@@ -110,7 +110,6 @@ impl Queue {
             handle: Some(handle),
         }
     }
-
 }
 
 impl Element for Queue {

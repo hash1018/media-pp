@@ -38,7 +38,7 @@ pub struct Decoder {
 
 impl Decoder {
     /// `params` should come from the stream you want to decode — see
-    /// [`crate::elements::FileDemuxSource::stream_parameters`].
+    /// [`crate::elements::FileDemuxer::stream_parameters`].
     pub fn new(
         name: impl Into<String>,
         params: ffmpeg::codec::Parameters,

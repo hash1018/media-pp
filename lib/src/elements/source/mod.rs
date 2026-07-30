@@ -1,3 +1,3 @@
-mod demux;
+mod file_demuxer;
 
-pub use demux::{FileDemuxError, FileDemuxSource, StreamInfo};
+pub use file_demuxer::{FileDemuxError, FileDemuxer, StreamInfo};

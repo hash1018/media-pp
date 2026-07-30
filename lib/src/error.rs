@@ -1,5 +1,7 @@
 use thiserror::Error;
 
+#[cfg(feature = "dx12-renderer")]
+use crate::elements::Dx12RendererError;
 use crate::{
     elements::{DecoderError, FileDemuxError},
     queue::QueueError,
@@ -24,6 +26,10 @@ pub enum Error {
 
     #[error(transparent)]
     QueueError(#[from] QueueError),
+
+    #[cfg(feature = "dx12-renderer")]
+    #[error(transparent)]
+    Dx12RendererError(#[from] Dx12RendererError),
 
     #[error("{0}")]
     Other(String),
