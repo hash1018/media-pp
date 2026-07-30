@@ -1,0 +1,10 @@
+[package]
+name = "media-pp"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ffmpeg-next = "8"
+crossbeam-channel = "0.5"
+thiserror = "2"
+log = "0.4"
