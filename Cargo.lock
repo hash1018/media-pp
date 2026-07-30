@@ -1453,6 +1453,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "tee"
+version = "0.1.0"
+dependencies = [
+ "ffmpeg-next",
+ "media-pp",
+]
+
+[[package]]
 name = "thiserror"
 version = "1.0.69"
 source = "registry+https://github.com/rust-lang/crates.io-index"

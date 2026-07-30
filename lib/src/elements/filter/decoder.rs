@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use ffmpeg_next as ffmpeg;
 use thiserror::Error as ThisError;
 
@@ -74,11 +76,11 @@ impl Sink for Decoder {
         match buf {
             MediaBuffer::Packet(packet) => match &mut self.kind {
                 Kind::Video(decoder) => {
-                    decoder.send_packet(&packet).map_err(DecoderError::from)?;
+                    decoder.send_packet(&*packet).map_err(DecoderError::from)?;
                     drain_video(decoder, &mut self.pad)
                 }
                 Kind::Audio(decoder) => {
-                    decoder.send_packet(&packet).map_err(DecoderError::from)?;
+                    decoder.send_packet(&*packet).map_err(DecoderError::from)?;
                     drain_audio(decoder, &mut self.pad)
                 }
             },
@@ -106,7 +108,7 @@ impl Sink for Decoder {
 fn drain_video(decoder: &mut ffmpeg::decoder::Video, pad: &mut SrcPad) -> crate::error::Result<()> {
     let mut frame = ffmpeg::frame::Video::empty();
     while decoder.receive_frame(&mut frame).is_ok() {
-        pad.push(MediaBuffer::Video(frame))?;
+        pad.push(MediaBuffer::Video(Arc::new(frame)))?;
         frame = ffmpeg::frame::Video::empty();
     }
     Ok(())
@@ -115,7 +117,7 @@ fn drain_video(decoder: &mut ffmpeg::decoder::Video, pad: &mut SrcPad) -> crate:
 fn drain_audio(decoder: &mut ffmpeg::decoder::Audio, pad: &mut SrcPad) -> crate::error::Result<()> {
     let mut frame = ffmpeg::frame::Audio::empty();
     while decoder.receive_frame(&mut frame).is_ok() {
-        pad.push(MediaBuffer::Audio(frame))?;
+        pad.push(MediaBuffer::Audio(Arc::new(frame)))?;
         frame = ffmpeg::frame::Audio::empty();
     }
     Ok(())

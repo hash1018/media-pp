@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use ffmpeg_next as ffmpeg;
 
 /// The unit of data that flows between elements.
@@ -6,10 +8,16 @@ use ffmpeg_next as ffmpeg;
 /// than a single opaque `Buffer` type like GStreamer) because ffmpeg-next
 /// already gives us strongly-typed `Packet`/`Frame` types — collapsing them
 /// into one type would just mean unwrapping again downstream.
+///
+/// Payloads are `Arc`-wrapped so `MediaBuffer` is cheaply `Clone` —
+/// duplicating a buffer (e.g. [`crate::elements::Tee`] fanning packets out
+/// to a decode branch and a remux branch) is a refcount bump, never a copy
+/// of the encoded/decoded data.
+#[derive(Clone)]
 pub enum MediaBuffer {
-    Packet(ffmpeg::Packet),
-    Video(ffmpeg::frame::Video),
-    Audio(ffmpeg::frame::Audio),
+    Packet(Arc<ffmpeg::Packet>),
+    Video(Arc<ffmpeg::frame::Video>),
+    Audio(Arc<ffmpeg::frame::Audio>),
     /// End of stream marker. Elements that hold resources (encoders with
     /// delayed frames, muxers, ...) should flush when they see this.
     Eos,

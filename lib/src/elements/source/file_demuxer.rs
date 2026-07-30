@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{path::Path, sync::Arc};
 
 use ffmpeg_next as ffmpeg;
 use thiserror::Error as ThisError;
@@ -111,7 +111,7 @@ impl SourceElement for FileDemuxer {
         for (stream, packet) in input.packets() {
             let index = stream.index();
             if let Some(pad) = pads.get_mut(index) {
-                pad.push(MediaBuffer::Packet(packet))?;
+                pad.push(MediaBuffer::Packet(Arc::new(packet)))?;
             }
         }
         for pad in pads.iter_mut() {
