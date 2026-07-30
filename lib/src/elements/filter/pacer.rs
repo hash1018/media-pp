@@ -9,10 +9,11 @@ use crate::{
     pad::SrcPad,
 };
 
-/// Delays each frame until its presentation time, so downstream sees
-/// frames at real playback speed instead of as fast as decode can produce
-/// them. A `Filter`: receives via `Sink`, sleeps in `consume`, then pushes
-/// the same frame on through its own (single) src pad.
+/// Delays each buffer until its presentation time, so downstream sees
+/// frames (or, upstream of a decoder, compressed packets) at real playback
+/// speed instead of as fast as demux/decode can produce them. A `Filter`:
+/// receives via `Sink`, sleeps in `consume`, then pushes the same buffer on
+/// through its own (single) src pad.
 ///
 /// Must run on its own thread (put a [`crate::queue::Queue`] upstream of
 /// it) — sleeping here would otherwise stall whatever's feeding it
@@ -81,9 +82,10 @@ impl Source for Pacer {
 impl Sink for Pacer {
     fn consume(&mut self, buf: MediaBuffer) -> crate::error::Result<()> {
         match &buf {
+            MediaBuffer::Packet(packet) => self.wait_for(packet.pts()),
             MediaBuffer::Video(frame) => self.wait_for(frame.pts()),
             MediaBuffer::Audio(frame) => self.wait_for(frame.pts()),
-            MediaBuffer::Eos | MediaBuffer::Packet(_) => {}
+            MediaBuffer::Eos => {}
         }
         self.pad.push(buf)
     }

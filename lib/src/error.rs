@@ -1,5 +1,7 @@
 use thiserror::Error;
 
+#[cfg(feature = "rtsp-server")]
+use crate::elements::RtspServerError;
 #[cfg(feature = "dx12-renderer")]
 use crate::elements::{D3d12vaDecoderError, Dx12RendererError};
 use crate::{
@@ -26,6 +28,10 @@ pub enum Error {
 
     #[error(transparent)]
     QueueError(#[from] QueueError),
+
+    #[cfg(feature = "rtsp-server")]
+    #[error(transparent)]
+    RtspServerError(#[from] RtspServerError),
 
     #[cfg(feature = "dx12-renderer")]
     #[error(transparent)]

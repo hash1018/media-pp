@@ -57,6 +57,7 @@ Everything is built from a handful of primitives in `lib/src/`:
 | `FrameCounter` / `PacketCounter` | Sink | Count decoded frames / raw packets, expose the count via `Arc<AtomicUsize>` |
 | `D3d12vaDecoder` | Filter (feature `dx12-renderer`) | Decodes `Packet`s into `Video` frames via D3D12VA hardware acceleration — GPU-resident, no software decode |
 | `Dx12Renderer` | Sink (feature `dx12-renderer`) | Submits frames to a native window via [renderer-engine](https://github.com/hash1018/RendererEngine)'s DX12 `WindowRenderer`. Dispatches on `frame.format()`: `YUV420P` copies pixels up (CPU decode path); `D3D12` (from `D3d12vaDecoder`) draws zero-copy straight from the decoder's own texture |
+| `RtspServer` | Sink (feature `rtsp-server`) | Spawns a vendored [MediaMTX](https://github.com/bluenviron/mediamtx) as a child process and remuxes incoming `Packet`s into it (RTSP `ANNOUNCE`/`RECORD`) — a self-contained RTSP server from the outside, no separate process to start first. Packets only, no encoding: link it straight after `FileDemuxer`, not a decoder |
 
 ## Examples (`examples/`)
 
@@ -73,6 +74,7 @@ Each is its own crate so per-example dependencies (e.g. `winit` for
 | `tee` | Demux → Tee → {SwDecoder → FrameCounter, PacketCounter} | `Tee` fanning the same packets out to two independent consumers |
 | `sw_decode_render` | Demux → SwDecoder → Queue → Pacer → Dx12Renderer | End-to-end playback in a native window, CPU decode + CPU-upload render (Windows + DX12 only) |
 | `hw_decode_render` | Demux → D3d12vaDecoder → Queue → Pacer → Dx12Renderer | Same as `sw_decode_render`, but GPU decode (D3D12VA) feeding the renderer zero-copy — no decoded pixel ever touches system memory (Windows + DX12 only) |
+| `rtsp_serve` | Demux → Queue → Pacer → RtspServer | Serves a file's video as a live RTSP stream (`rtsp-server` feature) — connect with `ffplay rtsp://127.0.0.1:8554/stream` while it runs |
 
 ```sh
 cargo run -p decode -- path/to/video.mp4   # or omit the path to use test-video/h265.mp4
@@ -86,6 +88,11 @@ cargo run -p sw_decode_render              # dx12-renderer is already enabled in
   `D3d12vaDecoder`. Off by default so consumers that don't render to a
   window never build DX12/Windows-only code. `sw_decode_render` and
   `hw_decode_render` turn it on in their own `Cargo.toml`.
+- `rtsp-server` (on `media-pp`) — enables `RtspServer` and copies the
+  vendored `mediamtx.exe` (`third_party/mediamtx/`, MIT-licensed) next to
+  whatever binary depends on `media-pp` (see `lib/build.rs`). Windows-only
+  for now, since only a Windows binary is vendored. `rtsp_serve` turns it
+  on in its own `Cargo.toml`.
 
 ## Requirements
 
