@@ -3,7 +3,6 @@ use std::sync::atomic::Ordering;
 use ffmpeg_next::media;
 use media_pp::{
     Error,
-    bus::BusEvent,
     element::Source,
     elements::{FileDemuxer, PacketCounter},
     pipeline::{ChainBuilder, Pipeline},
@@ -50,13 +49,7 @@ fn main() -> media_pp::Result<()> {
     // thread downstream has drained and joined, so it's safe to read the
     // bus and the counter right after.
     pipeline.run()?;
-    for event in pipeline.bus().iter() {
-        match event {
-            BusEvent::Error { element, message } => eprintln!("[{element}] error: {message}"),
-            BusEvent::Eos { element } => println!("[{element}] eos"),
-            BusEvent::Dropped { element } => eprintln!("[{element}] dropped a buffer (queue full)"),
-        }
-    }
+    pipeline.bus().log_events();
 
     println!("packet count: {}", count.load(Ordering::Relaxed));
     Ok(())

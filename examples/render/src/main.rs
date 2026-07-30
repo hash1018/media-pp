@@ -3,7 +3,6 @@ use std::{sync::Arc, thread};
 use ffmpeg_next::media;
 use media_pp::{
     Error,
-    bus::BusEvent,
     clock::Clock,
     element::Source,
     elements::{Decoder, Dx12Renderer, FileDemuxer, Pacer},
@@ -133,13 +132,7 @@ fn play(path: &str, hwnd: isize, width: u32, height: u32) -> media_pp::Result<()
     // (e.g. an unsupported pixel format from `Renderer`) was already
     // posted there before the failure propagated up through `?`.
     let ran = pipeline.run();
-    for event in pipeline.bus().iter() {
-        match event {
-            BusEvent::Error { element, message } => eprintln!("[{element}] error: {message}"),
-            BusEvent::Eos { element } => println!("[{element}] eos"),
-            BusEvent::Dropped { element } => eprintln!("[{element}] dropped a buffer (queue full)"),
-        }
-    }
+    pipeline.bus().log_events();
     ran?;
     Ok(())
 }

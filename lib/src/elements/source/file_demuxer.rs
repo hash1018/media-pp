@@ -75,20 +75,18 @@ impl FileDemuxer {
     /// Codec parameters for one of this file's streams — what you need to
     /// construct a matching [`crate::elements::Decoder`] for it.
     pub fn stream_parameters(&self, index: usize) -> Option<ffmpeg::codec::Parameters> {
-        self.input
-            .streams()
-            .find(|s| s.index() == index)
-            .map(|s| s.parameters())
+        self.stream(index).map(|s| s.parameters())
     }
 
     /// The unit decoded frame timestamps for this stream are expressed in —
     /// what you need to construct a matching [`crate::elements::Pacer`] for
     /// it.
     pub fn stream_time_base(&self, index: usize) -> Option<ffmpeg::Rational> {
-        self.input
-            .streams()
-            .find(|s| s.index() == index)
-            .map(|s| s.time_base())
+        self.stream(index).map(|s| s.time_base())
+    }
+
+    fn stream(&self, index: usize) -> Option<ffmpeg::format::stream::Stream<'_>> {
+        self.input.streams().find(|s| s.index() == index)
     }
 }
 

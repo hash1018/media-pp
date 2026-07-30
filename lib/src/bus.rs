@@ -52,4 +52,21 @@ impl BusReceiver {
     pub fn iter(&self) -> impl Iterator<Item = BusEvent> + '_ {
         self.rx.iter()
     }
+
+    /// Drains every event so far, printing each in a common default
+    /// format (`[element] eos`, `[element] error: ...`, `[element]
+    /// dropped a buffer (queue full)`). Convenience for examples and
+    /// smoke tests; anything that needs to act on specific events should
+    /// match on `iter()` directly instead.
+    pub fn log_events(&self) {
+        for event in self.iter() {
+            match event {
+                BusEvent::Error { element, message } => eprintln!("[{element}] error: {message}"),
+                BusEvent::Eos { element } => println!("[{element}] eos"),
+                BusEvent::Dropped { element } => {
+                    eprintln!("[{element}] dropped a buffer (queue full)")
+                }
+            }
+        }
+    }
 }

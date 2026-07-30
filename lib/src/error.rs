@@ -31,6 +31,9 @@ pub enum Error {
     #[error(transparent)]
     Dx12RendererError(#[from] Dx12RendererError),
 
+    #[error("ffmpeg error: {0}")]
+    Ffmpeg(#[from] ffmpeg_next::Error),
+
     #[error("{0}")]
     Other(String),
 }

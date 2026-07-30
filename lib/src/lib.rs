@@ -10,9 +10,8 @@ pub mod queue;
 
 pub use error::{Error, Result};
 
-/// Must be called once before using any element that touches ffmpeg. Not
-/// tied to any one element, so failures just get wrapped in `Other`
-/// rather than chaining through an `{Element}Error`.
+/// Must be called once before using any element that touches ffmpeg.
 pub fn init() -> Result<()> {
-    ffmpeg_next::init().map_err(|e| Error::Other(e.to_string()))
+    ffmpeg_next::init()?;
+    Ok(())
 }

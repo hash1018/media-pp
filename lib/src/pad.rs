@@ -6,10 +6,12 @@ use crate::{buffer::MediaBuffer, element::Sink, error::Result};
 ///
 /// This is what fan-out is, in this design: an element with more than one
 /// src pad *is* a tee — there's no separate "Tee" primitive in the
-/// pad/element model itself. [`crate::elements::Tee`] is just an ordinary
-/// element built on exactly that (clones each buffer to every one of its
-/// src pads); a demuxer with one pad per container stream is the same
-/// idea applied to routing by content instead of duplicating it.
+/// pad/element model itself. [`crate::elements::FileDemuxer`] is the
+/// plain form of it: one pad per container stream, chosen once at wiring
+/// time via a normal `&mut [SrcPad]`. [`crate::elements::Tee`] is the one
+/// deliberate exception to that plain shape — its pads live behind a lock
+/// instead, so a `TeeHandle` can add or remove one from a different
+/// thread than whatever is driving it; see that module for why.
 pub struct SrcPad {
     name: String,
     peer: Option<Box<dyn Sink>>,

@@ -2,7 +2,6 @@ use std::sync::atomic::Ordering;
 
 use ffmpeg_next::media;
 use media_pp::{
-    bus::BusEvent,
     element::Source,
     elements::{FileDemuxer, PacketCounter},
     pipeline::{ChainBuilder, Pipeline},
@@ -53,13 +52,7 @@ fn main() -> media_pp::Result<()> {
     // Blocks until the demuxer hits EOS and both branch queues have
     // drained and joined.
     pipeline.run()?;
-    for event in pipeline.bus().iter() {
-        match event {
-            BusEvent::Error { element, message } => eprintln!("[{element}] error: {message}"),
-            BusEvent::Eos { element } => println!("[{element}] eos"),
-            BusEvent::Dropped { element } => eprintln!("[{element}] dropped a buffer (queue full)"),
-        }
-    }
+    pipeline.bus().log_events();
 
     println!("video packets: {}", video_count.load(Ordering::Relaxed));
     println!("audio packets: {}", audio_count.load(Ordering::Relaxed));
