@@ -5,7 +5,7 @@ use media_pp::{
     Error,
     clock::Clock,
     element::Source,
-    elements::{Decoder, Dx12Renderer, FileDemuxer, Pacer},
+    elements::{D3d12vaDecoder, Dx12Renderer, FileDemuxer, Pacer},
     pipeline::{ChainBuilder, Pipeline},
 };
 use renderer_engine::engine::RendererEngine;
@@ -13,40 +13,54 @@ use winit::{
     application::ApplicationHandler,
     dpi::LogicalSize,
     event::WindowEvent,
-    event_loop::{ActiveEventLoop, EventLoop},
+    event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy},
     raw_window_handle::{HasWindowHandle, RawWindowHandle},
     window::{Window, WindowId},
 };
 
-/// Demux -> Decoder -> Queue -> Pacer -> Renderer: decodes a video file
-/// and presents it in a native window at real playback speed, via
-/// `renderer_engine`'s DX12 `WindowRenderer`.
+/// Demux -> D3d12vaDecoder -> Queue -> Pacer -> Renderer: decodes on the
+/// GPU via D3D12VA hardware acceleration and presents the frames in a
+/// native window at real playback speed, without ever copying the
+/// decoded pixels back to system memory — `Dx12Renderer` draws straight
+/// from the decoder's own D3D12 texture. Compare against
+/// `sw_decode_render`, which uses `SwDecoder` (CPU decode) and a
+/// CPU-upload submit path instead.
 ///
-///     cargo run -p render -- path/to/video.mp4
+///     cargo run -p hw_decode_render -- path/to/video.mp4
 fn main() {
     let path = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "test-video/h265.mp4".into());
 
-    let event_loop = EventLoop::new().expect("failed to create event loop");
+    let event_loop = EventLoop::<PlaybackDone>::with_user_event()
+        .build()
+        .expect("failed to create event loop");
+    let proxy = event_loop.create_proxy();
     let mut app = App {
         path,
+        proxy,
         window: None,
         // Kept alive for the app's duration so the window doesn't outlive
-        // the thread rendering into it; not otherwise joined — closing
-        // the window just ends the process.
+        // the thread rendering into it; not otherwise joined — the window
+        // closes itself once playback finishes (see `user_event` below).
         _playback: None,
     };
     event_loop.run_app(&mut app).expect("event loop failed");
 }
 
+/// Sent from the playback thread once `play()` returns, so the window
+/// closes itself when the pipeline finishes instead of sitting there
+/// until someone closes it by hand.
+struct PlaybackDone;
+
 struct App {
     path: String,
+    proxy: EventLoopProxy<PlaybackDone>,
     window: Option<Window>,
     _playback: Option<thread::JoinHandle<()>>,
 }
 
-impl ApplicationHandler for App {
+impl ApplicationHandler<PlaybackDone> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
             return;
@@ -55,7 +69,7 @@ impl ApplicationHandler for App {
         let window = event_loop
             .create_window(
                 Window::default_attributes()
-                    .with_title("media-pp render")
+                    .with_title("media-pp hw_decode_render")
                     .with_inner_size(LogicalSize::new(1280, 720))
                     // Pacer/Renderer are wired up once, sized to the
                     // window's initial size — no resize handling here.
@@ -69,15 +83,17 @@ impl ApplicationHandler for App {
             .as_raw()
         {
             RawWindowHandle::Win32(handle) => handle.hwnd.get(),
-            _ => panic!("render example only supports Windows"),
+            _ => panic!("hw_decode_render example only supports Windows"),
         };
         let size = window.inner_size();
 
         let path = self.path.clone();
+        let proxy = self.proxy.clone();
         self._playback = Some(thread::spawn(move || {
             if let Err(e) = play(&path, hwnd, size.width, size.height) {
                 eprintln!("playback failed: {e}");
             }
+            let _ = proxy.send_event(PlaybackDone);
         }));
         self.window = Some(window);
     }
@@ -94,6 +110,10 @@ impl ApplicationHandler for App {
         if let WindowEvent::CloseRequested = event {
             event_loop.exit();
         }
+    }
+
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, _event: PlaybackDone) {
+        event_loop.exit();
     }
 }
 
@@ -116,7 +136,10 @@ fn play(path: &str, hwnd: isize, width: u32, height: u32) -> media_pp::Result<()
     let clock = Arc::new(Clock::new());
 
     let mut pipeline = Pipeline::new(source, |source, bus| {
-        let decoder = Decoder::new("decoder", params).expect("failed to open decoder");
+        // Same device the renderer draws with — required for the
+        // zero-copy path to be valid at all (see D3d12vaDecoder::new).
+        let decoder = D3d12vaDecoder::new("decoder", params, engine.device())
+            .expect("failed to open D3D12VA decoder");
         let pacer = Pacer::new("pacer", time_base, clock);
         let renderer = Dx12Renderer::new("renderer", &engine, hwnd, width, height)
             .expect("failed to create renderer");
@@ -129,8 +152,7 @@ fn play(path: &str, hwnd: isize, width: u32, height: u32) -> media_pp::Result<()
     });
 
     // Drain the bus even if `run()` failed — the *specific* element error
-    // (e.g. an unsupported pixel format from `Renderer`) was already
-    // posted there before the failure propagated up through `?`.
+    // was already posted there before the failure propagated up through `?`.
     let ran = pipeline.run();
     pipeline.bus().log_events();
     ran?;

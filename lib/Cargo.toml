@@ -8,6 +8,10 @@ ffmpeg-next = "8"
 crossbeam-channel = "0.5"
 thiserror = "2"
 renderer-engine = { git = "https://github.com/hash1018/RendererEngine", package = "renderer-engine", optional = true }
+windows = { version = "0.62", optional = true, features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D12",
+] }
 
 [features]
-dx12-renderer = ["dep:renderer-engine"]
+dx12-renderer = ["dep:renderer-engine", "dep:windows"]

@@ -5,11 +5,11 @@ use media_pp::{
     Error,
     clock::Clock,
     element::Source,
-    elements::{Decoder, FileDemuxer, FrameCounter, Pacer},
+    elements::{FileDemuxer, FrameCounter, Pacer, SwDecoder},
     pipeline::{ChainBuilder, Pipeline},
 };
 
-/// Demux -> Decoder -> Pacer -> FrameCounter: proves `Pacer` paces decoded
+/// Demux -> SwDecoder -> Pacer -> FrameCounter: proves `Pacer` paces decoded
 /// frames out at real playback speed (via PTS + `Clock`) instead of as
 /// fast as decode can produce them. Compare against `decode`, which runs
 /// the same chain without a `Pacer` and finishes as fast as possible.
@@ -44,7 +44,7 @@ fn main() -> media_pp::Result<()> {
     let clock = Arc::new(Clock::new());
 
     let mut pipeline = Pipeline::new(source, |source, bus| {
-        let decoder = Decoder::new("decoder", params).expect("failed to open decoder");
+        let decoder = SwDecoder::new("decoder", params).expect("failed to open decoder");
         let pacer = Pacer::new("pacer", time_base, clock);
         let branch = ChainBuilder::new(bus.clone())
             .pipe(decoder) // same thread as the demux — cheap enough not to need a queue

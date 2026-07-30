@@ -4,13 +4,13 @@ use ffmpeg_next::media;
 use media_pp::{
     Error,
     element::Source,
-    elements::{Decoder, FileDemuxer, FrameCounter},
+    elements::{FileDemuxer, FrameCounter, SwDecoder},
     pipeline::{ChainBuilder, Pipeline},
 };
 
-/// Demux -> Decoder -> FrameCounter: proves `Decoder` (a `Filter`, both
-/// `Source` and `Sink`) actually decodes packets into frames, not just
-/// that it compiles.
+/// Demux -> SwDecoder -> FrameCounter: proves `SwDecoder` (a `Filter`,
+/// both `Source` and `Sink`) actually decodes packets into frames, not
+/// just that it compiles.
 ///
 ///     cargo run -p decode -- path/to/video.mp4
 fn main() -> media_pp::Result<()> {
@@ -38,7 +38,7 @@ fn main() -> media_pp::Result<()> {
     let (counter, frame_count) = FrameCounter::new("counter");
 
     let mut pipeline = Pipeline::new(source, |source, bus| {
-        let decoder = Decoder::new("decoder", params).expect("failed to open decoder");
+        let decoder = SwDecoder::new("decoder", params).expect("failed to open decoder");
         let branch = ChainBuilder::new(bus.clone())
             .pipe(decoder) // same thread as the demux — cheap enough not to need a queue
             .build(Box::new(counter));

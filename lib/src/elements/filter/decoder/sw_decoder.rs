@@ -9,10 +9,10 @@ use crate::{
     pad::SrcPad,
 };
 
-/// Errors specific to `Decoder`. Converts into the crate-wide `Error` via
-/// `?` (see [`crate::error::Error`]).
+/// Errors specific to `SwDecoder`. Converts into the crate-wide `Error`
+/// via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
-pub enum DecoderError {
+pub enum SwDecoderError {
     #[error("unsupported media type: {0:?}")]
     UnsupportedMediaType(ffmpeg::media::Type),
 
@@ -25,33 +25,34 @@ enum Kind {
     Audio(ffmpeg::decoder::Audio),
 }
 
-/// Decodes one stream's `Packet`s into `Frame`s. A `Filter`: receives via
-/// `Sink`, pushes what it produces into its own (single) src pad.
+/// Decodes one stream's `Packet`s into `Frame`s in software (plain
+/// libavcodec, no hardware acceleration). A `Filter`: receives via `Sink`,
+/// pushes what it produces into its own (single) src pad.
 ///
 /// One packet can turn into zero, one, or several frames (B-frame
 /// reordering, decoder buffering, ...) — `consume` just drains
 /// `receive_frame` in a loop after every `send_packet`/`send_eof`, pushing
 /// however many frames come out.
-pub struct Decoder {
+pub struct SwDecoder {
     name: String,
     kind: Kind,
     pad: SrcPad,
 }
 
-impl Decoder {
+impl SwDecoder {
     /// `params` should come from the stream you want to decode — see
     /// [`crate::elements::FileDemuxer::stream_parameters`].
     pub fn new(
         name: impl Into<String>,
         params: ffmpeg::codec::Parameters,
-    ) -> Result<Self, DecoderError> {
+    ) -> Result<Self, SwDecoderError> {
         let name = name.into();
         let context = ffmpeg::codec::context::Context::from_parameters(params)?;
 
         let kind = match context.medium() {
             ffmpeg::media::Type::Video => Kind::Video(context.decoder().video()?),
             ffmpeg::media::Type::Audio => Kind::Audio(context.decoder().audio()?),
-            other => return Err(DecoderError::UnsupportedMediaType(other)),
+            other => return Err(SwDecoderError::UnsupportedMediaType(other)),
         };
 
         let pad = SrcPad::new(format!("{name}_src"));
@@ -59,28 +60,32 @@ impl Decoder {
     }
 }
 
-impl Element for Decoder {
+impl Element for SwDecoder {
     fn name(&self) -> &str {
         &self.name
     }
 }
 
-impl Source for Decoder {
+impl Source for SwDecoder {
     fn src_pads(&mut self) -> &mut [SrcPad] {
         std::slice::from_mut(&mut self.pad)
     }
 }
 
-impl Sink for Decoder {
+impl Sink for SwDecoder {
     fn consume(&mut self, buf: MediaBuffer) -> crate::error::Result<()> {
         match buf {
             MediaBuffer::Packet(packet) => match &mut self.kind {
                 Kind::Video(decoder) => {
-                    decoder.send_packet(&*packet).map_err(DecoderError::from)?;
+                    decoder
+                        .send_packet(&*packet)
+                        .map_err(SwDecoderError::from)?;
                     drain_video(decoder, &mut self.pad)
                 }
                 Kind::Audio(decoder) => {
-                    decoder.send_packet(&*packet).map_err(DecoderError::from)?;
+                    decoder
+                        .send_packet(&*packet)
+                        .map_err(SwDecoderError::from)?;
                     drain_audio(decoder, &mut self.pad)
                 }
             },

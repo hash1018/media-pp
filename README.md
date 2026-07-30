@@ -51,41 +51,52 @@ Everything is built from a handful of primitives in `lib/src/`:
 | Element | Kind | What it does |
 |---|---|---|
 | `FileDemuxer` | Source | Demuxes a file; one src pad per container stream |
-| `Decoder` | Filter | Decodes `Packet`s into `Video`/`Audio` frames |
+| `SwDecoder` | Filter | Decodes `Packet`s into `Video`/`Audio` frames (software, plain libavcodec) |
 | `Pacer` | Filter | Sleeps in `consume` to release frames at real playback time (PTS + shared `Clock`) — must run on its own thread (behind a `Queue`) |
 | `Tee` | Filter-shaped, but no `Source` | Fans one input out to a *dynamic* set of sinks via a cloneable `TeeHandle` (`add_sink`/`remove_sink`/`sink_count`), addable/removable from any thread while the pipeline runs |
 | `FrameCounter` / `PacketCounter` | Sink | Count decoded frames / raw packets, expose the count via `Arc<AtomicUsize>` |
-| `Dx12Renderer` | Sink (feature `dx12-renderer`) | Submits YUV420P frames to a native window via [renderer-engine](https://github.com/hash1018/RendererEngine)'s DX12 `WindowRenderer` |
+| `D3d12vaDecoder` | Filter (feature `dx12-renderer`) | Decodes `Packet`s into `Video` frames via D3D12VA hardware acceleration — GPU-resident, no software decode |
+| `Dx12Renderer` | Sink (feature `dx12-renderer`) | Submits frames to a native window via [renderer-engine](https://github.com/hash1018/RendererEngine)'s DX12 `WindowRenderer`. Dispatches on `frame.format()`: `YUV420P` copies pixels up (CPU decode path); `D3D12` (from `D3d12vaDecoder`) draws zero-copy straight from the decoder's own texture |
 
 ## Examples (`examples/`)
 
 Each is its own crate so per-example dependencies (e.g. `winit` for
-`render`) don't leak into the others. All default to `test-video/h265.mp4`
-when run with no path argument.
+`sw_decode_render`) don't leak into the others. All default to
+`test-video/h265.mp4` when run with no path argument.
 
 | Crate | Pipeline | Demonstrates |
 |---|---|---|
-| `decode` | Demux → Decoder → FrameCounter | `Decoder` actually decodes, direct (same-thread) chaining |
+| `decode` | Demux → SwDecoder → FrameCounter | `SwDecoder` actually decodes, direct (same-thread) chaining |
 | `probe` | Demux → Queue → PacketCounter | An explicit `Queue` thread boundary |
 | `fanout` | Demux → {Queue → PacketCounter} × 2 | Multi-pad fan-out at the source (video + audio to separate branches) |
-| `pace` | Demux → Decoder → Queue → Pacer → FrameCounter | `Pacer` releasing frames at real playback speed — compare its `wall time` output against `decode`'s near-instant run |
-| `tee` | Demux → Tee → {Decoder → FrameCounter, PacketCounter} | `Tee` fanning the same packets out to two independent consumers |
-| `render` | Demux → Decoder → Queue → Pacer → Dx12Renderer | End-to-end playback in a native window (Windows + DX12 only) |
+| `pace` | Demux → SwDecoder → Queue → Pacer → FrameCounter | `Pacer` releasing frames at real playback speed — compare its `wall time` output against `decode`'s near-instant run |
+| `tee` | Demux → Tee → {SwDecoder → FrameCounter, PacketCounter} | `Tee` fanning the same packets out to two independent consumers |
+| `sw_decode_render` | Demux → SwDecoder → Queue → Pacer → Dx12Renderer | End-to-end playback in a native window, CPU decode + CPU-upload render (Windows + DX12 only) |
+| `hw_decode_render` | Demux → D3d12vaDecoder → Queue → Pacer → Dx12Renderer | Same as `sw_decode_render`, but GPU decode (D3D12VA) feeding the renderer zero-copy — no decoded pixel ever touches system memory (Windows + DX12 only) |
 
 ```sh
 cargo run -p decode -- path/to/video.mp4   # or omit the path to use test-video/h265.mp4
-cargo run -p render                        # dx12-renderer is already enabled in render's own Cargo.toml
+cargo run -p sw_decode_render              # dx12-renderer is already enabled in its own Cargo.toml
 ```
 
 ## Feature flags
 
 - `dx12-renderer` (on `media-pp`) — pulls in the optional `renderer-engine`
-  git dependency and enables `Dx12Renderer`. Off by default so consumers
-  that don't render to a window never build DX12/Windows-only code. Only
-  the `render` example crate turns it on.
+  git dependency (plus `windows`) and enables `Dx12Renderer` and
+  `D3d12vaDecoder`. Off by default so consumers that don't render to a
+  window never build DX12/Windows-only code. `sw_decode_render` and
+  `hw_decode_render` turn it on in their own `Cargo.toml`.
 
 ## Requirements
 
 - ffmpeg installed and discoverable by `ffmpeg-sys-next` (see that crate's
-  build requirements).
-- `render` (and the `dx12-renderer` feature) only build/run on Windows.
+  build requirements). `D3d12vaDecoder` additionally needs an ffmpeg build
+  with `d3d12va` hwaccel support (check `ffmpeg -hwaccels`) and a GPU/driver
+  that supports it.
+- `sw_decode_render`/`hw_decode_render` (and the `dx12-renderer` feature)
+  only build/run on Windows.
+- `D3d12vaDecoder` hand-mirrors a few structs from FFmpeg's
+  `libavutil/hwcontext_d3d12va.h` that `ffmpeg-sys-next` doesn't bind
+  (see the doc comment at the top of `d3d12va_decoder.rs`) — sourced from
+  FFmpeg n8.0's header. A future FFmpeg version changing that header's
+  layout would silently break this with no compile-time warning.

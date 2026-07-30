@@ -4,13 +4,13 @@ use ffmpeg_next::media;
 use media_pp::{
     Error,
     element::Source,
-    elements::{Decoder, FileDemuxer, FrameCounter, PacketCounter, Tee},
+    elements::{FileDemuxer, FrameCounter, PacketCounter, SwDecoder, Tee},
     pipeline::{ChainBuilder, Pipeline},
 };
 
 /// Demux -> Tee, fanning the same packets out to two independent
 /// branches:
-///   - Decoder -> FrameCounter: decodes and counts frames
+///   - SwDecoder -> FrameCounter: decodes and counts frames
 ///   - PacketCounter: counts the raw (still-encoded) packets
 ///
 /// Proves `Tee` delivers every packet to both branches — same source
@@ -43,7 +43,7 @@ fn main() -> media_pp::Result<()> {
     let (packet_counter, packet_count) = PacketCounter::new("packet-counter");
 
     let mut pipeline = Pipeline::new(source, |source, bus| {
-        let decoder = Decoder::new("decoder", params).expect("failed to open decoder");
+        let decoder = SwDecoder::new("decoder", params).expect("failed to open decoder");
         let decode_branch = ChainBuilder::new(bus.clone())
             .pipe(decoder)
             .build(Box::new(frame_counter));

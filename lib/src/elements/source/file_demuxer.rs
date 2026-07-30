@@ -73,7 +73,7 @@ impl FileDemuxer {
     }
 
     /// Codec parameters for one of this file's streams — what you need to
-    /// construct a matching [`crate::elements::Decoder`] for it.
+    /// construct a matching [`crate::elements::SwDecoder`] for it.
     pub fn stream_parameters(&self, index: usize) -> Option<ffmpeg::codec::Parameters> {
         self.stream(index).map(|s| s.parameters())
     }

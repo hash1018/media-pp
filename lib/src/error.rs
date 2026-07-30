@@ -1,14 +1,14 @@
 use thiserror::Error;
 
 #[cfg(feature = "dx12-renderer")]
-use crate::elements::Dx12RendererError;
+use crate::elements::{D3d12vaDecoderError, Dx12RendererError};
 use crate::{
-    elements::{DecoderError, FileDemuxError},
+    elements::{FileDemuxError, SwDecoderError},
     queue::QueueError,
 };
 
 /// Crate-wide error. Each element defines its own `{Element}Error` (see
-/// [`FileDemuxError`], [`DecoderError`], [`QueueError`]) for its own
+/// [`FileDemuxError`], [`SwDecoderError`], [`QueueError`]) for its own
 /// domain-specific failures; this enum just aggregates them so trait
 /// methods (`Sink::consume`, `SourceElement::run`, ...) — which have to
 /// return one common error type to stay object-safe across arbitrary
@@ -22,7 +22,7 @@ pub enum Error {
     FileDemuxError(#[from] FileDemuxError),
 
     #[error(transparent)]
-    DecoderError(#[from] DecoderError),
+    SwDecoderError(#[from] SwDecoderError),
 
     #[error(transparent)]
     QueueError(#[from] QueueError),
@@ -30,6 +30,10 @@ pub enum Error {
     #[cfg(feature = "dx12-renderer")]
     #[error(transparent)]
     Dx12RendererError(#[from] Dx12RendererError),
+
+    #[cfg(feature = "dx12-renderer")]
+    #[error(transparent)]
+    D3d12vaDecoderError(#[from] D3d12vaDecoderError),
 
     #[error("ffmpeg error: {0}")]
     Ffmpeg(#[from] ffmpeg_next::Error),

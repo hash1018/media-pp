@@ -537,6 +537,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "15cdd26707701c53297e2fa6afb323d55fbc1d0810c3aec078ae3ef0424c3c15"
 
 [[package]]
+name = "hw_decode_render"
+version = "0.1.0"
+dependencies = [
+ "ffmpeg-next",
+ "media-pp",
+ "renderer-engine",
+ "winit",
+]
+
+[[package]]
 name = "iana-time-zone"
 version = "0.1.65"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -712,6 +722,7 @@ dependencies = [
  "ffmpeg-next",
  "renderer-engine",
  "thiserror 2.0.19",
+ "windows",
 ]
 
 [[package]]
@@ -1220,19 +1231,9 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
-name = "render"
-version = "0.1.0"
-dependencies = [
- "ffmpeg-next",
- "media-pp",
- "renderer-engine",
- "winit",
-]
-
-[[package]]
 name = "renderer-engine"
 version = "0.1.0"
-source = "git+https://github.com/hash1018/RendererEngine#89106107c0fec2455aa9d92b69f4ebe189d12ffe"
+source = "git+https://github.com/hash1018/RendererEngine#479d66ab2a511d25a4e1c1e603537413f45df24b"
 dependencies = [
  "fern",
  "humantime",
@@ -1429,6 +1430,16 @@ name = "strict-num"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6637bab7722d379c8b41ba849228d680cc12d0a45ba1fa2b48f2a30577a06731"
+
+[[package]]
+name = "sw_decode_render"
+version = "0.1.0"
+dependencies = [
+ "ffmpeg-next",
+ "media-pp",
+ "renderer-engine",
+ "winit",
+]
 
 [[package]]
 name = "syn"
