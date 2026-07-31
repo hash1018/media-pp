@@ -185,7 +185,7 @@ fn worker_loop(
 ) {
     loop {
         if let Some((msg, ack)) = control_rx.try_recv() {
-            if apply_control(&mut downstream, msg, &ack, &control_rx) {
+            if apply_control(&data_rx, &mut downstream, msg, &ack, &control_rx) {
                 return;
             }
             continue;
@@ -195,7 +195,7 @@ fn worker_loop(
             recv(control_rx.rx) -> req => {
                 match req {
                     Ok(req) => {
-                        if apply_control(&mut downstream, req.msg, &req.ack, &control_rx) {
+                        if apply_control(&data_rx, &mut downstream, req.msg, &req.ack, &control_rx) {
                             return;
                         }
                     }
@@ -230,11 +230,13 @@ fn worker_loop(
 /// touching `data_rx`) until `Resume`/`Stop`. Returns `true` once `Stop`
 /// has been handled, meaning the caller (`worker_loop`) should exit.
 fn apply_control(
+    data_rx: &Receiver<MediaBuffer>,
     downstream: &mut Box<dyn Sink>,
     msg: ControlMsg,
     ack: &Sender<()>,
     control_rx: &ControlReceiver,
 ) -> bool {
+    discard_stale_data(data_rx, msg);
     let _ = downstream.control(msg);
     let is_stop = msg == ControlMsg::Stop;
     let _ = ack.send(());
@@ -248,6 +250,7 @@ fn apply_control(
         let Some((msg, ack)) = control_rx.recv() else {
             return true; // sender gone — treat like Stop
         };
+        discard_stale_data(data_rx, msg);
         let _ = downstream.control(msg);
         let is_stop = msg == ControlMsg::Stop;
         let _ = ack.send(());
@@ -258,6 +261,20 @@ fn apply_control(
             return false;
         }
         // Another Pause while already paused: already forwarded above, keep waiting.
+    }
+}
+
+/// Drops everything already buffered in `data_rx` without processing it —
+/// only for `Seek`. That data predates the seek point (this Queue's
+/// worker hasn't gotten to it yet, but it was read/produced before the
+/// jump), so delivering it downstream afterward would show stale
+/// frames instead of skipping straight to the new position.
+/// `Pause`/`Resume`/`Stop` leave `data_rx` alone — see the type-level
+/// docs on why that's safe (nothing feeds a paused/stopped queue in the
+/// first place).
+fn discard_stale_data(data_rx: &Receiver<MediaBuffer>, msg: ControlMsg) {
+    if matches!(msg, ControlMsg::Seek(_)) {
+        while data_rx.try_recv().is_ok() {}
     }
 }
 

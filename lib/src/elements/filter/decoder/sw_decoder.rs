@@ -111,9 +111,21 @@ impl Sink for SwDecoder {
     }
 
     fn control(&mut self, msg: ControlMsg) -> crate::error::Result<()> {
-        // No local reaction needed: `Stop` means abandon (not drain), so
-        // there's nothing to flush before this decoder's own `Drop`
-        // frees the codec context — just forward.
+        // `Stop`: no local reaction needed — abandon means there's
+        // nothing to flush before this decoder's own `Drop` frees the
+        // codec context.
+        //
+        // `Seek`: unlike `Stop`, playback continues after this from a
+        // new position, so leftover reference/reordering state from
+        // before the jump has to go now — otherwise the next packets
+        // (from the new position) would decode against stale state and
+        // produce corrupt frames.
+        if let ControlMsg::Seek(_) = msg {
+            match &mut self.kind {
+                Kind::Video(decoder) => decoder.flush(),
+                Kind::Audio(decoder) => decoder.flush(),
+            }
+        }
         self.pad.control(msg)
     }
 }

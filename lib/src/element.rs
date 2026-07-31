@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use crate::{
     buffer::MediaBuffer,
     control::{ControlMsg, ControlReceiver},
@@ -61,6 +63,15 @@ pub trait SourceElement: Source {
     /// once per loop iteration to make `control` responsive between
     /// blocking reads.
     fn run(&mut self, control: &ControlReceiver) -> Result<()>;
+
+    /// Repositions this source to `target`, an absolute position from the
+    /// start of the media (e.g. `av_seek_frame` for
+    /// [`crate::elements::FileDemuxer`]). Called by
+    /// [`crate::control::drain_control`] as part of handling
+    /// [`ControlMsg::Seek`], *before* that message is forwarded to the
+    /// source's own pads — so whatever's read next comes from the new
+    /// position by the time downstream elements are told to flush for it.
+    fn seek(&mut self, target: Duration) -> Result<()>;
 }
 
 /// An element with both an input and an output — decoder, encoder,

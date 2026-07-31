@@ -83,6 +83,26 @@ impl Clock {
             };
         }
     }
+
+    /// Back to the same "never started" state as a freshly constructed
+    /// `Clock` — the next [`Clock::start`] call re-anchors t=0 to
+    /// *that* moment, same lazy-first-caller-wins semantics as initial
+    /// startup (see the type docs). Unconditional, regardless of current
+    /// state.
+    ///
+    /// Called on [`crate::control::ControlMsg::Seek`]
+    /// (see [`crate::pipeline::Pipeline::seek`]): the old anchor measured
+    /// real time elapsed *for the pre-seek position* — after a jump, a
+    /// `Pacer`'s `elapsed_secs` (relative to its own now-reset
+    /// `first_pts`) starts over from ~0 too, so pairing it with the
+    /// stale anchor would compute a `due` far in the past and skip
+    /// sleeping entirely, dumping every post-seek frame with no pacing.
+    /// This is the wall-clock half of that same fix — `Pacer::first_pts`
+    /// resetting is the pts half; both are needed together.
+    pub fn reset(&self) {
+        let mut state = self.state.lock().unwrap();
+        *state = State::Unset;
+    }
 }
 
 #[cfg(test)]
@@ -104,6 +124,29 @@ mod tests {
         assert!(
             after >= first + Duration::from_millis(20),
             "expected start() to shift forward by roughly the pause duration"
+        );
+    }
+
+    /// Regression test for the bug found manually testing `seek_render`:
+    /// without `reset()`, a `Pacer` re-anchoring only its `first_pts` (not
+    /// the shared `Clock`) after a seek computed `due` times far in the
+    /// past — `start()` kept returning the *original* anchor no matter
+    /// how long ago that was — so every post-seek frame skipped its sleep
+    /// entirely. `reset()` must make the next `start()` anchor to a fresh
+    /// "now", not the original one.
+    #[test]
+    fn reset_makes_the_next_start_anchor_to_a_fresh_now() {
+        let clock = Clock::new();
+        let original = clock.start();
+
+        std::thread::sleep(Duration::from_millis(30));
+        clock.reset();
+        let after_reset = clock.start();
+
+        assert!(
+            after_reset >= original + Duration::from_millis(20),
+            "expected start() after reset() to anchor to a fresh instant, \
+             not keep returning the original one"
         );
     }
 }

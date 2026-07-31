@@ -1,6 +1,8 @@
+use std::time::Duration;
+
 use crossbeam_channel::{Receiver, Sender, unbounded};
 
-use crate::{error::Result, pad::SrcPad};
+use crate::{element::SourceElement, error::Result};
 
 /// A command that can be sent down a running [`crate::pipeline::Pipeline`]
 /// — travels the same pad-to-pad path `MediaBuffer` does (see
@@ -23,6 +25,16 @@ pub enum ControlMsg {
     /// whatever's in flight is dropped, not flushed. The pipeline isn't
     /// reusable afterward; build a new one for the next run.
     Stop,
+    /// Jump to an absolute position from the start of the media.
+    /// Handled in two parts, both inside [`drain_control`]: the source
+    /// itself repositions via [`crate::element::SourceElement::seek`]
+    /// *before* this is forwarded downstream, then the forward cascades
+    /// as usual — a [`crate::queue::Queue`] drops whatever it has
+    /// buffered (it predates the seek) instead of delivering it, and a
+    /// decoder flushes its internal reference-frame state. Unlike
+    /// `Pause`, this doesn't block waiting for anything further: it's a
+    /// one-shot repositioning, not a state to later undo with `Resume`.
+    Seek(Duration),
 }
 
 /// One in-flight control request: the message plus a rendezvous channel
@@ -85,23 +97,30 @@ impl ControlReceiver {
     }
 }
 
-/// Call once per loop iteration in a [`crate::element::SourceElement::run`]
-/// implementation, right before pulling the next unit of work — mirrors
-/// how a natural `Eos` is pushed into `pads` at the end of that same loop,
-/// just for externally-triggered control instead.
+/// Call once per loop iteration in a [`SourceElement::run`] implementation,
+/// right before pulling the next unit of work — mirrors how a natural
+/// `Eos` is pushed into the source's own pads at the end of that same
+/// loop, just for externally-triggered control instead.
 ///
-/// Drains every pending message, forwarding each to every pad in `pads`
-/// (so it cascades through the graph exactly like a data buffer would).
-/// `Pause` blocks right here — still watching `control`, not `pads` — until
+/// Drains every pending message. `Seek` repositions `source` itself
+/// first (see [`SourceElement::seek`]) — that's the one case a message
+/// needs source-specific action, not just forwarding, which is why this
+/// takes the whole source rather than just its pads. Every message is
+/// then forwarded to every one of `source`'s pads (so it cascades through
+/// the graph exactly like a data buffer would). `Pause` blocks right
+/// here — still watching `control`, not producing anything — until
 /// `Resume` or `Stop` arrives, so nothing upstream of this call keeps
 /// running while paused either.
 ///
 /// Returns `true` if `Stop` was seen: the caller should return `Ok(())`
 /// immediately, without pushing a final `Eos` (`Stop` means abandon, not
 /// drain to completion).
-pub fn drain_control(control: &ControlReceiver, pads: &mut [SrcPad]) -> Result<bool> {
+pub fn drain_control<S: SourceElement>(control: &ControlReceiver, source: &mut S) -> Result<bool> {
     while let Some((msg, ack)) = control.try_recv() {
-        for pad in pads.iter_mut() {
+        if let ControlMsg::Seek(target) = msg {
+            source.seek(target)?;
+        }
+        for pad in source.src_pads() {
             pad.control(msg)?;
         }
         let is_stop = msg == ControlMsg::Stop;
@@ -114,7 +133,10 @@ pub fn drain_control(control: &ControlReceiver, pads: &mut [SrcPad]) -> Result<b
                 let Some((msg, ack)) = control.recv() else {
                     return Ok(true); // sender gone — treat like Stop
                 };
-                for pad in pads.iter_mut() {
+                if let ControlMsg::Seek(target) = msg {
+                    source.seek(target)?;
+                }
+                for pad in source.src_pads() {
                     pad.control(msg)?;
                 }
                 let is_stop = msg == ControlMsg::Stop;

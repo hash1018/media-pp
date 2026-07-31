@@ -99,9 +99,37 @@ impl Sink for Pacer {
     }
 
     fn control(&mut self, msg: ControlMsg) -> crate::error::Result<()> {
-        // Nothing local to react to — `Pause`/`Stop` freezing this pacer
-        // is entirely a function of upstream not feeding it (see
-        // `Queue`'s worker loop) and `Clock` being paused; just forward.
+        // Pause/Stop: nothing local to react to — freezing this pacer is
+        // entirely a function of upstream not feeding it (see `Queue`'s
+        // worker loop) and `Clock` being paused.
+        //
+        // Seek: the next frame this pacer sees will have a pts from the
+        // new position, unrelated to `first_pts` (from before the jump)
+        // — reset it so `wait_for` re-anchors instead of computing a
+        // huge/negative `elapsed_ticks` against a stale reference.
+        //
+        // `Clock::reset()` has to happen *here*, not eagerly in
+        // `Pipeline::seek` before the cascade even starts — this call is
+        // reached only once any data item this worker thread was already
+        // in the middle of consuming (started before the `Seek` control
+        // message got priority — see `Queue`'s `discard_stale_data`,
+        // which can only drop what's still *sitting in the channel*, not
+        // something already handed to `consume()`) has fully finished.
+        // If the reset happened earlier instead, that leftover pre-seek
+        // frame's own `wait_for` call could still be in flight and call
+        // `clock.start()` *after* the reset but *before* the real
+        // post-seek frame does, re-poisoning the fresh anchor with a
+        // stale timestamp — every post-seek frame would then compute a
+        // `due` time already in the past and skip pacing entirely. Pause
+        // /resume can safely touch `Clock` from `Pipeline` directly
+        // instead, because `Pause` itself guarantees every worker is
+        // already quiesced first — nothing else could be racing to call
+        // `clock.start()` at that point. `Seek` has no such guarantee, so
+        // it needs the same in-cascade timing `first_pts` already gets.
+        if let ControlMsg::Seek(_) = msg {
+            self.first_pts = None;
+            self.clock.reset();
+        }
         self.pad.control(msg)
     }
 }

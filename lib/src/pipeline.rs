@@ -4,6 +4,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
     thread,
+    time::Duration,
 };
 
 use crate::{
@@ -314,11 +315,32 @@ impl Pipeline {
         }
         self.control_tx.send(ControlMsg::Stop);
     }
+
+    /// Jumps to an absolute position from the start of the media. Blocks
+    /// until the source has repositioned (see
+    /// [`crate::element::SourceElement::seek`]) and every element
+    /// downstream has reacted (a `Queue` drops its stale backlog, a
+    /// decoder flushes, a `Pacer` re-anchors both its pts reference and
+    /// this pipeline's `Clock`) — same synchronous cascade as `pause`/
+    /// `resume`/`stop`. One-shot, unlike `pause`: nothing further to undo
+    /// afterward, playback just continues from the new position. No-op
+    /// if `run()` isn't currently in progress on another thread.
+    ///
+    /// Deliberately does *not* touch `Clock` directly here the way
+    /// `pause`/`resume` do — see [`crate::elements::Pacer::control`] for
+    /// why that would race a straggler pre-seek frame that's still being
+    /// processed.
+    pub fn seek(&self, target: Duration) {
+        if !self.running.load(Ordering::Acquire) {
+            return;
+        }
+        self.control_tx.send(ControlMsg::Seek(target));
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{thread, time::Duration};
+    use std::{sync::atomic::AtomicUsize, thread, time::Duration};
 
     use super::*;
     use crate::{element::Source, elements::FileDemuxer};
@@ -371,6 +393,48 @@ mod tests {
         );
     }
 
+    /// `seek()` mid-playback should reposition the source (no error from
+    /// `Input::seek`), reset/flush everything downstream without
+    /// deadlocking, and let packets keep flowing afterward.
+    #[test]
+    fn seek_repositions_and_playback_continues() {
+        let (source, streams) = FileDemuxer::open("demux", test_video()).expect("open test video");
+        let video = streams
+            .iter()
+            .find(|s| s.kind == ffmpeg_next::media::Type::Video)
+            .expect("test video has a video stream");
+        let index = video.index;
+
+        let count = Arc::new(AtomicUsize::new(0));
+        let sink = CountingSink {
+            count: count.clone(),
+        };
+
+        let pipeline = Pipeline::new(source, |source, bus, _clock| {
+            let branch = ChainBuilder::new(bus.clone())
+                .queue("q", 4)
+                .build(Box::new(sink));
+            source.src_pads()[index].link(branch);
+        });
+
+        pipeline.run();
+        thread::sleep(Duration::from_millis(50));
+        pipeline.seek(Duration::from_secs(1));
+        // Let packets flow again post-seek before tearing down.
+        thread::sleep(Duration::from_millis(100));
+        pipeline.stop();
+
+        let events: Vec<_> = pipeline.bus().iter().collect();
+        assert!(
+            !events.iter().any(|e| matches!(e, BusEvent::Error { .. })),
+            "unexpected error event(s): {events:?}"
+        );
+        assert!(
+            count.load(Ordering::SeqCst) > 0,
+            "expected at least one packet to arrive after the seek"
+        );
+    }
+
     struct NoOpSink;
     impl Element for NoOpSink {
         fn name(&self) -> &str {
@@ -379,6 +443,26 @@ mod tests {
     }
     impl Sink for NoOpSink {
         fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
+            Ok(())
+        }
+        fn control(&mut self, _msg: ControlMsg) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    struct CountingSink {
+        count: Arc<AtomicUsize>,
+    }
+    impl Element for CountingSink {
+        fn name(&self) -> &str {
+            "counting-sink"
+        }
+    }
+    impl Sink for CountingSink {
+        fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+            if matches!(buf, MediaBuffer::Packet(_)) {
+                self.count.fetch_add(1, Ordering::SeqCst);
+            }
             Ok(())
         }
         fn control(&mut self, _msg: ControlMsg) -> Result<()> {

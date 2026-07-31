@@ -210,6 +210,22 @@ pub struct RtspServer {
     input_time_base: ffmpeg::Rational,
     mediamtx: Child,
     ports: Vec<u16>,
+    /// Last pts actually written to `output` (in *output* time_base
+    /// units) — what `consume` re-anchors `pts_offset` against right
+    /// after a `Seek`, so the stream this element writes keeps
+    /// increasing smoothly instead of jumping to wherever the seek
+    /// landed. `mediamtx`/most RTSP clients assume monotonically
+    /// increasing timestamps; a raw post-seek pts would violate that.
+    last_output_pts: Option<i64>,
+    /// Added to every packet's (rescaled) pts/dts before writing.
+    /// Constant between seeks — recomputed only when `pending_seek` is
+    /// consumed, so relative spacing between consecutive frames is
+    /// preserved; only the absolute baseline shifts.
+    pts_offset: i64,
+    /// Set by `control(Seek)`, consumed by the next `consume(Packet)` —
+    /// deferred because the actual jump size (in output time_base units)
+    /// isn't knowable until that packet's raw pts is in hand.
+    pending_seek: bool,
 }
 
 impl RtspServer {
@@ -269,6 +285,9 @@ impl RtspServer {
             input_time_base: time_base,
             mediamtx: mediamtx_guard.disarm(),
             ports: port_guard.disarm(),
+            last_output_pts: None,
+            pts_offset: 0,
+            pending_seek: false,
         })
     }
 
@@ -611,6 +630,28 @@ impl Sink for RtspServer {
                     .expect("stream 0 was added in new()")
                     .time_base();
                 packet.rescale_ts(self.input_time_base, output_time_base);
+
+                if let Some(raw_pts) = packet.pts() {
+                    if self.pending_seek {
+                        // Continue smoothly from whatever was last
+                        // written, ignoring how far this actually jumped
+                        // — a viewer only ever sees the output side.
+                        self.pts_offset = match self.last_output_pts {
+                            Some(last) => last + 1 - raw_pts,
+                            None => 0, // nothing written yet: raw pts is fine as-is
+                        };
+                        self.pending_seek = false;
+                    }
+                    let corrected_pts = raw_pts + self.pts_offset;
+                    packet.set_pts(Some(corrected_pts));
+                    if let Some(raw_dts) = packet.dts() {
+                        // Same offset as pts, so the original pts/dts gap
+                        // (relevant for B-frame reordering) is preserved.
+                        packet.set_dts(Some(raw_dts + self.pts_offset));
+                    }
+                    self.last_output_pts = Some(corrected_pts);
+                }
+
                 packet.set_stream(0);
                 packet.set_position(-1);
                 packet
@@ -624,10 +665,17 @@ impl Sink for RtspServer {
         }
     }
 
-    fn control(&mut self, _msg: ControlMsg) -> Result<()> {
-        // Terminal, nothing to flush or forward. `Stop` doesn't write a
-        // trailer here (unlike natural `Eos`) — `Stop` means abandon, and
-        // `Drop` already kills `mediamtx` unconditionally.
+    fn control(&mut self, msg: ControlMsg) -> Result<()> {
+        // Terminal, nothing to forward. `Stop` doesn't write a trailer
+        // here (unlike natural `Eos`) — `Stop` means abandon, and `Drop`
+        // already kills `mediamtx` unconditionally.
+        //
+        // `Seek`: just flag it — see `pending_seek`'s docs for why the
+        // actual pts correction waits for `consume`'s next packet
+        // instead of happening here.
+        if let ControlMsg::Seek(_) = msg {
+            self.pending_seek = true;
+        }
         Ok(())
     }
 }

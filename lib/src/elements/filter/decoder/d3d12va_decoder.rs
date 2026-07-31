@@ -185,8 +185,16 @@ impl Sink for D3d12vaDecoder {
     }
 
     fn control(&mut self, msg: ControlMsg) -> crate::error::Result<()> {
-        // No local reaction needed — see `SwDecoder::control`; same
-        // reasoning applies to the hw device context, freed in `Drop`.
+        // `Stop`: no local reaction needed — see `SwDecoder::control`;
+        // same reasoning applies to the hw device context, freed in
+        // `Drop`.
+        //
+        // `Seek`: same reasoning as `SwDecoder::control` too — flush
+        // leftover reference-frame state before decoding resumes from
+        // the new position.
+        if let ControlMsg::Seek(_) = msg {
+            self.decoder.flush();
+        }
         self.pad.control(msg)
     }
 }

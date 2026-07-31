@@ -1,4 +1,4 @@
-use std::{path::Path, sync::Arc};
+use std::{path::Path, sync::Arc, time::Duration};
 
 use ffmpeg_next as ffmpeg;
 use thiserror::Error as ThisError;
@@ -105,21 +105,41 @@ impl Source for FileDemuxer {
 
 impl SourceElement for FileDemuxer {
     fn run(&mut self, control: &ControlReceiver) -> crate::error::Result<()> {
-        let Self { input, pads, .. } = self;
-
-        for (stream, packet) in input.packets() {
-            if drain_control(control, pads)? {
+        // Deliberately re-creates `self.input.packets()` fresh every
+        // iteration (cheap — it's just a short-lived wrapper, not a
+        // stateful cursor of its own) instead of holding one `for` loop's
+        // iterator across the whole function, the way this used to read.
+        // That iterator borrows `input` for as long as it's alive; `Seek`
+        // needs `drain_control` to be able to call `self.seek()` — a
+        // *second* mutable borrow of `input` — in between reads, which a
+        // single loop-spanning iterator would rule out.
+        loop {
+            if drain_control(control, self)? {
                 // Stop: abandon in place, no final Eos.
                 return Ok(());
             }
+            let Some((stream, packet)) = self.input.packets().next() else {
+                break;
+            };
             let index = stream.index();
-            if let Some(pad) = pads.get_mut(index) {
+            if let Some(pad) = self.pads.get_mut(index) {
                 pad.push(MediaBuffer::Packet(Arc::new(packet)))?;
             }
         }
-        for pad in pads.iter_mut() {
+        for pad in self.pads.iter_mut() {
             pad.push(MediaBuffer::Eos)?;
         }
+        Ok(())
+    }
+
+    fn seek(&mut self, target: Duration) -> crate::error::Result<()> {
+        // `Input::seek` takes microseconds (`AV_TIME_BASE` units) when
+        // seeking the whole container (stream index -1, which is what it
+        // uses internally) rather than one specific stream — an unbounded
+        // range (`..`) just means "as close to `ts` as ffmpeg can manage",
+        // no extra min/max constraint.
+        let ts = target.as_micros().min(i64::MAX as u128) as i64;
+        self.input.seek(ts, ..)?;
         Ok(())
     }
 }
