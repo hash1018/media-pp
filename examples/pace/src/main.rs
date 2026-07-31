@@ -3,6 +3,7 @@ use std::{sync::atomic::Ordering, time::Instant};
 use ffmpeg_next::media;
 use media_pp::{
     Error,
+    bus::BusEvent,
     element::Source,
     elements::{FileDemuxer, FrameCounter, Pacer, SwDecoder},
     pipeline::{ChainBuilder, Pipeline},
@@ -54,7 +55,20 @@ fn main() -> media_pp::Result<()> {
 
     let start = Instant::now();
     pipeline.run();
-    pipeline.bus().log_events(); // blocks until playback actually finishes
+
+    // Watch for `Eos`/`Error` and `stop()` on either — errors no longer
+    // end the pipeline on their own, so this is what makes the loop
+    // below actually finish instead of running forever after a failure.
+    for event in pipeline.bus().iter() {
+        match &event {
+            BusEvent::Eos { name, .. } => println!("[{name}] eos"),
+            BusEvent::Error { name, error, .. } => eprintln!("[{name}] error: {error}"),
+            BusEvent::Dropped { name, .. } => eprintln!("[{name}] dropped a buffer (queue full)"),
+        }
+        if matches!(event, BusEvent::Eos { .. } | BusEvent::Error { .. }) {
+            pipeline.stop();
+        }
+    }
 
     println!("decoded frames: {}", frame_count.load(Ordering::Relaxed));
     println!("wall time: {:.2}s", start.elapsed().as_secs_f64());

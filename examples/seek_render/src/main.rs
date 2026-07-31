@@ -7,6 +7,7 @@ use std::{
 use ffmpeg_next::media;
 use media_pp::{
     Error,
+    bus::BusEvent,
     element::Source,
     elements::{Dx12Renderer, FileDemuxer, Pacer, SwDecoder},
     pipeline::{ChainBuilder, Pipeline},
@@ -169,7 +170,27 @@ fn play(path: &str, hwnd: isize, width: u32, height: u32) -> media_pp::Result<()
         thread::spawn(move || read_seek_commands(&pipeline));
     }
 
-    pipeline.bus().log_events(); // blocks until playback actually finishes
+    // Same output `log_events()` would print, but also calls `stop()` on
+    // `Eos`/`Error` — errors no longer end the pipeline on their own (see
+    // `BusEvent`'s docs), so without this an error here (e.g. the
+    // renderer's GPU upload ring running out of slots) would just get
+    // printed forever instead of ending playback. `Eos` calling `stop()`
+    // too is a harmless no-op in this example (single video stream, one
+    // `Eos` means everything's already finished) — a multi-stream
+    // pipeline would need to wait for every branch's `Eos`, not stop on
+    // the first one.
+    for event in pipeline.bus().iter() {
+        match &event {
+            BusEvent::Eos { name, .. } => println!("[{name}] eos"),
+            BusEvent::Error { name, error, .. } => eprintln!("[{name}] error: {error}"),
+            BusEvent::Dropped { name, .. } => {
+                eprintln!("[{name}] dropped a buffer (queue full)")
+            }
+        }
+        if matches!(event, BusEvent::Eos { .. } | BusEvent::Error { .. }) {
+            pipeline.stop();
+        }
+    }
     Ok(())
 }
 

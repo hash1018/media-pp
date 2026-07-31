@@ -3,6 +3,7 @@ use std::thread;
 use ffmpeg_next::media;
 use media_pp::{
     Error,
+    bus::BusEvent,
     element::Source,
     elements::{D3d12vaDecoder, Dx12Renderer, FileDemuxer, Pacer},
     pipeline::{ChainBuilder, Pipeline},
@@ -153,6 +154,21 @@ fn play(path: &str, hwnd: isize, width: u32, height: u32) -> media_pp::Result<()
     // away — any failure (including the source's own) shows up as a
     // `BusEvent::Error` here instead of through a returned `Result`.
     pipeline.run();
-    pipeline.bus().log_events();
+
+    // Errors no longer end the pipeline on their own (see `BusEvent`'s
+    // docs) — watch for one here and `stop()`, or this window would just
+    // sit open (showing a frozen last frame) instead of closing after a
+    // renderer failure. Single video stream, so `Eos` calling `stop()` is
+    // a harmless no-op too.
+    for event in pipeline.bus().iter() {
+        match &event {
+            BusEvent::Eos { name, .. } => println!("[{name}] eos"),
+            BusEvent::Error { name, error, .. } => eprintln!("[{name}] error: {error}"),
+            BusEvent::Dropped { name, .. } => eprintln!("[{name}] dropped a buffer (queue full)"),
+        }
+        if matches!(event, BusEvent::Eos { .. } | BusEvent::Error { .. }) {
+            pipeline.stop();
+        }
+    }
     Ok(())
 }

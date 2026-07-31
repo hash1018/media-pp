@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use crate::{
     buffer::MediaBuffer,
     control::ControlMsg,
-    element::{Element, Sink},
+    element::{Element, ElementType, Sink},
     error::Result,
     pad::SrcPad,
 };
@@ -78,6 +78,10 @@ impl TeeHandle {
 impl Element for Tee {
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn element_type(&self) -> ElementType {
+        ElementType::Tee
     }
 }
 

@@ -5,8 +5,9 @@ use thiserror::Error as ThisError;
 
 use crate::{
     buffer::MediaBuffer,
+    bus::{Bus, BusEvent},
     control::{ControlReceiver, drain_control},
-    element::{Element, Source, SourceElement},
+    element::{Element, ElementType, Source, SourceElement},
     pad::SrcPad,
 };
 
@@ -95,6 +96,10 @@ impl Element for FileDemuxer {
     fn name(&self) -> &str {
         &self.name
     }
+
+    fn element_type(&self) -> ElementType {
+        ElementType::FileDemuxer
+    }
 }
 
 impl Source for FileDemuxer {
@@ -104,7 +109,7 @@ impl Source for FileDemuxer {
 }
 
 impl SourceElement for FileDemuxer {
-    fn run(&mut self, control: &ControlReceiver) -> crate::error::Result<()> {
+    fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> crate::error::Result<()> {
         // Deliberately re-creates `self.input.packets()` fresh every
         // iteration (cheap — it's just a short-lived wrapper, not a
         // stateful cursor of its own) instead of holding one `for` loop's
@@ -123,7 +128,18 @@ impl SourceElement for FileDemuxer {
             };
             let index = stream.index();
             if let Some(pad) = self.pads.get_mut(index) {
-                pad.push(MediaBuffer::Packet(Arc::new(packet)))?;
+                // A downstream failure drops just this one packet — same
+                // "report, don't die" contract `Queue`'s worker gives a
+                // failing `Sink` — rather than ending this whole source
+                // thread over it. `Pipeline::stop` is how a caller who
+                // decides an error is fatal actually ends things.
+                if let Err(error) = pad.push(MediaBuffer::Packet(Arc::new(packet))) {
+                    bus.post(BusEvent::Error {
+                        element_type: ElementType::FileDemuxer,
+                        name: self.name.clone(),
+                        error,
+                    });
+                }
             }
         }
         for pad in self.pads.iter_mut() {

@@ -6,7 +6,7 @@ use thiserror::Error as ThisError;
 use crate::{
     buffer::MediaBuffer,
     control::ControlMsg,
-    element::{Element, Sink, Source},
+    element::{Element, ElementType, Sink, Source},
     pad::SrcPad,
 };
 
@@ -64,6 +64,10 @@ impl SwDecoder {
 impl Element for SwDecoder {
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn element_type(&self) -> ElementType {
+        ElementType::SwDecoder
     }
 }
 

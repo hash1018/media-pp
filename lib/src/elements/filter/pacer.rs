@@ -6,7 +6,7 @@ use crate::{
     buffer::MediaBuffer,
     clock::Clock,
     control::ControlMsg,
-    element::{Element, Sink, Source},
+    element::{Element, ElementType, Sink, Source},
     pad::SrcPad,
 };
 
@@ -78,6 +78,10 @@ impl Pacer {
 impl Element for Pacer {
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn element_type(&self) -> ElementType {
+        ElementType::Pacer
     }
 }
 

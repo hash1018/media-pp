@@ -2,16 +2,44 @@ use std::time::Duration;
 
 use crate::{
     buffer::MediaBuffer,
+    bus::Bus,
     control::{ControlMsg, ControlReceiver},
     error::Result,
     pad::SrcPad,
 };
+
+/// Which kind of element posted a [`crate::bus::BusEvent`] — cheap to
+/// compare/match, unlike the accompanying `name: String` (an
+/// instance-level identifier chosen by whoever constructed it, needed
+/// alongside this to tell apart e.g. two `Queue`s in the same pipeline;
+/// see [`Element::element_type`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ElementType {
+    FileDemuxer,
+    SwDecoder,
+    D3d12vaDecoder,
+    Pacer,
+    Tee,
+    Queue,
+    FrameCounter,
+    PacketCounter,
+    Dx12Renderer,
+    RtspServer,
+    /// Anything outside this crate's own elements — a test double, or a
+    /// custom `Sink`/`SourceElement` implemented downstream of this
+    /// crate. Keeps this enum from needing to grow every time someone
+    /// adds their own element.
+    Other,
+}
 
 /// A node in the pipeline graph with a name. Plain identity only — says
 /// nothing about whether the node has an input, an output, both, or
 /// neither.
 pub trait Element: Send {
     fn name(&self) -> &str;
+
+    /// See [`ElementType`].
+    fn element_type(&self) -> ElementType;
 }
 
 /// Anything that can receive a buffer pushed from upstream — the input
@@ -62,7 +90,17 @@ pub trait SourceElement: Source {
     /// [`ControlMsg::Stop`]) — call [`crate::control::drain_control`]
     /// once per loop iteration to make `control` responsive between
     /// blocking reads.
-    fn run(&mut self, control: &ControlReceiver) -> Result<()>;
+    ///
+    /// `bus` is this source's own way to report a failure pushing into
+    /// one of its pads *without* treating it as fatal — post a
+    /// [`crate::bus::BusEvent::Error`] and keep going (drop that one
+    /// buffer), the same way a [`crate::queue::Queue`] handles a failing
+    /// downstream `Sink` — rather than returning `Err` and ending this
+    /// source's thread over one bad buffer. A returned `Err` is still
+    /// how genuinely fatal failures (this source can't continue at all)
+    /// reach [`crate::pipeline::Pipeline::run`], which posts it to `bus`
+    /// itself.
+    fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()>;
 
     /// Repositions this source to `target`, an absolute position from the
     /// start of the media (e.g. `av_seek_frame` for

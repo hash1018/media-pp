@@ -1,18 +1,23 @@
 use crossbeam_channel::{Receiver, Sender, unbounded};
 
+use crate::{element::ElementType, error::Error};
+
 #[derive(Debug)]
 pub enum BusEvent {
     Eos {
-        element: String,
+        element_type: ElementType,
+        name: String,
     },
     Error {
-        element: String,
-        message: String,
+        element_type: ElementType,
+        name: String,
+        error: Error,
     },
     /// A `Queue` with `OverflowPolicy::DropNewest` dropped a buffer
     /// because it was full.
     Dropped {
-        element: String,
+        element_type: ElementType,
+        name: String,
     },
 }
 
@@ -54,17 +59,20 @@ impl BusReceiver {
     }
 
     /// Drains every event so far, printing each in a common default
-    /// format (`[element] eos`, `[element] error: ...`, `[element]
-    /// dropped a buffer (queue full)`). Convenience for examples and
-    /// smoke tests; anything that needs to act on specific events should
-    /// match on `iter()` directly instead.
+    /// format (`[name] eos`, `[name] error: ...`, `[name] dropped a
+    /// buffer (queue full)`). Convenience for examples and smoke tests;
+    /// anything that needs to act on specific events — e.g. deciding
+    /// whether an `Error` warrants a [`crate::pipeline::Pipeline::stop`]
+    /// — should match on `iter()` directly instead, where `error`'s
+    /// concrete variant (see [`crate::error::Error`]) is still available,
+    /// not just its `Display` text.
     pub fn log_events(&self) {
         for event in self.iter() {
             match event {
-                BusEvent::Error { element, message } => eprintln!("[{element}] error: {message}"),
-                BusEvent::Eos { element } => println!("[{element}] eos"),
-                BusEvent::Dropped { element } => {
-                    eprintln!("[{element}] dropped a buffer (queue full)")
+                BusEvent::Error { name, error, .. } => eprintln!("[{name}] error: {error}"),
+                BusEvent::Eos { name, .. } => println!("[{name}] eos"),
+                BusEvent::Dropped { name, .. } => {
+                    eprintln!("[{name}] dropped a buffer (queue full)")
                 }
             }
         }

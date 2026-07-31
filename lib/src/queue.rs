@@ -7,7 +7,7 @@ use crate::{
     buffer::MediaBuffer,
     bus::{Bus, BusEvent},
     control::{self, ControlMsg, ControlReceiver, ControlSender},
-    element::{Element, Sink},
+    element::{Element, ElementType, Sink},
     error::Result,
 };
 
@@ -56,6 +56,13 @@ pub enum OverflowPolicy {
 /// simply *not* have a `Queue` between them and their upstream — they run
 /// as a direct call on the upstream element's thread instead of paying for
 /// a dedicated thread they don't need.
+///
+/// A failing `downstream.consume()` doesn't end the worker thread either —
+/// that buffer is dropped, `BusEvent::Error` is posted, and the loop moves
+/// on to the next one. This crate never decides an error is fatal on your
+/// behalf; watch [`crate::pipeline::Pipeline::bus`] and call
+/// [`crate::pipeline::Pipeline::stop`] yourself if a particular error
+/// means the whole pipeline should end.
 pub struct Queue {
     name: String,
     tx: Sender<MediaBuffer>,
@@ -112,6 +119,10 @@ impl Element for Queue {
     fn name(&self) -> &str {
         &self.name
     }
+
+    fn element_type(&self) -> ElementType {
+        ElementType::Queue
+    }
 }
 
 impl Sink for Queue {
@@ -135,7 +146,8 @@ impl Sink for Queue {
                 Ok(()) => Ok(()),
                 Err(TrySendError::Full(_)) => {
                     self.bus.post(BusEvent::Dropped {
-                        element: self.name.clone(),
+                        element_type: ElementType::Queue,
+                        name: self.name.clone(),
                     });
                     Ok(())
                 }
@@ -206,16 +218,28 @@ fn worker_loop(
                 match buf {
                     Ok(buf) => {
                         let is_eos = buf.is_eos();
-                        if let Err(e) = downstream.consume(buf) {
-                            bus.post(BusEvent::Error {
-                                element: name.clone(),
-                                message: e.to_string(),
-                            });
-                            return;
-                        }
-                        if is_eos {
-                            bus.post(BusEvent::Eos { element: name.clone() });
-                            return;
+                        match downstream.consume(buf) {
+                            Ok(()) => {
+                                if is_eos {
+                                    bus.post(BusEvent::Eos {
+                                        element_type: ElementType::Queue,
+                                        name: name.clone(),
+                                    });
+                                    return;
+                                }
+                            }
+                            Err(error) => {
+                                // Report and move on to the next buffer —
+                                // this one's dropped, but nothing else
+                                // dies over it. Whoever's watching the bus
+                                // decides whether the error is fatal
+                                // enough to call `Pipeline::stop`.
+                                bus.post(BusEvent::Error {
+                                    element_type: ElementType::Queue,
+                                    name: name.clone(),
+                                    error,
+                                });
+                            }
                         }
                     }
                     Err(_) => return, // producer side (this Queue) dropped
@@ -301,6 +325,10 @@ mod tests {
     impl Element for SlowCounter {
         fn name(&self) -> &str {
             "slow-counter"
+        }
+
+        fn element_type(&self) -> ElementType {
+            ElementType::Other
         }
     }
 
@@ -414,5 +442,76 @@ mod tests {
         queue.consume(packet()).unwrap();
         queue.control(ControlMsg::Stop).unwrap(); // blocks until the worker has exited
         drop(queue); // join should return immediately — the worker already returned
+    }
+
+    /// A downstream that fails on the very first `Packet` it sees, then
+    /// behaves like `SlowCounter` for every one after.
+    struct FailFirstThenCount {
+        count: Arc<AtomicUsize>,
+        failed_once: bool,
+    }
+
+    impl Element for FailFirstThenCount {
+        fn name(&self) -> &str {
+            "fail-first"
+        }
+
+        fn element_type(&self) -> ElementType {
+            ElementType::Other
+        }
+    }
+
+    impl Sink for FailFirstThenCount {
+        fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+            let MediaBuffer::Packet(_) = buf else {
+                return Ok(());
+            };
+            if !self.failed_once {
+                self.failed_once = true;
+                return Err(crate::error::Error::Other("simulated failure".into()));
+            }
+            self.count.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn control(&mut self, _msg: ControlMsg) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Regression test for the design change prompted by the `NoFreeSlot`
+    /// investigation: a `Sink::consume` failure used to end the worker
+    /// thread outright (and, transitively, everything upstream once its
+    /// data channel closed). Now it's just one dropped buffer — the
+    /// worker keeps running, later buffers still get through, and exactly
+    /// one `BusEvent::Error` shows up for the one that failed.
+    #[test]
+    fn a_failing_consume_drops_that_buffer_but_keeps_the_worker_alive() {
+        let count = Arc::new(AtomicUsize::new(0));
+        let sink = FailFirstThenCount {
+            count: count.clone(),
+            failed_once: false,
+        };
+        let (bus, bus_rx) = Bus::new();
+
+        let mut queue =
+            Queue::spawn_with_policy("test", 8, Box::new(sink), bus, OverflowPolicy::Block);
+        for _ in 0..3 {
+            queue.consume(packet()).unwrap();
+        }
+        queue.consume(MediaBuffer::Eos).unwrap();
+        drop(queue); // blocks until the worker drains everything and joins
+
+        // First packet failed (and was dropped); the other two still went
+        // through — the worker didn't die over the first one.
+        assert_eq!(count.load(Ordering::SeqCst), 2);
+        let errors = bus_rx
+            .iter()
+            .filter(|e| matches!(e, BusEvent::Error { .. }))
+            .count();
+        assert_eq!(
+            errors, 1,
+            "expected exactly one Error event, for the one buffer that failed"
+        );
     }
 }

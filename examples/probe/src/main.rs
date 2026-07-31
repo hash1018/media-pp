@@ -3,6 +3,7 @@ use std::sync::atomic::Ordering;
 use ffmpeg_next::media;
 use media_pp::{
     Error,
+    bus::BusEvent,
     element::Source,
     elements::{FileDemuxer, PacketCounter},
     pipeline::{ChainBuilder, Pipeline},
@@ -45,11 +46,21 @@ fn main() -> media_pp::Result<()> {
         source.src_pads()[video.index].link(branch);
     });
 
-    // run() blocks until the source hits EOS and every queue worker
-    // thread downstream has drained and joined, so it's safe to read the
-    // bus and the counter right after.
     pipeline.run();
-    pipeline.bus().log_events();
+
+    // Watch for `Eos`/`Error` and `stop()` on either — errors no longer
+    // end the pipeline on their own, so this is what makes the loop
+    // below actually finish instead of running forever after a failure.
+    for event in pipeline.bus().iter() {
+        match &event {
+            BusEvent::Eos { name, .. } => println!("[{name}] eos"),
+            BusEvent::Error { name, error, .. } => eprintln!("[{name}] error: {error}"),
+            BusEvent::Dropped { name, .. } => eprintln!("[{name}] dropped a buffer (queue full)"),
+        }
+        if matches!(event, BusEvent::Eos { .. } | BusEvent::Error { .. }) {
+            pipeline.stop();
+        }
+    }
 
     println!("packet count: {}", count.load(Ordering::Relaxed));
     Ok(())

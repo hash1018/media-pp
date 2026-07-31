@@ -6,7 +6,7 @@ use std::sync::{
 use crate::{
     buffer::MediaBuffer,
     control::ControlMsg,
-    element::{Element, Sink},
+    element::{Element, ElementType, Sink},
     error::Result,
 };
 
@@ -35,6 +35,10 @@ impl FrameCounter {
 impl Element for FrameCounter {
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn element_type(&self) -> ElementType {
+        ElementType::FrameCounter
     }
 }
 

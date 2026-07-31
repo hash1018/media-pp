@@ -12,7 +12,7 @@ use crate::{
     bus::{Bus, BusEvent, BusReceiver},
     clock::Clock,
     control::{self, ControlMsg, ControlReceiver, ControlSender},
-    element::{Element, Filter, Sink, SourceElement},
+    element::{Element, ElementType, Filter, Sink, SourceElement},
     error::Result,
     queue::{OverflowPolicy, Queue},
 };
@@ -73,6 +73,10 @@ impl Element for EosReporter {
     fn name(&self) -> &str {
         self.inner.name()
     }
+
+    fn element_type(&self) -> ElementType {
+        self.inner.element_type()
+    }
 }
 
 impl Sink for EosReporter {
@@ -81,7 +85,8 @@ impl Sink for EosReporter {
         self.inner.consume(buf)?;
         if is_eos {
             self.bus.post(BusEvent::Eos {
-                element: self.inner.name().to_string(),
+                element_type: self.inner.element_type(),
+                name: self.inner.name().to_string(),
             });
         }
         Ok(())
@@ -268,10 +273,17 @@ impl Pipeline {
             .name("pipeline:source".into())
             .spawn(move || {
                 let source_name = source.name().to_string();
-                if let Err(e) = source.run(&control_rx) {
+                let source_type = source.element_type();
+                // `source.run()` itself already reports non-fatal,
+                // per-buffer failures to `bus` as it goes (see
+                // `SourceElement::run`'s docs) — a returned `Err` here
+                // means something genuinely ended the whole source, e.g.
+                // a `Seek` that failed outright.
+                if let Err(error) = source.run(&control_rx, &bus) {
                     bus.post(BusEvent::Error {
-                        element: source_name,
-                        message: e.to_string(),
+                        element_type: source_type,
+                        name: source_name,
+                        error,
                     });
                 }
                 this.running.store(false, Ordering::Release);
@@ -440,6 +452,10 @@ mod tests {
         fn name(&self) -> &str {
             "noop"
         }
+
+        fn element_type(&self) -> ElementType {
+            ElementType::Other
+        }
     }
     impl Sink for NoOpSink {
         fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
@@ -456,6 +472,10 @@ mod tests {
     impl Element for CountingSink {
         fn name(&self) -> &str {
             "counting-sink"
+        }
+
+        fn element_type(&self) -> ElementType {
+            ElementType::Other
         }
     }
     impl Sink for CountingSink {

@@ -14,7 +14,7 @@ use windows::{
 use crate::{
     buffer::MediaBuffer,
     control::ControlMsg,
-    element::{Element, Sink},
+    element::{Element, ElementType, Sink},
     elements::filter::decoder::d3d12va_decoder::d3d12va_texture,
     error::Result,
 };
@@ -144,6 +144,10 @@ impl Dx12Renderer {
 impl Element for Dx12Renderer {
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn element_type(&self) -> ElementType {
+        ElementType::Dx12Renderer
     }
 }
 

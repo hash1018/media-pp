@@ -19,7 +19,7 @@ use thiserror::Error as ThisError;
 use crate::{
     buffer::MediaBuffer,
     control::ControlMsg,
-    element::{Element, Sink},
+    element::{Element, ElementType, Sink},
     error::Result,
 };
 
@@ -616,6 +616,10 @@ fn alloc_output(url: &str) -> Result<ffmpeg::format::context::Output> {
 impl Element for RtspServer {
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn element_type(&self) -> ElementType {
+        ElementType::RtspServer
     }
 }
 

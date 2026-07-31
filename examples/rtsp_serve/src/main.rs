@@ -1,6 +1,7 @@
 use ffmpeg_next::media;
 use media_pp::{
     Error,
+    bus::BusEvent,
     element::Source,
     elements::{FileDemuxer, Pacer, PortPolicy, PublishTransport, RtspServer, ViewerTransport},
     pipeline::{ChainBuilder, Pipeline},
@@ -72,6 +73,21 @@ fn main() -> media_pp::Result<()> {
     // away — any failure shows up as a `BusEvent::Error` here instead of
     // through a returned `Result`.
     pipeline.run();
-    pipeline.bus().log_events();
+
+    // Errors no longer end the pipeline on their own (see `BusEvent`'s
+    // docs) — watch for one here and `stop()`, or this would just keep
+    // trying to publish into a broken `mediamtx`/connection forever
+    // instead of exiting. Single video stream, so `Eos` calling `stop()`
+    // is a harmless no-op too.
+    for event in pipeline.bus().iter() {
+        match &event {
+            BusEvent::Eos { name, .. } => println!("[{name}] eos"),
+            BusEvent::Error { name, error, .. } => eprintln!("[{name}] error: {error}"),
+            BusEvent::Dropped { name, .. } => eprintln!("[{name}] dropped a buffer (queue full)"),
+        }
+        if matches!(event, BusEvent::Eos { .. } | BusEvent::Error { .. }) {
+            pipeline.stop();
+        }
+    }
     Ok(())
 }

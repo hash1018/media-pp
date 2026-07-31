@@ -7,7 +7,7 @@ use windows::{Win32::Graphics::Direct3D12::ID3D12Device, core::Interface};
 use crate::{
     buffer::MediaBuffer,
     control::ControlMsg,
-    element::{Element, Sink, Source},
+    element::{Element, ElementType, Sink, Source},
     pad::SrcPad,
 };
 
@@ -154,6 +154,10 @@ impl D3d12vaDecoder {
 impl Element for D3d12vaDecoder {
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn element_type(&self) -> ElementType {
+        ElementType::D3d12vaDecoder
     }
 }
 
