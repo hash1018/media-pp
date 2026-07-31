@@ -35,7 +35,7 @@ enum Kind {
 /// `receive_frame` in a loop after every `send_packet`/`send_eof`, pushing
 /// however many frames come out.
 pub struct SwDecoder {
-    name: String,
+    name: Arc<str>,
     kind: Kind,
     pad: SrcPad,
 }
@@ -47,7 +47,7 @@ impl SwDecoder {
         name: impl Into<String>,
         params: ffmpeg::codec::Parameters,
     ) -> Result<Self, SwDecoderError> {
-        let name = name.into();
+        let name: Arc<str> = name.into().into();
         let context = ffmpeg::codec::context::Context::from_parameters(params)?;
 
         let kind = match context.medium() {
@@ -62,8 +62,8 @@ impl SwDecoder {
 }
 
 impl Element for SwDecoder {
-    fn name(&self) -> &str {
-        &self.name
+    fn name(&self) -> Arc<str> {
+        self.name.clone()
     }
 
     fn element_type(&self) -> ElementType {

@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use crossbeam_channel::{Receiver, Sender, unbounded};
 
@@ -8,18 +8,18 @@ use crate::{element::ElementType, error::Error};
 pub enum BusEvent {
     Eos {
         element_type: ElementType,
-        name: String,
+        name: Arc<str>,
     },
     Error {
         element_type: ElementType,
-        name: String,
+        name: Arc<str>,
         error: Error,
     },
     /// A `Queue` with `OverflowPolicy::DropNewest` dropped a buffer
     /// because it was full.
     Dropped {
         element_type: ElementType,
-        name: String,
+        name: Arc<str>,
     },
     /// Posted by [`crate::control::drain_control`] once
     /// [`crate::element::SourceElement::seek`] returns — `requested` is
@@ -31,7 +31,7 @@ pub enum BusEvent {
     /// assuming `requested` took effect verbatim.
     Seeked {
         element_type: ElementType,
-        name: String,
+        name: Arc<str>,
         requested: Duration,
         landed: Duration,
     },

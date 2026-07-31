@@ -15,7 +15,7 @@ use crate::{
 /// pipeline even when this sink ends up running on a `Queue` worker
 /// thread.
 pub struct FrameCounter {
-    name: String,
+    name: Arc<str>,
     count: Arc<AtomicUsize>,
 }
 
@@ -24,7 +24,7 @@ impl FrameCounter {
         let count = Arc::new(AtomicUsize::new(0));
         (
             Self {
-                name: name.into(),
+                name: name.into().into(),
                 count: count.clone(),
             },
             count,
@@ -33,8 +33,8 @@ impl FrameCounter {
 }
 
 impl Element for FrameCounter {
-    fn name(&self) -> &str {
-        &self.name
+    fn name(&self) -> Arc<str> {
+        self.name.clone()
     }
 
     fn element_type(&self) -> ElementType {

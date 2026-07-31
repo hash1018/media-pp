@@ -168,7 +168,7 @@ fn apply_seek<S: SourceElement>(source: &mut S, bus: &Bus, msg: ControlMsg) -> R
         let landed = source.seek(target)?;
         bus.post(BusEvent::Seeked {
             element_type: source.element_type(),
-            name: source.name().to_string(),
+            name: source.name(),
             requested: target,
             landed,
         });

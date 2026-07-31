@@ -7,7 +7,7 @@ use std::{
     process::{Child, Command, Stdio},
     ptr,
     sync::{
-        LazyLock, Mutex,
+        Arc, LazyLock, Mutex,
         atomic::{AtomicU32, Ordering},
     },
     time::{Duration, Instant},
@@ -204,7 +204,7 @@ pub enum RtspServerError {
 /// playback speed first (put a [`crate::elements::Pacer`] upstream) or
 /// viewers will receive the whole file far faster than realtime.
 pub struct RtspServer {
-    name: String,
+    name: Arc<str>,
     url: String,
     output: ffmpeg::format::context::Output,
     input_time_base: ffmpeg::Rational,
@@ -288,7 +288,7 @@ impl RtspServer {
         let output = Self::publish(&url, params, time_base, publish_transport)?;
 
         Ok(Self {
-            name: name.into(),
+            name: name.into().into(),
             url,
             output,
             input_time_base: time_base,
@@ -624,8 +624,8 @@ fn alloc_output(url: &str) -> Result<ffmpeg::format::context::Output> {
 }
 
 impl Element for RtspServer {
-    fn name(&self) -> &str {
-        &self.name
+    fn name(&self) -> Arc<str> {
+        self.name.clone()
     }
 
     fn element_type(&self) -> ElementType {

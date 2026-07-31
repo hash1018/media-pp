@@ -36,7 +36,7 @@ pub struct StreamInfo {
 /// separate "Tee" element here — it's just a matter of linking more than
 /// one of these pads.
 pub struct FileDemuxer {
-    name: String,
+    name: Arc<str>,
     input: ffmpeg::format::context::Input,
     pads: Vec<SrcPad>,
     /// One packet read ahead of `run`'s own loop, set only by `seek` —
@@ -72,7 +72,7 @@ impl FileDemuxer {
 
         Ok((
             Self {
-                name: name.into(),
+                name: name.into().into(),
                 input,
                 pads,
                 pending: None,
@@ -100,8 +100,8 @@ impl FileDemuxer {
 }
 
 impl Element for FileDemuxer {
-    fn name(&self) -> &str {
-        &self.name
+    fn name(&self) -> Arc<str> {
+        self.name.clone()
     }
 
     fn element_type(&self) -> ElementType {

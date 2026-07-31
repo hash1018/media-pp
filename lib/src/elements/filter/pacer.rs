@@ -25,7 +25,7 @@ use crate::{
 /// — video, audio, ...) so they all agree on the same t=0 instead of each
 /// anchoring to its own first frame.
 pub struct Pacer {
-    name: String,
+    name: Arc<str>,
     time_base: ffmpeg::Rational,
     clock: Arc<Clock>,
     /// This pacer's first timestamped frame's pts — set on first call.
@@ -42,7 +42,7 @@ pub struct Pacer {
 
 impl Pacer {
     pub fn new(name: impl Into<String>, time_base: ffmpeg::Rational, clock: Arc<Clock>) -> Self {
-        let name = name.into();
+        let name: Arc<str> = name.into().into();
         let pad = SrcPad::new(format!("{name}_src"));
         Self {
             name,
@@ -76,8 +76,8 @@ impl Pacer {
 }
 
 impl Element for Pacer {
-    fn name(&self) -> &str {
-        &self.name
+    fn name(&self) -> Arc<str> {
+        self.name.clone()
     }
 
     fn element_type(&self) -> ElementType {

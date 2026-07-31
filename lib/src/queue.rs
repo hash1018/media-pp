@@ -1,4 +1,7 @@
-use std::thread::{self, JoinHandle};
+use std::{
+    sync::Arc,
+    thread::{self, JoinHandle},
+};
 
 use crossbeam_channel::{Receiver, Sender, TrySendError, bounded, select};
 use thiserror::Error as ThisError;
@@ -64,7 +67,7 @@ pub enum OverflowPolicy {
 /// [`crate::pipeline::Pipeline::stop`] yourself if a particular error
 /// means the whole pipeline should end.
 pub struct Queue {
-    name: String,
+    name: Arc<str>,
     tx: Sender<MediaBuffer>,
     policy: OverflowPolicy,
     bus: Bus,
@@ -93,7 +96,11 @@ impl Queue {
         bus: Bus,
         policy: OverflowPolicy,
     ) -> Queue {
-        let name = name.into();
+        // Stored as `Arc<str>` (not `String`) so the `worker_name.clone()`
+        // below, and every subsequent `BusEvent` this posts, are a
+        // refcount bump instead of a fresh allocation — `Dropped` in
+        // particular can fire once per buffer under sustained overflow.
+        let name: Arc<str> = name.into().into();
         let (tx, rx) = bounded::<MediaBuffer>(capacity);
         let (control_tx, control_rx) = control::channel();
         let worker_name = name.clone();
@@ -116,8 +123,8 @@ impl Queue {
 }
 
 impl Element for Queue {
-    fn name(&self) -> &str {
-        &self.name
+    fn name(&self) -> Arc<str> {
+        self.name.clone()
     }
 
     fn element_type(&self) -> ElementType {
@@ -193,7 +200,7 @@ fn worker_loop(
     control_rx: ControlReceiver,
     mut downstream: Box<dyn Sink>,
     bus: Bus,
-    name: String,
+    name: Arc<str>,
 ) {
     loop {
         if let Some((msg, ack)) = control_rx.try_recv() {
@@ -323,8 +330,8 @@ mod tests {
     }
 
     impl Element for SlowCounter {
-        fn name(&self) -> &str {
-            "slow-counter"
+        fn name(&self) -> Arc<str> {
+            "slow-counter".into()
         }
 
         fn element_type(&self) -> ElementType {
@@ -452,8 +459,8 @@ mod tests {
     }
 
     impl Element for FailFirstThenCount {
-        fn name(&self) -> &str {
-            "fail-first"
+        fn name(&self) -> Arc<str> {
+            "fail-first".into()
         }
 
         fn element_type(&self) -> ElementType {

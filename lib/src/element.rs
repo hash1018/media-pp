@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use crate::{
     buffer::MediaBuffer,
@@ -9,7 +9,7 @@ use crate::{
 };
 
 /// Which kind of element posted a [`crate::bus::BusEvent`] — cheap to
-/// compare/match, unlike the accompanying `name: String` (an
+/// compare/match, unlike the accompanying `name: Arc<str>` (an
 /// instance-level identifier chosen by whoever constructed it, needed
 /// alongside this to tell apart e.g. two `Queue`s in the same pipeline;
 /// see [`Element::element_type`]).
@@ -36,7 +36,13 @@ pub enum ElementType {
 /// nothing about whether the node has an input, an output, both, or
 /// neither.
 pub trait Element: Send {
-    fn name(&self) -> &str;
+    /// Returns a cheap clone (refcount bump, not a deep copy) of this
+    /// element's name — [`crate::bus::BusEvent`] stores names as
+    /// `Arc<str>` for exactly this reason: a hot path like
+    /// [`crate::queue::Queue`] posting `BusEvent::Dropped` once per
+    /// overflowed buffer shouldn't pay for a fresh heap allocation every
+    /// time it wants to report which element it is.
+    fn name(&self) -> Arc<str>;
 
     /// See [`ElementType`].
     fn element_type(&self) -> ElementType;

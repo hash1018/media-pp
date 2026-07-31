@@ -57,7 +57,7 @@ pub enum Dx12RendererError {
 ///     draws straight from the decoder's own texture via
 ///     `submit_nv12_texture`.
 pub struct Dx12Renderer {
-    name: String,
+    name: Arc<str>,
     inner: WindowRenderer,
 }
 
@@ -76,7 +76,7 @@ impl Dx12Renderer {
         let inner =
             WindowRenderer::new(engine, hwnd, width, height).map_err(Dx12RendererError::Create)?;
         Ok(Self {
-            name: name.into(),
+            name: name.into().into(),
             inner,
         })
     }
@@ -142,8 +142,8 @@ impl Dx12Renderer {
 }
 
 impl Element for Dx12Renderer {
-    fn name(&self) -> &str {
-        &self.name
+    fn name(&self) -> Arc<str> {
+        self.name.clone()
     }
 
     fn element_type(&self) -> ElementType {

@@ -70,7 +70,7 @@ struct EosReporter {
 }
 
 impl Element for EosReporter {
-    fn name(&self) -> &str {
+    fn name(&self) -> Arc<str> {
         self.inner.name()
     }
 
@@ -86,7 +86,7 @@ impl Sink for EosReporter {
         if is_eos {
             self.bus.post(BusEvent::Eos {
                 element_type: self.inner.element_type(),
-                name: self.inner.name().to_string(),
+                name: self.inner.name(),
             });
         }
         Ok(())
@@ -272,7 +272,7 @@ impl Pipeline {
         thread::Builder::new()
             .name("pipeline:source".into())
             .spawn(move || {
-                let source_name = source.name().to_string();
+                let source_name = source.name();
                 let source_type = source.element_type();
                 // `source.run()` itself already reports non-fatal,
                 // per-buffer failures to `bus` as it goes (see
@@ -524,8 +524,8 @@ mod tests {
 
     struct NoOpSink;
     impl Element for NoOpSink {
-        fn name(&self) -> &str {
-            "noop"
+        fn name(&self) -> Arc<str> {
+            "noop".into()
         }
 
         fn element_type(&self) -> ElementType {
@@ -545,8 +545,8 @@ mod tests {
         count: Arc<AtomicUsize>,
     }
     impl Element for CountingSink {
-        fn name(&self) -> &str {
-            "counting-sink"
+        fn name(&self) -> Arc<str> {
+            "counting-sink".into()
         }
 
         fn element_type(&self) -> ElementType {

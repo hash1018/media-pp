@@ -76,8 +76,8 @@ impl TeeHandle {
 }
 
 impl Element for Tee {
-    fn name(&self) -> &str {
-        &self.name
+    fn name(&self) -> Arc<str> {
+        self.name.clone()
     }
 
     fn element_type(&self) -> ElementType {

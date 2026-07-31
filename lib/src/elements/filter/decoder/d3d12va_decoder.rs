@@ -73,7 +73,7 @@ pub enum D3d12vaDecoderError {
 /// it checks `frame.format()` and, for `Pixel::D3D12`, takes the
 /// zero-copy path via [`d3d12va_texture`] instead of reading pixel bytes.
 pub struct D3d12vaDecoder {
-    name: String,
+    name: Arc<str>,
     decoder: ffmpeg::decoder::Video,
     hw_device_ctx: *mut ffi::AVBufferRef,
     pad: SrcPad,
@@ -100,7 +100,7 @@ impl D3d12vaDecoder {
         params: ffmpeg::codec::Parameters,
         device: &ID3D12Device,
     ) -> Result<Self, D3d12vaDecoderError> {
-        let name = name.into();
+        let name: Arc<str> = name.into().into();
 
         let hw_device_ctx = unsafe { create_hw_device_ctx(device) }?;
 
@@ -152,8 +152,8 @@ impl D3d12vaDecoder {
 }
 
 impl Element for D3d12vaDecoder {
-    fn name(&self) -> &str {
-        &self.name
+    fn name(&self) -> Arc<str> {
+        self.name.clone()
     }
 
     fn element_type(&self) -> ElementType {
