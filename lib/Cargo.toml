@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 ffmpeg-next = "8"
 crossbeam-channel = "0.5"
+crossbeam-queue = "0.3"
 thiserror = "2"
 renderer-engine = { git = "https://github.com/hash1018/RendererEngine", package = "renderer-engine", optional = true }
 windows = { version = "0.62", optional = true, features = [

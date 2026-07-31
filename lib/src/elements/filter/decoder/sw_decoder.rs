@@ -8,6 +8,7 @@ use crate::{
     control::ControlMsg,
     element::{Element, ElementType, Sink, Source},
     pad::SrcPad,
+    pool::UnboundObjectPool,
 };
 
 /// Errors specific to `SwDecoder`. Converts into the crate-wide `Error`
@@ -38,6 +39,15 @@ pub struct SwDecoder {
     name: Arc<str>,
     kind: Kind,
     pad: SrcPad,
+    /// Reused across every decoded video frame instead of allocating a
+    /// fresh one each time — see [`UnboundObjectPool`]'s docs. Starts
+    /// empty: decoded format/dimensions aren't known until the first
+    /// frame actually comes out of the decoder, so `init` just makes an
+    /// empty frame (`avcodec_receive_frame` allocates it on first use,
+    /// same as before this existed) and the pool fills organically as
+    /// frames get returned. Unused (harmlessly) if this turns out to be
+    /// an audio decoder — `MediaBuffer::Audio` isn't pooled.
+    pool: UnboundObjectPool<ffmpeg::frame::Video>,
 }
 
 impl SwDecoder {
@@ -57,7 +67,13 @@ impl SwDecoder {
         };
 
         let pad = SrcPad::new(format!("{name}_src"));
-        Ok(Self { name, kind, pad })
+        let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
+        Ok(Self {
+            name,
+            kind,
+            pad,
+            pool,
+        })
     }
 }
 
@@ -85,7 +101,7 @@ impl Sink for SwDecoder {
                     decoder
                         .send_packet(&*packet)
                         .map_err(SwDecoderError::from)?;
-                    drain_video(decoder, &mut self.pad)
+                    drain_video(decoder, &mut self.pad, &self.pool)
                 }
                 Kind::Audio(decoder) => {
                     decoder
@@ -98,7 +114,7 @@ impl Sink for SwDecoder {
                 match &mut self.kind {
                     Kind::Video(decoder) => {
                         let _ = decoder.send_eof();
-                        drain_video(decoder, &mut self.pad)?;
+                        drain_video(decoder, &mut self.pad, &self.pool)?;
                     }
                     Kind::Audio(decoder) => {
                         let _ = decoder.send_eof();
@@ -134,11 +150,15 @@ impl Sink for SwDecoder {
     }
 }
 
-fn drain_video(decoder: &mut ffmpeg::decoder::Video, pad: &mut SrcPad) -> crate::error::Result<()> {
-    let mut frame = ffmpeg::frame::Video::empty();
+fn drain_video(
+    decoder: &mut ffmpeg::decoder::Video,
+    pad: &mut SrcPad,
+    pool: &UnboundObjectPool<ffmpeg::frame::Video>,
+) -> crate::error::Result<()> {
+    let mut frame = pool.get();
     while decoder.receive_frame(&mut frame).is_ok() {
         pad.push(MediaBuffer::Video(Arc::new(frame)))?;
-        frame = ffmpeg::frame::Video::empty();
+        frame = pool.get();
     }
     Ok(())
 }

@@ -1,13 +1,11 @@
-pub mod buffer;
-pub mod bus;
-pub mod clock;
-pub mod control;
-pub mod element;
+mod core;
 pub mod elements;
 pub mod error;
-pub mod pad;
-pub mod pipeline;
-pub mod queue;
+
+// Flat re-export: `core/` only exists to group these files on disk (see
+// its module doc) — every external and internal caller keeps using
+// `crate::pipeline`/`media_pp::pipeline` etc., never `crate::core::...`.
+pub use core::{buffer, bus, clock, control, element, pad, pipeline, pool, queue};
 
 pub use error::{Error, Result};
 

@@ -4,7 +4,7 @@ pub mod source;
 
 #[cfg(feature = "dx12-renderer")]
 pub use filter::{D3d12vaDecoder, D3d12vaDecoderError};
-pub use filter::{Pacer, SwDecoder, SwDecoderError, Tee, TeeHandle};
+pub use filter::{Pacer, Scaler, ScalerError, SwDecoder, SwDecoderError, Tee, TeeHandle};
 #[cfg(feature = "dx12-renderer")]
 pub use sink::{Dx12Renderer, Dx12RendererError};
 pub use sink::{FrameCounter, PacketCounter};

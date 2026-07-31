@@ -19,6 +19,7 @@ pub enum ElementType {
     SwDecoder,
     D3d12vaDecoder,
     Pacer,
+    Scaler,
     Tee,
     Queue,
     FrameCounter,

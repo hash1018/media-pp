@@ -17,6 +17,7 @@ use crate::{
     element::{Element, ElementType, Sink},
     elements::filter::decoder::d3d12va_decoder::d3d12va_texture,
     error::Result,
+    pool::UnboundObjectPoolRef,
 };
 
 /// Errors specific to `Dx12Renderer`. Converts into the crate-wide `Error`
@@ -107,7 +108,10 @@ impl Dx12Renderer {
         Ok(())
     }
 
-    fn submit_d3d12_frame(&self, frame: Arc<ffmpeg::frame::Video>) -> Result<()> {
+    fn submit_d3d12_frame(
+        &self,
+        frame: Arc<UnboundObjectPoolRef<ffmpeg::frame::Video>>,
+    ) -> Result<()> {
         let (texture_raw, fence_raw, fence_value) =
             d3d12va_texture(&frame).ok_or(Dx12RendererError::InvalidD3d12Frame)?;
         let width = frame.width();

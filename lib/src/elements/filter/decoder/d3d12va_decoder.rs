@@ -9,6 +9,7 @@ use crate::{
     control::ControlMsg,
     element::{Element, ElementType, Sink, Source},
     pad::SrcPad,
+    pool::UnboundObjectPool,
 };
 
 /// Mirrors of the D3D12VA-specific structs from FFmpeg's
@@ -66,8 +67,8 @@ pub enum D3d12vaDecoderError {
 /// via D3D12VA hardware acceleration, instead of [`crate::elements::SwDecoder`]'s
 /// plain libavcodec software path. A `Filter`, same shape as `SwDecoder`.
 ///
-/// Frames this produces are still plain `MediaBuffer::Video(Arc<ffmpeg::frame::Video>)`
-/// — nothing downstream needs to change to receive them. `Pacer`/`Tee`/
+/// Frames this produces are still plain `MediaBuffer::Video` — nothing
+/// downstream needs to change to receive them. `Pacer`/`Tee`/
 /// `FrameCounter` only ever touch `.pts()` or match the enum variant, so
 /// they work unmodified. Only [`crate::elements::Dx12Renderer`] cares:
 /// it checks `frame.format()` and, for `Pixel::D3D12`, takes the
@@ -77,6 +78,15 @@ pub struct D3d12vaDecoder {
     decoder: ffmpeg::decoder::Video,
     hw_device_ctx: *mut ffi::AVBufferRef,
     pad: SrcPad,
+    /// Reused across every decoded frame — see [`UnboundObjectPool`]'s
+    /// docs. The actual GPU texture behind a `Pixel::D3D12` frame is
+    /// already pooled/recycled by ffmpeg's own hw frames context
+    /// regardless of what this crate does, so the benefit here is
+    /// smaller than for [`crate::elements::SwDecoder`]/
+    /// [`crate::elements::Scaler`] (just the small CPU-side `AVFrame`
+    /// wrapper, not the texture) — but `MediaBuffer::Video` requires
+    /// this either way, so there's no reason not to.
+    pool: UnboundObjectPool<ffmpeg::frame::Video>,
 }
 
 // SAFETY: `hw_device_ctx` is a heap-allocated FFmpeg buffer with no
@@ -130,22 +140,24 @@ impl D3d12vaDecoder {
         };
 
         let pad = SrcPad::new(format!("{name}_src"));
+        let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
         Ok(Self {
             name,
             decoder,
             hw_device_ctx,
             pad,
+            pool,
         })
     }
 
     fn drain(&mut self) -> crate::error::Result<()> {
-        let mut frame = ffmpeg::frame::Video::empty();
+        let mut frame = self.pool.get();
         while self.decoder.receive_frame(&mut frame).is_ok() {
             if frame.format() != ffmpeg::format::Pixel::D3D12 {
                 return Err(D3d12vaDecoderError::HwAccelUnavailable.into());
             }
             self.pad.push(MediaBuffer::Video(Arc::new(frame)))?;
-            frame = ffmpeg::frame::Video::empty();
+            frame = self.pool.get();
         }
         Ok(())
     }

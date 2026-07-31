@@ -5,7 +5,7 @@ use crate::elements::RtspServerError;
 #[cfg(feature = "dx12-renderer")]
 use crate::elements::{D3d12vaDecoderError, Dx12RendererError};
 use crate::{
-    elements::{FileDemuxError, SwDecoderError},
+    elements::{FileDemuxError, ScalerError, SwDecoderError},
     queue::QueueError,
 };
 
@@ -25,6 +25,9 @@ pub enum Error {
 
     #[error(transparent)]
     SwDecoderError(#[from] SwDecoderError),
+
+    #[error(transparent)]
+    ScalerError(#[from] ScalerError),
 
     #[error(transparent)]
     QueueError(#[from] QueueError),
