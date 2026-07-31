@@ -48,24 +48,44 @@ Everything is built from a handful of primitives in `lib/src/`:
 
 ## Elements (`lib/src/elements/`)
 
-| Element | Kind | What it does |
-|---|---|---|
-| `FileDemuxer` | Source | Demuxes a file; one src pad per container stream |
-| `SwDecoder` | Filter | Decodes `Packet`s into `Video`/`Audio` frames (software, plain libavcodec) |
-| `Pacer` | Filter | Sleeps in `consume` to release frames at real playback time (PTS + shared `Clock`) — must run on its own thread (behind a `Queue`) |
-| `Tee` | Filter-shaped, but no `Source` | Fans one input out to a *dynamic* set of sinks via a cloneable `TeeHandle` (`add_sink`/`remove_sink`/`sink_count`), addable/removable from any thread while the pipeline runs |
-| `FrameCounter` / `PacketCounter` | Sink | Count decoded frames / raw packets, expose the count via `Arc<AtomicUsize>` |
-| `D3d12vaDecoder` | Filter (feature `dx12-renderer`) | Decodes `Packet`s into `Video` frames via D3D12VA hardware acceleration — GPU-resident, no software decode |
-| `Dx12Renderer` | Sink (feature `dx12-renderer`) | Submits frames to a native window via [renderer-engine](https://github.com/hash1018/RendererEngine)'s DX12 `WindowRenderer`. Dispatches on `frame.format()`: `YUV420P` copies pixels up (CPU decode path); `D3D12` (from `D3d12vaDecoder`) draws zero-copy straight from the decoder's own texture |
-| `RtspServer` | Sink (feature `rtsp-server`) | Spawns a vendored [MediaMTX](https://github.com/bluenviron/mediamtx) as a child process and remuxes incoming `Packet`s into it (RTSP `ANNOUNCE`/`RECORD`) — a self-contained RTSP server from the outside, no separate process to start first. Packets only, no encoding: link it straight after `FileDemuxer`, not a decoder |
-| `Scaler` | Filter | Converts pixel format and resizes `Video` frames in one pass (`libswscale`) — e.g. a decoder's YUV output to the fixed RGB size an inference model expects. Source format/size is learned from the first frame it sees, not passed up front |
-| `AppSink` | Sink | Hands every buffer to a plain closure — GStreamer's `appsink` equivalent, for consuming a pipeline's output without writing a dedicated `Element`/`Sink` impl |
+One-line index only — each element's own doc comment (`cargo doc --open`)
+has the full rationale (why it's built the way it is, what to watch out
+for); this table isn't meant to duplicate that.
+
+### Sources
+
+| Element | What it does |
+|---|---|
+| `FileDemuxer` | Demuxes a file; one src pad per container stream |
+
+### Filters
+
+| Element | What it does |
+|---|---|
+| `SwDecoder` | Decodes `Packet`s into `Video`/`Audio` frames (software) |
+| `D3d12vaDecoder` (`dx12-renderer`) | Decodes into GPU-resident `Video` frames via D3D12VA hardware acceleration |
+| `Pacer` | Releases buffers at real playback speed (PTS + a shared `Clock`) |
+| `Scaler` | Converts pixel format and resizes `Video` frames in one pass (`libswscale`) |
+| `Tee`¹ | Fans one input out to a dynamic set of sinks, addable/removable while the pipeline runs |
+
+¹ Doesn't actually implement `Source` — its pads live behind a lock instead of a plain `&mut [SrcPad]`, so a handle on another thread can add/remove one mid-`consume`. See its own doc comment.
+
+### Sinks
+
+| Element | What it does |
+|---|---|
+| `FrameCounter` / `PacketCounter` | Count decoded frames / raw packets, expose the count via `Arc<AtomicUsize>` |
+| `Dx12Renderer` (`dx12-renderer`) | Submits frames to a native window via DX12 — zero-copy for `D3d12vaDecoder`'s frames |
+| `RtspServer` (`rtsp-server`) | Spawns a vendored MediaMTX and remuxes packets into it as a live RTSP stream |
+| `AppSink` | Hands buffers (and, optionally, control messages) to plain closures — GStreamer's `appsink` equivalent |
 
 ## Examples (`examples/`)
 
 Each is its own crate so per-example dependencies (e.g. `winit` for
 `sw_decode_render`) don't leak into the others. All default to
 `test-video/h265.mp4` when run with no path argument.
+
+### Core concepts
 
 | Crate | Pipeline | Demonstrates |
 |---|---|---|
@@ -74,12 +94,27 @@ Each is its own crate so per-example dependencies (e.g. `winit` for
 | `fanout` | Demux → {Queue → PacketCounter} × 2 | Multi-pad fan-out at the source (video + audio to separate branches) |
 | `pace` | Demux → SwDecoder → Queue → Pacer → FrameCounter | `Pacer` releasing frames at real playback speed — compare its `wall time` output against `decode`'s near-instant run |
 | `tee` | Demux → Tee → {SwDecoder → FrameCounter, PacketCounter} | `Tee` fanning the same packets out to two independent consumers |
-| `sw_decode_render` | Demux → SwDecoder → Queue → Pacer → Dx12Renderer | End-to-end playback in a native window, CPU decode + CPU-upload render (Windows + DX12 only) |
-| `hw_decode_render` | Demux → D3d12vaDecoder → Queue → Pacer → Dx12Renderer | Same as `sw_decode_render`, but GPU decode (D3D12VA) feeding the renderer zero-copy — no decoded pixel ever touches system memory (Windows + DX12 only) |
-| `rtsp_serve` | Demux → Queue → Pacer → RtspServer | Serves a file's video as a live RTSP stream (`rtsp-server` feature) — connect with `ffplay rtsp://127.0.0.1:8554/stream` while it runs |
-| `rtsp_serve_seek` | Demux → Queue → Pacer → RtspServer | Same as `rtsp_serve`, plus a terminal prompt that calls `Pipeline::seek` — jump around a live-served RTSP stream while it plays |
+| `app_sink` | Demux → SwDecoder → AppSink | Same chain as `decode`, but the terminal sink is a plain closure instead of a bespoke `FrameCounter` |
+
+### Playback (Windows + DX12 only)
+
+| Crate | Pipeline | Demonstrates |
+|---|---|---|
+| `sw_decode_render` | Demux → SwDecoder → Queue → Pacer → Dx12Renderer | End-to-end playback in a native window, CPU decode + CPU-upload render |
+| `hw_decode_render` | Demux → D3d12vaDecoder → Queue → Pacer → Dx12Renderer | Same, but GPU decode feeding the renderer zero-copy — no decoded pixel ever touches system memory |
+
+### RTSP streaming (`rtsp-server` feature)
+
+| Crate | Pipeline | Demonstrates |
+|---|---|---|
+| `rtsp_serve` | Demux → Queue → Pacer → RtspServer | Serves a file's video as a live RTSP stream — connect with `ffplay rtsp://127.0.0.1:8554/stream` while it runs |
+| `rtsp_serve_seek` | Demux → Queue → Pacer → RtspServer | Same, plus a terminal prompt that calls `Pipeline::seek` — jump around the live stream while it plays |
+
+### Inference-pipeline building blocks
+
+| Crate | Pipeline | Demonstrates |
+|---|---|---|
 | `scale` | Demux → SwDecoder → Queue → Scaler → (verify) | `Scaler` converting decoded frames to a fixed RGB24 640x640 — prints the first scaled frame's actual format/size to prove the conversion really happened |
-| `app_sink` | Demux → SwDecoder → AppSink | Same chain as `decode`, but the terminal sink is a plain closure instead of a bespoke `FrameCounter` — proves `AppSink` needs no dedicated type at all |
 
 ```sh
 cargo run -p decode -- path/to/video.mp4   # or omit the path to use test-video/h265.mp4
