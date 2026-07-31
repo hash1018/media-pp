@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use crossbeam_channel::{Receiver, Sender, unbounded};
 
 use crate::{element::ElementType, error::Error};
@@ -18,6 +20,20 @@ pub enum BusEvent {
     Dropped {
         element_type: ElementType,
         name: String,
+    },
+    /// Posted by [`crate::control::drain_control`] once
+    /// [`crate::element::SourceElement::seek`] returns — `requested` is
+    /// whatever [`crate::pipeline::Pipeline::seek`] was called with;
+    /// `landed` is where the source actually ended up, which the source
+    /// itself has to resolve (e.g. `FileDemuxer` can only reposition to a
+    /// keyframe at or before `requested`, never exactly on top of an
+    /// arbitrary timestamp — see its `seek` impl). Watch this instead of
+    /// assuming `requested` took effect verbatim.
+    Seeked {
+        element_type: ElementType,
+        name: String,
+        requested: Duration,
+        landed: Duration,
     },
 }
 
@@ -60,12 +76,13 @@ impl BusReceiver {
 
     /// Drains every event so far, printing each in a common default
     /// format (`[name] eos`, `[name] error: ...`, `[name] dropped a
-    /// buffer (queue full)`). Convenience for examples and smoke tests;
-    /// anything that needs to act on specific events — e.g. deciding
-    /// whether an `Error` warrants a [`crate::pipeline::Pipeline::stop`]
-    /// — should match on `iter()` directly instead, where `error`'s
-    /// concrete variant (see [`crate::error::Error`]) is still available,
-    /// not just its `Display` text.
+    /// buffer (queue full)`, `[name] seeked: requested ... landed ...`).
+    /// Convenience for examples and smoke tests; anything that needs to
+    /// act on specific events — e.g. deciding whether an `Error` warrants
+    /// a [`crate::pipeline::Pipeline::stop`] — should match on `iter()`
+    /// directly instead, where `error`'s concrete variant (see
+    /// [`crate::error::Error`]) is still available, not just its
+    /// `Display` text.
     pub fn log_events(&self) {
         for event in self.iter() {
             match event {
@@ -74,6 +91,12 @@ impl BusReceiver {
                 BusEvent::Dropped { name, .. } => {
                     eprintln!("[{name}] dropped a buffer (queue full)")
                 }
+                BusEvent::Seeked {
+                    name,
+                    requested,
+                    landed,
+                    ..
+                } => println!("[{name}] seeked: requested {requested:.2?}, landed {landed:.2?}"),
             }
         }
     }

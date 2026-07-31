@@ -75,6 +75,7 @@ Each is its own crate so per-example dependencies (e.g. `winit` for
 | `sw_decode_render` | Demux → SwDecoder → Queue → Pacer → Dx12Renderer | End-to-end playback in a native window, CPU decode + CPU-upload render (Windows + DX12 only) |
 | `hw_decode_render` | Demux → D3d12vaDecoder → Queue → Pacer → Dx12Renderer | Same as `sw_decode_render`, but GPU decode (D3D12VA) feeding the renderer zero-copy — no decoded pixel ever touches system memory (Windows + DX12 only) |
 | `rtsp_serve` | Demux → Queue → Pacer → RtspServer | Serves a file's video as a live RTSP stream (`rtsp-server` feature) — connect with `ffplay rtsp://127.0.0.1:8554/stream` while it runs |
+| `rtsp_serve_seek` | Demux → Queue → Pacer → RtspServer | Same as `rtsp_serve`, plus a terminal prompt that calls `Pipeline::seek` — jump around a live-served RTSP stream while it plays |
 
 ```sh
 cargo run -p decode -- path/to/video.mp4   # or omit the path to use test-video/h265.mp4

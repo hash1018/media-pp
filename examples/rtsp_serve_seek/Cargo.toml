@@ -1,0 +1,9 @@
+[package]
+name = "rtsp_serve_seek"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+media-pp = { path = "../../lib", features = ["rtsp-server"] }
+ffmpeg-next = "8"

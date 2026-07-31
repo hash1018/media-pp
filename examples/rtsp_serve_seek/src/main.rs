@@ -1,3 +1,9 @@
+use std::{
+    io::{self, BufRead},
+    thread,
+    time::Duration,
+};
+
 use ffmpeg_next::media;
 use media_pp::{
     Error,
@@ -7,19 +13,16 @@ use media_pp::{
     pipeline::{ChainBuilder, Pipeline},
 };
 
-/// Demux -> Queue -> Pacer -> RtspServer: remuxes a file's video packets
-/// (no re-encoding) and serves them, paced to real playback speed, as a
-/// live RTSP stream. `RtspServer` spawns `mediamtx` itself (vendored by the
-/// `rtsp-server` feature, see `lib/build.rs`) — nothing else needs to be
-/// started first.
+/// Same Demux -> Queue -> Pacer -> RtspServer chain as `rtsp_serve`, plus a
+/// terminal prompt (same as `seek_render`'s) that reads timestamps and calls
+/// `Pipeline::seek` with them while the stream is live — lets a viewer
+/// jump around a live-served RTSP stream instead of only watching it play
+/// straight through.
 ///
-/// Uses `PortPolicy::Any` with a fixed range rather than assuming 8554 is
-/// free, so more than one of these can run at once (each picks its own
-/// free port within the range, tracked across instances in this process).
-/// Watch the printed URL for the port it actually chose.
-///
-///     cargo run -p rtsp_serve -- path/to/video.mp4 rtsp://127.0.0.1/stream
+///     cargo run -p rtsp_serve_seek -- path/to/video.mp4 rtsp://127.0.0.1/stream
 ///     ffplay rtsp://127.0.0.1:8554/stream                    # in another terminal
+///     (then in the first terminal: type `30` or `1:15` + Enter to jump
+///      there, or `q` + Enter to stop early)
 fn main() -> media_pp::Result<()> {
     media_pp::init()?;
 
@@ -70,9 +73,18 @@ fn main() -> media_pp::Result<()> {
 
     println!("ready — connect with `ffplay {actual_url}`");
     // `run()` starts publishing on a background thread and returns right
-    // away — any failure shows up as a `BusEvent::Error` here instead of
-    // through a returned `Result`.
+    // away — that's what makes this terminal prompt possible on the same
+    // thread that would otherwise just be blocked waiting for it.
     pipeline.run();
+
+    // Reads seek requests for as long as the process lives, on its own
+    // thread — a blocked stdin read can't also notice natural playback
+    // completion, so it doesn't try to; the whole process (this thread
+    // included) exits once the bus loop below returns.
+    {
+        let pipeline = pipeline.clone();
+        thread::spawn(move || read_seek_commands(&pipeline));
+    }
 
     // Errors no longer end the pipeline on their own (see `BusEvent`'s
     // docs) — watch for one here and `stop()`, or this would just keep
@@ -96,4 +108,41 @@ fn main() -> media_pp::Result<()> {
         }
     }
     Ok(())
+}
+
+fn read_seek_commands(pipeline: &Pipeline) {
+    println!("type a time in seconds (e.g. `30`) or mm:ss (e.g. `1:15`) + Enter to seek there");
+    println!("(or `q` + Enter to stop early)");
+    for line in io::stdin().lock().lines() {
+        let Ok(line) = line else { break };
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if line.eq_ignore_ascii_case("q") {
+            pipeline.stop();
+            break;
+        }
+        match parse_timestamp(line) {
+            Some(target) => {
+                println!("seeking to {target:.2?}...");
+                pipeline.seek(target);
+            }
+            None => eprintln!("couldn't parse {line:?} — use seconds (`30`) or mm:ss (`1:15`)"),
+        }
+    }
+}
+
+/// `"90"` (plain seconds) or `"1:30"` (mm:ss) -> `Duration`. Fractional
+/// seconds work in both forms (`"1.5"`, `"1:01.5"`).
+fn parse_timestamp(s: &str) -> Option<Duration> {
+    let secs = match s.split_once(':') {
+        Some((min, sec)) => min.parse::<f64>().ok()? * 60.0 + sec.parse::<f64>().ok()?,
+        None => s.parse::<f64>().ok()?,
+    };
+    if secs.is_finite() && secs >= 0.0 {
+        Some(Duration::from_secs_f64(secs))
+    } else {
+        None
+    }
 }

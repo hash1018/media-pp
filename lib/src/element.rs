@@ -109,7 +109,16 @@ pub trait SourceElement: Source {
     /// [`ControlMsg::Seek`], *before* that message is forwarded to the
     /// source's own pads — so whatever's read next comes from the new
     /// position by the time downstream elements are told to flush for it.
-    fn seek(&mut self, target: Duration) -> Result<()>;
+    ///
+    /// Returns where this actually landed, which is allowed to differ
+    /// from `target` — a container seek can only ever reposition to a
+    /// keyframe at or before it (landing mid-GOP would leave downstream
+    /// decoders/muxers with no reference frame to start from), so
+    /// `target` is a request, not a guarantee. `drain_control` reports
+    /// the gap between the two via [`crate::bus::BusEvent::Seeked`];
+    /// callers that need to know where playback actually resumed should
+    /// watch that instead of assuming `target` took effect verbatim.
+    fn seek(&mut self, target: Duration) -> Result<Duration>;
 }
 
 /// An element with both an input and an output — decoder, encoder,

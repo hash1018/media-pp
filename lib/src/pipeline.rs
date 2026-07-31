@@ -355,7 +355,10 @@ mod tests {
     use std::{sync::atomic::AtomicUsize, thread, time::Duration};
 
     use super::*;
-    use crate::{element::Source, elements::FileDemuxer};
+    use crate::{
+        element::Source,
+        elements::{FileDemuxer, Pacer},
+    };
 
     /// Real video file, one directory up from this crate — same one every
     /// example defaults to.
@@ -416,15 +419,25 @@ mod tests {
             .find(|s| s.kind == ffmpeg_next::media::Type::Video)
             .expect("test video has a video stream");
         let index = video.index;
+        let time_base = source.stream_time_base(index).expect("stream disappeared");
 
         let count = Arc::new(AtomicUsize::new(0));
         let sink = CountingSink {
             count: count.clone(),
         };
 
-        let pipeline = Pipeline::new(source, |source, bus, _clock| {
+        // A `Pacer` here isn't incidental: without it, this whole 10s/
+        // 300-packet file races through in well under the 50ms sleep
+        // below (no decode, no throttling), so `seek()` would land on an
+        // already-finished pipeline and silently no-op — exactly the kind
+        // of thing a weak `count > 0` assertion wouldn't have caught (see
+        // `seek_reports_where_it_actually_landed_when_target_is_not_a_keyframe`
+        // for how this was found).
+        let pipeline = Pipeline::new(source, |source, bus, clock| {
+            let pacer = Pacer::new("pacer", time_base, clock.clone());
             let branch = ChainBuilder::new(bus.clone())
                 .queue("q", 4)
+                .pipe(pacer)
                 .build(Box::new(sink));
             source.src_pads()[index].link(branch);
         });
@@ -444,6 +457,68 @@ mod tests {
         assert!(
             count.load(Ordering::SeqCst) > 0,
             "expected at least one packet to arrive after the seek"
+        );
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                BusEvent::Seeked { requested, .. } if *requested == Duration::from_secs(1)
+            )),
+            "expected a Seeked event reporting the request; got {events:?}"
+        );
+    }
+
+    /// Regression test for the bug found manually testing `rtsp_serve_seek`:
+    /// a container seek can only land on a keyframe at or before `target`
+    /// (see `FileDemuxer::seek`'s docs) — `test-video/h265.mp4` has
+    /// keyframes only at 0s and ~8.33s, so any `target` between them has
+    /// to land back at 0s, nowhere near what was requested. Without
+    /// `BusEvent::Seeked` reporting that gap, this looked indistinguishable
+    /// from `seek` silently doing nothing.
+    #[test]
+    fn seek_reports_where_it_actually_landed_when_target_is_not_a_keyframe() {
+        let (source, streams) = FileDemuxer::open("demux", test_video()).expect("open test video");
+        let video = streams
+            .iter()
+            .find(|s| s.kind == ffmpeg_next::media::Type::Video)
+            .expect("test video has a video stream");
+        let index = video.index;
+        let time_base = source.stream_time_base(index).expect("stream disappeared");
+
+        // Paced for the same reason as `seek_repositions_and_playback_continues`
+        // — otherwise the file finishes before `seek()` is even called.
+        let pipeline = Pipeline::new(source, |source, bus, clock| {
+            let pacer = Pacer::new("pacer", time_base, clock.clone());
+            let branch = ChainBuilder::new(bus.clone())
+                .queue("q", 4)
+                .pipe(pacer)
+                .build(Box::new(NoOpSink));
+            source.src_pads()[index].link(branch);
+        });
+
+        pipeline.run();
+        thread::sleep(Duration::from_millis(50));
+        // 3s falls inside the file's first (only) GOP before the 8.33s
+        // keyframe — landing anywhere near 3s would mean this stream
+        // unexpectedly grew more keyframes than it's known to have.
+        pipeline.seek(Duration::from_secs(3));
+        thread::sleep(Duration::from_millis(100));
+        pipeline.stop();
+
+        let events: Vec<_> = pipeline.bus().iter().collect();
+        let seeked = events
+            .iter()
+            .find_map(|e| match e {
+                BusEvent::Seeked {
+                    requested, landed, ..
+                } => Some((*requested, *landed)),
+                _ => None,
+            })
+            .expect("expected a Seeked event");
+        assert_eq!(seeked.0, Duration::from_secs(3));
+        assert!(
+            seeked.1 < Duration::from_secs(1),
+            "expected landed to fall back to the 0s keyframe, got {:?}",
+            seeked.1
         );
     }
 

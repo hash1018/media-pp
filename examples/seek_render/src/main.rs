@@ -186,6 +186,12 @@ fn play(path: &str, hwnd: isize, width: u32, height: u32) -> media_pp::Result<()
             BusEvent::Dropped { name, .. } => {
                 eprintln!("[{name}] dropped a buffer (queue full)")
             }
+            BusEvent::Seeked {
+                name,
+                requested,
+                landed,
+                ..
+            } => println!("[{name}] seeked: requested {requested:.2?}, landed {landed:.2?}"),
         }
         if matches!(event, BusEvent::Eos { .. } | BusEvent::Error { .. }) {
             pipeline.stop();

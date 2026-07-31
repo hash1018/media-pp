@@ -210,12 +210,21 @@ pub struct RtspServer {
     input_time_base: ffmpeg::Rational,
     mediamtx: Child,
     ports: Vec<u16>,
-    /// Last pts actually written to `output` (in *output* time_base
+    /// Last dts actually written to `output` (in *output* time_base
     /// units) — what `consume` re-anchors `pts_offset` against right
-    /// after a `Seek`, so the stream this element writes keeps
-    /// increasing smoothly instead of jumping to wherever the seek
-    /// landed. `mediamtx`/most RTSP clients assume monotonically
-    /// increasing timestamps; a raw post-seek pts would violate that.
+    /// after a `Seek`. Anchored on dts, not pts: the muxer rejects a
+    /// non-monotonic dts outright (`write_interleaved` errors), while
+    /// pts is allowed to reorder (B-frames) and has no such hard
+    /// requirement. Matching *pts* continuity across the seam instead
+    /// doesn't guarantee dts stays increasing — a B-frame's own pts
+    /// trails its dts, so if the last packet written before the seek
+    /// happened to be one, the pts-matched offset undershoots dts by
+    /// however far behind it was. Same `pts_offset` still applies to
+    /// both pts and dts (see that field), so each packet's own pts/dts
+    /// gap is preserved regardless of which one the anchor is based on.
+    last_output_dts: Option<i64>,
+    /// Same role as `last_output_dts`, for packets where `dts()` is
+    /// `None` (anchor falls back to this — see `consume`).
     last_output_pts: Option<i64>,
     /// Added to every packet's (rescaled) pts/dts before writing.
     /// Constant between seeks — recomputed only when `pending_seek` is
@@ -285,6 +294,7 @@ impl RtspServer {
             input_time_base: time_base,
             mediamtx: mediamtx_guard.disarm(),
             ports: port_guard.disarm(),
+            last_output_dts: None,
             last_output_pts: None,
             pts_offset: 0,
             pending_seek: false,
@@ -640,9 +650,16 @@ impl Sink for RtspServer {
                         // Continue smoothly from whatever was last
                         // written, ignoring how far this actually jumped
                         // — a viewer only ever sees the output side.
-                        self.pts_offset = match self.last_output_pts {
-                            Some(last) => last + 1 - raw_pts,
-                            None => 0, // nothing written yet: raw pts is fine as-is
+                        // Anchored on dts (see `last_output_dts`) since
+                        // that's what the muxer actually requires to be
+                        // monotonic; falls back to pts only for a packet
+                        // with no dts at all.
+                        self.pts_offset = match (self.last_output_dts, packet.dts()) {
+                            (Some(last_dts), Some(raw_dts)) => last_dts + 1 - raw_dts,
+                            _ => match self.last_output_pts {
+                                Some(last_pts) => last_pts + 1 - raw_pts,
+                                None => 0, // nothing written yet: raw pts is fine as-is
+                            },
                         };
                         self.pending_seek = false;
                     }
@@ -651,7 +668,9 @@ impl Sink for RtspServer {
                     if let Some(raw_dts) = packet.dts() {
                         // Same offset as pts, so the original pts/dts gap
                         // (relevant for B-frame reordering) is preserved.
-                        packet.set_dts(Some(raw_dts + self.pts_offset));
+                        let corrected_dts = raw_dts + self.pts_offset;
+                        packet.set_dts(Some(corrected_dts));
+                        self.last_output_dts = Some(corrected_dts);
                     }
                     self.last_output_pts = Some(corrected_pts);
                 }

@@ -39,6 +39,12 @@ pub struct FileDemuxer {
     name: String,
     input: ffmpeg::format::context::Input,
     pads: Vec<SrcPad>,
+    /// One packet read ahead of `run`'s own loop, set only by `seek` —
+    /// peeking a packet right after `Input::seek` is how it learns where
+    /// playback actually landed (see `seek`'s docs), and that packet still
+    /// needs to be delivered, not discarded, so it's stashed here for
+    /// `run`'s next iteration to pick up instead of reading a fresh one.
+    pending: Option<(usize, ffmpeg::Packet)>,
 }
 
 impl FileDemuxer {
@@ -69,6 +75,7 @@ impl FileDemuxer {
                 name: name.into(),
                 input,
                 pads,
+                pending: None,
             },
             streams,
         ))
@@ -119,14 +126,20 @@ impl SourceElement for FileDemuxer {
         // *second* mutable borrow of `input` — in between reads, which a
         // single loop-spanning iterator would rule out.
         loop {
-            if drain_control(control, self)? {
+            if drain_control(control, self, bus)? {
                 // Stop: abandon in place, no final Eos.
                 return Ok(());
             }
-            let Some((stream, packet)) = self.input.packets().next() else {
+            // `seek` (called from within `drain_control`, above) already
+            // consumed one packet to find out where it landed — deliver
+            // that before reading a fresh one, or it'd be silently lost.
+            let next = match self.pending.take() {
+                Some(next) => Some(next),
+                None => self.input.packets().next().map(|(s, p)| (s.index(), p)),
+            };
+            let Some((index, packet)) = next else {
                 break;
             };
-            let index = stream.index();
             if let Some(pad) = self.pads.get_mut(index) {
                 // A downstream failure drops just this one packet — same
                 // "report, don't die" contract `Queue`'s worker gives a
@@ -148,14 +161,46 @@ impl SourceElement for FileDemuxer {
         Ok(())
     }
 
-    fn seek(&mut self, target: Duration) -> crate::error::Result<()> {
+    fn seek(&mut self, target: Duration) -> crate::error::Result<Duration> {
         // `Input::seek` takes microseconds (`AV_TIME_BASE` units) when
         // seeking the whole container (stream index -1, which is what it
         // uses internally) rather than one specific stream — an unbounded
         // range (`..`) just means "as close to `ts` as ffmpeg can manage",
-        // no extra min/max constraint.
+        // no extra min/max constraint. In practice that means *backward*
+        // to the nearest keyframe at or before `target`: never forward,
+        // and never onto a non-keyframe, since either would leave nothing
+        // downstream can decode/remux from. A sparse-keyframe file can
+        // make that keyframe well before `target` — e.g. a single
+        // 10-second file with keyframes only at 0s and 8.3s means every
+        // `target` under 8.3s lands back at 0s.
         let ts = target.as_micros().min(i64::MAX as u128) as i64;
         self.input.seek(ts, ..)?;
-        Ok(())
+
+        // `avformat_seek_file` only reports success/failure, not where it
+        // landed — the one way to find out is to read the next packet and
+        // look at its own timestamp. That packet is real data (not a
+        // probe to throw away), so it's stashed in `pending` for `run`'s
+        // next iteration instead of being dropped here.
+        match self.input.packets().next() {
+            Some((stream, packet)) => {
+                let time_base = stream.time_base();
+                let landed = packet
+                    .pts()
+                    .or_else(|| packet.dts())
+                    .map(|ts| ts_to_duration(ts, time_base))
+                    .unwrap_or(Duration::ZERO);
+                self.pending = Some((stream.index(), packet));
+                Ok(landed)
+            }
+            // Nothing left to read right after seeking (`target` at/past
+            // EOF) — there's no packet to learn a real position from, so
+            // just report the request back as-is.
+            None => Ok(target),
+        }
     }
+}
+
+fn ts_to_duration(ts: i64, time_base: ffmpeg::Rational) -> Duration {
+    let secs = ts as f64 * f64::from(time_base.numerator()) / f64::from(time_base.denominator());
+    Duration::from_secs_f64(secs.max(0.0))
 }

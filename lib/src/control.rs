@@ -2,7 +2,11 @@ use std::time::Duration;
 
 use crossbeam_channel::{Receiver, Sender, unbounded};
 
-use crate::{element::SourceElement, error::Result};
+use crate::{
+    bus::{Bus, BusEvent},
+    element::SourceElement,
+    error::Result,
+};
 
 /// A command that can be sent down a running [`crate::pipeline::Pipeline`]
 /// — travels the same pad-to-pad path `MediaBuffer` does (see
@@ -115,11 +119,13 @@ impl ControlReceiver {
 /// Returns `true` if `Stop` was seen: the caller should return `Ok(())`
 /// immediately, without pushing a final `Eos` (`Stop` means abandon, not
 /// drain to completion).
-pub fn drain_control<S: SourceElement>(control: &ControlReceiver, source: &mut S) -> Result<bool> {
+pub fn drain_control<S: SourceElement>(
+    control: &ControlReceiver,
+    source: &mut S,
+    bus: &Bus,
+) -> Result<bool> {
     while let Some((msg, ack)) = control.try_recv() {
-        if let ControlMsg::Seek(target) = msg {
-            source.seek(target)?;
-        }
+        apply_seek(source, bus, msg)?;
         for pad in source.src_pads() {
             pad.control(msg)?;
         }
@@ -133,9 +139,7 @@ pub fn drain_control<S: SourceElement>(control: &ControlReceiver, source: &mut S
                 let Some((msg, ack)) = control.recv() else {
                     return Ok(true); // sender gone — treat like Stop
                 };
-                if let ControlMsg::Seek(target) = msg {
-                    source.seek(target)?;
-                }
+                apply_seek(source, bus, msg)?;
                 for pad in source.src_pads() {
                     pad.control(msg)?;
                 }
@@ -153,4 +157,21 @@ pub fn drain_control<S: SourceElement>(control: &ControlReceiver, source: &mut S
         }
     }
     Ok(false)
+}
+
+/// `Seek`'s source-specific half of `drain_control` — repositions
+/// `source` (see [`SourceElement::seek`]) and reports where it actually
+/// landed via [`BusEvent::Seeked`], since that can differ from what was
+/// requested. No-op for every other [`ControlMsg`].
+fn apply_seek<S: SourceElement>(source: &mut S, bus: &Bus, msg: ControlMsg) -> Result<()> {
+    if let ControlMsg::Seek(target) = msg {
+        let landed = source.seek(target)?;
+        bus.post(BusEvent::Seeked {
+            element_type: source.element_type(),
+            name: source.name().to_string(),
+            requested: target,
+            landed,
+        });
+    }
+    Ok(())
 }
