@@ -154,6 +154,9 @@ pub enum RtspServerError {
     )]
     MediamtxExited(std::process::ExitStatus),
 
+    #[error("mediamtx exited unexpectedly ({0}) while streaming")]
+    MediamtxDied(std::process::ExitStatus),
+
     #[error("failed to write a temporary mediamtx config to {0}: {1}")]
     WriteConfig(PathBuf, std::io::Error),
 
@@ -592,6 +595,30 @@ fn wait_for_listener(authority: &str, mediamtx: &mut Child) -> Result<()> {
     }
 }
 
+/// Diagnoses a failed write against `output`: if `mediamtx` has actually
+/// exited, that's almost certainly *why* the write failed, and reporting
+/// [`RtspServerError::MediamtxDied`] instead of the raw ffmpeg I/O error
+/// lets whoever's watching [`crate::bus::BusEvent::Error`] tell "the
+/// server is gone, stop retrying" apart from a transient network hiccup —
+/// the same generic error either way otherwise. `try_wait` is cheap and
+/// non-blocking, so this only costs anything on the already-slow path of
+/// a write that just failed; the common case (write succeeds) never
+/// touches it. Detection is therefore lazy, not polled per packet: it
+/// only fires on the next attempted write after `mediamtx` dies, not the
+/// instant it happens (e.g. never, if nothing writes while paused).
+fn check_mediamtx(
+    mediamtx: &mut Child,
+    result: std::result::Result<(), ffmpeg::Error>,
+) -> Result<()> {
+    let Err(error) = result else {
+        return Ok(());
+    };
+    if let Ok(Some(status)) = mediamtx.try_wait() {
+        return Err(RtspServerError::MediamtxDied(status).into());
+    }
+    Err(RtspServerError::from(error).into())
+}
+
 /// Allocates an RTSP output context without opening a generic `AVIOContext`
 /// for it. `ffmpeg_next::format::output_as`/`_with` always calls
 /// `avio_open2`, but the RTSP muxer sets `AVFMT_NOFILE` — it manages its
@@ -677,12 +704,12 @@ impl Sink for RtspServer {
 
                 packet.set_stream(0);
                 packet.set_position(-1);
-                packet
-                    .write_interleaved(&mut self.output)
-                    .map_err(RtspServerError::from)?;
-                Ok(())
+                check_mediamtx(
+                    &mut self.mediamtx,
+                    packet.write_interleaved(&mut self.output),
+                )
             }
-            MediaBuffer::Eos => Ok(self.output.write_trailer().map_err(RtspServerError::from)?),
+            MediaBuffer::Eos => check_mediamtx(&mut self.mediamtx, self.output.write_trailer()),
             MediaBuffer::Video(_) => Err(RtspServerError::UnsupportedBuffer("Video").into()),
             MediaBuffer::Audio(_) => Err(RtspServerError::UnsupportedBuffer("Audio").into()),
         }
