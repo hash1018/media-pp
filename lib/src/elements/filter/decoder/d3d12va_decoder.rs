@@ -6,6 +6,7 @@ use windows::{Win32::Graphics::Direct3D12::ID3D12Device, core::Interface};
 
 use crate::{
     buffer::MediaBuffer,
+    control::ControlMsg,
     element::{Element, Sink, Source},
     pad::SrcPad,
 };
@@ -181,6 +182,12 @@ impl Sink for D3d12vaDecoder {
                 Ok(())
             }
         }
+    }
+
+    fn control(&mut self, msg: ControlMsg) -> crate::error::Result<()> {
+        // No local reaction needed — see `SwDecoder::control`; same
+        // reasoning applies to the hw device context, freed in `Drop`.
+        self.pad.control(msg)
     }
 }
 

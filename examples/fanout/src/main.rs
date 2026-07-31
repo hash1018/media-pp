@@ -33,7 +33,7 @@ fn main() -> media_pp::Result<()> {
     let (video_counter, video_count) = PacketCounter::new("video-counter");
     let (audio_counter, audio_count) = PacketCounter::new("audio-counter");
 
-    let mut pipeline = Pipeline::new(source, |source, bus| {
+    let pipeline = Pipeline::new(source, |source, bus, _clock| {
         if let Some(v) = video {
             let branch = ChainBuilder::new(bus.clone())
                 .queue("video-q", 32) // its own thread, separate from audio
@@ -49,9 +49,9 @@ fn main() -> media_pp::Result<()> {
         // Any other stream's pad is simply left unlinked.
     });
 
+    pipeline.run(); // starts the source on a background thread, returns right away
     // Blocks until the demuxer hits EOS and both branch queues have
-    // drained and joined.
-    pipeline.run()?;
+    // drained and joined (i.e. every `Bus` handle in the pipeline dropped).
     pipeline.bus().log_events();
 
     println!("video packets: {}", video_count.load(Ordering::Relaxed));

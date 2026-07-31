@@ -13,6 +13,7 @@ use windows::{
 
 use crate::{
     buffer::MediaBuffer,
+    control::ControlMsg,
     element::{Element, Sink},
     elements::filter::decoder::d3d12va_decoder::d3d12va_texture,
     error::Result,
@@ -157,5 +158,12 @@ impl Sink for Dx12Renderer {
             ffmpeg::format::Pixel::D3D12 => self.submit_d3d12_frame(frame),
             other => Err(Dx12RendererError::UnsupportedFormat(other).into()),
         }
+    }
+
+    fn control(&mut self, _msg: ControlMsg) -> Result<()> {
+        // Terminal, nothing to flush or forward — a paused/stopped window
+        // just stops receiving new frames (see `Queue`'s worker loop) and
+        // keeps showing whatever was submitted last.
+        Ok(())
     }
 }

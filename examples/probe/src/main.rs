@@ -38,7 +38,7 @@ fn main() -> media_pp::Result<()> {
 
     let (counter, count) = PacketCounter::new("counter");
 
-    let mut pipeline = Pipeline::new(source, |source, bus| {
+    let pipeline = Pipeline::new(source, |source, bus, _clock| {
         let branch = ChainBuilder::new(bus.clone())
             .queue("q1", 32) // thread boundary: demux thread -> counter thread
             .build(Box::new(counter));
@@ -48,7 +48,7 @@ fn main() -> media_pp::Result<()> {
     // run() blocks until the source hits EOS and every queue worker
     // thread downstream has drained and joined, so it's safe to read the
     // bus and the counter right after.
-    pipeline.run()?;
+    pipeline.run();
     pipeline.bus().log_events();
 
     println!("packet count: {}", count.load(Ordering::Relaxed));

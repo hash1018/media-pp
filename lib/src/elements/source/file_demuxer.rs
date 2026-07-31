@@ -5,6 +5,7 @@ use thiserror::Error as ThisError;
 
 use crate::{
     buffer::MediaBuffer,
+    control::{ControlReceiver, drain_control},
     element::{Element, Source, SourceElement},
     pad::SrcPad,
 };
@@ -103,10 +104,14 @@ impl Source for FileDemuxer {
 }
 
 impl SourceElement for FileDemuxer {
-    fn run(&mut self) -> crate::error::Result<()> {
+    fn run(&mut self, control: &ControlReceiver) -> crate::error::Result<()> {
         let Self { input, pads, .. } = self;
 
         for (stream, packet) in input.packets() {
+            if drain_control(control, pads)? {
+                // Stop: abandon in place, no final Eos.
+                return Ok(());
+            }
             let index = stream.index();
             if let Some(pad) = pads.get_mut(index) {
                 pad.push(MediaBuffer::Packet(Arc::new(packet)))?;

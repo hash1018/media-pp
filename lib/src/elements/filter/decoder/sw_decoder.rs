@@ -5,6 +5,7 @@ use thiserror::Error as ThisError;
 
 use crate::{
     buffer::MediaBuffer,
+    control::ControlMsg,
     element::{Element, Sink, Source},
     pad::SrcPad,
 };
@@ -107,6 +108,13 @@ impl Sink for SwDecoder {
                 Ok(())
             }
         }
+    }
+
+    fn control(&mut self, msg: ControlMsg) -> crate::error::Result<()> {
+        // No local reaction needed: `Stop` means abandon (not drain), so
+        // there's nothing to flush before this decoder's own `Drop`
+        // frees the codec context — just forward.
+        self.pad.control(msg)
     }
 }
 

@@ -2,6 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::{
     buffer::MediaBuffer,
+    control::ControlMsg,
     element::{Element, Sink},
     error::Result,
     pad::SrcPad,
@@ -90,5 +91,16 @@ impl Sink for Tee {
             pad.push(buf.clone())?;
         }
         last.push(buf)
+    }
+
+    fn control(&mut self, msg: ControlMsg) -> Result<()> {
+        // Unlike `consume`, every branch gets the same `ControlMsg`
+        // value directly (it's `Copy`, no need for the last-one-moves
+        // split `consume` does for `MediaBuffer`).
+        let mut pads = self.pads.lock().unwrap();
+        for pad in pads.iter_mut() {
+            pad.control(msg)?;
+        }
+        Ok(())
     }
 }

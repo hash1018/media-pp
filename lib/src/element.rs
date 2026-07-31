@@ -1,4 +1,9 @@
-use crate::{buffer::MediaBuffer, error::Result, pad::SrcPad};
+use crate::{
+    buffer::MediaBuffer,
+    control::{ControlMsg, ControlReceiver},
+    error::Result,
+    pad::SrcPad,
+};
 
 /// A node in the pipeline graph with a name. Plain identity only — says
 /// nothing about whether the node has an input, an output, both, or
@@ -19,6 +24,16 @@ pub trait Element: Send {
 /// own threads.
 pub trait Sink: Element {
     fn consume(&mut self, buf: MediaBuffer) -> Result<()>;
+
+    /// Reacts to a [`ControlMsg`] (pause/resume/stop) and, for anything
+    /// with a downstream of its own, forwards it on — same shape as
+    /// `consume`, just a separate channel from `MediaBuffer` so it can
+    /// reach every element (not just ones that already know how to
+    /// interpret a data buffer) and, at a [`crate::queue::Queue`], jump
+    /// ahead of whatever data is backed up instead of waiting behind it.
+    /// No default: every `Sink` has to consciously decide what this means
+    /// for it, rather than silently dropping it.
+    fn control(&mut self, msg: ControlMsg) -> Result<()>;
 }
 
 /// An element with one or more output ports. It sends data downstream by
@@ -41,7 +56,11 @@ pub trait Source: Element {
 /// until EOS or an error. Typically wraps a blocking I/O read (demuxer,
 /// file/network source).
 pub trait SourceElement: Source {
-    fn run(&mut self) -> Result<()>;
+    /// Drives this source until `Eos` (normal completion) or `Stop` (see
+    /// [`ControlMsg::Stop`]) — call [`crate::control::drain_control`]
+    /// once per loop iteration to make `control` responsive between
+    /// blocking reads.
+    fn run(&mut self, control: &ControlReceiver) -> Result<()>;
 }
 
 /// An element with both an input and an output — decoder, encoder,

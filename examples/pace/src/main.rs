@@ -1,9 +1,8 @@
-use std::{sync::Arc, sync::atomic::Ordering, time::Instant};
+use std::{sync::atomic::Ordering, time::Instant};
 
 use ffmpeg_next::media;
 use media_pp::{
     Error,
-    clock::Clock,
     element::Source,
     elements::{FileDemuxer, FrameCounter, Pacer, SwDecoder},
     pipeline::{ChainBuilder, Pipeline},
@@ -41,11 +40,10 @@ fn main() -> media_pp::Result<()> {
         .ok_or_else(|| Error::Other("stream disappeared".into()))?;
 
     let (counter, frame_count) = FrameCounter::new("counter");
-    let clock = Arc::new(Clock::new());
 
-    let mut pipeline = Pipeline::new(source, |source, bus| {
+    let pipeline = Pipeline::new(source, |source, bus, clock| {
         let decoder = SwDecoder::new("decoder", params).expect("failed to open decoder");
-        let pacer = Pacer::new("pacer", time_base, clock);
+        let pacer = Pacer::new("pacer", time_base, clock.clone());
         let branch = ChainBuilder::new(bus.clone())
             .pipe(decoder) // same thread as the demux — cheap enough not to need a queue
             .queue("frames", 32) // pacer sleeps on its own thread; let decode run ahead into this
@@ -55,8 +53,8 @@ fn main() -> media_pp::Result<()> {
     });
 
     let start = Instant::now();
-    pipeline.run()?;
-    pipeline.bus().log_events();
+    pipeline.run();
+    pipeline.bus().log_events(); // blocks until playback actually finishes
 
     println!("decoded frames: {}", frame_count.load(Ordering::Relaxed));
     println!("wall time: {:.2}s", start.elapsed().as_secs_f64());

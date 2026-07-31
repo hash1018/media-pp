@@ -1,6 +1,7 @@
 pub mod buffer;
 pub mod bus;
 pub mod clock;
+pub mod control;
 pub mod element;
 pub mod elements;
 pub mod error;

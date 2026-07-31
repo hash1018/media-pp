@@ -1,9 +1,8 @@
-use std::{sync::Arc, thread};
+use std::thread;
 
 use ffmpeg_next::media;
 use media_pp::{
     Error,
-    clock::Clock,
     element::Source,
     elements::{D3d12vaDecoder, Dx12Renderer, FileDemuxer, Pacer},
     pipeline::{ChainBuilder, Pipeline},
@@ -133,14 +132,13 @@ fn play(path: &str, hwnd: isize, width: u32, height: u32) -> media_pp::Result<()
         .ok_or_else(|| Error::Other("stream disappeared".into()))?;
 
     let engine = RendererEngine::new().map_err(|e| Error::Other(format!("{e:?}")))?;
-    let clock = Arc::new(Clock::new());
 
-    let mut pipeline = Pipeline::new(source, |source, bus| {
+    let pipeline = Pipeline::new(source, |source, bus, clock| {
         // Same device the renderer draws with — required for the
         // zero-copy path to be valid at all (see D3d12vaDecoder::new).
         let decoder = D3d12vaDecoder::new("decoder", params, engine.device())
             .expect("failed to open D3D12VA decoder");
-        let pacer = Pacer::new("pacer", time_base, clock);
+        let pacer = Pacer::new("pacer", time_base, clock.clone());
         let renderer = Dx12Renderer::new("renderer", &engine, hwnd, width, height)
             .expect("failed to create renderer");
         let branch = ChainBuilder::new(bus.clone())
@@ -151,10 +149,10 @@ fn play(path: &str, hwnd: isize, width: u32, height: u32) -> media_pp::Result<()
         source.src_pads()[video.index].link(branch);
     });
 
-    // Drain the bus even if `run()` failed — the *specific* element error
-    // was already posted there before the failure propagated up through `?`.
-    let ran = pipeline.run();
+    // `run()` starts playback on a background thread and returns right
+    // away — any failure (including the source's own) shows up as a
+    // `BusEvent::Error` here instead of through a returned `Result`.
+    pipeline.run();
     pipeline.bus().log_events();
-    ran?;
     Ok(())
 }

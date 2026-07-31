@@ -1,11 +1,12 @@
 use std::thread::{self, JoinHandle};
 
-use crossbeam_channel::{Sender, TrySendError, bounded};
+use crossbeam_channel::{Receiver, Sender, TrySendError, bounded, select};
 use thiserror::Error as ThisError;
 
 use crate::{
     buffer::MediaBuffer,
     bus::{Bus, BusEvent},
+    control::{self, ControlMsg, ControlReceiver, ControlSender},
     element::{Element, Sink},
     error::Result,
 };
@@ -42,6 +43,15 @@ pub enum OverflowPolicy {
 /// drives it via direct `Sink::consume` calls, until it hits another
 /// `Queue`.
 ///
+/// [`ControlMsg`] crosses this same thread boundary through a separate
+/// channel from data, and the worker always checks it first — so
+/// `Pause`/`Stop` never wait behind whatever's already backed up in the
+/// data channel. Every worker acks a control message *before* acting on
+/// it any further (e.g. before blocking on `Pause`), so the channel stays
+/// responsive to the next one — `Resume`/`Stop` always reaches a paused
+/// worker immediately, it's never stuck behind the pause itself. See the
+/// worker loop below.
+///
 /// Cheap elements (e.g. a muxer sitting right after an encoder) should
 /// simply *not* have a `Queue` between them and their upstream — they run
 /// as a direct call on the upstream element's thread instead of paying for
@@ -52,6 +62,7 @@ pub struct Queue {
     policy: OverflowPolicy,
     bus: Bus,
     handle: Option<JoinHandle<()>>,
+    control: ControlSender,
 }
 
 impl Queue {
@@ -71,35 +82,19 @@ impl Queue {
     pub fn spawn_with_policy(
         name: impl Into<String>,
         capacity: usize,
-        mut downstream: Box<dyn Sink>,
+        downstream: Box<dyn Sink>,
         bus: Bus,
         policy: OverflowPolicy,
     ) -> Queue {
         let name = name.into();
         let (tx, rx) = bounded::<MediaBuffer>(capacity);
+        let (control_tx, control_rx) = control::channel();
         let worker_name = name.clone();
         let worker_bus = bus.clone();
 
         let handle = thread::Builder::new()
             .name(format!("queue:{worker_name}"))
-            .spawn(move || {
-                for buf in rx.iter() {
-                    let is_eos = buf.is_eos();
-                    if let Err(e) = downstream.consume(buf) {
-                        worker_bus.post(BusEvent::Error {
-                            element: worker_name.clone(),
-                            message: e.to_string(),
-                        });
-                        return;
-                    }
-                    if is_eos {
-                        worker_bus.post(BusEvent::Eos {
-                            element: worker_name.clone(),
-                        });
-                        return;
-                    }
-                }
-            })
+            .spawn(move || worker_loop(rx, control_rx, downstream, worker_bus, worker_name))
             .expect("failed to spawn queue worker thread");
 
         Queue {
@@ -108,6 +103,7 @@ impl Queue {
             policy,
             bus,
             handle: Some(handle),
+            control: control_tx,
         }
     }
 }
@@ -147,15 +143,121 @@ impl Sink for Queue {
             },
         }
     }
+
+    fn control(&mut self, msg: ControlMsg) -> Result<()> {
+        // Blocks until the worker — and everything downstream of it — has
+        // finished handling this. Never stuck behind a data backlog: the
+        // worker checks this channel before every data buffer it pulls
+        // (see `worker_loop`), and while paused it's blocked *only* on
+        // this channel, so a `consume()` blocked sending data upstream of
+        // a paused queue just sits in ordinary backpressure — nothing
+        // feeds this queue while it's paused, since `Pause` blocks
+        // whatever's upstream the same way, all the way back to the
+        // source (see [`crate::control::drain_control`]).
+        self.control.send(msg);
+        Ok(())
+    }
 }
 
 impl Drop for Queue {
     fn drop(&mut self) {
-        // Dropping `tx` (once this is the last handle) closes the channel,
-        // which lets the worker's `rx.iter()` loop end on its own.
+        // Dropping `tx` (once this is the last handle) closes the data
+        // channel, which lets the worker's loop end on its own if it
+        // hasn't already (e.g. via `Stop`).
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }
+    }
+}
+
+/// Owns `downstream` on its own thread: pulls from `data_rx` and calls
+/// `downstream.consume()`, same as before, except every iteration checks
+/// `control_rx` *first* — so a pending `Pause`/`Stop` is handled before
+/// the next data buffer, however deep the backlog. `Pause` blocks this
+/// whole function (and therefore `downstream`) right here, without
+/// touching `data_rx` at all, until `Resume`/`Stop`.
+fn worker_loop(
+    data_rx: Receiver<MediaBuffer>,
+    control_rx: ControlReceiver,
+    mut downstream: Box<dyn Sink>,
+    bus: Bus,
+    name: String,
+) {
+    loop {
+        if let Some((msg, ack)) = control_rx.try_recv() {
+            if apply_control(&mut downstream, msg, &ack, &control_rx) {
+                return;
+            }
+            continue;
+        }
+
+        select! {
+            recv(control_rx.rx) -> req => {
+                match req {
+                    Ok(req) => {
+                        if apply_control(&mut downstream, req.msg, &req.ack, &control_rx) {
+                            return;
+                        }
+                    }
+                    Err(_) => return, // sender (this Queue) dropped
+                }
+            }
+            recv(data_rx) -> buf => {
+                match buf {
+                    Ok(buf) => {
+                        let is_eos = buf.is_eos();
+                        if let Err(e) = downstream.consume(buf) {
+                            bus.post(BusEvent::Error {
+                                element: name.clone(),
+                                message: e.to_string(),
+                            });
+                            return;
+                        }
+                        if is_eos {
+                            bus.post(BusEvent::Eos { element: name.clone() });
+                            return;
+                        }
+                    }
+                    Err(_) => return, // producer side (this Queue) dropped
+                }
+            }
+        }
+    }
+}
+
+/// Applies one control message to `downstream`, acking it, then — only
+/// for `Pause` — blocking this thread on `control_rx` alone (never
+/// touching `data_rx`) until `Resume`/`Stop`. Returns `true` once `Stop`
+/// has been handled, meaning the caller (`worker_loop`) should exit.
+fn apply_control(
+    downstream: &mut Box<dyn Sink>,
+    msg: ControlMsg,
+    ack: &Sender<()>,
+    control_rx: &ControlReceiver,
+) -> bool {
+    let _ = downstream.control(msg);
+    let is_stop = msg == ControlMsg::Stop;
+    let _ = ack.send(());
+    if is_stop {
+        return true;
+    }
+    if msg != ControlMsg::Pause {
+        return false;
+    }
+    loop {
+        let Some((msg, ack)) = control_rx.recv() else {
+            return true; // sender gone — treat like Stop
+        };
+        let _ = downstream.control(msg);
+        let is_stop = msg == ControlMsg::Stop;
+        let _ = ack.send(());
+        if is_stop {
+            return true;
+        }
+        if msg == ControlMsg::Resume {
+            return false;
+        }
+        // Another Pause while already paused: already forwarded above, keep waiting.
     }
 }
 
@@ -191,6 +293,10 @@ mod tests {
                 thread::sleep(Duration::from_millis(20));
                 self.count.fetch_add(1, Ordering::SeqCst);
             }
+            Ok(())
+        }
+
+        fn control(&mut self, _msg: ControlMsg) -> Result<()> {
             Ok(())
         }
     }
@@ -249,5 +355,47 @@ mod tests {
         );
         assert!(dropped > 0, "expected at least one BusEvent::Dropped");
         assert_eq!(processed + dropped, 10);
+    }
+
+    #[test]
+    fn pause_stops_delivery_and_resume_lets_it_continue() {
+        let count = Arc::new(AtomicUsize::new(0));
+        let sink = SlowCounter {
+            count: count.clone(),
+        };
+        let (bus, _bus_rx) = Bus::new();
+
+        let mut queue =
+            Queue::spawn_with_policy("test", 8, Box::new(sink), bus, OverflowPolicy::Block);
+        queue.control(ControlMsg::Pause).unwrap(); // blocks until the worker is actually paused
+
+        for _ in 0..3 {
+            queue.consume(packet()).unwrap();
+        }
+        // Worker is paused and not touching data_rx — nothing should have
+        // been processed yet, however long we wait.
+        thread::sleep(Duration::from_millis(100));
+        assert_eq!(count.load(Ordering::SeqCst), 0);
+
+        queue.control(ControlMsg::Resume).unwrap();
+        queue.consume(MediaBuffer::Eos).unwrap();
+        drop(queue);
+
+        assert_eq!(count.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn stop_is_synchronous_and_terminates_the_worker() {
+        let count = Arc::new(AtomicUsize::new(0));
+        let sink = SlowCounter {
+            count: count.clone(),
+        };
+        let (bus, _bus_rx) = Bus::new();
+
+        let mut queue =
+            Queue::spawn_with_policy("test", 8, Box::new(sink), bus, OverflowPolicy::Block);
+        queue.consume(packet()).unwrap();
+        queue.control(ControlMsg::Stop).unwrap(); // blocks until the worker has exited
+        drop(queue); // join should return immediately — the worker already returned
     }
 }

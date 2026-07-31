@@ -37,7 +37,7 @@ fn main() -> media_pp::Result<()> {
 
     let (counter, frame_count) = FrameCounter::new("counter");
 
-    let mut pipeline = Pipeline::new(source, |source, bus| {
+    let pipeline = Pipeline::new(source, |source, bus, _clock| {
         let decoder = SwDecoder::new("decoder", params).expect("failed to open decoder");
         let branch = ChainBuilder::new(bus.clone())
             .pipe(decoder) // same thread as the demux — cheap enough not to need a queue
@@ -45,7 +45,7 @@ fn main() -> media_pp::Result<()> {
         source.src_pads()[video.index].link(branch);
     });
 
-    pipeline.run()?;
+    pipeline.run();
     pipeline.bus().log_events();
 
     println!("decoded frames: {}", frame_count.load(Ordering::Relaxed));

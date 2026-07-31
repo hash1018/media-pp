@@ -18,6 +18,7 @@ use thiserror::Error as ThisError;
 
 use crate::{
     buffer::MediaBuffer,
+    control::ControlMsg,
     element::{Element, Sink},
     error::Result,
 };
@@ -621,6 +622,13 @@ impl Sink for RtspServer {
             MediaBuffer::Video(_) => Err(RtspServerError::UnsupportedBuffer("Video").into()),
             MediaBuffer::Audio(_) => Err(RtspServerError::UnsupportedBuffer("Audio").into()),
         }
+    }
+
+    fn control(&mut self, _msg: ControlMsg) -> Result<()> {
+        // Terminal, nothing to flush or forward. `Stop` doesn't write a
+        // trailer here (unlike natural `Eos`) — `Stop` means abandon, and
+        // `Drop` already kills `mediamtx` unconditionally.
+        Ok(())
     }
 }
 

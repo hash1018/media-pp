@@ -5,6 +5,7 @@ use std::sync::{
 
 use crate::{
     buffer::MediaBuffer,
+    control::ControlMsg,
     element::{Element, Sink},
     error::Result,
 };
@@ -42,6 +43,11 @@ impl Sink for FrameCounter {
         if let MediaBuffer::Video(_) | MediaBuffer::Audio(_) = buf {
             self.count.fetch_add(1, Ordering::Relaxed);
         }
+        Ok(())
+    }
+
+    fn control(&mut self, _msg: ControlMsg) -> Result<()> {
+        // Terminal, nothing to flush or forward.
         Ok(())
     }
 }

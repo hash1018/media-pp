@@ -5,6 +5,7 @@ use ffmpeg_next as ffmpeg;
 use crate::{
     buffer::MediaBuffer,
     clock::Clock,
+    control::ControlMsg,
     element::{Element, Sink, Source},
     pad::SrcPad,
 };
@@ -27,9 +28,15 @@ pub struct Pacer {
     name: String,
     time_base: ffmpeg::Rational,
     clock: Arc<Clock>,
-    /// (wall-clock anchor, first frame's pts) — set on this pacer's first
-    /// timestamped frame.
-    origin: Option<(Instant, i64)>,
+    /// This pacer's first timestamped frame's pts — set on first call.
+    /// Deliberately *not* paired with a cached wall-clock anchor: the
+    /// anchor has to come fresh from `clock.start()` on every call
+    /// instead, since [`Clock::pause`]/[`Clock::resume`] can shift it —
+    /// caching it once here would mean a paused-then-resumed pipeline
+    /// blasts through however many frames piled up during the pause
+    /// (their `due` times would all already be in the past relative to a
+    /// stale anchor).
+    first_pts: Option<i64>,
     pad: SrcPad,
 }
 
@@ -41,17 +48,18 @@ impl Pacer {
             name,
             time_base,
             clock,
-            origin: None,
+            first_pts: None,
             pad,
         }
     }
 
-    /// Blocks until `pts` is due, based on this pacer's origin (set here,
-    /// on the first call) and the shared `clock`'s anchor. Frames without a
-    /// pts (`None`) pass straight through — nothing to pace against.
+    /// Blocks until `pts` is due, based on this pacer's `first_pts` (set
+    /// here, on the first call) and the shared `clock`'s *current*
+    /// anchor. Frames without a pts (`None`) pass straight through —
+    /// nothing to pace against.
     fn wait_for(&mut self, pts: Option<i64>) {
         let Some(pts) = pts else { return };
-        let &mut (anchor, first_pts) = self.origin.get_or_insert((self.clock.start(), pts));
+        let first_pts = *self.first_pts.get_or_insert(pts);
 
         let elapsed_ticks = pts - first_pts;
         let elapsed_secs = elapsed_ticks as f64 * f64::from(self.time_base);
@@ -59,7 +67,7 @@ impl Pacer {
             return;
         }
 
-        let due = anchor + std::time::Duration::from_secs_f64(elapsed_secs);
+        let due = self.clock.start() + std::time::Duration::from_secs_f64(elapsed_secs);
         let now = Instant::now();
         if due > now {
             thread::sleep(due - now);
@@ -88,5 +96,12 @@ impl Sink for Pacer {
             MediaBuffer::Eos => {}
         }
         self.pad.push(buf)
+    }
+
+    fn control(&mut self, msg: ControlMsg) -> crate::error::Result<()> {
+        // Nothing local to react to — `Pause`/`Stop` freezing this pacer
+        // is entirely a function of upstream not feeding it (see
+        // `Queue`'s worker loop) and `Clock` being paused; just forward.
+        self.pad.control(msg)
     }
 }

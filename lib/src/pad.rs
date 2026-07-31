@@ -1,4 +1,4 @@
-use crate::{buffer::MediaBuffer, element::Sink, error::Result};
+use crate::{buffer::MediaBuffer, control::ControlMsg, element::Sink, error::Result};
 
 /// An output port an [`Element`](crate::element::Element) owns. Data only
 /// ever leaves an element through one of its src pads — there is no other
@@ -51,6 +51,16 @@ impl SrcPad {
     pub fn push(&mut self, buf: MediaBuffer) -> Result<()> {
         match &mut self.peer {
             Some(sink) => sink.consume(buf),
+            None => Ok(()),
+        }
+    }
+
+    /// Forwards a [`ControlMsg`] to whatever this pad is linked to —
+    /// mirrors [`SrcPad::push`], just for control instead of data.
+    /// Pushing into an unlinked pad is a no-op, same as `push`.
+    pub fn control(&mut self, msg: ControlMsg) -> Result<()> {
+        match &mut self.peer {
+            Some(sink) => sink.control(msg),
             None => Ok(()),
         }
     }
