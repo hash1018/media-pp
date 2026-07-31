@@ -59,6 +59,7 @@ Everything is built from a handful of primitives in `lib/src/`:
 | `Dx12Renderer` | Sink (feature `dx12-renderer`) | Submits frames to a native window via [renderer-engine](https://github.com/hash1018/RendererEngine)'s DX12 `WindowRenderer`. Dispatches on `frame.format()`: `YUV420P` copies pixels up (CPU decode path); `D3D12` (from `D3d12vaDecoder`) draws zero-copy straight from the decoder's own texture |
 | `RtspServer` | Sink (feature `rtsp-server`) | Spawns a vendored [MediaMTX](https://github.com/bluenviron/mediamtx) as a child process and remuxes incoming `Packet`s into it (RTSP `ANNOUNCE`/`RECORD`) — a self-contained RTSP server from the outside, no separate process to start first. Packets only, no encoding: link it straight after `FileDemuxer`, not a decoder |
 | `Scaler` | Filter | Converts pixel format and resizes `Video` frames in one pass (`libswscale`) — e.g. a decoder's YUV output to the fixed RGB size an inference model expects. Source format/size is learned from the first frame it sees, not passed up front |
+| `AppSink` | Sink | Hands every buffer to a plain closure — GStreamer's `appsink` equivalent, for consuming a pipeline's output without writing a dedicated `Element`/`Sink` impl |
 
 ## Examples (`examples/`)
 
@@ -78,6 +79,7 @@ Each is its own crate so per-example dependencies (e.g. `winit` for
 | `rtsp_serve` | Demux → Queue → Pacer → RtspServer | Serves a file's video as a live RTSP stream (`rtsp-server` feature) — connect with `ffplay rtsp://127.0.0.1:8554/stream` while it runs |
 | `rtsp_serve_seek` | Demux → Queue → Pacer → RtspServer | Same as `rtsp_serve`, plus a terminal prompt that calls `Pipeline::seek` — jump around a live-served RTSP stream while it plays |
 | `scale` | Demux → SwDecoder → Queue → Scaler → (verify) | `Scaler` converting decoded frames to a fixed RGB24 640x640 — prints the first scaled frame's actual format/size to prove the conversion really happened |
+| `app_sink` | Demux → SwDecoder → AppSink | Same chain as `decode`, but the terminal sink is a plain closure instead of a bespoke `FrameCounter` — proves `AppSink` needs no dedicated type at all |
 
 ```sh
 cargo run -p decode -- path/to/video.mp4   # or omit the path to use test-video/h265.mp4

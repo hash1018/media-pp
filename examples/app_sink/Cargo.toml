@@ -1,0 +1,9 @@
+[package]
+name = "app_sink"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+media-pp = { path = "../../lib" }
+ffmpeg-next = "8"
