@@ -78,6 +78,7 @@ for); this table isn't meant to duplicate that.
 | `Dx12Renderer` (`dx12-renderer`) | Submits frames to a native window via DX12 — zero-copy for `D3d12vaDecoder`'s frames |
 | `RtspServer` (`rtsp-server`) | Spawns a vendored MediaMTX and remuxes packets into it as a live RTSP stream |
 | `AppSink` | Hands buffers (and, optionally, control messages) to plain closures — GStreamer's `appsink` equivalent |
+| `OrtDetector` (`ort`) | Runs a YOLOv8/v11-style ONNX model on each frame via `ort`, hands decoded/NMS-filtered detections to a closure |
 
 ## Examples (`examples/`)
 
@@ -115,6 +116,7 @@ Each is its own crate so per-example dependencies (e.g. `winit` for
 | Crate | Pipeline | Demonstrates |
 |---|---|---|
 | `scale` | Demux → SwDecoder → Queue → Scaler → (verify) | `Scaler` converting decoded frames to a fixed RGB24 640x640 — prints the first scaled frame's actual format/size to prove the conversion really happened |
+| `detect` | Demux → SwDecoder → Queue → Scaler → OrtDetector | `OrtDetector` running a YOLOv8/v11 ONNX model on the scaled frames and printing every detection |
 
 ```sh
 cargo run -p decode -- path/to/video.mp4   # or omit the path to use test-video/h265.mp4
@@ -133,6 +135,9 @@ cargo run -p sw_decode_render              # dx12-renderer is already enabled in
   whatever binary depends on `media-pp` (see `lib/build.rs`). Windows-only
   for now, since only a Windows binary is vendored. `rtsp_serve` turns it
   on in its own `Cargo.toml`.
+- `ort` (on `media-pp`) — pulls in the `ort` crate (ONNX Runtime bindings;
+  downloads a prebuilt onnxruntime binary at build time) and `ndarray`, and
+  enables `OrtDetector`. `detect` turns it on in its own `Cargo.toml`.
 
 ## Requirements
 

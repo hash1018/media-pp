@@ -13,7 +13,10 @@ windows = { version = "0.62", optional = true, features = [
     "Win32_Foundation",
     "Win32_Graphics_Direct3D12",
 ] }
+ort = { version = "2.0.0-rc.13", optional = true }
+ndarray = { version = "0.17", optional = true }
 
 [features]
 dx12-renderer = ["dep:renderer-engine", "dep:windows"]
 rtsp-server = []
+ort = ["dep:ort", "dep:ndarray"]

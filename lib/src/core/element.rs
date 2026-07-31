@@ -27,6 +27,7 @@ pub enum ElementType {
     Dx12Renderer,
     RtspServer,
     AppSink,
+    OrtDetector,
     /// Anything outside this crate's own elements — a test double, or a
     /// custom `Sink`/`SourceElement` implemented downstream of this
     /// crate. Keeps this enum from needing to grow every time someone
