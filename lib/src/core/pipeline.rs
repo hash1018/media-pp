@@ -270,7 +270,7 @@ impl Pipeline {
         let Some(mut source) = self.source.lock().unwrap().take() else {
             return;
         };
-        // Always `Some` in lockstep with `source` above — both taken
+        // Always `Some` in lockstep with `source` above — all three taken
         // exactly once, on whichever `run()` call actually wins the
         // `source` guard.
         let Some(bus) = self.bus.lock().unwrap().take() else {

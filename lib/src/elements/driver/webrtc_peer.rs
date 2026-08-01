@@ -136,8 +136,7 @@ pub struct WebRtcPeer {
     /// `Sender`, not a `Box<dyn Sink>` — the matching `Receiver` lives
     /// inside that track's own [`WebRtcTrackSource`], driven by *its own*
     /// `Pipeline` on its own thread, so nothing here needs to know about
-    /// `ControlMsg` fan-out (see `run`'s own docs for why that dropped the
-    /// old `_with_fanout` machinery).
+    /// `ControlMsg` at all.
     tracks_in: HashMap<Mid, Sender<MediaBuffer>>,
     tracks_out: HashMap<TrackId, TrackOutState>,
     /// The one SDP exchange currently in flight (str0m only allows one at a
@@ -296,8 +295,9 @@ impl Sink for WebRtcTrackSink {
 /// itself, [`WebRtcPeer::run`] pushes into the sending half of this same
 /// channel internally, from its own thread, for every `Event::MediaData`
 /// on this track's `Mid`. Nothing here ever calls back into caller-supplied
-/// code from `WebRtcPeer::run`'s own thread — that's the whole point of
-/// not taking an `on_track` closure anymore (see the module docs).
+/// code from `WebRtcPeer::run`'s own thread — that thread only ever touches
+/// this crate's own types (see the module docs for why `WebRtcPeer` hands
+/// tracks out through [`WebRtcHandle::next_track`] instead of a callback).
 pub struct WebRtcTrackSource {
     name: Arc<str>,
     pad: SrcPad,
@@ -378,21 +378,22 @@ impl SourceElement for WebRtcTrackSource {
             }
         }
         // The data channel ending (above) can race a `Stop` sent at the
-        // same moment — e.g. `Pipeline::stop` on the *upstream* `WebRtcPeer`
-        // disconnects this exact channel, and a caller stopping this
-        // `Pipeline` too, right after, can land its `Stop` in `control`'s
-        // queue after `select!` already picked the data arm. Ack it (a
-        // no-op otherwise) so `ControlSender::send`'s rendezvous never
-        // blocks forever waiting for an ack this thread would otherwise
-        // never get around to sending.
+        // same moment — e.g. stopping the *upstream* `WebRtcPeer` (via its
+        // `DriverRunner`) disconnects this exact channel, and a caller
+        // stopping this `Pipeline` too, right after, can land its `Stop` in
+        // `control`'s queue after `select!` already picked the data arm.
+        // Ack it (a no-op otherwise) so `ControlSender::send`'s rendezvous
+        // never blocks forever waiting for an ack this thread would
+        // otherwise never get around to sending.
         while let Some((_msg, ack)) = control.try_recv() {
             let _ = ack.send(());
         }
         self.pad.push(MediaBuffer::Eos)
     }
 
-    /// No timeline of its own — same reasoning as [`WebRtcPeer::seek`]/
-    /// [`crate::elements::AppSource::seek`].
+    /// No timeline of its own — same reasoning as
+    /// [`crate::elements::AppSource::seek`]: a WebRTC connection has
+    /// nothing to reposition.
     fn seek(&mut self, target: Duration) -> Result<Duration> {
         Ok(target)
     }
