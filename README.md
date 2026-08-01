@@ -57,6 +57,7 @@ for); this table isn't meant to duplicate that.
 | Element | What it does |
 |---|---|
 | `FileDemuxer` | Demuxes a file; one src pad per container stream |
+| `AppSource` | Application code pushes buffers in via a handle, from any thread — GStreamer's `appsrc` equivalent |
 
 ### Filters
 
@@ -96,6 +97,7 @@ Each is its own crate so per-example dependencies (e.g. `winit` for
 | `pace` | Demux → SwDecoder → Queue → Pacer → FrameCounter | `Pacer` releasing frames at real playback speed — compare its `wall time` output against `decode`'s near-instant run |
 | `tee` | Demux → Tee → {SwDecoder → FrameCounter, PacketCounter} | `Tee` fanning the same packets out to two independent consumers |
 | `app_sink` | Demux → SwDecoder → AppSink | Same chain as `decode`, but the terminal sink is a plain closure instead of a bespoke `FrameCounter` |
+| `app_source` | AppSource → SwDecoder → FrameCounter | A background thread feeds packets in via `AppSourceHandle`, standing in for whatever a real external producer would push from |
 
 ### Playback (Windows + DX12 only)
 

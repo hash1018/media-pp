@@ -16,6 +16,7 @@ use crate::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ElementType {
     FileDemuxer,
+    AppSource,
     SwDecoder,
     D3d12vaDecoder,
     Pacer,

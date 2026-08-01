@@ -1,0 +1,84 @@
+use std::{sync::Arc, thread};
+
+use ffmpeg_next as ffmpeg;
+use media_pp::{
+    Result,
+    buffer::MediaBuffer,
+    bus::BusEvent,
+    element::Source,
+    elements::{AppSource, FrameCounter, SwDecoder},
+    pipeline::{ChainBuilder, Pipeline},
+};
+
+/// A background thread demuxes a file with plain `ffmpeg_next` — standing
+/// in for whatever a real caller would push from (a network receive loop,
+/// a camera SDK's callback, ...) — and pushes its video packets into an
+/// `AppSource` one by one via `AppSourceHandle::push`. The pipeline itself
+/// (`AppSource -> SwDecoder -> FrameCounter`) never touches the file
+/// directly; proves `AppSource` (GStreamer's `appsrc` equivalent) actually
+/// carries externally-produced buffers all the way through decode.
+///
+///     cargo run -p app_source -- path/to/video.mp4
+fn main() -> Result<()> {
+    media_pp::init()?;
+
+    let path = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "test-video/h265.mp4".into());
+
+    // Opened once up front just to learn the video stream's decoder
+    // parameters — same reason every other example does this before
+    // wiring — then closed; the feeder thread below opens its own handle
+    // on the file for the actual read loop.
+    let (video_index, params) = {
+        let input = ffmpeg::format::input(&path)?;
+        let stream = input
+            .streams()
+            .best(ffmpeg::media::Type::Video)
+            .ok_or_else(|| media_pp::Error::Other("no video stream in file".into()))?;
+        (stream.index(), stream.parameters())
+    };
+
+    let (app_source, handle) = AppSource::new("app-source", 8);
+    let (frame_counter, count) = FrameCounter::new("frame-counter");
+
+    let pipeline = Pipeline::new(app_source, |source, bus, _clock| {
+        let decoder = SwDecoder::new("decoder", params).expect("failed to open decoder");
+        let branch = ChainBuilder::new(bus.clone())
+            .pipe(decoder) // same thread as `AppSource::run` — cheap enough not to need a queue
+            .build(Box::new(frame_counter));
+        source.src_pads()[0].link(branch);
+    });
+    pipeline.run();
+
+    // The "external producer": wholly separate from the thread
+    // `Pipeline::run` spawned for `app_source` above.
+    let feeder = thread::spawn(move || -> Result<()> {
+        let mut input = ffmpeg::format::input(&path)?;
+        for (stream, packet) in input.packets() {
+            if stream.index() == video_index {
+                handle.push(MediaBuffer::Packet(Arc::new(packet)))?;
+            }
+        }
+        handle.push(MediaBuffer::Eos)
+    });
+
+    for event in pipeline.bus().iter() {
+        match &event {
+            BusEvent::Eos { name, .. } => println!("[{name}] eos"),
+            BusEvent::Error { name, error, .. } => eprintln!("[{name}] error: {error}"),
+            BusEvent::Dropped { name, .. } => eprintln!("[{name}] dropped a buffer (queue full)"),
+            BusEvent::Seeked { .. } => {}
+        }
+        if matches!(event, BusEvent::Eos { .. } | BusEvent::Error { .. }) {
+            pipeline.stop();
+        }
+    }
+
+    feeder.join().expect("feeder thread panicked")?;
+    println!(
+        "decoded frames: {}",
+        count.load(std::sync::atomic::Ordering::Relaxed)
+    );
+    Ok(())
+}

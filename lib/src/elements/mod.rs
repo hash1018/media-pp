@@ -12,4 +12,6 @@ pub use sink::{COCO_CLASS_LABELS, Detection, OrtDetector, OrtDetectorError};
 pub use sink::{Dx12Renderer, Dx12RendererError};
 #[cfg(feature = "rtsp-server")]
 pub use sink::{PortPolicy, PublishTransport, RtspServer, RtspServerError, ViewerTransport};
-pub use source::{FileDemuxError, FileDemuxer, StreamInfo};
+pub use source::{
+    AppSource, AppSourceError, AppSourceHandle, FileDemuxError, FileDemuxer, StreamInfo,
+};

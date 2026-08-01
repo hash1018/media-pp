@@ -106,15 +106,15 @@ impl ControlReceiver {
 /// `Eos` is pushed into the source's own pads at the end of that same
 /// loop, just for externally-triggered control instead.
 ///
-/// Drains every pending message. `Seek` repositions `source` itself
-/// first (see [`SourceElement::seek`]) — that's the one case a message
-/// needs source-specific action, not just forwarding, which is why this
-/// takes the whole source rather than just its pads. Every message is
-/// then forwarded to every one of `source`'s pads (so it cascades through
-/// the graph exactly like a data buffer would). `Pause` blocks right
-/// here — still watching `control`, not producing anything — until
-/// `Resume` or `Stop` arrives, so nothing upstream of this call keeps
-/// running while paused either.
+/// Drains every pending message (see [`apply_one`] for what "handling
+/// one" means, including `Pause`'s blocking wait). Non-blocking if
+/// nothing's pending — a [`SourceElement::run`] whose own "next unit of
+/// work" can't be waited on via `control`'s own channel (e.g.
+/// [`crate::elements::FileDemuxer`]'s blocking file read) calls this once
+/// before that blocking step; one that *can* (e.g.
+/// [`crate::elements::AppSource`]'s channel receive) selects on both
+/// instead, calling [`apply_one`]/[`wait_out_pause`] directly so a
+/// pending `Stop` is never left waiting behind a slow/absent producer.
 ///
 /// Returns `true` if `Stop` was seen: the caller should return `Ok(())`
 /// immediately, without pushing a final `Eos` (`Stop` means abandon, not
@@ -125,38 +125,59 @@ pub fn drain_control<S: SourceElement>(
     bus: &Bus,
 ) -> Result<bool> {
     while let Some((msg, ack)) = control.try_recv() {
-        apply_seek(source, bus, msg)?;
-        for pad in source.src_pads() {
-            pad.control(msg)?;
-        }
-        let is_stop = msg == ControlMsg::Stop;
-        let _ = ack.send(());
-        if is_stop {
+        if apply_one(source, bus, msg, &ack)? {
             return Ok(true);
         }
-        if msg == ControlMsg::Pause {
-            loop {
-                let Some((msg, ack)) = control.recv() else {
-                    return Ok(true); // sender gone — treat like Stop
-                };
-                apply_seek(source, bus, msg)?;
-                for pad in source.src_pads() {
-                    pad.control(msg)?;
-                }
-                let is_stop = msg == ControlMsg::Stop;
-                let _ = ack.send(());
-                if is_stop {
-                    return Ok(true);
-                }
-                if msg == ControlMsg::Resume {
-                    break;
-                }
-                // Another Pause while already paused: already forwarded
-                // above (harmless no-op downstream), just keep waiting.
-            }
+        if msg == ControlMsg::Pause && wait_out_pause(control, source, bus)? {
+            return Ok(true);
         }
     }
     Ok(false)
+}
+
+/// Applies one already-received control message to `source`: repositions
+/// it first on `Seek` (see [`apply_seek`]), then forwards `msg` to every
+/// one of `source`'s pads (so it cascades through the graph exactly like
+/// a data buffer would), then acks. Returns `true` for `Stop` — same
+/// meaning as [`drain_control`]'s own return.
+pub(crate) fn apply_one<S: SourceElement>(
+    source: &mut S,
+    bus: &Bus,
+    msg: ControlMsg,
+    ack: &Sender<()>,
+) -> Result<bool> {
+    apply_seek(source, bus, msg)?;
+    for pad in source.src_pads() {
+        pad.control(msg)?;
+    }
+    let is_stop = msg == ControlMsg::Stop;
+    let _ = ack.send(());
+    Ok(is_stop)
+}
+
+/// Blocks on `control` alone — not whatever `source.run()` itself is
+/// otherwise waiting on — until `Resume` or `Stop`, applying (and acking)
+/// every message seen in between via [`apply_one`]. Returns `true` if
+/// `Stop` ended it (including the sender simply going away, treated the
+/// same as `Stop`); `false` once `Resume` arrives.
+pub(crate) fn wait_out_pause<S: SourceElement>(
+    control: &ControlReceiver,
+    source: &mut S,
+    bus: &Bus,
+) -> Result<bool> {
+    loop {
+        let Some((msg, ack)) = control.recv() else {
+            return Ok(true); // sender gone — treat like Stop
+        };
+        if apply_one(source, bus, msg, &ack)? {
+            return Ok(true);
+        }
+        if msg == ControlMsg::Resume {
+            return Ok(false);
+        }
+        // Another Pause while already paused: already forwarded above
+        // (harmless no-op downstream), just keep waiting.
+    }
 }
 
 /// `Seek`'s source-specific half of `drain_control` — repositions
