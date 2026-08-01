@@ -58,6 +58,7 @@ for); this table isn't meant to duplicate that.
 |---|---|
 | `FileDemuxer` | Demuxes a file; one src pad per container stream |
 | `AppSource` | Application code pushes buffers in via a handle, from any thread — GStreamer's `appsrc` equivalent |
+| `WebRtcPeer` (`webrtc`) | Drives one str0m `Rtc` session; `on_track` attaches a sink and hands back a `WebRtcTrackSink` the moment each track's `Mid` exists — symmetric for tracks either side added, so one `Direction::SendRecv` track carries both directions (see below) |
 
 ### Filters
 
@@ -80,6 +81,7 @@ for); this table isn't meant to duplicate that.
 | `RtspServer` (`rtsp-server`) | Spawns a vendored MediaMTX and remuxes packets into it as a live RTSP stream |
 | `AppSink` | Hands buffers (and, optionally, control messages) to plain closures — GStreamer's `appsink` equivalent |
 | `OrtDetector` (`ort`) | Runs a YOLOv8/v11-style ONNX model on each frame via `ort`, hands decoded/NMS-filtered detections to a closure |
+| `WebRtcTrackSink` (`webrtc`) | The send side of one WebRTC track — `consume()` hands off to its `WebRtcPeer`'s own thread; handed out by `on_track`, not `WebRtcHandle::add_track` (which only returns a `TrackId`) |
 
 ## Examples (`examples/`)
 
@@ -120,6 +122,12 @@ Each is its own crate so per-example dependencies (e.g. `winit` for
 | `scale` | Demux → SwDecoder → Queue → Scaler → (verify) | `Scaler` converting decoded frames to a fixed RGB24 640x640 — prints the first scaled frame's actual format/size to prove the conversion really happened |
 | `detect` | Demux → SwDecoder → Queue → Scaler → OrtDetector | `OrtDetector` running a YOLOv8/v11 ONNX model on the scaled frames and printing every detection |
 
+### WebRTC (`webrtc` feature)
+
+| Crate | Pipeline | Demonstrates |
+|---|---|---|
+| `webrtc_loopback` | Two `WebRtcPeer`s over loopback UDP | One `Direction::SendRecv` track (opened by `WebRtcHandle::add_track` on one side, accepted via `WebRtcHandle::accept_remote_offer` on the other) carrying data both ways over the *same* `Mid` — no second negotiation for the reverse direction. No browser/signaling server: real ICE/DTLS-SRTP over loopback UDP |
+
 ```sh
 cargo run -p decode -- path/to/video.mp4   # or omit the path to use test-video/h265.mp4
 cargo run -p sw_decode_render              # dx12-renderer is already enabled in its own Cargo.toml
@@ -140,6 +148,14 @@ cargo run -p sw_decode_render              # dx12-renderer is already enabled in
 - `ort` (on `media-pp`) — pulls in the `ort` crate (ONNX Runtime bindings;
   downloads a prebuilt onnxruntime binary at build time) and `ndarray`, and
   enables `OrtDetector`. `detect` turns it on in its own `Cargo.toml`.
+- `webrtc` (on `media-pp`) — pulls in `str0m` (sans-I/O WebRTC, `wincrypto`
+  backend — native Windows crypto, no OpenSSL vendoring) and enables
+  `WebRtcPeer`/`WebRtcHandle`/`WebRtcTrackSink`. The initial SDP
+  offer/answer and ICE candidate setup happen via str0m directly, in the
+  caller's own code, *before* constructing a `WebRtcPeer` — same posture
+  as `RtspServer` not managing RTSP client connections itself; there's no
+  signaling server built in. `webrtc_loopback` turns it on in its own
+  `Cargo.toml`.
 
 ## Requirements
 

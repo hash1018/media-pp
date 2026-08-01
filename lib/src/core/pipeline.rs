@@ -205,7 +205,18 @@ pub struct Pipeline {
     /// forever instead of unblocking once the pipeline actually finishes.
     bus: Mutex<Option<Bus>>,
     control_tx: ControlSender,
-    control_rx: ControlReceiver,
+    /// Taken (leaving `None` behind) the moment `run()` starts, and moved
+    /// into the background thread — same reasoning as `bus` above. If
+    /// `Pipeline` kept its own clone alive for its whole lifetime instead,
+    /// the control channel's receiver side would never fully disconnect
+    /// even after the background thread has long since exited, so a
+    /// [`Pipeline::stop`]/`pause`/`resume` racing that thread's own natural
+    /// end (e.g. called right as `run()` finishes on its own) could
+    /// enqueue a `Request` nobody will ever read *or drop* — leaving
+    /// [`crate::control::ControlSender::send`]'s rendezvous ack blocked
+    /// forever instead of unblocked by the disconnect, the way it is the
+    /// moment the *last* `ControlReceiver` clone actually goes away.
+    control_rx: Mutex<Option<ControlReceiver>>,
     clock: Arc<Clock>,
     bus_rx: BusReceiver,
     running: AtomicBool,
@@ -232,7 +243,7 @@ impl Pipeline {
             source: Mutex::new(Some(Box::new(source))),
             bus: Mutex::new(Some(bus)),
             control_tx,
-            control_rx,
+            control_rx: Mutex::new(Some(control_rx)),
             clock,
             bus_rx,
             running: AtomicBool::new(false),
@@ -265,9 +276,11 @@ impl Pipeline {
         let Some(bus) = self.bus.lock().unwrap().take() else {
             return;
         };
+        let Some(control_rx) = self.control_rx.lock().unwrap().take() else {
+            return;
+        };
 
         self.running.store(true, Ordering::Release);
-        let control_rx = self.control_rx.clone();
         let this = Arc::clone(self);
         thread::Builder::new()
             .name("pipeline:source".into())

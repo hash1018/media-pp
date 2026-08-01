@@ -17,6 +17,7 @@ use crate::{
 pub enum ElementType {
     FileDemuxer,
     AppSource,
+    WebRtcPeer,
     SwDecoder,
     D3d12vaDecoder,
     Pacer,

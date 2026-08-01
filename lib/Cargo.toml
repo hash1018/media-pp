@@ -15,8 +15,12 @@ windows = { version = "0.62", optional = true, features = [
 ] }
 ort = { version = "2.0.0-rc.13", optional = true }
 ndarray = { version = "0.17", optional = true }
+str0m = { version = "0.21", optional = true, default-features = false, features = [
+    "wincrypto",
+] }
 
 [features]
 dx12-renderer = ["dep:renderer-engine", "dep:windows"]
 rtsp-server = []
 ort = ["dep:ort", "dep:ndarray"]
+webrtc = ["dep:str0m"]

@@ -16,6 +16,7 @@ pub mod buffer;
 pub mod bus;
 pub mod clock;
 pub mod control;
+pub mod driver;
 pub mod element;
 pub mod pad;
 pub mod pipeline;

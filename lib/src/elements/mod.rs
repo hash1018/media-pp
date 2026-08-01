@@ -1,7 +1,12 @@
+pub mod driver;
 pub mod filter;
 pub mod sink;
 pub mod source;
 
+#[cfg(feature = "webrtc")]
+pub use driver::{
+    TrackId, WebRtcError, WebRtcHandle, WebRtcPeer, WebRtcTrackSink, WebRtcTrackSource,
+};
 #[cfg(feature = "dx12-renderer")]
 pub use filter::{D3d12vaDecoder, D3d12vaDecoderError};
 pub use filter::{Pacer, Scaler, ScalerError, SwDecoder, SwDecoderError, Tee, TeeHandle};

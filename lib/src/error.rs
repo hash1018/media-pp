@@ -4,6 +4,8 @@ use thiserror::Error;
 use crate::elements::OrtDetectorError;
 #[cfg(feature = "rtsp-server")]
 use crate::elements::RtspServerError;
+#[cfg(feature = "webrtc")]
+use crate::elements::WebRtcError;
 #[cfg(feature = "dx12-renderer")]
 use crate::elements::{D3d12vaDecoderError, Dx12RendererError};
 use crate::{
@@ -52,6 +54,10 @@ pub enum Error {
     #[cfg(feature = "ort")]
     #[error(transparent)]
     OrtDetectorError(#[from] OrtDetectorError),
+
+    #[cfg(feature = "webrtc")]
+    #[error(transparent)]
+    WebRtcError(#[from] WebRtcError),
 
     #[error("ffmpeg error: {0}")]
     Ffmpeg(#[from] ffmpeg_next::Error),
