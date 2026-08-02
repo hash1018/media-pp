@@ -1,12 +1,13 @@
 use std::{sync::Arc, thread, time::Instant};
 
 use ffmpeg_next as ffmpeg;
+use rust_hlog::HLog;
 
 use crate::{
     buffer::MediaBuffer,
     clock::Clock,
     control::ControlMsg,
-    element::{Element, ElementType, Sink, Source},
+    element::{Element, ElementType, Sink, Source, element_hlog},
     pad::SrcPad,
 };
 
@@ -24,6 +25,7 @@ use crate::{
 /// `clock` is shared across every `Pacer` in the pipeline (one per stream
 /// — video, audio, ...) so they all agree on the same t=0 instead of each
 /// anchoring to its own first frame.
+#[rust_hlog::hlog]
 pub struct Pacer {
     name: Arc<str>,
     time_base: ffmpeg::Rational,
@@ -43,9 +45,11 @@ pub struct Pacer {
 impl Pacer {
     pub fn new(name: impl Into<String>, time_base: ffmpeg::Rational, clock: Arc<Clock>) -> Self {
         let name: Arc<str> = name.into().into();
+        let hlog = element_hlog(ElementType::Pacer, &name, None);
         let pad = SrcPad::new(format!("{name}_src"));
         Self {
             name,
+            hlog,
             time_base,
             clock,
             first_pts: None,
@@ -82,6 +86,14 @@ impl Element for Pacer {
 
     fn element_type(&self) -> ElementType {
         ElementType::Pacer
+    }
+
+    fn hlog(&self) -> &HLog {
+        &self.hlog
+    }
+
+    fn hlog_mut(&mut self) -> &mut HLog {
+        &mut self.hlog
     }
 }
 

@@ -1,13 +1,14 @@
 use std::{sync::Arc, time::Duration};
 
 use crossbeam_channel::{Receiver, Sender, TrySendError, bounded, select};
+use rust_hlog::HLog;
 use thiserror::Error as ThisError;
 
 use crate::{
     buffer::MediaBuffer,
     bus::{Bus, BusEvent},
     control::{ControlMsg, ControlReceiver, apply_one, drain_control, wait_out_pause},
-    element::{Element, ElementType, Source, SourceElement},
+    element::{Element, ElementType, Source, SourceElement, element_hlog},
     error::Result,
     pad::SrcPad,
 };
@@ -42,6 +43,7 @@ pub enum AppSourceError {
 /// Has no timeline of its own, so [`SourceElement::seek`] is a no-op that
 /// reports back whatever was requested as where it "landed" — nothing to
 /// reposition when the app, not a file offset, decides what comes next.
+#[rust_hlog::hlog]
 pub struct AppSource {
     name: Arc<str>,
     pad: SrcPad,
@@ -63,11 +65,13 @@ impl AppSource {
     /// [`crate::queue::Queue`]'s own `capacity`.
     pub fn new(name: impl Into<String>, capacity: usize) -> (Self, AppSourceHandle) {
         let name: Arc<str> = name.into().into();
+        let hlog = element_hlog(ElementType::AppSource, &name, None);
         let pad = SrcPad::new(format!("{name}_src"));
         let (data_tx, data_rx) = bounded(capacity);
         (
             Self {
                 name: name.clone(),
+                hlog,
                 pad,
                 data_rx,
             },
@@ -111,6 +115,14 @@ impl Element for AppSource {
     fn element_type(&self) -> ElementType {
         ElementType::AppSource
     }
+
+    fn hlog(&self) -> &HLog {
+        &self.hlog
+    }
+
+    fn hlog_mut(&mut self) -> &mut HLog {
+        &mut self.hlog
+    }
 }
 
 impl Source for AppSource {
@@ -153,11 +165,14 @@ impl SourceElement for AppSource {
                         Ok(buf) if buf.is_eos() => break,
                         Ok(buf) => {
                             if let Err(error) = self.pad.push(buf) {
-                                bus.post(BusEvent::Error {
-                                    element_type: ElementType::AppSource,
-                                    name: self.name.clone(),
-                                    error,
-                                });
+                                bus.post(
+                                    &self.hlog,
+                                    BusEvent::Error {
+                                        element_type: ElementType::AppSource,
+                                        name: self.name.clone(),
+                                        error,
+                                    },
+                                );
                             }
                         }
                         // Every `AppSourceHandle` dropped without an explicit Eos.
@@ -189,6 +204,7 @@ mod tests {
     use super::*;
     use crate::pipeline::{ChainBuilder, Pipeline};
 
+    #[rust_hlog::hlog]
     struct CountingSink {
         count: Arc<AtomicUsize>,
     }
@@ -200,6 +216,14 @@ mod tests {
 
         fn element_type(&self) -> ElementType {
             ElementType::Other
+        }
+
+        fn hlog(&self) -> &HLog {
+            &self.hlog
+        }
+
+        fn hlog_mut(&mut self) -> &mut HLog {
+            &mut self.hlog
         }
     }
 
@@ -221,9 +245,12 @@ mod tests {
     }
 
     fn wire(source: AppSource, count: Arc<AtomicUsize>) -> Arc<Pipeline> {
-        let sink = CountingSink { count };
-        Pipeline::new(source, |source, bus, _clock| {
-            let branch = ChainBuilder::new(bus.clone()).build(Box::new(sink));
+        let sink = CountingSink {
+            count,
+            hlog: element_hlog(ElementType::Other, "counter", None),
+        };
+        Pipeline::new("test", source, |source, bus, _clock, id| {
+            let branch = ChainBuilder::new(bus.clone(), id).build(Box::new(sink));
             source.src_pads()[0].link(branch);
         })
     }

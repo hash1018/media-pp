@@ -1,13 +1,14 @@
 use std::{path::Path, sync::Arc, time::Duration};
 
 use ffmpeg_next as ffmpeg;
+use rust_hlog::{HLog, herror};
 use thiserror::Error as ThisError;
 
 use crate::{
     buffer::MediaBuffer,
     bus::{Bus, BusEvent},
     control::{ControlReceiver, drain_control},
-    element::{Element, ElementType, Source, SourceElement},
+    element::{Element, ElementType, Source, SourceElement, element_hlog},
     pad::SrcPad,
 };
 
@@ -35,6 +36,7 @@ pub struct StreamInfo {
 /// Fan-out (e.g. routing video and audio to separate branches) needs no
 /// separate "Tee" element here — it's just a matter of linking more than
 /// one of these pads.
+#[rust_hlog::hlog]
 pub struct FileDemuxer {
     name: Arc<str>,
     input: ffmpeg::format::context::Input,
@@ -70,9 +72,12 @@ impl FileDemuxer {
             .map(|s| SrcPad::new(format!("src_{}", s.index)))
             .collect();
 
+        let name: Arc<str> = name.into().into();
+        let hlog = element_hlog(ElementType::FileDemuxer, &name, None);
         Ok((
             Self {
-                name: name.into().into(),
+                name,
+                hlog,
                 input,
                 pads,
                 pending: None,
@@ -106,6 +111,14 @@ impl Element for FileDemuxer {
 
     fn element_type(&self) -> ElementType {
         ElementType::FileDemuxer
+    }
+
+    fn hlog(&self) -> &HLog {
+        &self.hlog
+    }
+
+    fn hlog_mut(&mut self) -> &mut HLog {
+        &mut self.hlog
     }
 }
 
@@ -147,11 +160,14 @@ impl SourceElement for FileDemuxer {
                 // thread over it. `Pipeline::stop` is how a caller who
                 // decides an error is fatal actually ends things.
                 if let Err(error) = pad.push(MediaBuffer::Packet(Arc::new(packet))) {
-                    bus.post(BusEvent::Error {
-                        element_type: ElementType::FileDemuxer,
-                        name: self.name.clone(),
-                        error,
-                    });
+                    bus.post(
+                        &self.hlog,
+                        BusEvent::Error {
+                            element_type: ElementType::FileDemuxer,
+                            name: self.name.clone(),
+                            error,
+                        },
+                    );
                 }
             }
         }
@@ -174,7 +190,9 @@ impl SourceElement for FileDemuxer {
         // 10-second file with keyframes only at 0s and 8.3s means every
         // `target` under 8.3s lands back at 0s.
         let ts = target.as_micros().min(i64::MAX as u128) as i64;
-        self.input.seek(ts, ..)?;
+        self.input.seek(ts, ..).inspect_err(|error| {
+            herror!(self, "seek to {target:?} failed: {error}");
+        })?;
 
         // `avformat_seek_file` only reports success/failure, not where it
         // landed — the one way to find out is to read the next packet and

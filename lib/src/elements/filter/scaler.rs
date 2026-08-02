@@ -1,12 +1,13 @@
 use std::sync::Arc;
 
 use ffmpeg_next as ffmpeg;
+use rust_hlog::{HLog, herror};
 use thiserror::Error as ThisError;
 
 use crate::{
     buffer::MediaBuffer,
     control::ControlMsg,
-    element::{Element, ElementType, Sink, Source},
+    element::{Element, ElementType, Sink, Source, element_hlog},
     error::Result,
     pad::SrcPad,
     pool::UnboundObjectPool,
@@ -46,6 +47,7 @@ pub enum ScalerError {
 /// Typical placement: right before something with a fixed input
 /// contract, e.g. an ONNX object-detection model — not a general-purpose
 /// pipeline stage, so most chains won't need one at all.
+#[rust_hlog::hlog]
 pub struct Scaler {
     name: Arc<str>,
     dst_format: ffmpeg::format::Pixel,
@@ -91,6 +93,7 @@ impl Scaler {
         flags: ffmpeg::software::scaling::Flags,
     ) -> Self {
         let name: Arc<str> = name.into().into();
+        let hlog = element_hlog(ElementType::Scaler, &name, None);
         let pad = SrcPad::new(format!("{name}_src"));
         let pool = UnboundObjectPool::new(
             POOL_SIZE,
@@ -99,6 +102,7 @@ impl Scaler {
         );
         Self {
             name,
+            hlog,
             dst_format,
             dst_width,
             dst_height,
@@ -132,6 +136,14 @@ impl Element for Scaler {
 
     fn element_type(&self) -> ElementType {
         ElementType::Scaler
+    }
+
+    fn hlog(&self) -> &HLog {
+        &self.hlog
+    }
+
+    fn hlog_mut(&mut self) -> &mut HLog {
+        &mut self.hlog
     }
 }
 
@@ -167,6 +179,9 @@ impl Sink for Scaler {
                                     self.dst_height,
                                     self.flags,
                                 )
+                                .inspect_err(|error| {
+                                    herror!(self, "failed to build scaling context: {error}")
+                                })
                                 .map_err(ScalerError::from)?,
                             );
                         }
@@ -181,6 +196,7 @@ impl Sink for Scaler {
                     .as_mut()
                     .expect("built or confirmed matching above")
                     .run(&frame, &mut output)
+                    .inspect_err(|error| herror!(self, "scale failed: {error}"))
                     .map_err(ScalerError::from)?;
                 // `run` only copies pixel data, not metadata — carry the
                 // pts through by hand so downstream pacing/muxing still
@@ -190,8 +206,14 @@ impl Sink for Scaler {
                 self.pad.push(MediaBuffer::Video(Arc::new(output)))
             }
             MediaBuffer::Eos => self.pad.push(MediaBuffer::Eos),
-            MediaBuffer::Packet(_) => Err(ScalerError::UnsupportedBuffer("Packet").into()),
-            MediaBuffer::Audio(_) => Err(ScalerError::UnsupportedBuffer("Audio").into()),
+            MediaBuffer::Packet(_) => {
+                herror!(self, "unsupported buffer: Packet");
+                Err(ScalerError::UnsupportedBuffer("Packet").into())
+            }
+            MediaBuffer::Audio(_) => {
+                herror!(self, "unsupported buffer: Audio");
+                Err(ScalerError::UnsupportedBuffer("Audio").into())
+            }
         }
     }
 

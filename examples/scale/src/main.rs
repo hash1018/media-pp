@@ -9,10 +9,11 @@ use media_pp::{
     buffer::MediaBuffer,
     bus::BusEvent,
     control::ControlMsg,
-    element::{Element, ElementType, Sink, Source},
+    element::{Element, ElementType, Sink, Source, element_hlog},
     elements::{FileDemuxer, Scaler, SwDecoder},
     pipeline::{ChainBuilder, Pipeline},
 };
+use rust_hlog::HLog;
 
 const DST_FORMAT: Pixel = Pixel::RGB24;
 const DST_WIDTH: u32 = 640;
@@ -44,12 +45,13 @@ fn main() -> media_pp::Result<()> {
     let count = Arc::new(AtomicUsize::new(0));
     let sink = VerifyingSink {
         count: count.clone(),
+        hlog: element_hlog(ElementType::Other, "verify", None),
     };
 
-    let pipeline = Pipeline::new(source, |source, bus, _clock| {
+    let pipeline = Pipeline::new("scale", source, |source, bus, _clock, id| {
         let decoder = SwDecoder::new("decoder", params).expect("failed to open decoder");
         let scaler = Scaler::new("scaler", DST_FORMAT, DST_WIDTH, DST_HEIGHT, Flags::BILINEAR);
-        let branch = ChainBuilder::new(bus.clone())
+        let branch = ChainBuilder::new(bus.clone(), id)
             .pipe(decoder) // same thread as the demux — cheap enough not to need a queue
             .queue("frames", 8) // scaler/sink run on their own thread
             .pipe(scaler)
@@ -88,6 +90,7 @@ fn main() -> media_pp::Result<()> {
 /// `DST_WIDTH`x`DST_HEIGHT`, not just that the pipeline ran to
 /// completion — then counts every frame after that the same way
 /// `FrameCounter` would.
+#[rust_hlog::hlog]
 struct VerifyingSink {
     count: Arc<AtomicUsize>,
 }
@@ -99,6 +102,14 @@ impl Element for VerifyingSink {
 
     fn element_type(&self) -> ElementType {
         ElementType::Other
+    }
+
+    fn hlog(&self) -> &HLog {
+        &self.hlog
+    }
+
+    fn hlog_mut(&mut self) -> &mut HLog {
+        &mut self.hlog
     }
 }
 

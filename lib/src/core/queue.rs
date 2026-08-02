@@ -4,13 +4,14 @@ use std::{
 };
 
 use crossbeam_channel::{Receiver, Sender, TrySendError, bounded, select};
+use rust_hlog::HLog;
 use thiserror::Error as ThisError;
 
 use crate::{
     buffer::MediaBuffer,
     bus::{Bus, BusEvent},
     control::{self, ControlMsg, ControlReceiver, ControlSender},
-    element::{Element, ElementType, Sink},
+    element::{Element, ElementType, Sink, element_hlog},
     error::Result,
 };
 
@@ -66,6 +67,7 @@ pub enum OverflowPolicy {
 /// behalf; watch [`crate::pipeline::Pipeline::bus`] and call
 /// [`crate::pipeline::Pipeline::stop`] yourself if a particular error
 /// means the whole pipeline should end.
+#[rust_hlog::hlog]
 pub struct Queue {
     name: Arc<str>,
     tx: Sender<MediaBuffer>,
@@ -83,36 +85,62 @@ impl Queue {
         capacity: usize,
         downstream: Box<dyn Sink>,
         bus: Bus,
+        pipeline_id: Option<&str>,
     ) -> Queue {
-        Self::spawn_with_policy(name, capacity, downstream, bus, OverflowPolicy::Block)
+        Self::spawn_with_policy(
+            name,
+            capacity,
+            downstream,
+            bus,
+            OverflowPolicy::Block,
+            pipeline_id,
+        )
     }
 
     /// Spawns the worker thread that owns `downstream` and starts pulling
-    /// from the channel immediately.
+    /// from the channel immediately. `pipeline_id` (typically the owning
+    /// [`crate::pipeline::Pipeline`]'s own id — see
+    /// [`crate::pipeline::ChainBuilder`], which is what actually passes
+    /// one when this `Queue` came from a `.queue()`/`.queue_with_policy()`
+    /// call) becomes this `Queue`'s `hlog` sub_id; `None` if it wasn't
+    /// built through a `Pipeline` at all (e.g. the tests below).
     pub fn spawn_with_policy(
         name: impl Into<String>,
         capacity: usize,
         downstream: Box<dyn Sink>,
         bus: Bus,
         policy: OverflowPolicy,
+        pipeline_id: Option<&str>,
     ) -> Queue {
         // Stored as `Arc<str>` (not `String`) so the `worker_name.clone()`
         // below, and every subsequent `BusEvent` this posts, are a
         // refcount bump instead of a fresh allocation — `Dropped` in
         // particular can fire once per buffer under sustained overflow.
         let name: Arc<str> = name.into().into();
+        let hlog = element_hlog(ElementType::Queue, &name, pipeline_id);
         let (tx, rx) = bounded::<MediaBuffer>(capacity);
         let (control_tx, control_rx) = control::channel();
         let worker_name = name.clone();
         let worker_bus = bus.clone();
+        let worker_hlog = hlog.clone();
 
         let handle = thread::Builder::new()
             .name(format!("queue:{worker_name}"))
-            .spawn(move || worker_loop(rx, control_rx, downstream, worker_bus, worker_name))
+            .spawn(move || {
+                worker_loop(
+                    rx,
+                    control_rx,
+                    downstream,
+                    worker_bus,
+                    worker_name,
+                    worker_hlog,
+                )
+            })
             .expect("failed to spawn queue worker thread");
 
         Queue {
             name,
+            hlog,
             tx,
             policy,
             bus,
@@ -129,6 +157,14 @@ impl Element for Queue {
 
     fn element_type(&self) -> ElementType {
         ElementType::Queue
+    }
+
+    fn hlog(&self) -> &HLog {
+        &self.hlog
+    }
+
+    fn hlog_mut(&mut self) -> &mut HLog {
+        &mut self.hlog
     }
 }
 
@@ -152,10 +188,13 @@ impl Sink for Queue {
             OverflowPolicy::DropNewest => match self.tx.try_send(buf) {
                 Ok(()) => Ok(()),
                 Err(TrySendError::Full(_)) => {
-                    self.bus.post(BusEvent::Dropped {
-                        element_type: ElementType::Queue,
-                        name: self.name.clone(),
-                    });
+                    self.bus.post(
+                        &self.hlog,
+                        BusEvent::Dropped {
+                            element_type: ElementType::Queue,
+                            name: self.name.clone(),
+                        },
+                    );
                     Ok(())
                 }
                 Err(TrySendError::Disconnected(_)) => Err(QueueError::ChannelClosed.into()),
@@ -201,6 +240,11 @@ fn worker_loop(
     mut downstream: Box<dyn Sink>,
     bus: Bus,
     name: Arc<str>,
+    // Cloned from `Queue`'s own field before this thread was spawned —
+    // same value, not rebuilt here, so a `pipeline_id` passed to
+    // `spawn_with_policy` actually reaches this thread's own log lines
+    // too.
+    hlog: HLog,
 ) {
     loop {
         if let Some((msg, ack)) = control_rx.try_recv() {
@@ -228,10 +272,13 @@ fn worker_loop(
                         match downstream.consume(buf) {
                             Ok(()) => {
                                 if is_eos {
-                                    bus.post(BusEvent::Eos {
-                                        element_type: ElementType::Queue,
-                                        name: name.clone(),
-                                    });
+                                    bus.post(
+                                        &hlog,
+                                        BusEvent::Eos {
+                                            element_type: ElementType::Queue,
+                                            name: name.clone(),
+                                        },
+                                    );
                                     return;
                                 }
                             }
@@ -241,11 +288,14 @@ fn worker_loop(
                                 // dies over it. Whoever's watching the bus
                                 // decides whether the error is fatal
                                 // enough to call `Pipeline::stop`.
-                                bus.post(BusEvent::Error {
-                                    element_type: ElementType::Queue,
-                                    name: name.clone(),
-                                    error,
-                                });
+                                bus.post(
+                                    &hlog,
+                                    BusEvent::Error {
+                                        element_type: ElementType::Queue,
+                                        name: name.clone(),
+                                        error,
+                                    },
+                                );
                             }
                         }
                     }
@@ -325,6 +375,7 @@ mod tests {
 
     /// A downstream that's slower than the producer, so a small queue
     /// behind it actually fills up during the test.
+    #[rust_hlog::hlog]
     struct SlowCounter {
         count: Arc<AtomicUsize>,
     }
@@ -336,6 +387,14 @@ mod tests {
 
         fn element_type(&self) -> ElementType {
             ElementType::Other
+        }
+
+        fn hlog(&self) -> &HLog {
+            &self.hlog
+        }
+
+        fn hlog_mut(&mut self) -> &mut HLog {
+            &mut self.hlog
         }
     }
 
@@ -362,11 +421,12 @@ mod tests {
         let count = Arc::new(AtomicUsize::new(0));
         let sink = SlowCounter {
             count: count.clone(),
+            hlog: element_hlog(ElementType::Other, "slow-counter", None),
         };
         let (bus, bus_rx) = Bus::new();
 
         let mut queue =
-            Queue::spawn_with_policy("test", 1, Box::new(sink), bus, OverflowPolicy::Block);
+            Queue::spawn_with_policy("test", 1, Box::new(sink), bus, OverflowPolicy::Block, None);
         for _ in 0..10 {
             queue.consume(packet()).unwrap();
         }
@@ -382,11 +442,18 @@ mod tests {
         let count = Arc::new(AtomicUsize::new(0));
         let sink = SlowCounter {
             count: count.clone(),
+            hlog: element_hlog(ElementType::Other, "slow-counter", None),
         };
         let (bus, bus_rx) = Bus::new();
 
-        let mut queue =
-            Queue::spawn_with_policy("test", 1, Box::new(sink), bus, OverflowPolicy::DropNewest);
+        let mut queue = Queue::spawn_with_policy(
+            "test",
+            1,
+            Box::new(sink),
+            bus,
+            OverflowPolicy::DropNewest,
+            None,
+        );
         // Pushed much faster than the 20ms/item downstream can drain a
         // capacity-1 channel, so some of these must get dropped.
         for _ in 0..10 {
@@ -414,11 +481,12 @@ mod tests {
         let count = Arc::new(AtomicUsize::new(0));
         let sink = SlowCounter {
             count: count.clone(),
+            hlog: element_hlog(ElementType::Other, "slow-counter", None),
         };
         let (bus, _bus_rx) = Bus::new();
 
         let mut queue =
-            Queue::spawn_with_policy("test", 8, Box::new(sink), bus, OverflowPolicy::Block);
+            Queue::spawn_with_policy("test", 8, Box::new(sink), bus, OverflowPolicy::Block, None);
         queue.control(ControlMsg::Pause).unwrap(); // blocks until the worker is actually paused
 
         for _ in 0..3 {
@@ -441,11 +509,12 @@ mod tests {
         let count = Arc::new(AtomicUsize::new(0));
         let sink = SlowCounter {
             count: count.clone(),
+            hlog: element_hlog(ElementType::Other, "slow-counter", None),
         };
         let (bus, _bus_rx) = Bus::new();
 
         let mut queue =
-            Queue::spawn_with_policy("test", 8, Box::new(sink), bus, OverflowPolicy::Block);
+            Queue::spawn_with_policy("test", 8, Box::new(sink), bus, OverflowPolicy::Block, None);
         queue.consume(packet()).unwrap();
         queue.control(ControlMsg::Stop).unwrap(); // blocks until the worker has exited
         drop(queue); // join should return immediately — the worker already returned
@@ -453,6 +522,7 @@ mod tests {
 
     /// A downstream that fails on the very first `Packet` it sees, then
     /// behaves like `SlowCounter` for every one after.
+    #[rust_hlog::hlog]
     struct FailFirstThenCount {
         count: Arc<AtomicUsize>,
         failed_once: bool,
@@ -465,6 +535,14 @@ mod tests {
 
         fn element_type(&self) -> ElementType {
             ElementType::Other
+        }
+
+        fn hlog(&self) -> &HLog {
+            &self.hlog
+        }
+
+        fn hlog_mut(&mut self) -> &mut HLog {
+            &mut self.hlog
         }
     }
 
@@ -498,11 +576,12 @@ mod tests {
         let sink = FailFirstThenCount {
             count: count.clone(),
             failed_once: false,
+            hlog: element_hlog(ElementType::Other, "fail-first", None),
         };
         let (bus, bus_rx) = Bus::new();
 
         let mut queue =
-            Queue::spawn_with_policy("test", 8, Box::new(sink), bus, OverflowPolicy::Block);
+            Queue::spawn_with_policy("test", 8, Box::new(sink), bus, OverflowPolicy::Block, None);
         for _ in 0..3 {
             queue.consume(packet()).unwrap();
         }

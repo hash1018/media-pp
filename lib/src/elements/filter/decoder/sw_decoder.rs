@@ -1,12 +1,13 @@
 use std::sync::Arc;
 
 use ffmpeg_next as ffmpeg;
+use rust_hlog::{HLog, herror};
 use thiserror::Error as ThisError;
 
 use crate::{
     buffer::MediaBuffer,
     control::ControlMsg,
-    element::{Element, ElementType, Sink, Source},
+    element::{Element, ElementType, Sink, Source, element_hlog},
     pad::SrcPad,
     pool::UnboundObjectPool,
 };
@@ -35,6 +36,7 @@ enum Kind {
 /// reordering, decoder buffering, ...) — `consume` just drains
 /// `receive_frame` in a loop after every `send_packet`/`send_eof`, pushing
 /// however many frames come out.
+#[rust_hlog::hlog]
 pub struct SwDecoder {
     name: Arc<str>,
     kind: Kind,
@@ -58,6 +60,7 @@ impl SwDecoder {
         params: ffmpeg::codec::Parameters,
     ) -> Result<Self, SwDecoderError> {
         let name: Arc<str> = name.into().into();
+        let hlog = element_hlog(ElementType::SwDecoder, &name, None);
         let context = ffmpeg::codec::context::Context::from_parameters(params)?;
 
         let kind = match context.medium() {
@@ -70,6 +73,7 @@ impl SwDecoder {
         let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
         Ok(Self {
             name,
+            hlog,
             kind,
             pad,
             pool,
@@ -84,6 +88,14 @@ impl Element for SwDecoder {
 
     fn element_type(&self) -> ElementType {
         ElementType::SwDecoder
+    }
+
+    fn hlog(&self) -> &HLog {
+        &self.hlog
+    }
+
+    fn hlog_mut(&mut self) -> &mut HLog {
+        &mut self.hlog
     }
 }
 
@@ -100,12 +112,14 @@ impl Sink for SwDecoder {
                 Kind::Video(decoder) => {
                     decoder
                         .send_packet(&*packet)
+                        .inspect_err(|error| herror!(self, "send_packet failed: {error}"))
                         .map_err(SwDecoderError::from)?;
                     drain_video(decoder, &mut self.pad, &self.pool)
                 }
                 Kind::Audio(decoder) => {
                     decoder
                         .send_packet(&*packet)
+                        .inspect_err(|error| herror!(self, "send_packet failed: {error}"))
                         .map_err(SwDecoderError::from)?;
                     drain_audio(decoder, &mut self.pad)
                 }

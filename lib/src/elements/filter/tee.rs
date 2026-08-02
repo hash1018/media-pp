@@ -1,9 +1,11 @@
 use std::sync::{Arc, Mutex};
 
+use rust_hlog::HLog;
+
 use crate::{
     buffer::MediaBuffer,
     control::ControlMsg,
-    element::{Element, ElementType, Sink},
+    element::{Element, ElementType, Sink, element_hlog},
     error::Result,
     pad::SrcPad,
 };
@@ -21,6 +23,7 @@ use crate::{
 /// Cheap to fan out: `MediaBuffer` wraps its payload in an `Arc`, so
 /// cloning a buffer for each output is a refcount bump, not a copy of the
 /// encoded/decoded data.
+#[rust_hlog::hlog]
 pub struct Tee {
     name: Arc<str>,
     pads: Arc<Mutex<Vec<SrcPad>>>,
@@ -41,10 +44,12 @@ impl Tee {
     /// before (or any time after) wiring `Tee` itself into the pipeline.
     pub fn new(name: impl Into<String>) -> (Self, TeeHandle) {
         let name: Arc<str> = name.into().into();
+        let hlog = element_hlog(ElementType::Tee, &name, None);
         let pads = Arc::new(Mutex::new(Vec::new()));
         (
             Self {
                 name: name.clone(),
+                hlog,
                 pads: pads.clone(),
             },
             TeeHandle { name, pads },
@@ -82,6 +87,14 @@ impl Element for Tee {
 
     fn element_type(&self) -> ElementType {
         ElementType::Tee
+    }
+
+    fn hlog(&self) -> &HLog {
+        &self.hlog
+    }
+
+    fn hlog_mut(&mut self) -> &mut HLog {
+        &mut self.hlog
     }
 }
 

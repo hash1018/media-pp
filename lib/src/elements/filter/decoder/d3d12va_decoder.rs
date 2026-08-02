@@ -1,13 +1,14 @@
 use std::{ffi::c_void, sync::Arc};
 
 use ffmpeg_next::{self as ffmpeg, ffi};
+use rust_hlog::{HLog, herror};
 use thiserror::Error as ThisError;
 use windows::{Win32::Graphics::Direct3D12::ID3D12Device, core::Interface};
 
 use crate::{
     buffer::MediaBuffer,
     control::ControlMsg,
-    element::{Element, ElementType, Sink, Source},
+    element::{Element, ElementType, Sink, Source, element_hlog},
     pad::SrcPad,
     pool::UnboundObjectPool,
 };
@@ -73,6 +74,7 @@ pub enum D3d12vaDecoderError {
 /// they work unmodified. Only [`crate::elements::Dx12Renderer`] cares:
 /// it checks `frame.format()` and, for `Pixel::D3D12`, takes the
 /// zero-copy path via [`d3d12va_texture`] instead of reading pixel bytes.
+#[rust_hlog::hlog]
 pub struct D3d12vaDecoder {
     name: Arc<str>,
     decoder: ffmpeg::decoder::Video,
@@ -111,6 +113,7 @@ impl D3d12vaDecoder {
         device: &ID3D12Device,
     ) -> Result<Self, D3d12vaDecoderError> {
         let name: Arc<str> = name.into().into();
+        let hlog = element_hlog(ElementType::D3d12vaDecoder, &name, None);
 
         let hw_device_ctx = unsafe { create_hw_device_ctx(device) }?;
 
@@ -143,6 +146,7 @@ impl D3d12vaDecoder {
         let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
         Ok(Self {
             name,
+            hlog,
             decoder,
             hw_device_ctx,
             pad,
@@ -154,6 +158,7 @@ impl D3d12vaDecoder {
         let mut frame = self.pool.get();
         while self.decoder.receive_frame(&mut frame).is_ok() {
             if frame.format() != ffmpeg::format::Pixel::D3D12 {
+                herror!(self, "decoder did not select the D3D12VA pixel format");
                 return Err(D3d12vaDecoderError::HwAccelUnavailable.into());
             }
             self.pad.push(MediaBuffer::Video(Arc::new(frame)))?;
@@ -171,6 +176,14 @@ impl Element for D3d12vaDecoder {
     fn element_type(&self) -> ElementType {
         ElementType::D3d12vaDecoder
     }
+
+    fn hlog(&self) -> &HLog {
+        &self.hlog
+    }
+
+    fn hlog_mut(&mut self) -> &mut HLog {
+        &mut self.hlog
+    }
 }
 
 impl Source for D3d12vaDecoder {
@@ -185,6 +198,7 @@ impl Sink for D3d12vaDecoder {
             MediaBuffer::Packet(packet) => {
                 self.decoder
                     .send_packet(&*packet)
+                    .inspect_err(|error| herror!(self, "send_packet failed: {error}"))
                     .map_err(D3d12vaDecoderError::from)?;
                 self.drain()
             }

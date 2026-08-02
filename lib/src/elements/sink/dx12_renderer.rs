@@ -5,6 +5,7 @@ use renderer_engine::{
     engine::RendererEngine,
     window_renderer::{RawPlane, SubmitError, WindowRenderer},
 };
+use rust_hlog::{HLog, herror};
 use thiserror::Error as ThisError;
 use windows::{
     Win32::Graphics::Direct3D12::{ID3D12Fence, ID3D12Resource},
@@ -14,7 +15,7 @@ use windows::{
 use crate::{
     buffer::MediaBuffer,
     control::ControlMsg,
-    element::{Element, ElementType, Sink},
+    element::{Element, ElementType, Sink, element_hlog},
     elements::filter::decoder::d3d12va_decoder::d3d12va_texture,
     error::Result,
     pool::UnboundObjectPoolRef,
@@ -57,6 +58,7 @@ pub enum Dx12RendererError {
 ///   - `Pixel::D3D12`: GPU-decoded (from `D3d12vaDecoder`) — zero-copy,
 ///     draws straight from the decoder's own texture via
 ///     `submit_nv12_texture`.
+#[rust_hlog::hlog]
 pub struct Dx12Renderer {
     name: Arc<str>,
     inner: WindowRenderer,
@@ -76,10 +78,9 @@ impl Dx12Renderer {
     ) -> Result<Self> {
         let inner =
             WindowRenderer::new(engine, hwnd, width, height).map_err(Dx12RendererError::Create)?;
-        Ok(Self {
-            name: name.into().into(),
-            inner,
-        })
+        let name: Arc<str> = name.into().into();
+        let hlog = element_hlog(ElementType::Dx12Renderer, &name, None);
+        Ok(Self { name, hlog, inner })
     }
 
     /// Call when the target window resizes.
@@ -153,6 +154,14 @@ impl Element for Dx12Renderer {
     fn element_type(&self) -> ElementType {
         ElementType::Dx12Renderer
     }
+
+    fn hlog(&self) -> &HLog {
+        &self.hlog
+    }
+
+    fn hlog_mut(&mut self) -> &mut HLog {
+        &mut self.hlog
+    }
 }
 
 impl Sink for Dx12Renderer {
@@ -162,9 +171,16 @@ impl Sink for Dx12Renderer {
         };
 
         match frame.format() {
-            ffmpeg::format::Pixel::YUV420P => self.submit_yuv420p_frame(&frame),
-            ffmpeg::format::Pixel::D3D12 => self.submit_d3d12_frame(frame),
-            other => Err(Dx12RendererError::UnsupportedFormat(other).into()),
+            ffmpeg::format::Pixel::YUV420P => self
+                .submit_yuv420p_frame(&frame)
+                .inspect_err(|error| herror!(self, "submit_yuv420p_frame failed: {error}")),
+            ffmpeg::format::Pixel::D3D12 => self
+                .submit_d3d12_frame(frame)
+                .inspect_err(|error| herror!(self, "submit_d3d12_frame failed: {error}")),
+            other => {
+                herror!(self, "unsupported pixel format: {other:?}");
+                Err(Dx12RendererError::UnsupportedFormat(other).into())
+            }
         }
     }
 

@@ -7,12 +7,14 @@ use std::{
     time::Duration,
 };
 
+use rust_hlog::HLog;
+
 use crate::{
     buffer::MediaBuffer,
     bus::{Bus, BusEvent, BusReceiver},
     clock::Clock,
     control::{self, ControlMsg, ControlReceiver, ControlSender},
-    element::{Element, ElementType, Filter, Sink, SourceElement},
+    element::{Element, ElementType, Filter, Sink, SourceElement, element_hlog},
     error::Result,
     queue::{OverflowPolicy, Queue},
 };
@@ -27,11 +29,22 @@ use crate::{
 /// terminal `Sink` at [`ChainBuilder::build`] time.
 pub struct ChainBuilder {
     bus: Bus,
+    /// This chain's owning [`Pipeline`]'s own id — stamped as every
+    /// element's `hlog` sub_id (via [`crate::element::element_hlog`]) as
+    /// it's wrapped in [`ChainBuilder::pipe`]/[`ChainBuilder::queue`]/
+    /// [`ChainBuilder::build`], so a log line names not just which
+    /// element failed but which pipeline it belonged to.
+    pipeline_id: Arc<str>,
     elements: Vec<Box<dyn StageBuilder>>,
 }
 
 trait StageBuilder: Send {
-    fn wrap(self: Box<Self>, downstream: Box<dyn Sink>, bus: &Bus) -> Box<dyn Sink>;
+    fn wrap(
+        self: Box<Self>,
+        downstream: Box<dyn Sink>,
+        bus: &Bus,
+        pipeline_id: &str,
+    ) -> Box<dyn Sink>;
 }
 
 struct DirectStage<T>(T);
@@ -40,7 +53,12 @@ impl<T> StageBuilder for DirectStage<T>
 where
     T: Filter + 'static,
 {
-    fn wrap(self: Box<Self>, downstream: Box<dyn Sink>, _bus: &Bus) -> Box<dyn Sink> {
+    fn wrap(
+        self: Box<Self>,
+        downstream: Box<dyn Sink>,
+        _bus: &Bus,
+        pipeline_id: &str,
+    ) -> Box<dyn Sink> {
         let mut element = self.0;
         assert_eq!(
             element.src_pads().len(),
@@ -48,6 +66,8 @@ where
             "ChainBuilder::pipe() is for single-output elements; link a multi-pad \
              element's src_pads() by hand instead"
         );
+        *element.hlog_mut() =
+            element_hlog(element.element_type(), &element.name(), Some(pipeline_id));
         element.src_pads()[0].link(downstream);
         Box::new(element)
     }
@@ -77,6 +97,14 @@ impl Element for EosReporter {
     fn element_type(&self) -> ElementType {
         self.inner.element_type()
     }
+
+    fn hlog(&self) -> &HLog {
+        self.inner.hlog()
+    }
+
+    fn hlog_mut(&mut self) -> &mut HLog {
+        self.inner.hlog_mut()
+    }
 }
 
 impl Sink for EosReporter {
@@ -84,10 +112,13 @@ impl Sink for EosReporter {
         let is_eos = buf.is_eos();
         self.inner.consume(buf)?;
         if is_eos {
-            self.bus.post(BusEvent::Eos {
-                element_type: self.inner.element_type(),
-                name: self.inner.name(),
-            });
+            self.bus.post(
+                self.inner.hlog(),
+                BusEvent::Eos {
+                    element_type: self.inner.element_type(),
+                    name: self.inner.name(),
+                },
+            );
         }
         Ok(())
     }
@@ -98,21 +129,28 @@ impl Sink for EosReporter {
 }
 
 impl StageBuilder for QueueStage {
-    fn wrap(self: Box<Self>, downstream: Box<dyn Sink>, bus: &Bus) -> Box<dyn Sink> {
+    fn wrap(
+        self: Box<Self>,
+        downstream: Box<dyn Sink>,
+        bus: &Bus,
+        pipeline_id: &str,
+    ) -> Box<dyn Sink> {
         Box::new(Queue::spawn_with_policy(
             self.name,
             self.capacity,
             downstream,
             bus.clone(),
             self.policy,
+            Some(pipeline_id),
         ))
     }
 }
 
 impl ChainBuilder {
-    pub fn new(bus: Bus) -> Self {
+    pub fn new(bus: Bus, pipeline_id: impl Into<String>) -> Self {
         Self {
             bus,
+            pipeline_id: pipeline_id.into().into(),
             elements: Vec::new(),
         }
     }
@@ -154,7 +192,12 @@ impl ChainBuilder {
     /// assembles everything into a single `Box<dyn Sink>` ready to be
     /// linked into a source's src pad. The terminal's own `Element::name()`
     /// is what shows up on the bus when it reports EOS.
-    pub fn build(self, terminal: Box<dyn Sink>) -> Box<dyn Sink> {
+    pub fn build(self, mut terminal: Box<dyn Sink>) -> Box<dyn Sink> {
+        *terminal.hlog_mut() = element_hlog(
+            terminal.element_type(),
+            &terminal.name(),
+            Some(&self.pipeline_id),
+        );
         let terminal: Box<dyn Sink> = Box::new(EosReporter {
             bus: self.bus.clone(),
             inner: terminal,
@@ -163,7 +206,7 @@ impl ChainBuilder {
             .into_iter()
             .rev()
             .fold(terminal, |downstream, stage| {
-                stage.wrap(downstream, &self.bus)
+                stage.wrap(downstream, &self.bus, &self.pipeline_id)
             })
     }
 }
@@ -196,6 +239,10 @@ impl ChainBuilder {
 /// finished via a natural `Eos` or [`Pipeline::stop`]) — a second `run()`
 /// call is a no-op; build a fresh `Pipeline` for another play-through.
 pub struct Pipeline {
+    /// This pipeline's own id — passed to [`Pipeline::new`], stamped onto
+    /// the source's own `hlog` there and onto every element that passes
+    /// through a [`ChainBuilder`] built with it (see [`Pipeline::id`]).
+    id: Arc<str>,
     source: Mutex<Option<Box<dyn SourceElement>>>,
     /// Taken (leaving `None` behind) the moment `run()` starts, and moved
     /// into the background thread — so once a pipeline is running,
@@ -223,23 +270,33 @@ pub struct Pipeline {
 }
 
 impl Pipeline {
-    /// `wire` is called once with the freshly created source, a `Bus`, and
+    /// `id` names this pipeline — stamped as the source's own `hlog`
+    /// sub_id right away, and handed to `wire` (its last argument) so
+    /// every `ChainBuilder::new(bus.clone(), id)` it builds tags whatever
+    /// passes through it the same way (see [`ChainBuilder`]'s own docs).
+    ///
+    /// `wire` is called once with the freshly created source, a `Bus`,
     /// this pipeline's `Clock` (share it with every
     /// [`crate::elements::Pacer`] via `Clock::clone` — one clock per
     /// pipeline, so every paced branch agrees on the same t=0 and the
-    /// same pause/resume timeline), so it can build one or more
-    /// `ChainBuilder` chains (one per src pad that should actually be
-    /// used) and link them via `source.src_pads()[i].link(...)`. Pads
-    /// left unlinked just drop whatever gets pushed into them.
+    /// same pause/resume timeline), and this pipeline's own `id`, so it
+    /// can build one or more `ChainBuilder` chains (one per src pad that
+    /// should actually be used) and link them via
+    /// `source.src_pads()[i].link(...)`. Pads left unlinked just drop
+    /// whatever gets pushed into them.
     pub fn new<S: SourceElement + 'static>(
+        id: impl Into<String>,
         mut source: S,
-        wire: impl FnOnce(&mut S, &Bus, &Arc<Clock>),
+        wire: impl FnOnce(&mut S, &Bus, &Arc<Clock>, &str),
     ) -> Arc<Self> {
+        let id: Arc<str> = id.into().into();
         let (bus, bus_rx) = Bus::new();
         let clock = Arc::new(Clock::new());
-        wire(&mut source, &bus, &clock);
+        *source.hlog_mut() = element_hlog(source.element_type(), &source.name(), Some(&id));
+        wire(&mut source, &bus, &clock, &id);
         let (control_tx, control_rx) = control::channel();
         Arc::new(Pipeline {
+            id,
             source: Mutex::new(Some(Box::new(source))),
             bus: Mutex::new(Some(bus)),
             control_tx,
@@ -248,6 +305,11 @@ impl Pipeline {
             bus_rx,
             running: AtomicBool::new(false),
         })
+    }
+
+    /// This pipeline's own id, as passed to [`Pipeline::new`].
+    pub fn id(&self) -> &str {
+        &self.id
     }
 
     pub fn bus(&self) -> &BusReceiver {
@@ -293,11 +355,14 @@ impl Pipeline {
                 // means something genuinely ended the whole source, e.g.
                 // a `Seek` that failed outright.
                 if let Err(error) = source.run(&control_rx, &bus) {
-                    bus.post(BusEvent::Error {
-                        element_type: source_type,
-                        name: source_name,
-                        error,
-                    });
+                    bus.post(
+                        source.hlog(),
+                        BusEvent::Error {
+                            element_type: source_type,
+                            name: source_name,
+                            error,
+                        },
+                    );
                 }
                 this.running.store(false, Ordering::Release);
             })
@@ -396,10 +461,12 @@ mod tests {
             .expect("test video has a video stream");
         let index = video.index;
 
-        let pipeline = Pipeline::new(source, |source, bus, _clock| {
-            let branch = ChainBuilder::new(bus.clone())
+        let pipeline = Pipeline::new("test", source, |source, bus, _clock, id| {
+            let branch = ChainBuilder::new(bus.clone(), id)
                 .queue("q", 4)
-                .build(Box::new(NoOpSink));
+                .build(Box::new(NoOpSink {
+                    hlog: element_hlog(ElementType::Other, "noop", None),
+                }));
             source.src_pads()[index].link(branch);
         });
 
@@ -437,6 +504,7 @@ mod tests {
         let count = Arc::new(AtomicUsize::new(0));
         let sink = CountingSink {
             count: count.clone(),
+            hlog: element_hlog(ElementType::Other, "counting-sink", None),
         };
 
         // A `Pacer` here isn't incidental: without it, this whole 10s/
@@ -446,9 +514,9 @@ mod tests {
         // of thing a weak `count > 0` assertion wouldn't have caught (see
         // `seek_reports_where_it_actually_landed_when_target_is_not_a_keyframe`
         // for how this was found).
-        let pipeline = Pipeline::new(source, |source, bus, clock| {
+        let pipeline = Pipeline::new("test", source, |source, bus, clock, id| {
             let pacer = Pacer::new("pacer", time_base, clock.clone());
-            let branch = ChainBuilder::new(bus.clone())
+            let branch = ChainBuilder::new(bus.clone(), id)
                 .queue("q", 4)
                 .pipe(pacer)
                 .build(Box::new(sink));
@@ -499,12 +567,14 @@ mod tests {
 
         // Paced for the same reason as `seek_repositions_and_playback_continues`
         // — otherwise the file finishes before `seek()` is even called.
-        let pipeline = Pipeline::new(source, |source, bus, clock| {
+        let pipeline = Pipeline::new("test", source, |source, bus, clock, id| {
             let pacer = Pacer::new("pacer", time_base, clock.clone());
-            let branch = ChainBuilder::new(bus.clone())
+            let branch = ChainBuilder::new(bus.clone(), id)
                 .queue("q", 4)
                 .pipe(pacer)
-                .build(Box::new(NoOpSink));
+                .build(Box::new(NoOpSink {
+                    hlog: element_hlog(ElementType::Other, "noop", None),
+                }));
             source.src_pads()[index].link(branch);
         });
 
@@ -535,7 +605,9 @@ mod tests {
         );
     }
 
-    struct NoOpSink;
+    struct NoOpSink {
+        hlog: HLog,
+    }
     impl Element for NoOpSink {
         fn name(&self) -> Arc<str> {
             "noop".into()
@@ -543,6 +615,14 @@ mod tests {
 
         fn element_type(&self) -> ElementType {
             ElementType::Other
+        }
+
+        fn hlog(&self) -> &HLog {
+            &self.hlog
+        }
+
+        fn hlog_mut(&mut self) -> &mut HLog {
+            &mut self.hlog
         }
     }
     impl Sink for NoOpSink {
@@ -554,6 +634,7 @@ mod tests {
         }
     }
 
+    #[rust_hlog::hlog]
     struct CountingSink {
         count: Arc<AtomicUsize>,
     }
@@ -564,6 +645,14 @@ mod tests {
 
         fn element_type(&self) -> ElementType {
             ElementType::Other
+        }
+
+        fn hlog(&self) -> &HLog {
+            &self.hlog
+        }
+
+        fn hlog_mut(&mut self) -> &mut HLog {
+            &mut self.hlog
         }
     }
     impl Sink for CountingSink {
@@ -576,5 +665,41 @@ mod tests {
         fn control(&mut self, _msg: ControlMsg) -> Result<()> {
             Ok(())
         }
+    }
+
+    /// `ChainBuilder::build`'s terminal — and, transitively via `.pipe()`/
+    /// `.queue()`, everything upstream of it — should come out tagged with
+    /// the pipeline id it was built with, not left at `sub_id: None`.
+    #[test]
+    fn chain_builder_stamps_pipeline_id_into_terminal_hlog() {
+        let (bus, _bus_rx) = Bus::new();
+        let sink = NoOpSink {
+            hlog: element_hlog(ElementType::Other, "noop", None),
+        };
+        let built = ChainBuilder::new(bus, "my-pipeline").build(Box::new(sink));
+        assert_eq!(built.hlog().log_id(), "Other(noop):Pipeline(my-pipeline)");
+    }
+
+    /// `Pipeline::new`'s `id` should come back unchanged from
+    /// [`Pipeline::id`], and the `wire` closure's own `id: &str` argument
+    /// (used to build a matching `ChainBuilder`) should be that same
+    /// value — not, say, whatever `source.name()` happens to be.
+    #[test]
+    fn pipeline_id_is_whatever_new_was_given() {
+        let (source, streams) = FileDemuxer::open("demux", test_video()).expect("open test video");
+        let video = streams
+            .iter()
+            .find(|s| s.kind == ffmpeg_next::media::Type::Video)
+            .expect("test video has a video stream");
+        let index = video.index;
+
+        let pipeline = Pipeline::new("my-pipeline", source, |source, bus, _clock, id| {
+            let branch = ChainBuilder::new(bus.clone(), id).build(Box::new(NoOpSink {
+                hlog: element_hlog(ElementType::Other, "noop", None),
+            }));
+            source.src_pads()[index].link(branch);
+        });
+
+        assert_eq!(pipeline.id(), "my-pipeline");
     }
 }

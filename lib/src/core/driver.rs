@@ -110,11 +110,14 @@ impl DriverRunner {
                 let name = driver.name();
                 let element_type = driver.element_type();
                 if let Err(error) = driver.run(&stop, &bus) {
-                    bus.post(BusEvent::Error {
-                        element_type,
-                        name,
-                        error,
-                    });
+                    bus.post(
+                        driver.hlog(),
+                        BusEvent::Error {
+                            element_type,
+                            name,
+                            error,
+                        },
+                    );
                 }
                 this.running.store(false, Ordering::Release);
             })

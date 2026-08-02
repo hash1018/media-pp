@@ -1,0 +1,68 @@
+//! Opt-in file logging backend for [`rust_hlog`] (see
+//! [`crate::bus::Bus::post`], the one place this crate actually logs —
+//! every element's error/warning/etc surfaces there). Inert until [`init`]
+//! is called: this is a library, and writing to disk by default —
+//! including from the crate's own tests, or anything embedding this crate
+//! that never asked for log files — would be a surprising side effect.
+//!
+//! `rust_hlog`'s `hinfo!`/`hwarn!`/`herror!` macros go through the plain
+//! [`log`] facade, so this bridges those records into a [`tracing`]
+//! subscriber (via [`tracing_log`]) writing through a daily-rotating
+//! [`tracing_appender`] file — same backend shape as this crate's own
+//! sibling projects, not a bespoke one.
+
+use thiserror::Error as ThisError;
+use tracing_appender::{
+    non_blocking::WorkerGuard,
+    rolling::{InitError, RollingFileAppender, Rotation},
+};
+use tracing_subscriber::fmt::time::LocalTime;
+
+#[derive(Debug, ThisError)]
+pub enum LogInitError {
+    #[error("failed to create log file appender: {0}")]
+    FileAppender(#[from] InitError),
+}
+
+/// Starts file logging: every `hinfo!`/`hwarn!`/`herror!` this crate makes
+/// (via `rust_hlog`, see [`crate::bus::Bus::post`]) from this point on is
+/// appended to a rotating file named `{log_prefix}.{date}.log` in
+/// `log_path` — one new file per day, oldest ones beyond `max_log_files`
+/// deleted automatically. Writes happen on a dedicated background thread,
+/// so nothing calling into `Bus::post` ever blocks on file I/O.
+///
+/// The returned [`WorkerGuard`] must be kept alive for as long as logging
+/// should keep working — dropping it stops the background writer (and
+/// flushes whatever's queued), so hold it for the program's lifetime
+/// (e.g. a local in `main`), not something to let fall out of scope early.
+pub fn init(
+    log_prefix: &str,
+    log_path: &str,
+    level: tracing::Level,
+    max_log_files: usize,
+) -> Result<WorkerGuard, LogInitError> {
+    let file_appender = RollingFileAppender::builder()
+        .filename_prefix(log_prefix)
+        .filename_suffix("log")
+        .rotation(Rotation::DAILY)
+        .max_log_files(max_log_files)
+        .build(log_path)?;
+
+    let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+
+    // `tracing-subscriber`'s `tracing-log` feature (on by default) already
+    // bridges the plain `log` facade into whatever subscriber `.init()`
+    // installs below — which is what `rust_hlog`'s `hinfo!`/`hwarn!`/
+    // `herror!` macros go through — so no separate `tracing_log::LogTracer`
+    // setup is needed (an explicit second one collides: `log::set_logger`
+    // only ever succeeds once).
+    tracing_subscriber::fmt()
+        .with_writer(non_blocking)
+        .with_ansi(false)
+        .with_max_level(level)
+        .with_thread_ids(true)
+        .with_timer(LocalTime::rfc_3339())
+        .init();
+
+    Ok(guard)
+}

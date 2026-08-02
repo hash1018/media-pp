@@ -8,6 +8,10 @@ ffmpeg-next = "8"
 crossbeam-channel = "0.5"
 crossbeam-queue = "0.3"
 thiserror = "2"
+rust-hlog = { path = "../rust-hlog" }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["local-time"] }
+tracing-appender = "0.2"
 renderer-engine = { git = "https://github.com/hash1018/RendererEngine", package = "renderer-engine", optional = true }
 windows = { version = "0.62", optional = true, features = [
     "Win32_Foundation",

@@ -1,5 +1,7 @@
 use std::{sync::Arc, time::Duration};
 
+use rust_hlog::HLog;
+
 use crate::{
     buffer::MediaBuffer,
     bus::Bus,
@@ -51,6 +53,39 @@ pub trait Element: Send {
 
     /// See [`ElementType`].
     fn element_type(&self) -> ElementType;
+
+    /// This element's identity for [`crate::bus::Bus::post`] — same
+    /// `id`/`name` as [`Element::name`], just already wrapped as the
+    /// [`rust_hlog::HLog`] its `hinfo!`/`hwarn!`/`herror!` macros need. A
+    /// stored field (via `#[rust_hlog::hlog]`), not built fresh per call,
+    /// for the same reason `name()` returns a cheap `Arc<str>` clone
+    /// instead of a fresh `String` — see its own docs.
+    fn hlog(&self) -> &HLog;
+
+    /// Mutable access to the same field [`Element::hlog`] reads — used by
+    /// [`crate::pipeline::ChainBuilder`] to stamp a `sub_id` (the owning
+    /// [`crate::pipeline::Pipeline`]'s own id) onto every element that
+    /// passes through it, via [`element_hlog`]. Not meant to be called
+    /// from anywhere else.
+    fn hlog_mut(&mut self) -> &mut HLog;
+}
+
+/// Builds the [`HLog`] every element constructs for its own [`Element::hlog`]
+/// field, and that [`crate::pipeline::ChainBuilder`]/[`crate::pipeline::Pipeline`]
+/// rebuild once they know which pipeline an element belongs to. Renders as
+/// `ElementType(name)` for the id — so a log line names *what* failed, not
+/// just the instance name a caller could've picked for two different kinds
+/// of element — and `Pipeline(pipeline_id)` for the sub_id, when there is
+/// one (`None` for an element that isn't wired into a `Pipeline` at all,
+/// e.g. most of this crate's own tests). Public so a custom `Element`
+/// implemented outside this crate (see [`ElementType::Other`]) can build
+/// its own `hlog` field the same way.
+pub fn element_hlog(element_type: ElementType, name: &str, pipeline_id: Option<&str>) -> HLog {
+    let id = format!("{element_type:?}({name})");
+    match pipeline_id {
+        Some(pipeline_id) => HLog::new(&id, Some(&format!("Pipeline({pipeline_id})"))),
+        None => HLog::new(&id, None),
+    }
 }
 
 /// Anything that can receive a buffer pushed from upstream — the input

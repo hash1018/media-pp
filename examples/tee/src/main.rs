@@ -42,12 +42,12 @@ fn main() -> media_pp::Result<()> {
     let (frame_counter, frame_count) = FrameCounter::new("frame-counter");
     let (packet_counter, packet_count) = PacketCounter::new("packet-counter");
 
-    let pipeline = Pipeline::new(source, |source, bus, _clock| {
+    let pipeline = Pipeline::new("tee", source, |source, bus, _clock, id| {
         let decoder = SwDecoder::new("decoder", params).expect("failed to open decoder");
-        let decode_branch = ChainBuilder::new(bus.clone())
+        let decode_branch = ChainBuilder::new(bus.clone(), id)
             .pipe(decoder)
             .build(Box::new(frame_counter));
-        let packet_branch = ChainBuilder::new(bus.clone()).build(Box::new(packet_counter));
+        let packet_branch = ChainBuilder::new(bus.clone(), id).build(Box::new(packet_counter));
 
         let (tee, tee_handle) = Tee::new("tee");
         tee_handle.add_sink(decode_branch);

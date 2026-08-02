@@ -187,12 +187,15 @@ pub(crate) fn wait_out_pause<S: SourceElement>(
 fn apply_seek<S: SourceElement>(source: &mut S, bus: &Bus, msg: ControlMsg) -> Result<()> {
     if let ControlMsg::Seek(target) = msg {
         let landed = source.seek(target)?;
-        bus.post(BusEvent::Seeked {
-            element_type: source.element_type(),
-            name: source.name(),
-            requested: target,
-            landed,
-        });
+        bus.post(
+            source.hlog(),
+            BusEvent::Seeked {
+                element_type: source.element_type(),
+                name: source.name(),
+                requested: target,
+                landed,
+            },
+        );
     }
     Ok(())
 }

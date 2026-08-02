@@ -10,6 +10,7 @@ use std::{
 
 use crossbeam_channel::{Receiver, Sender, TrySendError, bounded, select, unbounded};
 use ffmpeg_next as ffmpeg;
+use rust_hlog::{HLog, herror};
 use str0m::{
     Event, Input, Output, Rtc, RtcError,
     change::{SdpAnswer, SdpOffer, SdpPendingOffer},
@@ -24,7 +25,7 @@ use crate::{
     bus::{Bus, BusEvent},
     control::{ControlMsg, ControlReceiver, apply_one, drain_control, wait_out_pause},
     driver::{Driver, StopReceiver},
-    element::{Element, ElementType, Sink, Source, SourceElement},
+    element::{Element, ElementType, Sink, Source, SourceElement, element_hlog},
     error::Result,
     pad::SrcPad,
 };
@@ -140,6 +141,7 @@ impl TrackOutState {
 /// not an error.) This is the same idea as
 /// [`crate::elements::Tee::add_sink`]'s dynamic attachment, just without
 /// `Tee`'s `Mutex` (nothing but this one thread ever touches `tracks_in`).
+#[rust_hlog::hlog]
 pub struct WebRtcPeer {
     name: Arc<str>,
     rtc: Rtc,
@@ -274,6 +276,7 @@ impl WebRtcHandle {
 /// [`crate::elements::RtspServer`] or any other terminal sink.
 /// `consume()` only ever hands off to `WebRtcPeer::run`'s own thread via a
 /// channel send; the actual str0m write happens over there.
+#[rust_hlog::hlog]
 pub struct WebRtcTrackSink {
     id: TrackId,
     command_tx: Sender<Command>,
@@ -287,6 +290,14 @@ impl Element for WebRtcTrackSink {
     fn element_type(&self) -> ElementType {
         ElementType::WebRtcPeer
     }
+
+    fn hlog(&self) -> &HLog {
+        &self.hlog
+    }
+
+    fn hlog_mut(&mut self) -> &mut HLog {
+        &mut self.hlog
+    }
 }
 
 impl Sink for WebRtcTrackSink {
@@ -297,6 +308,7 @@ impl Sink for WebRtcTrackSink {
                 MediaBuffer::Audio(_) => "Audio",
                 MediaBuffer::Packet(_) | MediaBuffer::Eos => unreachable!("matched above"),
             };
+            herror!(self, "unsupported buffer: {kind}");
             return Err(WebRtcError::UnsupportedBuffer(kind).into());
         }
         // `WebRtcPeer::run` gone (channel disconnected) means this track is
@@ -317,7 +329,10 @@ impl Sink for WebRtcTrackSink {
         // `BusReceiver::iter()` to finish once every sender is gone.
         match self.command_tx.try_send(Command::Push(self.id, buf)) {
             Ok(()) | Err(TrySendError::Full(_)) => Ok(()),
-            Err(TrySendError::Disconnected(_)) => Err(WebRtcError::Closed.into()),
+            Err(TrySendError::Disconnected(_)) => {
+                herror!(self, "WebRtcPeer::run gone — track is dead");
+                Err(WebRtcError::Closed.into())
+            }
         }
     }
 
@@ -339,6 +354,7 @@ impl Sink for WebRtcTrackSink {
 /// code from `WebRtcPeer::run`'s own thread — that thread only ever touches
 /// this crate's own types (see the module docs for why `WebRtcPeer` hands
 /// tracks out through [`WebRtcHandle::next_track`] instead of a callback).
+#[rust_hlog::hlog]
 pub struct WebRtcTrackSource {
     name: Arc<str>,
     pad: SrcPad,
@@ -353,9 +369,11 @@ impl WebRtcTrackSource {
         codec: Arc<Mutex<Option<Codec>>>,
     ) -> Self {
         let name: Arc<str> = name.into().into();
+        let hlog = element_hlog(ElementType::WebRtcPeer, &name, None);
         let pad = SrcPad::new(format!("{name}_src"));
         Self {
             name,
+            hlog,
             pad,
             data_rx,
             codec,
@@ -385,6 +403,14 @@ impl Element for WebRtcTrackSource {
 
     fn element_type(&self) -> ElementType {
         ElementType::WebRtcPeer
+    }
+
+    fn hlog(&self) -> &HLog {
+        &self.hlog
+    }
+
+    fn hlog_mut(&mut self) -> &mut HLog {
+        &mut self.hlog
     }
 }
 
@@ -430,11 +456,14 @@ impl SourceElement for WebRtcTrackSource {
                         Ok(buf) if buf.is_eos() => break,
                         Ok(buf) => {
                             if let Err(error) = self.pad.push(buf) {
-                                bus.post(BusEvent::Error {
-                                    element_type: ElementType::WebRtcPeer,
-                                    name: self.name.clone(),
-                                    error,
-                                });
+                                bus.post(
+                                    &self.hlog,
+                                    BusEvent::Error {
+                                        element_type: ElementType::WebRtcPeer,
+                                        name: self.name.clone(),
+                                        error,
+                                    },
+                                );
                             }
                         }
                         // `WebRtcPeer` gone — this track (or the whole peer) is done.
@@ -481,12 +510,14 @@ impl WebRtcPeer {
         on_keyframe_request: impl FnMut(TrackId) + Send + 'static,
     ) -> (Self, WebRtcHandle) {
         let name: Arc<str> = name.into().into();
+        let hlog = element_hlog(ElementType::WebRtcPeer, &name, None);
         let (command_tx, command_rx) = bounded(CHANNEL_CAPACITY);
         let (new_track_tx, new_track_rx) = unbounded();
         let next_id = Arc::new(AtomicU64::new(0));
         (
             Self {
                 name,
+                hlog,
                 rtc,
                 socket,
                 tracks_in: HashMap::new(),
@@ -516,6 +547,11 @@ impl WebRtcPeer {
         let reply = WebRtcTrackSink {
             id,
             command_tx: self.command_tx.clone(),
+            hlog: element_hlog(
+                ElementType::WebRtcPeer,
+                &format!("webrtc-track-{}", id.0),
+                None,
+            ),
         };
         let (tx, rx) = bounded(CHANNEL_CAPACITY);
         let codec = Arc::new(Mutex::new(None));
@@ -539,6 +575,7 @@ impl WebRtcPeer {
                 self.rtc
                     .sdp_api()
                     .accept_answer(pending, answer)
+                    .inspect_err(|error| herror!(self, "accept_answer failed: {error}"))
                     .map_err(WebRtcError::from)?;
                 for id in ids {
                     if let Some(state @ TrackOutState::Negotiating(_)) = self.tracks_out.get(&id) {
@@ -552,6 +589,7 @@ impl WebRtcPeer {
                     .rtc
                     .sdp_api()
                     .accept_offer(offer)
+                    .inspect_err(|error| herror!(self, "accept_offer failed: {error}"))
                     .map_err(WebRtcError::from);
                 let _ = reply.send(result);
             }
@@ -638,6 +676,7 @@ impl WebRtcPeer {
         let rtp_time = MediaTime::new(pts, frequency);
         writer
             .write(pt, Instant::now(), rtp_time, data)
+            .inspect_err(|error| herror!(self, "writer.write failed: {error}"))
             .map_err(WebRtcError::from)?;
         Ok(())
     }
@@ -647,7 +686,11 @@ impl WebRtcPeer {
     /// the returned deadline.
     fn drive_until_timeout(&mut self, bus: &Bus) -> Result<Instant> {
         loop {
-            let output = self.rtc.poll_output().map_err(WebRtcError::from)?;
+            let output = self
+                .rtc
+                .poll_output()
+                .inspect_err(|error| herror!(self, "poll_output failed: {error}"))
+                .map_err(WebRtcError::from)?;
             match output {
                 Output::Timeout(deadline) => return Ok(deadline),
                 Output::Transmit(t) => {
@@ -705,10 +748,13 @@ impl WebRtcPeer {
                             // it feeds) isn't keeping up — drop the newest
                             // buffer rather than let this grow unbounded
                             // (see `CHANNEL_CAPACITY`'s docs).
-                            bus.post(BusEvent::Dropped {
-                                element_type: ElementType::WebRtcPeer,
-                                name: self.name.clone(),
-                            });
+                            bus.post(
+                                &self.hlog,
+                                BusEvent::Dropped {
+                                    element_type: ElementType::WebRtcPeer,
+                                    name: self.name.clone(),
+                                },
+                            );
                         }
                         Err(TrySendError::Disconnected(_)) => {
                             // This track's `WebRtcTrackSource` is gone (its
@@ -743,6 +789,14 @@ impl Element for WebRtcPeer {
 
     fn element_type(&self) -> ElementType {
         ElementType::WebRtcPeer
+    }
+
+    fn hlog(&self) -> &HLog {
+        &self.hlog
+    }
+
+    fn hlog_mut(&mut self) -> &mut HLog {
+        &mut self.hlog
     }
 }
 
@@ -789,6 +843,7 @@ impl Driver for WebRtcPeer {
                 .max(Duration::from_millis(1));
             self.socket
                 .set_read_timeout(Some(wait))
+                .inspect_err(|error| herror!(self, "set_read_timeout failed: {error}"))
                 .map_err(WebRtcError::from)?;
 
             match self.socket.recv_from(&mut buf) {
@@ -796,7 +851,11 @@ impl Driver for WebRtcPeer {
                     let Ok(contents) = buf[..n].try_into() else {
                         continue; // not a WebRTC datagram we recognize — ignore
                     };
-                    let destination = self.socket.local_addr().map_err(WebRtcError::from)?;
+                    let destination = self
+                        .socket
+                        .local_addr()
+                        .inspect_err(|error| herror!(self, "local_addr failed: {error}"))
+                        .map_err(WebRtcError::from)?;
                     self.rtc
                         .handle_input(Input::Receive(
                             Instant::now(),
@@ -807,6 +866,7 @@ impl Driver for WebRtcPeer {
                                 contents,
                             },
                         ))
+                        .inspect_err(|error| herror!(self, "handle_input(Receive) failed: {error}"))
                         .map_err(WebRtcError::from)?;
                 }
                 Err(e)
@@ -825,9 +885,13 @@ impl Driver for WebRtcPeer {
                     // isn't coming.
                     self.rtc
                         .handle_input(Input::Timeout(Instant::now()))
+                        .inspect_err(|error| herror!(self, "handle_input(Timeout) failed: {error}"))
                         .map_err(WebRtcError::from)?;
                 }
-                Err(e) => return Err(WebRtcError::from(e).into()),
+                Err(e) => {
+                    herror!(self, "recv_from failed: {e}");
+                    return Err(WebRtcError::from(e).into());
+                }
             }
         }
     }
@@ -850,6 +914,7 @@ mod tests {
         pipeline::{ChainBuilder, Pipeline},
     };
 
+    #[rust_hlog::hlog]
     struct CountingSink {
         count: Arc<AtomicUsize>,
     }
@@ -861,6 +926,14 @@ mod tests {
 
         fn element_type(&self) -> ElementType {
             ElementType::Other
+        }
+
+        fn hlog(&self) -> &HLog {
+            &self.hlog
+        }
+
+        fn hlog_mut(&mut self) -> &mut HLog {
+            &mut self.hlog
         }
     }
 
@@ -926,9 +999,12 @@ mod tests {
     /// for the real, independent downstream pipeline a `WebRtcTrackSource`
     /// is meant to be driven from.
     fn wire_counting(source: WebRtcTrackSource, count: Arc<AtomicUsize>) -> Arc<Pipeline> {
-        let sink = CountingSink { count };
-        Pipeline::new(source, |source, bus, _clock| {
-            let branch = ChainBuilder::new(bus.clone()).build(Box::new(sink));
+        let sink = CountingSink {
+            count,
+            hlog: element_hlog(ElementType::Other, "counter", None),
+        };
+        Pipeline::new("test", source, |source, bus, _clock, id| {
+            let branch = ChainBuilder::new(bus.clone(), id).build(Box::new(sink));
             source.src_pads()[0].link(branch);
         })
     }

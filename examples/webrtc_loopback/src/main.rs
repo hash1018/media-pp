@@ -14,10 +14,11 @@ use media_pp::{
     buffer::MediaBuffer,
     control::ControlMsg,
     driver::DriverRunner,
-    element::{Element, ElementType, Sink, Source},
+    element::{Element, ElementType, Sink, Source, element_hlog},
     elements::{WebRtcPeer, WebRtcTrackSink, WebRtcTrackSource},
     pipeline::{ChainBuilder, Pipeline},
 };
+use rust_hlog::HLog;
 use str0m::{
     Candidate, Rtc,
     change::SdpOffer,
@@ -168,9 +169,12 @@ fn main() {
 /// `WebRtcTrackSource` is a plain `SourceElement`, so it plugs into
 /// `Pipeline`/`ChainBuilder` exactly like any other source.
 fn wire_counting(source: WebRtcTrackSource, count: Arc<AtomicUsize>) -> Arc<Pipeline> {
-    let sink = CountingSink { count };
-    Pipeline::new(source, |source, bus, _clock| {
-        let branch = ChainBuilder::new(bus.clone()).build(Box::new(sink));
+    let sink = CountingSink {
+        count,
+        hlog: element_hlog(ElementType::Other, "counter", None),
+    };
+    Pipeline::new("webrtc-loopback", source, |source, bus, _clock, id| {
+        let branch = ChainBuilder::new(bus.clone(), id).build(Box::new(sink));
         source.src_pads()[0].link(branch);
     })
 }
@@ -185,6 +189,7 @@ fn push_packets(sink: &mut WebRtcTrackSink) {
     }
 }
 
+#[rust_hlog::hlog]
 struct CountingSink {
     count: Arc<AtomicUsize>,
 }
@@ -196,6 +201,14 @@ impl Element for CountingSink {
 
     fn element_type(&self) -> ElementType {
         ElementType::Other
+    }
+
+    fn hlog(&self) -> &HLog {
+        &self.hlog
+    }
+
+    fn hlog_mut(&mut self) -> &mut HLog {
+        &mut self.hlog
     }
 }
 

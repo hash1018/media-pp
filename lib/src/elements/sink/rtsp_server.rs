@@ -14,12 +14,13 @@ use std::{
 };
 
 use ffmpeg_next::{self as ffmpeg, ffi};
+use rust_hlog::{HLog, herror};
 use thiserror::Error as ThisError;
 
 use crate::{
     buffer::MediaBuffer,
     control::ControlMsg,
-    element::{Element, ElementType, Sink},
+    element::{Element, ElementType, Sink, element_hlog},
     error::Result,
 };
 
@@ -206,6 +207,7 @@ pub enum RtspServerError {
 /// Packets arrive as fast as upstream produces them — pace them to real
 /// playback speed first (put a [`crate::elements::Pacer`] upstream) or
 /// viewers will receive the whole file far faster than realtime.
+#[rust_hlog::hlog]
 pub struct RtspServer {
     name: Arc<str>,
     url: String,
@@ -290,8 +292,11 @@ impl RtspServer {
 
         let output = Self::publish(&url, params, time_base, publish_transport)?;
 
+        let name: Arc<str> = name.into().into();
+        let hlog = element_hlog(ElementType::RtspServer, &name, None);
         Ok(Self {
-            name: name.into().into(),
+            name,
+            hlog,
             url,
             output,
             input_time_base: time_base,
@@ -658,6 +663,14 @@ impl Element for RtspServer {
     fn element_type(&self) -> ElementType {
         ElementType::RtspServer
     }
+
+    fn hlog(&self) -> &HLog {
+        &self.hlog
+    }
+
+    fn hlog_mut(&mut self) -> &mut HLog {
+        &mut self.hlog
+    }
 }
 
 impl Sink for RtspServer {
@@ -708,10 +721,18 @@ impl Sink for RtspServer {
                     &mut self.mediamtx,
                     packet.write_interleaved(&mut self.output),
                 )
+                .inspect_err(|error| herror!(self, "write_interleaved failed: {error}"))
             }
-            MediaBuffer::Eos => check_mediamtx(&mut self.mediamtx, self.output.write_trailer()),
-            MediaBuffer::Video(_) => Err(RtspServerError::UnsupportedBuffer("Video").into()),
-            MediaBuffer::Audio(_) => Err(RtspServerError::UnsupportedBuffer("Audio").into()),
+            MediaBuffer::Eos => check_mediamtx(&mut self.mediamtx, self.output.write_trailer())
+                .inspect_err(|error| herror!(self, "write_trailer failed: {error}")),
+            MediaBuffer::Video(_) => {
+                herror!(self, "unsupported buffer: Video");
+                Err(RtspServerError::UnsupportedBuffer("Video").into())
+            }
+            MediaBuffer::Audio(_) => {
+                herror!(self, "unsupported buffer: Audio");
+                Err(RtspServerError::UnsupportedBuffer("Audio").into())
+            }
         }
     }
 

@@ -3,12 +3,13 @@ use std::{path::Path, sync::Arc};
 use ffmpeg_next as ffmpeg;
 use ndarray::{Array4, Axis, s};
 use ort::{inputs, session::Session, value::TensorRef};
+use rust_hlog::{HLog, herror};
 use thiserror::Error as ThisError;
 
 use crate::{
     buffer::MediaBuffer,
     control::ControlMsg,
-    element::{Element, ElementType, Sink},
+    element::{Element, ElementType, Sink, element_hlog},
     error::Result,
 };
 
@@ -87,6 +88,7 @@ pub enum OrtDetectorError {
 ///
 /// NMS is per-class (a box only suppresses another box of the *same*
 /// `class_id`), matching Ultralytics' own default (non-agnostic) NMS.
+#[rust_hlog::hlog]
 pub struct OrtDetector<F> {
     name: Arc<str>,
     session: Session,
@@ -114,8 +116,11 @@ where
             .map_err(OrtDetectorError::from)?
             .commit_from_file(model_path)
             .map_err(OrtDetectorError::from)?;
+        let name: Arc<str> = name.into().into();
+        let hlog = element_hlog(ElementType::OrtDetector, &name, None);
         Ok(Self {
-            name: name.into().into(),
+            name,
+            hlog,
             session,
             conf_threshold,
             iou_threshold,
@@ -232,6 +237,14 @@ where
     fn element_type(&self) -> ElementType {
         ElementType::OrtDetector
     }
+
+    fn hlog(&self) -> &HLog {
+        &self.hlog
+    }
+
+    fn hlog_mut(&mut self) -> &mut HLog {
+        &mut self.hlog
+    }
 }
 
 impl<F> Sink for OrtDetector<F>
@@ -242,14 +255,23 @@ where
         match buf {
             MediaBuffer::Video(frame) => {
                 if frame.format() != ffmpeg::format::Pixel::RGB24 {
+                    herror!(self, "unsupported pixel format: {:?}", frame.format());
                     return Err(OrtDetectorError::UnsupportedFormat(frame.format()).into());
                 }
-                let detections = self.detect(&frame)?;
+                let detections = self
+                    .detect(&frame)
+                    .inspect_err(|error| herror!(self, "detect failed: {error}"))?;
                 (self.on_detections)(&frame, &detections)
             }
             MediaBuffer::Eos => Ok(()),
-            MediaBuffer::Packet(_) => Err(OrtDetectorError::UnsupportedBuffer("Packet").into()),
-            MediaBuffer::Audio(_) => Err(OrtDetectorError::UnsupportedBuffer("Audio").into()),
+            MediaBuffer::Packet(_) => {
+                herror!(self, "unsupported buffer: Packet");
+                Err(OrtDetectorError::UnsupportedBuffer("Packet").into())
+            }
+            MediaBuffer::Audio(_) => {
+                herror!(self, "unsupported buffer: Audio");
+                Err(OrtDetectorError::UnsupportedBuffer("Audio").into())
+            }
         }
     }
 
