@@ -1,7 +1,7 @@
 use std::{path::Path, sync::Arc, time::Duration};
 
 use ffmpeg_next as ffmpeg;
-use rust_hlog::{HLog, herror};
+use rust_hlog::{HLog, herror, hinfo};
 use thiserror::Error as ThisError;
 
 use crate::{
@@ -74,6 +74,12 @@ impl FileDemuxer {
 
         let name: Arc<str> = name.into().into();
         let hlog = element_hlog(ElementType::FileDemuxer, &name, None);
+        hinfo!(
+            hlog: &hlog,
+            "opened: path={}, {} stream(s)",
+            path.as_ref().display(),
+            streams.len()
+        );
         Ok((
             Self {
                 name,
@@ -130,6 +136,7 @@ impl Source for FileDemuxer {
 
 impl SourceElement for FileDemuxer {
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> crate::error::Result<()> {
+        hinfo!(self, "run: starting");
         // Deliberately re-creates `self.input.packets()` fresh every
         // iteration (cheap — it's just a short-lived wrapper, not a
         // stateful cursor of its own) instead of holding one `for` loop's
@@ -141,6 +148,7 @@ impl SourceElement for FileDemuxer {
         loop {
             if drain_control(control, self, bus)? {
                 // Stop: abandon in place, no final Eos.
+                hinfo!(self, "run: stopped");
                 return Ok(());
             }
             // `seek` (called from within `drain_control`, above) already
@@ -174,6 +182,7 @@ impl SourceElement for FileDemuxer {
         for pad in self.pads.iter_mut() {
             pad.push(MediaBuffer::Eos)?;
         }
+        hinfo!(self, "run: reached eos");
         Ok(())
     }
 

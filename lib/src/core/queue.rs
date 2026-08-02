@@ -1,10 +1,14 @@
 use std::{
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     thread::{self, JoinHandle},
+    time::Duration,
 };
 
-use crossbeam_channel::{Receiver, Sender, TrySendError, bounded, select};
-use rust_hlog::HLog;
+use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TrySendError, bounded, select};
+use rust_hlog::{HLog, hinfo};
 use thiserror::Error as ThisError;
 
 use crate::{
@@ -22,6 +26,15 @@ pub enum QueueError {
     #[error("downstream channel closed")]
     ChannelClosed,
 }
+
+/// How often the worker's blocking wait wakes up on its own (nothing
+/// ready on either channel) to check [`Queue`]'s `stop` flag — see
+/// [`worker_loop`] and [`apply_control`]'s pause loop. Only ever adds
+/// latency to the already-abnormal "torn down without ever being told to
+/// stop" path (see [`Queue::drop`]); real data/control traffic is always
+/// picked up immediately; this pause is only ever *waited out*, not
+/// polled on a timer.
+const STOP_POLL_INTERVAL: Duration = Duration::from_millis(20);
 
 /// What a `Queue` does when its channel is full.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -75,6 +88,14 @@ pub struct Queue {
     bus: Bus,
     handle: Option<JoinHandle<()>>,
     control: ControlSender,
+    /// Set by [`Queue::drop`], read by the worker's own wait loops
+    /// ([`worker_loop`], [`apply_control`]'s pause loop) — the one signal
+    /// that reaches the worker no matter which of those it's currently
+    /// blocked in, without competing with (and possibly cutting off)
+    /// whatever real data/control traffic is already legitimately queued.
+    /// See [`Queue::drop`] for why neither channel alone can play this
+    /// role safely.
+    stop: Arc<AtomicBool>,
 }
 
 impl Queue {
@@ -118,11 +139,14 @@ impl Queue {
         // particular can fire once per buffer under sustained overflow.
         let name: Arc<str> = name.into().into();
         let hlog = element_hlog(ElementType::Queue, &name, pipeline_id);
+        hinfo!(hlog: &hlog, "spawned: capacity={capacity}, policy={policy:?}");
         let (tx, rx) = bounded::<MediaBuffer>(capacity);
         let (control_tx, control_rx) = control::channel();
         let worker_name = name.clone();
         let worker_bus = bus.clone();
         let worker_hlog = hlog.clone();
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = stop.clone();
 
         let handle = thread::Builder::new()
             .name(format!("queue:{worker_name}"))
@@ -134,6 +158,7 @@ impl Queue {
                     worker_bus,
                     worker_name,
                     worker_hlog,
+                    worker_stop,
                 )
             })
             .expect("failed to spawn queue worker thread");
@@ -146,6 +171,7 @@ impl Queue {
             bus,
             handle: Some(handle),
             control: control_tx,
+            stop,
         }
     }
 }
@@ -219,10 +245,23 @@ impl Sink for Queue {
 
 impl Drop for Queue {
     fn drop(&mut self) {
-        // Dropping `tx` (once this is the last handle) closes the data
-        // channel, which lets the worker's loop end on its own if it
-        // hasn't already (e.g. via `Stop`).
         if let Some(handle) = self.handle.take() {
+            // Wakes the worker if nothing else already would — it checks
+            // this on every idle wait-timeout, in both `worker_loop` and
+            // `apply_control`'s pause loop, so it's the one signal that
+            // reaches a genuinely-idle worker no matter which of those two
+            // places it's currently blocked in (e.g. a `.queue()`-having
+            // `Pipeline` dropped without ever being `run()`, or a bare
+            // `Queue` paused and then dropped without `Resume`/`Stop` —
+            // `handle.join()` below would otherwise hang on either).
+            // Doesn't race real pending data/control the way closing a
+            // channel to force this would: it's only ever consulted once
+            // `select!`/`recv_timeout` has already waited out a full
+            // `STOP_POLL_INTERVAL` with *nothing* ready on either channel,
+            // so any already-queued `Stop`/`Eos`/data is always drained
+            // first, same as `block_never_drops` and friends rely on.
+            self.stop.store(true, Ordering::Relaxed);
+            hinfo!(hlog: &self.hlog, "dropped: joining worker");
             let _ = handle.join();
         }
     }
@@ -245,10 +284,21 @@ fn worker_loop(
     // `spawn_with_policy` actually reaches this thread's own log lines
     // too.
     hlog: HLog,
+    stop: Arc<AtomicBool>,
 ) {
+    hinfo!(hlog: &hlog, "worker: starting");
     loop {
         if let Some((msg, ack)) = control_rx.try_recv() {
-            if apply_control(&data_rx, &mut downstream, msg, &ack, &control_rx) {
+            if apply_control(
+                &data_rx,
+                &mut downstream,
+                msg,
+                &ack,
+                &control_rx,
+                &hlog,
+                &stop,
+            ) {
+                hinfo!(hlog: &hlog, "worker: stopped");
                 return;
             }
             continue;
@@ -258,11 +308,15 @@ fn worker_loop(
             recv(control_rx.rx) -> req => {
                 match req {
                     Ok(req) => {
-                        if apply_control(&data_rx, &mut downstream, req.msg, &req.ack, &control_rx) {
+                        if apply_control(&data_rx, &mut downstream, req.msg, &req.ack, &control_rx, &hlog, &stop) {
+                            hinfo!(hlog: &hlog, "worker: stopped");
                             return;
                         }
                     }
-                    Err(_) => return, // sender (this Queue) dropped
+                    Err(_) => {
+                        hinfo!(hlog: &hlog, "worker: control channel gone, ending");
+                        return; // sender (this Queue) dropped
+                    }
                 }
             }
             recv(data_rx) -> buf => {
@@ -299,7 +353,19 @@ fn worker_loop(
                             }
                         }
                     }
-                    Err(_) => return, // producer side (this Queue) dropped
+                    Err(_) => {
+                        hinfo!(hlog: &hlog, "worker: producer (this Queue) gone, ending");
+                        return;
+                    }
+                }
+            }
+            // Only reached once neither branch above had anything ready
+            // for a whole `STOP_POLL_INTERVAL` — real traffic on either
+            // channel always wins first. See `Queue::drop`.
+            default(STOP_POLL_INTERVAL) => {
+                if stop.load(Ordering::Relaxed) {
+                    hinfo!(hlog: &hlog, "worker: stop flag set, ending");
+                    return;
                 }
             }
         }
@@ -316,7 +382,10 @@ fn apply_control(
     msg: ControlMsg,
     ack: &Sender<()>,
     control_rx: &ControlReceiver,
+    hlog: &HLog,
+    stop: &AtomicBool,
 ) -> bool {
+    hinfo!(hlog: hlog, "control: {msg:?}");
     discard_stale_data(data_rx, msg);
     let _ = downstream.control(msg);
     let is_stop = msg == ControlMsg::Stop;
@@ -328,9 +397,28 @@ fn apply_control(
         return false;
     }
     loop {
-        let Some((msg, ack)) = control_rx.recv() else {
-            return true; // sender gone — treat like Stop
+        // `recv_timeout` (not `recv`) so `Queue::drop` setting `stop` can
+        // still wake a worker that's paused forever with no `Resume`/
+        // `Stop` ever coming (e.g. a bare `Queue`, not reached through a
+        // `Pipeline` — see `Queue::drop`'s docs on why this state is
+        // otherwise unreachable there). Nothing else feeds this queue
+        // while paused (see the type-level docs), so there's no
+        // legitimate traffic this could ever cut off.
+        let (msg, ack) = match control_rx.rx.recv_timeout(STOP_POLL_INTERVAL) {
+            Ok(req) => (req.msg, req.ack),
+            Err(RecvTimeoutError::Timeout) => {
+                if stop.load(Ordering::Relaxed) {
+                    hinfo!(hlog: hlog, "worker: stop flag set while paused, ending");
+                    return true;
+                }
+                continue;
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                hinfo!(hlog: hlog, "worker: control channel gone while paused, ending");
+                return true; // sender gone — treat like Stop
+            }
         };
+        hinfo!(hlog: hlog, "control: {msg:?}");
         discard_stale_data(data_rx, msg);
         let _ = downstream.control(msg);
         let is_stop = msg == ControlMsg::Stop;
@@ -502,6 +590,49 @@ mod tests {
         drop(queue);
 
         assert_eq!(count.load(Ordering::SeqCst), 3);
+    }
+
+    /// Regression test: before `Queue::drop` set its own `stop` flag,
+    /// dropping a `Queue` that was never fed a `Stop` control message or
+    /// an `Eos` buffer left its worker thread parked on `recv()` with
+    /// nothing left to wake it — `drop()`'s own `handle.join()` then hung
+    /// forever. This mirrors what happens to a `.queue()`-containing
+    /// `Pipeline` that's dropped without ever being `run()`, so if this
+    /// test hangs, that fix regressed.
+    #[test]
+    fn dropping_without_stop_or_eos_does_not_hang() {
+        let count = Arc::new(AtomicUsize::new(0));
+        let sink = SlowCounter {
+            count: count.clone(),
+            hlog: element_hlog(ElementType::Other, "slow-counter", None),
+        };
+        let (bus, _bus_rx) = Bus::new();
+
+        let queue =
+            Queue::spawn_with_policy("test", 8, Box::new(sink), bus, OverflowPolicy::Block, None);
+        drop(queue);
+    }
+
+    /// Regression test for the other half of the same bug: a worker
+    /// that's specifically inside `apply_control`'s pause loop (blocked on
+    /// `control_rx` alone, not `data_rx`) when dropped without ever
+    /// getting `Resume`/`Stop` — only reachable by pausing a bare `Queue`
+    /// directly (a `Pipeline`-owned one can't be dropped in this state,
+    /// see `Queue::drop`'s docs), but the `stop` flag has to wake this
+    /// wait loop too, not just `worker_loop`'s.
+    #[test]
+    fn dropping_while_paused_does_not_hang() {
+        let count = Arc::new(AtomicUsize::new(0));
+        let sink = SlowCounter {
+            count: count.clone(),
+            hlog: element_hlog(ElementType::Other, "slow-counter", None),
+        };
+        let (bus, _bus_rx) = Bus::new();
+
+        let mut queue =
+            Queue::spawn_with_policy("test", 8, Box::new(sink), bus, OverflowPolicy::Block, None);
+        queue.control(ControlMsg::Pause).unwrap(); // blocks until the worker is actually paused
+        drop(queue);
     }
 
     #[test]

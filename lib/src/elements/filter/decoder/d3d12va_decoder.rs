@@ -1,7 +1,7 @@
 use std::{ffi::c_void, sync::Arc};
 
 use ffmpeg_next::{self as ffmpeg, ffi};
-use rust_hlog::{HLog, herror};
+use rust_hlog::{HLog, herror, hinfo};
 use thiserror::Error as ThisError;
 use windows::{Win32::Graphics::Direct3D12::ID3D12Device, core::Interface};
 
@@ -144,6 +144,7 @@ impl D3d12vaDecoder {
 
         let pad = SrcPad::new(format!("{name}_src"));
         let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
+        hinfo!(hlog: &hlog, "opened: codec={:?}", decoder.id());
         Ok(Self {
             name,
             hlog,
@@ -231,6 +232,7 @@ impl Sink for D3d12vaDecoder {
 
 impl Drop for D3d12vaDecoder {
     fn drop(&mut self) {
+        hinfo!(self, "dropped: freeing hw_device_ctx");
         unsafe { free_buffer(self.hw_device_ctx) };
     }
 }

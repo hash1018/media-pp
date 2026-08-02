@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use ffmpeg_next as ffmpeg;
-use rust_hlog::{HLog, herror};
+use rust_hlog::{HLog, herror, hinfo};
 use thiserror::Error as ThisError;
 
 use crate::{
@@ -71,6 +71,14 @@ impl SwDecoder {
 
         let pad = SrcPad::new(format!("{name}_src"));
         let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
+        hinfo!(
+            hlog: &hlog,
+            "opened: {}",
+            match &kind {
+                Kind::Video(d) => format!("video, codec={:?}", d.id()),
+                Kind::Audio(d) => format!("audio, codec={:?}", d.id()),
+            }
+        );
         Ok(Self {
             name,
             hlog,

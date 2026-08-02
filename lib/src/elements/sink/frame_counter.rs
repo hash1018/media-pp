@@ -3,7 +3,7 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
-use rust_hlog::HLog;
+use rust_hlog::{HLog, hinfo};
 
 use crate::{
     buffer::MediaBuffer,
@@ -27,6 +27,7 @@ impl FrameCounter {
         let count = Arc::new(AtomicUsize::new(0));
         let name: Arc<str> = name.into().into();
         let hlog = element_hlog(ElementType::FrameCounter, &name, None);
+        hinfo!(hlog: &hlog, "created");
         (
             Self {
                 name,

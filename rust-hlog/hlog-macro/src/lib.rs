@@ -7,21 +7,18 @@ pub fn hlog(_args: TokenStream, input: TokenStream) -> TokenStream {
     let mut ast = parse_macro_input!(input as DeriveInput);
     match &mut ast.data {
         syn::Data::Struct(struct_data) => {
-            match &mut struct_data.fields {
-                syn::Fields::Named(fields) => {
-                    fields.named.push(
-                        syn::Field::parse_named
-                            .parse2(quote! { pub hlog: ::rust_hlog::HLog })
-                            .unwrap(),
-                    );
-                }
-                _ => (),
+            if let syn::Fields::Named(fields) = &mut struct_data.fields {
+                fields.named.push(
+                    syn::Field::parse_named
+                        .parse2(quote! { pub hlog: ::rust_hlog::HLog })
+                        .unwrap(),
+                );
             }
 
-            return quote! {
+            quote! {
                 #ast
             }
-            .into();
+            .into()
         }
         _ => panic!("`add_field` has to be used with structs "),
     }

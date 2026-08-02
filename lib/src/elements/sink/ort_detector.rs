@@ -3,7 +3,7 @@ use std::{path::Path, sync::Arc};
 use ffmpeg_next as ffmpeg;
 use ndarray::{Array4, Axis, s};
 use ort::{inputs, session::Session, value::TensorRef};
-use rust_hlog::{HLog, herror};
+use rust_hlog::{HLog, herror, hinfo};
 use thiserror::Error as ThisError;
 
 use crate::{
@@ -112,12 +112,17 @@ where
         iou_threshold: f32,
         on_detections: F,
     ) -> Result<Self> {
+        let model_path_display = model_path.as_ref().display().to_string();
         let session = Session::builder()
             .map_err(OrtDetectorError::from)?
             .commit_from_file(model_path)
             .map_err(OrtDetectorError::from)?;
         let name: Arc<str> = name.into().into();
         let hlog = element_hlog(ElementType::OrtDetector, &name, None);
+        hinfo!(
+            hlog: &hlog,
+            "model loaded: path={model_path_display}, conf_threshold={conf_threshold}, iou_threshold={iou_threshold}"
+        );
         Ok(Self {
             name,
             hlog,

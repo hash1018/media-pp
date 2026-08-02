@@ -10,7 +10,7 @@ use std::{
 
 use crossbeam_channel::{Receiver, Sender, TrySendError, bounded, select, unbounded};
 use ffmpeg_next as ffmpeg;
-use rust_hlog::{HLog, herror};
+use rust_hlog::{HLog, herror, hinfo};
 use str0m::{
     Event, Input, Output, Rtc, RtcError,
     change::{SdpAnswer, SdpOffer, SdpPendingOffer},
@@ -429,8 +429,10 @@ impl SourceElement for WebRtcTrackSource {
     /// ends when every `AppSourceHandle` is dropped: one final `Eos`, no
     /// error.
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
+        hinfo!(self, "run: starting");
         loop {
             if drain_control(control, self, bus)? {
+                hinfo!(self, "run: stopped");
                 return Ok(());
             }
 
@@ -439,21 +441,29 @@ impl SourceElement for WebRtcTrackSource {
                     match req {
                         Ok(req) => {
                             if apply_one(self, bus, req.msg, &req.ack)? {
+                                hinfo!(self, "run: stopped");
                                 return Ok(());
                             }
                             if req.msg == ControlMsg::Pause
                                 && wait_out_pause(control, self, bus)?
                             {
+                                hinfo!(self, "run: stopped");
                                 return Ok(());
                             }
                         }
                         // The Pipeline itself is gone — nothing left to drive this.
-                        Err(_) => return Ok(()),
+                        Err(_) => {
+                            hinfo!(self, "run: control channel gone, ending");
+                            return Ok(());
+                        }
                     }
                 }
                 recv(self.data_rx) -> buf => {
                     match buf {
-                        Ok(buf) if buf.is_eos() => break,
+                        Ok(buf) if buf.is_eos() => {
+                            hinfo!(self, "run: reached eos");
+                            break;
+                        }
                         Ok(buf) => {
                             if let Err(error) = self.pad.push(buf) {
                                 bus.post(
@@ -467,7 +477,10 @@ impl SourceElement for WebRtcTrackSource {
                             }
                         }
                         // `WebRtcPeer` gone — this track (or the whole peer) is done.
-                        Err(_) => break,
+                        Err(_) => {
+                            hinfo!(self, "run: WebRtcPeer gone, ending");
+                            break;
+                        }
                     }
                 }
             }
@@ -511,6 +524,11 @@ impl WebRtcPeer {
     ) -> (Self, WebRtcHandle) {
         let name: Arc<str> = name.into().into();
         let hlog = element_hlog(ElementType::WebRtcPeer, &name, None);
+        hinfo!(
+            hlog: &hlog,
+            "created: local_addr={:?}",
+            socket.local_addr()
+        );
         let (command_tx, command_rx) = bounded(CHANNEL_CAPACITY);
         let (new_track_tx, new_track_rx) = unbounded();
         let next_id = Arc::new(AtomicU64::new(0));
@@ -544,6 +562,7 @@ impl WebRtcPeer {
     /// see the type docs for why this is the one path both locally- and
     /// remotely-added tracks go through.
     fn attach_track(&mut self, id: TrackId, mid: Mid, kind: MediaKind) {
+        hinfo!(self, "track attached: id={id:?}, mid={mid}, kind={kind:?}");
         let reply = WebRtcTrackSink {
             id,
             command_tx: self.command_tx.clone(),
@@ -563,6 +582,10 @@ impl WebRtcPeer {
     fn apply_command(&mut self, cmd: Command) -> Result<()> {
         match cmd {
             Command::AddTrack(id, kind, direction, codec) => {
+                hinfo!(
+                    self,
+                    "add_track requested: id={id:?}, kind={kind:?}, direction={direction:?}, codec={codec:?}"
+                );
                 self.tracks_out
                     .insert(id, TrackOutState::ToOpen(kind, direction));
                 self.track_codec.insert(id, codec);
@@ -577,6 +600,7 @@ impl WebRtcPeer {
                     .accept_answer(pending, answer)
                     .inspect_err(|error| herror!(self, "accept_answer failed: {error}"))
                     .map_err(WebRtcError::from)?;
+                hinfo!(self, "renegotiation complete: {} track(s)", ids.len());
                 for id in ids {
                     if let Some(state @ TrackOutState::Negotiating(_)) = self.tracks_out.get(&id) {
                         let mid = state.mid().expect("Negotiating always carries a Mid");
@@ -591,6 +615,9 @@ impl WebRtcPeer {
                     .accept_offer(offer)
                     .inspect_err(|error| herror!(self, "accept_offer failed: {error}"))
                     .map_err(WebRtcError::from);
+                if result.is_ok() {
+                    hinfo!(self, "accepted remote offer");
+                }
                 let _ = reply.send(result);
             }
         }
@@ -627,6 +654,7 @@ impl WebRtcPeer {
         }
 
         if let Some((offer, pending)) = api.apply() {
+            hinfo!(self, "renegotiation started: {} track(s)", to_open.len());
             self.pending = Some((pending, to_open));
             (self.on_offer)(offer);
         }
@@ -771,12 +799,26 @@ impl WebRtcPeer {
                     .iter()
                     .find(|(_, s)| s.mid() == Some(req.mid))
                 {
+                    hinfo!(self, "keyframe requested: id={id:?}, mid={}", req.mid);
                     (self.on_keyframe_request)(id);
                 }
             }
-            // `Event` is `#[non_exhaustive]` — connection state changes,
-            // stats, data channels, etc. are all outside this element's
-            // concern for now.
+            Event::Connected => {
+                hinfo!(self, "ICE+DTLS connected");
+            }
+            Event::IceConnectionStateChange(state) => {
+                hinfo!(self, "ICE connection state: {state:?}");
+            }
+            Event::MediaChanged(changed) => {
+                hinfo!(
+                    self,
+                    "media changed: mid={}, direction={:?}",
+                    changed.mid,
+                    changed.direction
+                );
+            }
+            // `Event` is `#[non_exhaustive]` — data channels, stats, etc.
+            // are still outside this element's concern for now.
             _ => {}
         }
     }
@@ -824,6 +866,7 @@ impl Driver for WebRtcPeer {
     /// this loop would starve ICE keepalives/DTLS retransmits, likely
     /// dropping the connection rather than gracefully suspending it.
     fn run(&mut self, stop: &StopReceiver, bus: &Bus) -> Result<()> {
+        hinfo!(self, "run: starting");
         let mut buf = vec![0u8; 2000];
         loop {
             while let Ok(cmd) = self.command_rx.try_recv() {
@@ -833,6 +876,7 @@ impl Driver for WebRtcPeer {
 
             let deadline = self.drive_until_timeout(bus)?;
             if !self.rtc.is_alive() || stop.is_stopped() {
+                hinfo!(self, "run: stopped (rtc alive: {})", self.rtc.is_alive());
                 self.tracks_in.clear();
                 return Ok(());
             }

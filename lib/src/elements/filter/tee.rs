@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex};
 
-use rust_hlog::HLog;
+use rust_hlog::{HLog, hinfo};
 
 use crate::{
     buffer::MediaBuffer,
@@ -45,6 +45,7 @@ impl Tee {
     pub fn new(name: impl Into<String>) -> (Self, TeeHandle) {
         let name: Arc<str> = name.into().into();
         let hlog = element_hlog(ElementType::Tee, &name, None);
+        hinfo!(hlog: &hlog, "created");
         let pads = Arc::new(Mutex::new(Vec::new()));
         (
             Self {
@@ -62,6 +63,11 @@ impl TeeHandle {
     pub fn add_sink(&self, sink: Box<dyn Sink>) {
         let mut pads = self.pads.lock().unwrap();
         let mut pad = SrcPad::new(format!("{}_src{}", self.name, pads.len()));
+        hinfo!(
+            hlog: &element_hlog(ElementType::Tee, &self.name, None),
+            "sink added: {} total",
+            pads.len() + 1
+        );
         pad.link(sink);
         pads.push(pad);
     }
@@ -72,6 +78,11 @@ impl TeeHandle {
         if index >= pads.len() {
             return None;
         }
+        hinfo!(
+            hlog: &element_hlog(ElementType::Tee, &self.name, None),
+            "sink removed: index={index}, {} remaining",
+            pads.len() - 1
+        );
         pads.remove(index).unlink()
     }
 

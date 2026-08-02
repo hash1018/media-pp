@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use ffmpeg_next as ffmpeg;
-use rust_hlog::{HLog, herror};
+use rust_hlog::{HLog, herror, hinfo};
 use thiserror::Error as ThisError;
 
 use crate::{
@@ -94,6 +94,10 @@ impl Scaler {
     ) -> Self {
         let name: Arc<str> = name.into().into();
         let hlog = element_hlog(ElementType::Scaler, &name, None);
+        hinfo!(
+            hlog: &hlog,
+            "created: dst_format={dst_format:?}, dst={dst_width}x{dst_height}"
+        );
         let pad = SrcPad::new(format!("{name}_src"));
         let pool = UnboundObjectPool::new(
             POOL_SIZE,

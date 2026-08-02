@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use rust_hlog::HLog;
+use rust_hlog::{HLog, hinfo};
 
 use crate::{
     buffer::MediaBuffer,
@@ -78,6 +78,7 @@ where
     pub fn with_control(name: impl Into<String>, consume: F, control: C) -> Self {
         let name: Arc<str> = name.into().into();
         let hlog = element_hlog(ElementType::AppSink, &name, None);
+        hinfo!(hlog: &hlog, "created");
         Self {
             name,
             hlog,

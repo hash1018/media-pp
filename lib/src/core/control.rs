@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use crossbeam_channel::{Receiver, Sender, unbounded};
+use rust_hlog::hinfo;
 
 use crate::{
     bus::{Bus, BusEvent},
@@ -146,6 +147,7 @@ pub(crate) fn apply_one<S: SourceElement>(
     msg: ControlMsg,
     ack: &Sender<()>,
 ) -> Result<bool> {
+    hinfo!(hlog: source.hlog(), "control: {msg:?}");
     apply_seek(source, bus, msg)?;
     for pad in source.src_pads() {
         pad.control(msg)?;

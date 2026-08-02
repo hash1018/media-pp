@@ -1,7 +1,7 @@
 use std::{sync::Arc, time::Duration};
 
 use crossbeam_channel::{Receiver, Sender, TrySendError, bounded, select};
-use rust_hlog::HLog;
+use rust_hlog::{HLog, hinfo};
 use thiserror::Error as ThisError;
 
 use crate::{
@@ -66,6 +66,7 @@ impl AppSource {
     pub fn new(name: impl Into<String>, capacity: usize) -> (Self, AppSourceHandle) {
         let name: Arc<str> = name.into().into();
         let hlog = element_hlog(ElementType::AppSource, &name, None);
+        hinfo!(hlog: &hlog, "created: capacity={capacity}");
         let pad = SrcPad::new(format!("{name}_src"));
         let (data_tx, data_rx) = bounded(capacity);
         (
@@ -133,6 +134,7 @@ impl Source for AppSource {
 
 impl SourceElement for AppSource {
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
+        hinfo!(self, "run: starting");
         loop {
             // Non-blocking first: if control is already backed up, clear
             // it before the `select!` below picks an arbitrary ready arm
@@ -140,6 +142,7 @@ impl SourceElement for AppSource {
             // this keeps `AppSource` consistent with every other
             // `SourceElement::run` calling `drain_control` per iteration).
             if drain_control(control, self, bus)? {
+                hinfo!(self, "run: stopped");
                 return Ok(());
             }
 
@@ -148,21 +151,29 @@ impl SourceElement for AppSource {
                     match req {
                         Ok(req) => {
                             if apply_one(self, bus, req.msg, &req.ack)? {
+                                hinfo!(self, "run: stopped");
                                 return Ok(());
                             }
                             if req.msg == ControlMsg::Pause
                                 && wait_out_pause(control, self, bus)?
                             {
+                                hinfo!(self, "run: stopped");
                                 return Ok(());
                             }
                         }
                         // The Pipeline itself is gone — nothing left to drive this.
-                        Err(_) => return Ok(()),
+                        Err(_) => {
+                            hinfo!(self, "run: control channel gone, ending");
+                            return Ok(());
+                        }
                     }
                 }
                 recv(self.data_rx) -> buf => {
                     match buf {
-                        Ok(buf) if buf.is_eos() => break,
+                        Ok(buf) if buf.is_eos() => {
+                            hinfo!(self, "run: reached eos");
+                            break;
+                        }
                         Ok(buf) => {
                             if let Err(error) = self.pad.push(buf) {
                                 bus.post(
@@ -176,7 +187,10 @@ impl SourceElement for AppSource {
                             }
                         }
                         // Every `AppSourceHandle` dropped without an explicit Eos.
-                        Err(_) => break,
+                        Err(_) => {
+                            hinfo!(self, "run: every AppSourceHandle dropped, ending");
+                            break;
+                        }
                     }
                 }
             }

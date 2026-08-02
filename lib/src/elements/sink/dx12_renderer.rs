@@ -5,7 +5,7 @@ use renderer_engine::{
     engine::RendererEngine,
     window_renderer::{RawPlane, SubmitError, WindowRenderer},
 };
-use rust_hlog::{HLog, herror};
+use rust_hlog::{HLog, herror, hinfo};
 use thiserror::Error as ThisError;
 use windows::{
     Win32::Graphics::Direct3D12::{ID3D12Fence, ID3D12Resource},
@@ -80,6 +80,7 @@ impl Dx12Renderer {
             WindowRenderer::new(engine, hwnd, width, height).map_err(Dx12RendererError::Create)?;
         let name: Arc<str> = name.into().into();
         let hlog = element_hlog(ElementType::Dx12Renderer, &name, None);
+        hinfo!(hlog: &hlog, "created: {width}x{height}");
         Ok(Self { name, hlog, inner })
     }
 
@@ -87,7 +88,9 @@ impl Dx12Renderer {
     pub fn resize(&self, width: u32, height: u32) -> Result<()> {
         self.inner
             .resize(width, height)
+            .inspect_err(|error| herror!(self, "resize failed: {error:?}"))
             .map_err(Dx12RendererError::Resize)?;
+        hinfo!(self, "resized: {width}x{height}");
         Ok(())
     }
 

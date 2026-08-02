@@ -7,7 +7,7 @@ use std::{
     time::Duration,
 };
 
-use rust_hlog::HLog;
+use rust_hlog::{HLog, hinfo};
 
 use crate::{
     buffer::MediaBuffer,
@@ -36,6 +36,12 @@ pub struct ChainBuilder {
     /// element failed but which pipeline it belonged to.
     pipeline_id: Arc<str>,
     elements: Vec<Box<dyn StageBuilder>>,
+    /// `Type(name)` for each element added so far, in call order — captured
+    /// right when `.pipe()`/`.queue()` are called (before the element is
+    /// boxed into an opaque `StageBuilder`, which no longer exposes its own
+    /// name/type). Rendered into one line and handed to [`Bus::register_branch`]
+    /// by [`ChainBuilder::build`] — see [`Pipeline::topology`].
+    stage_descs: Vec<String>,
 }
 
 trait StageBuilder: Send {
@@ -152,6 +158,7 @@ impl ChainBuilder {
             bus,
             pipeline_id: pipeline_id.into().into(),
             elements: Vec::new(),
+            stage_descs: Vec::new(),
         }
     }
 
@@ -160,6 +167,8 @@ impl ChainBuilder {
     /// It runs on the same thread as whatever is upstream of it — direct
     /// function call, no queue.
     pub fn pipe<T: Filter + 'static>(mut self, element: T) -> Self {
+        self.stage_descs
+            .push(format!("{:?}({})", element.element_type(), element.name()));
         self.elements.push(Box::new(DirectStage(element)));
         self
     }
@@ -180,8 +189,11 @@ impl ChainBuilder {
         capacity: usize,
         policy: OverflowPolicy,
     ) -> Self {
+        let name = name.into();
+        self.stage_descs
+            .push(format!("{:?}({name})", ElementType::Queue));
         self.elements.push(Box::new(QueueStage {
-            name: name.into(),
+            name,
             capacity,
             policy,
         }));
@@ -198,6 +210,13 @@ impl ChainBuilder {
             &terminal.name(),
             Some(&self.pipeline_id),
         );
+        let mut descs = self.stage_descs;
+        descs.push(format!(
+            "{:?}({})",
+            terminal.element_type(),
+            terminal.name()
+        ));
+        self.bus.register_branch(descs.join(" - "));
         let terminal: Box<dyn Sink> = Box::new(EosReporter {
             bus: self.bus.clone(),
             inner: terminal,
@@ -267,6 +286,11 @@ pub struct Pipeline {
     clock: Arc<Clock>,
     bus_rx: BusReceiver,
     running: AtomicBool,
+    /// One line per branch (`src_pads()[i]` linked through a
+    /// `ChainBuilder::build` inside `wire`), each `"Type(name) - Type(name) - ..."`
+    /// from the source through to that branch's terminal — see
+    /// [`Pipeline::topology`].
+    topology: Vec<String>,
 }
 
 impl Pipeline {
@@ -292,8 +316,14 @@ impl Pipeline {
         let id: Arc<str> = id.into().into();
         let (bus, bus_rx) = Bus::new();
         let clock = Arc::new(Clock::new());
+        let source_desc = format!("{:?}({})", source.element_type(), source.name());
         *source.hlog_mut() = element_hlog(source.element_type(), &source.name(), Some(&id));
         wire(&mut source, &bus, &clock, &id);
+        let topology = bus
+            .topology()
+            .into_iter()
+            .map(|branch| format!("{source_desc} - {branch}"))
+            .collect();
         let (control_tx, control_rx) = control::channel();
         Arc::new(Pipeline {
             id,
@@ -304,6 +334,7 @@ impl Pipeline {
             clock,
             bus_rx,
             running: AtomicBool::new(false),
+            topology,
         })
     }
 
@@ -314,6 +345,21 @@ impl Pipeline {
 
     pub fn bus(&self) -> &BusReceiver {
         &self.bus_rx
+    }
+
+    /// Human-readable rundown of every element statically wired into this
+    /// pipeline: one line per branch (one per `src_pads()[i]` that got
+    /// linked through a [`ChainBuilder::build`] inside `wire`), each
+    /// formatted `Type(name) - Type(name) - ...` from the source through to
+    /// that branch's terminal. Multiple branches (fan-out across more than
+    /// one src pad) are joined by newlines.
+    ///
+    /// Only reflects wiring done through `ChainBuilder` at construction
+    /// time — a `SrcPad::link` called by hand instead, or anything attached
+    /// dynamically afterward (e.g. [`crate::elements::Tee::add_sink`]),
+    /// won't show up here.
+    pub fn topology(&self) -> String {
+        self.topology.join("\n")
     }
 
     /// The clock every `Pacer` in this pipeline paces against — see
@@ -347,6 +393,7 @@ impl Pipeline {
         thread::Builder::new()
             .name("pipeline:source".into())
             .spawn(move || {
+                hinfo!(main_id: &this.id, "pipeline: run starting");
                 let source_name = source.name();
                 let source_type = source.element_type();
                 // `source.run()` itself already reports non-fatal,
@@ -354,7 +401,7 @@ impl Pipeline {
                 // `SourceElement::run`'s docs) — a returned `Err` here
                 // means something genuinely ended the whole source, e.g.
                 // a `Seek` that failed outright.
-                if let Err(error) = source.run(&control_rx, &bus) {
+                let outcome = if let Err(error) = source.run(&control_rx, &bus) {
                     bus.post(
                         source.hlog(),
                         BusEvent::Error {
@@ -363,7 +410,11 @@ impl Pipeline {
                             error,
                         },
                     );
-                }
+                    "error"
+                } else {
+                    "ok"
+                };
+                hinfo!(main_id: &this.id, "pipeline: run finished ({outcome})");
                 this.running.store(false, Ordering::Release);
             })
             .expect("failed to spawn pipeline source thread");
@@ -701,5 +752,42 @@ mod tests {
         });
 
         assert_eq!(pipeline.id(), "my-pipeline");
+    }
+
+    /// [`Pipeline::topology`] should render the source plus every element
+    /// added via `.queue()`/`.pipe()` and the terminal, in order, joined by
+    /// `" - "` — and one line per branch when more than one src pad is
+    /// linked.
+    #[test]
+    fn topology_lists_source_through_terminal_per_branch() {
+        let (source, streams) = FileDemuxer::open("demux", test_video()).expect("open test video");
+        let video = streams
+            .iter()
+            .find(|s| s.kind == ffmpeg_next::media::Type::Video)
+            .expect("test video has a video stream");
+        let index = video.index;
+        let time_base = source.stream_time_base(index).expect("stream disappeared");
+
+        let pipeline = Pipeline::new("test", source, |source, bus, clock, id| {
+            let pacer = Pacer::new("pacer", time_base, clock.clone());
+            let branch = ChainBuilder::new(bus.clone(), id)
+                .queue("q", 4)
+                .pipe(pacer)
+                .build(Box::new(NoOpSink {
+                    hlog: element_hlog(ElementType::Other, "noop", None),
+                }));
+            source.src_pads()[index].link(branch);
+        });
+
+        assert_eq!(
+            pipeline.topology(),
+            "FileDemuxer(demux) - Queue(q) - Pacer(pacer) - Other(noop)"
+        );
+
+        // `pipeline` is dropped here without ever being `run()`, taking
+        // its `.queue()`-spawned worker thread down with it — regression
+        // coverage for the `Queue::drop` fix (see
+        // `queue::tests::dropping_without_stop_or_eos_does_not_hang`):
+        // this used to hang the test process forever.
     }
 }

@@ -14,7 +14,7 @@ use std::{
 };
 
 use ffmpeg_next::{self as ffmpeg, ffi};
-use rust_hlog::{HLog, herror};
+use rust_hlog::{HLog, herror, hinfo};
 use thiserror::Error as ThisError;
 
 use crate::{
@@ -294,6 +294,7 @@ impl RtspServer {
 
         let name: Arc<str> = name.into().into();
         let hlog = element_hlog(ElementType::RtspServer, &name, None);
+        hinfo!(hlog: &hlog, "mediamtx up, publishing: url={url}, port={port}");
         Ok(Self {
             name,
             hlog,
@@ -753,6 +754,11 @@ impl Sink for RtspServer {
 
 impl Drop for RtspServer {
     fn drop(&mut self) {
+        hinfo!(
+            self,
+            "dropped: killing mediamtx, releasing ports {:?}",
+            self.ports
+        );
         // mediamtx has no portable graceful-shutdown API from here (no
         // SIGTERM equivalent in `std` on Windows); killing it is enough
         // since it owns no state we need flushed — the stream itself was

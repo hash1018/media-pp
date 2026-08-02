@@ -1,7 +1,7 @@
 use std::{sync::Arc, thread, time::Instant};
 
 use ffmpeg_next as ffmpeg;
-use rust_hlog::HLog;
+use rust_hlog::{HLog, hinfo};
 
 use crate::{
     buffer::MediaBuffer,
@@ -46,6 +46,7 @@ impl Pacer {
     pub fn new(name: impl Into<String>, time_base: ffmpeg::Rational, clock: Arc<Clock>) -> Self {
         let name: Arc<str> = name.into().into();
         let hlog = element_hlog(ElementType::Pacer, &name, None);
+        hinfo!(hlog: &hlog, "created: time_base={time_base}");
         let pad = SrcPad::new(format!("{name}_src"));
         Self {
             name,
