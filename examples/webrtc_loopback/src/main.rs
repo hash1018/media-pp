@@ -21,6 +21,7 @@ use media_pp::{
 use str0m::{
     Candidate, Rtc,
     change::SdpOffer,
+    format::Codec,
     media::{Direction, MediaKind},
 };
 
@@ -96,7 +97,7 @@ fn main() {
     thread::sleep(Duration::from_millis(200));
     println!("ICE/DTLS-SRTP established over loopback UDP");
 
-    let _track_id = handle_a.add_track(MediaKind::Video, Direction::SendRecv);
+    let _track_id = handle_a.add_track(MediaKind::Video, Direction::SendRecv, Codec::Vp8);
     // `next_track()` returns for peer-a's own track the moment `add_track`'s
     // negotiation mints a Mid — before the offer even leaves this process.
     let (_id, _mid, kind, mut sink_a, source_a) = handle_a
