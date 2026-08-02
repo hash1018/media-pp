@@ -42,13 +42,17 @@ fn main() -> Result<()> {
     let (app_source, handle) = AppSource::new("app-source", 8);
     let (frame_counter, count) = FrameCounter::new("frame-counter");
 
-    let pipeline = Pipeline::new("app-source", app_source, |source, bus, _clock, id| {
-        let decoder = SwDecoder::new("decoder", params).expect("failed to open decoder");
-        let branch = ChainBuilder::new(bus.clone(), id)
-            .pipe(decoder) // same thread as `AppSource::run` — cheap enough not to need a queue
-            .build(Box::new(frame_counter));
-        source.src_pads()[0].link(branch);
-    });
+    let pipeline = Pipeline::new(
+        "app-source",
+        app_source,
+        |source, bus, _clock, id, registry| {
+            let decoder = SwDecoder::new("decoder", params).expect("failed to open decoder");
+            let branch = ChainBuilder::new(bus.clone(), id, registry.clone())
+                .pipe(decoder) // same thread as `AppSource::run` — cheap enough not to need a queue
+                .build(Box::new(frame_counter));
+            source.src_pads()[0].link(branch);
+        },
+    );
     pipeline.run();
 
     // The "external producer": wholly separate from the thread

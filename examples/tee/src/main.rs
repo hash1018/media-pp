@@ -42,14 +42,15 @@ fn main() -> media_pp::Result<()> {
     let (frame_counter, frame_count) = FrameCounter::new("frame-counter");
     let (packet_counter, packet_count) = PacketCounter::new("packet-counter");
 
-    let pipeline = Pipeline::new("tee", source, |source, bus, _clock, id| {
+    let pipeline = Pipeline::new("tee", source, |source, bus, _clock, id, registry| {
         let decoder = SwDecoder::new("decoder", params).expect("failed to open decoder");
-        let decode_branch = ChainBuilder::new(bus.clone(), id)
+        let decode_branch = ChainBuilder::new(bus.clone(), id, registry.clone())
             .pipe(decoder)
             .build(Box::new(frame_counter));
-        let packet_branch = ChainBuilder::new(bus.clone(), id).build(Box::new(packet_counter));
+        let packet_branch =
+            ChainBuilder::new(bus.clone(), id, registry.clone()).build(Box::new(packet_counter));
 
-        let (tee, tee_handle) = Tee::new("tee");
+        let (tee, tee_handle) = Tee::new("tee", registry.clone());
         tee_handle.add_sink(decode_branch);
         tee_handle.add_sink(packet_branch);
         source.src_pads()[video.index].link(Box::new(tee));

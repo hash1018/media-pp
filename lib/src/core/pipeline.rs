@@ -14,7 +14,10 @@ use crate::{
     bus::{Bus, BusEvent, BusReceiver},
     clock::Clock,
     control::{self, ControlMsg, ControlReceiver, ControlSender},
-    element::{Element, ElementType, Filter, Sink, SourceElement, element_hlog},
+    element::{
+        Element, ElementInfo, ElementRegistry, ElementType, Filter, Sink, SourceElement,
+        element_hlog,
+    },
     error::Result,
     queue::{OverflowPolicy, Queue},
 };
@@ -36,12 +39,14 @@ pub struct ChainBuilder {
     /// element failed but which pipeline it belonged to.
     pipeline_id: Arc<str>,
     elements: Vec<Box<dyn StageBuilder>>,
-    /// `Type(name)` for each element added so far, in call order — captured
-    /// right when `.pipe()`/`.queue()` are called (before the element is
-    /// boxed into an opaque `StageBuilder`, which no longer exposes its own
-    /// name/type). Rendered into one line and handed to [`Bus::register_branch`]
-    /// by [`ChainBuilder::build`] — see [`Pipeline::topology`].
-    stage_descs: Vec<String>,
+    registry: ElementRegistry,
+    /// Name of the most-recently-added element in this chain, captured
+    /// right when `.pipe()`/`.queue()`/`.build()` are called — so the next
+    /// one can register itself as *its* `upstream`. `None` until the
+    /// first is added, meaning that one's own `upstream` is registered
+    /// unresolved (see [`ElementInfo::upstream`]'s own docs on how that
+    /// gets resolved later).
+    last: Option<Arc<str>>,
 }
 
 trait StageBuilder: Send {
@@ -153,12 +158,13 @@ impl StageBuilder for QueueStage {
 }
 
 impl ChainBuilder {
-    pub fn new(bus: Bus, pipeline_id: impl Into<String>) -> Self {
+    pub fn new(bus: Bus, pipeline_id: impl Into<String>, registry: ElementRegistry) -> Self {
         Self {
             bus,
             pipeline_id: pipeline_id.into().into(),
             elements: Vec::new(),
-            stage_descs: Vec::new(),
+            registry,
+            last: None,
         }
     }
 
@@ -167,8 +173,10 @@ impl ChainBuilder {
     /// It runs on the same thread as whatever is upstream of it — direct
     /// function call, no queue.
     pub fn pipe<T: Filter + 'static>(mut self, element: T) -> Self {
-        self.stage_descs
-            .push(format!("{:?}({})", element.element_type(), element.name()));
+        let name = element.name();
+        self.registry
+            .register(element.element_type(), name.clone(), self.last.take());
+        self.last = Some(name);
         self.elements.push(Box::new(DirectStage(element)));
         self
     }
@@ -189,11 +197,12 @@ impl ChainBuilder {
         capacity: usize,
         policy: OverflowPolicy,
     ) -> Self {
-        let name = name.into();
-        self.stage_descs
-            .push(format!("{:?}({name})", ElementType::Queue));
+        let name: Arc<str> = name.into().into();
+        self.registry
+            .register(ElementType::Queue, name.clone(), self.last.take());
+        self.last = Some(name.clone());
         self.elements.push(Box::new(QueueStage {
-            name,
+            name: name.to_string(),
             capacity,
             policy,
         }));
@@ -210,13 +219,8 @@ impl ChainBuilder {
             &terminal.name(),
             Some(&self.pipeline_id),
         );
-        let mut descs = self.stage_descs;
-        descs.push(format!(
-            "{:?}({})",
-            terminal.element_type(),
-            terminal.name()
-        ));
-        self.bus.register_branch(descs.join(" - "));
+        self.registry
+            .register(terminal.element_type(), terminal.name(), self.last);
         let terminal: Box<dyn Sink> = Box::new(EosReporter {
             bus: self.bus.clone(),
             inner: terminal,
@@ -286,44 +290,55 @@ pub struct Pipeline {
     clock: Arc<Clock>,
     bus_rx: BusReceiver,
     running: AtomicBool,
-    /// One line per branch (`src_pads()[i]` linked through a
-    /// `ChainBuilder::build` inside `wire`), each `"Type(name) - Type(name) - ..."`
-    /// from the source through to that branch's terminal — see
-    /// [`Pipeline::topology`].
-    topology: Vec<String>,
+    /// Every element statically wired into this pipeline, source included
+    /// — see [`Pipeline::elements`]/[`Pipeline::topology`].
+    elements: Vec<ElementInfo>,
 }
 
 impl Pipeline {
     /// `id` names this pipeline — stamped as the source's own `hlog`
-    /// sub_id right away, and handed to `wire` (its last argument) so
-    /// every `ChainBuilder::new(bus.clone(), id)` it builds tags whatever
-    /// passes through it the same way (see [`ChainBuilder`]'s own docs).
+    /// sub_id right away, and handed to `wire` so every
+    /// `ChainBuilder::new(bus.clone(), id, registry.clone())` it builds
+    /// tags whatever passes through it the same way (see [`ChainBuilder`]'s
+    /// own docs).
     ///
     /// `wire` is called once with the freshly created source, a `Bus`,
     /// this pipeline's `Clock` (share it with every
     /// [`crate::elements::Pacer`] via `Clock::clone` — one clock per
     /// pipeline, so every paced branch agrees on the same t=0 and the
-    /// same pause/resume timeline), and this pipeline's own `id`, so it
-    /// can build one or more `ChainBuilder` chains (one per src pad that
-    /// should actually be used) and link them via
-    /// `source.src_pads()[i].link(...)`. Pads left unlinked just drop
-    /// whatever gets pushed into them.
+    /// same pause/resume timeline), this pipeline's own `id`, and an
+    /// [`ElementRegistry`] (already seeded with the source itself) that
+    /// every `ChainBuilder`/[`crate::elements::Tee`] built inside `wire`
+    /// should be given a clone of, so [`Pipeline::elements`]/
+    /// [`Pipeline::topology`] can see them afterward. `wire` builds one or
+    /// more `ChainBuilder` chains (one per src pad that should actually be
+    /// used) and links them via `source.src_pads()[i].link(...)`. Pads
+    /// left unlinked just drop whatever gets pushed into them.
     pub fn new<S: SourceElement + 'static>(
         id: impl Into<String>,
         mut source: S,
-        wire: impl FnOnce(&mut S, &Bus, &Arc<Clock>, &str),
+        wire: impl FnOnce(&mut S, &Bus, &Arc<Clock>, &str, &ElementRegistry),
     ) -> Arc<Self> {
         let id: Arc<str> = id.into().into();
         let (bus, bus_rx) = Bus::new();
         let clock = Arc::new(Clock::new());
-        let source_desc = format!("{:?}({})", source.element_type(), source.name());
         *source.hlog_mut() = element_hlog(source.element_type(), &source.name(), Some(&id));
-        wire(&mut source, &bus, &clock, &id);
-        let topology = bus
-            .topology()
-            .into_iter()
-            .map(|branch| format!("{source_desc} - {branch}"))
-            .collect();
+        let registry = ElementRegistry::new();
+        registry.register(source.element_type(), source.name(), None);
+        wire(&mut source, &bus, &clock, &id, &registry);
+        let mut elements = registry.snapshot();
+        // Everything other than the source's own entry (registered first,
+        // above) that never got a resolved `upstream` — a `ChainBuilder`
+        // chain's first element, unless something like `TeeHandle::add_sink`
+        // already pointed it elsewhere — defaults to hanging directly off
+        // the source, matching `ChainBuilder`/`Pipeline`'s own default
+        // wiring pattern (`source.src_pads()[i].link(chain)`).
+        let source_name = elements[0].name.clone();
+        for element in elements.iter_mut().skip(1) {
+            if element.upstream.is_none() {
+                element.upstream = Some(source_name.clone());
+            }
+        }
         let (control_tx, control_rx) = control::channel();
         Arc::new(Pipeline {
             id,
@@ -334,7 +349,7 @@ impl Pipeline {
             clock,
             bus_rx,
             running: AtomicBool::new(false),
-            topology,
+            elements,
         })
     }
 
@@ -347,19 +362,60 @@ impl Pipeline {
         &self.bus_rx
     }
 
-    /// Human-readable rundown of every element statically wired into this
-    /// pipeline: one line per branch (one per `src_pads()[i]` that got
-    /// linked through a [`ChainBuilder::build`] inside `wire`), each
-    /// formatted `Type(name) - Type(name) - ...` from the source through to
-    /// that branch's terminal. Multiple branches (fan-out across more than
-    /// one src pad) are joined by newlines.
+    /// Every element statically wired into this pipeline (source
+    /// included), each knowing what feeds it — see
+    /// [`ElementInfo::upstream`]. Raw data behind [`Pipeline::topology`];
+    /// reach for that instead unless you actually need to walk the graph
+    /// yourself.
     ///
-    /// Only reflects wiring done through `ChainBuilder` at construction
-    /// time — a `SrcPad::link` called by hand instead, or anything attached
-    /// dynamically afterward (e.g. [`crate::elements::Tee::add_sink`]),
+    /// Only reflects wiring done through `ChainBuilder`/[`crate::elements::Tee`]
+    /// at construction time — a `SrcPad::link` called by hand instead
     /// won't show up here.
+    pub fn elements(&self) -> &[ElementInfo] {
+        &self.elements
+    }
+
+    /// Human-readable rundown of [`Pipeline::elements`]: one line per
+    /// branch — each element nothing else in the graph feeds into (a
+    /// terminal sink, or an empty [`crate::elements::Tee`] with no sinks
+    /// attached yet) — formatted `Type(name) - Type(name) - ...` by
+    /// walking that element's `upstream` chain back to the source.
+    /// Multiple branches (fan-out across more than one src pad, or a
+    /// `Tee`) are joined by newlines.
     pub fn topology(&self) -> String {
-        self.topology.join("\n")
+        let by_name = |name: &str| self.elements.iter().find(|e| &*e.name == name);
+        let is_leaf = |name: &str| {
+            !self
+                .elements
+                .iter()
+                .any(|e| e.upstream.as_deref() == Some(name))
+        };
+        let render = |leaf: &ElementInfo| {
+            let mut chain = vec![format!("{:?}({})", leaf.element_type, leaf.name)];
+            let mut current = leaf;
+            // Bounded by `elements.len()` rather than looping until
+            // `upstream` runs out, purely defensive — a real cycle would
+            // mean a bug elsewhere (`ChainBuilder`/`Tee` registration),
+            // not something to hang over here.
+            for _ in 0..self.elements.len() {
+                let Some(upstream_name) = current.upstream.as_deref() else {
+                    break;
+                };
+                let Some(upstream) = by_name(upstream_name) else {
+                    break; // dangling reference — shouldn't normally happen
+                };
+                chain.push(format!("{:?}({})", upstream.element_type, upstream.name));
+                current = upstream;
+            }
+            chain.reverse();
+            chain.join(" - ")
+        };
+        self.elements
+            .iter()
+            .filter(|e| is_leaf(&e.name))
+            .map(render)
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     /// The clock every `Pacer` in this pipeline paces against — see
@@ -486,7 +542,7 @@ mod tests {
     use super::*;
     use crate::{
         element::Source,
-        elements::{FileDemuxer, Pacer},
+        elements::{FileDemuxer, Pacer, Tee},
     };
 
     /// Real video file, one directory up from this crate — same one every
@@ -512,10 +568,11 @@ mod tests {
             .expect("test video has a video stream");
         let index = video.index;
 
-        let pipeline = Pipeline::new("test", source, |source, bus, _clock, id| {
-            let branch = ChainBuilder::new(bus.clone(), id)
+        let pipeline = Pipeline::new("test", source, |source, bus, _clock, id, registry| {
+            let branch = ChainBuilder::new(bus.clone(), id, registry.clone())
                 .queue("q", 4)
                 .build(Box::new(NoOpSink {
+                    name: "noop".into(),
                     hlog: element_hlog(ElementType::Other, "noop", None),
                 }));
             source.src_pads()[index].link(branch);
@@ -565,9 +622,9 @@ mod tests {
         // of thing a weak `count > 0` assertion wouldn't have caught (see
         // `seek_reports_where_it_actually_landed_when_target_is_not_a_keyframe`
         // for how this was found).
-        let pipeline = Pipeline::new("test", source, |source, bus, clock, id| {
+        let pipeline = Pipeline::new("test", source, |source, bus, clock, id, registry| {
             let pacer = Pacer::new("pacer", time_base, clock.clone());
-            let branch = ChainBuilder::new(bus.clone(), id)
+            let branch = ChainBuilder::new(bus.clone(), id, registry.clone())
                 .queue("q", 4)
                 .pipe(pacer)
                 .build(Box::new(sink));
@@ -618,12 +675,13 @@ mod tests {
 
         // Paced for the same reason as `seek_repositions_and_playback_continues`
         // — otherwise the file finishes before `seek()` is even called.
-        let pipeline = Pipeline::new("test", source, |source, bus, clock, id| {
+        let pipeline = Pipeline::new("test", source, |source, bus, clock, id, registry| {
             let pacer = Pacer::new("pacer", time_base, clock.clone());
-            let branch = ChainBuilder::new(bus.clone(), id)
+            let branch = ChainBuilder::new(bus.clone(), id, registry.clone())
                 .queue("q", 4)
                 .pipe(pacer)
                 .build(Box::new(NoOpSink {
+                    name: "noop".into(),
                     hlog: element_hlog(ElementType::Other, "noop", None),
                 }));
             source.src_pads()[index].link(branch);
@@ -657,11 +715,12 @@ mod tests {
     }
 
     struct NoOpSink {
+        name: Arc<str>,
         hlog: HLog,
     }
     impl Element for NoOpSink {
         fn name(&self) -> Arc<str> {
-            "noop".into()
+            self.name.clone()
         }
 
         fn element_type(&self) -> ElementType {
@@ -725,9 +784,11 @@ mod tests {
     fn chain_builder_stamps_pipeline_id_into_terminal_hlog() {
         let (bus, _bus_rx) = Bus::new();
         let sink = NoOpSink {
+            name: "noop".into(),
             hlog: element_hlog(ElementType::Other, "noop", None),
         };
-        let built = ChainBuilder::new(bus, "my-pipeline").build(Box::new(sink));
+        let built =
+            ChainBuilder::new(bus, "my-pipeline", ElementRegistry::new()).build(Box::new(sink));
         assert_eq!(built.hlog().log_id(), "Other(noop):Pipeline(my-pipeline)");
     }
 
@@ -744,12 +805,19 @@ mod tests {
             .expect("test video has a video stream");
         let index = video.index;
 
-        let pipeline = Pipeline::new("my-pipeline", source, |source, bus, _clock, id| {
-            let branch = ChainBuilder::new(bus.clone(), id).build(Box::new(NoOpSink {
-                hlog: element_hlog(ElementType::Other, "noop", None),
-            }));
-            source.src_pads()[index].link(branch);
-        });
+        let pipeline = Pipeline::new(
+            "my-pipeline",
+            source,
+            |source, bus, _clock, id, registry| {
+                let branch = ChainBuilder::new(bus.clone(), id, registry.clone()).build(Box::new(
+                    NoOpSink {
+                        name: "noop".into(),
+                        hlog: element_hlog(ElementType::Other, "noop", None),
+                    },
+                ));
+                source.src_pads()[index].link(branch);
+            },
+        );
 
         assert_eq!(pipeline.id(), "my-pipeline");
     }
@@ -768,12 +836,13 @@ mod tests {
         let index = video.index;
         let time_base = source.stream_time_base(index).expect("stream disappeared");
 
-        let pipeline = Pipeline::new("test", source, |source, bus, clock, id| {
+        let pipeline = Pipeline::new("test", source, |source, bus, clock, id, registry| {
             let pacer = Pacer::new("pacer", time_base, clock.clone());
-            let branch = ChainBuilder::new(bus.clone(), id)
+            let branch = ChainBuilder::new(bus.clone(), id, registry.clone())
                 .queue("q", 4)
                 .pipe(pacer)
                 .build(Box::new(NoOpSink {
+                    name: "noop".into(),
                     hlog: element_hlog(ElementType::Other, "noop", None),
                 }));
             source.src_pads()[index].link(branch);
@@ -789,5 +858,48 @@ mod tests {
         // coverage for the `Queue::drop` fix (see
         // `queue::tests::dropping_without_stop_or_eos_does_not_hang`):
         // this used to hang the test process forever.
+    }
+
+    /// A branch handed to [`TeeHandle::add_sink`] should render as starting
+    /// under `Tee(...)`, not the pipeline's source — the whole reason
+    /// [`Tee::new`]/[`TeeHandle::add_sink`] participate in the same
+    /// [`ElementRegistry`] every `ChainBuilder` does.
+    #[test]
+    fn topology_attributes_tee_branches_to_the_tee_not_the_source() {
+        let (source, streams) = FileDemuxer::open("demux", test_video()).expect("open test video");
+        let video = streams
+            .iter()
+            .find(|s| s.kind == ffmpeg_next::media::Type::Video)
+            .expect("test video has a video stream");
+        let index = video.index;
+
+        let pipeline = Pipeline::new("test", source, |source, bus, _clock, id, registry| {
+            let branch_a =
+                ChainBuilder::new(bus.clone(), id, registry.clone()).build(Box::new(NoOpSink {
+                    name: "sink-a".into(),
+                    hlog: element_hlog(ElementType::Other, "sink-a", None),
+                }));
+            let branch_b =
+                ChainBuilder::new(bus.clone(), id, registry.clone()).build(Box::new(NoOpSink {
+                    name: "sink-b".into(),
+                    hlog: element_hlog(ElementType::Other, "sink-b", None),
+                }));
+
+            let (tee, tee_handle) = Tee::new("tee", registry.clone());
+            tee_handle.add_sink(branch_a);
+            tee_handle.add_sink(branch_b);
+            source.src_pads()[index].link(Box::new(tee));
+        });
+
+        let topology = pipeline.topology();
+        let mut branches: Vec<&str> = topology.split('\n').collect();
+        branches.sort_unstable();
+        assert_eq!(
+            branches,
+            vec![
+                "FileDemuxer(demux) - Tee(tee) - Other(sink-a)",
+                "FileDemuxer(demux) - Tee(tee) - Other(sink-b)",
+            ]
+        );
     }
 }

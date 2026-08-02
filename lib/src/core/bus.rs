@@ -1,7 +1,4 @@
-use std::{
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::{sync::Arc, time::Duration};
 
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use rust_hlog::{HLog, herror, hinfo, hwarn};
@@ -47,12 +44,6 @@ pub enum BusEvent {
 #[derive(Clone)]
 pub struct Bus {
     tx: Sender<BusEvent>,
-    /// One entry per [`crate::pipeline::ChainBuilder`] chain built through
-    /// this `Bus` (i.e. one per `.build()` call) — shared via `Arc` so
-    /// every clone handed to a branch's own `ChainBuilder::new` writes into
-    /// the same list. Read back by [`crate::pipeline::Pipeline::new`] right
-    /// after `wire` returns, to assemble [`crate::pipeline::Pipeline::topology`].
-    topology: Arc<Mutex<Vec<String>>>,
 }
 
 pub struct BusReceiver {
@@ -62,27 +53,7 @@ pub struct BusReceiver {
 impl Bus {
     pub fn new() -> (Bus, BusReceiver) {
         let (tx, rx) = unbounded();
-        (
-            Bus {
-                tx,
-                topology: Arc::new(Mutex::new(Vec::new())),
-            },
-            BusReceiver { rx },
-        )
-    }
-
-    /// Records one finished chain's element list, in build order — called
-    /// by [`crate::pipeline::ChainBuilder::build`]. Not meant to be called
-    /// directly.
-    pub(crate) fn register_branch(&self, description: String) {
-        self.topology.lock().unwrap().push(description);
-    }
-
-    /// Every branch description recorded so far via
-    /// [`Bus::register_branch`], in the order each `ChainBuilder::build`
-    /// call finished.
-    pub(crate) fn topology(&self) -> Vec<String> {
-        self.topology.lock().unwrap().clone()
+        (Bus { tx }, BusReceiver { rx })
     }
 
     /// `hlog` is the posting element's own [`crate::element::Element::hlog`]

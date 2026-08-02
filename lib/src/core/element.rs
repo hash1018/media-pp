@@ -1,4 +1,7 @@
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use rust_hlog::HLog;
 
@@ -85,6 +88,83 @@ pub fn element_hlog(element_type: ElementType, name: &str, pipeline_id: Option<&
     match pipeline_id {
         Some(pipeline_id) => HLog::new(&id, Some(&format!("Pipeline({pipeline_id})"))),
         None => HLog::new(&id, None),
+    }
+}
+
+/// One element known to have been statically wired into a
+/// [`crate::pipeline::Pipeline`] — see [`crate::pipeline::Pipeline::elements`]/
+/// [`crate::pipeline::Pipeline::topology`].
+#[derive(Debug, Clone)]
+pub struct ElementInfo {
+    pub element_type: ElementType,
+    pub name: Arc<str>,
+    /// The name of whatever feeds this element, if [`ElementRegistry`]
+    /// could determine it. `None` means either this *is* the pipeline's
+    /// own source (nothing feeds it), or this registry simply couldn't
+    /// trace it — e.g. the first element of a [`crate::pipeline::ChainBuilder`]
+    /// chain, until whatever links the finished chain resolves it (the
+    /// pipeline's source by default, or a [`crate::elements::Tee`] — see
+    /// [`crate::elements::TeeHandle::add_sink`]). Rendering code (see
+    /// [`crate::pipeline::Pipeline::topology`]) treats an unresolved
+    /// `None` other than the source's own entry as "attached directly to
+    /// the source", the same default `ChainBuilder`/`Pipeline::new` apply.
+    pub upstream: Option<Arc<str>>,
+}
+
+/// Shared, append-mostly registry of every [`ElementInfo`] wired into a
+/// [`crate::pipeline::Pipeline`] — created by
+/// [`crate::pipeline::Pipeline::new`] and threaded into its `wire`
+/// closure, so [`crate::pipeline::ChainBuilder`] (and
+/// [`crate::elements::Tee`]) can record themselves as they're
+/// constructed. Read back into [`crate::pipeline::Pipeline::elements`]
+/// right after `wire` returns — `Pipeline` itself, not this registry, is
+/// the long-lived, queryable home for that data afterward.
+///
+/// Deliberately its own type rather than piggybacked on
+/// [`crate::bus::Bus`] (an earlier version of this did exactly that): a
+/// `Bus` is for runtime playback events, not build-time structure — the
+/// two don't belong sharing one channel just because both happen to
+/// already be threaded through `wire`.
+#[derive(Clone, Default)]
+pub struct ElementRegistry(Arc<Mutex<Vec<ElementInfo>>>);
+
+impl ElementRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Records one element, in whatever order it's discovered. `upstream`
+    /// is typically "the previous element in the same chain" — `None` for
+    /// a chain's first element, left for later resolution (see
+    /// [`ElementInfo::upstream`]'s own docs).
+    pub(crate) fn register(
+        &self,
+        element_type: ElementType,
+        name: Arc<str>,
+        upstream: Option<Arc<str>>,
+    ) {
+        self.0.lock().unwrap().push(ElementInfo {
+            element_type,
+            name,
+            upstream,
+        });
+    }
+
+    /// Points the entry named `name`'s `upstream` at `upstream` — used
+    /// once a chain's true root becomes known only *after* it was already
+    /// registered, e.g. [`crate::elements::TeeHandle::add_sink`] learning
+    /// the branch it just received actually starts under that `Tee`, not
+    /// wherever it'll eventually turn out to be linked. A no-op if
+    /// nothing named `name` is registered (nothing to fix up).
+    pub(crate) fn set_upstream(&self, name: &str, upstream: Arc<str>) {
+        if let Some(info) = self.0.lock().unwrap().iter_mut().find(|e| &*e.name == name) {
+            info.upstream = Some(upstream);
+        }
+    }
+
+    /// Everything registered so far, in registration order.
+    pub(crate) fn snapshot(&self) -> Vec<ElementInfo> {
+        self.0.lock().unwrap().clone()
     }
 }
 

@@ -1047,8 +1047,8 @@ mod tests {
             count,
             hlog: element_hlog(ElementType::Other, "counter", None),
         };
-        Pipeline::new("test", source, |source, bus, _clock, id| {
-            let branch = ChainBuilder::new(bus.clone(), id).build(Box::new(sink));
+        Pipeline::new("test", source, |source, bus, _clock, id, registry| {
+            let branch = ChainBuilder::new(bus.clone(), id, registry.clone()).build(Box::new(sink));
             source.src_pads()[0].link(branch);
         })
     }

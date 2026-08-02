@@ -49,27 +49,31 @@ fn main() -> media_pp::Result<()> {
     println!("starting mediamtx and publishing to {url} ...");
     let mut actual_url = String::new();
 
-    let pipeline = Pipeline::new("rtsp-serve-seek", source, |source, bus, clock, id| {
-        // Spawns mediamtx, waits for it to come up, then publishes to it —
-        // by the time this returns, `server.url()` is live for viewers.
-        let server = RtspServer::new(
-            "rtsp",
-            &url,
-            port_policy,
-            ViewerTransport::default(),
-            PublishTransport::default(),
-            params,
-            time_base,
-        )
-        .expect("failed to start RTSP server");
-        actual_url = server.url().to_string();
-        let pacer = Pacer::new("pacer", time_base, clock.clone());
-        let branch = ChainBuilder::new(bus.clone(), id)
-            .queue("packets", 32) // pacer sleeps on its own thread; let demux run ahead into this
-            .pipe(pacer)
-            .build(Box::new(server));
-        source.src_pads()[video.index].link(branch);
-    });
+    let pipeline = Pipeline::new(
+        "rtsp-serve-seek",
+        source,
+        |source, bus, clock, id, registry| {
+            // Spawns mediamtx, waits for it to come up, then publishes to it —
+            // by the time this returns, `server.url()` is live for viewers.
+            let server = RtspServer::new(
+                "rtsp",
+                &url,
+                port_policy,
+                ViewerTransport::default(),
+                PublishTransport::default(),
+                params,
+                time_base,
+            )
+            .expect("failed to start RTSP server");
+            actual_url = server.url().to_string();
+            let pacer = Pacer::new("pacer", time_base, clock.clone());
+            let branch = ChainBuilder::new(bus.clone(), id, registry.clone())
+                .queue("packets", 32) // pacer sleeps on its own thread; let demux run ahead into this
+                .pipe(pacer)
+                .build(Box::new(server));
+            source.src_pads()[video.index].link(branch);
+        },
+    );
 
     println!("ready — connect with `ffplay {actual_url}`");
     // `run()` starts publishing on a background thread and returns right

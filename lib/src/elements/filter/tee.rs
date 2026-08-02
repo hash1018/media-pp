@@ -5,7 +5,7 @@ use rust_hlog::{HLog, hinfo};
 use crate::{
     buffer::MediaBuffer,
     control::ControlMsg,
-    element::{Element, ElementType, Sink, element_hlog},
+    element::{Element, ElementRegistry, ElementType, Sink, element_hlog},
     error::Result,
     pad::SrcPad,
 };
@@ -30,22 +30,29 @@ pub struct Tee {
 }
 
 /// A cheaply-cloneable handle for adding or removing a [`Tee`]'s sinks
-/// while the pipeline is running. `Clone` is just two refcount bumps
-/// (`name` and `pads` are both `Arc`) — free to hand out to as many
-/// threads as want to control this `Tee`.
+/// while the pipeline is running. `Clone` is just three refcount bumps
+/// (`name`, `pads`, and `registry` are all `Arc`-backed) — free to hand
+/// out to as many threads as want to control this `Tee`.
 #[derive(Clone)]
 pub struct TeeHandle {
     name: Arc<str>,
     pads: Arc<Mutex<Vec<SrcPad>>>,
+    registry: ElementRegistry,
 }
 
 impl Tee {
     /// Starts with no sinks — add some via the returned [`TeeHandle`]
     /// before (or any time after) wiring `Tee` itself into the pipeline.
-    pub fn new(name: impl Into<String>) -> (Self, TeeHandle) {
+    /// `registry` should be the same one [`crate::pipeline::Pipeline::new`]'s
+    /// `wire` closure was handed (a clone, same as `Bus`) — lets
+    /// [`TeeHandle::add_sink`] register each attached branch as starting
+    /// under this `Tee` rather than the pipeline's source, so
+    /// [`crate::pipeline::Pipeline::topology`] renders it correctly.
+    pub fn new(name: impl Into<String>, registry: ElementRegistry) -> (Self, TeeHandle) {
         let name: Arc<str> = name.into().into();
         let hlog = element_hlog(ElementType::Tee, &name, None);
         hinfo!(hlog: &hlog, "created");
+        registry.register(ElementType::Tee, name.clone(), None);
         let pads = Arc::new(Mutex::new(Vec::new()));
         (
             Self {
@@ -53,7 +60,11 @@ impl Tee {
                 hlog,
                 pads: pads.clone(),
             },
-            TeeHandle { name, pads },
+            TeeHandle {
+                name,
+                pads,
+                registry,
+            },
         )
     }
 }
@@ -61,6 +72,13 @@ impl Tee {
 impl TeeHandle {
     /// Adds a new sink, live for the next buffer `Tee` consumes.
     pub fn add_sink(&self, sink: Box<dyn Sink>) {
+        // Retroactively points whatever `ChainBuilder` chain built `sink`
+        // (registered with an unresolved `upstream` — it had no way to
+        // know at `.build()` time whether it'd end up linked straight to
+        // a source pad or, as here, added to a `Tee`) at this `Tee`
+        // instead of the default-to-source fallback
+        // [`crate::pipeline::Pipeline::new`] would otherwise apply.
+        self.registry.set_upstream(&sink.name(), self.name.clone());
         let mut pads = self.pads.lock().unwrap();
         let mut pad = SrcPad::new(format!("{}_src{}", self.name, pads.len()));
         hinfo!(
