@@ -3,7 +3,7 @@ use std::thread;
 use media_pp::{
     bus::BusEvent,
     element::Source,
-    elements::{Pacer, TestVideoOptions, TestVideoSource},
+    elements::{TestVideoOptions, TestVideoSource},
     pipeline::{ChainBuilder, Pipeline},
 };
 use renderer_engine::engine::RendererEngine;
@@ -16,12 +16,19 @@ use winit::{
     window::{Window, WindowId},
 };
 
-/// TestVideoSource -> Pacer -> Renderer: a synthetic moving-gradient
-/// stream, no file/camera/decoder involved at all, presented in a native
-/// window at real playback speed via `renderer_engine`'s DX12
-/// `WindowRenderer` (wrapped as a `Dx12Renderer` by `render_common`) —
-/// proves `TestVideoSource`'s frames (and `Pacer`, `Dx12Renderer`'s
-/// CPU-upload path) work end to end without needing a real video source.
+/// TestVideoSource -> Renderer: a synthetic moving-gradient stream, no
+/// file/camera/decoder involved at all, presented in a native window via
+/// `renderer_engine`'s DX12 `WindowRenderer` (wrapped as a `Dx12Renderer`
+/// by `render_common`) — proves `TestVideoSource`'s frames and
+/// `Dx12Renderer`'s CPU-upload path work end to end without needing a
+/// real video source.
+///
+/// No `Pacer` here, deliberately, as an experiment: `TestVideoSource`
+/// self-paces with a drift-free absolute schedule (see its own docs) and
+/// nothing sits between it and the renderer here (no `Scaler`, unlike
+/// `screen_capture`, where removing `Pacer` measurably caused judder) —
+/// testing whether that's enough on its own for a vsync-locked renderer
+/// to stay smooth without a separate pacing stage.
 ///
 ///     cargo run -p test_video
 fn main() {
@@ -62,8 +69,8 @@ impl ApplicationHandler<PlaybackDone> for App {
                 Window::default_attributes()
                     .with_title("media-pp test_video")
                     .with_inner_size(LogicalSize::new(1280, 720))
-                    // Pacer/Renderer are wired up once, sized to the
-                    // window's initial size — no resize handling here.
+                    // Renderer is wired up once, sized to the window's
+                    // initial size — no resize handling here.
                     .with_resizable(false),
             )
             .expect("failed to create window");
@@ -116,17 +123,14 @@ fn play(hwnd: isize, width: u32, height: u32) -> media_pp::Result<()> {
         ..TestVideoOptions::default()
     };
     let source = TestVideoSource::new("test-video", options);
-    let time_base = source.time_base();
 
     let engine = RendererEngine::new().map_err(|e| media_pp::Error::Other(format!("{e:?}")))?;
 
     let pipeline = Pipeline::new("test-video", source, |source, ctx| {
-        let pacer = Pacer::new("pacer", time_base, ctx.clock.clone());
         let renderer = render_common::window_renderer("renderer", &engine, hwnd, width, height)
             .expect("failed to create renderer");
         let branch = ChainBuilder::new(ctx.clone())
-            .queue("frames", 8) // pacer sleeps on its own thread; let generation run ahead into this
-            .pipe(pacer)
+            .queue("frames", 8) // thread boundary so rendering doesn't block generation
             .build(Box::new(renderer));
         source.src_pads()[0].link(branch);
     });

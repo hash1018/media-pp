@@ -25,3 +25,5 @@ pub use source::{
     RtspSource, RtspSourceError, RtspTransport, StreamInfo, TestVideoOptions, TestVideoSource,
     TestVideoSourceError,
 };
+#[cfg(feature = "dxgi-capture")]
+pub use source::{DxgiScreenOptions, DxgiScreenSource, DxgiScreenSourceError};

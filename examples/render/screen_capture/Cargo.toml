@@ -1,0 +1,12 @@
+[package]
+name = "screen_capture"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+media-pp = { path = "../../../lib", features = ["dx12-renderer", "dxgi-capture"] }
+ffmpeg-next = "8"
+renderer-engine = { git = "https://github.com/hash1018/RendererEngine", package = "renderer-engine" }
+render_common = { path = "../render_common" }
+winit = "0.30"

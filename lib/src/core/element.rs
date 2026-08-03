@@ -25,6 +25,7 @@ pub enum ElementType {
     AppSource,
     RtspSource,
     TestVideoSource,
+    DxgiScreenSource,
     WebRtcPeer,
     SwDecoder,
     D3d12vaDecoder,

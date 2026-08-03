@@ -98,7 +98,26 @@ pub struct SwEncoderOptions {
     /// Must match the `pts` unit of whatever frames this receives — e.g.
     /// [`crate::elements::TestVideoSource::time_base`] or a demuxed
     /// stream's own `time_base` if this is a transcode pipeline.
+    /// Deliberately *not* used to derive [`SwEncoderOptions::frame_rate`]
+    /// (an earlier version of this did exactly that) — the two aren't the
+    /// same thing. A pts tick unit fine enough for accurate timestamps
+    /// (say, microseconds) doesn't mean a million frames actually happen
+    /// per second, which `1 / time_base` would wrongly claim.
     pub time_base: ffmpeg::Rational,
+    /// The nominal rate the encoder uses for internal rate-control
+    /// (targeting `bit_rate` per frame) and the frame-rate metadata it
+    /// writes into the bitstream — *not* required to match the real
+    /// interval between `send_frame` calls. For a source with its own
+    /// genuinely fixed rate (e.g. [`crate::elements::TestVideoSource`]),
+    /// that's `TestVideoOptions::framerate` itself. For an irregular/VFR
+    /// source (e.g. [`crate::elements::DxgiScreenSource`], whose frames
+    /// arrive only on real desktop changes, capped but not paced to a
+    /// fixed cadence), use its configured cap
+    /// (`DxgiScreenOptions::max_fps`) as the closest meaningful nominal
+    /// rate — actual encoded packets still carry each frame's real `pts`
+    /// either way, so muxing stays correct regardless of how well this
+    /// nominal rate matches the true one.
+    pub frame_rate: ffmpeg::Rational,
     pub bit_rate: usize,
 }
 
@@ -133,10 +152,7 @@ impl SwEncoder {
         video.set_height(options.height);
         video.set_format(ffmpeg::format::Pixel::YUV420P);
         video.set_time_base(options.time_base);
-        video.set_frame_rate(Some(ffmpeg::Rational::new(
-            options.time_base.denominator(),
-            options.time_base.numerator(),
-        )));
+        video.set_frame_rate(Some(options.frame_rate));
         video.set_bit_rate(options.bit_rate);
 
         let encoder = video.open_as(codec).map_err(SwEncoderError::from)?;
@@ -265,6 +281,7 @@ mod tests {
                     width: 640,
                     height: 480,
                     time_base: ffmpeg::Rational::new(1, 30),
+                    frame_rate: ffmpeg::Rational::new(30, 1),
                     bit_rate: 1_000_000,
                 },
             );

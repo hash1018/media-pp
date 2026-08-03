@@ -61,6 +61,7 @@ for); this table isn't meant to duplicate that.
 | `AppSource` | Application code pushes buffers in via a handle, from any thread — GStreamer's `appsrc` equivalent |
 | `RtspSource` | Demuxes a live RTSP stream (the client/receive counterpart to `RtspServer`) — no internal retry/reconnect on a dropped connection, fails fast instead; the caller rebuilds a fresh one to reconnect |
 | `TestVideoSource` | Generates a synthetic moving-gradient `Pixel::YUV420P` stream — GStreamer's `videotestsrc` equivalent, no file/camera/decoder needed |
+| `DxgiScreenSource` (`dxgi-capture`) | Captures the desktop live via DXGI Desktop Duplication — GStreamer's `d3d11screencapturesrc` equivalent. Pushes `Pixel::BGRA` untouched (chain a `Scaler` for YUV420P); emits at a constant `fps` (default 30, same convention as `TestVideoSource`) rather than one push per real desktop change — repeats the latest captured image if nothing changed since the last tick, since a variable-rate/push-on-change version of this turned out to cause visible judder against a vsync-locked renderer; optional cursor compositing |
 | `WebRtcPeer` (`webrtc`) | Drives one str0m `Rtc` session on its own thread. Not a `Pipeline` source itself — `WebRtcHandle::add_track`/`next_track()` mint a `WebRtcTrackSink`+`WebRtcTrackSource` pair per track (see below), symmetric for tracks either side added, so one `Direction::SendRecv` track carries both directions |
 | `WebRtcTrackSource` (`webrtc`) | The receive side of one WebRTC track — a plain `SourceElement`, same shape as `AppSource`; obtained via `WebRtcHandle::next_track()`, not constructed directly |
 
@@ -112,11 +113,12 @@ Each is its own crate so per-example dependencies (e.g. `winit` for
 |---|---|---|
 | `sw_decode_render` | Demux → SwDecoder → Queue → Pacer → Dx12Renderer | End-to-end playback in a native window, CPU decode + CPU-upload render |
 | `hw_decode_render` | Demux → D3d12vaDecoder → Queue → Pacer → Dx12Renderer | Same, but GPU decode feeding the renderer zero-copy — no decoded pixel ever touches system memory |
-| `test_video` | TestVideoSource → Queue → Pacer → Dx12Renderer | A synthetic moving-gradient stream rendered directly (no file/camera/decoder) — proves `TestVideoSource`'s frames and `Dx12Renderer`'s CPU-upload path work end to end |
+| `test_video` | TestVideoSource → Queue → Dx12Renderer | A synthetic moving-gradient stream rendered directly (no file/camera/decoder, no `Pacer`) — proves `TestVideoSource`'s frames and `Dx12Renderer`'s CPU-upload path work end to end. Confirmed smooth without a `Pacer`: `TestVideoSource` self-paces on a drift-free absolute schedule, which turned out to be what actually mattered (see `screen_capture`, which confirmed the same thing even with a `Scaler` in between); `transcode_render` (below) keeps one, since its `SwEncoder`/`SwDecoder` stages have their own real per-frame variance, untested without |
 | `transcode_render` | TestVideoSource → Queue → SwEncoder → Queue → SwDecoder → Queue → Pacer → Dx12Renderer | Encodes the synthetic stream (`libopenh264`) and decodes it straight back, no container/mux involved — proves `SwEncoder`'s `Packet`s are actually valid, decodable bitstream, not just "opened successfully" |
 | `seek_render` | Demux → SwDecoder → Queue → Pacer → Dx12Renderer | Same chain as `sw_decode_render`, plus a terminal prompt that calls `Pipeline::seek` while the window is open |
+| `screen_capture` | DxgiScreenSource → Queue → Scaler → Queue → Dx12Renderer | Live desktop capture (DXGI Desktop Duplication, cursor included) at a constant frame rate, converted/resized to the window's own size and rendered directly, no `Pacer`. Confirmed smooth without one: an earlier, variable-rate version of `DxgiScreenSource` measurably needed a `Pacer` here to avoid judder, but once it moved to constant-rate, drift-free-scheduled emission (same pattern as `TestVideoSource`), `Scaler` alone wasn't enough to bring the judder back |
 
-All five of the above build their `Dx12Renderer` through `render_common` (`examples/render/render_common`), a small shared crate holding the one `renderer_engine::window_renderer::WindowRenderer` → `media_pp::elements::FrameRenderer` adapter, instead of each example hand-copying it. `media-pp` itself still doesn't depend on `renderer-engine` — only `render_common` and whichever example needs a `RendererEngine` (e.g. to pass `engine.device()` into `D3d12vaDecoder`) do.
+All six of the above build their `Dx12Renderer` through `render_common` (`examples/render/render_common`), a small shared crate holding the one `renderer_engine::window_renderer::WindowRenderer` → `media_pp::elements::FrameRenderer` adapter, instead of each example hand-copying it. `media-pp` itself still doesn't depend on `renderer-engine` — only `render_common` and whichever example needs a `RendererEngine` (e.g. to pass `engine.device()` into `D3d12vaDecoder`) do.
 
 ### RTSP streaming (`rtsp-server` feature)
 
@@ -161,6 +163,12 @@ cargo run -p sw_decode_render              # dx12-renderer is already enabled in
   to a window never build DX12/Windows-only code. `sw_decode_render`,
   `hw_decode_render`, `test_video`, `transcode_render`, and `seek_render`
   turn it on in their own `Cargo.toml`.
+- `dxgi-capture` (on `media-pp`) — pulls in `windows` (DXGI/D3D11
+  sub-features) and enables `DxgiScreenSource`. Independent of
+  `dx12-renderer` — Desktop Duplication is a D3D11 API, not D3D12, so
+  screen capture and the DX12 renderer don't need each other. Windows-only.
+  `screen_capture` turns it on in its own `Cargo.toml` (alongside
+  `dx12-renderer`, to actually render what it captures).
 - `rtsp-server` (on `media-pp`) — enables `RtspServer` and copies the
   vendored `mediamtx.exe` (`third_party/mediamtx/`, MIT-licensed) next to
   whatever binary depends on `media-pp` (see `lib/build.rs`). Windows-only
@@ -184,8 +192,8 @@ cargo run -p sw_decode_render              # dx12-renderer is already enabled in
   build requirements). `D3d12vaDecoder` additionally needs an ffmpeg build
   with `d3d12va` hwaccel support (check `ffmpeg -hwaccels`) and a GPU/driver
   that supports it.
-- All five `examples/render/*` crates (and the `dx12-renderer` feature
-  itself) only build/run on Windows.
+- All six `examples/render/*` crates (and the `dx12-renderer`/`dxgi-capture`
+  features themselves) only build/run on Windows.
 - `D3d12vaDecoder` hand-mirrors a few structs from FFmpeg's
   `libavutil/hwcontext_d3d12va.h` that `ffmpeg-sys-next` doesn't bind
   (see the doc comment at the top of `d3d12va_decoder.rs`) — sourced from

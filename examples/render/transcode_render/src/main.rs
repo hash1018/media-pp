@@ -24,9 +24,14 @@ use winit::{
 /// straight back — no file, camera, or container/mux involved at all —
 /// presented in a native window at real playback speed. Proves
 /// `SwEncoder`'s `Packet`s are actually valid, decodable H.264 (not just
-/// "avcodec_open2 succeeded"): if the round trip corrupted anything,
-/// the gradient would visibly glitch or freeze instead of scrolling
-/// smoothly.
+/// "avcodec_open2 succeeded"): if the round trip corrupted anything, the
+/// gradient would visibly glitch or freeze instead of scrolling smoothly.
+/// `Pacer` is still needed even though `TestVideoSource` already
+/// self-paces to its own `framerate`: `Dx12Renderer` presents on a
+/// vsync-locked swap chain that only shows the latest submitted frame
+/// each tick, and only `Pacer`'s clock-anchored release timing keeps
+/// submissions well-aligned to that grid (see `TestVideoOptions::framerate`'s
+/// own docs on why self-pacing alone isn't enough).
 ///
 ///     cargo run -p transcode_render
 fn main() {
@@ -133,6 +138,7 @@ fn play(hwnd: isize, width: u32, height: u32) -> media_pp::Result<()> {
                 width,
                 height,
                 time_base,
+                frame_rate: options.framerate,
                 bit_rate: 2_000_000,
             },
         )

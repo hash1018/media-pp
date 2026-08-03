@@ -1,4 +1,8 @@
-use std::sync::Arc;
+use std::{
+    sync::Arc,
+    thread,
+    time::{Duration, Instant},
+};
 
 use ffmpeg_next as ffmpeg;
 use rust_hlog::hinfo;
@@ -26,10 +30,14 @@ pub enum TestVideoSourceError {
 pub struct TestVideoOptions {
     pub width: u32,
     pub height: u32,
-    /// How fast `pts` advances per generated frame — not a real-time pace
-    /// on its own (see [`TestVideoSource`]'s own docs); only meaningful
-    /// once a downstream [`crate::elements::Pacer`] is built against
-    /// [`TestVideoSource::time_base`].
+    /// How fast `pts` advances per generated frame, and — since
+    /// [`TestVideoSource`] self-paces to this same rate on a drift-free
+    /// absolute schedule (see its own docs) — how fast frames actually
+    /// get generated/pushed in real time, precisely enough that a
+    /// downstream [`crate::elements::Pacer`] against
+    /// [`TestVideoSource::time_base`] turns out not to be needed purely
+    /// for smooth `Dx12Renderer` output (confirmed in
+    /// `examples/render/test_video`).
     pub framerate: ffmpeg::Rational,
 }
 
@@ -53,9 +61,31 @@ impl Default for TestVideoOptions {
 /// CPU-upload path, so this can feed a renderer directly, no decoder
 /// needed.
 ///
-/// Doesn't pace itself — generates as fast as whatever's downstream can
-/// absorb, same convention as `FileDemuxer`/`RtspSource`; put a `Pacer`
-/// after it for real-time playback.
+/// Self-paces to `options.framerate` on a drift-free absolute schedule
+/// (`next_due += frame_interval` each tick in `run`, not "sleep
+/// `frame_interval` since the last push" — the latter accumulates drift,
+/// since generation itself always takes some nonzero time) — unlike
+/// `FileDemuxer`/`RtspSource` (which push as fast as they can and leave
+/// real-time pacing entirely to a downstream `Pacer`), this element's
+/// "real time" isn't defined by anything external; it's whatever
+/// `framerate` says it should be, so there's no reason not to generate at
+/// exactly that rate itself.
+///
+/// Confirmed (`examples/render/test_video`, with and without a
+/// downstream `Pacer`) that this is actually enough on its own for
+/// smooth `Dx12Renderer` output, vsync-locked presentation included — an
+/// earlier version of this doc claimed self-pacing alone was *not*
+/// enough and a `Pacer` was still required, reasoning that only the
+/// *average* rate was being kept correct, not *when* each frame lines up
+/// against the vsync grid. That reasoning wasn't wrong about the
+/// mechanism, but the fix turned out to already be in place here: a
+/// relative "since last push" schedule genuinely can drift out of phase
+/// over time, but this element was rewritten to the absolute schedule
+/// described above specifically to close that gap, and testing without a
+/// `Pacer` afterward showed no judder. See
+/// `crate::elements::DxgiScreenSource`'s own docs for the same
+/// conclusion reached the same way, including a case (`Scaler` sitting
+/// between source and renderer) this element doesn't have.
 ///
 /// Runs until `Stop` — never reaches `Eos` on its own (no frame-count
 /// limit is exposed, deliberately, mirroring a live camera source more
@@ -66,6 +96,12 @@ pub struct TestVideoSource {
     options: TestVideoOptions,
     pad: SrcPad,
     frame_index: i64,
+    /// `1 / options.framerate`, precomputed once — how long to wait
+    /// between generated frames. `Duration::ZERO` (never sleeps, same as
+    /// this element's old unpaced behavior) if `framerate`'s numerator is
+    /// `0`, which would otherwise make this an infinite/undefined
+    /// duration.
+    frame_interval: Duration,
     /// Reused across every generated frame — see [`UnboundObjectPool`]'s
     /// docs. `init` builds a fresh `Pixel::YUV420P` frame at this
     /// element's fixed size; the next `generate_frame` call overwrites
@@ -91,12 +127,21 @@ impl TestVideoSource {
             move || ffmpeg::frame::Video::new(ffmpeg::format::Pixel::YUV420P, width, height),
             |_| {},
         );
+        // See `frame_interval`'s own docs on the `numerator() > 0` guard.
+        let frame_interval = if options.framerate.numerator() > 0 {
+            Duration::from_secs_f64(
+                options.framerate.denominator() as f64 / options.framerate.numerator() as f64,
+            )
+        } else {
+            Duration::ZERO
+        };
         Self {
             name,
             hlog,
             options,
             pad,
             frame_index: 0,
+            frame_interval,
             pool,
         }
     }
@@ -167,11 +212,23 @@ impl Source for TestVideoSource {
 impl SourceElement for TestVideoSource {
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> crate::error::Result<()> {
         hinfo!(self, "run: starting");
+        // Absolute schedule (`next_due += frame_interval` each tick), not
+        // "sleep `frame_interval` since the last push" — the latter drifts
+        // over time, since generation/push itself always takes some
+        // nonzero time that would otherwise get added on top of every
+        // single interval. Same pattern `DxgiScreenSource::run` uses.
+        let mut next_due = Instant::now();
         loop {
             if drain_control(control, self, bus)? {
                 hinfo!(self, "run: stopped");
                 return Ok(());
             }
+            let now = Instant::now();
+            if now < next_due {
+                thread::sleep(next_due - now);
+            }
+            next_due += self.frame_interval;
+
             let frame = self.generate_frame();
             // A downstream failure drops just this one frame — same
             // "report, don't die" contract `Queue`'s worker gives a
@@ -270,7 +327,10 @@ mod tests {
         });
 
         pipeline.run();
-        thread::sleep(Duration::from_millis(50));
+        // Long enough to observe several ticks at the 30fps `framerate`
+        // above (self-paced since `TestVideoSource` now generates at that
+        // rate itself — see its own docs), not just one or two.
+        thread::sleep(Duration::from_millis(200));
         pipeline.stop();
 
         // Blocks until every `Bus` handle has dropped — i.e. the source

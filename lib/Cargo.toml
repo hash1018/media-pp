@@ -14,7 +14,11 @@ tracing-subscriber = { version = "0.3", features = ["local-time"] }
 tracing-appender = "0.2"
 windows = { version = "0.62", optional = true, features = [
     "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
     "Win32_Graphics_Direct3D12",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
 ] }
 ort = { version = "2.0.0-rc.13", optional = true }
 ndarray = { version = "0.17", optional = true }
@@ -24,6 +28,7 @@ str0m = { version = "0.21", optional = true, default-features = false, features 
 
 [features]
 dx12-renderer = ["dep:windows"]
+dxgi-capture = ["dep:windows"]
 rtsp-server = []
 ort = ["dep:ort", "dep:ndarray"]
 webrtc = ["dep:str0m"]

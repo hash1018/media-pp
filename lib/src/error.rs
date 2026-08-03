@@ -1,5 +1,7 @@
 use thiserror::Error;
 
+#[cfg(feature = "dxgi-capture")]
+use crate::elements::DxgiScreenSourceError;
 #[cfg(feature = "ort")]
 use crate::elements::OrtDetectorError;
 #[cfg(feature = "rtsp-server")]
@@ -62,6 +64,10 @@ pub enum Error {
     #[cfg(feature = "dx12-renderer")]
     #[error(transparent)]
     D3d12vaDecoderError(#[from] D3d12vaDecoderError),
+
+    #[cfg(feature = "dxgi-capture")]
+    #[error(transparent)]
+    DxgiScreenSourceError(#[from] DxgiScreenSourceError),
 
     #[cfg(feature = "ort")]
     #[error(transparent)]
