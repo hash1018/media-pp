@@ -18,5 +18,6 @@ pub use sink::{Dx12Renderer, Dx12RendererError};
 #[cfg(feature = "rtsp-server")]
 pub use sink::{PortPolicy, PublishTransport, RtspServer, RtspServerError, ViewerTransport};
 pub use source::{
-    AppSource, AppSourceError, AppSourceHandle, FileDemuxError, FileDemuxer, StreamInfo,
+    AppSource, AppSourceError, AppSourceHandle, FileDemuxError, FileDemuxer, RtspOptions,
+    RtspSource, RtspSourceError, RtspTransport, StreamInfo,
 };

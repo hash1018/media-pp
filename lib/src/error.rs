@@ -9,7 +9,7 @@ use crate::elements::WebRtcError;
 #[cfg(feature = "dx12-renderer")]
 use crate::elements::{D3d12vaDecoderError, Dx12RendererError};
 use crate::{
-    elements::{AppSourceError, FileDemuxError, ScalerError, SwDecoderError},
+    elements::{AppSourceError, FileDemuxError, RtspSourceError, ScalerError, SwDecoderError},
     queue::QueueError,
 };
 
@@ -29,6 +29,9 @@ pub enum Error {
 
     #[error(transparent)]
     AppSourceError(#[from] AppSourceError),
+
+    #[error(transparent)]
+    RtspSourceError(#[from] RtspSourceError),
 
     #[error(transparent)]
     SwDecoderError(#[from] SwDecoderError),

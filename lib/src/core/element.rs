@@ -23,6 +23,7 @@ use crate::{
 pub enum ElementType {
     FileDemuxer,
     AppSource,
+    RtspSource,
     WebRtcPeer,
     SwDecoder,
     D3d12vaDecoder,

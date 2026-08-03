@@ -2010,6 +2010,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "rtsp_source"
+version = "0.1.0"
+dependencies = [
+ "ffmpeg-next",
+ "media-pp",
+]
+
+[[package]]
 name = "rust-hlog"
 version = "0.1.0"
 dependencies = [
