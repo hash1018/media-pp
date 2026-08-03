@@ -58,7 +58,8 @@ for); this table isn't meant to duplicate that.
 |---|---|
 | `FileDemuxer` | Demuxes a file; one src pad per container stream |
 | `AppSource` | Application code pushes buffers in via a handle, from any thread — GStreamer's `appsrc` equivalent |
-| `WebRtcPeer` (`webrtc`) | Drives one str0m `Rtc` session; `on_track` attaches a sink and hands back a `WebRtcTrackSink` the moment each track's `Mid` exists — symmetric for tracks either side added, so one `Direction::SendRecv` track carries both directions (see below) |
+| `WebRtcPeer` (`webrtc`) | Drives one str0m `Rtc` session on its own thread. Not a `Pipeline` source itself — `WebRtcHandle::add_track`/`next_track()` mint a `WebRtcTrackSink`+`WebRtcTrackSource` pair per track (see below), symmetric for tracks either side added, so one `Direction::SendRecv` track carries both directions |
+| `WebRtcTrackSource` (`webrtc`) | The receive side of one WebRTC track — a plain `SourceElement`, same shape as `AppSource`; obtained via `WebRtcHandle::next_track()`, not constructed directly |
 
 ### Filters
 
@@ -81,7 +82,7 @@ for); this table isn't meant to duplicate that.
 | `RtspServer` (`rtsp-server`) | Spawns a vendored MediaMTX and remuxes packets into it as a live RTSP stream |
 | `AppSink` | Hands buffers (and, optionally, control messages) to plain closures — GStreamer's `appsink` equivalent |
 | `OrtDetector` (`ort`) | Runs a YOLOv8/v11-style ONNX model on each frame via `ort`, hands decoded/NMS-filtered detections to a closure |
-| `WebRtcTrackSink` (`webrtc`) | The send side of one WebRTC track — `consume()` hands off to its `WebRtcPeer`'s own thread; handed out by `on_track`, not `WebRtcHandle::add_track` (which only returns a `TrackId`) |
+| `WebRtcTrackSink` (`webrtc`) | The send side of one WebRTC track — `consume()` hands off to its `WebRtcPeer`'s own thread; handed out by `WebRtcHandle::next_track()`, not `WebRtcHandle::add_track` (which only returns a `TrackId`) |
 
 ## Examples (`examples/`)
 
@@ -150,7 +151,7 @@ cargo run -p sw_decode_render              # dx12-renderer is already enabled in
   enables `OrtDetector`. `detect` turns it on in its own `Cargo.toml`.
 - `webrtc` (on `media-pp`) — pulls in `str0m` (sans-I/O WebRTC, `wincrypto`
   backend — native Windows crypto, no OpenSSL vendoring) and enables
-  `WebRtcPeer`/`WebRtcHandle`/`WebRtcTrackSink`. The initial SDP
+  `WebRtcPeer`/`WebRtcHandle`/`WebRtcTrackSink`/`WebRtcTrackSource`. The initial SDP
   offer/answer and ICE candidate setup happen via str0m directly, in the
   caller's own code, *before* constructing a `WebRtcPeer` — same posture
   as `RtspServer` not managing RTSP client connections itself; there's no
