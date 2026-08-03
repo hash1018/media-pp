@@ -1,0 +1,13 @@
+[package]
+name = "render_common"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+media-pp = { path = "../../../lib", features = ["dx12-renderer"] }
+renderer-engine = { git = "https://github.com/hash1018/RendererEngine", package = "renderer-engine" }
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D12",
+] }

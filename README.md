@@ -3,7 +3,8 @@
 A small, GStreamer-flavored media pipeline library in Rust, built on
 [`ffmpeg-next`](https://github.com/zmwangx/rust-ffmpeg). `lib/` is the
 library (crate name `media-pp`); `examples/` holds one independent crate
-per demo pipeline.
+per demo pipeline, grouped into subdirectories by theme (`core/`,
+`render/`, `rtsp/`, `vision/`, `webrtc/`).
 
 ## Architecture
 
@@ -81,7 +82,7 @@ for); this table isn't meant to duplicate that.
 | Element | What it does |
 |---|---|
 | `FrameCounter` / `PacketCounter` | Count decoded frames / raw packets, expose the count via `Arc<AtomicUsize>` |
-| `Dx12Renderer` (`dx12-renderer`) | Submits frames to a native window via DX12 — zero-copy for `D3d12vaDecoder`'s frames |
+| `Dx12Renderer` (`dx12-renderer`) | Submits frames to a `FrameRenderer` impl — zero-copy for `D3d12vaDecoder`'s frames. `media-pp` only defines the trait (plus `RawPlane`/`SubmitError`); the actual DX12 window rendering lives in each example's own `renderer-engine` dependency |
 | `RtspServer` (`rtsp-server`) | Spawns a vendored MediaMTX and remuxes packets into it as a live RTSP stream |
 | `AppSink` | Hands buffers (and, optionally, control messages) to plain closures — GStreamer's `appsink` equivalent |
 | `OrtDetector` (`ort`) | Runs a YOLOv8/v11-style ONNX model on each frame via `ort`, hands decoded/NMS-filtered detections to a closure |
@@ -113,6 +114,9 @@ Each is its own crate so per-example dependencies (e.g. `winit` for
 | `hw_decode_render` | Demux → D3d12vaDecoder → Queue → Pacer → Dx12Renderer | Same, but GPU decode feeding the renderer zero-copy — no decoded pixel ever touches system memory |
 | `test_video` | TestVideoSource → Queue → Pacer → Dx12Renderer | A synthetic moving-gradient stream rendered directly (no file/camera/decoder) — proves `TestVideoSource`'s frames and `Dx12Renderer`'s CPU-upload path work end to end |
 | `transcode_render` | TestVideoSource → Queue → SwEncoder → Queue → SwDecoder → Queue → Pacer → Dx12Renderer | Encodes the synthetic stream (`libopenh264`) and decodes it straight back, no container/mux involved — proves `SwEncoder`'s `Packet`s are actually valid, decodable bitstream, not just "opened successfully" |
+| `seek_render` | Demux → SwDecoder → Queue → Pacer → Dx12Renderer | Same chain as `sw_decode_render`, plus a terminal prompt that calls `Pipeline::seek` while the window is open |
+
+All five of the above build their `Dx12Renderer` through `render_common` (`examples/render/render_common`), a small shared crate holding the one `renderer_engine::window_renderer::WindowRenderer` → `media_pp::elements::FrameRenderer` adapter, instead of each example hand-copying it. `media-pp` itself still doesn't depend on `renderer-engine` — only `render_common` and whichever example needs a `RendererEngine` (e.g. to pass `engine.device()` into `D3d12vaDecoder`) do.
 
 ### RTSP streaming (`rtsp-server` feature)
 
@@ -147,11 +151,16 @@ cargo run -p sw_decode_render              # dx12-renderer is already enabled in
 
 ## Feature flags
 
-- `dx12-renderer` (on `media-pp`) — pulls in the optional `renderer-engine`
-  git dependency (plus `windows`) and enables `Dx12Renderer` and
-  `D3d12vaDecoder`. Off by default so consumers that don't render to a
-  window never build DX12/Windows-only code. `sw_decode_render` and
-  `hw_decode_render` turn it on in their own `Cargo.toml`.
+- `dx12-renderer` (on `media-pp`) — pulls in `windows` and enables
+  `Dx12Renderer`, `FrameRenderer`, `RawPlane`, `SubmitError`, and
+  `D3d12vaDecoder`. `media-pp` itself has no dependency on
+  `renderer-engine` at all — `Dx12Renderer` takes a `Box<dyn
+  FrameRenderer>`, and it's each example's own job to adapt a concrete
+  renderer (e.g. `renderer-engine`'s `WindowRenderer`, via a small local
+  wrapper) to that trait. Off by default so consumers that don't render
+  to a window never build DX12/Windows-only code. `sw_decode_render`,
+  `hw_decode_render`, `test_video`, `transcode_render`, and `seek_render`
+  turn it on in their own `Cargo.toml`.
 - `rtsp-server` (on `media-pp`) — enables `RtspServer` and copies the
   vendored `mediamtx.exe` (`third_party/mediamtx/`, MIT-licensed) next to
   whatever binary depends on `media-pp` (see `lib/build.rs`). Windows-only

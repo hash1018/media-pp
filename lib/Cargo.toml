@@ -12,7 +12,6 @@ rust-hlog = { path = "../rust-hlog" }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["local-time"] }
 tracing-appender = "0.2"
-renderer-engine = { git = "https://github.com/hash1018/RendererEngine", package = "renderer-engine", optional = true }
 windows = { version = "0.62", optional = true, features = [
     "Win32_Foundation",
     "Win32_Graphics_Direct3D12",
@@ -24,7 +23,7 @@ str0m = { version = "0.21", optional = true, default-features = false, features 
 ] }
 
 [features]
-dx12-renderer = ["dep:renderer-engine", "dep:windows"]
+dx12-renderer = ["dep:windows"]
 rtsp-server = []
 ort = ["dep:ort", "dep:ndarray"]
 webrtc = ["dep:str0m"]

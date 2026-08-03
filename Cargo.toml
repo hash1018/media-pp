@@ -1,3 +1,12 @@
 [workspace]
 resolver = "3"
-members = ["lib", "examples/*", "rust-hlog", "rust-hlog/hlog-macro"]
+members = [
+    "lib",
+    "examples/core/*",
+    "examples/render/*",
+    "examples/rtsp/*",
+    "examples/vision/*",
+    "examples/webrtc/*",
+    "rust-hlog",
+    "rust-hlog/hlog-macro",
+]

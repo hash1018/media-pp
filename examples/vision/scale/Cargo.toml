@@ -1,0 +1,10 @@
+[package]
+name = "scale"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+media-pp = { path = "../../../lib" }
+ffmpeg-next = "8"
+rust-hlog = { path = "../../../rust-hlog" }
