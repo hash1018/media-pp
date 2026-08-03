@@ -184,8 +184,8 @@ cargo run -p sw_decode_render              # dx12-renderer is already enabled in
   build requirements). `D3d12vaDecoder` additionally needs an ffmpeg build
   with `d3d12va` hwaccel support (check `ffmpeg -hwaccels`) and a GPU/driver
   that supports it.
-- `sw_decode_render`/`hw_decode_render` (and the `dx12-renderer` feature)
-  only build/run on Windows.
+- All five `examples/render/*` crates (and the `dx12-renderer` feature
+  itself) only build/run on Windows.
 - `D3d12vaDecoder` hand-mirrors a few structs from FFmpeg's
   `libavutil/hwcontext_d3d12va.h` that `ffmpeg-sys-next` doesn't bind
   (see the doc comment at the top of `d3d12va_decoder.rs`) — sourced from

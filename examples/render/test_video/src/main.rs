@@ -19,9 +19,9 @@ use winit::{
 /// TestVideoSource -> Pacer -> Renderer: a synthetic moving-gradient
 /// stream, no file/camera/decoder involved at all, presented in a native
 /// window at real playback speed via `renderer_engine`'s DX12
-/// `WindowRenderer` — proves `TestVideoSource`'s frames (and `Pacer`,
-/// `Dx12Renderer`'s CPU-upload path) work end to end without needing a
-/// real video source.
+/// `WindowRenderer` (wrapped as a `Dx12Renderer` by `render_common`) —
+/// proves `TestVideoSource`'s frames (and `Pacer`, `Dx12Renderer`'s
+/// CPU-upload path) work end to end without needing a real video source.
 ///
 ///     cargo run -p test_video
 fn main() {

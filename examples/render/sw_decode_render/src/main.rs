@@ -20,7 +20,8 @@ use winit::{
 
 /// Demux -> SwDecoder -> Queue -> Pacer -> Renderer: decodes a video file
 /// and presents it in a native window at real playback speed, via
-/// `renderer_engine`'s DX12 `WindowRenderer`.
+/// `renderer_engine`'s DX12 `WindowRenderer` (wrapped as a `Dx12Renderer`
+/// by `render_common`).
 ///
 ///     cargo run -p sw_decode_render -- path/to/video.mp4
 fn main() {

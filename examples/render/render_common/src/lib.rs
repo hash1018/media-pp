@@ -1,9 +1,10 @@
 //! The one place that adapts `renderer_engine::window_renderer::WindowRenderer`
-//! to `media_pp`'s `FrameRenderer` trait, so every `examples/*_render` crate
-//! doesn't hand-copy the same ~40 lines. `media-pp` itself still has no
-//! dependency on `renderer-engine` at all — that dependency lives here (and
-//! in whichever example needs a `RendererEngine` to open one, e.g. to pass
-//! `engine.device()` into `D3d12vaDecoder`).
+//! to `media_pp`'s `FrameRenderer` trait, so every other crate under
+//! `examples/render/` doesn't hand-copy the same ~40 lines. `media-pp`
+//! itself still has no dependency on `renderer-engine` at all — that
+//! dependency lives here (and in whichever example needs a
+//! `RendererEngine` to open one, e.g. to pass `engine.device()` into
+//! `D3d12vaDecoder`).
 
 use media_pp::elements::{Dx12Renderer, FrameRenderer};
 use renderer_engine::{
