@@ -69,6 +69,7 @@ for); this table isn't meant to duplicate that.
 |---|---|
 | `SwDecoder` | Decodes `Packet`s into `Video`/`Audio` frames (software) |
 | `D3d12vaDecoder` (`dx12-renderer`) | Decodes into GPU-resident `Video` frames via D3D12VA hardware acceleration |
+| `SwEncoder` | Encodes `Video` frames into `Packet`s (software only) — `VideoCodec` picks H.264/H.265/VP8/VP9/AV1 across GPL (`libx264`/`libx265`) and non-GPL (`libopenh264`/`libkvazaar`/`libvpx`/`libaom-av1`/`libsvtav1`) encoders; fails with a clear error, not a panic, if the linked ffmpeg build doesn't have the one you asked for |
 | `Pacer` | Releases buffers at real playback speed (PTS + a shared `Clock`) |
 | `Scaler` | Converts pixel format and resizes `Video` frames in one pass (`libswscale`) |
 | `Tee`¹ | Fans one input out to a dynamic set of sinks, addable/removable while the pipeline runs |
@@ -111,6 +112,7 @@ Each is its own crate so per-example dependencies (e.g. `winit` for
 | `sw_decode_render` | Demux → SwDecoder → Queue → Pacer → Dx12Renderer | End-to-end playback in a native window, CPU decode + CPU-upload render |
 | `hw_decode_render` | Demux → D3d12vaDecoder → Queue → Pacer → Dx12Renderer | Same, but GPU decode feeding the renderer zero-copy — no decoded pixel ever touches system memory |
 | `test_video` | TestVideoSource → Queue → Pacer → Dx12Renderer | A synthetic moving-gradient stream rendered directly (no file/camera/decoder) — proves `TestVideoSource`'s frames and `Dx12Renderer`'s CPU-upload path work end to end |
+| `transcode_render` | TestVideoSource → Queue → SwEncoder → Queue → SwDecoder → Queue → Pacer → Dx12Renderer | Encodes the synthetic stream (`libopenh264`) and decodes it straight back, no container/mux involved — proves `SwEncoder`'s `Packet`s are actually valid, decodable bitstream, not just "opened successfully" |
 
 ### RTSP streaming (`rtsp-server` feature)
 

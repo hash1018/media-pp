@@ -28,6 +28,7 @@ pub enum ElementType {
     WebRtcPeer,
     SwDecoder,
     D3d12vaDecoder,
+    SwEncoder,
     Pacer,
     Scaler,
     Tee,

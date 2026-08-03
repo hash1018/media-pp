@@ -9,7 +9,10 @@ pub use driver::{
 };
 #[cfg(feature = "dx12-renderer")]
 pub use filter::{D3d12vaDecoder, D3d12vaDecoderError};
-pub use filter::{Pacer, Scaler, ScalerError, SwDecoder, SwDecoderError, Tee, TeeHandle};
+pub use filter::{
+    Pacer, Scaler, ScalerError, SwDecoder, SwDecoderError, SwEncoder, SwEncoderError,
+    SwEncoderOptions, Tee, TeeHandle, VideoCodec,
+};
 pub use sink::{AppSink, FrameCounter, PacketCounter};
 #[cfg(feature = "ort")]
 pub use sink::{COCO_CLASS_LABELS, Detection, OrtDetector, OrtDetectorError};

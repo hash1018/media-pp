@@ -11,7 +11,7 @@ use crate::elements::{D3d12vaDecoderError, Dx12RendererError};
 use crate::{
     elements::{
         AppSourceError, FileDemuxError, RtspSourceError, ScalerError, SwDecoderError,
-        TestVideoSourceError,
+        SwEncoderError, TestVideoSourceError,
     },
     queue::QueueError,
 };
@@ -41,6 +41,9 @@ pub enum Error {
 
     #[error(transparent)]
     SwDecoderError(#[from] SwDecoderError),
+
+    #[error(transparent)]
+    SwEncoderError(#[from] SwEncoderError),
 
     #[error(transparent)]
     ScalerError(#[from] ScalerError),
