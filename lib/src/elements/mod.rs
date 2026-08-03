@@ -19,5 +19,6 @@ pub use sink::{Dx12Renderer, Dx12RendererError};
 pub use sink::{PortPolicy, PublishTransport, RtspServer, RtspServerError, ViewerTransport};
 pub use source::{
     AppSource, AppSourceError, AppSourceHandle, FileDemuxError, FileDemuxer, RtspOptions,
-    RtspSource, RtspSourceError, RtspTransport, StreamInfo,
+    RtspSource, RtspSourceError, RtspTransport, StreamInfo, TestVideoOptions, TestVideoSource,
+    TestVideoSourceError,
 };

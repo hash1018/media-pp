@@ -24,6 +24,7 @@ pub enum ElementType {
     FileDemuxer,
     AppSource,
     RtspSource,
+    TestVideoSource,
     WebRtcPeer,
     SwDecoder,
     D3d12vaDecoder,

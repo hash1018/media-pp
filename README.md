@@ -59,6 +59,7 @@ for); this table isn't meant to duplicate that.
 | `FileDemuxer` | Demuxes a file; one src pad per container stream |
 | `AppSource` | Application code pushes buffers in via a handle, from any thread — GStreamer's `appsrc` equivalent |
 | `RtspSource` | Demuxes a live RTSP stream (the client/receive counterpart to `RtspServer`) — no internal retry/reconnect on a dropped connection, fails fast instead; the caller rebuilds a fresh one to reconnect |
+| `TestVideoSource` | Generates a synthetic moving-gradient `Pixel::YUV420P` stream — GStreamer's `videotestsrc` equivalent, no file/camera/decoder needed |
 | `WebRtcPeer` (`webrtc`) | Drives one str0m `Rtc` session on its own thread. Not a `Pipeline` source itself — `WebRtcHandle::add_track`/`next_track()` mint a `WebRtcTrackSink`+`WebRtcTrackSource` pair per track (see below), symmetric for tracks either side added, so one `Direction::SendRecv` track carries both directions |
 | `WebRtcTrackSource` (`webrtc`) | The receive side of one WebRTC track — a plain `SourceElement`, same shape as `AppSource`; obtained via `WebRtcHandle::next_track()`, not constructed directly |
 
@@ -109,6 +110,7 @@ Each is its own crate so per-example dependencies (e.g. `winit` for
 |---|---|---|
 | `sw_decode_render` | Demux → SwDecoder → Queue → Pacer → Dx12Renderer | End-to-end playback in a native window, CPU decode + CPU-upload render |
 | `hw_decode_render` | Demux → D3d12vaDecoder → Queue → Pacer → Dx12Renderer | Same, but GPU decode feeding the renderer zero-copy — no decoded pixel ever touches system memory |
+| `test_video` | TestVideoSource → Queue → Pacer → Dx12Renderer | A synthetic moving-gradient stream rendered directly (no file/camera/decoder) — proves `TestVideoSource`'s frames and `Dx12Renderer`'s CPU-upload path work end to end |
 
 ### RTSP streaming (`rtsp-server` feature)
 
