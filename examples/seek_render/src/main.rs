@@ -143,12 +143,12 @@ fn play(path: &str, hwnd: isize, width: u32, height: u32) -> media_pp::Result<()
 
     let engine = RendererEngine::new().map_err(|e| Error::Other(format!("{e:?}")))?;
 
-    let pipeline = Pipeline::new("seek-render", source, |source, bus, clock, id, registry| {
+    let pipeline = Pipeline::new("seek-render", source, |source, ctx| {
         let decoder = SwDecoder::new("decoder", params).expect("failed to open decoder");
-        let pacer = Pacer::new("pacer", time_base, clock.clone());
+        let pacer = Pacer::new("pacer", time_base, ctx.clock.clone());
         let renderer = Dx12Renderer::new("renderer", &engine, hwnd, width, height)
             .expect("failed to create renderer");
-        let branch = ChainBuilder::new(bus.clone(), id, registry.clone())
+        let branch = ChainBuilder::new(ctx.clone())
             .pipe(decoder) // same thread as the demux — cheap enough not to need a queue
             .queue("frames", 32) // pacer sleeps on its own thread; let decode run ahead into this
             .pipe(pacer)

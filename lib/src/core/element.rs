@@ -8,6 +8,7 @@ use rust_hlog::HLog;
 use crate::{
     buffer::MediaBuffer,
     bus::Bus,
+    clock::Clock,
     control::{ControlMsg, ControlReceiver},
     error::Result,
     pad::SrcPad,
@@ -113,18 +114,20 @@ pub struct ElementInfo {
 
 /// Shared, append-mostly registry of every [`ElementInfo`] wired into a
 /// [`crate::pipeline::Pipeline`] — created by
-/// [`crate::pipeline::Pipeline::new`] and threaded into its `wire`
-/// closure, so [`crate::pipeline::ChainBuilder`] (and
-/// [`crate::elements::Tee`]) can record themselves as they're
-/// constructed. Read back into [`crate::pipeline::Pipeline::elements`]
-/// right after `wire` returns — `Pipeline` itself, not this registry, is
-/// the long-lived, queryable home for that data afterward.
+/// [`crate::pipeline::Pipeline::new`] and handed out (via [`Context`]) to
+/// whatever [`crate::pipeline::ChainBuilder`]/[`crate::elements::Tee`]
+/// records itself as it's constructed, statically or dynamically.
+/// `Pipeline` keeps its own clone alive for the whole run, so
+/// [`crate::pipeline::Pipeline::elements`]/[`crate::pipeline::Pipeline::topology`]
+/// can re-derive a fresh view — including anything registered well after
+/// construction (e.g. a branch added to a running [`crate::elements::Tee`])
+/// — on every call, rather than a snapshot frozen at construction time.
 ///
 /// Deliberately its own type rather than piggybacked on
 /// [`crate::bus::Bus`] (an earlier version of this did exactly that): a
 /// `Bus` is for runtime playback events, not build-time structure — the
 /// two don't belong sharing one channel just because both happen to
-/// already be threaded through `wire`.
+/// already be threaded through the same [`Context`].
 #[derive(Clone, Default)]
 pub struct ElementRegistry(Arc<Mutex<Vec<ElementInfo>>>);
 
@@ -162,10 +165,65 @@ impl ElementRegistry {
         }
     }
 
+    /// Removes `name`'s own entry, then repeatedly removes anything whose
+    /// `upstream` (transitively) pointed at something just removed — i.e.
+    /// the whole branch rooted at `name`, not just its first element. Used
+    /// by [`crate::elements::TeeHandle::remove_sink`]: once a branch is
+    /// detached, it's no longer part of this pipeline's topology at all,
+    /// not still shown hanging off the `Tee` it was just pulled from.
+    ///
+    /// Deliberately a hard delete, not a reversible "detach" a later
+    /// `add_sink` could restore — mirrors [`crate::pipeline::Pipeline`]
+    /// itself not supporting reuse (see its own docs): resurrecting a
+    /// removed branch's old bookkeeping was designed once (a `detached`
+    /// flag + a cascading "reattach" call) and deliberately dropped as
+    /// unneeded complexity for a case with no real caller — if you want a
+    /// branch back, build a fresh one. A no-op if nothing named `name` is
+    /// registered.
+    pub(crate) fn remove_subtree(&self, name: &str) {
+        let mut elements = self.0.lock().unwrap();
+        let Some(pos) = elements.iter().position(|e| &*e.name == name) else {
+            return;
+        };
+        let mut removed = vec![elements.remove(pos).name];
+        loop {
+            let before = elements.len();
+            elements.retain(|e| {
+                let is_orphaned = e
+                    .upstream
+                    .as_deref()
+                    .is_some_and(|u| removed.iter().any(|r| &**r == u));
+                if is_orphaned {
+                    removed.push(e.name.clone());
+                }
+                !is_orphaned
+            });
+            if elements.len() == before {
+                break;
+            }
+        }
+    }
+
     /// Everything registered so far, in registration order.
     pub(crate) fn snapshot(&self) -> Vec<ElementInfo> {
         self.0.lock().unwrap().clone()
     }
+}
+
+/// Everything a [`crate::pipeline::ChainBuilder`]/[`crate::elements::Tee`]
+/// needs to wire itself into a [`crate::pipeline::Pipeline`] — bundled into
+/// one `Arc` instead of threading `bus`/`pipeline_id`/`registry`/`clock`
+/// through separately. Built once by [`crate::pipeline::Pipeline::new`] and
+/// handed to its `wire` closure; a [`crate::elements::TeeHandle`] keeps its
+/// own clone (from whatever `Context` [`crate::elements::Tee::new`] was
+/// built with) so it can mint further `ChainBuilder`s for branches added
+/// long after the pipeline started running, without the caller needing to
+/// have kept any of these four values around itself.
+pub struct Context {
+    pub bus: Bus,
+    pub pipeline_id: Arc<str>,
+    pub registry: ElementRegistry,
+    pub clock: Arc<Clock>,
 }
 
 /// Anything that can receive a buffer pushed from upstream — the input

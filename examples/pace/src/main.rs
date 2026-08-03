@@ -42,10 +42,10 @@ fn main() -> media_pp::Result<()> {
 
     let (counter, frame_count) = FrameCounter::new("counter");
 
-    let pipeline = Pipeline::new("pace", source, |source, bus, clock, id, registry| {
+    let pipeline = Pipeline::new("pace", source, |source, ctx| {
         let decoder = SwDecoder::new("decoder", params).expect("failed to open decoder");
-        let pacer = Pacer::new("pacer", time_base, clock.clone());
-        let branch = ChainBuilder::new(bus.clone(), id, registry.clone())
+        let pacer = Pacer::new("pacer", time_base, ctx.clock.clone());
+        let branch = ChainBuilder::new(ctx.clone())
             .pipe(decoder) // same thread as the demux — cheap enough not to need a queue
             .queue("frames", 32) // pacer sleeps on its own thread; let decode run ahead into this
             .pipe(pacer)

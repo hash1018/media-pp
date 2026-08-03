@@ -173,14 +173,10 @@ fn wire_counting(source: WebRtcTrackSource, count: Arc<AtomicUsize>) -> Arc<Pipe
         count,
         hlog: element_hlog(ElementType::Other, "counter", None),
     };
-    Pipeline::new(
-        "webrtc-loopback",
-        source,
-        |source, bus, _clock, id, registry| {
-            let branch = ChainBuilder::new(bus.clone(), id, registry.clone()).build(Box::new(sink));
-            source.src_pads()[0].link(branch);
-        },
-    )
+    Pipeline::new("webrtc-loopback", source, |source, ctx| {
+        let branch = ChainBuilder::new(ctx.clone()).build(Box::new(sink));
+        source.src_pads()[0].link(branch);
+    })
 }
 
 fn push_packets(sink: &mut WebRtcTrackSink) {

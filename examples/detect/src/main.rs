@@ -171,7 +171,7 @@ fn play(model_path: &str, video_path: &str, proxy: EventLoopProxy<AppEvent>) -> 
         .stream_parameters(video.index)
         .ok_or_else(|| Error::Other("stream disappeared".into()))?;
 
-    let pipeline = Pipeline::new("detect", source, |source, bus, _clock, id, registry| {
+    let pipeline = Pipeline::new("detect", source, |source, ctx| {
         let decoder = SwDecoder::new("decoder", params).expect("failed to open decoder");
         let scaler = Scaler::new("scaler", DST_FORMAT, DST_WIDTH, DST_HEIGHT, Flags::BILINEAR);
         let render_proxy = proxy.clone();
@@ -196,7 +196,7 @@ fn play(model_path: &str, video_path: &str, proxy: EventLoopProxy<AppEvent>) -> 
         )
         .expect("failed to load model");
 
-        let branch = ChainBuilder::new(bus.clone(), id, registry.clone())
+        let branch = ChainBuilder::new(ctx.clone())
             .pipe(decoder) // same thread as the demux — cheap enough not to need a queue
             .queue("frames", 8) // scaler/detector run on their own thread
             .pipe(scaler)

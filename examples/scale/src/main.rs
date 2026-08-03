@@ -48,10 +48,10 @@ fn main() -> media_pp::Result<()> {
         hlog: element_hlog(ElementType::Other, "verify", None),
     };
 
-    let pipeline = Pipeline::new("scale", source, |source, bus, _clock, id, registry| {
+    let pipeline = Pipeline::new("scale", source, |source, ctx| {
         let decoder = SwDecoder::new("decoder", params).expect("failed to open decoder");
         let scaler = Scaler::new("scaler", DST_FORMAT, DST_WIDTH, DST_HEIGHT, Flags::BILINEAR);
-        let branch = ChainBuilder::new(bus.clone(), id, registry.clone())
+        let branch = ChainBuilder::new(ctx.clone())
             .pipe(decoder) // same thread as the demux — cheap enough not to need a queue
             .queue("frames", 8) // scaler/sink run on their own thread
             .pipe(scaler)

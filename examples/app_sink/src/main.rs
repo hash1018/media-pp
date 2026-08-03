@@ -47,9 +47,9 @@ fn main() -> media_pp::Result<()> {
         })
     };
 
-    let pipeline = Pipeline::new("app-sink", source, |source, bus, _clock, id, registry| {
+    let pipeline = Pipeline::new("app-sink", source, |source, ctx| {
         let decoder = SwDecoder::new("decoder", params).expect("failed to open decoder");
-        let branch = ChainBuilder::new(bus.clone(), id, registry.clone())
+        let branch = ChainBuilder::new(ctx.clone())
             .pipe(decoder) // same thread as the demux — cheap enough not to need a queue
             .build(Box::new(sink));
         source.src_pads()[video.index].link(branch);

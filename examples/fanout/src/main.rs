@@ -33,15 +33,15 @@ fn main() -> media_pp::Result<()> {
     let (video_counter, video_count) = PacketCounter::new("video-counter");
     let (audio_counter, audio_count) = PacketCounter::new("audio-counter");
 
-    let pipeline = Pipeline::new("fanout", source, |source, bus, _clock, id, registry| {
+    let pipeline = Pipeline::new("fanout", source, |source, ctx| {
         if let Some(v) = video {
-            let branch = ChainBuilder::new(bus.clone(), id, registry.clone())
+            let branch = ChainBuilder::new(ctx.clone())
                 .queue("video-q", 32) // its own thread, separate from audio
                 .build(Box::new(video_counter));
             source.src_pads()[v.index].link(branch);
         }
         if let Some(a) = audio {
-            let branch = ChainBuilder::new(bus.clone(), id, registry.clone())
+            let branch = ChainBuilder::new(ctx.clone())
                 .queue("audio-q", 32)
                 .build(Box::new(audio_counter));
             source.src_pads()[a.index].link(branch);

@@ -39,8 +39,8 @@ fn main() -> media_pp::Result<()> {
 
     let (counter, count) = PacketCounter::new("counter");
 
-    let pipeline = Pipeline::new("probe", source, |source, bus, _clock, id, registry| {
-        let branch = ChainBuilder::new(bus.clone(), id, registry.clone())
+    let pipeline = Pipeline::new("probe", source, |source, ctx| {
+        let branch = ChainBuilder::new(ctx.clone())
             .queue("q1", 32) // thread boundary: demux thread -> counter thread
             .build(Box::new(counter));
         source.src_pads()[video.index].link(branch);
