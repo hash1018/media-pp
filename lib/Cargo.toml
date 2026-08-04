@@ -27,7 +27,7 @@ str0m = { version = "0.21", optional = true, default-features = false, features 
 ] }
 
 [features]
-dx12-renderer = ["dep:windows"]
+d3d12-renderer = ["dep:windows"]
 dxgi-capture = ["dep:windows"]
 rtsp-server = []
 ort = ["dep:ort", "dep:ndarray"]

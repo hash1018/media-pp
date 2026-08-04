@@ -7,8 +7,8 @@ pub mod source;
 pub use driver::{
     TrackId, WebRtcError, WebRtcHandle, WebRtcPeer, WebRtcTrackSink, WebRtcTrackSource,
 };
-#[cfg(feature = "dx12-renderer")]
-pub use filter::{D3d12vaDecoder, D3d12vaDecoderError};
+#[cfg(feature = "d3d12-renderer")]
+pub use filter::{D3d12Upload, D3d12UploadError, D3d12vaDecoder, D3d12vaDecoderError};
 pub use filter::{
     Pacer, Scaler, ScalerError, SwDecoder, SwDecoderError, SwEncoder, SwEncoderError,
     SwEncoderOptions, Tee, TeeHandle, VideoCodec,
@@ -16,8 +16,8 @@ pub use filter::{
 pub use sink::{AppSink, FrameCounter, PacketCounter};
 #[cfg(feature = "ort")]
 pub use sink::{COCO_CLASS_LABELS, Detection, OrtDetector, OrtDetectorError};
-#[cfg(feature = "dx12-renderer")]
-pub use sink::{Dx12Renderer, Dx12RendererError, FrameRenderer, RawPlane, SubmitError};
+#[cfg(feature = "d3d12-renderer")]
+pub use sink::{D3d12Renderer, D3d12RendererError, FrameRenderer, RawPlane, SubmitError};
 #[cfg(feature = "rtsp-server")]
 pub use sink::{PortPolicy, PublishTransport, RtspServer, RtspServerError, ViewerTransport};
 pub use source::{

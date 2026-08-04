@@ -470,6 +470,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f27ae1dd37df86211c42e150270f82743308803d90a6f6e6651cd730d5e1732f"
 
 [[package]]
+name = "d3d12_upload"
+version = "0.1.0"
+dependencies = [
+ "ffmpeg-next",
+ "media-pp",
+ "render_common",
+ "renderer-engine",
+ "winit",
+]
+
+[[package]]
 name = "decode"
 version = "0.1.0"
 dependencies = [

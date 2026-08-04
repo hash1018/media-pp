@@ -6,7 +6,7 @@
 //! `RendererEngine` to open one, e.g. to pass `engine.device()` into
 //! `D3d12vaDecoder`).
 
-use media_pp::elements::{Dx12Renderer, FrameRenderer};
+use media_pp::elements::{D3d12Renderer, FrameRenderer};
 use renderer_engine::{
     engine::RendererEngine,
     window_renderer::{RawPlane, SubmitError, WindowRenderer},
@@ -68,7 +68,7 @@ fn convert_error(error: SubmitError) -> media_pp::elements::SubmitError {
     }
 }
 
-/// Opens a `WindowRenderer` for `hwnd` and wraps it as a `Dx12Renderer` —
+/// Opens a `WindowRenderer` for `hwnd` and wraps it as a `D3d12Renderer` —
 /// the whole point of this crate, so callers don't write the wrapper
 /// themselves. `Err` only on `WindowRenderer::new` failing (e.g. a bad
 /// `hwnd` or zero size); the wrap itself is infallible.
@@ -78,9 +78,9 @@ pub fn window_renderer(
     hwnd: isize,
     width: u32,
     height: u32,
-) -> Result<Dx12Renderer, SubmitError> {
+) -> Result<D3d12Renderer, SubmitError> {
     let window_renderer = WindowRenderer::new(engine, hwnd, width, height)?;
-    Ok(Dx12Renderer::new(
+    Ok(D3d12Renderer::new(
         name,
         Box::new(RealFrameRenderer(window_renderer)),
     ))

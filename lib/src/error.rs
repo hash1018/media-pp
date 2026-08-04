@@ -8,8 +8,8 @@ use crate::elements::OrtDetectorError;
 use crate::elements::RtspServerError;
 #[cfg(feature = "webrtc")]
 use crate::elements::WebRtcError;
-#[cfg(feature = "dx12-renderer")]
-use crate::elements::{D3d12vaDecoderError, Dx12RendererError};
+#[cfg(feature = "d3d12-renderer")]
+use crate::elements::{D3d12RendererError, D3d12UploadError, D3d12vaDecoderError};
 use crate::{
     elements::{
         AppSourceError, FileDemuxError, RtspSourceError, ScalerError, SwDecoderError,
@@ -57,13 +57,17 @@ pub enum Error {
     #[error(transparent)]
     RtspServerError(#[from] RtspServerError),
 
-    #[cfg(feature = "dx12-renderer")]
+    #[cfg(feature = "d3d12-renderer")]
     #[error(transparent)]
-    Dx12RendererError(#[from] Dx12RendererError),
+    D3d12RendererError(#[from] D3d12RendererError),
 
-    #[cfg(feature = "dx12-renderer")]
+    #[cfg(feature = "d3d12-renderer")]
     #[error(transparent)]
     D3d12vaDecoderError(#[from] D3d12vaDecoderError),
+
+    #[cfg(feature = "d3d12-renderer")]
+    #[error(transparent)]
+    D3d12UploadError(#[from] D3d12UploadError),
 
     #[cfg(feature = "dxgi-capture")]
     #[error(transparent)]

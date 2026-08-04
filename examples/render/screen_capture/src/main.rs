@@ -133,7 +133,7 @@ fn play(hwnd: isize, window_width: u32, window_height: u32) -> media_pp::Result<
     let pipeline = Pipeline::new("screen-capture", source, |source, ctx| {
         // Converts the captured `Pixel::BGRA` desktop frames down to the
         // window's own size as `Pixel::YUV420P` in one pass —
-        // `Dx12Renderer`'s CPU-upload path only understands
+        // `D3d12Renderer`'s CPU-upload path only understands
         // YUV420P/D3D12, not BGRA.
         let scaler = Scaler::new(
             "to-yuv",
@@ -172,7 +172,7 @@ fn play(hwnd: isize, window_width: u32, window_height: u32) -> media_pp::Result<
         // renderer's 2-slot upload ring), live desktop capture can
         // legitimately burst faster than that ring drains — e.g. right at
         // startup, before the render thread has processed even its first
-        // frame. `Dx12RendererError::Submit(NoFreeSlot)` on an occasional
+        // frame. `D3d12RendererError::Submit(NoFreeSlot)` on an occasional
         // frame is expected backpressure, not a reason to end the whole
         // demo — the `Queue` in front of the renderer already drops just
         // that one buffer and keeps going (see `Queue`'s own "report,

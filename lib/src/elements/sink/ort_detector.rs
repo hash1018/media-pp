@@ -281,7 +281,7 @@ where
     }
 
     fn control(&mut self, _msg: ControlMsg) -> Result<()> {
-        // Terminal, same as AppSink/Dx12Renderer: nothing buffered or
+        // Terminal, same as AppSink/D3d12Renderer: nothing buffered or
         // downstream to flush/forward for any ControlMsg.
         Ok(())
     }

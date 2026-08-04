@@ -125,7 +125,7 @@ struct CursorShape {
 /// equivalent. One src pad, pushing `Pixel::BGRA` frames (no internal
 /// color conversion — same division of labor as every other source in
 /// this crate: chain a [`crate::elements::Scaler`] downstream if
-/// something needs YUV420P, e.g. [`crate::elements::Dx12Renderer`]'s
+/// something needs YUV420P, e.g. [`crate::elements::D3d12Renderer`]'s
 /// CPU-upload path or [`crate::elements::SwEncoder`]).
 ///
 /// Emits at a **constant** rate — [`DxgiScreenOptions::fps`] — not one
@@ -133,7 +133,7 @@ struct CursorShape {
 /// variable-rate (VFR): a real wall-clock pts per actual change, nothing
 /// in between. That turned out to cause real problems, both for muxing
 /// (most consumers assume something closer to a steady rate) and,
-/// concretely, for live rendering: `Dx12Renderer` presents on a
+/// concretely, for live rendering: `D3d12Renderer` presents on a
 /// vsync-locked swap chain (`Present(1, ..)`) that only ever shows the
 /// *latest* submitted frame each tick, silently dropping anything else
 /// queued behind it — submission timing straight off an irregular VFR
@@ -159,7 +159,7 @@ struct CursorShape {
 /// over its own irregular submission timing; once emission here is
 /// steady and drift-free, `Scaler`'s modest, fairly consistent per-frame
 /// conversion cost isn't enough on its own to reintroduce the same vsync
-/// misalignment, so a straight `DxgiScreenSource -> Scaler -> Dx12Renderer`
+/// misalignment, so a straight `DxgiScreenSource -> Scaler -> D3d12Renderer`
 /// chain stays smooth with no `Pacer` at all. `Pacer` remains genuinely
 /// useful for other reasons (multi-stream sync against a shared `Clock`,
 /// or a stage with real per-frame variance like `SwEncoder`), just not

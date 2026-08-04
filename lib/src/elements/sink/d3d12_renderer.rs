@@ -31,7 +31,7 @@ pub struct RawPlane {
 
 /// Errors a [`FrameRenderer`] implementation can report. Mirrors the
 /// shape of `renderer_engine::window_renderer::SubmitError` (the crate
-/// `Dx12Renderer` was originally built directly against) without this
+/// `D3d12Renderer` was originally built directly against) without this
 /// crate depending on that one — see [`FrameRenderer`]'s own docs on why
 /// that dependency was pushed out to the caller.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,9 +47,9 @@ pub enum SubmitError {
     DeviceRemoved,
 }
 
-/// What [`Dx12Renderer`] needs from an actual DX12 window/rendering
+/// What [`D3d12Renderer`] needs from an actual DX12 window/rendering
 /// implementation — deliberately the *only* thing this crate knows about
-/// GPU-vendor-specific rendering. `Dx12Renderer` itself only depends on
+/// GPU-vendor-specific rendering. `D3d12Renderer` itself only depends on
 /// this trait (plus the `windows` COM types the zero-copy path needs to
 /// pass through) — not on `renderer_engine` or any other concrete
 /// rendering crate. A caller wanting to actually render implements this
@@ -87,10 +87,10 @@ pub trait FrameRenderer: Send {
     fn resize(&self, width: u32, height: u32) -> std::result::Result<(), SubmitError>;
 }
 
-/// Errors specific to `Dx12Renderer`. Converts into the crate-wide `Error`
+/// Errors specific to `D3d12Renderer`. Converts into the crate-wide `Error`
 /// via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
-pub enum Dx12RendererError {
+pub enum D3d12RendererError {
     #[error("failed to submit frame: {0:?}")]
     Submit(SubmitError),
 
@@ -98,7 +98,7 @@ pub enum Dx12RendererError {
     Resize(SubmitError),
 
     #[error(
-        "Dx12Renderer only handles YUV420P frames (CPU) or D3D12 frames \
+        "D3d12Renderer only handles YUV420P frames (CPU) or D3D12 frames \
          (from D3d12vaDecoder), got {0:?}"
     )]
     UnsupportedFormat(ffmpeg::format::Pixel),
@@ -111,7 +111,7 @@ pub enum Dx12RendererError {
 }
 
 /// Terminal sink that submits decoded video frames to a caller-supplied
-/// [`FrameRenderer`]. Only built with the `dx12-renderer` feature — every
+/// [`FrameRenderer`]. Only built with the `d3d12-renderer` feature — every
 /// consumer that doesn't need to render to a window pulls in neither this
 /// nor the `windows` dependency it needs for the zero-copy path.
 ///
@@ -122,19 +122,19 @@ pub enum Dx12RendererError {
 ///     draws straight from the decoder's own texture via
 ///     `FrameRenderer::submit_nv12_texture`.
 #[rust_hlog::hlog]
-pub struct Dx12Renderer {
+pub struct D3d12Renderer {
     name: Arc<str>,
     inner: Box<dyn FrameRenderer>,
 }
 
-impl Dx12Renderer {
+impl D3d12Renderer {
     /// `renderer` is whatever the caller's own [`FrameRenderer`]
     /// implementation is — already constructed and pointed at a real
     /// window/device by the time it gets here. This element doesn't
     /// create or own a window itself.
     pub fn new(name: impl Into<String>, renderer: Box<dyn FrameRenderer>) -> Self {
         let name: Arc<str> = name.into().into();
-        let hlog = element_hlog(ElementType::Dx12Renderer, &name, None);
+        let hlog = element_hlog(ElementType::D3d12Renderer, &name, None);
         hinfo!(hlog: &hlog, "created");
         Self {
             name,
@@ -148,7 +148,7 @@ impl Dx12Renderer {
         self.inner
             .resize(width, height)
             .inspect_err(|error| herror!(self, "resize failed: {error:?}"))
-            .map_err(Dx12RendererError::Resize)?;
+            .map_err(D3d12RendererError::Resize)?;
         hinfo!(self, "resized: {width}x{height}");
         Ok(())
     }
@@ -166,7 +166,7 @@ impl Dx12Renderer {
         unsafe {
             self.inner
                 .submit_yuv420p(plane(0), plane(1), plane(2), frame.width(), frame.height())
-                .map_err(Dx12RendererError::Submit)?;
+                .map_err(D3d12RendererError::Submit)?;
         }
         Ok(())
     }
@@ -176,7 +176,7 @@ impl Dx12Renderer {
         frame: Arc<UnboundObjectPoolRef<ffmpeg::frame::Video>>,
     ) -> Result<()> {
         let (texture_raw, fence_raw, fence_value) =
-            d3d12va_texture(&frame).ok_or(Dx12RendererError::InvalidD3d12Frame)?;
+            d3d12va_texture(&frame).ok_or(D3d12RendererError::InvalidD3d12Frame)?;
         let width = frame.width();
         let height = frame.height();
 
@@ -202,19 +202,19 @@ impl Dx12Renderer {
         unsafe {
             self.inner
                 .submit_nv12_texture(texture, fence, fence_value, width, height, Box::new(frame))
-                .map_err(Dx12RendererError::Submit)?;
+                .map_err(D3d12RendererError::Submit)?;
         }
         Ok(())
     }
 }
 
-impl Element for Dx12Renderer {
+impl Element for D3d12Renderer {
     fn name(&self) -> Arc<str> {
         self.name.clone()
     }
 
     fn element_type(&self) -> ElementType {
-        ElementType::Dx12Renderer
+        ElementType::D3d12Renderer
     }
 
     fn hlog(&self) -> &HLog {
@@ -226,7 +226,7 @@ impl Element for Dx12Renderer {
     }
 }
 
-impl Sink for Dx12Renderer {
+impl Sink for D3d12Renderer {
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         let MediaBuffer::Video(frame) = buf else {
             return Ok(());
@@ -241,7 +241,7 @@ impl Sink for Dx12Renderer {
                 .inspect_err(|error| herror!(self, "submit_d3d12_frame failed: {error}")),
             other => {
                 herror!(self, "unsupported pixel format: {other:?}");
-                Err(Dx12RendererError::UnsupportedFormat(other).into())
+                Err(D3d12RendererError::UnsupportedFormat(other).into())
             }
         }
     }

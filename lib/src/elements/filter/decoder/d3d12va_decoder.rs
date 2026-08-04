@@ -71,7 +71,7 @@ pub enum D3d12vaDecoderError {
 /// Frames this produces are still plain `MediaBuffer::Video` — nothing
 /// downstream needs to change to receive them. `Pacer`/`Tee`/
 /// `FrameCounter` only ever touch `.pts()` or match the enum variant, so
-/// they work unmodified. Only [`crate::elements::Dx12Renderer`] cares:
+/// they work unmodified. Only [`crate::elements::D3d12Renderer`] cares:
 /// it checks `frame.format()` and, for `Pixel::D3D12`, takes the
 /// zero-copy path via [`d3d12va_texture`] instead of reading pixel bytes.
 #[rust_hlog::hlog]
@@ -103,7 +103,7 @@ impl D3d12vaDecoder {
     /// context borrows it without taking its own reference, matching how
     /// FFmpeg's `hwcontext_d3d12va.c` doesn't `AddRef` a caller-provided
     /// device either. Pass the same `ID3D12Device` your
-    /// [`crate::elements::Dx12Renderer`] uses (e.g. from the
+    /// [`crate::elements::D3d12Renderer`] uses (e.g. from the
     /// `RendererEngine` that creates it) so decoded frames land on the
     /// same device the renderer reads from — required for the zero-copy
     /// path to be valid at all.
@@ -115,7 +115,8 @@ impl D3d12vaDecoder {
         let name: Arc<str> = name.into().into();
         let hlog = element_hlog(ElementType::D3d12vaDecoder, &name, None);
 
-        let hw_device_ctx = unsafe { create_hw_device_ctx(device) }?;
+        let hw_device_ctx =
+            unsafe { create_hw_device_ctx(device) }.map_err(D3d12vaDecoderError::HwDeviceInit)?;
 
         let mut context = match ffmpeg::codec::context::Context::from_parameters(params) {
             Ok(context) => context,
@@ -237,13 +238,18 @@ impl Drop for D3d12vaDecoder {
     }
 }
 
-unsafe fn create_hw_device_ctx(
+/// Shared with [`crate::elements::D3d12Upload`] — the mirror-image
+/// element that uploads CPU frames to this same device rather than
+/// decoding onto it. Returns a raw `AVERROR` code rather than
+/// `D3d12vaDecoderError` so it doesn't tie that caller to this module's
+/// own error type; each call site maps it into its own error variant.
+pub(crate) unsafe fn create_hw_device_ctx(
     device: &ID3D12Device,
-) -> Result<*mut ffi::AVBufferRef, D3d12vaDecoderError> {
+) -> Result<*mut ffi::AVBufferRef, i32> {
     unsafe {
         let buf = ffi::av_hwdevice_ctx_alloc(ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_D3D12VA);
         if buf.is_null() {
-            return Err(D3d12vaDecoderError::HwDeviceInit(-1));
+            return Err(-1);
         }
 
         let hw_device_ctx = (*buf).data as *mut ffi::AVHWDeviceContext;
@@ -254,14 +260,16 @@ unsafe fn create_hw_device_ctx(
         let result = ffi::av_hwdevice_ctx_init(buf);
         if result < 0 {
             free_buffer(buf);
-            return Err(D3d12vaDecoderError::HwDeviceInit(result));
+            return Err(result);
         }
 
         Ok(buf)
     }
 }
 
-unsafe fn free_buffer(mut buf: *mut ffi::AVBufferRef) {
+/// Shared with [`crate::elements::D3d12Upload`] — see
+/// [`create_hw_device_ctx`]'s own docs.
+pub(crate) unsafe fn free_buffer(mut buf: *mut ffi::AVBufferRef) {
     unsafe { ffi::av_buffer_unref(&mut buf) };
 }
 

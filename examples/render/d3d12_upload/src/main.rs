@@ -1,12 +1,10 @@
 use std::thread;
 
+use ffmpeg_next as ffmpeg;
 use media_pp::{
     bus::BusEvent,
     element::Source,
-    elements::{
-        Pacer, SwDecoder, SwEncoder, SwEncoderOptions, TestVideoOptions, TestVideoSource,
-        VideoCodec,
-    },
+    elements::{D3d12Upload, Scaler, TestVideoOptions, TestVideoSource},
     pipeline::{ChainBuilder, Pipeline},
 };
 use renderer_engine::engine::RendererEngine;
@@ -19,21 +17,17 @@ use winit::{
     window::{Window, WindowId},
 };
 
-/// TestVideoSource -> SwEncoder -> SwDecoder -> Pacer -> Renderer: encodes
-/// a synthetic moving-gradient stream (via `libopenh264`) and decodes it
-/// straight back — no file, camera, or container/mux involved at all —
-/// presented in a native window at real playback speed. Proves
-/// `SwEncoder`'s `Packet`s are actually valid, decodable H.264 (not just
-/// "avcodec_open2 succeeded"): if the round trip corrupted anything, the
-/// gradient would visibly glitch or freeze instead of scrolling smoothly.
-/// `Pacer` is still needed even though `TestVideoSource` already
-/// self-paces to its own `framerate`: `D3d12Renderer` presents on a
-/// vsync-locked swap chain that only shows the latest submitted frame
-/// each tick, and only `Pacer`'s clock-anchored release timing keeps
-/// submissions well-aligned to that grid (see `TestVideoOptions::framerate`'s
-/// own docs on why self-pacing alone isn't enough).
+/// TestVideoSource -> Scaler -> D3d12Upload -> Renderer: a synthetic
+/// `Pixel::YUV420P` stream converted to `Pixel::NV12` on the CPU, then
+/// uploaded to a GPU `Pixel::D3D12` texture on the *renderer's own*
+/// `ID3D12Device` before being presented — proves `D3d12Upload`'s frames
+/// are structurally identical to `D3d12vaDecoder`'s own (same
+/// `AVD3D12VAFrame` payload), so `D3d12Renderer` takes its zero-copy path
+/// unmodified even though nothing here ever decoded anything. Compare
+/// against `test_video`, which feeds `D3d12Renderer`'s CPU-upload path
+/// directly instead.
 ///
-///     cargo run -p transcode_render
+///     cargo run -p d3d12_upload
 fn main() {
     let event_loop = EventLoop::<PlaybackDone>::with_user_event()
         .build()
@@ -70,10 +64,10 @@ impl ApplicationHandler<PlaybackDone> for App {
         let window = event_loop
             .create_window(
                 Window::default_attributes()
-                    .with_title("media-pp transcode_render")
+                    .with_title("media-pp d3d12_upload")
                     .with_inner_size(LogicalSize::new(1280, 720))
-                    // Pacer/Renderer are wired up once, sized to the
-                    // window's initial size — no resize handling here.
+                    // Renderer is wired up once, sized to the window's
+                    // initial size — no resize handling here.
                     .with_resizable(false),
             )
             .expect("failed to create window");
@@ -84,7 +78,7 @@ impl ApplicationHandler<PlaybackDone> for App {
             .as_raw()
         {
             RawWindowHandle::Win32(handle) => handle.hwnd.get(),
-            _ => panic!("transcode_render example only supports Windows"),
+            _ => panic!("d3d12_upload example only supports Windows"),
         };
         let size = window.inner_size();
 
@@ -126,48 +120,41 @@ fn play(hwnd: isize, width: u32, height: u32) -> media_pp::Result<()> {
         ..TestVideoOptions::default()
     };
     let source = TestVideoSource::new("test-video", options);
-    let time_base = source.time_base();
 
     let engine = RendererEngine::new().map_err(|e| media_pp::Error::Other(format!("{e:?}")))?;
 
-    let pipeline = Pipeline::new("transcode-render", source, |source, ctx| {
-        let encoder = SwEncoder::new(
-            "encoder",
-            SwEncoderOptions {
-                codec: VideoCodec::OpenH264,
-                width,
-                height,
-                time_base,
-                frame_rate: options.framerate,
-                bit_rate: 2_000_000,
-            },
-        )
-        .expect("failed to open encoder");
-        // No container/demuxer in this loop to get these from — SwEncoder
-        // exposes its own codec parameters for exactly this case.
-        let params = encoder.parameters();
-        let decoder = SwDecoder::new("decoder", params).expect("failed to open decoder");
-        let pacer = Pacer::new("pacer", time_base, ctx.clock.clone());
+    let pipeline = Pipeline::new("d3d12-upload", source, |source, ctx| {
+        // `Pixel::NV12` — the only layout `D3d12Upload`/`D3d12Renderer`'s
+        // zero-copy path accepts.
+        let scaler = Scaler::new(
+            "to-nv12",
+            ffmpeg::format::Pixel::NV12,
+            width,
+            height,
+            ffmpeg::software::scaling::Flags::BILINEAR,
+        );
+        // Same device the renderer draws with — required for the
+        // zero-copy path to be valid at all (see D3d12Upload::new).
+        let upload = D3d12Upload::new("upload", engine.device(), width, height)
+            .expect("failed to open D3D12Upload");
         let renderer = render_common::window_renderer("renderer", &engine, hwnd, width, height)
             .expect("failed to create renderer");
 
         let branch = ChainBuilder::new(ctx.clone())
-            .queue("to-encode", 8) // let generation run ahead of the (CPU-heavy) encoder
-            .pipe(encoder)
-            .queue("to-decode", 8) // let encode run ahead of decode
-            .pipe(decoder)
-            .queue("frames", 8) // pacer sleeps on its own thread; let decode run ahead into this
-            .pipe(pacer)
+            .queue("generated", 4) // thread boundary so scaling doesn't block generation
+            .pipe(scaler)
+            .queue("scaled", 4) // thread boundary so uploading doesn't block scaling
+            .pipe(upload)
+            .queue("frames", 8) // thread boundary so rendering doesn't block uploading
             .build(Box::new(renderer));
         source.src_pads()[0].link(branch);
     });
 
     // `run()` starts playback on a background thread and returns right
-    // away — any failure (encoder/decoder open already happened above and
-    // would have panicked synchronously; a runtime failure like a bad
-    // pixel format from `Renderer`) shows up as a `BusEvent::Error` here
-    // instead of through a returned `Result`. `TestVideoSource` never
-    // reaches `Eos` on its own — closing the window is what ends this.
+    // away — any failure (e.g. an unsupported pixel format anywhere in
+    // the chain) shows up as a `BusEvent::Error` here instead of through a
+    // returned `Result`. `TestVideoSource` never reaches `Eos` on its own
+    // — closing the window is what ends this.
     pipeline.run();
 
     for event in pipeline.bus().iter() {

@@ -18,9 +18,9 @@ use winit::{
 
 /// TestVideoSource -> Renderer: a synthetic moving-gradient stream, no
 /// file/camera/decoder involved at all, presented in a native window via
-/// `renderer_engine`'s DX12 `WindowRenderer` (wrapped as a `Dx12Renderer`
+/// `renderer_engine`'s DX12 `WindowRenderer` (wrapped as a `D3d12Renderer`
 /// by `render_common`) — proves `TestVideoSource`'s frames and
-/// `Dx12Renderer`'s CPU-upload path work end to end without needing a
+/// `D3d12Renderer`'s CPU-upload path work end to end without needing a
 /// real video source.
 ///
 /// No `Pacer` here, deliberately, as an experiment: `TestVideoSource`

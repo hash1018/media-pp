@@ -36,7 +36,7 @@ pub struct TestVideoOptions {
     /// get generated/pushed in real time, precisely enough that a
     /// downstream [`crate::elements::Pacer`] against
     /// [`TestVideoSource::time_base`] turns out not to be needed purely
-    /// for smooth `Dx12Renderer` output (confirmed in
+    /// for smooth `D3d12Renderer` output (confirmed in
     /// `examples/render/test_video`).
     pub framerate: ffmpeg::Rational,
 }
@@ -56,8 +56,8 @@ impl Default for TestVideoOptions {
 /// `run()` fabricates one `Pixel::YUV420P` frame per tick, stamps it with
 /// an increasing `pts` (one tick per frame, in [`TestVideoSource::time_base`]'s
 /// units), and pushes it straight downstream — useful for exercising
-/// `Scaler`/`Pacer`/`Dx12Renderer`/etc. without a real file or camera.
-/// `Dx12Renderer` in particular already handles `Pixel::YUV420P` on its
+/// `Scaler`/`Pacer`/`D3d12Renderer`/etc. without a real file or camera.
+/// `D3d12Renderer` in particular already handles `Pixel::YUV420P` on its
 /// CPU-upload path, so this can feed a renderer directly, no decoder
 /// needed.
 ///
@@ -73,7 +73,7 @@ impl Default for TestVideoOptions {
 ///
 /// Confirmed (`examples/render/test_video`, with and without a
 /// downstream `Pacer`) that this is actually enough on its own for
-/// smooth `Dx12Renderer` output, vsync-locked presentation included — an
+/// smooth `D3d12Renderer` output, vsync-locked presentation included — an
 /// earlier version of this doc claimed self-pacing alone was *not*
 /// enough and a `Pacer` was still required, reasoning that only the
 /// *average* rate was being kept correct, not *when* each frame lines up
