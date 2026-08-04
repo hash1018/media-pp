@@ -6,7 +6,7 @@ use media_pp::{
     elements::{TestVideoOptions, TestVideoSource},
     pipeline::{ChainBuilder, Pipeline},
 };
-use renderer_engine::engine::RendererEngine;
+use render_common::GpuContext;
 use winit::{
     application::ApplicationHandler,
     dpi::LogicalSize,
@@ -18,8 +18,8 @@ use winit::{
 
 /// TestVideoSource -> Renderer: a synthetic moving-gradient stream, no
 /// file/camera/decoder involved at all, presented in a native window via
-/// `renderer_engine`'s DX12 `WindowRenderer` (wrapped as a `D3d12Renderer`
-/// by `render_common`) — proves `TestVideoSource`'s frames and
+/// `render_common`'s own `D3d12WindowRenderer` (wrapped as a
+/// `D3d12Renderer`) — proves `TestVideoSource`'s frames and
 /// `D3d12Renderer`'s CPU-upload path work end to end without needing a
 /// real video source.
 ///
@@ -124,10 +124,10 @@ fn play(hwnd: isize, width: u32, height: u32) -> media_pp::Result<()> {
     };
     let source = TestVideoSource::new("test-video", options);
 
-    let engine = RendererEngine::new().map_err(|e| media_pp::Error::Other(format!("{e:?}")))?;
+    let gpu = GpuContext::new().map_err(|e| media_pp::Error::Other(format!("{e:?}")))?;
 
     let pipeline = Pipeline::new("test-video", source, |source, ctx| {
-        let renderer = render_common::window_renderer("renderer", &engine, hwnd, width, height)
+        let renderer = render_common::window_renderer("renderer", &gpu, hwnd, width, height)
             .expect("failed to create renderer");
         let branch = ChainBuilder::new(ctx.clone())
             .queue("frames", 8) // thread boundary so rendering doesn't block generation

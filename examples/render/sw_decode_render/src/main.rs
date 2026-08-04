@@ -8,7 +8,7 @@ use media_pp::{
     elements::{FileDemuxer, Pacer, SwDecoder},
     pipeline::{ChainBuilder, Pipeline},
 };
-use renderer_engine::engine::RendererEngine;
+use render_common::GpuContext;
 use winit::{
     application::ApplicationHandler,
     dpi::LogicalSize,
@@ -20,8 +20,8 @@ use winit::{
 
 /// Demux -> SwDecoder -> Queue -> Pacer -> Renderer: decodes a video file
 /// and presents it in a native window at real playback speed, via
-/// `renderer_engine`'s DX12 `WindowRenderer` (wrapped as a `D3d12Renderer`
-/// by `render_common`).
+/// `render_common`'s own `D3d12WindowRenderer` (wrapped as a
+/// `D3d12Renderer`).
 ///
 ///     cargo run -p sw_decode_render -- path/to/video.mp4
 fn main() {
@@ -121,12 +121,12 @@ fn play(path: &str, hwnd: isize, width: u32, height: u32) -> media_pp::Result<()
         .stream_time_base(video.index)
         .ok_or_else(|| Error::Other("stream disappeared".into()))?;
 
-    let engine = RendererEngine::new().map_err(|e| Error::Other(format!("{e:?}")))?;
+    let gpu = GpuContext::new().map_err(|e| Error::Other(format!("{e:?}")))?;
 
     let pipeline = Pipeline::new("sw-decode-render", source, |source, ctx| {
         let decoder = SwDecoder::new("decoder", params).expect("failed to open decoder");
         let pacer = Pacer::new("pacer", time_base, ctx.clock.clone());
-        let renderer = render_common::window_renderer("renderer", &engine, hwnd, width, height)
+        let renderer = render_common::window_renderer("renderer", &gpu, hwnd, width, height)
             .expect("failed to create renderer");
         let branch = ChainBuilder::new(ctx.clone())
             .pipe(decoder)

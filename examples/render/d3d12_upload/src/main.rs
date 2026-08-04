@@ -7,7 +7,7 @@ use media_pp::{
     elements::{D3d12Upload, Scaler, TestVideoOptions, TestVideoSource},
     pipeline::{ChainBuilder, Pipeline},
 };
-use renderer_engine::engine::RendererEngine;
+use render_common::GpuContext;
 use winit::{
     application::ApplicationHandler,
     dpi::LogicalSize,
@@ -121,7 +121,7 @@ fn play(hwnd: isize, width: u32, height: u32) -> media_pp::Result<()> {
     };
     let source = TestVideoSource::new("test-video", options);
 
-    let engine = RendererEngine::new().map_err(|e| media_pp::Error::Other(format!("{e:?}")))?;
+    let gpu = GpuContext::new().map_err(|e| media_pp::Error::Other(format!("{e:?}")))?;
 
     let pipeline = Pipeline::new("d3d12-upload", source, |source, ctx| {
         // `Pixel::NV12` — the only layout `D3d12Upload`/`D3d12Renderer`'s
@@ -135,9 +135,9 @@ fn play(hwnd: isize, width: u32, height: u32) -> media_pp::Result<()> {
         );
         // Same device the renderer draws with — required for the
         // zero-copy path to be valid at all (see D3d12Upload::new).
-        let upload = D3d12Upload::new("upload", engine.device(), width, height)
+        let upload = D3d12Upload::new("upload", gpu.device(), width, height)
             .expect("failed to open D3D12Upload");
-        let renderer = render_common::window_renderer("renderer", &engine, hwnd, width, height)
+        let renderer = render_common::window_renderer("renderer", &gpu, hwnd, width, height)
             .expect("failed to create renderer");
 
         let branch = ChainBuilder::new(ctx.clone())

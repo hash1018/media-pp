@@ -17,7 +17,7 @@ pub use sink::{AppSink, FrameCounter, PacketCounter};
 #[cfg(feature = "ort")]
 pub use sink::{COCO_CLASS_LABELS, Detection, OrtDetector, OrtDetectorError};
 #[cfg(feature = "d3d12-renderer")]
-pub use sink::{D3d12Renderer, D3d12RendererError, FrameRenderer, RawPlane, SubmitError};
+pub use sink::{D3d12FrameRenderer, D3d12Renderer, D3d12RendererError, RawPlane, SubmitError};
 #[cfg(feature = "rtsp-server")]
 pub use sink::{PortPolicy, PublishTransport, RtspServer, RtspServerError, ViewerTransport};
 pub use source::{

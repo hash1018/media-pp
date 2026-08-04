@@ -9,7 +9,7 @@ use media_pp::{
     },
     pipeline::{ChainBuilder, Pipeline},
 };
-use renderer_engine::engine::RendererEngine;
+use render_common::GpuContext;
 use winit::{
     application::ApplicationHandler,
     dpi::LogicalSize,
@@ -128,7 +128,7 @@ fn play(hwnd: isize, width: u32, height: u32) -> media_pp::Result<()> {
     let source = TestVideoSource::new("test-video", options);
     let time_base = source.time_base();
 
-    let engine = RendererEngine::new().map_err(|e| media_pp::Error::Other(format!("{e:?}")))?;
+    let gpu = GpuContext::new().map_err(|e| media_pp::Error::Other(format!("{e:?}")))?;
 
     let pipeline = Pipeline::new("transcode-render", source, |source, ctx| {
         let encoder = SwEncoder::new(
@@ -148,7 +148,7 @@ fn play(hwnd: isize, width: u32, height: u32) -> media_pp::Result<()> {
         let params = encoder.parameters();
         let decoder = SwDecoder::new("decoder", params).expect("failed to open decoder");
         let pacer = Pacer::new("pacer", time_base, ctx.clock.clone());
-        let renderer = render_common::window_renderer("renderer", &engine, hwnd, width, height)
+        let renderer = render_common::window_renderer("renderer", &gpu, hwnd, width, height)
             .expect("failed to create renderer");
 
         let branch = ChainBuilder::new(ctx.clone())

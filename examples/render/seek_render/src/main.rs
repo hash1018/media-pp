@@ -12,7 +12,7 @@ use media_pp::{
     elements::{FileDemuxer, Pacer, SwDecoder},
     pipeline::{ChainBuilder, Pipeline},
 };
-use renderer_engine::engine::RendererEngine;
+use render_common::GpuContext;
 use winit::{
     application::ApplicationHandler,
     dpi::LogicalSize,
@@ -31,12 +31,6 @@ use winit::{
 ///     (then in the same terminal: type `30` or `1:15` + Enter to jump
 ///      there, or `q` + Enter to stop early)
 fn main() {
-    // `renderer-engine` logs internal render-thread failures via `log`
-    // (e.g. a DX12 present error) that would otherwise be silently
-    // dropped — without a logger installed, `log::error!` calls are
-    // no-ops. Set `RUST_LOG=debug` (or `error`/`warn`) to see them.
-    env_logger::init();
-
     let path = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "test-video/h265.mp4".into());
@@ -141,12 +135,12 @@ fn play(path: &str, hwnd: isize, width: u32, height: u32) -> media_pp::Result<()
         .stream_time_base(video.index)
         .ok_or_else(|| Error::Other("stream disappeared".into()))?;
 
-    let engine = RendererEngine::new().map_err(|e| Error::Other(format!("{e:?}")))?;
+    let gpu = GpuContext::new().map_err(|e| Error::Other(format!("{e:?}")))?;
 
     let pipeline = Pipeline::new("seek-render", source, |source, ctx| {
         let decoder = SwDecoder::new("decoder", params).expect("failed to open decoder");
         let pacer = Pacer::new("pacer", time_base, ctx.clock.clone());
-        let renderer = render_common::window_renderer("renderer", &engine, hwnd, width, height)
+        let renderer = render_common::window_renderer("renderer", &gpu, hwnd, width, height)
             .expect("failed to create renderer");
         let branch = ChainBuilder::new(ctx.clone())
             .pipe(decoder) // same thread as the demux — cheap enough not to need a queue

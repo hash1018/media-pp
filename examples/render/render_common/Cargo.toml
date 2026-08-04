@@ -6,8 +6,13 @@ publish = false
 
 [dependencies]
 media-pp = { path = "../../../lib", features = ["d3d12-renderer"] }
-renderer-engine = { git = "https://github.com/hash1018/RendererEngine", package = "renderer-engine" }
 windows = { version = "0.62", features = [
     "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D_Fxc",
     "Win32_Graphics_Direct3D12",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Security",
+    "Win32_System_Threading",
 ] }

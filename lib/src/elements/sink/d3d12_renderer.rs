@@ -4,7 +4,7 @@ use ffmpeg_next as ffmpeg;
 use rust_hlog::{HLog, herror, hinfo};
 use thiserror::Error as ThisError;
 use windows::{
-    Win32::Graphics::Direct3D12::{ID3D12Fence, ID3D12Resource},
+    Win32::Graphics::Direct3D12::{ID3D12Device, ID3D12Fence, ID3D12Resource},
     core::Interface,
 };
 
@@ -19,9 +19,11 @@ use crate::{
 
 /// One CPU-resident image plane — data pointer, byte length, and row
 /// stride. Deliberately a plain, GPU-vendor-agnostic struct (no
-/// dependency on any particular rendering crate's own type) so
-/// [`FrameRenderer`] implementors on the caller's side don't need this
-/// crate to know anything about their concrete rendering setup.
+/// dependency on any particular rendering crate's own type) — unlike
+/// [`D3d12FrameRenderer::submit_nv12_texture`]'s COM types, this is the
+/// one part of the trait that isn't D3D12-specific, so
+/// [`D3d12FrameRenderer`] implementors only need this crate to know
+/// anything about their concrete rendering setup for the CPU-upload path.
 #[derive(Clone, Copy)]
 pub struct RawPlane {
     pub data: *const u8,
@@ -29,11 +31,11 @@ pub struct RawPlane {
     pub stride: usize,
 }
 
-/// Errors a [`FrameRenderer`] implementation can report. Mirrors the
+/// Errors a [`D3d12FrameRenderer`] implementation can report. Mirrors the
 /// shape of `renderer_engine::window_renderer::SubmitError` (the crate
 /// `D3d12Renderer` was originally built directly against) without this
-/// crate depending on that one — see [`FrameRenderer`]'s own docs on why
-/// that dependency was pushed out to the caller.
+/// crate depending on that one — see [`D3d12FrameRenderer`]'s own docs on
+/// why that dependency was pushed out to the caller.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SubmitError {
     NullBuffer,
@@ -49,14 +51,26 @@ pub enum SubmitError {
 
 /// What [`D3d12Renderer`] needs from an actual DX12 window/rendering
 /// implementation — deliberately the *only* thing this crate knows about
-/// GPU-vendor-specific rendering. `D3d12Renderer` itself only depends on
-/// this trait (plus the `windows` COM types the zero-copy path needs to
-/// pass through) — not on `renderer_engine` or any other concrete
-/// rendering crate. A caller wanting to actually render implements this
-/// for whatever they're using (e.g. a small newtype wrapping
-/// `renderer_engine::window_renderer::WindowRenderer`) in their own
-/// example/application code, not in this crate.
-pub trait FrameRenderer: Send {
+/// D3D12 rendering. Not GPU-vendor-agnostic despite `submit_yuv420p`'s
+/// plain `RawPlane` args: `submit_nv12_texture`'s zero-copy path takes
+/// `ID3D12Resource`/`ID3D12Fence` directly, so this trait (and any
+/// element built on it) is inherently D3D12-only — a Vulkan/CUDA renderer
+/// would need its own trait, not an impl of this one. `D3d12Renderer`
+/// itself only depends on this trait (plus the `windows` COM types the
+/// zero-copy path needs to pass through) — not on `renderer_engine` or
+/// any other concrete rendering crate. A caller wanting to actually
+/// render implements this for whatever they're using (e.g. a small
+/// newtype wrapping `renderer_engine::window_renderer::WindowRenderer`)
+/// in their own example/application code, not in this crate.
+pub trait D3d12FrameRenderer: Send {
+    /// The `ID3D12Device` this implementation actually renders/submits
+    /// with. [`D3d12Renderer`] reads this once at construction to guard
+    /// [`D3d12FrameRenderer::submit_nv12_texture`]'s zero-copy path: a
+    /// texture from a different device is invalid to draw from at all
+    /// (not just wrong-looking), so it's checked against this rather than
+    /// trusted.
+    fn device(&self) -> ID3D12Device;
+
     /// # Safety
     /// All plane pointers must be readable for the given length and
     /// remain valid until this call returns.
@@ -108,38 +122,57 @@ pub enum D3d12RendererError {
          payload — must come from D3d12vaDecoder"
     )]
     InvalidD3d12Frame,
+
+    #[error(
+        "a Pixel::D3D12 frame's texture lives on a different ID3D12Device \
+         than this D3d12Renderer was created with — the producer \
+         (D3d12vaDecoder/D3d12Upload) and the D3d12FrameRenderer impl \
+         must share the same device for zero-copy to be valid"
+    )]
+    DeviceMismatch,
 }
 
 /// Terminal sink that submits decoded video frames to a caller-supplied
-/// [`FrameRenderer`]. Only built with the `d3d12-renderer` feature — every
-/// consumer that doesn't need to render to a window pulls in neither this
-/// nor the `windows` dependency it needs for the zero-copy path.
+/// [`D3d12FrameRenderer`]. Only built with the `d3d12-renderer` feature —
+/// every consumer that doesn't need to render to a window pulls in
+/// neither this nor the `windows` dependency it needs for the zero-copy
+/// path.
 ///
 /// Handles two kinds of input, dispatched on `frame.format()`:
 ///   - `Pixel::YUV420P`: CPU-decoded (e.g. from `SwDecoder`) — copies
-///     pixel bytes to the GPU via `FrameRenderer::submit_yuv420p`.
+///     pixel bytes to the GPU via `D3d12FrameRenderer::submit_yuv420p`.
 ///   - `Pixel::D3D12`: GPU-decoded (from `D3d12vaDecoder`) — zero-copy,
 ///     draws straight from the decoder's own texture via
-///     `FrameRenderer::submit_nv12_texture`.
+///     `D3d12FrameRenderer::submit_nv12_texture`.
 #[rust_hlog::hlog]
 pub struct D3d12Renderer {
     name: Arc<str>,
-    inner: Box<dyn FrameRenderer>,
+    inner: Box<dyn D3d12FrameRenderer>,
+    /// Captured once from `inner.device()` at construction — the
+    /// reference `submit_d3d12_frame` checks every zero-copy frame's
+    /// actual device against. Fetched from `inner` itself rather than
+    /// taken as a separate constructor parameter: a second
+    /// independently-supplied device would just be another value the
+    /// caller could get wrong, proving nothing about what `inner` really
+    /// renders with.
+    device: ID3D12Device,
 }
 
 impl D3d12Renderer {
-    /// `renderer` is whatever the caller's own [`FrameRenderer`]
+    /// `renderer` is whatever the caller's own [`D3d12FrameRenderer`]
     /// implementation is — already constructed and pointed at a real
     /// window/device by the time it gets here. This element doesn't
     /// create or own a window itself.
-    pub fn new(name: impl Into<String>, renderer: Box<dyn FrameRenderer>) -> Self {
+    pub fn new(name: impl Into<String>, renderer: Box<dyn D3d12FrameRenderer>) -> Self {
         let name: Arc<str> = name.into().into();
         let hlog = element_hlog(ElementType::D3d12Renderer, &name, None);
         hinfo!(hlog: &hlog, "created");
+        let device = renderer.device();
         Self {
             name,
             hlog,
             inner: renderer,
+            device,
         }
     }
 
@@ -194,6 +227,18 @@ impl D3d12Renderer {
                 .clone();
             (texture, fence)
         };
+
+        // The producer (`D3d12vaDecoder`/`D3d12Upload`) and `self.inner`
+        // are independent constructions that only *should* share a
+        // device by convention — verify it, since drawing a different
+        // device's texture is invalid, not just wrong output.
+        let mut texture_device: Option<ID3D12Device> = None;
+        unsafe { texture.GetDevice(&mut texture_device) }
+            .map_err(|_| D3d12RendererError::DeviceMismatch)?;
+        let texture_device = texture_device.ok_or(D3d12RendererError::DeviceMismatch)?;
+        if texture_device.as_raw() != self.device.as_raw() {
+            return Err(D3d12RendererError::DeviceMismatch.into());
+        }
 
         // `frame` (an `Arc`) is what keeps the underlying D3D12 texture
         // memory from being recycled by the decoder's frame pool while

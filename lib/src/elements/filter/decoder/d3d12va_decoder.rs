@@ -103,10 +103,12 @@ impl D3d12vaDecoder {
     /// context borrows it without taking its own reference, matching how
     /// FFmpeg's `hwcontext_d3d12va.c` doesn't `AddRef` a caller-provided
     /// device either. Pass the same `ID3D12Device` your
-    /// [`crate::elements::D3d12Renderer`] uses (e.g. from the
-    /// `RendererEngine` that creates it) so decoded frames land on the
-    /// same device the renderer reads from — required for the zero-copy
-    /// path to be valid at all.
+    /// [`crate::elements::D3d12Renderer`]'s own
+    /// [`crate::elements::D3d12FrameRenderer`] impl renders with (see
+    /// that trait's own `device()`) so decoded frames land on the same
+    /// device the renderer reads from — required for the zero-copy path
+    /// to be valid at all; checked at render time, not just documented,
+    /// via `D3d12Renderer`'s own device-mismatch guard.
     pub fn new(
         name: impl Into<String>,
         params: ffmpeg::codec::Parameters,

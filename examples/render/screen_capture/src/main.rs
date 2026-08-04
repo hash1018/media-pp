@@ -7,7 +7,7 @@ use media_pp::{
     elements::{DxgiScreenOptions, DxgiScreenSource, Scaler},
     pipeline::{ChainBuilder, Pipeline},
 };
-use renderer_engine::engine::RendererEngine;
+use render_common::GpuContext;
 use winit::{
     application::ApplicationHandler,
     dpi::LogicalSize,
@@ -128,7 +128,7 @@ fn play(hwnd: isize, window_width: u32, window_height: u32) -> media_pp::Result<
     let (source, _capture_width, _capture_height) =
         DxgiScreenSource::open("screen", capture_options)?;
 
-    let engine = RendererEngine::new().map_err(|e| media_pp::Error::Other(format!("{e:?}")))?;
+    let gpu = GpuContext::new().map_err(|e| media_pp::Error::Other(format!("{e:?}")))?;
 
     let pipeline = Pipeline::new("screen-capture", source, |source, ctx| {
         // Converts the captured `Pixel::BGRA` desktop frames down to the
@@ -143,7 +143,7 @@ fn play(hwnd: isize, window_width: u32, window_height: u32) -> media_pp::Result<
             ffmpeg::software::scaling::Flags::BILINEAR,
         );
         let renderer =
-            render_common::window_renderer("renderer", &engine, hwnd, window_width, window_height)
+            render_common::window_renderer("renderer", &gpu, hwnd, window_width, window_height)
                 .expect("failed to create renderer");
 
         let branch = ChainBuilder::new(ctx.clone())

@@ -83,7 +83,7 @@ for); this table isn't meant to duplicate that.
 | Element | What it does |
 |---|---|
 | `FrameCounter` / `PacketCounter` | Count decoded frames / raw packets, expose the count via `Arc<AtomicUsize>` |
-| `D3d12Renderer` (`d3d12-renderer`) | Submits frames to a `FrameRenderer` impl — zero-copy for `D3d12vaDecoder`'s frames. `media-pp` only defines the trait (plus `RawPlane`/`SubmitError`); the actual DX12 window rendering lives in each example's own `renderer-engine` dependency |
+| `D3d12Renderer` (`d3d12-renderer`) | Submits frames to a `D3d12FrameRenderer` impl — zero-copy for `D3d12vaDecoder`'s frames. `media-pp` only defines the trait (plus `RawPlane`/`SubmitError`); the actual DX12 window rendering lives in `examples/render/render_common`'s own `D3d12WindowRenderer` |
 | `RtspServer` (`rtsp-server`) | Spawns a vendored MediaMTX and remuxes packets into it as a live RTSP stream |
 | `AppSink` | Hands buffers (and, optionally, control messages) to plain closures — GStreamer's `appsink` equivalent |
 | `OrtDetector` (`ort`) | Runs a YOLOv8/v11-style ONNX model on each frame via `ort`, hands decoded/NMS-filtered detections to a closure |
@@ -117,8 +117,9 @@ Each is its own crate so per-example dependencies (e.g. `winit` for
 | `transcode_render` | TestVideoSource → Queue → SwEncoder → Queue → SwDecoder → Queue → Pacer → D3d12Renderer | Encodes the synthetic stream (`libopenh264`) and decodes it straight back, no container/mux involved — proves `SwEncoder`'s `Packet`s are actually valid, decodable bitstream, not just "opened successfully" |
 | `seek_render` | Demux → SwDecoder → Queue → Pacer → D3d12Renderer | Same chain as `sw_decode_render`, plus a terminal prompt that calls `Pipeline::seek` while the window is open |
 | `screen_capture` | DxgiScreenSource → Queue → Scaler → Queue → D3d12Renderer | Live desktop capture (DXGI Desktop Duplication, cursor included) at a constant frame rate, converted/resized to the window's own size and rendered directly, no `Pacer`. Confirmed smooth without one: an earlier, variable-rate version of `DxgiScreenSource` measurably needed a `Pacer` here to avoid judder, but once it moved to constant-rate, drift-free-scheduled emission (same pattern as `TestVideoSource`), `Scaler` alone wasn't enough to bring the judder back |
+| `d3d12_upload` | TestVideoSource → Queue → Scaler → Queue → D3d12Upload → Queue → D3d12Renderer | A CPU `Pixel::YUV420P` stream converted to `Pixel::NV12` on the CPU, then uploaded to a GPU `Pixel::D3D12` texture on the renderer's own device via `D3d12Upload` before being presented zero-copy — proves `D3d12Upload`'s frames are structurally identical to `D3d12vaDecoder`'s own, so `D3d12Renderer` takes its zero-copy path unmodified even though nothing here ever decoded anything |
 
-All six of the above build their `D3d12Renderer` through `render_common` (`examples/render/render_common`), a small shared crate holding the one `renderer_engine::window_renderer::WindowRenderer` → `media_pp::elements::FrameRenderer` adapter, instead of each example hand-copying it. `media-pp` itself still doesn't depend on `renderer-engine` — only `render_common` and whichever example needs a `RendererEngine` (e.g. to pass `engine.device()` into `D3d12vaDecoder`) do.
+All seven of the above build their `D3d12Renderer` through `render_common` (`examples/render/render_common`), a small shared crate holding its own minimal D3D12 window renderer (`GpuContext` for the process-wide device/queue/shader-pipeline state, `D3d12WindowRenderer` implementing `media_pp::elements::D3d12FrameRenderer` per window) instead of each example hand-copying it. `media-pp` itself has no dependency on any rendering crate at all — only `render_common` depends on `windows`' D3D12/DXGI bindings to actually draw.
 
 ### RTSP streaming (`rtsp-server` feature)
 
@@ -154,15 +155,15 @@ cargo run -p sw_decode_render              # d3d12-renderer is already enabled i
 ## Feature flags
 
 - `d3d12-renderer` (on `media-pp`) — pulls in `windows` and enables
-  `D3d12Renderer`, `FrameRenderer`, `RawPlane`, `SubmitError`, and
-  `D3d12vaDecoder`. `media-pp` itself has no dependency on
-  `renderer-engine` at all — `D3d12Renderer` takes a `Box<dyn
-  FrameRenderer>`, and it's each example's own job to adapt a concrete
-  renderer (e.g. `renderer-engine`'s `WindowRenderer`, via a small local
-  wrapper) to that trait. Off by default so consumers that don't render
-  to a window never build DX12/Windows-only code. `sw_decode_render`,
-  `hw_decode_render`, `test_video`, `transcode_render`, and `seek_render`
-  turn it on in their own `Cargo.toml`.
+  `D3d12Renderer`, `D3d12FrameRenderer`, `RawPlane`, `SubmitError`,
+  `D3d12vaDecoder`, and `D3d12Upload`. `media-pp` itself has no dependency
+  on any rendering crate at all — `D3d12Renderer` takes a `Box<dyn
+  D3d12FrameRenderer>`, and it's each example's own job to provide a
+  concrete renderer (`examples/render/render_common`'s own
+  `D3d12WindowRenderer`) implementing that trait. Off by default so
+  consumers that don't render to a window never build DX12/Windows-only
+  code. Every `examples/render/*` crate turns it on in its own
+  `Cargo.toml`.
 - `dxgi-capture` (on `media-pp`) — pulls in `windows` (DXGI/D3D11
   sub-features) and enables `DxgiScreenSource`. Independent of
   `d3d12-renderer` — Desktop Duplication is a D3D11 API, not D3D12, so
@@ -192,7 +193,7 @@ cargo run -p sw_decode_render              # d3d12-renderer is already enabled i
   build requirements). `D3d12vaDecoder` additionally needs an ffmpeg build
   with `d3d12va` hwaccel support (check `ffmpeg -hwaccels`) and a GPU/driver
   that supports it.
-- All six `examples/render/*` crates (and the `d3d12-renderer`/`dxgi-capture`
+- All seven `examples/render/*` crates (and the `d3d12-renderer`/`dxgi-capture`
   features themselves) only build/run on Windows.
 - `D3d12vaDecoder` hand-mirrors a few structs from FFmpeg's
   `libavutil/hwcontext_d3d12va.h` that `ffmpeg-sys-next` doesn't bind
