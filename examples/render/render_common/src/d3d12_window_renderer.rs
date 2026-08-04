@@ -1,7 +1,7 @@
 //! A single window's D3D12 renderer — swap chain, the two draw paths
 //! [`media_pp::elements::D3d12FrameRenderer`] needs (`submit_yuv420p`
 //! CPU-upload, `submit_nv12_texture` zero-copy), and resize. Reuses
-//! [`crate::GpuContext`]'s device/queue/root-signature/PSOs; everything
+//! [`crate::D3d12GpuContext`]'s device/queue/root-signature/PSOs; everything
 //! else here (swap chain, RTV heap, SRV heap, command allocator/list,
 //! fence) is this window's own.
 //!
@@ -47,7 +47,7 @@ use windows::{
     core::{Error, Interface},
 };
 
-use crate::gpu_context::GpuContext;
+use crate::d3d12_gpu_context::D3d12GpuContext;
 
 /// Double-buffered, same as the `renderer-engine` crate this replaces.
 const FRAME_COUNT: usize = 2;
@@ -127,7 +127,7 @@ pub struct D3d12WindowRenderer {
     /// Set once a DXGI/D3D12 call comes back with a device-removed-class
     /// error. After that every further call fails fast with
     /// `SubmitError::DeviceRemoved` instead of touching the GPU again —
-    /// recovery means recreating the whole `GpuContext`, not retrying.
+    /// recovery means recreating the whole `D3d12GpuContext`, not retrying.
     device_lost: AtomicBool,
     state: Mutex<RendererState>,
 }
@@ -142,7 +142,7 @@ unsafe impl Sync for D3d12WindowRenderer {}
 
 impl D3d12WindowRenderer {
     pub fn new(
-        gpu: &GpuContext,
+        gpu: &D3d12GpuContext,
         hwnd_value: isize,
         width: u32,
         height: u32,

@@ -8,6 +8,8 @@ use crate::elements::OrtDetectorError;
 use crate::elements::RtspServerError;
 #[cfg(feature = "webrtc")]
 use crate::elements::WebRtcError;
+#[cfg(feature = "d3d11-renderer")]
+use crate::elements::{D3d11RendererError, D3d11UploadError, D3d11vaDecoderError};
 #[cfg(feature = "d3d12-renderer")]
 use crate::elements::{D3d12RendererError, D3d12UploadError, D3d12vaDecoderError};
 use crate::{
@@ -68,6 +70,18 @@ pub enum Error {
     #[cfg(feature = "d3d12-renderer")]
     #[error(transparent)]
     D3d12UploadError(#[from] D3d12UploadError),
+
+    #[cfg(feature = "d3d11-renderer")]
+    #[error(transparent)]
+    D3d11vaDecoderError(#[from] D3d11vaDecoderError),
+
+    #[cfg(feature = "d3d11-renderer")]
+    #[error(transparent)]
+    D3d11UploadError(#[from] D3d11UploadError),
+
+    #[cfg(feature = "d3d11-renderer")]
+    #[error(transparent)]
+    D3d11RendererError(#[from] D3d11RendererError),
 
     #[cfg(feature = "dxgi-capture")]
     #[error(transparent)]

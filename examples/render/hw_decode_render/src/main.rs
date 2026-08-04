@@ -8,7 +8,7 @@ use media_pp::{
     elements::{D3d12vaDecoder, FileDemuxer, Pacer},
     pipeline::{ChainBuilder, Pipeline},
 };
-use render_common::GpuContext;
+use render_common::D3d12GpuContext;
 use winit::{
     application::ApplicationHandler,
     dpi::LogicalSize,
@@ -132,7 +132,7 @@ fn play(path: &str, hwnd: isize, width: u32, height: u32) -> media_pp::Result<()
         .stream_time_base(video.index)
         .ok_or_else(|| Error::Other("stream disappeared".into()))?;
 
-    let gpu = GpuContext::new().map_err(|e| Error::Other(format!("{e:?}")))?;
+    let gpu = D3d12GpuContext::new().map_err(|e| Error::Other(format!("{e:?}")))?;
 
     let pipeline = Pipeline::new("hw-decode-render", source, |source, ctx| {
         // Same device the renderer draws with — required for the
@@ -140,7 +140,7 @@ fn play(path: &str, hwnd: isize, width: u32, height: u32) -> media_pp::Result<()
         let decoder = D3d12vaDecoder::new("decoder", params, gpu.device())
             .expect("failed to open D3D12VA decoder");
         let pacer = Pacer::new("pacer", time_base, ctx.clock.clone());
-        let renderer = render_common::window_renderer("renderer", &gpu, hwnd, width, height)
+        let renderer = render_common::d3d12_window_renderer("renderer", &gpu, hwnd, width, height)
             .expect("failed to create renderer");
         let branch = ChainBuilder::new(ctx.clone())
             .pipe(decoder) // same thread as the demux — cheap enough not to need a queue

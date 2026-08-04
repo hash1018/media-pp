@@ -2,12 +2,12 @@
 // format hardware video decode (e.g. D3D12VA) produces directly, as one
 // resource with a full-resolution luma plane and a half-resolution
 // interleaved-chroma plane, as opposed to the three separate planes
-// `ps_yuv420p` (frame.hlsl) expects from a CPU-side YUV420P upload.
+// `ps_yuv420p` (yuv420p.hlsl) expects from a CPU-side YUV420P upload.
 //
 // Compiled as its own translation unit (own `D3DCompile` call, see
 // `gpu_context.rs`) specifically so its `t0`/`t1` register declarations
-// don't collide with frame.hlsl's `texture0`/`texture1`/`texture2` — the
-// root signature is still the one extracted from frame.hlsl's `vs_main`
+// don't collide with yuv420p.hlsl's `texture0`/`texture1`/`texture2` — the
+// root signature is still the one extracted from yuv420p.hlsl's `vs_main`
 // (`FRAME_ROOT_SIGNATURE`: 3 contiguous SRVs at t0, static sampler s0),
 // which this shader fits inside without needing its own copy of that
 // attribute.

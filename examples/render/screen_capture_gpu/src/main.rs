@@ -1,13 +1,12 @@
 use std::thread;
 
-use ffmpeg_next as ffmpeg;
 use media_pp::{
     bus::BusEvent,
     element::{ElementType, Source},
-    elements::{CaptureMode, DxgiScreenOptions, DxgiScreenSource, Scaler},
+    elements::{CaptureMode, DxgiScreenOptions, DxgiScreenSource},
     pipeline::{ChainBuilder, Pipeline},
 };
-use render_common::D3d12GpuContext;
+use render_common::D3d11GpuContext;
 use winit::{
     application::ApplicationHandler,
     dpi::LogicalSize,
@@ -17,23 +16,20 @@ use winit::{
     window::{Window, WindowId},
 };
 
-/// DxgiScreenSource -> Scaler -> Renderer: captures the desktop live via
-/// DXGI Desktop Duplication (cursor included) at a constant frame rate
-/// (`DxgiScreenOptions::fps`) and converts/resizes it to the window's own
-/// size as `Pixel::YUV420P` before rendering — no `SwEncoder`/`SwDecoder`
-/// round trip.
+/// DxgiScreenSource (GPU mode) -> Renderer: captures the desktop straight
+/// to a GPU-resident `Pixel::D3D11` BGRA texture on the *renderer's own*
+/// `ID3D11Device` (no `Map`, no CPU pixel copy at all — see
+/// `CaptureMode::Gpu`'s own docs) and presents it directly, no `Scaler`
+/// (desktop content is already BGRA/RGB, no YUV conversion needed, and
+/// `D3d11Renderer` letterboxes any capture size into the window on its
+/// own). Compare against `screen_capture`, which captures to a plain CPU
+/// `Pixel::BGRA` frame instead and converts it to YUV420P for the D3D12
+/// CPU-upload path.
 ///
-/// No `Pacer` here, confirmed unneeded: `DxgiScreenSource` previously
-/// emitted variable-rate (real wall-clock pts, push-on-change), and
-/// removing `Pacer` against that measurably caused judder. It's since
-/// been rewritten to emit at a constant rate on a drift-free absolute
-/// schedule instead — the same pattern `TestVideoSource` uses (see
-/// `test_video`) — and with that fixed, `Scaler` sitting between source
-/// and renderer here doesn't add enough jitter on its own to bring the
-/// judder back. The constant-rate/drift-free change was the actual fix,
-/// not the presence of a `Pacer` stage.
+/// No cursor: `CaptureMode::Gpu` doesn't support cursor compositing yet
+/// (see that variant's own docs) — `screen_capture`'s CPU path does.
 ///
-///     cargo run -p screen_capture
+///     cargo run -p screen_capture_gpu
 fn main() {
     let event_loop = EventLoop::<PlaybackDone>::with_user_event()
         .build()
@@ -70,7 +66,7 @@ impl ApplicationHandler<PlaybackDone> for App {
         let window = event_loop
             .create_window(
                 Window::default_attributes()
-                    .with_title("media-pp screen_capture")
+                    .with_title("media-pp screen_capture_gpu")
                     .with_inner_size(LogicalSize::new(1280, 720))
                     // Renderer is wired up once, sized to the window's
                     // initial size — no resize handling here.
@@ -84,7 +80,7 @@ impl ApplicationHandler<PlaybackDone> for App {
             .as_raw()
         {
             RawWindowHandle::Win32(handle) => handle.hwnd.get(),
-            _ => panic!("screen_capture example only supports Windows"),
+            _ => panic!("screen_capture_gpu example only supports Windows"),
         };
         let size = window.inner_size();
 
@@ -120,31 +116,24 @@ impl ApplicationHandler<PlaybackDone> for App {
 fn play(hwnd: isize, window_width: u32, window_height: u32) -> media_pp::Result<()> {
     media_pp::init()?;
 
+    // Built first: `DxgiScreenSource`'s GPU mode needs a device up front
+    // (and verifies it's on the same adapter `output_index` selects) —
+    // the same device `render_common::d3d11_window_renderer` below draws
+    // with, required for the zero-copy path to be valid at all.
+    let gpu = D3d11GpuContext::new().map_err(|e| media_pp::Error::Other(format!("{e:?}")))?;
+
     let capture_options = DxgiScreenOptions {
         fps: 60,
-        capture_mode: CaptureMode::Cpu {
-            include_cursor: true,
+        capture_mode: CaptureMode::Gpu {
+            device: gpu.device().clone(),
         },
         ..DxgiScreenOptions::default()
     };
     let (source, _capture_width, _capture_height) =
         DxgiScreenSource::open("screen", capture_options)?;
 
-    let gpu = D3d12GpuContext::new().map_err(|e| media_pp::Error::Other(format!("{e:?}")))?;
-
-    let pipeline = Pipeline::new("screen-capture", source, |source, ctx| {
-        // Converts the captured `Pixel::BGRA` desktop frames down to the
-        // window's own size as `Pixel::YUV420P` in one pass —
-        // `D3d12Renderer`'s CPU-upload path only understands
-        // YUV420P/D3D12, not BGRA.
-        let scaler = Scaler::new(
-            "to-yuv",
-            ffmpeg::format::Pixel::YUV420P,
-            window_width,
-            window_height,
-            ffmpeg::software::scaling::Flags::BILINEAR,
-        );
-        let renderer = render_common::d3d12_window_renderer(
+    let pipeline = Pipeline::new("screen-capture-gpu", source, |source, ctx| {
+        let renderer = render_common::d3d11_window_renderer(
             "renderer",
             &gpu,
             hwnd,
@@ -154,9 +143,7 @@ fn play(hwnd: isize, window_width: u32, window_height: u32) -> media_pp::Result<
         .expect("failed to create renderer");
 
         let branch = ChainBuilder::new(ctx.clone())
-            .queue("captured", 4) // thread boundary so scaling doesn't block capture
-            .pipe(scaler)
-            .queue("frames", 8) // thread boundary so rendering doesn't block scaling
+            .queue("captured", 4) // thread boundary so rendering doesn't block capture
             .build(Box::new(renderer));
         source.src_pads()[0].link(branch);
     });
@@ -174,19 +161,10 @@ fn play(hwnd: isize, window_width: u32, window_height: u32) -> media_pp::Result<
             BusEvent::Dropped { name, .. } => eprintln!("[{name}] dropped a buffer (queue full)"),
             BusEvent::Seeked { .. } => {}
         }
-        // Unlike the other render examples (a steady, self-paced
-        // synthetic/file source that essentially never overruns the
-        // renderer's 2-slot upload ring), live desktop capture can
-        // legitimately burst faster than that ring drains — e.g. right at
-        // startup, before the render thread has processed even its first
-        // frame. `D3d12RendererError::Submit(NoFreeSlot)` on an occasional
-        // frame is expected backpressure, not a reason to end the whole
-        // demo — the `Queue` in front of the renderer already drops just
-        // that one buffer and keeps going (see `Queue`'s own "report,
-        // don't die" contract). Only stop for `Eos`, or an `Error` from
-        // `DxgiScreenSource` itself (its `run()` thread actually ended —
-        // e.g. `DXGI_ERROR_ACCESS_LOST` from a lock screen — so nothing
-        // more will ever arrive).
+        // Same reasoning as `screen_capture`'s own loop: only stop for
+        // `Eos`, or an `Error` that means `DxgiScreenSource`'s own `run()`
+        // thread actually ended — an occasional dropped/backpressured
+        // frame elsewhere isn't a reason to end the demo.
         let source_died = matches!(
             &event,
             BusEvent::Error { element_type, .. } if *element_type == ElementType::DxgiScreenSource

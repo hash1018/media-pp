@@ -5,10 +5,10 @@ use media_pp::{
     Error,
     bus::BusEvent,
     element::Source,
-    elements::{FileDemuxer, Pacer, SwDecoder},
+    elements::{D3d11Decoder, FileDemuxer, Pacer},
     pipeline::{ChainBuilder, Pipeline},
 };
-use render_common::D3d12GpuContext;
+use render_common::D3d11GpuContext;
 use winit::{
     application::ApplicationHandler,
     dpi::LogicalSize,
@@ -18,12 +18,23 @@ use winit::{
     window::{Window, WindowId},
 };
 
-/// Demux -> SwDecoder -> Queue -> Pacer -> Renderer: decodes a video file
-/// and presents it in a native window at real playback speed, via
-/// `render_common`'s own `D3d12WindowRenderer` (wrapped as a
-/// `D3d12Renderer`).
+/// Demux -> D3d11Decoder -> Queue -> Pacer -> Renderer: decodes on the GPU
+/// via D3D11VA hardware acceleration and presents the frames in a native
+/// window at real playback speed, without ever copying the decoded pixels
+/// back to system memory — `D3d11Renderer` draws straight from the
+/// decoder's own D3D11 texture. The D3D11 sibling of `hw_decode_render`
+/// (which does the same thing via D3D12VA instead).
 ///
-///     cargo run -p sw_decode_render -- path/to/video.mp4
+/// `D3d11Decoder` never touches FFmpeg's `hw_frames_ctx`/
+/// `AVD3D11VAFramesContext` itself — only `hw_device_ctx` and `get_format`
+/// (see `D3d11Decoder`'s own docs) — so libavcodec's own internal D3D11VA
+/// hwaccel init handles frames-context allocation entirely inside
+/// already-correct C code, unlike the hand-mirrored struct path that
+/// crashed when this project tried to drive it manually (see
+/// `D3d11Upload`'s/`wrap_d3d11_texture`'s own docs on that history). This
+/// example is what actually proves that's safe on real hardware.
+///
+///     cargo run -p d3d11_decode_render -- path/to/video.mp4
 fn main() {
     let path = std::env::args()
         .nth(1)
@@ -37,11 +48,17 @@ fn main() {
         path,
         proxy,
         window: None,
+        // Kept alive for the app's duration so the window doesn't outlive
+        // the thread rendering into it; not otherwise joined — the window
+        // closes itself once playback finishes (see `user_event` below).
         _playback: None,
     };
     event_loop.run_app(&mut app).expect("event loop failed");
 }
 
+/// Sent from the playback thread once `play()` returns, so the window
+/// closes itself when the pipeline finishes instead of sitting there
+/// until someone closes it by hand.
 struct PlaybackDone;
 
 struct App {
@@ -60,8 +77,10 @@ impl ApplicationHandler<PlaybackDone> for App {
         let window = event_loop
             .create_window(
                 Window::default_attributes()
-                    .with_title("media-pp sw_decode_render")
+                    .with_title("media-pp d3d11_decode_render")
                     .with_inner_size(LogicalSize::new(1280, 720))
+                    // Pacer/Renderer are wired up once, sized to the
+                    // window's initial size — no resize handling here.
                     .with_resizable(false),
             )
             .expect("failed to create window");
@@ -72,7 +91,7 @@ impl ApplicationHandler<PlaybackDone> for App {
             .as_raw()
         {
             RawWindowHandle::Win32(handle) => handle.hwnd.get(),
-            _ => panic!("sw_decode_render example only supports Windows"),
+            _ => panic!("d3d11_decode_render example only supports Windows"),
         };
         let size = window.inner_size();
 
@@ -121,23 +140,38 @@ fn play(path: &str, hwnd: isize, width: u32, height: u32) -> media_pp::Result<()
         .stream_time_base(video.index)
         .ok_or_else(|| Error::Other("stream disappeared".into()))?;
 
-    let gpu = D3d12GpuContext::new().map_err(|e| Error::Other(format!("{e:?}")))?;
+    let gpu = D3d11GpuContext::new().map_err(|e| Error::Other(format!("{e:?}")))?;
 
-    let pipeline = Pipeline::new("sw-decode-render", source, |source, ctx| {
-        let decoder = SwDecoder::new("decoder", params).expect("failed to open decoder");
+    let pipeline = Pipeline::new("d3d11-decode-render", source, |source, ctx| {
+        // Same device the renderer draws with — required for the
+        // zero-copy path to be valid at all (see D3d11Decoder::new).
+        // `extra_hw_frames` must cover the `"frames"` queue's own depth
+        // below (see D3d11Decoder::new's own docs on why, unlike
+        // D3d12vaDecoder) — decode can legitimately run that far ahead of
+        // playback while the queue buffers up.
+        let decoder = D3d11Decoder::new("decoder", params, gpu.device(), 32)
+            .expect("failed to open D3D11VA decoder");
         let pacer = Pacer::new("pacer", time_base, ctx.clock.clone());
-        let renderer = render_common::d3d12_window_renderer("renderer", &gpu, hwnd, width, height)
+        let renderer = render_common::d3d11_window_renderer("renderer", &gpu, hwnd, width, height)
             .expect("failed to create renderer");
         let branch = ChainBuilder::new(ctx.clone())
-            .pipe(decoder)
-            .queue("frames", 32)
+            .pipe(decoder) // same thread as the demux — cheap enough not to need a queue
+            .queue("frames", 32) // pacer sleeps on its own thread; let decode run ahead into this
             .pipe(pacer)
             .build(Box::new(renderer));
         source.src_pads()[video.index].link(branch);
     });
 
+    // `run()` starts playback on a background thread and returns right
+    // away — any failure (including the source's own) shows up as a
+    // `BusEvent::Error` here instead of through a returned `Result`.
     pipeline.run();
 
+    // Errors no longer end the pipeline on their own (see `BusEvent`'s
+    // docs) — watch for one here and `stop()`, or this window would just
+    // sit open (showing a frozen last frame) instead of closing after a
+    // renderer failure. Single video stream, so `Eos` calling `stop()` is
+    // a harmless no-op too.
     for event in pipeline.bus().iter() {
         match &event {
             BusEvent::Eos { name, .. } => println!("[{name}] eos"),

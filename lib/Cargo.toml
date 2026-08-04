@@ -28,7 +28,8 @@ str0m = { version = "0.21", optional = true, default-features = false, features 
 
 [features]
 d3d12-renderer = ["dep:windows"]
-dxgi-capture = ["dep:windows"]
+d3d11-renderer = ["dep:windows"]
+dxgi-capture = ["dep:windows", "d3d11-renderer"]
 rtsp-server = []
 ort = ["dep:ort", "dep:ndarray"]
 webrtc = ["dep:str0m"]

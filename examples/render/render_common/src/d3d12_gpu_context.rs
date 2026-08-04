@@ -1,9 +1,9 @@
 //! Process-wide D3D12 state shared by every window: the device, the
 //! command queue every window presents through, and the root
-//! signature/pipeline state objects `window_renderer` draws with. Kept
-//! separate from any one window so opening a second window doesn't pay
-//! for shader compilation again — mirrors why the `renderer-engine` git
-//! dependency this replaces split things the same way.
+//! signature/pipeline state objects `d3d12_window_renderer` draws with.
+//! Kept separate from any one window so opening a second window doesn't
+//! pay for shader compilation again — mirrors why the `renderer-engine`
+//! git dependency this replaces split things the same way.
 
 use std::{ffi::c_void, mem::ManuallyDrop};
 
@@ -18,8 +18,8 @@ use windows::{
     core::{Error, Result, s},
 };
 
-const SHADER_SOURCE: &[u8] = include_bytes!("shaders/frame.hlsl");
-const NV12_SHADER_SOURCE: &[u8] = include_bytes!("shaders/nv12.hlsl");
+const YUV420P_SHADER_SOURCE: &[u8] = include_bytes!("shaders/d3d12/yuv420p.hlsl");
+const NV12_SHADER_SOURCE: &[u8] = include_bytes!("shaders/d3d12/nv12.hlsl");
 
 /// Owns the `ID3D12Device` and everything derived from it that every
 /// window's renderer shares read-only: the DXGI factory (used to create
@@ -29,7 +29,7 @@ const NV12_SHADER_SOURCE: &[u8] = include_bytes!("shaders/nv12.hlsl");
 /// signature/PSOs for the two pixel formats [`crate::D3d12WindowRenderer`]
 /// knows how to draw (`Pixel::YUV420P` CPU-uploaded planes,
 /// `Pixel::D3D12`/NV12 zero-copy textures).
-pub struct GpuContext {
+pub struct D3d12GpuContext {
     pub(crate) factory: IDXGIFactory4,
     pub(crate) device: ID3D12Device,
     pub(crate) command_queue: ID3D12CommandQueue,
@@ -38,18 +38,18 @@ pub struct GpuContext {
     pub(crate) nv12_pipeline: ID3D12PipelineState,
 }
 
-impl GpuContext {
+impl D3d12GpuContext {
     /// The shared D3D12 device — pass into
     /// [`media_pp::elements::D3d12vaDecoder::new`]/
     /// [`media_pp::elements::D3d12Upload::new`] so decoded/uploaded frames
-    /// land on the same device [`crate::window_renderer`] draws with,
+    /// land on the same device [`crate::d3d12_window_renderer`] draws with,
     /// required for their zero-copy path to be valid at all.
     pub fn device(&self) -> &ID3D12Device {
         &self.device
     }
 
     /// Creates the D3D12 device and shared shader pipeline in dependency
-    /// order. One `GpuContext` per process is enough — every window's
+    /// order. One `D3d12GpuContext` per process is enough — every window's
     /// renderer clones (COM ref-count bump, not a deep copy) what it
     /// needs from this.
     pub fn new() -> Result<Self> {
@@ -78,11 +78,11 @@ impl GpuContext {
             };
             let command_queue: ID3D12CommandQueue = device.CreateCommandQueue(&queue_desc)?;
 
-            let vertex_shader = compile_shader(SHADER_SOURCE, s!("vs_main"), s!("vs_5_1"))?;
-            let yuv_shader = compile_shader(SHADER_SOURCE, s!("ps_yuv420p"), s!("ps_5_1"))?;
-            // Compiled from its own source file (not `SHADER_SOURCE`) so
-            // its `t0`/`t1` register declarations don't collide with the
-            // ones above — see nv12.hlsl for why.
+            let vertex_shader = compile_shader(YUV420P_SHADER_SOURCE, s!("vs_main"), s!("vs_5_1"))?;
+            let yuv_shader = compile_shader(YUV420P_SHADER_SOURCE, s!("ps_yuv420p"), s!("ps_5_1"))?;
+            // Compiled from its own source file (not `YUV420P_SHADER_SOURCE`)
+            // so its `t0`/`t1` register declarations don't collide with the
+            // ones above — see d3d12/nv12.hlsl for why.
             let nv12_shader = compile_shader(NV12_SHADER_SOURCE, s!("ps_nv12"), s!("ps_5_1"))?;
 
             // Extract the serialized root signature from HLSL's
@@ -132,7 +132,7 @@ unsafe fn compile_shader(
         D3DCompile(
             source.as_ptr().cast::<c_void>(),
             source.len(),
-            s!("frame.hlsl"),
+            s!("d3d12_shader.hlsl"),
             None,
             None::<&ID3DInclude>,
             entry,

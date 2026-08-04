@@ -13,9 +13,10 @@ use windows::{
         Graphics::{
             Direct3D::D3D_DRIVER_TYPE_UNKNOWN,
             Direct3D11::{
-                D3D11_BIND_FLAG, D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_FLAG, D3D11_MAP_READ,
-                D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING, D3D11CreateDevice,
-                ID3D11Device, ID3D11DeviceContext, ID3D11Resource, ID3D11Texture2D,
+                D3D11_BIND_FLAG, D3D11_BIND_SHADER_RESOURCE, D3D11_CPU_ACCESS_READ,
+                D3D11_CREATE_DEVICE_FLAG, D3D11_MAP_READ, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC,
+                D3D11_USAGE_DEFAULT, D3D11_USAGE_STAGING, D3D11CreateDevice, ID3D11Device,
+                ID3D11DeviceContext, ID3D11Resource, ID3D11Texture2D,
             },
             Dxgi::{
                 Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC},
@@ -36,6 +37,7 @@ use crate::{
     bus::{Bus, BusEvent},
     control::{ControlReceiver, drain_control},
     element::{Element, ElementType, Source, SourceElement, element_hlog},
+    elements::filter::decoder::d3d11va_decoder::wrap_d3d11_texture,
     error::Result,
     pad::SrcPad,
     pool::UnboundObjectPool,
@@ -74,10 +76,57 @@ pub enum DxgiScreenSourceError {
 
     #[error("DxgiScreenSource doesn't support seeking a live capture")]
     SeekUnsupported,
+
+    #[error(
+        "CaptureMode::Gpu's device is on a different adapter than output_index \
+         selects — open it against the same adapter that output belongs to"
+    )]
+    DeviceAdapterMismatch,
+}
+
+/// How [`DxgiScreenSource::open`] captures each frame — see
+/// [`DxgiScreenOptions::capture_mode`].
+#[derive(Debug, Clone)]
+pub enum CaptureMode {
+    /// The original behavior: `AcquireNextFrame`'s resource is copied into
+    /// a CPU-readable staging texture, `Map`ped, and copied row-by-row
+    /// into a plain `Pixel::BGRA` CPU frame. No external device required —
+    /// `open` creates its own, internal to this element, from the chosen
+    /// output's own adapter.
+    ///
+    /// `include_cursor` composites the mouse cursor onto every emitted
+    /// frame. Off by default: the base capture path (desktop pixels only)
+    /// needs no extra work, and most consumers (recording, streaming a
+    /// presentation) don't want the cursor baked in at all. Only exists on
+    /// this variant — cursor compositing is CPU-side pixel blending
+    /// ([`composite_cursor`]), which has nothing to run against under
+    /// [`CaptureMode::Gpu`], where the captured image never touches the
+    /// CPU at all; putting the field here instead of as a separate
+    /// `DxgiScreenOptions` flag makes that combination unrepresentable
+    /// rather than a runtime error to guard against.
+    Cpu { include_cursor: bool },
+    /// Captures straight to a GPU-resident frame tagged `Pixel::D3D11`
+    /// (BGRA — desktop content has no reason to go through YUV) on
+    /// `device` — no `Map`, no CPU pixel copy at all, just two GPU-side
+    /// `CopyResource` calls (duplication resource -> this element's own
+    /// "latest capture" texture, then that texture -> a fresh per-emission
+    /// texture every tick, so an in-flight pushed frame's content can't
+    /// change under whatever's still reading it — same reasoning
+    /// [`crate::elements::D3d11Upload`] documents for building a fresh
+    /// texture per call rather than reusing one). `device` must be opened
+    /// against the *same adapter* [`DxgiScreenOptions::output_index`]
+    /// selects — `open` verifies this and fails with
+    /// [`DxgiScreenSourceError::DeviceAdapterMismatch`] otherwise — and
+    /// should be the one `ID3D11Device` every other D3D11 element in the
+    /// pipeline shares, for `open`'s own zero-copy path to mean anything —
+    /// see [`crate::elements::D3d11Renderer`]'s own docs on why.
+    ///
+    /// No cursor option — see [`CaptureMode::Cpu`]'s own docs on why.
+    Gpu { device: ID3D11Device },
 }
 
 /// Construction-time options for [`DxgiScreenSource::open`].
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct DxgiScreenOptions {
     /// A flat index across every adapter's every output, in enumeration
     /// order (adapter 0's outputs, then adapter 1's, ...) — "monitor 0",
@@ -85,25 +134,27 @@ pub struct DxgiScreenOptions {
     /// whatever Windows considers the first output of the first adapter,
     /// not necessarily the primary monitor.
     pub output_index: u32,
-    /// Whether to composite the mouse cursor onto every emitted frame.
-    /// Off by default: the base capture path (desktop pixels only) needs
-    /// no extra work, and most consumers (recording, streaming a
-    /// presentation) don't want the cursor baked in at all.
-    pub include_cursor: bool,
     /// The constant rate frames are emitted at — see [`DxgiScreenSource`]'s
     /// own docs on why this is a fixed output rate (like
     /// [`crate::elements::TestVideoSource::new`]'s `framerate`), not a cap
     /// on an otherwise irregular one. `30` by default, matching
     /// `TestVideoSource`'s own default.
     pub fps: u32,
+    /// CPU (the original behavior) or GPU (zero-copy) capture — see
+    /// [`CaptureMode`]. `CaptureMode::Cpu { include_cursor: false }` by
+    /// default, so existing callers building `DxgiScreenOptions { ..
+    /// ..Default::default() }` keep today's behavior unchanged.
+    pub capture_mode: CaptureMode,
 }
 
 impl Default for DxgiScreenOptions {
     fn default() -> Self {
         Self {
             output_index: 0,
-            include_cursor: false,
             fps: 30,
+            capture_mode: CaptureMode::Cpu {
+                include_cursor: false,
+            },
         }
     }
 }
@@ -177,11 +228,22 @@ struct CursorShape {
 #[rust_hlog::hlog]
 pub struct DxgiScreenSource {
     name: Arc<str>,
+    /// Only used by [`CaptureMode::Gpu`]'s [`DxgiScreenSource::emit_frame`]
+    /// path, to build each tick's fresh per-emission texture — unused
+    /// after construction in [`CaptureMode::Cpu`], but harmless to hold
+    /// either way (one extra COM reference, same device already owns).
+    device: ID3D11Device,
     context: ID3D11DeviceContext,
     duplication: IDXGIOutputDuplication,
+    /// The latest captured desktop image, GPU-resident either way —
+    /// CPU-readable (`D3D11_USAGE_STAGING`) under [`CaptureMode::Cpu`], or
+    /// shader-bindable (`D3D11_USAGE_DEFAULT`/`D3D11_BIND_SHADER_RESOURCE`)
+    /// under [`CaptureMode::Gpu`]. See [`DxgiScreenSource::poll_capture`]
+    /// for which.
     staging_texture: ID3D11Texture2D,
     width: u32,
     height: u32,
+    gpu_mode: bool,
     include_cursor: bool,
     cursor_shape: Option<CursorShape>,
     /// The cursor's last known position/visibility — *not*
@@ -195,14 +257,16 @@ pub struct DxgiScreenSource {
     /// moving cursor over an otherwise-static screen still shows up.
     cursor_position: POINT,
     cursor_visible: bool,
-    /// The most recently captured desktop image — plain, not pool-backed
-    /// (never shared/pushed directly downstream; see `run`'s own emit
-    /// step, which copies out of this into a fresh pooled frame every
-    /// tick). Updated in place whenever `poll_capture` sees a real image
-    /// change; re-copied from as-is on every tick where nothing new
+    /// The most recently captured desktop image, CPU-side — plain, not
+    /// pool-backed (never shared/pushed directly downstream; see `run`'s
+    /// own emit step, which copies out of this into a fresh pooled frame
+    /// every tick). Updated in place whenever `poll_capture` sees a real
+    /// image change; re-copied from as-is on every tick where nothing new
     /// arrived, which is what makes this element emit at a constant rate
-    /// rather than only on real changes.
-    staging: ffmpeg::frame::Video,
+    /// rather than only on real changes. Only under [`CaptureMode::Cpu`] —
+    /// `None` under [`CaptureMode::Gpu`], which reads straight from
+    /// `staging_texture` instead (see `emit_frame`).
+    staging: Option<ffmpeg::frame::Video>,
     /// Whether `staging` holds real captured pixels yet — `false` until
     /// the first successful capture, so `run` doesn't emit a blank frame
     /// before there's anything real to show.
@@ -248,24 +312,53 @@ impl DxgiScreenSource {
 
         let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }?;
         let (adapter, output) = pick_output(&factory, options.output_index)?;
+        let gpu_mode = matches!(options.capture_mode, CaptureMode::Gpu { .. });
+        // `CaptureMode::Gpu` has no `include_cursor` field at all (see its
+        // own docs) — nothing to extract there, so `false` unconditionally.
+        let include_cursor = match &options.capture_mode {
+            CaptureMode::Cpu { include_cursor } => *include_cursor,
+            CaptureMode::Gpu { .. } => false,
+        };
 
-        let mut device: Option<ID3D11Device> = None;
-        let mut context: Option<ID3D11DeviceContext> = None;
-        unsafe {
-            D3D11CreateDevice(
-                &adapter.cast::<windows::Win32::Graphics::Dxgi::IDXGIAdapter>()?,
-                D3D_DRIVER_TYPE_UNKNOWN,
-                HMODULE::default(),
-                D3D11_CREATE_DEVICE_FLAG(0),
-                None,
-                D3D11_SDK_VERSION,
-                Some(&mut device),
-                None,
-                Some(&mut context),
-            )?;
-        }
-        let device = device.expect("D3D11CreateDevice succeeded without producing a device");
-        let context = context.expect("D3D11CreateDevice succeeded without producing a context");
+        let (device, context) = match &options.capture_mode {
+            CaptureMode::Cpu { .. } => {
+                let mut device: Option<ID3D11Device> = None;
+                let mut context: Option<ID3D11DeviceContext> = None;
+                unsafe {
+                    D3D11CreateDevice(
+                        &adapter.cast::<windows::Win32::Graphics::Dxgi::IDXGIAdapter>()?,
+                        D3D_DRIVER_TYPE_UNKNOWN,
+                        HMODULE::default(),
+                        D3D11_CREATE_DEVICE_FLAG(0),
+                        None,
+                        D3D11_SDK_VERSION,
+                        Some(&mut device),
+                        None,
+                        Some(&mut context),
+                    )?;
+                }
+                (
+                    device.expect("D3D11CreateDevice succeeded without producing a device"),
+                    context.expect("D3D11CreateDevice succeeded without producing a context"),
+                )
+            }
+            CaptureMode::Gpu { device } => {
+                // Same LUID check `D3d12Renderer`'s own device-mismatch
+                // guard does — a device from the wrong adapter would
+                // silently fail (or worse) once `DuplicateOutput`/
+                // `CopyResource` actually run against `output`'s adapter.
+                let selected_luid = unsafe { adapter.GetDesc() }?.AdapterLuid;
+                let device_adapter = unsafe { device.cast::<IDXGIDevice>()?.GetAdapter() }?;
+                let device_luid = unsafe { device_adapter.GetDesc() }?.AdapterLuid;
+                if (device_luid.LowPart, device_luid.HighPart)
+                    != (selected_luid.LowPart, selected_luid.HighPart)
+                {
+                    return Err(DxgiScreenSourceError::DeviceAdapterMismatch);
+                }
+                let context = unsafe { device.GetImmediateContext() }?;
+                (device.clone(), context)
+            }
+        };
 
         let output1: IDXGIOutput1 = output.cast()?;
         let dxgi_device: IDXGIDevice = device.cast()?;
@@ -275,6 +368,10 @@ impl DxgiScreenSource {
         let width = desc.ModeDesc.Width;
         let height = desc.ModeDesc.Height;
 
+        // Cpu: CPU-readable staging texture, `Map`ped every real capture
+        // (see `poll_capture`). Gpu: shader-bindable, never CPU-mapped —
+        // just the GPU-side "latest capture" `CopyResource` target that
+        // `emit_frame` copies out of into each tick's own fresh texture.
         let staging_desc = D3D11_TEXTURE2D_DESC {
             Width: width,
             Height: height,
@@ -285,9 +382,21 @@ impl DxgiScreenSource {
                 Count: 1,
                 Quality: 0,
             },
-            Usage: D3D11_USAGE_STAGING,
-            BindFlags: D3D11_BIND_FLAG(0).0 as u32,
-            CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
+            Usage: if gpu_mode {
+                D3D11_USAGE_DEFAULT
+            } else {
+                D3D11_USAGE_STAGING
+            },
+            BindFlags: if gpu_mode {
+                D3D11_BIND_SHADER_RESOURCE.0 as u32
+            } else {
+                D3D11_BIND_FLAG(0).0 as u32
+            },
+            CPUAccessFlags: if gpu_mode {
+                0
+            } else {
+                D3D11_CPU_ACCESS_READ.0 as u32
+            },
             MiscFlags: 0,
         };
         let mut staging_texture: Option<ID3D11Texture2D> = None;
@@ -296,34 +405,47 @@ impl DxgiScreenSource {
             staging_texture.expect("CreateTexture2D succeeded without producing a texture");
 
         let pad = SrcPad::new(format!("{name}_src"));
-        let pool = UnboundObjectPool::new(
-            0,
-            move || ffmpeg::frame::Video::new(ffmpeg::format::Pixel::BGRA, width, height),
-            |_| {},
-        );
-        let staging = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::BGRA, width, height);
+        // Gpu: only the small CPU-side `AVFrame` wrapper is ever pooled
+        // (`ffmpeg::frame::Video::empty` — same as `D3d11Upload`'s own
+        // pool); the GPU texture itself is a fresh allocation every
+        // `emit_frame` call (see that method's own docs on why). Cpu:
+        // pre-sized real `Pixel::BGRA` CPU buffers, as before.
+        let pool = if gpu_mode {
+            UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {})
+        } else {
+            UnboundObjectPool::new(
+                0,
+                move || ffmpeg::frame::Video::new(ffmpeg::format::Pixel::BGRA, width, height),
+                |_| {},
+            )
+        };
+        let staging = (!gpu_mode)
+            .then(|| ffmpeg::frame::Video::new(ffmpeg::format::Pixel::BGRA, width, height));
 
         let fps = options.fps.max(1); // a `0` fps is nonsensical; treat it as 1 rather than dividing by zero
         hinfo!(
             hlog: &hlog,
-            "opened: output_index={}, {}x{}, include_cursor={}, fps={}",
+            "opened: output_index={}, {}x{}, include_cursor={}, fps={}, gpu_mode={}",
             options.output_index,
             width,
             height,
-            options.include_cursor,
-            fps
+            include_cursor,
+            fps,
+            gpu_mode
         );
 
         Ok((
             Self {
                 name,
                 hlog,
+                device,
                 context,
                 duplication,
                 staging_texture,
                 width,
                 height,
-                include_cursor: options.include_cursor,
+                gpu_mode,
+                include_cursor,
                 cursor_shape: None,
                 cursor_position: POINT::default(),
                 cursor_visible: false,
@@ -434,9 +556,17 @@ impl DxgiScreenSource {
         }
 
         // Release DXGI's own frame as soon as we've copied it out, rather
-        // than holding it while we map/read the (independent) staging
-        // copy below.
+        // than holding it while we map/read (Cpu mode) the (independent)
+        // staging copy below.
         unsafe { self.duplication.ReleaseFrame() }?;
+
+        if self.gpu_mode {
+            // No `Map`/CPU copy at all — `self.staging_texture` itself
+            // *is* the latest capture; `emit_frame` reads straight from
+            // it. See `CaptureMode::Gpu`'s own docs.
+            self.has_captured = true;
+            return Ok(());
+        }
 
         let mut mapped = Default::default();
         unsafe {
@@ -449,9 +579,13 @@ impl DxgiScreenSource {
             )?;
         }
         {
-            let dst_stride = self.staging.stride(0);
+            let staging = self
+                .staging
+                .as_mut()
+                .expect("CaptureMode::Cpu always has a staging buffer");
+            let dst_stride = staging.stride(0);
             let row_bytes = self.width as usize * 4;
-            let dst = self.staging.data_mut(0);
+            let dst = staging.data_mut(0);
             for row in 0..self.height as usize {
                 let src = unsafe {
                     std::slice::from_raw_parts(
@@ -470,22 +604,45 @@ impl DxgiScreenSource {
         Ok(())
     }
 
+    /// Builds the next frame to push — the unit of work `run` does once
+    /// per emission tick, real change or repeat — and stamps the next
+    /// `pts`. Dispatches to [`DxgiScreenSource::emit_frame_cpu`] or
+    /// [`DxgiScreenSource::emit_frame_gpu`] depending on `self.gpu_mode`.
+    fn emit_frame(
+        &mut self,
+    ) -> std::result::Result<
+        crate::pool::UnboundObjectPoolRef<ffmpeg::frame::Video>,
+        DxgiScreenSourceError,
+    > {
+        let mut frame = if self.gpu_mode {
+            self.emit_frame_gpu()?
+        } else {
+            self.emit_frame_cpu()
+        };
+        frame.set_pts(Some(self.frame_index));
+        self.frame_index += 1;
+        Ok(frame)
+    }
+
     /// Copies `self.staging` (the latest captured desktop image, however
-    /// stale) into a fresh pooled frame, composites the cursor onto that
-    /// copy if enabled, and stamps the next `pts` tick — the unit of work
-    /// `run` does once per emission, real change or repeat. Copying
-    /// instead of sharing `self.staging` directly is what lets each
-    /// emitted frame carry its own distinct, correctly-incrementing `pts`
+    /// stale) into a fresh pooled CPU frame, compositing the cursor onto
+    /// that copy if enabled. Copying instead of sharing `self.staging`
+    /// directly is what lets each emitted frame carry its own distinct,
+    /// correctly-incrementing `pts` (stamped by the caller, `emit_frame`)
     /// even when several emissions in a row show the same content — an
     /// `Arc`-shared frame can't have its `pts` safely rewritten in place
     /// once downstream might already hold a clone of it.
-    fn emit_frame(&mut self) -> crate::pool::UnboundObjectPoolRef<ffmpeg::frame::Video> {
+    fn emit_frame_cpu(&mut self) -> crate::pool::UnboundObjectPoolRef<ffmpeg::frame::Video> {
         let mut frame = self.pool.get();
+        let staging = self
+            .staging
+            .as_ref()
+            .expect("CaptureMode::Cpu always has a staging buffer");
         {
             let dst_stride = frame.stride(0);
-            let src_stride = self.staging.stride(0);
+            let src_stride = staging.stride(0);
             let row_bytes = self.width as usize * 4;
-            let src = self.staging.data(0);
+            let src = staging.data(0);
             let dst = frame.data_mut(0);
             for row in 0..self.height as usize {
                 dst[row * dst_stride..row * dst_stride + row_bytes]
@@ -506,9 +663,62 @@ impl DxgiScreenSource {
                 );
             }
         }
-        frame.set_pts(Some(self.frame_index));
-        self.frame_index += 1;
         frame
+    }
+
+    /// `CaptureMode::Gpu`'s equivalent of [`DxgiScreenSource::emit_frame_cpu`]:
+    /// builds a fresh `ID3D11Texture2D` (same shape as `staging_texture`)
+    /// and `CopyResource`s `self.staging_texture`'s current contents into
+    /// it — a second GPU-side copy, same reasoning `D3d11Upload::upload`
+    /// documents for allocating fresh every call rather than reusing one
+    /// texture: `staging_texture` gets overwritten by the next real
+    /// capture, so a frame already pushed downstream needs its own,
+    /// independently stable copy of what it was capturing at push time.
+    /// Wraps the fresh texture as a `Pixel::D3D11` frame via
+    /// [`wrap_d3d11_texture`], reusing the pooled `AVFrame` wrapper (the
+    /// pool built by `open` for `CaptureMode::Gpu` only holds these small
+    /// wrappers, not GPU memory — see that pool's own construction site).
+    fn emit_frame_gpu(
+        &mut self,
+    ) -> std::result::Result<
+        crate::pool::UnboundObjectPoolRef<ffmpeg::frame::Video>,
+        DxgiScreenSourceError,
+    > {
+        let desc = D3D11_TEXTURE2D_DESC {
+            Width: self.width,
+            Height: self.height,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Usage: D3D11_USAGE_DEFAULT,
+            BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
+            CPUAccessFlags: 0,
+            MiscFlags: 0,
+        };
+        let mut texture: Option<ID3D11Texture2D> = None;
+        unsafe {
+            self.device
+                .CreateTexture2D(&desc, None, Some(&mut texture))?;
+        }
+        let texture = texture.expect("CreateTexture2D succeeded without producing a texture");
+        unsafe {
+            self.context.CopyResource(
+                &texture.cast::<ID3D11Resource>()?,
+                &self.staging_texture.cast::<ID3D11Resource>()?,
+            );
+        }
+
+        let mut frame = self.pool.get();
+        // Overwrites the pooled slot's previous contents in place —
+        // `ffmpeg::frame::Video`'s own `Drop` runs on whatever was there
+        // before, releasing that frame's GPU texture right here (same
+        // pattern `D3d11Upload::consume` documents).
+        *frame = wrap_d3d11_texture(texture, self.width, self.height);
+        Ok(frame)
     }
 }
 
@@ -561,7 +771,13 @@ impl SourceElement for DxgiScreenSource {
             if !self.has_captured {
                 continue; // nothing real captured yet — nothing to emit
             }
-            let frame = self.emit_frame();
+            let frame = match self.emit_frame() {
+                Ok(frame) => frame,
+                Err(error) => {
+                    herror!(self, "emit_frame failed: {error}");
+                    return Err(error.into());
+                }
+            };
             if let Err(error) = self.pad.push(MediaBuffer::Video(Arc::new(frame))) {
                 bus.post(
                     &self.hlog,

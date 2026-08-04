@@ -6,7 +6,7 @@ use media_pp::{
     elements::{TestVideoOptions, TestVideoSource},
     pipeline::{ChainBuilder, Pipeline},
 };
-use render_common::GpuContext;
+use render_common::D3d12GpuContext;
 use winit::{
     application::ApplicationHandler,
     dpi::LogicalSize,
@@ -124,10 +124,10 @@ fn play(hwnd: isize, width: u32, height: u32) -> media_pp::Result<()> {
     };
     let source = TestVideoSource::new("test-video", options);
 
-    let gpu = GpuContext::new().map_err(|e| media_pp::Error::Other(format!("{e:?}")))?;
+    let gpu = D3d12GpuContext::new().map_err(|e| media_pp::Error::Other(format!("{e:?}")))?;
 
     let pipeline = Pipeline::new("test-video", source, |source, ctx| {
-        let renderer = render_common::window_renderer("renderer", &gpu, hwnd, width, height)
+        let renderer = render_common::d3d12_window_renderer("renderer", &gpu, hwnd, width, height)
             .expect("failed to create renderer");
         let branch = ChainBuilder::new(ctx.clone())
             .queue("frames", 8) // thread boundary so rendering doesn't block generation

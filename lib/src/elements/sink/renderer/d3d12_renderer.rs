@@ -12,7 +12,7 @@ use crate::{
     buffer::MediaBuffer,
     control::ControlMsg,
     element::{Element, ElementType, Sink, element_hlog},
-    elements::filter::decoder::d3d12va_decoder::d3d12va_texture,
+    elements::{SubmitError, filter::decoder::d3d12va_decoder::d3d12va_texture},
     error::Result,
     pool::UnboundObjectPoolRef,
 };
@@ -29,24 +29,6 @@ pub struct RawPlane {
     pub data: *const u8,
     pub len: usize,
     pub stride: usize,
-}
-
-/// Errors a [`D3d12FrameRenderer`] implementation can report. Mirrors the
-/// shape of `renderer_engine::window_renderer::SubmitError` (the crate
-/// `D3d12Renderer` was originally built directly against) without this
-/// crate depending on that one — see [`D3d12FrameRenderer`]'s own docs on
-/// why that dependency was pushed out to the caller.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SubmitError {
-    NullBuffer,
-    InvalidFrame,
-    NoFreeSlot,
-    RendererStopped,
-    RenderFailed,
-    /// The GPU device is no longer valid (driver reset/removal). Recovery
-    /// requires recreating the whole rendering setup, not just retrying —
-    /// same meaning as upstream `renderer_engine`'s own variant.
-    DeviceRemoved,
 }
 
 /// What [`D3d12Renderer`] needs from an actual DX12 window/rendering
