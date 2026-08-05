@@ -7,7 +7,9 @@ use std::{
     time::Duration,
 };
 
-use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TrySendError, bounded, select};
+use crossbeam_channel::{
+    Receiver, RecvTimeoutError, SendTimeoutError, Sender, TrySendError, bounded, select,
+};
 use rust_hlog::{HLog, hinfo};
 use thiserror::Error as ThisError;
 
@@ -25,6 +27,16 @@ use crate::{
 pub enum QueueError {
     #[error("downstream channel closed")]
     ChannelClosed,
+
+    /// [`OverflowPolicy::Block`] only — the channel stayed full for the
+    /// whole `after`, meaning whatever's downstream of this `Queue`
+    /// didn't just fall behind (ordinary, self-resolving backpressure),
+    /// it's genuinely stuck. Unlike [`OverflowPolicy::DropNewest`]'s
+    /// silent, expected-under-load `BusEvent::Dropped`, this is
+    /// surfaced as a real error precisely because it isn't expected —
+    /// see [`OverflowPolicy::Block`]'s own docs.
+    #[error("downstream didn't accept a buffer within {after:?} — send timed out")]
+    SendTimedOut { after: Duration },
 }
 
 /// How often the worker's blocking wait wakes up on its own (nothing
@@ -37,18 +49,46 @@ pub enum QueueError {
 const STOP_POLL_INTERVAL: Duration = Duration::from_millis(20);
 
 /// What a `Queue` does when its channel is full.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OverflowPolicy {
-    /// Block the pushing thread until there's room. Never loses data —
+    /// Block the pushing thread until there's room, up to `Duration` —
     /// the right choice for offline/file processing, where correctness
-    /// matters more than staying caught up.
-    #[default]
-    Block,
+    /// matters more than staying caught up. Use [`Duration::MAX`] (what
+    /// [`OverflowPolicy::default`] does) for what's practically an
+    /// unbounded wait — [`Sender::send_timeout`] with that duration
+    /// isn't ever going to time out in a real program.
+    ///
+    /// A *finite* `Duration` is the escape hatch against the one thing
+    /// an actually-unbounded wait can't recover from: whatever's
+    /// downstream not just falling behind (ordinary backpressure, which
+    /// resolves on its own as the worker keeps draining) but genuinely
+    /// stuck — a `Sink::consume` call somewhere in the chain that never
+    /// returns. An unbounded wait here would then also wedge whoever's
+    /// pushing into this `Queue`, and transitively every `Queue`
+    /// upstream of *that*, since each one's worker can't get back to its
+    /// own `control_rx` until its current `downstream.consume()` call
+    /// returns (see [`Queue::control`]'s own docs on why control is only
+    /// ever checked *between* buffers, not able to preempt one already
+    /// in flight). Timing out bounds that: it's what lets a `Stop` sent
+    /// to an upstream `Queue` eventually reach it instead of waiting
+    /// forever. Doesn't help if the stall is inside a raw (non-`Queue`)
+    /// `Sink`'s own `consume()` call directly — nothing here retries or
+    /// times out *that* call itself, only the channel send. On timeout,
+    /// returns [`QueueError::SendTimedOut`] rather than losing the
+    /// buffer silently — unlike [`OverflowPolicy::DropNewest`], this
+    /// isn't an expected, routine condition.
+    Block(Duration),
     /// Drop the incoming buffer instead of blocking, and post
     /// [`BusEvent::Dropped`]. Never stalls the upstream thread — the
     /// right choice for live sources, where falling behind is worse than
     /// losing a frame.
     DropNewest,
+}
+
+impl Default for OverflowPolicy {
+    fn default() -> Self {
+        OverflowPolicy::Block(Duration::MAX)
+    }
 }
 
 /// An explicit thread boundary.
@@ -99,7 +139,7 @@ pub struct Queue {
 }
 
 impl Queue {
-    /// Spawns with [`OverflowPolicy::Block`]. Use
+    /// Spawns with [`OverflowPolicy::default`]. Use
     /// [`Queue::spawn_with_policy`] to drop instead of blocking when full.
     pub fn spawn(
         name: impl Into<String>,
@@ -113,7 +153,7 @@ impl Queue {
             capacity,
             downstream,
             bus,
-            OverflowPolicy::Block,
+            OverflowPolicy::default(),
             pipeline_id,
         )
     }
@@ -207,10 +247,13 @@ impl Sink for Queue {
         }
 
         match self.policy {
-            OverflowPolicy::Block => self
-                .tx
-                .send(buf)
-                .map_err(|_| QueueError::ChannelClosed.into()),
+            OverflowPolicy::Block(timeout) => match self.tx.send_timeout(buf, timeout) {
+                Ok(()) => Ok(()),
+                Err(SendTimeoutError::Timeout(_)) => {
+                    Err(QueueError::SendTimedOut { after: timeout }.into())
+                }
+                Err(SendTimeoutError::Disconnected(_)) => Err(QueueError::ChannelClosed.into()),
+            },
             OverflowPolicy::DropNewest => match self.tx.try_send(buf) {
                 Ok(()) => Ok(()),
                 Err(TrySendError::Full(_)) => {
@@ -513,8 +556,14 @@ mod tests {
         };
         let (bus, bus_rx) = Bus::new();
 
-        let mut queue =
-            Queue::spawn_with_policy("test", 1, Box::new(sink), bus, OverflowPolicy::Block, None);
+        let mut queue = Queue::spawn_with_policy(
+            "test",
+            1,
+            Box::new(sink),
+            bus,
+            OverflowPolicy::default(),
+            None,
+        );
         for _ in 0..10 {
             queue.consume(packet()).unwrap();
         }
@@ -523,6 +572,45 @@ mod tests {
 
         assert_eq!(count.load(Ordering::SeqCst), 10);
         assert!(!bus_rx.iter().any(|e| matches!(e, BusEvent::Dropped { .. })));
+    }
+
+    #[test]
+    fn block_with_a_finite_timeout_errors_instead_of_blocking_forever() {
+        let count = Arc::new(AtomicUsize::new(0));
+        let sink = SlowCounter {
+            count: count.clone(),
+            hlog: element_hlog(ElementType::Other, "slow-counter", None),
+        };
+        let (bus, _bus_rx) = Bus::new();
+
+        // Capacity 1, downstream takes 20ms/item, timeout is 5ms — pushed
+        // in a tight loop, some of these sends must outlast their own
+        // timeout instead of blocking until the worker catches up.
+        let mut queue = Queue::spawn_with_policy(
+            "test",
+            1,
+            Box::new(sink),
+            bus,
+            OverflowPolicy::Block(Duration::from_millis(5)),
+            None,
+        );
+        let mut timed_out = 0;
+        for _ in 0..10 {
+            match queue.consume(packet()) {
+                Ok(()) => {}
+                Err(_) => timed_out += 1,
+            }
+        }
+        // Eos isn't subject to the timeout (see `Sink::consume`'s own
+        // special-casing) — always goes through even after some sends
+        // above timed out.
+        queue.consume(MediaBuffer::Eos).unwrap();
+        drop(queue); // blocks until the worker drains everything and joins
+
+        assert!(
+            timed_out > 0,
+            "expected at least one send to time out against a downstream that can't keep up"
+        );
     }
 
     #[test]
@@ -573,8 +661,14 @@ mod tests {
         };
         let (bus, _bus_rx) = Bus::new();
 
-        let mut queue =
-            Queue::spawn_with_policy("test", 8, Box::new(sink), bus, OverflowPolicy::Block, None);
+        let mut queue = Queue::spawn_with_policy(
+            "test",
+            8,
+            Box::new(sink),
+            bus,
+            OverflowPolicy::default(),
+            None,
+        );
         queue.control(ControlMsg::Pause).unwrap(); // blocks until the worker is actually paused
 
         for _ in 0..3 {
@@ -608,8 +702,14 @@ mod tests {
         };
         let (bus, _bus_rx) = Bus::new();
 
-        let queue =
-            Queue::spawn_with_policy("test", 8, Box::new(sink), bus, OverflowPolicy::Block, None);
+        let queue = Queue::spawn_with_policy(
+            "test",
+            8,
+            Box::new(sink),
+            bus,
+            OverflowPolicy::default(),
+            None,
+        );
         drop(queue);
     }
 
@@ -629,8 +729,14 @@ mod tests {
         };
         let (bus, _bus_rx) = Bus::new();
 
-        let mut queue =
-            Queue::spawn_with_policy("test", 8, Box::new(sink), bus, OverflowPolicy::Block, None);
+        let mut queue = Queue::spawn_with_policy(
+            "test",
+            8,
+            Box::new(sink),
+            bus,
+            OverflowPolicy::default(),
+            None,
+        );
         queue.control(ControlMsg::Pause).unwrap(); // blocks until the worker is actually paused
         drop(queue);
     }
@@ -644,8 +750,14 @@ mod tests {
         };
         let (bus, _bus_rx) = Bus::new();
 
-        let mut queue =
-            Queue::spawn_with_policy("test", 8, Box::new(sink), bus, OverflowPolicy::Block, None);
+        let mut queue = Queue::spawn_with_policy(
+            "test",
+            8,
+            Box::new(sink),
+            bus,
+            OverflowPolicy::default(),
+            None,
+        );
         queue.consume(packet()).unwrap();
         queue.control(ControlMsg::Stop).unwrap(); // blocks until the worker has exited
         drop(queue); // join should return immediately — the worker already returned
@@ -711,8 +823,14 @@ mod tests {
         };
         let (bus, bus_rx) = Bus::new();
 
-        let mut queue =
-            Queue::spawn_with_policy("test", 8, Box::new(sink), bus, OverflowPolicy::Block, None);
+        let mut queue = Queue::spawn_with_policy(
+            "test",
+            8,
+            Box::new(sink),
+            bus,
+            OverflowPolicy::default(),
+            None,
+        );
         for _ in 0..3 {
             queue.consume(packet()).unwrap();
         }

@@ -177,7 +177,7 @@ impl ChainBuilder {
     /// [`OverflowPolicy::Block`]): everything added after this runs on its
     /// own worker thread instead of the thread that feeds this queue.
     pub fn queue(self, name: impl Into<String>, capacity: usize) -> Self {
-        self.queue_with_policy(name, capacity, OverflowPolicy::Block)
+        self.queue_with_policy(name, capacity, OverflowPolicy::default())
     }
 
     /// Same as [`ChainBuilder::queue`], but lets you choose what happens
