@@ -127,7 +127,7 @@ fn play(hwnd: isize, window_width: u32, window_height: u32) -> media_pp::Result<
         },
         ..DxgiScreenOptions::default()
     };
-    let (source, _capture_width, _capture_height) =
+    let (source, _capture_width, _capture_height, _device) =
         DxgiScreenSource::open("screen", capture_options)?;
 
     let gpu = D3d12GpuContext::new().map_err(|e| media_pp::Error::Other(format!("{e:?}")))?;

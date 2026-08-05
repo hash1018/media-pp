@@ -116,21 +116,23 @@ impl ApplicationHandler<PlaybackDone> for App {
 fn play(hwnd: isize, window_width: u32, window_height: u32) -> media_pp::Result<()> {
     media_pp::init()?;
 
-    // Built first: `DxgiScreenSource`'s GPU mode needs a device up front
-    // (and verifies it's on the same adapter `output_index` selects) —
-    // the same device `render_common::d3d11_window_renderer` below draws
-    // with, required for the zero-copy path to be valid at all.
-    let gpu = D3d11GpuContext::new().map_err(|e| media_pp::Error::Other(format!("{e:?}")))?;
-
+    // Opened first: `CaptureMode::Gpu` builds its own device from
+    // whichever adapter `output_index` actually selects and hands it
+    // back — `render_common::d3d11_window_renderer` below is built from
+    // that same returned device, required for the zero-copy path to be
+    // valid at all (see `CaptureMode::Gpu`'s own docs on why the device
+    // flows this direction, not the other way).
     let capture_options = DxgiScreenOptions {
         fps: 60,
-        capture_mode: CaptureMode::Gpu {
-            device: gpu.device().clone(),
-        },
+        capture_mode: CaptureMode::Gpu,
         ..DxgiScreenOptions::default()
     };
-    let (source, _capture_width, _capture_height) =
+    let (source, _capture_width, _capture_height, device) =
         DxgiScreenSource::open("screen", capture_options)?;
+    let device = device.expect("CaptureMode::Gpu always returns a device");
+
+    let gpu =
+        D3d11GpuContext::new(Some(device)).map_err(|e| media_pp::Error::Other(format!("{e:?}")))?;
 
     let pipeline = Pipeline::new("screen-capture-gpu", source, |source, ctx| {
         let renderer = render_common::d3d11_window_renderer(

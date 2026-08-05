@@ -120,7 +120,7 @@ fn play(hwnd: isize, width: u32, height: u32) -> media_pp::Result<()> {
     };
     let source = TestVideoSource::new("test-video", options);
 
-    let gpu = D3d11GpuContext::new().map_err(|e| media_pp::Error::Other(format!("{e:?}")))?;
+    let gpu = D3d11GpuContext::new(None).map_err(|e| media_pp::Error::Other(format!("{e:?}")))?;
 
     let pipeline = Pipeline::new("d3d11-upload", source, |source, ctx| {
         // `Pixel::NV12` — the only layout `D3d11Upload` accepts.

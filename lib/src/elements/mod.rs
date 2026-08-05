@@ -30,4 +30,7 @@ pub use source::{
     TestVideoSourceError,
 };
 #[cfg(feature = "dxgi-capture")]
-pub use source::{CaptureMode, DxgiScreenOptions, DxgiScreenSource, DxgiScreenSourceError};
+pub use source::{
+    CaptureArea, CaptureMode, CaptureRect, DxgiScreenOptions, DxgiScreenSource,
+    DxgiScreenSourceError,
+};

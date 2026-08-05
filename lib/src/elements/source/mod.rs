@@ -8,7 +8,8 @@ mod test_video_source;
 pub use app_source::{AppSource, AppSourceError, AppSourceHandle};
 #[cfg(feature = "dxgi-capture")]
 pub use dxgi_screen_source::{
-    CaptureMode, DxgiScreenOptions, DxgiScreenSource, DxgiScreenSourceError,
+    CaptureArea, CaptureMode, CaptureRect, DxgiScreenOptions, DxgiScreenSource,
+    DxgiScreenSourceError,
 };
 pub use file_demuxer::{FileDemuxError, FileDemuxer, StreamInfo};
 pub use rtsp_source::{RtspOptions, RtspSource, RtspSourceError, RtspTransport};

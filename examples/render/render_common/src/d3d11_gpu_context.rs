@@ -49,12 +49,14 @@ pub struct D3d11GpuContext {
 
 impl D3d11GpuContext {
     /// The shared D3D11 device — pass into
-    /// [`media_pp::elements::DxgiScreenSource::open`] (GPU capture mode)/
     /// [`media_pp::elements::D3d11Upload::new`]/
     /// [`media_pp::elements::D3d11Decoder::new`] so every producer lands on
     /// the same device (and, transitively, the same one immediate context
     /// — see this type's own docs) [`crate::d3d11_window_renderer`] draws
-    /// with.
+    /// with. Not for [`media_pp::elements::DxgiScreenSource::open`]'s
+    /// `CaptureMode::Gpu` path — that one runs the other way round (see
+    /// [`D3d11GpuContext::new`]'s own docs): `open` resolves the device,
+    /// this type reuses it.
     pub fn device(&self) -> &ID3D11Device {
         &self.device
     }
@@ -68,34 +70,57 @@ impl D3d11GpuContext {
         self.context.clone()
     }
 
-    /// Creates the D3D11 device/context and compiles the shared shaders in
-    /// dependency order. One `D3d11GpuContext` per process is enough —
-    /// every window's renderer clones (COM ref-count bump, not a deep
-    /// copy) what it needs from this.
-    pub fn new() -> Result<Self> {
+    /// Creates the shared shader/sampler state on top of a D3D11
+    /// device+context, and compiles the shared shaders in dependency
+    /// order. One `D3d11GpuContext` per process is enough — every
+    /// window's renderer clones (COM ref-count bump, not a deep copy)
+    /// what it needs from this.
+    ///
+    /// `device`: `None` creates a fresh device on the OS's default
+    /// adapter (the original behavior — fine when nothing else in the
+    /// pipeline cares which adapter that is, e.g. `d3d11_upload`/
+    /// `d3d11_decode_render`, which only ever talk to this one device).
+    /// `Some(device)` reuses an already-created device as-is instead of
+    /// creating a new one — e.g. the `ID3D11Device` returned by
+    /// [`media_pp::elements::DxgiScreenSource::open`]'s `CaptureMode::Gpu`
+    /// path, which is already pinned to whichever adapter the captured
+    /// monitor is actually attached to (`screen_capture_gpu`'s own case).
+    /// Reusing that exact device instead of separately creating a
+    /// same-adapter one and relying on the two matching is what lets this
+    /// whole stack skip a device-mismatch check entirely — there's only
+    /// ever one device in play, not two independently resolved ones that
+    /// could disagree.
+    pub fn new(device: Option<ID3D11Device>) -> Result<Self> {
         unsafe {
             let factory: IDXGIFactory2 = CreateDXGIFactory1()?;
 
-            let flags = if cfg!(debug_assertions) {
-                D3D11_CREATE_DEVICE_DEBUG
-            } else {
-                D3D11_CREATE_DEVICE_FLAG(0)
+            let (device, context) = match device {
+                Some(device) => {
+                    let context = device.GetImmediateContext()?;
+                    (device, context)
+                }
+                None => {
+                    let flags = if cfg!(debug_assertions) {
+                        D3D11_CREATE_DEVICE_DEBUG
+                    } else {
+                        D3D11_CREATE_DEVICE_FLAG(0)
+                    };
+                    let mut device = None;
+                    let mut context = None;
+                    D3D11CreateDevice(
+                        None,
+                        D3D_DRIVER_TYPE_HARDWARE,
+                        Default::default(),
+                        flags,
+                        None,
+                        D3D11_SDK_VERSION,
+                        Some(&mut device),
+                        None,
+                        Some(&mut context),
+                    )?;
+                    (device.unwrap(), context.unwrap())
+                }
             };
-            let mut device = None;
-            let mut context = None;
-            D3D11CreateDevice(
-                None,
-                D3D_DRIVER_TYPE_HARDWARE,
-                Default::default(),
-                flags,
-                None,
-                D3D11_SDK_VERSION,
-                Some(&mut device),
-                None,
-                Some(&mut context),
-            )?;
-            let device: ID3D11Device = device.unwrap();
-            let context = context.unwrap();
             // Not created with `D3D11_CREATE_DEVICE_SINGLETHREADED`, which
             // is supposed to mean the runtime already auto-serializes
             // cross-thread calls into this context — but that alone

@@ -140,7 +140,7 @@ fn play(path: &str, hwnd: isize, width: u32, height: u32) -> media_pp::Result<()
         .stream_time_base(video.index)
         .ok_or_else(|| Error::Other("stream disappeared".into()))?;
 
-    let gpu = D3d11GpuContext::new().map_err(|e| Error::Other(format!("{e:?}")))?;
+    let gpu = D3d11GpuContext::new(None).map_err(|e| Error::Other(format!("{e:?}")))?;
 
     let pipeline = Pipeline::new("d3d11-decode-render", source, |source, ctx| {
         // Same device the renderer draws with — required for the

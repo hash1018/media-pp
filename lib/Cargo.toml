@@ -19,6 +19,11 @@ windows = { version = "0.62", optional = true, features = [
     "Win32_Graphics_Direct3D12",
     "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common",
+    # `IDXGIOutput::GetDesc`'s `DXGI_OUTPUT_DESC` return type has a
+    # `Monitor: HMONITOR` field — windows-rs silently drops `GetDesc`
+    # from its generated bindings without this feature to supply that
+    # type, rather than erroring at generation time.
+    "Win32_Graphics_Gdi",
 ] }
 ort = { version = "2.0.0-rc.13", optional = true }
 ndarray = { version = "0.17", optional = true }
