@@ -26,12 +26,11 @@ use winit::{
 /// `SwEncoder`'s `Packet`s are actually valid, decodable H.264 (not just
 /// "avcodec_open2 succeeded"): if the round trip corrupted anything, the
 /// gradient would visibly glitch or freeze instead of scrolling smoothly.
-/// `Pacer` is still needed even though `TestVideoSource` already
-/// self-paces to its own `framerate`: `D3d12Renderer` presents on a
-/// vsync-locked swap chain that only shows the latest submitted frame
-/// each tick, and only `Pacer`'s clock-anchored release timing keeps
-/// submissions well-aligned to that grid (see `TestVideoOptions::framerate`'s
-/// own docs on why self-pacing alone isn't enough).
+/// This example keeps a `Pacer` after the encode/decode round trip. The
+/// source itself is already paced accurately enough for direct rendering,
+/// but the encoder and decoder add their own buffering and per-frame
+/// variance; this particular chain has not been validated without the
+/// final clock-anchored pacing stage.
 ///
 ///     cargo run -p transcode_render
 fn main() {

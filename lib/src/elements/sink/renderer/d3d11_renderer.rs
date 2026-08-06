@@ -43,7 +43,7 @@ use crate::{
 /// zero — this is precisely the abstraction D3D12 (deliberately) doesn't
 /// provide, which is why that side needs the caller to keep the source
 /// frame alive by hand via an explicit fence. Here, once
-/// [`D3d11Renderer::submit_d3d11_frame`]'s local `texture` clone (and
+/// `D3d11Renderer::submit_d3d11_frame`'s local `texture` clone (and
 /// whatever `Arc<UnboundObjectPoolRef<..>>` produced it) drops, the
 /// runtime — not this crate — is what keeps the actual texture memory
 /// valid for as long as the GPU still needs it.
@@ -79,7 +79,7 @@ pub trait D3d11FrameRenderer: Send {
     /// D3D11VA hwaccel decode pools frames as slices of one shared **array**
     /// texture (unlike `D3d11Upload`, which always builds a fresh
     /// non-array, single-slice texture per frame — `array_index` is always
-    /// `0` there) — see [`d3d11va_texture`]'s own docs.
+    /// `0` there) — see `d3d11va_texture`'s own docs.
     ///
     /// # Safety
     /// `texture` must be a valid `ID3D11Texture2D` on the same
@@ -155,11 +155,11 @@ pub enum D3d11RendererError {
 /// explicit synchronization, same as the D3D12 case.
 ///
 /// Dispatches on the *texture's own* `DXGI_FORMAT` (via `GetDesc`), not on
-/// any extra tag carried by the frame — every `Pixel::D3D11` producer in
-/// this crate is built manually (see [`d3d11va_texture`]'s own docs on
-/// why: this crate's D3D11 frames don't go through FFmpeg's own
-/// hwframe-pool `sw_format` bookkeeping), so the texture itself is the
-/// only reliable source of truth for which pixel layout it actually holds.
+/// any extra tag carried by the frame. `D3d11Upload` and GPU screen capture
+/// wrap manually-created textures, while `D3d11Decoder` receives textures
+/// from FFmpeg's D3D11VA frame pool; reading the actual texture description
+/// gives all of those producer paths one reliable source of truth for the
+/// pixel layout.
 #[rust_hlog::hlog]
 pub struct D3d11Renderer {
     name: Arc<str>,

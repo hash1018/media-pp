@@ -31,10 +31,13 @@ Everything is built from a handful of primitives in `lib/src/`:
   elements (`Packet` / `Video` / `Audio` / `Eos`). Payloads are
   `Arc`-wrapped, so cloning a buffer (e.g. to fan it out) is a refcount
   bump, never a copy of the encoded/decoded data.
-- **`Queue`** (`queue.rs`) — the *only* thread boundary in the system.
+- **`Queue`** (`queue.rs`) — the explicit thread boundary between stages
+  in a dataflow chain.
   Wrapping a `Sink` in a `Queue` hands buffers off through a bounded
-  channel to a dedicated worker thread. Elements never spawn their own
-  threads; boundaries are introduced explicitly wherever one is wanted.
+  channel to a dedicated worker thread. Directly-linked stages stay on
+  their upstream caller's thread; the top-level `Pipeline` and
+  `DriverRunner` separately own the background threads that drive a source
+  or driver.
 - **`Bus` / `BusEvent`** (`bus.rs`) — a cross-thread event channel. Once a
   buffer crosses a `Queue` boundary, errors can't propagate with `?`
   anymore, so they're posted here instead (`Error`, `Eos`, `Dropped`).
@@ -42,8 +45,10 @@ Everything is built from a handful of primitives in `lib/src/`:
 - **`Pipeline` / `ChainBuilder`** (`pipeline.rs`) — `ChainBuilder` builds
   one linear chain (`.pipe(filter)` for same-thread stages, `.queue(name,
   capacity)` for a thread boundary, `.build(sink)` to terminate);
-  `Pipeline` drives a `SourceElement` on the calling thread until EOS and
-  every `Queue` worker thread has drained and joined.
+  `Pipeline::run()` drives a `SourceElement` on a background thread and
+  returns immediately; draining its bus waits for that source and every
+  reachable `Queue` worker to finish, provided the application has not
+  retained an extra `Context`/`Bus` sender.
 - **`Clock`** (`clock.rs`) — a shared wall-clock anchor (`Arc<Clock>`) so
   multiple `Pacer`s (e.g. one per stream) agree on the same t=0.
 
@@ -61,7 +66,7 @@ for); this table isn't meant to duplicate that.
 | `AppSource` | Application code pushes buffers in via a handle, from any thread — GStreamer's `appsrc` equivalent |
 | `RtspSource` | Demuxes a live RTSP stream (the client/receive counterpart to `RtspServer`) — no internal retry/reconnect on a dropped connection, fails fast instead; the caller rebuilds a fresh one to reconnect |
 | `TestVideoSource` | Generates a synthetic moving-gradient `Pixel::YUV420P` stream — GStreamer's `videotestsrc` equivalent, no file/camera/decoder needed |
-| `DxgiScreenSource` (`dxgi-capture`) | Captures the desktop live via DXGI Desktop Duplication — GStreamer's `d3d11screencapturesrc` equivalent. Pushes `Pixel::BGRA` untouched (chain a `Scaler` for YUV420P); emits at a constant `fps` (default 30, same convention as `TestVideoSource`) rather than one push per real desktop change — repeats the latest captured image if nothing changed since the last tick, since a variable-rate/push-on-change version of this turned out to cause visible judder against a vsync-locked renderer. `CaptureMode::Cpu` (default, optional cursor compositing) or `CaptureMode::Gpu { device }` — zero-copy straight to a `Pixel::D3D11` texture on a caller-supplied `ID3D11Device` shared with the rest of a D3D11 pipeline, no `Map`/CPU pixel copy at all (no cursor support yet in this mode) |
+| `DxgiScreenSource` (`dxgi-capture`) | Captures the desktop live via DXGI Desktop Duplication — GStreamer's `d3d11screencapturesrc` equivalent. Pushes `Pixel::BGRA` untouched (chain a `Scaler` for YUV420P); emits at a constant `fps` (default 30, same convention as `TestVideoSource`) rather than one push per real desktop change — repeats the latest captured image if nothing changed since the last tick, since a variable-rate/push-on-change version of this turned out to cause visible judder against a vsync-locked renderer. `CaptureMode::Cpu` (default, optional cursor compositing) or `CaptureMode::Gpu` — the GPU mode resolves the capture adapter, creates its own `ID3D11Device`, and returns that device from `open()` so the renderer and other D3D11 stages can share it; capture then emits zero-copy `Pixel::D3D11` textures with no `Map`/CPU pixel copy (no cursor support yet in this mode) |
 | `WebRtcPeer` (`webrtc`) | Drives one str0m `Rtc` session on its own thread. Not a `Pipeline` source itself — `WebRtcHandle::add_track`/`next_track()` mint a `WebRtcTrackSink`+`WebRtcTrackSource` pair per track (see below), symmetric for tracks either side added, so one `Direction::SendRecv` track carries both directions |
 | `WebRtcTrackSource` (`webrtc`) | The receive side of one WebRTC track — a plain `SourceElement`, same shape as `AppSource`; obtained via `WebRtcHandle::next_track()`, not constructed directly |
 
@@ -78,7 +83,7 @@ for); this table isn't meant to duplicate that.
 | `Scaler` | Converts pixel format and resizes `Video` frames in one pass (`libswscale`) |
 | `Tee`¹ | Fans one input out to a dynamic set of sinks, addable/removable while the pipeline runs |
 
-¹ Doesn't actually implement `Source` — its pads live behind a lock instead of a plain `&mut [SrcPad]`, so a handle on another thread can add/remove one mid-`consume`. See its own doc comment.
+¹ Doesn't actually implement `Source` — its pads live behind a lock instead of a plain `&mut [SrcPad]`, so a handle on another thread can request add/remove while `consume` is running. The operation completes after the in-flight `consume` releases that lock. See its own doc comment.
 
 ### Sinks
 
@@ -95,8 +100,10 @@ for); this table isn't meant to duplicate that.
 ## Examples (`examples/`)
 
 Each is its own crate so per-example dependencies (e.g. `winit` for
-`sw_decode_render`) don't leak into the others. All default to
-`test-video/h265.mp4` when run with no path argument.
+`sw_decode_render`) don't leak into the others. File-based playback/core
+examples that accept an optional media path generally default to
+`test-video/h265.mp4`; live capture, WebRTC, and synthetic-source examples
+have their own arguments or need none.
 
 ### Core concepts
 
@@ -168,8 +175,8 @@ cargo run -p sw_decode_render              # d3d12-renderer is already enabled i
   concrete renderer (`examples/render/render_common`'s own
   `D3d12WindowRenderer`) implementing that trait. Off by default so
   consumers that don't render to a window never build DX12/Windows-only
-  code. Every `examples/render/*` crate turns it on in its own
-  `Cargo.toml`.
+  code. The D3D12-based render examples turn it on in their own
+  `Cargo.toml`; D3D11-only examples enable `d3d11-renderer` instead.
 - `d3d11-renderer` (on `media-pp`) — pulls in `windows` and enables
   `D3d11Renderer`, `D3d11FrameRenderer`, `D3d11Decoder`, `D3d11Upload`, and
   `SubmitError` (shared with `d3d12-renderer`). Independent of

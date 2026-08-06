@@ -77,6 +77,11 @@ pub enum OverflowPolicy {
     /// returns [`QueueError::SendTimedOut`] rather than losing the
     /// buffer silently — unlike [`OverflowPolicy::DropNewest`], this
     /// isn't an expected, routine condition.
+    ///
+    /// This timeout applies to ordinary data buffers only. `Queue` sends
+    /// `MediaBuffer::Eos` with an unbounded `send` under every policy so a
+    /// natural end-of-stream marker is never discarded; if downstream has
+    /// stopped consuming entirely, an EOS push can therefore still block.
     Block(Duration),
     /// Drop the incoming buffer instead of blocking, and post
     /// [`BusEvent::Dropped`]. Never stalls the upstream thread — the
@@ -101,9 +106,12 @@ impl Default for OverflowPolicy {
 /// `Queue`.
 ///
 /// [`ControlMsg`] crosses this same thread boundary through a separate
-/// channel from data, and the worker always checks it first — so
-/// `Pause`/`Stop` never wait behind whatever's already backed up in the
-/// data channel. Every worker acks a control message *before* acting on
+/// channel from data. The worker checks that channel before entering its
+/// combined wait on every iteration, so a control message already pending
+/// at that point jumps ahead of the data backlog. A control message that
+/// arrives in the narrow window after that check can race one ready data
+/// buffer in `select!`, but is checked again before another buffer is
+/// pulled. Every worker acks a control message *before* acting on
 /// it any further (e.g. before blocking on `Pause`), so the channel stays
 /// responsive to the next one — `Resume`/`Stop` always reaches a paused
 /// worker immediately, it's never stuck behind the pause itself. See the
@@ -236,9 +244,11 @@ impl Element for Queue {
 
 impl Sink for Queue {
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
-        // EOS must never be dropped, regardless of policy: it's the only
-        // shutdown signal the worker thread gets, and losing it would
-        // leave that thread (and this Queue's `Drop`) blocked forever.
+        // EOS must never be dropped, regardless of policy: unlike an
+        // explicit Stop or Queue::drop's private stop flag, this is the
+        // natural-completion signal that tells the worker to finish only
+        // after everything queued before it has reached downstream. The
+        // policy timeout intentionally does not apply to this send.
         if buf.is_eos() {
             return self
                 .tx
@@ -311,9 +321,12 @@ impl Drop for Queue {
 }
 
 /// Owns `downstream` on its own thread: pulls from `data_rx` and calls
-/// `downstream.consume()`, same as before, except every iteration checks
-/// `control_rx` *first* — so a pending `Pause`/`Stop` is handled before
-/// the next data buffer, however deep the backlog. `Pause` blocks this
+/// `downstream.consume()`, same as before. Every iteration first checks
+/// `control_rx` non-blockingly, so a control request already pending there
+/// is handled before the next data buffer, however deep the backlog. A
+/// request arriving immediately afterward can race one ready data item in
+/// the combined `select!`; the next iteration checks control first again.
+/// `Pause` blocks this
 /// whole function (and therefore `downstream`) right here, without
 /// touching `data_rx` at all, until `Resume`/`Stop`.
 fn worker_loop(

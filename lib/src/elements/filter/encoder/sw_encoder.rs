@@ -241,13 +241,13 @@ impl Sink for SwEncoder {
     }
 
     fn control(&mut self, msg: ControlMsg) -> Result<()> {
-        // No local state needs resetting on `Seek` — unlike a decoder,
-        // this encoder has no documented "position" corruption to flush
-        // against (see `SwDecoder::control`'s own reasoning, which this
-        // deliberately doesn't mirror); a mid-GOP discontinuity is at
-        // worst a slightly suboptimal GOP boundary, not corrupt output.
-        // `Stop`: nothing to flush either — abandon means the codec
-        // context just gets freed in `Drop`.
+        // Current behavior deliberately forwards Seek without flushing
+        // the encoder. Encoders may retain delayed/reordered frames (see
+        // the type docs), so packets originating before the seek can still
+        // be emitted by later `send_frame` calls. Callers that require a
+        // hard encoded-stream discontinuity must rebuild the encoder; this
+        // implementation does not promise that boundary. `Stop` abandons
+        // the codec context without flushing it.
         self.pad.control(msg)
     }
 }

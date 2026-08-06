@@ -61,8 +61,10 @@ pub trait Driver: Element {
 /// `run()` is asynchronous, same as `Pipeline::run`: it starts the driver
 /// on a background thread and returns immediately. Watch
 /// [`DriverRunner::bus`] to learn when it's actually done — draining it
-/// blocks until every `Bus` handle has been dropped, which only happens
-/// once the background thread has fully finished.
+/// blocks until every `Bus` sender has been dropped. The built-in drivers
+/// keep that sender only for the duration of their background `run` call,
+/// so this normally coincides with thread completion; a custom `Driver`
+/// that clones and retains `bus` extends the wait until its clone drops.
 pub struct DriverRunner {
     driver: Mutex<Option<Box<dyn Driver>>>,
     bus: Mutex<Option<Bus>>,

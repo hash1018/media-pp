@@ -1,13 +1,13 @@
-//! Opt-in file logging backend for [`rust_hlog`] (see
-//! [`crate::bus::Bus::post`], the one place this crate actually logs —
-//! every element's error/warning/etc surfaces there). Inert until [`init`]
+//! Opt-in file logging backend for [`rust_hlog`]. Elements emit their own
+//! lifecycle/error records, and [`crate::bus::Bus::post`] additionally logs
+//! each event it publishes. Inert until [`init`]
 //! is called: this is a library, and writing to disk by default —
 //! including from the crate's own tests, or anything embedding this crate
 //! that never asked for log files — would be a surprising side effect.
 //!
 //! `rust_hlog`'s `hinfo!`/`hwarn!`/`herror!` macros go through the plain
-//! [`log`] facade, so this bridges those records into a [`tracing`]
-//! subscriber (via [`tracing_log`]) writing through a daily-rotating
+//! `log` facade, so this bridges those records into a `tracing`
+//! subscriber (via `tracing-log`) writing through a daily-rotating
 //! [`tracing_appender`] file — same backend shape as this crate's own
 //! sibling projects, not a bespoke one.
 
@@ -35,6 +35,12 @@ pub enum LogInitError {
 /// should keep working — dropping it stops the background writer (and
 /// flushes whatever's queued), so hold it for the program's lifetime
 /// (e.g. a local in `main`), not something to let fall out of scope early.
+///
+/// # Panics
+///
+/// Panics if a global tracing subscriber has already been installed.
+/// Call this at most once, before another part of the application installs
+/// its own subscriber.
 pub fn init(
     log_prefix: &str,
     log_path: &str,

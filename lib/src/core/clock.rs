@@ -67,7 +67,7 @@ impl Clock {
     /// on every [`Clock::resume`] by however long the clock spent paused,
     /// so `now - start()` stays continuous across a pause/resume cycle
     /// instead of jumping by the pause's real duration. Callers that pace
-    /// against this (see [`crate::elements::Pacer::wait_for`]) need to
+    /// against this (see `Pacer::wait_for`) need to
     /// call it fresh each time, not cache the first result — the whole
     /// point is that it can move.
     pub fn start(&self) -> Instant {

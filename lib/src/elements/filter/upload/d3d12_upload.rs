@@ -21,9 +21,10 @@ use crate::{
 /// `av_hwframe_ctx_init` has run, so this needs to comfortably cover
 /// however many uploaded frames can legitimately be in flight at once
 /// (this element's own reused `AVFrame` plus whatever's sitting in a
-/// downstream `Queue`) — matches [`crate::elements::Scaler`]'s own
-/// `POOL_SIZE` default for the same "reasonable default, not a hard
-/// limit" reasoning.
+/// downstream `Queue`). Unlike [`crate::elements::Scaler`]'s growable
+/// object pool, this value can be an effective hard limit for the FFmpeg
+/// implementation in use; downstream queue capacity and renderer-held
+/// frames must be sized with that in mind.
 const POOL_SIZE: i32 = 4;
 
 /// Errors specific to `D3d12Upload`. Converts into the crate-wide `Error`

@@ -242,11 +242,14 @@ impl ChainBuilder {
 ///
 /// There's no separate "is it done yet" query or callback: watch
 /// [`Pipeline::bus`] instead. [`BusReceiver::iter`]/
-/// [`BusReceiver::log_events`] block until every [`Bus`] handle in the
-/// whole pipeline has been dropped, which only happens once the
+/// [`BusReceiver::log_events`] block until every [`Bus`] sender has been
+/// dropped. Under the normal ownership path that happens once the
 /// background thread (and everything reachable from the source) has
-/// fully finished — so draining the bus doubles as "wait for
-/// completion." A source-level failure (returned from
+/// fully finished, so draining the bus doubles as "wait for completion."
+/// A caller that clones the [`Context`] supplied to [`Pipeline::new`]'s
+/// `wire` closure also retains its `Bus` sender; in that case bus draining
+/// intentionally remains blocked until that extra context is dropped.
+/// A source-level failure (returned from
 /// [`crate::element::SourceElement::run`] itself, as opposed to one
 /// reported from inside a `Queue`) shows up there too, as a
 /// [`BusEvent::Error`] under the source's own name, since there's no
@@ -503,11 +506,15 @@ impl Pipeline {
         self.control_tx.send(ControlMsg::Resume);
     }
 
-    /// Requests an early, full stop — abandons whatever's in flight
-    /// rather than draining to a natural `Eos`. The background thread
-    /// started by `run()` exits shortly after; watch [`Pipeline::bus`] to
-    /// know when. Not reusable afterward — build a new `Pipeline` for the
-    /// next play-through.
+    /// Performs an early, full stop — abandons buffered work rather than
+    /// draining to a natural `Eos`. This call is synchronous: it waits for
+    /// the source and every reachable downstream element to handle
+    /// [`ControlMsg::Stop`]. It therefore cannot preempt an arbitrary
+    /// source read or `Sink::consume` call already blocked inside user or
+    /// external-library code; the call returns only after that work gives
+    /// the control cascade a turn. After it returns, watch [`Pipeline::bus`]
+    /// for the background thread's final completion. Not reusable
+    /// afterward — build a new `Pipeline` for the next play-through.
     pub fn stop(&self) {
         if !self.running.load(Ordering::Acquire) {
             return;

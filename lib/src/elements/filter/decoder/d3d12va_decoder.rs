@@ -73,7 +73,7 @@ pub enum D3d12vaDecoderError {
 /// `FrameCounter` only ever touch `.pts()` or match the enum variant, so
 /// they work unmodified. Only [`crate::elements::D3d12Renderer`] cares:
 /// it checks `frame.format()` and, for `Pixel::D3D12`, takes the
-/// zero-copy path via [`d3d12va_texture`] instead of reading pixel bytes.
+/// zero-copy path via `d3d12va_texture` instead of reading pixel bytes.
 #[rust_hlog::hlog]
 pub struct D3d12vaDecoder {
     name: Arc<str>,

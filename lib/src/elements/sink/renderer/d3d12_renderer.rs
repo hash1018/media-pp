@@ -41,9 +41,9 @@ pub struct RawPlane {
 /// itself only depends on this trait (plus the `windows` COM types the
 /// zero-copy path needs to pass through) — not on `renderer_engine` or
 /// any other concrete rendering crate. A caller wanting to actually
-/// render implements this for whatever they're using (e.g. a small
-/// newtype wrapping `renderer_engine::window_renderer::WindowRenderer`)
-/// in their own example/application code, not in this crate.
+/// render implements this for its own window/rendering stack; this
+/// repository's examples use `examples/render/render_common` for that
+/// implementation, outside the `media-pp` crate itself.
 pub trait D3d12FrameRenderer: Send {
     /// The `ID3D12Device` this implementation actually renders/submits
     /// with. [`D3d12Renderer`] reads this once at construction to guard

@@ -107,7 +107,7 @@ pub enum CaptureMode {
     /// needs no extra work, and most consumers (recording, streaming a
     /// presentation) don't want the cursor baked in at all. Only exists on
     /// this variant — cursor compositing is CPU-side pixel blending
-    /// ([`composite_cursor`]), which has nothing to run against under
+    /// (`composite_cursor`), which has nothing to run against under
     /// [`CaptureMode::Gpu`], where the captured image never touches the
     /// CPU at all; putting the field here instead of as a separate
     /// `DxgiScreenOptions` flag makes that combination unrepresentable
@@ -132,7 +132,7 @@ pub enum CaptureMode {
     /// own to inject: `open` always builds the device itself, from
     /// whichever adapter [`DxgiScreenOptions::area`] actually selects
     /// (the *only* place that resolves "which adapter" — see
-    /// [`resolve_area`]), and hands it back as `open`'s own return value
+    /// `resolve_area`), and hands it back as `open`'s own return value
     /// for the caller to reuse. That's the one `ID3D11Device` every other
     /// D3D11 element sharing this capture's output should be built from
     /// (e.g. `render_common::D3d11GpuContext::new(Some(device))`) — for
@@ -339,7 +339,7 @@ struct CaptureUnit {
 ///
 /// May capture from more than one output at once — see
 /// [`CaptureArea::Region`] — in which case every field below that used
-/// to describe "the" duplication instead describes one [`CaptureUnit`]
+/// to describe "the" duplication instead describes one `CaptureUnit`
 /// per contributing output.
 #[rust_hlog::hlog]
 pub struct DxgiScreenSource {

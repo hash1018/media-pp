@@ -272,10 +272,12 @@ pub trait Source: Element {
     fn src_pads(&mut self) -> &mut [SrcPad];
 }
 
-/// A pure source: has output but no input. Drives its own thread (or the
-/// caller's, if run directly) and pushes buffers into its own src pad(s)
-/// until EOS or an error. Typically wraps a blocking I/O read (demuxer,
-/// file/network source).
+/// A pure source: has output but no input. Its `run` method drives the
+/// production loop and pushes buffers into its own src pad(s) until EOS or
+/// an error. [`crate::pipeline::Pipeline::run`] normally invokes that loop
+/// on the pipeline's background source thread; a caller may also invoke a
+/// concrete implementation directly. Sources typically wrap blocking I/O
+/// reads (demuxer, file/network source).
 pub trait SourceElement: Source {
     /// Drives this source until `Eos` (normal completion) or `Stop` (see
     /// [`ControlMsg::Stop`]) — call [`crate::control::drain_control`]

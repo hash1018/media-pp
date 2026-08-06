@@ -62,7 +62,7 @@ pub enum D3d11UploadError {
 /// machinery at all — `consume` creates a plain `ID3D11Texture2D` directly
 /// via ordinary `windows-rs` calls (with the CPU pixel data as its initial
 /// contents) every call, then wraps it as a `Pixel::D3D11` frame via
-/// [`wrap_d3d11_texture`]. See that function's own docs for why: driving
+/// `wrap_d3d11_texture`. See that function's own docs for why: driving
 /// D3D11VA's real frames-context init from a hand-mirrored
 /// `AVD3D11VAFramesContext*` corrupted memory in testing, for a reason not
 /// fully root-caused even against FFmpeg's real (version-matched) source.

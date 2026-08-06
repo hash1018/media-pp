@@ -23,13 +23,16 @@ const INTERRUPT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 /// Delays each buffer until its presentation time, so downstream sees
 /// frames (or, upstream of a decoder, compressed packets) at real playback
 /// speed instead of as fast as demux/decode can produce them. A `Filter`:
-/// receives via `Sink`, sleeps in `consume`, then pushes the same buffer on
-/// through its own (single) src pad.
+/// receives via `Sink`, waits in short interruptible sleeps inside
+/// `consume`, then pushes the same buffer through its own (single) src pad.
+/// A pending pause/seek/stop interrupts that wait so the owning worker can
+/// process control: pause retains the in-flight buffer for resume, while
+/// seek and stop discard it.
 ///
-/// Must run on its own thread (put a [`crate::queue::Queue`] upstream of
-/// it) — sleeping here would otherwise stall whatever's feeding it
-/// (demux/decode), which needs to keep running ahead into that queue's
-/// buffer.
+/// Normally place a [`crate::queue::Queue`] upstream so the paced waits do
+/// not stall the demux/decoder feeding it and those stages can run ahead
+/// into the queue. The type does not enforce that placement; without the
+/// queue, pacing simply blocks the upstream caller on the same thread.
 ///
 /// `clock` is shared across every `Pacer` in the pipeline (one per stream
 /// — video, audio, ...) so they all agree on the same t=0 instead of each
@@ -50,7 +53,10 @@ pub struct Pacer {
     first_pts: Option<i64>,
     /// The latest pipeline interrupt this pacer has acknowledged through
     /// `control()`. A newer clock epoch means pause/seek/stop is waiting for
-    /// the current `consume()` call to return.
+    /// the current `consume()` call to return. `Queue`'s own worker only
+    /// checks its control channel *between* buffers (see its type docs) —
+    /// it can't preempt a `consume()` call already in flight, and this
+    /// pacer's own wait is exactly that kind of long-running call.
     interrupt_epoch: u64,
     /// Buffers whose paced wait was interrupted before the owning worker
     /// could process pause/seek/stop. Pause retains them for resume; seek

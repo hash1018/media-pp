@@ -42,8 +42,10 @@ const POLL_INTERVAL: Duration = Duration::from_millis(20);
 /// where a backed-up peer means falling behind, not something worth
 /// buffering indefinitely for (same reasoning as
 /// [`crate::queue::OverflowPolicy::DropNewest`]). Control traffic on the
-/// same channel (`AddTrack`/`SetAnswer`/`AcceptOffer`) never drops — see
-/// their call sites, which block on a plain `send` instead of `try_send`.
+/// same channel (`AddTrack`/`SetAnswer`/`AcceptOffer`) is never dropped for
+/// capacity pressure — those call sites block on plain `send` instead of
+/// `try_send`. A disconnected peer still rejects the command; `set_answer`
+/// intentionally treats that case as a no-op.
 const CHANNEL_CAPACITY: usize = 128;
 
 /// Identifies one outbound track before/after negotiation. str0m's own
@@ -139,8 +141,9 @@ impl TrackOutState {
 /// half of the pair — a `WebRtcTrackSource` nothing ever sends on, or a
 /// `WebRtcTrackSink` str0m has no send capability for — is simply inert,
 /// not an error.) This is the same idea as
-/// [`crate::elements::Tee::add_sink`]'s dynamic attachment, just without
-/// `Tee`'s `Mutex` (nothing but this one thread ever touches `tracks_in`).
+/// [`crate::elements::TeeHandle::add_sink`]'s dynamic attachment, just
+/// without `Tee`'s `Mutex` (nothing but this one thread ever touches
+/// `tracks_in`).
 #[rust_hlog::hlog]
 pub struct WebRtcPeer {
     name: Arc<str>,

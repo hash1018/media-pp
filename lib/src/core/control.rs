@@ -107,14 +107,14 @@ impl ControlReceiver {
 /// `Eos` is pushed into the source's own pads at the end of that same
 /// loop, just for externally-triggered control instead.
 ///
-/// Drains every pending message (see [`apply_one`] for what "handling
+/// Drains every pending message (see `apply_one` for what "handling
 /// one" means, including `Pause`'s blocking wait). Non-blocking if
 /// nothing's pending — a [`SourceElement::run`] whose own "next unit of
 /// work" can't be waited on via `control`'s own channel (e.g.
 /// [`crate::elements::FileDemuxer`]'s blocking file read) calls this once
 /// before that blocking step; one that *can* (e.g.
 /// [`crate::elements::AppSource`]'s channel receive) selects on both
-/// instead, calling [`apply_one`]/[`wait_out_pause`] directly so a
+/// instead, calling `apply_one`/`wait_out_pause` directly so a
 /// pending `Stop` is never left waiting behind a slow/absent producer.
 ///
 /// Returns `true` if `Stop` was seen: the caller should return `Ok(())`

@@ -18,8 +18,10 @@ use crate::{
 /// `Tee` doesn't implement [`crate::element::Source`] like other
 /// multi-pad elements (e.g. [`crate::elements::FileDemuxer`]): its pads
 /// live behind a lock instead of being a plain `&mut [SrcPad]`, so a
-/// handle on another thread can add or remove one while the pipeline
-/// thread is mid-`consume`.
+/// handle on another thread can request an add or removal while the
+/// pipeline thread is in `consume`. `consume` holds that lock while it
+/// visits the current sinks, so the mutation completes after the in-flight
+/// buffer has finished fan-out; the new set applies to the next buffer.
 ///
 /// Cheap to fan out: `MediaBuffer` wraps its payload in an `Arc`, so
 /// cloning a buffer for each output is a refcount bump, not a copy of the
@@ -126,7 +128,7 @@ impl TeeHandle {
     /// abandon a sink here). Doesn't hand the removed `Box<dyn Sink>` back
     /// — deliberately: re-adding the same removed sink elsewhere isn't a
     /// supported way to get it back into [`crate::pipeline::Pipeline::topology`]
-    /// (see [`crate::element::ElementRegistry::remove_subtree`]'s own
+    /// (see `ElementRegistry::remove_subtree`'s own
     /// docs), so returning it would just invite exactly that. Want a
     /// branch back? Build a fresh one.
     pub fn remove_sink(&self, index: usize) {

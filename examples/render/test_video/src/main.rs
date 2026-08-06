@@ -26,9 +26,10 @@ use winit::{
 /// No `Pacer` here, deliberately, as an experiment: `TestVideoSource`
 /// self-paces with a drift-free absolute schedule (see its own docs) and
 /// nothing sits between it and the renderer here (no `Scaler`, unlike
-/// `screen_capture`, where removing `Pacer` measurably caused judder) —
-/// testing whether that's enough on its own for a vsync-locked renderer
-/// to stay smooth without a separate pacing stage.
+/// `screen_capture`). Testing confirmed that schedule is enough on its own
+/// for a vsync-locked renderer to stay smooth without a separate pacing
+/// stage; `screen_capture` reached the same result after its source moved
+/// from variable-rate emission to the same absolute scheduling scheme.
 ///
 ///     cargo run -p test_video
 fn main() {

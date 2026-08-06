@@ -93,9 +93,13 @@ impl BusReceiver {
         self.rx.iter()
     }
 
-    /// Drains every event so far, printing each in a common default
-    /// format (`[name] eos`, `[name] error: ...`, `[name] dropped a
-    /// buffer (queue full)`, `[name] seeked: requested ... landed ...`).
+    /// Blocks and prints events in a common default format (`[name] eos`,
+    /// `[name] error: ...`, `[name] dropped a buffer (queue full)`,
+    /// `[name] seeked: requested ... landed ...`) until every corresponding
+    /// [`Bus`] sender has been dropped. This consumes both events already
+    /// queued and events posted while the call is waiting; use
+    /// [`BusReceiver::try_recv`] to drain only what is currently available.
+    ///
     /// Convenience for examples and smoke tests; anything that needs to
     /// act on specific events — e.g. deciding whether an `Error` warrants
     /// a [`crate::pipeline::Pipeline::stop`] — should match on `iter()`

@@ -14,12 +14,12 @@ use crossbeam_queue::SegQueue;
 /// allocation when the reused frame already matches — not just savings
 /// on this crate's side.
 ///
-/// Never blocks and never fails: [`UnboundObjectPool::get`] pops a
-/// previously-returned item if one's available, or calls `init` to build
-/// a fresh one on the spot otherwise — the pool just grows to whatever
-/// depth turns out to be needed (e.g. however many frames a downstream
-/// `Queue` lets pile up at once) instead of capping it and having to
-/// handle "pool exhausted" as a distinct case.
+/// Has no capacity wait or "pool exhausted" result:
+/// [`UnboundObjectPool::get`] pops a previously-returned item if one's
+/// available, or calls `init` to build a fresh one on the spot otherwise.
+/// The pool therefore grows to whatever depth turns out to be needed (e.g.
+/// however many frames a downstream `Queue` lets pile up at once). As with
+/// any caller-provided closure, a panic inside `init` still propagates.
 ///
 /// Deliberately a private implementation detail owned by whichever
 /// element produces the frames (a struct field, initialized once in that
@@ -67,7 +67,9 @@ impl<T: Send + Sync> UnboundObjectPool<T> {
         }
     }
 
-    /// Never blocks, never fails — see the type docs.
+    /// Never waits for a pooled item and has no exhaustion error — see the
+    /// type docs. If the pool is empty, this calls the supplied `init`
+    /// closure directly.
     pub fn get(&self) -> UnboundObjectPoolRef<T> {
         let item = self
             .share
