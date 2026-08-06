@@ -1,4 +1,10 @@
-use std::{sync::Mutex, time::Instant};
+use std::{
+    sync::{
+        Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Instant,
+};
 
 /// Shared wall-clock reference for pacing decoded frames to their
 /// presentation time. Whichever branch (video, audio, ...) processes a
@@ -12,6 +18,11 @@ use std::{sync::Mutex, time::Instant};
 /// pause-aware and not just a fixed anchor.
 pub struct Clock {
     state: Mutex<State>,
+    /// Incremented before a control request starts cascading through the
+    /// pipeline. A `Pacer` compares this with the last generation it
+    /// acknowledged in `control()` so a long presentation-time wait can
+    /// return promptly and let the owning worker process that request.
+    interrupt_epoch: AtomicU64,
 }
 
 #[derive(Clone, Copy)]
@@ -37,7 +48,19 @@ impl Clock {
     pub fn new() -> Self {
         Self {
             state: Mutex::new(State::Unset),
+            interrupt_epoch: AtomicU64::new(0),
         }
+    }
+
+    /// Signals paced waits to return without changing the clock's playback
+    /// anchor. The actual pause/seek/stop state change still happens through
+    /// the ordinary synchronous control cascade.
+    pub(crate) fn interrupt(&self) {
+        self.interrupt_epoch.fetch_add(1, Ordering::Release);
+    }
+
+    pub(crate) fn interrupt_epoch(&self) -> u64 {
+        self.interrupt_epoch.load(Ordering::Acquire)
     }
 
     /// The instant playback started, set on first call — shifted forward

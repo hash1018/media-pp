@@ -203,15 +203,12 @@ pub struct WebRtcHandle {
 }
 
 impl WebRtcHandle {
-    /// Requests a new track of `kind`/`direction`. Returns immediately —
-    /// the `TrackId` is assigned locally, not by str0m. Real SDP
-    /// negotiation happens inside `WebRtcPeer::run`, which attaches this
-    /// `TrackId`'s `Mid` (see the type docs) — deliverable via
-    /// [`WebRtcHandle::next_track`] — as soon as it exists, even before
-    /// negotiation completes if `direction` permits sending: buffers pushed
-    /// into the resulting [`WebRtcTrackSink`] before then are silently
-    /// dropped (str0m's own `Event::KeyframeRequest` cycle recovers once
-    /// the track opens — no special buffering needed).
+    /// Requests a new track of `kind`/`direction`. Blocks only while the
+    /// peer's bounded command queue is full; once the command is accepted,
+    /// returns the locally assigned [`TrackId`]. This does not mean SDP
+    /// negotiation has completed — receive the attached track through
+    /// [`WebRtcHandle::next_track`]. Returns [`WebRtcError::Closed`] without
+    /// yielding a `TrackId` if the peer loop has already stopped.
     ///
     /// `codec` is what [`WebRtcTrackSink::consume`] on the resulting track
     /// will actually be fed (an encoder's output, or a packet relayed
@@ -219,16 +216,17 @@ impl WebRtcHandle {
     /// type out of whatever this connection negotiates for the track,
     /// instead of guessing. If this connection never negotiates `codec` for
     /// it, pushed buffers are silently dropped, same as an unopened track.
-    pub fn add_track(&self, kind: MediaKind, direction: Direction, codec: Codec) -> TrackId {
+    pub fn add_track(
+        &self,
+        kind: MediaKind,
+        direction: Direction,
+        codec: Codec,
+    ) -> Result<TrackId> {
         let id = TrackId(self.next_id.fetch_add(1, Ordering::Relaxed));
-        // A full channel here would mean `WebRtcPeer::run` is badly
-        // backed up; dropping this request (rather than blocking the
-        // caller) is consistent with `WebRtcTrackSink::consume` also
-        // dropping under the same condition.
-        let _ = self
-            .command_tx
-            .send(Command::AddTrack(id, kind, direction, codec));
-        id
+        self.command_tx
+            .send(Command::AddTrack(id, kind, direction, codec))
+            .map_err(|_| WebRtcError::Closed)?;
+        Ok(id)
     }
 
     /// Blocks until the next track attaches — either one requested via
@@ -945,7 +943,11 @@ impl Driver for WebRtcPeer {
 mod tests {
     use std::{
         net::UdpSocket,
-        sync::atomic::{AtomicUsize, Ordering},
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+            mpsc,
+        },
         thread,
         time::{Duration, Instant},
     };
@@ -957,6 +959,89 @@ mod tests {
         driver::DriverRunner,
         pipeline::{ChainBuilder, Pipeline},
     };
+
+    fn command_only_handle(capacity: usize) -> (WebRtcHandle, Receiver<Command>) {
+        let (command_tx, command_rx) = bounded(capacity);
+        let (_new_track_tx, new_track_rx) = unbounded();
+        (
+            WebRtcHandle {
+                next_id: Arc::new(AtomicU64::new(0)),
+                command_tx,
+                new_track_rx,
+            },
+            command_rx,
+        )
+    }
+
+    #[test]
+    fn add_track_returns_the_id_that_was_enqueued() {
+        let (handle, command_rx) = command_only_handle(1);
+
+        let returned = handle
+            .add_track(MediaKind::Video, Direction::SendRecv, Codec::Vp8)
+            .expect("live command receiver should accept AddTrack");
+        let Command::AddTrack(enqueued, kind, direction, codec) =
+            command_rx.recv().expect("AddTrack should be queued")
+        else {
+            panic!("expected AddTrack command");
+        };
+
+        assert_eq!(returned, enqueued);
+        assert_eq!(kind, MediaKind::Video);
+        assert_eq!(direction, Direction::SendRecv);
+        assert_eq!(codec, Codec::Vp8);
+    }
+
+    #[test]
+    fn add_track_blocks_for_backpressure_then_unblocks_when_capacity_opens() {
+        let (handle, command_rx) = command_only_handle(1);
+        handle
+            .add_track(MediaKind::Video, Direction::SendRecv, Codec::Vp8)
+            .expect("first command should fill the queue");
+
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let blocked_handle = handle.clone();
+        let worker = thread::spawn(move || {
+            entered_tx.send(()).expect("test receiver alive");
+            let result =
+                blocked_handle.add_track(MediaKind::Audio, Direction::SendOnly, Codec::Opus);
+            done_tx.send(result).expect("test receiver alive");
+        });
+
+        entered_rx.recv().expect("worker should start add_track");
+        assert!(
+            done_rx.recv_timeout(Duration::from_millis(50)).is_err(),
+            "second AddTrack must wait while the bounded queue is full"
+        );
+
+        let _first = command_rx.recv().expect("free one queue slot");
+        let second_id = done_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("add_track should unblock once capacity opens")
+            .expect("command receiver is still alive");
+        let Command::AddTrack(enqueued_id, ..) =
+            command_rx.recv().expect("second AddTrack should be queued")
+        else {
+            panic!("expected AddTrack command");
+        };
+        assert_eq!(second_id, enqueued_id);
+        worker.join().expect("worker should finish cleanly");
+    }
+
+    #[test]
+    fn add_track_returns_closed_instead_of_a_phantom_id() {
+        let (handle, command_rx) = command_only_handle(1);
+        drop(command_rx);
+
+        let error = handle
+            .add_track(MediaKind::Video, Direction::SendRecv, Codec::Vp8)
+            .expect_err("closed peer must not yield a TrackId");
+        assert!(matches!(
+            error,
+            crate::Error::WebRtcError(WebRtcError::Closed)
+        ));
+    }
 
     #[rust_hlog::hlog]
     struct CountingSink {
@@ -1093,7 +1178,9 @@ mod tests {
         // before renegotiating.
         thread::sleep(Duration::from_millis(200));
 
-        let track_id = handle_a.add_track(MediaKind::Video, Direction::SendRecv, Codec::Vp8);
+        let track_id = handle_a
+            .add_track(MediaKind::Video, Direction::SendRecv, Codec::Vp8)
+            .expect("running peer should accept AddTrack");
         // `next_track()` returns for peer-a's own track the moment
         // `add_track`'s negotiation mints a `Mid` — before the offer even
         // leaves this process, let alone before an answer comes back.

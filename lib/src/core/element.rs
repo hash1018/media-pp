@@ -222,11 +222,10 @@ impl ElementRegistry {
 /// needs to wire itself into a [`crate::pipeline::Pipeline`] — bundled into
 /// one `Arc` instead of threading `bus`/`pipeline_id`/`registry`/`clock`
 /// through separately. Built once by [`crate::pipeline::Pipeline::new`] and
-/// handed to its `wire` closure; a [`crate::elements::TeeHandle`] keeps its
-/// own clone (from whatever `Context` [`crate::elements::Tee::new`] was
-/// built with) so it can mint further `ChainBuilder`s for branches added
-/// long after the pipeline started running, without the caller needing to
-/// have kept any of these four values around itself.
+/// handed to its `wire` closure; a [`crate::elements::Tee`] keeps its own
+/// clone while it is alive, and its [`crate::elements::TeeHandle`] accesses
+/// that clone weakly so retaining the handle cannot keep the pipeline's
+/// `Bus` open after the `Tee` itself is gone.
 pub struct Context {
     pub bus: Bus,
     pub pipeline_id: Arc<str>,

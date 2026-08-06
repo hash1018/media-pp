@@ -287,9 +287,8 @@ pub struct Pipeline {
     /// Live registry backing [`Pipeline::elements`]/[`Pipeline::topology`] —
     /// kept for this `Pipeline`'s whole life (unlike `bus`/`control_rx`
     /// above) so a branch registered long after construction (e.g. added to
-    /// a running [`crate::elements::Tee`] via a [`Context`] its
-    /// [`crate::elements::TeeHandle`] kept) still shows up when either is
-    /// called again.
+    /// a running [`crate::elements::Tee`] via the [`Context`] owned by that
+    /// `Tee`'s shared state) still shows up when either is called again.
     registry: ElementRegistry,
 }
 
@@ -488,6 +487,7 @@ impl Pipeline {
         if !self.running.load(Ordering::Acquire) {
             return;
         }
+        self.clock.interrupt();
         self.control_tx.send(ControlMsg::Pause);
         self.clock.pause();
     }
@@ -512,6 +512,7 @@ impl Pipeline {
         if !self.running.load(Ordering::Acquire) {
             return;
         }
+        self.clock.interrupt();
         self.control_tx.send(ControlMsg::Stop);
     }
 
@@ -525,14 +526,16 @@ impl Pipeline {
     /// afterward, playback just continues from the new position. No-op
     /// if `run()` isn't currently in progress on another thread.
     ///
-    /// Deliberately does *not* touch `Clock` directly here the way
-    /// `pause`/`resume` do — see [`crate::elements::Pacer::control`] for
-    /// why that would race a straggler pre-seek frame that's still being
-    /// processed.
+    /// Signals the clock's interrupt epoch before starting the synchronous
+    /// cascade so a `Pacer` in a long wait can return its worker promptly.
+    /// The clock's playback anchor is still reset later, inside
+    /// [`crate::elements::Pacer::control`], after that in-flight frame is
+    /// out of the way.
     pub fn seek(&self, target: Duration) {
         if !self.running.load(Ordering::Acquire) {
             return;
         }
+        self.clock.interrupt();
         self.control_tx.send(ControlMsg::Seek(target));
     }
 }

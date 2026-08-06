@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 use rust_hlog::{HLog, hinfo};
 
@@ -27,28 +27,34 @@ use crate::{
 #[rust_hlog::hlog]
 pub struct Tee {
     name: Arc<str>,
-    pads: Arc<Mutex<Vec<SrcPad>>>,
+    shared: Arc<TeeShared>,
+}
+
+struct TeeShared {
+    pads: Mutex<Vec<SrcPad>>,
+    context: Arc<Context>,
 }
 
 /// A cheaply-cloneable handle for adding or removing a [`Tee`]'s sinks
-/// while the pipeline is running. `Clone` is just three refcount bumps
-/// (`name`, `pads`, and `context` are all `Arc`-backed) — free to hand out
-/// to as many threads as want to control this `Tee`.
+/// while the pipeline is running. It deliberately keeps only a [`Weak`]
+/// reference to the `Tee`'s shared state: retaining a handle after the
+/// pipeline finishes must not keep downstream sinks or the pipeline's
+/// [`crate::bus::Bus`] sender alive. Once the `Tee` is gone,
+/// [`TeeHandle::chain_builder`] returns `None` and the other operations are
+/// harmless no-ops.
 #[derive(Clone)]
 pub struct TeeHandle {
     name: Arc<str>,
-    pads: Arc<Mutex<Vec<SrcPad>>>,
-    context: Arc<Context>,
+    shared: Weak<TeeShared>,
 }
 
 impl Tee {
     /// Starts with no sinks — add some via the returned [`TeeHandle`]
     /// before (or any time after) wiring `Tee` itself into the pipeline.
     /// `context` should be the same one [`crate::pipeline::Pipeline::new`]'s
-    /// `wire` closure was handed — `TeeHandle` keeps its own clone so
-    /// [`TeeHandle::chain_builder`] can mint further branches long after
-    /// `wire` has returned, without the caller needing to have kept a
-    /// `Bus`/id/registry around itself.
+    /// `wire` closure was handed. The `Tee` keeps that context alive while
+    /// it belongs to the pipeline; `TeeHandle` accesses it weakly so the
+    /// handle itself cannot extend the pipeline's lifetime.
     pub fn new(name: impl Into<String>, context: Arc<Context>) -> (Self, TeeHandle) {
         let name: Arc<str> = name.into().into();
         let hlog = element_hlog(ElementType::Tee, &name, None);
@@ -56,17 +62,19 @@ impl Tee {
         context
             .registry
             .register(ElementType::Tee, name.clone(), None);
-        let pads = Arc::new(Mutex::new(Vec::new()));
+        let shared = Arc::new(TeeShared {
+            pads: Mutex::new(Vec::new()),
+            context,
+        });
         (
             Self {
                 name: name.clone(),
                 hlog,
-                pads: pads.clone(),
+                shared: shared.clone(),
             },
             TeeHandle {
                 name,
-                pads,
-                context,
+                shared: Arc::downgrade(&shared),
             },
         )
     }
@@ -78,23 +86,28 @@ impl TeeHandle {
     /// chains, ending in `.build(...)`) at any point after the pipeline
     /// started running, then hand the result to [`TeeHandle::add_sink`],
     /// without needing to have kept a `Bus`/pipeline id/[`crate::element::ElementRegistry`]
-    /// around separately.
-    pub fn chain_builder(&self) -> ChainBuilder {
-        ChainBuilder::new(self.context.clone())
+    /// around separately. Returns `None` once the `Tee` has been dropped.
+    pub fn chain_builder(&self) -> Option<ChainBuilder> {
+        let shared = self.shared.upgrade()?;
+        Some(ChainBuilder::new(shared.context.clone()))
     }
 
     /// Adds a new sink, live for the next buffer `Tee` consumes.
     pub fn add_sink(&self, sink: Box<dyn Sink>) {
+        let Some(shared) = self.shared.upgrade() else {
+            return;
+        };
         // Retroactively points whatever `ChainBuilder` chain built `sink`
         // (registered with an unresolved `upstream` — it had no way to
         // know at `.build()` time whether it'd end up linked straight to
         // a source pad or, as here, added to a `Tee`) at this `Tee`
         // instead of the default-to-source fallback
         // [`crate::pipeline::Pipeline::new`] would otherwise apply.
-        self.context
+        shared
+            .context
             .registry
             .set_upstream(&sink.name(), self.name.clone());
-        let mut pads = self.pads.lock().unwrap();
+        let mut pads = shared.pads.lock().unwrap();
         let mut pad = SrcPad::new(format!("{}_src{}", self.name, pads.len()));
         hinfo!(
             hlog: &element_hlog(ElementType::Tee, &self.name, None),
@@ -117,7 +130,10 @@ impl TeeHandle {
     /// docs), so returning it would just invite exactly that. Want a
     /// branch back? Build a fresh one.
     pub fn remove_sink(&self, index: usize) {
-        let mut pads = self.pads.lock().unwrap();
+        let Some(shared) = self.shared.upgrade() else {
+            return;
+        };
+        let mut pads = shared.pads.lock().unwrap();
         if index >= pads.len() {
             return;
         }
@@ -130,13 +146,16 @@ impl TeeHandle {
             // Otherwise this branch would keep showing up under
             // `Tee(...)` in `Pipeline::topology()` forever — the registry
             // has no idea it was ever removed unless told.
-            self.context.registry.remove_subtree(&sink.name());
+            shared.context.registry.remove_subtree(&sink.name());
             // `sink` drops here.
         }
     }
 
     pub fn sink_count(&self) -> usize {
-        self.pads.lock().unwrap().len()
+        self.shared
+            .upgrade()
+            .map(|shared| shared.pads.lock().unwrap().len())
+            .unwrap_or(0)
     }
 }
 
@@ -160,7 +179,7 @@ impl Element for Tee {
 
 impl Sink for Tee {
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
-        let mut pads = self.pads.lock().unwrap();
+        let mut pads = self.shared.pads.lock().unwrap();
         let Some((last, rest)) = pads.split_last_mut() else {
             return Ok(());
         };
@@ -174,10 +193,38 @@ impl Sink for Tee {
         // Unlike `consume`, every branch gets the same `ControlMsg`
         // value directly (it's `Copy`, no need for the last-one-moves
         // split `consume` does for `MediaBuffer`).
-        let mut pads = self.pads.lock().unwrap();
+        let mut pads = self.shared.pads.lock().unwrap();
         for pad in pads.iter_mut() {
             pad.control(msg)?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{bus::Bus, clock::Clock, element::ElementRegistry};
+
+    #[test]
+    fn retained_handle_does_not_keep_tee_context_or_bus_alive() {
+        let (bus, bus_rx) = Bus::new();
+        let context = Arc::new(Context {
+            bus,
+            pipeline_id: "test".into(),
+            registry: ElementRegistry::new(),
+            clock: Arc::new(Clock::new()),
+        });
+        let (tee, handle) = Tee::new("tee", context.clone());
+
+        drop(context);
+        drop(tee);
+
+        assert!(handle.chain_builder().is_none());
+        assert_eq!(handle.sink_count(), 0);
+        assert!(
+            bus_rx.iter().next().is_none(),
+            "a retained TeeHandle must not keep the Bus sender alive"
+        );
     }
 }
