@@ -360,12 +360,19 @@ impl AudioCaptureSource {
         let mut frame =
             ffmpeg::frame::Audio::new(self.format, frames as usize, self.channel_layout);
         frame.set_rate(self.sample_rate);
-        let bytes = frame.data_mut(0).len();
+        // `frame.data_mut(0)`'s length is FFmpeg's own padded linesize,
+        // not necessarily `frames * channels * format.bytes()` exactly —
+        // only ever touch that tight amount (the same bound
+        // `frame.plane::<T>()` itself reads via `samples()`), never the
+        // destination's full length, or a WASAPI buffer exactly `frames`
+        // frames long could get read past its end.
+        let tight_bytes =
+            frames as usize * self.channel_layout.channels() as usize * self.format.bytes();
         if data.is_null() || flags & (AUDCLNT_BUFFERFLAGS_SILENT.0 as u32) != 0 {
-            frame.data_mut(0).fill(0);
+            frame.data_mut(0)[..tight_bytes].fill(0);
         } else {
             unsafe {
-                ptr::copy_nonoverlapping(data, frame.data_mut(0).as_mut_ptr(), bytes);
+                ptr::copy_nonoverlapping(data, frame.data_mut(0).as_mut_ptr(), tight_bytes);
             }
         }
         frame.set_pts(Some(self.samples_emitted));
