@@ -1,5 +1,7 @@
 use thiserror::Error;
 
+#[cfg(feature = "wasapi-capture")]
+use crate::elements::AudioCaptureSourceError;
 #[cfg(feature = "dxgi-capture")]
 use crate::elements::DxgiScreenSourceError;
 #[cfg(feature = "ort")]
@@ -86,6 +88,10 @@ pub enum Error {
     #[cfg(feature = "dxgi-capture")]
     #[error(transparent)]
     DxgiScreenSourceError(#[from] DxgiScreenSourceError),
+
+    #[cfg(feature = "wasapi-capture")]
+    #[error(transparent)]
+    AudioCaptureSourceError(#[from] AudioCaptureSourceError),
 
     #[cfg(feature = "ort")]
     #[error(transparent)]

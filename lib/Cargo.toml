@@ -24,6 +24,14 @@ windows = { version = "0.62", optional = true, features = [
     # from its generated bindings without this feature to supply that
     # type, rather than erroring at generation time.
     "Win32_Graphics_Gdi",
+    "Win32_Devices_FunctionDiscovery",
+    "Win32_Media_Audio",
+    "Win32_Media_KernelStreaming",
+    "Win32_Media_Multimedia",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Variant",
+    "Win32_UI_Shell_PropertiesSystem",
 ] }
 ort = { version = "2.0.0-rc.13", optional = true }
 ndarray = { version = "0.17", optional = true }
@@ -35,6 +43,7 @@ str0m = { version = "0.21", optional = true, default-features = false, features 
 d3d12-renderer = ["dep:windows"]
 d3d11-renderer = ["dep:windows"]
 dxgi-capture = ["dep:windows", "d3d11-renderer"]
+wasapi-capture = ["dep:windows"]
 rtsp-server = []
 ort = ["dep:ort", "dep:ndarray"]
 webrtc = ["dep:str0m"]

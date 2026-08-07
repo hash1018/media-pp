@@ -29,6 +29,10 @@ pub use source::{
     RtspSource, RtspSourceError, RtspTransport, StreamInfo, TestVideoOptions, TestVideoSource,
     TestVideoSourceError,
 };
+#[cfg(feature = "wasapi-capture")]
+pub use source::{
+    AudioCaptureOptions, AudioCaptureSource, AudioCaptureSourceError, AudioDevice, AudioDeviceKind,
+};
 #[cfg(feature = "dxgi-capture")]
 pub use source::{
     CaptureArea, CaptureMode, CaptureRect, DxgiScreenOptions, DxgiScreenSource,
