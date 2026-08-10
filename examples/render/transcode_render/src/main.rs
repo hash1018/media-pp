@@ -139,6 +139,7 @@ fn play(hwnd: isize, width: u32, height: u32) -> media_pp::Result<()> {
                 time_base,
                 frame_rate: options.framerate,
                 bit_rate: 2_000_000,
+                gop_size: 60, // ~2s @ 30fps (TestVideoOptions::default's own framerate)
             },
         )
         .expect("failed to open encoder");

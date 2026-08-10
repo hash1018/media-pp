@@ -119,6 +119,20 @@ pub struct SwEncoderOptions {
     /// nominal rate matches the true one.
     pub frame_rate: ffmpeg::Rational,
     pub bit_rate: usize,
+    /// How many frames between keyframes — `AVCodecContext.gop_size`
+    /// directly (not a duration; multiply by `frame_rate` yourself, e.g.
+    /// `frame_rate * 2` for "roughly every 2 seconds"). Not every codec's
+    /// own default is a periodic interval at all — `libopenh264` was
+    /// found, building [`crate::elements::SegmentedMp4Muxer`], to rely on
+    /// scene-change detection alone and go an *entire* recording without
+    /// a second keyframe against smoothly-changing content — so this is
+    /// always set explicitly rather than left to whatever a given codec
+    /// happens to default to. Matters beyond segmenting a recording, too:
+    /// [`crate::elements::RtspServer`]/[`crate::elements::WebRtcTrackSink`]
+    /// viewers/peers joining mid-stream can't decode anything until the
+    /// next keyframe, so an unbounded interval is a real join-latency
+    /// problem, not just a segmenting one.
+    pub gop_size: u32,
 }
 
 /// Encodes `Pixel::YUV420P` `Video` frames into `Packet`s via a software
@@ -154,22 +168,7 @@ impl SwEncoder {
         video.set_time_base(options.time_base);
         video.set_frame_rate(Some(options.frame_rate));
         video.set_bit_rate(options.bit_rate);
-        // A bounded keyframe interval, not each codec's own default —
-        // `libopenh264` in particular was found (building
-        // `crate::elements::SegmentedMp4Muxer`, which needs a keyframe to
-        // ever actually cut a segment) to go the *entire* encode without
-        // a second keyframe against smoothly-changing synthetic content,
-        // relying purely on its own scene-change heuristic rather than any
-        // periodic interval. An unbounded GOP is also bad practice for
-        // `RtspServer`/`WebRtcTrackSink` generally — a viewer/peer joining
-        // mid-stream can't decode anything until the next keyframe, so
-        // "never" is the worst possible answer. ~2 seconds is a common,
-        // reasonable default (RTSP/WebRTC join latency vs. bitrate
-        // overhead); not exposed as its own option since nothing needs a
-        // different value yet.
-        let fps = (options.frame_rate.numerator() as f64 / options.frame_rate.denominator() as f64)
-            .max(1.0);
-        video.set_gop((fps * 2.0).round() as u32);
+        video.set_gop(options.gop_size);
 
         let encoder = video.open_as(codec).map_err(SwEncoderError::from)?;
 
@@ -301,6 +300,7 @@ mod tests {
                     time_base: ffmpeg::Rational::new(1, 30),
                     frame_rate: ffmpeg::Rational::new(30, 1),
                     bit_rate: 1_000_000,
+                    gop_size: 60, // ~2s @ 30fps
                 },
             );
             // Whether it succeeds or fails depends on how this machine's

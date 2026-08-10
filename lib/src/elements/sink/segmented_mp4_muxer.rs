@@ -340,6 +340,10 @@ mod tests {
                 time_base,
                 frame_rate: video_options.framerate,
                 bit_rate: 200_000,
+                // Short on purpose (~0.5s @ 15fps) — this test needs
+                // several real keyframes to show up quickly, not the
+                // ~2s default every other caller uses.
+                gop_size: 8,
             },
         )
         .expect("openh264 encoder must be available");
@@ -366,7 +370,7 @@ mod tests {
             source.src_pads()[0].link(branch);
         });
         pipeline.run();
-        std::thread::sleep(Duration::from_secs(6));
+        std::thread::sleep(Duration::from_secs(3));
         pipeline.stop();
         pipeline.bus().log_events();
 

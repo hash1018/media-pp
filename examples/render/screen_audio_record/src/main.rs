@@ -70,6 +70,7 @@ fn main() -> media_pp::Result<()> {
             time_base: video_time_base,
             frame_rate: ffmpeg::Rational::new(30, 1),
             bit_rate: 4_000_000,
+            gop_size: 60, // ~2s @ 30fps
         },
     )
     .expect("failed to open video encoder");

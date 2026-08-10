@@ -155,6 +155,7 @@ fn main() {
             time_base: video_time_base,
             frame_rate: video_options.framerate,
             bit_rate: 500_000,
+            gop_size: 30, // ~2s @ 15fps
         },
     )
     .expect("failed to open video encoder");
