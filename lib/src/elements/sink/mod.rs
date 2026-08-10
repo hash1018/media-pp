@@ -7,6 +7,7 @@ mod packet_counter;
 mod renderer;
 #[cfg(feature = "rtsp-server")]
 mod rtsp_server;
+mod segmented_mp4_muxer;
 
 pub use app_sink::AppSink;
 pub use frame_counter::FrameCounter;
@@ -21,3 +22,4 @@ pub use renderer::{D3d11FrameRenderer, D3d11Renderer, D3d11RendererError};
 pub use renderer::{D3d12FrameRenderer, D3d12Renderer, D3d12RendererError, RawPlane};
 #[cfg(feature = "rtsp-server")]
 pub use rtsp_server::{PortPolicy, PublishTransport, RtspServer, RtspServerError, ViewerTransport};
+pub use segmented_mp4_muxer::{SegmentPolicy, SegmentedMp4Muxer};

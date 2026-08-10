@@ -154,6 +154,22 @@ impl SwEncoder {
         video.set_time_base(options.time_base);
         video.set_frame_rate(Some(options.frame_rate));
         video.set_bit_rate(options.bit_rate);
+        // A bounded keyframe interval, not each codec's own default —
+        // `libopenh264` in particular was found (building
+        // `crate::elements::SegmentedMp4Muxer`, which needs a keyframe to
+        // ever actually cut a segment) to go the *entire* encode without
+        // a second keyframe against smoothly-changing synthetic content,
+        // relying purely on its own scene-change heuristic rather than any
+        // periodic interval. An unbounded GOP is also bad practice for
+        // `RtspServer`/`WebRtcTrackSink` generally — a viewer/peer joining
+        // mid-stream can't decode anything until the next keyframe, so
+        // "never" is the worst possible answer. ~2 seconds is a common,
+        // reasonable default (RTSP/WebRTC join latency vs. bitrate
+        // overhead); not exposed as its own option since nothing needs a
+        // different value yet.
+        let fps = (options.frame_rate.numerator() as f64 / options.frame_rate.denominator() as f64)
+            .max(1.0);
+        video.set_gop((fps * 2.0).round() as u32);
 
         let encoder = video.open_as(codec).map_err(SwEncoderError::from)?;
 

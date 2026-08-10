@@ -118,7 +118,6 @@ fn main() -> media_pp::Result<()> {
             source.src_pads()[0].link(branch);
         })
         .build();
-    
 
     println!("recording desktop + system audio to {path} — type `q` + Enter to stop");
     pipeline.run();
