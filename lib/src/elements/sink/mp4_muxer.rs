@@ -380,6 +380,41 @@ mod tests {
         std::fs::remove_file(&path).ok();
     }
 
+    /// Regression test against a leaked file handle: dropping every track
+    /// `Sink` without ever sending `Eos`/`Stop` (simulating a `Pipeline`
+    /// just getting dropped mid-recording, e.g. the process is tearing
+    /// down) must still release the underlying file — no stray clone of
+    /// the shared `Arc` (or the `ffmpeg::format::context::Output` it
+    /// guards) left holding it open. Windows won't let an open file be
+    /// deleted, so a successful `remove_file` here is direct proof
+    /// nothing lingered; on a build where that isn't already guaranteed
+    /// by construction, this would instead hang or fail with a sharing
+    /// violation.
+    #[test]
+    fn dropping_every_sink_without_eos_or_stop_still_releases_the_file() {
+        let encoder = open_aac_encoder(48000, 1);
+
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("mp4_muxer_drop_test_{}.mp4", std::process::id()));
+
+        let mut muxer = Mp4Muxer::create(&path).expect("mp4 muxer must open");
+        muxer
+            .add_stream(
+                "audio",
+                encoder.parameters(),
+                ffmpeg::Rational::new(1, 48000),
+            )
+            .expect("add_stream must succeed");
+        let sinks = muxer.open().expect("open must write the header");
+
+        // No `Eos`/`Stop`, no trailer — just drop everything, on purpose.
+        drop(sinks);
+        drop(encoder);
+
+        std::fs::remove_file(&path)
+            .expect("file handle must be released once every sink is dropped");
+    }
+
     /// Two independent tracks (standing in for a real video+audio pair —
     /// `Mp4Muxer` treats every stream as an opaque `codec::Parameters`, so
     /// two AAC tracks at different sample rates exercise the same

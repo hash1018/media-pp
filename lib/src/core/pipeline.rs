@@ -810,6 +810,65 @@ mod tests {
         );
     }
 
+    /// The same leak this crate already guards against for a *single*
+    /// source (`Tee`'s own `retained_handle_does_not_keep_tee_context_or_bus_alive`
+    /// test, which builds a bespoke `Context` by hand) but through the
+    /// real, integrated [`PipelineBuilder`] path with a *second*,
+    /// unrelated source also present: a `Tee` wired under one of two
+    /// sources, its `TeeHandle` retained well past the point the whole
+    /// `Pipeline` finishes. Draining `pipeline.bus()` to completion is
+    /// itself the proof — it doesn't return until every `Bus` sender,
+    /// including whatever clone the `Tee`'s own retained `Context` held,
+    /// has actually dropped; `tee_handle` only ever held a `Weak`
+    /// reference; so it couldn't have kept anything alive regardless. The
+    /// `chain_builder()`/`sink_count()` checks afterward confirm the
+    /// underlying shared state is really gone, not just that the bus
+    /// happened to close for some unrelated reason.
+    #[test]
+    fn tee_handle_retained_across_a_multi_source_pipeline_does_not_leak() {
+        let video = TestVideoSource::new("video", TestVideoOptions::default());
+        let audio = TestAudioSource::new("audio", TestAudioOptions::default());
+
+        let mut tee_handle_slot = None;
+        let pipeline = PipelineBuilder::new("multi-source-tee-test")
+            .add_source(video, |source, ctx| {
+                let (tee, handle) = Tee::new("tee", ctx.clone());
+                let branch = ChainBuilder::new(ctx.clone()).build(Box::new(NoOpSink {
+                    name: "video-sink".into(),
+                    hlog: element_hlog(ElementType::Other, "video-sink", None),
+                }));
+                handle.add_sink(branch);
+                source.src_pads()[0].link(Box::new(tee));
+                tee_handle_slot = Some(handle);
+            })
+            .add_source(audio, |source, ctx| {
+                let branch = ChainBuilder::new(ctx.clone()).build(Box::new(NoOpSink {
+                    name: "audio-sink".into(),
+                    hlog: element_hlog(ElementType::Other, "audio-sink", None),
+                }));
+                source.src_pads()[0].link(branch);
+            })
+            .build();
+        let tee_handle = tee_handle_slot.expect("wire ran");
+
+        pipeline.run();
+        thread::sleep(Duration::from_millis(100));
+        pipeline.stop();
+
+        let events: Vec<_> = pipeline.bus().iter().collect();
+        assert!(
+            !events.iter().any(|e| matches!(e, BusEvent::Error { .. })),
+            "unexpected error event(s): {events:?}"
+        );
+
+        drop(pipeline);
+        assert!(
+            tee_handle.chain_builder().is_none(),
+            "Tee's shared state should be gone once its owning Pipeline is fully torn down"
+        );
+        assert_eq!(tee_handle.sink_count(), 0);
+    }
+
     /// `seek()` mid-playback should reposition the source (no error from
     /// `Input::seek`), reset/flush everything downstream without
     /// deadlocking, and let packets keep flowing afterward.

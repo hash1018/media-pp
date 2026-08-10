@@ -403,4 +403,93 @@ mod tests {
             std::fs::remove_file(path).ok();
         }
     }
+
+    /// Regression test against a leaked file handle on the *previous*
+    /// segment specifically: a rotation has to fully close (write the
+    /// trailer, drop the underlying `Mp4Muxer` for that segment) the
+    /// outgoing file the moment it cuts — not defer that until the whole
+    /// recording later stops. Proven by reading the first segment back
+    /// *while the pipeline is still running* (recording into the second
+    /// one) — if `SegmentGroup::consume_packet` kept anything from the old
+    /// segment alive past the cut, this would find it still unreadable
+    /// (or, on Windows, fail to even open for read at all due to a
+    /// lingering write lock).
+    #[test]
+    fn old_segment_is_released_immediately_not_deferred_until_the_whole_recording_stops() {
+        let video_options = TestVideoOptions {
+            width: 160,
+            height: 120,
+            framerate: ffmpeg::Rational::new(15, 1),
+        };
+        let video_source = TestVideoSource::new("video", video_options);
+        let time_base = video_source.time_base();
+        let encoder = SwEncoder::new(
+            "encoder",
+            SwEncoderOptions {
+                codec: VideoCodec::OpenH264,
+                width: video_options.width,
+                height: video_options.height,
+                time_base,
+                frame_rate: video_options.framerate,
+                bit_rate: 200_000,
+                gop_size: 8, // ~0.5s @ 15fps — see the other test's own note
+            },
+        )
+        .expect("openh264 encoder must be available");
+
+        let dir = std::env::temp_dir();
+        let prefix = format!("segmented_mp4_release_test_{}", std::process::id());
+        let paths: Arc<Mutex<Vec<PathBuf>>> = Arc::new(Mutex::new(Vec::new()));
+        let recorded_paths = paths.clone();
+
+        let mut muxer = SegmentedMp4Muxer::create(
+            SegmentPolicy::Duration(Duration::from_millis(300)),
+            move |index| {
+                let path = dir.join(format!("{prefix}_{index:03}.mp4"));
+                recorded_paths.lock().unwrap().push(path.clone());
+                path
+            },
+        );
+        muxer.add_stream("video", encoder.parameters(), time_base);
+        let mut sinks = muxer.open().expect("open must succeed");
+        let sink = sinks.pop().expect("exactly one stream was added");
+
+        let pipeline = Pipeline::new("segmented-release-test", video_source, |source, ctx| {
+            let branch = ChainBuilder::new(ctx.clone()).pipe(encoder).build(sink);
+            source.src_pads()[0].link(branch);
+        });
+        pipeline.run();
+
+        // Wait (bounded) for at least one rotation — the pipeline is
+        // deliberately still running past this point.
+        let waited = Instant::now();
+        loop {
+            if paths.lock().unwrap().len() >= 2 {
+                break;
+            }
+            assert!(
+                waited.elapsed() < Duration::from_secs(5),
+                "no rotation happened within 5s"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        let first_segment = paths.lock().unwrap()[0].clone();
+        let mut input = ffmpeg::format::input(&first_segment).unwrap_or_else(|error| {
+            panic!("segment 0 must already be readable while still recording segment 1: {error}")
+        });
+        let mut packet = ffmpeg::Packet::empty();
+        assert!(
+            packet.read(&mut input).is_ok(),
+            "segment 0 must have packets"
+        );
+        drop(input);
+
+        pipeline.stop();
+        pipeline.bus().log_events();
+
+        for path in paths.lock().unwrap().iter() {
+            std::fs::remove_file(path).ok();
+        }
+    }
 }
