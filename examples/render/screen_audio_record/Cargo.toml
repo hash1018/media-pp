@@ -1,0 +1,9 @@
+[package]
+name = "screen_audio_record"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+media-pp = { path = "../../../lib", features = ["dxgi-capture", "wasapi-capture"] }
+ffmpeg-next = "8"

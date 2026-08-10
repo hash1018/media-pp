@@ -61,9 +61,11 @@ impl Tee {
         let name: Arc<str> = name.into().into();
         let hlog = element_hlog(ElementType::Tee, &name, None);
         hinfo!(hlog: &hlog, "created");
-        context
-            .registry
-            .register(ElementType::Tee, name.clone(), None);
+        context.registry.register(
+            ElementType::Tee,
+            name.clone(),
+            Some(context.default_upstream.clone()),
+        );
         let shared = Arc::new(TeeShared {
             pads: Mutex::new(Vec::new()),
             context,
@@ -216,6 +218,7 @@ mod tests {
             pipeline_id: "test".into(),
             registry: ElementRegistry::new(),
             clock: Arc::new(Clock::new()),
+            default_upstream: "source".into(),
         });
         let (tee, handle) = Tee::new("tee", context.clone());
 

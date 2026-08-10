@@ -226,16 +226,27 @@ impl ElementRegistry {
 /// Everything a [`crate::pipeline::ChainBuilder`]/[`crate::elements::Tee`]
 /// needs to wire itself into a [`crate::pipeline::Pipeline`] — bundled into
 /// one `Arc` instead of threading `bus`/`pipeline_id`/`registry`/`clock`
-/// through separately. Built once by [`crate::pipeline::Pipeline::new`] and
-/// handed to its `wire` closure; a [`crate::elements::Tee`] keeps its own
-/// clone while it is alive, and its [`crate::elements::TeeHandle`] accesses
-/// that clone weakly so retaining the handle cannot keep the pipeline's
-/// `Bus` open after the `Tee` itself is gone.
+/// through separately. Built once per source by
+/// [`crate::pipeline::PipelineBuilder::add_source`] (what
+/// [`crate::pipeline::Pipeline::new`] itself calls, for its own
+/// single-source case) and handed to that source's own `wire` closure; a
+/// [`crate::elements::Tee`] keeps its own clone while it is alive, and its
+/// [`crate::elements::TeeHandle`] accesses that clone weakly so retaining
+/// the handle cannot keep the pipeline's `Bus` open after the `Tee` itself
+/// is gone.
 pub struct Context {
     pub bus: Bus,
     pub pipeline_id: Arc<str>,
     pub registry: ElementRegistry,
     pub clock: Arc<Clock>,
+    /// The name of the source this particular `Context` was built for —
+    /// what [`crate::pipeline::ChainBuilder::new`] seeds its own chain's
+    /// first `upstream` with, so a chain built under one source in a
+    /// multi-source [`crate::pipeline::Pipeline`] (see
+    /// [`crate::pipeline::PipelineBuilder`]) defaults to hanging off
+    /// *that* source in [`crate::pipeline::Pipeline::topology`], not
+    /// whichever source happened to be registered first.
+    pub default_upstream: Arc<str>,
 }
 
 /// Anything that can receive a buffer pushed from upstream — the input

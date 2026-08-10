@@ -1,7 +1,7 @@
 use std::{
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicUsize, Ordering},
     },
     thread,
     time::Duration,
@@ -151,11 +151,20 @@ impl StageBuilder for QueueStage {
 }
 
 impl ChainBuilder {
+    /// A fresh chain defaults to hanging directly off whichever source
+    /// `context` was built for (`context.default_upstream`) — not `None`
+    /// — so [`Pipeline::topology`] renders it correctly even when there's
+    /// more than one source in the same [`Pipeline`] (see
+    /// [`PipelineBuilder`]). [`crate::elements::TeeHandle::add_sink`]
+    /// still overrides this after the fact via
+    /// [`ElementRegistry::set_upstream`] for a chain that turns out to
+    /// start under a `Tee` instead.
     pub fn new(context: Arc<Context>) -> Self {
+        let last = Some(context.default_upstream.clone());
         Self {
             context,
             elements: Vec::new(),
-            last: None,
+            last,
         }
     }
 
@@ -228,67 +237,185 @@ impl ChainBuilder {
     }
 }
 
-/// Top-level pipeline: a source (with everything reachable from its src
-/// pads already linked) plus the bus it reports events on and the
-/// [`Clock`] every [`crate::elements::Pacer`] in it shares.
+/// Accumulates one or more sources into a single [`Pipeline`] — the
+/// multi-source generalization of what [`Pipeline::new`] does for exactly
+/// one. Each [`PipelineBuilder::add_source`] call gets its own background
+/// thread once [`PipelineBuilder::build`]'s [`Pipeline::run`] starts, but
+/// they all share one [`Bus`] (so [`Pipeline::bus`] sees every source's
+/// events on one channel), one [`Clock`] (so every [`crate::elements::Pacer`]
+/// anywhere in the pipeline — regardless of which source's chain it's
+/// under — agrees on the same t=0/pause timeline), and one
+/// [`ElementRegistry`] (so [`Pipeline::topology`] renders every source's
+/// own branches together).
 ///
-/// `run()` is asynchronous: it starts the source on a background thread
-/// and returns immediately, rather than blocking the caller for the
+/// [`Pipeline::new`] is exactly `PipelineBuilder::new(id).add_source(source,
+/// wire).build()` — the ergonomic single-source special case, kept as its
+/// own entry point so existing single-source callers don't need to change.
+/// Reach for `PipelineBuilder` directly once there's more than one live
+/// source to combine into one file/output — e.g. a video capture and an
+/// audio capture both feeding the same [`crate::elements::Mp4Muxer`]: two
+/// independent sources under today's [`crate::element::SourceElement`]
+/// model, but one [`Pipeline`] so `run()`/`pause()`/`resume()`/`stop()`
+/// only need to be called once, not once per source.
+pub struct PipelineBuilder {
+    id: Arc<str>,
+    bus: Bus,
+    bus_rx: BusReceiver,
+    clock: Arc<Clock>,
+    registry: ElementRegistry,
+    sources: Vec<Box<dyn SourceElement>>,
+    control_pairs: Vec<(ControlSender, ControlReceiver)>,
+}
+
+impl PipelineBuilder {
+    pub fn new(id: impl Into<String>) -> Self {
+        let id: Arc<str> = id.into().into();
+        let (bus, bus_rx) = Bus::new();
+        Self {
+            id,
+            bus,
+            bus_rx,
+            clock: Arc::new(Clock::new()),
+            registry: ElementRegistry::new(),
+            sources: Vec::new(),
+            control_pairs: Vec::new(),
+        }
+    }
+
+    /// Registers one more source. `wire` is called once, right away, with
+    /// the freshly stamped source and a fresh [`Context`] whose
+    /// `default_upstream` is *this* source's own name — so a
+    /// [`ChainBuilder`] built from it defaults its first element to
+    /// hanging off this source specifically, not whichever source was
+    /// added first (see [`ChainBuilder::new`]'s own docs). Otherwise the
+    /// same contract as [`Pipeline::new`]'s own `wire` parameter: build
+    /// one or more `ChainBuilder` chains and link them via
+    /// `source.src_pads()[i].link(...)`.
+    pub fn add_source<S: SourceElement + 'static>(
+        mut self,
+        mut source: S,
+        wire: impl FnOnce(&mut S, &Arc<Context>),
+    ) -> Self {
+        *source.hlog_mut() = element_hlog(source.element_type(), &source.name(), Some(&self.id));
+        self.registry
+            .register(source.element_type(), source.name(), None);
+        let context = Arc::new(Context {
+            bus: self.bus.clone(),
+            pipeline_id: self.id.clone(),
+            registry: self.registry.clone(),
+            clock: self.clock.clone(),
+            default_upstream: source.name(),
+        });
+        wire(&mut source, &context);
+        self.sources.push(Box::new(source));
+        self.control_pairs.push(control::channel());
+        self
+    }
+
+    /// Finishes construction. At least one [`PipelineBuilder::add_source`]
+    /// call must have happened — an empty [`Pipeline`] has nothing for
+    /// [`Pipeline::run`] to ever drive, and [`Pipeline::bus`] would block
+    /// forever waiting for a source thread that will never start (nothing
+    /// left holding a [`Bus`] sender to eventually drop).
+    pub fn build(self) -> Arc<Pipeline> {
+        assert!(
+            !self.sources.is_empty(),
+            "PipelineBuilder::build called with no sources added"
+        );
+        let (control_txs, control_rxs): (Vec<_>, Vec<_>) = self.control_pairs.into_iter().unzip();
+        Arc::new(Pipeline {
+            id: self.id,
+            sources: Mutex::new(Some(self.sources)),
+            bus: Mutex::new(Some(self.bus)),
+            control_txs,
+            control_rxs: Mutex::new(Some(control_rxs)),
+            clock: self.clock,
+            bus_rx: self.bus_rx,
+            running: AtomicUsize::new(0),
+            registry: self.registry,
+        })
+    }
+}
+
+/// Top-level pipeline: one or more sources (see [`PipelineBuilder`], with
+/// everything reachable from each source's own src pads already linked)
+/// plus the bus every source reports events on and the [`Clock`] every
+/// [`crate::elements::Pacer`] in it shares.
+///
+/// `run()` is asynchronous: it starts every source on its own background
+/// thread and returns immediately, rather than blocking the caller for the
 /// whole play-through. Always held as `Arc<Pipeline>` (that's what
-/// [`Pipeline::new`] returns) — the background thread needs its own
-/// owning handle to outlive the `run()` call that spawned it, and that's
-/// also what lets [`Pipeline::pause`]/[`Pipeline::resume`]/
-/// [`Pipeline::stop`] be called from another thread while it's running.
+/// [`Pipeline::new`]/[`PipelineBuilder::build`] return) — the background
+/// threads need their own owning handle to outlive the `run()` call that
+/// spawned them, and that's also what lets [`Pipeline::pause`]/
+/// [`Pipeline::resume`]/[`Pipeline::stop`] be called from another thread
+/// while it's running.
 ///
 /// There's no separate "is it done yet" query or callback: watch
 /// [`Pipeline::bus`] instead. [`BusReceiver::iter`]/
 /// [`BusReceiver::log_events`] block until every [`Bus`] sender has been
-/// dropped. Under the normal ownership path that happens once the
-/// background thread (and everything reachable from the source) has
-/// fully finished, so draining the bus doubles as "wait for completion."
-/// A caller that clones the [`Context`] supplied to [`Pipeline::new`]'s
-/// `wire` closure also retains its `Bus` sender; in that case bus draining
-/// intentionally remains blocked until that extra context is dropped.
-/// A source-level failure (returned from
+/// dropped. Under the normal ownership path that happens once every
+/// source's background thread (and everything reachable from it) has
+/// fully finished, so draining the bus doubles as "wait for completion" —
+/// with more than one source, that means waiting for *all* of them, not
+/// just the first to reach `Eos`. A caller that clones the [`Context`]
+/// supplied to a source's own `wire` closure also retains its `Bus`
+/// sender; in that case bus draining intentionally remains blocked until
+/// that extra context is dropped. A source-level failure (returned from
 /// [`crate::element::SourceElement::run`] itself, as opposed to one
 /// reported from inside a `Queue`) shows up there too, as a
-/// [`BusEvent::Error`] under the source's own name, since there's no
+/// [`BusEvent::Error`] under that source's own name, since there's no
 /// synchronous return path left to carry it.
 ///
 /// A `Pipeline` isn't reusable once `run()` has been called (whether it
-/// finished via a natural `Eos` or [`Pipeline::stop`]) — a second `run()`
-/// call is a no-op; build a fresh `Pipeline` for another play-through.
+/// finished via every source's natural `Eos` or [`Pipeline::stop`]) — a
+/// second `run()` call is a no-op; build a fresh `Pipeline` for another
+/// play-through.
 pub struct Pipeline {
-    /// This pipeline's own id — passed to [`Pipeline::new`], stamped onto
-    /// the source's own `hlog` there and onto every element that passes
-    /// through a [`ChainBuilder`] built with it (see [`Pipeline::id`]).
+    /// This pipeline's own id — passed to [`Pipeline::new`]/
+    /// [`PipelineBuilder::new`], stamped onto every source's own `hlog`
+    /// there and onto every element that passes through a [`ChainBuilder`]
+    /// built with it (see [`Pipeline::id`]).
     id: Arc<str>,
-    source: Mutex<Option<Box<dyn SourceElement>>>,
-    /// Taken (leaving `None` behind) the moment `run()` starts, and moved
-    /// into the background thread — so once a pipeline is running,
-    /// `Pipeline` itself no longer holds a `Bus` sender. If it did,
-    /// [`BusReceiver::iter`] could never observe every sender dropped
-    /// (one would always still be sitting right here), and would block
-    /// forever instead of unblocking once the pipeline actually finishes.
+    sources: Mutex<Option<Vec<Box<dyn SourceElement>>>>,
+    /// Taken (leaving `None` behind) the moment `run()` starts, and cloned
+    /// once per source into that source's own background thread — so once
+    /// a pipeline is running, `Pipeline` itself no longer holds a `Bus`
+    /// sender directly. If it did, [`BusReceiver::iter`] could never
+    /// observe every sender dropped (one would always still be sitting
+    /// right here), and would block forever instead of unblocking once
+    /// every source actually finishes.
     bus: Mutex<Option<Bus>>,
-    control_tx: ControlSender,
+    /// One [`ControlSender`] per source, in the same order
+    /// [`PipelineBuilder::add_source`] was called — [`Pipeline::stop`]/
+    /// `pause`/`resume`/`seek` send to every one of these in turn (each
+    /// `send` is its own synchronous rendezvous with that source's own
+    /// control cascade — see [`crate::control::ControlSender::send`] — so
+    /// this serializes across sources rather than fanning out in
+    /// parallel; fine for the handful of sources this is meant for).
+    control_txs: Vec<ControlSender>,
     /// Taken (leaving `None` behind) the moment `run()` starts, and moved
-    /// into the background thread — same reasoning as `bus` above. If
-    /// `Pipeline` kept its own clone alive for its whole lifetime instead,
-    /// the control channel's receiver side would never fully disconnect
-    /// even after the background thread has long since exited, so a
-    /// [`Pipeline::stop`]/`pause`/`resume` racing that thread's own natural
-    /// end (e.g. called right as `run()` finishes on its own) could
+    /// one per thread — same reasoning as `bus` above. If `Pipeline` kept
+    /// its own clone of each alive for its whole lifetime instead, that
+    /// control channel's receiver side would never fully disconnect even
+    /// after its thread has long since exited, so a
+    /// [`Pipeline::stop`]/`pause`/`resume` racing that thread's own
+    /// natural end (e.g. called right as it finishes on its own) could
     /// enqueue a `Request` nobody will ever read *or drop* — leaving
     /// [`crate::control::ControlSender::send`]'s rendezvous ack blocked
     /// forever instead of unblocked by the disconnect, the way it is the
     /// moment the *last* `ControlReceiver` clone actually goes away.
-    control_rx: Mutex<Option<ControlReceiver>>,
+    control_rxs: Mutex<Option<Vec<ControlReceiver>>>,
     clock: Arc<Clock>,
     bus_rx: BusReceiver,
-    running: AtomicBool,
+    /// How many source threads are still running — `0` before `run()` and
+    /// again once every source's thread has finished. `AtomicUsize` rather
+    /// than a per-source flag: every call site (`pause`/`resume`/`stop`/
+    /// `seek`) only ever needs "is anything still running at all", never
+    /// which specific source.
+    running: AtomicUsize,
     /// Live registry backing [`Pipeline::elements`]/[`Pipeline::topology`] —
-    /// kept for this `Pipeline`'s whole life (unlike `bus`/`control_rx`
+    /// kept for this `Pipeline`'s whole life (unlike `bus`/`control_rxs`
     /// above) so a branch registered long after construction (e.g. added to
     /// a running [`crate::elements::Tee`] via the [`Context`] owned by that
     /// `Tee`'s shared state) still shows up when either is called again.
@@ -311,37 +438,16 @@ impl Pipeline {
     /// (one per src pad that should actually be used) and links them via
     /// `source.src_pads()[i].link(...)`. Pads left unlinked just drop
     /// whatever gets pushed into them.
+    ///
+    /// The single-source special case of [`PipelineBuilder`] — see its own
+    /// docs for combining more than one live source (e.g. a video capture
+    /// and an audio capture) into one `Pipeline`.
     pub fn new<S: SourceElement + 'static>(
         id: impl Into<String>,
-        mut source: S,
+        source: S,
         wire: impl FnOnce(&mut S, &Arc<Context>),
     ) -> Arc<Self> {
-        let id: Arc<str> = id.into().into();
-        let (bus, bus_rx) = Bus::new();
-        let clock = Arc::new(Clock::new());
-        *source.hlog_mut() = element_hlog(source.element_type(), &source.name(), Some(&id));
-        let registry = ElementRegistry::new();
-        registry.register(source.element_type(), source.name(), None);
-        let context = Arc::new(Context {
-            bus,
-            pipeline_id: id.clone(),
-            registry: registry.clone(),
-            clock: clock.clone(),
-        });
-        wire(&mut source, &context);
-        let bus = context.bus.clone();
-        let (control_tx, control_rx) = control::channel();
-        Arc::new(Pipeline {
-            id,
-            source: Mutex::new(Some(Box::new(source))),
-            bus: Mutex::new(Some(bus)),
-            control_tx,
-            control_rx: Mutex::new(Some(control_rx)),
-            clock,
-            bus_rx,
-            running: AtomicBool::new(false),
-            registry,
-        })
+        PipelineBuilder::new(id).add_source(source, wire).build()
     }
 
     /// This pipeline's own id, as passed to [`Pipeline::new`].
@@ -364,23 +470,17 @@ impl Pipeline {
     /// wired during `wire`. Only reflects wiring done through
     /// `ChainBuilder`/`Tee` — a `SrcPad::link` called by hand instead won't
     /// show up here.
+    ///
+    /// Every non-source entry's `upstream` is already resolved by the time
+    /// it's registered — [`ChainBuilder::new`] seeds it from whichever
+    /// source's [`Context`] built that chain, and
+    /// [`crate::elements::TeeHandle::add_sink`] overrides it for a branch
+    /// that turns out to start under a `Tee` instead — so this no longer
+    /// needs a post-hoc "default to the source" pass the way it did before
+    /// [`PipelineBuilder`] made more than one source (and so more than one
+    /// possible default) possible.
     pub fn elements(&self) -> Vec<ElementInfo> {
-        let mut elements = self.registry.snapshot();
-        // Everything other than the source's own entry (registered first,
-        // in `Pipeline::new`) that never got a resolved `upstream` — a
-        // `ChainBuilder` chain's first element, unless something like
-        // `TeeHandle::add_sink` already pointed it elsewhere — defaults to
-        // hanging directly off the source, matching `ChainBuilder`/
-        // `Pipeline`'s own default wiring pattern
-        // (`source.src_pads()[i].link(chain)`).
-        if let Some(source_name) = elements.first().map(|e| e.name.clone()) {
-            for element in elements.iter_mut().skip(1) {
-                if element.upstream.is_none() {
-                    element.upstream = Some(source_name.clone());
-                }
-            }
-        }
-        elements
+        self.registry.snapshot()
     }
 
     /// Human-readable rundown of [`Pipeline::elements`]: one line per
@@ -435,63 +535,71 @@ impl Pipeline {
     /// has already finished a previous run — this type has no "reset"
     /// path; build a fresh `Pipeline` for another play-through.
     pub fn run(self: &Arc<Self>) {
-        let Some(mut source) = self.source.lock().unwrap().take() else {
+        let Some(sources) = self.sources.lock().unwrap().take() else {
             return;
         };
-        // Always `Some` in lockstep with `source` above — all three taken
+        // Always `Some` in lockstep with `sources` above — all three taken
         // exactly once, on whichever `run()` call actually wins the
-        // `source` guard.
+        // `sources` guard.
         let Some(bus) = self.bus.lock().unwrap().take() else {
             return;
         };
-        let Some(control_rx) = self.control_rx.lock().unwrap().take() else {
+        let Some(control_rxs) = self.control_rxs.lock().unwrap().take() else {
             return;
         };
 
-        self.running.store(true, Ordering::Release);
-        let this = Arc::clone(self);
-        thread::Builder::new()
-            .name("pipeline:source".into())
-            .spawn(move || {
-                hinfo!(main_id: &this.id, "pipeline: run starting");
-                let source_name = source.name();
-                let source_type = source.element_type();
-                // `source.run()` itself already reports non-fatal,
-                // per-buffer failures to `bus` as it goes (see
-                // `SourceElement::run`'s docs) — a returned `Err` here
-                // means something genuinely ended the whole source, e.g.
-                // a `Seek` that failed outright.
-                let outcome = if let Err(error) = source.run(&control_rx, &bus) {
-                    bus.post(
-                        source.hlog(),
-                        BusEvent::Error {
-                            element_type: source_type,
-                            name: source_name,
-                            error,
-                        },
+        self.running.store(sources.len(), Ordering::Release);
+        for (mut source, control_rx) in sources.into_iter().zip(control_rxs) {
+            let bus = bus.clone();
+            let this = Arc::clone(self);
+            thread::Builder::new()
+                .name("pipeline:source".into())
+                .spawn(move || {
+                    hinfo!(main_id: &this.id, "pipeline: run starting ({})", source.name());
+                    let source_name = source.name();
+                    let source_type = source.element_type();
+                    // `source.run()` itself already reports non-fatal,
+                    // per-buffer failures to `bus` as it goes (see
+                    // `SourceElement::run`'s docs) — a returned `Err` here
+                    // means something genuinely ended this source, e.g.
+                    // a `Seek` that failed outright.
+                    let outcome = if let Err(error) = source.run(&control_rx, &bus) {
+                        bus.post(
+                            source.hlog(),
+                            BusEvent::Error {
+                                element_type: source_type,
+                                name: source_name.clone(),
+                                error,
+                            },
+                        );
+                        "error"
+                    } else {
+                        "ok"
+                    };
+                    hinfo!(
+                        main_id: &this.id,
+                        "pipeline: run finished ({outcome}, {source_name})"
                     );
-                    "error"
-                } else {
-                    "ok"
-                };
-                hinfo!(main_id: &this.id, "pipeline: run finished ({outcome})");
-                this.running.store(false, Ordering::Release);
-            })
-            .expect("failed to spawn pipeline source thread");
+                    this.running.fetch_sub(1, Ordering::AcqRel);
+                })
+                .expect("failed to spawn pipeline source thread");
+        }
     }
 
-    /// Blocks until every element downstream of the source has paused —
+    /// Blocks until every element downstream of every source has paused —
     /// see [`crate::control::drain_control`] (source side) and
     /// [`crate::queue::Queue`]'s worker loop (each thread boundary). Also
     /// pauses this pipeline's `Clock`, so a `Pacer` doesn't see a jump in
     /// elapsed time once resumed. No-op if `run()` isn't currently in
     /// progress on another thread.
     pub fn pause(&self) {
-        if !self.running.load(Ordering::Acquire) {
+        if self.running.load(Ordering::Acquire) == 0 {
             return;
         }
         self.clock.interrupt();
-        self.control_tx.send(ControlMsg::Pause);
+        for control_tx in &self.control_txs {
+            control_tx.send(ControlMsg::Pause);
+        }
         self.clock.pause();
     }
 
@@ -499,34 +607,40 @@ impl Pipeline {
     /// already shifted forward by the time `Pacer`s start receiving
     /// frames again.
     pub fn resume(&self) {
-        if !self.running.load(Ordering::Acquire) {
+        if self.running.load(Ordering::Acquire) == 0 {
             return;
         }
         self.clock.resume();
-        self.control_tx.send(ControlMsg::Resume);
+        for control_tx in &self.control_txs {
+            control_tx.send(ControlMsg::Resume);
+        }
     }
 
     /// Performs an early, full stop — abandons buffered work rather than
-    /// draining to a natural `Eos`. This call is synchronous: it waits for
-    /// the source and every reachable downstream element to handle
-    /// [`ControlMsg::Stop`]. It therefore cannot preempt an arbitrary
+    /// draining to a natural `Eos`. This call is synchronous: it sends
+    /// [`ControlMsg::Stop`] to every source in turn and waits for each
+    /// one's own cascade to finish before moving to the next — sequential,
+    /// not parallel, across sources (fine for the handful of sources this
+    /// is meant for). It therefore cannot preempt an arbitrary
     /// source read or `Sink::consume` call already blocked inside user or
     /// external-library code; the call returns only after that work gives
     /// the control cascade a turn. After it returns, watch [`Pipeline::bus`]
-    /// for the background thread's final completion. Not reusable
+    /// for every source's background thread to finish. Not reusable
     /// afterward — build a new `Pipeline` for the next play-through.
     pub fn stop(&self) {
-        if !self.running.load(Ordering::Acquire) {
+        if self.running.load(Ordering::Acquire) == 0 {
             return;
         }
         self.clock.interrupt();
-        self.control_tx.send(ControlMsg::Stop);
+        for control_tx in &self.control_txs {
+            control_tx.send(ControlMsg::Stop);
+        }
     }
 
     /// Jumps to an absolute position from the start of the media. Blocks
-    /// until the source has repositioned (see
+    /// until every source has repositioned (see
     /// [`crate::element::SourceElement::seek`]) and every element
-    /// downstream has reacted (a `Queue` drops its stale backlog, a
+    /// downstream of each has reacted (a `Queue` drops its stale backlog, a
     /// decoder flushes, a `Pacer` re-anchors both its pts reference and
     /// this pipeline's `Clock`) — same synchronous cascade as `pause`/
     /// `resume`/`stop`. One-shot, unlike `pause`: nothing further to undo
@@ -538,12 +652,21 @@ impl Pipeline {
     /// The clock's playback anchor is still reset later, inside
     /// [`crate::elements::Pacer::control`], after that in-flight frame is
     /// out of the way.
+    ///
+    /// A source that doesn't support seeking (e.g. a live capture) reports
+    /// that via its own [`crate::element::SourceElement::seek`] returning
+    /// an error — surfaced on [`Pipeline::bus`] as a
+    /// [`BusEvent::Error`] under that source's name, same as any other
+    /// per-source failure, rather than failing this call outright or
+    /// skipping that source silently.
     pub fn seek(&self, target: Duration) {
-        if !self.running.load(Ordering::Acquire) {
+        if self.running.load(Ordering::Acquire) == 0 {
             return;
         }
         self.clock.interrupt();
-        self.control_tx.send(ControlMsg::Seek(target));
+        for control_tx in &self.control_txs {
+            control_tx.send(ControlMsg::Seek(target));
+        }
     }
 }
 
@@ -554,7 +677,10 @@ mod tests {
     use super::*;
     use crate::{
         element::Source,
-        elements::{FileDemuxer, Pacer, Tee},
+        elements::{
+            FileDemuxer, Pacer, Tee, TestAudioOptions, TestAudioSource, TestVideoOptions,
+            TestVideoSource,
+        },
     };
 
     /// Real video file, one directory up from this crate — same one every
@@ -608,6 +734,82 @@ mod tests {
         );
     }
 
+    /// [`PipelineBuilder`] with two independent, indefinitely-running
+    /// sources (standing in for a real video capture + audio capture pair
+    /// feeding one [`crate::elements::Mp4Muxer`]) sharing one `Pipeline`:
+    /// both should show up in `topology()` under their *own* root, not
+    /// both defaulted to whichever source was added first (the exact bug
+    /// `Tee`'s own registration had before `default_upstream` existed —
+    /// see [`Context::default_upstream`]'s docs), and a single `stop()`
+    /// call must reach both — if it only reached one, the other source's
+    /// thread would still be alive holding its own `Bus` sender clone
+    /// open, and `pipeline.bus().iter().collect()` below would hang
+    /// forever instead of returning.
+    #[test]
+    fn multi_source_pipeline_stops_every_source_from_one_stop_call() {
+        let video = TestVideoSource::new("video", TestVideoOptions::default());
+        let audio = TestAudioSource::new("audio", TestAudioOptions::default());
+
+        let video_count = Arc::new(AtomicUsize::new(0));
+        let audio_count = Arc::new(AtomicUsize::new(0));
+
+        let pipeline = PipelineBuilder::new("multi-source-test")
+            .add_source(video, {
+                let count = video_count.clone();
+                move |source, ctx| {
+                    let branch = ChainBuilder::new(ctx.clone()).build(Box::new(CountingSink {
+                        name: "video-sink".into(),
+                        count,
+                        hlog: element_hlog(ElementType::Other, "video-sink", None),
+                    }));
+                    source.src_pads()[0].link(branch);
+                }
+            })
+            .add_source(audio, {
+                let count = audio_count.clone();
+                move |source, ctx| {
+                    let branch = ChainBuilder::new(ctx.clone()).build(Box::new(CountingSink {
+                        name: "audio-sink".into(),
+                        count,
+                        hlog: element_hlog(ElementType::Other, "audio-sink", None),
+                    }));
+                    source.src_pads()[0].link(branch);
+                }
+            })
+            .build();
+
+        let topology = pipeline.topology();
+        let mut branches: Vec<&str> = topology.split('\n').collect();
+        branches.sort_unstable();
+        assert_eq!(
+            branches,
+            vec![
+                "TestAudioSource(audio) - Other(audio-sink)",
+                "TestVideoSource(video) - Other(video-sink)",
+            ]
+        );
+
+        pipeline.run();
+        thread::sleep(Duration::from_millis(100));
+        pipeline.stop();
+
+        // Would hang here if `stop()` only reached one of the two sources
+        // — see this test's own docs.
+        let events: Vec<_> = pipeline.bus().iter().collect();
+        assert!(
+            !events.iter().any(|e| matches!(e, BusEvent::Error { .. })),
+            "unexpected error event(s): {events:?}"
+        );
+        assert!(
+            video_count.load(Ordering::SeqCst) > 0,
+            "video branch never received anything"
+        );
+        assert!(
+            audio_count.load(Ordering::SeqCst) > 0,
+            "audio branch never received anything"
+        );
+    }
+
     /// `seek()` mid-playback should reposition the source (no error from
     /// `Input::seek`), reset/flush everything downstream without
     /// deadlocking, and let packets keep flowing afterward.
@@ -623,6 +825,7 @@ mod tests {
 
         let count = Arc::new(AtomicUsize::new(0));
         let sink = CountingSink {
+            name: "counting-sink".into(),
             count: count.clone(),
             hlog: element_hlog(ElementType::Other, "counting-sink", None),
         };
@@ -758,11 +961,12 @@ mod tests {
 
     #[rust_hlog::hlog]
     struct CountingSink {
+        name: Arc<str>,
         count: Arc<AtomicUsize>,
     }
     impl Element for CountingSink {
         fn name(&self) -> Arc<str> {
-            "counting-sink".into()
+            self.name.clone()
         }
 
         fn element_type(&self) -> ElementType {
@@ -779,7 +983,12 @@ mod tests {
     }
     impl Sink for CountingSink {
         fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
-            if matches!(buf, MediaBuffer::Packet(_)) {
+            // Anything but `Eos` counts — covers `FileDemuxer`'s `Packet`s
+            // (what every other test using this sink actually sends) and
+            // `TestVideoSource`/`TestAudioSource`'s `Video`/`Audio` frames
+            // (what `multi_source_pipeline_stops_every_source_from_one_stop_call`
+            // sends) alike.
+            if !buf.is_eos() {
                 self.count.fetch_add(1, Ordering::SeqCst);
             }
             Ok(())
@@ -804,6 +1013,7 @@ mod tests {
             pipeline_id: "my-pipeline".into(),
             registry: ElementRegistry::new(),
             clock: Arc::new(Clock::new()),
+            default_upstream: "source".into(),
         });
         let built = ChainBuilder::new(context).build(Box::new(sink));
         assert_eq!(built.hlog().log_id(), "Other(noop):Pipeline(my-pipeline)");
