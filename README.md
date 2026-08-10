@@ -42,13 +42,19 @@ Everything is built from a handful of primitives in `lib/src/`:
   buffer crosses a `Queue` boundary, errors can't propagate with `?`
   anymore, so they're posted here instead (`Error`, `Eos`, `Dropped`).
   `BusReceiver::log_events()` drains and prints them in a default format.
-- **`Pipeline` / `ChainBuilder`** (`pipeline.rs`) — `ChainBuilder` builds
-  one linear chain (`.pipe(filter)` for same-thread stages, `.queue(name,
-  capacity)` for a thread boundary, `.build(sink)` to terminate);
-  `Pipeline::run()` drives a `SourceElement` on a background thread and
-  returns immediately; draining its bus waits for that source and every
-  reachable `Queue` worker to finish, provided the application has not
-  retained an extra `Context`/`Bus` sender.
+- **`Pipeline` / `ChainBuilder` / `PipelineBuilder`** (`pipeline.rs`) —
+  `ChainBuilder` builds one linear chain (`.pipe(filter)` for same-thread
+  stages, `.queue(name, capacity)` for a thread boundary, `.build(sink)` to
+  terminate); `Pipeline::run()` drives a `SourceElement` on a background
+  thread and returns immediately; draining its bus waits for that source
+  and every reachable `Queue` worker to finish, provided the application
+  has not retained an extra `Context`/`Bus` sender. `Pipeline::new` is the
+  single-source case; `PipelineBuilder::new(id).add_source(source, wire)…`
+  combines more than one independent `SourceElement` (e.g. a video capture
+  and an audio capture both feeding one `Mp4Muxer`) into one `Pipeline` —
+  each source gets its own thread, but they share one `Bus`/`Clock`/
+  registry, and `run`/`pause`/`resume`/`stop`/`seek` reach every source
+  from a single call.
 - **`Clock`** (`clock.rs`) — a shared wall-clock anchor (`Arc<Clock>`) so
   multiple `Pacer`s (e.g. one per stream) agree on the same t=0.
 
@@ -66,9 +72,14 @@ for); this table isn't meant to duplicate that.
 | `AppSource` | Application code pushes buffers in via a handle, from any thread — GStreamer's `appsrc` equivalent |
 | `RtspSource` | Demuxes a live RTSP stream (the client/receive counterpart to `RtspServer`) — no internal retry/reconnect on a dropped connection, fails fast instead; the caller rebuilds a fresh one to reconnect |
 | `TestVideoSource` | Generates a synthetic moving-gradient `Pixel::YUV420P` stream — GStreamer's `videotestsrc` equivalent, no file/camera/decoder needed |
+| `TestAudioSource` | Generates a synthetic sine-tone `Sample::F32(Packed)` audio stream — the audio sibling of `TestVideoSource`, no file/microphone/decoder needed |
 | `DxgiScreenSource` (`dxgi-capture`) | Captures the desktop live via DXGI Desktop Duplication — GStreamer's `d3d11screencapturesrc` equivalent. Pushes `Pixel::BGRA` untouched (chain a `Scaler` for YUV420P); emits at a constant `fps` (default 30, same convention as `TestVideoSource`) rather than one push per real desktop change — repeats the latest captured image if nothing changed since the last tick, since a variable-rate/push-on-change version of this turned out to cause visible judder against a vsync-locked renderer. `CaptureMode::Cpu` (default, optional cursor compositing) or `CaptureMode::Gpu` — the GPU mode resolves the capture adapter, creates its own `ID3D11Device`, and returns that device from `open()` so the renderer and other D3D11 stages can share it; capture then emits zero-copy `Pixel::D3D11` textures with no `Map`/CPU pixel copy (no cursor support yet in this mode) |
+| `AudioCaptureSource` (`wasapi-capture`) | Captures audio live via WASAPI — either a playback endpoint's own outgoing mix (loopback, i.e. system audio — the audio counterpart to record alongside `DxgiScreenSource`) or a microphone, picked from `AudioCaptureSource::list_devices()` |
+| `AudioMixer`¹ | Live-mixes any number of inputs, attachable/detachable while running via `MixerHandle::add_source`/`remove_source` (each returning/taking a `Sink` a *different* pipeline's own source can link to) — the fan-in counterpart to `Tee`'s fan-out |
 | `WebRtcPeer` (`webrtc`) | Drives one str0m `Rtc` session on its own thread. Not a `Pipeline` source itself — `WebRtcHandle::add_track`/`next_track()` mint a `WebRtcTrackSink`+`WebRtcTrackSource` pair per track (see below), symmetric for tracks either side added, so one `Direction::SendRecv` track carries both directions |
 | `WebRtcTrackSource` (`webrtc`) | The receive side of one WebRTC track — a plain `SourceElement`, same shape as `AppSource`; obtained via `WebRtcHandle::next_track()`, not constructed directly |
+
+¹ Each input is driven from wherever it was attached — typically a *different* `Pipeline`/thread than the one the `AudioMixer` itself is the source of, which is the whole point (e.g. a capture pipeline feeding a mixer that another pipeline reads from). For combining a fixed, known-up-front set of live sources into one output instead (no dynamic attach/detach needed), see `PipelineBuilder` — a simpler fit for e.g. one video capture + one audio capture feeding a single `Mp4Muxer`.
 
 ### Filters
 
@@ -79,23 +90,27 @@ for); this table isn't meant to duplicate that.
 | `D3d11Decoder` (`d3d11-renderer`) | Decodes into GPU-resident `Video` frames via D3D11VA hardware acceleration — the D3D11 sibling of `D3d12vaDecoder`. `extra_hw_frames` matters here in a way it doesn't for D3D12: D3D11VA's decode surface pool is fixed-size, sized once at open time, so it must cover the deepest downstream queue/buffer or decode itself starts failing once the pool runs out |
 | `D3d11Upload` (`d3d11-renderer`) | Uploads CPU-resident `Pixel::NV12` frames to a GPU-resident `Pixel::D3D11` texture — the D3D11 sibling of `D3d12Upload`. Doesn't go through FFmpeg's own hwframe-pool machinery at all (an earlier version that did corrupted memory); builds the `ID3D11Texture2D` directly via plain `windows-rs` calls instead |
 | `SwEncoder` | Encodes `Video` frames into `Packet`s (software only) — `VideoCodec` picks H.264/H.265/VP8/VP9/AV1 across GPL (`libx264`/`libx265`) and non-GPL (`libopenh264`/`libkvazaar`/`libvpx`/`libaom-av1`/`libsvtav1`) encoders; fails with a clear error, not a panic, if the linked ffmpeg build doesn't have the one you asked for |
+| `SwAudioEncoder` | Encodes `Audio` frames into `Packet`s (software `aac`) — resamples to whatever format/channel layout the codec actually needs, built lazily from the first frame it sees |
 | `Pacer` | Releases buffers at real playback speed (PTS + a shared `Clock`) |
 | `Scaler` | Converts pixel format and resizes `Video` frames in one pass (`libswscale`) |
-| `Tee`¹ | Fans one input out to a dynamic set of sinks, addable/removable while the pipeline runs |
+| `Tee`² | Fans one input out to a dynamic set of sinks, addable/removable while the pipeline runs |
 
-¹ Doesn't actually implement `Source` — its pads live behind a lock instead of a plain `&mut [SrcPad]`, so a handle on another thread can request add/remove while `consume` is running. The operation completes after the in-flight `consume` releases that lock. See its own doc comment.
+² Doesn't actually implement `Source` — its pads live behind a lock instead of a plain `&mut [SrcPad]`, so a handle on another thread can request add/remove while `consume` is running. The operation completes after the in-flight `consume` releases that lock. See its own doc comment.
 
 ### Sinks
 
 | Element | What it does |
 |---|---|
 | `FrameCounter` / `PacketCounter` | Count decoded frames / raw packets, expose the count via `Arc<AtomicUsize>` |
+| `Mp4Muxer`³ | Muxes one or more `Packet` streams — encoder output (`SwEncoder`/`SwAudioEncoder`) or a `FileDemuxer`'s own streams for a pure remux — into an MP4 file, one or more tracks |
 | `D3d12Renderer` (`d3d12-renderer`) | Submits frames to a `D3d12FrameRenderer` impl — zero-copy for `D3d12vaDecoder`'s frames. `media-pp` only defines the trait (plus `RawPlane`/`SubmitError`); the actual DX12 window rendering lives in `examples/render/render_common`'s own `D3d12WindowRenderer` |
 | `D3d11Renderer` (`d3d11-renderer`) | Submits frames to a `D3d11FrameRenderer` impl — zero-copy for `D3d11Upload`/`D3d11Decoder`/`DxgiScreenSource`'s GPU mode. No fence, no `keep_alive` (unlike `D3d12FrameRenderer`): every producer in this crate's D3D11 stack shares one `ID3D11Device`+context, and D3D11's own driver-deferred resource destruction means the runtime — not this crate — keeps a texture alive for as long as the GPU still needs it. `examples/render/render_common`'s own `D3d11WindowRenderer` is the concrete implementation |
 | `RtspServer` (`rtsp-server`) | Spawns a vendored MediaMTX and remuxes packets into it as a live RTSP stream |
 | `AppSink` | Hands buffers (and, optionally, control messages) to plain closures — GStreamer's `appsink` equivalent |
 | `OrtDetector` (`ort`) | Runs a YOLOv8/v11-style ONNX model on each frame via `ort`, hands decoded/NMS-filtered detections to a closure |
 | `WebRtcTrackSink` (`webrtc`) | The send side of one WebRTC track — `consume()` hands off to its `WebRtcPeer`'s own thread; handed out by `WebRtcHandle::next_track()`, not `WebRtcHandle::add_track` (which only returns a `TrackId`) |
+
+³ Not a plain `Sink` itself — `Mp4Muxer::create`/`add_stream`/`open` is a two-phase builder, since a container's header has to describe every track's codec parameters before it can be written at all. `create` opens the file, `add_stream` registers one track at a time (name + `codec::Parameters` + `time_base`), and `open` writes the header and returns one real `Sink` per track, in registration order — all sharing one lock around the file, so tracks fed from independently-threaded branches (e.g. one video encode chain, one audio encode chain) can write concurrently without racing. The trailer is written once *every* track reports done (`Eos` or `Stop`), not on whichever finishes first. See its own doc comment, and `PipelineBuilder` for wiring two independent live sources (e.g. video + audio capture) into the tracks it expects.
 
 ## Examples (`examples/`)
 
@@ -116,6 +131,16 @@ have their own arguments or need none.
 | `tee` | Demux → Tee → {SwDecoder → FrameCounter, PacketCounter} | `Tee` fanning the same packets out to two independent consumers |
 | `app_sink` | Demux → SwDecoder → AppSink | Same chain as `decode`, but the terminal sink is a plain closure instead of a bespoke `FrameCounter` |
 | `app_source` | AppSource → SwDecoder → FrameCounter | A background thread feeds packets in via `AppSourceHandle`, standing in for whatever a real external producer would push from |
+| `audio_record` | TestAudioSource → SwAudioEncoder → Mp4Muxer | Encodes a synthetic sine tone straight into a playable `.mp4` — `Mp4Muxer`'s single-track path, the audio counterpart to `transcode_render`'s `SwEncoder` proof |
+| `remux` | FileDemuxer → Mp4Muxer (one track per kept stream) | Remuxes a file's video + audio streams into a new `.mp4` with no decode/re-encode — `Mp4Muxer`'s multi-track builder driven by a single source's multiple `src_pads`, packets passed through untouched |
+
+### Recording (Windows only)
+
+| Crate | Pipeline | Demonstrates |
+|---|---|---|
+| `audio_capture` (`wasapi-capture`) | AudioCaptureSource → FrameCounter | Lists WASAPI endpoints, captures ~3s from one (system-audio loopback by default, or a microphone), reports how many buffers came through |
+| `screen_record` (`dxgi-capture`) | DxgiScreenSource → Scaler → SwEncoder → Mp4Muxer | Headless desktop recording straight to `.mp4` — no window, no renderer (compare `screen_capture`, which renders instead of encoding) |
+| `screen_audio_record` (`dxgi-capture` + `wasapi-capture`) | DxgiScreenSource + AudioCaptureSource → Mp4Muxer | Desktop + system-audio recording combined into one file — two independent live sources driven by one `PipelineBuilder`-built `Pipeline`, both tracks finalized together; stops on `q` + Enter in the terminal |
 
 ### Playback (Windows only)
 
@@ -192,6 +217,14 @@ cargo run -p sw_decode_render              # d3d12-renderer is already enabled i
   `screen_capture`/`screen_capture_gpu` turn it on in their own
   `Cargo.toml` (alongside `d3d12-renderer`/`d3d11-renderer` respectively,
   to actually render what they capture).
+- `wasapi-capture` (on `media-pp`) — pulls in `windows` (WASAPI/Core Audio
+  sub-features) and enables `AudioCaptureSource`/`AudioCaptureOptions`/
+  `AudioDevice`/`AudioDeviceKind`. Independent of `dxgi-capture`/
+  `d3d11-renderer`/`d3d12-renderer` — capturing audio needs none of them —
+  but commonly turned on alongside `dxgi-capture` for a combined
+  desktop+audio recording (see `screen_audio_record`). Windows-only (WASAPI
+  itself is a Windows API). `audio_capture`/`screen_audio_record` turn it
+  on in their own `Cargo.toml`.
 - `rtsp-server` (on `media-pp`) — enables `RtspServer` and copies the
   vendored `mediamtx.exe` (`third_party/mediamtx/`, MIT-licensed) next to
   whatever binary depends on `media-pp` (see `lib/build.rs`). Windows-only
@@ -216,8 +249,8 @@ cargo run -p sw_decode_render              # d3d12-renderer is already enabled i
   ffmpeg build with `d3d12va`/`d3d11va` hwaccel support respectively (check
   `ffmpeg -hwaccels`) and a GPU/driver that supports it.
 - All `examples/render/*` crates (and the
-  `d3d12-renderer`/`d3d11-renderer`/`dxgi-capture` features themselves)
-  only build/run on Windows.
+  `d3d12-renderer`/`d3d11-renderer`/`dxgi-capture`/`wasapi-capture`
+  features themselves) only build/run on Windows.
 - `D3d12vaDecoder` hand-mirrors a few structs from FFmpeg's
   `libavutil/hwcontext_d3d12va.h` that `ffmpeg-sys-next` doesn't bind
   (see the doc comment at the top of

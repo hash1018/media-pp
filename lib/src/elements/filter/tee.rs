@@ -54,9 +54,11 @@ impl Tee {
     /// Starts with no sinks — add some via the returned [`TeeHandle`]
     /// before (or any time after) wiring `Tee` itself into the pipeline.
     /// `context` should be the same one [`crate::pipeline::Pipeline::new`]'s
-    /// `wire` closure was handed. The `Tee` keeps that context alive while
-    /// it belongs to the pipeline; `TeeHandle` accesses it weakly so the
-    /// handle itself cannot extend the pipeline's lifetime.
+    /// (or, for a multi-source pipeline,
+    /// [`crate::pipeline::PipelineBuilder::add_source`]'s) `wire` closure
+    /// was handed. The `Tee` keeps that context alive while it belongs to
+    /// the pipeline; `TeeHandle` accesses it weakly so the handle itself
+    /// cannot extend the pipeline's lifetime.
     pub fn new(name: impl Into<String>, context: Arc<Context>) -> (Self, TeeHandle) {
         let name: Arc<str> = name.into().into();
         let hlog = element_hlog(ElementType::Tee, &name, None);

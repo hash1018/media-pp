@@ -177,8 +177,10 @@ impl SwEncoder {
 
     /// This encoder's own codec parameters — what you need to construct
     /// a matching [`crate::elements::SwDecoder`] to decode the `Packet`s
-    /// this produces, when there's no container/demuxer in the loop to
-    /// get them from otherwise (e.g. encoding straight into a `Tee`/RTSP
+    /// this produces, or what a [`crate::elements::Mp4Muxer`] track needs
+    /// (same pattern [`crate::elements::SwAudioEncoder::parameters`]
+    /// documents for audio), when there's no container/demuxer in the loop
+    /// to get them from otherwise (e.g. encoding straight into a `Tee`/RTSP
     /// sink, or decoding straight back out for a round-trip smoke test).
     pub fn parameters(&self) -> ffmpeg::codec::Parameters {
         ffmpeg::codec::Parameters::from(&self.encoder)

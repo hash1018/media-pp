@@ -12,12 +12,12 @@ use media_pp::{
 /// get rescaled to whatever time_base the output container actually
 /// assigns each stream (see `Mp4Muxer::open`'s own docs).
 ///
-/// Unlike combining a *live* video capture with a *live* audio capture
-/// (two independent sources, so two separate `Pipeline`s — see
-/// `screen_record`/`audio_record`), `FileDemuxer` is a single source with
-/// one `src_pad` per container stream, so this only needs one `Pipeline` —
-/// `Eos` reaches every kept stream's `Mp4Muxer` sink from the same source
-/// thread, no manual cross-pipeline coordination needed.
+/// `FileDemuxer` is a single source with one `src_pad` per container
+/// stream, so — unlike combining two independent *live* sources (see
+/// `screen_audio_record`, which needs `PipelineBuilder` for exactly that)
+/// — this only ever needs one `Pipeline`: `Eos` reaches every kept
+/// stream's `Mp4Muxer` sink from that same source thread, no multi-source
+/// coordination needed.
 ///
 ///     cargo run -p remux -- [input.mp4] [output.mp4]
 fn main() -> media_pp::Result<()> {

@@ -12,9 +12,9 @@ use media_pp::{
 
 /// TestAudioSource -> SwAudioEncoder -> Mp4Muxer: encodes a generated sine
 /// tone straight into a playable `.mp4` file — the audio-only counterpart
-/// to `screen_record`'s video path. Combining a video track and an audio
-/// track into the same file together is deliberately separate, later work
-/// (see `Mp4Muxer`'s own docs); this writes an audio-only MP4.
+/// to `screen_record`'s video path, and `Mp4Muxer`'s single-track path
+/// (see `screen_audio_record` for a video+audio track combined into one
+/// file instead).
 ///
 ///     cargo run -p audio_record -- [output.mp4] [seconds]
 fn main() -> media_pp::Result<()> {
