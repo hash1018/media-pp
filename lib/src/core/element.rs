@@ -27,6 +27,7 @@ pub enum ElementType {
     TestVideoSource,
     DxgiScreenSource,
     AudioCaptureSource,
+    AudioMixer,
     WebRtcPeer,
     SwDecoder,
     D3d12vaDecoder,

@@ -25,8 +25,9 @@ pub use sink::{D3d12FrameRenderer, D3d12Renderer, D3d12RendererError, RawPlane};
 #[cfg(feature = "rtsp-server")]
 pub use sink::{PortPolicy, PublishTransport, RtspServer, RtspServerError, ViewerTransport};
 pub use source::{
-    AppSource, AppSourceError, AppSourceHandle, FileDemuxError, FileDemuxer, RtspOptions,
-    RtspSource, RtspSourceError, RtspTransport, StreamInfo, TestVideoOptions, TestVideoSource,
+    AppSource, AppSourceError, AppSourceHandle, AudioMixer, AudioMixerError, AudioMixerOptions,
+    FileDemuxError, FileDemuxer, MixerHandle, MixerInputSink, RtspOptions, RtspSource,
+    RtspSourceError, RtspTransport, StreamInfo, TestVideoOptions, TestVideoSource,
     TestVideoSourceError,
 };
 #[cfg(feature = "wasapi-capture")]

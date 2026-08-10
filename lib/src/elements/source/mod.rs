@@ -1,6 +1,7 @@
 mod app_source;
 #[cfg(feature = "wasapi-capture")]
 mod audio_capture_source;
+mod audio_mixer;
 #[cfg(feature = "dxgi-capture")]
 mod dxgi_screen_source;
 mod file_demuxer;
@@ -11,6 +12,9 @@ pub use app_source::{AppSource, AppSourceError, AppSourceHandle};
 #[cfg(feature = "wasapi-capture")]
 pub use audio_capture_source::{
     AudioCaptureOptions, AudioCaptureSource, AudioCaptureSourceError, AudioDevice, AudioDeviceKind,
+};
+pub use audio_mixer::{
+    AudioMixer, AudioMixerError, AudioMixerOptions, MixerHandle, MixerInputSink,
 };
 #[cfg(feature = "dxgi-capture")]
 pub use dxgi_screen_source::{
