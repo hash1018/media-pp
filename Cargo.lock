@@ -3009,6 +3009,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "webrtc_av_loopback"
+version = "0.1.0"
+dependencies = [
+ "ffmpeg-next",
+ "media-pp",
+ "rust-hlog",
+ "str0m",
+]
+
+[[package]]
 name = "webrtc_loopback"
 version = "0.1.0"
 dependencies = [

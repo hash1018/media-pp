@@ -184,6 +184,7 @@ The D3D12 examples above build their `D3d12Renderer`, and the D3D11 ones their `
 | Crate | Pipeline | Demonstrates |
 |---|---|---|
 | `webrtc_loopback` | Two `WebRtcPeer`s over loopback UDP | One `Direction::SendRecv` track (opened by `WebRtcHandle::add_track` on one side, accepted via `WebRtcHandle::accept_remote_offer` on the other) carrying data both ways over the *same* `Mid` — no second negotiation for the reverse direction. No browser/signaling server: real ICE/DTLS-SRTP over loopback UDP |
+| `webrtc_av_loopback` | TestVideoSource → SwEncoder → WebRtcTrackSink, TestAudioSource → SwAudioEncoder → WebRtcTrackSink (two `PipelineBuilder` sources) | Two tracks — one video, one audio — negotiated onto the *same* `WebRtcPeer` connection (two sequential `add_track` renegotiations, one `Rtc`/socket/peer pair), each carrying real encoded media; peer-b counts packets per track to prove they arrive independently, no cross-contamination |
 
 ```sh
 cargo run -p decode -- path/to/video.mp4   # or omit the path to use test-video/h265.mp4
