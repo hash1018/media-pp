@@ -36,6 +36,7 @@ pub enum ElementType {
     D3d11Decoder,
     D3d11Upload,
     SwEncoder,
+    SwAudioEncoder,
     Pacer,
     Scaler,
     Tee,
@@ -47,6 +48,7 @@ pub enum ElementType {
     RtspServer,
     AppSink,
     OrtDetector,
+    Mp4Muxer,
     /// Anything outside this crate's own elements — a test double, or a
     /// custom `Sink`/`SourceElement` implemented downstream of this
     /// crate. Keeps this enum from needing to grow every time someone

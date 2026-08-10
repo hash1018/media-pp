@@ -1,5 +1,6 @@
 mod app_sink;
 mod frame_counter;
+mod mp4_muxer;
 #[cfg(feature = "ort")]
 mod ort_detector;
 mod packet_counter;
@@ -9,6 +10,7 @@ mod rtsp_server;
 
 pub use app_sink::AppSink;
 pub use frame_counter::FrameCounter;
+pub use mp4_muxer::{Mp4Muxer, Mp4MuxerError, Mp4MuxerStreamSink};
 #[cfg(feature = "ort")]
 pub use ort_detector::{COCO_CLASS_LABELS, Detection, OrtDetector, OrtDetectorError};
 pub use packet_counter::PacketCounter;

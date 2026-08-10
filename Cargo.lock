@@ -163,6 +163,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "audio_record"
+version = "0.1.0"
+dependencies = [
+ "media-pp",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1959,6 +1966,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
+name = "remux"
+version = "0.1.0"
+dependencies = [
+ "ffmpeg-next",
+ "media-pp",
+]
+
+[[package]]
 name = "render_common"
 version = "0.1.0"
 dependencies = [
@@ -2105,6 +2120,14 @@ dependencies = [
  "media-pp",
  "render_common",
  "winit",
+]
+
+[[package]]
+name = "screen_record"
+version = "0.1.0"
+dependencies = [
+ "ffmpeg-next",
+ "media-pp",
 ]
 
 [[package]]

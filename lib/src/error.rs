@@ -16,8 +16,9 @@ use crate::elements::{D3d11RendererError, D3d11UploadError, D3d11vaDecoderError}
 use crate::elements::{D3d12RendererError, D3d12UploadError, D3d12vaDecoderError};
 use crate::{
     elements::{
-        AppSourceError, AudioMixerError, FileDemuxError, RtspSourceError, ScalerError,
-        SwDecoderError, SwEncoderError, TestAudioSourceError, TestVideoSourceError,
+        AppSourceError, AudioMixerError, FileDemuxError, Mp4MuxerError, RtspSourceError,
+        ScalerError, SwAudioEncoderError, SwDecoderError, SwEncoderError, TestAudioSourceError,
+        TestVideoSourceError,
     },
     queue::QueueError,
 };
@@ -55,6 +56,9 @@ pub enum Error {
     SwEncoderError(#[from] SwEncoderError),
 
     #[error(transparent)]
+    SwAudioEncoderError(#[from] SwAudioEncoderError),
+
+    #[error(transparent)]
     ScalerError(#[from] ScalerError),
 
     #[error(transparent)]
@@ -62,6 +66,9 @@ pub enum Error {
 
     #[error(transparent)]
     AudioMixerError(#[from] AudioMixerError),
+
+    #[error(transparent)]
+    Mp4MuxerError(#[from] Mp4MuxerError),
 
     #[cfg(feature = "rtsp-server")]
     #[error(transparent)]

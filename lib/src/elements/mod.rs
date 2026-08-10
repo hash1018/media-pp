@@ -7,15 +7,18 @@ pub mod source;
 pub use driver::{
     TrackId, WebRtcError, WebRtcHandle, WebRtcPeer, WebRtcTrackSink, WebRtcTrackSource,
 };
+pub use filter::{
+    AudioCodec, Pacer, Scaler, ScalerError, SwAudioEncoder, SwAudioEncoderError,
+    SwAudioEncoderOptions, SwDecoder, SwDecoderError, SwEncoder, SwEncoderError, SwEncoderOptions,
+    Tee, TeeHandle, VideoCodec,
+};
 #[cfg(feature = "d3d11-renderer")]
 pub use filter::{D3d11Decoder, D3d11Upload, D3d11UploadError, D3d11vaDecoderError};
 #[cfg(feature = "d3d12-renderer")]
 pub use filter::{D3d12Upload, D3d12UploadError, D3d12vaDecoder, D3d12vaDecoderError};
-pub use filter::{
-    Pacer, Scaler, ScalerError, SwDecoder, SwDecoderError, SwEncoder, SwEncoderError,
-    SwEncoderOptions, Tee, TeeHandle, VideoCodec,
+pub use sink::{
+    AppSink, FrameCounter, Mp4Muxer, Mp4MuxerError, Mp4MuxerStreamSink, PacketCounter, SubmitError,
 };
-pub use sink::{AppSink, FrameCounter, PacketCounter, SubmitError};
 #[cfg(feature = "ort")]
 pub use sink::{COCO_CLASS_LABELS, Detection, OrtDetector, OrtDetectorError};
 #[cfg(feature = "d3d11-renderer")]

@@ -10,7 +10,10 @@ pub use decoder::{D3d11Decoder, D3d11vaDecoderError};
 #[cfg(feature = "d3d12-renderer")]
 pub use decoder::{D3d12vaDecoder, D3d12vaDecoderError};
 pub use decoder::{SwDecoder, SwDecoderError};
-pub use encoder::{SwEncoder, SwEncoderError, SwEncoderOptions, VideoCodec};
+pub use encoder::{
+    AudioCodec, SwAudioEncoder, SwAudioEncoderError, SwAudioEncoderOptions, SwEncoder,
+    SwEncoderError, SwEncoderOptions, VideoCodec,
+};
 pub use pacer::Pacer;
 pub use scaler::{Scaler, ScalerError};
 pub use tee::{Tee, TeeHandle};

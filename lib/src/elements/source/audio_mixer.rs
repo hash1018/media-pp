@@ -86,7 +86,22 @@ impl InputBuffer {
         };
         let mut output = ffmpeg::frame::Audio::empty();
         resampler.run(frame, &mut output)?;
-        self.samples.extend(output.plane::<f32>(0).iter().copied());
+        // Raw bytes, not `plane::<f32>(0)`: `ffmpeg_next`'s `plane::<T>()`
+        // always returns exactly `output.samples()` elements of type `T`,
+        // which for **packed multi-channel** data (this mixer's own fixed
+        // `Sample::F32(Packed)` target — see `AudioMixer::new`) covers only
+        // the first `samples()` of the real `samples() * channels`
+        // interleaved scalars actually in the buffer, silently dropping
+        // every channel past the first once `target_layout` has more than
+        // one. Same fix, and the same root cause, as
+        // `crate::elements::SwAudioEncoder`'s own `absorb_resampled`
+        // (found while building that element — this call predates it).
+        let samples = output.samples();
+        let channels = target_layout.channels() as usize;
+        let bytes = &output.data(0)[..samples * channels * 4];
+        let interleaved =
+            unsafe { std::slice::from_raw_parts(bytes.as_ptr() as *const f32, bytes.len() / 4) };
+        self.samples.extend(interleaved.iter().copied());
         Ok(())
     }
 }
@@ -525,6 +540,143 @@ mod tests {
         }
         fn control(&mut self, _msg: ControlMsg) -> Result<()> {
             Ok(())
+        }
+    }
+
+    fn constant_stereo_frame(
+        left: f32,
+        right: f32,
+        samples: usize,
+        rate: u32,
+    ) -> ffmpeg::frame::Audio {
+        let mut frame = ffmpeg::frame::Audio::new(
+            ffmpeg::format::Sample::F32(ffmpeg::format::sample::Type::Packed),
+            samples,
+            ffmpeg::ChannelLayout::default(2),
+        );
+        frame.set_rate(rate);
+        let bytes = frame.data_mut(0);
+        let floats =
+            unsafe { std::slice::from_raw_parts_mut(bytes.as_mut_ptr() as *mut f32, samples * 2) };
+        for pair in floats.chunks_mut(2) {
+            pair[0] = left;
+            pair[1] = right;
+        }
+        frame
+    }
+
+    #[rust_hlog::hlog]
+    struct StereoRecordingSink {
+        seen: Arc<StdMutex<Vec<(f32, f32)>>>,
+    }
+
+    impl Element for StereoRecordingSink {
+        fn name(&self) -> Arc<str> {
+            "stereo-recorder".into()
+        }
+        fn element_type(&self) -> ElementType {
+            ElementType::Other
+        }
+        fn hlog(&self) -> &HLog {
+            &self.hlog
+        }
+        fn hlog_mut(&mut self) -> &mut HLog {
+            &mut self.hlog
+        }
+    }
+
+    impl Sink for StereoRecordingSink {
+        fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+            if let MediaBuffer::Audio(frame) = buf
+                && frame.samples() > 0
+            {
+                // Raw bytes, not `plane::<f32>(0)`, for the same reason
+                // `InputBuffer::push` above does: `AudioMixer`'s output is
+                // packed multi-channel, and `plane::<T>()` only ever
+                // returns `samples()` elements regardless of channel
+                // count — reading channel 1 through it would silently
+                // read the wrong offset (still inside channel 0's data),
+                // not the second channel.
+                let samples = frame.samples();
+                let bytes = &frame.data(0)[..samples * 2 * 4];
+                let floats = unsafe {
+                    std::slice::from_raw_parts(bytes.as_ptr() as *const f32, samples * 2)
+                };
+                self.seen.lock().unwrap().push((floats[0], floats[1]));
+            }
+            Ok(())
+        }
+        fn control(&mut self, _msg: ControlMsg) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Regression test for the packed-multichannel `InputBuffer::push` bug
+    /// (see the comment there): two stereo inputs, each with distinct,
+    /// asymmetric L/R values, should sum per-channel without the channels
+    /// bleeding into each other or silently dropping to zero. Before the
+    /// fix, `plane::<f32>(0)` under-read the resampled buffer (only
+    /// `samples()` interleaved scalars instead of `samples() * channels`),
+    /// which desynced every input's channel alignment.
+    #[test]
+    fn mixes_stereo_sources_without_channel_corruption() {
+        let (mixer, handle) = AudioMixer::new(
+            "mixer",
+            AudioMixerOptions {
+                sample_rate: 48000,
+                channels: 2,
+            },
+        );
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let sink = StereoRecordingSink {
+            seen: seen.clone(),
+            hlog: element_hlog(ElementType::Other, "stereo-recorder", None),
+        };
+
+        let pipeline = Pipeline::new("mixer-stereo-test", mixer, |source, ctx| {
+            let branch = ChainBuilder::new(ctx.clone()).build(Box::new(sink));
+            source.src_pads()[0].link(branch);
+        });
+        pipeline.run();
+
+        let mut input_a = handle.add_source("a").expect("mixer still alive");
+        let mut input_b = handle.add_source("b").expect("mixer still alive");
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let feeder_stop = stop.clone();
+        let feeder = std::thread::spawn(move || {
+            while !feeder_stop.load(Ordering::Relaxed) {
+                let _ = input_a.consume(MediaBuffer::Audio(Arc::new(constant_stereo_frame(
+                    0.2, -0.1, 480, 48000,
+                ))));
+                let _ = input_b.consume(MediaBuffer::Audio(Arc::new(constant_stereo_frame(
+                    0.1, -0.2, 480, 48000,
+                ))));
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        });
+
+        std::thread::sleep(Duration::from_millis(300));
+        stop.store(true, Ordering::Relaxed);
+        feeder.join().unwrap();
+        pipeline.stop();
+        pipeline.bus().log_events();
+
+        let seen = seen.lock().unwrap();
+        assert!(
+            seen.len() > 5,
+            "expected several mixed frames, got {seen:?}"
+        );
+        let steady = &seen[3..seen.len() - 2];
+        for &(left, right) in steady {
+            assert!(
+                (left - 0.3).abs() < 0.01,
+                "expected left channel ~0.3, got {left} in {seen:?}"
+            );
+            assert!(
+                (right - -0.3).abs() < 0.01,
+                "expected right channel ~-0.3, got {right} in {seen:?}"
+            );
         }
     }
 
