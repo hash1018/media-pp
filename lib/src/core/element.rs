@@ -25,6 +25,7 @@ pub enum ElementType {
     AppSource,
     RtspSource,
     TestVideoSource,
+    TestAudioSource,
     DxgiScreenSource,
     AudioCaptureSource,
     AudioMixer,

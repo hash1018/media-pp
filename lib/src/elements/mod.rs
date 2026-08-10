@@ -27,8 +27,8 @@ pub use sink::{PortPolicy, PublishTransport, RtspServer, RtspServerError, Viewer
 pub use source::{
     AppSource, AppSourceError, AppSourceHandle, AudioMixer, AudioMixerError, AudioMixerOptions,
     FileDemuxError, FileDemuxer, MixerHandle, MixerInputSink, RtspOptions, RtspSource,
-    RtspSourceError, RtspTransport, StreamInfo, TestVideoOptions, TestVideoSource,
-    TestVideoSourceError,
+    RtspSourceError, RtspTransport, StreamInfo, TestAudioOptions, TestAudioSource,
+    TestAudioSourceError, TestVideoOptions, TestVideoSource, TestVideoSourceError,
 };
 #[cfg(feature = "wasapi-capture")]
 pub use source::{
