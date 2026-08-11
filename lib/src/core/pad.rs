@@ -1,4 +1,11 @@
-use crate::{buffer::MediaBuffer, control::ControlMsg, element::Sink, error::Result};
+use std::sync::Arc;
+
+use crate::{
+    buffer::MediaBuffer,
+    control::ControlMsg,
+    element::{ElementType, Sink},
+    error::Result,
+};
 
 /// An output port an [`Element`](crate::element::Element) owns. Data only
 /// ever leaves an element through one of its src pads — there is no other
@@ -31,6 +38,17 @@ impl SrcPad {
 
     pub fn is_linked(&self) -> bool {
         self.peer.is_some()
+    }
+
+    /// The linked sink's own identity, without touching the link itself —
+    /// lets a caller that just saw [`SrcPad::push`]/[`SrcPad::control`]
+    /// fail (e.g. [`crate::elements::Tee`], fanning out to several pads at
+    /// once) report *which* downstream element the failure actually came
+    /// from, instead of only knowing its own. `None` for an unlinked pad.
+    pub fn peer_identity(&self) -> Option<(ElementType, Arc<str>)> {
+        self.peer
+            .as_ref()
+            .map(|sink| (sink.element_type(), sink.name()))
     }
 
     /// Links this pad to a downstream `Sink` — a plain element, a `Queue`

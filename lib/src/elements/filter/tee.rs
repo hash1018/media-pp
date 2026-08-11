@@ -86,17 +86,26 @@ impl Tee {
         )
     }
 
-    /// Posts a branch's `push` failure to the bus under `Tee`'s own
-    /// identity — mirrors how `Queue`'s worker loop attributes a failed
-    /// downstream `consume()` to itself rather than the thing it was
-    /// pushing into, since that's the only identity `Tee` reliably knows
-    /// here (`SrcPad` doesn't expose which element it's linked to).
-    fn report_branch_error(&self, error: crate::error::Error) {
+    /// Posts a branch's `push` failure to the bus under *that branch's*
+    /// own identity (via [`SrcPad::peer_identity`]) — unlike `Queue`,
+    /// which only ever has one downstream and so can only attribute a
+    /// failure to itself, `Tee` fans out to several and does know which
+    /// one just failed. Reporting it that way (rather than folding every
+    /// branch's failures into one generic `Tee` event) is what lets a
+    /// caller watching the bus tell branches apart and call
+    /// [`TeeHandle::remove_sink`] on the right one. Falls back to `Tee`'s
+    /// own identity in the same call that just unlinked its peer, though
+    /// in practice that can't happen: `pad`'s peer is still there
+    /// whenever this is called (`SrcPad::push` never unlinks on `Err`).
+    fn report_branch_error(&self, pad: &SrcPad, error: crate::error::Error) {
+        let (element_type, name) = pad
+            .peer_identity()
+            .unwrap_or((ElementType::Tee, self.name.clone()));
         self.shared.context.bus.post(
             &self.hlog,
             BusEvent::Error {
-                element_type: ElementType::Tee,
-                name: self.name.clone(),
+                element_type,
+                name,
                 error,
             },
         );
@@ -141,28 +150,38 @@ impl TeeHandle {
         pads.push(pad);
     }
 
-    /// Removes the sink at `index`, if present, and drops it — cleanup
-    /// happens exactly the same way an abandoned/`Stop`'d branch's does
-    /// elsewhere in this crate (e.g. `SwDecoder`/`D3d12vaDecoder` only
-    /// flush on `Seek`, not `Stop`, precisely because dropping without an
-    /// explicit shutdown message is already a normal, accepted way to
-    /// abandon a sink here). Doesn't hand the removed `Box<dyn Sink>` back
-    /// — deliberately: re-adding the same removed sink elsewhere isn't a
-    /// supported way to get it back into [`crate::pipeline::Pipeline::topology`]
-    /// (see `ElementRegistry::remove_subtree`'s own
-    /// docs), so returning it would just invite exactly that. Want a
-    /// branch back? Build a fresh one.
-    pub fn remove_sink(&self, index: usize) {
+    /// Removes the sink named `name` — the same `Element::name()` a branch
+    /// carries into its own [`crate::bus::BusEvent`]s, including the ones
+    /// [`Tee::report_branch_error`] posts when that branch's `push` fails
+    /// — so a caller reacting to an error on the bus can call this
+    /// straight off `BusEvent::Error`'s own `name` field, without having
+    /// separately tracked which position `add_sink` assigned it. A no-op
+    /// if nothing by that name is currently attached (already removed, or
+    /// never added). Drops the sink on removal — cleanup happens exactly
+    /// the same way an abandoned/`Stop`'d branch's does elsewhere in this
+    /// crate (e.g. `SwDecoder`/`D3d12vaDecoder` only flush on `Seek`, not
+    /// `Stop`, precisely because dropping without an explicit shutdown
+    /// message is already a normal, accepted way to abandon a sink here).
+    /// Doesn't hand the removed `Box<dyn Sink>` back — deliberately:
+    /// re-adding the same removed sink elsewhere isn't a supported way to
+    /// get it back into [`crate::pipeline::Pipeline::topology`] (see
+    /// `ElementRegistry::remove_subtree`'s own docs), so returning it
+    /// would just invite exactly that. Want a branch back? Build a fresh
+    /// one.
+    pub fn remove_sink(&self, name: &str) {
         let Some(shared) = self.shared.upgrade() else {
             return;
         };
         let mut pads = shared.pads.lock().unwrap();
-        if index >= pads.len() {
+        let Some(index) = pads
+            .iter()
+            .position(|pad| pad.peer_identity().is_some_and(|(_, n)| &*n == name))
+        else {
             return;
-        }
+        };
         hinfo!(
             hlog: &element_hlog(ElementType::Tee, &self.name, None),
-            "sink removed: index={index}, {} remaining",
+            "sink removed: name={name}, {} remaining",
             pads.len() - 1
         );
         if let Some(sink) = pads.remove(index).unlink() {
@@ -171,6 +190,43 @@ impl TeeHandle {
             // has no idea it was ever removed unless told.
             shared.context.registry.remove_subtree(&sink.name());
             // `sink` drops here.
+        }
+    }
+
+    /// Same effect as [`TeeHandle::remove_sink`], but `name` doesn't have
+    /// to be the branch's own root — it can be *any* element inside it,
+    /// found by walking [`crate::element::ElementInfo::upstream`] (the
+    /// same chain [`crate::pipeline::Pipeline::topology`] draws from)
+    /// back up until it reaches something added to this `Tee` directly.
+    /// For when the element that actually failed sits behind a
+    /// `.queue(...)` in the branch: past that boundary a failure is
+    /// reported under *that* element's own name (a `Queue` can only ever
+    /// speak for itself — see its own worker loop), not this `Tee`'s,
+    /// since `Tee` never sees it at all. Rather than have every caller
+    /// separately track "element X belongs to branch Y" just to route
+    /// around that, this reuses the bookkeeping `ElementRegistry` already
+    /// keeps for `topology()`. A no-op if `name` isn't registered, or
+    /// doesn't trace back to a branch currently attached to this `Tee`
+    /// (already removed, belongs to a different `Tee`/the plain source,
+    /// ...).
+    pub fn remove_branch_containing(&self, name: &str) {
+        let Some(shared) = self.shared.upgrade() else {
+            return;
+        };
+        let snapshot = shared.context.registry.snapshot();
+        let mut current = name;
+        loop {
+            let Some(info) = snapshot.iter().find(|e| &*e.name == current) else {
+                return;
+            };
+            match info.upstream.as_deref() {
+                Some(upstream) if upstream == &*self.name => {
+                    self.remove_sink(current);
+                    return;
+                }
+                Some(upstream) => current = upstream,
+                None => return,
+            }
         }
     }
 
@@ -214,11 +270,11 @@ impl Sink for Tee {
         // whether to call `TeeHandle::remove_sink` over it.
         for pad in rest {
             if let Err(error) = pad.push(buf.clone()) {
-                self.report_branch_error(error);
+                self.report_branch_error(pad, error);
             }
         }
         if let Err(error) = last.push(buf) {
-            self.report_branch_error(error);
+            self.report_branch_error(last, error);
         }
         Ok(())
     }
@@ -360,13 +416,23 @@ mod tests {
 
         drop(tee);
         drop(handle);
-        let errors = bus_rx
+        let errors: Vec<_> = bus_rx
             .iter()
             .filter(|e| matches!(e, BusEvent::Error { .. }))
-            .count();
+            .collect();
         assert_eq!(
-            errors, 3,
+            errors.len(),
+            3,
             "expected one Error event per failed push, not a fatal short-circuit"
+        );
+        assert!(
+            errors.iter().all(|e| matches!(
+                e,
+                BusEvent::Error { name, .. } if &**name == "always-fail"
+            )),
+            "each Error event should be attributed to the branch that actually \
+             failed, not to Tee itself — that's what lets a caller call \
+             TeeHandle::remove_sink(name) straight off the bus; got {errors:?}"
         );
     }
 

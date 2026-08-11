@@ -1215,7 +1215,56 @@ mod tests {
         });
 
         let tee_handle = tee_handle_slot.expect("wire ran");
-        tee_handle.remove_sink(0); // sink-a, added first
+        tee_handle.remove_sink("sink-a");
+
+        assert_eq!(
+            pipeline.topology(),
+            "FileDemuxer(demux) - Tee(tee) - Other(sink-b)"
+        );
+    }
+
+    /// A failure past a `.queue(...)` inside a branch is reported under
+    /// that deeper element's own name (a `Queue`/whatever it wraps can
+    /// only ever speak for itself), never the `Queue`'s own name that's
+    /// what's actually attached to the `Tee` (`add_sink`'s `sink.name()`
+    /// is the *outermost* wrapper — see `ChainBuilder::build`'s own
+    /// fold). `remove_branch_containing` has to walk both hops of that
+    /// upstream chain to land on the right one.
+    #[test]
+    fn remove_branch_containing_resolves_through_a_queue_to_the_tee_attached_root() {
+        let (source, streams) = FileDemuxer::open("demux", test_video()).expect("open test video");
+        let video = streams
+            .iter()
+            .find(|s| s.kind == ffmpeg_next::media::Type::Video)
+            .expect("test video has a video stream");
+        let index = video.index;
+
+        let mut tee_handle_slot = None;
+        let pipeline = Pipeline::new("test", source, |source, ctx| {
+            let branch_a = ChainBuilder::new(ctx.clone())
+                .queue("q-a", 4)
+                .build(Box::new(NoOpSink {
+                    name: "sink-a".into(),
+                    hlog: element_hlog(ElementType::Other, "sink-a", None),
+                }));
+            let branch_b = ChainBuilder::new(ctx.clone()).build(Box::new(NoOpSink {
+                name: "sink-b".into(),
+                hlog: element_hlog(ElementType::Other, "sink-b", None),
+            }));
+
+            let (tee, tee_handle) = Tee::new("tee", ctx.clone());
+            tee_handle.add_sink(branch_a);
+            tee_handle.add_sink(branch_b);
+            source.src_pads()[index].link(Box::new(tee));
+            tee_handle_slot = Some(tee_handle);
+        });
+
+        let tee_handle = tee_handle_slot.expect("wire ran");
+        // "sink-a" itself was never handed to `add_sink` — "q-a" was.
+        // Passing the deeply-nested terminal's name straight through is
+        // exactly the case a caller reacting to *its* `BusEvent::Error`
+        // would hit.
+        tee_handle.remove_branch_containing("sink-a");
 
         assert_eq!(
             pipeline.topology(),
@@ -1263,11 +1312,8 @@ mod tests {
         expected.sort();
         assert_eq!(branches, expected, "all {N} branches should show up once");
 
-        // Repeatedly removing index 0 always pulls off the current first
-        // pad — since sinks were added in order 0..N, this removes
-        // sink-0, then sink-1, ..., sink-(N/2 - 1).
-        for _ in 0..N / 2 {
-            tee_handle.remove_sink(0);
+        for i in 0..N / 2 {
+            tee_handle.remove_sink(&format!("sink-{i}"));
         }
 
         let mut remaining: Vec<String> = pipeline.topology().lines().map(String::from).collect();
