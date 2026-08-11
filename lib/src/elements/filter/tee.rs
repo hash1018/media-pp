@@ -4,6 +4,7 @@ use rust_hlog::{HLog, hinfo};
 
 use crate::{
     buffer::MediaBuffer,
+    bus::BusEvent,
     control::ControlMsg,
     element::{Context, Element, ElementType, Sink, element_hlog},
     error::Result,
@@ -83,6 +84,22 @@ impl Tee {
                 shared: Arc::downgrade(&shared),
             },
         )
+    }
+
+    /// Posts a branch's `push` failure to the bus under `Tee`'s own
+    /// identity — mirrors how `Queue`'s worker loop attributes a failed
+    /// downstream `consume()` to itself rather than the thing it was
+    /// pushing into, since that's the only identity `Tee` reliably knows
+    /// here (`SrcPad` doesn't expose which element it's linked to).
+    fn report_branch_error(&self, error: crate::error::Error) {
+        self.shared.context.bus.post(
+            &self.hlog,
+            BusEvent::Error {
+                element_type: ElementType::Tee,
+                name: self.name.clone(),
+                error,
+            },
+        );
     }
 }
 
@@ -189,10 +206,21 @@ impl Sink for Tee {
         let Some((last, rest)) = pads.split_last_mut() else {
             return Ok(());
         };
+        // One branch failing must not stop the buffer from reaching its
+        // siblings — same "errors never kill anything, just get reported"
+        // rule `Queue`'s worker loop follows. That buffer is dropped for
+        // the failing branch only; the branch itself stays wired and gets
+        // retried on the next one. Whoever's watching the bus decides
+        // whether to call `TeeHandle::remove_sink` over it.
         for pad in rest {
-            pad.push(buf.clone())?;
+            if let Err(error) = pad.push(buf.clone()) {
+                self.report_branch_error(error);
+            }
         }
-        last.push(buf)
+        if let Err(error) = last.push(buf) {
+            self.report_branch_error(error);
+        }
+        Ok(())
     }
 
     fn control(&mut self, msg: ControlMsg) -> Result<()> {
@@ -209,8 +237,138 @@ impl Sink for Tee {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
     use crate::{bus::Bus, clock::Clock, element::ElementRegistry};
+
+    fn packet() -> MediaBuffer {
+        MediaBuffer::Packet(Arc::new(ffmpeg_next::Packet::empty()))
+    }
+
+    #[rust_hlog::hlog]
+    struct CountingSink {
+        name: &'static str,
+        count: Arc<AtomicUsize>,
+    }
+
+    impl Element for CountingSink {
+        fn name(&self) -> Arc<str> {
+            self.name.into()
+        }
+
+        fn element_type(&self) -> ElementType {
+            ElementType::Other
+        }
+
+        fn hlog(&self) -> &HLog {
+            &self.hlog
+        }
+
+        fn hlog_mut(&mut self) -> &mut HLog {
+            &mut self.hlog
+        }
+    }
+
+    impl Sink for CountingSink {
+        fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
+            self.count.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn control(&mut self, _msg: ControlMsg) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[rust_hlog::hlog]
+    struct AlwaysFailSink {}
+
+    impl Element for AlwaysFailSink {
+        fn name(&self) -> Arc<str> {
+            "always-fail".into()
+        }
+
+        fn element_type(&self) -> ElementType {
+            ElementType::Other
+        }
+
+        fn hlog(&self) -> &HLog {
+            &self.hlog
+        }
+
+        fn hlog_mut(&mut self) -> &mut HLog {
+            &mut self.hlog
+        }
+    }
+
+    impl Sink for AlwaysFailSink {
+        fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
+            Err(crate::error::Error::Other(
+                "simulated branch failure".into(),
+            ))
+        }
+
+        fn control(&mut self, _msg: ControlMsg) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A failing branch must not stop the same buffer from reaching its
+    /// siblings, nor stop `Tee::consume` itself from returning `Ok` — same
+    /// "errors get reported, nothing dies" rule `Queue`'s worker loop
+    /// follows (see `queue::tests::a_failing_consume_drops_that_buffer_but_keeps_the_worker_alive`).
+    /// Wires the failing branch in the *middle* (`before`/`after` on
+    /// either side of it) so the test also proves a mid-`rest` failure
+    /// doesn't short-circuit the fan-out to what comes after it,
+    /// including `last`.
+    #[test]
+    fn a_failing_branch_does_not_block_its_siblings() {
+        let (bus, bus_rx) = Bus::new();
+        let context = Arc::new(Context {
+            bus,
+            pipeline_id: "test".into(),
+            registry: ElementRegistry::new(),
+            clock: Arc::new(Clock::new()),
+            default_upstream: "source".into(),
+        });
+        let (mut tee, handle) = Tee::new("tee", context);
+
+        let before_count = Arc::new(AtomicUsize::new(0));
+        let after_count = Arc::new(AtomicUsize::new(0));
+        handle.add_sink(Box::new(CountingSink {
+            name: "before",
+            count: before_count.clone(),
+            hlog: element_hlog(ElementType::Other, "before", None),
+        }));
+        handle.add_sink(Box::new(AlwaysFailSink {
+            hlog: element_hlog(ElementType::Other, "always-fail", None),
+        }));
+        handle.add_sink(Box::new(CountingSink {
+            name: "after",
+            count: after_count.clone(),
+            hlog: element_hlog(ElementType::Other, "after", None),
+        }));
+
+        for _ in 0..3 {
+            tee.consume(packet())
+                .expect("a branch failing must not surface as an error from Tee::consume");
+        }
+
+        assert_eq!(before_count.load(Ordering::SeqCst), 3);
+        assert_eq!(after_count.load(Ordering::SeqCst), 3);
+
+        drop(tee);
+        drop(handle);
+        let errors = bus_rx
+            .iter()
+            .filter(|e| matches!(e, BusEvent::Error { .. }))
+            .count();
+        assert_eq!(
+            errors, 3,
+            "expected one Error event per failed push, not a fatal short-circuit"
+        );
+    }
 
     #[test]
     fn retained_handle_does_not_keep_tee_context_or_bus_alive() {

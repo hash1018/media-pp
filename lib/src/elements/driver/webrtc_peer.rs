@@ -1273,4 +1273,87 @@ mod tests {
             "unexpected error event(s) on peer-b's inbound track: {track_events_b:?}"
         );
     }
+
+    /// Regression test for the claim in `Driver::run`'s own docs: stopping
+    /// one side must clear its `tracks_in` immediately, so an
+    /// already-attached `WebRtcTrackSource` sees its data channel
+    /// disconnect and ends with a final `Eos` on its own — not left
+    /// hanging until some other, unrelated thing (e.g. a caller's own
+    /// `Pipeline::stop`) intervenes. There's no "reconnect" concept here
+    /// to test instead: `WebRtcPeer::run` only ever reacts to its `Rtc`
+    /// going not-alive or an explicit `Stop`, treating both the same way
+    /// (see that `if` right before `tracks_in.clear()`); `Stop` is the
+    /// deterministic one of the two to trigger from a test. Deliberately
+    /// omits the `track_pipeline.stop()` safety net
+    /// `one_sendrecv_track_carries_data_both_ways` uses — the whole point
+    /// here is to prove the `Pipeline` ends on its own.
+    #[test]
+    fn stopping_a_peer_ends_its_inbound_track_source_with_a_clean_eos() {
+        let (rtc_a, socket_a, rtc_b, socket_b) = connected_pair();
+
+        let (offer_tx, offer_rx) = crossbeam_channel::unbounded::<SdpOffer>();
+        let (peer_a, handle_a) = WebRtcPeer::new(
+            "peer-a",
+            rtc_a,
+            socket_a,
+            move |offer| {
+                let _ = offer_tx.send(offer);
+            },
+            |_id| {},
+        );
+        let (peer_b, handle_b) = WebRtcPeer::new("peer-b", rtc_b, socket_b, |_offer| {}, |_id| {});
+
+        let driver_a = DriverRunner::new(peer_a);
+        let driver_b = DriverRunner::new(peer_b);
+        driver_a.run();
+        driver_b.run();
+
+        thread::sleep(Duration::from_millis(200));
+
+        handle_a
+            .add_track(MediaKind::Video, Direction::SendOnly, Codec::Vp8)
+            .expect("running peer should accept AddTrack");
+        let offer = offer_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("peer-a should generate a renegotiation offer");
+        let answer = handle_b
+            .accept_remote_offer(offer)
+            .expect("peer-b should accept the offer");
+        handle_a.set_answer(answer);
+
+        let (_id, _mid, _kind, _sink_b, source_b) = handle_b
+            .next_track()
+            .expect("peer-b's remote track should attach");
+
+        let received = Arc::new(AtomicUsize::new(0));
+        let track_pipeline_b = wire_counting(source_b, received);
+        track_pipeline_b.run();
+
+        // Let the answer actually apply before tearing the connection down.
+        thread::sleep(Duration::from_millis(100));
+
+        driver_b.stop();
+
+        // No `track_pipeline_b.stop()` — draining the bus to completion is
+        // itself the proof: it only returns once every `Bus` sender,
+        // including the one `WebRtcTrackSource`'s own `Pipeline::run`
+        // thread holds, has actually dropped.
+        let track_events_b: Vec<_> = track_pipeline_b.bus().iter().collect();
+        assert!(
+            track_events_b
+                .iter()
+                .any(|e| matches!(e, BusEvent::Eos { .. })),
+            "expected the inbound track's own Pipeline to reach Eos on its \
+             own once peer-b stopped, without an explicit Pipeline::stop; \
+             got {track_events_b:?}"
+        );
+        assert!(
+            !track_events_b
+                .iter()
+                .any(|e| matches!(e, BusEvent::Error { .. })),
+            "unexpected error event(s): {track_events_b:?}"
+        );
+
+        driver_a.stop();
+    }
 }

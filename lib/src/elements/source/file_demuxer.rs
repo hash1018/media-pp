@@ -231,3 +231,120 @@ fn ts_to_duration(ts: i64, time_base: ffmpeg::Rational) -> Duration {
     let secs = ts as f64 * f64::from(time_base.numerator()) / f64::from(time_base.denominator());
     Duration::from_secs_f64(secs.max(0.0))
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    use super::*;
+    use crate::control;
+
+    /// Real video file, one directory up from this crate — same fixture
+    /// `pipeline::tests::test_video` drives its own `FileDemuxer`
+    /// integration tests through; this module drives `FileDemuxer`
+    /// directly instead, without a `Pipeline` around it.
+    fn test_video() -> &'static str {
+        concat!(env!("CARGO_MANIFEST_DIR"), "/../test-video/h265.mp4")
+    }
+
+    #[rust_hlog::hlog]
+    struct CountingSink {
+        count: Arc<AtomicUsize>,
+        saw_eos: Arc<AtomicBool>,
+    }
+
+    impl Element for CountingSink {
+        fn name(&self) -> Arc<str> {
+            "counting-sink".into()
+        }
+
+        fn element_type(&self) -> ElementType {
+            ElementType::Other
+        }
+
+        fn hlog(&self) -> &HLog {
+            &self.hlog
+        }
+
+        fn hlog_mut(&mut self) -> &mut HLog {
+            &mut self.hlog
+        }
+    }
+
+    impl crate::element::Sink for CountingSink {
+        fn consume(&mut self, buf: MediaBuffer) -> crate::error::Result<()> {
+            match buf {
+                MediaBuffer::Eos => self.saw_eos.store(true, Ordering::SeqCst),
+                _ => {
+                    self.count.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+            Ok(())
+        }
+
+        fn control(&mut self, _msg: crate::control::ControlMsg) -> crate::error::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn open_reports_stream_parameters_for_a_valid_index_and_none_out_of_range() {
+        let (demuxer, streams) = FileDemuxer::open("demux", test_video()).expect("open test video");
+        let video = streams
+            .iter()
+            .find(|s| s.kind == ffmpeg::media::Type::Video)
+            .expect("test video has a video stream");
+
+        assert!(demuxer.stream_parameters(video.index).is_some());
+        assert!(demuxer.stream_time_base(video.index).is_some());
+
+        let out_of_range = streams.len() + 1;
+        assert!(
+            demuxer.stream_parameters(out_of_range).is_none(),
+            "an out-of-range stream index must report nothing, not panic"
+        );
+        assert!(demuxer.stream_time_base(out_of_range).is_none());
+    }
+
+    /// Drives `FileDemuxer::run` directly (no `Pipeline`) to prove the
+    /// basic contract on its own: every packet on a linked pad's stream
+    /// arrives, and running off the end of the file delivers a final
+    /// `Eos` rather than just stopping silently.
+    #[test]
+    fn run_delivers_every_packet_on_a_linked_pad_then_eos() {
+        let (mut demuxer, streams) =
+            FileDemuxer::open("demux", test_video()).expect("open test video");
+        let video = streams
+            .iter()
+            .find(|s| s.kind == ffmpeg::media::Type::Video)
+            .expect("test video has a video stream");
+
+        let count = Arc::new(AtomicUsize::new(0));
+        let saw_eos = Arc::new(AtomicBool::new(false));
+        demuxer.src_pads()[video.index].link(Box::new(CountingSink {
+            count: count.clone(),
+            saw_eos: saw_eos.clone(),
+            hlog: element_hlog(ElementType::Other, "counting-sink", None),
+        }));
+
+        let (bus, bus_rx) = Bus::new();
+        let (_tx, rx) = control::channel();
+        demuxer
+            .run(&rx, &bus)
+            .expect("run must reach eos cleanly, not error");
+
+        assert!(
+            count.load(Ordering::SeqCst) > 0,
+            "expected at least one packet delivered to the linked pad"
+        );
+        assert!(
+            saw_eos.load(Ordering::SeqCst),
+            "expected an Eos once the file is exhausted"
+        );
+        drop(bus);
+        assert!(
+            bus_rx.iter().all(|e| !matches!(e, BusEvent::Error { .. })),
+            "run must not report any errors demuxing a well-formed file"
+        );
+    }
+}

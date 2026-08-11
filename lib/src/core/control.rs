@@ -201,3 +201,115 @@ fn apply_seek<S: SourceElement>(source: &mut S, bus: &Bus, msg: ControlMsg) -> R
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use std::{sync::Arc, thread};
+
+    use rust_hlog::HLog;
+
+    use super::*;
+    use crate::{
+        element::{Element, ElementType, Source, element_hlog},
+        pad::SrcPad,
+    };
+
+    /// A `SourceElement` with no real I/O — just enough surface for
+    /// `drain_control`/`wait_out_pause` to drive, since this module's own
+    /// logic doesn't care what the source actually produces.
+    #[rust_hlog::hlog]
+    struct DummySource {
+        pad: SrcPad,
+    }
+
+    impl DummySource {
+        fn new() -> Self {
+            Self {
+                hlog: element_hlog(ElementType::Other, "dummy", None),
+                pad: SrcPad::new("dummy_src"),
+            }
+        }
+    }
+
+    impl Element for DummySource {
+        fn name(&self) -> Arc<str> {
+            "dummy".into()
+        }
+
+        fn element_type(&self) -> ElementType {
+            ElementType::Other
+        }
+
+        fn hlog(&self) -> &HLog {
+            &self.hlog
+        }
+
+        fn hlog_mut(&mut self) -> &mut HLog {
+            &mut self.hlog
+        }
+    }
+
+    impl Source for DummySource {
+        fn src_pads(&mut self) -> &mut [SrcPad] {
+            std::slice::from_mut(&mut self.pad)
+        }
+    }
+
+    impl SourceElement for DummySource {
+        fn run(&mut self, _control: &ControlReceiver, _bus: &Bus) -> Result<()> {
+            unreachable!("not exercised by these tests")
+        }
+
+        fn seek(&mut self, target: Duration) -> Result<Duration> {
+            Ok(target)
+        }
+    }
+
+    /// The edge case called out in `wait_out_pause`'s own docs: the
+    /// `ControlSender` going away entirely (e.g. the owning `Pipeline`
+    /// dropped) while paused has to be treated the same as an explicit
+    /// `Stop`, not left blocking forever on a channel nothing will ever
+    /// send on again.
+    #[test]
+    fn wait_out_pause_treats_a_dropped_sender_as_stop() {
+        let (tx, rx) = channel();
+        drop(tx);
+
+        let (bus, _bus_rx) = Bus::new();
+        let mut source = DummySource::new();
+
+        let stopped = wait_out_pause(&rx, &mut source, &bus)
+            .expect("no real seek/push happens on this path, so this can't fail");
+        assert!(
+            stopped,
+            "a dropped ControlSender must be treated the same as an explicit Stop"
+        );
+    }
+
+    /// `wait_out_pause` blocks past any number of redundant `Pause`s and
+    /// only returns (`Ok(false)`, meaning "keep running") once `Resume`
+    /// actually arrives.
+    #[test]
+    fn wait_out_pause_blocks_until_resume_then_returns_false() {
+        let (tx, rx) = channel();
+        let (bus, _bus_rx) = Bus::new();
+        let mut source = DummySource::new();
+
+        let worker = thread::spawn(move || wait_out_pause(&rx, &mut source, &bus));
+
+        // A redundant Pause while already paused: per `wait_out_pause`'s
+        // own docs, forwarded (harmless no-op downstream) and then it
+        // keeps waiting rather than returning.
+        tx.send(ControlMsg::Pause);
+        tx.send(ControlMsg::Resume);
+
+        let stopped = worker
+            .join()
+            .expect("worker must not panic")
+            .expect("no real seek/push happens on this path, so this can't fail");
+        assert!(
+            !stopped,
+            "Resume must unblock wait_out_pause with Ok(false)"
+        );
+    }
+}
