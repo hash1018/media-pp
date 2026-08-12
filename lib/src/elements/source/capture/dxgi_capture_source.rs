@@ -944,9 +944,22 @@ impl SourceElement for DxgiCaptureSource {
         hinfo!(self, "run: starting");
         let mut next_due = Instant::now();
         loop {
-            if drain_control(control, self, bus)? {
+            let outcome = drain_control(control, self, bus)?;
+            if outcome.stopped {
                 hinfo!(self, "run: stopped");
                 return Ok(());
+            }
+            if outcome.paused_for > Duration::ZERO {
+                // See `TestVideoSource::run`'s identical correction: shift
+                // the deadline forward by however long `Pause` actually
+                // held it, then drop straight to "one interval from now"
+                // if that still lands in the past, rather than emitting
+                // every missed frame back to back once capture resumes.
+                next_due += outcome.paused_for;
+                let now = Instant::now();
+                if next_due < now {
+                    next_due = now + self.frame_interval;
+                }
             }
 
             let remaining = next_due.saturating_duration_since(Instant::now());

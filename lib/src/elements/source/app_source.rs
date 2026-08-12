@@ -141,7 +141,7 @@ impl SourceElement for AppSource {
             // (it'd be just as correct to skip straight to `select!`, but
             // this keeps `AppSource` consistent with every other
             // `SourceElement::run` calling `drain_control` per iteration).
-            if drain_control(control, self, bus)? {
+            if drain_control(control, self, bus)?.stopped {
                 hinfo!(self, "run: stopped");
                 return Ok(());
             }

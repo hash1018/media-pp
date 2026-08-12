@@ -219,9 +219,23 @@ impl SourceElement for TestVideoSource {
         // single interval. Same pattern `DxgiCaptureSource::run` uses.
         let mut next_due = Instant::now();
         loop {
-            if drain_control(control, self, bus)? {
+            let outcome = drain_control(control, self, bus)?;
+            if outcome.stopped {
                 hinfo!(self, "run: stopped");
                 return Ok(());
+            }
+            if outcome.paused_for > Duration::ZERO {
+                // Shift the schedule forward by exactly how long `Pause`
+                // held it, so `Resume` picks up from "one interval after
+                // whenever this actually resumed", not a deadline that's
+                // been sitting in the past the whole time it was frozen —
+                // the latter would generate every missed frame back to
+                // back the instant this loop runs again.
+                next_due += outcome.paused_for;
+                let now = Instant::now();
+                if next_due < now {
+                    next_due = now + self.frame_interval;
+                }
             }
             let now = Instant::now();
             if now < next_due {
@@ -357,5 +371,100 @@ mod tests {
     fn seek_is_explicitly_unsupported() {
         let mut source = TestVideoSource::new("test-video", TestVideoOptions::default());
         assert!(source.seek(Duration::from_secs(1)).is_err());
+    }
+
+    /// Records the wall-clock `Instant` each frame arrives at, rather than
+    /// its content — what
+    /// [`resuming_after_a_pause_does_not_dump_a_burst_of_catch_up_frames`]
+    /// needs to tell a steady post-resume framerate apart from a burst.
+    #[rust_hlog::hlog]
+    struct TimestampSink {
+        seen: Arc<Mutex<Vec<Instant>>>,
+    }
+
+    impl Element for TimestampSink {
+        fn name(&self) -> Arc<str> {
+            "timestamp-recorder".into()
+        }
+        fn element_type(&self) -> ElementType {
+            ElementType::Other
+        }
+        fn hlog(&self) -> &HLog {
+            &self.hlog
+        }
+        fn hlog_mut(&mut self) -> &mut HLog {
+            &mut self.hlog
+        }
+    }
+
+    impl Sink for TimestampSink {
+        fn consume(&mut self, buf: MediaBuffer) -> crate::error::Result<()> {
+            if matches!(buf, MediaBuffer::Video(_)) {
+                self.seen.lock().unwrap().push(Instant::now());
+            }
+            Ok(())
+        }
+        fn control(&mut self, _msg: ControlMsg) -> crate::error::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Regression test for the pause/resume scheduling bug: `next_due` is
+    /// an absolute `Instant` deadline, and real time keeps moving while
+    /// [`Pipeline::pause`] blocks this source's own loop inside
+    /// `drain_control`. Without shifting `next_due` forward by however
+    /// long the pause actually lasted (`ControlOutcome::paused_for`),
+    /// `Resume` would find a deadline that's been sitting in the past the
+    /// whole time it was frozen and dump every "missed" frame back to
+    /// back instead of picking the steady framerate back up.
+    #[test]
+    fn resuming_after_a_pause_does_not_dump_a_burst_of_catch_up_frames() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let sink = TimestampSink {
+            seen: seen.clone(),
+            hlog: element_hlog(ElementType::Other, "timestamp-recorder", None),
+        };
+        let source = TestVideoSource::new(
+            "test-video",
+            TestVideoOptions {
+                width: 16,
+                height: 16,
+                framerate: ffmpeg::Rational::new(50, 1), // 20ms/frame
+            },
+        );
+
+        let pipeline = Pipeline::new("pause-resume-test", source, |source, ctx| {
+            let branch = ctx.branch().to(Box::new(sink))?;
+            ctx.attach(source, 0, branch)?;
+            Ok(())
+        })
+        .expect("test pipeline wiring must succeed");
+
+        pipeline.run();
+        thread::sleep(Duration::from_millis(60));
+        pipeline.pause();
+        thread::sleep(Duration::from_millis(400));
+
+        let resumed_at = Instant::now();
+        pipeline.resume();
+        thread::sleep(Duration::from_millis(120));
+        pipeline.stop();
+        pipeline.bus().log_events();
+
+        let after_resume = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|&&t| t >= resumed_at)
+            .count();
+        // At 50fps, ~120ms of real time after resume owes ~6 frames.
+        // Well under this bound if paced steadily; a 400ms pause treated
+        // as owed catch-up work would dump ~20 frames virtually at once,
+        // comfortably clearing it.
+        assert!(
+            after_resume <= 12,
+            "expected a steady framerate after resume, not a burst of catch-up frames: \
+             {after_resume} frames arrived within 120ms of resuming"
+        );
     }
 }

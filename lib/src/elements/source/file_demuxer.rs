@@ -146,7 +146,7 @@ impl SourceElement for FileDemuxer {
         // *second* mutable borrow of `input` — in between reads, which a
         // single loop-spanning iterator would rule out.
         loop {
-            if drain_control(control, self, bus)? {
+            if drain_control(control, self, bus)?.stopped {
                 // Stop: abandon in place, no final Eos.
                 hinfo!(self, "run: stopped");
                 return Ok(());

@@ -186,14 +186,23 @@ impl SourceElement for TestAudioSource {
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
         hinfo!(self, "run: starting");
         let start = Instant::now();
+        // Total wall-clock time spent frozen inside `Pause` so far — real
+        // time keeps moving during a pause, but the sine wave's own phase
+        // (tied to `samples_emitted`, which stops advancing while paused)
+        // must not, or `Resume` would generate a burst of samples to cover
+        // the whole gap at once.
+        let mut paused_total = Duration::ZERO;
         loop {
-            if drain_control(control, self, bus)? {
+            let outcome = drain_control(control, self, bus)?;
+            if outcome.stopped {
                 hinfo!(self, "run: stopped");
                 return Ok(());
             }
+            paused_total += outcome.paused_for;
             thread::sleep(TICK_INTERVAL);
 
-            let expected = (start.elapsed().as_secs_f64() * self.sample_rate as f64) as i64;
+            let expected = (start.elapsed().saturating_sub(paused_total).as_secs_f64()
+                * self.sample_rate as f64) as i64;
             let needed = (expected - self.samples_emitted).max(0) as usize;
             if needed == 0 {
                 continue;
@@ -328,5 +337,69 @@ mod tests {
     fn seek_is_explicitly_unsupported() {
         let mut source = TestAudioSource::new("test-audio", TestAudioOptions::default());
         assert!(source.seek(Duration::from_secs(1)).is_err());
+    }
+
+    /// Regression test for the pause/resume timing bug: `start.elapsed()`
+    /// keeps advancing while [`Pipeline::pause`] blocks this source's own
+    /// loop inside `drain_control`. Without subtracting the accumulated
+    /// `ControlOutcome::paused_for` back out, `Resume` would find the
+    /// whole pause suddenly counted as owed samples and emit one wildly
+    /// oversized frame to cover it, instead of resuming its steady
+    /// per-tick sample count — each frame's `pts` is a running sample
+    /// count, so a healthy run never has two consecutive frames whose
+    /// `pts` gap is anywhere near a whole pause's worth of samples.
+    #[test]
+    fn resuming_after_a_pause_does_not_dump_a_burst_of_samples() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let sink = RecordingSink {
+            seen: seen.clone(),
+            hlog: element_hlog(ElementType::Other, "recorder", None),
+        };
+        let source = TestAudioSource::new(
+            "test-audio",
+            TestAudioOptions {
+                sample_rate: 48000,
+                channels: 2,
+                frequency: 440.0,
+            },
+        );
+
+        let pipeline = Pipeline::new("pause-resume-test", source, |source, ctx| {
+            let branch = ctx.branch().to(Box::new(sink))?;
+            ctx.attach(source, 0, branch)?;
+            Ok(())
+        })
+        .expect("test pipeline wiring must succeed");
+
+        pipeline.run();
+        thread::sleep(Duration::from_millis(60));
+        pipeline.pause();
+        thread::sleep(Duration::from_millis(400));
+        pipeline.resume();
+        thread::sleep(Duration::from_millis(100));
+        pipeline.stop();
+        pipeline.bus().log_events();
+
+        let frames = seen.lock().unwrap();
+        let pts: Vec<i64> = frames.iter().filter_map(|&(_, _, _, pts, _)| pts).collect();
+        assert!(
+            pts.len() >= 2,
+            "expected multiple frames spanning the pause/resume, got {}",
+            pts.len()
+        );
+        for window in pts.windows(2) {
+            let gap = window[1] - window[0];
+            // A healthy tick's worth of samples at 48kHz/20ms is ~960; a
+            // 400ms pause treated as owed catch-up would show up as a
+            // ~19200-sample gap. 12000 (250ms) sits comfortably between
+            // the two.
+            assert!(
+                gap < 12_000,
+                "expected steady per-tick sample counts across resume, not a single burst \
+                 frame covering the whole pause: consecutive pts gap was {gap} samples \
+                 ({:.0}ms) — full pts sequence: {pts:?}",
+                gap as f64 / 48.0
+            );
+        }
     }
 }

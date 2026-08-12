@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use rust_hlog::hinfo;
@@ -102,6 +102,31 @@ impl ControlReceiver {
     }
 }
 
+/// What draining pending control messages actually did — whether `Stop`
+/// ended it, and how long (if any) was spent frozen inside a `Pause`/
+/// `Resume` pair. A source built on wall-clock scheduling (an elapsed-time
+/// budget like [`crate::elements::TestAudioSource`]/
+/// [`crate::elements::AudioMixer`], or an absolute next-tick deadline like
+/// [`crate::elements::TestVideoSource`]/[`crate::elements::DxgiCaptureSource`])
+/// has to fold `paused_for` back into its own schedule after every
+/// [`drain_control`] call — real (`Instant`) time keeps moving during a
+/// `Pause`, but the media timeline must not, or `Resume` would look like a
+/// burst of catch-up work owed all at once.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ControlOutcome {
+    /// `true` if `Stop` was seen: the caller should return `Ok(())`
+    /// immediately, without pushing a final `Eos` (`Stop` means abandon,
+    /// not drain to completion).
+    pub stopped: bool,
+    /// Wall-clock time actually spent blocked inside `Pause` during this
+    /// call — `Duration::ZERO` if no `Pause` was seen. Still meaningful
+    /// even when `stopped` is `true` (the sender simply going away while
+    /// paused is treated the same as `Stop`, see [`wait_out_pause`]), so a
+    /// caller that also tracks its own paused-time total can fold this in
+    /// unconditionally rather than only on the non-stopped path.
+    pub paused_for: Duration,
+}
+
 /// Call once per loop iteration in a [`SourceElement::run`] implementation,
 /// right before pulling the next unit of work — mirrors how a natural
 /// `Eos` is pushed into the source's own pads at the end of that same
@@ -115,25 +140,41 @@ impl ControlReceiver {
 /// before that blocking step; one that *can* (e.g.
 /// [`crate::elements::AppSource`]'s channel receive) selects on both
 /// instead, calling `apply_one`/`wait_out_pause` directly so a
-/// pending `Stop` is never left waiting behind a slow/absent producer.
+/// pending `Stop` is never left waiting behind a slow/absent producer —
+/// same reason [`crate::elements::WasapiCaptureSource`] also calls them
+/// directly, to bracket the wait with starting/stopping its capture
+/// device rather than leaving it running unread through the whole pause.
 ///
-/// Returns `true` if `Stop` was seen: the caller should return `Ok(())`
-/// immediately, without pushing a final `Eos` (`Stop` means abandon, not
-/// drain to completion).
+/// See [`ControlOutcome`] for what the return value means.
 pub fn drain_control<S: SourceElement>(
     control: &ControlReceiver,
     source: &mut S,
     bus: &Bus,
-) -> Result<bool> {
+) -> Result<ControlOutcome> {
+    let mut paused_for = Duration::ZERO;
     while let Some((msg, ack)) = control.try_recv() {
         if apply_one(source, bus, msg, &ack)? {
-            return Ok(true);
+            return Ok(ControlOutcome {
+                stopped: true,
+                paused_for,
+            });
         }
-        if msg == ControlMsg::Pause && wait_out_pause(control, source, bus)? {
-            return Ok(true);
+        if msg == ControlMsg::Pause {
+            let pause_start = Instant::now();
+            let stopped = wait_out_pause(control, source, bus)?;
+            paused_for += pause_start.elapsed();
+            if stopped {
+                return Ok(ControlOutcome {
+                    stopped: true,
+                    paused_for,
+                });
+            }
         }
     }
-    Ok(false)
+    Ok(ControlOutcome {
+        stopped: false,
+        paused_for,
+    })
 }
 
 /// Applies one already-received control message to `source`: repositions

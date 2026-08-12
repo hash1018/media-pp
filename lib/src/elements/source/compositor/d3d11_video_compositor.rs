@@ -830,7 +830,7 @@ impl SourceElement for D3d11VideoCompositor {
         hinfo!(self, "run: starting");
         let mut next_due = Instant::now();
         loop {
-            if drain_control(control, self, bus)? {
+            if drain_control(control, self, bus)?.stopped {
                 hinfo!(self, "run: stopped");
                 return Ok(());
             }

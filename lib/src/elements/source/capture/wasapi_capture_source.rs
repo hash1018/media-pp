@@ -20,7 +20,7 @@ use windows::Win32::{
 use crate::{
     buffer::MediaBuffer,
     bus::{Bus, BusEvent},
-    control::{ControlReceiver, drain_control},
+    control::{self, ControlMsg, ControlOutcome, ControlReceiver},
     element::{Element, ElementType, Source, SourceElement, element_hlog},
     error::Result,
     pad::SrcPad,
@@ -301,8 +301,12 @@ impl WasapiCaptureSource {
 
     /// Synthesizes and pushes one silence frame covering however many
     /// samples real WASAPI delivery has fallen behind wall-clock time
-    /// since `run_captured` started — a no-op (`deficit <= 0`) whenever
-    /// real packets have kept up. WASAPI delivers **zero** packets
+    /// since `run_captured` started, minus `paused_total` (time already
+    /// spent frozen inside `Pause` — see [`WasapiCaptureSource::handle_control`] —
+    /// must not itself count as a deficit to fill, or `Resume` would
+    /// synthesize one giant silence frame covering the whole pause) — a
+    /// no-op (`deficit <= 0`) whenever real packets have kept up. WASAPI
+    /// delivers **zero** packets
     /// whenever the render engine has no active session at all (as
     /// opposed to an active-but-quiet session, which still delivers
     /// `AUDCLNT_BUFFERFLAGS_SILENT`-flagged packets `build_frame` already
@@ -313,8 +317,9 @@ impl WasapiCaptureSource {
     /// every gap with synthesized silence (rather than, say, stretching
     /// the next real frame's `pts`) keeps `pts` a plain, always-accurate
     /// sample count no matter which samples were real.
-    fn fill_silence_gap(&mut self, start: Instant, bus: &Bus) {
-        let expected = (start.elapsed().as_secs_f64() * self.sample_rate as f64) as i64;
+    fn fill_silence_gap(&mut self, start: Instant, paused_total: Duration, bus: &Bus) {
+        let elapsed = start.elapsed().saturating_sub(paused_total);
+        let expected = (elapsed.as_secs_f64() * self.sample_rate as f64) as i64;
         let deficit = expected - self.samples_emitted;
         if deficit <= 0 {
             return;
@@ -328,6 +333,55 @@ impl WasapiCaptureSource {
         self.push_frame(frame, bus);
     }
 
+    /// Like [`crate::control::drain_control`], but calls
+    /// [`crate::control::apply_one`]/[`crate::control::wait_out_pause`]
+    /// directly (same reason [`crate::elements::AppSource`] does — see
+    /// `drain_control`'s own docs) so it can bracket the blocking `Pause`
+    /// wait with `IAudioClient::Stop`/`Start`: without this, the capture
+    /// session keeps running the whole time this source is paused, with
+    /// nothing ever draining `IAudioCaptureClient::GetBuffer` to read it —
+    /// harmless in that WASAPI's shared-mode ring buffer just silently
+    /// overwrites whatever it can't hold (see `BUFFER_DURATION_100NS`), but
+    /// there's no reason to keep the device (and whatever driver-side work
+    /// backs it) actively capturing audio nobody is ever going to read.
+    /// `Stop`'s own failure is only logged, not fatal — capture staying
+    /// active through a pause it should've halted isn't worth ending the
+    /// whole source over; a failing `Start` on the way back out, by
+    /// contrast, means this source can no longer capture at all, so that
+    /// one is fatal, same as any other `classify_error` call in this file.
+    fn handle_control(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<ControlOutcome> {
+        let mut paused_for = Duration::ZERO;
+        while let Some((msg, ack)) = control.try_recv() {
+            if control::apply_one(self, bus, msg, &ack)? {
+                return Ok(ControlOutcome {
+                    stopped: true,
+                    paused_for,
+                });
+            }
+            if msg == ControlMsg::Pause {
+                if let Err(error) = unsafe { self.audio_client.Stop() } {
+                    herror!(self, "Stop (pause) failed: {error}");
+                }
+                let pause_start = Instant::now();
+                let stopped = control::wait_out_pause(control, self, bus)?;
+                paused_for += pause_start.elapsed();
+                if stopped {
+                    return Ok(ControlOutcome {
+                        stopped: true,
+                        paused_for,
+                    });
+                }
+                if let Err(error) = unsafe { self.audio_client.Start() } {
+                    return Err(self.classify_error(error).into());
+                }
+            }
+        }
+        Ok(ControlOutcome {
+            stopped: false,
+            paused_for,
+        })
+    }
+
     /// The main capture loop, run once COM has joined this thread's
     /// apartment (see [`SourceElement::run`]) and the audio client has been
     /// started. Drains every buffer WASAPI has ready on each
@@ -338,11 +392,16 @@ impl WasapiCaptureSource {
     /// where WASAPI delivered nothing at all.
     fn run_captured(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
         let start = Instant::now();
+        // See `fill_silence_gap`'s own docs on why this has to be
+        // subtracted back out of `start.elapsed()`.
+        let mut paused_total = Duration::ZERO;
         loop {
-            if drain_control(control, self, bus)? {
+            let outcome = self.handle_control(control, bus)?;
+            if outcome.stopped {
                 hinfo!(self, "run: stopped");
                 return Ok(());
             }
+            paused_total += outcome.paused_for;
 
             thread::sleep(POLL_INTERVAL);
 
@@ -378,7 +437,7 @@ impl WasapiCaptureSource {
                 self.push_frame(frame, bus);
             }
 
-            self.fill_silence_gap(start, bus);
+            self.fill_silence_gap(start, paused_total, bus);
         }
     }
 }

@@ -188,7 +188,7 @@ impl SourceElement for RtspSource {
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
         hinfo!(self, "run: starting");
         loop {
-            if drain_control(control, self, bus)? {
+            if drain_control(control, self, bus)?.stopped {
                 hinfo!(self, "run: stopped");
                 return Ok(());
             }
