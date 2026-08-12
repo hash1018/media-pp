@@ -13,6 +13,8 @@ use crate::{
     pad::SrcPad,
 };
 
+use crate::elements::filter::is_codec_drain_boundary;
+
 /// Errors specific to `SwEncoder`. Converts into the crate-wide `Error`
 /// via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
@@ -221,12 +223,18 @@ impl SwEncoder {
 
     fn drain(&mut self) -> Result<()> {
         let mut packet = ffmpeg::Packet::empty();
-        while self.encoder.receive_packet(&mut packet).is_ok() {
-            if packet.duration() == 0 && self.packet_duration > 0 {
-                packet.set_duration(self.packet_duration);
+        loop {
+            match self.encoder.receive_packet(&mut packet) {
+                Ok(()) => {
+                    if packet.duration() == 0 && self.packet_duration > 0 {
+                        packet.set_duration(self.packet_duration);
+                    }
+                    self.pad.push(MediaBuffer::Packet(Arc::new(packet)))?;
+                    packet = ffmpeg::Packet::empty();
+                }
+                Err(error) if is_codec_drain_boundary(&error) => break,
+                Err(error) => return Err(SwEncoderError::from(error).into()),
             }
-            self.pad.push(MediaBuffer::Packet(Arc::new(packet)))?;
-            packet = ffmpeg::Packet::empty();
         }
         Ok(())
     }
@@ -267,7 +275,10 @@ impl Sink for SwEncoder {
                 self.drain()
             }
             MediaBuffer::Eos => {
-                let _ = self.encoder.send_eof();
+                self.encoder
+                    .send_eof()
+                    .inspect_err(|error| herror!(self, "send_eof failed: {error}"))
+                    .map_err(SwEncoderError::from)?;
                 self.drain()?;
                 self.pad.push(MediaBuffer::Eos)
             }

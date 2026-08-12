@@ -28,3 +28,28 @@ pub use tee::{Tee, TeeBuilder, TeeHandle};
 pub use upload::{D3d11Upload, D3d11UploadError};
 #[cfg(feature = "d3d12-renderer")]
 pub use upload::{D3d12Upload, D3d12UploadError};
+
+/// `avcodec_receive_frame`/`avcodec_receive_packet` use `EAGAIN` to mean
+/// "drained for now" and `EOF` to mean permanently drained after flush.
+/// Every other error is a real codec failure and must be propagated.
+fn is_codec_drain_boundary(error: &ffmpeg_next::Error) -> bool {
+    match error {
+        ffmpeg_next::Error::Eof => true,
+        ffmpeg_next::Error::Other { errno } => *errno == ffmpeg_next::error::EAGAIN,
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod codec_error_tests {
+    use super::*;
+
+    #[test]
+    fn only_eagain_and_eof_are_codec_drain_boundaries() {
+        assert!(is_codec_drain_boundary(&ffmpeg_next::Error::Eof));
+        assert!(is_codec_drain_boundary(&ffmpeg_next::Error::Other {
+            errno: ffmpeg_next::error::EAGAIN,
+        }));
+        assert!(!is_codec_drain_boundary(&ffmpeg_next::Error::InvalidData));
+    }
+}

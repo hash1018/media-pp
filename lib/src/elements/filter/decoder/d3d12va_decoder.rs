@@ -13,6 +13,8 @@ use crate::{
     pool::UnboundObjectPool,
 };
 
+use crate::elements::filter::is_codec_drain_boundary;
+
 /// Mirrors of the D3D12VA-specific structs from FFmpeg's
 /// `libavutil/hwcontext_d3d12va.h` (as of FFmpeg n8.0), hand-written
 /// because `ffmpeg-sys-next` doesn't bind that header — only the
@@ -160,13 +162,19 @@ impl D3d12vaDecoder {
 
     fn drain(&mut self) -> crate::error::Result<()> {
         let mut frame = self.pool.get();
-        while self.decoder.receive_frame(&mut frame).is_ok() {
-            if frame.format() != ffmpeg::format::Pixel::D3D12 {
-                herror!(self, "decoder did not select the D3D12VA pixel format");
-                return Err(D3d12vaDecoderError::HwAccelUnavailable.into());
+        loop {
+            match self.decoder.receive_frame(&mut frame) {
+                Ok(()) => {
+                    if frame.format() != ffmpeg::format::Pixel::D3D12 {
+                        herror!(self, "decoder did not select the D3D12VA pixel format");
+                        return Err(D3d12vaDecoderError::HwAccelUnavailable.into());
+                    }
+                    self.pad.push(MediaBuffer::Video(Arc::new(frame)))?;
+                    frame = self.pool.get();
+                }
+                Err(error) if is_codec_drain_boundary(&error) => break,
+                Err(error) => return Err(D3d12vaDecoderError::from(error).into()),
             }
-            self.pad.push(MediaBuffer::Video(Arc::new(frame)))?;
-            frame = self.pool.get();
         }
         Ok(())
     }
@@ -207,7 +215,10 @@ impl Sink for D3d12vaDecoder {
                 self.drain()
             }
             MediaBuffer::Eos => {
-                let _ = self.decoder.send_eof();
+                self.decoder
+                    .send_eof()
+                    .inspect_err(|error| herror!(self, "send_eof failed: {error}"))
+                    .map_err(D3d12vaDecoderError::from)?;
                 self.drain()?;
                 self.pad.push(MediaBuffer::Eos)
             }

@@ -18,6 +18,8 @@ cbuffer LayerBuffer : register(b0)
     float4 yuv_to_blue;
     float opacity;
     float3 _padding;
+    float2 uv_scale;
+    float2 _uv_padding;
 };
 
 Texture2D<float> luma : register(t0);
@@ -29,9 +31,10 @@ SamplerState layer_sampler : register(s0);
 // converting every input to opaque BGRA via libswscale.
 float4 ps_nv12(VertexOutput input) : SV_Target
 {
+    float2 source_uv = input.uv * uv_scale;
     float4 yuv = float4(
-        luma.Sample(layer_sampler, input.uv).r,
-        chroma.Sample(layer_sampler, input.uv).rg,
+        luma.Sample(layer_sampler, source_uv).r,
+        chroma.Sample(layer_sampler, source_uv).rg,
         1.0
     );
     float3 rgb = float3(

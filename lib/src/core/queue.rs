@@ -343,6 +343,11 @@ fn worker_loop(
     stop: Arc<AtomicBool>,
 ) {
     hinfo!(hlog: &hlog, "worker: starting");
+    let error_reporter = QueueErrorReporter {
+        bus: &bus,
+        name: &name,
+        hlog: &hlog,
+    };
     loop {
         if let Some((msg, ack)) = control_rx.try_recv() {
             if apply_control(
@@ -351,7 +356,7 @@ fn worker_loop(
                 msg,
                 &ack,
                 &control_rx,
-                &hlog,
+                &error_reporter,
                 &stop,
             ) {
                 hinfo!(hlog: &hlog, "worker: stopped");
@@ -364,7 +369,15 @@ fn worker_loop(
             recv(control_rx.rx) -> req => {
                 match req {
                     Ok(req) => {
-                        if apply_control(&data_rx, &mut downstream, req.msg, &req.ack, &control_rx, &hlog, &stop) {
+                        if apply_control(
+                            &data_rx,
+                            &mut downstream,
+                            req.msg,
+                            &req.ack,
+                            &control_rx,
+                            &error_reporter,
+                            &stop,
+                        ) {
                             hinfo!(hlog: &hlog, "worker: stopped");
                             return;
                         }
@@ -398,14 +411,7 @@ fn worker_loop(
                                 // dies over it. Whoever's watching the bus
                                 // decides whether the error is fatal
                                 // enough to call `Pipeline::stop`.
-                                bus.post(
-                                    &hlog,
-                                    BusEvent::Error {
-                                        element_type: ElementType::Queue,
-                                        name: name.clone(),
-                                        error,
-                                    },
-                                );
+                                error_reporter.post(error);
                             }
                         }
                     }
@@ -438,12 +444,12 @@ fn apply_control(
     msg: ControlMsg,
     ack: &Sender<()>,
     control_rx: &ControlReceiver,
-    hlog: &HLog,
+    error_reporter: &QueueErrorReporter<'_>,
     stop: &AtomicBool,
 ) -> bool {
-    hinfo!(hlog: hlog, "control: {msg:?}");
+    hinfo!(hlog: error_reporter.hlog, "control: {msg:?}");
     discard_stale_data(data_rx, msg);
-    let _ = downstream.control(msg);
+    forward_control(downstream, msg, error_reporter);
     let is_stop = msg == ControlMsg::Stop;
     let _ = ack.send(());
     if is_stop {
@@ -464,19 +470,19 @@ fn apply_control(
             Ok(req) => (req.msg, req.ack),
             Err(RecvTimeoutError::Timeout) => {
                 if stop.load(Ordering::Relaxed) {
-                    hinfo!(hlog: hlog, "worker: stop flag set while paused, ending");
+                    hinfo!(hlog: error_reporter.hlog, "worker: stop flag set while paused, ending");
                     return true;
                 }
                 continue;
             }
             Err(RecvTimeoutError::Disconnected) => {
-                hinfo!(hlog: hlog, "worker: control channel gone while paused, ending");
+                hinfo!(hlog: error_reporter.hlog, "worker: control channel gone while paused, ending");
                 return true; // sender gone — treat like Stop
             }
         };
-        hinfo!(hlog: hlog, "control: {msg:?}");
+        hinfo!(hlog: error_reporter.hlog, "control: {msg:?}");
         discard_stale_data(data_rx, msg);
-        let _ = downstream.control(msg);
+        forward_control(downstream, msg, error_reporter);
         let is_stop = msg == ControlMsg::Stop;
         let _ = ack.send(());
         if is_stop {
@@ -486,6 +492,39 @@ fn apply_control(
             return false;
         }
         // Another Pause while already paused: already forwarded above, keep waiting.
+    }
+}
+
+struct QueueErrorReporter<'a> {
+    bus: &'a Bus,
+    name: &'a Arc<str>,
+    hlog: &'a HLog,
+}
+
+impl QueueErrorReporter<'_> {
+    fn post(&self, error: crate::error::Error) {
+        self.bus.post(
+            self.hlog,
+            BusEvent::Error {
+                element_type: ElementType::Queue,
+                name: self.name.clone(),
+                error,
+            },
+        );
+    }
+}
+
+/// Forwards control without turning one downstream failure into a stuck
+/// synchronous caller or a dead Queue worker. The request is still acked by
+/// [`apply_control`], while the failure is exposed through the same Bus path
+/// used for `consume` failures.
+fn forward_control(
+    downstream: &mut Box<dyn Sink>,
+    msg: ControlMsg,
+    error_reporter: &QueueErrorReporter<'_>,
+) {
+    if let Err(error) = downstream.control(msg) {
+        error_reporter.post(error);
     }
 }
 
@@ -820,6 +859,39 @@ mod tests {
         }
     }
 
+    #[rust_hlog::hlog]
+    struct FailControl {}
+
+    impl Element for FailControl {
+        fn name(&self) -> Arc<str> {
+            "fail-control".into()
+        }
+
+        fn element_type(&self) -> ElementType {
+            ElementType::Other
+        }
+
+        fn hlog(&self) -> &HLog {
+            &self.hlog
+        }
+
+        fn hlog_mut(&mut self) -> &mut HLog {
+            &mut self.hlog
+        }
+    }
+
+    impl Sink for FailControl {
+        fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
+            Ok(())
+        }
+
+        fn control(&mut self, msg: ControlMsg) -> Result<()> {
+            Err(crate::error::Error::Other(format!(
+                "simulated {msg:?} failure"
+            )))
+        }
+    }
+
     /// Regression test for the design change prompted by the `NoFreeSlot`
     /// investigation: a `Sink::consume` failure used to end the worker
     /// thread outright (and, transitively, everything upstream once its
@@ -860,6 +932,40 @@ mod tests {
         assert_eq!(
             errors, 1,
             "expected exactly one Error event, for the one buffer that failed"
+        );
+    }
+
+    /// Control failures are asynchronous worker failures just like
+    /// `consume` failures: they must be visible on the Bus, but must not
+    /// prevent Pause/Resume/Stop acknowledgements or strand the worker.
+    #[test]
+    fn failing_control_is_reported_without_blocking_the_control_cascade() {
+        let sink = FailControl {
+            hlog: element_hlog(ElementType::Other, "fail-control", None),
+        };
+        let (bus, bus_rx) = Bus::new();
+        let mut queue = Queue::spawn_with_policy(
+            "test",
+            1,
+            Box::new(sink),
+            bus,
+            OverflowPolicy::default(),
+            None,
+        );
+
+        queue.control(ControlMsg::Pause).unwrap();
+        queue.control(ControlMsg::Resume).unwrap();
+        queue.control(ControlMsg::Stop).unwrap();
+        drop(queue);
+
+        let errors: Vec<_> = bus_rx
+            .iter()
+            .filter(|event| matches!(event, BusEvent::Error { .. }))
+            .collect();
+        assert_eq!(
+            errors.len(),
+            3,
+            "Pause, Resume, and Stop failures must each be reported once"
         );
     }
 }

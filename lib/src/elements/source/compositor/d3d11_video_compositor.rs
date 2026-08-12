@@ -103,6 +103,17 @@ pub enum D3d11VideoCompositorError {
     InvalidArrayIndex { index: isize, array_size: u32 },
 
     #[error(
+        "frame dimensions {frame_width}x{frame_height} exceed the backing D3D11 texture's \
+         {texture_width}x{texture_height} dimensions"
+    )]
+    FrameExceedsTexture {
+        frame_width: u32,
+        frame_height: u32,
+        texture_width: u32,
+        texture_height: u32,
+    },
+
+    #[error(
         "a Pixel::D3D11 frame's texture lives on a different ID3D11Device than this \
          D3d11VideoCompositor was created with — every D3D11 element in one pipeline must share \
          exactly one device for zero-copy to be valid"
@@ -402,20 +413,24 @@ struct LayerConstants {
     blue: [f32; 4],
     opacity: f32,
     _padding: [f32; 3],
+    uv_scale: [f32; 2],
+    _uv_padding: [f32; 2],
 }
 
 impl LayerConstants {
-    fn bgra(opacity: f32) -> Self {
+    fn bgra(opacity: f32, uv_scale: [f32; 2]) -> Self {
         Self {
             red: [0.0; 4],
             green: [0.0; 4],
             blue: [0.0; 4],
             opacity,
             _padding: [0.0; 3],
+            uv_scale,
+            _uv_padding: [0.0; 2],
         }
     }
 
-    fn nv12(frame: &ffmpeg::frame::Video, opacity: f32) -> Self {
+    fn nv12(frame: &ffmpeg::frame::Video, opacity: f32, uv_scale: [f32; 2]) -> Self {
         let [red, green, blue] =
             yuv_to_rgb_rows(frame.color_space(), frame.color_range(), frame.height());
         Self {
@@ -424,8 +439,30 @@ impl LayerConstants {
             blue,
             opacity,
             _padding: [0.0; 3],
+            uv_scale,
+            _uv_padding: [0.0; 2],
         }
     }
+}
+
+fn visible_uv_scale(
+    frame_width: u32,
+    frame_height: u32,
+    texture_width: u32,
+    texture_height: u32,
+) -> std::result::Result<[f32; 2], D3d11VideoCompositorError> {
+    if frame_width > texture_width || frame_height > texture_height {
+        return Err(D3d11VideoCompositorError::FrameExceedsTexture {
+            frame_width,
+            frame_height,
+            texture_width,
+            texture_height,
+        });
+    }
+    Ok([
+        frame_width as f32 / texture_width as f32,
+        frame_height as f32 / texture_height as f32,
+    ])
 }
 
 /// Composites the latest frames from any number of independent GPU-backed
@@ -719,6 +756,7 @@ impl D3d11VideoCompositor {
             });
         }
         let array_index = index as u32;
+        let uv_scale = visible_uv_scale(frame.width(), frame.height(), desc.Width, desc.Height)?;
 
         let geometry =
             video_layer::layer_geometry(frame.width(), frame.height(), layer.rect, layer.fit)
@@ -729,8 +767,8 @@ impl D3d11VideoCompositor {
         };
 
         let constants = match desc.Format {
-            DXGI_FORMAT_B8G8R8A8_UNORM => LayerConstants::bgra(layer.opacity),
-            DXGI_FORMAT_NV12 => LayerConstants::nv12(frame, layer.opacity),
+            DXGI_FORMAT_B8G8R8A8_UNORM => LayerConstants::bgra(layer.opacity, uv_scale),
+            DXGI_FORMAT_NV12 => LayerConstants::nv12(frame, layer.opacity, uv_scale),
             other => return Err(D3d11VideoCompositorError::UnsupportedTextureFormat(other)),
         };
         unsafe {
@@ -1265,6 +1303,16 @@ mod tests {
         bgra: [u8; 4],
     ) -> ID3D11Texture2D {
         let pixels: Vec<u8> = (0..width * height).flat_map(|_| bgra).collect();
+        bgra_texture_from_pixels(device, width, height, &pixels)
+    }
+
+    fn bgra_texture_from_pixels(
+        device: &ID3D11Device,
+        width: u32,
+        height: u32,
+        pixels: &[u8],
+    ) -> ID3D11Texture2D {
+        assert_eq!(pixels.len(), (width * height * 4) as usize);
         unsafe {
             let desc = D3D11_TEXTURE2D_DESC {
                 Width: width,
@@ -1430,6 +1478,63 @@ mod tests {
         let downloaded = download_frame(&device, context, composed);
         assert_eq!(pixel(&downloaded, 0, 0), [0, 0, 255, 255], "red background");
         assert_eq!(pixel(&downloaded, 1, 1), [255, 0, 0, 255], "blue overlay");
+    }
+
+    #[test]
+    fn ignores_rows_outside_the_frame_visible_dimensions() {
+        let Some((device, context)) = try_device() else {
+            return;
+        };
+        let options = VideoCompositorOptions {
+            width: 4,
+            height: 3,
+            frame_rate: ffmpeg::Rational::new(30, 1),
+            background: video_layer::VideoColor::BLACK,
+        };
+        let (mut compositor, handle) =
+            D3d11VideoCompositor::new("compositor", &device, context.clone(), options)
+                .expect("D3d11VideoCompositor::new should succeed");
+        let mut layer = VideoLayer::new(VideoRect::new(0, 0, 4, 3));
+        layer.fit = video_layer::VideoFit::Stretch;
+        let mut sink = handle.add_source("input", layer).unwrap().unwrap().sink;
+
+        // The frame exposes only the top three red rows of a four-row
+        // texture. Sampling the full texture would blend the blue padding
+        // row into the last visible output row.
+        let mut pixels = Vec::with_capacity(4 * 4 * 4);
+        for y in 0..4 {
+            let color = if y < 3 {
+                [0, 0, 255, 255]
+            } else {
+                [255, 0, 0, 255]
+            };
+            pixels.extend((0..4).flat_map(|_| color));
+        }
+        let texture = bgra_texture_from_pixels(&device, 4, 4, &pixels);
+        sink.consume(pooled_video(wrap_d3d11_texture(texture, 4, 3)))
+            .unwrap();
+
+        let composed = compositor.compose_frame().expect("compose_frame failed");
+        let downloaded = download_frame(&device, context, composed);
+        for y in 0..3 {
+            for x in 0..4 {
+                assert_eq!(pixel(&downloaded, x, y), [0, 0, 255, 255]);
+            }
+        }
+    }
+
+    #[test]
+    fn rejects_frame_dimensions_larger_than_the_backing_texture() {
+        let error = visible_uv_scale(1920, 1088, 1920, 1080).unwrap_err();
+        assert!(matches!(
+            error,
+            D3d11VideoCompositorError::FrameExceedsTexture {
+                frame_width: 1920,
+                frame_height: 1088,
+                texture_width: 1920,
+                texture_height: 1080,
+            }
+        ));
     }
 
     #[test]

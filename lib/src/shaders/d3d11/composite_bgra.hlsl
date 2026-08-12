@@ -36,6 +36,8 @@ cbuffer LayerBuffer : register(b0)
     float4 yuv_to_blue;
     float opacity;
     float3 _padding;
+    float2 uv_scale;
+    float2 _uv_padding;
 };
 
 Texture2D<float4> bgra_texture : register(t0);
@@ -45,6 +47,6 @@ SamplerState layer_sampler : register(s0);
 // no YUV conversion needed, same reasoning as render_common's own ps_bgra.
 float4 ps_bgra(VertexOutput input) : SV_Target
 {
-    float4 color = bgra_texture.Sample(layer_sampler, input.uv);
+    float4 color = bgra_texture.Sample(layer_sampler, input.uv * uv_scale);
     return float4(color.rgb, color.a * opacity);
 }

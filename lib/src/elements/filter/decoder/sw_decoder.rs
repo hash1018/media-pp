@@ -12,6 +12,8 @@ use crate::{
     pool::UnboundObjectPool,
 };
 
+use crate::elements::filter::is_codec_drain_boundary;
+
 /// Errors specific to `SwDecoder`. Converts into the crate-wide `Error`
 /// via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
@@ -135,11 +137,17 @@ impl Sink for SwDecoder {
             MediaBuffer::Eos => {
                 match &mut self.kind {
                     Kind::Video(decoder) => {
-                        let _ = decoder.send_eof();
+                        decoder
+                            .send_eof()
+                            .inspect_err(|error| herror!(self, "send_eof failed: {error}"))
+                            .map_err(SwDecoderError::from)?;
                         drain_video(decoder, &mut self.pad, &self.pool)?;
                     }
                     Kind::Audio(decoder) => {
-                        let _ = decoder.send_eof();
+                        decoder
+                            .send_eof()
+                            .inspect_err(|error| herror!(self, "send_eof failed: {error}"))
+                            .map_err(SwDecoderError::from)?;
                         drain_audio(decoder, &mut self.pad)?;
                     }
                 }
@@ -178,18 +186,30 @@ fn drain_video(
     pool: &UnboundObjectPool<ffmpeg::frame::Video>,
 ) -> crate::error::Result<()> {
     let mut frame = pool.get();
-    while decoder.receive_frame(&mut frame).is_ok() {
-        pad.push(MediaBuffer::Video(Arc::new(frame)))?;
-        frame = pool.get();
+    loop {
+        match decoder.receive_frame(&mut frame) {
+            Ok(()) => {
+                pad.push(MediaBuffer::Video(Arc::new(frame)))?;
+                frame = pool.get();
+            }
+            Err(error) if is_codec_drain_boundary(&error) => break,
+            Err(error) => return Err(SwDecoderError::from(error).into()),
+        }
     }
     Ok(())
 }
 
 fn drain_audio(decoder: &mut ffmpeg::decoder::Audio, pad: &mut SrcPad) -> crate::error::Result<()> {
     let mut frame = ffmpeg::frame::Audio::empty();
-    while decoder.receive_frame(&mut frame).is_ok() {
-        pad.push(MediaBuffer::Audio(Arc::new(frame)))?;
-        frame = ffmpeg::frame::Audio::empty();
+    loop {
+        match decoder.receive_frame(&mut frame) {
+            Ok(()) => {
+                pad.push(MediaBuffer::Audio(Arc::new(frame)))?;
+                frame = ffmpeg::frame::Audio::empty();
+            }
+            Err(error) if is_codec_drain_boundary(&error) => break,
+            Err(error) => return Err(SwDecoderError::from(error).into()),
+        }
     }
     Ok(())
 }

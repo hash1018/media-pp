@@ -16,6 +16,8 @@ use crate::{
     pool::UnboundObjectPool,
 };
 
+use crate::elements::filter::is_codec_drain_boundary;
+
 /// Mirrors of the D3D11VA-specific structs from FFmpeg's
 /// `libavutil/hwcontext_d3d11va.h` (verified against the actual header
 /// linked on this machine, `C:\ffmpeg-lib\include\libavutil\hwcontext_d3d11va.h`
@@ -195,13 +197,19 @@ impl D3d11Decoder {
 
     fn drain(&mut self) -> crate::error::Result<()> {
         let mut frame = self.pool.get();
-        while self.decoder.receive_frame(&mut frame).is_ok() {
-            if frame.format() != ffmpeg::format::Pixel::D3D11 {
-                herror!(self, "decoder did not select the D3D11VA pixel format");
-                return Err(D3d11vaDecoderError::HwAccelUnavailable.into());
+        loop {
+            match self.decoder.receive_frame(&mut frame) {
+                Ok(()) => {
+                    if frame.format() != ffmpeg::format::Pixel::D3D11 {
+                        herror!(self, "decoder did not select the D3D11VA pixel format");
+                        return Err(D3d11vaDecoderError::HwAccelUnavailable.into());
+                    }
+                    self.pad.push(MediaBuffer::Video(Arc::new(frame)))?;
+                    frame = self.pool.get();
+                }
+                Err(error) if is_codec_drain_boundary(&error) => break,
+                Err(error) => return Err(D3d11vaDecoderError::from(error).into()),
             }
-            self.pad.push(MediaBuffer::Video(Arc::new(frame)))?;
-            frame = self.pool.get();
         }
         Ok(())
     }
@@ -242,7 +250,10 @@ impl Sink for D3d11Decoder {
                 self.drain()
             }
             MediaBuffer::Eos => {
-                let _ = self.decoder.send_eof();
+                self.decoder
+                    .send_eof()
+                    .inspect_err(|error| herror!(self, "send_eof failed: {error}"))
+                    .map_err(D3d11vaDecoderError::from)?;
                 self.drain()?;
                 self.pad.push(MediaBuffer::Eos)
             }
