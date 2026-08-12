@@ -1,5 +1,5 @@
 use std::sync::{
-    Arc, Mutex, Weak,
+    Arc, Mutex, MutexGuard, Weak,
     atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
@@ -50,6 +50,17 @@ struct TeeBranch {
     root_id: ElementId,
     active: AtomicBool,
     pad: Mutex<SrcPad>,
+}
+
+/// Recovers the protected value after a panic instead of turning one
+/// poisoned Tee lock into a permanent source of follow-up panics. The
+/// original panic still unwinds normally; this only lets a caller that
+/// catches it keep using or detach the remaining branch state.
+fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    match mutex.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
 }
 
 /// Build-time configuration for a [`Tee`]. Initial branches are merged
@@ -176,7 +187,7 @@ impl TeeBuilder {
         let shared = tee.shared.clone();
         let context = shared.context.clone();
         let mut tee_branch = context.branch().to(Box::new(tee))?;
-        let mut runtime_branches = shared.branches.lock().unwrap();
+        let mut runtime_branches = lock_unpoisoned(&shared.branches);
 
         for branch in initial_branches {
             let mut pad = shared.next_pad(&tee_name);
@@ -230,7 +241,7 @@ impl TeeHandle {
             .shared
             .upgrade()
             .ok_or(GraphError::ParentNotAttached(self.id))?;
-        let mut branches = shared.branches.lock().unwrap();
+        let mut branches = lock_unpoisoned(&shared.branches);
         let mut pad = shared.next_pad(&self.name);
         let from_port: Arc<str> = pad.name().into();
         let DetachedBranch { root, plan } = branch;
@@ -265,7 +276,7 @@ impl TeeHandle {
             .shared
             .upgrade()
             .ok_or(GraphError::BranchNotAttached(branch_id))?;
-        let mut branches = shared.branches.lock().unwrap();
+        let mut branches = lock_unpoisoned(&shared.branches);
         let index = branches
             .iter()
             .position(|branch| branch.id == Some(branch_id))
@@ -309,7 +320,7 @@ impl TeeHandle {
     pub fn sink_count(&self) -> usize {
         self.shared
             .upgrade()
-            .map(|shared| shared.branches.lock().unwrap().len())
+            .map(|shared| lock_unpoisoned(&shared.branches).len())
             .unwrap_or(0)
     }
 }
@@ -338,7 +349,7 @@ impl Element for Tee {
 
 impl Sink for Tee {
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
-        let branches = self.shared.branches.lock().unwrap().clone();
+        let branches = lock_unpoisoned(&self.shared.branches).clone();
         // One branch failing must not stop the buffer from reaching its
         // siblings — same "errors never kill anything, just get reported"
         // rule `Queue`'s worker loop follows. That buffer is dropped for
@@ -349,7 +360,7 @@ impl Sink for Tee {
             if !branch.active.load(Ordering::Acquire) {
                 continue;
             }
-            let mut pad = branch.pad.lock().unwrap();
+            let mut pad = lock_unpoisoned(&branch.pad);
             // Detach may have won the race while this thread waited for a
             // previous push on the same branch to finish.
             if !branch.active.load(Ordering::Acquire) {
@@ -366,18 +377,24 @@ impl Sink for Tee {
     }
 
     fn control(&mut self, msg: ControlMsg) -> Result<()> {
-        // Every active branch gets the same `ControlMsg` value directly;
-        // it is `Copy` and does not need a per-branch clone.
-        let branches = self.shared.branches.lock().unwrap().clone();
+        // Control failures follow the same isolation rule as data failures:
+        // report the failed branch, but still deliver the message to every
+        // sibling. This is especially important for Stop and Pause.
+        let branches = lock_unpoisoned(&self.shared.branches).clone();
         for branch in branches {
             if !branch.active.load(Ordering::Acquire) {
                 continue;
             }
-            let mut pad = branch.pad.lock().unwrap();
+            let mut pad = lock_unpoisoned(&branch.pad);
             if !branch.active.load(Ordering::Acquire) {
                 continue;
             }
-            pad.control(msg)?;
+            let peer = pad.peer_identity();
+            let outcome = pad.control(msg);
+            drop(pad);
+            if let Err(error) = outcome {
+                self.report_branch_error(branch.root_id, peer, error);
+            }
         }
         Ok(())
     }
@@ -386,8 +403,10 @@ impl Sink for Tee {
 #[cfg(test)]
 mod tests {
     use std::{
+        panic::{AssertUnwindSafe, catch_unwind},
         sync::{
-            atomic::{AtomicUsize, Ordering},
+            Barrier,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
             mpsc,
         },
         thread,
@@ -462,6 +481,87 @@ mod tests {
             Err(crate::error::Error::Other(
                 "simulated branch failure".into(),
             ))
+        }
+
+        fn control(&mut self, _msg: ControlMsg) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[rust_hlog::hlog]
+    struct ControlObservingSink {
+        name: &'static str,
+        count: Arc<AtomicUsize>,
+        fail: bool,
+    }
+
+    impl Element for ControlObservingSink {
+        fn name(&self) -> Arc<str> {
+            self.name.into()
+        }
+
+        fn element_type(&self) -> ElementType {
+            ElementType::Other
+        }
+
+        fn hlog(&self) -> &HLog {
+            &self.hlog
+        }
+
+        fn hlog_mut(&mut self) -> &mut HLog {
+            &mut self.hlog
+        }
+    }
+
+    impl Sink for ControlObservingSink {
+        fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
+            Ok(())
+        }
+
+        fn control(&mut self, _msg: ControlMsg) -> Result<()> {
+            self.count.fetch_add(1, Ordering::SeqCst);
+            if self.fail {
+                Err(crate::error::Error::Other(
+                    "simulated control failure".into(),
+                ))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[rust_hlog::hlog]
+    struct PanicOnceSink {
+        panicked: bool,
+        successful: Arc<AtomicUsize>,
+    }
+
+    impl Element for PanicOnceSink {
+        fn name(&self) -> Arc<str> {
+            "panic-once".into()
+        }
+
+        fn element_type(&self) -> ElementType {
+            ElementType::Other
+        }
+
+        fn hlog(&self) -> &HLog {
+            &self.hlog
+        }
+
+        fn hlog_mut(&mut self) -> &mut HLog {
+            &mut self.hlog
+        }
+    }
+
+    impl Sink for PanicOnceSink {
+        fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
+            if !self.panicked {
+                self.panicked = true;
+                panic!("simulated downstream panic");
+            }
+            self.successful.fetch_add(1, Ordering::SeqCst);
+            Ok(())
         }
 
         fn control(&mut self, _msg: ControlMsg) -> Result<()> {
@@ -635,6 +735,142 @@ mod tests {
     }
 
     #[test]
+    fn a_failing_control_branch_does_not_block_its_siblings() {
+        let (bus, bus_rx) = Bus::new();
+        let graph = PipelineGraph::new();
+        let source_id = graph.add_source(ElementType::Other, "source".into());
+        let context = Arc::new(Context {
+            bus,
+            pipeline_id: "test".into(),
+            graph,
+            clock: Arc::new(Clock::new()),
+            source_id,
+        });
+        let failing_count = Arc::new(AtomicUsize::new(0));
+        let healthy_count = Arc::new(AtomicUsize::new(0));
+        let failing = context
+            .branch()
+            .to(Box::new(ControlObservingSink {
+                name: "control-fail",
+                count: failing_count.clone(),
+                fail: true,
+                hlog: element_hlog(ElementType::Other, "control-fail", None),
+            }))
+            .unwrap();
+        let healthy = context
+            .branch()
+            .to(Box::new(ControlObservingSink {
+                name: "control-ok",
+                count: healthy_count.clone(),
+                fail: false,
+                hlog: element_hlog(ElementType::Other, "control-ok", None),
+            }))
+            .unwrap();
+        let tee_branch = TeeBuilder::new("tee", context.clone())
+            .branch(failing)
+            .branch(healthy)
+            .build()
+            .unwrap();
+        let mut upstream = SrcPad::new("source_src");
+        context.attach_pad(&mut upstream, tee_branch).unwrap();
+
+        upstream
+            .control(ControlMsg::Pause)
+            .expect("a branch control failure should be reported, not short-circuit Tee");
+
+        assert_eq!(failing_count.load(Ordering::SeqCst), 1);
+        assert_eq!(healthy_count.load(Ordering::SeqCst), 1);
+        let message = bus_rx
+            .try_recv_message()
+            .expect("the failing control branch should post an Error event");
+        assert!(matches!(
+            message.event,
+            BusEvent::Error { name, .. } if &*name == "control-fail"
+        ));
+        assert!(bus_rx.try_recv_message().is_none());
+    }
+
+    #[test]
+    fn a_poisoned_branch_pad_can_be_used_after_the_panic_is_caught() {
+        let (bus, _bus_rx) = Bus::new();
+        let graph = PipelineGraph::new();
+        let source_id = graph.add_source(ElementType::Other, "source".into());
+        let context = Arc::new(Context {
+            bus,
+            pipeline_id: "test".into(),
+            graph,
+            clock: Arc::new(Clock::new()),
+            source_id,
+        });
+        let successful = Arc::new(AtomicUsize::new(0));
+        let panic_once = context
+            .branch()
+            .to(Box::new(PanicOnceSink {
+                panicked: false,
+                successful: successful.clone(),
+                hlog: element_hlog(ElementType::Other, "panic-once", None),
+            }))
+            .unwrap();
+        let tee_branch = TeeBuilder::new("tee", context.clone())
+            .branch(panic_once)
+            .build()
+            .unwrap();
+        let mut upstream = SrcPad::new("source_src");
+        context.attach_pad(&mut upstream, tee_branch).unwrap();
+
+        let first = catch_unwind(AssertUnwindSafe(|| upstream.push(packet())));
+        assert!(
+            first.is_err(),
+            "the original downstream panic must propagate"
+        );
+        upstream
+            .push(packet())
+            .expect("the poisoned branch pad should be recovered on the next push");
+        assert_eq!(successful.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_poisoned_branch_list_does_not_break_attach_or_detach() {
+        let (bus, _bus_rx) = Bus::new();
+        let graph = PipelineGraph::new();
+        let source_id = graph.add_source(ElementType::Other, "source".into());
+        let context = Arc::new(Context {
+            bus,
+            pipeline_id: "test".into(),
+            graph,
+            clock: Arc::new(Clock::new()),
+            source_id,
+        });
+        let (tee_branch, handle) = TeeBuilder::new("tee", context.clone())
+            .build_dynamic()
+            .unwrap();
+        let mut upstream = SrcPad::new("source_src");
+        context.attach_pad(&mut upstream, tee_branch).unwrap();
+        let shared = handle.shared.upgrade().unwrap();
+
+        let poisoned = catch_unwind(AssertUnwindSafe(|| {
+            let _branches = shared.branches.lock().unwrap();
+            panic!("poison the branch-list lock");
+        }));
+        assert!(poisoned.is_err());
+        assert_eq!(handle.sink_count(), 0);
+
+        let branch = handle
+            .branch()
+            .unwrap()
+            .to(Box::new(CountingSink {
+                name: "after-poison",
+                count: Arc::new(AtomicUsize::new(0)),
+                hlog: element_hlog(ElementType::Other, "after-poison", None),
+            }))
+            .unwrap();
+        let branch_id = handle.attach(branch).unwrap();
+        assert_eq!(handle.sink_count(), 1);
+        handle.detach(branch_id).unwrap();
+        assert_eq!(handle.sink_count(), 0);
+    }
+
+    #[test]
     fn blocked_downstream_does_not_block_unrelated_attach_or_detach() {
         let (bus, _bus_rx) = Bus::new();
         let graph = PipelineGraph::new();
@@ -715,6 +951,111 @@ mod tests {
             detach_completed_while_blocked,
             "detach waited for an already-running downstream call"
         );
+    }
+
+    #[test]
+    fn concurrent_push_attach_and_detach_stays_consistent_under_stress() {
+        const MIN_PUSHES: usize = 10_000;
+        const MUTATIONS: usize = 500;
+
+        let (bus, _bus_rx) = Bus::new();
+        let graph = PipelineGraph::new();
+        let source_id = graph.add_source(ElementType::Other, "source".into());
+        let context = Arc::new(Context {
+            bus,
+            pipeline_id: "test".into(),
+            graph,
+            clock: Arc::new(Clock::new()),
+            source_id,
+        });
+        let initial_count = Arc::new(AtomicUsize::new(0));
+        let initial = context
+            .branch()
+            .to(Box::new(CountingSink {
+                name: "initial",
+                count: initial_count.clone(),
+                hlog: element_hlog(ElementType::Other, "initial", None),
+            }))
+            .unwrap();
+        let (tee_branch, handle) = TeeBuilder::new("tee", context.clone())
+            .branch(initial)
+            .build_dynamic()
+            .unwrap();
+        let mut upstream = SrcPad::new("source_src");
+        context.attach_pad(&mut upstream, tee_branch).unwrap();
+
+        let start = Arc::new(Barrier::new(2));
+        let mutating = Arc::new(AtomicBool::new(true));
+        let (push_done_tx, push_done_rx) = mpsc::channel();
+        let push_start = start.clone();
+        let push_mutating = mutating.clone();
+        let push_thread = thread::spawn(move || {
+            push_start.wait();
+            let packet = packet();
+            let mut pushed = 0;
+            let mut outcome = Ok(());
+            while push_mutating.load(Ordering::Acquire) || pushed < MIN_PUSHES {
+                if let Err(error) = upstream.push(packet.clone()) {
+                    outcome = Err(error.to_string());
+                    break;
+                }
+                pushed += 1;
+                if pushed % 32 == 0 {
+                    thread::yield_now();
+                }
+            }
+            let _ = push_done_tx.send((upstream, outcome, pushed));
+        });
+
+        let (mutation_done_tx, mutation_done_rx) = mpsc::channel();
+        let mutation_start = start;
+        let mutation_handle = handle.clone();
+        let mutation_thread = thread::spawn(move || {
+            mutation_start.wait();
+            let outcome = (|| -> std::result::Result<(), String> {
+                for _ in 0..MUTATIONS {
+                    let branch = mutation_handle
+                        .branch()
+                        .ok_or_else(|| "Tee disappeared during stress test".to_owned())?
+                        .to(Box::new(CountingSink {
+                            name: "dynamic",
+                            count: Arc::new(AtomicUsize::new(0)),
+                            hlog: element_hlog(ElementType::Other, "dynamic", None),
+                        }))
+                        .map_err(|error| error.to_string())?;
+                    let branch_id = mutation_handle
+                        .attach(branch)
+                        .map_err(|error| error.to_string())?;
+                    thread::yield_now();
+                    mutation_handle
+                        .detach(branch_id)
+                        .map_err(|error| error.to_string())?;
+                }
+                Ok(())
+            })();
+            mutating.store(false, Ordering::Release);
+            let _ = mutation_done_tx.send(outcome);
+        });
+
+        mutation_done_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("attach/detach stress thread timed out")
+            .expect("attach/detach stress thread failed");
+        let (upstream, push_outcome, pushed) = push_done_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("push stress thread timed out");
+        push_outcome.expect("push stress thread failed");
+        push_thread.join().unwrap();
+        mutation_thread.join().unwrap();
+
+        assert!(pushed >= MIN_PUSHES);
+        assert_eq!(initial_count.load(Ordering::SeqCst), pushed);
+        assert_eq!(handle.sink_count(), 1);
+        let graph = context.graph.snapshot();
+        assert_eq!(graph.nodes.len(), 3);
+        assert_eq!(graph.edges.len(), 2);
+        assert_eq!(graph.revision, 2 + (MUTATIONS as u64 * 2));
+        drop(upstream);
     }
 
     #[test]
