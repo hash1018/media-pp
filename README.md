@@ -82,8 +82,8 @@ for); this table isn't meant to duplicate that.
 | `RtspSource` | Demuxes a live RTSP stream (the client/receive counterpart to `RtspServer`) — no internal retry/reconnect on a dropped connection, fails fast instead; the caller rebuilds a fresh one to reconnect |
 | `TestVideoSource` | Generates a synthetic moving-gradient `Pixel::YUV420P` stream — GStreamer's `videotestsrc` equivalent, no file/camera/decoder needed |
 | `TestAudioSource` | Generates a synthetic sine-tone `Sample::F32(Packed)` audio stream — the audio sibling of `TestVideoSource`, no file/microphone/decoder needed |
-| `DxgiScreenSource` (`dxgi-capture`) | Captures the desktop live via DXGI Desktop Duplication — GStreamer's `d3d11screencapturesrc` equivalent. Pushes `Pixel::BGRA` untouched (chain a `Scaler` for YUV420P); emits at a constant `fps` (default 30, same convention as `TestVideoSource`) rather than one push per real desktop change — repeats the latest captured image if nothing changed since the last tick, since a variable-rate/push-on-change version of this turned out to cause visible judder against a vsync-locked renderer. `CaptureMode::Cpu` (default, optional cursor compositing) or `CaptureMode::Gpu` — the GPU mode resolves the capture adapter, creates its own `ID3D11Device`, and returns that device from `open()` so the renderer and other D3D11 stages can share it; capture then emits zero-copy `Pixel::D3D11` textures with no `Map`/CPU pixel copy (no cursor support yet in this mode) |
-| `AudioCaptureSource` (`wasapi-capture`) | Captures audio live via WASAPI — either a playback endpoint's own outgoing mix (loopback, i.e. system audio — the audio counterpart to record alongside `DxgiScreenSource`) or a microphone, picked from `AudioCaptureSource::list_devices()` |
+| `DxgiCaptureSource` (`dxgi-capture`) | Captures the desktop live via DXGI Desktop Duplication — GStreamer's `d3d11screencapturesrc` equivalent. Pushes `Pixel::BGRA` untouched (chain a `Scaler` for YUV420P); emits at a constant `fps` (default 30, same convention as `TestVideoSource`) rather than one push per real desktop change — repeats the latest captured image if nothing changed since the last tick, since a variable-rate/push-on-change version of this turned out to cause visible judder against a vsync-locked renderer. `CaptureMode::Cpu` (default, optional cursor compositing) or `CaptureMode::Gpu` — the GPU mode resolves the capture adapter, creates its own `ID3D11Device`, and returns that device from `open()` so the renderer and other D3D11 stages can share it; capture then emits zero-copy `Pixel::D3D11` textures with no `Map`/CPU pixel copy (no cursor support yet in this mode) |
+| `WasapiCaptureSource` (`wasapi-capture`) | Captures audio live via WASAPI — either a playback endpoint's own outgoing mix (loopback, i.e. system audio — the audio counterpart to record alongside `DxgiCaptureSource`) or a microphone, picked from `WasapiCaptureSource::list_devices()` |
 | `AudioMixer`¹ | Live-mixes any number of inputs, attachable/detachable while running via `MixerHandle::add_source`/`remove_source` (`add_source` returns a terminal `Sink` that a different pipeline can pass to `ctx.branch().to(...)`) — the fan-in counterpart to `Tee`'s fan-out |
 | `WebRtcPeer` (`webrtc`) | Drives one str0m `Rtc` session on its own thread. Not a `Pipeline` source itself — `WebRtcHandle::add_track`/`next_track()` mint a `WebRtcTrackSink`+`WebRtcTrackSource` pair per track (see below), symmetric for tracks either side added, so one `Direction::SendRecv` track carries both directions |
 | `WebRtcTrackSource` (`webrtc`) | The receive side of one WebRTC track — a plain `SourceElement`, same shape as `AppSource`; obtained via `WebRtcHandle::next_track()`, not constructed directly |
@@ -115,7 +115,7 @@ for); this table isn't meant to duplicate that.
 | `SegmentedMp4Muxer`⁴ | Same shape as `Mp4Muxer`, but cuts to a new file every so often (`SegmentPolicy::Duration`) instead of writing one file for the whole recording — e.g. `rec_000.mp4`, `rec_001.mp4`, ... — so a crash mid-recording only loses the currently-open segment |
 | `HlsMuxer`⁵ | Muxes one or more encoded packet streams into an HLS media playlist with MPEG-TS or fMP4 segments; supports sliding live windows, EVENT/VOD playlists, atomic manifest replacement, and optional deletion of expired live segments |
 | `D3d12Renderer` (`d3d12-renderer`) | Submits frames to a `D3d12FrameRenderer` impl — zero-copy for `D3d12vaDecoder`'s frames. `media-pp` only defines the trait (plus `RawPlane`/`SubmitError`); the actual DX12 window rendering lives in `examples/render/render_common`'s own `D3d12WindowRenderer` |
-| `D3d11Renderer` (`d3d11-renderer`) | Submits frames to a `D3d11FrameRenderer` impl — zero-copy for `D3d11Upload`/`D3d11Decoder`/`DxgiScreenSource`'s GPU mode. No fence, no `keep_alive` (unlike `D3d12FrameRenderer`): every producer in this crate's D3D11 stack shares one `ID3D11Device`+context, and D3D11's own driver-deferred resource destruction means the runtime — not this crate — keeps a texture alive for as long as the GPU still needs it. `examples/render/render_common`'s own `D3d11WindowRenderer` is the concrete implementation |
+| `D3d11Renderer` (`d3d11-renderer`) | Submits frames to a `D3d11FrameRenderer` impl — zero-copy for `D3d11Upload`/`D3d11Decoder`/`DxgiCaptureSource`'s GPU mode. No fence, no `keep_alive` (unlike `D3d12FrameRenderer`): every producer in this crate's D3D11 stack shares one `ID3D11Device`+context, and D3D11's own driver-deferred resource destruction means the runtime — not this crate — keeps a texture alive for as long as the GPU still needs it. `examples/render/render_common`'s own `D3d11WindowRenderer` is the concrete implementation |
 | `RtspServer` (`rtsp-server`) | Spawns a vendored MediaMTX and remuxes packets into it as a live RTSP stream |
 | `AppSink` | Hands buffers (and, optionally, control messages) to plain closures — GStreamer's `appsink` equivalent |
 | `OrtDetector` (`ort`) | Runs a YOLOv8/v11-style ONNX model on each frame via `ort`, hands decoded/NMS-filtered detections to a closure |
@@ -155,9 +155,9 @@ have their own arguments or need none.
 
 | Crate | Pipeline | Demonstrates |
 |---|---|---|
-| `audio_capture` (`wasapi-capture`) | AudioCaptureSource → FrameCounter | Lists WASAPI endpoints, captures ~3s from one (system-audio loopback by default, or a microphone), reports how many buffers came through |
-| `screen_record` (`dxgi-capture`) | DxgiScreenSource → Scaler → SwEncoder → Mp4Muxer | Headless desktop recording straight to `.mp4` — no window, no renderer (compare `screen_capture`, which renders instead of encoding) |
-| `screen_audio_record` (`dxgi-capture` + `wasapi-capture`) | DxgiScreenSource + AudioCaptureSource → Mp4Muxer | Desktop + system-audio recording combined into one file — two independent live sources driven by one `PipelineBuilder`-built `Pipeline`, both tracks finalized together; stops on `q` + Enter in the terminal |
+| `audio_capture` (`wasapi-capture`) | WasapiCaptureSource → FrameCounter | Lists WASAPI endpoints, captures ~3s from one (system-audio loopback by default, or a microphone), reports how many buffers came through |
+| `screen_record` (`dxgi-capture`) | DxgiCaptureSource → Scaler → SwEncoder → Mp4Muxer | Headless desktop recording straight to `.mp4` — no window, no renderer (compare `screen_capture`, which renders instead of encoding) |
+| `screen_audio_record` (`dxgi-capture` + `wasapi-capture`) | DxgiCaptureSource + WasapiCaptureSource → Mp4Muxer | Desktop + system-audio recording combined into one file — two independent live sources driven by one `PipelineBuilder`-built `Pipeline`, both tracks finalized together; stops on `q` + Enter in the terminal |
 
 ### Playback (Windows only)
 
@@ -169,8 +169,8 @@ have their own arguments or need none.
 | `test_video` | TestVideoSource → Queue → D3d12Renderer | A synthetic moving-gradient stream rendered directly (no file/camera/decoder, no `Pacer`) — proves `TestVideoSource`'s frames and `D3d12Renderer`'s CPU-upload path work end to end. Confirmed smooth without a `Pacer`: `TestVideoSource` self-paces on a drift-free absolute schedule, which turned out to be what actually mattered (see `screen_capture`, which confirmed the same thing even with a `Scaler` in between); `transcode_render` (below) keeps one, since its `SwEncoder`/`SwDecoder` stages have their own real per-frame variance, untested without |
 | `transcode_render` | TestVideoSource → Queue → SwEncoder → Queue → SwDecoder → Queue → Pacer → D3d12Renderer | Encodes the synthetic stream (`libopenh264`) and decodes it straight back, no container/mux involved — proves `SwEncoder`'s `Packet`s are actually valid, decodable bitstream, not just "opened successfully" |
 | `seek_render` | Demux → SwDecoder → Queue → Pacer → D3d12Renderer | Same chain as `sw_decode_render`, plus a terminal prompt that calls `Pipeline::seek` while the window is open |
-| `screen_capture` | DxgiScreenSource (CPU mode) → Queue → Scaler → Queue → D3d12Renderer | Live desktop capture (DXGI Desktop Duplication, cursor included) at a constant frame rate, converted/resized to the window's own size and rendered directly, no `Pacer`. Confirmed smooth without one: an earlier, variable-rate version of `DxgiScreenSource` measurably needed a `Pacer` here to avoid judder, but once it moved to constant-rate, drift-free-scheduled emission (same pattern as `TestVideoSource`), `Scaler` alone wasn't enough to bring the judder back |
-| `screen_capture_gpu` | DxgiScreenSource (GPU mode) → Queue → D3d11Renderer | The zero-copy sibling of `screen_capture`: captures straight to a GPU-resident `Pixel::D3D11` BGRA texture on the renderer's own `ID3D11Device` — no `Map`, no CPU pixel copy, no `Scaler` (desktop content is already BGRA/RGB). No cursor (`CaptureMode::Gpu` doesn't support it yet) |
+| `screen_capture` | DxgiCaptureSource (CPU mode) → Queue → Scaler → Queue → D3d12Renderer | Live desktop capture (DXGI Desktop Duplication, cursor included) at a constant frame rate, converted/resized to the window's own size and rendered directly, no `Pacer`. Confirmed smooth without one: an earlier, variable-rate version of `DxgiCaptureSource` measurably needed a `Pacer` here to avoid judder, but once it moved to constant-rate, drift-free-scheduled emission (same pattern as `TestVideoSource`), `Scaler` alone wasn't enough to bring the judder back |
+| `screen_capture_gpu` | DxgiCaptureSource (GPU mode) → Queue → D3d11Renderer | The zero-copy sibling of `screen_capture`: captures straight to a GPU-resident `Pixel::D3D11` BGRA texture on the renderer's own `ID3D11Device` — no `Map`, no CPU pixel copy, no `Scaler` (desktop content is already BGRA/RGB). No cursor (`CaptureMode::Gpu` doesn't support it yet) |
 | `d3d12_upload` | TestVideoSource → Queue → Scaler → Queue → D3d12Upload → Queue → D3d12Renderer | A CPU `Pixel::YUV420P` stream converted to `Pixel::NV12` on the CPU, then uploaded to a GPU `Pixel::D3D12` texture on the renderer's own device via `D3d12Upload` before being presented zero-copy — proves `D3d12Upload`'s frames are structurally identical to `D3d12vaDecoder`'s own, so `D3d12Renderer` takes its zero-copy path unmodified even though nothing here ever decoded anything |
 | `d3d11_upload` | TestVideoSource → Queue → Scaler → Queue → D3d11Upload → Queue → D3d11Renderer | The D3D11 sibling of `d3d12_upload`, same proof for `D3d11Upload`/`D3d11Renderer` |
 
@@ -228,15 +228,15 @@ cargo run -p sw_decode_render              # d3d12-renderer is already enabled i
   `d3d12-renderer`. Every `d3d11_*`/`screen_capture_gpu` example crate
   turns it on in its own `Cargo.toml`.
 - `dxgi-capture` (on `media-pp`) — pulls in `windows` (DXGI sub-features)
-  and enables `DxgiScreenSource`/`CaptureMode`. Requires `d3d11-renderer`
-  (`DxgiScreenOptions`' `CaptureMode::Gpu` produces a `Pixel::D3D11` frame
+  and enables `DxgiCaptureSource`/`CaptureMode`. Requires `d3d11-renderer`
+  (`DxgiCaptureOptions`' `CaptureMode::Gpu` produces a `Pixel::D3D11` frame
   the same way `D3d11Upload` does, via the same shared helper) — enabling
   `dxgi-capture` pulls `d3d11-renderer` in automatically. Windows-only.
   `screen_capture`/`screen_capture_gpu` turn it on in their own
   `Cargo.toml` (alongside `d3d12-renderer`/`d3d11-renderer` respectively,
   to actually render what they capture).
 - `wasapi-capture` (on `media-pp`) — pulls in `windows` (WASAPI/Core Audio
-  sub-features) and enables `AudioCaptureSource`/`AudioCaptureOptions`/
+  sub-features) and enables `WasapiCaptureSource`/`WasapiCaptureOptions`/
   `AudioDevice`/`AudioDeviceKind`. Independent of `dxgi-capture`/
   `d3d11-renderer`/`d3d12-renderer` — capturing audio needs none of them —
   but commonly turned on alongside `dxgi-capture` for a combined
@@ -275,7 +275,7 @@ cargo run -p sw_decode_render              # d3d12-renderer is already enabled i
   `elements/filter/decoder/d3d12va_decoder.rs`) — sourced from FFmpeg
   n8.0's header. A future FFmpeg version changing that header's layout
   would silently break this with no compile-time warning.
-  `D3d11Decoder`/`D3d11Upload`/`DxgiScreenSource`'s GPU mode do the same
+  `D3d11Decoder`/`D3d11Upload`/`DxgiCaptureSource`'s GPU mode do the same
   for a couple of small D3D11VA-specific structs
   (`elements/filter/decoder/d3d11va_decoder.rs`),
   but deliberately touch only a handful of already-initialized fields
@@ -288,7 +288,7 @@ cargo run -p sw_decode_render              # d3d12-renderer is already enabled i
   downstream queue/buffer can hold, or decode itself starts failing once
   the pool runs out (see its own doc comment).
 - Every D3D11 element in one pipeline (`D3d11Decoder`, `D3d11Upload`,
-  `D3d11Renderer`, `DxgiScreenSource`'s GPU mode) must share exactly one
+  `D3d11Renderer`, `DxgiCaptureSource`'s GPU mode) must share exactly one
   `ID3D11Device` — that's what lets this stack skip explicit GPU-side
   fences entirely, unlike the D3D12 side (see `D3d11Renderer`'s own doc
   comment for why).

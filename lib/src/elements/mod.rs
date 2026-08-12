@@ -37,10 +37,11 @@ pub use source::{
 };
 #[cfg(feature = "wasapi-capture")]
 pub use source::{
-    AudioCaptureOptions, AudioCaptureSource, AudioCaptureSourceError, AudioDevice, AudioDeviceKind,
+    AudioDevice, AudioDeviceKind, WasapiCaptureOptions, WasapiCaptureSource,
+    WasapiCaptureSourceError,
 };
 #[cfg(feature = "dxgi-capture")]
 pub use source::{
-    CaptureArea, CaptureMode, CaptureRect, DxgiScreenOptions, DxgiScreenSource,
-    DxgiScreenSourceError,
+    CaptureArea, CaptureMode, CaptureRect, DxgiCaptureOptions, DxgiCaptureSource,
+    DxgiCaptureSourceError,
 };

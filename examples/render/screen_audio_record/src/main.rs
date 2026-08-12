@@ -7,14 +7,14 @@ use ffmpeg_next as ffmpeg;
 use media_pp::{
     bus::BusEvent,
     elements::{
-        AudioCaptureOptions, AudioCaptureSource, AudioCodec, AudioDeviceKind, CaptureMode,
-        DxgiScreenOptions, DxgiScreenSource, Mp4Muxer, Scaler, SwAudioEncoder,
-        SwAudioEncoderOptions, SwEncoder, SwEncoderOptions, VideoCodec,
+        AudioCodec, AudioDeviceKind, CaptureMode, DxgiCaptureOptions, DxgiCaptureSource, Mp4Muxer,
+        Scaler, SwAudioEncoder, SwAudioEncoderOptions, SwEncoder, SwEncoderOptions, VideoCodec,
+        WasapiCaptureOptions, WasapiCaptureSource,
     },
     pipeline::PipelineBuilder,
 };
 
-/// DxgiScreenSource + AudioCaptureSource (system-audio loopback — whatever
+/// DxgiCaptureSource + WasapiCaptureSource (system-audio loopback — whatever
 /// the default playback device is putting out, i.e. "PC 소리") -> one
 /// Mp4Muxer: records the desktop and its system audio together into a
 /// single playable `.mp4`. Two independent live sources sharing one
@@ -38,25 +38,26 @@ fn main() -> media_pp::Result<()> {
         .nth(1)
         .unwrap_or_else(|| "screen_audio_record.mp4".into());
 
-    let capture_options = DxgiScreenOptions {
+    let capture_options = DxgiCaptureOptions {
         fps: 30,
         capture_mode: CaptureMode::Cpu {
             include_cursor: true,
         },
-        ..DxgiScreenOptions::default()
+        ..DxgiCaptureOptions::default()
     };
-    let (video_source, width, height, _device) = DxgiScreenSource::open("screen", capture_options)?;
+    let (video_source, width, height, _device) =
+        DxgiCaptureSource::open("screen", capture_options)?;
     let video_time_base = video_source.time_base();
 
     let devices =
-        AudioCaptureSource::list_devices().map_err(|e| media_pp::Error::Other(e.to_string()))?;
+        WasapiCaptureSource::list_devices().map_err(|e| media_pp::Error::Other(e.to_string()))?;
     let device = devices
         .into_iter()
         .find(|d| d.kind == AudioDeviceKind::Render && d.is_default)
         .ok_or_else(|| media_pp::Error::Other("no default playback device found".into()))?;
     println!("capturing system audio from: {}", device.name);
     let (audio_source, sample_rate, channels) =
-        AudioCaptureSource::open("system-audio", AudioCaptureOptions { device })
+        WasapiCaptureSource::open("system-audio", WasapiCaptureOptions { device })
             .map_err(|e| media_pp::Error::Other(e.to_string()))?;
     let audio_time_base = audio_source.time_base();
 

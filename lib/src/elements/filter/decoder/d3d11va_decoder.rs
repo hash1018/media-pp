@@ -272,7 +272,7 @@ impl Drop for D3d11Decoder {
 }
 
 /// Shared with [`crate::elements::D3d11Upload`] and
-/// [`crate::elements::DxgiScreenSource`]'s GPU capture mode — every
+/// [`crate::elements::DxgiCaptureSource`]'s GPU capture mode — every
 /// producer of a `Pixel::D3D11` frame in this crate goes through this same
 /// device-context setup, which is what lets [`d3d11va_texture`] read any
 /// of their frames identically. Returns a raw `AVERROR` code rather than
@@ -322,7 +322,7 @@ pub(crate) unsafe fn create_hw_device_ctx(
     }
 }
 
-/// Shared with [`crate::elements::D3d11Upload`]/[`crate::elements::DxgiScreenSource`]
+/// Shared with [`crate::elements::D3d11Upload`]/[`crate::elements::DxgiCaptureSource`]
 /// — see [`create_hw_device_ctx`]'s own docs.
 pub(crate) unsafe fn free_buffer(mut buf: *mut ffi::AVBufferRef) {
     unsafe { ffi::av_buffer_unref(&mut buf) };
@@ -350,7 +350,7 @@ unsafe extern "C" fn release_d3d11_texture(_opaque: *mut c_void, data: *mut u8) 
 /// version of this function did exactly that and corrupted memory badly
 /// enough to trip `/GS` (`STATUS_STACK_BUFFER_OVERRUN`), for a reason not
 /// fully root-caused. [`crate::elements::D3d11Upload`] and
-/// [`crate::elements::DxgiScreenSource`]'s GPU capture mode build their
+/// [`crate::elements::DxgiCaptureSource`]'s GPU capture mode build their
 /// own `ID3D11Texture2D` directly via plain `windows-rs` calls instead
 /// (safe, ordinary D3D11 API usage, no struct-layout guessing) and use
 /// this function only to make the *result* look like a normal

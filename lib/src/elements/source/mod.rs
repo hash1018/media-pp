@@ -1,28 +1,27 @@
 mod app_source;
-#[cfg(feature = "wasapi-capture")]
-mod audio_capture_source;
 mod audio_mixer;
-#[cfg(feature = "dxgi-capture")]
-mod dxgi_screen_source;
+mod capture;
 mod file_demuxer;
 mod rtsp_source;
-mod test_audio_source;
-mod test_video_source;
+mod test;
 
 pub use app_source::{AppSource, AppSourceError, AppSourceHandle};
-#[cfg(feature = "wasapi-capture")]
-pub use audio_capture_source::{
-    AudioCaptureOptions, AudioCaptureSource, AudioCaptureSourceError, AudioDevice, AudioDeviceKind,
-};
 pub use audio_mixer::{
     AudioMixer, AudioMixerError, AudioMixerOptions, MixerHandle, MixerInputSink,
 };
+#[cfg(feature = "wasapi-capture")]
+pub use capture::{
+    AudioDevice, AudioDeviceKind, WasapiCaptureOptions, WasapiCaptureSource,
+    WasapiCaptureSourceError,
+};
 #[cfg(feature = "dxgi-capture")]
-pub use dxgi_screen_source::{
-    CaptureArea, CaptureMode, CaptureRect, DxgiScreenOptions, DxgiScreenSource,
-    DxgiScreenSourceError,
+pub use capture::{
+    CaptureArea, CaptureMode, CaptureRect, DxgiCaptureOptions, DxgiCaptureSource,
+    DxgiCaptureSourceError,
 };
 pub use file_demuxer::{FileDemuxError, FileDemuxer, StreamInfo};
 pub use rtsp_source::{RtspOptions, RtspSource, RtspSourceError, RtspTransport};
-pub use test_audio_source::{TestAudioOptions, TestAudioSource, TestAudioSourceError};
-pub use test_video_source::{TestVideoOptions, TestVideoSource, TestVideoSourceError};
+pub use test::{
+    TestAudioOptions, TestAudioSource, TestAudioSourceError, TestVideoOptions, TestVideoSource,
+    TestVideoSourceError,
+};

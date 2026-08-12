@@ -43,18 +43,18 @@ use crate::{
     pool::UnboundObjectPool,
 };
 
-/// How often [`DxgiScreenSource::run`]'s poll loop re-checks
+/// How often [`DxgiCaptureSource::run`]'s poll loop re-checks
 /// `drain_control`/whether it's time to emit, even mid-wait for the next
 /// real desktop change — bounds `Stop` latency at very low configured
-/// [`DxgiScreenOptions::fps`] values, where "wait until the next tick" on
+/// [`DxgiCaptureOptions::fps`] values, where "wait until the next tick" on
 /// its own could otherwise be a long, unresponsive block. Same idea as
 /// [`crate::queue::Queue`]'s own `STOP_POLL_INTERVAL`.
 const POLL_GRANULARITY: Duration = Duration::from_millis(100);
 
-/// Errors specific to `DxgiScreenSource`. Converts into the crate-wide
+/// Errors specific to `DxgiCaptureSource`. Converts into the crate-wide
 /// `Error` via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
-pub enum DxgiScreenSourceError {
+pub enum DxgiCaptureSourceError {
     #[error("windows error: {0}")]
     Windows(#[from] windows::core::Error),
 
@@ -62,7 +62,7 @@ pub enum DxgiScreenSourceError {
     NoSuchOutput(u32),
 
     /// `DXGI_ERROR_ACCESS_LOST` specifically, broken out of the generic
-    /// [`DxgiScreenSourceError::Windows`] variant because it's the single
+    /// [`DxgiCaptureSourceError::Windows`] variant because it's the single
     /// most common *recoverable* failure mode for desktop duplication —
     /// a lock screen, a UAC prompt, a display mode change, or a
     /// fullscreen-exclusive app/overlay stealing the duplication lock all
@@ -70,11 +70,11 @@ pub enum DxgiScreenSourceError {
     /// contract [`crate::elements::RtspSource`] already documents: this
     /// element doesn't retry internally, callers that want to survive a
     /// lock-screen cycle watch for this specific error and call
-    /// [`DxgiScreenSource::open`] again.
+    /// [`DxgiCaptureSource::open`] again.
     #[error("DXGI_ERROR_ACCESS_LOST — desktop duplication needs to be reopened")]
     AccessLost,
 
-    #[error("DxgiScreenSource doesn't support seeking a live capture")]
+    #[error("DxgiCaptureSource doesn't support seeking a live capture")]
     SeekUnsupported,
 
     #[error("CaptureArea::Region {0:?} doesn't overlap any display output")]
@@ -92,8 +92,8 @@ pub enum DxgiScreenSourceError {
     CursorUnsupportedForRegion,
 }
 
-/// How [`DxgiScreenSource::open`] captures each frame — see
-/// [`DxgiScreenOptions::capture_mode`].
+/// How [`DxgiCaptureSource::open`] captures each frame — see
+/// [`DxgiCaptureOptions::capture_mode`].
 #[derive(Debug, Clone)]
 pub enum CaptureMode {
     /// The original behavior: `AcquireNextFrame`'s resource is copied into
@@ -110,11 +110,11 @@ pub enum CaptureMode {
     /// (`composite_cursor`), which has nothing to run against under
     /// [`CaptureMode::Gpu`], where the captured image never touches the
     /// CPU at all; putting the field here instead of as a separate
-    /// `DxgiScreenOptions` flag makes that combination unrepresentable
+    /// `DxgiCaptureOptions` flag makes that combination unrepresentable
     /// rather than a runtime error to guard against. Also unsupported
     /// (a hard `open`-time error, see
-    /// [`DxgiScreenSourceError::CursorUnsupportedForRegion`]) when
-    /// [`DxgiScreenOptions::area`] is a [`CaptureArea::Region`] spanning
+    /// [`DxgiCaptureSourceError::CursorUnsupportedForRegion`]) when
+    /// [`DxgiCaptureOptions::area`] is a [`CaptureArea::Region`] spanning
     /// more than one output — see that variant's own docs on why.
     Cpu { include_cursor: bool },
     /// Captures straight to a GPU-resident frame tagged `Pixel::D3D11`
@@ -130,7 +130,7 @@ pub enum CaptureMode {
     ///
     /// Unlike [`CaptureMode::Cpu`], this variant carries no device of its
     /// own to inject: `open` always builds the device itself, from
-    /// whichever adapter [`DxgiScreenOptions::area`] actually selects
+    /// whichever adapter [`DxgiCaptureOptions::area`] actually selects
     /// (the *only* place that resolves "which adapter" — see
     /// `resolve_area`), and hands it back as `open`'s own return value
     /// for the caller to reuse. That's the one `ID3D11Device` every other
@@ -160,8 +160,8 @@ pub struct CaptureRect {
     pub height: u32,
 }
 
-/// Which portion of the desktop [`DxgiScreenSource::open`] duplicates —
-/// see [`DxgiScreenOptions::area`].
+/// Which portion of the desktop [`DxgiCaptureSource::open`] duplicates —
+/// see [`DxgiCaptureOptions::area`].
 #[derive(Debug, Clone, Copy)]
 pub enum CaptureArea {
     /// The `output_index`'th output's entire desktop — a flat index
@@ -192,26 +192,26 @@ pub enum CaptureArea {
     /// — `open` checks every intersected output's adapter *before*
     /// opening any duplication, so a rejected region never partially
     /// opens anything, and fails outright
-    /// ([`DxgiScreenSourceError::RegionSpansMultipleAdapters`]) rather
+    /// ([`DxgiCaptureSourceError::RegionSpansMultipleAdapters`]) rather
     /// than silently falling back to a CPU bridge for the mismatched
     /// output — same "hard, loud failure, never a silent auto-copy"
     /// reasoning as `D3d12Renderer`'s own device-mismatch guard.
     ///
     /// `include_cursor` (see [`CaptureMode::Cpu`]) is only valid when the
     /// region resolves to a single output —
-    /// [`DxgiScreenSourceError::CursorUnsupportedForRegion`] otherwise.
+    /// [`DxgiCaptureSourceError::CursorUnsupportedForRegion`] otherwise.
     /// The cursor can legitimately straddle a monitor boundary inside a
     /// stitched composite; handling that correctly isn't done, simplest
     /// to reject rather than silently draw it wrong.
     Region(CaptureRect),
 }
 
-/// Construction-time options for [`DxgiScreenSource::open`].
+/// Construction-time options for [`DxgiCaptureSource::open`].
 #[derive(Debug, Clone)]
-pub struct DxgiScreenOptions {
+pub struct DxgiCaptureOptions {
     /// Which output(s) to capture from — see [`CaptureArea`].
     pub area: CaptureArea,
-    /// The constant rate frames are emitted at — see [`DxgiScreenSource`]'s
+    /// The constant rate frames are emitted at — see [`DxgiCaptureSource`]'s
     /// own docs on why this is a fixed output rate (like
     /// [`crate::elements::TestVideoSource::new`]'s `framerate`), not a cap
     /// on an otherwise irregular one. `30` by default, matching
@@ -219,12 +219,12 @@ pub struct DxgiScreenOptions {
     pub fps: u32,
     /// CPU (the original behavior) or GPU (zero-copy) capture — see
     /// [`CaptureMode`]. `CaptureMode::Cpu { include_cursor: false }` by
-    /// default, so existing callers building `DxgiScreenOptions { ..
+    /// default, so existing callers building `DxgiCaptureOptions { ..
     /// ..Default::default() }` keep today's behavior unchanged.
     pub capture_mode: CaptureMode,
 }
 
-impl Default for DxgiScreenOptions {
+impl Default for DxgiCaptureOptions {
     fn default() -> Self {
         Self {
             area: CaptureArea::Output { output_index: 0 },
@@ -259,7 +259,7 @@ struct CaptureUnit {
     /// (`D3D11_USAGE_STAGING`) under [`CaptureMode::Cpu`], GPU-only
     /// (`D3D11_USAGE_DEFAULT`, no bind flags) under [`CaptureMode::Gpu`]
     /// — only the fresh composite texture
-    /// [`DxgiScreenSource::emit_frame_gpu`] builds needs to be
+    /// [`DxgiCaptureSource::emit_frame_gpu`] builds needs to be
     /// shader-bindable, not this one. Sized to this output's own
     /// resolution, not the final composite's — see `source_box` for the
     /// (possibly smaller) piece of it actually used.
@@ -276,7 +276,7 @@ struct CaptureUnit {
     dest_y: u32,
     /// Whether this unit has captured at least one real image yet — the
     /// element as a whole is ready to emit only once every unit's own
-    /// flag is `true` (see [`DxgiScreenSource::all_captured`]), so a
+    /// flag is `true` (see [`DxgiCaptureSource::all_captured`]), so a
     /// freshly opened multi-output region never emits with part of the
     /// composite still blank.
     has_captured: bool,
@@ -290,7 +290,7 @@ struct CaptureUnit {
 /// something needs YUV420P, e.g. [`crate::elements::D3d12Renderer`]'s
 /// CPU-upload path or [`crate::elements::SwEncoder`]).
 ///
-/// Emits at a **constant** rate — [`DxgiScreenOptions::fps`] — not one
+/// Emits at a **constant** rate — [`DxgiCaptureOptions::fps`] — not one
 /// push per real desktop change. An earlier version of this pushed
 /// variable-rate (VFR): a real wall-clock pts per actual change, nothing
 /// in between. That turned out to cause real problems, both for muxing
@@ -310,7 +310,7 @@ struct CaptureUnit {
 /// steady `1 / fps` cadence, entirely on the one thread `run()` already
 /// has (no extra threads spawned; see this crate's own "elements never
 /// spawn their own threads" rule). Same shape as
-/// [`crate::elements::TestVideoSource`]: [`DxgiScreenSource::time_base`]
+/// [`crate::elements::TestVideoSource`]: [`DxgiCaptureSource::time_base`]
 /// is `1 / fps` and `pts` is a plain incrementing tick counter, one per
 /// *emitted* frame, not per real capture.
 ///
@@ -321,7 +321,7 @@ struct CaptureUnit {
 /// over its own irregular submission timing; once emission here is
 /// steady and drift-free, `Scaler`'s modest, fairly consistent per-frame
 /// conversion cost isn't enough on its own to reintroduce the same vsync
-/// misalignment, so a straight `DxgiScreenSource -> Scaler -> D3d12Renderer`
+/// misalignment, so a straight `DxgiCaptureSource -> Scaler -> D3d12Renderer`
 /// chain stays smooth with no `Pacer` at all. `Pacer` remains genuinely
 /// useful for other reasons (multi-stream sync against a shared `Clock`,
 /// or a stage with real per-frame variance like `SwEncoder`), just not
@@ -331,8 +331,8 @@ struct CaptureUnit {
 /// Deliberately does **not** retry internally on `DXGI_ERROR_ACCESS_LOST`
 /// (lock screen, UAC prompt, display mode change, ...) — same "fail fast,
 /// caller rebuilds" contract as [`crate::elements::RtspSource`]; watch for
-/// [`DxgiScreenSourceError::AccessLost`] and call
-/// [`DxgiScreenSource::open`] again.
+/// [`DxgiCaptureSourceError::AccessLost`] and call
+/// [`DxgiCaptureSource::open`] again.
 ///
 /// Runs until `Stop` — never reaches `Eos` on its own, same as
 /// `TestVideoSource` (there's no natural end to a live desktop capture).
@@ -342,9 +342,9 @@ struct CaptureUnit {
 /// to describe "the" duplication instead describes one `CaptureUnit`
 /// per contributing output.
 #[rust_hlog::hlog]
-pub struct DxgiScreenSource {
+pub struct DxgiCaptureSource {
     name: Arc<str>,
-    /// Only used by [`CaptureMode::Gpu`]'s [`DxgiScreenSource::emit_frame`]
+    /// Only used by [`CaptureMode::Gpu`]'s [`DxgiCaptureSource::emit_frame`]
     /// path, to build each tick's fresh per-emission composite texture —
     /// unused after construction in [`CaptureMode::Cpu`], but harmless to
     /// hold either way (one extra COM reference, same device already
@@ -382,16 +382,16 @@ pub struct DxgiScreenSource {
     /// constant rate rather than only on real changes. Only under
     /// [`CaptureMode::Cpu`] — `None` under [`CaptureMode::Gpu`], which
     /// composites straight from each unit's own `staging_texture` at
-    /// emit time instead (see [`DxgiScreenSource::emit_frame_gpu`]).
+    /// emit time instead (see [`DxgiCaptureSource::emit_frame_gpu`]).
     staging: Option<ffmpeg::frame::Video>,
-    /// See [`DxgiScreenOptions::fps`] — kept alongside `frame_interval`
-    /// so [`DxgiScreenSource::time_base`] doesn't have to recover it from
+    /// See [`DxgiCaptureOptions::fps`] — kept alongside `frame_interval`
+    /// so [`DxgiCaptureSource::time_base`] doesn't have to recover it from
     /// a `Duration`.
     fps: i32,
     /// `1 / fps`.
     frame_interval: Duration,
     /// This element's `pts` tick counter — one per *emitted* frame (see
-    /// [`DxgiScreenSource::time_base`]'s own docs), not per real capture.
+    /// [`DxgiCaptureSource::time_base`]'s own docs), not per real capture.
     frame_index: i64,
     pad: SrcPad,
     /// Reused across every emitted frame — see [`UnboundObjectPool`]'s
@@ -405,10 +405,10 @@ pub struct DxgiScreenSource {
 // `&mut self` on every method that touches them (mirrors `D3d12vaDecoder`/
 // `Scaler`'s own reasoning) already rules out concurrent access from
 // multiple threads.
-unsafe impl Send for DxgiScreenSource {}
+unsafe impl Send for DxgiCaptureSource {}
 
-impl DxgiScreenSource {
-    /// Opens whichever output(s) [`DxgiScreenOptions::area`] resolves to
+impl DxgiCaptureSource {
+    /// Opens whichever output(s) [`DxgiCaptureOptions::area`] resolves to
     /// and starts duplicating them. Returns the element alongside the
     /// captured composite's actual `(width, height)` — what the caller
     /// needs to build a matching downstream
@@ -423,10 +423,10 @@ impl DxgiScreenSource {
     /// rather than a separately-created one.
     pub fn open(
         name: impl Into<String>,
-        options: DxgiScreenOptions,
-    ) -> std::result::Result<(Self, u32, u32, Option<ID3D11Device>), DxgiScreenSourceError> {
+        options: DxgiCaptureOptions,
+    ) -> std::result::Result<(Self, u32, u32, Option<ID3D11Device>), DxgiCaptureSourceError> {
         let name: Arc<str> = name.into().into();
-        let hlog = element_hlog(ElementType::DxgiScreenSource, &name, None);
+        let hlog = element_hlog(ElementType::DxgiCaptureSource, &name, None);
 
         let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }?;
         let gpu_mode = matches!(options.capture_mode, CaptureMode::Gpu);
@@ -439,7 +439,7 @@ impl DxgiScreenSource {
 
         let (targets, requested) = resolve_area(&factory, &options.area)?;
         if include_cursor && targets.len() > 1 {
-            return Err(DxgiScreenSourceError::CursorUnsupportedForRegion);
+            return Err(DxgiCaptureSourceError::CursorUnsupportedForRegion);
         }
         let width = (requested.right - requested.left) as u32;
         let height = (requested.bottom - requested.top) as u32;
@@ -661,7 +661,7 @@ impl DxgiScreenSource {
     /// `DXGI_ERROR_WAIT_TIMEOUT` on any one unit (nothing changed within
     /// its share of `timeout_ms`) is not an error — that unit is simply
     /// unchanged this call.
-    fn poll_capture(&mut self, timeout_ms: u32) -> std::result::Result<(), DxgiScreenSourceError> {
+    fn poll_capture(&mut self, timeout_ms: u32) -> std::result::Result<(), DxgiCaptureSourceError> {
         let per_unit_timeout = timeout_ms / self.units.len() as u32;
         for index in 0..self.units.len() {
             let mut info = DXGI_OUTDUPL_FRAME_INFO::default();
@@ -677,7 +677,7 @@ impl DxgiScreenSource {
                 Ok(()) => resource.expect("AcquireNextFrame succeeded without a resource"),
                 Err(error) if error.code() == DXGI_ERROR_WAIT_TIMEOUT => continue,
                 Err(error) if error.code() == DXGI_ERROR_ACCESS_LOST => {
-                    return Err(DxgiScreenSourceError::AccessLost);
+                    return Err(DxgiCaptureSourceError::AccessLost);
                 }
                 Err(error) => return Err(error.into()),
             };
@@ -784,13 +784,13 @@ impl DxgiScreenSource {
 
     /// Builds the next frame to push — the unit of work `run` does once
     /// per emission tick, real change or repeat — and stamps the next
-    /// `pts`. Dispatches to [`DxgiScreenSource::emit_frame_cpu`] or
-    /// [`DxgiScreenSource::emit_frame_gpu`] depending on `self.gpu_mode`.
+    /// `pts`. Dispatches to [`DxgiCaptureSource::emit_frame_cpu`] or
+    /// [`DxgiCaptureSource::emit_frame_gpu`] depending on `self.gpu_mode`.
     fn emit_frame(
         &mut self,
     ) -> std::result::Result<
         crate::pool::UnboundObjectPoolRef<ffmpeg::frame::Video>,
-        DxgiScreenSourceError,
+        DxgiCaptureSourceError,
     > {
         let mut frame = if self.gpu_mode {
             self.emit_frame_gpu()?
@@ -846,7 +846,7 @@ impl DxgiScreenSource {
         frame
     }
 
-    /// `CaptureMode::Gpu`'s equivalent of [`DxgiScreenSource::emit_frame_cpu`]:
+    /// `CaptureMode::Gpu`'s equivalent of [`DxgiCaptureSource::emit_frame_cpu`]:
     /// builds a fresh composite `ID3D11Texture2D` (`self.width` x
     /// `self.height`) and `CopySubresourceRegion`s every unit's own
     /// `source_box` crop into it at that unit's `dest_x`/`dest_y` — one
@@ -864,7 +864,7 @@ impl DxgiScreenSource {
         &mut self,
     ) -> std::result::Result<
         crate::pool::UnboundObjectPoolRef<ffmpeg::frame::Video>,
-        DxgiScreenSourceError,
+        DxgiCaptureSourceError,
     > {
         let desc = D3D11_TEXTURE2D_DESC {
             Width: self.width,
@@ -915,13 +915,13 @@ impl DxgiScreenSource {
     }
 }
 
-impl Element for DxgiScreenSource {
+impl Element for DxgiCaptureSource {
     fn name(&self) -> Arc<str> {
         self.name.clone()
     }
 
     fn element_type(&self) -> ElementType {
-        ElementType::DxgiScreenSource
+        ElementType::DxgiCaptureSource
     }
 
     fn hlog(&self) -> &HLog {
@@ -933,13 +933,13 @@ impl Element for DxgiScreenSource {
     }
 }
 
-impl Source for DxgiScreenSource {
+impl Source for DxgiCaptureSource {
     fn src_pads(&mut self) -> &mut [SrcPad] {
         std::slice::from_mut(&mut self.pad)
     }
 }
 
-impl SourceElement for DxgiScreenSource {
+impl SourceElement for DxgiCaptureSource {
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
         hinfo!(self, "run: starting");
         let mut next_due = Instant::now();
@@ -975,7 +975,7 @@ impl SourceElement for DxgiScreenSource {
                 bus.post(
                     &self.hlog,
                     BusEvent::Error {
-                        element_type: ElementType::DxgiScreenSource,
+                        element_type: ElementType::DxgiCaptureSource,
                         name: self.name.clone(),
                         error,
                     },
@@ -985,20 +985,20 @@ impl SourceElement for DxgiScreenSource {
     }
 
     fn seek(&mut self, _target: Duration) -> Result<Duration> {
-        Err(DxgiScreenSourceError::SeekUnsupported.into())
+        Err(DxgiCaptureSourceError::SeekUnsupported.into())
     }
 }
 
 fn pick_output(
     factory: &IDXGIFactory1,
     output_index: u32,
-) -> std::result::Result<(IDXGIAdapter1, IDXGIOutput1), DxgiScreenSourceError> {
+) -> std::result::Result<(IDXGIAdapter1, IDXGIOutput1), DxgiCaptureSourceError> {
     let mut remaining = output_index;
     let mut adapter_index = 0u32;
     loop {
         let adapter = match unsafe { factory.EnumAdapters1(adapter_index) } {
             Ok(adapter) => adapter,
-            Err(_) => return Err(DxgiScreenSourceError::NoSuchOutput(output_index)),
+            Err(_) => return Err(DxgiCaptureSourceError::NoSuchOutput(output_index)),
         };
         let mut output_i = 0u32;
         loop {
@@ -1027,14 +1027,14 @@ type ResolvedOutput = (IDXGIAdapter1, IDXGIOutput1, RECT);
 /// `DesktopCoordinates` doubles as the requested rectangle — the whole
 /// monitor). [`CaptureArea::Region`] resolves to every output whose own
 /// desktop rectangle intersects the requested one —
-/// [`DxgiScreenSourceError::RegionOutsideDesktop`] if none do — and fails
-/// with [`DxgiScreenSourceError::RegionSpansMultipleAdapters`] if those
+/// [`DxgiCaptureSourceError::RegionOutsideDesktop`] if none do — and fails
+/// with [`DxgiCaptureSourceError::RegionSpansMultipleAdapters`] if those
 /// outputs aren't all on the same adapter, checked here before
-/// [`DxgiScreenSource::open`] opens any duplication.
+/// [`DxgiCaptureSource::open`] opens any duplication.
 fn resolve_area(
     factory: &IDXGIFactory1,
     area: &CaptureArea,
-) -> std::result::Result<(Vec<ResolvedOutput>, RECT), DxgiScreenSourceError> {
+) -> std::result::Result<(Vec<ResolvedOutput>, RECT), DxgiCaptureSourceError> {
     match *area {
         CaptureArea::Output { output_index } => {
             let (adapter, output) = pick_output(factory, output_index)?;
@@ -1085,7 +1085,7 @@ fn resolve_area(
                 adapter_index += 1;
             }
             if targets.is_empty() {
-                return Err(DxgiScreenSourceError::RegionOutsideDesktop(rect));
+                return Err(DxgiCaptureSourceError::RegionOutsideDesktop(rect));
             }
             let first_luid = unsafe {
                 targets[0]
@@ -1102,7 +1102,7 @@ fn resolve_area(
                 }?
                 .AdapterLuid;
                 if (luid.LowPart, luid.HighPart) != (first_luid.LowPart, first_luid.HighPart) {
-                    return Err(DxgiScreenSourceError::RegionSpansMultipleAdapters);
+                    return Err(DxgiCaptureSourceError::RegionSpansMultipleAdapters);
                 }
             }
             Ok((targets, requested))

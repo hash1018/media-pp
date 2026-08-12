@@ -1,7 +1,7 @@
 #[cfg(feature = "webrtc")]
-mod webrtc_peer;
+mod webrtc;
 
 #[cfg(feature = "webrtc")]
-pub use webrtc_peer::{
+pub use webrtc::{
     TrackId, WebRtcError, WebRtcHandle, WebRtcPeer, WebRtcTrackSink, WebRtcTrackSource,
 };

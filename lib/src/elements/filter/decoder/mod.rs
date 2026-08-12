@@ -12,7 +12,7 @@
 //! [`crate::elements::filter::upload`]'s own D3D11/D3D12 variants, by
 //! [`crate::elements::sink::renderer`]'s own D3D11/D3D12 variants (to
 //! read the frames this module's decoders produce), and by
-//! [`crate::elements::source::dxgi_screen_source`]'s GPU capture mode
+//! [`crate::elements::DxgiCaptureSource`]'s GPU capture mode
 //! (which shares the D3D11 frame representation without itself decoding
 //! anything).
 

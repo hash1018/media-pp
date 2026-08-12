@@ -19,8 +19,8 @@ use crate::{
 };
 
 /// How often [`AudioMixer::run`] mixes and emits a combined frame — same
-/// role as [`crate::elements::DxgiScreenSource`]'s own `POLL_GRANULARITY`/
-/// `crate::elements::AudioCaptureSource`'s `POLL_INTERVAL`: bounds `Stop`
+/// role as [`crate::elements::DxgiCaptureSource`]'s own `POLL_GRANULARITY`/
+/// `crate::elements::WasapiCaptureSource`'s `POLL_INTERVAL`: bounds `Stop`
 /// latency and sets the mixer's own output granularity.
 const TICK_INTERVAL: Duration = Duration::from_millis(20);
 
@@ -256,7 +256,7 @@ impl Sink for MixerInputSink {
     /// not a passthrough. `Stop` removes this input immediately, same as
     /// [`MixerHandle::remove_source`]: `Stop` means abandon now, not drain
     /// to a natural `Eos` (see `ControlMsg::Stop`'s own docs), and for a
-    /// live capture source — [`crate::elements::AudioCaptureSource`]
+    /// live capture source — [`crate::elements::WasapiCaptureSource`]
     /// included — `Stop` is the *only* shutdown signal that ever arrives;
     /// it never reaches `Eos` on its own. Relying on `Eos` alone to clean
     /// up (as an earlier version of this did) left a stale entry in
@@ -287,7 +287,7 @@ impl Sink for MixerInputSink {
 /// currently-attached input has ready — because mixing has to keep
 /// producing *something* on a steady clock even when some (or all) inputs
 /// have gone quiet, the same reason
-/// [`crate::elements::AudioCaptureSource`] synthesizes silence for gaps
+/// [`crate::elements::WasapiCaptureSource`] synthesizes silence for gaps
 /// rather than just emitting nothing.
 ///
 /// Every input is resampled to this mixer's own fixed
@@ -382,7 +382,7 @@ impl AudioMixer {
     /// Sums however many samples are needed to keep `samples_emitted` in
     /// lockstep with `start.elapsed()` (a no-op if nothing's owed yet —
     /// same wall-clock-deficit shape as
-    /// [`crate::elements::AudioCaptureSource::fill_silence_gap`], just
+    /// [`crate::elements::WasapiCaptureSource::fill_silence_gap`], just
     /// summing real contributions from every input instead of emitting
     /// pure silence). Drops any input that's both `eos` and fully drained
     /// — it contributed its last real samples on a previous tick and has
@@ -419,7 +419,7 @@ impl AudioMixer {
         // not necessarily `mixed.len() * 4` exactly — only ever write that
         // tight amount (same bound `frame.plane::<T>()` itself reads via
         // `samples()`), never assume the destination's full length
-        // matches `bytes` (see `AudioCaptureSource::build_frame`'s own
+        // matches `bytes` (see `WasapiCaptureSource::build_frame`'s own
         // identical fix).
         frame.data_mut(0)[..bytes.len()].copy_from_slice(bytes);
         frame.set_pts(Some(self.samples_emitted));
@@ -792,7 +792,7 @@ mod tests {
     }
 
     /// Regression test: a capture pipeline ending via `Stop` — the only
-    /// shutdown signal a live source like `AudioCaptureSource` ever sends,
+    /// shutdown signal a live source like `WasapiCaptureSource` ever sends,
     /// since it never reaches `Eos` on its own — used to leave a stale
     /// entry in the mixer's input map forever, because only `Eos` cleared
     /// it. `Sink::control` is what a `Queue`/`Pipeline` actually calls on
@@ -830,7 +830,7 @@ mod tests {
 
         // What a `Queue`/`Pipeline` actually calls on this input's own
         // `Sink` when its upstream capture pipeline is stopped — never
-        // `consume(Eos)`, since `AudioCaptureSource` doesn't send one.
+        // `consume(Eos)`, since `WasapiCaptureSource` doesn't send one.
         input_a.control(ControlMsg::Stop).unwrap();
 
         assert_eq!(

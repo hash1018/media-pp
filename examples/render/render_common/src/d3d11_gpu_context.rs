@@ -1,5 +1,5 @@
 //! Process-wide D3D11 state shared by every window *and* every non-render
-//! D3D11 element (`DxgiScreenSource`'s GPU capture mode, `D3d11Upload`,
+//! D3D11 element (`DxgiCaptureSource`'s GPU capture mode, `D3d11Upload`,
 //! `D3d11Decoder`) — the device, its **one** immediate context, and the
 //! shader objects [`crate::D3d11WindowRenderer`] draws with. Sharing one
 //! device+context across the whole pipeline (not just one per window) is
@@ -53,7 +53,7 @@ impl D3d11GpuContext {
     /// [`media_pp::elements::D3d11Decoder::new`] so every producer lands on
     /// the same device (and, transitively, the same one immediate context
     /// — see this type's own docs) [`crate::d3d11_window_renderer`] draws
-    /// with. Not for [`media_pp::elements::DxgiScreenSource::open`]'s
+    /// with. Not for [`media_pp::elements::DxgiCaptureSource::open`]'s
     /// `CaptureMode::Gpu` path — that one runs the other way round (see
     /// [`D3d11GpuContext::new`]'s own docs): `open` resolves the device,
     /// this type reuses it.
@@ -82,7 +82,7 @@ impl D3d11GpuContext {
     /// `d3d11_decode_render`, which only ever talk to this one device).
     /// `Some(device)` reuses an already-created device as-is instead of
     /// creating a new one — e.g. the `ID3D11Device` returned by
-    /// [`media_pp::elements::DxgiScreenSource::open`]'s `CaptureMode::Gpu`
+    /// [`media_pp::elements::DxgiCaptureSource::open`]'s `CaptureMode::Gpu`
     /// path, which is already pinned to whichever adapter the captured
     /// monitor is actually attached to (`screen_capture_gpu`'s own case).
     /// Reusing that exact device instead of separately creating a
@@ -126,7 +126,7 @@ impl D3d11GpuContext {
             // cross-thread calls into this context — but that alone
             // wasn't enough in testing (`screen_capture_gpu`, which really
             // does drive this context from two threads: this crate's
-            // window renderer and `DxgiScreenSource`'s own capture thread,
+            // window renderer and `DxgiCaptureSource`'s own capture thread,
             // via its own `ID3D11DeviceContext` handle obtained from
             // `GetImmediateContext()` on the same shared device — see
             // `CaptureMode::Gpu`'s own docs — crashed without this).

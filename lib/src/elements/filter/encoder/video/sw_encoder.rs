@@ -111,10 +111,10 @@ pub struct SwEncoderOptions {
     /// interval between `send_frame` calls. For a source with its own
     /// genuinely fixed rate (e.g. [`crate::elements::TestVideoSource`]),
     /// that's `TestVideoOptions::framerate` itself. For an irregular/VFR
-    /// source (e.g. [`crate::elements::DxgiScreenSource`], whose frames
+    /// source (e.g. [`crate::elements::DxgiCaptureSource`], whose frames
     /// arrive only on real desktop changes, capped but not paced to a
     /// fixed cadence), use its configured cap
-    /// (`DxgiScreenOptions::max_fps`) as the closest meaningful nominal
+    /// (`DxgiCaptureOptions::max_fps`) as the closest meaningful nominal
     /// rate — actual encoded packets still carry each frame's real `pts`
     /// either way, so muxing stays correct regardless of how well this
     /// nominal rate matches the true one.

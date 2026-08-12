@@ -3,7 +3,7 @@ use std::thread;
 use media_pp::{
     bus::BusEvent,
     element::ElementType,
-    elements::{CaptureMode, DxgiScreenOptions, DxgiScreenSource},
+    elements::{CaptureMode, DxgiCaptureOptions, DxgiCaptureSource},
     pipeline::Pipeline,
 };
 use render_common::D3d11GpuContext;
@@ -16,7 +16,7 @@ use winit::{
     window::{Window, WindowId},
 };
 
-/// DxgiScreenSource (GPU mode) -> Renderer: captures the desktop straight
+/// DxgiCaptureSource (GPU mode) -> Renderer: captures the desktop straight
 /// to a GPU-resident `Pixel::D3D11` BGRA texture on the *renderer's own*
 /// `ID3D11Device` (no `Map`, no CPU pixel copy at all — see
 /// `CaptureMode::Gpu`'s own docs) and presents it directly, no `Scaler`
@@ -122,13 +122,13 @@ fn play(hwnd: isize, window_width: u32, window_height: u32) -> media_pp::Result<
     // that same returned device, required for the zero-copy path to be
     // valid at all (see `CaptureMode::Gpu`'s own docs on why the device
     // flows this direction, not the other way).
-    let capture_options = DxgiScreenOptions {
+    let capture_options = DxgiCaptureOptions {
         fps: 60,
         capture_mode: CaptureMode::Gpu,
-        ..DxgiScreenOptions::default()
+        ..DxgiCaptureOptions::default()
     };
     let (source, _capture_width, _capture_height, device) =
-        DxgiScreenSource::open("screen", capture_options)?;
+        DxgiCaptureSource::open("screen", capture_options)?;
     let device = device.expect("CaptureMode::Gpu always returns a device");
 
     let gpu =
@@ -154,7 +154,7 @@ fn play(hwnd: isize, window_width: u32, window_height: u32) -> media_pp::Result<
 
     // `run()` starts capture on a background thread and returns right
     // away — any failure shows up as a `BusEvent::Error` here instead of
-    // through a returned `Result`. `DxgiScreenSource` never reaches `Eos`
+    // through a returned `Result`. `DxgiCaptureSource` never reaches `Eos`
     // on its own — closing the window is what ends this.
     pipeline.run();
 
@@ -166,12 +166,12 @@ fn play(hwnd: isize, window_width: u32, window_height: u32) -> media_pp::Result<
             BusEvent::Seeked { .. } => {}
         }
         // Same reasoning as `screen_capture`'s own loop: only stop for
-        // `Eos`, or an `Error` that means `DxgiScreenSource`'s own `run()`
+        // `Eos`, or an `Error` that means `DxgiCaptureSource`'s own `run()`
         // thread actually ended — an occasional dropped/backpressured
         // frame elsewhere isn't a reason to end the demo.
         let source_died = matches!(
             &event,
-            BusEvent::Error { element_type, .. } if *element_type == ElementType::DxgiScreenSource
+            BusEvent::Error { element_type, .. } if *element_type == ElementType::DxgiCaptureSource
         );
         if matches!(event, BusEvent::Eos { .. }) || source_died {
             pipeline.stop();

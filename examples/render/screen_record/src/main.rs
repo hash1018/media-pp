@@ -4,18 +4,18 @@ use ffmpeg_next as ffmpeg;
 use media_pp::{
     bus::BusEvent,
     elements::{
-        CaptureMode, DxgiScreenOptions, DxgiScreenSource, Mp4Muxer, Scaler, SwEncoder,
+        CaptureMode, DxgiCaptureOptions, DxgiCaptureSource, Mp4Muxer, Scaler, SwEncoder,
         SwEncoderOptions, VideoCodec,
     },
     pipeline::Pipeline,
 };
 
-/// DxgiScreenSource -> Scaler -> SwEncoder -> Mp4Muxer: captures the
+/// DxgiCaptureSource -> Scaler -> SwEncoder -> Mp4Muxer: captures the
 /// desktop live via DXGI Desktop Duplication and encodes it straight into
 /// a playable `.mp4` file — no window, no renderer, just a headless
 /// recording (compare `screen_capture`, which renders instead of encoding).
 ///
-/// `DxgiScreenSource` never reaches `Eos` on its own (see its own docs);
+/// `DxgiCaptureSource` never reaches `Eos` on its own (see its own docs);
 /// this just captures for a fixed duration and then `pipeline.stop()`s,
 /// which is also what finalizes the MP4's trailer — `Mp4Muxer` writes it on
 /// `Stop` as well as `Eos`, unlike `RtspServer`, since an MP4 file needs a
@@ -33,14 +33,14 @@ fn main() -> media_pp::Result<()> {
         .and_then(|s| s.parse().ok())
         .unwrap_or(5);
 
-    let capture_options = DxgiScreenOptions {
+    let capture_options = DxgiCaptureOptions {
         fps: 30,
         capture_mode: CaptureMode::Cpu {
             include_cursor: true,
         },
-        ..DxgiScreenOptions::default()
+        ..DxgiCaptureOptions::default()
     };
-    let (source, width, height, _device) = DxgiScreenSource::open("screen", capture_options)?;
+    let (source, width, height, _device) = DxgiCaptureSource::open("screen", capture_options)?;
     let time_base = source.time_base();
 
     let encoder = SwEncoder::new(

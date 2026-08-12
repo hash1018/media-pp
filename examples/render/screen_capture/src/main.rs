@@ -4,7 +4,7 @@ use ffmpeg_next as ffmpeg;
 use media_pp::{
     bus::BusEvent,
     element::ElementType,
-    elements::{CaptureMode, DxgiScreenOptions, DxgiScreenSource, Scaler},
+    elements::{CaptureMode, DxgiCaptureOptions, DxgiCaptureSource, Scaler},
     pipeline::Pipeline,
 };
 use render_common::D3d12GpuContext;
@@ -17,13 +17,13 @@ use winit::{
     window::{Window, WindowId},
 };
 
-/// DxgiScreenSource -> Scaler -> Renderer: captures the desktop live via
+/// DxgiCaptureSource -> Scaler -> Renderer: captures the desktop live via
 /// DXGI Desktop Duplication (cursor included) at a constant frame rate
-/// (`DxgiScreenOptions::fps`) and converts/resizes it to the window's own
+/// (`DxgiCaptureOptions::fps`) and converts/resizes it to the window's own
 /// size as `Pixel::YUV420P` before rendering — no `SwEncoder`/`SwDecoder`
 /// round trip.
 ///
-/// No `Pacer` here, confirmed unneeded: `DxgiScreenSource` previously
+/// No `Pacer` here, confirmed unneeded: `DxgiCaptureSource` previously
 /// emitted variable-rate (real wall-clock pts, push-on-change), and
 /// removing `Pacer` against that measurably caused judder. It's since
 /// been rewritten to emit at a constant rate on a drift-free absolute
@@ -120,15 +120,15 @@ impl ApplicationHandler<PlaybackDone> for App {
 fn play(hwnd: isize, window_width: u32, window_height: u32) -> media_pp::Result<()> {
     media_pp::init()?;
 
-    let capture_options = DxgiScreenOptions {
+    let capture_options = DxgiCaptureOptions {
         fps: 60,
         capture_mode: CaptureMode::Cpu {
             include_cursor: true,
         },
-        ..DxgiScreenOptions::default()
+        ..DxgiCaptureOptions::default()
     };
     let (source, _capture_width, _capture_height, _device) =
-        DxgiScreenSource::open("screen", capture_options)?;
+        DxgiCaptureSource::open("screen", capture_options)?;
 
     let gpu = D3d12GpuContext::new().map_err(|e| media_pp::Error::Other(format!("{e:?}")))?;
 
@@ -165,7 +165,7 @@ fn play(hwnd: isize, window_width: u32, window_height: u32) -> media_pp::Result<
 
     // `run()` starts capture on a background thread and returns right
     // away — any failure shows up as a `BusEvent::Error` here instead of
-    // through a returned `Result`. `DxgiScreenSource` never reaches `Eos`
+    // through a returned `Result`. `DxgiCaptureSource` never reaches `Eos`
     // on its own — closing the window is what ends this.
     pipeline.run();
 
@@ -186,12 +186,12 @@ fn play(hwnd: isize, window_width: u32, window_height: u32) -> media_pp::Result<
         // demo — the `Queue` in front of the renderer already drops just
         // that one buffer and keeps going (see `Queue`'s own "report,
         // don't die" contract). Only stop for `Eos`, or an `Error` from
-        // `DxgiScreenSource` itself (its `run()` thread actually ended —
+        // `DxgiCaptureSource` itself (its `run()` thread actually ended —
         // e.g. `DXGI_ERROR_ACCESS_LOST` from a lock screen — so nothing
         // more will ever arrive).
         let source_died = matches!(
             &event,
-            BusEvent::Error { element_type, .. } if *element_type == ElementType::DxgiScreenSource
+            BusEvent::Error { element_type, .. } if *element_type == ElementType::DxgiCaptureSource
         );
         if matches!(event, BusEvent::Eos { .. }) || source_died {
             pipeline.stop();

@@ -355,7 +355,7 @@ unsafe fn create_render_target_view(
 /// from an array texture. A `Texture2DArray` view describing one slice
 /// (`FirstArraySlice: array_index, ArraySize: 1`) works identically to a
 /// plain `Texture2D` view when the underlying resource happens to have
-/// `ArraySize == 1` (`DxgiScreenSource`'s GPU mode, `D3d11Upload` — always
+/// `ArraySize == 1` (`DxgiCaptureSource`'s GPU mode, `D3d11Upload` — always
 /// `array_index == 0` there) — so using this one shape unconditionally
 /// avoids branching on where the texture came from, while still handling
 /// [`crate::D3d11WindowRenderer::submit_nv12_texture`]'s real case: a

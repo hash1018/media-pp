@@ -1,13 +1,13 @@
 use thiserror::Error;
 
-#[cfg(feature = "wasapi-capture")]
-use crate::elements::AudioCaptureSourceError;
 #[cfg(feature = "dxgi-capture")]
-use crate::elements::DxgiScreenSourceError;
+use crate::elements::DxgiCaptureSourceError;
 #[cfg(feature = "ort")]
 use crate::elements::OrtDetectorError;
 #[cfg(feature = "rtsp-server")]
 use crate::elements::RtspServerError;
+#[cfg(feature = "wasapi-capture")]
+use crate::elements::WasapiCaptureSourceError;
 #[cfg(feature = "webrtc")]
 use crate::elements::WebRtcError;
 #[cfg(feature = "d3d11-renderer")]
@@ -107,11 +107,11 @@ pub enum Error {
 
     #[cfg(feature = "dxgi-capture")]
     #[error(transparent)]
-    DxgiScreenSourceError(#[from] DxgiScreenSourceError),
+    DxgiCaptureSourceError(#[from] DxgiCaptureSourceError),
 
     #[cfg(feature = "wasapi-capture")]
     #[error(transparent)]
-    AudioCaptureSourceError(#[from] AudioCaptureSourceError),
+    WasapiCaptureSourceError(#[from] WasapiCaptureSourceError),
 
     #[cfg(feature = "ort")]
     #[error(transparent)]

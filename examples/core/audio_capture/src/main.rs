@@ -3,13 +3,13 @@ use std::{sync::atomic::Ordering, thread, time::Duration};
 use media_pp::{
     Result,
     bus::BusEvent,
-    elements::{AudioCaptureOptions, AudioCaptureSource, AudioDeviceKind, FrameCounter},
+    elements::{AudioDeviceKind, FrameCounter, WasapiCaptureOptions, WasapiCaptureSource},
     pipeline::Pipeline,
 };
 
 /// Lists every audio endpoint, picks one, captures ~3 seconds from it and
 /// reports how many buffers came through — a smoke test for
-/// `AudioCaptureSource`'s list-then-pick device API.
+/// `WasapiCaptureSource`'s list-then-pick device API.
 ///
 ///     cargo run -p audio_capture              # default render device (system audio / loopback)
 ///     cargo run -p audio_capture -- mic        # default capture device (microphone)
@@ -19,7 +19,7 @@ fn main() -> Result<()> {
     media_pp::init()?;
 
     let devices =
-        AudioCaptureSource::list_devices().map_err(|e| media_pp::Error::Other(e.to_string()))?;
+        WasapiCaptureSource::list_devices().map_err(|e| media_pp::Error::Other(e.to_string()))?;
 
     let arg = std::env::args().nth(1);
     if arg.as_deref() == Some("list") {
@@ -52,7 +52,7 @@ fn main() -> Result<()> {
     println!("selected: {:?} {}", device.kind, device.name);
 
     let (source, sample_rate, channels) =
-        AudioCaptureSource::open("audio-capture", AudioCaptureOptions { device })
+        WasapiCaptureSource::open("audio-capture", WasapiCaptureOptions { device })
             .map_err(|e| media_pp::Error::Other(e.to_string()))?;
     println!("opened: {sample_rate}Hz, {channels} channel(s)");
 

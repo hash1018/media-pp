@@ -20,7 +20,7 @@ use crate::{
 
 /// How often [`TestAudioSource::run`] wakes up to top up however many
 /// samples wall-clock time now owes — same role/value as
-/// [`crate::elements::AudioCaptureSource`]'s own `POLL_INTERVAL`/
+/// [`crate::elements::WasapiCaptureSource`]'s own `POLL_INTERVAL`/
 /// [`crate::elements::AudioMixer`]'s `TICK_INTERVAL`.
 const TICK_INTERVAL: Duration = Duration::from_millis(20);
 
@@ -58,7 +58,7 @@ impl Default for TestAudioOptions {
 /// fabricates however many samples wall-clock time now owes on a
 /// drift-free absolute schedule (`expected = elapsed * sample_rate`,
 /// `needed = expected - samples_emitted` — the same shape
-/// [`crate::elements::AudioCaptureSource::fill_silence_gap`]/
+/// [`crate::elements::WasapiCaptureSource::fill_silence_gap`]/
 /// [`crate::elements::AudioMixer::mix_tick`] both use, not a fixed
 /// per-tick sample count, which would drift the same way a fixed-duration
 /// `thread::sleep`-only schedule would), stamps it with an increasing
@@ -148,7 +148,7 @@ impl TestAudioSource {
             )
         };
         // Same tight-length write `AudioMixer::mix_tick`/
-        // `AudioCaptureSource::build_frame` both use — `data_mut(0)`'s own
+        // `WasapiCaptureSource::build_frame` both use — `data_mut(0)`'s own
         // length is FFmpeg's own padded linesize, not necessarily exactly
         // `bytes.len()`.
         frame.data_mut(0)[..bytes.len()].copy_from_slice(bytes);

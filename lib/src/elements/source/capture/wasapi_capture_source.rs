@@ -44,9 +44,9 @@ use crate::{
     pad::SrcPad,
 };
 
-/// How long [`AudioCaptureSource::run`] sleeps between checks of
+/// How long [`WasapiCaptureSource::run`] sleeps between checks of
 /// `GetNextPacketSize` — also bounds `Stop` latency, same reasoning as
-/// [`crate::elements::DxgiScreenSource`]'s own `POLL_GRANULARITY`. Plain
+/// [`crate::elements::DxgiCaptureSource`]'s own `POLL_GRANULARITY`. Plain
 /// polling rather than `IAudioClient::SetEventHandle` + `WaitForSingleObject`:
 /// event-driven signaling is well documented as unreliable specifically
 /// for loopback capture (Microsoft's own WASAPILoopbackCapture sample
@@ -62,25 +62,25 @@ const POLL_INTERVAL: Duration = Duration::from_millis(20);
 /// the device's ring buffer, is what bounds latency.
 const BUFFER_DURATION_100NS: i64 = 200 * 10_000;
 
-/// Errors specific to `AudioCaptureSource`. Converts into the crate-wide
+/// Errors specific to `WasapiCaptureSource`. Converts into the crate-wide
 /// `Error` via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
-pub enum AudioCaptureSourceError {
+pub enum WasapiCaptureSourceError {
     #[error("windows error: {0}")]
     Windows(#[from] windows::core::Error),
 
     /// `AUDCLNT_E_DEVICE_INVALIDATED` specifically, broken out of the
-    /// generic [`AudioCaptureSourceError::Windows`] variant for the same
-    /// reason [`crate::elements::DxgiScreenSourceError::AccessLost`] is:
+    /// generic [`WasapiCaptureSourceError::Windows`] variant for the same
+    /// reason [`crate::elements::DxgiCaptureSourceError::AccessLost`] is:
     /// the single most common *recoverable* failure (default device
     /// changed, device unplugged, format changed) surfaces this way. Same
     /// "fail fast, caller rebuilds a fresh one" contract
-    /// [`crate::elements::RtspSource`]/[`crate::elements::DxgiScreenSource`]
+    /// [`crate::elements::RtspSource`]/[`crate::elements::DxgiCaptureSource`]
     /// already document: this element doesn't retry internally.
     #[error("AUDCLNT_E_DEVICE_INVALIDATED — audio device needs to be reopened")]
     DeviceInvalidated,
 
-    #[error("AudioCaptureSource doesn't support seeking a live capture")]
+    #[error("WasapiCaptureSource doesn't support seeking a live capture")]
     SeekUnsupported,
 
     #[error("unsupported WASAPI mix format: format_tag={format_tag}, bits_per_sample={bits}")]
@@ -88,28 +88,28 @@ pub enum AudioCaptureSourceError {
 }
 
 /// Which direction an [`AudioDevice`] flows. Determines how
-/// [`AudioCaptureSource::open`] has to `Initialize` the stream — a
+/// [`WasapiCaptureSource::open`] has to `Initialize` the stream — a
 /// `Render` endpoint (speakers/headphones) only has an outgoing signal to
 /// tap via WASAPI loopback (`AUDCLNT_STREAMFLAGS_LOOPBACK`); a `Capture`
 /// endpoint (microphone) is already an input, captured directly. Callers
-/// picking a device out of [`AudioCaptureSource::list_devices`] don't need
+/// picking a device out of [`WasapiCaptureSource::list_devices`] don't need
 /// to reason about this themselves — it travels with the `AudioDevice`
 /// they chose.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AudioDeviceKind {
     /// A playback endpoint — its *outgoing* mix is what gets captured
     /// (loopback). The system audio a screen recording should carry
-    /// alongside [`crate::elements::DxgiScreenSource`].
+    /// alongside [`crate::elements::DxgiCaptureSource`].
     Render,
     /// A microphone or other recording endpoint — captured directly.
     Capture,
 }
 
-/// One WASAPI endpoint enumerated by [`AudioCaptureSource::list_devices`].
+/// One WASAPI endpoint enumerated by [`WasapiCaptureSource::list_devices`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AudioDevice {
     /// Opaque device identifier (`IMMDevice::GetId`) — pass straight into
-    /// [`AudioCaptureOptions::device`], never parsed. Stable for as long
+    /// [`WasapiCaptureOptions::device`], never parsed. Stable for as long
     /// as the device stays plugged in, not guaranteed stable across a
     /// reboot or a driver reinstall.
     pub id: String,
@@ -124,11 +124,11 @@ pub struct AudioDevice {
     pub is_default: bool,
 }
 
-/// Construction-time options for [`AudioCaptureSource::open`].
+/// Construction-time options for [`WasapiCaptureSource::open`].
 #[derive(Debug, Clone)]
-pub struct AudioCaptureOptions {
+pub struct WasapiCaptureOptions {
     /// Which endpoint to capture from — one entry out of
-    /// [`AudioCaptureSource::list_devices`] (or hand-built, if the caller
+    /// [`WasapiCaptureSource::list_devices`] (or hand-built, if the caller
     /// already knows a device's id/kind some other way).
     pub device: AudioDevice,
 }
@@ -137,7 +137,7 @@ pub struct AudioCaptureOptions {
 /// GStreamer's `wasapi2src` equivalent. One src pad, pushing
 /// `MediaBuffer::Audio` frames in the captured device's own native mix
 /// format/rate/channel count — no resampling. Same division of labor as
-/// [`crate::elements::DxgiScreenSource`] emitting raw `Pixel::BGRA` and
+/// [`crate::elements::DxgiCaptureSource`] emitting raw `Pixel::BGRA` and
 /// leaving conversion to a downstream [`crate::elements::Scaler`]: if
 /// something downstream needs a fixed sample rate/format, that's a future
 /// audio resampler filter's job, not this element's.
@@ -150,7 +150,7 @@ pub struct AudioCaptureOptions {
 /// Emits continuously from the moment `run` starts, `pts` always in
 /// lockstep with wall-clock time — backed by real WASAPI data when it's
 /// available and synthesized silence otherwise (see
-/// [`AudioCaptureSource::fill_silence_gap`]), since WASAPI itself
+/// [`WasapiCaptureSource::fill_silence_gap`]), since WASAPI itself
 /// delivers literally nothing whenever the render engine has no active
 /// session at all (e.g. nothing currently playing, for
 /// [`AudioDeviceKind::Render`]). Without this, a quiet period would be a
@@ -158,7 +158,7 @@ pub struct AudioCaptureOptions {
 /// a downstream muxer/encoder with no way to keep audio and video in
 /// sync across it.
 ///
-/// Every WASAPI object here is created by [`AudioCaptureSource::open`] on
+/// Every WASAPI object here is created by [`WasapiCaptureSource::open`] on
 /// its caller's thread, then actually driven by [`SourceElement::run`] on
 /// whichever thread [`crate::pipeline::Pipeline`] spawns for this source
 /// — a different thread in the normal case. COM requires every thread
@@ -179,14 +179,14 @@ pub struct AudioCaptureOptions {
 /// Deliberately does **not** retry internally on
 /// `AUDCLNT_E_DEVICE_INVALIDATED` (default device changed, unplugged,
 /// format changed) — same "fail fast, caller rebuilds" contract as
-/// `DxgiScreenSource`/`RtspSource`; watch for
-/// [`AudioCaptureSourceError::DeviceInvalidated`] and call
-/// [`AudioCaptureSource::open`] again.
+/// `DxgiCaptureSource`/`RtspSource`; watch for
+/// [`WasapiCaptureSourceError::DeviceInvalidated`] and call
+/// [`WasapiCaptureSource::open`] again.
 ///
 /// Runs until `Stop` — never reaches `Eos` on its own, same as every other
 /// live source in this crate.
 #[rust_hlog::hlog]
-pub struct AudioCaptureSource {
+pub struct WasapiCaptureSource {
     name: Arc<str>,
     audio_client: IAudioClient,
     capture_client: IAudioCaptureClient,
@@ -194,7 +194,7 @@ pub struct AudioCaptureSource {
     format: ffmpeg::format::Sample,
     channel_layout: ffmpeg::ChannelLayout,
     /// Cumulative sample count across every emitted frame — this
-    /// element's `pts` unit (see [`AudioCaptureSource::time_base`]), same
+    /// element's `pts` unit (see [`WasapiCaptureSource::time_base`]), same
     /// "integer tick counter" convention every other source in this crate
     /// uses.
     samples_emitted: i64,
@@ -206,18 +206,18 @@ pub struct AudioCaptureSource {
 // these specific interfaces are documented free-threaded/agile).
 // `&mut self` on every method that touches them already rules out
 // concurrent access from multiple threads — same reasoning
-// `DxgiScreenSource` documents for its own `unsafe impl Send`.
-unsafe impl Send for AudioCaptureSource {}
+// `DxgiCaptureSource` documents for its own `unsafe impl Send`.
+unsafe impl Send for WasapiCaptureSource {}
 
-impl AudioCaptureSource {
+impl WasapiCaptureSource {
     /// Enumerates every currently-active audio endpoint — both `Render`
     /// (playback) and `Capture` (recording) — as an [`AudioDevice`] list a
     /// caller can show in a picker UI and index/search into, then hand the
-    /// chosen entry straight to [`AudioCaptureOptions::device`]. No
+    /// chosen entry straight to [`WasapiCaptureOptions::device`]. No
     /// concept of "mode" to reason about beforehand: the picked device's
     /// own [`AudioDeviceKind`] is what tells `open` whether to use
     /// loopback.
-    pub fn list_devices() -> std::result::Result<Vec<AudioDevice>, AudioCaptureSourceError> {
+    pub fn list_devices() -> std::result::Result<Vec<AudioDevice>, WasapiCaptureSourceError> {
         unsafe {
             let hr = CoInitializeEx(None, COINIT_MULTITHREADED);
             if hr.is_err() {
@@ -263,14 +263,14 @@ impl AudioCaptureSource {
     /// session. Returns the element alongside the captured stream's
     /// actual `(sample_rate, channels)` — what a caller needs to build a
     /// matching downstream encoder/muxer, same pattern as
-    /// [`crate::elements::DxgiScreenSource::open`] returning
+    /// [`crate::elements::DxgiCaptureSource::open`] returning
     /// `(width, height)`.
     pub fn open(
         name: impl Into<String>,
-        options: AudioCaptureOptions,
-    ) -> std::result::Result<(Self, u32, u16), AudioCaptureSourceError> {
+        options: WasapiCaptureOptions,
+    ) -> std::result::Result<(Self, u32, u16), WasapiCaptureSourceError> {
         let name: Arc<str> = name.into().into();
-        let hlog = element_hlog(ElementType::AudioCaptureSource, &name, None);
+        let hlog = element_hlog(ElementType::WasapiCaptureSource, &name, None);
 
         unsafe {
             // See this struct's own docs on why this call is intentionally
@@ -342,11 +342,11 @@ impl AudioCaptureSource {
         ffmpeg::Rational::new(1, self.sample_rate as i32)
     }
 
-    fn classify_error(&self, error: windows::core::Error) -> AudioCaptureSourceError {
+    fn classify_error(&self, error: windows::core::Error) -> WasapiCaptureSourceError {
         if error.code() == AUDCLNT_E_DEVICE_INVALIDATED {
-            AudioCaptureSourceError::DeviceInvalidated
+            WasapiCaptureSourceError::DeviceInvalidated
         } else {
-            AudioCaptureSourceError::Windows(error)
+            WasapiCaptureSourceError::Windows(error)
         }
     }
 
@@ -382,14 +382,14 @@ impl AudioCaptureSource {
 
     /// Pushes `frame` downstream, reporting (rather than dying on) a
     /// failing `Sink` — same "drop this one buffer, keep going" contract
-    /// [`crate::elements::DxgiScreenSource::run`]/[`crate::elements::TestVideoSource::run`]
+    /// [`crate::elements::DxgiCaptureSource::run`]/[`crate::elements::TestVideoSource::run`]
     /// give their own pushes.
     fn push_frame(&mut self, frame: ffmpeg::frame::Audio, bus: &Bus) {
         if let Err(error) = self.pad.push(MediaBuffer::Audio(Arc::new(frame))) {
             bus.post(
                 &self.hlog,
                 BusEvent::Error {
-                    element_type: ElementType::AudioCaptureSource,
+                    element_type: ElementType::WasapiCaptureSource,
                     name: self.name.clone(),
                     error,
                 },
@@ -431,7 +431,7 @@ impl AudioCaptureSource {
     /// started. Drains every buffer WASAPI has ready on each
     /// `POLL_INTERVAL` tick (`GetNextPacketSize` returning `0` means
     /// caught up), pushing one `MediaBuffer::Audio` per packet, then tops
-    /// up with synthesized silence (see [`AudioCaptureSource::fill_silence_gap`])
+    /// up with synthesized silence (see [`WasapiCaptureSource::fill_silence_gap`])
     /// so `pts` keeps advancing with wall-clock time even across a tick
     /// where WASAPI delivered nothing at all.
     fn run_captured(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
@@ -481,13 +481,13 @@ impl AudioCaptureSource {
     }
 }
 
-impl Element for AudioCaptureSource {
+impl Element for WasapiCaptureSource {
     fn name(&self) -> Arc<str> {
         self.name.clone()
     }
 
     fn element_type(&self) -> ElementType {
-        ElementType::AudioCaptureSource
+        ElementType::WasapiCaptureSource
     }
 
     fn hlog(&self) -> &HLog {
@@ -499,13 +499,13 @@ impl Element for AudioCaptureSource {
     }
 }
 
-impl Source for AudioCaptureSource {
+impl Source for WasapiCaptureSource {
     fn src_pads(&mut self) -> &mut [SrcPad] {
         std::slice::from_mut(&mut self.pad)
     }
 }
 
-impl SourceElement for AudioCaptureSource {
+impl SourceElement for WasapiCaptureSource {
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
         hinfo!(self, "run: starting");
 
@@ -515,7 +515,7 @@ impl SourceElement for AudioCaptureSource {
         // on this same thread start to finish.
         let hr = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
         if hr.is_err() {
-            return Err(AudioCaptureSourceError::from(windows::core::Error::from(hr)).into());
+            return Err(WasapiCaptureSourceError::from(windows::core::Error::from(hr)).into());
         }
 
         if let Err(error) = unsafe { self.audio_client.Start() } {
@@ -533,12 +533,12 @@ impl SourceElement for AudioCaptureSource {
     }
 
     fn seek(&mut self, _target: std::time::Duration) -> Result<std::time::Duration> {
-        Err(AudioCaptureSourceError::SeekUnsupported.into())
+        Err(WasapiCaptureSourceError::SeekUnsupported.into())
     }
 }
 
 /// Reads `device`'s `PKEY_Device_FriendlyName` property (e.g. "Speakers
-/// (Realtek High Definition Audio)") for [`AudioCaptureSource::list_devices`].
+/// (Realtek High Definition Audio)") for [`WasapiCaptureSource::list_devices`].
 /// `None` if the property store can't be opened or the value isn't a
 /// string — every real endpoint has this property, so that's effectively
 /// "shouldn't happen", not something worth a hard error over; the caller
@@ -581,7 +581,8 @@ fn property_variant_to_string(variant: &PROPVARIANT) -> Option<String> {
 /// `open`-time error rather than a silent, likely-wrong guess.
 fn resolve_sample_format(
     mix_format: *const WAVEFORMATEX,
-) -> std::result::Result<(ffmpeg::format::Sample, ffmpeg::ChannelLayout), AudioCaptureSourceError> {
+) -> std::result::Result<(ffmpeg::format::Sample, ffmpeg::ChannelLayout), WasapiCaptureSourceError>
+{
     let wf = unsafe { &*mix_format };
     let bits = wf.wBitsPerSample;
     let format_tag = if wf.wFormatTag as u32 == WAVE_FORMAT_EXTENSIBLE {
@@ -609,7 +610,7 @@ fn resolve_sample_format(
             ffmpeg::format::Sample::I32(ffmpeg::format::sample::Type::Packed)
         }
         _ => {
-            return Err(AudioCaptureSourceError::UnsupportedMixFormat { format_tag, bits });
+            return Err(WasapiCaptureSourceError::UnsupportedMixFormat { format_tag, bits });
         }
     };
     let channel_layout = ffmpeg::ChannelLayout::default(wf.nChannels as i32);

@@ -83,7 +83,7 @@ impl Default for TestVideoOptions {
 /// over time, but this element was rewritten to the absolute schedule
 /// described above specifically to close that gap, and testing without a
 /// `Pacer` afterward showed no judder. See
-/// `crate::elements::DxgiScreenSource`'s own docs for the same
+/// `crate::elements::DxgiCaptureSource`'s own docs for the same
 /// conclusion reached the same way, including a case (`Scaler` sitting
 /// between source and renderer) this element doesn't have.
 ///
@@ -216,7 +216,7 @@ impl SourceElement for TestVideoSource {
         // "sleep `frame_interval` since the last push" — the latter drifts
         // over time, since generation/push itself always takes some
         // nonzero time that would otherwise get added on top of every
-        // single interval. Same pattern `DxgiScreenSource::run` uses.
+        // single interval. Same pattern `DxgiCaptureSource::run` uses.
         let mut next_due = Instant::now();
         loop {
             if drain_control(control, self, bus)? {
