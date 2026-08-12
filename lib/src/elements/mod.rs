@@ -17,7 +17,10 @@ pub use filter::{
     SwEncoderError, SwEncoderOptions, Tee, TeeBuilder, TeeHandle, VideoCodec,
 };
 #[cfg(feature = "d3d11-renderer")]
-pub use filter::{D3d11Decoder, D3d11Upload, D3d11UploadError, D3d11vaDecoderError};
+pub use filter::{
+    D3d11Decoder, D3d11Download, D3d11DownloadError, D3d11Upload, D3d11UploadError,
+    D3d11vaDecoderError,
+};
 #[cfg(feature = "d3d12-renderer")]
 pub use filter::{D3d12Upload, D3d12UploadError, D3d12vaDecoder, D3d12vaDecoderError};
 pub use sink::{
@@ -48,6 +51,11 @@ pub use source::{
 pub use source::{
     CaptureArea, CaptureMode, CaptureRect, DxgiCaptureOptions, DxgiCaptureSource,
     DxgiCaptureSourceError,
+};
+#[cfg(feature = "d3d11-renderer")]
+pub use source::{
+    D3d11VideoCompositor, D3d11VideoCompositorError, D3d11VideoCompositorHandle,
+    D3d11VideoCompositorInput, D3d11VideoCompositorInputSink, D3d11VideoLayerHandle,
 };
 #[cfg(feature = "wasapi-capture")]
 pub use source::{WasapiCaptureOptions, WasapiCaptureSource, WasapiCaptureSourceError};

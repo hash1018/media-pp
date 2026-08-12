@@ -1,6 +1,7 @@
 mod audio_resampler;
 mod audio_volume;
 pub(crate) mod decoder;
+mod download;
 mod encoder;
 mod pacer;
 mod scaler;
@@ -14,6 +15,8 @@ pub use decoder::{D3d11Decoder, D3d11vaDecoderError};
 #[cfg(feature = "d3d12-renderer")]
 pub use decoder::{D3d12vaDecoder, D3d12vaDecoderError};
 pub use decoder::{SwDecoder, SwDecoderError};
+#[cfg(feature = "d3d11-renderer")]
+pub use download::{D3d11Download, D3d11DownloadError};
 pub use encoder::{
     AudioCodec, SwAudioEncoder, SwAudioEncoderError, SwAudioEncoderOptions, SwEncoder,
     SwEncoderError, SwEncoderOptions, VideoCodec,
