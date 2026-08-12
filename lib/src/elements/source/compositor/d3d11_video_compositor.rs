@@ -99,6 +99,9 @@ pub enum D3d11VideoCompositorError {
     )]
     UnsupportedTextureFormat(DXGI_FORMAT),
 
+    #[error("D3D11 texture array index {index} is outside ArraySize {array_size}")]
+    InvalidArrayIndex { index: isize, array_size: u32 },
+
     #[error(
         "a Pixel::D3D11 frame's texture lives on a different ID3D11Device than this \
          D3d11VideoCompositor was created with — every D3D11 element in one pipeline must share \
@@ -386,21 +389,43 @@ struct InputSnapshot {
     frame: Option<Arc<UnboundObjectPoolRef<ffmpeg::frame::Video>>>,
 }
 
-/// One reusable render-target texture the compositor draws layers into.
-/// Cycled round-robin across `OUTPUT_POOL_SIZE` slots rather than
-/// allocated fresh per frame — safe to reuse a slot a downstream consumer
-/// may still be reading, without any explicit fence, for the same reason
-/// [`crate::elements::D3d11Renderer`]'s own docs give: every producer and
-/// consumer of a `Pixel::D3D11` frame in this pipeline shares one
-/// `ID3D11Device`/`ID3D11DeviceContext`, so the driver executes every
-/// command funneled through that one context in submission order — a
-/// downstream `CopyResource`/draw reading slot N is guaranteed to have
-/// been submitted (and thus ordered) before this compositor's next
-/// `ClearRenderTargetView`/draw into that same slot N, `OUTPUT_POOL_SIZE`
-/// cycles later.
 struct OutputTarget {
     texture: ID3D11Texture2D,
     render_target_view: ID3D11RenderTargetView,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct LayerConstants {
+    red: [f32; 4],
+    green: [f32; 4],
+    blue: [f32; 4],
+    opacity: f32,
+    _padding: [f32; 3],
+}
+
+impl LayerConstants {
+    fn bgra(opacity: f32) -> Self {
+        Self {
+            red: [0.0; 4],
+            green: [0.0; 4],
+            blue: [0.0; 4],
+            opacity,
+            _padding: [0.0; 3],
+        }
+    }
+
+    fn nv12(frame: &ffmpeg::frame::Video, opacity: f32) -> Self {
+        let [red, green, blue] =
+            yuv_to_rgb_rows(frame.color_space(), frame.color_range(), frame.height());
+        Self {
+            red,
+            green,
+            blue,
+            opacity,
+            _padding: [0.0; 3],
+        }
+    }
 }
 
 /// Composites the latest frames from any number of independent GPU-backed
@@ -438,20 +463,18 @@ pub struct D3d11VideoCompositor {
     blend_state: ID3D11BlendState,
     rasterizer_state: ID3D11RasterizerState,
     layer_buffer: ID3D11Buffer,
-    outputs: Vec<OutputTarget>,
-    next_output: usize,
+    /// Checked-out frames remain unavailable until every downstream `Arc`
+    /// is dropped. The unbounded pool grows when all prefilled frames are
+    /// still queued or being consumed instead of aliasing a live texture.
+    output_pool: UnboundObjectPool<ffmpeg::frame::Video>,
+    /// Immutable RTVs cached by the corresponding texture's COM pointer.
+    output_views: HashMap<usize, ID3D11RenderTargetView>,
     pad: SrcPad,
-    /// Reused across every composed frame — see [`UnboundObjectPool`]'s
-    /// docs; same reasoning as `D3d11Upload`'s own `pool` field (only the
-    /// small CPU-side `AVFrame` wrapper is actually reused here — the GPU
-    /// texture itself cycles through `outputs`, not this pool).
-    pool: UnboundObjectPool<ffmpeg::frame::Video>,
 }
 
 // SAFETY: every field is either a `windows-rs` COM interface wrapper
 // (free-threaded for the calls used here, the context-touching ones behind
-// `context`'s own `Mutex` — see `OutputTarget`'s own docs on why reusing an
-// output slot needs no separate fence) or plain data. `&mut self` on every
+// `context`'s own `Mutex`) or plain data. `&mut self` on every
 // method that touches non-`Arc`/`Mutex` state rules out concurrent access
 // to those parts from multiple threads.
 unsafe impl Send for D3d11VideoCompositor {}
@@ -462,13 +485,13 @@ impl D3d11VideoCompositor {
     /// `Arc<Mutex<ID3D11DeviceContext>>` every other context-touching D3D11
     /// consumer in this pipeline uses (e.g.
     /// `render_common::D3d11GpuContext::context()`) — reading a texture via
-    /// `CopyResource`/`Map` ([`crate::elements::D3d11Download`]) or drawing
+    /// `CopySubresourceRegion`/`Map` ([`crate::elements::D3d11Download`]) or drawing
     /// with it (a window renderer) are both context-level operations, and
     /// only funneling every one of them through one shared, mutex-guarded
-    /// context is what lets this whole stack skip explicit GPU fences (see
-    /// [`crate::elements::D3d11Renderer`]'s own docs on why, and
-    /// [`OutputTarget`]'s docs on why that same reasoning is what makes
-    /// cycling a small fixed pool of output textures safe here).
+    /// context is what lets this whole stack skip explicit GPU fences once
+    /// a consumer has submitted its read. Output texture reuse is governed
+    /// separately by the output frame's downstream `Arc` lifetime, because
+    /// a frame waiting inside a `Queue` has not submitted that read yet.
     pub fn new(
         name: impl Into<String>,
         device: &ID3D11Device,
@@ -496,11 +519,6 @@ impl D3d11VideoCompositor {
             layer_buffer,
         ) = unsafe { build_pipeline_state(device)? };
 
-        let mut outputs = Vec::with_capacity(OUTPUT_POOL_SIZE);
-        for _ in 0..OUTPUT_POOL_SIZE {
-            outputs.push(unsafe { create_output_target(device, options.width, options.height)? });
-        }
-
         hinfo!(
             hlog: &hlog,
             "created: {}x{}, frame_rate={}, format=D3D11(BGRA)",
@@ -525,10 +543,13 @@ impl D3d11VideoCompositor {
                 blend_state,
                 rasterizer_state,
                 layer_buffer,
-                outputs,
-                next_output: 0,
+                output_pool: UnboundObjectPool::new(
+                    OUTPUT_POOL_SIZE,
+                    ffmpeg::frame::Video::empty,
+                    |_| {},
+                ),
+                output_views: HashMap::new(),
                 pad: SrcPad::new(format!("{name}_src")),
-                pool: UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {}),
             },
             D3d11VideoCompositorHandle {
                 shared: Arc::downgrade(&shared),
@@ -576,7 +597,8 @@ impl D3d11VideoCompositor {
 
     fn compose_frame(
         &mut self,
-    ) -> std::result::Result<ffmpeg::frame::Video, D3d11VideoCompositorError> {
+    ) -> std::result::Result<UnboundObjectPoolRef<ffmpeg::frame::Video>, D3d11VideoCompositorError>
+    {
         let mut snapshots = self.snapshots();
         snapshots.sort_by(|left, right| {
             left.layer
@@ -585,18 +607,37 @@ impl D3d11VideoCompositor {
                 .then_with(|| left.id.cmp(&right.id))
         });
 
-        let output = &self.outputs[self.next_output];
-        self.next_output = (self.next_output + 1) % self.outputs.len();
         let (canvas_width, canvas_height) = (self.options.width, self.options.height);
+        let mut output_frame = self.output_pool.get();
+        if d3d11va_texture(&output_frame).is_none() {
+            let target =
+                unsafe { create_output_target(&self.device, canvas_width, canvas_height)? };
+            let key = target.texture.as_raw() as usize;
+            self.output_views
+                .insert(key, target.render_target_view.clone());
+            *output_frame = wrap_d3d11_texture(target.texture, canvas_width, canvas_height);
+        }
+        let (output_raw, _) = d3d11va_texture(&output_frame)
+            .expect("output pool frames are initialized immediately after checkout");
+        let output_texture = unsafe {
+            ID3D11Texture2D::from_raw_borrowed(&output_raw)
+                .expect("pooled output texture pointer must not be null")
+                .clone()
+        };
+        let output_view = self
+            .output_views
+            .get(&(output_texture.as_raw() as usize))
+            .expect("every initialized output texture has a cached RTV")
+            .clone();
 
         let context = self
             .context
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        unsafe {
+        let draw_result = unsafe {
             let background = &self.options.background;
             context.ClearRenderTargetView(
-                &output.render_target_view,
+                &output_view,
                 &[
                     f32::from(background.red) / 255.0,
                     f32::from(background.green) / 255.0,
@@ -604,7 +645,7 @@ impl D3d11VideoCompositor {
                     1.0,
                 ],
             );
-            context.OMSetRenderTargets(Some(&[Some(output.render_target_view.clone())]), None);
+            context.OMSetRenderTargets(Some(&[Some(output_view)]), None);
             context.OMSetBlendState(&self.blend_state, None, 0xffff_ffff);
             context.RSSetState(&self.rasterizer_state);
             context.IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -612,12 +653,12 @@ impl D3d11VideoCompositor {
             context.PSSetSamplers(0, Some(&[Some(self.sampler.clone())]));
             context.PSSetConstantBuffers(0, Some(&[Some(self.layer_buffer.clone())]));
 
-            for snapshot in &snapshots {
+            let result = snapshots.iter().try_for_each(|snapshot| {
                 if !snapshot.layer.visible || snapshot.layer.opacity == 0.0 {
-                    continue;
+                    return Ok(());
                 }
                 let Some(frame) = &snapshot.frame else {
-                    continue;
+                    return Ok(());
                 };
                 self.draw_layer(
                     &context,
@@ -625,18 +666,21 @@ impl D3d11VideoCompositor {
                     &snapshot.layer,
                     canvas_width,
                     canvas_height,
-                )?;
-            }
+                )
+            });
 
-            // Unbind so a subsequent frame's first `Draw` never inherits a
-            // stale SRV from whichever layer drew last.
+            // Always release resource bindings, including when one layer
+            // failed after earlier layers had already drawn.
             context.PSSetShaderResources(0, Some(&[None, None]));
-        }
+            context.OMSetRenderTargets(None, None);
+            result
+        };
         drop(context);
+        draw_result?;
 
-        let mut output_frame =
-            wrap_d3d11_texture(output.texture.clone(), canvas_width, canvas_height);
         output_frame.set_pts(Some(self.frame_index));
+        output_frame.set_color_space(ffmpeg::color::Space::RGB);
+        output_frame.set_color_range(ffmpeg::color::Range::JPEG);
         self.frame_index += 1;
         Ok(output_frame)
     }
@@ -651,7 +695,6 @@ impl D3d11VideoCompositor {
     ) -> std::result::Result<(), D3d11VideoCompositorError> {
         let (texture_raw, index) =
             d3d11va_texture(frame).ok_or(D3d11VideoCompositorError::InvalidD3d11Frame)?;
-        let array_index = index as u32;
         // Safety: `texture_raw` is a borrowed raw `ID3D11Texture2D*` — see
         // `d3d11va_texture`'s own docs; `.clone()` (`AddRef`) gives an
         // independently ref-counted handle valid for this draw call.
@@ -669,6 +712,13 @@ impl D3d11VideoCompositor {
 
         let mut desc = D3D11_TEXTURE2D_DESC::default();
         unsafe { texture.GetDesc(&mut desc) };
+        if index < 0 || index as u64 >= u64::from(desc.ArraySize) {
+            return Err(D3d11VideoCompositorError::InvalidArrayIndex {
+                index,
+                array_size: desc.ArraySize,
+            });
+        }
+        let array_index = index as u32;
 
         let geometry =
             video_layer::layer_geometry(frame.width(), frame.height(), layer.rect, layer.fit)
@@ -678,14 +728,18 @@ impl D3d11VideoCompositor {
             return Ok(());
         };
 
-        let cbuffer_data = [layer.opacity, 0.0f32, 0.0, 0.0];
+        let constants = match desc.Format {
+            DXGI_FORMAT_B8G8R8A8_UNORM => LayerConstants::bgra(layer.opacity),
+            DXGI_FORMAT_NV12 => LayerConstants::nv12(frame, layer.opacity),
+            other => return Err(D3d11VideoCompositorError::UnsupportedTextureFormat(other)),
+        };
         unsafe {
             context.UpdateSubresource(
                 &self.layer_buffer,
                 0,
                 None,
-                cbuffer_data.as_ptr().cast::<c_void>(),
-                16,
+                (&raw const constants).cast::<c_void>(),
+                0,
                 0,
             );
             context.RSSetViewports(Some(&[viewport]));
@@ -726,15 +780,13 @@ impl D3d11VideoCompositor {
                     context.Draw(3, 0);
                 }
             }
-            other => return Err(D3d11VideoCompositorError::UnsupportedTextureFormat(other)),
+            _ => unreachable!("texture format was validated before updating constants"),
         }
         Ok(())
     }
 
     fn push_frame(&mut self, bus: &Bus) -> std::result::Result<(), D3d11VideoCompositorError> {
-        let composed = self.compose_frame()?;
-        let mut output = self.pool.get();
-        *output = composed;
+        let output = self.compose_frame()?;
         if let Err(error) = self.pad.push(MediaBuffer::Video(Arc::new(output))) {
             bus.post(
                 &self.hlog,
@@ -822,6 +874,44 @@ fn validate_output_options(
         ));
     }
     Ok(())
+}
+
+/// Builds three affine rows that turn normalized `(Y, Cb, Cr, 1)` samples
+/// into RGB. Unspecified color metadata follows the common SD/HD fallback:
+/// BT.601 through 576 lines and BT.709 above it; unspecified range is
+/// treated as MPEG/limited, matching ordinary decoded NV12 video.
+fn yuv_to_rgb_rows(
+    space: ffmpeg::color::Space,
+    range: ffmpeg::color::Range,
+    height: u32,
+) -> [[f32; 4]; 3] {
+    let (kr, kb) = match space {
+        ffmpeg::color::Space::BT709 => (0.2126f32, 0.0722f32),
+        ffmpeg::color::Space::BT2020NCL | ffmpeg::color::Space::BT2020CL => (0.2627f32, 0.0593f32),
+        ffmpeg::color::Space::FCC => (0.30f32, 0.11f32),
+        ffmpeg::color::Space::SMPTE240M => (0.212f32, 0.087f32),
+        ffmpeg::color::Space::Unspecified if height > 576 => (0.2126f32, 0.0722f32),
+        _ => (0.299f32, 0.114f32),
+    };
+    let kg = 1.0 - kr - kb;
+    let (y_offset, y_scale, chroma_scale) = match range {
+        ffmpeg::color::Range::JPEG => (0.0, 1.0, 1.0),
+        ffmpeg::color::Range::MPEG | ffmpeg::color::Range::Unspecified => {
+            (16.0 / 255.0, 255.0 / 219.0, 255.0 / 224.0)
+        }
+    };
+    let chroma_offset = 128.0 / 255.0;
+    let red_cr = 2.0 * (1.0 - kr) * chroma_scale;
+    let blue_cb = 2.0 * (1.0 - kb) * chroma_scale;
+    let green_cb = -2.0 * kb * (1.0 - kb) / kg * chroma_scale;
+    let green_cr = -2.0 * kr * (1.0 - kr) / kg * chroma_scale;
+    let offset = |cb: f32, cr: f32| -y_scale * y_offset - cb * chroma_offset - cr * chroma_offset;
+
+    [
+        [y_scale, 0.0, red_cr, offset(0.0, red_cr)],
+        [y_scale, green_cb, green_cr, offset(green_cb, green_cr)],
+        [y_scale, blue_cb, 0.0, offset(blue_cb, 0.0)],
+    ]
 }
 
 /// Turns pixel-space [`LayerGeometry`] into a D3D11 viewport (where the
@@ -975,11 +1065,9 @@ unsafe fn build_pipeline_state(
         // `ScissorEnable = TRUE`: every layer draw needs its own scissor
         // rect to crop overflow (e.g. `VideoFit::Cover`) or an
         // off-canvas rect — see `clipped_viewport`'s own docs. Left bound
-        // on the shared context afterward; harmless to any other D3D11
-        // consumer sharing it, since every one of them (e.g.
-        // `D3d11WindowRenderer::record_and_present`) already sets its own
-        // scissor rect immediately before its own draw, same discipline
-        // this compositor follows.
+        // on the shared context afterward; every renderer sharing this
+        // context must explicitly select its own rasterizer state before
+        // drawing, just as this compositor does.
         let rasterizer_desc = D3D11_RASTERIZER_DESC {
             FillMode: D3D11_FILL_SOLID,
             CullMode: D3D11_CULL_NONE,
@@ -992,7 +1080,7 @@ unsafe fn build_pipeline_state(
         let rasterizer_state = rasterizer_state.unwrap();
 
         let buffer_desc = D3D11_BUFFER_DESC {
-            ByteWidth: 16,
+            ByteWidth: std::mem::size_of::<LayerConstants>() as u32,
             Usage: D3D11_USAGE_DEFAULT,
             BindFlags: D3D11_BIND_CONSTANT_BUFFER.0 as u32,
             CPUAccessFlags: 0,
@@ -1098,6 +1186,8 @@ unsafe fn create_output_target(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
 
     use super::*;
@@ -1204,6 +1294,57 @@ mod tests {
         }
     }
 
+    fn nv12_texture(
+        device: &ID3D11Device,
+        width: u32,
+        height: u32,
+        y: u8,
+        cb: u8,
+        cr: u8,
+    ) -> ID3D11Texture2D {
+        let row_bytes = width as usize;
+        let luma_size = row_bytes * height as usize;
+        let mut pixels = vec![y; luma_size + row_bytes * height.div_ceil(2) as usize];
+        for pair in pixels[luma_size..].chunks_exact_mut(2) {
+            pair.copy_from_slice(&[cb, cr]);
+        }
+        unsafe {
+            let desc = D3D11_TEXTURE2D_DESC {
+                Width: width,
+                Height: height,
+                MipLevels: 1,
+                ArraySize: 1,
+                Format: DXGI_FORMAT_NV12,
+                SampleDesc: DXGI_SAMPLE_DESC {
+                    Count: 1,
+                    Quality: 0,
+                },
+                Usage: D3D11_USAGE_DEFAULT,
+                BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
+                CPUAccessFlags: 0,
+                MiscFlags: 0,
+            };
+            let initial = D3D11_SUBRESOURCE_DATA {
+                pSysMem: pixels.as_ptr().cast::<c_void>(),
+                SysMemPitch: width,
+                SysMemSlicePitch: 0,
+            };
+            let mut texture = None;
+            device
+                .CreateTexture2D(&desc, Some(&initial), Some(&mut texture))
+                .expect("CreateTexture2D(NV12) failed");
+            texture.expect("CreateTexture2D succeeded without producing a texture")
+        }
+    }
+
+    fn texture_key(frame: &ffmpeg::frame::Video) -> usize {
+        d3d11va_texture(frame).expect("expected a D3D11 frame").0 as usize
+    }
+
+    fn apply_color_rows(rows: [[f32; 4]; 3], y: f32, cb: f32, cr: f32) -> [f32; 3] {
+        rows.map(|row| row[0] * y + row[1] * cb + row[2] * cr + row[3])
+    }
+
     fn pooled_video(frame: ffmpeg::frame::Video) -> MediaBuffer {
         let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
         let mut pooled = pool.get();
@@ -1214,7 +1355,7 @@ mod tests {
     fn download_frame(
         device: &ID3D11Device,
         context: Arc<Mutex<ID3D11DeviceContext>>,
-        composed: ffmpeg::frame::Video,
+        composed: UnboundObjectPoolRef<ffmpeg::frame::Video>,
     ) -> Arc<UnboundObjectPoolRef<ffmpeg::frame::Video>> {
         let (width, height) = (composed.width(), composed.height());
         let mut download = D3d11Download::new("download", device, context, width, height)
@@ -1225,7 +1366,7 @@ mod tests {
             hlog: element_hlog(ElementType::Other, "capture", None),
         }));
         download
-            .consume(pooled_video(composed))
+            .consume(MediaBuffer::Video(Arc::new(composed)))
             .expect("download consume should succeed");
         let mut received = received.lock().unwrap();
         let MediaBuffer::Video(frame) = received.remove(0) else {
@@ -1289,6 +1430,129 @@ mod tests {
         let downloaded = download_frame(&device, context, composed);
         assert_eq!(pixel(&downloaded, 0, 0), [0, 0, 255, 255], "red background");
         assert_eq!(pixel(&downloaded, 1, 1), [255, 0, 0, 255], "blue overlay");
+    }
+
+    #[test]
+    fn live_output_frames_keep_distinct_textures_until_the_last_arc_drops() {
+        let Some((device, context)) = try_device() else {
+            return;
+        };
+        let options = VideoCompositorOptions {
+            width: 1,
+            height: 1,
+            frame_rate: ffmpeg::Rational::new(30, 1),
+            background: video_layer::VideoColor::BLACK,
+        };
+        let (mut compositor, handle) =
+            D3d11VideoCompositor::new("compositor", &device, context.clone(), options)
+                .expect("D3d11VideoCompositor::new should succeed");
+        let mut layer = VideoLayer::new(VideoRect::new(0, 0, 1, 1));
+        layer.fit = video_layer::VideoFit::Stretch;
+        let mut sink = handle.add_source("input", layer).unwrap().unwrap().sink;
+
+        sink.consume(pooled_video(wrap_d3d11_texture(
+            bgra_texture(&device, 1, 1, [0, 0, 255, 255]),
+            1,
+            1,
+        )))
+        .unwrap();
+        let first = compositor.compose_frame().expect("first compose failed");
+
+        sink.consume(pooled_video(wrap_d3d11_texture(
+            bgra_texture(&device, 1, 1, [255, 0, 0, 255]),
+            1,
+            1,
+        )))
+        .unwrap();
+        let mut later = Vec::new();
+        for _ in 0..OUTPUT_POOL_SIZE {
+            later.push(compositor.compose_frame().expect("later compose failed"));
+        }
+
+        let mut keys = HashSet::new();
+        keys.insert(texture_key(&first));
+        keys.extend(later.iter().map(|frame| texture_key(frame)));
+        assert_eq!(
+            keys.len(),
+            OUTPUT_POOL_SIZE + 1,
+            "simultaneously-live output frames must never alias one texture"
+        );
+
+        let downloaded = download_frame(&device, context, first);
+        assert_eq!(
+            pixel(&downloaded, 0, 0),
+            [0, 0, 255, 255],
+            "later compositions must not overwrite a queued first frame"
+        );
+    }
+
+    #[test]
+    fn nv12_conversion_uses_frame_color_space_and_range() {
+        let Some((device, context)) = try_device() else {
+            return;
+        };
+        let options = VideoCompositorOptions {
+            width: 2,
+            height: 2,
+            frame_rate: ffmpeg::Rational::new(30, 1),
+            background: video_layer::VideoColor::BLACK,
+        };
+        let (mut compositor, handle) =
+            D3d11VideoCompositor::new("compositor", &device, context.clone(), options)
+                .expect("D3d11VideoCompositor::new should succeed");
+        let mut layer = VideoLayer::new(VideoRect::new(0, 0, 2, 2));
+        layer.fit = video_layer::VideoFit::Stretch;
+        let mut sink = handle.add_source("input", layer).unwrap().unwrap().sink;
+        let texture = nv12_texture(&device, 2, 2, 81, 90, 240);
+
+        let mut bt601 = wrap_d3d11_texture(texture.clone(), 2, 2);
+        bt601.set_color_space(ffmpeg::color::Space::SMPTE170M);
+        bt601.set_color_range(ffmpeg::color::Range::MPEG);
+        sink.consume(pooled_video(bt601)).unwrap();
+        let bt601 = compositor.compose_frame().expect("BT.601 compose failed");
+        let bt601 = download_frame(&device, context.clone(), bt601);
+
+        let mut bt709 = wrap_d3d11_texture(texture, 2, 2);
+        bt709.set_color_space(ffmpeg::color::Space::BT709);
+        bt709.set_color_range(ffmpeg::color::Range::MPEG);
+        sink.consume(pooled_video(bt709)).unwrap();
+        let bt709 = compositor.compose_frame().expect("BT.709 compose failed");
+        let bt709 = download_frame(&device, context, bt709);
+
+        let pixel_601 = pixel(&bt601, 0, 0);
+        let pixel_709 = pixel(&bt709, 0, 0);
+        assert!(
+            pixel_601[1].abs_diff(pixel_709[1]) >= 20,
+            "the same NV12 sample should use different 601/709 matrices: {pixel_601:?} vs {pixel_709:?}"
+        );
+        assert_eq!(pixel_601[3], 255);
+        assert_eq!(pixel_709[3], 255);
+    }
+
+    #[test]
+    fn nv12_conversion_distinguishes_limited_and_full_range() {
+        let limited = yuv_to_rgb_rows(
+            ffmpeg::color::Space::BT709,
+            ffmpeg::color::Range::MPEG,
+            1080,
+        );
+        let full = yuv_to_rgb_rows(
+            ffmpeg::color::Space::BT709,
+            ffmpeg::color::Range::JPEG,
+            1080,
+        );
+        let neutral = 128.0 / 255.0;
+        let limited_black = apply_color_rows(limited, 16.0 / 255.0, neutral, neutral);
+        let limited_white = apply_color_rows(limited, 235.0 / 255.0, neutral, neutral);
+        let full_black = apply_color_rows(full, 0.0, neutral, neutral);
+        let full_white = apply_color_rows(full, 1.0, neutral, neutral);
+
+        for channel in limited_black.into_iter().chain(full_black) {
+            assert!(channel.abs() < 1e-5, "black mapped to {channel}");
+        }
+        for channel in limited_white.into_iter().chain(full_white) {
+            assert!((channel - 1.0).abs() < 1e-5, "white mapped to {channel}");
+        }
     }
 
     #[test]

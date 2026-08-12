@@ -298,6 +298,12 @@ impl D3d11WindowRenderer {
         unsafe {
             context.ClearRenderTargetView(&render_target_view, &[0.0, 0.0, 0.0, 1.0]);
             context.OMSetRenderTargets(Some(&[Some(render_target_view)]), None);
+            // This immediate context is intentionally shared with GPU
+            // filters such as D3d11VideoCompositor. Never inherit their
+            // blend/rasterizer state: window presentation is an opaque
+            // full-frame copy with the default rasterizer.
+            context.OMSetBlendState(None, None, u32::MAX);
+            context.RSSetState(None);
             context.IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
             context.RSSetViewports(Some(&[viewport]));
             context.RSSetScissorRects(Some(&[scissor]));

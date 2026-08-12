@@ -31,6 +31,9 @@ VertexOutput vs_main(uint vertex_id : SV_VertexID)
 
 cbuffer LayerBuffer : register(b0)
 {
+    float4 yuv_to_red;
+    float4 yuv_to_green;
+    float4 yuv_to_blue;
     float opacity;
     float3 _padding;
 };

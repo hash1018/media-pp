@@ -229,6 +229,8 @@ impl Sink for D3d11Upload {
                 // texture (via `release_d3d11_texture`) right here.
                 *gpu_frame = wrap_d3d11_texture(texture, self.width, self.height);
                 gpu_frame.set_pts(frame.pts());
+                gpu_frame.set_color_space(frame.color_space());
+                gpu_frame.set_color_range(frame.color_range());
 
                 self.pad.push(MediaBuffer::Video(Arc::new(gpu_frame)))
             }

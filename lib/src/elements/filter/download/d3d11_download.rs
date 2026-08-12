@@ -6,8 +6,9 @@ use thiserror::Error as ThisError;
 use windows::{
     Win32::Graphics::{
         Direct3D11::{
-            D3D11_CPU_ACCESS_READ, D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE, D3D11_TEXTURE2D_DESC,
-            D3D11_USAGE_STAGING, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
+            D3D11_BOX, D3D11_CPU_ACCESS_READ, D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE,
+            D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING, ID3D11Device, ID3D11DeviceContext,
+            ID3D11Texture2D,
         },
         Dxgi::Common::{DXGI_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC},
     },
@@ -61,6 +62,19 @@ pub enum D3d11DownloadError {
         expected_height: u32,
     },
 
+    #[error(
+        "D3D11 texture is {actual_width}x{actual_height}, smaller than {expected_width}x{expected_height}"
+    )]
+    TextureTooSmall {
+        actual_width: u32,
+        actual_height: u32,
+        expected_width: u32,
+        expected_height: u32,
+    },
+
+    #[error("D3D11 texture array index {index} is outside ArraySize {array_size}")]
+    InvalidArrayIndex { index: isize, array_size: u32 },
+
     #[error("D3d11Download only handles Video frames, got a {0}")]
     UnsupportedBuffer(&'static str),
 }
@@ -75,7 +89,7 @@ pub enum D3d11DownloadError {
 ///
 /// Unlike `D3d11Upload` (a plain `ID3D11Device::CreateTexture2D` call, safe
 /// to issue from any thread), reading a texture back to the CPU needs
-/// `ID3D11DeviceContext::CopyResource`/`Map`/`Unmap` — context-level calls,
+/// `ID3D11DeviceContext::CopySubresourceRegion`/`Map`/`Unmap` — context-level calls,
 /// not device-level ones. `context` must be the exact same
 /// `Arc<Mutex<ID3D11DeviceContext>>` every other context-touching D3D11
 /// consumer in this pipeline shares (e.g.
@@ -141,13 +155,14 @@ impl D3d11Download {
         })
     }
 
-    /// `CopyResource`s `texture` into the cached staging texture, `Map`s
-    /// it, and copies every row into a pooled CPU frame — under `context`'s
+    /// Copies one texture-array subresource into the cached staging texture,
+    /// `Map`s it, and copies every row into a pooled CPU frame — under `context`'s
     /// lock for the whole sequence, since both calls touch the shared
     /// immediate context (see this type's own docs).
     fn download(
         &self,
         texture: &ID3D11Texture2D,
+        source_subresource: u32,
     ) -> std::result::Result<
         crate::pool::UnboundObjectPoolRef<ffmpeg::frame::Video>,
         windows::core::Error,
@@ -158,7 +173,24 @@ impl D3d11Download {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         unsafe {
-            context.CopyResource(&self.staging, texture);
+            let source_box = D3D11_BOX {
+                left: 0,
+                top: 0,
+                front: 0,
+                right: self.width,
+                bottom: self.height,
+                back: 1,
+            };
+            context.CopySubresourceRegion(
+                &self.staging,
+                0,
+                0,
+                0,
+                0,
+                texture,
+                source_subresource,
+                Some(&source_box as *const D3D11_BOX),
+            );
 
             let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
             context.Map(&self.staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))?;
@@ -225,7 +257,7 @@ impl Sink for D3d11Download {
                     return Err(error.into());
                 }
 
-                let (texture_raw, _index) =
+                let (texture_raw, index) =
                     d3d11va_texture(&frame).ok_or(D3d11DownloadError::InvalidD3d11Frame)?;
                 // Safety: `texture_raw` is a borrowed raw `ID3D11Texture2D*`
                 // — still owned by `frame`'s own buffer reference, not by
@@ -250,12 +282,33 @@ impl Sink for D3d11Download {
                     herror!(self, "unsupported texture format: {:?}", desc.Format);
                     return Err(D3d11DownloadError::UnsupportedTextureFormat(desc.Format).into());
                 }
+                if desc.Width < self.width || desc.Height < self.height {
+                    let error = D3d11DownloadError::TextureTooSmall {
+                        actual_width: desc.Width,
+                        actual_height: desc.Height,
+                        expected_width: self.width,
+                        expected_height: self.height,
+                    };
+                    herror!(self, "{error}");
+                    return Err(error.into());
+                }
+                if index < 0 || index as u64 >= u64::from(desc.ArraySize) {
+                    let error = D3d11DownloadError::InvalidArrayIndex {
+                        index,
+                        array_size: desc.ArraySize,
+                    };
+                    herror!(self, "{error}");
+                    return Err(error.into());
+                }
+                let source_subresource = (index as u32) * desc.MipLevels;
 
                 let mut cpu_frame = self
-                    .download(&texture)
+                    .download(&texture, source_subresource)
                     .inspect_err(|error| herror!(self, "GPU download failed: {error}"))
                     .map_err(D3d11DownloadError::from)?;
                 cpu_frame.set_pts(frame.pts());
+                cpu_frame.set_color_space(frame.color_space());
+                cpu_frame.set_color_range(frame.color_range());
 
                 self.pad.push(MediaBuffer::Video(Arc::new(cpu_frame)))
             }
@@ -412,6 +465,97 @@ mod tests {
             let expected = &pixels[row * width as usize * 4..(row + 1) * width as usize * 4];
             assert_eq!(row_bytes, expected, "row {row} mismatch");
         }
+    }
+
+    #[test]
+    fn downloads_only_the_selected_bgra_texture_array_slice() {
+        let mut device = None;
+        let mut context = None;
+        let result = unsafe {
+            D3D11CreateDevice(
+                None,
+                D3D_DRIVER_TYPE_HARDWARE,
+                Default::default(),
+                Default::default(),
+                None,
+                D3D11_SDK_VERSION,
+                Some(&mut device),
+                None,
+                Some(&mut context),
+            )
+        };
+        let Ok(()) = result else {
+            eprintln!("skipping: D3D11CreateDevice failed on this machine: {result:?}");
+            return;
+        };
+        let device = device.expect("D3D11CreateDevice succeeded without producing a device");
+        let context = Arc::new(Mutex::new(
+            context.expect("D3D11CreateDevice succeeded without producing a context"),
+        ));
+
+        let (width, height) = (2u32, 2u32);
+        let red = [0u8, 0, 255, 255].repeat((width * height) as usize);
+        let blue = [255u8, 0, 0, 255].repeat((width * height) as usize);
+        let initial = [
+            D3D11_SUBRESOURCE_DATA {
+                pSysMem: red.as_ptr().cast::<c_void>(),
+                SysMemPitch: width * 4,
+                SysMemSlicePitch: 0,
+            },
+            D3D11_SUBRESOURCE_DATA {
+                pSysMem: blue.as_ptr().cast::<c_void>(),
+                SysMemPitch: width * 4,
+                SysMemSlicePitch: 0,
+            },
+        ];
+        let texture = unsafe {
+            let desc = D3D11_TEXTURE2D_DESC {
+                Width: width,
+                Height: height,
+                MipLevels: 1,
+                ArraySize: 2,
+                Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                SampleDesc: DXGI_SAMPLE_DESC {
+                    Count: 1,
+                    Quality: 0,
+                },
+                Usage: D3D11_USAGE_DEFAULT,
+                BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
+                CPUAccessFlags: 0,
+                MiscFlags: 0,
+            };
+            let mut texture = None;
+            device
+                .CreateTexture2D(&desc, Some(initial.as_ptr()), Some(&mut texture))
+                .expect("CreateTexture2D array failed");
+            texture.expect("CreateTexture2D succeeded without producing a texture")
+        };
+        let mut source_frame = wrap_d3d11_texture(texture, width, height);
+        unsafe {
+            (*source_frame.as_mut_ptr()).data[1] = std::ptr::dangling_mut::<u8>();
+        }
+
+        let mut download = D3d11Download::new("test-download", &device, context, width, height)
+            .expect("D3d11Download::new should succeed");
+        let received = Arc::new(Mutex::new(Vec::new()));
+        download.src_pads()[0].link(Box::new(CapturingSink {
+            received: received.clone(),
+            hlog: element_hlog(ElementType::Other, "capture", None),
+        }));
+        let source_pool =
+            crate::pool::UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
+        let mut source_pooled = source_pool.get();
+        *source_pooled = source_frame;
+        download
+            .consume(MediaBuffer::Video(Arc::new(source_pooled)))
+            .expect("download consume should succeed");
+
+        let received = received.lock().unwrap();
+        let MediaBuffer::Video(frame) = &received[0] else {
+            panic!("expected a Video buffer");
+        };
+        let row = &frame.data(0)[..width as usize * 4];
+        assert_eq!(row, &blue[..width as usize * 4]);
     }
 
     #[rust_hlog::hlog]
