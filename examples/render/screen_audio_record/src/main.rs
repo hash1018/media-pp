@@ -7,9 +7,9 @@ use ffmpeg_next as ffmpeg;
 use media_pp::{
     bus::BusEvent,
     elements::{
-        AudioCodec, AudioDeviceKind, CaptureMode, DxgiCaptureOptions, DxgiCaptureSource, Mp4Muxer,
-        Scaler, SwAudioEncoder, SwAudioEncoderOptions, SwEncoder, SwEncoderOptions, VideoCodec,
-        WasapiCaptureOptions, WasapiCaptureSource,
+        AudioCodec, CaptureMode, DxgiCaptureOptions, DxgiCaptureSource, Mp4Muxer, Scaler,
+        SwAudioEncoder, SwAudioEncoderOptions, SwEncoder, SwEncoderOptions, VideoCodec,
+        WasapiCaptureOptions, WasapiCaptureSource, WasapiDeviceKind,
     },
     pipeline::PipelineBuilder,
 };
@@ -53,7 +53,7 @@ fn main() -> media_pp::Result<()> {
         WasapiCaptureSource::list_devices().map_err(|e| media_pp::Error::Other(e.to_string()))?;
     let device = devices
         .into_iter()
-        .find(|d| d.kind == AudioDeviceKind::Render && d.is_default)
+        .find(|d| d.kind == WasapiDeviceKind::Render && d.is_default)
         .ok_or_else(|| media_pp::Error::Other("no default playback device found".into()))?;
     println!("capturing system audio from: {}", device.name);
     let (audio_source, sample_rate, channels) =

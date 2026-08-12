@@ -9,30 +9,12 @@ use std::{
 use ffmpeg_next as ffmpeg;
 use rust_hlog::{HLog, herror, hinfo};
 use thiserror::Error as ThisError;
-use windows::{
-    Win32::{
-        Devices::FunctionDiscovery::PKEY_Device_FriendlyName,
-        Media::{
-            Audio::{
-                AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_E_DEVICE_INVALIDATED, AUDCLNT_SHAREMODE_SHARED,
-                AUDCLNT_STREAMFLAGS_LOOPBACK, DEVICE_STATE_ACTIVE, IAudioCaptureClient,
-                IAudioClient, IMMDevice, IMMDeviceEnumerator, MMDeviceEnumerator, WAVE_FORMAT_PCM,
-                WAVEFORMATEX, WAVEFORMATEXTENSIBLE, eCapture, eConsole, eRender,
-            },
-            KernelStreaming::{KSDATAFORMAT_SUBTYPE_PCM, WAVE_FORMAT_EXTENSIBLE},
-            Multimedia::{KSDATAFORMAT_SUBTYPE_IEEE_FLOAT, WAVE_FORMAT_IEEE_FLOAT},
-        },
-        System::{
-            Com::{
-                CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree,
-                CoUninitialize, STGM_READ,
-                StructuredStorage::{PROPVARIANT, PropVariantClear},
-            },
-            Variant::VT_LPWSTR,
-        },
-        UI::Shell::PropertiesSystem::IPropertyStore,
+use windows::Win32::{
+    Media::Audio::{
+        AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_E_DEVICE_INVALIDATED, AUDCLNT_SHAREMODE_SHARED,
+        AUDCLNT_STREAMFLAGS_LOOPBACK, IAudioCaptureClient, IAudioClient,
     },
-    core::HSTRING,
+    System::Com::{CLSCTX_ALL, CoTaskMemFree},
 };
 
 use crate::{
@@ -42,6 +24,10 @@ use crate::{
     element::{Element, ElementType, Source, SourceElement, element_hlog},
     error::Result,
     pad::SrcPad,
+    platform::windows::wasapi::{
+        ComApartment, WasapiDevice, WasapiDeviceKind, list_devices as enumerate_wasapi_devices,
+        open_device, resolve_mix_format,
+    },
 };
 
 /// How long [`WasapiCaptureSource::run`] sleeps between checks of
@@ -87,50 +73,13 @@ pub enum WasapiCaptureSourceError {
     UnsupportedMixFormat { format_tag: u32, bits: u16 },
 }
 
-/// Which direction an [`AudioDevice`] flows. Determines how
-/// [`WasapiCaptureSource::open`] has to `Initialize` the stream — a
-/// `Render` endpoint (speakers/headphones) only has an outgoing signal to
-/// tap via WASAPI loopback (`AUDCLNT_STREAMFLAGS_LOOPBACK`); a `Capture`
-/// endpoint (microphone) is already an input, captured directly. Callers
-/// picking a device out of [`WasapiCaptureSource::list_devices`] don't need
-/// to reason about this themselves — it travels with the `AudioDevice`
-/// they chose.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AudioDeviceKind {
-    /// A playback endpoint — its *outgoing* mix is what gets captured
-    /// (loopback). The system audio a screen recording should carry
-    /// alongside [`crate::elements::DxgiCaptureSource`].
-    Render,
-    /// A microphone or other recording endpoint — captured directly.
-    Capture,
-}
-
-/// One WASAPI endpoint enumerated by [`WasapiCaptureSource::list_devices`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AudioDevice {
-    /// Opaque device identifier (`IMMDevice::GetId`) — pass straight into
-    /// [`WasapiCaptureOptions::device`], never parsed. Stable for as long
-    /// as the device stays plugged in, not guaranteed stable across a
-    /// reboot or a driver reinstall.
-    pub id: String,
-    /// Human-readable name for a picker UI (e.g. "Speakers (Realtek High
-    /// Definition Audio)"), falling back to `id` if a friendly name
-    /// couldn't be read.
-    pub name: String,
-    pub kind: AudioDeviceKind,
-    /// Whether this was the system default endpoint for `kind`'s role at
-    /// enumeration time — a `Render` device with `is_default: true` is
-    /// what most "record my screen" callers want.
-    pub is_default: bool,
-}
-
 /// Construction-time options for [`WasapiCaptureSource::open`].
 #[derive(Debug, Clone)]
 pub struct WasapiCaptureOptions {
     /// Which endpoint to capture from — one entry out of
     /// [`WasapiCaptureSource::list_devices`] (or hand-built, if the caller
     /// already knows a device's id/kind some other way).
-    pub device: AudioDevice,
+    pub device: WasapiDevice,
 }
 
 /// Captures audio via WASAPI (`IAudioClient`/`IAudioCaptureClient`) —
@@ -139,8 +88,9 @@ pub struct WasapiCaptureOptions {
 /// format/rate/channel count — no resampling. Same division of labor as
 /// [`crate::elements::DxgiCaptureSource`] emitting raw `Pixel::BGRA` and
 /// leaving conversion to a downstream [`crate::elements::Scaler`]: if
-/// something downstream needs a fixed sample rate/format, that's a future
-/// audio resampler filter's job, not this element's.
+/// something downstream needs a fixed sample rate/format, use
+/// [`crate::elements::AudioResampler`] rather than hiding conversion in
+/// this element.
 ///
 /// Polls `IAudioCaptureClient::GetNextPacketSize` on a short fixed
 /// interval (`POLL_INTERVAL`) rather than waiting on a WASAPI-signaled
@@ -153,7 +103,7 @@ pub struct WasapiCaptureOptions {
 /// [`WasapiCaptureSource::fill_silence_gap`]), since WASAPI itself
 /// delivers literally nothing whenever the render engine has no active
 /// session at all (e.g. nothing currently playing, for
-/// [`AudioDeviceKind::Render`]). Without this, a quiet period would be a
+/// [`WasapiDeviceKind::Render`]). Without this, a quiet period would be a
 /// real gap in the audio timeline rather than silence, which would leave
 /// a downstream muxer/encoder with no way to keep audio and video in
 /// sync across it.
@@ -167,14 +117,10 @@ pub struct WasapiCaptureOptions {
 /// across threads freely), so `run` makes its own `CoInitializeEx` call
 /// before touching anything, paired with `CoUninitialize` when it returns
 /// — the same two-`CoInitializeEx`-calls-per-object-lifetime pattern
-/// `cpal`'s own WASAPI backend uses. `open`'s own `CoInitializeEx` (on the
-/// *caller's* thread) is deliberately never paired with a matching
-/// `CoUninitialize`: this struct can be dropped on a different thread than
-/// `open` was called from (typically it is — the pipeline's worker
-/// thread), so there is no single correct thread to uninitialize from.
-/// One extra, never-undone `CoInitializeEx` on the calling thread for the
-/// life of the process is harmless — the same thing most GUI apps already
-/// do on their main thread.
+/// `cpal`'s own WASAPI backend uses. `open` also joins its caller's COM
+/// apartment while it creates the agile WASAPI interfaces, then balances
+/// that call before returning; the pipeline worker joins its own apartment
+/// independently in `run`.
 ///
 /// Deliberately does **not** retry internally on
 /// `AUDCLNT_E_DEVICE_INVALIDATED` (default device changed, unplugged,
@@ -211,52 +157,14 @@ unsafe impl Send for WasapiCaptureSource {}
 
 impl WasapiCaptureSource {
     /// Enumerates every currently-active audio endpoint — both `Render`
-    /// (playback) and `Capture` (recording) — as an [`AudioDevice`] list a
+    /// (playback) and `Capture` (recording) — as an [`WasapiDevice`] list a
     /// caller can show in a picker UI and index/search into, then hand the
     /// chosen entry straight to [`WasapiCaptureOptions::device`]. No
     /// concept of "mode" to reason about beforehand: the picked device's
-    /// own [`AudioDeviceKind`] is what tells `open` whether to use
+    /// own [`WasapiDeviceKind`] is what tells `open` whether to use
     /// loopback.
-    pub fn list_devices() -> std::result::Result<Vec<AudioDevice>, WasapiCaptureSourceError> {
-        unsafe {
-            let hr = CoInitializeEx(None, COINIT_MULTITHREADED);
-            if hr.is_err() {
-                return Err(windows::core::Error::from(hr).into());
-            }
-
-            let enumerator: IMMDeviceEnumerator =
-                CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
-
-            let mut devices = Vec::new();
-            for (dataflow, kind) in [
-                (eRender, AudioDeviceKind::Render),
-                (eCapture, AudioDeviceKind::Capture),
-            ] {
-                let default_id = enumerator
-                    .GetDefaultAudioEndpoint(dataflow, eConsole)
-                    .ok()
-                    .and_then(|device| device.GetId().ok())
-                    .and_then(|id| id.to_string().ok());
-
-                let collection = enumerator.EnumAudioEndpoints(dataflow, DEVICE_STATE_ACTIVE)?;
-                let count = collection.GetCount()?;
-                for index in 0..count {
-                    let device = collection.Item(index)?;
-                    let Some(id) = device.GetId().ok().and_then(|id| id.to_string().ok()) else {
-                        continue; // couldn't read this one's id — skip rather than fail the whole list
-                    };
-                    let name = device_friendly_name(&device).unwrap_or_else(|| id.clone());
-                    let is_default = default_id.as_deref() == Some(id.as_str());
-                    devices.push(AudioDevice {
-                        id,
-                        name,
-                        kind,
-                        is_default,
-                    });
-                }
-            }
-            Ok(devices)
-        }
+    pub fn list_devices() -> std::result::Result<Vec<WasapiDevice>, WasapiCaptureSourceError> {
+        Ok(enumerate_wasapi_devices(None)?)
     }
 
     /// Opens `options.device` and starts a shared-mode WASAPI capture
@@ -271,29 +179,23 @@ impl WasapiCaptureSource {
     ) -> std::result::Result<(Self, u32, u16), WasapiCaptureSourceError> {
         let name: Arc<str> = name.into().into();
         let hlog = element_hlog(ElementType::WasapiCaptureSource, &name, None);
+        let _apartment = ComApartment::new()?;
 
         unsafe {
-            // See this struct's own docs on why this call is intentionally
-            // never paired with a `CoUninitialize`.
-            let hr = CoInitializeEx(None, COINIT_MULTITHREADED);
-            if hr.is_err() {
-                return Err(windows::core::Error::from(hr).into());
-            }
-
-            let enumerator: IMMDeviceEnumerator =
-                CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
-            let device_id = HSTRING::from(options.device.id.as_str());
-            let device: IMMDevice = enumerator.GetDevice(&device_id)?;
+            let device = open_device(&options.device.id)?;
             let audio_client: IAudioClient = device.Activate(CLSCTX_ALL, None)?;
 
             let mix_format = audio_client.GetMixFormat()?;
-            let (format, channel_layout) = resolve_sample_format(mix_format)?;
-            let sample_rate = (*mix_format).nSamplesPerSec;
-            let channels = (*mix_format).nChannels;
+            let audio_format = resolve_mix_format(mix_format).map_err(|error| {
+                WasapiCaptureSourceError::UnsupportedMixFormat {
+                    format_tag: error.format_tag,
+                    bits: error.bits,
+                }
+            })?;
 
             let stream_flags = match options.device.kind {
-                AudioDeviceKind::Render => AUDCLNT_STREAMFLAGS_LOOPBACK,
-                AudioDeviceKind::Capture => 0,
+                WasapiDeviceKind::Render => AUDCLNT_STREAMFLAGS_LOOPBACK,
+                WasapiDeviceKind::Capture => 0,
             };
             let init_result = audio_client.Initialize(
                 AUDCLNT_SHAREMODE_SHARED,
@@ -313,9 +215,9 @@ impl WasapiCaptureSource {
                 "opened: device={:?} ({:?}), {}Hz, {} channel(s), format={:?}",
                 options.device.name,
                 options.device.kind,
-                sample_rate,
-                channels,
-                format
+                audio_format.sample_rate,
+                audio_format.channels,
+                audio_format.sample_format
             );
             let pad = SrcPad::new(format!("{name}_src"));
 
@@ -325,14 +227,14 @@ impl WasapiCaptureSource {
                     hlog,
                     audio_client,
                     capture_client,
-                    sample_rate,
-                    format,
-                    channel_layout,
+                    sample_rate: audio_format.sample_rate,
+                    format: audio_format.sample_format,
+                    channel_layout: audio_format.channel_layout(),
                     samples_emitted: 0,
                     pad,
                 },
-                sample_rate,
-                channels,
+                audio_format.sample_rate,
+                audio_format.channels,
             ))
         }
     }
@@ -509,17 +411,9 @@ impl SourceElement for WasapiCaptureSource {
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
         hinfo!(self, "run: starting");
 
-        // See this struct's own docs on why every thread that touches
-        // `audio_client`/`capture_client` needs its own `CoInitializeEx`
-        // call, this one paired with `CoUninitialize` below since both run
-        // on this same thread start to finish.
-        let hr = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
-        if hr.is_err() {
-            return Err(WasapiCaptureSourceError::from(windows::core::Error::from(hr)).into());
-        }
+        let _apartment = ComApartment::new().map_err(WasapiCaptureSourceError::from)?;
 
         if let Err(error) = unsafe { self.audio_client.Start() } {
-            unsafe { CoUninitialize() };
             return Err(self.classify_error(error).into());
         }
 
@@ -528,91 +422,10 @@ impl SourceElement for WasapiCaptureSource {
         if let Err(error) = unsafe { self.audio_client.Stop() } {
             herror!(self, "Stop failed: {error}");
         }
-        unsafe { CoUninitialize() };
         result
     }
 
     fn seek(&mut self, _target: std::time::Duration) -> Result<std::time::Duration> {
         Err(WasapiCaptureSourceError::SeekUnsupported.into())
     }
-}
-
-/// Reads `device`'s `PKEY_Device_FriendlyName` property (e.g. "Speakers
-/// (Realtek High Definition Audio)") for [`WasapiCaptureSource::list_devices`].
-/// `None` if the property store can't be opened or the value isn't a
-/// string — every real endpoint has this property, so that's effectively
-/// "shouldn't happen", not something worth a hard error over; the caller
-/// falls back to the device's id instead.
-fn device_friendly_name(device: &IMMDevice) -> Option<String> {
-    unsafe {
-        let store: IPropertyStore = device.OpenPropertyStore(STGM_READ).ok()?;
-        let mut variant: PROPVARIANT = store.GetValue(&PKEY_Device_FriendlyName).ok()?;
-        let name = property_variant_to_string(&variant);
-        let _ = PropVariantClear(&mut variant);
-        name
-    }
-}
-
-/// Extracts a `VT_LPWSTR` string out of a `PROPVARIANT` — the only variant
-/// type `PKEY_Device_FriendlyName` is ever actually stored as. `None` for
-/// any other `vt`, rather than guessing at a union field that isn't
-/// active.
-fn property_variant_to_string(variant: &PROPVARIANT) -> Option<String> {
-    unsafe {
-        if variant.Anonymous.Anonymous.vt != VT_LPWSTR {
-            return None;
-        }
-        variant
-            .Anonymous
-            .Anonymous
-            .Anonymous
-            .pwszVal
-            .to_string()
-            .ok()
-    }
-}
-
-/// Resolves a WASAPI `WAVEFORMATEX` (possibly a `WAVEFORMATEXTENSIBLE` in
-/// disguise — `wFormatTag == WAVE_FORMAT_EXTENSIBLE`, common on modern
-/// multi-channel devices) into the `ffmpeg::format::Sample` it corresponds
-/// to plus a matching [`ffmpeg::ChannelLayout`]. Only PCM and IEEE float,
-/// 16/32-bit, are handled — every WASAPI shared-mode mix format actually
-/// seen on real hardware is one of these two; anything else is a hard
-/// `open`-time error rather than a silent, likely-wrong guess.
-fn resolve_sample_format(
-    mix_format: *const WAVEFORMATEX,
-) -> std::result::Result<(ffmpeg::format::Sample, ffmpeg::ChannelLayout), WasapiCaptureSourceError>
-{
-    let wf = unsafe { &*mix_format };
-    let bits = wf.wBitsPerSample;
-    let format_tag = if wf.wFormatTag as u32 == WAVE_FORMAT_EXTENSIBLE {
-        let ext = mix_format as *const WAVEFORMATEXTENSIBLE;
-        let sub_format = unsafe { (*ext).SubFormat };
-        if sub_format == KSDATAFORMAT_SUBTYPE_IEEE_FLOAT {
-            WAVE_FORMAT_IEEE_FLOAT
-        } else if sub_format == KSDATAFORMAT_SUBTYPE_PCM {
-            WAVE_FORMAT_PCM
-        } else {
-            0
-        }
-    } else {
-        wf.wFormatTag as u32
-    };
-
-    let format = match (format_tag, bits) {
-        (tag, 32) if tag == WAVE_FORMAT_IEEE_FLOAT => {
-            ffmpeg::format::Sample::F32(ffmpeg::format::sample::Type::Packed)
-        }
-        (tag, 16) if tag == WAVE_FORMAT_PCM => {
-            ffmpeg::format::Sample::I16(ffmpeg::format::sample::Type::Packed)
-        }
-        (tag, 32) if tag == WAVE_FORMAT_PCM => {
-            ffmpeg::format::Sample::I32(ffmpeg::format::sample::Type::Packed)
-        }
-        _ => {
-            return Err(WasapiCaptureSourceError::UnsupportedMixFormat { format_tag, bits });
-        }
-    };
-    let channel_layout = ffmpeg::ChannelLayout::default(wf.nChannels as i32);
-    Ok((format, channel_layout))
 }

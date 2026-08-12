@@ -3,7 +3,7 @@ use std::{sync::atomic::Ordering, thread, time::Duration};
 use media_pp::{
     Result,
     bus::BusEvent,
-    elements::{AudioDeviceKind, FrameCounter, WasapiCaptureOptions, WasapiCaptureSource},
+    elements::{FrameCounter, WasapiCaptureOptions, WasapiCaptureSource, WasapiDeviceKind},
     pipeline::Pipeline,
 };
 
@@ -35,7 +35,7 @@ fn main() -> Result<()> {
     }
 
     let wanted_kind = if arg.as_deref() == Some("mic") {
-        Some(AudioDeviceKind::Capture)
+        Some(WasapiDeviceKind::Capture)
     } else {
         None
     };
@@ -45,7 +45,7 @@ fn main() -> Result<()> {
             Some(kind) => d.kind == *kind && d.is_default,
             None => match &arg {
                 Some(name) => d.name.contains(name.as_str()),
-                None => d.kind == AudioDeviceKind::Render && d.is_default,
+                None => d.kind == WasapiDeviceKind::Render && d.is_default,
             },
         })
         .ok_or_else(|| media_pp::Error::Other("no matching device found".into()))?;

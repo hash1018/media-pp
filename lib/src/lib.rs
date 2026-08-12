@@ -1,6 +1,7 @@
 mod core;
 pub mod elements;
 pub mod error;
+mod platform;
 
 // Flat re-export: `core/` only exists to group these files on disk (see
 // its module doc) — every external and internal caller keeps using

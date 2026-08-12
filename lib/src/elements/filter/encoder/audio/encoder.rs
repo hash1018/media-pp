@@ -12,6 +12,8 @@ use crate::{
     pad::SrcPad,
 };
 
+use crate::elements::filter::audio_resampler::{AudioFormat, AudioFrameResampler};
+
 /// Errors specific to `SwAudioEncoder`. Converts into the crate-wide
 /// `Error` via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
@@ -119,9 +121,10 @@ pub struct SwAudioEncoder {
     /// `0` means the codec accepts any chunk size — see this struct's
     /// own docs.
     frame_size: usize,
-    /// Built lazily from the first frame this element ever sees — see
-    /// this struct's own docs.
-    resampler: Option<ffmpeg::software::resampling::Context>,
+    /// Shared resampling engine also used by `AudioResampler`; it builds
+    /// lazily from the first input frame and flushes/rebuilds if the input
+    /// definition changes.
+    resampler: AudioFrameResampler,
     /// One queue per channel, holding already-resampled (`target_format`'s
     /// sample type, always `f32` — see [`SwAudioEncoderError::NoF32Format`])
     /// samples waiting for a full `frame_size`-sample chunk. Channel-major
@@ -213,7 +216,11 @@ impl SwAudioEncoder {
             target_layout,
             sample_rate: options.sample_rate,
             frame_size,
-            resampler: None,
+            resampler: AudioFrameResampler::new(AudioFormat {
+                sample_format: target_format,
+                sample_rate: options.sample_rate,
+                channels: options.channels,
+            }),
             pending: (0..options.channels).map(|_| VecDeque::new()).collect(),
             samples_emitted: 0,
         })
@@ -231,27 +238,13 @@ impl SwAudioEncoder {
         ffmpeg::Rational::new(1, self.sample_rate as i32)
     }
 
-    /// Resamples `frame` (building the resampler on the first call — see
-    /// this struct's own docs) and appends the result onto `pending`,
+    /// Resamples `frame` through the same input-change-aware engine used by
+    /// `AudioResampler` and appends every produced frame onto `pending`,
     /// channel-major.
     fn resample(&mut self, frame: &ffmpeg::frame::Audio) -> std::result::Result<(), ffmpeg::Error> {
-        let resampler = match &mut self.resampler {
-            Some(resampler) => resampler,
-            None => {
-                let resampler = ffmpeg::software::resampling::Context::get(
-                    frame.format(),
-                    frame.channel_layout(),
-                    frame.rate(),
-                    self.target_format,
-                    self.target_layout,
-                    self.sample_rate,
-                )?;
-                self.resampler.insert(resampler)
-            }
-        };
-        let mut output = ffmpeg::frame::Audio::empty();
-        resampler.run(frame, &mut output)?;
-        absorb_resampled(&output, self.target_format, &mut self.pending);
+        for output in self.resampler.run(frame)? {
+            absorb_resampled(&output, self.target_format, &mut self.pending);
+        }
         Ok(())
     }
 
@@ -310,20 +303,10 @@ impl SwAudioEncoder {
     /// [`ffmpeg::software::resampling::Context::flush`]'s own docs.
     /// A no-op if the resampler was never built (nothing was ever fed).
     fn flush_resampler(&mut self) -> std::result::Result<(), ffmpeg::Error> {
-        let Some(resampler) = &mut self.resampler else {
-            return Ok(());
-        };
-        loop {
-            let mut output =
-                ffmpeg::frame::Audio::new(self.target_format, 1024, self.target_layout);
-            let delay = resampler.flush(&mut output)?;
-            if output.samples() > 0 {
-                absorb_resampled(&output, self.target_format, &mut self.pending);
-            }
-            if delay.is_none() {
-                return Ok(());
-            }
+        for output in self.resampler.flush()? {
+            absorb_resampled(&output, self.target_format, &mut self.pending);
         }
+        Ok(())
     }
 }
 

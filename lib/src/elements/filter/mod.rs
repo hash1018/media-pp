@@ -1,3 +1,4 @@
+mod audio_resampler;
 pub(crate) mod decoder;
 mod encoder;
 mod pacer;
@@ -5,6 +6,7 @@ mod scaler;
 mod tee;
 mod upload;
 
+pub use audio_resampler::{AudioFormat, AudioResampler, AudioResamplerError};
 #[cfg(feature = "d3d11-renderer")]
 pub use decoder::{D3d11Decoder, D3d11vaDecoderError};
 #[cfg(feature = "d3d12-renderer")]

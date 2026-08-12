@@ -3,14 +3,17 @@ pub mod filter;
 pub mod sink;
 pub mod source;
 
+#[cfg(any(feature = "wasapi-capture", feature = "wasapi-renderer"))]
+pub use crate::platform::windows::wasapi::{WasapiDevice, WasapiDeviceKind};
+
 #[cfg(feature = "webrtc")]
 pub use driver::{
     TrackId, WebRtcError, WebRtcHandle, WebRtcPeer, WebRtcTrackSink, WebRtcTrackSource,
 };
 pub use filter::{
-    AudioCodec, Pacer, Scaler, ScalerError, SwAudioEncoder, SwAudioEncoderError,
-    SwAudioEncoderOptions, SwDecoder, SwDecoderError, SwEncoder, SwEncoderError, SwEncoderOptions,
-    Tee, TeeBuilder, TeeHandle, VideoCodec,
+    AudioCodec, AudioFormat, AudioResampler, AudioResamplerError, Pacer, Scaler, ScalerError,
+    SwAudioEncoder, SwAudioEncoderError, SwAudioEncoderOptions, SwDecoder, SwDecoderError,
+    SwEncoder, SwEncoderError, SwEncoderOptions, Tee, TeeBuilder, TeeHandle, VideoCodec,
 };
 #[cfg(feature = "d3d11-renderer")]
 pub use filter::{D3d11Decoder, D3d11Upload, D3d11UploadError, D3d11vaDecoderError};
@@ -29,19 +32,18 @@ pub use sink::{D3d11FrameRenderer, D3d11Renderer, D3d11RendererError};
 pub use sink::{D3d12FrameRenderer, D3d12Renderer, D3d12RendererError, RawPlane};
 #[cfg(feature = "rtsp-server")]
 pub use sink::{PortPolicy, PublishTransport, RtspServer, RtspServerError, ViewerTransport};
+#[cfg(feature = "wasapi-renderer")]
+pub use sink::{WasapiRenderer, WasapiRendererError, WasapiRendererOptions};
 pub use source::{
     AppSource, AppSourceError, AppSourceHandle, AudioMixer, AudioMixerError, AudioMixerOptions,
     FileDemuxError, FileDemuxer, MixerHandle, MixerInputSink, RtspOptions, RtspSource,
     RtspSourceError, RtspTransport, StreamInfo, TestAudioOptions, TestAudioSource,
     TestAudioSourceError, TestVideoOptions, TestVideoSource, TestVideoSourceError,
 };
-#[cfg(feature = "wasapi-capture")]
-pub use source::{
-    AudioDevice, AudioDeviceKind, WasapiCaptureOptions, WasapiCaptureSource,
-    WasapiCaptureSourceError,
-};
 #[cfg(feature = "dxgi-capture")]
 pub use source::{
     CaptureArea, CaptureMode, CaptureRect, DxgiCaptureOptions, DxgiCaptureSource,
     DxgiCaptureSourceError,
 };
+#[cfg(feature = "wasapi-capture")]
+pub use source::{WasapiCaptureOptions, WasapiCaptureSource, WasapiCaptureSourceError};

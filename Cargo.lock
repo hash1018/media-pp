@@ -163,6 +163,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "audio_playback"
+version = "0.1.0"
+dependencies = [
+ "media-pp",
+]
+
+[[package]]
 name = "audio_record"
 version = "0.1.0"
 dependencies = [

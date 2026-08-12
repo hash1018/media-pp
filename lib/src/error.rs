@@ -8,6 +8,8 @@ use crate::elements::OrtDetectorError;
 use crate::elements::RtspServerError;
 #[cfg(feature = "wasapi-capture")]
 use crate::elements::WasapiCaptureSourceError;
+#[cfg(feature = "wasapi-renderer")]
+use crate::elements::WasapiRendererError;
 #[cfg(feature = "webrtc")]
 use crate::elements::WebRtcError;
 #[cfg(feature = "d3d11-renderer")]
@@ -16,9 +18,9 @@ use crate::elements::{D3d11RendererError, D3d11UploadError, D3d11vaDecoderError}
 use crate::elements::{D3d12RendererError, D3d12UploadError, D3d12vaDecoderError};
 use crate::{
     elements::{
-        AppSourceError, AudioMixerError, FileDemuxError, HlsMuxerError, Mp4MuxerError,
-        RtspSourceError, ScalerError, SwAudioEncoderError, SwDecoderError, SwEncoderError,
-        TestAudioSourceError, TestVideoSourceError,
+        AppSourceError, AudioMixerError, AudioResamplerError, FileDemuxError, HlsMuxerError,
+        Mp4MuxerError, RtspSourceError, ScalerError, SwAudioEncoderError, SwDecoderError,
+        SwEncoderError, TestAudioSourceError, TestVideoSourceError,
     },
     graph::GraphError,
     queue::QueueError,
@@ -58,6 +60,9 @@ pub enum Error {
 
     #[error(transparent)]
     SwAudioEncoderError(#[from] SwAudioEncoderError),
+
+    #[error(transparent)]
+    AudioResamplerError(#[from] AudioResamplerError),
 
     #[error(transparent)]
     ScalerError(#[from] ScalerError),
@@ -112,6 +117,10 @@ pub enum Error {
     #[cfg(feature = "wasapi-capture")]
     #[error(transparent)]
     WasapiCaptureSourceError(#[from] WasapiCaptureSourceError),
+
+    #[cfg(feature = "wasapi-renderer")]
+    #[error(transparent)]
+    WasapiRendererError(#[from] WasapiRendererError),
 
     #[cfg(feature = "ort")]
     #[error(transparent)]

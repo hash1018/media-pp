@@ -100,6 +100,7 @@ for); this table isn't meant to duplicate that.
 | `D3d11Upload` (`d3d11-renderer`) | Uploads CPU-resident `Pixel::NV12` frames to a GPU-resident `Pixel::D3D11` texture — the D3D11 sibling of `D3d12Upload`. Doesn't go through FFmpeg's own hwframe-pool machinery at all (an earlier version that did corrupted memory); builds the `ID3D11Texture2D` directly via plain `windows-rs` calls instead |
 | `SwEncoder` | Encodes `Video` frames into `Packet`s (software only) — `VideoCodec` picks H.264/H.265/VP8/VP9/AV1 across GPL (`libx264`/`libx265`) and non-GPL (`libopenh264`/`libkvazaar`/`libvpx`/`libaom-av1`/`libsvtav1`) encoders; fails with a clear error, not a panic, if the linked ffmpeg build doesn't have the one you asked for |
 | `SwAudioEncoder` | Encodes `Audio` frames into `Packet`s (software `aac`) — resamples to whatever format/channel layout the codec actually needs, built lazily from the first frame it sees |
+| `AudioResampler` | Converts decoded `Audio` sample format/rate/channels through `libswresample`; rebuilds on mid-stream input format changes and flushes delayed samples at EOS |
 | `Pacer` | Releases buffers at real playback speed (PTS + a shared `Clock`) |
 | `Scaler` | Converts pixel format and resizes `Video` frames in one pass (`libswscale`) |
 | `Tee`² | Fans one input out to multiple branches; `TeeBuilder` defines the initial fan-out and `TeeHandle::attach`/`detach` changes runtime branches by stable `BranchId` |
@@ -116,6 +117,7 @@ for); this table isn't meant to duplicate that.
 | `HlsMuxer`⁵ | Muxes one or more encoded packet streams into an HLS media playlist with MPEG-TS or fMP4 segments; supports sliding live windows, EVENT/VOD playlists, atomic manifest replacement, and optional deletion of expired live segments |
 | `D3d12Renderer` (`d3d12-renderer`) | Submits frames to a `D3d12FrameRenderer` impl — zero-copy for `D3d12vaDecoder`'s frames. `media-pp` only defines the trait (plus `RawPlane`/`SubmitError`); the actual DX12 window rendering lives in `examples/render/render_common`'s own `D3d12WindowRenderer` |
 | `D3d11Renderer` (`d3d11-renderer`) | Submits frames to a `D3d11FrameRenderer` impl — zero-copy for `D3d11Upload`/`D3d11Decoder`/`DxgiCaptureSource`'s GPU mode. No fence, no `keep_alive` (unlike `D3d12FrameRenderer`): every producer in this crate's D3D11 stack shares one `ID3D11Device`+context, and D3D11's own driver-deferred resource destruction means the runtime — not this crate — keeps a texture alive for as long as the GPU still needs it. `examples/render/render_common`'s own `D3d11WindowRenderer` is the concrete implementation |
+| `WasapiRenderer` (`wasapi-renderer`) | Plays decoded audio through a WASAPI shared-mode render endpoint. `open()` returns the endpoint's `AudioFormat`; place `AudioResampler` before it and a `Queue` at the blocking device boundary |
 | `RtspServer` (`rtsp-server`) | Spawns a vendored MediaMTX and remuxes packets into it as a live RTSP stream |
 | `AppSink` | Hands buffers (and, optionally, control messages) to plain closures — GStreamer's `appsink` equivalent |
 | `OrtDetector` (`ort`) | Runs a YOLOv8/v11-style ONNX model on each frame via `ort`, hands decoded/NMS-filtered detections to a closure |
@@ -148,6 +150,7 @@ have their own arguments or need none.
 | `app_sink` | Demux → SwDecoder → AppSink | Same chain as `decode`, but the terminal sink is a plain closure instead of a bespoke `FrameCounter` |
 | `app_source` | AppSource → SwDecoder → FrameCounter | A background thread feeds packets in via `AppSourceHandle`, standing in for whatever a real external producer would push from |
 | `audio_record` | TestAudioSource → SwAudioEncoder → Mp4Muxer | Encodes a synthetic sine tone straight into a playable `.mp4` — `Mp4Muxer`'s single-track path, the audio counterpart to `transcode_render`'s `SwEncoder` proof |
+| `audio_playback` (`wasapi-renderer`) | TestAudioSource → AudioResampler → Queue → WasapiRenderer | Lists render endpoints and plays a three-second tone in the selected device's native mix format |
 | `hls` | TestVideoSource → SwEncoder → HlsMuxer | Writes a live fMP4 `index.m3u8`, `init.mp4`, and keyframe-aligned `.m4s` segments with a sliding playlist window |
 | `remux` | FileDemuxer → Mp4Muxer (one track per kept stream) | Remuxes a file's video + audio streams into a new `.mp4` with no decode/re-encode — `Mp4Muxer`'s multi-track builder driven by a single source's multiple `src_pads`, packets passed through untouched |
 
@@ -237,12 +240,17 @@ cargo run -p sw_decode_render              # d3d12-renderer is already enabled i
   to actually render what they capture).
 - `wasapi-capture` (on `media-pp`) — pulls in `windows` (WASAPI/Core Audio
   sub-features) and enables `WasapiCaptureSource`/`WasapiCaptureOptions`/
-  `AudioDevice`/`AudioDeviceKind`. Independent of `dxgi-capture`/
+  `WasapiDevice`/`WasapiDeviceKind`. Independent of `dxgi-capture`/
   `d3d11-renderer`/`d3d12-renderer` — capturing audio needs none of them —
   but commonly turned on alongside `dxgi-capture` for a combined
   desktop+audio recording (see `screen_audio_record`). Windows-only (WASAPI
   itself is a Windows API). `audio_capture`/`screen_audio_record` turn it
   on in their own `Cargo.toml`.
+- `wasapi-renderer` (on `media-pp`) — pulls in the same Windows Core Audio
+  bindings and enables `WasapiRenderer`/`WasapiRendererOptions`. It shares
+  `WasapiDevice`/`WasapiDeviceKind` with `wasapi-capture`, but is otherwise
+  independent. `audio_playback` enables it and converts into the selected
+  endpoint's returned `AudioFormat` with `AudioResampler`.
 - `rtsp-server` (on `media-pp`) — enables `RtspServer` and copies the
   vendored `mediamtx.exe` (`third_party/mediamtx/`, MIT-licensed) next to
   whatever binary depends on `media-pp` (see `lib/build.rs`). Windows-only

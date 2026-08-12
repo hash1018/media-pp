@@ -10,6 +10,5 @@ pub use dxgi_capture_source::{
 };
 #[cfg(feature = "wasapi-capture")]
 pub use wasapi_capture_source::{
-    AudioDevice, AudioDeviceKind, WasapiCaptureOptions, WasapiCaptureSource,
-    WasapiCaptureSourceError,
+    WasapiCaptureOptions, WasapiCaptureSource, WasapiCaptureSourceError,
 };
