@@ -1,6 +1,9 @@
 use std::{
     collections::{HashMap, VecDeque},
-    sync::{Arc, Mutex, Weak},
+    sync::{
+        Arc, Mutex, Weak,
+        atomic::{AtomicU64, Ordering},
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -52,6 +55,9 @@ pub struct AudioMixerOptions {
 /// self-describe — no need for [`MixerHandle::add_source`] to be told
 /// this upfront).
 struct InputBuffer {
+    /// Identity of this particular registration. The name can be reused,
+    /// but an older sink must not be allowed to touch its replacement.
+    id: u64,
     resampler: Option<ffmpeg::software::resampling::Context>,
     samples: VecDeque<f32>,
     /// Set once this input's `Eos` arrives — [`AudioMixer::mix_tick`]
@@ -113,6 +119,9 @@ impl InputBuffer {
 /// tick already needs to visit every input together anyway).
 struct MixerShared {
     inputs: Mutex<HashMap<Arc<str>, InputBuffer>>,
+    /// Issues a distinct identity for every `add_source` call, including
+    /// replacements registered under an existing name.
+    next_input_id: AtomicU64,
 }
 
 /// A cheaply-cloneable handle for adding or removing an [`AudioMixer`]'s
@@ -139,7 +148,9 @@ impl MixerHandle {
     /// the point). `None` once the mixer itself is gone. Calling this
     /// again with a name already in use replaces that input outright
     /// (whatever it had buffered is dropped) rather than erroring — same
-    /// "just do what was asked" spirit as `HashMap::insert`.
+    /// "just do what was asked" spirit as `HashMap::insert`. A sink from
+    /// the previous registration then becomes inert: its data, `Eos`, and
+    /// `Stop` cannot affect the replacement sharing its name.
     ///
     /// The input endpoint appears in the upstream source pipeline's graph
     /// when attached through [`crate::element::Context::attach`]. The graph
@@ -147,9 +158,11 @@ impl MixerHandle {
     pub fn add_source(&self, name: impl Into<String>) -> Option<Box<dyn Sink>> {
         let shared = self.shared.upgrade()?;
         let name: Arc<str> = name.into().into();
+        let id = shared.next_input_id.fetch_add(1, Ordering::Relaxed);
         shared.inputs.lock().unwrap().insert(
             name.clone(),
             InputBuffer {
+                id,
                 resampler: None,
                 samples: VecDeque::new(),
                 eos: false,
@@ -157,6 +170,7 @@ impl MixerHandle {
         );
         Some(Box::new(MixerInputSink {
             name: name.clone(),
+            id,
             hlog: element_hlog(ElementType::AudioMixer, &name, None),
             shared: self.shared.clone(),
             target_format: self.format,
@@ -192,6 +206,10 @@ impl MixerHandle {
 #[rust_hlog::hlog]
 pub struct MixerInputSink {
     name: Arc<str>,
+    /// Identity returned by the corresponding `add_source` call. Compared
+    /// with the map entry before every mutation so a stale sink cannot
+    /// write to or remove a same-name replacement.
+    id: u64,
     shared: Weak<MixerShared>,
     target_format: ffmpeg::format::Sample,
     target_layout: ffmpeg::ChannelLayout,
@@ -231,7 +249,9 @@ impl Sink for MixerInputSink {
         match buf {
             MediaBuffer::Audio(frame) => {
                 let mut inputs = shared.inputs.lock().unwrap();
-                if let Some(input) = inputs.get_mut(&self.name) {
+                if let Some(input) = inputs.get_mut(&self.name)
+                    && input.id == self.id
+                {
                     input.push(
                         &frame,
                         self.target_format,
@@ -239,11 +259,15 @@ impl Sink for MixerInputSink {
                         self.target_rate,
                     )?;
                 }
-                // Absent means `remove_source` raced ahead of this frame —
-                // dropping it is correct, there's nowhere left to put it.
+                // Absent means `remove_source` raced ahead of this frame;
+                // an ID mismatch means this name was replaced. Dropping
+                // the frame is correct in both cases.
             }
             MediaBuffer::Eos => {
-                if let Some(input) = shared.inputs.lock().unwrap().get_mut(&self.name) {
+                let mut inputs = shared.inputs.lock().unwrap();
+                if let Some(input) = inputs.get_mut(&self.name)
+                    && input.id == self.id
+                {
                     input.eos = true;
                 }
             }
@@ -264,12 +288,20 @@ impl Sink for MixerInputSink {
     /// pipeline normally instead of remembering to call
     /// `MixerHandle::remove_source` by hand. `Pause`/`Resume`/`Seek` need
     /// no handling here — this input has no thread or queue of its own to
-    /// freeze/resume, and a live capture source doesn't seek.
+    /// freeze/resume, and a live capture source doesn't seek. Removal is
+    /// conditional on the registration ID: a late `Stop` from a replaced
+    /// sink must not remove the newer input using the same name.
     fn control(&mut self, msg: ControlMsg) -> Result<()> {
         if msg == ControlMsg::Stop
             && let Some(shared) = self.shared.upgrade()
         {
-            shared.inputs.lock().unwrap().remove(&self.name);
+            let mut inputs = shared.inputs.lock().unwrap();
+            if inputs
+                .get(&self.name)
+                .is_some_and(|input| input.id == self.id)
+            {
+                inputs.remove(&self.name);
+            }
         }
         Ok(())
     }
@@ -351,6 +383,7 @@ impl AudioMixer {
         let channel_layout = ffmpeg::ChannelLayout::default(options.channels as i32);
         let shared = Arc::new(MixerShared {
             inputs: Mutex::new(HashMap::new()),
+            next_input_id: AtomicU64::new(0),
         });
         let pad = SrcPad::new(format!("{name}_src"));
         (
@@ -848,5 +881,66 @@ mod tests {
 
         pipeline.stop();
         pipeline.bus().log_events();
+    }
+
+    /// Re-registering a name replaces its input buffer, but callers may
+    /// still hold the sink returned for the old registration. Every late
+    /// operation through that stale sink must be inert rather than being
+    /// redirected to (or deleting) the replacement merely because the map
+    /// key is the same.
+    #[test]
+    fn replacing_an_input_by_name_invalidates_the_stale_sink() {
+        let (_mixer, handle) = AudioMixer::new(
+            "mixer",
+            AudioMixerOptions {
+                sample_rate: 48000,
+                channels: 1,
+            },
+        );
+        let mut stale = handle.add_source("mic").expect("mixer still alive");
+        let mut current = handle.add_source("mic").expect("mixer still alive");
+        assert_eq!(handle.source_count(), 1);
+
+        stale
+            .consume(MediaBuffer::Audio(Arc::new(constant_frame(
+                0.75, 480, 48000,
+            ))))
+            .unwrap();
+        stale.consume(MediaBuffer::Eos).unwrap();
+        stale.control(ControlMsg::Stop).unwrap();
+
+        assert_eq!(
+            handle.source_count(),
+            1,
+            "a stale sink's Stop must not remove its replacement"
+        );
+        let shared = handle.shared.upgrade().expect("mixer still alive");
+        {
+            let inputs = shared.inputs.lock().unwrap();
+            let input = inputs.get("mic").expect("replacement remains registered");
+            assert!(
+                input.resampler.is_none() && input.samples.is_empty(),
+                "stale audio must not enter the replacement buffer"
+            );
+            assert!(!input.eos, "stale Eos must not mark the replacement ended");
+        }
+
+        // The current sink still owns the registration and therefore
+        // remains fully functional.
+        current
+            .consume(MediaBuffer::Audio(Arc::new(constant_frame(
+                0.25, 480, 48000,
+            ))))
+            .unwrap();
+        current.consume(MediaBuffer::Eos).unwrap();
+        {
+            let inputs = shared.inputs.lock().unwrap();
+            let input = inputs.get("mic").expect("replacement remains registered");
+            assert!(input.resampler.is_some(), "current audio was not accepted");
+            assert!(input.eos, "current Eos was not accepted");
+        }
+
+        current.control(ControlMsg::Stop).unwrap();
+        assert_eq!(handle.source_count(), 0);
     }
 }
