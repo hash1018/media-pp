@@ -36,6 +36,7 @@ pub enum ElementType {
     SwEncoder,
     SwAudioEncoder,
     AudioResampler,
+    AudioVolume,
     Pacer,
     Scaler,
     Tee,

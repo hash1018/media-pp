@@ -101,6 +101,7 @@ for); this table isn't meant to duplicate that.
 | `SwEncoder` | Encodes `Video` frames into `Packet`s (software only) — `VideoCodec` picks H.264/H.265/VP8/VP9/AV1 across GPL (`libx264`/`libx265`) and non-GPL (`libopenh264`/`libkvazaar`/`libvpx`/`libaom-av1`/`libsvtav1`) encoders; fails with a clear error, not a panic, if the linked ffmpeg build doesn't have the one you asked for |
 | `SwAudioEncoder` | Encodes `Audio` frames into `Packet`s (software `aac`) — resamples to whatever format/channel layout the codec actually needs, built lazily from the first frame it sees |
 | `AudioResampler` | Converts decoded `Audio` sample format/rate/channels through `libswresample`; rebuilds on mid-stream input format changes and flushes delayed samples at EOS |
+| `AudioVolume` | Applies runtime-adjustable gain/mute through `AudioVolumeHandle`; uses a configurable 10 ms default ramp to prevent clicks and preserves the input audio format/timestamps |
 | `Pacer` | Releases buffers at real playback speed (PTS + a shared `Clock`) |
 | `Scaler` | Converts pixel format and resizes `Video` frames in one pass (`libswscale`) |
 | `Tee`² | Fans one input out to multiple branches; `TeeBuilder` defines the initial fan-out and `TeeHandle::attach`/`detach` changes runtime branches by stable `BranchId` |
@@ -150,7 +151,7 @@ have their own arguments or need none.
 | `app_sink` | Demux → SwDecoder → AppSink | Same chain as `decode`, but the terminal sink is a plain closure instead of a bespoke `FrameCounter` |
 | `app_source` | AppSource → SwDecoder → FrameCounter | A background thread feeds packets in via `AppSourceHandle`, standing in for whatever a real external producer would push from |
 | `audio_record` | TestAudioSource → SwAudioEncoder → Mp4Muxer | Encodes a synthetic sine tone straight into a playable `.mp4` — `Mp4Muxer`'s single-track path, the audio counterpart to `transcode_render`'s `SwEncoder` proof |
-| `audio_playback` (`wasapi-renderer`) | TestAudioSource → AudioResampler → Queue → WasapiRenderer | Lists render endpoints and plays a three-second tone in the selected device's native mix format |
+| `audio_playback` (`wasapi-renderer`) | TestAudioSource → AudioResampler → AudioVolume → Queue → WasapiRenderer | Lists render endpoints and demonstrates runtime gain/mute changes while playing a three-second tone in the selected device's native mix format |
 | `hls` | TestVideoSource → SwEncoder → HlsMuxer | Writes a live fMP4 `index.m3u8`, `init.mp4`, and keyframe-aligned `.m4s` segments with a sliding playlist window |
 | `remux` | FileDemuxer → Mp4Muxer (one track per kept stream) | Remuxes a file's video + audio streams into a new `.mp4` with no decode/re-encode — `Mp4Muxer`'s multi-track builder driven by a single source's multiple `src_pads`, packets passed through untouched |
 

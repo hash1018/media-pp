@@ -4,13 +4,15 @@ use media_pp::{
     Result,
     bus::BusEvent,
     elements::{
-        AudioResampler, TestAudioOptions, TestAudioSource, WasapiRenderer, WasapiRendererOptions,
+        AudioResampler, AudioVolume, TestAudioOptions, TestAudioSource, WasapiRenderer,
+        WasapiRendererOptions,
     },
     pipeline::Pipeline,
 };
 
-/// TestAudioSource -> AudioResampler -> Queue -> WasapiRenderer: plays a
-/// 440Hz tone for three seconds through a selected WASAPI render endpoint.
+/// TestAudioSource -> AudioResampler -> AudioVolume -> Queue ->
+/// WasapiRenderer: plays a 440Hz tone for three seconds and demonstrates
+/// click-free runtime gain/mute changes.
 ///
 ///     cargo run -p audio_playback
 ///     cargo run -p audio_playback -- list
@@ -54,10 +56,12 @@ fn main() -> Result<()> {
     // conversion rather than WasapiRenderer doing it implicitly.
     let source = TestAudioSource::new("tone", TestAudioOptions::default());
     let resampler = AudioResampler::new("resampler", output_format);
+    let (volume, volume_handle) = AudioVolume::new("volume");
     let pipeline = Pipeline::new("audio-playback", source, |source, context| {
         let branch = context
             .branch()
             .pipe(resampler)
+            .pipe(volume)
             .queue("audio-output", 8)
             .to(Box::new(renderer))?;
         context.attach(source, 0, branch)?;
@@ -65,7 +69,16 @@ fn main() -> Result<()> {
     })?;
 
     pipeline.run();
-    thread::sleep(Duration::from_secs(3));
+    thread::sleep(Duration::from_secs(1));
+    println!("volume: -12 dB");
+    volume_handle.set_gain_db(-12.0)?;
+    thread::sleep(Duration::from_secs(1));
+    println!("muted");
+    volume_handle.set_muted(true);
+    thread::sleep(Duration::from_millis(500));
+    println!("unmuted");
+    volume_handle.set_muted(false);
+    thread::sleep(Duration::from_millis(500));
     pipeline.stop();
 
     for event in pipeline.bus().iter() {

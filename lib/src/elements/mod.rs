@@ -11,9 +11,10 @@ pub use driver::{
     TrackId, WebRtcError, WebRtcHandle, WebRtcPeer, WebRtcTrackSink, WebRtcTrackSource,
 };
 pub use filter::{
-    AudioCodec, AudioFormat, AudioResampler, AudioResamplerError, Pacer, Scaler, ScalerError,
-    SwAudioEncoder, SwAudioEncoderError, SwAudioEncoderOptions, SwDecoder, SwDecoderError,
-    SwEncoder, SwEncoderError, SwEncoderOptions, Tee, TeeBuilder, TeeHandle, VideoCodec,
+    AudioCodec, AudioFormat, AudioResampler, AudioResamplerError, AudioVolume, AudioVolumeError,
+    AudioVolumeHandle, AudioVolumeOptions, Pacer, Scaler, ScalerError, SwAudioEncoder,
+    SwAudioEncoderError, SwAudioEncoderOptions, SwDecoder, SwDecoderError, SwEncoder,
+    SwEncoderError, SwEncoderOptions, Tee, TeeBuilder, TeeHandle, VideoCodec,
 };
 #[cfg(feature = "d3d11-renderer")]
 pub use filter::{D3d11Decoder, D3d11Upload, D3d11UploadError, D3d11vaDecoderError};
