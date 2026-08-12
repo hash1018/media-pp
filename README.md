@@ -104,7 +104,7 @@ for); this table isn't meant to duplicate that.
 | `Scaler` | Converts pixel format and resizes `Video` frames in one pass (`libswscale`) |
 | `Tee`² | Fans one input out to multiple branches; `TeeBuilder` defines the initial fan-out and `TeeHandle::attach`/`detach` changes runtime branches by stable `BranchId` |
 
-² Doesn't actually implement `Source` — its pads live behind a lock instead of a plain `&mut [SrcPad]`, so a handle on another thread can request add/remove while `consume` is running. The operation completes after the in-flight `consume` releases that lock. See its own doc comment.
+² Doesn't actually implement `Source` — its pads live in individually locked branch slots instead of a plain `&mut [SrcPad]`. `consume` only holds the branch-list lock long enough to clone an `Arc` snapshot, so a slow downstream does not block unrelated `TeeHandle::attach`/`detach` operations. Detach prevents a push that has not started yet; one already executing downstream call may finish. See its own doc comment.
 
 ### Sinks
 
@@ -113,6 +113,7 @@ for); this table isn't meant to duplicate that.
 | `FrameCounter` / `PacketCounter` | Count decoded frames / raw packets, expose the count via `Arc<AtomicUsize>` |
 | `Mp4Muxer`³ | Muxes one or more `Packet` streams — encoder output (`SwEncoder`/`SwAudioEncoder`) or a `FileDemuxer`'s own streams for a pure remux — into an MP4 file, one or more tracks |
 | `SegmentedMp4Muxer`⁴ | Same shape as `Mp4Muxer`, but cuts to a new file every so often (`SegmentPolicy::Duration`) instead of writing one file for the whole recording — e.g. `rec_000.mp4`, `rec_001.mp4`, ... — so a crash mid-recording only loses the currently-open segment |
+| `HlsMuxer`⁵ | Muxes one or more encoded packet streams into an HLS media playlist with MPEG-TS or fMP4 segments; supports sliding live windows, EVENT/VOD playlists, atomic manifest replacement, and optional deletion of expired live segments |
 | `D3d12Renderer` (`d3d12-renderer`) | Submits frames to a `D3d12FrameRenderer` impl — zero-copy for `D3d12vaDecoder`'s frames. `media-pp` only defines the trait (plus `RawPlane`/`SubmitError`); the actual DX12 window rendering lives in `examples/render/render_common`'s own `D3d12WindowRenderer` |
 | `D3d11Renderer` (`d3d11-renderer`) | Submits frames to a `D3d11FrameRenderer` impl — zero-copy for `D3d11Upload`/`D3d11Decoder`/`DxgiScreenSource`'s GPU mode. No fence, no `keep_alive` (unlike `D3d12FrameRenderer`): every producer in this crate's D3D11 stack shares one `ID3D11Device`+context, and D3D11's own driver-deferred resource destruction means the runtime — not this crate — keeps a texture alive for as long as the GPU still needs it. `examples/render/render_common`'s own `D3d11WindowRenderer` is the concrete implementation |
 | `RtspServer` (`rtsp-server`) | Spawns a vendored MediaMTX and remuxes packets into it as a live RTSP stream |
@@ -123,6 +124,8 @@ for); this table isn't meant to duplicate that.
 ³ Not a plain `Sink` itself — `Mp4Muxer::create`/`add_stream`/`open` is a two-phase builder, since a container's header has to describe every track's codec parameters before it can be written at all. `create` opens the file, `add_stream` registers one track at a time (name + `codec::Parameters` + `time_base`), and `open` writes the header and returns one real `Sink` per track, in registration order — all sharing one lock around the file, so tracks fed from independently-threaded branches (e.g. one video encode chain, one audio encode chain) can write concurrently without racing. The trailer is written once *every* track reports done (`Eos` or `Stop`), not on whichever finishes first. See its own doc comment, and `PipelineBuilder` for wiring two independent live sources (e.g. video + audio capture) into the tracks it expects.
 
 ⁴ Same two-phase builder shape as `Mp4Muxer` (`create`/`add_stream`/`open`), plus a naming closure (`FnMut(u64) -> PathBuf`, called with the segment index) instead of one fixed path. A rotation only actually cuts once the configured duration has elapsed *and* the video track's next packet is a keyframe — never mid-GOP — so every segment file is independently decodable from its own frame 0, closing the outgoing segment (writing its trailer) via the exact same all-tracks-report-done mechanism `Mp4Muxer` already uses for a normal `Eos`/`Stop`. Building this is what surfaced a real gap in `SwEncoder`: it now always sets a ~2-second keyframe interval itself, since at least one codec (`libopenh264`) was found to otherwise go an entire recording without a second keyframe against smoothly-changing content — relying on scene-change detection alone, which would have meant a `SegmentedMp4Muxer` using it might never rotate at all.
+
+⁵ `HlsOptions::new` defaults to live fMP4 with two-second target segments and a six-entry sliding window. `HlsMode` selects live/EVENT/VOD behavior and `HlsSegmentFormat` selects fMP4 or MPEG-TS. Like the other muxers, `HlsMuxer::open` returns one sink per registered track and writes `#EXT-X-ENDLIST` only after every track reports `Eos` or `Stop`. Segment timing is media-timestamp based inside FFmpeg's HLS muxer; video segments cut on keyframes, so the encoder GOP should be close to the requested segment duration.
 
 ## Examples (`examples/`)
 
@@ -145,6 +148,7 @@ have their own arguments or need none.
 | `app_sink` | Demux → SwDecoder → AppSink | Same chain as `decode`, but the terminal sink is a plain closure instead of a bespoke `FrameCounter` |
 | `app_source` | AppSource → SwDecoder → FrameCounter | A background thread feeds packets in via `AppSourceHandle`, standing in for whatever a real external producer would push from |
 | `audio_record` | TestAudioSource → SwAudioEncoder → Mp4Muxer | Encodes a synthetic sine tone straight into a playable `.mp4` — `Mp4Muxer`'s single-track path, the audio counterpart to `transcode_render`'s `SwEncoder` proof |
+| `hls` | TestVideoSource → SwEncoder → HlsMuxer | Writes a live fMP4 `index.m3u8`, `init.mp4`, and keyframe-aligned `.m4s` segments with a sliding playlist window |
 | `remux` | FileDemuxer → Mp4Muxer (one track per kept stream) | Remuxes a file's video + audio streams into a new `.mp4` with no decode/re-encode — `Mp4Muxer`'s multi-track builder driven by a single source's multiple `src_pads`, packets passed through untouched |
 
 ### Recording (Windows only)

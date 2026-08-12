@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use ffmpeg_next as ffmpeg;
+use ffmpeg_next::Rescale;
 use rust_hlog::{HLog, herror, hinfo};
 use thiserror::Error as ThisError;
 
@@ -149,7 +150,22 @@ pub struct SwEncoderOptions {
 pub struct SwEncoder {
     name: Arc<str>,
     encoder: ffmpeg::encoder::Video,
+    /// Nominal frame duration in `encoder.time_base()` ticks. Some codecs
+    /// (notably `libopenh264`) leave `AVPacket::duration` at zero; muxers
+    /// such as HLS need it for precise segment durations.
+    packet_duration: i64,
     pad: SrcPad,
+}
+
+fn nominal_packet_duration(time_base: ffmpeg::Rational, frame_rate: ffmpeg::Rational) -> i64 {
+    if frame_rate.numerator() <= 0 || time_base.numerator() <= 0 || time_base.denominator() <= 0 {
+        return 0;
+    }
+    1i64.rescale(
+        ffmpeg::Rational::new(frame_rate.denominator(), frame_rate.numerator()),
+        time_base,
+    )
+    .max(1)
 }
 
 impl SwEncoder {
@@ -171,6 +187,7 @@ impl SwEncoder {
         video.set_gop(options.gop_size);
 
         let encoder = video.open_as(codec).map_err(SwEncoderError::from)?;
+        let packet_duration = nominal_packet_duration(options.time_base, options.frame_rate);
 
         let name: Arc<str> = name.into().into();
         let hlog = element_hlog(ElementType::SwEncoder, &name, None);
@@ -186,6 +203,7 @@ impl SwEncoder {
             name,
             hlog,
             encoder,
+            packet_duration,
             pad,
         })
     }
@@ -204,6 +222,9 @@ impl SwEncoder {
     fn drain(&mut self) -> Result<()> {
         let mut packet = ffmpeg::Packet::empty();
         while self.encoder.receive_packet(&mut packet).is_ok() {
+            if packet.duration() == 0 && self.packet_duration > 0 {
+                packet.set_duration(self.packet_duration);
+            }
             self.pad.push(MediaBuffer::Packet(Arc::new(packet)))?;
             packet = ffmpeg::Packet::empty();
         }
@@ -272,6 +293,25 @@ impl Sink for SwEncoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nominal_frame_duration_is_expressed_in_encoder_time_base_ticks() {
+        assert_eq!(
+            nominal_packet_duration(ffmpeg::Rational::new(1, 30), ffmpeg::Rational::new(30, 1),),
+            1
+        );
+        assert_eq!(
+            nominal_packet_duration(
+                ffmpeg::Rational::new(1, 90_000),
+                ffmpeg::Rational::new(30_000, 1001),
+            ),
+            3003
+        );
+        assert_eq!(
+            nominal_packet_duration(ffmpeg::Rational::new(1, 30), ffmpeg::Rational::new(0, 1),),
+            0
+        );
+    }
 
     /// `SwEncoder::new` should fail cleanly (not panic) when the linked
     /// ffmpeg build wasn't compiled with the requested encoder — the

@@ -1,5 +1,6 @@
 mod app_sink;
 mod frame_counter;
+mod hls_muxer;
 mod mp4_muxer;
 #[cfg(feature = "ort")]
 mod ort_detector;
@@ -11,6 +12,9 @@ mod segmented_mp4_muxer;
 
 pub use app_sink::AppSink;
 pub use frame_counter::FrameCounter;
+pub use hls_muxer::{
+    HlsMode, HlsMuxer, HlsMuxerError, HlsMuxerStreamSink, HlsOptions, HlsSegmentFormat,
+};
 pub use mp4_muxer::{Mp4Muxer, Mp4MuxerError, Mp4MuxerStreamSink};
 #[cfg(feature = "ort")]
 pub use ort_detector::{COCO_CLASS_LABELS, Detection, OrtDetector, OrtDetectorError};

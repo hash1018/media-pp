@@ -46,6 +46,7 @@ pub enum ElementType {
     RtspServer,
     AppSink,
     OrtDetector,
+    HlsMuxer,
     Mp4Muxer,
     SegmentedMp4Muxer,
     /// Anything outside this crate's own elements — a test double, or a
