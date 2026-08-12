@@ -141,6 +141,40 @@ fn multi_source_pipeline_stops_every_source_from_one_stop_call() {
     );
 }
 
+/// The shared Pacer clock freezes before Pause begins its synchronous
+/// downstream cascade. A busy sink must not turn time spent waiting for
+/// its Pause acknowledgement into playable media time.
+#[test]
+fn pipeline_clock_includes_a_slow_pause_cascade_in_its_frozen_time() {
+    let pause_delay = Duration::from_millis(80);
+    let source = TestVideoSource::new("video", TestVideoOptions::default());
+    let pipeline = Pipeline::new("slow-pause-clock-test", source, |source, ctx| {
+        let branch = ctx.branch().to(Box::new(SlowPauseSink {
+            pause_delay,
+            hlog: element_hlog(ElementType::Other, "slow-pause", None),
+        }))?;
+        ctx.attach(source, 0, branch)?;
+        Ok(())
+    })
+    .expect("test pipeline wiring must succeed");
+    let original_start = pipeline.clock().start();
+
+    pipeline.run();
+    thread::sleep(Duration::from_millis(50));
+    pipeline.pause();
+    pipeline.resume();
+
+    let shifted_start = pipeline.clock().start();
+    pipeline.stop();
+    pipeline.bus().log_events();
+
+    assert!(
+        shifted_start.saturating_duration_since(original_start) >= Duration::from_millis(60),
+        "the {:?} Pause cascade was omitted from the shared Clock's frozen interval",
+        pause_delay
+    );
+}
+
 /// A live source must not retain its owning Pipeline. Dropping the last
 /// external Arc implicitly stops and joins the source, then releases the
 /// Pipeline itself instead of leaving both alive forever.
@@ -380,6 +414,42 @@ impl Sink for NoOpSink {
         Ok(())
     }
     fn control(&mut self, _msg: ControlMsg) -> Result<()> {
+        Ok(())
+    }
+}
+
+#[rust_hlog::hlog]
+struct SlowPauseSink {
+    pause_delay: Duration,
+}
+
+impl Element for SlowPauseSink {
+    fn name(&self) -> Arc<str> {
+        "slow-pause".into()
+    }
+
+    fn element_type(&self) -> ElementType {
+        ElementType::Other
+    }
+
+    fn hlog(&self) -> &HLog {
+        &self.hlog
+    }
+
+    fn hlog_mut(&mut self) -> &mut HLog {
+        &mut self.hlog
+    }
+}
+
+impl Sink for SlowPauseSink {
+    fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
+        Ok(())
+    }
+
+    fn control(&mut self, msg: ControlMsg) -> Result<()> {
+        if msg == ControlMsg::Pause {
+            thread::sleep(self.pause_delay);
+        }
         Ok(())
     }
 }

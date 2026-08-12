@@ -333,47 +333,77 @@ impl WasapiCaptureSource {
         self.push_frame(frame, bus);
     }
 
-    /// Like [`crate::control::drain_control`], but calls
-    /// [`crate::control::apply_one`]/[`crate::control::wait_out_pause`]
-    /// directly (same reason [`crate::elements::AppSource`] does — see
-    /// `drain_control`'s own docs) so it can bracket the blocking `Pause`
-    /// wait with `IAudioClient::Stop`/`Start`: without this, the capture
+    /// Like [`crate::control::drain_control`], but drives the raw control
+    /// receiver and [`crate::control::apply_one`] directly (same reason
+    /// [`crate::elements::AppSource`] does — see `drain_control`'s own
+    /// docs) so it can bracket the blocking `Pause` wait with
+    /// `IAudioClient::Stop`/`Reset`/`Start`: without this, the capture
     /// session keeps running the whole time this source is paused, with
     /// nothing ever draining `IAudioCaptureClient::GetBuffer` to read it —
     /// harmless in that WASAPI's shared-mode ring buffer just silently
     /// overwrites whatever it can't hold (see `BUFFER_DURATION_100NS`), but
     /// there's no reason to keep the device (and whatever driver-side work
     /// backs it) actively capturing audio nobody is ever going to read.
-    /// `Stop`'s own failure is only logged, not fatal — capture staying
-    /// active through a pause it should've halted isn't worth ending the
-    /// whole source over; a failing `Start` on the way back out, by
-    /// contrast, means this source can no longer capture at all, so that
-    /// one is fatal, same as any other `classify_error` call in this file.
+    /// `Reset` also flushes data already pending at the pause boundary, so
+    /// Resume cannot emit stale pre-pause packets as a short burst. These
+    /// device transitions happen before their synchronous control request
+    /// is acknowledged; failure is fatal because correct capture state can
+    /// no longer be guaranteed.
     fn handle_control(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<ControlOutcome> {
         let mut paused_for = Duration::ZERO;
         while let Some((msg, ack)) = control.try_recv() {
-            if control::apply_one(self, bus, msg, &ack)? {
-                return Ok(ControlOutcome {
-                    stopped: true,
-                    paused_for,
-                });
-            }
-            if msg == ControlMsg::Pause {
-                if let Err(error) = unsafe { self.audio_client.Stop() } {
-                    herror!(self, "Stop (pause) failed: {error}");
-                }
-                let pause_start = Instant::now();
-                let stopped = control::wait_out_pause(control, self, bus)?;
-                paused_for += pause_start.elapsed();
-                if stopped {
+            if msg != ControlMsg::Pause {
+                if control::apply_one(self, bus, msg, &ack)? {
                     return Ok(ControlOutcome {
                         stopped: true,
                         paused_for,
                     });
                 }
-                if let Err(error) = unsafe { self.audio_client.Start() } {
-                    return Err(self.classify_error(error).into());
+                continue;
+            }
+
+            // Include device shutdown and both synchronous downstream
+            // cascades in the frozen interval: this source produces no
+            // media during any of them.
+            let pause_start = Instant::now();
+            unsafe { self.audio_client.Stop() }.map_err(|error| self.classify_error(error))?;
+            // Stop freezes the stream but does not discard packets that
+            // were already pending. Reset flushes those packets so Resume
+            // cannot dump stale pre-pause audio in a short burst.
+            unsafe { self.audio_client.Reset() }.map_err(|error| self.classify_error(error))?;
+            control::apply_one(self, bus, msg, &ack)?;
+
+            loop {
+                let Some((paused_msg, paused_ack)) = control.recv() else {
+                    paused_for += pause_start.elapsed();
+                    return Ok(ControlOutcome {
+                        stopped: true,
+                        paused_for,
+                    });
+                };
+
+                if paused_msg == ControlMsg::Resume {
+                    // Keep capture stopped until every downstream element
+                    // has resumed. Start the device and only then ack, so
+                    // the synchronous caller cannot observe a half-resumed
+                    // source and no audio accumulates during a slow cascade.
+                    control::apply_one_unacked(self, bus, paused_msg)?;
+                    unsafe { self.audio_client.Start() }
+                        .map_err(|error| self.classify_error(error))?;
+                    let _ = paused_ack.send(());
+                    paused_for += pause_start.elapsed();
+                    break;
                 }
+
+                if control::apply_one(self, bus, paused_msg, &paused_ack)? {
+                    paused_for += pause_start.elapsed();
+                    return Ok(ControlOutcome {
+                        stopped: true,
+                        paused_for,
+                    });
+                }
+                // A redundant Pause (or another one-shot control) was
+                // forwarded and acknowledged; remain frozen until Resume.
             }
         }
         Ok(ControlOutcome {

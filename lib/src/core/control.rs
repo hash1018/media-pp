@@ -118,8 +118,10 @@ pub struct ControlOutcome {
     /// immediately, without pushing a final `Eos` (`Stop` means abandon,
     /// not drain to completion).
     pub stopped: bool,
-    /// Wall-clock time actually spent blocked inside `Pause` during this
-    /// call — `Duration::ZERO` if no `Pause` was seen. Still meaningful
+    /// Wall-clock time from starting the synchronous downstream `Pause`
+    /// cascade through finishing the matching `Resume` (or terminating
+    /// `Stop`) cascade during this call — `Duration::ZERO` if no `Pause`
+    /// was seen. Still meaningful
     /// even when `stopped` is `true` (the sender simply going away while
     /// paused is treated the same as `Stop`, see [`wait_out_pause`]), so a
     /// caller that also tracks its own paused-time total can fold this in
@@ -141,9 +143,10 @@ pub struct ControlOutcome {
 /// [`crate::elements::AppSource`]'s channel receive) selects on both
 /// instead, calling `apply_one`/`wait_out_pause` directly so a
 /// pending `Stop` is never left waiting behind a slow/absent producer —
-/// same reason [`crate::elements::WasapiCaptureSource`] also calls them
-/// directly, to bracket the wait with starting/stopping its capture
-/// device rather than leaving it running unread through the whole pause.
+/// same reason [`crate::elements::WasapiCaptureSource`] also drives the
+/// raw receiver directly, to bracket the wait with resetting/restarting
+/// its capture device rather than leaving it running unread through the
+/// whole pause.
 ///
 /// See [`ControlOutcome`] for what the return value means.
 pub fn drain_control<S: SourceElement>(
@@ -153,14 +156,14 @@ pub fn drain_control<S: SourceElement>(
 ) -> Result<ControlOutcome> {
     let mut paused_for = Duration::ZERO;
     while let Some((msg, ack)) = control.try_recv() {
-        if apply_one(source, bus, msg, &ack)? {
-            return Ok(ControlOutcome {
-                stopped: true,
-                paused_for,
-            });
-        }
         if msg == ControlMsg::Pause {
+            // Start measuring before forwarding Pause. `apply_one` is a
+            // synchronous cascade and may itself spend substantial time
+            // waiting for a busy Queue/Sink to become paused; the source
+            // produces no media during that time, so it belongs to the
+            // frozen interval just as much as the later wait for Resume.
             let pause_start = Instant::now();
+            apply_one(source, bus, msg, &ack)?;
             let stopped = wait_out_pause(control, source, bus)?;
             paused_for += pause_start.elapsed();
             if stopped {
@@ -169,6 +172,13 @@ pub fn drain_control<S: SourceElement>(
                     paused_for,
                 });
             }
+            continue;
+        }
+        if apply_one(source, bus, msg, &ack)? {
+            return Ok(ControlOutcome {
+                stopped: true,
+                paused_for,
+            });
         }
     }
     Ok(ControlOutcome {
@@ -188,14 +198,27 @@ pub(crate) fn apply_one<S: SourceElement>(
     msg: ControlMsg,
     ack: &Sender<()>,
 ) -> Result<bool> {
+    let is_stop = apply_one_unacked(source, bus, msg)?;
+    let _ = ack.send(());
+    Ok(is_stop)
+}
+
+/// The forwarding half of [`apply_one`], split out for a source that must
+/// finish source-local state changes before the synchronous request is
+/// acknowledged. [`crate::elements::WasapiCaptureSource`] uses this for
+/// `Resume`: downstream is resumed first, then its capture device is
+/// restarted, and only then may the caller observe the request as done.
+pub(crate) fn apply_one_unacked<S: SourceElement>(
+    source: &mut S,
+    bus: &Bus,
+    msg: ControlMsg,
+) -> Result<bool> {
     hinfo!(hlog: source.hlog(), "control: {msg:?}");
     apply_seek(source, bus, msg)?;
     for pad in source.src_pads() {
         pad.control(msg)?;
     }
-    let is_stop = msg == ControlMsg::Stop;
-    let _ = ack.send(());
-    Ok(is_stop)
+    Ok(msg == ControlMsg::Stop)
 }
 
 /// Blocks on `control` alone — not whatever `source.run()` itself is
@@ -251,7 +274,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        element::{Element, ElementType, Source, element_hlog},
+        buffer::MediaBuffer,
+        element::{Element, ElementType, Sink, Source, element_hlog},
         pad::SrcPad,
     };
 
@@ -306,6 +330,42 @@ mod tests {
         }
     }
 
+    #[rust_hlog::hlog]
+    struct SlowPauseSink {
+        pause_delay: Duration,
+    }
+
+    impl Element for SlowPauseSink {
+        fn name(&self) -> Arc<str> {
+            "slow-pause".into()
+        }
+
+        fn element_type(&self) -> ElementType {
+            ElementType::Other
+        }
+
+        fn hlog(&self) -> &HLog {
+            &self.hlog
+        }
+
+        fn hlog_mut(&mut self) -> &mut HLog {
+            &mut self.hlog
+        }
+    }
+
+    impl Sink for SlowPauseSink {
+        fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
+            Ok(())
+        }
+
+        fn control(&mut self, msg: ControlMsg) -> Result<()> {
+            if msg == ControlMsg::Pause {
+                thread::sleep(self.pause_delay);
+            }
+            Ok(())
+        }
+    }
+
     /// The edge case called out in `wait_out_pause`'s own docs: the
     /// `ControlSender` going away entirely (e.g. the owning `Pipeline`
     /// dropped) while paused has to be treated the same as an explicit
@@ -351,6 +411,45 @@ mod tests {
         assert!(
             !stopped,
             "Resume must unblock wait_out_pause with Ok(false)"
+        );
+    }
+
+    /// `paused_for` starts when the source begins forwarding Pause, not
+    /// only after every downstream element has finally acknowledged it.
+    /// Otherwise a slow control cascade is miscounted as playable media
+    /// time and an elapsed-time source catches that interval up as a burst.
+    #[test]
+    fn drain_control_counts_the_pause_cascade_as_paused_time() {
+        let pause_delay = Duration::from_millis(80);
+        let (tx, rx) = channel();
+        let controller = thread::spawn(move || {
+            tx.send(ControlMsg::Pause);
+            tx.send(ControlMsg::Resume);
+        });
+
+        let (bus, _bus_rx) = Bus::new();
+        let mut source = DummySource::new();
+        source.pad.link(Box::new(SlowPauseSink {
+            pause_delay,
+            hlog: element_hlog(ElementType::Other, "slow-pause", None),
+        }));
+
+        let outcome = loop {
+            let outcome = drain_control(&rx, &mut source, &bus)
+                .expect("the synthetic control cascade cannot fail");
+            if outcome.paused_for > Duration::ZERO {
+                break outcome;
+            }
+            thread::yield_now();
+        };
+        controller.join().expect("controller must not panic");
+
+        assert!(!outcome.stopped);
+        assert!(
+            outcome.paused_for >= Duration::from_millis(60),
+            "the {:?} Pause cascade was omitted from paused_for: {:?}",
+            pause_delay,
+            outcome.paused_for
         );
     }
 }

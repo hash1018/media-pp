@@ -238,18 +238,20 @@ impl Pipeline {
     /// Blocks until every element downstream of every source has paused —
     /// see [`crate::control::drain_control`] (source side) and
     /// [`crate::queue::Queue`]'s worker loop (each thread boundary). Also
-    /// pauses this pipeline's `Clock`, so a `Pacer` doesn't see a jump in
-    /// elapsed time once resumed. No-op if `run()` isn't currently in
-    /// progress on another thread.
+    /// pauses this pipeline's `Clock` before that synchronous cascade
+    /// starts, so time spent waiting for a busy downstream element to
+    /// acknowledge `Pause` is frozen too and a `Pacer` doesn't see a jump
+    /// once resumed. No-op if `run()` isn't currently in progress on
+    /// another thread.
     pub fn pause(&self) {
         if self.running.load(Ordering::Acquire) == 0 {
             return;
         }
         self.clock.interrupt();
+        self.clock.pause();
         for control_tx in &self.control_txs {
             control_tx.send(ControlMsg::Pause);
         }
-        self.clock.pause();
     }
 
     /// Undoes [`Pipeline::pause`]. Resumes the `Clock` first, so it's
