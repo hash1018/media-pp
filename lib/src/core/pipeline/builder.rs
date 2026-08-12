@@ -101,7 +101,8 @@ impl PipelineBuilder {
             control_rxs: Mutex::new(Some(control_rxs)),
             clock: self.clock,
             bus_rx: self.bus_rx,
-            running: AtomicUsize::new(0),
+            running: Arc::new(AtomicUsize::new(0)),
+            workers: Mutex::new(Vec::new()),
             graph: self.graph,
         })
     }

@@ -1,4 +1,8 @@
-use std::{sync::atomic::AtomicUsize, thread, time::Duration};
+use std::{
+    sync::{atomic::AtomicUsize, mpsc},
+    thread,
+    time::Duration,
+};
 
 use super::*;
 use crate::elements::{
@@ -134,6 +138,34 @@ fn multi_source_pipeline_stops_every_source_from_one_stop_call() {
     assert!(
         audio_count.load(Ordering::SeqCst) > 0,
         "audio branch never received anything"
+    );
+}
+
+/// A live source must not retain its owning Pipeline. Dropping the last
+/// external Arc implicitly stops and joins the source, then releases the
+/// Pipeline itself instead of leaving both alive forever.
+#[test]
+fn dropping_a_running_pipeline_stops_and_releases_it() {
+    let source = TestVideoSource::new("video", TestVideoOptions::default());
+    let pipeline = Pipeline::new("drop-running-test", source, |_source, _ctx| Ok(()))
+        .expect("test pipeline wiring must succeed");
+    let weak = Arc::downgrade(&pipeline);
+
+    pipeline.run();
+    thread::sleep(Duration::from_millis(50));
+
+    let (dropped_tx, dropped_rx) = mpsc::sync_channel(0);
+    thread::spawn(move || {
+        drop(pipeline);
+        let _ = dropped_tx.send(());
+    });
+
+    dropped_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("dropping a running Pipeline must stop and join its source promptly");
+    assert!(
+        weak.upgrade().is_none(),
+        "a source worker must not retain the Pipeline after external handles are dropped"
     );
 }
 

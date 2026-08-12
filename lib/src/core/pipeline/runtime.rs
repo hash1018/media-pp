@@ -3,7 +3,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
-    thread,
+    thread::{self, JoinHandle},
     time::Duration,
 };
 
@@ -27,10 +27,10 @@ use super::{PipelineBuilder, builder::SourceEntry};
 ///
 /// `run()` is asynchronous: it starts every source on its own background
 /// thread and returns immediately, rather than blocking the caller for the
-/// whole play-through. Always held as `Arc<Pipeline>` (that's what
+/// whole play-through. Returned as `Arc<Pipeline>` (that's what
 /// [`Pipeline::new`]/[`PipelineBuilder::build`] return) — the background
-/// threads need their own owning handle to outlive the `run()` call that
-/// spawned them, and that's also what lets [`Pipeline::pause`]/
+/// threads deliberately do not retain an owning handle, so dropping the
+/// last external `Arc` can stop them. The `Arc` also lets [`Pipeline::pause`]/
 /// [`Pipeline::resume`]/[`Pipeline::stop`] be called from another thread
 /// while it's running.
 ///
@@ -96,7 +96,11 @@ pub struct Pipeline {
     /// than a per-source flag: every call site (`pause`/`resume`/`stop`/
     /// `seek`) only ever needs "is anything still running at all", never
     /// which specific source.
-    pub(super) running: AtomicUsize,
+    pub(super) running: Arc<AtomicUsize>,
+    /// Handles for every source thread started by [`Pipeline::run`]. They
+    /// are retained so dropping the pipeline can synchronously stop and
+    /// join live sources instead of leaving detached work behind.
+    pub(super) workers: Mutex<Vec<JoinHandle<()>>>,
     /// Live node/edge graph backing snapshots and topology rendering.
     pub(super) graph: PipelineGraph,
 }
@@ -170,7 +174,7 @@ impl Pipeline {
     /// actually done. A no-op if this `Pipeline` is already running or
     /// has already finished a previous run — this type has no "reset"
     /// path; build a fresh `Pipeline` for another play-through.
-    pub fn run(self: &Arc<Self>) {
+    pub fn run(&self) {
         let Some(sources) = self.sources.lock().unwrap().take() else {
             return;
         };
@@ -185,13 +189,22 @@ impl Pipeline {
         };
 
         self.running.store(sources.len(), Ordering::Release);
-        for ((source_id, mut source), control_rx) in sources.into_iter().zip(control_rxs) {
+        for ((source_id, source), control_rx) in sources.into_iter().zip(control_rxs) {
             let bus = bus.for_element(source_id);
-            let this = Arc::clone(self);
-            thread::Builder::new()
+            let pipeline_id = Arc::clone(&self.id);
+            let running = Arc::clone(&self.running);
+            let handle = thread::Builder::new()
                 .name("pipeline:source".into())
                 .spawn(move || {
-                    hinfo!(main_id: &this.id, "pipeline: run starting ({})", source.name());
+                    // Keep these as locals in this order. During unwinding the
+                    // guard is dropped first, then the receiver, then the
+                    // source. That makes a Pipeline indirectly retained by a
+                    // custom source safe to drop from this worker thread.
+                    let mut source = source;
+                    let control_rx = control_rx;
+                    let _running = RunningSourceGuard::new(running);
+
+                    hinfo!(main_id: &pipeline_id, "pipeline: run starting ({})", source.name());
                     let source_name = source.name();
                     let source_type = source.element_type();
                     // `source.run()` itself already reports non-fatal,
@@ -213,12 +226,12 @@ impl Pipeline {
                         "ok"
                     };
                     hinfo!(
-                        main_id: &this.id,
+                        main_id: &pipeline_id,
                         "pipeline: run finished ({outcome}, {source_name})"
                     );
-                    this.running.fetch_sub(1, Ordering::AcqRel);
                 })
                 .expect("failed to spawn pipeline source thread");
+            self.workers.lock().unwrap().push(handle);
         }
     }
 
@@ -302,6 +315,44 @@ impl Pipeline {
         self.clock.interrupt();
         for control_tx in &self.control_txs {
             control_tx.send(ControlMsg::Seek(target));
+        }
+    }
+}
+
+/// Decrements the live-source count even if a source panics while running.
+struct RunningSourceGuard {
+    running: Arc<AtomicUsize>,
+}
+
+impl RunningSourceGuard {
+    fn new(running: Arc<AtomicUsize>) -> Self {
+        Self { running }
+    }
+}
+
+impl Drop for RunningSourceGuard {
+    fn drop(&mut self) {
+        self.running.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+impl Drop for Pipeline {
+    fn drop(&mut self) {
+        // Send Stop while every sender is still alive. Merely dropping the
+        // senders would not wake a source polling an empty control channel.
+        self.stop();
+
+        let current_thread = thread::current().id();
+        let workers = self
+            .workers
+            .get_mut()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for worker in workers.drain(..) {
+            // A custom source can indirectly retain the last Pipeline Arc.
+            // In that unusual case its own worker must not try to join itself.
+            if worker.thread().id() != current_thread {
+                let _ = worker.join();
+            }
         }
     }
 }
