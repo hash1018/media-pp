@@ -1,6 +1,6 @@
 use std::sync::{
     Arc, Mutex, Weak,
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
 use rust_hlog::{HLog, hinfo};
@@ -23,11 +23,11 @@ use crate::{
 /// (the pipeline's source/queue-worker thread). That's the whole reason
 /// `Tee` doesn't implement [`crate::element::Source`] like other
 /// multi-pad elements (e.g. [`crate::elements::FileDemuxer`]): its pads
-/// live behind a lock instead of being a plain `&mut [SrcPad]`, so a
-/// handle on another thread can request an add or removal while the
-/// pipeline thread is in `consume`. `consume` holds that lock while it
-/// visits the current sinks, so the mutation completes after the in-flight
-/// buffer has finished fan-out; the new set applies to the next buffer.
+/// live in individually locked branch slots instead of being a plain
+/// `&mut [SrcPad]`. `consume` only holds the branch-list lock long enough
+/// to take a cheap `Arc` snapshot, so a slow downstream does not block
+/// unrelated attach/detach operations. Detach prevents any push that has
+/// not started yet; one already executing downstream call may finish.
 ///
 /// Cheap to fan out: `MediaBuffer` wraps its payload in an `Arc`, so
 /// cloning a buffer for each output is a refcount bump, not a copy of the
@@ -40,7 +40,7 @@ pub struct Tee {
 }
 
 struct TeeShared {
-    branches: Mutex<Vec<TeeBranch>>,
+    branches: Mutex<Vec<Arc<TeeBranch>>>,
     next_pad_id: AtomicU64,
     context: Arc<Context>,
 }
@@ -48,7 +48,8 @@ struct TeeShared {
 struct TeeBranch {
     id: Option<BranchId>,
     root_id: ElementId,
-    pad: SrcPad,
+    active: AtomicBool,
+    pad: Mutex<SrcPad>,
 }
 
 /// Build-time configuration for a [`Tee`]. Initial branches are merged
@@ -67,7 +68,7 @@ pub struct TeeBuilder {
 /// reference to the `Tee`'s shared state: retaining a handle after the
 /// pipeline finishes must not keep downstream sinks or the pipeline's
 /// [`crate::bus::Bus`] sender alive. Once the `Tee` is gone,
-/// [`TeeHandle::branch`] returns `None` once the `Tee` is gone.
+/// [`TeeHandle::branch`] returns `None`.
 #[derive(Clone)]
 pub struct TeeHandle {
     id: ElementId,
@@ -107,17 +108,18 @@ impl Tee {
     /// failure to itself, `Tee` fans out to several and does know which
     /// one just failed. Reporting it that way (rather than folding every
     /// branch's failures into one generic `Tee` event) is what lets a
-    /// caller watching the bus tell branches apart and call
-    /// corresponding runtime branch. Falls back to `Tee`'s
-    /// own identity in the same call that just unlinked its peer, though
-    /// in practice that can't happen: `pad`'s peer is still there
-    /// whenever this is called (`SrcPad::push` never unlinks on `Err`).
-    fn report_branch_error(&self, branch: &TeeBranch, error: crate::error::Error) {
-        let (element_type, name) = branch
-            .pad
-            .peer_identity()
-            .unwrap_or((ElementType::Tee, self.name.clone()));
-        self.shared.context.bus.for_element(branch.root_id).post(
+    /// caller watching the bus tell branches apart and identify the
+    /// corresponding runtime branch. The peer identity is captured just
+    /// before the downstream call, so the event stays attributable even
+    /// if that branch is detached while the call is running.
+    fn report_branch_error(
+        &self,
+        root_id: ElementId,
+        peer: Option<(ElementType, Arc<str>)>,
+        error: crate::error::Error,
+    ) {
+        let (element_type, name) = peer.unwrap_or((ElementType::Tee, self.name.clone()));
+        self.shared.context.bus.for_element(root_id).post(
             &self.hlog,
             BusEvent::Error {
                 element_type,
@@ -196,11 +198,12 @@ impl TeeBuilder {
             tee_branch.plan.edges.extend(plan.edges);
 
             pad.link(root);
-            runtime_branches.push(TeeBranch {
+            runtime_branches.push(Arc::new(TeeBranch {
                 id: None,
                 root_id,
-                pad,
-            });
+                active: AtomicBool::new(true),
+                pad: Mutex::new(pad),
+            }));
         }
         drop(runtime_branches);
 
@@ -238,11 +241,12 @@ impl TeeHandle {
                 .graph
                 .attach_with(self.id, from_port, plan, |branch_id| {
                     pad.link(root);
-                    branches.push(TeeBranch {
+                    branches.push(Arc::new(TeeBranch {
                         id: Some(branch_id),
                         root_id,
-                        pad,
-                    });
+                        active: AtomicBool::new(true),
+                        pad: Mutex::new(pad),
+                    }));
                     Ok(())
                 })?;
         hinfo!(
@@ -271,10 +275,18 @@ impl TeeHandle {
             "sink removed: branch={branch_id}, {} remaining",
             branches.len() - 1
         );
+        let mut removed = None;
         shared.context.graph.detach_with(branch_id, || {
-            let _ = branches.remove(index).pad.unlink();
+            let branch = branches.remove(index);
+            branch.active.store(false, Ordering::Release);
+            removed = Some(branch);
             Ok(())
         })?;
+        drop(branches);
+        // The last Arc owns the downstream sink. Dropping it outside both
+        // the branch-list and graph locks allows arbitrary Sink::drop code
+        // to inspect the graph or call back into Tee without deadlocking.
+        drop(removed);
         Ok(())
     }
 
@@ -326,34 +338,46 @@ impl Element for Tee {
 
 impl Sink for Tee {
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
-        let mut branches = self.shared.branches.lock().unwrap();
-        let Some((last, rest)) = branches.split_last_mut() else {
-            return Ok(());
-        };
+        let branches = self.shared.branches.lock().unwrap().clone();
         // One branch failing must not stop the buffer from reaching its
         // siblings — same "errors never kill anything, just get reported"
         // rule `Queue`'s worker loop follows. That buffer is dropped for
         // the failing branch only; the branch itself stays wired and gets
         // retried on the next one. Whoever's watching the bus decides
         // whether to call `TeeHandle::detach` for it.
-        for branch in rest {
-            if let Err(error) = branch.pad.push(buf.clone()) {
-                self.report_branch_error(branch, error);
+        for branch in branches {
+            if !branch.active.load(Ordering::Acquire) {
+                continue;
             }
-        }
-        if let Err(error) = last.pad.push(buf) {
-            self.report_branch_error(last, error);
+            let mut pad = branch.pad.lock().unwrap();
+            // Detach may have won the race while this thread waited for a
+            // previous push on the same branch to finish.
+            if !branch.active.load(Ordering::Acquire) {
+                continue;
+            }
+            let peer = pad.peer_identity();
+            let outcome = pad.push(buf.clone());
+            drop(pad);
+            if let Err(error) = outcome {
+                self.report_branch_error(branch.root_id, peer, error);
+            }
         }
         Ok(())
     }
 
     fn control(&mut self, msg: ControlMsg) -> Result<()> {
-        // Unlike `consume`, every branch gets the same `ControlMsg`
-        // value directly (it's `Copy`, no need for the last-one-moves
-        // split `consume` does for `MediaBuffer`).
-        let mut branches = self.shared.branches.lock().unwrap();
-        for branch in branches.iter_mut() {
-            branch.pad.control(msg)?;
+        // Every active branch gets the same `ControlMsg` value directly;
+        // it is `Copy` and does not need a per-branch clone.
+        let branches = self.shared.branches.lock().unwrap().clone();
+        for branch in branches {
+            if !branch.active.load(Ordering::Acquire) {
+                continue;
+            }
+            let mut pad = branch.pad.lock().unwrap();
+            if !branch.active.load(Ordering::Acquire) {
+                continue;
+            }
+            pad.control(msg)?;
         }
         Ok(())
     }
@@ -361,7 +385,14 @@ impl Sink for Tee {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::{
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            mpsc,
+        },
+        thread,
+        time::Duration,
+    };
 
     use super::*;
     use crate::{bus::Bus, clock::Clock, graph::PipelineGraph};
@@ -435,6 +466,87 @@ mod tests {
 
         fn control(&mut self, _msg: ControlMsg) -> Result<()> {
             Ok(())
+        }
+    }
+
+    #[rust_hlog::hlog]
+    struct BlockingSink {
+        entered: Option<mpsc::Sender<()>>,
+        release: mpsc::Receiver<()>,
+    }
+
+    impl Element for BlockingSink {
+        fn name(&self) -> Arc<str> {
+            "blocking".into()
+        }
+
+        fn element_type(&self) -> ElementType {
+            ElementType::Other
+        }
+
+        fn hlog(&self) -> &HLog {
+            &self.hlog
+        }
+
+        fn hlog_mut(&mut self) -> &mut HLog {
+            &mut self.hlog
+        }
+    }
+
+    impl Sink for BlockingSink {
+        fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
+            if let Some(entered) = self.entered.take() {
+                let _ = entered.send(());
+            }
+            let _ = self.release.recv();
+            Ok(())
+        }
+
+        fn control(&mut self, _msg: ControlMsg) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[rust_hlog::hlog]
+    struct GraphInspectingDropSink {
+        graph: PipelineGraph,
+        dropped: Option<mpsc::Sender<()>>,
+    }
+
+    impl Element for GraphInspectingDropSink {
+        fn name(&self) -> Arc<str> {
+            "graph-inspecting-drop".into()
+        }
+
+        fn element_type(&self) -> ElementType {
+            ElementType::Other
+        }
+
+        fn hlog(&self) -> &HLog {
+            &self.hlog
+        }
+
+        fn hlog_mut(&mut self) -> &mut HLog {
+            &mut self.hlog
+        }
+    }
+
+    impl Sink for GraphInspectingDropSink {
+        fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
+            Ok(())
+        }
+
+        fn control(&mut self, _msg: ControlMsg) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Drop for GraphInspectingDropSink {
+        fn drop(&mut self) {
+            let _ = self.graph.snapshot();
+            if let Some(dropped) = self.dropped.take() {
+                let _ = dropped.send(());
+            }
         }
     }
 
@@ -520,6 +632,134 @@ mod tests {
              failed, not to Tee itself — that's what lets a caller call \
              TeeHandle::detach(branch_id) straight off the bus; got {errors:?}"
         );
+    }
+
+    #[test]
+    fn blocked_downstream_does_not_block_unrelated_attach_or_detach() {
+        let (bus, _bus_rx) = Bus::new();
+        let graph = PipelineGraph::new();
+        let source_id = graph.add_source(ElementType::Other, "source".into());
+        let context = Arc::new(Context {
+            bus,
+            pipeline_id: "test".into(),
+            graph,
+            clock: Arc::new(Clock::new()),
+            source_id,
+        });
+        let (tee_branch, handle) = TeeBuilder::new("tee", context.clone())
+            .build_dynamic()
+            .unwrap();
+        let mut upstream = SrcPad::new("source_src");
+        context.attach_pad(&mut upstream, tee_branch).unwrap();
+
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let blocking = handle
+            .branch()
+            .unwrap()
+            .to(Box::new(BlockingSink {
+                entered: Some(entered_tx),
+                release: release_rx,
+                hlog: element_hlog(ElementType::Other, "blocking", None),
+            }))
+            .unwrap();
+        let blocking_id = handle.attach(blocking).unwrap();
+
+        let push_thread = thread::spawn(move || upstream.push(packet()));
+        entered_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("blocking branch was never entered");
+
+        let new_branch = handle
+            .branch()
+            .unwrap()
+            .to(Box::new(CountingSink {
+                name: "new",
+                count: Arc::new(AtomicUsize::new(0)),
+                hlog: element_hlog(ElementType::Other, "new", None),
+            }))
+            .unwrap();
+        let (attach_tx, attach_rx) = mpsc::channel();
+        let attach_handle = handle.clone();
+        let attach_thread = thread::spawn(move || {
+            let _ = attach_tx.send(attach_handle.attach(new_branch));
+        });
+
+        let (detach_tx, detach_rx) = mpsc::channel();
+        let detach_handle = handle.clone();
+        let detach_thread = thread::spawn(move || {
+            let _ = detach_tx.send(detach_handle.detach(blocking_id));
+        });
+
+        let attach_before_release = attach_rx.recv_timeout(Duration::from_millis(250)).ok();
+        let detach_before_release = detach_rx.recv_timeout(Duration::from_millis(250)).ok();
+        let attach_completed_while_blocked = attach_before_release.is_some();
+        let detach_completed_while_blocked = detach_before_release.is_some();
+        let _ = release_tx.send(());
+
+        push_thread.join().unwrap().unwrap();
+        attach_thread.join().unwrap();
+        detach_thread.join().unwrap();
+        let attach_result = attach_before_release
+            .unwrap_or_else(|| attach_rx.recv_timeout(Duration::from_secs(1)).unwrap());
+        let detach_result = detach_before_release
+            .unwrap_or_else(|| detach_rx.recv_timeout(Duration::from_secs(1)).unwrap());
+        attach_result.unwrap();
+        detach_result.unwrap();
+
+        assert!(
+            attach_completed_while_blocked,
+            "an unrelated attach waited for the blocked downstream"
+        );
+        assert!(
+            detach_completed_while_blocked,
+            "detach waited for an already-running downstream call"
+        );
+    }
+
+    #[test]
+    fn detached_sink_is_dropped_outside_the_graph_lock() {
+        let (bus, _bus_rx) = Bus::new();
+        let graph = PipelineGraph::new();
+        let source_id = graph.add_source(ElementType::Other, "source".into());
+        let context = Arc::new(Context {
+            bus,
+            pipeline_id: "test".into(),
+            graph: graph.clone(),
+            clock: Arc::new(Clock::new()),
+            source_id,
+        });
+        let (tee_branch, handle) = TeeBuilder::new("tee", context.clone())
+            .build_dynamic()
+            .unwrap();
+        let mut upstream = SrcPad::new("source_src");
+        context.attach_pad(&mut upstream, tee_branch).unwrap();
+
+        let (dropped_tx, dropped_rx) = mpsc::channel();
+        let branch = handle
+            .branch()
+            .unwrap()
+            .to(Box::new(GraphInspectingDropSink {
+                graph,
+                dropped: Some(dropped_tx),
+                hlog: element_hlog(ElementType::Other, "graph-inspecting-drop", None),
+            }))
+            .unwrap();
+        let branch_id = handle.attach(branch).unwrap();
+        let (done_tx, done_rx) = mpsc::channel();
+        let detach_thread = thread::spawn(move || {
+            let _ = done_tx.send(handle.detach(branch_id));
+        });
+
+        dropped_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("sink Drop deadlocked while inspecting the graph");
+        done_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("detach did not finish")
+            .unwrap();
+        detach_thread.join().unwrap();
+        drop(upstream);
     }
 
     #[test]

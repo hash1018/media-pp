@@ -58,11 +58,6 @@ impl SrcPad {
         self.peer = Some(sink);
     }
 
-    /// Removes and returns whatever this pad was linked to, if anything.
-    pub(crate) fn unlink(&mut self) -> Option<Box<dyn Sink>> {
-        self.peer.take()
-    }
-
     /// Pushes a buffer to whatever this pad is linked to. Pushing into an
     /// unlinked pad silently drops the buffer (e.g. a demuxer stream
     /// nobody cared to link).
