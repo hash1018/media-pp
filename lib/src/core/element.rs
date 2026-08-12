@@ -27,6 +27,7 @@ pub enum ElementType {
     DxgiCaptureSource,
     WasapiCaptureSource,
     AudioMixer,
+    VideoCompositor,
     WebRtcPeer,
     SwDecoder,
     D3d12vaDecoder,

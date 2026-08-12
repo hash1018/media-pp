@@ -39,7 +39,10 @@ pub use source::{
     AppSource, AppSourceError, AppSourceHandle, AudioMixer, AudioMixerError, AudioMixerOptions,
     FileDemuxError, FileDemuxer, MixerHandle, MixerInputSink, RtspOptions, RtspSource,
     RtspSourceError, RtspTransport, StreamInfo, TestAudioOptions, TestAudioSource,
-    TestAudioSourceError, TestVideoOptions, TestVideoSource, TestVideoSourceError,
+    TestAudioSourceError, TestVideoOptions, TestVideoSource, TestVideoSourceError, VideoColor,
+    VideoCompositor, VideoCompositorError, VideoCompositorHandle, VideoCompositorInput,
+    VideoCompositorInputSink, VideoCompositorOptions, VideoFit, VideoInputId, VideoLayer,
+    VideoLayerHandle, VideoRect,
 };
 #[cfg(feature = "dxgi-capture")]
 pub use source::{

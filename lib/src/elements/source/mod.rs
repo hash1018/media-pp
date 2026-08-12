@@ -4,6 +4,7 @@ mod capture;
 mod file_demuxer;
 mod rtsp_source;
 mod test;
+mod video_compositor;
 
 #[cfg(any(feature = "wasapi-capture", feature = "wasapi-renderer"))]
 pub use crate::platform::windows::wasapi::{WasapiDevice, WasapiDeviceKind};
@@ -23,4 +24,9 @@ pub use rtsp_source::{RtspOptions, RtspSource, RtspSourceError, RtspTransport};
 pub use test::{
     TestAudioOptions, TestAudioSource, TestAudioSourceError, TestVideoOptions, TestVideoSource,
     TestVideoSourceError,
+};
+pub use video_compositor::{
+    VideoColor, VideoCompositor, VideoCompositorError, VideoCompositorHandle, VideoCompositorInput,
+    VideoCompositorInputSink, VideoCompositorOptions, VideoFit, VideoInputId, VideoLayer,
+    VideoLayerHandle, VideoRect,
 };
