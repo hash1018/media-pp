@@ -16,7 +16,7 @@ pub use encoder::{
 };
 pub use pacer::Pacer;
 pub use scaler::{Scaler, ScalerError};
-pub use tee::{Tee, TeeHandle};
+pub use tee::{Tee, TeeBuilder, TeeHandle};
 #[cfg(feature = "d3d11-renderer")]
 pub use upload::{D3d11Upload, D3d11UploadError};
 #[cfg(feature = "d3d12-renderer")]

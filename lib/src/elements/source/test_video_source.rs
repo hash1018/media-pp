@@ -261,12 +261,15 @@ mod tests {
     use super::*;
     use crate::{control::ControlMsg, element::Sink, pipeline::Pipeline};
 
+    type VideoObservation = (ffmpeg::format::Pixel, u32, u32, Option<i64>);
+    type RecordedFrames = Arc<Mutex<Vec<VideoObservation>>>;
+
     /// Captures every frame's `(format, width, height, pts)` it sees, in
     /// order — enough to check both pixel format/size and that `pts`
     /// actually advances frame over frame.
     #[rust_hlog::hlog]
     struct RecordingSink {
-        seen: Arc<Mutex<Vec<(ffmpeg::format::Pixel, u32, u32, Option<i64>)>>>,
+        seen: RecordedFrames,
     }
 
     impl Element for RecordingSink {

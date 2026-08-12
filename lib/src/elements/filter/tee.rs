@@ -1,4 +1,7 @@
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{
+    Arc, Mutex, Weak,
+    atomic::{AtomicU64, Ordering},
+};
 
 use rust_hlog::{HLog, hinfo};
 
@@ -8,14 +11,15 @@ use crate::{
     control::ControlMsg,
     element::{Context, Element, ElementType, Sink, element_hlog},
     error::Result,
-    graph::{BranchId, ElementId, GraphError},
+    graph::{BranchId, ElementId, GraphError, PlannedEdge, PortRef},
     pad::SrcPad,
     pipeline::{ChainBuilder, DetachedBranch},
 };
 
-/// Fans a single input out to a *dynamic* set of sinks — sinks are added
-/// and removed through a [`TeeHandle`], which can be cloned and used from
-/// any thread, independent of whatever thread is driving `Tee::consume`
+/// Fans a single input out to multiple sinks. [`TeeBuilder`] owns the
+/// initial fan-out; later branches are added and removed through a
+/// [`TeeHandle`], which can be cloned and used from any thread, independent
+/// of whatever thread is driving `Tee::consume`
 /// (the pipeline's source/queue-worker thread). That's the whole reason
 /// `Tee` doesn't implement [`crate::element::Source`] like other
 /// multi-pad elements (e.g. [`crate::elements::FileDemuxer`]): its pads
@@ -37,13 +41,25 @@ pub struct Tee {
 
 struct TeeShared {
     branches: Mutex<Vec<TeeBranch>>,
+    next_pad_id: AtomicU64,
     context: Arc<Context>,
 }
 
 struct TeeBranch {
-    id: BranchId,
+    id: Option<BranchId>,
     root_id: ElementId,
     pad: SrcPad,
+}
+
+/// Build-time configuration for a [`Tee`]. Initial branches are merged
+/// with the Tee into one detached subgraph and committed by a single
+/// [`Context::attach`] call. Use [`TeeBuilder::build`] for a fixed fan-out,
+/// or [`TeeBuilder::build_dynamic`] when runtime changes need a
+/// [`TeeHandle`].
+pub struct TeeBuilder {
+    tee: Tee,
+    handle: TeeHandle,
+    initial_branches: Vec<DetachedBranch>,
 }
 
 /// A cheaply-cloneable handle for adding or removing a [`Tee`]'s sinks
@@ -60,21 +76,14 @@ pub struct TeeHandle {
 }
 
 impl Tee {
-    /// Starts with no sinks — add some via the returned [`TeeHandle`]
-    /// before (or any time after) wiring `Tee` itself into the pipeline.
-    /// `context` should be the same one [`crate::pipeline::Pipeline::new`]'s
-    /// (or, for a multi-source pipeline,
-    /// [`crate::pipeline::PipelineBuilder::add_source`]'s) `wire` closure
-    /// was handed. The `Tee` keeps that context alive while it belongs to
-    /// the pipeline; `TeeHandle` accesses it weakly so the handle itself
-    /// cannot extend the pipeline's lifetime.
-    pub fn new(name: impl Into<String>, context: Arc<Context>) -> (Self, TeeHandle) {
+    fn new(name: impl Into<String>, context: Arc<Context>) -> (Self, TeeHandle) {
         let name: Arc<str> = name.into().into();
         let hlog = element_hlog(ElementType::Tee, &name, None);
         hinfo!(hlog: &hlog, "created");
         let id = context.graph.reserve_element_id();
         let shared = Arc::new(TeeShared {
             branches: Mutex::new(Vec::new()),
+            next_pad_id: AtomicU64::new(0),
             context,
         });
         (
@@ -119,6 +128,86 @@ impl Tee {
     }
 }
 
+impl TeeShared {
+    fn next_pad(&self, tee_name: &str) -> SrcPad {
+        let id = self.next_pad_id.fetch_add(1, Ordering::Relaxed);
+        SrcPad::new(format!("{tee_name}_src{id}"))
+    }
+}
+
+impl TeeBuilder {
+    /// Starts an initially empty Tee in the supplied pipeline context.
+    pub fn new(name: impl Into<String>, context: Arc<Context>) -> Self {
+        let (tee, handle) = Tee::new(name, context);
+        Self {
+            tee,
+            handle,
+            initial_branches: Vec::new(),
+        }
+    }
+
+    /// Adds one fixed initial branch to this fan-out subgraph.
+    pub fn branch(mut self, branch: DetachedBranch) -> Self {
+        self.initial_branches.push(branch);
+        self
+    }
+
+    /// Returns the complete fixed fan-out without exposing runtime control.
+    pub fn build(self) -> Result<DetachedBranch> {
+        self.finish().map(|(branch, _handle)| branch)
+    }
+
+    /// Returns the initial subgraph together with its runtime control handle.
+    /// Attach the branch through [`Context::attach`] before using the handle.
+    pub fn build_dynamic(self) -> Result<(DetachedBranch, TeeHandle)> {
+        self.finish()
+    }
+
+    fn finish(self) -> Result<(DetachedBranch, TeeHandle)> {
+        let Self {
+            tee,
+            handle,
+            initial_branches,
+        } = self;
+        let tee_id = tee.id;
+        let tee_name = tee.name.clone();
+        let shared = tee.shared.clone();
+        let context = shared.context.clone();
+        let mut tee_branch = context.branch().to(Box::new(tee))?;
+        let mut runtime_branches = shared.branches.lock().unwrap();
+
+        for branch in initial_branches {
+            let mut pad = shared.next_pad(&tee_name);
+            let from_port: Arc<str> = pad.name().into();
+            let DetachedBranch { root, plan } = branch;
+            let root_id = plan.root;
+
+            tee_branch.plan.edges.push(PlannedEdge {
+                from: PortRef {
+                    element: tee_id,
+                    port: from_port,
+                },
+                to: PortRef {
+                    element: root_id,
+                    port: "sink".into(),
+                },
+            });
+            tee_branch.plan.nodes.extend(plan.nodes);
+            tee_branch.plan.edges.extend(plan.edges);
+
+            pad.link(root);
+            runtime_branches.push(TeeBranch {
+                id: None,
+                root_id,
+                pad,
+            });
+        }
+        drop(runtime_branches);
+
+        Ok((tee_branch, handle))
+    }
+}
+
 impl TeeHandle {
     /// A [`crate::pipeline::ChainBuilder`] pre-wired with this `Tee`'s own
     /// [`Context`] — lets a caller build a whole new branch (`.pipe(...)`
@@ -131,14 +220,15 @@ impl TeeHandle {
         Some(shared.context.branch())
     }
 
-    /// Attaches a detached branch, returning the stable ID used to remove it.
+    /// Attaches a runtime branch, returning the stable ID used to remove it.
+    /// Fixed initial branches belong in [`TeeBuilder`].
     pub fn attach(&self, branch: DetachedBranch) -> Result<BranchId> {
         let shared = self
             .shared
             .upgrade()
             .ok_or(GraphError::ParentNotAttached(self.id))?;
         let mut branches = shared.branches.lock().unwrap();
-        let mut pad = SrcPad::new(format!("{}_src{}", self.name, branches.len()));
+        let mut pad = shared.next_pad(&self.name);
         let from_port: Arc<str> = pad.name().into();
         let DetachedBranch { root, plan } = branch;
         let root_id = plan.root;
@@ -149,7 +239,7 @@ impl TeeHandle {
                 .attach_with(self.id, from_port, plan, |branch_id| {
                     pad.link(root);
                     branches.push(TeeBranch {
-                        id: branch_id,
+                        id: Some(branch_id),
                         root_id,
                         pad,
                     });
@@ -174,7 +264,7 @@ impl TeeHandle {
         let mut branches = shared.branches.lock().unwrap();
         let index = branches
             .iter()
-            .position(|branch| branch.id == branch_id)
+            .position(|branch| branch.id == Some(branch_id))
             .ok_or(GraphError::BranchNotAttached(branch_id))?;
         hinfo!(
             hlog: &element_hlog(ElementType::Tee, &self.name, None),
@@ -368,11 +458,6 @@ mod tests {
             clock: Arc::new(Clock::new()),
             source_id,
         });
-        let (tee, handle) = Tee::new("tee", context.clone());
-        let tee_branch = context.branch().to(Box::new(tee)).unwrap();
-        let mut upstream = SrcPad::new("source_src");
-        context.attach_pad(&mut upstream, tee_branch).unwrap();
-
         let before_count = Arc::new(AtomicUsize::new(0));
         let after_count = Arc::new(AtomicUsize::new(0));
         let before = context
@@ -397,9 +482,14 @@ mod tests {
                 hlog: element_hlog(ElementType::Other, "after", None),
             }))
             .unwrap();
-        handle.attach(before).unwrap();
-        handle.attach(failing).unwrap();
-        handle.attach(after).unwrap();
+        let tee_branch = TeeBuilder::new("tee", context.clone())
+            .branch(before)
+            .branch(failing)
+            .branch(after)
+            .build()
+            .unwrap();
+        let mut upstream = SrcPad::new("source_src");
+        context.attach_pad(&mut upstream, tee_branch).unwrap();
 
         for _ in 0..3 {
             upstream
@@ -411,7 +501,6 @@ mod tests {
         assert_eq!(after_count.load(Ordering::SeqCst), 3);
 
         drop(upstream);
-        drop(handle);
         drop(context);
         let errors: Vec<_> = bus_rx
             .iter()
@@ -445,10 +534,12 @@ mod tests {
             clock: Arc::new(Clock::new()),
             source_id,
         });
-        let (tee, handle) = Tee::new("tee", context.clone());
+        let (tee_branch, handle) = TeeBuilder::new("tee", context.clone())
+            .build_dynamic()
+            .unwrap();
 
         drop(context);
-        drop(tee);
+        drop(tee_branch);
 
         assert!(handle.branch().is_none());
         assert_eq!(handle.sink_count(), 0);

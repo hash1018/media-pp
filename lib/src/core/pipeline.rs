@@ -731,7 +731,7 @@ mod tests {
 
     use super::*;
     use crate::elements::{
-        FileDemuxer, Pacer, Tee, TestAudioOptions, TestAudioSource, TestVideoOptions,
+        FileDemuxer, Pacer, TeeBuilder, TestAudioOptions, TestAudioSource, TestVideoOptions,
         TestVideoSource,
     };
 
@@ -877,7 +877,7 @@ mod tests {
     /// including whatever clone the `Tee`'s own retained `Context` held,
     /// has actually dropped; `tee_handle` only ever held a `Weak`
     /// reference; so it couldn't have kept anything alive regardless. The
-    /// `chain_builder()`/`sink_count()` checks afterward confirm the
+    /// `branch()`/`sink_count()` checks afterward confirm the
     /// underlying shared state is really gone, not just that the bus
     /// happened to close for some unrelated reason.
     #[test]
@@ -888,14 +888,14 @@ mod tests {
         let mut tee_handle_slot = None;
         let pipeline = PipelineBuilder::new("multi-source-tee-test")
             .add_source(video, |source, ctx| {
-                let (tee, handle) = Tee::new("tee", ctx.clone());
-                let tee_branch = ctx.branch().to(Box::new(tee))?;
-                ctx.attach(source, 0, tee_branch)?;
                 let branch = ctx.branch().to(Box::new(NoOpSink {
                     name: "video-sink".into(),
                     hlog: element_hlog(ElementType::Other, "video-sink", None),
                 }))?;
-                handle.attach(branch)?;
+                let (tee_branch, handle) = TeeBuilder::new("tee", ctx.clone())
+                    .branch(branch)
+                    .build_dynamic()?;
+                ctx.attach(source, 0, tee_branch)?;
                 tee_handle_slot = Some(handle);
                 Ok(())
             })
@@ -1213,10 +1213,9 @@ mod tests {
         // this used to hang the test process forever.
     }
 
-    /// A branch handed to [`TeeHandle::attach`] should render as starting
-    /// under `Tee(...)`, not the pipeline's source — the whole reason
-    /// [`Tee::new`]/[`TeeHandle::attach`] participate in the same live
-    /// [`PipelineGraph`] every `ChainBuilder` does.
+    /// Initial branches handed to [`TeeBuilder`] should render as starting
+    /// under `Tee(...)`, not the pipeline's source. The whole initial
+    /// fan-out is committed as one subgraph.
     #[test]
     fn topology_attributes_tee_branches_to_the_tee_not_the_source() {
         let (source, streams) = FileDemuxer::open("demux", test_video()).expect("open test video");
@@ -1236,16 +1235,31 @@ mod tests {
                 hlog: element_hlog(ElementType::Other, "sink-b", None),
             }))?;
 
-            let (tee, tee_handle) = Tee::new("tee", ctx.clone());
-            let tee_branch = ctx.branch().to(Box::new(tee))?;
+            let tee_branch = TeeBuilder::new("tee", ctx.clone())
+                .branch(branch_a)
+                .branch(branch_b)
+                .build()?;
             ctx.attach(source, index, tee_branch)?;
-            tee_handle.attach(branch_a)?;
-            tee_handle.attach(branch_b)?;
             Ok(())
         })
         .expect("test pipeline wiring must succeed");
 
         let topology = pipeline.topology();
+        let graph = pipeline.graph();
+        assert_eq!(
+            graph.revision, 2,
+            "source registration plus one subgraph commit"
+        );
+        assert_eq!(graph.nodes.len(), 4);
+        assert_eq!(graph.edges.len(), 3);
+        let initial_branch_id = graph.edges[0].branch_id;
+        assert!(
+            graph
+                .edges
+                .iter()
+                .all(|edge| edge.branch_id == initial_branch_id),
+            "the Tee and both initial branches must commit as one subgraph"
+        );
         let mut branches: Vec<&str> = topology.split('\n').collect();
         branches.sort_unstable();
         assert_eq!(
@@ -1271,31 +1285,34 @@ mod tests {
         let index = video.index;
 
         let mut tee_handle_slot = None;
-        let mut branch_a_id = None;
         let pipeline = Pipeline::new("test", source, |source, ctx| {
-            let branch_a = ctx.branch().to(Box::new(NoOpSink {
-                name: "sink-a".into(),
-                hlog: element_hlog(ElementType::Other, "sink-a", None),
-            }))?;
-            let branch_b = ctx.branch().to(Box::new(NoOpSink {
-                name: "sink-b".into(),
-                hlog: element_hlog(ElementType::Other, "sink-b", None),
-            }))?;
-
-            let (tee, tee_handle) = Tee::new("tee", ctx.clone());
-            let tee_branch = ctx.branch().to(Box::new(tee))?;
+            let (tee_branch, tee_handle) = TeeBuilder::new("tee", ctx.clone()).build_dynamic()?;
             ctx.attach(source, index, tee_branch)?;
-            branch_a_id = Some(tee_handle.attach(branch_a)?);
-            tee_handle.attach(branch_b)?;
             tee_handle_slot = Some(tee_handle);
             Ok(())
         })
         .expect("test pipeline wiring must succeed");
 
         let tee_handle = tee_handle_slot.expect("wire ran");
-        tee_handle
-            .detach(branch_a_id.expect("branch attached"))
+        let branch_a = tee_handle
+            .branch()
+            .expect("tee is alive")
+            .to(Box::new(NoOpSink {
+                name: "sink-a".into(),
+                hlog: element_hlog(ElementType::Other, "sink-a", None),
+            }))
             .unwrap();
+        let branch_b = tee_handle
+            .branch()
+            .expect("tee is alive")
+            .to(Box::new(NoOpSink {
+                name: "sink-b".into(),
+                hlog: element_hlog(ElementType::Other, "sink-b", None),
+            }))
+            .unwrap();
+        let branch_a_id = tee_handle.attach(branch_a).unwrap();
+        tee_handle.attach(branch_b).unwrap();
+        tee_handle.detach(branch_a_id).unwrap();
 
         assert_eq!(
             pipeline.topology(),
@@ -1320,26 +1337,33 @@ mod tests {
 
         let mut tee_handle_slot = None;
         let pipeline = Pipeline::new("test", source, |source, ctx| {
-            let branch_a = ctx.branch().queue("q-a", 4).to(Box::new(NoOpSink {
-                name: "sink-a".into(),
-                hlog: element_hlog(ElementType::Other, "sink-a", None),
-            }))?;
-            let branch_b = ctx.branch().to(Box::new(NoOpSink {
-                name: "sink-b".into(),
-                hlog: element_hlog(ElementType::Other, "sink-b", None),
-            }))?;
-
-            let (tee, tee_handle) = Tee::new("tee", ctx.clone());
-            let tee_branch = ctx.branch().to(Box::new(tee))?;
+            let (tee_branch, tee_handle) = TeeBuilder::new("tee", ctx.clone()).build_dynamic()?;
             ctx.attach(source, index, tee_branch)?;
-            tee_handle.attach(branch_a)?;
-            tee_handle.attach(branch_b)?;
             tee_handle_slot = Some(tee_handle);
             Ok(())
         })
         .expect("test pipeline wiring must succeed");
 
         let tee_handle = tee_handle_slot.expect("wire ran");
+        let branch_a = tee_handle
+            .branch()
+            .expect("tee is alive")
+            .queue("q-a", 4)
+            .to(Box::new(NoOpSink {
+                name: "sink-a".into(),
+                hlog: element_hlog(ElementType::Other, "sink-a", None),
+            }))
+            .unwrap();
+        let branch_b = tee_handle
+            .branch()
+            .expect("tee is alive")
+            .to(Box::new(NoOpSink {
+                name: "sink-b".into(),
+                hlog: element_hlog(ElementType::Other, "sink-b", None),
+            }))
+            .unwrap();
+        tee_handle.attach(branch_a).unwrap();
+        tee_handle.attach(branch_b).unwrap();
         // The queue, not "sink-a", is the branch root. Resolving the
         // deeply nested terminal ID still finds the correct branch.
         let sink_a_id = pipeline
@@ -1359,9 +1383,8 @@ mod tests {
 
     /// Scale check beyond the 2-branch tests above: dozens of branches on
     /// one `Tee`, all present in `topology()`, then half removed — proves
-    /// neither `ChainBuilder`'s eager registration nor `remove_subtree`'s
-    /// fixpoint walk depend on branch count or removal order in some way
-    /// the small tests wouldn't catch.
+    /// graph attachment and recursive branch removal do not depend on
+    /// branch count or removal order in a way the small tests miss.
     #[test]
     fn topology_stays_correct_with_dozens_of_branches_added_and_then_removed() {
         let (source, streams) = FileDemuxer::open("demux", test_video()).expect("open test video");
@@ -1373,25 +1396,28 @@ mod tests {
 
         const N: usize = 30;
         let mut tee_handle_slot = None;
-        let mut branch_ids = Vec::new();
         let pipeline = Pipeline::new("test", source, |source, ctx| {
-            let (tee, tee_handle) = Tee::new("tee", ctx.clone());
-            let tee_branch = ctx.branch().to(Box::new(tee))?;
+            let (tee_branch, tee_handle) = TeeBuilder::new("tee", ctx.clone()).build_dynamic()?;
             ctx.attach(source, index, tee_branch)?;
-            for i in 0..N {
-                let name: Arc<str> = format!("sink-{i}").into();
-                let branch = ctx.branch().to(Box::new(NoOpSink {
-                    name: name.clone(),
-                    hlog: element_hlog(ElementType::Other, &name, None),
-                }))?;
-                branch_ids.push(tee_handle.attach(branch)?);
-            }
             tee_handle_slot = Some(tee_handle);
             Ok(())
         })
         .expect("test pipeline wiring must succeed");
 
         let tee_handle = tee_handle_slot.expect("wire ran");
+        let mut branch_ids = Vec::new();
+        for i in 0..N {
+            let name: Arc<str> = format!("sink-{i}").into();
+            let branch = tee_handle
+                .branch()
+                .expect("tee is alive")
+                .to(Box::new(NoOpSink {
+                    name: name.clone(),
+                    hlog: element_hlog(ElementType::Other, &name, None),
+                }))
+                .unwrap();
+            branch_ids.push(tee_handle.attach(branch).unwrap());
+        }
 
         let mut branches: Vec<String> = pipeline.topology().lines().map(String::from).collect();
         branches.sort();
@@ -1445,8 +1471,7 @@ mod tests {
             .index;
         let mut handle_slot = None;
         let pipeline = Pipeline::new("test", source, |source, ctx| {
-            let (tee, handle) = Tee::new("tee", ctx.clone());
-            let tee_branch = ctx.branch().to(Box::new(tee))?;
+            let (tee_branch, handle) = TeeBuilder::new("tee", ctx.clone()).build_dynamic()?;
             ctx.attach(source, index, tee_branch)?;
             handle_slot = Some(handle);
             Ok(())
@@ -1484,8 +1509,7 @@ mod tests {
             .index;
         let mut handle_slot = None;
         let pipeline = Pipeline::new("test", source, |source, ctx| {
-            let (tee, handle) = Tee::new("tee", ctx.clone());
-            let tee_branch = ctx.branch().to(Box::new(tee))?;
+            let (tee_branch, handle) = TeeBuilder::new("tee", ctx.clone()).build_dynamic()?;
             ctx.attach(source, index, tee_branch)?;
             handle_slot = Some(handle);
             Ok(())
@@ -1505,8 +1529,93 @@ mod tests {
         assert_eq!(pipeline.graph().revision, before);
         let branch_id = handle.attach(detached).unwrap();
         assert_eq!(pipeline.graph().revision, before + 1);
+        let attached_edge = pipeline
+            .graph()
+            .edges
+            .into_iter()
+            .find(|edge| edge.branch_id == branch_id)
+            .expect("dynamic branch edge is present");
+        assert_eq!(&*attached_edge.from.port, "tee_src0");
+
         handle.detach(branch_id).unwrap();
         assert_eq!(pipeline.graph().revision, before + 2);
+
+        let replacement = handle
+            .branch()
+            .expect("tee is alive")
+            .to(Box::new(NoOpSink {
+                name: "replacement".into(),
+                hlog: element_hlog(ElementType::Other, "replacement", None),
+            }))
+            .unwrap();
+        let replacement_id = handle.attach(replacement).unwrap();
+        assert_eq!(pipeline.graph().revision, before + 3);
+        let replacement_edge = pipeline
+            .graph()
+            .edges
+            .into_iter()
+            .find(|edge| edge.branch_id == replacement_id)
+            .expect("replacement branch edge is present");
+        assert_eq!(
+            &*replacement_edge.from.port, "tee_src1",
+            "removed Tee pad names must never be reused"
+        );
+    }
+
+    #[test]
+    fn tee_handle_changes_branches_after_the_pipeline_starts() {
+        let source = TestVideoSource::new("video", TestVideoOptions::default());
+        let initial_count = Arc::new(AtomicUsize::new(0));
+        let dynamic_count = Arc::new(AtomicUsize::new(0));
+        let mut handle_slot = None;
+        let pipeline = Pipeline::new("runtime-tee-test", source, |source, ctx| {
+            let initial_branch = ctx.branch().to(Box::new(CountingSink {
+                name: "initial".into(),
+                count: initial_count.clone(),
+                hlog: element_hlog(ElementType::Other, "initial", None),
+            }))?;
+            let (tee_branch, handle) = TeeBuilder::new("tee", ctx.clone())
+                .branch(initial_branch)
+                .build_dynamic()?;
+            ctx.attach(source, 0, tee_branch)?;
+            handle_slot = Some(handle);
+            Ok(())
+        })
+        .expect("test pipeline wiring must succeed");
+        let handle = handle_slot.expect("wire ran");
+
+        pipeline.run();
+        thread::sleep(Duration::from_millis(75));
+        let dynamic_branch = handle
+            .branch()
+            .expect("tee is alive")
+            .to(Box::new(CountingSink {
+                name: "dynamic".into(),
+                count: dynamic_count.clone(),
+                hlog: element_hlog(ElementType::Other, "dynamic", None),
+            }))
+            .unwrap();
+        let branch_id = handle.attach(dynamic_branch).unwrap();
+        thread::sleep(Duration::from_millis(100));
+        handle.detach(branch_id).unwrap();
+
+        let count_after_detach = dynamic_count.load(Ordering::SeqCst);
+        assert!(count_after_detach > 0, "runtime branch received no frames");
+        thread::sleep(Duration::from_millis(75));
+        assert_eq!(
+            dynamic_count.load(Ordering::SeqCst),
+            count_after_detach,
+            "detached branch kept receiving frames"
+        );
+        assert!(initial_count.load(Ordering::SeqCst) > count_after_detach);
+
+        pipeline.stop();
+        let errors: Vec<_> = pipeline
+            .bus()
+            .iter()
+            .filter(|event| matches!(event, BusEvent::Error { .. }))
+            .collect();
+        assert!(errors.is_empty(), "unexpected runtime errors: {errors:?}");
     }
 
     #[test]

@@ -10,7 +10,7 @@ pub use driver::{
 pub use filter::{
     AudioCodec, Pacer, Scaler, ScalerError, SwAudioEncoder, SwAudioEncoderError,
     SwAudioEncoderOptions, SwDecoder, SwDecoderError, SwEncoder, SwEncoderError, SwEncoderOptions,
-    Tee, TeeHandle, VideoCodec,
+    Tee, TeeBuilder, TeeHandle, VideoCodec,
 };
 #[cfg(feature = "d3d11-renderer")]
 pub use filter::{D3d11Decoder, D3d11Upload, D3d11UploadError, D3d11vaDecoderError};

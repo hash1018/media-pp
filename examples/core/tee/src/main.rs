@@ -3,7 +3,7 @@ use std::sync::atomic::Ordering;
 use ffmpeg_next::media;
 use media_pp::{
     Error,
-    elements::{FileDemuxer, FrameCounter, PacketCounter, SwDecoder, Tee},
+    elements::{FileDemuxer, FrameCounter, PacketCounter, SwDecoder, TeeBuilder},
     pipeline::Pipeline,
 };
 
@@ -46,11 +46,11 @@ fn main() -> media_pp::Result<()> {
         let decode_branch = ctx.branch().pipe(decoder).to(Box::new(frame_counter))?;
         let packet_branch = ctx.branch().to(Box::new(packet_counter))?;
 
-        let (tee, tee_handle) = Tee::new("tee", ctx.clone());
-        let tee_branch = ctx.branch().to(Box::new(tee))?;
+        let tee_branch = TeeBuilder::new("tee", ctx.clone())
+            .branch(decode_branch)
+            .branch(packet_branch)
+            .build()?;
         ctx.attach(source, video.index, tee_branch)?;
-        tee_handle.attach(decode_branch)?;
-        tee_handle.attach(packet_branch)?;
         Ok(())
     })?;
 
