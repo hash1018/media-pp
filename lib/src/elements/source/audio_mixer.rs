@@ -132,23 +132,18 @@ pub struct MixerHandle {
 }
 
 impl MixerHandle {
-    /// Registers a new input under `name` and returns a [`Sink`] to link
-    /// an upstream source's pad to (e.g.
-    /// `capture_source.src_pads()[0].link(handle.add_source("mic").unwrap())`
-    /// inside that source's own `Pipeline::new` `wire` closure — a
+    /// Registers a new input under `name` and returns a [`Sink`] to use as
+    /// a detached branch terminal. Build and attach it inside that source's
+    /// own `Pipeline::new` wiring closure — a
     /// *different* pipeline/thread than this mixer's own, which is exactly
     /// the point). `None` once the mixer itself is gone. Calling this
     /// again with a name already in use replaces that input outright
     /// (whatever it had buffered is dropped) rather than erroring — same
     /// "just do what was asked" spirit as `HashMap::insert`.
     ///
-    /// **Known gap**: the returned [`MixerInputSink`] isn't registered in
-    /// any [`crate::element::ElementRegistry`] (it has no access to the
-    /// *other* pipeline's own one, and that registry's `register` is
-    /// crate-private besides), so it won't show up in that source's
-    /// [`crate::pipeline::Pipeline::topology`]. Nothing today depends on
-    /// cross-pipeline topology, so this is left unsolved rather than
-    /// guessed at.
+    /// The input endpoint appears in the upstream source pipeline's graph
+    /// when attached through [`crate::element::Context::attach`]. The graph
+    /// intentionally does not invent a cross-pipeline edge to the mixer.
     pub fn add_source(&self, name: impl Into<String>) -> Option<Box<dyn Sink>> {
         let shared = self.shared.upgrade()?;
         let name: Arc<str> = name.into().into();
@@ -496,7 +491,7 @@ mod tests {
     use rust_hlog::HLog;
 
     use super::*;
-    use crate::pipeline::{ChainBuilder, Pipeline};
+    use crate::pipeline::Pipeline;
 
     fn constant_frame(value: f32, samples: usize, rate: u32) -> ffmpeg::frame::Audio {
         let mut frame = ffmpeg::frame::Audio::new(
@@ -634,9 +629,11 @@ mod tests {
         };
 
         let pipeline = Pipeline::new("mixer-stereo-test", mixer, |source, ctx| {
-            let branch = ChainBuilder::new(ctx.clone()).build(Box::new(sink));
-            source.src_pads()[0].link(branch);
-        });
+            let branch = ctx.branch().to(Box::new(sink))?;
+            ctx.attach(source, 0, branch)?;
+            Ok(())
+        })
+        .expect("test pipeline wiring must succeed");
         pipeline.run();
 
         let mut input_a = handle.add_source("a").expect("mixer still alive");
@@ -701,9 +698,11 @@ mod tests {
         };
 
         let pipeline = Pipeline::new("mixer-test", mixer, |source, ctx| {
-            let branch = ChainBuilder::new(ctx.clone()).build(Box::new(sink));
-            source.src_pads()[0].link(branch);
-        });
+            let branch = ctx.branch().to(Box::new(sink))?;
+            ctx.attach(source, 0, branch)?;
+            Ok(())
+        })
+        .expect("test pipeline wiring must succeed");
         pipeline.run();
 
         let mut input_a = handle.add_source("a").expect("mixer still alive");
@@ -763,9 +762,11 @@ mod tests {
             hlog: element_hlog(ElementType::Other, "recorder", None),
         };
         let pipeline = Pipeline::new("mixer-test-2", mixer, |source, ctx| {
-            let branch = ChainBuilder::new(ctx.clone()).build(Box::new(sink));
-            source.src_pads()[0].link(branch);
-        });
+            let branch = ctx.branch().to(Box::new(sink))?;
+            ctx.attach(source, 0, branch)?;
+            Ok(())
+        })
+        .expect("test pipeline wiring must succeed");
         pipeline.run();
 
         let mut input_a = handle.add_source("a").unwrap();
@@ -812,9 +813,11 @@ mod tests {
             hlog: element_hlog(ElementType::Other, "recorder", None),
         };
         let pipeline = Pipeline::new("mixer-test-3", mixer, |source, ctx| {
-            let branch = ChainBuilder::new(ctx.clone()).build(Box::new(sink));
-            source.src_pads()[0].link(branch);
-        });
+            let branch = ctx.branch().to(Box::new(sink))?;
+            ctx.attach(source, 0, branch)?;
+            Ok(())
+        })
+        .expect("test pipeline wiring must succeed");
         pipeline.run();
 
         let mut input_a = handle.add_source("a").unwrap();

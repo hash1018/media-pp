@@ -141,7 +141,7 @@ impl TrackOutState {
 /// half of the pair — a `WebRtcTrackSource` nothing ever sends on, or a
 /// `WebRtcTrackSink` str0m has no send capability for — is simply inert,
 /// not an error.) This is the same idea as
-/// [`crate::elements::TeeHandle::add_sink`]'s dynamic attachment, just
+/// [`crate::elements::TeeHandle::attach`]'s dynamic attachment, just
 /// without `Tee`'s `Mutex` (nothing but this one thread ever touches
 /// `tracks_in`).
 #[rust_hlog::hlog]
@@ -958,10 +958,7 @@ mod tests {
     use str0m::Candidate;
 
     use super::*;
-    use crate::{
-        driver::DriverRunner,
-        pipeline::{ChainBuilder, Pipeline},
-    };
+    use crate::{driver::DriverRunner, pipeline::Pipeline};
 
     fn command_only_handle(capacity: usize) -> (WebRtcHandle, Receiver<Command>) {
         let (command_tx, command_rx) = bounded(capacity);
@@ -1136,9 +1133,11 @@ mod tests {
             hlog: element_hlog(ElementType::Other, "counter", None),
         };
         Pipeline::new("test", source, |source, ctx| {
-            let branch = ChainBuilder::new(ctx.clone()).build(Box::new(sink));
-            source.src_pads()[0].link(branch);
+            let branch = ctx.branch().to(Box::new(sink))?;
+            ctx.attach(source, 0, branch)?;
+            Ok(())
         })
+        .expect("test pipeline wiring must succeed")
     }
 
     /// One `Direction::SendRecv` track, opened by `WebRtcHandle::add_track`

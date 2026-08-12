@@ -3,9 +3,9 @@ use std::thread;
 use ffmpeg_next as ffmpeg;
 use media_pp::{
     bus::BusEvent,
-    element::{ElementType, Source},
+    element::ElementType,
     elements::{CaptureMode, DxgiScreenOptions, DxgiScreenSource, Scaler},
-    pipeline::{ChainBuilder, Pipeline},
+    pipeline::Pipeline,
 };
 use render_common::D3d12GpuContext;
 use winit::{
@@ -153,13 +153,15 @@ fn play(hwnd: isize, window_width: u32, window_height: u32) -> media_pp::Result<
         )
         .expect("failed to create renderer");
 
-        let branch = ChainBuilder::new(ctx.clone())
+        let branch = ctx
+            .branch()
             .queue("captured", 4) // thread boundary so scaling doesn't block capture
             .pipe(scaler)
             .queue("frames", 8) // thread boundary so rendering doesn't block scaling
-            .build(Box::new(renderer));
-        source.src_pads()[0].link(branch);
-    });
+            .to(Box::new(renderer))?;
+        ctx.attach(source, 0, branch)?;
+        Ok(())
+    })?;
 
     // `run()` starts capture on a background thread and returns right
     // away — any failure shows up as a `BusEvent::Error` here instead of

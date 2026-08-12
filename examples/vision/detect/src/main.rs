@@ -4,9 +4,8 @@ use ffmpeg_next::{format::Pixel, frame::Video, media, software::scaling::Flags};
 use media_pp::{
     Error, Result,
     bus::BusEvent,
-    element::Source,
     elements::{COCO_CLASS_LABELS, Detection, FileDemuxer, OrtDetector, Scaler, SwDecoder},
-    pipeline::{ChainBuilder, Pipeline},
+    pipeline::Pipeline,
 };
 use softbuffer::{Context, Surface};
 use winit::{
@@ -196,13 +195,15 @@ fn play(model_path: &str, video_path: &str, proxy: EventLoopProxy<AppEvent>) -> 
         )
         .expect("failed to load model");
 
-        let branch = ChainBuilder::new(ctx.clone())
+        let branch = ctx
+            .branch()
             .pipe(decoder) // same thread as the demux — cheap enough not to need a queue
             .queue("frames", 8) // scaler/detector run on their own thread
             .pipe(scaler)
-            .build(Box::new(detector));
-        source.src_pads()[video.index].link(branch);
-    });
+            .to(Box::new(detector))?;
+        ctx.attach(source, video.index, branch)?;
+        Ok(())
+    })?;
 
     pipeline.run();
 

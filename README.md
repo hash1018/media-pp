@@ -25,8 +25,9 @@ Everything is built from a handful of primitives in `lib/src/`:
 - **`Filter`** (`element.rs`) — anything that's both a `Source` and a
   `Sink` (decoder, pacer, ...). Auto-implemented for any `T: Source + Sink`;
   no separate "processing element" trait needed.
-- **`SrcPad`** (`pad.rs`) — an output port; links to exactly one
-  downstream `Sink`.
+- **`SrcPad`** (`pad.rs`) — an output port with exactly one runtime peer.
+  Applications connect it through `Context::attach`, so the runtime peer
+  and topology graph cannot diverge.
 - **`MediaBuffer`** (`buffer.rs`) — the unit of data flowing between
   elements (`Packet` / `Video` / `Audio` / `Eos`). Payloads are
   `Arc`-wrapped, so cloning a buffer (e.g. to fan it out) is a refcount
@@ -41,20 +42,28 @@ Everything is built from a handful of primitives in `lib/src/`:
 - **`Bus` / `BusEvent`** (`bus.rs`) — a cross-thread event channel. Once a
   buffer crosses a `Queue` boundary, errors can't propagate with `?`
   anymore, so they're posted here instead (`Error`, `Eos`, `Dropped`).
-  `BusReceiver::log_events()` drains and prints them in a default format.
+  `BusReceiver::iter_with_ids()` pairs each event with its stable graph
+  `ElementId`; `log_events()` drains and prints them in a default format.
 - **`Pipeline` / `ChainBuilder` / `PipelineBuilder`** (`pipeline.rs`) —
-  `ChainBuilder` builds one linear chain (`.pipe(filter)` for same-thread
-  stages, `.queue(name, capacity)` for a thread boundary, `.build(sink)` to
-  terminate); `Pipeline::run()` drives a `SourceElement` on a background
-  thread and returns immediately; draining its bus waits for that source
-  and every reachable `Queue` worker to finish, provided the application
-  has not retained an extra `Context`/`Bus` sender. `Pipeline::new` is the
+  `ctx.branch()` builds one linear, detached chain (`.pipe(filter)` for
+  same-thread stages, `.queue(name, capacity)` for a thread boundary,
+  `.to(sink)` to terminate). `ctx.attach(source, pad, branch)` commits the
+  runtime connection and graph in one operation. `Pipeline::run()` drives
+  a `SourceElement` on a background thread and returns immediately;
+  draining its bus waits for that source and every reachable `Queue`
+  worker to finish, provided the application has not retained an extra
+  `Context`/`Bus` sender. `Pipeline::new` is the
   single-source case; `PipelineBuilder::new(id).add_source(source, wire)…`
   combines more than one independent `SourceElement` (e.g. a video capture
   and an audio capture both feeding one `Mp4Muxer`) into one `Pipeline` —
   each source gets its own thread, but they share one `Bus`/`Clock`/
-  registry, and `run`/`pause`/`resume`/`stop`/`seek` reach every source
+  graph, and `run`/`pause`/`resume`/`stop`/`seek` reach every source
   from a single call.
+- **`PipelineGraph`** (`graph.rs`) — the live node/edge graph. Elements,
+  edges, and dynamic branches use stable `ElementId`/`EdgeId`/`BranchId`
+  values; names are display labels only. `Pipeline::graph()` returns a
+  revisioned, consistent snapshot, and `Pipeline::topology()` renders it.
+  A detached branch never appears until attachment succeeds.
 - **`Clock`** (`clock.rs`) — a shared wall-clock anchor (`Arc<Clock>`) so
   multiple `Pacer`s (e.g. one per stream) agree on the same t=0.
 
@@ -75,7 +84,7 @@ for); this table isn't meant to duplicate that.
 | `TestAudioSource` | Generates a synthetic sine-tone `Sample::F32(Packed)` audio stream — the audio sibling of `TestVideoSource`, no file/microphone/decoder needed |
 | `DxgiScreenSource` (`dxgi-capture`) | Captures the desktop live via DXGI Desktop Duplication — GStreamer's `d3d11screencapturesrc` equivalent. Pushes `Pixel::BGRA` untouched (chain a `Scaler` for YUV420P); emits at a constant `fps` (default 30, same convention as `TestVideoSource`) rather than one push per real desktop change — repeats the latest captured image if nothing changed since the last tick, since a variable-rate/push-on-change version of this turned out to cause visible judder against a vsync-locked renderer. `CaptureMode::Cpu` (default, optional cursor compositing) or `CaptureMode::Gpu` — the GPU mode resolves the capture adapter, creates its own `ID3D11Device`, and returns that device from `open()` so the renderer and other D3D11 stages can share it; capture then emits zero-copy `Pixel::D3D11` textures with no `Map`/CPU pixel copy (no cursor support yet in this mode) |
 | `AudioCaptureSource` (`wasapi-capture`) | Captures audio live via WASAPI — either a playback endpoint's own outgoing mix (loopback, i.e. system audio — the audio counterpart to record alongside `DxgiScreenSource`) or a microphone, picked from `AudioCaptureSource::list_devices()` |
-| `AudioMixer`¹ | Live-mixes any number of inputs, attachable/detachable while running via `MixerHandle::add_source`/`remove_source` (each returning/taking a `Sink` a *different* pipeline's own source can link to) — the fan-in counterpart to `Tee`'s fan-out |
+| `AudioMixer`¹ | Live-mixes any number of inputs, attachable/detachable while running via `MixerHandle::add_source`/`remove_source` (`add_source` returns a terminal `Sink` that a different pipeline can pass to `ctx.branch().to(...)`) — the fan-in counterpart to `Tee`'s fan-out |
 | `WebRtcPeer` (`webrtc`) | Drives one str0m `Rtc` session on its own thread. Not a `Pipeline` source itself — `WebRtcHandle::add_track`/`next_track()` mint a `WebRtcTrackSink`+`WebRtcTrackSource` pair per track (see below), symmetric for tracks either side added, so one `Direction::SendRecv` track carries both directions |
 | `WebRtcTrackSource` (`webrtc`) | The receive side of one WebRTC track — a plain `SourceElement`, same shape as `AppSource`; obtained via `WebRtcHandle::next_track()`, not constructed directly |
 
@@ -93,7 +102,7 @@ for); this table isn't meant to duplicate that.
 | `SwAudioEncoder` | Encodes `Audio` frames into `Packet`s (software `aac`) — resamples to whatever format/channel layout the codec actually needs, built lazily from the first frame it sees |
 | `Pacer` | Releases buffers at real playback speed (PTS + a shared `Clock`) |
 | `Scaler` | Converts pixel format and resizes `Video` frames in one pass (`libswscale`) |
-| `Tee`² | Fans one input out to a dynamic set of sinks, addable/removable while the pipeline runs |
+| `Tee`² | Fans one input out to dynamic branches; `attach` returns a stable `BranchId` used by `detach` while the pipeline runs |
 
 ² Doesn't actually implement `Source` — its pads live behind a lock instead of a plain `&mut [SrcPad]`, so a handle on another thread can request add/remove while `consume` is running. The operation completes after the in-flight `consume` releases that lock. See its own doc comment.
 

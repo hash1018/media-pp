@@ -8,8 +8,9 @@ use crate::{
     control::ControlMsg,
     element::{Context, Element, ElementType, Sink, element_hlog},
     error::Result,
+    graph::{BranchId, ElementId, GraphError},
     pad::SrcPad,
-    pipeline::ChainBuilder,
+    pipeline::{ChainBuilder, DetachedBranch},
 };
 
 /// Fans a single input out to a *dynamic* set of sinks — sinks are added
@@ -29,13 +30,20 @@ use crate::{
 /// encoded/decoded data.
 #[rust_hlog::hlog]
 pub struct Tee {
+    id: ElementId,
     name: Arc<str>,
     shared: Arc<TeeShared>,
 }
 
 struct TeeShared {
-    pads: Mutex<Vec<SrcPad>>,
+    branches: Mutex<Vec<TeeBranch>>,
     context: Arc<Context>,
+}
+
+struct TeeBranch {
+    id: BranchId,
+    root_id: ElementId,
+    pad: SrcPad,
 }
 
 /// A cheaply-cloneable handle for adding or removing a [`Tee`]'s sinks
@@ -43,10 +51,10 @@ struct TeeShared {
 /// reference to the `Tee`'s shared state: retaining a handle after the
 /// pipeline finishes must not keep downstream sinks or the pipeline's
 /// [`crate::bus::Bus`] sender alive. Once the `Tee` is gone,
-/// [`TeeHandle::chain_builder`] returns `None` and the other operations are
-/// harmless no-ops.
+/// [`TeeHandle::branch`] returns `None` once the `Tee` is gone.
 #[derive(Clone)]
 pub struct TeeHandle {
+    id: ElementId,
     name: Arc<str>,
     shared: Weak<TeeShared>,
 }
@@ -64,22 +72,20 @@ impl Tee {
         let name: Arc<str> = name.into().into();
         let hlog = element_hlog(ElementType::Tee, &name, None);
         hinfo!(hlog: &hlog, "created");
-        context.registry.register(
-            ElementType::Tee,
-            name.clone(),
-            Some(context.default_upstream.clone()),
-        );
+        let id = context.graph.reserve_element_id();
         let shared = Arc::new(TeeShared {
-            pads: Mutex::new(Vec::new()),
+            branches: Mutex::new(Vec::new()),
             context,
         });
         (
             Self {
+                id,
                 name: name.clone(),
                 hlog,
                 shared: shared.clone(),
             },
             TeeHandle {
+                id,
                 name,
                 shared: Arc::downgrade(&shared),
             },
@@ -93,15 +99,16 @@ impl Tee {
     /// one just failed. Reporting it that way (rather than folding every
     /// branch's failures into one generic `Tee` event) is what lets a
     /// caller watching the bus tell branches apart and call
-    /// [`TeeHandle::remove_sink`] on the right one. Falls back to `Tee`'s
+    /// corresponding runtime branch. Falls back to `Tee`'s
     /// own identity in the same call that just unlinked its peer, though
     /// in practice that can't happen: `pad`'s peer is still there
     /// whenever this is called (`SrcPad::push` never unlinks on `Err`).
-    fn report_branch_error(&self, pad: &SrcPad, error: crate::error::Error) {
-        let (element_type, name) = pad
+    fn report_branch_error(&self, branch: &TeeBranch, error: crate::error::Error) {
+        let (element_type, name) = branch
+            .pad
             .peer_identity()
             .unwrap_or((ElementType::Tee, self.name.clone()));
-        self.shared.context.bus.post(
+        self.shared.context.bus.for_element(branch.root_id).post(
             &self.hlog,
             BusEvent::Error {
                 element_type,
@@ -115,125 +122,92 @@ impl Tee {
 impl TeeHandle {
     /// A [`crate::pipeline::ChainBuilder`] pre-wired with this `Tee`'s own
     /// [`Context`] — lets a caller build a whole new branch (`.pipe(...)`
-    /// chains, ending in `.build(...)`) at any point after the pipeline
-    /// started running, then hand the result to [`TeeHandle::add_sink`],
-    /// without needing to have kept a `Bus`/pipeline id/[`crate::element::ElementRegistry`]
+    /// chains, ending in `.to(...)`) at any point after the pipeline
+    /// started running, then hand the result to [`TeeHandle::attach`],
+    /// without needing to retain the pipeline context separately
     /// around separately. Returns `None` once the `Tee` has been dropped.
-    pub fn chain_builder(&self) -> Option<ChainBuilder> {
+    pub fn branch(&self) -> Option<ChainBuilder> {
         let shared = self.shared.upgrade()?;
-        Some(ChainBuilder::new(shared.context.clone()))
+        Some(shared.context.branch())
     }
 
-    /// Adds a new sink, live for the next buffer `Tee` consumes.
-    pub fn add_sink(&self, sink: Box<dyn Sink>) {
-        let Some(shared) = self.shared.upgrade() else {
-            return;
-        };
-        // Retroactively points whatever `ChainBuilder` chain built `sink`
-        // (registered with an unresolved `upstream` — it had no way to
-        // know at `.build()` time whether it'd end up linked straight to
-        // a source pad or, as here, added to a `Tee`) at this `Tee`
-        // instead of the default-to-source fallback
-        // [`crate::pipeline::Pipeline::new`] would otherwise apply.
-        shared
-            .context
-            .registry
-            .set_upstream(&sink.name(), self.name.clone());
-        let mut pads = shared.pads.lock().unwrap();
-        let mut pad = SrcPad::new(format!("{}_src{}", self.name, pads.len()));
+    /// Attaches a detached branch, returning the stable ID used to remove it.
+    pub fn attach(&self, branch: DetachedBranch) -> Result<BranchId> {
+        let shared = self
+            .shared
+            .upgrade()
+            .ok_or(GraphError::ParentNotAttached(self.id))?;
+        let mut branches = shared.branches.lock().unwrap();
+        let mut pad = SrcPad::new(format!("{}_src{}", self.name, branches.len()));
+        let from_port: Arc<str> = pad.name().into();
+        let DetachedBranch { root, plan } = branch;
+        let root_id = plan.root;
+        let branch_id =
+            shared
+                .context
+                .graph
+                .attach_with(self.id, from_port, plan, |branch_id| {
+                    pad.link(root);
+                    branches.push(TeeBranch {
+                        id: branch_id,
+                        root_id,
+                        pad,
+                    });
+                    Ok(())
+                })?;
         hinfo!(
             hlog: &element_hlog(ElementType::Tee, &self.name, None),
             "sink added: {} total",
-            pads.len() + 1
+            branches.len()
         );
-        pad.link(sink);
-        pads.push(pad);
+        Ok(branch_id)
     }
 
-    /// Removes the sink named `name` — the same `Element::name()` a branch
-    /// carries into its own [`crate::bus::BusEvent`]s, including the ones
-    /// [`Tee::report_branch_error`] posts when that branch's `push` fails
-    /// — so a caller reacting to an error on the bus can call this
-    /// straight off `BusEvent::Error`'s own `name` field, without having
-    /// separately tracked which position `add_sink` assigned it. A no-op
-    /// if nothing by that name is currently attached (already removed, or
-    /// never added). Drops the sink on removal — cleanup happens exactly
-    /// the same way an abandoned/`Stop`'d branch's does elsewhere in this
-    /// crate (e.g. `SwDecoder`/`D3d12vaDecoder` only flush on `Seek`, not
-    /// `Stop`, precisely because dropping without an explicit shutdown
-    /// message is already a normal, accepted way to abandon a sink here).
-    /// Doesn't hand the removed `Box<dyn Sink>` back — deliberately:
-    /// re-adding the same removed sink elsewhere isn't a supported way to
-    /// get it back into [`crate::pipeline::Pipeline::topology`] (see
-    /// `ElementRegistry::remove_subtree`'s own docs), so returning it
-    /// would just invite exactly that. Want a branch back? Build a fresh
-    /// one.
-    pub fn remove_sink(&self, name: &str) {
-        let Some(shared) = self.shared.upgrade() else {
-            return;
-        };
-        let mut pads = shared.pads.lock().unwrap();
-        let Some(index) = pads
+    /// Detaches exactly the branch returned by [`TeeHandle::attach`]. The
+    /// runtime peer and every graph node owned by it disappear in the same
+    /// transaction. Names are deliberately not used as graph keys.
+    pub fn detach(&self, branch_id: BranchId) -> Result<()> {
+        let shared = self
+            .shared
+            .upgrade()
+            .ok_or(GraphError::BranchNotAttached(branch_id))?;
+        let mut branches = shared.branches.lock().unwrap();
+        let index = branches
             .iter()
-            .position(|pad| pad.peer_identity().is_some_and(|(_, n)| &*n == name))
-        else {
-            return;
-        };
+            .position(|branch| branch.id == branch_id)
+            .ok_or(GraphError::BranchNotAttached(branch_id))?;
         hinfo!(
             hlog: &element_hlog(ElementType::Tee, &self.name, None),
-            "sink removed: name={name}, {} remaining",
-            pads.len() - 1
+            "sink removed: branch={branch_id}, {} remaining",
+            branches.len() - 1
         );
-        if let Some(sink) = pads.remove(index).unlink() {
-            // Otherwise this branch would keep showing up under
-            // `Tee(...)` in `Pipeline::topology()` forever — the registry
-            // has no idea it was ever removed unless told.
-            shared.context.registry.remove_subtree(&sink.name());
-            // `sink` drops here.
-        }
+        shared.context.graph.detach_with(branch_id, || {
+            let _ = branches.remove(index).pad.unlink();
+            Ok(())
+        })?;
+        Ok(())
     }
 
-    /// Same effect as [`TeeHandle::remove_sink`], but `name` doesn't have
-    /// to be the branch's own root — it can be *any* element inside it,
-    /// found by walking [`crate::element::ElementInfo::upstream`] (the
-    /// same chain [`crate::pipeline::Pipeline::topology`] draws from)
-    /// back up until it reaches something added to this `Tee` directly.
-    /// For when the element that actually failed sits behind a
-    /// `.queue(...)` in the branch: past that boundary a failure is
-    /// reported under *that* element's own name (a `Queue` can only ever
-    /// speak for itself — see its own worker loop), not this `Tee`'s,
-    /// since `Tee` never sees it at all. Rather than have every caller
-    /// separately track "element X belongs to branch Y" just to route
-    /// around that, this reuses the bookkeeping `ElementRegistry` already
-    /// keeps for `topology()`. A no-op if `name` isn't registered, or
-    /// doesn't trace back to a branch currently attached to this `Tee`
-    /// (already removed, belongs to a different `Tee`/the plain source,
-    /// ...).
-    pub fn remove_branch_containing(&self, name: &str) {
-        let Some(shared) = self.shared.upgrade() else {
-            return;
-        };
-        let snapshot = shared.context.registry.snapshot();
-        let mut current = name;
-        loop {
-            let Some(info) = snapshot.iter().find(|e| &*e.name == current) else {
-                return;
-            };
-            match info.upstream.as_deref() {
-                Some(upstream) if upstream == &*self.name => {
-                    self.remove_sink(current);
-                    return;
-                }
-                Some(upstream) => current = upstream,
-                None => return,
-            }
-        }
+    /// Resolves the owning branch from any element ID inside it and
+    /// detaches that branch. Useful when an error is attributed to a stage
+    /// behind a queue rather than to the branch root.
+    pub fn detach_branch_containing(&self, element: ElementId) -> Result<()> {
+        let shared = self
+            .shared
+            .upgrade()
+            .ok_or(GraphError::ParentNotAttached(self.id))?;
+        let branch_id = shared
+            .context
+            .graph
+            .branch_containing(element)
+            .ok_or(GraphError::ParentNotAttached(element))?;
+        self.detach(branch_id)
     }
 
     pub fn sink_count(&self) -> usize {
         self.shared
             .upgrade()
-            .map(|shared| shared.pads.lock().unwrap().len())
+            .map(|shared| shared.branches.lock().unwrap().len())
             .unwrap_or(0)
     }
 }
@@ -247,6 +221,10 @@ impl Element for Tee {
         ElementType::Tee
     }
 
+    fn graph_id(&self) -> Option<ElementId> {
+        Some(self.id)
+    }
+
     fn hlog(&self) -> &HLog {
         &self.hlog
     }
@@ -258,8 +236,8 @@ impl Element for Tee {
 
 impl Sink for Tee {
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
-        let mut pads = self.shared.pads.lock().unwrap();
-        let Some((last, rest)) = pads.split_last_mut() else {
+        let mut branches = self.shared.branches.lock().unwrap();
+        let Some((last, rest)) = branches.split_last_mut() else {
             return Ok(());
         };
         // One branch failing must not stop the buffer from reaching its
@@ -267,13 +245,13 @@ impl Sink for Tee {
         // rule `Queue`'s worker loop follows. That buffer is dropped for
         // the failing branch only; the branch itself stays wired and gets
         // retried on the next one. Whoever's watching the bus decides
-        // whether to call `TeeHandle::remove_sink` over it.
-        for pad in rest {
-            if let Err(error) = pad.push(buf.clone()) {
-                self.report_branch_error(pad, error);
+        // whether to call `TeeHandle::detach` for it.
+        for branch in rest {
+            if let Err(error) = branch.pad.push(buf.clone()) {
+                self.report_branch_error(branch, error);
             }
         }
-        if let Err(error) = last.push(buf) {
+        if let Err(error) = last.pad.push(buf) {
             self.report_branch_error(last, error);
         }
         Ok(())
@@ -283,9 +261,9 @@ impl Sink for Tee {
         // Unlike `consume`, every branch gets the same `ControlMsg`
         // value directly (it's `Copy`, no need for the last-one-moves
         // split `consume` does for `MediaBuffer`).
-        let mut pads = self.shared.pads.lock().unwrap();
-        for pad in pads.iter_mut() {
-            pad.control(msg)?;
+        let mut branches = self.shared.branches.lock().unwrap();
+        for branch in branches.iter_mut() {
+            branch.pad.control(msg)?;
         }
         Ok(())
     }
@@ -296,7 +274,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
-    use crate::{bus::Bus, clock::Clock, element::ElementRegistry};
+    use crate::{bus::Bus, clock::Clock, graph::PipelineGraph};
 
     fn packet() -> MediaBuffer {
         MediaBuffer::Packet(Arc::new(ffmpeg_next::Packet::empty()))
@@ -381,41 +359,60 @@ mod tests {
     #[test]
     fn a_failing_branch_does_not_block_its_siblings() {
         let (bus, bus_rx) = Bus::new();
+        let graph = PipelineGraph::new();
+        let source_id = graph.add_source(ElementType::Other, "source".into());
         let context = Arc::new(Context {
             bus,
             pipeline_id: "test".into(),
-            registry: ElementRegistry::new(),
+            graph,
             clock: Arc::new(Clock::new()),
-            default_upstream: "source".into(),
+            source_id,
         });
-        let (mut tee, handle) = Tee::new("tee", context);
+        let (tee, handle) = Tee::new("tee", context.clone());
+        let tee_branch = context.branch().to(Box::new(tee)).unwrap();
+        let mut upstream = SrcPad::new("source_src");
+        context.attach_pad(&mut upstream, tee_branch).unwrap();
 
         let before_count = Arc::new(AtomicUsize::new(0));
         let after_count = Arc::new(AtomicUsize::new(0));
-        handle.add_sink(Box::new(CountingSink {
-            name: "before",
-            count: before_count.clone(),
-            hlog: element_hlog(ElementType::Other, "before", None),
-        }));
-        handle.add_sink(Box::new(AlwaysFailSink {
-            hlog: element_hlog(ElementType::Other, "always-fail", None),
-        }));
-        handle.add_sink(Box::new(CountingSink {
-            name: "after",
-            count: after_count.clone(),
-            hlog: element_hlog(ElementType::Other, "after", None),
-        }));
+        let before = context
+            .branch()
+            .to(Box::new(CountingSink {
+                name: "before",
+                count: before_count.clone(),
+                hlog: element_hlog(ElementType::Other, "before", None),
+            }))
+            .unwrap();
+        let failing = context
+            .branch()
+            .to(Box::new(AlwaysFailSink {
+                hlog: element_hlog(ElementType::Other, "always-fail", None),
+            }))
+            .unwrap();
+        let after = context
+            .branch()
+            .to(Box::new(CountingSink {
+                name: "after",
+                count: after_count.clone(),
+                hlog: element_hlog(ElementType::Other, "after", None),
+            }))
+            .unwrap();
+        handle.attach(before).unwrap();
+        handle.attach(failing).unwrap();
+        handle.attach(after).unwrap();
 
         for _ in 0..3 {
-            tee.consume(packet())
+            upstream
+                .push(packet())
                 .expect("a branch failing must not surface as an error from Tee::consume");
         }
 
         assert_eq!(before_count.load(Ordering::SeqCst), 3);
         assert_eq!(after_count.load(Ordering::SeqCst), 3);
 
-        drop(tee);
+        drop(upstream);
         drop(handle);
+        drop(context);
         let errors: Vec<_> = bus_rx
             .iter()
             .filter(|e| matches!(e, BusEvent::Error { .. }))
@@ -432,26 +429,28 @@ mod tests {
             )),
             "each Error event should be attributed to the branch that actually \
              failed, not to Tee itself — that's what lets a caller call \
-             TeeHandle::remove_sink(name) straight off the bus; got {errors:?}"
+             TeeHandle::detach(branch_id) straight off the bus; got {errors:?}"
         );
     }
 
     #[test]
     fn retained_handle_does_not_keep_tee_context_or_bus_alive() {
         let (bus, bus_rx) = Bus::new();
+        let graph = PipelineGraph::new();
+        let source_id = graph.add_source(ElementType::Other, "source".into());
         let context = Arc::new(Context {
             bus,
             pipeline_id: "test".into(),
-            registry: ElementRegistry::new(),
+            graph,
             clock: Arc::new(Clock::new()),
-            default_upstream: "source".into(),
+            source_id,
         });
         let (tee, handle) = Tee::new("tee", context.clone());
 
         drop(context);
         drop(tee);
 
-        assert!(handle.chain_builder().is_none());
+        assert!(handle.branch().is_none());
         assert_eq!(handle.sink_count(), 0);
         assert!(
             bus_rx.iter().next().is_none(),

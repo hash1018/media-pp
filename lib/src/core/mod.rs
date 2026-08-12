@@ -18,6 +18,7 @@ pub mod clock;
 pub mod control;
 pub mod driver;
 pub mod element;
+pub mod graph;
 pub mod log;
 pub mod pad;
 pub mod pipeline;

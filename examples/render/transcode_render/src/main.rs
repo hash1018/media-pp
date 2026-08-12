@@ -2,12 +2,11 @@ use std::thread;
 
 use media_pp::{
     bus::BusEvent,
-    element::Source,
     elements::{
         Pacer, SwDecoder, SwEncoder, SwEncoderOptions, TestVideoOptions, TestVideoSource,
         VideoCodec,
     },
-    pipeline::{ChainBuilder, Pipeline},
+    pipeline::Pipeline,
 };
 use render_common::D3d12GpuContext;
 use winit::{
@@ -151,16 +150,18 @@ fn play(hwnd: isize, width: u32, height: u32) -> media_pp::Result<()> {
         let renderer = render_common::d3d12_window_renderer("renderer", &gpu, hwnd, width, height)
             .expect("failed to create renderer");
 
-        let branch = ChainBuilder::new(ctx.clone())
+        let branch = ctx
+            .branch()
             .queue("to-encode", 8) // let generation run ahead of the (CPU-heavy) encoder
             .pipe(encoder)
             .queue("to-decode", 8) // let encode run ahead of decode
             .pipe(decoder)
             .queue("frames", 8) // pacer sleeps on its own thread; let decode run ahead into this
             .pipe(pacer)
-            .build(Box::new(renderer));
-        source.src_pads()[0].link(branch);
-    });
+            .to(Box::new(renderer))?;
+        ctx.attach(source, 0, branch)?;
+        Ok(())
+    })?;
 
     // `run()` starts playback on a background thread and returns right
     // away — any failure (encoder/decoder open already happened above and

@@ -4,9 +4,8 @@ use ffmpeg_next::media;
 use media_pp::{
     Error,
     bus::BusEvent,
-    element::Source,
     elements::{PacketCounter, RtspOptions, RtspSource},
-    pipeline::{ChainBuilder, Pipeline},
+    pipeline::Pipeline,
 };
 
 /// Connects to a live RTSP stream and counts video packets for a few
@@ -40,11 +39,10 @@ fn main() -> media_pp::Result<()> {
     let (counter, count) = PacketCounter::new("counter");
 
     let pipeline = Pipeline::new("rtsp-source", source, |source, ctx| {
-        let branch = ChainBuilder::new(ctx.clone())
-            .queue("q", 32)
-            .build(Box::new(counter));
-        source.src_pads()[index].link(branch);
-    });
+        let branch = ctx.branch().queue("q", 32).to(Box::new(counter))?;
+        ctx.attach(source, index, branch)?;
+        Ok(())
+    })?;
 
     pipeline.run();
 

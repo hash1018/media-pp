@@ -309,9 +309,8 @@ impl Sink for SegmentedTrackSink {
 mod tests {
     use super::*;
     use crate::{
-        element::Source,
         elements::{SwEncoder, SwEncoderOptions, TestVideoOptions, TestVideoSource, VideoCodec},
-        pipeline::{ChainBuilder, Pipeline},
+        pipeline::Pipeline,
     };
 
     /// Drives a real `TestVideoSource -> SwEncoder -> SegmentedMp4Muxer`
@@ -366,9 +365,11 @@ mod tests {
         let sink = sinks.pop().expect("exactly one stream was added");
 
         let pipeline = Pipeline::new("segmented-test", video_source, |source, ctx| {
-            let branch = ChainBuilder::new(ctx.clone()).pipe(encoder).build(sink);
-            source.src_pads()[0].link(branch);
-        });
+            let branch = ctx.branch().pipe(encoder).to(sink)?;
+            ctx.attach(source, 0, branch)?;
+            Ok(())
+        })
+        .expect("test pipeline wiring must succeed");
         pipeline.run();
         std::thread::sleep(Duration::from_secs(3));
         pipeline.stop();
@@ -455,9 +456,11 @@ mod tests {
         let sink = sinks.pop().expect("exactly one stream was added");
 
         let pipeline = Pipeline::new("segmented-release-test", video_source, |source, ctx| {
-            let branch = ChainBuilder::new(ctx.clone()).pipe(encoder).build(sink);
-            source.src_pads()[0].link(branch);
-        });
+            let branch = ctx.branch().pipe(encoder).to(sink)?;
+            ctx.attach(source, 0, branch)?;
+            Ok(())
+        })
+        .expect("test pipeline wiring must succeed");
         pipeline.run();
 
         // Wait (bounded) for at least one rotation — the pipeline is

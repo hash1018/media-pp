@@ -3,9 +3,8 @@ use std::{sync::atomic::Ordering, thread, time::Duration};
 use media_pp::{
     Result,
     bus::BusEvent,
-    element::Source,
     elements::{AudioCaptureOptions, AudioCaptureSource, AudioDeviceKind, FrameCounter},
-    pipeline::{ChainBuilder, Pipeline},
+    pipeline::Pipeline,
 };
 
 /// Lists every audio endpoint, picks one, captures ~3 seconds from it and
@@ -59,9 +58,10 @@ fn main() -> Result<()> {
 
     let (counter, count) = FrameCounter::new("frame-counter");
     let pipeline = Pipeline::new("audio-capture", source, |source, ctx| {
-        let branch = ChainBuilder::new(ctx.clone()).build(Box::new(counter));
-        source.src_pads()[0].link(branch);
-    });
+        let branch = ctx.branch().to(Box::new(counter))?;
+        ctx.attach(source, 0, branch)?;
+        Ok(())
+    })?;
     pipeline.run();
 
     thread::sleep(Duration::from_secs(3));

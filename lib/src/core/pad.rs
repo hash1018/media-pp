@@ -51,15 +51,15 @@ impl SrcPad {
             .map(|sink| (sink.element_type(), sink.name()))
     }
 
-    /// Links this pad to a downstream `Sink` — a plain element, a `Queue`
-    /// (thread boundary), or anything else that implements `Sink`.
-    /// Replaces any previous link.
-    pub fn link(&mut self, sink: Box<dyn Sink>) {
+    /// Runtime half of a connection. Pipeline users connect through
+    /// [`crate::element::Context::attach`], which keeps the graph and this
+    /// peer in sync. Kept crate-visible for element-level unit tests.
+    pub(crate) fn link(&mut self, sink: Box<dyn Sink>) {
         self.peer = Some(sink);
     }
 
     /// Removes and returns whatever this pad was linked to, if anything.
-    pub fn unlink(&mut self) -> Option<Box<dyn Sink>> {
+    pub(crate) fn unlink(&mut self) -> Option<Box<dyn Sink>> {
         self.peer.take()
     }
 

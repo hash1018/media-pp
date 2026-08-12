@@ -1,9 +1,8 @@
 use ffmpeg_next::media;
 use media_pp::{
     bus::BusEvent,
-    element::Source,
     elements::{FileDemuxer, Mp4Muxer},
-    pipeline::{ChainBuilder, Pipeline},
+    pipeline::Pipeline,
 };
 
 /// FileDemuxer -> Mp4Muxer: remuxes every video/audio stream in a file
@@ -60,10 +59,11 @@ fn main() -> media_pp::Result<()> {
 
     let pipeline = Pipeline::new("remux", source, |source, ctx| {
         for (stream_index, sink) in kept_indices.into_iter().zip(sinks) {
-            let branch = ChainBuilder::new(ctx.clone()).build(sink);
-            source.src_pads()[stream_index].link(branch);
+            let branch = ctx.branch().to(sink)?;
+            ctx.attach(source, stream_index, branch)?;
         }
-    });
+        Ok(())
+    })?;
 
     println!("remuxing {input_path} -> {output_path} ...");
     pipeline.run();

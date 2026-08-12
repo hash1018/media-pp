@@ -3,9 +3,8 @@ use std::thread;
 use ffmpeg_next as ffmpeg;
 use media_pp::{
     bus::BusEvent,
-    element::Source,
     elements::{D3d11Upload, Scaler, TestVideoOptions, TestVideoSource},
-    pipeline::{ChainBuilder, Pipeline},
+    pipeline::Pipeline,
 };
 use render_common::D3d11GpuContext;
 use winit::{
@@ -137,15 +136,17 @@ fn play(hwnd: isize, width: u32, height: u32) -> media_pp::Result<()> {
         let renderer = render_common::d3d11_window_renderer("renderer", &gpu, hwnd, width, height)
             .expect("failed to create renderer");
 
-        let branch = ChainBuilder::new(ctx.clone())
+        let branch = ctx
+            .branch()
             .queue("generated", 4) // thread boundary so scaling doesn't block generation
             .pipe(scaler)
             .queue("scaled", 4) // thread boundary so uploading doesn't block scaling
             .pipe(upload)
             .queue("frames", 8) // thread boundary so rendering doesn't block uploading
-            .build(Box::new(renderer));
-        source.src_pads()[0].link(branch);
-    });
+            .to(Box::new(renderer))?;
+        ctx.attach(source, 0, branch)?;
+        Ok(())
+    })?;
 
     // `run()` starts playback on a background thread and returns right
     // away — any failure (e.g. an unsupported pixel format anywhere in

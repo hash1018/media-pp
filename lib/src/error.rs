@@ -20,6 +20,7 @@ use crate::{
         ScalerError, SwAudioEncoderError, SwDecoderError, SwEncoderError, TestAudioSourceError,
         TestVideoSourceError,
     },
+    graph::GraphError,
     queue::QueueError,
 };
 
@@ -63,6 +64,9 @@ pub enum Error {
 
     #[error(transparent)]
     QueueError(#[from] QueueError),
+
+    #[error(transparent)]
+    GraphError(#[from] GraphError),
 
     #[error(transparent)]
     AudioMixerError(#[from] AudioMixerError),

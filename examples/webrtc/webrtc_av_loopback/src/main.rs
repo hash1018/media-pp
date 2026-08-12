@@ -13,13 +13,13 @@ use media_pp::{
     buffer::MediaBuffer,
     control::ControlMsg,
     driver::DriverRunner,
-    element::{Element, ElementType, Sink, Source, element_hlog},
+    element::{Element, ElementType, Sink, element_hlog},
     elements::{
         AudioCodec, SwAudioEncoder, SwAudioEncoderOptions, SwEncoder, SwEncoderOptions,
         TestAudioOptions, TestAudioSource, TestVideoOptions, TestVideoSource, VideoCodec,
         WebRtcPeer,
     },
-    pipeline::{ChainBuilder, PipelineBuilder},
+    pipeline::PipelineBuilder,
 };
 use rust_hlog::HLog;
 use str0m::{
@@ -177,19 +177,25 @@ fn main() {
 
     let send_pipeline = PipelineBuilder::new("peer-a-send")
         .add_source(video_source, |source, ctx| {
-            let branch = ChainBuilder::new(ctx.clone())
+            let branch = ctx
+                .branch()
                 .queue("encode-video", 4)
                 .pipe(video_encoder)
-                .build(Box::new(video_sink_a));
-            source.src_pads()[0].link(branch);
+                .to(Box::new(video_sink_a))?;
+            ctx.attach(source, 0, branch)?;
+            Ok(())
         })
+        .expect("video send pipeline wiring must succeed")
         .add_source(audio_source, |source, ctx| {
-            let branch = ChainBuilder::new(ctx.clone())
+            let branch = ctx
+                .branch()
                 .queue("encode-audio", 4)
                 .pipe(audio_encoder)
-                .build(Box::new(audio_sink_a));
-            source.src_pads()[0].link(branch);
+                .to(Box::new(audio_sink_a))?;
+            ctx.attach(source, 0, branch)?;
+            Ok(())
         })
+        .expect("audio send pipeline wiring must succeed")
         .build();
 
     // -- Receive side: count packets on each track independently.
@@ -199,25 +205,29 @@ fn main() {
         .add_source(video_source_b, {
             let count = video_count.clone();
             move |source, ctx| {
-                let branch = ChainBuilder::new(ctx.clone()).build(Box::new(CountingSink {
+                let branch = ctx.branch().to(Box::new(CountingSink {
                     name: "video-counter".into(),
                     count,
                     hlog: element_hlog(ElementType::Other, "video-counter", None),
-                }));
-                source.src_pads()[0].link(branch);
+                }))?;
+                ctx.attach(source, 0, branch)?;
+                Ok(())
             }
         })
+        .expect("video receive pipeline wiring must succeed")
         .add_source(audio_source_b, {
             let count = audio_count.clone();
             move |source, ctx| {
-                let branch = ChainBuilder::new(ctx.clone()).build(Box::new(CountingSink {
+                let branch = ctx.branch().to(Box::new(CountingSink {
                     name: "audio-counter".into(),
                     count,
                     hlog: element_hlog(ElementType::Other, "audio-counter", None),
-                }));
-                source.src_pads()[0].link(branch);
+                }))?;
+                ctx.attach(source, 0, branch)?;
+                Ok(())
             }
         })
+        .expect("audio receive pipeline wiring must succeed")
         .build();
 
     send_pipeline.run();

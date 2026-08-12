@@ -1,7 +1,4 @@
-use std::{
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::{sync::Arc, time::Duration};
 
 use rust_hlog::HLog;
 
@@ -11,6 +8,7 @@ use crate::{
     clock::Clock,
     control::{ControlMsg, ControlReceiver},
     error::Result,
+    graph::{ElementId, PipelineGraph},
     pad::SrcPad,
 };
 
@@ -72,6 +70,13 @@ pub trait Element: Send {
     /// See [`ElementType`].
     fn element_type(&self) -> ElementType;
 
+    /// A pre-reserved graph identity for elements that expose dynamic
+    /// attachment handles. Most elements receive an ID from
+    /// `ChainBuilder` and keep the default `None` implementation.
+    fn graph_id(&self) -> Option<ElementId> {
+        None
+    }
+
     /// This element's identity for [`crate::bus::Bus::post`] — same
     /// `id`/`name` as [`Element::name`], just already wrapped as the
     /// [`rust_hlog::HLog`] its `hinfo!`/`hwarn!`/`herror!` macros need. A
@@ -106,127 +111,9 @@ pub fn element_hlog(element_type: ElementType, name: &str, pipeline_id: Option<&
     }
 }
 
-/// One element known to have been statically wired into a
-/// [`crate::pipeline::Pipeline`] — see [`crate::pipeline::Pipeline::elements`]/
-/// [`crate::pipeline::Pipeline::topology`].
-#[derive(Debug, Clone)]
-pub struct ElementInfo {
-    pub element_type: ElementType,
-    pub name: Arc<str>,
-    /// The name of whatever feeds this element, if [`ElementRegistry`]
-    /// could determine it. `None` means either this *is* the pipeline's
-    /// own source (nothing feeds it), or this registry simply couldn't
-    /// trace it — e.g. the first element of a [`crate::pipeline::ChainBuilder`]
-    /// chain, until whatever links the finished chain resolves it (the
-    /// pipeline's source by default, or a [`crate::elements::Tee`] — see
-    /// [`crate::elements::TeeHandle::add_sink`]). Rendering code (see
-    /// [`crate::pipeline::Pipeline::topology`]) treats an unresolved
-    /// `None` other than the source's own entry as "attached directly to
-    /// the source", the same default `ChainBuilder`/`Pipeline::new` apply.
-    pub upstream: Option<Arc<str>>,
-}
-
-/// Shared, append-mostly registry of every [`ElementInfo`] wired into a
-/// [`crate::pipeline::Pipeline`] — created by
-/// [`crate::pipeline::Pipeline::new`] and handed out (via [`Context`]) to
-/// whatever [`crate::pipeline::ChainBuilder`]/[`crate::elements::Tee`]
-/// records itself as it's constructed, statically or dynamically.
-/// `Pipeline` keeps its own clone alive for the whole run, so
-/// [`crate::pipeline::Pipeline::elements`]/[`crate::pipeline::Pipeline::topology`]
-/// can re-derive a fresh view — including anything registered well after
-/// construction (e.g. a branch added to a running [`crate::elements::Tee`])
-/// — on every call, rather than a snapshot frozen at construction time.
-///
-/// Deliberately its own type rather than piggybacked on
-/// [`crate::bus::Bus`] (an earlier version of this did exactly that): a
-/// `Bus` is for runtime playback events, not build-time structure — the
-/// two don't belong sharing one channel just because both happen to
-/// already be threaded through the same [`Context`].
-#[derive(Clone, Default)]
-pub struct ElementRegistry(Arc<Mutex<Vec<ElementInfo>>>);
-
-impl ElementRegistry {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Records one element, in whatever order it's discovered. `upstream`
-    /// is typically "the previous element in the same chain" — `None` for
-    /// a chain's first element, left for later resolution (see
-    /// [`ElementInfo::upstream`]'s own docs).
-    pub(crate) fn register(
-        &self,
-        element_type: ElementType,
-        name: Arc<str>,
-        upstream: Option<Arc<str>>,
-    ) {
-        self.0.lock().unwrap().push(ElementInfo {
-            element_type,
-            name,
-            upstream,
-        });
-    }
-
-    /// Points the entry named `name`'s `upstream` at `upstream` — used
-    /// once a chain's true root becomes known only *after* it was already
-    /// registered, e.g. [`crate::elements::TeeHandle::add_sink`] learning
-    /// the branch it just received actually starts under that `Tee`, not
-    /// wherever it'll eventually turn out to be linked. A no-op if
-    /// nothing named `name` is registered (nothing to fix up).
-    pub(crate) fn set_upstream(&self, name: &str, upstream: Arc<str>) {
-        if let Some(info) = self.0.lock().unwrap().iter_mut().find(|e| &*e.name == name) {
-            info.upstream = Some(upstream);
-        }
-    }
-
-    /// Removes `name`'s own entry, then repeatedly removes anything whose
-    /// `upstream` (transitively) pointed at something just removed — i.e.
-    /// the whole branch rooted at `name`, not just its first element. Used
-    /// by [`crate::elements::TeeHandle::remove_sink`]: once a branch is
-    /// detached, it's no longer part of this pipeline's topology at all,
-    /// not still shown hanging off the `Tee` it was just pulled from.
-    ///
-    /// Deliberately a hard delete, not a reversible "detach" a later
-    /// `add_sink` could restore — mirrors [`crate::pipeline::Pipeline`]
-    /// itself not supporting reuse (see its own docs): resurrecting a
-    /// removed branch's old bookkeeping was designed once (a `detached`
-    /// flag + a cascading "reattach" call) and deliberately dropped as
-    /// unneeded complexity for a case with no real caller — if you want a
-    /// branch back, build a fresh one. A no-op if nothing named `name` is
-    /// registered.
-    pub(crate) fn remove_subtree(&self, name: &str) {
-        let mut elements = self.0.lock().unwrap();
-        let Some(pos) = elements.iter().position(|e| &*e.name == name) else {
-            return;
-        };
-        let mut removed = vec![elements.remove(pos).name];
-        loop {
-            let before = elements.len();
-            elements.retain(|e| {
-                let is_orphaned = e
-                    .upstream
-                    .as_deref()
-                    .is_some_and(|u| removed.iter().any(|r| &**r == u));
-                if is_orphaned {
-                    removed.push(e.name.clone());
-                }
-                !is_orphaned
-            });
-            if elements.len() == before {
-                break;
-            }
-        }
-    }
-
-    /// Everything registered so far, in registration order.
-    pub(crate) fn snapshot(&self) -> Vec<ElementInfo> {
-        self.0.lock().unwrap().clone()
-    }
-}
-
 /// Everything a [`crate::pipeline::ChainBuilder`]/[`crate::elements::Tee`]
 /// needs to wire itself into a [`crate::pipeline::Pipeline`] — bundled into
-/// one `Arc` instead of threading `bus`/`pipeline_id`/`registry`/`clock`
+/// one `Arc` instead of threading `bus`/`pipeline_id`/`graph`/`clock`
 /// through separately. Built once per source by
 /// [`crate::pipeline::PipelineBuilder::add_source`] (what
 /// [`crate::pipeline::Pipeline::new`] itself calls, for its own
@@ -238,16 +125,10 @@ impl ElementRegistry {
 pub struct Context {
     pub bus: Bus,
     pub pipeline_id: Arc<str>,
-    pub registry: ElementRegistry,
+    pub graph: PipelineGraph,
     pub clock: Arc<Clock>,
-    /// The name of the source this particular `Context` was built for —
-    /// what [`crate::pipeline::ChainBuilder::new`] seeds its own chain's
-    /// first `upstream` with, so a chain built under one source in a
-    /// multi-source [`crate::pipeline::Pipeline`] (see
-    /// [`crate::pipeline::PipelineBuilder`]) defaults to hanging off
-    /// *that* source in [`crate::pipeline::Pipeline::topology`], not
-    /// whichever source happened to be registered first.
-    pub default_upstream: Arc<str>,
+    /// Graph identity of the source whose wiring closure owns this context.
+    pub source_id: ElementId,
 }
 
 /// Anything that can receive a buffer pushed from upstream — the input

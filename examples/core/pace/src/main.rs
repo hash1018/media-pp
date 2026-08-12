@@ -4,9 +4,8 @@ use ffmpeg_next::media;
 use media_pp::{
     Error,
     bus::BusEvent,
-    element::Source,
     elements::{FileDemuxer, FrameCounter, Pacer, SwDecoder},
-    pipeline::{ChainBuilder, Pipeline},
+    pipeline::Pipeline,
 };
 
 /// Demux -> SwDecoder -> Pacer -> FrameCounter: proves `Pacer` paces decoded
@@ -45,13 +44,15 @@ fn main() -> media_pp::Result<()> {
     let pipeline = Pipeline::new("pace", source, |source, ctx| {
         let decoder = SwDecoder::new("decoder", params).expect("failed to open decoder");
         let pacer = Pacer::new("pacer", time_base, ctx.clock.clone());
-        let branch = ChainBuilder::new(ctx.clone())
+        let branch = ctx
+            .branch()
             .pipe(decoder) // same thread as the demux — cheap enough not to need a queue
             .queue("frames", 32) // pacer sleeps on its own thread; let decode run ahead into this
             .pipe(pacer)
-            .build(Box::new(counter));
-        source.src_pads()[video.index].link(branch);
-    });
+            .to(Box::new(counter))?;
+        ctx.attach(source, video.index, branch)?;
+        Ok(())
+    })?;
 
     let start = Instant::now();
     pipeline.run();

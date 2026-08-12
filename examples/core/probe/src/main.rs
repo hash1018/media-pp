@@ -4,9 +4,8 @@ use ffmpeg_next::media;
 use media_pp::{
     Error,
     bus::BusEvent,
-    element::Source,
     elements::{FileDemuxer, PacketCounter},
-    pipeline::{ChainBuilder, Pipeline},
+    pipeline::Pipeline,
 };
 
 /// Smoke test for the architecture: open a file, inspect its streams,
@@ -40,11 +39,13 @@ fn main() -> media_pp::Result<()> {
     let (counter, count) = PacketCounter::new("counter");
 
     let pipeline = Pipeline::new("probe", source, |source, ctx| {
-        let branch = ChainBuilder::new(ctx.clone())
+        let branch = ctx
+            .branch()
             .queue("q1", 32) // thread boundary: demux thread -> counter thread
-            .build(Box::new(counter));
-        source.src_pads()[video.index].link(branch);
-    });
+            .to(Box::new(counter))?;
+        ctx.attach(source, video.index, branch)?;
+        Ok(())
+    })?;
 
     pipeline.run();
 

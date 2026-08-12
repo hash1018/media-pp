@@ -4,9 +4,8 @@ use ffmpeg_next::media;
 use media_pp::{
     Error,
     bus::BusEvent,
-    element::Source,
     elements::{D3d11Decoder, FileDemuxer, Pacer},
-    pipeline::{ChainBuilder, Pipeline},
+    pipeline::Pipeline,
 };
 use render_common::D3d11GpuContext;
 use winit::{
@@ -154,13 +153,15 @@ fn play(path: &str, hwnd: isize, width: u32, height: u32) -> media_pp::Result<()
         let pacer = Pacer::new("pacer", time_base, ctx.clock.clone());
         let renderer = render_common::d3d11_window_renderer("renderer", &gpu, hwnd, width, height)
             .expect("failed to create renderer");
-        let branch = ChainBuilder::new(ctx.clone())
+        let branch = ctx
+            .branch()
             .pipe(decoder) // same thread as the demux — cheap enough not to need a queue
             .queue("frames", 32) // pacer sleeps on its own thread; let decode run ahead into this
             .pipe(pacer)
-            .build(Box::new(renderer));
-        source.src_pads()[video.index].link(branch);
-    });
+            .to(Box::new(renderer))?;
+        ctx.attach(source, video.index, branch)?;
+        Ok(())
+    })?;
 
     // `run()` starts playback on a background thread and returns right
     // away — any failure (including the source's own) shows up as a

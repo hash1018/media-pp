@@ -6,13 +6,12 @@ use std::{
 use ffmpeg_next as ffmpeg;
 use media_pp::{
     bus::BusEvent,
-    element::Source,
     elements::{
         AudioCaptureOptions, AudioCaptureSource, AudioCodec, AudioDeviceKind, CaptureMode,
         DxgiScreenOptions, DxgiScreenSource, Mp4Muxer, Scaler, SwAudioEncoder,
         SwAudioEncoderOptions, SwEncoder, SwEncoderOptions, VideoCodec,
     },
-    pipeline::{ChainBuilder, PipelineBuilder},
+    pipeline::PipelineBuilder,
 };
 
 /// DxgiScreenSource + AudioCaptureSource (system-audio loopback — whatever
@@ -104,20 +103,21 @@ fn main() -> media_pp::Result<()> {
                 height,
                 ffmpeg::software::scaling::Flags::BILINEAR,
             );
-            let branch = ChainBuilder::new(ctx.clone())
+            let branch = ctx
+                .branch()
                 .queue("captured", 4) // thread boundary so scaling doesn't block capture
                 .pipe(scaler)
                 .queue("frames", 8) // thread boundary so encoding doesn't block scaling
                 .pipe(video_encoder)
-                .build(video_sink);
-            source.src_pads()[0].link(branch);
-        })
+                .to(video_sink)?;
+            ctx.attach(source, 0, branch)?;
+            Ok(())
+        })?
         .add_source(audio_source, |source, ctx| {
-            let branch = ChainBuilder::new(ctx.clone())
-                .pipe(audio_encoder)
-                .build(audio_sink);
-            source.src_pads()[0].link(branch);
-        })
+            let branch = ctx.branch().pipe(audio_encoder).to(audio_sink)?;
+            ctx.attach(source, 0, branch)?;
+            Ok(())
+        })?
         .build();
 
     println!("recording desktop + system audio to {path} — type `q` + Enter to stop");

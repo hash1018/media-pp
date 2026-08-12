@@ -2,12 +2,11 @@ use std::{thread, time::Duration};
 
 use media_pp::{
     bus::BusEvent,
-    element::Source,
     elements::{
         AudioCodec, Mp4Muxer, SwAudioEncoder, SwAudioEncoderOptions, TestAudioOptions,
         TestAudioSource,
     },
-    pipeline::{ChainBuilder, Pipeline},
+    pipeline::Pipeline,
 };
 
 /// TestAudioSource -> SwAudioEncoder -> Mp4Muxer: encodes a generated sine
@@ -52,11 +51,10 @@ fn main() -> media_pp::Result<()> {
     let muxer_sink = muxer.open()?.pop().expect("exactly one stream was added");
 
     let pipeline = Pipeline::new("audio-record", source, |source, ctx| {
-        let branch = ChainBuilder::new(ctx.clone())
-            .pipe(encoder)
-            .build(muxer_sink);
-        source.src_pads()[0].link(branch);
-    });
+        let branch = ctx.branch().pipe(encoder).to(muxer_sink)?;
+        ctx.attach(source, 0, branch)?;
+        Ok(())
+    })?;
 
     println!(
         "recording {seconds}s of a {}Hz tone to {path} ...",

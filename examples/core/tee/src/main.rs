@@ -3,9 +3,8 @@ use std::sync::atomic::Ordering;
 use ffmpeg_next::media;
 use media_pp::{
     Error,
-    element::Source,
     elements::{FileDemuxer, FrameCounter, PacketCounter, SwDecoder, Tee},
-    pipeline::{ChainBuilder, Pipeline},
+    pipeline::Pipeline,
 };
 
 /// Demux -> Tee, fanning the same packets out to two independent
@@ -44,16 +43,16 @@ fn main() -> media_pp::Result<()> {
 
     let pipeline = Pipeline::new("tee", source, |source, ctx| {
         let decoder = SwDecoder::new("decoder", params).expect("failed to open decoder");
-        let decode_branch = ChainBuilder::new(ctx.clone())
-            .pipe(decoder)
-            .build(Box::new(frame_counter));
-        let packet_branch = ChainBuilder::new(ctx.clone()).build(Box::new(packet_counter));
+        let decode_branch = ctx.branch().pipe(decoder).to(Box::new(frame_counter))?;
+        let packet_branch = ctx.branch().to(Box::new(packet_counter))?;
 
         let (tee, tee_handle) = Tee::new("tee", ctx.clone());
-        tee_handle.add_sink(decode_branch);
-        tee_handle.add_sink(packet_branch);
-        source.src_pads()[video.index].link(Box::new(tee));
-    });
+        let tee_branch = ctx.branch().to(Box::new(tee))?;
+        ctx.attach(source, video.index, tee_branch)?;
+        tee_handle.attach(decode_branch)?;
+        tee_handle.attach(packet_branch)?;
+        Ok(())
+    })?;
 
     pipeline.run();
     pipeline.bus().log_events();

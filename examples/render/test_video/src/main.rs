@@ -2,9 +2,8 @@ use std::thread;
 
 use media_pp::{
     bus::BusEvent,
-    element::Source,
     elements::{TestVideoOptions, TestVideoSource},
-    pipeline::{ChainBuilder, Pipeline},
+    pipeline::Pipeline,
 };
 use render_common::D3d12GpuContext;
 use winit::{
@@ -130,11 +129,13 @@ fn play(hwnd: isize, width: u32, height: u32) -> media_pp::Result<()> {
     let pipeline = Pipeline::new("test-video", source, |source, ctx| {
         let renderer = render_common::d3d12_window_renderer("renderer", &gpu, hwnd, width, height)
             .expect("failed to create renderer");
-        let branch = ChainBuilder::new(ctx.clone())
+        let branch = ctx
+            .branch()
             .queue("frames", 8) // thread boundary so rendering doesn't block generation
-            .build(Box::new(renderer));
-        source.src_pads()[0].link(branch);
-    });
+            .to(Box::new(renderer))?;
+        ctx.attach(source, 0, branch)?;
+        Ok(())
+    })?;
 
     // `run()` starts playback on a background thread and returns right
     // away — any failure (e.g. an unsupported pixel format from

@@ -3,7 +3,7 @@ use std::{sync::Arc, time::Duration};
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use rust_hlog::{HLog, herror, hinfo, hwarn};
 
-use crate::{element::ElementType, error::Error};
+use crate::{element::ElementType, error::Error, graph::ElementId};
 
 #[derive(Debug)]
 pub enum BusEvent {
@@ -43,17 +43,40 @@ pub enum BusEvent {
 /// posted here instead so the owner of the `Pipeline` can observe them.
 #[derive(Clone)]
 pub struct Bus {
-    tx: Sender<BusEvent>,
+    tx: Sender<BusMessage>,
+    element_id: Option<ElementId>,
 }
 
 pub struct BusReceiver {
-    rx: Receiver<BusEvent>,
+    rx: Receiver<BusMessage>,
+}
+
+/// One bus event together with the stable graph identity of the element
+/// that posted it. Drivers and standalone elements that do not belong to a
+/// `PipelineGraph` use `None`.
+#[derive(Debug)]
+pub struct BusMessage {
+    pub element_id: Option<ElementId>,
+    pub event: BusEvent,
 }
 
 impl Bus {
     pub fn new() -> (Bus, BusReceiver) {
         let (tx, rx) = unbounded();
-        (Bus { tx }, BusReceiver { rx })
+        (
+            Bus {
+                tx,
+                element_id: None,
+            },
+            BusReceiver { rx },
+        )
+    }
+
+    pub(crate) fn for_element(&self, element_id: ElementId) -> Bus {
+        Bus {
+            tx: self.tx.clone(),
+            element_id: Some(element_id),
+        }
     }
 
     /// `hlog` is the posting element's own [`crate::element::Element::hlog`]
@@ -76,20 +99,35 @@ impl Bus {
             } => hinfo!(hlog: hlog, "seeked: requested {requested:.2?}, landed {landed:.2?}"),
         }
         // Nothing to do if the receiving end is gone (pipeline dropped).
-        let _ = self.tx.send(event);
+        let _ = self.tx.send(BusMessage {
+            element_id: self.element_id,
+            event,
+        });
     }
 }
 
 impl BusReceiver {
     pub fn recv(&self) -> Option<BusEvent> {
-        self.rx.recv().ok()
+        self.recv_message().map(|message| message.event)
     }
 
     pub fn try_recv(&self) -> Option<BusEvent> {
-        self.rx.try_recv().ok()
+        self.try_recv_message().map(|message| message.event)
     }
 
     pub fn iter(&self) -> impl Iterator<Item = BusEvent> + '_ {
+        self.iter_with_ids().map(|message| message.event)
+    }
+
+    pub fn recv_message(&self) -> Option<BusMessage> {
+        self.rx.recv().ok()
+    }
+
+    pub fn try_recv_message(&self) -> Option<BusMessage> {
+        self.rx.try_recv().ok()
+    }
+
+    pub fn iter_with_ids(&self) -> impl Iterator<Item = BusMessage> + '_ {
         self.rx.iter()
     }
 

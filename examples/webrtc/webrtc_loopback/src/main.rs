@@ -14,9 +14,9 @@ use media_pp::{
     buffer::MediaBuffer,
     control::ControlMsg,
     driver::DriverRunner,
-    element::{Element, ElementType, Sink, Source, element_hlog},
+    element::{Element, ElementType, Sink, element_hlog},
     elements::{WebRtcPeer, WebRtcTrackSink, WebRtcTrackSource},
-    pipeline::{ChainBuilder, Pipeline},
+    pipeline::Pipeline,
 };
 use rust_hlog::HLog;
 use str0m::{
@@ -176,9 +176,11 @@ fn wire_counting(source: WebRtcTrackSource, count: Arc<AtomicUsize>) -> Arc<Pipe
         hlog: element_hlog(ElementType::Other, "counter", None),
     };
     Pipeline::new("webrtc-loopback", source, |source, ctx| {
-        let branch = ChainBuilder::new(ctx.clone()).build(Box::new(sink));
-        source.src_pads()[0].link(branch);
+        let branch = ctx.branch().to(Box::new(sink))?;
+        ctx.attach(source, 0, branch)?;
+        Ok(())
     })
+    .expect("WebRTC track pipeline wiring must succeed")
 }
 
 fn push_packets(sink: &mut WebRtcTrackSink) {

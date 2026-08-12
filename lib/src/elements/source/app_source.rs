@@ -216,7 +216,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::pipeline::{ChainBuilder, Pipeline};
+    use crate::pipeline::Pipeline;
 
     #[rust_hlog::hlog]
     struct CountingSink {
@@ -264,9 +264,11 @@ mod tests {
             hlog: element_hlog(ElementType::Other, "counter", None),
         };
         Pipeline::new("test", source, |source, ctx| {
-            let branch = ChainBuilder::new(ctx.clone()).build(Box::new(sink));
-            source.src_pads()[0].link(branch);
+            let branch = ctx.branch().to(Box::new(sink))?;
+            ctx.attach(source, 0, branch)?;
+            Ok(())
         })
+        .expect("test pipeline wiring must succeed")
     }
 
     #[test]

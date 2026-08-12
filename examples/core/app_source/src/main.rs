@@ -5,9 +5,8 @@ use media_pp::{
     Result,
     buffer::MediaBuffer,
     bus::BusEvent,
-    element::Source,
     elements::{AppSource, FrameCounter, SwDecoder},
-    pipeline::{ChainBuilder, Pipeline},
+    pipeline::Pipeline,
 };
 
 /// A background thread demuxes a file with plain `ffmpeg_next` — standing
@@ -44,11 +43,13 @@ fn main() -> Result<()> {
 
     let pipeline = Pipeline::new("app-source", app_source, |source, ctx| {
         let decoder = SwDecoder::new("decoder", params).expect("failed to open decoder");
-        let branch = ChainBuilder::new(ctx.clone())
+        let branch = ctx
+            .branch()
             .pipe(decoder) // same thread as `AppSource::run` — cheap enough not to need a queue
-            .build(Box::new(frame_counter));
-        source.src_pads()[0].link(branch);
-    });
+            .to(Box::new(frame_counter))?;
+        ctx.attach(source, 0, branch)?;
+        Ok(())
+    })?;
     pipeline.run();
 
     // The "external producer": wholly separate from the thread

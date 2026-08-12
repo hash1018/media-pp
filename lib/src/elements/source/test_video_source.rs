@@ -259,11 +259,7 @@ mod tests {
     use rust_hlog::HLog;
 
     use super::*;
-    use crate::{
-        control::ControlMsg,
-        element::Sink,
-        pipeline::{ChainBuilder, Pipeline},
-    };
+    use crate::{control::ControlMsg, element::Sink, pipeline::Pipeline};
 
     /// Captures every frame's `(format, width, height, pts)` it sees, in
     /// order — enough to check both pixel format/size and that `pts`
@@ -322,9 +318,11 @@ mod tests {
         );
 
         let pipeline = Pipeline::new("test", source, |source, ctx| {
-            let branch = ChainBuilder::new(ctx.clone()).build(Box::new(sink));
-            source.src_pads()[0].link(branch);
-        });
+            let branch = ctx.branch().to(Box::new(sink))?;
+            ctx.attach(source, 0, branch)?;
+            Ok(())
+        })
+        .expect("test pipeline wiring must succeed");
 
         pipeline.run();
         // Long enough to observe several ticks at the 30fps `framerate`

@@ -9,9 +9,9 @@ use media_pp::{
     buffer::MediaBuffer,
     bus::BusEvent,
     control::ControlMsg,
-    element::{Element, ElementType, Sink, Source, element_hlog},
+    element::{Element, ElementType, Sink, element_hlog},
     elements::{FileDemuxer, Scaler, SwDecoder},
-    pipeline::{ChainBuilder, Pipeline},
+    pipeline::Pipeline,
 };
 use rust_hlog::HLog;
 
@@ -51,13 +51,15 @@ fn main() -> media_pp::Result<()> {
     let pipeline = Pipeline::new("scale", source, |source, ctx| {
         let decoder = SwDecoder::new("decoder", params).expect("failed to open decoder");
         let scaler = Scaler::new("scaler", DST_FORMAT, DST_WIDTH, DST_HEIGHT, Flags::BILINEAR);
-        let branch = ChainBuilder::new(ctx.clone())
+        let branch = ctx
+            .branch()
             .pipe(decoder) // same thread as the demux — cheap enough not to need a queue
             .queue("frames", 8) // scaler/sink run on their own thread
             .pipe(scaler)
-            .build(Box::new(sink));
-        source.src_pads()[video.index].link(branch);
-    });
+            .to(Box::new(sink))?;
+        ctx.attach(source, video.index, branch)?;
+        Ok(())
+    })?;
 
     pipeline.run();
 

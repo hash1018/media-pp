@@ -2,9 +2,8 @@ use std::sync::atomic::Ordering;
 
 use ffmpeg_next::media;
 use media_pp::{
-    element::Source,
     elements::{FileDemuxer, PacketCounter},
-    pipeline::{ChainBuilder, Pipeline},
+    pipeline::Pipeline,
 };
 
 /// Demonstrates fan-out: open a file, inspect its streams, then link
@@ -35,19 +34,22 @@ fn main() -> media_pp::Result<()> {
 
     let pipeline = Pipeline::new("fanout", source, |source, ctx| {
         if let Some(v) = video {
-            let branch = ChainBuilder::new(ctx.clone())
+            let branch = ctx
+                .branch()
                 .queue("video-q", 32) // its own thread, separate from audio
-                .build(Box::new(video_counter));
-            source.src_pads()[v.index].link(branch);
+                .to(Box::new(video_counter))?;
+            ctx.attach(source, v.index, branch)?;
         }
         if let Some(a) = audio {
-            let branch = ChainBuilder::new(ctx.clone())
+            let branch = ctx
+                .branch()
                 .queue("audio-q", 32)
-                .build(Box::new(audio_counter));
-            source.src_pads()[a.index].link(branch);
+                .to(Box::new(audio_counter))?;
+            ctx.attach(source, a.index, branch)?;
         }
         // Any other stream's pad is simply left unlinked.
-    });
+        Ok(())
+    })?;
 
     pipeline.run(); // starts the source on a background thread, returns right away
     // Blocks until the demuxer hits EOS and both branch queues have

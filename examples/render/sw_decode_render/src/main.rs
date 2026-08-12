@@ -4,9 +4,8 @@ use ffmpeg_next::media;
 use media_pp::{
     Error,
     bus::BusEvent,
-    element::Source,
     elements::{FileDemuxer, Pacer, SwDecoder},
-    pipeline::{ChainBuilder, Pipeline},
+    pipeline::Pipeline,
 };
 use render_common::D3d12GpuContext;
 use winit::{
@@ -128,13 +127,15 @@ fn play(path: &str, hwnd: isize, width: u32, height: u32) -> media_pp::Result<()
         let pacer = Pacer::new("pacer", time_base, ctx.clock.clone());
         let renderer = render_common::d3d12_window_renderer("renderer", &gpu, hwnd, width, height)
             .expect("failed to create renderer");
-        let branch = ChainBuilder::new(ctx.clone())
+        let branch = ctx
+            .branch()
             .pipe(decoder)
             .queue("frames", 32)
             .pipe(pacer)
-            .build(Box::new(renderer));
-        source.src_pads()[video.index].link(branch);
-    });
+            .to(Box::new(renderer))?;
+        ctx.attach(source, video.index, branch)?;
+        Ok(())
+    })?;
 
     pipeline.run();
 

@@ -3,12 +3,11 @@ use std::{thread, time::Duration};
 use ffmpeg_next as ffmpeg;
 use media_pp::{
     bus::BusEvent,
-    element::Source,
     elements::{
         CaptureMode, DxgiScreenOptions, DxgiScreenSource, Mp4Muxer, Scaler, SwEncoder,
         SwEncoderOptions, VideoCodec,
     },
-    pipeline::{ChainBuilder, Pipeline},
+    pipeline::Pipeline,
 };
 
 /// DxgiScreenSource -> Scaler -> SwEncoder -> Mp4Muxer: captures the
@@ -72,14 +71,16 @@ fn main() -> media_pp::Result<()> {
             height,
             ffmpeg::software::scaling::Flags::BILINEAR,
         );
-        let branch = ChainBuilder::new(ctx.clone())
+        let branch = ctx
+            .branch()
             .queue("captured", 4) // thread boundary so scaling doesn't block capture
             .pipe(scaler)
             .queue("frames", 8) // thread boundary so encoding doesn't block scaling
             .pipe(encoder)
-            .build(muxer_sink);
-        source.src_pads()[0].link(branch);
-    });
+            .to(muxer_sink)?;
+        ctx.attach(source, 0, branch)?;
+        Ok(())
+    })?;
 
     println!("recording {seconds}s of the desktop to {path} ...");
     pipeline.run();

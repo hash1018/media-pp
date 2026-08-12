@@ -8,9 +8,8 @@ use ffmpeg_next::media;
 use media_pp::{
     Error,
     bus::BusEvent,
-    element::Source,
     elements::{FileDemuxer, Pacer, PortPolicy, PublishTransport, RtspServer, ViewerTransport},
-    pipeline::{ChainBuilder, Pipeline},
+    pipeline::Pipeline,
 };
 
 /// Same Demux -> Queue -> Pacer -> RtspServer chain as `rtsp_serve`, plus a
@@ -64,12 +63,14 @@ fn main() -> media_pp::Result<()> {
         .expect("failed to start RTSP server");
         actual_url = server.url().to_string();
         let pacer = Pacer::new("pacer", time_base, ctx.clock.clone());
-        let branch = ChainBuilder::new(ctx.clone())
+        let branch = ctx
+            .branch()
             .queue("packets", 32) // pacer sleeps on its own thread; let demux run ahead into this
             .pipe(pacer)
-            .build(Box::new(server));
-        source.src_pads()[video.index].link(branch);
-    });
+            .to(Box::new(server))?;
+        ctx.attach(source, video.index, branch)?;
+        Ok(())
+    })?;
 
     println!("ready — connect with `ffplay {actual_url}`");
     // `run()` starts publishing on a background thread and returns right

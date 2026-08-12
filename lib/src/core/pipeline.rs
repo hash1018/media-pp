@@ -14,11 +14,13 @@ use crate::{
     bus::{Bus, BusEvent, BusReceiver},
     clock::Clock,
     control::{self, ControlMsg, ControlReceiver, ControlSender},
-    element::{
-        Context, Element, ElementInfo, ElementRegistry, ElementType, Filter, Sink, SourceElement,
-        element_hlog,
-    },
+    element::{Context, Element, ElementType, Filter, Sink, Source, SourceElement, element_hlog},
     error::Result,
+    graph::{
+        BranchId, BranchPlan, ElementId, GraphError, GraphSnapshot, NodeInfo, PipelineGraph,
+        PlannedEdge, PortRef,
+    },
+    pad::SrcPad,
     queue::{OverflowPolicy, Queue},
 };
 
@@ -29,17 +31,32 @@ use crate::{
 /// Because each element needs a handle to *its* downstream to be
 /// constructed, the chain is assembled back-to-front: elements are
 /// collected in call order, then folded right-to-left starting from the
-/// terminal `Sink` at [`ChainBuilder::build`] time.
+/// terminal `Sink` at [`ChainBuilder::to`] time.
 pub struct ChainBuilder {
     context: Arc<Context>,
     elements: Vec<Box<dyn StageBuilder>>,
-    /// Name of the most-recently-added element in this chain, captured
-    /// right when `.pipe()`/`.queue()`/`.build()` are called — so the next
-    /// one can register itself as *its* `upstream`. `None` until the
-    /// first is added, meaning that one's own `upstream` is registered
-    /// unresolved (see [`ElementInfo::upstream`]'s own docs on how that
-    /// gets resolved later).
-    last: Option<Arc<str>>,
+    /// Nodes kept locally until this builder becomes a `DetachedBranch`
+    /// and an attach operation commits the complete plan.
+    planned: Vec<PlannedNode>,
+    error: Option<GraphError>,
+}
+
+struct PlannedNode {
+    info: NodeInfo,
+    output_port: Arc<str>,
+}
+
+/// A fully constructed runtime chain whose graph nodes are still detached.
+/// Dropping it has no topology effect; only an attach operation commits it.
+pub struct DetachedBranch {
+    pub(crate) root: Box<dyn Sink>,
+    pub(crate) plan: BranchPlan,
+}
+
+impl DetachedBranch {
+    pub fn root_id(&self) -> ElementId {
+        self.plan.root
+    }
 }
 
 trait StageBuilder: Send {
@@ -64,12 +81,6 @@ where
         pipeline_id: &str,
     ) -> Box<dyn Sink> {
         let mut element = self.0;
-        assert_eq!(
-            element.src_pads().len(),
-            1,
-            "ChainBuilder::pipe() is for single-output elements; link a multi-pad \
-             element's src_pads() by hand instead"
-        );
         *element.hlog_mut() =
             element_hlog(element.element_type(), &element.name(), Some(pipeline_id));
         element.src_pads()[0].link(downstream);
@@ -78,6 +89,7 @@ where
 }
 
 struct QueueStage {
+    id: ElementId,
     name: String,
     capacity: usize,
     policy: OverflowPolicy,
@@ -100,6 +112,10 @@ impl Element for EosReporter {
 
     fn element_type(&self) -> ElementType {
         self.inner.element_type()
+    }
+
+    fn graph_id(&self) -> Option<ElementId> {
+        self.inner.graph_id()
     }
 
     fn hlog(&self) -> &HLog {
@@ -143,7 +159,7 @@ impl StageBuilder for QueueStage {
             self.name,
             self.capacity,
             downstream,
-            bus.clone(),
+            bus.for_element(self.id),
             self.policy,
             Some(pipeline_id),
         ))
@@ -151,20 +167,15 @@ impl StageBuilder for QueueStage {
 }
 
 impl ChainBuilder {
-    /// A fresh chain defaults to hanging directly off whichever source
-    /// `context` was built for (`context.default_upstream`) — not `None`
-    /// — so [`Pipeline::topology`] renders it correctly even when there's
-    /// more than one source in the same [`Pipeline`] (see
-    /// [`PipelineBuilder`]). [`crate::elements::TeeHandle::add_sink`]
-    /// still overrides this after the fact via
-    /// [`ElementRegistry::set_upstream`] for a chain that turns out to
-    /// start under a `Tee` instead.
+    /// Starts a detached branch plan. Prefer [`Context::branch`] at call
+    /// sites; it makes the owning pipeline explicit without cloning the
+    /// context manually.
     pub fn new(context: Arc<Context>) -> Self {
-        let last = Some(context.default_upstream.clone());
         Self {
             context,
             elements: Vec::new(),
-            last,
+            planned: Vec::new(),
+            error: None,
         }
     }
 
@@ -172,12 +183,28 @@ impl ChainBuilder {
     /// receives via `Sink` and produces through its own (single) src pad.
     /// It runs on the same thread as whatever is upstream of it — direct
     /// function call, no queue.
-    pub fn pipe<T: Filter + 'static>(mut self, element: T) -> Self {
+    pub fn pipe<T: Filter + 'static>(mut self, mut element: T) -> Self {
         let name = element.name();
-        self.context
-            .registry
-            .register(element.element_type(), name.clone(), self.last.take());
-        self.last = Some(name);
+        let pad_count = element.src_pads().len();
+        if pad_count != 1 && self.error.is_none() {
+            self.error = Some(GraphError::NotSingleOutput {
+                name: name.clone(),
+                count: pad_count,
+            });
+        }
+        let output_port = element
+            .src_pads()
+            .first()
+            .map(|pad| Arc::<str>::from(pad.name()))
+            .unwrap_or_else(|| "src".into());
+        self.planned.push(PlannedNode {
+            info: NodeInfo {
+                id: self.context.graph.reserve_element_id(),
+                element_type: element.element_type(),
+                name,
+            },
+            output_port,
+        });
         self.elements.push(Box::new(DirectStage(element)));
         self
     }
@@ -199,11 +226,17 @@ impl ChainBuilder {
         policy: OverflowPolicy,
     ) -> Self {
         let name: Arc<str> = name.into().into();
-        self.context
-            .registry
-            .register(ElementType::Queue, name.clone(), self.last.take());
-        self.last = Some(name.clone());
+        let id = self.context.graph.reserve_element_id();
+        self.planned.push(PlannedNode {
+            info: NodeInfo {
+                id,
+                element_type: ElementType::Queue,
+                name: name.clone(),
+            },
+            output_port: format!("{name}_src").into(),
+        });
         self.elements.push(Box::new(QueueStage {
+            id,
             name: name.to_string(),
             capacity,
             policy,
@@ -215,25 +248,98 @@ impl ChainBuilder {
     /// assembles everything into a single `Box<dyn Sink>` ready to be
     /// linked into a source's src pad. The terminal's own `Element::name()`
     /// is what shows up on the bus when it reports EOS.
-    pub fn build(self, mut terminal: Box<dyn Sink>) -> Box<dyn Sink> {
+    pub fn to(self, mut terminal: Box<dyn Sink>) -> Result<DetachedBranch> {
+        if let Some(error) = self.error {
+            return Err(error.into());
+        }
         *terminal.hlog_mut() = element_hlog(
             terminal.element_type(),
             &terminal.name(),
             Some(&self.context.pipeline_id),
         );
-        self.context
-            .registry
-            .register(terminal.element_type(), terminal.name(), self.last);
+        let terminal_info = NodeInfo {
+            id: terminal
+                .graph_id()
+                .unwrap_or_else(|| self.context.graph.reserve_element_id()),
+            element_type: terminal.element_type(),
+            name: terminal.name(),
+        };
+        let terminal_id = terminal_info.id;
+        let mut nodes: Vec<_> = self.planned.iter().map(|node| node.info.clone()).collect();
+        nodes.push(terminal_info);
+        let edges = nodes
+            .windows(2)
+            .enumerate()
+            .map(|(index, pair)| PlannedEdge {
+                from: PortRef {
+                    element: pair[0].id,
+                    port: self.planned[index].output_port.clone(),
+                },
+                to: PortRef {
+                    element: pair[1].id,
+                    port: "sink".into(),
+                },
+            })
+            .collect();
+        let root_id = nodes.first().expect("terminal always supplies one node").id;
         let terminal: Box<dyn Sink> = Box::new(EosReporter {
-            bus: self.context.bus.clone(),
+            bus: self.context.bus.for_element(terminal_id),
             inner: terminal,
         });
-        self.elements
+        let root = self
+            .elements
             .into_iter()
             .rev()
             .fold(terminal, |downstream, stage| {
                 stage.wrap(downstream, &self.context.bus, &self.context.pipeline_id)
-            })
+            });
+        Ok(DetachedBranch {
+            root,
+            plan: BranchPlan {
+                nodes,
+                edges,
+                root: root_id,
+            },
+        })
+    }
+
+    pub fn build(self, terminal: Box<dyn Sink>) -> Result<DetachedBranch> {
+        self.to(terminal)
+    }
+}
+
+impl Context {
+    pub fn branch(self: &Arc<Self>) -> ChainBuilder {
+        ChainBuilder::new(self.clone())
+    }
+
+    pub fn attach<S: Source>(
+        &self,
+        source: &mut S,
+        pad_index: usize,
+        branch: DetachedBranch,
+    ) -> Result<BranchId> {
+        let pads = source.src_pads();
+        let pad_count = pads.len();
+        let pad = pads.get_mut(pad_index).ok_or(GraphError::PadOutOfRange {
+            index: pad_index,
+            pad_count,
+        })?;
+        self.attach_pad(pad, branch)
+    }
+
+    pub(crate) fn attach_pad(&self, pad: &mut SrcPad, branch: DetachedBranch) -> Result<BranchId> {
+        if pad.is_linked() {
+            return Err(GraphError::PadAlreadyLinked(pad.name().to_owned()).into());
+        }
+        let from_port: Arc<str> = pad.name().into();
+        let DetachedBranch { root, plan } = branch;
+        Ok(self
+            .graph
+            .attach_with(self.source_id, from_port, plan, |_| {
+                pad.link(root);
+                Ok(())
+            })?)
     }
 }
 
@@ -245,7 +351,7 @@ impl ChainBuilder {
 /// events on one channel), one [`Clock`] (so every [`crate::elements::Pacer`]
 /// anywhere in the pipeline — regardless of which source's chain it's
 /// under — agrees on the same t=0/pause timeline), and one
-/// [`ElementRegistry`] (so [`Pipeline::topology`] renders every source's
+/// [`PipelineGraph`] (so [`Pipeline::topology`] renders every source's
 /// own branches together).
 ///
 /// [`Pipeline::new`] is exactly `PipelineBuilder::new(id).add_source(source,
@@ -257,13 +363,15 @@ impl ChainBuilder {
 /// independent sources under today's [`crate::element::SourceElement`]
 /// model, but one [`Pipeline`] so `run()`/`pause()`/`resume()`/`stop()`
 /// only need to be called once, not once per source.
+type SourceEntry = (ElementId, Box<dyn SourceElement>);
+
 pub struct PipelineBuilder {
     id: Arc<str>,
     bus: Bus,
     bus_rx: BusReceiver,
     clock: Arc<Clock>,
-    registry: ElementRegistry,
-    sources: Vec<Box<dyn SourceElement>>,
+    graph: PipelineGraph,
+    sources: Vec<SourceEntry>,
     control_pairs: Vec<(ControlSender, ControlReceiver)>,
 }
 
@@ -276,40 +384,34 @@ impl PipelineBuilder {
             bus,
             bus_rx,
             clock: Arc::new(Clock::new()),
-            registry: ElementRegistry::new(),
+            graph: PipelineGraph::new(),
             sources: Vec::new(),
             control_pairs: Vec::new(),
         }
     }
 
-    /// Registers one more source. `wire` is called once, right away, with
-    /// the freshly stamped source and a fresh [`Context`] whose
-    /// `default_upstream` is *this* source's own name — so a
-    /// [`ChainBuilder`] built from it defaults its first element to
-    /// hanging off this source specifically, not whichever source was
-    /// added first (see [`ChainBuilder::new`]'s own docs). Otherwise the
-    /// same contract as [`Pipeline::new`]'s own `wire` parameter: build
-    /// one or more `ChainBuilder` chains and link them via
-    /// `source.src_pads()[i].link(...)`.
+    /// Registers one more source. `wire` receives a source-scoped
+    /// [`Context`]; build detached branches with [`Context::branch`] and
+    /// commit them with [`Context::attach`]. A wiring error aborts the
+    /// builder without publishing a partially built pipeline.
     pub fn add_source<S: SourceElement + 'static>(
         mut self,
         mut source: S,
-        wire: impl FnOnce(&mut S, &Arc<Context>),
-    ) -> Self {
+        wire: impl FnOnce(&mut S, &Arc<Context>) -> Result<()>,
+    ) -> Result<Self> {
         *source.hlog_mut() = element_hlog(source.element_type(), &source.name(), Some(&self.id));
-        self.registry
-            .register(source.element_type(), source.name(), None);
+        let source_id = self.graph.add_source(source.element_type(), source.name());
         let context = Arc::new(Context {
             bus: self.bus.clone(),
             pipeline_id: self.id.clone(),
-            registry: self.registry.clone(),
+            graph: self.graph.clone(),
             clock: self.clock.clone(),
-            default_upstream: source.name(),
+            source_id,
         });
-        wire(&mut source, &context);
-        self.sources.push(Box::new(source));
+        wire(&mut source, &context)?;
+        self.sources.push((source_id, Box::new(source)));
         self.control_pairs.push(control::channel());
-        self
+        Ok(self)
     }
 
     /// Finishes construction. At least one [`PipelineBuilder::add_source`]
@@ -332,7 +434,7 @@ impl PipelineBuilder {
             clock: self.clock,
             bus_rx: self.bus_rx,
             running: AtomicUsize::new(0),
-            registry: self.registry,
+            graph: self.graph,
         })
     }
 }
@@ -377,7 +479,7 @@ pub struct Pipeline {
     /// there and onto every element that passes through a [`ChainBuilder`]
     /// built with it (see [`Pipeline::id`]).
     id: Arc<str>,
-    sources: Mutex<Option<Vec<Box<dyn SourceElement>>>>,
+    sources: Mutex<Option<Vec<SourceEntry>>>,
     /// Taken (leaving `None` behind) the moment `run()` starts, and cloned
     /// once per source into that source's own background thread — so once
     /// a pipeline is running, `Pipeline` itself no longer holds a `Bus`
@@ -414,12 +516,8 @@ pub struct Pipeline {
     /// `seek`) only ever needs "is anything still running at all", never
     /// which specific source.
     running: AtomicUsize,
-    /// Live registry backing [`Pipeline::elements`]/[`Pipeline::topology`] —
-    /// kept for this `Pipeline`'s whole life (unlike `bus`/`control_rxs`
-    /// above) so a branch registered long after construction (e.g. added to
-    /// a running [`crate::elements::Tee`] via the [`Context`] owned by that
-    /// `Tee`'s shared state) still shows up when either is called again.
-    registry: ElementRegistry,
+    /// Live node/edge graph backing snapshots and topology rendering.
+    graph: PipelineGraph,
 }
 
 impl Pipeline {
@@ -428,16 +526,14 @@ impl Pipeline {
     /// (see [`ChainBuilder`]'s own docs).
     ///
     /// `wire` is called once with the freshly created source and a
-    /// [`Context`] bundling this pipeline's `Bus`, `id`, [`ElementRegistry`]
+    /// [`Context`] bundling this pipeline's `Bus`, `id`, [`PipelineGraph`]
     /// (already seeded with the source itself), and `Clock` (share it with
     /// every [`crate::elements::Pacer`] via `Clock::clone` — one clock per
     /// pipeline, so every paced branch agrees on the same t=0 and the same
     /// pause/resume timeline) — everything a [`ChainBuilder`]/
     /// [`crate::elements::Tee`] needs, in one `Arc` clone instead of four
-    /// separate arguments. `wire` builds one or more `ChainBuilder` chains
-    /// (one per src pad that should actually be used) and links them via
-    /// `source.src_pads()[i].link(...)`. Pads left unlinked just drop
-    /// whatever gets pushed into them.
+    /// separate arguments. `wire` creates detached chains and attaches
+    /// them through [`Context::attach`]. Pads left unattached drop data.
     ///
     /// The single-source special case of [`PipelineBuilder`] — see its own
     /// docs for combining more than one live source (e.g. a video capture
@@ -445,9 +541,9 @@ impl Pipeline {
     pub fn new<S: SourceElement + 'static>(
         id: impl Into<String>,
         source: S,
-        wire: impl FnOnce(&mut S, &Arc<Context>),
-    ) -> Arc<Self> {
-        PipelineBuilder::new(id).add_source(source, wire).build()
+        wire: impl FnOnce(&mut S, &Arc<Context>) -> Result<()>,
+    ) -> Result<Arc<Self>> {
+        Ok(PipelineBuilder::new(id).add_source(source, wire)?.build())
     }
 
     /// This pipeline's own id, as passed to [`Pipeline::new`].
@@ -459,28 +555,15 @@ impl Pipeline {
         &self.bus_rx
     }
 
-    /// Every element wired into this pipeline so far (source included),
-    /// each knowing what feeds it — see [`ElementInfo::upstream`]. Raw data
-    /// behind [`Pipeline::topology`]; reach for that instead unless you
-    /// actually need to walk the graph yourself.
-    ///
-    /// Freshly derived from the live [`ElementRegistry`] on every call — so
-    /// a branch added to a [`crate::elements::Tee`] well after this
-    /// `Pipeline` started running shows up here too, not just whatever was
-    /// wired during `wire`. Only reflects wiring done through
-    /// `ChainBuilder`/`Tee` — a `SrcPad::link` called by hand instead won't
-    /// show up here.
-    ///
-    /// Every non-source entry's `upstream` is already resolved by the time
-    /// it's registered — [`ChainBuilder::new`] seeds it from whichever
-    /// source's [`Context`] built that chain, and
-    /// [`crate::elements::TeeHandle::add_sink`] overrides it for a branch
-    /// that turns out to start under a `Tee` instead — so this no longer
-    /// needs a post-hoc "default to the source" pass the way it did before
-    /// [`PipelineBuilder`] made more than one source (and so more than one
-    /// possible default) possible.
-    pub fn elements(&self) -> Vec<ElementInfo> {
-        self.registry.snapshot()
+    /// Returns a consistent node/edge snapshot of the live graph. Detached
+    /// branches do not appear; a successful attach or detach increments its
+    /// revision exactly once.
+    pub fn graph(&self) -> GraphSnapshot {
+        self.graph.snapshot()
+    }
+
+    pub fn elements(&self) -> Vec<NodeInfo> {
+        self.graph().nodes
     }
 
     /// Human-readable rundown of [`Pipeline::elements`]: one line per
@@ -491,35 +574,7 @@ impl Pipeline {
     /// Multiple branches (fan-out across more than one src pad, or a
     /// `Tee`) are joined by newlines.
     pub fn topology(&self) -> String {
-        let elements = self.elements();
-        let by_name = |name: &str| elements.iter().find(|e| &*e.name == name);
-        let is_leaf = |name: &str| !elements.iter().any(|e| e.upstream.as_deref() == Some(name));
-        let render = |leaf: &ElementInfo| {
-            let mut chain = vec![format!("{:?}({})", leaf.element_type, leaf.name)];
-            let mut current = leaf;
-            // Bounded by `elements.len()` rather than looping until
-            // `upstream` runs out, purely defensive — a real cycle would
-            // mean a bug elsewhere (`ChainBuilder`/`Tee` registration),
-            // not something to hang over here.
-            for _ in 0..elements.len() {
-                let Some(upstream_name) = current.upstream.as_deref() else {
-                    break;
-                };
-                let Some(upstream) = by_name(upstream_name) else {
-                    break; // dangling reference — shouldn't normally happen
-                };
-                chain.push(format!("{:?}({})", upstream.element_type, upstream.name));
-                current = upstream;
-            }
-            chain.reverse();
-            chain.join(" - ")
-        };
-        elements
-            .iter()
-            .filter(|e| is_leaf(&e.name))
-            .map(render)
-            .collect::<Vec<_>>()
-            .join("\n")
+        self.graph().topology()
     }
 
     /// The clock every `Pacer` in this pipeline paces against — see
@@ -549,8 +604,8 @@ impl Pipeline {
         };
 
         self.running.store(sources.len(), Ordering::Release);
-        for (mut source, control_rx) in sources.into_iter().zip(control_rxs) {
-            let bus = bus.clone();
+        for ((source_id, mut source), control_rx) in sources.into_iter().zip(control_rxs) {
+            let bus = bus.for_element(source_id);
             let this = Arc::clone(self);
             thread::Builder::new()
                 .name("pipeline:source".into())
@@ -675,12 +730,9 @@ mod tests {
     use std::{sync::atomic::AtomicUsize, thread, time::Duration};
 
     use super::*;
-    use crate::{
-        element::Source,
-        elements::{
-            FileDemuxer, Pacer, Tee, TestAudioOptions, TestAudioSource, TestVideoOptions,
-            TestVideoSource,
-        },
+    use crate::elements::{
+        FileDemuxer, Pacer, Tee, TestAudioOptions, TestAudioSource, TestVideoOptions,
+        TestVideoSource,
     };
 
     /// Real video file, one directory up from this crate — same one every
@@ -707,14 +759,14 @@ mod tests {
         let index = video.index;
 
         let pipeline = Pipeline::new("test", source, |source, ctx| {
-            let branch = ChainBuilder::new(ctx.clone())
-                .queue("q", 4)
-                .build(Box::new(NoOpSink {
-                    name: "noop".into(),
-                    hlog: element_hlog(ElementType::Other, "noop", None),
-                }));
-            source.src_pads()[index].link(branch);
-        });
+            let branch = ctx.branch().queue("q", 4).to(Box::new(NoOpSink {
+                name: "noop".into(),
+                hlog: element_hlog(ElementType::Other, "noop", None),
+            }))?;
+            ctx.attach(source, index, branch)?;
+            Ok(())
+        })
+        .expect("test pipeline wiring must succeed");
 
         pipeline.run();
 
@@ -757,25 +809,29 @@ mod tests {
             .add_source(video, {
                 let count = video_count.clone();
                 move |source, ctx| {
-                    let branch = ChainBuilder::new(ctx.clone()).build(Box::new(CountingSink {
+                    let branch = ctx.branch().to(Box::new(CountingSink {
                         name: "video-sink".into(),
                         count,
                         hlog: element_hlog(ElementType::Other, "video-sink", None),
-                    }));
-                    source.src_pads()[0].link(branch);
+                    }))?;
+                    ctx.attach(source, 0, branch)?;
+                    Ok(())
                 }
             })
+            .expect("video wiring must succeed")
             .add_source(audio, {
                 let count = audio_count.clone();
                 move |source, ctx| {
-                    let branch = ChainBuilder::new(ctx.clone()).build(Box::new(CountingSink {
+                    let branch = ctx.branch().to(Box::new(CountingSink {
                         name: "audio-sink".into(),
                         count,
                         hlog: element_hlog(ElementType::Other, "audio-sink", None),
-                    }));
-                    source.src_pads()[0].link(branch);
+                    }))?;
+                    ctx.attach(source, 0, branch)?;
+                    Ok(())
                 }
             })
+            .expect("audio wiring must succeed")
             .build();
 
         let topology = pipeline.topology();
@@ -833,21 +889,26 @@ mod tests {
         let pipeline = PipelineBuilder::new("multi-source-tee-test")
             .add_source(video, |source, ctx| {
                 let (tee, handle) = Tee::new("tee", ctx.clone());
-                let branch = ChainBuilder::new(ctx.clone()).build(Box::new(NoOpSink {
+                let tee_branch = ctx.branch().to(Box::new(tee))?;
+                ctx.attach(source, 0, tee_branch)?;
+                let branch = ctx.branch().to(Box::new(NoOpSink {
                     name: "video-sink".into(),
                     hlog: element_hlog(ElementType::Other, "video-sink", None),
-                }));
-                handle.add_sink(branch);
-                source.src_pads()[0].link(Box::new(tee));
+                }))?;
+                handle.attach(branch)?;
                 tee_handle_slot = Some(handle);
+                Ok(())
             })
+            .expect("video wiring must succeed")
             .add_source(audio, |source, ctx| {
-                let branch = ChainBuilder::new(ctx.clone()).build(Box::new(NoOpSink {
+                let branch = ctx.branch().to(Box::new(NoOpSink {
                     name: "audio-sink".into(),
                     hlog: element_hlog(ElementType::Other, "audio-sink", None),
-                }));
-                source.src_pads()[0].link(branch);
+                }))?;
+                ctx.attach(source, 0, branch)?;
+                Ok(())
             })
+            .expect("audio wiring must succeed")
             .build();
         let tee_handle = tee_handle_slot.expect("wire ran");
 
@@ -863,7 +924,7 @@ mod tests {
 
         drop(pipeline);
         assert!(
-            tee_handle.chain_builder().is_none(),
+            tee_handle.branch().is_none(),
             "Tee's shared state should be gone once its owning Pipeline is fully torn down"
         );
         assert_eq!(tee_handle.sink_count(), 0);
@@ -898,12 +959,11 @@ mod tests {
         // for how this was found).
         let pipeline = Pipeline::new("test", source, |source, ctx| {
             let pacer = Pacer::new("pacer", time_base, ctx.clock.clone());
-            let branch = ChainBuilder::new(ctx.clone())
-                .queue("q", 4)
-                .pipe(pacer)
-                .build(Box::new(sink));
-            source.src_pads()[index].link(branch);
-        });
+            let branch = ctx.branch().queue("q", 4).pipe(pacer).to(Box::new(sink))?;
+            ctx.attach(source, index, branch)?;
+            Ok(())
+        })
+        .expect("test pipeline wiring must succeed");
 
         pipeline.run();
         thread::sleep(Duration::from_millis(50));
@@ -951,15 +1011,18 @@ mod tests {
         // — otherwise the file finishes before `seek()` is even called.
         let pipeline = Pipeline::new("test", source, |source, ctx| {
             let pacer = Pacer::new("pacer", time_base, ctx.clock.clone());
-            let branch = ChainBuilder::new(ctx.clone())
+            let branch = ctx
+                .branch()
                 .queue("q", 4)
                 .pipe(pacer)
-                .build(Box::new(NoOpSink {
+                .to(Box::new(NoOpSink {
                     name: "noop".into(),
                     hlog: element_hlog(ElementType::Other, "noop", None),
-                }));
-            source.src_pads()[index].link(branch);
-        });
+                }))?;
+            ctx.attach(source, index, branch)?;
+            Ok(())
+        })
+        .expect("test pipeline wiring must succeed");
 
         pipeline.run();
         thread::sleep(Duration::from_millis(50));
@@ -1067,15 +1130,20 @@ mod tests {
             name: "noop".into(),
             hlog: element_hlog(ElementType::Other, "noop", None),
         };
+        let graph = PipelineGraph::new();
+        let source_id = graph.add_source(ElementType::Other, "source".into());
         let context = Arc::new(Context {
             bus,
             pipeline_id: "my-pipeline".into(),
-            registry: ElementRegistry::new(),
+            graph,
             clock: Arc::new(Clock::new()),
-            default_upstream: "source".into(),
+            source_id,
         });
-        let built = ChainBuilder::new(context).build(Box::new(sink));
-        assert_eq!(built.hlog().log_id(), "Other(noop):Pipeline(my-pipeline)");
+        let built = context.branch().to(Box::new(sink)).unwrap();
+        assert_eq!(
+            built.root.hlog().log_id(),
+            "Other(noop):Pipeline(my-pipeline)"
+        );
     }
 
     /// `Pipeline::new`'s `id` should come back unchanged from
@@ -1092,12 +1160,14 @@ mod tests {
         let index = video.index;
 
         let pipeline = Pipeline::new("my-pipeline", source, |source, ctx| {
-            let branch = ChainBuilder::new(ctx.clone()).build(Box::new(NoOpSink {
+            let branch = ctx.branch().to(Box::new(NoOpSink {
                 name: "noop".into(),
                 hlog: element_hlog(ElementType::Other, "noop", None),
-            }));
-            source.src_pads()[index].link(branch);
-        });
+            }))?;
+            ctx.attach(source, index, branch)?;
+            Ok(())
+        })
+        .expect("test pipeline wiring must succeed");
 
         assert_eq!(pipeline.id(), "my-pipeline");
     }
@@ -1118,15 +1188,18 @@ mod tests {
 
         let pipeline = Pipeline::new("test", source, |source, ctx| {
             let pacer = Pacer::new("pacer", time_base, ctx.clock.clone());
-            let branch = ChainBuilder::new(ctx.clone())
+            let branch = ctx
+                .branch()
                 .queue("q", 4)
                 .pipe(pacer)
-                .build(Box::new(NoOpSink {
+                .to(Box::new(NoOpSink {
                     name: "noop".into(),
                     hlog: element_hlog(ElementType::Other, "noop", None),
-                }));
-            source.src_pads()[index].link(branch);
-        });
+                }))?;
+            ctx.attach(source, index, branch)?;
+            Ok(())
+        })
+        .expect("test pipeline wiring must succeed");
 
         assert_eq!(
             pipeline.topology(),
@@ -1140,10 +1213,10 @@ mod tests {
         // this used to hang the test process forever.
     }
 
-    /// A branch handed to [`TeeHandle::add_sink`] should render as starting
+    /// A branch handed to [`TeeHandle::attach`] should render as starting
     /// under `Tee(...)`, not the pipeline's source — the whole reason
-    /// [`Tee::new`]/[`TeeHandle::add_sink`] participate in the same
-    /// [`ElementRegistry`] every `ChainBuilder` does.
+    /// [`Tee::new`]/[`TeeHandle::attach`] participate in the same live
+    /// [`PipelineGraph`] every `ChainBuilder` does.
     #[test]
     fn topology_attributes_tee_branches_to_the_tee_not_the_source() {
         let (source, streams) = FileDemuxer::open("demux", test_video()).expect("open test video");
@@ -1154,20 +1227,23 @@ mod tests {
         let index = video.index;
 
         let pipeline = Pipeline::new("test", source, |source, ctx| {
-            let branch_a = ChainBuilder::new(ctx.clone()).build(Box::new(NoOpSink {
+            let branch_a = ctx.branch().to(Box::new(NoOpSink {
                 name: "sink-a".into(),
                 hlog: element_hlog(ElementType::Other, "sink-a", None),
-            }));
-            let branch_b = ChainBuilder::new(ctx.clone()).build(Box::new(NoOpSink {
+            }))?;
+            let branch_b = ctx.branch().to(Box::new(NoOpSink {
                 name: "sink-b".into(),
                 hlog: element_hlog(ElementType::Other, "sink-b", None),
-            }));
+            }))?;
 
             let (tee, tee_handle) = Tee::new("tee", ctx.clone());
-            tee_handle.add_sink(branch_a);
-            tee_handle.add_sink(branch_b);
-            source.src_pads()[index].link(Box::new(tee));
-        });
+            let tee_branch = ctx.branch().to(Box::new(tee))?;
+            ctx.attach(source, index, tee_branch)?;
+            tee_handle.attach(branch_a)?;
+            tee_handle.attach(branch_b)?;
+            Ok(())
+        })
+        .expect("test pipeline wiring must succeed");
 
         let topology = pipeline.topology();
         let mut branches: Vec<&str> = topology.split('\n').collect();
@@ -1181,12 +1257,10 @@ mod tests {
         );
     }
 
-    /// Once a branch is pulled off a [`Tee`] via [`TeeHandle::remove_sink`],
+    /// Once a branch is pulled off a [`Tee`] via [`TeeHandle::detach`],
     /// it should stop showing up in [`Pipeline::topology`] entirely — not
     /// keep rendering as still attached under `Tee(...)`, which is what a
-    /// stale `ElementRegistry` entry would otherwise do (nothing else
-    /// clears it on removal, since the registry doesn't know about
-    /// `SrcPad::unlink` on its own).
+    /// stale graph node would otherwise do.
     #[test]
     fn topology_forgets_a_branch_once_it_is_removed_from_the_tee() {
         let (source, streams) = FileDemuxer::open("demux", test_video()).expect("open test video");
@@ -1197,25 +1271,31 @@ mod tests {
         let index = video.index;
 
         let mut tee_handle_slot = None;
+        let mut branch_a_id = None;
         let pipeline = Pipeline::new("test", source, |source, ctx| {
-            let branch_a = ChainBuilder::new(ctx.clone()).build(Box::new(NoOpSink {
+            let branch_a = ctx.branch().to(Box::new(NoOpSink {
                 name: "sink-a".into(),
                 hlog: element_hlog(ElementType::Other, "sink-a", None),
-            }));
-            let branch_b = ChainBuilder::new(ctx.clone()).build(Box::new(NoOpSink {
+            }))?;
+            let branch_b = ctx.branch().to(Box::new(NoOpSink {
                 name: "sink-b".into(),
                 hlog: element_hlog(ElementType::Other, "sink-b", None),
-            }));
+            }))?;
 
             let (tee, tee_handle) = Tee::new("tee", ctx.clone());
-            tee_handle.add_sink(branch_a);
-            tee_handle.add_sink(branch_b);
-            source.src_pads()[index].link(Box::new(tee));
+            let tee_branch = ctx.branch().to(Box::new(tee))?;
+            ctx.attach(source, index, tee_branch)?;
+            branch_a_id = Some(tee_handle.attach(branch_a)?);
+            tee_handle.attach(branch_b)?;
             tee_handle_slot = Some(tee_handle);
-        });
+            Ok(())
+        })
+        .expect("test pipeline wiring must succeed");
 
         let tee_handle = tee_handle_slot.expect("wire ran");
-        tee_handle.remove_sink("sink-a");
+        tee_handle
+            .detach(branch_a_id.expect("branch attached"))
+            .unwrap();
 
         assert_eq!(
             pipeline.topology(),
@@ -1226,10 +1306,9 @@ mod tests {
     /// A failure past a `.queue(...)` inside a branch is reported under
     /// that deeper element's own name (a `Queue`/whatever it wraps can
     /// only ever speak for itself), never the `Queue`'s own name that's
-    /// what's actually attached to the `Tee` (`add_sink`'s `sink.name()`
-    /// is the *outermost* wrapper — see `ChainBuilder::build`'s own
-    /// fold). `remove_branch_containing` has to walk both hops of that
-    /// upstream chain to land on the right one.
+    /// what's actually attached to the `Tee`. The branch root is the
+    /// *outermost* wrapper; `detach_branch_containing` resolves the stable
+    /// element ID back to the owning branch regardless of depth.
     #[test]
     fn remove_branch_containing_resolves_through_a_queue_to_the_tee_attached_root() {
         let (source, streams) = FileDemuxer::open("demux", test_video()).expect("open test video");
@@ -1241,30 +1320,36 @@ mod tests {
 
         let mut tee_handle_slot = None;
         let pipeline = Pipeline::new("test", source, |source, ctx| {
-            let branch_a = ChainBuilder::new(ctx.clone())
-                .queue("q-a", 4)
-                .build(Box::new(NoOpSink {
-                    name: "sink-a".into(),
-                    hlog: element_hlog(ElementType::Other, "sink-a", None),
-                }));
-            let branch_b = ChainBuilder::new(ctx.clone()).build(Box::new(NoOpSink {
+            let branch_a = ctx.branch().queue("q-a", 4).to(Box::new(NoOpSink {
+                name: "sink-a".into(),
+                hlog: element_hlog(ElementType::Other, "sink-a", None),
+            }))?;
+            let branch_b = ctx.branch().to(Box::new(NoOpSink {
                 name: "sink-b".into(),
                 hlog: element_hlog(ElementType::Other, "sink-b", None),
-            }));
+            }))?;
 
             let (tee, tee_handle) = Tee::new("tee", ctx.clone());
-            tee_handle.add_sink(branch_a);
-            tee_handle.add_sink(branch_b);
-            source.src_pads()[index].link(Box::new(tee));
+            let tee_branch = ctx.branch().to(Box::new(tee))?;
+            ctx.attach(source, index, tee_branch)?;
+            tee_handle.attach(branch_a)?;
+            tee_handle.attach(branch_b)?;
             tee_handle_slot = Some(tee_handle);
-        });
+            Ok(())
+        })
+        .expect("test pipeline wiring must succeed");
 
         let tee_handle = tee_handle_slot.expect("wire ran");
-        // "sink-a" itself was never handed to `add_sink` — "q-a" was.
-        // Passing the deeply-nested terminal's name straight through is
-        // exactly the case a caller reacting to *its* `BusEvent::Error`
-        // would hit.
-        tee_handle.remove_branch_containing("sink-a");
+        // The queue, not "sink-a", is the branch root. Resolving the
+        // deeply nested terminal ID still finds the correct branch.
+        let sink_a_id = pipeline
+            .graph()
+            .nodes
+            .iter()
+            .find(|node| &*node.name == "sink-a")
+            .expect("sink-a is attached")
+            .id;
+        tee_handle.detach_branch_containing(sink_a_id).unwrap();
 
         assert_eq!(
             pipeline.topology(),
@@ -1288,19 +1373,23 @@ mod tests {
 
         const N: usize = 30;
         let mut tee_handle_slot = None;
+        let mut branch_ids = Vec::new();
         let pipeline = Pipeline::new("test", source, |source, ctx| {
             let (tee, tee_handle) = Tee::new("tee", ctx.clone());
+            let tee_branch = ctx.branch().to(Box::new(tee))?;
+            ctx.attach(source, index, tee_branch)?;
             for i in 0..N {
                 let name: Arc<str> = format!("sink-{i}").into();
-                let branch = ChainBuilder::new(ctx.clone()).build(Box::new(NoOpSink {
+                let branch = ctx.branch().to(Box::new(NoOpSink {
                     name: name.clone(),
                     hlog: element_hlog(ElementType::Other, &name, None),
-                }));
-                tee_handle.add_sink(branch);
+                }))?;
+                branch_ids.push(tee_handle.attach(branch)?);
             }
-            source.src_pads()[index].link(Box::new(tee));
             tee_handle_slot = Some(tee_handle);
-        });
+            Ok(())
+        })
+        .expect("test pipeline wiring must succeed");
 
         let tee_handle = tee_handle_slot.expect("wire ran");
 
@@ -1312,8 +1401,8 @@ mod tests {
         expected.sort();
         assert_eq!(branches, expected, "all {N} branches should show up once");
 
-        for i in 0..N / 2 {
-            tee_handle.remove_sink(&format!("sink-{i}"));
+        for branch_id in branch_ids.into_iter().take(N / 2) {
+            tee_handle.detach(branch_id).unwrap();
         }
 
         let mut remaining: Vec<String> = pipeline.topology().lines().map(String::from).collect();
@@ -1326,5 +1415,133 @@ mod tests {
             remaining, expected_remaining,
             "only the un-removed half should remain, none of the removed ones lingering"
         );
+    }
+
+    #[test]
+    fn detached_branch_never_appears_in_topology() {
+        let (source, _) = FileDemuxer::open("demux", test_video()).expect("open test video");
+
+        let pipeline = Pipeline::new("test", source, |_source, ctx| {
+            let detached = ctx.branch().to(Box::new(NoOpSink {
+                name: "never-attached".into(),
+                hlog: element_hlog(ElementType::Other, "never-attached", None),
+            }))?;
+            assert_eq!(ctx.graph.snapshot().nodes.len(), 1);
+            drop(detached);
+            Ok(())
+        })
+        .expect("test pipeline wiring must succeed");
+
+        assert_eq!(pipeline.topology(), "FileDemuxer(demux)");
+    }
+
+    #[test]
+    fn duplicate_names_are_independent_when_detaching_by_branch_id() {
+        let (source, streams) = FileDemuxer::open("demux", test_video()).expect("open test video");
+        let index = streams
+            .iter()
+            .find(|stream| stream.kind == ffmpeg_next::media::Type::Video)
+            .expect("test video has a video stream")
+            .index;
+        let mut handle_slot = None;
+        let pipeline = Pipeline::new("test", source, |source, ctx| {
+            let (tee, handle) = Tee::new("tee", ctx.clone());
+            let tee_branch = ctx.branch().to(Box::new(tee))?;
+            ctx.attach(source, index, tee_branch)?;
+            handle_slot = Some(handle);
+            Ok(())
+        })
+        .expect("test pipeline wiring must succeed");
+        let handle = handle_slot.expect("wire ran");
+
+        let make_branch = || {
+            handle
+                .branch()
+                .expect("tee is alive")
+                .to(Box::new(NoOpSink {
+                    name: "same-name".into(),
+                    hlog: element_hlog(ElementType::Other, "same-name", None),
+                }))
+                .unwrap()
+        };
+        let first = handle.attach(make_branch()).unwrap();
+        let second = handle.attach(make_branch()).unwrap();
+        assert_ne!(first, second);
+        assert_eq!(pipeline.topology().lines().count(), 2);
+
+        handle.detach(first).unwrap();
+        assert_eq!(pipeline.topology().lines().count(), 1);
+        assert!(pipeline.topology().contains("Other(same-name)"));
+    }
+
+    #[test]
+    fn dynamic_attach_and_detach_each_publish_one_graph_revision() {
+        let (source, streams) = FileDemuxer::open("demux", test_video()).expect("open test video");
+        let index = streams
+            .iter()
+            .find(|stream| stream.kind == ffmpeg_next::media::Type::Video)
+            .expect("test video has a video stream")
+            .index;
+        let mut handle_slot = None;
+        let pipeline = Pipeline::new("test", source, |source, ctx| {
+            let (tee, handle) = Tee::new("tee", ctx.clone());
+            let tee_branch = ctx.branch().to(Box::new(tee))?;
+            ctx.attach(source, index, tee_branch)?;
+            handle_slot = Some(handle);
+            Ok(())
+        })
+        .expect("test pipeline wiring must succeed");
+        let handle = handle_slot.expect("wire ran");
+        let before = pipeline.graph().revision;
+        let detached = handle
+            .branch()
+            .expect("tee is alive")
+            .to(Box::new(NoOpSink {
+                name: "dynamic".into(),
+                hlog: element_hlog(ElementType::Other, "dynamic", None),
+            }))
+            .unwrap();
+
+        assert_eq!(pipeline.graph().revision, before);
+        let branch_id = handle.attach(detached).unwrap();
+        assert_eq!(pipeline.graph().revision, before + 1);
+        handle.detach(branch_id).unwrap();
+        assert_eq!(pipeline.graph().revision, before + 2);
+    }
+
+    #[test]
+    fn bus_messages_carry_the_posting_elements_stable_graph_id() {
+        let (source, streams) = FileDemuxer::open("demux", test_video()).expect("open test video");
+        let index = streams
+            .iter()
+            .find(|stream| stream.kind == ffmpeg_next::media::Type::Video)
+            .expect("test video has a video stream")
+            .index;
+        let pipeline = Pipeline::new("test", source, |source, ctx| {
+            let branch = ctx.branch().to(Box::new(NoOpSink {
+                name: "stable-id-sink".into(),
+                hlog: element_hlog(ElementType::Other, "stable-id-sink", None),
+            }))?;
+            ctx.attach(source, index, branch)?;
+            Ok(())
+        })
+        .expect("test pipeline wiring must succeed");
+        let sink_id = pipeline
+            .graph()
+            .nodes
+            .iter()
+            .find(|node| &*node.name == "stable-id-sink")
+            .expect("sink is attached")
+            .id;
+
+        pipeline.run();
+        let messages: Vec<_> = pipeline.bus().iter_with_ids().collect();
+        assert!(messages.iter().any(|message| {
+            message.element_id == Some(sink_id)
+                && matches!(
+                    &message.event,
+                    BusEvent::Eos { name, .. } if &**name == "stable-id-sink"
+                )
+        }));
     }
 }
