@@ -81,11 +81,11 @@ pub struct D3d11TextLayerHandle {
 }
 
 impl D3d11TextLayerHandle {
-    /// `pub(crate)`, not `pub`: [`super::D3d11VideoCompositorHandle::add_text_layer`]
-    /// is the only place outside this crate that can ever produce a
-    /// `D3d11TextLayerHandle`, which is what guarantees `device` actually
-    /// matches `layer`'s own compositor — a public constructor here would
-    /// let a caller reintroduce that mismatch.
+    /// Validates `font_size` and parses `font_data`, so
+    /// [`super::D3d11VideoCompositorHandle::add_text_layer`] can fail
+    /// *before* registering anything — everything that can fail happens
+    /// here, ahead of the `add_layer` call, so a rejected font never
+    /// leaves a dangling placeholder registration behind.
     pub(crate) fn parse_font(
         font_data: Vec<u8>,
         font_size: f32,
@@ -96,6 +96,13 @@ impl D3d11TextLayerHandle {
         Ok(FontArc::try_from_vec(font_data)?)
     }
 
+    /// `pub(crate)`, not `pub`, and infallible: by the time this is called
+    /// (from [`super::D3d11VideoCompositorHandle::add_text_layer`], the
+    /// only place outside this crate that can ever produce a
+    /// `D3d11TextLayerHandle`), `font` has already been validated via
+    /// [`Self::parse_font`] and `device` is guaranteed to match `layer`'s
+    /// own compositor — a public constructor here would let a caller
+    /// reintroduce that mismatch.
     pub(crate) fn new(
         layer: D3d11VideoLayerHandle,
         device: &ID3D11Device,

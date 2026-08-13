@@ -654,8 +654,19 @@ impl D3d11VideoCompositor {
             .collect()
     }
 
+    /// Composites one output frame. A single bad input layer (mismatched
+    /// device, unsupported texture format, oversized frame, ...) is
+    /// skipped and reported on `bus` as a [`BusEvent::Error`] rather than
+    /// failing the whole call — same "elements don't die on data errors"
+    /// contract as the rest of this crate (see
+    /// [`crate::element::SourceElement::run`]'s own docs: a `Result::Err`
+    /// returned from here would propagate all the way out of `run()` and
+    /// end this compositor's output permanently, which one misbehaving
+    /// input has no business doing). Only a genuine infrastructure failure
+    /// (e.g. `create_output_target` failing) still returns `Err`.
     fn compose_frame(
         &mut self,
+        bus: &Bus,
     ) -> std::result::Result<UnboundObjectPoolRef<ffmpeg::frame::Video>, D3d11VideoCompositorError>
     {
         let mut snapshots = self.snapshots();
@@ -693,7 +704,7 @@ impl D3d11VideoCompositor {
             .context
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let draw_result = unsafe {
+        unsafe {
             let background = &self.options.background;
             context.ClearRenderTargetView(
                 &output_view,
@@ -712,30 +723,40 @@ impl D3d11VideoCompositor {
             context.PSSetSamplers(0, Some(&[Some(self.sampler.clone())]));
             context.PSSetConstantBuffers(0, Some(&[Some(self.layer_buffer.clone())]));
 
-            let result = snapshots.iter().try_for_each(|snapshot| {
+            for snapshot in &snapshots {
                 if !snapshot.layer.visible || snapshot.layer.opacity == 0.0 {
-                    return Ok(());
+                    continue;
                 }
                 let Some(frame) = &snapshot.frame else {
-                    return Ok(());
+                    continue;
                 };
-                self.draw_layer(
+                if let Err(error) = self.draw_layer(
                     &context,
                     frame,
                     &snapshot.layer,
                     canvas_width,
                     canvas_height,
-                )
-            });
+                ) {
+                    // Skip just this layer — a bad frame on one input (wrong
+                    // device, unsupported format, ...) is a data error, not
+                    // grounds to fail the whole composited output.
+                    bus.post(
+                        &self.hlog,
+                        BusEvent::Error {
+                            element_type: ElementType::D3d11VideoCompositor,
+                            name: self.name.clone(),
+                            error: error.into(),
+                        },
+                    );
+                }
+            }
 
-            // Always release resource bindings, including when one layer
-            // failed after earlier layers had already drawn.
+            // Always release resource bindings, including when a layer
+            // above was skipped after earlier layers had already drawn.
             context.PSSetShaderResources(0, Some(&[None, None]));
             context.OMSetRenderTargets(None, None);
-            result
         };
         drop(context);
-        draw_result?;
 
         output_frame.set_pts(Some(self.frame_index));
         output_frame.set_color_space(ffmpeg::color::Space::RGB);
@@ -846,7 +867,7 @@ impl D3d11VideoCompositor {
     }
 
     fn push_frame(&mut self, bus: &Bus) -> std::result::Result<(), D3d11VideoCompositorError> {
-        let output = self.compose_frame()?;
+        let output = self.compose_frame(bus)?;
         if let Err(error) = self.pad.push(MediaBuffer::Video(Arc::new(output))) {
             bus.post(
                 &self.hlog,
@@ -1425,6 +1446,13 @@ mod tests {
         MediaBuffer::Video(Arc::new(pooled))
     }
 
+    /// A `Bus` with its receiver immediately dropped, for tests that don't
+    /// care about per-layer error reporting — `Bus::post` no-ops once the
+    /// receiving end is gone.
+    fn test_bus() -> Bus {
+        Bus::new().0
+    }
+
     fn download_frame(
         device: &ID3D11Device,
         context: Arc<Mutex<ID3D11DeviceContext>>,
@@ -1520,7 +1548,9 @@ mod tests {
             .consume(pooled_video(wrap_d3d11_texture(blue_texture, 2, 2)))
             .unwrap();
 
-        let composed = compositor.compose_frame().expect("compose_frame failed");
+        let composed = compositor
+            .compose_frame(&test_bus())
+            .expect("compose_frame failed");
         assert_eq!(composed.format(), ffmpeg::format::Pixel::D3D11);
         assert_eq!((composed.width(), composed.height()), (4, 4));
         assert_eq!(composed.pts(), Some(0));
@@ -1564,7 +1594,9 @@ mod tests {
         sink.consume(pooled_video(wrap_d3d11_texture(texture, 4, 3)))
             .unwrap();
 
-        let composed = compositor.compose_frame().expect("compose_frame failed");
+        let composed = compositor
+            .compose_frame(&test_bus())
+            .expect("compose_frame failed");
         let downloaded = download_frame(&device, context, composed);
         for y in 0..3 {
             for x in 0..4 {
@@ -1611,7 +1643,9 @@ mod tests {
             1,
         )))
         .unwrap();
-        let first = compositor.compose_frame().expect("first compose failed");
+        let first = compositor
+            .compose_frame(&test_bus())
+            .expect("first compose failed");
 
         sink.consume(pooled_video(wrap_d3d11_texture(
             bgra_texture(&device, 1, 1, [255, 0, 0, 255]),
@@ -1621,7 +1655,11 @@ mod tests {
         .unwrap();
         let mut later = Vec::new();
         for _ in 0..OUTPUT_POOL_SIZE {
-            later.push(compositor.compose_frame().expect("later compose failed"));
+            later.push(
+                compositor
+                    .compose_frame(&test_bus())
+                    .expect("later compose failed"),
+            );
         }
 
         let mut keys = HashSet::new();
@@ -1664,14 +1702,18 @@ mod tests {
         bt601.set_color_space(ffmpeg::color::Space::SMPTE170M);
         bt601.set_color_range(ffmpeg::color::Range::MPEG);
         sink.consume(pooled_video(bt601)).unwrap();
-        let bt601 = compositor.compose_frame().expect("BT.601 compose failed");
+        let bt601 = compositor
+            .compose_frame(&test_bus())
+            .expect("BT.601 compose failed");
         let bt601 = download_frame(&device, context.clone(), bt601);
 
         let mut bt709 = wrap_d3d11_texture(texture, 2, 2);
         bt709.set_color_space(ffmpeg::color::Space::BT709);
         bt709.set_color_range(ffmpeg::color::Range::MPEG);
         sink.consume(pooled_video(bt709)).unwrap();
-        let bt709 = compositor.compose_frame().expect("BT.709 compose failed");
+        let bt709 = compositor
+            .compose_frame(&test_bus())
+            .expect("BT.709 compose failed");
         let bt709 = download_frame(&device, context, bt709);
 
         let pixel_601 = pixel(&bt601, 0, 0);
@@ -1736,7 +1778,9 @@ mod tests {
 
         layer_handle.set_rect(VideoRect::new(1, 0, 1, 1)).unwrap();
         layer_handle.set_opacity(0.5).unwrap();
-        let blended = compositor.compose_frame().expect("compose_frame failed");
+        let blended = compositor
+            .compose_frame(&test_bus())
+            .expect("compose_frame failed");
         let downloaded = download_frame(&device, context.clone(), blended);
         assert_eq!(pixel(&downloaded, 0, 0), [0, 0, 0, 255], "background only");
         // 255 * 0.5 = 127.5 — the CPU VideoCompositor's software blend
@@ -1758,14 +1802,16 @@ mod tests {
         }
 
         layer_handle.set_visible(false).unwrap();
-        let hidden = compositor.compose_frame().expect("compose_frame failed");
+        let hidden = compositor
+            .compose_frame(&test_bus())
+            .expect("compose_frame failed");
         assert_eq!(hidden.pts(), Some(1));
         let downloaded = download_frame(&device, context, hidden);
         assert_eq!(pixel(&downloaded, 1, 0), [0, 0, 0, 255], "hidden layer");
     }
 
     #[test]
-    fn rejects_a_texture_from_a_different_device() {
+    fn skips_a_mismatched_device_texture_and_reports_it_on_the_bus() {
         let Some((device_a, context_a)) = try_device() else {
             return;
         };
@@ -1779,7 +1825,7 @@ mod tests {
             background: Color::BLACK,
         };
         let (mut compositor, handle) =
-            D3d11VideoCompositor::new("compositor", &device_a, context_a, options)
+            D3d11VideoCompositor::new("compositor", &device_a, context_a.clone(), options)
                 .expect("D3d11VideoCompositor::new should succeed");
         let mut sink = handle
             .add_source("mismatched", VideoLayer::new(VideoRect::new(0, 0, 1, 1)))
@@ -1791,10 +1837,30 @@ mod tests {
         sink.consume(pooled_video(wrap_d3d11_texture(foreign_texture, 1, 1)))
             .unwrap();
 
-        let error = match compositor.compose_frame() {
-            Ok(_) => panic!("expected a device-mismatch error"),
-            Err(error) => error,
+        let (bus, bus_rx) = Bus::new();
+        let composed = compositor
+            .compose_frame(&bus)
+            .expect("a mismatched-device layer must be skipped, not fail the whole frame");
+
+        let error = match bus_rx
+            .try_recv()
+            .expect("the skipped layer should be reported on the bus")
+        {
+            BusEvent::Error { error, .. } => error,
+            other => panic!("expected a BusEvent::Error, got {other:?}"),
         };
-        assert!(matches!(error, D3d11VideoCompositorError::DeviceMismatch));
+        assert!(matches!(
+            error,
+            crate::error::Error::D3d11VideoCompositorError(
+                D3d11VideoCompositorError::DeviceMismatch
+            )
+        ));
+
+        let downloaded = download_frame(&device_a, context_a, composed);
+        assert_eq!(
+            pixel(&downloaded, 0, 0),
+            [0, 0, 0, 255],
+            "mismatched-device layer must not be drawn — background only"
+        );
     }
 }
