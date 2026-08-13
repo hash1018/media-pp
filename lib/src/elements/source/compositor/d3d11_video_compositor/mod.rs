@@ -304,6 +304,9 @@ impl D3d11VideoCompositorHandle {
         let Some(device) = self.shared.upgrade().map(|shared| shared.device.clone()) else {
             return Ok(None);
         };
+        // Validate everything that can fail before replacing an existing
+        // registration with the same name.
+        let font = D3d11TextLayerHandle::parse_font(text_layer.font_data, text_layer.font_size)?;
         // Placeholder rect: no text has been rasterized yet, so its exact
         // size is unknown. `D3d11TextLayerHandle::set_text` immediately overwrites
         // this with the real bitmap size the first time it's called.
@@ -319,10 +322,10 @@ impl D3d11VideoCompositorHandle {
         Ok(Some(D3d11TextLayerHandle::new(
             layer,
             &device,
-            text_layer.font_data,
+            font,
             text_layer.font_size,
             text_layer.color,
-        )?))
+        )))
     }
 }
 
@@ -1448,6 +1451,31 @@ mod tests {
     fn pixel(frame: &ffmpeg::frame::Video, x: usize, y: usize) -> [u8; 4] {
         let offset = y * frame.stride(0) + x * 4;
         frame.data(0)[offset..offset + 4].try_into().unwrap()
+    }
+
+    #[test]
+    fn invalid_text_layer_does_not_replace_an_existing_registration() {
+        let Some((device, context)) = try_device() else {
+            return;
+        };
+        let options = VideoCompositorOptions {
+            width: 4,
+            height: 4,
+            frame_rate: ffmpeg::Rational::new(30, 1),
+            background: Color::BLACK,
+        };
+        let (_compositor, handle) =
+            D3d11VideoCompositor::new("compositor", &device, context, options).unwrap();
+        let existing = handle
+            .add_layer("overlay", VideoLayer::new(VideoRect::new(0, 0, 1, 1)))
+            .unwrap()
+            .unwrap();
+
+        let result = handle.add_text_layer("overlay", TextLayer::new(vec![0, 1, 2, 3]));
+
+        assert!(matches!(result, Err(D3d11TextLayerError::InvalidFont(_))));
+        assert_eq!(handle.source_count(), 1);
+        assert!(existing.layer().is_some());
     }
 
     #[test]

@@ -22,13 +22,24 @@ use crate::{
     pool::UnboundObjectPool,
 };
 
-use super::super::video_layer::VideoRect;
+use super::super::video_layer::{MAX_DIMENSION, VideoRect};
+
+const MAX_TEXT_PIXELS: usize = 16 * 1024 * 1024;
 
 /// Errors specific to [`D3d11TextLayerHandle`].
 #[derive(Debug, ThisError)]
 pub enum D3d11TextLayerError {
     #[error("invalid font data: {0}")]
     InvalidFont(#[from] InvalidFont),
+
+    #[error("font size must be finite and greater than zero, got {0}")]
+    InvalidFontSize(f32),
+
+    #[error("rasterized text is too large: {width}x{height}")]
+    TextTooLarge { width: u64, height: u64 },
+
+    #[error("could not allocate {bytes} bytes for rasterized text")]
+    AllocationFailed { bytes: usize },
 
     #[error(transparent)]
     Compositor(#[from] D3d11VideoCompositorError),
@@ -75,22 +86,31 @@ impl D3d11TextLayerHandle {
     /// `D3d11TextLayerHandle`, which is what guarantees `device` actually
     /// matches `layer`'s own compositor — a public constructor here would
     /// let a caller reintroduce that mismatch.
+    pub(crate) fn parse_font(
+        font_data: Vec<u8>,
+        font_size: f32,
+    ) -> std::result::Result<FontArc, D3d11TextLayerError> {
+        if !font_size.is_finite() || font_size <= 0.0 {
+            return Err(D3d11TextLayerError::InvalidFontSize(font_size));
+        }
+        Ok(FontArc::try_from_vec(font_data)?)
+    }
+
     pub(crate) fn new(
         layer: D3d11VideoLayerHandle,
         device: &ID3D11Device,
-        font_data: Vec<u8>,
+        font: FontArc,
         font_size: f32,
         color: Color,
-    ) -> std::result::Result<Self, D3d11TextLayerError> {
-        let font = FontArc::try_from_vec(font_data)?;
-        Ok(Self {
+    ) -> Self {
+        Self {
             layer,
             device: device.clone(),
             font,
             font_size,
             color,
             pool: UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {}),
-        })
+        }
     }
 
     /// Rasterizes `text` and swaps it in as this layer's frame, resizing
@@ -105,7 +125,8 @@ impl D3d11TextLayerHandle {
             .ok_or(D3d11VideoCompositorError::SourceRemoved)?;
         let (x, y) = (current.rect.x, current.rect.y);
 
-        let Some((width, height, pixels)) = rasterize(&self.font, self.font_size, text, self.color)
+        let Some((width, height, pixels)) =
+            rasterize(&self.font, self.font_size, text, self.color)?
         else {
             self.layer.set_visible(false)?;
             return Ok(());
@@ -165,7 +186,7 @@ fn rasterize(
     size_px: f32,
     text: &str,
     color: Color,
-) -> Option<(u32, u32, Vec<u8>)> {
+) -> std::result::Result<Option<(u32, u32, Vec<u8>)>, D3d11TextLayerError> {
     let scaled = font.as_scaled(PxScale::from(size_px));
     let mut glyphs = Vec::new();
     let mut caret = point(0.0, scaled.ascent());
@@ -184,16 +205,50 @@ fn rasterize(
         glyphs.push(glyph);
     }
     if glyphs.is_empty() {
-        return None;
+        return Ok(None);
     }
 
-    let width = (caret.x.ceil() as i64).clamp(1, i64::from(u32::MAX)) as u32;
-    let height = (scaled.height().ceil() as i64).clamp(1, i64::from(u32::MAX)) as u32;
-    let mut pixels = vec![0u8; width as usize * height as usize * 4];
-    for glyph in glyphs {
-        let Some(outlined) = font.outline_glyph(glyph) else {
-            continue;
-        };
+    let outlined: Vec<_> = glyphs
+        .into_iter()
+        .filter_map(|glyph| font.outline_glyph(glyph))
+        .collect();
+    if outlined.is_empty() {
+        return Ok(None);
+    }
+
+    let width_f = caret.x.ceil();
+    let height_f = scaled.height().ceil();
+    if !width_f.is_finite()
+        || !height_f.is_finite()
+        || width_f > MAX_DIMENSION as f32
+        || height_f > MAX_DIMENSION as f32
+    {
+        return Err(D3d11TextLayerError::TextTooLarge {
+            width: width_f.max(0.0) as u64,
+            height: height_f.max(0.0) as u64,
+        });
+    }
+    let width = width_f.max(1.0) as u32;
+    let height = height_f.max(1.0) as u32;
+    let pixel_count = (width as usize)
+        .checked_mul(height as usize)
+        .filter(|&count| count <= MAX_TEXT_PIXELS)
+        .ok_or(D3d11TextLayerError::TextTooLarge {
+            width: width.into(),
+            height: height.into(),
+        })?;
+    let byte_count = pixel_count
+        .checked_mul(4)
+        .ok_or(D3d11TextLayerError::TextTooLarge {
+            width: width.into(),
+            height: height.into(),
+        })?;
+    let mut pixels = Vec::new();
+    pixels
+        .try_reserve_exact(byte_count)
+        .map_err(|_| D3d11TextLayerError::AllocationFailed { bytes: byte_count })?;
+    pixels.resize(byte_count, 0u8);
+    for outlined in outlined {
         let bounds = outlined.px_bounds();
         outlined.draw(|gx, gy, coverage| {
             let px = bounds.min.x as i32 + gx as i32;
@@ -212,7 +267,7 @@ fn rasterize(
             pixels[index + 3] = pixels[index + 3].max(alpha);
         });
     }
-    Some((width, height, pixels))
+    Ok(Some((width, height, pixels)))
 }
 
 /// Builds one GPU `ID3D11Texture2D` (`DXGI_FORMAT_B8G8R8A8_UNORM`,
@@ -252,4 +307,50 @@ fn upload_bgra(
         device.CreateTexture2D(&desc, Some(&initial_data), Some(&mut texture))?;
     }
     Ok(texture.expect("CreateTexture2D succeeded without producing a texture"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn system_font() -> Option<FontArc> {
+        let data = std::fs::read(r"C:\Windows\Fonts\arial.ttf").ok()?;
+        FontArc::try_from_vec(data).ok()
+    }
+
+    #[test]
+    fn rejects_invalid_font_sizes_before_parsing_font_data() {
+        for size in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+            assert!(matches!(
+                D3d11TextLayerHandle::parse_font(Vec::new(), size),
+                Err(D3d11TextLayerError::InvalidFontSize(value)) if value.to_bits() == size.to_bits()
+            ));
+        }
+    }
+
+    #[test]
+    fn whitespace_and_control_only_text_has_no_bitmap() {
+        let Some(font) = system_font() else {
+            eprintln!("skipping: no usable Arial font on this machine");
+            return;
+        };
+        assert!(
+            rasterize(&font, 32.0, " \t\r\n", Color::WHITE)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn rejects_oversized_text_before_allocating_pixels() {
+        let Some(font) = system_font() else {
+            eprintln!("skipping: no usable Arial font on this machine");
+            return;
+        };
+        let text = "W".repeat(MAX_DIMENSION as usize);
+        assert!(matches!(
+            rasterize(&font, 32.0, &text, Color::WHITE),
+            Err(D3d11TextLayerError::TextTooLarge { .. })
+        ));
+    }
 }
