@@ -20,6 +20,7 @@ use str0m::{
 };
 
 use super::command::Command;
+use super::peer::packet_rtp_time;
 use super::{WebRtcError, WebRtcHandle, WebRtcPeer, WebRtcTrackSink, WebRtcTrackSource};
 use crate::{
     buffer::MediaBuffer,
@@ -424,4 +425,41 @@ fn stopping_a_peer_ends_its_inbound_track_source_with_a_clean_eos() {
     );
 
     driver_a.stop();
+}
+
+/// Regression test for the RTP-timestamp bug where `write_track` built
+/// str0m's `MediaTime` from `pts / time_base.denominator()`, silently
+/// dropping `time_base`'s numerator. That was invisible with the
+/// numerator-1 time bases used elsewhere in this codebase (e.g.
+/// `1/90_000`) but wrong for an NTSC-style time base like `1001/30_000`,
+/// where it made the RTP clock run ~1001x too fast.
+#[test]
+fn packet_rtp_time_accounts_for_the_time_base_numerator() {
+    let mut packet = ffmpeg::Packet::copy(&[1, 2, 3, 4]);
+    packet.set_time_base(ffmpeg::Rational::new(1001, 30_000));
+    packet.set_pts(Some(30));
+
+    let media_time = packet_rtp_time(&packet).expect("packet has a usable time base");
+
+    // 30 ticks of 1001/30_000s each = 1.001s = 30_030/30_000.
+    assert_eq!(media_time.numer(), 30_030);
+    assert_eq!(media_time.denom(), 30_000);
+    assert!(
+        (media_time.as_seconds() - 1.001).abs() < 1e-9,
+        "expected ~1.001s, got {}",
+        media_time.as_seconds()
+    );
+}
+
+/// The common case (numerator 1) must still come out exactly right.
+#[test]
+fn packet_rtp_time_handles_unit_numerator_time_bases() {
+    let mut packet = ffmpeg::Packet::copy(&[1, 2, 3, 4]);
+    packet.set_time_base(ffmpeg::Rational::new(1, 90_000));
+    packet.set_pts(Some(3_000));
+
+    let media_time = packet_rtp_time(&packet).expect("packet has a usable time base");
+
+    assert_eq!(media_time.numer(), 3_000);
+    assert_eq!(media_time.denom(), 90_000);
 }

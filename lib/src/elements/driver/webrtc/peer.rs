@@ -310,12 +310,9 @@ impl WebRtcPeer {
             return Ok(()); // no negotiated codec (matching or otherwise) yet
         };
         let data = packet.data().unwrap_or(&[]).to_vec();
-        let time_base = packet.time_base();
-        let pts = packet.pts().unwrap_or(0).max(0) as u64;
-        let Some(frequency) = str0m::media::Frequency::new(time_base.denominator() as u32) else {
+        let Some(rtp_time) = packet_rtp_time(&packet) else {
             return Ok(()); // packet has no usable time base — nothing sane to write
         };
-        let rtp_time = MediaTime::new(pts, frequency);
         writer
             .write(pt, Instant::now(), rtp_time, data)
             .inspect_err(|error| herror!(self, "writer.write failed: {error}"))
@@ -436,6 +433,23 @@ impl WebRtcPeer {
             _ => {}
         }
     }
+}
+
+/// Converts a `Packet`'s `(pts, time_base)` into the `MediaTime` str0m
+/// expects for [`str0m::media::Writer::write`]. `MediaTime` is
+/// numer/denom *seconds* (str0m rebases it to the codec's RTP clock rate
+/// internally), but an FFmpeg `time_base` is numer/denom *seconds per
+/// tick* — so the elapsed time is `pts * numerator / denominator`, not
+/// `pts / denominator`. Most time bases in this codebase have numerator 1
+/// (e.g. `1/90_000`), which would hide a naive `pts / denominator`: an
+/// NTSC-style `1001/30_000` time base would make the RTP timestamp run
+/// ~1001x too fast.
+pub(super) fn packet_rtp_time(packet: &ffmpeg::Packet) -> Option<MediaTime> {
+    let time_base = packet.time_base();
+    let pts = packet.pts().unwrap_or(0).max(0) as u64;
+    let frequency = str0m::media::Frequency::new(time_base.denominator() as u32)?;
+    let numer = pts.saturating_mul(time_base.numerator().max(0) as u64);
+    Some(MediaTime::new(numer, frequency))
 }
 
 impl Element for WebRtcPeer {
