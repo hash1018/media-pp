@@ -25,6 +25,9 @@ pub enum SwAudioEncoderError {
     )]
     CodecNotFound(String),
 
+    #[error("SwAudioEncoder only accepts Audio or Eos buffers, got {0}")]
+    UnsupportedBuffer(&'static str),
+
     /// [`SwAudioEncoder`] only ever resamples to `Sample::F32` (packed or
     /// planar, whichever the codec itself reports) — see its own docs on
     /// why. This is what a codec whose *only* supported formats are
@@ -461,10 +464,7 @@ impl Sink for SwAudioEncoder {
                 self.drain_packets()?;
                 self.pad.push(MediaBuffer::Eos)
             }
-            other => {
-                let _ = other;
-                Ok(())
-            }
+            other => Err(SwAudioEncoderError::UnsupportedBuffer(other.kind()).into()),
         }
     }
 

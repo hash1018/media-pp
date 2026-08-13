@@ -32,6 +32,24 @@ pub enum WebRtcError {
     )]
     UnsupportedBuffer(&'static str),
 
+    #[error("WebRTC packet has no PTS")]
+    MissingPacketPts,
+
+    #[error("WebRTC packet has a negative PTS: {0}")]
+    NegativePacketPts(i64),
+
+    #[error("WebRTC packet has an invalid time base: {numerator}/{denominator}")]
+    InvalidPacketTimeBase { numerator: i32, denominator: i32 },
+
+    #[error(
+        "WebRTC packet timestamp overflows MediaTime: pts={pts}, time_base={numerator}/{denominator}"
+    )]
+    PacketTimestampOverflow {
+        pts: u64,
+        numerator: i32,
+        denominator: i32,
+    },
+
     #[error("WebRtcPeer's run() has already ended")]
     Closed,
 }

@@ -463,3 +463,50 @@ fn packet_rtp_time_handles_unit_numerator_time_bases() {
     assert_eq!(media_time.numer(), 3_000);
     assert_eq!(media_time.denom(), 90_000);
 }
+
+#[test]
+fn packet_rtp_time_rejects_missing_pts() {
+    let mut packet = ffmpeg::Packet::copy(&[1, 2, 3, 4]);
+    packet.set_time_base(ffmpeg::Rational::new(1, 90_000));
+
+    assert!(matches!(
+        packet_rtp_time(&packet),
+        Err(WebRtcError::MissingPacketPts)
+    ));
+}
+
+#[test]
+fn packet_rtp_time_rejects_negative_pts() {
+    let mut packet = ffmpeg::Packet::copy(&[1, 2, 3, 4]);
+    packet.set_time_base(ffmpeg::Rational::new(1, 90_000));
+    packet.set_pts(Some(-1));
+
+    assert!(matches!(
+        packet_rtp_time(&packet),
+        Err(WebRtcError::NegativePacketPts(-1))
+    ));
+}
+
+#[test]
+fn packet_rtp_time_rejects_invalid_time_base() {
+    let mut packet = ffmpeg::Packet::copy(&[1, 2, 3, 4]);
+    packet.set_time_base(ffmpeg::Rational::new(0, 0));
+    packet.set_pts(Some(0));
+
+    assert!(matches!(
+        packet_rtp_time(&packet),
+        Err(WebRtcError::InvalidPacketTimeBase { .. })
+    ));
+}
+
+#[test]
+fn packet_rtp_time_rejects_timestamp_overflow() {
+    let mut packet = ffmpeg::Packet::copy(&[1, 2, 3, 4]);
+    packet.set_time_base(ffmpeg::Rational::new(i32::MAX, 1));
+    packet.set_pts(Some(i64::MAX));
+
+    assert!(matches!(
+        packet_rtp_time(&packet),
+        Err(WebRtcError::PacketTimestampOverflow { .. })
+    ));
+}

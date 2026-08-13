@@ -35,4 +35,33 @@ impl MediaBuffer {
     pub fn is_eos(&self) -> bool {
         matches!(self, MediaBuffer::Eos)
     }
+
+    /// Stable, human-readable variant name for diagnostics emitted when
+    /// elements are wired to an incompatible media type.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            MediaBuffer::Packet(_) => "Packet",
+            MediaBuffer::Video(_) => "Video",
+            MediaBuffer::Audio(_) => "Audio",
+            MediaBuffer::Eos => "Eos",
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kind_reports_each_variant() {
+        assert_eq!(
+            MediaBuffer::Packet(Arc::new(ffmpeg::Packet::empty())).kind(),
+            "Packet"
+        );
+        assert_eq!(
+            MediaBuffer::Audio(Arc::new(ffmpeg::frame::Audio::empty())).kind(),
+            "Audio"
+        );
+        assert_eq!(MediaBuffer::Eos.kind(), "Eos");
+    }
 }

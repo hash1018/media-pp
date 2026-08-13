@@ -249,6 +249,9 @@ fn has_integer_conversion(pattern: &str) -> bool {
 /// Errors specific to [`HlsMuxer`].
 #[derive(Debug, ThisError)]
 pub enum HlsMuxerError {
+    #[error("HlsMuxer stream sinks only accept Packet or Eos buffers, got {0}")]
+    UnsupportedBuffer(&'static str),
+
     #[error("HLS segment duration must be greater than zero")]
     ZeroSegmentDuration,
 
@@ -470,10 +473,7 @@ impl Sink for HlsMuxerStreamSink {
                 .write_packet(self.stream_index, self.input_time_base, &packet)
                 .inspect_err(|error| herror!(self, "write_interleaved failed: {error}")),
             MediaBuffer::Eos => self.finish(),
-            other => {
-                let _ = other;
-                Ok(())
-            }
+            other => Err(HlsMuxerError::UnsupportedBuffer(other.kind()).into()),
         }
     }
 

@@ -18,6 +18,9 @@ use crate::{
 /// `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum Mp4MuxerError {
+    #[error("Mp4Muxer stream sinks only accept Packet or Eos buffers, got {0}")]
+    UnsupportedBuffer(&'static str),
+
     #[error("ffmpeg error: {0}")]
     Ffmpeg(#[from] ffmpeg::Error),
 }
@@ -279,10 +282,7 @@ impl Sink for Mp4MuxerStreamSink {
                 .write_packet(self.stream_index, self.input_time_base, &packet)
                 .inspect_err(|error| herror!(self, "write_interleaved failed: {error}")),
             MediaBuffer::Eos => self.finish(),
-            other => {
-                let _ = other;
-                Ok(())
-            }
+            other => Err(Mp4MuxerError::UnsupportedBuffer(other.kind()).into()),
         }
     }
 

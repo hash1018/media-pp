@@ -26,6 +26,9 @@ pub enum SwEncoderError {
     )]
     CodecNotFound(String),
 
+    #[error("SwEncoder only accepts Video or Eos buffers, got {0}")]
+    UnsupportedBuffer(&'static str),
+
     #[error("ffmpeg error: {0}")]
     Ffmpeg(#[from] ffmpeg::Error),
 }
@@ -282,10 +285,7 @@ impl Sink for SwEncoder {
                 self.drain()?;
                 self.pad.push(MediaBuffer::Eos)
             }
-            other => {
-                let _ = other;
-                Ok(())
-            }
+            other => Err(SwEncoderError::UnsupportedBuffer(other.kind()).into()),
         }
     }
 

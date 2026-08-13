@@ -193,7 +193,7 @@ impl WebRtcPeer {
         let _ = self.new_track_tx.send((id, mid, kind, reply, source));
     }
 
-    fn apply_command(&mut self, cmd: Command) -> Result<()> {
+    fn apply_command(&mut self, cmd: Command, bus: &Bus) -> Result<()> {
         match cmd {
             Command::AddTrack(id, kind, direction, codec) => {
                 hinfo!(
@@ -204,7 +204,22 @@ impl WebRtcPeer {
                     .insert(id, TrackOutState::ToOpen(kind, direction));
                 self.track_codec.insert(id, codec);
             }
-            Command::Push(id, buf) => self.write_track(id, buf)?,
+            Command::Push(id, buf) => {
+                // A malformed media packet is local to this one track and
+                // buffer. Report and drop it without tearing down the
+                // entire live WebRTC connection, matching Queue's
+                // consume-error contract.
+                if let Err(error) = self.write_track(id, buf) {
+                    bus.post(
+                        &self.hlog,
+                        BusEvent::Error {
+                            element_type: ElementType::WebRtcPeer,
+                            name: self.name.clone(),
+                            error,
+                        },
+                    );
+                }
+            }
             Command::SetAnswer(answer) => {
                 let Some((pending, ids)) = self.pending.take() else {
                     return Ok(());
@@ -310,9 +325,7 @@ impl WebRtcPeer {
             return Ok(()); // no negotiated codec (matching or otherwise) yet
         };
         let data = packet.data().unwrap_or(&[]).to_vec();
-        let Some(rtp_time) = packet_rtp_time(&packet) else {
-            return Ok(()); // packet has no usable time base — nothing sane to write
-        };
+        let rtp_time = packet_rtp_time(&packet)?;
         writer
             .write(pt, Instant::now(), rtp_time, data)
             .inspect_err(|error| herror!(self, "writer.write failed: {error}"))
@@ -444,12 +457,34 @@ impl WebRtcPeer {
 /// (e.g. `1/90_000`), which would hide a naive `pts / denominator`: an
 /// NTSC-style `1001/30_000` time base would make the RTP timestamp run
 /// ~1001x too fast.
-pub(super) fn packet_rtp_time(packet: &ffmpeg::Packet) -> Option<MediaTime> {
+pub(super) fn packet_rtp_time(
+    packet: &ffmpeg::Packet,
+) -> std::result::Result<MediaTime, WebRtcError> {
     let time_base = packet.time_base();
-    let pts = packet.pts().unwrap_or(0).max(0) as u64;
-    let frequency = str0m::media::Frequency::new(time_base.denominator() as u32)?;
-    let numer = pts.saturating_mul(time_base.numerator().max(0) as u64);
-    Some(MediaTime::new(numer, frequency))
+    let numerator = time_base.numerator();
+    let denominator = time_base.denominator();
+    if numerator <= 0 || denominator <= 0 {
+        return Err(WebRtcError::InvalidPacketTimeBase {
+            numerator,
+            denominator,
+        });
+    }
+    let pts = packet.pts().ok_or(WebRtcError::MissingPacketPts)?;
+    let pts = u64::try_from(pts).map_err(|_| WebRtcError::NegativePacketPts(pts))?;
+    let frequency = str0m::media::Frequency::new(denominator as u32).ok_or(
+        WebRtcError::InvalidPacketTimeBase {
+            numerator,
+            denominator,
+        },
+    )?;
+    let numer = pts
+        .checked_mul(numerator as u64)
+        .ok_or(WebRtcError::PacketTimestampOverflow {
+            pts,
+            numerator,
+            denominator,
+        })?;
+    Ok(MediaTime::new(numer, frequency))
 }
 
 impl Element for WebRtcPeer {
@@ -498,7 +533,7 @@ impl Driver for WebRtcPeer {
         let mut buf = vec![0u8; 2000];
         loop {
             while let Ok(cmd) = self.command_rx.try_recv() {
-                self.apply_command(cmd)?;
+                self.apply_command(cmd, bus)?;
             }
             self.negotiate_if_needed();
 
