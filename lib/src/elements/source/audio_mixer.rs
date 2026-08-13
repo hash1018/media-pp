@@ -36,6 +36,9 @@ pub enum AudioMixerError {
 
     #[error("AudioMixer doesn't support seeking a live mix")]
     SeekUnsupported,
+
+    #[error("AudioMixer inputs only accept Audio or Eos buffers, got {0}")]
+    UnsupportedBuffer(&'static str),
 }
 
 /// Construction-time options for [`AudioMixer::new`] — the mixer's fixed
@@ -271,7 +274,10 @@ impl Sink for MixerInputSink {
                     input.eos = true;
                 }
             }
-            _ => herror!(self, "unsupported buffer: expected Audio or Eos"),
+            other => {
+                herror!(self, "unsupported buffer: expected Audio or Eos");
+                return Err(AudioMixerError::UnsupportedBuffer(other.kind()).into());
+            }
         }
         Ok(())
     }
@@ -942,5 +948,35 @@ mod tests {
 
         current.control(ControlMsg::Stop).unwrap();
         assert_eq!(handle.source_count(), 0);
+    }
+
+    /// A misrouted `Packet`/`Video` buffer used to be silently logged and
+    /// dropped — no `BusEvent::Error`, no way for a misconfigured pipeline
+    /// to ever find out. Matches the typed-error pattern every other
+    /// `Sink` in this codebase already uses for a wrong `MediaBuffer`
+    /// variant (e.g. `Mp4MuxerStreamSink`).
+    #[test]
+    fn rejects_buffers_that_are_neither_audio_nor_eos() {
+        let (mixer, handle) = AudioMixer::new(
+            "mixer",
+            AudioMixerOptions {
+                sample_rate: 48000,
+                channels: 2,
+            },
+        );
+        let mut input = handle.add_source("a").expect("mixer still alive");
+
+        let error = input
+            .consume(MediaBuffer::Packet(Arc::new(ffmpeg::Packet::empty())))
+            .expect_err("a Packet buffer must be rejected, not silently dropped");
+        assert!(
+            matches!(
+                error,
+                crate::error::Error::AudioMixerError(AudioMixerError::UnsupportedBuffer("Packet"))
+            ),
+            "unexpected error: {error:?}"
+        );
+
+        drop(mixer);
     }
 }

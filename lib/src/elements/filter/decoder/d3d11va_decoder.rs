@@ -398,13 +398,29 @@ pub(crate) fn wrap_d3d11_texture(
         // `data[1]` — `0` here since this is never an array texture.
         (*ptr).data[0] = raw as *mut u8;
         (*ptr).data[1] = std::ptr::null_mut();
-        (*ptr).buf[0] = ffi::av_buffer_create(
+        let buf = ffi::av_buffer_create(
             raw as *mut u8,
             std::mem::size_of::<*mut c_void>(),
             Some(release_d3d11_texture),
             std::ptr::null_mut(),
             0,
         );
+        if buf.is_null() {
+            // `av_buffer_create`'s own allocation failed — nothing will
+            // ever call `release_d3d11_texture` for the COM reference
+            // `into_raw()` already handed off above, and `data[0]` must
+            // not keep pointing at it (whatever reads this frame next
+            // would treat it as a still-live texture). Release it here
+            // ourselves instead of leaking it or leaving a dangling
+            // pointer behind, then fail loudly: this is an allocation
+            // failure with no sane per-frame recovery, not a condition
+            // worth threading a `Result` through every one of this
+            // function's callers for.
+            (*ptr).data[0] = std::ptr::null_mut();
+            drop(ID3D11Texture2D::from_raw(raw));
+            panic!("av_buffer_create failed to allocate a D3D11 texture buffer wrapper");
+        }
+        (*ptr).buf[0] = buf;
     }
     frame
 }

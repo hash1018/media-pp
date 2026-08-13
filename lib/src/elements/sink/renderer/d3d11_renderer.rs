@@ -128,6 +128,9 @@ pub enum D3d11RendererError {
     )]
     DeviceMismatch,
 
+    #[error("D3D11 texture array index {index} is outside ArraySize {array_size}")]
+    InvalidArrayIndex { index: isize, array_size: u32 },
+
     #[error("windows error: {0}")]
     Windows(#[from] windows::core::Error),
 }
@@ -203,7 +206,6 @@ impl D3d11Renderer {
     ) -> Result<()> {
         let (texture_raw, index) =
             d3d11va_texture(&frame).ok_or(D3d11RendererError::InvalidD3d11Frame)?;
-        let array_index = index as u32;
         let width = frame.width();
         let height = frame.height();
 
@@ -228,6 +230,15 @@ impl D3d11Renderer {
 
         let mut desc = Default::default();
         unsafe { texture.GetDesc(&mut desc) };
+        if index < 0 || index as u64 >= u64::from(desc.ArraySize) {
+            let error = D3d11RendererError::InvalidArrayIndex {
+                index,
+                array_size: desc.ArraySize,
+            };
+            herror!(self, "{error}");
+            return Err(error.into());
+        }
+        let array_index = index as u32;
 
         // No `keep_alive` to pass through here — see `D3d11FrameRenderer`'s
         // own docs on why D3D11's driver-deferred resource destruction

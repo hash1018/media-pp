@@ -7,7 +7,7 @@ use std::{
 use ffmpeg_next as ffmpeg;
 use rust_hlog::{HLog, hinfo};
 
-use super::mp4_muxer::Mp4Muxer;
+use super::mp4_muxer::{Mp4Muxer, Mp4MuxerError};
 use crate::{
     buffer::MediaBuffer,
     control::ControlMsg,
@@ -290,10 +290,11 @@ impl Sink for SegmentedTrackSink {
         match buf {
             MediaBuffer::Packet(packet) => self.group.consume_packet(self.track_index, packet),
             MediaBuffer::Eos => self.group.finish_eos(self.track_index),
-            other => {
-                let _ = other;
-                Ok(())
-            }
+            // The `Mp4Muxer` each rotated segment wraps already rejects
+            // this — matching its own `Mp4MuxerStreamSink::consume` here
+            // instead of silently no-op'ing keeps that protection visible
+            // through the rotation wrapper instead of swallowing it.
+            other => Err(Mp4MuxerError::UnsupportedBuffer(other.kind()).into()),
         }
     }
 
@@ -403,6 +404,61 @@ mod tests {
         for path in &paths {
             std::fs::remove_file(path).ok();
         }
+    }
+
+    /// A misrouted `Audio` buffer used to be silently dropped by
+    /// `SegmentedTrackSink::consume`. The `Mp4Muxer` each segment wraps
+    /// already rejects this via `Mp4MuxerError::UnsupportedBuffer` — the
+    /// rotation wrapper must surface that instead of swallowing it.
+    #[test]
+    fn rejects_a_buffer_type_the_wrapped_mp4_muxer_does_not_accept() {
+        let video_options = TestVideoOptions {
+            width: 160,
+            height: 120,
+            framerate: ffmpeg::Rational::new(15, 1),
+        };
+        let video_source = TestVideoSource::new("video", video_options);
+        let time_base = video_source.time_base();
+        let encoder = SwEncoder::new(
+            "encoder",
+            SwEncoderOptions {
+                codec: VideoCodec::OpenH264,
+                width: video_options.width,
+                height: video_options.height,
+                time_base,
+                frame_rate: video_options.framerate,
+                bit_rate: 200_000,
+                gop_size: 8,
+            },
+        )
+        .expect("openh264 encoder must be available");
+
+        let path = std::env::temp_dir().join(format!(
+            "segmented_mp4_reject_test_{}.mp4",
+            std::process::id()
+        ));
+        let recorded_path = path.clone();
+        let mut muxer = SegmentedMp4Muxer::create(
+            SegmentPolicy::Duration(Duration::from_secs(3600)),
+            move |_index| recorded_path.clone(),
+        );
+        muxer.add_stream("video", encoder.parameters(), time_base);
+        let mut sinks = muxer.open().expect("open must succeed");
+        let mut sink = sinks.pop().expect("exactly one stream was added");
+
+        let error = sink
+            .consume(MediaBuffer::Audio(Arc::new(ffmpeg::frame::Audio::empty())))
+            .expect_err("an Audio buffer must be rejected, not silently dropped");
+        assert!(
+            matches!(
+                error,
+                crate::error::Error::Mp4MuxerError(Mp4MuxerError::UnsupportedBuffer("Audio"))
+            ),
+            "unexpected error: {error:?}"
+        );
+
+        drop(sink);
+        std::fs::remove_file(&path).ok();
     }
 
     /// Regression test against a leaked file handle on the *previous*

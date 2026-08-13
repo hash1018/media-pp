@@ -105,7 +105,14 @@ impl DriverRunner {
         let stop = StopReceiver {
             flag: self.stop_flag.clone(),
         };
-        let this = Arc::clone(self);
+        // A `Weak` back-reference, not `Arc::clone(self)`: the thread only
+        // needs it to flip `running` back off when the driver returns, and
+        // holding a strong ref here would mean the last *external*
+        // `Arc<DriverRunner>` going away could never bring the strong count
+        // to zero — `Drop` would never run, and nothing would ever flip
+        // `stop_flag` for a caller that just drops its handle (see `Drop`
+        // below, which depends on this being a `Weak`).
+        let this = Arc::downgrade(self);
         thread::Builder::new()
             .name("driver".into())
             .spawn(move || {
@@ -121,7 +128,9 @@ impl DriverRunner {
                         },
                     );
                 }
-                this.running.store(false, Ordering::Release);
+                if let Some(this) = this.upgrade() {
+                    this.running.store(false, Ordering::Release);
+                }
             })
             .expect("failed to spawn driver thread");
     }
@@ -133,5 +142,88 @@ impl DriverRunner {
             return;
         }
         self.stop_flag.store(true, Ordering::Release);
+    }
+}
+
+impl Drop for DriverRunner {
+    /// Same posture as [`crate::pipeline::Pipeline`]'s own `Drop`: dropping
+    /// the last handle stops the background work instead of leaking it.
+    /// Sets the flag directly rather than through `stop()` — by the time
+    /// this runs there's no `Arc<Self>` left to reach `&self` through one,
+    /// only the raw fields still being torn down.
+    fn drop(&mut self) {
+        self.stop_flag.store(true, Ordering::Release);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{sync::mpsc, time::Duration};
+
+    use rust_hlog::HLog;
+
+    use super::*;
+    use crate::element::{Element, ElementType, element_hlog};
+
+    #[rust_hlog::hlog]
+    struct LoopingDriver {
+        started: mpsc::Sender<()>,
+        stopped: mpsc::Sender<()>,
+    }
+
+    impl Element for LoopingDriver {
+        fn name(&self) -> Arc<str> {
+            "looping".into()
+        }
+
+        fn element_type(&self) -> ElementType {
+            ElementType::Other
+        }
+
+        fn hlog(&self) -> &HLog {
+            &self.hlog
+        }
+
+        fn hlog_mut(&mut self) -> &mut HLog {
+            &mut self.hlog
+        }
+    }
+
+    impl Driver for LoopingDriver {
+        fn run(&mut self, stop: &StopReceiver, _bus: &Bus) -> Result<()> {
+            let _ = self.started.send(());
+            while !stop.is_stopped() {
+                thread::sleep(Duration::from_millis(5));
+            }
+            let _ = self.stopped.send(());
+            Ok(())
+        }
+    }
+
+    /// Regression test: `run()` used to keep its own strong `Arc<Self>`
+    /// clone alive on the background thread for the entire loop, so the
+    /// last *external* handle going out of scope never actually dropped
+    /// the `DriverRunner` — `stop_flag` was never set, and the thread (and
+    /// whatever socket/session it holds) ran forever. `run` now hands the
+    /// thread a `Weak` instead, so this drop must reach `Drop::drop`.
+    #[test]
+    fn dropping_the_last_handle_stops_the_background_thread() {
+        let (started_tx, started_rx) = mpsc::channel();
+        let (stopped_tx, stopped_rx) = mpsc::channel();
+        let runner = DriverRunner::new(LoopingDriver {
+            started: started_tx,
+            stopped: stopped_tx,
+            hlog: element_hlog(ElementType::Other, "looping", None),
+        });
+        runner.run();
+        started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("driver should start");
+
+        drop(runner);
+
+        stopped_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("dropping the last DriverRunner handle should stop the background thread");
     }
 }

@@ -708,18 +708,30 @@ impl DxgiCaptureSource {
                 continue;
             }
 
-            let texture: ID3D11Texture2D = resource.cast()?;
-            unsafe {
-                self.context.CopyResource(
-                    &self.units[index].staging_texture.cast::<ID3D11Resource>()?,
-                    &texture.cast::<ID3D11Resource>()?,
-                );
-            }
+            // Every fallible step here (the two `cast`s, the copy itself)
+            // must still release DXGI's own frame lock on the way out —
+            // an early `?` before `ReleaseFrame()` would leave this unit
+            // unable to `AcquireNextFrame` again until it's torn down
+            // entirely, so the copy's own result is captured instead of
+            // propagated directly.
+            let copy_result: std::result::Result<(), DxgiCaptureSourceError> = (|| {
+                let texture: ID3D11Texture2D = resource.cast()?;
+                unsafe {
+                    self.context.CopyResource(
+                        &self.units[index].staging_texture.cast::<ID3D11Resource>()?,
+                        &texture.cast::<ID3D11Resource>()?,
+                    );
+                }
+                Ok(())
+            })();
 
             // Release DXGI's own frame as soon as we've copied it out,
             // rather than holding it while we map/read (Cpu mode) the
-            // (independent) staging copy below.
-            unsafe { self.units[index].duplication.ReleaseFrame() }?;
+            // (independent) staging copy below — and unconditionally,
+            // even if the copy above failed.
+            let release_result = unsafe { self.units[index].duplication.ReleaseFrame() };
+            copy_result?;
+            release_result?;
 
             if self.gpu_mode {
                 // No `Map`/CPU copy at all — `staging_texture` itself

@@ -369,15 +369,27 @@ fn apply_gain(
     let required = scalar_count.saturating_mul(format.bytes());
 
     for plane in 0..planes {
-        let data = frame.data_mut(plane);
-        if data.len() < required {
+        // `frame.data_mut(plane)`'s length comes from `AVFrame.linesize[plane]`,
+        // but FFmpeg's convention for planar *audio* only ever fills in
+        // `linesize[0]` (every plane is the same size, so it isn't repeated
+        // elsewhere) — `linesize[1..]` stay `0`, so `data_mut` on any channel
+        // but the first always reports a zero-length slice regardless of the
+        // real buffer. Same footgun documented and worked around in
+        // `encoder/audio/encoder.rs`'s `absorb_resampled`; read the real
+        // per-plane byte range directly from the frame instead.
+        if plane >= frame.planes() {
             return Err(AudioVolumeError::InvalidPlaneSize {
                 plane,
                 required,
-                actual: data.len(),
+                actual: 0,
             });
         }
-        let data = &mut data[..required];
+        // Safety: `plane < frame.planes()`, and `required` is exactly
+        // `gains.len() * channels_per_plane * format.bytes()`, which the
+        // caller (`process_audio`) guarantees equals this plane's real
+        // allocated size (`gains.len() == frame.samples()`).
+        let data =
+            unsafe { std::slice::from_raw_parts_mut((*frame.as_mut_ptr()).data[plane], required) };
         match format {
             ffmpeg::format::Sample::U8(_) => scale_u8(data, gains, channels_per_plane),
             ffmpeg::format::Sample::I16(_) => scale_i16(data, gains, channels_per_plane),
@@ -506,6 +518,26 @@ mod tests {
         Arc::new(frame)
     }
 
+    /// One `&[f32]` per channel, written as a genuinely planar frame (each
+    /// channel its own plane) — unlike `f32_packed_frame`, which only ever
+    /// exercises plane 0.
+    fn f32_planar_frame(channels_data: &[&[f32]], rate: u32) -> Arc<ffmpeg::frame::Audio> {
+        let channels = channels_data.len();
+        let samples = channels_data[0].len();
+        assert!(channels_data.iter().all(|c| c.len() == samples));
+        let mut frame = ffmpeg::frame::Audio::new(
+            ffmpeg::format::Sample::F32(Type::Planar),
+            samples,
+            ffmpeg::ChannelLayout::default(channels as i32),
+        );
+        frame.set_rate(rate);
+        frame.set_pts(Some(123));
+        for (index, values) in channels_data.iter().enumerate() {
+            frame.plane_mut::<f32>(index).copy_from_slice(values);
+        }
+        Arc::new(frame)
+    }
+
     fn captured_f32(received: &Arc<Mutex<Vec<MediaBuffer>>>, index: usize) -> Vec<f32> {
         let received = received.lock().unwrap();
         let MediaBuffer::Audio(frame) = &received[index] else {
@@ -575,6 +607,34 @@ mod tests {
         assert_eq!(frame.channels(), 2);
         assert_eq!(frame.samples(), 2);
         assert_eq!(frame.pts(), Some(123));
+    }
+
+    /// Regression test for the planar-audio footgun documented in
+    /// `apply_gain`: reading a channel via `data_mut(plane)` instead of the
+    /// frame's real per-plane byte range made every channel but the first
+    /// report a zero-length buffer, so any non-unity gain on planar audio
+    /// with 2+ channels used to fail every frame instead of scaling it.
+    #[test]
+    fn gain_scales_every_channel_of_a_planar_frame() {
+        let options = AudioVolumeOptions {
+            gain: 0.5,
+            ramp_duration: Duration::ZERO,
+            ..AudioVolumeOptions::default()
+        };
+        let (mut volume, _handle, received) = new_volume(options);
+        volume
+            .consume(MediaBuffer::Audio(f32_planar_frame(
+                &[&[1.0, -1.0], &[0.5, -0.5]],
+                48_000,
+            )))
+            .unwrap();
+
+        let received = received.lock().unwrap();
+        let MediaBuffer::Audio(frame) = &received[0] else {
+            panic!("expected audio")
+        };
+        assert_eq!(frame.plane::<f32>(0).to_vec(), vec![0.5, -0.5]);
+        assert_eq!(frame.plane::<f32>(1).to_vec(), vec![0.25, -0.25]);
     }
 
     #[test]
