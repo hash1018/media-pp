@@ -297,6 +297,13 @@ impl SwAudioEncoder {
         loop {
             match self.encoder.receive_packet(&mut packet) {
                 Ok(()) => {
+                    // `avcodec_receive_packet` never sets `AVPacket.time_base`
+                    // itself — without this, `packet.time_base()` reads back
+                    // FFmpeg's `0/1` "unset" sentinel, wrong for anything
+                    // (e.g. `WebRtcPeer::write_track`) deriving real time
+                    // from a packet's own declared time_base. `pts` above is
+                    // already expressed in this same `1/sample_rate` unit.
+                    packet.set_time_base(self.time_base());
                     self.pad.push(MediaBuffer::Packet(Arc::new(packet)))?;
                     packet = ffmpeg::Packet::empty();
                 }
@@ -618,5 +625,90 @@ mod tests {
             eos.load(std::sync::atomic::Ordering::SeqCst),
             "expected Eos to cascade"
         );
+    }
+
+    #[rust_hlog::hlog]
+    struct CapturingSink {
+        packets: Arc<std::sync::Mutex<Vec<Arc<ffmpeg::Packet>>>>,
+    }
+
+    impl Element for CapturingSink {
+        fn name(&self) -> Arc<str> {
+            "capture".into()
+        }
+        fn element_type(&self) -> ElementType {
+            ElementType::Other
+        }
+        fn hlog(&self) -> &HLog {
+            &self.hlog
+        }
+        fn hlog_mut(&mut self) -> &mut HLog {
+            &mut self.hlog
+        }
+    }
+
+    impl Sink for CapturingSink {
+        fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+            if let MediaBuffer::Packet(packet) = buf {
+                self.packets.lock().unwrap().push(packet);
+            }
+            Ok(())
+        }
+        fn control(&mut self, _msg: ControlMsg) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Regression test: `avcodec_receive_packet` never sets a packet's own
+    /// `AVPacket.time_base` — only `drain_packets` stamping it explicitly
+    /// (added alongside this test) keeps `Packet::time_base()` from
+    /// reading back FFmpeg's `0/1` "unset" sentinel. That silently broke
+    /// `WebRtcPeer::write_track`, which derives real RTP time from each
+    /// packet's own declared time_base (`0/1`'s numerator of `0` fails its
+    /// validation, so every packet was dropped) — see
+    /// `webrtc_av_loopback`'s own regression run.
+    #[test]
+    fn produced_packets_carry_the_configured_time_base() {
+        let Ok(mut encoder) = SwAudioEncoder::new(
+            "encoder",
+            SwAudioEncoderOptions {
+                codec: AudioCodec::Aac,
+                sample_rate: 48000,
+                channels: 2,
+                time_base: ffmpeg::Rational::new(1, 48000),
+                bit_rate: 128_000,
+            },
+        ) else {
+            eprintln!("skipping: aac not available in this ffmpeg build");
+            return;
+        };
+
+        let packets = Arc::new(std::sync::Mutex::new(Vec::new()));
+        encoder.src_pads()[0].link(Box::new(CapturingSink {
+            packets: packets.clone(),
+            hlog: element_hlog(ElementType::Other, "capture", None),
+        }));
+
+        for _ in 0..20 {
+            encoder
+                .consume(MediaBuffer::Audio(Arc::new(constant_stereo_frame(
+                    0.1, 960, 48000,
+                ))))
+                .expect("consume should succeed");
+        }
+        encoder
+            .consume(MediaBuffer::Eos)
+            .expect("consume(Eos) should succeed");
+
+        let packets = packets.lock().unwrap();
+        assert!(!packets.is_empty(), "expected at least one packet");
+        for packet in packets.iter() {
+            assert_eq!(
+                packet.time_base(),
+                ffmpeg::Rational::new(1, 48000),
+                "packet time_base must match SwAudioEncoder::time_base(), \
+                 not FFmpeg's 0/1 unset sentinel"
+            );
+        }
     }
 }

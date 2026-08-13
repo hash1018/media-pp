@@ -159,6 +159,16 @@ pub struct SwEncoder {
     /// (notably `libopenh264`) leave `AVPacket::duration` at zero; muxers
     /// such as HLS need it for precise segment durations.
     packet_duration: i64,
+    /// The unit each produced packet's `pts` is expressed in — same value
+    /// `SwEncoderOptions::time_base` was constructed with. Stamped onto
+    /// every packet in `drain` since `avcodec_receive_packet` itself never
+    /// sets `AVPacket.time_base` (only the encoder context's own time base,
+    /// via `set_time_base` below); without it, a packet's own
+    /// `Packet::time_base()` reads back FFmpeg's `0/1` "unset" sentinel —
+    /// wrong for anything (e.g. `WebRtcPeer::write_track`) that derives
+    /// real time from a packet's own declared time_base rather than
+    /// external knowledge of what this encoder was built with.
+    time_base: ffmpeg::Rational,
     pad: SrcPad,
 }
 
@@ -209,6 +219,7 @@ impl SwEncoder {
             hlog,
             encoder,
             packet_duration,
+            time_base: options.time_base,
             pad,
         })
     }
@@ -229,6 +240,7 @@ impl SwEncoder {
         loop {
             match self.encoder.receive_packet(&mut packet) {
                 Ok(()) => {
+                    packet.set_time_base(self.time_base);
                     if packet.duration() == 0 && self.packet_duration > 0 {
                         packet.set_duration(self.packet_duration);
                     }
@@ -303,7 +315,10 @@ impl Sink for SwEncoder {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex as StdMutex;
+
     use super::*;
+    use crate::pool::UnboundObjectPool;
 
     #[test]
     fn nominal_frame_duration_is_expressed_in_encoder_time_base_ticks() {
@@ -367,6 +382,97 @@ mod tests {
                     "expected CodecNotFound, got {error:?}"
                 );
             }
+        }
+    }
+
+    #[rust_hlog::hlog]
+    struct CapturingSink {
+        packets: Arc<StdMutex<Vec<Arc<ffmpeg::Packet>>>>,
+    }
+
+    impl Element for CapturingSink {
+        fn name(&self) -> Arc<str> {
+            "capture".into()
+        }
+
+        fn element_type(&self) -> ElementType {
+            ElementType::Other
+        }
+
+        fn hlog(&self) -> &HLog {
+            &self.hlog
+        }
+
+        fn hlog_mut(&mut self) -> &mut HLog {
+            &mut self.hlog
+        }
+    }
+
+    impl Sink for CapturingSink {
+        fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+            if let MediaBuffer::Packet(packet) = buf {
+                self.packets.lock().unwrap().push(packet);
+            }
+            Ok(())
+        }
+
+        fn control(&mut self, _msg: ControlMsg) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    fn pooled_video(frame: ffmpeg::frame::Video) -> MediaBuffer {
+        let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
+        let mut pooled = pool.get();
+        *pooled = frame;
+        MediaBuffer::Video(Arc::new(pooled))
+    }
+
+    /// Regression test: `avcodec_receive_packet` never sets a packet's own
+    /// `AVPacket.time_base` — only `drain` stamping it explicitly (added
+    /// alongside this test) keeps `Packet::time_base()` from reading back
+    /// FFmpeg's `0/1` "unset" sentinel. That silently broke
+    /// `WebRtcPeer::write_track`, which derives real RTP time from each
+    /// packet's own declared time_base (`0/1`'s numerator of `0` fails its
+    /// validation, so every packet was dropped) — see
+    /// `webrtc_av_loopback`'s own regression run.
+    #[test]
+    fn produced_packets_carry_the_configured_time_base() {
+        let options = SwEncoderOptions {
+            codec: VideoCodec::OpenH264,
+            width: 64,
+            height: 64,
+            time_base: ffmpeg::Rational::new(1, 30),
+            frame_rate: ffmpeg::Rational::new(30, 1),
+            bit_rate: 200_000,
+            gop_size: 30,
+        };
+        let Ok(mut encoder) = SwEncoder::new("encoder", options) else {
+            return; // openh264 unavailable on this build, see codec_not_found_is_a_clean_error_not_a_panic
+        };
+        let packets = Arc::new(StdMutex::new(Vec::new()));
+        encoder.src_pads()[0].link(Box::new(CapturingSink {
+            packets: packets.clone(),
+            hlog: element_hlog(ElementType::Other, "capture", None),
+        }));
+
+        let mut frame = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::YUV420P, 64, 64);
+        frame.set_pts(Some(0));
+        for plane in 0..frame.planes() {
+            frame.data_mut(plane).fill(128);
+        }
+        encoder.consume(pooled_video(frame)).unwrap();
+        encoder.consume(MediaBuffer::Eos).unwrap();
+
+        let packets = packets.lock().unwrap();
+        assert!(!packets.is_empty(), "expected at least one packet");
+        for packet in packets.iter() {
+            assert_eq!(
+                packet.time_base(),
+                ffmpeg::Rational::new(1, 30),
+                "packet time_base must match the encoder's configured time_base, \
+                 not FFmpeg's 0/1 unset sentinel"
+            );
         }
     }
 }
