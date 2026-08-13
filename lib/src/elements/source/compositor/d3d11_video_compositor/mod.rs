@@ -1,3 +1,10 @@
+//! GPU (D3D11) video compositor — [`D3d11VideoCompositor`] itself plus
+//! everything specific to driving it: input registration
+//! ([`D3d11VideoCompositorHandle`]), per-input placement control
+//! ([`video_handle::D3d11VideoLayerHandle`]), and the dynamic-text
+//! sibling ([`text_handle::D3d11TextLayerHandle`]) each split into their
+//! own file since neither is small enough to justify inlining here.
+
 use std::{
     collections::HashMap,
     ffi::c_void,
@@ -29,7 +36,16 @@ use windows::{
     core::{Interface, s},
 };
 
-use super::video_layer::{self, LayerGeometry, MAX_DIMENSION, VideoLayer, VideoLayerError};
+mod text_handle;
+mod video_handle;
+
+pub use text_handle::{D3d11TextLayerError, D3d11TextLayerHandle};
+pub use video_handle::D3d11VideoLayerHandle;
+
+use super::{
+    text_layer::TextLayer,
+    video_layer::{self, LayerGeometry, MAX_DIMENSION, VideoLayer, VideoLayerError},
+};
 use crate::{
     buffer::MediaBuffer,
     bus::{Bus, BusEvent},
@@ -47,8 +63,8 @@ use crate::{
 const OUTPUT_POOL_SIZE: usize = 4;
 const CONTROL_POLL_INTERVAL: Duration = Duration::from_millis(5);
 
-const BGRA_SHADER_SOURCE: &[u8] = include_bytes!("../../../shaders/d3d11/composite_bgra.hlsl");
-const NV12_SHADER_SOURCE: &[u8] = include_bytes!("../../../shaders/d3d11/composite_nv12.hlsl");
+const BGRA_SHADER_SOURCE: &[u8] = include_bytes!("../../../../shaders/d3d11/composite_bgra.hlsl");
+const NV12_SHADER_SOURCE: &[u8] = include_bytes!("../../../../shaders/d3d11/composite_nv12.hlsl");
 
 /// Errors specific to [`D3d11VideoCompositor`].
 #[derive(Debug, ThisError)]
@@ -162,6 +178,11 @@ struct GpuVideoInput {
 struct D3d11CompositorShared {
     inputs: Mutex<HashMap<Arc<str>, Arc<GpuVideoInput>>>,
     next_input_id: AtomicU64,
+    /// Lets [`D3d11VideoCompositorHandle::add_text_layer`] build GPU
+    /// resources guaranteed to match this compositor's own device, without
+    /// requiring a separately-threaded-through device parameter that could
+    /// drift from the real one.
+    device: ID3D11Device,
 }
 
 /// A cheaply cloneable handle for adding and removing
@@ -179,16 +200,17 @@ pub struct D3d11VideoCompositorInput {
 }
 
 impl D3d11VideoCompositorHandle {
-    /// Registers an input and returns its terminal Sink plus independent
-    /// runtime layer control — see
-    /// [`crate::elements::VideoCompositorHandle::add_source`]'s own docs
-    /// (identical contract: reusing `name` replaces the old registration,
-    /// old sinks/layer handles become harmlessly stale).
-    pub fn add_source(
+    /// Registers an input under `name` and returns its layer handle —
+    /// shared by [`Self::add_source`] (which additionally wraps a `Sink`
+    /// around the same registration) and [`Self::add_layer`] (which
+    /// returns just this handle, for handle-driven inputs like
+    /// [`crate::elements::TextLayer`] that never receive `Pipeline`
+    /// frames and would otherwise build a `Sink` only to discard it).
+    fn register_input(
         &self,
         name: impl Into<String>,
         layer: VideoLayer,
-    ) -> std::result::Result<Option<D3d11VideoCompositorInput>, D3d11VideoCompositorError> {
+    ) -> std::result::Result<Option<D3d11VideoLayerHandle>, D3d11VideoCompositorError> {
         video_layer::validate_layer(layer).map_err(map_layer_error)?;
         let Some(shared) = self.shared.upgrade() else {
             return Ok(None);
@@ -206,19 +228,48 @@ impl D3d11VideoCompositorHandle {
             .unwrap()
             .insert(name.clone(), input.clone());
 
+        Ok(Some(D3d11VideoLayerHandle {
+            id,
+            name,
+            input: Arc::downgrade(&input),
+        }))
+    }
+
+    /// Registers an input and returns its terminal Sink plus independent
+    /// runtime layer control — see
+    /// [`crate::elements::VideoCompositorHandle::add_source`]'s own docs
+    /// (identical contract: reusing `name` replaces the old registration,
+    /// old sinks/layer handles become harmlessly stale).
+    pub fn add_source(
+        &self,
+        name: impl Into<String>,
+        layer: VideoLayer,
+    ) -> std::result::Result<Option<D3d11VideoCompositorInput>, D3d11VideoCompositorError> {
+        let Some(layer_handle) = self.register_input(name, layer)? else {
+            return Ok(None);
+        };
         Ok(Some(D3d11VideoCompositorInput {
             sink: Box::new(D3d11VideoCompositorInputSink {
-                name: name.clone(),
-                hlog: element_hlog(ElementType::D3d11VideoCompositor, &name, None),
+                name: layer_handle.name.clone(),
+                hlog: element_hlog(ElementType::D3d11VideoCompositor, &layer_handle.name, None),
                 shared: self.shared.clone(),
-                input: Arc::downgrade(&input),
+                input: layer_handle.input.clone(),
             }),
-            layer: D3d11VideoLayerHandle {
-                id,
-                name,
-                input: Arc::downgrade(&input),
-            },
+            layer: layer_handle,
         }))
+    }
+
+    /// Registers an input and returns *only* its layer handle — no `Sink`
+    /// at all — for a caller that drives this input's frames directly via
+    /// [`D3d11VideoLayerHandle::set_frame`] instead of wiring a `Pipeline`
+    /// branch into it (e.g. [`crate::elements::TextLayer`]). Same
+    /// replace-on-reuse contract as [`Self::add_source`].
+    pub fn add_layer(
+        &self,
+        name: impl Into<String>,
+        layer: VideoLayer,
+    ) -> std::result::Result<Option<D3d11VideoLayerHandle>, D3d11VideoCompositorError> {
+        self.register_input(name, layer)
     }
 
     pub fn remove_source(&self, name: &str) {
@@ -233,78 +284,45 @@ impl D3d11VideoCompositorHandle {
             .map(|shared| shared.inputs.lock().unwrap().len())
             .unwrap_or(0)
     }
-}
 
-/// Thread-safe runtime placement control for one [`D3d11VideoCompositor`]
-/// input — the GPU sibling of [`crate::elements::VideoLayerHandle`].
-#[derive(Clone)]
-pub struct D3d11VideoLayerHandle {
-    id: video_layer::VideoInputId,
-    name: Arc<str>,
-    input: Weak<GpuVideoInput>,
-}
-
-impl D3d11VideoLayerHandle {
-    pub fn id(&self) -> video_layer::VideoInputId {
-        self.id
-    }
-
-    pub fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    pub fn layer(&self) -> Option<VideoLayer> {
-        self.input
-            .upgrade()
-            .map(|input| *input.layer.lock().unwrap())
-    }
-
-    pub fn set_layer(
+    /// Registers a new text layer and returns a [`D3d11TextLayerHandle`]
+    /// ready for [`D3d11TextLayerHandle::set_text`] — the text-specific
+    /// sibling of [`Self::add_layer`] (which stays generic, unaware of
+    /// text), taking a [`TextLayer`] the same way `add_source` takes a
+    /// [`VideoLayer`]. Always uses this compositor's own device
+    /// internally, so unlike a hand-assembled `add_layer` +
+    /// separately-supplied device there's no way to accidentally construct
+    /// a `D3d11TextLayerHandle` against the wrong device — the one class
+    /// of bug a caller-supplied device would allow. Returns `None` if the
+    /// compositor has already been dropped, matching [`Self::add_layer`]'s
+    /// own contract.
+    pub fn add_text_layer(
         &self,
-        layer: VideoLayer,
-    ) -> std::result::Result<(), D3d11VideoCompositorError> {
-        video_layer::validate_layer(layer).map_err(map_layer_error)?;
-        self.update(|current| *current = layer)
-    }
-
-    pub fn set_rect(
-        &self,
-        rect: video_layer::VideoRect,
-    ) -> std::result::Result<(), D3d11VideoCompositorError> {
-        video_layer::validate_rect(rect).map_err(map_layer_error)?;
-        self.update(|layer| layer.rect = rect)
-    }
-
-    pub fn set_opacity(&self, opacity: f32) -> std::result::Result<(), D3d11VideoCompositorError> {
-        video_layer::validate_opacity(opacity).map_err(map_layer_error)?;
-        self.update(|layer| layer.opacity = opacity)
-    }
-
-    pub fn set_z_index(&self, z_index: i32) -> std::result::Result<(), D3d11VideoCompositorError> {
-        self.update(|layer| layer.z_index = z_index)
-    }
-
-    pub fn set_visible(&self, visible: bool) -> std::result::Result<(), D3d11VideoCompositorError> {
-        self.update(|layer| layer.visible = visible)
-    }
-
-    pub fn set_fit(
-        &self,
-        fit: video_layer::VideoFit,
-    ) -> std::result::Result<(), D3d11VideoCompositorError> {
-        self.update(|layer| layer.fit = fit)
-    }
-
-    fn update(
-        &self,
-        update: impl FnOnce(&mut VideoLayer),
-    ) -> std::result::Result<(), D3d11VideoCompositorError> {
-        let input = self
-            .input
-            .upgrade()
-            .ok_or(D3d11VideoCompositorError::SourceRemoved)?;
-        update(&mut input.layer.lock().unwrap());
-        Ok(())
+        name: impl Into<String>,
+        text_layer: TextLayer,
+    ) -> std::result::Result<Option<D3d11TextLayerHandle>, D3d11TextLayerError> {
+        let Some(device) = self.shared.upgrade().map(|shared| shared.device.clone()) else {
+            return Ok(None);
+        };
+        // Placeholder rect: no text has been rasterized yet, so its exact
+        // size is unknown. `D3d11TextLayerHandle::set_text` immediately overwrites
+        // this with the real bitmap size the first time it's called.
+        let placeholder = VideoLayer::new(video_layer::VideoRect::new(
+            text_layer.x,
+            text_layer.y,
+            1,
+            1,
+        ));
+        let Some(layer) = self.add_layer(name, placeholder)? else {
+            return Ok(None);
+        };
+        Ok(Some(D3d11TextLayerHandle::new(
+            layer,
+            &device,
+            text_layer.font_data,
+            text_layer.font_size,
+            text_layer.color,
+        )?))
     }
 }
 
@@ -541,6 +559,7 @@ impl D3d11VideoCompositor {
         let shared = Arc::new(D3d11CompositorShared {
             inputs: Mutex::new(HashMap::new()),
             next_input_id: AtomicU64::new(1),
+            device: device.clone(),
         });
         let frame_interval = Duration::from_secs_f64(
             options.frame_rate.denominator() as f64 / options.frame_rate.numerator() as f64,
@@ -1229,7 +1248,10 @@ mod tests {
     use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
 
     use super::*;
-    use crate::elements::{D3d11Download, VideoRect};
+    use crate::{
+        color::Color,
+        elements::{D3d11Download, VideoRect},
+    };
 
     #[rust_hlog::hlog]
     struct CapturingSink {
@@ -1437,7 +1459,7 @@ mod tests {
             width: 4,
             height: 4,
             frame_rate: ffmpeg::Rational::new(30, 1),
-            background: video_layer::VideoColor::BLACK,
+            background: Color::BLACK,
         };
         let (mut compositor, handle) =
             D3d11VideoCompositor::new("compositor", &device, context.clone(), options)
@@ -1489,7 +1511,7 @@ mod tests {
             width: 4,
             height: 3,
             frame_rate: ffmpeg::Rational::new(30, 1),
-            background: video_layer::VideoColor::BLACK,
+            background: Color::BLACK,
         };
         let (mut compositor, handle) =
             D3d11VideoCompositor::new("compositor", &device, context.clone(), options)
@@ -1546,7 +1568,7 @@ mod tests {
             width: 1,
             height: 1,
             frame_rate: ffmpeg::Rational::new(30, 1),
-            background: video_layer::VideoColor::BLACK,
+            background: Color::BLACK,
         };
         let (mut compositor, handle) =
             D3d11VideoCompositor::new("compositor", &device, context.clone(), options)
@@ -1600,7 +1622,7 @@ mod tests {
             width: 2,
             height: 2,
             frame_rate: ffmpeg::Rational::new(30, 1),
-            background: video_layer::VideoColor::BLACK,
+            background: Color::BLACK,
         };
         let (mut compositor, handle) =
             D3d11VideoCompositor::new("compositor", &device, context.clone(), options)
@@ -1669,7 +1691,7 @@ mod tests {
             width: 3,
             height: 1,
             frame_rate: ffmpeg::Rational::new(30, 1),
-            background: video_layer::VideoColor::BLACK,
+            background: Color::BLACK,
         };
         let (mut compositor, handle) =
             D3d11VideoCompositor::new("compositor", &device, context.clone(), options)
@@ -1726,7 +1748,7 @@ mod tests {
             width: 1,
             height: 1,
             frame_rate: ffmpeg::Rational::new(30, 1),
-            background: video_layer::VideoColor::BLACK,
+            background: Color::BLACK,
         };
         let (mut compositor, handle) =
             D3d11VideoCompositor::new("compositor", &device_a, context_a, options)

@@ -3,9 +3,10 @@ use std::{thread, time::Duration};
 use ffmpeg_next as ffmpeg;
 use media_pp::{
     bus::BusEvent,
+    color::Color,
     elements::{
         D3d11Download, D3d11Upload, D3d11VideoCompositor, Mp4Muxer, Scaler, SwEncoder,
-        SwEncoderOptions, TeeBuilder, TestVideoOptions, TestVideoSource, VideoCodec, VideoColor,
+        SwEncoderOptions, TeeBuilder, TestVideoOptions, TestVideoSource, VideoCodec,
         VideoCompositorOptions, VideoFit, VideoLayer, VideoRect,
     },
     pipeline::Pipeline,
@@ -134,7 +135,7 @@ fn play(hwnd: isize, path: &str, seconds: u64) -> media_pp::Result<()> {
             width: output_width,
             height: output_height,
             frame_rate,
-            background: VideoColor::new(24, 24, 24),
+            background: Color::new(24, 24, 24),
         },
     )
     .map_err(|e| media_pp::Error::Other(e.to_string()))?;

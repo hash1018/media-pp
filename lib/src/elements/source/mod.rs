@@ -21,11 +21,12 @@ pub use capture::{
 pub use capture::{WasapiCaptureOptions, WasapiCaptureSource, WasapiCaptureSourceError};
 #[cfg(feature = "d3d11-renderer")]
 pub use compositor::{
-    D3d11VideoCompositor, D3d11VideoCompositorError, D3d11VideoCompositorHandle,
-    D3d11VideoCompositorInput, D3d11VideoCompositorInputSink, D3d11VideoLayerHandle,
+    D3d11TextLayerError, D3d11TextLayerHandle, D3d11VideoCompositor, D3d11VideoCompositorError,
+    D3d11VideoCompositorHandle, D3d11VideoCompositorInput, D3d11VideoCompositorInputSink,
+    D3d11VideoLayerHandle,
 };
 pub use compositor::{
-    VideoColor, VideoCompositor, VideoCompositorError, VideoCompositorHandle, VideoCompositorInput,
+    TextLayer, VideoCompositor, VideoCompositorError, VideoCompositorHandle, VideoCompositorInput,
     VideoCompositorInputSink, VideoCompositorOptions, VideoFit, VideoInputId, VideoLayer,
     VideoLayerHandle, VideoRect,
 };

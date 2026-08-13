@@ -14,12 +14,13 @@ use rust_hlog::{HLog, hinfo};
 use thiserror::Error as ThisError;
 
 use super::video_layer::{
-    self, LayerGeometry, MAX_DIMENSION, VideoColor, VideoFit, VideoInputId, VideoLayer,
-    VideoLayerError, VideoRect,
+    self, LayerGeometry, MAX_DIMENSION, VideoFit, VideoInputId, VideoLayer, VideoLayerError,
+    VideoRect,
 };
 use crate::{
     buffer::MediaBuffer,
     bus::{Bus, BusEvent},
+    color::Color,
     control::{ControlMsg, ControlReceiver, drain_control},
     element::{Element, ElementType, Sink, Source, SourceElement, element_hlog},
     error::Result,
@@ -37,7 +38,7 @@ pub struct VideoCompositorOptions {
     pub width: u32,
     pub height: u32,
     pub frame_rate: ffmpeg::Rational,
-    pub background: VideoColor,
+    pub background: Color,
 }
 
 impl Default for VideoCompositorOptions {
@@ -46,7 +47,7 @@ impl Default for VideoCompositorOptions {
             width: 1920,
             height: 1080,
             frame_rate: ffmpeg::Rational::new(30, 1),
-            background: VideoColor::BLACK,
+            background: Color::BLACK,
         }
     }
 }
@@ -674,7 +675,7 @@ fn layer_geometry(
     video_layer::layer_geometry(source_width, source_height, rect, fit).map_err(map_layer_error)
 }
 
-fn fill_background(frame: &mut ffmpeg::frame::Video, color: VideoColor) {
+fn fill_background(frame: &mut ffmpeg::frame::Video, color: Color) {
     let width = frame.width() as usize;
     let height = frame.height() as usize;
     let stride = frame.stride(0);
@@ -787,14 +788,14 @@ mod tests {
             width,
             height,
             frame_rate: ffmpeg::Rational::new(30, 1),
-            background: VideoColor::BLACK,
+            background: Color::BLACK,
         }
     }
 
     fn solid_frame(
         width: u32,
         height: u32,
-        color: VideoColor,
+        color: Color,
     ) -> Arc<UnboundObjectPoolRef<ffmpeg::frame::Video>> {
         let pool = UnboundObjectPool::new(
             0,
@@ -831,18 +832,10 @@ mod tests {
         overlay.fit = VideoFit::Stretch;
         let (mut blue_sink, _) = input(&handle, "blue", overlay);
         red_sink
-            .consume(MediaBuffer::Video(solid_frame(
-                4,
-                4,
-                VideoColor::new(255, 0, 0),
-            )))
+            .consume(MediaBuffer::Video(solid_frame(4, 4, Color::new(255, 0, 0))))
             .unwrap();
         blue_sink
-            .consume(MediaBuffer::Video(solid_frame(
-                2,
-                2,
-                VideoColor::new(0, 0, 255),
-            )))
+            .consume(MediaBuffer::Video(solid_frame(2, 2, Color::new(0, 0, 255))))
             .unwrap();
 
         let frame = compositor.compose_frame().unwrap();
@@ -858,7 +851,7 @@ mod tests {
         let (mut compositor, handle) = VideoCompositor::new("compositor", options(3, 1)).unwrap();
         let layer = VideoLayer::new(VideoRect::new(0, 0, 1, 1));
         let (mut sink, layer_handle) = input(&handle, "white", layer);
-        sink.consume(MediaBuffer::Video(solid_frame(1, 1, VideoColor::WHITE)))
+        sink.consume(MediaBuffer::Video(solid_frame(1, 1, Color::WHITE)))
             .unwrap();
 
         layer_handle.set_rect(VideoRect::new(1, 0, 1, 1)).unwrap();
@@ -881,18 +874,10 @@ mod tests {
             "latest",
             VideoLayer::new(VideoRect::new(0, 0, 1, 1)),
         );
-        sink.consume(MediaBuffer::Video(solid_frame(
-            1,
-            1,
-            VideoColor::new(255, 0, 0),
-        )))
-        .unwrap();
-        sink.consume(MediaBuffer::Video(solid_frame(
-            1,
-            1,
-            VideoColor::new(0, 255, 0),
-        )))
-        .unwrap();
+        sink.consume(MediaBuffer::Video(solid_frame(1, 1, Color::new(255, 0, 0))))
+            .unwrap();
+        sink.consume(MediaBuffer::Video(solid_frame(1, 1, Color::new(0, 255, 0))))
+            .unwrap();
 
         let frame = compositor.compose_frame().unwrap();
         assert_eq!(pixel(&frame, 0, 0), [0, 255, 0, 255]);
@@ -902,8 +887,8 @@ mod tests {
     fn frame_replacement_and_composition_run_concurrently() {
         let (mut compositor, handle) = VideoCompositor::new("compositor", options(1, 1)).unwrap();
         let (mut sink, _) = input(&handle, "live", VideoLayer::new(VideoRect::new(0, 0, 1, 1)));
-        let red = solid_frame(1, 1, VideoColor::new(255, 0, 0));
-        let green = solid_frame(1, 1, VideoColor::new(0, 255, 0));
+        let red = solid_frame(1, 1, Color::new(255, 0, 0));
+        let green = solid_frame(1, 1, Color::new(0, 255, 0));
         let done = Arc::new(AtomicBool::new(false));
         let producer_done = done.clone();
         let producer = thread::spawn(move || {
@@ -944,18 +929,10 @@ mod tests {
             Err(VideoCompositorError::SourceRemoved)
         ));
         old_sink
-            .consume(MediaBuffer::Video(solid_frame(
-                1,
-                1,
-                VideoColor::new(255, 0, 0),
-            )))
+            .consume(MediaBuffer::Video(solid_frame(1, 1, Color::new(255, 0, 0))))
             .unwrap();
         new_sink
-            .consume(MediaBuffer::Video(solid_frame(
-                1,
-                1,
-                VideoColor::new(0, 0, 255),
-            )))
+            .consume(MediaBuffer::Video(solid_frame(1, 1, Color::new(0, 0, 255))))
             .unwrap();
 
         let frame = compositor.compose_frame().unwrap();

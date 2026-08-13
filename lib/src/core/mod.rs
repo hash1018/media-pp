@@ -1,7 +1,8 @@
 //! The pipeline framework itself — the graph primitives (`element`,
 //! `pad`, `buffer`) and everything that drives them at runtime
-//! (`pipeline`, `queue`, `control`, `clock`, `bus`, `pool`). Kept as its
-//! own module purely to group these files on disk; this module itself is
+//! (`pipeline`, `queue`, `control`, `clock`, `bus`, `pool`), plus small
+//! shared value types with no pipeline behavior of their own (`color`).
+//! Kept as its own module purely to group these files on disk; this module itself is
 //! private (see `lib.rs`) and every item here is re-exported flat at the
 //! crate root, so nothing outside this file (internal or external to the
 //! crate) refers to `crate::core::...` directly — `crate::pipeline`,
@@ -15,6 +16,7 @@
 pub mod buffer;
 pub mod bus;
 pub mod clock;
+pub mod color;
 pub mod control;
 pub mod driver;
 pub mod element;

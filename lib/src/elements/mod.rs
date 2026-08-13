@@ -42,7 +42,7 @@ pub use source::{
     AppSource, AppSourceError, AppSourceHandle, AudioMixer, AudioMixerError, AudioMixerOptions,
     FileDemuxError, FileDemuxer, MixerHandle, MixerInputSink, RtspOptions, RtspSource,
     RtspSourceError, RtspTransport, StreamInfo, TestAudioOptions, TestAudioSource,
-    TestAudioSourceError, TestVideoOptions, TestVideoSource, TestVideoSourceError, VideoColor,
+    TestAudioSourceError, TestVideoOptions, TestVideoSource, TestVideoSourceError, TextLayer,
     VideoCompositor, VideoCompositorError, VideoCompositorHandle, VideoCompositorInput,
     VideoCompositorInputSink, VideoCompositorOptions, VideoFit, VideoInputId, VideoLayer,
     VideoLayerHandle, VideoRect,
@@ -54,8 +54,9 @@ pub use source::{
 };
 #[cfg(feature = "d3d11-renderer")]
 pub use source::{
-    D3d11VideoCompositor, D3d11VideoCompositorError, D3d11VideoCompositorHandle,
-    D3d11VideoCompositorInput, D3d11VideoCompositorInputSink, D3d11VideoLayerHandle,
+    D3d11TextLayerError, D3d11TextLayerHandle, D3d11VideoCompositor, D3d11VideoCompositorError,
+    D3d11VideoCompositorHandle, D3d11VideoCompositorInput, D3d11VideoCompositorInputSink,
+    D3d11VideoLayerHandle,
 };
 #[cfg(feature = "wasapi-capture")]
 pub use source::{WasapiCaptureOptions, WasapiCaptureSource, WasapiCaptureSourceError};

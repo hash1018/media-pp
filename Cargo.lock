@@ -1181,6 +1181,7 @@ dependencies = [
 name = "media-pp"
 version = "0.1.0"
 dependencies = [
+ "ab_glyph",
  "arc-swap",
  "crossbeam-channel",
  "crossbeam-queue",
@@ -2528,6 +2529,15 @@ dependencies = [
  "media-pp",
  "render_common",
  "winit",
+]
+
+[[package]]
+name = "text_overlay"
+version = "0.1.0"
+dependencies = [
+ "ffmpeg-next",
+ "media-pp",
+ "render_common",
 ]
 
 [[package]]

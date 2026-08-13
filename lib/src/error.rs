@@ -14,8 +14,8 @@ use crate::elements::WasapiRendererError;
 use crate::elements::WebRtcError;
 #[cfg(feature = "d3d11-renderer")]
 use crate::elements::{
-    D3d11DownloadError, D3d11RendererError, D3d11UploadError, D3d11VideoCompositorError,
-    D3d11vaDecoderError,
+    D3d11DownloadError, D3d11RendererError, D3d11TextLayerError, D3d11UploadError,
+    D3d11VideoCompositorError, D3d11vaDecoderError,
 };
 #[cfg(feature = "d3d12-renderer")]
 use crate::elements::{D3d12RendererError, D3d12UploadError, D3d12vaDecoderError};
@@ -127,6 +127,10 @@ pub enum Error {
     #[cfg(feature = "d3d11-renderer")]
     #[error(transparent)]
     D3d11VideoCompositorError(#[from] D3d11VideoCompositorError),
+
+    #[cfg(feature = "d3d11-renderer")]
+    #[error(transparent)]
+    D3d11TextLayerError(#[from] D3d11TextLayerError),
 
     #[cfg(feature = "dxgi-capture")]
     #[error(transparent)]

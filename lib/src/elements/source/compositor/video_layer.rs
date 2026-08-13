@@ -15,23 +15,6 @@ pub(crate) const MAX_DIMENSION: u32 = 16_384;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct VideoInputId(pub(crate) u64);
 
-/// An opaque background color. Compositor output is always opaque BGRA.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct VideoColor {
-    pub red: u8,
-    pub green: u8,
-    pub blue: u8,
-}
-
-impl VideoColor {
-    pub const BLACK: Self = Self::new(0, 0, 0);
-    pub const WHITE: Self = Self::new(255, 255, 255);
-
-    pub const fn new(red: u8, green: u8, blue: u8) -> Self {
-        Self { red, green, blue }
-    }
-}
-
 /// An output-space rectangle. Signed coordinates allow a layer to be
 /// moved partially outside the canvas while its size remains positive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

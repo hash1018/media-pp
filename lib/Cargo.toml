@@ -40,10 +40,11 @@ ndarray = { version = "0.17", optional = true }
 str0m = { version = "0.21", optional = true, default-features = false, features = [
     "wincrypto",
 ] }
+ab_glyph = { version = "0.2", optional = true }
 
 [features]
 d3d12-renderer = ["dep:windows"]
-d3d11-renderer = ["dep:windows"]
+d3d11-renderer = ["dep:windows", "dep:ab_glyph"]
 dxgi-capture = ["dep:windows", "d3d11-renderer"]
 wasapi-capture = ["dep:windows"]
 wasapi-renderer = ["dep:windows"]
