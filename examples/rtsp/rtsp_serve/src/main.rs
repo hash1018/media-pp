@@ -59,8 +59,7 @@ fn main() -> media_pp::Result<()> {
         )
         .expect("failed to start RTSP server");
         actual_url = server.url().to_string();
-        let pacer =
-            Pacer::new("pacer", time_base, ctx.clock.clone()).expect("failed to create pacer");
+        let pacer = Pacer::new("pacer", time_base, ctx.clock.clone())?;
         let branch = ctx
             .branch()
             .queue("packets", 32) // pacer sleeps on its own thread; let demux run ahead into this
