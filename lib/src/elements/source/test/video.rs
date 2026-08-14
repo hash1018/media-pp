@@ -15,6 +15,7 @@ use crate::{
     element::{Element, ElementType, Source, SourceElement, element_hlog},
     pad::SrcPad,
     pool::UnboundObjectPool,
+    schedule::PeriodicSchedule,
 };
 
 /// Errors specific to `TestVideoSource`. Converts into the crate-wide
@@ -212,12 +213,7 @@ impl Source for TestVideoSource {
 impl SourceElement for TestVideoSource {
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> crate::error::Result<()> {
         hinfo!(self, "run: starting");
-        // Absolute schedule (`next_due += frame_interval` each tick), not
-        // "sleep `frame_interval` since the last push" — the latter drifts
-        // over time, since generation/push itself always takes some
-        // nonzero time that would otherwise get added on top of every
-        // single interval. Same pattern `DxgiCaptureSource::run` uses.
-        let mut next_due = Instant::now();
+        let mut schedule = PeriodicSchedule::new(self.frame_interval, Instant::now());
         loop {
             let outcome = drain_control(control, self, bus)?;
             if outcome.stopped {
@@ -225,32 +221,10 @@ impl SourceElement for TestVideoSource {
                 return Ok(());
             }
             if outcome.paused_for > Duration::ZERO {
-                // Shift the schedule forward by exactly how long `Pause`
-                // held it, so `Resume` picks up from "one interval after
-                // whenever this actually resumed", not a deadline that's
-                // been sitting in the past the whole time it was frozen —
-                // the latter would generate every missed frame back to
-                // back the instant this loop runs again.
-                next_due += outcome.paused_for;
-                let now = Instant::now();
-                if next_due < now {
-                    next_due = now + self.frame_interval;
-                }
+                schedule.resume_after_pause(outcome.paused_for, Instant::now());
             }
-            let now = Instant::now();
-            if now < next_due {
-                thread::sleep(next_due - now);
-            }
-            next_due += self.frame_interval;
-            let now = Instant::now();
-            if next_due < now {
-                // A slow generate/push must not cause a burst of catch-up
-                // frames once it finally does keep up. Drop missed ticks
-                // and resume cadence from the next real output deadline —
-                // same correction `VideoCompositor::run` already applies
-                // to its own composition step.
-                next_due = now + self.frame_interval;
-            }
+            thread::sleep(schedule.remaining(Instant::now()));
+            schedule.advance_after_tick(Instant::now());
 
             let frame = self.generate_frame();
             // A downstream failure drops just this one frame — same

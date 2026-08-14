@@ -26,6 +26,7 @@ use crate::{
     error::Result,
     pad::SrcPad,
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
+    schedule::PeriodicSchedule,
 };
 
 const OUTPUT_POOL_SIZE: usize = 4;
@@ -585,7 +586,7 @@ impl Source for VideoCompositor {
 impl SourceElement for VideoCompositor {
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
         hinfo!(self, "run: starting");
-        let mut next_due = Instant::now();
+        let mut schedule = PeriodicSchedule::new(self.frame_interval, Instant::now());
         loop {
             let outcome = drain_control(control, self, bus)?;
             if outcome.stopped {
@@ -593,33 +594,17 @@ impl SourceElement for VideoCompositor {
                 return Ok(());
             }
             if outcome.paused_for > Duration::ZERO {
-                // Shift the deadline forward by exactly how long Pause
-                // held it, so Resume picks up from the same phase it had
-                // before freezing instead of resyncing to a fresh cadence
-                // anchored at whenever this loop happens to run again —
-                // same correction as `TestVideoSource`/`DxgiCaptureSource`.
-                next_due += outcome.paused_for;
-                let now = Instant::now();
-                if next_due < now {
-                    next_due = now + self.frame_interval;
-                }
+                schedule.resume_after_pause(outcome.paused_for, Instant::now());
             }
 
             let now = Instant::now();
-            if now < next_due {
-                thread::sleep((next_due - now).min(CONTROL_POLL_INTERVAL));
+            if !schedule.is_due(now) {
+                thread::sleep(schedule.remaining(now).min(CONTROL_POLL_INTERVAL));
                 continue;
             }
 
             self.push_frame(bus)?;
-            next_due += self.frame_interval;
-            let now = Instant::now();
-            if next_due < now {
-                // A slow composition must not cause a burst of catch-up
-                // frames. Drop missed ticks and resume cadence from the
-                // next real output deadline.
-                next_due = now + self.frame_interval;
-            }
+            schedule.advance_after_tick(Instant::now());
         }
     }
 

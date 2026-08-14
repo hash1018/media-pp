@@ -41,6 +41,7 @@ use crate::{
     error::Result,
     pad::SrcPad,
     pool::UnboundObjectPool,
+    schedule::PeriodicSchedule,
 };
 
 /// How often [`DxgiCaptureSource::run`]'s poll loop re-checks
@@ -954,7 +955,7 @@ impl Source for DxgiCaptureSource {
 impl SourceElement for DxgiCaptureSource {
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
         hinfo!(self, "run: starting");
-        let mut next_due = Instant::now();
+        let mut schedule = PeriodicSchedule::new(self.frame_interval, Instant::now());
         loop {
             let outcome = drain_control(control, self, bus)?;
             if outcome.stopped {
@@ -962,38 +963,19 @@ impl SourceElement for DxgiCaptureSource {
                 return Ok(());
             }
             if outcome.paused_for > Duration::ZERO {
-                // See `TestVideoSource::run`'s identical correction: shift
-                // the deadline forward by however long `Pause` actually
-                // held it, then drop straight to "one interval from now"
-                // if that still lands in the past, rather than emitting
-                // every missed frame back to back once capture resumes.
-                next_due += outcome.paused_for;
-                let now = Instant::now();
-                if next_due < now {
-                    next_due = now + self.frame_interval;
-                }
+                schedule.resume_after_pause(outcome.paused_for, Instant::now());
             }
 
-            let remaining = next_due.saturating_duration_since(Instant::now());
-            let poll_timeout = remaining.min(POLL_GRANULARITY);
+            let poll_timeout = schedule.remaining(Instant::now()).min(POLL_GRANULARITY);
             if let Err(error) = self.poll_capture(poll_timeout.as_millis() as u32) {
                 herror!(self, "capture failed: {error}");
                 return Err(error.into());
             }
 
-            if Instant::now() < next_due {
+            if !schedule.is_due(Instant::now()) {
                 continue;
             }
-            next_due += self.frame_interval;
-            let now = Instant::now();
-            if next_due < now {
-                // A slow poll/capture cycle must not cause a burst of
-                // catch-up frames once it finally does keep up. Drop
-                // missed ticks and resume cadence from the next real
-                // output deadline — same correction `VideoCompositor::run`
-                // already applies to its own composition step.
-                next_due = now + self.frame_interval;
-            }
+            schedule.advance_after_tick(Instant::now());
 
             if !self.all_captured() {
                 continue; // nothing real captured yet — nothing to emit

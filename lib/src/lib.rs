@@ -8,6 +8,7 @@ mod platform;
 // `crate::pipeline`/`media_pp::pipeline` etc., never `crate::core::...`.
 pub use core::{
     buffer, bus, clock, color, control, driver, element, graph, log, pad, pipeline, pool, queue,
+    schedule,
 };
 
 pub use error::{Error, Result};

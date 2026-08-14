@@ -1,7 +1,8 @@
 //! The pipeline framework itself — the graph primitives (`element`,
 //! `pad`, `buffer`) and everything that drives them at runtime
 //! (`pipeline`, `queue`, `control`, `clock`, `bus`, `pool`), plus small
-//! shared value types with no pipeline behavior of their own (`color`).
+//! shared value types with no pipeline behavior of their own (`color`,
+//! `schedule`).
 //! Kept as its own module purely to group these files on disk; this module itself is
 //! private (see `lib.rs`) and every item here is re-exported flat at the
 //! crate root, so nothing outside this file (internal or external to the
@@ -26,3 +27,4 @@ pub mod pad;
 pub mod pipeline;
 pub mod pool;
 pub mod queue;
+pub mod schedule;
