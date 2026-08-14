@@ -224,7 +224,6 @@ impl SourceElement for TestVideoSource {
                 schedule.resume_after_pause(outcome.paused_for, Instant::now());
             }
             thread::sleep(schedule.remaining(Instant::now()));
-            schedule.advance_after_tick(Instant::now());
 
             let frame = self.generate_frame();
             // A downstream failure drops just this one frame — same
@@ -241,6 +240,12 @@ impl SourceElement for TestVideoSource {
                     },
                 );
             }
+            // Advance only now that this tick's own work (generate + push,
+            // which a slow downstream can stretch arbitrarily) is done —
+            // `advance_after_tick`'s resync check needs `now` to reflect
+            // that, or one abnormally slow tick's own catch-up frame slips
+            // through uncapped before the next iteration ever notices.
+            schedule.advance_after_tick(Instant::now());
         }
     }
 
@@ -476,11 +481,15 @@ mod tests {
     impl Sink for SlowFirstFrameSink {
         fn consume(&mut self, buf: MediaBuffer) -> crate::error::Result<()> {
             if matches!(buf, MediaBuffer::Video(_)) {
-                let _ = self.tx.send(Instant::now());
                 if !self.delayed {
                     self.delayed = true;
                     thread::sleep(self.slow_duration);
                 }
+                // Timestamped after any delay, not before — this marks
+                // when the downstream actually became free again, the
+                // reference point the next frame's arrival gets measured
+                // against.
+                let _ = self.tx.send(Instant::now());
             }
             Ok(())
         }
@@ -497,7 +506,11 @@ mod tests {
     /// between them as soon as the loop got a chance to run again — a
     /// burst of catch-up frames. `VideoCompositor::run` already guarded
     /// its own composition step this way; `TestVideoSource::run` now
-    /// applies the same clamp right after advancing `next_due`.
+    /// applies the same clamp right after advancing `next_due` — and only
+    /// *after* generate+push (this test's other regression: advancing
+    /// before push meant the clamp couldn't see the slow tick's own delay
+    /// until the following iteration, letting exactly one immediate
+    /// catch-up frame slip through right after the slow one finished).
     #[test]
     fn a_slow_sink_does_not_cause_a_burst_of_catch_up_frames() {
         let (tx, rx) = crossbeam_channel::unbounded();
@@ -524,16 +537,25 @@ mod tests {
         .expect("test pipeline wiring must succeed");
 
         pipeline.run();
-        rx.recv_timeout(Duration::from_millis(500))
-            .expect("expected the first (slow) frame");
-        let after_slow = rx
+        let slow_done = rx
             .recv_timeout(Duration::from_secs(1))
-            .expect("expected the frame right after the slow one caught up");
+            .expect("expected the first (slow) frame to finish");
+        let after_slow = rx
+            .recv_timeout(Duration::from_millis(500))
+            .expect("expected the frame right after the slow one");
         let steady = rx
             .recv_timeout(Duration::from_millis(500))
             .expect("expected a third frame at steady cadence");
         pipeline.stop();
         pipeline.bus().log_events();
+
+        let immediate_gap = after_slow.saturating_duration_since(slow_done);
+        assert!(
+            immediate_gap >= Duration::from_millis(25),
+            "expected the frame right after the slow one to wait a steady \
+             ~50ms interval, not follow immediately just because the slow \
+             sink had finally caught up: got {immediate_gap:?}"
+        );
 
         let gap = steady.saturating_duration_since(after_slow);
         assert!(

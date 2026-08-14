@@ -975,9 +975,13 @@ impl SourceElement for DxgiCaptureSource {
             if !schedule.is_due(Instant::now()) {
                 continue;
             }
-            schedule.advance_after_tick(Instant::now());
 
             if !self.all_captured() {
+                // Still advance even though there's nothing to emit this
+                // tick — otherwise `next_due` sits in the past and the
+                // next iteration's `poll_timeout` above is zero, busy-looping
+                // instead of waiting for the next tick.
+                schedule.advance_after_tick(Instant::now());
                 continue; // nothing real captured yet — nothing to emit
             }
             let frame = match self.emit_frame() {
@@ -997,6 +1001,11 @@ impl SourceElement for DxgiCaptureSource {
                     },
                 );
             }
+            // Advance only now that this tick's own work (emit + push,
+            // which a slow downstream/GPU readback can stretch
+            // arbitrarily) is done — see `TestVideoSource::run`'s
+            // identical correction for why the placement matters.
+            schedule.advance_after_tick(Instant::now());
         }
     }
 
