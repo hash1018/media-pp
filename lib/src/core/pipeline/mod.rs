@@ -10,7 +10,6 @@ pub use runtime::Pipeline;
 use crate::{
     buffer::MediaBuffer,
     bus::{Bus, BusEvent},
-    clock::Clock,
     control::ControlMsg,
     element::{Context, Element, ElementType, Sink, element_hlog},
     error::Result,

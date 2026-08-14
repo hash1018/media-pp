@@ -3,7 +3,7 @@ use std::{
         Mutex,
         atomic::{AtomicU64, Ordering},
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 /// Shared wall-clock reference for pacing decoded frames to their
@@ -80,6 +80,16 @@ impl Clock {
             }
             State::Running { start } => start,
             State::Paused { start, .. } => start,
+        }
+    }
+
+    /// Pause-aware time elapsed since this clock was first anchored.
+    pub(crate) fn elapsed(&self) -> Duration {
+        let state = self.state.lock().unwrap();
+        match *state {
+            State::Unset => Duration::ZERO,
+            State::Running { start } => Instant::now().saturating_duration_since(start),
+            State::Paused { start, paused_at } => paused_at.saturating_duration_since(start),
         }
     }
 

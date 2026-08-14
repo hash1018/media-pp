@@ -7,7 +7,8 @@ mod platform;
 // its module doc) — every external and internal caller keeps using
 // `crate::pipeline`/`media_pp::pipeline` etc., never `crate::core::...`.
 pub use core::{
-    buffer, bus, clock, color, control, driver, element, graph, log, pad, pipeline, pool, queue,
+    buffer, bus, clock, color, control, driver, element, graph, log, pad, pipeline, playback_clock,
+    pool, queue,
 };
 
 // Same flat-namespace reasoning as above, but crate-private: `schedule`/

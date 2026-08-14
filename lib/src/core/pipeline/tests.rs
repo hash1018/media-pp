@@ -505,13 +505,7 @@ fn chain_builder_stamps_pipeline_id_into_terminal_hlog() {
     };
     let graph = PipelineGraph::new();
     let source_id = graph.add_source(ElementType::Other, "source".into());
-    let context = Arc::new(Context {
-        bus,
-        pipeline_id: "my-pipeline".into(),
-        graph,
-        clock: Arc::new(Clock::new()),
-        source_id,
-    });
+    let context = Arc::new(Context::for_test(bus, "my-pipeline", graph, source_id));
     let built = context.branch().to(Box::new(sink)).unwrap();
     assert_eq!(
         built.root.hlog().log_id(),

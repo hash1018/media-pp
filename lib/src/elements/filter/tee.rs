@@ -414,7 +414,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::{bus::Bus, clock::Clock, graph::PipelineGraph};
+    use crate::{bus::Bus, graph::PipelineGraph};
 
     fn packet() -> MediaBuffer {
         MediaBuffer::Packet(Arc::new(ffmpeg_next::Packet::empty()))
@@ -663,13 +663,7 @@ mod tests {
         let (bus, bus_rx) = Bus::new();
         let graph = PipelineGraph::new();
         let source_id = graph.add_source(ElementType::Other, "source".into());
-        let context = Arc::new(Context {
-            bus,
-            pipeline_id: "test".into(),
-            graph,
-            clock: Arc::new(Clock::new()),
-            source_id,
-        });
+        let context = Arc::new(Context::for_test(bus, "test", graph, source_id));
         let before_count = Arc::new(AtomicUsize::new(0));
         let after_count = Arc::new(AtomicUsize::new(0));
         let before = context
@@ -739,13 +733,7 @@ mod tests {
         let (bus, bus_rx) = Bus::new();
         let graph = PipelineGraph::new();
         let source_id = graph.add_source(ElementType::Other, "source".into());
-        let context = Arc::new(Context {
-            bus,
-            pipeline_id: "test".into(),
-            graph,
-            clock: Arc::new(Clock::new()),
-            source_id,
-        });
+        let context = Arc::new(Context::for_test(bus, "test", graph, source_id));
         let failing_count = Arc::new(AtomicUsize::new(0));
         let healthy_count = Arc::new(AtomicUsize::new(0));
         let failing = context
@@ -795,13 +783,7 @@ mod tests {
         let (bus, _bus_rx) = Bus::new();
         let graph = PipelineGraph::new();
         let source_id = graph.add_source(ElementType::Other, "source".into());
-        let context = Arc::new(Context {
-            bus,
-            pipeline_id: "test".into(),
-            graph,
-            clock: Arc::new(Clock::new()),
-            source_id,
-        });
+        let context = Arc::new(Context::for_test(bus, "test", graph, source_id));
         let successful = Arc::new(AtomicUsize::new(0));
         let panic_once = context
             .branch()
@@ -834,13 +816,7 @@ mod tests {
         let (bus, _bus_rx) = Bus::new();
         let graph = PipelineGraph::new();
         let source_id = graph.add_source(ElementType::Other, "source".into());
-        let context = Arc::new(Context {
-            bus,
-            pipeline_id: "test".into(),
-            graph,
-            clock: Arc::new(Clock::new()),
-            source_id,
-        });
+        let context = Arc::new(Context::for_test(bus, "test", graph, source_id));
         let (tee_branch, handle) = TeeBuilder::new("tee", context.clone())
             .build_dynamic()
             .unwrap();
@@ -875,13 +851,7 @@ mod tests {
         let (bus, _bus_rx) = Bus::new();
         let graph = PipelineGraph::new();
         let source_id = graph.add_source(ElementType::Other, "source".into());
-        let context = Arc::new(Context {
-            bus,
-            pipeline_id: "test".into(),
-            graph,
-            clock: Arc::new(Clock::new()),
-            source_id,
-        });
+        let context = Arc::new(Context::for_test(bus, "test", graph, source_id));
         let (tee_branch, handle) = TeeBuilder::new("tee", context.clone())
             .build_dynamic()
             .unwrap();
@@ -961,13 +931,7 @@ mod tests {
         let (bus, _bus_rx) = Bus::new();
         let graph = PipelineGraph::new();
         let source_id = graph.add_source(ElementType::Other, "source".into());
-        let context = Arc::new(Context {
-            bus,
-            pipeline_id: "test".into(),
-            graph,
-            clock: Arc::new(Clock::new()),
-            source_id,
-        });
+        let context = Arc::new(Context::for_test(bus, "test", graph, source_id));
         let initial_count = Arc::new(AtomicUsize::new(0));
         let initial = context
             .branch()
@@ -1063,13 +1027,7 @@ mod tests {
         let (bus, _bus_rx) = Bus::new();
         let graph = PipelineGraph::new();
         let source_id = graph.add_source(ElementType::Other, "source".into());
-        let context = Arc::new(Context {
-            bus,
-            pipeline_id: "test".into(),
-            graph: graph.clone(),
-            clock: Arc::new(Clock::new()),
-            source_id,
-        });
+        let context = Arc::new(Context::for_test(bus, "test", graph.clone(), source_id));
         let (tee_branch, handle) = TeeBuilder::new("tee", context.clone())
             .build_dynamic()
             .unwrap();
@@ -1108,13 +1066,7 @@ mod tests {
         let (bus, bus_rx) = Bus::new();
         let graph = PipelineGraph::new();
         let source_id = graph.add_source(ElementType::Other, "source".into());
-        let context = Arc::new(Context {
-            bus,
-            pipeline_id: "test".into(),
-            graph,
-            clock: Arc::new(Clock::new()),
-            source_id,
-        });
+        let context = Arc::new(Context::for_test(bus, "test", graph, source_id));
         let (tee_branch, handle) = TeeBuilder::new("tee", context.clone())
             .build_dynamic()
             .unwrap();

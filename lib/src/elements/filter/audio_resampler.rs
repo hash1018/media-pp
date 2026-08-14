@@ -10,6 +10,7 @@ use crate::{
     element::{Element, ElementType, Sink, Source, element_hlog},
     error::Result,
     pad::SrcPad,
+    time::{InvalidTimeBase, MediaTimestamp, TimeBase},
 };
 
 /// A complete uncompressed-audio format description.
@@ -160,6 +161,11 @@ pub enum AudioResamplerError {
         "AudioResampler only converts decoded Audio frames, got a {0}; link it after an audio decoder or source"
     )]
     UnsupportedBuffer(&'static str),
+
+    #[error(
+        "invalid input time base {numerator}/{denominator}: both numerator and denominator must be positive"
+    )]
+    InvalidTimeBase { numerator: i32, denominator: i32 },
 }
 
 /// Converts decoded audio to one fixed [`AudioFormat`] via
@@ -168,18 +174,25 @@ pub enum AudioResamplerError {
 ///
 /// Output timestamps use `1 / target.sample_rate` units and remain
 /// contiguous across resampler buffering. The first output is anchored to
-/// the first input frame's PTS, rescaled from the input sample rate.
+/// the first input frame's PTS, rescaled from the explicitly supplied
+/// input time base. A decoded frame does not carry that unit itself, so
+/// callers must pass the originating stream/source time base.
 #[rust_hlog::hlog]
 pub struct AudioResampler {
     name: Arc<str>,
     target: AudioFormat,
+    input_time_base: TimeBase,
     resampler: AudioFrameResampler,
     next_pts: Option<i64>,
     pad: SrcPad,
 }
 
 impl AudioResampler {
-    pub fn new(name: impl Into<String>, target: AudioFormat) -> Self {
+    pub fn new(
+        name: impl Into<String>,
+        target: AudioFormat,
+        input_time_base: ffmpeg::Rational,
+    ) -> std::result::Result<Self, AudioResamplerError> {
         let name: Arc<str> = name.into().into();
         let hlog = element_hlog(ElementType::AudioResampler, &name, None);
         let pad = SrcPad::new(format!("{name}_src"));
@@ -190,14 +203,24 @@ impl AudioResampler {
             target.channels(),
             target.sample_format
         );
-        Self {
+        let input_time_base = TimeBase::try_new(input_time_base).map_err(
+            |InvalidTimeBase {
+                 numerator,
+                 denominator,
+             }| AudioResamplerError::InvalidTimeBase {
+                numerator,
+                denominator,
+            },
+        )?;
+        Ok(Self {
             name,
             hlog,
             target,
+            input_time_base,
             resampler: AudioFrameResampler::new(target),
             next_pts: None,
             pad,
-        }
+        })
     }
 
     pub fn format(&self) -> AudioFormat {
@@ -212,11 +235,16 @@ impl AudioResampler {
         if self.next_pts.is_some() {
             return;
         }
-        let input_rate = i128::from(input.rate().max(1));
-        let target_rate = i128::from(self.target.sample_rate);
         let pts = input
             .pts()
-            .map(|pts| (i128::from(pts) * target_rate / input_rate) as i64)
+            .map(|pts| {
+                MediaTimestamp::new_unchecked(pts, self.input_time_base).rescale(
+                    TimeBase::new_unchecked(ffmpeg::Rational::new(
+                        1,
+                        self.target.sample_rate as i32,
+                    )),
+                )
+            })
             .unwrap_or(0);
         self.next_pts = Some(pts);
     }
@@ -349,7 +377,8 @@ mod tests {
     }
 
     fn new_resampler(target: AudioFormat) -> (AudioResampler, Arc<Mutex<Vec<MediaBuffer>>>) {
-        let mut resampler = AudioResampler::new("resampler", target);
+        let mut resampler =
+            AudioResampler::new("resampler", target, ffmpeg::Rational::new(1, 48_000)).unwrap();
         let received = Arc::new(Mutex::new(Vec::new()));
         resampler.src_pads()[0].link(Box::new(CapturingSink {
             received: received.clone(),

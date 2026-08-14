@@ -7,6 +7,7 @@ use crate::{
     element::{Context, SourceElement, element_hlog},
     error::Result,
     graph::{ElementId, PipelineGraph},
+    playback_clock::PlaybackClock,
 };
 
 use super::Pipeline;
@@ -38,6 +39,7 @@ pub struct PipelineBuilder {
     bus: Bus,
     bus_rx: BusReceiver,
     clock: Arc<Clock>,
+    playback_clock: Arc<PlaybackClock>,
     graph: PipelineGraph,
     sources: Vec<SourceEntry>,
     control_pairs: Vec<(ControlSender, ControlReceiver)>,
@@ -47,11 +49,13 @@ impl PipelineBuilder {
     pub fn new(id: impl Into<String>) -> Self {
         let id: Arc<str> = id.into().into();
         let (bus, bus_rx) = Bus::new();
+        let clock = Arc::new(Clock::new());
         Self {
             id,
             bus,
             bus_rx,
-            clock: Arc::new(Clock::new()),
+            playback_clock: Arc::new(PlaybackClock::new(clock.clone())),
+            clock,
             graph: PipelineGraph::new(),
             sources: Vec::new(),
             control_pairs: Vec::new(),
@@ -74,6 +78,7 @@ impl PipelineBuilder {
             pipeline_id: self.id.clone(),
             graph: self.graph.clone(),
             clock: self.clock.clone(),
+            playback_clock: self.playback_clock.clone(),
             source_id,
         });
         wire(&mut source, &context)?;
@@ -100,6 +105,7 @@ impl PipelineBuilder {
             control_txs,
             control_rxs: Mutex::new(Some(control_rxs)),
             clock: self.clock,
+            playback_clock: self.playback_clock,
             bus_rx: self.bus_rx,
             running: Arc::new(AtomicUsize::new(0)),
             workers: Mutex::new(Vec::new()),

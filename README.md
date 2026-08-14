@@ -66,6 +66,10 @@ Everything is built from a handful of primitives in `lib/src/`:
   A detached branch never appears until attachment succeeds.
 - **`Clock`** (`clock.rs`) — a shared wall-clock anchor (`Arc<Clock>`) so
   multiple `Pacer`s (e.g. one per stream) agree on the same t=0.
+- **`PlaybackClock`** (`playback_clock.rs`) — a shared media-position clock.
+  Video-only playback derives it from `Clock`; a bound audio renderer can
+  take over with its actual played-sample position without moving the
+  timeline backwards.
 
 ## Elements (`lib/src/elements/`)
 
@@ -103,9 +107,10 @@ for); this table isn't meant to duplicate that.
 | `D3d11Download` (`d3d11-renderer`) | The mirror of `D3d11Upload` — downloads a GPU-resident `Pixel::D3D11` BGRA texture (e.g. from `D3d11VideoCompositor`) back to a CPU-resident `Pixel::BGRA` frame via `CopySubresourceRegion`/`Map` into a cached staging texture, including a selected slice of a texture array. Needed because `SwEncoder` is software-only and has no zero-copy GPU input path; chain a `Scaler` after this for whatever pixel format the encoder actually needs |
 | `SwEncoder` | Encodes `Video` frames into `Packet`s (software only) — `VideoCodec` picks H.264/H.265/VP8/VP9/AV1 across GPL (`libx264`/`libx265`) and non-GPL (`libopenh264`/`libkvazaar`/`libvpx`/`libaom-av1`/`libsvtav1`) encoders; fails with a clear error, not a panic, if the linked ffmpeg build doesn't have the one you asked for |
 | `SwAudioEncoder` | Encodes `Audio` frames into `Packet`s (software `aac`) — resamples to whatever format/channel layout the codec actually needs, built lazily from the first frame it sees |
-| `AudioResampler` | Converts decoded `Audio` sample format/rate/channels through `libswresample`; rebuilds on mid-stream input format changes and flushes delayed samples at EOS |
+| `AudioResampler` | Converts decoded `Audio` sample format/rate/channels through `libswresample`; its explicit input time base preserves the media PTS across conversion, and it flushes delayed samples at EOS |
 | `AudioVolume` | Applies runtime-adjustable gain/mute through `AudioVolumeHandle`; uses a configurable 10 ms default ramp to prevent clicks and preserves the input audio format/timestamps |
 | `Pacer` | Releases buffers at real playback speed (PTS + a shared `Clock`) — `new` rejects an invalid `time_base` with a typed `PacerError` rather than panicking, since it comes from a demuxed/externally supplied stream |
+| `VideoSynchronizer` | Replaces `Pacer` for A/V playback: uses the pipeline wall clock for video-only playback, then automatically waits/drops video against a registered audio playback master |
 | `Scaler` | Converts pixel format and resizes `Video` frames in one pass (`libswscale`) |
 | `Tee`² | Fans one input out to multiple branches; `TeeBuilder` defines the initial fan-out and `TeeHandle::attach`/`detach` changes runtime branches by stable `BranchId` |
 
@@ -172,6 +177,7 @@ have their own arguments or need none.
 | Crate | Pipeline | Demonstrates |
 |---|---|---|
 | `sw_decode_render` | Demux → SwDecoder → Queue → Pacer → D3d12Renderer | End-to-end playback in a native window, CPU decode + CPU-upload render |
+| `av_playback` | Demux → {SwDecoder → Queue → VideoSynchronizer → D3d12Renderer, dynamic Tee → SwDecoder → AudioResampler → Queue → WasapiRenderer} | Starts video-only, then accepts terminal commands to attach/detach WASAPI audio and seek; video switches between wall-clock pacing and the played-audio master without rebuilding the pipeline |
 | `hw_decode_render` | Demux → D3d12vaDecoder → Queue → Pacer → D3d12Renderer | Same, but GPU decode feeding the renderer zero-copy — no decoded pixel ever touches system memory |
 | `d3d11_decode_render` | Demux → D3d11Decoder → Queue → Pacer → D3d11Renderer | The D3D11 sibling of `hw_decode_render` — GPU decode via D3D11VA, zero-copy render. What actually proved `D3d11Decoder` safe on real hardware: `D3d11Decoder` never touches FFmpeg's `hw_frames_ctx` struct layout itself (only `bind_flags`, via the documented `avcodec_get_hw_frames_parameters` API, from inside `get_format`) — unlike an earlier, abandoned attempt at manual `AVD3D11VAFramesContext` construction, which corrupted memory |
 | `test_video` | TestVideoSource → Queue → D3d12Renderer | A synthetic moving-gradient stream rendered directly (no file/camera/decoder, no `Pacer`) — proves `TestVideoSource`'s frames and `D3d12Renderer`'s CPU-upload path work end to end. Confirmed smooth without a `Pacer`: `TestVideoSource` self-paces on a drift-free absolute schedule, which turned out to be what actually mattered (see `screen_capture`, which confirmed the same thing even with a `Scaler` in between); `transcode_render` (below) keeps one, since its `SwEncoder`/`SwDecoder` stages have their own real per-frame variance, untested without |

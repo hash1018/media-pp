@@ -24,7 +24,7 @@ use crate::{
         AppSourceError, AudioMixerError, AudioResamplerError, AudioVolumeError, FileDemuxError,
         HlsMuxerError, Mp4MuxerError, PacerError, RtspSourceError, ScalerError,
         SwAudioEncoderError, SwDecoderError, SwEncoderError, TestAudioSourceError,
-        TestVideoSourceError, VideoCompositorError,
+        TestVideoSourceError, VideoCompositorError, VideoSynchronizerError,
     },
     graph::GraphError,
     queue::QueueError,
@@ -64,6 +64,9 @@ pub enum Error {
 
     #[error(transparent)]
     PacerError(#[from] PacerError),
+
+    #[error(transparent)]
+    VideoSynchronizerError(#[from] VideoSynchronizerError),
 
     #[error(transparent)]
     SwAudioEncoderError(#[from] SwAudioEncoderError),

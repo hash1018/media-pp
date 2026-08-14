@@ -14,7 +14,8 @@ pub use filter::{
     AudioCodec, AudioFormat, AudioResampler, AudioResamplerError, AudioVolume, AudioVolumeError,
     AudioVolumeHandle, AudioVolumeOptions, Pacer, PacerError, Scaler, ScalerError, SwAudioEncoder,
     SwAudioEncoderError, SwAudioEncoderOptions, SwDecoder, SwDecoderError, SwEncoder,
-    SwEncoderError, SwEncoderOptions, Tee, TeeBuilder, TeeHandle, VideoCodec,
+    SwEncoderError, SwEncoderOptions, Tee, TeeBuilder, TeeHandle, VideoCodec, VideoSynchronizer,
+    VideoSynchronizerError,
 };
 #[cfg(feature = "d3d11-renderer")]
 pub use filter::{

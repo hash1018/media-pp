@@ -7,6 +7,7 @@ mod pacer;
 mod scaler;
 mod tee;
 mod upload;
+mod video_synchronizer;
 
 pub use audio_resampler::{AudioFormat, AudioResampler, AudioResamplerError};
 pub use audio_volume::{AudioVolume, AudioVolumeError, AudioVolumeHandle, AudioVolumeOptions};
@@ -28,6 +29,7 @@ pub use tee::{Tee, TeeBuilder, TeeHandle};
 pub use upload::{D3d11Upload, D3d11UploadError};
 #[cfg(feature = "d3d12-renderer")]
 pub use upload::{D3d12Upload, D3d12UploadError};
+pub use video_synchronizer::{VideoSynchronizer, VideoSynchronizerError};
 
 /// `avcodec_receive_frame`/`avcodec_receive_packet` use `EAGAIN` to mean
 /// "drained for now" and `EOF` to mean permanently drained after flush.

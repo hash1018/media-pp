@@ -25,6 +25,7 @@ pub mod graph;
 pub mod log;
 pub mod pad;
 pub mod pipeline;
+pub mod playback_clock;
 pub mod pool;
 pub mod queue;
 pub mod schedule;

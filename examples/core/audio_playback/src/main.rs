@@ -43,7 +43,7 @@ fn main() -> Result<()> {
         .ok_or_else(|| media_pp::Error::Other("no matching render device found".into()))?;
     println!("selected: {}", device.name);
 
-    let (renderer, output_format) =
+    let (mut renderer, output_format) =
         WasapiRenderer::open("speakers", WasapiRendererOptions { device })
             .map_err(|error| media_pp::Error::Other(error.to_string()))?;
     println!(
@@ -55,9 +55,10 @@ fn main() -> Result<()> {
     // configured to 44.1kHz or mono, proving AudioResampler owns the format
     // conversion rather than WasapiRenderer doing it implicitly.
     let source = TestAudioSource::new("tone", TestAudioOptions::default());
-    let resampler = AudioResampler::new("resampler", output_format);
+    let resampler = AudioResampler::new("resampler", output_format, source.time_base())?;
     let (volume, volume_handle) = AudioVolume::new("volume");
     let pipeline = Pipeline::new("audio-playback", source, |source, context| {
+        renderer.bind_playback_clock(context.playback_clock.clone())?;
         let branch = context
             .branch()
             .pipe(resampler)

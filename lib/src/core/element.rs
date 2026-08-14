@@ -10,6 +10,7 @@ use crate::{
     error::Result,
     graph::{ElementId, PipelineGraph},
     pad::SrcPad,
+    playback_clock::PlaybackClock,
 };
 
 /// Which kind of element posted a [`crate::bus::BusEvent`] — cheap to
@@ -41,6 +42,7 @@ pub enum ElementType {
     AudioResampler,
     AudioVolume,
     Pacer,
+    VideoSynchronizer,
     Scaler,
     Tee,
     Queue,
@@ -120,8 +122,8 @@ pub fn element_hlog(element_type: ElementType, name: &str, pipeline_id: Option<&
 
 /// Everything a [`crate::pipeline::ChainBuilder`]/[`crate::elements::Tee`]
 /// needs to wire itself into a [`crate::pipeline::Pipeline`] — bundled into
-/// one `Arc` instead of threading `bus`/`pipeline_id`/`graph`/`clock`
-/// through separately. Built once per source by
+/// one `Arc` instead of threading `bus`/`pipeline_id`/`graph`/the wall and
+/// playback clocks through separately. Built once per source by
 /// [`crate::pipeline::PipelineBuilder::add_source`] (what
 /// [`crate::pipeline::Pipeline::new`] itself calls, for its own
 /// single-source case) and handed to that source's own `wire` closure; a
@@ -134,8 +136,31 @@ pub struct Context {
     pub pipeline_id: Arc<str>,
     pub graph: PipelineGraph,
     pub clock: Arc<Clock>,
+    /// Shared media-position clock used to hand video scheduling from the
+    /// wall clock to an audio output master without changing pipelines.
+    pub playback_clock: Arc<PlaybackClock>,
     /// Graph identity of the source whose wiring closure owns this context.
     pub source_id: ElementId,
+}
+
+#[cfg(test)]
+impl Context {
+    pub(crate) fn for_test(
+        bus: Bus,
+        pipeline_id: impl Into<Arc<str>>,
+        graph: PipelineGraph,
+        source_id: ElementId,
+    ) -> Self {
+        let clock = Arc::new(Clock::new());
+        Self {
+            bus,
+            pipeline_id: pipeline_id.into(),
+            graph,
+            playback_clock: Arc::new(PlaybackClock::new(clock.clone())),
+            clock,
+            source_id,
+        }
+    }
 }
 
 /// Anything that can receive a buffer pushed from upstream — the input

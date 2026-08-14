@@ -1,0 +1,490 @@
+use std::{
+    sync::{Arc, Mutex},
+    time::Duration,
+};
+
+use thiserror::Error as ThisError;
+
+use crate::clock::Clock;
+
+/// Which source currently defines the pipeline's media position.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlaybackMaster {
+    /// No timestamped stream has established a position yet.
+    Unavailable,
+    /// Media position advances from the pipeline's pause-aware wall clock.
+    Wall,
+    /// An audio renderer owns the clock but has not started the endpoint yet.
+    AudioPriming,
+    /// An audio endpoint's played-sample position is the master clock.
+    Audio,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ThisError)]
+pub enum PlaybackClockError {
+    #[error("this pipeline already has an audio playback-clock master")]
+    AudioMasterAlreadyRegistered,
+
+    #[error("the audio playback-clock registration is stale")]
+    StaleAudioMaster,
+}
+
+/// Pipeline-wide media clock shared by audio output and video scheduling.
+///
+/// [`Clock`] remains the pipeline's monotonic control/pause clock. This
+/// type adds the media-timeline position and can hand that position from a
+/// wall-clock fallback to one audio renderer without letting the position
+/// jump backwards. It deliberately contains no WASAPI types: an audio
+/// backend publishes device-position snapshots through its private
+/// registration, while video scheduling only reads the resulting position.
+pub struct PlaybackClock {
+    wall_clock: Arc<Clock>,
+    state: Mutex<State>,
+}
+
+#[derive(Clone, Copy)]
+enum State {
+    Unavailable {
+        next_registration: u64,
+    },
+    Wall {
+        anchor_ns: i64,
+        anchor_elapsed: Duration,
+        next_registration: u64,
+    },
+    AudioPriming {
+        registration: u64,
+        held_ns: Option<i64>,
+        next_registration: u64,
+    },
+    Audio {
+        registration: u64,
+        position_ns: i64,
+        sampled_elapsed: Duration,
+        submitted_until_ns: i64,
+        running: bool,
+        next_registration: u64,
+    },
+    AudioFallback {
+        registration: u64,
+        anchor_ns: i64,
+        anchor_elapsed: Duration,
+        next_registration: u64,
+    },
+}
+
+impl PlaybackClock {
+    pub(crate) fn new(wall_clock: Arc<Clock>) -> Self {
+        Self {
+            wall_clock,
+            state: Mutex::new(State::Unavailable {
+                next_registration: 1,
+            }),
+        }
+    }
+
+    pub fn master(&self) -> PlaybackMaster {
+        match *self.state.lock().unwrap() {
+            State::Unavailable { .. } => PlaybackMaster::Unavailable,
+            State::Wall { .. } | State::AudioFallback { .. } => PlaybackMaster::Wall,
+            State::AudioPriming { .. } => PlaybackMaster::AudioPriming,
+            State::Audio { .. } => PlaybackMaster::Audio,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn position_ns(&self) -> Option<i64> {
+        let state = self.state.lock().unwrap();
+        position_at(*state, self.wall_clock.elapsed())
+    }
+
+    pub(crate) fn interrupt_epoch(&self) -> u64 {
+        self.wall_clock.interrupt_epoch()
+    }
+
+    /// Establishes a wall-clock media origin if no stream owns one yet.
+    /// Returns the current position after doing so.
+    #[cfg(test)]
+    pub(crate) fn ensure_wall_origin(&self, media_ns: i64) -> Option<i64> {
+        let mut state = self.state.lock().unwrap();
+        if let State::Unavailable { next_registration } = *state {
+            self.wall_clock.start();
+            let elapsed = self.wall_clock.elapsed();
+            *state = State::Wall {
+                anchor_ns: media_ns,
+                anchor_elapsed: elapsed,
+                next_registration,
+            };
+        }
+        position_at(*state, self.wall_clock.elapsed())
+    }
+
+    pub(crate) fn video_snapshot(&self, media_ns: i64) -> (PlaybackMaster, Option<i64>) {
+        let mut state = self.state.lock().unwrap();
+        if let State::Unavailable { next_registration } = *state {
+            self.wall_clock.start();
+            let elapsed = self.wall_clock.elapsed();
+            *state = State::Wall {
+                anchor_ns: media_ns,
+                anchor_elapsed: elapsed,
+                next_registration,
+            };
+        }
+        let elapsed = self.wall_clock.elapsed();
+        let master = match *state {
+            State::Unavailable { .. } => PlaybackMaster::Unavailable,
+            State::Wall { .. } | State::AudioFallback { .. } => PlaybackMaster::Wall,
+            State::AudioPriming { .. } => PlaybackMaster::AudioPriming,
+            State::Audio { .. } => PlaybackMaster::Audio,
+        };
+        (master, position_at(*state, elapsed))
+    }
+
+    pub(crate) fn register_audio_master(
+        self: &Arc<Self>,
+    ) -> Result<AudioMasterRegistration, PlaybackClockError> {
+        let mut state = self.state.lock().unwrap();
+        let elapsed = self.wall_clock.elapsed();
+        let (held_ns, registration, next_registration) = match *state {
+            State::Unavailable { next_registration } => {
+                (None, next_registration, next_registration.wrapping_add(1))
+            }
+            State::Wall {
+                next_registration, ..
+            } => (
+                position_at(*state, elapsed),
+                next_registration,
+                next_registration.wrapping_add(1),
+            ),
+            State::AudioPriming { .. } | State::Audio { .. } | State::AudioFallback { .. } => {
+                return Err(PlaybackClockError::AudioMasterAlreadyRegistered);
+            }
+        };
+        *state = State::AudioPriming {
+            registration,
+            held_ns,
+            next_registration,
+        };
+        Ok(AudioMasterRegistration {
+            clock: self.clone(),
+            registration,
+        })
+    }
+
+    /// Resets media state for a seek while retaining the current audio
+    /// renderer's ownership. The next timestamp/device sample establishes
+    /// the post-seek position.
+    pub(crate) fn reset_for_seek(&self) {
+        let mut state = self.state.lock().unwrap();
+        *state = match *state {
+            State::Unavailable { next_registration }
+            | State::Wall {
+                next_registration, ..
+            } => State::Unavailable { next_registration },
+            State::AudioPriming {
+                registration,
+                next_registration,
+                ..
+            }
+            | State::Audio {
+                registration,
+                next_registration,
+                ..
+            }
+            | State::AudioFallback {
+                registration,
+                next_registration,
+                ..
+            } => State::AudioPriming {
+                registration,
+                held_ns: None,
+                next_registration,
+            },
+        };
+    }
+
+    fn release_audio_master(&self, registration: u64) {
+        let mut state = self.state.lock().unwrap();
+        let elapsed = self.wall_clock.elapsed();
+        let (matches, next_registration) = match *state {
+            State::AudioPriming {
+                registration: current,
+                next_registration,
+                ..
+            }
+            | State::Audio {
+                registration: current,
+                next_registration,
+                ..
+            }
+            | State::AudioFallback {
+                registration: current,
+                next_registration,
+                ..
+            } => (current == registration, next_registration),
+            State::Unavailable { .. } | State::Wall { .. } => return,
+        };
+        if !matches {
+            return;
+        }
+        *state = match position_at(*state, elapsed) {
+            Some(anchor_ns) => State::Wall {
+                anchor_ns,
+                anchor_elapsed: elapsed,
+                next_registration,
+            },
+            None => State::Unavailable { next_registration },
+        };
+    }
+}
+
+/// Exclusive, generation-checked writer owned by one audio renderer.
+/// Dropping it hands the last known position back to the wall clock.
+pub(crate) struct AudioMasterRegistration {
+    clock: Arc<PlaybackClock>,
+    registration: u64,
+}
+
+impl AudioMasterRegistration {
+    pub(crate) fn priming_target_ns(&self) -> Result<Option<i64>, PlaybackClockError> {
+        match *self.clock.state.lock().unwrap() {
+            State::AudioPriming {
+                registration,
+                held_ns,
+                ..
+            } if registration == self.registration => Ok(held_ns),
+            State::Audio { registration, .. } if registration == self.registration => Ok(None),
+            State::AudioFallback { registration, .. } if registration == self.registration => {
+                Ok(None)
+            }
+            _ => Err(PlaybackClockError::StaleAudioMaster),
+        }
+    }
+
+    pub(crate) fn publish(
+        &self,
+        position_ns: i64,
+        submitted_until_ns: i64,
+        running: bool,
+    ) -> Result<(), PlaybackClockError> {
+        let mut state = self.clock.state.lock().unwrap();
+        self.clock.wall_clock.start();
+        let elapsed = self.clock.wall_clock.elapsed();
+        let (held_ns, next_registration) = match *state {
+            State::AudioPriming {
+                registration,
+                held_ns,
+                next_registration,
+            } if registration == self.registration => (held_ns, next_registration),
+            State::Audio {
+                registration,
+                next_registration,
+                ..
+            } if registration == self.registration => (None, next_registration),
+            State::AudioFallback {
+                registration,
+                next_registration,
+                ..
+            } if registration == self.registration => (None, next_registration),
+            _ => return Err(PlaybackClockError::StaleAudioMaster),
+        };
+
+        // A master handoff must never make video scheduling move backwards.
+        let position_ns = held_ns.map_or(position_ns, |held| position_ns.max(held));
+        let submitted_until_ns = submitted_until_ns.max(position_ns);
+        *state = State::Audio {
+            registration: self.registration,
+            position_ns,
+            sampled_elapsed: elapsed,
+            submitted_until_ns,
+            running,
+            next_registration,
+        };
+        Ok(())
+    }
+
+    /// Audio ended before another stream: continue from its final played
+    /// position using the wall clock while retaining this registration so
+    /// a second renderer cannot race the still-attached one.
+    pub(crate) fn finish(&self, position_ns: i64) -> Result<(), PlaybackClockError> {
+        let mut state = self.clock.state.lock().unwrap();
+        let elapsed = self.clock.wall_clock.elapsed();
+        let next_registration = match *state {
+            State::AudioPriming {
+                registration,
+                next_registration,
+                ..
+            }
+            | State::Audio {
+                registration,
+                next_registration,
+                ..
+            } if registration == self.registration => next_registration,
+            _ => return Err(PlaybackClockError::StaleAudioMaster),
+        };
+        *state = State::AudioFallback {
+            registration: self.registration,
+            anchor_ns: position_ns,
+            anchor_elapsed: elapsed,
+            next_registration,
+        };
+        Ok(())
+    }
+
+    pub(crate) fn reset_for_seek(&self) -> Result<(), PlaybackClockError> {
+        let mut state = self.clock.state.lock().unwrap();
+        let next_registration = match *state {
+            State::AudioPriming {
+                registration,
+                next_registration,
+                ..
+            }
+            | State::Audio {
+                registration,
+                next_registration,
+                ..
+            }
+            | State::AudioFallback {
+                registration,
+                next_registration,
+                ..
+            } if registration == self.registration => next_registration,
+            _ => return Err(PlaybackClockError::StaleAudioMaster),
+        };
+        *state = State::AudioPriming {
+            registration: self.registration,
+            held_ns: None,
+            next_registration,
+        };
+        Ok(())
+    }
+}
+
+impl Drop for AudioMasterRegistration {
+    fn drop(&mut self) {
+        self.clock.release_audio_master(self.registration);
+    }
+}
+
+fn position_at(state: State, elapsed: Duration) -> Option<i64> {
+    match state {
+        State::Unavailable { .. } => None,
+        State::Wall {
+            anchor_ns,
+            anchor_elapsed,
+            ..
+        } => Some(add_duration(
+            anchor_ns,
+            elapsed.saturating_sub(anchor_elapsed),
+        )),
+        State::AudioPriming { held_ns, .. } => held_ns,
+        State::Audio {
+            position_ns,
+            sampled_elapsed,
+            submitted_until_ns,
+            running,
+            ..
+        } => {
+            let projected = if running {
+                add_duration(position_ns, elapsed.saturating_sub(sampled_elapsed))
+            } else {
+                position_ns
+            };
+            Some(projected.min(submitted_until_ns))
+        }
+        State::AudioFallback {
+            anchor_ns,
+            anchor_elapsed,
+            ..
+        } => Some(add_duration(
+            anchor_ns,
+            elapsed.saturating_sub(anchor_elapsed),
+        )),
+    }
+}
+
+fn add_duration(value_ns: i64, duration: Duration) -> i64 {
+    let delta = duration.as_nanos().min(i64::MAX as u128) as i64;
+    value_ns.saturating_add(delta)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{thread, time::Duration};
+
+    use super::*;
+
+    #[test]
+    fn wall_origin_advances_and_freezes_with_pipeline_clock() {
+        let wall = Arc::new(Clock::new());
+        let playback = PlaybackClock::new(wall.clone());
+        assert!(playback.ensure_wall_origin(1_000).unwrap() >= 1_000);
+        thread::sleep(Duration::from_millis(20));
+        assert!(playback.position_ns().unwrap() >= 10_000_000);
+
+        wall.pause();
+        let paused = playback.position_ns().unwrap();
+        thread::sleep(Duration::from_millis(20));
+        assert_eq!(playback.position_ns(), Some(paused));
+    }
+
+    #[test]
+    fn audio_handoff_never_moves_backwards_and_release_continues_on_wall() {
+        let wall = Arc::new(Clock::new());
+        let playback = Arc::new(PlaybackClock::new(wall));
+        playback.ensure_wall_origin(50_000_000);
+        let audio = playback.register_audio_master().unwrap();
+        let held = audio.priming_target_ns().unwrap().unwrap();
+
+        audio
+            .publish(held - 10_000_000, held + 100_000_000, true)
+            .unwrap();
+        assert!(playback.position_ns().unwrap() >= held);
+        drop(audio);
+        let released = playback.position_ns().unwrap();
+        thread::sleep(Duration::from_millis(10));
+        assert!(playback.position_ns().unwrap() >= released);
+        assert_eq!(playback.master(), PlaybackMaster::Wall);
+    }
+
+    #[test]
+    fn only_one_audio_master_can_publish_and_seek_retains_its_generation() {
+        let wall = Arc::new(Clock::new());
+        let playback = Arc::new(PlaybackClock::new(wall));
+        let audio = playback.register_audio_master().unwrap();
+        assert!(matches!(
+            playback.register_audio_master(),
+            Err(PlaybackClockError::AudioMasterAlreadyRegistered)
+        ));
+
+        playback.reset_for_seek();
+        audio.publish(2_000, 3_000, true).unwrap();
+        assert_eq!(playback.master(), PlaybackMaster::Audio);
+    }
+
+    #[test]
+    fn audio_projection_is_capped_at_submitted_media() {
+        let wall = Arc::new(Clock::new());
+        let playback = Arc::new(PlaybackClock::new(wall));
+        let audio = playback.register_audio_master().unwrap();
+        audio.publish(10, 1_000_000, true).unwrap();
+        thread::sleep(Duration::from_millis(5));
+        assert_eq!(playback.position_ns(), Some(1_000_000));
+    }
+
+    #[test]
+    fn finished_audio_continues_on_wall_and_can_reset_for_seek() {
+        let wall = Arc::new(Clock::new());
+        let playback = Arc::new(PlaybackClock::new(wall));
+        let audio = playback.register_audio_master().unwrap();
+        audio.publish(1_000, 2_000, false).unwrap();
+        audio.finish(2_000).unwrap();
+        assert_eq!(playback.master(), PlaybackMaster::Wall);
+        thread::sleep(Duration::from_millis(5));
+        assert!(playback.position_ns().unwrap() > 2_000);
+
+        audio.reset_for_seek().unwrap();
+        assert_eq!(playback.master(), PlaybackMaster::AudioPriming);
+        assert_eq!(playback.position_ns(), None);
+    }
+}

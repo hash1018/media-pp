@@ -16,6 +16,7 @@ use crate::{
     element::{Context, SourceElement},
     error::Result,
     graph::{GraphSnapshot, NodeInfo, PipelineGraph},
+    playback_clock::PlaybackClock,
 };
 
 use super::{PipelineBuilder, builder::SourceEntry};
@@ -90,6 +91,7 @@ pub struct Pipeline {
     /// moment the *last* `ControlReceiver` clone actually goes away.
     pub(super) control_rxs: Mutex<Option<Vec<ControlReceiver>>>,
     pub(super) clock: Arc<Clock>,
+    pub(super) playback_clock: Arc<PlaybackClock>,
     pub(super) bus_rx: BusReceiver,
     /// How many source threads are still running — `0` before `run()` and
     /// again once every source's thread has finished. `AtomicUsize` rather
@@ -167,6 +169,11 @@ impl Pipeline {
     /// this directly.
     pub fn clock(&self) -> &Arc<Clock> {
         &self.clock
+    }
+
+    /// Media-position clock shared by audio output and video scheduling.
+    pub fn playback_clock(&self) -> &Arc<PlaybackClock> {
+        &self.playback_clock
     }
 
     /// Starts driving the source on a background thread and returns
@@ -315,6 +322,7 @@ impl Pipeline {
             return;
         }
         self.clock.interrupt();
+        self.playback_clock.reset_for_seek();
         for control_tx in &self.control_txs {
             control_tx.send(ControlMsg::Seek(target));
         }
