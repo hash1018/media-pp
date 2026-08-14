@@ -14,7 +14,14 @@ use crate::{
     control::ControlMsg,
     element::{Element, ElementType, Sink, Source, element_hlog},
     pad::SrcPad,
+    time::{MediaTimestamp, TimeBase},
 };
+
+/// [`TimeBase::new_unchecked`] is fine here — `1/1_000_000_000` is a
+/// hardcoded constant known valid, not external input.
+fn nanoseconds() -> TimeBase {
+    TimeBase::new_unchecked(ffmpeg::Rational::new(1, 1_000_000_000))
+}
 
 /// Maximum time a paced wait sleeps without checking whether a control
 /// request needs the owning worker back.
@@ -40,7 +47,7 @@ const INTERRUPT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 #[rust_hlog::hlog]
 pub struct Pacer {
     name: Arc<str>,
-    time_base: ffmpeg::Rational,
+    time_base: TimeBase,
     clock: Arc<Clock>,
     /// This pacer's first timestamped frame's pts — set on first call.
     /// Deliberately *not* paired with a cached wall-clock anchor: the
@@ -72,6 +79,13 @@ impl Pacer {
         hinfo!(hlog: &hlog, "created: time_base={time_base}");
         let pad = SrcPad::new(format!("{name}_src"));
         let interrupt_epoch = clock.interrupt_epoch();
+        // Every caller derives `time_base` from a real stream/encoder time
+        // base (see e.g. `SourceElement::stream_time_base`,
+        // `SwEncoder::time_base`), never from unvalidated external input —
+        // an invalid one here is this crate's own bug, not something to
+        // recover from at runtime.
+        let time_base = TimeBase::try_new(time_base)
+            .unwrap_or_else(|error| panic!("Pacer::new given an invalid time_base: {error}"));
         Self {
             name,
             hlog,
@@ -98,12 +112,18 @@ impl Pacer {
         let first_pts = *self.first_pts.get_or_insert(pts);
 
         let elapsed_ticks = pts - first_pts;
-        let elapsed_secs = elapsed_ticks as f64 * f64::from(self.time_base);
-        if elapsed_secs <= 0.0 {
+        if elapsed_ticks <= 0 {
             return true;
         }
+        // Integer rescale straight to nanoseconds rather than
+        // `elapsed_ticks as f64 * f64::from(time_base)` — the latter loses
+        // precision (and the numerator, if computed by naive division)
+        // over a long-running stream; see `MediaTimestamp`'s own docs.
+        let elapsed_ns = MediaTimestamp::new_unchecked(elapsed_ticks, self.time_base)
+            .rescale(nanoseconds())
+            .max(0) as u64;
 
-        let due = self.clock.start() + std::time::Duration::from_secs_f64(elapsed_secs);
+        let due = self.clock.start() + Duration::from_nanos(elapsed_ns);
         loop {
             if self.clock.interrupt_epoch() != self.interrupt_epoch {
                 return false;

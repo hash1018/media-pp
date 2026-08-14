@@ -25,6 +25,7 @@ use crate::{
     driver::{Driver, StopReceiver},
     element::{Element, ElementType, element_hlog},
     error::Result,
+    time::{InvalidTimeBase, MediaTimestamp},
 };
 
 use super::{
@@ -460,17 +461,36 @@ impl WebRtcPeer {
 pub(super) fn packet_rtp_time(
     packet: &ffmpeg::Packet,
 ) -> std::result::Result<MediaTime, WebRtcError> {
-    let time_base = packet.time_base();
-    let numerator = time_base.numerator();
-    let denominator = time_base.denominator();
-    if numerator <= 0 || denominator <= 0 {
-        return Err(WebRtcError::InvalidPacketTimeBase {
+    let pts = packet.pts().ok_or(WebRtcError::MissingPacketPts)?;
+    let timestamp = MediaTimestamp::try_new(pts, packet.time_base()).map_err(
+        |InvalidTimeBase {
+             numerator,
+             denominator,
+         }| WebRtcError::InvalidPacketTimeBase {
             numerator,
             denominator,
-        });
-    }
-    let pts = packet.pts().ok_or(WebRtcError::MissingPacketPts)?;
-    let pts = u64::try_from(pts).map_err(|_| WebRtcError::NegativePacketPts(pts))?;
+        },
+    )?;
+    to_str0m_media_time(timestamp)
+}
+
+/// Converts a validated `(pts, time_base)` into the `MediaTime` str0m
+/// expects for [`str0m::media::Writer::write`]. `MediaTime` is numer/denom
+/// *seconds* (str0m rebases it to the codec's RTP clock rate internally),
+/// but an FFmpeg `time_base` is numer/denom *seconds per tick* — so the
+/// elapsed time is `pts * numerator / denominator`, not `pts /
+/// denominator`. This keeps that exact `(pts * numerator, denominator)`
+/// rational rather than rescaling to some fixed target base first — a
+/// backend-specific conversion, so it lives here rather than on
+/// `MediaTimestamp` itself.
+fn to_str0m_media_time(
+    timestamp: MediaTimestamp,
+) -> std::result::Result<MediaTime, WebRtcError> {
+    let time_base = timestamp.time_base().get();
+    let numerator = time_base.numerator();
+    let denominator = time_base.denominator();
+    let pts = u64::try_from(timestamp.pts())
+        .map_err(|_| WebRtcError::NegativePacketPts(timestamp.pts()))?;
     let frequency = str0m::media::Frequency::new(denominator as u32).ok_or(
         WebRtcError::InvalidPacketTimeBase {
             numerator,
