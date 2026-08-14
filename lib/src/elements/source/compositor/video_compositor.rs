@@ -587,9 +587,22 @@ impl SourceElement for VideoCompositor {
         hinfo!(self, "run: starting");
         let mut next_due = Instant::now();
         loop {
-            if drain_control(control, self, bus)?.stopped {
+            let outcome = drain_control(control, self, bus)?;
+            if outcome.stopped {
                 hinfo!(self, "run: stopped");
                 return Ok(());
+            }
+            if outcome.paused_for > Duration::ZERO {
+                // Shift the deadline forward by exactly how long Pause
+                // held it, so Resume picks up from the same phase it had
+                // before freezing instead of resyncing to a fresh cadence
+                // anchored at whenever this loop happens to run again —
+                // same correction as `TestVideoSource`/`DxgiCaptureSource`.
+                next_due += outcome.paused_for;
+                let now = Instant::now();
+                if next_due < now {
+                    next_due = now + self.frame_interval;
+                }
             }
 
             let now = Instant::now();
@@ -602,9 +615,9 @@ impl SourceElement for VideoCompositor {
             next_due += self.frame_interval;
             let now = Instant::now();
             if next_due < now {
-                // A slow composition or Pause must not cause a burst of
-                // catch-up frames. Drop missed ticks and resume cadence
-                // from the next real output deadline.
+                // A slow composition must not cause a burst of catch-up
+                // frames. Drop missed ticks and resume cadence from the
+                // next real output deadline.
                 next_due = now + self.frame_interval;
             }
         }
@@ -1012,5 +1025,102 @@ mod tests {
             })
             .collect();
         assert_eq!(pts, vec![Some(0), Some(1)]);
+    }
+
+    #[rust_hlog::hlog]
+    struct TimestampSink {
+        tx: crossbeam_channel::Sender<Instant>,
+    }
+
+    impl Element for TimestampSink {
+        fn name(&self) -> Arc<str> {
+            "timestamp-recorder".into()
+        }
+        fn element_type(&self) -> ElementType {
+            ElementType::Other
+        }
+        fn hlog(&self) -> &HLog {
+            &self.hlog
+        }
+        fn hlog_mut(&mut self) -> &mut HLog {
+            &mut self.hlog
+        }
+    }
+
+    impl Sink for TimestampSink {
+        fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+            if matches!(buf, MediaBuffer::Video(_)) {
+                let _ = self.tx.send(Instant::now());
+            }
+            Ok(())
+        }
+        fn control(&mut self, _msg: ControlMsg) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Regression test: `VideoCompositor::run` never folded
+    /// `ControlOutcome::paused_for` back into `next_due` — a `Pause` let
+    /// real time blow straight past the stale deadline, so the loop
+    /// iteration right after `Resume` always found `next_due` already in
+    /// the past and pushed immediately, resetting the output cadence's
+    /// phase to the resume instant instead of preserving wherever it was
+    /// before the freeze. A slow 10fps (100ms/frame) rate keeps the
+    /// expected gap (near-zero vs. near-one-interval) well clear of
+    /// scheduling jitter. Pausing is triggered synchronously right after a
+    /// frame is observed, so `next_due` is a known ~100ms away the instant
+    /// `Pause` is drained (`run`'s own control check only happens at the
+    /// top of the loop, after that deadline has already been advanced).
+    #[test]
+    fn resuming_after_a_pause_preserves_output_phase() {
+        use crate::pipeline::Pipeline;
+
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let sink = TimestampSink {
+            tx,
+            hlog: element_hlog(ElementType::Other, "timestamp-recorder", None),
+        };
+        let (compositor, _handle) = VideoCompositor::new(
+            "compositor",
+            VideoCompositorOptions {
+                frame_rate: ffmpeg::Rational::new(10, 1),
+                ..options(2, 2)
+            },
+        )
+        .unwrap();
+
+        let pipeline = Pipeline::new("phase-test", compositor, |source, ctx| {
+            let branch = ctx.branch().to(Box::new(sink))?;
+            ctx.attach(source, 0, branch)?;
+            Ok(())
+        })
+        .expect("test pipeline wiring must succeed");
+
+        pipeline.run();
+        // Warm up, then pause the instant a frame is observed — `next_due`
+        // is then a known one interval away.
+        for _ in 0..2 {
+            rx.recv_timeout(Duration::from_millis(500))
+                .expect("expected steady frames before pausing");
+        }
+        pipeline.pause();
+        thread::sleep(Duration::from_millis(500));
+
+        let resumed_at = Instant::now();
+        pipeline.resume();
+        let first_after_resume = rx
+            .recv_timeout(Duration::from_millis(500))
+            .expect("expected a frame after resume");
+        pipeline.stop();
+        pipeline.bus().log_events();
+
+        let gap = first_after_resume.saturating_duration_since(resumed_at);
+        assert!(
+            gap >= Duration::from_millis(50),
+            "expected the post-pause frame to land close to a full 100ms \
+             interval after resume (phase preserved from before the \
+             pause), not almost immediately (phase reset to the resume \
+             instant): got {gap:?}"
+        );
     }
 }
