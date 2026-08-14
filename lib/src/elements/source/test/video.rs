@@ -242,6 +242,15 @@ impl SourceElement for TestVideoSource {
                 thread::sleep(next_due - now);
             }
             next_due += self.frame_interval;
+            let now = Instant::now();
+            if next_due < now {
+                // A slow generate/push must not cause a burst of catch-up
+                // frames once it finally does keep up. Drop missed ticks
+                // and resume cadence from the next real output deadline —
+                // same correction `VideoCompositor::run` already applies
+                // to its own composition step.
+                next_due = now + self.frame_interval;
+            }
 
             let frame = self.generate_frame();
             // A downstream failure drops just this one frame — same
@@ -465,6 +474,98 @@ mod tests {
             after_resume <= 12,
             "expected a steady framerate after resume, not a burst of catch-up frames: \
              {after_resume} frames arrived within 120ms of resuming"
+        );
+    }
+
+    #[rust_hlog::hlog]
+    struct SlowFirstFrameSink {
+        tx: crossbeam_channel::Sender<Instant>,
+        slow_duration: Duration,
+        delayed: bool,
+    }
+
+    impl Element for SlowFirstFrameSink {
+        fn name(&self) -> Arc<str> {
+            "slow-sink".into()
+        }
+        fn element_type(&self) -> ElementType {
+            ElementType::Other
+        }
+        fn hlog(&self) -> &HLog {
+            &self.hlog
+        }
+        fn hlog_mut(&mut self) -> &mut HLog {
+            &mut self.hlog
+        }
+    }
+
+    impl Sink for SlowFirstFrameSink {
+        fn consume(&mut self, buf: MediaBuffer) -> crate::error::Result<()> {
+            if matches!(buf, MediaBuffer::Video(_)) {
+                let _ = self.tx.send(Instant::now());
+                if !self.delayed {
+                    self.delayed = true;
+                    thread::sleep(self.slow_duration);
+                }
+            }
+            Ok(())
+        }
+        fn control(&mut self, _msg: ControlMsg) -> crate::error::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Regression test for the missing processing-delay clamp:
+    /// `next_due += self.frame_interval` alone (no follow-up "did that
+    /// still land in the past?" check) let one abnormally slow downstream
+    /// `consume()` call leave `next_due` many intervals behind `now`, and
+    /// every one of those intervals would fire back-to-back with no sleep
+    /// between them as soon as the loop got a chance to run again — a
+    /// burst of catch-up frames. `VideoCompositor::run` already guarded
+    /// its own composition step this way; `TestVideoSource::run` now
+    /// applies the same clamp right after advancing `next_due`.
+    #[test]
+    fn a_slow_sink_does_not_cause_a_burst_of_catch_up_frames() {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let sink = SlowFirstFrameSink {
+            tx,
+            slow_duration: Duration::from_millis(300),
+            delayed: false,
+            hlog: element_hlog(ElementType::Other, "slow-sink", None),
+        };
+        let source = TestVideoSource::new(
+            "test-video",
+            TestVideoOptions {
+                width: 16,
+                height: 16,
+                framerate: ffmpeg::Rational::new(20, 1), // 50ms/frame
+            },
+        );
+
+        let pipeline = Pipeline::new("slow-sink-test", source, |source, ctx| {
+            let branch = ctx.branch().to(Box::new(sink))?;
+            ctx.attach(source, 0, branch)?;
+            Ok(())
+        })
+        .expect("test pipeline wiring must succeed");
+
+        pipeline.run();
+        rx.recv_timeout(Duration::from_millis(500))
+            .expect("expected the first (slow) frame");
+        let after_slow = rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("expected the frame right after the slow one caught up");
+        let steady = rx
+            .recv_timeout(Duration::from_millis(500))
+            .expect("expected a third frame at steady cadence");
+        pipeline.stop();
+        pipeline.bus().log_events();
+
+        let gap = steady.saturating_duration_since(after_slow);
+        assert!(
+            gap >= Duration::from_millis(25),
+            "expected steady ~50ms cadence once the slow sink caught up, not a \
+             burst of catch-up frames immediately following it: got {gap:?}"
         );
     }
 }

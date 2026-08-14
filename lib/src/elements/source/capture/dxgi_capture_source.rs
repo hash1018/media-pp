@@ -985,6 +985,15 @@ impl SourceElement for DxgiCaptureSource {
                 continue;
             }
             next_due += self.frame_interval;
+            let now = Instant::now();
+            if next_due < now {
+                // A slow poll/capture cycle must not cause a burst of
+                // catch-up frames once it finally does keep up. Drop
+                // missed ticks and resume cadence from the next real
+                // output deadline — same correction `VideoCompositor::run`
+                // already applies to its own composition step.
+                next_due = now + self.frame_interval;
+            }
 
             if !self.all_captured() {
                 continue; // nothing real captured yet — nothing to emit
