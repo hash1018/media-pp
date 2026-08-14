@@ -7,6 +7,7 @@ use std::{
 
 use ffmpeg_next as ffmpeg;
 use rust_hlog::{HLog, hinfo};
+use thiserror::Error as ThisError;
 
 use crate::{
     buffer::MediaBuffer,
@@ -14,8 +15,22 @@ use crate::{
     control::ControlMsg,
     element::{Element, ElementType, Sink, Source, element_hlog},
     pad::SrcPad,
-    time::{MediaTimestamp, TimeBase},
+    time::{InvalidTimeBase, MediaTimestamp, TimeBase},
 };
+
+/// Errors specific to [`Pacer`].
+#[derive(Debug, ThisError)]
+pub enum PacerError {
+    /// `time_base` came from
+    /// [`crate::element::SourceElement::stream_time_base`]/an encoder's own
+    /// time base — i.e. from a demuxed file or an otherwise externally
+    /// supplied stream, not a value this crate controls. A malformed or
+    /// unusual stream can legitimately have an invalid one.
+    #[error(
+        "invalid time base {numerator}/{denominator}: both numerator and denominator must be positive"
+    )]
+    InvalidTimeBase { numerator: i32, denominator: i32 },
+}
 
 /// [`TimeBase::new_unchecked`] is fine here — `1/1_000_000_000` is a
 /// hardcoded constant known valid, not external input.
@@ -73,20 +88,26 @@ pub struct Pacer {
 }
 
 impl Pacer {
-    pub fn new(name: impl Into<String>, time_base: ffmpeg::Rational, clock: Arc<Clock>) -> Self {
+    pub fn new(
+        name: impl Into<String>,
+        time_base: ffmpeg::Rational,
+        clock: Arc<Clock>,
+    ) -> Result<Self, PacerError> {
         let name: Arc<str> = name.into().into();
         let hlog = element_hlog(ElementType::Pacer, &name, None);
         hinfo!(hlog: &hlog, "created: time_base={time_base}");
         let pad = SrcPad::new(format!("{name}_src"));
         let interrupt_epoch = clock.interrupt_epoch();
-        // Every caller derives `time_base` from a real stream/encoder time
-        // base (see e.g. `SourceElement::stream_time_base`,
-        // `SwEncoder::time_base`), never from unvalidated external input —
-        // an invalid one here is this crate's own bug, not something to
-        // recover from at runtime.
-        let time_base = TimeBase::try_new(time_base)
-            .unwrap_or_else(|error| panic!("Pacer::new given an invalid time_base: {error}"));
-        Self {
+        let time_base = TimeBase::try_new(time_base).map_err(
+            |InvalidTimeBase {
+                 numerator,
+                 denominator,
+             }| PacerError::InvalidTimeBase {
+                numerator,
+                denominator,
+            },
+        )?;
+        Ok(Self {
             name,
             hlog,
             time_base,
@@ -95,7 +116,7 @@ impl Pacer {
             interrupt_epoch,
             pending: VecDeque::new(),
             pad,
-        }
+        })
     }
 
     /// Blocks until `pts` is due, based on this pacer's `first_pts` (set
@@ -111,7 +132,14 @@ impl Pacer {
         let Some(pts) = pts else { return true };
         let first_pts = *self.first_pts.get_or_insert(pts);
 
-        let elapsed_ticks = pts - first_pts;
+        // A stream's own `pts` is external input too — an adversarial or
+        // corrupt jump close to `i64`'s range could overflow this
+        // subtraction. Nothing sane to pace against in that case; let the
+        // buffer through rather than panic (debug builds) or wrap into a
+        // nonsense wait (release builds).
+        let Some(elapsed_ticks) = pts.checked_sub(first_pts) else {
+            return true;
+        };
         if elapsed_ticks <= 0 {
             return true;
         }
@@ -212,7 +240,7 @@ mod tests {
     #[test]
     fn long_wait_returns_promptly_when_control_interrupts_it() {
         let clock = Arc::new(Clock::new());
-        let mut pacer = Pacer::new("pacer", ffmpeg::Rational::new(1, 1), clock.clone());
+        let mut pacer = Pacer::new("pacer", ffmpeg::Rational::new(1, 1), clock.clone()).unwrap();
         assert!(
             pacer.wait_for(Some(0)),
             "first pts should establish the anchor"
@@ -237,7 +265,7 @@ mod tests {
     #[test]
     fn pause_retains_interrupted_buffer_but_seek_and_stop_discard_it() {
         let clock = Arc::new(Clock::new());
-        let mut pacer = Pacer::new("pacer", ffmpeg::Rational::new(1, 1), clock.clone());
+        let mut pacer = Pacer::new("pacer", ffmpeg::Rational::new(1, 1), clock.clone()).unwrap();
 
         clock.interrupt();
         pacer.consume(packet(0)).expect("interrupted consume");

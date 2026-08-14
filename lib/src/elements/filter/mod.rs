@@ -21,7 +21,7 @@ pub use encoder::{
     AudioCodec, SwAudioEncoder, SwAudioEncoderError, SwAudioEncoderOptions, SwEncoder,
     SwEncoderError, SwEncoderOptions, VideoCodec,
 };
-pub use pacer::Pacer;
+pub use pacer::{Pacer, PacerError};
 pub use scaler::{Scaler, ScalerError};
 pub use tee::{Tee, TeeBuilder, TeeHandle};
 #[cfg(feature = "d3d11-renderer")]

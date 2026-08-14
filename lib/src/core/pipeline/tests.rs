@@ -295,7 +295,7 @@ fn seek_repositions_and_playback_continues() {
     // `seek_reports_where_it_actually_landed_when_target_is_not_a_keyframe`
     // for how this was found).
     let pipeline = Pipeline::new("test", source, |source, ctx| {
-        let pacer = Pacer::new("pacer", time_base, ctx.clock.clone());
+        let pacer = Pacer::new("pacer", time_base, ctx.clock.clone())?;
         let branch = ctx.branch().queue("q", 4).pipe(pacer).to(Box::new(sink))?;
         ctx.attach(source, index, branch)?;
         Ok(())
@@ -347,7 +347,7 @@ fn seek_reports_where_it_actually_landed_when_target_is_not_a_keyframe() {
     // Paced for the same reason as `seek_repositions_and_playback_continues`
     // — otherwise the file finishes before `seek()` is even called.
     let pipeline = Pipeline::new("test", source, |source, ctx| {
-        let pacer = Pacer::new("pacer", time_base, ctx.clock.clone());
+        let pacer = Pacer::new("pacer", time_base, ctx.clock.clone())?;
         let branch = ctx
             .branch()
             .queue("q", 4)
@@ -560,7 +560,7 @@ fn topology_lists_source_through_terminal_per_branch() {
     let time_base = source.stream_time_base(index).expect("stream disappeared");
 
     let pipeline = Pipeline::new("test", source, |source, ctx| {
-        let pacer = Pacer::new("pacer", time_base, ctx.clock.clone());
+        let pacer = Pacer::new("pacer", time_base, ctx.clock.clone())?;
         let branch = ctx
             .branch()
             .queue("q", 4)

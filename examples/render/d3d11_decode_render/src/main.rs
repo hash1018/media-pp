@@ -150,7 +150,8 @@ fn play(path: &str, hwnd: isize, width: u32, height: u32) -> media_pp::Result<()
         // playback while the queue buffers up.
         let decoder = D3d11Decoder::new("decoder", params, gpu.device(), 32)
             .expect("failed to open D3D11VA decoder");
-        let pacer = Pacer::new("pacer", time_base, ctx.clock.clone());
+        let pacer =
+            Pacer::new("pacer", time_base, ctx.clock.clone()).expect("failed to create pacer");
         let renderer = render_common::d3d11_window_renderer("renderer", &gpu, hwnd, width, height)
             .expect("failed to create renderer");
         let branch = ctx

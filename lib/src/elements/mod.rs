@@ -12,7 +12,7 @@ pub use driver::{
 };
 pub use filter::{
     AudioCodec, AudioFormat, AudioResampler, AudioResamplerError, AudioVolume, AudioVolumeError,
-    AudioVolumeHandle, AudioVolumeOptions, Pacer, Scaler, ScalerError, SwAudioEncoder,
+    AudioVolumeHandle, AudioVolumeOptions, Pacer, PacerError, Scaler, ScalerError, SwAudioEncoder,
     SwAudioEncoderError, SwAudioEncoderOptions, SwDecoder, SwDecoderError, SwEncoder,
     SwEncoderError, SwEncoderOptions, Tee, TeeBuilder, TeeHandle, VideoCodec,
 };

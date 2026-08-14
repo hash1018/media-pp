@@ -138,7 +138,8 @@ fn play(path: &str, hwnd: isize, width: u32, height: u32) -> media_pp::Result<()
         // zero-copy path to be valid at all (see D3d12vaDecoder::new).
         let decoder = D3d12vaDecoder::new("decoder", params, gpu.device())
             .expect("failed to open D3D12VA decoder");
-        let pacer = Pacer::new("pacer", time_base, ctx.clock.clone());
+        let pacer =
+            Pacer::new("pacer", time_base, ctx.clock.clone()).expect("failed to create pacer");
         let renderer = render_common::d3d12_window_renderer("renderer", &gpu, hwnd, width, height)
             .expect("failed to create renderer");
         let branch = ctx

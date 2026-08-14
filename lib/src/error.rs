@@ -22,9 +22,9 @@ use crate::elements::{D3d12RendererError, D3d12UploadError, D3d12vaDecoderError}
 use crate::{
     elements::{
         AppSourceError, AudioMixerError, AudioResamplerError, AudioVolumeError, FileDemuxError,
-        HlsMuxerError, Mp4MuxerError, RtspSourceError, ScalerError, SwAudioEncoderError,
-        SwDecoderError, SwEncoderError, TestAudioSourceError, TestVideoSourceError,
-        VideoCompositorError,
+        HlsMuxerError, Mp4MuxerError, PacerError, RtspSourceError, ScalerError,
+        SwAudioEncoderError, SwDecoderError, SwEncoderError, TestAudioSourceError,
+        TestVideoSourceError, VideoCompositorError,
     },
     graph::GraphError,
     queue::QueueError,
@@ -61,6 +61,9 @@ pub enum Error {
 
     #[error(transparent)]
     SwEncoderError(#[from] SwEncoderError),
+
+    #[error(transparent)]
+    PacerError(#[from] PacerError),
 
     #[error(transparent)]
     SwAudioEncoderError(#[from] SwAudioEncoderError),
