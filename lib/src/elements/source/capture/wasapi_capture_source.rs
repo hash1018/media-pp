@@ -28,6 +28,7 @@ use crate::{
         ComApartment, WasapiDevice, WasapiDeviceKind, list_devices as enumerate_wasapi_devices,
         open_device, resolve_mix_format,
     },
+    schedule::ActiveTimeline,
 };
 
 /// How long [`WasapiCaptureSource::run`] sleeps between checks of
@@ -300,10 +301,11 @@ impl WasapiCaptureSource {
     }
 
     /// Synthesizes and pushes one silence frame covering however many
-    /// samples real WASAPI delivery has fallen behind wall-clock time
-    /// since `run_captured` started, minus `paused_total` (time already
-    /// spent frozen inside `Pause` — see [`WasapiCaptureSource::handle_control`] —
-    /// must not itself count as a deficit to fill, or `Resume` would
+    /// samples real WASAPI delivery has fallen behind `elapsed` — active
+    /// wall-clock time since `run_captured` started, already excluding
+    /// time spent frozen inside `Pause` (see
+    /// [`crate::schedule::ActiveTimeline`]; a raw `Instant::elapsed()`
+    /// would count a pause as a deficit to fill, making `Resume`
     /// synthesize one giant silence frame covering the whole pause) — a
     /// no-op (`deficit <= 0`) whenever real packets have kept up. WASAPI
     /// delivers **zero** packets
@@ -317,8 +319,7 @@ impl WasapiCaptureSource {
     /// every gap with synthesized silence (rather than, say, stretching
     /// the next real frame's `pts`) keeps `pts` a plain, always-accurate
     /// sample count no matter which samples were real.
-    fn fill_silence_gap(&mut self, start: Instant, paused_total: Duration, bus: &Bus) {
-        let elapsed = start.elapsed().saturating_sub(paused_total);
+    fn fill_silence_gap(&mut self, elapsed: Duration, bus: &Bus) {
         let expected = (elapsed.as_secs_f64() * self.sample_rate as f64) as i64;
         let deficit = expected - self.samples_emitted;
         if deficit <= 0 {
@@ -421,17 +422,14 @@ impl WasapiCaptureSource {
     /// so `pts` keeps advancing with wall-clock time even across a tick
     /// where WASAPI delivered nothing at all.
     fn run_captured(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
-        let start = Instant::now();
-        // See `fill_silence_gap`'s own docs on why this has to be
-        // subtracted back out of `start.elapsed()`.
-        let mut paused_total = Duration::ZERO;
+        let mut timeline = ActiveTimeline::new(Instant::now());
         loop {
             let outcome = self.handle_control(control, bus)?;
             if outcome.stopped {
                 hinfo!(self, "run: stopped");
                 return Ok(());
             }
-            paused_total += outcome.paused_for;
+            timeline.account_pause(outcome.paused_for);
 
             thread::sleep(POLL_INTERVAL);
 
@@ -467,7 +465,7 @@ impl WasapiCaptureSource {
                 self.push_frame(frame, bus);
             }
 
-            self.fill_silence_gap(start, paused_total, bus);
+            self.fill_silence_gap(timeline.elapsed(Instant::now()), bus);
         }
     }
 }

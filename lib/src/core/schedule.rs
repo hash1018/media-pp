@@ -1,13 +1,22 @@
-//! Wall-clock scheduling helpers shared by every periodic
-//! [`crate::element::SourceElement`] (`TestVideoSource`, `DxgiCaptureSource`,
-//! `VideoCompositor`, `D3d11VideoCompositor`, ...): an absolute `next_due`
-//! deadline that must survive a [`crate::control::ControlMsg::Pause`]/
-//! `Resume` cycle without losing its phase, yet also must not let one
-//! abnormally slow tick turn into a burst of back-to-back catch-up work.
-//! [`PeriodicSchedule`] is exactly the small piece of arithmetic these
-//! sources used to duplicate (and, for a while, disagree on) inline in
-//! their own `run()` loops — see its own docs for the two distinct causes
-//! of "behind schedule" it separates.
+//! Wall-clock scheduling helpers shared by every
+//! [`crate::element::SourceElement`] that paces itself against real time
+//! instead of an upstream `pts`. Two distinct shapes of that problem live
+//! here:
+//!
+//! - [`PeriodicSchedule`] — an absolute `next_due` deadline
+//!   (`TestVideoSource`, `DxgiCaptureSource`, `VideoCompositor`,
+//!   `D3d11VideoCompositor`, ...) that must survive a
+//!   [`crate::control::ControlMsg::Pause`]/`Resume` cycle without losing
+//!   its phase, yet also must not let one abnormally slow tick turn into a
+//!   burst of back-to-back catch-up work.
+//! - [`ActiveTimeline`] — an elapsed-time budget (`WasapiCaptureSource`,
+//!   `TestAudioSource`, `AudioMixer`, ...) measuring how much *active*
+//!   (non-`Pause`d) wall-clock time has passed since this source started,
+//!   used to decide how many samples/ticks are owed so far.
+//!
+//! Both used to be duplicated (and, for a while, disagreed on) inline in
+//! each source's own `run()` loop — see each type's own docs for exactly
+//! what they replace.
 
 use std::time::{Duration, Instant};
 
@@ -80,6 +89,100 @@ impl PeriodicSchedule {
         if self.next_due < now {
             self.next_due = now + self.interval;
         }
+    }
+}
+
+/// How much *active* (non-`Pause`d) wall-clock time has passed since this
+/// source started — the elapsed-time counterpart to [`PeriodicSchedule`]'s
+/// absolute deadline, for sources that decide how many samples/ticks are
+/// owed so far rather than waiting for one fixed-size tick at a time (e.g.
+/// `WasapiCaptureSource` filling a silence gap, `AudioMixer`/
+/// `TestAudioSource` deciding how many samples a mix tick owes).
+///
+/// Tracks a single shifting `anchor` rather than a separate elapsed-time
+/// accumulator: `now.saturating_duration_since(anchor)` after shifting
+/// `anchor` forward by a pause's duration gives exactly the same value as
+/// `now.saturating_duration_since(start) - paused_total` would with a
+/// fixed `start` and a separately accumulated `paused_total` — one field
+/// instead of two, and it composes for free across any number of
+/// `Pause`/`Resume` cycles. Unlike [`crate::clock::Clock`] (which every
+/// [`crate::elements::Pacer`] in a pipeline shares, and which observes
+/// `pause()`/`resume()` as they happen in real time), each caller of this
+/// type owns its own private instance and only ever learns about a pause
+/// after the fact — one summed [`crate::control::ControlOutcome::paused_for`]
+/// per [`crate::control::drain_control`] call — so there is no in-progress
+/// "currently paused" state to represent here.
+#[derive(Debug, Clone, Copy)]
+pub struct ActiveTimeline {
+    anchor: Instant,
+}
+
+impl ActiveTimeline {
+    pub fn new(now: Instant) -> Self {
+        Self { anchor: now }
+    }
+
+    /// Folds a measured [`crate::control::ControlOutcome::paused_for`]
+    /// back in, so [`ActiveTimeline::elapsed`] does not count time spent
+    /// frozen inside `Pause` as active — see the type's own docs for why
+    /// shifting the anchor is equivalent to subtracting an accumulated
+    /// total.
+    pub fn account_pause(&mut self, paused_for: Duration) {
+        self.anchor += paused_for;
+    }
+
+    /// Active time elapsed since `now`(construction) minus every
+    /// `paused_for` folded in since. Saturates to zero rather than
+    /// underflowing/panicking if `now` predates the (possibly
+    /// pause-shifted) anchor.
+    pub fn elapsed(&self, now: Instant) -> Duration {
+        now.saturating_duration_since(self.anchor)
+    }
+}
+
+#[cfg(test)]
+mod active_timeline_tests {
+    use super::*;
+
+    #[test]
+    fn elapsed_excludes_time_spent_paused() {
+        let t0 = Instant::now();
+        let mut timeline = ActiveTimeline::new(t0);
+
+        let before_pause = t0 + Duration::from_millis(200);
+        assert_eq!(timeline.elapsed(before_pause), Duration::from_millis(200));
+
+        // A 500ms Pause/Resume cycle measured 500ms after `before_pause`.
+        timeline.account_pause(Duration::from_millis(500));
+        let after_pause = before_pause + Duration::from_millis(500);
+        assert_eq!(
+            timeline.elapsed(after_pause),
+            Duration::from_millis(200),
+            "the 500ms spent paused must not count as active time"
+        );
+    }
+
+    #[test]
+    fn multiple_pauses_accumulate() {
+        let t0 = Instant::now();
+        let mut timeline = ActiveTimeline::new(t0);
+        timeline.account_pause(Duration::from_millis(100));
+        timeline.account_pause(Duration::from_millis(250));
+
+        assert_eq!(
+            timeline.elapsed(t0 + Duration::from_secs(1)),
+            Duration::from_millis(650),
+            "1s of real time minus 350ms total paused"
+        );
+    }
+
+    #[test]
+    fn elapsed_saturates_instead_of_underflowing() {
+        let t0 = Instant::now();
+        let mut timeline = ActiveTimeline::new(t0);
+        timeline.account_pause(Duration::from_secs(10));
+
+        assert_eq!(timeline.elapsed(t0), Duration::ZERO);
     }
 }
 

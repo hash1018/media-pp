@@ -19,6 +19,7 @@ use crate::{
     element::{Element, ElementType, Sink, Source, SourceElement, element_hlog},
     error::Result,
     pad::SrcPad,
+    schedule::ActiveTimeline,
 };
 
 /// How often [`AudioMixer::run`] mixes and emits a combined frame — same
@@ -419,20 +420,19 @@ impl AudioMixer {
     }
 
     /// Sums however many samples are needed to keep `samples_emitted` in
-    /// lockstep with `start.elapsed()` minus `paused_total` (a no-op if
-    /// nothing's owed yet — same wall-clock-deficit shape as
+    /// lockstep with `elapsed` (a no-op if nothing's owed yet — same
+    /// wall-clock-deficit shape as
     /// [`crate::elements::WasapiCaptureSource::fill_silence_gap`], just
     /// summing real contributions from every input instead of emitting
-    /// pure silence). `paused_total` is subtracted so a `Pause`/`Resume`
-    /// pair doesn't get summed as a burst of owed samples the moment
-    /// playback resumes — real time keeps moving while paused, but this
-    /// mix's own timeline must not. Drops any input that's both `eos` and
+    /// pure silence). `elapsed` already excludes time spent frozen inside
+    /// `Pause` (see [`crate::schedule::ActiveTimeline`]) so a `Pause`/
+    /// `Resume` pair doesn't get summed as a burst of owed samples the
+    /// moment playback resumes. Drops any input that's both `eos` and
     /// fully drained — it contributed its last real samples on a previous
     /// tick and has nothing left to give.
-    fn mix_tick(&mut self, start: Instant, paused_total: Duration, bus: &Bus) {
+    fn mix_tick(&mut self, elapsed: Duration, bus: &Bus) {
         let channels = self.channels as usize;
-        let expected = (start.elapsed().saturating_sub(paused_total).as_secs_f64()
-            * self.sample_rate as f64) as i64;
+        let expected = (elapsed.as_secs_f64() * self.sample_rate as f64) as i64;
         let needed = (expected - self.samples_emitted).max(0) as usize;
         if needed == 0 {
             return;
@@ -508,17 +508,16 @@ impl Source for AudioMixer {
 impl SourceElement for AudioMixer {
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
         hinfo!(self, "run: starting");
-        let start = Instant::now();
-        let mut paused_total = Duration::ZERO;
+        let mut timeline = ActiveTimeline::new(Instant::now());
         loop {
             let outcome = drain_control(control, self, bus)?;
             if outcome.stopped {
                 hinfo!(self, "run: stopped");
                 return Ok(());
             }
-            paused_total += outcome.paused_for;
+            timeline.account_pause(outcome.paused_for);
             thread::sleep(TICK_INTERVAL);
-            self.mix_tick(start, paused_total, bus);
+            self.mix_tick(timeline.elapsed(Instant::now()), bus);
         }
     }
 

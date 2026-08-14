@@ -16,6 +16,7 @@ use crate::{
     element::{Element, ElementType, Source, SourceElement, element_hlog},
     error::Result,
     pad::SrcPad,
+    schedule::ActiveTimeline,
 };
 
 /// How often [`TestAudioSource::run`] wakes up to top up however many
@@ -185,23 +186,17 @@ impl Source for TestAudioSource {
 impl SourceElement for TestAudioSource {
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
         hinfo!(self, "run: starting");
-        let start = Instant::now();
-        // Total wall-clock time spent frozen inside `Pause` so far — real
-        // time keeps moving during a pause, but the sine wave's own phase
-        // (tied to `samples_emitted`, which stops advancing while paused)
-        // must not, or `Resume` would generate a burst of samples to cover
-        // the whole gap at once.
-        let mut paused_total = Duration::ZERO;
+        let mut timeline = ActiveTimeline::new(Instant::now());
         loop {
             let outcome = drain_control(control, self, bus)?;
             if outcome.stopped {
                 hinfo!(self, "run: stopped");
                 return Ok(());
             }
-            paused_total += outcome.paused_for;
+            timeline.account_pause(outcome.paused_for);
             thread::sleep(TICK_INTERVAL);
 
-            let expected = (start.elapsed().saturating_sub(paused_total).as_secs_f64()
+            let expected = (timeline.elapsed(Instant::now()).as_secs_f64()
                 * self.sample_rate as f64) as i64;
             let needed = (expected - self.samples_emitted).max(0) as usize;
             if needed == 0 {
