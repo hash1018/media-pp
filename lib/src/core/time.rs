@@ -20,7 +20,7 @@
 //! [`Pacer`]: crate::elements::Pacer
 
 use ffmpeg_next as ffmpeg;
-use ffmpeg_next::{Rescale, Rounding};
+use ffmpeg_next::Rescale;
 use thiserror::Error as ThisError;
 
 /// `numerator`/`denominator` were not both positive — `0/1` (FFmpeg's own
@@ -28,7 +28,9 @@ use thiserror::Error as ThisError;
 /// rejected here rather than left to produce `inf`/`NaN`/a division panic
 /// somewhere downstream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ThisError)]
-#[error("invalid time base {numerator}/{denominator}: both numerator and denominator must be positive")]
+#[error(
+    "invalid time base {numerator}/{denominator}: both numerator and denominator must be positive"
+)]
 pub struct InvalidTimeBase {
     pub numerator: i32,
     pub denominator: i32,
@@ -55,11 +57,19 @@ impl TimeBase {
     /// constant like nanoseconds (`1/1_000_000_000`) — where re-deriving
     /// that via `try_new` on every call would be pure overhead. Prefer
     /// `try_new` whenever `value` originates outside this crate's own
-    /// control.
-    pub fn new_unchecked(value: ffmpeg::Rational) -> Self {
+    /// control. `pub(crate)` rather than `pub`: this whole module is
+    /// crate-private already (see `lib.rs`), but marking the unvalidated
+    /// escape hatch itself is worth the redundancy in case that ever
+    /// changes without this callsite being revisited.
+    pub(crate) fn new_unchecked(value: ffmpeg::Rational) -> Self {
         Self(value)
     }
 
+    /// Only [`crate::elements::driver::webrtc::peer::to_str0m_media_time`]
+    /// needs the raw `ffmpeg::Rational` back out today — `#[cfg]`-gated
+    /// rather than left for a hypothetical future caller (this module has
+    /// no `#[allow(dead_code)]` precedent elsewhere in this crate).
+    #[cfg(feature = "webrtc")]
     pub fn get(self) -> ffmpeg::Rational {
         self.0
     }
@@ -75,6 +85,15 @@ pub struct MediaTimestamp {
 }
 
 impl MediaTimestamp {
+    /// Only [`crate::elements::driver::webrtc::peer::packet_rtp_time`]
+    /// builds a `MediaTimestamp` straight from an unvalidated
+    /// `ffmpeg::Rational` today; [`Pacer`] already holds a validated
+    /// [`TimeBase`] and uses [`MediaTimestamp::new_unchecked`] instead. See
+    /// [`TimeBase::get`]'s own doc for why this is `#[cfg]`-gated rather
+    /// than kept for a hypothetical future caller.
+    ///
+    /// [`Pacer`]: crate::elements::Pacer
+    #[cfg(feature = "webrtc")]
     pub fn try_new(pts: i64, time_base: ffmpeg::Rational) -> Result<Self, InvalidTimeBase> {
         Ok(Self {
             pts,
@@ -84,33 +103,32 @@ impl MediaTimestamp {
 
     /// For a caller already holding a proven-valid [`TimeBase`] (from an
     /// earlier [`TimeBase::try_new`]) that wants to pair a new `pts` with
-    /// it without re-validating.
-    pub fn new_unchecked(pts: i64, time_base: TimeBase) -> Self {
+    /// it without re-validating. `pub(crate)` for the same reason as
+    /// [`TimeBase::new_unchecked`].
+    pub(crate) fn new_unchecked(pts: i64, time_base: TimeBase) -> Self {
         Self { pts, time_base }
     }
 
+    #[cfg(feature = "webrtc")]
     pub fn pts(self) -> i64 {
         self.pts
     }
 
+    #[cfg(feature = "webrtc")]
     pub fn time_base(self) -> TimeBase {
         self.time_base
     }
 
     /// Rescales `pts` into `target`'s units using FFmpeg's default
-    /// rounding (nearest, ties away from zero). Callers where early vs.
+    /// rounding (nearest, ties away from zero). A caller where early vs.
     /// late matters more than exact nearness — a packet timestamp, a
     /// duration, a presentation deadline can each have a different
-    /// tolerance — should use [`MediaTimestamp::rescale_with`] and pick a
-    /// rounding explicitly instead.
+    /// tolerance — should reach for [`ffmpeg_next::Rescale::rescale_with`]
+    /// directly (`self.pts().rescale_with(self.time_base().get(),
+    /// target.get(), rounding)`) and pick a rounding explicitly instead;
+    /// not wrapped here since nothing in this crate needs it yet.
     pub fn rescale(self, target: TimeBase) -> i64 {
         self.pts.rescale(self.time_base.0, target.0)
-    }
-
-    /// Same as [`MediaTimestamp::rescale`], with an explicit rounding
-    /// policy.
-    pub fn rescale_with(self, target: TimeBase, rounding: Rounding) -> i64 {
-        self.pts.rescale_with(self.time_base.0, target.0, rounding)
     }
 }
 
@@ -130,6 +148,14 @@ mod tests {
                 }),
                 "expected {numerator}/{denominator} to be rejected"
             );
+        }
+    }
+
+    #[cfg(feature = "webrtc")]
+    #[test]
+    fn media_timestamp_try_new_rejects_the_same_invalid_time_bases() {
+        for (numerator, denominator) in [(0, 1), (1, 0), (-1, 1), (1, -1), (0, 0)] {
+            let rational = ffmpeg::Rational::new(numerator, denominator);
             assert!(MediaTimestamp::try_new(1, rational).is_err());
         }
     }
@@ -137,7 +163,8 @@ mod tests {
     #[test]
     fn rescale_matches_hand_computed_seconds() {
         // 30 ticks of 1001/30_000s each = 1.001s = 30_030/30_000.
-        let timestamp = MediaTimestamp::try_new(30, ffmpeg::Rational::new(1001, 30_000)).unwrap();
+        let time_base = TimeBase::try_new(ffmpeg::Rational::new(1001, 30_000)).unwrap();
+        let timestamp = MediaTimestamp::new_unchecked(30, time_base);
         let seconds = TimeBase::try_new(ffmpeg::Rational::new(1, 30_000)).unwrap();
 
         assert_eq!(timestamp.rescale(seconds), 30_030);
@@ -145,7 +172,8 @@ mod tests {
 
     #[test]
     fn rescale_is_exact_for_a_unit_numerator_time_base() {
-        let timestamp = MediaTimestamp::try_new(3_000, ffmpeg::Rational::new(1, 90_000)).unwrap();
+        let time_base = TimeBase::try_new(ffmpeg::Rational::new(1, 90_000)).unwrap();
+        let timestamp = MediaTimestamp::new_unchecked(3_000, time_base);
         let same_base = TimeBase::try_new(ffmpeg::Rational::new(1, 90_000)).unwrap();
 
         assert_eq!(timestamp.rescale(same_base), 3_000);

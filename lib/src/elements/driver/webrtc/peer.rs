@@ -483,9 +483,7 @@ pub(super) fn packet_rtp_time(
 /// rational rather than rescaling to some fixed target base first — a
 /// backend-specific conversion, so it lives here rather than on
 /// `MediaTimestamp` itself.
-fn to_str0m_media_time(
-    timestamp: MediaTimestamp,
-) -> std::result::Result<MediaTime, WebRtcError> {
+fn to_str0m_media_time(timestamp: MediaTimestamp) -> std::result::Result<MediaTime, WebRtcError> {
     let time_base = timestamp.time_base().get();
     let numerator = time_base.numerator();
     let denominator = time_base.denominator();

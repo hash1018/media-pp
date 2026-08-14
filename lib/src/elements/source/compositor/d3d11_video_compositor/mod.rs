@@ -1919,8 +1919,9 @@ mod tests {
             frame_rate: ffmpeg::Rational::new(10, 1),
             background: Color::BLACK,
         };
-        let (compositor, _handle) = D3d11VideoCompositor::new("compositor", &device, context, options)
-            .expect("D3d11VideoCompositor::new should succeed");
+        let (compositor, _handle) =
+            D3d11VideoCompositor::new("compositor", &device, context, options)
+                .expect("D3d11VideoCompositor::new should succeed");
 
         let pipeline = Pipeline::new("phase-test", compositor, |source, ctx| {
             let branch = ctx.branch().to(Box::new(sink))?;

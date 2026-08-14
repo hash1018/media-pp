@@ -196,8 +196,8 @@ impl SourceElement for TestAudioSource {
             timeline.account_pause(outcome.paused_for);
             thread::sleep(TICK_INTERVAL);
 
-            let expected = (timeline.elapsed(Instant::now()).as_secs_f64()
-                * self.sample_rate as f64) as i64;
+            let expected =
+                (timeline.elapsed(Instant::now()).as_secs_f64() * self.sample_rate as f64) as i64;
             let needed = (expected - self.samples_emitted).max(0) as usize;
             if needed == 0 {
                 continue;
