@@ -105,7 +105,7 @@ for); this table isn't meant to duplicate that.
 | `SwAudioEncoder` | Encodes `Audio` frames into `Packet`s (software `aac`) — resamples to whatever format/channel layout the codec actually needs, built lazily from the first frame it sees |
 | `AudioResampler` | Converts decoded `Audio` sample format/rate/channels through `libswresample`; rebuilds on mid-stream input format changes and flushes delayed samples at EOS |
 | `AudioVolume` | Applies runtime-adjustable gain/mute through `AudioVolumeHandle`; uses a configurable 10 ms default ramp to prevent clicks and preserves the input audio format/timestamps |
-| `Pacer` | Releases buffers at real playback speed (PTS + a shared `Clock`) |
+| `Pacer` | Releases buffers at real playback speed (PTS + a shared `Clock`) — `new` rejects an invalid `time_base` with a typed `PacerError` rather than panicking, since it comes from a demuxed/externally supplied stream |
 | `Scaler` | Converts pixel format and resizes `Video` frames in one pass (`libswscale`) |
 | `Tee`² | Fans one input out to multiple branches; `TeeBuilder` defines the initial fan-out and `TeeHandle::attach`/`detach` changes runtime branches by stable `BranchId` |
 
