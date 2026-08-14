@@ -30,6 +30,13 @@ pub enum PacerError {
         "invalid time base {numerator}/{denominator}: both numerator and denominator must be positive"
     )]
     InvalidTimeBase { numerator: i32, denominator: i32 },
+
+    /// `pts` is external input too (see [`PacerError::InvalidTimeBase`]) —
+    /// an adversarial or corrupt jump this far from this pacer's own
+    /// `first_pts` overflows the subtraction used to compute how long to
+    /// wait, leaving nothing sane to pace against.
+    #[error("pts {pts} is too far from this pacer's first pts {first_pts} to pace against")]
+    TimestampDeltaOverflow { pts: i64, first_pts: i64 },
 }
 
 /// [`TimeBase::new_unchecked`] is fine here — `1/1_000_000_000` is a
@@ -121,27 +128,25 @@ impl Pacer {
 
     /// Blocks until `pts` is due, based on this pacer's `first_pts` (set
     /// here, on the first call) and the shared `clock`'s *current*
-    /// anchor. Returns `false` if pause/seek/stop interrupts the wait; the
-    /// caller retains that in-flight buffer and returns so the owning worker
-    /// can process the pending control request. Frames without a pts (`None`)
-    /// pass straight through.
-    fn wait_for(&mut self, pts: Option<i64>) -> bool {
+    /// anchor. Returns `Ok(false)` if pause/seek/stop interrupts the wait;
+    /// the caller retains that in-flight buffer and returns so the owning
+    /// worker can process the pending control request. Frames without a
+    /// pts (`None`) pass straight through. `Err` only for a `pts` too
+    /// pathological to pace against at all (see
+    /// [`PacerError::TimestampDeltaOverflow`]) — the caller drops that one
+    /// buffer rather than treating it as interrupted.
+    fn wait_for(&mut self, pts: Option<i64>) -> Result<bool, PacerError> {
         if self.clock.interrupt_epoch() != self.interrupt_epoch {
-            return false;
+            return Ok(false);
         }
-        let Some(pts) = pts else { return true };
+        let Some(pts) = pts else { return Ok(true) };
         let first_pts = *self.first_pts.get_or_insert(pts);
 
-        // A stream's own `pts` is external input too — an adversarial or
-        // corrupt jump close to `i64`'s range could overflow this
-        // subtraction. Nothing sane to pace against in that case; let the
-        // buffer through rather than panic (debug builds) or wrap into a
-        // nonsense wait (release builds).
-        let Some(elapsed_ticks) = pts.checked_sub(first_pts) else {
-            return true;
-        };
+        let elapsed_ticks = pts
+            .checked_sub(first_pts)
+            .ok_or(PacerError::TimestampDeltaOverflow { pts, first_pts })?;
         if elapsed_ticks <= 0 {
-            return true;
+            return Ok(true);
         }
         // Integer rescale straight to nanoseconds rather than
         // `elapsed_ticks as f64 * f64::from(time_base)` — the latter loses
@@ -154,11 +159,11 @@ impl Pacer {
         let due = self.clock.start() + Duration::from_nanos(elapsed_ns);
         loop {
             if self.clock.interrupt_epoch() != self.interrupt_epoch {
-                return false;
+                return Ok(false);
             }
             let now = Instant::now();
             if due <= now {
-                return true;
+                return Ok(true);
             }
             thread::sleep((due - now).min(INTERRUPT_POLL_INTERVAL));
         }
@@ -194,9 +199,9 @@ impl Sink for Pacer {
         self.pending.push_back(buf);
         while let Some(buf) = self.pending.pop_front() {
             let ready = match &buf {
-                MediaBuffer::Packet(packet) => self.wait_for(packet.pts()),
-                MediaBuffer::Video(frame) => self.wait_for(frame.pts()),
-                MediaBuffer::Audio(frame) => self.wait_for(frame.pts()),
+                MediaBuffer::Packet(packet) => self.wait_for(packet.pts())?,
+                MediaBuffer::Video(frame) => self.wait_for(frame.pts())?,
+                MediaBuffer::Audio(frame) => self.wait_for(frame.pts())?,
                 MediaBuffer::Eos => true,
             };
             if !ready {
@@ -242,7 +247,7 @@ mod tests {
         let clock = Arc::new(Clock::new());
         let mut pacer = Pacer::new("pacer", ffmpeg::Rational::new(1, 1), clock.clone()).unwrap();
         assert!(
-            pacer.wait_for(Some(0)),
+            pacer.wait_for(Some(0)).unwrap(),
             "first pts should establish the anchor"
         );
 
@@ -257,7 +262,10 @@ mod tests {
         clock.interrupt();
 
         assert!(
-            !worker.join().expect("paced wait should return"),
+            !worker
+                .join()
+                .expect("paced wait should return")
+                .expect("interrupted wait is Ok(false), not an error"),
             "an interrupted paced wait must return before its due time"
         );
     }
@@ -284,5 +292,59 @@ mod tests {
         assert_eq!(pacer.pending.len(), 1);
         pacer.control(ControlMsg::Stop).expect("stop");
         assert!(pacer.pending.is_empty(), "stop must abandon pending data");
+    }
+
+    #[test]
+    fn new_rejects_an_invalid_time_base() {
+        let clock = Arc::new(Clock::new());
+        for rational in [
+            ffmpeg::Rational::new(0, 1),
+            ffmpeg::Rational::new(1, 0),
+            ffmpeg::Rational::new(-1, 1),
+            ffmpeg::Rational::new(1, -1),
+        ] {
+            assert!(
+                matches!(
+                    Pacer::new("pacer", rational, clock.clone()),
+                    Err(PacerError::InvalidTimeBase { .. })
+                ),
+                "expected {rational} to be rejected"
+            );
+        }
+    }
+
+    /// Regression test: a `pts` this far from `first_pts` used to overflow
+    /// `pts - first_pts` silently (a plain `-`) or let the buffer through
+    /// unpaced (an earlier `checked_sub` that swallowed the error). Now
+    /// it's a typed `PacerError` `consume` propagates via `?`, and — since
+    /// `Queue`/a pushing source both treat a `Sink::consume` failure as
+    /// "drop this one buffer, report on the bus, keep going" — a Pacer
+    /// that hits this on one buffer must still pace the next one normally.
+    #[test]
+    fn a_pathological_pts_jump_is_a_typed_error_not_silent_passthrough() {
+        let clock = Arc::new(Clock::new());
+        let mut pacer = Pacer::new("pacer", ffmpeg::Rational::new(1, 1), clock).unwrap();
+
+        assert!(pacer.consume(packet(-1)).is_ok(), "establishes first_pts");
+
+        let error = pacer
+            .consume(packet(i64::MAX))
+            .expect_err("pts far enough from first_pts to overflow the subtraction");
+        assert!(matches!(
+            error,
+            crate::Error::PacerError(PacerError::TimestampDeltaOverflow {
+                pts: i64::MAX,
+                first_pts: -1,
+            })
+        ));
+        assert!(
+            pacer.pending.is_empty(),
+            "the overflowing buffer must not get stuck in `pending`"
+        );
+
+        // The pacer itself must still be usable afterward: a `Some` result
+        // (not a further error) for an ordinary pts relative to the same
+        // `first_pts`.
+        assert!(pacer.wait_for(Some(0)).is_ok());
     }
 }
