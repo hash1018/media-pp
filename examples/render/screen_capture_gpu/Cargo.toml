@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
-[dependencies]
+[target.'cfg(windows)'.dependencies]
 media-pp = { path = "../../../lib", features = ["dxgi-capture", "d3d11-renderer"] }
 render_common = { path = "../render_common" }
 winit = "0.30"

@@ -4,5 +4,5 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
-[dependencies]
+[target.'cfg(windows)'.dependencies]
 media-pp = { path = "../../../lib", features = ["wasapi-capture"] }

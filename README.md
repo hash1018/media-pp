@@ -291,7 +291,11 @@ cargo run -p sw_decode_render              # d3d12-renderer is already enabled i
   build requirements). `D3d12vaDecoder`/`D3d11Decoder` additionally need an
   ffmpeg build with `d3d12va`/`d3d11va` hwaccel support respectively (check
   `ffmpeg -hwaccels`) and a GPU/driver that supports it.
-- All `examples/render/*` crates only build/run on Windows.
+- Windows-backed examples (`audio_capture`, `audio_playback`, the
+  `examples/render/*` window/capture examples, `rtsp_serve*`, and the current
+  WebRTC loopbacks) keep their runtime dependencies behind `cfg(windows)`.
+  They build as unsupported stubs on other targets and print a clear message
+  when run; their actual pipelines still run only on Windows.
 - Windows backend modules and public re-exports are guarded by both their
   Cargo feature and `target_os = "windows"`; enabling one of those features
   for another target does not expose the Windows-specific element types.

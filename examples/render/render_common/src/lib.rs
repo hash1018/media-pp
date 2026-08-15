@@ -8,6 +8,8 @@
 //! independent — separate device, separate shader set, nothing shared
 //! between them.
 
+#![cfg(target_os = "windows")]
+
 mod d3d11_gpu_context;
 mod d3d11_window_renderer;
 mod d3d12_gpu_context;
