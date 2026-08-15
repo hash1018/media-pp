@@ -1,4 +1,9 @@
 /target
 /.claude
-/test-video/sample.mp4
+
+# `media_pp::log::init` output — every example writes ./logs
 /logs
+
+# Example recordings: each writes its result into the repo root
+/*.mp4
+/hls_output
