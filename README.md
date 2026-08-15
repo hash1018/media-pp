@@ -376,9 +376,10 @@ to `./logs`, and uses its Cargo package name as the file prefix.
 
 There is no `default` feature set. The [docs.rs] build enables the Windows
 backend features and targets Windows so their public types remain visible. Its
-Linux build host uses its installed FFmpeg metadata only to let
-`ffmpeg-sys-next` generate and type-check bindings; rustdoc does not link a
-Windows executable. To build the same API docs on Windows locally:
+Linux build host uses its installed FFmpeg metadata and parses those headers
+for the Linux host ABI so `ffmpeg-sys-next` can generate bindings while
+cross-documenting the Rust API; rustdoc does not link a Windows executable. To
+build the same API docs on Windows locally:
 
 ```sh
 cargo doc -p media-pp --open --features d3d11-renderer,d3d12-renderer,dxgi-capture,wasapi-capture,wasapi-renderer,webrtc
