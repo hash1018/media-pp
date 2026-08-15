@@ -2548,6 +2548,7 @@ dependencies = [
  "ffmpeg-next",
  "media-pp",
  "render_common",
+ "windows",
 ]
 
 [[package]]

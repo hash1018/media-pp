@@ -1,4 +1,8 @@
-use std::{thread, time::Duration};
+use std::{
+    sync::mpsc::{self, RecvTimeoutError},
+    thread,
+    time::{Duration, Instant},
+};
 
 use ffmpeg_next as ffmpeg;
 use media_pp::{
@@ -12,6 +16,16 @@ use media_pp::{
     pipeline::Pipeline,
 };
 use render_common::D3d11GpuContext;
+use windows::Win32::System::Console::{
+    GetStdHandle, INPUT_RECORD, KEY_EVENT, ReadConsoleInputW, STD_INPUT_HANDLE,
+};
+
+const MOVE_STEP: i32 = 10;
+
+enum TerminalCommand {
+    Move { dx: i32, dy: i32 },
+    Quit,
+}
 
 /// A moving-gradient `TestVideoSource` background composited with a
 /// `D3d11TextLayerHandle` clock in front of it, recorded to an mp4 — proves dynamic
@@ -21,6 +35,7 @@ use render_common::D3d11GpuContext;
 /// really re-rasterizing and re-uploading each call.
 ///
 ///     cargo run -p text_overlay -- [output.mp4] [seconds]
+///     (use the arrow keys to move the text, or `q` to stop early)
 fn main() -> media_pp::Result<()> {
     media_pp::init()?;
 
@@ -148,11 +163,48 @@ fn main() -> media_pp::Result<()> {
     output_pipeline.run();
     background_pipeline.run();
 
-    for elapsed in 1..=seconds {
-        thread::sleep(Duration::from_secs(1));
-        overlay
-            .set_text(&format!("t={elapsed}s"))
-            .map_err(|e| media_pp::Error::Other(e.to_string()))?;
+    println!("controls: arrow keys move the text by {MOVE_STEP}px; q stops recording");
+    let commands = terminal_commands();
+    let started = Instant::now();
+    let duration = Duration::from_secs(seconds);
+    let mut next_text_update = Duration::from_secs(1);
+    let (mut text_x, mut text_y) = (20, 20);
+    let mut terminal_connected = true;
+
+    while started.elapsed() < duration {
+        let elapsed = started.elapsed();
+        let wait_for_tick = next_text_update.saturating_sub(elapsed);
+        let wait_for_end = duration.saturating_sub(elapsed);
+
+        let wait = wait_for_tick.min(wait_for_end);
+        let command = if terminal_connected {
+            commands.recv_timeout(wait)
+        } else {
+            thread::sleep(wait);
+            Err(RecvTimeoutError::Timeout)
+        };
+
+        match command {
+            Ok(TerminalCommand::Move { dx, dy }) => {
+                text_x = (text_x + dx).clamp(0, output_width as i32);
+                text_y = (text_y + dy).clamp(0, output_height as i32);
+                overlay
+                    .set_position(text_x, text_y)
+                    .map_err(|e| media_pp::Error::Other(e.to_string()))?;
+                println!("text position: ({text_x}, {text_y})");
+            }
+            Ok(TerminalCommand::Quit) => break,
+            Err(RecvTimeoutError::Timeout) => {
+                let elapsed_seconds = started.elapsed().as_secs().min(seconds);
+                if elapsed_seconds > 0 && started.elapsed() >= next_text_update {
+                    overlay
+                        .set_text(&format!("t={elapsed_seconds}s"))
+                        .map_err(|e| media_pp::Error::Other(e.to_string()))?;
+                    next_text_update = Duration::from_secs(elapsed_seconds.saturating_add(1));
+                }
+            }
+            Err(RecvTimeoutError::Disconnected) => terminal_connected = false,
+        }
     }
 
     background_pipeline.stop();
@@ -168,4 +220,65 @@ fn main() -> media_pp::Result<()> {
 
     println!("wrote {path}");
     Ok(())
+}
+
+fn terminal_commands() -> mpsc::Receiver<TerminalCommand> {
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let input = match unsafe { GetStdHandle(STD_INPUT_HANDLE) } {
+            Ok(input) => input,
+            Err(error) => {
+                eprintln!("terminal controls unavailable: {error}");
+                return;
+            }
+        };
+
+        loop {
+            let mut record = INPUT_RECORD::default();
+            let mut read = 0;
+            if let Err(error) =
+                unsafe { ReadConsoleInputW(input, std::slice::from_mut(&mut record), &mut read) }
+            {
+                // stdin may be redirected or detached in CI. Recording still
+                // follows its requested duration; only live controls are absent.
+                let _ = error;
+                return;
+            }
+            if read == 0 || u32::from(record.EventType) != KEY_EVENT {
+                continue;
+            }
+
+            // `EventType == KEY_EVENT` makes the matching union field active.
+            let key = unsafe { record.Event.KeyEvent };
+            if !key.bKeyDown.as_bool() {
+                continue;
+            }
+
+            let command = match key.wVirtualKeyCode {
+                0x25 => Some(TerminalCommand::Move {
+                    dx: -MOVE_STEP,
+                    dy: 0,
+                }),
+                0x26 => Some(TerminalCommand::Move {
+                    dx: 0,
+                    dy: -MOVE_STEP,
+                }),
+                0x27 => Some(TerminalCommand::Move {
+                    dx: MOVE_STEP,
+                    dy: 0,
+                }),
+                0x28 => Some(TerminalCommand::Move {
+                    dx: 0,
+                    dy: MOVE_STEP,
+                }),
+                0x51 => Some(TerminalCommand::Quit),
+                _ => None,
+            };
+
+            if command.is_some_and(|command| sender.send(command).is_err()) {
+                return;
+            }
+        }
+    });
+    receiver
 }

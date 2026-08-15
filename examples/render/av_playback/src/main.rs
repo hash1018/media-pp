@@ -34,6 +34,8 @@ use winit::{
 ///     cargo run -p av_playback -- path/to/video-with-audio.mp4
 ///     audio on
 ///     audio off
+///     pause
+///     resume
 ///     seek 30
 ///     seek 1:15
 ///     q
@@ -235,6 +237,14 @@ fn read_commands(
                     Err(error) => eprintln!("could not disable audio: {error}"),
                 }
             }
+            ["pause"] => {
+                pipeline.pause();
+                println!("paused");
+            }
+            ["resume"] => {
+                pipeline.resume();
+                println!("resumed");
+            }
             ["seek", target] => match parse_timestamp(target) {
                 Some(target) => {
                     let clock = if audio_branch.is_some() {
@@ -295,6 +305,8 @@ fn print_help() {
     println!("commands:");
     println!("  audio on          attach the default WASAPI output");
     println!("  audio off         detach audio and keep video playing");
+    println!("  pause             pause playback");
+    println!("  resume            resume playback");
     println!("  seek <seconds>    seek, for example `seek 30` or `seek 1:15`");
     println!("  help              print this help");
     println!("  q                 stop playback");

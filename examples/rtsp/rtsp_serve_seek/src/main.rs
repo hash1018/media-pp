@@ -20,8 +20,7 @@ use media_pp::{
 ///
 ///     cargo run -p rtsp_serve_seek -- path/to/video.mp4 rtsp://127.0.0.1/stream
 ///     ffplay rtsp://127.0.0.1:8554/stream                    # in another terminal
-///     (then in the first terminal: type `30` or `1:15` + Enter to jump
-///      there, or `q` + Enter to stop early)
+///     (then use `pause`, `resume`, `seek 30`, `seek 1:15`, or `q`)
 fn main() -> media_pp::Result<()> {
     media_pp::init()?;
 
@@ -112,8 +111,7 @@ fn main() -> media_pp::Result<()> {
 }
 
 fn read_seek_commands(pipeline: &Pipeline) {
-    println!("type a time in seconds (e.g. `30`) or mm:ss (e.g. `1:15`) + Enter to seek there");
-    println!("(or `q` + Enter to stop early)");
+    print_help();
     for line in io::stdin().lock().lines() {
         let Ok(line) = line else { break };
         let line = line.trim();
@@ -124,7 +122,22 @@ fn read_seek_commands(pipeline: &Pipeline) {
             pipeline.stop();
             break;
         }
-        match parse_timestamp(line) {
+        if line.eq_ignore_ascii_case("pause") {
+            pipeline.pause();
+            println!("paused");
+            continue;
+        }
+        if line.eq_ignore_ascii_case("resume") {
+            pipeline.resume();
+            println!("resumed");
+            continue;
+        }
+        if line.eq_ignore_ascii_case("help") {
+            print_help();
+            continue;
+        }
+        let value = line.strip_prefix("seek ").unwrap_or(line).trim();
+        match parse_timestamp(value) {
             Some(target) => {
                 println!("seeking to {target:.2?}...");
                 pipeline.seek(target);
@@ -132,6 +145,15 @@ fn read_seek_commands(pipeline: &Pipeline) {
             None => eprintln!("couldn't parse {line:?} — use seconds (`30`) or mm:ss (`1:15`)"),
         }
     }
+}
+
+fn print_help() {
+    println!("commands:");
+    println!("  pause             pause publishing");
+    println!("  resume            resume publishing");
+    println!("  seek <seconds>    seek, for example `seek 30` or `seek 1:15`");
+    println!("  help              print this help");
+    println!("  q                 stop publishing");
 }
 
 /// `"90"` (plain seconds) or `"1:30"` (mm:ss) -> `Duration`. Fractional
