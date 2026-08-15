@@ -2,10 +2,15 @@
 name = "media-pp"
 version = "0.1.0"
 edition = "2024"
+# Verified with `cargo +1.88 check` across every feature. Edition 2024 alone
+# needs only 1.85; 1.88 is the highest MSRV among the resolved dependencies.
+rust-version = "1.88"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/hash1018/media-pp"
 readme = "../README.md"
 description = "A small, GStreamer-flavored media pipeline library built on FFmpeg."
+keywords = ["ffmpeg", "video", "audio", "pipeline", "streaming"]
+categories = ["multimedia::video", "multimedia::audio", "multimedia::encoding"]
 
 [dependencies]
 ffmpeg-next = "8"
