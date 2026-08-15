@@ -34,5 +34,6 @@ pub(crate) fn try_test_video() -> Option<String> {
         eprintln!("skipping: MEDIA_PP_TEST_VIDEO=`{path}` is not a readable file");
         return None;
     }
+    eprintln!("using test video: {path}");
     Some(path)
 }
