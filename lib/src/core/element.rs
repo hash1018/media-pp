@@ -115,6 +115,15 @@ pub fn element_pp_log(element_type: ElementType, name: &str, pipeline_id: Option
     PpLog::new(&format!("{element_type:?}"), name, pipeline_id)
 }
 
+/// Builds the [`PpLog`] used for records a [`crate::pipeline::Pipeline`]
+/// emits about itself rather than about any one element — `run` and the
+/// `topology` diagram. A pipeline is not a graph node and so has no
+/// [`ElementType`]; its instance name is its own id. Kept here next to
+/// [`element_pp_log`] so the literal element name appears exactly once.
+pub(crate) fn pipeline_pp_log(pipeline_id: &str) -> PpLog {
+    PpLog::new("Pipeline", pipeline_id, Some(pipeline_id))
+}
+
 /// Everything a [`crate::pipeline::ChainBuilder`]/[`crate::elements::Tee`]
 /// needs to wire itself into a [`crate::pipeline::Pipeline`] — bundled into
 /// one `Arc` instead of threading `bus`/`pipeline_id`/`graph`/the wall and

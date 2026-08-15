@@ -12,10 +12,12 @@ use std::{
     path::PathBuf,
     sync::{
         Arc, Mutex, OnceLock,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
+    thread,
 };
 
+use arc_swap::ArcSwapOption;
 use thiserror::Error as ThisError;
 use time::OffsetDateTime;
 use tracing_appender::{
@@ -29,6 +31,27 @@ const BUFFERED_LINES_LIMIT: usize = 4096;
 
 static LOGGER: OnceLock<PrivateLogger> = OnceLock::new();
 static INIT_LOCK: Mutex<()> = Mutex::new(());
+static NEXT_THREAD_NUMBER: AtomicU64 = AtomicU64::new(1);
+
+thread_local! {
+    /// Built once per thread, on that thread's first record. Formatting it
+    /// per record would mean a `thread::current()` handle clone and a
+    /// `String` build on every line, and the value never changes.
+    static THREAD_TAG: String = thread_tag();
+}
+
+/// Numbers threads in the order they first log, in the `name#number` shape
+/// the topology diagram already uses for elements. A thread name alone does
+/// not identify a thread — a pipeline with two sources has two threads both
+/// named `pipeline:source` — and `ThreadId`'s own value is not readable on
+/// stable Rust, so the number is assigned here.
+fn thread_tag() -> String {
+    let number = NEXT_THREAD_NUMBER.fetch_add(1, Ordering::Relaxed);
+    match thread::current().name() {
+        Some(name) => format!("{name}#{number}"),
+        None => format!("#{number}"),
+    }
+}
 
 /// Severity threshold for the private `media-pp` file logger.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -69,11 +92,26 @@ pub enum LogInitError {
 
 /// Owns the private logging worker installed by [`init`].
 ///
-/// Keep this value alive for as long as logging should remain active. Dropping
-/// it first disables new records, then flushes queued records and joins the
-/// worker. It is deliberately not stored in a static because Rust does not drop
-/// static values at process exit, which would make final-record flushing
-/// unreliable.
+/// Keep this value alive for as long as logging should remain active.
+///
+/// Dropping it rejects log calls that begin afterwards. A record already being
+/// emitted concurrently may complete or be discarded — the guard does not join
+/// the worker thread, the same trade the lossy writer already makes on a full
+/// queue.
+///
+/// The final flush is attempted, not promised. The drop asks [`WorkerGuard`] to
+/// shut the worker down, which enqueues a shutdown message on the same bounded
+/// channel the records use — waiting at most 100ms — and then waits at most one
+/// second for the worker's acknowledgement, sent only after it has flushed
+/// everything already queued. So under normal conditions queued records do reach
+/// the file, but a file writer stalled long enough to keep that channel full
+/// makes the drop give up and return with records still queued. On that path
+/// `tracing-appender` also prints one line to the process's stdout, which this
+/// crate cannot suppress. The worker still terminates and flushes on its own
+/// afterwards (see this type's `Drop`), just with nothing waiting for it.
+///
+/// It is deliberately not stored in a static because Rust does not drop static
+/// values at process exit, which would make even that attempt impossible.
 pub struct LogGuard {
     active: Arc<AtomicBool>,
     error_counter: ErrorCounter,
@@ -91,6 +129,18 @@ impl LogGuard {
 impl Drop for LogGuard {
     fn drop(&mut self) {
         self.active.store(false, Ordering::Release);
+        // Release this process-wide writer *before* running the worker
+        // guard. That guard gets 100ms to enqueue its shutdown message on
+        // the same bounded channel the records use; a stalled file writer
+        // can make that time out. While the static still held a sender the
+        // worker could then never observe a disconnect either, and would
+        // outlive this guard for the rest of the process. Dropping ours
+        // first leaves the worker guard's own sender as the last one, so
+        // that path terminates the worker through disconnect instead —
+        // after it drains and flushes what is already queued.
+        if let Some(logger) = LOGGER.get() {
+            logger.writer.store(None);
+        }
         self.worker.take();
     }
 }
@@ -98,7 +148,11 @@ impl Drop for LogGuard {
 struct PrivateLogger {
     level: Level,
     active: Arc<AtomicBool>,
-    writer: NonBlocking,
+    /// Cleared by [`LogGuard::drop`], which is the only thing that makes the
+    /// worker's channel reach zero senders — this value lives in a `static`
+    /// that Rust never drops. See that `Drop` impl for why the worker's
+    /// termination depends on it.
+    writer: ArcSwapOption<NonBlocking>,
 }
 
 /// Starts the private `media-pp` file logger.
@@ -113,8 +167,15 @@ struct PrivateLogger {
 /// coexist with any logger installed by the embedding application.
 ///
 /// The returned [`LogGuard`] must be retained for as long as logging is needed.
-/// Dropping it flushes queued records and permanently stops this one-shot
-/// logger; a process cannot initialize it again.
+/// Dropping it permanently stops this one-shot logger and makes a bounded
+/// attempt to flush what is still queued; see [`LogGuard`] for what that does
+/// and does not promise. Initialization is per process, not per guard: a second
+/// call returns
+/// [`LogInitError::AlreadyInitialized`] whether or not the first guard is still
+/// alive, so an application cannot re-enable logging or move it to a different
+/// directory afterwards. Integration tests that need this logger therefore need
+/// one test binary each, since `cargo test` runs a binary's tests in one
+/// process.
 pub fn init(
     log_prefix: &str,
     log_path: &str,
@@ -152,7 +213,7 @@ pub fn init(
     let logger = PrivateLogger {
         level,
         active: active.clone(),
-        writer,
+        writer: ArcSwapOption::from_pointee(writer),
     };
     if LOGGER.set(logger).is_err() {
         return Err(LogInitError::AlreadyInitialized);
@@ -181,6 +242,9 @@ pub fn emit(level: Level, pp_log: &PpLog, args: fmt::Arguments<'_>) {
     if !logger.active.load(Ordering::Acquire) || level > logger.level {
         return;
     }
+    let Some(writer) = logger.writer.load_full() else {
+        return;
+    };
 
     // Build one complete line before calling `NonBlocking::write_all`.
     // `NonBlocking` treats each write as an independent queued message, so
@@ -190,6 +254,19 @@ pub fn emit(level: Level, pp_log: &PpLog, args: fmt::Arguments<'_>) {
     let mut line = String::with_capacity(256);
     write_timestamp(&mut line, timestamp);
     let _ = write!(line, " {level}");
+    // Ahead of the element identity, not between it and the message: a
+    // reader grepping for one element's records should get its message on
+    // the same match, and the thread is a property of the record's origin
+    // like the timestamp and level, not part of who the element is.
+    // `try_with` because a record emitted from a `Drop` running during
+    // thread teardown would find this thread-local already destroyed; the
+    // field still gets written so every record has the same shape.
+    let tagged = THREAD_TAG.try_with(|tag| {
+        let _ = write!(line, " [thread={tag}]");
+    });
+    if tagged.is_err() {
+        let _ = line.write_str(" [thread=?]");
+    }
     if let Some(pipeline_id) = pp_log.pipeline_id() {
         let _ = write!(line, " [pipeline_id={pipeline_id}]");
     }
@@ -202,7 +279,7 @@ pub fn emit(level: Level, pp_log: &PpLog, args: fmt::Arguments<'_>) {
     let _ = line.write_fmt(args);
     line.push('\n');
 
-    let mut writer = logger.writer.clone();
+    let mut writer = NonBlocking::clone(&writer);
     let _ = writer.write_all(line.as_bytes());
 }
 

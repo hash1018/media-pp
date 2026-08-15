@@ -59,7 +59,8 @@ documentation and implementation differ.
   caller-selected instance name as separate identity fields. Construct or
   update its `PpLog` through the existing pipeline helpers instead of packing
   identity into a free-form message. Use the stable graph element ID where a
-  topology must disambiguate duplicate names.
+  topology must disambiguate duplicate names. The originating thread is a
+  record field the logger writes itself; never fold a thread id into a message.
 - Keep levels intentional: `Error` for failed operations, `Warn` for degraded
   or recoverable conditions, `Info` for sparse lifecycle and topology changes,
   `Debug` for diagnostic state, and `Trace` for detailed EOS/control flow. Do

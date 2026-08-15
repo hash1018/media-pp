@@ -4,11 +4,10 @@ use crate::{
     bus::{Bus, BusReceiver},
     clock::Clock,
     control::{self, ControlReceiver, ControlSender},
-    element::{Context, SourceElement, element_pp_log},
+    element::{Context, SourceElement, element_pp_log, pipeline_pp_log},
     error::Result,
     graph::{ElementId, PipelineGraph},
     playback_clock::PlaybackClock,
-    pp_log::PpLog,
 };
 
 use super::Pipeline;
@@ -100,7 +99,7 @@ impl PipelineBuilder {
             "PipelineBuilder::build called with no sources added"
         );
         let (control_txs, control_rxs): (Vec<_>, Vec<_>) = self.control_pairs.into_iter().unzip();
-        let pp_log = PpLog::new("Pipeline", &self.id, Some(&self.id));
+        let pp_log = pipeline_pp_log(&self.id);
         Arc::new(Pipeline {
             id: self.id,
             pp_log,

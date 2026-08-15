@@ -218,6 +218,7 @@ impl SegmentGroup {
     ) -> Result<()> {
         let mut state = self.state.lock().unwrap();
         let SegmentPolicy::Duration(due_after) = self.policy;
+        let mut rotated_to = None;
         if state.segment_started.elapsed() >= due_after {
             let has_video = state.streams.iter().any(|s| s.is_video);
             let this_is_video = state.streams[track_index].is_video;
@@ -235,10 +236,18 @@ impl SegmentGroup {
                 state.current_sinks = open_segment(&state.streams, path)?;
                 state.segment_index = index;
                 state.segment_started = Instant::now();
-                pp_info!(pp_log: pp_log, "rotated segment_index={index}");
+                rotated_to = Some(index);
             }
         }
-        state.current_sinks[track_index].consume(MediaBuffer::Packet(packet))
+        let result = state.current_sinks[track_index].consume(MediaBuffer::Packet(packet));
+        // Formatting and emitting happen off the group lock: every track's
+        // `consume_packet` contends for it, so nothing that isn't required
+        // to be serialized with the rotation belongs inside it.
+        drop(state);
+        if let Some(index) = rotated_to {
+            pp_info!(pp_log: pp_log, "rotated segment_index={index}");
+        }
+        result
     }
 
     /// One track's own natural `Eos` — forwarded into whatever segment is

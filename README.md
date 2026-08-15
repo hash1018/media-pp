@@ -243,23 +243,46 @@ let _log_guard = media_pp::log::init(
 )?;
 ```
 
-Keep the returned `LogGuard` alive while logging is needed. Dropping it disables
-new records, flushes the bounded non-blocking writer, and joins its worker.
-`media_pp` records never enter the embedding application's logger, and the
-application's records never enter these files. If the writer's 4096-line queue
-fills, it drops new records instead of blocking a media thread;
-`LogGuard::dropped_lines()` reports how many were dropped.
+Keep the returned `LogGuard` alive while logging is needed. `media_pp` records
+never enter the embedding application's logger, and the application's records
+never enter these files. If the writer's 4096-line queue fills, it drops new
+records instead of blocking a media thread; `LogGuard::dropped_lines()` reports
+how many were dropped.
+
+Dropping the guard permanently rejects log calls that begin afterwards — a record
+already being emitted on another thread may still complete — and makes a
+*bounded* attempt to flush what is still queued: at most 100 ms to hand the
+worker a shutdown message, then
+at most one second for it to report back that it has drained. That is enough
+whenever the log file is writable at normal speed, but a stalled writer that
+keeps the queue full will make the drop return with records still unwritten (and
+`tracing-appender` prints one line to stdout on that path, which this crate
+cannot suppress). If final records matter, drop the guard before anything else
+that could saturate the queue, and check `dropped_lines()`.
+
+`init` succeeds at most once per process. A second call returns
+`LogInitError::AlreadyInitialized` even after the first `LogGuard` has been
+dropped, so the log directory and level are chosen once at startup and logging
+cannot be re-enabled later. Anything needing this logger under `cargo test`
+consequently needs its own integration-test file, because one test binary is one
+process.
 
 Each record uses explicit identity fields so it can be read without parsing a
 compressed target string:
 
 ```text
-2026-08-15T15:52:24.068+09:00 INFO [pipeline_id=app-sink] [element=FileDemuxer] [name=demux] started
+2026-08-15T15:52:24.068+09:00 INFO [thread=pipeline:source#2] [pipeline_id=app-sink] [element=FileDemuxer] [name=demux] started
 ```
 
 Records emitted before an element is attached to a pipeline omit only the
 `pipeline_id` field. Timestamps use local time with a numeric UTC offset and
 millisecond precision.
+
+`thread` names the thread the record came from, numbered in the order threads
+first log so that a pipeline's two `pipeline:source` threads stay distinguishable.
+It sits ahead of the identity fields deliberately: `[element=…] [name=…]` and the
+message remain adjacent, so grepping for one element's records still returns what
+that element said.
 
 When a pipeline starts, it records `run` followed by one pad-aware flow diagram
 at `Info`. Stable element IDs distinguish different elements that happen to
@@ -267,8 +290,8 @@ share a name, while each downstream connector begins under its upstream
 element so fan-out remains visually clear:
 
 ```text
-INFO [pipeline_id=app-sink] [element=Pipeline] [name=app-sink] run
-INFO [pipeline_id=app-sink] [element=Pipeline] [name=app-sink] topology
+INFO [thread=main#1] [pipeline_id=app-sink] [element=Pipeline] [name=app-sink] run
+INFO [thread=main#1] [pipeline_id=app-sink] [element=Pipeline] [name=app-sink] topology
 FileDemuxer(demux)#1
 └── [src_0] → Tee(tee)#2
               ├── [tee_src0] → AppSink(preview)#3

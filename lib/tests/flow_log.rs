@@ -83,5 +83,34 @@ fn pipeline_logs_topology_eos_and_control_at_each_boundary() {
     assert!(contents.contains("[element=Queue] [name=queue] event=eos phase=completed outcome=ok"));
     assert!(contents.contains("[element=AppSink] [name=sink] event=eos phase=received"));
 
+    // EOS crosses a `Queue`, so the record the source emits sending it and
+    // the record the sink emits receiving it must name different threads —
+    // that difference is the only reason the field exists.
+    let sending_thread = thread_of(
+        &contents,
+        "[element=AppSource] [name=source] event=eos phase=sending",
+    );
+    let receiving_thread = thread_of(
+        &contents,
+        "[element=AppSink] [name=sink] event=eos phase=received",
+    );
+    assert!(sending_thread.starts_with("pipeline:source#"));
+    assert!(receiving_thread.starts_with("queue:queue#"));
+
     fs::remove_dir_all(log_dir).expect("temporary log directory must be removable");
+}
+
+/// Reads the `[thread=…]` value off the one record containing `marker`.
+fn thread_of(contents: &str, marker: &str) -> String {
+    let line = contents
+        .lines()
+        .find(|line| line.contains(marker))
+        .unwrap_or_else(|| panic!("no record matched `{marker}`"));
+    let (_, after) = line
+        .split_once("[thread=")
+        .expect("every record carries a thread field");
+    let (tag, _) = after
+        .split_once(']')
+        .expect("the thread field must be closed");
+    tag.to_owned()
 }

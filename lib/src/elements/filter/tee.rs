@@ -9,7 +9,7 @@ use crate::{
     buffer::MediaBuffer,
     bus::BusEvent,
     control::ControlMsg,
-    element::{Context, Element, ElementType, Sink, element_pp_log},
+    element::{Context, Element, ElementType, Sink, element_pp_log, pipeline_pp_log},
     error::Result,
     graph::{BranchId, ElementId, GraphError, PlannedEdge, PortRef, log_topology},
     pad::SrcPad,
@@ -84,6 +84,10 @@ pub struct TeeBuilder {
 pub struct TeeHandle {
     id: ElementId,
     name: Arc<str>,
+    /// The same identity the `Tee` element logs under, cloned once at
+    /// construction — attach/detach must not rebuild it per call, and the
+    /// handle must not be able to disagree with the element about it.
+    pp_log: PpLog,
     shared: Weak<TeeShared>,
 }
 
@@ -102,12 +106,13 @@ impl Tee {
             Self {
                 id,
                 name: name.clone(),
-                pp_log,
+                pp_log: pp_log.clone(),
                 shared: shared.clone(),
             },
             TeeHandle {
                 id,
                 name,
+                pp_log,
                 shared: Arc::downgrade(&shared),
             },
         )
@@ -264,18 +269,8 @@ impl TeeHandle {
             crate::log::enabled(crate::log::Level::Info).then(|| shared.context.graph.snapshot());
         drop(branches);
         if let Some(snapshot) = snapshot {
-            let pp_log = element_pp_log(
-                ElementType::Tee,
-                &self.name,
-                Some(&shared.context.pipeline_id),
-            );
-            pp_info!(pp_log: &pp_log, "attach");
-            let pipeline_pp_log = PpLog::new(
-                "Pipeline",
-                &shared.context.pipeline_id,
-                Some(&shared.context.pipeline_id),
-            );
-            log_topology(&pipeline_pp_log, &snapshot);
+            pp_info!(pp_log: &self.pp_log, "attach");
+            log_topology(&pipeline_pp_log(&shared.context.pipeline_id), &snapshot);
         }
         Ok(branch_id)
     }
@@ -308,18 +303,8 @@ impl TeeHandle {
         // to inspect the graph or call back into Tee without deadlocking.
         drop(removed);
         if let Some(snapshot) = snapshot {
-            let pp_log = element_pp_log(
-                ElementType::Tee,
-                &self.name,
-                Some(&shared.context.pipeline_id),
-            );
-            pp_info!(pp_log: &pp_log, "detach");
-            let pipeline_pp_log = PpLog::new(
-                "Pipeline",
-                &shared.context.pipeline_id,
-                Some(&shared.context.pipeline_id),
-            );
-            log_topology(&pipeline_pp_log, &snapshot);
+            pp_info!(pp_log: &self.pp_log, "detach");
+            log_topology(&pipeline_pp_log(&shared.context.pipeline_id), &snapshot);
         }
         Ok(())
     }
