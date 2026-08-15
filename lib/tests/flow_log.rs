@@ -58,9 +58,11 @@ fn pipeline_logs_topology_eos_and_control_at_each_boundary() {
         .expect("the rolling appender must create a log file");
     let contents = fs::read_to_string(log_file).expect("log file must contain UTF-8 text");
 
-    assert!(contents.contains("[element=Pipeline] [name=flow-test] run"));
+    // One record, not two: the `Queue` worker started by this very `run()`
+    // is already free to log, so a separate diagram record would only
+    // usually follow the `run` that produced it.
     assert!(contents.contains(concat!(
-        "[element=Pipeline] [name=flow-test] topology\n",
+        "[element=Pipeline] [name=flow-test] run\n",
         "AppSource(source)#1\n",
         "└── [source_src] → Queue(queue)#2\n",
         "                   └── [queue_src] → AppSink(sink)#3",

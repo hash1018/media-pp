@@ -110,9 +110,9 @@ pub struct Pipeline {
 }
 
 impl Pipeline {
-    /// `id` names this pipeline — stamped as the source's own `pp_log`
-    /// sub_id right away, and folded into the [`Context`] handed to `wire`
-    /// (see [`super::ChainBuilder`]'s own docs).
+    /// `id` names this pipeline — stamped into the source's own `pp_log` as
+    /// its `pipeline_id` right away, and folded into the [`Context`] handed
+    /// to `wire` (see [`super::ChainBuilder`]'s own docs).
     ///
     /// `wire` is called once with the freshly created source and a
     /// [`Context`] bundling this pipeline's `Bus`, `id`, [`PipelineGraph`]
@@ -198,9 +198,7 @@ impl Pipeline {
         };
 
         if crate::log::enabled(crate::log::Level::Info) {
-            let snapshot = self.graph();
-            pp_info!(pp_log: &self.pp_log, "run");
-            log_topology(&self.pp_log, &snapshot);
+            log_topology(&self.pp_log, "run", &self.graph());
         }
         self.running.store(sources.len(), Ordering::Release);
         for ((source_id, source), control_rx) in sources.into_iter().zip(control_rxs) {

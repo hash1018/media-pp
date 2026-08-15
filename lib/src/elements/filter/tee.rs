@@ -9,7 +9,7 @@ use crate::{
     buffer::MediaBuffer,
     bus::BusEvent,
     control::ControlMsg,
-    element::{Context, Element, ElementType, Sink, element_pp_log, pipeline_pp_log},
+    element::{Context, Element, ElementType, Sink, element_pp_log},
     error::Result,
     graph::{BranchId, ElementId, GraphError, PlannedEdge, PortRef, log_topology},
     pad::SrcPad,
@@ -269,8 +269,7 @@ impl TeeHandle {
             crate::log::enabled(crate::log::Level::Info).then(|| shared.context.graph.snapshot());
         drop(branches);
         if let Some(snapshot) = snapshot {
-            pp_info!(pp_log: &self.pp_log, "attach");
-            log_topology(&pipeline_pp_log(&shared.context.pipeline_id), &snapshot);
+            log_topology(&self.pp_log, "attach", &snapshot);
         }
         Ok(branch_id)
     }
@@ -303,8 +302,7 @@ impl TeeHandle {
         // to inspect the graph or call back into Tee without deadlocking.
         drop(removed);
         if let Some(snapshot) = snapshot {
-            pp_info!(pp_log: &self.pp_log, "detach");
-            log_topology(&pipeline_pp_log(&shared.context.pipeline_id), &snapshot);
+            log_topology(&self.pp_log, "detach", &snapshot);
         }
         Ok(())
     }

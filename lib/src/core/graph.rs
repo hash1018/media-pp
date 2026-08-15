@@ -211,14 +211,19 @@ impl GraphSnapshot {
     }
 }
 
-/// Emits the whole topology as one non-blocking writer record. Embedded lines
-/// cannot interleave with another record because the private logger queues the
-/// completed message with a single write.
-pub(crate) fn log_topology(pp_log: &PpLog, snapshot: &GraphSnapshot) {
+/// Emits `event` and the topology it produced as **one** record: the event
+/// word on the header line, the diagram in the body.
+///
+/// They cannot be two records. The private logger queues each `write_all`
+/// separately, so only the lines inside a single record are guaranteed to stay
+/// together — any live thread (a `Queue` worker this very call just started,
+/// say) can write between two of them. Emitting the diagram separately would
+/// mean it is merely *usually* adjacent to the event that caused it.
+pub(crate) fn log_topology(pp_log: &PpLog, event: &str, snapshot: &GraphSnapshot) {
     if !enabled(Level::Info) {
         return;
     }
-    pp_info!(pp_log: pp_log, "topology\n{}", snapshot.topology_diagram());
+    pp_info!(pp_log: pp_log, "{event}\n{}", snapshot.topology_diagram());
 }
 
 #[derive(Debug, ThisError, PartialEq, Eq)]

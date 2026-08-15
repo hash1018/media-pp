@@ -81,13 +81,12 @@ impl Bus {
 
     /// `pp_log` is the posting element's own [`crate::element::Element::pp_log`]
     /// — used (via `crate::pp_log`'s `pp_log:` macro form) instead of `event`'s
-    /// own `name` so a real `sub_id`, if that element's `PpLog` was built
-    /// with one, actually reaches the log line.
+    /// own `name` so the element's full identity, pipeline id included, reaches
+    /// the log record rather than just the name carried in the event.
     pub fn post(&self, pp_log: &PpLog, event: BusEvent) {
-        // `log`'s own facade already no-ops (skipping the `format!` too)
-        // when nothing has called `crate::log::init` — same reasoning as
-        // the old hand-rolled check this replaced, just built into `log`
-        // itself instead of written here.
+        // Each `pp_*` macro checks `crate::log::enabled` before evaluating its
+        // arguments, so posting to a bus nobody is logging costs no `format!`
+        // — no hand-rolled check needed here.
         match &event {
             BusEvent::Eos { .. } => {
                 pp_info!(pp_log: pp_log, "event=eos phase=reported")

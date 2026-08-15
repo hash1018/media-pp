@@ -284,22 +284,28 @@ It sits ahead of the identity fields deliberately: `[element=…] [name=…]` an
 message remain adjacent, so grepping for one element's records still returns what
 that element said.
 
-When a pipeline starts, it records `run` followed by one pad-aware flow diagram
-at `Info`. Stable element IDs distinguish different elements that happen to
-share a name, while each downstream connector begins under its upstream
-element so fan-out remains visually clear:
+When a pipeline starts it writes one `Info` record whose body is a pad-aware
+flow diagram of the graph it just started. Stable element IDs distinguish
+different elements that happen to share a name, while each downstream connector
+begins under its upstream element so fan-out remains visually clear:
 
 ```text
 INFO [thread=main#1] [pipeline_id=app-sink] [element=Pipeline] [name=app-sink] run
-INFO [thread=main#1] [pipeline_id=app-sink] [element=Pipeline] [name=app-sink] topology
 FileDemuxer(demux)#1
 └── [src_0] → Tee(tee)#2
               ├── [tee_src0] → AppSink(preview)#3
               └── [tee_src1] → AppSink(record)#4
 ```
 
-A successful runtime `Tee` change records `attach` or `detach`, followed by the
-complete updated flow diagram. EOS and control messages use `Trace` records at
+The diagram shares the event's record rather than following it as a second one.
+Only the lines within a single record are guaranteed to stay together — a
+`Queue` worker that `run()` itself just started can write in between two records
+— so a separate diagram would merely tend to sit next to the event that caused
+it.
+
+A runtime `Tee` change writes the same kind of record under the `Tee`'s own
+identity, with `attach` or `detach` in place of `run` and the updated diagram as
+its body. EOS and control messages use `Trace` records at
 every element boundary with explicit phases (`sending`/`sent`,
 `requested`/`received`/`forwarding`/`completed`). Ordinary video, audio, and
 packet buffers are not logged per buffer.

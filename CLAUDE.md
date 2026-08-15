@@ -65,9 +65,12 @@ documentation and implementation differ.
   or recoverable conditions, `Info` for sparse lifecycle and topology changes,
   `Debug` for diagnostic state, and `Trace` for detailed EOS/control flow. Do
   not log ordinary video, audio, or packet buffers one record per buffer.
-- A successful pipeline start logs `run`, followed immediately by one complete
-  multiline `topology` record. A successful dynamic `Tee` change logs only
-  `attach` or `detach`, followed by the complete updated topology. The diagram
+- A successful pipeline start logs one `run` record whose body is the complete
+  multiline topology diagram; a successful dynamic `Tee` change logs the same
+  kind of record under the `Tee`'s own identity, with `attach` or `detach` in
+  place of `run`. Keep the diagram inside the event's own record — only lines
+  within one record are guaranteed to stay adjacent, so a separate diagram
+  record would merely tend to follow the event that caused it. The diagram
   shows stable `#id` values and source-pad labels; align each downstream
   connector under its upstream element so fan-out is visible at the actual
   branching point. Do not replace it with repeated root-to-leaf paths or add

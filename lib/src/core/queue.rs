@@ -171,8 +171,8 @@ impl Queue {
     /// [`crate::pipeline::Pipeline`]'s own id — see
     /// [`crate::pipeline::ChainBuilder`], which is what actually passes
     /// one when this `Queue` came from a `.queue()`/`.queue_with_policy()`
-    /// call) becomes this `Queue`'s `pp_log` sub_id; `None` if it wasn't
-    /// built through a `Pipeline` at all (e.g. the tests below).
+    /// call) becomes this `Queue`'s `pp_log` `pipeline_id`; `None` if it
+    /// wasn't built through a `Pipeline` at all (e.g. the tests below).
     pub fn spawn_with_policy(
         name: impl Into<String>,
         capacity: usize,
