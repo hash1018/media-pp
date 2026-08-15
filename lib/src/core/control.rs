@@ -107,7 +107,7 @@ impl ControlReceiver {
 /// `Resume` pair. A source built on wall-clock scheduling (an elapsed-time
 /// budget like [`crate::elements::TestAudioSource`]/
 /// [`crate::elements::AudioMixer`], or an absolute next-tick deadline like
-/// [`crate::elements::TestVideoSource`]/[`crate::elements::DxgiCaptureSource`])
+/// [`crate::elements::TestVideoSource`]/`DxgiCaptureSource`)
 /// has to fold `paused_for` back into its own schedule after every
 /// [`drain_control`] call — real (`Instant`) time keeps moving during a
 /// `Pause`, but the media timeline must not, or `Resume` would look like a
@@ -123,7 +123,7 @@ pub struct ControlOutcome {
     /// `Stop`) cascade during this call — `Duration::ZERO` if no `Pause`
     /// was seen. Still meaningful
     /// even when `stopped` is `true` (the sender simply going away while
-    /// paused is treated the same as `Stop`, see [`wait_out_pause`]), so a
+    /// paused is treated the same as `Stop`, see `wait_out_pause`), so a
     /// caller that also tracks its own paused-time total can fold this in
     /// unconditionally rather than only on the non-stopped path.
     pub paused_for: Duration,
@@ -143,7 +143,7 @@ pub struct ControlOutcome {
 /// [`crate::elements::AppSource`]'s channel receive) selects on both
 /// instead, calling `apply_one`/`wait_out_pause` directly so a
 /// pending `Stop` is never left waiting behind a slow/absent producer —
-/// same reason [`crate::elements::WasapiCaptureSource`] also drives the
+/// same reason `WasapiCaptureSource` also drives the
 /// raw receiver directly, to bracket the wait with resetting/restarting
 /// its capture device rather than leaving it running unread through the
 /// whole pause.

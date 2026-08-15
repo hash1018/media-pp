@@ -335,7 +335,8 @@ impl Pipeline {
     /// Signals the clock's interrupt epoch before starting the synchronous
     /// cascade so a `Pacer` in a long wait can return its worker promptly.
     /// The clock's playback anchor is still reset later, inside
-    /// [`crate::elements::Pacer::control`], after that in-flight frame is
+    /// [`Sink::control`](crate::element::Sink::control) on `Pacer`, after
+    /// that in-flight frame is
     /// out of the way.
     ///
     /// A source that doesn't support seeking (e.g. a live capture) reports

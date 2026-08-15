@@ -8,7 +8,7 @@
 use crate::color::Color;
 
 /// Construction-time settings for one text layer, passed to
-/// [`crate::elements::D3d11VideoCompositorHandle::add_text_layer`] — the
+/// `D3d11VideoCompositorHandle::add_text_layer` — the
 /// text sibling of [`super::video_layer::VideoLayer`], which `add_source`
 /// takes the same way. `font_data` (raw TTF/OTF bytes; this crate bundles
 /// no font of its own) has no sane default, so — mirroring

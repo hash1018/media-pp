@@ -44,7 +44,7 @@ pub enum AudioMixerError {
 
 /// Construction-time options for [`AudioMixer::new`] — the mixer's fixed
 /// *output* format. Every input is resampled to match this on the way in
-/// (see [`InputBuffer::push`]); the mixer never adapts to whatever an
+/// (see `InputBuffer::push`); the mixer never adapts to whatever an
 /// input happens to produce.
 #[derive(Debug, Clone, Copy)]
 pub struct AudioMixerOptions {
@@ -287,7 +287,7 @@ impl Sink for MixerInputSink {
     /// not a passthrough. `Stop` removes this input immediately, same as
     /// [`MixerHandle::remove_source`]: `Stop` means abandon now, not drain
     /// to a natural `Eos` (see `ControlMsg::Stop`'s own docs), and for a
-    /// live capture source — [`crate::elements::WasapiCaptureSource`]
+    /// live capture source — `WasapiCaptureSource`
     /// included — `Stop` is the *only* shutdown signal that ever arrives;
     /// it never reaches `Eos` on its own. Relying on `Eos` alone to clean
     /// up (as an earlier version of this did) left a stale entry in
@@ -322,11 +322,11 @@ impl Sink for MixerInputSink {
 /// runs on) summed into one output. Unlike `Tee`, which is a passive
 /// [`Sink`] driven entirely by whatever calls `consume`, `AudioMixer` has
 /// to drive itself: it's a [`SourceElement`] with its own `run` thread,
-/// ticking every [`TICK_INTERVAL`] to sum however many samples each
+/// ticking every `TICK_INTERVAL` to sum however many samples each
 /// currently-attached input has ready — because mixing has to keep
 /// producing *something* on a steady clock even when some (or all) inputs
 /// have gone quiet, the same reason
-/// [`crate::elements::WasapiCaptureSource`] synthesizes silence for gaps
+/// `WasapiCaptureSource` synthesizes silence for gaps
 /// rather than just emitting nothing.
 ///
 /// Every input is resampled to this mixer's own fixed

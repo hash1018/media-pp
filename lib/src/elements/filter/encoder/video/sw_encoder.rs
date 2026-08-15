@@ -116,7 +116,7 @@ pub struct SwEncoderOptions {
     /// interval between `send_frame` calls. For a source with its own
     /// genuinely fixed rate (e.g. [`crate::elements::TestVideoSource`]),
     /// that's `TestVideoOptions::framerate` itself. For an irregular/VFR
-    /// source (e.g. [`crate::elements::DxgiCaptureSource`], whose frames
+    /// source (e.g. `DxgiCaptureSource`, whose frames
     /// arrive only on real desktop changes, capped but not paced to a
     /// fixed cadence), use its configured cap
     /// (`DxgiCaptureOptions::max_fps`) as the closest meaningful nominal
@@ -134,7 +134,7 @@ pub struct SwEncoderOptions {
     /// a second keyframe against smoothly-changing content — so this is
     /// always set explicitly rather than left to whatever a given codec
     /// happens to default to. Matters beyond segmenting a recording, too:
-    /// [`crate::elements::RtspSink`]/[`crate::elements::WebRtcTrackSink`]
+    /// [`crate::elements::RtspSink`]/`WebRtcTrackSink`
     /// viewers/peers joining mid-stream can't decode anything until the
     /// next keyframe, so an unbounded interval is a real join-latency
     /// problem, not just a segmenting one.

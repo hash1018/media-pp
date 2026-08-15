@@ -17,7 +17,7 @@ use crate::{
 ///
 /// Unlike a `(sample_rate, channels)` tuple, this also carries the sample
 /// representation and channel layout, so it can be passed directly from a
-/// hardware endpoint such as [`crate::elements::WasapiRenderer`] to an
+/// hardware endpoint such as `WasapiRenderer` to an
 /// [`AudioResampler`] without guessing either one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AudioFormat {

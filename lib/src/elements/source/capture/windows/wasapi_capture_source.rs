@@ -101,7 +101,7 @@ pub struct WasapiCaptureOptions {
 /// Emits continuously from the moment `run` starts, `pts` always in
 /// lockstep with wall-clock time — backed by real WASAPI data when it's
 /// available and synthesized silence otherwise (see
-/// [`WasapiCaptureSource::fill_silence_gap`]), since WASAPI itself
+/// `WasapiCaptureSource::fill_silence_gap`), since WASAPI itself
 /// delivers literally nothing whenever the render engine has no active
 /// session at all (e.g. nothing currently playing, for
 /// [`WasapiDeviceKind::Render`]). Without this, a quiet period would be a

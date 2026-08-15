@@ -13,7 +13,7 @@ use super::super::super::video_layer::{self, VideoLayer};
 /// Thread-safe runtime placement control for one [`super::D3d11VideoCompositor`]
 /// input — the GPU sibling of [`crate::elements::VideoLayerHandle`].
 ///
-/// Fields are `pub(super)` rather than fully private: [`super::D3d11VideoCompositorHandle::register_input`]
+/// Fields are `pub(super)` rather than fully private: `D3d11VideoCompositorHandle::register_input`
 /// (defined in the parent module) constructs and reads this struct
 /// directly rather than through a constructor function — a private
 /// struct-literal shortcut that's fine to keep since both live in the same

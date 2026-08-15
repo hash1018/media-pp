@@ -37,7 +37,7 @@ impl StopReceiver {
 /// A background task with no `Sink`/`Source` ports of its own — nothing to
 /// push into, nothing to pull out of *this* object; whatever it produces
 /// or consumes happens through other `Sink`/`Source` pairs it mints on the
-/// side (e.g. [`crate::elements::WebRtcPeer`] handing out
+/// side (e.g. `WebRtcPeer` handing out
 /// `WebRtcTrackSink`/`WebRtcTrackSource`). Reach for
 /// [`crate::pipeline::Pipeline`]/[`crate::element::SourceElement`] instead
 /// for anything that actually has a `src_pads()` dataflow graph to wire —

@@ -22,7 +22,7 @@ use crate::{
 #[derive(Debug, ThisError)]
 pub enum PacerError {
     /// `time_base` came from
-    /// [`crate::element::SourceElement::stream_time_base`]/an encoder's own
+    /// [`crate::elements::FileDemuxer::stream_time_base`]/an encoder's own
     /// time base — i.e. from a demuxed file or an otherwise externally
     /// supplied stream, not a value this crate controls. A malformed or
     /// unusual stream can legitimately have an invalid one.

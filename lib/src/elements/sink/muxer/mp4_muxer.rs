@@ -228,7 +228,7 @@ impl Mp4MuxerShared {
 }
 
 /// One track's own [`Sink`] — a lightweight handle sharing a
-/// [`Mp4MuxerShared`] with every other track [`Mp4Muxer::open`] returned
+/// `Mp4MuxerShared` with every other track [`Mp4Muxer::open`] returned
 /// alongside it. See [`Mp4Muxer::open`]'s own docs for the
 /// finalize-once-every-track-is-done contract this relies on.
 pub struct Mp4MuxerStreamSink {
