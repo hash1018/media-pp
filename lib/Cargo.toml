@@ -12,6 +12,23 @@ description = "A small, GStreamer-flavored media pipeline library built on FFmpe
 keywords = ["ffmpeg", "video", "audio", "pipeline", "streaming"]
 categories = ["multimedia::video", "multimedia::audio", "multimedia::encoding"]
 
+# There is no `default` feature set, so docs.rs would otherwise document only
+# the backend-independent core — every D3D11/D3D12/WASAPI/WebRTC element would
+# be missing from the published documentation. Documenting is not linking, so
+# building for a Windows target here is what makes the `cfg(windows)` items
+# appear. `ort` is left off deliberately: it would have docs.rs download ONNX
+# Runtime, and it is still a pre-release dependency.
+[package.metadata.docs.rs]
+features = [
+    "d3d11-renderer",
+    "d3d12-renderer",
+    "dxgi-capture",
+    "wasapi-capture",
+    "wasapi-renderer",
+    "webrtc",
+]
+targets = ["x86_64-pc-windows-msvc"]
+
 [dependencies]
 ffmpeg-next = "8"
 crossbeam-channel = "0.5"
