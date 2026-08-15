@@ -374,15 +374,14 @@ to `./logs`, and uses its Cargo package name as the file prefix.
   signaling server built in. `webrtc_loopback` turns it on in its own
   `Cargo.toml`.
 
-There is no `default` feature set, and the crate metadata restricts [docs.rs]
-to its native Linux target, so the published documentation covers only the
-backend-independent core — every `D3d11*`/`D3d12*`/WASAPI element is absent
-from it. Cross-compiling the Windows documentation there does not work because
-`ffmpeg-sys-next` resolves FFmpeg through pkg-config without a target sysroot.
-Build those docs locally on Windows instead:
+There is no `default` feature set. The [docs.rs] build enables the Windows
+backend features and targets Windows so their public types remain visible. Its
+Linux build host uses its installed FFmpeg metadata only to let
+`ffmpeg-sys-next` generate and type-check bindings; rustdoc does not link a
+Windows executable. To build the same API docs on Windows locally:
 
 ```sh
-cargo doc -p media-pp --open --features d3d11-renderer,d3d12-renderer,dxgi-capture,wasapi-capture,wasapi-renderer
+cargo doc -p media-pp --open --features d3d11-renderer,d3d12-renderer,dxgi-capture,wasapi-capture,wasapi-renderer,webrtc
 ```
 
 [docs.rs]: https://docs.rs/media-pp

@@ -1,6 +1,6 @@
 [package]
 name = "media-pp"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 # Verified with `cargo +1.88 check` across every feature. Edition 2024 alone
 # needs only 1.85; 1.88 is the highest MSRV among the resolved dependencies.
@@ -12,13 +12,22 @@ description = "A small, GStreamer-flavored media pipeline library built on FFmpe
 keywords = ["ffmpeg", "video", "audio", "pipeline", "streaming"]
 categories = ["multimedia::video", "multimedia::audio", "multimedia::encoding"]
 
-# Build only the native Linux target on docs.rs. Its other default tier-one
-# targets are cross-compiled, but `ffmpeg-sys-next` resolves FFmpeg through
-# pkg-config and cannot discover target libraries without a cross sysroot.
-# Windows-only backends are documented by building locally on Windows.
+# Generate the public Windows API on its real target. docs.rs runs on Linux,
+# but rustdoc does not link a final binary, so its host FFmpeg installation is
+# sufficient for ffmpeg-sys-next to generate/type-check bindings. The Cargo
+# config override is scoped to this docs.rs invocation only.
 [package.metadata.docs.rs]
-default-target = "x86_64-unknown-linux-gnu"
+features = [
+    "d3d11-renderer",
+    "d3d12-renderer",
+    "dxgi-capture",
+    "wasapi-capture",
+    "wasapi-renderer",
+    "webrtc",
+]
+default-target = "x86_64-pc-windows-msvc"
 targets = []
+cargo-args = ['--config=env.PKG_CONFIG_ALLOW_CROSS="1"']
 
 [dependencies]
 ffmpeg-next = "8"
