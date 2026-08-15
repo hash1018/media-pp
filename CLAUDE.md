@@ -43,7 +43,7 @@ documentation and implementation differ.
   processed. Avoid `try_for_each`, an unreviewed `?`, or an early return that
   turns one item's error into termination of the whole loop.
 - Attribute bus errors to the most specific failing element/branch available,
-  using the existing `HLog` and stable graph identity conventions.
+  using the existing `CLog` and stable graph identity conventions.
 - Plain control-plane objects that are not `Element`s have no bus identity;
   their operations should return a typed error directly to the caller.
 

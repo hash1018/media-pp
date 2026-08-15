@@ -1,14 +1,14 @@
 use std::{sync::Arc, time::Duration};
 
+use crate::clog::{CLog, cinfo};
 use crossbeam_channel::{Receiver, Sender, TrySendError, bounded, select};
-use rust_hlog::{HLog, hinfo};
 use thiserror::Error as ThisError;
 
 use crate::{
     buffer::MediaBuffer,
     bus::{Bus, BusEvent},
     control::{ControlMsg, ControlReceiver, apply_one, drain_control, wait_out_pause},
-    element::{Element, ElementType, Source, SourceElement, element_hlog},
+    element::{Element, ElementType, Source, SourceElement, element_clog},
     error::Result,
     pad::SrcPad,
 };
@@ -43,8 +43,8 @@ pub enum AppSourceError {
 /// Has no timeline of its own, so [`SourceElement::seek`] is a no-op that
 /// reports back whatever was requested as where it "landed" — nothing to
 /// reposition when the app, not a file offset, decides what comes next.
-#[rust_hlog::hlog]
 pub struct AppSource {
+    clog: CLog,
     name: Arc<str>,
     pad: SrcPad,
     data_rx: Receiver<MediaBuffer>,
@@ -65,14 +65,14 @@ impl AppSource {
     /// [`crate::queue::Queue`]'s own `capacity`.
     pub fn new(name: impl Into<String>, capacity: usize) -> (Self, AppSourceHandle) {
         let name: Arc<str> = name.into().into();
-        let hlog = element_hlog(ElementType::AppSource, &name, None);
-        hinfo!(hlog: &hlog, "created: capacity={capacity}");
+        let clog = element_clog(ElementType::AppSource, &name, None);
+        cinfo!(clog: &clog, "created: capacity={capacity}");
         let pad = SrcPad::new(format!("{name}_src"));
         let (data_tx, data_rx) = bounded(capacity);
         (
             Self {
                 name: name.clone(),
-                hlog,
+                clog,
                 pad,
                 data_rx,
             },
@@ -117,12 +117,12 @@ impl Element for AppSource {
         ElementType::AppSource
     }
 
-    fn hlog(&self) -> &HLog {
-        &self.hlog
+    fn clog(&self) -> &CLog {
+        &self.clog
     }
 
-    fn hlog_mut(&mut self) -> &mut HLog {
-        &mut self.hlog
+    fn clog_mut(&mut self) -> &mut CLog {
+        &mut self.clog
     }
 }
 
@@ -134,7 +134,7 @@ impl Source for AppSource {
 
 impl SourceElement for AppSource {
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
-        hinfo!(self, "run: starting");
+        cinfo!(self, "run: starting");
         loop {
             // Non-blocking first: if control is already backed up, clear
             // it before the `select!` below picks an arbitrary ready arm
@@ -142,7 +142,7 @@ impl SourceElement for AppSource {
             // this keeps `AppSource` consistent with every other
             // `SourceElement::run` calling `drain_control` per iteration).
             if drain_control(control, self, bus)?.stopped {
-                hinfo!(self, "run: stopped");
+                cinfo!(self, "run: stopped");
                 return Ok(());
             }
 
@@ -151,19 +151,19 @@ impl SourceElement for AppSource {
                     match req {
                         Ok(req) => {
                             if apply_one(self, bus, req.msg, &req.ack)? {
-                                hinfo!(self, "run: stopped");
+                                cinfo!(self, "run: stopped");
                                 return Ok(());
                             }
                             if req.msg == ControlMsg::Pause
                                 && wait_out_pause(control, self, bus)?
                             {
-                                hinfo!(self, "run: stopped");
+                                cinfo!(self, "run: stopped");
                                 return Ok(());
                             }
                         }
                         // The Pipeline itself is gone — nothing left to drive this.
                         Err(_) => {
-                            hinfo!(self, "run: control channel gone, ending");
+                            cinfo!(self, "run: control channel gone, ending");
                             return Ok(());
                         }
                     }
@@ -171,13 +171,13 @@ impl SourceElement for AppSource {
                 recv(self.data_rx) -> buf => {
                     match buf {
                         Ok(buf) if buf.is_eos() => {
-                            hinfo!(self, "run: reached eos");
+                            cinfo!(self, "run: reached eos");
                             break;
                         }
                         Ok(buf) => {
                             if let Err(error) = self.pad.push(buf) {
                                 bus.post(
-                                    &self.hlog,
+                                    &self.clog,
                                     BusEvent::Error {
                                         element_type: ElementType::AppSource,
                                         name: self.name.clone(),
@@ -188,7 +188,7 @@ impl SourceElement for AppSource {
                         }
                         // Every `AppSourceHandle` dropped without an explicit Eos.
                         Err(_) => {
-                            hinfo!(self, "run: every AppSourceHandle dropped, ending");
+                            cinfo!(self, "run: every AppSourceHandle dropped, ending");
                             break;
                         }
                     }
@@ -218,8 +218,8 @@ mod tests {
     use super::*;
     use crate::pipeline::Pipeline;
 
-    #[rust_hlog::hlog]
     struct CountingSink {
+        clog: CLog,
         count: Arc<AtomicUsize>,
     }
 
@@ -232,12 +232,12 @@ mod tests {
             ElementType::Other
         }
 
-        fn hlog(&self) -> &HLog {
-            &self.hlog
+        fn clog(&self) -> &CLog {
+            &self.clog
         }
 
-        fn hlog_mut(&mut self) -> &mut HLog {
-            &mut self.hlog
+        fn clog_mut(&mut self) -> &mut CLog {
+            &mut self.clog
         }
     }
 
@@ -261,7 +261,7 @@ mod tests {
     fn wire(source: AppSource, count: Arc<AtomicUsize>) -> Arc<Pipeline> {
         let sink = CountingSink {
             count,
-            hlog: element_hlog(ElementType::Other, "counter", None),
+            clog: element_clog(ElementType::Other, "counter", None),
         };
         Pipeline::new("test", source, |source, ctx| {
             let branch = ctx.branch().to(Box::new(sink))?;

@@ -6,8 +6,8 @@ use std::{
     time::Duration,
 };
 
+use crate::clog::{CLog, cerror, cinfo};
 use crossbeam_channel::{Receiver, Sender, TrySendError, select};
-use rust_hlog::{HLog, herror, hinfo};
 use str0m::{
     change::{SdpAnswer, SdpOffer},
     format::Codec,
@@ -18,7 +18,7 @@ use crate::{
     buffer::MediaBuffer,
     bus::{Bus, BusEvent},
     control::{ControlMsg, ControlReceiver, apply_one, drain_control, wait_out_pause},
-    element::{Element, ElementType, Sink, Source, SourceElement, element_hlog},
+    element::{Element, ElementType, Sink, Source, SourceElement, element_clog},
     error::Result,
     pad::SrcPad,
 };
@@ -112,8 +112,8 @@ impl WebRtcHandle {
 /// [`crate::elements::RtspServer`] or any other terminal sink.
 /// `consume()` only ever hands off to `WebRtcPeer::run`'s own thread via a
 /// channel send; the actual str0m write happens over there.
-#[rust_hlog::hlog]
 pub struct WebRtcTrackSink {
+    clog: CLog,
     id: TrackId,
     command_tx: Sender<Command>,
 }
@@ -123,7 +123,7 @@ impl WebRtcTrackSink {
         Self {
             id,
             command_tx,
-            hlog: element_hlog(
+            clog: element_clog(
                 ElementType::WebRtcPeer,
                 &format!("webrtc-track-{}", id.0),
                 None,
@@ -141,12 +141,12 @@ impl Element for WebRtcTrackSink {
         ElementType::WebRtcPeer
     }
 
-    fn hlog(&self) -> &HLog {
-        &self.hlog
+    fn clog(&self) -> &CLog {
+        &self.clog
     }
 
-    fn hlog_mut(&mut self) -> &mut HLog {
-        &mut self.hlog
+    fn clog_mut(&mut self) -> &mut CLog {
+        &mut self.clog
     }
 }
 
@@ -158,7 +158,7 @@ impl Sink for WebRtcTrackSink {
                 MediaBuffer::Audio(_) => "Audio",
                 MediaBuffer::Packet(_) | MediaBuffer::Eos => unreachable!("matched above"),
             };
-            herror!(self, "unsupported buffer: {kind}");
+            cerror!(self, "unsupported buffer: {kind}");
             return Err(WebRtcError::UnsupportedBuffer(kind).into());
         }
         // `WebRtcPeer::run` gone (channel disconnected) means this track is
@@ -180,7 +180,7 @@ impl Sink for WebRtcTrackSink {
         match self.command_tx.try_send(Command::Push(self.id, buf)) {
             Ok(()) | Err(TrySendError::Full(_)) => Ok(()),
             Err(TrySendError::Disconnected(_)) => {
-                herror!(self, "WebRtcPeer::run gone — track is dead");
+                cerror!(self, "WebRtcPeer::run gone — track is dead");
                 Err(WebRtcError::Closed.into())
             }
         }
@@ -204,8 +204,8 @@ impl Sink for WebRtcTrackSink {
 /// code from `WebRtcPeer::run`'s own thread — that thread only ever touches
 /// this crate's own types (see the module docs for why `WebRtcPeer` hands
 /// tracks out through [`WebRtcHandle::next_track`] instead of a callback).
-#[rust_hlog::hlog]
 pub struct WebRtcTrackSource {
+    clog: CLog,
     name: Arc<str>,
     pad: SrcPad,
     data_rx: Receiver<MediaBuffer>,
@@ -219,11 +219,11 @@ impl WebRtcTrackSource {
         codec: Arc<Mutex<Option<Codec>>>,
     ) -> Self {
         let name: Arc<str> = name.into().into();
-        let hlog = element_hlog(ElementType::WebRtcPeer, &name, None);
+        let clog = element_clog(ElementType::WebRtcPeer, &name, None);
         let pad = SrcPad::new(format!("{name}_src"));
         Self {
             name,
-            hlog,
+            clog,
             pad,
             data_rx,
             codec,
@@ -255,12 +255,12 @@ impl Element for WebRtcTrackSource {
         ElementType::WebRtcPeer
     }
 
-    fn hlog(&self) -> &HLog {
-        &self.hlog
+    fn clog(&self) -> &CLog {
+        &self.clog
     }
 
-    fn hlog_mut(&mut self) -> &mut HLog {
-        &mut self.hlog
+    fn clog_mut(&mut self) -> &mut CLog {
+        &mut self.clog
     }
 }
 
@@ -279,10 +279,10 @@ impl SourceElement for WebRtcTrackSource {
     /// ends when every `AppSourceHandle` is dropped: one final `Eos`, no
     /// error.
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
-        hinfo!(self, "run: starting");
+        cinfo!(self, "run: starting");
         loop {
             if drain_control(control, self, bus)?.stopped {
-                hinfo!(self, "run: stopped");
+                cinfo!(self, "run: stopped");
                 return Ok(());
             }
 
@@ -291,19 +291,19 @@ impl SourceElement for WebRtcTrackSource {
                     match req {
                         Ok(req) => {
                             if apply_one(self, bus, req.msg, &req.ack)? {
-                                hinfo!(self, "run: stopped");
+                                cinfo!(self, "run: stopped");
                                 return Ok(());
                             }
                             if req.msg == ControlMsg::Pause
                                 && wait_out_pause(control, self, bus)?
                             {
-                                hinfo!(self, "run: stopped");
+                                cinfo!(self, "run: stopped");
                                 return Ok(());
                             }
                         }
                         // The Pipeline itself is gone — nothing left to drive this.
                         Err(_) => {
-                            hinfo!(self, "run: control channel gone, ending");
+                            cinfo!(self, "run: control channel gone, ending");
                             return Ok(());
                         }
                     }
@@ -311,13 +311,13 @@ impl SourceElement for WebRtcTrackSource {
                 recv(self.data_rx) -> buf => {
                     match buf {
                         Ok(buf) if buf.is_eos() => {
-                            hinfo!(self, "run: reached eos");
+                            cinfo!(self, "run: reached eos");
                             break;
                         }
                         Ok(buf) => {
                             if let Err(error) = self.pad.push(buf) {
                                 bus.post(
-                                    &self.hlog,
+                                    &self.clog,
                                     BusEvent::Error {
                                         element_type: ElementType::WebRtcPeer,
                                         name: self.name.clone(),
@@ -328,7 +328,7 @@ impl SourceElement for WebRtcTrackSource {
                         }
                         // `WebRtcPeer` gone — this track (or the whole peer) is done.
                         Err(_) => {
-                            hinfo!(self, "run: WebRtcPeer gone, ending");
+                            cinfo!(self, "run: WebRtcPeer gone, ending");
                             break;
                         }
                     }

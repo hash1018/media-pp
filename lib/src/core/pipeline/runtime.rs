@@ -7,7 +7,7 @@ use std::{
     time::Duration,
 };
 
-use rust_hlog::hinfo;
+use crate::clog::cinfo;
 
 use crate::{
     bus::{Bus, BusEvent, BusReceiver},
@@ -57,7 +57,7 @@ use super::{PipelineBuilder, builder::SourceEntry};
 /// play-through.
 pub struct Pipeline {
     /// This pipeline's own id — passed to [`Pipeline::new`]/
-    /// [`PipelineBuilder::new`], stamped onto every source's own `hlog`
+    /// [`PipelineBuilder::new`], stamped onto every source's own `clog`
     /// there and onto every element that passes through a [`super::ChainBuilder`]
     /// built with it (see [`Pipeline::id`]).
     pub(super) id: Arc<str>,
@@ -108,7 +108,7 @@ pub struct Pipeline {
 }
 
 impl Pipeline {
-    /// `id` names this pipeline — stamped as the source's own `hlog`
+    /// `id` names this pipeline — stamped as the source's own `clog`
     /// sub_id right away, and folded into the [`Context`] handed to `wire`
     /// (see [`super::ChainBuilder`]'s own docs).
     ///
@@ -211,7 +211,7 @@ impl Pipeline {
                     let control_rx = control_rx;
                     let _running = RunningSourceGuard::new(running);
 
-                    hinfo!(main_id: &pipeline_id, "pipeline: run starting ({})", source.name());
+                    cinfo!(main_id: &pipeline_id, "pipeline: run starting ({})", source.name());
                     let source_name = source.name();
                     let source_type = source.element_type();
                     // `source.run()` itself already reports non-fatal,
@@ -221,7 +221,7 @@ impl Pipeline {
                     // a `Seek` that failed outright.
                     let outcome = if let Err(error) = source.run(&control_rx, &bus) {
                         bus.post(
-                            source.hlog(),
+                            source.clog(),
                             BusEvent::Error {
                                 element_type: source_type,
                                 name: source_name.clone(),
@@ -232,7 +232,7 @@ impl Pipeline {
                     } else {
                         "ok"
                     };
-                    hinfo!(
+                    cinfo!(
                         main_id: &pipeline_id,
                         "pipeline: run finished ({outcome}, {source_name})"
                     );

@@ -1,14 +1,14 @@
 use std::{path::Path, sync::Arc, time::Duration};
 
+use crate::clog::{CLog, cerror, cinfo};
 use ffmpeg_next as ffmpeg;
-use rust_hlog::{HLog, herror, hinfo};
 use thiserror::Error as ThisError;
 
 use crate::{
     buffer::MediaBuffer,
     bus::{Bus, BusEvent},
     control::{ControlReceiver, drain_control},
-    element::{Element, ElementType, Source, SourceElement, element_hlog},
+    element::{Element, ElementType, Source, SourceElement, element_clog},
     pad::SrcPad,
 };
 
@@ -36,8 +36,8 @@ pub struct StreamInfo {
 /// Fan-out (e.g. routing video and audio to separate branches) needs no
 /// separate "Tee" element here — it's just a matter of linking more than
 /// one of these pads.
-#[rust_hlog::hlog]
 pub struct FileDemuxer {
+    clog: CLog,
     name: Arc<str>,
     input: ffmpeg::format::context::Input,
     pads: Vec<SrcPad>,
@@ -73,9 +73,9 @@ impl FileDemuxer {
             .collect();
 
         let name: Arc<str> = name.into().into();
-        let hlog = element_hlog(ElementType::FileDemuxer, &name, None);
-        hinfo!(
-            hlog: &hlog,
+        let clog = element_clog(ElementType::FileDemuxer, &name, None);
+        cinfo!(
+            clog: &clog,
             "opened: path={}, {} stream(s)",
             path.as_ref().display(),
             streams.len()
@@ -83,7 +83,7 @@ impl FileDemuxer {
         Ok((
             Self {
                 name,
-                hlog,
+                clog,
                 input,
                 pads,
                 pending: None,
@@ -119,12 +119,12 @@ impl Element for FileDemuxer {
         ElementType::FileDemuxer
     }
 
-    fn hlog(&self) -> &HLog {
-        &self.hlog
+    fn clog(&self) -> &CLog {
+        &self.clog
     }
 
-    fn hlog_mut(&mut self) -> &mut HLog {
-        &mut self.hlog
+    fn clog_mut(&mut self) -> &mut CLog {
+        &mut self.clog
     }
 }
 
@@ -136,7 +136,7 @@ impl Source for FileDemuxer {
 
 impl SourceElement for FileDemuxer {
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> crate::error::Result<()> {
-        hinfo!(self, "run: starting");
+        cinfo!(self, "run: starting");
         // Deliberately re-creates `self.input.packets()` fresh every
         // iteration (cheap — it's just a short-lived wrapper, not a
         // stateful cursor of its own) instead of holding one `for` loop's
@@ -148,7 +148,7 @@ impl SourceElement for FileDemuxer {
         loop {
             if drain_control(control, self, bus)?.stopped {
                 // Stop: abandon in place, no final Eos.
-                hinfo!(self, "run: stopped");
+                cinfo!(self, "run: stopped");
                 return Ok(());
             }
             // `seek` (called from within `drain_control`, above) already
@@ -169,7 +169,7 @@ impl SourceElement for FileDemuxer {
                 // decides an error is fatal actually ends things.
                 if let Err(error) = pad.push(MediaBuffer::Packet(Arc::new(packet))) {
                     bus.post(
-                        &self.hlog,
+                        &self.clog,
                         BusEvent::Error {
                             element_type: ElementType::FileDemuxer,
                             name: self.name.clone(),
@@ -182,7 +182,7 @@ impl SourceElement for FileDemuxer {
         for pad in self.pads.iter_mut() {
             pad.push(MediaBuffer::Eos)?;
         }
-        hinfo!(self, "run: reached eos");
+        cinfo!(self, "run: reached eos");
         Ok(())
     }
 
@@ -200,7 +200,7 @@ impl SourceElement for FileDemuxer {
         // `target` under 8.3s lands back at 0s.
         let ts = target.as_micros().min(i64::MAX as u128) as i64;
         self.input.seek(ts, ..).inspect_err(|error| {
-            herror!(self, "seek to {target:?} failed: {error}");
+            cerror!(self, "seek to {target:?} failed: {error}");
         })?;
 
         // `avformat_seek_file` only reports success/failure, not where it
@@ -247,8 +247,8 @@ mod tests {
         concat!(env!("CARGO_MANIFEST_DIR"), "/../test-video/h265.mp4")
     }
 
-    #[rust_hlog::hlog]
     struct CountingSink {
+        clog: CLog,
         count: Arc<AtomicUsize>,
         saw_eos: Arc<AtomicBool>,
     }
@@ -262,12 +262,12 @@ mod tests {
             ElementType::Other
         }
 
-        fn hlog(&self) -> &HLog {
-            &self.hlog
+        fn clog(&self) -> &CLog {
+            &self.clog
         }
 
-        fn hlog_mut(&mut self) -> &mut HLog {
-            &mut self.hlog
+        fn clog_mut(&mut self) -> &mut CLog {
+            &mut self.clog
         }
     }
 
@@ -324,7 +324,7 @@ mod tests {
         demuxer.src_pads()[video.index].link(Box::new(CountingSink {
             count: count.clone(),
             saw_eos: saw_eos.clone(),
-            hlog: element_hlog(ElementType::Other, "counting-sink", None),
+            clog: element_clog(ElementType::Other, "counting-sink", None),
         }));
 
         let (bus, bus_rx) = Bus::new();

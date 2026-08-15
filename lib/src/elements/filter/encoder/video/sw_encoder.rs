@@ -1,14 +1,14 @@
 use std::sync::Arc;
 
+use crate::clog::{CLog, cerror, cinfo};
 use ffmpeg_next as ffmpeg;
 use ffmpeg_next::Rescale;
-use rust_hlog::{HLog, herror, hinfo};
 use thiserror::Error as ThisError;
 
 use crate::{
     buffer::MediaBuffer,
     control::ControlMsg,
-    element::{Element, ElementType, Sink, Source, element_hlog},
+    element::{Element, ElementType, Sink, Source, element_clog},
     error::Result,
     pad::SrcPad,
 };
@@ -151,8 +151,8 @@ pub struct SwEncoderOptions {
 /// until `Eos` flushes whatever's left) — `consume` drains `receive_packet`
 /// in a loop after every `send_frame`/`send_eof`, same shape as
 /// `SwDecoder`'s own `receive_frame` drain loop.
-#[rust_hlog::hlog]
 pub struct SwEncoder {
+    clog: CLog,
     name: Arc<str>,
     encoder: ffmpeg::encoder::Video,
     /// Nominal frame duration in `encoder.time_base()` ticks. Some codecs
@@ -205,10 +205,10 @@ impl SwEncoder {
         let packet_duration = nominal_packet_duration(options.time_base, options.frame_rate);
 
         let name: Arc<str> = name.into().into();
-        let hlog = element_hlog(ElementType::SwEncoder, &name, None);
+        let clog = element_clog(ElementType::SwEncoder, &name, None);
         let pad = SrcPad::new(format!("{name}_src"));
-        hinfo!(
-            hlog: &hlog,
+        cinfo!(
+            clog: &clog,
             "opened: codec={encoder_name}, {}x{}, bit_rate={}",
             options.width,
             options.height,
@@ -216,7 +216,7 @@ impl SwEncoder {
         );
         Ok(Self {
             name,
-            hlog,
+            clog,
             encoder,
             packet_duration,
             time_base: options.time_base,
@@ -264,12 +264,12 @@ impl Element for SwEncoder {
         ElementType::SwEncoder
     }
 
-    fn hlog(&self) -> &HLog {
-        &self.hlog
+    fn clog(&self) -> &CLog {
+        &self.clog
     }
 
-    fn hlog_mut(&mut self) -> &mut HLog {
-        &mut self.hlog
+    fn clog_mut(&mut self) -> &mut CLog {
+        &mut self.clog
     }
 }
 
@@ -285,14 +285,14 @@ impl Sink for SwEncoder {
             MediaBuffer::Video(frame) => {
                 self.encoder
                     .send_frame(&frame)
-                    .inspect_err(|error| herror!(self, "send_frame failed: {error}"))
+                    .inspect_err(|error| cerror!(self, "send_frame failed: {error}"))
                     .map_err(SwEncoderError::from)?;
                 self.drain()
             }
             MediaBuffer::Eos => {
                 self.encoder
                     .send_eof()
-                    .inspect_err(|error| herror!(self, "send_eof failed: {error}"))
+                    .inspect_err(|error| cerror!(self, "send_eof failed: {error}"))
                     .map_err(SwEncoderError::from)?;
                 self.drain()?;
                 self.pad.push(MediaBuffer::Eos)
@@ -385,8 +385,8 @@ mod tests {
         }
     }
 
-    #[rust_hlog::hlog]
     struct CapturingSink {
+        clog: CLog,
         packets: Arc<StdMutex<Vec<Arc<ffmpeg::Packet>>>>,
     }
 
@@ -399,12 +399,12 @@ mod tests {
             ElementType::Other
         }
 
-        fn hlog(&self) -> &HLog {
-            &self.hlog
+        fn clog(&self) -> &CLog {
+            &self.clog
         }
 
-        fn hlog_mut(&mut self) -> &mut HLog {
-            &mut self.hlog
+        fn clog_mut(&mut self) -> &mut CLog {
+            &mut self.clog
         }
     }
 
@@ -453,7 +453,7 @@ mod tests {
         let packets = Arc::new(StdMutex::new(Vec::new()));
         encoder.src_pads()[0].link(Box::new(CapturingSink {
             packets: packets.clone(),
-            hlog: element_hlog(ElementType::Other, "capture", None),
+            clog: element_clog(ElementType::Other, "capture", None),
         }));
 
         let mut frame = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::YUV420P, 64, 64);

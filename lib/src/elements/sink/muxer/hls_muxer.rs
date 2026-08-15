@@ -7,14 +7,14 @@ use std::{
     time::Duration,
 };
 
+use crate::clog::{CLog, cerror};
 use ffmpeg_next as ffmpeg;
-use rust_hlog::{HLog, herror};
 use thiserror::Error as ThisError;
 
 use crate::{
     buffer::MediaBuffer,
     control::ControlMsg,
-    element::{Element, ElementType, Sink, element_hlog},
+    element::{Element, ElementType, Sink, element_clog},
     error::Result,
 };
 
@@ -363,7 +363,7 @@ impl HlsMuxer {
             .enumerate()
             .map(|(index, stream)| -> Box<dyn Sink> {
                 Box::new(HlsMuxerStreamSink {
-                    hlog: element_hlog(ElementType::HlsMuxer, &stream.name, None),
+                    clog: element_clog(ElementType::HlsMuxer, &stream.name, None),
                     name: stream.name,
                     shared: shared.clone(),
                     stream_index: index,
@@ -426,8 +426,8 @@ impl HlsMuxerShared {
 
 /// One registered HLS track's sink. Instances returned by the same
 /// [`HlsMuxer::open`] share their muxer and finalization state.
-#[rust_hlog::hlog]
 pub struct HlsMuxerStreamSink {
+    clog: CLog,
     name: Arc<str>,
     shared: Arc<HlsMuxerShared>,
     stream_index: usize,
@@ -443,7 +443,7 @@ impl HlsMuxerStreamSink {
         self.done = true;
         self.shared
             .finish_track()
-            .inspect_err(|error| herror!(self, "write_trailer failed: {error}"))
+            .inspect_err(|error| cerror!(self, "write_trailer failed: {error}"))
     }
 }
 
@@ -456,12 +456,12 @@ impl Element for HlsMuxerStreamSink {
         ElementType::HlsMuxer
     }
 
-    fn hlog(&self) -> &HLog {
-        &self.hlog
+    fn clog(&self) -> &CLog {
+        &self.clog
     }
 
-    fn hlog_mut(&mut self) -> &mut HLog {
-        &mut self.hlog
+    fn clog_mut(&mut self) -> &mut CLog {
+        &mut self.clog
     }
 }
 
@@ -471,7 +471,7 @@ impl Sink for HlsMuxerStreamSink {
             MediaBuffer::Packet(packet) => self
                 .shared
                 .write_packet(self.stream_index, self.input_time_base, &packet)
-                .inspect_err(|error| herror!(self, "write_interleaved failed: {error}")),
+                .inspect_err(|error| cerror!(self, "write_interleaved failed: {error}")),
             MediaBuffer::Eos => self.finish(),
             other => Err(HlsMuxerError::UnsupportedBuffer(other.kind()).into()),
         }

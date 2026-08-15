@@ -17,6 +17,7 @@
 pub mod buffer;
 pub mod bus;
 pub mod clock;
+pub mod clog;
 pub mod color;
 pub mod control;
 pub mod driver;

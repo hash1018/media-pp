@@ -9,9 +9,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::clog::CLog;
 use crossbeam_channel::{Receiver, bounded, unbounded};
 use ffmpeg_next as ffmpeg;
-use rust_hlog::HLog;
 use str0m::{
     Candidate, Rtc,
     change::SdpOffer,
@@ -27,7 +27,7 @@ use crate::{
     bus::BusEvent,
     control::ControlMsg,
     driver::DriverRunner,
-    element::{Element, ElementType, Sink, element_hlog},
+    element::{Element, ElementType, Sink, element_clog},
     error::Result,
     pipeline::Pipeline,
 };
@@ -114,8 +114,8 @@ fn add_track_returns_closed_instead_of_a_phantom_id() {
     ));
 }
 
-#[rust_hlog::hlog]
 struct CountingSink {
+    clog: CLog,
     count: Arc<AtomicUsize>,
 }
 
@@ -128,12 +128,12 @@ impl Element for CountingSink {
         ElementType::Other
     }
 
-    fn hlog(&self) -> &HLog {
-        &self.hlog
+    fn clog(&self) -> &CLog {
+        &self.clog
     }
 
-    fn hlog_mut(&mut self) -> &mut HLog {
-        &mut self.hlog
+    fn clog_mut(&mut self) -> &mut CLog {
+        &mut self.clog
     }
 }
 
@@ -201,7 +201,7 @@ fn push_packets(sink: &mut WebRtcTrackSink) {
 fn wire_counting(source: WebRtcTrackSource, count: Arc<AtomicUsize>) -> Arc<Pipeline> {
     let sink = CountingSink {
         count,
-        hlog: element_hlog(ElementType::Other, "counter", None),
+        clog: element_clog(ElementType::Other, "counter", None),
     };
     Pipeline::new("test", source, |source, ctx| {
         let branch = ctx.branch().to(Box::new(sink))?;

@@ -8,9 +8,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::clog::{CLog, cerror, cinfo};
 use crossbeam_channel::{Receiver, Sender, TrySendError, bounded, unbounded};
 use ffmpeg_next as ffmpeg;
-use rust_hlog::{HLog, herror, hinfo};
 use str0m::{
     Event, Input, Output, Rtc,
     change::{SdpOffer, SdpPendingOffer},
@@ -23,7 +23,7 @@ use crate::{
     buffer::MediaBuffer,
     bus::{Bus, BusEvent},
     driver::{Driver, StopReceiver},
-    element::{Element, ElementType, element_hlog},
+    element::{Element, ElementType, element_clog},
     error::Result,
     time::{InvalidTimeBase, MediaTimestamp},
 };
@@ -84,8 +84,8 @@ const CHANNEL_CAPACITY: usize = 128;
 /// [`crate::elements::TeeHandle::attach`]'s dynamic attachment, just
 /// without `Tee`'s `Mutex` (nothing but this one thread ever touches
 /// `tracks_in`).
-#[rust_hlog::hlog]
 pub struct WebRtcPeer {
+    clog: CLog,
     name: Arc<str>,
     rtc: Rtc,
     socket: UdpSocket,
@@ -146,9 +146,9 @@ impl WebRtcPeer {
         on_keyframe_request: impl FnMut(TrackId) + Send + 'static,
     ) -> (Self, WebRtcHandle) {
         let name: Arc<str> = name.into().into();
-        let hlog = element_hlog(ElementType::WebRtcPeer, &name, None);
-        hinfo!(
-            hlog: &hlog,
+        let clog = element_clog(ElementType::WebRtcPeer, &name, None);
+        cinfo!(
+            clog: &clog,
             "created: local_addr={:?}",
             socket.local_addr()
         );
@@ -158,7 +158,7 @@ impl WebRtcPeer {
         (
             Self {
                 name,
-                hlog,
+                clog,
                 rtc,
                 socket,
                 tracks_in: HashMap::new(),
@@ -185,7 +185,7 @@ impl WebRtcPeer {
     /// see the type docs for why this is the one path both locally- and
     /// remotely-added tracks go through.
     fn attach_track(&mut self, id: TrackId, mid: Mid, kind: MediaKind) {
-        hinfo!(self, "track attached: id={id:?}, mid={mid}, kind={kind:?}");
+        cinfo!(self, "track attached: id={id:?}, mid={mid}, kind={kind:?}");
         let reply = WebRtcTrackSink::new(id, self.command_tx.clone());
         let (tx, rx) = bounded(CHANNEL_CAPACITY);
         let codec = Arc::new(Mutex::new(None));
@@ -197,7 +197,7 @@ impl WebRtcPeer {
     fn apply_command(&mut self, cmd: Command, bus: &Bus) -> Result<()> {
         match cmd {
             Command::AddTrack(id, kind, direction, codec) => {
-                hinfo!(
+                cinfo!(
                     self,
                     "add_track requested: id={id:?}, kind={kind:?}, direction={direction:?}, codec={codec:?}"
                 );
@@ -212,7 +212,7 @@ impl WebRtcPeer {
                 // consume-error contract.
                 if let Err(error) = self.write_track(id, buf) {
                     bus.post(
-                        &self.hlog,
+                        &self.clog,
                         BusEvent::Error {
                             element_type: ElementType::WebRtcPeer,
                             name: self.name.clone(),
@@ -228,9 +228,9 @@ impl WebRtcPeer {
                 self.rtc
                     .sdp_api()
                     .accept_answer(pending, answer)
-                    .inspect_err(|error| herror!(self, "accept_answer failed: {error}"))
+                    .inspect_err(|error| cerror!(self, "accept_answer failed: {error}"))
                     .map_err(WebRtcError::from)?;
-                hinfo!(self, "renegotiation complete: {} track(s)", ids.len());
+                cinfo!(self, "renegotiation complete: {} track(s)", ids.len());
                 for id in ids {
                     if let Some(state @ TrackOutState::Negotiating(_)) = self.tracks_out.get(&id) {
                         let mid = state.mid().expect("Negotiating always carries a Mid");
@@ -243,10 +243,10 @@ impl WebRtcPeer {
                     .rtc
                     .sdp_api()
                     .accept_offer(offer)
-                    .inspect_err(|error| herror!(self, "accept_offer failed: {error}"))
+                    .inspect_err(|error| cerror!(self, "accept_offer failed: {error}"))
                     .map_err(WebRtcError::from);
                 if result.is_ok() {
-                    hinfo!(self, "accepted remote offer");
+                    cinfo!(self, "accepted remote offer");
                 }
                 let _ = reply.send(result);
             }
@@ -284,7 +284,7 @@ impl WebRtcPeer {
         }
 
         if let Some((offer, pending)) = api.apply() {
-            hinfo!(self, "renegotiation started: {} track(s)", to_open.len());
+            cinfo!(self, "renegotiation started: {} track(s)", to_open.len());
             self.pending = Some((pending, to_open));
             (self.on_offer)(offer);
         }
@@ -329,7 +329,7 @@ impl WebRtcPeer {
         let rtp_time = packet_rtp_time(&packet)?;
         writer
             .write(pt, Instant::now(), rtp_time, data)
-            .inspect_err(|error| herror!(self, "writer.write failed: {error}"))
+            .inspect_err(|error| cerror!(self, "writer.write failed: {error}"))
             .map_err(WebRtcError::from)?;
         Ok(())
     }
@@ -342,7 +342,7 @@ impl WebRtcPeer {
             let output = self
                 .rtc
                 .poll_output()
-                .inspect_err(|error| herror!(self, "poll_output failed: {error}"))
+                .inspect_err(|error| cerror!(self, "poll_output failed: {error}"))
                 .map_err(WebRtcError::from)?;
             match output {
                 Output::Timeout(deadline) => return Ok(deadline),
@@ -402,7 +402,7 @@ impl WebRtcPeer {
                             // buffer rather than let this grow unbounded
                             // (see `CHANNEL_CAPACITY`'s docs).
                             bus.post(
-                                &self.hlog,
+                                &self.clog,
                                 BusEvent::Dropped {
                                     element_type: ElementType::WebRtcPeer,
                                     name: self.name.clone(),
@@ -424,18 +424,18 @@ impl WebRtcPeer {
                     .iter()
                     .find(|(_, s)| s.mid() == Some(req.mid))
                 {
-                    hinfo!(self, "keyframe requested: id={id:?}, mid={}", req.mid);
+                    cinfo!(self, "keyframe requested: id={id:?}, mid={}", req.mid);
                     (self.on_keyframe_request)(id);
                 }
             }
             Event::Connected => {
-                hinfo!(self, "ICE+DTLS connected");
+                cinfo!(self, "ICE+DTLS connected");
             }
             Event::IceConnectionStateChange(state) => {
-                hinfo!(self, "ICE connection state: {state:?}");
+                cinfo!(self, "ICE connection state: {state:?}");
             }
             Event::MediaChanged(changed) => {
-                hinfo!(
+                cinfo!(
                     self,
                     "media changed: mid={}, direction={:?}",
                     changed.mid,
@@ -514,12 +514,12 @@ impl Element for WebRtcPeer {
         ElementType::WebRtcPeer
     }
 
-    fn hlog(&self) -> &HLog {
-        &self.hlog
+    fn clog(&self) -> &CLog {
+        &self.clog
     }
 
-    fn hlog_mut(&mut self) -> &mut HLog {
-        &mut self.hlog
+    fn clog_mut(&mut self) -> &mut CLog {
+        &mut self.clog
     }
 }
 
@@ -547,7 +547,7 @@ impl Driver for WebRtcPeer {
     /// this loop would starve ICE keepalives/DTLS retransmits, likely
     /// dropping the connection rather than gracefully suspending it.
     fn run(&mut self, stop: &StopReceiver, bus: &Bus) -> Result<()> {
-        hinfo!(self, "run: starting");
+        cinfo!(self, "run: starting");
         let mut buf = vec![0u8; 2000];
         loop {
             while let Ok(cmd) = self.command_rx.try_recv() {
@@ -557,7 +557,7 @@ impl Driver for WebRtcPeer {
 
             let deadline = self.drive_until_timeout(bus)?;
             if !self.rtc.is_alive() || stop.is_stopped() {
-                hinfo!(self, "run: stopped (rtc alive: {})", self.rtc.is_alive());
+                cinfo!(self, "run: stopped (rtc alive: {})", self.rtc.is_alive());
                 self.tracks_in.clear();
                 return Ok(());
             }
@@ -568,7 +568,7 @@ impl Driver for WebRtcPeer {
                 .max(Duration::from_millis(1));
             self.socket
                 .set_read_timeout(Some(wait))
-                .inspect_err(|error| herror!(self, "set_read_timeout failed: {error}"))
+                .inspect_err(|error| cerror!(self, "set_read_timeout failed: {error}"))
                 .map_err(WebRtcError::from)?;
 
             match self.socket.recv_from(&mut buf) {
@@ -579,7 +579,7 @@ impl Driver for WebRtcPeer {
                     let destination = self
                         .socket
                         .local_addr()
-                        .inspect_err(|error| herror!(self, "local_addr failed: {error}"))
+                        .inspect_err(|error| cerror!(self, "local_addr failed: {error}"))
                         .map_err(WebRtcError::from)?;
                     self.rtc
                         .handle_input(Input::Receive(
@@ -591,7 +591,7 @@ impl Driver for WebRtcPeer {
                                 contents,
                             },
                         ))
-                        .inspect_err(|error| herror!(self, "handle_input(Receive) failed: {error}"))
+                        .inspect_err(|error| cerror!(self, "handle_input(Receive) failed: {error}"))
                         .map_err(WebRtcError::from)?;
                 }
                 Err(e)
@@ -610,11 +610,11 @@ impl Driver for WebRtcPeer {
                     // isn't coming.
                     self.rtc
                         .handle_input(Input::Timeout(Instant::now()))
-                        .inspect_err(|error| herror!(self, "handle_input(Timeout) failed: {error}"))
+                        .inspect_err(|error| cerror!(self, "handle_input(Timeout) failed: {error}"))
                         .map_err(WebRtcError::from)?;
                 }
                 Err(e) => {
-                    herror!(self, "recv_from failed: {e}");
+                    cerror!(self, "recv_from failed: {e}");
                     return Err(WebRtcError::from(e).into());
                 }
             }

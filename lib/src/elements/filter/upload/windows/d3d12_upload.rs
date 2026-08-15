@@ -1,14 +1,14 @@
 use std::sync::Arc;
 
+use crate::clog::{CLog, cerror, cinfo};
 use ffmpeg_next::{self as ffmpeg, ffi};
-use rust_hlog::{HLog, herror, hinfo};
 use thiserror::Error as ThisError;
 use windows::Win32::Graphics::Direct3D12::ID3D12Device;
 
 use crate::{
     buffer::MediaBuffer,
     control::ControlMsg,
-    element::{Element, ElementType, Sink, Source, element_hlog},
+    element::{Element, ElementType, Sink, Source, element_clog},
     elements::filter::decoder::d3d12va_decoder::{create_hw_device_ctx, free_buffer},
     error::Result,
     pad::SrcPad,
@@ -88,8 +88,8 @@ pub enum D3d12UploadError {
 /// dimensions can't be changed after `av_hwframe_ctx_init`, so every frame
 /// `consume` receives must match exactly (a resolution change means
 /// tearing this element down and building a fresh one).
-#[rust_hlog::hlog]
 pub struct D3d12Upload {
+    clog: CLog,
     name: Arc<str>,
     hw_device_ctx: *mut ffi::AVBufferRef,
     hw_frames_ctx: *mut ffi::AVBufferRef,
@@ -126,7 +126,7 @@ impl D3d12Upload {
         height: u32,
     ) -> std::result::Result<Self, D3d12UploadError> {
         let name: Arc<str> = name.into().into();
-        let hlog = element_hlog(ElementType::D3d12Upload, &name, None);
+        let clog = element_clog(ElementType::D3d12Upload, &name, None);
 
         let hw_device_ctx =
             unsafe { create_hw_device_ctx(device) }.map_err(D3d12UploadError::HwDeviceInit)?;
@@ -141,10 +141,10 @@ impl D3d12Upload {
 
         let pad = SrcPad::new(format!("{name}_src"));
         let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
-        hinfo!(hlog: &hlog, "opened: {width}x{height}");
+        cinfo!(clog: &clog, "opened: {width}x{height}");
         Ok(Self {
             name,
-            hlog,
+            clog,
             hw_device_ctx,
             hw_frames_ctx,
             width,
@@ -164,12 +164,12 @@ impl Element for D3d12Upload {
         ElementType::D3d12Upload
     }
 
-    fn hlog(&self) -> &HLog {
-        &self.hlog
+    fn clog(&self) -> &CLog {
+        &self.clog
     }
 
-    fn hlog_mut(&mut self) -> &mut HLog {
-        &mut self.hlog
+    fn clog_mut(&mut self) -> &mut CLog {
+        &mut self.clog
     }
 }
 
@@ -184,7 +184,7 @@ impl Sink for D3d12Upload {
         match buf {
             MediaBuffer::Video(frame) => {
                 if frame.format() != ffmpeg::format::Pixel::NV12 {
-                    herror!(self, "unsupported pixel format: {:?}", frame.format());
+                    cerror!(self, "unsupported pixel format: {:?}", frame.format());
                     return Err(D3d12UploadError::UnsupportedFormat(frame.format()).into());
                 }
                 if frame.width() != self.width || frame.height() != self.height {
@@ -194,7 +194,7 @@ impl Sink for D3d12Upload {
                         expected_width: self.width,
                         expected_height: self.height,
                     };
-                    herror!(self, "{error}");
+                    cerror!(self, "{error}");
                     return Err(error.into());
                 }
 
@@ -208,13 +208,13 @@ impl Sink for D3d12Upload {
                     let ret =
                         ffi::av_hwframe_get_buffer(self.hw_frames_ctx, gpu_frame.as_mut_ptr(), 0);
                     if ret < 0 {
-                        herror!(self, "av_hwframe_get_buffer failed: {ret}");
+                        cerror!(self, "av_hwframe_get_buffer failed: {ret}");
                         return Err(D3d12UploadError::GetBuffer(ret).into());
                     }
                     let ret =
                         ffi::av_hwframe_transfer_data(gpu_frame.as_mut_ptr(), frame.as_ptr(), 0);
                     if ret < 0 {
-                        herror!(self, "av_hwframe_transfer_data failed: {ret}");
+                        cerror!(self, "av_hwframe_transfer_data failed: {ret}");
                         return Err(D3d12UploadError::TransferData(ret).into());
                     }
                 }
@@ -224,11 +224,11 @@ impl Sink for D3d12Upload {
             }
             MediaBuffer::Eos => self.pad.push(MediaBuffer::Eos),
             MediaBuffer::Packet(_) => {
-                herror!(self, "unsupported buffer: Packet");
+                cerror!(self, "unsupported buffer: Packet");
                 Err(D3d12UploadError::UnsupportedBuffer("Packet").into())
             }
             MediaBuffer::Audio(_) => {
-                herror!(self, "unsupported buffer: Audio");
+                cerror!(self, "unsupported buffer: Audio");
                 Err(D3d12UploadError::UnsupportedBuffer("Audio").into())
             }
         }
@@ -243,7 +243,7 @@ impl Sink for D3d12Upload {
 
 impl Drop for D3d12Upload {
     fn drop(&mut self) {
-        hinfo!(self, "dropped: freeing hw_frames_ctx/hw_device_ctx");
+        cinfo!(self, "dropped: freeing hw_frames_ctx/hw_device_ctx");
         unsafe {
             free_buffer(self.hw_frames_ctx);
             free_buffer(self.hw_device_ctx);

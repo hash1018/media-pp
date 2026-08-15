@@ -1,13 +1,13 @@
 use std::sync::Arc;
 
+use crate::clog::{CLog, cerror, cinfo};
 use ffmpeg_next as ffmpeg;
-use rust_hlog::{HLog, herror, hinfo};
 use thiserror::Error as ThisError;
 
 use crate::{
     buffer::MediaBuffer,
     control::ControlMsg,
-    element::{Element, ElementType, Sink, Source, element_hlog},
+    element::{Element, ElementType, Sink, Source, element_clog},
     error::Result,
     pad::SrcPad,
     pool::UnboundObjectPool,
@@ -47,8 +47,8 @@ pub enum ScalerError {
 /// Typical placement: right before something with a fixed input
 /// contract, e.g. an ONNX object-detection model — not a general-purpose
 /// pipeline stage, so most chains won't need one at all.
-#[rust_hlog::hlog]
 pub struct Scaler {
+    clog: CLog,
     name: Arc<str>,
     dst_format: ffmpeg::format::Pixel,
     dst_width: u32,
@@ -93,9 +93,9 @@ impl Scaler {
         flags: ffmpeg::software::scaling::Flags,
     ) -> Self {
         let name: Arc<str> = name.into().into();
-        let hlog = element_hlog(ElementType::Scaler, &name, None);
-        hinfo!(
-            hlog: &hlog,
+        let clog = element_clog(ElementType::Scaler, &name, None);
+        cinfo!(
+            clog: &clog,
             "created: dst_format={dst_format:?}, dst={dst_width}x{dst_height}"
         );
         let pad = SrcPad::new(format!("{name}_src"));
@@ -106,7 +106,7 @@ impl Scaler {
         );
         Self {
             name,
-            hlog,
+            clog,
             dst_format,
             dst_width,
             dst_height,
@@ -142,12 +142,12 @@ impl Element for Scaler {
         ElementType::Scaler
     }
 
-    fn hlog(&self) -> &HLog {
-        &self.hlog
+    fn clog(&self) -> &CLog {
+        &self.clog
     }
 
-    fn hlog_mut(&mut self) -> &mut HLog {
-        &mut self.hlog
+    fn clog_mut(&mut self) -> &mut CLog {
+        &mut self.clog
     }
 }
 
@@ -184,7 +184,7 @@ impl Sink for Scaler {
                                     self.flags,
                                 )
                                 .inspect_err(|error| {
-                                    herror!(self, "failed to build scaling context: {error}")
+                                    cerror!(self, "failed to build scaling context: {error}")
                                 })
                                 .map_err(ScalerError::from)?,
                             );
@@ -200,7 +200,7 @@ impl Sink for Scaler {
                     .as_mut()
                     .expect("built or confirmed matching above")
                     .run(&frame, &mut output)
-                    .inspect_err(|error| herror!(self, "scale failed: {error}"))
+                    .inspect_err(|error| cerror!(self, "scale failed: {error}"))
                     .map_err(ScalerError::from)?;
                 // `run` only copies pixel data, not metadata — carry the
                 // pts through by hand so downstream pacing/muxing still
@@ -211,11 +211,11 @@ impl Sink for Scaler {
             }
             MediaBuffer::Eos => self.pad.push(MediaBuffer::Eos),
             MediaBuffer::Packet(_) => {
-                herror!(self, "unsupported buffer: Packet");
+                cerror!(self, "unsupported buffer: Packet");
                 Err(ScalerError::UnsupportedBuffer("Packet").into())
             }
             MediaBuffer::Audio(_) => {
-                herror!(self, "unsupported buffer: Audio");
+                cerror!(self, "unsupported buffer: Audio");
                 Err(ScalerError::UnsupportedBuffer("Audio").into())
             }
         }
@@ -236,8 +236,8 @@ mod tests {
 
     use super::*;
 
-    #[rust_hlog::hlog]
     struct CapturingSink {
+        clog: CLog,
         received: Arc<Mutex<Vec<MediaBuffer>>>,
     }
 
@@ -250,12 +250,12 @@ mod tests {
             ElementType::Other
         }
 
-        fn hlog(&self) -> &HLog {
-            &self.hlog
+        fn clog(&self) -> &CLog {
+            &self.clog
         }
 
-        fn hlog_mut(&mut self) -> &mut HLog {
-            &mut self.hlog
+        fn clog_mut(&mut self) -> &mut CLog {
+            &mut self.clog
         }
     }
 
@@ -301,7 +301,7 @@ mod tests {
         let received = Arc::new(Mutex::new(Vec::new()));
         scaler.src_pads()[0].link(Box::new(CapturingSink {
             received: received.clone(),
-            hlog: element_hlog(ElementType::Other, "capture", None),
+            clog: element_clog(ElementType::Other, "capture", None),
         }));
         (scaler, received)
     }

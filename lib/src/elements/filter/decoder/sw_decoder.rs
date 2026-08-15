@@ -1,13 +1,13 @@
 use std::sync::Arc;
 
+use crate::clog::{CLog, cerror, cinfo};
 use ffmpeg_next as ffmpeg;
-use rust_hlog::{HLog, herror, hinfo};
 use thiserror::Error as ThisError;
 
 use crate::{
     buffer::MediaBuffer,
     control::ControlMsg,
-    element::{Element, ElementType, Sink, Source, element_hlog},
+    element::{Element, ElementType, Sink, Source, element_clog},
     pad::SrcPad,
     pool::UnboundObjectPool,
 };
@@ -38,8 +38,8 @@ enum Kind {
 /// reordering, decoder buffering, ...) — `consume` just drains
 /// `receive_frame` in a loop after every `send_packet`/`send_eof`, pushing
 /// however many frames come out.
-#[rust_hlog::hlog]
 pub struct SwDecoder {
+    clog: CLog,
     name: Arc<str>,
     kind: Kind,
     pad: SrcPad,
@@ -62,7 +62,7 @@ impl SwDecoder {
         params: ffmpeg::codec::Parameters,
     ) -> Result<Self, SwDecoderError> {
         let name: Arc<str> = name.into().into();
-        let hlog = element_hlog(ElementType::SwDecoder, &name, None);
+        let clog = element_clog(ElementType::SwDecoder, &name, None);
         let context = ffmpeg::codec::context::Context::from_parameters(params)?;
 
         let kind = match context.medium() {
@@ -73,8 +73,8 @@ impl SwDecoder {
 
         let pad = SrcPad::new(format!("{name}_src"));
         let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
-        hinfo!(
-            hlog: &hlog,
+        cinfo!(
+            clog: &clog,
             "opened: {}",
             match &kind {
                 Kind::Video(d) => format!("video, codec={:?}", d.id()),
@@ -83,7 +83,7 @@ impl SwDecoder {
         );
         Ok(Self {
             name,
-            hlog,
+            clog,
             kind,
             pad,
             pool,
@@ -100,12 +100,12 @@ impl Element for SwDecoder {
         ElementType::SwDecoder
     }
 
-    fn hlog(&self) -> &HLog {
-        &self.hlog
+    fn clog(&self) -> &CLog {
+        &self.clog
     }
 
-    fn hlog_mut(&mut self) -> &mut HLog {
-        &mut self.hlog
+    fn clog_mut(&mut self) -> &mut CLog {
+        &mut self.clog
     }
 }
 
@@ -122,14 +122,14 @@ impl Sink for SwDecoder {
                 Kind::Video(decoder) => {
                     decoder
                         .send_packet(&*packet)
-                        .inspect_err(|error| herror!(self, "send_packet failed: {error}"))
+                        .inspect_err(|error| cerror!(self, "send_packet failed: {error}"))
                         .map_err(SwDecoderError::from)?;
                     drain_video(decoder, &mut self.pad, &self.pool)
                 }
                 Kind::Audio(decoder) => {
                     decoder
                         .send_packet(&*packet)
-                        .inspect_err(|error| herror!(self, "send_packet failed: {error}"))
+                        .inspect_err(|error| cerror!(self, "send_packet failed: {error}"))
                         .map_err(SwDecoderError::from)?;
                     drain_audio(decoder, &mut self.pad)
                 }
@@ -139,14 +139,14 @@ impl Sink for SwDecoder {
                     Kind::Video(decoder) => {
                         decoder
                             .send_eof()
-                            .inspect_err(|error| herror!(self, "send_eof failed: {error}"))
+                            .inspect_err(|error| cerror!(self, "send_eof failed: {error}"))
                             .map_err(SwDecoderError::from)?;
                         drain_video(decoder, &mut self.pad, &self.pool)?;
                     }
                     Kind::Audio(decoder) => {
                         decoder
                             .send_eof()
-                            .inspect_err(|error| herror!(self, "send_eof failed: {error}"))
+                            .inspect_err(|error| cerror!(self, "send_eof failed: {error}"))
                             .map_err(SwDecoderError::from)?;
                         drain_audio(decoder, &mut self.pad)?;
                     }

@@ -4,16 +4,16 @@ use std::sync::{
 };
 
 use ffmpeg_next::{format::Pixel, media, software::scaling::Flags};
+use media_pp::clog::CLog;
 use media_pp::{
     Error, Result,
     buffer::MediaBuffer,
     bus::BusEvent,
     control::ControlMsg,
-    element::{Element, ElementType, Sink, element_hlog},
+    element::{Element, ElementType, Sink, element_clog},
     elements::{FileDemuxer, Scaler, SwDecoder},
     pipeline::Pipeline,
 };
-use rust_hlog::HLog;
 
 const DST_FORMAT: Pixel = Pixel::RGB24;
 const DST_WIDTH: u32 = 640;
@@ -45,7 +45,7 @@ fn main() -> media_pp::Result<()> {
     let count = Arc::new(AtomicUsize::new(0));
     let sink = VerifyingSink {
         count: count.clone(),
-        hlog: element_hlog(ElementType::Other, "verify", None),
+        clog: element_clog(ElementType::Other, "verify", None),
     };
 
     let pipeline = Pipeline::new("scale", source, |source, ctx| {
@@ -92,8 +92,8 @@ fn main() -> media_pp::Result<()> {
 /// `DST_WIDTH`x`DST_HEIGHT`, not just that the pipeline ran to
 /// completion — then counts every frame after that the same way
 /// `FrameCounter` would.
-#[rust_hlog::hlog]
 struct VerifyingSink {
+    clog: CLog,
     count: Arc<AtomicUsize>,
 }
 
@@ -106,12 +106,12 @@ impl Element for VerifyingSink {
         ElementType::Other
     }
 
-    fn hlog(&self) -> &HLog {
-        &self.hlog
+    fn clog(&self) -> &CLog {
+        &self.clog
     }
 
-    fn hlog_mut(&mut self) -> &mut HLog {
-        &mut self.hlog
+    fn clog_mut(&mut self) -> &mut CLog {
+        &mut self.clog
     }
 }
 

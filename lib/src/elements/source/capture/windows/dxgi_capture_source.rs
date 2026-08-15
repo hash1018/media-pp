@@ -4,8 +4,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::clog::{CLog, cerror, cinfo};
 use ffmpeg_next as ffmpeg;
-use rust_hlog::{HLog, herror, hinfo};
 use thiserror::Error as ThisError;
 use windows::{
     Win32::{
@@ -36,7 +36,7 @@ use crate::{
     buffer::MediaBuffer,
     bus::{Bus, BusEvent},
     control::{ControlReceiver, drain_control},
-    element::{Element, ElementType, Source, SourceElement, element_hlog},
+    element::{Element, ElementType, Source, SourceElement, element_clog},
     elements::filter::decoder::d3d11va_decoder::wrap_d3d11_texture,
     error::Result,
     pad::SrcPad,
@@ -342,8 +342,8 @@ struct CaptureUnit {
 /// [`CaptureArea::Region`] — in which case every field below that used
 /// to describe "the" duplication instead describes one `CaptureUnit`
 /// per contributing output.
-#[rust_hlog::hlog]
 pub struct DxgiCaptureSource {
+    clog: CLog,
     name: Arc<str>,
     /// Only used by [`CaptureMode::Gpu`]'s [`DxgiCaptureSource::emit_frame`]
     /// path, to build each tick's fresh per-emission composite texture —
@@ -427,7 +427,7 @@ impl DxgiCaptureSource {
         options: DxgiCaptureOptions,
     ) -> std::result::Result<(Self, u32, u32, Option<ID3D11Device>), DxgiCaptureSourceError> {
         let name: Arc<str> = name.into().into();
-        let hlog = element_hlog(ElementType::DxgiCaptureSource, &name, None);
+        let clog = element_clog(ElementType::DxgiCaptureSource, &name, None);
 
         let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }?;
         let gpu_mode = matches!(options.capture_mode, CaptureMode::Gpu);
@@ -564,8 +564,8 @@ impl DxgiCaptureSource {
             .then(|| ffmpeg::frame::Video::new(ffmpeg::format::Pixel::BGRA, width, height));
 
         let fps = options.fps.max(1); // a `0` fps is nonsensical; treat it as 1 rather than dividing by zero
-        hinfo!(
-            hlog: &hlog,
+        cinfo!(
+            clog: &clog,
             "opened: {}x{} composite from {} output(s), include_cursor={}, fps={}, gpu_mode={}",
             width,
             height,
@@ -578,7 +578,7 @@ impl DxgiCaptureSource {
         Ok((
             Self {
                 name,
-                hlog,
+                clog,
                 device,
                 context,
                 units,
@@ -937,12 +937,12 @@ impl Element for DxgiCaptureSource {
         ElementType::DxgiCaptureSource
     }
 
-    fn hlog(&self) -> &HLog {
-        &self.hlog
+    fn clog(&self) -> &CLog {
+        &self.clog
     }
 
-    fn hlog_mut(&mut self) -> &mut HLog {
-        &mut self.hlog
+    fn clog_mut(&mut self) -> &mut CLog {
+        &mut self.clog
     }
 }
 
@@ -954,12 +954,12 @@ impl Source for DxgiCaptureSource {
 
 impl SourceElement for DxgiCaptureSource {
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
-        hinfo!(self, "run: starting");
+        cinfo!(self, "run: starting");
         let mut schedule = PeriodicSchedule::new(self.frame_interval, Instant::now());
         loop {
             let outcome = drain_control(control, self, bus)?;
             if outcome.stopped {
-                hinfo!(self, "run: stopped");
+                cinfo!(self, "run: stopped");
                 return Ok(());
             }
             if outcome.paused_for > Duration::ZERO {
@@ -968,7 +968,7 @@ impl SourceElement for DxgiCaptureSource {
 
             let poll_timeout = schedule.remaining(Instant::now()).min(POLL_GRANULARITY);
             if let Err(error) = self.poll_capture(poll_timeout.as_millis() as u32) {
-                herror!(self, "capture failed: {error}");
+                cerror!(self, "capture failed: {error}");
                 return Err(error.into());
             }
 
@@ -987,13 +987,13 @@ impl SourceElement for DxgiCaptureSource {
             let frame = match self.emit_frame() {
                 Ok(frame) => frame,
                 Err(error) => {
-                    herror!(self, "emit_frame failed: {error}");
+                    cerror!(self, "emit_frame failed: {error}");
                     return Err(error.into());
                 }
             };
             if let Err(error) = self.pad.push(MediaBuffer::Video(Arc::new(frame))) {
                 bus.post(
-                    &self.hlog,
+                    &self.clog,
                     BusEvent::Error {
                         element_type: ElementType::DxgiCaptureSource,
                         name: self.name.clone(),

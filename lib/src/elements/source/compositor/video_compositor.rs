@@ -8,9 +8,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::clog::{CLog, cinfo};
 use arc_swap::ArcSwapOption;
 use ffmpeg_next as ffmpeg;
-use rust_hlog::{HLog, hinfo};
 use thiserror::Error as ThisError;
 
 use super::video_layer::{
@@ -22,7 +22,7 @@ use crate::{
     bus::{Bus, BusEvent},
     color::Color,
     control::{ControlMsg, ControlReceiver, drain_control},
-    element::{Element, ElementType, Sink, Source, SourceElement, element_hlog},
+    element::{Element, ElementType, Sink, Source, SourceElement, element_clog},
     error::Result,
     pad::SrcPad,
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
@@ -154,7 +154,7 @@ impl VideoCompositorHandle {
         Ok(Some(VideoCompositorInput {
             sink: Box::new(VideoCompositorInputSink {
                 name: name.clone(),
-                hlog: element_hlog(ElementType::VideoCompositor, &name, None),
+                clog: element_clog(ElementType::VideoCompositor, &name, None),
                 shared: self.shared.clone(),
                 input: Arc::downgrade(&input),
             }),
@@ -250,8 +250,8 @@ impl VideoLayerHandle {
 /// [`VideoCompositorHandle::add_source`]. It stores only the latest frame,
 /// so a fast producer cannot build an unbounded queue behind a slower
 /// compositor output rate.
-#[rust_hlog::hlog]
 pub struct VideoCompositorInputSink {
+    clog: CLog,
     name: Arc<str>,
     shared: Weak<CompositorShared>,
     input: Weak<VideoInput>,
@@ -281,12 +281,12 @@ impl Element for VideoCompositorInputSink {
         ElementType::VideoCompositor
     }
 
-    fn hlog(&self) -> &HLog {
-        &self.hlog
+    fn clog(&self) -> &CLog {
+        &self.clog
     }
 
-    fn hlog_mut(&mut self) -> &mut HLog {
-        &mut self.hlog
+    fn clog_mut(&mut self) -> &mut CLog {
+        &mut self.clog
     }
 }
 
@@ -397,8 +397,8 @@ impl InputScaler {
 /// element's own pipeline drives output on its independent clock. Input
 /// frame PTS values therefore do not become output PTS; output advances by
 /// one tick in [`VideoCompositor::time_base`] for every composed frame.
-#[rust_hlog::hlog]
 pub struct VideoCompositor {
+    clog: CLog,
     name: Arc<str>,
     shared: Arc<CompositorShared>,
     options: VideoCompositorOptions,
@@ -421,7 +421,7 @@ impl VideoCompositor {
     ) -> std::result::Result<(Self, VideoCompositorHandle), VideoCompositorError> {
         validate_output_options(options)?;
         let name: Arc<str> = name.into().into();
-        let hlog = element_hlog(ElementType::VideoCompositor, &name, None);
+        let clog = element_clog(ElementType::VideoCompositor, &name, None);
         let shared = Arc::new(CompositorShared {
             inputs: Mutex::new(HashMap::new()),
             next_input_id: AtomicU64::new(1),
@@ -435,8 +435,8 @@ impl VideoCompositor {
             move || ffmpeg::frame::Video::new(ffmpeg::format::Pixel::BGRA, width, height),
             |_| {},
         );
-        hinfo!(
-            hlog: &hlog,
+        cinfo!(
+            clog: &clog,
             "created: {}x{}, frame_rate={}, format=BGRA",
             width,
             height,
@@ -445,7 +445,7 @@ impl VideoCompositor {
         Ok((
             Self {
                 name: name.clone(),
-                hlog,
+                clog,
                 shared: shared.clone(),
                 options,
                 frame_interval,
@@ -547,7 +547,7 @@ impl VideoCompositor {
         let output = self.compose_frame()?;
         if let Err(error) = self.pad.push(MediaBuffer::Video(Arc::new(output))) {
             bus.post(
-                &self.hlog,
+                &self.clog,
                 BusEvent::Error {
                     element_type: ElementType::VideoCompositor,
                     name: self.name.clone(),
@@ -568,12 +568,12 @@ impl Element for VideoCompositor {
         ElementType::VideoCompositor
     }
 
-    fn hlog(&self) -> &HLog {
-        &self.hlog
+    fn clog(&self) -> &CLog {
+        &self.clog
     }
 
-    fn hlog_mut(&mut self) -> &mut HLog {
-        &mut self.hlog
+    fn clog_mut(&mut self) -> &mut CLog {
+        &mut self.clog
     }
 }
 
@@ -585,12 +585,12 @@ impl Source for VideoCompositor {
 
 impl SourceElement for VideoCompositor {
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
-        hinfo!(self, "run: starting");
+        cinfo!(self, "run: starting");
         let mut schedule = PeriodicSchedule::new(self.frame_interval, Instant::now());
         loop {
             let outcome = drain_control(control, self, bus)?;
             if outcome.stopped {
-                hinfo!(self, "run: stopped");
+                cinfo!(self, "run: stopped");
                 return Ok(());
             }
             if outcome.paused_for > Duration::ZERO {
@@ -747,8 +747,8 @@ mod tests {
 
     use super::*;
 
-    #[rust_hlog::hlog]
     struct CapturingSink {
+        clog: CLog,
         received: Arc<StdMutex<Vec<MediaBuffer>>>,
     }
 
@@ -761,12 +761,12 @@ mod tests {
             ElementType::Other
         }
 
-        fn hlog(&self) -> &HLog {
-            &self.hlog
+        fn clog(&self) -> &CLog {
+            &self.clog
         }
 
-        fn hlog_mut(&mut self) -> &mut HLog {
-            &mut self.hlog
+        fn clog_mut(&mut self) -> &mut CLog {
+            &mut self.clog
         }
     }
 
@@ -995,7 +995,7 @@ mod tests {
         let received = Arc::new(StdMutex::new(Vec::new()));
         compositor.src_pads()[0].link(Box::new(CapturingSink {
             received: received.clone(),
-            hlog: element_hlog(ElementType::Other, "capture", None),
+            clog: element_clog(ElementType::Other, "capture", None),
         }));
         let (bus, _) = Bus::new();
         compositor.push_frame(&bus).unwrap();
@@ -1012,8 +1012,8 @@ mod tests {
         assert_eq!(pts, vec![Some(0), Some(1)]);
     }
 
-    #[rust_hlog::hlog]
     struct TimestampSink {
+        clog: CLog,
         tx: crossbeam_channel::Sender<Instant>,
     }
 
@@ -1024,11 +1024,11 @@ mod tests {
         fn element_type(&self) -> ElementType {
             ElementType::Other
         }
-        fn hlog(&self) -> &HLog {
-            &self.hlog
+        fn clog(&self) -> &CLog {
+            &self.clog
         }
-        fn hlog_mut(&mut self) -> &mut HLog {
-            &mut self.hlog
+        fn clog_mut(&mut self) -> &mut CLog {
+            &mut self.clog
         }
     }
 
@@ -1063,7 +1063,7 @@ mod tests {
         let (tx, rx) = crossbeam_channel::unbounded();
         let sink = TimestampSink {
             tx,
-            hlog: element_hlog(ElementType::Other, "timestamp-recorder", None),
+            clog: element_clog(ElementType::Other, "timestamp-recorder", None),
         };
         let (compositor, _handle) = VideoCompositor::new(
             "compositor",

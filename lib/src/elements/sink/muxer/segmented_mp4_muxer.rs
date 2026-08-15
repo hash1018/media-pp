@@ -4,14 +4,14 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::clog::{CLog, cinfo};
 use ffmpeg_next as ffmpeg;
-use rust_hlog::{HLog, hinfo};
 
 use super::mp4_muxer::{Mp4Muxer, Mp4MuxerError};
 use crate::{
     buffer::MediaBuffer,
     control::ControlMsg,
-    element::{Element, ElementType, Sink, element_hlog},
+    element::{Element, ElementType, Sink, element_clog},
     error::Result,
 };
 
@@ -152,7 +152,7 @@ impl SegmentedMp4Muxer {
             .enumerate()
             .map(|(index, name)| -> Box<dyn Sink> {
                 Box::new(SegmentedTrackSink {
-                    hlog: element_hlog(ElementType::SegmentedMp4Muxer, &name, None),
+                    clog: element_clog(ElementType::SegmentedMp4Muxer, &name, None),
                     name,
                     track_index: index,
                     group: group.clone(),
@@ -230,7 +230,7 @@ impl SegmentGroup {
                 state.current_sinks = open_segment(&state.streams, path)?;
                 state.segment_index = index;
                 state.segment_started = Instant::now();
-                hinfo!(
+                cinfo!(
                     main_id: "segmented-mp4-muxer",
                     "rotated to segment {index}"
                 );
@@ -260,8 +260,8 @@ impl SegmentGroup {
 /// One track's own [`Sink`] — a lightweight handle sharing a
 /// [`SegmentGroup`] with every other track [`SegmentedMp4Muxer::open`]
 /// returned alongside it.
-#[rust_hlog::hlog]
 struct SegmentedTrackSink {
+    clog: CLog,
     name: Arc<str>,
     track_index: usize,
     group: Arc<SegmentGroup>,
@@ -276,12 +276,12 @@ impl Element for SegmentedTrackSink {
         ElementType::SegmentedMp4Muxer
     }
 
-    fn hlog(&self) -> &HLog {
-        &self.hlog
+    fn clog(&self) -> &CLog {
+        &self.clog
     }
 
-    fn hlog_mut(&mut self) -> &mut HLog {
-        &mut self.hlog
+    fn clog_mut(&mut self) -> &mut CLog {
+        &mut self.clog
     }
 }
 

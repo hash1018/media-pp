@@ -8,15 +8,15 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::clog::{CLog, cerror, cinfo};
 use ffmpeg_next as ffmpeg;
-use rust_hlog::{HLog, herror, hinfo};
 use thiserror::Error as ThisError;
 
 use crate::{
     buffer::MediaBuffer,
     bus::{Bus, BusEvent},
     control::{ControlMsg, ControlReceiver, drain_control},
-    element::{Element, ElementType, Sink, Source, SourceElement, element_hlog},
+    element::{Element, ElementType, Sink, Source, SourceElement, element_clog},
     error::Result,
     pad::SrcPad,
     schedule::ActiveTimeline,
@@ -175,7 +175,7 @@ impl MixerHandle {
         Some(Box::new(MixerInputSink {
             name: name.clone(),
             id,
-            hlog: element_hlog(ElementType::AudioMixer, &name, None),
+            clog: element_clog(ElementType::AudioMixer, &name, None),
             shared: self.shared.clone(),
             target_format: self.format,
             target_layout: self.channel_layout,
@@ -207,8 +207,8 @@ impl MixerHandle {
 /// whatever thread is driving the *upstream* source this got linked to
 /// (a different pipeline's own thread, in the normal case), so every
 /// access to the shared input map goes through `MixerShared`'s lock.
-#[rust_hlog::hlog]
 pub struct MixerInputSink {
+    clog: CLog,
     name: Arc<str>,
     /// Identity returned by the corresponding `add_source` call. Compared
     /// with the map entry before every mutation so a stale sink cannot
@@ -236,12 +236,12 @@ impl Element for MixerInputSink {
         ElementType::AudioMixer
     }
 
-    fn hlog(&self) -> &HLog {
-        &self.hlog
+    fn clog(&self) -> &CLog {
+        &self.clog
     }
 
-    fn hlog_mut(&mut self) -> &mut HLog {
-        &mut self.hlog
+    fn clog_mut(&mut self) -> &mut CLog {
+        &mut self.clog
     }
 }
 
@@ -276,7 +276,7 @@ impl Sink for MixerInputSink {
                 }
             }
             other => {
-                herror!(self, "unsupported buffer: expected Audio or Eos");
+                cerror!(self, "unsupported buffer: expected Audio or Eos");
                 return Err(AudioMixerError::UnsupportedBuffer(other.kind()).into());
             }
         }
@@ -350,8 +350,8 @@ impl Sink for MixerInputSink {
 /// Runs until `Stop` — never reaches `Eos` on its own, same as every
 /// other live source in this crate; an individual input reaching `Eos` or
 /// being removed just drops out of future ticks, it doesn't end the mix.
-#[rust_hlog::hlog]
 pub struct AudioMixer {
+    clog: CLog,
     name: Arc<str>,
     shared: Arc<MixerShared>,
     pad: SrcPad,
@@ -379,9 +379,9 @@ impl AudioMixer {
     /// chains of its own for a handle to build).
     pub fn new(name: impl Into<String>, options: AudioMixerOptions) -> (Self, MixerHandle) {
         let name: Arc<str> = name.into().into();
-        let hlog = element_hlog(ElementType::AudioMixer, &name, None);
-        hinfo!(
-            hlog: &hlog,
+        let clog = element_clog(ElementType::AudioMixer, &name, None);
+        cinfo!(
+            clog: &clog,
             "created: {}Hz, {} channel(s)",
             options.sample_rate,
             options.channels
@@ -396,7 +396,7 @@ impl AudioMixer {
         (
             Self {
                 name: name.clone(),
-                hlog,
+                clog,
                 shared: shared.clone(),
                 pad,
                 sample_rate: options.sample_rate,
@@ -470,7 +470,7 @@ impl AudioMixer {
 
         if let Err(error) = self.pad.push(MediaBuffer::Audio(Arc::new(frame))) {
             bus.post(
-                &self.hlog,
+                &self.clog,
                 BusEvent::Error {
                     element_type: ElementType::AudioMixer,
                     name: self.name.clone(),
@@ -490,12 +490,12 @@ impl Element for AudioMixer {
         ElementType::AudioMixer
     }
 
-    fn hlog(&self) -> &HLog {
-        &self.hlog
+    fn clog(&self) -> &CLog {
+        &self.clog
     }
 
-    fn hlog_mut(&mut self) -> &mut HLog {
-        &mut self.hlog
+    fn clog_mut(&mut self) -> &mut CLog {
+        &mut self.clog
     }
 }
 
@@ -507,12 +507,12 @@ impl Source for AudioMixer {
 
 impl SourceElement for AudioMixer {
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
-        hinfo!(self, "run: starting");
+        cinfo!(self, "run: starting");
         let mut timeline = ActiveTimeline::new(Instant::now());
         loop {
             let outcome = drain_control(control, self, bus)?;
             if outcome.stopped {
-                hinfo!(self, "run: stopped");
+                cinfo!(self, "run: stopped");
                 return Ok(());
             }
             timeline.account_pause(outcome.paused_for);
@@ -533,7 +533,7 @@ mod tests {
         atomic::{AtomicBool, Ordering},
     };
 
-    use rust_hlog::HLog;
+    use crate::clog::CLog;
 
     use super::*;
     use crate::pipeline::Pipeline;
@@ -549,8 +549,8 @@ mod tests {
         frame
     }
 
-    #[rust_hlog::hlog]
     struct RecordingSink {
+        clog: CLog,
         seen: Arc<StdMutex<Vec<f32>>>,
     }
 
@@ -561,11 +561,11 @@ mod tests {
         fn element_type(&self) -> ElementType {
             ElementType::Other
         }
-        fn hlog(&self) -> &HLog {
-            &self.hlog
+        fn clog(&self) -> &CLog {
+            &self.clog
         }
-        fn hlog_mut(&mut self) -> &mut HLog {
-            &mut self.hlog
+        fn clog_mut(&mut self) -> &mut CLog {
+            &mut self.clog
         }
     }
 
@@ -605,8 +605,8 @@ mod tests {
         frame
     }
 
-    #[rust_hlog::hlog]
     struct StereoRecordingSink {
+        clog: CLog,
         seen: Arc<StdMutex<Vec<(f32, f32)>>>,
     }
 
@@ -617,11 +617,11 @@ mod tests {
         fn element_type(&self) -> ElementType {
             ElementType::Other
         }
-        fn hlog(&self) -> &HLog {
-            &self.hlog
+        fn clog(&self) -> &CLog {
+            &self.clog
         }
-        fn hlog_mut(&mut self) -> &mut HLog {
-            &mut self.hlog
+        fn clog_mut(&mut self) -> &mut CLog {
+            &mut self.clog
         }
     }
 
@@ -670,7 +670,7 @@ mod tests {
         let seen = Arc::new(StdMutex::new(Vec::new()));
         let sink = StereoRecordingSink {
             seen: seen.clone(),
-            hlog: element_hlog(ElementType::Other, "stereo-recorder", None),
+            clog: element_clog(ElementType::Other, "stereo-recorder", None),
         };
 
         let pipeline = Pipeline::new("mixer-stereo-test", mixer, |source, ctx| {
@@ -739,7 +739,7 @@ mod tests {
         let seen = Arc::new(StdMutex::new(Vec::new()));
         let sink = RecordingSink {
             seen: seen.clone(),
-            hlog: element_hlog(ElementType::Other, "recorder", None),
+            clog: element_clog(ElementType::Other, "recorder", None),
         };
 
         let pipeline = Pipeline::new("mixer-test", mixer, |source, ctx| {
@@ -804,7 +804,7 @@ mod tests {
         let seen = Arc::new(StdMutex::new(Vec::new()));
         let sink = RecordingSink {
             seen: seen.clone(),
-            hlog: element_hlog(ElementType::Other, "recorder", None),
+            clog: element_clog(ElementType::Other, "recorder", None),
         };
         let pipeline = Pipeline::new("mixer-test-2", mixer, |source, ctx| {
             let branch = ctx.branch().to(Box::new(sink))?;
@@ -855,7 +855,7 @@ mod tests {
         let seen = Arc::new(StdMutex::new(Vec::new()));
         let sink = RecordingSink {
             seen: seen.clone(),
-            hlog: element_hlog(ElementType::Other, "recorder", None),
+            clog: element_clog(ElementType::Other, "recorder", None),
         };
         let pipeline = Pipeline::new("mixer-test-3", mixer, |source, ctx| {
             let branch = ctx.branch().to(Box::new(sink))?;

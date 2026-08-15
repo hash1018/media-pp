@@ -4,7 +4,7 @@ use crate::{
     bus::{Bus, BusReceiver},
     clock::Clock,
     control::{self, ControlReceiver, ControlSender},
-    element::{Context, SourceElement, element_hlog},
+    element::{Context, SourceElement, element_clog},
     error::Result,
     graph::{ElementId, PipelineGraph},
     playback_clock::PlaybackClock,
@@ -71,7 +71,7 @@ impl PipelineBuilder {
         mut source: S,
         wire: impl FnOnce(&mut S, &Arc<Context>) -> Result<()>,
     ) -> Result<Self> {
-        *source.hlog_mut() = element_hlog(source.element_type(), &source.name(), Some(&self.id));
+        *source.clog_mut() = element_clog(source.element_type(), &source.name(), Some(&self.id));
         let source_id = self.graph.add_source(source.element_type(), source.name());
         let context = Arc::new(Context {
             bus: self.bus.clone(),

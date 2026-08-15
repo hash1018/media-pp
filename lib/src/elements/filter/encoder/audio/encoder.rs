@@ -1,13 +1,13 @@
 use std::{collections::VecDeque, sync::Arc};
 
+use crate::clog::{CLog, cerror, cinfo};
 use ffmpeg_next as ffmpeg;
-use rust_hlog::{HLog, herror, hinfo};
 use thiserror::Error as ThisError;
 
 use crate::{
     buffer::MediaBuffer,
     control::ControlMsg,
-    element::{Element, ElementType, Sink, Source, element_hlog},
+    element::{Element, ElementType, Sink, Source, element_clog},
     error::Result,
     pad::SrcPad,
 };
@@ -114,8 +114,8 @@ pub struct SwAudioEncoderOptions {
 /// [`ffmpeg::software::resampling::Context::flush`]) and whatever's left
 /// in `pending` (as one final, possibly short, frame — allowed for the
 /// last frame only) before flushing the encoder itself.
-#[rust_hlog::hlog]
 pub struct SwAudioEncoder {
+    clog: CLog,
     name: Arc<str>,
     encoder: ffmpeg::encoder::audio::Encoder,
     pad: SrcPad,
@@ -200,10 +200,10 @@ impl SwAudioEncoder {
         let frame_size = encoder.frame_size() as usize;
 
         let name: Arc<str> = name.into().into();
-        let hlog = element_hlog(ElementType::SwAudioEncoder, &name, None);
+        let clog = element_clog(ElementType::SwAudioEncoder, &name, None);
         let pad = SrcPad::new(format!("{name}_src"));
-        hinfo!(
-            hlog: &hlog,
+        cinfo!(
+            clog: &clog,
             "opened: codec={encoder_name}, {}Hz, {} channel(s), format={:?}, frame_size={}, bit_rate={}",
             options.sample_rate,
             options.channels,
@@ -213,7 +213,7 @@ impl SwAudioEncoder {
         );
         Ok(Self {
             name,
-            hlog,
+            clog,
             encoder,
             pad,
             target_format,
@@ -282,7 +282,7 @@ impl SwAudioEncoder {
 
             self.encoder
                 .send_frame(&frame)
-                .inspect_err(|error| herror!(self, "send_frame failed: {error}"))
+                .inspect_err(|error| cerror!(self, "send_frame failed: {error}"))
                 .map_err(SwAudioEncoderError::from)?;
             self.drain_packets()?;
 
@@ -435,12 +435,12 @@ impl Element for SwAudioEncoder {
         ElementType::SwAudioEncoder
     }
 
-    fn hlog(&self) -> &HLog {
-        &self.hlog
+    fn clog(&self) -> &CLog {
+        &self.clog
     }
 
-    fn hlog_mut(&mut self) -> &mut HLog {
-        &mut self.hlog
+    fn clog_mut(&mut self) -> &mut CLog {
+        &mut self.clog
     }
 }
 
@@ -455,18 +455,18 @@ impl Sink for SwAudioEncoder {
         match buf {
             MediaBuffer::Audio(frame) => {
                 self.resample(&frame)
-                    .inspect_err(|error| herror!(self, "resample failed: {error}"))
+                    .inspect_err(|error| cerror!(self, "resample failed: {error}"))
                     .map_err(SwAudioEncoderError::from)?;
                 self.drain_pending(false)
             }
             MediaBuffer::Eos => {
                 self.flush_resampler()
-                    .inspect_err(|error| herror!(self, "resampler flush failed: {error}"))
+                    .inspect_err(|error| cerror!(self, "resampler flush failed: {error}"))
                     .map_err(SwAudioEncoderError::from)?;
                 self.drain_pending(true)?;
                 self.encoder
                     .send_eof()
-                    .inspect_err(|error| herror!(self, "send_eof failed: {error}"))
+                    .inspect_err(|error| cerror!(self, "send_eof failed: {error}"))
                     .map_err(SwAudioEncoderError::from)?;
                 self.drain_packets()?;
                 self.pad.push(MediaBuffer::Eos)
@@ -517,8 +517,8 @@ mod tests {
         }
     }
 
-    #[rust_hlog::hlog]
     struct RecordingSink {
+        clog: CLog,
         packets: Arc<std::sync::Mutex<usize>>,
         eos: Arc<std::sync::atomic::AtomicBool>,
     }
@@ -530,11 +530,11 @@ mod tests {
         fn element_type(&self) -> ElementType {
             ElementType::Other
         }
-        fn hlog(&self) -> &HLog {
-            &self.hlog
+        fn clog(&self) -> &CLog {
+            &self.clog
         }
-        fn hlog_mut(&mut self) -> &mut HLog {
-            &mut self.hlog
+        fn clog_mut(&mut self) -> &mut CLog {
+            &mut self.clog
         }
     }
 
@@ -602,7 +602,7 @@ mod tests {
         let sink = RecordingSink {
             packets: packets.clone(),
             eos: eos.clone(),
-            hlog: element_hlog(ElementType::Other, "recorder", None),
+            clog: element_clog(ElementType::Other, "recorder", None),
         };
         encoder.src_pads()[0].link(Box::new(sink));
 
@@ -627,8 +627,8 @@ mod tests {
         );
     }
 
-    #[rust_hlog::hlog]
     struct CapturingSink {
+        clog: CLog,
         packets: Arc<std::sync::Mutex<Vec<Arc<ffmpeg::Packet>>>>,
     }
 
@@ -639,11 +639,11 @@ mod tests {
         fn element_type(&self) -> ElementType {
             ElementType::Other
         }
-        fn hlog(&self) -> &HLog {
-            &self.hlog
+        fn clog(&self) -> &CLog {
+            &self.clog
         }
-        fn hlog_mut(&mut self) -> &mut HLog {
-            &mut self.hlog
+        fn clog_mut(&mut self) -> &mut CLog {
+            &mut self.clog
         }
     }
 
@@ -686,7 +686,7 @@ mod tests {
         let packets = Arc::new(std::sync::Mutex::new(Vec::new()));
         encoder.src_pads()[0].link(Box::new(CapturingSink {
             packets: packets.clone(),
-            hlog: element_hlog(ElementType::Other, "capture", None),
+            clog: element_clog(ElementType::Other, "capture", None),
         }));
 
         for _ in 0..20 {

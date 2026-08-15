@@ -1,14 +1,14 @@
 use std::{sync::Arc, time::Duration};
 
+use crate::clog::{CLog, cerror, cinfo};
 use ffmpeg_next as ffmpeg;
-use rust_hlog::{HLog, herror, hinfo};
 use thiserror::Error as ThisError;
 
 use crate::{
     buffer::MediaBuffer,
     bus::{Bus, BusEvent},
     control::{ControlReceiver, drain_control},
-    element::{Element, ElementType, Source, SourceElement, element_hlog},
+    element::{Element, ElementType, Source, SourceElement, element_clog},
     error::Result,
     pad::SrcPad,
 };
@@ -80,8 +80,8 @@ impl Default for RtspOptions {
 /// stuck connection un-`Stop`-able (`drain_control` never gets a turn)
 /// and this element's "fail fast, don't retry" contract impossible to
 /// keep.
-#[rust_hlog::hlog]
 pub struct RtspSource {
+    clog: CLog,
     name: Arc<str>,
     input: ffmpeg::format::context::Input,
     pads: Vec<SrcPad>,
@@ -123,9 +123,9 @@ impl RtspSource {
             .collect();
 
         let name: Arc<str> = name.into().into();
-        let hlog = element_hlog(ElementType::RtspSource, &name, None);
-        hinfo!(
-            hlog: &hlog,
+        let clog = element_clog(ElementType::RtspSource, &name, None);
+        cinfo!(
+            clog: &clog,
             "opened: url={}, transport={:?}, {} stream(s)",
             url.as_ref(),
             options.transport,
@@ -134,7 +134,7 @@ impl RtspSource {
         Ok((
             Self {
                 name,
-                hlog,
+                clog,
                 input,
                 pads,
             },
@@ -169,12 +169,12 @@ impl Element for RtspSource {
         ElementType::RtspSource
     }
 
-    fn hlog(&self) -> &HLog {
-        &self.hlog
+    fn clog(&self) -> &CLog {
+        &self.clog
     }
 
-    fn hlog_mut(&mut self) -> &mut HLog {
-        &mut self.hlog
+    fn clog_mut(&mut self) -> &mut CLog {
+        &mut self.clog
     }
 }
 
@@ -186,10 +186,10 @@ impl Source for RtspSource {
 
 impl SourceElement for RtspSource {
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
-        hinfo!(self, "run: starting");
+        cinfo!(self, "run: starting");
         loop {
             if drain_control(control, self, bus)?.stopped {
-                hinfo!(self, "run: stopped");
+                cinfo!(self, "run: stopped");
                 return Ok(());
             }
 
@@ -204,7 +204,7 @@ impl SourceElement for RtspSource {
                         // ending this whole source thread over it.
                         if let Err(error) = pad.push(MediaBuffer::Packet(Arc::new(packet))) {
                             bus.post(
-                                &self.hlog,
+                                &self.clog,
                                 BusEvent::Error {
                                     element_type: ElementType::RtspSource,
                                     name: self.name.clone(),
@@ -224,7 +224,7 @@ impl SourceElement for RtspSource {
                 // belongs to whoever's watching the bus, building a fresh
                 // `RtspSource` to reconnect with.
                 Err(error) => {
-                    herror!(self, "read failed: {error}");
+                    cerror!(self, "read failed: {error}");
                     return Err(RtspSourceError::Ffmpeg(error).into());
                 }
             }
@@ -232,7 +232,7 @@ impl SourceElement for RtspSource {
         for pad in self.pads.iter_mut() {
             pad.push(MediaBuffer::Eos)?;
         }
-        hinfo!(self, "run: reached eos");
+        cinfo!(self, "run: reached eos");
         Ok(())
     }
 

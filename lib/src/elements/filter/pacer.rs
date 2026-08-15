@@ -5,15 +5,15 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::clog::{CLog, cinfo};
 use ffmpeg_next as ffmpeg;
-use rust_hlog::{HLog, hinfo};
 use thiserror::Error as ThisError;
 
 use crate::{
     buffer::MediaBuffer,
     clock::Clock,
     control::ControlMsg,
-    element::{Element, ElementType, Sink, Source, element_hlog},
+    element::{Element, ElementType, Sink, Source, element_clog},
     pad::SrcPad,
     time::{InvalidTimeBase, MediaTimestamp, TimeBase},
 };
@@ -66,8 +66,8 @@ const INTERRUPT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 /// `clock` is shared across every `Pacer` in the pipeline (one per stream
 /// — video, audio, ...) so they all agree on the same t=0 instead of each
 /// anchoring to its own first frame.
-#[rust_hlog::hlog]
 pub struct Pacer {
+    clog: CLog,
     name: Arc<str>,
     time_base: TimeBase,
     clock: Arc<Clock>,
@@ -101,8 +101,8 @@ impl Pacer {
         clock: Arc<Clock>,
     ) -> Result<Self, PacerError> {
         let name: Arc<str> = name.into().into();
-        let hlog = element_hlog(ElementType::Pacer, &name, None);
-        hinfo!(hlog: &hlog, "created: time_base={time_base}");
+        let clog = element_clog(ElementType::Pacer, &name, None);
+        cinfo!(clog: &clog, "created: time_base={time_base}");
         let pad = SrcPad::new(format!("{name}_src"));
         let interrupt_epoch = clock.interrupt_epoch();
         let time_base = TimeBase::try_new(time_base).map_err(
@@ -116,7 +116,7 @@ impl Pacer {
         )?;
         Ok(Self {
             name,
-            hlog,
+            clog,
             time_base,
             clock,
             first_pts: None,
@@ -179,12 +179,12 @@ impl Element for Pacer {
         ElementType::Pacer
     }
 
-    fn hlog(&self) -> &HLog {
-        &self.hlog
+    fn clog(&self) -> &CLog {
+        &self.clog
     }
 
-    fn hlog_mut(&mut self) -> &mut HLog {
-        &mut self.hlog
+    fn clog_mut(&mut self) -> &mut CLog {
+        &mut self.clog
     }
 }
 

@@ -1,13 +1,13 @@
 use std::{collections::VecDeque, sync::Arc, thread, time::Duration};
 
+use crate::clog::{CLog, cdebug, cinfo};
 use ffmpeg_next as ffmpeg;
-use rust_hlog::{HLog, hdebug, hinfo};
 use thiserror::Error as ThisError;
 
 use crate::{
     buffer::MediaBuffer,
     control::ControlMsg,
-    element::{Element, ElementType, Sink, Source, element_hlog},
+    element::{Element, ElementType, Sink, Source, element_clog},
     pad::SrcPad,
     playback_clock::{PlaybackClock, PlaybackMaster},
     time::{InvalidTimeBase, MediaTimestamp, TimeBase},
@@ -53,8 +53,8 @@ enum Decision {
 ///
 /// Do not put a `Pacer` in the same video branch; that would pace twice.
 /// Put a [`crate::queue::Queue`] upstream so waits do not block demux/decode.
-#[rust_hlog::hlog]
 pub struct VideoSynchronizer {
+    clog: CLog,
     name: Arc<str>,
     time_base: TimeBase,
     playback_clock: Arc<PlaybackClock>,
@@ -72,7 +72,7 @@ impl VideoSynchronizer {
         playback_clock: Arc<PlaybackClock>,
     ) -> Result<Self, VideoSynchronizerError> {
         let name: Arc<str> = name.into().into();
-        let hlog = element_hlog(ElementType::VideoSynchronizer, &name, None);
+        let clog = element_clog(ElementType::VideoSynchronizer, &name, None);
         let time_base = TimeBase::try_new(time_base).map_err(
             |InvalidTimeBase {
                  numerator,
@@ -83,10 +83,10 @@ impl VideoSynchronizer {
             },
         )?;
         let interrupt_epoch = playback_clock.interrupt_epoch();
-        hinfo!(hlog: &hlog, "created: time_base={time_base:?}");
+        cinfo!(clog: &clog, "created: time_base={time_base:?}");
         Ok(Self {
             name: name.clone(),
-            hlog,
+            clog,
             time_base,
             playback_clock,
             interrupt_epoch,
@@ -177,12 +177,12 @@ impl Element for VideoSynchronizer {
         ElementType::VideoSynchronizer
     }
 
-    fn hlog(&self) -> &HLog {
-        &self.hlog
+    fn clog(&self) -> &CLog {
+        &self.clog
     }
 
-    fn hlog_mut(&mut self) -> &mut HLog {
-        &mut self.hlog
+    fn clog_mut(&mut self) -> &mut CLog {
+        &mut self.clog
     }
 }
 
@@ -211,7 +211,7 @@ impl Sink for VideoSynchronizer {
             };
             match outcome {
                 WaitOutcome::Render => self.pad.push(buf)?,
-                WaitOutcome::Drop => hdebug!(self, "dropping late video frame"),
+                WaitOutcome::Drop => cdebug!(self, "dropping late video frame"),
                 WaitOutcome::Interrupted => {
                     self.pending.push_front(buf);
                     return Ok(());

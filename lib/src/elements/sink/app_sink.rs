@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
-use rust_hlog::{HLog, hinfo};
+use crate::clog::{CLog, cinfo};
 
 use crate::{
     buffer::MediaBuffer,
     control::ControlMsg,
-    element::{Element, ElementType, Sink, element_hlog},
+    element::{Element, ElementType, Sink, element_clog},
     error::Result,
 };
 
@@ -31,8 +31,8 @@ use crate::{
 ///     Ok(())
 /// });
 /// ```
-#[rust_hlog::hlog]
 pub struct AppSink<F, C> {
+    clog: CLog,
     name: Arc<str>,
     consume: F,
     control: C,
@@ -77,11 +77,11 @@ where
     /// ```
     pub fn with_control(name: impl Into<String>, consume: F, control: C) -> Self {
         let name: Arc<str> = name.into().into();
-        let hlog = element_hlog(ElementType::AppSink, &name, None);
-        hinfo!(hlog: &hlog, "created");
+        let clog = element_clog(ElementType::AppSink, &name, None);
+        cinfo!(clog: &clog, "created");
         Self {
             name,
-            hlog,
+            clog,
             consume,
             control,
         }
@@ -101,12 +101,12 @@ where
         ElementType::AppSink
     }
 
-    fn hlog(&self) -> &HLog {
-        &self.hlog
+    fn clog(&self) -> &CLog {
+        &self.clog
     }
 
-    fn hlog_mut(&mut self) -> &mut HLog {
-        &mut self.hlog
+    fn clog_mut(&mut self) -> &mut CLog {
+        &mut self.clog
     }
 }
 

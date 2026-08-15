@@ -7,6 +7,4 @@ members = [
     "examples/rtsp/*",
     "examples/vision/*",
     "examples/webrtc/*",
-    "rust-hlog",
-    "rust-hlog/hlog-macro",
 ]

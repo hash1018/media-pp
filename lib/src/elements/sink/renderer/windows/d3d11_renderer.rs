@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
+use crate::clog::{CLog, cerror, cinfo};
 use ffmpeg_next as ffmpeg;
-use rust_hlog::{HLog, herror, hinfo};
 use thiserror::Error as ThisError;
 use windows::{
     Win32::Graphics::{
@@ -14,7 +14,7 @@ use windows::{
 use crate::{
     buffer::MediaBuffer,
     control::ControlMsg,
-    element::{Element, ElementType, Sink, element_hlog},
+    element::{Element, ElementType, Sink, element_clog},
     elements::{SubmitError, filter::decoder::d3d11va_decoder::d3d11va_texture},
     error::Result,
     pool::UnboundObjectPoolRef,
@@ -163,8 +163,8 @@ pub enum D3d11RendererError {
 /// from FFmpeg's D3D11VA frame pool; reading the actual texture description
 /// gives all of those producer paths one reliable source of truth for the
 /// pixel layout.
-#[rust_hlog::hlog]
 pub struct D3d11Renderer {
+    clog: CLog,
     name: Arc<str>,
     inner: Box<dyn D3d11FrameRenderer>,
     /// Captured once from `inner.device()` at construction — see
@@ -179,12 +179,12 @@ impl D3d11Renderer {
     /// window/device by the time it gets here.
     pub fn new(name: impl Into<String>, renderer: Box<dyn D3d11FrameRenderer>) -> Self {
         let name: Arc<str> = name.into().into();
-        let hlog = element_hlog(ElementType::D3d11Renderer, &name, None);
-        hinfo!(hlog: &hlog, "created");
+        let clog = element_clog(ElementType::D3d11Renderer, &name, None);
+        cinfo!(clog: &clog, "created");
         let device = renderer.device();
         Self {
             name,
-            hlog,
+            clog,
             inner: renderer,
             device,
         }
@@ -194,9 +194,9 @@ impl D3d11Renderer {
     pub fn resize(&self, width: u32, height: u32) -> Result<()> {
         self.inner
             .resize(width, height)
-            .inspect_err(|error| herror!(self, "resize failed: {error:?}"))
+            .inspect_err(|error| cerror!(self, "resize failed: {error:?}"))
             .map_err(D3d11RendererError::Resize)?;
-        hinfo!(self, "resized: {width}x{height}");
+        cinfo!(self, "resized: {width}x{height}");
         Ok(())
     }
 
@@ -235,7 +235,7 @@ impl D3d11Renderer {
                 index,
                 array_size: desc.ArraySize,
             };
-            herror!(self, "{error}");
+            cerror!(self, "{error}");
             return Err(error.into());
         }
         let array_index = index as u32;
@@ -270,12 +270,12 @@ impl Element for D3d11Renderer {
         ElementType::D3d11Renderer
     }
 
-    fn hlog(&self) -> &HLog {
-        &self.hlog
+    fn clog(&self) -> &CLog {
+        &self.clog
     }
 
-    fn hlog_mut(&mut self) -> &mut HLog {
-        &mut self.hlog
+    fn clog_mut(&mut self) -> &mut CLog {
+        &mut self.clog
     }
 }
 
@@ -287,11 +287,11 @@ impl Sink for D3d11Renderer {
 
         if frame.format() != ffmpeg::format::Pixel::D3D11 {
             let format = frame.format();
-            herror!(self, "unsupported pixel format: {format:?}");
+            cerror!(self, "unsupported pixel format: {format:?}");
             return Err(D3d11RendererError::UnsupportedFormat(format).into());
         }
         self.submit_d3d11_frame(frame)
-            .inspect_err(|error| herror!(self, "submit_d3d11_frame failed: {error}"))
+            .inspect_err(|error| cerror!(self, "submit_d3d11_frame failed: {error}"))
     }
 
     fn control(&mut self, _msg: ControlMsg) -> Result<()> {

@@ -3,20 +3,20 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
-use rust_hlog::{HLog, hinfo};
+use crate::clog::{CLog, cinfo};
 
 use crate::{
     buffer::MediaBuffer,
     control::ControlMsg,
-    element::{Element, ElementType, Sink, element_hlog},
+    element::{Element, ElementType, Sink, element_clog},
     error::Result,
 };
 
 /// Terminal sink that just counts packets. Backed by an `Arc<AtomicUsize>`
 /// so the count can be read from outside the pipeline even when this sink
 /// ends up running on a `Queue` worker thread.
-#[rust_hlog::hlog]
 pub struct PacketCounter {
+    clog: CLog,
     name: Arc<str>,
     count: Arc<AtomicUsize>,
 }
@@ -25,12 +25,12 @@ impl PacketCounter {
     pub fn new(name: impl Into<String>) -> (Self, Arc<AtomicUsize>) {
         let count = Arc::new(AtomicUsize::new(0));
         let name: Arc<str> = name.into().into();
-        let hlog = element_hlog(ElementType::PacketCounter, &name, None);
-        hinfo!(hlog: &hlog, "created");
+        let clog = element_clog(ElementType::PacketCounter, &name, None);
+        cinfo!(clog: &clog, "created");
         (
             Self {
                 name,
-                hlog,
+                clog,
                 count: count.clone(),
             },
             count,
@@ -47,12 +47,12 @@ impl Element for PacketCounter {
         ElementType::PacketCounter
     }
 
-    fn hlog(&self) -> &HLog {
-        &self.hlog
+    fn clog(&self) -> &CLog {
+        &self.clog
     }
 
-    fn hlog_mut(&mut self) -> &mut HLog {
-        &mut self.hlog
+    fn clog_mut(&mut self) -> &mut CLog {
+        &mut self.clog
     }
 }
 

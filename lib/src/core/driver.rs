@@ -120,7 +120,7 @@ impl DriverRunner {
                 let element_type = driver.element_type();
                 if let Err(error) = driver.run(&stop, &bus) {
                     bus.post(
-                        driver.hlog(),
+                        driver.clog(),
                         BusEvent::Error {
                             element_type,
                             name,
@@ -160,13 +160,13 @@ impl Drop for DriverRunner {
 mod tests {
     use std::{sync::mpsc, time::Duration};
 
-    use rust_hlog::HLog;
+    use crate::clog::CLog;
 
     use super::*;
-    use crate::element::{Element, ElementType, element_hlog};
+    use crate::element::{Element, ElementType, element_clog};
 
-    #[rust_hlog::hlog]
     struct LoopingDriver {
+        clog: CLog,
         started: mpsc::Sender<()>,
         stopped: mpsc::Sender<()>,
     }
@@ -180,12 +180,12 @@ mod tests {
             ElementType::Other
         }
 
-        fn hlog(&self) -> &HLog {
-            &self.hlog
+        fn clog(&self) -> &CLog {
+            &self.clog
         }
 
-        fn hlog_mut(&mut self) -> &mut HLog {
-            &mut self.hlog
+        fn clog_mut(&mut self) -> &mut CLog {
+            &mut self.clog
         }
     }
 
@@ -213,7 +213,7 @@ mod tests {
         let runner = DriverRunner::new(LoopingDriver {
             started: started_tx,
             stopped: stopped_tx,
-            hlog: element_hlog(ElementType::Other, "looping", None),
+            clog: element_clog(ElementType::Other, "looping", None),
         });
         runner.run();
         started_rx

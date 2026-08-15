@@ -3,13 +3,13 @@ use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
-use rust_hlog::{HLog, hinfo};
+use crate::clog::{CLog, cinfo};
 
 use crate::{
     buffer::MediaBuffer,
     bus::BusEvent,
     control::ControlMsg,
-    element::{Context, Element, ElementType, Sink, element_hlog},
+    element::{Context, Element, ElementType, Sink, element_clog},
     error::Result,
     graph::{BranchId, ElementId, GraphError, PlannedEdge, PortRef},
     pad::SrcPad,
@@ -32,8 +32,8 @@ use crate::{
 /// Cheap to fan out: `MediaBuffer` wraps its payload in an `Arc`, so
 /// cloning a buffer for each output is a refcount bump, not a copy of the
 /// encoded/decoded data.
-#[rust_hlog::hlog]
 pub struct Tee {
+    clog: CLog,
     id: ElementId,
     name: Arc<str>,
     shared: Arc<TeeShared>,
@@ -90,8 +90,8 @@ pub struct TeeHandle {
 impl Tee {
     fn new(name: impl Into<String>, context: Arc<Context>) -> (Self, TeeHandle) {
         let name: Arc<str> = name.into().into();
-        let hlog = element_hlog(ElementType::Tee, &name, None);
-        hinfo!(hlog: &hlog, "created");
+        let clog = element_clog(ElementType::Tee, &name, None);
+        cinfo!(clog: &clog, "created");
         let id = context.graph.reserve_element_id();
         let shared = Arc::new(TeeShared {
             branches: Mutex::new(Vec::new()),
@@ -102,7 +102,7 @@ impl Tee {
             Self {
                 id,
                 name: name.clone(),
-                hlog,
+                clog,
                 shared: shared.clone(),
             },
             TeeHandle {
@@ -131,7 +131,7 @@ impl Tee {
     ) {
         let (element_type, name) = peer.unwrap_or((ElementType::Tee, self.name.clone()));
         self.shared.context.bus.for_element(root_id).post(
-            &self.hlog,
+            &self.clog,
             BusEvent::Error {
                 element_type,
                 name,
@@ -260,8 +260,8 @@ impl TeeHandle {
                     }));
                     Ok(())
                 })?;
-        hinfo!(
-            hlog: &element_hlog(ElementType::Tee, &self.name, None),
+        cinfo!(
+            clog: &element_clog(ElementType::Tee, &self.name, None),
             "sink added: {} total",
             branches.len()
         );
@@ -281,8 +281,8 @@ impl TeeHandle {
             .iter()
             .position(|branch| branch.id == Some(branch_id))
             .ok_or(GraphError::BranchNotAttached(branch_id))?;
-        hinfo!(
-            hlog: &element_hlog(ElementType::Tee, &self.name, None),
+        cinfo!(
+            clog: &element_clog(ElementType::Tee, &self.name, None),
             "sink removed: branch={branch_id}, {} remaining",
             branches.len() - 1
         );
@@ -338,12 +338,12 @@ impl Element for Tee {
         Some(self.id)
     }
 
-    fn hlog(&self) -> &HLog {
-        &self.hlog
+    fn clog(&self) -> &CLog {
+        &self.clog
     }
 
-    fn hlog_mut(&mut self) -> &mut HLog {
-        &mut self.hlog
+    fn clog_mut(&mut self) -> &mut CLog {
+        &mut self.clog
     }
 }
 
@@ -420,8 +420,8 @@ mod tests {
         MediaBuffer::Packet(Arc::new(ffmpeg_next::Packet::empty()))
     }
 
-    #[rust_hlog::hlog]
     struct CountingSink {
+        clog: CLog,
         name: &'static str,
         count: Arc<AtomicUsize>,
     }
@@ -435,12 +435,12 @@ mod tests {
             ElementType::Other
         }
 
-        fn hlog(&self) -> &HLog {
-            &self.hlog
+        fn clog(&self) -> &CLog {
+            &self.clog
         }
 
-        fn hlog_mut(&mut self) -> &mut HLog {
-            &mut self.hlog
+        fn clog_mut(&mut self) -> &mut CLog {
+            &mut self.clog
         }
     }
 
@@ -455,8 +455,9 @@ mod tests {
         }
     }
 
-    #[rust_hlog::hlog]
-    struct AlwaysFailSink {}
+    struct AlwaysFailSink {
+        clog: CLog,
+    }
 
     impl Element for AlwaysFailSink {
         fn name(&self) -> Arc<str> {
@@ -467,12 +468,12 @@ mod tests {
             ElementType::Other
         }
 
-        fn hlog(&self) -> &HLog {
-            &self.hlog
+        fn clog(&self) -> &CLog {
+            &self.clog
         }
 
-        fn hlog_mut(&mut self) -> &mut HLog {
-            &mut self.hlog
+        fn clog_mut(&mut self) -> &mut CLog {
+            &mut self.clog
         }
     }
 
@@ -488,8 +489,8 @@ mod tests {
         }
     }
 
-    #[rust_hlog::hlog]
     struct ControlObservingSink {
+        clog: CLog,
         name: &'static str,
         count: Arc<AtomicUsize>,
         fail: bool,
@@ -504,12 +505,12 @@ mod tests {
             ElementType::Other
         }
 
-        fn hlog(&self) -> &HLog {
-            &self.hlog
+        fn clog(&self) -> &CLog {
+            &self.clog
         }
 
-        fn hlog_mut(&mut self) -> &mut HLog {
-            &mut self.hlog
+        fn clog_mut(&mut self) -> &mut CLog {
+            &mut self.clog
         }
     }
 
@@ -530,8 +531,8 @@ mod tests {
         }
     }
 
-    #[rust_hlog::hlog]
     struct PanicOnceSink {
+        clog: CLog,
         panicked: bool,
         successful: Arc<AtomicUsize>,
     }
@@ -545,12 +546,12 @@ mod tests {
             ElementType::Other
         }
 
-        fn hlog(&self) -> &HLog {
-            &self.hlog
+        fn clog(&self) -> &CLog {
+            &self.clog
         }
 
-        fn hlog_mut(&mut self) -> &mut HLog {
-            &mut self.hlog
+        fn clog_mut(&mut self) -> &mut CLog {
+            &mut self.clog
         }
     }
 
@@ -569,8 +570,8 @@ mod tests {
         }
     }
 
-    #[rust_hlog::hlog]
     struct BlockingSink {
+        clog: CLog,
         entered: Option<mpsc::Sender<()>>,
         release: mpsc::Receiver<()>,
     }
@@ -584,12 +585,12 @@ mod tests {
             ElementType::Other
         }
 
-        fn hlog(&self) -> &HLog {
-            &self.hlog
+        fn clog(&self) -> &CLog {
+            &self.clog
         }
 
-        fn hlog_mut(&mut self) -> &mut HLog {
-            &mut self.hlog
+        fn clog_mut(&mut self) -> &mut CLog {
+            &mut self.clog
         }
     }
 
@@ -607,8 +608,8 @@ mod tests {
         }
     }
 
-    #[rust_hlog::hlog]
     struct GraphInspectingDropSink {
+        clog: CLog,
         graph: PipelineGraph,
         dropped: Option<mpsc::Sender<()>>,
     }
@@ -622,12 +623,12 @@ mod tests {
             ElementType::Other
         }
 
-        fn hlog(&self) -> &HLog {
-            &self.hlog
+        fn clog(&self) -> &CLog {
+            &self.clog
         }
 
-        fn hlog_mut(&mut self) -> &mut HLog {
-            &mut self.hlog
+        fn clog_mut(&mut self) -> &mut CLog {
+            &mut self.clog
         }
     }
 
@@ -671,13 +672,13 @@ mod tests {
             .to(Box::new(CountingSink {
                 name: "before",
                 count: before_count.clone(),
-                hlog: element_hlog(ElementType::Other, "before", None),
+                clog: element_clog(ElementType::Other, "before", None),
             }))
             .unwrap();
         let failing = context
             .branch()
             .to(Box::new(AlwaysFailSink {
-                hlog: element_hlog(ElementType::Other, "always-fail", None),
+                clog: element_clog(ElementType::Other, "always-fail", None),
             }))
             .unwrap();
         let after = context
@@ -685,7 +686,7 @@ mod tests {
             .to(Box::new(CountingSink {
                 name: "after",
                 count: after_count.clone(),
-                hlog: element_hlog(ElementType::Other, "after", None),
+                clog: element_clog(ElementType::Other, "after", None),
             }))
             .unwrap();
         let tee_branch = TeeBuilder::new("tee", context.clone())
@@ -742,7 +743,7 @@ mod tests {
                 name: "control-fail",
                 count: failing_count.clone(),
                 fail: true,
-                hlog: element_hlog(ElementType::Other, "control-fail", None),
+                clog: element_clog(ElementType::Other, "control-fail", None),
             }))
             .unwrap();
         let healthy = context
@@ -751,7 +752,7 @@ mod tests {
                 name: "control-ok",
                 count: healthy_count.clone(),
                 fail: false,
-                hlog: element_hlog(ElementType::Other, "control-ok", None),
+                clog: element_clog(ElementType::Other, "control-ok", None),
             }))
             .unwrap();
         let tee_branch = TeeBuilder::new("tee", context.clone())
@@ -790,7 +791,7 @@ mod tests {
             .to(Box::new(PanicOnceSink {
                 panicked: false,
                 successful: successful.clone(),
-                hlog: element_hlog(ElementType::Other, "panic-once", None),
+                clog: element_clog(ElementType::Other, "panic-once", None),
             }))
             .unwrap();
         let tee_branch = TeeBuilder::new("tee", context.clone())
@@ -837,7 +838,7 @@ mod tests {
             .to(Box::new(CountingSink {
                 name: "after-poison",
                 count: Arc::new(AtomicUsize::new(0)),
-                hlog: element_hlog(ElementType::Other, "after-poison", None),
+                clog: element_clog(ElementType::Other, "after-poison", None),
             }))
             .unwrap();
         let branch_id = handle.attach(branch).unwrap();
@@ -866,7 +867,7 @@ mod tests {
             .to(Box::new(BlockingSink {
                 entered: Some(entered_tx),
                 release: release_rx,
-                hlog: element_hlog(ElementType::Other, "blocking", None),
+                clog: element_clog(ElementType::Other, "blocking", None),
             }))
             .unwrap();
         let blocking_id = handle.attach(blocking).unwrap();
@@ -882,7 +883,7 @@ mod tests {
             .to(Box::new(CountingSink {
                 name: "new",
                 count: Arc::new(AtomicUsize::new(0)),
-                hlog: element_hlog(ElementType::Other, "new", None),
+                clog: element_clog(ElementType::Other, "new", None),
             }))
             .unwrap();
         let (attach_tx, attach_rx) = mpsc::channel();
@@ -938,7 +939,7 @@ mod tests {
             .to(Box::new(CountingSink {
                 name: "initial",
                 count: initial_count.clone(),
-                hlog: element_hlog(ElementType::Other, "initial", None),
+                clog: element_clog(ElementType::Other, "initial", None),
             }))
             .unwrap();
         let (tee_branch, handle) = TeeBuilder::new("tee", context.clone())
@@ -984,7 +985,7 @@ mod tests {
                         .to(Box::new(CountingSink {
                             name: "dynamic",
                             count: Arc::new(AtomicUsize::new(0)),
-                            hlog: element_hlog(ElementType::Other, "dynamic", None),
+                            clog: element_clog(ElementType::Other, "dynamic", None),
                         }))
                         .map_err(|error| error.to_string())?;
                     let branch_id = mutation_handle
@@ -1041,7 +1042,7 @@ mod tests {
             .to(Box::new(GraphInspectingDropSink {
                 graph,
                 dropped: Some(dropped_tx),
-                hlog: element_hlog(ElementType::Other, "graph-inspecting-drop", None),
+                clog: element_clog(ElementType::Other, "graph-inspecting-drop", None),
             }))
             .unwrap();
         let branch_id = handle.attach(branch).unwrap();

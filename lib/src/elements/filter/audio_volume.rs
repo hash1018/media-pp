@@ -6,14 +6,14 @@ use std::{
     time::Duration,
 };
 
+use crate::clog::{CLog, cinfo};
 use ffmpeg_next as ffmpeg;
-use rust_hlog::{HLog, hinfo};
 use thiserror::Error as ThisError;
 
 use crate::{
     buffer::MediaBuffer,
     control::ControlMsg,
-    element::{Element, ElementType, Sink, Source, element_hlog},
+    element::{Element, ElementType, Sink, Source, element_clog},
     error::Result,
     pad::SrcPad,
 };
@@ -171,8 +171,8 @@ impl AudioVolumeHandle {
 /// Runtime changes made through [`AudioVolumeHandle`] are linearly ramped
 /// per audio sample. This changes parameters only and never changes graph
 /// topology.
-#[rust_hlog::hlog]
 pub struct AudioVolume {
+    clog: CLog,
     name: Arc<str>,
     control: Arc<VolumeControl>,
     ramp_duration: Duration,
@@ -197,14 +197,14 @@ impl AudioVolume {
     ) -> std::result::Result<(Self, AudioVolumeHandle), AudioVolumeError> {
         validate_gain(options.gain)?;
         let name: Arc<str> = name.into().into();
-        let hlog = element_hlog(ElementType::AudioVolume, &name, None);
+        let clog = element_clog(ElementType::AudioVolume, &name, None);
         let control = Arc::new(VolumeControl::new(options.gain, options.muted));
         let initial_gain = control.effective_gain();
         let handle = AudioVolumeHandle {
             control: control.clone(),
         };
-        hinfo!(
-            hlog: &hlog,
+        cinfo!(
+            clog: &clog,
             "created: gain={}, muted={}, ramp={:?}",
             options.gain,
             options.muted,
@@ -213,7 +213,7 @@ impl AudioVolume {
         Ok((
             Self {
                 name: name.clone(),
-                hlog,
+                clog,
                 control,
                 ramp_duration: options.ramp_duration,
                 current_gain: initial_gain,
@@ -310,12 +310,12 @@ impl Element for AudioVolume {
         ElementType::AudioVolume
     }
 
-    fn hlog(&self) -> &HLog {
-        &self.hlog
+    fn clog(&self) -> &CLog {
+        &self.clog
     }
 
-    fn hlog_mut(&mut self) -> &mut HLog {
-        &mut self.hlog
+    fn clog_mut(&mut self) -> &mut CLog {
+        &mut self.clog
     }
 }
 
@@ -455,8 +455,8 @@ mod tests {
 
     use super::*;
 
-    #[rust_hlog::hlog]
     struct CapturingSink {
+        clog: CLog,
         received: Arc<Mutex<Vec<MediaBuffer>>>,
     }
 
@@ -469,12 +469,12 @@ mod tests {
             ElementType::Other
         }
 
-        fn hlog(&self) -> &HLog {
-            &self.hlog
+        fn clog(&self) -> &CLog {
+            &self.clog
         }
 
-        fn hlog_mut(&mut self) -> &mut HLog {
-            &mut self.hlog
+        fn clog_mut(&mut self) -> &mut CLog {
+            &mut self.clog
         }
     }
 
@@ -496,7 +496,7 @@ mod tests {
         let received = Arc::new(Mutex::new(Vec::new()));
         volume.src_pads()[0].link(Box::new(CapturingSink {
             received: received.clone(),
-            hlog: element_hlog(ElementType::Other, "capture", None),
+            clog: element_clog(ElementType::Other, "capture", None),
         }));
         (volume, handle, received)
     }

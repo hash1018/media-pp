@@ -1,7 +1,7 @@
 use std::{ffi::c_void, sync::Arc};
 
+use crate::clog::{CLog, cerror, cinfo};
 use ffmpeg_next::{self as ffmpeg, ffi};
-use rust_hlog::{HLog, herror, hinfo};
 use thiserror::Error as ThisError;
 use windows::{
     Win32::Graphics::Direct3D11::{D3D11_BIND_SHADER_RESOURCE, ID3D11Device, ID3D11Texture2D},
@@ -11,7 +11,7 @@ use windows::{
 use crate::{
     buffer::MediaBuffer,
     control::ControlMsg,
-    element::{Element, ElementType, Sink, Source, element_hlog},
+    element::{Element, ElementType, Sink, Source, element_clog},
     pad::SrcPad,
     pool::UnboundObjectPool,
 };
@@ -102,8 +102,8 @@ pub enum D3d11vaDecoderError {
 /// docs on why that means no explicit fence/sync is needed anywhere in
 /// this stack, unlike the D3D12 side). A `Filter`, same shape as
 /// `SwDecoder`/`D3d12vaDecoder`.
-#[rust_hlog::hlog]
 pub struct D3d11Decoder {
+    clog: CLog,
     name: Arc<str>,
     decoder: ffmpeg::decoder::Video,
     hw_device_ctx: *mut ffi::AVBufferRef,
@@ -151,7 +151,7 @@ impl D3d11Decoder {
         extra_hw_frames: i32,
     ) -> Result<Self, D3d11vaDecoderError> {
         let name: Arc<str> = name.into().into();
-        let hlog = element_hlog(ElementType::D3d11Decoder, &name, None);
+        let clog = element_clog(ElementType::D3d11Decoder, &name, None);
 
         let hw_device_ctx =
             unsafe { create_hw_device_ctx(device) }.map_err(D3d11vaDecoderError::HwDeviceInit)?;
@@ -184,10 +184,10 @@ impl D3d11Decoder {
 
         let pad = SrcPad::new(format!("{name}_src"));
         let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
-        hinfo!(hlog: &hlog, "opened: codec={:?}", decoder.id());
+        cinfo!(clog: &clog, "opened: codec={:?}", decoder.id());
         Ok(Self {
             name,
-            hlog,
+            clog,
             decoder,
             hw_device_ctx,
             pad,
@@ -201,7 +201,7 @@ impl D3d11Decoder {
             match self.decoder.receive_frame(&mut frame) {
                 Ok(()) => {
                     if frame.format() != ffmpeg::format::Pixel::D3D11 {
-                        herror!(self, "decoder did not select the D3D11VA pixel format");
+                        cerror!(self, "decoder did not select the D3D11VA pixel format");
                         return Err(D3d11vaDecoderError::HwAccelUnavailable.into());
                     }
                     self.pad.push(MediaBuffer::Video(Arc::new(frame)))?;
@@ -224,12 +224,12 @@ impl Element for D3d11Decoder {
         ElementType::D3d11Decoder
     }
 
-    fn hlog(&self) -> &HLog {
-        &self.hlog
+    fn clog(&self) -> &CLog {
+        &self.clog
     }
 
-    fn hlog_mut(&mut self) -> &mut HLog {
-        &mut self.hlog
+    fn clog_mut(&mut self) -> &mut CLog {
+        &mut self.clog
     }
 }
 
@@ -245,14 +245,14 @@ impl Sink for D3d11Decoder {
             MediaBuffer::Packet(packet) => {
                 self.decoder
                     .send_packet(&*packet)
-                    .inspect_err(|error| herror!(self, "send_packet failed: {error}"))
+                    .inspect_err(|error| cerror!(self, "send_packet failed: {error}"))
                     .map_err(D3d11vaDecoderError::from)?;
                 self.drain()
             }
             MediaBuffer::Eos => {
                 self.decoder
                     .send_eof()
-                    .inspect_err(|error| herror!(self, "send_eof failed: {error}"))
+                    .inspect_err(|error| cerror!(self, "send_eof failed: {error}"))
                     .map_err(D3d11vaDecoderError::from)?;
                 self.drain()?;
                 self.pad.push(MediaBuffer::Eos)
@@ -277,7 +277,7 @@ impl Sink for D3d11Decoder {
 
 impl Drop for D3d11Decoder {
     fn drop(&mut self) {
-        hinfo!(self, "dropped: freeing hw_device_ctx");
+        cinfo!(self, "dropped: freeing hw_device_ctx");
         unsafe { free_buffer(self.hw_device_ctx) };
     }
 }

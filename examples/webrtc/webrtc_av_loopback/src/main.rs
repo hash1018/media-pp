@@ -21,11 +21,12 @@ mod windows_example {
     };
 
     use ffmpeg_next as ffmpeg;
+    use media_pp::clog::CLog;
     use media_pp::{
         buffer::MediaBuffer,
         control::ControlMsg,
         driver::DriverRunner,
-        element::{Element, ElementType, Sink, element_hlog},
+        element::{Element, ElementType, Sink, element_clog},
         elements::{
             AudioCodec, SwAudioEncoder, SwAudioEncoderOptions, SwEncoder, SwEncoderOptions,
             TestAudioOptions, TestAudioSource, TestVideoOptions, TestVideoSource, VideoCodec,
@@ -33,7 +34,6 @@ mod windows_example {
         },
         pipeline::PipelineBuilder,
     };
-    use rust_hlog::HLog;
     use str0m::{
         Candidate, Rtc,
         change::SdpOffer,
@@ -220,7 +220,7 @@ mod windows_example {
                     let branch = ctx.branch().to(Box::new(CountingSink {
                         name: "video-counter".into(),
                         count,
-                        hlog: element_hlog(ElementType::Other, "video-counter", None),
+                        clog: element_clog(ElementType::Other, "video-counter", None),
                     }))?;
                     ctx.attach(source, 0, branch)?;
                     Ok(())
@@ -233,7 +233,7 @@ mod windows_example {
                     let branch = ctx.branch().to(Box::new(CountingSink {
                         name: "audio-counter".into(),
                         count,
-                        hlog: element_hlog(ElementType::Other, "audio-counter", None),
+                        clog: element_clog(ElementType::Other, "audio-counter", None),
                     }))?;
                     ctx.attach(source, 0, branch)?;
                     Ok(())
@@ -269,8 +269,8 @@ mod windows_example {
         println!("ok — two tracks, one connection, no cross-contamination");
     }
 
-    #[rust_hlog::hlog]
     struct CountingSink {
+        clog: CLog,
         name: Arc<str>,
         count: Arc<AtomicUsize>,
     }
@@ -282,11 +282,11 @@ mod windows_example {
         fn element_type(&self) -> ElementType {
             ElementType::Other
         }
-        fn hlog(&self) -> &HLog {
-            &self.hlog
+        fn clog(&self) -> &CLog {
+            &self.clog
         }
-        fn hlog_mut(&mut self) -> &mut HLog {
-            &mut self.hlog
+        fn clog_mut(&mut self) -> &mut CLog {
+            &mut self.clog
         }
     }
 

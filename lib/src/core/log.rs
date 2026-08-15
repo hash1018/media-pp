@@ -1,11 +1,11 @@
-//! Opt-in file logging backend for [`rust_hlog`]. Elements emit their own
+//! Opt-in file logging backend for [`crate::clog`]. Elements emit their own
 //! lifecycle/error records, and [`crate::bus::Bus::post`] additionally logs
 //! each event it publishes. Inert until [`init`]
 //! is called: this is a library, and writing to disk by default —
 //! including from the crate's own tests, or anything embedding this crate
 //! that never asked for log files — would be a surprising side effect.
 //!
-//! `rust_hlog`'s `hinfo!`/`hwarn!`/`herror!` macros go through the plain
+//! `crate::clog`'s `cinfo!`/`cwarn!`/`cerror!` macros go through the plain
 //! `log` facade, so this bridges those records into a `tracing`
 //! subscriber (via `tracing-log`) writing through a daily-rotating
 //! [`tracing_appender`] file — same backend shape as this crate's own
@@ -24,8 +24,8 @@ pub enum LogInitError {
     FileAppender(#[from] InitError),
 }
 
-/// Starts file logging: every `hinfo!`/`hwarn!`/`herror!` this crate makes
-/// (via `rust_hlog`, see [`crate::bus::Bus::post`]) from this point on is
+/// Starts file logging: every `cinfo!`/`cwarn!`/`cerror!` this crate makes
+/// (via `crate::clog`, see [`crate::bus::Bus::post`]) from this point on is
 /// appended to a rotating file named `{log_prefix}.{date}.log` in
 /// `log_path` — one new file per day, oldest ones beyond `max_log_files`
 /// deleted automatically. Writes happen on a dedicated background thread,
@@ -58,8 +58,8 @@ pub fn init(
 
     // `tracing-subscriber`'s `tracing-log` feature (on by default) already
     // bridges the plain `log` facade into whatever subscriber `.init()`
-    // installs below — which is what `rust_hlog`'s `hinfo!`/`hwarn!`/
-    // `herror!` macros go through — so no separate `tracing_log::LogTracer`
+    // installs below — which is what `crate::clog`'s `cinfo!`/`cwarn!`/
+    // `cerror!` macros go through — so no separate `tracing_log::LogTracer`
     // setup is needed (an explicit second one collides: `log::set_logger`
     // only ever succeeds once).
     tracing_subscriber::fmt()

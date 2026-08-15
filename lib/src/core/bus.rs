@@ -1,7 +1,7 @@
 use std::{sync::Arc, time::Duration};
 
+use crate::clog::{CLog, cerror, cinfo, cwarn};
 use crossbeam_channel::{Receiver, Sender, unbounded};
-use rust_hlog::{HLog, herror, hinfo, hwarn};
 
 use crate::{element::ElementType, error::Error, graph::ElementId};
 
@@ -79,24 +79,24 @@ impl Bus {
         }
     }
 
-    /// `hlog` is the posting element's own [`crate::element::Element::hlog`]
-    /// — used (via `rust_hlog`'s `hlog:` macro form) instead of `event`'s
-    /// own `name` so a real `sub_id`, if that element's `HLog` was built
+    /// `clog` is the posting element's own [`crate::element::Element::clog`]
+    /// — used (via `crate::clog`'s `clog:` macro form) instead of `event`'s
+    /// own `name` so a real `sub_id`, if that element's `CLog` was built
     /// with one, actually reaches the log line.
-    pub fn post(&self, hlog: &HLog, event: BusEvent) {
+    pub fn post(&self, clog: &CLog, event: BusEvent) {
         // `log`'s own facade already no-ops (skipping the `format!` too)
         // when nothing has called `crate::log::init` — same reasoning as
         // the old hand-rolled check this replaced, just built into `log`
         // itself instead of written here.
         match &event {
-            BusEvent::Eos { .. } => hinfo!(hlog: hlog, "eos"),
-            BusEvent::Error { error, .. } => herror!(hlog: hlog, "{error}"),
+            BusEvent::Eos { .. } => cinfo!(clog: clog, "eos"),
+            BusEvent::Error { error, .. } => cerror!(clog: clog, "{error}"),
             BusEvent::Dropped { .. } => {
-                hwarn!(hlog: hlog, "dropped a buffer (queue full)")
+                cwarn!(clog: clog, "dropped a buffer (queue full)")
             }
             BusEvent::Seeked {
                 requested, landed, ..
-            } => hinfo!(hlog: hlog, "seeked: requested {requested:.2?}, landed {landed:.2?}"),
+            } => cinfo!(clog: clog, "seeked: requested {requested:.2?}, landed {landed:.2?}"),
         }
         // Nothing to do if the receiving end is gone (pipeline dropped).
         let _ = self.tx.send(BusMessage {

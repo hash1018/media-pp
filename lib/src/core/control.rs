@@ -1,7 +1,7 @@
 use std::time::{Duration, Instant};
 
+use crate::clog::cinfo;
 use crossbeam_channel::{Receiver, Sender, unbounded};
-use rust_hlog::hinfo;
 
 use crate::{
     bus::{Bus, BusEvent},
@@ -213,7 +213,7 @@ pub(crate) fn apply_one_unacked<S: SourceElement>(
     bus: &Bus,
     msg: ControlMsg,
 ) -> Result<bool> {
-    hinfo!(hlog: source.hlog(), "control: {msg:?}");
+    cinfo!(clog: source.clog(), "control: {msg:?}");
     apply_seek(source, bus, msg)?;
     for pad in source.src_pads() {
         pad.control(msg)?;
@@ -254,7 +254,7 @@ fn apply_seek<S: SourceElement>(source: &mut S, bus: &Bus, msg: ControlMsg) -> R
     if let ControlMsg::Seek(target) = msg {
         let landed = source.seek(target)?;
         bus.post(
-            source.hlog(),
+            source.clog(),
             BusEvent::Seeked {
                 element_type: source.element_type(),
                 name: source.name(),
@@ -270,27 +270,27 @@ fn apply_seek<S: SourceElement>(source: &mut S, bus: &Bus, msg: ControlMsg) -> R
 mod tests {
     use std::{sync::Arc, thread};
 
-    use rust_hlog::HLog;
+    use crate::clog::CLog;
 
     use super::*;
     use crate::{
         buffer::MediaBuffer,
-        element::{Element, ElementType, Sink, Source, element_hlog},
+        element::{Element, ElementType, Sink, Source, element_clog},
         pad::SrcPad,
     };
 
     /// A `SourceElement` with no real I/O — just enough surface for
     /// `drain_control`/`wait_out_pause` to drive, since this module's own
     /// logic doesn't care what the source actually produces.
-    #[rust_hlog::hlog]
     struct DummySource {
+        clog: CLog,
         pad: SrcPad,
     }
 
     impl DummySource {
         fn new() -> Self {
             Self {
-                hlog: element_hlog(ElementType::Other, "dummy", None),
+                clog: element_clog(ElementType::Other, "dummy", None),
                 pad: SrcPad::new("dummy_src"),
             }
         }
@@ -305,12 +305,12 @@ mod tests {
             ElementType::Other
         }
 
-        fn hlog(&self) -> &HLog {
-            &self.hlog
+        fn clog(&self) -> &CLog {
+            &self.clog
         }
 
-        fn hlog_mut(&mut self) -> &mut HLog {
-            &mut self.hlog
+        fn clog_mut(&mut self) -> &mut CLog {
+            &mut self.clog
         }
     }
 
@@ -330,8 +330,8 @@ mod tests {
         }
     }
 
-    #[rust_hlog::hlog]
     struct SlowPauseSink {
+        clog: CLog,
         pause_delay: Duration,
     }
 
@@ -344,12 +344,12 @@ mod tests {
             ElementType::Other
         }
 
-        fn hlog(&self) -> &HLog {
-            &self.hlog
+        fn clog(&self) -> &CLog {
+            &self.clog
         }
 
-        fn hlog_mut(&mut self) -> &mut HLog {
-            &mut self.hlog
+        fn clog_mut(&mut self) -> &mut CLog {
+            &mut self.clog
         }
     }
 
@@ -431,7 +431,7 @@ mod tests {
         let mut source = DummySource::new();
         source.pad.link(Box::new(SlowPauseSink {
             pause_delay,
-            hlog: element_hlog(ElementType::Other, "slow-pause", None),
+            clog: element_clog(ElementType::Other, "slow-pause", None),
         }));
 
         let outcome = loop {
