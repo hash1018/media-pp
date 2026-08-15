@@ -36,7 +36,7 @@ fn pause_then_stop_returns_promptly() {
     let pipeline = Pipeline::new("test", source, |source, ctx| {
         let branch = ctx.branch().queue("q", 4).to(Box::new(NoOpSink {
             name: "noop".into(),
-            clog: element_clog(ElementType::Other, "noop", None),
+            pp_log: element_pp_log(ElementType::Other, "noop", None),
         }))?;
         ctx.attach(source, index, branch)?;
         Ok(())
@@ -87,7 +87,7 @@ fn multi_source_pipeline_stops_every_source_from_one_stop_call() {
                 let branch = ctx.branch().to(Box::new(CountingSink {
                     name: "video-sink".into(),
                     count,
-                    clog: element_clog(ElementType::Other, "video-sink", None),
+                    pp_log: element_pp_log(ElementType::Other, "video-sink", None),
                 }))?;
                 ctx.attach(source, 0, branch)?;
                 Ok(())
@@ -100,7 +100,7 @@ fn multi_source_pipeline_stops_every_source_from_one_stop_call() {
                 let branch = ctx.branch().to(Box::new(CountingSink {
                     name: "audio-sink".into(),
                     count,
-                    clog: element_clog(ElementType::Other, "audio-sink", None),
+                    pp_log: element_pp_log(ElementType::Other, "audio-sink", None),
                 }))?;
                 ctx.attach(source, 0, branch)?;
                 Ok(())
@@ -151,7 +151,7 @@ fn pipeline_clock_includes_a_slow_pause_cascade_in_its_frozen_time() {
     let pipeline = Pipeline::new("slow-pause-clock-test", source, |source, ctx| {
         let branch = ctx.branch().to(Box::new(SlowPauseSink {
             pause_delay,
-            clog: element_clog(ElementType::Other, "slow-pause", None),
+            pp_log: element_pp_log(ElementType::Other, "slow-pause", None),
         }))?;
         ctx.attach(source, 0, branch)?;
         Ok(())
@@ -227,7 +227,7 @@ fn tee_handle_retained_across_a_multi_source_pipeline_does_not_leak() {
         .add_source(video, |source, ctx| {
             let branch = ctx.branch().to(Box::new(NoOpSink {
                 name: "video-sink".into(),
-                clog: element_clog(ElementType::Other, "video-sink", None),
+                pp_log: element_pp_log(ElementType::Other, "video-sink", None),
             }))?;
             let (tee_branch, handle) = TeeBuilder::new("tee", ctx.clone())
                 .branch(branch)
@@ -240,7 +240,7 @@ fn tee_handle_retained_across_a_multi_source_pipeline_does_not_leak() {
         .add_source(audio, |source, ctx| {
             let branch = ctx.branch().to(Box::new(NoOpSink {
                 name: "audio-sink".into(),
-                clog: element_clog(ElementType::Other, "audio-sink", None),
+                pp_log: element_pp_log(ElementType::Other, "audio-sink", None),
             }))?;
             ctx.attach(source, 0, branch)?;
             Ok(())
@@ -284,7 +284,7 @@ fn seek_repositions_and_playback_continues() {
     let sink = CountingSink {
         name: "counting-sink".into(),
         count: count.clone(),
-        clog: element_clog(ElementType::Other, "counting-sink", None),
+        pp_log: element_pp_log(ElementType::Other, "counting-sink", None),
     };
 
     // A `Pacer` here isn't incidental: without it, this whole 10s/
@@ -354,7 +354,7 @@ fn seek_reports_where_it_actually_landed_when_target_is_not_a_keyframe() {
             .pipe(pacer)
             .to(Box::new(NoOpSink {
                 name: "noop".into(),
-                clog: element_clog(ElementType::Other, "noop", None),
+                pp_log: element_pp_log(ElementType::Other, "noop", None),
             }))?;
         ctx.attach(source, index, branch)?;
         Ok(())
@@ -390,7 +390,7 @@ fn seek_reports_where_it_actually_landed_when_target_is_not_a_keyframe() {
 
 struct NoOpSink {
     name: Arc<str>,
-    clog: CLog,
+    pp_log: PpLog,
 }
 impl Element for NoOpSink {
     fn name(&self) -> Arc<str> {
@@ -401,12 +401,12 @@ impl Element for NoOpSink {
         ElementType::Other
     }
 
-    fn clog(&self) -> &CLog {
-        &self.clog
+    fn pp_log(&self) -> &PpLog {
+        &self.pp_log
     }
 
-    fn clog_mut(&mut self) -> &mut CLog {
-        &mut self.clog
+    fn pp_log_mut(&mut self) -> &mut PpLog {
+        &mut self.pp_log
     }
 }
 impl Sink for NoOpSink {
@@ -419,7 +419,7 @@ impl Sink for NoOpSink {
 }
 
 struct SlowPauseSink {
-    clog: CLog,
+    pp_log: PpLog,
     pause_delay: Duration,
 }
 
@@ -432,12 +432,12 @@ impl Element for SlowPauseSink {
         ElementType::Other
     }
 
-    fn clog(&self) -> &CLog {
-        &self.clog
+    fn pp_log(&self) -> &PpLog {
+        &self.pp_log
     }
 
-    fn clog_mut(&mut self) -> &mut CLog {
-        &mut self.clog
+    fn pp_log_mut(&mut self) -> &mut PpLog {
+        &mut self.pp_log
     }
 }
 
@@ -455,7 +455,7 @@ impl Sink for SlowPauseSink {
 }
 
 struct CountingSink {
-    clog: CLog,
+    pp_log: PpLog,
     name: Arc<str>,
     count: Arc<AtomicUsize>,
 }
@@ -468,12 +468,12 @@ impl Element for CountingSink {
         ElementType::Other
     }
 
-    fn clog(&self) -> &CLog {
-        &self.clog
+    fn pp_log(&self) -> &PpLog {
+        &self.pp_log
     }
 
-    fn clog_mut(&mut self) -> &mut CLog {
-        &mut self.clog
+    fn pp_log_mut(&mut self) -> &mut PpLog {
+        &mut self.pp_log
     }
 }
 impl Sink for CountingSink {
@@ -497,18 +497,18 @@ impl Sink for CountingSink {
 /// `.queue()`, everything upstream of it — should come out tagged with
 /// the pipeline id it was built with, not left at `sub_id: None`.
 #[test]
-fn chain_builder_stamps_pipeline_id_into_terminal_clog() {
+fn chain_builder_stamps_pipeline_id_into_terminal_pp_log() {
     let (bus, _bus_rx) = Bus::new();
     let sink = NoOpSink {
         name: "noop".into(),
-        clog: element_clog(ElementType::Other, "noop", None),
+        pp_log: element_pp_log(ElementType::Other, "noop", None),
     };
     let graph = PipelineGraph::new();
     let source_id = graph.add_source(ElementType::Other, "source".into());
     let context = Arc::new(Context::for_test(bus, "my-pipeline", graph, source_id));
     let built = context.branch().to(Box::new(sink)).unwrap();
     assert_eq!(
-        built.root.clog().log_id(),
+        built.root.pp_log().log_id(),
         "Other(noop):Pipeline(my-pipeline)"
     );
 }
@@ -529,7 +529,7 @@ fn pipeline_id_is_whatever_new_was_given() {
     let pipeline = Pipeline::new("my-pipeline", source, |source, ctx| {
         let branch = ctx.branch().to(Box::new(NoOpSink {
             name: "noop".into(),
-            clog: element_clog(ElementType::Other, "noop", None),
+            pp_log: element_pp_log(ElementType::Other, "noop", None),
         }))?;
         ctx.attach(source, index, branch)?;
         Ok(())
@@ -561,7 +561,7 @@ fn topology_lists_source_through_terminal_per_branch() {
             .pipe(pacer)
             .to(Box::new(NoOpSink {
                 name: "noop".into(),
-                clog: element_clog(ElementType::Other, "noop", None),
+                pp_log: element_pp_log(ElementType::Other, "noop", None),
             }))?;
         ctx.attach(source, index, branch)?;
         Ok(())
@@ -595,11 +595,11 @@ fn topology_attributes_tee_branches_to_the_tee_not_the_source() {
     let pipeline = Pipeline::new("test", source, |source, ctx| {
         let branch_a = ctx.branch().to(Box::new(NoOpSink {
             name: "sink-a".into(),
-            clog: element_clog(ElementType::Other, "sink-a", None),
+            pp_log: element_pp_log(ElementType::Other, "sink-a", None),
         }))?;
         let branch_b = ctx.branch().to(Box::new(NoOpSink {
             name: "sink-b".into(),
-            clog: element_clog(ElementType::Other, "sink-b", None),
+            pp_log: element_pp_log(ElementType::Other, "sink-b", None),
         }))?;
 
         let tee_branch = TeeBuilder::new("tee", ctx.clone())
@@ -666,7 +666,7 @@ fn topology_forgets_a_branch_once_it_is_removed_from_the_tee() {
         .expect("tee is alive")
         .to(Box::new(NoOpSink {
             name: "sink-a".into(),
-            clog: element_clog(ElementType::Other, "sink-a", None),
+            pp_log: element_pp_log(ElementType::Other, "sink-a", None),
         }))
         .unwrap();
     let branch_b = tee_handle
@@ -674,7 +674,7 @@ fn topology_forgets_a_branch_once_it_is_removed_from_the_tee() {
         .expect("tee is alive")
         .to(Box::new(NoOpSink {
             name: "sink-b".into(),
-            clog: element_clog(ElementType::Other, "sink-b", None),
+            pp_log: element_pp_log(ElementType::Other, "sink-b", None),
         }))
         .unwrap();
     let branch_a_id = tee_handle.attach(branch_a).unwrap();
@@ -718,7 +718,7 @@ fn remove_branch_containing_resolves_through_a_queue_to_the_tee_attached_root() 
         .queue("q-a", 4)
         .to(Box::new(NoOpSink {
             name: "sink-a".into(),
-            clog: element_clog(ElementType::Other, "sink-a", None),
+            pp_log: element_pp_log(ElementType::Other, "sink-a", None),
         }))
         .unwrap();
     let branch_b = tee_handle
@@ -726,7 +726,7 @@ fn remove_branch_containing_resolves_through_a_queue_to_the_tee_attached_root() 
         .expect("tee is alive")
         .to(Box::new(NoOpSink {
             name: "sink-b".into(),
-            clog: element_clog(ElementType::Other, "sink-b", None),
+            pp_log: element_pp_log(ElementType::Other, "sink-b", None),
         }))
         .unwrap();
     tee_handle.attach(branch_a).unwrap();
@@ -780,7 +780,7 @@ fn topology_stays_correct_with_dozens_of_branches_added_and_then_removed() {
             .expect("tee is alive")
             .to(Box::new(NoOpSink {
                 name: name.clone(),
-                clog: element_clog(ElementType::Other, &name, None),
+                pp_log: element_pp_log(ElementType::Other, &name, None),
             }))
             .unwrap();
         branch_ids.push(tee_handle.attach(branch).unwrap());
@@ -817,7 +817,7 @@ fn detached_branch_never_appears_in_topology() {
     let pipeline = Pipeline::new("test", source, |_source, ctx| {
         let detached = ctx.branch().to(Box::new(NoOpSink {
             name: "never-attached".into(),
-            clog: element_clog(ElementType::Other, "never-attached", None),
+            pp_log: element_pp_log(ElementType::Other, "never-attached", None),
         }))?;
         assert_eq!(ctx.graph.snapshot().nodes.len(), 1);
         drop(detached);
@@ -852,7 +852,7 @@ fn duplicate_names_are_independent_when_detaching_by_branch_id() {
             .expect("tee is alive")
             .to(Box::new(NoOpSink {
                 name: "same-name".into(),
-                clog: element_clog(ElementType::Other, "same-name", None),
+                pp_log: element_pp_log(ElementType::Other, "same-name", None),
             }))
             .unwrap()
     };
@@ -889,7 +889,7 @@ fn dynamic_attach_and_detach_each_publish_one_graph_revision() {
         .expect("tee is alive")
         .to(Box::new(NoOpSink {
             name: "dynamic".into(),
-            clog: element_clog(ElementType::Other, "dynamic", None),
+            pp_log: element_pp_log(ElementType::Other, "dynamic", None),
         }))
         .unwrap();
 
@@ -912,7 +912,7 @@ fn dynamic_attach_and_detach_each_publish_one_graph_revision() {
         .expect("tee is alive")
         .to(Box::new(NoOpSink {
             name: "replacement".into(),
-            clog: element_clog(ElementType::Other, "replacement", None),
+            pp_log: element_pp_log(ElementType::Other, "replacement", None),
         }))
         .unwrap();
     let replacement_id = handle.attach(replacement).unwrap();
@@ -939,7 +939,7 @@ fn tee_handle_changes_branches_after_the_pipeline_starts() {
         let initial_branch = ctx.branch().to(Box::new(CountingSink {
             name: "initial".into(),
             count: initial_count.clone(),
-            clog: element_clog(ElementType::Other, "initial", None),
+            pp_log: element_pp_log(ElementType::Other, "initial", None),
         }))?;
         let (tee_branch, handle) = TeeBuilder::new("tee", ctx.clone())
             .branch(initial_branch)
@@ -959,7 +959,7 @@ fn tee_handle_changes_branches_after_the_pipeline_starts() {
         .to(Box::new(CountingSink {
             name: "dynamic".into(),
             count: dynamic_count.clone(),
-            clog: element_clog(ElementType::Other, "dynamic", None),
+            pp_log: element_pp_log(ElementType::Other, "dynamic", None),
         }))
         .unwrap();
     let branch_id = handle.attach(dynamic_branch).unwrap();
@@ -996,7 +996,7 @@ fn bus_messages_carry_the_posting_elements_stable_graph_id() {
     let pipeline = Pipeline::new("test", source, |source, ctx| {
         let branch = ctx.branch().to(Box::new(NoOpSink {
             name: "stable-id-sink".into(),
-            clog: element_clog(ElementType::Other, "stable-id-sink", None),
+            pp_log: element_pp_log(ElementType::Other, "stable-id-sink", None),
         }))?;
         ctx.attach(source, index, branch)?;
         Ok(())

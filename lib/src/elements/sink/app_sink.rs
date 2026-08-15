@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
-use crate::clog::{CLog, cinfo};
+use crate::pp_log::{PpLog, pp_info};
 
 use crate::{
     buffer::MediaBuffer,
     control::ControlMsg,
-    element::{Element, ElementType, Sink, element_clog},
+    element::{Element, ElementType, Sink, element_pp_log},
     error::Result,
 };
 
@@ -32,7 +32,7 @@ use crate::{
 /// });
 /// ```
 pub struct AppSink<F, C> {
-    clog: CLog,
+    pp_log: PpLog,
     name: Arc<str>,
     consume: F,
     control: C,
@@ -77,11 +77,11 @@ where
     /// ```
     pub fn with_control(name: impl Into<String>, consume: F, control: C) -> Self {
         let name: Arc<str> = name.into().into();
-        let clog = element_clog(ElementType::AppSink, &name, None);
-        cinfo!(clog: &clog, "created");
+        let pp_log = element_pp_log(ElementType::AppSink, &name, None);
+        pp_info!(pp_log: &pp_log, "created");
         Self {
             name,
-            clog,
+            pp_log,
             consume,
             control,
         }
@@ -101,12 +101,12 @@ where
         ElementType::AppSink
     }
 
-    fn clog(&self) -> &CLog {
-        &self.clog
+    fn pp_log(&self) -> &PpLog {
+        &self.pp_log
     }
 
-    fn clog_mut(&mut self) -> &mut CLog {
-        &mut self.clog
+    fn pp_log_mut(&mut self) -> &mut PpLog {
+        &mut self.pp_log
     }
 }
 

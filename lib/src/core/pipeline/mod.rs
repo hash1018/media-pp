@@ -7,13 +7,13 @@ pub use chain::{ChainBuilder, DetachedBranch};
 pub use runtime::Pipeline;
 
 #[cfg(test)]
-use crate::clog::CLog;
+use crate::pp_log::PpLog;
 #[cfg(test)]
 use crate::{
     buffer::MediaBuffer,
     bus::{Bus, BusEvent},
     control::ControlMsg,
-    element::{Context, Element, ElementType, Sink, element_clog},
+    element::{Context, Element, ElementType, Sink, element_pp_log},
     error::Result,
     graph::PipelineGraph,
 };

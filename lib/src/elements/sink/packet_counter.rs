@@ -3,12 +3,12 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
-use crate::clog::{CLog, cinfo};
+use crate::pp_log::{PpLog, pp_info};
 
 use crate::{
     buffer::MediaBuffer,
     control::ControlMsg,
-    element::{Element, ElementType, Sink, element_clog},
+    element::{Element, ElementType, Sink, element_pp_log},
     error::Result,
 };
 
@@ -16,7 +16,7 @@ use crate::{
 /// so the count can be read from outside the pipeline even when this sink
 /// ends up running on a `Queue` worker thread.
 pub struct PacketCounter {
-    clog: CLog,
+    pp_log: PpLog,
     name: Arc<str>,
     count: Arc<AtomicUsize>,
 }
@@ -25,12 +25,12 @@ impl PacketCounter {
     pub fn new(name: impl Into<String>) -> (Self, Arc<AtomicUsize>) {
         let count = Arc::new(AtomicUsize::new(0));
         let name: Arc<str> = name.into().into();
-        let clog = element_clog(ElementType::PacketCounter, &name, None);
-        cinfo!(clog: &clog, "created");
+        let pp_log = element_pp_log(ElementType::PacketCounter, &name, None);
+        pp_info!(pp_log: &pp_log, "created");
         (
             Self {
                 name,
-                clog,
+                pp_log,
                 count: count.clone(),
             },
             count,
@@ -47,12 +47,12 @@ impl Element for PacketCounter {
         ElementType::PacketCounter
     }
 
-    fn clog(&self) -> &CLog {
-        &self.clog
+    fn pp_log(&self) -> &PpLog {
+        &self.pp_log
     }
 
-    fn clog_mut(&mut self) -> &mut CLog {
-        &mut self.clog
+    fn pp_log_mut(&mut self) -> &mut PpLog {
+        &mut self.pp_log
     }
 }
 

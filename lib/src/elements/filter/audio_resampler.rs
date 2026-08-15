@@ -1,13 +1,13 @@
 use std::sync::Arc;
 
-use crate::clog::{CLog, cerror, cinfo};
+use crate::pp_log::{PpLog, pp_error, pp_info};
 use ffmpeg_next as ffmpeg;
 use thiserror::Error as ThisError;
 
 use crate::{
     buffer::MediaBuffer,
     control::ControlMsg,
-    element::{Element, ElementType, Sink, Source, element_clog},
+    element::{Element, ElementType, Sink, Source, element_pp_log},
     error::Result,
     pad::SrcPad,
     time::{InvalidTimeBase, MediaTimestamp, TimeBase},
@@ -178,7 +178,7 @@ pub enum AudioResamplerError {
 /// input time base. A decoded frame does not carry that unit itself, so
 /// callers must pass the originating stream/source time base.
 pub struct AudioResampler {
-    clog: CLog,
+    pp_log: PpLog,
     name: Arc<str>,
     target: AudioFormat,
     input_time_base: TimeBase,
@@ -194,10 +194,10 @@ impl AudioResampler {
         input_time_base: ffmpeg::Rational,
     ) -> std::result::Result<Self, AudioResamplerError> {
         let name: Arc<str> = name.into().into();
-        let clog = element_clog(ElementType::AudioResampler, &name, None);
+        let pp_log = element_pp_log(ElementType::AudioResampler, &name, None);
         let pad = SrcPad::new(format!("{name}_src"));
-        cinfo!(
-            clog: &clog,
+        pp_info!(
+            pp_log: &pp_log,
             "created: {}Hz, {} channel(s), format={:?}",
             target.sample_rate,
             target.channels(),
@@ -214,7 +214,7 @@ impl AudioResampler {
         )?;
         Ok(Self {
             name,
-            clog,
+            pp_log,
             target,
             input_time_base,
             resampler: AudioFrameResampler::new(target),
@@ -275,12 +275,12 @@ impl Element for AudioResampler {
         ElementType::AudioResampler
     }
 
-    fn clog(&self) -> &CLog {
-        &self.clog
+    fn pp_log(&self) -> &PpLog {
+        &self.pp_log
     }
 
-    fn clog_mut(&mut self) -> &mut CLog {
-        &mut self.clog
+    fn pp_log_mut(&mut self) -> &mut PpLog {
+        &mut self.pp_log
     }
 }
 
@@ -298,7 +298,7 @@ impl Sink for AudioResampler {
                 let frames = self
                     .resampler
                     .run(&frame)
-                    .inspect_err(|error| cerror!(self, "resample failed: {error}"))
+                    .inspect_err(|error| pp_error!(self, "resample failed: {error}"))
                     .map_err(AudioResamplerError::from)?;
                 self.push_frames(frames)
             }
@@ -306,7 +306,7 @@ impl Sink for AudioResampler {
                 let frames = self
                     .resampler
                     .flush()
-                    .inspect_err(|error| cerror!(self, "resampler flush failed: {error}"))
+                    .inspect_err(|error| pp_error!(self, "resampler flush failed: {error}"))
                     .map_err(AudioResamplerError::from)?;
                 self.push_frames(frames)?;
                 self.pad.push(MediaBuffer::Eos)
@@ -333,7 +333,7 @@ mod tests {
     use super::*;
 
     struct CapturingSink {
-        clog: CLog,
+        pp_log: PpLog,
         received: Arc<Mutex<Vec<MediaBuffer>>>,
     }
 
@@ -346,12 +346,12 @@ mod tests {
             ElementType::Other
         }
 
-        fn clog(&self) -> &CLog {
-            &self.clog
+        fn pp_log(&self) -> &PpLog {
+            &self.pp_log
         }
 
-        fn clog_mut(&mut self) -> &mut CLog {
-            &mut self.clog
+        fn pp_log_mut(&mut self) -> &mut PpLog {
+            &mut self.pp_log
         }
     }
 
@@ -382,7 +382,7 @@ mod tests {
         let received = Arc::new(Mutex::new(Vec::new()));
         resampler.src_pads()[0].link(Box::new(CapturingSink {
             received: received.clone(),
-            clog: element_clog(ElementType::Other, "capture", None),
+            pp_log: element_pp_log(ElementType::Other, "capture", None),
         }));
         (resampler, received)
     }

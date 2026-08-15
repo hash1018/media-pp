@@ -1,6 +1,6 @@
 use std::{sync::Arc, time::Duration};
 
-use crate::clog::CLog;
+use crate::pp_log::PpLog;
 
 use crate::{
     buffer::MediaBuffer,
@@ -88,21 +88,21 @@ pub trait Element: Send {
 
     /// This element's identity for [`crate::bus::Bus::post`] — same
     /// `id`/`name` as [`Element::name`], just already wrapped as the
-    /// [`crate::clog::CLog`] its `cinfo!`/`cwarn!`/`cerror!` macros need. A
+    /// [`crate::pp_log::PpLog`] its `pp_info!`/`pp_warn!`/`pp_error!` macros need. A
     /// stored private field, not built fresh per call, for the same reason
     /// `name()` returns a cheap `Arc<str>` clone instead of a fresh `String`
     /// — see its own docs.
-    fn clog(&self) -> &CLog;
+    fn pp_log(&self) -> &PpLog;
 
-    /// Mutable access to the same field [`Element::clog`] reads — used by
+    /// Mutable access to the same field [`Element::pp_log`] reads — used by
     /// [`crate::pipeline::ChainBuilder`] to stamp a `sub_id` (the owning
     /// [`crate::pipeline::Pipeline`]'s own id) onto every element that
-    /// passes through it, via [`element_clog`]. Not meant to be called
+    /// passes through it, via [`element_pp_log`]. Not meant to be called
     /// from anywhere else.
-    fn clog_mut(&mut self) -> &mut CLog;
+    fn pp_log_mut(&mut self) -> &mut PpLog;
 }
 
-/// Builds the [`CLog`] every element constructs for its own [`Element::clog`]
+/// Builds the [`PpLog`] every element constructs for its own [`Element::pp_log`]
 /// field, and that [`crate::pipeline::ChainBuilder`]/[`crate::pipeline::Pipeline`]
 /// rebuild once they know which pipeline an element belongs to. Renders as
 /// `ElementType(name)` for the id — so a log line names *what* failed, not
@@ -111,12 +111,12 @@ pub trait Element: Send {
 /// one (`None` for an element that isn't wired into a `Pipeline` at all,
 /// e.g. most of this crate's own tests). Public so a custom `Element`
 /// implemented outside this crate (see [`ElementType::Other`]) can build
-/// its own `clog` field the same way.
-pub fn element_clog(element_type: ElementType, name: &str, pipeline_id: Option<&str>) -> CLog {
+/// its own `pp_log` field the same way.
+pub fn element_pp_log(element_type: ElementType, name: &str, pipeline_id: Option<&str>) -> PpLog {
     let id = format!("{element_type:?}({name})");
     match pipeline_id {
-        Some(pipeline_id) => CLog::new(&id, Some(&format!("Pipeline({pipeline_id})"))),
-        None => CLog::new(&id, None),
+        Some(pipeline_id) => PpLog::new(&id, Some(&format!("Pipeline({pipeline_id})"))),
+        None => PpLog::new(&id, None),
     }
 }
 

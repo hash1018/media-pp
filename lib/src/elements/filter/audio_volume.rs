@@ -6,14 +6,14 @@ use std::{
     time::Duration,
 };
 
-use crate::clog::{CLog, cinfo};
+use crate::pp_log::{PpLog, pp_info};
 use ffmpeg_next as ffmpeg;
 use thiserror::Error as ThisError;
 
 use crate::{
     buffer::MediaBuffer,
     control::ControlMsg,
-    element::{Element, ElementType, Sink, Source, element_clog},
+    element::{Element, ElementType, Sink, Source, element_pp_log},
     error::Result,
     pad::SrcPad,
 };
@@ -172,7 +172,7 @@ impl AudioVolumeHandle {
 /// per audio sample. This changes parameters only and never changes graph
 /// topology.
 pub struct AudioVolume {
-    clog: CLog,
+    pp_log: PpLog,
     name: Arc<str>,
     control: Arc<VolumeControl>,
     ramp_duration: Duration,
@@ -197,14 +197,14 @@ impl AudioVolume {
     ) -> std::result::Result<(Self, AudioVolumeHandle), AudioVolumeError> {
         validate_gain(options.gain)?;
         let name: Arc<str> = name.into().into();
-        let clog = element_clog(ElementType::AudioVolume, &name, None);
+        let pp_log = element_pp_log(ElementType::AudioVolume, &name, None);
         let control = Arc::new(VolumeControl::new(options.gain, options.muted));
         let initial_gain = control.effective_gain();
         let handle = AudioVolumeHandle {
             control: control.clone(),
         };
-        cinfo!(
-            clog: &clog,
+        pp_info!(
+            pp_log: &pp_log,
             "created: gain={}, muted={}, ramp={:?}",
             options.gain,
             options.muted,
@@ -213,7 +213,7 @@ impl AudioVolume {
         Ok((
             Self {
                 name: name.clone(),
-                clog,
+                pp_log,
                 control,
                 ramp_duration: options.ramp_duration,
                 current_gain: initial_gain,
@@ -310,12 +310,12 @@ impl Element for AudioVolume {
         ElementType::AudioVolume
     }
 
-    fn clog(&self) -> &CLog {
-        &self.clog
+    fn pp_log(&self) -> &PpLog {
+        &self.pp_log
     }
 
-    fn clog_mut(&mut self) -> &mut CLog {
-        &mut self.clog
+    fn pp_log_mut(&mut self) -> &mut PpLog {
+        &mut self.pp_log
     }
 }
 
@@ -456,7 +456,7 @@ mod tests {
     use super::*;
 
     struct CapturingSink {
-        clog: CLog,
+        pp_log: PpLog,
         received: Arc<Mutex<Vec<MediaBuffer>>>,
     }
 
@@ -469,12 +469,12 @@ mod tests {
             ElementType::Other
         }
 
-        fn clog(&self) -> &CLog {
-            &self.clog
+        fn pp_log(&self) -> &PpLog {
+            &self.pp_log
         }
 
-        fn clog_mut(&mut self) -> &mut CLog {
-            &mut self.clog
+        fn pp_log_mut(&mut self) -> &mut PpLog {
+            &mut self.pp_log
         }
     }
 
@@ -496,7 +496,7 @@ mod tests {
         let received = Arc::new(Mutex::new(Vec::new()));
         volume.src_pads()[0].link(Box::new(CapturingSink {
             received: received.clone(),
-            clog: element_clog(ElementType::Other, "capture", None),
+            pp_log: element_pp_log(ElementType::Other, "capture", None),
         }));
         (volume, handle, received)
     }

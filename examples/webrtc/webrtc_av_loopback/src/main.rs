@@ -21,12 +21,12 @@ mod windows_example {
     };
 
     use ffmpeg_next as ffmpeg;
-    use media_pp::clog::CLog;
+    use media_pp::pp_log::PpLog;
     use media_pp::{
         buffer::MediaBuffer,
         control::ControlMsg,
         driver::DriverRunner,
-        element::{Element, ElementType, Sink, element_clog},
+        element::{Element, ElementType, Sink, element_pp_log},
         elements::{
             AudioCodec, SwAudioEncoder, SwAudioEncoderOptions, SwEncoder, SwEncoderOptions,
             TestAudioOptions, TestAudioSource, TestVideoOptions, TestVideoSource, VideoCodec,
@@ -220,7 +220,7 @@ mod windows_example {
                     let branch = ctx.branch().to(Box::new(CountingSink {
                         name: "video-counter".into(),
                         count,
-                        clog: element_clog(ElementType::Other, "video-counter", None),
+                        pp_log: element_pp_log(ElementType::Other, "video-counter", None),
                     }))?;
                     ctx.attach(source, 0, branch)?;
                     Ok(())
@@ -233,7 +233,7 @@ mod windows_example {
                     let branch = ctx.branch().to(Box::new(CountingSink {
                         name: "audio-counter".into(),
                         count,
-                        clog: element_clog(ElementType::Other, "audio-counter", None),
+                        pp_log: element_pp_log(ElementType::Other, "audio-counter", None),
                     }))?;
                     ctx.attach(source, 0, branch)?;
                     Ok(())
@@ -270,7 +270,7 @@ mod windows_example {
     }
 
     struct CountingSink {
-        clog: CLog,
+        pp_log: PpLog,
         name: Arc<str>,
         count: Arc<AtomicUsize>,
     }
@@ -282,11 +282,11 @@ mod windows_example {
         fn element_type(&self) -> ElementType {
             ElementType::Other
         }
-        fn clog(&self) -> &CLog {
-            &self.clog
+        fn pp_log(&self) -> &PpLog {
+            &self.pp_log
         }
-        fn clog_mut(&mut self) -> &mut CLog {
-            &mut self.clog
+        fn pp_log_mut(&mut self) -> &mut PpLog {
+            &mut self.pp_log
         }
     }
 

@@ -16,7 +16,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::clog::{CLog, cinfo};
+use crate::pp_log::{PpLog, pp_info};
 use arc_swap::ArcSwapOption;
 use ffmpeg_next as ffmpeg;
 use thiserror::Error as ThisError;
@@ -50,7 +50,7 @@ use crate::{
     buffer::MediaBuffer,
     bus::{Bus, BusEvent},
     control::{ControlMsg, ControlReceiver, drain_control},
-    element::{Element, ElementType, Sink, Source, SourceElement, element_clog},
+    element::{Element, ElementType, Sink, Source, SourceElement, element_pp_log},
     elements::{
         VideoCompositorOptions,
         filter::decoder::d3d11va_decoder::{d3d11va_texture, wrap_d3d11_texture},
@@ -254,7 +254,7 @@ impl D3d11VideoCompositorHandle {
         Ok(Some(D3d11VideoCompositorInput {
             sink: Box::new(D3d11VideoCompositorInputSink {
                 name: layer_handle.name.clone(),
-                clog: element_clog(ElementType::D3d11VideoCompositor, &layer_handle.name, None),
+                pp_log: element_pp_log(ElementType::D3d11VideoCompositor, &layer_handle.name, None),
                 shared: self.shared.clone(),
                 input: layer_handle.input.clone(),
             }),
@@ -338,7 +338,7 @@ impl D3d11VideoCompositorHandle {
 /// only the latest frame; a fast producer can't build an unbounded queue
 /// behind a slower compositor output rate).
 pub struct D3d11VideoCompositorInputSink {
-    clog: CLog,
+    pp_log: PpLog,
     name: Arc<str>,
     shared: Weak<D3d11CompositorShared>,
     input: Weak<GpuVideoInput>,
@@ -368,12 +368,12 @@ impl Element for D3d11VideoCompositorInputSink {
         ElementType::D3d11VideoCompositor
     }
 
-    fn clog(&self) -> &CLog {
-        &self.clog
+    fn pp_log(&self) -> &PpLog {
+        &self.pp_log
     }
 
-    fn clog_mut(&mut self) -> &mut CLog {
-        &mut self.clog
+    fn pp_log_mut(&mut self) -> &mut PpLog {
+        &mut self.pp_log
     }
 }
 
@@ -509,7 +509,7 @@ fn visible_uv_scale(
 /// the sinks returned by [`D3d11VideoCompositorHandle::add_source`], while
 /// this element's own pipeline drives output on its independent clock.
 pub struct D3d11VideoCompositor {
-    clog: CLog,
+    pp_log: PpLog,
     name: Arc<str>,
     shared: Arc<D3d11CompositorShared>,
     options: VideoCompositorOptions,
@@ -561,7 +561,7 @@ impl D3d11VideoCompositor {
     ) -> std::result::Result<(Self, D3d11VideoCompositorHandle), D3d11VideoCompositorError> {
         validate_output_options(options)?;
         let name: Arc<str> = name.into().into();
-        let clog = element_clog(ElementType::D3d11VideoCompositor, &name, None);
+        let pp_log = element_pp_log(ElementType::D3d11VideoCompositor, &name, None);
         let shared = Arc::new(D3d11CompositorShared {
             inputs: Mutex::new(HashMap::new()),
             next_input_id: AtomicU64::new(1),
@@ -581,8 +581,8 @@ impl D3d11VideoCompositor {
             layer_buffer,
         ) = unsafe { build_pipeline_state(device)? };
 
-        cinfo!(
-            clog: &clog,
+        pp_info!(
+            pp_log: &pp_log,
             "created: {}x{}, frame_rate={}, format=D3D11(BGRA)",
             options.width,
             options.height,
@@ -591,7 +591,7 @@ impl D3d11VideoCompositor {
         Ok((
             Self {
                 name: name.clone(),
-                clog,
+                pp_log,
                 shared: shared.clone(),
                 options,
                 frame_interval,
@@ -744,7 +744,7 @@ impl D3d11VideoCompositor {
                     // device, unsupported format, ...) is a data error, not
                     // grounds to fail the whole composited output.
                     bus.post(
-                        &self.clog,
+                        &self.pp_log,
                         BusEvent::Error {
                             element_type: ElementType::D3d11VideoCompositor,
                             name: self.name.clone(),
@@ -873,7 +873,7 @@ impl D3d11VideoCompositor {
         let output = self.compose_frame(bus)?;
         if let Err(error) = self.pad.push(MediaBuffer::Video(Arc::new(output))) {
             bus.post(
-                &self.clog,
+                &self.pp_log,
                 BusEvent::Error {
                     element_type: ElementType::D3d11VideoCompositor,
                     name: self.name.clone(),
@@ -894,12 +894,12 @@ impl Element for D3d11VideoCompositor {
         ElementType::D3d11VideoCompositor
     }
 
-    fn clog(&self) -> &CLog {
-        &self.clog
+    fn pp_log(&self) -> &PpLog {
+        &self.pp_log
     }
 
-    fn clog_mut(&mut self) -> &mut CLog {
-        &mut self.clog
+    fn pp_log_mut(&mut self) -> &mut PpLog {
+        &mut self.pp_log
     }
 }
 
@@ -911,12 +911,12 @@ impl Source for D3d11VideoCompositor {
 
 impl SourceElement for D3d11VideoCompositor {
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
-        cinfo!(self, "run: starting");
+        pp_info!(self, "run: starting");
         let mut schedule = PeriodicSchedule::new(self.frame_interval, Instant::now());
         loop {
             let outcome = drain_control(control, self, bus)?;
             if outcome.stopped {
-                cinfo!(self, "run: stopped");
+                pp_info!(self, "run: stopped");
                 return Ok(());
             }
             if outcome.paused_for > Duration::ZERO {
@@ -1281,7 +1281,7 @@ mod tests {
     };
 
     struct CapturingSink {
-        clog: CLog,
+        pp_log: PpLog,
         received: Arc<Mutex<Vec<MediaBuffer>>>,
     }
 
@@ -1294,12 +1294,12 @@ mod tests {
             ElementType::Other
         }
 
-        fn clog(&self) -> &CLog {
-            &self.clog
+        fn pp_log(&self) -> &PpLog {
+            &self.pp_log
         }
 
-        fn clog_mut(&mut self) -> &mut CLog {
-            &mut self.clog
+        fn pp_log_mut(&mut self) -> &mut PpLog {
+            &mut self.pp_log
         }
     }
 
@@ -1467,7 +1467,7 @@ mod tests {
         let received = Arc::new(Mutex::new(Vec::new()));
         download.src_pads()[0].link(Box::new(CapturingSink {
             received: received.clone(),
-            clog: element_clog(ElementType::Other, "capture", None),
+            pp_log: element_pp_log(ElementType::Other, "capture", None),
         }));
         download
             .consume(MediaBuffer::Video(Arc::new(composed)))
@@ -1868,7 +1868,7 @@ mod tests {
     }
 
     struct TimestampSink {
-        clog: CLog,
+        pp_log: PpLog,
         tx: crossbeam_channel::Sender<Instant>,
     }
 
@@ -1879,11 +1879,11 @@ mod tests {
         fn element_type(&self) -> ElementType {
             ElementType::Other
         }
-        fn clog(&self) -> &CLog {
-            &self.clog
+        fn pp_log(&self) -> &PpLog {
+            &self.pp_log
         }
-        fn clog_mut(&mut self) -> &mut CLog {
-            &mut self.clog
+        fn pp_log_mut(&mut self) -> &mut PpLog {
+            &mut self.pp_log
         }
     }
 
@@ -1913,7 +1913,7 @@ mod tests {
         let (tx, rx) = crossbeam_channel::unbounded();
         let sink = TimestampSink {
             tx,
-            clog: element_clog(ElementType::Other, "timestamp-recorder", None),
+            pp_log: element_pp_log(ElementType::Other, "timestamp-recorder", None),
         };
         let options = VideoCompositorOptions {
             width: 2,

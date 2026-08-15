@@ -1,12 +1,12 @@
 use std::sync::Arc;
 
-use crate::clog::CLog;
+use crate::pp_log::PpLog;
 
 use crate::{
     buffer::MediaBuffer,
     bus::{Bus, BusEvent},
     control::ControlMsg,
-    element::{Context, Element, ElementType, Filter, Sink, Source, element_clog},
+    element::{Context, Element, ElementType, Filter, Sink, Source, element_pp_log},
     error::Result,
     graph::{BranchId, BranchPlan, ElementId, GraphError, NodeInfo, PlannedEdge, PortRef},
     pad::SrcPad,
@@ -70,8 +70,8 @@ where
         pipeline_id: &str,
     ) -> Box<dyn Sink> {
         let mut element = self.0;
-        *element.clog_mut() =
-            element_clog(element.element_type(), &element.name(), Some(pipeline_id));
+        *element.pp_log_mut() =
+            element_pp_log(element.element_type(), &element.name(), Some(pipeline_id));
         element.src_pads()[0].link(downstream);
         Box::new(element)
     }
@@ -107,12 +107,12 @@ impl Element for EosReporter {
         self.inner.graph_id()
     }
 
-    fn clog(&self) -> &CLog {
-        self.inner.clog()
+    fn pp_log(&self) -> &PpLog {
+        self.inner.pp_log()
     }
 
-    fn clog_mut(&mut self) -> &mut CLog {
-        self.inner.clog_mut()
+    fn pp_log_mut(&mut self) -> &mut PpLog {
+        self.inner.pp_log_mut()
     }
 }
 
@@ -122,7 +122,7 @@ impl Sink for EosReporter {
         self.inner.consume(buf)?;
         if is_eos {
             self.bus.post(
-                self.inner.clog(),
+                self.inner.pp_log(),
                 BusEvent::Eos {
                     element_type: self.inner.element_type(),
                     name: self.inner.name(),
@@ -241,7 +241,7 @@ impl ChainBuilder {
         if let Some(error) = self.error {
             return Err(error.into());
         }
-        *terminal.clog_mut() = element_clog(
+        *terminal.pp_log_mut() = element_pp_log(
             terminal.element_type(),
             &terminal.name(),
             Some(&self.context.pipeline_id),

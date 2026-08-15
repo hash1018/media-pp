@@ -17,7 +17,6 @@
 pub mod buffer;
 pub mod bus;
 pub mod clock;
-pub mod clog;
 pub mod color;
 pub mod control;
 pub mod driver;
@@ -28,6 +27,7 @@ pub mod pad;
 pub mod pipeline;
 pub mod playback_clock;
 pub mod pool;
+pub mod pp_log;
 pub mod queue;
 pub mod schedule;
 pub mod time;

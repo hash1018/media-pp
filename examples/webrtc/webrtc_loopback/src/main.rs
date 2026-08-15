@@ -21,13 +21,13 @@ mod windows_example {
     };
 
     use ffmpeg_next as ffmpeg;
-    use media_pp::clog::CLog;
+    use media_pp::pp_log::PpLog;
     use media_pp::{
         Result,
         buffer::MediaBuffer,
         control::ControlMsg,
         driver::DriverRunner,
-        element::{Element, ElementType, Sink, element_clog},
+        element::{Element, ElementType, Sink, element_pp_log},
         elements::{WebRtcPeer, WebRtcTrackSink, WebRtcTrackSource},
         pipeline::Pipeline,
     };
@@ -185,7 +185,7 @@ mod windows_example {
     fn wire_counting(source: WebRtcTrackSource, count: Arc<AtomicUsize>) -> Arc<Pipeline> {
         let sink = CountingSink {
             count,
-            clog: element_clog(ElementType::Other, "counter", None),
+            pp_log: element_pp_log(ElementType::Other, "counter", None),
         };
         Pipeline::new("webrtc-loopback", source, |source, ctx| {
             let branch = ctx.branch().to(Box::new(sink))?;
@@ -206,7 +206,7 @@ mod windows_example {
     }
 
     struct CountingSink {
-        clog: CLog,
+        pp_log: PpLog,
         count: Arc<AtomicUsize>,
     }
 
@@ -219,12 +219,12 @@ mod windows_example {
             ElementType::Other
         }
 
-        fn clog(&self) -> &CLog {
-            &self.clog
+        fn pp_log(&self) -> &PpLog {
+            &self.pp_log
         }
 
-        fn clog_mut(&mut self) -> &mut CLog {
-            &mut self.clog
+        fn pp_log_mut(&mut self) -> &mut PpLog {
+            &mut self.pp_log
         }
     }
 

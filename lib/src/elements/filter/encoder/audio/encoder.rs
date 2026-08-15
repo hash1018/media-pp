@@ -1,13 +1,13 @@
 use std::{collections::VecDeque, sync::Arc};
 
-use crate::clog::{CLog, cerror, cinfo};
+use crate::pp_log::{PpLog, pp_error, pp_info};
 use ffmpeg_next as ffmpeg;
 use thiserror::Error as ThisError;
 
 use crate::{
     buffer::MediaBuffer,
     control::ControlMsg,
-    element::{Element, ElementType, Sink, Source, element_clog},
+    element::{Element, ElementType, Sink, Source, element_pp_log},
     error::Result,
     pad::SrcPad,
 };
@@ -115,7 +115,7 @@ pub struct SwAudioEncoderOptions {
 /// in `pending` (as one final, possibly short, frame — allowed for the
 /// last frame only) before flushing the encoder itself.
 pub struct SwAudioEncoder {
-    clog: CLog,
+    pp_log: PpLog,
     name: Arc<str>,
     encoder: ffmpeg::encoder::audio::Encoder,
     pad: SrcPad,
@@ -200,10 +200,10 @@ impl SwAudioEncoder {
         let frame_size = encoder.frame_size() as usize;
 
         let name: Arc<str> = name.into().into();
-        let clog = element_clog(ElementType::SwAudioEncoder, &name, None);
+        let pp_log = element_pp_log(ElementType::SwAudioEncoder, &name, None);
         let pad = SrcPad::new(format!("{name}_src"));
-        cinfo!(
-            clog: &clog,
+        pp_info!(
+            pp_log: &pp_log,
             "opened: codec={encoder_name}, {}Hz, {} channel(s), format={:?}, frame_size={}, bit_rate={}",
             options.sample_rate,
             options.channels,
@@ -213,7 +213,7 @@ impl SwAudioEncoder {
         );
         Ok(Self {
             name,
-            clog,
+            pp_log,
             encoder,
             pad,
             target_format,
@@ -282,7 +282,7 @@ impl SwAudioEncoder {
 
             self.encoder
                 .send_frame(&frame)
-                .inspect_err(|error| cerror!(self, "send_frame failed: {error}"))
+                .inspect_err(|error| pp_error!(self, "send_frame failed: {error}"))
                 .map_err(SwAudioEncoderError::from)?;
             self.drain_packets()?;
 
@@ -435,12 +435,12 @@ impl Element for SwAudioEncoder {
         ElementType::SwAudioEncoder
     }
 
-    fn clog(&self) -> &CLog {
-        &self.clog
+    fn pp_log(&self) -> &PpLog {
+        &self.pp_log
     }
 
-    fn clog_mut(&mut self) -> &mut CLog {
-        &mut self.clog
+    fn pp_log_mut(&mut self) -> &mut PpLog {
+        &mut self.pp_log
     }
 }
 
@@ -455,18 +455,18 @@ impl Sink for SwAudioEncoder {
         match buf {
             MediaBuffer::Audio(frame) => {
                 self.resample(&frame)
-                    .inspect_err(|error| cerror!(self, "resample failed: {error}"))
+                    .inspect_err(|error| pp_error!(self, "resample failed: {error}"))
                     .map_err(SwAudioEncoderError::from)?;
                 self.drain_pending(false)
             }
             MediaBuffer::Eos => {
                 self.flush_resampler()
-                    .inspect_err(|error| cerror!(self, "resampler flush failed: {error}"))
+                    .inspect_err(|error| pp_error!(self, "resampler flush failed: {error}"))
                     .map_err(SwAudioEncoderError::from)?;
                 self.drain_pending(true)?;
                 self.encoder
                     .send_eof()
-                    .inspect_err(|error| cerror!(self, "send_eof failed: {error}"))
+                    .inspect_err(|error| pp_error!(self, "send_eof failed: {error}"))
                     .map_err(SwAudioEncoderError::from)?;
                 self.drain_packets()?;
                 self.pad.push(MediaBuffer::Eos)
@@ -518,7 +518,7 @@ mod tests {
     }
 
     struct RecordingSink {
-        clog: CLog,
+        pp_log: PpLog,
         packets: Arc<std::sync::Mutex<usize>>,
         eos: Arc<std::sync::atomic::AtomicBool>,
     }
@@ -530,11 +530,11 @@ mod tests {
         fn element_type(&self) -> ElementType {
             ElementType::Other
         }
-        fn clog(&self) -> &CLog {
-            &self.clog
+        fn pp_log(&self) -> &PpLog {
+            &self.pp_log
         }
-        fn clog_mut(&mut self) -> &mut CLog {
-            &mut self.clog
+        fn pp_log_mut(&mut self) -> &mut PpLog {
+            &mut self.pp_log
         }
     }
 
@@ -602,7 +602,7 @@ mod tests {
         let sink = RecordingSink {
             packets: packets.clone(),
             eos: eos.clone(),
-            clog: element_clog(ElementType::Other, "recorder", None),
+            pp_log: element_pp_log(ElementType::Other, "recorder", None),
         };
         encoder.src_pads()[0].link(Box::new(sink));
 
@@ -628,7 +628,7 @@ mod tests {
     }
 
     struct CapturingSink {
-        clog: CLog,
+        pp_log: PpLog,
         packets: Arc<std::sync::Mutex<Vec<Arc<ffmpeg::Packet>>>>,
     }
 
@@ -639,11 +639,11 @@ mod tests {
         fn element_type(&self) -> ElementType {
             ElementType::Other
         }
-        fn clog(&self) -> &CLog {
-            &self.clog
+        fn pp_log(&self) -> &PpLog {
+            &self.pp_log
         }
-        fn clog_mut(&mut self) -> &mut CLog {
-            &mut self.clog
+        fn pp_log_mut(&mut self) -> &mut PpLog {
+            &mut self.pp_log
         }
     }
 
@@ -686,7 +686,7 @@ mod tests {
         let packets = Arc::new(std::sync::Mutex::new(Vec::new()));
         encoder.src_pads()[0].link(Box::new(CapturingSink {
             packets: packets.clone(),
-            clog: element_clog(ElementType::Other, "capture", None),
+            pp_log: element_pp_log(ElementType::Other, "capture", None),
         }));
 
         for _ in 0..20 {

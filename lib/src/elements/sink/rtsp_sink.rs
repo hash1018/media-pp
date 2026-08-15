@@ -1,13 +1,13 @@
 use std::{ffi::CString, ptr, sync::Arc};
 
-use crate::clog::{CLog, cerror, cinfo};
+use crate::pp_log::{PpLog, pp_error, pp_info};
 use ffmpeg_next::{self as ffmpeg, ffi};
 use thiserror::Error as ThisError;
 
 use crate::{
     buffer::MediaBuffer,
     control::ControlMsg,
-    element::{Element, ElementType, Sink, element_clog},
+    element::{Element, ElementType, Sink, element_pp_log},
     elements::RtspTransport,
     error::Result,
 };
@@ -46,7 +46,7 @@ pub enum RtspSinkError {
 /// The current sink publishes one stream. Build separate sinks and RTSP
 /// paths when publishing independent streams.
 pub struct RtspSink {
-    clog: CLog,
+    pp_log: PpLog,
     name: Arc<str>,
     url: String,
     output: ffmpeg::format::context::Output,
@@ -94,11 +94,11 @@ impl RtspSink {
             .map_err(RtspSinkError::from)?;
 
         let name: Arc<str> = name.into().into();
-        let clog = element_clog(ElementType::RtspSink, &name, None);
-        cinfo!(clog: &clog, "publishing: url={url}, transport={transport:?}");
+        let pp_log = element_pp_log(ElementType::RtspSink, &name, None);
+        pp_info!(pp_log: &pp_log, "publishing: url={url}, transport={transport:?}");
 
         Ok(Self {
-            clog,
+            pp_log,
             name,
             url,
             output,
@@ -151,12 +151,12 @@ impl Element for RtspSink {
         ElementType::RtspSink
     }
 
-    fn clog(&self) -> &CLog {
-        &self.clog
+    fn pp_log(&self) -> &PpLog {
+        &self.pp_log
     }
 
-    fn clog_mut(&mut self) -> &mut CLog {
-        &mut self.clog
+    fn pp_log_mut(&mut self) -> &mut PpLog {
+        &mut self.pp_log
     }
 }
 
@@ -204,20 +204,20 @@ impl Sink for RtspSink {
                     .write_interleaved(&mut self.output)
                     .map_err(RtspSinkError::from)
                     .map_err(Into::into)
-                    .inspect_err(|error| cerror!(self, "write_interleaved failed: {error}"))
+                    .inspect_err(|error| pp_error!(self, "write_interleaved failed: {error}"))
             }
             MediaBuffer::Eos => self
                 .output
                 .write_trailer()
                 .map_err(RtspSinkError::from)
                 .map_err(Into::into)
-                .inspect_err(|error| cerror!(self, "write_trailer failed: {error}")),
+                .inspect_err(|error| pp_error!(self, "write_trailer failed: {error}")),
             MediaBuffer::Video(_) => {
-                cerror!(self, "unsupported buffer: Video");
+                pp_error!(self, "unsupported buffer: Video");
                 Err(RtspSinkError::UnsupportedBuffer("Video").into())
             }
             MediaBuffer::Audio(_) => {
-                cerror!(self, "unsupported buffer: Audio");
+                pp_error!(self, "unsupported buffer: Audio");
                 Err(RtspSinkError::UnsupportedBuffer("Audio").into())
             }
         }
@@ -234,7 +234,7 @@ impl Sink for RtspSink {
 
 impl Drop for RtspSink {
     fn drop(&mut self) {
-        cinfo!(
+        pp_info!(
             self,
             "dropped: closing publisher connection to {}",
             self.url

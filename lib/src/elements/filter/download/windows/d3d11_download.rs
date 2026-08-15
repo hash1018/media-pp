@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex};
 
-use crate::clog::{CLog, cerror, cinfo};
+use crate::pp_log::{PpLog, pp_error, pp_info};
 use ffmpeg_next as ffmpeg;
 use thiserror::Error as ThisError;
 use windows::{
@@ -18,7 +18,7 @@ use windows::{
 use crate::{
     buffer::MediaBuffer,
     control::ControlMsg,
-    element::{Element, ElementType, Sink, Source, element_clog},
+    element::{Element, ElementType, Sink, Source, element_pp_log},
     elements::filter::decoder::d3d11va_decoder::d3d11va_texture,
     error::Result,
     pad::SrcPad,
@@ -98,7 +98,7 @@ pub enum D3d11DownloadError {
 /// unrelated bind/draw/copy sequences from interleaving on the one
 /// underlying immediate context.
 pub struct D3d11Download {
-    clog: CLog,
+    pp_log: PpLog,
     name: Arc<str>,
     device: ID3D11Device,
     context: Arc<Mutex<ID3D11DeviceContext>>,
@@ -133,7 +133,7 @@ impl D3d11Download {
         height: u32,
     ) -> std::result::Result<Self, D3d11DownloadError> {
         let name: Arc<str> = name.into().into();
-        let clog = element_clog(ElementType::D3d11Download, &name, None);
+        let pp_log = element_pp_log(ElementType::D3d11Download, &name, None);
         let staging = create_staging_texture(device, width, height)?;
         let pad = SrcPad::new(format!("{name}_src"));
         let pool = UnboundObjectPool::new(
@@ -141,10 +141,10 @@ impl D3d11Download {
             move || ffmpeg::frame::Video::new(ffmpeg::format::Pixel::BGRA, width, height),
             |_| {},
         );
-        cinfo!(clog: &clog, "opened: {width}x{height}");
+        pp_info!(pp_log: &pp_log, "opened: {width}x{height}");
         Ok(Self {
             name,
-            clog,
+            pp_log,
             device: device.clone(),
             context,
             width,
@@ -222,12 +222,12 @@ impl Element for D3d11Download {
         ElementType::D3d11Download
     }
 
-    fn clog(&self) -> &CLog {
-        &self.clog
+    fn pp_log(&self) -> &PpLog {
+        &self.pp_log
     }
 
-    fn clog_mut(&mut self) -> &mut CLog {
-        &mut self.clog
+    fn pp_log_mut(&mut self) -> &mut PpLog {
+        &mut self.pp_log
     }
 }
 
@@ -243,7 +243,7 @@ impl Sink for D3d11Download {
             MediaBuffer::Video(frame) => {
                 if frame.format() != ffmpeg::format::Pixel::D3D11 {
                     let format = frame.format();
-                    cerror!(self, "unsupported pixel format: {format:?}");
+                    pp_error!(self, "unsupported pixel format: {format:?}");
                     return Err(D3d11DownloadError::UnsupportedFormat(format).into());
                 }
                 if frame.width() != self.width || frame.height() != self.height {
@@ -253,7 +253,7 @@ impl Sink for D3d11Download {
                         expected_width: self.width,
                         expected_height: self.height,
                     };
-                    cerror!(self, "{error}");
+                    pp_error!(self, "{error}");
                     return Err(error.into());
                 }
 
@@ -272,14 +272,14 @@ impl Sink for D3d11Download {
                 let texture_device =
                     unsafe { texture.GetDevice() }.map_err(D3d11DownloadError::from)?;
                 if texture_device.as_raw() != self.device.as_raw() {
-                    cerror!(self, "device mismatch");
+                    pp_error!(self, "device mismatch");
                     return Err(D3d11DownloadError::DeviceMismatch.into());
                 }
 
                 let mut desc = D3D11_TEXTURE2D_DESC::default();
                 unsafe { texture.GetDesc(&mut desc) };
                 if desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM {
-                    cerror!(self, "unsupported texture format: {:?}", desc.Format);
+                    pp_error!(self, "unsupported texture format: {:?}", desc.Format);
                     return Err(D3d11DownloadError::UnsupportedTextureFormat(desc.Format).into());
                 }
                 if desc.Width < self.width || desc.Height < self.height {
@@ -289,7 +289,7 @@ impl Sink for D3d11Download {
                         expected_width: self.width,
                         expected_height: self.height,
                     };
-                    cerror!(self, "{error}");
+                    pp_error!(self, "{error}");
                     return Err(error.into());
                 }
                 if index < 0 || index as u64 >= u64::from(desc.ArraySize) {
@@ -297,14 +297,14 @@ impl Sink for D3d11Download {
                         index,
                         array_size: desc.ArraySize,
                     };
-                    cerror!(self, "{error}");
+                    pp_error!(self, "{error}");
                     return Err(error.into());
                 }
                 let source_subresource = (index as u32) * desc.MipLevels;
 
                 let mut cpu_frame = self
                     .download(&texture, source_subresource)
-                    .inspect_err(|error| cerror!(self, "GPU download failed: {error}"))
+                    .inspect_err(|error| pp_error!(self, "GPU download failed: {error}"))
                     .map_err(D3d11DownloadError::from)?;
                 cpu_frame.set_pts(frame.pts());
                 cpu_frame.set_color_space(frame.color_space());
@@ -314,11 +314,11 @@ impl Sink for D3d11Download {
             }
             MediaBuffer::Eos => self.pad.push(MediaBuffer::Eos),
             MediaBuffer::Packet(_) => {
-                cerror!(self, "unsupported buffer: Packet");
+                pp_error!(self, "unsupported buffer: Packet");
                 Err(D3d11DownloadError::UnsupportedBuffer("Packet").into())
             }
             MediaBuffer::Audio(_) => {
-                cerror!(self, "unsupported buffer: Audio");
+                pp_error!(self, "unsupported buffer: Audio");
                 Err(D3d11DownloadError::UnsupportedBuffer("Audio").into())
             }
         }
@@ -442,7 +442,7 @@ mod tests {
         let received_clone = received.clone();
         download.src_pads()[0].link(Box::new(CapturingSink {
             received: received_clone,
-            clog: element_clog(ElementType::Other, "capture", None),
+            pp_log: element_pp_log(ElementType::Other, "capture", None),
         }));
 
         let source_pool =
@@ -540,7 +540,7 @@ mod tests {
         let received = Arc::new(Mutex::new(Vec::new()));
         download.src_pads()[0].link(Box::new(CapturingSink {
             received: received.clone(),
-            clog: element_clog(ElementType::Other, "capture", None),
+            pp_log: element_pp_log(ElementType::Other, "capture", None),
         }));
         let source_pool =
             crate::pool::UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
@@ -559,7 +559,7 @@ mod tests {
     }
 
     struct CapturingSink {
-        clog: CLog,
+        pp_log: PpLog,
         received: Arc<std::sync::Mutex<Vec<MediaBuffer>>>,
     }
 
@@ -572,12 +572,12 @@ mod tests {
             ElementType::Other
         }
 
-        fn clog(&self) -> &CLog {
-            &self.clog
+        fn pp_log(&self) -> &PpLog {
+            &self.pp_log
         }
 
-        fn clog_mut(&mut self) -> &mut CLog {
-            &mut self.clog
+        fn pp_log_mut(&mut self) -> &mut PpLog {
+            &mut self.pp_log
         }
     }
 

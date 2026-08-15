@@ -1,6 +1,6 @@
 use std::{ffi::c_void, sync::Arc};
 
-use crate::clog::{CLog, cerror, cinfo};
+use crate::pp_log::{PpLog, pp_error, pp_info};
 use ffmpeg_next as ffmpeg;
 use thiserror::Error as ThisError;
 use windows::Win32::Graphics::{
@@ -14,7 +14,7 @@ use windows::Win32::Graphics::{
 use crate::{
     buffer::MediaBuffer,
     control::ControlMsg,
-    element::{Element, ElementType, Sink, Source, element_clog},
+    element::{Element, ElementType, Sink, Source, element_pp_log},
     elements::filter::decoder::d3d11va_decoder::wrap_d3d11_texture,
     error::Result,
     pad::SrcPad,
@@ -76,7 +76,7 @@ pub enum D3d11UploadError {
 /// [`D3d11Upload::new`] — every frame `consume` receives must match
 /// exactly.
 pub struct D3d11Upload {
-    clog: CLog,
+    pp_log: PpLog,
     name: Arc<str>,
     device: ID3D11Device,
     width: u32,
@@ -100,13 +100,13 @@ impl D3d11Upload {
     /// see [`crate::elements::D3d11Renderer`]'s own docs on why.
     pub fn new(name: impl Into<String>, device: &ID3D11Device, width: u32, height: u32) -> Self {
         let name: Arc<str> = name.into().into();
-        let clog = element_clog(ElementType::D3d11Upload, &name, None);
+        let pp_log = element_pp_log(ElementType::D3d11Upload, &name, None);
         let pad = SrcPad::new(format!("{name}_src"));
         let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
-        cinfo!(clog: &clog, "opened: {width}x{height}");
+        pp_info!(pp_log: &pp_log, "opened: {width}x{height}");
         Self {
             name,
-            clog,
+            pp_log,
             device: device.clone(),
             width,
             height,
@@ -184,12 +184,12 @@ impl Element for D3d11Upload {
         ElementType::D3d11Upload
     }
 
-    fn clog(&self) -> &CLog {
-        &self.clog
+    fn pp_log(&self) -> &PpLog {
+        &self.pp_log
     }
 
-    fn clog_mut(&mut self) -> &mut CLog {
-        &mut self.clog
+    fn pp_log_mut(&mut self) -> &mut PpLog {
+        &mut self.pp_log
     }
 }
 
@@ -204,7 +204,7 @@ impl Sink for D3d11Upload {
         match buf {
             MediaBuffer::Video(frame) => {
                 if frame.format() != ffmpeg::format::Pixel::NV12 {
-                    cerror!(self, "unsupported pixel format: {:?}", frame.format());
+                    pp_error!(self, "unsupported pixel format: {:?}", frame.format());
                     return Err(D3d11UploadError::UnsupportedFormat(frame.format()).into());
                 }
                 if frame.width() != self.width || frame.height() != self.height {
@@ -214,13 +214,13 @@ impl Sink for D3d11Upload {
                         expected_width: self.width,
                         expected_height: self.height,
                     };
-                    cerror!(self, "{error}");
+                    pp_error!(self, "{error}");
                     return Err(error.into());
                 }
 
                 let texture = self
                     .upload(&frame)
-                    .inspect_err(|error| cerror!(self, "GPU upload failed: {error}"))
+                    .inspect_err(|error| pp_error!(self, "GPU upload failed: {error}"))
                     .map_err(D3d11UploadError::from)?;
                 let mut gpu_frame = self.pool.get();
                 // Overwrites the pooled slot's previous contents in
@@ -236,11 +236,11 @@ impl Sink for D3d11Upload {
             }
             MediaBuffer::Eos => self.pad.push(MediaBuffer::Eos),
             MediaBuffer::Packet(_) => {
-                cerror!(self, "unsupported buffer: Packet");
+                pp_error!(self, "unsupported buffer: Packet");
                 Err(D3d11UploadError::UnsupportedBuffer("Packet").into())
             }
             MediaBuffer::Audio(_) => {
-                cerror!(self, "unsupported buffer: Audio");
+                pp_error!(self, "unsupported buffer: Audio");
                 Err(D3d11UploadError::UnsupportedBuffer("Audio").into())
             }
         }

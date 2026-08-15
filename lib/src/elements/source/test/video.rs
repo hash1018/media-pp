@@ -4,7 +4,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::clog::{CLog, cinfo};
+use crate::pp_log::{PpLog, pp_info};
 use ffmpeg_next as ffmpeg;
 use thiserror::Error as ThisError;
 
@@ -12,7 +12,7 @@ use crate::{
     buffer::MediaBuffer,
     bus::{Bus, BusEvent},
     control::{ControlReceiver, drain_control},
-    element::{Element, ElementType, Source, SourceElement, element_clog},
+    element::{Element, ElementType, Source, SourceElement, element_pp_log},
     pad::SrcPad,
     pool::UnboundObjectPool,
     schedule::PeriodicSchedule,
@@ -92,7 +92,7 @@ impl Default for TestVideoOptions {
 /// limit is exposed, deliberately, mirroring a live camera source more
 /// than a file).
 pub struct TestVideoSource {
-    clog: CLog,
+    pp_log: PpLog,
     name: Arc<str>,
     options: TestVideoOptions,
     pad: SrcPad,
@@ -113,10 +113,10 @@ pub struct TestVideoSource {
 impl TestVideoSource {
     pub fn new(name: impl Into<String>, options: TestVideoOptions) -> Self {
         let name: Arc<str> = name.into().into();
-        let clog = element_clog(ElementType::TestVideoSource, &name, None);
+        let pp_log = element_pp_log(ElementType::TestVideoSource, &name, None);
         let pad = SrcPad::new(format!("{name}_src"));
-        cinfo!(
-            clog: &clog,
+        pp_info!(
+            pp_log: &pp_log,
             "created: {}x{}, framerate={}",
             options.width,
             options.height,
@@ -138,7 +138,7 @@ impl TestVideoSource {
         };
         Self {
             name,
-            clog,
+            pp_log,
             options,
             pad,
             frame_index: 0,
@@ -195,12 +195,12 @@ impl Element for TestVideoSource {
         ElementType::TestVideoSource
     }
 
-    fn clog(&self) -> &crate::clog::CLog {
-        &self.clog
+    fn pp_log(&self) -> &crate::pp_log::PpLog {
+        &self.pp_log
     }
 
-    fn clog_mut(&mut self) -> &mut crate::clog::CLog {
-        &mut self.clog
+    fn pp_log_mut(&mut self) -> &mut crate::pp_log::PpLog {
+        &mut self.pp_log
     }
 }
 
@@ -212,12 +212,12 @@ impl Source for TestVideoSource {
 
 impl SourceElement for TestVideoSource {
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> crate::error::Result<()> {
-        cinfo!(self, "run: starting");
+        pp_info!(self, "run: starting");
         let mut schedule = PeriodicSchedule::new(self.frame_interval, Instant::now());
         loop {
             let outcome = drain_control(control, self, bus)?;
             if outcome.stopped {
-                cinfo!(self, "run: stopped");
+                pp_info!(self, "run: stopped");
                 return Ok(());
             }
             if outcome.paused_for > Duration::ZERO {
@@ -232,7 +232,7 @@ impl SourceElement for TestVideoSource {
             // thread over it.
             if let Err(error) = self.pad.push(MediaBuffer::Video(Arc::new(frame))) {
                 bus.post(
-                    &self.clog,
+                    &self.pp_log,
                     BusEvent::Error {
                         element_type: ElementType::TestVideoSource,
                         name: self.name.clone(),
@@ -258,7 +258,7 @@ impl SourceElement for TestVideoSource {
 mod tests {
     use std::{sync::Mutex, thread, time::Duration};
 
-    use crate::clog::CLog;
+    use crate::pp_log::PpLog;
 
     use super::*;
     use crate::{control::ControlMsg, element::Sink, pipeline::Pipeline};
@@ -270,7 +270,7 @@ mod tests {
     /// order — enough to check both pixel format/size and that `pts`
     /// actually advances frame over frame.
     struct RecordingSink {
-        clog: CLog,
+        pp_log: PpLog,
         seen: RecordedFrames,
     }
 
@@ -281,11 +281,11 @@ mod tests {
         fn element_type(&self) -> ElementType {
             ElementType::Other
         }
-        fn clog(&self) -> &CLog {
-            &self.clog
+        fn pp_log(&self) -> &PpLog {
+            &self.pp_log
         }
-        fn clog_mut(&mut self) -> &mut CLog {
-            &mut self.clog
+        fn pp_log_mut(&mut self) -> &mut PpLog {
+            &mut self.pp_log
         }
     }
 
@@ -311,7 +311,7 @@ mod tests {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let sink = RecordingSink {
             seen: seen.clone(),
-            clog: element_clog(ElementType::Other, "recorder", None),
+            pp_log: element_pp_log(ElementType::Other, "recorder", None),
         };
         let source = TestVideoSource::new(
             "test-video",
@@ -366,7 +366,7 @@ mod tests {
     /// [`resuming_after_a_pause_does_not_dump_a_burst_of_catch_up_frames`]
     /// needs to tell a steady post-resume framerate apart from a burst.
     struct TimestampSink {
-        clog: CLog,
+        pp_log: PpLog,
         seen: Arc<Mutex<Vec<Instant>>>,
     }
 
@@ -377,11 +377,11 @@ mod tests {
         fn element_type(&self) -> ElementType {
             ElementType::Other
         }
-        fn clog(&self) -> &CLog {
-            &self.clog
+        fn pp_log(&self) -> &PpLog {
+            &self.pp_log
         }
-        fn clog_mut(&mut self) -> &mut CLog {
-            &mut self.clog
+        fn pp_log_mut(&mut self) -> &mut PpLog {
+            &mut self.pp_log
         }
     }
 
@@ -410,7 +410,7 @@ mod tests {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let sink = TimestampSink {
             seen: seen.clone(),
-            clog: element_clog(ElementType::Other, "timestamp-recorder", None),
+            pp_log: element_pp_log(ElementType::Other, "timestamp-recorder", None),
         };
         let source = TestVideoSource::new(
             "test-video",
@@ -457,7 +457,7 @@ mod tests {
     }
 
     struct SlowFirstFrameSink {
-        clog: CLog,
+        pp_log: PpLog,
         tx: crossbeam_channel::Sender<Instant>,
         slow_duration: Duration,
         delayed: bool,
@@ -470,11 +470,11 @@ mod tests {
         fn element_type(&self) -> ElementType {
             ElementType::Other
         }
-        fn clog(&self) -> &CLog {
-            &self.clog
+        fn pp_log(&self) -> &PpLog {
+            &self.pp_log
         }
-        fn clog_mut(&mut self) -> &mut CLog {
-            &mut self.clog
+        fn pp_log_mut(&mut self) -> &mut PpLog {
+            &mut self.pp_log
         }
     }
 
@@ -518,7 +518,7 @@ mod tests {
             tx,
             slow_duration: Duration::from_millis(300),
             delayed: false,
-            clog: element_clog(ElementType::Other, "slow-sink", None),
+            pp_log: element_pp_log(ElementType::Other, "slow-sink", None),
         };
         let source = TestVideoSource::new(
             "test-video",

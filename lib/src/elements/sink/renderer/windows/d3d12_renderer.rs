@@ -1,6 +1,6 @@
 use std::{any::Any, sync::Arc};
 
-use crate::clog::{CLog, cerror, cinfo};
+use crate::pp_log::{PpLog, pp_error, pp_info};
 use ffmpeg_next as ffmpeg;
 use thiserror::Error as ThisError;
 use windows::{
@@ -11,7 +11,7 @@ use windows::{
 use crate::{
     buffer::MediaBuffer,
     control::ControlMsg,
-    element::{Element, ElementType, Sink, element_clog},
+    element::{Element, ElementType, Sink, element_pp_log},
     elements::{SubmitError, filter::decoder::d3d12va_decoder::d3d12va_texture},
     error::Result,
     pool::UnboundObjectPoolRef,
@@ -127,7 +127,7 @@ pub enum D3d12RendererError {
 ///     draws straight from the decoder's own texture via
 ///     `D3d12FrameRenderer::submit_nv12_texture`.
 pub struct D3d12Renderer {
-    clog: CLog,
+    pp_log: PpLog,
     name: Arc<str>,
     inner: Box<dyn D3d12FrameRenderer>,
     /// Captured once from `inner.device()` at construction — the
@@ -147,12 +147,12 @@ impl D3d12Renderer {
     /// create or own a window itself.
     pub fn new(name: impl Into<String>, renderer: Box<dyn D3d12FrameRenderer>) -> Self {
         let name: Arc<str> = name.into().into();
-        let clog = element_clog(ElementType::D3d12Renderer, &name, None);
-        cinfo!(clog: &clog, "created");
+        let pp_log = element_pp_log(ElementType::D3d12Renderer, &name, None);
+        pp_info!(pp_log: &pp_log, "created");
         let device = renderer.device();
         Self {
             name,
-            clog,
+            pp_log,
             inner: renderer,
             device,
         }
@@ -162,9 +162,9 @@ impl D3d12Renderer {
     pub fn resize(&self, width: u32, height: u32) -> Result<()> {
         self.inner
             .resize(width, height)
-            .inspect_err(|error| cerror!(self, "resize failed: {error:?}"))
+            .inspect_err(|error| pp_error!(self, "resize failed: {error:?}"))
             .map_err(D3d12RendererError::Resize)?;
-        cinfo!(self, "resized: {width}x{height}");
+        pp_info!(self, "resized: {width}x{height}");
         Ok(())
     }
 
@@ -244,12 +244,12 @@ impl Element for D3d12Renderer {
         ElementType::D3d12Renderer
     }
 
-    fn clog(&self) -> &CLog {
-        &self.clog
+    fn pp_log(&self) -> &PpLog {
+        &self.pp_log
     }
 
-    fn clog_mut(&mut self) -> &mut CLog {
-        &mut self.clog
+    fn pp_log_mut(&mut self) -> &mut PpLog {
+        &mut self.pp_log
     }
 }
 
@@ -262,12 +262,12 @@ impl Sink for D3d12Renderer {
         match frame.format() {
             ffmpeg::format::Pixel::YUV420P => self
                 .submit_yuv420p_frame(&frame)
-                .inspect_err(|error| cerror!(self, "submit_yuv420p_frame failed: {error}")),
+                .inspect_err(|error| pp_error!(self, "submit_yuv420p_frame failed: {error}")),
             ffmpeg::format::Pixel::D3D12 => self
                 .submit_d3d12_frame(frame)
-                .inspect_err(|error| cerror!(self, "submit_d3d12_frame failed: {error}")),
+                .inspect_err(|error| pp_error!(self, "submit_d3d12_frame failed: {error}")),
             other => {
-                cerror!(self, "unsupported pixel format: {other:?}");
+                pp_error!(self, "unsupported pixel format: {other:?}");
                 Err(D3d12RendererError::UnsupportedFormat(other).into())
             }
         }

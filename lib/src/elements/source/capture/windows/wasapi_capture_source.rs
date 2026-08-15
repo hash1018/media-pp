@@ -6,7 +6,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::clog::{CLog, cerror, cinfo};
+use crate::pp_log::{PpLog, pp_error, pp_info};
 use ffmpeg_next as ffmpeg;
 use thiserror::Error as ThisError;
 use windows::Win32::{
@@ -21,7 +21,7 @@ use crate::{
     buffer::MediaBuffer,
     bus::{Bus, BusEvent},
     control::{self, ControlMsg, ControlOutcome, ControlReceiver},
-    element::{Element, ElementType, Source, SourceElement, element_clog},
+    element::{Element, ElementType, Source, SourceElement, element_pp_log},
     error::Result,
     pad::SrcPad,
     platform::windows::wasapi::{
@@ -133,7 +133,7 @@ pub struct WasapiCaptureOptions {
 /// Runs until `Stop` — never reaches `Eos` on its own, same as every other
 /// live source in this crate.
 pub struct WasapiCaptureSource {
-    clog: CLog,
+    pp_log: PpLog,
     name: Arc<str>,
     audio_client: IAudioClient,
     capture_client: IAudioCaptureClient,
@@ -179,7 +179,7 @@ impl WasapiCaptureSource {
         options: WasapiCaptureOptions,
     ) -> std::result::Result<(Self, u32, u16), WasapiCaptureSourceError> {
         let name: Arc<str> = name.into().into();
-        let clog = element_clog(ElementType::WasapiCaptureSource, &name, None);
+        let pp_log = element_pp_log(ElementType::WasapiCaptureSource, &name, None);
         let _apartment = ComApartment::new()?;
 
         unsafe {
@@ -211,8 +211,8 @@ impl WasapiCaptureSource {
 
             let capture_client: IAudioCaptureClient = audio_client.GetService()?;
 
-            cinfo!(
-                clog: &clog,
+            pp_info!(
+                pp_log: &pp_log,
                 "opened: device={:?} ({:?}), {}Hz, {} channel(s), format={:?}",
                 options.device.name,
                 options.device.kind,
@@ -225,7 +225,7 @@ impl WasapiCaptureSource {
             Ok((
                 Self {
                     name,
-                    clog,
+                    pp_log,
                     audio_client,
                     capture_client,
                     sample_rate: audio_format.sample_rate,
@@ -290,7 +290,7 @@ impl WasapiCaptureSource {
     fn push_frame(&mut self, frame: ffmpeg::frame::Audio, bus: &Bus) {
         if let Err(error) = self.pad.push(MediaBuffer::Audio(Arc::new(frame))) {
             bus.post(
-                &self.clog,
+                &self.pp_log,
                 BusEvent::Error {
                     element_type: ElementType::WasapiCaptureSource,
                     name: self.name.clone(),
@@ -426,7 +426,7 @@ impl WasapiCaptureSource {
         loop {
             let outcome = self.handle_control(control, bus)?;
             if outcome.stopped {
-                cinfo!(self, "run: stopped");
+                pp_info!(self, "run: stopped");
                 return Ok(());
             }
             timeline.account_pause(outcome.paused_for);
@@ -479,12 +479,12 @@ impl Element for WasapiCaptureSource {
         ElementType::WasapiCaptureSource
     }
 
-    fn clog(&self) -> &CLog {
-        &self.clog
+    fn pp_log(&self) -> &PpLog {
+        &self.pp_log
     }
 
-    fn clog_mut(&mut self) -> &mut CLog {
-        &mut self.clog
+    fn pp_log_mut(&mut self) -> &mut PpLog {
+        &mut self.pp_log
     }
 }
 
@@ -496,7 +496,7 @@ impl Source for WasapiCaptureSource {
 
 impl SourceElement for WasapiCaptureSource {
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
-        cinfo!(self, "run: starting");
+        pp_info!(self, "run: starting");
 
         let _apartment = ComApartment::new().map_err(WasapiCaptureSourceError::from)?;
 
@@ -507,7 +507,7 @@ impl SourceElement for WasapiCaptureSource {
         let result = self.run_captured(control, bus);
 
         if let Err(error) = unsafe { self.audio_client.Stop() } {
-            cerror!(self, "Stop failed: {error}");
+            pp_error!(self, "Stop failed: {error}");
         }
         result
     }

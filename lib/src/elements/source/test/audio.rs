@@ -5,7 +5,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::clog::{CLog, cinfo};
+use crate::pp_log::{PpLog, pp_info};
 use ffmpeg_next as ffmpeg;
 use thiserror::Error as ThisError;
 
@@ -13,7 +13,7 @@ use crate::{
     buffer::MediaBuffer,
     bus::{Bus, BusEvent},
     control::{ControlReceiver, drain_control},
-    element::{Element, ElementType, Source, SourceElement, element_clog},
+    element::{Element, ElementType, Source, SourceElement, element_pp_log},
     error::Result,
     pad::SrcPad,
     schedule::ActiveTimeline,
@@ -76,7 +76,7 @@ impl Default for TestAudioOptions {
 /// live source in this crate (no sample-count limit is exposed,
 /// deliberately, mirroring a live capture source more than a file).
 pub struct TestAudioSource {
-    clog: CLog,
+    pp_log: PpLog,
     name: Arc<str>,
     pad: SrcPad,
     sample_rate: u32,
@@ -101,9 +101,9 @@ unsafe impl Send for TestAudioSource {}
 impl TestAudioSource {
     pub fn new(name: impl Into<String>, options: TestAudioOptions) -> Self {
         let name: Arc<str> = name.into().into();
-        let clog = element_clog(ElementType::TestAudioSource, &name, None);
-        cinfo!(
-            clog: &clog,
+        let pp_log = element_pp_log(ElementType::TestAudioSource, &name, None);
+        pp_info!(
+            pp_log: &pp_log,
             "created: {}Hz, {} channel(s), {}Hz tone",
             options.sample_rate,
             options.channels,
@@ -112,7 +112,7 @@ impl TestAudioSource {
         let pad = SrcPad::new(format!("{name}_src"));
         Self {
             name,
-            clog,
+            pp_log,
             pad,
             sample_rate: options.sample_rate,
             channels: options.channels,
@@ -168,12 +168,12 @@ impl Element for TestAudioSource {
         ElementType::TestAudioSource
     }
 
-    fn clog(&self) -> &crate::clog::CLog {
-        &self.clog
+    fn pp_log(&self) -> &crate::pp_log::PpLog {
+        &self.pp_log
     }
 
-    fn clog_mut(&mut self) -> &mut crate::clog::CLog {
-        &mut self.clog
+    fn pp_log_mut(&mut self) -> &mut crate::pp_log::PpLog {
+        &mut self.pp_log
     }
 }
 
@@ -185,12 +185,12 @@ impl Source for TestAudioSource {
 
 impl SourceElement for TestAudioSource {
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
-        cinfo!(self, "run: starting");
+        pp_info!(self, "run: starting");
         let mut timeline = ActiveTimeline::new(Instant::now());
         loop {
             let outcome = drain_control(control, self, bus)?;
             if outcome.stopped {
-                cinfo!(self, "run: stopped");
+                pp_info!(self, "run: stopped");
                 return Ok(());
             }
             timeline.account_pause(outcome.paused_for);
@@ -208,7 +208,7 @@ impl SourceElement for TestAudioSource {
             // crate gives its own push.
             if let Err(error) = self.pad.push(MediaBuffer::Audio(Arc::new(frame))) {
                 bus.post(
-                    &self.clog,
+                    &self.pp_log,
                     BusEvent::Error {
                         element_type: ElementType::TestAudioSource,
                         name: self.name.clone(),
@@ -228,7 +228,7 @@ impl SourceElement for TestAudioSource {
 mod tests {
     use std::sync::Mutex;
 
-    use crate::clog::CLog;
+    use crate::pp_log::PpLog;
 
     use super::*;
     use crate::{control::ControlMsg, element::Sink, pipeline::Pipeline};
@@ -236,7 +236,7 @@ mod tests {
     /// Captures every frame's `(format, rate, channels, pts, first_sample)`
     /// it sees, in order.
     struct RecordingSink {
-        clog: CLog,
+        pp_log: PpLog,
         #[allow(clippy::type_complexity)]
         seen: Arc<Mutex<Vec<(ffmpeg::format::Sample, u32, u16, Option<i64>, f32)>>>,
     }
@@ -248,11 +248,11 @@ mod tests {
         fn element_type(&self) -> ElementType {
             ElementType::Other
         }
-        fn clog(&self) -> &CLog {
-            &self.clog
+        fn pp_log(&self) -> &PpLog {
+            &self.pp_log
         }
-        fn clog_mut(&mut self) -> &mut CLog {
-            &mut self.clog
+        fn pp_log_mut(&mut self) -> &mut PpLog {
+            &mut self.pp_log
         }
     }
 
@@ -281,7 +281,7 @@ mod tests {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let sink = RecordingSink {
             seen: seen.clone(),
-            clog: element_clog(ElementType::Other, "recorder", None),
+            pp_log: element_pp_log(ElementType::Other, "recorder", None),
         };
         let source = TestAudioSource::new(
             "test-audio",
@@ -348,7 +348,7 @@ mod tests {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let sink = RecordingSink {
             seen: seen.clone(),
-            clog: element_clog(ElementType::Other, "recorder", None),
+            pp_log: element_pp_log(ElementType::Other, "recorder", None),
         };
         let source = TestAudioSource::new(
             "test-audio",

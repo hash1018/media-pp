@@ -1,6 +1,6 @@
 use std::{ffi::c_void, ptr, sync::Arc, thread, time::Duration};
 
-use crate::clog::{CLog, cerror, cinfo};
+use crate::pp_log::{PpLog, pp_error, pp_info};
 use ffmpeg_next::{self as ffmpeg, Rescale, Rounding};
 use thiserror::Error as ThisError;
 use windows::Win32::{
@@ -14,7 +14,7 @@ use windows::Win32::{
 use crate::{
     buffer::MediaBuffer,
     control::ControlMsg,
-    element::{Element, ElementType, Sink, element_clog},
+    element::{Element, ElementType, Sink, element_pp_log},
     elements::{AudioFormat, WasapiDevice, WasapiDeviceKind},
     error::Result,
     platform::windows::wasapi::{
@@ -91,7 +91,7 @@ pub enum WasapiRendererError {
 /// [`crate::queue::Queue`] immediately before this sink when its blocking
 /// must not hold up another branch.
 pub struct WasapiRenderer {
-    clog: CLog,
+    pp_log: PpLog,
     name: Arc<str>,
     audio_client: IAudioClient,
     audio_clock: IAudioClock,
@@ -161,7 +161,7 @@ impl WasapiRenderer {
 
         let _apartment = ComApartment::new()?;
         let name: Arc<str> = name.into().into();
-        let clog = element_clog(ElementType::WasapiRenderer, &name, None);
+        let pp_log = element_pp_log(ElementType::WasapiRenderer, &name, None);
         let device = open_device(&options.device.id)?;
         let audio_client: IAudioClient = unsafe { device.Activate(CLSCTX_ALL, None)? };
         let mix_format = unsafe { audio_client.GetMixFormat()? };
@@ -193,8 +193,8 @@ impl WasapiRenderer {
             ));
         }
         let buffer_frames = unsafe { audio_client.GetBufferSize()? };
-        cinfo!(
-            clog: &clog,
+        pp_info!(
+            pp_log: &pp_log,
             "opened: device={:?}, {}Hz, {} channel(s), format={:?}, buffer_frames={buffer_frames}",
             options.device.name,
             format.sample_rate,
@@ -205,7 +205,7 @@ impl WasapiRenderer {
         Ok((
             Self {
                 name,
-                clog,
+                pp_log,
                 audio_client,
                 audio_clock,
                 audio_clock_frequency,
@@ -492,12 +492,12 @@ impl Element for WasapiRenderer {
         ElementType::WasapiRenderer
     }
 
-    fn clog(&self) -> &CLog {
-        &self.clog
+    fn pp_log(&self) -> &PpLog {
+        &self.pp_log
     }
 
-    fn clog_mut(&mut self) -> &mut CLog {
-        &mut self.clog
+    fn pp_log_mut(&mut self) -> &mut PpLog {
+        &mut self.pp_log
     }
 }
 
@@ -507,10 +507,10 @@ impl Sink for WasapiRenderer {
         match buf {
             MediaBuffer::Audio(frame) => self
                 .render(&frame)
-                .inspect_err(|error| cerror!(self, "render failed: {error}")),
+                .inspect_err(|error| pp_error!(self, "render failed: {error}")),
             MediaBuffer::Eos => self
                 .drain()
-                .inspect_err(|error| cerror!(self, "drain failed: {error}")),
+                .inspect_err(|error| pp_error!(self, "drain failed: {error}")),
             MediaBuffer::Packet(_) => Err(WasapiRendererError::UnsupportedBuffer("Packet").into()),
             MediaBuffer::Video(_) => Err(WasapiRendererError::UnsupportedBuffer("Video").into()),
         }

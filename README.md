@@ -44,9 +44,9 @@ Everything is built from a handful of primitives in `lib/src/`:
   anymore, so they're posted here instead (`Error`, `Eos`, `Dropped`).
   `BusReceiver::iter_with_ids()` pairs each event with its stable graph
   `ElementId`; `log_events()` drains and prints them in a default format.
-- **`CLog`** (`clog.rs`) — the contextual log identity stored privately by
-  every element. `cinfo!`, `cdebug!`, `cwarn!`, `cerror!`, and `ctrace!` attach
-  that identity as the `log` target; `element_clog()` creates the canonical
+- **`PpLog`** (`pp_log.rs`) — the contextual log identity stored privately by
+  every element. `pp_info!`, `pp_debug!`, `pp_warn!`, `pp_error!`, and `pp_trace!` attach
+  that identity as the `log` target; `element_pp_log()` creates the canonical
   `ElementType(name):Pipeline(id)` identity used throughout the graph.
 - **`Pipeline` / `ChainBuilder` / `PipelineBuilder`** (`pipeline.rs`) —
   `ctx.branch()` builds one linear, detached chain (`.pipe(filter)` for

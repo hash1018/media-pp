@@ -5,7 +5,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::clog::{CLog, cinfo};
+use crate::pp_log::{PpLog, pp_info};
 use ffmpeg_next as ffmpeg;
 use thiserror::Error as ThisError;
 
@@ -13,7 +13,7 @@ use crate::{
     buffer::MediaBuffer,
     clock::Clock,
     control::ControlMsg,
-    element::{Element, ElementType, Sink, Source, element_clog},
+    element::{Element, ElementType, Sink, Source, element_pp_log},
     pad::SrcPad,
     time::{InvalidTimeBase, MediaTimestamp, TimeBase},
 };
@@ -67,7 +67,7 @@ const INTERRUPT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 /// — video, audio, ...) so they all agree on the same t=0 instead of each
 /// anchoring to its own first frame.
 pub struct Pacer {
-    clog: CLog,
+    pp_log: PpLog,
     name: Arc<str>,
     time_base: TimeBase,
     clock: Arc<Clock>,
@@ -101,8 +101,8 @@ impl Pacer {
         clock: Arc<Clock>,
     ) -> Result<Self, PacerError> {
         let name: Arc<str> = name.into().into();
-        let clog = element_clog(ElementType::Pacer, &name, None);
-        cinfo!(clog: &clog, "created: time_base={time_base}");
+        let pp_log = element_pp_log(ElementType::Pacer, &name, None);
+        pp_info!(pp_log: &pp_log, "created: time_base={time_base}");
         let pad = SrcPad::new(format!("{name}_src"));
         let interrupt_epoch = clock.interrupt_epoch();
         let time_base = TimeBase::try_new(time_base).map_err(
@@ -116,7 +116,7 @@ impl Pacer {
         )?;
         Ok(Self {
             name,
-            clog,
+            pp_log,
             time_base,
             clock,
             first_pts: None,
@@ -179,12 +179,12 @@ impl Element for Pacer {
         ElementType::Pacer
     }
 
-    fn clog(&self) -> &CLog {
-        &self.clog
+    fn pp_log(&self) -> &PpLog {
+        &self.pp_log
     }
 
-    fn clog_mut(&mut self) -> &mut CLog {
-        &mut self.clog
+    fn pp_log_mut(&mut self) -> &mut PpLog {
+        &mut self.pp_log
     }
 }
 

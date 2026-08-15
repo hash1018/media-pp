@@ -4,14 +4,14 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::clog::{CLog, cinfo};
+use crate::pp_log::{PpLog, pp_info};
 use ffmpeg_next as ffmpeg;
 
 use super::mp4_muxer::{Mp4Muxer, Mp4MuxerError};
 use crate::{
     buffer::MediaBuffer,
     control::ControlMsg,
-    element::{Element, ElementType, Sink, element_clog},
+    element::{Element, ElementType, Sink, element_pp_log},
     error::Result,
 };
 
@@ -152,7 +152,7 @@ impl SegmentedMp4Muxer {
             .enumerate()
             .map(|(index, name)| -> Box<dyn Sink> {
                 Box::new(SegmentedTrackSink {
-                    clog: element_clog(ElementType::SegmentedMp4Muxer, &name, None),
+                    pp_log: element_pp_log(ElementType::SegmentedMp4Muxer, &name, None),
                     name,
                     track_index: index,
                     group: group.clone(),
@@ -230,7 +230,7 @@ impl SegmentGroup {
                 state.current_sinks = open_segment(&state.streams, path)?;
                 state.segment_index = index;
                 state.segment_started = Instant::now();
-                cinfo!(
+                pp_info!(
                     main_id: "segmented-mp4-muxer",
                     "rotated to segment {index}"
                 );
@@ -261,7 +261,7 @@ impl SegmentGroup {
 /// [`SegmentGroup`] with every other track [`SegmentedMp4Muxer::open`]
 /// returned alongside it.
 struct SegmentedTrackSink {
-    clog: CLog,
+    pp_log: PpLog,
     name: Arc<str>,
     track_index: usize,
     group: Arc<SegmentGroup>,
@@ -276,12 +276,12 @@ impl Element for SegmentedTrackSink {
         ElementType::SegmentedMp4Muxer
     }
 
-    fn clog(&self) -> &CLog {
-        &self.clog
+    fn pp_log(&self) -> &PpLog {
+        &self.pp_log
     }
 
-    fn clog_mut(&mut self) -> &mut CLog {
-        &mut self.clog
+    fn pp_log_mut(&mut self) -> &mut PpLog {
+        &mut self.pp_log
     }
 }
 

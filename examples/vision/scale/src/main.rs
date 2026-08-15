@@ -4,13 +4,13 @@ use std::sync::{
 };
 
 use ffmpeg_next::{format::Pixel, media, software::scaling::Flags};
-use media_pp::clog::CLog;
+use media_pp::pp_log::PpLog;
 use media_pp::{
     Error, Result,
     buffer::MediaBuffer,
     bus::BusEvent,
     control::ControlMsg,
-    element::{Element, ElementType, Sink, element_clog},
+    element::{Element, ElementType, Sink, element_pp_log},
     elements::{FileDemuxer, Scaler, SwDecoder},
     pipeline::Pipeline,
 };
@@ -45,7 +45,7 @@ fn main() -> media_pp::Result<()> {
     let count = Arc::new(AtomicUsize::new(0));
     let sink = VerifyingSink {
         count: count.clone(),
-        clog: element_clog(ElementType::Other, "verify", None),
+        pp_log: element_pp_log(ElementType::Other, "verify", None),
     };
 
     let pipeline = Pipeline::new("scale", source, |source, ctx| {
@@ -93,7 +93,7 @@ fn main() -> media_pp::Result<()> {
 /// completion — then counts every frame after that the same way
 /// `FrameCounter` would.
 struct VerifyingSink {
-    clog: CLog,
+    pp_log: PpLog,
     count: Arc<AtomicUsize>,
 }
 
@@ -106,12 +106,12 @@ impl Element for VerifyingSink {
         ElementType::Other
     }
 
-    fn clog(&self) -> &CLog {
-        &self.clog
+    fn pp_log(&self) -> &PpLog {
+        &self.pp_log
     }
 
-    fn clog_mut(&mut self) -> &mut CLog {
-        &mut self.clog
+    fn pp_log_mut(&mut self) -> &mut PpLog {
+        &mut self.pp_log
     }
 }
 

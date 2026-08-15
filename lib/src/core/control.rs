@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use crate::clog::cinfo;
+use crate::pp_log::pp_info;
 use crossbeam_channel::{Receiver, Sender, unbounded};
 
 use crate::{
@@ -213,7 +213,7 @@ pub(crate) fn apply_one_unacked<S: SourceElement>(
     bus: &Bus,
     msg: ControlMsg,
 ) -> Result<bool> {
-    cinfo!(clog: source.clog(), "control: {msg:?}");
+    pp_info!(pp_log: source.pp_log(), "control: {msg:?}");
     apply_seek(source, bus, msg)?;
     for pad in source.src_pads() {
         pad.control(msg)?;
@@ -254,7 +254,7 @@ fn apply_seek<S: SourceElement>(source: &mut S, bus: &Bus, msg: ControlMsg) -> R
     if let ControlMsg::Seek(target) = msg {
         let landed = source.seek(target)?;
         bus.post(
-            source.clog(),
+            source.pp_log(),
             BusEvent::Seeked {
                 element_type: source.element_type(),
                 name: source.name(),
@@ -270,12 +270,12 @@ fn apply_seek<S: SourceElement>(source: &mut S, bus: &Bus, msg: ControlMsg) -> R
 mod tests {
     use std::{sync::Arc, thread};
 
-    use crate::clog::CLog;
+    use crate::pp_log::PpLog;
 
     use super::*;
     use crate::{
         buffer::MediaBuffer,
-        element::{Element, ElementType, Sink, Source, element_clog},
+        element::{Element, ElementType, Sink, Source, element_pp_log},
         pad::SrcPad,
     };
 
@@ -283,14 +283,14 @@ mod tests {
     /// `drain_control`/`wait_out_pause` to drive, since this module's own
     /// logic doesn't care what the source actually produces.
     struct DummySource {
-        clog: CLog,
+        pp_log: PpLog,
         pad: SrcPad,
     }
 
     impl DummySource {
         fn new() -> Self {
             Self {
-                clog: element_clog(ElementType::Other, "dummy", None),
+                pp_log: element_pp_log(ElementType::Other, "dummy", None),
                 pad: SrcPad::new("dummy_src"),
             }
         }
@@ -305,12 +305,12 @@ mod tests {
             ElementType::Other
         }
 
-        fn clog(&self) -> &CLog {
-            &self.clog
+        fn pp_log(&self) -> &PpLog {
+            &self.pp_log
         }
 
-        fn clog_mut(&mut self) -> &mut CLog {
-            &mut self.clog
+        fn pp_log_mut(&mut self) -> &mut PpLog {
+            &mut self.pp_log
         }
     }
 
@@ -331,7 +331,7 @@ mod tests {
     }
 
     struct SlowPauseSink {
-        clog: CLog,
+        pp_log: PpLog,
         pause_delay: Duration,
     }
 
@@ -344,12 +344,12 @@ mod tests {
             ElementType::Other
         }
 
-        fn clog(&self) -> &CLog {
-            &self.clog
+        fn pp_log(&self) -> &PpLog {
+            &self.pp_log
         }
 
-        fn clog_mut(&mut self) -> &mut CLog {
-            &mut self.clog
+        fn pp_log_mut(&mut self) -> &mut PpLog {
+            &mut self.pp_log
         }
     }
 
@@ -431,7 +431,7 @@ mod tests {
         let mut source = DummySource::new();
         source.pad.link(Box::new(SlowPauseSink {
             pause_delay,
-            clog: element_clog(ElementType::Other, "slow-pause", None),
+            pp_log: element_pp_log(ElementType::Other, "slow-pause", None),
         }));
 
         let outcome = loop {

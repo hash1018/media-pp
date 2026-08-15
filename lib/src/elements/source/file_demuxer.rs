@@ -1,6 +1,6 @@
 use std::{path::Path, sync::Arc, time::Duration};
 
-use crate::clog::{CLog, cerror, cinfo};
+use crate::pp_log::{PpLog, pp_error, pp_info};
 use ffmpeg_next as ffmpeg;
 use thiserror::Error as ThisError;
 
@@ -8,7 +8,7 @@ use crate::{
     buffer::MediaBuffer,
     bus::{Bus, BusEvent},
     control::{ControlReceiver, drain_control},
-    element::{Element, ElementType, Source, SourceElement, element_clog},
+    element::{Element, ElementType, Source, SourceElement, element_pp_log},
     pad::SrcPad,
 };
 
@@ -37,7 +37,7 @@ pub struct StreamInfo {
 /// separate "Tee" element here — it's just a matter of linking more than
 /// one of these pads.
 pub struct FileDemuxer {
-    clog: CLog,
+    pp_log: PpLog,
     name: Arc<str>,
     input: ffmpeg::format::context::Input,
     pads: Vec<SrcPad>,
@@ -73,9 +73,9 @@ impl FileDemuxer {
             .collect();
 
         let name: Arc<str> = name.into().into();
-        let clog = element_clog(ElementType::FileDemuxer, &name, None);
-        cinfo!(
-            clog: &clog,
+        let pp_log = element_pp_log(ElementType::FileDemuxer, &name, None);
+        pp_info!(
+            pp_log: &pp_log,
             "opened: path={}, {} stream(s)",
             path.as_ref().display(),
             streams.len()
@@ -83,7 +83,7 @@ impl FileDemuxer {
         Ok((
             Self {
                 name,
-                clog,
+                pp_log,
                 input,
                 pads,
                 pending: None,
@@ -119,12 +119,12 @@ impl Element for FileDemuxer {
         ElementType::FileDemuxer
     }
 
-    fn clog(&self) -> &CLog {
-        &self.clog
+    fn pp_log(&self) -> &PpLog {
+        &self.pp_log
     }
 
-    fn clog_mut(&mut self) -> &mut CLog {
-        &mut self.clog
+    fn pp_log_mut(&mut self) -> &mut PpLog {
+        &mut self.pp_log
     }
 }
 
@@ -136,7 +136,7 @@ impl Source for FileDemuxer {
 
 impl SourceElement for FileDemuxer {
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> crate::error::Result<()> {
-        cinfo!(self, "run: starting");
+        pp_info!(self, "run: starting");
         // Deliberately re-creates `self.input.packets()` fresh every
         // iteration (cheap — it's just a short-lived wrapper, not a
         // stateful cursor of its own) instead of holding one `for` loop's
@@ -148,7 +148,7 @@ impl SourceElement for FileDemuxer {
         loop {
             if drain_control(control, self, bus)?.stopped {
                 // Stop: abandon in place, no final Eos.
-                cinfo!(self, "run: stopped");
+                pp_info!(self, "run: stopped");
                 return Ok(());
             }
             // `seek` (called from within `drain_control`, above) already
@@ -169,7 +169,7 @@ impl SourceElement for FileDemuxer {
                 // decides an error is fatal actually ends things.
                 if let Err(error) = pad.push(MediaBuffer::Packet(Arc::new(packet))) {
                     bus.post(
-                        &self.clog,
+                        &self.pp_log,
                         BusEvent::Error {
                             element_type: ElementType::FileDemuxer,
                             name: self.name.clone(),
@@ -182,7 +182,7 @@ impl SourceElement for FileDemuxer {
         for pad in self.pads.iter_mut() {
             pad.push(MediaBuffer::Eos)?;
         }
-        cinfo!(self, "run: reached eos");
+        pp_info!(self, "run: reached eos");
         Ok(())
     }
 
@@ -200,7 +200,7 @@ impl SourceElement for FileDemuxer {
         // `target` under 8.3s lands back at 0s.
         let ts = target.as_micros().min(i64::MAX as u128) as i64;
         self.input.seek(ts, ..).inspect_err(|error| {
-            cerror!(self, "seek to {target:?} failed: {error}");
+            pp_error!(self, "seek to {target:?} failed: {error}");
         })?;
 
         // `avformat_seek_file` only reports success/failure, not where it
@@ -248,7 +248,7 @@ mod tests {
     }
 
     struct CountingSink {
-        clog: CLog,
+        pp_log: PpLog,
         count: Arc<AtomicUsize>,
         saw_eos: Arc<AtomicBool>,
     }
@@ -262,12 +262,12 @@ mod tests {
             ElementType::Other
         }
 
-        fn clog(&self) -> &CLog {
-            &self.clog
+        fn pp_log(&self) -> &PpLog {
+            &self.pp_log
         }
 
-        fn clog_mut(&mut self) -> &mut CLog {
-            &mut self.clog
+        fn pp_log_mut(&mut self) -> &mut PpLog {
+            &mut self.pp_log
         }
     }
 
@@ -324,7 +324,7 @@ mod tests {
         demuxer.src_pads()[video.index].link(Box::new(CountingSink {
             count: count.clone(),
             saw_eos: saw_eos.clone(),
-            clog: element_clog(ElementType::Other, "counting-sink", None),
+            pp_log: element_pp_log(ElementType::Other, "counting-sink", None),
         }));
 
         let (bus, bus_rx) = Bus::new();

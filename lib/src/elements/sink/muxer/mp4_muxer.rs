@@ -3,14 +3,14 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use crate::clog::{CLog, cerror};
+use crate::pp_log::{PpLog, pp_error};
 use ffmpeg_next as ffmpeg;
 use thiserror::Error as ThisError;
 
 use crate::{
     buffer::MediaBuffer,
     control::ControlMsg,
-    element::{Element, ElementType, Sink, element_clog},
+    element::{Element, ElementType, Sink, element_pp_log},
     error::Result,
 };
 
@@ -27,7 +27,7 @@ pub enum Mp4MuxerError {
 
 /// One track registered via [`Mp4Muxer::add_stream`], waiting for
 /// [`Mp4Muxer::open`] to turn it into a real [`Mp4MuxerStreamSink`] — its
-/// `name` becomes that sink's own [`Element::name`]/`clog` identity, and
+/// `name` becomes that sink's own [`Element::name`]/`pp_log` identity, and
 /// `input_time_base` is what every `Packet` it receives already carries
 /// `pts`/`dts` in (the same one its upstream encoder was opened with).
 struct PendingStream {
@@ -75,7 +75,7 @@ impl Mp4Muxer {
     /// [`crate::elements::SwEncoder::parameters`]/the same `time_base`
     /// passed to its own `SwEncoderOptions` (or the
     /// [`crate::elements::SwAudioEncoder`] equivalents). `name` becomes
-    /// this track's own [`Element::name`]/`clog` identity once
+    /// this track's own [`Element::name`]/`pp_log` identity once
     /// [`Mp4Muxer::open`] turns it into a `Sink` — pick something that
     /// tells multiple tracks apart in logs/[`crate::bus::BusEvent`]s,
     /// e.g. `"video"`/`"audio"`.
@@ -147,7 +147,7 @@ impl Mp4Muxer {
             .enumerate()
             .map(|(index, stream)| -> Box<dyn Sink> {
                 Box::new(Mp4MuxerStreamSink {
-                    clog: element_clog(ElementType::Mp4Muxer, &stream.name, None),
+                    pp_log: element_pp_log(ElementType::Mp4Muxer, &stream.name, None),
                     name: stream.name,
                     shared: shared.clone(),
                     stream_index: index,
@@ -232,7 +232,7 @@ impl Mp4MuxerShared {
 /// alongside it. See [`Mp4Muxer::open`]'s own docs for the
 /// finalize-once-every-track-is-done contract this relies on.
 pub struct Mp4MuxerStreamSink {
-    clog: CLog,
+    pp_log: PpLog,
     name: Arc<str>,
     shared: Arc<Mp4MuxerShared>,
     stream_index: usize,
@@ -252,7 +252,7 @@ impl Mp4MuxerStreamSink {
         self.done = true;
         self.shared
             .finish_track()
-            .inspect_err(|error| cerror!(self, "write_trailer failed: {error}"))
+            .inspect_err(|error| pp_error!(self, "write_trailer failed: {error}"))
     }
 }
 
@@ -265,12 +265,12 @@ impl Element for Mp4MuxerStreamSink {
         ElementType::Mp4Muxer
     }
 
-    fn clog(&self) -> &CLog {
-        &self.clog
+    fn pp_log(&self) -> &PpLog {
+        &self.pp_log
     }
 
-    fn clog_mut(&mut self) -> &mut CLog {
-        &mut self.clog
+    fn pp_log_mut(&mut self) -> &mut PpLog {
+        &mut self.pp_log
     }
 }
 
@@ -280,7 +280,7 @@ impl Sink for Mp4MuxerStreamSink {
             MediaBuffer::Packet(packet) => self
                 .shared
                 .write_packet(self.stream_index, self.input_time_base, &packet)
-                .inspect_err(|error| cerror!(self, "write_interleaved failed: {error}")),
+                .inspect_err(|error| pp_error!(self, "write_interleaved failed: {error}")),
             MediaBuffer::Eos => self.finish(),
             other => Err(Mp4MuxerError::UnsupportedBuffer(other.kind()).into()),
         }

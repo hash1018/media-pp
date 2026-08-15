@@ -1,6 +1,6 @@
 use std::{path::Path, sync::Arc};
 
-use crate::clog::{CLog, cerror, cinfo};
+use crate::pp_log::{PpLog, pp_error, pp_info};
 use ffmpeg_next as ffmpeg;
 use ndarray::{Array4, Axis, s};
 use ort::{inputs, session::Session, value::TensorRef};
@@ -9,7 +9,7 @@ use thiserror::Error as ThisError;
 use crate::{
     buffer::MediaBuffer,
     control::ControlMsg,
-    element::{Element, ElementType, Sink, element_clog},
+    element::{Element, ElementType, Sink, element_pp_log},
     error::Result,
 };
 
@@ -89,7 +89,7 @@ pub enum OrtDetectorError {
 /// NMS is per-class (a box only suppresses another box of the *same*
 /// `class_id`), matching Ultralytics' own default (non-agnostic) NMS.
 pub struct OrtDetector<F> {
-    clog: CLog,
+    pp_log: PpLog,
     name: Arc<str>,
     session: Session,
     conf_threshold: f32,
@@ -118,14 +118,14 @@ where
             .commit_from_file(model_path)
             .map_err(OrtDetectorError::from)?;
         let name: Arc<str> = name.into().into();
-        let clog = element_clog(ElementType::OrtDetector, &name, None);
-        cinfo!(
-            clog: &clog,
+        let pp_log = element_pp_log(ElementType::OrtDetector, &name, None);
+        pp_info!(
+            pp_log: &pp_log,
             "model loaded: path={model_path_display}, conf_threshold={conf_threshold}, iou_threshold={iou_threshold}"
         );
         Ok(Self {
             name,
-            clog,
+            pp_log,
             session,
             conf_threshold,
             iou_threshold,
@@ -243,12 +243,12 @@ where
         ElementType::OrtDetector
     }
 
-    fn clog(&self) -> &CLog {
-        &self.clog
+    fn pp_log(&self) -> &PpLog {
+        &self.pp_log
     }
 
-    fn clog_mut(&mut self) -> &mut CLog {
-        &mut self.clog
+    fn pp_log_mut(&mut self) -> &mut PpLog {
+        &mut self.pp_log
     }
 }
 
@@ -260,21 +260,21 @@ where
         match buf {
             MediaBuffer::Video(frame) => {
                 if frame.format() != ffmpeg::format::Pixel::RGB24 {
-                    cerror!(self, "unsupported pixel format: {:?}", frame.format());
+                    pp_error!(self, "unsupported pixel format: {:?}", frame.format());
                     return Err(OrtDetectorError::UnsupportedFormat(frame.format()).into());
                 }
                 let detections = self
                     .detect(&frame)
-                    .inspect_err(|error| cerror!(self, "detect failed: {error}"))?;
+                    .inspect_err(|error| pp_error!(self, "detect failed: {error}"))?;
                 (self.on_detections)(&frame, &detections)
             }
             MediaBuffer::Eos => Ok(()),
             MediaBuffer::Packet(_) => {
-                cerror!(self, "unsupported buffer: Packet");
+                pp_error!(self, "unsupported buffer: Packet");
                 Err(OrtDetectorError::UnsupportedBuffer("Packet").into())
             }
             MediaBuffer::Audio(_) => {
-                cerror!(self, "unsupported buffer: Audio");
+                pp_error!(self, "unsupported buffer: Audio");
                 Err(OrtDetectorError::UnsupportedBuffer("Audio").into())
             }
         }

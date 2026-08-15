@@ -7,7 +7,7 @@ use std::{
     time::Duration,
 };
 
-use crate::clog::{CLog, cinfo};
+use crate::pp_log::{PpLog, pp_info};
 use crossbeam_channel::{
     Receiver, RecvTimeoutError, SendTimeoutError, Sender, TrySendError, bounded, select,
 };
@@ -17,7 +17,7 @@ use crate::{
     buffer::MediaBuffer,
     bus::{Bus, BusEvent},
     control::{self, ControlMsg, ControlReceiver, ControlSender},
-    element::{Element, ElementType, Sink, element_clog},
+    element::{Element, ElementType, Sink, element_pp_log},
     error::Result,
 };
 
@@ -129,7 +129,7 @@ impl Default for OverflowPolicy {
 /// [`crate::pipeline::Pipeline::stop`] yourself if a particular error
 /// means the whole pipeline should end.
 pub struct Queue {
-    clog: CLog,
+    pp_log: PpLog,
     name: Arc<str>,
     tx: Sender<MediaBuffer>,
     policy: OverflowPolicy,
@@ -171,7 +171,7 @@ impl Queue {
     /// [`crate::pipeline::Pipeline`]'s own id — see
     /// [`crate::pipeline::ChainBuilder`], which is what actually passes
     /// one when this `Queue` came from a `.queue()`/`.queue_with_policy()`
-    /// call) becomes this `Queue`'s `clog` sub_id; `None` if it wasn't
+    /// call) becomes this `Queue`'s `pp_log` sub_id; `None` if it wasn't
     /// built through a `Pipeline` at all (e.g. the tests below).
     pub fn spawn_with_policy(
         name: impl Into<String>,
@@ -186,13 +186,13 @@ impl Queue {
         // refcount bump instead of a fresh allocation — `Dropped` in
         // particular can fire once per buffer under sustained overflow.
         let name: Arc<str> = name.into().into();
-        let clog = element_clog(ElementType::Queue, &name, pipeline_id);
-        cinfo!(clog: &clog, "spawned: capacity={capacity}, policy={policy:?}");
+        let pp_log = element_pp_log(ElementType::Queue, &name, pipeline_id);
+        pp_info!(pp_log: &pp_log, "spawned: capacity={capacity}, policy={policy:?}");
         let (tx, rx) = bounded::<MediaBuffer>(capacity);
         let (control_tx, control_rx) = control::channel();
         let worker_name = name.clone();
         let worker_bus = bus.clone();
-        let worker_clog = clog.clone();
+        let worker_pp_log = pp_log.clone();
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = stop.clone();
 
@@ -205,7 +205,7 @@ impl Queue {
                     downstream,
                     worker_bus,
                     worker_name,
-                    worker_clog,
+                    worker_pp_log,
                     worker_stop,
                 )
             })
@@ -213,7 +213,7 @@ impl Queue {
 
         Queue {
             name,
-            clog,
+            pp_log,
             tx,
             policy,
             bus,
@@ -233,12 +233,12 @@ impl Element for Queue {
         ElementType::Queue
     }
 
-    fn clog(&self) -> &CLog {
-        &self.clog
+    fn pp_log(&self) -> &PpLog {
+        &self.pp_log
     }
 
-    fn clog_mut(&mut self) -> &mut CLog {
-        &mut self.clog
+    fn pp_log_mut(&mut self) -> &mut PpLog {
+        &mut self.pp_log
     }
 }
 
@@ -268,7 +268,7 @@ impl Sink for Queue {
                 Ok(()) => Ok(()),
                 Err(TrySendError::Full(_)) => {
                     self.bus.post(
-                        &self.clog,
+                        &self.pp_log,
                         BusEvent::Dropped {
                             element_type: ElementType::Queue,
                             name: self.name.clone(),
@@ -314,7 +314,7 @@ impl Drop for Queue {
             // so any already-queued `Stop`/`Eos`/data is always drained
             // first, same as `block_never_drops` and friends rely on.
             self.stop.store(true, Ordering::Relaxed);
-            cinfo!(clog: &self.clog, "dropped: joining worker");
+            pp_info!(pp_log: &self.pp_log, "dropped: joining worker");
             let _ = handle.join();
         }
     }
@@ -339,14 +339,14 @@ fn worker_loop(
     // same value, not rebuilt here, so a `pipeline_id` passed to
     // `spawn_with_policy` actually reaches this thread's own log lines
     // too.
-    clog: CLog,
+    pp_log: PpLog,
     stop: Arc<AtomicBool>,
 ) {
-    cinfo!(clog: &clog, "worker: starting");
+    pp_info!(pp_log: &pp_log, "worker: starting");
     let error_reporter = QueueErrorReporter {
         bus: &bus,
         name: &name,
-        clog: &clog,
+        pp_log: &pp_log,
     };
     loop {
         if let Some((msg, ack)) = control_rx.try_recv() {
@@ -359,7 +359,7 @@ fn worker_loop(
                 &error_reporter,
                 &stop,
             ) {
-                cinfo!(clog: &clog, "worker: stopped");
+                pp_info!(pp_log: &pp_log, "worker: stopped");
                 return;
             }
             continue;
@@ -378,12 +378,12 @@ fn worker_loop(
                             &error_reporter,
                             &stop,
                         ) {
-                            cinfo!(clog: &clog, "worker: stopped");
+                            pp_info!(pp_log: &pp_log, "worker: stopped");
                             return;
                         }
                     }
                     Err(_) => {
-                        cinfo!(clog: &clog, "worker: control channel gone, ending");
+                        pp_info!(pp_log: &pp_log, "worker: control channel gone, ending");
                         return; // sender (this Queue) dropped
                     }
                 }
@@ -396,7 +396,7 @@ fn worker_loop(
                             Ok(()) => {
                                 if is_eos {
                                     bus.post(
-                                        &clog,
+                                        &pp_log,
                                         BusEvent::Eos {
                                             element_type: ElementType::Queue,
                                             name: name.clone(),
@@ -416,7 +416,7 @@ fn worker_loop(
                         }
                     }
                     Err(_) => {
-                        cinfo!(clog: &clog, "worker: producer (this Queue) gone, ending");
+                        pp_info!(pp_log: &pp_log, "worker: producer (this Queue) gone, ending");
                         return;
                     }
                 }
@@ -426,7 +426,7 @@ fn worker_loop(
             // channel always wins first. See `Queue::drop`.
             default(STOP_POLL_INTERVAL) => {
                 if stop.load(Ordering::Relaxed) {
-                    cinfo!(clog: &clog, "worker: stop flag set, ending");
+                    pp_info!(pp_log: &pp_log, "worker: stop flag set, ending");
                     return;
                 }
             }
@@ -447,7 +447,7 @@ fn apply_control(
     error_reporter: &QueueErrorReporter<'_>,
     stop: &AtomicBool,
 ) -> bool {
-    cinfo!(clog: error_reporter.clog, "control: {msg:?}");
+    pp_info!(pp_log: error_reporter.pp_log, "control: {msg:?}");
     discard_stale_data(data_rx, msg);
     forward_control(downstream, msg, error_reporter);
     let is_stop = msg == ControlMsg::Stop;
@@ -470,17 +470,17 @@ fn apply_control(
             Ok(req) => (req.msg, req.ack),
             Err(RecvTimeoutError::Timeout) => {
                 if stop.load(Ordering::Relaxed) {
-                    cinfo!(clog: error_reporter.clog, "worker: stop flag set while paused, ending");
+                    pp_info!(pp_log: error_reporter.pp_log, "worker: stop flag set while paused, ending");
                     return true;
                 }
                 continue;
             }
             Err(RecvTimeoutError::Disconnected) => {
-                cinfo!(clog: error_reporter.clog, "worker: control channel gone while paused, ending");
+                pp_info!(pp_log: error_reporter.pp_log, "worker: control channel gone while paused, ending");
                 return true; // sender gone — treat like Stop
             }
         };
-        cinfo!(clog: error_reporter.clog, "control: {msg:?}");
+        pp_info!(pp_log: error_reporter.pp_log, "control: {msg:?}");
         discard_stale_data(data_rx, msg);
         forward_control(downstream, msg, error_reporter);
         let is_stop = msg == ControlMsg::Stop;
@@ -498,13 +498,13 @@ fn apply_control(
 struct QueueErrorReporter<'a> {
     bus: &'a Bus,
     name: &'a Arc<str>,
-    clog: &'a CLog,
+    pp_log: &'a PpLog,
 }
 
 impl QueueErrorReporter<'_> {
     fn post(&self, error: crate::error::Error) {
         self.bus.post(
-            self.clog,
+            self.pp_log,
             BusEvent::Error {
                 element_type: ElementType::Queue,
                 name: self.name.clone(),
@@ -559,7 +559,7 @@ mod tests {
     /// A downstream that's slower than the producer, so a small queue
     /// behind it actually fills up during the test.
     struct SlowCounter {
-        clog: CLog,
+        pp_log: PpLog,
         count: Arc<AtomicUsize>,
     }
 
@@ -572,12 +572,12 @@ mod tests {
             ElementType::Other
         }
 
-        fn clog(&self) -> &CLog {
-            &self.clog
+        fn pp_log(&self) -> &PpLog {
+            &self.pp_log
         }
 
-        fn clog_mut(&mut self) -> &mut CLog {
-            &mut self.clog
+        fn pp_log_mut(&mut self) -> &mut PpLog {
+            &mut self.pp_log
         }
     }
 
@@ -604,7 +604,7 @@ mod tests {
         let count = Arc::new(AtomicUsize::new(0));
         let sink = SlowCounter {
             count: count.clone(),
-            clog: element_clog(ElementType::Other, "slow-counter", None),
+            pp_log: element_pp_log(ElementType::Other, "slow-counter", None),
         };
         let (bus, bus_rx) = Bus::new();
 
@@ -631,7 +631,7 @@ mod tests {
         let count = Arc::new(AtomicUsize::new(0));
         let sink = SlowCounter {
             count: count.clone(),
-            clog: element_clog(ElementType::Other, "slow-counter", None),
+            pp_log: element_pp_log(ElementType::Other, "slow-counter", None),
         };
         let (bus, _bus_rx) = Bus::new();
 
@@ -670,7 +670,7 @@ mod tests {
         let count = Arc::new(AtomicUsize::new(0));
         let sink = SlowCounter {
             count: count.clone(),
-            clog: element_clog(ElementType::Other, "slow-counter", None),
+            pp_log: element_pp_log(ElementType::Other, "slow-counter", None),
         };
         let (bus, bus_rx) = Bus::new();
 
@@ -709,7 +709,7 @@ mod tests {
         let count = Arc::new(AtomicUsize::new(0));
         let sink = SlowCounter {
             count: count.clone(),
-            clog: element_clog(ElementType::Other, "slow-counter", None),
+            pp_log: element_pp_log(ElementType::Other, "slow-counter", None),
         };
         let (bus, _bus_rx) = Bus::new();
 
@@ -750,7 +750,7 @@ mod tests {
         let count = Arc::new(AtomicUsize::new(0));
         let sink = SlowCounter {
             count: count.clone(),
-            clog: element_clog(ElementType::Other, "slow-counter", None),
+            pp_log: element_pp_log(ElementType::Other, "slow-counter", None),
         };
         let (bus, _bus_rx) = Bus::new();
 
@@ -777,7 +777,7 @@ mod tests {
         let count = Arc::new(AtomicUsize::new(0));
         let sink = SlowCounter {
             count: count.clone(),
-            clog: element_clog(ElementType::Other, "slow-counter", None),
+            pp_log: element_pp_log(ElementType::Other, "slow-counter", None),
         };
         let (bus, _bus_rx) = Bus::new();
 
@@ -798,7 +798,7 @@ mod tests {
         let count = Arc::new(AtomicUsize::new(0));
         let sink = SlowCounter {
             count: count.clone(),
-            clog: element_clog(ElementType::Other, "slow-counter", None),
+            pp_log: element_pp_log(ElementType::Other, "slow-counter", None),
         };
         let (bus, _bus_rx) = Bus::new();
 
@@ -818,7 +818,7 @@ mod tests {
     /// A downstream that fails on the very first `Packet` it sees, then
     /// behaves like `SlowCounter` for every one after.
     struct FailFirstThenCount {
-        clog: CLog,
+        pp_log: PpLog,
         count: Arc<AtomicUsize>,
         failed_once: bool,
     }
@@ -832,12 +832,12 @@ mod tests {
             ElementType::Other
         }
 
-        fn clog(&self) -> &CLog {
-            &self.clog
+        fn pp_log(&self) -> &PpLog {
+            &self.pp_log
         }
 
-        fn clog_mut(&mut self) -> &mut CLog {
-            &mut self.clog
+        fn pp_log_mut(&mut self) -> &mut PpLog {
+            &mut self.pp_log
         }
     }
 
@@ -860,7 +860,7 @@ mod tests {
     }
 
     struct FailControl {
-        clog: CLog,
+        pp_log: PpLog,
     }
 
     impl Element for FailControl {
@@ -872,12 +872,12 @@ mod tests {
             ElementType::Other
         }
 
-        fn clog(&self) -> &CLog {
-            &self.clog
+        fn pp_log(&self) -> &PpLog {
+            &self.pp_log
         }
 
-        fn clog_mut(&mut self) -> &mut CLog {
-            &mut self.clog
+        fn pp_log_mut(&mut self) -> &mut PpLog {
+            &mut self.pp_log
         }
     }
 
@@ -905,7 +905,7 @@ mod tests {
         let sink = FailFirstThenCount {
             count: count.clone(),
             failed_once: false,
-            clog: element_clog(ElementType::Other, "fail-first", None),
+            pp_log: element_pp_log(ElementType::Other, "fail-first", None),
         };
         let (bus, bus_rx) = Bus::new();
 
@@ -942,7 +942,7 @@ mod tests {
     #[test]
     fn failing_control_is_reported_without_blocking_the_control_cascade() {
         let sink = FailControl {
-            clog: element_clog(ElementType::Other, "fail-control", None),
+            pp_log: element_pp_log(ElementType::Other, "fail-control", None),
         };
         let (bus, bus_rx) = Bus::new();
         let mut queue = Queue::spawn_with_policy(
