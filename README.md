@@ -374,6 +374,19 @@ to `./logs`, and uses its Cargo package name as the file prefix.
   signaling server built in. `webrtc_loopback` turns it on in its own
   `Cargo.toml`.
 
+There is no `default` feature set, and the crate metadata restricts [docs.rs]
+to its native Linux target, so the published documentation covers only the
+backend-independent core — every `D3d11*`/`D3d12*`/WASAPI element is absent
+from it. Cross-compiling the Windows documentation there does not work because
+`ffmpeg-sys-next` resolves FFmpeg through pkg-config without a target sysroot.
+Build those docs locally on Windows instead:
+
+```sh
+cargo doc -p media-pp --open --features d3d11-renderer,d3d12-renderer,dxgi-capture,wasapi-capture,wasapi-renderer
+```
+
+[docs.rs]: https://docs.rs/media-pp
+
 ## Requirements
 
 - ffmpeg installed and discoverable by `ffmpeg-sys-next` (see that crate's

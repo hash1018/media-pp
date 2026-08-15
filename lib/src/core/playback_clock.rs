@@ -57,6 +57,12 @@ enum State {
         held_ns: Option<i64>,
         next_registration: u64,
     },
+    // Only an audio renderer moves the clock into these two, and the only one
+    // in this crate is behind `wasapi-renderer`. They are dead in a build
+    // without it, but they are the timeline contract `PlaybackClock` exists to
+    // provide — gating them on a backend feature would invert that. See
+    // `AudioMasterRegistration`.
+    #[allow(dead_code)]
     Audio {
         registration: u64,
         position_ns: i64,
@@ -65,6 +71,7 @@ enum State {
         running: bool,
         next_registration: u64,
     },
+    #[allow(dead_code)]
     AudioFallback {
         registration: u64,
         anchor_ns: i64,
@@ -140,6 +147,9 @@ impl PlaybackClock {
         (master, position_at(*state, elapsed))
     }
 
+    /// Claims the timeline for one audio renderer. Unused in a build without
+    /// an audio renderer (see `AudioMasterRegistration`), hence the `allow`.
+    #[allow(dead_code)]
     pub(crate) fn register_audio_master(
         self: &Arc<Self>,
     ) -> Result<AudioMasterRegistration, PlaybackClockError> {
@@ -203,6 +213,7 @@ impl PlaybackClock {
         };
     }
 
+    #[allow(dead_code)]
     fn release_audio_master(&self, registration: u64) {
         let mut state = self.state.lock().unwrap();
         let elapsed = self.wall_clock.elapsed();
@@ -240,11 +251,22 @@ impl PlaybackClock {
 
 /// Exclusive, generation-checked writer owned by one audio renderer.
 /// Dropping it hands the last known position back to the wall clock.
+///
+/// The only audio renderer in this crate is `WasapiRenderer`, behind the
+/// `wasapi-renderer` feature, so a build without it constructs this nowhere and
+/// every method below is dead. That is why the `allow`s here are deliberate
+/// rather than a `cfg(feature = "wasapi-renderer")` gate: `PlaybackClock` is
+/// the backend-independent timeline every renderer binds to, and teaching it
+/// about one backend's Cargo feature would invert that relationship. The
+/// crate's own tests exercise this path, so it is covered even when no shipped
+/// element uses it.
+#[allow(dead_code)]
 pub(crate) struct AudioMasterRegistration {
     clock: Arc<PlaybackClock>,
     registration: u64,
 }
 
+#[allow(dead_code)]
 impl AudioMasterRegistration {
     pub(crate) fn priming_target_ns(&self) -> Result<Option<i64>, PlaybackClockError> {
         match *self.clock.state.lock().unwrap() {
