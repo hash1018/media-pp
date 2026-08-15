@@ -26,6 +26,7 @@ use crate::{
         TestVideoSourceError, VideoCompositorError, VideoSynchronizerError,
     },
     graph::GraphError,
+    log::LogInitError,
     queue::QueueError,
 };
 
@@ -84,6 +85,9 @@ pub enum Error {
 
     #[error(transparent)]
     GraphError(#[from] GraphError),
+
+    #[error(transparent)]
+    LogInitError(#[from] LogInitError),
 
     #[error(transparent)]
     AudioMixerError(#[from] AudioMixerError),

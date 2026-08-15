@@ -60,7 +60,15 @@ mod windows_example {
     /// WebSocket, ...) instead of a direct function call.
     ///
     ///     cargo run -p webrtc_loopback
-    pub(super) fn run() {
+    pub(super) fn run() -> std::result::Result<(), Box<dyn std::error::Error>> {
+        media_pp::init()?;
+        let _log_guard = media_pp::log::init(
+            env!("CARGO_PKG_NAME"),
+            "logs",
+            media_pp::log::Level::Trace,
+            7,
+        )?;
+
         let socket_a = UdpSocket::bind("127.0.0.1:0").expect("bind a");
         let socket_b = UdpSocket::bind("127.0.0.1:0").expect("bind b");
         let addr_a = socket_a.local_addr().expect("addr a");
@@ -176,6 +184,7 @@ mod windows_example {
             "expected every packet peer-b sent to reach peer-a"
         );
         println!("\nok");
+        Ok(())
     }
 
     /// Wires `source` into its own `Pipeline`, forwarding every packet it

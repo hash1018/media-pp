@@ -46,8 +46,9 @@ Everything is built from a handful of primitives in `lib/src/`:
   `ElementId`; `log_events()` drains and prints them in a default format.
 - **`PpLog`** (`pp_log.rs`) — the contextual log identity stored privately by
   every element. `pp_info!`, `pp_debug!`, `pp_warn!`, `pp_error!`, and `pp_trace!` attach
-  that identity as the `log` target; `element_pp_log()` creates the canonical
-  `ElementType(name):Pipeline(id)` identity used throughout the graph.
+  that identity to records sent to the opt-in private file logger;
+  `element_pp_log()` keeps `pipeline_id`, element type, and instance name as
+  separate fields used throughout the graph.
 - **`Pipeline` / `ChainBuilder` / `PipelineBuilder`** (`pipeline.rs`) —
   `ctx.branch()` builds one linear, detached chain (`.pipe(filter)` for
   same-thread stages, `.queue(name, capacity)` for a thread boundary,
@@ -226,6 +227,62 @@ The D3D12 examples above build their `D3d12Renderer`, and the D3D11 ones their `
 cargo run -p decode -- path/to/video.mp4   # or omit the path to use test-video/h265.mp4
 cargo run -p sw_decode_render              # d3d12-renderer is already enabled in its own Cargo.toml
 ```
+
+## Logging
+
+`media-pp` logging is disabled by default. Applications can opt into a private,
+daily-rotating file logger without installing or interacting with the
+process-global `log`/`tracing` subscriber:
+
+```rust
+let _log_guard = media_pp::log::init(
+    "media-pp",
+    "./logs",
+    media_pp::log::Level::Info,
+    7,
+)?;
+```
+
+Keep the returned `LogGuard` alive while logging is needed. Dropping it disables
+new records, flushes the bounded non-blocking writer, and joins its worker.
+`media_pp` records never enter the embedding application's logger, and the
+application's records never enter these files. If the writer's 4096-line queue
+fills, it drops new records instead of blocking a media thread;
+`LogGuard::dropped_lines()` reports how many were dropped.
+
+Each record uses explicit identity fields so it can be read without parsing a
+compressed target string:
+
+```text
+2026-08-15T15:52:24.068+09:00 INFO [pipeline_id=app-sink] [element=FileDemuxer] [name=demux] started
+```
+
+Records emitted before an element is attached to a pipeline omit only the
+`pipeline_id` field. Timestamps use local time with a numeric UTC offset and
+millisecond precision.
+
+When a pipeline starts, it records `run` followed by one pad-aware flow diagram
+at `Info`. Stable element IDs distinguish different elements that happen to
+share a name, while each downstream connector begins under its upstream
+element so fan-out remains visually clear:
+
+```text
+INFO [pipeline_id=app-sink] [element=Pipeline] [name=app-sink] run
+INFO [pipeline_id=app-sink] [element=Pipeline] [name=app-sink] topology
+FileDemuxer(demux)#1
+└── [src_0] → Tee(tee)#2
+              ├── [tee_src0] → AppSink(preview)#3
+              └── [tee_src1] → AppSink(record)#4
+```
+
+A successful runtime `Tee` change records `attach` or `detach`, followed by the
+complete updated flow diagram. EOS and control messages use `Trace` records at
+every element boundary with explicit phases (`sending`/`sent`,
+`requested`/`received`/`forwarding`/`completed`). Ordinary video, audio, and
+packet buffers are not logged per buffer.
+
+Every checked-in executable example enables this logger at `Trace` level, writes
+to `./logs`, and uses its Cargo package name as the file prefix.
 
 ## Feature flags
 

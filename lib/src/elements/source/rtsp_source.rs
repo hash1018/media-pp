@@ -167,10 +167,10 @@ impl Source for RtspSource {
 
 impl SourceElement for RtspSource {
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
-        pp_info!(self, "run: starting");
+        pp_info!(self, "started");
         loop {
             if drain_control(control, self, bus)?.stopped {
-                pp_info!(self, "run: stopped");
+                pp_info!(self, "stopped");
                 return Ok(());
             }
 
@@ -211,9 +211,9 @@ impl SourceElement for RtspSource {
             }
         }
         for pad in self.pads.iter_mut() {
-            pad.push(MediaBuffer::Eos)?;
+            pad.push_eos(&self.pp_log)?;
         }
-        pp_info!(self, "run: reached eos");
+        pp_info!(self, "event=eos phase=source_completed outcome=ok");
         Ok(())
     }
 

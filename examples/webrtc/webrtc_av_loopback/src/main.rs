@@ -55,7 +55,15 @@ mod windows_example {
     /// don't cross-contaminate.
     ///
     ///     cargo run -p webrtc_av_loopback
-    pub(super) fn run() {
+    pub(super) fn run() -> std::result::Result<(), Box<dyn std::error::Error>> {
+        media_pp::init()?;
+        let _log_guard = media_pp::log::init(
+            env!("CARGO_PKG_NAME"),
+            "logs",
+            media_pp::log::Level::Trace,
+            7,
+        )?;
+
         let socket_a = UdpSocket::bind("127.0.0.1:0").expect("bind a");
         let socket_b = UdpSocket::bind("127.0.0.1:0").expect("bind b");
         let addr_a = socket_a.local_addr().expect("addr a");
@@ -267,6 +275,7 @@ mod windows_example {
             "expected at least one audio packet on peer-b's audio track"
         );
         println!("ok — two tracks, one connection, no cross-contamination");
+        Ok(())
     }
 
     struct CountingSink {

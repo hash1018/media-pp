@@ -5,6 +5,7 @@ use crate::{
     control::ControlMsg,
     element::{ElementType, Sink},
     error::Result,
+    pp_log::{PpLog, pp_trace},
 };
 
 /// An output port an [`Element`](crate::element::Element) owns. Data only
@@ -66,6 +67,40 @@ impl SrcPad {
             Some(sink) => sink.consume(buf),
             None => Ok(()),
         }
+    }
+
+    /// Sends a source-originated EOS with explicit pad-level trace records.
+    /// Filters are traced by the pipeline's common element wrapper; this is
+    /// for the source boundary where EOS first enters the dataflow graph.
+    pub(crate) fn push_eos(&mut self, pp_log: &PpLog) -> Result<()> {
+        if self.peer.is_none() {
+            pp_trace!(
+                pp_log: pp_log,
+                "event=eos phase=skipped pad={} reason=unlinked",
+                self.name
+            );
+            return Ok(());
+        }
+
+        pp_trace!(
+            pp_log: pp_log,
+            "event=eos phase=sending pad={}",
+            self.name
+        );
+        let result = self.push(MediaBuffer::Eos);
+        match &result {
+            Ok(()) => pp_trace!(
+                pp_log: pp_log,
+                "event=eos phase=sent pad={} outcome=ok",
+                self.name
+            ),
+            Err(error) => pp_trace!(
+                pp_log: pp_log,
+                "event=eos phase=sent pad={} outcome=error error={error}",
+                self.name
+            ),
+        }
+        result
     }
 
     /// Forwards a [`ControlMsg`] to whatever this pad is linked to —

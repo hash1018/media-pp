@@ -495,7 +495,7 @@ impl Sink for CountingSink {
 
 /// `ChainBuilder::build`'s terminal — and, transitively via `.pipe()`/
 /// `.queue()`, everything upstream of it — should come out tagged with
-/// the pipeline id it was built with, not left at `sub_id: None`.
+/// the pipeline id it was built with, not left as `None`.
 #[test]
 fn chain_builder_stamps_pipeline_id_into_terminal_pp_log() {
     let (bus, _bus_rx) = Bus::new();
@@ -507,10 +507,9 @@ fn chain_builder_stamps_pipeline_id_into_terminal_pp_log() {
     let source_id = graph.add_source(ElementType::Other, "source".into());
     let context = Arc::new(Context::for_test(bus, "my-pipeline", graph, source_id));
     let built = context.branch().to(Box::new(sink)).unwrap();
-    assert_eq!(
-        built.root.pp_log().log_id(),
-        "Other(noop):Pipeline(my-pipeline)"
-    );
+    assert_eq!(built.root.pp_log().pipeline_id(), Some("my-pipeline"));
+    assert_eq!(built.root.pp_log().element(), "Other");
+    assert_eq!(built.root.pp_log().name(), "noop");
 }
 
 /// `Pipeline::new`'s `id` should come back unchanged from
@@ -571,6 +570,15 @@ fn topology_lists_source_through_terminal_per_branch() {
     assert_eq!(
         pipeline.topology(),
         "FileDemuxer(demux) - Queue(q) - Pacer(pacer) - Other(noop)"
+    );
+    assert_eq!(
+        pipeline.graph().topology_diagram(),
+        concat!(
+            "FileDemuxer(demux)#1\n",
+            "└── [src_0] → Queue(q)#2\n",
+            "              └── [q_src] → Pacer(pacer)#3\n",
+            "                            └── [pacer_src] → Other(noop)#4",
+        )
     );
 
     // `pipeline` is dropped here without ever being `run()`, taking
@@ -635,6 +643,15 @@ fn topology_attributes_tee_branches_to_the_tee_not_the_source() {
             "FileDemuxer(demux) - Tee(tee) - Other(sink-a)",
             "FileDemuxer(demux) - Tee(tee) - Other(sink-b)",
         ]
+    );
+    assert_eq!(
+        graph.topology_diagram(),
+        concat!(
+            "FileDemuxer(demux)#1\n",
+            "└── [src_0] → Tee(tee)#4\n",
+            "              ├── [tee_src0] → Other(sink-a)#2\n",
+            "              └── [tee_src1] → Other(sink-b)#3",
+        )
     );
 }
 

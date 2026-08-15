@@ -43,9 +43,48 @@ documentation and implementation differ.
   processed. Avoid `try_for_each`, an unreviewed `?`, or an early return that
   turns one item's error into termination of the whole loop.
 - Attribute bus errors to the most specific failing element/branch available,
-  using the existing `CLog` and stable graph identity conventions.
+  using the existing `PpLog` and stable graph identity conventions.
 - Plain control-plane objects that are not `Element`s have no bus identity;
   their operations should return a typed error directly to the caller.
+
+## Logging
+
+- Library diagnostics must use `PpLog` and the `pp_info!`, `pp_debug!`,
+  `pp_warn!`, `pp_error!`, and `pp_trace!` macros. Do not emit through or
+  install a process-global `log` logger or `tracing` subscriber. The private
+  file logger stays explicit and opt-in through `media_pp::log::init`, and the
+  caller owns its `LogGuard` for the full period in which logs must be kept and
+  flushed.
+- Every attached element record must keep `pipeline_id`, element type, and
+  caller-selected instance name as separate identity fields. Construct or
+  update its `PpLog` through the existing pipeline helpers instead of packing
+  identity into a free-form message. Use the stable graph element ID where a
+  topology must disambiguate duplicate names.
+- Keep levels intentional: `Error` for failed operations, `Warn` for degraded
+  or recoverable conditions, `Info` for sparse lifecycle and topology changes,
+  `Debug` for diagnostic state, and `Trace` for detailed EOS/control flow. Do
+  not log ordinary video, audio, or packet buffers one record per buffer.
+- A successful pipeline start logs `run`, followed immediately by one complete
+  multiline `topology` record. A successful dynamic `Tee` change logs only
+  `attach` or `detach`, followed by the complete updated topology. The diagram
+  shows stable `#id` values and source-pad labels; align each downstream
+  connector under its upstream element so fan-out is visible at the actual
+  branching point. Do not replace it with repeated root-to-leaf paths or add
+  `reason`, revision, branch, element, or edge-count summaries without a new
+  requirement.
+- Trace EOS and control at every element/thread boundary with an explicit
+  `event`, `phase`, and success/error `outcome` where applicable. Include the
+  pad when the event is sent through a specific pad, so a log can show exactly
+  where propagation stopped.
+- Keep logging off hot paths when its level is disabled: check `enabled` before
+  taking graph snapshots or doing non-trivial formatting. Queue a multiline
+  diagram as one complete non-blocking-writer record, and never hold graph,
+  branch, input, or pad locks while formatting or emitting a record.
+- Every executable example initializes the private logger at `Trace`, writes to
+  `./logs` with its Cargo package name as the prefix, and retains the returned
+  guard until shutdown. For logging-format or propagation changes, update
+  `lib/tests/flow_log.rs` and run an affected example end to end in addition to
+  the normal library tests.
 
 ## Buffers, timestamps, and EOS
 

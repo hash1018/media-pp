@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use crate::pp_log::pp_info;
+use crate::pp_log::pp_trace;
 use crossbeam_channel::{Receiver, Sender, unbounded};
 
 use crate::{
@@ -213,12 +213,28 @@ pub(crate) fn apply_one_unacked<S: SourceElement>(
     bus: &Bus,
     msg: ControlMsg,
 ) -> Result<bool> {
-    pp_info!(pp_log: source.pp_log(), "control: {msg:?}");
-    apply_seek(source, bus, msg)?;
-    for pad in source.src_pads() {
-        pad.control(msg)?;
+    pp_trace!(
+        pp_log: source.pp_log(),
+        "event=control control={msg:?} phase=received"
+    );
+    let result: Result<bool> = (|| {
+        apply_seek(source, bus, msg)?;
+        for pad in source.src_pads() {
+            pad.control(msg)?;
+        }
+        Ok(msg == ControlMsg::Stop)
+    })();
+    match &result {
+        Ok(_) => pp_trace!(
+            pp_log: source.pp_log(),
+            "event=control control={msg:?} phase=completed outcome=ok"
+        ),
+        Err(error) => pp_trace!(
+            pp_log: source.pp_log(),
+            "event=control control={msg:?} phase=completed outcome=error error={error}"
+        ),
     }
-    Ok(msg == ControlMsg::Stop)
+    result
 }
 
 /// Blocks on `control` alone — not whatever `source.run()` itself is

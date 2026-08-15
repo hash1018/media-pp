@@ -31,6 +31,12 @@ mod windows_example {
     ///     cargo run -p audio_playback -- <device-name-substring>
     pub(super) fn run() -> Result<()> {
         media_pp::init()?;
+        let _log_guard = media_pp::log::init(
+            env!("CARGO_PKG_NAME"),
+            "logs",
+            media_pp::log::Level::Trace,
+            7,
+        )?;
 
         let devices = WasapiRenderer::list_devices()
             .map_err(|error| media_pp::Error::Other(error.to_string()))?;

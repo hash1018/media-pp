@@ -89,7 +89,9 @@ impl Bus {
         // the old hand-rolled check this replaced, just built into `log`
         // itself instead of written here.
         match &event {
-            BusEvent::Eos { .. } => pp_info!(pp_log: pp_log, "eos"),
+            BusEvent::Eos { .. } => {
+                pp_info!(pp_log: pp_log, "event=eos phase=reported")
+            }
             BusEvent::Error { error, .. } => pp_error!(pp_log: pp_log, "{error}"),
             BusEvent::Dropped { .. } => {
                 pp_warn!(pp_log: pp_log, "dropped a buffer (queue full)")

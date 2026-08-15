@@ -1,201 +1,108 @@
 //! Contextual logging identity and macros used by pipeline elements.
 //!
-//! A [`PpLog`] stores the stable log target for one element. The `pp_*`
-//! macros route messages through the `log` facade while attaching that
-//! target, so the configured subscriber can attribute each record to the
-//! exact element and pipeline that produced it.
+//! A [`PpLog`] stores the stable, structured identity for one element. The `pp_*`
+//! macros send records only to [`crate::log`]'s opt-in private file writer,
+//! keeping them isolated from an embedding application's global logger.
+
+use std::sync::Arc;
 
 /// Stable contextual identity attached to a pipeline element's log records.
 #[derive(Debug, Clone)]
 pub struct PpLog {
-    log_id: String,
+    pipeline_id: Option<Arc<str>>,
+    element: Arc<str>,
+    name: Arc<str>,
 }
 
 impl PpLog {
-    pub fn new(id: &str, sub_id: Option<&str>) -> Self {
+    /// Creates a logging identity.
+    ///
+    /// `element` is the element type (for example `FileDemuxer`), while
+    /// `name` is the caller-selected instance name (for example `demux`).
+    /// `pipeline_id` is omitted until the element is attached to a pipeline.
+    pub fn new(element: &str, name: &str, pipeline_id: Option<&str>) -> Self {
         Self {
-            log_id: make_log_id(id, sub_id),
+            pipeline_id: pipeline_id.map(Arc::from),
+            element: Arc::from(element),
+            name: Arc::from(name),
         }
     }
 
-    pub fn set_log_id(&mut self, id: &str, sub_id: Option<&str>) {
-        self.log_id = make_log_id(id, sub_id);
+    pub fn pipeline_id(&self) -> Option<&str> {
+        self.pipeline_id.as_deref()
     }
 
-    pub fn log_id(&self) -> &str {
-        &self.log_id
+    pub fn element(&self) -> &str {
+        &self.element
     }
-}
 
-fn make_log_id(id: &str, sub_id: Option<&str>) -> String {
-    match sub_id {
-        Some(sub_id) => format!("{id}:{sub_id}"),
-        None => id.to_owned(),
+    pub fn name(&self) -> &str {
+        &self.name
     }
 }
 
 #[doc(hidden)]
 pub mod __private {
-    pub use log::{Level, log};
+    pub use crate::log::{Level, emit, enabled};
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __pp_log {
+    ($level:expr, pp_log: $pp_log:expr, $($arg:tt)+) => {{
+        let level = $level;
+        if $crate::pp_log::__private::enabled(level) {
+            $crate::pp_log::__private::emit(
+                level,
+                $pp_log,
+                format_args!($($arg)+),
+            );
+        }
+    }};
+    ($level:expr, $self:ident, $($arg:tt)+) => {{
+        let level = $level;
+        if $crate::pp_log::__private::enabled(level) {
+            $crate::pp_log::__private::emit(
+                level,
+                &$self.pp_log,
+                format_args!($($arg)+),
+            );
+        }
+    }};
 }
 
 #[macro_export]
 macro_rules! pp_info {
-    (pp_log: $pp_log:expr, $($arg:tt)+) => {
-        $crate::pp_log::__private::log!(
-            target: $pp_log.log_id(),
-            $crate::pp_log::__private::Level::Info,
-            $($arg)+
-        )
-    };
-    ($self:ident, $($arg:tt)+) => {
-        $crate::pp_log::__private::log!(
-            target: $self.pp_log.log_id(),
-            $crate::pp_log::__private::Level::Info,
-            $($arg)+
-        )
-    };
-    (main_id: $main_id:expr, sub_id: $sub_id:expr, $($arg:tt)+) => {
-        $crate::pp_log::__private::log!(
-            target: &format!("{}:{}", $main_id, $sub_id),
-            $crate::pp_log::__private::Level::Info,
-            $($arg)+
-        )
-    };
-    (main_id: $main_id:expr, $($arg:tt)+) => {
-        $crate::pp_log::__private::log!(
-            target: $main_id,
-            $crate::pp_log::__private::Level::Info,
-            $($arg)+
-        )
+    ($($arg:tt)+) => {
+        $crate::__pp_log!($crate::pp_log::__private::Level::Info, $($arg)+)
     };
 }
 
 #[macro_export]
 macro_rules! pp_debug {
-    (pp_log: $pp_log:expr, $($arg:tt)+) => {
-        $crate::pp_log::__private::log!(
-            target: $pp_log.log_id(),
-            $crate::pp_log::__private::Level::Debug,
-            $($arg)+
-        )
-    };
-    ($self:ident, $($arg:tt)+) => {
-        $crate::pp_log::__private::log!(
-            target: $self.pp_log.log_id(),
-            $crate::pp_log::__private::Level::Debug,
-            $($arg)+
-        )
-    };
-    (main_id: $main_id:expr, sub_id: $sub_id:expr, $($arg:tt)+) => {
-        $crate::pp_log::__private::log!(
-            target: &format!("{}:{}", $main_id, $sub_id),
-            $crate::pp_log::__private::Level::Debug,
-            $($arg)+
-        )
-    };
-    (main_id: $main_id:expr, $($arg:tt)+) => {
-        $crate::pp_log::__private::log!(
-            target: $main_id,
-            $crate::pp_log::__private::Level::Debug,
-            $($arg)+
-        )
+    ($($arg:tt)+) => {
+        $crate::__pp_log!($crate::pp_log::__private::Level::Debug, $($arg)+)
     };
 }
 
 #[macro_export]
 macro_rules! pp_warn {
-    (pp_log: $pp_log:expr, $($arg:tt)+) => {
-        $crate::pp_log::__private::log!(
-            target: $pp_log.log_id(),
-            $crate::pp_log::__private::Level::Warn,
-            $($arg)+
-        )
-    };
-    ($self:ident, $($arg:tt)+) => {
-        $crate::pp_log::__private::log!(
-            target: $self.pp_log.log_id(),
-            $crate::pp_log::__private::Level::Warn,
-            $($arg)+
-        )
-    };
-    (main_id: $main_id:expr, sub_id: $sub_id:expr, $($arg:tt)+) => {
-        $crate::pp_log::__private::log!(
-            target: &format!("{}:{}", $main_id, $sub_id),
-            $crate::pp_log::__private::Level::Warn,
-            $($arg)+
-        )
-    };
-    (main_id: $main_id:expr, $($arg:tt)+) => {
-        $crate::pp_log::__private::log!(
-            target: $main_id,
-            $crate::pp_log::__private::Level::Warn,
-            $($arg)+
-        )
+    ($($arg:tt)+) => {
+        $crate::__pp_log!($crate::pp_log::__private::Level::Warn, $($arg)+)
     };
 }
 
 #[macro_export]
 macro_rules! pp_error {
-    (pp_log: $pp_log:expr, $($arg:tt)+) => {
-        $crate::pp_log::__private::log!(
-            target: $pp_log.log_id(),
-            $crate::pp_log::__private::Level::Error,
-            $($arg)+
-        )
-    };
-    ($self:ident, $($arg:tt)+) => {
-        $crate::pp_log::__private::log!(
-            target: $self.pp_log.log_id(),
-            $crate::pp_log::__private::Level::Error,
-            $($arg)+
-        )
-    };
-    (main_id: $main_id:expr, sub_id: $sub_id:expr, $($arg:tt)+) => {
-        $crate::pp_log::__private::log!(
-            target: &format!("{}:{}", $main_id, $sub_id),
-            $crate::pp_log::__private::Level::Error,
-            $($arg)+
-        )
-    };
-    (main_id: $main_id:expr, $($arg:tt)+) => {
-        $crate::pp_log::__private::log!(
-            target: $main_id,
-            $crate::pp_log::__private::Level::Error,
-            $($arg)+
-        )
+    ($($arg:tt)+) => {
+        $crate::__pp_log!($crate::pp_log::__private::Level::Error, $($arg)+)
     };
 }
 
 #[macro_export]
 macro_rules! pp_trace {
-    (pp_log: $pp_log:expr, $($arg:tt)+) => {
-        $crate::pp_log::__private::log!(
-            target: $pp_log.log_id(),
-            $crate::pp_log::__private::Level::Trace,
-            $($arg)+
-        )
-    };
-    ($self:ident, $($arg:tt)+) => {
-        $crate::pp_log::__private::log!(
-            target: $self.pp_log.log_id(),
-            $crate::pp_log::__private::Level::Trace,
-            $($arg)+
-        )
-    };
-    (main_id: $main_id:expr, sub_id: $sub_id:expr, $($arg:tt)+) => {
-        $crate::pp_log::__private::log!(
-            target: &format!("{}:{}", $main_id, $sub_id),
-            $crate::pp_log::__private::Level::Trace,
-            $($arg)+
-        )
-    };
-    (main_id: $main_id:expr, $($arg:tt)+) => {
-        $crate::pp_log::__private::log!(
-            target: $main_id,
-            $crate::pp_log::__private::Level::Trace,
-            $($arg)+
-        )
+    ($($arg:tt)+) => {
+        $crate::__pp_log!($crate::pp_log::__private::Level::Trace, $($arg)+)
     };
 }
 
@@ -206,15 +113,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn combines_main_and_sub_ids() {
-        let pp_log = PpLog::new("element", Some("pipeline"));
-        assert_eq!(pp_log.log_id(), "element:pipeline");
-    }
-
-    #[test]
-    fn replaces_the_log_id() {
-        let mut pp_log = PpLog::new("old", None);
-        pp_log.set_log_id("new", Some("sub"));
-        assert_eq!(pp_log.log_id(), "new:sub");
+    fn keeps_each_identity_field_separate() {
+        let pp_log = PpLog::new("FileDemuxer", "demux", Some("app-sink"));
+        assert_eq!(pp_log.pipeline_id(), Some("app-sink"));
+        assert_eq!(pp_log.element(), "FileDemuxer");
+        assert_eq!(pp_log.name(), "demux");
     }
 }

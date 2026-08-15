@@ -7,7 +7,7 @@ use std::{
     time::Duration,
 };
 
-use crate::pp_log::{PpLog, pp_info};
+use crate::pp_log::{PpLog, pp_info, pp_trace};
 use crossbeam_channel::{
     Receiver, RecvTimeoutError, SendTimeoutError, Sender, TrySendError, bounded, select,
 };
@@ -250,10 +250,22 @@ impl Sink for Queue {
         // after everything queued before it has reached downstream. The
         // policy timeout intentionally does not apply to this send.
         if buf.is_eos() {
-            return self
+            pp_trace!(pp_log: &self.pp_log, "event=eos phase=received");
+            let result = self
                 .tx
                 .send(buf)
                 .map_err(|_| QueueError::ChannelClosed.into());
+            match &result {
+                Ok(()) => pp_trace!(
+                    pp_log: &self.pp_log,
+                    "event=eos phase=queued outcome=ok"
+                ),
+                Err(error) => pp_trace!(
+                    pp_log: &self.pp_log,
+                    "event=eos phase=queued outcome=error error={error}"
+                ),
+            }
+            return result;
         }
 
         match self.policy {
@@ -291,7 +303,15 @@ impl Sink for Queue {
         // feeds this queue while it's paused, since `Pause` blocks
         // whatever's upstream the same way, all the way back to the
         // source (see [`crate::control::drain_control`]).
+        pp_trace!(
+            pp_log: &self.pp_log,
+            "event=control control={msg:?} phase=received"
+        );
         self.control.send(msg);
+        pp_trace!(
+            pp_log: &self.pp_log,
+            "event=control control={msg:?} phase=completed outcome=ok"
+        );
         Ok(())
     }
 }
@@ -395,6 +415,10 @@ fn worker_loop(
                         match downstream.consume(buf) {
                             Ok(()) => {
                                 if is_eos {
+                                    pp_trace!(
+                                        pp_log: &pp_log,
+                                        "event=eos phase=completed outcome=ok"
+                                    );
                                     bus.post(
                                         &pp_log,
                                         BusEvent::Eos {
@@ -406,6 +430,12 @@ fn worker_loop(
                                 }
                             }
                             Err(error) => {
+                                if is_eos {
+                                    pp_trace!(
+                                        pp_log: &pp_log,
+                                        "event=eos phase=completed outcome=error error={error}"
+                                    );
+                                }
                                 // Report and move on to the next buffer —
                                 // this one's dropped, but nothing else
                                 // dies over it. Whoever's watching the bus
@@ -447,7 +477,10 @@ fn apply_control(
     error_reporter: &QueueErrorReporter<'_>,
     stop: &AtomicBool,
 ) -> bool {
-    pp_info!(pp_log: error_reporter.pp_log, "control: {msg:?}");
+    pp_trace!(
+        pp_log: error_reporter.pp_log,
+        "event=control control={msg:?} phase=forwarding"
+    );
     discard_stale_data(data_rx, msg);
     forward_control(downstream, msg, error_reporter);
     let is_stop = msg == ControlMsg::Stop;
@@ -480,7 +513,10 @@ fn apply_control(
                 return true; // sender gone — treat like Stop
             }
         };
-        pp_info!(pp_log: error_reporter.pp_log, "control: {msg:?}");
+        pp_trace!(
+            pp_log: error_reporter.pp_log,
+            "event=control control={msg:?} phase=forwarding"
+        );
         discard_stale_data(data_rx, msg);
         forward_control(downstream, msg, error_reporter);
         let is_stop = msg == ControlMsg::Stop;

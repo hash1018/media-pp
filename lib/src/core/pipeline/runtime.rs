@@ -7,7 +7,7 @@ use std::{
     time::Duration,
 };
 
-use crate::pp_log::pp_info;
+use crate::pp_log::{PpLog, pp_info, pp_trace};
 
 use crate::{
     bus::{Bus, BusEvent, BusReceiver},
@@ -15,7 +15,7 @@ use crate::{
     control::{ControlMsg, ControlReceiver, ControlSender},
     element::{Context, SourceElement},
     error::Result,
-    graph::{GraphSnapshot, NodeInfo, PipelineGraph},
+    graph::{GraphSnapshot, NodeInfo, PipelineGraph, log_topology},
     playback_clock::PlaybackClock,
 };
 
@@ -61,6 +61,8 @@ pub struct Pipeline {
     /// there and onto every element that passes through a [`super::ChainBuilder`]
     /// built with it (see [`Pipeline::id`]).
     pub(super) id: Arc<str>,
+    /// Logging identity for pipeline-level topology records.
+    pub(super) pp_log: PpLog,
     pub(super) sources: Mutex<Option<Vec<SourceEntry>>>,
     /// Taken (leaving `None` behind) the moment `run()` starts, and cloned
     /// once per source into that source's own background thread — so once
@@ -195,10 +197,14 @@ impl Pipeline {
             return;
         };
 
+        if crate::log::enabled(crate::log::Level::Info) {
+            let snapshot = self.graph();
+            pp_info!(pp_log: &self.pp_log, "run");
+            log_topology(&self.pp_log, &snapshot);
+        }
         self.running.store(sources.len(), Ordering::Release);
         for ((source_id, source), control_rx) in sources.into_iter().zip(control_rxs) {
             let bus = bus.for_element(source_id);
-            let pipeline_id = Arc::clone(&self.id);
             let running = Arc::clone(&self.running);
             let handle = thread::Builder::new()
                 .name("pipeline:source".into())
@@ -211,7 +217,6 @@ impl Pipeline {
                     let control_rx = control_rx;
                     let _running = RunningSourceGuard::new(running);
 
-                    pp_info!(main_id: &pipeline_id, "pipeline: run starting ({})", source.name());
                     let source_name = source.name();
                     let source_type = source.element_type();
                     // `source.run()` itself already reports non-fatal,
@@ -232,10 +237,7 @@ impl Pipeline {
                     } else {
                         "ok"
                     };
-                    pp_info!(
-                        main_id: &pipeline_id,
-                        "pipeline: run finished ({outcome}, {source_name})"
-                    );
+                    pp_info!(pp_log: source.pp_log(), "finished outcome={outcome}");
                 })
                 .expect("failed to spawn pipeline source thread");
             self.workers.lock().unwrap().push(handle);
@@ -254,11 +256,20 @@ impl Pipeline {
         if self.running.load(Ordering::Acquire) == 0 {
             return;
         }
+        let msg = ControlMsg::Pause;
+        pp_trace!(
+            pp_log: &self.pp_log,
+            "event=control control={msg:?} phase=requested"
+        );
         self.clock.interrupt();
         self.clock.pause();
         for control_tx in &self.control_txs {
-            control_tx.send(ControlMsg::Pause);
+            control_tx.send(msg);
         }
+        pp_trace!(
+            pp_log: &self.pp_log,
+            "event=control control={msg:?} phase=completed outcome=ok"
+        );
     }
 
     /// Undoes [`Pipeline::pause`]. Resumes the `Clock` first, so it's
@@ -268,10 +279,19 @@ impl Pipeline {
         if self.running.load(Ordering::Acquire) == 0 {
             return;
         }
+        let msg = ControlMsg::Resume;
+        pp_trace!(
+            pp_log: &self.pp_log,
+            "event=control control={msg:?} phase=requested"
+        );
         self.clock.resume();
         for control_tx in &self.control_txs {
-            control_tx.send(ControlMsg::Resume);
+            control_tx.send(msg);
         }
+        pp_trace!(
+            pp_log: &self.pp_log,
+            "event=control control={msg:?} phase=completed outcome=ok"
+        );
     }
 
     /// Performs an early, full stop — abandons buffered work rather than
@@ -289,10 +309,19 @@ impl Pipeline {
         if self.running.load(Ordering::Acquire) == 0 {
             return;
         }
+        let msg = ControlMsg::Stop;
+        pp_trace!(
+            pp_log: &self.pp_log,
+            "event=control control={msg:?} phase=requested"
+        );
         self.clock.interrupt();
         for control_tx in &self.control_txs {
-            control_tx.send(ControlMsg::Stop);
+            control_tx.send(msg);
         }
+        pp_trace!(
+            pp_log: &self.pp_log,
+            "event=control control={msg:?} phase=completed outcome=ok"
+        );
     }
 
     /// Jumps to an absolute position from the start of the media. Blocks
@@ -321,11 +350,20 @@ impl Pipeline {
         if self.running.load(Ordering::Acquire) == 0 {
             return;
         }
+        let msg = ControlMsg::Seek(target);
+        pp_trace!(
+            pp_log: &self.pp_log,
+            "event=control control={msg:?} phase=requested"
+        );
         self.clock.interrupt();
         self.playback_clock.reset_for_seek();
         for control_tx in &self.control_txs {
-            control_tx.send(ControlMsg::Seek(target));
+            control_tx.send(msg);
         }
+        pp_trace!(
+            pp_log: &self.pp_log,
+            "event=control control={msg:?} phase=completed outcome=ok"
+        );
     }
 }
 

@@ -136,7 +136,7 @@ impl Source for FileDemuxer {
 
 impl SourceElement for FileDemuxer {
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> crate::error::Result<()> {
-        pp_info!(self, "run: starting");
+        pp_info!(self, "started");
         // Deliberately re-creates `self.input.packets()` fresh every
         // iteration (cheap — it's just a short-lived wrapper, not a
         // stateful cursor of its own) instead of holding one `for` loop's
@@ -148,7 +148,7 @@ impl SourceElement for FileDemuxer {
         loop {
             if drain_control(control, self, bus)?.stopped {
                 // Stop: abandon in place, no final Eos.
-                pp_info!(self, "run: stopped");
+                pp_info!(self, "stopped");
                 return Ok(());
             }
             // `seek` (called from within `drain_control`, above) already
@@ -180,9 +180,9 @@ impl SourceElement for FileDemuxer {
             }
         }
         for pad in self.pads.iter_mut() {
-            pad.push(MediaBuffer::Eos)?;
+            pad.push_eos(&self.pp_log)?;
         }
-        pp_info!(self, "run: reached eos");
+        pp_info!(self, "event=eos phase=source_completed outcome=ok");
         Ok(())
     }
 

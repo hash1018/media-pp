@@ -507,12 +507,12 @@ impl Source for AudioMixer {
 
 impl SourceElement for AudioMixer {
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
-        pp_info!(self, "run: starting");
+        pp_info!(self, "started");
         let mut timeline = ActiveTimeline::new(Instant::now());
         loop {
             let outcome = drain_control(control, self, bus)?;
             if outcome.stopped {
-                pp_info!(self, "run: stopped");
+                pp_info!(self, "stopped");
                 return Ok(());
             }
             timeline.account_pause(outcome.paused_for);

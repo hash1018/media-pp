@@ -210,7 +210,12 @@ impl SegmentGroup {
     /// Rotates first if this is the packet that should trigger it (see
     /// [`SegmentedMp4Muxer::open`]'s own docs), then writes into whichever
     /// segment is current by the time this returns.
-    fn consume_packet(&self, track_index: usize, packet: Arc<ffmpeg::Packet>) -> Result<()> {
+    fn consume_packet(
+        &self,
+        track_index: usize,
+        packet: Arc<ffmpeg::Packet>,
+        pp_log: &PpLog,
+    ) -> Result<()> {
         let mut state = self.state.lock().unwrap();
         let SegmentPolicy::Duration(due_after) = self.policy;
         if state.segment_started.elapsed() >= due_after {
@@ -230,10 +235,7 @@ impl SegmentGroup {
                 state.current_sinks = open_segment(&state.streams, path)?;
                 state.segment_index = index;
                 state.segment_started = Instant::now();
-                pp_info!(
-                    main_id: "segmented-mp4-muxer",
-                    "rotated to segment {index}"
-                );
+                pp_info!(pp_log: pp_log, "rotated segment_index={index}");
             }
         }
         state.current_sinks[track_index].consume(MediaBuffer::Packet(packet))
@@ -288,7 +290,10 @@ impl Element for SegmentedTrackSink {
 impl Sink for SegmentedTrackSink {
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         match buf {
-            MediaBuffer::Packet(packet) => self.group.consume_packet(self.track_index, packet),
+            MediaBuffer::Packet(packet) => {
+                self.group
+                    .consume_packet(self.track_index, packet, &self.pp_log)
+            }
             MediaBuffer::Eos => self.group.finish_eos(self.track_index),
             // The `Mp4Muxer` each rotated segment wraps already rejects
             // this — matching its own `Mp4MuxerStreamSink::consume` here

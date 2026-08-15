@@ -95,8 +95,8 @@ pub trait Element: Send {
     fn pp_log(&self) -> &PpLog;
 
     /// Mutable access to the same field [`Element::pp_log`] reads — used by
-    /// [`crate::pipeline::ChainBuilder`] to stamp a `sub_id` (the owning
-    /// [`crate::pipeline::Pipeline`]'s own id) onto every element that
+    /// [`crate::pipeline::ChainBuilder`] to stamp the owning
+    /// [`crate::pipeline::Pipeline`]'s id onto every element that
     /// passes through it, via [`element_pp_log`]. Not meant to be called
     /// from anywhere else.
     fn pp_log_mut(&mut self) -> &mut PpLog;
@@ -104,20 +104,15 @@ pub trait Element: Send {
 
 /// Builds the [`PpLog`] every element constructs for its own [`Element::pp_log`]
 /// field, and that [`crate::pipeline::ChainBuilder`]/[`crate::pipeline::Pipeline`]
-/// rebuild once they know which pipeline an element belongs to. Renders as
-/// `ElementType(name)` for the id — so a log line names *what* failed, not
-/// just the instance name a caller could've picked for two different kinds
-/// of element — and `Pipeline(pipeline_id)` for the sub_id, when there is
-/// one (`None` for an element that isn't wired into a `Pipeline` at all,
-/// e.g. most of this crate's own tests). Public so a custom `Element`
+/// rebuild once they know which pipeline an element belongs to. Keeps the
+/// element type, instance name, and pipeline id as separate fields, so a log
+/// reader does not need to parse a combined display string. The pipeline id is
+/// `None` for an element that isn't wired into a `Pipeline` at all (e.g. most
+/// of this crate's own tests). Public so a custom `Element`
 /// implemented outside this crate (see [`ElementType::Other`]) can build
 /// its own `pp_log` field the same way.
 pub fn element_pp_log(element_type: ElementType, name: &str, pipeline_id: Option<&str>) -> PpLog {
-    let id = format!("{element_type:?}({name})");
-    match pipeline_id {
-        Some(pipeline_id) => PpLog::new(&id, Some(&format!("Pipeline({pipeline_id})"))),
-        None => PpLog::new(&id, None),
-    }
+    PpLog::new(&format!("{element_type:?}"), name, pipeline_id)
 }
 
 /// Everything a [`crate::pipeline::ChainBuilder`]/[`crate::elements::Tee`]

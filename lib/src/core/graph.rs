@@ -1,12 +1,16 @@
 use std::{
     collections::{HashMap, HashSet},
-    fmt,
+    fmt::{self, Write as _},
     sync::{Arc, Mutex},
 };
 
 use thiserror::Error as ThisError;
 
-use crate::element::ElementType;
+use crate::{
+    element::ElementType,
+    log::{Level, enabled},
+    pp_log::{PpLog, pp_info},
+};
 
 /// Stable identity of one element inside a pipeline graph. Names are only
 /// labels; IDs are what graph mutation and lookup use.
@@ -71,6 +75,99 @@ impl GraphSnapshot {
     /// separate from nodes means this also remains meaningful for fan-in
     /// graphs, where a node can have more than one upstream.
     pub fn topology(&self) -> String {
+        self.paths()
+            .into_iter()
+            .map(|path| {
+                path.into_iter()
+                    .filter_map(|id| self.node(id))
+                    .map(|node| format!("{:?}({})", node.element_type, node.name))
+                    .collect::<Vec<_>>()
+                    .join(" - ")
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Logging-only flow diagram. Each child connector starts under its
+    /// upstream element, so a fan-out is visible at the element where it
+    /// actually occurs instead of repeating the common path for every leaf.
+    pub(crate) fn topology_diagram(&self) -> String {
+        let roots: Vec<_> = self
+            .nodes
+            .iter()
+            .filter(|node| !self.edges.iter().any(|edge| edge.to.element == node.id))
+            .collect();
+        let mut output = String::new();
+
+        for (index, root) in roots.iter().enumerate() {
+            let is_last = index + 1 == roots.len();
+            let child_indent = if roots.len() == 1 {
+                let _ = write!(output, "{:?}({})#{}", root.element_type, root.name, root.id);
+                String::new()
+            } else {
+                let connector = if is_last { "└── " } else { "├── " };
+                let _ = write!(
+                    output,
+                    "{connector}{:?}({})#{}",
+                    root.element_type, root.name, root.id
+                );
+                if is_last {
+                    "    ".to_owned()
+                } else {
+                    "│   ".to_owned()
+                }
+            };
+            self.render_diagram_children(
+                root.id,
+                &child_indent,
+                &mut HashSet::from([root.id]),
+                &mut output,
+            );
+            if !is_last {
+                output.push('\n');
+            }
+        }
+
+        output
+    }
+
+    fn render_diagram_children(
+        &self,
+        parent: ElementId,
+        indent: &str,
+        visiting: &mut HashSet<ElementId>,
+        output: &mut String,
+    ) {
+        let children: Vec<_> = self
+            .edges
+            .iter()
+            .filter(|edge| edge.from.element == parent)
+            .collect();
+
+        for (index, edge) in children.iter().enumerate() {
+            let Some(child) = self.node(edge.to.element) else {
+                continue;
+            };
+            let is_last = index + 1 == children.len();
+            let connector = if is_last { "└── " } else { "├── " };
+            let link = format!("[{}] → ", edge.from.port);
+            let _ = write!(
+                output,
+                "\n{indent}{connector}{link}{:?}({})#{}",
+                child.element_type, child.name, child.id
+            );
+
+            if visiting.insert(child.id) {
+                let continuation = if is_last { "    " } else { "│   " };
+                let child_indent =
+                    format!("{indent}{continuation}{}", " ".repeat(link.chars().count()));
+                self.render_diagram_children(child.id, &child_indent, visiting, output);
+                visiting.remove(&child.id);
+            }
+        }
+    }
+
+    fn paths(&self) -> Vec<Vec<ElementId>> {
         let leaves: Vec<_> = self
             .nodes
             .iter()
@@ -78,19 +175,9 @@ impl GraphSnapshot {
             .collect();
         let mut rendered = Vec::new();
         for leaf in leaves {
-            let mut paths = Vec::new();
-            self.paths_to(leaf.id, &mut HashSet::new(), &mut Vec::new(), &mut paths);
-            for path in paths {
-                rendered.push(
-                    path.into_iter()
-                        .filter_map(|id| self.node(id))
-                        .map(|node| format!("{:?}({})", node.element_type, node.name))
-                        .collect::<Vec<_>>()
-                        .join(" - "),
-                );
-            }
+            self.paths_to(leaf.id, &mut HashSet::new(), &mut Vec::new(), &mut rendered);
         }
-        rendered.join("\n")
+        rendered
     }
 
     fn paths_to(
@@ -122,6 +209,16 @@ impl GraphSnapshot {
         suffix.pop();
         visiting.remove(&current);
     }
+}
+
+/// Emits the whole topology as one non-blocking writer record. Embedded lines
+/// cannot interleave with another record because the private logger queues the
+/// completed message with a single write.
+pub(crate) fn log_topology(pp_log: &PpLog, snapshot: &GraphSnapshot) {
+    if !enabled(Level::Info) {
+        return;
+    }
+    pp_info!(pp_log: pp_log, "topology\n{}", snapshot.topology_diagram());
 }
 
 #[derive(Debug, ThisError, PartialEq, Eq)]

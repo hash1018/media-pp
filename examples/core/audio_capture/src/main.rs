@@ -29,6 +29,12 @@ mod windows_example {
     ///     cargo run -p audio_capture -- <name>     # first device whose name contains <name>
     pub(super) fn run() -> Result<()> {
         media_pp::init()?;
+        let _log_guard = media_pp::log::init(
+            env!("CARGO_PKG_NAME"),
+            "logs",
+            media_pp::log::Level::Trace,
+            7,
+        )?;
 
         let devices = WasapiCaptureSource::list_devices()
             .map_err(|e| media_pp::Error::Other(e.to_string()))?;

@@ -13,9 +13,7 @@ crossbeam-channel = "0.5"
 crossbeam-queue = "0.3"
 arc-swap = "1"
 thiserror = "2"
-log = "0.4"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["local-time"] }
+time = { version = "0.3", features = ["local-offset"] }
 tracing-appender = "0.2"
 ort = { version = "2.0.0-rc.13", optional = true }
 ndarray = { version = "0.17", optional = true }
@@ -56,3 +54,6 @@ wasapi-capture = ["dep:windows"]
 wasapi-renderer = ["dep:windows"]
 ort = ["dep:ort", "dep:ndarray"]
 webrtc = ["dep:str0m"]
+
+[dev-dependencies]
+log = "0.4"

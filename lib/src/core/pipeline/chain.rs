@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::pp_log::PpLog;
+use crate::pp_log::{PpLog, pp_trace};
 
 use crate::{
     buffer::MediaBuffer,
@@ -59,42 +59,13 @@ trait StageBuilder: Send {
 
 struct DirectStage<T>(T);
 
-impl<T> StageBuilder for DirectStage<T>
-where
-    T: Filter + 'static,
-{
-    fn wrap(
-        self: Box<Self>,
-        downstream: Box<dyn Sink>,
-        _bus: &Bus,
-        pipeline_id: &str,
-    ) -> Box<dyn Sink> {
-        let mut element = self.0;
-        *element.pp_log_mut() =
-            element_pp_log(element.element_type(), &element.name(), Some(pipeline_id));
-        element.src_pads()[0].link(downstream);
-        Box::new(element)
-    }
+/// Adds uniform EOS/control boundary tracing to every direct filter without
+/// requiring each built-in or downstream custom element to duplicate it.
+struct FlowTracer<T> {
+    inner: T,
 }
 
-struct QueueStage {
-    id: ElementId,
-    name: String,
-    capacity: usize,
-    policy: OverflowPolicy,
-}
-
-/// Wraps a terminal `Sink`, posting a `BusEvent::Eos` (under the sink's own
-/// `Element::name()`) once it sees an EOS buffer pass through — mirrors
-/// what `Queue` does for its own downstream, but without introducing a
-/// thread boundary. This is what lets a fully direct chain (no `queue()`
-/// calls at all) still report EOS on the bus.
-struct EosReporter {
-    bus: Bus,
-    inner: Box<dyn Sink>,
-}
-
-impl Element for EosReporter {
+impl<T: Element> Element for FlowTracer<T> {
     fn name(&self) -> Arc<str> {
         self.inner.name()
     }
@@ -116,24 +87,159 @@ impl Element for EosReporter {
     }
 }
 
-impl Sink for EosReporter {
+impl<T: Source> Source for FlowTracer<T> {
+    fn src_pads(&mut self) -> &mut [SrcPad] {
+        self.inner.src_pads()
+    }
+}
+
+impl<T: Sink> Sink for FlowTracer<T> {
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         let is_eos = buf.is_eos();
-        self.inner.consume(buf)?;
         if is_eos {
-            self.bus.post(
-                self.inner.pp_log(),
-                BusEvent::Eos {
-                    element_type: self.inner.element_type(),
-                    name: self.inner.name(),
-                },
-            );
+            pp_trace!(pp_log: self.inner.pp_log(), "event=eos phase=received");
         }
-        Ok(())
+        let result = self.inner.consume(buf);
+        if is_eos {
+            match &result {
+                Ok(()) => pp_trace!(
+                    pp_log: self.inner.pp_log(),
+                    "event=eos phase=completed outcome=ok"
+                ),
+                Err(error) => pp_trace!(
+                    pp_log: self.inner.pp_log(),
+                    "event=eos phase=completed outcome=error error={error}"
+                ),
+            }
+        }
+        result
     }
 
     fn control(&mut self, msg: ControlMsg) -> Result<()> {
-        self.inner.control(msg)
+        pp_trace!(
+            pp_log: self.inner.pp_log(),
+            "event=control control={msg:?} phase=received"
+        );
+        let result = self.inner.control(msg);
+        match &result {
+            Ok(()) => pp_trace!(
+                pp_log: self.inner.pp_log(),
+                "event=control control={msg:?} phase=completed outcome=ok"
+            ),
+            Err(error) => pp_trace!(
+                pp_log: self.inner.pp_log(),
+                "event=control control={msg:?} phase=completed outcome=error error={error}"
+            ),
+        }
+        result
+    }
+}
+
+impl<T> StageBuilder for DirectStage<T>
+where
+    T: Filter + 'static,
+{
+    fn wrap(
+        self: Box<Self>,
+        downstream: Box<dyn Sink>,
+        _bus: &Bus,
+        pipeline_id: &str,
+    ) -> Box<dyn Sink> {
+        let mut element = self.0;
+        *element.pp_log_mut() =
+            element_pp_log(element.element_type(), &element.name(), Some(pipeline_id));
+        element.src_pads()[0].link(downstream);
+        Box::new(FlowTracer { inner: element })
+    }
+}
+
+struct QueueStage {
+    id: ElementId,
+    name: String,
+    capacity: usize,
+    policy: OverflowPolicy,
+}
+
+/// Traces EOS/control at a terminal `Sink` and posts a `BusEvent::Eos` (under
+/// the sink's own `Element::name()`) once EOS completes — mirrors what
+/// `Queue` does for its own downstream, but without introducing a thread
+/// boundary. This is what lets a fully direct chain (no `queue()` calls at
+/// all) still report EOS on the bus.
+struct TerminalTracer {
+    bus: Bus,
+    inner: Box<dyn Sink>,
+}
+
+impl Element for TerminalTracer {
+    fn name(&self) -> Arc<str> {
+        self.inner.name()
+    }
+
+    fn element_type(&self) -> ElementType {
+        self.inner.element_type()
+    }
+
+    fn graph_id(&self) -> Option<ElementId> {
+        self.inner.graph_id()
+    }
+
+    fn pp_log(&self) -> &PpLog {
+        self.inner.pp_log()
+    }
+
+    fn pp_log_mut(&mut self) -> &mut PpLog {
+        self.inner.pp_log_mut()
+    }
+}
+
+impl Sink for TerminalTracer {
+    fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+        let is_eos = buf.is_eos();
+        if is_eos {
+            pp_trace!(pp_log: self.inner.pp_log(), "event=eos phase=received");
+        }
+        let result = self.inner.consume(buf);
+        if is_eos {
+            match &result {
+                Ok(()) => {
+                    pp_trace!(
+                        pp_log: self.inner.pp_log(),
+                        "event=eos phase=completed outcome=ok"
+                    );
+                    self.bus.post(
+                        self.inner.pp_log(),
+                        BusEvent::Eos {
+                            element_type: self.inner.element_type(),
+                            name: self.inner.name(),
+                        },
+                    );
+                }
+                Err(error) => pp_trace!(
+                    pp_log: self.inner.pp_log(),
+                    "event=eos phase=completed outcome=error error={error}"
+                ),
+            }
+        }
+        result
+    }
+
+    fn control(&mut self, msg: ControlMsg) -> Result<()> {
+        pp_trace!(
+            pp_log: self.inner.pp_log(),
+            "event=control control={msg:?} phase=received"
+        );
+        let result = self.inner.control(msg);
+        match &result {
+            Ok(()) => pp_trace!(
+                pp_log: self.inner.pp_log(),
+                "event=control control={msg:?} phase=completed outcome=ok"
+            ),
+            Err(error) => pp_trace!(
+                pp_log: self.inner.pp_log(),
+                "event=control control={msg:?} phase=completed outcome=error error={error}"
+            ),
+        }
+        result
     }
 }
 
@@ -271,7 +377,7 @@ impl ChainBuilder {
             })
             .collect();
         let root_id = nodes.first().expect("terminal always supplies one node").id;
-        let terminal: Box<dyn Sink> = Box::new(EosReporter {
+        let terminal: Box<dyn Sink> = Box::new(TerminalTracer {
             bus: self.context.bus.for_element(terminal_id),
             inner: terminal,
         });

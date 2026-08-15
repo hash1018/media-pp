@@ -131,6 +131,12 @@ mod windows_example {
 
     fn play(hwnd: isize, window_width: u32, window_height: u32) -> media_pp::Result<()> {
         media_pp::init()?;
+        let _log_guard = media_pp::log::init(
+            env!("CARGO_PKG_NAME"),
+            "logs",
+            media_pp::log::Level::Trace,
+            7,
+        )?;
 
         let capture_options = DxgiCaptureOptions {
             fps: 60,

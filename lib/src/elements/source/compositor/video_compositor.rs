@@ -585,12 +585,12 @@ impl Source for VideoCompositor {
 
 impl SourceElement for VideoCompositor {
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
-        pp_info!(self, "run: starting");
+        pp_info!(self, "started");
         let mut schedule = PeriodicSchedule::new(self.frame_interval, Instant::now());
         loop {
             let outcome = drain_control(control, self, bus)?;
             if outcome.stopped {
-                pp_info!(self, "run: stopped");
+                pp_info!(self, "stopped");
                 return Ok(());
             }
             if outcome.paused_for > Duration::ZERO {

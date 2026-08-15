@@ -11,7 +11,7 @@ use crate::{
     control::ControlMsg,
     element::{Context, Element, ElementType, Sink, element_pp_log},
     error::Result,
-    graph::{BranchId, ElementId, GraphError, PlannedEdge, PortRef},
+    graph::{BranchId, ElementId, GraphError, PlannedEdge, PortRef, log_topology},
     pad::SrcPad,
     pipeline::{ChainBuilder, DetachedBranch},
 };
@@ -90,7 +90,7 @@ pub struct TeeHandle {
 impl Tee {
     fn new(name: impl Into<String>, context: Arc<Context>) -> (Self, TeeHandle) {
         let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::Tee, &name, None);
+        let pp_log = element_pp_log(ElementType::Tee, &name, Some(&context.pipeline_id));
         pp_info!(pp_log: &pp_log, "created");
         let id = context.graph.reserve_element_id();
         let shared = Arc::new(TeeShared {
@@ -260,11 +260,23 @@ impl TeeHandle {
                     }));
                     Ok(())
                 })?;
-        pp_info!(
-            pp_log: &element_pp_log(ElementType::Tee, &self.name, None),
-            "sink added: {} total",
-            branches.len()
-        );
+        let snapshot =
+            crate::log::enabled(crate::log::Level::Info).then(|| shared.context.graph.snapshot());
+        drop(branches);
+        if let Some(snapshot) = snapshot {
+            let pp_log = element_pp_log(
+                ElementType::Tee,
+                &self.name,
+                Some(&shared.context.pipeline_id),
+            );
+            pp_info!(pp_log: &pp_log, "attach");
+            let pipeline_pp_log = PpLog::new(
+                "Pipeline",
+                &shared.context.pipeline_id,
+                Some(&shared.context.pipeline_id),
+            );
+            log_topology(&pipeline_pp_log, &snapshot);
+        }
         Ok(branch_id)
     }
 
@@ -281,11 +293,6 @@ impl TeeHandle {
             .iter()
             .position(|branch| branch.id == Some(branch_id))
             .ok_or(GraphError::BranchNotAttached(branch_id))?;
-        pp_info!(
-            pp_log: &element_pp_log(ElementType::Tee, &self.name, None),
-            "sink removed: branch={branch_id}, {} remaining",
-            branches.len() - 1
-        );
         let mut removed = None;
         shared.context.graph.detach_with(branch_id, || {
             let branch = branches.remove(index);
@@ -293,11 +300,27 @@ impl TeeHandle {
             removed = Some(branch);
             Ok(())
         })?;
+        let snapshot =
+            crate::log::enabled(crate::log::Level::Info).then(|| shared.context.graph.snapshot());
         drop(branches);
         // The last Arc owns the downstream sink. Dropping it outside both
         // the branch-list and graph locks allows arbitrary Sink::drop code
         // to inspect the graph or call back into Tee without deadlocking.
         drop(removed);
+        if let Some(snapshot) = snapshot {
+            let pp_log = element_pp_log(
+                ElementType::Tee,
+                &self.name,
+                Some(&shared.context.pipeline_id),
+            );
+            pp_info!(pp_log: &pp_log, "detach");
+            let pipeline_pp_log = PpLog::new(
+                "Pipeline",
+                &shared.context.pipeline_id,
+                Some(&shared.context.pipeline_id),
+            );
+            log_topology(&pipeline_pp_log, &snapshot);
+        }
         Ok(())
     }
 

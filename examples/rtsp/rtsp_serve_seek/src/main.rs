@@ -28,6 +28,12 @@ mod example {
     ///     (then use `pause`, `resume`, `seek 30`, `seek 1:15`, or `q`)
     pub(super) fn run() -> media_pp::Result<()> {
         media_pp::init()?;
+        let _log_guard = media_pp::log::init(
+            env!("CARGO_PKG_NAME"),
+            "logs",
+            media_pp::log::Level::Trace,
+            7,
+        )?;
 
         let path = std::env::args()
             .nth(1)

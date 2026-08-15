@@ -279,10 +279,10 @@ impl SourceElement for WebRtcTrackSource {
     /// ends when every `AppSourceHandle` is dropped: one final `Eos`, no
     /// error.
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
-        pp_info!(self, "run: starting");
+        pp_info!(self, "started");
         loop {
             if drain_control(control, self, bus)?.stopped {
-                pp_info!(self, "run: stopped");
+                pp_info!(self, "stopped");
                 return Ok(());
             }
 
@@ -291,13 +291,13 @@ impl SourceElement for WebRtcTrackSource {
                     match req {
                         Ok(req) => {
                             if apply_one(self, bus, req.msg, &req.ack)? {
-                                pp_info!(self, "run: stopped");
+                                pp_info!(self, "stopped");
                                 return Ok(());
                             }
                             if req.msg == ControlMsg::Pause
                                 && wait_out_pause(control, self, bus)?
                             {
-                                pp_info!(self, "run: stopped");
+                                pp_info!(self, "stopped");
                                 return Ok(());
                             }
                         }
@@ -311,7 +311,7 @@ impl SourceElement for WebRtcTrackSource {
                 recv(self.data_rx) -> buf => {
                     match buf {
                         Ok(buf) if buf.is_eos() => {
-                            pp_info!(self, "run: reached eos");
+                            pp_info!(self, "event=eos phase=source_received");
                             break;
                         }
                         Ok(buf) => {
@@ -346,7 +346,7 @@ impl SourceElement for WebRtcTrackSource {
         while let Some((_msg, ack)) = control.try_recv() {
             let _ = ack.send(());
         }
-        self.pad.push(MediaBuffer::Eos)
+        self.pad.push_eos(&self.pp_log)
     }
 
     /// No timeline of its own — same reasoning as

@@ -547,7 +547,7 @@ impl Driver for WebRtcPeer {
     /// this loop would starve ICE keepalives/DTLS retransmits, likely
     /// dropping the connection rather than gracefully suspending it.
     fn run(&mut self, stop: &StopReceiver, bus: &Bus) -> Result<()> {
-        pp_info!(self, "run: starting");
+        pp_info!(self, "started");
         let mut buf = vec![0u8; 2000];
         loop {
             while let Ok(cmd) = self.command_rx.try_recv() {
@@ -557,7 +557,7 @@ impl Driver for WebRtcPeer {
 
             let deadline = self.drive_until_timeout(bus)?;
             if !self.rtc.is_alive() || stop.is_stopped() {
-                pp_info!(self, "run: stopped (rtc alive: {})", self.rtc.is_alive());
+                pp_info!(self, "stopped rtc_alive={}", self.rtc.is_alive());
                 self.tracks_in.clear();
                 return Ok(());
             }

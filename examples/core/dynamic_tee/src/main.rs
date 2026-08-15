@@ -12,6 +12,12 @@ use media_pp::{
 ///     cargo run -p dynamic_tee
 fn main() -> media_pp::Result<()> {
     media_pp::init()?;
+    let _log_guard = media_pp::log::init(
+        env!("CARGO_PKG_NAME"),
+        "logs",
+        media_pp::log::Level::Trace,
+        7,
+    )?;
 
     let source = TestVideoSource::new("video", TestVideoOptions::default());
     let (initial_counter, initial_count) = FrameCounter::new("initial-counter");

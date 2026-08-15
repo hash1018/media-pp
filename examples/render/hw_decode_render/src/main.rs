@@ -130,6 +130,12 @@ mod windows_example {
 
     fn play(path: &str, hwnd: isize, width: u32, height: u32) -> media_pp::Result<()> {
         media_pp::init()?;
+        let _log_guard = media_pp::log::init(
+            env!("CARGO_PKG_NAME"),
+            "logs",
+            media_pp::log::Level::Trace,
+            7,
+        )?;
 
         let (source, streams) = FileDemuxer::open("demux", path)?;
         let video = streams

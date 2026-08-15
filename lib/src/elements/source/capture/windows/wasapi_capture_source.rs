@@ -426,7 +426,7 @@ impl WasapiCaptureSource {
         loop {
             let outcome = self.handle_control(control, bus)?;
             if outcome.stopped {
-                pp_info!(self, "run: stopped");
+                pp_info!(self, "stopped");
                 return Ok(());
             }
             timeline.account_pause(outcome.paused_for);
@@ -496,7 +496,7 @@ impl Source for WasapiCaptureSource {
 
 impl SourceElement for WasapiCaptureSource {
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
-        pp_info!(self, "run: starting");
+        pp_info!(self, "started");
 
         let _apartment = ComApartment::new().map_err(WasapiCaptureSourceError::from)?;
 

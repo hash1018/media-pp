@@ -134,7 +134,7 @@ impl Source for AppSource {
 
 impl SourceElement for AppSource {
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
-        pp_info!(self, "run: starting");
+        pp_info!(self, "started");
         loop {
             // Non-blocking first: if control is already backed up, clear
             // it before the `select!` below picks an arbitrary ready arm
@@ -142,7 +142,7 @@ impl SourceElement for AppSource {
             // this keeps `AppSource` consistent with every other
             // `SourceElement::run` calling `drain_control` per iteration).
             if drain_control(control, self, bus)?.stopped {
-                pp_info!(self, "run: stopped");
+                pp_info!(self, "stopped");
                 return Ok(());
             }
 
@@ -151,13 +151,13 @@ impl SourceElement for AppSource {
                     match req {
                         Ok(req) => {
                             if apply_one(self, bus, req.msg, &req.ack)? {
-                                pp_info!(self, "run: stopped");
+                                pp_info!(self, "stopped");
                                 return Ok(());
                             }
                             if req.msg == ControlMsg::Pause
                                 && wait_out_pause(control, self, bus)?
                             {
-                                pp_info!(self, "run: stopped");
+                                pp_info!(self, "stopped");
                                 return Ok(());
                             }
                         }
@@ -171,7 +171,7 @@ impl SourceElement for AppSource {
                 recv(self.data_rx) -> buf => {
                     match buf {
                         Ok(buf) if buf.is_eos() => {
-                            pp_info!(self, "run: reached eos");
+                            pp_info!(self, "event=eos phase=source_received");
                             break;
                         }
                         Ok(buf) => {
@@ -195,7 +195,7 @@ impl SourceElement for AppSource {
                 }
             }
         }
-        self.pad.push(MediaBuffer::Eos)
+        self.pad.push_eos(&self.pp_log)
     }
 
     /// No-op: `AppSource` has nothing of its own to reposition — whatever

@@ -19,6 +19,12 @@ mod example {
     ///     ffplay rtsp://127.0.0.1:8554/stream                    # in another terminal
     pub(super) fn run() -> media_pp::Result<()> {
         media_pp::init()?;
+        let _log_guard = media_pp::log::init(
+            env!("CARGO_PKG_NAME"),
+            "logs",
+            media_pp::log::Level::Trace,
+            7,
+        )?;
 
         let path = std::env::args()
             .nth(1)
