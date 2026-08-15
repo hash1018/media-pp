@@ -87,7 +87,7 @@ for); this table isn't meant to duplicate that.
 |---|---|
 | `FileDemuxer` | Demuxes a file; one src pad per container stream |
 | `AppSource` | Application code pushes buffers in via a handle, from any thread — GStreamer's `appsrc` equivalent |
-| `RtspSource` | Demuxes a live RTSP stream (the client/receive counterpart to `RtspServer`) — no internal retry/reconnect on a dropped connection, fails fast instead; the caller rebuilds a fresh one to reconnect |
+| `RtspSource` | Demuxes a live RTSP stream (the receive counterpart to `RtspSink`) — no internal retry/reconnect on a dropped connection, fails fast instead; the caller rebuilds a fresh one to reconnect |
 | `TestVideoSource` | Generates a synthetic moving-gradient `Pixel::YUV420P` stream — GStreamer's `videotestsrc` equivalent, no file/camera/decoder needed |
 | `TestAudioSource` | Generates a synthetic sine-tone `Sample::F32(Packed)` audio stream — the audio sibling of `TestVideoSource`, no file/microphone/decoder needed |
 | `DxgiCaptureSource` (`dxgi-capture`) | Captures the desktop live via DXGI Desktop Duplication — GStreamer's `d3d11screencapturesrc` equivalent. Pushes `Pixel::BGRA` untouched (chain a `Scaler` for YUV420P); emits at a constant `fps` (default 30, same convention as `TestVideoSource`) rather than one push per real desktop change — repeats the latest captured image if nothing changed since the last tick, since a variable-rate/push-on-change version of this turned out to cause visible judder against a vsync-locked renderer. `CaptureMode::Cpu` (default, optional cursor compositing) or `CaptureMode::Gpu` — the GPU mode resolves the capture adapter, creates its own `ID3D11Device`, and returns that device from `open()` so the renderer and other D3D11 stages can share it; capture then emits zero-copy `Pixel::D3D11` textures with no `Map`/CPU pixel copy (no cursor support yet in this mode) |
@@ -131,7 +131,7 @@ for); this table isn't meant to duplicate that.
 | `D3d12Renderer` (`d3d12-renderer`) | Submits frames to a `D3d12FrameRenderer` impl — zero-copy for `D3d12vaDecoder`'s frames. `media-pp` only defines the trait (plus `RawPlane`/`SubmitError`); the actual DX12 window rendering lives in `examples/render/render_common`'s own `D3d12WindowRenderer` |
 | `D3d11Renderer` (`d3d11-renderer`) | Submits frames to a `D3d11FrameRenderer` impl — zero-copy for `D3d11Upload`/`D3d11Decoder`/`DxgiCaptureSource`'s GPU mode. No fence, no `keep_alive` (unlike `D3d12FrameRenderer`): every producer in this crate's D3D11 stack shares one `ID3D11Device`+context, and D3D11's own driver-deferred resource destruction means the runtime — not this crate — keeps a texture alive for as long as the GPU still needs it. `examples/render/render_common`'s own `D3d11WindowRenderer` is the concrete implementation |
 | `WasapiRenderer` (`wasapi-renderer`) | Plays decoded audio through a WASAPI shared-mode render endpoint. `open()` returns the endpoint's `AudioFormat`; place `AudioResampler` before it and a `Queue` at the blocking device boundary |
-| `RtspServer` (`rtsp-server`) | Spawns a vendored MediaMTX and remuxes packets into it as a live RTSP stream |
+| `RtspSink` | Publishes one compressed packet stream to an already-running RTSP server; it remuxes rather than re-encoding and works with any server that accepts RTSP publishing |
 | `AppSink` | Hands buffers (and, optionally, control messages) to plain closures — GStreamer's `appsink` equivalent |
 | `OrtDetector` (`ort`) | Runs a YOLOv8/v11-style ONNX model on each frame via `ort`, hands decoded/NMS-filtered detections to a closure |
 | `WebRtcTrackSink` (`webrtc`) | The send side of one WebRTC track — `consume()` hands off to its `WebRtcPeer`'s own thread; handed out by `WebRtcHandle::next_track()`, not `WebRtcHandle::add_track` (which only returns a `TrackId`) |
@@ -195,18 +195,18 @@ have their own arguments or need none.
 
 The D3D12 examples above build their `D3d12Renderer`, and the D3D11 ones their `D3d11Renderer`, through `render_common` (`examples/render/render_common`) — a small shared crate holding its own minimal window renderers (`D3d12GpuContext`/`D3d12WindowRenderer` for D3D12, `D3d11GpuContext`/`D3d11WindowRenderer` for D3D11) instead of each example hand-copying them. `media-pp` has no dependency on any *window*-rendering crate — only `render_common` depends on `windows`' DXGI swap-chain bindings to actually present to an `HWND`. `D3d11VideoCompositor` is the one exception to "no shader code in `media-pp`": compositing is window-independent (pure texture-to-texture), so its D3D11 pipeline/shader setup lives directly in `lib` rather than being pushed out to example code the way window presentation is. The D3D11/D3D12 stacks remain independent (separate device, separate shader set) — nothing shares a device across them.
 
-### RTSP streaming (`rtsp-server` feature)
+### RTSP publishing
 
 | Crate | Pipeline | Demonstrates |
 |---|---|---|
-| `rtsp_serve` | Demux → Queue → Pacer → RtspServer | Serves a file's video as a live RTSP stream — connect with `ffplay rtsp://127.0.0.1:8554/stream` while it runs |
-| `rtsp_serve_seek` | Demux → Queue → Pacer → RtspServer | Same, plus a terminal prompt that calls `Pipeline::seek` — jump around the live stream while it plays |
+| `rtsp_serve` | Demux → Queue → Pacer → RtspSink | Publishes a file's video to an already-running RTSP server; pass the file and publishing URL as arguments |
+| `rtsp_serve_seek` | Demux → Queue → Pacer → RtspSink | Same, plus terminal commands for pause, resume, seek, and stop while publishing |
 
 ### RTSP client (no extra feature — just `ffmpeg-next`)
 
 | Crate | Pipeline | Demonstrates |
 |---|---|---|
-| `rtsp_source` | RtspSource → Queue → PacketCounter | Connects to a real RTSP server/camera (TCP transport by default), counts video packets for a fixed window, then stops — `RtspSource` is the client/receive counterpart to `RtspServer` |
+| `rtsp_source` | RtspSource → Queue → PacketCounter | Connects to a real RTSP server/camera (TCP transport by default), counts video packets for a fixed window, then stops — `RtspSource` is the receive counterpart to `RtspSink` |
 
 ### Inference-pipeline building blocks
 
@@ -272,11 +272,6 @@ cargo run -p sw_decode_render              # d3d12-renderer is already enabled i
   `WasapiDevice`/`WasapiDeviceKind` with `wasapi-capture`, but is otherwise
   independent. `audio_playback` enables it and converts into the selected
   endpoint's returned `AudioFormat` with `AudioResampler`.
-- `rtsp-server` (on `media-pp`) — enables `RtspServer` and copies the
-  vendored `mediamtx.exe` (`third_party/mediamtx/`, MIT-licensed) next to
-  whatever binary depends on `media-pp` (see `lib/build.rs`). Windows-only
-  for now, since only a Windows binary is vendored. `rtsp_serve` turns it
-  on in its own `Cargo.toml`.
 - `ort` (on `media-pp`) — pulls in the `ort` crate (ONNX Runtime bindings;
   downloads a prebuilt onnxruntime binary at build time) and `ndarray`, and
   enables `OrtDetector`. `detect` turns it on in its own `Cargo.toml`.
@@ -284,8 +279,7 @@ cargo run -p sw_decode_render              # d3d12-renderer is already enabled i
   backend — native Windows crypto, no OpenSSL vendoring) and enables
   `WebRtcPeer`/`WebRtcHandle`/`WebRtcTrackSink`/`WebRtcTrackSource`. The initial SDP
   offer/answer and ICE candidate setup happen via str0m directly, in the
-  caller's own code, *before* constructing a `WebRtcPeer` — same posture
-  as `RtspServer` not managing RTSP client connections itself; there's no
+  caller's own code, *before* constructing a `WebRtcPeer`; there's no
   signaling server built in. `webrtc_loopback` turns it on in its own
   `Cargo.toml`.
 
@@ -295,8 +289,11 @@ cargo run -p sw_decode_render              # d3d12-renderer is already enabled i
   build requirements). `D3d12vaDecoder`/`D3d11Decoder` additionally need an
   ffmpeg build with `d3d12va`/`d3d11va` hwaccel support respectively (check
   `ffmpeg -hwaccels`) and a GPU/driver that supports it.
+- `rtsp_serve` and `rtsp_serve_seek` require an external RTSP server that
+  accepts publishing at the supplied URL. MediaMTX is one compatible option,
+  but it is not bundled or managed by `media-pp`.
 - Windows-backed examples (`audio_capture`, `audio_playback`, the
-  `examples/render/*` window/capture examples, `rtsp_serve*`, and the current
+  `examples/render/*` window/capture examples, and the current
   WebRTC loopbacks) keep their runtime dependencies behind `cfg(windows)`.
   They build as unsupported stubs on other targets and print a clear message
   when run; their actual pipelines still run only on Windows.

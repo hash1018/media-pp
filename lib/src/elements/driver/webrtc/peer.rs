@@ -62,9 +62,9 @@ const CHANNEL_CAPACITY: usize = 128;
 ///
 /// `rtc`/`socket` must already be connected: the initial SDP offer/answer
 /// and ICE candidate setup happen via str0m directly, in the caller's own
-/// code, *before* [`WebRtcPeer::new`] — same posture as
-/// [`crate::elements::RtspServer`] not managing RTSP client connections
-/// itself. `WebRtcPeer` only takes over from there.
+/// code, *before* [`WebRtcPeer::new`]. `WebRtcPeer` only takes over after
+/// signaling has established the connection; it does not provide a signaling
+/// server itself.
 ///
 /// Every track — whether it's one this side requested via
 /// [`WebRtcHandle::add_track`] or one the remote peer added (`str0m`'s

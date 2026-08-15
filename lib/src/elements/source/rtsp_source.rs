@@ -9,6 +9,7 @@ use crate::{
     bus::{Bus, BusEvent},
     control::{ControlReceiver, drain_control},
     element::{Element, ElementType, Source, SourceElement, element_clog},
+    elements::RtspTransport,
     error::Result,
     pad::SrcPad,
 };
@@ -23,20 +24,6 @@ pub enum RtspSourceError {
     Ffmpeg(#[from] ffmpeg::Error),
     #[error("RtspSource doesn't support seeking a live stream")]
     SeekUnsupported,
-}
-
-/// Which RTP transport to negotiate with the RTSP server.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RtspTransport {
-    /// RTP-over-TCP, interleaved in the RTSP session itself — the
-    /// default. Traverses NAT/firewalls that block or mangle arbitrary
-    /// inbound UDP, at the cost of head-of-line blocking every stream
-    /// multiplexed on the same connection behind one dropped/late segment.
-    Tcp,
-    /// Plain RTP-over-UDP, one port pair per stream — lower latency when
-    /// nothing in the path interferes, but exactly the kind of traffic a
-    /// typical firewall/NAT drops or never lets back in.
-    Udp,
 }
 
 /// Construction-time options for [`RtspSource::open`].
@@ -61,7 +48,7 @@ impl Default for RtspOptions {
 }
 
 /// Demuxes a live RTSP stream — the client/receive counterpart to
-/// [`crate::elements::RtspServer`] (which publishes). One src pad per
+/// [`crate::elements::RtspSink`] (which publishes). One src pad per
 /// stream the server advertises, same shape as
 /// [`crate::elements::FileDemuxer`].
 ///
@@ -98,13 +85,7 @@ impl RtspSource {
         options: RtspOptions,
     ) -> std::result::Result<(Self, Vec<StreamInfo>), RtspSourceError> {
         let mut dict = ffmpeg::Dictionary::new();
-        dict.set(
-            "rtsp_transport",
-            match options.transport {
-                RtspTransport::Tcp => "tcp",
-                RtspTransport::Udp => "udp",
-            },
-        );
+        dict.set("rtsp_transport", options.transport.as_ffmpeg_option());
         dict.set("timeout", &options.timeout.as_micros().to_string());
 
         let input = ffmpeg::format::input_with_dictionary(url.as_ref(), dict)?;

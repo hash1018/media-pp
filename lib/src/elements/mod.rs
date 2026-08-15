@@ -1,7 +1,10 @@
 pub mod driver;
 pub mod filter;
+mod rtsp;
 pub mod sink;
 pub mod source;
+
+pub use rtsp::RtspTransport;
 
 #[cfg(all(
     target_os = "windows",
@@ -29,8 +32,8 @@ pub use filter::{
 pub use filter::{D3d12Upload, D3d12UploadError, D3d12vaDecoder, D3d12vaDecoderError};
 pub use sink::{
     AppSink, FrameCounter, HlsMode, HlsMuxer, HlsMuxerError, HlsMuxerStreamSink, HlsOptions,
-    HlsSegmentFormat, Mp4Muxer, Mp4MuxerError, Mp4MuxerStreamSink, PacketCounter, SegmentPolicy,
-    SegmentedMp4Muxer, SubmitError,
+    HlsSegmentFormat, Mp4Muxer, Mp4MuxerError, Mp4MuxerStreamSink, PacketCounter, RtspSink,
+    RtspSinkError, SegmentPolicy, SegmentedMp4Muxer, SubmitError,
 };
 #[cfg(feature = "ort")]
 pub use sink::{COCO_CLASS_LABELS, Detection, OrtDetector, OrtDetectorError};
@@ -38,18 +41,15 @@ pub use sink::{COCO_CLASS_LABELS, Detection, OrtDetector, OrtDetectorError};
 pub use sink::{D3d11FrameRenderer, D3d11Renderer, D3d11RendererError};
 #[cfg(all(target_os = "windows", feature = "d3d12-renderer"))]
 pub use sink::{D3d12FrameRenderer, D3d12Renderer, D3d12RendererError, RawPlane};
-#[cfg(all(target_os = "windows", feature = "rtsp-server"))]
-pub use sink::{PortPolicy, PublishTransport, RtspServer, RtspServerError, ViewerTransport};
 #[cfg(all(target_os = "windows", feature = "wasapi-renderer"))]
 pub use sink::{WasapiRenderer, WasapiRendererError, WasapiRendererOptions};
 pub use source::{
     AppSource, AppSourceError, AppSourceHandle, AudioMixer, AudioMixerError, AudioMixerOptions,
     FileDemuxError, FileDemuxer, MixerHandle, MixerInputSink, RtspOptions, RtspSource,
-    RtspSourceError, RtspTransport, StreamInfo, TestAudioOptions, TestAudioSource,
-    TestAudioSourceError, TestVideoOptions, TestVideoSource, TestVideoSourceError, TextLayer,
-    VideoCompositor, VideoCompositorError, VideoCompositorHandle, VideoCompositorInput,
-    VideoCompositorInputSink, VideoCompositorOptions, VideoFit, VideoInputId, VideoLayer,
-    VideoLayerHandle, VideoRect,
+    RtspSourceError, StreamInfo, TestAudioOptions, TestAudioSource, TestAudioSourceError,
+    TestVideoOptions, TestVideoSource, TestVideoSourceError, TextLayer, VideoCompositor,
+    VideoCompositorError, VideoCompositorHandle, VideoCompositorInput, VideoCompositorInputSink,
+    VideoCompositorOptions, VideoFit, VideoInputId, VideoLayer, VideoLayerHandle, VideoRect,
 };
 #[cfg(all(target_os = "windows", feature = "dxgi-capture"))]
 pub use source::{

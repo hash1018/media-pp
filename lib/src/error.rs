@@ -4,8 +4,7 @@ use thiserror::Error;
 use crate::elements::DxgiCaptureSourceError;
 #[cfg(feature = "ort")]
 use crate::elements::OrtDetectorError;
-#[cfg(all(target_os = "windows", feature = "rtsp-server"))]
-use crate::elements::RtspServerError;
+use crate::elements::RtspSinkError;
 #[cfg(all(target_os = "windows", feature = "wasapi-capture"))]
 use crate::elements::WasapiCaptureSourceError;
 #[cfg(all(target_os = "windows", feature = "wasapi-renderer"))]
@@ -98,9 +97,8 @@ pub enum Error {
     #[error(transparent)]
     HlsMuxerError(#[from] HlsMuxerError),
 
-    #[cfg(all(target_os = "windows", feature = "rtsp-server"))]
     #[error(transparent)]
-    RtspServerError(#[from] RtspServerError),
+    RtspSinkError(#[from] RtspSinkError),
 
     #[cfg(all(target_os = "windows", feature = "d3d12-renderer"))]
     #[error(transparent)]

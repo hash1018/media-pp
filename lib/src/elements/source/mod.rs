@@ -34,7 +34,7 @@ pub use compositor::{
     VideoLayerHandle, VideoRect,
 };
 pub use file_demuxer::{FileDemuxError, FileDemuxer, StreamInfo};
-pub use rtsp_source::{RtspOptions, RtspSource, RtspSourceError, RtspTransport};
+pub use rtsp_source::{RtspOptions, RtspSource, RtspSourceError};
 pub use test::{
     TestAudioOptions, TestAudioSource, TestAudioSourceError, TestVideoOptions, TestVideoSource,
     TestVideoSourceError,

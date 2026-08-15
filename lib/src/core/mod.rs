@@ -10,7 +10,7 @@
 //! `media_pp::pipeline`, etc. keep working exactly as before.
 //!
 //! [`crate::elements`] (the built-in `Sink`/`Source`/`Filter`
-//! implementations, e.g. `FileDemuxer`/`SwDecoder`/`RtspServer`) is
+//! implementations, e.g. `FileDemuxer`/`SwDecoder`/`RtspSink`) is
 //! deliberately its own top-level module, not part of this one — those
 //! are built *on* this framework, not part of it.
 

@@ -4,6 +4,6 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
-[target.'cfg(windows)'.dependencies]
-media-pp = { path = "../../../lib", features = ["rtsp-server"] }
+[dependencies]
+media-pp = { path = "../../../lib" }
 ffmpeg-next = "8"

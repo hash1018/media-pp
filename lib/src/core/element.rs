@@ -51,7 +51,7 @@ pub enum ElementType {
     D3d12Renderer,
     D3d11Renderer,
     WasapiRenderer,
-    RtspServer,
+    RtspSink,
     AppSink,
     OrtDetector,
     HlsMuxer,
