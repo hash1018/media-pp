@@ -22,7 +22,7 @@ use crate::{
     pool::UnboundObjectPool,
 };
 
-use super::super::video_layer::{MAX_DIMENSION, VideoRect};
+use super::super::super::video_layer::{MAX_DIMENSION, VideoRect};
 
 const MAX_TEXT_PIXELS: usize = 16 * 1024 * 1024;
 

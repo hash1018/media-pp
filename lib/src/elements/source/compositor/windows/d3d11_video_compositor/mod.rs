@@ -42,7 +42,7 @@ mod video_handle;
 pub use text_handle::{D3d11TextLayerError, D3d11TextLayerHandle};
 pub use video_handle::D3d11VideoLayerHandle;
 
-use super::{
+use super::super::{
     text_layer::TextLayer,
     video_layer::{self, LayerGeometry, MAX_DIMENSION, VideoLayer, VideoLayerError},
 };
@@ -64,8 +64,10 @@ use crate::{
 const OUTPUT_POOL_SIZE: usize = 4;
 const CONTROL_POLL_INTERVAL: Duration = Duration::from_millis(5);
 
-const BGRA_SHADER_SOURCE: &[u8] = include_bytes!("../../../../shaders/d3d11/composite_bgra.hlsl");
-const NV12_SHADER_SOURCE: &[u8] = include_bytes!("../../../../shaders/d3d11/composite_nv12.hlsl");
+const BGRA_SHADER_SOURCE: &[u8] =
+    include_bytes!("../../../../../shaders/d3d11/composite_bgra.hlsl");
+const NV12_SHADER_SOURCE: &[u8] =
+    include_bytes!("../../../../../shaders/d3d11/composite_nv12.hlsl");
 
 /// Errors specific to [`D3d11VideoCompositor`].
 #[derive(Debug, ThisError)]

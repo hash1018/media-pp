@@ -13,6 +13,13 @@ rust-hlog = { path = "../rust-hlog" }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["local-time"] }
 tracing-appender = "0.2"
+ort = { version = "2.0.0-rc.13", optional = true }
+ndarray = { version = "0.17", optional = true }
+str0m = { version = "0.21", optional = true, default-features = false, features = [
+    "wincrypto",
+] }
+
+[target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", optional = true, features = [
     "Win32_Foundation",
     "Win32_Graphics_Direct3D",
@@ -34,11 +41,6 @@ windows = { version = "0.62", optional = true, features = [
     "Win32_System_Com_StructuredStorage",
     "Win32_System_Variant",
     "Win32_UI_Shell_PropertiesSystem",
-] }
-ort = { version = "2.0.0-rc.13", optional = true }
-ndarray = { version = "0.17", optional = true }
-str0m = { version = "0.21", optional = true, default-features = false, features = [
-    "wincrypto",
 ] }
 ab_glyph = { version = "0.2", optional = true }
 

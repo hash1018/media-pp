@@ -3,7 +3,10 @@ pub mod filter;
 pub mod sink;
 pub mod source;
 
-#[cfg(any(feature = "wasapi-capture", feature = "wasapi-renderer"))]
+#[cfg(all(
+    target_os = "windows",
+    any(feature = "wasapi-capture", feature = "wasapi-renderer")
+))]
 pub use crate::platform::windows::wasapi::{WasapiDevice, WasapiDeviceKind};
 
 #[cfg(feature = "webrtc")]
@@ -17,12 +20,12 @@ pub use filter::{
     SwEncoderError, SwEncoderOptions, Tee, TeeBuilder, TeeHandle, VideoCodec, VideoSynchronizer,
     VideoSynchronizerError,
 };
-#[cfg(feature = "d3d11-renderer")]
+#[cfg(all(target_os = "windows", feature = "d3d11-renderer"))]
 pub use filter::{
     D3d11Decoder, D3d11Download, D3d11DownloadError, D3d11Upload, D3d11UploadError,
     D3d11vaDecoderError,
 };
-#[cfg(feature = "d3d12-renderer")]
+#[cfg(all(target_os = "windows", feature = "d3d12-renderer"))]
 pub use filter::{D3d12Upload, D3d12UploadError, D3d12vaDecoder, D3d12vaDecoderError};
 pub use sink::{
     AppSink, FrameCounter, HlsMode, HlsMuxer, HlsMuxerError, HlsMuxerStreamSink, HlsOptions,
@@ -31,13 +34,13 @@ pub use sink::{
 };
 #[cfg(feature = "ort")]
 pub use sink::{COCO_CLASS_LABELS, Detection, OrtDetector, OrtDetectorError};
-#[cfg(feature = "d3d11-renderer")]
+#[cfg(all(target_os = "windows", feature = "d3d11-renderer"))]
 pub use sink::{D3d11FrameRenderer, D3d11Renderer, D3d11RendererError};
-#[cfg(feature = "d3d12-renderer")]
+#[cfg(all(target_os = "windows", feature = "d3d12-renderer"))]
 pub use sink::{D3d12FrameRenderer, D3d12Renderer, D3d12RendererError, RawPlane};
-#[cfg(feature = "rtsp-server")]
+#[cfg(all(target_os = "windows", feature = "rtsp-server"))]
 pub use sink::{PortPolicy, PublishTransport, RtspServer, RtspServerError, ViewerTransport};
-#[cfg(feature = "wasapi-renderer")]
+#[cfg(all(target_os = "windows", feature = "wasapi-renderer"))]
 pub use sink::{WasapiRenderer, WasapiRendererError, WasapiRendererOptions};
 pub use source::{
     AppSource, AppSourceError, AppSourceHandle, AudioMixer, AudioMixerError, AudioMixerOptions,
@@ -48,16 +51,16 @@ pub use source::{
     VideoCompositorInputSink, VideoCompositorOptions, VideoFit, VideoInputId, VideoLayer,
     VideoLayerHandle, VideoRect,
 };
-#[cfg(feature = "dxgi-capture")]
+#[cfg(all(target_os = "windows", feature = "dxgi-capture"))]
 pub use source::{
     CaptureArea, CaptureMode, CaptureRect, DxgiCaptureOptions, DxgiCaptureSource,
     DxgiCaptureSourceError,
 };
-#[cfg(feature = "d3d11-renderer")]
+#[cfg(all(target_os = "windows", feature = "d3d11-renderer"))]
 pub use source::{
     D3d11TextLayerError, D3d11TextLayerHandle, D3d11VideoCompositor, D3d11VideoCompositorError,
     D3d11VideoCompositorHandle, D3d11VideoCompositorInput, D3d11VideoCompositorInputSink,
     D3d11VideoLayerHandle,
 };
-#[cfg(feature = "wasapi-capture")]
+#[cfg(all(target_os = "windows", feature = "wasapi-capture"))]
 pub use source::{WasapiCaptureOptions, WasapiCaptureSource, WasapiCaptureSourceError};

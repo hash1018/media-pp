@@ -166,7 +166,8 @@ documentation and implementation differ.
   downstream buffering, unlike the growable pools used elsewhere.
 - Before extending text overlays (for example multi-line layout, background
   boxes, or shared font caching), read the design and ownership rationale in
-  `d3d11_video_compositor/text_handle.rs` and `compositor/text_layer.rs`. The
+  `compositor/windows/d3d11_video_compositor/text_handle.rs` and
+  `compositor/text_layer.rs`. The
   current split between backend-independent settings and the D3D11-owned
   rasterize/upload control object, including its deliberately constrained
   construction path, is intentional.

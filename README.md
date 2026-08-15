@@ -291,18 +291,19 @@ cargo run -p sw_decode_render              # d3d12-renderer is already enabled i
   build requirements). `D3d12vaDecoder`/`D3d11Decoder` additionally need an
   ffmpeg build with `d3d12va`/`d3d11va` hwaccel support respectively (check
   `ffmpeg -hwaccels`) and a GPU/driver that supports it.
-- All `examples/render/*` crates (and the
-  `d3d12-renderer`/`d3d11-renderer`/`dxgi-capture`/`wasapi-capture`
-  features themselves) only build/run on Windows.
+- All `examples/render/*` crates only build/run on Windows.
+- Windows backend modules and public re-exports are guarded by both their
+  Cargo feature and `target_os = "windows"`; enabling one of those features
+  for another target does not expose the Windows-specific element types.
 - `D3d12vaDecoder` hand-mirrors a few structs from FFmpeg's
   `libavutil/hwcontext_d3d12va.h` that `ffmpeg-sys-next` doesn't bind
   (see the doc comment at the top of
-  `elements/filter/decoder/d3d12va_decoder.rs`) — sourced from FFmpeg
+  `elements/filter/decoder/windows/d3d12va_decoder.rs`) — sourced from FFmpeg
   n8.0's header. A future FFmpeg version changing that header's layout
   would silently break this with no compile-time warning.
   `D3d11Decoder`/`D3d11Upload`/`DxgiCaptureSource`'s GPU mode do the same
   for a couple of small D3D11VA-specific structs
-  (`elements/filter/decoder/d3d11va_decoder.rs`),
+  (`elements/filter/decoder/windows/d3d11va_decoder.rs`),
   but deliberately touch only a handful of already-initialized fields
   (never construct FFmpeg's `AVHWFramesContext` from scratch) — an earlier
   version that did corrupted memory badly enough to trip `/GS`

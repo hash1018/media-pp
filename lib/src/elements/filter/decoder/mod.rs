@@ -1,10 +1,8 @@
-//! Every element that turns `Packet`s into `Video`/`Audio` frames,
-//! grouped here by *what they do* rather than by which GPU API backs
-//! them — [`d3d11va_decoder`]/[`d3d12va_decoder`] sit next to
-//! [`sw_decoder`] instead of off in their own per-API trees, so "what
-//! decoders exist" is answerable by listing this one directory.
+//! Every element that turns `Packet`s into `Video`/`Audio` frames. The
+//! backend-independent software decoder stays here, while Windows-specific
+//! D3D11VA/D3D12VA implementations live under [`windows`].
 //!
-//! `d3d11va_decoder`/`d3d12va_decoder` are `pub(crate)`, not private:
+//! The D3D11VA/D3D12VA modules are re-exported `pub(crate)`, not private:
 //! their small `pub(crate)` helpers
 //! ([`d3d11va_decoder::wrap_d3d11_texture`]/
 //! [`d3d11va_decoder::create_hw_device_ctx`], and D3D12's equivalents)
@@ -16,14 +14,20 @@
 //! (which shares the D3D11 frame representation without itself decoding
 //! anything).
 
-#[cfg(feature = "d3d11-renderer")]
-pub(crate) mod d3d11va_decoder;
-#[cfg(feature = "d3d12-renderer")]
-pub(crate) mod d3d12va_decoder;
 mod sw_decoder;
+#[cfg(all(
+    target_os = "windows",
+    any(feature = "d3d11-renderer", feature = "d3d12-renderer")
+))]
+mod windows;
 
-#[cfg(feature = "d3d11-renderer")]
-pub use d3d11va_decoder::{D3d11Decoder, D3d11vaDecoderError};
-#[cfg(feature = "d3d12-renderer")]
-pub use d3d12va_decoder::{D3d12vaDecoder, D3d12vaDecoderError};
 pub use sw_decoder::{SwDecoder, SwDecoderError};
+#[cfg(all(target_os = "windows", feature = "d3d11-renderer"))]
+pub(crate) use windows::d3d11va_decoder;
+#[cfg(all(target_os = "windows", feature = "d3d12-renderer"))]
+pub(crate) use windows::d3d12va_decoder;
+#[cfg(all(
+    target_os = "windows",
+    any(feature = "d3d11-renderer", feature = "d3d12-renderer")
+))]
+pub use windows::*;

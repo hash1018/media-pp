@@ -5,7 +5,7 @@ mod muxer;
 mod ort_detector;
 mod packet_counter;
 mod renderer;
-#[cfg(feature = "rtsp-server")]
+#[cfg(all(target_os = "windows", feature = "rtsp-server"))]
 mod rtsp_server;
 
 pub use app_sink::AppSink;
@@ -18,11 +18,11 @@ pub use muxer::{Mp4Muxer, Mp4MuxerError, Mp4MuxerStreamSink, SegmentPolicy, Segm
 pub use ort_detector::{COCO_CLASS_LABELS, Detection, OrtDetector, OrtDetectorError};
 pub use packet_counter::PacketCounter;
 pub use renderer::SubmitError;
-#[cfg(feature = "d3d11-renderer")]
+#[cfg(all(target_os = "windows", feature = "d3d11-renderer"))]
 pub use renderer::{D3d11FrameRenderer, D3d11Renderer, D3d11RendererError};
-#[cfg(feature = "d3d12-renderer")]
+#[cfg(all(target_os = "windows", feature = "d3d12-renderer"))]
 pub use renderer::{D3d12FrameRenderer, D3d12Renderer, D3d12RendererError, RawPlane};
-#[cfg(feature = "wasapi-renderer")]
+#[cfg(all(target_os = "windows", feature = "wasapi-renderer"))]
 pub use renderer::{WasapiRenderer, WasapiRendererError, WasapiRendererOptions};
-#[cfg(feature = "rtsp-server")]
+#[cfg(all(target_os = "windows", feature = "rtsp-server"))]
 pub use rtsp_server::{PortPolicy, PublishTransport, RtspServer, RtspServerError, ViewerTransport};

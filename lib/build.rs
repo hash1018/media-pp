@@ -10,6 +10,9 @@ fn main() {
     if env::var_os("CARGO_FEATURE_RTSP_SERVER").is_none() {
         return;
     }
+    if env::var_os("CARGO_CFG_TARGET_OS").as_deref() != Some(std::ffi::OsStr::new("windows")) {
+        return;
+    }
 
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let vendored = manifest_dir.join("../third_party/mediamtx/mediamtx.exe");

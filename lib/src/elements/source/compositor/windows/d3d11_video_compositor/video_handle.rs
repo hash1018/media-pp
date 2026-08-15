@@ -8,7 +8,7 @@ use ffmpeg_next as ffmpeg;
 use super::{D3d11VideoCompositorError, GpuVideoInput, map_layer_error};
 use crate::pool::UnboundObjectPoolRef;
 
-use super::super::video_layer::{self, VideoLayer};
+use super::super::super::video_layer::{self, VideoLayer};
 
 /// Thread-safe runtime placement control for one [`super::D3d11VideoCompositor`]
 /// input — the GPU sibling of [`crate::elements::VideoLayerHandle`].

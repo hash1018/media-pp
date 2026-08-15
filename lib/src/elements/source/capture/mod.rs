@@ -1,14 +1,11 @@
-#[cfg(feature = "dxgi-capture")]
-mod dxgi_capture_source;
-#[cfg(feature = "wasapi-capture")]
-mod wasapi_capture_source;
+#[cfg(all(
+    target_os = "windows",
+    any(feature = "dxgi-capture", feature = "wasapi-capture")
+))]
+mod windows;
 
-#[cfg(feature = "dxgi-capture")]
-pub use dxgi_capture_source::{
-    CaptureArea, CaptureMode, CaptureRect, DxgiCaptureOptions, DxgiCaptureSource,
-    DxgiCaptureSourceError,
-};
-#[cfg(feature = "wasapi-capture")]
-pub use wasapi_capture_source::{
-    WasapiCaptureOptions, WasapiCaptureSource, WasapiCaptureSourceError,
-};
+#[cfg(all(
+    target_os = "windows",
+    any(feature = "dxgi-capture", feature = "wasapi-capture")
+))]
+pub use windows::*;

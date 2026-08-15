@@ -1,23 +1,23 @@
 use thiserror::Error;
 
-#[cfg(feature = "dxgi-capture")]
+#[cfg(all(target_os = "windows", feature = "dxgi-capture"))]
 use crate::elements::DxgiCaptureSourceError;
 #[cfg(feature = "ort")]
 use crate::elements::OrtDetectorError;
-#[cfg(feature = "rtsp-server")]
+#[cfg(all(target_os = "windows", feature = "rtsp-server"))]
 use crate::elements::RtspServerError;
-#[cfg(feature = "wasapi-capture")]
+#[cfg(all(target_os = "windows", feature = "wasapi-capture"))]
 use crate::elements::WasapiCaptureSourceError;
-#[cfg(feature = "wasapi-renderer")]
+#[cfg(all(target_os = "windows", feature = "wasapi-renderer"))]
 use crate::elements::WasapiRendererError;
 #[cfg(feature = "webrtc")]
 use crate::elements::WebRtcError;
-#[cfg(feature = "d3d11-renderer")]
+#[cfg(all(target_os = "windows", feature = "d3d11-renderer"))]
 use crate::elements::{
     D3d11DownloadError, D3d11RendererError, D3d11TextLayerError, D3d11UploadError,
     D3d11VideoCompositorError, D3d11vaDecoderError,
 };
-#[cfg(feature = "d3d12-renderer")]
+#[cfg(all(target_os = "windows", feature = "d3d12-renderer"))]
 use crate::elements::{D3d12RendererError, D3d12UploadError, D3d12vaDecoderError};
 use crate::{
     elements::{
@@ -98,55 +98,55 @@ pub enum Error {
     #[error(transparent)]
     HlsMuxerError(#[from] HlsMuxerError),
 
-    #[cfg(feature = "rtsp-server")]
+    #[cfg(all(target_os = "windows", feature = "rtsp-server"))]
     #[error(transparent)]
     RtspServerError(#[from] RtspServerError),
 
-    #[cfg(feature = "d3d12-renderer")]
+    #[cfg(all(target_os = "windows", feature = "d3d12-renderer"))]
     #[error(transparent)]
     D3d12RendererError(#[from] D3d12RendererError),
 
-    #[cfg(feature = "d3d12-renderer")]
+    #[cfg(all(target_os = "windows", feature = "d3d12-renderer"))]
     #[error(transparent)]
     D3d12vaDecoderError(#[from] D3d12vaDecoderError),
 
-    #[cfg(feature = "d3d12-renderer")]
+    #[cfg(all(target_os = "windows", feature = "d3d12-renderer"))]
     #[error(transparent)]
     D3d12UploadError(#[from] D3d12UploadError),
 
-    #[cfg(feature = "d3d11-renderer")]
+    #[cfg(all(target_os = "windows", feature = "d3d11-renderer"))]
     #[error(transparent)]
     D3d11vaDecoderError(#[from] D3d11vaDecoderError),
 
-    #[cfg(feature = "d3d11-renderer")]
+    #[cfg(all(target_os = "windows", feature = "d3d11-renderer"))]
     #[error(transparent)]
     D3d11UploadError(#[from] D3d11UploadError),
 
-    #[cfg(feature = "d3d11-renderer")]
+    #[cfg(all(target_os = "windows", feature = "d3d11-renderer"))]
     #[error(transparent)]
     D3d11DownloadError(#[from] D3d11DownloadError),
 
-    #[cfg(feature = "d3d11-renderer")]
+    #[cfg(all(target_os = "windows", feature = "d3d11-renderer"))]
     #[error(transparent)]
     D3d11RendererError(#[from] D3d11RendererError),
 
-    #[cfg(feature = "d3d11-renderer")]
+    #[cfg(all(target_os = "windows", feature = "d3d11-renderer"))]
     #[error(transparent)]
     D3d11VideoCompositorError(#[from] D3d11VideoCompositorError),
 
-    #[cfg(feature = "d3d11-renderer")]
+    #[cfg(all(target_os = "windows", feature = "d3d11-renderer"))]
     #[error(transparent)]
     D3d11TextLayerError(#[from] D3d11TextLayerError),
 
-    #[cfg(feature = "dxgi-capture")]
+    #[cfg(all(target_os = "windows", feature = "dxgi-capture"))]
     #[error(transparent)]
     DxgiCaptureSourceError(#[from] DxgiCaptureSourceError),
 
-    #[cfg(feature = "wasapi-capture")]
+    #[cfg(all(target_os = "windows", feature = "wasapi-capture"))]
     #[error(transparent)]
     WasapiCaptureSourceError(#[from] WasapiCaptureSourceError),
 
-    #[cfg(feature = "wasapi-renderer")]
+    #[cfg(all(target_os = "windows", feature = "wasapi-renderer"))]
     #[error(transparent)]
     WasapiRendererError(#[from] WasapiRendererError),
 
