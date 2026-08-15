@@ -26,9 +26,10 @@ mod example {
             7,
         )?;
 
-        let path = std::env::args()
-            .nth(1)
-            .unwrap_or_else(|| "test-video/h265.mp4".into());
+        let Some(path) = std::env::args().nth(1) else {
+            eprintln!("usage: rtsp_serve <video.mp4> [rtsp://host:port/path]");
+            std::process::exit(1);
+        };
         let url = std::env::args()
             .nth(2)
             .unwrap_or_else(|| "rtsp://127.0.0.1:8554/stream".into());

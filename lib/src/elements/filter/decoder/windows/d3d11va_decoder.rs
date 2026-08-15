@@ -563,8 +563,10 @@ mod tests {
         };
         let device = device.expect("D3D11CreateDevice succeeded without producing a device");
 
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../test-video/h265.mp4");
-        let mut input = ffmpeg::format::input(path).expect("failed to open test video");
+        let Some(path) = crate::test_support::try_test_video() else {
+            return;
+        };
+        let mut input = ffmpeg::format::input(&path).expect("failed to open test video");
         let video_stream = input
             .streams()
             .best(ffmpeg::media::Type::Video)

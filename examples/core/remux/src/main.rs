@@ -28,9 +28,10 @@ fn main() -> media_pp::Result<()> {
         7,
     )?;
 
-    let input_path = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "test-video/sample.mp4".into());
+    let Some(input_path) = std::env::args().nth(1) else {
+        eprintln!("usage: remux <video.mp4> [output.mp4]");
+        std::process::exit(1);
+    };
     let output_path = std::env::args()
         .nth(2)
         .unwrap_or_else(|| "remuxed.mp4".into());

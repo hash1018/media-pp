@@ -27,9 +27,10 @@ fn main() -> Result<()> {
         7,
     )?;
 
-    let path = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "test-video/h265.mp4".into());
+    let Some(path) = std::env::args().nth(1) else {
+        eprintln!("usage: app_source <video.mp4>");
+        std::process::exit(1);
+    };
 
     // Opened once up front just to learn the video stream's decoder
     // parameters — same reason every other example does this before

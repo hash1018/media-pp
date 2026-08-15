@@ -23,9 +23,10 @@ fn main() -> media_pp::Result<()> {
         7,
     )?;
 
-    let path = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "test-video/h265.mp4".into());
+    let Some(path) = std::env::args().nth(1) else {
+        eprintln!("usage: probe <video.mp4>");
+        std::process::exit(1);
+    };
 
     let (source, streams) = FileDemuxer::open("demux", &path)?;
 

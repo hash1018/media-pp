@@ -238,14 +238,7 @@ mod tests {
 
     use super::*;
     use crate::control;
-
-    /// Real video file, one directory up from this crate — same fixture
-    /// `pipeline::tests::test_video` drives its own `FileDemuxer`
-    /// integration tests through; this module drives `FileDemuxer`
-    /// directly instead, without a `Pipeline` around it.
-    fn test_video() -> &'static str {
-        concat!(env!("CARGO_MANIFEST_DIR"), "/../test-video/h265.mp4")
-    }
+    use crate::test_support::try_test_video;
 
     struct CountingSink {
         pp_log: PpLog,
@@ -289,7 +282,8 @@ mod tests {
 
     #[test]
     fn open_reports_stream_parameters_for_a_valid_index_and_none_out_of_range() {
-        let (demuxer, streams) = FileDemuxer::open("demux", test_video()).expect("open test video");
+        let Some(path) = try_test_video() else { return };
+        let (demuxer, streams) = FileDemuxer::open("demux", &path).expect("open test video");
         let video = streams
             .iter()
             .find(|s| s.kind == ffmpeg::media::Type::Video)
@@ -312,8 +306,8 @@ mod tests {
     /// `Eos` rather than just stopping silently.
     #[test]
     fn run_delivers_every_packet_on_a_linked_pad_then_eos() {
-        let (mut demuxer, streams) =
-            FileDemuxer::open("demux", test_video()).expect("open test video");
+        let Some(path) = try_test_video() else { return };
+        let (mut demuxer, streams) = FileDemuxer::open("demux", &path).expect("open test video");
         let video = streams
             .iter()
             .find(|s| s.kind == ffmpeg::media::Type::Video)

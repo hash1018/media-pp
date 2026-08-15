@@ -39,9 +39,10 @@ mod windows_example {
     ///
     ///     cargo run -p hw_decode_render -- path/to/video.mp4
     pub(super) fn run() {
-        let path = std::env::args()
-            .nth(1)
-            .unwrap_or_else(|| "test-video/h265.mp4".into());
+        let Some(path) = std::env::args().nth(1) else {
+            eprintln!("usage: hw_decode_render <video.mp4>");
+            std::process::exit(1);
+        };
 
         let event_loop = EventLoop::<PlaybackDone>::with_user_event()
             .build()

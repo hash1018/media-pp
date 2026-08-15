@@ -33,14 +33,13 @@ const BOX_THICKNESS: usize = 2;
 /// No `Pacer` in this pipeline, so frames show up as fast as decode +
 /// inference allow, not at real playback speed.
 ///
-///     cargo run -p detect -- path/to/model.onnx [path/to/video.mp4]
+///     cargo run -p detect -- path/to/model.onnx path/to/video.mp4
 fn main() {
     let mut args = std::env::args().skip(1);
-    let Some(model_path) = args.next() else {
-        eprintln!("usage: detect <model.onnx> [video, default test-video/h265.mp4]");
+    let (Some(model_path), Some(video_path)) = (args.next(), args.next()) else {
+        eprintln!("usage: detect <model.onnx> <video.mp4>");
         std::process::exit(1);
     };
-    let video_path = args.next().unwrap_or_else(|| "test-video/h265.mp4".into());
 
     let event_loop = EventLoop::<AppEvent>::with_user_event()
         .build()

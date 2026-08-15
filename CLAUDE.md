@@ -180,9 +180,17 @@ documentation and implementation differ.
   Select other features according to the files changed. Also check the default
   build when changing feature-gated exports.
 - Hardware-dependent tests use a `try_device()`-style helper and skip with a
-  clear reason when the required device is unavailable. Prefer checked-in test
-  data; if a system font/device is unavoidable, detect absence rather than
-  panicking.
+  clear reason when the required device is unavailable. Detect absence rather
+  than panicking whenever a system font, device, or media file is unavoidable.
+- No media is checked into this repository. A test needing a real video calls
+  `test_support::try_test_video`, which reads `MEDIA_PP_TEST_VIDEO` and skips
+  with a reason when it is unset or unreadable; run the affected tests with that
+  variable actually set, since a skipped test reports as passing. Such a test
+  must assert a contract that holds for any fixture — never a particular file's
+  codec, resolution, duration, or keyframe spacing.
+- Examples take their media path as a required argument, print a `usage:` line
+  to stderr when it is missing, and exit non-zero. Do not reintroduce a default
+  path.
 - For a new or changed example, run that actual example end to end. For recorded
   video/audio, inspect the result with `ffprobe`; for visual behavior, extract
   representative frames and verify the expected pixels/content instead of only

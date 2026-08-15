@@ -146,10 +146,11 @@ for); this table isn't meant to duplicate that.
 ## Examples (`examples/`)
 
 Each is its own crate so per-example dependencies (e.g. `winit` for
-`sw_decode_render`) don't leak into the others. File-based playback/core
-examples that accept an optional media path generally default to
-`test-video/h265.mp4`; live capture, WebRTC, and synthetic-source examples
-have their own arguments or need none.
+`sw_decode_render`) don't leak into the others. Every file-based example takes
+its media path as a required argument — there is no default and no media is
+checked in, so supply your own file; run one with no arguments to see its usage
+line. Live capture, WebRTC, and synthetic-source examples have their own
+arguments or need none.
 
 ### Core concepts
 
@@ -223,9 +224,13 @@ The D3D12 examples above build their `D3d12Renderer`, and the D3D11 ones their `
 | `webrtc_loopback` | Two `WebRtcPeer`s over loopback UDP | One `Direction::SendRecv` track (opened by `WebRtcHandle::add_track` on one side, accepted via `WebRtcHandle::accept_remote_offer` on the other) carrying data both ways over the *same* `Mid` — no second negotiation for the reverse direction. No browser/signaling server: real ICE/DTLS-SRTP over loopback UDP |
 | `webrtc_av_loopback` | TestVideoSource → SwEncoder → WebRtcTrackSink, TestAudioSource → SwAudioEncoder → WebRtcTrackSink (two `PipelineBuilder` sources) | Two tracks — one video, one audio — negotiated onto the *same* `WebRtcPeer` connection (two sequential `add_track` renegotiations, one `Rtc`/socket/peer pair), each carrying real encoded media; peer-b counts packets per track to prove they arrive independently, no cross-contamination |
 
+Examples that read a file take its path as a required argument — none of them
+carry a default, so no media is checked into this repository. Run one with no
+arguments to see its usage line.
+
 ```sh
-cargo run -p decode -- path/to/video.mp4   # or omit the path to use test-video/h265.mp4
-cargo run -p sw_decode_render              # d3d12-renderer is already enabled in its own Cargo.toml
+cargo run -p decode -- path/to/video.mp4
+cargo run -p sw_decode_render -- path/to/video.mp4   # d3d12-renderer is already enabled in its own Cargo.toml
 ```
 
 ## Logging
@@ -378,6 +383,15 @@ to `./logs`, and uses its Cargo package name as the file prefix.
 - `rtsp_serve` and `rtsp_serve_seek` require an external RTSP server that
   accepts publishing at the supplied URL. MediaMTX is one compatible option,
   but it is not bundled or managed by `media-pp`.
+- No media is checked in, so tests that need a real video read its path from
+  `MEDIA_PP_TEST_VIDEO` and skip with a printed reason when it is unset. Point
+  it at any container ffmpeg can open, holding a video stream and at least a few
+  seconds long. **A skipped test still reports as passing**, so set the variable
+  when a change touches demuxing, seeking, or decoding:
+
+  ```sh
+  MEDIA_PP_TEST_VIDEO=/path/to/video.mp4 cargo test -p media-pp
+  ```
 - Windows-backed examples (`audio_capture`, `audio_playback`, the
   `examples/render/*` window/capture examples, and the current
   WebRTC loopbacks) keep their runtime dependencies behind `cfg(windows)`.

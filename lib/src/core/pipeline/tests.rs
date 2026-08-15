@@ -9,12 +9,7 @@ use crate::elements::{
     FileDemuxer, Pacer, TeeBuilder, TestAudioOptions, TestAudioSource, TestVideoOptions,
     TestVideoSource,
 };
-
-/// Real video file, one directory up from this crate — same one every
-/// example defaults to.
-fn test_video() -> &'static str {
-    concat!(env!("CARGO_MANIFEST_DIR"), "/../test-video/h265.mp4")
-}
+use crate::test_support::try_test_video;
 
 /// End-to-end: `run()` (async — starts the background thread and
 /// returns right away), then `pause()`/`stop()` (skipping `resume()`)
@@ -26,7 +21,8 @@ fn test_video() -> &'static str {
 /// control message — or a `Bus` handle — that never arrives/drops.
 #[test]
 fn pause_then_stop_returns_promptly() {
-    let (source, streams) = FileDemuxer::open("demux", test_video()).expect("open test video");
+    let Some(path) = try_test_video() else { return };
+    let (source, streams) = FileDemuxer::open("demux", &path).expect("open test video");
     let video = streams
         .iter()
         .find(|s| s.kind == ffmpeg_next::media::Type::Video)
@@ -272,7 +268,8 @@ fn tee_handle_retained_across_a_multi_source_pipeline_does_not_leak() {
 /// deadlocking, and let packets keep flowing afterward.
 #[test]
 fn seek_repositions_and_playback_continues() {
-    let (source, streams) = FileDemuxer::open("demux", test_video()).expect("open test video");
+    let Some(path) = try_test_video() else { return };
+    let (source, streams) = FileDemuxer::open("demux", &path).expect("open test video");
     let video = streams
         .iter()
         .find(|s| s.kind == ffmpeg_next::media::Type::Video)
@@ -329,14 +326,18 @@ fn seek_repositions_and_playback_continues() {
 
 /// Regression test for the bug found manually testing `rtsp_serve_seek`:
 /// a container seek can only land on a keyframe at or before `target`
-/// (see `FileDemuxer::seek`'s docs) — `test-video/h265.mp4` has
-/// keyframes only at 0s and ~8.33s, so any `target` between them has
-/// to land back at 0s, nowhere near what was requested. Without
-/// `BusEvent::Seeked` reporting that gap, this looked indistinguishable
-/// from `seek` silently doing nothing.
+/// (see `FileDemuxer::seek`'s docs), so a `target` inside a GOP lands
+/// back at that GOP's keyframe — potentially nowhere near what was
+/// requested. Without `BusEvent::Seeked` reporting that gap, this looked
+/// indistinguishable from `seek` silently doing nothing.
+///
+/// The assertions below hold for any fixture: how far back the seek
+/// actually lands depends on the file's keyframe spacing, but it must
+/// never land *past* the request, and the gap must be reported.
 #[test]
 fn seek_reports_where_it_actually_landed_when_target_is_not_a_keyframe() {
-    let (source, streams) = FileDemuxer::open("demux", test_video()).expect("open test video");
+    let Some(path) = try_test_video() else { return };
+    let (source, streams) = FileDemuxer::open("demux", &path).expect("open test video");
     let video = streams
         .iter()
         .find(|s| s.kind == ffmpeg_next::media::Type::Video)
@@ -363,9 +364,6 @@ fn seek_reports_where_it_actually_landed_when_target_is_not_a_keyframe() {
 
     pipeline.run();
     thread::sleep(Duration::from_millis(50));
-    // 3s falls inside the file's first (only) GOP before the 8.33s
-    // keyframe — landing anywhere near 3s would mean this stream
-    // unexpectedly grew more keyframes than it's known to have.
     pipeline.seek(Duration::from_secs(3));
     thread::sleep(Duration::from_millis(100));
     pipeline.stop();
@@ -382,9 +380,10 @@ fn seek_reports_where_it_actually_landed_when_target_is_not_a_keyframe() {
         .expect("expected a Seeked event");
     assert_eq!(seeked.0, Duration::from_secs(3));
     assert!(
-        seeked.1 < Duration::from_secs(1),
-        "expected landed to fall back to the 0s keyframe, got {:?}",
-        seeked.1
+        seeked.1 <= seeked.0,
+        "a container seek must land at or before the request, got {:?} for {:?}",
+        seeked.1,
+        seeked.0
     );
 }
 
@@ -518,7 +517,8 @@ fn chain_builder_stamps_pipeline_id_into_terminal_pp_log() {
 /// value — not, say, whatever `source.name()` happens to be.
 #[test]
 fn pipeline_id_is_whatever_new_was_given() {
-    let (source, streams) = FileDemuxer::open("demux", test_video()).expect("open test video");
+    let Some(path) = try_test_video() else { return };
+    let (source, streams) = FileDemuxer::open("demux", &path).expect("open test video");
     let video = streams
         .iter()
         .find(|s| s.kind == ffmpeg_next::media::Type::Video)
@@ -544,7 +544,8 @@ fn pipeline_id_is_whatever_new_was_given() {
 /// linked.
 #[test]
 fn topology_lists_source_through_terminal_per_branch() {
-    let (source, streams) = FileDemuxer::open("demux", test_video()).expect("open test video");
+    let Some(path) = try_test_video() else { return };
+    let (source, streams) = FileDemuxer::open("demux", &path).expect("open test video");
     let video = streams
         .iter()
         .find(|s| s.kind == ffmpeg_next::media::Type::Video)
@@ -593,7 +594,8 @@ fn topology_lists_source_through_terminal_per_branch() {
 /// fan-out is committed as one subgraph.
 #[test]
 fn topology_attributes_tee_branches_to_the_tee_not_the_source() {
-    let (source, streams) = FileDemuxer::open("demux", test_video()).expect("open test video");
+    let Some(path) = try_test_video() else { return };
+    let (source, streams) = FileDemuxer::open("demux", &path).expect("open test video");
     let video = streams
         .iter()
         .find(|s| s.kind == ffmpeg_next::media::Type::Video)
@@ -661,7 +663,8 @@ fn topology_attributes_tee_branches_to_the_tee_not_the_source() {
 /// stale graph node would otherwise do.
 #[test]
 fn topology_forgets_a_branch_once_it_is_removed_from_the_tee() {
-    let (source, streams) = FileDemuxer::open("demux", test_video()).expect("open test video");
+    let Some(path) = try_test_video() else { return };
+    let (source, streams) = FileDemuxer::open("demux", &path).expect("open test video");
     let video = streams
         .iter()
         .find(|s| s.kind == ffmpeg_next::media::Type::Video)
@@ -712,7 +715,8 @@ fn topology_forgets_a_branch_once_it_is_removed_from_the_tee() {
 /// element ID back to the owning branch regardless of depth.
 #[test]
 fn remove_branch_containing_resolves_through_a_queue_to_the_tee_attached_root() {
-    let (source, streams) = FileDemuxer::open("demux", test_video()).expect("open test video");
+    let Some(path) = try_test_video() else { return };
+    let (source, streams) = FileDemuxer::open("demux", &path).expect("open test video");
     let video = streams
         .iter()
         .find(|s| s.kind == ffmpeg_next::media::Type::Video)
@@ -771,7 +775,8 @@ fn remove_branch_containing_resolves_through_a_queue_to_the_tee_attached_root() 
 /// branch count or removal order in a way the small tests miss.
 #[test]
 fn topology_stays_correct_with_dozens_of_branches_added_and_then_removed() {
-    let (source, streams) = FileDemuxer::open("demux", test_video()).expect("open test video");
+    let Some(path) = try_test_video() else { return };
+    let (source, streams) = FileDemuxer::open("demux", &path).expect("open test video");
     let video = streams
         .iter()
         .find(|s| s.kind == ffmpeg_next::media::Type::Video)
@@ -829,7 +834,8 @@ fn topology_stays_correct_with_dozens_of_branches_added_and_then_removed() {
 
 #[test]
 fn detached_branch_never_appears_in_topology() {
-    let (source, _) = FileDemuxer::open("demux", test_video()).expect("open test video");
+    let Some(path) = try_test_video() else { return };
+    let (source, _) = FileDemuxer::open("demux", &path).expect("open test video");
 
     let pipeline = Pipeline::new("test", source, |_source, ctx| {
         let detached = ctx.branch().to(Box::new(NoOpSink {
@@ -847,7 +853,8 @@ fn detached_branch_never_appears_in_topology() {
 
 #[test]
 fn duplicate_names_are_independent_when_detaching_by_branch_id() {
-    let (source, streams) = FileDemuxer::open("demux", test_video()).expect("open test video");
+    let Some(path) = try_test_video() else { return };
+    let (source, streams) = FileDemuxer::open("demux", &path).expect("open test video");
     let index = streams
         .iter()
         .find(|stream| stream.kind == ffmpeg_next::media::Type::Video)
@@ -885,7 +892,8 @@ fn duplicate_names_are_independent_when_detaching_by_branch_id() {
 
 #[test]
 fn dynamic_attach_and_detach_each_publish_one_graph_revision() {
-    let (source, streams) = FileDemuxer::open("demux", test_video()).expect("open test video");
+    let Some(path) = try_test_video() else { return };
+    let (source, streams) = FileDemuxer::open("demux", &path).expect("open test video");
     let index = streams
         .iter()
         .find(|stream| stream.kind == ffmpeg_next::media::Type::Video)
@@ -1004,7 +1012,8 @@ fn tee_handle_changes_branches_after_the_pipeline_starts() {
 
 #[test]
 fn bus_messages_carry_the_posting_elements_stable_graph_id() {
-    let (source, streams) = FileDemuxer::open("demux", test_video()).expect("open test video");
+    let Some(path) = try_test_video() else { return };
+    let (source, streams) = FileDemuxer::open("demux", &path).expect("open test video");
     let index = streams
         .iter()
         .find(|stream| stream.kind == ffmpeg_next::media::Type::Video)
