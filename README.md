@@ -323,3 +323,11 @@ cargo run -p sw_decode_render              # d3d12-renderer is already enabled i
   `ID3D11Device` — that's what lets this stack skip explicit GPU-side
   fences entirely, unlike the D3D12 side (see `D3d11Renderer`'s own doc
   comment for why).
+
+## License
+
+Licensed under either of the [Apache License, Version 2.0](LICENSE-APACHE)
+or the [MIT License](LICENSE-MIT), at your option.
+
+`media-pp` does not bundle FFmpeg. Users are responsible for complying with
+the license of the FFmpeg build and optional codecs they link against.
