@@ -374,18 +374,18 @@ to `./logs`, and uses its Cargo package name as the file prefix.
   signaling server built in. `webrtc_loopback` turns it on in its own
   `Cargo.toml`.
 
-There is no `default` feature set. The [docs.rs] build enables the Windows
-backend features and targets Windows so their public types remain visible. Its
-Linux build host uses its installed FFmpeg metadata and parses those headers
-for the Linux host ABI so `ffmpeg-sys-next` can generate bindings while
-cross-documenting the Rust API; rustdoc does not link a Windows executable. To
-build the same API docs on Windows locally:
+There is no `default` feature set. The [docs.rs] build uses its native Linux
+target, so it reliably documents the backend-independent API but omits modules
+guarded by `target_os = "windows"`. Full [Windows API docs] are generated on a
+Windows GitHub Actions runner from every version tag. To build those same docs
+locally on Windows:
 
 ```sh
 cargo doc -p media-pp --open --features d3d11-renderer,d3d12-renderer,dxgi-capture,wasapi-capture,wasapi-renderer,webrtc
 ```
 
 [docs.rs]: https://docs.rs/media-pp
+[Windows API docs]: https://hash1018.github.io/media-pp/media_pp/
 
 ## Requirements
 

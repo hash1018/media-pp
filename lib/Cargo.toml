@@ -1,6 +1,6 @@
 [package]
 name = "media-pp"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2024"
 # Verified with `cargo +1.88 check` across every feature. Edition 2024 alone
 # needs only 1.85; 1.88 is the highest MSRV among the resolved dependencies.
@@ -13,26 +13,13 @@ description = "A small, GStreamer-flavored media pipeline library built on FFmpe
 keywords = ["ffmpeg", "video", "audio", "pipeline", "streaming"]
 categories = ["multimedia::video", "multimedia::audio", "multimedia::encoding"]
 
-# Generate the public Windows API on its real target. docs.rs runs on Linux,
-# so pkg-config locates its host FFmpeg installation and bindgen parses those
-# host headers with the Linux target instead of trying to find Windows C
-# headers. rustdoc only type-checks the resulting Windows crate and does not
-# link a final executable. Both overrides are scoped to docs.rs.
+# Build docs.rs on its native Linux target. `ffmpeg-sys-next` generates FFI
+# bindings from the installed target headers, so using Linux headers while
+# cross-documenting a Windows target produces invalid ABI layout assertions.
+# Full Windows API docs are built separately on a Windows GitHub Actions runner.
 [package.metadata.docs.rs]
-features = [
-    "d3d11-renderer",
-    "d3d12-renderer",
-    "dxgi-capture",
-    "wasapi-capture",
-    "wasapi-renderer",
-    "webrtc",
-]
-default-target = "x86_64-pc-windows-msvc"
+default-target = "x86_64-unknown-linux-gnu"
 targets = []
-cargo-args = [
-    '--config=env.PKG_CONFIG_ALLOW_CROSS="1"',
-    "--config=env.BINDGEN_EXTRA_CLANG_ARGS='--target=x86_64-unknown-linux-gnu'",
-]
 
 [dependencies]
 ffmpeg-next = "8"
