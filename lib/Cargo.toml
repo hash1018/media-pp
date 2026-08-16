@@ -67,9 +67,9 @@ windows = { version = "0.62", optional = true, features = [
 ab_glyph = { version = "0.2", optional = true }
 
 [features]
-d3d12-renderer = ["dep:windows"]
-d3d11-renderer = ["dep:windows", "dep:ab_glyph"]
-dxgi-capture = ["dep:windows", "d3d11-renderer"]
+d3d12 = ["dep:windows"]
+d3d11 = ["dep:windows", "dep:ab_glyph"]
+dxgi-capture = ["dep:windows", "d3d11"]
 wasapi-capture = ["dep:windows"]
 wasapi-renderer = ["dep:windows"]
 ort = ["dep:ort", "dep:ndarray"]

@@ -22,7 +22,7 @@ pub use capture::{
 };
 #[cfg(all(target_os = "windows", feature = "wasapi-capture"))]
 pub use capture::{WasapiCaptureOptions, WasapiCaptureSource, WasapiCaptureSourceError};
-#[cfg(all(target_os = "windows", feature = "d3d11-renderer"))]
+#[cfg(all(target_os = "windows", feature = "d3d11"))]
 pub use compositor::{
     D3d11TextLayerError, D3d11TextLayerHandle, D3d11VideoCompositor, D3d11VideoCompositorError,
     D3d11VideoCompositorHandle, D3d11VideoCompositorInput, D3d11VideoCompositorInputSink,

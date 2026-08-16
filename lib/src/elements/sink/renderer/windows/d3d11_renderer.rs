@@ -138,7 +138,7 @@ pub enum D3d11RendererError {
 /// Terminal sink that submits `Pixel::D3D11` video frames to a
 /// caller-supplied [`D3d11FrameRenderer`] — the D3D11 sibling of
 /// [`crate::elements::D3d12Renderer`]. Only built with the
-/// `d3d11-renderer` feature.
+/// `d3d11` feature.
 ///
 /// Every producer in this crate's D3D11 stack
 /// ([`crate::elements::D3d11Upload`], [`crate::elements::D3d11Decoder`],

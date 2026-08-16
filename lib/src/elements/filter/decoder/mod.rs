@@ -15,19 +15,13 @@
 //! anything).
 
 mod sw_decoder;
-#[cfg(all(
-    target_os = "windows",
-    any(feature = "d3d11-renderer", feature = "d3d12-renderer")
-))]
+#[cfg(all(target_os = "windows", any(feature = "d3d11", feature = "d3d12")))]
 mod windows;
 
 pub use sw_decoder::{SwDecoder, SwDecoderError};
-#[cfg(all(target_os = "windows", feature = "d3d11-renderer"))]
+#[cfg(all(target_os = "windows", feature = "d3d11"))]
 pub(crate) use windows::d3d11va_decoder;
-#[cfg(all(target_os = "windows", feature = "d3d12-renderer"))]
+#[cfg(all(target_os = "windows", feature = "d3d12"))]
 pub(crate) use windows::d3d12va_decoder;
-#[cfg(all(
-    target_os = "windows",
-    any(feature = "d3d11-renderer", feature = "d3d12-renderer")
-))]
+#[cfg(all(target_os = "windows", any(feature = "d3d11", feature = "d3d12")))]
 pub use windows::*;

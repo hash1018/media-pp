@@ -8,7 +8,7 @@
 mod text_layer;
 mod video_compositor;
 mod video_layer;
-#[cfg(all(target_os = "windows", feature = "d3d11-renderer"))]
+#[cfg(all(target_os = "windows", feature = "d3d11"))]
 mod windows;
 
 pub use text_layer::TextLayer;
@@ -17,5 +17,5 @@ pub use video_compositor::{
     VideoCompositorInputSink, VideoCompositorOptions, VideoLayerHandle,
 };
 pub use video_layer::{VideoFit, VideoInputId, VideoLayer, VideoRect};
-#[cfg(all(target_os = "windows", feature = "d3d11-renderer"))]
+#[cfg(all(target_os = "windows", feature = "d3d11"))]
 pub use windows::*;

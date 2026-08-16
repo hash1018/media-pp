@@ -8,21 +8,13 @@
 mod submit_error;
 #[cfg(all(
     target_os = "windows",
-    any(
-        feature = "d3d11-renderer",
-        feature = "d3d12-renderer",
-        feature = "wasapi-renderer"
-    )
+    any(feature = "d3d11", feature = "d3d12", feature = "wasapi-renderer")
 ))]
 mod windows;
 
 pub use submit_error::SubmitError;
 #[cfg(all(
     target_os = "windows",
-    any(
-        feature = "d3d11-renderer",
-        feature = "d3d12-renderer",
-        feature = "wasapi-renderer"
-    )
+    any(feature = "d3d11", feature = "d3d12", feature = "wasapi-renderer")
 ))]
 pub use windows::*;

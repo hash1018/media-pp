@@ -11,12 +11,12 @@ use crate::elements::WasapiCaptureSourceError;
 use crate::elements::WasapiRendererError;
 #[cfg(feature = "webrtc")]
 use crate::elements::WebRtcError;
-#[cfg(all(target_os = "windows", feature = "d3d11-renderer"))]
+#[cfg(all(target_os = "windows", feature = "d3d11"))]
 use crate::elements::{
     D3d11DownloadError, D3d11RendererError, D3d11TextLayerError, D3d11UploadError,
     D3d11VideoCompositorError, D3d11vaDecoderError,
 };
-#[cfg(all(target_os = "windows", feature = "d3d12-renderer"))]
+#[cfg(all(target_os = "windows", feature = "d3d12"))]
 use crate::elements::{D3d12RendererError, D3d12UploadError, D3d12vaDecoderError};
 use crate::{
     elements::{
@@ -104,39 +104,39 @@ pub enum Error {
     #[error(transparent)]
     RtspSinkError(#[from] RtspSinkError),
 
-    #[cfg(all(target_os = "windows", feature = "d3d12-renderer"))]
+    #[cfg(all(target_os = "windows", feature = "d3d12"))]
     #[error(transparent)]
     D3d12RendererError(#[from] D3d12RendererError),
 
-    #[cfg(all(target_os = "windows", feature = "d3d12-renderer"))]
+    #[cfg(all(target_os = "windows", feature = "d3d12"))]
     #[error(transparent)]
     D3d12vaDecoderError(#[from] D3d12vaDecoderError),
 
-    #[cfg(all(target_os = "windows", feature = "d3d12-renderer"))]
+    #[cfg(all(target_os = "windows", feature = "d3d12"))]
     #[error(transparent)]
     D3d12UploadError(#[from] D3d12UploadError),
 
-    #[cfg(all(target_os = "windows", feature = "d3d11-renderer"))]
+    #[cfg(all(target_os = "windows", feature = "d3d11"))]
     #[error(transparent)]
     D3d11vaDecoderError(#[from] D3d11vaDecoderError),
 
-    #[cfg(all(target_os = "windows", feature = "d3d11-renderer"))]
+    #[cfg(all(target_os = "windows", feature = "d3d11"))]
     #[error(transparent)]
     D3d11UploadError(#[from] D3d11UploadError),
 
-    #[cfg(all(target_os = "windows", feature = "d3d11-renderer"))]
+    #[cfg(all(target_os = "windows", feature = "d3d11"))]
     #[error(transparent)]
     D3d11DownloadError(#[from] D3d11DownloadError),
 
-    #[cfg(all(target_os = "windows", feature = "d3d11-renderer"))]
+    #[cfg(all(target_os = "windows", feature = "d3d11"))]
     #[error(transparent)]
     D3d11RendererError(#[from] D3d11RendererError),
 
-    #[cfg(all(target_os = "windows", feature = "d3d11-renderer"))]
+    #[cfg(all(target_os = "windows", feature = "d3d11"))]
     #[error(transparent)]
     D3d11VideoCompositorError(#[from] D3d11VideoCompositorError),
 
-    #[cfg(all(target_os = "windows", feature = "d3d11-renderer"))]
+    #[cfg(all(target_os = "windows", feature = "d3d11"))]
     #[error(transparent)]
     D3d11TextLayerError(#[from] D3d11TextLayerError),
 

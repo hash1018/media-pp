@@ -11,12 +11,12 @@ mod video_synchronizer;
 
 pub use audio_resampler::{AudioFormat, AudioResampler, AudioResamplerError};
 pub use audio_volume::{AudioVolume, AudioVolumeError, AudioVolumeHandle, AudioVolumeOptions};
-#[cfg(all(target_os = "windows", feature = "d3d11-renderer"))]
+#[cfg(all(target_os = "windows", feature = "d3d11"))]
 pub use decoder::{D3d11Decoder, D3d11vaDecoderError};
-#[cfg(all(target_os = "windows", feature = "d3d12-renderer"))]
+#[cfg(all(target_os = "windows", feature = "d3d12"))]
 pub use decoder::{D3d12vaDecoder, D3d12vaDecoderError};
 pub use decoder::{SwDecoder, SwDecoderError};
-#[cfg(all(target_os = "windows", feature = "d3d11-renderer"))]
+#[cfg(all(target_os = "windows", feature = "d3d11"))]
 pub use download::{D3d11Download, D3d11DownloadError};
 pub use encoder::{
     AudioCodec, SwAudioEncoder, SwAudioEncoderError, SwAudioEncoderOptions, SwEncoder,
@@ -25,9 +25,9 @@ pub use encoder::{
 pub use pacer::{Pacer, PacerError};
 pub use scaler::{Scaler, ScalerError};
 pub use tee::{Tee, TeeBuilder, TeeHandle};
-#[cfg(all(target_os = "windows", feature = "d3d11-renderer"))]
+#[cfg(all(target_os = "windows", feature = "d3d11"))]
 pub use upload::{D3d11Upload, D3d11UploadError};
-#[cfg(all(target_os = "windows", feature = "d3d12-renderer"))]
+#[cfg(all(target_os = "windows", feature = "d3d12"))]
 pub use upload::{D3d12Upload, D3d12UploadError};
 pub use video_synchronizer::{VideoSynchronizer, VideoSynchronizerError};
 

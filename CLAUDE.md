@@ -174,7 +174,7 @@ documentation and implementation differ.
   ```text
   cargo fmt --all -- --check
   cargo test -p media-pp
-  cargo test -p media-pp --features d3d11-renderer
+  cargo test -p media-pp --features d3d11
   ```
 
   Select other features according to the files changed. Also check the default

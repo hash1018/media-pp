@@ -115,7 +115,7 @@ pub enum D3d12RendererError {
 }
 
 /// Terminal sink that submits decoded video frames to a caller-supplied
-/// [`D3d12FrameRenderer`]. Only built with the `d3d12-renderer` feature —
+/// [`D3d12FrameRenderer`]. Only built with the `d3d12` feature —
 /// every consumer that doesn't need to render to a window pulls in
 /// neither this nor the `windows` dependency it needs for the zero-copy
 /// path.

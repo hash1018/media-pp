@@ -1,5 +1,5 @@
-#[cfg(feature = "d3d11-renderer")]
+#[cfg(feature = "d3d11")]
 mod d3d11_download;
 
-#[cfg(feature = "d3d11-renderer")]
+#[cfg(feature = "d3d11")]
 pub use d3d11_download::{D3d11Download, D3d11DownloadError};

@@ -125,9 +125,9 @@ The library has no default features.
 
 | Feature | Adds | Platform |
 |---|---|---|
-| `d3d11-renderer` | D3D11 decode, upload/download, rendering, and GPU compositing | Windows |
-| `d3d12-renderer` | D3D12VA decode, upload, and rendering interfaces | Windows |
-| `dxgi-capture` | Desktop capture; also enables `d3d11-renderer` | Windows |
+| `d3d11` | D3D11 decode, upload/download, rendering, and GPU compositing | Windows |
+| `d3d12` | D3D12VA decode, upload, and rendering interfaces | Windows |
+| `dxgi-capture` | Desktop capture; also enables `d3d11` | Windows |
 | `wasapi-capture` | System-audio and microphone capture | Windows |
 | `wasapi-renderer` | Shared-mode audio playback | Windows |
 | `ort` | ONNX Runtime object detection | All supported targets |
@@ -138,7 +138,7 @@ what labels each item with the feature that enables it:
 
 ```powershell
 $env:RUSTDOCFLAGS = "--cfg docsrs"
-cargo +nightly doc -p media-pp --open --features d3d11-renderer,d3d12-renderer,dxgi-capture,wasapi-capture,wasapi-renderer,webrtc
+cargo +nightly doc -p media-pp --open --features d3d11,d3d12,dxgi-capture,wasapi-capture,wasapi-renderer,webrtc
 ```
 
 [docs.rs] builds this crate for Linux, so it documents only the
