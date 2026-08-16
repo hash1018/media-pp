@@ -17,9 +17,15 @@ categories = ["multimedia::video", "multimedia::audio", "multimedia::encoding"]
 # bindings from the installed target headers, so using Linux headers while
 # cross-documenting a Windows target produces invalid ABI layout assertions.
 # Full Windows API docs are built separately on a Windows GitHub Actions runner.
+#
+# `ort` and `webrtc` are the only optional features that build on Linux without
+# network access: `ort-sys`'s build script returns early when docs.rs sets
+# `DOCS_RS`, and `str0m`'s `rust-crypto` backend is pure Rust.
 [package.metadata.docs.rs]
 default-target = "x86_64-unknown-linux-gnu"
 targets = []
+features = ["ort", "webrtc"]
+rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
 ffmpeg-next = "8"
@@ -32,7 +38,7 @@ tracing-appender = "0.2"
 ort = { version = "2.0.0-rc.13", optional = true }
 ndarray = { version = "0.17", optional = true }
 str0m = { version = "0.21", optional = true, default-features = false, features = [
-    "wincrypto",
+    "rust-crypto",
 ] }
 
 [target.'cfg(windows)'.dependencies]

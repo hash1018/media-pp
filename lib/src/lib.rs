@@ -1,3 +1,8 @@
+// docs.rs passes `--cfg docsrs` (see `package.metadata.docs.rs`), which labels
+// every feature-gated item with the Cargo feature that enables it. Stable
+// builds never see the `feature` attribute.
+#![cfg_attr(docsrs, feature(doc_cfg))]
+
 mod core;
 pub mod elements;
 pub mod error;

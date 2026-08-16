@@ -1,15 +1,8 @@
-#[cfg(not(target_os = "windows"))]
-fn main() {
-    eprintln!("{} example only supports Windows", env!("CARGO_PKG_NAME"));
-}
-
-#[cfg(target_os = "windows")]
 fn main() -> impl std::process::Termination {
-    windows_example::run()
+    example::run()
 }
 
-#[cfg(target_os = "windows")]
-mod windows_example {
+mod example {
     use std::{
         net::UdpSocket,
         sync::{

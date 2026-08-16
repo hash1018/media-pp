@@ -22,14 +22,18 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v6
 
+      # Nightly only for rustdoc: `doc_cfg` is what labels each item with the
+      # Cargo feature that enables it, and it is still unstable. The library
+      # itself builds on stable (see `rust-version` in `lib/Cargo.toml`).
       - name: Install Rust
         shell: pwsh
         run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
+          rustup toolchain install nightly --profile minimal
+          rustup default nightly
 
-      # ffmpeg-next 8.1 supports FFmpeg through 8.0. The rolling vcpkg
-      # installation on hosted runners may already contain FFmpeg 8.1.
+      # ffmpeg-next 8.1 supports FFmpeg through 8.0, and the rolling vcpkg
+      # installation on hosted runners has moved past that. This tag's ffmpeg
+      # port is 8.0.1, the same version this crate is developed against.
       - name: Check out compatible vcpkg
         uses: actions/checkout@v6
         with:
@@ -37,17 +41,41 @@ jobs:
           ref: 2026.01.16
           path: .vcpkg
 
+      # Export `FFMPEG_DIR`, not `VCPKG_ROOT`: `ffmpeg-sys-next` reads it before
+      # it attempts any vcpkg or pkg-config discovery, so the pinned tree above
+      # becomes the only FFmpeg the build can reach. Exporting `VCPKG_ROOT`
+      # alone left the discovery order in play, and the first run of this
+      # workflow generated bindings from FFmpeg 8.1 headers found elsewhere on
+      # the runner: `AVCodec` had lost `pix_fmts`/`sample_fmts`/`ch_layouts` and
+      # `AV_CODEC_ID_V410` was gone, which `ffmpeg-next` 8.1 uses unguarded.
+      #
+      # The exit-code checks stop this step at the command that actually broke.
+      # A native failure does not raise a PowerShell error, so without them the
+      # script runs on and the step reports whichever command exited last.
       - name: Install FFmpeg development libraries
         shell: pwsh
         run: |
           & "$env:GITHUB_WORKSPACE\.vcpkg\bootstrap-vcpkg.bat" -disableMetrics
+          if ($LASTEXITCODE -ne 0) { throw "vcpkg bootstrap failed ($LASTEXITCODE)" }
           & "$env:GITHUB_WORKSPACE\.vcpkg\vcpkg.exe" install ffmpeg:x64-windows
-          "VCPKG_ROOT=$env:GITHUB_WORKSPACE\.vcpkg" >> $env:GITHUB_ENV
+          if ($LASTEXITCODE -ne 0) { throw "vcpkg install ffmpeg failed ($LASTEXITCODE)" }
+          $prefix = "$env:GITHUB_WORKSPACE\.vcpkg\installed\x64-windows"
+          if (-not (Test-Path "$prefix\include\libavcodec\avcodec.h")) {
+            throw "no FFmpeg headers under $prefix"
+          }
+          # Recorded so a future header mismatch is diagnosable from the log.
+          Get-ChildItem "$prefix\include\libavcodec\version*.h" |
+            Select-String -Pattern '#define\s+LIBAVCODEC_VERSION_(MAJOR|MINOR)\s'
+          "FFMPEG_DIR=$prefix" >> $env:GITHUB_ENV
 
+      # Every feature, so this build stays a strict superset of docs.rs, which
+      # can only reach the non-Windows ones.
       - name: Build Windows API documentation
         shell: pwsh
+        env:
+          RUSTDOCFLAGS: --cfg docsrs
         run: |
-          cargo doc -p media-pp --no-deps --features d3d11-renderer,d3d12-renderer,dxgi-capture,wasapi-capture,wasapi-renderer,webrtc
+          cargo doc -p media-pp --no-deps --features d3d11-renderer,d3d12-renderer,dxgi-capture,wasapi-capture,wasapi-renderer,webrtc,ort
           '<meta http-equiv="refresh" content="0; url=media_pp/">' | Set-Content -Encoding utf8 target/doc/index.html
           Remove-Item target/doc/.lock -ErrorAction SilentlyContinue
 
