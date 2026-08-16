@@ -28,11 +28,21 @@ jobs:
           rustup toolchain install stable --profile minimal
           rustup default stable
 
+      # ffmpeg-next 8.1 supports FFmpeg through 8.0. The rolling vcpkg
+      # installation on hosted runners may already contain FFmpeg 8.1.
+      - name: Check out compatible vcpkg
+        uses: actions/checkout@v6
+        with:
+          repository: microsoft/vcpkg
+          ref: 2026.01.16
+          path: .vcpkg
+
       - name: Install FFmpeg development libraries
         shell: pwsh
         run: |
-          & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install ffmpeg:x64-windows
-          "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" >> $env:GITHUB_ENV
+          & "$env:GITHUB_WORKSPACE\.vcpkg\bootstrap-vcpkg.bat" -disableMetrics
+          & "$env:GITHUB_WORKSPACE\.vcpkg\vcpkg.exe" install ffmpeg:x64-windows
+          "VCPKG_ROOT=$env:GITHUB_WORKSPACE\.vcpkg" >> $env:GITHUB_ENV
 
       - name: Build Windows API documentation
         shell: pwsh
