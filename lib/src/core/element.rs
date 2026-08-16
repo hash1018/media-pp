@@ -38,6 +38,7 @@ pub enum ElementType {
     D3d11Upload,
     D3d11Download,
     SwEncoder,
+    D3d11NvencEncoder,
     SwAudioEncoder,
     AudioResampler,
     AudioVolume,

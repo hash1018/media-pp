@@ -1703,6 +1703,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "nvenc_record"
+version = "0.1.0"
+dependencies = [
+ "ffmpeg-next",
+ "media-pp",
+ "render_common",
+]
+
+[[package]]
 name = "objc-sys"
 version = "0.3.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"

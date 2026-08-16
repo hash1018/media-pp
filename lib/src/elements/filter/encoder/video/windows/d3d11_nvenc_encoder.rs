@@ -1,0 +1,837 @@
+use std::sync::{Arc, Mutex};
+
+use ffmpeg_next as ffmpeg;
+use ffmpeg_next::Rescale;
+use ffmpeg_next::ffi;
+use thiserror::Error as ThisError;
+use windows::{
+    Win32::Graphics::{
+        Direct3D11::{
+            D3D11_BIND_SHADER_RESOURCE, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
+        },
+        Dxgi::Common::{DXGI_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_NV12},
+    },
+    core::Interface,
+};
+
+use crate::pp_log::{PpLog, pp_error, pp_info};
+
+use crate::{
+    buffer::MediaBuffer,
+    control::ControlMsg,
+    element::{Element, ElementType, Sink, Source, element_pp_log},
+    elements::filter::decoder::d3d11va_decoder::{
+        create_hw_device_ctx, d3d11va_texture, free_buffer, or_frames_bind_flags,
+    },
+    elements::filter::is_codec_drain_boundary,
+    error::Result,
+    pad::SrcPad,
+};
+
+/// Errors specific to `D3d11NvencEncoder`. Converts into the crate-wide
+/// `Error` via `?` (see [`crate::error::Error`]).
+#[derive(Debug, ThisError)]
+pub enum D3d11NvencEncoderError {
+    #[error(
+        "encoder {0:?} not found — this ffmpeg build wasn't compiled with \
+         NVENC support (run `ffmpeg -encoders` to check)"
+    )]
+    CodecNotFound(String),
+
+    #[error("failed to create D3D11VA hw device context (code {0})")]
+    HwDeviceInit(i32),
+
+    #[error("failed to allocate a D3D11 hw frames context")]
+    HwFramesAlloc,
+
+    #[error(
+        "failed to initialize the D3D11 hw frames context (code {0}) — most \
+         often the requested {1}x{2} exceeds what this GPU's encoder accepts"
+    )]
+    HwFramesInit(i32, u32, u32),
+
+    #[error("failed to acquire a frame from the encoder's own D3D11 pool (code {0})")]
+    HwFrameGet(i32),
+
+    #[error(
+        "D3d11NvencEncoder only accepts Pixel::D3D11 frames (chain a \
+         D3d11Upload, or feed it a D3d11VideoCompositor/DxgiCaptureSource \
+         GPU-mode output), got {0:?}"
+    )]
+    UnsupportedFormat(ffmpeg::format::Pixel),
+
+    #[error(
+        "frame is {actual_width}x{actual_height}, but D3d11NvencEncoder was \
+         opened for {expected_width}x{expected_height}"
+    )]
+    DimensionMismatch {
+        actual_width: u32,
+        actual_height: u32,
+        expected_width: u32,
+        expected_height: u32,
+    },
+
+    #[error(
+        "frame carries a {actual:?} texture, but D3d11NvencEncoder was opened \
+         for {expected:?} — an encoder's input format is fixed at \
+         avcodec_open2 time and cannot change mid-stream"
+    )]
+    TextureFormatMismatch { actual: i32, expected: i32 },
+
+    #[error("a Pixel::D3D11 frame arrived without a texture in data[0]")]
+    MissingTexture,
+
+    #[error("D3d11NvencEncoder only accepts Video or Eos buffers, got {0}")]
+    UnsupportedBuffer(&'static str),
+
+    #[error("windows error: {0}")]
+    Windows(#[from] windows::core::Error),
+
+    #[error("ffmpeg error: {0}")]
+    Ffmpeg(#[from] ffmpeg::Error),
+}
+
+/// Which NVENC encoder to open. Both are hardware encoders on the GPU's
+/// dedicated encode block, so neither carries the GPL/licensing question
+/// [`crate::elements::VideoCodec`]'s software encoders document — but both
+/// still have to actually exist in the linked ffmpeg build, and
+/// [`D3d11NvencEncoder::new`] fails with
+/// [`D3d11NvencEncoderError::CodecNotFound`] (not a panic) if they don't.
+///
+/// AV1 is deliberately absent: `av1_nvenc` exists in ffmpeg, but NVENC's
+/// AV1 encode block only shipped with Ada (RTX 40) and later, so offering
+/// it here would mean a variant that fails at `open` on a large share of
+/// otherwise-working GPUs. Add it when there is a real requirement and a
+/// machine to verify it on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum D3d11NvencCodec {
+    /// `h264_nvenc` — H.264/AVC.
+    H264,
+    /// `hevc_nvenc` — H.265/HEVC.
+    H265,
+}
+
+impl D3d11NvencCodec {
+    fn encoder_name(self) -> &'static str {
+        match self {
+            Self::H264 => "h264_nvenc",
+            Self::H265 => "hevc_nvenc",
+        }
+    }
+}
+
+/// Which D3D11 texture format this encoder's input frames carry. This is
+/// the `sw_format` of the encoder's own hw frames context, fixed at
+/// `avcodec_open2` time like every other codec parameter — it is *not*
+/// inferred from the first frame, for the same reason
+/// [`crate::elements::SwEncoderOptions`] takes `width`/`height` up front.
+///
+/// Both variants were verified against `h264_nvenc`/`hevc_nvenc` on real
+/// hardware. [`D3d11NvencInputFormat::Bgra`] is what makes a screen
+/// recording need no color conversion at all: `D3d11VideoCompositor` and
+/// `DxgiCaptureSource`'s GPU mode both produce BGRA textures, and NVENC
+/// converts to its own internal YUV as part of encoding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum D3d11NvencInputFormat {
+    /// `DXGI_FORMAT_NV12` — what [`crate::elements::D3d11Upload`] and
+    /// [`crate::elements::D3d11Decoder`] produce.
+    Nv12,
+    /// `DXGI_FORMAT_B8G8R8A8_UNORM` — what
+    /// [`crate::elements::D3d11VideoCompositor`] and
+    /// [`crate::elements::DxgiCaptureSource`]'s GPU mode produce.
+    Bgra,
+}
+
+impl D3d11NvencInputFormat {
+    fn sw_format(self) -> ffi::AVPixelFormat {
+        match self {
+            Self::Nv12 => ffi::AVPixelFormat::AV_PIX_FMT_NV12,
+            Self::Bgra => ffi::AVPixelFormat::AV_PIX_FMT_BGRA,
+        }
+    }
+
+    fn dxgi_format(self) -> DXGI_FORMAT {
+        match self {
+            Self::Nv12 => DXGI_FORMAT_NV12,
+            Self::Bgra => DXGI_FORMAT_B8G8R8A8_UNORM,
+        }
+    }
+}
+
+/// Everything `avcodec_open2` needs before this encoder can be opened at
+/// all — same convention, and the same reasoning, as
+/// [`crate::elements::SwEncoderOptions`], which documents at length why
+/// `time_base` and `frame_rate` are separate values rather than one
+/// derived from the other.
+#[derive(Debug, Clone, Copy)]
+pub struct D3d11NvencEncoderOptions {
+    pub codec: D3d11NvencCodec,
+    /// The texture format every input frame must carry. See
+    /// [`D3d11NvencInputFormat`].
+    pub input_format: D3d11NvencInputFormat,
+    pub width: u32,
+    pub height: u32,
+    /// Must match the `pts` unit of whatever frames this receives.
+    pub time_base: ffmpeg::Rational,
+    /// The nominal rate NVENC uses for rate control and writes into the
+    /// bitstream — not required to match the real interval between
+    /// `consume` calls. See [`crate::elements::SwEncoderOptions::frame_rate`].
+    pub frame_rate: ffmpeg::Rational,
+    pub bit_rate: usize,
+    /// Frames between keyframes (`AVCodecContext.gop_size`). Always set
+    /// explicitly, for the join-latency and segmenting reasons
+    /// [`crate::elements::SwEncoderOptions::gop_size`] documents.
+    pub gop_size: u32,
+}
+
+/// Encodes GPU-resident `Pixel::D3D11` `Video` frames into `Packet`s on the
+/// GPU's dedicated NVENC block — the hardware counterpart to
+/// [`crate::elements::SwEncoder`], for a pipeline built entirely on one
+/// shared `ID3D11Device` (see [`crate::elements::D3d11Renderer`]'s own docs
+/// on why that means no explicit fence/sync is needed anywhere in this
+/// stack). A `Filter`: receives via `Sink`, pushes what it produces into
+/// its own single src pad.
+///
+/// # Why the input texture is copied rather than handed over directly
+///
+/// NVENC needs `AVCodecContext.hw_frames_ctx` set before `avcodec_open2`,
+/// and every frame passed to `send_frame` must come from *that* context's
+/// own pool. The `Pixel::D3D11` frames flowing through this crate don't:
+/// [`crate::elements::D3d11Upload`],
+/// [`crate::elements::DxgiCaptureSource`]'s GPU mode and
+/// [`crate::elements::D3d11VideoCompositor`] all build their textures with
+/// plain `windows-rs` calls and wrap them via
+/// `d3d11va_decoder::wrap_d3d11_texture`, deliberately bypassing FFmpeg's
+/// frames-context machinery altogether (that function's own docs explain
+/// why: driving it from a hand-mirrored `AVD3D11VAFramesContext*` corrupted
+/// memory badly enough to trip `/GS`).
+///
+/// So `consume` takes the other route: it lets libavutil allocate and own
+/// the encoder's input pool through the ordinary, publicly documented
+/// `av_hwframe_ctx_alloc`/`av_hwframe_ctx_init`/`av_hwframe_get_buffer`
+/// API — touching only bindgen-generated `AVHWFramesContext` fields, never
+/// the D3D11VA-specific struct that has no binding — and copies each
+/// incoming texture into a pool texture with `CopySubresourceRegion`.
+///
+/// That copy never leaves the GPU. It replaces the
+/// `D3d11Download` → `Scaler` → `SwEncoder` chain that was previously the
+/// only way to record a GPU-resident stream, which read every frame back
+/// over PCIe, converted it on the CPU, and encoded it on the CPU.
+///
+/// # Frame delay
+///
+/// One frame can turn into zero or one packets per `send_frame` — NVENC's
+/// lookahead and B-frame reordering delay some packets until later frames
+/// arrive, or until `Eos` flushes what's left. `consume` drains
+/// `receive_packet` in a loop after every `send_frame`/`send_eof`, the same
+/// shape as [`crate::elements::SwEncoder`]'s own drain loop.
+pub struct D3d11NvencEncoder {
+    pp_log: PpLog,
+    name: Arc<str>,
+    encoder: ffmpeg::encoder::Video,
+    /// The shared immediate context. `CopySubresourceRegion` is a
+    /// context-level call, not a device-level one, so this must be the
+    /// exact same `Arc<Mutex<ID3D11DeviceContext>>` every other
+    /// context-touching D3D11 element in this pipeline holds — see
+    /// [`crate::elements::D3d11Download`]'s own docs on why a lone
+    /// per-element context handle isn't enough.
+    context: Arc<Mutex<ID3D11DeviceContext>>,
+    /// Owned for this element's lifetime; the encoder holds its own
+    /// `av_buffer_ref` on both of these.
+    hw_device_ctx: *mut ffi::AVBufferRef,
+    hw_frames_ctx: *mut ffi::AVBufferRef,
+    width: u32,
+    height: u32,
+    input_format: D3d11NvencInputFormat,
+    /// Nominal frame duration in `time_base` ticks. NVENC leaves
+    /// `AVPacket::duration` at zero; muxers such as
+    /// [`crate::elements::HlsMuxer`] need it for precise segment durations.
+    packet_duration: i64,
+    /// Stamped onto every produced packet, since `avcodec_receive_packet`
+    /// never sets `AVPacket.time_base` itself — see
+    /// [`crate::elements::SwEncoder`]'s own field of the same name.
+    time_base: ffmpeg::Rational,
+    pad: SrcPad,
+}
+
+// SAFETY: `hw_device_ctx`/`hw_frames_ctx` are heap-allocated FFmpeg buffers
+// with no thread affinity, and `encoder`'s own `Send` covers the codec
+// context. `&mut self` on every method that touches them rules out
+// concurrent access — same reasoning as `D3d11Decoder`.
+unsafe impl Send for D3d11NvencEncoder {}
+
+fn nominal_packet_duration(time_base: ffmpeg::Rational, frame_rate: ffmpeg::Rational) -> i64 {
+    if frame_rate.numerator() <= 0 || time_base.numerator() <= 0 || time_base.denominator() <= 0 {
+        return 0;
+    }
+    1i64.rescale(
+        ffmpeg::Rational::new(frame_rate.denominator(), frame_rate.numerator()),
+        time_base,
+    )
+    .max(1)
+}
+
+/// Allocates and initializes the encoder's own D3D11 input pool.
+///
+/// Every field written here is a documented public field of the
+/// bindgen-generated `AVHWFramesContext`; `hwctx` (the D3D11VA-specific
+/// struct libavutil layers on top, which `ffmpeg-sys-next` generates no
+/// binding for) is deliberately left entirely to libavutil. That is the
+/// whole difference between this and the approach recorded in
+/// `wrap_d3d11_texture`'s docs as having corrupted memory.
+unsafe fn create_hw_frames_ctx(
+    hw_device_ctx: *mut ffi::AVBufferRef,
+    options: &D3d11NvencEncoderOptions,
+) -> std::result::Result<*mut ffi::AVBufferRef, D3d11NvencEncoderError> {
+    unsafe {
+        let buf = ffi::av_hwframe_ctx_alloc(hw_device_ctx);
+        if buf.is_null() {
+            return Err(D3d11NvencEncoderError::HwFramesAlloc);
+        }
+
+        let frames_ctx = (*buf).data as *mut ffi::AVHWFramesContext;
+        (*frames_ctx).format = ffi::AVPixelFormat::AV_PIX_FMT_D3D11;
+        (*frames_ctx).sw_format = options.input_format.sw_format();
+        (*frames_ctx).width = options.width as i32;
+        (*frames_ctx).height = options.height as i32;
+        // Left at libavutil's dynamic `AVBufferPool` rather than a fixed
+        // array texture, which is what a non-zero `initial_pool_size` asks
+        // for. A `DXGI_FORMAT_NV12` *array* needs decoder-class binding to
+        // be created at all, so pairing it with the shader-resource binding
+        // below fails outright (`E_INVALIDARG`), while BGRA arrays succeed —
+        // an asymmetry that would make the same options struct work for one
+        // input format and not the other. The dynamic pool still recycles
+        // textures through `AVBufferPool`; it just allocates them one at a
+        // time, exactly as ffmpeg's own `hwupload` filter does on the path
+        // this element was verified against.
+        (*frames_ctx).initial_pool_size = 0;
+        // Required, not an optimization: libavutil copies `BindFlags`
+        // straight into its `D3D11_TEXTURE2D_DESC` and defaults it to
+        // nothing, and `CreateTexture2D` rejects a `D3D11_USAGE_DEFAULT`
+        // texture with no bind flags (`E_INVALIDARG`).
+        or_frames_bind_flags(frames_ctx, D3D11_BIND_SHADER_RESOURCE.0 as u32);
+
+        let code = ffi::av_hwframe_ctx_init(buf);
+        if code < 0 {
+            free_buffer(buf);
+            return Err(D3d11NvencEncoderError::HwFramesInit(
+                code,
+                options.width,
+                options.height,
+            ));
+        }
+        Ok(buf)
+    }
+}
+
+impl D3d11NvencEncoder {
+    /// `device` must be the same `ID3D11Device`, and `context` the same
+    /// shared immediate context, every other D3D11 element in this pipeline
+    /// uses — see this type's own docs on why.
+    ///
+    /// Opens the encoder eagerly, so a missing `h264_nvenc`/`hevc_nvenc`, a
+    /// driver too old for the linked ffmpeg's NVENC API version, or a
+    /// resolution this GPU's encode block rejects all surface here as a
+    /// typed error rather than at the first frame.
+    pub fn new(
+        name: impl Into<String>,
+        device: &ID3D11Device,
+        context: Arc<Mutex<ID3D11DeviceContext>>,
+        options: D3d11NvencEncoderOptions,
+    ) -> std::result::Result<Self, D3d11NvencEncoderError> {
+        let name: Arc<str> = name.into().into();
+        let pp_log = element_pp_log(ElementType::D3d11NvencEncoder, &name, None);
+
+        let encoder_name = options.codec.encoder_name();
+        let codec = ffmpeg::encoder::find_by_name(encoder_name)
+            .ok_or_else(|| D3d11NvencEncoderError::CodecNotFound(encoder_name.into()))?;
+
+        let hw_device_ctx = unsafe { create_hw_device_ctx(device) }
+            .map_err(D3d11NvencEncoderError::HwDeviceInit)?;
+        let hw_frames_ctx = match unsafe { create_hw_frames_ctx(hw_device_ctx, &options) } {
+            Ok(ctx) => ctx,
+            Err(error) => {
+                unsafe { free_buffer(hw_device_ctx) };
+                return Err(error);
+            }
+        };
+
+        // From here on every early return has to release both contexts, so
+        // the work is done in a closure and the cleanup written once.
+        let opened = (|| -> std::result::Result<ffmpeg::encoder::Video, D3d11NvencEncoderError> {
+            let mut ctx = ffmpeg::codec::context::Context::new_with_codec(codec);
+            ctx.set_time_base(options.time_base);
+
+            let mut video = ctx.encoder().video()?;
+            video.set_width(options.width);
+            video.set_height(options.height);
+            // The *frame* format is the hardware one; `sw_format` on the
+            // frames context above is what says what those textures hold.
+            video.set_format(ffmpeg::format::Pixel::D3D11);
+            video.set_time_base(options.time_base);
+            video.set_frame_rate(Some(options.frame_rate));
+            video.set_bit_rate(options.bit_rate);
+            video.set_gop(options.gop_size);
+            unsafe {
+                let ptr = video.as_mut_ptr();
+                (*ptr).hw_frames_ctx = ffi::av_buffer_ref(hw_frames_ctx);
+            }
+            Ok(video.open_as(codec)?)
+        })();
+
+        let encoder = match opened {
+            Ok(encoder) => encoder,
+            Err(error) => {
+                unsafe {
+                    free_buffer(hw_frames_ctx);
+                    free_buffer(hw_device_ctx);
+                }
+                return Err(error);
+            }
+        };
+
+        let pad = SrcPad::new(format!("{name}_src"));
+        pp_info!(
+            pp_log: &pp_log,
+            "opened: codec={encoder_name}, {}x{}, input={:?}, bit_rate={}, gop_size={}",
+            options.width,
+            options.height,
+            options.input_format,
+            options.bit_rate,
+            options.gop_size
+        );
+        Ok(Self {
+            name,
+            pp_log,
+            encoder,
+            context,
+            hw_device_ctx,
+            hw_frames_ctx,
+            width: options.width,
+            height: options.height,
+            input_format: options.input_format,
+            packet_duration: nominal_packet_duration(options.time_base, options.frame_rate),
+            time_base: options.time_base,
+            pad,
+        })
+    }
+
+    /// This encoder's own codec parameters — what a
+    /// [`crate::elements::Mp4Muxer`] track needs when there's no
+    /// container/demuxer in the loop to get them from, same as
+    /// [`crate::elements::SwEncoder::parameters`].
+    pub fn parameters(&self) -> ffmpeg::codec::Parameters {
+        ffmpeg::codec::Parameters::from(&self.encoder)
+    }
+
+    /// Takes one texture from the encoder's own pool and copies `texture`'s
+    /// `source_subresource` slice into it, under `context`'s lock since
+    /// `CopySubresourceRegion` touches the shared immediate context.
+    ///
+    /// The returned frame owns its pool reference: dropping it returns the
+    /// texture to libavutil's pool.
+    fn stage_input(
+        &self,
+        texture: &ID3D11Texture2D,
+        source_subresource: u32,
+    ) -> std::result::Result<ffmpeg::frame::Video, D3d11NvencEncoderError> {
+        let mut staged = ffmpeg::frame::Video::empty();
+        unsafe {
+            let code = ffi::av_hwframe_get_buffer(self.hw_frames_ctx, staged.as_mut_ptr(), 0);
+            if code < 0 {
+                return Err(D3d11NvencEncoderError::HwFrameGet(code));
+            }
+        }
+
+        // A pool frame carries its texture exactly the way every other
+        // `Pixel::D3D11` frame in this crate does — pointer in `data[0]`,
+        // array slice in `data[1]` — so the same reader works here.
+        let (destination, destination_slice) =
+            d3d11va_texture(&staged).ok_or(D3d11NvencEncoderError::MissingTexture)?;
+        if destination.is_null() {
+            return Err(D3d11NvencEncoderError::MissingTexture);
+        }
+
+        let context = self
+            .context
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        unsafe {
+            // Borrowed, not owned: `ManuallyDrop` keeps this from releasing
+            // a COM reference the pool frame still holds.
+            let destination = std::mem::ManuallyDrop::new(ID3D11Texture2D::from_raw(destination));
+            context.CopySubresourceRegion(
+                &*destination,
+                destination_slice as u32,
+                0,
+                0,
+                0,
+                texture,
+                source_subresource,
+                None,
+            );
+        }
+        Ok(staged)
+    }
+
+    fn drain(&mut self) -> Result<()> {
+        let mut packet = ffmpeg::Packet::empty();
+        loop {
+            match self.encoder.receive_packet(&mut packet) {
+                Ok(()) => {
+                    packet.set_time_base(self.time_base);
+                    if packet.duration() == 0 && self.packet_duration > 0 {
+                        packet.set_duration(self.packet_duration);
+                    }
+                    self.pad.push(MediaBuffer::Packet(Arc::new(packet)))?;
+                    packet = ffmpeg::Packet::empty();
+                }
+                Err(error) if is_codec_drain_boundary(&error) => break,
+                Err(error) => return Err(D3d11NvencEncoderError::from(error).into()),
+            }
+        }
+        Ok(())
+    }
+
+    fn encode(&mut self, frame: &ffmpeg::frame::Video) -> Result<()> {
+        if frame.format() != ffmpeg::format::Pixel::D3D11 {
+            pp_error!(self, "unsupported pixel format: {:?}", frame.format());
+            return Err(D3d11NvencEncoderError::UnsupportedFormat(frame.format()).into());
+        }
+        if frame.width() != self.width || frame.height() != self.height {
+            let error = D3d11NvencEncoderError::DimensionMismatch {
+                actual_width: frame.width(),
+                actual_height: frame.height(),
+                expected_width: self.width,
+                expected_height: self.height,
+            };
+            pp_error!(self, "{error}");
+            return Err(error.into());
+        }
+
+        let (source, source_slice) =
+            d3d11va_texture(frame).ok_or(D3d11NvencEncoderError::MissingTexture)?;
+        if source.is_null() {
+            pp_error!(self, "Pixel::D3D11 frame carried no texture");
+            return Err(D3d11NvencEncoderError::MissingTexture.into());
+        }
+
+        // Borrowed for the duration of the copy only — the incoming frame
+        // still owns this COM reference.
+        let source = std::mem::ManuallyDrop::new(unsafe { ID3D11Texture2D::from_raw(source) });
+        let mut description = Default::default();
+        unsafe { source.GetDesc(&mut description) };
+        if description.Format != self.input_format.dxgi_format() {
+            let error = D3d11NvencEncoderError::TextureFormatMismatch {
+                actual: description.Format.0,
+                expected: self.input_format.dxgi_format().0,
+            };
+            pp_error!(self, "{error}");
+            return Err(error.into());
+        }
+
+        let mut staged = self
+            .stage_input(&source, source_slice as u32)
+            .inspect_err(|error| pp_error!(self, "staging the input texture failed: {error}"))?;
+        // Metadata is part of the buffer contract, not decoration — the
+        // staged frame is a different AVFrame than the one that arrived.
+        staged.set_pts(frame.pts());
+        staged.set_color_space(frame.color_space());
+        staged.set_color_range(frame.color_range());
+
+        self.encoder
+            .send_frame(&staged)
+            .inspect_err(|error| pp_error!(self, "send_frame failed: {error}"))
+            .map_err(D3d11NvencEncoderError::from)?;
+        self.drain()
+    }
+}
+
+impl Drop for D3d11NvencEncoder {
+    fn drop(&mut self) {
+        pp_info!(self, "dropped: freeing hw_frames_ctx and hw_device_ctx");
+        // Order matters only in that both must go; the frames context holds
+        // its own reference on the device context, so either order is safe.
+        unsafe {
+            free_buffer(self.hw_frames_ctx);
+            free_buffer(self.hw_device_ctx);
+        }
+    }
+}
+
+impl Element for D3d11NvencEncoder {
+    fn name(&self) -> Arc<str> {
+        self.name.clone()
+    }
+
+    fn element_type(&self) -> ElementType {
+        ElementType::D3d11NvencEncoder
+    }
+
+    fn pp_log(&self) -> &PpLog {
+        &self.pp_log
+    }
+
+    fn pp_log_mut(&mut self) -> &mut PpLog {
+        &mut self.pp_log
+    }
+}
+
+impl Source for D3d11NvencEncoder {
+    fn src_pads(&mut self) -> &mut [SrcPad] {
+        std::slice::from_mut(&mut self.pad)
+    }
+}
+
+impl Sink for D3d11NvencEncoder {
+    fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+        match buf {
+            MediaBuffer::Video(frame) => self.encode(&frame),
+            MediaBuffer::Eos => {
+                self.encoder
+                    .send_eof()
+                    .inspect_err(|error| pp_error!(self, "send_eof failed: {error}"))
+                    .map_err(D3d11NvencEncoderError::from)?;
+                self.drain()?;
+                self.pad.push(MediaBuffer::Eos)
+            }
+            other => Err(D3d11NvencEncoderError::UnsupportedBuffer(other.kind()).into()),
+        }
+    }
+
+    fn control(&mut self, msg: ControlMsg) -> Result<()> {
+        // Same deliberate choice as `SwEncoder::control`: Seek is forwarded
+        // without flushing, since NVENC can still emit packets originating
+        // before the seek from later `send_frame` calls. A caller needing a
+        // hard encoded-stream discontinuity rebuilds the encoder.
+        self.pad.control(msg)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use windows::Win32::Graphics::{
+        Direct3D::D3D_DRIVER_TYPE_HARDWARE,
+        Direct3D11::{D3D11_SDK_VERSION, D3D11CreateDevice},
+    };
+
+    use super::*;
+
+    /// `None` when this machine has no usable D3D11 device, so the tests
+    /// below skip with a reason rather than failing on a machine that was
+    /// never going to be able to run them.
+    fn try_device() -> Option<(ID3D11Device, Arc<Mutex<ID3D11DeviceContext>>)> {
+        let mut device = None;
+        let mut context = None;
+        let result = unsafe {
+            D3D11CreateDevice(
+                None,
+                D3D_DRIVER_TYPE_HARDWARE,
+                Default::default(),
+                Default::default(),
+                None,
+                D3D11_SDK_VERSION,
+                Some(&mut device),
+                None,
+                Some(&mut context),
+            )
+        };
+        if result.is_err() {
+            eprintln!("skipping: D3D11CreateDevice failed on this machine: {result:?}");
+            return None;
+        }
+        Some((device?, Arc::new(Mutex::new(context?))))
+    }
+
+    fn options(input_format: D3d11NvencInputFormat) -> D3d11NvencEncoderOptions {
+        D3d11NvencEncoderOptions {
+            codec: D3d11NvencCodec::H264,
+            input_format,
+            width: 320,
+            height: 240,
+            time_base: ffmpeg::Rational::new(1, 30),
+            frame_rate: ffmpeg::Rational::new(30, 1),
+            bit_rate: 1_000_000,
+            gop_size: 30,
+        }
+    }
+
+    /// Builds a GPU texture the way every real producer in this crate does
+    /// — plain `windows-rs`, then `wrap_d3d11_texture` — so this exercises
+    /// the actual input shape `consume` receives rather than a frame from
+    /// the encoder's own pool.
+    fn gpu_frame(
+        device: &ID3D11Device,
+        format: DXGI_FORMAT,
+        width: u32,
+        height: u32,
+    ) -> ffmpeg::frame::Video {
+        use windows::Win32::Graphics::{
+            Direct3D11::{D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT},
+            Dxgi::Common::DXGI_SAMPLE_DESC,
+        };
+        let description = D3D11_TEXTURE2D_DESC {
+            Width: width,
+            Height: height,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: format,
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Usage: D3D11_USAGE_DEFAULT,
+            BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
+            CPUAccessFlags: 0,
+            MiscFlags: 0,
+        };
+        let mut texture = None;
+        unsafe { device.CreateTexture2D(&description, None, Some(&mut texture)) }
+            .expect("creating a plain D3D11 texture should succeed on a working device");
+        crate::elements::filter::decoder::d3d11va_decoder::wrap_d3d11_texture(
+            texture.expect("CreateTexture2D succeeded without producing a texture"),
+            width,
+            height,
+        )
+    }
+
+    /// The whole point of this element, end to end: real GPU textures in,
+    /// real encoded packets out, for both input formats. Asserts on the
+    /// packets rather than on `consume` merely returning `Ok`, since a
+    /// silently-empty encoder would pass the latter.
+    #[test]
+    fn encodes_gpu_textures_into_packets() {
+        let Some((device, context)) = try_device() else {
+            return;
+        };
+        let (width, height) = (320u32, 240u32);
+
+        for input_format in [D3d11NvencInputFormat::Nv12, D3d11NvencInputFormat::Bgra] {
+            let mut encoder = match D3d11NvencEncoder::new(
+                format!("test-nvenc-encode-{input_format:?}"),
+                &device,
+                context.clone(),
+                options(input_format),
+            ) {
+                Ok(encoder) => encoder,
+                Err(error) if is_absent_hardware(&error) => {
+                    eprintln!("skipping {input_format:?}: NVENC unavailable here: {error}");
+                    continue;
+                }
+                Err(error) => panic!("{input_format:?} failed to open: {error}"),
+            };
+
+            let packets = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let counted = packets.clone();
+            let sink = crate::elements::AppSink::new("test-nvenc-sink", move |buf| {
+                if matches!(buf, MediaBuffer::Packet(_)) {
+                    counted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                Ok(())
+            });
+            encoder.src_pads()[0].link(Box::new(sink));
+
+            // The factory runs whenever the pool is empty, so this both
+            // exercises fresh textures and — once frames start returning to
+            // the pool — the reuse a real source does.
+            let pool = crate::pool::UnboundObjectPool::new(
+                0,
+                {
+                    let device = device.clone();
+                    let format = input_format.dxgi_format();
+                    move || gpu_frame(&device, format, width, height)
+                },
+                |_| {},
+            );
+            for index in 0..30i64 {
+                let mut frame = pool.get();
+                frame.set_pts(Some(index));
+                encoder
+                    .consume(MediaBuffer::Video(Arc::new(frame)))
+                    .unwrap_or_else(|error| panic!("{input_format:?} frame {index}: {error}"));
+            }
+            encoder
+                .consume(MediaBuffer::Eos)
+                .unwrap_or_else(|error| panic!("{input_format:?} Eos: {error}"));
+
+            let produced = packets.load(std::sync::atomic::Ordering::Relaxed);
+            assert!(
+                produced > 0,
+                "{input_format:?}: 30 GPU frames produced no packets at all"
+            );
+        }
+    }
+
+    /// Only the two conditions this machine genuinely may not meet — no
+    /// NVENC in the linked ffmpeg build, or a driver too old for its NVENC
+    /// API version — are grounds for skipping. Anything else is a real
+    /// failure and must not be swallowed: an earlier version of this test
+    /// treated *every* error as "skip" and reported a green run while
+    /// `av_hwframe_ctx_init` was failing with `E_INVALIDARG` on every call.
+    fn is_absent_hardware(error: &D3d11NvencEncoderError) -> bool {
+        match error {
+            D3d11NvencEncoderError::CodecNotFound(_) => true,
+            // NVENC reports an unusable driver from `avcodec_open2`.
+            D3d11NvencEncoderError::Ffmpeg(_) => true,
+            _ => false,
+        }
+    }
+
+    /// Opening is where every environmental precondition is checked at
+    /// once: `h264_nvenc` present in the linked ffmpeg, a driver new enough
+    /// for its NVENC API version, and a frames context this GPU accepts.
+    #[test]
+    fn opens_for_both_input_formats_on_real_hardware() {
+        let Some((device, context)) = try_device() else {
+            return;
+        };
+        for input_format in [D3d11NvencInputFormat::Nv12, D3d11NvencInputFormat::Bgra] {
+            match D3d11NvencEncoder::new(
+                format!("test-nvenc-{input_format:?}"),
+                &device,
+                context.clone(),
+                options(input_format),
+            ) {
+                Ok(encoder) => {
+                    assert_eq!(encoder.element_type(), ElementType::D3d11NvencEncoder);
+                }
+                Err(error) if is_absent_hardware(&error) => {
+                    eprintln!("skipping {input_format:?}: NVENC unavailable here: {error}");
+                }
+                Err(error) => panic!("{input_format:?} failed to open: {error}"),
+            }
+        }
+    }
+
+    /// The input format is fixed at open time, so a texture that does not
+    /// match must be rejected with a typed error rather than silently
+    /// producing garbage or tripping a Windows API failure later.
+    #[test]
+    fn rejects_a_non_d3d11_frame() {
+        let Some((device, context)) = try_device() else {
+            return;
+        };
+        let Ok(mut encoder) = D3d11NvencEncoder::new(
+            "test-nvenc-reject",
+            &device,
+            context,
+            options(D3d11NvencInputFormat::Nv12),
+        ) else {
+            eprintln!("skipping: NVENC unavailable on this machine");
+            return;
+        };
+
+        let pool = crate::pool::UnboundObjectPool::new(
+            0,
+            || ffmpeg::frame::Video::new(ffmpeg::format::Pixel::NV12, 320, 240),
+            |_| {},
+        );
+        let error = encoder
+            .consume(MediaBuffer::Video(Arc::new(pool.get())))
+            .expect_err("a CPU NV12 frame is not a Pixel::D3D11 frame");
+        assert!(
+            error.to_string().contains("Pixel::D3D11"),
+            "expected an UnsupportedFormat error, got: {error}"
+        );
+    }
+}

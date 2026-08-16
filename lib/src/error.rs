@@ -13,8 +13,8 @@ use crate::elements::WasapiRendererError;
 use crate::elements::WebRtcError;
 #[cfg(all(target_os = "windows", feature = "d3d11"))]
 use crate::elements::{
-    D3d11DownloadError, D3d11RendererError, D3d11TextLayerError, D3d11UploadError,
-    D3d11VideoCompositorError, D3d11vaDecoderError,
+    D3d11DownloadError, D3d11NvencEncoderError, D3d11RendererError, D3d11TextLayerError,
+    D3d11UploadError, D3d11VideoCompositorError, D3d11vaDecoderError,
 };
 #[cfg(all(target_os = "windows", feature = "d3d12"))]
 use crate::elements::{D3d12RendererError, D3d12UploadError, D3d12vaDecoderError};
@@ -127,6 +127,10 @@ pub enum Error {
     #[cfg(all(target_os = "windows", feature = "d3d11"))]
     #[error(transparent)]
     D3d11DownloadError(#[from] D3d11DownloadError),
+
+    #[cfg(all(target_os = "windows", feature = "d3d11"))]
+    #[error(transparent)]
+    D3d11NvencEncoderError(#[from] D3d11NvencEncoderError),
 
     #[cfg(all(target_os = "windows", feature = "d3d11"))]
     #[error(transparent)]

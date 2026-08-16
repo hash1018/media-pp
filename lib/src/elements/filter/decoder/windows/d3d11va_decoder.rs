@@ -441,6 +441,27 @@ pub(crate) fn wrap_d3d11_texture(
 /// libavcodec's own default `bind_flags` only cover what the D3D11 video
 /// decode API itself needs (`D3D11_BIND_DECODER`), not sampling from a
 /// pixel shader.
+/// ORs `flags` into `frames_ctx`'s D3D11VA-specific `bind_flags`.
+///
+/// The one and only place this crate touches [`AVD3D11VAFramesContext`], so
+/// the hand-mirrored layout stays confined to the module that documents its
+/// provenance. `frames_ctx` must be a context libavutil itself allocated —
+/// through `avcodec_get_hw_frames_parameters` (this module) or
+/// `av_hwframe_ctx_alloc` ([`crate::elements::D3d11NvencEncoder`]) — and
+/// must not yet have been passed to `av_hwframe_ctx_init`, since the
+/// struct's own documentation forbids modifying it once frames exist.
+///
+/// libavutil applies no default here: `hwcontext_d3d11va.c` copies
+/// `BindFlags` straight into its `D3D11_TEXTURE2D_DESC`, so leaving it zero
+/// makes `CreateTexture2D` fail with `E_INVALIDARG` rather than producing a
+/// usable pool. Every caller has to say what it needs the textures for.
+pub(crate) unsafe fn or_frames_bind_flags(frames_ctx: *mut ffi::AVHWFramesContext, flags: u32) {
+    unsafe {
+        let d3d11_frames = (*frames_ctx).hwctx as *mut AVD3D11VAFramesContext;
+        (*d3d11_frames).bind_flags |= flags;
+    }
+}
+
 unsafe fn configure_hw_frames_ctx(ctx: *mut ffi::AVCodecContext) -> Result<(), i32> {
     unsafe {
         let mut frames_ref: *mut ffi::AVBufferRef = std::ptr::null_mut();
@@ -455,8 +476,7 @@ unsafe fn configure_hw_frames_ctx(ctx: *mut ffi::AVCodecContext) -> Result<(), i
         }
 
         let frames_ctx = (*frames_ref).data as *mut ffi::AVHWFramesContext;
-        let d3d11_frames = (*frames_ctx).hwctx as *mut AVD3D11VAFramesContext;
-        (*d3d11_frames).bind_flags |= D3D11_BIND_SHADER_RESOURCE.0 as u32;
+        or_frames_bind_flags(frames_ctx, D3D11_BIND_SHADER_RESOURCE.0 as u32);
 
         let result = ffi::av_hwframe_ctx_init(frames_ref);
         if result < 0 {

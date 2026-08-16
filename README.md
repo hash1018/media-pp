@@ -85,7 +85,7 @@ are preserved through stages that do not intentionally create a new timeline.
 | Kind | Elements |
 |---|---|
 | Sources | `FileDemuxer`, `AppSource`, `RtspSource`, `TestVideoSource`, `TestAudioSource`, `DxgiCaptureSource`, `WasapiCaptureSource`, `AudioMixer`, `VideoCompositor`, `D3d11VideoCompositor`, `WebRtcTrackSource` |
-| Filters | `SwDecoder`, `D3d11Decoder`, `D3d12vaDecoder`, `SwEncoder`, `SwAudioEncoder`, `AudioResampler`, `AudioVolume`, `Scaler`, `Pacer`, `VideoSynchronizer`, `D3d11Upload`, `D3d11Download`, `D3d12Upload`, `Tee` |
+| Filters | `SwDecoder`, `D3d11Decoder`, `D3d12vaDecoder`, `SwEncoder`, `D3d11NvencEncoder`, `SwAudioEncoder`, `AudioResampler`, `AudioVolume`, `Scaler`, `Pacer`, `VideoSynchronizer`, `D3d11Upload`, `D3d11Download`, `D3d12Upload`, `Tee` |
 | Sinks | `FrameCounter`, `PacketCounter`, `AppSink`, `Mp4Muxer`, `SegmentedMp4Muxer`, `HlsMuxer`, `RtspSink`, `D3d11Renderer`, `D3d12Renderer`, `WasapiRenderer`, `OrtDetector`, `WebRtcTrackSink` |
 
 Backend-specific elements are available only on Windows and require their
@@ -101,7 +101,7 @@ The examples are grouped by purpose:
 - `examples/core`: decoding, queues, fan-out, dynamic tees, app sources/sinks,
   audio, muxing, HLS, and CPU compositing.
 - `examples/render`: D3D11/D3D12 playback, upload, capture, synchronization,
-  GPU compositing, and recording.
+  GPU compositing, NVENC hardware encoding, and recording.
 - `examples/rtsp`: publishing, seeking, and receiving RTSP streams.
 - `examples/vision`: scaling and ONNX object detection.
 - `examples/webrtc`: data and encoded A/V loopback pipelines.
@@ -125,7 +125,7 @@ The library has no default features.
 
 | Feature | Adds | Platform |
 |---|---|---|
-| `d3d11` | D3D11 decode, upload/download, rendering, and GPU compositing | Windows |
+| `d3d11` | D3D11 decode, upload/download, rendering, GPU compositing, and NVENC encoding | Windows |
 | `d3d12` | D3D12VA decode, upload, and rendering interfaces | Windows |
 | `dxgi-capture` | Desktop capture; also enables `d3d11` | Windows |
 | `wasapi-capture` | System-audio and microphone capture | Windows |
@@ -176,6 +176,9 @@ buffers are not logged one record per buffer.
   immediate context.
 - `D3d11Decoder` uses a fixed-size FFmpeg surface pool; `extra_hw_frames` must
   cover the deepest downstream buffering.
+- `D3d11NvencEncoder` needs an NVIDIA GPU and an FFmpeg build with NVENC. It
+  fails to open with a typed error, not a panic, on any other GPU. The other
+  `d3d11` elements are vendor-neutral.
 - RTSP publishing requires an external server that accepts publishing, such as
   MediaMTX.
 - Tests needing real media read `MEDIA_PP_TEST_VIDEO`. They skip when it is

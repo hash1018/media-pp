@@ -22,6 +22,11 @@ pub use encoder::{
     AudioCodec, SwAudioEncoder, SwAudioEncoderError, SwAudioEncoderOptions, SwEncoder,
     SwEncoderError, SwEncoderOptions, VideoCodec,
 };
+#[cfg(all(target_os = "windows", feature = "d3d11"))]
+pub use encoder::{
+    D3d11NvencCodec, D3d11NvencEncoder, D3d11NvencEncoderError, D3d11NvencEncoderOptions,
+    D3d11NvencInputFormat,
+};
 pub use pacer::{Pacer, PacerError};
 pub use scaler::{Scaler, ScalerError};
 pub use tee::{Tee, TeeBuilder, TeeHandle};
