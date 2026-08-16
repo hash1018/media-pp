@@ -1,5 +1,8 @@
 use std::{
-    sync::{atomic::AtomicUsize, mpsc},
+    sync::{
+        atomic::{AtomicBool, AtomicUsize},
+        mpsc,
+    },
     thread,
     time::Duration,
 };
@@ -10,6 +13,11 @@ use crate::elements::{
     TestVideoSource,
 };
 use crate::test_support::try_test_video;
+use crate::{
+    control::{ControlReceiver, drain_control},
+    element::{Source, SourceElement},
+    pad::SrcPad,
+};
 
 /// End-to-end: `run()` (async — starts the background thread and
 /// returns right away), then `pause()`/`stop()` (skipping `resume()`)
@@ -55,6 +63,146 @@ fn pause_then_stop_returns_promptly() {
         !events.iter().any(|e| matches!(e, BusEvent::Error { .. })),
         "unexpected error event(s): {events:?}"
     );
+}
+
+struct BurstSource {
+    pp_log: PpLog,
+    pad: SrcPad,
+    ready: Arc<AtomicBool>,
+    buffers: usize,
+}
+
+impl Element for BurstSource {
+    fn name(&self) -> Arc<str> {
+        "burst".into()
+    }
+
+    fn element_type(&self) -> ElementType {
+        ElementType::Other
+    }
+
+    fn pp_log(&self) -> &PpLog {
+        &self.pp_log
+    }
+
+    fn pp_log_mut(&mut self) -> &mut PpLog {
+        &mut self.pp_log
+    }
+}
+
+impl Source for BurstSource {
+    fn src_pads(&mut self) -> &mut [SrcPad] {
+        std::slice::from_mut(&mut self.pad)
+    }
+}
+
+impl SourceElement for BurstSource {
+    fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
+        for _ in 0..self.buffers {
+            self.pad
+                .push(MediaBuffer::Packet(Arc::new(ffmpeg_next::Packet::empty())))?;
+        }
+        self.ready.store(true, Ordering::Release);
+        loop {
+            if drain_control(control, self, bus)?.stopped {
+                return Ok(());
+            }
+            thread::yield_now();
+        }
+    }
+
+    fn seek(&mut self, target: Duration) -> Result<Duration> {
+        Ok(target)
+    }
+}
+
+struct SlowEosSink {
+    pp_log: PpLog,
+    count: Arc<AtomicUsize>,
+    saw_eos: Arc<AtomicBool>,
+}
+
+impl Element for SlowEosSink {
+    fn name(&self) -> Arc<str> {
+        "slow-eos".into()
+    }
+
+    fn element_type(&self) -> ElementType {
+        ElementType::Other
+    }
+
+    fn pp_log(&self) -> &PpLog {
+        &self.pp_log
+    }
+
+    fn pp_log_mut(&mut self) -> &mut PpLog {
+        &mut self.pp_log
+    }
+}
+
+impl Sink for SlowEosSink {
+    fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+        if buf.is_eos() {
+            self.saw_eos.store(true, Ordering::Release);
+        } else {
+            thread::sleep(Duration::from_millis(5));
+            self.count.fetch_add(1, Ordering::AcqRel);
+        }
+        Ok(())
+    }
+
+    fn control(&mut self, _msg: ControlMsg) -> Result<()> {
+        Ok(())
+    }
+}
+
+/// `finish()` is deliberately not a second spelling of `stop()`: even from a
+/// paused state it resumes the queue, places EOS behind the source's backlog,
+/// and waits until every queued buffer and EOS have reached the terminal sink.
+#[test]
+fn finish_drains_queued_data_and_eos_even_while_paused() {
+    const BUFFERS: usize = 24;
+    let ready = Arc::new(AtomicBool::new(false));
+    let count = Arc::new(AtomicUsize::new(0));
+    let saw_eos = Arc::new(AtomicBool::new(false));
+    let source = BurstSource {
+        pp_log: element_pp_log(ElementType::Other, "burst", None),
+        pad: SrcPad::new("burst_src"),
+        ready: ready.clone(),
+        buffers: BUFFERS,
+    };
+    let pipeline = Pipeline::new("finish-test", source, |source, ctx| {
+        let branch = ctx
+            .branch()
+            .queue("backlog", BUFFERS)
+            .to(Box::new(SlowEosSink {
+                pp_log: element_pp_log(ElementType::Other, "slow-eos", None),
+                count: count.clone(),
+                saw_eos: saw_eos.clone(),
+            }))?;
+        ctx.attach(source, 0, branch)?;
+        Ok(())
+    })
+    .expect("test pipeline wiring must succeed");
+
+    pipeline.run();
+    while !ready.load(Ordering::Acquire) {
+        thread::yield_now();
+    }
+    pipeline.pause();
+    pipeline.finish();
+
+    assert_eq!(count.load(Ordering::Acquire), BUFFERS);
+    assert!(
+        saw_eos.load(Ordering::Acquire),
+        "terminal sink never received EOS"
+    );
+    let errors: Vec<_> = pipeline
+        .bus()
+        .iter()
+        .filter(|event| matches!(event, BusEvent::Error { .. }))
+        .collect();
+    assert!(errors.is_empty(), "unexpected finish errors: {errors:?}");
 }
 
 /// [`PipelineBuilder`] with two independent, indefinitely-running

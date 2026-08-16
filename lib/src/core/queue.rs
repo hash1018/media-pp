@@ -16,7 +16,7 @@ use thiserror::Error as ThisError;
 use crate::{
     buffer::MediaBuffer,
     bus::{Bus, BusEvent},
-    control::{self, ControlMsg, ControlReceiver, ControlSender},
+    control::{self, ControlMsg, ControlReceiver, ControlSender, RequestKind},
     element::{Element, ElementType, Sink, element_pp_log},
     error::Result,
 };
@@ -369,7 +369,11 @@ fn worker_loop(
         pp_log: &pp_log,
     };
     loop {
-        if let Some((msg, ack)) = control_rx.try_recv() {
+        if let Some((request, ack)) = control_rx.try_recv() {
+            let RequestKind::Control(msg) = request else {
+                let _ = ack.send(());
+                continue;
+            };
             if apply_control(
                 &data_rx,
                 &mut downstream,
@@ -389,10 +393,14 @@ fn worker_loop(
             recv(control_rx.rx) -> req => {
                 match req {
                     Ok(req) => {
+                        let RequestKind::Control(msg) = req.kind else {
+                            let _ = req.ack.send(());
+                            continue;
+                        };
                         if apply_control(
                             &data_rx,
                             &mut downstream,
-                            req.msg,
+                            msg,
                             &req.ack,
                             &control_rx,
                             &error_reporter,
@@ -500,7 +508,13 @@ fn apply_control(
         // while paused (see the type-level docs), so there's no
         // legitimate traffic this could ever cut off.
         let (msg, ack) = match control_rx.rx.recv_timeout(STOP_POLL_INTERVAL) {
-            Ok(req) => (req.msg, req.ack),
+            Ok(req) => {
+                let RequestKind::Control(msg) = req.kind else {
+                    let _ = req.ack.send(());
+                    continue;
+                };
+                (msg, req.ack)
+            }
             Err(RecvTimeoutError::Timeout) => {
                 if stop.load(Ordering::Relaxed) {
                     pp_info!(pp_log: error_reporter.pp_log, "worker: stop flag set while paused, ending");

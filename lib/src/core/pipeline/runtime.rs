@@ -1,7 +1,7 @@
 use std::{
     sync::{
         Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     thread::{self, JoinHandle},
     time::Duration,
@@ -52,7 +52,8 @@ use super::{PipelineBuilder, builder::SourceEntry};
 /// synchronous return path left to carry it.
 ///
 /// A `Pipeline` isn't reusable once `run()` has been called (whether it
-/// finished via every source's natural `Eos` or [`Pipeline::stop`]) — a
+/// finished via every source's natural `Eos`, [`Pipeline::finish`], or
+/// [`Pipeline::stop`]) — a
 /// second `run()` call is a no-op; build a fresh `Pipeline` for another
 /// play-through.
 pub struct Pipeline {
@@ -73,8 +74,8 @@ pub struct Pipeline {
     /// every source actually finishes.
     pub(super) bus: Mutex<Option<Bus>>,
     /// One [`ControlSender`] per source, in the same order
-    /// [`PipelineBuilder::add_source`] was called — [`Pipeline::stop`]/
-    /// `pause`/`resume`/`seek` send to every one of these in turn (each
+    /// [`PipelineBuilder::add_source`] was called — [`Pipeline::finish`]/
+    /// `stop`/`pause`/`resume`/`seek` send to every one of these in turn (each
     /// `send` is its own synchronous rendezvous with that source's own
     /// control cascade — see [`crate::control::ControlSender::send`] — so
     /// this serializes across sources rather than fanning out in
@@ -101,6 +102,11 @@ pub struct Pipeline {
     /// `seek`) only ever needs "is anything still running at all", never
     /// which specific source.
     pub(super) running: Arc<AtomicUsize>,
+    /// Tracks whether `Pipeline::pause` has completed without a matching
+    /// resume. This cannot be inferred from `Clock`: pausing before the first
+    /// media timestamp leaves an unset clock unchanged while downstream
+    /// queues are nevertheless paused.
+    pub(super) paused: AtomicBool,
     /// Handles for every source thread started by [`Pipeline::run`]. They
     /// are retained so dropping the pipeline can synchronously stop and
     /// join live sources instead of leaving detached work behind.
@@ -261,6 +267,7 @@ impl Pipeline {
         );
         self.clock.interrupt();
         self.clock.pause();
+        self.paused.store(true, Ordering::Release);
         for control_tx in &self.control_txs {
             control_tx.send(msg);
         }
@@ -277,6 +284,7 @@ impl Pipeline {
         if self.running.load(Ordering::Acquire) == 0 {
             return;
         }
+        self.paused.store(false, Ordering::Release);
         let msg = ControlMsg::Resume;
         pp_trace!(
             pp_log: &self.pp_log,
@@ -308,6 +316,7 @@ impl Pipeline {
             return;
         }
         let msg = ControlMsg::Stop;
+        self.paused.store(false, Ordering::Release);
         pp_trace!(
             pp_log: &self.pp_log,
             "event=control control={msg:?} phase=requested"
@@ -320,6 +329,53 @@ impl Pipeline {
             pp_log: &self.pp_log,
             "event=control control={msg:?} phase=completed outcome=ok"
         );
+    }
+
+    /// Gracefully completes every source and waits for the whole graph to
+    /// drain. Each source stops producing and places `MediaBuffer::Eos` behind
+    /// its already-produced data; queues preserve that order, stateful codecs
+    /// flush delayed output, and muxers finalize only after their EOS arrives.
+    ///
+    /// Unlike [`Pipeline::stop`], this does not abandon queued work. If the
+    /// pipeline is paused, it resumes the control cascade first so a full
+    /// paused queue cannot prevent its ordered EOS from being enqueued. The
+    /// call returns only after every source thread (and the Queue workers each
+    /// source owns) has finished. The pipeline is not reusable afterward.
+    pub fn finish(&self) {
+        if self.running.load(Ordering::Acquire) == 0 {
+            self.join_workers();
+            return;
+        }
+
+        pp_trace!(
+            pp_log: &self.pp_log,
+            "event=finish phase=requested"
+        );
+        self.clock.interrupt();
+        if self.paused.load(Ordering::Acquire) {
+            self.resume();
+        }
+        for control_tx in &self.control_txs {
+            control_tx.finish();
+        }
+        self.join_workers();
+        pp_trace!(
+            pp_log: &self.pp_log,
+            "event=finish phase=completed outcome=ok"
+        );
+    }
+
+    fn join_workers(&self) {
+        let current_thread = thread::current().id();
+        let mut workers = self
+            .workers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for worker in workers.drain(..) {
+            if worker.thread().id() != current_thread {
+                let _ = worker.join();
+            }
+        }
     }
 
     /// Jumps to an absolute position from the start of the media. Blocks
@@ -389,17 +445,6 @@ impl Drop for Pipeline {
         // senders would not wake a source polling an empty control channel.
         self.stop();
 
-        let current_thread = thread::current().id();
-        let workers = self
-            .workers
-            .get_mut()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        for worker in workers.drain(..) {
-            // A custom source can indirectly retain the last Pipeline Arc.
-            // In that unusual case its own worker must not try to join itself.
-            if worker.thread().id() != current_thread {
-                let _ = worker.join();
-            }
-        }
+        self.join_workers();
     }
 }

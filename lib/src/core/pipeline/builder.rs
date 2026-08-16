@@ -1,4 +1,7 @@
-use std::sync::{Arc, Mutex, atomic::AtomicUsize};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, AtomicUsize},
+};
 
 use crate::{
     bus::{Bus, BusReceiver},
@@ -111,6 +114,7 @@ impl PipelineBuilder {
             playback_clock: self.playback_clock,
             bus_rx: self.bus_rx,
             running: Arc::new(AtomicUsize::new(0)),
+            paused: AtomicBool::new(false),
             workers: Mutex::new(Vec::new()),
             graph: self.graph,
         })

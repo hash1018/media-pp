@@ -20,7 +20,7 @@ use windows::Win32::{
 use crate::{
     buffer::MediaBuffer,
     bus::{Bus, BusEvent},
-    control::{self, ControlMsg, ControlOutcome, ControlReceiver},
+    control::{self, ControlMsg, ControlOutcome, ControlReceiver, RequestKind},
     element::{Element, ElementType, Source, SourceElement, element_pp_log},
     error::Result,
     pad::SrcPad,
@@ -352,7 +352,14 @@ impl WasapiCaptureSource {
     /// no longer be guaranteed.
     fn handle_control(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<ControlOutcome> {
         let mut paused_for = Duration::ZERO;
-        while let Some((msg, ack)) = control.try_recv() {
+        while let Some((request, ack)) = control.try_recv() {
+            let RequestKind::Control(msg) = request else {
+                control::apply_finish(self, bus, &ack);
+                return Ok(ControlOutcome {
+                    stopped: true,
+                    paused_for,
+                });
+            };
             if msg != ControlMsg::Pause {
                 if control::apply_one(self, bus, msg, &ack)? {
                     return Ok(ControlOutcome {
@@ -376,6 +383,15 @@ impl WasapiCaptureSource {
 
             loop {
                 let Some((paused_msg, paused_ack)) = control.recv() else {
+                    paused_for += pause_start.elapsed();
+                    return Ok(ControlOutcome {
+                        stopped: true,
+                        paused_for,
+                    });
+                };
+
+                let RequestKind::Control(paused_msg) = paused_msg else {
+                    control::apply_finish(self, bus, &paused_ack);
                     paused_for += pause_start.elapsed();
                     return Ok(ControlOutcome {
                         stopped: true,

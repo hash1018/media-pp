@@ -214,7 +214,8 @@ pub trait Source: Element {
 /// concrete implementation directly. Sources typically wrap blocking I/O
 /// reads (demuxer, file/network source).
 pub trait SourceElement: Source {
-    /// Drives this source until `Eos` (normal completion) or `Stop` (see
+    /// Drives this source until `Eos` (normal completion),
+    /// [`crate::pipeline::Pipeline::finish`], or `Stop` (see
     /// [`ControlMsg::Stop`]) — call [`crate::control::drain_control`]
     /// once per loop iteration to make `control` responsive between
     /// blocking reads.

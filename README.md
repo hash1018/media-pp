@@ -79,6 +79,8 @@ The core types are deliberately small:
 Buffers use shared ownership, so fan-out clones references rather than media
 payloads. PTS, duration, packet time bases, video color information, and EOS
 are preserved through stages that do not intentionally create a new timeline.
+Use `Pipeline::finish` to stop a live source with ordered EOS and drain queued
+buffers, codecs, and muxers; `Pipeline::stop` abandons buffered work immediately.
 
 ## Element inventory
 

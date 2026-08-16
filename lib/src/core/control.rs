@@ -42,6 +42,15 @@ pub enum ControlMsg {
     Seek(Duration),
 }
 
+/// A request carried by a control channel. Ordinary controls cascade through
+/// the graph immediately; `Finish` is source-only because graceful completion
+/// must enter the graph as an ordered [`crate::buffer::MediaBuffer::Eos`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RequestKind {
+    Control(ControlMsg),
+    Finish,
+}
+
 /// One in-flight control request: the message plus a rendezvous channel
 /// the receiver acks once it (and everything it cascaded into downstream)
 /// has finished handling it — this is what makes
@@ -51,7 +60,7 @@ pub enum ControlMsg {
 /// not the [`ControlReceiver::try_recv`]/[`ControlReceiver::recv`]
 /// wrappers used everywhere else).
 pub(crate) struct Request {
-    pub(crate) msg: ControlMsg,
+    pub(crate) kind: RequestKind,
     pub(crate) ack: Sender<()>,
 }
 
@@ -85,26 +94,36 @@ impl ControlSender {
     /// (returns immediately) if nothing is on the other end to receive it
     /// (e.g. the pipeline already finished).
     pub fn send(&self, msg: ControlMsg) {
+        self.send_request(RequestKind::Control(msg));
+    }
+
+    /// Requests source-originated EOS without exposing `Finish` as a
+    /// downstream [`ControlMsg`]. Used only by [`crate::pipeline::Pipeline`].
+    pub(crate) fn finish(&self) {
+        self.send_request(RequestKind::Finish);
+    }
+
+    fn send_request(&self, kind: RequestKind) {
         let (ack_tx, ack_rx) = crossbeam_channel::bounded(0);
-        if self.tx.send(Request { msg, ack: ack_tx }).is_ok() {
+        if self.tx.send(Request { kind, ack: ack_tx }).is_ok() {
             let _ = ack_rx.recv();
         }
     }
 }
 
 impl ControlReceiver {
-    pub(crate) fn try_recv(&self) -> Option<(ControlMsg, Sender<()>)> {
-        self.rx.try_recv().ok().map(|r| (r.msg, r.ack))
+    pub(crate) fn try_recv(&self) -> Option<(RequestKind, Sender<()>)> {
+        self.rx.try_recv().ok().map(|r| (r.kind, r.ack))
     }
 
-    pub(crate) fn recv(&self) -> Option<(ControlMsg, Sender<()>)> {
-        self.rx.recv().ok().map(|r| (r.msg, r.ack))
+    pub(crate) fn recv(&self) -> Option<(RequestKind, Sender<()>)> {
+        self.rx.recv().ok().map(|r| (r.kind, r.ack))
     }
 }
 
-/// What draining pending control messages actually did — whether `Stop`
-/// ended it, and how long (if any) was spent frozen inside a `Pause`/
-/// `Resume` pair. A source built on wall-clock scheduling (an elapsed-time
+/// What draining pending source requests actually did — whether `Stop` or
+/// source-only `Finish` ended it, and how long (if any) was spent frozen
+/// inside a `Pause`/`Resume` pair. A source built on wall-clock scheduling (an elapsed-time
 /// budget like [`crate::elements::TestAudioSource`]/
 /// [`crate::elements::AudioMixer`], or an absolute next-tick deadline like
 /// [`crate::elements::TestVideoSource`]/`DxgiCaptureSource`)
@@ -114,9 +133,12 @@ impl ControlReceiver {
 /// burst of catch-up work owed all at once.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ControlOutcome {
-    /// `true` if `Stop` was seen: the caller should return `Ok(())`
-    /// immediately, without pushing a final `Eos` (`Stop` means abandon,
-    /// not drain to completion).
+    /// `true` if either `Stop` or source-only `Finish` was seen: the caller
+    /// should return `Ok(())` immediately. `Stop` abandons without EOS;
+    /// `Finish` has already pushed ordered EOS from the source boundary.
+    /// Keeping this terminal flag true for both also makes existing custom
+    /// source loops honor the new graceful request without continuing to emit
+    /// after EOS.
     pub stopped: bool,
     /// Wall-clock time from starting the synchronous downstream `Pause`
     /// cascade through finishing the matching `Resume` (or terminating
@@ -142,7 +164,7 @@ pub struct ControlOutcome {
 /// before that blocking step; one that *can* (e.g.
 /// [`crate::elements::AppSource`]'s channel receive) selects on both
 /// instead, calling `apply_one`/`wait_out_pause` directly so a
-/// pending `Stop` is never left waiting behind a slow/absent producer —
+/// pending `Stop`/`Finish` is never left waiting behind a slow/absent producer —
 /// same reason `WasapiCaptureSource` also drives the
 /// raw receiver directly, to bracket the wait with resetting/restarting
 /// its capture device rather than leaving it running unread through the
@@ -155,7 +177,14 @@ pub fn drain_control<S: SourceElement>(
     bus: &Bus,
 ) -> Result<ControlOutcome> {
     let mut paused_for = Duration::ZERO;
-    while let Some((msg, ack)) = control.try_recv() {
+    while let Some((request, ack)) = control.try_recv() {
+        let RequestKind::Control(msg) = request else {
+            apply_finish(source, bus, &ack);
+            return Ok(ControlOutcome {
+                stopped: true,
+                paused_for,
+            });
+        };
         if msg == ControlMsg::Pause {
             // Start measuring before forwarding Pause. `apply_one` is a
             // synchronous cascade and may itself spend substantial time
@@ -185,6 +214,37 @@ pub fn drain_control<S: SourceElement>(
         stopped: false,
         paused_for,
     })
+}
+
+/// Applies one source-only graceful completion request. Unlike
+/// [`apply_one`], this never calls `Sink::control`: EOS has to sit behind every
+/// already-produced buffer in each data path so queues and stateful elements
+/// drain in order.
+pub(crate) fn apply_finish<S: SourceElement>(source: &mut S, bus: &Bus, ack: &Sender<()>) {
+    pp_trace!(
+        pp_log: source.pp_log(),
+        "event=finish phase=received"
+    );
+    let pp_log = source.pp_log().clone();
+    let element_type = source.element_type();
+    let name = source.name();
+    for pad in source.src_pads() {
+        if let Err(error) = pad.push_eos(&pp_log) {
+            bus.post(
+                &pp_log,
+                BusEvent::Error {
+                    element_type,
+                    name: name.clone(),
+                    error,
+                },
+            );
+        }
+    }
+    let _ = ack.send(());
+    pp_trace!(
+        pp_log: source.pp_log(),
+        "event=finish phase=completed outcome=ok"
+    );
 }
 
 /// Applies one already-received control message to `source`: repositions
@@ -238,18 +298,22 @@ pub(crate) fn apply_one_unacked<S: SourceElement>(
 }
 
 /// Blocks on `control` alone — not whatever `source.run()` itself is
-/// otherwise waiting on — until `Resume` or `Stop`, applying (and acking)
-/// every message seen in between via [`apply_one`]. Returns `true` if
-/// `Stop` ended it (including the sender simply going away, treated the
-/// same as `Stop`); `false` once `Resume` arrives.
+/// otherwise waiting on — until `Resume`, `Stop`, or `Finish`, applying (and
+/// acking) every request seen in between. Returns `true` if `Stop`/`Finish`
+/// ended it (including the sender simply going away, treated the same as
+/// `Stop`); `false` once `Resume` arrives.
 pub(crate) fn wait_out_pause<S: SourceElement>(
     control: &ControlReceiver,
     source: &mut S,
     bus: &Bus,
 ) -> Result<bool> {
     loop {
-        let Some((msg, ack)) = control.recv() else {
+        let Some((request, ack)) = control.recv() else {
             return Ok(true); // sender gone — treat like Stop
+        };
+        let RequestKind::Control(msg) = request else {
+            apply_finish(source, bus, &ack);
+            return Ok(true);
         };
         if apply_one(source, bus, msg, &ack)? {
             return Ok(true);

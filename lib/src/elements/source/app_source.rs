@@ -7,7 +7,10 @@ use thiserror::Error as ThisError;
 use crate::{
     buffer::MediaBuffer,
     bus::{Bus, BusEvent},
-    control::{ControlMsg, ControlReceiver, apply_one, drain_control, wait_out_pause},
+    control::{
+        ControlMsg, ControlReceiver, RequestKind, apply_finish, apply_one, drain_control,
+        wait_out_pause,
+    },
     element::{Element, ElementType, Source, SourceElement, element_pp_log},
     error::Result,
     pad::SrcPad,
@@ -150,15 +153,24 @@ impl SourceElement for AppSource {
                 recv(control.rx) -> req => {
                     match req {
                         Ok(req) => {
-                            if apply_one(self, bus, req.msg, &req.ack)? {
-                                pp_info!(self, "stopped");
-                                return Ok(());
-                            }
-                            if req.msg == ControlMsg::Pause
-                                && wait_out_pause(control, self, bus)?
-                            {
-                                pp_info!(self, "stopped");
-                                return Ok(());
+                            match req.kind {
+                                RequestKind::Finish => {
+                                    apply_finish(self, bus, &req.ack);
+                                    pp_info!(self, "finished");
+                                    return Ok(());
+                                }
+                                RequestKind::Control(msg) => {
+                                    if apply_one(self, bus, msg, &req.ack)? {
+                                        pp_info!(self, "stopped");
+                                        return Ok(());
+                                    }
+                                    if msg == ControlMsg::Pause
+                                        && wait_out_pause(control, self, bus)?
+                                    {
+                                        pp_info!(self, "stopped");
+                                        return Ok(());
+                                    }
+                                }
                             }
                         }
                         // The Pipeline itself is gone — nothing left to drive this.
