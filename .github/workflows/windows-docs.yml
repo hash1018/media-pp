@@ -70,10 +70,19 @@ jobs:
 
       # Every feature, so this build stays a strict superset of docs.rs, which
       # can only reach the non-Windows ones.
+      #
+      # `DOCS_RS` is what the `ort` feature needs here. `ort-sys`'s build script
+      # otherwise downloads ONNX Runtime and links its dylibs into the target
+      # directory, which panicked on the runner because symlinks need Developer
+      # Mode and its copy fallback could not resolve the destination. Documenting
+      # never links, and `ort-sys` returns early when this is set. It is safe for
+      # the rest of the graph: `ffmpeg-sys-next` does not read `DOCS_RS`, so the
+      # bindings above are still generated from the pinned headers.
       - name: Build Windows API documentation
         shell: pwsh
         env:
           RUSTDOCFLAGS: --cfg docsrs
+          DOCS_RS: "1"
         run: |
           cargo doc -p media-pp --no-deps --features d3d11-renderer,d3d12-renderer,dxgi-capture,wasapi-capture,wasapi-renderer,webrtc,ort
           '<meta http-equiv="refresh" content="0; url=media_pp/">' | Set-Content -Encoding utf8 target/doc/index.html
