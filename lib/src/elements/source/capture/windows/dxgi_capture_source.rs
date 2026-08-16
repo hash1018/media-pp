@@ -797,8 +797,23 @@ impl DxgiCaptureSource {
 
     /// Builds the next frame to push — the unit of work `run` does once
     /// per emission tick, real change or repeat — and stamps the next
-    /// `pts`. Dispatches to [`DxgiCaptureSource::emit_frame_cpu`] or
+    /// `pts` and this source's fixed color description. Dispatches to
+    /// [`DxgiCaptureSource::emit_frame_cpu`] or
     /// [`DxgiCaptureSource::emit_frame_gpu`] depending on `self.gpu_mode`.
+    ///
+    /// Both modes produce BGRA, so both get the same description, and it
+    /// matches what [`crate::elements::D3d11VideoCompositor`] already stamps
+    /// on its own BGRA output: `Space::RGB` because these are RGB samples
+    /// with no luma/chroma matrix applied, and `Range::JPEG` because desktop
+    /// pixels are full-range 0-255, not studio-swing.
+    ///
+    /// Downstream consumers read this rather than guessing:
+    /// `D3d11VideoCompositor` uses it to pick its NV12 conversion matrix,
+    /// and [`crate::elements::D3d11NvencEncoder`] forwards it. Note it does
+    /// **not** change what a BGRA-input NVENC recording is tagged with —
+    /// NVENC converts RGB to YUV inside its own encode block with a fixed
+    /// matrix and tags the bitstream to match what it actually did, which
+    /// is why that path stays self-consistent either way.
     fn emit_frame(
         &mut self,
     ) -> std::result::Result<
@@ -811,6 +826,8 @@ impl DxgiCaptureSource {
             self.emit_frame_cpu()
         };
         frame.set_pts(Some(self.frame_index));
+        frame.set_color_space(ffmpeg::color::Space::RGB);
+        frame.set_color_range(ffmpeg::color::Range::JPEG);
         self.frame_index += 1;
         Ok(frame)
     }
@@ -1324,5 +1341,80 @@ mod tests {
         composite_cursor(&mut dst, stride, 2, 1, 0, 0, &shape);
         assert_eq!(dst[0], 0b1010_1010 ^ 0b0101_0101);
         assert_eq!(&dst[4..8], &[77, 88, 99, 255]);
+    }
+
+    /// Every emitted frame has to describe its own color, in both capture
+    /// modes: `D3d11VideoCompositor` reads exactly these two fields to pick
+    /// an NV12 conversion matrix, and leaving them unset makes it fall back
+    /// to a guess instead of using what this source actually produces.
+    ///
+    /// Skips when the machine has no desktop to duplicate (a headless or
+    /// session-0 runner), since that is a real environment rather than a
+    /// failure.
+    #[test]
+    fn emitted_frames_describe_full_range_rgb_in_both_modes() {
+        use crate::{buffer::MediaBuffer, elements::AppSink, pipeline::Pipeline};
+        use std::sync::{Arc, Mutex};
+
+        for capture_mode in [
+            CaptureMode::Cpu {
+                include_cursor: false,
+            },
+            CaptureMode::Gpu,
+        ] {
+            let options = DxgiCaptureOptions {
+                fps: 30,
+                capture_mode: capture_mode.clone(),
+                ..DxgiCaptureOptions::default()
+            };
+            let Ok((source, _width, _height, _device)) =
+                DxgiCaptureSource::open("test-capture", options)
+            else {
+                eprintln!("skipping {capture_mode:?}: no duplicable desktop on this machine");
+                continue;
+            };
+
+            let seen: Arc<Mutex<Option<(ffmpeg::color::Space, ffmpeg::color::Range)>>> =
+                Arc::new(Mutex::new(None));
+            let recorded = seen.clone();
+            let sink = AppSink::new("test-capture-sink", move |buf| {
+                if let MediaBuffer::Video(frame) = buf {
+                    let mut slot = recorded
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    slot.get_or_insert((frame.color_space(), frame.color_range()));
+                }
+                Ok(())
+            });
+
+            let pipeline = Pipeline::new("capture-color", source, |source, ctx| {
+                let branch = ctx.branch().to(Box::new(sink))?;
+                ctx.attach(source, 0, branch)?;
+                Ok(())
+            })
+            .expect("wiring a capture source to an AppSink should succeed");
+            pipeline.run();
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            pipeline.stop();
+
+            let observed = seen
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take();
+            let Some((space, range)) = observed else {
+                eprintln!("skipping {capture_mode:?}: capture produced no frame in time");
+                continue;
+            };
+            assert_eq!(
+                space,
+                ffmpeg::color::Space::RGB,
+                "{capture_mode:?} must describe its BGRA samples as RGB, not leave them unspecified"
+            );
+            assert_eq!(
+                range,
+                ffmpeg::color::Range::JPEG,
+                "{capture_mode:?} must describe desktop pixels as full range"
+            );
+        }
     }
 }

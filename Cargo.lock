@@ -2626,6 +2626,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "screen_record_nvenc"
+version = "0.1.0"
+dependencies = [
+ "ffmpeg-next",
+ "media-pp",
+ "render_common",
+]
+
+[[package]]
 name = "sctk-adwaita"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
