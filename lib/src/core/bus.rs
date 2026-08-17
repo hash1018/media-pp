@@ -29,32 +29,6 @@ pub enum BusEvent {
         element_type: ElementType,
         name: Arc<str>,
     },
-    /// A live source is still emitting on its own schedule, but whatever
-    /// feeds it has stopped producing new content — so every buffer it
-    /// pushes from here on repeats the last one it really captured.
-    ///
-    /// Worth its own event because nothing downstream can tell: the rate,
-    /// the timestamps, and the buffer count all look exactly as they do
-    /// during normal operation. A `PipeWireScreenCaptureSource` capturing a
-    /// monitor posts this when the compositor stops feeding its stream —
-    /// which GNOME does for as long as some client is fullscreen — and a
-    /// caller that cares can warn, switch source, or stop recording rather
-    /// than writing minutes of a frozen image.
-    ///
-    /// Paired with [`BusEvent::SourceResumed`]; `stalled_for` is how long
-    /// production had been stopped when this was posted, not its final
-    /// duration.
-    SourceStalled {
-        element_type: ElementType,
-        name: Arc<str>,
-        stalled_for: Duration,
-    },
-    /// The source that posted an earlier [`BusEvent::SourceStalled`] is
-    /// receiving new content again.
-    SourceResumed {
-        element_type: ElementType,
-        name: Arc<str>,
-    },
     /// Posted by [`crate::control::drain_control`] once
     /// [`crate::element::SourceElement::seek`] returns — `requested` is
     /// whatever [`crate::pipeline::Pipeline::seek`] was called with;
@@ -128,13 +102,6 @@ impl Bus {
             BusEvent::Dropped { .. } => {
                 pp_warn!(pp_log: pp_log, "dropped a buffer (queue full)")
             }
-            BusEvent::SourceStalled { stalled_for, .. } => pp_warn!(
-                pp_log: pp_log,
-                "no new content for {stalled_for:.0?}; emitted buffers now repeat the last one"
-            ),
-            BusEvent::SourceResumed { .. } => {
-                pp_info!(pp_log: pp_log, "producing new content again")
-            }
             BusEvent::Seeked {
                 requested, landed, ..
             } => pp_info!(pp_log: pp_log, "seeked: requested {requested:.2?}, landed {landed:.2?}"),
@@ -192,15 +159,6 @@ impl BusReceiver {
                 BusEvent::Eos { name, .. } => println!("[{name}] eos"),
                 BusEvent::Dropped { name, .. } => {
                     eprintln!("[{name}] dropped a buffer (queue full)")
-                }
-                BusEvent::SourceStalled {
-                    name, stalled_for, ..
-                } => eprintln!(
-                    "[{name}] stalled: no new content for {stalled_for:.0?}, \
-                     buffers now repeat the last one"
-                ),
-                BusEvent::SourceResumed { name, .. } => {
-                    println!("[{name}] resumed producing new content")
                 }
                 BusEvent::Seeked {
                     name,

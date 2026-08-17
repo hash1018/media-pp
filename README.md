@@ -204,8 +204,12 @@ buffers are not logged one record per buffer.
   frames entirely while some client is fullscreen; GNOME's own recorder behaves
   the same way, so this is a compositor behaviour rather than something the
   element can negotiate around. Capturing a *window* is unaffected and keeps
-  delivering at full rate. Either way the element warns about a sustained stall
-  instead of silently repeating its last frame.
+  delivering at full rate. A monitor capture that stops receiving simply keeps
+  emitting its last frame until the screen changes again.
+- Closing a captured *window* ends the capture with a typed `SourceGone` error.
+  The PipeWire stream cannot tell that apart from the stall above, so the
+  element watches the portal session's `Closed` signal instead, which is what
+  keeps a permanent loss distinct from something that may still recover.
 - A *window* stream is sized to the monitor, not to the window: a smaller window
   arrives top-left with the rest of the frame black, and one spanning two
   monitors is clipped rather than widening the stream. The element also follows

@@ -171,6 +171,12 @@ mod windows_example {
                 }
                 _ => {}
             }
+            // A capture that failed will not come back, and recording audio
+            // against a frozen video track is not worth continuing — stop so
+            // the muxer finalizes what it has.
+            if matches!(event, BusEvent::Error { .. }) {
+                pipeline.stop();
+            }
         }
 
         println!("wrote {path}");
@@ -362,6 +368,12 @@ mod linux_example {
                     eprintln!("[{name}] dropped a buffer (queue full)")
                 }
                 _ => {}
+            }
+            // A capture that failed will not come back, and recording audio
+            // against a frozen video track is not worth continuing — stop so
+            // the muxer finalizes what it has.
+            if matches!(event, BusEvent::Error { .. }) {
+                pipeline.stop();
             }
         }
 

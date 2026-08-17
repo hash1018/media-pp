@@ -7,7 +7,7 @@ use std::{
     time::Duration,
 };
 
-use crate::pp_log::{PpLog, pp_info, pp_trace};
+use crate::pp_log::{PpLog, pp_info, pp_trace, pp_warn};
 
 use crate::{
     bus::{Bus, BusEvent, BusReceiver},
@@ -237,6 +237,26 @@ impl Pipeline {
                                 error,
                             },
                         );
+                        // Nothing has told this source's branch that it is
+                        // over: `run` returned instead of being stopped, and
+                        // dropping it merely tears the elements down. A muxer
+                        // waiting on this track would then never write its
+                        // trailer, leaving an unplayable file — so cascade the
+                        // same `Stop` a deliberate shutdown would have sent.
+                        // `Stop` rather than `Eos` because the source failed:
+                        // there is no complete stream to drain, only state to
+                        // finalize.
+                        // The log identity is cloned first: `src_pads` borrows
+                        // the source mutably for the whole loop.
+                        let source_log = source.pp_log().clone();
+                        for pad in source.src_pads() {
+                            if let Err(error) = pad.control(ControlMsg::Stop) {
+                                pp_warn!(
+                                    pp_log: &source_log,
+                                    "failed to stop the branch after a source error: {error}"
+                                );
+                            }
+                        }
                         "error"
                     } else {
                         "ok"

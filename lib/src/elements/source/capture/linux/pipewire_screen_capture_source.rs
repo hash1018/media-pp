@@ -1,6 +1,23 @@
+/// # Closing a captured window ends the capture
+///
+/// Not via the stream, which reports nothing useful: a closed window, a
+/// fullscreen-starved monitor, and a desktop where nothing happens to be moving
+/// are identical from there — zero frames, zero buffers, zero callbacks. The
+/// stream even stays `Streaming` throughout.
+///
+/// The portal knows, though, and says so: closing a captured window makes it
+/// emit the session's `Closed` signal, measured at about six seconds after the
+/// fact on GNOME 50. This element watches for it and ends `run` with
+/// [`PipeWireScreenCaptureSourceError::SourceGone`]. A capture that merely
+/// stopped receiving frames is left alone, since it may still recover.
+/// Reopening is
+/// the caller's decision, the same contract `DxgiCaptureSourceError::AccessLost`
+/// sets on Windows.
+///
 use std::{
     sync::{
         Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
         mpsc::{self, RecvTimeoutError},
     },
     thread::JoinHandle,
@@ -15,7 +32,7 @@ use spa::pod::Pod;
 use spa::sys as spa_sys;
 use thiserror::Error as ThisError;
 
-use crate::pp_log::{PpLog, pp_debug, pp_error, pp_info, pp_warn};
+use crate::pp_log::{PpLog, pp_error, pp_info, pp_warn};
 
 use crate::{
     buffer::MediaBuffer,
@@ -40,18 +57,10 @@ const NEGOTIATION_TIMEOUT: Duration = Duration::from_secs(5);
 /// long, unresponsive block. Same idea as `DxgiCaptureSource`'s own constant.
 const POLL_GRANULARITY: Duration = Duration::from_millis(100);
 
-/// How often [`SourceElement::run`] reports the rate at which the compositor is
-/// actually producing frames, when `Debug` logging is on.
-const CAPTURE_REPORT_INTERVAL: Duration = Duration::from_secs(5);
-
-/// How long the compositor may produce nothing before this element says so.
-///
-/// A still desktop legitimately produces no frames, so silence is not by itself
-/// an error — but a *sustained* silence is indistinguishable downstream from a
-/// working capture of a frozen screen, because every emitted tick still carries
-/// a frame. Long enough not to fire on an idle moment, short enough to name the
-/// condition while it is still happening.
-const STALL_THRESHOLD: Duration = Duration::from_secs(3);
+/// How long the portal-session watcher waits before re-checking whether the
+/// element is still alive. Only bounds shutdown latency; the signal itself
+/// arrives whenever it arrives.
+const SESSION_POLL_GRANULARITY: Duration = Duration::from_millis(250);
 
 /// Errors specific to `PipeWireScreenCaptureSource`. Converts into the crate-wide
 /// `Error` via `?` (see [`crate::error::Error`]).
@@ -87,6 +96,17 @@ pub enum PipeWireScreenCaptureSourceError {
     /// [`PipeWireScreenCaptureSource`]'s own docs on why DMA-BUF is out of scope.
     #[error("compositor negotiated unsupported video format {0:?}")]
     UnsupportedFormat(u32),
+
+    /// What was being captured no longer exists: the portal closed the session
+    /// (a captured window was closed), or the stream itself errored or
+    /// disconnected after having run.
+    ///
+    /// Broken out of [`Self::PipeWire`] because it is terminal — unlike a
+    /// stall, this will not recover — following the "fail fast, the caller
+    /// decides whether to reopen" contract `DxgiCaptureSourceError::AccessLost`
+    /// sets.
+    #[error("the captured source is gone: {0}")]
+    SourceGone(String),
 
     #[error("PipeWireScreenCaptureSource doesn't support seeking a live capture")]
     SeekUnsupported,
@@ -173,23 +193,6 @@ struct Latest {
     /// whatever `open` first saw.
     width: u32,
     height: u32,
-    /// Buffers carrying real content, counted since `open` and never reset:
-    /// the rate report and the stall detector both read it and would otherwise
-    /// consume each other's evidence. Distinguishes
-    /// "the compositor is not producing frames" from "this element is dropping
-    /// them", which is otherwise invisible: the emitted rate is constant either
-    /// way, so a collapse in captured content looks exactly like a still
-    /// desktop.
-    received: u64,
-    /// Buffers that arrived carrying no content at all. Monotonic, like
-    /// [`Latest::received`].
-    empty: u64,
-    /// Times the compositor invoked the process callback at all, whether or not
-    /// a buffer could be taken from it. Counted separately so a stall can say
-    /// which side went quiet: no callbacks means the compositor stopped
-    /// scheduling this stream, while callbacks without usable buffers means it
-    /// is scheduling it but producing nothing.
-    callbacks: u64,
     /// Set when a buffer arrived that this element could not read — currently
     /// only a GPU-resident (DMA-BUF) buffer, which has no CPU mapping. Reported
     /// once by `run` rather than silently dropped, because dropping every frame
@@ -201,7 +204,7 @@ struct Latest {
     /// Set when the PipeWire thread hits an unrecoverable stream error, so
     /// `run` can surface it instead of silently emitting stale frames
     /// forever.
-    error: Option<String>,
+    error: Option<PipeWireScreenCaptureSourceError>,
 }
 
 /// What the PipeWire thread reports back to `open` once, at startup.
@@ -261,11 +264,6 @@ struct Terminate;
 /// measured at 25-35fps against 0fps for a monitor stream under identical
 /// conditions. Prefer it whenever the caller knows it wants one application.
 ///
-/// Because the symptom is otherwise invisible — every emitted tick still
-/// carries a frame — `run` reports a sustained production stall as a warning
-/// (see `STALL_THRESHOLD`) and, at `Debug`, the compositor's actual frame
-/// rate alongside the emitted one.
-///
 /// # A window stream is monitor-sized, whatever the window's own size
 ///
 /// GNOME sizes a [`CaptureSourceKind::Window`] stream to the monitor rather
@@ -276,6 +274,24 @@ struct Terminate;
 /// rather than widening it. So a window capture can never show more than one
 /// monitor's worth of pixels, and capturing a small window still encodes a
 /// full-size frame that is mostly black.
+///
+/// # Closing a captured window cannot be detected
+///
+/// It looks exactly like the fullscreen stall above. Measured on GNOME 50,
+/// closing a captured window leaves the PipeWire stream in `Streaming` — no
+/// error, no disconnect — and simply stops the process callbacks. A monitor
+/// stream starved by a fullscreen client produces the identical signature:
+/// zero frames, zero empty buffers, zero callbacks. The only difference is that
+/// one recovers and the other never will, which is not knowable at the time.
+///
+/// So this element reports a stall for both and keeps running, rather than
+/// guessing. A caller that must distinguish them has to look outside the
+/// stream — at whether the window it asked for still exists. Ending the capture
+/// on a long stall would kill recordings that were about to resume.
+///
+/// [`PipeWireScreenCaptureSourceError::SourceGone`] therefore only covers a
+/// stream that genuinely reports an error or disconnects, which a closed window
+/// on this compositor does not.
 ///
 /// # A captured window can be resized — put a `Scaler` downstream
 ///
@@ -329,6 +345,12 @@ pub struct PipeWireScreenCaptureSource {
     terminate: Option<pw::channel::Sender<Terminate>>,
     /// Joined by `Drop` — this element owns the thread it spawned.
     worker: Option<JoinHandle<()>>,
+    /// Cleared on `Drop` to end `session_watcher`, which otherwise blocks on a
+    /// signal that may never come.
+    watching: Arc<AtomicBool>,
+    /// Watches the portal session for the one signal that distinguishes a
+    /// vanished source from an idle screen — see `watch_session_closed`.
+    session_watcher: Option<JoinHandle<()>>,
 }
 
 impl PipeWireScreenCaptureSource {
@@ -353,16 +375,16 @@ impl PipeWireScreenCaptureSource {
         let name = name.into();
         let pp_log = element_pp_log(ElementType::PipeWireScreenCaptureSource, &name, None);
 
-        let cast = portal_handshake(&options)?;
+        let mut cast = portal_handshake(&options)?;
         let restore_token = cast.restore_token.clone();
+        // Taken out before `cast` moves into the PipeWire thread: the session
+        // is watched here, the stream is opened there.
+        let session = cast.session.take();
 
         let latest = Arc::new(Mutex::new(Latest {
             pixels: Vec::new(),
             width: 0,
             height: 0,
-            received: 0,
-            empty: 0,
-            callbacks: 0,
             unmappable_buffers: 0,
             have_frame: false,
             error: None,
@@ -383,10 +405,11 @@ impl PipeWireScreenCaptureSource {
                         // stream fails, so report through both paths: the
                         // startup channel (ignored if nobody is listening
                         // any more) and the shared slot `run` polls.
-                        let message = error.to_string();
+                        let reported =
+                            PipeWireScreenCaptureSourceError::PipeWire(error.to_string());
                         let _ = startup_tx.send(Startup::Failed(error));
                         if let Ok(mut latest) = latest.lock() {
-                            latest.error.get_or_insert(message);
+                            latest.error.get_or_insert(reported);
                         }
                     }
                 })
@@ -418,6 +441,9 @@ impl PipeWireScreenCaptureSource {
             }
         };
 
+        let watching = Arc::new(AtomicBool::new(true));
+        let session_watcher = watch_session_closed(session, latest.clone(), watching.clone());
+
         let fps = options.fps.max(1); // a `0` fps is nonsensical; treat it as 1 rather than dividing by zero
         pp_info!(
             pp_log: &pp_log,
@@ -448,6 +474,8 @@ impl PipeWireScreenCaptureSource {
                 latest,
                 terminate: Some(terminate_tx),
                 worker: Some(worker),
+                watching,
+                session_watcher,
             },
             width,
             height,
@@ -539,16 +567,6 @@ impl PipeWireScreenCaptureSource {
         Some(frame)
     }
 
-    /// Running totals of buffers with content and of empty ticks. Callers keep
-    /// their own previous values and subtract, so the rate report and the stall
-    /// detector cannot consume one another's evidence.
-    fn capture_counts(&self) -> (u64, u64, u64) {
-        self.latest
-            .lock()
-            .map(|latest| (latest.received, latest.empty, latest.callbacks))
-            .unwrap_or((0, 0, 0))
-    }
-
     /// How many unreadable buffers have arrived since the last check, if any.
     /// Taken rather than peeked so the warning is not repeated every tick.
     fn take_unmappable_report(&self) -> Option<u64> {
@@ -558,7 +576,7 @@ impl PipeWireScreenCaptureSource {
 
     /// The PipeWire thread's error, if it has hit one. Taken rather than
     /// peeked so `run` reports it exactly once.
-    fn take_worker_error(&self) -> Option<String> {
+    fn take_worker_error(&self) -> Option<PipeWireScreenCaptureSourceError> {
         self.latest.lock().ok()?.error.take()
     }
 }
@@ -574,6 +592,12 @@ impl Drop for PipeWireScreenCaptureSource {
             && worker.join().is_err()
         {
             pp_warn!(self, "the PipeWire capture thread panicked");
+        }
+        self.watching.store(false, Ordering::Release);
+        if let Some(watcher) = self.session_watcher.take()
+            && watcher.join().is_err()
+        {
+            pp_warn!(self, "the portal session watcher panicked");
         }
     }
 }
@@ -606,12 +630,6 @@ impl SourceElement for PipeWireScreenCaptureSource {
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
         pp_info!(self, "started");
         let mut schedule = PeriodicSchedule::new(self.frame_interval, Instant::now());
-        let mut last_report = Instant::now();
-        let mut reported = (0u64, 0u64, 0u64);
-        let mut last_seen_received = 0u64;
-        let mut last_frame_seen = Instant::now();
-        let mut stall_callbacks = 0u64;
-        let mut stalled = false;
         loop {
             let outcome = drain_control(control, self, bus)?;
             if outcome.stopped {
@@ -622,66 +640,6 @@ impl SourceElement for PipeWireScreenCaptureSource {
                 schedule.resume_after_pause(outcome.paused_for, Instant::now());
             }
 
-            // Report a sustained production stall. The emitted rate is constant
-            // regardless, so without this a compositor that stopped feeding this
-            // stream is invisible to everything downstream — the recording just
-            // silently repeats its last frame.
-            let (received_now, empty_now, callbacks_now) = self.capture_counts();
-            if received_now > last_seen_received {
-                last_seen_received = received_now;
-                stall_callbacks = callbacks_now;
-                if stalled {
-                    bus.post(
-                        &self.pp_log,
-                        BusEvent::SourceResumed {
-                            element_type: ElementType::PipeWireScreenCaptureSource,
-                            name: self.name.clone(),
-                        },
-                    );
-                    stalled = false;
-                }
-                last_frame_seen = Instant::now();
-            } else if !stalled && last_frame_seen.elapsed() >= STALL_THRESHOLD {
-                // Reported on the bus, not just logged: a caller cannot detect
-                // this any other way — the emitted rate, timestamps, and buffer
-                // count are identical to a healthy capture — and may well want
-                // to stop recording rather than write a frozen image.
-                // `Bus::post` logs it too, so there is no separate warning here.
-                bus.post(
-                    &self.pp_log,
-                    BusEvent::SourceStalled {
-                        element_type: ElementType::PipeWireScreenCaptureSource,
-                        name: self.name.clone(),
-                        stalled_for: last_frame_seen.elapsed(),
-                    },
-                );
-                pp_debug!(
-                    self,
-                    "{} process callback(s) arrived during the stall",
-                    callbacks_now.saturating_sub(stall_callbacks)
-                );
-                stalled = true;
-            }
-
-            // The compositor produces frames on damage, so the captured rate is
-            // expected to differ from the emitted one — but a collapse in it is
-            // otherwise undetectable downstream, where every tick still carries
-            // a frame. Reported periodically rather than per buffer.
-            if last_report.elapsed() >= CAPTURE_REPORT_INTERVAL
-                && crate::log::enabled(crate::log::Level::Debug)
-            {
-                let elapsed = last_report.elapsed();
-                pp_debug!(
-                    self,
-                    "captured {:.1} new frame(s)/s ({} empty, {} callback(s)) while emitting at {}fps",
-                    received_now.saturating_sub(reported.0) as f64 / elapsed.as_secs_f64(),
-                    empty_now.saturating_sub(reported.1),
-                    callbacks_now.saturating_sub(reported.2),
-                    self.fps
-                );
-                reported = (received_now, empty_now, callbacks_now);
-                last_report = Instant::now();
-            }
             if let Some(count) = self.take_unmappable_report() {
                 pp_warn!(
                     self,
@@ -692,7 +650,7 @@ impl SourceElement for PipeWireScreenCaptureSource {
             }
             if let Some(error) = self.take_worker_error() {
                 pp_error!(self, "capture failed: {error}");
-                return Err(PipeWireScreenCaptureSourceError::PipeWire(error).into());
+                return Err(error.into());
             }
 
             // Nothing to poll: the PipeWire thread fills `latest` on its own.
@@ -735,6 +693,10 @@ impl SourceElement for PipeWireScreenCaptureSource {
 
 /// What the portal handshake resolved to.
 struct PortalCast {
+    /// Kept rather than dropped: the cast lives exactly as long as this, and
+    /// its `Closed` signal is the one thing that tells a vanished source apart
+    /// from a merely idle one (see `watch_session_closed`).
+    session: Option<ashpd::desktop::Session<ashpd::desktop::screencast::Screencast>>,
     fd: std::os::fd::OwnedFd,
     node_id: u32,
     restore_token: Option<String>,
@@ -813,18 +775,33 @@ fn portal_handshake(
             .await
             .map_err(portal_err)?;
 
-        // The cast lives exactly as long as the portal session object. Closing
-        // it here would tear the stream down before it produced a frame, and
-        // the session has no lifetime tie to the returned fd, so it is kept
-        // alive deliberately for the process's remaining lifetime.
-        std::mem::forget(session);
-
         Ok(PortalCast {
+            session: Some(session),
             fd,
             node_id,
             restore_token,
         })
     })
+}
+
+/// Whether a stream state transition means the thing being captured is gone,
+/// and what to say about it.
+///
+/// `Unconnected` is also where every stream starts, so it only counts as a loss
+/// once the stream really was running — otherwise opening one would report
+/// itself as already broken.
+fn disconnect_reason(
+    old: &pw::stream::StreamState,
+    new: &pw::stream::StreamState,
+) -> Option<String> {
+    use pw::stream::StreamState::{Error, Paused, Streaming, Unconnected};
+    match new {
+        Error(message) => Some(message.clone()),
+        Unconnected if matches!(old, Paused | Streaming) => {
+            Some("the stream was disconnected".to_owned())
+        }
+        _ => None,
+    }
 }
 
 /// Copies `rows` tightly packed rows of `row_bytes` into a destination whose
@@ -887,6 +864,61 @@ fn repack_rows(
     true
 }
 
+/// Watches the portal session for its `Closed` signal, which the compositor
+/// emits when what was being captured no longer exists — a captured window
+/// being closed, measured at ~6s after the fact on GNOME 50.
+///
+/// This is the *only* way to tell that case apart from a stall. The PipeWire
+/// stream reports nothing: a closed window, a fullscreen-starved monitor, and a
+/// desktop where simply nothing is moving all present identically — zero
+/// frames, zero buffers, zero callbacks. One of them never recovers, and only
+/// the portal knows which.
+///
+/// Returns `None` when there is no session to watch, which leaves the element
+/// reporting stalls exactly as before rather than failing to open.
+fn watch_session_closed(
+    session: Option<ashpd::desktop::Session<ashpd::desktop::screencast::Screencast>>,
+    latest: Arc<Mutex<Latest>>,
+    watching: Arc<AtomicBool>,
+) -> Option<JoinHandle<()>> {
+    use futures_util::StreamExt;
+
+    let session = session?;
+    std::thread::Builder::new()
+        .name("portal-session-watch".into())
+        .spawn(move || {
+            pollster::block_on(async move {
+                let Ok(mut closed) = session.receive_closed().await else {
+                    return;
+                };
+                // Polled in slices rather than awaited outright: `Drop` has to
+                // be able to end this thread, and the signal may never come.
+                while watching.load(Ordering::Acquire) {
+                    let next = std::pin::pin!(closed.next());
+                    let slice = std::pin::pin!(async_io::Timer::after(SESSION_POLL_GRANULARITY));
+                    match futures_util::future::select(next, slice).await {
+                        futures_util::future::Either::Left((signal, _)) => {
+                            if let Ok(mut latest) = latest.lock() {
+                                latest.error.get_or_insert(
+                                    PipeWireScreenCaptureSourceError::SourceGone(
+                                        if signal.is_some() {
+                                            "the portal closed the session".to_owned()
+                                        } else {
+                                            "the portal session ended".to_owned()
+                                        },
+                                    ),
+                                );
+                            }
+                            return;
+                        }
+                        futures_util::future::Either::Right(_) => {}
+                    }
+                }
+            })
+        })
+        .ok()
+}
+
 /// The PipeWire thread body: owns the main loop, context, core, and stream,
 /// none of which are `Send`, and so all of which must be created and dropped
 /// here rather than handed across from `open`.
@@ -929,6 +961,22 @@ fn run_pipewire(
 
     let _listener = stream
         .add_local_listener_with_user_data(())
+        .state_changed({
+            let latest = latest.clone();
+            move |_, (), old, new| {
+                // A closed window takes its node with it, and the callbacks
+                // simply stop. Without watching the state that is
+                // indistinguishable from a compositor going quiet, and the
+                // capture would run forever repeating its last frame.
+                if let Some(message) = disconnect_reason(&old, &new)
+                    && let Ok(mut latest) = latest.lock()
+                {
+                    latest
+                        .error
+                        .get_or_insert(PipeWireScreenCaptureSourceError::SourceGone(message));
+                }
+            }
+        })
         .param_changed({
             let size = size.clone();
             let latest = latest.clone();
@@ -1015,9 +1063,6 @@ fn run_pipewire(
         .process({
             let size = size.clone();
             move |stream, ()| {
-                if let Ok(mut latest) = latest.lock() {
-                    latest.callbacks += 1;
-                }
                 let Some(mut buffer) = stream.dequeue_buffer() else {
                     return;
                 };
@@ -1027,9 +1072,6 @@ fn run_pipewire(
                 }
                 let data = &mut datas[0];
                 if data.chunk().size() == 0 {
-                    if let Ok(mut latest) = latest.lock() {
-                        latest.empty += 1;
-                    }
                     return; // a tick with no new content
                 }
                 let stride = data.chunk().stride();
@@ -1062,7 +1104,6 @@ fn run_pipewire(
                 }
                 latest.width = width;
                 latest.height = height;
-                latest.received += 1;
                 if repack_rows(
                     &mut latest.pixels,
                     pixels,
@@ -1180,6 +1221,35 @@ mod tests {
         (0..rows)
             .flat_map(|r| std::iter::repeat_n(r as u8, row_bytes))
             .collect()
+    }
+
+    #[test]
+    fn a_stream_error_is_reported_as_a_lost_source() {
+        use pw::stream::StreamState::{Error, Streaming};
+        assert_eq!(
+            disconnect_reason(&Streaming, &Error("node destroyed".into())),
+            Some("node destroyed".to_owned())
+        );
+    }
+
+    #[test]
+    fn disconnecting_after_running_is_a_lost_source() {
+        // What a closed window looks like: the node goes away and the stream
+        // falls back to Unconnected without ever erroring.
+        use pw::stream::StreamState::{Paused, Streaming, Unconnected};
+        assert!(disconnect_reason(&Streaming, &Unconnected).is_some());
+        assert!(disconnect_reason(&Paused, &Unconnected).is_some());
+    }
+
+    #[test]
+    fn the_states_a_stream_opens_through_are_not_a_lost_source() {
+        // Every stream starts Unconnected and climbs; reporting a loss here
+        // would make every successful open look like an immediate failure.
+        use pw::stream::StreamState::{Connecting, Paused, Streaming, Unconnected};
+        assert!(disconnect_reason(&Unconnected, &Connecting).is_none());
+        assert!(disconnect_reason(&Connecting, &Paused).is_none());
+        assert!(disconnect_reason(&Paused, &Streaming).is_none());
+        assert!(disconnect_reason(&Streaming, &Paused).is_none());
     }
 
     #[test]
