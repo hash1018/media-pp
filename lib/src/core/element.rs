@@ -26,6 +26,7 @@ pub enum ElementType {
     TestVideoSource,
     TestAudioSource,
     DxgiCaptureSource,
+    PipeWireCaptureSource,
     WasapiCaptureSource,
     AudioMixer,
     VideoCompositor,

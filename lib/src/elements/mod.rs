@@ -57,6 +57,10 @@ pub use source::{
     CaptureArea, CaptureMode, CaptureRect, DxgiCaptureOptions, DxgiCaptureSource,
     DxgiCaptureSourceError,
 };
+#[cfg(all(target_os = "linux", feature = "pipewire-capture"))]
+pub use source::{
+    CaptureSourceKind, PipeWireCaptureOptions, PipeWireCaptureSource, PipeWireCaptureSourceError,
+};
 #[cfg(all(target_os = "windows", feature = "d3d11"))]
 pub use source::{
     D3d11TextLayerError, D3d11TextLayerHandle, D3d11VideoCompositor, D3d11VideoCompositorError,

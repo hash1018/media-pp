@@ -20,6 +20,10 @@ pub use capture::{
     CaptureArea, CaptureMode, CaptureRect, DxgiCaptureOptions, DxgiCaptureSource,
     DxgiCaptureSourceError,
 };
+#[cfg(all(target_os = "linux", feature = "pipewire-capture"))]
+pub use capture::{
+    CaptureSourceKind, PipeWireCaptureOptions, PipeWireCaptureSource, PipeWireCaptureSourceError,
+};
 #[cfg(all(target_os = "windows", feature = "wasapi-capture"))]
 pub use capture::{WasapiCaptureOptions, WasapiCaptureSource, WasapiCaptureSourceError};
 #[cfg(all(target_os = "windows", feature = "d3d11"))]

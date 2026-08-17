@@ -86,13 +86,21 @@ buffers, codecs, and muxers; `Pipeline::stop` abandons buffered work immediately
 
 | Kind | Elements |
 |---|---|
-| Sources | `FileDemuxer`, `AppSource`, `RtspSource`, `TestVideoSource`, `TestAudioSource`, `DxgiCaptureSource`, `WasapiCaptureSource`, `AudioMixer`, `VideoCompositor`, `D3d11VideoCompositor`, `WebRtcTrackSource` |
+| Sources | `FileDemuxer`, `AppSource`, `RtspSource`, `TestVideoSource`, `TestAudioSource`, `DxgiCaptureSource`, `PipeWireCaptureSource`, `WasapiCaptureSource`, `AudioMixer`, `VideoCompositor`, `D3d11VideoCompositor`, `WebRtcTrackSource` |
 | Filters | `SwDecoder`, `D3d11Decoder`, `D3d12vaDecoder`, `SwEncoder`, `D3d11NvencEncoder`, `SwAudioEncoder`, `AudioResampler`, `AudioVolume`, `Scaler`, `Pacer`, `VideoSynchronizer`, `D3d11Upload`, `D3d11Download`, `D3d12Upload`, `Tee` |
 | Sinks | `FrameCounter`, `PacketCounter`, `AppSink`, `Mp4Muxer`, `SegmentedMp4Muxer`, `HlsMuxer`, `RtspSink`, `D3d11Renderer`, `D3d12Renderer`, `WasapiRenderer`, `OrtDetector`, `WebRtcTrackSink` |
 
-Backend-specific elements are available only on Windows and require their
-corresponding Cargo feature. See each type's Rust documentation for buffer
-requirements, ownership, error behavior, and runtime-control semantics.
+Backend-specific elements require their corresponding Cargo feature and are
+available only on that backend's platform. See each type's Rust documentation
+for buffer requirements, ownership, error behavior, and runtime-control
+semantics.
+
+Screen capture is not one element with a platform switch. `DxgiCaptureSource`
+selects what it captures (`CaptureArea::Output`/`Region`, resolved at `open`),
+while `PipeWireCaptureSource` cannot: Wayland exposes no API to name a monitor,
+window, or rectangle, so the compositor's own portal dialog decides and the
+element only filters what that dialog lists. Both implement `SourceElement` and
+emit the same full-range BGRA frames, so only the construction site differs.
 `WebRtcPeer` is the WebRTC driver and creates the `WebRtcHandle` used to add
 tracks and obtain each `WebRtcTrackSink`/`WebRtcTrackSource` pair.
 
@@ -101,7 +109,7 @@ tracks and obtain each `WebRtcTrackSink`/`WebRtcTrackSource` pair.
 The examples are grouped by purpose:
 
 - `examples/core`: decoding, queues, fan-out, dynamic tees, app sources/sinks,
-  audio, muxing, HLS, and CPU compositing.
+  audio, muxing, HLS, CPU compositing, and Wayland screen capture.
 - `examples/render`: D3D11/D3D12 playback, upload, capture, synchronization,
   GPU compositing, NVENC hardware encoding, and recording.
 - `examples/rtsp`: publishing, seeking, and receiving RTSP streams.
@@ -130,6 +138,7 @@ The library has no default features.
 | `d3d11` | D3D11 decode, upload/download, rendering, GPU compositing, and NVENC encoding | Windows |
 | `d3d12` | D3D12VA decode, upload, and rendering interfaces | Windows |
 | `dxgi-capture` | Desktop capture; also enables `d3d11` | Windows |
+| `pipewire-capture` | Desktop capture through xdg-desktop-portal and PipeWire | Linux |
 | `wasapi-capture` | System-audio and microphone capture | Windows |
 | `wasapi-renderer` | Shared-mode audio playback | Windows |
 | `ort` | ONNX Runtime object detection | All supported targets |
@@ -178,6 +187,12 @@ buffers are not logged one record per buffer.
   immediate context.
 - `D3d11Decoder` uses a fixed-size FFmpeg surface pool; `extra_hw_frames` must
   cover the deepest downstream buffering.
+- `PipeWireCaptureSource` needs `libpipewire-0.3` development files, a running
+  PipeWire session, and an `xdg-desktop-portal` backend implementing
+  `org.freedesktop.portal.ScreenCast`. Its `open` shows the compositor's
+  screen-share dialog and blocks until the user answers, unless a previously
+  issued restore token is supplied. It negotiates CPU-mapped BGRx/BGRA buffers
+  only; DMA-BUF is not used.
 - `D3d11NvencEncoder` needs an NVIDIA GPU and an FFmpeg build with NVENC. It
   fails to open with a typed error, not a panic, on any other GPU. The other
   `d3d11` elements are vendor-neutral.

@@ -4,6 +4,8 @@ use thiserror::Error;
 use crate::elements::DxgiCaptureSourceError;
 #[cfg(feature = "ort")]
 use crate::elements::OrtDetectorError;
+#[cfg(all(target_os = "linux", feature = "pipewire-capture"))]
+use crate::elements::PipeWireCaptureSourceError;
 use crate::elements::RtspSinkError;
 #[cfg(all(target_os = "windows", feature = "wasapi-capture"))]
 use crate::elements::WasapiCaptureSourceError;
@@ -147,6 +149,10 @@ pub enum Error {
     #[cfg(all(target_os = "windows", feature = "dxgi-capture"))]
     #[error(transparent)]
     DxgiCaptureSourceError(#[from] DxgiCaptureSourceError),
+
+    #[cfg(all(target_os = "linux", feature = "pipewire-capture"))]
+    #[error(transparent)]
+    PipeWireCaptureSourceError(#[from] PipeWireCaptureSourceError),
 
     #[cfg(all(target_os = "windows", feature = "wasapi-capture"))]
     #[error(transparent)]
