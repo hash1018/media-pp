@@ -188,6 +188,17 @@ documentation and implementation differ.
   variable actually set, since a skipped test reports as passing. Such a test
   must assert a contract that holds for any fixture — never a particular file's
   codec, resolution, duration, or keyframe spacing.
+- Before adding an example, check whether an existing one already covers the
+  same purpose and extend it instead of adding a parallel crate. A second
+  backend for something an example already demonstrates belongs inside that
+  example as another `cfg(target_os)` branch, with each platform's feature
+  selected per target in the same `Cargo.toml` — `examples/core/audio_capture`
+  builds against WASAPI on Windows and PipeWire on Linux from one source file.
+  Do not name an example after its backend when the purpose already has a name.
+- Keep such branches' pipeline shape, terminal sink, and CLI identical, so only
+  the backend-specific construction differs. A divergence the platform does not
+  actually force is a defect in one of the branches, and putting them in one
+  file is what makes it visible.
 - Examples take their media path as a required argument, print a `usage:` line
   to stderr when it is missing, and exit non-zero. Do not reintroduce a default
   path.

@@ -1,9 +1,0 @@
-[package]
-name = "screen_capture_pipewire"
-version = "0.1.0"
-edition = "2024"
-publish = false
-
-[dependencies]
-ffmpeg-next = "8"
-media-pp = { path = "../../../lib", features = ["pipewire-capture"] }

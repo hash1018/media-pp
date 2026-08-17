@@ -67,7 +67,7 @@ windows = { version = "0.62", optional = true, features = [
 ab_glyph = { version = "0.2", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-# `async-io` rather than the default `tokio` backend: `PipeWireCaptureSource::open`
+# `async-io` rather than the default `tokio` backend: `PipeWireScreenCaptureSource::open`
 # drives the portal handshake to completion with `pollster::block_on` on the
 # caller's own thread, so it must not require callers of this synchronous
 # library to already have a tokio runtime installed.
@@ -83,7 +83,8 @@ pollster = { version = "1", optional = true }
 d3d12 = ["dep:windows"]
 d3d11 = ["dep:windows", "dep:ab_glyph"]
 dxgi-capture = ["dep:windows", "d3d11"]
-pipewire-capture = ["dep:ashpd", "dep:enumflags2", "dep:pipewire", "dep:pollster"]
+pipewire-audio-capture = ["dep:pipewire"]
+pipewire-screen-capture = ["dep:ashpd", "dep:enumflags2", "dep:pipewire", "dep:pollster"]
 wasapi-capture = ["dep:windows"]
 wasapi-renderer = ["dep:windows"]
 ort = ["dep:ort", "dep:ndarray"]

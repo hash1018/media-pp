@@ -86,7 +86,7 @@ buffers, codecs, and muxers; `Pipeline::stop` abandons buffered work immediately
 
 | Kind | Elements |
 |---|---|
-| Sources | `FileDemuxer`, `AppSource`, `RtspSource`, `TestVideoSource`, `TestAudioSource`, `DxgiCaptureSource`, `PipeWireCaptureSource`, `WasapiCaptureSource`, `AudioMixer`, `VideoCompositor`, `D3d11VideoCompositor`, `WebRtcTrackSource` |
+| Sources | `FileDemuxer`, `AppSource`, `RtspSource`, `TestVideoSource`, `TestAudioSource`, `DxgiCaptureSource`, `PipeWireScreenCaptureSource`, `PipeWireAudioCaptureSource`, `WasapiCaptureSource`, `AudioMixer`, `VideoCompositor`, `D3d11VideoCompositor`, `WebRtcTrackSource` |
 | Filters | `SwDecoder`, `D3d11Decoder`, `D3d12vaDecoder`, `SwEncoder`, `D3d11NvencEncoder`, `SwAudioEncoder`, `AudioResampler`, `AudioVolume`, `Scaler`, `Pacer`, `VideoSynchronizer`, `D3d11Upload`, `D3d11Download`, `D3d12Upload`, `Tee` |
 | Sinks | `FrameCounter`, `PacketCounter`, `AppSink`, `Mp4Muxer`, `SegmentedMp4Muxer`, `HlsMuxer`, `RtspSink`, `D3d11Renderer`, `D3d12Renderer`, `WasapiRenderer`, `OrtDetector`, `WebRtcTrackSink` |
 
@@ -97,10 +97,13 @@ semantics.
 
 Screen capture is not one element with a platform switch. `DxgiCaptureSource`
 selects what it captures (`CaptureArea::Output`/`Region`, resolved at `open`),
-while `PipeWireCaptureSource` cannot: Wayland exposes no API to name a monitor,
+while `PipeWireScreenCaptureSource` cannot: Wayland exposes no API to name a monitor,
 window, or rectangle, so the compositor's own portal dialog decides and the
 element only filters what that dialog lists. Both implement `SourceElement` and
 emit the same full-range BGRA frames, so only the construction site differs.
+Audio is the opposite case: `PipeWireAudioCaptureSource` needs no portal, so it
+does select its device programmatically and mirrors `WasapiCaptureSource`'s
+`list_devices`-then-pick API.
 `WebRtcPeer` is the WebRTC driver and creates the `WebRtcHandle` used to add
 tracks and obtain each `WebRtcTrackSink`/`WebRtcTrackSource` pair.
 
@@ -109,9 +112,10 @@ tracks and obtain each `WebRtcTrackSink`/`WebRtcTrackSource` pair.
 The examples are grouped by purpose:
 
 - `examples/core`: decoding, queues, fan-out, dynamic tees, app sources/sinks,
-  audio, muxing, HLS, CPU compositing, and Wayland screen capture.
+  audio, muxing, HLS, and CPU compositing.
 - `examples/render`: D3D11/D3D12 playback, upload, capture, synchronization,
-  GPU compositing, NVENC hardware encoding, and recording.
+  GPU compositing, NVENC hardware encoding, and recording. `screen_record`
+  additionally covers Wayland capture through PipeWire.
 - `examples/rtsp`: publishing, seeking, and receiving RTSP streams.
 - `examples/vision`: scaling and ONNX object detection.
 - `examples/webrtc`: data and encoded A/V loopback pipelines.
@@ -125,9 +129,10 @@ cargo run -p app_sink -- path/to/video.mp4
 cargo run -p scale -- path/to/video.mp4
 ```
 
-Windows rendering and capture examples enable their required library features
-in their own `Cargo.toml` files. Run an example without arguments to see its
-usage line.
+Backend-specific examples enable their required library features in their own
+`Cargo.toml` files, per target where an example covers more than one platform —
+`audio_capture` builds against WASAPI on Windows and PipeWire on Linux from one
+source file. Run an example without arguments to see its usage line.
 
 ## Feature flags
 
@@ -138,7 +143,8 @@ The library has no default features.
 | `d3d11` | D3D11 decode, upload/download, rendering, GPU compositing, and NVENC encoding | Windows |
 | `d3d12` | D3D12VA decode, upload, and rendering interfaces | Windows |
 | `dxgi-capture` | Desktop capture; also enables `d3d11` | Windows |
-| `pipewire-capture` | Desktop capture through xdg-desktop-portal and PipeWire | Linux |
+| `pipewire-audio-capture` | System-audio and microphone capture through PipeWire | Linux |
+| `pipewire-screen-capture` | Desktop capture through xdg-desktop-portal and PipeWire | Linux |
 | `wasapi-capture` | System-audio and microphone capture | Windows |
 | `wasapi-renderer` | Shared-mode audio playback | Windows |
 | `ort` | ONNX Runtime object detection | All supported targets |
@@ -187,12 +193,17 @@ buffers are not logged one record per buffer.
   immediate context.
 - `D3d11Decoder` uses a fixed-size FFmpeg surface pool; `extra_hw_frames` must
   cover the deepest downstream buffering.
-- `PipeWireCaptureSource` needs `libpipewire-0.3` development files, a running
+- `PipeWireScreenCaptureSource` needs `libpipewire-0.3` development files, a running
   PipeWire session, and an `xdg-desktop-portal` backend implementing
   `org.freedesktop.portal.ScreenCast`. Its `open` shows the compositor's
   screen-share dialog and blocks until the user answers, unless a previously
   issued restore token is supplied. It negotiates CPU-mapped BGRx/BGRA buffers
   only; DMA-BUF is not used.
+- `PipeWireAudioCaptureSource` needs the same PipeWire development files and a
+  running session, but no portal: audio nodes are enumerated with
+  `list_devices` and selected programmatically, with no dialog. Capturing a
+  `Sink` device records that device's monitor (system audio); capturing a
+  `Source` device records a microphone.
 - `D3d11NvencEncoder` needs an NVIDIA GPU and an FFmpeg build with NVENC. It
   fails to open with a typed error, not a panic, on any other GPU. The other
   `d3d11` elements are vendor-neutral.

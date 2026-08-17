@@ -4,8 +4,10 @@ use thiserror::Error;
 use crate::elements::DxgiCaptureSourceError;
 #[cfg(feature = "ort")]
 use crate::elements::OrtDetectorError;
-#[cfg(all(target_os = "linux", feature = "pipewire-capture"))]
-use crate::elements::PipeWireCaptureSourceError;
+#[cfg(all(target_os = "linux", feature = "pipewire-audio-capture"))]
+use crate::elements::PipeWireAudioCaptureSourceError;
+#[cfg(all(target_os = "linux", feature = "pipewire-screen-capture"))]
+use crate::elements::PipeWireScreenCaptureSourceError;
 use crate::elements::RtspSinkError;
 #[cfg(all(target_os = "windows", feature = "wasapi-capture"))]
 use crate::elements::WasapiCaptureSourceError;
@@ -150,9 +152,13 @@ pub enum Error {
     #[error(transparent)]
     DxgiCaptureSourceError(#[from] DxgiCaptureSourceError),
 
-    #[cfg(all(target_os = "linux", feature = "pipewire-capture"))]
+    #[cfg(all(target_os = "linux", feature = "pipewire-audio-capture"))]
     #[error(transparent)]
-    PipeWireCaptureSourceError(#[from] PipeWireCaptureSourceError),
+    PipeWireAudioCaptureSourceError(#[from] PipeWireAudioCaptureSourceError),
+
+    #[cfg(all(target_os = "linux", feature = "pipewire-screen-capture"))]
+    #[error(transparent)]
+    PipeWireScreenCaptureSourceError(#[from] PipeWireScreenCaptureSourceError),
 
     #[cfg(all(target_os = "windows", feature = "wasapi-capture"))]
     #[error(transparent)]

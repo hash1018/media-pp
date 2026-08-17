@@ -1,4 +1,10 @@
-#[cfg(all(target_os = "linux", feature = "pipewire-capture"))]
+#[cfg(all(
+    target_os = "linux",
+    any(
+        feature = "pipewire-screen-capture",
+        feature = "pipewire-audio-capture"
+    )
+))]
 mod linux;
 #[cfg(all(
     target_os = "windows",
@@ -6,7 +12,13 @@ mod linux;
 ))]
 mod windows;
 
-#[cfg(all(target_os = "linux", feature = "pipewire-capture"))]
+#[cfg(all(
+    target_os = "linux",
+    any(
+        feature = "pipewire-screen-capture",
+        feature = "pipewire-audio-capture"
+    )
+))]
 pub use linux::*;
 #[cfg(all(
     target_os = "windows",

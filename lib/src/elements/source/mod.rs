@@ -20,9 +20,15 @@ pub use capture::{
     CaptureArea, CaptureMode, CaptureRect, DxgiCaptureOptions, DxgiCaptureSource,
     DxgiCaptureSourceError,
 };
-#[cfg(all(target_os = "linux", feature = "pipewire-capture"))]
+#[cfg(all(target_os = "linux", feature = "pipewire-screen-capture"))]
 pub use capture::{
-    CaptureSourceKind, PipeWireCaptureOptions, PipeWireCaptureSource, PipeWireCaptureSourceError,
+    CaptureSourceKind, PipeWireScreenCaptureOptions, PipeWireScreenCaptureSource,
+    PipeWireScreenCaptureSourceError,
+};
+#[cfg(all(target_os = "linux", feature = "pipewire-audio-capture"))]
+pub use capture::{
+    PipeWireAudioCaptureOptions, PipeWireAudioCaptureSource, PipeWireAudioCaptureSourceError,
+    PipeWireAudioDevice, PipeWireAudioDeviceKind,
 };
 #[cfg(all(target_os = "windows", feature = "wasapi-capture"))]
 pub use capture::{WasapiCaptureOptions, WasapiCaptureSource, WasapiCaptureSourceError};

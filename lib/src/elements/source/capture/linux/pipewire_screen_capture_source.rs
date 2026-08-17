@@ -27,27 +27,27 @@ use crate::{
     schedule::PeriodicSchedule,
 };
 
-/// How long [`PipeWireCaptureSource::open`] waits for the PipeWire stream to
+/// How long [`PipeWireScreenCaptureSource::open`] waits for the PipeWire stream to
 /// finish negotiating a format after the portal handshake already succeeded.
 /// Only covers the machine-to-machine part — the user is done choosing by the
 /// time this starts — so a generous-but-finite bound is enough to turn a
 /// compositor that never answers into an error instead of a permanent hang.
 const NEGOTIATION_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Bounds `Stop` latency at very low configured [`PipeWireCaptureOptions::fps`]
+/// Bounds `Stop` latency at very low configured [`PipeWireScreenCaptureOptions::fps`]
 /// values, where "wait until the next tick" on its own could otherwise be a
 /// long, unresponsive block. Same idea as `DxgiCaptureSource`'s own constant.
 const POLL_GRANULARITY: Duration = Duration::from_millis(100);
 
-/// Errors specific to `PipeWireCaptureSource`. Converts into the crate-wide
+/// Errors specific to `PipeWireScreenCaptureSource`. Converts into the crate-wide
 /// `Error` via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
-pub enum PipeWireCaptureSourceError {
+pub enum PipeWireScreenCaptureSourceError {
     #[error("xdg-desktop-portal error: {0}")]
     Portal(String),
 
     /// The user dismissed the screen-share dialog, or a supplied
-    /// [`PipeWireCaptureOptions::restore_token`] was rejected and the
+    /// [`PipeWireScreenCaptureOptions::restore_token`] was rejected and the
     /// re-prompt was then cancelled. Distinct from [`Self::Portal`] because
     /// it is a routine outcome — the caller decides whether to re-prompt,
     /// give up, or fall back — not a malfunction to report as a failure.
@@ -70,21 +70,21 @@ pub enum PipeWireCaptureSourceError {
 
     /// The compositor offered only formats this element does not accept. v1
     /// negotiates CPU-mapped `BGRx`/`BGRA` only — see
-    /// [`PipeWireCaptureSource`]'s own docs on why DMA-BUF is out of scope.
+    /// [`PipeWireScreenCaptureSource`]'s own docs on why DMA-BUF is out of scope.
     #[error("compositor negotiated unsupported video format {0:?}")]
     UnsupportedFormat(u32),
 
-    #[error("PipeWireCaptureSource doesn't support seeking a live capture")]
+    #[error("PipeWireScreenCaptureSource doesn't support seeking a live capture")]
     SeekUnsupported,
 }
 
 /// Which kinds of source the portal's picker offers the user — see
-/// [`PipeWireCaptureOptions::source_kind`].
+/// [`PipeWireScreenCaptureOptions::source_kind`].
 ///
 /// This is a *filter on the dialog*, not a selection. Wayland gives no way to
 /// name a particular monitor, window, or rectangle: the compositor's own
 /// picker decides, and this only narrows what it lists. See
-/// [`PipeWireCaptureSource`]'s docs for the full consequence.
+/// [`PipeWireScreenCaptureSource`]'s docs for the full consequence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CaptureSourceKind {
     /// List whole monitors only.
@@ -95,12 +95,12 @@ pub enum CaptureSourceKind {
     MonitorOrWindow,
 }
 
-/// Construction-time options for [`PipeWireCaptureSource::open`].
+/// Construction-time options for [`PipeWireScreenCaptureSource::open`].
 #[derive(Debug, Clone)]
-pub struct PipeWireCaptureOptions {
+pub struct PipeWireScreenCaptureOptions {
     /// The constant rate frames are emitted at. Like
     /// `DxgiCaptureOptions::fps`, this is a fixed *output* rate, not a cap on
-    /// an otherwise irregular one — see [`PipeWireCaptureSource`]'s docs on
+    /// an otherwise irregular one — see [`PipeWireScreenCaptureSource`]'s docs on
     /// why the capture side's own rate is both variable and unrelated.
     /// `30` by default, matching every other source in this crate.
     pub fps: u32,
@@ -115,7 +115,7 @@ pub struct PipeWireCaptureOptions {
     /// compositor does the drawing, so it costs nothing here and works for
     /// every source kind.
     pub include_cursor: bool,
-    /// A token from a previous session's [`PipeWireCaptureSource::open`]
+    /// A token from a previous session's [`PipeWireScreenCaptureSource::open`]
     /// (see its return value). Supplying it reconnects to the same source
     /// **without showing the dialog again**; leaving it `None` always
     /// prompts.
@@ -127,7 +127,7 @@ pub struct PipeWireCaptureOptions {
     pub restore_token: Option<String>,
 }
 
-impl Default for PipeWireCaptureOptions {
+impl Default for PipeWireScreenCaptureOptions {
     fn default() -> Self {
         Self {
             fps: 30,
@@ -159,7 +159,7 @@ struct Latest {
 /// What the PipeWire thread reports back to `open` once, at startup.
 enum Startup {
     Ready { width: u32, height: u32 },
-    Failed(PipeWireCaptureSourceError),
+    Failed(PipeWireScreenCaptureSourceError),
 }
 
 /// Sent into the PipeWire thread's own main loop to end it.
@@ -172,11 +172,11 @@ struct Terminate;
 ///
 /// **Not a monitor this element chooses.** Wayland deliberately offers no API
 /// to name a monitor, window, or rectangle; the compositor's own picker does.
-/// [`PipeWireCaptureOptions::source_kind`] only narrows what that picker
-/// lists, and [`PipeWireCaptureOptions::restore_token`] is the only way to
+/// [`PipeWireScreenCaptureOptions::source_kind`] only narrows what that picker
+/// lists, and [`PipeWireScreenCaptureOptions::restore_token`] is the only way to
 /// reuse an earlier choice without re-prompting. `open` is therefore
 /// interactive and can block for as long as the user takes to answer — and
-/// can fail with [`PipeWireCaptureSourceError::Cancelled`], a failure mode
+/// can fail with [`PipeWireScreenCaptureSourceError::Cancelled`], a failure mode
 /// with no `DxgiCaptureSource` equivalent.
 ///
 /// This is the substantive difference from `DxgiCaptureSource`, which is why
@@ -185,7 +185,7 @@ struct Terminate;
 ///
 /// # Frame rate
 ///
-/// [`PipeWireCaptureOptions::fps`] is a fixed *output* rate. The compositor
+/// [`PipeWireScreenCaptureOptions::fps`] is a fixed *output* rate. The compositor
 /// produces frames on damage — the negotiated PipeWire framerate is variable
 /// (`0/1`) with only a maximum — so an idle desktop may deliver a handful of
 /// frames per second while a busy one approaches the monitor's refresh rate.
@@ -202,12 +202,16 @@ struct Terminate;
 /// (`MemFd`/`MemPtr`) are negotiated: DMA-BUF is deliberately out of scope
 /// while this crate has no Linux GPU element that could consume a
 /// GPU-resident frame without an immediate round trip back to system memory.
-pub struct PipeWireCaptureSource {
+pub struct PipeWireScreenCaptureSource {
     name: Arc<str>,
     pp_log: PpLog,
     pad: SrcPad,
     width: u32,
     height: u32,
+    /// The configured output rate, kept because it is the unit `pts` counts in
+    /// and so what [`PipeWireScreenCaptureSource::time_base`] must report —
+    /// `frame_interval` below is derived from it for scheduling.
+    fps: u32,
     frame_interval: Duration,
     /// Monotonic frame counter used as the emitted `pts`.
     frame_index: i64,
@@ -222,12 +226,12 @@ pub struct PipeWireCaptureSource {
     worker: Option<JoinHandle<()>>,
 }
 
-impl PipeWireCaptureSource {
+impl PipeWireScreenCaptureSource {
     /// Runs the portal handshake, starts the PipeWire stream, and waits for
     /// format negotiation to finish.
     ///
     /// **Blocks on user interaction** unless
-    /// [`PipeWireCaptureOptions::restore_token`] is supplied and still valid:
+    /// [`PipeWireScreenCaptureOptions::restore_token`] is supplied and still valid:
     /// the compositor shows its screen-share dialog and this call does not
     /// return until the user answers.
     ///
@@ -238,10 +242,11 @@ impl PipeWireCaptureSource {
     /// make the two differ.
     pub fn open(
         name: impl Into<String>,
-        options: PipeWireCaptureOptions,
-    ) -> std::result::Result<(Self, u32, u32, Option<String>), PipeWireCaptureSourceError> {
+        options: PipeWireScreenCaptureOptions,
+    ) -> std::result::Result<(Self, u32, u32, Option<String>), PipeWireScreenCaptureSourceError>
+    {
         let name = name.into();
-        let pp_log = element_pp_log(ElementType::PipeWireCaptureSource, &name, None);
+        let pp_log = element_pp_log(ElementType::PipeWireScreenCaptureSource, &name, None);
 
         let cast = portal_handshake(&options)?;
         let restore_token = cast.restore_token.clone();
@@ -274,7 +279,7 @@ impl PipeWireCaptureSource {
                         }
                     }
                 })
-                .map_err(|e| PipeWireCaptureSourceError::PipeWire(e.to_string()))?
+                .map_err(|e| PipeWireScreenCaptureSourceError::PipeWire(e.to_string()))?
         };
 
         // From here on the thread is running, so every early return has to
@@ -284,11 +289,11 @@ impl PipeWireCaptureSource {
             Err(RecvTimeoutError::Timeout) => {
                 let _ = terminate_tx.send(Terminate);
                 let _ = worker.join();
-                return Err(PipeWireCaptureSourceError::NegotiationTimeout);
+                return Err(PipeWireScreenCaptureSourceError::NegotiationTimeout);
             }
             Err(RecvTimeoutError::Disconnected) => {
                 let _ = worker.join();
-                return Err(PipeWireCaptureSourceError::PipeWire(
+                return Err(PipeWireScreenCaptureSourceError::PipeWire(
                     "the PipeWire thread exited before negotiating a format".into(),
                 ));
             }
@@ -321,6 +326,7 @@ impl PipeWireCaptureSource {
                 pp_log,
                 width,
                 height,
+                fps,
                 frame_interval: Duration::from_secs_f64(1.0 / fps as f64),
                 frame_index: 0,
                 pool: UnboundObjectPool::new(
@@ -336,6 +342,15 @@ impl PipeWireCaptureSource {
             height,
             restore_token,
         ))
+    }
+
+    /// The unit each emitted frame's `pts` is expressed in.
+    ///
+    /// Frames are stamped with a plain frame counter, so this is `1/fps` — the
+    /// configured output rate, not the compositor's irregular capture rate.
+    /// Same contract as `DxgiCaptureSource::time_base`.
+    pub fn time_base(&self) -> ffmpeg::Rational {
+        ffmpeg::Rational::new(1, self.fps as i32)
     }
 
     /// Copies the latest captured image into a fresh pooled frame.
@@ -377,7 +392,7 @@ impl PipeWireCaptureSource {
     }
 }
 
-impl Drop for PipeWireCaptureSource {
+impl Drop for PipeWireScreenCaptureSource {
     fn drop(&mut self) {
         // Dropping the sender alone would not wake a blocked main loop, so
         // signal first, then join the thread this element owns.
@@ -392,13 +407,13 @@ impl Drop for PipeWireCaptureSource {
     }
 }
 
-impl Element for PipeWireCaptureSource {
+impl Element for PipeWireScreenCaptureSource {
     fn name(&self) -> Arc<str> {
         self.name.clone()
     }
 
     fn element_type(&self) -> ElementType {
-        ElementType::PipeWireCaptureSource
+        ElementType::PipeWireScreenCaptureSource
     }
 
     fn pp_log(&self) -> &PpLog {
@@ -410,13 +425,13 @@ impl Element for PipeWireCaptureSource {
     }
 }
 
-impl Source for PipeWireCaptureSource {
+impl Source for PipeWireScreenCaptureSource {
     fn src_pads(&mut self) -> &mut [SrcPad] {
         std::slice::from_mut(&mut self.pad)
     }
 }
 
-impl SourceElement for PipeWireCaptureSource {
+impl SourceElement for PipeWireScreenCaptureSource {
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
         pp_info!(self, "started");
         let mut schedule = PeriodicSchedule::new(self.frame_interval, Instant::now());
@@ -432,7 +447,7 @@ impl SourceElement for PipeWireCaptureSource {
 
             if let Some(error) = self.take_worker_error() {
                 pp_error!(self, "capture failed: {error}");
-                return Err(PipeWireCaptureSourceError::PipeWire(error).into());
+                return Err(PipeWireScreenCaptureSourceError::PipeWire(error).into());
             }
 
             // Nothing to poll: the PipeWire thread fills `latest` on its own.
@@ -455,7 +470,7 @@ impl SourceElement for PipeWireCaptureSource {
                 bus.post(
                     &self.pp_log,
                     BusEvent::Error {
-                        element_type: ElementType::PipeWireCaptureSource,
+                        element_type: ElementType::PipeWireScreenCaptureSource,
                         name: self.name.clone(),
                         error,
                     },
@@ -469,7 +484,7 @@ impl SourceElement for PipeWireCaptureSource {
     }
 
     fn seek(&mut self, _target: Duration) -> Result<Duration> {
-        Err(PipeWireCaptureSourceError::SeekUnsupported.into())
+        Err(PipeWireScreenCaptureSourceError::SeekUnsupported.into())
     }
 }
 
@@ -487,19 +502,19 @@ struct PortalCast {
 /// nothing here requires the caller to have installed a runtime, which keeps
 /// `open` a plain blocking constructor like every other element's.
 fn portal_handshake(
-    options: &PipeWireCaptureOptions,
-) -> std::result::Result<PortalCast, PipeWireCaptureSourceError> {
+    options: &PipeWireScreenCaptureOptions,
+) -> std::result::Result<PortalCast, PipeWireScreenCaptureSourceError> {
     use ashpd::desktop::{
         PersistMode,
         screencast::{CursorMode, Screencast, SelectSourcesOptions, SourceType, StartCastOptions},
     };
 
-    fn portal_err(error: ashpd::Error) -> PipeWireCaptureSourceError {
+    fn portal_err(error: ashpd::Error) -> PipeWireScreenCaptureSourceError {
         match error {
             ashpd::Error::Response(ashpd::desktop::ResponseError::Cancelled) => {
-                PipeWireCaptureSourceError::Cancelled
+                PipeWireScreenCaptureSourceError::Cancelled
             }
-            other => PipeWireCaptureSourceError::Portal(other.to_string()),
+            other => PipeWireScreenCaptureSourceError::Portal(other.to_string()),
         }
     }
 
@@ -544,7 +559,7 @@ fn portal_handshake(
         let stream = response
             .streams()
             .first()
-            .ok_or(PipeWireCaptureSourceError::NoStream)?;
+            .ok_or(PipeWireScreenCaptureSourceError::NoStream)?;
         let node_id = stream.pipe_wire_node_id();
         let restore_token = response.restore_token().map(str::to_owned);
 
@@ -608,9 +623,9 @@ fn run_pipewire(
     latest: Arc<Mutex<Latest>>,
     startup: &mpsc::Sender<Startup>,
     terminate: pw::channel::Receiver<Terminate>,
-) -> std::result::Result<(), PipeWireCaptureSourceError> {
-    fn pw_err(error: impl std::fmt::Display) -> PipeWireCaptureSourceError {
-        PipeWireCaptureSourceError::PipeWire(error.to_string())
+) -> std::result::Result<(), PipeWireScreenCaptureSourceError> {
+    fn pw_err(error: impl std::fmt::Display) -> PipeWireScreenCaptureSourceError {
+        PipeWireScreenCaptureSourceError::PipeWire(error.to_string())
     }
 
     pw::init();
@@ -626,7 +641,7 @@ fn run_pipewire(
 
     let stream = pw::stream::StreamBox::new(
         &core,
-        "media-pp-capture",
+        "media-pp-screen-capture",
         properties! {
             *pw::keys::MEDIA_TYPE => "Video",
             *pw::keys::MEDIA_CATEGORY => "Capture",
@@ -668,7 +683,7 @@ fn run_pipewire(
                     && format != spa::param::video::VideoFormat::BGRA
                 {
                     let _ = startup.send(Startup::Failed(
-                        PipeWireCaptureSourceError::UnsupportedFormat(format.as_raw()),
+                        PipeWireScreenCaptureSourceError::UnsupportedFormat(format.as_raw()),
                     ));
                     return;
                 }
@@ -801,7 +816,7 @@ fn run_pipewire(
     .0
     .into_inner();
     let mut params = [Pod::from_bytes(&values).ok_or_else(|| {
-        PipeWireCaptureSourceError::PipeWire("failed to build format pod".into())
+        PipeWireScreenCaptureSourceError::PipeWire("failed to build format pod".into())
     })?];
 
     stream
@@ -918,7 +933,7 @@ mod tests {
 
     #[test]
     fn default_options_match_the_documented_defaults() {
-        let options = PipeWireCaptureOptions::default();
+        let options = PipeWireScreenCaptureOptions::default();
         assert_eq!(options.fps, 30);
         assert_eq!(options.source_kind, CaptureSourceKind::Monitor);
         assert!(!options.include_cursor);
@@ -929,12 +944,12 @@ mod tests {
     fn seek_is_rejected_as_a_typed_error() {
         // `open` needs a portal dialog, so the rejection is asserted against
         // the error itself rather than through a constructed element.
-        let error: crate::Error = PipeWireCaptureSourceError::SeekUnsupported.into();
+        let error: crate::Error = PipeWireScreenCaptureSourceError::SeekUnsupported.into();
         assert!(
             matches!(
                 error,
-                crate::Error::PipeWireCaptureSourceError(
-                    PipeWireCaptureSourceError::SeekUnsupported
+                crate::Error::PipeWireScreenCaptureSourceError(
+                    PipeWireScreenCaptureSourceError::SeekUnsupported
                 )
             ),
             "seek failures must reach callers as a typed variant, not a stringly error"

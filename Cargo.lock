@@ -2999,14 +2999,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "screen_capture_pipewire"
-version = "0.1.0"
-dependencies = [
- "ffmpeg-next",
- "media-pp",
-]
-
-[[package]]
 name = "screen_record"
 version = "0.1.0"
 dependencies = [
