@@ -148,7 +148,9 @@ mod windows_example {
                         eprintln!("[{name}] dropped a buffer (queue full)")
                     }
                     BusEvent::Eos { name, .. } => println!("[{name}] eos"),
-                    BusEvent::Seeked { .. } => {}
+                    // `BusEvent` is `#[non_exhaustive]`; this example only acts
+                    // on the events above.
+                    _ => {}
                 }
             }
             thread::sleep(
@@ -176,7 +178,9 @@ mod windows_example {
                     eprintln!("[{name}] dropped a buffer (queue full)")
                 }
                 BusEvent::Eos { name, .. } => println!("[{name}] eos"),
-                BusEvent::Seeked { .. } => {}
+                // `BusEvent` is `#[non_exhaustive]`; this example only acts
+                // on the events above.
+                _ => {}
             }
         }
 

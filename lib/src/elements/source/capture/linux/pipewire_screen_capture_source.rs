@@ -12,9 +12,10 @@ use ffmpeg_next as ffmpeg;
 use pipewire as pw;
 use pw::{properties::properties, spa};
 use spa::pod::Pod;
+use spa::sys as spa_sys;
 use thiserror::Error as ThisError;
 
-use crate::pp_log::{PpLog, pp_error, pp_info, pp_warn};
+use crate::pp_log::{PpLog, pp_debug, pp_error, pp_info, pp_warn};
 
 use crate::{
     buffer::MediaBuffer,
@@ -38,6 +39,19 @@ const NEGOTIATION_TIMEOUT: Duration = Duration::from_secs(5);
 /// values, where "wait until the next tick" on its own could otherwise be a
 /// long, unresponsive block. Same idea as `DxgiCaptureSource`'s own constant.
 const POLL_GRANULARITY: Duration = Duration::from_millis(100);
+
+/// How often [`SourceElement::run`] reports the rate at which the compositor is
+/// actually producing frames, when `Debug` logging is on.
+const CAPTURE_REPORT_INTERVAL: Duration = Duration::from_secs(5);
+
+/// How long the compositor may produce nothing before this element says so.
+///
+/// A still desktop legitimately produces no frames, so silence is not by itself
+/// an error — but a *sustained* silence is indistinguishable downstream from a
+/// working capture of a frozen screen, because every emitted tick still carries
+/// a frame. Long enough not to fire on an idle moment, short enough to name the
+/// condition while it is still happening.
+const STALL_THRESHOLD: Duration = Duration::from_secs(3);
 
 /// Errors specific to `PipeWireScreenCaptureSource`. Converts into the crate-wide
 /// `Error` via `?` (see [`crate::error::Error`]).
@@ -63,7 +77,7 @@ pub enum PipeWireScreenCaptureSourceError {
     PipeWire(String),
 
     /// The stream connected but never produced a `Format` param within
-    /// [`NEGOTIATION_TIMEOUT`], so this element never learned what size or
+    /// `NEGOTIATION_TIMEOUT`, so this element never learned what size or
     /// pixel layout to expect.
     #[error("timed out waiting for the PipeWire stream to negotiate a format")]
     NegotiationTimeout,
@@ -147,6 +161,40 @@ impl Default for PipeWireScreenCaptureOptions {
 /// keeps the locked region free of any ffmpeg allocation behaviour.
 struct Latest {
     pixels: Vec<u8>,
+    /// The size `pixels` is currently in.
+    ///
+    /// Not necessarily the size [`PipeWireScreenCaptureSource::open`] reported:
+    /// the compositor renegotiates the format whenever a captured *window* is
+    /// resized, while everything downstream stays built for the original size.
+    /// `emit_frame` reconciles the two rather than trusting either alone.
+    /// The size currently being emitted, and the size `pool`'s frames are
+    /// allocated to. Follows the compositor's renegotiation — a captured
+    /// *window* changes size when the user resizes it — rather than staying at
+    /// whatever `open` first saw.
+    width: u32,
+    height: u32,
+    /// Buffers carrying real content, counted since `open` and never reset:
+    /// the rate report and the stall detector both read it and would otherwise
+    /// consume each other's evidence. Distinguishes
+    /// "the compositor is not producing frames" from "this element is dropping
+    /// them", which is otherwise invisible: the emitted rate is constant either
+    /// way, so a collapse in captured content looks exactly like a still
+    /// desktop.
+    received: u64,
+    /// Buffers that arrived carrying no content at all. Monotonic, like
+    /// [`Latest::received`].
+    empty: u64,
+    /// Times the compositor invoked the process callback at all, whether or not
+    /// a buffer could be taken from it. Counted separately so a stall can say
+    /// which side went quiet: no callbacks means the compositor stopped
+    /// scheduling this stream, while callbacks without usable buffers means it
+    /// is scheduling it but producing nothing.
+    callbacks: u64,
+    /// Set when a buffer arrived that this element could not read — currently
+    /// only a GPU-resident (DMA-BUF) buffer, which has no CPU mapping. Reported
+    /// once by `run` rather than silently dropped, because dropping every frame
+    /// looks exactly like a frozen desktop and gives a caller nothing to act on.
+    unmappable_buffers: u64,
     /// `false` until the first real (non-empty) frame lands, so `run` can
     /// tell "nothing captured yet" apart from "a genuinely black screen".
     have_frame: bool,
@@ -193,6 +241,63 @@ struct Terminate;
 /// schedule, exactly as `DxgiCaptureSource` does, so downstream sees a steady
 /// rate either way. Raising `fps` above the chosen monitor's refresh rate only
 /// repeats frames; it does not capture more.
+///
+/// # A fullscreen client can stall a monitor capture — capture the window instead
+///
+/// While a client is fullscreen and the compositor can scan its buffer out
+/// directly, GNOME/Mutter may stop composing that monitor and feed a
+/// [`CaptureSourceKind::Monitor`] stream nothing at all — not empty buffers, no
+/// buffers — for as long as that lasts, then resume the moment fullscreen ends.
+/// `run` keeps emitting at the configured rate throughout, so downstream sees
+/// repeats of the last captured image rather than any error.
+///
+/// Nothing this element negotiates changes that: GNOME's own built-in recorder
+/// collapses to well under 1fps under exactly the same conditions and recovers
+/// at exactly the same moment.
+///
+/// [`CaptureSourceKind::Window`] does not have the problem. A window stream is
+/// fed from that window's own surface rather than from the monitor's composited
+/// output, so it keeps delivering at full rate while the window is fullscreen —
+/// measured at 25-35fps against 0fps for a monitor stream under identical
+/// conditions. Prefer it whenever the caller knows it wants one application.
+///
+/// Because the symptom is otherwise invisible — every emitted tick still
+/// carries a frame — `run` reports a sustained production stall as a warning
+/// (see `STALL_THRESHOLD`) and, at `Debug`, the compositor's actual frame
+/// rate alongside the emitted one.
+///
+/// # A window stream is monitor-sized, whatever the window's own size
+///
+/// GNOME sizes a [`CaptureSourceKind::Window`] stream to the monitor rather
+/// than to the window, and keeps it there. Measured against GNOME 50: a window
+/// smaller than the monitor arrives top-left aligned with the rest of the frame
+/// black; a maximized or fullscreen one fills it exactly; and a window dragged
+/// across two monitors, wider than either, is **clipped** at the stream's width
+/// rather than widening it. So a window capture can never show more than one
+/// monitor's worth of pixels, and capturing a small window still encodes a
+/// full-size frame that is mostly black.
+///
+/// # A captured window can be resized — put a `Scaler` downstream
+///
+/// The portal does not forbid a compositor from renegotiating mid-stream, and
+/// when one does **this element follows**, emitting frames at the new size. The
+/// size [`PipeWireScreenCaptureSource::open`] reports is therefore the *initial*
+/// size, not a promise for the whole stream.
+///
+/// GNOME never actually does this — see the section above; resizing, maximizing,
+/// and spanning monitors all left the stream at its original size. Treat this as
+/// insurance for other compositors rather than as behaviour to expect here.
+///
+/// Chain a [`crate::elements::Scaler`] before anything built for a fixed
+/// geometry. It rebuilds its scaling context whenever its input dimensions
+/// change and always emits its own configured size, so an encoder and muxer
+/// behind it keep working across a resize. Without one, an encoder rejects the
+/// first differently-sized frame outright — a loud failure, deliberately, in
+/// preference to this element silently cropping away whatever moved outside the
+/// original rectangle.
+///
+/// Scaling here instead would be the same hidden conversion every other source
+/// in this crate refuses to do.
 ///
 /// # Frame format
 ///
@@ -253,6 +358,12 @@ impl PipeWireScreenCaptureSource {
 
         let latest = Arc::new(Mutex::new(Latest {
             pixels: Vec::new(),
+            width: 0,
+            height: 0,
+            received: 0,
+            empty: 0,
+            callbacks: 0,
+            unmappable_buffers: 0,
             have_frame: false,
             error: None,
         }));
@@ -364,18 +475,61 @@ impl PipeWireScreenCaptureSource {
     /// Returns `None` when nothing has been captured yet, so `run` can skip
     /// the tick instead of pushing an uninitialised frame.
     fn emit_frame(&mut self) -> Option<crate::pool::UnboundObjectPoolRef<ffmpeg::frame::Video>> {
+        let (src_width, src_height, ready) = {
+            let latest = self.latest.lock().ok()?;
+            (latest.width, latest.height, latest.have_frame)
+        };
+        if !ready || src_width == 0 || src_height == 0 {
+            return None;
+        }
+        // Follow the compositor rather than clamping to the opening size: a
+        // resized window would otherwise be silently cropped, losing whatever
+        // moved outside the original rectangle. Downstream absorbs the change
+        // through `Scaler`, which rebuilds its own context per input size — see
+        // this element's docs on why that split, not scaling here, is the one
+        // consistent with the rest of the crate.
+        if (src_width, src_height) != (self.width, self.height) {
+            pp_info!(
+                self,
+                "capture resized: {}x{} -> {}x{}",
+                self.width,
+                self.height,
+                src_width,
+                src_height
+            );
+            self.width = src_width;
+            self.height = src_height;
+            // Pooled frames are allocated to a fixed size, so the old pool
+            // cannot serve the new one. Outstanding frames stay valid: each
+            // `UnboundObjectPoolRef` keeps its own pool's share alive.
+            self.pool = UnboundObjectPool::new(
+                0,
+                move || {
+                    ffmpeg::frame::Video::new(ffmpeg::format::Pixel::BGRA, src_width, src_height)
+                },
+                |_| {},
+            );
+        }
+
+        let row_bytes = src_width as usize * 4;
         let mut frame = self.pool.get();
-        let row_bytes = self.width as usize * 4;
         {
             let latest = self.latest.lock().ok()?;
-            if !latest.have_frame || latest.pixels.len() < row_bytes * self.height as usize {
+            // Re-checked under the lock: the PipeWire thread may have
+            // renegotiated again between the read above and here.
+            if latest.width != src_width || latest.height != src_height {
                 return None;
             }
             let dst_stride = frame.stride(0);
             let dst = frame.data_mut(0);
-            for row in 0..self.height as usize {
-                dst[row * dst_stride..row * dst_stride + row_bytes]
-                    .copy_from_slice(&latest.pixels[row * row_bytes..(row + 1) * row_bytes]);
+            if !copy_rows_into(
+                dst,
+                dst_stride,
+                &latest.pixels,
+                row_bytes,
+                src_height as usize,
+            ) {
+                return None;
             }
         }
         frame.set_pts(Some(self.frame_index));
@@ -383,6 +537,23 @@ impl PipeWireScreenCaptureSource {
         frame.set_color_range(ffmpeg::color::Range::JPEG);
         self.frame_index += 1;
         Some(frame)
+    }
+
+    /// Running totals of buffers with content and of empty ticks. Callers keep
+    /// their own previous values and subtract, so the rate report and the stall
+    /// detector cannot consume one another's evidence.
+    fn capture_counts(&self) -> (u64, u64, u64) {
+        self.latest
+            .lock()
+            .map(|latest| (latest.received, latest.empty, latest.callbacks))
+            .unwrap_or((0, 0, 0))
+    }
+
+    /// How many unreadable buffers have arrived since the last check, if any.
+    /// Taken rather than peeked so the warning is not repeated every tick.
+    fn take_unmappable_report(&self) -> Option<u64> {
+        let mut latest = self.latest.lock().ok()?;
+        (latest.unmappable_buffers > 0).then(|| std::mem::take(&mut latest.unmappable_buffers))
     }
 
     /// The PipeWire thread's error, if it has hit one. Taken rather than
@@ -435,6 +606,12 @@ impl SourceElement for PipeWireScreenCaptureSource {
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
         pp_info!(self, "started");
         let mut schedule = PeriodicSchedule::new(self.frame_interval, Instant::now());
+        let mut last_report = Instant::now();
+        let mut reported = (0u64, 0u64, 0u64);
+        let mut last_seen_received = 0u64;
+        let mut last_frame_seen = Instant::now();
+        let mut stall_callbacks = 0u64;
+        let mut stalled = false;
         loop {
             let outcome = drain_control(control, self, bus)?;
             if outcome.stopped {
@@ -445,6 +622,74 @@ impl SourceElement for PipeWireScreenCaptureSource {
                 schedule.resume_after_pause(outcome.paused_for, Instant::now());
             }
 
+            // Report a sustained production stall. The emitted rate is constant
+            // regardless, so without this a compositor that stopped feeding this
+            // stream is invisible to everything downstream — the recording just
+            // silently repeats its last frame.
+            let (received_now, empty_now, callbacks_now) = self.capture_counts();
+            if received_now > last_seen_received {
+                last_seen_received = received_now;
+                stall_callbacks = callbacks_now;
+                if stalled {
+                    bus.post(
+                        &self.pp_log,
+                        BusEvent::SourceResumed {
+                            element_type: ElementType::PipeWireScreenCaptureSource,
+                            name: self.name.clone(),
+                        },
+                    );
+                    stalled = false;
+                }
+                last_frame_seen = Instant::now();
+            } else if !stalled && last_frame_seen.elapsed() >= STALL_THRESHOLD {
+                // Reported on the bus, not just logged: a caller cannot detect
+                // this any other way — the emitted rate, timestamps, and buffer
+                // count are identical to a healthy capture — and may well want
+                // to stop recording rather than write a frozen image.
+                // `Bus::post` logs it too, so there is no separate warning here.
+                bus.post(
+                    &self.pp_log,
+                    BusEvent::SourceStalled {
+                        element_type: ElementType::PipeWireScreenCaptureSource,
+                        name: self.name.clone(),
+                        stalled_for: last_frame_seen.elapsed(),
+                    },
+                );
+                pp_debug!(
+                    self,
+                    "{} process callback(s) arrived during the stall",
+                    callbacks_now.saturating_sub(stall_callbacks)
+                );
+                stalled = true;
+            }
+
+            // The compositor produces frames on damage, so the captured rate is
+            // expected to differ from the emitted one — but a collapse in it is
+            // otherwise undetectable downstream, where every tick still carries
+            // a frame. Reported periodically rather than per buffer.
+            if last_report.elapsed() >= CAPTURE_REPORT_INTERVAL
+                && crate::log::enabled(crate::log::Level::Debug)
+            {
+                let elapsed = last_report.elapsed();
+                pp_debug!(
+                    self,
+                    "captured {:.1} new frame(s)/s ({} empty, {} callback(s)) while emitting at {}fps",
+                    received_now.saturating_sub(reported.0) as f64 / elapsed.as_secs_f64(),
+                    empty_now.saturating_sub(reported.1),
+                    callbacks_now.saturating_sub(reported.2),
+                    self.fps
+                );
+                reported = (received_now, empty_now, callbacks_now);
+                last_report = Instant::now();
+            }
+            if let Some(count) = self.take_unmappable_report() {
+                pp_warn!(
+                    self,
+                    "dropped {count} GPU-resident (DMA-BUF) buffer(s): this element only \
+                     reads CPU-mapped buffers, so the captured image is frozen at the last \
+                     readable frame"
+                );
+            }
             if let Some(error) = self.take_worker_error() {
                 pp_error!(self, "capture failed: {error}");
                 return Err(PipeWireScreenCaptureSourceError::PipeWire(error).into());
@@ -582,6 +827,34 @@ fn portal_handshake(
     })
 }
 
+/// Copies `rows` tightly packed rows of `row_bytes` into a destination whose
+/// own rows are `dst_stride` apart.
+///
+/// FFmpeg allocates each frame's line size with its own padding, so the
+/// destination stride is generally wider than the pixels; only the real
+/// `row_bytes` are written. Returns `false` without writing anything when
+/// either side cannot supply or hold that many rows.
+fn copy_rows_into(
+    dst: &mut [u8],
+    dst_stride: usize,
+    src: &[u8],
+    row_bytes: usize,
+    rows: usize,
+) -> bool {
+    if row_bytes == 0
+        || dst_stride < row_bytes
+        || src.len() < row_bytes.saturating_mul(rows)
+        || dst.len() < dst_stride.saturating_mul(rows.saturating_sub(1)) + row_bytes
+    {
+        return false;
+    }
+    for row in 0..rows {
+        dst[row * dst_stride..row * dst_stride + row_bytes]
+            .copy_from_slice(&src[row * row_bytes..(row + 1) * row_bytes]);
+    }
+    true
+}
+
 /// Copies `height` rows of `row_bytes` out of a `src_stride`-strided source
 /// into a tightly packed destination.
 ///
@@ -660,7 +933,7 @@ fn run_pipewire(
             let size = size.clone();
             let latest = latest.clone();
             let startup = startup.clone();
-            move |_, (), id, param| {
+            move |stream, (), id, param| {
                 let Some(param) = param else { return };
                 if id != spa::param::ParamType::Format.as_raw() {
                     return;
@@ -698,14 +971,53 @@ fn run_pipewire(
                     // A renegotiation to a different size (the user resized a
                     // captured window) invalidates whatever was buffered.
                     latest.pixels = vec![0; width as usize * height as usize * 4];
+                    latest.width = width;
+                    latest.height = height;
                     latest.have_frame = false;
                 }
+
+                // Constrain the buffer negotiation to memory this element can
+                // actually read. Without this the compositor is free to hand
+                // over DMA-BUF once the captured content becomes GPU-resident
+                // (a fullscreen video, say); those have no CPU mapping, every
+                // frame is dropped, and the capture silently freezes at the
+                // last readable image. See this element's docs on why DMA-BUF
+                // support is out of scope rather than merely unimplemented.
+                let data_type = (1 << spa::buffer::DataType::MemFd.as_raw())
+                    | (1 << spa::buffer::DataType::MemPtr.as_raw());
+                let buffers = spa::pod::object!(
+                    spa::utils::SpaTypes::ObjectParamBuffers,
+                    spa::param::ParamType::Buffers,
+                    spa::pod::Property::new(
+                        spa_sys::SPA_PARAM_BUFFERS_dataType,
+                        spa::pod::Value::Choice(spa::pod::ChoiceValue::Int(spa::utils::Choice(
+                            spa::utils::ChoiceFlags::empty(),
+                            spa::utils::ChoiceEnum::Flags {
+                                default: data_type,
+                                flags: vec![data_type],
+                            },
+                        ),)),
+                    ),
+                );
+                if let Ok(bytes) = spa::pod::serialize::PodSerializer::serialize(
+                    std::io::Cursor::new(Vec::new()),
+                    &spa::pod::Value::Object(buffers),
+                ) {
+                    let bytes = bytes.0.into_inner();
+                    if let Some(pod) = Pod::from_bytes(&bytes) {
+                        let _ = stream.update_params(&mut [pod]);
+                    }
+                }
+
                 let _ = startup.send(Startup::Ready { width, height });
             }
         })
         .process({
             let size = size.clone();
             move |stream, ()| {
+                if let Ok(mut latest) = latest.lock() {
+                    latest.callbacks += 1;
+                }
                 let Some(mut buffer) = stream.dequeue_buffer() else {
                     return;
                 };
@@ -715,6 +1027,9 @@ fn run_pipewire(
                 }
                 let data = &mut datas[0];
                 if data.chunk().size() == 0 {
+                    if let Ok(mut latest) = latest.lock() {
+                        latest.empty += 1;
+                    }
                     return; // a tick with no new content
                 }
                 let stride = data.chunk().stride();
@@ -730,13 +1045,24 @@ fn run_pipewire(
                 } else {
                     row_bytes
                 };
-                let Some(pixels) = data.data() else { return };
+                let Some(pixels) = data.data() else {
+                    // No CPU mapping: a DMA-BUF slipped through negotiation.
+                    // Count it so `run` can say so; returning quietly here is
+                    // what made a dead capture look like a static desktop.
+                    if let Ok(mut latest) = latest.lock() {
+                        latest.unmappable_buffers += 1;
+                    }
+                    return;
+                };
                 let Ok(mut latest) = latest.lock() else {
                     return;
                 };
                 if latest.pixels.len() < row_bytes * height as usize {
                     latest.pixels = vec![0; row_bytes * height as usize];
                 }
+                latest.width = width;
+                latest.height = height;
+                latest.received += 1;
                 if repack_rows(
                     &mut latest.pixels,
                     pixels,
@@ -846,6 +1172,62 @@ mod tests {
             src.extend(std::iter::repeat_n(0xAA, pad));
         }
         src
+    }
+
+    /// Builds `rows` tightly packed rows of `row_bytes`, each filled with its
+    /// own row index.
+    fn image(row_bytes: usize, rows: usize) -> Vec<u8> {
+        (0..rows)
+            .flat_map(|r| std::iter::repeat_n(r as u8, row_bytes))
+            .collect()
+    }
+
+    #[test]
+    fn rows_are_written_at_the_destination_stride_not_packed() {
+        // FFmpeg pads each line, so writing packed would put row 1 inside
+        // row 0's padding and skew the whole image.
+        let (row_bytes, rows, stride) = (8, 3, 12);
+        let src = image(row_bytes, rows);
+        let mut dst = vec![0xEEu8; stride * rows];
+
+        assert!(copy_rows_into(&mut dst, stride, &src, row_bytes, rows));
+        for row in 0..rows {
+            assert_eq!(
+                &dst[row * stride..row * stride + row_bytes],
+                &vec![row as u8; row_bytes][..],
+                "row {row} lands at its own stride offset"
+            );
+            assert!(
+                dst[row * stride + row_bytes..(row + 1) * stride]
+                    .iter()
+                    .all(|&b| b == 0xEE),
+                "the destination's own padding is left alone"
+            );
+        }
+    }
+
+    #[test]
+    fn a_source_shorter_than_it_claims_is_refused_without_writing() {
+        let (row_bytes, rows) = (8, 3);
+        let src = vec![0x77u8; row_bytes * rows - 1];
+        let mut dst = vec![0u8; row_bytes * rows];
+
+        assert!(!copy_rows_into(&mut dst, row_bytes, &src, row_bytes, rows));
+        assert!(
+            dst.iter().all(|&b| b == 0),
+            "a rejected copy must leave the frame untouched rather than half-written"
+        );
+    }
+
+    #[test]
+    fn a_destination_too_small_for_the_frame_is_refused() {
+        // Mirrors a renegotiation racing ahead of the pool rebuild.
+        let (row_bytes, rows) = (8, 3);
+        let src = image(row_bytes, rows);
+        let mut dst = vec![0u8; row_bytes * (rows - 1)];
+
+        assert!(!copy_rows_into(&mut dst, row_bytes, &src, row_bytes, rows));
+        assert!(dst.iter().all(|&b| b == 0));
     }
 
     #[test]

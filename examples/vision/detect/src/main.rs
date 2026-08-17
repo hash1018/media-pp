@@ -217,7 +217,9 @@ fn play(model_path: &str, video_path: &str, proxy: EventLoopProxy<AppEvent>) -> 
             BusEvent::Eos { name, .. } => println!("[{name}] eos"),
             BusEvent::Error { name, error, .. } => eprintln!("[{name}] error: {error}"),
             BusEvent::Dropped { name, .. } => eprintln!("[{name}] dropped a buffer (queue full)"),
-            BusEvent::Seeked { .. } => {}
+            // `BusEvent` is `#[non_exhaustive]`; this example only acts
+            // on the events above.
+            _ => {}
         }
         if matches!(event, BusEvent::Eos { .. } | BusEvent::Error { .. }) {
             pipeline.stop();

@@ -218,6 +218,9 @@ mod windows_example {
                     landed,
                     ..
                 } => println!("[{name}] seeked: requested {requested:.2?}, landed {landed:.2?}"),
+                // `BusEvent` is `#[non_exhaustive]`; this example only acts
+                // on the events above.
+                _ => {}
             }
         }
         Ok(())

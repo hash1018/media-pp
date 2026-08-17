@@ -239,7 +239,7 @@ enum Command {
 /// # Pacing
 ///
 /// Queue backpressure is the playback clock: `consume` blocks once
-/// [`QUEUE_CAPACITY`] frames are outstanding, so upstream can run no faster
+/// `QUEUE_CAPACITY` frames are outstanding, so upstream can run no faster
 /// than the device drains. Put a [`crate::queue::Queue`] immediately before
 /// this sink when that blocking must not hold up another branch.
 ///
@@ -256,7 +256,7 @@ pub struct PipeWireAudioRenderer {
     playback: Arc<Playback>,
     clock_binding: PlaybackClockBinding,
     /// Whether the stream has been started yet. It stays inactive until
-    /// [`PRIME_FRAMES`] are queued — see that constant's own docs.
+    /// `PRIME_FRAMES` are queued — see that constant's own docs.
     primed: bool,
     /// Media timestamp the first submitted frame carried, and how far the
     /// submitted range now extends. `None` until the first frame with a `pts`.
@@ -558,7 +558,7 @@ impl PipeWireAudioRenderer {
     }
 
     /// Starts the stream once enough audio is queued to survive the first few
-    /// graph cycles — see [`PRIME_FRAMES`].
+    /// graph cycles — see `PRIME_FRAMES`.
     fn start_once_primed(&mut self) {
         if !self.primed && self.frames.len() >= PRIME_FRAMES {
             self.send_command(Command::SetActive(true));

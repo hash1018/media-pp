@@ -61,7 +61,7 @@ pub enum PipeWireAudioCaptureSourceError {
     PipeWire(String),
 
     /// The stream connected but never produced a `Format` param within
-    /// [`NEGOTIATION_TIMEOUT`].
+    /// `NEGOTIATION_TIMEOUT`.
     #[error("timed out waiting for the PipeWire audio stream to negotiate a format")]
     NegotiationTimeout,
 

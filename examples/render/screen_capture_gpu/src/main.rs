@@ -183,7 +183,9 @@ mod windows_example {
                 BusEvent::Dropped { name, .. } => {
                     eprintln!("[{name}] dropped a buffer (queue full)")
                 }
-                BusEvent::Seeked { .. } => {}
+                // `BusEvent` is `#[non_exhaustive]`; this example only acts
+                // on the events above.
+                _ => {}
             }
             // Same reasoning as `screen_capture`'s own loop: only stop for
             // `Eos`, or an `Error` that means `DxgiCaptureSource`'s own `run()`

@@ -161,7 +161,7 @@ mod linux_example {
     /// Windows path this captures for a fixed duration and then
     /// `pipeline.stop()`s, which is also what finalizes the MP4's trailer.
     ///
-    ///     cargo run -p screen_record -- [output.mp4] [seconds] [restore-token]
+    ///     cargo run -p screen_record -- [output.mp4] [seconds] [monitor|window] [restore-token]
     pub(super) fn run() -> media_pp::Result<()> {
         media_pp::init()?;
         let _log_guard = media_pp::log::init(
@@ -178,7 +178,17 @@ mod linux_example {
             .nth(2)
             .and_then(|s| s.parse().ok())
             .unwrap_or(5);
-        let restore_token = std::env::args().nth(3);
+        // Monitor by default, matching the Windows branch's whole-desktop
+        // capture. `window` is worth reaching for when one application is the
+        // subject: a monitor stream stalls while any client is fullscreen,
+        // where a window stream does not — see `PipeWireScreenCaptureSource`.
+        let source_kind = match std::env::args().nth(3).as_deref() {
+            Some("window") => CaptureSourceKind::Window,
+            _ => CaptureSourceKind::Monitor,
+        };
+        // Last so it can simply be left off, unlike the token-shaped argument
+        // it replaces: it is a long opaque string that only a repeat run has.
+        let restore_token = std::env::args().nth(4);
 
         if restore_token.is_none() {
             eprintln!("opening the portal — approve the screen-share dialog to continue...");
@@ -188,7 +198,7 @@ mod linux_example {
                 "screen",
                 PipeWireScreenCaptureOptions {
                     fps: 30,
-                    source_kind: CaptureSourceKind::Monitor,
+                    source_kind,
                     include_cursor: true,
                     restore_token,
                 },
@@ -254,7 +264,14 @@ mod linux_example {
 
         println!("wrote {path}");
         match restore_token {
-            Some(token) => println!("re-run without a dialog:\n  ... {path} {seconds} {token}"),
+            Some(token) => println!(
+                "re-run without a dialog:\n  ... {path} {seconds} {} {token}",
+                if matches!(source_kind, CaptureSourceKind::Window) {
+                    "window"
+                } else {
+                    "monitor"
+                }
+            ),
             None => println!("the compositor issued no restore token; the next run will prompt"),
         }
         Ok(())

@@ -114,8 +114,8 @@ The examples are grouped by purpose:
 - `examples/core`: decoding, queues, fan-out, dynamic tees, app sources/sinks,
   audio, muxing, HLS, and CPU compositing.
 - `examples/render`: D3D11/D3D12 playback, upload, capture, synchronization,
-  GPU compositing, NVENC hardware encoding, and recording. `screen_record`
-  additionally covers Wayland capture through PipeWire.
+  GPU compositing, NVENC hardware encoding, and recording. `screen_record` and
+  `screen_audio_record` additionally cover Wayland capture through PipeWire.
 - `examples/rtsp`: publishing, seeking, and receiving RTSP streams.
 - `examples/vision`: scaling and ONNX object detection.
 - `examples/webrtc`: data and encoded A/V loopback pipelines.
@@ -200,6 +200,18 @@ buffers are not logged one record per buffer.
   screen-share dialog and blocks until the user answers, unless a previously
   issued restore token is supplied. It negotiates CPU-mapped BGRx/BGRA buffers
   only; DMA-BUF is not used.
+- A `PipeWireScreenCaptureSource` capturing a *monitor* can stop receiving
+  frames entirely while some client is fullscreen; GNOME's own recorder behaves
+  the same way, so this is a compositor behaviour rather than something the
+  element can negotiate around. Capturing a *window* is unaffected and keeps
+  delivering at full rate. Either way the element warns about a sustained stall
+  instead of silently repeating its last frame.
+- A *window* stream is sized to the monitor, not to the window: a smaller window
+  arrives top-left with the rest of the frame black, and one spanning two
+  monitors is clipped rather than widening the stream. The element also follows
+  a mid-stream size renegotiation should a compositor do one, so the size `open`
+  reports is the initial one; chain a `Scaler` before any encoder or muxer,
+  since it rebuilds its context per input size and emits a fixed one.
 - `PipeWireAudioCaptureSource` needs the same PipeWire development files and a
   running session, but no portal: audio nodes are enumerated with
   `list_devices` and selected programmatically, with no dialog. Capturing a
