@@ -6,3 +6,6 @@ publish = false
 
 [target.'cfg(windows)'.dependencies]
 media-pp = { path = "../../../lib", features = ["wasapi-renderer"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+media-pp = { path = "../../../lib", features = ["pipewire-audio-renderer"] }

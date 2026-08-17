@@ -53,6 +53,7 @@ pub enum ElementType {
     PacketCounter,
     D3d12Renderer,
     D3d11Renderer,
+    PipeWireAudioRenderer,
     WasapiRenderer,
     RtspSink,
     AppSink,

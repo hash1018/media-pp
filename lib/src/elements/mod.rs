@@ -12,6 +12,16 @@ pub use rtsp::RtspTransport;
 ))]
 pub use crate::platform::windows::wasapi::{WasapiDevice, WasapiDeviceKind};
 
+#[cfg(all(
+    target_os = "linux",
+    any(
+        feature = "pipewire-audio-capture",
+        feature = "pipewire-audio-renderer"
+    )
+))]
+pub use crate::platform::linux::pipewire::{
+    PipeWireAudioDevice, PipeWireAudioDeviceKind, PipeWireDeviceError,
+};
 #[cfg(feature = "webrtc")]
 pub use driver::{
     TrackId, WebRtcError, WebRtcHandle, WebRtcPeer, WebRtcTrackSink, WebRtcTrackSource,
@@ -42,6 +52,8 @@ pub use sink::{COCO_CLASS_LABELS, Detection, OrtDetector, OrtDetectorError};
 pub use sink::{D3d11FrameRenderer, D3d11Renderer, D3d11RendererError};
 #[cfg(all(target_os = "windows", feature = "d3d12"))]
 pub use sink::{D3d12FrameRenderer, D3d12Renderer, D3d12RendererError, RawPlane};
+#[cfg(all(target_os = "linux", feature = "pipewire-audio-renderer"))]
+pub use sink::{PipeWireAudioRenderer, PipeWireAudioRendererError, PipeWireAudioRendererOptions};
 #[cfg(all(target_os = "windows", feature = "wasapi-renderer"))]
 pub use sink::{WasapiRenderer, WasapiRendererError, WasapiRendererOptions};
 pub use source::{
@@ -71,7 +83,6 @@ pub use source::{
 #[cfg(all(target_os = "linux", feature = "pipewire-audio-capture"))]
 pub use source::{
     PipeWireAudioCaptureOptions, PipeWireAudioCaptureSource, PipeWireAudioCaptureSourceError,
-    PipeWireAudioDevice, PipeWireAudioDeviceKind,
 };
 #[cfg(all(target_os = "windows", feature = "wasapi-capture"))]
 pub use source::{WasapiCaptureOptions, WasapiCaptureSource, WasapiCaptureSourceError};

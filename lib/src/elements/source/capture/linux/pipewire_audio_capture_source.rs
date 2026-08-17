@@ -1,5 +1,5 @@
 use std::{
-    cell::{Cell, RefCell},
+    cell::Cell,
     rc::Rc,
     sync::{
         Arc,
@@ -27,6 +27,9 @@ use crate::{
     elements::AudioFormat,
     error::Result,
     pad::SrcPad,
+    platform::linux::pipewire::{
+        PipeWireAudioDevice, PipeWireAudioDeviceKind, PipeWireDeviceError,
+    },
 };
 
 /// How long [`PipeWireAudioCaptureSource::open`] waits for the stream to
@@ -35,10 +38,6 @@ use crate::{
 /// graph scheduling, and exists to turn an unresponsive daemon into an error
 /// rather than a permanent hang.
 const NEGOTIATION_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// How long [`PipeWireAudioCaptureSource::list_devices`] waits for the
-/// registry round trip that enumerates existing nodes.
-const ENUMERATION_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Bounds `Stop` latency while `run` waits for the next captured packet.
 const RECV_GRANULARITY: Duration = Duration::from_millis(100);
@@ -66,8 +65,8 @@ pub enum PipeWireAudioCaptureSourceError {
     #[error("timed out waiting for the PipeWire audio stream to negotiate a format")]
     NegotiationTimeout,
 
-    #[error("timed out enumerating PipeWire audio nodes")]
-    EnumerationTimeout,
+    #[error(transparent)]
+    Device(#[from] PipeWireDeviceError),
 
     /// The daemon negotiated a sample format this element cannot describe as
     /// an FFmpeg sample format.
@@ -81,53 +80,6 @@ pub enum PipeWireAudioCaptureSourceError {
 
     #[error("PipeWireAudioCaptureSource doesn't support seeking a live capture")]
     SeekUnsupported,
-}
-
-/// Which direction a PipeWire audio node flows — the same distinction
-/// `WasapiDeviceKind` draws, and with the same consequence for how `open`
-/// connects to it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PipeWireAudioDeviceKind {
-    /// A playback node (speakers, headphones, HDMI). Captured through its
-    /// *monitor* ports, so what arrives is whatever the system is playing —
-    /// PipeWire's equivalent of WASAPI loopback on a render endpoint.
-    Sink,
-    /// A recording node (microphone, line input). Captured directly.
-    Source,
-}
-
-/// One PipeWire audio node that can be captured.
-///
-/// Obtained from [`PipeWireAudioCaptureSource::list_devices`] and handed
-/// straight to [`PipeWireAudioCaptureOptions::device`]. Unlike the screen
-/// capture path, this really is a selection: audio needs no portal, so a
-/// caller can enumerate, filter, and pick a node programmatically with no
-/// dialog and no user interaction at all.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PipeWireAudioDevice {
-    /// The PipeWire global node id. Stable only for the lifetime of the node:
-    /// unplugging and reattaching a device yields a new id, so persist
-    /// [`Self::name`] instead if a choice has to survive a restart.
-    pub id: u32,
-    /// The node's `node.name` — stable across restarts for a given physical
-    /// device, unlike [`Self::id`].
-    pub name: String,
-    /// The node's human-readable `node.description`, falling back to
-    /// `node.nick` and then to `name`.
-    pub description: String,
-    pub kind: PipeWireAudioDeviceKind,
-    /// Whether this was the session's default node for its own [`kind`] when
-    /// it was enumerated.
-    ///
-    /// Not guaranteed to be set for any node of a given kind. PipeWire's
-    /// `default.audio.source` metadata routinely names a *sink* — that is how
-    /// "use this output's monitor as my input" is expressed — in which case no
-    /// [`PipeWireAudioDeviceKind::Source`] carries the flag at all. Callers
-    /// should fall back to any node of the kind they want rather than assuming
-    /// one is marked.
-    ///
-    /// [`kind`]: Self::kind
-    pub is_default: bool,
 }
 
 /// Construction-time options for [`PipeWireAudioCaptureSource::open`].
@@ -229,31 +181,12 @@ impl PipeWireAudioCaptureSource {
     /// can show in a picker, search, or filter, then hand straight to
     /// [`PipeWireAudioCaptureOptions::device`].
     ///
-    /// Needs no portal and shows no dialog. Connects to the daemon, walks the
-    /// registry to a single `core.sync` barrier, and disconnects.
+    /// Needs no portal and shows no dialog. See
+    /// [`crate::elements::PipeWireAudioRenderer::list_devices`] for the same
+    /// list filtered to playback nodes.
     pub fn list_devices()
     -> std::result::Result<Vec<PipeWireAudioDevice>, PipeWireAudioCaptureSourceError> {
-        let (tx, rx) = mpsc::channel();
-        // The PipeWire main loop and registry are not `Send`, so the whole
-        // round trip happens on a thread of its own and only the plain
-        // results cross back.
-        let worker = std::thread::Builder::new()
-            .name("pipewire-enumerate".into())
-            .spawn(move || {
-                let _ = tx.send(enumerate_nodes());
-            })
-            .map_err(|e| PipeWireAudioCaptureSourceError::PipeWire(e.to_string()))?;
-        let result = rx.recv_timeout(ENUMERATION_TIMEOUT);
-        let _ = worker.join();
-        match result {
-            Ok(devices) => devices,
-            Err(RecvTimeoutError::Timeout) => {
-                Err(PipeWireAudioCaptureSourceError::EnumerationTimeout)
-            }
-            Err(RecvTimeoutError::Disconnected) => Err(PipeWireAudioCaptureSourceError::PipeWire(
-                "the enumeration thread exited without a result".into(),
-            )),
-        }
+        Ok(crate::platform::linux::pipewire::list_devices()?)
     }
 
     /// Opens `options.device` and starts capturing.
@@ -494,120 +427,6 @@ fn ffmpeg_sample_format(format: spa::param::audio::AudioFormat) -> Option<ffmpeg
         Spa::S32LE => ffmpeg::format::Sample::I32(Packed),
         _ => return None,
     })
-}
-
-/// One registry round trip, on its own thread's main loop.
-fn enumerate_nodes()
--> std::result::Result<Vec<PipeWireAudioDevice>, PipeWireAudioCaptureSourceError> {
-    fn pw_err(error: impl std::fmt::Display) -> PipeWireAudioCaptureSourceError {
-        PipeWireAudioCaptureSourceError::PipeWire(error.to_string())
-    }
-
-    pw::init();
-    let mainloop = pw::main_loop::MainLoopRc::new(None).map_err(pw_err)?;
-    let context = pw::context::ContextRc::new(&mainloop, None).map_err(pw_err)?;
-    let core = context.connect_rc(None).map_err(pw_err)?;
-    let registry = core.get_registry_rc().map_err(pw_err)?;
-
-    let nodes = Rc::new(RefCell::new(Vec::new()));
-    let _reg_listener = {
-        let nodes = nodes.clone();
-        registry
-            .add_listener_local()
-            .global(move |global| {
-                if global.type_ != pw::types::ObjectType::Node {
-                    return;
-                }
-                let Some(props) = global.props else { return };
-                let kind = match props.get("media.class").unwrap_or_default() {
-                    "Audio/Sink" => PipeWireAudioDeviceKind::Sink,
-                    "Audio/Source" => PipeWireAudioDeviceKind::Source,
-                    _ => return,
-                };
-                let name = props.get("node.name").unwrap_or_default().to_owned();
-                let description = props
-                    .get("node.description")
-                    .or_else(|| props.get("node.nick"))
-                    .filter(|d| !d.is_empty())
-                    .unwrap_or(&name)
-                    .to_owned();
-                nodes.borrow_mut().push(PipeWireAudioDevice {
-                    id: global.id,
-                    name,
-                    description,
-                    kind,
-                    // Filled in below, once the defaults metadata is known.
-                    is_default: false,
-                });
-            })
-            .register()
-    };
-
-    // The server replays every existing global before answering a sync, so
-    // one round trip is enough to see the whole current graph.
-    let done = Rc::new(Cell::new(false));
-    let pending = core.sync(0).map_err(pw_err)?;
-    let _core_listener = {
-        let mainloop = mainloop.clone();
-        let done = done.clone();
-        core.add_listener_local()
-            .done(move |id, seq| {
-                if id == pw::sys::PW_ID_CORE && seq == pending {
-                    done.set(true);
-                    mainloop.quit();
-                }
-            })
-            .register()
-    };
-    mainloop.run();
-    if !done.get() {
-        return Err(PipeWireAudioCaptureSourceError::EnumerationTimeout);
-    }
-
-    let mut nodes = Rc::try_unwrap(nodes)
-        .map(RefCell::into_inner)
-        .unwrap_or_else(|shared| shared.borrow().clone());
-    mark_defaults(&mut nodes);
-    nodes.sort_by_key(|node| (node.kind == PipeWireAudioDeviceKind::Sink, node.id));
-    Ok(nodes)
-}
-
-/// Flags whichever nodes the session currently treats as default.
-///
-/// Read from the daemon's `default` metadata rather than assumed, and a
-/// failure to read it is not fatal: an unflagged list is still a complete and
-/// usable list, so this degrades to "no entry marked default" instead of
-/// failing enumeration outright.
-fn mark_defaults(nodes: &mut [PipeWireAudioDevice]) {
-    let Ok(output) = std::process::Command::new("pw-metadata")
-        .args(["-n", "default"])
-        .output()
-    else {
-        return;
-    };
-    let text = String::from_utf8_lossy(&output.stdout);
-    for line in text.lines() {
-        let kind = if line.contains("'default.audio.sink'") {
-            PipeWireAudioDeviceKind::Sink
-        } else if line.contains("'default.audio.source'") {
-            PipeWireAudioDeviceKind::Source
-        } else {
-            continue;
-        };
-        // value:'{"name":"<node.name>"}'
-        let Some(name) = line
-            .split("\"name\":\"")
-            .nth(1)
-            .and_then(|rest| rest.split('"').next())
-        else {
-            continue;
-        };
-        for node in nodes.iter_mut() {
-            if node.kind == kind && node.name == name {
-                node.is_default = true;
-            }
-        }
-    }
 }
 
 /// The PipeWire thread body: owns the main loop, context, core, and stream,

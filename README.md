@@ -88,7 +88,7 @@ buffers, codecs, and muxers; `Pipeline::stop` abandons buffered work immediately
 |---|---|
 | Sources | `FileDemuxer`, `AppSource`, `RtspSource`, `TestVideoSource`, `TestAudioSource`, `DxgiCaptureSource`, `PipeWireScreenCaptureSource`, `PipeWireAudioCaptureSource`, `WasapiCaptureSource`, `AudioMixer`, `VideoCompositor`, `D3d11VideoCompositor`, `WebRtcTrackSource` |
 | Filters | `SwDecoder`, `D3d11Decoder`, `D3d12vaDecoder`, `SwEncoder`, `D3d11NvencEncoder`, `SwAudioEncoder`, `AudioResampler`, `AudioVolume`, `Scaler`, `Pacer`, `VideoSynchronizer`, `D3d11Upload`, `D3d11Download`, `D3d12Upload`, `Tee` |
-| Sinks | `FrameCounter`, `PacketCounter`, `AppSink`, `Mp4Muxer`, `SegmentedMp4Muxer`, `HlsMuxer`, `RtspSink`, `D3d11Renderer`, `D3d12Renderer`, `WasapiRenderer`, `OrtDetector`, `WebRtcTrackSink` |
+| Sinks | `FrameCounter`, `PacketCounter`, `AppSink`, `Mp4Muxer`, `SegmentedMp4Muxer`, `HlsMuxer`, `RtspSink`, `D3d11Renderer`, `D3d12Renderer`, `PipeWireAudioRenderer`, `WasapiRenderer`, `OrtDetector`, `WebRtcTrackSink` |
 
 Backend-specific elements require their corresponding Cargo feature and are
 available only on that backend's platform. See each type's Rust documentation
@@ -144,6 +144,7 @@ The library has no default features.
 | `d3d12` | D3D12VA decode, upload, and rendering interfaces | Windows |
 | `dxgi-capture` | Desktop capture; also enables `d3d11` | Windows |
 | `pipewire-audio-capture` | System-audio and microphone capture through PipeWire | Linux |
+| `pipewire-audio-renderer` | Audio playback through PipeWire | Linux |
 | `pipewire-screen-capture` | Desktop capture through xdg-desktop-portal and PipeWire | Linux |
 | `wasapi-capture` | System-audio and microphone capture | Windows |
 | `wasapi-renderer` | Shared-mode audio playback | Windows |
@@ -204,6 +205,9 @@ buffers are not logged one record per buffer.
   `list_devices` and selected programmatically, with no dialog. Capturing a
   `Sink` device records that device's monitor (system audio); capturing a
   `Source` device records a microphone.
+- `PipeWireAudioRenderer` is the playback counterpart and the only element that
+  can act as the audio master for `PlaybackClock` on Linux, so binding it is
+  what hands video scheduling from the wall clock to audio output.
 - `D3d11NvencEncoder` needs an NVIDIA GPU and an FFmpeg build with NVENC. It
   fails to open with a typed error, not a panic, on any other GPU. The other
   `d3d11` elements are vendor-neutral.

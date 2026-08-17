@@ -76,7 +76,11 @@ ashpd = { version = "0.13", optional = true, default-features = false, features 
     "async-io",
 ] }
 enumflags2 = { version = "0.7", optional = true }
-pipewire = { version = "0.10", optional = true }
+# `v0_3_49` is needed for `pw_buffer.requested`, which tells a playback stream
+# how many frames the graph wants this cycle. Without it a renderer can only
+# fill the whole buffer, which drains its queue in bursts and stutters. Raises
+# the minimum libpipewire to 0.3.49 (2022); distributions ship far newer.
+pipewire = { version = "0.10", optional = true, features = ["v0_3_49"] }
 pollster = { version = "1", optional = true }
 
 [features]
@@ -84,6 +88,7 @@ d3d12 = ["dep:windows"]
 d3d11 = ["dep:windows", "dep:ab_glyph"]
 dxgi-capture = ["dep:windows", "d3d11"]
 pipewire-audio-capture = ["dep:pipewire"]
+pipewire-audio-renderer = ["dep:pipewire"]
 pipewire-screen-capture = ["dep:ashpd", "dep:enumflags2", "dep:pipewire", "dep:pollster"]
 wasapi-capture = ["dep:windows"]
 wasapi-renderer = ["dep:windows"]

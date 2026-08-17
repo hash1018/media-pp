@@ -6,6 +6,8 @@ use crate::elements::DxgiCaptureSourceError;
 use crate::elements::OrtDetectorError;
 #[cfg(all(target_os = "linux", feature = "pipewire-audio-capture"))]
 use crate::elements::PipeWireAudioCaptureSourceError;
+#[cfg(all(target_os = "linux", feature = "pipewire-audio-renderer"))]
+use crate::elements::PipeWireAudioRendererError;
 #[cfg(all(target_os = "linux", feature = "pipewire-screen-capture"))]
 use crate::elements::PipeWireScreenCaptureSourceError;
 use crate::elements::RtspSinkError;
@@ -155,6 +157,10 @@ pub enum Error {
     #[cfg(all(target_os = "linux", feature = "pipewire-audio-capture"))]
     #[error(transparent)]
     PipeWireAudioCaptureSourceError(#[from] PipeWireAudioCaptureSourceError),
+
+    #[cfg(all(target_os = "linux", feature = "pipewire-audio-renderer"))]
+    #[error(transparent)]
+    PipeWireAudioRendererError(#[from] PipeWireAudioRendererError),
 
     #[cfg(all(target_os = "linux", feature = "pipewire-screen-capture"))]
     #[error(transparent)]
