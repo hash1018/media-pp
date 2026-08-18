@@ -40,7 +40,10 @@ pub use filter::{
     VideoSynchronizerError,
 };
 #[cfg(feature = "cuda")]
-pub use filter::{CudaDecoder, CudaDecoderError};
+pub use filter::{
+    CudaCodec, CudaDecoder, CudaDecoderError, CudaEncoder, CudaEncoderError, CudaEncoderOptions,
+    CudaUpload, CudaUploadError,
+};
 #[cfg(all(target_os = "windows", feature = "d3d11"))]
 pub use filter::{
     D3d11Decoder, D3d11Download, D3d11DownloadError, D3d11NvencCodec, D3d11NvencEncoder,

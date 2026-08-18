@@ -221,11 +221,17 @@ documentation and implementation differ.
 
 ## Known historical hazards
 
-- Hardware video encoding was implemented, tested on real hardware, and then
-  intentionally reverted. `SwEncoder` is the only encoder family currently in
-  the tree. Read history and ask before reintroducing a hardware encoder.
+- An early hardware encoder was implemented, tested on real hardware, and then
+  intentionally reverted; the families now in the tree (`D3d11NvencEncoder`,
+  `CudaEncoder`) were reintroduced deliberately afterwards. Read history before
+  adding a third, but the question of whether hardware encoding belongs here at
+  all is settled.
 - D3D11VA decode surfaces are fixed-size. `extra_hw_frames` must cover the deepest
   downstream buffering, unlike the growable pools used elsewhere.
+- NVDEC's pool is fixed-size *and* capped: at most 32 surfaces including the
+  codec's own reference frames. Exceeding it fails `cuvidCreateDecoder`
+  outright rather than degrading, so a downstream `Queue` depth has to fit that
+  budget — see `CudaDecoder::new`.
 - Before extending text overlays (for example multi-line layout, background
   boxes, or shared font caching), read the design and ownership rationale in
   `compositor/windows/d3d11_video_compositor/text_handle.rs` and
