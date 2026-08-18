@@ -41,8 +41,8 @@ pub use filter::{
 };
 #[cfg(feature = "cuda")]
 pub use filter::{
-    CudaCodec, CudaDecoder, CudaDecoderError, CudaEncoder, CudaEncoderError, CudaEncoderOptions,
-    CudaUpload, CudaUploadError,
+    CudaCodec, CudaDecoder, CudaDecoderError, CudaDownload, CudaDownloadError, CudaEncoder,
+    CudaEncoderError, CudaEncoderOptions, CudaUpload, CudaUploadError,
 };
 #[cfg(all(target_os = "windows", feature = "d3d11"))]
 pub use filter::{

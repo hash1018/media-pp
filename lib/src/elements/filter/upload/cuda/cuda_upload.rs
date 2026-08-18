@@ -53,6 +53,7 @@ pub enum CudaUploadError {
 /// CUDA sibling of [`crate::elements::D3d11Upload`], and what lets a CPU
 /// source reach [`crate::elements::CudaEncoder`] or
 /// [`crate::elements::CudaRenderer`] at all.
+/// [`crate::elements::CudaDownload`] is the mirror of this element.
 ///
 /// A `Filter`: receives via `Sink`, pushes the uploaded frame into its own
 /// single src pad. PTS, duration, and color metadata are carried across with
