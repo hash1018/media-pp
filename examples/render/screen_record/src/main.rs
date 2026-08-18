@@ -66,16 +66,15 @@ mod windows_example {
             },
             ..DxgiCaptureOptions::default()
         };
-        let (source, width, height, _device) = DxgiCaptureSource::open("screen", capture_options)?;
-        let time_base = source.time_base();
+        let (source, format, _device) = DxgiCaptureSource::open("screen", capture_options)?;
 
         let encoder = SwEncoder::new(
             "encoder",
             SwEncoderOptions {
                 codec: VideoCodec::OpenH264,
-                width,
-                height,
-                time_base,
+                width: format.width,
+                height: format.height,
+                time_base: format.time_base,
                 frame_rate: ffmpeg::Rational::new(30, 1),
                 bit_rate: 4_000_000,
                 gop_size: 60, // ~2s @ 30fps
@@ -86,15 +85,15 @@ mod windows_example {
         // exposes its own codec parameters for exactly this case (see
         // `transcode_render`'s own use of this, wiring a decoder instead).
         let mut muxer = Mp4Muxer::create(&path)?;
-        muxer.add_stream("video", encoder.parameters(), time_base)?;
+        muxer.add_stream("video", encoder.parameters(), format.time_base)?;
         let muxer_sink = muxer.open()?.pop().expect("exactly one stream was added");
 
         let pipeline = Pipeline::new("screen-record", source, |source, ctx| {
             let scaler = Scaler::new(
                 "to-yuv",
                 ffmpeg::format::Pixel::YUV420P,
-                width,
-                height,
+                format.width,
+                format.height,
                 ffmpeg::software::scaling::Flags::BILINEAR,
             );
             let branch = ctx

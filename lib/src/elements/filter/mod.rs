@@ -9,7 +9,7 @@ mod tee;
 mod upload;
 mod video_synchronizer;
 
-pub use audio_resampler::{AudioFormat, AudioResampler, AudioResamplerError};
+pub use audio_resampler::{AudioResampler, AudioResamplerError};
 pub use audio_volume::{AudioVolume, AudioVolumeError, AudioVolumeHandle, AudioVolumeOptions};
 #[cfg(all(target_os = "windows", feature = "d3d11"))]
 pub use decoder::{D3d11Decoder, D3d11vaDecoderError};

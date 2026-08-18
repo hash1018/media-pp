@@ -12,7 +12,8 @@ use crate::{
     pad::SrcPad,
 };
 
-use crate::elements::filter::audio_resampler::{AudioFormat, AudioFrameResampler};
+use crate::elements::AudioFormat;
+use crate::elements::filter::audio_resampler::AudioFrameResampler;
 use crate::elements::filter::is_codec_drain_boundary;
 
 /// Errors specific to `SwAudioEncoder`. Converts into the crate-wide

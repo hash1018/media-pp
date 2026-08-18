@@ -87,11 +87,10 @@ mod windows_example {
             capture_mode: CaptureMode::Gpu,
             ..DxgiCaptureOptions::default()
         };
-        let (source, width, height, device) = DxgiCaptureSource::open("screen", capture_options)?;
+        let (source, format, device) = DxgiCaptureSource::open("screen", capture_options)?;
         let device = device.expect("CaptureMode::Gpu always returns a device");
         let gpu = D3d11GpuContext::new(Some(device))
             .map_err(|e| media_pp::Error::Other(format!("{e:?}")))?;
-        let time_base = source.time_base();
         let frame_rate = ffmpeg::Rational::new(30, 1);
 
         let encoder = D3d11NvencEncoder::new(
@@ -103,9 +102,9 @@ mod windows_example {
                 // What removes the conversion step: DXGI desktop duplication
                 // produces BGRA and NVENC accepts BGRA textures as-is.
                 input_format: D3d11NvencInputFormat::Bgra,
-                width,
-                height,
-                time_base,
+                width: format.width,
+                height: format.height,
+                time_base: format.time_base,
                 frame_rate,
                 bit_rate: 8_000_000,
                 gop_size: 60, // ~2s @ 30fps
@@ -114,7 +113,7 @@ mod windows_example {
         .map_err(|e| media_pp::Error::Other(e.to_string()))?;
 
         let mut muxer = Mp4Muxer::create(&path)?;
-        muxer.add_stream("video", encoder.parameters(), time_base)?;
+        muxer.add_stream("video", encoder.parameters(), format.time_base)?;
         let muxer_sink = muxer.open()?.pop().expect("exactly one stream was added");
 
         let pipeline = Pipeline::new("screen-record-nvenc", source, |source, ctx| {
@@ -130,7 +129,8 @@ mod windows_example {
         })?;
 
         println!(
-            "recording {seconds}s of the desktop at {width}x{height} (h264_nvenc) to {path} ..."
+            "recording {seconds}s of the desktop at {}x{} (h264_nvenc) to {path} ...",
+            format.width, format.height
         );
         pipeline.run();
 

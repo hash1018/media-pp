@@ -1,10 +1,14 @@
+mod audio_format;
 pub mod driver;
 pub mod filter;
 mod rtsp;
 pub mod sink;
 pub mod source;
+mod video_format;
 
+pub use audio_format::AudioFormat;
 pub use rtsp::RtspTransport;
+pub use video_format::VideoFormat;
 
 #[cfg(all(
     target_os = "windows",
@@ -27,7 +31,7 @@ pub use driver::{
     TrackId, WebRtcError, WebRtcHandle, WebRtcPeer, WebRtcTrackSink, WebRtcTrackSource,
 };
 pub use filter::{
-    AudioCodec, AudioFormat, AudioResampler, AudioResamplerError, AudioVolume, AudioVolumeError,
+    AudioCodec, AudioResampler, AudioResamplerError, AudioVolume, AudioVolumeError,
     AudioVolumeHandle, AudioVolumeOptions, Pacer, PacerError, Scaler, ScalerError, SwAudioEncoder,
     SwAudioEncoderError, SwAudioEncoderOptions, SwDecoder, SwDecoderError, SwEncoder,
     SwEncoderError, SwEncoderOptions, Tee, TeeBuilder, TeeHandle, VideoCodec, VideoSynchronizer,

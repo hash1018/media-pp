@@ -71,9 +71,9 @@ mod windows_example {
             },
             ..DxgiCaptureOptions::default()
         };
-        let (video_source, width, height, _device) =
+        let (video_source, video_format, _device) =
             DxgiCaptureSource::open("screen", capture_options)?;
-        let video_time_base = video_source.time_base();
+        let video_time_base = video_format.time_base;
 
         let devices = WasapiCaptureSource::list_devices()
             .map_err(|e| media_pp::Error::Other(e.to_string()))?;
@@ -82,7 +82,7 @@ mod windows_example {
             .find(|d| d.kind == WasapiDeviceKind::Render && d.is_default)
             .ok_or_else(|| media_pp::Error::Other("no default playback device found".into()))?;
         println!("capturing system audio from: {}", device.name);
-        let (audio_source, sample_rate, channels) =
+        let (audio_source, audio_format) =
             WasapiCaptureSource::open("system-audio", WasapiCaptureOptions { device })
                 .map_err(|e| media_pp::Error::Other(e.to_string()))?;
         let audio_time_base = audio_source.time_base();
@@ -91,8 +91,8 @@ mod windows_example {
             "video-encoder",
             SwEncoderOptions {
                 codec: VideoCodec::OpenH264,
-                width,
-                height,
+                width: video_format.width,
+                height: video_format.height,
                 time_base: video_time_base,
                 frame_rate: ffmpeg::Rational::new(30, 1),
                 bit_rate: 4_000_000,
@@ -104,8 +104,8 @@ mod windows_example {
             "audio-encoder",
             SwAudioEncoderOptions {
                 codec: AudioCodec::Aac,
-                sample_rate,
-                channels,
+                sample_rate: audio_format.sample_rate,
+                channels: audio_format.channels,
                 time_base: audio_time_base,
                 bit_rate: 128_000,
             },
@@ -126,8 +126,8 @@ mod windows_example {
                 let scaler = Scaler::new(
                     "to-yuv",
                     ffmpeg::format::Pixel::YUV420P,
-                    width,
-                    height,
+                    video_format.width,
+                    video_format.height,
                     ffmpeg::software::scaling::Flags::BILINEAR,
                 );
                 let branch = ctx

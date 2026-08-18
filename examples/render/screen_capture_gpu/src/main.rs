@@ -145,8 +145,7 @@ mod windows_example {
             capture_mode: CaptureMode::Gpu,
             ..DxgiCaptureOptions::default()
         };
-        let (source, _capture_width, _capture_height, device) =
-            DxgiCaptureSource::open("screen", capture_options)?;
+        let (source, _format, device) = DxgiCaptureSource::open("screen", capture_options)?;
         let device = device.expect("CaptureMode::Gpu always returns a device");
 
         let gpu = D3d11GpuContext::new(Some(device))
