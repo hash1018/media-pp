@@ -39,6 +39,7 @@ use crate::{
     bus::{Bus, BusEvent},
     control::{ControlReceiver, drain_control},
     element::{Element, ElementType, Source, SourceElement, element_pp_log},
+    elements::VideoFormat,
     error::Result,
     pad::SrcPad,
     pool::UnboundObjectPool,
@@ -362,15 +363,18 @@ impl PipeWireScreenCaptureSource {
     /// the compositor shows its screen-share dialog and this call does not
     /// return until the user answers.
     ///
-    /// Returns the element, the negotiated capture size, and a restore token
+    /// Returns the element, the capture's [`VideoFormat`], and a restore token
     /// to persist for the next run (`None` if the compositor declined to
-    /// issue one). The size comes from the stream's negotiated format rather
-    /// than the portal's reported monitor size, because compositor scaling can
-    /// make the two differ.
+    /// issue one) — the same shape [`crate::elements::DxgiCaptureSource::open`]
+    /// returns, so a caller can build a matching downstream
+    /// [`crate::elements::Scaler`]/[`crate::elements::SwEncoder`]/
+    /// [`crate::elements::Mp4Muxer`] from one value. The size comes from the
+    /// stream's negotiated format rather than the portal's reported monitor
+    /// size, because compositor scaling can make the two differ.
     pub fn open(
         name: impl Into<String>,
         options: PipeWireScreenCaptureOptions,
-    ) -> std::result::Result<(Self, u32, u32, Option<String>), PipeWireScreenCaptureSourceError>
+    ) -> std::result::Result<(Self, VideoFormat, Option<String>), PipeWireScreenCaptureSourceError>
     {
         let name = name.into();
         let pp_log = element_pp_log(ElementType::PipeWireScreenCaptureSource, &name, None);
@@ -445,6 +449,10 @@ impl PipeWireScreenCaptureSource {
         let session_watcher = watch_session_closed(session, latest.clone(), watching.clone());
 
         let fps = options.fps.max(1); // a `0` fps is nonsensical; treat it as 1 rather than dividing by zero
+        // Same `1 / fps` convention as `PipeWireScreenCaptureSource::time_base`
+        // — computed here too since `Self` is moved into the tuple below before
+        // that method could be called on it.
+        let time_base = ffmpeg::Rational::new(1, fps as i32);
         pp_info!(
             pp_log: &pp_log,
             "opened: {}x{} via xdg-desktop-portal, source_kind={:?}, include_cursor={}, fps={}, restored={}",
@@ -477,8 +485,11 @@ impl PipeWireScreenCaptureSource {
                 watching,
                 session_watcher,
             },
-            width,
-            height,
+            VideoFormat {
+                width,
+                height,
+                time_base,
+            },
             restore_token,
         ))
     }

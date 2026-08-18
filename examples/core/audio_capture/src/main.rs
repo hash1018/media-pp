@@ -191,12 +191,15 @@ mod linux_example {
             .ok_or_else(|| media_pp::Error::Other("no matching device found".into()))?;
         println!("selected: {:?} {}", device.kind, device.name);
 
-        let (source, sample_rate, channels) = PipeWireAudioCaptureSource::open(
+        let (source, format) = PipeWireAudioCaptureSource::open(
             "audio-capture",
             PipeWireAudioCaptureOptions { device },
         )
         .map_err(|e| media_pp::Error::Other(e.to_string()))?;
-        println!("opened: {sample_rate}Hz, {channels} channel(s)");
+        println!(
+            "opened: {}Hz, {} channel(s)",
+            format.sample_rate, format.channels
+        );
 
         let (counter, count) = FrameCounter::new("frame-counter");
         let pipeline = Pipeline::new("audio-capture", source, |source, ctx| {

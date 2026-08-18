@@ -191,14 +191,16 @@ impl PipeWireAudioCaptureSource {
 
     /// Opens `options.device` and starts capturing.
     ///
-    /// Returns the element alongside the stream's actual
-    /// `(sample_rate, channels)` — what a caller needs to build a matching
-    /// downstream encoder or muxer, the same shape
-    /// `WasapiCaptureSource::open` returns.
+    /// Returns the element alongside the stream's negotiated [`AudioFormat`] —
+    /// what a caller needs to build a matching downstream encoder or muxer, the
+    /// same shape `WasapiCaptureSource::open` returns. It carries no
+    /// `time_base` (unlike [`crate::elements::VideoFormat`]) because every
+    /// audio element here derives it as `1 / sample_rate`; see
+    /// [`PipeWireAudioCaptureSource::time_base`].
     pub fn open(
         name: impl Into<String>,
         options: PipeWireAudioCaptureOptions,
-    ) -> std::result::Result<(Self, u32, u16), PipeWireAudioCaptureSourceError> {
+    ) -> std::result::Result<(Self, AudioFormat), PipeWireAudioCaptureSourceError> {
         let name = name.into();
         let pp_log = element_pp_log(ElementType::PipeWireAudioCaptureSource, &name, None);
 
@@ -271,8 +273,7 @@ impl PipeWireAudioCaptureSource {
                 terminate: Some(terminate_tx),
                 worker: Some(worker),
             },
-            format.sample_rate,
-            format.channels,
+            format,
         ))
     }
 

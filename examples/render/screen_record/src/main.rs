@@ -192,22 +192,20 @@ mod linux_example {
         if restore_token.is_none() {
             eprintln!("opening the portal — approve the screen-share dialog to continue...");
         }
-        let (source, capture_width, capture_height, restore_token) =
-            PipeWireScreenCaptureSource::open(
-                "screen",
-                PipeWireScreenCaptureOptions {
-                    fps: 30,
-                    source_kind,
-                    include_cursor: true,
-                    restore_token,
-                },
-            )?;
-        let time_base = source.time_base();
+        let (source, capture_format, restore_token) = PipeWireScreenCaptureSource::open(
+            "screen",
+            PipeWireScreenCaptureOptions {
+                fps: 30,
+                source_kind,
+                include_cursor: true,
+                restore_token,
+            },
+        )?;
 
         // H.264 needs even dimensions. A monitor is even in practice, but the
         // portal's picker can hand back a window of any size at all, which the
         // DXGI path never has to consider.
-        let (width, height) = (capture_width & !1, capture_height & !1);
+        let (width, height) = (capture_format.width & !1, capture_format.height & !1);
 
         let encoder = SwEncoder::new(
             "encoder",
@@ -215,7 +213,7 @@ mod linux_example {
                 codec: VideoCodec::OpenH264,
                 width,
                 height,
-                time_base,
+                time_base: capture_format.time_base,
                 frame_rate: ffmpeg::Rational::new(30, 1),
                 bit_rate: 4_000_000,
                 gop_size: 60, // ~2s @ 30fps
@@ -223,7 +221,7 @@ mod linux_example {
         )
         .expect("failed to open encoder");
         let mut muxer = Mp4Muxer::create(&path)?;
-        muxer.add_stream("video", encoder.parameters(), time_base)?;
+        muxer.add_stream("video", encoder.parameters(), capture_format.time_base)?;
         let muxer_sink = muxer.open()?.pop().expect("exactly one stream was added");
 
         let pipeline = Pipeline::new("screen-record", source, |source, ctx| {

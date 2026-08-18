@@ -250,20 +250,19 @@ mod linux_example {
         if restore_token.is_none() {
             eprintln!("opening the portal — approve the screen-share dialog to continue...");
         }
-        let (video_source, capture_width, capture_height, restore_token) =
-            PipeWireScreenCaptureSource::open(
-                "screen",
-                PipeWireScreenCaptureOptions {
-                    fps: 30,
-                    source_kind,
-                    include_cursor: true,
-                    restore_token,
-                },
-            )?;
-        let video_time_base = video_source.time_base();
+        let (video_source, video_format, restore_token) = PipeWireScreenCaptureSource::open(
+            "screen",
+            PipeWireScreenCaptureOptions {
+                fps: 30,
+                source_kind,
+                include_cursor: true,
+                restore_token,
+            },
+        )?;
+        let video_time_base = video_format.time_base;
         // H.264 needs even dimensions; the portal's picker can hand back a
         // window of any size at all.
-        let (width, height) = (capture_width & !1, capture_height & !1);
+        let (width, height) = (video_format.width & !1, video_format.height & !1);
 
         let devices = PipeWireAudioCaptureSource::list_devices()
             .map_err(|e| media_pp::Error::Other(e.to_string()))?;
@@ -280,7 +279,7 @@ mod linux_example {
             .cloned()
             .ok_or_else(|| media_pp::Error::Other("no playback device found".into()))?;
         println!("capturing system audio from: {}", device.name);
-        let (audio_source, sample_rate, channels) = PipeWireAudioCaptureSource::open(
+        let (audio_source, audio_format) = PipeWireAudioCaptureSource::open(
             "system-audio",
             PipeWireAudioCaptureOptions { device },
         )
@@ -304,8 +303,8 @@ mod linux_example {
             "audio-encoder",
             SwAudioEncoderOptions {
                 codec: AudioCodec::Aac,
-                sample_rate,
-                channels,
+                sample_rate: audio_format.sample_rate,
+                channels: audio_format.channels,
                 time_base: audio_time_base,
                 bit_rate: 128_000,
             },
