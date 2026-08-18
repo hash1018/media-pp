@@ -88,6 +88,13 @@ pipewire = { version = "0.10", optional = true, features = ["v0_3_49"] }
 pollster = { version = "1", optional = true }
 
 [features]
+# CUDA-resident decode and rendering. Needs no extra Rust dependency: FFmpeg
+# owns the CUDA context and the frame pool, and this crate's CUDA elements
+# only ever move `AVFrame`s around. The graphics-API interop that actually
+# displays a CUDA frame lives in the caller's own `CudaFrameRenderer`
+# implementation, which is where `ash`/`windows-rs` would be pulled in.
+# Not platform-gated: CUDA is available on Linux and Windows alike.
+cuda = []
 d3d12 = ["dep:windows"]
 d3d11 = ["dep:windows", "dep:ab_glyph"]
 dxgi-capture = ["dep:windows", "d3d11"]

@@ -10,6 +10,8 @@ pub use audio_format::AudioFormat;
 pub use rtsp::RtspTransport;
 pub use video_format::VideoFormat;
 
+#[cfg(feature = "cuda")]
+pub use crate::platform::cuda::{CudaDevice, CudaDeviceError};
 #[cfg(all(
     target_os = "windows",
     any(feature = "wasapi-capture", feature = "wasapi-renderer")
@@ -37,6 +39,8 @@ pub use filter::{
     SwEncoderError, SwEncoderOptions, Tee, TeeBuilder, TeeHandle, VideoCodec, VideoSynchronizer,
     VideoSynchronizerError,
 };
+#[cfg(feature = "cuda")]
+pub use filter::{CudaDecoder, CudaDecoderError};
 #[cfg(all(target_os = "windows", feature = "d3d11"))]
 pub use filter::{
     D3d11Decoder, D3d11Download, D3d11DownloadError, D3d11NvencCodec, D3d11NvencEncoder,
@@ -52,6 +56,8 @@ pub use sink::{
 };
 #[cfg(feature = "ort")]
 pub use sink::{COCO_CLASS_LABELS, Detection, OrtDetector, OrtDetectorError};
+#[cfg(feature = "cuda")]
+pub use sink::{CudaFrameRenderer, CudaRenderer, CudaRendererError};
 #[cfg(all(target_os = "windows", feature = "d3d11"))]
 pub use sink::{D3d11FrameRenderer, D3d11Renderer, D3d11RendererError};
 #[cfg(all(target_os = "windows", feature = "d3d12"))]

@@ -7,20 +7,41 @@
 //! `media_pp::elements::D3d12Renderer`/`D3d11Renderer`. The two stacks are
 //! independent — separate device, separate shader set, nothing shared
 //! between them.
+//!
+//! On Linux the same job is done by [`VulkanGpuContext`] and
+//! [`cuda_window_renderer`], which present `media_pp::elements::CudaDecoder`
+//! output through a Vulkan swapchain. That stack is named for what it
+//! consumes, matching the library element it plugs into: a CUDA frame has to
+//! be copied into Vulkan-owned memory (see `CudaFrameRenderer`'s docs on why
+//! the direction is fixed), so the graphics API is an implementation detail
+//! here exactly as the swapchain is on the D3D side.
 
-#![cfg(target_os = "windows")]
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "linux")]
+pub use linux::{CudaWindowRenderer, VulkanGpuContext, cuda_window_renderer};
 
+#[cfg(target_os = "windows")]
 mod d3d11_gpu_context;
+#[cfg(target_os = "windows")]
 mod d3d11_window_renderer;
+#[cfg(target_os = "windows")]
 mod d3d12_gpu_context;
+#[cfg(target_os = "windows")]
 mod d3d12_window_renderer;
 
+#[cfg(target_os = "windows")]
 pub use d3d11_gpu_context::D3d11GpuContext;
+#[cfg(target_os = "windows")]
 pub use d3d11_window_renderer::D3d11WindowRenderer;
+#[cfg(target_os = "windows")]
 pub use d3d12_gpu_context::D3d12GpuContext;
+#[cfg(target_os = "windows")]
 pub use d3d12_window_renderer::D3d12WindowRenderer;
+#[cfg(target_os = "windows")]
 use media_pp::elements::{D3d11Renderer, D3d12Renderer, SubmitError};
 
+#[cfg(target_os = "windows")]
 /// Opens a window renderer for `hwnd` and wraps it as a `D3d12Renderer` —
 /// the whole point of this crate, so callers don't write the wrapper
 /// themselves.
@@ -35,6 +56,7 @@ pub fn d3d12_window_renderer(
     Ok(D3d12Renderer::new(name, Box::new(renderer)))
 }
 
+#[cfg(target_os = "windows")]
 /// The D3D11 sibling of [`d3d12_window_renderer`] — opens a window
 /// renderer for `hwnd` and wraps it as a `D3d11Renderer`.
 pub fn d3d11_window_renderer(

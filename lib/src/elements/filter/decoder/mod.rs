@@ -14,10 +14,14 @@
 //! (which shares the D3D11 frame representation without itself decoding
 //! anything).
 
+#[cfg(feature = "cuda")]
+mod cuda;
 mod sw_decoder;
 #[cfg(all(target_os = "windows", any(feature = "d3d11", feature = "d3d12")))]
 mod windows;
 
+#[cfg(feature = "cuda")]
+pub use cuda::{CudaDecoder, CudaDecoderError};
 pub use sw_decoder::{SwDecoder, SwDecoderError};
 #[cfg(all(target_os = "windows", feature = "d3d11"))]
 pub(crate) use windows::d3d11va_decoder;

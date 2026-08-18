@@ -11,6 +11,8 @@ mod video_synchronizer;
 
 pub use audio_resampler::{AudioResampler, AudioResamplerError};
 pub use audio_volume::{AudioVolume, AudioVolumeError, AudioVolumeHandle, AudioVolumeOptions};
+#[cfg(feature = "cuda")]
+pub use decoder::{CudaDecoder, CudaDecoderError};
 #[cfg(all(target_os = "windows", feature = "d3d11"))]
 pub use decoder::{D3d11Decoder, D3d11vaDecoderError};
 #[cfg(all(target_os = "windows", feature = "d3d12"))]

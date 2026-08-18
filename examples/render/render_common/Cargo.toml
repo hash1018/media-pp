@@ -4,6 +4,21 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
+[target.'cfg(target_os = "linux")'.dependencies]
+media-pp = { path = "../../../lib", features = ["cuda"] }
+# Raw Vulkan, not `wgpu`: the whole point of this renderer is importing
+# externally-allocated memory (`VkExportMemoryAllocateInfo` +
+# `VK_KHR_external_memory_fd`), which wgpu's safe API does not expose — going
+# through it would mean using `wgpu-hal`'s escape hatch to reach these same
+# calls anyway, with an extra abstraction in between.
+ash = "0.38"
+ash-window = "0.13"
+raw-window-handle = "0.6"
+# Pure-Rust WGSL -> SPIR-V, so this example needs no `glslc`/shaderc/C++
+# toolchain to build. The two shaders it compiles are tiny and are built once
+# at renderer construction.
+naga = { version = "30", features = ["wgsl-in", "spv-out"] }
+
 [target.'cfg(windows)'.dependencies]
 media-pp = { path = "../../../lib", features = ["d3d12", "d3d11"] }
 windows = { version = "0.62", features = [

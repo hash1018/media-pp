@@ -17,6 +17,8 @@ use crate::elements::WasapiCaptureSourceError;
 use crate::elements::WasapiRendererError;
 #[cfg(feature = "webrtc")]
 use crate::elements::WebRtcError;
+#[cfg(feature = "cuda")]
+use crate::elements::{CudaDecoderError, CudaRendererError};
 #[cfg(all(target_os = "windows", feature = "d3d11"))]
 use crate::elements::{
     D3d11DownloadError, D3d11NvencEncoderError, D3d11RendererError, D3d11TextLayerError,
@@ -64,6 +66,14 @@ pub enum Error {
 
     #[error(transparent)]
     SwDecoderError(#[from] SwDecoderError),
+
+    #[cfg(feature = "cuda")]
+    #[error(transparent)]
+    CudaDecoderError(#[from] CudaDecoderError),
+
+    #[cfg(feature = "cuda")]
+    #[error(transparent)]
+    CudaRendererError(#[from] CudaRendererError),
 
     #[error(transparent)]
     SwEncoderError(#[from] SwEncoderError),

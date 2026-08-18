@@ -87,8 +87,8 @@ buffers, codecs, and muxers; `Pipeline::stop` abandons buffered work immediately
 | Kind | Elements |
 |---|---|
 | Sources | `FileDemuxer`, `AppSource`, `RtspSource`, `TestVideoSource`, `TestAudioSource`, `DxgiCaptureSource`, `PipeWireScreenCaptureSource`, `PipeWireAudioCaptureSource`, `WasapiCaptureSource`, `AudioMixer`, `VideoCompositor`, `D3d11VideoCompositor`, `WebRtcTrackSource` |
-| Filters | `SwDecoder`, `D3d11Decoder`, `D3d12vaDecoder`, `SwEncoder`, `D3d11NvencEncoder`, `SwAudioEncoder`, `AudioResampler`, `AudioVolume`, `Scaler`, `Pacer`, `VideoSynchronizer`, `D3d11Upload`, `D3d11Download`, `D3d12Upload`, `Tee` |
-| Sinks | `FrameCounter`, `PacketCounter`, `AppSink`, `Mp4Muxer`, `SegmentedMp4Muxer`, `HlsMuxer`, `RtspSink`, `D3d11Renderer`, `D3d12Renderer`, `PipeWireAudioRenderer`, `WasapiRenderer`, `OrtDetector`, `WebRtcTrackSink` |
+| Filters | `SwDecoder`, `CudaDecoder`, `D3d11Decoder`, `D3d12vaDecoder`, `SwEncoder`, `D3d11NvencEncoder`, `SwAudioEncoder`, `AudioResampler`, `AudioVolume`, `Scaler`, `Pacer`, `VideoSynchronizer`, `D3d11Upload`, `D3d11Download`, `D3d12Upload`, `Tee` |
+| Sinks | `FrameCounter`, `PacketCounter`, `AppSink`, `Mp4Muxer`, `SegmentedMp4Muxer`, `HlsMuxer`, `RtspSink`, `CudaRenderer`, `D3d11Renderer`, `D3d12Renderer`, `PipeWireAudioRenderer`, `WasapiRenderer`, `OrtDetector`, `WebRtcTrackSink` |
 
 Backend-specific elements require their corresponding Cargo feature and are
 available only on that backend's platform. See each type's Rust documentation
@@ -115,7 +115,8 @@ The examples are grouped by purpose:
   audio, muxing, HLS, and CPU compositing.
 - `examples/render`: D3D11/D3D12 playback, upload, capture, synchronization,
   GPU compositing, NVENC hardware encoding, and recording. `screen_record` and
-  `screen_audio_record` additionally cover Wayland capture through PipeWire.
+  `screen_audio_record` additionally cover Wayland capture through PipeWire, and
+  `av_playback` runs NVDEC -> CUDA -> Vulkan playback on Linux.
 - `examples/rtsp`: publishing, seeking, and receiving RTSP streams.
 - `examples/vision`: scaling and ONNX object detection.
 - `examples/webrtc`: data and encoded A/V loopback pipelines.
@@ -140,6 +141,7 @@ The library has no default features.
 
 | Feature | Adds | Platform |
 |---|---|---|
+| `cuda` | NVDEC decode into CUDA-resident frames and a `CudaRenderer` terminal for them | Linux, Windows |
 | `d3d11` | D3D11 decode, upload/download, rendering, GPU compositing, and NVENC encoding | Windows |
 | `d3d12` | D3D12VA decode, upload, and rendering interfaces | Windows |
 | `dxgi-capture` | Desktop capture; also enables `d3d11` | Windows |
