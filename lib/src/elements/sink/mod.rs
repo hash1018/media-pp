@@ -17,10 +17,16 @@ pub use muxer::{Mp4Muxer, Mp4MuxerError, Mp4MuxerStreamSink, SegmentPolicy, Segm
 pub use ort_detector::{COCO_CLASS_LABELS, Detection, OrtDetector, OrtDetectorError};
 pub use packet_counter::PacketCounter;
 pub use renderer::SubmitError;
+#[cfg(feature = "cuda")]
+pub use renderer::{CudaFrameRenderer, CudaRenderer, CudaRendererError};
 #[cfg(all(target_os = "windows", feature = "d3d11"))]
 pub use renderer::{D3d11FrameRenderer, D3d11Renderer, D3d11RendererError};
 #[cfg(all(target_os = "windows", feature = "d3d12"))]
 pub use renderer::{D3d12FrameRenderer, D3d12Renderer, D3d12RendererError, RawPlane};
+#[cfg(all(target_os = "linux", feature = "pipewire-audio-renderer"))]
+pub use renderer::{
+    PipeWireAudioRenderer, PipeWireAudioRendererError, PipeWireAudioRendererOptions,
+};
 #[cfg(all(target_os = "windows", feature = "wasapi-renderer"))]
 pub use renderer::{WasapiRenderer, WasapiRendererError, WasapiRendererOptions};
 pub use rtsp_sink::{RtspSink, RtspSinkError};

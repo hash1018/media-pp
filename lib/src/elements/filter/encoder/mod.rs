@@ -13,6 +13,8 @@ mod audio;
 mod video;
 
 pub use audio::{AudioCodec, SwAudioEncoder, SwAudioEncoderError, SwAudioEncoderOptions};
+#[cfg(feature = "cuda")]
+pub use video::{CudaCodec, CudaEncoder, CudaEncoderError, CudaEncoderOptions};
 #[cfg(all(target_os = "windows", feature = "d3d11"))]
 pub use video::{
     D3d11NvencCodec, D3d11NvencEncoder, D3d11NvencEncoderError, D3d11NvencEncoderOptions,

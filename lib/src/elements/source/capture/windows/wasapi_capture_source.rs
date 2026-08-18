@@ -22,6 +22,7 @@ use crate::{
     bus::{Bus, BusEvent},
     control::{self, ControlMsg, ControlOutcome, ControlReceiver, RequestKind},
     element::{Element, ElementType, Source, SourceElement, element_pp_log},
+    elements::AudioFormat,
     error::Result,
     pad::SrcPad,
     platform::windows::wasapi::{
@@ -169,15 +170,19 @@ impl WasapiCaptureSource {
     }
 
     /// Opens `options.device` and starts a shared-mode WASAPI capture
-    /// session. Returns the element alongside the captured stream's
-    /// actual `(sample_rate, channels)` — what a caller needs to build a
-    /// matching downstream encoder/muxer, same pattern as
-    /// [`crate::elements::DxgiCaptureSource::open`] returning
-    /// `(width, height)`.
+    /// session. Returns the element alongside the captured stream's actual
+    /// [`AudioFormat`] — what a caller needs to build a matching downstream
+    /// encoder/muxer, same pattern as
+    /// [`crate::elements::DxgiCaptureSource::open`] returning a
+    /// [`crate::elements::VideoFormat`]. Doesn't carry a `time_base`
+    /// (unlike `VideoFormat`) — every audio element in this crate derives
+    /// it as `1 / sample_rate` (see [`WasapiCaptureSource::time_base`]),
+    /// so it's never an independent value a caller could get wrong by
+    /// threading it separately.
     pub fn open(
         name: impl Into<String>,
         options: WasapiCaptureOptions,
-    ) -> std::result::Result<(Self, u32, u16), WasapiCaptureSourceError> {
+    ) -> std::result::Result<(Self, AudioFormat), WasapiCaptureSourceError> {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::WasapiCaptureSource, &name, None);
         let _apartment = ComApartment::new()?;
@@ -234,8 +239,7 @@ impl WasapiCaptureSource {
                     samples_emitted: 0,
                     pad,
                 },
-                audio_format.sample_rate,
-                audio_format.channels,
+                audio_format,
             ))
         }
     }

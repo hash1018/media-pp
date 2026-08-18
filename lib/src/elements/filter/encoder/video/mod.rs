@@ -1,4 +1,9 @@
+#[cfg(feature = "cuda")]
+mod cuda;
 mod sw_encoder;
+
+#[cfg(feature = "cuda")]
+pub use cuda::{CudaCodec, CudaEncoder, CudaEncoderError, CudaEncoderOptions};
 #[cfg(all(target_os = "windows", feature = "d3d11"))]
 mod windows;
 

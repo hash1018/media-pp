@@ -67,7 +67,9 @@ fn main() -> media_pp::Result<()> {
                 BusEvent::Dropped { name, .. } => {
                     eprintln!("[{name}] dropped a buffer (queue full)")
                 }
-                BusEvent::Seeked { .. } => {}
+                // `BusEvent` is `#[non_exhaustive]`; this example only acts
+                // on the events above.
+                _ => {}
             }
             if matches!(event, BusEvent::Eos { .. } | BusEvent::Error { .. }) {
                 break;

@@ -66,10 +66,48 @@ windows = { version = "0.62", optional = true, features = [
 ] }
 ab_glyph = { version = "0.2", optional = true }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# `async-io` rather than the default `tokio` backend: `PipeWireScreenCaptureSource::open`
+# drives the portal handshake to completion with `pollster::block_on` on the
+# caller's own thread, so it must not require callers of this synchronous
+# library to already have a tokio runtime installed.
+ashpd = { version = "0.13", optional = true, default-features = false, features = [
+    "screencast",
+    "async-io",
+] }
+# Already in the tree via `ashpd`'s `async-io` backend; taken directly so the
+# portal session's `Closed` signal can be waited on with a bounded poll.
+async-io = { version = "2", optional = true }
+enumflags2 = { version = "0.7", optional = true }
+futures-util = { version = "0.3", optional = true }
+# `v0_3_49` is needed for `pw_buffer.requested`, which tells a playback stream
+# how many frames the graph wants this cycle. Without it a renderer can only
+# fill the whole buffer, which drains its queue in bursts and stutters. Raises
+# the minimum libpipewire to 0.3.49 (2022); distributions ship far newer.
+pipewire = { version = "0.10", optional = true, features = ["v0_3_49"] }
+pollster = { version = "1", optional = true }
+
 [features]
+# CUDA-resident decode and rendering. Needs no extra Rust dependency: FFmpeg
+# owns the CUDA context and the frame pool, and this crate's CUDA elements
+# only ever move `AVFrame`s around. The graphics-API interop that actually
+# displays a CUDA frame lives in the caller's own `CudaFrameRenderer`
+# implementation, which is where `ash`/`windows-rs` would be pulled in.
+# Not platform-gated: CUDA is available on Linux and Windows alike.
+cuda = []
 d3d12 = ["dep:windows"]
 d3d11 = ["dep:windows", "dep:ab_glyph"]
 dxgi-capture = ["dep:windows", "d3d11"]
+pipewire-audio-capture = ["dep:pipewire"]
+pipewire-audio-renderer = ["dep:pipewire"]
+pipewire-screen-capture = [
+    "dep:ashpd",
+    "dep:async-io",
+    "dep:enumflags2",
+    "dep:futures-util",
+    "dep:pipewire",
+    "dep:pollster",
+]
 wasapi-capture = ["dep:windows"]
 wasapi-renderer = ["dep:windows"]
 ort = ["dep:ort", "dep:ndarray"]

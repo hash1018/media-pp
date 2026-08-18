@@ -65,6 +65,85 @@ fn pause_then_stop_returns_promptly() {
     );
 }
 
+/// Fails on its first `run`, the way a live capture whose source disappears
+/// does.
+struct FailingSource {
+    pp_log: PpLog,
+    pad: SrcPad,
+}
+
+impl Element for FailingSource {
+    fn name(&self) -> Arc<str> {
+        "failing".into()
+    }
+
+    fn element_type(&self) -> ElementType {
+        ElementType::Other
+    }
+
+    fn pp_log(&self) -> &PpLog {
+        &self.pp_log
+    }
+
+    fn pp_log_mut(&mut self) -> &mut PpLog {
+        &mut self.pp_log
+    }
+}
+
+impl Source for FailingSource {
+    fn src_pads(&mut self) -> &mut [SrcPad] {
+        std::slice::from_mut(&mut self.pad)
+    }
+}
+
+impl SourceElement for FailingSource {
+    fn run(&mut self, _control: &ControlReceiver, _bus: &Bus) -> Result<()> {
+        Err(crate::Error::Other("the source went away".into()))
+    }
+
+    fn seek(&mut self, target: Duration) -> Result<Duration> {
+        Ok(target)
+    }
+}
+
+/// Records whether it was ever told to stop — what a muxer needs before it can
+/// finalize a track.
+struct StopRecordingSink {
+    pp_log: PpLog,
+    stopped: Arc<AtomicBool>,
+}
+
+impl Element for StopRecordingSink {
+    fn name(&self) -> Arc<str> {
+        "stop-recorder".into()
+    }
+
+    fn element_type(&self) -> ElementType {
+        ElementType::Other
+    }
+
+    fn pp_log(&self) -> &PpLog {
+        &self.pp_log
+    }
+
+    fn pp_log_mut(&mut self) -> &mut PpLog {
+        &mut self.pp_log
+    }
+}
+
+impl Sink for StopRecordingSink {
+    fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
+        Ok(())
+    }
+
+    fn control(&mut self, msg: ControlMsg) -> Result<()> {
+        if msg == ControlMsg::Stop {
+            self.stopped.store(true, Ordering::Release);
+        }
+        Ok(())
+    }
+}
+
 struct BurstSource {
     pp_log: PpLog,
     pad: SrcPad,
@@ -1193,4 +1272,38 @@ fn bus_messages_carry_the_posting_elements_stable_graph_id() {
                 BusEvent::Eos { name, .. } if &**name == "stable-id-sink"
             )
     }));
+}
+
+#[test]
+fn a_source_that_fails_still_stops_its_own_branch() {
+    // Without this the branch is only dropped, so a stateful sink — a muxer
+    // waiting to write its trailer — never learns the stream is over and
+    // leaves an unplayable file behind.
+    let stopped = Arc::new(AtomicBool::new(false));
+    let sink = StopRecordingSink {
+        pp_log: PpLog::new("Other", "stop-recorder", None),
+        stopped: stopped.clone(),
+    };
+    let source = FailingSource {
+        pp_log: PpLog::new("Other", "failing", None),
+        pad: SrcPad::new("failing_src"),
+    };
+    let pipeline = Pipeline::new("failing-source", source, |source, ctx| {
+        let branch = ctx.branch().to(Box::new(sink))?;
+        ctx.attach(source, 0, branch)?;
+        Ok(())
+    })
+    .expect("wiring succeeds");
+
+    pipeline.run();
+    let error = pipeline
+        .bus()
+        .iter()
+        .find(|event| matches!(event, BusEvent::Error { .. }));
+    assert!(error.is_some(), "the failure reaches the bus");
+    assert!(
+        stopped.load(Ordering::Acquire),
+        "the branch behind a failed source must still be stopped, \
+         or anything holding state downstream can never finalize it"
+    );
 }

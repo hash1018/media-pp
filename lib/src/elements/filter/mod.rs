@@ -9,19 +9,25 @@ mod tee;
 mod upload;
 mod video_synchronizer;
 
-pub use audio_resampler::{AudioFormat, AudioResampler, AudioResamplerError};
+pub use audio_resampler::{AudioResampler, AudioResamplerError};
 pub use audio_volume::{AudioVolume, AudioVolumeError, AudioVolumeHandle, AudioVolumeOptions};
+#[cfg(feature = "cuda")]
+pub use decoder::{CudaDecoder, CudaDecoderError};
 #[cfg(all(target_os = "windows", feature = "d3d11"))]
 pub use decoder::{D3d11Decoder, D3d11vaDecoderError};
 #[cfg(all(target_os = "windows", feature = "d3d12"))]
 pub use decoder::{D3d12vaDecoder, D3d12vaDecoderError};
 pub use decoder::{SwDecoder, SwDecoderError};
+#[cfg(feature = "cuda")]
+pub use download::{CudaDownload, CudaDownloadError};
 #[cfg(all(target_os = "windows", feature = "d3d11"))]
 pub use download::{D3d11Download, D3d11DownloadError};
 pub use encoder::{
     AudioCodec, SwAudioEncoder, SwAudioEncoderError, SwAudioEncoderOptions, SwEncoder,
     SwEncoderError, SwEncoderOptions, VideoCodec,
 };
+#[cfg(feature = "cuda")]
+pub use encoder::{CudaCodec, CudaEncoder, CudaEncoderError, CudaEncoderOptions};
 #[cfg(all(target_os = "windows", feature = "d3d11"))]
 pub use encoder::{
     D3d11NvencCodec, D3d11NvencEncoder, D3d11NvencEncoderError, D3d11NvencEncoderOptions,
@@ -30,6 +36,8 @@ pub use encoder::{
 pub use pacer::{Pacer, PacerError};
 pub use scaler::{Scaler, ScalerError};
 pub use tee::{Tee, TeeBuilder, TeeHandle};
+#[cfg(feature = "cuda")]
+pub use upload::{CudaUpload, CudaUploadError};
 #[cfg(all(target_os = "windows", feature = "d3d11"))]
 pub use upload::{D3d11Upload, D3d11UploadError};
 #[cfg(all(target_os = "windows", feature = "d3d12"))]

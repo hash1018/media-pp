@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::pp_log::{PpLog, pp_error, pp_info};
+use crate::pp_log::{PpLog, pp_debug, pp_error, pp_info};
 use ffmpeg_next as ffmpeg;
 use thiserror::Error as ThisError;
 
@@ -163,16 +163,42 @@ impl Sink for Scaler {
             MediaBuffer::Video(frame) => {
                 if !self.context_matches(&frame) {
                     match &mut self.context {
-                        Some(context) => context.cached(
-                            frame.format(),
-                            frame.width(),
-                            frame.height(),
-                            self.dst_format,
-                            self.dst_width,
-                            self.dst_height,
-                            self.flags,
-                        ),
+                        Some(context) => {
+                            // A live source can renegotiate mid-stream — a
+                            // captured window being resized, say. Absorbing that
+                            // is exactly what keeps a fixed-geometry encoder
+                            // downstream working, but it is also the kind of
+                            // change worth seeing in a log when output suddenly
+                            // looks stretched.
+                            let previous = context.input();
+                            pp_info!(
+                                self,
+                                "input changed: {}x{} {:?} -> {}x{} {:?}, rebuilding context",
+                                previous.width,
+                                previous.height,
+                                previous.format,
+                                frame.width(),
+                                frame.height(),
+                                frame.format()
+                            );
+                            context.cached(
+                                frame.format(),
+                                frame.width(),
+                                frame.height(),
+                                self.dst_format,
+                                self.dst_width,
+                                self.dst_height,
+                                self.flags,
+                            );
+                        }
                         None => {
+                            pp_debug!(
+                                self,
+                                "input is {}x{} {:?}, building context",
+                                frame.width(),
+                                frame.height(),
+                                frame.format()
+                            );
                             self.context = Some(
                                 ffmpeg::software::scaling::Context::get(
                                     frame.format(),

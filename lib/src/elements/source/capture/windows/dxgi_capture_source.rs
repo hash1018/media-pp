@@ -37,6 +37,7 @@ use crate::{
     bus::{Bus, BusEvent},
     control::{ControlReceiver, drain_control},
     element::{Element, ElementType, Source, SourceElement, element_pp_log},
+    elements::VideoFormat,
     elements::filter::decoder::d3d11va_decoder::wrap_d3d11_texture,
     error::Result,
     pad::SrcPad,
@@ -411,7 +412,7 @@ unsafe impl Send for DxgiCaptureSource {}
 impl DxgiCaptureSource {
     /// Opens whichever output(s) [`DxgiCaptureOptions::area`] resolves to
     /// and starts duplicating them. Returns the element alongside the
-    /// captured composite's actual `(width, height)` — what the caller
+    /// captured composite's actual [`VideoFormat`] — what the caller
     /// needs to build a matching downstream
     /// [`crate::elements::Scaler`]/[`crate::elements::Pacer`], same
     /// pattern as [`crate::elements::RtspSource::open`] returning stream
@@ -425,7 +426,8 @@ impl DxgiCaptureSource {
     pub fn open(
         name: impl Into<String>,
         options: DxgiCaptureOptions,
-    ) -> std::result::Result<(Self, u32, u32, Option<ID3D11Device>), DxgiCaptureSourceError> {
+    ) -> std::result::Result<(Self, VideoFormat, Option<ID3D11Device>), DxgiCaptureSourceError>
+    {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::DxgiCaptureSource, &name, None);
 
@@ -564,6 +566,10 @@ impl DxgiCaptureSource {
             .then(|| ffmpeg::frame::Video::new(ffmpeg::format::Pixel::BGRA, width, height));
 
         let fps = options.fps.max(1); // a `0` fps is nonsensical; treat it as 1 rather than dividing by zero
+        // Same `1 / fps` convention as `DxgiCaptureSource::time_base` — computed
+        // here too since `Self` is moved into the tuple below before that method
+        // could be called on it.
+        let time_base = ffmpeg::Rational::new(1, fps as i32);
         pp_info!(
             pp_log: &pp_log,
             "opened: {}x{} composite from {} output(s), include_cursor={}, fps={}, gpu_mode={}",
@@ -596,8 +602,11 @@ impl DxgiCaptureSource {
                 pad,
                 pool,
             },
-            width,
-            height,
+            VideoFormat {
+                width,
+                height,
+                time_base,
+            },
             returned_device,
         ))
     }
@@ -1367,8 +1376,7 @@ mod tests {
                 capture_mode: capture_mode.clone(),
                 ..DxgiCaptureOptions::default()
             };
-            let Ok((source, _width, _height, _device)) =
-                DxgiCaptureSource::open("test-capture", options)
+            let Ok((source, _format, _device)) = DxgiCaptureSource::open("test-capture", options)
             else {
                 eprintln!("skipping {capture_mode:?}: no duplicable desktop on this machine");
                 continue;

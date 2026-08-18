@@ -4,6 +4,12 @@ use thiserror::Error;
 use crate::elements::DxgiCaptureSourceError;
 #[cfg(feature = "ort")]
 use crate::elements::OrtDetectorError;
+#[cfg(all(target_os = "linux", feature = "pipewire-audio-capture"))]
+use crate::elements::PipeWireAudioCaptureSourceError;
+#[cfg(all(target_os = "linux", feature = "pipewire-audio-renderer"))]
+use crate::elements::PipeWireAudioRendererError;
+#[cfg(all(target_os = "linux", feature = "pipewire-screen-capture"))]
+use crate::elements::PipeWireScreenCaptureSourceError;
 use crate::elements::RtspSinkError;
 #[cfg(all(target_os = "windows", feature = "wasapi-capture"))]
 use crate::elements::WasapiCaptureSourceError;
@@ -11,6 +17,10 @@ use crate::elements::WasapiCaptureSourceError;
 use crate::elements::WasapiRendererError;
 #[cfg(feature = "webrtc")]
 use crate::elements::WebRtcError;
+#[cfg(feature = "cuda")]
+use crate::elements::{
+    CudaDecoderError, CudaDownloadError, CudaEncoderError, CudaRendererError, CudaUploadError,
+};
 #[cfg(all(target_os = "windows", feature = "d3d11"))]
 use crate::elements::{
     D3d11DownloadError, D3d11NvencEncoderError, D3d11RendererError, D3d11TextLayerError,
@@ -58,6 +68,26 @@ pub enum Error {
 
     #[error(transparent)]
     SwDecoderError(#[from] SwDecoderError),
+
+    #[cfg(feature = "cuda")]
+    #[error(transparent)]
+    CudaDecoderError(#[from] CudaDecoderError),
+
+    #[cfg(feature = "cuda")]
+    #[error(transparent)]
+    CudaRendererError(#[from] CudaRendererError),
+
+    #[cfg(feature = "cuda")]
+    #[error(transparent)]
+    CudaUploadError(#[from] CudaUploadError),
+
+    #[cfg(feature = "cuda")]
+    #[error(transparent)]
+    CudaDownloadError(#[from] CudaDownloadError),
+
+    #[cfg(feature = "cuda")]
+    #[error(transparent)]
+    CudaEncoderError(#[from] CudaEncoderError),
 
     #[error(transparent)]
     SwEncoderError(#[from] SwEncoderError),
@@ -147,6 +177,18 @@ pub enum Error {
     #[cfg(all(target_os = "windows", feature = "dxgi-capture"))]
     #[error(transparent)]
     DxgiCaptureSourceError(#[from] DxgiCaptureSourceError),
+
+    #[cfg(all(target_os = "linux", feature = "pipewire-audio-capture"))]
+    #[error(transparent)]
+    PipeWireAudioCaptureSourceError(#[from] PipeWireAudioCaptureSourceError),
+
+    #[cfg(all(target_os = "linux", feature = "pipewire-audio-renderer"))]
+    #[error(transparent)]
+    PipeWireAudioRendererError(#[from] PipeWireAudioRendererError),
+
+    #[cfg(all(target_os = "linux", feature = "pipewire-screen-capture"))]
+    #[error(transparent)]
+    PipeWireScreenCaptureSourceError(#[from] PipeWireScreenCaptureSourceError),
 
     #[cfg(all(target_os = "windows", feature = "wasapi-capture"))]
     #[error(transparent)]

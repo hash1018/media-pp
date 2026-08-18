@@ -5,7 +5,14 @@ use crossbeam_channel::{Receiver, Sender, unbounded};
 
 use crate::{element::ElementType, error::Error, graph::ElementId};
 
+/// Marked `#[non_exhaustive]`: this grows as elements gain conditions worth
+/// reporting, and a caller acting on `Eos`/`Error` should not stop compiling
+/// because some unrelated element learned to report a stall. Within this crate
+/// the attribute has no effect, so [`Bus::post`] and
+/// [`BusReceiver::log_events`] still fail to compile until they handle a new
+/// variant — the completeness check stays where it belongs.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum BusEvent {
     Eos {
         element_type: ElementType,
@@ -23,7 +30,7 @@ pub enum BusEvent {
         name: Arc<str>,
     },
     /// Posted by [`crate::control::drain_control`] once
-    /// [`crate::element::SourceElement::seek`] returns — `requested` is
+    /// [`crate::element::SourceElement::seek`] returns — `requested` is`1`
     /// whatever [`crate::pipeline::Pipeline::seek`] was called with;
     /// `landed` is where the source actually ended up, which the source
     /// itself has to resolve (e.g. `FileDemuxer` can only reposition to a

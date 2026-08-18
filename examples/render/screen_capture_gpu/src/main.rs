@@ -145,8 +145,7 @@ mod windows_example {
             capture_mode: CaptureMode::Gpu,
             ..DxgiCaptureOptions::default()
         };
-        let (source, _capture_width, _capture_height, device) =
-            DxgiCaptureSource::open("screen", capture_options)?;
+        let (source, _format, device) = DxgiCaptureSource::open("screen", capture_options)?;
         let device = device.expect("CaptureMode::Gpu always returns a device");
 
         let gpu = D3d11GpuContext::new(Some(device))
@@ -183,7 +182,9 @@ mod windows_example {
                 BusEvent::Dropped { name, .. } => {
                     eprintln!("[{name}] dropped a buffer (queue full)")
                 }
-                BusEvent::Seeked { .. } => {}
+                // `BusEvent` is `#[non_exhaustive]`; this example only acts
+                // on the events above.
+                _ => {}
             }
             // Same reasoning as `screen_capture`'s own loop: only stop for
             // `Eos`, or an `Error` that means `DxgiCaptureSource`'s own `run()`

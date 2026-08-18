@@ -78,6 +78,9 @@ fn main() -> media_pp::Result<()> {
                 landed,
                 ..
             } => println!("[{name}] seeked: requested {requested:.2?}, landed {landed:.2?}"),
+            // `BusEvent` is `#[non_exhaustive]`; this example only acts
+            // on the events above.
+            _ => {}
         }
         if matches!(event, BusEvent::Eos { .. } | BusEvent::Error { .. }) {
             pipeline.stop();

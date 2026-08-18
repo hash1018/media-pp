@@ -8,41 +8,11 @@ use crate::{
     buffer::MediaBuffer,
     control::ControlMsg,
     element::{Element, ElementType, Sink, Source, element_pp_log},
+    elements::AudioFormat,
     error::Result,
     pad::SrcPad,
     time::{InvalidTimeBase, MediaTimestamp, TimeBase},
 };
-
-/// A complete uncompressed-audio format description.
-///
-/// Unlike a `(sample_rate, channels)` tuple, this also carries the sample
-/// representation and channel layout, so it can be passed directly from a
-/// hardware endpoint such as `WasapiRenderer` to an
-/// [`AudioResampler`] without guessing either one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct AudioFormat {
-    pub sample_format: ffmpeg::format::Sample,
-    pub sample_rate: u32,
-    pub channels: u16,
-}
-
-impl AudioFormat {
-    pub fn new(sample_format: ffmpeg::format::Sample, sample_rate: u32, channels: u16) -> Self {
-        Self {
-            sample_format,
-            sample_rate,
-            channels,
-        }
-    }
-
-    pub fn channels(self) -> u16 {
-        self.channels
-    }
-
-    pub fn channel_layout(self) -> ffmpeg::ChannelLayout {
-        ffmpeg::ChannelLayout::default(i32::from(self.channels))
-    }
-}
 
 /// The reusable `libswresample` state shared by [`AudioResampler`] and
 /// [`crate::elements::SwAudioEncoder`]. It owns the otherwise easy-to-get-

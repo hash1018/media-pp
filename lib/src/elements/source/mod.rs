@@ -7,6 +7,16 @@ mod rtsp_source;
 mod test;
 
 #[cfg(all(
+    target_os = "linux",
+    any(
+        feature = "pipewire-audio-capture",
+        feature = "pipewire-audio-renderer"
+    )
+))]
+pub use crate::platform::linux::pipewire::{
+    PipeWireAudioDevice, PipeWireAudioDeviceKind, PipeWireDeviceError,
+};
+#[cfg(all(
     target_os = "windows",
     any(feature = "wasapi-capture", feature = "wasapi-renderer")
 ))]
@@ -19,6 +29,15 @@ pub use audio_mixer::{
 pub use capture::{
     CaptureArea, CaptureMode, CaptureRect, DxgiCaptureOptions, DxgiCaptureSource,
     DxgiCaptureSourceError,
+};
+#[cfg(all(target_os = "linux", feature = "pipewire-screen-capture"))]
+pub use capture::{
+    CaptureSourceKind, PipeWireScreenCaptureOptions, PipeWireScreenCaptureSource,
+    PipeWireScreenCaptureSourceError,
+};
+#[cfg(all(target_os = "linux", feature = "pipewire-audio-capture"))]
+pub use capture::{
+    PipeWireAudioCaptureOptions, PipeWireAudioCaptureSource, PipeWireAudioCaptureSourceError,
 };
 #[cfg(all(target_os = "windows", feature = "wasapi-capture"))]
 pub use capture::{WasapiCaptureOptions, WasapiCaptureSource, WasapiCaptureSourceError};

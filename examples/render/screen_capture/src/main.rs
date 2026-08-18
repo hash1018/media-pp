@@ -145,8 +145,7 @@ mod windows_example {
             },
             ..DxgiCaptureOptions::default()
         };
-        let (source, _capture_width, _capture_height, _device) =
-            DxgiCaptureSource::open("screen", capture_options)?;
+        let (source, _format, _device) = DxgiCaptureSource::open("screen", capture_options)?;
 
         let gpu = D3d12GpuContext::new().map_err(|e| media_pp::Error::Other(format!("{e:?}")))?;
 
@@ -194,7 +193,9 @@ mod windows_example {
                 BusEvent::Dropped { name, .. } => {
                     eprintln!("[{name}] dropped a buffer (queue full)")
                 }
-                BusEvent::Seeked { .. } => {}
+                // `BusEvent` is `#[non_exhaustive]`; this example only acts
+                // on the events above.
+                _ => {}
             }
             // Unlike the other render examples (a steady, self-paced
             // synthetic/file source that essentially never overruns the
