@@ -3,7 +3,7 @@
 //! CUDA-resident one lives under [`cuda`].
 
 #[cfg(feature = "cuda")]
-mod cuda;
+pub(crate) mod cuda;
 mod sw_scaler;
 
 #[cfg(feature = "cuda")]

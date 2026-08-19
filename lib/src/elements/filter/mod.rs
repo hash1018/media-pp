@@ -4,9 +4,9 @@ pub(crate) mod decoder;
 mod download;
 mod encoder;
 mod pacer;
-mod scaler;
+pub(crate) mod scaler;
 mod tee;
-mod upload;
+pub(crate) mod upload;
 mod video_synchronizer;
 
 pub use audio_resampler::{AudioResampler, AudioResamplerError};

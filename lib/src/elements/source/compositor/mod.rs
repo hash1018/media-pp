@@ -15,6 +15,11 @@ pub use sw_video_compositor::{
     SwVideoCompositor, SwVideoCompositorError, SwVideoCompositorHandle, SwVideoCompositorInput,
     SwVideoCompositorInputSink, SwVideoLayerHandle, VideoCompositorOptions,
 };
+#[cfg(feature = "cuda")]
+mod cuda;
+
+#[cfg(feature = "cuda")]
+pub use cuda::*;
 pub use text_layer::TextLayer;
 pub use video_layer::{VideoFit, VideoInputId, VideoLayer, VideoRect};
 #[cfg(all(target_os = "windows", feature = "d3d11"))]

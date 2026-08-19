@@ -13,7 +13,14 @@ output runs as a second `Pipeline` (`D3d11Download -> SwScaler -> SwEncoder ->
 Mp4Muxer`). The text layer itself never receives `Pipeline` frames — it's a
 handle driven directly by `set_text`/`set_position`, built against the
 compositor's own device via `D3d11VideoCompositorHandle::add_text_layer`.
-Windows only.
+
+Windows only, and not for want of an example: `CudaVideoCompositor` has no
+text layer to build one against. A rasterized glyph bitmap is straight-alpha
+BGRA — alpha *is* the glyph coverage — so drawing it needs per-pixel blending,
+and that backend composites with a device-to-device copy (see its own docs on
+why a blend would need a CUDA kernel). The same missing piece is what limits
+its `VideoLayer::opacity` to 0.0 and 1.0. Use `SwVideoCompositor` for text on
+Linux.
 
 ```sh
 cargo run -p text_overlay -- [output.mp4] [seconds]

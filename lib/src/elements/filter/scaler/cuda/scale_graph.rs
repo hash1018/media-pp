@@ -1,0 +1,239 @@
+//! The `buffer -> scale_cuda -> buffersink` graph behind
+//! [`crate::elements::CudaScaler`], factored out because
+//! [`crate::elements::CudaVideoCompositor`] needs the same thing per layer:
+//! resizing a CUDA surface without bringing it back to the CPU.
+//!
+//! The two callers differ in what drives the output size. `CudaScaler` fixes
+//! it at construction; the compositor recomputes it from each layer's
+//! rectangle, so it can change at any time. Both are handled the same way —
+//! the graph records what it was configured for and rebuilds when any of it
+//! stops matching.
+
+use ffmpeg_next::{self as ffmpeg, ffi};
+
+use crate::{elements::filter::is_codec_drain_boundary, pool::UnboundObjectPool};
+
+use super::cuda_scaler::{CudaScalerError, CudaScalerInterp};
+
+/// One configured graph, plus what it was configured *for*, so a changed
+/// input or output can be detected.
+struct GraphState {
+    /// Owns the filter contexts below; freeing it frees them, so it must
+    /// outlive them — which it does, all three living in this struct.
+    _graph: ffmpeg::filter::Graph,
+    source: ffmpeg::filter::Context,
+    sink: ffmpeg::filter::Context,
+    input_width: u32,
+    input_height: u32,
+    output_width: u32,
+    output_height: u32,
+    /// The exact input pool this graph was configured against. A same-sized
+    /// frame from a *different* pool — an upstream decoder rebuilt after a
+    /// seek, say — still needs a rebuild, and comparing sizes alone would
+    /// miss it.
+    input_frames_ctx: *mut ffi::AVBufferRef,
+}
+
+/// A lazily built `scale_cuda` graph. Construct it, then hand it frames; it
+/// builds itself from the first one and rebuilds whenever the input or the
+/// requested output stops matching what it was configured for.
+pub(crate) struct CudaScaleGraph {
+    interp: CudaScalerInterp,
+    state: Option<GraphState>,
+    /// Reuses only the small CPU-side `AVFrame` wrapper; the scaled surface
+    /// itself comes from `scale_cuda`'s own output pool. Same split as
+    /// [`crate::elements::CudaUpload`].
+    pool: UnboundObjectPool<ffmpeg::frame::Video>,
+}
+
+// SAFETY: a filter graph and its contexts have no thread affinity of their
+// own — ffmpeg-next already marks `filter::Graph` itself `Send` — and every
+// method here takes `&mut self`, so no two threads can drive one graph at
+// once.
+unsafe impl Send for CudaScaleGraph {}
+
+/// What one call produced. `scale_cuda` emits one frame per frame, but a
+/// graph is allowed to hold or emit more than that, so callers drain a list
+/// rather than assuming.
+pub(crate) type ScaledFrames = Vec<crate::pool::UnboundObjectPoolRef<ffmpeg::frame::Video>>;
+
+impl CudaScaleGraph {
+    pub(crate) fn new(interp: CudaScalerInterp) -> Self {
+        Self {
+            interp,
+            state: None,
+            pool: UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {}),
+        }
+    }
+
+    /// Whether a graph is configured for exactly this input and output. The
+    /// caller checks first so it can log the rebuild in its own voice.
+    pub(crate) fn matches(
+        &self,
+        frame: &ffmpeg::frame::Video,
+        frames_ctx: *mut ffi::AVBufferRef,
+        width: u32,
+        height: u32,
+    ) -> bool {
+        match &self.state {
+            Some(state) => {
+                state.input_width == frame.width()
+                    && state.input_height == frame.height()
+                    && state.output_width == width
+                    && state.output_height == height
+                    && std::ptr::eq(state.input_frames_ctx, frames_ctx)
+            }
+            None => false,
+        }
+    }
+
+    /// Scales one already-validated CUDA frame, rebuilding the graph first if
+    /// it does not match. `frames_ctx` is the frame's own hardware frames
+    /// context, which is what libavfilter has to be configured against.
+    pub(crate) fn scale(
+        &mut self,
+        frame: &ffmpeg::frame::Video,
+        frames_ctx: *mut ffi::AVBufferRef,
+        width: u32,
+        height: u32,
+    ) -> Result<ScaledFrames, CudaScalerError> {
+        if !self.matches(frame, frames_ctx, width, height) {
+            self.build(frame, frames_ctx, width, height)?;
+        }
+        let source = unsafe {
+            self.state
+                .as_mut()
+                .expect("built or confirmed matching above")
+                .source
+                .as_mut_ptr()
+        };
+        // `av_buffersrc_write_frame`, not `add_frame`: the latter takes over
+        // the caller's reference and resets the frame, and this frame is
+        // shared — downstream `Arc` clones and the upstream pool both still
+        // expect it intact.
+        let code = unsafe { ffi::av_buffersrc_write_frame(source, frame.as_ptr()) };
+        if code < 0 {
+            return Err(CudaScalerError::BufferSrcPush(code));
+        }
+        self.drain()
+    }
+
+    /// Signals end of input and returns whatever the graph still held.
+    /// `scale_cuda` holds nothing back, but a graph that never sees EOF never
+    /// reports it either.
+    pub(crate) fn flush(&mut self) -> Result<ScaledFrames, CudaScalerError> {
+        if self.state.is_none() {
+            return Ok(Vec::new());
+        }
+        let source = unsafe {
+            self.state
+                .as_mut()
+                .expect("checked above")
+                .source
+                .as_mut_ptr()
+        };
+        let code = unsafe { ffi::av_buffersrc_add_frame_flags(source, std::ptr::null_mut(), 0) };
+        if code < 0 {
+            return Err(CudaScalerError::BufferSrcPush(code));
+        }
+        self.drain()
+    }
+
+    fn build(
+        &mut self,
+        frame: &ffmpeg::frame::Video,
+        frames_ctx: *mut ffi::AVBufferRef,
+        width: u32,
+        height: u32,
+    ) -> Result<(), CudaScalerError> {
+        let mut graph = ffmpeg::filter::Graph::new();
+
+        let buffer =
+            ffmpeg::filter::find("buffer").ok_or(CudaScalerError::FilterNotFound("buffer"))?;
+        let scale = ffmpeg::filter::find("scale_cuda")
+            .ok_or(CudaScalerError::FilterNotFound("scale_cuda"))?;
+        let buffersink = ffmpeg::filter::find("buffersink")
+            .ok_or(CudaScalerError::FilterNotFound("buffersink"))?;
+
+        // `scale_cuda` neither reorders nor retimes, and nothing between the
+        // source and the sink rescales timestamps, so a nominal 1/1 time base
+        // carries each frame's own pts through numerically unchanged. This
+        // graph is not the place that decides what a pts *means*.
+        let args = format!(
+            "video_size={}x{}:pix_fmt={}:time_base=1/1:pixel_aspect=1/1",
+            frame.width(),
+            frame.height(),
+            ffi::AVPixelFormat::AV_PIX_FMT_CUDA as i32,
+        );
+        let mut source = graph.add(&buffer, "in", &args)?;
+
+        // The size and format above describe the frames; *this* is what tells
+        // libavfilter which CUDA pool they come from, and without it
+        // `scale_cuda` has no device to configure itself on.
+        unsafe {
+            let params = ffi::av_buffersrc_parameters_alloc();
+            if params.is_null() {
+                return Err(CudaScalerError::BufferSrcParamsAlloc);
+            }
+            (*params).hw_frames_ctx = frames_ctx;
+            let code = ffi::av_buffersrc_parameters_set(source.as_mut_ptr(), params);
+            ffi::av_free(params.cast());
+            if code < 0 {
+                return Err(CudaScalerError::BufferSrcConfig(code));
+            }
+        }
+
+        let mut scale = graph.add(
+            &scale,
+            "scale",
+            &format!("w={width}:h={height}:interp_algo={}", self.interp.algo()),
+        )?;
+        let mut sink = graph.add(&buffersink, "out", "")?;
+
+        source.link(0, &mut scale, 0);
+        scale.link(0, &mut sink, 0);
+        graph.validate()?;
+
+        self.state = Some(GraphState {
+            _graph: graph,
+            source,
+            sink,
+            input_width: frame.width(),
+            input_height: frame.height(),
+            output_width: width,
+            output_height: height,
+            input_frames_ctx: frames_ctx,
+        });
+        Ok(())
+    }
+
+    /// Pulls everything the graph is willing to produce right now.
+    fn drain(&mut self) -> Result<ScaledFrames, CudaScalerError> {
+        let sink = unsafe {
+            self.state
+                .as_mut()
+                .expect("only called with a configured graph")
+                .sink
+                .as_mut_ptr()
+        };
+        let mut scaled = Vec::new();
+        loop {
+            let mut output = self.pool.get();
+            let code = unsafe {
+                let ptr = output.as_mut_ptr();
+                // The pooled wrapper may still reference the previous frame's
+                // surface; releasing it here is what returns that surface to
+                // the filter's pool rather than leaking it.
+                ffi::av_frame_unref(ptr);
+                ffi::av_buffersink_get_frame(sink, ptr)
+            };
+            if code < 0 {
+                if is_codec_drain_boundary(&ffmpeg::Error::from(code)) {
+                    return Ok(scaled);
+                }
+                return Err(CudaScalerError::BufferSinkPull(code));
+            }
+            scaled.push(output);
+        }
+    }
+}

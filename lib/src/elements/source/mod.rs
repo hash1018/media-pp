@@ -41,6 +41,11 @@ pub use capture::{
 };
 #[cfg(all(target_os = "windows", feature = "wasapi-capture"))]
 pub use capture::{WasapiCaptureOptions, WasapiCaptureSource, WasapiCaptureSourceError};
+#[cfg(feature = "cuda")]
+pub use compositor::{
+    CudaVideoCompositor, CudaVideoCompositorError, CudaVideoCompositorHandle,
+    CudaVideoCompositorInput, CudaVideoCompositorInputSink, CudaVideoLayerHandle,
+};
 #[cfg(all(target_os = "windows", feature = "d3d11"))]
 pub use compositor::{
     D3d11TextLayerError, D3d11TextLayerHandle, D3d11VideoCompositor, D3d11VideoCompositorError,

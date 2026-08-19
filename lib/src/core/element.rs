@@ -31,6 +31,7 @@ pub enum ElementType {
     WasapiCaptureSource,
     AudioMixer,
     SwVideoCompositor,
+    CudaVideoCompositor,
     D3d11VideoCompositor,
     WebRtcPeer,
     SwDecoder,

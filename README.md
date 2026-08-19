@@ -86,7 +86,7 @@ buffers, codecs, and muxers; `Pipeline::stop` abandons buffered work immediately
 
 | Kind | Elements |
 |---|---|
-| Sources | `FileDemuxer`, `AppSource`, `RtspSource`, `TestVideoSource`, `TestAudioSource`, `DxgiCaptureSource`, `PipeWireScreenCaptureSource`, `PipeWireAudioCaptureSource`, `WasapiCaptureSource`, `AudioMixer`, `SwVideoCompositor`, `D3d11VideoCompositor`, `WebRtcTrackSource` |
+| Sources | `FileDemuxer`, `AppSource`, `RtspSource`, `TestVideoSource`, `TestAudioSource`, `DxgiCaptureSource`, `PipeWireScreenCaptureSource`, `PipeWireAudioCaptureSource`, `WasapiCaptureSource`, `AudioMixer`, `SwVideoCompositor`, `CudaVideoCompositor`, `D3d11VideoCompositor`, `WebRtcTrackSource` |
 | Filters | `SwDecoder`, `CudaDecoder`, `D3d11Decoder`, `D3d12vaDecoder`, `SwEncoder`, `CudaEncoder`, `D3d11NvencEncoder`, `SwAudioEncoder`, `AudioResampler`, `AudioVolume`, `SwScaler`, `Pacer`, `VideoSynchronizer`, `CudaScaler`, `CudaUpload`, `CudaDownload`, `D3d11Upload`, `D3d11Download`, `D3d12Upload`, `Tee` |
 | Sinks | `FrameCounter`, `PacketCounter`, `AppSink`, `Mp4Muxer`, `SegmentedMp4Muxer`, `HlsMuxer`, `RtspSink`, `CudaRenderer`, `D3d11Renderer`, `D3d12Renderer`, `PipeWireAudioRenderer`, `WasapiRenderer`, `OrtDetector`, `WebRtcTrackSink` |
 
@@ -129,7 +129,7 @@ The library has no default features.
 
 | Feature | Adds | Platform |
 |---|---|---|
-| `cuda` | NVDEC decode, NVENC encode, scaling, upload/download, and rendering, all on CUDA-resident frames | Linux, Windows |
+| `cuda` | NVDEC decode, NVENC encode, scaling, compositing, upload/download, and rendering, all on CUDA-resident frames | Linux, Windows |
 | `d3d11` | D3D11 decode, upload/download, rendering, GPU compositing, and NVENC encoding | Windows |
 | `d3d12` | D3D12VA decode, upload, and rendering interfaces | Windows |
 | `dxgi-capture` | Desktop capture; also enables `d3d11` | Windows |
@@ -201,6 +201,17 @@ buffers are not logged one record per buffer.
   process before starting pipelines rather than per pipeline: creating or
   dropping one while another thread is decoding or encoding can crash inside
   the NVIDIA driver.
+- `CudaVideoCompositor` composites NV12 CUDA surfaces with `scale_cuda` plus
+  2D device-to-device copies, so every `VideoFit` works — including `Cover`,
+  which needs cropping that no CUDA filter offers. What it cannot do is blend:
+  `opacity` accepts only 0.0 and 1.0, because partial transparency needs a
+  CUDA kernel and compiling one would make the CUDA toolkit a build
+  requirement. Use `SwVideoCompositor` for translucent layers. Layer
+  placement and size are aligned to even pixels, since NV12 chroma is
+  subsampled.
+- The `cuda` feature links the NVIDIA driver library directly (`libcuda.so`
+  on Linux, `nvcuda.dll` on Windows) for those copies. No CUDA toolkit is
+  needed — the driver ships both.
 - `D3d11NvencEncoder` needs an NVIDIA GPU and an FFmpeg build with NVENC. It
   fails to open with a typed error, not a panic, on any other GPU. The other
   `d3d11` elements are vendor-neutral.

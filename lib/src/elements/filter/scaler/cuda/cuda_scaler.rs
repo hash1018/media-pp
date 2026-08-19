@@ -5,15 +5,15 @@ use thiserror::Error as ThisError;
 
 use crate::pp_log::{PpLog, pp_debug, pp_error, pp_info};
 
+use super::scale_graph::CudaScaleGraph;
+
 use crate::{
     buffer::MediaBuffer,
     control::ControlMsg,
     element::{Element, ElementType, Sink, Source, element_pp_log},
-    elements::filter::is_codec_drain_boundary,
     error::Result,
     pad::SrcPad,
     platform::cuda::{CudaDevice, CudaFrameFormat},
-    pool::UnboundObjectPool,
 };
 
 /// Errors specific to `CudaScaler`. Converts into the crate-wide `Error`
@@ -76,7 +76,7 @@ pub enum CudaScalerInterp {
 
 impl CudaScalerInterp {
     /// `scale_cuda`'s own `interp_algo` option values.
-    fn algo(self) -> u32 {
+    pub(crate) fn algo(self) -> u32 {
         match self {
             Self::Nearest => 1,
             Self::Bilinear => 2,
@@ -134,32 +134,10 @@ pub struct CudaScaler {
     device_ctx: *const ffi::AVHWDeviceContext,
     width: u32,
     height: u32,
-    interp: CudaScalerInterp,
-    /// `None` until the first frame arrives — see this type's own docs.
-    graph: Option<GraphState>,
+    /// Built from the first frame and rebuilt when the input changes — see
+    /// this type's own docs.
+    graph: CudaScaleGraph,
     pad: SrcPad,
-    /// Reuses only the small CPU-side `AVFrame` wrapper; the scaled surface
-    /// itself comes from `scale_cuda`'s own output pool. Same split as
-    /// [`crate::elements::CudaUpload`].
-    pool: UnboundObjectPool<ffmpeg::frame::Video>,
-}
-
-/// One configured `buffer -> scale_cuda -> buffersink` graph, plus what it
-/// was configured *for*, so a changed input can be detected.
-struct GraphState {
-    /// Owns the filter contexts below; freeing it frees them, so it must
-    /// outlive them — which it does, both being dropped together with the
-    /// element.
-    _graph: ffmpeg::filter::Graph,
-    source: ffmpeg::filter::Context,
-    sink: ffmpeg::filter::Context,
-    input_width: u32,
-    input_height: u32,
-    /// The exact input pool this graph was configured against. A same-sized
-    /// frame from a *different* pool — an upstream decoder rebuilt after a
-    /// seek, say — still needs a rebuild, and comparing sizes alone would
-    /// miss it.
-    input_frames_ctx: *mut ffi::AVBufferRef,
 }
 
 // SAFETY: `hw_device_ctx` is a heap-allocated FFmpeg buffer with no thread
@@ -194,7 +172,6 @@ impl CudaScaler {
         let device_ctx = unsafe { (*hw_device_ctx).data as *const ffi::AVHWDeviceContext };
 
         let pad = SrcPad::new(format!("{name}_src"));
-        let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
         pp_info!(pp_log: &pp_log, "created: dst={width}x{height}, interp={interp:?}");
         Self {
             name,
@@ -203,10 +180,8 @@ impl CudaScaler {
             device_ctx,
             width,
             height,
-            interp,
-            graph: None,
+            graph: CudaScaleGraph::new(interp),
             pad,
-            pool,
         }
     }
 
@@ -215,7 +190,7 @@ impl CudaScaler {
     /// error code — or, worse, as device pointers read against the wrong
     /// context. Returns the frame's own frames context, which is what the
     /// graph has to be configured against.
-    fn validate(
+    pub(crate) fn validate(
         &self,
         frame: &ffmpeg::frame::Video,
     ) -> std::result::Result<*mut ffi::AVBufferRef, CudaScalerError> {
@@ -241,171 +216,34 @@ impl CudaScaler {
         }
     }
 
-    /// Whether the configured graph (if any) already matches `frame`'s own
-    /// dimensions and surface pool.
-    fn graph_matches(
-        &self,
-        frame: &ffmpeg::frame::Video,
-        frames_ctx: *mut ffi::AVBufferRef,
-    ) -> bool {
-        match &self.graph {
-            Some(state) => {
-                state.input_width == frame.width()
-                    && state.input_height == frame.height()
-                    && std::ptr::eq(state.input_frames_ctx, frames_ctx)
-            }
-            None => false,
-        }
-    }
-
-    fn build_graph(
-        &mut self,
-        frame: &ffmpeg::frame::Video,
-        frames_ctx: *mut ffi::AVBufferRef,
-    ) -> std::result::Result<(), CudaScalerError> {
-        let mut graph = ffmpeg::filter::Graph::new();
-
-        let buffer =
-            ffmpeg::filter::find("buffer").ok_or(CudaScalerError::FilterNotFound("buffer"))?;
-        let scale = ffmpeg::filter::find("scale_cuda")
-            .ok_or(CudaScalerError::FilterNotFound("scale_cuda"))?;
-        let buffersink = ffmpeg::filter::find("buffersink")
-            .ok_or(CudaScalerError::FilterNotFound("buffersink"))?;
-
-        // `scale_cuda` neither reorders nor retimes, and nothing between the
-        // source and the sink rescales timestamps, so a nominal 1/1 time base
-        // carries each frame's own pts through numerically unchanged. This
-        // element is not the place that decides what a pts *means*.
-        let args = format!(
-            "video_size={}x{}:pix_fmt={}:time_base=1/1:pixel_aspect=1/1",
-            frame.width(),
-            frame.height(),
-            ffi::AVPixelFormat::AV_PIX_FMT_CUDA as i32,
-        );
-        let mut source = graph.add(&buffer, "in", &args)?;
-
-        // The size and format above describe the frames; *this* is what tells
-        // libavfilter which CUDA pool they come from, and without it
-        // `scale_cuda` has no device to configure itself on.
-        unsafe {
-            let params = ffi::av_buffersrc_parameters_alloc();
-            if params.is_null() {
-                return Err(CudaScalerError::BufferSrcParamsAlloc);
-            }
-            (*params).hw_frames_ctx = frames_ctx;
-            let code = ffi::av_buffersrc_parameters_set(source.as_mut_ptr(), params);
-            ffi::av_free(params.cast());
-            if code < 0 {
-                return Err(CudaScalerError::BufferSrcConfig(code));
-            }
-        }
-
-        let mut scale = graph.add(
-            &scale,
-            "scale",
-            &format!(
-                "w={}:h={}:interp_algo={}",
-                self.width,
-                self.height,
-                self.interp.algo()
-            ),
-        )?;
-        let mut sink = graph.add(&buffersink, "out", "")?;
-
-        source.link(0, &mut scale, 0);
-        scale.link(0, &mut sink, 0);
-        graph.validate()?;
-
-        self.graph = Some(GraphState {
-            _graph: graph,
-            source,
-            sink,
-            input_width: frame.width(),
-            input_height: frame.height(),
-            input_frames_ctx: frames_ctx,
-        });
-        Ok(())
-    }
-
     fn scale(&mut self, frame: &ffmpeg::frame::Video) -> Result<()> {
         let frames_ctx = self
             .validate(frame)
             .inspect_err(|error| pp_error!(self, "{error}"))?;
 
-        if !self.graph_matches(frame, frames_ctx) {
-            if self.graph.is_some() {
-                // A live source can renegotiate mid-stream, and a decoder
-                // rebuilt after a seek hands out a new pool — same reason
-                // `SwScaler` rebuilds its own context, and worth seeing in a
-                // log when output suddenly looks stretched.
-                pp_info!(
-                    self,
-                    "input changed to {}x{}, rebuilding the filter graph",
-                    frame.width(),
-                    frame.height()
-                );
-            } else {
-                pp_debug!(
-                    self,
-                    "input is {}x{}, building the filter graph",
-                    frame.width(),
-                    frame.height()
-                );
-            }
-            self.build_graph(frame, frames_ctx).inspect_err(|error| {
-                pp_error!(self, "failed to build the filter graph: {error}")
-            })?;
+        if !self
+            .graph
+            .matches(frame, frames_ctx, self.width, self.height)
+        {
+            // A live source can renegotiate mid-stream, and a decoder rebuilt
+            // after a seek hands out a new pool — same reason `SwScaler`
+            // rebuilds its own context, and worth seeing in a log when output
+            // suddenly looks stretched.
+            pp_debug!(
+                self,
+                "input is {}x{}, building the filter graph",
+                frame.width(),
+                frame.height()
+            );
         }
-
-        let source = unsafe {
-            self.graph
-                .as_mut()
-                .expect("built or confirmed matching above")
-                .source
-                .as_mut_ptr()
-        };
-        // `av_buffersrc_write_frame`, not `add_frame`: the latter takes over
-        // the caller's reference and resets the frame, and this frame is
-        // shared — downstream `Arc` clones and the upstream pool both still
-        // expect it intact.
-        let code = unsafe { ffi::av_buffersrc_write_frame(source, frame.as_ptr()) };
-        if code < 0 {
-            pp_error!(self, "av_buffersrc_write_frame failed: {code}");
-            return Err(CudaScalerError::BufferSrcPush(code).into());
-        }
-        self.drain()
-    }
-
-    /// Pulls everything the graph is willing to produce right now. One frame
-    /// in means one frame out for `scale_cuda`, but a graph is allowed to
-    /// hold or emit more than that, so this drains rather than reading once.
-    fn drain(&mut self) -> Result<()> {
-        let sink = unsafe {
-            self.graph
-                .as_mut()
-                .expect("only called with a configured graph")
-                .sink
-                .as_mut_ptr()
-        };
-        loop {
-            let mut output = self.pool.get();
-            let code = unsafe {
-                let ptr = output.as_mut_ptr();
-                // The pooled wrapper may still reference the previous frame's
-                // surface; releasing it here is what returns that surface to
-                // the filter's pool rather than leaking it.
-                ffi::av_frame_unref(ptr);
-                ffi::av_buffersink_get_frame(sink, ptr)
-            };
-            if code < 0 {
-                if is_codec_drain_boundary(&ffmpeg::Error::from(code)) {
-                    return Ok(());
-                }
-                pp_error!(self, "av_buffersink_get_frame failed: {code}");
-                return Err(CudaScalerError::BufferSinkPull(code).into());
-            }
+        let scaled = self
+            .graph
+            .scale(frame, frames_ctx, self.width, self.height)
+            .inspect_err(|error| pp_error!(self, "scale failed: {error}"))?;
+        for output in scaled {
             self.pad.push(MediaBuffer::Video(Arc::new(output)))?;
         }
+        Ok(())
     }
 }
 
@@ -438,25 +276,12 @@ impl Sink for CudaScaler {
         match buf {
             MediaBuffer::Video(frame) => self.scale(&frame),
             MediaBuffer::Eos => {
-                // `scale_cuda` holds nothing back, but a graph that never
-                // sees EOF never reports it either, and this is the one
-                // place anything buffered inside it can still come out.
-                if self.graph.is_some() {
-                    let source = unsafe {
-                        self.graph
-                            .as_mut()
-                            .expect("checked above")
-                            .source
-                            .as_mut_ptr()
-                    };
-                    let code = unsafe {
-                        ffi::av_buffersrc_add_frame_flags(source, std::ptr::null_mut(), 0)
-                    };
-                    if code < 0 {
-                        pp_error!(self, "failed to flush the filter graph: {code}");
-                        return Err(CudaScalerError::BufferSrcPush(code).into());
-                    }
-                    self.drain()?;
+                let drained = self
+                    .graph
+                    .flush()
+                    .inspect_err(|error| pp_error!(self, "failed to flush the graph: {error}"))?;
+                for output in drained {
+                    self.pad.push(MediaBuffer::Video(Arc::new(output)))?;
                 }
                 self.pad.push(MediaBuffer::Eos)
             }
@@ -485,6 +310,7 @@ mod tests {
     use super::*;
     use crate::{
         elements::{CudaDecoder, CudaDownload, CudaUpload},
+        pool::UnboundObjectPool,
         test_support::{try_cuda_device, try_test_video},
     };
 

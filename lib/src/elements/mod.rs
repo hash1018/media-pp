@@ -11,7 +11,7 @@ pub use rtsp::RtspTransport;
 pub use video_format::VideoFormat;
 
 #[cfg(feature = "cuda")]
-pub use crate::platform::cuda::{CudaDevice, CudaDeviceError, CudaFrameFormat};
+pub use crate::platform::cuda::{CudaDevice, CudaDeviceError, CudaDriverError, CudaFrameFormat};
 #[cfg(all(
     target_os = "windows",
     any(feature = "wasapi-capture", feature = "wasapi-renderer")
@@ -88,6 +88,11 @@ pub use source::{
 pub use source::{
     CaptureSourceKind, PipeWireScreenCaptureOptions, PipeWireScreenCaptureSource,
     PipeWireScreenCaptureSourceError,
+};
+#[cfg(feature = "cuda")]
+pub use source::{
+    CudaVideoCompositor, CudaVideoCompositorError, CudaVideoCompositorHandle,
+    CudaVideoCompositorInput, CudaVideoCompositorInputSink, CudaVideoLayerHandle,
 };
 #[cfg(all(target_os = "windows", feature = "d3d11"))]
 pub use source::{
