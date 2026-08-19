@@ -48,9 +48,9 @@ pub use compositor::{
     D3d11VideoLayerHandle,
 };
 pub use compositor::{
-    TextLayer, VideoCompositor, VideoCompositorError, VideoCompositorHandle, VideoCompositorInput,
-    VideoCompositorInputSink, VideoCompositorOptions, VideoFit, VideoInputId, VideoLayer,
-    VideoLayerHandle, VideoRect,
+    SwVideoCompositor, SwVideoCompositorError, SwVideoCompositorHandle, SwVideoCompositorInput,
+    SwVideoCompositorInputSink, SwVideoLayerHandle, TextLayer, VideoCompositorOptions, VideoFit,
+    VideoInputId, VideoLayer, VideoRect,
 };
 pub use file_demuxer::{FileDemuxError, FileDemuxer, StreamInfo};
 pub use rtsp_source::{RtspOptions, RtspSource, RtspSourceError};

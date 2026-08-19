@@ -24,13 +24,13 @@ mod windows_example {
     use media_pp::{
         bus::BusEvent,
         elements::{
-            CaptureMode, DxgiCaptureOptions, DxgiCaptureSource, Mp4Muxer, Scaler, SwEncoder,
-            SwEncoderOptions, VideoCodec,
+            CaptureMode, DxgiCaptureOptions, DxgiCaptureSource, Mp4Muxer, SwEncoder,
+            SwEncoderOptions, SwScaler, VideoCodec,
         },
         pipeline::Pipeline,
     };
 
-    /// DxgiCaptureSource -> Scaler -> SwEncoder -> Mp4Muxer: captures the
+    /// DxgiCaptureSource -> SwScaler -> SwEncoder -> Mp4Muxer: captures the
     /// desktop live via DXGI Desktop Duplication and encodes it straight into
     /// a playable `.mp4` file — no window, no renderer, just a headless
     /// recording (compare `screen_capture`, which renders instead of encoding).
@@ -89,7 +89,7 @@ mod windows_example {
         let muxer_sink = muxer.open()?.pop().expect("exactly one stream was added");
 
         let pipeline = Pipeline::new("screen-record", source, |source, ctx| {
-            let scaler = Scaler::new(
+            let scaler = SwScaler::new(
                 "to-yuv",
                 ffmpeg::format::Pixel::YUV420P,
                 format.width,
@@ -129,7 +129,7 @@ mod windows_example {
 }
 
 /// The Linux half of the same example. Deliberately the same pipeline as
-/// `windows_example` — capture -> Queue -> Scaler -> Queue -> SwEncoder ->
+/// `windows_example` — capture -> Queue -> SwScaler -> Queue -> SwEncoder ->
 /// Mp4Muxer, same codec, same terminus — so only the capture source differs.
 ///
 /// The one CLI difference is forced by the platform: Wayland has no way to
@@ -146,12 +146,12 @@ mod linux_example {
         bus::BusEvent,
         elements::{
             CaptureSourceKind, Mp4Muxer, PipeWireScreenCaptureOptions, PipeWireScreenCaptureSource,
-            Scaler, SwEncoder, SwEncoderOptions, VideoCodec,
+            SwEncoder, SwEncoderOptions, SwScaler, VideoCodec,
         },
         pipeline::Pipeline,
     };
 
-    /// PipeWireScreenCaptureSource -> Scaler -> SwEncoder -> Mp4Muxer: captures
+    /// PipeWireScreenCaptureSource -> SwScaler -> SwEncoder -> Mp4Muxer: captures
     /// the desktop live through xdg-desktop-portal and encodes it straight into
     /// a playable `.mp4` file — no window, no renderer, just a headless
     /// recording.
@@ -225,7 +225,7 @@ mod linux_example {
         let muxer_sink = muxer.open()?.pop().expect("exactly one stream was added");
 
         let pipeline = Pipeline::new("screen-record", source, |source, ctx| {
-            let scaler = Scaler::new(
+            let scaler = SwScaler::new(
                 "to-yuv",
                 ffmpeg::format::Pixel::YUV420P,
                 width,

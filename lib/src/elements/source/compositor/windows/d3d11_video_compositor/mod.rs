@@ -168,7 +168,7 @@ fn map_layer_error(error: VideoLayerError) -> D3d11VideoCompositorError {
 
 struct GpuVideoInput {
     id: video_layer::VideoInputId,
-    /// Same shape as the CPU `VideoCompositor`'s own `VideoInput` field —
+    /// Same shape as the CPU `SwVideoCompositor`'s own `VideoInput` field —
     /// `ffmpeg::frame::Video` is the same Rust type whether its pixel data
     /// is CPU-resident or (as with every `Pixel::D3D11` frame in this
     /// crate) a GPU texture pointer smuggled through `data[0]`. Replacing
@@ -190,7 +190,7 @@ struct D3d11CompositorShared {
 
 /// A cheaply cloneable handle for adding and removing
 /// [`D3d11VideoCompositor`] inputs — the GPU sibling of
-/// [`crate::elements::VideoCompositorHandle`], same shape and behavior.
+/// [`crate::elements::SwVideoCompositorHandle`], same shape and behavior.
 #[derive(Clone)]
 pub struct D3d11VideoCompositorHandle {
     shared: Weak<D3d11CompositorShared>,
@@ -240,7 +240,7 @@ impl D3d11VideoCompositorHandle {
 
     /// Registers an input and returns its terminal Sink plus independent
     /// runtime layer control — see
-    /// [`crate::elements::VideoCompositorHandle::add_source`]'s own docs
+    /// [`crate::elements::SwVideoCompositorHandle::add_source`]'s own docs
     /// (identical contract: reusing `name` replaces the old registration,
     /// old sinks/layer handles become harmlessly stale).
     pub fn add_source(
@@ -334,7 +334,7 @@ impl D3d11VideoCompositorHandle {
 
 /// One terminal video input returned by
 /// [`D3d11VideoCompositorHandle::add_source`] — the GPU sibling of
-/// [`crate::elements::VideoCompositorInputSink`], same behavior (stores
+/// [`crate::elements::SwVideoCompositorInputSink`], same behavior (stores
 /// only the latest frame; a fast producer can't build an unbounded queue
 /// behind a slower compositor output rate).
 pub struct D3d11VideoCompositorInputSink {
@@ -492,7 +492,7 @@ fn visible_uv_scale(
 /// Composites the latest frames from any number of independent GPU-backed
 /// input pipelines into one fixed-rate opaque `Pixel::D3D11` (BGRA)
 /// stream, entirely on the GPU via a D3D11 pixel shader — the D3D11
-/// sibling of [`crate::elements::VideoCompositor`] (which does the same
+/// sibling of [`crate::elements::SwVideoCompositor`] (which does the same
 /// job on the CPU via `libswscale`). Same [`VideoLayer`]/[`video_layer::VideoRect`]/
 /// [`video_layer::VideoFit`] API — a caller's layer-control code doesn't
 /// change shape when switching between the two.
@@ -504,7 +504,7 @@ fn visible_uv_scale(
 /// [`D3d11VideoCompositor::new`]'s own docs on why `context` specifically
 /// must be shared, not just the device.
 ///
-/// Like [`crate::elements::VideoCompositor`], this is a [`SourceElement`],
+/// Like [`crate::elements::SwVideoCompositor`], this is a [`SourceElement`],
 /// not a conventional one-input filter: upstream pipelines terminate at
 /// the sinks returned by [`D3d11VideoCompositorHandle::add_source`], while
 /// this element's own pipeline drives output on its independent clock.
@@ -1001,7 +1001,7 @@ fn yuv_to_rgb_rows(
 /// Turns pixel-space [`LayerGeometry`] into a D3D11 viewport (where the
 /// whole scaled image is drawn) plus a scissor rect (what's actually kept,
 /// clipped to the layer's own rect *and* the canvas) — the GPU equivalent
-/// of the CPU `VideoCompositor`'s `blend_bgra` clipping math, computed
+/// of the CPU `SwVideoCompositor`'s `blend_bgra` clipping math, computed
 /// once instead of per output pixel. `None` if the clipped area is empty
 /// (nothing to draw).
 fn clipped_viewport(
@@ -1128,7 +1128,7 @@ unsafe fn build_pipeline_state(
         // deliberately left untouched by every draw (`SrcBlendAlpha =
         // ZERO`, `DestBlendAlpha = ONE`) so it stays at whatever the
         // initial `ClearRenderTargetView` set (1.0) — same "output is
-        // always opaque" contract the CPU `VideoCompositor`'s
+        // always opaque" contract the CPU `SwVideoCompositor`'s
         // `blend_bgra` enforces by always writing 255 to the destination
         // alpha byte.
         let mut blend_desc = D3D11_BLEND_DESC::default();
@@ -1786,7 +1786,7 @@ mod tests {
             .expect("compose_frame failed");
         let downloaded = download_frame(&device, context.clone(), blended);
         assert_eq!(pixel(&downloaded, 0, 0), [0, 0, 0, 255], "background only");
-        // 255 * 0.5 = 127.5 — the CPU VideoCompositor's software blend
+        // 255 * 0.5 = 127.5 — the CPU SwVideoCompositor's software blend
         // rounds this to 128 (`f32::round`), but D3D11's fixed-function
         // blend hardware truncates instead, landing on 127. Both are
         // legitimate roundings of the same exact half-way value; this
@@ -1899,7 +1899,7 @@ mod tests {
         }
     }
 
-    /// Same regression as `VideoCompositor`'s
+    /// Same regression as `SwVideoCompositor`'s
     /// `resuming_after_a_pause_preserves_output_phase` — see that test's
     /// docs for the full rationale. `D3d11VideoCompositor::run` had the
     /// identical bug (never folding `paused_for` back into `next_due`).

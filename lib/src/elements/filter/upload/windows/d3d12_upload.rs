@@ -21,7 +21,7 @@ use crate::{
 /// `av_hwframe_ctx_init` has run, so this needs to comfortably cover
 /// however many uploaded frames can legitimately be in flight at once
 /// (this element's own reused `AVFrame` plus whatever's sitting in a
-/// downstream `Queue`). Unlike [`crate::elements::Scaler`]'s growable
+/// downstream `Queue`). Unlike [`crate::elements::SwScaler`]'s growable
 /// object pool, this value can be an effective hard limit for the FFmpeg
 /// implementation in use; downstream queue capacity and renderer-held
 /// frames must be sized with that in mind.
@@ -44,7 +44,7 @@ pub enum D3d12UploadError {
     TransferData(i32),
 
     #[error(
-        "D3d12Upload only accepts Pixel::NV12 frames (chain a Scaler in \
+        "D3d12Upload only accepts Pixel::NV12 frames (chain a SwScaler in \
          front of it), got {0:?}"
     )]
     UnsupportedFormat(ffmpeg::format::Pixel),
@@ -65,7 +65,7 @@ pub enum D3d12UploadError {
 }
 
 /// Uploads CPU-resident `Pixel::NV12` video frames (e.g. from
-/// [`crate::elements::Scaler`], fed by a synthetic source, a screen
+/// [`crate::elements::SwScaler`], fed by a synthetic source, a screen
 /// capture, ...) to GPU-resident `Video` frames tagged `Pixel::D3D12` —
 /// the mirror image of [`crate::elements::D3d12vaDecoder`]: that one
 /// decodes compressed `Packet`s straight to GPU frames; this one moves
@@ -79,7 +79,7 @@ pub enum D3d12UploadError {
 /// [`crate::elements::D3d12Renderer`]'s zero-copy `submit_nv12_texture`
 /// path requires of every `Pixel::D3D12` frame, decoder-produced or not,
 /// so there's no reason to support uploading anything else. Chain a
-/// [`crate::elements::Scaler`] (`dst_format = Pixel::NV12`) in front of
+/// [`crate::elements::SwScaler`] (`dst_format = Pixel::NV12`) in front of
 /// this if the source produces something else (e.g.
 /// [`crate::elements::TestVideoSource`]'s `Pixel::YUV420P`).
 ///
@@ -236,7 +236,7 @@ impl Sink for D3d12Upload {
 
     fn control(&mut self, msg: ControlMsg) -> Result<()> {
         // Nothing local to react to — a pure per-frame CPU->GPU transfer,
-        // same reasoning as `Scaler::control`.
+        // same reasoning as `SwScaler::control`.
         self.pad.control(msg)
     }
 }

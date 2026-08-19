@@ -6,7 +6,7 @@ use std::{
 use crossbeam_queue::SegQueue;
 
 /// A growable pool of reusable `T`s — lets a frame-producing element
-/// (see [`crate::elements::SwDecoder`], [`crate::elements::Scaler`]) hand
+/// (see [`crate::elements::SwDecoder`], [`crate::elements::SwScaler`]) hand
 /// out the *same* buffers over and over instead of allocating a fresh one
 /// (and freeing the old one) every single frame. Reusing an
 /// already-allocated `ffmpeg_next::frame::Video` also lets ffmpeg's own

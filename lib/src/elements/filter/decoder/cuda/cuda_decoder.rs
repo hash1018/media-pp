@@ -42,10 +42,11 @@ pub enum CudaDecoderError {
 /// Frames this produces are still plain `MediaBuffer::Video` — `Pacer`,
 /// `Tee`, `Queue`, and `FrameCounter` only touch `.pts()` or match the enum
 /// variant, so they work unmodified. What *cannot* read them is anything
-/// that reaches for pixel bytes: `Scaler` and `SwEncoder` see no CPU planes
+/// that reaches for pixel bytes: `SwScaler` and `SwEncoder` see no CPU planes
 /// on a CUDA frame. [`crate::elements::CudaRenderer`] is the terminal built
-/// for them, and [`crate::elements::CudaDownload`] is what brings a frame
-/// back to the CPU for everything else.
+/// for them, [`crate::elements::CudaScaler`] resizes them where they are,
+/// and [`crate::elements::CudaDownload`] is what brings a frame back to the
+/// CPU for everything else.
 ///
 /// Named for the frame type it produces, not for NVDEC, matching
 /// `D3d11Decoder`'s own naming: CUDA frames are NVIDIA-only by

@@ -102,7 +102,7 @@ pub struct SwAudioEncoderOptions {
 /// (both fixed `Sample::F32(Packed)`) feed this directly with no
 /// separate resampler element in between, the same way `SwEncoder`
 /// leaning on a fixed `Pixel::YUV420P` input still needs a
-/// [`crate::elements::Scaler`] in front of it for anything else.
+/// [`crate::elements::SwScaler`] in front of it for anything else.
 ///
 /// Most audio codecs (`aac` included) require a *fixed* number of samples
 /// per `send_frame` call (`encoder.frame_size()`) — not whatever size

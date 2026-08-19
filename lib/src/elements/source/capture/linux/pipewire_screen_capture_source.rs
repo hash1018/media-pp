@@ -294,7 +294,7 @@ struct Terminate;
 /// stream that genuinely reports an error or disconnects, which a closed window
 /// on this compositor does not.
 ///
-/// # A captured window can be resized — put a `Scaler` downstream
+/// # A captured window can be resized — put a `SwScaler` downstream
 ///
 /// The portal does not forbid a compositor from renegotiating mid-stream, and
 /// when one does **this element follows**, emitting frames at the new size. The
@@ -305,7 +305,7 @@ struct Terminate;
 /// and spanning monitors all left the stream at its original size. Treat this as
 /// insurance for other compositors rather than as behaviour to expect here.
 ///
-/// Chain a [`crate::elements::Scaler`] before anything built for a fixed
+/// Chain a [`crate::elements::SwScaler`] before anything built for a fixed
 /// geometry. It rebuilds its scaling context whenever its input dimensions
 /// change and always emits its own configured size, so an encoder and muxer
 /// behind it keep working across a resize. Without one, an encoder rejects the
@@ -367,7 +367,7 @@ impl PipeWireScreenCaptureSource {
     /// to persist for the next run (`None` if the compositor declined to
     /// issue one) — the same shape [`crate::elements::DxgiCaptureSource::open`]
     /// returns, so a caller can build a matching downstream
-    /// [`crate::elements::Scaler`]/[`crate::elements::SwEncoder`]/
+    /// [`crate::elements::SwScaler`]/[`crate::elements::SwEncoder`]/
     /// [`crate::elements::Mp4Muxer`] from one value. The size comes from the
     /// stream's negotiated format rather than the portal's reported monitor
     /// size, because compositor scaling can make the two differ.
@@ -524,7 +524,7 @@ impl PipeWireScreenCaptureSource {
         // Follow the compositor rather than clamping to the opening size: a
         // resized window would otherwise be silently cropped, losing whatever
         // moved outside the original rectangle. Downstream absorbs the change
-        // through `Scaler`, which rebuilds its own context per input size — see
+        // through `SwScaler`, which rebuilds its own context per input size — see
         // this element's docs on why that split, not scaling here, is the one
         // consistent with the rest of the crate.
         if (src_width, src_height) != (self.width, self.height) {

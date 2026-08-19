@@ -31,7 +31,7 @@ mod windows_example {
     /// DxgiCaptureSource (GPU mode) -> Renderer: captures the desktop straight
     /// to a GPU-resident `Pixel::D3D11` BGRA texture on the *renderer's own*
     /// `ID3D11Device` (no `Map`, no CPU pixel copy at all — see
-    /// `CaptureMode::Gpu`'s own docs) and presents it directly, no `Scaler`
+    /// `CaptureMode::Gpu`'s own docs) and presents it directly, no `SwScaler`
     /// (desktop content is already BGRA/RGB, no YUV conversion needed, and
     /// `D3d11Renderer` letterboxes any capture size into the window on its
     /// own). Compare against `screen_capture`, which captures to a plain CPU

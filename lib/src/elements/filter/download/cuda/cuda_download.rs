@@ -59,12 +59,12 @@ pub enum CudaDownloadError {
 ///
 /// This is what makes a CUDA frame reach anything other than
 /// [`crate::elements::CudaEncoder`] or [`crate::elements::CudaRenderer`]:
-/// [`crate::elements::Scaler`], [`crate::elements::SwEncoder`],
-/// [`crate::elements::OrtDetector`], [`crate::elements::VideoCompositor`],
+/// [`crate::elements::SwScaler`], [`crate::elements::SwEncoder`],
+/// [`crate::elements::OrtDetector`], [`crate::elements::SwVideoCompositor`],
 /// and [`crate::elements::AppSink`] all read pixel bytes, which a CUDA frame
 /// does not expose. So NVDEC decode plus CPU-side work — inference on a
 /// hardware-decoded stream, for instance — goes
-/// `CudaDecoder -> CudaDownload -> Scaler -> ...`.
+/// `CudaDecoder -> CudaDownload -> SwScaler -> ...`.
 ///
 /// A `Filter`: receives via `Sink`, pushes the downloaded frame into its own
 /// single src pad. PTS, duration, and color metadata are carried across with
@@ -76,7 +76,7 @@ pub enum CudaDownloadError {
 /// [`crate::elements::CudaUpload`]'s own note — so a surface in any other
 /// layout is refused here with a typed error rather than handed to
 /// `av_hwframe_transfer_data` to fail as an opaque code. Chain a
-/// [`crate::elements::Scaler`] after this to convert to whatever pixel
+/// [`crate::elements::SwScaler`] after this to convert to whatever pixel
 /// format the downstream stage actually needs.
 ///
 /// # Cost
@@ -388,7 +388,7 @@ mod tests {
     }
 
     /// The point of the element: real NVDEC output becomes readable CPU
-    /// pixels, which is what lets a hardware-decoded stream reach a `Scaler`,
+    /// pixels, which is what lets a hardware-decoded stream reach a `SwScaler`,
     /// `SwEncoder`, or `OrtDetector` at all.
     #[test]
     fn decoded_nvdec_frames_become_readable_cpu_frames() {

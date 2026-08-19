@@ -84,7 +84,7 @@ pub enum D3d11DownloadError {
 /// frames — the mirror of [`crate::elements::D3d11Upload`]. Needed because
 /// this crate's video encoder ([`crate::elements::SwEncoder`]) is
 /// software-only and has no zero-copy GPU input path; chain a
-/// [`crate::elements::Scaler`] after this to convert to whatever pixel
+/// [`crate::elements::SwScaler`] after this to convert to whatever pixel
 /// format an encoder actually needs.
 ///
 /// Unlike `D3d11Upload` (a plain `ID3D11Device::CreateTexture2D` call, safe

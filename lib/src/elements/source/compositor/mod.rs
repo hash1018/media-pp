@@ -5,17 +5,17 @@
 //! `TextLayer` are shared, backend-agnostic pieces the D3D11 compositor
 //! builds on (colors use [`crate::color::Color`], shared crate-wide).
 
+mod sw_video_compositor;
 mod text_layer;
-mod video_compositor;
 mod video_layer;
 #[cfg(all(target_os = "windows", feature = "d3d11"))]
 mod windows;
 
-pub use text_layer::TextLayer;
-pub use video_compositor::{
-    VideoCompositor, VideoCompositorError, VideoCompositorHandle, VideoCompositorInput,
-    VideoCompositorInputSink, VideoCompositorOptions, VideoLayerHandle,
+pub use sw_video_compositor::{
+    SwVideoCompositor, SwVideoCompositorError, SwVideoCompositorHandle, SwVideoCompositorInput,
+    SwVideoCompositorInputSink, SwVideoLayerHandle, VideoCompositorOptions,
 };
+pub use text_layer::TextLayer;
 pub use video_layer::{VideoFit, VideoInputId, VideoLayer, VideoRect};
 #[cfg(all(target_os = "windows", feature = "d3d11"))]
 pub use windows::*;

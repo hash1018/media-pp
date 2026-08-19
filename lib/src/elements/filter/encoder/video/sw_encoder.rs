@@ -93,7 +93,7 @@ impl VideoCodec {
 
 /// Construction-time options for [`SwEncoder::new`]. `width`/`height`/
 /// `time_base` must already be known — same convention as
-/// [`crate::elements::Scaler`]/[`crate::elements::Pacer`] — rather than
+/// [`crate::elements::SwScaler`]/[`crate::elements::Pacer`] — rather than
 /// inferred from the first frame, since `avcodec_open2` needs them set
 /// before this can be opened at all.
 #[derive(Debug, Clone, Copy)]

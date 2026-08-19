@@ -1,6 +1,6 @@
 # d3d11_upload
 
-`TestVideoSource -> Scaler -> D3d11Upload -> Renderer`: a synthetic
+`TestVideoSource -> SwScaler -> D3d11Upload -> Renderer`: a synthetic
 `Pixel::YUV420P` stream converted to `Pixel::NV12` on the CPU, then uploaded
 to a GPU `Pixel::D3D11` texture on the renderer's own `ID3D11Device` before
 being presented — proves `D3d11Upload`'s frames (built via plain

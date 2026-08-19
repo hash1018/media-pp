@@ -1,9 +1,9 @@
-//! `AppSource -> Scaler(NV12) -> upload -> NVENC -> Mp4Muxer`: encodes
+//! `AppSource -> SwScaler(NV12) -> upload -> NVENC -> Mp4Muxer`: encodes
 //! GPU-resident frames on the GPU's own NVENC block straight into a playable
 //! `.mp4`, with no CPU readback anywhere after the upload.
 //!
 //! The contrast with a software tail is the point: `gpu_video_compositor`'s
-//! recording branch has to run `Download -> Scaler -> SwEncoder`, pulling
+//! recording branch has to run `Download -> SwScaler -> SwEncoder`, pulling
 //! every frame back over PCIe and converting and encoding it on the CPU,
 //! because `SwEncoder` has no GPU input path. Here the frame stays on the GPU
 //! from the upload onward.
@@ -41,7 +41,7 @@ mod windows_example {
     use media_pp::{
         elements::{
             AppSource, D3d11NvencCodec, D3d11NvencEncoder, D3d11NvencEncoderOptions,
-            D3d11NvencInputFormat, D3d11Upload, Mp4Muxer, Scaler,
+            D3d11NvencInputFormat, D3d11Upload, Mp4Muxer, SwScaler,
         },
         pipeline::Pipeline,
     };
@@ -74,7 +74,7 @@ mod windows_example {
                 codec: D3d11NvencCodec::H264,
                 // D3d11Upload produces NV12 textures. Feeding this element a
                 // D3d11VideoCompositor or DxgiCaptureSource GPU-mode output
-                // instead means `Bgra` here and no Scaler at all — NVENC takes
+                // instead means `Bgra` here and no SwScaler at all — NVENC takes
                 // BGRA textures directly.
                 input_format: D3d11NvencInputFormat::Nv12,
                 width,
@@ -92,10 +92,10 @@ mod windows_example {
         let muxer_sink = muxer.open()?.pop().expect("exactly one stream was added");
 
         let pipeline = Pipeline::new("nvenc-record", source, |source, ctx| {
-            // AppSource emits YUV420P on the CPU, so this one Scaler is the
+            // AppSource emits YUV420P on the CPU, so this one SwScaler is the
             // only format conversion in the graph; the upload requires NV12
             // and everything downstream of it is GPU-resident.
-            let scaler = Scaler::new(
+            let scaler = SwScaler::new(
                 "to-nv12",
                 ffmpeg::format::Pixel::NV12,
                 width,
@@ -131,7 +131,7 @@ mod linux_example {
     use media_pp::{
         elements::{
             AppSource, CudaCodec, CudaDevice, CudaEncoder, CudaEncoderOptions, CudaUpload,
-            Mp4Muxer, Scaler,
+            Mp4Muxer, SwScaler,
         },
         pipeline::Pipeline,
     };
@@ -175,10 +175,10 @@ mod linux_example {
         let muxer_sink = muxer.open()?.pop().expect("exactly one stream was added");
 
         let pipeline = Pipeline::new("nvenc-record", source, |source, ctx| {
-            // AppSource emits YUV420P on the CPU, so this one Scaler is the
+            // AppSource emits YUV420P on the CPU, so this one SwScaler is the
             // only format conversion in the graph; the upload requires NV12
             // and everything downstream of it is GPU-resident.
-            let scaler = Scaler::new(
+            let scaler = SwScaler::new(
                 "to-nv12",
                 ffmpeg::format::Pixel::NV12,
                 width,

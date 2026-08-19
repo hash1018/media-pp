@@ -1,11 +1,11 @@
 # nvenc_record
 
-`AppSource -> Scaler(NV12) -> upload -> NVENC -> Mp4Muxer`: encodes
+`AppSource -> SwScaler(NV12) -> upload -> NVENC -> Mp4Muxer`: encodes
 GPU-resident frames on the GPU's own NVENC block straight into a playable
 `.mp4`, with no CPU readback anywhere after the upload.
 
 The contrast with a software tail is the point: `gpu_video_compositor`'s
-recording branch has to run `Download -> Scaler -> SwEncoder`, pulling every
+recording branch has to run `Download -> SwScaler -> SwEncoder`, pulling every
 frame back over PCIe and converting and encoding it on the CPU, because
 `SwEncoder` has no GPU input path. Here the frame stays on the GPU from the
 upload onward.

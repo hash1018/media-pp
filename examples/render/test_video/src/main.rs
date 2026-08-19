@@ -36,7 +36,7 @@ mod windows_example {
     ///
     /// No `Pacer` here, deliberately, as an experiment: `TestVideoSource`
     /// self-paces with a drift-free absolute schedule (see its own docs) and
-    /// nothing sits between it and the renderer here (no `Scaler`, unlike
+    /// nothing sits between it and the renderer here (no `SwScaler`, unlike
     /// `screen_capture`). Testing confirmed that schedule is enough on its own
     /// for a vsync-locked renderer to stay smooth without a separate pacing
     /// stage; `screen_capture` reached the same result after its source moved

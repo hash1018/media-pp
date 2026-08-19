@@ -53,9 +53,9 @@ impl Default for VideoCompositorOptions {
     }
 }
 
-/// Errors specific to [`VideoCompositor`].
+/// Errors specific to [`SwVideoCompositor`].
 #[derive(Debug, ThisError)]
-pub enum VideoCompositorError {
+pub enum SwVideoCompositorError {
     #[error("ffmpeg error: {0}")]
     Ffmpeg(#[from] ffmpeg::Error),
 
@@ -85,11 +85,11 @@ pub enum VideoCompositorError {
     SourceRemoved,
 
     #[error(
-        "VideoCompositorInputSink only accepts decoded Video frames, got a {0}; link it after a decoder or video source"
+        "SwVideoCompositorInputSink only accepts decoded Video frames, got a {0}; link it after a decoder or video source"
     )]
     UnsupportedBuffer(&'static str),
 
-    #[error("VideoCompositor doesn't support seeking a live composition")]
+    #[error("SwVideoCompositor doesn't support seeking a live composition")]
     SeekUnsupported,
 }
 
@@ -111,21 +111,21 @@ struct CompositorShared {
 
 /// A cheaply cloneable handle for adding and removing compositor inputs.
 /// It mirrors [`crate::elements::MixerHandle`], but each registration also
-/// returns a [`VideoLayerHandle`] for changing that input's placement.
+/// returns a [`SwVideoLayerHandle`] for changing that input's placement.
 #[derive(Clone)]
-pub struct VideoCompositorHandle {
+pub struct SwVideoCompositorHandle {
     shared: Weak<CompositorShared>,
 }
 
 /// The two endpoints created for one compositor input registration.
 /// Move `sink` into the upstream pipeline and retain `layer` in application
 /// code for runtime placement changes.
-pub struct VideoCompositorInput {
+pub struct SwVideoCompositorInput {
     pub sink: Box<dyn Sink>,
-    pub layer: VideoLayerHandle,
+    pub layer: SwVideoLayerHandle,
 }
 
-impl VideoCompositorHandle {
+impl SwVideoCompositorHandle {
     /// Registers an input and returns its terminal Sink plus independent
     /// runtime layer control. Reusing `name` replaces the old registration;
     /// old sinks and layer handles become harmlessly stale.
@@ -133,7 +133,7 @@ impl VideoCompositorHandle {
         &self,
         name: impl Into<String>,
         layer: VideoLayer,
-    ) -> std::result::Result<Option<VideoCompositorInput>, VideoCompositorError> {
+    ) -> std::result::Result<Option<SwVideoCompositorInput>, SwVideoCompositorError> {
         validate_layer(layer)?;
         let Some(shared) = self.shared.upgrade() else {
             return Ok(None);
@@ -151,14 +151,14 @@ impl VideoCompositorHandle {
             .unwrap()
             .insert(name.clone(), input.clone());
 
-        Ok(Some(VideoCompositorInput {
-            sink: Box::new(VideoCompositorInputSink {
+        Ok(Some(SwVideoCompositorInput {
+            sink: Box::new(SwVideoCompositorInputSink {
                 name: name.clone(),
-                pp_log: element_pp_log(ElementType::VideoCompositor, &name, None),
+                pp_log: element_pp_log(ElementType::SwVideoCompositor, &name, None),
                 shared: self.shared.clone(),
                 input: Arc::downgrade(&input),
             }),
-            layer: VideoLayerHandle {
+            layer: SwVideoLayerHandle {
                 id,
                 name,
                 input: Arc::downgrade(&input),
@@ -185,13 +185,13 @@ impl VideoCompositorHandle {
 /// Thread-safe runtime placement control for one compositor input.
 /// Retaining it does not keep the input or compositor alive.
 #[derive(Clone)]
-pub struct VideoLayerHandle {
+pub struct SwVideoLayerHandle {
     id: VideoInputId,
     name: Arc<str>,
     input: Weak<VideoInput>,
 }
 
-impl VideoLayerHandle {
+impl SwVideoLayerHandle {
     pub fn id(&self) -> VideoInputId {
         self.id
     }
@@ -206,58 +206,58 @@ impl VideoLayerHandle {
             .map(|input| *input.layer.lock().unwrap())
     }
 
-    pub fn set_layer(&self, layer: VideoLayer) -> std::result::Result<(), VideoCompositorError> {
+    pub fn set_layer(&self, layer: VideoLayer) -> std::result::Result<(), SwVideoCompositorError> {
         validate_layer(layer)?;
         self.update(|current| *current = layer)
     }
 
-    pub fn set_rect(&self, rect: VideoRect) -> std::result::Result<(), VideoCompositorError> {
+    pub fn set_rect(&self, rect: VideoRect) -> std::result::Result<(), SwVideoCompositorError> {
         validate_rect(rect)?;
         self.update(|layer| layer.rect = rect)
     }
 
-    pub fn set_opacity(&self, opacity: f32) -> std::result::Result<(), VideoCompositorError> {
+    pub fn set_opacity(&self, opacity: f32) -> std::result::Result<(), SwVideoCompositorError> {
         validate_opacity(opacity)?;
         self.update(|layer| layer.opacity = opacity)
     }
 
-    pub fn set_z_index(&self, z_index: i32) -> std::result::Result<(), VideoCompositorError> {
+    pub fn set_z_index(&self, z_index: i32) -> std::result::Result<(), SwVideoCompositorError> {
         self.update(|layer| layer.z_index = z_index)
     }
 
-    pub fn set_visible(&self, visible: bool) -> std::result::Result<(), VideoCompositorError> {
+    pub fn set_visible(&self, visible: bool) -> std::result::Result<(), SwVideoCompositorError> {
         self.update(|layer| layer.visible = visible)
     }
 
-    pub fn set_fit(&self, fit: VideoFit) -> std::result::Result<(), VideoCompositorError> {
+    pub fn set_fit(&self, fit: VideoFit) -> std::result::Result<(), SwVideoCompositorError> {
         self.update(|layer| layer.fit = fit)
     }
 
     fn update(
         &self,
         update: impl FnOnce(&mut VideoLayer),
-    ) -> std::result::Result<(), VideoCompositorError> {
+    ) -> std::result::Result<(), SwVideoCompositorError> {
         let input = self
             .input
             .upgrade()
-            .ok_or(VideoCompositorError::SourceRemoved)?;
+            .ok_or(SwVideoCompositorError::SourceRemoved)?;
         update(&mut input.layer.lock().unwrap());
         Ok(())
     }
 }
 
 /// One terminal video input returned by
-/// [`VideoCompositorHandle::add_source`]. It stores only the latest frame,
+/// [`SwVideoCompositorHandle::add_source`]. It stores only the latest frame,
 /// so a fast producer cannot build an unbounded queue behind a slower
 /// compositor output rate.
-pub struct VideoCompositorInputSink {
+pub struct SwVideoCompositorInputSink {
     pp_log: PpLog,
     name: Arc<str>,
     shared: Weak<CompositorShared>,
     input: Weak<VideoInput>,
 }
 
-impl VideoCompositorInputSink {
+impl SwVideoCompositorInputSink {
     fn detach(&self) {
         let (Some(shared), Some(input)) = (self.shared.upgrade(), self.input.upgrade()) else {
             return;
@@ -272,13 +272,13 @@ impl VideoCompositorInputSink {
     }
 }
 
-impl Element for VideoCompositorInputSink {
+impl Element for SwVideoCompositorInputSink {
     fn name(&self) -> Arc<str> {
         self.name.clone()
     }
 
     fn element_type(&self) -> ElementType {
-        ElementType::VideoCompositor
+        ElementType::SwVideoCompositor
     }
 
     fn pp_log(&self) -> &PpLog {
@@ -290,7 +290,7 @@ impl Element for VideoCompositorInputSink {
     }
 }
 
-impl Sink for VideoCompositorInputSink {
+impl Sink for SwVideoCompositorInputSink {
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         let Some(input) = self.input.upgrade() else {
             return Ok(());
@@ -304,8 +304,10 @@ impl Sink for VideoCompositorInputSink {
                 self.detach();
                 Ok(())
             }
-            MediaBuffer::Packet(_) => Err(VideoCompositorError::UnsupportedBuffer("Packet").into()),
-            MediaBuffer::Audio(_) => Err(VideoCompositorError::UnsupportedBuffer("Audio").into()),
+            MediaBuffer::Packet(_) => {
+                Err(SwVideoCompositorError::UnsupportedBuffer("Packet").into())
+            }
+            MediaBuffer::Audio(_) => Err(SwVideoCompositorError::UnsupportedBuffer("Audio").into()),
         }
     }
 
@@ -393,11 +395,11 @@ impl InputScaler {
 ///
 /// Like [`crate::elements::AudioMixer`], this is a [`SourceElement`], not
 /// a conventional one-input filter: upstream pipelines terminate at the
-/// sinks returned by [`VideoCompositorHandle::add_source`], while this
+/// sinks returned by [`SwVideoCompositorHandle::add_source`], while this
 /// element's own pipeline drives output on its independent clock. Input
 /// frame PTS values therefore do not become output PTS; output advances by
-/// one tick in [`VideoCompositor::time_base`] for every composed frame.
-pub struct VideoCompositor {
+/// one tick in [`SwVideoCompositor::time_base`] for every composed frame.
+pub struct SwVideoCompositor {
     pp_log: PpLog,
     name: Arc<str>,
     shared: Arc<CompositorShared>,
@@ -411,17 +413,17 @@ pub struct VideoCompositor {
 
 // SAFETY: `SwsContext` has no thread affinity and every scaling context is
 // exclusively accessed through `&mut self` on the compositor's one source
-// thread. ffmpeg-next simply omits Send for this wrapper, as with Scaler.
-unsafe impl Send for VideoCompositor {}
+// thread. ffmpeg-next simply omits Send for this wrapper, as with SwScaler.
+unsafe impl Send for SwVideoCompositor {}
 
-impl VideoCompositor {
+impl SwVideoCompositor {
     pub fn new(
         name: impl Into<String>,
         options: VideoCompositorOptions,
-    ) -> std::result::Result<(Self, VideoCompositorHandle), VideoCompositorError> {
+    ) -> std::result::Result<(Self, SwVideoCompositorHandle), SwVideoCompositorError> {
         validate_output_options(options)?;
         let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::VideoCompositor, &name, None);
+        let pp_log = element_pp_log(ElementType::SwVideoCompositor, &name, None);
         let shared = Arc::new(CompositorShared {
             inputs: Mutex::new(HashMap::new()),
             next_input_id: AtomicU64::new(1),
@@ -454,7 +456,7 @@ impl VideoCompositor {
                 output_pool,
                 pad: SrcPad::new(format!("{name}_src")),
             },
-            VideoCompositorHandle {
+            SwVideoCompositorHandle {
                 shared: Arc::downgrade(&shared),
             },
         ))
@@ -504,7 +506,8 @@ impl VideoCompositor {
 
     fn compose_frame(
         &mut self,
-    ) -> std::result::Result<UnboundObjectPoolRef<ffmpeg::frame::Video>, VideoCompositorError> {
+    ) -> std::result::Result<UnboundObjectPoolRef<ffmpeg::frame::Video>, SwVideoCompositorError>
+    {
         let mut snapshots = self.snapshots();
         let active: HashSet<_> = snapshots.iter().map(|snapshot| snapshot.id).collect();
         self.scalers.retain(|id, _| active.contains(id));
@@ -535,7 +538,7 @@ impl VideoCompositor {
                 .entry(snapshot.id)
                 .or_insert_with(InputScaler::new)
                 .scale(&frame, geometry.image_width, geometry.image_height)
-                .map_err(VideoCompositorError::from)?;
+                .map_err(SwVideoCompositorError::from)?;
             blend_bgra(&mut output, scaled, geometry, snapshot.layer.opacity);
         }
         output.set_pts(Some(self.frame_index));
@@ -543,13 +546,13 @@ impl VideoCompositor {
         Ok(output)
     }
 
-    fn push_frame(&mut self, bus: &Bus) -> std::result::Result<(), VideoCompositorError> {
+    fn push_frame(&mut self, bus: &Bus) -> std::result::Result<(), SwVideoCompositorError> {
         let output = self.compose_frame()?;
         if let Err(error) = self.pad.push(MediaBuffer::Video(Arc::new(output))) {
             bus.post(
                 &self.pp_log,
                 BusEvent::Error {
-                    element_type: ElementType::VideoCompositor,
+                    element_type: ElementType::SwVideoCompositor,
                     name: self.name.clone(),
                     error,
                 },
@@ -559,13 +562,13 @@ impl VideoCompositor {
     }
 }
 
-impl Element for VideoCompositor {
+impl Element for SwVideoCompositor {
     fn name(&self) -> Arc<str> {
         self.name.clone()
     }
 
     fn element_type(&self) -> ElementType {
-        ElementType::VideoCompositor
+        ElementType::SwVideoCompositor
     }
 
     fn pp_log(&self) -> &PpLog {
@@ -577,13 +580,13 @@ impl Element for VideoCompositor {
     }
 }
 
-impl Source for VideoCompositor {
+impl Source for SwVideoCompositor {
     fn src_pads(&mut self) -> &mut [SrcPad] {
         std::slice::from_mut(&mut self.pad)
     }
 }
 
-impl SourceElement for VideoCompositor {
+impl SourceElement for SwVideoCompositor {
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
         pp_info!(self, "started");
         let mut schedule = PeriodicSchedule::new(self.frame_interval, Instant::now());
@@ -609,58 +612,58 @@ impl SourceElement for VideoCompositor {
     }
 
     fn seek(&mut self, _target: Duration) -> Result<Duration> {
-        Err(VideoCompositorError::SeekUnsupported.into())
+        Err(SwVideoCompositorError::SeekUnsupported.into())
     }
 }
 
 fn validate_output_options(
     options: VideoCompositorOptions,
-) -> std::result::Result<(), VideoCompositorError> {
+) -> std::result::Result<(), SwVideoCompositorError> {
     if options.width == 0
         || options.height == 0
         || options.width > MAX_DIMENSION
         || options.height > MAX_DIMENSION
     {
-        return Err(VideoCompositorError::InvalidOutputDimensions {
+        return Err(SwVideoCompositorError::InvalidOutputDimensions {
             width: options.width,
             height: options.height,
         });
     }
     if options.frame_rate.numerator() <= 0 || options.frame_rate.denominator() <= 0 {
-        return Err(VideoCompositorError::InvalidFrameRate(options.frame_rate));
+        return Err(SwVideoCompositorError::InvalidFrameRate(options.frame_rate));
     }
     Ok(())
 }
 
 /// Thin adapters over the shared, backend-agnostic logic in
 /// [`super::video_layer`] — translate its [`VideoLayerError`] into this
-/// backend's own [`VideoCompositorError`] variants so every existing call
+/// backend's own [`SwVideoCompositorError`] variants so every existing call
 /// site/error consumer here keeps seeing the same error shape it always
 /// has.
-fn map_layer_error(error: VideoLayerError) -> VideoCompositorError {
+fn map_layer_error(error: VideoLayerError) -> SwVideoCompositorError {
     match error {
         VideoLayerError::InvalidDimensions { width, height } => {
-            VideoCompositorError::InvalidLayerDimensions { width, height }
+            SwVideoCompositorError::InvalidLayerDimensions { width, height }
         }
-        VideoLayerError::InvalidOpacity(opacity) => VideoCompositorError::InvalidOpacity(opacity),
+        VideoLayerError::InvalidOpacity(opacity) => SwVideoCompositorError::InvalidOpacity(opacity),
         VideoLayerError::InvalidInputDimensions { width, height } => {
-            VideoCompositorError::InvalidInputDimensions { width, height }
+            SwVideoCompositorError::InvalidInputDimensions { width, height }
         }
         VideoLayerError::ScaledLayerTooLarge { width, height } => {
-            VideoCompositorError::ScaledLayerTooLarge { width, height }
+            SwVideoCompositorError::ScaledLayerTooLarge { width, height }
         }
     }
 }
 
-fn validate_layer(layer: VideoLayer) -> std::result::Result<(), VideoCompositorError> {
+fn validate_layer(layer: VideoLayer) -> std::result::Result<(), SwVideoCompositorError> {
     video_layer::validate_layer(layer).map_err(map_layer_error)
 }
 
-fn validate_rect(rect: VideoRect) -> std::result::Result<(), VideoCompositorError> {
+fn validate_rect(rect: VideoRect) -> std::result::Result<(), SwVideoCompositorError> {
     video_layer::validate_rect(rect).map_err(map_layer_error)
 }
 
-fn validate_opacity(opacity: f32) -> std::result::Result<(), VideoCompositorError> {
+fn validate_opacity(opacity: f32) -> std::result::Result<(), SwVideoCompositorError> {
     video_layer::validate_opacity(opacity).map_err(map_layer_error)
 }
 
@@ -669,7 +672,7 @@ fn layer_geometry(
     source_height: u32,
     rect: VideoRect,
     fit: VideoFit,
-) -> std::result::Result<LayerGeometry, VideoCompositorError> {
+) -> std::result::Result<LayerGeometry, SwVideoCompositorError> {
     video_layer::layer_geometry(source_width, source_height, rect, fit).map_err(map_layer_error)
 }
 
@@ -811,17 +814,17 @@ mod tests {
     }
 
     fn input(
-        handle: &VideoCompositorHandle,
+        handle: &SwVideoCompositorHandle,
         name: &str,
         layer: VideoLayer,
-    ) -> (Box<dyn Sink>, VideoLayerHandle) {
+    ) -> (Box<dyn Sink>, SwVideoLayerHandle) {
         let input = handle.add_source(name, layer).unwrap().unwrap();
         (input.sink, input.layer)
     }
 
     #[test]
     fn composes_inputs_in_z_order_and_preserves_output_contract() {
-        let (mut compositor, handle) = VideoCompositor::new("compositor", options(4, 4)).unwrap();
+        let (mut compositor, handle) = SwVideoCompositor::new("compositor", options(4, 4)).unwrap();
         let mut background = VideoLayer::new(VideoRect::new(0, 0, 4, 4));
         background.fit = VideoFit::Stretch;
         let (mut red_sink, _) = input(&handle, "red", background);
@@ -846,7 +849,7 @@ mod tests {
 
     #[test]
     fn layer_handle_moves_blends_and_hides_a_live_source() {
-        let (mut compositor, handle) = VideoCompositor::new("compositor", options(3, 1)).unwrap();
+        let (mut compositor, handle) = SwVideoCompositor::new("compositor", options(3, 1)).unwrap();
         let layer = VideoLayer::new(VideoRect::new(0, 0, 1, 1));
         let (mut sink, layer_handle) = input(&handle, "white", layer);
         sink.consume(MediaBuffer::Video(solid_frame(1, 1, Color::WHITE)))
@@ -866,7 +869,7 @@ mod tests {
 
     #[test]
     fn input_keeps_only_the_latest_frame() {
-        let (mut compositor, handle) = VideoCompositor::new("compositor", options(1, 1)).unwrap();
+        let (mut compositor, handle) = SwVideoCompositor::new("compositor", options(1, 1)).unwrap();
         let (mut sink, _) = input(
             &handle,
             "latest",
@@ -883,7 +886,7 @@ mod tests {
 
     #[test]
     fn frame_replacement_and_composition_run_concurrently() {
-        let (mut compositor, handle) = VideoCompositor::new("compositor", options(1, 1)).unwrap();
+        let (mut compositor, handle) = SwVideoCompositor::new("compositor", options(1, 1)).unwrap();
         let (mut sink, _) = input(&handle, "live", VideoLayer::new(VideoRect::new(0, 0, 1, 1)));
         let red = solid_frame(1, 1, Color::new(255, 0, 0));
         let green = solid_frame(1, 1, Color::new(0, 255, 0));
@@ -918,13 +921,13 @@ mod tests {
 
     #[test]
     fn replacing_a_name_invalidates_old_sink_and_layer_handle() {
-        let (mut compositor, handle) = VideoCompositor::new("compositor", options(1, 1)).unwrap();
+        let (mut compositor, handle) = SwVideoCompositor::new("compositor", options(1, 1)).unwrap();
         let layer = VideoLayer::new(VideoRect::new(0, 0, 1, 1));
         let (mut old_sink, old_layer) = input(&handle, "camera", layer);
         let (mut new_sink, _) = input(&handle, "camera", layer);
         assert!(matches!(
             old_layer.set_visible(false),
-            Err(VideoCompositorError::SourceRemoved)
+            Err(SwVideoCompositorError::SourceRemoved)
         ));
         old_sink
             .consume(MediaBuffer::Video(solid_frame(1, 1, Color::new(255, 0, 0))))
@@ -940,7 +943,7 @@ mod tests {
 
     #[test]
     fn stop_removes_only_the_current_registration() {
-        let (_compositor, handle) = VideoCompositor::new("compositor", options(1, 1)).unwrap();
+        let (_compositor, handle) = SwVideoCompositor::new("compositor", options(1, 1)).unwrap();
         let layer = VideoLayer::new(VideoRect::new(0, 0, 1, 1));
         let (mut old_sink, _) = input(&handle, "camera", layer);
         let (_new_sink, _) = input(&handle, "camera", layer);
@@ -965,14 +968,14 @@ mod tests {
 
     #[test]
     fn rejects_invalid_layers_and_non_video_buffers() {
-        let (_compositor, handle) = VideoCompositor::new("compositor", options(1, 1)).unwrap();
+        let (_compositor, handle) = SwVideoCompositor::new("compositor", options(1, 1)).unwrap();
         let invalid = VideoLayer {
             opacity: 1.5,
             ..VideoLayer::new(VideoRect::new(0, 0, 1, 1))
         };
         assert!(matches!(
             handle.add_source("invalid", invalid),
-            Err(VideoCompositorError::InvalidOpacity(1.5))
+            Err(SwVideoCompositorError::InvalidOpacity(1.5))
         ));
 
         let (mut sink, _) = input(
@@ -985,13 +988,15 @@ mod tests {
             .unwrap_err();
         assert!(matches!(
             error,
-            crate::Error::VideoCompositorError(VideoCompositorError::UnsupportedBuffer("Packet"))
+            crate::Error::SwVideoCompositorError(SwVideoCompositorError::UnsupportedBuffer(
+                "Packet"
+            ))
         ));
     }
 
     #[test]
     fn pushes_fixed_format_frames_with_contiguous_pts() {
-        let (mut compositor, _) = VideoCompositor::new("compositor", options(2, 2)).unwrap();
+        let (mut compositor, _) = SwVideoCompositor::new("compositor", options(2, 2)).unwrap();
         let received = Arc::new(StdMutex::new(Vec::new()));
         compositor.src_pads()[0].link(Box::new(CapturingSink {
             received: received.clone(),
@@ -1044,7 +1049,7 @@ mod tests {
         }
     }
 
-    /// Regression test: `VideoCompositor::run` never folded
+    /// Regression test: `SwVideoCompositor::run` never folded
     /// `ControlOutcome::paused_for` back into `next_due` — a `Pause` let
     /// real time blow straight past the stale deadline, so the loop
     /// iteration right after `Resume` always found `next_due` already in
@@ -1065,7 +1070,7 @@ mod tests {
             tx,
             pp_log: element_pp_log(ElementType::Other, "timestamp-recorder", None),
         };
-        let (compositor, _handle) = VideoCompositor::new(
+        let (compositor, _handle) = SwVideoCompositor::new(
             "compositor",
             VideoCompositorOptions {
                 frame_rate: ffmpeg::Rational::new(10, 1),

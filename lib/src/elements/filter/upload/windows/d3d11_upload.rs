@@ -29,7 +29,7 @@ pub enum D3d11UploadError {
     Windows(#[from] windows::core::Error),
 
     #[error(
-        "D3d11Upload only accepts Pixel::NV12 frames (chain a Scaler in \
+        "D3d11Upload only accepts Pixel::NV12 frames (chain a SwScaler in \
          front of it), got {0:?}"
     )]
     UnsupportedFormat(ffmpeg::format::Pixel),
@@ -54,7 +54,7 @@ pub enum D3d11UploadError {
 /// [`crate::elements::D3d12Upload`], for a pipeline built entirely on one
 /// shared `ID3D11Device` (see [`crate::elements::D3d11Renderer`]'s own
 /// docs on why). Only accepts `Pixel::NV12` input — chain a
-/// [`crate::elements::Scaler`] (`dst_format = Pixel::NV12`) in front of
+/// [`crate::elements::SwScaler`] (`dst_format = Pixel::NV12`) in front of
 /// this if the source produces something else.
 ///
 /// Unlike `D3d12Upload`, this does **not** go through FFmpeg's

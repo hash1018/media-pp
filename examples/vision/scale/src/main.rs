@@ -11,7 +11,7 @@ use media_pp::{
     bus::BusEvent,
     control::ControlMsg,
     element::{Element, ElementType, Sink, element_pp_log},
-    elements::{FileDemuxer, Scaler, SwDecoder},
+    elements::{FileDemuxer, SwDecoder, SwScaler},
     pipeline::Pipeline,
 };
 
@@ -19,8 +19,8 @@ const DST_FORMAT: Pixel = Pixel::RGB24;
 const DST_WIDTH: u32 = 640;
 const DST_HEIGHT: u32 = 640;
 
-/// Demux -> SwDecoder -> Scaler -> (prints the first scaled frame's actual
-/// format/size, then counts the rest). Proves `Scaler` really converts
+/// Demux -> SwDecoder -> SwScaler -> (prints the first scaled frame's actual
+/// format/size, then counts the rest). Proves `SwScaler` really converts
 /// pixel format (whatever the decoder produces -> RGB24) and resizes
 /// (source resolution -> a fixed 640x640, the kind of input an ONNX
 /// object-detection model would want), not just that it compiles.
@@ -57,7 +57,7 @@ fn main() -> media_pp::Result<()> {
 
     let pipeline = Pipeline::new("scale", source, |source, ctx| {
         let decoder = SwDecoder::new("decoder", params).expect("failed to open decoder");
-        let scaler = Scaler::new("scaler", DST_FORMAT, DST_WIDTH, DST_HEIGHT, Flags::BILINEAR);
+        let scaler = SwScaler::new("scaler", DST_FORMAT, DST_WIDTH, DST_HEIGHT, Flags::BILINEAR);
         let branch = ctx
             .branch()
             .pipe(decoder) // same thread as the demux — cheap enough not to need a queue
@@ -98,7 +98,7 @@ fn main() -> media_pp::Result<()> {
 }
 
 /// Terminal sink that prints the *first* scaled frame's actual
-/// format/dimensions — proof `Scaler` really produced `DST_FORMAT` at
+/// format/dimensions — proof `SwScaler` really produced `DST_FORMAT` at
 /// `DST_WIDTH`x`DST_HEIGHT`, not just that the pipeline ran to
 /// completion — then counts every frame after that the same way
 /// `FrameCounter` would.
@@ -139,10 +139,10 @@ impl Sink for VerifyingSink {
             assert_eq!(
                 frame.format(),
                 DST_FORMAT,
-                "Scaler didn't convert pixel format"
+                "SwScaler didn't convert pixel format"
             );
-            assert_eq!(frame.width(), DST_WIDTH, "Scaler didn't resize width");
-            assert_eq!(frame.height(), DST_HEIGHT, "Scaler didn't resize height");
+            assert_eq!(frame.width(), DST_WIDTH, "SwScaler didn't resize width");
+            assert_eq!(frame.height(), DST_HEIGHT, "SwScaler didn't resize height");
         }
         Ok(())
     }

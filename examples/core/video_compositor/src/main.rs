@@ -5,15 +5,15 @@ use media_pp::{
     bus::BusEvent,
     color::Color,
     elements::{
-        Mp4Muxer, Scaler, SwEncoder, SwEncoderOptions, TestVideoOptions, TestVideoSource,
-        VideoCodec, VideoCompositor, VideoCompositorOptions, VideoFit, VideoLayer, VideoRect,
+        Mp4Muxer, SwEncoder, SwEncoderOptions, SwScaler, SwVideoCompositor, TestVideoOptions,
+        TestVideoSource, VideoCodec, VideoCompositorOptions, VideoFit, VideoLayer, VideoRect,
     },
     pipeline::Pipeline,
 };
 
-/// Two TestVideoSource pipelines -> VideoCompositor -> Scaler ->
+/// Two TestVideoSource pipelines -> SwVideoCompositor -> SwScaler ->
 /// SwEncoder -> Mp4Muxer. The foreground layer moves at runtime through
-/// its VideoLayerHandle while both source connections stay unchanged.
+/// its SwVideoLayerHandle while both source connections stay unchanged.
 ///
 ///     cargo run -p video_compositor -- [output.mp4] [seconds]
 fn main() -> media_pp::Result<()> {
@@ -36,7 +36,7 @@ fn main() -> media_pp::Result<()> {
     let output_width = 640;
     let output_height = 360;
     let frame_rate = ffmpeg::Rational::new(30, 1);
-    let (compositor, compositor_handle) = VideoCompositor::new(
+    let (compositor, compositor_handle) = SwVideoCompositor::new(
         "compositor",
         VideoCompositorOptions {
             width: output_width,
@@ -120,7 +120,7 @@ fn main() -> media_pp::Result<()> {
     muxer.add_stream("video", encoder.parameters(), time_base)?;
     let muxer_sink = muxer.open()?.pop().expect("one video stream");
     let output_pipeline = Pipeline::new("composited-output", compositor, |source, ctx| {
-        let scaler = Scaler::new(
+        let scaler = SwScaler::new(
             "to-yuv",
             ffmpeg::format::Pixel::YUV420P,
             output_width,

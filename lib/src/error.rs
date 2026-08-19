@@ -19,7 +19,8 @@ use crate::elements::WasapiRendererError;
 use crate::elements::WebRtcError;
 #[cfg(feature = "cuda")]
 use crate::elements::{
-    CudaDecoderError, CudaDownloadError, CudaEncoderError, CudaRendererError, CudaUploadError,
+    CudaDecoderError, CudaDownloadError, CudaEncoderError, CudaRendererError, CudaScalerError,
+    CudaUploadError,
 };
 #[cfg(all(target_os = "windows", feature = "d3d11"))]
 use crate::elements::{
@@ -31,9 +32,9 @@ use crate::elements::{D3d12RendererError, D3d12UploadError, D3d12vaDecoderError}
 use crate::{
     elements::{
         AppSourceError, AudioMixerError, AudioResamplerError, AudioVolumeError, FileDemuxError,
-        HlsMuxerError, Mp4MuxerError, PacerError, RtspSourceError, ScalerError,
-        SwAudioEncoderError, SwDecoderError, SwEncoderError, TestAudioSourceError,
-        TestVideoSourceError, VideoCompositorError, VideoSynchronizerError,
+        HlsMuxerError, Mp4MuxerError, PacerError, RtspSourceError, SwAudioEncoderError,
+        SwDecoderError, SwEncoderError, SwScalerError, SwVideoCompositorError,
+        TestAudioSourceError, TestVideoSourceError, VideoSynchronizerError,
     },
     graph::GraphError,
     log::LogInitError,
@@ -87,6 +88,10 @@ pub enum Error {
 
     #[cfg(feature = "cuda")]
     #[error(transparent)]
+    CudaScalerError(#[from] CudaScalerError),
+
+    #[cfg(feature = "cuda")]
+    #[error(transparent)]
     CudaEncoderError(#[from] CudaEncoderError),
 
     #[error(transparent)]
@@ -108,7 +113,7 @@ pub enum Error {
     AudioVolumeError(#[from] AudioVolumeError),
 
     #[error(transparent)]
-    ScalerError(#[from] ScalerError),
+    SwScalerError(#[from] SwScalerError),
 
     #[error(transparent)]
     QueueError(#[from] QueueError),
@@ -123,7 +128,7 @@ pub enum Error {
     AudioMixerError(#[from] AudioMixerError),
 
     #[error(transparent)]
-    VideoCompositorError(#[from] VideoCompositorError),
+    SwVideoCompositorError(#[from] SwVideoCompositorError),
 
     #[error(transparent)]
     Mp4MuxerError(#[from] Mp4MuxerError),

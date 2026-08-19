@@ -87,7 +87,7 @@ pub struct D3d12vaDecoder {
     /// already pooled/recycled by ffmpeg's own hw frames context
     /// regardless of what this crate does, so the benefit here is
     /// smaller than for [`crate::elements::SwDecoder`]/
-    /// [`crate::elements::Scaler`] (just the small CPU-side `AVFrame`
+    /// [`crate::elements::SwScaler`] (just the small CPU-side `AVFrame`
     /// wrapper, not the texture) — but `MediaBuffer::Video` requires
     /// this either way, so there's no reason not to.
     pool: UnboundObjectPool<ffmpeg::frame::Video>,

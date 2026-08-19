@@ -1,6 +1,6 @@
 # screen_record
 
-`CaptureSource -> Scaler -> SwEncoder -> Mp4Muxer`: captures the desktop live
+`CaptureSource -> SwScaler -> SwEncoder -> Mp4Muxer`: captures the desktop live
 and encodes it straight into a playable `.mp4` file — no window, no renderer,
 just a headless recording (compare `screen_capture`, which renders instead of
 encoding).

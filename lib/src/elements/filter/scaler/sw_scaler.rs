@@ -13,7 +13,7 @@ use crate::{
     pool::UnboundObjectPool,
 };
 
-/// How many output frames [`Scaler`] pre-allocates up front. Unlike
+/// How many output frames [`SwScaler`] pre-allocates up front. Unlike
 /// [`crate::elements::SwDecoder`]/[`crate::elements::D3d12vaDecoder`],
 /// this doesn't have to start empty and grow — `dst_format`/`dst_width`/
 /// `dst_height` are known at construction time, so the pool can be
@@ -24,15 +24,15 @@ use crate::{
 /// past this if more frames end up in flight at once.
 const POOL_SIZE: usize = 4;
 
-/// Errors specific to `Scaler`. Converts into the crate-wide `Error` via
+/// Errors specific to `SwScaler`. Converts into the crate-wide `Error` via
 /// `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
-pub enum ScalerError {
+pub enum SwScalerError {
     #[error("ffmpeg error: {0}")]
     Ffmpeg(#[from] ffmpeg::Error),
 
     #[error(
-        "Scaler only converts/resizes decoded Video frames, got a {0}; \
+        "SwScaler only converts/resizes decoded Video frames, got a {0}; \
          link it straight after a decoder, not a demuxer"
     )]
     UnsupportedBuffer(&'static str),
@@ -47,7 +47,7 @@ pub enum ScalerError {
 /// Typical placement: right before something with a fixed input
 /// contract, e.g. an ONNX object-detection model — not a general-purpose
 /// pipeline stage, so most chains won't need one at all.
-pub struct Scaler {
+pub struct SwScaler {
     pp_log: PpLog,
     name: Arc<str>,
     dst_format: ffmpeg::format::Pixel,
@@ -77,9 +77,9 @@ pub struct Scaler {
 // `&mut self` on every method that touches it (see `D3d12vaDecoder`'s
 // `hw_device_ctx` for the same reasoning) already rules out concurrent
 // access from multiple threads.
-unsafe impl Send for Scaler {}
+unsafe impl Send for SwScaler {}
 
-impl Scaler {
+impl SwScaler {
     /// `dst_format`/`dst_width`/`dst_height` describe what every output
     /// frame will be; the source side is learned automatically from
     /// whatever frames actually arrive (see `context`'s docs), so this
@@ -93,7 +93,7 @@ impl Scaler {
         flags: ffmpeg::software::scaling::Flags,
     ) -> Self {
         let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::Scaler, &name, None);
+        let pp_log = element_pp_log(ElementType::SwScaler, &name, None);
         pp_info!(
             pp_log: &pp_log,
             "created: dst_format={dst_format:?}, dst={dst_width}x{dst_height}"
@@ -133,13 +133,13 @@ impl Scaler {
     }
 }
 
-impl Element for Scaler {
+impl Element for SwScaler {
     fn name(&self) -> Arc<str> {
         self.name.clone()
     }
 
     fn element_type(&self) -> ElementType {
-        ElementType::Scaler
+        ElementType::SwScaler
     }
 
     fn pp_log(&self) -> &PpLog {
@@ -151,13 +151,13 @@ impl Element for Scaler {
     }
 }
 
-impl Source for Scaler {
+impl Source for SwScaler {
     fn src_pads(&mut self) -> &mut [SrcPad] {
         std::slice::from_mut(&mut self.pad)
     }
 }
 
-impl Sink for Scaler {
+impl Sink for SwScaler {
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         match buf {
             MediaBuffer::Video(frame) => {
@@ -212,7 +212,7 @@ impl Sink for Scaler {
                                 .inspect_err(|error| {
                                     pp_error!(self, "failed to build scaling context: {error}")
                                 })
-                                .map_err(ScalerError::from)?,
+                                .map_err(SwScalerError::from)?,
                             );
                         }
                     }
@@ -227,7 +227,7 @@ impl Sink for Scaler {
                     .expect("built or confirmed matching above")
                     .run(&frame, &mut output)
                     .inspect_err(|error| pp_error!(self, "scale failed: {error}"))
-                    .map_err(ScalerError::from)?;
+                    .map_err(SwScalerError::from)?;
                 // `run` only copies pixel data, not metadata — carry the
                 // pts through by hand so downstream pacing/muxing still
                 // sees the original timestamp.
@@ -238,11 +238,11 @@ impl Sink for Scaler {
             MediaBuffer::Eos => self.pad.push(MediaBuffer::Eos),
             MediaBuffer::Packet(_) => {
                 pp_error!(self, "unsupported buffer: Packet");
-                Err(ScalerError::UnsupportedBuffer("Packet").into())
+                Err(SwScalerError::UnsupportedBuffer("Packet").into())
             }
             MediaBuffer::Audio(_) => {
                 pp_error!(self, "unsupported buffer: Audio");
-                Err(ScalerError::UnsupportedBuffer("Audio").into())
+                Err(SwScalerError::UnsupportedBuffer("Audio").into())
             }
         }
     }
@@ -316,8 +316,8 @@ mod tests {
         dst_format: ffmpeg::format::Pixel,
         dst_width: u32,
         dst_height: u32,
-    ) -> (Scaler, Arc<Mutex<Vec<MediaBuffer>>>) {
-        let mut scaler = Scaler::new(
+    ) -> (SwScaler, Arc<Mutex<Vec<MediaBuffer>>>) {
+        let mut scaler = SwScaler::new(
             "scaler",
             dst_format,
             dst_width,

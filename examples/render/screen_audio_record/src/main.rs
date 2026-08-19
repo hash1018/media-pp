@@ -27,9 +27,9 @@ mod windows_example {
     use media_pp::{
         bus::BusEvent,
         elements::{
-            AudioCodec, CaptureMode, DxgiCaptureOptions, DxgiCaptureSource, Mp4Muxer, Scaler,
-            SwAudioEncoder, SwAudioEncoderOptions, SwEncoder, SwEncoderOptions, VideoCodec,
-            WasapiCaptureOptions, WasapiCaptureSource, WasapiDeviceKind,
+            AudioCodec, CaptureMode, DxgiCaptureOptions, DxgiCaptureSource, Mp4Muxer,
+            SwAudioEncoder, SwAudioEncoderOptions, SwEncoder, SwEncoderOptions, SwScaler,
+            VideoCodec, WasapiCaptureOptions, WasapiCaptureSource, WasapiDeviceKind,
         },
         pipeline::PipelineBuilder,
     };
@@ -123,7 +123,7 @@ mod windows_example {
 
         let pipeline = PipelineBuilder::new("screen-audio-record")
             .add_source(video_source, |source, ctx| {
-                let scaler = Scaler::new(
+                let scaler = SwScaler::new(
                     "to-yuv",
                     ffmpeg::format::Pixel::YUV420P,
                     video_format.width,
@@ -207,8 +207,8 @@ mod linux_example {
         elements::{
             AudioCodec, CaptureSourceKind, Mp4Muxer, PipeWireAudioCaptureOptions,
             PipeWireAudioCaptureSource, PipeWireAudioDeviceKind, PipeWireScreenCaptureOptions,
-            PipeWireScreenCaptureSource, Scaler, SwAudioEncoder, SwAudioEncoderOptions, SwEncoder,
-            SwEncoderOptions, VideoCodec,
+            PipeWireScreenCaptureSource, SwAudioEncoder, SwAudioEncoderOptions, SwEncoder,
+            SwEncoderOptions, SwScaler, VideoCodec,
         },
         pipeline::PipelineBuilder,
     };
@@ -320,7 +320,7 @@ mod linux_example {
 
         let pipeline = PipelineBuilder::new("screen-audio-record")
             .add_source(video_source, |source, ctx| {
-                let scaler = Scaler::new(
+                let scaler = SwScaler::new(
                     "to-yuv",
                     ffmpeg::format::Pixel::YUV420P,
                     width,

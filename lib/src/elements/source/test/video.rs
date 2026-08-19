@@ -57,7 +57,7 @@ impl Default for TestVideoOptions {
 /// `run()` fabricates one `Pixel::YUV420P` frame per tick, stamps it with
 /// an increasing `pts` (one tick per frame, in [`TestVideoSource::time_base`]'s
 /// units), and pushes it straight downstream — useful for exercising
-/// `Scaler`/`Pacer`/`D3d12Renderer`/etc. without a real file or camera.
+/// `SwScaler`/`Pacer`/`D3d12Renderer`/etc. without a real file or camera.
 /// `D3d12Renderer` in particular already handles `Pixel::YUV420P` on its
 /// CPU-upload path, so this can feed a renderer directly, no decoder
 /// needed.
@@ -85,7 +85,7 @@ impl Default for TestVideoOptions {
 /// described above specifically to close that gap, and testing without a
 /// `Pacer` afterward showed no judder. See
 /// `crate::elements::DxgiCaptureSource`'s own docs for the same
-/// conclusion reached the same way, including a case (`Scaler` sitting
+/// conclusion reached the same way, including a case (`SwScaler` sitting
 /// between source and renderer) this element doesn't have.
 ///
 /// Runs until `Stop` — never reaches `Eos` on its own (no frame-count
@@ -504,7 +504,7 @@ mod tests {
     /// `consume()` call leave `next_due` many intervals behind `now`, and
     /// every one of those intervals would fire back-to-back with no sleep
     /// between them as soon as the loop got a chance to run again — a
-    /// burst of catch-up frames. `VideoCompositor::run` already guarded
+    /// burst of catch-up frames. `SwVideoCompositor::run` already guarded
     /// its own composition step this way; `TestVideoSource::run` now
     /// applies the same clamp right after advancing `next_due` — and only
     /// *after* generate+push (this test's other regression: advancing

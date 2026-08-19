@@ -89,7 +89,7 @@ pub struct WasapiCaptureOptions {
 /// `MediaBuffer::Audio` frames in the captured device's own native mix
 /// format/rate/channel count — no resampling. Same division of labor as
 /// [`crate::elements::DxgiCaptureSource`] emitting raw `Pixel::BGRA` and
-/// leaving conversion to a downstream [`crate::elements::Scaler`]: if
+/// leaving conversion to a downstream [`crate::elements::SwScaler`]: if
 /// something downstream needs a fixed sample rate/format, use
 /// [`crate::elements::AudioResampler`] rather than hiding conversion in
 /// this element.

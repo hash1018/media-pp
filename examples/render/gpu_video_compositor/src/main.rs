@@ -17,8 +17,8 @@ mod windows_example {
         bus::BusEvent,
         color::Color,
         elements::{
-            D3d11Download, D3d11Upload, D3d11VideoCompositor, Mp4Muxer, Scaler, SwEncoder,
-            SwEncoderOptions, TeeBuilder, TestVideoOptions, TestVideoSource, VideoCodec,
+            D3d11Download, D3d11Upload, D3d11VideoCompositor, Mp4Muxer, SwEncoder,
+            SwEncoderOptions, SwScaler, TeeBuilder, TestVideoOptions, TestVideoSource, VideoCodec,
             VideoCompositorOptions, VideoFit, VideoLayer, VideoRect,
         },
         pipeline::Pipeline,
@@ -36,7 +36,7 @@ mod windows_example {
     /// Two TestVideoSource pipelines -> D3d11Upload -> D3d11VideoCompositor
     /// (GPU shader compositing, no CPU round trip for the inputs or the
     /// composited output) -> Tee -> {D3d11Renderer for live display,
-    /// D3d11Download -> Scaler -> SwEncoder -> Mp4Muxer for simultaneous
+    /// D3d11Download -> SwScaler -> SwEncoder -> Mp4Muxer for simultaneous
     /// recording}. The foreground layer moves at runtime through its
     /// D3d11VideoLayerHandle, same as the CPU `video_compositor` example, but
     /// every frame this composites never touches the CPU until the recording
@@ -187,7 +187,7 @@ mod windows_example {
         let foreground_sink = foreground_input.sink;
         let foreground_handle = foreground_input.layer;
 
-        // TestVideoSource -> Scaler(NV12) -> D3d11Upload: the CPU->GPU bridge
+        // TestVideoSource -> SwScaler(NV12) -> D3d11Upload: the CPU->GPU bridge
         // every compositor input needs (see D3d11VideoCompositor's own docs —
         // it only accepts already-GPU-resident Pixel::D3D11 frames).
         let background_source = TestVideoSource::new(
@@ -200,7 +200,7 @@ mod windows_example {
         );
         let background_pipeline =
             Pipeline::new("background-input", background_source, |source, ctx| {
-                let scaler = Scaler::new(
+                let scaler = SwScaler::new(
                     "to-nv12",
                     ffmpeg::format::Pixel::NV12,
                     output_width,
@@ -227,7 +227,7 @@ mod windows_example {
         );
         let foreground_pipeline =
             Pipeline::new("foreground-input", foreground_source, |source, ctx| {
-                let scaler = Scaler::new(
+                let scaler = SwScaler::new(
                     "to-nv12",
                     ffmpeg::format::Pixel::NV12,
                     320,
@@ -275,7 +275,7 @@ mod windows_example {
                 output_height,
             )
             .map_err(|e| media_pp::Error::Other(e.to_string()))?;
-            let to_yuv = Scaler::new(
+            let to_yuv = SwScaler::new(
                 "to-yuv",
                 ffmpeg::format::Pixel::YUV420P,
                 output_width,

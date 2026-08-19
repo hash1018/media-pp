@@ -4,7 +4,7 @@
 //! here:
 //!
 //! - [`PeriodicSchedule`] — an absolute `next_due` deadline
-//!   (`TestVideoSource`, `DxgiCaptureSource`, `VideoCompositor`,
+//!   (`TestVideoSource`, `DxgiCaptureSource`, `SwVideoCompositor`,
 //!   `D3d11VideoCompositor`, ...) that must survive a
 //!   [`crate::control::ControlMsg::Pause`]/`Resume` cycle without losing
 //!   its phase, yet also must not let one abnormally slow tick turn into a

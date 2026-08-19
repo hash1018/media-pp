@@ -1,5 +1,5 @@
 //! Shared, backend-agnostic layer types/math for anything that composites
-//! multiple video inputs into one output — [`crate::elements::VideoCompositor`]
+//! multiple video inputs into one output — [`crate::elements::SwVideoCompositor`]
 //! (CPU, `libswscale`) and [`crate::elements::D3d11VideoCompositor`] (GPU,
 //! D3D11) both use these exact same types, so a caller's layer-control code
 //! doesn't change shape when switching between them. Only the actual pixel
@@ -71,7 +71,7 @@ impl VideoLayer {
 
 /// Validation/geometry failures shared by every compositor backend. Each
 /// backend's own `{Backend}CompositorError` maps these into its own
-/// variants (see e.g. [`crate::elements::VideoCompositorError`]) rather
+/// variants (see e.g. [`crate::elements::SwVideoCompositorError`]) rather
 /// than exposing this type directly, so a caller matching on a specific
 /// backend's error type sees only that backend's own enum.
 #[derive(Debug, Clone, Copy, PartialEq, ThisError)]

@@ -108,7 +108,7 @@ pub enum CudaEncoderError {
 ///
 /// Fed by [`crate::elements::CudaDecoder`] this is a transcode that never
 /// brings a pixel to the CPU; fed by [`crate::elements::CudaUpload`] it is
-/// the hardware replacement for a `Scaler`-plus-`SwEncoder` recording tail.
+/// the hardware replacement for a `SwScaler`-plus-`SwEncoder` recording tail.
 ///
 /// Named for the frame type it consumes rather than for NVENC, matching
 /// `CudaDecoder`/`CudaRenderer`: a CUDA frame is NVIDIA-only by

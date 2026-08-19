@@ -16,7 +16,7 @@ mod windows_example {
     use media_pp::{
         bus::BusEvent,
         element::ElementType,
-        elements::{CaptureMode, DxgiCaptureOptions, DxgiCaptureSource, Scaler},
+        elements::{CaptureMode, DxgiCaptureOptions, DxgiCaptureSource, SwScaler},
         pipeline::Pipeline,
     };
     use render_common::D3d12GpuContext;
@@ -29,7 +29,7 @@ mod windows_example {
         window::{Window, WindowId},
     };
 
-    /// DxgiCaptureSource -> Scaler -> Renderer: captures the desktop live via
+    /// DxgiCaptureSource -> SwScaler -> Renderer: captures the desktop live via
     /// DXGI Desktop Duplication (cursor included) at a constant frame rate
     /// (`DxgiCaptureOptions::fps`) and converts/resizes it to the window's own
     /// size as `Pixel::YUV420P` before rendering — no `SwEncoder`/`SwDecoder`
@@ -40,7 +40,7 @@ mod windows_example {
     /// removing `Pacer` against that measurably caused judder. It's since
     /// been rewritten to emit at a constant rate on a drift-free absolute
     /// schedule instead — the same pattern `TestVideoSource` uses (see
-    /// `test_video`) — and with that fixed, `Scaler` sitting between source
+    /// `test_video`) — and with that fixed, `SwScaler` sitting between source
     /// and renderer here doesn't add enough jitter on its own to bring the
     /// judder back. The constant-rate/drift-free change was the actual fix,
     /// not the presence of a `Pacer` stage.
@@ -154,7 +154,7 @@ mod windows_example {
             // window's own size as `Pixel::YUV420P` in one pass —
             // `D3d12Renderer`'s CPU-upload path only understands
             // YUV420P/D3D12, not BGRA.
-            let scaler = Scaler::new(
+            let scaler = SwScaler::new(
                 "to-yuv",
                 ffmpeg::format::Pixel::YUV420P,
                 window_width,

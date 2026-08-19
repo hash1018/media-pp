@@ -64,7 +64,7 @@ pub enum CudaUploadError {
 /// Everything on this crate's CUDA path speaks NV12 (NVDEC produces it,
 /// [`crate::elements::CudaEncoder`] consumes it), so an upload that accepted
 /// other layouts would only be able to hand them to elements that reject
-/// them. Put a [`crate::elements::Scaler`] in front to convert, exactly as
+/// them. Put a [`crate::elements::SwScaler`] in front to convert, exactly as
 /// the D3D11 path does.
 ///
 /// # Why the frames context is built by hand here

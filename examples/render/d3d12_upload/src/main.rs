@@ -15,7 +15,7 @@ mod windows_example {
     use ffmpeg_next as ffmpeg;
     use media_pp::{
         bus::BusEvent,
-        elements::{D3d12Upload, Scaler, TestVideoOptions, TestVideoSource},
+        elements::{D3d12Upload, SwScaler, TestVideoOptions, TestVideoSource},
         pipeline::Pipeline,
     };
     use render_common::D3d12GpuContext;
@@ -28,7 +28,7 @@ mod windows_example {
         window::{Window, WindowId},
     };
 
-    /// TestVideoSource -> Scaler -> D3d12Upload -> Renderer: a synthetic
+    /// TestVideoSource -> SwScaler -> D3d12Upload -> Renderer: a synthetic
     /// `Pixel::YUV420P` stream converted to `Pixel::NV12` on the CPU, then
     /// uploaded to a GPU `Pixel::D3D12` texture on the *renderer's own*
     /// `ID3D12Device` before being presented — proves `D3d12Upload`'s frames
@@ -143,7 +143,7 @@ mod windows_example {
         let pipeline = Pipeline::new("d3d12-upload", source, |source, ctx| {
             // `Pixel::NV12` — the only layout `D3d12Upload`/`D3d12Renderer`'s
             // zero-copy path accepts.
-            let scaler = Scaler::new(
+            let scaler = SwScaler::new(
                 "to-nv12",
                 ffmpeg::format::Pixel::NV12,
                 width,

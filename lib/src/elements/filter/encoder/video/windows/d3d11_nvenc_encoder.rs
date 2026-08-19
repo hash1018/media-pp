@@ -234,7 +234,7 @@ pub struct D3d11NvencEncoderOptions {
 /// incoming texture into a pool texture with `CopySubresourceRegion`.
 ///
 /// That copy never leaves the GPU. It replaces the
-/// `D3d11Download` → `Scaler` → `SwEncoder` chain that was previously the
+/// `D3d11Download` → `SwScaler` → `SwEncoder` chain that was previously the
 /// only way to record a GPU-resident stream, which read every frame back
 /// over PCIe, converted it on the CPU, and encoded it on the CPU.
 ///

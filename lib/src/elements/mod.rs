@@ -34,15 +34,16 @@ pub use driver::{
 };
 pub use filter::{
     AudioCodec, AudioResampler, AudioResamplerError, AudioVolume, AudioVolumeError,
-    AudioVolumeHandle, AudioVolumeOptions, Pacer, PacerError, Scaler, ScalerError, SwAudioEncoder,
-    SwAudioEncoderError, SwAudioEncoderOptions, SwDecoder, SwDecoderError, SwEncoder,
-    SwEncoderError, SwEncoderOptions, Tee, TeeBuilder, TeeHandle, VideoCodec, VideoSynchronizer,
+    AudioVolumeHandle, AudioVolumeOptions, Pacer, PacerError, SwAudioEncoder, SwAudioEncoderError,
+    SwAudioEncoderOptions, SwDecoder, SwDecoderError, SwEncoder, SwEncoderError, SwEncoderOptions,
+    SwScaler, SwScalerError, Tee, TeeBuilder, TeeHandle, VideoCodec, VideoSynchronizer,
     VideoSynchronizerError,
 };
 #[cfg(feature = "cuda")]
 pub use filter::{
     CudaCodec, CudaDecoder, CudaDecoderError, CudaDownload, CudaDownloadError, CudaEncoder,
-    CudaEncoderError, CudaEncoderOptions, CudaUpload, CudaUploadError,
+    CudaEncoderError, CudaEncoderOptions, CudaScaler, CudaScalerError, CudaScalerInterp,
+    CudaUpload, CudaUploadError,
 };
 #[cfg(all(target_os = "windows", feature = "d3d11"))]
 pub use filter::{
@@ -72,10 +73,11 @@ pub use sink::{WasapiRenderer, WasapiRendererError, WasapiRendererOptions};
 pub use source::{
     AppSource, AppSourceError, AppSourceHandle, AudioMixer, AudioMixerError, AudioMixerOptions,
     FileDemuxError, FileDemuxer, MixerHandle, MixerInputSink, RtspOptions, RtspSource,
-    RtspSourceError, StreamInfo, TestAudioOptions, TestAudioSource, TestAudioSourceError,
-    TestVideoOptions, TestVideoSource, TestVideoSourceError, TextLayer, VideoCompositor,
-    VideoCompositorError, VideoCompositorHandle, VideoCompositorInput, VideoCompositorInputSink,
-    VideoCompositorOptions, VideoFit, VideoInputId, VideoLayer, VideoLayerHandle, VideoRect,
+    RtspSourceError, StreamInfo, SwVideoCompositor, SwVideoCompositorError,
+    SwVideoCompositorHandle, SwVideoCompositorInput, SwVideoCompositorInputSink,
+    SwVideoLayerHandle, TestAudioOptions, TestAudioSource, TestAudioSourceError, TestVideoOptions,
+    TestVideoSource, TestVideoSourceError, TextLayer, VideoCompositorOptions, VideoFit,
+    VideoInputId, VideoLayer, VideoRect,
 };
 #[cfg(all(target_os = "windows", feature = "dxgi-capture"))]
 pub use source::{

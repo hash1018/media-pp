@@ -4,7 +4,7 @@ use ffmpeg_next::{format::Pixel, frame::Video, media, software::scaling::Flags};
 use media_pp::{
     Error, Result,
     bus::BusEvent,
-    elements::{COCO_CLASS_LABELS, Detection, FileDemuxer, OrtDetector, Scaler, SwDecoder},
+    elements::{COCO_CLASS_LABELS, Detection, FileDemuxer, OrtDetector, SwDecoder, SwScaler},
     pipeline::Pipeline,
 };
 use softbuffer::{Context, Surface};
@@ -24,7 +24,7 @@ const IOU_THRESHOLD: f32 = 0.7;
 const BOX_COLOR: u32 = 0x00ff00; // XRGB8888 — softbuffer's pixel format
 const BOX_THICKNESS: usize = 2;
 
-/// Demux -> SwDecoder -> Scaler (640x640 RGB24) -> OrtDetector, drawing every
+/// Demux -> SwDecoder -> SwScaler (640x640 RGB24) -> OrtDetector, drawing every
 /// detection straight onto the same 640x640 frame `OrtDetector` saw and
 /// presenting it in a plain window. Deliberately not DX12: `D3d12Renderer`
 /// has no hook for drawing an overlay, so this blits pixels straight into a
@@ -177,7 +177,7 @@ fn play(model_path: &str, video_path: &str, proxy: EventLoopProxy<AppEvent>) -> 
 
     let pipeline = Pipeline::new("detect", source, |source, ctx| {
         let decoder = SwDecoder::new("decoder", params).expect("failed to open decoder");
-        let scaler = Scaler::new("scaler", DST_FORMAT, DST_WIDTH, DST_HEIGHT, Flags::BILINEAR);
+        let scaler = SwScaler::new("scaler", DST_FORMAT, DST_WIDTH, DST_HEIGHT, Flags::BILINEAR);
         let render_proxy = proxy.clone();
         let detector = OrtDetector::new(
             "detector",

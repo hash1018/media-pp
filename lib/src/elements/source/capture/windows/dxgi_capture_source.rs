@@ -288,7 +288,7 @@ struct CaptureUnit {
 /// (`IDXGIOutputDuplication`) — GStreamer's `d3d11screencapturesrc`
 /// equivalent. One src pad, pushing `Pixel::BGRA` frames (no internal
 /// color conversion — same division of labor as every other source in
-/// this crate: chain a [`crate::elements::Scaler`] downstream if
+/// this crate: chain a [`crate::elements::SwScaler`] downstream if
 /// something needs YUV420P, e.g. [`crate::elements::D3d12Renderer`]'s
 /// CPU-upload path or [`crate::elements::SwEncoder`]).
 ///
@@ -321,9 +321,9 @@ struct CaptureUnit {
 /// drift-free schedule is what actually mattered — not whether a
 /// separate `Pacer` stage exists. The VFR version needed one to paper
 /// over its own irregular submission timing; once emission here is
-/// steady and drift-free, `Scaler`'s modest, fairly consistent per-frame
+/// steady and drift-free, `SwScaler`'s modest, fairly consistent per-frame
 /// conversion cost isn't enough on its own to reintroduce the same vsync
-/// misalignment, so a straight `DxgiCaptureSource -> Scaler -> D3d12Renderer`
+/// misalignment, so a straight `DxgiCaptureSource -> SwScaler -> D3d12Renderer`
 /// chain stays smooth with no `Pacer` at all. `Pacer` remains genuinely
 /// useful for other reasons (multi-stream sync against a shared `Clock`,
 /// or a stage with real per-frame variance like `SwEncoder`), just not
@@ -398,14 +398,14 @@ pub struct DxgiCaptureSource {
     pad: SrcPad,
     /// Reused across every emitted frame — see [`UnboundObjectPool`]'s
     /// docs. Pre-sized to `width`/`height` up front, same reasoning as
-    /// `Scaler`'s own pool.
+    /// `SwScaler`'s own pool.
     pool: UnboundObjectPool<ffmpeg::frame::Video>,
 }
 
 // SAFETY: every D3D11/DXGI handle here is a `windows-rs` COM interface
 // wrapper — thread-safe to hand off (refcounting is interlocked), and
 // `&mut self` on every method that touches them (mirrors `D3d12vaDecoder`/
-// `Scaler`'s own reasoning) already rules out concurrent access from
+// `SwScaler`'s own reasoning) already rules out concurrent access from
 // multiple threads.
 unsafe impl Send for DxgiCaptureSource {}
 
@@ -414,7 +414,7 @@ impl DxgiCaptureSource {
     /// and starts duplicating them. Returns the element alongside the
     /// captured composite's actual [`VideoFormat`] — what the caller
     /// needs to build a matching downstream
-    /// [`crate::elements::Scaler`]/[`crate::elements::Pacer`], same
+    /// [`crate::elements::SwScaler`]/[`crate::elements::Pacer`], same
     /// pattern as [`crate::elements::RtspSource::open`] returning stream
     /// info — plus, under [`CaptureMode::Gpu`], the `ID3D11Device` this
     /// capture was opened on (`None` under [`CaptureMode::Cpu`], where

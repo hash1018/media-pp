@@ -55,13 +55,13 @@ pub enum OrtDetectorError {
 
     #[error(
         "OrtDetector only accepts RGB24 Video frames, got {0:?}; \
-         link it straight after a Scaler configured with Pixel::RGB24"
+         link it straight after a SwScaler configured with Pixel::RGB24"
     )]
     UnsupportedFormat(ffmpeg::format::Pixel),
 
     #[error(
         "OrtDetector only accepts decoded Video frames, got a {0}; \
-         link it straight after a Scaler"
+         link it straight after a SwScaler"
     )]
     UnsupportedBuffer(&'static str),
 }
@@ -76,7 +76,7 @@ pub enum OrtDetectorError {
 ///
 /// Expects every frame's pixel dimensions to already match the model's own
 /// input resolution (e.g. 640x640 for stock YOLOv8/11 weights) and its
-/// format to be `Pixel::RGB24` — put a [`crate::elements::Scaler`]
+/// format to be `Pixel::RGB24` — put a [`crate::elements::SwScaler`]
 /// configured that way directly upstream. Because of that, a detection's
 /// box coordinates need no rescaling back to some "original" resolution:
 /// they come straight out of the model in the exact same pixel space as

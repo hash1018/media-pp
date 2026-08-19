@@ -34,7 +34,9 @@ pub use encoder::{
     D3d11NvencInputFormat,
 };
 pub use pacer::{Pacer, PacerError};
-pub use scaler::{Scaler, ScalerError};
+#[cfg(feature = "cuda")]
+pub use scaler::{CudaScaler, CudaScalerError, CudaScalerInterp};
+pub use scaler::{SwScaler, SwScalerError};
 pub use tee::{Tee, TeeBuilder, TeeHandle};
 #[cfg(feature = "cuda")]
 pub use upload::{CudaUpload, CudaUploadError};
