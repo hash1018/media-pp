@@ -201,17 +201,19 @@ buffers are not logged one record per buffer.
   process before starting pipelines rather than per pipeline: creating or
   dropping one while another thread is decoding or encoding can crash inside
   the NVIDIA driver.
-- `CudaVideoCompositor` composites NV12 CUDA surfaces with `scale_cuda` plus
-  2D device-to-device copies, so every `VideoFit` works — including `Cover`,
-  which needs cropping that no CUDA filter offers. What it cannot do is blend:
-  `opacity` accepts only 0.0 and 1.0, because partial transparency needs a
-  CUDA kernel and compiling one would make the CUDA toolkit a build
-  requirement. Use `SwVideoCompositor` for translucent layers. Layer
-  placement and size are aligned to even pixels, since NV12 chroma is
-  subsampled.
+- `CudaVideoCompositor` composites NV12 CUDA surfaces with `scale_cuda`, 2D
+  device-to-device copies, and one small blend kernel, so every `VideoFit`
+  and `opacity` works as it does on the other backends — `Cover` needs
+  cropping that no CUDA filter offers, and translucency needs arithmetic no
+  copy can do. The kernel ships as PTX text that the driver JIT-compiles at
+  startup, so no CUDA toolkit is involved. Layer placement and size are
+  aligned to even pixels, since NV12 chroma is subsampled. It also draws text
+  layers (`CudaTextLayerHandle`), sharing the glyph rasterizer with the D3D11
+  compositor and blending the coverage with the same kernel.
 - The `cuda` feature links the NVIDIA driver library directly (`libcuda.so`
-  on Linux, `nvcuda.dll` on Windows) for those copies. No CUDA toolkit is
-  needed — the driver ships both.
+  on Linux, `nvcuda.dll` on Windows) for those copies and for the blend
+  kernel. No CUDA toolkit is needed — the driver ships both the library and
+  the PTX compiler.
 - `D3d11NvencEncoder` needs an NVIDIA GPU and an FFmpeg build with NVENC. It
   fails to open with a typed error, not a panic, on any other GPU. The other
   `d3d11` elements are vendor-neutral.

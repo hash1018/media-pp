@@ -40,6 +40,9 @@ ndarray = { version = "0.17", optional = true }
 str0m = { version = "0.21", optional = true, default-features = false, features = [
     "rust-crypto",
 ] }
+# Glyph rasterization for compositor text layers — needed by every backend
+# that draws one, so not Windows-only.
+ab_glyph = { version = "0.2", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", optional = true, features = [
@@ -64,7 +67,6 @@ windows = { version = "0.62", optional = true, features = [
     "Win32_System_Variant",
     "Win32_UI_Shell_PropertiesSystem",
 ] }
-ab_glyph = { version = "0.2", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # `async-io` rather than the default `tokio` backend: `PipeWireScreenCaptureSource::open`
@@ -94,7 +96,7 @@ pollster = { version = "1", optional = true }
 # displays a CUDA frame lives in the caller's own `CudaFrameRenderer`
 # implementation, which is where `ash`/`windows-rs` would be pulled in.
 # Not platform-gated: CUDA is available on Linux and Windows alike.
-cuda = []
+cuda = ["dep:ab_glyph"]
 d3d12 = ["dep:windows"]
 d3d11 = ["dep:windows", "dep:ab_glyph"]
 dxgi-capture = ["dep:windows", "d3d11"]

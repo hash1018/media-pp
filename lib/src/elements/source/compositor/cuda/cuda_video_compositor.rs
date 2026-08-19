@@ -2,7 +2,7 @@ use std::{
     collections::{HashMap, HashSet},
     sync::{
         Arc, Mutex, Weak,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering},
     },
     thread,
     time::{Duration, Instant},
@@ -15,6 +15,7 @@ use thiserror::Error as ThisError;
 use crate::pp_log::{PpLog, pp_debug, pp_error, pp_info};
 
 use super::super::sw_video_compositor::VideoCompositorOptions;
+use super::super::text_layer::{TextLayer, TextRasterError, rasterize_coverage};
 use super::super::video_layer::{
     self, LayerGeometry, MAX_DIMENSION, VideoFit, VideoInputId, VideoLayer, VideoLayerError,
     VideoRect, layer_geometry,
@@ -22,6 +23,7 @@ use super::super::video_layer::{
 use crate::{
     buffer::MediaBuffer,
     bus::{Bus, BusEvent},
+    color::Color,
     control::{ControlMsg, ControlReceiver, drain_control},
     element::{Element, ElementType, Sink, Source, SourceElement, element_pp_log},
     elements::{
@@ -33,7 +35,7 @@ use crate::{
     pad::SrcPad,
     platform::cuda::{
         CudaDevice, CudaFrameFormat,
-        driver::{CudaDriver, CudaDriverError, Nv12Region, Nv12Surface},
+        driver::{CudaDriver, CudaDriverError, CudaMask, Nv12Region, Nv12Surface},
     },
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
     schedule::PeriodicSchedule,
@@ -70,14 +72,6 @@ pub enum CudaVideoCompositorError {
     #[error("layer opacity must be finite and between 0.0 and 1.0, got {0}")]
     InvalidOpacity(f32),
 
-    /// Partial transparency needs a blend, and a blend needs a kernel this
-    /// crate has no way to compile — see this element's own docs.
-    #[error(
-        "CudaVideoCompositor cannot blend: opacity must be 0.0 or 1.0, got {0}. \
-         Composite on the CPU with SwVideoCompositor if a layer has to be translucent"
-    )]
-    OpacityUnsupported(f32),
-
     #[error("input frame has invalid dimensions {width}x{height}")]
     InvalidInputDimensions { width: u32, height: u32 },
 
@@ -113,6 +107,18 @@ pub enum CudaVideoCompositorError {
     #[error("failed to take an output frame from the CUDA pool (code {0})")]
     HwFrameGet(i32),
 
+    #[error("invalid font data: {0}")]
+    InvalidFont(String),
+
+    #[error("font size must be finite and greater than zero, got {0}")]
+    InvalidFontSize(f32),
+
+    #[error("rasterized text is too large: {width}x{height}")]
+    TextTooLarge { width: u64, height: u64 },
+
+    #[error("could not allocate {bytes} bytes for rasterized text")]
+    AllocationFailed { bytes: usize },
+
     #[error("CudaVideoCompositor doesn't support seeking a live composition")]
     SeekUnsupported,
 }
@@ -128,7 +134,14 @@ struct VideoInput {
 
 struct CompositorShared {
     inputs: Mutex<HashMap<Arc<str>, Arc<VideoInput>>>,
+    /// Text layers are kept apart from video inputs because they are not
+    /// inputs at all: nothing pushes frames into one. They are drawn after
+    /// every video layer, in registration order.
+    text_layers: Mutex<Vec<(Arc<str>, Arc<TextLayerState>)>>,
     next_input_id: AtomicU64,
+    /// Shared so a [`CudaTextLayerHandle`] can upload a freshly rasterized
+    /// mask from whichever thread called `set_text`.
+    driver: Arc<CudaDriver>,
     /// Captured from the compositor's own [`CudaDevice`] so every input sink
     /// can reject a frame from another CUDA context before it ever reaches a
     /// device pointer. Only ever compared.
@@ -216,8 +229,7 @@ impl CudaVideoCompositorHandle {
 }
 
 /// Runtime placement control for one registered input — the CUDA sibling of
-/// [`crate::elements::SwVideoLayerHandle`], with the one difference this
-/// backend cannot hide: `set_opacity` accepts only 0.0 and 1.0.
+/// [`crate::elements::SwVideoLayerHandle`], with the same API.
 #[derive(Clone)]
 pub struct CudaVideoLayerHandle {
     id: VideoInputId,
@@ -253,9 +265,6 @@ impl CudaVideoLayerHandle {
         self.update(|layer| layer.rect = rect)
     }
 
-    /// Only 0.0 and 1.0 are accepted; anything between them returns
-    /// [`CudaVideoCompositorError::OpacityUnsupported`] rather than silently
-    /// rounding to an opaque layer.
     pub fn set_opacity(&self, opacity: f32) -> std::result::Result<(), CudaVideoCompositorError> {
         validate_opacity(opacity)?;
         self.update(|layer| layer.opacity = opacity)
@@ -408,15 +417,14 @@ struct InputSnapshot {
 /// CPU before it can be composited here. Decoded video needs nothing:
 /// [`crate::elements::CudaDecoder`] already produces NV12.
 ///
-/// # No blending
+/// # Blending
 ///
-/// A layer is opaque or hidden; `opacity` between 0.0 and 1.0 is rejected by
-/// [`CudaVideoLayerHandle::set_opacity`]. Blending means reading, weighting,
-/// and writing every pixel, which needs a CUDA kernel — and compiling one
-/// would require the CUDA toolkit at build time, which this crate
-/// deliberately does not depend on (the driver alone is enough for
-/// everything else it does). Use [`crate::elements::SwVideoCompositor`] when
-/// a layer has to be translucent.
+/// A translucent layer is mixed by a small CUDA kernel this crate ships as
+/// PTX text and the driver JIT-compiles at startup — see `platform::cuda`'s
+/// `BLEND_PTX`. Nothing about that needs a CUDA toolkit, so `opacity` works
+/// here exactly as it does on the other two backends. An opaque layer skips
+/// the kernel entirely and is placed with a plain copy, which is why the
+/// common case costs no arithmetic at all.
 ///
 /// # Even coordinates
 ///
@@ -430,7 +438,7 @@ pub struct CudaVideoCompositor {
     options: VideoCompositorOptions,
     frame_interval: Duration,
     frame_index: i64,
-    driver: CudaDriver,
+    driver: Arc<CudaDriver>,
     /// This element's own reference to the shared context, released in
     /// `Drop` — it is what keeps `shared.device_ctx` a valid identity.
     hw_device_ctx: *mut ffi::AVBufferRef,
@@ -465,7 +473,7 @@ impl CudaVideoCompositor {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::CudaVideoCompositor, &name, None);
 
-        let driver = CudaDriver::retain_primary()?;
+        let driver = Arc::new(CudaDriver::retain_primary()?);
         let hw_device_ctx = unsafe { ffi::av_buffer_ref(device.as_ptr()) };
         let hw_frames_ctx = match unsafe {
             create_hw_frames_ctx(
@@ -486,7 +494,9 @@ impl CudaVideoCompositor {
 
         let shared = Arc::new(CompositorShared {
             inputs: Mutex::new(HashMap::new()),
+            text_layers: Mutex::new(Vec::new()),
             next_input_id: AtomicU64::new(1),
+            driver: driver.clone(),
             device_ctx,
         });
         let frame_interval = Duration::from_secs_f64(
@@ -611,6 +621,7 @@ impl CudaVideoCompositor {
             self.options.background,
         )?;
 
+        let mut blended = false;
         for snapshot in snapshots {
             if !snapshot.layer.visible || snapshot.layer.opacity == 0.0 {
                 continue;
@@ -649,10 +660,70 @@ impl CudaVideoCompositor {
             };
             let layer_surface =
                 Nv12Surface::from_frame(&scaled).ok_or(CudaVideoCompositorError::MissingPlane)?;
-            self.driver
-                .blit_nv12(layer_surface, canvas, placement.region)?;
+            if snapshot.layer.opacity >= 1.0 {
+                // A copy moves whole rows at the memory system's own rate,
+                // where the kernel reads, mixes, and writes every byte. Worth
+                // keeping apart, since opaque is the common case.
+                self.driver
+                    .blit_nv12(layer_surface, canvas, placement.region)?;
+            } else {
+                let alpha = (snapshot.layer.opacity * 255.0).round().clamp(0.0, 255.0) as u8;
+                self.driver
+                    .blend_nv12(layer_surface, canvas, placement.region, alpha)?;
+                blended = true;
+            }
         }
 
+        let text_layers: Vec<_> = self
+            .shared
+            .text_layers
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(_, state)| state.clone())
+            .collect();
+        for text in text_layers {
+            if !text.visible.load(Ordering::Relaxed) {
+                continue;
+            }
+            let Some(mask) = text.mask.load_full() else {
+                continue;
+            };
+            let opacity = f32::from_bits(text.opacity.load(Ordering::Relaxed));
+            if opacity <= 0.0 {
+                continue;
+            }
+            let Some(placement) = TextPlacement::new(
+                text.x.load(Ordering::Relaxed),
+                text.y.load(Ordering::Relaxed),
+                mask.width,
+                mask.height,
+                self.options.width,
+                self.options.height,
+            ) else {
+                continue;
+            };
+            self.driver.blend_mask_nv12(
+                canvas,
+                placement.destination_x,
+                placement.destination_y,
+                &mask,
+                placement.mask_x,
+                placement.mask_y,
+                placement.width,
+                placement.height,
+                text.color,
+                (opacity * 255.0).round().clamp(0.0, 255.0) as u8,
+            )?;
+            blended = true;
+        }
+
+        if blended {
+            // Blends are kernel launches, so they are asynchronous; a copy is
+            // not. One wait per frame is what makes the finished surface safe
+            // to hand downstream.
+            self.driver.synchronize()?;
+        }
         output.set_pts(Some(self.frame_index));
         self.frame_index += 1;
         Ok(output)
@@ -903,11 +974,7 @@ fn validate_rect(rect: VideoRect) -> std::result::Result<(), CudaVideoCompositor
 }
 
 fn validate_opacity(opacity: f32) -> std::result::Result<(), CudaVideoCompositorError> {
-    video_layer::validate_opacity(opacity).map_err(layer_error)?;
-    if opacity != 0.0 && opacity != 1.0 {
-        return Err(CudaVideoCompositorError::OpacityUnsupported(opacity));
-    }
-    Ok(())
+    video_layer::validate_opacity(opacity).map_err(layer_error)
 }
 
 fn layer_error(error: VideoLayerError) -> CudaVideoCompositorError {
@@ -1220,48 +1287,206 @@ mod tests {
         );
     }
 
-    /// The one capability this backend cannot offer. It has to be a typed
-    /// error rather than a silently opaque layer.
+    /// A translucent layer is mixed with what is under it, by the kernel the
+    /// driver JIT-compiles from this crate's own PTX. The expected value is
+    /// the same expression evaluated here, so a wrong blend cannot pass.
     #[test]
-    fn translucent_layers_are_refused_with_a_typed_error() {
+    fn a_translucent_layer_is_blended_with_the_background() {
         let Some((device, _cuda_lock)) = try_cuda_device() else {
             return;
         };
-        let Ok((_compositor, handle)) =
-            CudaVideoCompositor::new("compositor", &device, options(64, 64))
+        let (width, height) = (128u32, 128u32);
+        let Ok((mut compositor, handle)) =
+            CudaVideoCompositor::new("compositor", &device, options(width, height))
         else {
             eprintln!("skipping: this machine cannot open a CUDA compositor");
             return;
         };
-        let error = handle
+        let mut input = handle
             .add_source(
                 "layer",
                 VideoLayer {
                     opacity: 0.5,
-                    ..VideoLayer::new(VideoRect::new(0, 0, 32, 32))
+                    fit: VideoFit::Stretch,
+                    ..VideoLayer::new(VideoRect::new(0, 0, 64, 64))
                 },
             )
-            .err()
-            .expect("a translucent layer must not register");
-        assert!(
-            error.to_string().contains("cannot blend"),
-            "expected OpacityUnsupported, got {error}"
+            .expect("a translucent layer registers");
+        let Some(frame) = cuda_frame(&device, 32, 32, 200) else {
+            return;
+        };
+        input.sink.consume(frame).expect("frame");
+
+        let composed = compositor.compose_frame().expect("compose");
+        let out = download(&device, composed, width, height);
+
+        // Background is `Color::BLACK`, which is luma 16 in limited range.
+        let alpha = (0.5f32 * 255.0).round() as u32;
+        let expected = ((200 * alpha + 16 * (255 - alpha) + 127) / 255) as u8;
+        assert_eq!(
+            luma_at(&out, 10, 10),
+            expected,
+            "the layer was not blended with the background"
+        );
+        assert_eq!(
+            luma_at(&out, 100, 100),
+            16,
+            "outside the layer must stay background"
         );
 
-        let input = handle
-            .add_source("layer", VideoLayer::new(VideoRect::new(0, 0, 32, 32)))
-            .expect("an opaque layer registers");
-        let error = input
-            .layer
-            .set_opacity(0.25)
-            .expect_err("a translucent update must be refused");
+        // The endpoints still behave as before: fully opaque replaces,
+        // fully transparent draws nothing.
+        input.layer.set_opacity(1.0).expect("opaque");
+        let composed = compositor.compose_frame().expect("compose");
+        let out = download(&device, composed, width, height);
+        assert_eq!(luma_at(&out, 10, 10), 200);
+
+        input.layer.set_opacity(0.0).expect("transparent");
+        let composed = compositor.compose_frame().expect("compose");
+        let out = download(&device, composed, width, height);
+        assert_eq!(luma_at(&out, 10, 10), 16);
+    }
+
+    /// A font every machine running these tests has. Skips rather than
+    /// fails when it is missing, the same way a hardware test skips without
+    /// a device.
+    fn try_font() -> Option<Vec<u8>> {
+        for path in [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/TTF/DejaVuSans.ttf",
+            "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+        ] {
+            if let Ok(data) = std::fs::read(path) {
+                return Some(data);
+            }
+        }
+        eprintln!("skipping: no DejaVuSans on this machine to rasterize with");
+        None
+    }
+
+    /// The text layer's contract: nothing is drawn until `set_text`, then the
+    /// glyphs land on the canvas, and clearing the text removes them again.
+    #[test]
+    fn a_text_layer_draws_after_set_text_and_clears_when_emptied() {
+        let Some((device, _cuda_lock)) = try_cuda_device() else {
+            return;
+        };
+        let Some(font) = try_font() else {
+            return;
+        };
+        let (width, height) = (256u32, 128u32);
+        let Ok((mut compositor, handle)) =
+            CudaVideoCompositor::new("compositor", &device, options(width, height))
+        else {
+            eprintln!("skipping: this machine cannot open a CUDA compositor");
+            return;
+        };
+
+        let mut layer = TextLayer::new(font);
+        layer.font_size = 48.0;
+        layer.color = Color::WHITE;
+        layer.x = 8;
+        layer.y = 8;
+        let text = handle
+            .add_text_layer("clock", layer)
+            .expect("add a text layer");
+
+        // Nothing rasterized yet: the canvas is pure background.
+        let composed = compositor.compose_frame().expect("compose");
+        let out = download(&device, composed, width, height);
+        let background = luma_at(&out, 10, 10);
+        assert_eq!(background, 16, "an empty text layer drew something");
+
+        text.set_text("HELLO").expect("set_text");
+        let composed = compositor.compose_frame().expect("compose");
+        let out = download(&device, composed, width, height);
+        let lit = (0..64u32)
+            .flat_map(|y| (0..200u32).map(move |x| (x, y)))
+            .filter(|(x, y)| luma_at(&out, *x as usize, *y as usize) > background + 40)
+            .count();
         assert!(
-            error.to_string().contains("cannot blend"),
-            "expected OpacityUnsupported, got {error}"
+            lit > 100,
+            "the text did not reach the canvas ({lit} bright pixels)"
         );
-        // The two values a copy *can* express stay available.
-        input.layer.set_opacity(0.0).expect("fully transparent");
-        input.layer.set_opacity(1.0).expect("fully opaque");
+
+        // Text with no drawable glyphs clears the layer rather than erroring.
+        text.set_text("   ").expect("blank set_text");
+        let composed = compositor.compose_frame().expect("compose");
+        let out = download(&device, composed, width, height);
+        for y in 0..64usize {
+            for x in 0..200usize {
+                assert_eq!(
+                    luma_at(&out, x, y),
+                    background,
+                    "clearing the text left something at ({x}, {y})"
+                );
+            }
+        }
+    }
+
+    /// Position, visibility, and opacity all act on the next composed frame,
+    /// and opacity is a real blend here rather than an on/off switch.
+    #[test]
+    fn text_position_visibility_and_opacity_take_effect() {
+        let Some((device, _cuda_lock)) = try_cuda_device() else {
+            return;
+        };
+        let Some(font) = try_font() else {
+            return;
+        };
+        let (width, height) = (256u32, 128u32);
+        let Ok((mut compositor, handle)) =
+            CudaVideoCompositor::new("compositor", &device, options(width, height))
+        else {
+            eprintln!("skipping: this machine cannot open a CUDA compositor");
+            return;
+        };
+        let mut layer = TextLayer::new(font);
+        layer.font_size = 48.0;
+        layer.color = Color::WHITE;
+        let text = handle
+            .add_text_layer("clock", layer)
+            .expect("add a text layer");
+        text.set_text("IIII").expect("set_text");
+
+        let brightest = |frame: &ffmpeg::frame::Video, x0: usize, x1: usize| {
+            (0..64usize)
+                .flat_map(|y| (x0..x1).map(move |x| (x, y)))
+                .map(|(x, y)| luma_at(frame, x, y))
+                .max()
+                .unwrap_or(0)
+        };
+
+        let composed = compositor.compose_frame().expect("compose");
+        let out = download(&device, composed, width, height);
+        assert!(brightest(&out, 0, 100) > 100, "text is not at the origin");
+        assert_eq!(
+            brightest(&out, 150, 250),
+            16,
+            "text is already on the right"
+        );
+
+        text.set_position(150, 0);
+        let composed = compositor.compose_frame().expect("compose");
+        let out = download(&device, composed, width, height);
+        assert_eq!(brightest(&out, 0, 100), 16, "the text did not leave");
+        assert!(brightest(&out, 150, 250) > 100, "the text did not arrive");
+
+        // Half opacity over a luma-16 background must land near the midpoint
+        // rather than at either end.
+        text.set_opacity(0.5).expect("half opacity");
+        let composed = compositor.compose_frame().expect("compose");
+        let out = download(&device, composed, width, height);
+        let half = brightest(&out, 150, 250);
+        assert!(
+            (100..=170).contains(&half),
+            "half-opacity text should be mid-grey, got {half}"
+        );
+
+        text.set_visible(false);
+        let composed = compositor.compose_frame().expect("compose");
+        let out = download(&device, composed, width, height);
+        assert_eq!(brightest(&out, 150, 250), 16, "a hidden text layer drew");
     }
 
     /// Input validation happens where the input is named, so a CPU frame or
@@ -1344,4 +1569,188 @@ mod tests {
             assert_eq!(composed.pts(), Some(expected));
         }
     }
+}
+
+/// One registered text layer's live state, shared between its handle and the
+/// compositor's own thread.
+struct TextLayerState {
+    font: ab_glyph::FontArc,
+    font_size: f32,
+    color: Color,
+    /// Replaced wholesale by `set_text`, which is what makes a text change
+    /// atomic from the compositor's point of view: it either draws the whole
+    /// previous mask or the whole new one.
+    mask: ArcSwapOption<CudaMask>,
+    x: AtomicI32,
+    y: AtomicI32,
+    /// `f32` bits — the compositor only ever reads it, and a torn read is
+    /// impossible for a 32-bit atomic.
+    opacity: AtomicU32,
+    visible: AtomicBool,
+}
+
+/// Runtime control for one text layer — the CUDA sibling of
+/// `D3d11TextLayerHandle`.
+///
+/// Cloning is cheap and every clone controls the same layer. Unlike a
+/// [`CudaVideoLayerHandle`], this one does real work on `set_text`: it
+/// rasterizes the string on the CPU and uploads the resulting coverage mask
+/// to the GPU, so it is not something to call per frame if the text has not
+/// actually changed.
+#[derive(Clone)]
+pub struct CudaTextLayerHandle {
+    state: Arc<TextLayerState>,
+    driver: Arc<CudaDriver>,
+}
+
+impl CudaTextLayerHandle {
+    /// Rasterizes `text` and uploads it, replacing whatever was drawn
+    /// before. Text with no drawable glyphs (empty, whitespace, control
+    /// characters) clears the layer.
+    pub fn set_text(&self, text: &str) -> std::result::Result<(), CudaVideoCompositorError> {
+        let rasterized = rasterize_coverage(&self.state.font, self.state.font_size, text)
+            .map_err(text_raster_error)?;
+        let Some(mask) = rasterized else {
+            self.state.mask.store(None);
+            return Ok(());
+        };
+        // Uploaded before it is published, so the compositor never sees a
+        // half-written mask — the same reason `add_source` validates before
+        // it replaces a registration.
+        let uploaded = self
+            .driver
+            .upload_mask(&mask.coverage, mask.width, mask.height)?;
+        self.state.mask.store(Some(Arc::new(uploaded)));
+        Ok(())
+    }
+
+    /// Moves the layer's top-left corner. Coordinates are aligned to even
+    /// pixels when drawn, for the chroma reason
+    /// [`CudaVideoCompositor`] documents.
+    pub fn set_position(&self, x: i32, y: i32) {
+        self.state.x.store(x, Ordering::Relaxed);
+        self.state.y.store(y, Ordering::Relaxed);
+    }
+
+    /// Unlike a video layer's, this opacity is free: the text is already
+    /// drawn through the blend kernel, which takes the layer's own alpha as
+    /// one more factor.
+    pub fn set_opacity(&self, opacity: f32) -> std::result::Result<(), CudaVideoCompositorError> {
+        validate_opacity(opacity)?;
+        self.state
+            .opacity
+            .store(opacity.to_bits(), Ordering::Relaxed);
+        Ok(())
+    }
+
+    pub fn set_visible(&self, visible: bool) {
+        self.state.visible.store(visible, Ordering::Relaxed);
+    }
+}
+
+impl CudaVideoCompositorHandle {
+    /// Registers a text layer and returns its control handle. Reusing `name`
+    /// replaces the previous registration.
+    ///
+    /// The font is parsed here so bad font data fails at registration rather
+    /// than at the first `set_text`. Nothing is drawn until `set_text` is
+    /// called — a text layer with no text is not an error, just empty.
+    pub fn add_text_layer(
+        &self,
+        name: impl Into<String>,
+        text_layer: TextLayer,
+    ) -> std::result::Result<CudaTextLayerHandle, CudaVideoCompositorError> {
+        if !text_layer.font_size.is_finite() || text_layer.font_size <= 0.0 {
+            return Err(CudaVideoCompositorError::InvalidFontSize(
+                text_layer.font_size,
+            ));
+        }
+        let Some(shared) = self.shared.upgrade() else {
+            return Err(CudaVideoCompositorError::SourceRemoved);
+        };
+        let font = ab_glyph::FontArc::try_from_vec(text_layer.font_data)
+            .map_err(|error| CudaVideoCompositorError::InvalidFont(error.to_string()))?;
+        let state = Arc::new(TextLayerState {
+            font,
+            font_size: text_layer.font_size,
+            color: text_layer.color,
+            mask: ArcSwapOption::empty(),
+            x: AtomicI32::new(text_layer.x),
+            y: AtomicI32::new(text_layer.y),
+            opacity: AtomicU32::new(1.0f32.to_bits()),
+            visible: AtomicBool::new(true),
+        });
+        // Reusing a name replaces that registration, the same contract
+        // `add_source` has; the replaced handle then controls a layer nothing
+        // draws any more.
+        let name: Arc<str> = name.into().into();
+        let mut layers = shared.text_layers.lock().unwrap();
+        match layers.iter_mut().find(|(existing, _)| *existing == name) {
+            Some(slot) => slot.1 = state.clone(),
+            None => layers.push((name, state.clone())),
+        }
+        drop(layers);
+        Ok(CudaTextLayerHandle {
+            state,
+            driver: shared.driver.clone(),
+        })
+    }
+}
+
+fn text_raster_error(error: TextRasterError) -> CudaVideoCompositorError {
+    match error {
+        TextRasterError::TooLarge { width, height } => {
+            CudaVideoCompositorError::TextTooLarge { width, height }
+        }
+        TextRasterError::AllocationFailed { bytes } => {
+            CudaVideoCompositorError::AllocationFailed { bytes }
+        }
+    }
+}
+
+/// Where a text mask lands on the canvas, clipped and aligned to the 2x2
+/// chroma grid — the text counterpart of [`Placement`], simpler because a
+/// mask is never scaled: it is drawn at the size it was rasterized.
+struct TextPlacement {
+    destination_x: u32,
+    destination_y: u32,
+    mask_x: u32,
+    mask_y: u32,
+    width: u32,
+    height: u32,
+}
+
+impl TextPlacement {
+    fn new(
+        x: i32,
+        y: i32,
+        mask_width: u32,
+        mask_height: u32,
+        canvas_width: u32,
+        canvas_height: u32,
+    ) -> Option<Self> {
+        let (destination_x, mask_x, width) = text_axis(x, mask_width, canvas_width)?;
+        let (destination_y, mask_y, height) = text_axis(y, mask_height, canvas_height)?;
+        Some(Self {
+            destination_x,
+            destination_y,
+            mask_x,
+            mask_y,
+            width,
+            height,
+        })
+    }
+}
+
+/// One axis of a text mask's clip. Aligning the origin down keeps
+/// `mask = destination - origin` even as well, so both are valid chroma
+/// coordinates — the same trick [`axis`] uses for video layers.
+fn text_axis(origin: i32, extent: u32, canvas_extent: u32) -> Option<(u32, u32, u32)> {
+    let origin = align_down_signed(i64::from(origin));
+    let start = align_up_nonnegative(origin.max(0));
+    let end = align_down_signed((origin + i64::from(extent)).min(i64::from(canvas_extent)));
+    if end <= start {
+        return None;
+    }
+    Some((start as u32, (start - origin) as u32, (end - start) as u32))
 }

@@ -4,8 +4,14 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
+[dependencies]
+ffmpeg-next = "8"
+
 [target.'cfg(windows)'.dependencies]
 media-pp = { path = "../../../lib", features = ["d3d11"] }
-ffmpeg-next = "8"
 render_common = { path = "../render_common" }
 windows = { version = "0.62", features = ["Win32_System_Console"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+media-pp = { path = "../../../lib", features = ["cuda"] }
+libc = "0.2"

@@ -5,7 +5,7 @@
 
 use std::{ffi::c_void, sync::Arc};
 
-use ab_glyph::{Font, FontArc, InvalidFont, PxScale, ScaleFont, point};
+use ab_glyph::{FontArc, InvalidFont};
 use ffmpeg_next as ffmpeg;
 use thiserror::Error as ThisError;
 use windows::Win32::Graphics::{
@@ -22,9 +22,10 @@ use crate::{
     pool::UnboundObjectPool,
 };
 
-use super::super::super::video_layer::{MAX_DIMENSION, VideoRect};
-
-const MAX_TEXT_PIXELS: usize = 16 * 1024 * 1024;
+use super::super::super::text_layer::{TextRasterError, rasterize_coverage};
+#[cfg(test)]
+use super::super::super::video_layer::MAX_DIMENSION;
+use super::super::super::video_layer::VideoRect;
 
 /// Errors specific to [`D3d11TextLayerHandle`].
 #[derive(Debug, ThisError)]
@@ -184,97 +185,51 @@ impl D3d11TextLayerHandle {
     }
 }
 
-/// Rasterizes `text` at `size_px` (pixel height) into a tightly-bounding
-/// straight-alpha BGRA buffer: RGB is `color` uniformly, alpha is glyph
-/// coverage. Returns `None` for text with no drawable glyphs (empty,
-/// all-whitespace, or all-control).
+/// Expands the shared rasterizer's coverage into the straight-alpha BGRA
+/// buffer this backend's blend state expects: RGB is `color` uniformly,
+/// alpha is glyph coverage. Returns `None` for text with no drawable glyphs
+/// (empty, all-whitespace, or all-control).
+///
+/// The glyph work itself is in
+/// [`crate::elements::source::compositor::text_layer::rasterize_coverage`],
+/// shared with the CUDA compositor — only this expansion is D3D11-shaped
+/// (`SrcBlend = SRC_ALPHA`, `DestBlend = INV_SRC_ALPHA`).
 fn rasterize(
     font: &FontArc,
     size_px: f32,
     text: &str,
     color: Color,
 ) -> std::result::Result<Option<(u32, u32, Vec<u8>)>, D3d11TextLayerError> {
-    let scaled = font.as_scaled(PxScale::from(size_px));
-    let mut glyphs = Vec::new();
-    let mut caret = point(0.0, scaled.ascent());
-    let mut last_id = None;
-    for c in text.chars() {
-        if c.is_control() {
-            continue;
-        }
-        let mut glyph = scaled.scaled_glyph(c);
-        if let Some(last_id) = last_id {
-            caret.x += scaled.kern(last_id, glyph.id);
-        }
-        glyph.position = caret;
-        caret.x += scaled.h_advance(glyph.id);
-        last_id = Some(glyph.id);
-        glyphs.push(glyph);
-    }
-    if glyphs.is_empty() {
+    let Some(mask) = rasterize_coverage(font, size_px, text).map_err(text_raster_error)? else {
         return Ok(None);
-    }
-
-    let outlined: Vec<_> = glyphs
-        .into_iter()
-        .filter_map(|glyph| font.outline_glyph(glyph))
-        .collect();
-    if outlined.is_empty() {
-        return Ok(None);
-    }
-
-    let width_f = caret.x.ceil();
-    let height_f = scaled.height().ceil();
-    if !width_f.is_finite()
-        || !height_f.is_finite()
-        || width_f > MAX_DIMENSION as f32
-        || height_f > MAX_DIMENSION as f32
-    {
-        return Err(D3d11TextLayerError::TextTooLarge {
-            width: width_f.max(0.0) as u64,
-            height: height_f.max(0.0) as u64,
-        });
-    }
-    let width = width_f.max(1.0) as u32;
-    let height = height_f.max(1.0) as u32;
-    let pixel_count = (width as usize)
-        .checked_mul(height as usize)
-        .filter(|&count| count <= MAX_TEXT_PIXELS)
-        .ok_or(D3d11TextLayerError::TextTooLarge {
-            width: width.into(),
-            height: height.into(),
-        })?;
-    let byte_count = pixel_count
-        .checked_mul(4)
-        .ok_or(D3d11TextLayerError::TextTooLarge {
-            width: width.into(),
-            height: height.into(),
-        })?;
+    };
+    let byte_count =
+        mask.coverage
+            .len()
+            .checked_mul(4)
+            .ok_or(D3d11TextLayerError::TextTooLarge {
+                width: mask.width.into(),
+                height: mask.height.into(),
+            })?;
     let mut pixels = Vec::new();
     pixels
         .try_reserve_exact(byte_count)
         .map_err(|_| D3d11TextLayerError::AllocationFailed { bytes: byte_count })?;
-    pixels.resize(byte_count, 0u8);
-    for outlined in outlined {
-        let bounds = outlined.px_bounds();
-        outlined.draw(|gx, gy, coverage| {
-            let px = bounds.min.x as i32 + gx as i32;
-            let py = bounds.min.y as i32 + gy as i32;
-            if px < 0 || py < 0 || px as u32 >= width || py as u32 >= height {
-                return;
-            }
-            let index = (py as u32 * width + px as u32) as usize * 4;
-            let alpha = (coverage.clamp(0.0, 1.0) * 255.0).round() as u8;
-            // BGRA, straight (non-premultiplied) alpha — matches
-            // `D3d11VideoCompositor`'s BGRA blend state
-            // (`SrcBlend = SRC_ALPHA`, `DestBlend = INV_SRC_ALPHA`).
-            pixels[index] = color.blue;
-            pixels[index + 1] = color.green;
-            pixels[index + 2] = color.red;
-            pixels[index + 3] = pixels[index + 3].max(alpha);
-        });
+    for alpha in mask.coverage {
+        pixels.extend_from_slice(&[color.blue, color.green, color.red, alpha]);
     }
-    Ok(Some((width, height, pixels)))
+    Ok(Some((mask.width, mask.height, pixels)))
+}
+
+fn text_raster_error(error: TextRasterError) -> D3d11TextLayerError {
+    match error {
+        TextRasterError::TooLarge { width, height } => {
+            D3d11TextLayerError::TextTooLarge { width, height }
+        }
+        TextRasterError::AllocationFailed { bytes } => {
+            D3d11TextLayerError::AllocationFailed { bytes }
+        }
+    }
 }
 
 /// Builds one GPU `ID3D11Texture2D` (`DXGI_FORMAT_B8G8R8A8_UNORM`,

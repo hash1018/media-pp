@@ -12,13 +12,11 @@ download.
 - Linux: `CudaUpload` -> `CudaVideoCompositor` -> `CudaRenderer` (Vulkan
   swapchain) / `CudaDownload`
 
-Both branches run the identical graph, terminal sinks, and CLI. The one
-behavioural difference the backend forces is the foreground layer's
-translucency: `D3d11VideoCompositor` blends it at 0.85 opacity, while
-`CudaVideoCompositor` composites with a device-to-device copy and cannot
-blend at all, so the Linux branch draws that layer opaque. Both use
-`VideoFit::Cover`, which on the CUDA side is exactly why the copy is there —
-no CUDA filter in libavfilter can crop.
+Both branches run the identical graph, terminal sinks, layer settings, and
+CLI — the foreground is drawn at 0.85 opacity with `VideoFit::Cover` on
+either backend. On the CUDA side those two are exactly why it composites with
+copies and a blend kernel rather than libavfilter: no CUDA filter there can
+crop, and none can blend.
 
 ```sh
 cargo run -p gpu_video_compositor -- [output.mp4] [seconds]

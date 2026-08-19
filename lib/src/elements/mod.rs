@@ -91,7 +91,7 @@ pub use source::{
 };
 #[cfg(feature = "cuda")]
 pub use source::{
-    CudaVideoCompositor, CudaVideoCompositorError, CudaVideoCompositorHandle,
+    CudaTextLayerHandle, CudaVideoCompositor, CudaVideoCompositorError, CudaVideoCompositorHandle,
     CudaVideoCompositorInput, CudaVideoCompositorInputSink, CudaVideoLayerHandle,
 };
 #[cfg(all(target_os = "windows", feature = "d3d11"))]

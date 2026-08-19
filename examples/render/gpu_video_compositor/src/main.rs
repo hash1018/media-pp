@@ -5,10 +5,6 @@
 //! Both platforms run the identical graph, terminal sinks, and CLI; only the
 //! GPU stack differs — `D3d11Upload`/`D3d11VideoCompositor`/`D3d11Download`
 //! on Windows, `CudaUpload`/`CudaVideoCompositor`/`CudaDownload` on Linux.
-//! The one behavioural difference the backend forces is the foreground
-//! layer's translucency: `D3d11VideoCompositor` blends, `CudaVideoCompositor`
-//! cannot (see its own docs on why a blend would need a CUDA kernel), so the
-//! Linux branch draws that layer opaque.
 //!
 //!     cargo run -p gpu_video_compositor -- [output.mp4] [seconds]
 
@@ -361,15 +357,10 @@ mod windows_example {
     }
 }
 
-/// The Linux half of the same example. Deliberately the same graph as
-/// `windows_example` — two upload-fed inputs, one compositor, a Tee to a
-/// window renderer and to a download-and-encode recording branch — so only
-/// the GPU stack differs.
-///
-/// The foreground layer is opaque here. `CudaVideoCompositor` places layers
-/// with a device-to-device copy, which cannot blend; its `set_opacity` takes
-/// only 0.0 and 1.0, and refusing anything between is deliberate rather than
-/// silently drawing a translucent layer as opaque.
+/// The Linux half of the same example. Deliberately the same graph, the same
+/// layer settings, and the same CLI as `windows_example` — two upload-fed
+/// inputs, one compositor, a Tee to a window renderer and to a
+/// download-and-encode recording branch — so only the GPU stack differs.
 #[cfg(target_os = "linux")]
 mod linux_example {
     use std::{thread, time::Duration};
@@ -551,8 +542,7 @@ mod linux_example {
             foreground_height,
         ));
         foreground_layer.z_index = 1;
-        // Opaque, unlike the D3D11 branch's 0.85: this backend composites
-        // with a copy, so a layer is drawn or it is not.
+        foreground_layer.opacity = 0.85;
         foreground_layer.fit = VideoFit::Cover;
         let foreground_input = compositor_handle
             .add_source("foreground", foreground_layer)
