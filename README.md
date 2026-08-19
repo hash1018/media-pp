@@ -191,6 +191,16 @@ buffers are not logged one record per buffer.
   and closed-window detection this implies.
 - `PipeWireAudioCaptureSource`/`PipeWireAudioRenderer` need the same PipeWire
   development files and a running session, but no portal.
+- CUDA surfaces carry either NV12 or BGRA (`CudaFrameFormat`), and nothing on
+  that path converts between them — `CudaScaler` resizes, it does not convert,
+  because `scale_cuda` has no RGB-to-YUV kernel. It does not need one: NVENC
+  ingests BGRA as directly as NV12, converting in hardware, so a capture
+  recorded through `CudaUpload -> CudaEncoder` stays BGRA end to end. The one
+  element that requires NV12 is `CudaRenderer`.
+- A `CudaDevice` opens the device's primary CUDA context, so create one per
+  process before starting pipelines rather than per pipeline: creating or
+  dropping one while another thread is decoding or encoding can crash inside
+  the NVIDIA driver.
 - `D3d11NvencEncoder` needs an NVIDIA GPU and an FFmpeg build with NVENC. It
   fails to open with a typed error, not a panic, on any other GPU. The other
   `d3d11` elements are vendor-neutral.

@@ -1,6 +1,34 @@
-#[cfg(not(target_os = "windows"))]
+//! `capture -> NVENC -> Mp4Muxer`: records the desktop into a playable
+//! `.mp4` with no CPU color conversion anywhere in the graph.
+//!
+//! The contrast with `screen_record` is the whole point. That example runs
+//! `capture -> SwScaler -> SwEncoder`: every frame is converted BGRA->YUV420P
+//! by libswscale and encoded on the CPU. Here NVENC consumes the captured
+//! BGRA directly — it does its own color conversion inside the encode block —
+//! so there is no `SwScaler` in this graph at all, and only the compressed
+//! packets ever come back.
+//!
+//! Both platforms run the identical graph and terminal sink; only the GPU
+//! stack differs. What the platform does force is where the pixels start:
+//! DXGI can hand over a GPU-resident texture, so nothing is copied at all,
+//! while PipeWire delivers CPU-mapped buffers, so the Linux branch has one
+//! `CudaUpload` — a memcpy per frame, not a conversion. Everything after it
+//! is GPU-resident on both.
+//!
+//! Needs an NVIDIA GPU and an ffmpeg build with NVENC; both encoders report a
+//! typed error rather than panicking on anything else.
+//!
+//!     cargo run -p screen_record_nvenc -- <output.mp4> [seconds]
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+mod common;
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 fn main() {
-    eprintln!("{} example only supports Windows", env!("CARGO_PKG_NAME"));
+    eprintln!(
+        "{} supports Windows (DXGI) and Linux (PipeWire) only",
+        env!("CARGO_PKG_NAME")
+    );
 }
 
 #[cfg(target_os = "windows")]
@@ -8,16 +36,15 @@ fn main() -> impl std::process::Termination {
     windows_example::run()
 }
 
+#[cfg(target_os = "linux")]
+fn main() -> impl std::process::Termination {
+    linux_example::run()
+}
+
 #[cfg(target_os = "windows")]
 mod windows_example {
-    use std::{
-        thread,
-        time::{Duration, Instant},
-    };
-
     use ffmpeg_next as ffmpeg;
     use media_pp::{
-        bus::BusEvent,
         elements::{
             CaptureMode, D3d11NvencCodec, D3d11NvencEncoder, D3d11NvencEncoderOptions,
             D3d11NvencInputFormat, DxgiCaptureOptions, DxgiCaptureSource, Mp4Muxer,
@@ -26,24 +53,8 @@ mod windows_example {
     };
     use render_common::D3d11GpuContext;
 
-    /// DxgiCaptureSource (GPU mode) -> D3d11NvencEncoder -> Mp4Muxer: records
-    /// the desktop into a playable `.mp4` without the pixels ever touching the
-    /// CPU or going through a separate CPU color-conversion stage.
-    ///
-    /// The contrast with `screen_record` is the whole point. That example runs
-    /// `DxgiCaptureSource (CPU mode) -> SwScaler -> SwEncoder`: every frame is
-    /// mapped back to system memory, converted BGRA->YUV420P by libswscale, and
-    /// encoded on the CPU. Here capture writes a GPU-resident BGRA texture,
-    /// NVENC consumes that texture directly — `D3d11NvencInputFormat::Bgra`,
-    /// since NVENC does its own color conversion inside the encode block — and
-    /// only the compressed packets ever reach the CPU. There is no `SwScaler` and
-    /// no `D3d11Download` in this graph at all.
-    ///
-    /// Needs an NVIDIA GPU and an ffmpeg build with NVENC. `Pipeline::finish`
-    /// sends ordered EOS through the encoder and muxer so delayed frames are
-    /// drained before the MP4 trailer is finalized.
-    ///
-    ///     cargo run -p screen_record_nvenc -- <output.mp4> [seconds]
+    use crate::common;
+
     pub fn run() -> media_pp::Result<()> {
         media_pp::init()?;
         let _log_guard = media_pp::log::init(
@@ -52,31 +63,7 @@ mod windows_example {
             media_pp::log::Level::Trace,
             7,
         )?;
-
-        let mut args = std::env::args();
-        let program = args.next().unwrap_or_else(|| env!("CARGO_PKG_NAME").into());
-        let Some(path) = args.next() else {
-            eprintln!("usage: {program} <output.mp4> [seconds]");
-            return Err(media_pp::Error::Other("missing output path".into()));
-        };
-        let seconds = args
-            .next()
-            .map(|value| {
-                value
-                    .parse::<u64>()
-                    .map_err(|_| media_pp::Error::Other(format!("invalid seconds: {value}")))
-            })
-            .transpose()?
-            .unwrap_or(5);
-        if seconds == 0 {
-            return Err(media_pp::Error::Other(
-                "recording duration must be greater than zero".into(),
-            ));
-        }
-        if args.next().is_some() {
-            eprintln!("usage: {program} <output.mp4> [seconds]");
-            return Err(media_pp::Error::Other("too many arguments".into()));
-        }
+        let recording = common::parse_args("")?;
 
         // Opened first: `CaptureMode::Gpu` resolves the capture adapter, builds
         // its own device and hands it back. The encoder has to be built from
@@ -91,7 +78,6 @@ mod windows_example {
         let device = device.expect("CaptureMode::Gpu always returns a device");
         let gpu = D3d11GpuContext::new(Some(device))
             .map_err(|e| media_pp::Error::Other(format!("{e:?}")))?;
-        let frame_rate = ffmpeg::Rational::new(30, 1);
 
         let encoder = D3d11NvencEncoder::new(
             "encoder",
@@ -105,14 +91,14 @@ mod windows_example {
                 width: format.width,
                 height: format.height,
                 time_base: format.time_base,
-                frame_rate,
+                frame_rate: ffmpeg::Rational::new(30, 1),
                 bit_rate: 8_000_000,
                 gop_size: 60, // ~2s @ 30fps
             },
         )
         .map_err(|e| media_pp::Error::Other(e.to_string()))?;
 
-        let mut muxer = Mp4Muxer::create(&path)?;
+        let mut muxer = Mp4Muxer::create(&recording.path)?;
         muxer.add_stream("video", encoder.parameters(), format.time_base)?;
         let muxer_sink = muxer.open()?.pop().expect("exactly one stream was added");
 
@@ -129,66 +115,142 @@ mod windows_example {
         })?;
 
         println!(
-            "recording {seconds}s of the desktop at {}x{} (h264_nvenc) to {path} ...",
-            format.width, format.height
+            "recording {}s of the desktop at {}x{} (h264_nvenc) to {} ...",
+            recording.seconds, format.width, format.height, recording.path
         );
-        pipeline.run();
+        common::record(&pipeline, recording.seconds)?;
+        println!("wrote {}", recording.path);
+        Ok(())
+    }
+}
 
-        let deadline = Instant::now() + Duration::from_secs(seconds);
-        let mut pipeline_error = None;
-        while Instant::now() < deadline && pipeline_error.is_none() {
-            while let Some(event) = pipeline.bus().try_recv() {
-                match event {
-                    BusEvent::Error { name, error, .. } => {
-                        eprintln!("[{name}] error: {error}");
-                        pipeline_error = Some(error);
-                        break;
-                    }
-                    BusEvent::Dropped { name, .. } => {
-                        eprintln!("[{name}] dropped a buffer (queue full)")
-                    }
-                    BusEvent::Eos { name, .. } => println!("[{name}] eos"),
-                    // `BusEvent` is `#[non_exhaustive]`; this example only acts
-                    // on the events above.
-                    _ => {}
+/// The Linux half of the same example. Deliberately the same graph as
+/// `windows_example` — capture -> Queue -> NVENC -> Mp4Muxer, same codec,
+/// same terminus — with one `CudaUpload` the platform forces: PipeWire
+/// negotiates CPU-mapped buffers, so the captured BGRA has to be copied to
+/// the GPU before NVENC can read it. It is copied, not converted; the BGRA
+/// stays BGRA all the way into the encode block, which is what keeps
+/// libswscale out of this graph.
+///
+/// The CLI differences are the same ones `screen_record` documents: Wayland
+/// has no way to name a monitor, so the compositor prompts on the first run
+/// and hands back a restore token that skips the prompt next time.
+#[cfg(target_os = "linux")]
+mod linux_example {
+    use ffmpeg_next as ffmpeg;
+    use media_pp::{
+        elements::{
+            CaptureSourceKind, CudaCodec, CudaDevice, CudaEncoder, CudaEncoderOptions,
+            CudaFrameFormat, CudaUpload, Mp4Muxer, PipeWireScreenCaptureOptions,
+            PipeWireScreenCaptureSource,
+        },
+        pipeline::Pipeline,
+    };
+
+    use crate::common;
+
+    pub fn run() -> media_pp::Result<()> {
+        media_pp::init()?;
+        let _log_guard = media_pp::log::init(
+            env!("CARGO_PKG_NAME"),
+            "logs",
+            media_pp::log::Level::Trace,
+            7,
+        )?;
+        let recording = common::parse_args(" [monitor|window] [restore-token]")?;
+
+        // Monitor by default, matching the Windows branch's whole-desktop
+        // capture. `window` is worth reaching for when one application is the
+        // subject: a monitor stream stalls while any client is fullscreen,
+        // where a window stream does not — see `PipeWireScreenCaptureSource`.
+        let source_kind = match std::env::args().nth(3).as_deref() {
+            Some("window") => CaptureSourceKind::Window,
+            _ => CaptureSourceKind::Monitor,
+        };
+        // Last so it can simply be left off: it is a long opaque string that
+        // only a repeat run has.
+        let restore_token = std::env::args().nth(4);
+        if restore_token.is_none() {
+            eprintln!("opening the portal — approve the screen-share dialog to continue...");
+        }
+
+        let (source, format, restore_token) = PipeWireScreenCaptureSource::open(
+            "screen",
+            PipeWireScreenCaptureOptions {
+                fps: 30,
+                source_kind,
+                include_cursor: true,
+                restore_token,
+            },
+        )?;
+
+        // One CUDA context for the upload and the encoder — the invariant
+        // every CUDA element in this crate is built around, and what the
+        // encoder validates every incoming frame against.
+        let cuda = CudaDevice::new().map_err(|e| media_pp::Error::Other(e.to_string()))?;
+
+        // The capture's own size, not a rounded-down one: `CudaUpload` is
+        // fixed-size, so anything else would reject every frame. A stream
+        // whose dimensions are odd would need a `CudaScaler` in between, and
+        // NVENC reports that as a typed error at open rather than at the
+        // first frame.
+        let encoder = CudaEncoder::new(
+            "encoder",
+            &cuda,
+            CudaEncoderOptions {
+                codec: CudaCodec::H264,
+                // The same choice the Windows branch makes, for the same
+                // reason: what the capture produces is what NVENC ingests.
+                input_format: CudaFrameFormat::Bgra,
+                width: format.width,
+                height: format.height,
+                time_base: format.time_base,
+                frame_rate: ffmpeg::Rational::new(30, 1),
+                bit_rate: 8_000_000,
+                gop_size: 60, // ~2s @ 30fps
+            },
+        )
+        .map_err(|e| media_pp::Error::Other(e.to_string()))?;
+
+        let mut muxer = Mp4Muxer::create(&recording.path)?;
+        muxer.add_stream("video", encoder.parameters(), format.time_base)?;
+        let muxer_sink = muxer.open()?.pop().expect("exactly one stream was added");
+
+        let (width, height) = (format.width, format.height);
+        let pipeline = Pipeline::new("screen-record-nvenc", source, |source, ctx| {
+            let upload = CudaUpload::new("upload", &cuda, CudaFrameFormat::Bgra, width, height)
+                .map_err(|e| media_pp::Error::Other(e.to_string()))?;
+            let branch = ctx
+                .branch()
+                // Thread boundary so upload and encode cannot stall capture;
+                // the compositor keeps producing at its own rate.
+                .queue("captured", 4)
+                .pipe(upload)
+                .pipe(encoder)
+                .to(muxer_sink)?;
+            ctx.attach(source, 0, branch)?;
+            Ok(())
+        })?;
+
+        println!(
+            "recording {}s of the desktop at {width}x{height} (h264_nvenc) to {} ...",
+            recording.seconds, recording.path
+        );
+        common::record(&pipeline, recording.seconds)?;
+        println!("wrote {}", recording.path);
+        match restore_token {
+            Some(token) => println!(
+                "re-run without a dialog:\n  ... {} {} {} {token}",
+                recording.path,
+                recording.seconds,
+                if matches!(source_kind, CaptureSourceKind::Window) {
+                    "window"
+                } else {
+                    "monitor"
                 }
-            }
-            thread::sleep(
-                deadline
-                    .saturating_duration_since(Instant::now())
-                    .min(Duration::from_millis(20)),
-            );
+            ),
+            None => println!("the compositor issued no restore token; the next run will prompt"),
         }
-
-        if pipeline_error.is_some() {
-            pipeline.stop();
-        } else {
-            pipeline.finish();
-        }
-
-        for event in pipeline.bus().iter() {
-            match event {
-                BusEvent::Error { name, error, .. } => {
-                    eprintln!("[{name}] error: {error}");
-                    if pipeline_error.is_none() {
-                        pipeline_error = Some(error);
-                    }
-                }
-                BusEvent::Dropped { name, .. } => {
-                    eprintln!("[{name}] dropped a buffer (queue full)")
-                }
-                BusEvent::Eos { name, .. } => println!("[{name}] eos"),
-                // `BusEvent` is `#[non_exhaustive]`; this example only acts
-                // on the events above.
-                _ => {}
-            }
-        }
-
-        if let Some(error) = pipeline_error {
-            return Err(error);
-        }
-
-        println!("wrote {path}");
         Ok(())
     }
 }

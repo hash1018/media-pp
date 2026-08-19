@@ -11,7 +11,7 @@ use crate::{
     element::{Element, ElementType, Sink, Source, element_pp_log},
     error::Result,
     pad::SrcPad,
-    platform::cuda::CudaDevice,
+    platform::cuda::{CudaDevice, CudaFrameFormat},
     pool::UnboundObjectPool,
 };
 
@@ -19,8 +19,11 @@ use crate::{
 /// `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum CudaUploadError {
-    #[error("CudaUpload only uploads NV12 frames, got {0:?}")]
-    UnsupportedFormat(ffmpeg::format::Pixel),
+    #[error("this CudaUpload uploads {expected:?} frames, got {actual:?}")]
+    UnsupportedFormat {
+        expected: ffmpeg::format::Pixel,
+        actual: ffmpeg::format::Pixel,
+    },
 
     #[error("CudaUpload only accepts Video buffers, got a {0}")]
     UnsupportedBuffer(&'static str),
@@ -49,7 +52,7 @@ pub enum CudaUploadError {
     Transfer(i32),
 }
 
-/// Uploads CPU-resident NV12 `Video` frames into CUDA-resident ones — the
+/// Uploads CPU-resident `Video` frames into CUDA-resident ones — the
 /// CUDA sibling of [`crate::elements::D3d11Upload`], and what lets a CPU
 /// source reach [`crate::elements::CudaEncoder`] or
 /// [`crate::elements::CudaRenderer`] at all.
@@ -59,13 +62,16 @@ pub enum CudaUploadError {
 /// single src pad. PTS, duration, and color metadata are carried across with
 /// `av_frame_copy_props`, so this creates no new timeline.
 ///
-/// # NV12 only
+/// # One format, chosen up front
 ///
-/// Everything on this crate's CUDA path speaks NV12 (NVDEC produces it,
-/// [`crate::elements::CudaEncoder`] consumes it), so an upload that accepted
-/// other layouts would only be able to hand them to elements that reject
-/// them. Put a [`crate::elements::SwScaler`] in front to convert, exactly as
-/// the D3D11 path does.
+/// `format` fixes what every surface this allocates holds, and every frame
+/// `consume` receives must already be in the matching CPU layout — nothing
+/// here converts. `Bgra` is the format a screen capture already produces and
+/// NVENC ingests directly; `Nv12` is what a decoder produces and
+/// [`crate::elements::CudaRenderer`] presents. See [`CudaFrameFormat`] on
+/// why the choice has to be made here rather than converted later: no
+/// element on the CUDA path can turn one into the other. Put a
+/// [`crate::elements::SwScaler`] in front if the source produces neither.
 ///
 /// # Why the frames context is built by hand here
 ///
@@ -82,6 +88,7 @@ pub struct CudaUpload {
     hw_device_ctx: *mut ffi::AVBufferRef,
     /// The pool uploaded frames are allocated from.
     hw_frames_ctx: *mut ffi::AVBufferRef,
+    format: CudaFrameFormat,
     width: u32,
     height: u32,
     pad: SrcPad,
@@ -103,6 +110,7 @@ impl CudaUpload {
     pub fn new(
         name: impl Into<String>,
         device: &CudaDevice,
+        format: CudaFrameFormat,
         width: u32,
         height: u32,
     ) -> std::result::Result<Self, CudaUploadError> {
@@ -110,22 +118,28 @@ impl CudaUpload {
         let pp_log = element_pp_log(ElementType::CudaUpload, &name, None);
 
         let hw_device_ctx = unsafe { ffi::av_buffer_ref(device.as_ptr()) };
-        let hw_frames_ctx = match unsafe { create_hw_frames_ctx(hw_device_ctx, width, height) } {
-            Ok(ctx) => ctx,
-            Err(error) => {
-                unsafe { free_buffer(hw_device_ctx) };
-                return Err(error);
-            }
-        };
+        let hw_frames_ctx =
+            match unsafe { create_hw_frames_ctx(hw_device_ctx, format, width, height) } {
+                Ok(ctx) => ctx,
+                Err(error) => {
+                    unsafe { free_buffer(hw_device_ctx) };
+                    return Err(error);
+                }
+            };
 
         let pad = SrcPad::new(format!("{name}_src"));
         let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
-        pp_info!(pp_log: &pp_log, "opened: {width}x{height} NV12 -> CUDA");
+        pp_info!(
+            pp_log: &pp_log,
+            "opened: {width}x{height} {:?} -> CUDA",
+            format.pixel()
+        );
         Ok(Self {
             name,
             pp_log,
             hw_device_ctx,
             hw_frames_ctx,
+            format,
             width,
             height,
             pad,
@@ -134,9 +148,13 @@ impl CudaUpload {
     }
 
     fn upload(&mut self, source: &ffmpeg::frame::Video) -> Result<()> {
-        if source.format() != ffmpeg::format::Pixel::NV12 {
+        if source.format() != self.format.pixel() {
             pp_error!(self, "unsupported pixel format: {:?}", source.format());
-            return Err(CudaUploadError::UnsupportedFormat(source.format()).into());
+            return Err(CudaUploadError::UnsupportedFormat {
+                expected: self.format.pixel(),
+                actual: source.format(),
+            }
+            .into());
         }
         if source.width() != self.width || source.height() != self.height {
             let error = CudaUploadError::DimensionMismatch {
@@ -227,11 +245,12 @@ impl Drop for CudaUpload {
     }
 }
 
-/// Builds the CUDA/NV12 pool uploaded frames are allocated from. Shared with
+/// Builds the CUDA pool uploaded frames are allocated from. Shared with
 /// [`crate::elements::CudaEncoder`], which needs the identically-shaped
 /// context for `AVCodecContext.hw_frames_ctx`.
 pub(crate) unsafe fn create_hw_frames_ctx(
     hw_device_ctx: *mut ffi::AVBufferRef,
+    format: CudaFrameFormat,
     width: u32,
     height: u32,
 ) -> std::result::Result<*mut ffi::AVBufferRef, CudaUploadError> {
@@ -243,7 +262,7 @@ pub(crate) unsafe fn create_hw_frames_ctx(
 
         let frames_ctx = (*buf).data as *mut ffi::AVHWFramesContext;
         (*frames_ctx).format = ffi::AVPixelFormat::AV_PIX_FMT_CUDA;
-        (*frames_ctx).sw_format = ffi::AVPixelFormat::AV_PIX_FMT_NV12;
+        (*frames_ctx).sw_format = format.sw_format();
         (*frames_ctx).width = width as i32;
         (*frames_ctx).height = height as i32;
         // Left at libavutil's dynamic `AVBufferPool`, same choice as
@@ -271,16 +290,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
-
-    fn try_cuda_device() -> Option<CudaDevice> {
-        match CudaDevice::new() {
-            Ok(device) => Some(device),
-            Err(error) => {
-                eprintln!("skipping: no usable CUDA device on this machine ({error})");
-                None
-            }
-        }
-    }
+    use crate::test_support::try_cuda_device;
 
     struct CapturingSink {
         pp_log: PpLog,
@@ -321,21 +331,31 @@ mod tests {
         MediaBuffer::Video(Arc::new(pooled))
     }
 
-    fn new_upload(width: u32, height: u32) -> Option<(CudaUpload, Arc<Mutex<Vec<MediaBuffer>>>)> {
-        let device = try_cuda_device()?;
-        let mut upload = CudaUpload::new("upload", &device, width, height).ok()?;
+    type UploadFixture = (
+        CudaUpload,
+        Arc<Mutex<Vec<MediaBuffer>>>,
+        std::sync::MutexGuard<'static, ()>,
+    );
+
+    /// Carries the CUDA lock out with the element: dropping it here would
+    /// unlock before the test has even started running (see
+    /// [`try_cuda_device`]).
+    fn new_upload(width: u32, height: u32) -> Option<UploadFixture> {
+        let (device, cuda_lock) = try_cuda_device()?;
+        let mut upload =
+            CudaUpload::new("upload", &device, CudaFrameFormat::Nv12, width, height).ok()?;
         let received = Arc::new(Mutex::new(Vec::new()));
         upload.src_pads()[0].link(Box::new(CapturingSink {
             received: received.clone(),
             pp_log: element_pp_log(ElementType::Other, "capture", None),
         }));
-        Some((upload, received))
+        Some((upload, received, cuda_lock))
     }
 
     /// The contract: what comes out is GPU-resident and keeps its timestamp.
     #[test]
     fn uploads_nv12_into_cuda_frames_and_preserves_pts() {
-        let Some((mut upload, received)) = new_upload(64, 64) else {
+        let Some((mut upload, received, _cuda_lock)) = new_upload(64, 64) else {
             return;
         };
         upload.consume(nv12_frame(64, 64, 1234)).expect("upload");
@@ -353,11 +373,59 @@ mod tests {
         );
     }
 
+    /// The BGRA path a screen capture uses: what a capture source already
+    /// produces becomes a CUDA surface that still holds BGRA, since nothing
+    /// downstream on the CUDA path can convert RGB to YUV.
+    #[test]
+    fn uploads_bgra_into_bgra_surfaces() {
+        let Some((device, _cuda_lock)) = try_cuda_device() else {
+            return;
+        };
+        let (width, height) = (64u32, 64u32);
+        let Ok(mut upload) =
+            CudaUpload::new("upload", &device, CudaFrameFormat::Bgra, width, height)
+        else {
+            eprintln!("skipping: this machine has no usable CUDA frames context");
+            return;
+        };
+        let received = Arc::new(Mutex::new(Vec::new()));
+        upload.src_pads()[0].link(Box::new(CapturingSink {
+            received: received.clone(),
+            pp_log: element_pp_log(ElementType::Other, "capture", None),
+        }));
+
+        let mut bgra = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::BGRA, width, height);
+        bgra.set_pts(Some(7));
+        let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
+        let mut pooled = pool.get();
+        *pooled = bgra;
+        upload
+            .consume(MediaBuffer::Video(Arc::new(pooled)))
+            .expect("bgra upload");
+
+        let received = received.lock().unwrap();
+        let MediaBuffer::Video(frame) = &received[0] else {
+            panic!("expected a Video buffer, got {}", received[0].kind());
+        };
+        assert_eq!(frame.format(), ffmpeg::format::Pixel::CUDA);
+        assert_eq!(frame.pts(), Some(7));
+        let sw_format = unsafe {
+            let frames_ref = (*frame.as_ptr()).hw_frames_ctx;
+            let frames_ctx = (*frames_ref).data as *const ffi::AVHWFramesContext;
+            ffmpeg::format::Pixel::from((*frames_ctx).sw_format)
+        };
+        assert_eq!(
+            sw_format,
+            ffmpeg::format::Pixel::BGRA,
+            "the surface does not hold BGRA"
+        );
+    }
+
     /// A mismatched frame must be refused rather than uploaded into a
     /// differently-sized surface.
     #[test]
     fn wrong_size_and_format_are_typed_errors() {
-        let Some((mut upload, _received)) = new_upload(64, 64) else {
+        let Some((mut upload, _received, _cuda_lock)) = new_upload(64, 64) else {
             return;
         };
         let error = upload
@@ -375,9 +443,9 @@ mod tests {
         *pooled = rgb;
         let error = upload
             .consume(MediaBuffer::Video(Arc::new(pooled)))
-            .expect_err("a non-NV12 frame must not upload");
+            .expect_err("a frame in another layout must not upload");
         assert!(
-            error.to_string().contains("only uploads NV12"),
+            error.to_string().contains("uploads NV12 frames, got RGB24"),
             "expected UnsupportedFormat, got {error}"
         );
     }

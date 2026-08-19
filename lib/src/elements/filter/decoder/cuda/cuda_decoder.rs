@@ -258,20 +258,10 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
-    use crate::{error::Result, test_support::try_test_video};
-
-    /// Skips with a reason when this machine has no usable CUDA device,
-    /// the same way a D3D11 test skips without a device — a build with the
-    /// `cuda` feature still has to run on CI boxes with no NVIDIA GPU.
-    fn try_cuda_device() -> Option<CudaDevice> {
-        match CudaDevice::new() {
-            Ok(device) => Some(device),
-            Err(error) => {
-                eprintln!("skipping: no usable CUDA device on this machine ({error})");
-                None
-            }
-        }
-    }
+    use crate::{
+        error::Result,
+        test_support::{try_cuda_device, try_test_video},
+    };
 
     struct CapturingSink {
         pp_log: PpLog,
@@ -312,7 +302,7 @@ mod tests {
     /// configured — nothing here depends on its codec, size, or duration.
     #[test]
     fn decodes_into_cuda_frames_and_forwards_eos() {
-        let Some(device) = try_cuda_device() else {
+        let Some((device, _cuda_lock)) = try_cuda_device() else {
             return;
         };
         let Some(path) = try_test_video() else {
@@ -378,7 +368,7 @@ mod tests {
     /// rather than failing somewhere inside libavcodec later.
     #[test]
     fn audio_parameters_are_rejected_as_a_typed_error() {
-        let Some(device) = try_cuda_device() else {
+        let Some((device, _cuda_lock)) = try_cuda_device() else {
             return;
         };
         let mut params = ffmpeg::codec::Parameters::new();

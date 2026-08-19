@@ -4,5 +4,7 @@
 //! elements build on Linux and Windows.
 
 pub(crate) mod device;
+pub(crate) mod format;
 
 pub use device::{CudaDevice, CudaDeviceError};
+pub use format::CudaFrameFormat;

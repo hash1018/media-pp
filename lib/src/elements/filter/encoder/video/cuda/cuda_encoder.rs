@@ -13,7 +13,7 @@ use crate::{
     elements::filter::upload::cuda_upload::{create_hw_frames_ctx, free_buffer},
     error::Result,
     pad::SrcPad,
-    platform::cuda::CudaDevice,
+    platform::cuda::{CudaDevice, CudaFrameFormat},
 };
 
 /// Which NVENC codec [`CudaEncoder`] drives.
@@ -44,6 +44,14 @@ impl CudaCodec {
 #[derive(Debug, Clone, Copy)]
 pub struct CudaEncoderOptions {
     pub codec: CudaCodec,
+    /// What the incoming CUDA surfaces hold. NVENC takes `Bgra` as directly
+    /// as `Nv12`, converting to YUV in hardware, so a screen-capture
+    /// recording never needs a colorspace conversion anywhere upstream —
+    /// see [`CudaFrameFormat`]. Must match what the upstream
+    /// [`crate::elements::CudaUpload`]/[`crate::elements::CudaDecoder`]
+    /// actually produces; a mismatch is refused per frame rather than
+    /// encoded as garbage.
+    pub input_format: CudaFrameFormat,
     pub width: u32,
     pub height: u32,
     /// Must match the `pts` unit of whatever frames this receives.
@@ -71,6 +79,12 @@ pub enum CudaEncoderError {
 
     #[error("CudaEncoder only encodes CUDA frames, got {0:?}")]
     UnsupportedFormat(ffmpeg::format::Pixel),
+
+    #[error("this CudaEncoder was opened for {expected:?} surfaces, got {actual:?}")]
+    UnsupportedSurfaceFormat {
+        expected: ffmpeg::format::Pixel,
+        actual: ffmpeg::format::Pixel,
+    },
 
     #[error("CudaEncoder only accepts Video and Eos buffers, got a {0}")]
     UnsupportedBuffer(&'static str),
@@ -133,6 +147,7 @@ pub struct CudaEncoder {
     /// Captured at construction so an incoming frame can be checked against
     /// this encoder's own CUDA context. Only ever compared.
     device_ctx: *const ffi::AVHWDeviceContext,
+    input_format: CudaFrameFormat,
     width: u32,
     height: u32,
     /// Nominal frame duration in `time_base` ticks. NVENC leaves
@@ -180,14 +195,20 @@ impl CudaEncoder {
             .ok_or(CudaEncoderError::CodecNotFound(encoder_name))?;
 
         let hw_device_ctx = unsafe { ffi::av_buffer_ref(device.as_ptr()) };
-        let hw_frames_ctx =
-            match unsafe { create_hw_frames_ctx(hw_device_ctx, options.width, options.height) } {
-                Ok(ctx) => ctx,
-                Err(error) => {
-                    unsafe { free_buffer(hw_device_ctx) };
-                    return Err(CudaEncoderError::HwFrames(error.to_string()));
-                }
-            };
+        let hw_frames_ctx = match unsafe {
+            create_hw_frames_ctx(
+                hw_device_ctx,
+                options.input_format,
+                options.width,
+                options.height,
+            )
+        } {
+            Ok(ctx) => ctx,
+            Err(error) => {
+                unsafe { free_buffer(hw_device_ctx) };
+                return Err(CudaEncoderError::HwFrames(error.to_string()));
+            }
+        };
         let device_ctx = unsafe { (*hw_device_ctx).data as *const ffi::AVHWDeviceContext };
 
         let opened = (|| -> std::result::Result<ffmpeg::encoder::Video, ffmpeg::Error> {
@@ -225,10 +246,11 @@ impl CudaEncoder {
         let pad = SrcPad::new(format!("{name}_src"));
         pp_info!(
             pp_log: &pp_log,
-            "opened: {} {}x{}, {} bps, gop={}",
+            "opened: {} {}x{} {:?}, {} bps, gop={}",
             encoder_name,
             options.width,
             options.height,
+            options.input_format.pixel(),
             options.bit_rate,
             options.gop_size
         );
@@ -239,6 +261,7 @@ impl CudaEncoder {
             hw_device_ctx,
             hw_frames_ctx,
             device_ctx,
+            input_format: options.input_format,
             width: options.width,
             height: options.height,
             packet_duration: nominal_packet_duration(options.time_base, options.frame_rate),
@@ -279,6 +302,18 @@ impl CudaEncoder {
             if !std::ptr::eq((*frames_ctx).device_ctx, self.device_ctx) {
                 pp_error!(self, "frame belongs to a different CUDA context");
                 return Err(CudaEncoderError::ForeignContext.into());
+            }
+            // NVENC was configured for one surface layout at `open`. A frame
+            // in another one would be read through the wrong plane layout
+            // rather than rejected by the driver.
+            let sw_format = ffmpeg::format::Pixel::from((*frames_ctx).sw_format);
+            if sw_format != self.input_format.pixel() {
+                let error = CudaEncoderError::UnsupportedSurfaceFormat {
+                    expected: self.input_format.pixel(),
+                    actual: sw_format,
+                };
+                pp_error!(self, "{error}");
+                return Err(error.into());
             }
         }
 
@@ -377,18 +412,8 @@ mod tests {
         elements::{CudaDecoder, CudaUpload, FileDemuxer, PacketCounter},
         pipeline::Pipeline,
         pool::UnboundObjectPool,
-        test_support::try_test_video,
+        test_support::{try_cuda_device, try_test_video},
     };
-
-    fn try_cuda_device() -> Option<CudaDevice> {
-        match CudaDevice::new() {
-            Ok(device) => Some(device),
-            Err(error) => {
-                eprintln!("skipping: no usable CUDA device on this machine ({error})");
-                None
-            }
-        }
-    }
 
     struct CapturingSink {
         pp_log: PpLog,
@@ -423,6 +448,7 @@ mod tests {
     fn options(width: u32, height: u32) -> CudaEncoderOptions {
         CudaEncoderOptions {
             codec: CudaCodec::H264,
+            input_format: CudaFrameFormat::Nv12,
             width,
             height,
             time_base: ffmpeg::Rational::new(1, 30),
@@ -450,17 +476,18 @@ mod tests {
     /// The contract: CUDA frames in, real H.264 packets out, drained on Eos.
     #[test]
     fn encodes_cuda_frames_into_packets_and_drains_on_eos() {
-        let Some(device) = try_cuda_device() else {
+        let Some((device, _cuda_lock)) = try_cuda_device() else {
             return;
         };
         let (width, height) = (320u32, 240u32);
-        let mut upload = match CudaUpload::new("upload", &device, width, height) {
-            Ok(upload) => upload,
-            Err(error) => {
-                eprintln!("skipping: CUDA upload unavailable ({error})");
-                return;
-            }
-        };
+        let mut upload =
+            match CudaUpload::new("upload", &device, CudaFrameFormat::Nv12, width, height) {
+                Ok(upload) => upload,
+                Err(error) => {
+                    eprintln!("skipping: CUDA upload unavailable ({error})");
+                    return;
+                }
+            };
         let mut encoder = match CudaEncoder::new("encoder", &device, options(width, height)) {
             Ok(encoder) => encoder,
             Err(error) => {
@@ -522,6 +549,130 @@ mod tests {
         );
     }
 
+    /// What makes a screen recording able to stay on the GPU: NVENC takes
+    /// the BGRA a capture already produces and converts it in hardware, so
+    /// no element upstream has to do a colorspace conversion the CUDA path
+    /// cannot do anyway.
+    #[test]
+    fn encodes_bgra_surfaces_without_any_colorspace_conversion() {
+        let Some((device, _cuda_lock)) = try_cuda_device() else {
+            return;
+        };
+        let (width, height) = (320u32, 240u32);
+        let Ok(mut upload) =
+            CudaUpload::new("upload", &device, CudaFrameFormat::Bgra, width, height)
+        else {
+            eprintln!("skipping: this machine has no usable CUDA frames context");
+            return;
+        };
+        let mut encoder = match CudaEncoder::new(
+            "encoder",
+            &device,
+            CudaEncoderOptions {
+                input_format: CudaFrameFormat::Bgra,
+                ..options(width, height)
+            },
+        ) {
+            Ok(encoder) => encoder,
+            Err(error) => {
+                eprintln!("skipping: NVENC unavailable on this machine ({error})");
+                return;
+            }
+        };
+
+        let received = Arc::new(Mutex::new(Vec::new()));
+        encoder.src_pads()[0].link(Box::new(CapturingSink {
+            received: received.clone(),
+            pp_log: element_pp_log(ElementType::Other, "capture", None),
+        }));
+        let uploaded = Arc::new(Mutex::new(Vec::new()));
+        upload.src_pads()[0].link(Box::new(CapturingSink {
+            received: uploaded.clone(),
+            pp_log: element_pp_log(ElementType::Other, "uploaded", None),
+        }));
+
+        let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
+        for index in 0..30 {
+            let mut frame = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::BGRA, width, height);
+            let stride = frame.stride(0);
+            let pixels = frame.data_mut(0);
+            for y in 0..height as usize {
+                for x in 0..width as usize {
+                    let at = y * stride + x * 4;
+                    pixels[at] = ((x as i64 + index * 4) % 256) as u8;
+                    pixels[at + 1] = (y % 256) as u8;
+                    pixels[at + 2] = 128;
+                    pixels[at + 3] = 255;
+                }
+            }
+            frame.set_pts(Some(index));
+            let mut pooled = pool.get();
+            *pooled = frame;
+            upload
+                .consume(MediaBuffer::Video(Arc::new(pooled)))
+                .expect("upload failed");
+            let frame = uploaded.lock().unwrap().pop().expect("nothing uploaded");
+            encoder.consume(frame).expect("encode failed");
+        }
+        encoder.consume(MediaBuffer::Eos).expect("eos failed");
+
+        let received = received.lock().unwrap();
+        let packets: Vec<_> = received
+            .iter()
+            .filter_map(|buf| match buf {
+                MediaBuffer::Packet(packet) => Some(packet),
+                _ => None,
+            })
+            .collect();
+        assert!(!packets.is_empty(), "NVENC produced no packets from BGRA");
+        assert!(
+            packets.iter().any(|packet| packet.size() > 0),
+            "every packet was empty"
+        );
+    }
+
+    /// A surface in the layout this encoder was *not* opened for must be
+    /// refused: NVENC would otherwise read BGRA bytes through an NV12 plane
+    /// layout.
+    #[test]
+    fn a_surface_in_another_layout_is_a_typed_error() {
+        let Some((device, _cuda_lock)) = try_cuda_device() else {
+            return;
+        };
+        let Ok(mut upload) = CudaUpload::new("upload", &device, CudaFrameFormat::Bgra, 320, 240)
+        else {
+            eprintln!("skipping: this machine has no usable CUDA frames context");
+            return;
+        };
+        let mut encoder = match CudaEncoder::new("encoder", &device, options(320, 240)) {
+            Ok(encoder) => encoder,
+            Err(error) => {
+                eprintln!("skipping: NVENC unavailable on this machine ({error})");
+                return;
+            }
+        };
+        let uploaded = Arc::new(Mutex::new(Vec::new()));
+        upload.src_pads()[0].link(Box::new(CapturingSink {
+            received: uploaded.clone(),
+            pp_log: element_pp_log(ElementType::Other, "uploaded", None),
+        }));
+        let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
+        let mut pooled = pool.get();
+        *pooled = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::BGRA, 320, 240);
+        upload
+            .consume(MediaBuffer::Video(Arc::new(pooled)))
+            .expect("upload failed");
+        let frame = uploaded.lock().unwrap().pop().expect("nothing uploaded");
+
+        let error = encoder
+            .consume(frame)
+            .expect_err("a BGRA surface must not encode as NV12");
+        assert!(
+            error.to_string().contains("opened for NV12"),
+            "expected UnsupportedSurfaceFormat, got {error}"
+        );
+    }
+
     /// The headline claim of this element: `CudaDecoder`'s output goes
     /// straight in, with no upload and no download between them, even though
     /// the decoder allocates from its own frames pool. What makes that work
@@ -531,7 +682,7 @@ mod tests {
     /// than silently falling back to a copy.
     #[test]
     fn decoded_frames_encode_without_an_upload_step() {
-        let Some(device) = try_cuda_device() else {
+        let Some((device, _cuda_lock)) = try_cuda_device() else {
             return;
         };
         let Some(path) = try_test_video() else {
@@ -613,7 +764,7 @@ mod tests {
     /// refused with this element's own error.
     #[test]
     fn a_cpu_frame_is_rejected_as_a_typed_error() {
-        let Some(device) = try_cuda_device() else {
+        let Some((device, _cuda_lock)) = try_cuda_device() else {
             return;
         };
         let mut encoder = match CudaEncoder::new("encoder", &device, options(320, 240)) {

@@ -23,6 +23,16 @@ pub enum CudaDeviceError {
 /// underlying context stays alive as long as any element, or any frame
 /// still in flight downstream, references it.
 ///
+/// # Create it once, up front
+///
+/// Because this is the device's *primary* context (see below), constructing
+/// and dropping a `CudaDevice` retains and releases process-wide driver
+/// state. Doing that on one thread while another thread has NVDEC or NVENC
+/// work in flight has been observed to segfault inside `libnvcuvid`, on a
+/// thread the driver itself owns — nothing in this crate can catch or
+/// recover that. Build one per process before the pipelines start, hand it
+/// to every CUDA element, and keep it until they are gone.
+///
 /// Opens the default CUDA device. There is deliberately no ordinal
 /// parameter: a `CudaRenderer`'s graphics device has to be on the same
 /// physical GPU, and this crate has no way to verify that pairing, so

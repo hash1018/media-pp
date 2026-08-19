@@ -11,7 +11,7 @@ use crate::{
     element::{Element, ElementType, Sink, Source, element_pp_log},
     error::Result,
     pad::SrcPad,
-    platform::cuda::CudaDevice,
+    platform::cuda::{CudaDevice, CudaFrameFormat},
     pool::UnboundObjectPool,
 };
 
@@ -46,16 +46,19 @@ pub enum CudaDownloadError {
     #[error("CUDA frame belongs to a different CUDA context than this CudaDownload")]
     ForeignContext,
 
-    #[error("CudaDownload only downloads NV12 surfaces, got {0:?}")]
-    UnsupportedSurfaceFormat(ffmpeg::format::Pixel),
+    #[error("this CudaDownload was built for {expected:?} surfaces, got {actual:?}")]
+    UnsupportedSurfaceFormat {
+        expected: ffmpeg::format::Pixel,
+        actual: ffmpeg::format::Pixel,
+    },
 
     #[error("CUDA to CPU transfer failed (code {0})")]
     Transfer(i32),
 }
 
-/// Downloads GPU-resident `Pixel::CUDA` NV12 `Video` frames to CPU-resident
-/// `Pixel::NV12` ones — the mirror of [`crate::elements::CudaUpload`] and the
-/// CUDA sibling of [`crate::elements::D3d11Download`].
+/// Downloads GPU-resident `Pixel::CUDA` `Video` frames to CPU-resident ones
+/// in the matching layout — the mirror of [`crate::elements::CudaUpload`]
+/// and the CUDA sibling of [`crate::elements::D3d11Download`].
 ///
 /// This is what makes a CUDA frame reach anything other than
 /// [`crate::elements::CudaEncoder`] or [`crate::elements::CudaRenderer`]:
@@ -95,6 +98,7 @@ pub struct CudaDownload {
     /// this element's own CUDA context. Only ever compared, same as
     /// [`crate::elements::CudaEncoder`]'s.
     device_ctx: *const ffi::AVHWDeviceContext,
+    format: CudaFrameFormat,
     width: u32,
     height: u32,
     pad: SrcPad,
@@ -121,7 +125,13 @@ impl CudaDownload {
     /// `width`/`height` are fixed for this element's lifetime; every frame
     /// `consume` receives must match exactly, same convention as
     /// `CudaUpload`/`D3d11Download`.
-    pub fn new(name: impl Into<String>, device: &CudaDevice, width: u32, height: u32) -> Self {
+    pub fn new(
+        name: impl Into<String>,
+        device: &CudaDevice,
+        format: CudaFrameFormat,
+        width: u32,
+        height: u32,
+    ) -> Self {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::CudaDownload, &name, None);
 
@@ -129,17 +139,19 @@ impl CudaDownload {
         let device_ctx = unsafe { (*hw_device_ctx).data as *const ffi::AVHWDeviceContext };
 
         let pad = SrcPad::new(format!("{name}_src"));
+        let pixel = format.pixel();
         let pool = UnboundObjectPool::new(
             0,
-            move || ffmpeg::frame::Video::new(ffmpeg::format::Pixel::NV12, width, height),
+            move || ffmpeg::frame::Video::new(pixel, width, height),
             |_| {},
         );
-        pp_info!(pp_log: &pp_log, "opened: {width}x{height} CUDA -> NV12");
+        pp_info!(pp_log: &pp_log, "opened: {width}x{height} CUDA -> {pixel:?}");
         Self {
             name,
             pp_log,
             hw_device_ctx,
             device_ctx,
+            format,
             width,
             height,
             pad,
@@ -173,11 +185,14 @@ impl CudaDownload {
                 pp_error!(self, "frame belongs to a different CUDA context");
                 return Err(CudaDownloadError::ForeignContext.into());
             }
-            let sw_format = (*frames_ctx).sw_format;
-            if sw_format != ffi::AVPixelFormat::AV_PIX_FMT_NV12 {
-                let format = ffmpeg::format::Pixel::from(sw_format);
-                pp_error!(self, "unsupported surface format: {format:?}");
-                return Err(CudaDownloadError::UnsupportedSurfaceFormat(format).into());
+            let sw_format = ffmpeg::format::Pixel::from((*frames_ctx).sw_format);
+            if sw_format != self.format.pixel() {
+                let error = CudaDownloadError::UnsupportedSurfaceFormat {
+                    expected: self.format.pixel(),
+                    actual: sw_format,
+                };
+                pp_error!(self, "{error}");
+                return Err(error.into());
             }
         }
 
@@ -256,18 +271,8 @@ mod tests {
     use super::*;
     use crate::{
         elements::{CudaDecoder, CudaUpload},
-        test_support::try_test_video,
+        test_support::{try_cuda_device, try_test_video},
     };
-
-    fn try_cuda_device() -> Option<CudaDevice> {
-        match CudaDevice::new() {
-            Ok(device) => Some(device),
-            Err(error) => {
-                eprintln!("skipping: no usable CUDA device on this machine ({error})");
-                None
-            }
-        }
-    }
 
     struct CapturingSink {
         pp_log: PpLog,
@@ -342,15 +347,18 @@ mod tests {
     /// with their timestamp intact.
     #[test]
     fn a_cuda_frame_round_trips_back_to_cpu_nv12_pixels() {
-        let Some(device) = try_cuda_device() else {
+        let Some((device, _cuda_lock)) = try_cuda_device() else {
             return;
         };
         let (width, height) = (64u32, 64u32);
-        let Ok(mut upload) = CudaUpload::new("upload", &device, width, height) else {
+        let Ok(mut upload) =
+            CudaUpload::new("upload", &device, CudaFrameFormat::Nv12, width, height)
+        else {
             eprintln!("skipping: this machine has no usable CUDA frames context");
             return;
         };
-        let mut download = CudaDownload::new("download", &device, width, height);
+        let mut download =
+            CudaDownload::new("download", &device, CudaFrameFormat::Nv12, width, height);
         let received = capture(&mut download);
         upload.src_pads()[0].link(Box::new(download));
 
@@ -387,12 +395,97 @@ mod tests {
         );
     }
 
+    /// The same round trip in BGRA, the layout a screen capture produces.
+    /// Nothing on the CUDA path converts between the two, so each format has
+    /// to survive on its own.
+    #[test]
+    fn a_bgra_frame_round_trips_back_to_cpu_bgra_pixels() {
+        let Some((device, _cuda_lock)) = try_cuda_device() else {
+            return;
+        };
+        let (width, height) = (32u32, 32u32);
+        let Ok(mut upload) =
+            CudaUpload::new("upload", &device, CudaFrameFormat::Bgra, width, height)
+        else {
+            eprintln!("skipping: this machine has no usable CUDA frames context");
+            return;
+        };
+        let mut download =
+            CudaDownload::new("download", &device, CudaFrameFormat::Bgra, width, height);
+        let received = capture(&mut download);
+        upload.src_pads()[0].link(Box::new(download));
+
+        let mut source = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::BGRA, width, height);
+        source.set_pts(Some(11));
+        let stride = source.stride(0);
+        let pixels = source.data_mut(0);
+        for row in 0..height as usize {
+            for column in 0..width as usize {
+                let at = row * stride + column * 4;
+                pixels[at] = column as u8;
+                pixels[at + 1] = row as u8;
+                pixels[at + 2] = (column + row) as u8;
+                pixels[at + 3] = 255;
+            }
+        }
+        let expected: Vec<u8> = (0..height as usize)
+            .flat_map(|row| {
+                source.data(0)[row * stride..row * stride + width as usize * 4].to_vec()
+            })
+            .collect();
+        upload
+            .consume(pooled(source))
+            .expect("upload then download");
+
+        let received = received.lock().unwrap();
+        let MediaBuffer::Video(frame) = &received[0] else {
+            panic!("expected a Video buffer, got {}", received[0].kind());
+        };
+        assert_eq!(frame.format(), ffmpeg::format::Pixel::BGRA);
+        assert_eq!(frame.pts(), Some(11), "download dropped the pts");
+        let out_stride = frame.stride(0);
+        for row in 0..height as usize {
+            let actual = &frame.data(0)[row * out_stride..row * out_stride + width as usize * 4];
+            let expected = &expected[row * width as usize * 4..(row + 1) * width as usize * 4];
+            assert_eq!(actual, expected, "row {row} mismatch");
+        }
+    }
+
+    /// A surface holding something other than what this element was built
+    /// for must be refused, not transferred into a differently-shaped CPU
+    /// frame.
+    #[test]
+    fn a_surface_in_another_layout_is_a_typed_error() {
+        let Some((device, _cuda_lock)) = try_cuda_device() else {
+            return;
+        };
+        let Ok(mut upload) = CudaUpload::new("upload", &device, CudaFrameFormat::Bgra, 32, 32)
+        else {
+            eprintln!("skipping: this machine has no usable CUDA frames context");
+            return;
+        };
+        let uploaded = capture(&mut upload);
+        let bgra = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::BGRA, 32, 32);
+        upload.consume(pooled(bgra)).expect("upload");
+        let frame = uploaded.lock().unwrap().remove(0);
+
+        let mut download = CudaDownload::new("download", &device, CudaFrameFormat::Nv12, 32, 32);
+        let _received = capture(&mut download);
+        let error = download
+            .consume(frame)
+            .expect_err("a BGRA surface must not download as NV12");
+        assert!(
+            error.to_string().contains("built for NV12"),
+            "expected UnsupportedSurfaceFormat, got {error}"
+        );
+    }
+
     /// The point of the element: real NVDEC output becomes readable CPU
     /// pixels, which is what lets a hardware-decoded stream reach a `SwScaler`,
     /// `SwEncoder`, or `OrtDetector` at all.
     #[test]
     fn decoded_nvdec_frames_become_readable_cpu_frames() {
-        let Some(device) = try_cuda_device() else {
+        let Some((device, _cuda_lock)) = try_cuda_device() else {
             return;
         };
         let Some(path) = try_test_video() else {
@@ -415,7 +508,8 @@ mod tests {
             })
             .collect();
 
-        let mut download = CudaDownload::new("download", &device, width, height);
+        let mut download =
+            CudaDownload::new("download", &device, CudaFrameFormat::Nv12, width, height);
         let received = capture(&mut download);
         for frame in frames {
             download.consume(frame).expect("download failed");
@@ -448,10 +542,10 @@ mod tests {
     /// than read.
     #[test]
     fn a_cpu_frame_and_a_foreign_context_frame_are_typed_errors() {
-        let Some(device) = try_cuda_device() else {
+        let Some((device, _cuda_lock)) = try_cuda_device() else {
             return;
         };
-        let mut download = CudaDownload::new("download", &device, 64, 64);
+        let mut download = CudaDownload::new("download", &device, CudaFrameFormat::Nv12, 64, 64);
         let _received = capture(&mut download);
 
         let error = download
@@ -462,10 +556,12 @@ mod tests {
             "expected UnsupportedFormat, got {error}"
         );
 
-        let Some(other_device) = try_cuda_device() else {
-            return;
-        };
-        let Ok(mut upload) = CudaUpload::new("upload", &other_device, 64, 64) else {
+        // Directly, not `try_cuda_device` again: the lock it returns is
+        // already held for this test and does not nest.
+        let other_device = CudaDevice::new().expect("a second CUDA device");
+        let Ok(mut upload) =
+            CudaUpload::new("upload", &other_device, CudaFrameFormat::Nv12, 64, 64)
+        else {
             eprintln!("skipping: this machine has no usable CUDA frames context");
             return;
         };
@@ -487,10 +583,11 @@ mod tests {
     /// differently-sized CPU frame.
     #[test]
     fn a_wrong_size_frame_is_a_typed_error() {
-        let Some(device) = try_cuda_device() else {
+        let Some((device, _cuda_lock)) = try_cuda_device() else {
             return;
         };
-        let Ok(mut upload) = CudaUpload::new("upload", &device, 32, 32) else {
+        let Ok(mut upload) = CudaUpload::new("upload", &device, CudaFrameFormat::Nv12, 32, 32)
+        else {
             eprintln!("skipping: this machine has no usable CUDA frames context");
             return;
         };
@@ -500,7 +597,7 @@ mod tests {
             .expect("upload");
         let small = uploaded.lock().unwrap().remove(0);
 
-        let mut download = CudaDownload::new("download", &device, 64, 64);
+        let mut download = CudaDownload::new("download", &device, CudaFrameFormat::Nv12, 64, 64);
         let _received = capture(&mut download);
         let error = download
             .consume(small)

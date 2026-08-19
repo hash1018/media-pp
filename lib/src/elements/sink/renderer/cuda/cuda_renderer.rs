@@ -263,19 +263,11 @@ mod tests {
 
     use super::*;
     use crate::{
-        element::Source, elements::CudaDecoder, pool::UnboundObjectPool,
-        test_support::try_test_video,
+        element::Source,
+        elements::CudaDecoder,
+        pool::UnboundObjectPool,
+        test_support::{try_cuda_device, try_test_video},
     };
-
-    fn try_cuda_device() -> Option<CudaDevice> {
-        match CudaDevice::new() {
-            Ok(device) => Some(device),
-            Err(error) => {
-                eprintln!("skipping: no usable CUDA device on this machine ({error})");
-                None
-            }
-        }
-    }
 
     /// Records what reached the graphics side without touching a GPU, so the
     /// element's own validation can be tested on its own.
@@ -311,7 +303,7 @@ mod tests {
     /// kind of failure this guard exists to make impossible.
     #[test]
     fn a_cpu_frame_is_rejected_as_a_typed_error() {
-        let Some(device) = try_cuda_device() else {
+        let Some((device, _cuda_lock)) = try_cuda_device() else {
             return;
         };
         let mut renderer = CudaRenderer::new(
@@ -338,12 +330,12 @@ mod tests {
     /// must fail here rather than inside the driver.
     #[test]
     fn a_frame_from_another_cuda_context_is_rejected() {
-        let Some(decode_device) = try_cuda_device() else {
+        let Some((decode_device, _cuda_lock)) = try_cuda_device() else {
             return;
         };
-        let Some(render_device) = try_cuda_device() else {
-            return;
-        };
+        // Directly, not `try_cuda_device` again: the lock it returns is
+        // already held for this test and does not nest.
+        let render_device = CudaDevice::new().expect("a second CUDA device");
         let Some(path) = try_test_video() else {
             return;
         };
@@ -372,7 +364,7 @@ mod tests {
     /// dimensions and pitches it actually has.
     #[test]
     fn a_decoded_frame_reaches_the_graphics_side() {
-        let Some(device) = try_cuda_device() else {
+        let Some((device, _cuda_lock)) = try_cuda_device() else {
             return;
         };
         let Some(path) = try_test_video() else {

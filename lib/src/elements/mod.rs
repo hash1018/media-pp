@@ -11,7 +11,7 @@ pub use rtsp::RtspTransport;
 pub use video_format::VideoFormat;
 
 #[cfg(feature = "cuda")]
-pub use crate::platform::cuda::{CudaDevice, CudaDeviceError};
+pub use crate::platform::cuda::{CudaDevice, CudaDeviceError, CudaFrameFormat};
 #[cfg(all(
     target_os = "windows",
     any(feature = "wasapi-capture", feature = "wasapi-renderer")

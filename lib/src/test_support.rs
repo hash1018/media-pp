@@ -37,3 +37,48 @@ pub(crate) fn try_test_video() -> Option<String> {
     eprintln!("using test video: {path}");
     Some(path)
 }
+
+/// A CUDA device for a hardware test, together with the lock that keeps
+/// CUDA tests from overlapping. `None` — after printing why — on a machine
+/// without a usable device, the same way [`try_test_video`] skips without a
+/// fixture.
+///
+/// The two are returned together because they are not separable in practice.
+/// Creating or destroying a `CudaDevice` retains/releases the *process-wide*
+/// CUDA primary context (see [`crate::elements::CudaDevice`]'s own docs on
+/// why it uses that context), and doing so on one thread while another
+/// thread has NVDEC or NVENC work in flight segfaults inside `libnvcuvid` —
+/// on a thread the driver itself owns, so nothing in this crate can catch or
+/// recover it.
+///
+/// Running the whole suite hid that, because cheap tests were interleaved
+/// between the CUDA ones often enough to keep them from overlapping; a run
+/// filtered down to CUDA tests alone (`cargo test --features cuda cuda_`)
+/// crashed reliably. Bind the guard for the body of the test:
+///
+/// ```ignore
+/// let Some((device, _cuda_lock)) = try_cuda_device() else {
+///     return;
+/// };
+/// ```
+///
+/// A test needing a *second* device — to check that a frame from a foreign
+/// context is rejected — calls `CudaDevice::new()` directly rather than this
+/// again: the lock is already held, and it does not nest.
+#[cfg(feature = "cuda")]
+pub(crate) fn try_cuda_device() -> Option<(
+    crate::elements::CudaDevice,
+    std::sync::MutexGuard<'static, ()>,
+)> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // A test that panics while holding this must not turn every later CUDA
+    // test into a poison error instead of its own real result.
+    let guard = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    match crate::elements::CudaDevice::new() {
+        Ok(device) => Some((device, guard)),
+        Err(error) => {
+            eprintln!("skipping: no usable CUDA device on this machine ({error})");
+            None
+        }
+    }
+}

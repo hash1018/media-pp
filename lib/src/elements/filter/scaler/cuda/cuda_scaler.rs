@@ -12,7 +12,7 @@ use crate::{
     elements::filter::is_codec_drain_boundary,
     error::Result,
     pad::SrcPad,
-    platform::cuda::CudaDevice,
+    platform::cuda::{CudaDevice, CudaFrameFormat},
     pool::UnboundObjectPool,
 };
 
@@ -45,7 +45,7 @@ pub enum CudaScalerError {
     #[error("CUDA frame belongs to a different CUDA context than this CudaScaler")]
     ForeignContext,
 
-    #[error("CudaScaler only scales NV12 surfaces, got {0:?}")]
+    #[error("CudaScaler cannot scale {0:?} surfaces")]
     UnsupportedSurfaceFormat(ffmpeg::format::Pixel),
 
     #[error("failed to allocate the buffer source parameters")]
@@ -97,22 +97,21 @@ impl CudaScalerInterp {
 /// [`crate::elements::CudaUpload`], i.e. two PCIe crossings and a
 /// `libswscale` pass per frame.
 ///
-/// # NV12 only, resize only
+/// # Resize only
 ///
-/// Everything on this crate's CUDA path speaks NV12 (see
-/// [`crate::elements::CudaUpload`]'s own note), so this neither takes nor
-/// produces anything else. `scale_cuda` can convert *within* the YUV family,
-/// but not between RGB and YUV in either direction: its PTX module carries
-/// no kernel for those pairs, so the conversion fails as
-/// `Unsupported conversion: bgr0 -> nv12` rather than falling back to
+/// The output surface holds whatever the input did — every
+/// [`CudaFrameFormat`] goes through, and none of them turns into another.
+/// `scale_cuda` cannot convert between RGB and YUV in either direction: its
+/// PTX module carries no kernel for those pairs, so such a conversion fails
+/// as `Unsupported conversion: bgr0 -> nv12` rather than falling back to
 /// anything.
 ///
-/// That is a narrower limit than it sounds. NVENC ingests RGB surfaces
-/// directly and converts them in hardware, and `scale_cuda` resizes an RGB
-/// surface fine as long as it stays RGB — so a BGRA capture path never needs
-/// the conversion this filter refuses. What does need NV12 is
-/// [`crate::elements::CudaRenderer`], whose trait hands the graphics side
-/// separate luma/chroma pointers.
+/// That is a narrower limit than it sounds, because nothing downstream
+/// needs the conversion. NVENC ingests `Bgra` as directly as `Nv12`,
+/// converting in hardware, so a capture recorded through
+/// `CudaUpload -> CudaScaler -> CudaEncoder` stays BGRA end to end. The one
+/// element that does require `Nv12` is [`crate::elements::CudaRenderer`],
+/// whose trait hands the graphics side separate luma/chroma pointers.
 ///
 /// # The graph is built from the first frame
 ///
@@ -233,7 +232,7 @@ impl CudaScaler {
                 return Err(CudaScalerError::ForeignContext);
             }
             let sw_format = (*frames_ctx).sw_format;
-            if sw_format != ffi::AVPixelFormat::AV_PIX_FMT_NV12 {
+            if CudaFrameFormat::from_sw_format(sw_format).is_none() {
                 return Err(CudaScalerError::UnsupportedSurfaceFormat(
                     ffmpeg::format::Pixel::from(sw_format),
                 ));
@@ -486,18 +485,8 @@ mod tests {
     use super::*;
     use crate::{
         elements::{CudaDecoder, CudaDownload, CudaUpload},
-        test_support::try_test_video,
+        test_support::{try_cuda_device, try_test_video},
     };
-
-    fn try_cuda_device() -> Option<CudaDevice> {
-        match CudaDevice::new() {
-            Ok(device) => Some(device),
-            Err(error) => {
-                eprintln!("skipping: no usable CUDA device on this machine ({error})");
-                None
-            }
-        }
-    }
 
     struct CapturingSink {
         pp_log: PpLog,
@@ -573,7 +562,9 @@ mod tests {
         luma: u8,
         pts: i64,
     ) -> Option<MediaBuffer> {
-        let Ok(mut upload) = CudaUpload::new("upload", device, width, height) else {
+        let Ok(mut upload) =
+            CudaUpload::new("upload", device, CudaFrameFormat::Nv12, width, height)
+        else {
             eprintln!("skipping: this machine has no usable CUDA frames context");
             return None;
         };
@@ -591,7 +582,7 @@ mod tests {
     /// all, since a CUDA surface has no readable planes.
     #[test]
     fn a_cuda_frame_is_resized_on_the_gpu_and_keeps_its_pts() {
-        let Some(device) = try_cuda_device() else {
+        let Some((device, _cuda_lock)) = try_cuda_device() else {
             return;
         };
         let Some(frame) = cuda_frame(&device, 128, 128, 200, 777) else {
@@ -599,7 +590,7 @@ mod tests {
         };
 
         let mut scaler = CudaScaler::new("scaler", &device, 64, 64, CudaScalerInterp::Bilinear);
-        let mut download = CudaDownload::new("download", &device, 64, 64);
+        let mut download = CudaDownload::new("download", &device, CudaFrameFormat::Nv12, 64, 64);
         let received = capture(&mut download);
         scaler.src_pads()[0].link(Box::new(download));
 
@@ -633,7 +624,7 @@ mod tests {
     /// leaving the GPU, which is what a hardware transcode needs.
     #[test]
     fn decoded_nvdec_frames_are_resized_without_leaving_the_gpu() {
-        let Some(device) = try_cuda_device() else {
+        let Some((device, _cuda_lock)) = try_cuda_device() else {
             return;
         };
         let Some(path) = try_test_video() else {
@@ -675,12 +666,54 @@ mod tests {
         }
     }
 
+    /// The capture path's format. `scale_cuda` resizes an RGB surface fine as
+    /// long as it stays RGB, and the output must not have quietly become
+    /// something else — nothing downstream could convert it back.
+    #[test]
+    fn a_bgra_surface_is_resized_and_stays_bgra() {
+        let Some((device, _cuda_lock)) = try_cuda_device() else {
+            return;
+        };
+        let Ok(mut upload) = CudaUpload::new("upload", &device, CudaFrameFormat::Bgra, 128, 64)
+        else {
+            eprintln!("skipping: this machine has no usable CUDA frames context");
+            return;
+        };
+        let uploaded = capture(&mut upload);
+        let mut bgra = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::BGRA, 128, 64);
+        bgra.set_pts(Some(3));
+        upload.consume(pooled(bgra)).expect("upload");
+        let frame = uploaded.lock().unwrap().remove(0);
+
+        let mut scaler = CudaScaler::new("scaler", &device, 64, 32, CudaScalerInterp::Bilinear);
+        let received = capture(&mut scaler);
+        scaler.consume(frame).expect("bgra scale");
+
+        let received = received.lock().unwrap();
+        let MediaBuffer::Video(scaled) = &received[0] else {
+            panic!("expected a Video buffer, got {}", received[0].kind());
+        };
+        assert_eq!(scaled.width(), 64);
+        assert_eq!(scaled.height(), 32);
+        assert_eq!(scaled.pts(), Some(3));
+        let sw_format = unsafe {
+            let frames_ref = (*scaled.as_ptr()).hw_frames_ctx;
+            let frames_ctx = (*frames_ref).data as *const ffi::AVHWFramesContext;
+            ffmpeg::format::Pixel::from((*frames_ctx).sw_format)
+        };
+        assert_eq!(
+            sw_format,
+            ffmpeg::format::Pixel::BGRA,
+            "the scaler changed the surface layout"
+        );
+    }
+
     /// A mid-stream input change must rebuild the graph rather than fail or
     /// keep scaling from a stale one — same contract `SwScaler` has for its
     /// `libswscale` context.
     #[test]
     fn rebuilds_its_graph_when_the_input_changes_mid_stream() {
-        let Some(device) = try_cuda_device() else {
+        let Some((device, _cuda_lock)) = try_cuda_device() else {
             return;
         };
         let Some(first) = cuda_frame(&device, 128, 128, 100, 0) else {
@@ -713,7 +746,7 @@ mod tests {
     /// libavfilter ever sees them.
     #[test]
     fn a_cpu_frame_and_a_foreign_context_frame_are_typed_errors() {
-        let Some(device) = try_cuda_device() else {
+        let Some((device, _cuda_lock)) = try_cuda_device() else {
             return;
         };
         let mut scaler = CudaScaler::new("scaler", &device, 64, 64, CudaScalerInterp::Bilinear);
@@ -727,9 +760,9 @@ mod tests {
             "expected UnsupportedFormat, got {error}"
         );
 
-        let Some(other_device) = try_cuda_device() else {
-            return;
-        };
+        // Directly, not `try_cuda_device` again: the lock it returns is
+        // already held for this test and does not nest.
+        let other_device = CudaDevice::new().expect("a second CUDA device");
         let Some(foreign) = cuda_frame(&other_device, 128, 128, 100, 0) else {
             return;
         };

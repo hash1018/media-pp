@@ -130,8 +130,8 @@ mod linux_example {
     use ffmpeg_next as ffmpeg;
     use media_pp::{
         elements::{
-            AppSource, CudaCodec, CudaDevice, CudaEncoder, CudaEncoderOptions, CudaUpload,
-            Mp4Muxer, SwScaler,
+            AppSource, CudaCodec, CudaDevice, CudaEncoder, CudaEncoderOptions, CudaFrameFormat,
+            CudaUpload, Mp4Muxer, SwScaler,
         },
         pipeline::Pipeline,
     };
@@ -160,6 +160,7 @@ mod linux_example {
             &cuda,
             CudaEncoderOptions {
                 codec: CudaCodec::H264,
+                input_format: CudaFrameFormat::Nv12,
                 width,
                 height,
                 time_base: recording.time_base,
@@ -185,7 +186,7 @@ mod linux_example {
                 height,
                 ffmpeg::software::scaling::Flags::BILINEAR,
             );
-            let upload = CudaUpload::new("upload", &cuda, width, height)
+            let upload = CudaUpload::new("upload", &cuda, CudaFrameFormat::Nv12, width, height)
                 .map_err(|e| media_pp::Error::Other(e.to_string()))?;
             let branch = ctx
                 .branch()
