@@ -1,7 +1,5 @@
-//! Everything about this example that is not the GPU stack: argument
+//! Everything about this example that is not the CUDA stack: argument
 //! parsing, the synthetic frame generator, and the shutdown bookkeeping.
-//! `cuda_record` drives the identical shell, so the only thing that differs
-//! between the two is how the upload and encoder are constructed.
 
 use std::{
     sync::Arc,
@@ -27,7 +25,7 @@ pub struct Recording {
 pub fn parse_args() -> media_pp::Result<Recording> {
     let path = std::env::args()
         .nth(1)
-        .unwrap_or_else(|| "nvenc_record.mp4".into());
+        .unwrap_or_else(|| "cuda_record.mp4".into());
     let seconds: u64 = std::env::args()
         .nth(2)
         .and_then(|s| s.parse().ok())

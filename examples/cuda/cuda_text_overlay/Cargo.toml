@@ -1,0 +1,18 @@
+[package]
+name = "cuda_text_overlay"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+ffmpeg-next = "8"
+# No per-target dependency table for the library: CUDA is not a Linux backend,
+# so the whole graph below is platform-independent. Only the raw-key terminal
+# below genuinely differs per OS.
+media-pp = { path = "../../../lib", features = ["cuda"] }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = ["Win32_System_Console"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

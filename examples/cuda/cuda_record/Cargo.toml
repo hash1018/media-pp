@@ -1,0 +1,12 @@
+[package]
+name = "cuda_record"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+ffmpeg-next = "8"
+# No per-target dependency table: CUDA is not a Linux backend. The library's
+# `cuda` elements build and run wherever an NVIDIA driver and an NVENC-capable
+# ffmpeg exist, which includes Windows.
+media-pp = { path = "../../../lib", features = ["cuda"] }

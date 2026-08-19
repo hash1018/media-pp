@@ -921,6 +921,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "cuda_record"
+version = "0.1.0"
+dependencies = [
+ "ffmpeg-next",
+ "media-pp",
+]
+
+[[package]]
+name = "cuda_text_overlay"
+version = "0.1.0"
+dependencies = [
+ "ffmpeg-next",
+ "libc",
+ "media-pp",
+ "windows",
+]
+
+[[package]]
 name = "cursor-icon"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3696,7 +3714,6 @@ name = "text_overlay"
 version = "0.1.0"
 dependencies = [
  "ffmpeg-next",
- "libc",
  "media-pp",
  "render_common",
  "windows",

@@ -11,7 +11,3 @@ ffmpeg-next = "8"
 media-pp = { path = "../../../lib", features = ["d3d11"] }
 render_common = { path = "../render_common" }
 windows = { version = "0.62", features = ["Win32_System_Console"] }
-
-[target.'cfg(target_os = "linux")'.dependencies]
-media-pp = { path = "../../../lib", features = ["cuda"] }
-libc = "0.2"

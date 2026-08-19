@@ -8,31 +8,28 @@
 //! because `SwEncoder` has no GPU input path. Here the frame stays on the GPU
 //! from the upload onward.
 //!
-//! Both platforms run the identical graph and CLI; only the GPU stack
-//! differs — `D3d11Upload`/`D3d11NvencEncoder` on Windows,
-//! `CudaUpload`/`CudaEncoder` on Linux. Needs an NVIDIA GPU and an ffmpeg
-//! build with NVENC; both encoders report a typed error rather than panicking
-//! on anything else. No window and no media file are involved, so this runs
-//! headless.
+//! `cuda_record` is the same graph on the CUDA backend, in its own crate
+//! because CUDA is a vendor backend rather than a platform one and runs on
+//! Windows too. Needs an NVIDIA GPU and an ffmpeg build with NVENC;
+//! `D3d11NvencEncoder` reports a typed error rather than panicking on anything
+//! else. No window and no media file are involved, so this runs headless.
 //!
 //!     cargo run -p nvenc_record -- [output.mp4] [seconds]
 
-#[cfg(any(target_os = "windows", target_os = "linux"))]
+#[cfg(target_os = "windows")]
 mod common;
 
-#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+#[cfg(not(target_os = "windows"))]
 fn main() {
-    eprintln!("{} supports Windows and Linux only", env!("CARGO_PKG_NAME"));
+    eprintln!(
+        "{} supports Windows (D3D11) only; see `cuda_record` for the CUDA backend",
+        env!("CARGO_PKG_NAME")
+    );
 }
 
 #[cfg(target_os = "windows")]
 fn main() -> impl std::process::Termination {
     windows_example::run()
-}
-
-#[cfg(target_os = "linux")]
-fn main() -> impl std::process::Termination {
-    linux_example::run()
 }
 
 #[cfg(target_os = "windows")]
@@ -103,91 +100,6 @@ mod windows_example {
                 ffmpeg::software::scaling::Flags::BILINEAR,
             );
             let upload = D3d11Upload::new("upload", gpu.device(), width, height);
-            let branch = ctx
-                .branch()
-                .pipe(scaler)
-                .pipe(upload)
-                .queue("encode-frames", 8)
-                .pipe(encoder)
-                .to(muxer_sink)?;
-            ctx.attach(source, 0, branch)?;
-            Ok(())
-        })?;
-
-        println!(
-            "recording {}s of {width}x{height} h264_nvenc to {} ...",
-            recording.frame_count / 30,
-            recording.path
-        );
-        pipeline.run();
-        let feeder = common::spawn_feeder(source_handle, width, height, recording.frame_count);
-        common::finish(&pipeline, feeder, &recording.path)
-    }
-}
-
-#[cfg(target_os = "linux")]
-mod linux_example {
-    use ffmpeg_next as ffmpeg;
-    use media_pp::{
-        elements::{
-            AppSource, CudaCodec, CudaDevice, CudaEncoder, CudaEncoderOptions, CudaFrameFormat,
-            CudaUpload, Mp4Muxer, SwScaler,
-        },
-        pipeline::Pipeline,
-    };
-
-    use crate::common;
-
-    pub fn run() -> media_pp::Result<()> {
-        media_pp::init()?;
-        let _log_guard = media_pp::log::init(
-            env!("CARGO_PKG_NAME"),
-            "logs",
-            media_pp::log::Level::Trace,
-            7,
-        )?;
-        let recording = common::parse_args()?;
-        let (width, height) = (recording.width, recording.height);
-
-        // One CUDA context for both stages — the invariant every CUDA element
-        // in this crate is built around, and what the encoder validates every
-        // incoming frame against.
-        let cuda = CudaDevice::new().map_err(|e| media_pp::Error::Other(e.to_string()))?;
-        let (source, source_handle) = AppSource::new("source", 8);
-
-        let encoder = CudaEncoder::new(
-            "encoder",
-            &cuda,
-            CudaEncoderOptions {
-                codec: CudaCodec::H264,
-                input_format: CudaFrameFormat::Nv12,
-                width,
-                height,
-                time_base: recording.time_base,
-                frame_rate: recording.frame_rate,
-                bit_rate: 4_000_000,
-                gop_size: 60,
-            },
-        )
-        .map_err(|e| media_pp::Error::Other(e.to_string()))?;
-
-        let mut muxer = Mp4Muxer::create(&recording.path)?;
-        muxer.add_stream("video", encoder.parameters(), recording.time_base)?;
-        let muxer_sink = muxer.open()?.pop().expect("exactly one stream was added");
-
-        let pipeline = Pipeline::new("nvenc-record", source, |source, ctx| {
-            // AppSource emits YUV420P on the CPU, so this one SwScaler is the
-            // only format conversion in the graph; the upload requires NV12
-            // and everything downstream of it is GPU-resident.
-            let scaler = SwScaler::new(
-                "to-nv12",
-                ffmpeg::format::Pixel::NV12,
-                width,
-                height,
-                ffmpeg::software::scaling::Flags::BILINEAR,
-            );
-            let upload = CudaUpload::new("upload", &cuda, CudaFrameFormat::Nv12, width, height)
-                .map_err(|e| media_pp::Error::Other(e.to_string()))?;
             let branch = ctx
                 .branch()
                 .pipe(scaler)

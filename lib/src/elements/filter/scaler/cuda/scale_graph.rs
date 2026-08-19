@@ -155,33 +155,62 @@ impl CudaScaleGraph {
         let buffersink = ffmpeg::filter::find("buffersink")
             .ok_or(CudaScalerError::FilterNotFound("buffersink"))?;
 
-        // `scale_cuda` neither reorders nor retimes, and nothing between the
-        // source and the sink rescales timestamps, so a nominal 1/1 time base
-        // carries each frame's own pts through numerically unchanged. This
-        // graph is not the place that decides what a pts *means*.
-        let args = format!(
-            "video_size={}x{}:pix_fmt={}:time_base=1/1:pixel_aspect=1/1",
-            frame.width(),
-            frame.height(),
-            ffi::AVPixelFormat::AV_PIX_FMT_CUDA as i32,
-        );
-        let mut source = graph.add(&buffer, "in", &args)?;
-
-        // The size and format above describe the frames; *this* is what tells
-        // libavfilter which CUDA pool they come from, and without it
-        // `scale_cuda` has no device to configure itself on.
-        unsafe {
+        // Allocated and initialized in two steps rather than through
+        // `Graph::add`, which is `avfilter_graph_create_filter` and therefore
+        // initializes the filter with its argument string immediately. Since
+        // FFmpeg 7.1 (commit a7fe27f9, "lavfi/buffersrc: validate hw context
+        // presence in video_init()") a hardware `pix_fmt` without an
+        // `hw_frames_ctx` is rejected at *init*, not at graph-config time, so
+        // the frames context has to be in place before the filter is
+        // initialized. Everything the argument string used to carry travels in
+        // the same `AVBufferSrcParameters` instead.
+        let mut source = unsafe {
+            let context = ffi::avfilter_graph_alloc_filter(
+                graph.as_mut_ptr(),
+                buffer.as_ptr(),
+                c"in".as_ptr(),
+            );
+            if context.is_null() {
+                return Err(CudaScalerError::BufferSrcAlloc);
+            }
+            // The graph now owns `context` and frees it on drop, even
+            // uninitialized, so an early return below leaks nothing.
             let params = ffi::av_buffersrc_parameters_alloc();
             if params.is_null() {
                 return Err(CudaScalerError::BufferSrcParamsAlloc);
             }
+            (*params).format = ffi::AVPixelFormat::AV_PIX_FMT_CUDA as i32;
+            (*params).width = frame.width() as i32;
+            (*params).height = frame.height() as i32;
+            // `scale_cuda` neither reorders nor retimes, and nothing between
+            // the source and the sink rescales timestamps, so a nominal 1/1
+            // time base carries each frame's own pts through numerically
+            // unchanged. This graph is not the place that decides what a pts
+            // *means*.
+            (*params).time_base = ffi::AVRational { num: 1, den: 1 };
+            (*params).sample_aspect_ratio = ffi::AVRational { num: 1, den: 1 };
+            // `av_buffersrc_parameters_alloc` zeroes the struct, and zero is
+            // `AVCOL_SPC_RGB` rather than "unset" — say unspecified explicitly
+            // so the link keeps the same colorimetry the argument string left
+            // it with.
+            (*params).color_space = ffi::AVColorSpace::AVCOL_SPC_UNSPECIFIED;
+            (*params).color_range = ffi::AVColorRange::AVCOL_RANGE_UNSPECIFIED;
+            // This is what tells libavfilter which CUDA pool the frames come
+            // from; without it `scale_cuda` has no device to configure itself
+            // on. libavfilter takes its own reference, so the frame's context
+            // need not outlive this call.
             (*params).hw_frames_ctx = frames_ctx;
-            let code = ffi::av_buffersrc_parameters_set(source.as_mut_ptr(), params);
+            let code = ffi::av_buffersrc_parameters_set(context, params);
             ffi::av_free(params.cast());
             if code < 0 {
                 return Err(CudaScalerError::BufferSrcConfig(code));
             }
-        }
+            let code = ffi::avfilter_init_str(context, std::ptr::null());
+            if code < 0 {
+                return Err(CudaScalerError::BufferSrcInit(code));
+            }
+            ffmpeg::filter::Context::wrap(context)
+        };
 
         let mut scale = graph.add(
             &scale,

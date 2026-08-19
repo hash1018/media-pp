@@ -10,11 +10,12 @@ frame back over PCIe and converting and encoding it on the CPU, because
 `SwEncoder` has no GPU input path. Here the frame stays on the GPU from the
 upload onward.
 
-Both platforms run the identical graph and CLI; only the GPU stack differs —
-`D3d11Upload`/`D3d11NvencEncoder` on Windows, `CudaUpload`/`CudaEncoder` on
-Linux. Needs an NVIDIA GPU and an ffmpeg build with NVENC; both encoders
-report a typed error rather than panicking on anything else. No window and no
-media file are involved, so this runs headless.
+`cuda_record` is the same graph on the CUDA backend, in its own crate because
+CUDA is a vendor backend rather than a platform one and runs on Windows too.
+
+Needs an NVIDIA GPU and an ffmpeg build with NVENC; `D3d11NvencEncoder` reports
+a typed error rather than panicking on anything else. No window and no media
+file are involved, so this runs headless.
 
 ```sh
 cargo run -p nvenc_record -- [output.mp4] [seconds]

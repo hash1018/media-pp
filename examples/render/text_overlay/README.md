@@ -14,17 +14,15 @@ layer itself never receives `Pipeline` frames — it's a handle driven directly
 by `set_text`/`set_position`, built through the compositor's own
 `add_text_layer`.
 
-- Windows: `D3d11Upload` -> `D3d11VideoCompositor` (+ `D3d11TextLayerHandle`)
-  -> `D3d11Download`
-- Linux: `CudaUpload` -> `CudaVideoCompositor` (+ `CudaTextLayerHandle`) ->
-  `CudaDownload`
+The GPU stack is `D3d11Upload` -> `D3d11VideoCompositor` (+
+`D3d11TextLayerHandle`) -> `D3d11Download`, and the keyboard controls come from
+the Win32 console.
 
-Both run the identical graph and CLI. Glyph rasterization is shared code;
-what differs is how the coverage is drawn — a D3D11 blend state on one side,
-a CUDA blend kernel on the other. The keyboard controls differ for the same
-kind of reason: a Win32 console on Windows, a termios raw-mode terminal on
-Linux. Linux needs an NVIDIA GPU and a system font (DejaVu Sans or Liberation
-Sans; the example prints which one it found).
+`cuda_text_overlay` is the same graph on the CUDA backend, in its own crate
+because CUDA is a vendor backend rather than a platform one and runs on Windows
+too. Glyph rasterization is shared code between them; what differs is how the
+coverage is drawn — a D3D11 blend state on one side, a CUDA blend kernel on the
+other.
 
 ```sh
 cargo run -p text_overlay -- [output.mp4] [seconds]

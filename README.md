@@ -103,8 +103,15 @@ The examples are grouped by purpose:
 
 - `examples/core`: decoding, queues, fan-out, dynamic tees, app sources/sinks,
   audio, muxing, HLS, and CPU compositing.
+- `examples/cuda`: headless CUDA recording and GPU text compositing. CUDA is a
+  vendor backend rather than a platform one, so these build and run on both
+  Windows and Linux; the `examples/render` crates of the same shape are their
+  D3D11 counterparts.
 - `examples/render`: D3D11/D3D12 playback, upload, capture, synchronization,
-  GPU compositing, NVENC hardware encoding, and recording.
+  GPU compositing, NVENC hardware encoding, and recording. The CUDA halves of
+  the display and screen-capture examples stay here because their renderer
+  (Vulkan external memory over an fd) and capture source (PipeWire) are
+  genuinely Linux-only.
 - `examples/rtsp`: publishing, seeking, and receiving RTSP streams.
 - `examples/vision`: scaling and ONNX object detection.
 - `examples/webrtc`: data and encoded A/V loopback pipelines.

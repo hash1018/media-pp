@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "lib",
     "examples/core/*",
+    "examples/cuda/*",
     "examples/render/*",
     "examples/rtsp/*",
     "examples/vision/*",

@@ -48,11 +48,17 @@ pub enum CudaScalerError {
     #[error("CudaScaler cannot scale {0:?} surfaces")]
     UnsupportedSurfaceFormat(ffmpeg::format::Pixel),
 
+    #[error("failed to allocate the buffer source filter")]
+    BufferSrcAlloc,
+
     #[error("failed to allocate the buffer source parameters")]
     BufferSrcParamsAlloc,
 
     #[error("failed to configure the buffer source (code {0})")]
     BufferSrcConfig(i32),
+
+    #[error("failed to initialize the buffer source (code {0})")]
+    BufferSrcInit(i32),
 
     #[error("the filter graph rejected a frame (code {0})")]
     BufferSrcPush(i32),
