@@ -29,6 +29,10 @@ rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
 ffmpeg-next = "8"
+# Never referenced from code — the FFI comes through `ffmpeg::ffi`. Cargo hands the
+# FFmpeg version that `ffmpeg-sys-next` detected only to the build script of a crate
+# that depends on it directly, and `build.rs` needs it to reject FFmpeg older than 8.0.
+ffmpeg-sys-next = { version = "8.1", default-features = false }
 crossbeam-channel = "0.5"
 crossbeam-queue = "0.3"
 arc-swap = "1"

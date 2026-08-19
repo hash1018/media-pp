@@ -1959,6 +1959,7 @@ dependencies = [
  "crossbeam-queue",
  "enumflags2",
  "ffmpeg-next",
+ "ffmpeg-sys-next",
  "futures-util",
  "log",
  "ndarray",

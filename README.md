@@ -182,8 +182,10 @@ buffers are not logged one record per buffer.
 
 ## Requirements and platform notes
 
-- Install FFmpeg development headers and libraries in a location discoverable
-  by `ffmpeg-sys-next`.
+- Install FFmpeg 8.0 or newer development headers and libraries in a location
+  discoverable by `ffmpeg-sys-next`. The build script reads the version
+  `ffmpeg-sys-next` detected and fails with an explicit message on anything
+  older, rather than letting the mismatch surface as a link or runtime error.
 - Rust 1.88 or newer is required.
 - D3D11VA/D3D12VA require compatible FFmpeg builds, Windows drivers, and GPU
   hardware. Check available accelerators with `ffmpeg -hwaccels`.
