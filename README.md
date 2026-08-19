@@ -93,19 +93,9 @@ buffers, codecs, and muxers; `Pipeline::stop` abandons buffered work immediately
 Backend-specific elements require their corresponding Cargo feature and are
 available only on that backend's platform. See each type's Rust documentation
 for buffer requirements, ownership, error behavior, and runtime-control
-semantics.
-
-Screen capture is not one element with a platform switch. `DxgiCaptureSource`
-selects what it captures (`CaptureArea::Output`/`Region`, resolved at `open`),
-while `PipeWireScreenCaptureSource` cannot: Wayland exposes no API to name a monitor,
-window, or rectangle, so the compositor's own portal dialog decides and the
-element only filters what that dialog lists. Both implement `SourceElement` and
-emit the same full-range BGRA frames, so only the construction site differs.
-Audio is the opposite case: `PipeWireAudioCaptureSource` needs no portal, so it
-does select its device programmatically and mirrors `WasapiCaptureSource`'s
-`list_devices`-then-pick API.
-`WebRtcPeer` is the WebRTC driver and creates the `WebRtcHandle` used to add
-tracks and obtain each `WebRtcTrackSink`/`WebRtcTrackSource` pair.
+semantics — for example, why `DxgiCaptureSource` and
+`PipeWireScreenCaptureSource` are separate types rather than one struct with a
+platform switch is explained on `PipeWireScreenCaptureSource` itself.
 
 ## Examples
 
@@ -114,10 +104,7 @@ The examples are grouped by purpose:
 - `examples/core`: decoding, queues, fan-out, dynamic tees, app sources/sinks,
   audio, muxing, HLS, and CPU compositing.
 - `examples/render`: D3D11/D3D12 playback, upload, capture, synchronization,
-  GPU compositing, NVENC hardware encoding, and recording. `screen_record` and
-  `screen_audio_record` additionally cover Wayland capture through PipeWire, and
-  `av_playback` runs NVDEC -> CUDA -> Vulkan playback on Linux, and
-  `nvenc_record` encodes on NVENC from either backend.
+  GPU compositing, NVENC hardware encoding, and recording.
 - `examples/rtsp`: publishing, seeking, and receiving RTSP streams.
 - `examples/vision`: scaling and ONNX object detection.
 - `examples/webrtc`: data and encoded A/V loopback pipelines.
@@ -132,9 +119,9 @@ cargo run -p scale -- path/to/video.mp4
 ```
 
 Backend-specific examples enable their required library features in their own
-`Cargo.toml` files, per target where an example covers more than one platform —
-`audio_capture` builds against WASAPI on Windows and PipeWire on Linux from one
-source file. Run an example without arguments to see its usage line.
+`Cargo.toml` files, per target where an example covers more than one
+platform. Each such example's module docs explain how the backends differ;
+run an example without arguments to see its usage line.
 
 ## Feature flags
 
@@ -197,36 +184,13 @@ buffers are not logged one record per buffer.
   immediate context.
 - `D3d11Decoder` uses a fixed-size FFmpeg surface pool; `extra_hw_frames` must
   cover the deepest downstream buffering.
-- `PipeWireScreenCaptureSource` needs `libpipewire-0.3` development files, a running
-  PipeWire session, and an `xdg-desktop-portal` backend implementing
-  `org.freedesktop.portal.ScreenCast`. Its `open` shows the compositor's
-  screen-share dialog and blocks until the user answers, unless a previously
-  issued restore token is supplied. It negotiates CPU-mapped BGRx/BGRA buffers
-  only; DMA-BUF is not used.
-- A `PipeWireScreenCaptureSource` capturing a *monitor* can stop receiving
-  frames entirely while some client is fullscreen; GNOME's own recorder behaves
-  the same way, so this is a compositor behaviour rather than something the
-  element can negotiate around. Capturing a *window* is unaffected and keeps
-  delivering at full rate. A monitor capture that stops receiving simply keeps
-  emitting its last frame until the screen changes again.
-- Closing a captured *window* ends the capture with a typed `SourceGone` error.
-  The PipeWire stream cannot tell that apart from the stall above, so the
-  element watches the portal session's `Closed` signal instead, which is what
-  keeps a permanent loss distinct from something that may still recover.
-- A *window* stream is sized to the monitor, not to the window: a smaller window
-  arrives top-left with the rest of the frame black, and one spanning two
-  monitors is clipped rather than widening the stream. The element also follows
-  a mid-stream size renegotiation should a compositor do one, so the size `open`
-  reports is the initial one; chain a `Scaler` before any encoder or muxer,
-  since it rebuilds its context per input size and emits a fixed one.
-- `PipeWireAudioCaptureSource` needs the same PipeWire development files and a
-  running session, but no portal: audio nodes are enumerated with
-  `list_devices` and selected programmatically, with no dialog. Capturing a
-  `Sink` device records that device's monitor (system audio); capturing a
-  `Source` device records a microphone.
-- `PipeWireAudioRenderer` is the playback counterpart and the only element that
-  can act as the audio master for `PlaybackClock` on Linux, so binding it is
-  what hands video scheduling from the wall clock to audio output.
+- `PipeWireScreenCaptureSource` needs `libpipewire-0.3` development files, a
+  running PipeWire session, and an `xdg-desktop-portal` backend implementing
+  `org.freedesktop.portal.ScreenCast`. See its own Rust documentation for the
+  interactive portal dialog, restore tokens, window-vs-monitor stall behavior,
+  and closed-window detection this implies.
+- `PipeWireAudioCaptureSource`/`PipeWireAudioRenderer` need the same PipeWire
+  development files and a running session, but no portal.
 - `D3d11NvencEncoder` needs an NVIDIA GPU and an FFmpeg build with NVENC. It
   fails to open with a typed error, not a panic, on any other GPU. The other
   `d3d11` elements are vendor-neutral.

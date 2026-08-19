@@ -202,6 +202,18 @@ documentation and implementation differ.
 - Examples take their media path as a required argument, print a `usage:` line
   to stderr when it is missing, and exit non-zero. Do not reintroduce a default
   path.
+- Every example crate keeps a `README.md` in its own directory, since GitHub
+  renders it automatically when someone browses to that folder but never
+  surfaces the crate's own doc comment unmoved. Source it from the example's
+  existing `//!`/`///` doc comment where one exists — reformatted, not
+  reworded — and write it fresh from the actual pipeline-construction code
+  where one does not; either way, state only what the code shows, and keep
+  content that belongs in this file (feature flags, install requirements,
+  general build instructions) out of it. State the actual element chain with
+  the `SourceType -> Filter -> SinkType` arrow notation this codebase already
+  uses in its own doc comments — read the pipeline's wiring closure to get it
+  right, not just the element imports. When adding a new example, add its
+  `README.md` in the same change.
 - For a new or changed example, run that actual example end to end. For recorded
   video/audio, inspect the result with `ffprobe`; for visual behavior, extract
   representative frames and verify the expected pixels/content instead of only

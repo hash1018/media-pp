@@ -29,6 +29,12 @@ use winit::{
 /// hold: it stops the pipeline on `CloseRequested` and joins the playback
 /// thread in `Drop`, both before the `Window` is dropped.
 pub struct WindowTarget {
+    // Only `linux_example::play` (main.rs) reads this, for `VulkanGpuContext`;
+    // the Windows backend presents through `window` alone. Compiling for one
+    // platform at a time makes that a dead-code warning on the other, not a
+    // real defect — see this type's own doc comment for why the field still
+    // belongs on the shared shell struct instead of behind a `cfg`.
+    #[allow(dead_code)]
     pub display: RawDisplayHandle,
     pub window: RawWindowHandle,
     pub width: u32,
