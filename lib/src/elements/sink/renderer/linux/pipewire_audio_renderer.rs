@@ -212,6 +212,20 @@ impl Pending {
     }
 }
 
+/// Discards every frame a seek or a stop invalidated: the queue plus the one
+/// frame the last graph cycle was still copying from.
+///
+/// Only the PipeWire thread can do this. The element holds the sending half
+/// of `frames` and cannot drain it, so a handler that cleared `leftover`
+/// alone left up to a full queue -- by design, enough audio to survive
+/// several graph cycles -- to play out after the seek that invalidated it.
+fn discard_queued(frames: &Receiver<Vec<u8>>, leftover: &Mutex<Pending>) {
+    while frames.try_recv().is_ok() {}
+    if let Ok(mut leftover) = leftover.lock() {
+        *leftover = Pending::default();
+    }
+}
+
 /// Sent into the PipeWire thread's own main loop.
 enum Command {
     SetActive(bool),
@@ -737,16 +751,13 @@ fn run_pipewire(
         // whole life of the loop, while `stream`/`leftover` stay usable below.
         let command_stream = stream.clone();
         let command_leftover = leftover.clone();
+        let command_frames = frames.clone();
         let quit = mainloop.clone();
         let _commands = commands.attach(mainloop.loop_(), move |command| match command {
             Command::SetActive(active) => {
                 let _ = command_stream.set_active(active);
             }
-            Command::Flush => {
-                if let Ok(mut leftover) = command_leftover.lock() {
-                    *leftover = Pending::default();
-                }
-            }
+            Command::Flush => discard_queued(&command_frames, &command_leftover),
             Command::Terminate => quit.quit(),
         });
 
@@ -930,6 +941,30 @@ fn run_pipewire(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A seek invalidates the queue, not just the frame being copied. The
+    /// element cannot drain the queue itself -- it holds the sending half --
+    /// so this is the whole of what `Command::Flush` has to accomplish.
+    #[test]
+    fn a_flush_discards_the_queue_and_not_only_the_frame_in_flight() {
+        let (tx, rx) = crossbeam_channel::bounded::<Vec<u8>>(8);
+        for byte in 0..4u8 {
+            tx.send(vec![byte; 16]).expect("the queue has room");
+        }
+        let leftover = Mutex::new(Pending::new(vec![0xAB; 16]));
+
+        discard_queued(&rx, &leftover);
+
+        assert!(rx.is_empty(), "queued audio must not outlive the seek");
+        assert!(
+            leftover.lock().unwrap().is_empty(),
+            "the frame being copied must not outlive the seek either"
+        );
+        // Still usable afterwards: a seek is followed by new audio, not by a
+        // dead stream.
+        tx.send(vec![7; 16]).expect("the queue still accepts audio");
+        assert_eq!(rx.try_recv().expect("the new frame arrives"), vec![7; 16]);
+    }
 
     #[test]
     fn only_interleaved_formats_are_accepted() {
