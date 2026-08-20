@@ -4,7 +4,7 @@
 with no CPU color conversion anywhere in the graph.
 
 - Windows: `DxgiCaptureSource` (GPU mode) `-> D3d11NvencEncoder -> Mp4Muxer`
-- Linux: `PipeWireScreenCaptureSource -> CudaUpload -> CudaEncoder -> Mp4Muxer`
+- Linux: `PipeWireScreenCaptureSource` (GPU mode) `-> CudaEncoder -> Mp4Muxer`
 
 The contrast with `screen_record` is the whole point. That example runs
 `capture -> SwScaler -> SwEncoder`: every frame is converted BGRA->YUV420P by
@@ -15,10 +15,11 @@ does its own color conversion inside the encode block — so there is no
 Recording six seconds of a 1920x1080 desktop at 30fps costs about a third of
 the CPU time the software path does.
 
-What the platform forces is where the pixels start. DXGI hands over a
-GPU-resident texture, so nothing is copied at all. PipeWire delivers
-CPU-mapped buffers, so the Linux branch has one `CudaUpload` — a memcpy per
-frame, not a conversion. Everything after it is GPU-resident on both.
+The pixels start GPU-resident on both platforms. DXGI hands over a texture
+under `CaptureMode::Gpu`; `PipeWireScreenCaptureSource::open_gpu` negotiates
+DMA-BUF and imports each captured buffer into a CUDA BGRA surface, so the
+Linux branch needs no `CudaUpload` and the two graphs have the same elements.
+Nothing in either branch copies a frame through system memory.
 
 Needs an NVIDIA GPU and an ffmpeg build with NVENC. `Pipeline::finish` sends
 ordered EOS through the encoder and muxer so delayed frames are drained

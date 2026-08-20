@@ -9,11 +9,10 @@
 //! packets ever come back.
 //!
 //! Both platforms run the identical graph and terminal sink; only the GPU
-//! stack differs. What the platform does force is where the pixels start:
-//! DXGI can hand over a GPU-resident texture, so nothing is copied at all,
-//! while PipeWire delivers CPU-mapped buffers, so the Linux branch has one
-//! `CudaUpload` — a memcpy per frame, not a conversion. Everything after it
-//! is GPU-resident on both.
+//! stack differs. The pixels start GPU-resident on both: DXGI hands over a
+//! texture under `CaptureMode::Gpu`, and PipeWire hands over a DMA-BUF that
+//! `open_gpu` imports into a CUDA surface. Nothing in either branch copies a
+//! frame through system memory.
 //!
 //! Needs an NVIDIA GPU and an ffmpeg build with NVENC; both encoders report a
 //! typed error rather than panicking on anything else.
@@ -124,13 +123,12 @@ mod windows_example {
     }
 }
 
-/// The Linux half of the same example. Deliberately the same graph as
-/// `windows_example` — capture -> Queue -> NVENC -> Mp4Muxer, same codec,
-/// same terminus — with one `CudaUpload` the platform forces: PipeWire
-/// negotiates CPU-mapped buffers, so the captured BGRA has to be copied to
-/// the GPU before NVENC can read it. It is copied, not converted; the BGRA
-/// stays BGRA all the way into the encode block, which is what keeps
-/// libswscale out of this graph.
+/// The Linux half of the same example, and the same graph as
+/// `windows_example` down to the element count: capture -> Queue -> NVENC ->
+/// Mp4Muxer, same codec, same terminus. `open_gpu` negotiates DMA-BUF and
+/// imports each captured buffer straight into a CUDA BGRA surface, so there
+/// is no upload element here and the BGRA stays BGRA all the way into the
+/// encode block — which is what keeps libswscale out of this graph.
 ///
 /// The CLI differences are the same ones `screen_record` documents: Wayland
 /// has no way to name a monitor, so the compositor prompts on the first run
@@ -141,8 +139,7 @@ mod linux_example {
     use media_pp::{
         elements::{
             CaptureSourceKind, CudaCodec, CudaDevice, CudaEncoder, CudaEncoderOptions,
-            CudaFrameFormat, CudaUpload, Mp4Muxer, PipeWireScreenCaptureOptions,
-            PipeWireScreenCaptureSource,
+            CudaFrameFormat, Mp4Muxer, PipeWireScreenCaptureOptions, PipeWireScreenCaptureSource,
         },
         pipeline::Pipeline,
     };
@@ -174,7 +171,13 @@ mod linux_example {
             eprintln!("opening the portal — approve the screen-share dialog to continue...");
         }
 
-        let (source, format, restore_token) = PipeWireScreenCaptureSource::open(
+        // One CUDA context for the capture and the encoder — the invariant
+        // every CUDA element in this crate is built around, and what the
+        // encoder validates every incoming frame against. Built before the
+        // capture because `open_gpu` allocates its surfaces from it.
+        let cuda = CudaDevice::new().map_err(|e| media_pp::Error::Other(e.to_string()))?;
+
+        let (source, format, restore_token) = PipeWireScreenCaptureSource::open_gpu(
             "screen",
             PipeWireScreenCaptureOptions {
                 fps: 30,
@@ -182,14 +185,10 @@ mod linux_example {
                 include_cursor: true,
                 restore_token,
             },
+            &cuda,
         )?;
 
-        // One CUDA context for the upload and the encoder — the invariant
-        // every CUDA element in this crate is built around, and what the
-        // encoder validates every incoming frame against.
-        let cuda = CudaDevice::new().map_err(|e| media_pp::Error::Other(e.to_string()))?;
-
-        // The capture's own size, not a rounded-down one: `CudaUpload` is
+        // The capture's own size, not a rounded-down one: the encoder is
         // fixed-size, so anything else would reject every frame. A stream
         // whose dimensions are odd would need a `CudaScaler` in between, and
         // NVENC reports that as a typed error at open rather than at the
@@ -218,14 +217,11 @@ mod linux_example {
 
         let (width, height) = (format.width, format.height);
         let pipeline = Pipeline::new("screen-record-nvenc", source, |source, ctx| {
-            let upload = CudaUpload::new("upload", &cuda, CudaFrameFormat::Bgra, width, height)
-                .map_err(|e| media_pp::Error::Other(e.to_string()))?;
             let branch = ctx
                 .branch()
-                // Thread boundary so upload and encode cannot stall capture;
-                // the compositor keeps producing at its own rate.
+                // Thread boundary so the encode cannot stall capture; the
+                // compositor keeps producing at its own rate.
                 .queue("captured", 4)
-                .pipe(upload)
                 .pipe(encoder)
                 .to(muxer_sink)?;
             ctx.attach(source, 0, branch)?;

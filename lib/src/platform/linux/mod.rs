@@ -3,3 +3,9 @@
     feature = "pipewire-audio-renderer"
 ))]
 pub(crate) mod pipewire;
+
+/// DMA-BUF -> CUDA import, for `PipeWireScreenCaptureSource`'s GPU capture
+/// mode. Needs both features: the buffers come from the PipeWire capture and
+/// land in a CUDA frame.
+#[cfg(all(feature = "pipewire-screen-capture", feature = "cuda"))]
+pub(crate) mod dmabuf_cuda;

@@ -18,6 +18,16 @@ pub use crate::platform::cuda::{CudaDevice, CudaDeviceError, CudaDriverError, Cu
 ))]
 pub use crate::platform::windows::wasapi::{WasapiDevice, WasapiDeviceKind};
 
+/// The failure detail behind
+/// [`PipeWireScreenCaptureSourceError::GpuImport`] — what went wrong setting
+/// up or running the DMA-BUF import that
+/// [`PipeWireScreenCaptureSource::open_gpu`] depends on.
+#[cfg(all(
+    target_os = "linux",
+    feature = "pipewire-screen-capture",
+    feature = "cuda"
+))]
+pub use crate::platform::linux::dmabuf_cuda::DmaBufCudaError;
 #[cfg(all(
     target_os = "linux",
     any(

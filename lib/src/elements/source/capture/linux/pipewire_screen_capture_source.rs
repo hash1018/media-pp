@@ -26,6 +26,8 @@ use std::{
 
 use enumflags2::BitFlags;
 use ffmpeg_next as ffmpeg;
+#[cfg(feature = "cuda")]
+use ffmpeg_next::ffi;
 use pipewire as pw;
 use pw::{properties::properties, spa};
 use spa::pod::Pod;
@@ -33,6 +35,16 @@ use spa::sys as spa_sys;
 use thiserror::Error as ThisError;
 
 use crate::pp_log::{PpLog, pp_error, pp_info, pp_warn};
+
+#[cfg(feature = "cuda")]
+use crate::{
+    elements::CudaUploadError,
+    elements::filter::upload::cuda_upload::{create_hw_frames_ctx, free_buffer},
+    platform::cuda::{CudaDevice, CudaFrameFormat},
+    platform::linux::dmabuf_cuda::{
+        CudaBgraSurface, DmaBufCudaError, DmaBufCudaImporter, DmaBufPlane,
+    },
+};
 
 use crate::{
     buffer::MediaBuffer,
@@ -111,6 +123,40 @@ pub enum PipeWireScreenCaptureSourceError {
 
     #[error("PipeWireScreenCaptureSource doesn't support seeking a live capture")]
     SeekUnsupported,
+
+    /// GPU capture could not be set up, or a captured buffer could not be
+    /// imported. Terminal: every following buffer would fail the same way,
+    /// and this mode deliberately has no CPU fallback to drop back to — see
+    /// [`PipeWireScreenCaptureSource::open_gpu`].
+    #[cfg(feature = "cuda")]
+    #[error("GPU capture failed: {0}")]
+    GpuImport(#[from] DmaBufCudaError),
+
+    /// The CUDA pool captured surfaces are allocated from could not be built,
+    /// or would not hand one out. The same error `CudaUpload` reports for the
+    /// same operations, since this allocates from an identically shaped
+    /// frames context.
+    #[cfg(feature = "cuda")]
+    #[error("GPU capture's CUDA frame pool failed: {0}")]
+    CudaFrames(#[from] crate::elements::CudaUploadError),
+
+    /// A pooled CUDA frame arrived with no surface pointer to import into.
+    #[cfg(feature = "cuda")]
+    #[error("the pooled CUDA frame carries no surface")]
+    NoCudaSurface,
+
+    /// Taking this element's own reference to the caller's CUDA device
+    /// context failed.
+    #[cfg(feature = "cuda")]
+    #[error("failed to reference the CUDA device context")]
+    CudaDeviceRef,
+
+    /// GPU capture negotiated DMA-BUF and the compositor sent something else
+    /// anyway. Not a fallback point: the frames context, the import, and
+    /// everything downstream are built for CUDA surfaces.
+    #[cfg(feature = "cuda")]
+    #[error("GPU capture expected a DMA-BUF buffer, got {0}")]
+    NotDmaBuf(String),
 }
 
 /// Which kinds of source the portal's picker offers the user — see
@@ -202,10 +248,132 @@ struct Latest {
     /// `false` until the first real (non-empty) frame lands, so `run` can
     /// tell "nothing captured yet" apart from "a genuinely black screen".
     have_frame: bool,
+    /// The latest captured CUDA surface, in GPU mode only — `pixels` stays
+    /// empty there and this carries the frame instead.
+    ///
+    /// A whole `AVFrame` rather than a raw pointer: the surface belongs to a
+    /// refcounted pool, and holding this reference is what stops that
+    /// surface being handed out again while it is still the latest capture.
+    #[cfg(feature = "cuda")]
+    frame: Option<ffmpeg::frame::Video>,
     /// Set when the PipeWire thread hits an unrecoverable stream error, so
     /// `run` can surface it instead of silently emitting stale frames
     /// forever.
     error: Option<PipeWireScreenCaptureSourceError>,
+}
+
+/// What `run_pipewire` captures into, chosen by which constructor was used.
+enum CaptureTarget {
+    /// CPU-mapped buffers (`MemFd`/`MemPtr`) copied into plain BGRA frames.
+    Cpu,
+    /// DMA-BUF imported into CUDA BGRA surfaces — see
+    /// [`PipeWireScreenCaptureSource::open_gpu`].
+    #[cfg(feature = "cuda")]
+    Gpu(HwDeviceCtx),
+}
+
+/// The CUDA device context `open_gpu` referenced, on its way to the PipeWire
+/// thread.
+///
+/// Raw because `AVBufferRef` has no wrapper of its own here, and `Send`
+/// because it is a refcounted heap object with no thread affinity — the same
+/// reasoning `CudaUpload` documents for holding one.
+#[cfg(feature = "cuda")]
+struct HwDeviceCtx(*mut ffi::AVBufferRef);
+
+#[cfg(feature = "cuda")]
+unsafe impl Send for HwDeviceCtx {}
+
+/// GPU-mode capture state, owned by the PipeWire thread: the DMA-BUF import
+/// and the CUDA pool its results land in.
+#[cfg(feature = "cuda")]
+struct GpuCapture {
+    importer: DmaBufCudaImporter,
+    /// This element's own reference to the shared device context, released in
+    /// `Drop`.
+    hw_device_ctx: *mut ffi::AVBufferRef,
+    /// The BGRA CUDA pool captured surfaces come from. Rebuilt when the
+    /// compositor renegotiates the size — pooled surfaces are allocated to a
+    /// fixed one, and outstanding frames keep the old context alive through
+    /// their own references.
+    hw_frames_ctx: *mut ffi::AVBufferRef,
+    width: u32,
+    height: u32,
+}
+
+#[cfg(feature = "cuda")]
+impl GpuCapture {
+    fn new(
+        hw_device_ctx: *mut ffi::AVBufferRef,
+    ) -> std::result::Result<Self, PipeWireScreenCaptureSourceError> {
+        // Built before the stream connects: its modifier list is what the
+        // format negotiation offers the compositor.
+        let importer = DmaBufCudaImporter::new()?;
+        Ok(Self {
+            importer,
+            hw_device_ctx,
+            hw_frames_ctx: std::ptr::null_mut(),
+            width: 0,
+            height: 0,
+        })
+    }
+
+    /// Imports one captured DMA-BUF into a fresh CUDA surface.
+    fn capture(
+        &mut self,
+        plane: DmaBufPlane,
+        width: u32,
+        height: u32,
+    ) -> std::result::Result<ffmpeg::frame::Video, PipeWireScreenCaptureSourceError> {
+        self.ensure_frames_ctx(width, height)?;
+
+        let mut frame = ffmpeg::frame::Video::empty();
+        let code = unsafe { ffi::av_hwframe_get_buffer(self.hw_frames_ctx, frame.as_mut_ptr(), 0) };
+        if code < 0 {
+            return Err(CudaUploadError::HwFrameGet(code).into());
+        }
+        let surface = CudaBgraSurface::from_frame(&frame)
+            .ok_or(PipeWireScreenCaptureSourceError::NoCudaSurface)?;
+        self.importer.copy_into(plane, width, height, surface)?;
+
+        // The same full-range RGB contract the CPU path stamps on its frames;
+        // downstream cannot read it off a CUDA surface.
+        frame.set_color_space(ffmpeg::color::Space::RGB);
+        frame.set_color_range(ffmpeg::color::Range::JPEG);
+        Ok(frame)
+    }
+
+    fn ensure_frames_ctx(
+        &mut self,
+        width: u32,
+        height: u32,
+    ) -> std::result::Result<(), PipeWireScreenCaptureSourceError> {
+        if !self.hw_frames_ctx.is_null() && (self.width, self.height) == (width, height) {
+            return Ok(());
+        }
+        let frames_ctx = unsafe {
+            create_hw_frames_ctx(self.hw_device_ctx, CudaFrameFormat::Bgra, width, height)
+        }?;
+        if !self.hw_frames_ctx.is_null() {
+            unsafe { free_buffer(self.hw_frames_ctx) };
+        }
+        self.hw_frames_ctx = frames_ctx;
+        self.width = width;
+        self.height = height;
+        Ok(())
+    }
+}
+
+#[cfg(feature = "cuda")]
+impl Drop for GpuCapture {
+    fn drop(&mut self) {
+        unsafe {
+            if !self.hw_frames_ctx.is_null() {
+                free_buffer(self.hw_frames_ctx);
+            }
+            free_buffer(self.hw_device_ctx);
+        }
+    }
 }
 
 /// What the PipeWire thread reports back to `open` once, at startup.
@@ -320,10 +488,20 @@ struct Terminate;
 ///
 /// `Pixel::BGRA`, tagged `color_space = RGB` / `color_range = JPEG` — the same
 /// full-range RGB contract every capture source in this crate emits, so the
-/// same downstream conversions apply. Only CPU-mapped PipeWire buffers
-/// (`MemFd`/`MemPtr`) are negotiated: DMA-BUF is deliberately out of scope
-/// while this crate has no Linux GPU element that could consume a
-/// GPU-resident frame without an immediate round trip back to system memory.
+/// same downstream conversions apply. [`Self::open`] negotiates CPU-mapped
+/// PipeWire buffers (`MemFd`/`MemPtr`) only, so a GPU-resident capture never
+/// arrives as a buffer it would have to drop.
+///
+/// # GPU capture
+///
+/// [`Self::open_gpu`] captures the same desktop into **CUDA-resident**
+/// `Pixel::CUDA` frames instead, by negotiating DMA-BUF and importing each
+/// buffer onto the GPU. That is the mode to use in front of
+/// [`crate::elements::CudaEncoder`]: no compositor readback, no host copy, and
+/// no [`crate::elements::CudaUpload`] in the pipeline. It is a separate
+/// constructor rather than an option because it needs a
+/// [`crate::elements::CudaDevice`] to allocate against, and the two modes
+/// negotiate mutually exclusive buffer kinds.
 pub struct PipeWireScreenCaptureSource {
     name: Arc<str>,
     pp_log: PpLog,
@@ -352,6 +530,10 @@ pub struct PipeWireScreenCaptureSource {
     /// Watches the portal session for the one signal that distinguishes a
     /// vanished source from an idle screen — see `watch_session_closed`.
     session_watcher: Option<JoinHandle<()>>,
+    /// Whether captured frames are CUDA surfaces rather than CPU pixels.
+    /// Fixed at construction by which of `open`/`open_gpu` was used.
+    #[cfg(feature = "cuda")]
+    gpu: bool,
 }
 
 impl PipeWireScreenCaptureSource {
@@ -376,6 +558,59 @@ impl PipeWireScreenCaptureSource {
         options: PipeWireScreenCaptureOptions,
     ) -> std::result::Result<(Self, VideoFormat, Option<String>), PipeWireScreenCaptureSourceError>
     {
+        Self::open_with(name, options, CaptureTarget::Cpu)
+    }
+
+    /// Opens the same capture, but emits **CUDA-resident** `Pixel::CUDA`
+    /// frames (`CudaFrameFormat::Bgra`) instead of CPU ones, so a recording
+    /// pipeline is `PipeWireScreenCaptureSource -> CudaEncoder -> Mp4Muxer`
+    /// with no [`crate::elements::CudaUpload`] in between and no captured
+    /// pixel ever touching system memory.
+    ///
+    /// `device` must be the same [`CudaDevice`] every other CUDA element in
+    /// the pipeline is built from — this element takes its own FFmpeg
+    /// reference, so `device` itself need not outlive the call. The EGL
+    /// device the import runs on is selected by its `EGL_CUDA_DEVICE_NV`, so
+    /// the imported buffer and the frame it lands in are on one GPU by
+    /// construction rather than by agreement.
+    ///
+    /// # No fallback
+    ///
+    /// This negotiates DMA-BUF **only**. A compositor that cannot deliver it
+    /// fails `open_gpu` rather than quietly reverting to the CPU path: the
+    /// point of this mode is the absence of a round trip through system
+    /// memory, and silently reintroducing one would misreport what the
+    /// pipeline does. Call [`Self::open`] to choose that path deliberately.
+    ///
+    /// Needs the driver's own libraries at *run* time — `libEGL.so.1`,
+    /// `libGLESv2.so.2`, and `libcuda.so.1`, all `dlopen`ed, so a build needs
+    /// no development packages for them.
+    #[cfg(feature = "cuda")]
+    pub fn open_gpu(
+        name: impl Into<String>,
+        options: PipeWireScreenCaptureOptions,
+        device: &CudaDevice,
+    ) -> std::result::Result<(Self, VideoFormat, Option<String>), PipeWireScreenCaptureSourceError>
+    {
+        // Referenced here rather than in the PipeWire thread so a failure is
+        // reported by `open_gpu` itself.
+        let hw_device_ctx = unsafe { ffi::av_buffer_ref(device.as_ptr()) };
+        if hw_device_ctx.is_null() {
+            return Err(PipeWireScreenCaptureSourceError::CudaDeviceRef);
+        }
+        Self::open_with(
+            name,
+            options,
+            CaptureTarget::Gpu(HwDeviceCtx(hw_device_ctx)),
+        )
+    }
+
+    fn open_with(
+        name: impl Into<String>,
+        options: PipeWireScreenCaptureOptions,
+        target: CaptureTarget,
+    ) -> std::result::Result<(Self, VideoFormat, Option<String>), PipeWireScreenCaptureSourceError>
+    {
         let name = name.into();
         let pp_log = element_pp_log(ElementType::PipeWireScreenCaptureSource, &name, None);
 
@@ -391,10 +626,15 @@ impl PipeWireScreenCaptureSource {
             height: 0,
             unmappable_buffers: 0,
             have_frame: false,
+            #[cfg(feature = "cuda")]
+            frame: None,
             error: None,
         }));
         let (startup_tx, startup_rx) = mpsc::channel::<Startup>();
         let (terminate_tx, terminate_rx) = pw::channel::channel::<Terminate>();
+
+        #[cfg(feature = "cuda")]
+        let gpu = matches!(target, CaptureTarget::Gpu(_));
 
         let worker = {
             let latest = latest.clone();
@@ -403,7 +643,7 @@ impl PipeWireScreenCaptureSource {
                 .name(format!("{name}-pipewire"))
                 .spawn(move || {
                     if let Err(error) =
-                        run_pipewire(cast, fps, latest.clone(), &startup_tx, terminate_rx)
+                        run_pipewire(cast, fps, target, latest.clone(), &startup_tx, terminate_rx)
                     {
                         // `open` may already have returned by the time a
                         // stream fails, so report through both paths: the
@@ -474,6 +714,23 @@ impl PipeWireScreenCaptureSource {
                 fps,
                 frame_interval: Duration::from_secs_f64(1.0 / fps as f64),
                 frame_index: 0,
+                // GPU mode pools only the small `AVFrame` wrapper: the
+                // surface it references comes from the CUDA frames context
+                // the PipeWire thread allocates from. Same split as
+                // `CudaUpload`.
+                #[cfg(feature = "cuda")]
+                pool: if gpu {
+                    UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {})
+                } else {
+                    UnboundObjectPool::new(
+                        0,
+                        move || {
+                            ffmpeg::frame::Video::new(ffmpeg::format::Pixel::BGRA, width, height)
+                        },
+                        |_| {},
+                    )
+                },
+                #[cfg(not(feature = "cuda"))]
                 pool: UnboundObjectPool::new(
                     0,
                     move || ffmpeg::frame::Video::new(ffmpeg::format::Pixel::BGRA, width, height),
@@ -484,6 +741,8 @@ impl PipeWireScreenCaptureSource {
                 worker: Some(worker),
                 watching,
                 session_watcher,
+                #[cfg(feature = "cuda")]
+                gpu,
             },
             VideoFormat {
                 width,
@@ -514,6 +773,10 @@ impl PipeWireScreenCaptureSource {
     /// Returns `None` when nothing has been captured yet, so `run` can skip
     /// the tick instead of pushing an uninitialised frame.
     fn emit_frame(&mut self) -> Option<crate::pool::UnboundObjectPoolRef<ffmpeg::frame::Video>> {
+        #[cfg(feature = "cuda")]
+        if self.gpu {
+            return self.emit_gpu_frame();
+        }
         let (src_width, src_height, ready) = {
             let latest = self.latest.lock().ok()?;
             (latest.width, latest.height, latest.have_frame)
@@ -574,6 +837,56 @@ impl PipeWireScreenCaptureSource {
         frame.set_pts(Some(self.frame_index));
         frame.set_color_space(ffmpeg::color::Space::RGB);
         frame.set_color_range(ffmpeg::color::Range::JPEG);
+        self.frame_index += 1;
+        Some(frame)
+    }
+
+    /// Takes a new reference to the latest captured CUDA surface and stamps
+    /// this tick's `pts` on it.
+    ///
+    /// No pixel copy, unlike [`Self::emit_frame`]'s CPU path, and none is
+    /// needed for the same reason that one exists: `av_frame_ref` gives this
+    /// tick its own `AVFrame` to stamp, while the surface underneath stays
+    /// the PipeWire thread's. That thread allocates the *next* capture from
+    /// the frames context's pool, which will not hand back a surface that is
+    /// still referenced — so an already-pushed frame's pixels cannot change
+    /// under whatever is still reading them.
+    #[cfg(feature = "cuda")]
+    fn emit_gpu_frame(
+        &mut self,
+    ) -> Option<crate::pool::UnboundObjectPoolRef<ffmpeg::frame::Video>> {
+        let mut frame = self.pool.get();
+        let (src_width, src_height) = {
+            let latest = self.latest.lock().ok()?;
+            if !latest.have_frame {
+                return None;
+            }
+            let source = latest.frame.as_ref()?;
+            unsafe {
+                let destination = frame.as_mut_ptr();
+                // Releases the previous capture this pooled wrapper still
+                // referenced, which is what lets its surface return to the
+                // frames pool instead of being held for this element's life.
+                ffi::av_frame_unref(destination);
+                if ffi::av_frame_ref(destination, source.as_ptr()) < 0 {
+                    return None;
+                }
+            }
+            (latest.width, latest.height)
+        };
+        if (src_width, src_height) != (self.width, self.height) {
+            pp_info!(
+                self,
+                "capture resized: {}x{} -> {}x{}",
+                self.width,
+                self.height,
+                src_width,
+                src_height
+            );
+            self.width = src_width;
+            self.height = src_height;
+        }
+        frame.set_pts(Some(self.frame_index));
         self.frame_index += 1;
         Some(frame)
     }
@@ -936,6 +1249,7 @@ fn watch_session_closed(
 fn run_pipewire(
     cast: PortalCast,
     fps: u32,
+    target: CaptureTarget,
     latest: Arc<Mutex<Latest>>,
     startup: &mpsc::Sender<Startup>,
     terminate: pw::channel::Receiver<Terminate>,
@@ -966,9 +1280,40 @@ fn run_pipewire(
     )
     .map_err(pw_err)?;
 
+    // GPU mode's import lives on this thread for its whole life: its EGL
+    // context is current here and nowhere else.
+    #[cfg(feature = "cuda")]
+    let mut gpu = match target {
+        CaptureTarget::Cpu => None,
+        CaptureTarget::Gpu(hw_device_ctx) => match GpuCapture::new(hw_device_ctx.0) {
+            Ok(gpu) => Some(gpu),
+            // The reference `open_gpu` took never reached a `GpuCapture` to
+            // be released by its `Drop`, so it is released here instead.
+            Err(error) => {
+                unsafe { free_buffer(hw_device_ctx.0) };
+                return Err(error);
+            }
+        },
+    };
+    #[cfg(not(feature = "cuda"))]
+    let CaptureTarget::Cpu = target;
+
+    // The modifiers the import can accept, which is exactly what the format
+    // negotiation may offer: empty means CPU mode, which offers none at all.
+    #[cfg(feature = "cuda")]
+    let modifiers: Vec<u64> = gpu
+        .as_ref()
+        .map(|gpu| gpu.importer.modifiers().to_vec())
+        .unwrap_or_default();
+    #[cfg(not(feature = "cuda"))]
+    let modifiers: Vec<u64> = Vec::new();
+
     // Negotiated size, shared between the two callbacks below. Both run on
     // this thread's own loop, so a `Cell` is enough — no lock needed.
     let size = Arc::new(Mutex::new((0u32, 0u32)));
+    // The modifier the compositor fixated on, which every import of a buffer
+    // from this stream has to be told.
+    let modifier = Arc::new(Mutex::new(0u64));
 
     let _listener = stream
         .add_local_listener_with_user_data(())
@@ -992,6 +1337,8 @@ fn run_pipewire(
             let size = size.clone();
             let latest = latest.clone();
             let startup = startup.clone();
+            let modifiers = modifiers.clone();
+            let modifier = modifier.clone();
             move |stream, (), id, param| {
                 let Some(param) = param else { return };
                 if id != spa::param::ParamType::Format.as_raw() {
@@ -1023,6 +1370,42 @@ fn run_pipewire(
                 if width == 0 || height == 0 {
                     return;
                 }
+
+                if !modifiers.is_empty() {
+                    // GPU mode. The compositor answers the unfixated offer
+                    // with the modifiers it shares with this driver and asks
+                    // for one to be chosen; until that round trip is done it
+                    // allocates no buffers, so this returns rather than
+                    // reporting the format as negotiated.
+                    let (negotiated, fixation_required) = negotiated_modifier(param);
+                    let Some(negotiated) = negotiated else {
+                        let _ = startup.send(Startup::Failed(
+                            PipeWireScreenCaptureSourceError::PipeWire(
+                                "the compositor negotiated no DMA-BUF modifier".into(),
+                            ),
+                        ));
+                        return;
+                    };
+                    if let Ok(mut modifier) = modifier.lock() {
+                        *modifier = negotiated;
+                    }
+                    if fixation_required {
+                        if let Some(bytes) =
+                            fixated_format_pod(format, negotiated, width, height, fps)
+                            && let Some(pod) = Pod::from_bytes(&bytes)
+                        {
+                            let _ = stream.update_params(&mut [pod]);
+                        } else {
+                            let _ = startup.send(Startup::Failed(
+                                PipeWireScreenCaptureSourceError::PipeWire(
+                                    "failed to build the fixated format pod".into(),
+                                ),
+                            ));
+                        }
+                        return;
+                    }
+                }
+
                 if let Ok(mut size) = size.lock() {
                     *size = (width, height);
                 }
@@ -1036,36 +1419,24 @@ fn run_pipewire(
                 }
 
                 // Constrain the buffer negotiation to memory this element can
-                // actually read. Without this the compositor is free to hand
-                // over DMA-BUF once the captured content becomes GPU-resident
-                // (a fullscreen video, say); those have no CPU mapping, every
+                // actually use. In CPU mode that is the mapped kinds only:
+                // without this the compositor is free to hand over DMA-BUF
+                // once the captured content becomes GPU-resident (a
+                // fullscreen video, say), those have no CPU mapping, every
                 // frame is dropped, and the capture silently freezes at the
-                // last readable image. See this element's docs on why DMA-BUF
-                // support is out of scope rather than merely unimplemented.
-                let data_type = (1 << spa::buffer::DataType::MemFd.as_raw())
-                    | (1 << spa::buffer::DataType::MemPtr.as_raw());
-                let buffers = spa::pod::object!(
-                    spa::utils::SpaTypes::ObjectParamBuffers,
-                    spa::param::ParamType::Buffers,
-                    spa::pod::Property::new(
-                        spa_sys::SPA_PARAM_BUFFERS_dataType,
-                        spa::pod::Value::Choice(spa::pod::ChoiceValue::Int(spa::utils::Choice(
-                            spa::utils::ChoiceFlags::empty(),
-                            spa::utils::ChoiceEnum::Flags {
-                                default: data_type,
-                                flags: vec![data_type],
-                            },
-                        ),)),
-                    ),
-                );
-                if let Ok(bytes) = spa::pod::serialize::PodSerializer::serialize(
-                    std::io::Cursor::new(Vec::new()),
-                    &spa::pod::Value::Object(buffers),
-                ) {
-                    let bytes = bytes.0.into_inner();
-                    if let Some(pod) = Pod::from_bytes(&bytes) {
-                        let _ = stream.update_params(&mut [pod]);
-                    }
+                // last readable image. GPU mode is the exact mirror — a
+                // mapped buffer there has no importable fd, and this mode has
+                // no CPU path to fall back to.
+                let data_type = if modifiers.is_empty() {
+                    (1 << spa::buffer::DataType::MemFd.as_raw())
+                        | (1 << spa::buffer::DataType::MemPtr.as_raw())
+                } else {
+                    1 << spa::buffer::DataType::DmaBuf.as_raw()
+                };
+                if let Some(bytes) = buffers_pod(data_type)
+                    && let Some(pod) = Pod::from_bytes(&bytes)
+                {
+                    let _ = stream.update_params(&mut [pod]);
                 }
 
                 let _ = startup.send(Startup::Ready { width, height });
@@ -1073,6 +1444,12 @@ fn run_pipewire(
         })
         .process({
             let size = size.clone();
+            #[cfg(feature = "cuda")]
+            let modifier = modifier.clone();
+            // Moved in: the import runs here, on the loop thread its EGL
+            // context is current on.
+            #[cfg(feature = "cuda")]
+            let mut gpu = gpu.take();
             move |stream, ()| {
                 let Some(mut buffer) = stream.dequeue_buffer() else {
                     return;
@@ -1092,6 +1469,50 @@ fn run_pipewire(
                 if width == 0 || height == 0 {
                     return;
                 }
+
+                #[cfg(feature = "cuda")]
+                if let Some(gpu) = gpu.as_mut() {
+                    if data.type_() != spa::buffer::DataType::DmaBuf {
+                        // Negotiation asked for DMA-BUF only, so this is the
+                        // compositor contradicting itself rather than a
+                        // condition to fall back from.
+                        if let Ok(mut latest) = latest.lock() {
+                            latest.error.get_or_insert(
+                                PipeWireScreenCaptureSourceError::NotDmaBuf(format!(
+                                    "{:?}",
+                                    data.type_()
+                                )),
+                            );
+                        }
+                        return;
+                    }
+                    let plane = DmaBufPlane {
+                        fd: data.fd() as std::ffi::c_int,
+                        offset: data.chunk().offset(),
+                        stride,
+                        modifier: modifier
+                            .lock()
+                            .map(|modifier| *modifier)
+                            .unwrap_or_default(),
+                    };
+                    match gpu.capture(plane, width, height) {
+                        Ok(frame) => {
+                            if let Ok(mut latest) = latest.lock() {
+                                latest.width = width;
+                                latest.height = height;
+                                latest.frame = Some(frame);
+                                latest.have_frame = true;
+                            }
+                        }
+                        Err(error) => {
+                            if let Ok(mut latest) = latest.lock() {
+                                latest.error.get_or_insert(error);
+                            }
+                        }
+                    }
+                    return;
+                }
+
                 let row_bytes = width as usize * 4;
                 let src_stride = if stride > 0 {
                     stride as usize
@@ -1129,70 +1550,9 @@ fn run_pipewire(
         .register()
         .map_err(pw_err)?;
 
-    let obj = spa::pod::object!(
-        spa::utils::SpaTypes::ObjectParamFormat,
-        spa::param::ParamType::EnumFormat,
-        spa::pod::property!(
-            spa::param::format::FormatProperties::MediaType,
-            Id,
-            spa::param::format::MediaType::Video
-        ),
-        spa::pod::property!(
-            spa::param::format::FormatProperties::MediaSubtype,
-            Id,
-            spa::param::format::MediaSubtype::Raw
-        ),
-        // CPU-mapped BGRx/BGRA only — see this element's docs on why DMA-BUF
-        // is deliberately not offered.
-        spa::pod::property!(
-            spa::param::format::FormatProperties::VideoFormat,
-            Choice,
-            Enum,
-            Id,
-            spa::param::video::VideoFormat::BGRx,
-            spa::param::video::VideoFormat::BGRx,
-            spa::param::video::VideoFormat::BGRA,
-        ),
-        spa::pod::property!(
-            spa::param::format::FormatProperties::VideoSize,
-            Choice,
-            Range,
-            Rectangle,
-            spa::utils::Rectangle {
-                width: 1920,
-                height: 1080
-            },
-            spa::utils::Rectangle {
-                width: 1,
-                height: 1
-            },
-            spa::utils::Rectangle {
-                width: 8192,
-                height: 8192
-            }
-        ),
-        // The compositor answers with a variable rate (`0/1`) capped at this
-        // maximum; the emitted rate is this element's own concern, not this.
-        spa::pod::property!(
-            spa::param::format::FormatProperties::VideoFramerate,
-            Choice,
-            Range,
-            Fraction,
-            spa::utils::Fraction { num: fps, denom: 1 },
-            spa::utils::Fraction { num: 0, denom: 1 },
-            spa::utils::Fraction {
-                num: fps.max(60),
-                denom: 1
-            }
-        ),
-    );
-    let values: Vec<u8> = spa::pod::serialize::PodSerializer::serialize(
-        std::io::Cursor::new(Vec::new()),
-        &spa::pod::Value::Object(obj),
-    )
-    .map_err(pw_err)?
-    .0
-    .into_inner();
+    let values = format_pod(fps, &modifiers).ok_or_else(|| {
+        PipeWireScreenCaptureSourceError::PipeWire("failed to build format pod".into())
+    })?;
     let mut params = [Pod::from_bytes(&values).ok_or_else(|| {
         PipeWireScreenCaptureSourceError::PipeWire("failed to build format pod".into())
     })?];
@@ -1208,6 +1568,242 @@ fn run_pipewire(
 
     mainloop.run();
     Ok(())
+}
+
+/// The `EnumFormat` this element offers the compositor.
+///
+/// One pod covers both modes: `modifiers` empty asks for plain BGRx/BGRA,
+/// which the compositor can only satisfy from mapped memory, and a non-empty
+/// list adds the DMA-BUF modifier property that turns the same request into a
+/// GPU-buffer one. The list is offered `DONT_FIXATE`, which is what makes the
+/// compositor answer with the modifiers it shares with this driver instead of
+/// picking blindly — see `negotiated_modifier`.
+fn format_pod(fps: u32, modifiers: &[u64]) -> Option<Vec<u8>> {
+    use spa::pod::{ChoiceValue, Property, PropertyFlags, Value};
+    use spa::utils::{Choice, ChoiceEnum, ChoiceFlags, Fraction, Id, Rectangle};
+
+    let mut properties = vec![
+        Property::new(
+            spa_sys::SPA_FORMAT_mediaType,
+            Value::Id(Id(spa::param::format::MediaType::Video.as_raw())),
+        ),
+        Property::new(
+            spa_sys::SPA_FORMAT_mediaSubtype,
+            Value::Id(Id(spa::param::format::MediaSubtype::Raw.as_raw())),
+        ),
+        Property::new(
+            spa_sys::SPA_FORMAT_VIDEO_format,
+            Value::Choice(ChoiceValue::Id(Choice(
+                ChoiceFlags::empty(),
+                ChoiceEnum::Enum {
+                    default: Id(spa::param::video::VideoFormat::BGRx.as_raw()),
+                    alternatives: vec![
+                        Id(spa::param::video::VideoFormat::BGRx.as_raw()),
+                        Id(spa::param::video::VideoFormat::BGRA.as_raw()),
+                    ],
+                },
+            ))),
+        ),
+    ];
+    if !modifiers.is_empty() {
+        let mut modifier = Property::new(
+            spa_sys::SPA_FORMAT_VIDEO_modifier,
+            Value::Choice(ChoiceValue::Long(Choice(
+                ChoiceFlags::empty(),
+                ChoiceEnum::Enum {
+                    default: modifiers[0] as i64,
+                    alternatives: modifiers.iter().map(|&m| m as i64).collect(),
+                },
+            ))),
+        );
+        // MANDATORY says a format without a modifier is not acceptable —
+        // otherwise the compositor may answer with mapped memory this mode
+        // cannot import.
+        modifier.flags = PropertyFlags::MANDATORY | PropertyFlags::DONT_FIXATE;
+        properties.push(modifier);
+    }
+    properties.push(Property::new(
+        spa_sys::SPA_FORMAT_VIDEO_size,
+        Value::Choice(ChoiceValue::Rectangle(Choice(
+            ChoiceFlags::empty(),
+            ChoiceEnum::Range {
+                default: Rectangle {
+                    width: 1920,
+                    height: 1080,
+                },
+                min: Rectangle {
+                    width: 1,
+                    height: 1,
+                },
+                max: Rectangle {
+                    width: 8192,
+                    height: 8192,
+                },
+            },
+        ))),
+    ));
+    // The compositor answers with a variable rate (`0/1`) capped at this
+    // maximum; the emitted rate is this element's own concern, not this.
+    properties.push(Property::new(
+        spa_sys::SPA_FORMAT_VIDEO_framerate,
+        Value::Choice(ChoiceValue::Fraction(Choice(
+            ChoiceFlags::empty(),
+            ChoiceEnum::Range {
+                default: Fraction { num: fps, denom: 1 },
+                min: Fraction { num: 0, denom: 1 },
+                max: Fraction {
+                    num: fps.max(60),
+                    denom: 1,
+                },
+            },
+        ))),
+    ));
+
+    serialize_object(spa::pod::Object {
+        type_: spa::utils::SpaTypes::ObjectParamFormat.as_raw(),
+        id: spa::param::ParamType::EnumFormat.as_raw(),
+        properties,
+    })
+}
+
+/// The answer to a compositor that asked for the modifier to be fixated: the
+/// same format with exactly one modifier left and the `DONT_FIXATE` flag
+/// gone. Until this is sent the stream allocates no buffers.
+fn fixated_format_pod(
+    format: spa::param::video::VideoFormat,
+    modifier: u64,
+    width: u32,
+    height: u32,
+    fps: u32,
+) -> Option<Vec<u8>> {
+    use spa::pod::{ChoiceValue, Property, PropertyFlags, Value};
+    use spa::utils::{Choice, ChoiceEnum, ChoiceFlags, Fraction, Id, Rectangle};
+
+    let mut modifier = Property::new(
+        spa_sys::SPA_FORMAT_VIDEO_modifier,
+        Value::Choice(ChoiceValue::Long(Choice(
+            ChoiceFlags::empty(),
+            ChoiceEnum::Enum {
+                default: modifier as i64,
+                alternatives: vec![modifier as i64],
+            },
+        ))),
+    );
+    modifier.flags = PropertyFlags::MANDATORY;
+
+    serialize_object(spa::pod::Object {
+        type_: spa::utils::SpaTypes::ObjectParamFormat.as_raw(),
+        id: spa::param::ParamType::EnumFormat.as_raw(),
+        properties: vec![
+            Property::new(
+                spa_sys::SPA_FORMAT_mediaType,
+                Value::Id(Id(spa::param::format::MediaType::Video.as_raw())),
+            ),
+            Property::new(
+                spa_sys::SPA_FORMAT_mediaSubtype,
+                Value::Id(Id(spa::param::format::MediaSubtype::Raw.as_raw())),
+            ),
+            Property::new(
+                spa_sys::SPA_FORMAT_VIDEO_format,
+                Value::Id(Id(format.as_raw())),
+            ),
+            modifier,
+            Property::new(
+                spa_sys::SPA_FORMAT_VIDEO_size,
+                Value::Rectangle(Rectangle { width, height }),
+            ),
+            Property::new(
+                spa_sys::SPA_FORMAT_VIDEO_framerate,
+                Value::Choice(ChoiceValue::Fraction(Choice(
+                    ChoiceFlags::empty(),
+                    ChoiceEnum::Range {
+                        default: Fraction { num: fps, denom: 1 },
+                        min: Fraction { num: 0, denom: 1 },
+                        max: Fraction {
+                            num: fps.max(60),
+                            denom: 1,
+                        },
+                    },
+                ))),
+            ),
+        ],
+    })
+}
+
+/// The `Buffers` param restricting negotiation to the memory kinds this
+/// element can use — see its one call site on why each mode names exactly
+/// one set.
+fn buffers_pod(data_type: i32) -> Option<Vec<u8>> {
+    serialize_object(spa::pod::object!(
+        spa::utils::SpaTypes::ObjectParamBuffers,
+        spa::param::ParamType::Buffers,
+        spa::pod::Property::new(
+            spa_sys::SPA_PARAM_BUFFERS_dataType,
+            spa::pod::Value::Choice(spa::pod::ChoiceValue::Int(spa::utils::Choice(
+                spa::utils::ChoiceFlags::empty(),
+                spa::utils::ChoiceEnum::Flags {
+                    default: data_type,
+                    flags: vec![data_type],
+                },
+            ),)),
+        ),
+    ))
+}
+
+/// The modifier a `Format` param carries, and whether the compositor still
+/// wants it fixated.
+///
+/// Read out of the pod directly rather than through `VideoInfoRaw::flags`:
+/// the flags that carry this (`SPA_VIDEO_FLAG_MODIFIER`,
+/// `..._FIXATION_REQUIRED`) only exist behind libspa's `v0_3_65`/`v0_3_75`
+/// features, and this crate deliberately builds against a lower minimum —
+/// see `lib/Cargo.toml`. The property itself has been there throughout.
+fn negotiated_modifier(pod: &Pod) -> (Option<u64>, bool) {
+    let bytes = unsafe {
+        let raw = pod.as_raw_ptr();
+        std::slice::from_raw_parts(
+            raw as *const u8,
+            (*raw).size as usize + std::mem::size_of::<spa_sys::spa_pod>(),
+        )
+    };
+    let Ok((_, spa::pod::Value::Object(object))) =
+        spa::pod::deserialize::PodDeserializer::deserialize_any_from(bytes)
+    else {
+        return (None, false);
+    };
+    let Some(property) = object
+        .properties
+        .into_iter()
+        .find(|property| property.key == spa_sys::SPA_FORMAT_VIDEO_modifier)
+    else {
+        return (None, false);
+    };
+    let fixation_required = property
+        .flags
+        .contains(spa::pod::PropertyFlags::DONT_FIXATE);
+    let modifier = match property.value {
+        spa::pod::Value::Long(modifier) => Some(modifier as u64),
+        spa::pod::Value::Choice(spa::pod::ChoiceValue::Long(spa::utils::Choice(_, choice))) => {
+            match choice {
+                spa::utils::ChoiceEnum::None(modifier) => Some(modifier as u64),
+                spa::utils::ChoiceEnum::Enum { default, .. } => Some(default as u64),
+                spa::utils::ChoiceEnum::Range { default, .. } => Some(default as u64),
+                spa::utils::ChoiceEnum::Step { default, .. } => Some(default as u64),
+                spa::utils::ChoiceEnum::Flags { default, .. } => Some(default as u64),
+            }
+        }
+        _ => None,
+    };
+    (modifier, fixation_required)
+}
+
+fn serialize_object(object: spa::pod::Object) -> Option<Vec<u8>> {
+    spa::pod::serialize::PodSerializer::serialize(
+        std::io::Cursor::new(Vec::new()),
+        &spa::pod::Value::Object(object),
+    )
+    .ok()
+    .map(|serialized| serialized.0.into_inner())
 }
 
 #[cfg(test)]
@@ -1232,6 +1828,141 @@ mod tests {
         (0..rows)
             .flat_map(|r| std::iter::repeat_n(r as u8, row_bytes))
             .collect()
+    }
+
+    /// Parses a serialized param pod back into the object it encodes, so a
+    /// test asserts on what the compositor would actually receive rather than
+    /// on the builder's own inputs.
+    fn parse_object(bytes: &[u8]) -> spa::pod::Object {
+        let (_, value) = spa::pod::deserialize::PodDeserializer::deserialize_any_from(bytes)
+            .expect("the builder produced a decodable pod");
+        match value {
+            spa::pod::Value::Object(object) => object,
+            other => panic!("expected an object pod, got {other:?}"),
+        }
+    }
+
+    fn property(object: &spa::pod::Object, key: u32) -> Option<&spa::pod::Property> {
+        object.properties.iter().find(|prop| prop.key == key)
+    }
+
+    fn modifier_alternatives(property: &spa::pod::Property) -> Vec<u64> {
+        match &property.value {
+            spa::pod::Value::Choice(spa::pod::ChoiceValue::Long(spa::utils::Choice(
+                _,
+                spa::utils::ChoiceEnum::Enum { alternatives, .. },
+            ))) => alternatives.iter().map(|&m| m as u64).collect(),
+            other => panic!("expected a Long enum choice, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_cpu_format_offers_no_modifier_at_all() {
+        // What keeps the compositor from answering with a DMA-BUF the CPU
+        // path could only drop.
+        let pod = format_pod(30, &[]).expect("the CPU format pod builds");
+        let object = parse_object(&pod);
+        assert!(property(&object, spa_sys::SPA_FORMAT_VIDEO_modifier).is_none());
+        assert!(property(&object, spa_sys::SPA_FORMAT_VIDEO_format).is_some());
+    }
+
+    #[test]
+    fn the_gpu_format_offers_every_modifier_unfixated() {
+        let modifiers = [0x0300_0000_0060_6010u64, 0x00ff_ffff_ffff_ffff];
+        let pod = format_pod(30, &modifiers).expect("the DMA-BUF format pod builds");
+        let object = parse_object(&pod);
+        let offered =
+            property(&object, spa_sys::SPA_FORMAT_VIDEO_modifier).expect("modifier is offered");
+        // Both flags matter: MANDATORY rules out an answer with no modifier
+        // (which would be mapped memory), DONT_FIXATE is what makes the
+        // compositor reply with the modifiers it shares with this driver
+        // instead of picking one blindly.
+        assert!(offered.flags.contains(spa::pod::PropertyFlags::MANDATORY));
+        assert!(offered.flags.contains(spa::pod::PropertyFlags::DONT_FIXATE));
+        assert_eq!(modifier_alternatives(offered), modifiers);
+    }
+
+    #[test]
+    fn the_fixated_format_names_one_modifier_and_drops_dont_fixate() {
+        let pod = fixated_format_pod(
+            spa::param::video::VideoFormat::BGRx,
+            0x0300_0000_0060_6010,
+            1920,
+            1080,
+            30,
+        )
+        .expect("the fixated format pod builds");
+        let object = parse_object(&pod);
+        let fixated =
+            property(&object, spa_sys::SPA_FORMAT_VIDEO_modifier).expect("modifier is fixated");
+        assert!(!fixated.flags.contains(spa::pod::PropertyFlags::DONT_FIXATE));
+        assert_eq!(modifier_alternatives(fixated), [0x0300_0000_0060_6010]);
+        // The size has to be concrete too: a range here reads as a fresh
+        // offer rather than an answer, and the compositor keeps renegotiating.
+        assert!(matches!(
+            property(&object, spa_sys::SPA_FORMAT_VIDEO_size).map(|prop| &prop.value),
+            Some(spa::pod::Value::Rectangle(spa::utils::Rectangle {
+                width: 1920,
+                height: 1080
+            }))
+        ));
+    }
+
+    #[test]
+    fn a_modifier_choice_is_read_back_as_needing_fixation() {
+        let pod = format_pod(30, &[0x0300_0000_0060_6010, 0x0300_0000_0060_6011])
+            .expect("the DMA-BUF format pod builds");
+        let (modifier, fixation_required) =
+            negotiated_modifier(Pod::from_bytes(&pod).expect("a valid pod"));
+        assert_eq!(modifier, Some(0x0300_0000_0060_6010));
+        assert!(fixation_required);
+    }
+
+    #[test]
+    fn a_fixed_modifier_is_read_back_as_settled() {
+        let pod = fixated_format_pod(
+            spa::param::video::VideoFormat::BGRx,
+            0x0300_0000_00e0_8014,
+            800,
+            600,
+            30,
+        )
+        .expect("the fixated format pod builds");
+        let (modifier, fixation_required) =
+            negotiated_modifier(Pod::from_bytes(&pod).expect("a valid pod"));
+        assert_eq!(modifier, Some(0x0300_0000_00e0_8014));
+        assert!(!fixation_required);
+    }
+
+    #[test]
+    fn a_format_without_a_modifier_negotiates_none() {
+        let pod = format_pod(30, &[]).expect("the CPU format pod builds");
+        assert_eq!(
+            negotiated_modifier(Pod::from_bytes(&pod).expect("a valid pod")),
+            (None, false)
+        );
+    }
+
+    #[test]
+    fn the_buffers_param_names_exactly_the_requested_memory_kinds() {
+        let dma_buf = 1 << spa::buffer::DataType::DmaBuf.as_raw();
+        let pod = buffers_pod(dma_buf).expect("the buffers pod builds");
+        let object = parse_object(&pod);
+        let data_type =
+            property(&object, spa_sys::SPA_PARAM_BUFFERS_dataType).expect("dataType is named");
+        match &data_type.value {
+            spa::pod::Value::Choice(spa::pod::ChoiceValue::Int(spa::utils::Choice(
+                _,
+                spa::utils::ChoiceEnum::Flags { default, flags },
+            ))) => {
+                assert_eq!(*default, dma_buf);
+                assert_eq!(flags, &vec![dma_buf]);
+                // Mapped memory is not in the set: GPU mode has no CPU path
+                // to fall back to, so a mapped buffer must not be offered.
+                assert_eq!(*default & (1 << spa::buffer::DataType::MemFd.as_raw()), 0);
+            }
+            other => panic!("expected an Int flags choice, got {other:?}"),
+        }
     }
 
     #[test]

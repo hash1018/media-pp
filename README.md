@@ -198,6 +198,11 @@ buffers are not logged one record per buffer.
   `org.freedesktop.portal.ScreenCast`. See its own Rust documentation for the
   interactive portal dialog, restore tokens, window-vs-monitor stall behavior,
   and closed-window detection this implies.
+- `PipeWireScreenCaptureSource::open_gpu` (needs `cuda` as well) captures into
+  CUDA surfaces instead of CPU frames, so `screen_record_nvenc` records with
+  no upload element. It negotiates DMA-BUF only and fails rather than falling
+  back, and it `dlopen`s the driver's `libEGL.so.1`/`libGLESv2.so.2` at run
+  time — no development packages are needed to build it.
 - `PipeWireAudioCaptureSource`/`PipeWireAudioRenderer` need the same PipeWire
   development files and a running session, but no portal.
 - CUDA surfaces carry either NV12 or BGRA (`CudaFrameFormat`), and nothing on
