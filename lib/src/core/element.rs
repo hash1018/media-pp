@@ -54,6 +54,7 @@ pub enum ElementType {
     VideoSynchronizer,
     SwScaler,
     CudaScaler,
+    D3d11Scaler,
     Tee,
     Queue,
     FrameCounter,

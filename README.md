@@ -87,7 +87,7 @@ buffers, codecs, and muxers; `Pipeline::stop` abandons buffered work immediately
 | Kind | Elements |
 |---|---|
 | Sources | `FileDemuxer`, `AppSource`, `RtspSource`, `TestVideoSource`, `TestAudioSource`, `DxgiCaptureSource`, `PipeWireScreenCaptureSource`, `PipeWireAudioCaptureSource`, `WasapiCaptureSource`, `AudioMixer`, `SwVideoCompositor`, `CudaVideoCompositor`, `D3d11VideoCompositor`, `WebRtcTrackSource` |
-| Filters | `SwDecoder`, `CudaDecoder`, `D3d11Decoder`, `D3d12vaDecoder`, `SwEncoder`, `CudaEncoder`, `D3d11NvencEncoder`, `SwAudioEncoder`, `AudioResampler`, `AudioVolume`, `SwScaler`, `Pacer`, `VideoSynchronizer`, `CudaScaler`, `CudaUpload`, `CudaDownload`, `CudaConverter`, `D3d11Upload`, `D3d11Download`, `D3d12Upload`, `Tee` |
+| Filters | `SwDecoder`, `CudaDecoder`, `D3d11Decoder`, `D3d12vaDecoder`, `SwEncoder`, `CudaEncoder`, `D3d11NvencEncoder`, `SwAudioEncoder`, `AudioResampler`, `AudioVolume`, `SwScaler`, `Pacer`, `VideoSynchronizer`, `CudaScaler`, `D3d11Scaler`, `CudaUpload`, `CudaDownload`, `CudaConverter`, `D3d11Upload`, `D3d11Download`, `D3d12Upload`, `Tee` |
 | Sinks | `FrameCounter`, `PacketCounter`, `AppSink`, `Mp4Muxer`, `SegmentedMp4Muxer`, `HlsMuxer`, `RtspSink`, `CudaRenderer`, `D3d11Renderer`, `D3d12Renderer`, `PipeWireAudioRenderer`, `WasapiRenderer`, `OrtDetector`, `WebRtcTrackSink` |
 
 Backend-specific elements require their corresponding Cargo feature and are
@@ -108,9 +108,9 @@ The examples are grouped by purpose:
   Windows and Linux; the `examples/render` crates of the same shape are their
   D3D11 counterparts.
 - `examples/render`: D3D11/D3D12 playback, upload, capture, synchronization,
-  GPU compositing, NVENC hardware encoding, and recording. The CUDA halves of
-  the display and screen-capture examples stay here because their renderer
-  (Vulkan external memory over an fd) and capture source (PipeWire) are
+  GPU scaling/compositing, NVENC hardware encoding, and recording. The CUDA
+  halves of the display and screen-capture examples stay here because their
+  renderer (Vulkan external memory over an fd) and capture source (PipeWire) are
   genuinely Linux-only.
 - `examples/rtsp`: publishing, seeking, and receiving RTSP streams.
 - `examples/vision`: scaling and ONNX object detection.
@@ -123,6 +123,7 @@ cargo run -p probe -- path/to/video.mp4
 cargo run -p fanout -- path/to/video.mp4
 cargo run -p app_sink -- path/to/video.mp4
 cargo run -p scale -- path/to/video.mp4
+cargo run -p d3d11_scale_render -- path/to/video.mp4
 ```
 
 Backend-specific examples enable their required library features in their own
@@ -137,7 +138,7 @@ The library has no default features.
 | Feature | Adds | Platform |
 |---|---|---|
 | `cuda` | NVDEC decode, NVENC encode, scaling, compositing, upload/download, and rendering, all on CUDA-resident frames | Linux, Windows |
-| `d3d11` | D3D11 decode, upload/download, rendering, GPU compositing, and NVENC encoding | Windows |
+| `d3d11` | D3D11 decode, scaling, upload/download, rendering, GPU compositing, and NVENC encoding | Windows |
 | `d3d12` | D3D12VA decode, upload, and rendering interfaces | Windows |
 | `dxgi-capture` | Desktop capture; also enables `d3d11` | Windows |
 | `pipewire-audio-capture` | System-audio and microphone capture through PipeWire | Linux |

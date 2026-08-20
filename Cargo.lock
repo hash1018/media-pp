@@ -981,6 +981,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "d3d11_scale_render"
+version = "0.1.0"
+dependencies = [
+ "ffmpeg-next",
+ "media-pp",
+ "render_common",
+ "winit",
+]
+
+[[package]]
 name = "d3d11_upload"
 version = "0.1.0"
 dependencies = [

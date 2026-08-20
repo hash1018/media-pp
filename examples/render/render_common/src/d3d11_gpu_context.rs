@@ -1,9 +1,10 @@
 //! Process-wide D3D11 state shared by every window *and* every non-render
 //! D3D11 element (`DxgiCaptureSource`'s GPU capture mode, `D3d11Upload`,
-//! `D3d11Decoder`) — the device, its **one** immediate context, and the
-//! shader objects [`crate::D3d11WindowRenderer`] draws with. Sharing one
-//! device+context across the whole pipeline (not just one per window) is
-//! load-bearing, not just convenient: see [`media_pp::elements::D3d11Renderer`]'s
+//! `D3d11Decoder`, `D3d11Scaler`) — the device, its **one** immediate
+//! context, and the shader objects [`crate::D3d11WindowRenderer`] draws with.
+//! Sharing one device+context across the whole pipeline (not just one per
+//! window) is load-bearing, not just convenient: see
+//! [`media_pp::elements::D3d11Renderer`]'s
 //! own docs on why that's what lets this whole stack skip explicit
 //! GPU-side fences entirely, unlike the D3D12 side.
 
@@ -50,8 +51,9 @@ pub struct D3d11GpuContext {
 impl D3d11GpuContext {
     /// The shared D3D11 device — pass into
     /// [`media_pp::elements::D3d11Upload::new`]/
-    /// [`media_pp::elements::D3d11Decoder::new`] so every producer lands on
-    /// the same device (and, transitively, the same one immediate context
+    /// [`media_pp::elements::D3d11Decoder::new`]/
+    /// [`media_pp::elements::D3d11Scaler::new`] so every producer/filter
+    /// lands on the same device (and, transitively, the same immediate context
     /// — see this type's own docs) [`crate::d3d11_window_renderer`] draws
     /// with. Not for [`media_pp::elements::DxgiCaptureSource::open`]'s
     /// `CaptureMode::Gpu` path — that one runs the other way round (see
@@ -63,9 +65,10 @@ impl D3d11GpuContext {
 
     /// The shared immediate context, behind the lock every D3D11 window
     /// renderer's submit sequence holds for its full bind+draw+present —
-    /// see this type's own docs on why. Future GPU-resident capture/upload
-    /// paths that issue `CopySubresourceRegion`/`CopyResource` against this
-    /// same context should acquire this same lock around that copy.
+    /// see this type's own docs on why. Pass the same value to
+    /// [`media_pp::elements::D3d11Scaler::new`]; every other GPU-resident
+    /// capture/upload path that issues `CopySubresourceRegion`/`CopyResource`
+    /// against this context must acquire this lock around the copy too.
     pub fn context(&self) -> Arc<Mutex<ID3D11DeviceContext>> {
         self.context.clone()
     }
