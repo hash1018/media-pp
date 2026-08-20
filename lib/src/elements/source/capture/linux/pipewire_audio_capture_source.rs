@@ -99,6 +99,16 @@ struct Packet {
     /// `frames * channels * bytes_per_sample` long.
     bytes: Vec<u8>,
     frames: usize,
+    /// How many frames the device had captured before this packet, counting
+    /// the ones this element went on to discard.
+    ///
+    /// Stamped where the capture happens, because that is the only place
+    /// that knows where a packet sits in the captured stream. Counting on the
+    /// consuming side instead put the gap left by a discarded packet in front
+    /// of whatever came out of the queue next — audio captured *before* the
+    /// drop — so the timeline said the loss happened up to a full queue
+    /// earlier than it did.
+    position: u64,
 }
 
 /// What the PipeWire thread reports back to `open` once, at startup.
@@ -144,9 +154,11 @@ struct Terminate;
 /// PipeWire delivers on its own realtime thread, which must never block on a
 /// slow downstream. Captured packets therefore cross into
 /// [`SourceElement::run`] through a bounded queue; when a stalled consumer
-/// fills it, the oldest packet is dropped and reported as
+/// fills it, the packet that would not fit is dropped and reported as
 /// [`crate::bus::BusEvent::Dropped`] rather than stalling the daemon or
-/// growing without bound.
+/// growing without bound. The gap that leaves stays where it happened: every
+/// packet carries the position the device captured it at, so the frames after
+/// a drop are stamped past it.
 ///
 /// # Format
 ///
@@ -159,8 +171,6 @@ pub struct PipeWireAudioCaptureSource {
     pp_log: PpLog,
     pad: SrcPad,
     format: AudioFormat,
-    /// Running sample count used as each emitted frame's `pts`.
-    samples_emitted: i64,
     packets: Receiver<Packet>,
     /// Frames the PipeWire thread had to discard because `packets` was full.
     /// Added to `samples_emitted` before the next frame is stamped, so a drop
@@ -267,7 +277,6 @@ impl PipeWireAudioCaptureSource {
                 name: name.into(),
                 pp_log,
                 format,
-                samples_emitted: 0,
                 packets: packet_rx,
                 dropped_frames,
                 terminate: Some(terminate_tx),
@@ -281,30 +290,31 @@ impl PipeWireAudioCaptureSource {
     pub fn time_base(&self) -> ffmpeg::Rational {
         ffmpeg::Rational::new(1, self.format.sample_rate as i32)
     }
+}
 
-    /// Wraps one captured packet in a fresh `ffmpeg::frame::Audio` and stamps
-    /// its `pts` from the running sample count.
-    fn build_frame(&mut self, packet: &Packet) -> ffmpeg::frame::Audio {
-        // Derived rather than stored: `ffmpeg::ChannelLayout` is not `Send`,
-        // and keeping it as a field would force an `unsafe impl Send` on this
-        // whole element to satisfy `Element: Send` — for a value `AudioFormat`
-        // can already reproduce exactly.
-        let mut frame = ffmpeg::frame::Audio::new(
-            self.format.sample_format,
-            packet.frames,
-            self.format.channel_layout(),
-        );
-        frame.set_rate(self.format.sample_rate);
-        // `frame.data_mut(0)`'s length is FFmpeg's own padded linesize, not
-        // necessarily the tight sample bytes — copy only what the packet
-        // actually holds, the same bound `WasapiCaptureSource::build_frame`
-        // documents for the mirror-image reason.
-        let tight_bytes = packet.bytes.len().min(frame.data_mut(0).len());
-        frame.data_mut(0)[..tight_bytes].copy_from_slice(&packet.bytes[..tight_bytes]);
-        frame.set_pts(Some(self.samples_emitted));
-        self.samples_emitted += packet.frames as i64;
-        frame
-    }
+/// Wraps one captured packet as an `ffmpeg` frame, stamped with where the
+/// device captured it.
+///
+/// A free function taking the format rather than a method: the `pts` is the
+/// packet's own `position`, so nothing about this depends on element state,
+/// and the property that matters — a discarded packet leaves its gap where it
+/// happened — is then testable without a capture device.
+fn build_frame(format: &AudioFormat, packet: &Packet) -> ffmpeg::frame::Audio {
+    // Derived rather than stored: `ffmpeg::ChannelLayout` is not `Send`, and
+    // keeping it as a field would force an `unsafe impl Send` on the whole
+    // element to satisfy `Element: Send` — for a value `AudioFormat` can
+    // already reproduce exactly.
+    let mut frame =
+        ffmpeg::frame::Audio::new(format.sample_format, packet.frames, format.channel_layout());
+    frame.set_rate(format.sample_rate);
+    // `frame.data_mut(0)`'s length is FFmpeg's own padded linesize, not
+    // necessarily the tight sample bytes — copy only what the packet actually
+    // holds, the same bound `WasapiCaptureSource::build_frame` documents for
+    // the mirror-image reason.
+    let tight_bytes = packet.bytes.len().min(frame.data_mut(0).len());
+    frame.data_mut(0)[..tight_bytes].copy_from_slice(&packet.bytes[..tight_bytes]);
+    frame.set_pts(Some(packet.position as i64));
+    frame
 }
 
 impl Drop for PipeWireAudioCaptureSource {
@@ -374,12 +384,12 @@ impl SourceElement for PipeWireAudioCaptureSource {
                 }
             };
 
-            // Keep `pts` anchored to real captured time across a drop: the
-            // gap is real, so advance past it rather than pretending the
-            // discarded frames never existed.
+            // The gap a drop leaves is already in the timeline: every packet
+            // carries where it was captured, so the frames stamped after a
+            // drop skip past it on their own. Reported here, not accounted
+            // for here.
             let dropped = self.dropped_frames.swap(0, Ordering::Relaxed);
             if dropped > 0 {
-                self.samples_emitted += dropped as i64;
                 pp_warn!(
                     self,
                     "dropped {dropped} captured frame(s): downstream is not keeping up"
@@ -393,7 +403,7 @@ impl SourceElement for PipeWireAudioCaptureSource {
                 );
             }
 
-            let frame = self.build_frame(&packet);
+            let frame = build_frame(&self.format, &packet);
             if let Err(error) = self.pad.push(MediaBuffer::Audio(Arc::new(frame))) {
                 bus.post(
                     &self.pp_log,
@@ -516,6 +526,9 @@ fn run_pipewire(
         })
         .process({
             let format = format.clone();
+            // Frames the device has captured so far, dropped ones included:
+            // what stamps each packet's place in the captured stream.
+            let mut captured_frames = 0u64;
             move |stream, ()| {
                 let Some(mut buffer) = stream.dequeue_buffer() else {
                     return;
@@ -543,10 +556,13 @@ fn run_pipewire(
                 if usable == 0 {
                     return;
                 }
+                let frames = usable / frame_bytes;
                 let packet = Packet {
                     bytes: bytes[..usable].to_vec(),
-                    frames: usable / frame_bytes,
+                    frames,
+                    position: captured_frames,
                 };
+                captured_frames += frames as u64;
                 // Never block PipeWire's realtime thread on a slow consumer.
                 // A discarded packet is counted, not forgotten: `run` folds
                 // the frame count into `pts` so the timeline keeps matching
@@ -597,6 +613,61 @@ fn run_pipewire(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn stereo_f32() -> AudioFormat {
+        AudioFormat::new(
+            ffmpeg::format::Sample::F32(ffmpeg::format::sample::Type::Packed),
+            48_000,
+            2,
+        )
+    }
+
+    fn packet(format: &AudioFormat, position: u64, frames: usize) -> Packet {
+        let bytes_per_frame = format.channels as usize * format.sample_format.bytes();
+        Packet {
+            bytes: vec![0xAB; frames * bytes_per_frame],
+            frames,
+            position,
+        }
+    }
+
+    /// A discarded packet leaves a gap in the captured stream, and the gap
+    /// belongs where the capture lost it. Stamping `pts` from a count kept on
+    /// this side instead put it in front of whatever came out of the queue
+    /// next — audio captured *before* the drop — moving the gap up to a full
+    /// queue earlier than it happened.
+    #[test]
+    fn a_dropped_packet_leaves_its_gap_where_the_capture_lost_it() {
+        let format = stereo_f32();
+        // Three packets captured back to back; the middle one never made it
+        // into the queue, so `run` never sees it.
+        let first = build_frame(&format, &packet(&format, 0, 480));
+        let third = build_frame(&format, &packet(&format, 960, 480));
+
+        assert_eq!(first.pts(), Some(0));
+        assert_eq!(
+            third.pts(),
+            Some(960),
+            "the frame after a drop is stamped where it was captured, leaving \
+             the gap over the packet that was actually lost"
+        );
+    }
+
+    /// Nothing else about a packet changes with its position: the samples are
+    /// copied whole, and the frame describes the negotiated format.
+    #[test]
+    fn a_captured_packet_keeps_its_samples_and_format() {
+        let format = stereo_f32();
+        let frame = build_frame(&format, &packet(&format, 4_800, 240));
+
+        assert_eq!(frame.samples(), 240);
+        assert_eq!(frame.rate(), 48_000);
+        assert_eq!(frame.format(), format.sample_format);
+        assert!(
+            frame.data(0)[..240 * 8].iter().all(|&byte| byte == 0xAB),
+            "every captured sample reaches the frame"
+        );
+    }
 
     fn device(kind: PipeWireAudioDeviceKind, name: &str) -> PipeWireAudioDevice {
         PipeWireAudioDevice {
