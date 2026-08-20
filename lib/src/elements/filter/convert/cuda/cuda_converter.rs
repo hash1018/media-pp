@@ -129,7 +129,7 @@ impl CudaConverter {
         width: u32,
         height: u32,
     ) -> std::result::Result<Self, CudaConverterError> {
-        if width % 2 != 0 || height % 2 != 0 {
+        if !width.is_multiple_of(2) || !height.is_multiple_of(2) {
             return Err(CudaConverterError::OddDimensions { width, height });
         }
         let name: Arc<str> = name.into().into();

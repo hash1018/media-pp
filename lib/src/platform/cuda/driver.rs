@@ -1295,7 +1295,7 @@ impl BgraSurface {
             let ptr = frame.as_ptr();
             ((*ptr).data[0], (*ptr).linesize[0])
         };
-        (!pixels.is_null() && pitch > 0).then(|| Self {
+        (!pixels.is_null() && pitch > 0).then_some(Self {
             pixels: pixels as CUdeviceptr,
             pitch: pitch as usize,
         })
