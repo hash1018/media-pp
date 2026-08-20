@@ -8,3 +8,11 @@ publish = false
 media-pp = { path = "../../../lib", features = ["dxgi-capture", "d3d11"] }
 render_common = { path = "../render_common" }
 winit = "0.30"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+media-pp = { path = "../../../lib", features = [
+    "pipewire-screen-capture",
+    "cuda",
+] }
+render_common = { path = "../render_common" }
+winit = "0.30"
