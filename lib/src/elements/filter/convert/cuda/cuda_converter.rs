@@ -92,6 +92,11 @@ pub enum CudaConverterError {
 /// converted capture and a composited background agree. Chroma is the
 /// conversion of each 2x2 block's average colour, which is why the dimensions
 /// must be even: an odd extent has no whole chroma sample to write.
+///
+/// The converted frame is tagged for what it now holds — `BT709` /
+/// limited-range — rather than inheriting the source's RGB tags. That is the
+/// one part of a frame's metadata this element deliberately replaces; PTS and
+/// duration cross unchanged.
 pub struct CudaConverter {
     pp_log: PpLog,
     name: Arc<str>,
@@ -242,11 +247,19 @@ impl CudaConverter {
         .inspect_err(|error| pp_error!(self, "{error}"))?;
 
         unsafe {
-            // The conversion moves pixels only — PTS, duration, and color
-            // metadata are part of the buffer contract and would otherwise be
-            // dropped here.
+            // PTS and duration are part of the buffer contract and would
+            // otherwise be dropped here.
             ffi::av_frame_copy_props(destination.as_mut_ptr(), source.as_ptr());
         }
+        // Colour is the one thing this does *not* carry across: the input is
+        // full-range RGB and the output is BT.709 limited-range Y'CbCr, so
+        // copying the source's tags would describe the result as something it
+        // is not. Everything downstream reads these — an encoder tags its
+        // stream from them, a scaler picks its matrix from them — and
+        // libavfilter reports the mismatch as frame properties changing on
+        // the fly.
+        destination.set_color_space(ffmpeg::color::Space::BT709);
+        destination.set_color_range(ffmpeg::color::Range::MPEG);
         self.pad.push(MediaBuffer::Video(Arc::new(destination)))
     }
 }
@@ -424,6 +437,47 @@ mod tests {
             CudaFrameFormat::from_sw_format(sw_format),
             Some(CudaFrameFormat::Nv12)
         );
+    }
+
+    /// The conversion changes what the pixels *are*, so the tags that
+    /// describe them have to change with it: an encoder tags its stream from
+    /// these, and a scaler picks its matrix from them.
+    #[test]
+    fn a_converted_frame_is_tagged_for_the_colour_it_now_holds() {
+        let Some((device, _cuda_lock)) = try_cuda_device() else {
+            return;
+        };
+        let Some(mut converter) = converter(&device, 64, 32) else {
+            return;
+        };
+        // What a capture hands over: full-range RGB.
+        let Some(source) = cuda_frame(&device, CudaFrameFormat::Bgra, 64, 32, 0) else {
+            return;
+        };
+        let MediaBuffer::Video(frame) = &source else {
+            panic!("the upload produces a Video buffer");
+        };
+        let mut tagged = ffmpeg::frame::Video::empty();
+        unsafe {
+            ffi::av_frame_ref(tagged.as_mut_ptr(), frame.as_ptr());
+        }
+        tagged.set_color_space(ffmpeg::color::Space::RGB);
+        tagged.set_color_range(ffmpeg::color::Range::JPEG);
+        let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
+        let mut slot = pool.get();
+        *slot = tagged;
+
+        let converted = capture(&mut converter);
+        converter
+            .consume(MediaBuffer::Video(Arc::new(slot)))
+            .expect("convert");
+
+        let received = converted.lock().unwrap();
+        let MediaBuffer::Video(out) = &received[0] else {
+            panic!("expected a Video buffer");
+        };
+        assert_eq!(out.color_space(), ffmpeg::color::Space::BT709);
+        assert_eq!(out.color_range(), ffmpeg::color::Range::MPEG);
     }
 
     /// NV12 in is not a conversion this performs, and reading it as BGRA
