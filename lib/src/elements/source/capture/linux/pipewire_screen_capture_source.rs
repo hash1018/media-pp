@@ -278,20 +278,39 @@ enum CaptureTarget {
 /// Raw because `AVBufferRef` has no wrapper of its own here, and `Send`
 /// because it is a refcounted heap object with no thread affinity — the same
 /// reasoning `CudaUpload` documents for holding one.
+///
+/// Owning the reference rather than carrying a bare pointer is what makes
+/// every path that abandons it release it: `open_gpu` takes the reference
+/// before the portal handshake, which blocks on a dialog the user may
+/// cancel, and the thread it is bound for may fail to spawn.
 #[cfg(feature = "cuda")]
 struct HwDeviceCtx(*mut ffi::AVBufferRef);
 
 #[cfg(feature = "cuda")]
 unsafe impl Send for HwDeviceCtx {}
 
+#[cfg(feature = "cuda")]
+impl HwDeviceCtx {
+    fn as_ptr(&self) -> *mut ffi::AVBufferRef {
+        self.0
+    }
+}
+
+#[cfg(feature = "cuda")]
+impl Drop for HwDeviceCtx {
+    fn drop(&mut self) {
+        unsafe { free_buffer(self.0) };
+    }
+}
+
 /// GPU-mode capture state, owned by the PipeWire thread: the DMA-BUF import
 /// and the CUDA pool its results land in.
 #[cfg(feature = "cuda")]
 struct GpuCapture {
     importer: DmaBufCudaImporter,
-    /// This element's own reference to the shared device context, released in
-    /// `Drop`.
-    hw_device_ctx: *mut ffi::AVBufferRef,
+    /// This element's own reference to the shared device context, released
+    /// when this is dropped — see [`HwDeviceCtx`].
+    hw_device_ctx: HwDeviceCtx,
     /// The BGRA CUDA pool captured surfaces come from. Rebuilt when the
     /// compositor renegotiates the size — pooled surfaces are allocated to a
     /// fixed one, and outstanding frames keep the old context alive through
@@ -304,10 +323,12 @@ struct GpuCapture {
 #[cfg(feature = "cuda")]
 impl GpuCapture {
     fn new(
-        hw_device_ctx: *mut ffi::AVBufferRef,
+        hw_device_ctx: HwDeviceCtx,
     ) -> std::result::Result<Self, PipeWireScreenCaptureSourceError> {
         // Built before the stream connects: its modifier list is what the
-        // format negotiation offers the compositor.
+        // format negotiation offers the compositor. On failure `?` drops
+        // `hw_device_ctx`, which is what releases the reference `open_gpu`
+        // took.
         let importer = DmaBufCudaImporter::new()?;
         Ok(Self {
             importer,
@@ -352,7 +373,12 @@ impl GpuCapture {
             return Ok(());
         }
         let frames_ctx = unsafe {
-            create_hw_frames_ctx(self.hw_device_ctx, CudaFrameFormat::Bgra, width, height)
+            create_hw_frames_ctx(
+                self.hw_device_ctx.as_ptr(),
+                CudaFrameFormat::Bgra,
+                width,
+                height,
+            )
         }?;
         if !self.hw_frames_ctx.is_null() {
             unsafe { free_buffer(self.hw_frames_ctx) };
@@ -367,11 +393,9 @@ impl GpuCapture {
 #[cfg(feature = "cuda")]
 impl Drop for GpuCapture {
     fn drop(&mut self) {
-        unsafe {
-            if !self.hw_frames_ctx.is_null() {
-                free_buffer(self.hw_frames_ctx);
-            }
-            free_buffer(self.hw_device_ctx);
+        // The device reference releases itself with `hw_device_ctx`.
+        if !self.hw_frames_ctx.is_null() {
+            unsafe { free_buffer(self.hw_frames_ctx) };
         }
     }
 }
@@ -1285,15 +1309,7 @@ fn run_pipewire(
     #[cfg(feature = "cuda")]
     let mut gpu = match target {
         CaptureTarget::Cpu => None,
-        CaptureTarget::Gpu(hw_device_ctx) => match GpuCapture::new(hw_device_ctx.0) {
-            Ok(gpu) => Some(gpu),
-            // The reference `open_gpu` took never reached a `GpuCapture` to
-            // be released by its `Drop`, so it is released here instead.
-            Err(error) => {
-                unsafe { free_buffer(hw_device_ctx.0) };
-                return Err(error);
-            }
-        },
+        CaptureTarget::Gpu(hw_device_ctx) => Some(GpuCapture::new(hw_device_ctx)?),
     };
     #[cfg(not(feature = "cuda"))]
     let CaptureTarget::Cpu = target;
@@ -1963,6 +1979,65 @@ mod tests {
             }
             other => panic!("expected an Int flags choice, got {other:?}"),
         }
+    }
+
+    /// The reference `open_gpu` takes is taken *before* the portal handshake,
+    /// which blocks on a dialog the user can cancel — and before a thread
+    /// that may fail to spawn. Every one of those paths abandons the carrier,
+    /// so dropping it has to be what releases the reference. The refcount is
+    /// that contract in observable form.
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn an_abandoned_device_reference_is_released() {
+        let Some((device, _cuda_lock)) = crate::test_support::try_cuda_device() else {
+            return;
+        };
+        let before = unsafe { ffi::av_buffer_get_ref_count(device.as_ptr()) };
+        {
+            let held = HwDeviceCtx(unsafe { ffi::av_buffer_ref(device.as_ptr()) });
+            assert_eq!(
+                unsafe { ffi::av_buffer_get_ref_count(held.as_ptr()) },
+                before + 1,
+                "the carrier holds a reference of its own while it lives"
+            );
+        }
+        assert_eq!(
+            unsafe { ffi::av_buffer_get_ref_count(device.as_ptr()) },
+            before,
+            "an abandoned carrier must release the reference open_gpu took"
+        );
+    }
+
+    /// The same contract once the reference has reached the `GpuCapture` that
+    /// adopts it, which is the path a successful `open_gpu` takes. A machine
+    /// where the import cannot open at all exercises the other half: `new`
+    /// fails and releases the reference on its way out.
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn a_gpu_capture_releases_its_device_reference() {
+        let Some((device, _cuda_lock)) = crate::test_support::try_cuda_device() else {
+            return;
+        };
+        let before = unsafe { ffi::av_buffer_get_ref_count(device.as_ptr()) };
+        let carrier = HwDeviceCtx(unsafe { ffi::av_buffer_ref(device.as_ptr()) });
+        match GpuCapture::new(carrier) {
+            Ok(gpu) => {
+                assert_eq!(
+                    unsafe { ffi::av_buffer_get_ref_count(device.as_ptr()) },
+                    before + 1,
+                    "the capture holds the reference while it lives"
+                );
+                drop(gpu);
+            }
+            Err(error) => {
+                eprintln!("no usable DMA-BUF import here ({error}); checking release only")
+            }
+        }
+        assert_eq!(
+            unsafe { ffi::av_buffer_get_ref_count(device.as_ptr()) },
+            before,
+            "the reference must be released whether the capture was built or not"
+        );
     }
 
     #[test]
