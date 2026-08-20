@@ -17,7 +17,7 @@
 use std::{
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc::{self, RecvTimeoutError},
     },
     thread::JoinHandle,
@@ -1330,6 +1330,10 @@ fn run_pipewire(
     // The modifier the compositor fixated on, which every import of a buffer
     // from this stream has to be told.
     let modifier = Arc::new(Mutex::new(0u64));
+    // Bumped on every negotiated format. The compositor reallocates its
+    // buffers each time, so this is what tells the import that whatever it
+    // cached describes memory that no longer exists.
+    let negotiation = Arc::new(AtomicU64::new(0));
 
     let _listener = stream
         .add_local_listener_with_user_data(())
@@ -1355,6 +1359,7 @@ fn run_pipewire(
             let startup = startup.clone();
             let modifiers = modifiers.clone();
             let modifier = modifier.clone();
+            let negotiation = negotiation.clone();
             move |stream, (), id, param| {
                 let Some(param) = param else { return };
                 if id != spa::param::ParamType::Format.as_raw() {
@@ -1422,6 +1427,7 @@ fn run_pipewire(
                     }
                 }
 
+                negotiation.fetch_add(1, Ordering::Release);
                 if let Ok(mut size) = size.lock() {
                     *size = (width, height);
                 }
@@ -1462,6 +1468,8 @@ fn run_pipewire(
             let size = size.clone();
             #[cfg(feature = "cuda")]
             let modifier = modifier.clone();
+            #[cfg(feature = "cuda")]
+            let negotiation = negotiation.clone();
             // Moved in: the import runs here, on the loop thread its EGL
             // context is current on.
             #[cfg(feature = "cuda")]
@@ -1502,6 +1510,10 @@ fn run_pipewire(
                         }
                         return;
                     }
+                    // Buffers from an earlier negotiation are gone, whether
+                    // or not the size changed with it.
+                    gpu.importer
+                        .sync_negotiation(negotiation.load(Ordering::Acquire));
                     let plane = DmaBufPlane {
                         fd: data.fd() as std::ffi::c_int,
                         offset: data.chunk().offset(),

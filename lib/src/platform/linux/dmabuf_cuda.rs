@@ -108,6 +108,28 @@ pub(crate) struct DmaBufPlane {
     pub(crate) modifier: u64,
 }
 
+/// What distinguishes one cached EGLImage from another: everything the import
+/// is described by, since an fd number alone is only unique for as long as
+/// the buffer holding it stays open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct ImageKey {
+    fd: c_int,
+    offset: u32,
+    stride: i32,
+    modifier: u64,
+}
+
+impl From<DmaBufPlane> for ImageKey {
+    fn from(plane: DmaBufPlane) -> Self {
+        Self {
+            fd: plane.fd,
+            offset: plane.offset,
+            stride: plane.stride,
+            modifier: plane.modifier,
+        }
+    }
+}
+
 /// The destination surface of an import: an `AV_PIX_FMT_CUDA` frame's
 /// `data[0]`/`linesize[0]`.
 #[derive(Debug, Clone, Copy)]
@@ -141,10 +163,19 @@ pub(crate) struct DmaBufCudaImporter {
     /// The modifiers this driver will accept for XRGB8888, in the order EGL
     /// reported them — what the stream offers the compositor.
     modifiers: Vec<u64>,
-    /// One EGLImage per PipeWire buffer, keyed by the buffer's fd. PipeWire
-    /// recycles a small set of buffers, so this converges after the first
-    /// few frames instead of rebuilding an image per capture.
-    images: HashMap<c_int, EglImage>,
+    /// One EGLImage per PipeWire buffer. PipeWire recycles a small set of
+    /// buffers, so this converges after the first few frames instead of
+    /// rebuilding an image per capture.
+    ///
+    /// Keyed by everything that describes the buffer, not by its fd alone:
+    /// an fd number is only unique while the buffer holding it is open, and
+    /// the same fd may come back describing different memory. See
+    /// [`Self::sync_negotiation`] for the other half of that problem.
+    images: HashMap<ImageKey, EglImage>,
+    /// The negotiation the cached images belong to. A compositor reallocates
+    /// its buffers whenever the format is renegotiated, so images from an
+    /// earlier one must not be reused even when the size is unchanged.
+    negotiation: u64,
     texture: c_uint,
     framebuffer: c_uint,
     /// The CUDA-registered pixel buffer the readback lands in, sized to the
@@ -209,6 +240,7 @@ impl DmaBufCudaImporter {
             context,
             modifiers,
             images: HashMap::new(),
+            negotiation: 0,
             texture: 0,
             framebuffer: 0,
             pixel_buffer: None,
@@ -216,6 +248,24 @@ impl DmaBufCudaImporter {
         importer.gl.gen_textures(1, &mut importer.texture);
         importer.gl.gen_framebuffers(1, &mut importer.framebuffer);
         Ok(importer)
+    }
+
+    /// Drops every cached image when `negotiation` names a different round of
+    /// format negotiation than the cached ones came from, and reports whether
+    /// it did.
+    ///
+    /// The caller supplies the counter because only the stream's own
+    /// `param_changed` knows a renegotiation happened. Without this, a
+    /// renegotiation that keeps the size — a modifier change, or a
+    /// compositor simply rebuilding its pool — would leave this reading
+    /// images that describe buffers the compositor has since freed.
+    pub(crate) fn sync_negotiation(&mut self, negotiation: u64) -> bool {
+        if self.negotiation == negotiation {
+            return false;
+        }
+        self.negotiation = negotiation;
+        self.release_images();
+        true
     }
 
     /// The DMA-BUF modifiers to offer the compositor, most preferred first.
@@ -310,13 +360,14 @@ impl DmaBufCudaImporter {
         width: u32,
         height: u32,
     ) -> Result<EglImage, DmaBufCudaError> {
-        if let Some(image) = self.images.get(&plane.fd) {
+        let key = ImageKey::from(plane);
+        if let Some(image) = self.images.get(&key) {
             return Ok(*image);
         }
         let image = self
             .egl
             .create_dma_buf_image(self.display, plane, width, height)?;
-        self.images.insert(plane.fd, image);
+        self.images.insert(key, image);
         Ok(image)
     }
 
@@ -1022,6 +1073,77 @@ fn check_cuda(op: &'static str, result: c_int) -> Result<(), DmaBufCudaError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn plane() -> DmaBufPlane {
+        DmaBufPlane {
+            fd: 7,
+            offset: 0,
+            stride: 7680,
+            modifier: 0x0300_0000_0060_6010,
+        }
+    }
+
+    /// An fd number identifies a buffer only while that buffer is open, so a
+    /// cache keyed on it alone can hand back an image describing memory that
+    /// has since been replaced. Every field the import is built from has to
+    /// take part in the key.
+    #[test]
+    fn images_of_differently_described_buffers_are_cached_apart() {
+        let base = ImageKey::from(plane());
+        for changed in [
+            DmaBufPlane { fd: 8, ..plane() },
+            DmaBufPlane {
+                offset: 4096,
+                ..plane()
+            },
+            DmaBufPlane {
+                stride: 8192,
+                ..plane()
+            },
+            DmaBufPlane {
+                modifier: 0x0300_0000_00e0_8014,
+                ..plane()
+            },
+        ] {
+            assert_ne!(
+                base,
+                ImageKey::from(changed),
+                "{changed:?} describes different memory than {:?}",
+                plane()
+            );
+        }
+        assert_eq!(base, ImageKey::from(plane()), "the same plane is one key");
+    }
+
+    /// A renegotiation frees the compositor's buffers even when the size is
+    /// unchanged, so the caller's counter — not the size — is what clears the
+    /// cache.
+    #[test]
+    fn a_new_negotiation_clears_the_cached_images() {
+        let Some((_device, _cuda_lock)) = crate::test_support::try_cuda_device() else {
+            return;
+        };
+        let mut importer = match DmaBufCudaImporter::new() {
+            Ok(importer) => importer,
+            Err(error @ DmaBufCudaError::Library(_)) => {
+                eprintln!("skipping: {error}");
+                return;
+            }
+            Err(error) => panic!("DMA-BUF import is unusable on a CUDA machine: {error}"),
+        };
+        assert!(
+            importer.sync_negotiation(1),
+            "the first sight of a negotiation invalidates whatever was cached"
+        );
+        assert!(
+            !importer.sync_negotiation(1),
+            "the same negotiation must not throw away images that are still valid"
+        );
+        assert!(
+            importer.sync_negotiation(2),
+            "a later negotiation invalidates"
+        );
+    }
 
     /// Everything this module does before a buffer arrives: opening the EGL
     /// device that backs CUDA device 0, making a context current, and finding
