@@ -394,6 +394,24 @@ impl PipeWireAudioCaptureSource {
     }
 }
 
+/// The samples inside one mapped buffer.
+///
+/// SPA describes the valid region of a buffer with its chunk's own `offset`
+/// and `size`, not with the bounds of the mapping: a node is free to hand
+/// over a mapping whose data starts partway in. Reading from the start of the
+/// mapping instead would return whatever precedes the samples on such a node
+/// -- silence or noise, never an error.
+///
+/// Both bounds are clamped to the mapping, and the result is truncated to
+/// whole frames so no packet ever ends mid-frame. `None` means the chunk
+/// describes nothing this element can read.
+fn chunk_samples(bytes: &[u8], offset: usize, size: usize, frame_bytes: usize) -> Option<&[u8]> {
+    let start = offset.min(bytes.len());
+    let end = offset.saturating_add(size).min(bytes.len());
+    let usable = end.saturating_sub(start) / frame_bytes * frame_bytes;
+    (usable > 0).then(|| &bytes[start..start + usable])
+}
+
 /// Drops everything captured before a pause, so `Resume` emits live audio
 /// rather than the queue's stale contents.
 fn discard_captured(packets: &Receiver<Packet>) {
@@ -660,7 +678,7 @@ fn run_pipewire(
                     return; // data before the format param — nothing to describe it with
                 };
                 let data = &mut datas[0];
-                let size = data.chunk().size() as usize;
+                let (offset, size) = (data.chunk().offset() as usize, data.chunk().size() as usize);
                 if size == 0 {
                     return; // a tick with no new content
                 }
@@ -669,15 +687,12 @@ fn run_pipewire(
                     return;
                 }
                 let Some(bytes) = data.data() else { return };
-                // `chunk().size()` is authoritative for how much of the
-                // mapping is real; never read past whichever is shorter.
-                let usable = size.min(bytes.len()) / frame_bytes * frame_bytes;
-                if usable == 0 {
+                let Some(samples) = chunk_samples(bytes, offset, size, frame_bytes) else {
                     return;
-                }
-                let frames = usable / frame_bytes;
+                };
+                let frames = samples.len() / frame_bytes;
                 let packet = Packet {
-                    bytes: bytes[..usable].to_vec(),
+                    bytes: samples.to_vec(),
                     frames,
                     position: captured_frames,
                 };
@@ -732,6 +747,34 @@ fn run_pipewire(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A node is free to put its samples partway into the mapping, and SPA's
+    /// chunk is what says where. Reading from the mapping's start instead
+    /// returns whatever precedes them.
+    #[test]
+    fn samples_are_read_from_the_chunk_the_node_described() {
+        let mut buffer = vec![0xFFu8; 64];
+        buffer[16..48].fill(0x11);
+
+        let samples = chunk_samples(&buffer, 16, 32, 4).expect("the chunk holds whole frames");
+        assert_eq!(samples.len(), 32);
+        assert!(
+            samples.iter().all(|&byte| byte == 0x11),
+            "an ignored offset reads the bytes before the samples"
+        );
+    }
+
+    #[test]
+    fn a_chunk_is_clamped_to_the_mapping_and_to_whole_frames() {
+        let buffer = vec![0x22u8; 64];
+
+        // A size reaching past the mapping is clamped rather than trusted.
+        assert_eq!(chunk_samples(&buffer, 48, 64, 4).map(<[u8]>::len), Some(16));
+        // A region that does not hold a whole frame is not half a frame.
+        assert_eq!(chunk_samples(&buffer, 60, 3, 4), None);
+        // An offset past the mapping describes nothing at all.
+        assert_eq!(chunk_samples(&buffer, 128, 16, 4), None);
+    }
 
     /// Opens a capture on whatever this machine publishes, or skips with a
     /// reason. Sinks are preferred: a monitor stream captures whatever is

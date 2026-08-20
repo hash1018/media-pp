@@ -245,6 +245,11 @@ struct Latest {
     /// once by `run` rather than silently dropped, because dropping every frame
     /// looks exactly like a frozen desktop and gives a caller nothing to act on.
     unmappable_buffers: u64,
+    /// Set when a buffer's chunk did not describe a whole frame, so nothing
+    /// was copied out of it. Reported for the same reason as
+    /// `unmappable_buffers`: dropping every frame silently is
+    /// indistinguishable from a frozen desktop.
+    short_buffers: u64,
     /// `false` until the first real (non-empty) frame lands, so `run` can
     /// tell "nothing captured yet" apart from "a genuinely black screen".
     have_frame: bool,
@@ -649,6 +654,7 @@ impl PipeWireScreenCaptureSource {
             width: 0,
             height: 0,
             unmappable_buffers: 0,
+            short_buffers: 0,
             have_frame: false,
             #[cfg(feature = "cuda")]
             frame: None,
@@ -922,6 +928,13 @@ impl PipeWireScreenCaptureSource {
         (latest.unmappable_buffers > 0).then(|| std::mem::take(&mut latest.unmappable_buffers))
     }
 
+    /// How many buffers arrived whose chunk did not describe a whole frame.
+    /// Taken rather than peeked, for the same reason as the report above.
+    fn take_short_report(&self) -> Option<u64> {
+        let mut latest = self.latest.lock().ok()?;
+        (latest.short_buffers > 0).then(|| std::mem::take(&mut latest.short_buffers))
+    }
+
     /// The PipeWire thread's error, if it has hit one. Taken rather than
     /// peeked so `run` reports it exactly once.
     fn take_worker_error(&self) -> Option<PipeWireScreenCaptureSourceError> {
@@ -994,6 +1007,15 @@ impl SourceElement for PipeWireScreenCaptureSource {
                     "dropped {count} GPU-resident (DMA-BUF) buffer(s): this element only \
                      reads CPU-mapped buffers, so the captured image is frozen at the last \
                      readable frame"
+                );
+            }
+            if let Some(count) = self.take_short_report() {
+                pp_warn!(
+                    self,
+                    "dropped {count} buffer(s) whose chunk described less than a \
+                     {}x{} frame: the captured image is whatever last arrived whole",
+                    self.width,
+                    self.height
                 );
             }
             if let Some(error) = self.take_worker_error() {
@@ -1183,6 +1205,24 @@ fn copy_rows_into(
 /// Copies `height` rows of `row_bytes` out of a `src_stride`-strided source
 /// into a tightly packed destination.
 ///
+/// The pixels inside one mapped buffer.
+///
+/// SPA describes the valid region of a buffer with its chunk's own `offset`
+/// and `size`, not with the bounds of the mapping, and a node is free to hand
+/// over a mapping whose image starts partway in. Reading from the start of
+/// the mapping instead would copy whatever precedes the image and call it a
+/// desktop.
+///
+/// Both bounds are clamped to the mapping. `None` means the chunk describes
+/// nothing readable; whether what it does describe is a *whole* frame is
+/// `repack_rows`' own check, which refuses a short source rather than writing
+/// part of one.
+fn chunk_image(pixels: &[u8], offset: usize, size: usize) -> Option<&[u8]> {
+    let start = offset.min(pixels.len());
+    let end = offset.saturating_add(size).min(pixels.len());
+    (end > start).then(|| &pixels[start..end])
+}
+
 /// Repacking here rather than downstream keeps `emit_frame` dealing with only
 /// one stride (its own destination frame's): the compositor is free to pick
 /// any padded stride it likes, and on this path it is the only place a
@@ -1486,7 +1526,10 @@ fn run_pipewire(
                 if data.chunk().size() == 0 {
                     return; // a tick with no new content
                 }
+
                 let stride = data.chunk().stride();
+                let (offset, chunk_size) =
+                    (data.chunk().offset() as usize, data.chunk().size() as usize);
                 let Ok((width, height)) = size.lock().map(|s| *s) else {
                     return;
                 };
@@ -1556,6 +1599,12 @@ fn run_pipewire(
                     }
                     return;
                 };
+                let Some(image) = chunk_image(pixels, offset, chunk_size) else {
+                    if let Ok(mut latest) = latest.lock() {
+                        latest.short_buffers += 1;
+                    }
+                    return;
+                };
                 let Ok(mut latest) = latest.lock() else {
                     return;
                 };
@@ -1566,12 +1615,16 @@ fn run_pipewire(
                 latest.height = height;
                 if repack_rows(
                     &mut latest.pixels,
-                    pixels,
+                    image,
                     src_stride,
                     row_bytes,
                     height as usize,
                 ) {
                     latest.have_frame = true;
+                } else {
+                    // The chunk described less than a frame; the previous
+                    // image is left alone rather than half-overwritten.
+                    latest.short_buffers += 1;
                 }
             }
         })
@@ -2079,6 +2132,49 @@ mod tests {
         assert!(disconnect_reason(&Connecting, &Paused).is_none());
         assert!(disconnect_reason(&Paused, &Streaming).is_none());
         assert!(disconnect_reason(&Streaming, &Paused).is_none());
+    }
+
+    /// A node may hand over a mapping whose image starts partway in, and the
+    /// chunk is what says where. Reading from the mapping's start copies
+    /// whatever precedes the image instead.
+    #[test]
+    fn pixels_are_read_from_the_chunk_the_node_described() {
+        let mut buffer = vec![0xFFu8; 64];
+        buffer[16..48].fill(0x11);
+
+        let image = chunk_image(&buffer, 16, 32).expect("the chunk holds an image");
+        assert_eq!(image.len(), 32);
+        assert!(
+            image.iter().all(|&byte| byte == 0x11),
+            "an ignored offset reads the bytes before the image"
+        );
+    }
+
+    #[test]
+    fn a_chunk_reaching_past_its_mapping_is_clamped_to_it() {
+        let buffer = vec![0x22u8; 64];
+
+        assert_eq!(chunk_image(&buffer, 48, 64).map(<[u8]>::len), Some(16));
+        assert_eq!(chunk_image(&buffer, 64, 16), None);
+        assert_eq!(chunk_image(&buffer, 0, 0), None);
+    }
+
+    /// What the clamping is for: a chunk that covers less than the frame must
+    /// leave the previous image alone rather than write part of a new one.
+    #[test]
+    fn a_chunk_shorter_than_a_frame_is_refused_rather_than_half_copied() {
+        let mut destination = vec![0u8; 4 * 4 * 4];
+        let mapping = vec![0x33u8; 64];
+        let image = chunk_image(&mapping, 0, 32).expect("the chunk holds something");
+
+        assert!(
+            !repack_rows(&mut destination, image, 16, 16, 4),
+            "half a frame is not a frame"
+        );
+        assert!(
+            destination.iter().all(|&byte| byte == 0),
+            "a refused frame must not have written anything"
+        );
     }
 
     #[test]
