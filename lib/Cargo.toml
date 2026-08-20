@@ -124,3 +124,19 @@ webrtc = ["dep:str0m"]
 
 [dev-dependencies]
 log = "0.4"
+
+# `tests/soak.rs` measures process private bytes, adapter video memory, and
+# the D3D11 debug layer's live-object count. Unlike the library's own
+# optional `windows` dependency this one is not feature-gated: the private-
+# bytes gauge every soak scenario uses is plain Win32, needed whether or not
+# `d3d11` is enabled.
+[target.'cfg(windows)'.dev-dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Threading",
+] }

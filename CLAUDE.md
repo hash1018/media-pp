@@ -188,6 +188,42 @@ documentation and implementation differ.
   variable actually set, since a skipped test reports as passing. Such a test
   must assert a contract that holds for any fixture — never a particular file's
   codec, resolution, duration, or keyframe spacing.
+- Stress and leak coverage lives in `lib/tests/soak.rs`, `#[ignore]`d and run
+  explicitly (`--test soak -- --ignored --nocapture`). A scenario repeats one
+  cycle — build/run/teardown, control storm, dynamic churn, GPU upload/scale,
+  hardware decode/encode, desktop capture — and fails on a *fitted slope*, never
+  on a single before/after delta, because neither the Rust nor the C heap
+  returns freed memory eagerly. Take the
+  process's private bytes, not a `#[global_allocator]` counter, since FFmpeg
+  allocates through `av_malloc`; GPU memory needs its own gauge on top
+  (`common::gpu`: DXGI `QueryVideoMemoryInfo` plus the debug layer's
+  live-object count, and the NVIDIA driver's per-process figure for CUDA where
+  it is available). Add a scenario when a new element introduces a per-cycle
+  resource, start it with `isolate!()`, and set its threshold from a measured
+  run rather than a guess.
+- Every gauge measures a whole process, so each scenario re-runs itself in its
+  own child process (`isolate!()` / `common::spawn_isolated`). Sharing one
+  process is not merely untidy: the graphics driver trims its allocations for
+  tens of seconds after a GPU scenario ends, and that drift lands inside the
+  next scenario's window as a slope far larger than anything being measured.
+  Serializing and waiting (`common::settle`) narrows it; only a fresh process
+  removes it.
+- A pass claims "no growth above what this window could resolve", not "no
+  leak" — so `assert_flat` prints the fitted slope's standard error and the
+  resulting resolution, and fails a window too noisy for its own threshold
+  instead of reporting a quiet pass. Resolution improves as `n^1.5`; raising
+  `MEDIA_PP_SOAK_ITERS` is the way to tighten a claim, not lowering a
+  threshold until it passes.
+- A GPU scenario's private-bytes trend can be dominated by the graphics driver's
+  own allocation cache rather than by anything this crate did: repeatedly
+  creating and destroying screen-sized textures grows committed memory by about
+  one texture per cycle until it saturates, reproducibly, with no library code
+  involved at all. Before calling such growth a leak, reproduce it with raw API
+  calls, check whether a mode that makes no such allocation (`CaptureMode::Cpu`)
+  stays flat, and give the scenario enough warm-up to measure past saturation —
+  `d3d11::CAPTURE_WARMUP` exists for exactly that. And change nothing until an
+  A/B run of the same scenario shows the change actually moved the number; a
+  plausible-sounding fix measured once can easily be run-to-run variance.
 - Before adding an example, check whether an existing one already covers the
   same purpose and extend it instead of adding a parallel crate. A second
   backend for something an example already demonstrates belongs inside that

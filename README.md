@@ -53,6 +53,13 @@ cargo test -p media-pp
 cargo run -p decode -- path/to/video.mp4
 ```
 
+Stress and leak scenarios live in `lib/tests/soak.rs`. Each runs for tens of
+seconds, so they are `#[ignore]`d and stay out of the command above:
+
+```sh
+cargo test -p media-pp --features d3d11,cuda --test soak -- --ignored --nocapture
+```
+
 File-based examples require a media path. No media files are checked into the
 repository and examples do not use a default path.
 

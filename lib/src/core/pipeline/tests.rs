@@ -1296,11 +1296,18 @@ fn a_source_that_fails_still_stops_its_own_branch() {
     .expect("wiring succeeds");
 
     pipeline.run();
-    let error = pipeline
-        .bus()
-        .iter()
-        .find(|event| matches!(event, BusEvent::Error { .. }));
-    assert!(error.is_some(), "the failure reaches the bus");
+    // Drained to exhaustion, not searched lazily: the error is posted
+    // before the branch is stopped, so a `find` that returns on the first
+    // `Error` can observe `stopped` while the source thread is still on its
+    // way there. Iterating until every `Bus` sender has dropped is what
+    // makes the thread's work complete before the assertion below.
+    let events: Vec<_> = pipeline.bus().iter().collect();
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, BusEvent::Error { .. })),
+        "the failure reaches the bus"
+    );
     assert!(
         stopped.load(Ordering::Acquire),
         "the branch behind a failed source must still be stopped, \
