@@ -87,7 +87,7 @@ buffers, codecs, and muxers; `Pipeline::stop` abandons buffered work immediately
 | Kind | Elements |
 |---|---|
 | Sources | `FileDemuxer`, `AppSource`, `RtspSource`, `TestVideoSource`, `TestAudioSource`, `DxgiCaptureSource`, `PipeWireScreenCaptureSource`, `PipeWireAudioCaptureSource`, `WasapiCaptureSource`, `AudioMixer`, `SwVideoCompositor`, `CudaVideoCompositor`, `D3d11VideoCompositor`, `WebRtcTrackSource` |
-| Filters | `SwDecoder`, `CudaDecoder`, `D3d11Decoder`, `D3d12vaDecoder`, `SwEncoder`, `CudaEncoder`, `D3d11NvencEncoder`, `SwAudioEncoder`, `AudioResampler`, `AudioVolume`, `SwScaler`, `Pacer`, `VideoSynchronizer`, `CudaScaler`, `CudaUpload`, `CudaDownload`, `D3d11Upload`, `D3d11Download`, `D3d12Upload`, `Tee` |
+| Filters | `SwDecoder`, `CudaDecoder`, `D3d11Decoder`, `D3d12vaDecoder`, `SwEncoder`, `CudaEncoder`, `D3d11NvencEncoder`, `SwAudioEncoder`, `AudioResampler`, `AudioVolume`, `SwScaler`, `Pacer`, `VideoSynchronizer`, `CudaScaler`, `CudaUpload`, `CudaDownload`, `CudaConverter`, `D3d11Upload`, `D3d11Download`, `D3d12Upload`, `Tee` |
 | Sinks | `FrameCounter`, `PacketCounter`, `AppSink`, `Mp4Muxer`, `SegmentedMp4Muxer`, `HlsMuxer`, `RtspSink`, `CudaRenderer`, `D3d11Renderer`, `D3d12Renderer`, `PipeWireAudioRenderer`, `WasapiRenderer`, `OrtDetector`, `WebRtcTrackSink` |
 
 Backend-specific elements require their corresponding Cargo feature and are
@@ -205,12 +205,13 @@ buffers are not logged one record per buffer.
   time — no development packages are needed to build it.
 - `PipeWireAudioCaptureSource`/`PipeWireAudioRenderer` need PipeWire 0.3.50 or
   newer development files and a running session, but no portal.
-- CUDA surfaces carry either NV12 or BGRA (`CudaFrameFormat`), and nothing on
-  that path converts between them — `CudaScaler` resizes, it does not convert,
-  because `scale_cuda` has no RGB-to-YUV kernel. It does not need one: NVENC
-  ingests BGRA as directly as NV12, converting in hardware, so a capture
-  recorded through `CudaUpload -> CudaEncoder` stays BGRA end to end. The one
-  element that requires NV12 is `CudaRenderer`.
+- CUDA surfaces carry either NV12 or BGRA (`CudaFrameFormat`). Recording needs
+  no conversion between them: NVENC ingests BGRA as directly as NV12,
+  converting in hardware, so a capture recorded through `CudaEncoder` stays
+  BGRA end to end. `CudaVideoCompositor` and `CudaRenderer` work in NV12
+  instead, and `CudaConverter` is what a BGRA capture goes through to reach
+  them — with a kernel of this crate's own, since `scale_cuda` resizes but has
+  no RGB-to-YUV kernel and `CudaScaler` therefore does not convert.
 - A `CudaDevice` opens the device's primary CUDA context, so create one per
   process before starting pipelines rather than per pipeline: creating or
   dropping one while another thread is decoding or encoding can crash inside

@@ -57,6 +57,235 @@ struct CudaMemcpy2D {
     height: usize,
 }
 
+/// The BGRA-to-NV12 conversion nothing else on this crate's CUDA path can do.
+///
+/// `scale_cuda` resizes but does not convert — FFmpeg 8.1 answers a BGRA
+/// input with "Unsupported conversion: bgra -> semiplanar8" — and
+/// `colorspace_cuda` only moves YUV between ranges. Without this kernel a
+/// BGRA surface can reach [`crate::elements::CudaEncoder`], which ingests it
+/// directly, and nothing else: [`crate::elements::CudaVideoCompositor`] and
+/// [`crate::elements::CudaRenderer`] both work in NV12.
+///
+/// Two entry points rather than one: luma is a thread per pixel, chroma a
+/// thread per 2x2 block, and splitting them keeps each a straight line of
+/// loads, arithmetic, and one store. The colour maths is BT.709 limited
+/// range, deliberately the same definition [`rgb_to_bt709_limited`] uses for
+/// compositor backgrounds so a converted capture and a filled background
+/// agree, and written in the same operation order so a test can compare every
+/// byte against that expression instead of a tolerance.
+const CONVERT_PTX: &str = r#"
+.version 6.0
+.target sm_50
+.address_size 64
+
+.visible .entry bgra_to_luma(
+    .param .u64 dst,
+    .param .u32 dst_pitch,
+    .param .u64 src,
+    .param .u32 src_pitch,
+    .param .u32 width,
+    .param .u32 height
+)
+{
+    .reg .pred  %p<4>;
+    .reg .b16   %rs<8>;
+    .reg .b32   %r<24>;
+    .reg .f32   %f<20>;
+    .reg .b64   %rd<12>;
+
+    ld.param.u64    %rd1, [dst];
+    ld.param.u32    %r1, [dst_pitch];
+    ld.param.u64    %rd2, [src];
+    ld.param.u32    %r2, [src_pitch];
+    ld.param.u32    %r3, [width];
+    ld.param.u32    %r4, [height];
+
+    mov.u32         %r5, %ctaid.x;
+    mov.u32         %r6, %ntid.x;
+    mov.u32         %r7, %tid.x;
+    mad.lo.s32      %r8, %r5, %r6, %r7;
+    mov.u32         %r9, %ctaid.y;
+    mov.u32         %r10, %ntid.y;
+    mov.u32         %r11, %tid.y;
+    mad.lo.s32      %r12, %r9, %r10, %r11;
+
+    setp.ge.u32     %p1, %r8, %r3;
+    @%p1 bra        LUMA_DONE;
+    setp.ge.u32     %p2, %r12, %r4;
+    @%p2 bra        LUMA_DONE;
+
+    mul.lo.s32      %r13, %r12, %r2;
+    shl.b32         %r14, %r8, 2;
+    add.s32         %r15, %r13, %r14;
+    cvt.u64.u32     %rd3, %r15;
+    add.s64         %rd4, %rd2, %rd3;
+
+    ld.global.u8    %rs1, [%rd4];
+    ld.global.u8    %rs2, [%rd4+1];
+    ld.global.u8    %rs3, [%rd4+2];
+
+    cvt.u32.u16     %r16, %rs1;
+    cvt.rn.f32.u32  %f1, %r16;
+    cvt.u32.u16     %r17, %rs2;
+    cvt.rn.f32.u32  %f2, %r17;
+    cvt.u32.u16     %r18, %rs3;
+    cvt.rn.f32.u32  %f3, %r18;
+
+    mul.f32         %f4, %f3, 0f3E59B3D0;
+    mul.f32         %f5, %f2, 0f3F371759;
+    add.f32         %f6, %f4, %f5;
+    mul.f32         %f7, %f1, 0f3D93DD98;
+    add.f32         %f8, %f6, %f7;
+
+    mul.f32         %f9, %f8, 0f435B0000;
+    div.rn.f32      %f10, %f9, 0f437F0000;
+    add.f32         %f11, %f10, 0f41800000;
+    max.f32         %f12, %f11, 0f00000000;
+    min.f32         %f13, %f12, 0f437F0000;
+    add.f32         %f14, %f13, 0f3F000000;
+    cvt.rzi.u32.f32 %r19, %f14;
+    cvt.u16.u32     %rs4, %r19;
+
+    mul.lo.s32      %r20, %r12, %r1;
+    add.s32         %r21, %r20, %r8;
+    cvt.u64.u32     %rd5, %r21;
+    add.s64         %rd6, %rd1, %rd5;
+    st.global.u8    [%rd6], %rs4;
+
+LUMA_DONE:
+    ret;
+}
+
+.visible .entry bgra_to_chroma(
+    .param .u64 dst,
+    .param .u32 dst_pitch,
+    .param .u64 src,
+    .param .u32 src_pitch,
+    .param .u32 half_width,
+    .param .u32 half_height
+)
+{
+    .reg .pred  %p<4>;
+    .reg .b16   %rs<20>;
+    .reg .b32   %r<48>;
+    .reg .f32   %f<32>;
+    .reg .b64   %rd<16>;
+
+    ld.param.u64    %rd1, [dst];
+    ld.param.u32    %r1, [dst_pitch];
+    ld.param.u64    %rd2, [src];
+    ld.param.u32    %r2, [src_pitch];
+    ld.param.u32    %r3, [half_width];
+    ld.param.u32    %r4, [half_height];
+
+    mov.u32         %r5, %ctaid.x;
+    mov.u32         %r6, %ntid.x;
+    mov.u32         %r7, %tid.x;
+    mad.lo.s32      %r8, %r5, %r6, %r7;
+    mov.u32         %r9, %ctaid.y;
+    mov.u32         %r10, %ntid.y;
+    mov.u32         %r11, %tid.y;
+    mad.lo.s32      %r12, %r9, %r10, %r11;
+
+    setp.ge.u32     %p1, %r8, %r3;
+    @%p1 bra        CHROMA_DONE;
+    setp.ge.u32     %p2, %r12, %r4;
+    @%p2 bra        CHROMA_DONE;
+
+    shl.b32         %r13, %r12, 1;
+    shl.b32         %r14, %r8, 1;
+    mul.lo.s32      %r15, %r13, %r2;
+    shl.b32         %r16, %r14, 2;
+    add.s32         %r17, %r15, %r16;
+    cvt.u64.u32     %rd3, %r17;
+    add.s64         %rd4, %rd2, %rd3;
+    cvt.u64.u32     %rd5, %r2;
+    add.s64         %rd6, %rd4, %rd5;
+
+    ld.global.u8    %rs1, [%rd4];
+    ld.global.u8    %rs2, [%rd4+1];
+    ld.global.u8    %rs3, [%rd4+2];
+    ld.global.u8    %rs4, [%rd4+4];
+    ld.global.u8    %rs5, [%rd4+5];
+    ld.global.u8    %rs6, [%rd4+6];
+    ld.global.u8    %rs7, [%rd6];
+    ld.global.u8    %rs8, [%rd6+1];
+    ld.global.u8    %rs9, [%rd6+2];
+    ld.global.u8    %rs10, [%rd6+4];
+    ld.global.u8    %rs11, [%rd6+5];
+    ld.global.u8    %rs12, [%rd6+6];
+
+    cvt.u32.u16     %r18, %rs1;
+    cvt.u32.u16     %r19, %rs4;
+    add.s32         %r20, %r18, %r19;
+    cvt.u32.u16     %r21, %rs7;
+    add.s32         %r22, %r20, %r21;
+    cvt.u32.u16     %r23, %rs10;
+    add.s32         %r24, %r22, %r23;
+    cvt.rn.f32.u32  %f1, %r24;
+    mul.f32         %f2, %f1, 0f3E800000;
+
+    cvt.u32.u16     %r25, %rs2;
+    cvt.u32.u16     %r26, %rs5;
+    add.s32         %r27, %r25, %r26;
+    cvt.u32.u16     %r28, %rs8;
+    add.s32         %r29, %r27, %r28;
+    cvt.u32.u16     %r30, %rs11;
+    add.s32         %r31, %r29, %r30;
+    cvt.rn.f32.u32  %f3, %r31;
+    mul.f32         %f4, %f3, 0f3E800000;
+
+    cvt.u32.u16     %r32, %rs3;
+    cvt.u32.u16     %r33, %rs6;
+    add.s32         %r34, %r32, %r33;
+    cvt.u32.u16     %r35, %rs9;
+    add.s32         %r36, %r34, %r35;
+    cvt.u32.u16     %r37, %rs12;
+    add.s32         %r38, %r36, %r37;
+    cvt.rn.f32.u32  %f5, %r38;
+    mul.f32         %f6, %f5, 0f3E800000;
+
+    mul.f32         %f7, %f6, 0f3E59B3D0;
+    mul.f32         %f8, %f4, 0f3F371759;
+    add.f32         %f9, %f7, %f8;
+    mul.f32         %f10, %f2, 0f3D93DD98;
+    add.f32         %f11, %f9, %f10;
+
+    sub.f32         %f12, %f2, %f11;
+    div.rn.f32      %f13, %f12, 0f3FED844D;
+    mul.f32         %f14, %f13, 0f43600000;
+    div.rn.f32      %f15, %f14, 0f437F0000;
+    add.f32         %f16, %f15, 0f43000000;
+    max.f32         %f17, %f16, 0f00000000;
+    min.f32         %f18, %f17, 0f437F0000;
+    add.f32         %f19, %f18, 0f3F000000;
+    cvt.rzi.u32.f32 %r39, %f19;
+    cvt.u16.u32     %rs13, %r39;
+
+    sub.f32         %f20, %f6, %f11;
+    div.rn.f32      %f21, %f20, 0f3FC9930C;
+    mul.f32         %f22, %f21, 0f43600000;
+    div.rn.f32      %f23, %f22, 0f437F0000;
+    add.f32         %f24, %f23, 0f43000000;
+    max.f32         %f25, %f24, 0f00000000;
+    min.f32         %f26, %f25, 0f437F0000;
+    add.f32         %f27, %f26, 0f3F000000;
+    cvt.rzi.u32.f32 %r40, %f27;
+    cvt.u16.u32     %rs14, %r40;
+
+    mul.lo.s32      %r41, %r12, %r1;
+    shl.b32         %r42, %r8, 1;
+    add.s32         %r43, %r41, %r42;
+    cvt.u64.u32     %rd7, %r43;
+    add.s64         %rd8, %rd1, %rd7;
+    st.global.u8    [%rd8], %rs13;
+    st.global.u8    [%rd8+1], %rs14;
+
+CHROMA_DONE:
+    ret;
+}
+"#;
+
 // SAFETY of the block: these are the driver's own C ABI declarations, and
 // every call site below checks the returned `CUresult`. On Windows the
 // driver's `nvcuda.dll` is linked by name — `raw-dylib` needs no import
@@ -334,6 +563,12 @@ pub(crate) struct CudaDriver {
     module: CUmodule,
     blend: CUfunction,
     blend_masked: CUfunction,
+    /// [`CONVERT_PTX`] and its entry points, loaded alongside the blend
+    /// module: one JIT at construction rather than one on the first frame
+    /// that needs a conversion.
+    convert_module: CUmodule,
+    bgra_to_luma: CUfunction,
+    bgra_to_chroma: CUfunction,
 }
 
 // SAFETY: a `CUcontext` is not thread-affine — it is pushed onto whichever
@@ -366,16 +601,28 @@ impl CudaDriver {
             // Loading a module needs a current context, and this is before
             // there is a `Self` to push it through.
             check("cuCtxPushCurrent", cuCtxPushCurrent_v2(ctx))?;
-            let loaded = load_blend_module();
+            let loaded =
+                load_module(BLEND_PTX, ["blend_plane", "blend_masked"]).and_then(|blend| {
+                    match load_module(CONVERT_PTX, ["bgra_to_luma", "bgra_to_chroma"]) {
+                        Ok(convert) => Ok((blend, convert)),
+                        Err(error) => {
+                            // The first module has no owner yet, so nothing else
+                            // would ever unload it.
+                            cuModuleUnload(blend.0);
+                            Err(error)
+                        }
+                    }
+                });
             let mut popped: CUcontext = std::ptr::null_mut();
             check("cuCtxPopCurrent", cuCtxPopCurrent_v2(&mut popped))?;
-            let (module, blend, blend_masked) = match loaded {
-                Ok(pair) => pair,
-                Err(error) => {
-                    cuDevicePrimaryCtxRelease_v2(device);
-                    return Err(error);
-                }
-            };
+            let ((module, blend, blend_masked), (convert_module, bgra_to_luma, bgra_to_chroma)) =
+                match loaded {
+                    Ok(modules) => modules,
+                    Err(error) => {
+                        cuDevicePrimaryCtxRelease_v2(device);
+                        return Err(error);
+                    }
+                };
 
             Ok(Self {
                 device,
@@ -383,6 +630,9 @@ impl CudaDriver {
                 module,
                 blend,
                 blend_masked,
+                convert_module,
+                bgra_to_luma,
+                bgra_to_chroma,
             })
         }
     }
@@ -630,6 +880,90 @@ impl CudaDriver {
         }
     }
 
+    /// Converts a BGRA surface into an NV12 one, both CUDA-resident and both
+    /// `width` x `height`.
+    ///
+    /// Dimensions must be even: NV12 chroma is 2x2 subsampled, so an odd
+    /// extent has no whole chroma sample to write. The caller validates that
+    /// once at construction — see [`crate::elements::CudaConverter`] — rather
+    /// than this rejecting a frame per call.
+    ///
+    /// Two launches, one per plane. Nothing is synchronized here: a caller
+    /// that needs the result on the host calls [`Self::synchronize`], the
+    /// same split the blends use.
+    pub(crate) fn bgra_to_nv12(
+        &self,
+        source: BgraSurface,
+        destination: Nv12Surface,
+        width: u32,
+        height: u32,
+    ) -> Result<(), CudaDriverError> {
+        // 16x16 threads: one warp wide in x, which keeps a row's byte loads
+        // coalesced, the same shape the blends use.
+        const BLOCK: u32 = 16;
+        self.with_context(|| unsafe {
+            let mut luma = destination.luma;
+            let mut luma_pitch = destination.luma_pitch as u32;
+            let mut pixels = source.pixels;
+            let mut source_pitch = source.pitch as u32;
+            let mut width = width;
+            let mut height = height;
+            let mut luma_params: [*mut c_void; 6] = [
+                (&mut luma) as *mut _ as *mut c_void,
+                (&mut luma_pitch) as *mut _ as *mut c_void,
+                (&mut pixels) as *mut _ as *mut c_void,
+                (&mut source_pitch) as *mut _ as *mut c_void,
+                (&mut width) as *mut _ as *mut c_void,
+                (&mut height) as *mut _ as *mut c_void,
+            ];
+            check(
+                "cuLaunchKernel",
+                cuLaunchKernel(
+                    self.bgra_to_luma,
+                    width.div_ceil(BLOCK),
+                    height.div_ceil(BLOCK),
+                    1,
+                    BLOCK,
+                    BLOCK,
+                    1,
+                    0,
+                    std::ptr::null_mut(),
+                    luma_params.as_mut_ptr(),
+                    std::ptr::null_mut(),
+                ),
+            )?;
+
+            let mut chroma = destination.chroma;
+            let mut chroma_pitch = destination.chroma_pitch as u32;
+            let mut half_width = width / 2;
+            let mut half_height = height / 2;
+            let mut chroma_params: [*mut c_void; 6] = [
+                (&mut chroma) as *mut _ as *mut c_void,
+                (&mut chroma_pitch) as *mut _ as *mut c_void,
+                (&mut pixels) as *mut _ as *mut c_void,
+                (&mut source_pitch) as *mut _ as *mut c_void,
+                (&mut half_width) as *mut _ as *mut c_void,
+                (&mut half_height) as *mut _ as *mut c_void,
+            ];
+            check(
+                "cuLaunchKernel",
+                cuLaunchKernel(
+                    self.bgra_to_chroma,
+                    half_width.div_ceil(BLOCK),
+                    half_height.div_ceil(BLOCK),
+                    1,
+                    BLOCK,
+                    BLOCK,
+                    1,
+                    0,
+                    std::ptr::null_mut(),
+                    chroma_params.as_mut_ptr(),
+                    std::ptr::null_mut(),
+                ),
+            )
+        })
+    }
+
     /// Waits for everything issued on this context, which a caller does once
     /// after a frame's blends rather than after each one.
     pub(crate) fn synchronize(&self) -> Result<(), CudaDriverError> {
@@ -848,11 +1182,14 @@ impl CudaDriver {
     }
 }
 
-/// Hands the driver [`BLEND_PTX`] and looks up its entry points. The
+/// Hands the driver one PTX module and looks up its two entry points. The
 /// context must already be current.
-unsafe fn load_blend_module() -> Result<(CUmodule, CUfunction, CUfunction), CudaDriverError> {
+unsafe fn load_module(
+    ptx: &str,
+    entry_names: [&str; 2],
+) -> Result<(CUmodule, CUfunction, CUfunction), CudaDriverError> {
     unsafe {
-        let image = std::ffi::CString::new(BLEND_PTX)
+        let image = std::ffi::CString::new(ptx)
             .map_err(|error| CudaDriverError::KernelRejected(error.to_string()))?;
         let mut module: CUmodule = std::ptr::null_mut();
         check(
@@ -861,7 +1198,7 @@ unsafe fn load_blend_module() -> Result<(CUmodule, CUfunction, CUfunction), Cuda
         )
         .map_err(|error| CudaDriverError::KernelRejected(error.to_string()))?;
         let mut entries = [std::ptr::null_mut(); 2];
-        for (entry, name) in entries.iter_mut().zip(["blend_plane", "blend_masked"]) {
+        for (entry, name) in entries.iter_mut().zip(entry_names) {
             let name = std::ffi::CString::new(name).expect("a literal without a nul");
             if let Err(error) = check(
                 "cuModuleGetFunction",
@@ -882,6 +1219,7 @@ impl Drop for CudaDriver {
         unsafe {
             if cuCtxPushCurrent_v2(self.ctx) == CUDA_SUCCESS {
                 cuModuleUnload(self.module);
+                cuModuleUnload(self.convert_module);
                 let mut popped: CUcontext = std::ptr::null_mut();
                 cuCtxPopCurrent_v2(&mut popped);
             }
@@ -940,13 +1278,48 @@ impl Nv12Surface {
     }
 }
 
+/// The device pointer and pitch of one packed BGRA CUDA surface — what an
+/// `AVFrame` carries in `data[0]`/`linesize[0]`.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct BgraSurface {
+    pub(crate) pixels: CUdeviceptr,
+    pub(crate) pitch: usize,
+}
+
+impl BgraSurface {
+    /// Reads the surface out of a CUDA-resident BGRA frame. The caller has
+    /// already established that this *is* one — format, frames context, and
+    /// device — so the only thing left to reject is a frame with no pointer.
+    pub(crate) fn from_frame(frame: &ffmpeg_next::frame::Video) -> Option<Self> {
+        let (pixels, pitch) = unsafe {
+            let ptr = frame.as_ptr();
+            ((*ptr).data[0], (*ptr).linesize[0])
+        };
+        (!pixels.is_null() && pitch > 0).then(|| Self {
+            pixels: pixels as CUdeviceptr,
+            pitch: pitch as usize,
+        })
+    }
+}
+
 /// BT.709 limited-range Y'CbCr, matching what NVDEC produces and what NVENC
 /// expects for HD content — a background filled with anything else would not
 /// match the layers composited on top of it.
 fn rgb_to_bt709_limited(color: Color) -> (u8, u8, u8) {
-    let r = f32::from(color.red);
-    let g = f32::from(color.green);
-    let b = f32::from(color.blue);
+    bt709_limited(
+        f32::from(color.red),
+        f32::from(color.green),
+        f32::from(color.blue),
+    )
+}
+
+/// The same conversion over channels that need not be whole numbers, which is
+/// what a chroma sample averaged over a 2x2 block is.
+///
+/// [`CONVERT_PTX`] performs exactly this, in this operation order, so a test
+/// can hold the kernel to this expression byte for byte instead of to a
+/// tolerance.
+pub(crate) fn bt709_limited(r: f32, g: f32, b: f32) -> (u8, u8, u8) {
     let y = 0.2126 * r + 0.7152 * g + 0.0722 * b;
     let u = (b - y) / 1.8556;
     let v = (r - y) / 1.5748;
@@ -1130,6 +1503,120 @@ mod tests {
     /// A CUDA surface whose luma is `f(x, y)`, so an indexing or pitch
     /// mistake in the kernel shows up as a wrong *position*, not just a
     /// wrong value.
+    /// Uploads one BGRA frame built by `pixel`, so a conversion test starts
+    /// from a CUDA-resident source with content it can predict.
+    fn cuda_bgra_surface(
+        device: &crate::elements::CudaDevice,
+        width: u32,
+        height: u32,
+        pixel: impl Fn(u32, u32) -> [u8; 4],
+    ) -> Option<MediaBuffer> {
+        let Ok(mut upload) =
+            CudaUpload::new("upload", device, CudaFrameFormat::Bgra, width, height)
+        else {
+            eprintln!("skipping: this machine has no usable CUDA frames context");
+            return None;
+        };
+        let uploaded = capture(&mut upload);
+        let mut frame = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::BGRA, width, height);
+        let stride = frame.stride(0);
+        for y in 0..height {
+            let row = &mut frame.data_mut(0)[y as usize * stride..];
+            for x in 0..width {
+                row[x as usize * 4..x as usize * 4 + 4].copy_from_slice(&pixel(x, y));
+            }
+        }
+        let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
+        let mut slot = pool.get();
+        *slot = frame;
+        upload
+            .consume(MediaBuffer::Video(Arc::new(slot)))
+            .expect("upload");
+        Some(uploaded.lock().unwrap().remove(0))
+    }
+
+    /// The conversion nothing else on the CUDA path can do, checked against
+    /// the definition the compositor fills backgrounds with rather than
+    /// against a tolerance: every luma byte is that pixel's own conversion,
+    /// and every chroma pair is the conversion of its 2x2 block's average.
+    #[test]
+    fn bgra_converts_to_nv12_exactly_as_the_shared_definition_says() {
+        let Some((device, _cuda_lock)) = crate::test_support::try_cuda_device() else {
+            return;
+        };
+        let Ok(driver) = CudaDriver::retain_primary() else {
+            eprintln!("skipping: no usable CUDA driver on this machine");
+            return;
+        };
+        const WIDTH: u32 = 64;
+        const HEIGHT: u32 = 32;
+        // A pattern with no symmetry between channels, so a kernel that mixed
+        // two of them up could not still match.
+        let pixel = |x: u32, y: u32| {
+            [
+                (x * 4 % 256) as u8,
+                (y * 8 % 256) as u8,
+                ((x + y) * 3 % 256) as u8,
+                255,
+            ]
+        };
+        let Some(source) = cuda_bgra_surface(&device, WIDTH, HEIGHT, pixel) else {
+            return;
+        };
+        let Some(destination) = cuda_surface(&device, WIDTH, HEIGHT, 0) else {
+            return;
+        };
+
+        let (MediaBuffer::Video(source_frame), MediaBuffer::Video(destination_frame)) =
+            (&source, &destination)
+        else {
+            panic!("both uploads produce Video buffers");
+        };
+        driver
+            .bgra_to_nv12(
+                BgraSurface::from_frame(source_frame).expect("a BGRA surface"),
+                Nv12Surface::from_frame(destination_frame).expect("an NV12 surface"),
+                WIDTH,
+                HEIGHT,
+            )
+            .expect("convert");
+        driver.synchronize().expect("synchronize");
+
+        let converted = download(&device, destination, WIDTH, HEIGHT);
+        let luma_stride = converted.stride(0);
+        let chroma_stride = converted.stride(1);
+        for y in 0..HEIGHT {
+            for x in 0..WIDTH {
+                let [b, g, r, _] = pixel(x, y);
+                let (expected, _, _) = bt709_limited(f32::from(r), f32::from(g), f32::from(b));
+                assert_eq!(
+                    converted.data(0)[y as usize * luma_stride + x as usize],
+                    expected,
+                    "luma at {x},{y}"
+                );
+            }
+        }
+        for cy in 0..HEIGHT / 2 {
+            for cx in 0..WIDTH / 2 {
+                let mut sums = [0u32; 3];
+                for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                    let [b, g, r, _] = pixel(cx * 2 + dx, cy * 2 + dy);
+                    sums[0] += u32::from(b);
+                    sums[1] += u32::from(g);
+                    sums[2] += u32::from(r);
+                }
+                let (_, expected_u, expected_v) = bt709_limited(
+                    sums[2] as f32 / 4.0,
+                    sums[1] as f32 / 4.0,
+                    sums[0] as f32 / 4.0,
+                );
+                let at = cy as usize * chroma_stride + cx as usize * 2;
+                assert_eq!(converted.data(1)[at], expected_u, "u at {cx},{cy}");
+                assert_eq!(converted.data(1)[at + 1], expected_v, "v at {cx},{cy}");
+            }
+        }
+    }
+
     fn cuda_surface_with(
         device: &crate::elements::CudaDevice,
         width: u32,

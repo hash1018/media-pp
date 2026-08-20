@@ -1,5 +1,6 @@
 mod audio_resampler;
 mod audio_volume;
+pub(crate) mod convert;
 pub(crate) mod decoder;
 mod download;
 mod encoder;
@@ -11,6 +12,8 @@ mod video_synchronizer;
 
 pub use audio_resampler::{AudioResampler, AudioResamplerError};
 pub use audio_volume::{AudioVolume, AudioVolumeError, AudioVolumeHandle, AudioVolumeOptions};
+#[cfg(feature = "cuda")]
+pub use convert::{CudaConverter, CudaConverterError};
 #[cfg(feature = "cuda")]
 pub use decoder::{CudaDecoder, CudaDecoderError};
 #[cfg(all(target_os = "windows", feature = "d3d11"))]

@@ -19,8 +19,8 @@ use crate::elements::WasapiRendererError;
 use crate::elements::WebRtcError;
 #[cfg(feature = "cuda")]
 use crate::elements::{
-    CudaDecoderError, CudaDownloadError, CudaEncoderError, CudaRendererError, CudaScalerError,
-    CudaUploadError, CudaVideoCompositorError,
+    CudaConverterError, CudaDecoderError, CudaDownloadError, CudaEncoderError, CudaRendererError,
+    CudaScalerError, CudaUploadError, CudaVideoCompositorError,
 };
 #[cfg(all(target_os = "windows", feature = "d3d11"))]
 use crate::elements::{
@@ -89,6 +89,10 @@ pub enum Error {
     #[cfg(feature = "cuda")]
     #[error(transparent)]
     CudaScalerError(#[from] CudaScalerError),
+
+    #[cfg(feature = "cuda")]
+    #[error(transparent)]
+    CudaConverterError(#[from] CudaConverterError),
 
     #[cfg(feature = "cuda")]
     #[error(transparent)]
