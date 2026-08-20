@@ -408,6 +408,50 @@ mod tests {
         Some(frame)
     }
 
+    /// libavfilter keeps the colorimetry its link was configured with and
+    /// reports every frame that disagrees as "video frame properties changing
+    /// on the fly" — once per frame, for the whole run. The link is built
+    /// from the first frame's own tags, so a change in them is a rebuild like
+    /// a change in size.
+    #[test]
+    fn the_filter_link_follows_the_frames_colorimetry() {
+        let Some((device, _cuda_lock)) = try_cuda_device() else {
+            return;
+        };
+        let Some(tagged) = cuda_frame(&device, 128, 128, 200, 0) else {
+            return;
+        };
+        let MediaBuffer::Video(frame) = &tagged else {
+            panic!("the upload produces a Video buffer");
+        };
+        let frames_ctx = unsafe { (*frame.as_ptr()).hw_frames_ctx };
+        // What a converted capture carries.
+        let mut bt709 = ffmpeg::frame::Video::empty();
+        unsafe { ffi::av_frame_ref(bt709.as_mut_ptr(), frame.as_ptr()) };
+        bt709.set_color_space(ffmpeg::color::Space::BT709);
+        bt709.set_color_range(ffmpeg::color::Range::MPEG);
+
+        let mut graph = CudaScaleGraph::new(CudaScalerInterp::Bilinear);
+        graph
+            .scale(&bt709, frames_ctx, 64, 64)
+            .expect("the first frame builds the graph");
+        assert!(
+            graph.matches(&bt709, frames_ctx, 64, 64),
+            "the same frame must not rebuild the graph"
+        );
+
+        // Same pool, same size, different tags: the link would keep reporting
+        // a mismatch for every frame, so it has to be rebuilt.
+        let mut untagged = ffmpeg::frame::Video::empty();
+        unsafe { ffi::av_frame_ref(untagged.as_mut_ptr(), frame.as_ptr()) };
+        untagged.set_color_space(ffmpeg::color::Space::Unspecified);
+        untagged.set_color_range(ffmpeg::color::Range::Unspecified);
+        assert!(
+            !graph.matches(&untagged, frames_ctx, 64, 64),
+            "a frame tagged differently needs its own link"
+        );
+    }
+
     /// The contract: the frame comes out at the configured size, still on the
     /// GPU, still carrying its timestamp — and the pixels survive the resize.
     /// The `CudaDownload` on the tail is what makes the last part checkable at

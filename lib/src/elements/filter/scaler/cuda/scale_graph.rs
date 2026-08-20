@@ -32,6 +32,12 @@ struct GraphState {
     /// seek, say — still needs a rebuild, and comparing sizes alone would
     /// miss it.
     input_frames_ctx: *mut ffi::AVBufferRef,
+    /// The colorimetry the link was configured with. libavfilter reports a
+    /// frame whose tags differ from its link as "video frame properties
+    /// changing on the fly" and keeps the link's own values, so a change here
+    /// is a rebuild like any other.
+    input_color_space: ffi::AVColorSpace,
+    input_color_range: ffi::AVColorRange,
 }
 
 /// A lazily built `scale_cuda` graph. Construct it, then hand it frames; it
@@ -82,6 +88,8 @@ impl CudaScaleGraph {
                     && state.output_width == width
                     && state.output_height == height
                     && std::ptr::eq(state.input_frames_ctx, frames_ctx)
+                    && state.input_color_space == frame_color_space(frame)
+                    && state.input_color_range == frame_color_range(frame)
             }
             None => false,
         }
@@ -190,11 +198,13 @@ impl CudaScaleGraph {
             (*params).time_base = ffi::AVRational { num: 1, den: 1 };
             (*params).sample_aspect_ratio = ffi::AVRational { num: 1, den: 1 };
             // `av_buffersrc_parameters_alloc` zeroes the struct, and zero is
-            // `AVCOL_SPC_RGB` rather than "unset" — say unspecified explicitly
-            // so the link keeps the same colorimetry the argument string left
-            // it with.
-            (*params).color_space = ffi::AVColorSpace::AVCOL_SPC_UNSPECIFIED;
-            (*params).color_range = ffi::AVColorRange::AVCOL_RANGE_UNSPECIFIED;
+            // `AVCOL_SPC_RGB` rather than "unset" — so these are always set
+            // explicitly, and set to what the frames actually carry. Leaving
+            // the link unspecified made libavfilter report every frame as
+            // properties changing on the fly, once per frame, for the whole
+            // run of any pipeline whose frames are tagged at all.
+            (*params).color_space = frame_color_space(frame);
+            (*params).color_range = frame_color_range(frame);
             // This is what tells libavfilter which CUDA pool the frames come
             // from; without it `scale_cuda` has no device to configure itself
             // on. libavfilter takes its own reference, so the frame's context
@@ -232,6 +242,8 @@ impl CudaScaleGraph {
             output_width: width,
             output_height: height,
             input_frames_ctx: frames_ctx,
+            input_color_space: frame_color_space(frame),
+            input_color_range: frame_color_range(frame),
         });
         Ok(())
     }
@@ -265,4 +277,14 @@ impl CudaScaleGraph {
             scaled.push(output);
         }
     }
+}
+
+/// The frame's own colorimetry, as libavfilter's C fields rather than
+/// `ffmpeg-next`'s enums, which is what the buffersrc parameters take.
+fn frame_color_space(frame: &ffmpeg::frame::Video) -> ffi::AVColorSpace {
+    unsafe { (*frame.as_ptr()).colorspace }
+}
+
+fn frame_color_range(frame: &ffmpeg::frame::Video) -> ffi::AVColorRange {
+    unsafe { (*frame.as_ptr()).color_range }
 }
