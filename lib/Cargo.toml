@@ -86,11 +86,14 @@ ashpd = { version = "0.13", optional = true, default-features = false, features 
 async-io = { version = "2", optional = true }
 enumflags2 = { version = "0.7", optional = true }
 futures-util = { version = "0.3", optional = true }
-# `v0_3_49` is needed for `pw_buffer.requested`, which tells a playback stream
-# how many frames the graph wants this cycle. Without it a renderer can only
-# fill the whole buffer, which drains its queue in bursts and stutters. Raises
-# the minimum libpipewire to 0.3.49 (2022); distributions ship far newer.
-pipewire = { version = "0.10", optional = true, features = ["v0_3_49"] }
+# `v0_3_50` is where both `pw_buffer.requested` and `pw_time.buffered` appear:
+# the first tells a playback stream how many frames the graph wants this cycle
+# (filling the whole buffer instead drains the queue in bursts and stutters),
+# the second is the converter latency the reported position has to subtract.
+# `requested` is documented "Since 0.3.50", so the older `v0_3_49` pin named a
+# version that did not have it. Raises the minimum libpipewire to 0.3.50
+# (2022); distributions ship far newer.
+pipewire = { version = "0.10", optional = true, features = ["v0_3_50"] }
 pollster = { version = "1", optional = true }
 
 [features]

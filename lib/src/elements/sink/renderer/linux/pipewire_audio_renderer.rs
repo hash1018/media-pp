@@ -1,8 +1,10 @@
 use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
-        mpsc::{self, RecvTimeoutError},
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        mpsc::{self, RecvTimeoutError, SyncSender},
     },
     thread::JoinHandle,
     time::{Duration, Instant},
@@ -52,6 +54,12 @@ const SEND_GRANULARITY: Duration = Duration::from_millis(100);
 /// take it. A device that has stopped consuming never finishes, and EOS must
 /// not become a hang: past this the drain reports what it has and returns.
 const DRAIN_SLACK: Duration = Duration::from_secs(1);
+
+/// Bounds the native PipeWire drain after every application-owned frame has
+/// reached the stream. A `drained` event normally arrives after the graph and
+/// device latency; this only protects EOS from a stream that stopped making
+/// progress altogether.
+const DEVICE_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
 const QUEUE_CAPACITY: usize = 8;
 
@@ -114,6 +122,9 @@ pub enum PipeWireAudioRendererError {
     #[error("the PipeWire playback stream ended")]
     StreamEnded,
 
+    #[error("audio frame data is too short: need {expected} byte(s), got {actual}")]
+    FrameDataTooShort { expected: usize, actual: usize },
+
     #[error(transparent)]
     PlaybackClock(#[from] PlaybackClockError),
 
@@ -173,9 +184,10 @@ struct Playback {
     /// does not advance media time — the same correction `WasapiRenderer`
     /// makes by rebasing its timeline when the device drains.
     played_frames: AtomicU64,
-    /// The stream's most recently reported delay to the device, in frames.
-    /// Frames already written but not yet audible.
-    delay_frames: AtomicI64,
+    /// Real media handed over but not yet audible, in negotiated audio frames.
+    /// Combines PipeWire's queued buffers, converter/resampler buffering, and
+    /// graph/device delay.
+    latency_frames: AtomicU64,
     /// Frames submitted but not yet handed to the device: what is still in
     /// the channel *plus* whatever the callback has taken out of it and not
     /// finished copying. `drain` waits on this rather than on the channel,
@@ -264,12 +276,67 @@ fn wait_for_queue(playback: &Playback, deadline: Instant, mut tick: impl FnMut()
     }
 }
 
-/// Sent into the PipeWire thread's own main loop.
+type CommandResult = std::result::Result<(), String>;
+type CommandReply = SyncSender<CommandResult>;
+
+/// Sent into the PipeWire thread's own main loop. Mutations that are part of
+/// the synchronous [`Sink::control`] contract carry a reply: enqueueing a
+/// command is not the same as having applied it.
 enum Command {
-    SetActive(bool),
+    SetActive {
+        active: bool,
+        reply: CommandReply,
+    },
     /// Discard whatever is still queued, for `Stop`/`Flush` semantics.
-    Flush,
+    Flush(CommandReply),
+    /// Ask PipeWire to report when everything already submitted has actually
+    /// reached the device.
+    Drain(CommandReply),
     Terminate,
+}
+
+/// Queues one command together with the reply its caller must observe before
+/// treating the mutation as complete.
+fn queue_command(
+    commands: &pw::channel::Sender<Command>,
+    build: impl FnOnce(CommandReply) -> Command,
+) -> std::result::Result<mpsc::Receiver<CommandResult>, PipeWireAudioRendererError> {
+    // Capacity one lets the PipeWire thread finish even if a timed-out caller
+    // has already dropped its receiver.
+    let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+    commands
+        .send(build(reply_tx))
+        .map_err(|_| PipeWireAudioRendererError::StreamEnded)?;
+    Ok(reply_rx)
+}
+
+fn wait_command(
+    reply: mpsc::Receiver<CommandResult>,
+    operation: &'static str,
+) -> std::result::Result<(), PipeWireAudioRendererError> {
+    match reply.recv_timeout(NEGOTIATION_TIMEOUT) {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(PipeWireAudioRendererError::PipeWire(error)),
+        Err(RecvTimeoutError::Timeout) => Err(PipeWireAudioRendererError::PipeWire(format!(
+            "timed out waiting for PipeWire to {operation}"
+        ))),
+        Err(RecvTimeoutError::Disconnected) => Err(PipeWireAudioRendererError::StreamEnded),
+    }
+}
+
+fn complete_device_drain(
+    draining: &Cell<bool>,
+    playback: &Playback,
+    reply: &RefCell<Option<CommandReply>>,
+) {
+    // No submitted media remains behind the device cursor. The last process
+    // callback's timing sample is stale now, so clear it before the final
+    // clock publish and allow a later timeline to use the stream again.
+    playback.latency_frames.store(0, Ordering::Release);
+    draining.set(false);
+    if let Some(reply) = reply.borrow_mut().take() {
+        let _ = reply.send(Ok(()));
+    }
 }
 
 /// Terminal audio sink backed by a PipeWire playback node.
@@ -365,7 +432,7 @@ impl PipeWireAudioRenderer {
         let (command_tx, command_rx) = pw::channel::channel::<Command>();
         let playback = Arc::new(Playback {
             played_frames: AtomicU64::new(0),
-            delay_frames: AtomicI64::new(0),
+            latency_frames: AtomicU64::new(0),
             queued_frames: AtomicU64::new(0),
             ended: AtomicBool::new(false),
         });
@@ -418,7 +485,16 @@ impl PipeWireAudioRenderer {
         // needed an active stream, but pulling with nothing queued makes the
         // first graph cycles underrun and splice audible clicks; the silence
         // between here and the first primed frame is inaudible by definition.
-        let _ = command_tx.send(Command::SetActive(false));
+        if let Err(error) = queue_command(&command_tx, |reply| Command::SetActive {
+            active: false,
+            reply,
+        })
+        .and_then(|reply| wait_command(reply, "park the negotiated stream"))
+        {
+            let _ = command_tx.send(Command::Terminate);
+            let _ = worker.join();
+            return Err(error);
+        }
 
         pp_info!(
             pp_log: &pp_log,
@@ -505,9 +581,10 @@ impl PipeWireAudioRenderer {
     /// Publishes how far playback has actually reached, if this element is the
     /// audio master.
     ///
-    /// The position is derived from frames the device has consumed minus the
-    /// stream's reported delay, so it tracks what the listener has heard rather
-    /// than what has merely been handed over.
+    /// The position is derived from frames handed to PipeWire minus everything
+    /// still queued, buffered in its converter, or delayed in the graph/device,
+    /// so it tracks what the listener has heard rather than what has merely
+    /// been submitted.
     fn publish_position(&self, running: bool) -> Result<()> {
         let (Some(master), Some(timeline)) = (self.clock_binding.registration(), &self.timeline)
         else {
@@ -518,8 +595,8 @@ impl PipeWireAudioRenderer {
             .played_frames
             .load(Ordering::Acquire)
             .saturating_sub(timeline.played_origin);
-        let delay = self.playback.delay_frames.load(Ordering::Acquire).max(0) as u64;
-        let audible = played.saturating_sub(delay);
+        let latency = self.playback.latency_frames.load(Ordering::Acquire);
+        let audible = played.saturating_sub(latency);
         let position_ns = timeline
             .media_origin_ns
             .saturating_add(self.frames_ns(audible));
@@ -566,26 +643,21 @@ impl PipeWireAudioRenderer {
         let bytes_per_frame = self.format.channels as usize * self.format.sample_format.bytes();
         let tight = frame.samples() * bytes_per_frame;
         let plane = frame.data(0);
-        let payload = plane[..tight.min(plane.len())].to_vec();
+        if plane.len() < tight {
+            return Err(PipeWireAudioRendererError::FrameDataTooShort {
+                expected: tight,
+                actual: plane.len(),
+            }
+            .into());
+        }
+        let payload = plane[..tight].to_vec();
 
         let pts_ns = if self.clock_binding.registration().is_some() {
             Some(self.audio_pts_ns(frame)?)
         } else {
             frame.pts().map(|pts| self.frames_ns(pts.max(0) as u64))
         };
-        if let Some(pts_ns) = pts_ns {
-            let end_ns = pts_ns.saturating_add(self.frames_ns(frame.samples() as u64));
-            match &mut self.timeline {
-                Some(timeline) => timeline.submitted_until_ns = end_ns,
-                None => {
-                    self.timeline = Some(Timeline {
-                        media_origin_ns: pts_ns,
-                        submitted_until_ns: end_ns,
-                        played_origin: self.playback.played_frames.load(Ordering::Acquire),
-                    })
-                }
-            }
-        }
+        let played_origin = self.playback.played_frames.load(Ordering::Acquire);
 
         // Counted before the send, not after: the callback may consume this
         // frame before `send` has even returned, and a count added afterwards
@@ -602,33 +674,66 @@ impl PipeWireAudioRenderer {
                 Ok(()) => break,
                 Err(crossbeam_channel::SendTimeoutError::Timeout(returned)) => {
                     if self.playback.ended.load(Ordering::Acquire) {
+                        self.rollback_queued(frame.samples() as u64);
                         return Err(PipeWireAudioRendererError::StreamEnded.into());
                     }
                     // A full queue is exactly the primed condition, and nothing
                     // will drain it until the stream starts — so check here too,
                     // or a queue that fills before the threshold check deadlocks
                     // against a stream that never starts.
-                    self.start_once_primed();
-                    self.publish_position(true)?;
+                    if let Err(error) = self.start_once_primed() {
+                        self.rollback_queued(frame.samples() as u64);
+                        return Err(error);
+                    }
+                    if let Err(error) = self.publish_position(true) {
+                        self.rollback_queued(frame.samples() as u64);
+                        return Err(error);
+                    }
                     pending = returned;
                 }
                 Err(crossbeam_channel::SendTimeoutError::Disconnected(_)) => {
+                    self.rollback_queued(frame.samples() as u64);
                     return Err(PipeWireAudioRendererError::StreamEnded.into());
                 }
             }
         }
-        self.start_once_primed();
+        // Commit timeline state only after the frame entered the queue. The
+        // origin was sampled before sending so a very fast callback cannot
+        // make the first frame appear to start after itself.
+        if let Some(pts_ns) = pts_ns {
+            let end_ns = pts_ns.saturating_add(self.frames_ns(frame.samples() as u64));
+            match &mut self.timeline {
+                Some(timeline) => timeline.submitted_until_ns = end_ns,
+                None => {
+                    self.timeline = Some(Timeline {
+                        media_origin_ns: pts_ns,
+                        submitted_until_ns: end_ns,
+                        played_origin,
+                    })
+                }
+            }
+        }
+        self.start_once_primed()?;
         self.publish_position(true)?;
         Ok(())
     }
 
+    fn rollback_queued(&self, frames: u64) {
+        let _ = self.playback.queued_frames.fetch_update(
+            Ordering::AcqRel,
+            Ordering::Acquire,
+            |queued| Some(queued.saturating_sub(frames)),
+        );
+    }
+
     /// Starts the stream once enough audio is queued to survive the first few
     /// graph cycles — see `PRIME_FRAMES`.
-    fn start_once_primed(&mut self) {
+    fn start_once_primed(&mut self) -> Result<()> {
         if !self.primed && self.frames.len() >= PRIME_FRAMES {
-            self.send_command(Command::SetActive(true));
+            self.set_active(true)?;
             self.primed = true;
         }
+        Ok(())
     }
 
     /// Waits for everything already queued to reach the device, then reports
@@ -637,15 +742,14 @@ impl PipeWireAudioRenderer {
         // A stream shorter than `PRIME_FRAMES` never reached the threshold;
         // start it now or its audio would never play at all.
         if !self.primed {
-            self.send_command(Command::SetActive(true));
+            self.set_active(true)?;
             self.primed = true;
         }
         // Waiting on the channel alone ends the drain too early: the callback
         // takes a frame out of it before copying, so the channel reads empty
-        // while that frame, and everything the device has buffered behind it,
-        // is still inaudible. Both are accounted for instead — `queued_frames`
-        // covers what has not reached the device, `delay_frames` what has
-        // reached it but is not yet audible.
+        // while that frame is still being copied. `queued_frames` covers that
+        // application-owned part; PipeWire's native drain below covers its
+        // own buffers, graph processing, and device latency.
         let outstanding = self.playback.queued_frames.load(Ordering::Acquire);
         let deadline = Instant::now() + self.frames_duration(outstanding) + DRAIN_SLACK;
         let mut published = Ok(());
@@ -661,17 +765,13 @@ impl PipeWireAudioRenderer {
                 "the device stopped taking audio during drain: {} frame(s) never played",
                 self.playback.queued_frames.load(Ordering::Acquire)
             );
+            // Nothing more can be handed over, so abandon the application and
+            // PipeWire queues instead of asking the latter to drain forever.
+            self.flush()?;
         }
 
-        // Everything is written; the device still holds this much of it.
-        let audible_at = Instant::now()
-            + self
-                .frames_duration(self.playback.delay_frames.load(Ordering::Acquire).max(0) as u64);
-        while Instant::now() < audible_at && !self.playback.ended.load(Ordering::Acquire) {
-            self.publish_position(true)?;
-            std::thread::sleep(
-                SEND_GRANULARITY.min(audible_at.saturating_duration_since(Instant::now())),
-            );
+        if drained && !self.playback.ended.load(Ordering::Acquire) {
+            self.drain_device()?;
         }
         self.publish_position(false)?;
         let final_position = self
@@ -688,14 +788,63 @@ impl PipeWireAudioRenderer {
         Ok(())
     }
 
-    fn send_command(&self, command: Command) {
-        if let Some(commands) = &self.commands
-            && commands.send(command).is_err()
-        {
-            pp_warn!(
-                self,
-                "the PipeWire playback thread is no longer accepting commands"
-            );
+    fn request_command(
+        &self,
+        operation: &'static str,
+        build: impl FnOnce(CommandReply) -> Command,
+    ) -> Result<()> {
+        let commands = self
+            .commands
+            .as_ref()
+            .ok_or(PipeWireAudioRendererError::StreamEnded)?;
+        let reply = queue_command(commands, build)?;
+        wait_command(reply, operation)?;
+        Ok(())
+    }
+
+    fn set_active(&self, active: bool) -> Result<()> {
+        self.request_command(
+            if active {
+                "activate the playback stream"
+            } else {
+                "deactivate the playback stream"
+            },
+            |reply| Command::SetActive { active, reply },
+        )
+    }
+
+    fn flush(&self) -> Result<()> {
+        self.request_command("flush the playback stream", Command::Flush)
+    }
+
+    /// Waits for PipeWire's own drain completion rather than estimating it
+    /// from `pw_time.delay`: that field explicitly excludes the stream's
+    /// queued buffers and converter/resampler buffering.
+    fn drain_device(&self) -> Result<()> {
+        let commands = self
+            .commands
+            .as_ref()
+            .ok_or(PipeWireAudioRendererError::StreamEnded)?;
+        let reply = queue_command(commands, Command::Drain)?;
+        let deadline = Instant::now() + DEVICE_DRAIN_TIMEOUT;
+        loop {
+            let now = Instant::now();
+            if now >= deadline {
+                pp_warn!(self, "PipeWire did not report a completed device drain");
+                self.flush()?;
+                return Ok(());
+            }
+            match reply.recv_timeout(SEND_GRANULARITY.min(deadline.saturating_duration_since(now)))
+            {
+                Ok(Ok(())) => return Ok(()),
+                Ok(Err(error)) => {
+                    return Err(PipeWireAudioRendererError::PipeWire(error).into());
+                }
+                Err(RecvTimeoutError::Timeout) => self.publish_position(true)?,
+                Err(RecvTimeoutError::Disconnected) => {
+                    return Err(PipeWireAudioRendererError::StreamEnded.into());
+                }
+            }
         }
     }
 }
@@ -752,26 +901,32 @@ impl Sink for PipeWireAudioRenderer {
     fn control(&mut self, msg: ControlMsg) -> Result<()> {
         match msg {
             ControlMsg::Pause => {
-                self.send_command(Command::SetActive(false));
+                self.set_active(false)?;
                 self.publish_position(false)?;
             }
             ControlMsg::Resume => {
-                self.send_command(Command::SetActive(true));
+                self.set_active(true)?;
                 self.publish_position(true)?;
             }
             ControlMsg::Stop => {
                 // `Stop` means abandon, not natural EOS: discard queued audio
-                // instead of draining it.
-                self.send_command(Command::Flush);
-                self.send_command(Command::SetActive(false));
-                self.publish_position(false)?;
+                // instead of draining it. Cleanup is best-effort because an
+                // already-dead stream has satisfied Stop's observable goal.
+                if let Err(error) = self.flush() {
+                    pp_warn!(self, "failed to flush while stopping: {error}");
+                }
+                if let Err(error) = self.set_active(false) {
+                    pp_warn!(self, "failed to deactivate while stopping: {error}");
+                }
+                let position_result = self.publish_position(false);
                 self.timeline = None;
                 self.primed = false;
+                position_result?;
             }
             ControlMsg::Seek(_) => {
                 // A seek invalidates everything queued and restarts the media
                 // timeline at whatever arrives next.
-                self.send_command(Command::Flush);
+                self.flush()?;
                 self.timeline = None;
             }
         }
@@ -791,6 +946,43 @@ fn ffmpeg_sample_format(format: spa::param::audio::AudioFormat) -> Option<ffmpeg
         Spa::S32LE => ffmpeg::format::Sample::I32(Packed),
         _ => return None,
     })
+}
+
+/// Normalizes one `pw_time` snapshot into negotiated audio frames.
+///
+/// Each field arrives in its own unit. `buffered` is already audio frames and
+/// `delay` counts the graph's own ticks, whose rate `pw_time` carries with
+/// it. `queued` is the sum of the `pw_buffer.size` values of buffers still
+/// queued — a field the *producer* fills, which `pipewire`'s `Buffer` exposes
+/// no way to set, so this stream leaves it at zero and `queued` reads zero
+/// with it (measured across a whole playback). It is summed anyway rather
+/// than dropped: the moment that field can be set, it is part of the latency,
+/// and the header asks producers to express it in frames, which is what this
+/// treats it as. `current_frames` is the real-media prefix the current
+/// process callback just filled, which is not in `queued` until that callback
+/// returns.
+fn stream_latency_frames(
+    queued_frames: u64,
+    buffered_frames: u64,
+    delay_ticks: i64,
+    rate_num: u32,
+    rate_denom: u32,
+    sample_rate: u32,
+    current_frames: u64,
+) -> u64 {
+    let delay_frames = if delay_ticks <= 0 || rate_denom == 0 {
+        0
+    } else {
+        ((delay_ticks as u128)
+            .saturating_mul(u128::from(rate_num))
+            .saturating_mul(u128::from(sample_rate))
+            / u128::from(rate_denom))
+        .min(u128::from(u64::MAX)) as u64
+    };
+    queued_frames
+        .saturating_add(buffered_frames)
+        .saturating_add(delay_frames)
+        .saturating_add(current_frames)
 }
 
 /// The PipeWire thread body: owns the main loop, context, core, and stream,
@@ -826,6 +1018,13 @@ fn run_pipewire(
     // Whatever is left of the frame the previous callback did not fully
     // consume. Only ever touched from this thread's own loop.
     let leftover = Arc::new(Mutex::new(Pending::default()));
+    // Native drain state is local to this loop. While draining, the process
+    // callback must stop submitting silence or PipeWire can never reach its
+    // `drained` event. This Rc/Cell sharing relies on the stream deliberately
+    // omitting RT_PROCESS below: commands and process callbacks therefore run
+    // on this same main-loop thread.
+    let draining = Rc::new(Cell::new(false));
+    let drain_reply = Rc::new(RefCell::new(None::<CommandReply>));
     {
         // Distinct bindings: the command handler owns its own clones for the
         // whole life of the loop, while `stream`/`leftover` stay usable below.
@@ -833,13 +1032,48 @@ fn run_pipewire(
         let command_leftover = leftover.clone();
         let command_frames = frames.clone();
         let command_playback = playback.clone();
+        let command_draining = draining.clone();
+        let command_drain_reply = drain_reply.clone();
         let quit = mainloop.clone();
         let _commands = commands.attach(mainloop.loop_(), move |command| match command {
-            Command::SetActive(active) => {
-                let _ = command_stream.set_active(active);
+            Command::SetActive { active, reply } => {
+                let result = command_stream
+                    .set_active(active)
+                    .map_err(|error| error.to_string());
+                let _ = reply.send(result);
             }
-            Command::Flush => discard_queued(&command_frames, &command_leftover, &command_playback),
-            Command::Terminate => quit.quit(),
+            Command::Flush(reply) => {
+                command_draining.set(false);
+                if let Some(drain_reply) = command_drain_reply.borrow_mut().take() {
+                    let _ = drain_reply.send(Err("the device drain was cancelled".into()));
+                }
+                discard_queued(&command_frames, &command_leftover, &command_playback);
+                let result = command_stream
+                    .flush(false)
+                    .map_err(|error| error.to_string());
+                if result.is_ok() {
+                    command_playback.latency_frames.store(0, Ordering::Release);
+                }
+                let _ = reply.send(result);
+            }
+            Command::Drain(reply) => {
+                if let Some(previous) = command_drain_reply.borrow_mut().replace(reply) {
+                    let _ = previous.send(Err("a newer device drain replaced this one".into()));
+                }
+                command_draining.set(true);
+                if let Err(error) = command_stream.flush(true) {
+                    command_draining.set(false);
+                    if let Some(reply) = command_drain_reply.borrow_mut().take() {
+                        let _ = reply.send(Err(error.to_string()));
+                    }
+                }
+            }
+            Command::Terminate => {
+                if let Some(reply) = command_drain_reply.borrow_mut().take() {
+                    let _ = reply.send(Err("the playback stream terminated during drain".into()));
+                }
+                quit.quit();
+            }
         });
 
         let format = Arc::new(Mutex::new(None::<AudioFormat>));
@@ -887,12 +1121,24 @@ fn run_pipewire(
                     let _ = startup.send(Startup::Ready(negotiated));
                 }
             })
+            .drained({
+                let drain_reply = drain_reply.clone();
+                let draining = draining.clone();
+                let playback = playback.clone();
+                move |_, ()| {
+                    complete_device_drain(&draining, &playback, &drain_reply);
+                }
+            })
             .process({
                 let format = format.clone();
                 let leftover = leftover.clone();
                 let playback = playback.clone();
                 let frames = frames.clone();
+                let draining = draining.clone();
                 move |stream, ()| {
+                    if draining.get() {
+                        return;
+                    }
                     let Some(mut buffer) = stream.dequeue_buffer() else {
                         return;
                     };
@@ -904,12 +1150,16 @@ fn run_pipewire(
                     if bytes_per_frame == 0 {
                         return;
                     }
-
-                    // Report the delay before filling, so `consume` sees a value
-                    // that matches what it is about to be told has played.
-                    if let Ok(time) = stream.time() {
-                        playback.delay_frames.store(time.delay(), Ordering::Release);
-                    }
+                    let timing = stream.time().ok().map(|time| {
+                        let rate = time.rate();
+                        (
+                            time.queued(),
+                            time.buffered(),
+                            time.delay(),
+                            rate.num,
+                            rate.denom,
+                        )
+                    });
 
                     // How many frames the graph wants *this cycle*. Filling the
                     // whole buffer instead would hand over far more than one
@@ -962,6 +1212,20 @@ fn run_pipewire(
                         // silence above is a gap, not media time.
                         let consumed = (written / bytes_per_frame) as u64;
                         playback.played_frames.fetch_add(consumed, Ordering::AcqRel);
+                        if let Some((queued, buffered, delay, rate_num, rate_denom)) = timing {
+                            playback.latency_frames.store(
+                                stream_latency_frames(
+                                    queued,
+                                    buffered,
+                                    delay,
+                                    rate_num,
+                                    rate_denom,
+                                    negotiated.sample_rate,
+                                    consumed,
+                                ),
+                                Ordering::Release,
+                            );
+                        }
                         // Saturating, because a flush may have zeroed the
                         // count between the copy and here.
                         let _ = playback.queued_frames.fetch_update(
@@ -1032,10 +1296,48 @@ mod tests {
     fn playback() -> Playback {
         Playback {
             played_frames: AtomicU64::new(0),
-            delay_frames: AtomicI64::new(0),
+            latency_frames: AtomicU64::new(0),
             queued_frames: AtomicU64::new(0),
             ended: AtomicBool::new(false),
         }
+    }
+
+    #[test]
+    fn pipewire_timing_is_normalized_before_latency_is_combined() {
+        assert_eq!(
+            stream_latency_frames(
+                240, // queued frames, as the producer would express them
+                32,  // converter frames
+                480, // graph ticks at 1/48kHz
+                1, 48_000, 48_000, 128, // current buffer, not in `queued` yet
+            ),
+            240 + 32 + 480 + 128
+        );
+        assert_eq!(
+            stream_latency_frames(0, 0, 50, 1, 1_000, 48_000, 0),
+            2_400,
+            "graph-rate ticks are not necessarily audio frames"
+        );
+        assert_eq!(
+            stream_latency_frames(0, 0, -128, 1, 48_000, 48_000, 0),
+            0,
+            "negative graph delay is clamped as PipeWire recommends"
+        );
+    }
+
+    #[test]
+    fn a_completed_device_drain_leaves_the_stream_reusable() {
+        let playback = playback();
+        playback.latency_frames.store(512, Ordering::Release);
+        let draining = Cell::new(true);
+        let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+        let reply = RefCell::new(Some(reply_tx));
+
+        complete_device_drain(&draining, &playback, &reply);
+
+        assert!(!draining.get(), "later process callbacks must be accepted");
+        assert_eq!(playback.latency_frames.load(Ordering::Acquire), 0);
+        assert_eq!(reply_rx.try_recv(), Ok(Ok(())));
     }
 
     /// EOS must not return while audio is still on its way to the device. The
@@ -1125,6 +1427,41 @@ mod tests {
         // dead stream.
         tx.send(vec![7; 16]).expect("the queue still accepts audio");
         assert_eq!(rx.try_recv().expect("the new frame arrives"), vec![7; 16]);
+    }
+
+    #[test]
+    fn a_control_command_completes_only_after_the_pipewire_reply() {
+        let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+        let worker = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            reply_tx.send(Ok(())).expect("the caller is still waiting");
+        });
+        let started = Instant::now();
+
+        wait_command(reply_rx, "test the command").expect("the command succeeds");
+        worker.join().expect("the reply thread finishes");
+
+        assert!(
+            started.elapsed() >= Duration::from_millis(40),
+            "enqueueing alone must not acknowledge a synchronous control"
+        );
+    }
+
+    #[test]
+    fn a_pipewire_command_failure_reaches_its_caller() {
+        let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+        reply_tx
+            .send(Err("set_active failed".into()))
+            .expect("the caller is waiting");
+
+        let error = wait_command(reply_rx, "activate the stream")
+            .expect_err("the PipeWire mutation failed");
+
+        assert!(matches!(
+            error,
+            PipeWireAudioRendererError::PipeWire(message)
+                if message == "set_active failed"
+        ));
     }
 
     #[test]

@@ -203,8 +203,8 @@ buffers are not logged one record per buffer.
   no upload element. It negotiates DMA-BUF only and fails rather than falling
   back, and it `dlopen`s the driver's `libEGL.so.1`/`libGLESv2.so.2` at run
   time — no development packages are needed to build it.
-- `PipeWireAudioCaptureSource`/`PipeWireAudioRenderer` need the same PipeWire
-  development files and a running session, but no portal.
+- `PipeWireAudioCaptureSource`/`PipeWireAudioRenderer` need PipeWire 0.3.50 or
+  newer development files and a running session, but no portal.
 - CUDA surfaces carry either NV12 or BGRA (`CudaFrameFormat`), and nothing on
   that path converts between them — `CudaScaler` resizes, it does not convert,
   because `scale_cuda` has no RGB-to-YUV kernel. It does not need one: NVENC

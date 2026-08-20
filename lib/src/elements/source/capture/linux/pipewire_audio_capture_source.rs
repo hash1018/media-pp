@@ -4,7 +4,7 @@ use std::{
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
-        mpsc::{self, RecvTimeoutError},
+        mpsc::{self, RecvTimeoutError, SyncSender},
     },
     thread::JoinHandle,
     time::{Duration, Instant},
@@ -80,6 +80,9 @@ pub enum PipeWireAudioCaptureSourceError {
 
     #[error("PipeWireAudioCaptureSource doesn't support seeking a live capture")]
     SeekUnsupported,
+
+    #[error("the PipeWire audio capture stream ended")]
+    StreamEnded,
 }
 
 /// Construction-time options for [`PipeWireAudioCaptureSource::open`].
@@ -117,14 +120,51 @@ enum Startup {
     Failed(PipeWireAudioCaptureSourceError),
 }
 
-/// Sent into the PipeWire thread's own main loop to end it.
+// Result of a state mutation performed on the PipeWire thread.
+type CommandResult = std::result::Result<(), String>;
+type CommandReply = SyncSender<CommandResult>;
+
 /// Sent into the PipeWire thread's own main loop.
 enum Command {
     /// Starts or stops the capture stream itself. Stopping is what makes a
     /// paused source stop asking the daemon for audio nobody will read — see
     /// [`PipeWireAudioCaptureSource::handle_control`].
-    SetActive(bool),
+    SetActive {
+        active: bool,
+        reply: CommandReply,
+    },
     Terminate,
+}
+
+fn queue_set_active(
+    commands: &pw::channel::Sender<Command>,
+    active: bool,
+) -> std::result::Result<mpsc::Receiver<CommandResult>, PipeWireAudioCaptureSourceError> {
+    // Capacity one prevents a late PipeWire reply from blocking its own loop
+    // after a timed-out caller has gone away.
+    let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+    commands
+        .send(Command::SetActive {
+            active,
+            reply: reply_tx,
+        })
+        .map_err(|_| PipeWireAudioCaptureSourceError::StreamEnded)?;
+    Ok(reply_rx)
+}
+
+fn wait_set_active(
+    reply: mpsc::Receiver<CommandResult>,
+    active: bool,
+) -> std::result::Result<(), PipeWireAudioCaptureSourceError> {
+    match reply.recv_timeout(NEGOTIATION_TIMEOUT) {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(PipeWireAudioCaptureSourceError::PipeWire(error)),
+        Err(RecvTimeoutError::Timeout) => Err(PipeWireAudioCaptureSourceError::PipeWire(format!(
+            "timed out waiting for PipeWire to {} the capture stream",
+            if active { "activate" } else { "deactivate" }
+        ))),
+        Err(RecvTimeoutError::Disconnected) => Err(PipeWireAudioCaptureSourceError::StreamEnded),
+    }
 }
 
 /// Captures system audio or microphone input through PipeWire, emitting
@@ -180,12 +220,11 @@ pub struct PipeWireAudioCaptureSource {
     format: AudioFormat,
     packets: Receiver<Packet>,
     /// Frames the PipeWire thread had to discard because `packets` was full.
-    /// Added to `samples_emitted` before the next frame is stamped, so a drop
-    /// leaves an honest gap in the timeline rather than silently compressing
-    /// it and drifting out of sync with video.
+    /// Reporting is independent of timestamps: each packet already carries
+    /// its capture position, including gaps left by these discarded frames.
     dropped_frames: Arc<AtomicU64>,
-    /// Ends the PipeWire thread's main loop. `Option` only so `Drop` can take
-    /// it; always `Some` while this element is alive.
+    /// Controls the PipeWire stream and ends its main loop. `Option` only so
+    /// `Drop` can take it; always `Some` while this element is alive.
     commands: Option<pw::channel::Sender<Command>>,
     /// Joined by `Drop` — this element owns the thread it spawned.
     worker: Option<JoinHandle<()>>,
@@ -298,15 +337,18 @@ impl PipeWireAudioCaptureSource {
         ffmpeg::Rational::new(1, self.format.sample_rate as i32)
     }
 
-    fn send_command(&self, command: Command) {
-        if let Some(commands) = &self.commands
-            && commands.send(command).is_err()
-        {
-            pp_warn!(
-                self,
-                "the PipeWire capture thread is no longer accepting commands"
-            );
-        }
+    /// Applies one stream activation change on the PipeWire thread and waits
+    /// for its result. A control request is synchronous, so merely enqueueing
+    /// this command would let Pause/Resume acknowledge a state the stream had
+    /// not reached yet.
+    fn set_active(&self, active: bool) -> Result<()> {
+        let commands = self
+            .commands
+            .as_ref()
+            .ok_or(PipeWireAudioCaptureSourceError::StreamEnded)?;
+        let reply = queue_set_active(commands, active)?;
+        wait_set_active(reply, active)?;
+        Ok(())
     }
 
     /// Like [`crate::control::drain_control`], but drives the control receiver
@@ -343,7 +385,7 @@ impl PipeWireAudioCaptureSource {
             // Include the stream transition and the downstream cascade in the
             // frozen interval: this source produces no media during either.
             let pause_start = Instant::now();
-            self.send_command(Command::SetActive(false));
+            self.set_active(false)?;
             control::apply_one(self, bus, msg, &ack)?;
 
             loop {
@@ -370,7 +412,7 @@ impl PipeWireAudioCaptureSource {
                     // then acknowledge.
                     control::apply_one_unacked(self, bus, paused_msg)?;
                     discard_captured(&self.packets);
-                    self.send_command(Command::SetActive(true));
+                    self.set_active(true)?;
                     let _ = paused_ack.send(());
                     paused_for += pause_start.elapsed();
                     break;
@@ -610,8 +652,11 @@ fn run_pipewire(
         // Both directions are the daemon's own stream state: an inactive
         // capture stream stops being scheduled at all, rather than filling
         // buffers this element would immediately discard.
-        Command::SetActive(active) => {
-            let _ = command_stream.set_active(active);
+        Command::SetActive { active, reply } => {
+            let result = command_stream
+                .set_active(active)
+                .map_err(|error| error.to_string());
+            let _ = reply.send(result);
         }
         Command::Terminate => quit_loop.quit(),
     });
@@ -826,7 +871,9 @@ mod tests {
              stream from a silent one"
         );
 
-        source.send_command(Command::SetActive(false));
+        source
+            .set_active(false)
+            .expect("the capture stream can be paused");
         std::thread::sleep(Duration::from_millis(300));
         discard_captured(&source.packets);
         std::thread::sleep(Duration::from_millis(500));
@@ -835,11 +882,31 @@ mod tests {
             "a paused source must not keep capturing audio nobody will read"
         );
 
-        source.send_command(Command::SetActive(true));
+        source
+            .set_active(true)
+            .expect("the capture stream can be resumed");
         std::thread::sleep(Duration::from_millis(500));
         assert!(
             !source.packets.is_empty(),
             "resuming must start the capture again"
+        );
+    }
+
+    #[test]
+    fn a_capture_control_completes_only_after_the_pipewire_reply() {
+        let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+        let worker = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            reply_tx.send(Ok(())).expect("the caller is still waiting");
+        });
+        let started = Instant::now();
+
+        wait_set_active(reply_rx, false).expect("the stream was deactivated");
+        worker.join().expect("the reply thread finishes");
+
+        assert!(
+            started.elapsed() >= Duration::from_millis(40),
+            "enqueueing alone must not acknowledge Pause"
         );
     }
 
