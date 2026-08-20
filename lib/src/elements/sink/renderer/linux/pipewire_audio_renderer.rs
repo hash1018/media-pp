@@ -5,7 +5,7 @@ use std::{
         mpsc::{self, RecvTimeoutError},
     },
     thread::JoinHandle,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use crossbeam_channel::{Receiver, Sender};
@@ -48,6 +48,11 @@ const SEND_GRANULARITY: Duration = Duration::from_millis(100);
 /// `WasapiRenderer` documents. Deep enough to ride out scheduling jitter,
 /// shallow enough that the block starts promptly rather than buffering
 /// seconds of audio ahead of the speakers.
+/// How much longer than the audio itself a drain will wait for the device to
+/// take it. A device that has stopped consuming never finishes, and EOS must
+/// not become a hang: past this the drain reports what it has and returns.
+const DRAIN_SLACK: Duration = Duration::from_secs(1);
+
 const QUEUE_CAPACITY: usize = 8;
 
 /// How many frames must be queued before the stream is allowed to start.
@@ -171,6 +176,12 @@ struct Playback {
     /// The stream's most recently reported delay to the device, in frames.
     /// Frames already written but not yet audible.
     delay_frames: AtomicI64,
+    /// Frames submitted but not yet handed to the device: what is still in
+    /// the channel *plus* whatever the callback has taken out of it and not
+    /// finished copying. `drain` waits on this rather than on the channel,
+    /// which reads as empty the moment the callback takes the last frame out
+    /// of it.
+    queued_frames: AtomicU64,
     /// Set once the PipeWire thread has stopped for any reason, so a blocked
     /// `consume` can fail instead of waiting forever.
     ended: AtomicBool,
@@ -219,10 +230,37 @@ impl Pending {
 /// of `frames` and cannot drain it, so a handler that cleared `leftover`
 /// alone left up to a full queue -- by design, enough audio to survive
 /// several graph cycles -- to play out after the seek that invalidated it.
-fn discard_queued(frames: &Receiver<Vec<u8>>, leftover: &Mutex<Pending>) {
+fn discard_queued(frames: &Receiver<Vec<u8>>, leftover: &Mutex<Pending>, playback: &Playback) {
     while frames.try_recv().is_ok() {}
     if let Ok(mut leftover) = leftover.lock() {
         *leftover = Pending::default();
+    }
+    // Nothing discarded will ever reach the device, so it must stop counting
+    // as outstanding or the next `drain` would wait for audio that no longer
+    // exists.
+    playback.queued_frames.store(0, Ordering::Release);
+}
+
+/// Waits until the device has taken every outstanding frame, calling `tick`
+/// at each poll so the caller can keep publishing its position.
+///
+/// Reports whether the queue actually emptied; `false` means `deadline`
+/// passed first, which is the device having stopped consuming rather than
+/// audio still on its way.
+fn wait_for_queue(playback: &Playback, deadline: Instant, mut tick: impl FnMut()) -> bool {
+    loop {
+        if playback.queued_frames.load(Ordering::Acquire) == 0 {
+            return true;
+        }
+        if playback.ended.load(Ordering::Acquire) {
+            return false;
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return false;
+        }
+        tick();
+        std::thread::sleep(SEND_GRANULARITY.min(deadline.saturating_duration_since(now)));
     }
 }
 
@@ -328,6 +366,7 @@ impl PipeWireAudioRenderer {
         let playback = Arc::new(Playback {
             played_frames: AtomicU64::new(0),
             delay_frames: AtomicI64::new(0),
+            queued_frames: AtomicU64::new(0),
             ended: AtomicBool::new(false),
         });
 
@@ -453,6 +492,11 @@ impl PipeWireAudioRenderer {
     }
 
     /// Nanoseconds `frames` samples occupy at the negotiated rate.
+    /// The same span as [`Self::frames_ns`], as a `Duration` to wait for.
+    fn frames_duration(&self, frames: u64) -> Duration {
+        Duration::from_nanos(self.frames_ns(frames).max(0) as u64)
+    }
+
     fn frames_ns(&self, frames: u64) -> i64 {
         ((u128::from(frames) * 1_000_000_000u128) / u128::from(self.format.sample_rate.max(1)))
             .min(i64::MAX as u128) as i64
@@ -543,6 +587,13 @@ impl PipeWireAudioRenderer {
             }
         }
 
+        // Counted before the send, not after: the callback may consume this
+        // frame before `send` has even returned, and a count added afterwards
+        // would then be subtracted from a total that never included it.
+        self.playback
+            .queued_frames
+            .fetch_add(frame.samples() as u64, Ordering::AcqRel);
+
         // Blocking here is the pacing: once the queue is full, upstream waits
         // for the device to drain rather than running ahead.
         let mut pending = payload;
@@ -589,9 +640,38 @@ impl PipeWireAudioRenderer {
             self.send_command(Command::SetActive(true));
             self.primed = true;
         }
-        while !self.frames.is_empty() && !self.playback.ended.load(Ordering::Acquire) {
+        // Waiting on the channel alone ends the drain too early: the callback
+        // takes a frame out of it before copying, so the channel reads empty
+        // while that frame, and everything the device has buffered behind it,
+        // is still inaudible. Both are accounted for instead — `queued_frames`
+        // covers what has not reached the device, `delay_frames` what has
+        // reached it but is not yet audible.
+        let outstanding = self.playback.queued_frames.load(Ordering::Acquire);
+        let deadline = Instant::now() + self.frames_duration(outstanding) + DRAIN_SLACK;
+        let mut published = Ok(());
+        let drained = wait_for_queue(&self.playback, deadline, || {
+            if published.is_ok() {
+                published = self.publish_position(true);
+            }
+        });
+        published?;
+        if !drained && !self.playback.ended.load(Ordering::Acquire) {
+            pp_warn!(
+                self,
+                "the device stopped taking audio during drain: {} frame(s) never played",
+                self.playback.queued_frames.load(Ordering::Acquire)
+            );
+        }
+
+        // Everything is written; the device still holds this much of it.
+        let audible_at = Instant::now()
+            + self
+                .frames_duration(self.playback.delay_frames.load(Ordering::Acquire).max(0) as u64);
+        while Instant::now() < audible_at && !self.playback.ended.load(Ordering::Acquire) {
             self.publish_position(true)?;
-            std::thread::sleep(SEND_GRANULARITY);
+            std::thread::sleep(
+                SEND_GRANULARITY.min(audible_at.saturating_duration_since(Instant::now())),
+            );
         }
         self.publish_position(false)?;
         let final_position = self
@@ -752,12 +832,13 @@ fn run_pipewire(
         let command_stream = stream.clone();
         let command_leftover = leftover.clone();
         let command_frames = frames.clone();
+        let command_playback = playback.clone();
         let quit = mainloop.clone();
         let _commands = commands.attach(mainloop.loop_(), move |command| match command {
             Command::SetActive(active) => {
                 let _ = command_stream.set_active(active);
             }
-            Command::Flush => discard_queued(&command_frames, &command_leftover),
+            Command::Flush => discard_queued(&command_frames, &command_leftover, &command_playback),
             Command::Terminate => quit.quit(),
         });
 
@@ -879,9 +960,15 @@ fn run_pipewire(
                         }
                         // Only real media advances the played position; the
                         // silence above is a gap, not media time.
-                        playback
-                            .played_frames
-                            .fetch_add((written / bytes_per_frame) as u64, Ordering::AcqRel);
+                        let consumed = (written / bytes_per_frame) as u64;
+                        playback.played_frames.fetch_add(consumed, Ordering::AcqRel);
+                        // Saturating, because a flush may have zeroed the
+                        // count between the copy and here.
+                        let _ = playback.queued_frames.fetch_update(
+                            Ordering::AcqRel,
+                            Ordering::Acquire,
+                            |queued| Some(queued.saturating_sub(consumed)),
+                        );
                         want
                     };
 
@@ -942,6 +1029,72 @@ fn run_pipewire(
 mod tests {
     use super::*;
 
+    fn playback() -> Playback {
+        Playback {
+            played_frames: AtomicU64::new(0),
+            delay_frames: AtomicI64::new(0),
+            queued_frames: AtomicU64::new(0),
+            ended: AtomicBool::new(false),
+        }
+    }
+
+    /// EOS must not return while audio is still on its way to the device. The
+    /// channel emptying is not that moment — the callback takes a frame out
+    /// of it before copying — so the drain waits on the frame count instead.
+    #[test]
+    fn a_drain_waits_until_the_device_has_taken_everything() {
+        let playback = Arc::new(playback());
+        playback.queued_frames.store(1024, Ordering::Release);
+
+        let consumer = {
+            let playback = playback.clone();
+            std::thread::spawn(move || {
+                for _ in 0..4 {
+                    std::thread::sleep(Duration::from_millis(20));
+                    playback
+                        .queued_frames
+                        .fetch_sub(256, std::sync::atomic::Ordering::AcqRel);
+                }
+            })
+        };
+
+        let mut ticks = 0;
+        let drained = wait_for_queue(&playback, Instant::now() + Duration::from_secs(5), || {
+            ticks += 1
+        });
+        consumer.join().expect("the consumer thread finishes");
+
+        assert!(
+            drained,
+            "the drain must wait for the device to take the audio"
+        );
+        assert_eq!(playback.queued_frames.load(Ordering::Acquire), 0);
+        assert!(
+            ticks > 0,
+            "the caller keeps publishing its position while waiting"
+        );
+    }
+
+    /// A device that has stopped consuming never finishes, and EOS must not
+    /// become a hang.
+    #[test]
+    fn a_drain_gives_up_on_a_device_that_stopped_taking_audio() {
+        let playback = playback();
+        playback.queued_frames.store(1024, Ordering::Release);
+
+        let started = Instant::now();
+        let drained = wait_for_queue(&playback, started + Duration::from_millis(150), || {});
+
+        assert!(
+            !drained,
+            "a stalled device is reported, not waited on forever"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "the wait ends at its deadline"
+        );
+    }
+
     /// A seek invalidates the queue, not just the frame being copied. The
     /// element cannot drain the queue itself -- it holds the sending half --
     /// so this is the whole of what `Command::Flush` has to accomplish.
@@ -952,10 +1105,18 @@ mod tests {
             tx.send(vec![byte; 16]).expect("the queue has room");
         }
         let leftover = Mutex::new(Pending::new(vec![0xAB; 16]));
+        let playback = playback();
+        playback.queued_frames.store(320, Ordering::Release);
 
-        discard_queued(&rx, &leftover);
+        discard_queued(&rx, &leftover, &playback);
 
         assert!(rx.is_empty(), "queued audio must not outlive the seek");
+        assert_eq!(
+            playback.queued_frames.load(Ordering::Acquire),
+            0,
+            "discarded audio must stop counting as outstanding, or the next \
+             drain waits for audio that no longer exists"
+        );
         assert!(
             leftover.lock().unwrap().is_empty(),
             "the frame being copied must not outlive the seek either"
