@@ -1,6 +1,6 @@
 [package]
 name = "media-pp"
-version = "0.1.6"
+version = "0.1.7"
 edition = "2024"
 # Verified with `cargo +1.88 check` across every feature. Edition 2024 alone
 # needs only 1.85; 1.88 is the highest MSRV among the resolved dependencies.
