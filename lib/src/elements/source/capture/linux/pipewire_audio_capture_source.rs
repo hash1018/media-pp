@@ -7,7 +7,7 @@ use std::{
         mpsc::{self, RecvTimeoutError},
     },
     thread::JoinHandle,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use crossbeam_channel::{Receiver, Sender, TrySendError};
@@ -22,7 +22,7 @@ use crate::pp_log::{PpLog, pp_error, pp_info, pp_warn};
 use crate::{
     buffer::MediaBuffer,
     bus::{Bus, BusEvent},
-    control::{ControlReceiver, drain_control},
+    control::{self, ControlMsg, ControlOutcome, ControlReceiver, RequestKind},
     element::{Element, ElementType, Source, SourceElement, element_pp_log},
     elements::AudioFormat,
     error::Result,
@@ -118,7 +118,14 @@ enum Startup {
 }
 
 /// Sent into the PipeWire thread's own main loop to end it.
-struct Terminate;
+/// Sent into the PipeWire thread's own main loop.
+enum Command {
+    /// Starts or stops the capture stream itself. Stopping is what makes a
+    /// paused source stop asking the daemon for audio nobody will read — see
+    /// [`PipeWireAudioCaptureSource::handle_control`].
+    SetActive(bool),
+    Terminate,
+}
 
 /// Captures system audio or microphone input through PipeWire, emitting
 /// `MediaBuffer::Audio` frames in the graph's own native rate, channel count,
@@ -179,7 +186,7 @@ pub struct PipeWireAudioCaptureSource {
     dropped_frames: Arc<AtomicU64>,
     /// Ends the PipeWire thread's main loop. `Option` only so `Drop` can take
     /// it; always `Some` while this element is alive.
-    terminate: Option<pw::channel::Sender<Terminate>>,
+    commands: Option<pw::channel::Sender<Command>>,
     /// Joined by `Drop` — this element owns the thread it spawned.
     worker: Option<JoinHandle<()>>,
 }
@@ -217,7 +224,7 @@ impl PipeWireAudioCaptureSource {
         let (packet_tx, packet_rx) = crossbeam_channel::bounded(PACKET_QUEUE_CAPACITY);
         let dropped_frames = Arc::new(AtomicU64::new(0));
         let (startup_tx, startup_rx) = mpsc::channel::<Startup>();
-        let (terminate_tx, terminate_rx) = pw::channel::channel::<Terminate>();
+        let (command_tx, command_rx) = pw::channel::channel::<Command>();
 
         let device = options.device.clone();
         let worker = std::thread::Builder::new()
@@ -227,7 +234,7 @@ impl PipeWireAudioCaptureSource {
                 let dropped_frames = dropped_frames.clone();
                 move || {
                     if let Err(error) =
-                        run_pipewire(device, packet_tx, dropped_frames, &startup_tx, terminate_rx)
+                        run_pipewire(device, packet_tx, dropped_frames, &startup_tx, command_rx)
                     {
                         let _ = startup_tx.send(Startup::Failed(error));
                     }
@@ -240,7 +247,7 @@ impl PipeWireAudioCaptureSource {
         let startup = match startup_rx.recv_timeout(NEGOTIATION_TIMEOUT) {
             Ok(startup) => startup,
             Err(RecvTimeoutError::Timeout) => {
-                let _ = terminate_tx.send(Terminate);
+                let _ = command_tx.send(Command::Terminate);
                 let _ = worker.join();
                 return Err(PipeWireAudioCaptureSourceError::NegotiationTimeout);
             }
@@ -254,7 +261,7 @@ impl PipeWireAudioCaptureSource {
         let format = match startup {
             Startup::Ready(format) => format,
             Startup::Failed(error) => {
-                let _ = terminate_tx.send(Terminate);
+                let _ = command_tx.send(Command::Terminate);
                 let _ = worker.join();
                 return Err(error);
             }
@@ -279,7 +286,7 @@ impl PipeWireAudioCaptureSource {
                 format,
                 packets: packet_rx,
                 dropped_frames,
-                terminate: Some(terminate_tx),
+                commands: Some(command_tx),
                 worker: Some(worker),
             },
             format,
@@ -290,6 +297,107 @@ impl PipeWireAudioCaptureSource {
     pub fn time_base(&self) -> ffmpeg::Rational {
         ffmpeg::Rational::new(1, self.format.sample_rate as i32)
     }
+
+    fn send_command(&self, command: Command) {
+        if let Some(commands) = &self.commands
+            && commands.send(command).is_err()
+        {
+            pp_warn!(
+                self,
+                "the PipeWire capture thread is no longer accepting commands"
+            );
+        }
+    }
+
+    /// Like [`crate::control::drain_control`], but drives the control receiver
+    /// directly (the same reason [`crate::elements::WasapiCaptureSource`] does
+    /// — see `drain_control`'s own docs) so it can bracket the blocking
+    /// `Pause` wait with the stream's own `set_active`.
+    ///
+    /// Without this the daemon keeps capturing for the whole pause with
+    /// nothing draining the queue: it fills, every later packet is discarded
+    /// as an overload, and `Resume` emits the queue's stale pre-pause audio as
+    /// a burst before any live audio. Deactivating the stream is the PipeWire
+    /// equivalent of the `IAudioClient::Stop` that source performs, and
+    /// discarding what is already queued before reactivating is its `Reset`.
+    fn handle_control(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<ControlOutcome> {
+        let mut paused_for = Duration::ZERO;
+        while let Some((request, ack)) = control.try_recv() {
+            let RequestKind::Control(msg) = request else {
+                control::apply_finish(self, bus, &ack);
+                return Ok(ControlOutcome {
+                    stopped: true,
+                    paused_for,
+                });
+            };
+            if msg != ControlMsg::Pause {
+                if control::apply_one(self, bus, msg, &ack)? {
+                    return Ok(ControlOutcome {
+                        stopped: true,
+                        paused_for,
+                    });
+                }
+                continue;
+            }
+
+            // Include the stream transition and the downstream cascade in the
+            // frozen interval: this source produces no media during either.
+            let pause_start = Instant::now();
+            self.send_command(Command::SetActive(false));
+            control::apply_one(self, bus, msg, &ack)?;
+
+            loop {
+                let Some((paused_msg, paused_ack)) = control.recv() else {
+                    paused_for += pause_start.elapsed();
+                    return Ok(ControlOutcome {
+                        stopped: true,
+                        paused_for,
+                    });
+                };
+                let RequestKind::Control(paused_msg) = paused_msg else {
+                    control::apply_finish(self, bus, &paused_ack);
+                    paused_for += pause_start.elapsed();
+                    return Ok(ControlOutcome {
+                        stopped: true,
+                        paused_for,
+                    });
+                };
+
+                if paused_msg == ControlMsg::Resume {
+                    // Keep the stream stopped until every downstream element
+                    // has resumed, then discard whatever the pause boundary
+                    // left queued so `Resume` starts from live audio, and only
+                    // then acknowledge.
+                    control::apply_one_unacked(self, bus, paused_msg)?;
+                    discard_captured(&self.packets);
+                    self.send_command(Command::SetActive(true));
+                    let _ = paused_ack.send(());
+                    paused_for += pause_start.elapsed();
+                    break;
+                }
+
+                if control::apply_one(self, bus, paused_msg, &paused_ack)? {
+                    paused_for += pause_start.elapsed();
+                    return Ok(ControlOutcome {
+                        stopped: true,
+                        paused_for,
+                    });
+                }
+                // A redundant Pause (or another one-shot control) was
+                // forwarded and acknowledged; remain frozen until Resume.
+            }
+        }
+        Ok(ControlOutcome {
+            stopped: false,
+            paused_for,
+        })
+    }
+}
+
+/// Drops everything captured before a pause, so `Resume` emits live audio
+/// rather than the queue's stale contents.
+fn discard_captured(packets: &Receiver<Packet>) {
+    while packets.try_recv().is_ok() {}
 }
 
 /// Wraps one captured packet as an `ffmpeg` frame, stamped with where the
@@ -321,8 +429,8 @@ impl Drop for PipeWireAudioCaptureSource {
     fn drop(&mut self) {
         // Dropping the sender alone would not wake a blocked main loop, so
         // signal first, then join the thread this element owns.
-        if let Some(terminate) = self.terminate.take() {
-            let _ = terminate.send(Terminate);
+        if let Some(commands) = self.commands.take() {
+            let _ = commands.send(Command::Terminate);
         }
         if let Some(worker) = self.worker.take()
             && worker.join().is_err()
@@ -360,7 +468,7 @@ impl SourceElement for PipeWireAudioCaptureSource {
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
         pp_info!(self, "started");
         loop {
-            let outcome = drain_control(control, self, bus)?;
+            let outcome = self.handle_control(control, bus)?;
             if outcome.stopped {
                 pp_info!(self, "stopped");
                 return Ok(());
@@ -448,7 +556,7 @@ fn run_pipewire(
     packets: Sender<Packet>,
     dropped_frames: Arc<AtomicU64>,
     startup: &mpsc::Sender<Startup>,
-    terminate: pw::channel::Receiver<Terminate>,
+    commands: pw::channel::Receiver<Command>,
 ) -> std::result::Result<(), PipeWireAudioCaptureSourceError> {
     fn pw_err(error: impl std::fmt::Display) -> PipeWireAudioCaptureSourceError {
         PipeWireAudioCaptureSourceError::PipeWire(error.to_string())
@@ -458,12 +566,6 @@ fn run_pipewire(
     let mainloop = pw::main_loop::MainLoopRc::new(None).map_err(pw_err)?;
     let context = pw::context::ContextRc::new(&mainloop, None).map_err(pw_err)?;
     let core = context.connect_rc(None).map_err(pw_err)?;
-
-    // Attach to the outer loop, but let the callback own its own clone: the
-    // `AttachedReceiver` borrows the `Loop` for as long as it lives, so the
-    // handle it is attached to has to outlive it.
-    let quit_loop = mainloop.clone();
-    let _terminate = terminate.attach(mainloop.loop_(), move |_| quit_loop.quit());
 
     let mut props = properties! {
         *pw::keys::MEDIA_TYPE => "Audio",
@@ -476,8 +578,25 @@ fn run_pipewire(
         props.insert(*pw::keys::STREAM_CAPTURE_SINK, "true");
     }
 
+    // `StreamRc` rather than a borrowed stream: the command handler below
+    // needs a handle of its own to start and stop the capture with.
     let stream =
-        pw::stream::StreamBox::new(&core, "media-pp-audio-capture", props).map_err(pw_err)?;
+        pw::stream::StreamRc::new(core.clone(), "media-pp-audio-capture", props).map_err(pw_err)?;
+
+    // Attach to the outer loop, but let the callback own its own clones: the
+    // `AttachedReceiver` borrows the `Loop` for as long as it lives, so the
+    // handles it is attached to have to outlive it.
+    let quit_loop = mainloop.clone();
+    let command_stream = stream.clone();
+    let _commands = commands.attach(mainloop.loop_(), move |command| match command {
+        // Both directions are the daemon's own stream state: an inactive
+        // capture stream stops being scheduled at all, rather than filling
+        // buffers this element would immediately discard.
+        Command::SetActive(active) => {
+            let _ = command_stream.set_active(active);
+        }
+        Command::Terminate => quit_loop.quit(),
+    });
 
     // Negotiated format, shared with the process callback. Both callbacks run
     // on this thread's own loop, so a `Cell` is enough — no lock needed.
@@ -613,6 +732,92 @@ fn run_pipewire(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Opens a capture on whatever this machine publishes, or skips with a
+    /// reason. Sinks are preferred: a monitor stream captures whatever is
+    /// playing and needs no microphone permission.
+    fn try_capture_source() -> Option<PipeWireAudioCaptureSource> {
+        let devices = match PipeWireAudioCaptureSource::list_devices() {
+            Ok(devices) if !devices.is_empty() => devices,
+            Ok(_) => {
+                eprintln!("skipping: this machine publishes no audio nodes");
+                return None;
+            }
+            Err(error) => {
+                eprintln!("skipping: no usable PipeWire session ({error})");
+                return None;
+            }
+        };
+        let device = devices
+            .iter()
+            .find(|device| device.kind == PipeWireAudioDeviceKind::Sink)
+            .or_else(|| devices.first())
+            .expect("the list is not empty")
+            .clone();
+        match PipeWireAudioCaptureSource::open(
+            "capture-test",
+            PipeWireAudioCaptureOptions { device },
+        ) {
+            Ok((source, _format)) => Some(source),
+            Err(error) => {
+                eprintln!("skipping: the node could not be opened ({error})");
+                None
+            }
+        }
+    }
+
+    /// A paused source must stop the capture itself, not just stop reading it.
+    /// Left running, the daemon fills the queue during the pause, every later
+    /// packet is discarded as an overload, and `Resume` emits the stale queue
+    /// before any live audio.
+    #[test]
+    fn a_paused_capture_stops_asking_the_device_for_audio() {
+        let Some(source) = try_capture_source() else {
+            return;
+        };
+        // Capturing to begin with, or the rest of this proves nothing.
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(
+            !source.packets.is_empty(),
+            "the capture produced nothing at all, so this cannot tell a paused \
+             stream from a silent one"
+        );
+
+        source.send_command(Command::SetActive(false));
+        std::thread::sleep(Duration::from_millis(300));
+        discard_captured(&source.packets);
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(
+            source.packets.is_empty(),
+            "a paused source must not keep capturing audio nobody will read"
+        );
+
+        source.send_command(Command::SetActive(true));
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(
+            !source.packets.is_empty(),
+            "resuming must start the capture again"
+        );
+    }
+
+    /// What `Resume` discards: the queue's contents, so playback starts from
+    /// live audio rather than the pause boundary's leftovers.
+    #[test]
+    fn resuming_discards_what_the_pause_left_queued() {
+        let (tx, rx) = crossbeam_channel::bounded::<Packet>(8);
+        let format = stereo_f32();
+        for position in 0..4 {
+            tx.send(packet(&format, position * 480, 480))
+                .expect("the queue has room");
+        }
+
+        discard_captured(&rx);
+
+        assert!(rx.is_empty(), "stale audio must not outlive the pause");
+        tx.send(packet(&format, 4 * 480, 480))
+            .expect("the queue still accepts audio");
+        assert_eq!(rx.try_recv().map(|p| p.position), Ok(1920));
+    }
 
     fn stereo_f32() -> AudioFormat {
         AudioFormat::new(
