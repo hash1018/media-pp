@@ -84,26 +84,63 @@ pub struct PipeWireAudioDevice {
 /// thread of its own and only the plain results cross back.
 pub(crate) fn list_devices() -> std::result::Result<Vec<PipeWireAudioDevice>, PipeWireDeviceError> {
     let (tx, rx) = mpsc::channel();
+    let (quit_tx, quit_rx) = pw::channel::channel::<Quit>();
     let worker = std::thread::Builder::new()
         .name("pipewire-enumerate".into())
         .spawn(move || {
-            let _ = tx.send(enumerate_nodes());
+            let _ = tx.send(enumerate_nodes(quit_rx));
         })
         .map_err(|e| PipeWireDeviceError::PipeWire(e.to_string()))?;
-    let result = rx.recv_timeout(ENUMERATION_TIMEOUT);
-    let _ = worker.join();
-    match result {
-        Ok(devices) => devices,
-        Err(RecvTimeoutError::Timeout) => Err(PipeWireDeviceError::EnumerationTimeout),
-        Err(RecvTimeoutError::Disconnected) => Err(PipeWireDeviceError::PipeWire(
-            "the enumeration thread exited without a result".into(),
-        )),
+
+    await_enumeration(rx, worker, ENUMERATION_TIMEOUT, move || {
+        let _ = quit_tx.send(Quit);
+    })
+}
+
+/// Waits out one enumeration, giving up when `timeout` passes.
+///
+/// The thread is joined only once it has something to report. Joining
+/// unconditionally is what made the timeout no timeout at all: a `core.sync`
+/// that never comes back, or a daemon that stops answering, left the caller
+/// blocked in `join` long after the deadline it asked for. On a timeout the
+/// loop is asked to stop through `stop` and the thread is left to end on its
+/// own -- it owns everything it touches, so nothing here has to outlive it.
+fn await_enumeration(
+    rx: mpsc::Receiver<std::result::Result<Vec<PipeWireAudioDevice>, PipeWireDeviceError>>,
+    worker: std::thread::JoinHandle<()>,
+    timeout: Duration,
+    stop: impl FnOnce(),
+) -> std::result::Result<Vec<PipeWireAudioDevice>, PipeWireDeviceError> {
+    match rx.recv_timeout(timeout) {
+        Ok(devices) => {
+            let _ = worker.join();
+            devices
+        }
+        Err(RecvTimeoutError::Timeout) => {
+            stop();
+            Err(PipeWireDeviceError::EnumerationTimeout)
+        }
+        Err(RecvTimeoutError::Disconnected) => {
+            let _ = worker.join();
+            Err(PipeWireDeviceError::PipeWire(
+                "the enumeration thread exited without a result".into(),
+            ))
+        }
     }
 }
 
+/// Sent into [`enumerate_nodes`]'s own main loop when the caller has stopped
+/// waiting for it.
+pub(crate) struct Quit;
+
 /// One registry round trip, on its own thread's main loop.
-pub(crate) fn enumerate_nodes() -> std::result::Result<Vec<PipeWireAudioDevice>, PipeWireDeviceError>
-{
+///
+/// `quit` ends the loop early: [`list_devices`] sends it when its timeout has
+/// passed, so a wedged daemon leaves this thread finishing on its own rather
+/// than holding a connection open for the life of the process.
+pub(crate) fn enumerate_nodes(
+    quit: pw::channel::Receiver<Quit>,
+) -> std::result::Result<Vec<PipeWireAudioDevice>, PipeWireDeviceError> {
     fn pw_err(error: impl std::fmt::Display) -> PipeWireDeviceError {
         PipeWireDeviceError::PipeWire(error.to_string())
     }
@@ -113,6 +150,9 @@ pub(crate) fn enumerate_nodes() -> std::result::Result<Vec<PipeWireAudioDevice>,
     let context = pw::context::ContextRc::new(&mainloop, None).map_err(pw_err)?;
     let core = context.connect_rc(None).map_err(pw_err)?;
     let registry = core.get_registry_rc().map_err(pw_err)?;
+
+    let quit_loop = mainloop.clone();
+    let _quit = quit.attach(mainloop.loop_(), move |_| quit_loop.quit());
 
     let nodes = Rc::new(RefCell::new(Vec::new()));
     let _reg_listener = {
@@ -212,5 +252,70 @@ fn mark_defaults(nodes: &mut [PipeWireAudioDevice]) {
                 node.is_default = true;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Instant;
+
+    use super::*;
+
+    /// The timeout has to bound what the *caller* waits, not just when the
+    /// result is read: a daemon that never answers must not hold the caller
+    /// past it.
+    #[test]
+    fn enumeration_gives_up_at_its_timeout_rather_than_on_the_thread() {
+        let (tx, rx) = mpsc::channel();
+        let (stopped_tx, stopped_rx) = mpsc::channel();
+        // A thread that answers long after the deadline is what a wedged
+        // registry round trip looks like from here.
+        let worker = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(3));
+            let _ = tx.send(Ok(Vec::new()));
+        });
+
+        let started = Instant::now();
+        let result = await_enumeration(rx, worker, Duration::from_millis(150), move || {
+            let _ = stopped_tx.send(());
+        });
+
+        assert!(matches!(
+            result,
+            Err(PipeWireDeviceError::EnumerationTimeout)
+        ));
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "the caller waited {:?}, past the timeout it asked for",
+            started.elapsed()
+        );
+        assert!(
+            stopped_rx.try_recv().is_ok(),
+            "the loop must be told to stop, or it holds its connection open \
+             for the life of the process"
+        );
+    }
+
+    /// The ordinary path still joins, so a finished thread is never left
+    /// behind.
+    #[test]
+    fn a_finished_enumeration_is_collected_and_joined() {
+        let (tx, rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let _ = tx.send(Ok(vec![PipeWireAudioDevice {
+                id: 1,
+                name: "node".into(),
+                description: "Node".into(),
+                kind: PipeWireAudioDeviceKind::Sink,
+                is_default: true,
+            }]));
+        });
+
+        let devices = await_enumeration(rx, worker, Duration::from_secs(5), || {
+            panic!("a result that arrived in time must not stop the loop early")
+        })
+        .expect("the enumeration succeeded");
+
+        assert_eq!(devices.len(), 1);
     }
 }
