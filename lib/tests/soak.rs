@@ -1456,6 +1456,16 @@ mod cuda {
     /// than a free choice.
     const DECODE_QUEUE_DEPTH: usize = 4;
 
+    /// NVDEC's process-side driver cache takes substantially longer to
+    /// settle than the lazily initialized tables covered by [`WARMUP`]. On
+    /// this machine the first 15 cycles climbed by 5-7 MiB each, but a
+    /// 250-cycle A/B run both before and after the `AvBufferRef` RAII change
+    /// repeatedly returned tens of MiB and flattened to +0.083 MiB/cycle.
+    /// Discard enough cycles to measure after that cache has saturated;
+    /// otherwise this scenario deterministically reports driver warm-up as
+    /// a decoder leak.
+    const DECODE_CACHE_WARMUP: usize = 50;
+
     /// Decode a real file straight into CUDA memory. The decoder's pool is
     /// allocated per cycle and, unlike everything else measured here, is
     /// capped — a cycle that failed to release one would run the next
@@ -1585,6 +1595,7 @@ mod cuda {
     /// scenarios below differ only in the graph each cycle builds.
     fn measure_cycles(
         label: &str,
+        post_settle_warmup: usize,
         iterations: usize,
         max_memory_slope: f64,
         mut cycle: impl FnMut(Teardown) -> usize,
@@ -1605,7 +1616,8 @@ mod cuda {
             }
         };
 
-        for index in 0..(WARMUP + iterations) {
+        let measurement_start = WARMUP + post_settle_warmup;
+        for index in 0..(measurement_start + iterations) {
             let teardown = Teardown::for_cycle(index);
             let frames = cycle(teardown);
             // See the D3D11 module's own note: only a `finish` cycle owes
@@ -1620,7 +1632,7 @@ mod cuda {
             if index + 1 == WARMUP {
                 settle();
             }
-            if index >= WARMUP {
+            if index >= measurement_start {
                 memory.sample();
                 if let Some(gpu) = gpu.as_mut() {
                     gpu.sample();
@@ -1657,7 +1669,7 @@ mod cuda {
         // slope falling +0.075 over the first half, +0.032 over the
         // second, and exactly 0.000 over the last 62 cycles. A leak would
         // hold its slope as the window grows instead of flattening.
-        measure_cycles("cuda cycle", iterations(25), 1.0 * MIB, |teardown| {
+        measure_cycles("cuda cycle", 0, iterations(25), 1.0 * MIB, |teardown| {
             cycle(&device, teardown)
         });
     }
@@ -1674,9 +1686,13 @@ mod cuda {
             return;
         }
 
-        measure_cycles("cuda decode cycle", iterations(15), 1.0 * MIB, |teardown| {
-            decode_cycle(&device, &path, teardown)
-        });
+        measure_cycles(
+            "cuda decode cycle",
+            DECODE_CACHE_WARMUP,
+            iterations(50),
+            1.0 * MIB,
+            |teardown| decode_cycle(&device, &path, teardown),
+        );
     }
 
     #[test]
@@ -1690,9 +1706,13 @@ mod cuda {
             return;
         }
 
-        measure_cycles("cuda nvenc cycle", iterations(15), 1.0 * MIB, |teardown| {
-            encode_cycle(&device, teardown)
-        });
+        measure_cycles(
+            "cuda nvenc cycle",
+            0,
+            iterations(15),
+            1.0 * MIB,
+            |teardown| encode_cycle(&device, teardown),
+        );
     }
 }
 
