@@ -100,11 +100,9 @@ pub struct D3d12vaDecoder {
 unsafe impl Send for D3d12vaDecoder {}
 
 impl D3d12vaDecoder {
-    /// `device` must outlive this decoder (and, transitively, every frame
-    /// it produces that's still alive downstream) — the D3D12VA hw device
-    /// context borrows it without taking its own reference, matching how
-    /// FFmpeg's `hwcontext_d3d12va.c` doesn't `AddRef` a caller-provided
-    /// device either. Pass the same `ID3D12Device` your
+    /// The D3D12VA hardware context owns an independent COM reference to
+    /// `device`, so the caller does not need to keep its handle alive. Pass
+    /// the same underlying `ID3D12Device` your
     /// [`crate::elements::D3d12Renderer`]'s own
     /// [`crate::elements::D3d12FrameRenderer`] impl renders with (see
     /// that trait's own `device()`) so decoded frames land on the same
@@ -251,9 +249,8 @@ impl Drop for D3d12vaDecoder {
     }
 }
 
-/// Shared with [`crate::elements::D3d12Upload`] — the mirror-image
-/// element that uploads CPU frames to this same device rather than
-/// decoding onto it. Returns a raw `AVERROR` code rather than
+/// Shared with [`crate::elements::D3d12Upload`] and
+/// [`crate::elements::D3d12Scaler`]. Returns a raw `AVERROR` code rather than
 /// `D3d12vaDecoderError` so it doesn't tie that caller to this module's
 /// own error type; each call site maps it into its own error variant.
 pub(crate) unsafe fn create_hw_device_ctx(
@@ -267,8 +264,9 @@ pub(crate) unsafe fn create_hw_device_ctx(
 
         let hw_device_ctx = (*buf).data as *mut ffi::AVHWDeviceContext;
         let d3d12_ctx = (*hw_device_ctx).hwctx as *mut AVD3D12VADeviceContext;
-        // Borrowed, not owned — see `D3d12vaDecoder::new`'s doc comment.
-        (*d3d12_ctx).device = device.as_raw();
+        // FFmpeg releases a caller-supplied device when this context is
+        // freed, so transfer an independently owned COM reference.
+        (*d3d12_ctx).device = device.clone().into_raw();
 
         let result = ffi::av_hwdevice_ctx_init(buf);
         if result < 0 {
@@ -280,10 +278,37 @@ pub(crate) unsafe fn create_hw_device_ctx(
     }
 }
 
-/// Shared with [`crate::elements::D3d12Upload`] — see
+/// Shared with the other D3D12 filters — see
 /// [`create_hw_device_ctx`]'s own docs.
 pub(crate) unsafe fn free_buffer(mut buf: *mut ffi::AVBufferRef) {
     unsafe { ffi::av_buffer_unref(&mut buf) };
+}
+
+/// Creates an NV12 D3D12VA frame pool tied to `hw_device_ctx`.
+pub(crate) unsafe fn create_hw_frames_ctx(
+    hw_device_ctx: *mut ffi::AVBufferRef,
+    width: u32,
+    height: u32,
+    initial_pool_size: i32,
+) -> Result<*mut ffi::AVBufferRef, i32> {
+    unsafe {
+        let buf = ffi::av_hwframe_ctx_alloc(hw_device_ctx);
+        if buf.is_null() {
+            return Err(-1);
+        }
+        let frames_ctx = (*buf).data as *mut ffi::AVHWFramesContext;
+        (*frames_ctx).format = ffi::AVPixelFormat::AV_PIX_FMT_D3D12;
+        (*frames_ctx).sw_format = ffi::AVPixelFormat::AV_PIX_FMT_NV12;
+        (*frames_ctx).width = width as i32;
+        (*frames_ctx).height = height as i32;
+        (*frames_ctx).initial_pool_size = initial_pool_size;
+        let result = ffi::av_hwframe_ctx_init(buf);
+        if result < 0 {
+            free_buffer(buf);
+            return Err(result);
+        }
+        Ok(buf)
+    }
 }
 
 unsafe extern "C" fn get_format(
@@ -322,4 +347,20 @@ pub(crate) fn d3d12va_texture(
             d3d12_frame.sync_ctx.fence_value,
         ))
     }
+}
+
+/// Updates the fence value belonging to a D3D12VA frame after a producer has
+/// queued work and signalled the frame pool's own fence.
+pub(crate) fn set_d3d12va_fence_value(frame: &mut ffmpeg::frame::Video, fence_value: u64) -> bool {
+    if frame.format() != ffmpeg::format::Pixel::D3D12 {
+        return false;
+    }
+    unsafe {
+        let data = (*frame.as_mut_ptr()).data[0];
+        if data.is_null() {
+            return false;
+        }
+        (*(data as *mut AVD3D12VAFrame)).sync_ctx.fence_value = fence_value;
+    }
+    true
 }

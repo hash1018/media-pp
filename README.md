@@ -99,7 +99,7 @@ buffers, codecs, and muxers; `Pipeline::stop` abandons buffered work immediately
 | Kind | Elements |
 |---|---|
 | Sources | `FileDemuxer`, `AppSource`, `RtspSource`, `TestVideoSource`, `TestAudioSource`, `DxgiCaptureSource`, `PipeWireScreenCaptureSource`, `PipeWireAudioCaptureSource`, `WasapiCaptureSource`, `AudioMixer`, `SwVideoCompositor`, `CudaVideoCompositor`, `D3d11VideoCompositor`, `WebRtcTrackSource` |
-| Filters | `SwDecoder`, `CudaDecoder`, `D3d11Decoder`, `D3d12vaDecoder`, `SwEncoder`, `CudaEncoder`, `D3d11NvencEncoder`, `SwAudioEncoder`, `AudioResampler`, `AudioVolume`, `SwScaler`, `SwChromaKey`, `D3d11ChromaKey`, `Pacer`, `VideoSynchronizer`, `CudaScaler`, `D3d11Scaler`, `CudaUpload`, `CudaDownload`, `CudaConverter`, `D3d11Upload`, `D3d11Download`, `D3d12Upload`, `D3d12Download`, `Tee` |
+| Filters | `SwDecoder`, `CudaDecoder`, `D3d11Decoder`, `D3d12vaDecoder`, `SwEncoder`, `CudaEncoder`, `D3d11NvencEncoder`, `SwAudioEncoder`, `AudioResampler`, `AudioVolume`, `SwScaler`, `SwChromaKey`, `D3d11ChromaKey`, `Pacer`, `VideoSynchronizer`, `CudaScaler`, `D3d11Scaler`, `D3d12Scaler`, `CudaUpload`, `CudaDownload`, `CudaConverter`, `D3d11Upload`, `D3d11Download`, `D3d12Upload`, `D3d12Download`, `Tee` |
 | Sinks | `FrameCounter`, `PacketCounter`, `AppSink`, `Mp4Muxer`, `SegmentedMp4Muxer`, `HlsMuxer`, `RtspSink`, `CudaRenderer`, `D3d11Renderer`, `D3d12Renderer`, `PipeWireAudioRenderer`, `WasapiRenderer`, `OrtDetector`, `WebRtcTrackSink` |
 
 Backend-specific elements require their corresponding Cargo feature and are
@@ -151,7 +151,7 @@ The library has no default features.
 |---|---|---|
 | `cuda` | NVDEC decode, NVENC encode, scaling, compositing, upload/download, and rendering, all on CUDA-resident frames | Linux, Windows |
 | `d3d11` | D3D11 decode, scaling, upload/download, rendering, GPU compositing, and NVENC encoding | Windows |
-| `d3d12` | D3D12VA decode, upload/download, and rendering interfaces | Windows |
+| `d3d12` | D3D12VA decode, scaling, upload/download, and rendering interfaces | Windows |
 | `dxgi-capture` | Desktop capture; also enables `d3d11` | Windows |
 | `pipewire-audio-capture` | System-audio and microphone capture through PipeWire | Linux |
 | `pipewire-audio-renderer` | Audio playback through PipeWire | Linux |

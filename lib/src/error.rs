@@ -30,7 +30,7 @@ use crate::elements::{
 };
 #[cfg(all(target_os = "windows", feature = "d3d12"))]
 use crate::elements::{
-    D3d12DownloadError, D3d12RendererError, D3d12UploadError, D3d12vaDecoderError,
+    D3d12DownloadError, D3d12RendererError, D3d12ScalerError, D3d12UploadError, D3d12vaDecoderError,
 };
 use crate::{
     elements::{
@@ -168,6 +168,10 @@ pub enum Error {
     #[cfg(all(target_os = "windows", feature = "d3d12"))]
     #[error(transparent)]
     D3d12DownloadError(#[from] D3d12DownloadError),
+
+    #[cfg(all(target_os = "windows", feature = "d3d12"))]
+    #[error(transparent)]
+    D3d12ScalerError(#[from] D3d12ScalerError),
 
     #[cfg(all(target_os = "windows", feature = "d3d11"))]
     #[error(transparent)]

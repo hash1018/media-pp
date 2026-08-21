@@ -42,6 +42,7 @@ pub enum ElementType {
     D3d12vaDecoder,
     D3d12Upload,
     D3d12Download,
+    D3d12Scaler,
     D3d11Decoder,
     D3d11Upload,
     D3d11Download,

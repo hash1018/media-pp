@@ -65,8 +65,8 @@ pub use filter::{
 };
 #[cfg(all(target_os = "windows", feature = "d3d12"))]
 pub use filter::{
-    D3d12Download, D3d12DownloadError, D3d12Upload, D3d12UploadError, D3d12vaDecoder,
-    D3d12vaDecoderError,
+    D3d12Download, D3d12DownloadError, D3d12Scaler, D3d12ScalerError, D3d12Upload,
+    D3d12UploadError, D3d12vaDecoder, D3d12vaDecoderError,
 };
 pub use sink::{
     AppSink, FrameCounter, HlsMode, HlsMuxer, HlsMuxerError, HlsMuxerStreamSink, HlsOptions,

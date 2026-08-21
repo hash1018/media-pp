@@ -1266,17 +1266,18 @@ mod d3d11 {
     }
 }
 
-/// The D3D12VA transfer path. Each cycle creates and destroys an FFmpeg
-/// D3D12VA device/frames context, its fixed GPU surface pool, and the CPU
-/// frame pool `D3d12Download` fills. The device itself stays alive so the
-/// trend measures element ownership rather than adapter initialization.
+/// The D3D12VA transfer and video-process path. Each cycle creates and
+/// destroys the upload/scaler FFmpeg contexts, both fixed GPU surface pools,
+/// the video processor's queue/list/fences, and the CPU frame pool
+/// `D3d12Download` fills. The device itself stays alive so the trend measures
+/// element ownership rather than adapter initialization.
 #[cfg(all(windows, feature = "d3d12"))]
 mod d3d12 {
     use std::{sync::atomic::Ordering, thread, time::Duration};
 
     use ffmpeg_next as ffmpeg;
     use media_pp::{
-        elements::{D3d12Download, D3d12Upload, FrameCounter, SwScaler},
+        elements::{D3d12Download, D3d12Scaler, D3d12Upload, FrameCounter, SwScaler},
         pipeline::Pipeline,
     };
     use windows::Win32::Graphics::{
@@ -1286,6 +1287,9 @@ mod d3d12 {
 
     use crate::common::{Trend, Unit, exclusive, gpu::d3d12_vram_bytes, iterations, settle};
     use crate::{HEIGHT, Teardown, WARMUP, WIDTH, test_source};
+
+    const SCALED_WIDTH: u32 = 176;
+    const SCALED_HEIGHT: u32 = 144;
 
     fn try_device() -> Option<ID3D12Device> {
         let mut device = None;
@@ -1309,11 +1313,13 @@ mod d3d12 {
                 ffmpeg::software::scaling::Flags::BILINEAR,
             );
             let upload = D3d12Upload::new("upload", &device, WIDTH, HEIGHT)?;
-            let download = D3d12Download::new("download", WIDTH, HEIGHT);
+            let scaler = D3d12Scaler::new("scaler", &device, SCALED_WIDTH, SCALED_HEIGHT)?;
+            let download = D3d12Download::new("download", SCALED_WIDTH, SCALED_HEIGHT);
             let branch = ctx
                 .branch()
                 .pipe(to_nv12)
                 .pipe(upload)
+                .pipe(scaler)
                 .queue("gpu-frames", 4)
                 .pipe(download)
                 .to(Box::new(counter))?;
@@ -1321,7 +1327,7 @@ mod d3d12 {
             Ok(())
         })
         .expect(
-            "wire the D3D12 upload/download pipeline — a failure after the first cycle may mean \
+            "wire the D3D12 upload/scale/download pipeline — a failure after the first cycle may mean \
              an earlier FFmpeg D3D12VA frames context retained its surface pool",
         );
 
@@ -1333,14 +1339,14 @@ mod d3d12 {
 
     #[test]
     #[ignore = "soak test; run with --ignored"]
-    fn upload_and_download_cycles_do_not_grow_gpu_memory() {
+    fn upload_scale_and_download_cycles_do_not_grow_gpu_memory() {
         isolate!();
         let _exclusive = exclusive();
         media_pp::init().expect("ffmpeg init");
         let Some(device) = try_device() else { return };
 
-        let mut memory = Trend::private_bytes("d3d12 transfer cycle private bytes");
-        let mut vram = Trend::new("d3d12 transfer cycle adapter memory", Unit::Bytes, {
+        let mut memory = Trend::private_bytes("d3d12 scale cycle private bytes");
+        let mut vram = Trend::new("d3d12 scale cycle adapter memory", Unit::Bytes, {
             let device = device.clone();
             move || d3d12_vram_bytes(&device)
         });
@@ -1359,12 +1365,11 @@ mod d3d12 {
             }
         }
 
-        // Measured on the development machine over the default 15-cycle
-        // window: private bytes grew +0.017 MiB/cycle with sub-0.1 MiB
-        // jitter, while adapter memory stayed byte-for-byte flat. The host
-        // threshold leaves roughly 15x headroom over that fitted slope; the
-        // adapter threshold remains below one retained four-surface NV12
-        // pool at this resolution.
+        // Measured with upload + video-process scale + download over the
+        // default 15-cycle window: private bytes grew +0.032 MiB/cycle
+        // (0.018 MiB/cycle standard error), while adapter memory was flat.
+        // The thresholds remain below one retained output pool at this
+        // resolution and comfortably above the observed fitted slopes.
         memory.assert_flat(0.25 * crate::common::MIB);
         vram.assert_flat(0.5 * crate::common::MIB);
     }

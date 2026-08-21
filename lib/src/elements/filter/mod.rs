@@ -47,6 +47,8 @@ pub use pacer::{Pacer, PacerError};
 pub use scaler::{CudaScaler, CudaScalerError, CudaScalerInterp};
 #[cfg(all(target_os = "windows", feature = "d3d11"))]
 pub use scaler::{D3d11Scaler, D3d11ScalerError, D3d11ScalerFormat};
+#[cfg(all(target_os = "windows", feature = "d3d12"))]
+pub use scaler::{D3d12Scaler, D3d12ScalerError};
 pub use scaler::{SwScaler, SwScalerError};
 pub use tee::{Tee, TeeBuilder, TeeHandle};
 #[cfg(feature = "cuda")]

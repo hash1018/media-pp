@@ -9,7 +9,9 @@ use crate::{
     buffer::MediaBuffer,
     control::ControlMsg,
     element::{Element, ElementType, Sink, Source, element_pp_log},
-    elements::filter::decoder::d3d12va_decoder::{create_hw_device_ctx, free_buffer},
+    elements::filter::decoder::d3d12va_decoder::{
+        create_hw_device_ctx, create_hw_frames_ctx, free_buffer,
+    },
     error::Result,
     pad::SrcPad,
     pool::UnboundObjectPool,
@@ -115,9 +117,10 @@ pub struct D3d12Upload {
 unsafe impl Send for D3d12Upload {}
 
 impl D3d12Upload {
-    /// `device` must outlive this element (and, transitively, every frame
-    /// it produces that's still alive downstream) and must be the same
-    /// `ID3D12Device` your [`crate::elements::D3d12Renderer`] was created
+    /// The D3D12VA hardware context owns an independent COM reference to
+    /// `device`, so the caller does not need to keep its handle alive. It
+    /// must be the same underlying `ID3D12Device` your
+    /// [`crate::elements::D3d12Renderer`] was created
     /// with — same requirement [`crate::elements::D3d12vaDecoder::new`]
     /// documents, for the same reason: frames landing on a different
     /// device than the one the renderer submits to would make the
@@ -134,13 +137,14 @@ impl D3d12Upload {
         let hw_device_ctx =
             unsafe { create_hw_device_ctx(device) }.map_err(D3d12UploadError::HwDeviceInit)?;
 
-        let hw_frames_ctx = match unsafe { create_hw_frames_ctx(hw_device_ctx, width, height) } {
-            Ok(ctx) => ctx,
-            Err(error) => {
-                unsafe { free_buffer(hw_device_ctx) };
-                return Err(D3d12UploadError::HwFramesInit(error));
-            }
-        };
+        let hw_frames_ctx =
+            match unsafe { create_hw_frames_ctx(hw_device_ctx, width, height, POOL_SIZE) } {
+                Ok(ctx) => ctx,
+                Err(error) => {
+                    unsafe { free_buffer(hw_device_ctx) };
+                    return Err(D3d12UploadError::HwFramesInit(error));
+                }
+            };
 
         let pad = SrcPad::new(format!("{name}_src"));
         let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
@@ -260,36 +264,5 @@ impl Drop for D3d12Upload {
             free_buffer(self.hw_frames_ctx);
             free_buffer(self.hw_device_ctx);
         }
-    }
-}
-
-/// Allocates and initializes an `AVHWFramesContext` (D3D12VA) tied to
-/// `hw_device_ctx` — `Pixel::NV12` frames at `width`x`height`, the layout
-/// [`crate::elements::D3d12Renderer`]'s zero-copy path requires.
-unsafe fn create_hw_frames_ctx(
-    hw_device_ctx: *mut ffi::AVBufferRef,
-    width: u32,
-    height: u32,
-) -> std::result::Result<*mut ffi::AVBufferRef, i32> {
-    unsafe {
-        let buf = ffi::av_hwframe_ctx_alloc(hw_device_ctx);
-        if buf.is_null() {
-            return Err(-1);
-        }
-
-        let frames_ctx = (*buf).data as *mut ffi::AVHWFramesContext;
-        (*frames_ctx).format = ffi::AVPixelFormat::AV_PIX_FMT_D3D12;
-        (*frames_ctx).sw_format = ffi::AVPixelFormat::AV_PIX_FMT_NV12;
-        (*frames_ctx).width = width as i32;
-        (*frames_ctx).height = height as i32;
-        (*frames_ctx).initial_pool_size = POOL_SIZE;
-
-        let result = ffi::av_hwframe_ctx_init(buf);
-        if result < 0 {
-            free_buffer(buf);
-            return Err(result);
-        }
-
-        Ok(buf)
     }
 }
