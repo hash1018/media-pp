@@ -10,7 +10,7 @@ use crate::{
     control::ControlMsg,
     element::{Element, ElementType, Sink, element_pp_log},
     elements::sink::renderer::SubmitError,
-    platform::cuda::CudaDevice,
+    platform::{cuda::CudaDevice, ffmpeg::AvBufferRef},
 };
 
 /// What [`CudaRenderer`] needs from an actual windowing/graphics
@@ -116,7 +116,7 @@ pub struct CudaRenderer {
     /// This element's own reference to the shared context, released in
     /// `Drop`. Keeps `device_ctx` a valid identity for the renderer's whole
     /// life even if the caller drops its `CudaDevice` first.
-    hw_device_ctx: *mut ffi::AVBufferRef,
+    _hw_device_ctx: Arc<AvBufferRef>,
 }
 
 // SAFETY: `device_ctx`/`hw_device_ctx` are only compared and refcounted,
@@ -137,15 +137,15 @@ impl CudaRenderer {
     ) -> Self {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::CudaRenderer, &name, None);
-        let hw_device_ctx = unsafe { ffi::av_buffer_ref(device.as_ptr()) };
-        let device_ctx = unsafe { (*hw_device_ctx).data as *const ffi::AVHWDeviceContext };
+        let hw_device_ctx = device.retain();
+        let device_ctx = unsafe { (*hw_device_ctx.as_ptr()).data as *const ffi::AVHWDeviceContext };
         pp_info!(pp_log: &pp_log, "created");
         Self {
             name,
             pp_log,
             inner: renderer,
             device_ctx,
-            hw_device_ctx,
+            _hw_device_ctx: hw_device_ctx,
         }
     }
 
@@ -250,7 +250,6 @@ impl Sink for CudaRenderer {
 impl Drop for CudaRenderer {
     fn drop(&mut self) {
         pp_info!(self, "dropped: releasing hw_device_ctx");
-        unsafe { ffi::av_buffer_unref(&mut self.hw_device_ctx) };
     }
 }
 

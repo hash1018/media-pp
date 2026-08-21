@@ -13,8 +13,9 @@ use crate::{
     pad::SrcPad,
     platform::cuda::{
         CudaDevice, CudaFrameFormat,
-        frame::{CudaFramesContextError, create_hw_frames_ctx, free_buffer},
+        frame::{CudaFramesContextError, create_hw_frames_ctx},
     },
+    platform::ffmpeg::AvBufferRef,
     pool::UnboundObjectPool,
 };
 
@@ -101,9 +102,9 @@ pub struct CudaUpload {
     pp_log: PpLog,
     name: Arc<str>,
     /// This element's own reference to the shared context, released in `Drop`.
-    hw_device_ctx: *mut ffi::AVBufferRef,
+    _hw_device_ctx: Arc<AvBufferRef>,
     /// The pool uploaded frames are allocated from.
-    hw_frames_ctx: *mut ffi::AVBufferRef,
+    hw_frames_ctx: AvBufferRef,
     format: CudaFrameFormat,
     width: u32,
     height: u32,
@@ -133,15 +134,9 @@ impl CudaUpload {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::CudaUpload, &name, None);
 
-        let hw_device_ctx = unsafe { ffi::av_buffer_ref(device.as_ptr()) };
-        let hw_frames_ctx =
-            match unsafe { create_hw_frames_ctx(hw_device_ctx, format, width, height) } {
-                Ok(ctx) => ctx,
-                Err(error) => {
-                    unsafe { free_buffer(hw_device_ctx) };
-                    return Err(error.into());
-                }
-            };
+        let hw_device_ctx = device.retain();
+        let hw_frames_ctx = unsafe { create_hw_frames_ctx(&hw_device_ctx, format, width, height) }
+            .map_err(CudaUploadError::from)?;
 
         let pad = SrcPad::new(format!("{name}_src"));
         let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
@@ -153,7 +148,7 @@ impl CudaUpload {
         Ok(Self {
             name,
             pp_log,
-            hw_device_ctx,
+            _hw_device_ctx: hw_device_ctx,
             hw_frames_ctx,
             format,
             width,
@@ -191,7 +186,7 @@ impl CudaUpload {
             // frames pool rather than leaking it for the element's lifetime.
             ffi::av_frame_unref(dst);
 
-            let code = ffi::av_hwframe_get_buffer(self.hw_frames_ctx, dst, 0);
+            let code = ffi::av_hwframe_get_buffer(self.hw_frames_ctx.as_ptr(), dst, 0);
             if code < 0 {
                 pp_error!(self, "av_hwframe_get_buffer failed: {code}");
                 return Err(CudaUploadError::HwFrameGet(code).into());
@@ -254,10 +249,6 @@ impl Sink for CudaUpload {
 impl Drop for CudaUpload {
     fn drop(&mut self) {
         pp_info!(self, "dropped: releasing hw contexts");
-        unsafe {
-            free_buffer(self.hw_frames_ctx);
-            free_buffer(self.hw_device_ctx);
-        }
     }
 }
 

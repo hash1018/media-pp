@@ -15,8 +15,9 @@ use crate::{
     platform::cuda::{
         CudaDevice, CudaFrameFormat,
         driver::{BgraSurface, CudaDriver, Nv12Surface},
-        frame::{create_hw_frames_ctx, free_buffer},
+        frame::create_hw_frames_ctx,
     },
+    platform::ffmpeg::AvBufferRef,
     pool::UnboundObjectPool,
 };
 
@@ -100,9 +101,9 @@ pub struct CudaConverter {
     pp_log: PpLog,
     name: Arc<str>,
     /// This element's own reference to the shared context, released in `Drop`.
-    hw_device_ctx: *mut ffi::AVBufferRef,
+    _hw_device_ctx: Arc<AvBufferRef>,
     /// The pool converted frames are allocated from.
-    hw_frames_ctx: *mut ffi::AVBufferRef,
+    hw_frames_ctx: AvBufferRef,
     /// The device context incoming frames must belong to, compared by
     /// pointer — a surface from another device would be read against the
     /// wrong context.
@@ -140,17 +141,11 @@ impl CudaConverter {
         let pp_log = element_pp_log(ElementType::CudaConverter, &name, None);
 
         let driver = CudaDriver::retain_primary()?;
-        let hw_device_ctx = unsafe { ffi::av_buffer_ref(device.as_ptr()) };
-        let hw_frames_ctx = match unsafe {
-            create_hw_frames_ctx(hw_device_ctx, CudaFrameFormat::Nv12, width, height)
-        } {
-            Ok(ctx) => ctx,
-            Err(error) => {
-                unsafe { free_buffer(hw_device_ctx) };
-                return Err(CudaUploadError::from(error).into());
-            }
-        };
-        let device_ctx = unsafe { (*hw_device_ctx).data as *mut ffi::AVHWDeviceContext };
+        let hw_device_ctx = device.retain();
+        let hw_frames_ctx =
+            unsafe { create_hw_frames_ctx(&hw_device_ctx, CudaFrameFormat::Nv12, width, height) }
+                .map_err(CudaUploadError::from)?;
+        let device_ctx = unsafe { (*hw_device_ctx.as_ptr()).data as *mut ffi::AVHWDeviceContext };
 
         let pad = SrcPad::new(format!("{name}_src"));
         let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
@@ -158,7 +153,7 @@ impl CudaConverter {
         Ok(Self {
             name,
             pp_log,
-            hw_device_ctx,
+            _hw_device_ctx: hw_device_ctx,
             hw_frames_ctx,
             device_ctx,
             driver,
@@ -217,7 +212,7 @@ impl CudaConverter {
             // surface; releasing it here is what returns that surface to the
             // frames pool rather than leaking it for the element's lifetime.
             ffi::av_frame_unref(dst);
-            let code = ffi::av_hwframe_get_buffer(self.hw_frames_ctx, dst, 0);
+            let code = ffi::av_hwframe_get_buffer(self.hw_frames_ctx.as_ptr(), dst, 0);
             if code < 0 {
                 pp_error!(self, "av_hwframe_get_buffer failed: {code}");
                 return Err(CudaConverterError::Frames(CudaUploadError::HwFrameGet(code)).into());
@@ -306,10 +301,6 @@ impl Sink for CudaConverter {
 impl Drop for CudaConverter {
     fn drop(&mut self) {
         pp_info!(self, "dropped: releasing hw contexts");
-        unsafe {
-            free_buffer(self.hw_frames_ctx);
-            free_buffer(self.hw_device_ctx);
-        }
     }
 }
 

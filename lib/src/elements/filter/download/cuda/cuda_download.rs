@@ -11,7 +11,10 @@ use crate::{
     element::{Element, ElementType, Sink, Source, element_pp_log},
     error::Result,
     pad::SrcPad,
-    platform::cuda::{CudaDevice, CudaFrameFormat},
+    platform::{
+        cuda::{CudaDevice, CudaFrameFormat},
+        ffmpeg::AvBufferRef,
+    },
     pool::UnboundObjectPool,
 };
 
@@ -93,7 +96,7 @@ pub struct CudaDownload {
     /// This element's own reference to the shared context, released in
     /// `Drop`. Held for `device_ctx`'s sake: the pointer below stays valid
     /// only as long as this reference does.
-    hw_device_ctx: *mut ffi::AVBufferRef,
+    _hw_device_ctx: Arc<AvBufferRef>,
     /// Captured at construction so an incoming frame can be checked against
     /// this element's own CUDA context. Only ever compared, same as
     /// [`crate::elements::CudaEncoder`]'s.
@@ -135,8 +138,8 @@ impl CudaDownload {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::CudaDownload, &name, None);
 
-        let hw_device_ctx = unsafe { ffi::av_buffer_ref(device.as_ptr()) };
-        let device_ctx = unsafe { (*hw_device_ctx).data as *const ffi::AVHWDeviceContext };
+        let hw_device_ctx = device.retain();
+        let device_ctx = unsafe { (*hw_device_ctx.as_ptr()).data as *const ffi::AVHWDeviceContext };
 
         let pad = SrcPad::new(format!("{name}_src"));
         let pixel = format.pixel();
@@ -149,7 +152,7 @@ impl CudaDownload {
         Self {
             name,
             pp_log,
-            hw_device_ctx,
+            _hw_device_ctx: hw_device_ctx,
             device_ctx,
             format,
             width,
@@ -260,7 +263,6 @@ impl Sink for CudaDownload {
 impl Drop for CudaDownload {
     fn drop(&mut self) {
         pp_info!(self, "dropped: releasing hw_device_ctx");
-        unsafe { ffi::av_buffer_unref(&mut self.hw_device_ctx) };
     }
 }
 

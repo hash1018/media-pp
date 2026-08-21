@@ -11,7 +11,7 @@ use crate::{
     element::{Element, ElementType, Sink, Source, element_pp_log},
     elements::filter::is_codec_drain_boundary,
     pad::SrcPad,
-    platform::cuda::{CudaDevice, frame::free_buffer},
+    platform::{cuda::CudaDevice, ffmpeg::AvBufferRef},
     pool::UnboundObjectPool,
 };
 
@@ -56,7 +56,7 @@ pub struct CudaDecoder {
     pp_log: PpLog,
     name: Arc<str>,
     decoder: ffmpeg::decoder::Video,
-    hw_device_ctx: *mut ffi::AVBufferRef,
+    _hw_device_ctx: Arc<AvBufferRef>,
     pad: SrcPad,
     /// Reused across every decoded frame — the GPU surface itself is already
     /// pooled by FFmpeg's own hw frames context, so this only recycles the
@@ -111,24 +111,18 @@ impl CudaDecoder {
         // the decoder exists. Nothing between here and the `Ok` needs an
         // explicit unref: `hw_device_ctx` below is a second, independent
         // reference owned by the codec context.
-        let hw_device_ctx = unsafe { ffi::av_buffer_ref(device.as_ptr()) };
-        if hw_device_ctx.is_null() {
-            return Err(CudaDecoderError::HwDeviceRef);
-        }
+        let hw_device_ctx = device.retain();
+        let codec_device_ctx = hw_device_ctx
+            .try_clone()
+            .ok_or(CudaDecoderError::HwDeviceRef)?;
         unsafe {
             let ctx_ptr = context.as_mut_ptr();
-            (*ctx_ptr).hw_device_ctx = ffi::av_buffer_ref(hw_device_ctx);
+            (*ctx_ptr).hw_device_ctx = codec_device_ctx.into_raw();
             (*ctx_ptr).get_format = Some(get_format);
             (*ctx_ptr).extra_hw_frames = extra_hw_frames;
         }
 
-        let decoder = match context.decoder().video() {
-            Ok(decoder) => decoder,
-            Err(error) => {
-                unsafe { free_buffer(hw_device_ctx) };
-                return Err(error.into());
-            }
-        };
+        let decoder = context.decoder().video()?;
 
         let pad = SrcPad::new(format!("{name}_src"));
         let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
@@ -137,7 +131,7 @@ impl CudaDecoder {
             name,
             pp_log,
             decoder,
-            hw_device_ctx,
+            _hw_device_ctx: hw_device_ctx,
             pad,
             pool,
         })
@@ -226,7 +220,6 @@ impl Sink for CudaDecoder {
 impl Drop for CudaDecoder {
     fn drop(&mut self) {
         pp_info!(self, "dropped: releasing hw_device_ctx");
-        unsafe { free_buffer(self.hw_device_ctx) };
     }
 }
 

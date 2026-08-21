@@ -48,9 +48,11 @@ use crate::{
     element::{Element, ElementType, Sink, Source, element_pp_log},
     error::Result,
     pad::SrcPad,
-    platform::windows::d3d12va::{
-        create_hw_device_ctx, create_hw_frames_ctx, d3d12va_texture, free_buffer,
-        set_d3d12va_fence_value,
+    platform::{
+        ffmpeg::AvBufferRef,
+        windows::d3d12va::{
+            create_hw_device_ctx, create_hw_frames_ctx, d3d12va_texture, set_d3d12va_fence_value,
+        },
     },
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
 };
@@ -163,8 +165,8 @@ pub struct D3d12Scaler {
     slots: Vec<CommandSlot>,
     next_slot: usize,
     processor: Option<(ProcessorShape, ID3D12VideoProcessor)>,
-    hw_device_ctx: *mut ffi::AVBufferRef,
-    hw_frames_ctx: *mut ffi::AVBufferRef,
+    _hw_device_ctx: AvBufferRef,
+    hw_frames_ctx: AvBufferRef,
     width: u32,
     height: u32,
     pad: SrcPad,
@@ -232,17 +234,15 @@ impl D3d12Scaler {
                 return Err(D3d12ScalerError::HwDeviceInit(code));
             }
         };
-        let hw_frames_ctx =
-            match unsafe { create_hw_frames_ctx(hw_device_ctx, width, height, OUTPUT_POOL_SIZE) } {
-                Ok(ctx) => ctx,
-                Err(code) => {
-                    unsafe {
-                        free_buffer(hw_device_ctx);
-                        CloseHandle(fence_event).ok();
-                    }
-                    return Err(D3d12ScalerError::HwFramesInit(code));
-                }
-            };
+        let hw_frames_ctx = match unsafe {
+            create_hw_frames_ctx(&hw_device_ctx, width, height, OUTPUT_POOL_SIZE)
+        } {
+            Ok(ctx) => ctx,
+            Err(code) => {
+                unsafe { CloseHandle(fence_event).ok() };
+                return Err(D3d12ScalerError::HwFramesInit(code));
+            }
+        };
 
         let pad = SrcPad::new(format!("{name}_src"));
         let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
@@ -259,7 +259,7 @@ impl D3d12Scaler {
             slots,
             next_slot: 0,
             processor: None,
-            hw_device_ctx,
+            _hw_device_ctx: hw_device_ctx,
             hw_frames_ctx,
             width,
             height,
@@ -275,7 +275,11 @@ impl D3d12Scaler {
         let mut destination = self.pool.get();
         unsafe {
             ffi::av_frame_unref(destination.as_mut_ptr());
-            let ret = ffi::av_hwframe_get_buffer(self.hw_frames_ctx, destination.as_mut_ptr(), 0);
+            let ret = ffi::av_hwframe_get_buffer(
+                self.hw_frames_ctx.as_ptr(),
+                destination.as_mut_ptr(),
+                0,
+            );
             if ret < 0 {
                 return Err(D3d12ScalerError::GetBuffer(ret).into());
             }
@@ -632,11 +636,7 @@ impl Drop for D3d12Scaler {
             self,
             "dropped: freeing D3D12 video processor and frame contexts"
         );
-        unsafe {
-            free_buffer(self.hw_frames_ctx);
-            free_buffer(self.hw_device_ctx);
-            CloseHandle(self.fence_event).ok();
-        }
+        unsafe { CloseHandle(self.fence_event).ok() };
     }
 }
 

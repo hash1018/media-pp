@@ -1,11 +1,18 @@
+use std::sync::Arc;
+
 use ffmpeg_next::{self as ffmpeg, ffi};
 use thiserror::Error as ThisError;
+
+use crate::platform::ffmpeg::AvBufferRef;
 
 /// Errors from opening the CUDA device context.
 #[derive(Debug, ThisError)]
 pub enum CudaDeviceError {
     #[error("failed to open the CUDA device: {0}")]
     Open(ffmpeg::Error),
+
+    #[error("FFmpeg opened CUDA without returning a device context")]
+    MissingContext,
 }
 
 /// The one CUDA device context every CUDA element in a pipeline shares.
@@ -54,7 +61,7 @@ pub enum CudaDeviceError {
 /// provably gets the same `CUcontext` these frames were decoded on, with no
 /// struct layout guessed anywhere.
 pub struct CudaDevice {
-    ctx: *mut ffi::AVBufferRef,
+    ctx: Arc<AvBufferRef>,
 }
 
 /// `AV_CUDA_USE_PRIMARY_CONTEXT` from `libavutil/hwcontext_cuda.h` — passed
@@ -82,17 +89,11 @@ impl CudaDevice {
         if result < 0 {
             return Err(CudaDeviceError::Open(ffmpeg::Error::from(result)));
         }
-        Ok(Self { ctx })
+        let ctx = unsafe { AvBufferRef::from_raw(ctx) }.ok_or(CudaDeviceError::MissingContext)?;
+        Ok(Self { ctx: Arc::new(ctx) })
     }
 
-    /// The raw context, for an element to take its own reference from.
-    pub(crate) fn as_ptr(&self) -> *mut ffi::AVBufferRef {
-        self.ctx
-    }
-}
-
-impl Drop for CudaDevice {
-    fn drop(&mut self) {
-        unsafe { ffi::av_buffer_unref(&mut self.ctx) };
+    pub(crate) fn retain(&self) -> Arc<AvBufferRef> {
+        self.ctx.clone()
     }
 }

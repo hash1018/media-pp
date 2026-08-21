@@ -10,7 +10,7 @@ use crate::{
     control::ControlMsg,
     element::{Element, ElementType, Sink, Source, element_pp_log},
     pad::SrcPad,
-    platform::windows::d3d12va::{create_hw_device_ctx, free_buffer},
+    platform::{ffmpeg::AvBufferRef, windows::d3d12va::create_hw_device_ctx},
     pool::UnboundObjectPool,
 };
 
@@ -28,6 +28,9 @@ pub enum D3d12DecoderError {
 
     #[error("failed to create D3D12VA hw device context (code {0})")]
     HwDeviceInit(i32),
+
+    #[error("failed to reference the D3D12VA hw device context")]
+    HwDeviceRef,
 
     #[error(
         "decoder did not select the D3D12VA pixel format — hardware decode \
@@ -51,7 +54,7 @@ pub struct D3d12Decoder {
     pp_log: PpLog,
     name: Arc<str>,
     decoder: ffmpeg::decoder::Video,
-    hw_device_ctx: *mut ffi::AVBufferRef,
+    _hw_device_ctx: AvBufferRef,
     pad: SrcPad,
     /// Reused across every decoded frame — see [`UnboundObjectPool`]'s
     /// docs. The actual GPU texture behind a `Pixel::D3D12` frame is
@@ -91,30 +94,20 @@ impl D3d12Decoder {
         let hw_device_ctx =
             unsafe { create_hw_device_ctx(device) }.map_err(D3d12DecoderError::HwDeviceInit)?;
 
-        let mut context = match ffmpeg::codec::context::Context::from_parameters(params) {
-            Ok(context) => context,
-            Err(error) => {
-                unsafe { free_buffer(hw_device_ctx) };
-                return Err(error.into());
-            }
-        };
+        let mut context = ffmpeg::codec::context::Context::from_parameters(params)?;
         if context.medium() != ffmpeg::media::Type::Video {
-            unsafe { free_buffer(hw_device_ctx) };
             return Err(D3d12DecoderError::UnsupportedMediaType(context.medium()));
         }
+        let codec_device_ctx = hw_device_ctx
+            .try_clone()
+            .ok_or(D3d12DecoderError::HwDeviceRef)?;
         unsafe {
             let ctx_ptr = context.as_mut_ptr();
-            (*ctx_ptr).hw_device_ctx = ffi::av_buffer_ref(hw_device_ctx);
+            (*ctx_ptr).hw_device_ctx = codec_device_ctx.into_raw();
             (*ctx_ptr).get_format = Some(get_format);
         }
 
-        let decoder = match context.decoder().video() {
-            Ok(decoder) => decoder,
-            Err(error) => {
-                unsafe { free_buffer(hw_device_ctx) };
-                return Err(error.into());
-            }
-        };
+        let decoder = context.decoder().video()?;
 
         let pad = SrcPad::new(format!("{name}_src"));
         let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
@@ -123,7 +116,7 @@ impl D3d12Decoder {
             name,
             pp_log,
             decoder,
-            hw_device_ctx,
+            _hw_device_ctx: hw_device_ctx,
             pad,
             pool,
         })
@@ -216,7 +209,6 @@ impl Sink for D3d12Decoder {
 impl Drop for D3d12Decoder {
     fn drop(&mut self) {
         pp_info!(self, "dropped: freeing hw_device_ctx");
-        unsafe { free_buffer(self.hw_device_ctx) };
     }
 }
 

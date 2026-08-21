@@ -10,6 +10,8 @@ use std::ffi::c_void;
 use ffmpeg_next::{self as ffmpeg, ffi};
 use windows::{Win32::Graphics::Direct3D12::ID3D12Device, core::Interface};
 
+use crate::platform::ffmpeg::AvBufferRef;
+
 /// Mirrors of the D3D12VA-specific structs from FFmpeg's
 /// `libavutil/hwcontext_d3d12va.h` (as of FFmpeg n8.0), hand-written because
 /// `ffmpeg-sys-next` does not bind that header. COM pointers stay raw so the
@@ -40,24 +42,21 @@ struct AVD3D12VAFrame {
 
 /// Creates an FFmpeg D3D12VA hardware device context with an independently
 /// owned COM reference to `device`.
-pub(crate) unsafe fn create_hw_device_ctx(
-    device: &ID3D12Device,
-) -> Result<*mut ffi::AVBufferRef, i32> {
+pub(crate) unsafe fn create_hw_device_ctx(device: &ID3D12Device) -> Result<AvBufferRef, i32> {
     unsafe {
-        let buf = ffi::av_hwdevice_ctx_alloc(ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_D3D12VA);
-        if buf.is_null() {
-            return Err(-1);
-        }
+        let buf = AvBufferRef::from_raw(ffi::av_hwdevice_ctx_alloc(
+            ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_D3D12VA,
+        ))
+        .ok_or(-1)?;
 
-        let hw_device_ctx = (*buf).data as *mut ffi::AVHWDeviceContext;
+        let hw_device_ctx = (*buf.as_ptr()).data as *mut ffi::AVHWDeviceContext;
         let d3d12_ctx = (*hw_device_ctx).hwctx as *mut AVD3D12VADeviceContext;
         // FFmpeg always releases a caller-supplied device when this context
         // is freed, so transfer an independently owned COM reference.
         (*d3d12_ctx).device = device.clone().into_raw();
 
-        let result = ffi::av_hwdevice_ctx_init(buf);
+        let result = ffi::av_hwdevice_ctx_init(buf.as_ptr());
         if result < 0 {
-            free_buffer(buf);
             return Err(result);
         }
         Ok(buf)
@@ -66,33 +65,26 @@ pub(crate) unsafe fn create_hw_device_ctx(
 
 /// Creates an NV12 D3D12VA frame pool tied to `hw_device_ctx`.
 pub(crate) unsafe fn create_hw_frames_ctx(
-    hw_device_ctx: *mut ffi::AVBufferRef,
+    hw_device_ctx: &AvBufferRef,
     width: u32,
     height: u32,
     initial_pool_size: i32,
-) -> Result<*mut ffi::AVBufferRef, i32> {
+) -> Result<AvBufferRef, i32> {
     unsafe {
-        let buf = ffi::av_hwframe_ctx_alloc(hw_device_ctx);
-        if buf.is_null() {
-            return Err(-1);
-        }
-        let frames_ctx = (*buf).data as *mut ffi::AVHWFramesContext;
+        let buf =
+            AvBufferRef::from_raw(ffi::av_hwframe_ctx_alloc(hw_device_ctx.as_ptr())).ok_or(-1)?;
+        let frames_ctx = (*buf.as_ptr()).data as *mut ffi::AVHWFramesContext;
         (*frames_ctx).format = ffi::AVPixelFormat::AV_PIX_FMT_D3D12;
         (*frames_ctx).sw_format = ffi::AVPixelFormat::AV_PIX_FMT_NV12;
         (*frames_ctx).width = width as i32;
         (*frames_ctx).height = height as i32;
         (*frames_ctx).initial_pool_size = initial_pool_size;
-        let result = ffi::av_hwframe_ctx_init(buf);
+        let result = ffi::av_hwframe_ctx_init(buf.as_ptr());
         if result < 0 {
-            free_buffer(buf);
             return Err(result);
         }
         Ok(buf)
     }
-}
-
-pub(crate) unsafe fn free_buffer(mut buf: *mut ffi::AVBufferRef) {
-    unsafe { ffi::av_buffer_unref(&mut buf) };
 }
 
 /// Extracts borrowed `(texture, fence, fence_value)` pointers from an FFmpeg

@@ -11,7 +11,10 @@ use crate::{
     element::{Element, ElementType, Sink, Source, element_pp_log},
     error::Result,
     pad::SrcPad,
-    platform::windows::d3d12va::{create_hw_device_ctx, create_hw_frames_ctx, free_buffer},
+    platform::{
+        ffmpeg::AvBufferRef,
+        windows::d3d12va::{create_hw_device_ctx, create_hw_frames_ctx},
+    },
     pool::UnboundObjectPool,
 };
 
@@ -94,8 +97,8 @@ pub enum D3d12UploadError {
 pub struct D3d12Upload {
     pp_log: PpLog,
     name: Arc<str>,
-    hw_device_ctx: *mut ffi::AVBufferRef,
-    hw_frames_ctx: *mut ffi::AVBufferRef,
+    _hw_device_ctx: AvBufferRef,
+    hw_frames_ctx: AvBufferRef,
     width: u32,
     height: u32,
     pad: SrcPad,
@@ -136,13 +139,8 @@ impl D3d12Upload {
             unsafe { create_hw_device_ctx(device) }.map_err(D3d12UploadError::HwDeviceInit)?;
 
         let hw_frames_ctx =
-            match unsafe { create_hw_frames_ctx(hw_device_ctx, width, height, POOL_SIZE) } {
-                Ok(ctx) => ctx,
-                Err(error) => {
-                    unsafe { free_buffer(hw_device_ctx) };
-                    return Err(D3d12UploadError::HwFramesInit(error));
-                }
-            };
+            unsafe { create_hw_frames_ctx(&hw_device_ctx, width, height, POOL_SIZE) }
+                .map_err(D3d12UploadError::HwFramesInit)?;
 
         let pad = SrcPad::new(format!("{name}_src"));
         let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
@@ -150,7 +148,7 @@ impl D3d12Upload {
         Ok(Self {
             name,
             pp_log,
-            hw_device_ctx,
+            _hw_device_ctx: hw_device_ctx,
             hw_frames_ctx,
             width,
             height,
@@ -210,8 +208,11 @@ impl Sink for D3d12Upload {
                     // may still hold a reference to the GPU texture it was
                     // last uploaded into, so drop that first.
                     ffi::av_frame_unref(gpu_frame.as_mut_ptr());
-                    let ret =
-                        ffi::av_hwframe_get_buffer(self.hw_frames_ctx, gpu_frame.as_mut_ptr(), 0);
+                    let ret = ffi::av_hwframe_get_buffer(
+                        self.hw_frames_ctx.as_ptr(),
+                        gpu_frame.as_mut_ptr(),
+                        0,
+                    );
                     if ret < 0 {
                         pp_error!(self, "av_hwframe_get_buffer failed: {ret}");
                         return Err(D3d12UploadError::GetBuffer(ret).into());
@@ -258,9 +259,5 @@ impl Sink for D3d12Upload {
 impl Drop for D3d12Upload {
     fn drop(&mut self) {
         pp_info!(self, "dropped: freeing hw_frames_ctx/hw_device_ctx");
-        unsafe {
-            free_buffer(self.hw_frames_ctx);
-            free_buffer(self.hw_device_ctx);
-        }
     }
 }

@@ -12,10 +12,8 @@ use crate::{
     elements::filter::is_codec_drain_boundary,
     error::Result,
     pad::SrcPad,
-    platform::cuda::{
-        CudaDevice, CudaFrameFormat,
-        frame::{create_hw_frames_ctx, free_buffer},
-    },
+    platform::cuda::{CudaDevice, CudaFrameFormat, frame::create_hw_frames_ctx},
+    platform::ffmpeg::AvBufferRef,
 };
 
 /// Which NVENC codec [`CudaEncoder`] drives.
@@ -114,6 +112,9 @@ pub enum CudaEncoderError {
 
     #[error("failed to build the CUDA frames context: {0}")]
     HwFrames(String),
+
+    #[error("failed to reference the CUDA device context")]
+    HwDeviceRef,
 }
 
 /// Encodes GPU-resident `Pixel::CUDA` `Video` frames into `Packet`s on the
@@ -144,8 +145,8 @@ pub struct CudaEncoder {
     pp_log: PpLog,
     name: Arc<str>,
     encoder: ffmpeg::encoder::Video,
-    hw_device_ctx: *mut ffi::AVBufferRef,
-    hw_frames_ctx: *mut ffi::AVBufferRef,
+    _hw_device_ctx: Arc<AvBufferRef>,
+    _hw_frames_ctx: AvBufferRef,
     /// Captured at construction so an incoming frame can be checked against
     /// this encoder's own CUDA context. Only ever compared.
     device_ctx: *const ffi::AVHWDeviceContext,
@@ -196,10 +197,10 @@ impl CudaEncoder {
         let codec = ffmpeg::encoder::find_by_name(encoder_name)
             .ok_or(CudaEncoderError::CodecNotFound(encoder_name))?;
 
-        let hw_device_ctx = unsafe { ffi::av_buffer_ref(device.as_ptr()) };
+        let hw_device_ctx = device.retain();
         let hw_frames_ctx = match unsafe {
             create_hw_frames_ctx(
-                hw_device_ctx,
+                &hw_device_ctx,
                 options.input_format,
                 options.width,
                 options.height,
@@ -207,11 +208,16 @@ impl CudaEncoder {
         } {
             Ok(ctx) => ctx,
             Err(error) => {
-                unsafe { free_buffer(hw_device_ctx) };
                 return Err(CudaEncoderError::HwFrames(error.to_string()));
             }
         };
-        let device_ctx = unsafe { (*hw_device_ctx).data as *const ffi::AVHWDeviceContext };
+        let device_ctx = unsafe { (*hw_device_ctx.as_ptr()).data as *const ffi::AVHWDeviceContext };
+        let codec_device_ctx = hw_device_ctx
+            .try_clone()
+            .ok_or(CudaEncoderError::HwDeviceRef)?;
+        let codec_frames_ctx = hw_frames_ctx
+            .try_clone()
+            .ok_or_else(|| CudaEncoderError::HwFrames("failed to reference the pool".into()))?;
 
         let opened = (|| -> std::result::Result<ffmpeg::encoder::Video, ffmpeg::Error> {
             let context = ffmpeg::codec::context::Context::new_with_codec(codec);
@@ -228,22 +234,13 @@ impl CudaEncoder {
                 // NVENC needs both before `avcodec_open2`: the device to
                 // reach the encode block at all, and the frames context to
                 // learn the surface layout it will be handed.
-                (*ptr).hw_device_ctx = ffi::av_buffer_ref(hw_device_ctx);
-                (*ptr).hw_frames_ctx = ffi::av_buffer_ref(hw_frames_ctx);
+                (*ptr).hw_device_ctx = codec_device_ctx.into_raw();
+                (*ptr).hw_frames_ctx = codec_frames_ctx.into_raw();
             }
             video.open_as(codec)
         })();
 
-        let encoder = match opened {
-            Ok(encoder) => encoder,
-            Err(error) => {
-                unsafe {
-                    free_buffer(hw_frames_ctx);
-                    free_buffer(hw_device_ctx);
-                }
-                return Err(error.into());
-            }
-        };
+        let encoder = opened?;
 
         let pad = SrcPad::new(format!("{name}_src"));
         pp_info!(
@@ -260,8 +257,8 @@ impl CudaEncoder {
             name,
             pp_log,
             encoder,
-            hw_device_ctx,
-            hw_frames_ctx,
+            _hw_device_ctx: hw_device_ctx,
+            _hw_frames_ctx: hw_frames_ctx,
             device_ctx,
             input_format: options.input_format,
             width: options.width,
@@ -398,10 +395,6 @@ impl Sink for CudaEncoder {
 impl Drop for CudaEncoder {
     fn drop(&mut self) {
         pp_info!(self, "dropped: releasing hw contexts");
-        unsafe {
-            free_buffer(self.hw_frames_ctx);
-            free_buffer(self.hw_device_ctx);
-        }
     }
 }
 

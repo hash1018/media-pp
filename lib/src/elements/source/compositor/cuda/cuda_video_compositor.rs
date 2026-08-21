@@ -32,8 +32,9 @@ use crate::{
     platform::cuda::{
         CudaDevice, CudaFrameFormat,
         driver::{CudaDriver, CudaDriverError, CudaMask, Nv12Region, Nv12Surface},
-        frame::{create_hw_frames_ctx, free_buffer},
+        frame::create_hw_frames_ctx,
     },
+    platform::ffmpeg::AvBufferRef,
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
     schedule::PeriodicSchedule,
 };
@@ -438,9 +439,9 @@ pub struct CudaVideoCompositor {
     driver: Arc<CudaDriver>,
     /// This element's own reference to the shared context, released in
     /// `Drop` — it is what keeps `shared.device_ctx` a valid identity.
-    hw_device_ctx: *mut ffi::AVBufferRef,
+    _hw_device_ctx: Arc<AvBufferRef>,
     /// The pool output surfaces are allocated from.
-    hw_frames_ctx: *mut ffi::AVBufferRef,
+    hw_frames_ctx: AvBufferRef,
     scalers: HashMap<VideoInputId, CudaScaleGraph>,
     /// Reuses only the small CPU-side `AVFrame` wrapper; the surface itself
     /// comes from `hw_frames_ctx`'s own pool.
@@ -471,10 +472,10 @@ impl CudaVideoCompositor {
         let pp_log = element_pp_log(ElementType::CudaVideoCompositor, &name, None);
 
         let driver = Arc::new(CudaDriver::retain_primary()?);
-        let hw_device_ctx = unsafe { ffi::av_buffer_ref(device.as_ptr()) };
+        let hw_device_ctx = device.retain();
         let hw_frames_ctx = match unsafe {
             create_hw_frames_ctx(
-                hw_device_ctx,
+                &hw_device_ctx,
                 CudaFrameFormat::Nv12,
                 options.width,
                 options.height,
@@ -482,12 +483,11 @@ impl CudaVideoCompositor {
         } {
             Ok(ctx) => ctx,
             Err(error) => {
-                unsafe { free_buffer(hw_device_ctx) };
                 pp_error!(pp_log: &pp_log, "failed to build the output pool: {error}");
                 return Err(CudaVideoCompositorError::HwFramesAlloc);
             }
         };
-        let device_ctx = unsafe { (*hw_device_ctx).data as *const ffi::AVHWDeviceContext };
+        let device_ctx = unsafe { (*hw_device_ctx.as_ptr()).data as *const ffi::AVHWDeviceContext };
 
         let shared = Arc::new(CompositorShared {
             inputs: Mutex::new(HashMap::new()),
@@ -515,7 +515,7 @@ impl CudaVideoCompositor {
                 frame_interval,
                 frame_index: 0,
                 driver,
-                hw_device_ctx,
+                _hw_device_ctx: hw_device_ctx,
                 hw_frames_ctx,
                 scalers: HashMap::new(),
                 output_pool: UnboundObjectPool::new(
@@ -586,7 +586,7 @@ impl CudaVideoCompositor {
             // Releasing the previous surface here is what returns it to the
             // frames pool rather than holding it for this element's life.
             ffi::av_frame_unref(ptr);
-            let code = ffi::av_hwframe_get_buffer(self.hw_frames_ctx, ptr, 0);
+            let code = ffi::av_hwframe_get_buffer(self.hw_frames_ctx.as_ptr(), ptr, 0);
             if code < 0 {
                 return Err(CudaVideoCompositorError::HwFrameGet(code));
             }
@@ -799,10 +799,6 @@ impl SourceElement for CudaVideoCompositor {
 impl Drop for CudaVideoCompositor {
     fn drop(&mut self) {
         pp_info!(self, "dropped: releasing hw contexts");
-        unsafe {
-            free_buffer(self.hw_frames_ctx);
-            free_buffer(self.hw_device_ctx);
-        }
     }
 }
 

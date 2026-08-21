@@ -39,10 +39,8 @@ use crate::pp_log::{PpLog, pp_error, pp_info, pp_warn};
 #[cfg(feature = "cuda")]
 use crate::{
     elements::CudaUploadError,
-    platform::cuda::{
-        CudaDevice, CudaFrameFormat,
-        frame::{create_hw_frames_ctx, free_buffer},
-    },
+    platform::cuda::{CudaDevice, CudaFrameFormat, frame::create_hw_frames_ctx},
+    platform::ffmpeg::AvBufferRef,
     platform::linux::dmabuf_cuda::{
         CudaBgraSurface, DmaBufCudaError, DmaBufCudaImporter, DmaBufPlane,
     },
@@ -276,38 +274,7 @@ enum CaptureTarget {
     /// DMA-BUF imported into CUDA BGRA surfaces — see
     /// [`PipeWireScreenCaptureSource::open_gpu`].
     #[cfg(feature = "cuda")]
-    Gpu(HwDeviceCtx),
-}
-
-/// The CUDA device context `open_gpu` referenced, on its way to the PipeWire
-/// thread.
-///
-/// Raw because `AVBufferRef` has no wrapper of its own here, and `Send`
-/// because it is a refcounted heap object with no thread affinity — the same
-/// reasoning `CudaUpload` documents for holding one.
-///
-/// Owning the reference rather than carrying a bare pointer is what makes
-/// every path that abandons it release it: `open_gpu` takes the reference
-/// before the portal handshake, which blocks on a dialog the user may
-/// cancel, and the thread it is bound for may fail to spawn.
-#[cfg(feature = "cuda")]
-struct HwDeviceCtx(*mut ffi::AVBufferRef);
-
-#[cfg(feature = "cuda")]
-unsafe impl Send for HwDeviceCtx {}
-
-#[cfg(feature = "cuda")]
-impl HwDeviceCtx {
-    fn as_ptr(&self) -> *mut ffi::AVBufferRef {
-        self.0
-    }
-}
-
-#[cfg(feature = "cuda")]
-impl Drop for HwDeviceCtx {
-    fn drop(&mut self) {
-        unsafe { free_buffer(self.0) };
-    }
+    Gpu(Arc<AvBufferRef>),
 }
 
 /// GPU-mode capture state, owned by the PipeWire thread: the DMA-BUF import
@@ -316,13 +283,13 @@ impl Drop for HwDeviceCtx {
 struct GpuCapture {
     importer: DmaBufCudaImporter,
     /// This element's own reference to the shared device context, released
-    /// when this is dropped — see [`HwDeviceCtx`].
-    hw_device_ctx: HwDeviceCtx,
+    /// when this is dropped.
+    hw_device_ctx: Arc<AvBufferRef>,
     /// The BGRA CUDA pool captured surfaces come from. Rebuilt when the
     /// compositor renegotiates the size — pooled surfaces are allocated to a
     /// fixed one, and outstanding frames keep the old context alive through
     /// their own references.
-    hw_frames_ctx: *mut ffi::AVBufferRef,
+    hw_frames_ctx: Option<AvBufferRef>,
     width: u32,
     height: u32,
 }
@@ -330,7 +297,7 @@ struct GpuCapture {
 #[cfg(feature = "cuda")]
 impl GpuCapture {
     fn new(
-        hw_device_ctx: HwDeviceCtx,
+        hw_device_ctx: Arc<AvBufferRef>,
     ) -> std::result::Result<Self, PipeWireScreenCaptureSourceError> {
         // Built before the stream connects: its modifier list is what the
         // format negotiation offers the compositor. On failure `?` drops
@@ -340,7 +307,7 @@ impl GpuCapture {
         Ok(Self {
             importer,
             hw_device_ctx,
-            hw_frames_ctx: std::ptr::null_mut(),
+            hw_frames_ctx: None,
             width: 0,
             height: 0,
         })
@@ -356,7 +323,12 @@ impl GpuCapture {
         self.ensure_frames_ctx(width, height)?;
 
         let mut frame = ffmpeg::frame::Video::empty();
-        let code = unsafe { ffi::av_hwframe_get_buffer(self.hw_frames_ctx, frame.as_mut_ptr(), 0) };
+        let frames_ctx = self
+            .hw_frames_ctx
+            .as_ref()
+            .ok_or(CudaUploadError::HwFramesAlloc)?;
+        let code =
+            unsafe { ffi::av_hwframe_get_buffer(frames_ctx.as_ptr(), frame.as_mut_ptr(), 0) };
         if code < 0 {
             return Err(CudaUploadError::HwFrameGet(code).into());
         }
@@ -376,35 +348,17 @@ impl GpuCapture {
         width: u32,
         height: u32,
     ) -> std::result::Result<(), PipeWireScreenCaptureSourceError> {
-        if !self.hw_frames_ctx.is_null() && (self.width, self.height) == (width, height) {
+        if self.hw_frames_ctx.is_some() && (self.width, self.height) == (width, height) {
             return Ok(());
         }
         let frames_ctx = unsafe {
-            create_hw_frames_ctx(
-                self.hw_device_ctx.as_ptr(),
-                CudaFrameFormat::Bgra,
-                width,
-                height,
-            )
+            create_hw_frames_ctx(&self.hw_device_ctx, CudaFrameFormat::Bgra, width, height)
         }
         .map_err(CudaUploadError::from)?;
-        if !self.hw_frames_ctx.is_null() {
-            unsafe { free_buffer(self.hw_frames_ctx) };
-        }
-        self.hw_frames_ctx = frames_ctx;
+        self.hw_frames_ctx = Some(frames_ctx);
         self.width = width;
         self.height = height;
         Ok(())
-    }
-}
-
-#[cfg(feature = "cuda")]
-impl Drop for GpuCapture {
-    fn drop(&mut self) {
-        // The device reference releases itself with `hw_device_ctx`.
-        if !self.hw_frames_ctx.is_null() {
-            unsafe { free_buffer(self.hw_frames_ctx) };
-        }
     }
 }
 
@@ -626,15 +580,7 @@ impl PipeWireScreenCaptureSource {
     {
         // Referenced here rather than in the PipeWire thread so a failure is
         // reported by `open_gpu` itself.
-        let hw_device_ctx = unsafe { ffi::av_buffer_ref(device.as_ptr()) };
-        if hw_device_ctx.is_null() {
-            return Err(PipeWireScreenCaptureSourceError::CudaDeviceRef);
-        }
-        Self::open_with(
-            name,
-            options,
-            CaptureTarget::Gpu(HwDeviceCtx(hw_device_ctx)),
-        )
+        Self::open_with(name, options, CaptureTarget::Gpu(device.retain()))
     }
 
     fn open_with(
@@ -2060,17 +2006,18 @@ mod tests {
         let Some((device, _cuda_lock)) = crate::test_support::try_cuda_device() else {
             return;
         };
-        let before = unsafe { ffi::av_buffer_get_ref_count(device.as_ptr()) };
+        let owner = device.retain();
+        let before = Arc::strong_count(&owner);
         {
-            let held = HwDeviceCtx(unsafe { ffi::av_buffer_ref(device.as_ptr()) });
+            let held = owner.clone();
             assert_eq!(
-                unsafe { ffi::av_buffer_get_ref_count(held.as_ptr()) },
+                Arc::strong_count(&held),
                 before + 1,
                 "the carrier holds a reference of its own while it lives"
             );
         }
         assert_eq!(
-            unsafe { ffi::av_buffer_get_ref_count(device.as_ptr()) },
+            Arc::strong_count(&owner),
             before,
             "an abandoned carrier must release the reference open_gpu took"
         );
@@ -2086,12 +2033,13 @@ mod tests {
         let Some((device, _cuda_lock)) = crate::test_support::try_cuda_device() else {
             return;
         };
-        let before = unsafe { ffi::av_buffer_get_ref_count(device.as_ptr()) };
-        let carrier = HwDeviceCtx(unsafe { ffi::av_buffer_ref(device.as_ptr()) });
+        let owner = device.retain();
+        let before = Arc::strong_count(&owner);
+        let carrier = owner.clone();
         match GpuCapture::new(carrier) {
             Ok(gpu) => {
                 assert_eq!(
-                    unsafe { ffi::av_buffer_get_ref_count(device.as_ptr()) },
+                    Arc::strong_count(&owner),
                     before + 1,
                     "the capture holds the reference while it lives"
                 );
@@ -2102,7 +2050,7 @@ mod tests {
             }
         }
         assert_eq!(
-            unsafe { ffi::av_buffer_get_ref_count(device.as_ptr()) },
+            Arc::strong_count(&owner),
             before,
             "the reference must be released whether the capture was built or not"
         );

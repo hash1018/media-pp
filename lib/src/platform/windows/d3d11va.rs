@@ -12,6 +12,8 @@ use windows::{
     core::Interface,
 };
 
+use crate::platform::ffmpeg::AvBufferRef;
+
 /// Mirrors `AVD3D11VADeviceContext` from FFmpeg n8.0. A future minimum
 /// FFmpeg-version change must recheck this layout because the C header is not
 /// included in `ffmpeg-sys-next`'s generated bindings.
@@ -43,32 +45,25 @@ struct AVD3D11VAFramesContext {
 
 /// Creates an FFmpeg D3D11VA hardware device context with an independently
 /// owned COM reference to `device`.
-pub(crate) unsafe fn create_hw_device_ctx(
-    device: &ID3D11Device,
-) -> Result<*mut ffi::AVBufferRef, i32> {
+pub(crate) unsafe fn create_hw_device_ctx(device: &ID3D11Device) -> Result<AvBufferRef, i32> {
     unsafe {
-        let buf = ffi::av_hwdevice_ctx_alloc(ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_D3D11VA);
-        if buf.is_null() {
-            return Err(-1);
-        }
+        let buf = AvBufferRef::from_raw(ffi::av_hwdevice_ctx_alloc(
+            ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_D3D11VA,
+        ))
+        .ok_or(-1)?;
 
-        let hw_device_ctx = (*buf).data as *mut ffi::AVHWDeviceContext;
+        let hw_device_ctx = (*buf.as_ptr()).data as *mut ffi::AVHWDeviceContext;
         let d3d11_ctx = (*hw_device_ctx).hwctx as *mut AVD3D11VADeviceContext;
         // FFmpeg unconditionally releases this interface when the context is
         // freed, so a borrowed `as_raw()` would consume the caller's ref.
         (*d3d11_ctx).device = device.clone().into_raw();
 
-        let result = ffi::av_hwdevice_ctx_init(buf);
+        let result = ffi::av_hwdevice_ctx_init(buf.as_ptr());
         if result < 0 {
-            free_buffer(buf);
             return Err(result);
         }
         Ok(buf)
     }
-}
-
-pub(crate) unsafe fn free_buffer(mut buf: *mut ffi::AVBufferRef) {
-    unsafe { ffi::av_buffer_unref(&mut buf) };
 }
 
 unsafe extern "C" fn release_d3d11_texture(_opaque: *mut c_void, data: *mut u8) {

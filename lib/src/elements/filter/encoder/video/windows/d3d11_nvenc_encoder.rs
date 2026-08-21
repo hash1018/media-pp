@@ -24,8 +24,9 @@ use crate::{
     elements::filter::is_codec_drain_boundary,
     error::Result,
     pad::SrcPad,
-    platform::windows::d3d11va::{
-        create_hw_device_ctx, d3d11va_texture, free_buffer, or_frames_bind_flags,
+    platform::{
+        ffmpeg::AvBufferRef,
+        windows::d3d11va::{create_hw_device_ctx, d3d11va_texture, or_frames_bind_flags},
     },
 };
 
@@ -262,8 +263,8 @@ pub struct D3d11NvencEncoder {
     context: Arc<Mutex<ID3D11DeviceContext>>,
     /// Owned for this element's lifetime; the encoder holds its own
     /// `av_buffer_ref` on both of these.
-    hw_device_ctx: *mut ffi::AVBufferRef,
-    hw_frames_ctx: *mut ffi::AVBufferRef,
+    _hw_device_ctx: AvBufferRef,
+    hw_frames_ctx: AvBufferRef,
     width: u32,
     height: u32,
     input_format: D3d11NvencInputFormat,
@@ -304,16 +305,14 @@ fn nominal_packet_duration(time_base: ffmpeg::Rational, frame_rate: ffmpeg::Rati
 /// whole difference between this and the approach recorded in
 /// `wrap_d3d11_texture`'s docs as having corrupted memory.
 unsafe fn create_hw_frames_ctx(
-    hw_device_ctx: *mut ffi::AVBufferRef,
+    hw_device_ctx: &AvBufferRef,
     options: &D3d11NvencEncoderOptions,
-) -> std::result::Result<*mut ffi::AVBufferRef, D3d11NvencEncoderError> {
+) -> std::result::Result<AvBufferRef, D3d11NvencEncoderError> {
     unsafe {
-        let buf = ffi::av_hwframe_ctx_alloc(hw_device_ctx);
-        if buf.is_null() {
-            return Err(D3d11NvencEncoderError::HwFramesAlloc);
-        }
+        let buf = AvBufferRef::from_raw(ffi::av_hwframe_ctx_alloc(hw_device_ctx.as_ptr()))
+            .ok_or(D3d11NvencEncoderError::HwFramesAlloc)?;
 
-        let frames_ctx = (*buf).data as *mut ffi::AVHWFramesContext;
+        let frames_ctx = (*buf.as_ptr()).data as *mut ffi::AVHWFramesContext;
         (*frames_ctx).format = ffi::AVPixelFormat::AV_PIX_FMT_D3D11;
         (*frames_ctx).sw_format = options.input_format.sw_format();
         (*frames_ctx).width = options.width as i32;
@@ -335,9 +334,8 @@ unsafe fn create_hw_frames_ctx(
         // texture with no bind flags (`E_INVALIDARG`).
         or_frames_bind_flags(frames_ctx, D3D11_BIND_SHADER_RESOURCE.0 as u32);
 
-        let code = ffi::av_hwframe_ctx_init(buf);
+        let code = ffi::av_hwframe_ctx_init(buf.as_ptr());
         if code < 0 {
-            free_buffer(buf);
             return Err(D3d11NvencEncoderError::HwFramesInit(
                 code,
                 options.width,
@@ -382,13 +380,7 @@ impl D3d11NvencEncoder {
 
         let hw_device_ctx = unsafe { create_hw_device_ctx(device) }
             .map_err(D3d11NvencEncoderError::HwDeviceInit)?;
-        let hw_frames_ctx = match unsafe { create_hw_frames_ctx(hw_device_ctx, &options) } {
-            Ok(ctx) => ctx,
-            Err(error) => {
-                unsafe { free_buffer(hw_device_ctx) };
-                return Err(error);
-            }
-        };
+        let hw_frames_ctx = unsafe { create_hw_frames_ctx(&hw_device_ctx, &options) }?;
 
         // From here on every early return has to release both contexts, so
         // the work is done in a closure and the cleanup written once.
@@ -408,21 +400,15 @@ impl D3d11NvencEncoder {
             video.set_gop(options.gop_size);
             unsafe {
                 let ptr = video.as_mut_ptr();
-                (*ptr).hw_frames_ctx = ffi::av_buffer_ref(hw_frames_ctx);
+                (*ptr).hw_frames_ctx = hw_frames_ctx
+                    .try_clone()
+                    .ok_or(D3d11NvencEncoderError::HwFramesAlloc)?
+                    .into_raw();
             }
             Ok(video.open_as(codec)?)
         })();
 
-        let encoder = match opened {
-            Ok(encoder) => encoder,
-            Err(error) => {
-                unsafe {
-                    free_buffer(hw_frames_ctx);
-                    free_buffer(hw_device_ctx);
-                }
-                return Err(error);
-            }
-        };
+        let encoder = opened?;
 
         let pad = SrcPad::new(format!("{name}_src"));
         pp_info!(
@@ -440,7 +426,7 @@ impl D3d11NvencEncoder {
             encoder,
             device: device.clone(),
             context,
-            hw_device_ctx,
+            _hw_device_ctx: hw_device_ctx,
             hw_frames_ctx,
             width: options.width,
             height: options.height,
@@ -473,7 +459,8 @@ impl D3d11NvencEncoder {
     ) -> std::result::Result<ffmpeg::frame::Video, D3d11NvencEncoderError> {
         let mut staged = ffmpeg::frame::Video::empty();
         unsafe {
-            let code = ffi::av_hwframe_get_buffer(self.hw_frames_ctx, staged.as_mut_ptr(), 0);
+            let code =
+                ffi::av_hwframe_get_buffer(self.hw_frames_ctx.as_ptr(), staged.as_mut_ptr(), 0);
             if code < 0 {
                 return Err(D3d11NvencEncoderError::HwFrameGet(code));
             }
@@ -632,12 +619,6 @@ impl D3d11NvencEncoder {
 impl Drop for D3d11NvencEncoder {
     fn drop(&mut self) {
         pp_info!(self, "dropped: freeing hw_frames_ctx and hw_device_ctx");
-        // Order matters only in that both must go; the frames context holds
-        // its own reference on the device context, so either order is safe.
-        unsafe {
-            free_buffer(self.hw_frames_ctx);
-            free_buffer(self.hw_device_ctx);
-        }
     }
 }
 
