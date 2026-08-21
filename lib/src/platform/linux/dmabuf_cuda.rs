@@ -143,6 +143,10 @@ impl CudaBgraSurface {
     /// already established that this frame came from its own BGRA frames
     /// context, so the only thing left to reject is a frame with no pointer.
     pub(crate) fn from_frame(frame: &ffmpeg_next::frame::Video) -> Option<Self> {
+        // SAFETY: `frame` is a live `frame::Video`, so `as_ptr` yields an
+        // initialized `AVFrame`. `data` and `linesize` are plain arrays in it and
+        // index 0 exists for every pixel format; whether the values are usable is
+        // what the check below decides.
         let (pixels, pitch) = unsafe {
             let ptr = frame.as_ptr();
             ((*ptr).data[0], (*ptr).linesize[0])
@@ -232,7 +236,11 @@ impl DmaBufCudaImporter {
 
         let context = egl.create_context(display)?;
 
-        let mut importer = Self {
+        // After the context is current: both names are created in it.
+        let texture = gl.gen_texture();
+        let framebuffer = gl.gen_framebuffer();
+
+        Ok(Self {
             egl,
             gl,
             cuda,
@@ -241,13 +249,10 @@ impl DmaBufCudaImporter {
             modifiers,
             images: HashMap::new(),
             negotiation: 0,
-            texture: 0,
-            framebuffer: 0,
+            texture,
+            framebuffer,
             pixel_buffer: None,
-        };
-        importer.gl.gen_textures(1, &mut importer.texture);
-        importer.gl.gen_framebuffers(1, &mut importer.framebuffer);
-        Ok(importer)
+        })
     }
 
     /// Drops every cached image when `negotiation` names a different round of
@@ -285,6 +290,10 @@ impl DmaBufCudaImporter {
         height: u32,
         destination: CudaBgraSurface,
     ) -> Result<(), DmaBufCudaError> {
+        // Before the image, not after: sizing the pixel buffer is also what
+        // invalidates the cached images, so an image created ahead of it
+        // would be destroyed again on the very frame that allocated it.
+        let (buffer, resource) = self.ensure_pixel_buffer(width, height)?;
         let image = self.image_for(plane, width, height)?;
 
         // The texture is retargeted rather than kept per buffer: binding an
@@ -308,7 +317,6 @@ impl DmaBufCudaImporter {
             return Err(DmaBufCudaError::FramebufferIncomplete(status));
         }
 
-        let (buffer, resource) = self.ensure_pixel_buffer(width, height)?;
         self.gl.bind_buffer(GL_PIXEL_PACK_BUFFER, buffer);
         // Reads bottom-up in window coordinates, which for an FBO-attached
         // texture is its first row first — the DMA-BUF's own row order, so
@@ -390,10 +398,9 @@ impl DmaBufCudaImporter {
             self.release_images();
             if let Some(old) = self.pixel_buffer.take() {
                 let _ = self.cuda.unregister(old.resource);
-                self.gl.delete_buffers(1, &old.buffer);
+                self.gl.delete_buffer(old.buffer);
             }
-            let mut buffer = 0;
-            self.gl.gen_buffers(1, &mut buffer);
+            let buffer = self.gl.gen_buffer();
             self.gl.bind_buffer(GL_PIXEL_PACK_BUFFER, buffer);
             self.gl.buffer_data(
                 GL_PIXEL_PACK_BUFFER,
@@ -427,10 +434,10 @@ impl Drop for DmaBufCudaImporter {
         self.release_images();
         if let Some(pbo) = self.pixel_buffer.take() {
             let _ = self.cuda.unregister(pbo.resource);
-            self.gl.delete_buffers(1, &pbo.buffer);
+            self.gl.delete_buffer(pbo.buffer);
         }
-        self.gl.delete_framebuffers(1, &self.framebuffer);
-        self.gl.delete_textures(1, &self.texture);
+        self.gl.delete_framebuffer(self.framebuffer);
+        self.gl.delete_texture(self.texture);
         self.egl.release_context(self.display, self.context);
     }
 }
@@ -497,17 +504,26 @@ unsafe fn cast<T: Copy>(ptr: *mut c_void) -> T {
         std::mem::size_of::<*mut c_void>(),
         "function pointers are pointer-sized"
     );
+    // SAFETY: the contract above makes `ptr` a function pointer of type `T`,
+    // and the assert confirms `T` is pointer-sized, so this copies the whole
+    // value rather than reading past `ptr`.
     unsafe { std::mem::transmute_copy(&ptr) }
 }
 
 fn open_library(name: &str) -> Option<*mut c_void> {
     let name = CString::new(name).ok()?;
+    // SAFETY: `name` is a live `CString`, so the pointer is NUL-terminated for
+    // the length of the call. `dlopen` returns either a handle or null, and the
+    // caller keeps only the non-null case.
     let handle = unsafe { dlopen(name.as_ptr(), RTLD_NOW) };
     (!handle.is_null()).then_some(handle)
 }
 
 fn raw_symbol(lib: *mut c_void, name: &str) -> Option<*mut c_void> {
     let name = CString::new(name).ok()?;
+    // SAFETY: `lib` is a handle from `open_library` and is still open —
+    // nothing in this module ever calls `dlclose` — and `name` is a live
+    // NUL-terminated `CString`.
     let symbol = unsafe { dlsym(lib, name.as_ptr()) };
     (!symbol.is_null()).then_some(symbol)
 }
@@ -542,6 +558,9 @@ impl Egl {
         let lib = open_library("libEGL.so.1").ok_or(DmaBufCudaError::Library("libEGL.so.1"))?;
         let get_proc_ptr = raw_symbol(lib, "eglGetProcAddress")
             .ok_or(DmaBufCudaError::EglSymbol("eglGetProcAddress"))?;
+        // SAFETY: `get_proc_ptr` was resolved by the name `eglGetProcAddress`,
+        // and the type it is cast to is that function's signature from
+        // `EGL/egl.h`.
         let get_proc: unsafe extern "C" fn(*const c_char) -> *mut c_void =
             unsafe { cast(get_proc_ptr) };
 
@@ -552,12 +571,19 @@ impl Egl {
                 return Ok(symbol);
             }
             let c_name = CString::new(name).map_err(|_| DmaBufCudaError::EglSymbol(name))?;
+            // SAFETY: `get_proc` is `eglGetProcAddress` and `c_name` outlives the
+            // call. A name this EGL does not implement comes back null, which is
+            // what the check below is for.
             let symbol = unsafe { get_proc(c_name.as_ptr()) };
             (!symbol.is_null())
                 .then_some(symbol)
                 .ok_or(DmaBufCudaError::EglSymbol(name))
         };
 
+        // SAFETY: every `cast` receives the pointer `resolve` returned for the
+        // symbol named on its own line, and the field being initialized declares
+        // that symbol's signature from `EGL/egl.h` or `EGL/eglext.h`. Name and
+        // type sit on one line so the pairing stays checkable by reading.
         Ok(unsafe {
             Self {
                 get_proc,
@@ -584,6 +610,10 @@ impl Egl {
     /// is copied into live on one GPU by construction rather than by
     /// agreement.
     fn cuda_device_display(&self) -> Result<EglDisplay, DmaBufCudaError> {
+        // SAFETY: `query_devices` fills at most `devices.len()` entries and
+        // reports how many through `count`, which is what bounds the slice below.
+        // The remaining calls take out-params that are live locals, and a display
+        // EGL declines to create arrives as null and is skipped rather than used.
         unsafe {
             let mut devices = [std::ptr::null_mut::<c_void>(); 16];
             let mut count = 0;
@@ -613,6 +643,9 @@ impl Egl {
     }
 
     fn extensions(&self, display: EglDisplay) -> String {
+        // SAFETY: `query_string` returns either null — handled — or a
+        // NUL-terminated string owned by EGL and valid for the life of the
+        // display, which `CStr::from_ptr` only borrows while copying it.
         unsafe {
             let ptr = (self.query_string)(display, EGL_EXTENSIONS);
             if ptr.is_null() {
@@ -627,6 +660,10 @@ impl Egl {
     /// `GL_TEXTURE_EXTERNAL_OES`, which cannot be attached to a framebuffer,
     /// and the readback here needs exactly that.
     fn dma_buf_modifiers(&self, display: EglDisplay, fourcc: u32) -> Vec<u64> {
+        // SAFETY: the first call passes null out-pointers, which the extension
+        // defines as "report the count only". The second passes vectors allocated
+        // to exactly that count, and both are sized from the same value, so
+        // neither can be written past its end.
         unsafe {
             let mut count = 0;
             if (self.query_dma_buf_modifiers)(
@@ -667,6 +704,9 @@ impl Egl {
     /// does is own a texture, a framebuffer, and a pixel buffer, so there is
     /// no drawable to configure.
     fn create_context(&self, display: EglDisplay) -> Result<*mut c_void, DmaBufCudaError> {
+        // SAFETY: `attribs` is terminated with `EGL_NONE_INT` and outlives the
+        // call. Every failure path returns before the context is used, and the
+        // one that fails after creating it destroys it first.
         unsafe {
             if (self.bind_api)(EGL_OPENGL_ES_API) == 0 {
                 return Err(DmaBufCudaError::EglContext((self.get_error)()));
@@ -717,6 +757,10 @@ impl Egl {
             (plane.modifier >> 32) as EglAttrib,
             EGL_NONE,
         ];
+        // SAFETY: `attribs` is a live 17-element list terminated by `EGL_NONE`,
+        // which is the layout `EGL_EXT_image_dma_buf_import` defines for a
+        // single-plane buffer — the only kind this negotiates. `plane.fd` need
+        // only be open for the duration of the call, as noted below.
         unsafe {
             // EGL dups the fd, so the PipeWire buffer keeps ownership of its
             // own and this image outlives any single `process` callback.
@@ -735,10 +779,16 @@ impl Egl {
     }
 
     fn destroy_image(&self, display: EglDisplay, image: EglImage) {
+        // SAFETY: `image` was created by this module on this `display`, and
+        // `release_images` drains it out of the cache before destroying it, so no
+        // image reaches this twice.
         unsafe { (self.destroy_image)(display, image) };
     }
 
     fn release_context(&self, display: EglDisplay, context: *mut c_void) {
+        // SAFETY: unbinding with null before destroying is what lets EGL release
+        // the context here rather than deferring it to some later
+        // `eglMakeCurrent`. `context` is this importer's own and `Drop` runs once.
         unsafe {
             (self.make_current)(
                 display,
@@ -751,6 +801,14 @@ impl Egl {
     }
 }
 
+/// The GLES 3 entry points the readback needs, resolved once from
+/// `libGLESv2.so.2`.
+///
+/// Every method below is one call through one of these pointers, so they
+/// share a precondition: a current EGL context on the calling thread.
+/// [`DmaBufCudaImporter`] makes one current in `new` and is not `Send`, so
+/// no thread can reach these without it. Each method's own `SAFETY` note
+/// records only what that call adds on top.
 struct Gl {
     gen_textures: unsafe extern "C" fn(c_int, *mut c_uint),
     delete_textures: unsafe extern "C" fn(c_int, *const c_uint),
@@ -780,12 +838,19 @@ impl Gl {
         let image_target = {
             let name = CString::new("glEGLImageTargetTexture2DOES")
                 .map_err(|_| DmaBufCudaError::GlSymbol("glEGLImageTargetTexture2DOES"))?;
+            // SAFETY: `glEGLImageTargetTexture2DOES` is an extension entry point, so
+            // libGLESv2's dynamic symbol table does not carry it and only
+            // `eglGetProcAddress` resolves it. `name` outlives the call and the
+            // result is null-checked.
             let symbol = unsafe { (egl.get_proc)(name.as_ptr()) };
             (!symbol.is_null())
                 .then_some(symbol)
                 .ok_or(DmaBufCudaError::GlSymbol("glEGLImageTargetTexture2DOES"))?
         };
 
+        // SAFETY: as in `Egl::load` — each `cast` gets the pointer resolved for
+        // the symbol named on that line, typed as that GLES 3 entry point's
+        // signature.
         Ok(unsafe {
             Self {
                 gen_textures: cast(resolve("glGenTextures")?),
@@ -815,6 +880,8 @@ impl Gl {
     fn check(&self, op: &'static str) -> Result<(), DmaBufCudaError> {
         let mut first = GL_NO_ERROR;
         loop {
+            // SAFETY: `glGetError` takes no arguments and needs only a current
+            // context.
             let error = unsafe { (self.get_error)() };
             if error == GL_NO_ERROR {
                 break;
@@ -828,27 +895,40 @@ impl Gl {
             .ok_or(DmaBufCudaError::Gl(op, first))
     }
 
-    fn gen_textures(&self, count: c_int, out: &mut c_uint) {
-        unsafe { (self.gen_textures)(count, out) };
+    fn gen_texture(&self) -> c_uint {
+        let mut name = 0;
+        // SAFETY: `glGenTextures` writes as many names as it is asked for and
+        // has no bound of its own, so the count is fixed at the one name
+        // `name` has room for.
+        unsafe { (self.gen_textures)(1, &mut name) };
+        name
     }
 
-    fn delete_textures(&self, count: c_int, textures: &c_uint) {
-        unsafe { (self.delete_textures)(count, textures) };
+    fn delete_texture(&self, texture: c_uint) {
+        // SAFETY: reads one name, which is what `texture` is.
+        unsafe { (self.delete_textures)(1, &texture) };
     }
 
     fn bind_texture(&self, target: c_uint, texture: c_uint) {
+        // SAFETY: a target enum and a texture name, both plain integers. Values
+        // GL does not recognize are a GL error, not undefined behaviour.
         unsafe { (self.bind_texture)(target, texture) };
     }
 
-    fn gen_framebuffers(&self, count: c_int, out: &mut c_uint) {
-        unsafe { (self.gen_framebuffers)(count, out) };
+    fn gen_framebuffer(&self) -> c_uint {
+        let mut name = 0;
+        // SAFETY: as `gen_texture` — one name, one `c_uint` of room.
+        unsafe { (self.gen_framebuffers)(1, &mut name) };
+        name
     }
 
-    fn delete_framebuffers(&self, count: c_int, framebuffers: &c_uint) {
-        unsafe { (self.delete_framebuffers)(count, framebuffers) };
+    fn delete_framebuffer(&self, framebuffer: c_uint) {
+        // SAFETY: reads one name, which is what `framebuffer` is.
+        unsafe { (self.delete_framebuffers)(1, &framebuffer) };
     }
 
     fn bind_framebuffer(&self, target: c_uint, framebuffer: c_uint) {
+        // SAFETY: a target enum and a framebuffer name, both plain integers.
         unsafe { (self.bind_framebuffer)(target, framebuffer) };
     }
 
@@ -860,28 +940,41 @@ impl Gl {
         texture: c_uint,
         level: c_int,
     ) {
+        // SAFETY: all five arguments are plain integers. A target, attachment, or
+        // texture that does not fit together is reported by the
+        // `check_framebuffer_status` call the caller makes next.
         unsafe {
             (self.framebuffer_texture_2d)(target, attachment, texture_target, texture, level)
         };
     }
 
     fn check_framebuffer_status(&self, target: c_uint) -> c_uint {
+        // SAFETY: takes a target enum and returns a status.
         unsafe { (self.check_framebuffer_status)(target) }
     }
 
-    fn gen_buffers(&self, count: c_int, out: &mut c_uint) {
-        unsafe { (self.gen_buffers)(count, out) };
+    fn gen_buffer(&self) -> c_uint {
+        let mut name = 0;
+        // SAFETY: as `gen_texture` — one name, one `c_uint` of room.
+        unsafe { (self.gen_buffers)(1, &mut name) };
+        name
     }
 
-    fn delete_buffers(&self, count: c_int, buffers: &c_uint) {
-        unsafe { (self.delete_buffers)(count, buffers) };
+    fn delete_buffer(&self, buffer: c_uint) {
+        // SAFETY: reads one name, which is what `buffer` is.
+        unsafe { (self.delete_buffers)(1, &buffer) };
     }
 
     fn bind_buffer(&self, target: c_uint, buffer: c_uint) {
+        // SAFETY: a target enum and a buffer name, both plain integers.
         unsafe { (self.bind_buffer)(target, buffer) };
     }
 
     fn buffer_data(&self, target: c_uint, size: isize, data: *const c_void, usage: c_uint) {
+        // SAFETY: `ensure_pixel_buffer` passes a null `data` with a non-negative
+        // `size`, which allocates without reading anything — the only form used
+        // here. A non-null `data` would instead have to be readable for `size`
+        // bytes.
         unsafe { (self.buffer_data)(target, size, data, usage) };
     }
 
@@ -896,10 +989,19 @@ impl Gl {
         kind: c_uint,
         pixels: *mut c_void,
     ) {
+        // SAFETY: `copy_into` calls this with a buffer bound to
+        // `GL_PIXEL_PACK_BUFFER` and a null `pixels`, so the pointer is an offset
+        // into that buffer rather than a host address, and
+        // `ensure_pixel_buffer` sized it to the same `width * height * 4`. With
+        // no pack buffer bound the pointer would instead have to address that
+        // many writable host bytes.
         unsafe { (self.read_pixels)(x, y, width, height, format, kind, pixels) };
     }
 
     fn image_target_texture(&self, target: c_uint, image: EglImage) {
+        // SAFETY: `image` is an EGLImage this module created and still holds in
+        // `images`; `copy_into` sizes the pixel buffer first, so nothing
+        // destroys it between `image_for` and this call.
         unsafe { (self.image_target_texture)(target, image) };
     }
 }
@@ -954,6 +1056,11 @@ impl Cuda {
         let resolve =
             |name: &'static str| raw_symbol(lib, name).ok_or(DmaBufCudaError::CudaSymbol(name));
 
+        // SAFETY: each `cast` gets the pointer resolved for the symbol on its own
+        // line, typed as that entry point's signature from `cuda.h`. The calls run
+        // in the order the driver API requires — `cuInit` before anything else,
+        // the retained primary context made current before anything uses it — and
+        // each result is checked before the next call relies on it.
         unsafe {
             let init: unsafe extern "C" fn(c_uint) -> c_int = cast(resolve("cuInit")?);
             let device_get: unsafe extern "C" fn(*mut c_int, c_int) -> c_int =
@@ -990,6 +1097,9 @@ impl Cuda {
     /// (`0x01`): CUDA only ever reads what GL wrote into it.
     fn register_buffer(&self, buffer: c_uint) -> Result<*mut c_void, DmaBufCudaError> {
         let mut resource = std::ptr::null_mut();
+        // SAFETY: `resource` is a live local out-param, and `buffer` names a GL
+        // buffer `ensure_pixel_buffer` allocated on the context current for this
+        // thread.
         unsafe {
             check_cuda(
                 "cuGraphicsGLRegisterBuffer",
@@ -1001,6 +1111,10 @@ impl Cuda {
 
     fn map_buffer(&self, resource: *mut c_void) -> Result<u64, DmaBufCudaError> {
         let mut resource = resource;
+        // SAFETY: `resource` is a local copy, so the `&mut` these take cannot
+        // alias the `PixelBuffer` field it came from; `pointer` and `size` are
+        // live locals. Mapping on the null stream is what orders this after the
+        // GL writes, as `copy_into` records.
         unsafe {
             check_cuda(
                 "cuGraphicsMapResources",
@@ -1017,6 +1131,10 @@ impl Cuda {
 
     fn unmap(&self, resource: *mut c_void) -> Result<(), DmaBufCudaError> {
         let mut resource = resource;
+        // SAFETY: `resource` is registered, and again a local copy. Unmapping one
+        // that is not mapped returns an error rather than being undefined, which
+        // is what lets `copy_into` unmap unconditionally — covering the case
+        // where `map_buffer` failed *after* the map itself succeeded.
         unsafe {
             check_cuda(
                 "cuGraphicsUnmapResources",
@@ -1026,6 +1144,9 @@ impl Cuda {
     }
 
     fn unregister(&self, resource: *mut c_void) -> Result<(), DmaBufCudaError> {
+        // SAFETY: `resource` came from `register_buffer`, and both callers take
+        // the `PixelBuffer` out of its `Option` first, so it is unregistered
+        // once.
         unsafe {
             check_cuda(
                 "cuGraphicsUnregisterResource",
@@ -1054,12 +1175,18 @@ impl Cuda {
             height,
             ..Default::default()
         };
+        // SAFETY: `copy` is a live `CuMemcpy2D` with both memory types set to
+        // device, so CUDA reads `src_device`/`dst_device` and ignores the host and
+        // array fields left null by `Default`. The extents come from the caller
+        // and both pitches from the allocations themselves.
         unsafe { check_cuda("cuMemcpy2D", (self.memcpy_2d)(&copy)) }
     }
 }
 
 impl Drop for Cuda {
     fn drop(&mut self) {
+        // SAFETY: balances the `cuDevicePrimaryCtxRetain` in `load`. `Cuda` is
+        // owned by one importer and is not `Clone`, so this runs once.
         unsafe { (self.primary_ctx_release)(self.device) };
     }
 }
