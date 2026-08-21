@@ -682,8 +682,11 @@ fn fill_background(frame: &mut ffmpeg::frame::Video, color: Color) {
     let stride = frame.stride(0);
     let data = frame.data_mut(0);
     for row in 0..height {
-        for pixel in data[row * stride..row * stride + width * 4].chunks_exact_mut(4) {
-            pixel.copy_from_slice(&[color.blue, color.green, color.red, 255]);
+        for pixel in data[row * stride..row * stride + width * 4]
+            .as_chunks_mut::<4>()
+            .0
+        {
+            *pixel = [color.blue, color.green, color.red, 255];
         }
     }
 }

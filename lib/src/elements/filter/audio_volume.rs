@@ -417,13 +417,13 @@ fn scale_u8(data: &mut [u8], gains: &[f32], channels: usize) {
 macro_rules! scale_integer {
     ($name:ident, $sample_type:ty, $bytes:literal) => {
         fn $name(data: &mut [u8], gains: &[f32], channels: usize) {
-            for (index, sample) in data.chunks_exact_mut($bytes).enumerate() {
-                let value = <$sample_type>::from_ne_bytes(sample.try_into().expect("chunk size"));
+            for (index, sample) in data.as_chunks_mut::<$bytes>().0.iter_mut().enumerate() {
+                let value = <$sample_type>::from_ne_bytes(*sample);
                 let scaled = ((value as f64) * f64::from(gains[index / channels]))
                     .round()
                     .clamp(<$sample_type>::MIN as f64, <$sample_type>::MAX as f64)
                     as $sample_type;
-                sample.copy_from_slice(&scaled.to_ne_bytes());
+                *sample = scaled.to_ne_bytes();
             }
         }
     };
@@ -434,16 +434,16 @@ scale_integer!(scale_i32, i32, 4);
 scale_integer!(scale_i64, i64, 8);
 
 fn scale_f32(data: &mut [u8], gains: &[f32], channels: usize) {
-    for (index, sample) in data.chunks_exact_mut(4).enumerate() {
-        let value = f32::from_ne_bytes(sample.try_into().expect("chunk size"));
-        sample.copy_from_slice(&(value * gains[index / channels]).to_ne_bytes());
+    for (index, sample) in data.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+        let value = f32::from_ne_bytes(*sample);
+        *sample = (value * gains[index / channels]).to_ne_bytes();
     }
 }
 
 fn scale_f64(data: &mut [u8], gains: &[f32], channels: usize) {
-    for (index, sample) in data.chunks_exact_mut(8).enumerate() {
-        let value = f64::from_ne_bytes(sample.try_into().expect("chunk size"));
-        sample.copy_from_slice(&(value * f64::from(gains[index / channels])).to_ne_bytes());
+    for (index, sample) in data.as_chunks_mut::<8>().0.iter_mut().enumerate() {
+        let value = f64::from_ne_bytes(*sample);
+        *sample = (value * f64::from(gains[index / channels])).to_ne_bytes();
     }
 }
 
@@ -545,8 +545,10 @@ mod tests {
         };
         let count = frame.samples() * usize::from(frame.channels());
         frame.data(0)[..count * 4]
-            .chunks_exact(4)
-            .map(|bytes| f32::from_ne_bytes(bytes.try_into().unwrap()))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|bytes| f32::from_ne_bytes(*bytes))
             .collect()
     }
 
@@ -674,10 +676,12 @@ mod tests {
         );
         frame.set_rate(48_000);
         for (destination, value) in frame.data_mut(0)[..4]
-            .chunks_exact_mut(2)
+            .as_chunks_mut::<2>()
+            .0
+            .iter_mut()
             .zip([20_000_i16, -20_000_i16])
         {
-            destination.copy_from_slice(&value.to_ne_bytes());
+            *destination = value.to_ne_bytes();
         }
         volume.consume(MediaBuffer::Audio(Arc::new(frame))).unwrap();
 
@@ -686,8 +690,10 @@ mod tests {
             panic!("expected audio")
         };
         let output: Vec<_> = frame.data(0)[..4]
-            .chunks_exact(2)
-            .map(|bytes| i16::from_ne_bytes(bytes.try_into().unwrap()))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|bytes| i16::from_ne_bytes(*bytes))
             .collect();
         assert_eq!(output, vec![i16::MAX, i16::MIN]);
     }
