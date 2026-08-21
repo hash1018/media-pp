@@ -23,15 +23,8 @@ mod windows_example {
         elements::{FileDemuxer, Pacer, SwDecoder},
         pipeline::Pipeline,
     };
-    use render_common::D3d12GpuContext;
-    use winit::{
-        application::ApplicationHandler,
-        dpi::LogicalSize,
-        event::WindowEvent,
-        event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy},
-        raw_window_handle::{HasWindowHandle, RawWindowHandle},
-        window::{Window, WindowId},
-    };
+    use render_common::{D3d12GpuContext, Shutdown};
+    use winit::raw_window_handle::RawWindowHandle;
 
     /// Demux -> SwDecoder -> Queue -> Pacer -> Renderer, same chain as
     /// `sw_decode_render`, plus a terminal prompt that reads timestamps and
@@ -46,92 +39,32 @@ mod windows_example {
             std::process::exit(1);
         };
 
-        let event_loop = EventLoop::<PlaybackDone>::with_user_event()
-            .build()
-            .expect("failed to create event loop");
-        let proxy = event_loop.create_proxy();
-        let mut app = App {
-            path,
-            proxy,
-            window: None,
-            // Kept alive for the app's duration so the window doesn't outlive
-            // the thread rendering into it; not otherwise joined — the window
-            // closes itself once playback finishes (see `user_event` below).
-            _playback: None,
-        };
-        event_loop.run_app(&mut app).expect("event loop failed");
-    }
-
-    /// Sent from the playback thread once `play()` returns, so the window
-    /// closes itself when the pipeline finishes instead of sitting there
-    /// until someone closes it by hand.
-    struct PlaybackDone;
-
-    struct App {
-        path: String,
-        proxy: EventLoopProxy<PlaybackDone>,
-        window: Option<Window>,
-        _playback: Option<thread::JoinHandle<()>>,
-    }
-
-    impl ApplicationHandler<PlaybackDone> for App {
-        fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-            if self.window.is_some() {
-                return;
-            }
-
-            let window = event_loop
-                .create_window(
-                    Window::default_attributes()
-                        .with_title("media-pp seek_render")
-                        .with_inner_size(LogicalSize::new(1280, 720))
-                        // Pacer/Renderer are wired up once, sized to the
-                        // window's initial size — no resize handling here.
-                        .with_resizable(false),
+        render_common::run_window(
+            "media-pp seek_render",
+            1280,
+            720,
+            move |target, shutdown| {
+                let RawWindowHandle::Win32(handle) = target.window else {
+                    panic!("seek_render example only supports Windows");
+                };
+                play(
+                    &path,
+                    handle.hwnd.get(),
+                    target.width,
+                    target.height,
+                    &shutdown,
                 )
-                .expect("failed to create window");
-
-            let hwnd = match window
-                .window_handle()
-                .expect("failed to get window handle")
-                .as_raw()
-            {
-                RawWindowHandle::Win32(handle) => handle.hwnd.get(),
-                _ => panic!("seek_render example only supports Windows"),
-            };
-            let size = window.inner_size();
-
-            let path = self.path.clone();
-            let proxy = self.proxy.clone();
-            self._playback = Some(thread::spawn(move || {
-                if let Err(e) = play(&path, hwnd, size.width, size.height) {
-                    eprintln!("playback failed: {e}");
-                }
-                let _ = proxy.send_event(PlaybackDone);
-            }));
-            self.window = Some(window);
-        }
-
-        fn window_event(
-            &mut self,
-            event_loop: &ActiveEventLoop,
-            window_id: WindowId,
-            event: WindowEvent,
-        ) {
-            if self.window.as_ref().map(Window::id) != Some(window_id) {
-                return;
-            }
-            if let WindowEvent::CloseRequested = event {
-                event_loop.exit();
-            }
-        }
-
-        fn user_event(&mut self, event_loop: &ActiveEventLoop, _event: PlaybackDone) {
-            event_loop.exit();
-        }
+            },
+        );
     }
 
-    fn play(path: &str, hwnd: isize, width: u32, height: u32) -> media_pp::Result<()> {
+    fn play(
+        path: &str,
+        hwnd: isize,
+        width: u32,
+        height: u32,
+        shutdown: &Shutdown,
+    ) -> media_pp::Result<()> {
         media_pp::init()?;
         let _log_guard = media_pp::log::init(
             env!("CARGO_PKG_NAME"),
@@ -173,12 +106,16 @@ mod windows_example {
         // `run()` starts playback on a background thread and returns right
         // away — that's what makes this terminal prompt possible on the same
         // thread that would otherwise just be blocked waiting for it.
+        if shutdown.publish(std::slice::from_ref(&pipeline)) {
+            return Ok(());
+        }
+
         pipeline.run();
 
         // Reads seek requests for as long as the process lives, on its own
         // thread — a blocked stdin read can't also notice natural playback
-        // completion, so it doesn't try to; the whole process (this thread
-        // included) exits once the window closes below.
+        // completion, so it doesn't try to; the shared shell stops the
+        // pipeline and exits once the playback worker has returned.
         {
             let pipeline = pipeline.clone();
             thread::spawn(move || read_seek_commands(&pipeline));

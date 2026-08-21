@@ -10,22 +10,13 @@ fn main() -> impl std::process::Termination {
 
 #[cfg(target_os = "windows")]
 mod windows_example {
-    use std::thread;
-
     use media_pp::{
         bus::BusEvent,
         elements::{TestVideoOptions, TestVideoSource},
         pipeline::Pipeline,
     };
-    use render_common::D3d12GpuContext;
-    use winit::{
-        application::ApplicationHandler,
-        dpi::LogicalSize,
-        event::WindowEvent,
-        event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy},
-        raw_window_handle::{HasWindowHandle, RawWindowHandle},
-        window::{Window, WindowId},
-    };
+    use render_common::{D3d12GpuContext, Shutdown};
+    use winit::raw_window_handle::RawWindowHandle;
 
     /// TestVideoSource -> Renderer: a synthetic moving-gradient stream, no
     /// file/camera/decoder involved at all, presented in a native window via
@@ -44,89 +35,15 @@ mod windows_example {
     ///
     ///     cargo run -p test_video
     pub(super) fn run() {
-        let event_loop = EventLoop::<PlaybackDone>::with_user_event()
-            .build()
-            .expect("failed to create event loop");
-        let proxy = event_loop.create_proxy();
-        let mut app = App {
-            proxy,
-            window: None,
-            // Kept alive for the app's duration so the window doesn't outlive
-            // the thread rendering into it; not otherwise joined — the window
-            // closes itself once playback finishes (see `user_event` below).
-            _playback: None,
-        };
-        event_loop.run_app(&mut app).expect("event loop failed");
-    }
-
-    /// Sent from the playback thread once `play()` returns, so the window
-    /// closes itself when the pipeline finishes instead of sitting there
-    /// until someone closes it by hand.
-    struct PlaybackDone;
-
-    struct App {
-        proxy: EventLoopProxy<PlaybackDone>,
-        window: Option<Window>,
-        _playback: Option<thread::JoinHandle<()>>,
-    }
-
-    impl ApplicationHandler<PlaybackDone> for App {
-        fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-            if self.window.is_some() {
-                return;
-            }
-
-            let window = event_loop
-                .create_window(
-                    Window::default_attributes()
-                        .with_title("media-pp test_video")
-                        .with_inner_size(LogicalSize::new(1280, 720))
-                        // Renderer is wired up once, sized to the window's
-                        // initial size — no resize handling here.
-                        .with_resizable(false),
-                )
-                .expect("failed to create window");
-
-            let hwnd = match window
-                .window_handle()
-                .expect("failed to get window handle")
-                .as_raw()
-            {
-                RawWindowHandle::Win32(handle) => handle.hwnd.get(),
-                _ => panic!("test_video example only supports Windows"),
+        render_common::run_window("media-pp test_video", 1280, 720, |target, shutdown| {
+            let RawWindowHandle::Win32(handle) = target.window else {
+                panic!("test_video example only supports Windows");
             };
-            let size = window.inner_size();
-
-            let proxy = self.proxy.clone();
-            self._playback = Some(thread::spawn(move || {
-                if let Err(e) = play(hwnd, size.width, size.height) {
-                    eprintln!("playback failed: {e}");
-                }
-                let _ = proxy.send_event(PlaybackDone);
-            }));
-            self.window = Some(window);
-        }
-
-        fn window_event(
-            &mut self,
-            event_loop: &ActiveEventLoop,
-            window_id: WindowId,
-            event: WindowEvent,
-        ) {
-            if self.window.as_ref().map(Window::id) != Some(window_id) {
-                return;
-            }
-            if let WindowEvent::CloseRequested = event {
-                event_loop.exit();
-            }
-        }
-
-        fn user_event(&mut self, event_loop: &ActiveEventLoop, _event: PlaybackDone) {
-            event_loop.exit();
-        }
+            play(handle.hwnd.get(), target.width, target.height, &shutdown)
+        });
     }
 
-    fn play(hwnd: isize, width: u32, height: u32) -> media_pp::Result<()> {
+    fn play(hwnd: isize, width: u32, height: u32, shutdown: &Shutdown) -> media_pp::Result<()> {
         media_pp::init()?;
         let _log_guard = media_pp::log::init(
             env!("CARGO_PKG_NAME"),
@@ -161,8 +78,12 @@ mod windows_example {
         // `Renderer`) shows up as a `BusEvent::Error` here instead of through
         // a returned `Result`. `TestVideoSource` never reaches `Eos` on its
         // own — closing the window is what ends this (see `Ok(())` below,
-        // reached only via `pipeline.stop()` from outside this function, or
-        // an error).
+        // reached when the shared shell stops this published pipeline, or
+        // when an error ends it below).
+        if shutdown.publish(std::slice::from_ref(&pipeline)) {
+            return Ok(());
+        }
+
         pipeline.run();
 
         for event in pipeline.bus().iter() {
