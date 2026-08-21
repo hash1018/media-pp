@@ -190,13 +190,9 @@ impl Sink for D3d12Download {
 mod tests {
     use std::sync::Mutex;
 
-    use windows::Win32::Graphics::{
-        Direct3D::D3D_FEATURE_LEVEL_11_0,
-        Direct3D12::{D3D12CreateDevice, ID3D12Device},
-    };
-
     use super::*;
     use crate::elements::D3d12Upload;
+    use crate::test_support::try_d3d12_device as try_device;
 
     struct CapturingSink {
         pp_log: PpLog,
@@ -230,16 +226,6 @@ mod tests {
         fn control(&mut self, _msg: ControlMsg) -> Result<()> {
             Ok(())
         }
-    }
-
-    fn try_device() -> Option<ID3D12Device> {
-        let mut device = None;
-        let result = unsafe { D3D12CreateDevice(None, D3D_FEATURE_LEVEL_11_0, &mut device) };
-        if let Err(error) = result {
-            eprintln!("skipping: D3D12CreateDevice failed on this machine: {error}");
-            return None;
-        }
-        device
     }
 
     #[test]

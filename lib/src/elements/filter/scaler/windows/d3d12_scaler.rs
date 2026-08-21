@@ -383,6 +383,7 @@ mod tests {
 
     use super::*;
     use crate::elements::{D3d12Download, D3d12Upload};
+    use crate::test_support::try_d3d12_device as try_device;
 
     struct CapturingSink {
         pp_log: PpLog,
@@ -412,16 +413,6 @@ mod tests {
         fn control(&mut self, _msg: ControlMsg) -> Result<()> {
             Ok(())
         }
-    }
-
-    fn try_device() -> Option<ID3D12Device> {
-        let mut device = None;
-        if let Err(error) = unsafe { D3D12CreateDevice(None, D3D_FEATURE_LEVEL_11_0, &mut device) }
-        {
-            eprintln!("skipping: D3D12CreateDevice failed: {error}");
-            return None;
-        }
-        device
     }
 
     fn try_distinct_device(first: &ID3D12Device) -> Option<ID3D12Device> {

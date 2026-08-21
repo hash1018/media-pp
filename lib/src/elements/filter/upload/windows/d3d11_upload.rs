@@ -324,12 +324,9 @@ mod tests {
     use std::sync::Mutex;
 
     use windows::{
-        Win32::Graphics::{
-            Direct3D::D3D_DRIVER_TYPE_HARDWARE,
-            Direct3D11::{
-                D3D11_CPU_ACCESS_READ, D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE, D3D11_SDK_VERSION,
-                D3D11_USAGE_STAGING, D3D11CreateDevice, ID3D11DeviceContext,
-            },
+        Win32::Graphics::Direct3D11::{
+            D3D11_CPU_ACCESS_READ, D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE, D3D11_USAGE_STAGING,
+            ID3D11DeviceContext,
         },
         core::Interface,
     };
@@ -339,6 +336,7 @@ mod tests {
         element::{Element, ElementType, Sink, Source, element_pp_log},
         platform::windows::d3d11va::d3d11va_texture,
         pool::UnboundObjectPool,
+        test_support::try_d3d11_device,
     };
 
     struct CapturingSink {
@@ -378,36 +376,6 @@ mod tests {
             pp_log: element_pp_log(ElementType::Other, "capture", None),
         }));
         received
-    }
-
-    /// A D3D11 device and its immediate context, or `None` — after printing
-    /// why — on a machine without one, the same way every other hardware
-    /// test here skips. `D3d11Upload` itself needs no context; the tests
-    /// that read a texture back do.
-    fn try_device() -> Option<(ID3D11Device, ID3D11DeviceContext)> {
-        let mut device = None;
-        let mut context = None;
-        let result = unsafe {
-            D3D11CreateDevice(
-                None,
-                D3D_DRIVER_TYPE_HARDWARE,
-                Default::default(),
-                Default::default(),
-                None,
-                D3D11_SDK_VERSION,
-                Some(&mut device),
-                None,
-                Some(&mut context),
-            )
-        };
-        if result.is_err() {
-            eprintln!("skipping: D3D11CreateDevice failed on this machine: {result:?}");
-            return None;
-        }
-        Some((
-            device.expect("D3D11CreateDevice succeeded without producing a device"),
-            context.expect("D3D11CreateDevice succeeded without producing a context"),
-        ))
     }
 
     /// Reads a BGRA texture back through a staging copy, tightly packed —
@@ -467,7 +435,7 @@ mod tests {
     /// color round trip on anything headed for one of them.
     #[test]
     fn a_cpu_bgra_frame_uploads_to_a_bgra_texture_with_its_pixels_intact() {
-        let Some((device, context)) = try_device() else {
+        let Some((device, context)) = try_d3d11_device() else {
             return;
         };
         let (width, height) = (16u32, 16u32);
@@ -521,7 +489,7 @@ mod tests {
         // The bind flag every shader-based D3D11 element needs to read it.
         assert_ne!(desc.BindFlags & D3D11_BIND_SHADER_RESOURCE.0 as u32, 0);
 
-        let pixels = read_bgra(&device, &context, &texture, width, height);
+        let pixels = read_bgra(&device, &context.lock().unwrap(), &texture, width, height);
         for row in 0..height as usize {
             for column in 0..width as usize {
                 let offset = (row * width as usize + column) * 4;
@@ -538,7 +506,7 @@ mod tests {
     /// inputs must land in different DXGI formats through the same element.
     #[test]
     fn an_nv12_frame_uploads_to_an_nv12_texture() {
-        let Some((device, _context)) = try_device() else {
+        let Some((device, _context)) = try_d3d11_device() else {
             return;
         };
         let (width, height) = (16u32, 16u32);
@@ -575,7 +543,7 @@ mod tests {
 
     #[test]
     fn a_format_neither_path_handles_is_a_typed_error_not_a_panic() {
-        let Some((device, _context)) = try_device() else {
+        let Some((device, _context)) = try_d3d11_device() else {
             return;
         };
         let (width, height) = (16u32, 16u32);

@@ -673,38 +673,8 @@ impl Sink for D3d11NvencEncoder {
 
 #[cfg(test)]
 mod tests {
-    use windows::Win32::Graphics::{
-        Direct3D::D3D_DRIVER_TYPE_HARDWARE,
-        Direct3D11::{D3D11_SDK_VERSION, D3D11CreateDevice},
-    };
-
     use super::*;
-
-    /// `None` when this machine has no usable D3D11 device, so the tests
-    /// below skip with a reason rather than failing on a machine that was
-    /// never going to be able to run them.
-    fn try_device() -> Option<(ID3D11Device, Arc<Mutex<ID3D11DeviceContext>>)> {
-        let mut device = None;
-        let mut context = None;
-        let result = unsafe {
-            D3D11CreateDevice(
-                None,
-                D3D_DRIVER_TYPE_HARDWARE,
-                Default::default(),
-                Default::default(),
-                None,
-                D3D11_SDK_VERSION,
-                Some(&mut device),
-                None,
-                Some(&mut context),
-            )
-        };
-        if result.is_err() {
-            eprintln!("skipping: D3D11CreateDevice failed on this machine: {result:?}");
-            return None;
-        }
-        Some((device?, Arc::new(Mutex::new(context?))))
-    }
+    use crate::test_support::try_d3d11_device as try_device;
 
     fn options(
         codec: D3d11NvencCodec,

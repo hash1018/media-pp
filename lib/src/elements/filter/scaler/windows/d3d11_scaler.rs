@@ -658,16 +658,16 @@ mod tests {
     use std::ffi::c_void;
 
     use windows::Win32::Graphics::{
-        Direct3D::D3D_DRIVER_TYPE_HARDWARE,
         Direct3D11::{
-            D3D11_CPU_ACCESS_READ, D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE, D3D11_SDK_VERSION,
-            D3D11_SUBRESOURCE_DATA, D3D11_USAGE_STAGING, D3D11CreateDevice,
+            D3D11_CPU_ACCESS_READ, D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE,
+            D3D11_SUBRESOURCE_DATA, D3D11_USAGE_STAGING,
         },
         Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM,
     };
 
     use super::*;
     use crate::elements::{D3d11Download, D3d11Upload};
+    use crate::test_support::try_d3d11_device as try_device;
 
     struct CapturingSink {
         pp_log: PpLog,
@@ -706,41 +706,6 @@ mod tests {
             pp_log: element_pp_log(ElementType::Other, "capture", None),
         }));
         received
-    }
-
-    /// A D3D11 device and its immediate context, or `None` — after printing
-    /// why — on a machine without one, the same way every other hardware
-    /// test here skips.
-    ///
-    /// Enough for the tests that only exercise argument validation, which
-    /// `D3d11Scaler::new` rejects before it looks at what the adapter can
-    /// do. Anything that actually scales needs `try_video_device`.
-    fn try_device() -> Option<(ID3D11Device, Arc<Mutex<ID3D11DeviceContext>>)> {
-        let mut device = None;
-        let mut context = None;
-        let result = unsafe {
-            D3D11CreateDevice(
-                None,
-                D3D_DRIVER_TYPE_HARDWARE,
-                Default::default(),
-                Default::default(),
-                None,
-                D3D11_SDK_VERSION,
-                Some(&mut device),
-                None,
-                Some(&mut context),
-            )
-        };
-        if result.is_err() {
-            eprintln!("skipping: D3D11CreateDevice failed on this machine: {result:?}");
-            return None;
-        }
-        Some((
-            device.expect("D3D11CreateDevice succeeded without producing a device"),
-            Arc::new(Mutex::new(context.expect(
-                "D3D11CreateDevice succeeded without producing a context",
-            ))),
-        ))
     }
 
     /// The same device, but only when it can actually run a video

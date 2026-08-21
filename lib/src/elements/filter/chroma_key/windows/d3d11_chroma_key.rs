@@ -709,6 +709,7 @@ mod tests {
 
     use super::{super::super::options::ChromaKeyMethod, *};
     use crate::elements::D3d11Download;
+    use crate::test_support::try_d3d11_device as try_device;
 
     struct CapturingSink {
         pp_log: PpLog,
@@ -747,39 +748,6 @@ mod tests {
             pp_log: element_pp_log(ElementType::Other, "capture", None),
         }));
         received
-    }
-
-    /// A D3D11 device and its immediate context, or `None` — after printing
-    /// why — on a machine without one, the same way every other hardware
-    /// test here skips. Unlike `D3d11Scaler`, nothing in this element needs
-    /// an `ID3D11VideoDevice`: it draws through an ordinary pixel shader,
-    /// so a plain render device is enough.
-    fn try_device() -> Option<(ID3D11Device, Arc<Mutex<ID3D11DeviceContext>>)> {
-        let mut device = None;
-        let mut context = None;
-        let result = unsafe {
-            D3D11CreateDevice(
-                None,
-                D3D_DRIVER_TYPE_HARDWARE,
-                Default::default(),
-                Default::default(),
-                None,
-                D3D11_SDK_VERSION,
-                Some(&mut device),
-                None,
-                Some(&mut context),
-            )
-        };
-        if result.is_err() {
-            eprintln!("skipping: D3D11CreateDevice failed on this machine: {result:?}");
-            return None;
-        }
-        Some((
-            device.expect("D3D11CreateDevice succeeded without producing a device"),
-            Arc::new(Mutex::new(context.expect(
-                "D3D11CreateDevice succeeded without producing a context",
-            ))),
-        ))
     }
 
     fn default_options() -> ChromaKeyOptions {

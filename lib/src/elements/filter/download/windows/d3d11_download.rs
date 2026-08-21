@@ -362,16 +362,13 @@ fn create_staging_texture(
 mod tests {
     use std::ffi::c_void;
 
-    use windows::Win32::Graphics::{
-        Direct3D::D3D_DRIVER_TYPE_HARDWARE,
-        Direct3D11::{
-            D3D11_BIND_SHADER_RESOURCE, D3D11_SDK_VERSION, D3D11_SUBRESOURCE_DATA,
-            D3D11_USAGE_DEFAULT, D3D11CreateDevice,
-        },
+    use windows::Win32::Graphics::Direct3D11::{
+        D3D11_BIND_SHADER_RESOURCE, D3D11_SUBRESOURCE_DATA, D3D11_USAGE_DEFAULT,
     };
 
     use super::*;
     use crate::platform::windows::d3d11va::wrap_d3d11_texture;
+    use crate::test_support::try_d3d11_device;
 
     /// Real hardware round trip: build a small BGRA texture directly (the
     /// same shape a `D3d11VideoCompositor` output would have), wrap it as
@@ -379,28 +376,9 @@ mod tests {
     /// match what was uploaded.
     #[test]
     fn gpu_bgra_texture_round_trips_to_a_cpu_bgra_frame() {
-        let mut device = None;
-        let mut context = None;
-        let result = unsafe {
-            D3D11CreateDevice(
-                None,
-                D3D_DRIVER_TYPE_HARDWARE,
-                Default::default(),
-                Default::default(),
-                None,
-                D3D11_SDK_VERSION,
-                Some(&mut device),
-                None,
-                Some(&mut context),
-            )
-        };
-        let Ok(()) = result else {
-            eprintln!("skipping: D3D11CreateDevice failed on this machine: {result:?}");
+        let Some((device, context)) = try_d3d11_device() else {
             return;
         };
-        let device = device.expect("D3D11CreateDevice succeeded without producing a device");
-        let context = context.expect("D3D11CreateDevice succeeded without producing a context");
-        let context = Arc::new(Mutex::new(context));
 
         let (width, height) = (4u32, 4u32);
         let pixels: Vec<u8> = (0..width * height)
@@ -469,29 +447,9 @@ mod tests {
 
     #[test]
     fn downloads_only_the_selected_bgra_texture_array_slice() {
-        let mut device = None;
-        let mut context = None;
-        let result = unsafe {
-            D3D11CreateDevice(
-                None,
-                D3D_DRIVER_TYPE_HARDWARE,
-                Default::default(),
-                Default::default(),
-                None,
-                D3D11_SDK_VERSION,
-                Some(&mut device),
-                None,
-                Some(&mut context),
-            )
-        };
-        let Ok(()) = result else {
-            eprintln!("skipping: D3D11CreateDevice failed on this machine: {result:?}");
+        let Some((device, context)) = try_d3d11_device() else {
             return;
         };
-        let device = device.expect("D3D11CreateDevice succeeded without producing a device");
-        let context = Arc::new(Mutex::new(
-            context.expect("D3D11CreateDevice succeeded without producing a context"),
-        ));
 
         let (width, height) = (2u32, 2u32);
         let red = [0u8, 0, 255, 255].repeat((width * height) as usize);

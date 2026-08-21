@@ -1240,9 +1240,8 @@ unsafe fn create_output_target(
 mod tests {
     use std::collections::HashSet;
 
-    use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
-
     use super::*;
+    use crate::test_support::try_d3d11_device as try_device;
     use crate::{
         color::Color,
         elements::{D3d11Download, VideoRect},
@@ -1280,37 +1279,6 @@ mod tests {
         fn control(&mut self, _msg: ControlMsg) -> Result<()> {
             Ok(())
         }
-    }
-
-    /// `None` if this machine has no working D3D11 hardware device —
-    /// every test here skips gracefully in that case, same convention as
-    /// `D3d11Upload`/`D3d11Decoder`/`D3d11Download`'s own hardware tests.
-    fn try_device() -> Option<(ID3D11Device, Arc<Mutex<ID3D11DeviceContext>>)> {
-        let mut device = None;
-        let mut context = None;
-        let result = unsafe {
-            D3D11CreateDevice(
-                None,
-                D3D_DRIVER_TYPE_HARDWARE,
-                Default::default(),
-                Default::default(),
-                None,
-                D3D11_SDK_VERSION,
-                Some(&mut device),
-                None,
-                Some(&mut context),
-            )
-        };
-        if result.is_err() {
-            eprintln!("skipping: D3D11CreateDevice failed on this machine: {result:?}");
-            return None;
-        }
-        Some((
-            device.expect("D3D11CreateDevice succeeded without producing a device"),
-            Arc::new(Mutex::new(context.expect(
-                "D3D11CreateDevice succeeded without producing a context",
-            ))),
-        ))
     }
 
     fn bgra_texture(

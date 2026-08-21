@@ -279,12 +279,8 @@ unsafe extern "C" fn get_format(
 
 #[cfg(test)]
 mod tests {
-    use windows::Win32::Graphics::{
-        Direct3D::D3D_DRIVER_TYPE_HARDWARE,
-        Direct3D11::{D3D11_SDK_VERSION, D3D11CreateDevice},
-    };
-
     use super::*;
+    use crate::test_support::try_d3d11_device;
 
     /// Regression test for a real crash (`STATUS_ACCESS_VIOLATION`/
     /// `STATUS_BREAKPOINT`, depending on the run) found via
@@ -303,25 +299,9 @@ mod tests {
     /// it deterministically.
     #[test]
     fn decodes_a_full_file_and_tears_down_cleanly() {
-        let mut device = None;
-        let result = unsafe {
-            D3D11CreateDevice(
-                None,
-                D3D_DRIVER_TYPE_HARDWARE,
-                Default::default(),
-                Default::default(),
-                None,
-                D3D11_SDK_VERSION,
-                Some(&mut device),
-                None,
-                None,
-            )
-        };
-        let Ok(()) = result else {
-            eprintln!("skipping: D3D11CreateDevice failed on this machine: {result:?}");
+        let Some((device, _context)) = try_d3d11_device() else {
             return;
         };
-        let device = device.expect("D3D11CreateDevice succeeded without producing a device");
 
         let Some(path) = crate::test_support::try_test_video() else {
             return;

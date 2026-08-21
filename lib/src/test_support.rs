@@ -38,6 +38,62 @@ pub(crate) fn try_test_video() -> Option<String> {
     Some(path)
 }
 
+/// A hardware D3D11 device and its shared immediate context for unit tests.
+/// Prints the platform error and returns `None` when the machine cannot create
+/// one, so callers can use the repository's normal hardware-test skip path.
+#[cfg(all(target_os = "windows", feature = "d3d11"))]
+pub(crate) fn try_d3d11_device() -> Option<(
+    windows::Win32::Graphics::Direct3D11::ID3D11Device,
+    std::sync::Arc<std::sync::Mutex<windows::Win32::Graphics::Direct3D11::ID3D11DeviceContext>>,
+)> {
+    use windows::Win32::Graphics::{
+        Direct3D::D3D_DRIVER_TYPE_HARDWARE,
+        Direct3D11::{D3D11_SDK_VERSION, D3D11CreateDevice},
+    };
+
+    let mut device = None;
+    let mut context = None;
+    let result = unsafe {
+        D3D11CreateDevice(
+            None,
+            D3D_DRIVER_TYPE_HARDWARE,
+            Default::default(),
+            Default::default(),
+            None,
+            D3D11_SDK_VERSION,
+            Some(&mut device),
+            None,
+            Some(&mut context),
+        )
+    };
+    if let Err(error) = result {
+        eprintln!("skipping: D3D11CreateDevice failed on this machine: {error}");
+        return None;
+    }
+    Some((
+        device.expect("D3D11CreateDevice succeeded without producing a device"),
+        std::sync::Arc::new(std::sync::Mutex::new(
+            context.expect("D3D11CreateDevice succeeded without producing a context"),
+        )),
+    ))
+}
+
+/// A hardware D3D12 device for unit tests, with the same graceful skip
+/// behavior as the D3D11 test-device helper.
+#[cfg(all(target_os = "windows", feature = "d3d12"))]
+pub(crate) fn try_d3d12_device() -> Option<windows::Win32::Graphics::Direct3D12::ID3D12Device> {
+    use windows::Win32::Graphics::{
+        Direct3D::D3D_FEATURE_LEVEL_11_0, Direct3D12::D3D12CreateDevice,
+    };
+
+    let mut device = None;
+    if let Err(error) = unsafe { D3D12CreateDevice(None, D3D_FEATURE_LEVEL_11_0, &mut device) } {
+        eprintln!("skipping: D3D12CreateDevice failed on this machine: {error}");
+        return None;
+    }
+    device
+}
+
 /// A CUDA device for a hardware test, together with the lock that keeps
 /// CUDA tests from overlapping. `None` — after printing why — on a machine
 /// without a usable device, the same way [`try_test_video`] skips without a
