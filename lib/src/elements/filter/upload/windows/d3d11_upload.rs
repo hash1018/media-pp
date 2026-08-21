@@ -8,7 +8,7 @@ use windows::Win32::Graphics::{
         D3D11_BIND_SHADER_RESOURCE, D3D11_SUBRESOURCE_DATA, D3D11_TEXTURE2D_DESC,
         D3D11_USAGE_DEFAULT, ID3D11Device, ID3D11Texture2D,
     },
-    Dxgi::Common::{DXGI_FORMAT_NV12, DXGI_SAMPLE_DESC},
+    Dxgi::Common::{DXGI_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_NV12, DXGI_SAMPLE_DESC},
 };
 
 use crate::{
@@ -29,10 +29,20 @@ pub enum D3d11UploadError {
     Windows(#[from] windows::core::Error),
 
     #[error(
-        "D3d11Upload only accepts Pixel::NV12 frames (chain a SwScaler in \
-         front of it), got {0:?}"
+        "D3d11Upload only accepts Pixel::NV12 and Pixel::BGRA frames (chain a \
+         SwScaler in front of it), got {0:?}"
     )]
     UnsupportedFormat(ffmpeg::format::Pixel),
+
+    #[error(
+        "frame's plane holds {actual} bytes, too few for {height} rows of \
+         stride {stride}; uploading it would read past the end of the buffer"
+    )]
+    PlaneTooSmall {
+        actual: usize,
+        stride: usize,
+        height: u32,
+    },
 
     #[error(
         "frame is {actual_width}x{actual_height}, but D3d11Upload was \
@@ -49,13 +59,24 @@ pub enum D3d11UploadError {
     UnsupportedBuffer(&'static str),
 }
 
-/// Uploads CPU-resident `Pixel::NV12` video frames to GPU-resident `Video`
-/// frames tagged `Pixel::D3D11` — the D3D11 sibling of
+/// Uploads CPU-resident `Pixel::NV12` and `Pixel::BGRA` video frames to
+/// GPU-resident `Video` frames tagged `Pixel::D3D11` — the D3D11 sibling of
 /// [`crate::elements::D3d12Upload`], for a pipeline built entirely on one
 /// shared `ID3D11Device` (see [`crate::elements::D3d11Renderer`]'s own
-/// docs on why). Only accepts `Pixel::NV12` input — chain a
-/// [`crate::elements::SwScaler`] (`dst_format = Pixel::NV12`) in front of
-/// this if the source produces something else.
+/// docs on why). Chain a [`crate::elements::SwScaler`] in front of this if
+/// the source produces anything else.
+///
+/// # Which of the two to feed it
+///
+/// The texture's format follows the frame's rather than being configured:
+/// there is exactly one right answer per frame, and asking a caller to
+/// declare it alongside would only create a second thing to get wrong.
+/// `NV12` is the format for a decode/encode path — it is what
+/// [`crate::elements::D3d11Decoder`] produces and what a hardware encoder
+/// wants. `BGRA` is the format for anything that composites: it carries an
+/// alpha channel, so it is what a [`crate::elements::D3d11VideoCompositor`]
+/// layer and [`crate::elements::D3d11ChromaKey`] work in, and it skips the
+/// color conversion a YUV round trip would cost.
 ///
 /// Unlike `D3d12Upload`, this does **not** go through FFmpeg's
 /// `av_hwframe_get_buffer`/`av_hwframe_transfer_data` hwframe-pool
@@ -115,20 +136,13 @@ impl D3d11Upload {
         }
     }
 
-    /// Builds one GPU `ID3D11Texture2D` (`DXGI_FORMAT_NV12`, `D3D11_USAGE_DEFAULT`,
-    /// `D3D11_BIND_SHADER_RESOURCE` — enough for
-    /// [`crate::elements::D3d11Renderer`] to build an SRV from, nothing
-    /// decode-specific) with `frame`'s pixel data as its initial contents.
-    /// NV12 is one GPU resource covering both planes — D3D11 expects the
-    /// source buffer laid out as the full-height luma rows immediately
-    /// followed by the half-height interleaved-chroma rows, all sharing
-    /// one row pitch, which is why this copies both of `frame`'s own
-    /// (independently strided) planes into one packed buffer first rather
-    /// than uploading them separately.
-    fn upload(
-        &self,
-        frame: &ffmpeg::frame::Video,
-    ) -> std::result::Result<ID3D11Texture2D, windows::core::Error> {
+    /// Repacks an NV12 frame into the single buffer D3D11 wants. NV12 is
+    /// one GPU resource covering both planes, and D3D11 expects the source
+    /// laid out as the full-height luma rows immediately followed by the
+    /// half-height interleaved-chroma rows, all sharing one row pitch —
+    /// whereas `frame`'s two planes are separately allocated and
+    /// independently strided.
+    fn pack_nv12(&self, frame: &ffmpeg::frame::Video) -> Vec<u8> {
         let row_bytes = self.width as usize;
         let luma_rows = self.height as usize;
         let chroma_rows = self.height.div_ceil(2) as usize;
@@ -145,13 +159,50 @@ impl D3d11Upload {
             packed[dst..dst + row_bytes]
                 .copy_from_slice(&chroma_src[row * chroma_stride..row * chroma_stride + row_bytes]);
         }
+        packed
+    }
+
+    /// Builds one GPU `ID3D11Texture2D` (`D3D11_USAGE_DEFAULT`,
+    /// `D3D11_BIND_SHADER_RESOURCE` — enough for
+    /// [`crate::elements::D3d11Renderer`] to build an SRV from, nothing
+    /// decode-specific) with `frame`'s pixel data as its initial contents.
+    ///
+    /// A BGRA frame is handed over in place, with its own stride as the
+    /// row pitch: it is a single plane, so unlike NV12 there is nothing to
+    /// repack and no staging copy to pay for.
+    fn upload(
+        &self,
+        frame: &ffmpeg::frame::Video,
+        format: DXGI_FORMAT,
+    ) -> std::result::Result<ID3D11Texture2D, D3d11UploadError> {
+        let packed = (format == DXGI_FORMAT_NV12).then(|| self.pack_nv12(frame));
+        let (pixels, pitch) = match &packed {
+            Some(packed) => (packed.as_slice(), self.width as usize),
+            None => (frame.data(0), frame.stride(0)),
+        };
+        // D3D11 reads `pitch` bytes for each of the texture's rows straight
+        // out of this pointer. The NV12 buffer was just sized here, but a
+        // BGRA frame's plane belongs to whoever allocated it, so its extent
+        // is checked rather than assumed — a short buffer would be an
+        // out-of-bounds read inside the driver, not a Rust panic.
+        let rows = match &packed {
+            Some(_) => self.height as usize + self.height.div_ceil(2) as usize,
+            None => self.height as usize,
+        };
+        if pixels.len() < pitch * rows {
+            return Err(D3d11UploadError::PlaneTooSmall {
+                actual: pixels.len(),
+                stride: pitch,
+                height: rows as u32,
+            });
+        }
 
         let desc = D3D11_TEXTURE2D_DESC {
             Width: self.width,
             Height: self.height,
             MipLevels: 1,
             ArraySize: 1,
-            Format: DXGI_FORMAT_NV12,
+            Format: format,
             SampleDesc: DXGI_SAMPLE_DESC {
                 Count: 1,
                 Quality: 0,
@@ -162,8 +213,8 @@ impl D3d11Upload {
             MiscFlags: 0,
         };
         let initial_data = D3D11_SUBRESOURCE_DATA {
-            pSysMem: packed.as_ptr() as *const c_void,
-            SysMemPitch: row_bytes as u32,
+            pSysMem: pixels.as_ptr() as *const c_void,
+            SysMemPitch: pitch as u32,
             SysMemSlicePitch: 0,
         };
         let mut texture: Option<ID3D11Texture2D> = None;
@@ -172,6 +223,16 @@ impl D3d11Upload {
                 .CreateTexture2D(&desc, Some(&initial_data), Some(&mut texture))?;
         }
         Ok(texture.expect("CreateTexture2D succeeded without producing a texture"))
+    }
+}
+
+/// The DXGI format a CPU pixel format uploads into, or `None` for one this
+/// element cannot upload at all.
+fn texture_format(format: ffmpeg::format::Pixel) -> Option<DXGI_FORMAT> {
+    match format {
+        ffmpeg::format::Pixel::NV12 => Some(DXGI_FORMAT_NV12),
+        ffmpeg::format::Pixel::BGRA => Some(DXGI_FORMAT_B8G8R8A8_UNORM),
+        _ => None,
     }
 }
 
@@ -203,10 +264,10 @@ impl Sink for D3d11Upload {
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         match buf {
             MediaBuffer::Video(frame) => {
-                if frame.format() != ffmpeg::format::Pixel::NV12 {
+                let Some(format) = texture_format(frame.format()) else {
                     pp_error!(self, "unsupported pixel format: {:?}", frame.format());
                     return Err(D3d11UploadError::UnsupportedFormat(frame.format()).into());
-                }
+                };
                 if frame.width() != self.width || frame.height() != self.height {
                     let error = D3d11UploadError::DimensionMismatch {
                         actual_width: frame.width(),
@@ -219,9 +280,8 @@ impl Sink for D3d11Upload {
                 }
 
                 let texture = self
-                    .upload(&frame)
-                    .inspect_err(|error| pp_error!(self, "GPU upload failed: {error}"))
-                    .map_err(D3d11UploadError::from)?;
+                    .upload(&frame, format)
+                    .inspect_err(|error| pp_error!(self, "GPU upload failed: {error}"))?;
                 let mut gpu_frame = self.pool.get();
                 // Overwrites the pooled slot's previous contents in
                 // place — `ffmpeg::frame::Video`'s own `Drop` runs on
@@ -255,20 +315,72 @@ impl Sink for D3d11Upload {
 
 #[cfg(test)]
 mod tests {
-    use windows::Win32::Graphics::{
-        Direct3D::D3D_DRIVER_TYPE_HARDWARE,
-        Direct3D11::{D3D11_SDK_VERSION, D3D11CreateDevice},
+    use std::sync::Mutex;
+
+    use windows::{
+        Win32::Graphics::{
+            Direct3D::D3D_DRIVER_TYPE_HARDWARE,
+            Direct3D11::{
+                D3D11_CPU_ACCESS_READ, D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE, D3D11_SDK_VERSION,
+                D3D11_USAGE_STAGING, D3D11CreateDevice, ID3D11DeviceContext,
+            },
+        },
+        core::Interface,
     };
 
     use super::*;
-    use crate::pool::UnboundObjectPool;
+    use crate::{
+        element::{Element, ElementType, Sink, Source, element_pp_log},
+        elements::filter::decoder::d3d11va_decoder::d3d11va_texture,
+        pool::UnboundObjectPool,
+    };
 
-    /// Real hardware round trip for the plain-`windows-rs` (not
-    /// hand-mirrored-struct) upload path — see [`D3d11Upload`]'s own docs
-    /// on why it's built this way.
-    #[test]
-    fn cpu_nv12_frame_round_trips_to_a_gpu_d3d11_frame() {
+    struct CapturingSink {
+        pp_log: PpLog,
+        received: Arc<Mutex<Vec<MediaBuffer>>>,
+    }
+
+    impl Element for CapturingSink {
+        fn name(&self) -> Arc<str> {
+            "capture".into()
+        }
+        fn element_type(&self) -> ElementType {
+            ElementType::Other
+        }
+        fn pp_log(&self) -> &PpLog {
+            &self.pp_log
+        }
+        fn pp_log_mut(&mut self) -> &mut PpLog {
+            &mut self.pp_log
+        }
+    }
+
+    impl Sink for CapturingSink {
+        fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+            self.received.lock().unwrap().push(buf);
+            Ok(())
+        }
+        fn control(&mut self, _msg: ControlMsg) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    fn capture(element: &mut dyn Source) -> Arc<Mutex<Vec<MediaBuffer>>> {
+        let received = Arc::new(Mutex::new(Vec::new()));
+        element.src_pads()[0].link(Box::new(CapturingSink {
+            received: received.clone(),
+            pp_log: element_pp_log(ElementType::Other, "capture", None),
+        }));
+        received
+    }
+
+    /// A D3D11 device and its immediate context, or `None` — after printing
+    /// why — on a machine without one, the same way every other hardware
+    /// test here skips. `D3d11Upload` itself needs no context; the tests
+    /// that read a texture back do.
+    fn try_device() -> Option<(ID3D11Device, ID3D11DeviceContext)> {
         let mut device = None;
+        let mut context = None;
         let result = unsafe {
             D3D11CreateDevice(
                 None,
@@ -279,17 +391,153 @@ mod tests {
                 D3D11_SDK_VERSION,
                 Some(&mut device),
                 None,
-                None,
+                Some(&mut context),
             )
         };
-        let Ok(()) = result else {
+        if result.is_err() {
             eprintln!("skipping: D3D11CreateDevice failed on this machine: {result:?}");
+            return None;
+        }
+        Some((
+            device.expect("D3D11CreateDevice succeeded without producing a device"),
+            context.expect("D3D11CreateDevice succeeded without producing a context"),
+        ))
+    }
+
+    /// Reads a BGRA texture back through a staging copy, tightly packed —
+    /// what makes "the pixels arrived intact" checkable rather than just
+    /// "the API returned S_OK".
+    fn read_bgra(
+        device: &ID3D11Device,
+        context: &ID3D11DeviceContext,
+        texture: &ID3D11Texture2D,
+        width: u32,
+        height: u32,
+    ) -> Vec<u8> {
+        let desc = D3D11_TEXTURE2D_DESC {
+            Width: width,
+            Height: height,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Usage: D3D11_USAGE_STAGING,
+            BindFlags: 0,
+            CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
+            MiscFlags: 0,
+        };
+        let mut staging = None;
+        unsafe {
+            device
+                .CreateTexture2D(&desc, None, Some(&mut staging))
+                .expect("CreateTexture2D(BGRA staging) failed");
+        }
+        let staging = staging.expect("CreateTexture2D succeeded without producing a texture");
+
+        let mut pixels = Vec::with_capacity((width * height * 4) as usize);
+        unsafe {
+            context.CopyResource(&staging, texture);
+            let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+            context
+                .Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
+                .expect("Map(BGRA staging) failed");
+            let stride = mapped.RowPitch as usize;
+            let base = mapped.pData as *const u8;
+            for row in 0..height as usize {
+                let row_bytes =
+                    std::slice::from_raw_parts(base.add(row * stride), width as usize * 4);
+                pixels.extend_from_slice(row_bytes);
+            }
+            context.Unmap(&staging, 0);
+        }
+        pixels
+    }
+
+    /// The compositing path's format. A layer, a chroma key, and a renderer
+    /// all work in BGRA, so an upload that could only produce NV12 forced a
+    /// color round trip on anything headed for one of them.
+    #[test]
+    fn a_cpu_bgra_frame_uploads_to_a_bgra_texture_with_its_pixels_intact() {
+        let Some((device, context)) = try_device() else {
             return;
         };
-        let device = device.expect("D3D11CreateDevice succeeded without producing a device");
-
         let (width, height) = (16u32, 16u32);
         let mut upload = D3d11Upload::new("test-upload", &device, width, height);
+        let received = capture(&mut upload);
+
+        let color = [10u8, 200, 30, 255]; // BGRA
+        let pool = UnboundObjectPool::new(
+            0,
+            move || ffmpeg::frame::Video::new(ffmpeg::format::Pixel::BGRA, width, height),
+            |_| {},
+        );
+        let mut frame = pool.get();
+        let stride = frame.stride(0);
+        {
+            let data = frame.data_mut(0);
+            for row in 0..height as usize {
+                for column in 0..width as usize {
+                    let offset = row * stride + column * 4;
+                    data[offset..offset + 4].copy_from_slice(&color);
+                }
+            }
+        }
+        frame.set_pts(Some(42));
+
+        upload
+            .consume(MediaBuffer::Video(Arc::new(frame)))
+            .expect("CPU BGRA -> GPU D3D11 upload should succeed on a working device");
+
+        let received = received.lock().unwrap();
+        let MediaBuffer::Video(uploaded) = &received[0] else {
+            panic!("expected a Video buffer");
+        };
+        assert_eq!(uploaded.format(), ffmpeg::format::Pixel::D3D11);
+        assert_eq!(uploaded.pts(), Some(42), "the upload dropped the pts");
+
+        let (texture_raw, _) =
+            d3d11va_texture(uploaded).expect("the uploaded frame carries a texture");
+        let texture = unsafe {
+            ID3D11Texture2D::from_raw_borrowed(&texture_raw)
+                .expect("the texture pointer must not be null")
+                .clone()
+        };
+        let mut desc = D3D11_TEXTURE2D_DESC::default();
+        unsafe { texture.GetDesc(&mut desc) };
+        assert_eq!(
+            desc.Format, DXGI_FORMAT_B8G8R8A8_UNORM,
+            "a BGRA frame must not be uploaded as anything else"
+        );
+        assert_eq!((desc.Width, desc.Height), (width, height));
+        // The bind flag every shader-based D3D11 element needs to read it.
+        assert_ne!(desc.BindFlags & D3D11_BIND_SHADER_RESOURCE.0 as u32, 0);
+
+        let pixels = read_bgra(&device, &context, &texture, width, height);
+        for row in 0..height as usize {
+            for column in 0..width as usize {
+                let offset = (row * width as usize + column) * 4;
+                assert_eq!(
+                    &pixels[offset..offset + 4],
+                    color,
+                    "row {row}, column {column} did not survive the upload"
+                );
+            }
+        }
+    }
+
+    /// The texture's format is taken from the frame, so the two supported
+    /// inputs must land in different DXGI formats through the same element.
+    #[test]
+    fn an_nv12_frame_uploads_to_an_nv12_texture() {
+        let Some((device, _context)) = try_device() else {
+            return;
+        };
+        let (width, height) = (16u32, 16u32);
+        let mut upload = D3d11Upload::new("test-upload", &device, width, height);
+        let received = capture(&mut upload);
 
         let pool = UnboundObjectPool::new(
             0,
@@ -297,12 +545,52 @@ mod tests {
             |_| {},
         );
         let mut frame = pool.get();
-        frame.data_mut(0).fill(16); // Y
-        frame.data_mut(1).fill(128); // interleaved UV
-        frame.set_pts(Some(42));
-
+        frame.data_mut(0).fill(16);
+        frame.data_mut(1).fill(128);
         upload
             .consume(MediaBuffer::Video(Arc::new(frame)))
             .expect("CPU NV12 -> GPU D3D11 upload should succeed on a working device");
+
+        let received = received.lock().unwrap();
+        let MediaBuffer::Video(uploaded) = &received[0] else {
+            panic!("expected a Video buffer");
+        };
+        let (texture_raw, _) =
+            d3d11va_texture(uploaded).expect("the uploaded frame carries a texture");
+        let texture = unsafe {
+            ID3D11Texture2D::from_raw_borrowed(&texture_raw)
+                .expect("the texture pointer must not be null")
+                .clone()
+        };
+        let mut desc = D3D11_TEXTURE2D_DESC::default();
+        unsafe { texture.GetDesc(&mut desc) };
+        assert_eq!(desc.Format, DXGI_FORMAT_NV12);
+    }
+
+    #[test]
+    fn a_format_neither_path_handles_is_a_typed_error_not_a_panic() {
+        let Some((device, _context)) = try_device() else {
+            return;
+        };
+        let (width, height) = (16u32, 16u32);
+        let mut upload = D3d11Upload::new("test-upload", &device, width, height);
+
+        let pool = UnboundObjectPool::new(
+            0,
+            move || ffmpeg::frame::Video::new(ffmpeg::format::Pixel::YUV420P, width, height),
+            |_| {},
+        );
+        let error = upload
+            .consume(MediaBuffer::Video(Arc::new(pool.get())))
+            .expect_err("YUV420P must be rejected");
+        assert!(
+            matches!(
+                error,
+                crate::error::Error::D3d11UploadError(D3d11UploadError::UnsupportedFormat(
+                    ffmpeg::format::Pixel::YUV420P
+                ))
+            ),
+            "unexpected error: {error}"
+        );
     }
 }

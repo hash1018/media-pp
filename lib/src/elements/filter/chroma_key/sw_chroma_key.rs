@@ -4,6 +4,7 @@ use crate::pp_log::{PpLog, pp_debug, pp_error, pp_info};
 use ffmpeg_next as ffmpeg;
 use thiserror::Error as ThisError;
 
+use super::options::ChromaKeyOptions;
 use crate::{
     buffer::MediaBuffer,
     color::Color,
@@ -38,46 +39,9 @@ pub enum SwChromaKeyError {
     UnsupportedBuffer(&'static str),
 }
 
-/// Which background color [`SwChromaKey`] treats as transparent. `Green`/
-/// `Blue` are the two conventional screen colors (mirroring GStreamer's
-/// `alpha` element's `method` property); `Custom` covers anything else —
-/// a differently colored backdrop, or a solid-color background that isn't
-/// a screen at all.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ChromaKeyMethod {
-    Green,
-    Blue,
-    Custom(Color),
-}
-
-impl ChromaKeyMethod {
-    fn key_color(self) -> Color {
-        match self {
-            ChromaKeyMethod::Green => Color::new(0, 255, 0),
-            ChromaKeyMethod::Blue => Color::new(0, 0, 255),
-            ChromaKeyMethod::Custom(color) => color,
-        }
-    }
-}
-
-/// Construction-time options for [`SwChromaKey::new`].
-#[derive(Debug, Clone, Copy)]
-pub struct ChromaKeyOptions {
-    pub method: ChromaKeyMethod,
-    /// How far (as a fraction of the maximum possible RGB distance, so
-    /// `0.0..=1.0` is the meaningful range) a pixel may differ from the key
-    /// color before it counts as foreground rather than background.
-    pub threshold: f32,
-    /// Width of the linear feather band straddling `threshold`, in the
-    /// same 0.0..=1.0 units — this is what keeps a key edge from aliasing
-    /// into a hard, jagged cutout. `0.0` (or negative) is a hard step with
-    /// no feathering at all.
-    pub smoothing: f32,
-}
-
 /// Keys a solid background color out of a decoded BGRA frame into alpha —
-/// the software half of this crate's chroma-key support (a GPU-resident
-/// counterpart is planned; see this module's own docs). A `Filter`:
+/// the software half of this crate's chroma-key support, the GPU-resident
+/// other half being [`crate::elements::D3d11ChromaKey`]. A `Filter`:
 /// receives via `Sink`, pushes the keyed frame on through its own (single)
 /// src pad.
 ///
@@ -274,7 +238,7 @@ fn alpha_for(distance: f32, threshold: f32, smoothing: f32) -> u8 {
 mod tests {
     use std::sync::Mutex;
 
-    use super::*;
+    use super::{super::options::ChromaKeyMethod, *};
 
     struct CapturingSink {
         pp_log: PpLog,

@@ -56,6 +56,7 @@ pub enum ElementType {
     SwChromaKey,
     CudaScaler,
     D3d11Scaler,
+    D3d11ChromaKey,
     Tee,
     Queue,
     FrameCounter,

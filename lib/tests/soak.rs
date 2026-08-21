@@ -593,9 +593,12 @@ mod d3d11 {
 
     use ffmpeg_next as ffmpeg;
     use media_pp::{
+        color::Color,
         elements::{
-            D3d11Decoder, D3d11NvencCodec, D3d11NvencEncoder, D3d11NvencEncoderOptions,
-            D3d11NvencInputFormat, D3d11Scaler, D3d11Upload, FrameCounter, PacketCounter, SwScaler,
+            ChromaKeyMethod, ChromaKeyOptions, D3d11ChromaKey, D3d11Decoder, D3d11NvencCodec,
+            D3d11NvencEncoder, D3d11NvencEncoderOptions, D3d11NvencInputFormat, D3d11Scaler,
+            D3d11Upload, D3d11VideoCompositor, FrameCounter, PacketCounter, SwScaler,
+            VideoCompositorOptions, VideoLayer, VideoRect,
         },
         pipeline::Pipeline,
     };
@@ -655,6 +658,97 @@ mod d3d11 {
         pipeline.run();
         thread::sleep(Duration::from_millis(250));
         teardown.apply(&pipeline);
+        frames.load(Ordering::Relaxed)
+    }
+
+    /// Key a compositor's own BGRA output on the GPU. What this adds over
+    /// the upload/scale scenario is the per-frame render-target and
+    /// shader-resource views `D3d11ChromaKey` creates around each draw:
+    /// those are COM objects the shared context also holds a reference to
+    /// until the element clears its bindings, so a missed release shows up
+    /// on the debug layer's live-object count long before it is visible in
+    /// adapter memory.
+    ///
+    /// The compositor is here because it is the only headless producer of
+    /// GPU-resident BGRA in this crate — `D3d11Upload` is NV12-only, and
+    /// desktop capture needs a desktop. It is also the real topology: this
+    /// element exists to key a layer without leaving video memory.
+    fn chroma_key_cycle(
+        device: &ID3D11Device,
+        context: &Arc<Mutex<ID3D11DeviceContext>>,
+        teardown: Teardown,
+    ) -> usize {
+        let (compositor, compositor_handle) = D3d11VideoCompositor::new(
+            "compositor",
+            device,
+            context.clone(),
+            VideoCompositorOptions {
+                width: WIDTH,
+                height: HEIGHT,
+                frame_rate: frame_rate(),
+                background: Color::new(0, 255, 0),
+            },
+        )
+        .expect("build the compositor");
+        let layer_sink = compositor_handle
+            .add_source(
+                "layer",
+                VideoLayer::new(VideoRect::new(0, 0, WIDTH, HEIGHT)),
+            )
+            .expect("register the compositor input")
+            .expect("the compositor is alive")
+            .sink;
+
+        let input_device = device.clone();
+        let input_pipeline = Pipeline::new("soak-d3d11-key-input", test_source("video"), {
+            move |source, ctx| {
+                let to_nv12 = SwScaler::new(
+                    "to-nv12",
+                    ffmpeg::format::Pixel::NV12,
+                    WIDTH,
+                    HEIGHT,
+                    ffmpeg::software::scaling::Flags::BILINEAR,
+                );
+                let upload = D3d11Upload::new("upload", &input_device, WIDTH, HEIGHT);
+                let branch = ctx.branch().pipe(to_nv12).pipe(upload).to(layer_sink)?;
+                ctx.attach(source, 0, branch)?;
+                Ok(())
+            }
+        })
+        .expect("wire the compositor input pipeline");
+
+        let (counter, frames) = FrameCounter::new("counter");
+        let key_device = device.clone();
+        let key_context = context.clone();
+        let output_pipeline = Pipeline::new("soak-d3d11-key", compositor, move |source, ctx| {
+            let key = D3d11ChromaKey::new(
+                "key",
+                &key_device,
+                key_context,
+                ChromaKeyOptions {
+                    method: ChromaKeyMethod::Green,
+                    threshold: 0.15,
+                    smoothing: 0.1,
+                },
+            )?;
+            let branch = ctx
+                .branch()
+                .pipe(key)
+                .queue("keyed-frames", 4)
+                .to(Box::new(counter))?;
+            ctx.attach(source, 0, branch)?;
+            Ok(())
+        })
+        .expect("wire the chroma-key pipeline");
+
+        output_pipeline.run();
+        input_pipeline.run();
+        thread::sleep(Duration::from_millis(250));
+        // The input goes first: the compositor keeps drawing from whatever
+        // it last received, so tearing it down first would leave the input
+        // pushing into a sink that is already gone.
+        teardown.apply(&input_pipeline);
+        teardown.apply(&output_pipeline);
         frames.load(Ordering::Relaxed)
     }
 
@@ -911,6 +1005,39 @@ mod d3d11 {
                 vram: 1.0 * MIB,
             },
             |teardown| cycle(&device, &context, teardown),
+        );
+    }
+
+    #[test]
+    #[ignore = "soak test; run with --ignored"]
+    fn chroma_key_cycles_do_not_grow_gpu_memory() {
+        isolate!();
+        let _exclusive = exclusive();
+        media_pp::init().expect("ffmpeg init");
+        let Some((device, context, live)) = try_d3d11_device() else {
+            return;
+        };
+        // The live-object count is the gauge that matters here, and the
+        // reason this scenario exists. Every frame builds an output
+        // texture, its render-target view, and the input.s shader-resource
+        // view in both the compositor and the key, and a D3D11 object whose
+        // last reference is dropped is only queued for destruction — it
+        // survives until the context is flushed. Before `D3d11ChromaKey`
+        // flushed, this cycle grew the device.s object count by 65 per
+        // cycle and adapter memory by 5 MiB per cycle, both dead straight
+        // over 40 cycles; all three gauges are flat with the flush in
+        // place, which is where these thresholds come from.
+        measure_cycles(
+            "d3d11 chroma key cycle",
+            &device,
+            live.map(Arc::new),
+            Budget {
+                warmup: WARMUP,
+                iterations: iterations(15),
+                memory: Some(0.5 * MIB),
+                vram: 1.0 * MIB,
+            },
+            |teardown| chroma_key_cycle(&device, &context, teardown),
         );
     }
 

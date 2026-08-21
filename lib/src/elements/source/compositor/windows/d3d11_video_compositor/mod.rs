@@ -23,10 +23,7 @@ use thiserror::Error as ThisError;
 use windows::{
     Win32::Foundation::RECT,
     Win32::Graphics::{
-        Direct3D::{
-            D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, D3D_SRV_DIMENSION_TEXTURE2DARRAY, Fxc::*,
-            ID3DBlob, ID3DInclude,
-        },
+        Direct3D::{D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, D3D_SRV_DIMENSION_TEXTURE2DARRAY},
         Direct3D11::*,
         Dxgi::Common::{
             DXGI_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_NV12, DXGI_FORMAT_R8_UNORM,
@@ -57,6 +54,7 @@ use crate::{
     },
     error::Result,
     pad::SrcPad,
+    platform::windows::d3d11::compile_shader,
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
     schedule::PeriodicSchedule,
 };
@@ -1074,9 +1072,24 @@ unsafe fn build_pipeline_state(
     ID3D11Buffer,
 )> {
     unsafe {
-        let vertex_bytecode = compile_shader(BGRA_SHADER_SOURCE, s!("vs_main"), s!("vs_5_0"))?;
-        let bgra_bytecode = compile_shader(BGRA_SHADER_SOURCE, s!("ps_bgra"), s!("ps_5_0"))?;
-        let nv12_bytecode = compile_shader(NV12_SHADER_SOURCE, s!("ps_nv12"), s!("ps_5_0"))?;
+        let vertex_bytecode = compile_shader(
+            BGRA_SHADER_SOURCE,
+            s!("composite_bgra.hlsl"),
+            s!("vs_main"),
+            s!("vs_5_0"),
+        )?;
+        let bgra_bytecode = compile_shader(
+            BGRA_SHADER_SOURCE,
+            s!("composite_bgra.hlsl"),
+            s!("ps_bgra"),
+            s!("ps_5_0"),
+        )?;
+        let nv12_bytecode = compile_shader(
+            NV12_SHADER_SOURCE,
+            s!("composite_nv12.hlsl"),
+            s!("ps_nv12"),
+            s!("ps_5_0"),
+        )?;
 
         let mut vertex_shader = None;
         device.CreateVertexShader(
@@ -1185,51 +1198,6 @@ unsafe fn build_pipeline_state(
             layer_buffer,
         ))
     }
-}
-
-unsafe fn compile_shader(
-    source: &[u8],
-    entry: windows::core::PCSTR,
-    target: windows::core::PCSTR,
-) -> windows::core::Result<ID3DBlob> {
-    let mut shader = None;
-    let mut errors = None;
-    let flags = if cfg!(debug_assertions) {
-        D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION
-    } else {
-        D3DCOMPILE_OPTIMIZATION_LEVEL3
-    };
-    let result = unsafe {
-        D3DCompile(
-            source.as_ptr().cast::<c_void>(),
-            source.len(),
-            s!("d3d11_video_compositor.hlsl"),
-            None,
-            None::<&ID3DInclude>,
-            entry,
-            target,
-            flags,
-            0,
-            &mut shader,
-            Some(&mut errors),
-        )
-    };
-    if let Err(error) = result {
-        let message = errors
-            .map(|blob| unsafe {
-                let bytes = std::slice::from_raw_parts(
-                    blob.GetBufferPointer().cast::<u8>(),
-                    blob.GetBufferSize(),
-                );
-                String::from_utf8_lossy(bytes).into_owned()
-            })
-            .unwrap_or_else(|| error.message());
-        return Err(windows::core::Error::new(
-            windows::Win32::Foundation::E_FAIL,
-            message,
-        ));
-    }
-    Ok(shader.unwrap())
 }
 
 unsafe fn create_output_target(
