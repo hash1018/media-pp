@@ -15,6 +15,16 @@
 //! be copied into Vulkan-owned memory (see `CudaFrameRenderer`'s docs on why
 //! the direction is fixed), so the graphics API is an implementation detail
 //! here exactly as the swapchain is on the D3D side.
+//!
+//! Both stacks present from the pipeline's own thread into a window the main
+//! thread owns, so they share [`run_window`]: the winit shell that opens that
+//! window, runs the work beside it, and — the part that is easy to get wrong
+//! and fatal to get wrong — stops and joins before the window is dropped. See
+//! that function and [`Shutdown`] for the orderings it exists to get right.
+
+mod window_shell;
+
+pub use window_shell::{Shutdown, WindowTarget, run_window};
 
 #[cfg(target_os = "linux")]
 mod linux;

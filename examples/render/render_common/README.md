@@ -19,6 +19,17 @@ element it plugs into: a CUDA frame has to be copied into Vulkan-owned memory,
 so the graphics API is an implementation detail here exactly as the swapchain
 is on the D3D side.
 
+Both stacks present from the pipeline's own thread into a window the main
+thread owns, so they share `run_window`: the winit shell that opens that
+window, runs the work beside it, and — the part that is easy to get wrong and
+fatal to get wrong — stops and joins before the window is dropped. Exiting the
+event loop drops the window, which on Wayland frees the surface a
+`vkQueuePresentKHR` may still be using; and `Pipeline::stop` cannot be called
+from the event loop thread, because it waits for a renderer that in turn waits
+for that loop to keep dispatching. `Shutdown` is how a worker publishes what a
+close should stop, and how it learns a close arrived before it had anything to
+publish.
+
 Depended on by the other `examples/render/*` crates, including `av_playback`,
 `screen_record_nvenc`, `seek_render`, `sw_decode_render`, `test_video`,
 `text_overlay`, `transcode_render`, `nvenc_record`, `screen_capture`,

@@ -30,12 +30,30 @@ fn main() {
 
 #[cfg(target_os = "windows")]
 fn main() {
-    shell::run("media-pp A/V playback", windows_example::play);
+    let Some(path) = std::env::args().nth(1) else {
+        eprintln!("usage: av_playback <video-with-audio.mp4>");
+        std::process::exit(2);
+    };
+    render_common::run_window(
+        "media-pp A/V playback",
+        1280,
+        720,
+        move |target, shutdown| windows_example::play(path, target, shutdown),
+    );
 }
 
 #[cfg(target_os = "linux")]
 fn main() {
-    shell::run("media-pp A/V playback", linux_example::play);
+    let Some(path) = std::env::args().nth(1) else {
+        eprintln!("usage: av_playback <video-with-audio.mp4>");
+        std::process::exit(2);
+    };
+    render_common::run_window(
+        "media-pp A/V playback",
+        1280,
+        720,
+        move |target, shutdown| linux_example::play(path, target, shutdown),
+    );
 }
 
 /// The parts of `play` that are the same on every backend: opening the file
@@ -79,7 +97,7 @@ mod common {
 
 #[cfg(target_os = "windows")]
 mod windows_example {
-    use std::sync::{Arc, mpsc};
+    use std::sync::Arc;
 
     use media_pp::{
         Error,
@@ -90,15 +108,15 @@ mod windows_example {
         },
         pipeline::Pipeline,
     };
-    use render_common::D3d12GpuContext;
+    use render_common::{D3d12GpuContext, Shutdown, WindowTarget};
     use winit::raw_window_handle::RawWindowHandle;
 
-    use crate::{common, shell::WindowTarget};
+    use crate::common;
 
     pub fn play(
         path: String,
         target: WindowTarget,
-        started: mpsc::Sender<Arc<Pipeline>>,
+        shutdown: Arc<Shutdown>,
     ) -> media_pp::Result<()> {
         media_pp::init()?;
         let _log_guard = media_pp::log::init(
@@ -153,7 +171,11 @@ mod windows_example {
         let audio_tee_handle =
             audio_tee_handle.ok_or_else(|| Error::Other("audio Tee was not initialized".into()))?;
 
-        let _ = started.send(pipeline.clone());
+        // Published before `run`, so a close that arrives from here on finds
+        // the pipeline to stop. `true` means one already did.
+        if shutdown.publish(std::slice::from_ref(&pipeline)) {
+            return Ok(());
+        }
         pipeline.run();
         {
             let pipeline = pipeline.clone();
@@ -211,7 +233,7 @@ mod windows_example {
 
 #[cfg(target_os = "linux")]
 mod linux_example {
-    use std::sync::{Arc, mpsc};
+    use std::sync::Arc;
 
     use media_pp::{
         Error,
@@ -221,9 +243,9 @@ mod linux_example {
         },
         pipeline::Pipeline,
     };
-    use render_common::VulkanGpuContext;
+    use render_common::{Shutdown, VulkanGpuContext, WindowTarget};
 
-    use crate::{common, shell::WindowTarget};
+    use crate::common;
 
     /// Matches the `video-frames` queue below: NVDEC's surface pool is fixed
     /// at open time and every frame sitting in that queue holds a slot, so
@@ -237,7 +259,7 @@ mod linux_example {
     pub fn play(
         path: String,
         target: WindowTarget,
-        started: mpsc::Sender<Arc<Pipeline>>,
+        shutdown: Arc<Shutdown>,
     ) -> media_pp::Result<()> {
         media_pp::init()?;
         let _log_guard = media_pp::log::init(
@@ -296,7 +318,11 @@ mod linux_example {
         let audio_tee_handle =
             audio_tee_handle.ok_or_else(|| Error::Other("audio Tee was not initialized".into()))?;
 
-        let _ = started.send(pipeline.clone());
+        // Published before `run`, so a close that arrives from here on finds
+        // the pipeline to stop. `true` means one already did.
+        if shutdown.publish(std::slice::from_ref(&pipeline)) {
+            return Ok(());
+        }
         pipeline.run();
         {
             let pipeline = pipeline.clone();

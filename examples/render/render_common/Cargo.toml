@@ -4,6 +4,12 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
+# The window shell is backend-independent: winit and the pipeline control it
+# stops are the same on either platform.
+[dependencies]
+winit = "0.30"
+raw-window-handle = "0.6"
+
 [target.'cfg(target_os = "linux")'.dependencies]
 media-pp = { path = "../../../lib", features = ["cuda"] }
 # Raw Vulkan, not `wgpu`: the whole point of this renderer is importing
@@ -13,7 +19,6 @@ media-pp = { path = "../../../lib", features = ["cuda"] }
 # calls anyway, with an extra abstraction in between.
 ash = "0.38"
 ash-window = "0.13"
-raw-window-handle = "0.6"
 # Pure-Rust WGSL -> SPIR-V, so this example needs no `glslc`/shaderc/C++
 # toolchain to build. The two shaders it compiles are tiny and are built once
 # at renderer construction.

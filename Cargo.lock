@@ -3064,6 +3064,7 @@ dependencies = [
  "naga",
  "raw-window-handle",
  "windows",
+ "winit",
 ]
 
 [[package]]
