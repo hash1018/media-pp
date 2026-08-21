@@ -24,13 +24,13 @@ use crate::elements::{
 };
 #[cfg(all(target_os = "windows", feature = "d3d11"))]
 use crate::elements::{
-    D3d11ChromaKeyError, D3d11DownloadError, D3d11NvencEncoderError, D3d11RendererError,
-    D3d11ScalerError, D3d11TextLayerError, D3d11UploadError, D3d11VideoCompositorError,
-    D3d11vaDecoderError,
+    D3d11ChromaKeyError, D3d11DecoderError, D3d11DownloadError, D3d11NvencEncoderError,
+    D3d11RendererError, D3d11ScalerError, D3d11TextLayerError, D3d11UploadError,
+    D3d11VideoCompositorError,
 };
 #[cfg(all(target_os = "windows", feature = "d3d12"))]
 use crate::elements::{
-    D3d12DownloadError, D3d12RendererError, D3d12ScalerError, D3d12UploadError, D3d12vaDecoderError,
+    D3d12DecoderError, D3d12DownloadError, D3d12RendererError, D3d12ScalerError, D3d12UploadError,
 };
 use crate::{
     elements::{
@@ -159,7 +159,7 @@ pub enum Error {
 
     #[cfg(all(target_os = "windows", feature = "d3d12"))]
     #[error(transparent)]
-    D3d12vaDecoderError(#[from] D3d12vaDecoderError),
+    D3d12DecoderError(#[from] D3d12DecoderError),
 
     #[cfg(all(target_os = "windows", feature = "d3d12"))]
     #[error(transparent)]
@@ -175,7 +175,7 @@ pub enum Error {
 
     #[cfg(all(target_os = "windows", feature = "d3d11"))]
     #[error(transparent)]
-    D3d11vaDecoderError(#[from] D3d11vaDecoderError),
+    D3d11DecoderError(#[from] D3d11DecoderError),
 
     #[cfg(all(target_os = "windows", feature = "d3d11"))]
     #[error(transparent)]

@@ -72,7 +72,7 @@ pub enum D3d12UploadError {
 /// Uploads CPU-resident `Pixel::NV12` video frames (e.g. from
 /// [`crate::elements::SwScaler`], fed by a synthetic source, a screen
 /// capture, ...) to GPU-resident `Video` frames tagged `Pixel::D3D12` —
-/// the mirror image of [`crate::elements::D3d12vaDecoder`]: that one
+/// the mirror image of [`crate::elements::D3d12Decoder`]: that one
 /// decodes compressed `Packet`s straight to GPU frames; this one moves
 /// frames that start out on the CPU onto the same device a
 /// [`crate::elements::D3d12Renderer`] reads from, so the renderer can take
@@ -105,7 +105,7 @@ pub struct D3d12Upload {
     /// docs. Only the small CPU-side `AVFrame` wrapper is actually reused
     /// here; the GPU texture behind it comes fresh from `hw_frames_ctx`'s
     /// own pool every time (`consume` unrefs the previous one first) —
-    /// same division of labor [`crate::elements::D3d12vaDecoder`]'s own
+    /// same division of labor [`crate::elements::D3d12Decoder`]'s own
     /// `pool` field docs describe.
     pool: UnboundObjectPool<ffmpeg::frame::Video>,
 }
@@ -113,7 +113,7 @@ pub struct D3d12Upload {
 // SAFETY: `hw_device_ctx`/`hw_frames_ctx` are heap-allocated FFmpeg
 // buffers with no thread affinity; `&mut self` on every method that
 // touches them rules out concurrent access — same reasoning as
-// `D3d12vaDecoder`'s own `unsafe impl Send`.
+// `D3d12Decoder`'s own `unsafe impl Send`.
 unsafe impl Send for D3d12Upload {}
 
 impl D3d12Upload {
@@ -121,7 +121,7 @@ impl D3d12Upload {
     /// `device`, so the caller does not need to keep its handle alive. It
     /// must be the same underlying `ID3D12Device` your
     /// [`crate::elements::D3d12Renderer`] was created
-    /// with — same requirement [`crate::elements::D3d12vaDecoder::new`]
+    /// with — same requirement [`crate::elements::D3d12Decoder::new`]
     /// documents, for the same reason: frames landing on a different
     /// device than the one the renderer submits to would make the
     /// zero-copy path invalid.

@@ -39,7 +39,7 @@ pub enum ElementType {
     CudaUpload,
     CudaDownload,
     CudaConverter,
-    D3d12vaDecoder,
+    D3d12Decoder,
     D3d12Upload,
     D3d12Download,
     D3d12Scaler,

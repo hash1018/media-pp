@@ -404,7 +404,7 @@ pub struct DxgiCaptureSource {
 
 // SAFETY: every D3D11/DXGI handle here is a `windows-rs` COM interface
 // wrapper — thread-safe to hand off (refcounting is interlocked), and
-// `&mut self` on every method that touches them (mirrors `D3d12vaDecoder`/
+// `&mut self` on every method that touches them (mirrors `D3d12Decoder`/
 // `SwScaler`'s own reasoning) already rules out concurrent access from
 // multiple threads.
 unsafe impl Send for DxgiCaptureSource {}

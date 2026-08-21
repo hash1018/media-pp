@@ -52,7 +52,7 @@ pub enum D3d12DownloadError {
 /// This is the exit from a D3D12VA pipeline for CPU-only stages such as
 /// [`crate::elements::SwScaler`], [`crate::elements::SwEncoder`],
 /// [`crate::elements::OrtDetector`], and [`crate::elements::AppSink`]:
-/// `D3d12vaDecoder -> D3d12Download -> SwScaler -> ...`.
+/// `D3d12Decoder -> D3d12Download -> SwScaler -> ...`.
 ///
 /// A D3D12 device is deliberately not a constructor argument. The source
 /// frame's own `AVHWFramesContext` owns the device and synchronization state,
@@ -61,7 +61,7 @@ pub enum D3d12DownloadError {
 /// neither needs nor uses.
 ///
 /// Only NV12-backed D3D12 frames are accepted, matching
-/// [`crate::elements::D3d12vaDecoder`] and [`crate::elements::D3d12Upload`].
+/// [`crate::elements::D3d12Decoder`] and [`crate::elements::D3d12Upload`].
 /// PTS, duration, and color metadata are copied without creating a new
 /// timeline. `width` and `height` are fixed for this element's lifetime.
 pub struct D3d12Download {

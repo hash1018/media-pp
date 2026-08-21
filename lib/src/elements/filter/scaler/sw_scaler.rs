@@ -14,7 +14,7 @@ use crate::{
 };
 
 /// How many output frames [`SwScaler`] pre-allocates up front. Unlike
-/// [`crate::elements::SwDecoder`]/[`crate::elements::D3d12vaDecoder`],
+/// [`crate::elements::SwDecoder`]/[`crate::elements::D3d12Decoder`],
 /// this doesn't have to start empty and grow — `dst_format`/`dst_width`/
 /// `dst_height` are known at construction time, so the pool can be
 /// correctly sized from the very first frame instead of paying for a
@@ -74,7 +74,7 @@ pub struct SwScaler {
 // `SwsContext` with no thread affinity of its own — ffmpeg-next marks
 // the analogous audio `resampling::Context` (`SwrContext`) and every
 // codec type `Send` for the same reason, this one's just missing it.
-// `&mut self` on every method that touches it (see `D3d12vaDecoder`'s
+// `&mut self` on every method that touches it (see `D3d12Decoder`'s
 // `hw_device_ctx` for the same reasoning) already rules out concurrent
 // access from multiple threads.
 unsafe impl Send for SwScaler {}

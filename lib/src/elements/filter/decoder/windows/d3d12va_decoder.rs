@@ -46,10 +46,10 @@ struct AVD3D12VAFrame {
     sync_ctx: AVD3D12VASyncContext,
 }
 
-/// Errors specific to `D3d12vaDecoder`. Converts into the crate-wide
+/// Errors specific to `D3d12Decoder`. Converts into the crate-wide
 /// `Error` via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
-pub enum D3d12vaDecoderError {
+pub enum D3d12DecoderError {
     #[error("unsupported media type: {0:?} (D3D12VA decode is video-only)")]
     UnsupportedMediaType(ffmpeg::media::Type),
 
@@ -76,7 +76,7 @@ pub enum D3d12vaDecoderError {
 /// they work unmodified. Only [`crate::elements::D3d12Renderer`] cares:
 /// it checks `frame.format()` and, for `Pixel::D3D12`, takes the
 /// zero-copy path via `d3d12va_texture` instead of reading pixel bytes.
-pub struct D3d12vaDecoder {
+pub struct D3d12Decoder {
     pp_log: PpLog,
     name: Arc<str>,
     decoder: ffmpeg::decoder::Video,
@@ -97,9 +97,9 @@ pub struct D3d12vaDecoder {
 // thread affinity; `decoder`'s own `Send` already covers the rest.
 // `&mut self` on every method that touches it rules out concurrent
 // access from multiple threads.
-unsafe impl Send for D3d12vaDecoder {}
+unsafe impl Send for D3d12Decoder {}
 
-impl D3d12vaDecoder {
+impl D3d12Decoder {
     /// The D3D12VA hardware context owns an independent COM reference to
     /// `device`, so the caller does not need to keep its handle alive. Pass
     /// the same underlying `ID3D12Device` your
@@ -113,12 +113,12 @@ impl D3d12vaDecoder {
         name: impl Into<String>,
         params: ffmpeg::codec::Parameters,
         device: &ID3D12Device,
-    ) -> Result<Self, D3d12vaDecoderError> {
+    ) -> Result<Self, D3d12DecoderError> {
         let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::D3d12vaDecoder, &name, None);
+        let pp_log = element_pp_log(ElementType::D3d12Decoder, &name, None);
 
         let hw_device_ctx =
-            unsafe { create_hw_device_ctx(device) }.map_err(D3d12vaDecoderError::HwDeviceInit)?;
+            unsafe { create_hw_device_ctx(device) }.map_err(D3d12DecoderError::HwDeviceInit)?;
 
         let mut context = match ffmpeg::codec::context::Context::from_parameters(params) {
             Ok(context) => context,
@@ -129,7 +129,7 @@ impl D3d12vaDecoder {
         };
         if context.medium() != ffmpeg::media::Type::Video {
             unsafe { free_buffer(hw_device_ctx) };
-            return Err(D3d12vaDecoderError::UnsupportedMediaType(context.medium()));
+            return Err(D3d12DecoderError::UnsupportedMediaType(context.medium()));
         }
         unsafe {
             let ctx_ptr = context.as_mut_ptr();
@@ -165,26 +165,26 @@ impl D3d12vaDecoder {
                 Ok(()) => {
                     if frame.format() != ffmpeg::format::Pixel::D3D12 {
                         pp_error!(self, "decoder did not select the D3D12VA pixel format");
-                        return Err(D3d12vaDecoderError::HwAccelUnavailable.into());
+                        return Err(D3d12DecoderError::HwAccelUnavailable.into());
                     }
                     self.pad.push(MediaBuffer::Video(Arc::new(frame)))?;
                     frame = self.pool.get();
                 }
                 Err(error) if is_codec_drain_boundary(&error) => break,
-                Err(error) => return Err(D3d12vaDecoderError::from(error).into()),
+                Err(error) => return Err(D3d12DecoderError::from(error).into()),
             }
         }
         Ok(())
     }
 }
 
-impl Element for D3d12vaDecoder {
+impl Element for D3d12Decoder {
     fn name(&self) -> Arc<str> {
         self.name.clone()
     }
 
     fn element_type(&self) -> ElementType {
-        ElementType::D3d12vaDecoder
+        ElementType::D3d12Decoder
     }
 
     fn pp_log(&self) -> &PpLog {
@@ -196,27 +196,27 @@ impl Element for D3d12vaDecoder {
     }
 }
 
-impl Source for D3d12vaDecoder {
+impl Source for D3d12Decoder {
     fn src_pads(&mut self) -> &mut [SrcPad] {
         std::slice::from_mut(&mut self.pad)
     }
 }
 
-impl Sink for D3d12vaDecoder {
+impl Sink for D3d12Decoder {
     fn consume(&mut self, buf: MediaBuffer) -> crate::error::Result<()> {
         match buf {
             MediaBuffer::Packet(packet) => {
                 self.decoder
                     .send_packet(&*packet)
                     .inspect_err(|error| pp_error!(self, "send_packet failed: {error}"))
-                    .map_err(D3d12vaDecoderError::from)?;
+                    .map_err(D3d12DecoderError::from)?;
                 self.drain()
             }
             MediaBuffer::Eos => {
                 self.decoder
                     .send_eof()
                     .inspect_err(|error| pp_error!(self, "send_eof failed: {error}"))
-                    .map_err(D3d12vaDecoderError::from)?;
+                    .map_err(D3d12DecoderError::from)?;
                 self.drain()?;
                 self.pad.push(MediaBuffer::Eos)
             }
@@ -242,7 +242,7 @@ impl Sink for D3d12vaDecoder {
     }
 }
 
-impl Drop for D3d12vaDecoder {
+impl Drop for D3d12Decoder {
     fn drop(&mut self) {
         pp_info!(self, "dropped: freeing hw_device_ctx");
         unsafe { free_buffer(self.hw_device_ctx) };
@@ -251,7 +251,7 @@ impl Drop for D3d12vaDecoder {
 
 /// Shared with [`crate::elements::D3d12Upload`] and
 /// [`crate::elements::D3d12Scaler`]. Returns a raw `AVERROR` code rather than
-/// `D3d12vaDecoderError` so it doesn't tie that caller to this module's
+/// `D3d12DecoderError` so it doesn't tie that caller to this module's
 /// own error type; each call site maps it into its own error variant.
 pub(crate) unsafe fn create_hw_device_ctx(
     device: &ID3D12Device,
@@ -327,7 +327,7 @@ unsafe extern "C" fn get_format(
 }
 
 /// Extracts `(texture, fence, fence_value)` from a frame produced by
-/// [`D3d12vaDecoder`] — `None` if `frame` isn't actually a D3D12VA frame.
+/// [`D3d12Decoder`] — `None` if `frame` isn't actually a D3D12VA frame.
 /// `texture`/`fence` are borrowed raw `ID3D12Resource*`/`ID3D12Fence*`
 /// pointers (still owned by `frame`'s own hw frame pool reference) — the
 /// caller must `AddRef` (e.g. via `Interface::from_raw_borrowed(..).clone()`)

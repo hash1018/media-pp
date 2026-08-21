@@ -99,7 +99,7 @@ buffers, codecs, and muxers; `Pipeline::stop` abandons buffered work immediately
 | Kind | Elements |
 |---|---|
 | Sources | `FileDemuxer`, `AppSource`, `RtspSource`, `TestVideoSource`, `TestAudioSource`, `DxgiCaptureSource`, `PipeWireScreenCaptureSource`, `PipeWireAudioCaptureSource`, `WasapiCaptureSource`, `AudioMixer`, `SwVideoCompositor`, `CudaVideoCompositor`, `D3d11VideoCompositor`, `WebRtcTrackSource` |
-| Filters | `SwDecoder`, `CudaDecoder`, `D3d11Decoder`, `D3d12vaDecoder`, `SwEncoder`, `CudaEncoder`, `D3d11NvencEncoder`, `SwAudioEncoder`, `AudioResampler`, `AudioVolume`, `SwScaler`, `SwChromaKey`, `D3d11ChromaKey`, `Pacer`, `VideoSynchronizer`, `CudaScaler`, `D3d11Scaler`, `D3d12Scaler`, `CudaUpload`, `CudaDownload`, `CudaConverter`, `D3d11Upload`, `D3d11Download`, `D3d12Upload`, `D3d12Download`, `Tee` |
+| Filters | `SwDecoder`, `CudaDecoder`, `D3d11Decoder`, `D3d12Decoder`, `SwEncoder`, `CudaEncoder`, `D3d11NvencEncoder`, `SwAudioEncoder`, `AudioResampler`, `AudioVolume`, `SwScaler`, `SwChromaKey`, `D3d11ChromaKey`, `Pacer`, `VideoSynchronizer`, `CudaScaler`, `D3d11Scaler`, `D3d12Scaler`, `CudaUpload`, `CudaDownload`, `CudaConverter`, `D3d11Upload`, `D3d11Download`, `D3d12Upload`, `D3d12Download`, `Tee` |
 | Sinks | `FrameCounter`, `PacketCounter`, `AppSink`, `Mp4Muxer`, `SegmentedMp4Muxer`, `HlsMuxer`, `RtspSink`, `CudaRenderer`, `D3d11Renderer`, `D3d12Renderer`, `PipeWireAudioRenderer`, `WasapiRenderer`, `OrtDetector`, `WebRtcTrackSink` |
 
 Backend-specific elements require their corresponding Cargo feature and are

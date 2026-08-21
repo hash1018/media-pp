@@ -40,7 +40,7 @@ pub struct D3d12GpuContext {
 
 impl D3d12GpuContext {
     /// The shared D3D12 device — pass into
-    /// [`media_pp::elements::D3d12vaDecoder::new`]/
+    /// [`media_pp::elements::D3d12Decoder::new`]/
     /// [`media_pp::elements::D3d12Upload::new`] so decoded/uploaded frames
     /// land on the same device [`crate::d3d12_window_renderer`] draws with,
     /// required for their zero-copy path to be valid at all.

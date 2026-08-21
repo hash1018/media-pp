@@ -21,7 +21,7 @@ use crate::elements::filter::is_codec_drain_boundary;
 /// Mirrors of the D3D11VA-specific structs from FFmpeg's
 /// `libavutil/hwcontext_d3d11va.h` (verified against the actual header
 /// linked on this machine, `C:\ffmpeg-lib\include\libavutil\hwcontext_d3d11va.h`
-/// — not from memory; see [`crate::elements::D3d12vaDecoder`]'s own D3D12
+/// — not from memory; see [`crate::elements::D3d12Decoder`]'s own D3D12
 /// mirrors for the sibling case and why this hand-mirroring is needed at
 /// all: `ffmpeg-sys-next` only binds the type-agnostic
 /// `AVHWDeviceContext`/`AVHWFramesContext`). COM pointers are kept as
@@ -78,7 +78,7 @@ struct AVD3D11VAFramesContext {
 /// Errors specific to `D3d11Decoder`. Converts into the crate-wide
 /// `Error` via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
-pub enum D3d11vaDecoderError {
+pub enum D3d11DecoderError {
     #[error("unsupported media type: {0:?} (D3D11VA decode is video-only)")]
     UnsupportedMediaType(ffmpeg::media::Type),
 
@@ -97,11 +97,11 @@ pub enum D3d11vaDecoderError {
 
 /// Decodes one video stream's `Packet`s into GPU-resident `Video` frames
 /// via D3D11VA hardware acceleration — the D3D11 sibling of
-/// [`crate::elements::D3d12vaDecoder`], for a pipeline built entirely on
+/// [`crate::elements::D3d12Decoder`], for a pipeline built entirely on
 /// one shared `ID3D11Device` (see [`crate::elements::D3d11Renderer`]'s own
 /// docs on why that means no explicit fence/sync is needed anywhere in
 /// this stack, unlike the D3D12 side). A `Filter`, same shape as
-/// `SwDecoder`/`D3d12vaDecoder`.
+/// `SwDecoder`/`D3d12Decoder`.
 pub struct D3d11Decoder {
     pp_log: PpLog,
     name: Arc<str>,
@@ -109,7 +109,7 @@ pub struct D3d11Decoder {
     hw_device_ctx: *mut ffi::AVBufferRef,
     pad: SrcPad,
     /// Reused across every decoded frame — see [`UnboundObjectPool`]'s
-    /// docs; same reasoning as `D3d12vaDecoder`'s own `pool` field (the
+    /// docs; same reasoning as `D3d12Decoder`'s own `pool` field (the
     /// GPU texture itself is already pooled by ffmpeg's own hw frames
     /// context, this only reuses the small CPU-side `AVFrame` wrapper).
     pool: UnboundObjectPool<ffmpeg::frame::Video>,
@@ -118,7 +118,7 @@ pub struct D3d11Decoder {
 // SAFETY: `hw_device_ctx` is a heap-allocated FFmpeg buffer with no
 // thread affinity; `decoder`'s own `Send` already covers the rest.
 // `&mut self` on every method that touches it rules out concurrent
-// access from multiple threads — same reasoning as `D3d12vaDecoder`.
+// access from multiple threads — same reasoning as `D3d12Decoder`.
 unsafe impl Send for D3d11Decoder {}
 
 impl D3d11Decoder {
@@ -132,7 +132,7 @@ impl D3d11Decoder {
     /// `extra_hw_frames` sets `AVCodecContext.extra_hw_frames` — how many
     /// *additional* decode surfaces to allocate beyond what the codec's own
     /// reference-frame count strictly requires. Unlike
-    /// [`crate::elements::D3d12vaDecoder`] (no equivalent parameter needed),
+    /// [`crate::elements::D3d12Decoder`] (no equivalent parameter needed),
     /// D3D11VA's decode surface pool is a **fixed-size** texture array,
     /// sized once at `av_hwframe_ctx_init()` time and never grown — every
     /// decoded frame still alive downstream (sitting in a
@@ -149,12 +149,12 @@ impl D3d11Decoder {
         params: ffmpeg::codec::Parameters,
         device: &ID3D11Device,
         extra_hw_frames: i32,
-    ) -> Result<Self, D3d11vaDecoderError> {
+    ) -> Result<Self, D3d11DecoderError> {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::D3d11Decoder, &name, None);
 
         let hw_device_ctx =
-            unsafe { create_hw_device_ctx(device) }.map_err(D3d11vaDecoderError::HwDeviceInit)?;
+            unsafe { create_hw_device_ctx(device) }.map_err(D3d11DecoderError::HwDeviceInit)?;
 
         let mut context = match ffmpeg::codec::context::Context::from_parameters(params) {
             Ok(context) => context,
@@ -165,7 +165,7 @@ impl D3d11Decoder {
         };
         if context.medium() != ffmpeg::media::Type::Video {
             unsafe { free_buffer(hw_device_ctx) };
-            return Err(D3d11vaDecoderError::UnsupportedMediaType(context.medium()));
+            return Err(D3d11DecoderError::UnsupportedMediaType(context.medium()));
         }
         unsafe {
             let ctx_ptr = context.as_mut_ptr();
@@ -202,13 +202,13 @@ impl D3d11Decoder {
                 Ok(()) => {
                     if frame.format() != ffmpeg::format::Pixel::D3D11 {
                         pp_error!(self, "decoder did not select the D3D11VA pixel format");
-                        return Err(D3d11vaDecoderError::HwAccelUnavailable.into());
+                        return Err(D3d11DecoderError::HwAccelUnavailable.into());
                     }
                     self.pad.push(MediaBuffer::Video(Arc::new(frame)))?;
                     frame = self.pool.get();
                 }
                 Err(error) if is_codec_drain_boundary(&error) => break,
-                Err(error) => return Err(D3d11vaDecoderError::from(error).into()),
+                Err(error) => return Err(D3d11DecoderError::from(error).into()),
             }
         }
         Ok(())
@@ -246,14 +246,14 @@ impl Sink for D3d11Decoder {
                 self.decoder
                     .send_packet(&*packet)
                     .inspect_err(|error| pp_error!(self, "send_packet failed: {error}"))
-                    .map_err(D3d11vaDecoderError::from)?;
+                    .map_err(D3d11DecoderError::from)?;
                 self.drain()
             }
             MediaBuffer::Eos => {
                 self.decoder
                     .send_eof()
                     .inspect_err(|error| pp_error!(self, "send_eof failed: {error}"))
-                    .map_err(D3d11vaDecoderError::from)?;
+                    .map_err(D3d11DecoderError::from)?;
                 self.drain()?;
                 self.pad.push(MediaBuffer::Eos)
             }
@@ -265,7 +265,7 @@ impl Sink for D3d11Decoder {
     }
 
     fn control(&mut self, msg: ControlMsg) -> crate::error::Result<()> {
-        // Same reasoning as `D3d12vaDecoder::control`: nothing to do on
+        // Same reasoning as `D3d12Decoder::control`: nothing to do on
         // `Stop` (the hw device context is freed in `Drop`), flush
         // reference-frame state on `Seek`.
         if let ControlMsg::Seek(_) = msg {
@@ -287,7 +287,7 @@ impl Drop for D3d11Decoder {
 /// producer of a `Pixel::D3D11` frame in this crate goes through this same
 /// device-context setup, which is what lets [`d3d11va_texture`] read any
 /// of their frames identically. Returns a raw `AVERROR` code rather than
-/// `D3d11vaDecoderError` so it doesn't tie those callers to this module's
+/// `D3d11DecoderError` so it doesn't tie those callers to this module's
 /// own error type; each call site maps it into its own error variant.
 pub(crate) unsafe fn create_hw_device_ctx(
     device: &ID3D11Device,
@@ -518,7 +518,7 @@ unsafe extern "C" fn get_format(
 
 /// Extracts `(texture, array_index)` from a `Pixel::D3D11` frame — `None`
 /// if `frame` isn't actually a D3D11VA frame. Unlike
-/// [`crate::elements::D3d12vaDecoder`]'s `d3d12va_texture` (which
+/// [`crate::elements::D3d12Decoder`]'s `d3d12va_texture` (which
 /// dereferences a wrapper struct pointed to by `data[0]`), a normal
 /// D3D11VA frame stores the `ID3D11Texture2D*` directly in `data[0]` and
 /// the array-texture slice index directly in `data[1]` — see this

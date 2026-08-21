@@ -95,20 +95,20 @@ pub enum D3d12RendererError {
 
     #[error(
         "D3d12Renderer only handles YUV420P frames (CPU) or D3D12 frames \
-         (from D3d12vaDecoder), got {0:?}"
+         (from D3d12Decoder), got {0:?}"
     )]
     UnsupportedFormat(ffmpeg::format::Pixel),
 
     #[error(
         "frame claimed the D3D12 pixel format but has no AVD3D12VAFrame \
-         payload — must come from D3d12vaDecoder"
+         payload — must come from D3d12Decoder"
     )]
     InvalidD3d12Frame,
 
     #[error(
         "a Pixel::D3D12 frame's texture lives on a different ID3D12Device \
          than this D3d12Renderer was created with — the producer \
-         (D3d12vaDecoder/D3d12Upload) and the D3d12FrameRenderer impl \
+         (D3d12Decoder/D3d12Upload) and the D3d12FrameRenderer impl \
          must share the same device for zero-copy to be valid"
     )]
     DeviceMismatch,
@@ -123,7 +123,7 @@ pub enum D3d12RendererError {
 /// Handles two kinds of input, dispatched on `frame.format()`:
 ///   - `Pixel::YUV420P`: CPU-decoded (e.g. from `SwDecoder`) — copies
 ///     pixel bytes to the GPU via `D3d12FrameRenderer::submit_yuv420p`.
-///   - `Pixel::D3D12`: GPU-decoded (from `D3d12vaDecoder`) — zero-copy,
+///   - `Pixel::D3D12`: GPU-decoded (from `D3d12Decoder`) — zero-copy,
 ///     draws straight from the decoder's own texture via
 ///     `D3d12FrameRenderer::submit_nv12_texture`.
 pub struct D3d12Renderer {
@@ -210,7 +210,7 @@ impl D3d12Renderer {
             (texture, fence)
         };
 
-        // The producer (`D3d12vaDecoder`/`D3d12Upload`) and `self.inner`
+        // The producer (`D3d12Decoder`/`D3d12Upload`) and `self.inner`
         // are independent constructions that only *should* share a
         // device by convention — verify it, since drawing a different
         // device's texture is invalid, not just wrong output.

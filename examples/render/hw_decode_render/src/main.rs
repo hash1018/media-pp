@@ -16,7 +16,7 @@ mod windows_example {
     use media_pp::{
         Error,
         bus::BusEvent,
-        elements::{D3d12vaDecoder, FileDemuxer, Pacer},
+        elements::{D3d12Decoder, FileDemuxer, Pacer},
         pipeline::Pipeline,
     };
     use render_common::D3d12GpuContext;
@@ -29,7 +29,7 @@ mod windows_example {
         window::{Window, WindowId},
     };
 
-    /// Demux -> D3d12vaDecoder -> Queue -> Pacer -> Renderer: decodes on the
+    /// Demux -> D3d12Decoder -> Queue -> Pacer -> Renderer: decodes on the
     /// GPU via D3D12VA hardware acceleration and presents the frames in a
     /// native window at real playback speed, without ever copying the
     /// decoded pixels back to system memory — `D3d12Renderer` draws straight
@@ -154,8 +154,8 @@ mod windows_example {
 
         let pipeline = Pipeline::new("hw-decode-render", source, |source, ctx| {
             // Same device the renderer draws with — required for the
-            // zero-copy path to be valid at all (see D3d12vaDecoder::new).
-            let decoder = D3d12vaDecoder::new("decoder", params, gpu.device())
+            // zero-copy path to be valid at all (see D3d12Decoder::new).
+            let decoder = D3d12Decoder::new("decoder", params, gpu.device())
                 .expect("failed to open D3D12VA decoder");
             let pacer = Pacer::new("pacer", time_base, ctx.clock.clone())?;
             let renderer =

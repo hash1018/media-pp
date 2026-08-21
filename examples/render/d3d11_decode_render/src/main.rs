@@ -165,7 +165,7 @@ mod windows_example {
             // zero-copy path to be valid at all (see D3d11Decoder::new).
             // `extra_hw_frames` must cover the `"frames"` queue's own depth
             // below (see D3d11Decoder::new's own docs on why, unlike
-            // D3d12vaDecoder) — decode can legitimately run that far ahead of
+            // D3d12Decoder) — decode can legitimately run that far ahead of
             // playback while the queue buffers up.
             let decoder = D3d11Decoder::new("decoder", params, gpu.device(), 32)
                 .expect("failed to open D3D11VA decoder");
