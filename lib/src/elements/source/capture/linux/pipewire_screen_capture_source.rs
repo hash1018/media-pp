@@ -39,8 +39,10 @@ use crate::pp_log::{PpLog, pp_error, pp_info, pp_warn};
 #[cfg(feature = "cuda")]
 use crate::{
     elements::CudaUploadError,
-    elements::filter::upload::cuda_upload::{create_hw_frames_ctx, free_buffer},
-    platform::cuda::{CudaDevice, CudaFrameFormat},
+    platform::cuda::{
+        CudaDevice, CudaFrameFormat,
+        frame::{create_hw_frames_ctx, free_buffer},
+    },
     platform::linux::dmabuf_cuda::{
         CudaBgraSurface, DmaBufCudaError, DmaBufCudaImporter, DmaBufPlane,
     },
@@ -384,7 +386,8 @@ impl GpuCapture {
                 width,
                 height,
             )
-        }?;
+        }
+        .map_err(CudaUploadError::from)?;
         if !self.hw_frames_ctx.is_null() {
             unsafe { free_buffer(self.hw_frames_ctx) };
         }

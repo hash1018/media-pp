@@ -8,8 +8,6 @@ pub(crate) mod cuda;
 mod windows;
 
 #[cfg(feature = "cuda")]
-pub(crate) use cuda::cuda_upload;
-#[cfg(feature = "cuda")]
 pub use cuda::{CudaUpload, CudaUploadError};
 
 #[cfg(all(target_os = "windows", any(feature = "d3d11", feature = "d3d12")))]

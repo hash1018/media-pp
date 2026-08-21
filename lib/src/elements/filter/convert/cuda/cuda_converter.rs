@@ -15,11 +15,10 @@ use crate::{
     platform::cuda::{
         CudaDevice, CudaFrameFormat,
         driver::{BgraSurface, CudaDriver, Nv12Surface},
+        frame::{create_hw_frames_ctx, free_buffer},
     },
     pool::UnboundObjectPool,
 };
-
-use crate::elements::filter::upload::cuda_upload::{create_hw_frames_ctx, free_buffer};
 
 /// Errors specific to `CudaConverter`. Converts into the crate-wide `Error`
 /// via `?` (see [`crate::error::Error`]).
@@ -148,7 +147,7 @@ impl CudaConverter {
             Ok(ctx) => ctx,
             Err(error) => {
                 unsafe { free_buffer(hw_device_ctx) };
-                return Err(error.into());
+                return Err(CudaUploadError::from(error).into());
             }
         };
         let device_ctx = unsafe { (*hw_device_ctx).data as *mut ffi::AVHWDeviceContext };

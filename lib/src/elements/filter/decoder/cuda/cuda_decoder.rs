@@ -11,7 +11,7 @@ use crate::{
     element::{Element, ElementType, Sink, Source, element_pp_log},
     elements::filter::is_codec_drain_boundary,
     pad::SrcPad,
-    platform::cuda::CudaDevice,
+    platform::cuda::{CudaDevice, frame::free_buffer},
     pool::UnboundObjectPool,
 };
 
@@ -228,10 +228,6 @@ impl Drop for CudaDecoder {
         pp_info!(self, "dropped: releasing hw_device_ctx");
         unsafe { free_buffer(self.hw_device_ctx) };
     }
-}
-
-unsafe fn free_buffer(mut buf: *mut ffi::AVBufferRef) {
-    unsafe { ffi::av_buffer_unref(&mut buf) };
 }
 
 /// Picks `AV_PIX_FMT_CUDA` out of whatever libavcodec offers. Unlike the

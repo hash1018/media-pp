@@ -10,10 +10,12 @@ use crate::{
     control::ControlMsg,
     element::{Element, ElementType, Sink, Source, element_pp_log},
     elements::filter::is_codec_drain_boundary,
-    elements::filter::upload::cuda_upload::{create_hw_frames_ctx, free_buffer},
     error::Result,
     pad::SrcPad,
-    platform::cuda::{CudaDevice, CudaFrameFormat},
+    platform::cuda::{
+        CudaDevice, CudaFrameFormat,
+        frame::{create_hw_frames_ctx, free_buffer},
+    },
 };
 
 /// Which NVENC codec [`CudaEncoder`] drives.

@@ -26,16 +26,13 @@ use crate::{
     color::Color,
     control::{ControlMsg, ControlReceiver, drain_control},
     element::{Element, ElementType, Sink, Source, SourceElement, element_pp_log},
-    elements::{
-        CudaScalerInterp,
-        filter::scaler::cuda::scale_graph::CudaScaleGraph,
-        filter::upload::cuda_upload::{create_hw_frames_ctx, free_buffer},
-    },
+    elements::{CudaScalerInterp, filter::scaler::cuda::scale_graph::CudaScaleGraph},
     error::Result,
     pad::SrcPad,
     platform::cuda::{
         CudaDevice, CudaFrameFormat,
         driver::{CudaDriver, CudaDriverError, CudaMask, Nv12Region, Nv12Surface},
+        frame::{create_hw_frames_ctx, free_buffer},
     },
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
     schedule::PeriodicSchedule,

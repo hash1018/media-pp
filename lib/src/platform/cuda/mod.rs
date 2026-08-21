@@ -6,6 +6,7 @@
 pub(crate) mod device;
 pub(crate) mod driver;
 pub(crate) mod format;
+pub(crate) mod frame;
 
 pub use device::{CudaDevice, CudaDeviceError};
 pub use driver::CudaDriverError;

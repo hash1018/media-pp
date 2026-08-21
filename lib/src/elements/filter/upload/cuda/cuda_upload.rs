@@ -11,7 +11,10 @@ use crate::{
     element::{Element, ElementType, Sink, Source, element_pp_log},
     error::Result,
     pad::SrcPad,
-    platform::cuda::{CudaDevice, CudaFrameFormat},
+    platform::cuda::{
+        CudaDevice, CudaFrameFormat,
+        frame::{CudaFramesContextError, create_hw_frames_ctx, free_buffer},
+    },
     pool::UnboundObjectPool,
 };
 
@@ -50,6 +53,19 @@ pub enum CudaUploadError {
 
     #[error("CPU to CUDA transfer failed (code {0})")]
     Transfer(i32),
+}
+
+impl From<CudaFramesContextError> for CudaUploadError {
+    fn from(error: CudaFramesContextError) -> Self {
+        match error {
+            CudaFramesContextError::Alloc => Self::HwFramesAlloc,
+            CudaFramesContextError::Init {
+                code,
+                width,
+                height,
+            } => Self::HwFramesInit(code, width, height),
+        }
+    }
 }
 
 /// Uploads CPU-resident `Video` frames into CUDA-resident ones — the
@@ -123,7 +139,7 @@ impl CudaUpload {
                 Ok(ctx) => ctx,
                 Err(error) => {
                     unsafe { free_buffer(hw_device_ctx) };
-                    return Err(error);
+                    return Err(error.into());
                 }
             };
 
@@ -243,46 +259,6 @@ impl Drop for CudaUpload {
             free_buffer(self.hw_device_ctx);
         }
     }
-}
-
-/// Builds the CUDA pool uploaded frames are allocated from. Shared with
-/// [`crate::elements::CudaEncoder`], which needs the identically-shaped
-/// context for `AVCodecContext.hw_frames_ctx`.
-pub(crate) unsafe fn create_hw_frames_ctx(
-    hw_device_ctx: *mut ffi::AVBufferRef,
-    format: CudaFrameFormat,
-    width: u32,
-    height: u32,
-) -> std::result::Result<*mut ffi::AVBufferRef, CudaUploadError> {
-    unsafe {
-        let buf = ffi::av_hwframe_ctx_alloc(hw_device_ctx);
-        if buf.is_null() {
-            return Err(CudaUploadError::HwFramesAlloc);
-        }
-
-        let frames_ctx = (*buf).data as *mut ffi::AVHWFramesContext;
-        (*frames_ctx).format = ffi::AVPixelFormat::AV_PIX_FMT_CUDA;
-        (*frames_ctx).sw_format = format.sw_format();
-        (*frames_ctx).width = width as i32;
-        (*frames_ctx).height = height as i32;
-        // Left at libavutil's dynamic `AVBufferPool`, same choice as
-        // `D3d11NvencEncoder`'s own frames context: a fixed pool would have
-        // to be sized against the deepest downstream buffering, and unlike
-        // NVDEC's decode surfaces (capped at 32 — see `CudaDecoder::new`)
-        // nothing here requires one.
-        (*frames_ctx).initial_pool_size = 0;
-
-        let code = ffi::av_hwframe_ctx_init(buf);
-        if code < 0 {
-            free_buffer(buf);
-            return Err(CudaUploadError::HwFramesInit(code, width, height));
-        }
-        Ok(buf)
-    }
-}
-
-pub(crate) unsafe fn free_buffer(mut buf: *mut ffi::AVBufferRef) {
-    unsafe { ffi::av_buffer_unref(&mut buf) };
 }
 
 #[cfg(test)]
