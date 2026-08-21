@@ -50,12 +50,25 @@ pub(super) struct ScaleProcessor {
     input: InputShape,
     output_width: u32,
     output_height: u32,
-    /// Last colorimetry handed to the processor. Kept so an unchanged
-    /// stream does not re-issue the two setters per frame, and so a frame
-    /// that *does* retag mid-stream is followed without rebuilding
-    /// anything — unlike size or format, colorimetry is processor state,
-    /// not part of the enumerator's content description.
-    color_space: Option<D3D11_VIDEO_PROCESSOR_COLOR_SPACE>,
+    output_format: DXGI_FORMAT,
+    /// Last colorimetry handed to the processor, input side and output
+    /// side. Kept so an unchanged stream does not re-issue the setters per
+    /// frame, and so a frame that *does* retag mid-stream is followed
+    /// without rebuilding anything — unlike size or format, colorimetry is
+    /// processor state, not part of the enumerator's content description.
+    ///
+    color_space: Option<BltColorSpaces>,
+}
+
+/// What each side of one `Blt` is tagged with.
+///
+/// The two are equal for a pure resize and deliberately differ for a
+/// conversion: telling the processor that a Y'CbCr input and an RGB output
+/// share colorimetry is exactly what would suppress the conversion.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct BltColorSpaces {
+    pub(super) input: D3D11_VIDEO_PROCESSOR_COLOR_SPACE,
+    pub(super) output: D3D11_VIDEO_PROCESSOR_COLOR_SPACE,
 }
 
 impl ScaleProcessor {
@@ -68,12 +81,15 @@ impl ScaleProcessor {
         input: InputShape,
         output_width: u32,
         output_height: u32,
+        output_format: DXGI_FORMAT,
     ) -> Result<Self, D3d11ScalerError> {
         // Chroma is half-resolution in both directions, so an odd NV12
         // output has no representable chroma plane — `CreateTexture2D`
         // would fail with a bare `E_INVALIDARG` later, well away from the
-        // size the caller actually chose.
-        if input.format == DXGI_FORMAT_NV12
+        // size the caller actually chose. This follows the *output*
+        // format: converting an odd BGRA input into NV12 is just as
+        // impossible as resizing NV12 to an odd size.
+        if output_format == DXGI_FORMAT_NV12
             && (!output_width.is_multiple_of(2) || !output_height.is_multiple_of(2))
         {
             return Err(D3d11ScalerError::OddNv12Output {
@@ -103,15 +119,20 @@ impl ScaleProcessor {
         };
         let enumerator = unsafe { video_device.CreateVideoProcessorEnumerator(&desc) }?;
 
-        // The same surface format is both input and output here, so the
-        // driver has to support it as both. Asking first turns "this GPU's
-        // video processor does not do this format" into that sentence,
-        // rather than an `E_INVALIDARG` from view creation.
-        let support = unsafe { enumerator.CheckVideoProcessorFormat(input.format) }?;
-        let needed = (D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_INPUT.0
-            | D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_OUTPUT.0) as u32;
-        if support & needed != needed {
-            return Err(D3d11ScalerError::UnsupportedByVideoProcessor(input.format));
+        // Each side is asked for only the direction it is actually used in:
+        // the same format is both input and output for a pure resize, but a
+        // conversion may well be supported one way and not the other.
+        // Asking first turns "this GPU's video processor does not do this
+        // format" into that sentence, rather than an `E_INVALIDARG` from
+        // view creation.
+        for (format, needed) in [
+            (input.format, D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_INPUT),
+            (output_format, D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_OUTPUT),
+        ] {
+            let support = unsafe { enumerator.CheckVideoProcessorFormat(format) }?;
+            if support & needed.0 as u32 == 0 {
+                return Err(D3d11ScalerError::UnsupportedByVideoProcessor(format));
+            }
         }
 
         // Index 0 is the plain rate-conversion capability every driver
@@ -157,25 +178,34 @@ impl ScaleProcessor {
             input,
             output_width,
             output_height,
+            output_format,
             color_space: None,
         })
     }
 
-    /// Whether this processor is the one a frame of `input` scaled to
-    /// `output_width`x`output_height` needs.
-    pub(super) fn matches(&self, input: InputShape, output_width: u32, output_height: u32) -> bool {
+    /// Whether this processor is the one a frame of `input` needs to reach
+    /// `output_width`x`output_height` in `output_format`.
+    pub(super) fn matches(
+        &self,
+        input: InputShape,
+        output_width: u32,
+        output_height: u32,
+        output_format: DXGI_FORMAT,
+    ) -> bool {
         self.input == input
             && self.output_width == output_width
             && self.output_height == output_height
+            && self.output_format == output_format
     }
 
     /// Scales one texture-array slice of `source` into `output`.
     ///
     /// `video_context` must be the shared immediate context, with its lock
-    /// held for the whole call. `color_space` is what both sides are
-    /// tagged with: input and output carry the same surface format here, so
-    /// telling the processor they also share colorimetry is what keeps a
-    /// resize from turning into a color conversion.
+    /// held for the whole call. The two color spaces are what each side is
+    /// tagged with, and their relationship is the whole conversion: equal
+    /// values tell the processor nothing about color changes, which is what
+    /// keeps a pure resize from turning into one, while a Y'CbCr input
+    /// paired with an RGB output is what asks for the conversion.
     pub(super) fn scale(
         &mut self,
         video_device: &ID3D11VideoDevice,
@@ -183,12 +213,17 @@ impl ScaleProcessor {
         source: &ID3D11Texture2D,
         array_slice: u32,
         output: &ID3D11Texture2D,
-        color_space: D3D11_VIDEO_PROCESSOR_COLOR_SPACE,
+        color_space: BltColorSpaces,
     ) -> Result<(), D3d11ScalerError> {
         if self.color_space != Some(color_space) {
             unsafe {
-                video_context.VideoProcessorSetStreamColorSpace(&self.processor, 0, &color_space);
-                video_context.VideoProcessorSetOutputColorSpace(&self.processor, &color_space);
+                video_context.VideoProcessorSetStreamColorSpace(
+                    &self.processor,
+                    0,
+                    &color_space.input,
+                );
+                video_context
+                    .VideoProcessorSetOutputColorSpace(&self.processor, &color_space.output);
             }
             self.color_space = Some(color_space);
         }
@@ -252,16 +287,21 @@ impl ScaleProcessor {
     }
 }
 
-/// The colorimetry to hand the processor for a frame tagged this way.
+/// The colorimetry to hand the processor for a frame tagged this way, in
+/// the surface format it is held in.
 ///
-/// Only ever used for both sides of the same `Blt` (see
-/// [`ScaleProcessor::scale`]), so what matters is that a frame's own tags
-/// map to one consistent answer rather than that it round-trips through
-/// D3D11's older, coarser description of color: the bitfield below has one
-/// bit for the YCbCr matrix (601 or 709) and no way to say anything else.
-/// Unspecified metadata follows the same fallback
-/// `D3d11VideoCompositor` uses — BT.601 through 576 lines and BT.709 above
-/// it, limited range — so the two elements describe one frame the same way.
+/// Called once per side of a `Blt` (see [`ScaleProcessor::scale`]). For a
+/// pure resize both sides pass the same arguments and so get the same
+/// answer, which is what tells the processor there is no color change to
+/// make; a conversion describes each side for what it actually holds.
+///
+/// D3D11's description of color here is coarse — the bitfield below has one
+/// bit for the YCbCr matrix (601 or 709) and no way to say anything else —
+/// so what matters is that a frame's own tags map to one consistent answer
+/// rather than that they round-trip. Unspecified metadata follows the same
+/// fallback `D3d11VideoCompositor` uses — BT.601 through 576 lines and
+/// BT.709 above it, limited range — so the two elements describe one frame
+/// the same way.
 pub(super) fn color_space(
     space: ffmpeg::color::Space,
     range: ffmpeg::color::Range,

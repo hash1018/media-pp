@@ -4,4 +4,4 @@ mod d3d11_scaler;
 mod video_processor;
 
 #[cfg(feature = "d3d11")]
-pub use d3d11_scaler::{D3d11Scaler, D3d11ScalerError};
+pub use d3d11_scaler::{D3d11Scaler, D3d11ScalerError, D3d11ScalerFormat};

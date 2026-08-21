@@ -78,6 +78,12 @@ pub enum D3d11UploadError {
 /// layer and [`crate::elements::D3d11ChromaKey`] work in, and it skips the
 /// color conversion a YUV round trip would cost.
 ///
+/// Which one a frame already is decides this, so the choice really belongs
+/// to whatever produced it. To cross between the two once a frame is
+/// already on the GPU, see [`crate::elements::D3d11Scaler`] — its
+/// [`crate::elements::D3d11ScalerFormat`] converts on the video processor
+/// without a CPU round trip.
+///
 /// Unlike `D3d12Upload`, this does **not** go through FFmpeg's
 /// `av_hwframe_get_buffer`/`av_hwframe_transfer_data` hwframe-pool
 /// machinery at all — `consume` creates a plain `ID3D11Texture2D` directly

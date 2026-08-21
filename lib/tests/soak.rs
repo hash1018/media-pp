@@ -597,8 +597,8 @@ mod d3d11 {
         elements::{
             ChromaKeyMethod, ChromaKeyOptions, D3d11ChromaKey, D3d11Decoder, D3d11NvencCodec,
             D3d11NvencEncoder, D3d11NvencEncoderOptions, D3d11NvencInputFormat, D3d11Scaler,
-            D3d11Upload, D3d11VideoCompositor, FrameCounter, PacketCounter, SwScaler,
-            VideoCompositorOptions, VideoLayer, VideoRect,
+            D3d11ScalerFormat, D3d11Upload, D3d11VideoCompositor, FrameCounter, PacketCounter,
+            SwScaler, VideoCompositorOptions, VideoLayer, VideoRect,
         },
         pipeline::Pipeline,
     };
@@ -640,6 +640,7 @@ mod d3d11 {
                 "scaler",
                 &device,
                 context.clone(),
+                D3d11ScalerFormat::Preserve,
                 SCALED_WIDTH,
                 SCALED_HEIGHT,
             )?;

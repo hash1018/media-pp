@@ -16,7 +16,7 @@ mod windows_example {
     use media_pp::{
         Error,
         bus::BusEvent,
-        elements::{D3d11Decoder, D3d11Scaler, FileDemuxer, Pacer},
+        elements::{D3d11Decoder, D3d11Scaler, D3d11ScalerFormat, FileDemuxer, Pacer},
         pipeline::Pipeline,
     };
     use render_common::D3d11GpuContext;
@@ -164,6 +164,9 @@ mod windows_example {
                 "scaler",
                 gpu.device(),
                 gpu.context(),
+                // A pure resize: the decoder's NV12 surfaces stay NV12 all the
+                // way to the renderer, which draws either format.
+                D3d11ScalerFormat::Preserve,
                 OUTPUT_WIDTH,
                 OUTPUT_HEIGHT,
             )?;

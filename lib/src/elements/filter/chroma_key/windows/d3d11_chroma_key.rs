@@ -162,11 +162,14 @@ impl ChromaKeyConstants {
 /// Input must be a `DXGI_FORMAT_B8G8R8A8_UNORM` texture, the same
 /// constraint [`crate::elements::SwChromaKey`] has for the same reason: the
 /// result of keying *is* an alpha channel, and NV12 has nowhere to put one.
-/// A decoder's NV12 surfaces therefore need a conversion first, so the
-/// usual upstream here is [`crate::elements::D3d11Upload`],
-/// [`crate::elements::DxgiCaptureSource`]'s GPU mode, or another
-/// compositor's output. RGB is written through untouched; only alpha
-/// changes.
+/// [`crate::elements::D3d11Upload`] (from a `Pixel::BGRA` frame),
+/// [`crate::elements::DxgiCaptureSource`]'s GPU mode, and a compositor's
+/// output all produce that directly. A decoder does not — its surfaces are
+/// NV12 — so a decoded green screen reaches this element through
+/// [`crate::elements::D3d11Scaler`] with
+/// [`crate::elements::D3d11ScalerFormat::Bgra`], which converts on the same
+/// `VideoProcessorBlt` it would resize with. RGB is written through
+/// untouched; only alpha changes.
 ///
 /// Output is a fresh texture rather than a keyed-in-place input: the frame
 /// arriving here is `Arc`-shared and its upstream owner may still be

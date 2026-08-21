@@ -18,7 +18,7 @@ use windows::{
     core::Interface,
 };
 
-use super::video_processor::{InputShape, ScaleProcessor, color_space};
+use super::video_processor::{BltColorSpaces, InputShape, ScaleProcessor, color_space};
 
 use crate::{
     buffer::MediaBuffer,
@@ -90,17 +90,50 @@ pub enum D3d11ScalerError {
     )]
     OddNv12Output { width: u32, height: u32 },
 
-    #[error("this GPU's video processor does not support {0:?} as both input and output")]
+    #[error("this GPU's video processor does not support {0:?} on the side it is needed for")]
     UnsupportedByVideoProcessor(DXGI_FORMAT),
 
     #[error("D3d11Scaler only accepts Video and Eos buffers, got a {0}")]
     UnsupportedBuffer(&'static str),
 }
 
-/// Resizes GPU-resident `Pixel::D3D11` `Video` frames without ever touching
-/// the CPU, through D3D11's own video processor (`VideoProcessorBlt`). A
-/// `Filter`: receives via `Sink`, pushes the scaled frame into its own
-/// single src pad.
+/// What surface format [`D3d11Scaler`] writes its output in.
+///
+/// The two variants name the only formats this crate's D3D11 elements
+/// produce and consume, and `Preserve` is the third useful answer: a
+/// caller resizing a decoder's output usually should not have to know
+/// which of them is arriving, since the input side is learned from the
+/// frames themselves rather than declared (see [`D3d11Scaler`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum D3d11ScalerFormat {
+    /// Write whatever the input carried — a pure resize, and the only
+    /// setting that needs no assumption about what is upstream.
+    Preserve,
+    /// `DXGI_FORMAT_NV12` — what [`crate::elements::D3d11Decoder`] produces
+    /// and what a hardware encoder ingests.
+    Nv12,
+    /// `DXGI_FORMAT_B8G8R8A8_UNORM` — the format everything that
+    /// composites works in: [`crate::elements::D3d11VideoCompositor`]
+    /// layers, [`crate::elements::D3d11ChromaKey`], and
+    /// [`crate::elements::D3d11Download`].
+    Bgra,
+}
+
+impl D3d11ScalerFormat {
+    /// The DXGI format to write, given what the input turned out to hold.
+    fn resolve(self, input: DXGI_FORMAT) -> DXGI_FORMAT {
+        match self {
+            D3d11ScalerFormat::Preserve => input,
+            D3d11ScalerFormat::Nv12 => DXGI_FORMAT_NV12,
+            D3d11ScalerFormat::Bgra => DXGI_FORMAT_B8G8R8A8_UNORM,
+        }
+    }
+}
+
+/// Resizes and, when asked, converts GPU-resident `Pixel::D3D11` `Video`
+/// frames without ever touching the CPU, through D3D11's own video
+/// processor (`VideoProcessorBlt`). A `Filter`: receives via `Sink`, pushes
+/// the scaled frame into its own single src pad.
 ///
 /// This is what makes a resolution change possible inside a D3D11 pipeline
 /// at all — `D3d11Decoder -> D3d11Scaler -> D3d11NvencEncoder` stays on the
@@ -111,16 +144,31 @@ pub enum D3d11ScalerError {
 /// source: it produces its own fixed-rate timeline rather than preserving the
 /// timestamps flowing through it.
 ///
-/// # Resize only
+/// # Resize, and optionally convert
 ///
-/// The output surface holds whatever the input did — `DXGI_FORMAT_NV12`
-/// stays NV12 and `DXGI_FORMAT_B8G8R8A8_UNORM` stays BGRA, the two formats
-/// this crate's D3D11 elements produce. The video processor could convert
-/// between them, and deliberately is not asked to: both sides of the `Blt`
-/// are given the same format and the same colorimetry, which is what keeps
-/// the result a pure resize. Nothing downstream needs a conversion here
-/// anyway — [`crate::elements::D3d11NvencEncoder`] ingests either format,
+/// [`D3d11ScalerFormat::Preserve`] gives back whatever the input held —
+/// NV12 stays NV12 and BGRA stays BGRA — by handing both sides of the `Blt`
+/// the same format and the same colorimetry, which is what keeps the result
+/// a pure resize. Naming `Nv12` or `Bgra` instead asks the same `Blt` for
+/// the conversion as well, at no extra pass.
+///
+/// That conversion is what connects the two halves of this crate's D3D11
+/// support. A decoder produces NV12, while everything that composites works
+/// in BGRA — [`crate::elements::D3d11ChromaKey`] keys it,
+/// [`crate::elements::D3d11VideoCompositor`] takes it as a layer, and
+/// [`crate::elements::D3d11Download`] reads it — so
+/// `D3d11Decoder -> D3d11Scaler(Bgra) -> D3d11ChromaKey` is what lets a
+/// decoded green screen be keyed without ever leaving the GPU. The other
+/// direction exists for the same reason in reverse, though it is needed
+/// less often: [`crate::elements::D3d11NvencEncoder`] ingests either format
 /// and [`crate::elements::D3d11Renderer`] draws either.
+///
+/// A converted frame is retagged for what it now holds rather than
+/// inheriting the source's tags — an encoder reads those to describe its
+/// stream. RGB is tagged full-range; Y'CbCr is tagged BT.709 limited, the
+/// same definition [`crate::elements::D3d11VideoCompositor`] and
+/// [`crate::elements::CudaConverter`] use, so converted frames and
+/// composited ones agree.
 ///
 /// Shader-resource-only textures from [`crate::elements::D3d11Upload`] and
 /// DXGI GPU capture cannot be used directly as D3D11 video-processor input
@@ -163,6 +211,9 @@ pub struct D3d11Scaler {
     video_context: ID3D11VideoContext,
     width: u32,
     height: u32,
+    /// What to write. Resolved against each frame's own format, since
+    /// [`D3d11ScalerFormat::Preserve`] has no answer until one arrives.
+    format: D3d11ScalerFormat,
     /// Built from the first frame and rebuilt when the input changes — see
     /// this type's own docs.
     processor: Option<ScaleProcessor>,
@@ -187,6 +238,32 @@ struct ValidatedInput {
 // non-`Arc`/`Mutex` state already rules out concurrent access to those parts
 // from multiple threads — same reasoning as `D3d11Download`.
 unsafe impl Send for D3d11Scaler {}
+
+/// The colorimetry an output frame should be tagged with, given what came
+/// in and what surface format is being written.
+///
+/// An unchanged format is not a conversion, so the source's own tags cross
+/// untouched — including `Unspecified`, which is information the next
+/// element is entitled to see rather than something to invent an answer
+/// for. A conversion has to replace them: the pixels are no longer what the
+/// old tags described, and an encoder builds its stream's description from
+/// these. The two answers match what this crate already produces elsewhere
+/// — `D3d11VideoCompositor` tags its BGRA output full-range RGB, and
+/// `CudaConverter` tags its Y'CbCr output BT.709 limited.
+fn converted_colorimetry(
+    frame: &ffmpeg::frame::Video,
+    output_format: DXGI_FORMAT,
+    input_format: DXGI_FORMAT,
+) -> (ffmpeg::color::Space, ffmpeg::color::Range) {
+    if output_format == input_format {
+        return (frame.color_space(), frame.color_range());
+    }
+    if output_format == DXGI_FORMAT_NV12 {
+        (ffmpeg::color::Space::BT709, ffmpeg::color::Range::MPEG)
+    } else {
+        (ffmpeg::color::Space::RGB, ffmpeg::color::Range::JPEG)
+    }
+}
 
 fn validate_output_size(
     format: DXGI_FORMAT,
@@ -239,13 +316,17 @@ impl D3d11Scaler {
     /// shared immediate context, every other D3D11 element in this pipeline
     /// uses — see this type's own docs on why.
     ///
-    /// `width`/`height` are what every output frame will be; the input side
-    /// is learned from whatever frames actually arrive, so this needs no
-    /// input dimensions up front (see this type's own docs).
+    /// `format`, `width`, and `height` are what every output frame will be;
+    /// the input side is learned from whatever frames actually arrive, so
+    /// this needs neither input dimensions nor an input format up front
+    /// (see this type's own docs). `format` is ordered before the size for
+    /// the same reason [`crate::elements::SwScaler`] orders its own
+    /// `dst_format` that way.
     pub fn new(
         name: impl Into<String>,
         device: &ID3D11Device,
         context: Arc<Mutex<ID3D11DeviceContext>>,
+        format: D3d11ScalerFormat,
         width: u32,
         height: u32,
     ) -> std::result::Result<Self, D3d11ScalerError> {
@@ -272,7 +353,7 @@ impl D3d11Scaler {
         let video_device: ID3D11VideoDevice = device.cast()?;
         let pad = SrcPad::new(format!("{name}_src"));
         let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
-        pp_info!(pp_log: &pp_log, "opened: dst={width}x{height}");
+        pp_info!(pp_log: &pp_log, "opened: dst={width}x{height} {format:?}");
         Ok(Self {
             name,
             pp_log,
@@ -282,6 +363,7 @@ impl D3d11Scaler {
             video_context,
             width,
             height,
+            format,
             processor: None,
             pad,
             pool,
@@ -363,8 +445,9 @@ impl D3d11Scaler {
             .validate(frame)
             .inspect_err(|error| pp_error!(self, "{error}"))?;
         let input = validated.shape;
+        let output_format = self.format.resolve(input.format);
 
-        validate_output_size(input.format, self.width, self.height)
+        validate_output_size(output_format, self.width, self.height)
             .inspect_err(|error| pp_error!(self, "{error}"))?;
 
         // `D3d11Upload` and DXGI GPU capture produce shader-resource-only
@@ -388,15 +471,25 @@ impl D3d11Scaler {
             )
         };
 
-        let output = create_output_texture(&self.device, input.format, self.width, self.height)
+        let output = create_output_texture(&self.device, output_format, self.width, self.height)
             .inspect_err(|error| pp_error!(self, "failed to allocate the output texture: {error}"))
             .map_err(D3d11ScalerError::from)?;
-        let color_space = color_space(
-            frame.color_space(),
-            frame.color_range(),
-            input.height,
-            input.format,
-        );
+        // What each side holds. The two are identical whenever the format
+        // is unchanged, which is what keeps a pure resize from becoming a
+        // color conversion; when they differ they are also the tags this
+        // element is about to stamp on the outgoing frame, so the processor
+        // and the frame's own metadata describe the same pixels.
+        let (output_space, output_range) =
+            converted_colorimetry(frame, output_format, input.format);
+        let color_spaces = BltColorSpaces {
+            input: color_space(
+                frame.color_space(),
+                frame.color_range(),
+                input.height,
+                input.format,
+            ),
+            output: color_space(output_space, output_range, self.height, output_format),
+        };
 
         {
             let context = self
@@ -422,17 +515,16 @@ impl D3d11Scaler {
                 }
                 None => (&validated.texture, validated.array_slice),
             };
-            if !self
-                .processor
-                .as_ref()
-                .is_some_and(|processor| processor.matches(input, self.width, self.height))
-            {
+            if !self.processor.as_ref().is_some_and(|processor| {
+                processor.matches(input, self.width, self.height, output_format)
+            }) {
                 pp_debug!(
                     self,
-                    "input is {}x{} {:?}, building the video processor",
+                    "input is {}x{} {:?}, output {:?}, building the video processor",
                     input.width,
                     input.height,
-                    input.format
+                    input.format,
+                    output_format
                 );
                 // Assigned only once the new processor exists, so a
                 // failure here leaves the previous working one in place
@@ -444,6 +536,7 @@ impl D3d11Scaler {
                         input,
                         self.width,
                         self.height,
+                        output_format,
                     )
                     .inspect_err(|error| {
                         pp_error!(self, "failed to build the video processor: {error}")
@@ -459,7 +552,7 @@ impl D3d11Scaler {
                     processor_input,
                     processor_slice,
                     &output,
-                    color_space,
+                    color_spaces,
                 )
                 .inspect_err(|error| pp_error!(self, "scale failed: {error}"))?;
         }
@@ -470,8 +563,12 @@ impl D3d11Scaler {
         // before, releasing that frame's GPU texture right here.
         *scaled = wrap_d3d11_texture(output, self.width, self.height);
         scaled.set_pts(frame.pts());
-        scaled.set_color_space(frame.color_space());
-        scaled.set_color_range(frame.color_range());
+        // A pure resize carries the source's tags through unchanged; a
+        // conversion replaces them, because the pixels are no longer what
+        // they described. `converted_colorimetry` is what decides which of
+        // those this was.
+        scaled.set_color_space(output_space);
+        scaled.set_color_range(output_range);
 
         self.pad.push(MediaBuffer::Video(Arc::new(scaled)))
     }
@@ -833,8 +930,15 @@ mod tests {
         source_frame.set_color_space(ffmpeg::color::Space::BT709);
         source_frame.set_color_range(ffmpeg::color::Range::MPEG);
 
-        let mut scaler = D3d11Scaler::new("scaler", &device, context.clone(), 8, 8)
-            .expect("D3d11Scaler::new should succeed");
+        let mut scaler = D3d11Scaler::new(
+            "scaler",
+            &device,
+            context.clone(),
+            D3d11ScalerFormat::Preserve,
+            8,
+            8,
+        )
+        .expect("D3d11Scaler::new should succeed");
         let mut download = D3d11Download::new("download", &device, context, 8, 8)
             .expect("D3d11Download::new should succeed");
         let received = capture(&mut download);
@@ -879,8 +983,15 @@ mod tests {
         };
         let source = nv12_frame(&device, 32, 32, 200, 5);
 
-        let mut scaler = D3d11Scaler::new("scaler", &device, context.clone(), 16, 16)
-            .expect("D3d11Scaler::new should succeed");
+        let mut scaler = D3d11Scaler::new(
+            "scaler",
+            &device,
+            context.clone(),
+            D3d11ScalerFormat::Preserve,
+            16,
+            16,
+        )
+        .expect("D3d11Scaler::new should succeed");
         let received = capture(&mut scaler);
         scaler.consume(source).expect("scale");
 
@@ -938,8 +1049,15 @@ mod tests {
             .data[1] = std::ptr::dangling_mut::<u8>();
         }
 
-        let mut scaler = D3d11Scaler::new("scaler", &device, context.clone(), 8, 8)
-            .expect("D3d11Scaler::new should succeed");
+        let mut scaler = D3d11Scaler::new(
+            "scaler",
+            &device,
+            context.clone(),
+            D3d11ScalerFormat::Preserve,
+            8,
+            8,
+        )
+        .expect("D3d11Scaler::new should succeed");
         let mut download = D3d11Download::new("download", &device, context, 8, 8)
             .expect("D3d11Download::new should succeed");
         let received = capture(&mut download);
@@ -973,8 +1091,15 @@ mod tests {
         );
         let second = nv12_frame(&device, 32, 16, 180, 1);
 
-        let mut scaler = D3d11Scaler::new("scaler", &device, context, 8, 8)
-            .expect("D3d11Scaler::new should succeed");
+        let mut scaler = D3d11Scaler::new(
+            "scaler",
+            &device,
+            context,
+            D3d11ScalerFormat::Preserve,
+            8,
+            8,
+        )
+        .expect("D3d11Scaler::new should succeed");
         let received = capture(&mut scaler);
         scaler.consume(first).expect("the first frame must scale");
         scaler
@@ -1004,8 +1129,15 @@ mod tests {
             return;
         };
 
-        let mut scaler = D3d11Scaler::new("scaler", &device, context, 8, 8)
-            .expect("D3d11Scaler::new should succeed");
+        let mut scaler = D3d11Scaler::new(
+            "scaler",
+            &device,
+            context,
+            D3d11ScalerFormat::Preserve,
+            8,
+            8,
+        )
+        .expect("D3d11Scaler::new should succeed");
         let _received = capture(&mut scaler);
 
         let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
@@ -1046,8 +1178,15 @@ mod tests {
         };
         let source = nv12_frame(&device, 32, 32, 200, 0);
 
-        let mut scaler = D3d11Scaler::new("scaler", &device, context, 15, 15)
-            .expect("D3d11Scaler::new should succeed");
+        let mut scaler = D3d11Scaler::new(
+            "scaler",
+            &device,
+            context,
+            D3d11ScalerFormat::Preserve,
+            15,
+            15,
+        )
+        .expect("D3d11Scaler::new should succeed");
         let _received = capture(&mut scaler);
         let error = scaler
             .consume(source)
@@ -1068,7 +1207,14 @@ mod tests {
             return;
         };
         assert!(matches!(
-            D3d11Scaler::new("scaler", &device, context, 0, 8),
+            D3d11Scaler::new(
+                "scaler",
+                &device,
+                context,
+                D3d11ScalerFormat::Preserve,
+                0,
+                8
+            ),
             Err(D3d11ScalerError::InvalidOutputDimensions {
                 width: 0,
                 height: 8
@@ -1085,8 +1231,228 @@ mod tests {
             return;
         };
         assert!(matches!(
-            D3d11Scaler::new("scaler", &device, other_context, 8, 8),
+            D3d11Scaler::new(
+                "scaler",
+                &device,
+                other_context,
+                D3d11ScalerFormat::Preserve,
+                8,
+                8
+            ),
             Err(D3d11ScalerError::ContextDeviceMismatch)
         ));
+    }
+
+    /// How far a converted channel may land from the arithmetic answer.
+    /// The video processor is fixed-function hardware and each vendor
+    /// rounds its own way, so the contract worth asserting is "this is the
+    /// color that came out", not a bit-exact match.
+    const CHANNEL_TOLERANCE: i32 = 4;
+
+    fn assert_close(actual: u8, expected: u8, what: &str) {
+        let difference = i32::from(actual) - i32::from(expected);
+        assert!(
+            difference.abs() <= CHANNEL_TOLERANCE,
+            "{what}: expected about {expected}, got {actual}"
+        );
+    }
+
+    /// The conversion that connects a decoder to everything that
+    /// composites. A flat limited-range luma of 235 with neutral chroma is
+    /// white, so the BGRA that comes out has to be white in all three
+    /// channels — a suppressed conversion would hand back the raw luma
+    /// instead, and a wrong matrix would tint it.
+    #[test]
+    fn an_nv12_frame_converts_to_bgra_on_the_way_through() {
+        let Some((device, context)) = try_video_device() else {
+            return;
+        };
+        // 235 / neutral chroma: limited-range white.
+        let source = nv12_frame(&device, 32, 32, 235, 9);
+
+        let mut scaler = D3d11Scaler::new(
+            "scaler",
+            &device,
+            context.clone(),
+            D3d11ScalerFormat::Bgra,
+            16,
+            16,
+        )
+        .expect("D3d11Scaler::new should succeed");
+        let mut download = D3d11Download::new("download", &device, context, 16, 16)
+            .expect("D3d11Download::new should succeed");
+        let received = capture(&mut download);
+        scaler.src_pads()[0].link(Box::new(download));
+
+        scaler.consume(source).expect("convert");
+
+        let received = received.lock().unwrap();
+        let MediaBuffer::Video(converted) = &received[0] else {
+            panic!("expected a Video buffer, got {}", received[0].kind());
+        };
+        assert_eq!(converted.width(), 16);
+        assert_eq!(converted.height(), 16);
+        assert_eq!(converted.pts(), Some(9), "the conversion dropped the pts");
+
+        let stride = converted.stride(0);
+        for row in 0..16usize {
+            for column in 0..16usize {
+                let offset = row * stride + column * 4;
+                let pixel = &converted.data(0)[offset..offset + 4];
+                for (channel, name) in [(0, "blue"), (1, "green"), (2, "red")] {
+                    assert_close(
+                        pixel[channel],
+                        255,
+                        &format!("row {row}, column {column}, {name}"),
+                    );
+                }
+            }
+        }
+    }
+
+    /// The other direction, for a capture or compositor output headed into
+    /// something that wants NV12. Full-range white in, limited-range luma
+    /// 235 out.
+    #[test]
+    fn a_bgra_frame_converts_to_nv12_on_the_way_through() {
+        let Some((device, context)) = try_video_device() else {
+            return;
+        };
+        let white = [255u8, 255, 255, 255];
+        let source = frame(bgra_texture(&device, 16, 16, white, 1), 16, 16, 3);
+
+        let mut scaler = D3d11Scaler::new(
+            "scaler",
+            &device,
+            context.clone(),
+            D3d11ScalerFormat::Nv12,
+            8,
+            8,
+        )
+        .expect("D3d11Scaler::new should succeed");
+        let received = capture(&mut scaler);
+        scaler.consume(source).expect("convert");
+
+        let received = received.lock().unwrap();
+        let MediaBuffer::Video(converted) = &received[0] else {
+            panic!("expected a Video buffer, got {}", received[0].kind());
+        };
+        let (texture_raw, _) = d3d11va_texture(converted).expect("the output carries a texture");
+        let texture = unsafe {
+            ID3D11Texture2D::from_raw_borrowed(&texture_raw)
+                .expect("the output texture must not be null")
+                .clone()
+        };
+        let mut desc = D3D11_TEXTURE2D_DESC::default();
+        unsafe { texture.GetDesc(&mut desc) };
+        assert_eq!(
+            desc.Format, DXGI_FORMAT_NV12,
+            "asking for Nv12 must produce an NV12 surface"
+        );
+
+        let (luma, chroma) = read_nv12(&device, &context, &texture, 8, 8);
+        for (index, sample) in luma.iter().enumerate() {
+            assert_close(*sample, 235, &format!("luma sample {index}"));
+        }
+        for (index, sample) in chroma.iter().enumerate() {
+            assert_close(*sample, 128, &format!("chroma sample {index}"));
+        }
+    }
+
+    /// A conversion changes what the pixels are, so the tags that describe
+    /// them have to change with them — an encoder builds its stream's
+    /// description from exactly these.
+    #[test]
+    fn a_converted_frame_is_retagged_and_a_resized_one_is_not() {
+        let Some((device, context)) = try_video_device() else {
+            return;
+        };
+
+        // Converted: the source's BT.709/limited tags describe Y'CbCr, and
+        // the output is RGB, so they are replaced rather than carried.
+        let mut source = nv12_frame(&device, 32, 32, 128, 0);
+        let MediaBuffer::Video(source_frame) = &mut source else {
+            unreachable!("nv12_frame always returns a Video buffer");
+        };
+        let source_frame = Arc::get_mut(source_frame).expect("the frame is not shared yet");
+        source_frame.set_color_space(ffmpeg::color::Space::BT709);
+        source_frame.set_color_range(ffmpeg::color::Range::MPEG);
+
+        let mut converting = D3d11Scaler::new(
+            "converting",
+            &device,
+            context.clone(),
+            D3d11ScalerFormat::Bgra,
+            16,
+            16,
+        )
+        .expect("D3d11Scaler::new should succeed");
+        let converted = capture(&mut converting);
+        converting.consume(source).expect("convert");
+        {
+            let converted = converted.lock().unwrap();
+            let MediaBuffer::Video(frame) = &converted[0] else {
+                panic!("expected a Video buffer");
+            };
+            assert_eq!(frame.color_space(), ffmpeg::color::Space::RGB);
+            assert_eq!(frame.color_range(), ffmpeg::color::Range::JPEG);
+        }
+
+        // Resized only: the same tags cross untouched, because the pixels
+        // still are what they said they were.
+        let mut source = nv12_frame(&device, 32, 32, 128, 0);
+        let MediaBuffer::Video(source_frame) = &mut source else {
+            unreachable!("nv12_frame always returns a Video buffer");
+        };
+        let source_frame = Arc::get_mut(source_frame).expect("the frame is not shared yet");
+        source_frame.set_color_space(ffmpeg::color::Space::BT709);
+        source_frame.set_color_range(ffmpeg::color::Range::MPEG);
+
+        let mut resizing = D3d11Scaler::new(
+            "resizing",
+            &device,
+            context,
+            D3d11ScalerFormat::Preserve,
+            16,
+            16,
+        )
+        .expect("D3d11Scaler::new should succeed");
+        let resized = capture(&mut resizing);
+        resizing.consume(source).expect("resize");
+        let resized = resized.lock().unwrap();
+        let MediaBuffer::Video(frame) = &resized[0] else {
+            panic!("expected a Video buffer");
+        };
+        assert_eq!(frame.color_space(), ffmpeg::color::Space::BT709);
+        assert_eq!(frame.color_range(), ffmpeg::color::Range::MPEG);
+    }
+
+    /// The odd-size guard follows the output format, not the input's: a
+    /// BGRA input can be any size, but the NV12 it is being converted into
+    /// still has no half-sample to write.
+    #[test]
+    fn an_odd_size_is_rejected_when_the_output_is_nv12_even_from_a_bgra_input() {
+        let Some((device, context)) = try_video_device() else {
+            return;
+        };
+        let source = frame(bgra_texture(&device, 16, 16, [0, 0, 0, 255], 1), 16, 16, 0);
+
+        let mut scaler =
+            D3d11Scaler::new("scaler", &device, context, D3d11ScalerFormat::Nv12, 15, 15)
+                .expect("D3d11Scaler::new should succeed");
+        let _received = capture(&mut scaler);
+        let error = scaler
+            .consume(source)
+            .expect_err("an odd NV12 output must be rejected");
+        assert!(
+            matches!(
+                error,
+                crate::error::Error::D3d11ScalerError(D3d11ScalerError::OddNv12Output {
+                    width: 15,
+                    height: 15
+                })
+            ),
+            "unexpected error: {error}"
+        );
     }
 }

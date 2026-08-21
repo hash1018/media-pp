@@ -60,8 +60,8 @@ pub use filter::{
 pub use filter::{
     D3d11ChromaKey, D3d11ChromaKeyError, D3d11Decoder, D3d11Download, D3d11DownloadError,
     D3d11NvencCodec, D3d11NvencEncoder, D3d11NvencEncoderError, D3d11NvencEncoderOptions,
-    D3d11NvencInputFormat, D3d11Scaler, D3d11ScalerError, D3d11Upload, D3d11UploadError,
-    D3d11vaDecoderError,
+    D3d11NvencInputFormat, D3d11Scaler, D3d11ScalerError, D3d11ScalerFormat, D3d11Upload,
+    D3d11UploadError, D3d11vaDecoderError,
 };
 #[cfg(all(target_os = "windows", feature = "d3d12"))]
 pub use filter::{D3d12Upload, D3d12UploadError, D3d12vaDecoder, D3d12vaDecoderError};
