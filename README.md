@@ -60,6 +60,11 @@ seconds, so they are `#[ignore]`d and stay out of the command above:
 cargo test -p media-pp --features d3d11,cuda --test soak -- --ignored --nocapture
 ```
 
+On Linux, `pipewire-screen-capture` takes the place of `d3d11`. Its two capture
+scenarios also need `MEDIA_PP_SOAK_RESTORE_TOKEN`, since xdg-desktop-portal
+would otherwise show its picker and block; any run of `screen_record` prints a
+token to reuse.
+
 File-based examples require a media path. No media files are checked into the
 repository and examples do not use a default path.
 

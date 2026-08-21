@@ -188,6 +188,13 @@ documentation and implementation differ.
   variable actually set, since a skipped test reports as passing. Such a test
   must assert a contract that holds for any fixture — never a particular file's
   codec, resolution, duration, or keyframe spacing.
+- The Linux screen-capture soak scenarios need `MEDIA_PP_SOAK_RESTORE_TOKEN`
+  and skip with a reason without it. Wayland has no non-interactive way to name
+  a monitor, so `PipeWireScreenCaptureSource::open` shows the compositor's
+  picker and blocks on it with no timeout; only a portal restore token makes a
+  scenario that opens a session per cycle unattended. A successful restore
+  hands the same token back, so one value keeps working — mint it by running
+  any `screen_record`-style example, which prints it.
 - Stress and leak coverage lives in `lib/tests/soak.rs`, `#[ignore]`d and run
   explicitly (`--test soak -- --ignored --nocapture`). A scenario repeats one
   cycle — build/run/teardown, control storm, dynamic churn, GPU upload/scale,

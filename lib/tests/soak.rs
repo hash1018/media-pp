@@ -7,6 +7,8 @@
 //! cargo test -p media-pp --features d3d11,cuda --test soak -- --ignored --nocapture
 //! ```
 //!
+//! On Linux, `pipewire-screen-capture` replaces `d3d11`.
+//!
 //! `--nocapture` matters — every scenario prints the series it measured, so
 //! a passing run still shows how much headroom it had.
 //!
@@ -17,6 +19,10 @@
 //! - `MEDIA_PP_TEST_VIDEO` — a real video file. The seek and hardware-decode
 //!   scenarios skip without one: no synthetic source in this crate can seek,
 //!   and no hardware decoder has anything to decode.
+//! - `MEDIA_PP_SOAK_RESTORE_TOKEN` — an xdg-desktop-portal restore token.
+//!   The Linux screen-capture scenarios skip without one, since the portal
+//!   would otherwise show its picker and block; `cargo run -p screen_record
+//!   -- out.mp4 2 monitor` prints a token to reuse.
 //!
 //! What the numbers mean, and how the thresholds were picked, is in
 //! `common/mod.rs`; the short version is that each scenario fits a line
@@ -1325,7 +1331,10 @@ mod cuda {
     /// and releases the process-wide primary context, which
     /// `test_support`'s own CUDA helper documents as unsafe to churn next
     /// to in-flight NVDEC/NVENC work.
-    fn try_device() -> Option<CudaDevice> {
+    ///
+    /// `pub(crate)` for the `pipewire` module's GPU capture scenario, whose
+    /// frames land in CUDA memory through this same device.
+    pub(crate) fn try_device() -> Option<CudaDevice> {
         match CudaDevice::new() {
             Ok(device) => Some(device),
             Err(error) => {
@@ -1403,6 +1412,14 @@ mod cuda {
         // roughly +-4 MiB peak to peak, several times what the CPU-only
         // scenarios show, so a longer window and a looser threshold are
         // what keep that jitter from dominating the fitted slope.
+        //
+        // At the default count this gauge also shows a climb of about
+        // +0.1 MiB per cycle, which is the same host-side allocation
+        // settling rather than anything retained: measured over 250
+        // cycles it is a bounded ~14 MiB rise that stops outright, its
+        // slope falling +0.075 over the first half, +0.032 over the
+        // second, and exactly 0.000 over the last 62 cycles. A leak would
+        // hold its slope as the window grows instead of flattening.
         measure_cycles("cuda cycle", iterations(25), 1.0 * MIB, |teardown| {
             cycle(&device, teardown)
         });
@@ -1439,5 +1456,253 @@ mod cuda {
         measure_cycles("cuda nvenc cycle", iterations(15), 1.0 * MIB, |teardown| {
             encode_cycle(&device, teardown)
         });
+    }
+}
+
+/// The Linux desktop-capture path, the counterpart of the D3D11 module's
+/// two DXGI capture scenarios. Each cycle runs a whole portal handshake and
+/// PipeWire stream — session, node, negotiated format, and in GPU mode a
+/// set of DMA-BUF imports — so what these measure is whether a session
+/// releases all of that when its source drops.
+///
+/// Both need `MEDIA_PP_SOAK_RESTORE_TOKEN`; see `common::try_restore_token`
+/// for why that cannot be defaulted or detected.
+#[cfg(all(target_os = "linux", feature = "pipewire-screen-capture"))]
+mod pipewire {
+    use std::{sync::atomic::Ordering, thread, time::Duration};
+
+    use media_pp::{
+        elements::{
+            CaptureSourceKind, FrameCounter, PipeWireScreenCaptureOptions,
+            PipeWireScreenCaptureSource,
+        },
+        pipeline::Pipeline,
+    };
+
+    use crate::common::{MIB, Trend, exclusive, iterations, settle, try_restore_token};
+    use crate::{Teardown, WARMUP};
+
+    /// What every cycle below opens with. A monitor rather than a window:
+    /// the token restores whichever source was picked once, and a monitor
+    /// is the one kind that is certain to still exist on a later run.
+    fn options(restore_token: &str) -> PipeWireScreenCaptureOptions {
+        PipeWireScreenCaptureOptions {
+            fps: 30,
+            source_kind: CaptureSourceKind::Monitor,
+            include_cursor: false,
+            restore_token: Some(restore_token.to_owned()),
+        }
+    }
+
+    /// How long a cycle lets the capture run. Longer than the CPU-only
+    /// scenarios' cycles for the same reason the DXGI one is: this source
+    /// emits on its own fixed schedule, so a cycle has to span several of
+    /// its ticks to prove frames really flowed.
+    const CAPTURE_MILLIS: u64 = 400;
+
+    /// One CPU capture session: portal handshake, stream, frames into
+    /// pooled BGRA `AVFrame`s, teardown.
+    fn cpu_cycle(restore_token: &str, teardown: Teardown) -> usize {
+        let (counter, frames) = FrameCounter::new("counter");
+        let (source, _format, _token) =
+            PipeWireScreenCaptureSource::open("capture", options(restore_token)).expect(
+                "open the portal capture — a failure here after the first cycle means an \
+                 earlier source never closed its portal session or PipeWire stream",
+            );
+
+        let pipeline = Pipeline::new("soak-pipewire-capture", source, |source, ctx| {
+            let branch = ctx.branch().queue("captured", 4).to(Box::new(counter))?;
+            ctx.attach(source, 0, branch)?;
+            Ok(())
+        })
+        .expect("wire the capture pipeline");
+
+        pipeline.run();
+        thread::sleep(Duration::from_millis(CAPTURE_MILLIS));
+        teardown.apply(&pipeline);
+        frames.load(Ordering::Relaxed)
+    }
+
+    /// The same session in GPU mode: `open_gpu` negotiates DMA-BUF only and
+    /// imports each buffer into CUDA memory, so a cycle also creates and
+    /// destroys the EGL display, the cached `EGLImage`s, and a CUDA frames
+    /// context. None of that is visible to the process heap, which is why
+    /// this scenario asks the driver for its own number.
+    #[cfg(feature = "cuda")]
+    fn gpu_cycle(
+        device: &media_pp::elements::CudaDevice,
+        restore_token: &str,
+        teardown: Teardown,
+    ) -> usize {
+        let (counter, frames) = FrameCounter::new("counter");
+        let (source, _format, _token) =
+            PipeWireScreenCaptureSource::open_gpu("capture", options(restore_token), device)
+                .expect(
+                    "open the portal capture in GPU mode — a failure here after the first \
+                     cycle means an earlier source never released its EGL images or CUDA \
+                     surfaces",
+                );
+
+        let pipeline = Pipeline::new("soak-pipewire-capture-gpu", source, |source, ctx| {
+            let branch = ctx.branch().queue("captured", 4).to(Box::new(counter))?;
+            ctx.attach(source, 0, branch)?;
+            Ok(())
+        })
+        .expect("wire the GPU capture pipeline");
+
+        pipeline.run();
+        thread::sleep(Duration::from_millis(CAPTURE_MILLIS));
+        teardown.apply(&pipeline);
+        frames.load(Ordering::Relaxed)
+    }
+
+    /// Whether this desktop will hand out a capture at all with the token
+    /// it was given, so that a stale token or a compositor without the
+    /// portal skips with a reason instead of failing the suite.
+    ///
+    /// The probe is the honest place to find out: an `open` whose token no
+    /// longer restores falls back to the picker, and the picker being
+    /// dismissed is `Cancelled` — a routine outcome, not a malfunction.
+    fn capture_supported(restore_token: &str) -> bool {
+        match PipeWireScreenCaptureSource::open("probe", options(restore_token)) {
+            Ok(_) => true,
+            Err(error) => {
+                eprintln!("skipping: no portal screen capture available here ({error})");
+                false
+            }
+        }
+    }
+
+    /// Runs `cycle` and judges what this platform lets us see — the same
+    /// shape as the `cuda` module's own helper, since the GPU gauge is the
+    /// same driver query.
+    ///
+    /// `watch_gpu` is what the cycle's own mode decides: the CPU path never
+    /// creates a CUDA context, so querying the driver for its share would
+    /// only add a flat zero to the report and assert nothing.
+    fn measure_cycles(
+        label: &str,
+        watch_gpu: bool,
+        iterations: usize,
+        max_memory_slope: f64,
+        mut cycle: impl FnMut(Teardown) -> usize,
+    ) {
+        use crate::common::{Unit, gpu::nvidia_process_bytes};
+
+        let mut memory = Trend::private_bytes(format!("{label} private bytes"));
+        let mut gpu = match nvidia_process_bytes() {
+            Some(_) if watch_gpu => Some(Trend::new(
+                format!("{label} driver-reported GPU memory"),
+                Unit::Bytes,
+                || nvidia_process_bytes().unwrap_or_default(),
+            )),
+            None if watch_gpu => {
+                eprintln!(
+                    "note: this driver does not report per-process GPU memory; measuring private \
+                     bytes only"
+                );
+                None
+            }
+            _ => None,
+        };
+
+        for index in 0..(WARMUP + iterations) {
+            let teardown = Teardown::for_cycle(index);
+            let frames = cycle(teardown);
+            // Only a `finish` cycle owes us output, same as everywhere
+            // else here — and an idle desktop still produces frames,
+            // because this source re-emits its latest image on its own
+            // schedule rather than only when the screen changes.
+            if teardown == Teardown::Finish {
+                assert!(
+                    frames > 0,
+                    "{label} {index} captured nothing before draining"
+                );
+            }
+            if index + 1 == WARMUP {
+                settle();
+            }
+            if index >= WARMUP {
+                memory.sample();
+                if let Some(gpu) = gpu.as_mut() {
+                    gpu.sample();
+                }
+            }
+        }
+
+        memory.assert_flat(max_memory_slope);
+        if let Some(gpu) = gpu {
+            // Reported in whole MiB, so a threshold below that would fail
+            // on quantization alone.
+            gpu.assert_flat(1.0 * MIB);
+        }
+    }
+
+    /// The CPU path: every captured image is copied into a pooled frame in
+    /// system memory, so a session that kept its buffers shows up in
+    /// private bytes directly — a screen's worth of BGRA is ~8 MiB at
+    /// 1080p, sixteen times this threshold.
+    ///
+    /// What it does show is a bounded step, not a ramp: over 40 cycles on
+    /// the development machine private bytes climbed 74.4 -> 75.1 MiB and
+    /// then stayed there, all of it inside the first twenty cycles. Same
+    /// shape as the DXGI CPU scenario's own note — an allocator and driver
+    /// settling into a working set, which no per-cycle threshold above it
+    /// mistakes for growth.
+    #[test]
+    #[ignore = "soak test; run with --ignored"]
+    fn cpu_desktop_capture_cycles_do_not_grow_process_memory() {
+        isolate!();
+        let _exclusive = exclusive();
+        media_pp::init().expect("ffmpeg init");
+        let Some(token) = try_restore_token() else {
+            return;
+        };
+        if !capture_supported(&token) {
+            return;
+        }
+
+        measure_cycles(
+            "pipewire capture cycle",
+            false,
+            iterations(10),
+            0.5 * MIB,
+            |teardown| cpu_cycle(&token, teardown),
+        );
+    }
+
+    /// The zero-copy path: nothing captured reaches system memory, so the
+    /// driver's per-process figure carries this scenario and private bytes
+    /// only covers the host side of the EGL and CUDA bookkeeping.
+    ///
+    /// That driver figure is the sharp instrument here: 40 cycles measured
+    /// 82.0 MiB on every single one, so a retained frames context or a
+    /// leaked DMA-BUF import has nowhere to hide. Private bytes gets the
+    /// looser threshold instead, because the CUDA and EGL host allocations
+    /// arrive as occasional sub-MiB steps rather than a flat line.
+    #[test]
+    #[ignore = "soak test; run with --ignored"]
+    #[cfg(feature = "cuda")]
+    fn gpu_desktop_capture_cycles_do_not_grow_gpu_memory() {
+        isolate!();
+        let _exclusive = exclusive();
+        media_pp::init().expect("ffmpeg init");
+        let Some(token) = try_restore_token() else {
+            return;
+        };
+        let Some(device) = crate::cuda::try_device() else {
+            return;
+        };
+        if !capture_supported(&token) {
+            return;
+        }
+
+        measure_cycles(
+            "pipewire gpu capture cycle",
+            true,
+            iterations(10),
+            1.0 * MIB,
+            |teardown| gpu_cycle(&device, &token, teardown),
+        );
     }
 }

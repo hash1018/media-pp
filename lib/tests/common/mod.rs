@@ -401,6 +401,36 @@ pub fn try_test_video() -> Option<String> {
     Some(path)
 }
 
+/// A portal restore token for the screen-capture scenarios, from
+/// `MEDIA_PP_SOAK_RESTORE_TOKEN`.
+///
+/// Unlike every other input here this one cannot be defaulted or detected:
+/// Wayland offers no way to name a monitor, so
+/// `PipeWireScreenCaptureSource::open` shows the compositor's picker and
+/// blocks on it — with no timeout — unless a token restores an earlier
+/// choice. A scenario that opens one capture session per cycle would
+/// otherwise sit on that dialog forever. So the variable is what says "a
+/// desktop session is present and has already approved this", and its
+/// absence skips rather than prompts.
+///
+/// Mint one by running an example that prints it, e.g.
+/// `cargo run -p screen_record -- out.mp4 2 monitor`. A successful restore
+/// hands the same token back, so one value keeps working across cycles and
+/// across runs.
+pub fn try_restore_token() -> Option<String> {
+    match std::env::var("MEDIA_PP_SOAK_RESTORE_TOKEN") {
+        Ok(token) if !token.trim().is_empty() => Some(token),
+        _ => {
+            eprintln!(
+                "skipping: set MEDIA_PP_SOAK_RESTORE_TOKEN to an xdg-desktop-portal restore \
+                 token to run this test (without one the portal would show its picker and \
+                 block); `cargo run -p screen_record -- out.mp4 2 monitor` prints one"
+            );
+            None
+        }
+    }
+}
+
 /// A scratch directory that deletes itself on drop, for the scenarios that
 /// record to disk. Deleting is also an assertion: Windows refuses to remove
 /// a file something still holds open, so a clean teardown proves no muxer
