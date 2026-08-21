@@ -2,6 +2,8 @@
 mod d3d11_scaler;
 #[cfg(feature = "d3d12")]
 mod d3d12_scaler;
+#[cfg(feature = "d3d12")]
+mod d3d12_video_processor;
 #[cfg(feature = "d3d11")]
 mod video_processor;
 
