@@ -97,3 +97,66 @@ jobs:
       - name: Test (Windows backends)
         shell: pwsh
         run: cargo test -p media-pp --features d3d11,d3d12,dxgi-capture,wasapi-capture,wasapi-renderer
+
+  linux:
+    runs-on: ubuntu-26.04
+    env:
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+          rustup default stable
+
+      # Needed to build and lint the pipewire-* features; not part of the
+      # FFmpeg tree above.
+      - name: Install PipeWire development headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libpipewire-0.3-dev
+
+      - name: Set up FFmpeg
+        uses: ./.github/actions/setup-ffmpeg
+
+      - name: Cache downloaded crates
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Lint (no features)
+        run: cargo clippy -p media-pp --all-targets -- -D warnings
+
+      - name: Lint (Linux backends)
+        run: cargo clippy -p media-pp --all-targets --features pipewire-audio-capture,pipewire-audio-renderer,pipewire-screen-capture -- -D warnings
+
+      # Linted but not run: hosted runners have no NVIDIA driver, so a test
+      # binary built with this feature will not start. See the same job on
+      # Windows for the identical reasoning.
+      - name: Lint (CUDA)
+        run: cargo clippy -p media-pp --all-targets --features cuda -- -D warnings
+
+      - name: Check (ONNX Runtime and WebRTC)
+        env:
+          DOCS_RS: "1"
+        run: cargo check -p media-pp --all-targets --features ort,webrtc
+
+      - name: Test (no features)
+        run: cargo test -p media-pp
+
+      # PipeWire-session-dependent tests skip themselves with a reason
+      # (`try_capture_source()`-style helper) when this headless runner has
+      # no session to open; the screen-capture portal handshake itself is
+      # only exercised by the `#[ignore]`d soak scenario, not by this suite.
+      - name: Test (Linux backends)
+        run: cargo test -p media-pp --features pipewire-audio-capture,pipewire-audio-renderer,pipewire-screen-capture
