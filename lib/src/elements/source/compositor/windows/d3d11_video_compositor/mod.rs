@@ -1402,8 +1402,8 @@ mod tests {
         let row_bytes = width as usize;
         let luma_size = row_bytes * height as usize;
         let mut pixels = vec![y; luma_size + row_bytes * height.div_ceil(2) as usize];
-        for pair in pixels[luma_size..].chunks_exact_mut(2) {
-            pair.copy_from_slice(&[cb, cr]);
+        for pair in pixels[luma_size..].as_chunks_mut::<2>().0 {
+            *pair = [cb, cr];
         }
         unsafe {
             let desc = D3D11_TEXTURE2D_DESC {
