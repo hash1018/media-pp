@@ -254,7 +254,11 @@ impl D3d11Scaler {
         if width == 0 || height == 0 {
             return Err(D3d11ScalerError::InvalidOutputDimensions { width, height });
         }
-        let video_device: ID3D11VideoDevice = device.cast()?;
+        // The caller's own mistake is diagnosed before the adapter's
+        // capabilities are: a context belonging to another device is
+        // reported as `ContextDeviceMismatch` even on hardware with no
+        // video processor, where casting the device first would mask it as
+        // a bare `E_NOINTERFACE`.
         let video_context: ID3D11VideoContext = {
             let context = context
                 .lock()
@@ -265,6 +269,7 @@ impl D3d11Scaler {
             }
             context.cast()?
         };
+        let video_device: ID3D11VideoDevice = device.cast()?;
         let pad = SrcPad::new(format!("{name}_src"));
         let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
         pp_info!(pp_log: &pp_log, "opened: dst={width}x{height}");
@@ -609,6 +614,10 @@ mod tests {
     /// A D3D11 device and its immediate context, or `None` — after printing
     /// why — on a machine without one, the same way every other hardware
     /// test here skips.
+    ///
+    /// Enough for the tests that only exercise argument validation, which
+    /// `D3d11Scaler::new` rejects before it looks at what the adapter can
+    /// do. Anything that actually scales needs `try_video_device`.
     fn try_device() -> Option<(ID3D11Device, Arc<Mutex<ID3D11DeviceContext>>)> {
         let mut device = None;
         let mut context = None;
@@ -635,6 +644,30 @@ mod tests {
                 "D3D11CreateDevice succeeded without producing a context",
             ))),
         ))
+    }
+
+    /// The same device, but only when it can actually run a video
+    /// processor. `D3d11Scaler` scales through
+    /// `ID3D11VideoDevice`/`ID3D11VideoContext`, and an adapter without one
+    /// — a CI runner's basic render driver, for instance — still hands out a
+    /// perfectly usable `ID3D11Device` whose cast to those interfaces fails
+    /// with `E_NOINTERFACE`. That belongs in the skip check rather than in
+    /// each test's `D3d11Scaler::new(..).expect(..)`.
+    fn try_video_device() -> Option<(ID3D11Device, Arc<Mutex<ID3D11DeviceContext>>)> {
+        let (device, context) = try_device()?;
+        if let Err(error) = device.cast::<ID3D11VideoDevice>() {
+            eprintln!("skipping: this device has no ID3D11VideoDevice: {error}");
+            return None;
+        }
+        let supported = {
+            let context = context.lock().unwrap();
+            context.cast::<ID3D11VideoContext>()
+        };
+        if let Err(error) = supported {
+            eprintln!("skipping: this context has no ID3D11VideoContext: {error}");
+            return None;
+        }
+        Some((device, context))
     }
 
     /// A flat BGRA texture: after any interpolation every output pixel must
@@ -788,7 +821,7 @@ mod tests {
     /// part checkable at all.
     #[test]
     fn a_bgra_frame_is_resized_on_the_gpu_and_keeps_its_pts() {
-        let Some((device, context)) = try_device() else {
+        let Some((device, context)) = try_video_device() else {
             return;
         };
         let color = [20u8, 40, 60, 255];
@@ -841,7 +874,7 @@ mod tests {
     /// silent conversion would cost a color round trip per frame.
     #[test]
     fn an_nv12_frame_is_resized_and_stays_nv12() {
-        let Some((device, context)) = try_device() else {
+        let Some((device, context)) = try_video_device() else {
             return;
         };
         let source = nv12_frame(&device, 32, 32, 200, 5);
@@ -887,7 +920,7 @@ mod tests {
     /// to resize the slice the frame actually names — not slice zero.
     #[test]
     fn scales_only_the_selected_texture_array_slice() {
-        let Some((device, context)) = try_device() else {
+        let Some((device, context)) = try_video_device() else {
             return;
         };
         let color = [20u8, 40, 60, 255];
@@ -929,7 +962,7 @@ mod tests {
     /// and `SwScaler` have for their own scaling state.
     #[test]
     fn rebuilds_its_processor_when_the_input_changes_mid_stream() {
-        let Some((device, context)) = try_device() else {
+        let Some((device, context)) = try_video_device() else {
             return;
         };
         let first = frame(
@@ -964,10 +997,10 @@ mod tests {
     /// before the video processor ever sees them.
     #[test]
     fn a_cpu_frame_and_a_foreign_device_frame_are_typed_errors() {
-        let Some((device, context)) = try_device() else {
+        let Some((device, context)) = try_video_device() else {
             return;
         };
-        let Some((other_device, _other_context)) = try_device() else {
+        let Some((other_device, _other_context)) = try_video_device() else {
             return;
         };
 
@@ -1008,7 +1041,7 @@ mod tests {
     /// an `E_INVALIDARG` from somewhere inside the D3D11 call sequence.
     #[test]
     fn an_odd_nv12_output_size_is_a_typed_error() {
-        let Some((device, context)) = try_device() else {
+        let Some((device, context)) = try_video_device() else {
             return;
         };
         let source = nv12_frame(&device, 32, 32, 200, 0);
@@ -1025,6 +1058,10 @@ mod tests {
         );
     }
 
+    /// Both of these reject their arguments before `D3d11Scaler::new` casts
+    /// to the video interfaces, so they take a plain `try_device` and hold
+    /// on an adapter with no video processor too — which is exactly where a
+    /// check placed after the cast would report `E_NOINTERFACE` instead.
     #[test]
     fn rejects_zero_output_dimensions_before_allocating_a_texture() {
         let Some((device, context)) = try_device() else {
