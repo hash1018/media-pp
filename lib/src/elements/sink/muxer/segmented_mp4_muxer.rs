@@ -328,6 +328,21 @@ mod tests {
         pipeline::Pipeline,
     };
 
+    /// Opens an H.264 encoder for these tests, preferring the non-GPL
+    /// `OpenH264` but falling back to the GPL `H264` (`libx264`) — a
+    /// contributor's own ffmpeg build is more likely to carry `libx264`
+    /// (most distro packages enable it) than the Cisco `libopenh264`
+    /// library, and either one exercises the segment-rotation logic these
+    /// tests actually check. `None` only when neither is available.
+    fn open_h264_encoder(name: &str, mut options: SwEncoderOptions) -> Option<SwEncoder> {
+        [VideoCodec::OpenH264, VideoCodec::H264]
+            .into_iter()
+            .find_map(|codec| {
+                options.codec = codec;
+                SwEncoder::new(name, options).ok()
+            })
+    }
+
     /// Drives a real `TestVideoSource -> SwEncoder -> SegmentedMp4Muxer`
     /// chain for a few real seconds with a short rotation policy, then
     /// checks every segment file it produced: each one has to be a real,
@@ -345,7 +360,7 @@ mod tests {
         };
         let video_source = TestVideoSource::new("video", video_options);
         let time_base = video_source.time_base();
-        let encoder = SwEncoder::new(
+        let Some(encoder) = open_h264_encoder(
             "encoder",
             SwEncoderOptions {
                 codec: VideoCodec::OpenH264,
@@ -359,8 +374,10 @@ mod tests {
                 // ~2s default every other caller uses.
                 gop_size: 8,
             },
-        )
-        .expect("openh264 encoder must be available");
+        ) else {
+            eprintln!("skipping: no H.264 encoder available (openh264 or libx264)");
+            return;
+        };
 
         let dir = std::env::temp_dir();
         let prefix = format!("segmented_mp4_test_{}", std::process::id());
@@ -433,7 +450,7 @@ mod tests {
         };
         let video_source = TestVideoSource::new("video", video_options);
         let time_base = video_source.time_base();
-        let encoder = SwEncoder::new(
+        let Some(encoder) = open_h264_encoder(
             "encoder",
             SwEncoderOptions {
                 codec: VideoCodec::OpenH264,
@@ -444,8 +461,10 @@ mod tests {
                 bit_rate: 200_000,
                 gop_size: 8,
             },
-        )
-        .expect("openh264 encoder must be available");
+        ) else {
+            eprintln!("skipping: no H.264 encoder available (openh264 or libx264)");
+            return;
+        };
 
         let path = std::env::temp_dir().join(format!(
             "segmented_mp4_reject_test_{}.mp4",
@@ -494,7 +513,7 @@ mod tests {
         };
         let video_source = TestVideoSource::new("video", video_options);
         let time_base = video_source.time_base();
-        let encoder = SwEncoder::new(
+        let Some(encoder) = open_h264_encoder(
             "encoder",
             SwEncoderOptions {
                 codec: VideoCodec::OpenH264,
@@ -505,8 +524,10 @@ mod tests {
                 bit_rate: 200_000,
                 gop_size: 8, // ~0.5s @ 15fps — see the other test's own note
             },
-        )
-        .expect("openh264 encoder must be available");
+        ) else {
+            eprintln!("skipping: no H.264 encoder available (openh264 or libx264)");
+            return;
+        };
 
         let dir = std::env::temp_dir();
         let prefix = format!("segmented_mp4_release_test_{}", std::process::id());

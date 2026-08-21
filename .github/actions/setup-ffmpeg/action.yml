@@ -16,6 +16,17 @@ inputs:
       immutable git tag is the one reproducible source of a matching FFmpeg.
     required: false
     default: "2026.01.16"
+  vcpkg-features:
+    description: >
+      Comma-separated vcpkg features to add to the default `ffmpeg` port
+      install (e.g. "openh264"). `lib/tests` needs a working, non-GPL H.264
+      encoder it can rely on unconditionally (`VideoCodec::OpenH264` in
+      `sw_encoder.rs`, used by `segmented_mp4_muxer.rs`'s tests) — every other
+      codec variant is allowed to be absent and those tests skip cleanly, but
+      this one is treated as always-available. `openh264` is additive to
+      vcpkg's default feature set, not a replacement for it.
+    required: false
+    default: "openh264"
 
 runs:
   using: composite
@@ -49,7 +60,7 @@ runs:
       uses: actions/cache/restore@v4
       with:
         path: .vcpkg/installed
-        key: vcpkg-ffmpeg-${{ runner.os == 'Windows' && 'x64-windows' || 'x64-linux-dynamic' }}-${{ inputs.vcpkg-ref }}
+        key: vcpkg-ffmpeg-${{ runner.os == 'Windows' && 'x64-windows' || 'x64-linux-dynamic' }}-${{ inputs.vcpkg-ref }}-${{ inputs.vcpkg-features }}
 
     - name: Check out compatible vcpkg
       if: steps.ffmpeg.outputs.cache-hit != 'true'
@@ -78,7 +89,7 @@ runs:
       run: |
         & "$env:GITHUB_WORKSPACE\.vcpkg\bootstrap-vcpkg.bat" -disableMetrics
         if ($LASTEXITCODE -ne 0) { throw "vcpkg bootstrap failed ($LASTEXITCODE)" }
-        & "$env:GITHUB_WORKSPACE\.vcpkg\vcpkg.exe" install ffmpeg:x64-windows
+        & "$env:GITHUB_WORKSPACE\.vcpkg\vcpkg.exe" install "ffmpeg[${{ inputs.vcpkg-features }}]:x64-windows"
         if ($LASTEXITCODE -ne 0) { throw "vcpkg install ffmpeg failed ($LASTEXITCODE)" }
         # Nothing here links the debug variant, and it is about half of what
         # would otherwise be cached and restored on every later run.
@@ -91,7 +102,7 @@ runs:
       run: |
         set -euo pipefail
         "$GITHUB_WORKSPACE/.vcpkg/bootstrap-vcpkg.sh" -disableMetrics
-        "$GITHUB_WORKSPACE/.vcpkg/vcpkg" install ffmpeg:x64-linux-dynamic
+        "$GITHUB_WORKSPACE/.vcpkg/vcpkg" install "ffmpeg[${{ inputs.vcpkg-features }}]:x64-linux-dynamic"
         rm -rf "$GITHUB_WORKSPACE/.vcpkg/installed/x64-linux-dynamic/debug"
 
     # Export `FFMPEG_DIR`, not `VCPKG_ROOT`: `ffmpeg-sys-next` reads it before
@@ -164,4 +175,4 @@ runs:
       uses: actions/cache/save@v4
       with:
         path: .vcpkg/installed
-        key: vcpkg-ffmpeg-${{ runner.os == 'Windows' && 'x64-windows' || 'x64-linux-dynamic' }}-${{ inputs.vcpkg-ref }}
+        key: vcpkg-ffmpeg-${{ runner.os == 'Windows' && 'x64-windows' || 'x64-linux-dynamic' }}-${{ inputs.vcpkg-ref }}-${{ inputs.vcpkg-features }}
