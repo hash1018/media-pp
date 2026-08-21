@@ -33,12 +33,18 @@ runs:
     # hit. What keeps this one alive and reachable is therefore the CI workflow
     # running on every push and pull request; the tag-triggered docs build
     # restores what those runs wrote rather than maintaining its own.
+    # `save-always`: without it, actions/cache skips saving whenever a later
+    # step in the job fails, so a lint/test failure after a from-scratch
+    # vcpkg build would throw away that build and force the next run to
+    # repeat it. The tree this step caches is validated independently by
+    # Export FFMPEG_DIR below, so saving it even on a later failure is safe.
     - name: Restore cached FFmpeg development libraries
       id: ffmpeg
       uses: actions/cache@v4
       with:
         path: .vcpkg/installed
         key: vcpkg-ffmpeg-x64-windows-${{ inputs.vcpkg-ref }}
+        save-always: true
 
     - name: Check out compatible vcpkg
       if: steps.ffmpeg.outputs.cache-hit != 'true'
