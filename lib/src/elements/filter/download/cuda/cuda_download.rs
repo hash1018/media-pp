@@ -139,6 +139,11 @@ impl CudaDownload {
         let pp_log = element_pp_log(ElementType::CudaDownload, &name, None);
 
         let hw_device_ctx = device.retain();
+        // SAFETY: `hw_device_ctx` owns a live `AVBufferRef` for a CUDA device
+        // context, whose `data` is that `AVHWDeviceContext` by FFmpeg's own
+        // definition. Only the pointer's identity is kept, to compare against an
+        // incoming frame's; the reference held alongside it is what keeps that
+        // identity from being reused by a different context.
         let device_ctx = unsafe { (*hw_device_ctx.as_ptr()).data as *const ffi::AVHWDeviceContext };
 
         let pad = SrcPad::new(format!("{name}_src"));
@@ -177,6 +182,11 @@ impl CudaDownload {
             pp_error!(self, "{error}");
             return Err(error.into());
         }
+        // SAFETY: `frame` is a live `frame::Video` already confirmed to be
+        // `Pixel::CUDA`, so `as_ptr` yields an initialized `AVFrame` and a hardware
+        // frame's `hw_frames_ctx` is either null — rejected here — or an
+        // `AVBufferRef` whose `data` is an `AVHWFramesContext`. Only pointer
+        // identity is compared, never dereferenced past that.
         unsafe {
             let frames_ref = (*source.as_ptr()).hw_frames_ctx;
             if frames_ref.is_null() {
@@ -200,6 +210,9 @@ impl CudaDownload {
         }
 
         let mut destination = self.pool.get();
+        // SAFETY: `dst` is the pooled frame's own `AVFrame`, allocated for this
+        // element's format and size and kept across calls — see the comment beside
+        // it — and `source` is the caller's live CUDA frame, validated just above.
         unsafe {
             let dst = destination.as_mut_ptr();
             // The pooled frame keeps its own NV12 allocation across calls, so

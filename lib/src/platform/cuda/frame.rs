@@ -23,6 +23,11 @@ pub(crate) unsafe fn create_hw_frames_ctx(
     width: u32,
     height: u32,
 ) -> Result<AvBufferRef, CudaFramesContextError> {
+    // SAFETY: this function's own contract is a live device context, which
+    // `hw_device_ctx` is. The allocation is wrapped as an `AvBufferRef` before
+    // anything can fail, so every path below either returns it or drops it.
+    // `data` is an `AVHWFramesContext` by FFmpeg's own definition, and the
+    // fields written here are the ones `av_hwframe_ctx_init` reads.
     unsafe {
         let buf = AvBufferRef::from_raw(ffi::av_hwframe_ctx_alloc(hw_device_ctx.as_ptr()))
             .ok_or(CudaFramesContextError::Alloc)?;

@@ -204,6 +204,9 @@ fn allocate_output(
     })?;
     let format = CString::new("hls").expect("static HLS format name contains no NUL");
     let mut context = ptr::null_mut();
+    // SAFETY: `format` and `path` are live NUL-terminated `CString`s, and
+    // `context` is a live local FFmpeg writes the allocated context into. A
+    // failure leaves it null, which is checked before it is used.
     let result = unsafe {
         ffmpeg::ffi::avformat_alloc_output_context2(
             &mut context,
@@ -218,6 +221,9 @@ fn allocate_output(
     if context.is_null() {
         return Err(HlsMuxerError::Ffmpeg(ffmpeg::Error::Unknown));
     }
+    // SAFETY: `context` is non-null — checked just above — and was allocated by
+    // `avformat_alloc_output_context2` and never handed anywhere else, so
+    // `Output::wrap` is taking sole ownership as it requires.
     Ok(unsafe { ffmpeg::format::context::Output::wrap(context) })
 }
 

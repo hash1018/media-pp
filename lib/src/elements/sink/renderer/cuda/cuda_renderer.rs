@@ -138,6 +138,11 @@ impl CudaRenderer {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::CudaRenderer, &name, None);
         let hw_device_ctx = device.retain();
+        // SAFETY: `hw_device_ctx` owns a live `AVBufferRef` for a CUDA device
+        // context, whose `data` is that `AVHWDeviceContext` by FFmpeg's own
+        // definition. Only the pointer's identity is kept, to compare against an
+        // incoming frame's; the reference held alongside it is what keeps that
+        // identity from being reused by a different context.
         let device_ctx = unsafe { (*hw_device_ctx.as_ptr()).data as *const ffi::AVHWDeviceContext };
         pp_info!(pp_log: &pp_log, "created");
         Self {
@@ -160,6 +165,11 @@ impl CudaRenderer {
     }
 
     fn submit(&self, frame: &ffmpeg::frame::Video) -> Result<(), CudaRendererError> {
+        // SAFETY: `frame` is a live `frame::Video` already confirmed to be
+        // `Pixel::CUDA`, so `as_ptr` yields an initialized `AVFrame` and a hardware
+        // frame's `hw_frames_ctx` is either null — rejected here — or an
+        // `AVBufferRef` whose `data` is an `AVHWFramesContext`. Only pointer
+        // identity is compared, never dereferenced past that.
         let (y, y_pitch, uv, uv_pitch, width, height) = unsafe {
             let ptr = frame.as_ptr();
 
@@ -407,6 +417,9 @@ mod tests {
             width: u32,
             height: u32,
         ) -> std::result::Result<(), SubmitError> {
+            // SAFETY: forwarding the caller's own obligation unchanged — this trait
+            // method is `unsafe` for exactly the pointer validity that
+            // `RecordingRenderer::submit_nv12` requires.
             unsafe { RecordingRenderer::submit_nv12(self, y, y_pitch, uv, uv_pitch, width, height) }
         }
 

@@ -115,6 +115,10 @@ impl CudaDecoder {
         let codec_device_ctx = hw_device_ctx
             .try_clone()
             .ok_or(CudaDecoderError::HwDeviceRef)?;
+        // SAFETY: `ctx_ptr` is the codec context this owns and has not opened yet,
+        // which is the only point at which these fields may be set. The device
+        // reference is transferred with `into_raw`, so the codec frees it and this
+        // no longer does.
         unsafe {
             let ctx_ptr = context.as_mut_ptr();
             (*ctx_ptr).hw_device_ctx = codec_device_ctx.into_raw();
@@ -231,6 +235,8 @@ unsafe extern "C" fn get_format(
     _ctx: *mut ffi::AVCodecContext,
     mut fmt: *const ffi::AVPixelFormat,
 ) -> ffi::AVPixelFormat {
+    // SAFETY: `fmt` is FFmpeg's own `AV_PIX_FMT_NONE`-terminated list, which is
+    // what `get_format` is defined to be handed, so the walk stops inside it.
     unsafe {
         while *fmt != ffi::AVPixelFormat::AV_PIX_FMT_NONE {
             if *fmt == ffi::AVPixelFormat::AV_PIX_FMT_CUDA {
@@ -361,6 +367,8 @@ mod tests {
             return;
         };
         let mut params = ffmpeg::codec::Parameters::new();
+        // SAFETY: `as_mut_ptr` on parameters this test just created and still owns
+        // exclusively; `codec_type` is a plain field of `AVCodecParameters`.
         unsafe {
             (*params.as_mut_ptr()).codec_type = ffmpeg::media::Type::Audio.into();
         }

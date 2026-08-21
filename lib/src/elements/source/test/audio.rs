@@ -142,6 +142,9 @@ impl TestAudioSource {
 
         let mut frame = ffmpeg::frame::Audio::new(self.format, needed, self.channel_layout);
         frame.set_rate(self.sample_rate);
+        // SAFETY: viewing an `f32` slice as bytes, which is always aligned and
+        // exactly `size_of_val` long. What the destination can take is the separate
+        // bound the comment below describes.
         let bytes = unsafe {
             std::slice::from_raw_parts(
                 interleaved.as_ptr() as *const u8,

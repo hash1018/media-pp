@@ -198,6 +198,8 @@ impl CudaEncoder {
             .ok_or(CudaEncoderError::CodecNotFound(encoder_name))?;
 
         let hw_device_ctx = device.retain();
+        // SAFETY: `create_hw_frames_ctx`'s contract is a live device context, which
+        // is what the owned `AvBufferRef` beside it is.
         let hw_frames_ctx = match unsafe {
             create_hw_frames_ctx(
                 &hw_device_ctx,
@@ -211,6 +213,11 @@ impl CudaEncoder {
                 return Err(CudaEncoderError::HwFrames(error.to_string()));
             }
         };
+        // SAFETY: `hw_device_ctx` owns a live `AVBufferRef` for a CUDA device
+        // context, whose `data` is that `AVHWDeviceContext` by FFmpeg's own
+        // definition. Only the pointer's identity is kept, to compare against an
+        // incoming frame's; the reference held alongside it is what keeps that
+        // identity from being reused by a different context.
         let device_ctx = unsafe { (*hw_device_ctx.as_ptr()).data as *const ffi::AVHWDeviceContext };
         let codec_device_ctx = hw_device_ctx
             .try_clone()
@@ -229,6 +236,10 @@ impl CudaEncoder {
             video.set_frame_rate(Some(options.frame_rate));
             video.set_bit_rate(options.bit_rate);
             video.set_gop(options.gop_size);
+            // SAFETY: `ptr` is the encoder's own context, not yet opened — which is
+            // exactly when NVENC needs both of these, as the comment beside them
+            // records. Both references are transferred with `into_raw`, so the codec
+            // frees them and this no longer does.
             unsafe {
                 let ptr = video.as_mut_ptr();
                 // NVENC needs both before `avcodec_open2`: the device to
@@ -291,6 +302,11 @@ impl CudaEncoder {
             pp_error!(self, "{error}");
             return Err(error.into());
         }
+        // SAFETY: `frame` is a live `frame::Video` already confirmed to be
+        // `Pixel::CUDA`, so `as_ptr` yields an initialized `AVFrame` and a hardware
+        // frame's `hw_frames_ctx` is either null — rejected here — or an
+        // `AVBufferRef` whose `data` is an `AVHWFramesContext`. Only pointer
+        // identity is compared, never dereferenced past that.
         unsafe {
             let frames_ref = (*frame.as_ptr()).hw_frames_ctx;
             if frames_ref.is_null() {
@@ -692,6 +708,8 @@ mod tests {
         let index = video.index;
         let params = source.stream_parameters(index).expect("video stream gone");
         let time_base = source.stream_time_base(index).expect("video stream gone");
+        // SAFETY: `params` is a live `codec::Parameters` from the demuxer, whose
+        // `width`/`height` are plain fields of `AVCodecParameters`.
         let (width, height) = unsafe {
             let ptr = params.as_ptr();
             ((*ptr).width as u32, (*ptr).height as u32)

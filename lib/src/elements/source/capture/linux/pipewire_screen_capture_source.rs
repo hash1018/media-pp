@@ -328,6 +328,8 @@ impl GpuCapture {
             .as_ref()
             .ok_or(CudaUploadError::HwFramesAlloc)?;
         let code =
+            // SAFETY: `frames_ctx` is this capture's own pool, and `frame` is the empty
+            // local the surface is being allocated into.
             unsafe { ffi::av_hwframe_get_buffer(frames_ctx.as_ptr(), frame.as_mut_ptr(), 0) };
         if code < 0 {
             return Err(CudaUploadError::HwFrameGet(code).into());
@@ -351,6 +353,8 @@ impl GpuCapture {
         if self.hw_frames_ctx.is_some() && (self.width, self.height) == (width, height) {
             return Ok(());
         }
+        // SAFETY: `create_hw_frames_ctx`'s contract is a live device context, which
+        // is what the owned `AvBufferRef` beside it is.
         let frames_ctx = unsafe {
             create_hw_frames_ctx(&self.hw_device_ctx, CudaFrameFormat::Bgra, width, height)
         }
@@ -841,6 +845,10 @@ impl PipeWireScreenCaptureSource {
                 return None;
             }
             let source = latest.frame.as_ref()?;
+            // SAFETY: `destination` is the pooled wrapper's own `AVFrame` and `source`
+            // is the latest captured frame, still held by the lock above; they are
+            // distinct, so the unref-then-ref pair neither aliases nor drops the
+            // capture it is about to reference.
             unsafe {
                 let destination = frame.as_mut_ptr();
                 // Releases the previous capture this pooled wrapper still
@@ -1789,6 +1797,9 @@ fn buffers_pod(data_type: i32) -> Option<Vec<u8>> {
 /// features, and this crate deliberately builds against a lower minimum —
 /// see `lib/Cargo.toml`. The property itself has been there throughout.
 fn negotiated_modifier(pod: &Pod) -> (Option<u64>, bool) {
+    // SAFETY: `pod.as_raw_ptr()` is a live `spa_pod` owned by the callback's
+    // parameter, and a POD's own `size` field excludes its header — which is
+    // why the header is added back to get the whole object's extent.
     let bytes = unsafe {
         let raw = pod.as_raw_ptr();
         std::slice::from_raw_parts(

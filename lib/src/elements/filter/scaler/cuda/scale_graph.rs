@@ -108,6 +108,10 @@ impl CudaScaleGraph {
         if !self.matches(frame, frames_ctx, width, height) {
             self.build(frame, frames_ctx, width, height)?;
         }
+        // SAFETY: `as_mut_ptr` on a `filter::Context` the `GraphState` above owns,
+        // which the line before has just built or confirmed. The pointer is used
+        // only until the push below returns, and nothing between the two touches
+        // `self.state`.
         let source = unsafe {
             self.state
                 .as_mut()
@@ -119,6 +123,10 @@ impl CudaScaleGraph {
         // the caller's reference and resets the frame, and this frame is
         // shared — downstream `Arc` clones and the upstream pool both still
         // expect it intact.
+        // SAFETY: `source` is that graph's live buffersrc, and `frame` is a live
+        // `frame::Video` this only lends: `av_buffersrc_write_frame` takes a
+        // reference of its own rather than the caller's, which is exactly why it is
+        // used here — see the comment above.
         let code = unsafe { ffi::av_buffersrc_write_frame(source, frame.as_ptr()) };
         if code < 0 {
             return Err(CudaScalerError::BufferSrcPush(code));
@@ -133,6 +141,8 @@ impl CudaScaleGraph {
         if self.state.is_none() {
             return Ok(Vec::new());
         }
+        // SAFETY: as in `scale` — `as_mut_ptr` on a `filter::Context` owned by the
+        // `GraphState` the check above confirmed is present.
         let source = unsafe {
             self.state
                 .as_mut()
@@ -140,6 +150,8 @@ impl CudaScaleGraph {
                 .source
                 .as_mut_ptr()
         };
+        // SAFETY: `source` is a live buffersrc. A null frame is how this function
+        // is defined to signal end of input, not a missing argument.
         let code = unsafe { ffi::av_buffersrc_add_frame_flags(source, std::ptr::null_mut(), 0) };
         if code < 0 {
             return Err(CudaScalerError::BufferSrcPush(code));
@@ -172,6 +184,11 @@ impl CudaScaleGraph {
         // the frames context has to be in place before the filter is
         // initialized. Everything the argument string used to carry travels in
         // the same `AVBufferSrcParameters` instead.
+        // SAFETY: `graph` owns the filter this allocates and frees it on drop even
+        // when uninitialized, as the comment below records, so the early returns
+        // leak nothing. `buffer` is a live filter descriptor and the name is a
+        // literal `CStr`; a failed allocation comes back null and is rejected rather
+        // than used.
         let mut source = unsafe {
             let context = ffi::avfilter_graph_alloc_filter(
                 graph.as_mut_ptr(),
@@ -250,6 +267,9 @@ impl CudaScaleGraph {
 
     /// Pulls everything the graph is willing to produce right now.
     fn drain(&mut self) -> Result<ScaledFrames, CudaScalerError> {
+        // SAFETY: `as_mut_ptr` on a `filter::Context` owned by the `GraphState`,
+        // which is present because `drain` is only reached after a graph has been
+        // built.
         let sink = unsafe {
             self.state
                 .as_mut()
@@ -260,6 +280,9 @@ impl CudaScaleGraph {
         let mut scaled = Vec::new();
         loop {
             let mut output = self.pool.get();
+            // SAFETY: `ptr` is the pooled frame's own `AVFrame`, and the unref before
+            // the pull is what hands its previous surface back — see the comment beside
+            // it. `sink` is the live buffersink read out just above.
             let code = unsafe {
                 let ptr = output.as_mut_ptr();
                 // The pooled wrapper may still reference the previous frame's
@@ -282,9 +305,12 @@ impl CudaScaleGraph {
 /// The frame's own colorimetry, as libavfilter's C fields rather than
 /// `ffmpeg-next`'s enums, which is what the buffersrc parameters take.
 fn frame_color_space(frame: &ffmpeg::frame::Video) -> ffi::AVColorSpace {
+    // SAFETY: `frame` is a live `frame::Video`, so `as_ptr` yields an
+    // initialized `AVFrame` whose `colorspace` is a plain field in it.
     unsafe { (*frame.as_ptr()).colorspace }
 }
 
 fn frame_color_range(frame: &ffmpeg::frame::Video) -> ffi::AVColorRange {
+    // SAFETY: as `frame_color_space` — a plain field of a live `AVFrame`.
     unsafe { (*frame.as_ptr()).color_range }
 }

@@ -135,6 +135,8 @@ impl CudaUpload {
         let pp_log = element_pp_log(ElementType::CudaUpload, &name, None);
 
         let hw_device_ctx = device.retain();
+        // SAFETY: `create_hw_frames_ctx`'s contract is a live device context, which
+        // is what the owned `AvBufferRef` beside it is.
         let hw_frames_ctx = unsafe { create_hw_frames_ctx(&hw_device_ctx, format, width, height) }
             .map_err(CudaUploadError::from)?;
 
@@ -179,6 +181,9 @@ impl CudaUpload {
         }
 
         let mut destination = self.pool.get();
+        // SAFETY: `ptr` is the pooled wrapper's own `AVFrame`, and the unref before
+        // the allocation is what hands its previous surface back — see the comment
+        // beside it. The frames context is this element's own, held for its life.
         unsafe {
             let dst = destination.as_mut_ptr();
             // The pooled wrapper may still reference the previous frame's
@@ -376,6 +381,8 @@ mod tests {
         };
         assert_eq!(frame.format(), ffmpeg::format::Pixel::CUDA);
         assert_eq!(frame.pts(), Some(7));
+        // SAFETY: the assertions above have established this is a live CUDA frame,
+        // so its `hw_frames_ctx` is set and its `data` is an `AVHWFramesContext`.
         let sw_format = unsafe {
             let frames_ref = (*frame.as_ptr()).hw_frames_ctx;
             let frames_ctx = (*frames_ref).data as *const ffi::AVHWFramesContext;

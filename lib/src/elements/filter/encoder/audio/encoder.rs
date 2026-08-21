@@ -420,10 +420,15 @@ fn write_channels(
 /// of 4. FFmpeg allocates audio buffers with SIMD-friendly (well beyond
 /// 4-byte) alignment, so the cast itself is always valid.
 fn bytes_as_f32(bytes: &[u8]) -> &[f32] {
+    // SAFETY: the alignment and length reasoning is in this function's own doc
+    // comment above: FFmpeg's audio buffers are aligned well past 4, and the
+    // length is rounded down to whole `f32`s.
     unsafe { std::slice::from_raw_parts(bytes.as_ptr() as *const f32, bytes.len() / 4) }
 }
 
 fn bytes_as_f32_mut(bytes: &mut [u8]) -> &mut [f32] {
+    // SAFETY: as `bytes_as_f32`, and `&mut [u8]` is exclusive so the `&mut
+    // [f32]` handed back cannot alias anything.
     unsafe { std::slice::from_raw_parts_mut(bytes.as_mut_ptr() as *mut f32, bytes.len() / 4) }
 }
 
@@ -565,6 +570,8 @@ mod tests {
         );
         frame.set_rate(rate);
         let interleaved = vec![value; samples * 2];
+        // SAFETY: viewing an `f32` slice as bytes, which is always aligned and
+        // exactly `size_of_val` long.
         let bytes = unsafe {
             std::slice::from_raw_parts(
                 interleaved.as_ptr() as *const u8,

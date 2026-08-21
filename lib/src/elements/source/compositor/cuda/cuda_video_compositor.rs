@@ -150,6 +150,11 @@ struct CompositorShared {
 // compositor holds its own reference to the context for its whole life, so
 // the pointer cannot go stale while any input sink is alive.
 unsafe impl Send for CompositorShared {}
+
+// SAFETY: as above for the raw pointer, and every field beside it carries its
+// own synchronization — the maps are behind mutexes, the counters are atomic,
+// and the driver is itself `Sync`. This is what lets an input sink on one
+// thread share this with the compositor's own.
 unsafe impl Sync for CompositorShared {}
 
 /// A cheaply cloneable handle for adding and removing compositor inputs —
@@ -473,6 +478,8 @@ impl CudaVideoCompositor {
 
         let driver = Arc::new(CudaDriver::retain_primary()?);
         let hw_device_ctx = device.retain();
+        // SAFETY: `create_hw_frames_ctx`'s contract is a live device context, which
+        // is what the owned `AvBufferRef` beside it is.
         let hw_frames_ctx = match unsafe {
             create_hw_frames_ctx(
                 &hw_device_ctx,
@@ -487,6 +494,11 @@ impl CudaVideoCompositor {
                 return Err(CudaVideoCompositorError::HwFramesAlloc);
             }
         };
+        // SAFETY: `hw_device_ctx` owns a live `AVBufferRef` for a CUDA device
+        // context, whose `data` is that `AVHWDeviceContext` by FFmpeg's own
+        // definition. Only the pointer's identity is kept, to compare against an
+        // incoming frame's; the reference held alongside it is what keeps that
+        // identity from being reused by a different context.
         let device_ctx = unsafe { (*hw_device_ctx.as_ptr()).data as *const ffi::AVHWDeviceContext };
 
         let shared = Arc::new(CompositorShared {
@@ -581,6 +593,9 @@ impl CudaVideoCompositor {
     ) -> std::result::Result<UnboundObjectPoolRef<ffmpeg::frame::Video>, CudaVideoCompositorError>
     {
         let mut output = self.output_pool.get();
+        // SAFETY: `ptr` is the pooled wrapper's own `AVFrame`, and the unref before
+        // the allocation is what hands its previous surface back — see the comment
+        // beside it. The frames context is this element's own, held for its life.
         unsafe {
             let ptr = output.as_mut_ptr();
             // Releasing the previous surface here is what returns it to the
@@ -911,6 +926,11 @@ fn validate_input_frame(
             height: frame.height(),
         });
     }
+    // SAFETY: `frame` is a live `frame::Video` already confirmed to be
+    // `Pixel::CUDA`, so `as_ptr` yields an initialized `AVFrame` and a hardware
+    // frame's `hw_frames_ctx` is either null — rejected here — or an
+    // `AVBufferRef` whose `data` is an `AVHWFramesContext`. Only pointer
+    // identity is compared, never dereferenced past that.
     unsafe {
         let frames_ref = (*frame.as_ptr()).hw_frames_ctx;
         if frames_ref.is_null() {
@@ -1550,10 +1570,12 @@ mod tests {
         };
         if let MediaBuffer::Video(video) = &mut frame {
             // A wildly different input timeline, which must not leak through.
-            unsafe {
-                (*(Arc::as_ptr(video) as *mut UnboundObjectPoolRef<ffmpeg::frame::Video>))
-                    .set_pts(Some(9_999))
-            };
+            // `get_mut` rather than a cast through `Arc::as_ptr`: the frame has
+            // not been published yet, so this is the one moment it is uniquely
+            // owned and can be written at all.
+            Arc::get_mut(video)
+                .expect("an unpublished frame is uniquely owned")
+                .set_pts(Some(9_999));
         }
         input.sink.consume(frame).expect("frame");
 

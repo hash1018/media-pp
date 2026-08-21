@@ -110,6 +110,9 @@ impl InputBuffer {
         let channels = target_layout.channels() as usize;
         let bytes = &output.data(0)[..samples * channels * 4];
         let interleaved =
+            // SAFETY: `bytes` is a prefix of an FFmpeg audio plane, which is aligned
+            // well past 4 and whose length here is an exact multiple of four bytes —
+            // `samples * channels * 4`.
             unsafe { std::slice::from_raw_parts(bytes.as_ptr() as *const f32, bytes.len() / 4) };
         self.samples.extend(interleaved.iter().copied());
         Ok(())
@@ -455,6 +458,10 @@ impl AudioMixer {
 
         let mut frame = ffmpeg::frame::Audio::new(self.format, needed, self.channel_layout);
         frame.set_rate(self.sample_rate);
+        // SAFETY: viewing an `f32` slice as bytes, which is always aligned and
+        // exactly `size_of_val` long. The read is only as wide as `mixed` itself;
+        // what the *destination* can take is the separate bound the comment below
+        // describes.
         let bytes = unsafe {
             std::slice::from_raw_parts(mixed.as_ptr() as *const u8, std::mem::size_of_val(&*mixed))
         };
@@ -597,6 +604,8 @@ mod tests {
         frame.set_rate(rate);
         let bytes = frame.data_mut(0);
         let floats =
+            // SAFETY: `bytes` is this frame's own plane, which FFmpeg aligns well past
+            // 4, and `samples * 2` f32s is what the frame was allocated for.
             unsafe { std::slice::from_raw_parts_mut(bytes.as_mut_ptr() as *mut f32, samples * 2) };
         for pair in floats.chunks_mut(2) {
             pair[0] = left;
@@ -639,6 +648,8 @@ mod tests {
                 // not the second channel.
                 let samples = frame.samples();
                 let bytes = &frame.data(0)[..samples * 2 * 4];
+                // SAFETY: `bytes` is a prefix of the frame's plane, aligned by FFmpeg and
+                // cut to exactly `samples * 2 * 4` bytes just above.
                 let floats = unsafe {
                     std::slice::from_raw_parts(bytes.as_ptr() as *const f32, samples * 2)
                 };

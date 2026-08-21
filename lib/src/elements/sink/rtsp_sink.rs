@@ -81,6 +81,9 @@ impl RtspSink {
             stream.set_parameters(params);
             // Avoid codec-tag incompatibilities when the input packet came
             // from a container with a different tag convention.
+            // SAFETY: `as_mut_ptr` on parameters this stream owns, written before the
+            // stream is handed to the muxer — see the comment beside it for why the tag
+            // is cleared at all.
             unsafe {
                 (*stream.parameters().as_mut_ptr()).codec_tag = 0;
             }
@@ -126,6 +129,9 @@ fn alloc_output(url: &str) -> Result<ffmpeg::format::context::Output> {
     let c_url = CString::new(url).map_err(|_| RtspSinkError::InvalidUrl)?;
     let c_format = CString::new("rtsp").expect("static format name contains no NUL");
 
+    // SAFETY: `c_format` and `c_url` are live NUL-terminated `CString`s, and
+    // `context` is a live local. Every path below checks it before use, and the
+    // failure paths free what was allocated.
     unsafe {
         let mut context: *mut ffi::AVFormatContext = ptr::null_mut();
         let result = ffi::avformat_alloc_output_context2(

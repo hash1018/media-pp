@@ -77,6 +77,10 @@ impl CudaDevice {
         // `av_hwdevice_ctx_create` both allocates and initializes the
         // context, and this crate never touches `AVCUDADeviceContext`'s
         // layout at all.
+        // SAFETY: `ctx` is a live local FFmpeg writes the allocated context into,
+        // and the two nulls are the documented "default device, no options" form.
+        // The comment above records why this crate never touches the
+        // `AVCUDADeviceContext` layout itself.
         let result = unsafe {
             ffi::av_hwdevice_ctx_create(
                 &mut ctx,
@@ -89,6 +93,9 @@ impl CudaDevice {
         if result < 0 {
             return Err(CudaDeviceError::Open(ffmpeg::Error::from(result)));
         }
+        // SAFETY: `av_hwdevice_ctx_create` left `ctx` owning one reference and
+        // nothing else has taken it, which is what `from_raw` requires; a failure
+        // left it null and returned above.
         let ctx = unsafe { AvBufferRef::from_raw(ctx) }.ok_or(CudaDeviceError::MissingContext)?;
         Ok(Self { ctx: Arc::new(ctx) })
     }

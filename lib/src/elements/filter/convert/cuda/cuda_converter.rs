@@ -143,8 +143,15 @@ impl CudaConverter {
         let driver = CudaDriver::retain_primary()?;
         let hw_device_ctx = device.retain();
         let hw_frames_ctx =
+            // SAFETY: `create_hw_frames_ctx`'s contract is a live device context, which
+            // is what the owned `AvBufferRef` beside it is.
             unsafe { create_hw_frames_ctx(&hw_device_ctx, CudaFrameFormat::Nv12, width, height) }
                 .map_err(CudaUploadError::from)?;
+        // SAFETY: `hw_device_ctx` owns a live `AVBufferRef` for a CUDA device
+        // context, whose `data` is that `AVHWDeviceContext` by FFmpeg's own
+        // definition. Only the pointer's identity is kept, to compare against an
+        // incoming frame's; the reference held alongside it is what keeps that
+        // identity from being reused by a different context.
         let device_ctx = unsafe { (*hw_device_ctx.as_ptr()).data as *mut ffi::AVHWDeviceContext };
 
         let pad = SrcPad::new(format!("{name}_src"));
@@ -182,6 +189,11 @@ impl CudaConverter {
                 expected_height: self.height,
             });
         }
+        // SAFETY: `frame` is a live `frame::Video` already confirmed to be
+        // `Pixel::CUDA`, so `as_ptr` yields an initialized `AVFrame` and a hardware
+        // frame's `hw_frames_ctx` is either null — rejected here — or an
+        // `AVBufferRef` whose `data` is an `AVHWFramesContext`. Only pointer
+        // identity is compared, never dereferenced past that.
         unsafe {
             let frames_ref = (*frame.as_ptr()).hw_frames_ctx;
             if frames_ref.is_null() {
@@ -206,6 +218,9 @@ impl CudaConverter {
             .inspect_err(|error| pp_error!(self, "{error}"))?;
 
         let mut destination = self.pool.get();
+        // SAFETY: `ptr` is the pooled wrapper's own `AVFrame`, and the unref before
+        // the allocation is what hands its previous surface back — see the comment
+        // beside it. The frames context is this element's own, held for its life.
         unsafe {
             let dst = destination.as_mut_ptr();
             // The pooled wrapper may still reference the previous frame's
@@ -240,6 +255,9 @@ impl CudaConverter {
         })()
         .inspect_err(|error| pp_error!(self, "{error}"))?;
 
+        // SAFETY: both frames are live and distinct — `destination` came from the
+        // pool, `source` is the caller's — so `av_frame_copy_props` reads one and
+        // writes the other with no aliasing.
         unsafe {
             // PTS and duration are part of the buffer contract and would
             // otherwise be dropped here.
@@ -418,6 +436,8 @@ mod tests {
         assert_eq!(frame.format(), ffmpeg::format::Pixel::CUDA);
         assert_eq!((frame.width(), frame.height()), (64, 32));
         assert_eq!(frame.pts(), Some(7), "props are carried, not recreated");
+        // SAFETY: the assertions above have established this is a live CUDA frame,
+        // so its `hw_frames_ctx` is set and its `data` is an `AVHWFramesContext`.
         let sw_format = unsafe {
             let frames_ctx =
                 (*(*frame.as_ptr()).hw_frames_ctx).data as *const ffi::AVHWFramesContext;
@@ -448,6 +468,8 @@ mod tests {
             panic!("the upload produces a Video buffer");
         };
         let mut tagged = ffmpeg::frame::Video::empty();
+        // SAFETY: `frame` is a live frame from the upload above, and the target is
+        // the empty local on the line before, so the two cannot alias.
         unsafe {
             ffi::av_frame_ref(tagged.as_mut_ptr(), frame.as_ptr());
         }

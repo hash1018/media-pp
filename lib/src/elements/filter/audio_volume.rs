@@ -511,6 +511,8 @@ mod tests {
         );
         frame.set_rate(rate);
         frame.set_pts(Some(123));
+        // SAFETY: viewing an `f32` slice as bytes, which is always aligned and
+        // exactly `size_of_val` long.
         let bytes = unsafe {
             std::slice::from_raw_parts(values.as_ptr().cast::<u8>(), std::mem::size_of_val(values))
         };

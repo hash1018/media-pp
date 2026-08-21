@@ -536,6 +536,10 @@ fn check(call: &'static str, result: CUresult) -> Result<(), CudaDriverError> {
         return Ok(());
     }
     let mut raw: *const c_char = std::ptr::null();
+    // SAFETY: `cuGetErrorString` writes a pointer to a string the driver owns
+    // and keeps for the process, so it stays valid for the copy. A code it does
+    // not recognize leaves `raw` as the null it was initialized to, which is
+    // what the check beside it is for.
     let message = unsafe {
         if cuGetErrorString(result, &mut raw) == CUDA_SUCCESS && !raw.is_null() {
             CStr::from_ptr(raw).to_string_lossy().into_owned()
@@ -574,12 +578,14 @@ pub(crate) struct CudaDriver {
 // SAFETY: a `CUcontext` is not thread-affine — it is pushed onto whichever
 // thread uses it, which is exactly what `with_context` does around every
 // call, and the CUDA driver allows one context to be current on several
-// threads at once. Nothing here is mutated through `&self`: the context and
-// the two function handles are set at construction and only read afterwards,
-// so concurrent calls are the driver's own thread-safe operations rather
-// than shared mutable state. `Sync` is what lets a compositor and a text
-// layer handle on another thread share one driver.
+// threads at once.
 unsafe impl Send for CudaDriver {}
+
+// SAFETY: nothing here is mutated through `&self`: the context, the modules,
+// and the function handles are set at construction and only read afterwards,
+// so concurrent calls are the driver's own thread-safe operations rather than
+// shared mutable state. This is what lets a compositor and a text layer
+// handle on another thread share one driver.
 unsafe impl Sync for CudaDriver {}
 
 impl CudaDriver {
@@ -588,6 +594,12 @@ impl CudaDriver {
     /// it takes no ordinal: a composite mixing surfaces from two GPUs is not
     /// expressible here anyway.
     pub(crate) fn retain_primary() -> Result<Self, CudaDriverError> {
+        // SAFETY: the driver API calls run in the order it requires — `cuInit`
+        // before anything else, and a context current before a module is loaded into
+        // it — and every result is checked before the next call depends on it. All
+        // out-params are live locals. Both failure paths give back what they had
+        // taken: the first module is unloaded by hand, since no `Self` owns it yet,
+        // and the primary-context reference is released before returning.
         unsafe {
             check("cuInit", cuInit(0))?;
             let mut device: CUdevice = 0;
@@ -641,9 +653,15 @@ impl CudaDriver {
         &self,
         f: impl FnOnce() -> Result<T, CudaDriverError>,
     ) -> Result<T, CudaDriverError> {
+        // SAFETY: `self.ctx` is the primary context this retained at construction
+        // and still holds a reference to, so it can be made current for as long as
+        // `self` lives.
         unsafe { check("cuCtxPushCurrent", cuCtxPushCurrent_v2(self.ctx))? };
         let value = f();
         let mut popped: CUcontext = std::ptr::null_mut();
+        // SAFETY: balances the push above on this same thread, which is what
+        // `cuCtxPopCurrent` requires; `popped` is a live local for the context it
+        // removes.
         unsafe { check("cuCtxPopCurrent", cuCtxPopCurrent_v2(&mut popped))? };
         value
     }
@@ -665,6 +683,10 @@ impl CudaDriver {
         // Little-endian: the low byte lands at the lower address, which in an
         // interleaved NV12 chroma plane is U.
         let chroma = u16::from(u) | (u16::from(v) << 8);
+        // SAFETY: `with_context` has this driver's context current. Both plane
+        // pointers and pitches come from a frame the caller has already validated,
+        // and `width` x `height` is the caller's to keep within them — `cuMemsetD2D*`
+        // writes exactly that rectangle at the given pitch.
         self.with_context(|| unsafe {
             check(
                 "cuMemsetD2D8",
@@ -720,6 +742,11 @@ impl CudaDriver {
         if width == 0 || height == 0 {
             return Ok(());
         }
+        // SAFETY: `with_context` has the context current. Each `CudaMemcpy2D` is a
+        // live local with both memory types set to device, so the driver reads the
+        // device pointers and ignores the host and array fields `Default` left null.
+        // Keeping the rectangle inside both surfaces is the caller's contract; the
+        // `debug_assert` above only checks its 2x2 alignment.
         self.with_context(|| unsafe {
             let luma = CudaMemcpy2D {
                 src_memory_type: CU_MEMORYTYPE_DEVICE,
@@ -860,6 +887,10 @@ impl CudaDriver {
             (&mut height) as *mut _ as *mut c_void,
             (&mut alpha) as *mut _ as *mut c_void,
         ];
+        // SAFETY: `params` holds one pointer per parameter `blend_plane` declares,
+        // in that order, each pointing at a live local that outlives the launch —
+        // `cuLaunchKernel` reads the argument values before it returns. The context
+        // is current: every caller reaches this inside `with_context`.
         unsafe {
             check(
                 "cuLaunchKernel",
@@ -901,6 +932,11 @@ impl CudaDriver {
         // 16x16 threads: one warp wide in x, which keeps a row's byte loads
         // coalesced, the same shape the blends use.
         const BLOCK: u32 = 16;
+        // SAFETY: `with_context` has the context current, and each `params` array
+        // holds one pointer per parameter its kernel declares, in that order,
+        // pointing at locals that outlive the launch. The surfaces are the caller's
+        // already-validated frames, and the even dimensions the chroma launch
+        // divides by are established once at construction rather than here.
         self.with_context(|| unsafe {
             let mut luma = destination.luma;
             let mut luma_pitch = destination.luma_pitch as u32;
@@ -967,6 +1003,8 @@ impl CudaDriver {
     /// Waits for everything issued on this context, which a caller does once
     /// after a frame's blends rather than after each one.
     pub(crate) fn synchronize(&self) -> Result<(), CudaDriverError> {
+        // SAFETY: `with_context` has this driver's context current, which is the
+        // context `cuCtxSynchronize` waits on.
         self.with_context(|| unsafe { check("cuCtxSynchronize", cuCtxSynchronize()) })
     }
 }
@@ -986,15 +1024,24 @@ pub(crate) struct CudaMask {
 }
 
 // SAFETY: the pointers are plain device allocations with no thread affinity,
-// nothing is mutated through `&self` — a mask is uploaded once and only read
-// by the kernel afterwards — and `Drop` pushes the context it captured
-// before freeing them. `Sync` is what lets one published mask be read by the
-// compositor thread while the handle that made it lives on another.
+// and `Drop` pushes the context it captured before freeing them, so a mask
+// released on another thread is still released in the context it was
+// allocated in.
 unsafe impl Send for CudaMask {}
+
+// SAFETY: nothing is mutated through `&self` — a mask is uploaded once and
+// only read by the kernel afterwards. This is what lets one published mask be
+// read by the compositor thread while the handle that made it lives on
+// another.
 unsafe impl Sync for CudaMask {}
 
 impl Drop for CudaMask {
     fn drop(&mut self) {
+        // SAFETY: both pointers came from `cuMemAlloc` in `upload_mask` and are
+        // freed once, in the context they were allocated in — hence the push, and
+        // hence the frees only running when it succeeded. That context is still
+        // retained: a mask is owned by the compositor that owns the driver which
+        // allocated it.
         unsafe {
             if cuCtxPushCurrent_v2(self.ctx) == CUDA_SUCCESS {
                 cuMemFree_v2(self.full);
@@ -1039,6 +1086,10 @@ impl CudaDriver {
             }
         }
 
+        // SAFETY: `with_context` has the context current. Every out-param is a live
+        // local, each row copy reads `full_width <= width` bytes from within
+        // `coverage`'s own row, and the half-resolution upload is bounded by the
+        // length of the buffer built for it just above.
         self.with_context(|| unsafe {
             let mut full = 0;
             check(
@@ -1161,6 +1212,9 @@ impl CudaDriver {
             (&mut opacity) as *mut _ as *mut c_void,
             (&mut shift) as *mut _ as *mut c_void,
         ];
+        // SAFETY: as `launch_blend` — one pointer per parameter `blend_masked`
+        // declares, in that order, each at a live local, and the context is current
+        // because every caller reaches this inside `with_context`.
         unsafe {
             check(
                 "cuLaunchKernel",
@@ -1188,6 +1242,10 @@ unsafe fn load_module(
     ptx: &str,
     entry_names: [&str; 2],
 ) -> Result<(CUmodule, CUfunction, CUfunction), CudaDriverError> {
+    // SAFETY: the caller has a context current, which is this function's own
+    // documented contract. `image` and each `name` are live NUL-terminated
+    // `CString`s, and a failed lookup unloads the module before returning, so no
+    // path leaks it.
     unsafe {
         let image = std::ffi::CString::new(ptx)
             .map_err(|error| CudaDriverError::KernelRejected(error.to_string()))?;
@@ -1216,6 +1274,10 @@ impl Drop for CudaDriver {
     fn drop(&mut self) {
         // Nothing useful to do with a failure here, and the process is
         // usually on its way out; the retain count is what matters.
+        // SAFETY: both modules were loaded into `self.ctx`, so they are unloaded in
+        // that same context — hence the push, and hence the unloads only running when
+        // it succeeded. The release balances the retain in `retain_primary` and has
+        // to happen either way, so it sits outside that branch.
         unsafe {
             if cuCtxPushCurrent_v2(self.ctx) == CUDA_SUCCESS {
                 cuModuleUnload(self.module);
@@ -1257,6 +1319,10 @@ impl Nv12Surface {
     /// validated that this *is* one — format, frames context, and device —
     /// so the only thing left to reject is a frame with no pointers at all.
     pub(crate) fn from_frame(frame: &ffmpeg_next::frame::Video) -> Option<Self> {
+        // SAFETY: `frame` is a live `frame::Video`, so `as_ptr` yields an
+        // initialized `AVFrame`. `data` and `linesize` are plain arrays in it and
+        // indices 0 and 1 exist for every pixel format; whether the values describe
+        // a usable surface is what the check below decides.
         let (luma, chroma, luma_pitch, chroma_pitch) = unsafe {
             let ptr = frame.as_ptr();
             (
@@ -1291,6 +1357,8 @@ impl BgraSurface {
     /// already established that this *is* one — format, frames context, and
     /// device — so the only thing left to reject is a frame with no pointer.
     pub(crate) fn from_frame(frame: &ffmpeg_next::frame::Video) -> Option<Self> {
+        // SAFETY: as `Nv12Surface::from_frame` — a live `AVFrame`'s own `data` and
+        // `linesize` arrays, checked below rather than trusted here.
         let (pixels, pitch) = unsafe {
             let ptr = frame.as_ptr();
             ((*ptr).data[0], (*ptr).linesize[0])

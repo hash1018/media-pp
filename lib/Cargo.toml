@@ -75,6 +75,13 @@ futures-util = { version = "0.3", optional = true }
 pipewire = { version = "0.10", optional = true, features = ["v0_3_50"] }
 pollster = { version = "1", optional = true }
 
+# Every `unsafe` block in this crate states why it is sound. The rule is
+# worth enforcing rather than remembering: writing these honestly is what
+# surfaced the DMA-BUF import's create-then-destroy ordering and the GL name
+# wrappers whose `count` no type constrained.
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"
+
 [features]
 # CUDA-resident decode and rendering. Needs no extra Rust dependency: FFmpeg
 # owns the CUDA context and the frame pool, and this crate's CUDA elements

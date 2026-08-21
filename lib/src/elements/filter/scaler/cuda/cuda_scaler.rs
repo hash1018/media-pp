@@ -178,6 +178,11 @@ impl CudaScaler {
         let pp_log = element_pp_log(ElementType::CudaScaler, &name, None);
 
         let hw_device_ctx = device.retain();
+        // SAFETY: `hw_device_ctx` owns a live `AVBufferRef` for a CUDA device
+        // context, whose `data` is that `AVHWDeviceContext` by FFmpeg's own
+        // definition. Only the pointer's identity is kept, to compare against an
+        // incoming frame's; the reference held alongside it is what keeps that
+        // identity from being reused by a different context.
         let device_ctx = unsafe { (*hw_device_ctx.as_ptr()).data as *const ffi::AVHWDeviceContext };
 
         let pad = SrcPad::new(format!("{name}_src"));
@@ -206,6 +211,11 @@ impl CudaScaler {
         if frame.format() != ffmpeg::format::Pixel::CUDA {
             return Err(CudaScalerError::UnsupportedFormat(frame.format()));
         }
+        // SAFETY: `frame` is a live `frame::Video` already confirmed to be
+        // `Pixel::CUDA`, so `as_ptr` yields an initialized `AVFrame` and a hardware
+        // frame's `hw_frames_ctx` is either null — rejected here — or an
+        // `AVBufferRef` whose `data` is an `AVHWFramesContext`. Only pointer
+        // identity is compared, never dereferenced past that.
         unsafe {
             let frames_ref = (*frame.as_ptr()).hw_frames_ctx;
             if frames_ref.is_null() {
@@ -426,9 +436,14 @@ mod tests {
         let MediaBuffer::Video(frame) = &tagged else {
             panic!("the upload produces a Video buffer");
         };
+        // SAFETY: `frame` is a live CUDA frame from the upload above, so
+        // `hw_frames_ctx` is its own pool. Only the pointer is taken, to hand the
+        // graph the same pool the frames come from.
         let frames_ctx = unsafe { (*frame.as_ptr()).hw_frames_ctx };
         // What a converted capture carries.
         let mut bt709 = ffmpeg::frame::Video::empty();
+        // SAFETY: `frame` is a live frame from the upload above, and the target is
+        // the empty local on the line before, so the two cannot alias.
         unsafe { ffi::av_frame_ref(bt709.as_mut_ptr(), frame.as_ptr()) };
         bt709.set_color_space(ffmpeg::color::Space::BT709);
         bt709.set_color_range(ffmpeg::color::Range::MPEG);
@@ -445,6 +460,8 @@ mod tests {
         // Same pool, same size, different tags: the link would keep reporting
         // a mismatch for every frame, so it has to be rebuilt.
         let mut untagged = ffmpeg::frame::Video::empty();
+        // SAFETY: `frame` is a live frame from the upload above, and the target is
+        // the empty local on the line before, so the two cannot alias.
         unsafe { ffi::av_frame_ref(untagged.as_mut_ptr(), frame.as_ptr()) };
         untagged.set_color_space(ffmpeg::color::Space::Unspecified);
         untagged.set_color_range(ffmpeg::color::Range::Unspecified);
@@ -574,6 +591,8 @@ mod tests {
         assert_eq!(scaled.width(), 64);
         assert_eq!(scaled.height(), 32);
         assert_eq!(scaled.pts(), Some(3));
+        // SAFETY: the assertions above have established this is a live CUDA frame,
+        // so its `hw_frames_ctx` is set and its `data` is an `AVHWFramesContext`.
         let sw_format = unsafe {
             let frames_ref = (*scaled.as_ptr()).hw_frames_ctx;
             let frames_ctx = (*frames_ref).data as *const ffi::AVHWFramesContext;
