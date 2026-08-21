@@ -1,4 +1,4 @@
-//! The `ID3D11VideoProcessor` that [`super::D3d11Scaler`] resizes with,
+//! The D3D11 `ID3D11VideoProcessor` that [`super::D3d11Scaler`] resizes with,
 //! kept separate from the element the same way `CudaScaler` keeps its
 //! `scale_cuda` graph in `scale_graph.rs`: one object configured for one
 //! input shape, rebuilt when that shape changes.

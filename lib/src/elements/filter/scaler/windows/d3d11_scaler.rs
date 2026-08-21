@@ -18,7 +18,7 @@ use windows::{
     core::Interface,
 };
 
-use super::video_processor::{BltColorSpaces, InputShape, ScaleProcessor, color_space};
+use super::d3d11_video_processor::{BltColorSpaces, InputShape, ScaleProcessor, color_space};
 
 use crate::{
     buffer::MediaBuffer,
