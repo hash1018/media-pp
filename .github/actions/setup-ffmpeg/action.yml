@@ -89,3 +89,10 @@ runs:
         Get-ChildItem "$prefix\include\libavcodec\version*.h" |
           Select-String -Pattern '#define\s+LIBAVCODEC_VERSION_(MAJOR|MINOR)\s'
         "FFMPEG_DIR=$prefix" >> $env:GITHUB_ENV
+
+        # The x64-windows triplet links FFmpeg dynamically: a test binary
+        # resolves its avcodec/avutil/etc. DLLs from PATH at run time, not
+        # from the import libraries used to link it. Without this, compiling
+        # and linting still succeed but every test binary fails to start with
+        # STATUS_DLL_NOT_FOUND.
+        "$prefix\bin" >> $env:GITHUB_PATH
