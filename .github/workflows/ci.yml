@@ -1,0 +1,99 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  # A superseded pull-request run is wasted work; a superseded push to main
+  # would leave that commit unverified.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  windows:
+    runs-on: windows-2025
+    env:
+      # Nothing here reuses a build directory across runs, so incremental
+      # compilation only buys extra artifacts to write.
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install Rust
+        shell: pwsh
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+          rustup default stable
+
+      - name: Set up FFmpeg
+        uses: ./.github/actions/setup-ffmpeg
+
+      # Downloaded crate sources only, not `target`: the build directory for
+      # this dependency graph runs to several gigabytes of small files, and
+      # saving and restoring that on Windows costs more than recompiling it.
+      # Unlike the FFmpeg tree a stale entry here is only a slower build, never
+      # a wrong one, so this one does take a prefix fallback.
+      - name: Cache downloaded crates
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      - name: Check formatting
+        shell: pwsh
+        run: cargo fmt --all -- --check
+
+      # Feature-gated exports are the thing that breaks silently here: a
+      # module, re-export, or error variant left outside its `cfg` compiles
+      # fine in whichever set the author happened to build. Each set below is
+      # therefore checked on its own rather than all at once.
+      - name: Lint (no features)
+        shell: pwsh
+        run: cargo clippy -p media-pp --all-targets -- -D warnings
+
+      - name: Lint (Windows backends)
+        shell: pwsh
+        run: cargo clippy -p media-pp --all-targets --features d3d11,d3d12,dxgi-capture,wasapi-capture,wasapi-renderer -- -D warnings
+
+      # Linted but not run: `nvcuda.dll` is linked by name through `raw-dylib`,
+      # so a test binary built with this feature will not start on a machine
+      # without the NVIDIA driver, and hosted runners have none. Compiling is
+      # still what catches the breakage this job exists for.
+      - name: Lint (CUDA)
+        shell: pwsh
+        run: cargo clippy -p media-pp --all-targets --features cuda -- -D warnings
+
+      # `DOCS_RS` keeps `ort-sys` from downloading ONNX Runtime and linking its
+      # dylibs into the target directory, which needs Developer Mode on a
+      # runner to create symlinks. Checking never links, so the download buys
+      # nothing here. `ffmpeg-sys-next` ignores this variable, so the bindings
+      # still come from the pinned headers.
+      - name: Check (ONNX Runtime and WebRTC)
+        shell: pwsh
+        env:
+          DOCS_RS: "1"
+        run: cargo check -p media-pp --all-targets --features ort,webrtc
+
+      # Hardware-dependent tests detect the missing device and skip with a
+      # reason (`try_device()`), so these run the whole logic suite here and
+      # the D3D11/NVENC/capture parts on a developer machine. The soak
+      # scenarios in `lib/tests/soak.rs` are `#[ignore]`d and stay out of this.
+      - name: Test (no features)
+        shell: pwsh
+        run: cargo test -p media-pp
+
+      - name: Test (Windows backends)
+        shell: pwsh
+        run: cargo test -p media-pp --features d3d11,d3d12,dxgi-capture,wasapi-capture,wasapi-renderer

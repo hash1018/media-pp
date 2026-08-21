@@ -1,0 +1,91 @@
+name: Set up FFmpeg
+description: >
+  Exports FFMPEG_DIR pointing at a pinned FFmpeg 8.0 development tree, built
+  from vcpkg on a miss and restored from the Actions cache on a hit.
+
+inputs:
+  vcpkg-ref:
+    description: >
+      The microsoft/vcpkg tag to build the FFmpeg port from.
+
+      ffmpeg-next 8.1 supports FFmpeg through 8.0, and the rolling vcpkg
+      installation on hosted runners has moved past that. This tag's ffmpeg
+      port is 8.0.1, the same version this crate is developed against.
+      Upstream prebuilt binaries are no longer an escape hatch either: BtbN
+      prunes its autobuilds and now ships only the 8.1 and 9.0 lines, so this
+      immutable git tag is the one reproducible source of a matching FFmpeg.
+    required: false
+    default: "2026.01.16"
+
+runs:
+  using: composite
+  steps:
+    # Building FFmpeg from source costs tens of minutes on a hosted runner.
+    # What it produces depends only on the ref above, which is immutable, so
+    # the installed tree is cached under exactly that ref.
+    #
+    # No `restore-keys`: a prefix fallback would hand back a tree built from a
+    # different ref, which is the one outcome the pin exists to prevent. A miss
+    # must rebuild rather than approximate.
+    #
+    # A cache is readable from the ref that wrote it and from the default
+    # branch, and nowhere else, and it is evicted after seven days without a
+    # hit. What keeps this one alive and reachable is therefore the CI workflow
+    # running on every push and pull request; the tag-triggered docs build
+    # restores what those runs wrote rather than maintaining its own.
+    - name: Restore cached FFmpeg development libraries
+      id: ffmpeg
+      uses: actions/cache@v4
+      with:
+        path: .vcpkg/installed
+        key: vcpkg-ffmpeg-x64-windows-${{ inputs.vcpkg-ref }}
+
+    - name: Check out compatible vcpkg
+      if: steps.ffmpeg.outputs.cache-hit != 'true'
+      uses: actions/checkout@v6
+      with:
+        repository: microsoft/vcpkg
+        ref: ${{ inputs.vcpkg-ref }}
+        path: .vcpkg
+
+    # The exit-code checks stop this step at the command that actually broke.
+    # A native failure does not raise a PowerShell error, so without them the
+    # script runs on and the step reports whichever command exited last.
+    - name: Install FFmpeg development libraries
+      if: steps.ffmpeg.outputs.cache-hit != 'true'
+      shell: pwsh
+      run: |
+        & "$env:GITHUB_WORKSPACE\.vcpkg\bootstrap-vcpkg.bat" -disableMetrics
+        if ($LASTEXITCODE -ne 0) { throw "vcpkg bootstrap failed ($LASTEXITCODE)" }
+        & "$env:GITHUB_WORKSPACE\.vcpkg\vcpkg.exe" install ffmpeg:x64-windows
+        if ($LASTEXITCODE -ne 0) { throw "vcpkg install ffmpeg failed ($LASTEXITCODE)" }
+        # Nothing here links the debug variant, and it is about half of what
+        # would otherwise be cached and restored on every later run.
+        $debug = "$env:GITHUB_WORKSPACE\.vcpkg\installed\x64-windows\debug"
+        Remove-Item $debug -Recurse -Force -ErrorAction SilentlyContinue
+
+    # Export `FFMPEG_DIR`, not `VCPKG_ROOT`: `ffmpeg-sys-next` reads it before
+    # it attempts any vcpkg or pkg-config discovery, so the pinned tree becomes
+    # the only FFmpeg the build can reach. Exporting `VCPKG_ROOT` alone left the
+    # discovery order in play, and the first run of the docs workflow generated
+    # bindings from FFmpeg 8.1 headers found elsewhere on the runner: `AVCodec`
+    # had lost `pix_fmts`/`sample_fmts`/`ch_layouts` and `AV_CODEC_ID_V410` was
+    # gone, which `ffmpeg-next` 8.1 uses unguarded.
+    #
+    # Runs on both paths, so a restored cache is checked as strictly as a fresh
+    # build: a truncated or wrong-version tree fails here rather than halfway
+    # through generating bindings from it.
+    - name: Export FFMPEG_DIR
+      shell: pwsh
+      run: |
+        $prefix = "$env:GITHUB_WORKSPACE\.vcpkg\installed\x64-windows"
+        if (-not (Test-Path "$prefix\include\libavcodec\avcodec.h")) {
+          throw "no FFmpeg headers under $prefix"
+        }
+        if (-not (Get-ChildItem "$prefix\lib\*avcodec*.lib" -ErrorAction SilentlyContinue)) {
+          throw "no FFmpeg import libraries under $prefix"
+        }
+        # Recorded so a future header mismatch is diagnosable from the log.
+        Get-ChildItem "$prefix\include\libavcodec\version*.h" |
+          Select-String -Pattern '#define\s+LIBAVCODEC_VERSION_(MAJOR|MINOR)\s'
+        "FFMPEG_DIR=$prefix" >> $env:GITHUB_ENV
