@@ -9,11 +9,9 @@ use crate::{
     buffer::MediaBuffer,
     control::ControlMsg,
     element::{Element, ElementType, Sink, Source, element_pp_log},
-    elements::filter::decoder::d3d12va_decoder::{
-        create_hw_device_ctx, create_hw_frames_ctx, free_buffer,
-    },
     error::Result,
     pad::SrcPad,
+    platform::windows::d3d12va::{create_hw_device_ctx, create_hw_frames_ctx, free_buffer},
     pool::UnboundObjectPool,
 };
 

@@ -46,12 +46,12 @@ use crate::{
     buffer::MediaBuffer,
     control::ControlMsg,
     element::{Element, ElementType, Sink, Source, element_pp_log},
-    elements::filter::decoder::d3d12va_decoder::{
+    error::Result,
+    pad::SrcPad,
+    platform::windows::d3d12va::{
         create_hw_device_ctx, create_hw_frames_ctx, d3d12va_texture, free_buffer,
         set_d3d12va_fence_value,
     },
-    error::Result,
-    pad::SrcPad,
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
 };
 

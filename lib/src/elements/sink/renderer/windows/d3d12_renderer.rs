@@ -12,8 +12,9 @@ use crate::{
     buffer::MediaBuffer,
     control::ControlMsg,
     element::{Element, ElementType, Sink, element_pp_log},
-    elements::{SubmitError, filter::decoder::d3d12va_decoder::d3d12va_texture},
+    elements::SubmitError,
     error::Result,
+    platform::windows::d3d12va::d3d12va_texture,
     pool::UnboundObjectPoolRef,
 };
 

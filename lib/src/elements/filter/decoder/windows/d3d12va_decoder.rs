@@ -1,50 +1,20 @@
-use std::{ffi::c_void, sync::Arc};
+use std::sync::Arc;
 
 use crate::pp_log::{PpLog, pp_error, pp_info};
 use ffmpeg_next::{self as ffmpeg, ffi};
 use thiserror::Error as ThisError;
-use windows::{Win32::Graphics::Direct3D12::ID3D12Device, core::Interface};
+use windows::Win32::Graphics::Direct3D12::ID3D12Device;
 
 use crate::{
     buffer::MediaBuffer,
     control::ControlMsg,
     element::{Element, ElementType, Sink, Source, element_pp_log},
     pad::SrcPad,
+    platform::windows::d3d12va::{create_hw_device_ctx, free_buffer},
     pool::UnboundObjectPool,
 };
 
 use crate::elements::filter::is_codec_drain_boundary;
-
-/// Mirrors of the D3D12VA-specific structs from FFmpeg's
-/// `libavutil/hwcontext_d3d12va.h` (as of FFmpeg n8.0), hand-written
-/// because `ffmpeg-sys-next` doesn't bind that header — only the
-/// type-agnostic `AVHWDeviceContext`/`AVHWFramesContext` are generated.
-/// COM pointers are kept as `*mut c_void` rather than typed `windows-rs`
-/// handles so this struct's layout depends only on pointer size, not on
-/// `windows-rs`'s internal representation. If a future FFmpeg version
-/// changes this header's layout, these silently go stale — there's no
-/// compile-time check tying them together.
-#[repr(C)]
-struct AVD3D12VADeviceContext {
-    device: *mut c_void,
-    video_device: *mut c_void,
-    lock: Option<unsafe extern "C" fn(lock_ctx: *mut c_void)>,
-    unlock: Option<unsafe extern "C" fn(lock_ctx: *mut c_void)>,
-    lock_ctx: *mut c_void,
-}
-
-#[repr(C)]
-struct AVD3D12VASyncContext {
-    fence: *mut c_void,
-    event: *mut c_void,
-    fence_value: u64,
-}
-
-#[repr(C)]
-struct AVD3D12VAFrame {
-    texture: *mut c_void,
-    sync_ctx: AVD3D12VASyncContext,
-}
 
 /// Errors specific to `D3d12Decoder`. Converts into the crate-wide
 /// `Error` via `?` (see [`crate::error::Error`]).
@@ -75,7 +45,8 @@ pub enum D3d12DecoderError {
 /// `FrameCounter` only ever touch `.pts()` or match the enum variant, so
 /// they work unmodified. Only [`crate::elements::D3d12Renderer`] cares:
 /// it checks `frame.format()` and, for `Pixel::D3D12`, takes the
-/// zero-copy path via `d3d12va_texture` instead of reading pixel bytes.
+/// zero-copy path through the frame's D3D12VA texture instead of reading
+/// pixel bytes.
 pub struct D3d12Decoder {
     pp_log: PpLog,
     name: Arc<str>,
@@ -249,68 +220,6 @@ impl Drop for D3d12Decoder {
     }
 }
 
-/// Shared with [`crate::elements::D3d12Upload`] and
-/// [`crate::elements::D3d12Scaler`]. Returns a raw `AVERROR` code rather than
-/// `D3d12DecoderError` so it doesn't tie that caller to this module's
-/// own error type; each call site maps it into its own error variant.
-pub(crate) unsafe fn create_hw_device_ctx(
-    device: &ID3D12Device,
-) -> Result<*mut ffi::AVBufferRef, i32> {
-    unsafe {
-        let buf = ffi::av_hwdevice_ctx_alloc(ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_D3D12VA);
-        if buf.is_null() {
-            return Err(-1);
-        }
-
-        let hw_device_ctx = (*buf).data as *mut ffi::AVHWDeviceContext;
-        let d3d12_ctx = (*hw_device_ctx).hwctx as *mut AVD3D12VADeviceContext;
-        // FFmpeg releases a caller-supplied device when this context is
-        // freed, so transfer an independently owned COM reference.
-        (*d3d12_ctx).device = device.clone().into_raw();
-
-        let result = ffi::av_hwdevice_ctx_init(buf);
-        if result < 0 {
-            free_buffer(buf);
-            return Err(result);
-        }
-
-        Ok(buf)
-    }
-}
-
-/// Shared with the other D3D12 filters — see
-/// [`create_hw_device_ctx`]'s own docs.
-pub(crate) unsafe fn free_buffer(mut buf: *mut ffi::AVBufferRef) {
-    unsafe { ffi::av_buffer_unref(&mut buf) };
-}
-
-/// Creates an NV12 D3D12VA frame pool tied to `hw_device_ctx`.
-pub(crate) unsafe fn create_hw_frames_ctx(
-    hw_device_ctx: *mut ffi::AVBufferRef,
-    width: u32,
-    height: u32,
-    initial_pool_size: i32,
-) -> Result<*mut ffi::AVBufferRef, i32> {
-    unsafe {
-        let buf = ffi::av_hwframe_ctx_alloc(hw_device_ctx);
-        if buf.is_null() {
-            return Err(-1);
-        }
-        let frames_ctx = (*buf).data as *mut ffi::AVHWFramesContext;
-        (*frames_ctx).format = ffi::AVPixelFormat::AV_PIX_FMT_D3D12;
-        (*frames_ctx).sw_format = ffi::AVPixelFormat::AV_PIX_FMT_NV12;
-        (*frames_ctx).width = width as i32;
-        (*frames_ctx).height = height as i32;
-        (*frames_ctx).initial_pool_size = initial_pool_size;
-        let result = ffi::av_hwframe_ctx_init(buf);
-        if result < 0 {
-            free_buffer(buf);
-            return Err(result);
-        }
-        Ok(buf)
-    }
-}
-
 unsafe extern "C" fn get_format(
     _ctx: *mut ffi::AVCodecContext,
     mut fmt: *const ffi::AVPixelFormat,
@@ -324,43 +233,4 @@ unsafe extern "C" fn get_format(
         }
         ffi::AVPixelFormat::AV_PIX_FMT_NONE
     }
-}
-
-/// Extracts `(texture, fence, fence_value)` from a frame produced by
-/// [`D3d12Decoder`] — `None` if `frame` isn't actually a D3D12VA frame.
-/// `texture`/`fence` are borrowed raw `ID3D12Resource*`/`ID3D12Fence*`
-/// pointers (still owned by `frame`'s own hw frame pool reference) — the
-/// caller must `AddRef` (e.g. via `Interface::from_raw_borrowed(..).clone()`)
-/// before holding onto them independently of `frame`.
-pub(crate) fn d3d12va_texture(
-    frame: &ffmpeg::frame::Video,
-) -> Option<(*mut c_void, *mut c_void, u64)> {
-    if frame.format() != ffmpeg::format::Pixel::D3D12 {
-        return None;
-    }
-    unsafe {
-        let ptr = frame.as_ptr();
-        let d3d12_frame = &*((*ptr).data[0] as *const AVD3D12VAFrame);
-        Some((
-            d3d12_frame.texture,
-            d3d12_frame.sync_ctx.fence,
-            d3d12_frame.sync_ctx.fence_value,
-        ))
-    }
-}
-
-/// Updates the fence value belonging to a D3D12VA frame after a producer has
-/// queued work and signalled the frame pool's own fence.
-pub(crate) fn set_d3d12va_fence_value(frame: &mut ffmpeg::frame::Video, fence_value: u64) -> bool {
-    if frame.format() != ffmpeg::format::Pixel::D3D12 {
-        return false;
-    }
-    unsafe {
-        let data = (*frame.as_mut_ptr()).data[0];
-        if data.is_null() {
-            return false;
-        }
-        (*(data as *mut AVD3D12VAFrame)).sync_ctx.fence_value = fence_value;
-    }
-    true
 }

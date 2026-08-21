@@ -301,7 +301,7 @@ pub(crate) unsafe fn create_hw_device_ctx(
         let hw_device_ctx = (*buf).data as *mut ffi::AVHWDeviceContext;
         let d3d11_ctx = (*hw_device_ctx).hwctx as *mut AVD3D11VADeviceContext;
         // AddRef'd, not borrowed — unlike the D3D12 sibling
-        // (`elements::filter::decoder::d3d12va_decoder`'s `create_hw_device_ctx`),
+        // (`platform::windows::d3d12va::create_hw_device_ctx`),
         // whose comment this one used to copy verbatim. Verified against
         // the real `libavutil/hwcontext_d3d11va.c` (n8.0): `d3d11va_device_uninit`
         // unconditionally calls `ID3D11Device_Release(device_hwctx->device)`
