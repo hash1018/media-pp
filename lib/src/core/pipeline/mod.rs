@@ -1,3 +1,17 @@
+//! Building and running a graph.
+//!
+//! [`PipelineBuilder`] assembles one; [`Pipeline`] owns it at runtime — the
+//! source threads, the control cascade, the shared
+//! [`Clock`](crate::clock::Clock), the [`Bus`](crate::bus::Bus), and the
+//! [`PipelineGraph`](crate::graph::PipelineGraph). [`ChainBuilder`] and
+//! [`DetachedBranch`] are how a branch is described before it is attached, so
+//! that wiring can fail without leaving a half-built graph behind.
+//!
+//! Ending a pipeline is two different requests, not one:
+//! [`Pipeline::finish`] emits ordered EOS from the source and lets it drain
+//! every stage that holds delayed data, while [`Pipeline::stop`] abandons
+//! that work.
+
 mod builder;
 mod chain;
 mod runtime;

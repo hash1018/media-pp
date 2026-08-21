@@ -1,3 +1,17 @@
+//! Which stream currently defines the pipeline's media position.
+//!
+//! [`Clock`](crate::clock::Clock) stays the monotonic control and pause clock.
+//! This module adds the *media* position on top of it, and the handover it
+//! exists for: a pipeline starts on a wall-clock fallback and can pass the
+//! position to one audio renderer once that renderer's endpoint is running,
+//! without ever letting the position jump backwards. [`PlaybackMaster`] is
+//! the state that handover is currently in.
+//!
+//! Only one audio master may hold the clock at a time, which is what
+//! [`PlaybackClockError`] guards. No audio-backend type appears here: a
+//! renderer publishes device-position snapshots through a private
+//! registration, and video scheduling only ever reads the result.
+
 use std::{
     sync::{Arc, Mutex},
     time::Duration,
@@ -21,6 +35,11 @@ pub enum PlaybackMaster {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ThisError)]
+/// Why an audio renderer could not take or keep the playback clock.
+///
+/// Both variants mean the caller's registration is not the live one — either
+/// another master already holds the clock, or this registration was superseded.
+/// Neither is fatal to playback: the position simply stays with whoever owns it.
 pub enum PlaybackClockError {
     #[error("this pipeline already has an audio playback-clock master")]
     AudioMasterAlreadyRegistered,

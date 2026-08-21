@@ -71,6 +71,14 @@ macro_rules! __pp_log {
     }};
 }
 
+/// Logs at [`Level::Info`](crate::log::Level::Info) — sparse lifecycle and
+/// topology changes, not per-buffer activity.
+///
+/// Takes either an explicit identity (`pp_info!(pp_log: &self.pp_log, "..")`)
+/// or, for a type with a `pp_log` field, the receiver itself
+/// (`pp_info!(self, "..")`). Formatting is skipped entirely when the level is
+/// disabled, so a call on a hot path costs a level check rather than a
+/// formatted string.
 #[macro_export]
 macro_rules! pp_info {
     ($($arg:tt)+) => {
@@ -78,6 +86,8 @@ macro_rules! pp_info {
     };
 }
 
+/// Logs at [`Level::Debug`](crate::log::Level::Debug) — diagnostic state. Same
+/// forms and cost as [`pp_info!`].
 #[macro_export]
 macro_rules! pp_debug {
     ($($arg:tt)+) => {
@@ -85,6 +95,8 @@ macro_rules! pp_debug {
     };
 }
 
+/// Logs at [`Level::Warn`](crate::log::Level::Warn) — degraded or recovered
+/// conditions. Same forms and cost as [`pp_info!`].
 #[macro_export]
 macro_rules! pp_warn {
     ($($arg:tt)+) => {
@@ -92,6 +104,8 @@ macro_rules! pp_warn {
     };
 }
 
+/// Logs at [`Level::Error`](crate::log::Level::Error) — a failed operation.
+/// Same forms and cost as [`pp_info!`].
 #[macro_export]
 macro_rules! pp_error {
     ($($arg:tt)+) => {
@@ -99,6 +113,9 @@ macro_rules! pp_error {
     };
 }
 
+/// Logs at [`Level::Trace`](crate::log::Level::Trace) — EOS and control-flow
+/// detail at element and thread boundaries. Same forms and cost as
+/// [`pp_info!`].
 #[macro_export]
 macro_rules! pp_trace {
     ($($arg:tt)+) => {

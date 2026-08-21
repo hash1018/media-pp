@@ -1,3 +1,16 @@
+//! Background tasks that have no pads of their own.
+//!
+//! A [`Driver`] is a self-contained loop with nothing to push into and
+//! nothing to pull out of — whatever it produces or consumes it does through
+//! `Sink`/`Source` pairs it mints on the side, the way a WebRTC peer hands out
+//! per-track endpoints. [`DriverRunner`] runs one on a background thread.
+//!
+//! This is the deliberately smaller sibling of
+//! [`Pipeline`](crate::pipeline::Pipeline): no clock, no pause, no seek, no
+//! wiring callback, none of which mean anything for a connection that is not
+//! part of a dataflow graph. Anything that does have pads to wire belongs
+//! there instead.
+
 use std::{
     sync::{
         Arc, Mutex,

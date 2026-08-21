@@ -1,3 +1,20 @@
+//! The built-in elements, grouped by the role they play in a graph.
+//!
+//! [`source`] produces buffers, [`filter`] transforms them, [`sink`] consumes
+//! them, and [`driver`] holds the background tasks that have no pads at all.
+//! These are built *on* the framework re-exported at the crate root, not part
+//! of it — anything here could equally be written outside this crate against
+//! the same traits.
+//!
+//! Every element is re-exported flat from this module, so a backend's type is
+//! reached as `media_pp::elements::D3d11Scaler` regardless of which file it
+//! lives in. Backend-specific types carry their backend's prefix, require the
+//! matching Cargo feature, and exist only on that backend's platform; an
+//! unprefixed type is a deliberately backend-independent contract.
+//!
+//! What a given element accepts, what it owns, and how it behaves under error
+//! and runtime control is documented on the element itself rather than here.
+
 mod audio_format;
 pub mod driver;
 pub mod filter;

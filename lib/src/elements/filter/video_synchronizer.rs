@@ -21,6 +21,10 @@ fn nanoseconds() -> TimeBase {
 }
 
 #[derive(Debug, ThisError)]
+/// Input this element cannot schedule.
+///
+/// Scheduling needs a decoded video frame with a PTS and a usable time base;
+/// anything else is rejected rather than passed through unscheduled.
 pub enum VideoSynchronizerError {
     #[error(
         "invalid time base {numerator}/{denominator}: both numerator and denominator must be positive"

@@ -1,3 +1,11 @@
+//! The one output port data leaves an element through.
+//!
+//! There is no separate fan-out primitive in this model: an element with more
+//! than one [`SrcPad`] *is* a tee. [`FileDemuxer`](crate::elements::FileDemuxer)
+//! is the plain form — one pad per container stream, wired once — and
+//! [`Tee`](crate::elements::Tee) is the deliberate exception whose pads can
+//! change while it runs.
+
 use std::sync::Arc;
 
 use crate::{

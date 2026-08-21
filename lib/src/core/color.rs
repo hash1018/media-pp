@@ -14,7 +14,9 @@ pub struct Color {
 }
 
 impl Color {
+    /// Opaque black — the default compositor background.
     pub const BLACK: Self = Self::new(0, 0, 0);
+    /// Opaque white.
     pub const WHITE: Self = Self::new(255, 255, 255);
 
     pub const fn new(red: u8, green: u8, blue: u8) -> Self {

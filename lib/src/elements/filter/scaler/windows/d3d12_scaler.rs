@@ -33,6 +33,12 @@ use super::d3d12_video_processor::{D3d12VideoProcessor, ProcessorShape, VideoPro
 const OUTPUT_POOL_SIZE: i32 = 8;
 
 #[derive(Debug, ThisError)]
+/// Why a [`D3d12Scaler`] could not be created or could not scale a frame.
+///
+/// The input variants reject a frame this element cannot handle — one that is
+/// not D3D12-resident, or whose dimensions the NV12 layout does not allow —
+/// while the rest report a failed Direct3D or FFmpeg allocation. Neither kind
+/// leaves the scaler's device state bound.
 pub enum D3d12ScalerError {
     #[error("windows error: {0}")]
     Windows(#[from] windows::core::Error),

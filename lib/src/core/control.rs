@@ -1,3 +1,17 @@
+//! Pause, Resume, Stop, Seek, and Finish — and the channel they travel
+//! through.
+//!
+//! Control follows the same pad-to-pad path as data but on a dedicated
+//! channel, because unlike [`Eos`](crate::buffer::MediaBuffer::Eos) it has to
+//! reach elements mid-stream and, at a [`Queue`](crate::queue::Queue), jump
+//! ahead of whatever is already backed up instead of queueing behind it.
+//!
+//! A [`SourceElement`](crate::element::SourceElement) loop stays responsive by
+//! calling [`drain_control`] every iteration. The returned [`ControlOutcome`]
+//! is not only a "should I stop" flag: a source that schedules against the
+//! wall clock must add `paused_for` back into its own timing, or resuming will
+//! look like a burst of catch-up work owed all at once.
+
 use std::time::{Duration, Instant};
 
 use crate::pp_log::pp_trace;
@@ -83,6 +97,12 @@ pub struct ControlReceiver {
     pub(crate) rx: Receiver<Request>,
 }
 
+/// Creates a control channel.
+///
+/// The channel is unbounded, because a control request must never be blocked by
+/// backpressure on the data path — that is the whole reason control does not
+/// travel as data. [`Pipeline`](crate::pipeline::Pipeline) creates one per
+/// source; [`Queue`](crate::queue::Queue) creates one to reach its own worker.
 pub fn channel() -> (ControlSender, ControlReceiver) {
     let (tx, rx) = unbounded();
     (ControlSender { tx }, ControlReceiver { rx })

@@ -1,3 +1,11 @@
+//! What travels between elements.
+//!
+//! [`MediaBuffer`] is an enum rather than one opaque buffer type, because
+//! `ffmpeg-next` already hands back strongly-typed packets and frames and
+//! collapsing them would only mean unwrapping again downstream. Its own
+//! documentation covers why each payload is shared rather than copied, and
+//! why a video frame arrives through a pool reference.
+
 use std::sync::Arc;
 
 use ffmpeg_next as ffmpeg;

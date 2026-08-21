@@ -1,3 +1,13 @@
+//! The crate-wide error type.
+//!
+//! [`enum@Error`] is the aggregate an element's own error converts into with `?`,
+//! so that a pipeline built from unrelated elements still has one return type.
+//! Each variant wraps a component error — `thiserror` enums that stay actionable
+//! on their own, documented next to the element that produces them.
+//!
+//! Backend variants are behind the same Cargo features as the elements that
+//! raise them, so this enum is exactly as wide as the build it belongs to.
+
 use thiserror::Error;
 
 #[cfg(all(target_os = "windows", feature = "dxgi-capture"))]
@@ -248,4 +258,5 @@ pub enum Error {
     Other(String),
 }
 
+/// The crate's `Result`, with [`enum@Error`] as the error type.
 pub type Result<T> = std::result::Result<T, Error>;

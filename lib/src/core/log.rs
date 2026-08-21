@@ -76,6 +76,7 @@ impl fmt::Display for Level {
 }
 
 #[derive(Debug, ThisError)]
+/// Why [`init`] could not install the file logger.
 pub enum LogInitError {
     #[error("the media-pp file logger has already been initialized")]
     AlreadyInitialized,

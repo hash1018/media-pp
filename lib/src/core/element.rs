@@ -1,3 +1,14 @@
+//! The traits every element implements, and the identity it carries.
+//!
+//! [`Sink`] consumes buffers, [`Source`] owns the [`SrcPad`](crate::pad::SrcPad)s
+//! they leave through, and [`Filter`] is simply both. [`SourceElement`] adds
+//! the one thing a graph needs exactly once: a `run` loop that drives the
+//! whole pipeline.
+//!
+//! [`Element`] itself is the identity half — an element's type and its
+//! caller-chosen name, which every log record and every
+//! [`BusEvent`](crate::bus::BusEvent) is attributed to.
+
 use std::{sync::Arc, time::Duration};
 
 use crate::pp_log::PpLog;

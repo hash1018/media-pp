@@ -1,3 +1,11 @@
+//! The pipeline's shared, pause-aware wall-clock reference.
+//!
+//! One [`Clock`] per [`Pipeline`](crate::pipeline::Pipeline), shared with
+//! every [`Pacer`](crate::elements::Pacer) at wiring time. Whichever branch
+//! processes a frame first anchors t=0 and the others read that same anchor,
+//! which is what keeps video and audio from each drifting away from their own
+//! first frame.
+
 use std::{
     sync::{
         Mutex,

@@ -1,3 +1,17 @@
+//! The explicit thread boundary, and with it the error boundary.
+//!
+//! A pipeline is synchronous until a [`Queue`] is placed in it. A `Queue` owns
+//! a worker thread and a bounded channel, so upstream and downstream of it run
+//! concurrently and a full channel becomes backpressure.
+//!
+//! Crossing it changes how failure is handled. A direct
+//! [`Sink::consume`](crate::element::Sink::consume) call can return `Err` to
+//! its caller; a `Queue`'s worker has no caller to return to, so a downstream
+//! data error is posted to the [`Bus`](crate::bus::Bus), that buffer is
+//! dropped, and the worker continues. [`OverflowPolicy`] decides what a full
+//! channel does, and its own documentation explains why an unbounded wait is
+//! the default and when it is the wrong one.
+
 use std::{
     sync::{
         Arc,

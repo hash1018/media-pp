@@ -28,11 +28,24 @@ const BUFFER_DURATION_100NS: i64 = 100 * 10_000;
 const POLL_INTERVAL: Duration = Duration::from_millis(2);
 
 #[derive(Debug, Clone)]
+/// Which endpoint a [`WasapiRenderer`] opens.
+///
+/// The device carries its own mix format, so nothing else needs configuring
+/// here: the renderer resolves the format from the endpoint and requires the
+/// incoming audio to already match it.
 pub struct WasapiRendererOptions {
     pub device: WasapiDevice,
 }
 
 #[derive(Debug, ThisError)]
+/// Why a [`WasapiRenderer`] could not open its endpoint or render a frame.
+///
+/// [`WasapiRendererError::FormatMismatch`] is the one a pipeline hits most
+/// often, and it is a wiring problem rather than a device problem: this
+/// renderer does not convert, so an
+/// [`AudioResampler`](crate::elements::AudioResampler) belongs in front of it.
+/// [`WasapiRendererError::DeviceInvalidated`] is the endpoint disappearing
+/// underneath a running pipeline — the default device changing, for instance.
 pub enum WasapiRendererError {
     #[error("windows error: {0}")]
     Windows(#[from] windows::core::Error),

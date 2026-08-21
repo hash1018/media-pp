@@ -15,6 +15,8 @@ use crate::{
 
 use super::Pipeline;
 
+pub(super) type SourceEntry = (ElementId, Box<dyn SourceElement>);
+
 /// Accumulates one or more sources into a single [`Pipeline`] — the
 /// multi-source generalization of what [`Pipeline::new`] does for exactly
 /// one. Each [`PipelineBuilder::add_source`] call gets its own background
@@ -35,8 +37,6 @@ use super::Pipeline;
 /// independent sources under today's [`crate::element::SourceElement`]
 /// model, but one [`Pipeline`] so `run()`/`pause()`/`resume()`/`stop()`
 /// only need to be called once, not once per source.
-pub(super) type SourceEntry = (ElementId, Box<dyn SourceElement>);
-
 pub struct PipelineBuilder {
     id: Arc<str>,
     bus: Bus,

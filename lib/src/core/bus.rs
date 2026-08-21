@@ -1,3 +1,15 @@
+//! Out-of-band reporting for what cannot be returned to the caller.
+//!
+//! Inside a single thread a failing stage propagates with `?`. Once a buffer
+//! has crossed a [`Queue`](crate::queue::Queue) there is no longer a caller
+//! to return to, so the element posts a [`BusEvent`] here instead and keeps
+//! running. Whoever owns the pipeline observes those events through
+//! [`BusReceiver`].
+//!
+//! Every event is delivered as a [`BusMessage`] carrying the stable graph
+//! identity of the element that posted it, so a report can be attributed to
+//! one branch even when several elements share a name.
+
 use std::{sync::Arc, time::Duration};
 
 use crate::pp_log::{PpLog, pp_error, pp_info, pp_warn};
@@ -54,6 +66,10 @@ pub struct Bus {
     element_id: Option<ElementId>,
 }
 
+/// The receiving half of a [`Bus`], held by whoever owns the pipeline.
+///
+/// Draining it blocks until every `Bus` sender has been dropped, which is how
+/// a caller waits for a pipeline to actually finish rather than polling for it.
 pub struct BusReceiver {
     rx: Receiver<BusMessage>,
 }

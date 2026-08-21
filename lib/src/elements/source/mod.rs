@@ -1,3 +1,17 @@
+//! Elements that produce buffers.
+//!
+//! Three shapes live here. Readers pull from something that already exists —
+//! a container, an RTSP stream, a capture device, or the application itself
+//! through [`AppSource`]. Generators synthesize
+//! ([`TestVideoSource`], [`TestAudioSource`]). And fan-in elements
+//! ([`AudioMixer`] and the video compositors) are sources with inputs: they
+//! accept buffers from several upstream branches and emit one combined stream
+//! on their own schedule.
+//!
+//! A pipeline is driven by exactly one of these, the one implementing
+//! [`SourceElement`](crate::element::SourceElement) — its `run` loop is what
+//! makes the whole graph move.
+
 mod app_source;
 mod audio_mixer;
 mod capture;

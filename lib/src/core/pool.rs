@@ -1,3 +1,16 @@
+//! Recycling the backing storage of video frames.
+//!
+//! Decoding into a fresh `ffmpeg::frame::Video` every time means allocating and
+//! freeing a full frame per buffer. [`UnboundObjectPool`] hands out
+//! [`UnboundObjectPoolRef`]s that return their storage to the pool once every
+//! downstream clone has been dropped, so steady-state playback stops allocating
+//! entirely.
+//!
+//! "Unbound" is the contract that matters: the pool grows to whatever depth
+//! downstream buffering turns out to need instead of blocking at a fixed count.
+//! Fixed-size pools do exist in this crate, but they belong to hardware decoders
+//! whose surface count the driver fixes for them — see those elements' own docs.
+
 use std::{
     ops::{Deref, DerefMut},
     sync::Arc,

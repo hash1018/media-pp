@@ -1,3 +1,15 @@
+//! The pipeline's topology, recorded separately from the elements themselves.
+//!
+//! Elements own their pads and their downstream peers; nothing in that chain
+//! can answer "what does this pipeline look like right now". [`PipelineGraph`]
+//! keeps that record: stable [`ElementId`]/[`EdgeId`]/[`BranchId`] values that
+//! survive same-name churn, and [`GraphSnapshot`] as a consistent copy to read
+//! outside the lock.
+//!
+//! Names are labels only. IDs are what attachment, detachment, and lookup use,
+//! and what lets a log record name one specific element when several share a
+//! name.
+
 use std::{
     collections::{HashMap, HashSet},
     fmt::{self, Write as _},
@@ -39,6 +51,8 @@ impl fmt::Display for BranchId {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// One element as it appears in a [`GraphSnapshot`] — its stable identity, its
+/// type, and the name its caller chose.
 pub struct NodeInfo {
     pub id: ElementId,
     pub element_type: ElementType,
@@ -46,12 +60,15 @@ pub struct NodeInfo {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// One end of an edge: the element, and the name of the pad on it.
 pub struct PortRef {
     pub element: ElementId,
     pub port: Arc<str>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// One link from a source pad to a downstream element, together with the
+/// branch whose attachment created it.
 pub struct EdgeInfo {
     pub id: EdgeId,
     pub branch_id: BranchId,
@@ -60,6 +77,13 @@ pub struct EdgeInfo {
 }
 
 #[derive(Debug, Clone)]
+/// A consistent copy of the whole topology, taken under the graph's lock and
+/// then read without it.
+///
+/// `revision` increments on every mutation, so two snapshots can be told apart
+/// even when they describe the same shape. This is also what
+/// [`crate::pipeline::Pipeline::topology`] renders and what a `run`/`attach`/
+/// `detach` log record embeds.
 pub struct GraphSnapshot {
     pub revision: u64,
     pub nodes: Vec<NodeInfo>,
@@ -227,6 +251,11 @@ pub(crate) fn log_topology(pp_log: &PpLog, event: &str, snapshot: &GraphSnapshot
 }
 
 #[derive(Debug, ThisError, PartialEq, Eq)]
+/// A rejected topology change.
+///
+/// Every variant here is a refusal, not a partial result: attachment validates
+/// before it mutates, so a graph that returns one of these is left exactly as
+/// it was.
 pub enum GraphError {
     #[error("source pad index {index} is out of range (source has {pad_count} pads)")]
     PadOutOfRange { index: usize, pad_count: usize },

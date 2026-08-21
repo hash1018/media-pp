@@ -1,3 +1,17 @@
+//! Elements that are both a [`Sink`](crate::element::Sink) and a
+//! [`Source`](crate::element::Source).
+//!
+//! Codecs, scalers, pixel-format conversion, GPU upload and download, audio
+//! resampling and gain, chroma keying, and the two elements that change *when*
+//! rather than *what* — [`Pacer`], which holds a frame until its presentation
+//! time, and [`VideoSynchronizer`]. [`Tee`] is here too, as the one filter
+//! whose fan-out can change while the pipeline runs.
+//!
+//! Where the same job exists on more than one backend the types are separate
+//! and prefixed (`Sw*`, `Cuda*`, `D3d11*`, `D3d12*`) rather than one type with
+//! a runtime switch, because the buffers they accept genuinely differ: a GPU
+//! filter requires frames already resident on the device that created them.
+
 mod audio_resampler;
 mod audio_volume;
 pub(crate) mod chroma_key;
