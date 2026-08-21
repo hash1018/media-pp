@@ -23,7 +23,7 @@ use crate::{
 
 /// What [`D3d11Renderer`] needs from an actual DX11 window/rendering
 /// implementation — the D3D11 sibling of
-/// [`crate::elements::D3d12FrameRenderer`], deliberately **not** an impl of
+/// `D3d12FrameRenderer`, deliberately **not** an impl of
 /// that trait (it's documented as inherently D3D12-only). Unlike the D3D12
 /// trait, neither submit method here takes a fence *or* a `keep_alive` —
 /// see [`crate::elements::D3d11Renderer`]'s own docs on why a single
@@ -33,7 +33,7 @@ use crate::{
 /// the way `D3d12FrameRenderer::submit_yuv420p` is one): everything in
 /// this crate's D3D11 stack already produces GPU-resident `Pixel::D3D11`
 /// textures (see [`crate::elements::D3d11Upload`]/
-/// [`crate::elements::DxgiCaptureSource`]'s GPU capture mode/
+/// `DxgiCaptureSource`'s GPU capture mode/
 /// [`crate::elements::D3d11Decoder`]), so there's no CPU-side pixel data
 /// left to upload by the time a frame reaches here.
 ///
@@ -56,7 +56,7 @@ pub trait D3d11FrameRenderer: Send {
     fn device(&self) -> ID3D11Device;
 
     /// `texture` is a plain packed-BGRA surface — from
-    /// [`crate::elements::DxgiCaptureSource`]'s GPU capture mode or
+    /// `DxgiCaptureSource`'s GPU capture mode or
     /// [`crate::elements::D3d11Upload`] fed a BGRA source. `array_index` is
     /// always `0` for these producers (neither ever builds an array
     /// texture) — see `submit_nv12_texture`'s own docs on why it's a
@@ -138,16 +138,16 @@ pub enum D3d11RendererError {
 
 /// Terminal sink that submits `Pixel::D3D11` video frames to a
 /// caller-supplied [`D3d11FrameRenderer`] — the D3D11 sibling of
-/// [`crate::elements::D3d12Renderer`]. Only built with the
+/// `D3d12Renderer`. Only built with the
 /// `d3d11` feature.
 ///
 /// Every producer in this crate's D3D11 stack
 /// ([`crate::elements::D3d11Upload`], [`crate::elements::D3d11Decoder`],
-/// [`crate::elements::DxgiCaptureSource`]'s GPU capture mode) is meant to
+/// `DxgiCaptureSource`'s GPU capture mode) is meant to
 /// share **one** `ID3D11Device` (and its one immediate context) with
 /// whatever [`D3d11FrameRenderer`] impl this wraps. That single-context
 /// requirement is what makes zero-copy here need **no explicit fence**,
-/// unlike [`crate::elements::D3d12Renderer`]'s `submit_nv12_texture`
+/// unlike `D3d12Renderer`'s `submit_nv12_texture`
 /// (which needs one because the D3D12 decoder and renderer are genuinely
 /// different devices/queues with nothing else to serialize them): an
 /// `ID3D11Device` created without `D3D11_CREATE_DEVICE_SINGLETHREADED` has

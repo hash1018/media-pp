@@ -44,7 +44,7 @@ pub enum D3d11DecoderError {
 
 /// Decodes one video stream's `Packet`s into GPU-resident `Video` frames
 /// via D3D11VA hardware acceleration — the D3D11 sibling of
-/// [`crate::elements::D3d12Decoder`], for a pipeline built entirely on
+/// `D3d12Decoder`, for a pipeline built entirely on
 /// one shared `ID3D11Device` (see [`crate::elements::D3d11Renderer`]'s own
 /// docs on why that means no explicit fence/sync is needed anywhere in
 /// this stack, unlike the D3D12 side). A `Filter`, same shape as
@@ -79,7 +79,7 @@ impl D3d11Decoder {
     /// `extra_hw_frames` sets `AVCodecContext.extra_hw_frames` — how many
     /// *additional* decode surfaces to allocate beyond what the codec's own
     /// reference-frame count strictly requires. Unlike
-    /// [`crate::elements::D3d12Decoder`] (no equivalent parameter needed),
+    /// `D3d12Decoder` (no equivalent parameter needed),
     /// D3D11VA's decode surface pool is a **fixed-size** texture array,
     /// sized once at `av_hwframe_ctx_init()` time and never grown — every
     /// decoded frame still alive downstream (sitting in a

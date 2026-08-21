@@ -37,7 +37,7 @@ impl CudaCodec {
 /// Construction-time options for [`CudaEncoder`].
 ///
 /// Carries no input-format choice, unlike
-/// [`crate::elements::D3d11NvencEncoderOptions`]: every producer of a CUDA
+/// `D3d11NvencEncoderOptions`: every producer of a CUDA
 /// frame in this crate ([`crate::elements::CudaDecoder`],
 /// [`crate::elements::CudaUpload`]) emits NV12, so a second variant would
 /// only be expressible, never reachable.
@@ -120,7 +120,7 @@ pub enum CudaEncoderError {
 /// Encodes GPU-resident `Pixel::CUDA` `Video` frames into `Packet`s on the
 /// GPU's dedicated NVENC block — the CUDA counterpart to
 /// [`crate::elements::SwEncoder`] and the sibling of
-/// [`crate::elements::D3d11NvencEncoder`]. A `Filter`: receives via `Sink`,
+/// `D3d11NvencEncoder`. A `Filter`: receives via `Sink`,
 /// pushes what it produces into its own single src pad.
 ///
 /// Fed by [`crate::elements::CudaDecoder`] this is a transcode that never

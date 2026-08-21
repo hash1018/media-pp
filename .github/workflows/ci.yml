@@ -86,6 +86,18 @@ jobs:
           DOCS_RS: "1"
         run: cargo check -p media-pp --all-targets --features ort,webrtc
 
+      # Run rustdoc against the same isolated feature sets as Clippy. A link
+      # to a type from another optional backend only breaks while that backend
+      # is absent, so one all-features documentation build cannot catch it.
+      - name: Check API documentation
+        shell: pwsh
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: |
+          cargo doc -p media-pp --no-deps
+          cargo doc -p media-pp --no-deps --features d3d11,d3d12,dxgi-capture,wasapi-capture,wasapi-renderer
+          cargo doc -p media-pp --no-deps --features cuda
+
       # Hardware-dependent tests detect the missing device and skip with a
       # reason (`try_device()`), so these run the whole logic suite here and
       # the D3D11/NVENC/capture parts on a developer machine. The soak
@@ -150,6 +162,16 @@ jobs:
         env:
           DOCS_RS: "1"
         run: cargo check -p media-pp --all-targets --features ort,webrtc
+
+      # Keep cross-backend links honest: an all-features build would resolve
+      # links that are broken in the feature-specific docs users actually see.
+      - name: Check API documentation
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: |
+          cargo doc -p media-pp --no-deps
+          cargo doc -p media-pp --no-deps --features pipewire-audio-capture,pipewire-audio-renderer,pipewire-screen-capture
+          cargo doc -p media-pp --no-deps --features cuda
 
       - name: Test (no features)
         run: cargo test -p media-pp

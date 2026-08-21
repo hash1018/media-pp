@@ -487,10 +487,10 @@ struct Terminate;
 /// [`Self::open_gpu`] captures the same desktop into **CUDA-resident**
 /// `Pixel::CUDA` frames instead, by negotiating DMA-BUF and importing each
 /// buffer onto the GPU. That is the mode to use in front of
-/// [`crate::elements::CudaEncoder`]: no compositor readback, no host copy, and
-/// no [`crate::elements::CudaUpload`] in the pipeline. It is a separate
+/// `CudaEncoder`: no compositor readback, no host copy, and
+/// no `CudaUpload` in the pipeline. It is a separate
 /// constructor rather than an option because it needs a
-/// [`crate::elements::CudaDevice`] to allocate against, and the two modes
+/// `CudaDevice` to allocate against, and the two modes
 /// negotiate mutually exclusive buffer kinds.
 pub struct PipeWireScreenCaptureSource {
     name: Arc<str>,
@@ -537,7 +537,7 @@ impl PipeWireScreenCaptureSource {
     ///
     /// Returns the element, the capture's [`VideoFormat`], and a restore token
     /// to persist for the next run (`None` if the compositor declined to
-    /// issue one) — the same shape [`crate::elements::DxgiCaptureSource::open`]
+    /// issue one) — the same shape `DxgiCaptureSource::open`
     /// returns, so a caller can build a matching downstream
     /// [`crate::elements::SwScaler`]/[`crate::elements::SwEncoder`]/
     /// [`crate::elements::Mp4Muxer`] from one value. The size comes from the
@@ -554,7 +554,7 @@ impl PipeWireScreenCaptureSource {
     /// Opens the same capture, but emits **CUDA-resident** `Pixel::CUDA`
     /// frames (`CudaFrameFormat::Bgra`) instead of CPU ones, so a recording
     /// pipeline is `PipeWireScreenCaptureSource -> CudaEncoder -> Mp4Muxer`
-    /// with no [`crate::elements::CudaUpload`] in between and no captured
+    /// with no `CudaUpload` in between and no captured
     /// pixel ever touching system memory.
     ///
     /// `device` must be the same [`CudaDevice`] every other CUDA element in

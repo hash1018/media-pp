@@ -61,7 +61,7 @@ pub enum D3d11UploadError {
 
 /// Uploads CPU-resident `Pixel::NV12` and `Pixel::BGRA` video frames to
 /// GPU-resident `Video` frames tagged `Pixel::D3D11` — the D3D11 sibling of
-/// [`crate::elements::D3d12Upload`], for a pipeline built entirely on one
+/// `D3d12Upload`, for a pipeline built entirely on one
 /// shared `ID3D11Device` (see [`crate::elements::D3d11Renderer`]'s own
 /// docs on why). Chain a [`crate::elements::SwScaler`] in front of this if
 /// the source produces anything else.

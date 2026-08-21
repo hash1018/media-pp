@@ -34,7 +34,7 @@ use crate::{
 
 /// How long [`WasapiCaptureSource::run`] sleeps between checks of
 /// `GetNextPacketSize` — also bounds `Stop` latency, same reasoning as
-/// [`crate::elements::DxgiCaptureSource`]'s own `POLL_GRANULARITY`. Plain
+/// `DxgiCaptureSource`'s own `POLL_GRANULARITY`. Plain
 /// polling rather than `IAudioClient::SetEventHandle` + `WaitForSingleObject`:
 /// event-driven signaling is well documented as unreliable specifically
 /// for loopback capture (Microsoft's own WASAPILoopbackCapture sample
@@ -59,11 +59,11 @@ pub enum WasapiCaptureSourceError {
 
     /// `AUDCLNT_E_DEVICE_INVALIDATED` specifically, broken out of the
     /// generic [`WasapiCaptureSourceError::Windows`] variant for the same
-    /// reason [`crate::elements::DxgiCaptureSourceError::AccessLost`] is:
+    /// reason `DxgiCaptureSourceError::AccessLost` is:
     /// the single most common *recoverable* failure (default device
     /// changed, device unplugged, format changed) surfaces this way. Same
     /// "fail fast, caller rebuilds a fresh one" contract
-    /// [`crate::elements::RtspSource`]/[`crate::elements::DxgiCaptureSource`]
+    /// [`crate::elements::RtspSource`]/`DxgiCaptureSource`
     /// already document: this element doesn't retry internally.
     #[error("AUDCLNT_E_DEVICE_INVALIDATED — audio device needs to be reopened")]
     DeviceInvalidated,
@@ -88,7 +88,7 @@ pub struct WasapiCaptureOptions {
 /// GStreamer's `wasapi2src` equivalent. One src pad, pushing
 /// `MediaBuffer::Audio` frames in the captured device's own native mix
 /// format/rate/channel count — no resampling. Same division of labor as
-/// [`crate::elements::DxgiCaptureSource`] emitting raw `Pixel::BGRA` and
+/// `DxgiCaptureSource` emitting raw `Pixel::BGRA` and
 /// leaving conversion to a downstream [`crate::elements::SwScaler`]: if
 /// something downstream needs a fixed sample rate/format, use
 /// [`crate::elements::AudioResampler`] rather than hiding conversion in
@@ -173,7 +173,7 @@ impl WasapiCaptureSource {
     /// session. Returns the element alongside the captured stream's actual
     /// [`AudioFormat`] — what a caller needs to build a matching downstream
     /// encoder/muxer, same pattern as
-    /// [`crate::elements::DxgiCaptureSource::open`] returning a
+    /// `DxgiCaptureSource::open` returning a
     /// [`crate::elements::VideoFormat`]. Doesn't carry a `time_base`
     /// (unlike `VideoFormat`) — every audio element in this crate derives
     /// it as `1 / sample_rate` (see [`WasapiCaptureSource::time_base`]),

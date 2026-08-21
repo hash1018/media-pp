@@ -159,7 +159,7 @@ pub enum D3d11NvencInputFormat {
     Nv12,
     /// `DXGI_FORMAT_B8G8R8A8_UNORM` — what
     /// [`crate::elements::D3d11VideoCompositor`] and
-    /// [`crate::elements::DxgiCaptureSource`]'s GPU mode produce.
+    /// `DxgiCaptureSource`'s GPU mode produce.
     Bgra,
 }
 
@@ -219,7 +219,7 @@ pub struct D3d11NvencEncoderOptions {
 /// and every frame passed to `send_frame` must come from *that* context's
 /// own pool. The `Pixel::D3D11` frames flowing through this crate don't:
 /// [`crate::elements::D3d11Upload`],
-/// [`crate::elements::DxgiCaptureSource`]'s GPU mode and
+/// `DxgiCaptureSource`'s GPU mode and
 /// [`crate::elements::D3d11VideoCompositor`] all build their textures with
 /// plain `windows-rs` calls and wrap them via
 /// `platform::windows::d3d11va::wrap_d3d11_texture`, deliberately bypassing FFmpeg's

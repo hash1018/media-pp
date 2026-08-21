@@ -15,7 +15,7 @@ use crate::{
 
 /// What [`CudaRenderer`] needs from an actual windowing/graphics
 /// implementation — the CUDA sibling of
-/// [`crate::elements::D3d11FrameRenderer`].
+/// `D3d11FrameRenderer`.
 ///
 /// # Why this trait carries device pointers rather than an image handle
 ///
@@ -92,7 +92,7 @@ pub enum CudaRendererError {
 
 /// Presents GPU-resident CUDA frames — the terminal for a
 /// [`crate::elements::CudaDecoder`] branch, and the CUDA sibling of
-/// [`crate::elements::D3d11Renderer`].
+/// `D3d11Renderer`.
 ///
 /// Named for the frame type it consumes, not for the graphics API that ends
 /// up drawing it: this element never touches Vulkan or D3D, and which one

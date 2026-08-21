@@ -497,7 +497,7 @@ fn visible_uv_scale(
 ///
 /// Every input must already be a `Pixel::D3D11` frame (from
 /// [`crate::elements::D3d11Upload`], [`crate::elements::D3d11Decoder`], or
-/// [`crate::elements::DxgiCaptureSource`]'s GPU mode) on the exact same
+/// `DxgiCaptureSource`'s GPU mode) on the exact same
 /// `ID3D11Device`/shared context this compositor was built with — see
 /// [`D3d11VideoCompositor::new`]'s own docs on why `context` specifically
 /// must be shared, not just the device.

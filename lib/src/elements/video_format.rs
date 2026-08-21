@@ -3,7 +3,7 @@ use ffmpeg_next as ffmpeg;
 /// A complete uncompressed-video geometry/timing description.
 ///
 /// Unlike a `(width, height, time_base)` tuple, this can be passed directly
-/// from a capture source such as [`crate::elements::DxgiCaptureSource`] to a
+/// from a capture source such as `DxgiCaptureSource` to a
 /// downstream [`crate::elements::SwScaler`]/[`crate::elements::SwEncoder`]/
 /// [`crate::elements::Mp4Muxer`] without the caller re-threading three
 /// separate values by hand — same role [`crate::elements::AudioFormat`]

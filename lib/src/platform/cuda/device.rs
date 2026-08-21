@@ -18,7 +18,7 @@ pub enum CudaDeviceError {
 /// The one CUDA device context every CUDA element in a pipeline shares.
 ///
 /// This is the exact analog of the single `ID3D11Device` the D3D11 stack
-/// requires (see [`crate::elements::D3d11Renderer`]'s docs on why that stack
+/// requires (see `D3d11Renderer`'s docs on why that stack
 /// needs one shared device rather than merely one adapter): a CUDA frame
 /// allocated against one context is not readable from another, so
 /// [`crate::elements::CudaDecoder`] and [`crate::elements::CudaRenderer`]

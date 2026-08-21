@@ -16,8 +16,8 @@ use ffmpeg_next::{self as ffmpeg, ffi};
 /// `Nv12` is what NVDEC produces and what
 /// [`crate::elements::CudaRenderer`] presents. `Bgra` is what every screen
 /// capture in this crate emits
-/// ([`crate::elements::PipeWireScreenCaptureSource`],
-/// [`crate::elements::DxgiCaptureSource`]), and NVENC ingests it directly,
+/// (`PipeWireScreenCaptureSource`,
+/// `DxgiCaptureSource`), and NVENC ingests it directly,
 /// converting to YUV in hardware — so a capture-to-recording pipeline never
 /// needs a colorspace conversion at all. That matters because the one thing
 /// the GPU path *cannot* do is convert between them:

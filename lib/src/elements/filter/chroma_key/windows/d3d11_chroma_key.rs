@@ -163,7 +163,7 @@ impl ChromaKeyConstants {
 /// constraint [`crate::elements::SwChromaKey`] has for the same reason: the
 /// result of keying *is* an alpha channel, and NV12 has nowhere to put one.
 /// [`crate::elements::D3d11Upload`] (from a `Pixel::BGRA` frame),
-/// [`crate::elements::DxgiCaptureSource`]'s GPU mode, and a compositor's
+/// `DxgiCaptureSource`'s GPU mode, and a compositor's
 /// output all produce that directly. A decoder does not — its surfaces are
 /// NV12 — so a decoded green screen reaches this element through
 /// [`crate::elements::D3d11Scaler`] with

@@ -352,7 +352,7 @@ impl PipeWireAudioCaptureSource {
     }
 
     /// Like [`crate::control::drain_control`], but drives the control receiver
-    /// directly (the same reason [`crate::elements::WasapiCaptureSource`] does
+    /// directly (the same reason `WasapiCaptureSource` does
     /// — see `drain_control`'s own docs) so it can bracket the blocking
     /// `Pause` wait with the stream's own `set_active`.
     ///

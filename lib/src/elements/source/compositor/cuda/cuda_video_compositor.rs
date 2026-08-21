@@ -393,7 +393,7 @@ struct InputSnapshot {
 /// pipelines into one fixed-rate NV12 `Pixel::CUDA` stream, without any frame
 /// ever leaving the GPU — the CUDA sibling of
 /// [`crate::elements::SwVideoCompositor`] and
-/// [`crate::elements::D3d11VideoCompositor`], driving the same
+/// `D3d11VideoCompositor`, driving the same
 /// [`VideoLayer`]/[`VideoRect`]/[`VideoFit`] API.
 ///
 /// Like the other two, this is a [`SourceElement`], not a one-input filter:

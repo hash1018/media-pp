@@ -167,7 +167,7 @@ impl D3d11ScalerFormat {
 /// inheriting the source's tags — an encoder reads those to describe its
 /// stream. RGB is tagged full-range; Y'CbCr is tagged BT.709 limited, the
 /// same definition [`crate::elements::D3d11VideoCompositor`] and
-/// [`crate::elements::CudaConverter`] use, so converted frames and
+/// `CudaConverter` use, so converted frames and
 /// composited ones agree.
 ///
 /// Shader-resource-only textures from [`crate::elements::D3d11Upload`] and
@@ -186,7 +186,7 @@ impl D3d11ScalerFormat {
 /// changes — a live source can renegotiate mid-stream, and a decoder
 /// rebuilt after a seek can hand out differently shaped surfaces. The
 /// output size is fixed at construction. This is the same lazy-rebuild
-/// contract [`crate::elements::CudaScaler`] and
+/// contract `CudaScaler` and
 /// [`crate::elements::SwScaler`] have for their own scaling state.
 ///
 /// # Device and context

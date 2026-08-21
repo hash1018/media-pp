@@ -70,7 +70,7 @@ impl From<CudaFramesContextError> for CudaUploadError {
 }
 
 /// Uploads CPU-resident `Video` frames into CUDA-resident ones — the
-/// CUDA sibling of [`crate::elements::D3d11Upload`], and what lets a CPU
+/// CUDA sibling of `D3d11Upload`, and what lets a CPU
 /// source reach [`crate::elements::CudaEncoder`] or
 /// [`crate::elements::CudaRenderer`] at all.
 /// [`crate::elements::CudaDownload`] is the mirror of this element.

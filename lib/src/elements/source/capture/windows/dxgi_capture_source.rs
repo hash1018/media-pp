@@ -289,7 +289,7 @@ struct CaptureUnit {
 /// equivalent. One src pad, pushing `Pixel::BGRA` frames (no internal
 /// color conversion — same division of labor as every other source in
 /// this crate: chain a [`crate::elements::SwScaler`] downstream if
-/// something needs YUV420P, e.g. [`crate::elements::D3d12Renderer`]'s
+/// something needs YUV420P, e.g. `D3d12Renderer`'s
 /// CPU-upload path or [`crate::elements::SwEncoder`]).
 ///
 /// Emits at a **constant** rate — [`DxgiCaptureOptions::fps`] — not one

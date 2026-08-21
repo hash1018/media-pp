@@ -61,12 +61,12 @@ pub enum CudaDownloadError {
 
 /// Downloads GPU-resident `Pixel::CUDA` `Video` frames to CPU-resident ones
 /// in the matching layout — the mirror of [`crate::elements::CudaUpload`]
-/// and the CUDA sibling of [`crate::elements::D3d11Download`].
+/// and the CUDA sibling of `D3d11Download`.
 ///
 /// This is what makes a CUDA frame reach anything other than
 /// [`crate::elements::CudaEncoder`] or [`crate::elements::CudaRenderer`]:
 /// [`crate::elements::SwScaler`], [`crate::elements::SwEncoder`],
-/// [`crate::elements::OrtDetector`], [`crate::elements::SwVideoCompositor`],
+/// `OrtDetector`, [`crate::elements::SwVideoCompositor`],
 /// and [`crate::elements::AppSink`] all read pixel bytes, which a CUDA frame
 /// does not expose. So NVDEC decode plus CPU-side work — inference on a
 /// hardware-decoded stream, for instance — goes

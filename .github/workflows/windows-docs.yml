@@ -51,7 +51,7 @@ jobs:
       - name: Build Windows API documentation
         shell: pwsh
         env:
-          RUSTDOCFLAGS: --cfg docsrs
+          RUSTDOCFLAGS: --cfg docsrs -D warnings
           DOCS_RS: "1"
         run: |
           cargo doc -p media-pp --no-deps --features d3d11,d3d12,dxgi-capture,wasapi-capture,wasapi-renderer,webrtc,ort
