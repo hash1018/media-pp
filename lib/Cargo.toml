@@ -49,31 +49,7 @@ str0m = { version = "0.21", optional = true, default-features = false, features 
 ab_glyph = { version = "0.2", optional = true }
 
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.62", optional = true, features = [
-    "Win32_Foundation",
-    "Win32_Graphics_Direct3D",
-    "Win32_Graphics_Direct3D_Fxc",
-    "Win32_Graphics_Direct3D11",
-    "Win32_Graphics_Direct3D12",
-    "Win32_Graphics_Dxgi",
-    "Win32_Graphics_Dxgi_Common",
-    # `IDXGIOutput::GetDesc`'s `DXGI_OUTPUT_DESC` return type has a
-    # `Monitor: HMONITOR` field — windows-rs silently drops `GetDesc`
-    # from its generated bindings without this feature to supply that
-    # type, rather than erroring at generation time.
-    "Win32_Graphics_Gdi",
-    "Win32_Devices_FunctionDiscovery",
-    "Win32_Media_Audio",
-    "Win32_Media_KernelStreaming",
-    "Win32_Media_Multimedia",
-    "Win32_Media_MediaFoundation",
-    "Win32_Security",
-    "Win32_System_Com",
-    "Win32_System_Com_StructuredStorage",
-    "Win32_System_Variant",
-    "Win32_System_Threading",
-    "Win32_UI_Shell_PropertiesSystem",
-] }
+windows = { version = "0.62", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # `async-io` rather than the default `tokio` backend: `PipeWireScreenCaptureSource::open`
@@ -107,9 +83,32 @@ pollster = { version = "1", optional = true }
 # implementation, which is where `ash`/`windows-rs` would be pulled in.
 # Not platform-gated: CUDA is available on Linux and Windows alike.
 cuda = ["dep:ab_glyph"]
-d3d12 = ["dep:windows"]
-d3d11 = ["dep:windows", "dep:ab_glyph"]
-dxgi-capture = ["dep:windows", "d3d11"]
+d3d12 = [
+    "dep:windows",
+    "windows/Win32_Foundation",
+    "windows/Win32_Graphics_Direct3D12",
+    "windows/Win32_Graphics_Dxgi_Common",
+    "windows/Win32_Media_MediaFoundation",
+    # `CreateEventW` is hidden by windows-rs without its SECURITY_ATTRIBUTES type.
+    "windows/Win32_Security",
+    "windows/Win32_System_Threading",
+]
+d3d11 = [
+    "dep:windows",
+    "dep:ab_glyph",
+    "windows/Win32_Foundation",
+    "windows/Win32_Graphics_Direct3D",
+    "windows/Win32_Graphics_Direct3D_Fxc",
+    "windows/Win32_Graphics_Direct3D11",
+    "windows/Win32_Graphics_Dxgi_Common",
+]
+dxgi-capture = [
+    "d3d11",
+    "windows/Win32_Graphics_Dxgi",
+    # `IDXGIOutput::GetDesc`'s `DXGI_OUTPUT_DESC` return type contains an
+    # `HMONITOR`, so windows-rs omits `GetDesc` without the GDI feature.
+    "windows/Win32_Graphics_Gdi",
+]
 pipewire-audio-capture = ["dep:pipewire"]
 pipewire-audio-renderer = ["dep:pipewire"]
 pipewire-screen-capture = [
@@ -120,8 +119,30 @@ pipewire-screen-capture = [
     "dep:pipewire",
     "dep:pollster",
 ]
-wasapi-capture = ["dep:windows"]
-wasapi-renderer = ["dep:windows"]
+wasapi-capture = [
+    "dep:windows",
+    "windows/Win32_Foundation",
+    "windows/Win32_Devices_FunctionDiscovery",
+    "windows/Win32_Media_Audio",
+    "windows/Win32_Media_KernelStreaming",
+    "windows/Win32_Media_Multimedia",
+    "windows/Win32_System_Com",
+    "windows/Win32_System_Com_StructuredStorage",
+    "windows/Win32_System_Variant",
+    "windows/Win32_UI_Shell_PropertiesSystem",
+]
+wasapi-renderer = [
+    "dep:windows",
+    "windows/Win32_Foundation",
+    "windows/Win32_Devices_FunctionDiscovery",
+    "windows/Win32_Media_Audio",
+    "windows/Win32_Media_KernelStreaming",
+    "windows/Win32_Media_Multimedia",
+    "windows/Win32_System_Com",
+    "windows/Win32_System_Com_StructuredStorage",
+    "windows/Win32_System_Variant",
+    "windows/Win32_UI_Shell_PropertiesSystem",
+]
 ort = ["dep:ort", "dep:ndarray"]
 webrtc = ["dep:str0m"]
 
