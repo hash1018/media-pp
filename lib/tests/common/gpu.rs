@@ -65,6 +65,12 @@ mod windows_gpu {
         core::Interface,
     };
 
+    #[cfg(feature = "d3d12")]
+    use windows::Win32::Graphics::{
+        Direct3D12::ID3D12Device,
+        Dxgi::{CreateDXGIFactory1, IDXGIFactory4},
+    };
+
     /// A D3D11 device, its shared immediate context, and — when the SDK
     /// debug layer is installed — the debug interfaces that can enumerate
     /// live objects. `None`, after printing why, on a machine without a
@@ -142,6 +148,21 @@ mod windows_gpu {
             .expect("IDXGIDevice::GetAdapter")
             .cast()
             .expect("IDXGIAdapter3 needs Windows 10 or newer");
+        let mut info = DXGI_QUERY_VIDEO_MEMORY_INFO::default();
+        unsafe { adapter.QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &mut info) }
+            .expect("QueryVideoMemoryInfo");
+        info.CurrentUsage
+    }
+
+    /// This process's current local-video-memory usage on the adapter that
+    /// owns `device`. D3D12 devices do not implement `IDXGIDevice`, so find
+    /// the same adapter by its LUID before asking DXGI for the process gauge.
+    #[cfg(feature = "d3d12")]
+    pub fn d3d12_vram_bytes(device: &ID3D12Device) -> u64 {
+        let luid = unsafe { device.GetAdapterLuid() };
+        let factory: IDXGIFactory4 = unsafe { CreateDXGIFactory1() }.expect("CreateDXGIFactory1");
+        let adapter: IDXGIAdapter3 =
+            unsafe { factory.EnumAdapterByLuid(luid) }.expect("EnumAdapterByLuid for D3D12 device");
         let mut info = DXGI_QUERY_VIDEO_MEMORY_INFO::default();
         unsafe { adapter.QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &mut info) }
             .expect("QueryVideoMemoryInfo");

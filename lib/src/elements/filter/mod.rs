@@ -29,6 +29,8 @@ pub use decoder::{SwDecoder, SwDecoderError};
 pub use download::{CudaDownload, CudaDownloadError};
 #[cfg(all(target_os = "windows", feature = "d3d11"))]
 pub use download::{D3d11Download, D3d11DownloadError};
+#[cfg(all(target_os = "windows", feature = "d3d12"))]
+pub use download::{D3d12Download, D3d12DownloadError};
 pub use encoder::{
     AudioCodec, SwAudioEncoder, SwAudioEncoderError, SwAudioEncoderOptions, SwEncoder,
     SwEncoderError, SwEncoderOptions, VideoCodec,

@@ -29,7 +29,9 @@ use crate::elements::{
     D3d11vaDecoderError,
 };
 #[cfg(all(target_os = "windows", feature = "d3d12"))]
-use crate::elements::{D3d12RendererError, D3d12UploadError, D3d12vaDecoderError};
+use crate::elements::{
+    D3d12DownloadError, D3d12RendererError, D3d12UploadError, D3d12vaDecoderError,
+};
 use crate::{
     elements::{
         AppSourceError, AudioMixerError, AudioResamplerError, AudioVolumeError, FileDemuxError,
@@ -162,6 +164,10 @@ pub enum Error {
     #[cfg(all(target_os = "windows", feature = "d3d12"))]
     #[error(transparent)]
     D3d12UploadError(#[from] D3d12UploadError),
+
+    #[cfg(all(target_os = "windows", feature = "d3d12"))]
+    #[error(transparent)]
+    D3d12DownloadError(#[from] D3d12DownloadError),
 
     #[cfg(all(target_os = "windows", feature = "d3d11"))]
     #[error(transparent)]

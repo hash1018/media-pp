@@ -43,6 +43,9 @@ pub enum D3d12UploadError {
     #[error("failed to upload frame to the GPU (code {0})")]
     TransferData(i32),
 
+    #[error("failed to copy uploaded frame metadata (code {0})")]
+    CopyProperties(i32),
+
     #[error(
         "D3d12Upload only accepts Pixel::NV12 frames (chain a SwScaler in \
          front of it), got {0:?}"
@@ -218,7 +221,16 @@ impl Sink for D3d12Upload {
                         return Err(D3d12UploadError::TransferData(ret).into());
                     }
                 }
-                gpu_frame.set_pts(frame.pts());
+                unsafe {
+                    // The transfer copies pixels only. Keep the source
+                    // timeline and color description on the GPU frame so a
+                    // later D3d12Download can restore the complete contract.
+                    let ret = ffi::av_frame_copy_props(gpu_frame.as_mut_ptr(), frame.as_ptr());
+                    if ret < 0 {
+                        pp_error!(self, "av_frame_copy_props failed: {ret}");
+                        return Err(D3d12UploadError::CopyProperties(ret).into());
+                    }
+                }
 
                 self.pad.push(MediaBuffer::Video(Arc::new(gpu_frame)))
             }
