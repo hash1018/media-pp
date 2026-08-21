@@ -210,7 +210,7 @@ impl D3d11Renderer {
         let width = frame.width();
         let height = frame.height();
 
-        // Safety: `texture_raw` is a borrowed raw `ID3D11Texture2D*` —
+        // SAFETY: `texture_raw` is a borrowed raw `ID3D11Texture2D*` —
         // still owned by `frame`'s own buffer reference, not by us.
         // `.clone()` (`AddRef`) gives us an independently ref-counted
         // handle, valid for as long as we hold it.
@@ -224,12 +224,16 @@ impl D3d11Renderer {
         // device check: the producer and `self.inner` are independent
         // constructions that only *should* share a device by convention —
         // verify it.
+        // SAFETY: `texture` is a live cloned COM interface; `GetDevice`
+        // returns an owned reference to the device that created it.
         let texture_device = unsafe { texture.GetDevice() }.map_err(D3d11RendererError::from)?;
         if texture_device.as_raw() != self.device.as_raw() {
             return Err(D3d11RendererError::DeviceMismatch.into());
         }
 
         let mut desc = Default::default();
+        // SAFETY: `desc` is a live, correctly typed out-parameter for the
+        // live texture.
         unsafe { texture.GetDesc(&mut desc) };
         if index < 0 || index as u64 >= u64::from(desc.ArraySize) {
             let error = D3d11RendererError::InvalidArrayIndex {
@@ -246,11 +250,15 @@ impl D3d11Renderer {
         // makes that unnecessary, unlike `D3d12Renderer`. `frame` itself
         // just drops normally at the end of this function.
         match desc.Format {
+            // SAFETY: device, format, dimensions, and array index were all
+            // validated above; the cloned texture remains live for the call.
             DXGI_FORMAT_B8G8R8A8_UNORM => unsafe {
                 self.inner
                     .submit_bgra_texture(texture, array_index, width, height)
                     .map_err(D3d11RendererError::Submit)?;
             },
+            // SAFETY: the same validation applies to the NV12-specific submit
+            // contract selected by this format arm.
             DXGI_FORMAT_NV12 => unsafe {
                 self.inner
                     .submit_nv12_texture(texture, array_index, width, height)

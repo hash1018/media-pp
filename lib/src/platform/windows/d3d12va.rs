@@ -43,6 +43,9 @@ struct AVD3D12VAFrame {
 /// Creates an FFmpeg D3D12VA hardware device context with an independently
 /// owned COM reference to `device`.
 pub(crate) unsafe fn create_hw_device_ctx(device: &ID3D12Device) -> Result<AvBufferRef, i32> {
+    // SAFETY: the caller supplies a live D3D12 device. The FFmpeg allocation
+    // is wrapped before later failure, and the cloned COM reference is the one
+    // transferred into the hardware-device context.
     unsafe {
         let buf = AvBufferRef::from_raw(ffi::av_hwdevice_ctx_alloc(
             ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_D3D12VA,
@@ -70,6 +73,9 @@ pub(crate) unsafe fn create_hw_frames_ctx(
     height: u32,
     initial_pool_size: i32,
 ) -> Result<AvBufferRef, i32> {
+    // SAFETY: `hw_device_ctx` owns a live initialized D3D12VA device context;
+    // the allocated frames context is wrapped before mutation, and the fields
+    // set here are precisely those consumed by `av_hwframe_ctx_init`.
     unsafe {
         let buf =
             AvBufferRef::from_raw(ffi::av_hwframe_ctx_alloc(hw_device_ctx.as_ptr())).ok_or(-1)?;
@@ -95,6 +101,8 @@ pub(crate) fn d3d12va_texture(
     if frame.format() != ffmpeg::format::Pixel::D3D12 {
         return None;
     }
+    // SAFETY: a live D3D12 frame stores a pointer to its
+    // `AVD3D12VAFrame` payload in initialized `data[0]`; null is rejected.
     unsafe {
         let data = (*frame.as_ptr()).data[0];
         if data.is_null() {
@@ -115,6 +123,8 @@ pub(crate) fn set_d3d12va_fence_value(frame: &mut ffmpeg::frame::Video, fence_va
     if frame.format() != ffmpeg::format::Pixel::D3D12 {
         return false;
     }
+    // SAFETY: as in `d3d12va_frame`, with exclusive access to the frame and
+    // therefore to the payload whose fence value is updated.
     unsafe {
         let data = (*frame.as_mut_ptr()).data[0];
         if data.is_null() {
@@ -132,6 +142,8 @@ mod tests {
     #[test]
     fn rejects_a_d3d12_tagged_frame_without_its_abi_payload() {
         let mut frame = ffmpeg::frame::Video::empty();
+        // SAFETY: the test exclusively owns this live frame and writes only
+        // its pixel-format discriminator.
         unsafe {
             (*frame.as_mut_ptr()).format = ffi::AVPixelFormat::AV_PIX_FMT_D3D12 as i32;
         }

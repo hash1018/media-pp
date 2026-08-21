@@ -187,6 +187,10 @@ impl WasapiCaptureSource {
         let pp_log = element_pp_log(ElementType::WasapiCaptureSource, &name, None);
         let _apartment = ComApartment::new()?;
 
+        // SAFETY: COM is initialized on this thread. Every activated interface
+        // is live, `mix_format` is the non-null allocation returned by WASAPI
+        // and remains valid through format parsing/initialization, then is
+        // freed exactly once after `Initialize` has finished reading it.
         unsafe {
             let device = open_device(&options.device.id)?;
             let audio_client: IAudioClient = device.Activate(CLSCTX_ALL, None)?;
@@ -278,6 +282,9 @@ impl WasapiCaptureSource {
         if data.is_null() || flags & (AUDCLNT_BUFFERFLAGS_SILENT.0 as u32) != 0 {
             frame.data_mut(0)[..tight_bytes].fill(0);
         } else {
+            // SAFETY: a successful `GetBuffer` makes `data` readable for
+            // `frames * channels * sample_bytes` until `ReleaseBuffer`; the
+            // destination slice was allocated for at least that tight size.
             unsafe {
                 ptr::copy_nonoverlapping(data, frame.data_mut(0).as_mut_ptr(), tight_bytes);
             }
@@ -378,10 +385,14 @@ impl WasapiCaptureSource {
             // cascades in the frozen interval: this source produces no
             // media during any of them.
             let pause_start = Instant::now();
+            // SAFETY: `audio_client` is initialized and currently started;
+            // this thread serializes its lifecycle calls.
             unsafe { self.audio_client.Stop() }.map_err(|error| self.classify_error(error))?;
             // Stop freezes the stream but does not discard packets that
             // were already pending. Reset flushes those packets so Resume
             // cannot dump stale pre-pause audio in a short burst.
+            // SAFETY: the client was successfully stopped immediately above,
+            // which is the required state for `Reset`.
             unsafe { self.audio_client.Reset() }.map_err(|error| self.classify_error(error))?;
             control::apply_one(self, bus, msg, &ack)?;
 
@@ -409,6 +420,8 @@ impl WasapiCaptureSource {
                     // the synchronous caller cannot observe a half-resumed
                     // source and no audio accumulates during a slow cascade.
                     control::apply_one_unacked(self, bus, paused_msg)?;
+                    // SAFETY: this initialized client is stopped/reset and the
+                    // source thread exclusively sequences its lifecycle.
                     unsafe { self.audio_client.Start() }
                         .map_err(|error| self.classify_error(error))?;
                     let _ = paused_ack.send(());
@@ -454,6 +467,8 @@ impl WasapiCaptureSource {
             thread::sleep(POLL_INTERVAL);
 
             loop {
+                // SAFETY: `capture_client` is live while its parent audio
+                // client is started; no packet is currently held here.
                 let packet_size = match unsafe { self.capture_client.GetNextPacketSize() } {
                     Ok(size) => size,
                     Err(error) => return Err(self.classify_error(error).into()),
@@ -465,6 +480,9 @@ impl WasapiCaptureSource {
                 let mut data: *mut u8 = ptr::null_mut();
                 let mut frames_available = 0u32;
                 let mut flags = 0u32;
+                // SAFETY: all three outputs are live locals, optional position
+                // outputs are intentionally omitted, and no earlier packet is
+                // outstanding on this serialized capture client.
                 if let Err(error) = unsafe {
                     self.capture_client.GetBuffer(
                         &mut data,
@@ -478,6 +496,9 @@ impl WasapiCaptureSource {
                 }
 
                 let frame = self.build_frame(data, frames_available, flags);
+                // SAFETY: balances the successful `GetBuffer` above with the
+                // exact frame count it returned; `build_frame` copied all data
+                // before the buffer becomes invalid.
                 if let Err(error) = unsafe { self.capture_client.ReleaseBuffer(frames_available) } {
                     return Err(self.classify_error(error).into());
                 }
@@ -520,12 +541,16 @@ impl SourceElement for WasapiCaptureSource {
 
         let _apartment = ComApartment::new().map_err(WasapiCaptureSourceError::from)?;
 
+        // SAFETY: this client was initialized in `open` and the source thread
+        // exclusively owns its start/stop lifecycle.
         if let Err(error) = unsafe { self.audio_client.Start() } {
             return Err(self.classify_error(error).into());
         }
 
         let result = self.run_captured(control, bus);
 
+        // SAFETY: balances the successful start for this run; calling Stop on
+        // the live client is also the required cleanup after a loop error.
         if let Err(error) = unsafe { self.audio_client.Stop() } {
             pp_error!(self, "Stop failed: {error}");
         }

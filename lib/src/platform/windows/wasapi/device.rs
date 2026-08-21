@@ -51,6 +51,8 @@ pub(crate) struct ComApartment {
 
 impl ComApartment {
     pub(crate) fn new() -> windows::core::Result<Self> {
+        // SAFETY: initializes COM for the current thread with no reserved
+        // pointer; the successful initialization is balanced in `Drop`.
         let result = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
         if result == RPC_E_CHANGED_MODE {
             // The caller already initialized this thread as STA. COM is
@@ -68,6 +70,8 @@ impl ComApartment {
 impl Drop for ComApartment {
     fn drop(&mut self) {
         if self.uninitialize {
+            // SAFETY: this instance records a successful `CoInitializeEx` on
+            // this same thread, so this call balances it exactly once.
             unsafe { CoUninitialize() };
         }
     }
@@ -77,6 +81,8 @@ pub(crate) fn list_devices(
     kind_filter: Option<WasapiDeviceKind>,
 ) -> windows::core::Result<Vec<WasapiDevice>> {
     let _apartment = ComApartment::new()?;
+    // SAFETY: COM is initialized on this thread and the registered class is
+    // requested as its documented `IMMDeviceEnumerator` interface.
     let enumerator: IMMDeviceEnumerator =
         unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)? };
 
@@ -91,17 +97,32 @@ pub(crate) fn list_devices(
 
     let mut devices = Vec::new();
     for &(dataflow, kind) in kinds {
+        // SAFETY: the enumerator is live and both enums are valid WASAPI
+        // values; the returned interface and allocated ID own their lifetimes.
         let default_id = unsafe { enumerator.GetDefaultAudioEndpoint(dataflow, eConsole) }
             .ok()
+            // SAFETY: `device` is the live endpoint returned above; `GetId`
+            // returns a COM-allocated NUL-terminated string wrapper.
             .and_then(|device| unsafe { device.GetId() }.ok())
+            // SAFETY: the returned `PWSTR` is NUL-terminated and remains valid
+            // for this conversion while its wrapper is alive.
             .and_then(|id| unsafe { id.to_string() }.ok());
 
+        // SAFETY: the enumerator is live and the flags/enums are documented
+        // values; the returned collection owns its COM reference.
         let collection = unsafe { enumerator.EnumAudioEndpoints(dataflow, DEVICE_STATE_ACTIVE)? };
+        // SAFETY: `collection` is live and `GetCount` has no pointer inputs.
         let count = unsafe { collection.GetCount()? };
         for index in 0..count {
+            // SAFETY: `index` is bounded by the count obtained from this same
+            // live collection.
             let device = unsafe { collection.Item(index)? };
+            // SAFETY: `device` is a live endpoint and `GetId` returns its
+            // allocated, NUL-terminated identifier.
             let Some(id) = unsafe { device.GetId() }
                 .ok()
+                // SAFETY: the identifier wrapper remains alive for the string
+                // conversion and guarantees a NUL terminator.
                 .and_then(|id| unsafe { id.to_string() }.ok())
             else {
                 continue;
@@ -120,13 +141,20 @@ pub(crate) fn list_devices(
 }
 
 pub(crate) fn open_device(id: &str) -> windows::core::Result<IMMDevice> {
+    // SAFETY: callers establish a COM apartment; the registered class is
+    // requested as its documented `IMMDeviceEnumerator` interface.
     let enumerator: IMMDeviceEnumerator =
         unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)? };
     let id = HSTRING::from(id);
+    // SAFETY: `id` is a live Windows string for the duration of the call and
+    // `enumerator` is a live COM interface.
     unsafe { enumerator.GetDevice(&id) }
 }
 
 fn device_friendly_name(device: &IMMDevice) -> Option<String> {
+    // SAFETY: `device` and the returned property store are live COM
+    // interfaces. `variant` is initialized by `GetValue` and cleared exactly
+    // once after its borrowed string value is copied.
     unsafe {
         let store: IPropertyStore = device.OpenPropertyStore(STGM_READ).ok()?;
         let mut variant: PROPVARIANT = store.GetValue(&PKEY_Device_FriendlyName).ok()?;
@@ -137,6 +165,9 @@ fn device_friendly_name(device: &IMMDevice) -> Option<String> {
 }
 
 fn property_variant_to_string(variant: &PROPVARIANT) -> Option<String> {
+    // SAFETY: the caller passes an initialized `PROPVARIANT`; after checking
+    // `VT_LPWSTR`, reading the matching union member yields its NUL-terminated
+    // string pointer, which is borrowed only for this conversion.
     unsafe {
         if variant.Anonymous.Anonymous.vt != VT_LPWSTR {
             return None;

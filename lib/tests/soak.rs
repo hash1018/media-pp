@@ -1293,6 +1293,9 @@ mod d3d12 {
 
     fn try_device() -> Option<ID3D12Device> {
         let mut device = None;
+        // SAFETY: null adapter requests the default hardware adapter and
+        // `device` is the correctly typed live out-parameter for this feature
+        // level.
         let result = unsafe { D3D12CreateDevice(None, D3D_FEATURE_LEVEL_11_0, &mut device) };
         if let Err(error) = result {
             eprintln!("skipping: D3D12CreateDevice failed on this machine: {error}");

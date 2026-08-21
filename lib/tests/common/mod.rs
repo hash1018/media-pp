@@ -35,6 +35,9 @@ pub fn private_bytes() -> u64 {
     };
 
     let mut counters = PROCESS_MEMORY_COUNTERS_EX::default();
+    // SAFETY: the pseudo-handle names this live process, `counters` is a
+    // writable structure whose prefix is `PROCESS_MEMORY_COUNTERS`, and the
+    // byte count names the full extended structure allocation.
     unsafe {
         GetProcessMemoryInfo(
             GetCurrentProcess(),

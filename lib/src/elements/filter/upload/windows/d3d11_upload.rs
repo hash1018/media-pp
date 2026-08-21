@@ -224,6 +224,9 @@ impl D3d11Upload {
             SysMemSlicePitch: 0,
         };
         let mut texture: Option<ID3D11Texture2D> = None;
+        // SAFETY: `initial_data` points into the live source frame for the
+        // dimensions and pitch declared in `desc`; `texture` is a live
+        // out-parameter and D3D copies the initialization before returning.
         unsafe {
             self.device
                 .CreateTexture2D(&desc, Some(&initial_data), Some(&mut texture))?;
@@ -404,6 +407,8 @@ mod tests {
             MiscFlags: 0,
         };
         let mut staging = None;
+        // SAFETY: `desc` describes a valid readback texture, no initial data
+        // is supplied, and `staging` is a live COM out-parameter.
         unsafe {
             device
                 .CreateTexture2D(&desc, None, Some(&mut staging))
@@ -412,6 +417,9 @@ mod tests {
         let staging = staging.expect("CreateTexture2D succeeded without producing a texture");
 
         let mut pixels = Vec::with_capacity((width * height * 4) as usize);
+        // SAFETY: source and staging have identical device/format/dimensions.
+        // Successful `Map` keeps the pointer valid through `Unmap`, and each
+        // copied row is bounded by its reported `RowPitch`.
         unsafe {
             context.CopyResource(&staging, texture);
             let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
@@ -474,12 +482,15 @@ mod tests {
 
         let (texture_raw, _) =
             d3d11va_texture(uploaded).expect("the uploaded frame carries a texture");
+        // SAFETY: the live frame owns `texture_raw`; cloning the borrowed COM
+        // wrapper acquires an independent reference.
         let texture = unsafe {
             ID3D11Texture2D::from_raw_borrowed(&texture_raw)
                 .expect("the texture pointer must not be null")
                 .clone()
         };
         let mut desc = D3D11_TEXTURE2D_DESC::default();
+        // SAFETY: `desc` is a live out-parameter for the live texture.
         unsafe { texture.GetDesc(&mut desc) };
         assert_eq!(
             desc.Format, DXGI_FORMAT_B8G8R8A8_UNORM,
@@ -531,12 +542,15 @@ mod tests {
         };
         let (texture_raw, _) =
             d3d11va_texture(uploaded).expect("the uploaded frame carries a texture");
+        // SAFETY: the live frame owns `texture_raw`; cloning the borrowed COM
+        // wrapper acquires an independent reference.
         let texture = unsafe {
             ID3D11Texture2D::from_raw_borrowed(&texture_raw)
                 .expect("the texture pointer must not be null")
                 .clone()
         };
         let mut desc = D3D11_TEXTURE2D_DESC::default();
+        // SAFETY: `desc` is a live out-parameter for the live texture.
         unsafe { texture.GetDesc(&mut desc) };
         assert_eq!(desc.Format, DXGI_FORMAT_NV12);
     }

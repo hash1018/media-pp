@@ -135,9 +135,13 @@ impl D3d12Upload {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::D3d12Upload, &name, None);
 
+        // SAFETY: `device` is live and the helper transfers a cloned COM
+        // reference into the returned FFmpeg device context.
         let hw_device_ctx =
             unsafe { create_hw_device_ctx(device) }.map_err(D3d12UploadError::HwDeviceInit)?;
 
+        // SAFETY: `hw_device_ctx` is live and initialized; dimensions were
+        // validated above and `POOL_SIZE` is a positive fixed allocation size.
         let hw_frames_ctx =
             unsafe { create_hw_frames_ctx(&hw_device_ctx, width, height, POOL_SIZE) }
                 .map_err(D3d12UploadError::HwFramesInit)?;
@@ -202,6 +206,9 @@ impl Sink for D3d12Upload {
                 }
 
                 let mut gpu_frame = self.pool.get();
+                // SAFETY: the pooled destination is exclusively owned and
+                // unreffed before reuse. Its frames context remains live, and
+                // the validated CPU source is readable for the transfer.
                 unsafe {
                     // `av_hwframe_get_buffer` requires an "empty (freshly
                     // allocated or unreffed)" frame — a reused pool item
@@ -224,6 +231,8 @@ impl Sink for D3d12Upload {
                         return Err(D3d12UploadError::TransferData(ret).into());
                     }
                 }
+                // SAFETY: both frames remain live, the destination is uniquely
+                // owned, and `av_frame_copy_props` copies metadata only.
                 unsafe {
                     // The transfer copies pixels only. Keep the source
                     // timeline and color description on the GPU frame so a

@@ -264,6 +264,9 @@ fn upload_bgra(
         SysMemSlicePitch: 0,
     };
     let mut texture: Option<ID3D11Texture2D> = None;
+    // SAFETY: `initial_data` points at the live `pixels` allocation with the
+    // exact pitch and extent declared by `desc`; `texture` is a live
+    // out-parameter and D3D copies the data before returning.
     unsafe {
         device.CreateTexture2D(&desc, Some(&initial_data), Some(&mut texture))?;
     }

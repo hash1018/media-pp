@@ -100,6 +100,8 @@ impl D3d11Decoder {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::D3d11Decoder, &name, None);
 
+        // SAFETY: `device` is a live D3D11 device; the returned FFmpeg
+        // context takes its own COM reference as documented by the helper.
         let hw_device_ctx =
             unsafe { create_hw_device_ctx(device) }.map_err(D3d11DecoderError::HwDeviceInit)?;
 
@@ -110,6 +112,9 @@ impl D3d11Decoder {
         let codec_device_ctx = hw_device_ctx
             .try_clone()
             .ok_or(D3d11DecoderError::HwDeviceRef)?;
+        // SAFETY: `context` is exclusively owned and not opened yet. The raw
+        // FFmpeg buffer reference is transferred into `hw_device_ctx`, and the
+        // callback and frame count are set before the decoder can read them.
         unsafe {
             let ctx_ptr = context.as_mut_ptr();
             (*ctx_ptr).hw_device_ctx = codec_device_ctx.into_raw();
@@ -224,6 +229,9 @@ impl Drop for D3d11Decoder {
 /// sample them. The shared ABI write is confined to
 /// [`crate::platform::windows::d3d11va::or_frames_bind_flags`].
 unsafe fn configure_hw_frames_ctx(ctx: *mut ffi::AVCodecContext) -> Result<(), i32> {
+    // SAFETY: the callback receives a live codec context during format
+    // negotiation. FFmpeg initializes the returned reference; it is wrapped
+    // immediately so every error path releases it before returning.
     unsafe {
         let mut frames_ref: *mut ffi::AVBufferRef = std::ptr::null_mut();
         let result = ffi::avcodec_get_hw_frames_parameters(
@@ -258,6 +266,8 @@ unsafe extern "C" fn get_format(
     ctx: *mut ffi::AVCodecContext,
     mut fmt: *const ffi::AVPixelFormat,
 ) -> ffi::AVPixelFormat {
+    // SAFETY: FFmpeg supplies a live `AV_PIX_FMT_NONE`-terminated format list
+    // and a live codec context for the duration of this callback.
     unsafe {
         while *fmt != ffi::AVPixelFormat::AV_PIX_FMT_NONE {
             if *fmt == ffi::AVPixelFormat::AV_PIX_FMT_D3D11 {

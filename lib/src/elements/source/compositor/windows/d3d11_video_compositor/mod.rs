@@ -569,6 +569,8 @@ impl D3d11VideoCompositor {
             options.frame_rate.denominator() as f64 / options.frame_rate.numerator() as f64,
         );
 
+        // SAFETY: `device` is live; the helper reads only static shader bytes
+        // and fully initialized descriptors and returns owned COM interfaces.
         let (
             vertex_shader,
             bgra_pixel_shader,
@@ -681,6 +683,9 @@ impl D3d11VideoCompositor {
         let (canvas_width, canvas_height) = (self.options.width, self.options.height);
         let mut output_frame = self.output_pool.get();
         if d3d11va_texture(&output_frame).is_none() {
+            // SAFETY: the compositor's device is live and the nonzero canvas
+            // dimensions were validated at construction; the helper returns
+            // owned texture and view interfaces.
             let target =
                 unsafe { create_output_target(&self.device, canvas_width, canvas_height)? };
             let key = target.texture.as_raw() as usize;
@@ -690,6 +695,8 @@ impl D3d11VideoCompositor {
         }
         let (output_raw, _) = d3d11va_texture(&output_frame)
             .expect("output pool frames are initialized immediately after checkout");
+        // SAFETY: `output_raw` is borrowed from the still-live pooled frame;
+        // cloning the wrapper acquires an independent COM reference.
         let output_texture = unsafe {
             ID3D11Texture2D::from_raw_borrowed(&output_raw)
                 .expect("pooled output texture pointer must not be null")
@@ -705,6 +712,10 @@ impl D3d11VideoCompositor {
             .context
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // SAFETY: target view, pipeline state, and every snapshot resource are
+        // live on this context's device. The mutex serializes the immediate
+        // context; each layer validates its own texture before drawing, and
+        // all bindings are cleared before resources can be released.
         unsafe {
             let background = &self.options.background;
             context.ClearRenderTargetView(
@@ -776,7 +787,7 @@ impl D3d11VideoCompositor {
     ) -> std::result::Result<(), D3d11VideoCompositorError> {
         let (texture_raw, index) =
             d3d11va_texture(frame).ok_or(D3d11VideoCompositorError::InvalidD3d11Frame)?;
-        // Safety: `texture_raw` is a borrowed raw `ID3D11Texture2D*` — see
+        // SAFETY: `texture_raw` is a borrowed raw `ID3D11Texture2D*` — see
         // `d3d11va_texture`'s own docs; `.clone()` (`AddRef`) gives an
         // independently ref-counted handle valid for this draw call.
         let texture = unsafe {
@@ -785,6 +796,8 @@ impl D3d11VideoCompositor {
                 .clone()
         };
 
+        // SAFETY: `texture` is a live cloned COM interface; `GetDevice`
+        // returns an owned reference to its creating device.
         let texture_device =
             unsafe { texture.GetDevice() }.map_err(D3d11VideoCompositorError::from)?;
         if texture_device.as_raw() != self.device.as_raw() {
@@ -792,6 +805,7 @@ impl D3d11VideoCompositor {
         }
 
         let mut desc = D3D11_TEXTURE2D_DESC::default();
+        // SAFETY: `desc` is a live out-parameter for the live texture.
         unsafe { texture.GetDesc(&mut desc) };
         if index < 0 || index as u64 >= u64::from(desc.ArraySize) {
             return Err(D3d11VideoCompositorError::InvalidArrayIndex {
@@ -815,6 +829,8 @@ impl D3d11VideoCompositor {
             DXGI_FORMAT_NV12 => LayerConstants::nv12(frame, layer.opacity, uv_scale),
             other => return Err(D3d11VideoCompositorError::UnsupportedTextureFormat(other)),
         };
+        // SAFETY: `constants` is readable for the declared constant-buffer
+        // size, and the live context owns the destination buffer.
         unsafe {
             context.UpdateSubresource(
                 &self.layer_buffer,
@@ -832,6 +848,9 @@ impl D3d11VideoCompositor {
             DXGI_FORMAT_B8G8R8A8_UNORM => {
                 let srv_desc = plane_srv_desc(DXGI_FORMAT_B8G8R8A8_UNORM, array_index);
                 let mut srv = None;
+                // SAFETY: validation established the BGRA format and bounded
+                // array slice; `srv` is a live out-parameter, and the resulting
+                // view and shader remain live through the synchronous draw.
                 unsafe {
                     self.device
                         .CreateShaderResourceView(&texture, Some(&srv_desc), Some(&mut srv))
@@ -846,6 +865,9 @@ impl D3d11VideoCompositor {
                 let chroma_desc = plane_srv_desc(DXGI_FORMAT_R8G8_UNORM, array_index);
                 let mut luma_srv = None;
                 let mut chroma_srv = None;
+                // SAFETY: validation established an NV12 texture and bounded
+                // slice; both plane descriptors and out-parameters match that
+                // texture, and the views remain live through the draw.
                 unsafe {
                     self.device
                         .CreateShaderResourceView(&texture, Some(&luma_desc), Some(&mut luma_srv))
@@ -1071,6 +1093,9 @@ unsafe fn build_pipeline_state(
     ID3D11RasterizerState,
     ID3D11Buffer,
 )> {
+    // SAFETY: the device is live; compiled blobs retain their bytecode while
+    // shader creation reads it, all state descriptors are initialized, and
+    // every interface slot is a live out-parameter. No Rust pointer is kept.
     unsafe {
         let vertex_bytecode = compile_shader(
             BGRA_SHADER_SOURCE,
@@ -1205,6 +1230,9 @@ unsafe fn create_output_target(
     width: u32,
     height: u32,
 ) -> windows::core::Result<OutputTarget> {
+    // SAFETY: `device` is live, dimensions were validated by the compositor,
+    // texture/view descriptors are fully initialized, and both optional
+    // interface slots are live out-parameters.
     unsafe {
         let desc = D3D11_TEXTURE2D_DESC {
             Width: width,
@@ -1298,6 +1326,8 @@ mod tests {
         pixels: &[u8],
     ) -> ID3D11Texture2D {
         assert_eq!(pixels.len(), (width * height * 4) as usize);
+        // SAFETY: `pixels` is live and exactly matches the BGRA description's
+        // dimensions and pitch; the output interface slot is live.
         unsafe {
             let desc = D3D11_TEXTURE2D_DESC {
                 Width: width,
@@ -1341,6 +1371,8 @@ mod tests {
         for pair in pixels[luma_size..].as_chunks_mut::<2>().0 {
             *pair = [cb, cr];
         }
+        // SAFETY: the contiguous NV12 buffer is live and sized for the padded
+        // row pitch and both planes described below; the output slot is live.
         unsafe {
             let desc = D3D11_TEXTURE2D_DESC {
                 Width: width,

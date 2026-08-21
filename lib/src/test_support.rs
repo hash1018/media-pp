@@ -53,6 +53,9 @@ pub(crate) fn try_d3d11_device() -> Option<(
 
     let mut device = None;
     let mut context = None;
+    // SAFETY: null adapter/software pointers select the hardware driver path,
+    // feature levels use D3D defaults, and `device`/`context` are live,
+    // correctly typed out-parameters.
     let result = unsafe {
         D3D11CreateDevice(
             None,
@@ -87,6 +90,9 @@ pub(crate) fn try_d3d12_device() -> Option<windows::Win32::Graphics::Direct3D12:
     };
 
     let mut device = None;
+    // SAFETY: a null adapter requests the default hardware adapter and
+    // `device` is the correctly typed live out-parameter for the requested
+    // minimum feature level.
     if let Err(error) = unsafe { D3D12CreateDevice(None, D3D_FEATURE_LEVEL_11_0, &mut device) } {
         eprintln!("skipping: D3D12CreateDevice failed on this machine: {error}");
         return None;

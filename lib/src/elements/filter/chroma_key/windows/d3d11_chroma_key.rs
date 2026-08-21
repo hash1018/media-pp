@@ -256,12 +256,17 @@ impl D3d11ChromaKey {
             let context = context
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
+            // SAFETY: `context` is a live immediate-context interface;
+            // `GetDevice` returns an owned reference to its creating device.
             let context_device = unsafe { context.GetDevice() }?;
             if context_device.as_raw() != device.as_raw() {
                 return Err(D3d11ChromaKeyError::ContextDeviceMismatch);
             }
         }
 
+        // SAFETY: `device` is live; the helper creates state only from static
+        // shader bytes and fully initialized descriptors, returning owned COM
+        // references without retaining borrowed pointers.
         let (vertex_shader, pixel_shader, sampler, blend_state, rasterizer_state, constant_buffer) =
             unsafe { build_pipeline_state(device) }?;
 
@@ -314,7 +319,7 @@ impl D3d11ChromaKey {
         if texture_raw.is_null() {
             return Err(D3d11ChromaKeyError::InvalidD3d11Frame);
         }
-        // Safety: `texture_raw` is a borrowed raw `ID3D11Texture2D*` — still
+        // SAFETY: `texture_raw` is a borrowed raw `ID3D11Texture2D*` — still
         // owned by `frame`'s own buffer reference, not by us. `.clone()`
         // (`AddRef`) gives an independently ref-counted handle, valid for as
         // long as the caller keeps it.
@@ -324,12 +329,15 @@ impl D3d11ChromaKey {
                 .clone()
         };
 
+        // SAFETY: `texture` is a live cloned COM interface; `GetDevice`
+        // returns an owned reference to its creating device.
         let texture_device = unsafe { texture.GetDevice() }?;
         if texture_device.as_raw() != self.device.as_raw() {
             return Err(D3d11ChromaKeyError::DeviceMismatch);
         }
 
         let mut desc = D3D11_TEXTURE2D_DESC::default();
+        // SAFETY: `desc` is a live out-parameter for the live texture.
         unsafe { texture.GetDesc(&mut desc) };
         if desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM {
             return Err(D3d11ChromaKeyError::UnsupportedTextureFormat(desc.Format));
@@ -386,6 +394,8 @@ impl D3d11ChromaKey {
             .inspect_err(|error| pp_error!(self, "failed to allocate the output texture: {error}"))
             .map_err(D3d11ChromaKeyError::from)?;
         let mut output_view = None;
+        // SAFETY: `output` is a live render-target-capable texture and
+        // `output_view` is the correctly typed live out-parameter.
         unsafe {
             self.device
                 .CreateRenderTargetView(&output, None, Some(&mut output_view))
@@ -407,6 +417,9 @@ impl D3d11ChromaKey {
             },
         };
         let mut srv = None;
+        // SAFETY: input validation established the texture format and bounded
+        // array slice; `srv_desc` selects exactly that slice and `srv` is a
+        // live out-parameter.
         unsafe {
             self.device
                 .CreateShaderResourceView(&input.texture, Some(&srv_desc), Some(&mut srv))
@@ -434,6 +447,10 @@ impl D3d11ChromaKey {
                 .context
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
+            // SAFETY: all state objects and views are live and belong to the
+            // context's device; the constants pointer is readable for the
+            // buffer's declared size. Bindings are cleared before references
+            // drop, and the immediate context is serialized by its mutex.
             unsafe {
                 context.UpdateSubresource(
                     &self.constant_buffer,
@@ -560,6 +577,10 @@ unsafe fn build_pipeline_state(
     ID3D11RasterizerState,
     ID3D11Buffer,
 )> {
+    // SAFETY: the device is live; compiler blobs retain their bytecode while
+    // shader creation reads it, every descriptor is fully initialized, and
+    // each optional interface slot is a live out-parameter. No call retains a
+    // borrowed Rust pointer after returning.
     unsafe {
         let vertex_bytecode = compile_shader(
             SHADER_SOURCE,
@@ -688,6 +709,8 @@ fn create_output_texture(
         MiscFlags: 0,
     };
     let mut texture = None;
+    // SAFETY: `desc` fully describes a render-target texture, no initial data
+    // is supplied, and `texture` is a live out-parameter.
     unsafe {
         device.CreateTexture2D(&desc, None, Some(&mut texture))?;
     }
@@ -799,6 +822,8 @@ mod tests {
             MiscFlags: 0,
         };
         let mut texture = None;
+        // SAFETY: `initial` has one entry per declared array slice and every
+        // pointer addresses a live, correctly pitched plane through the call.
         unsafe {
             device
                 .CreateTexture2D(&desc, Some(initial.as_ptr()), Some(&mut texture))
@@ -1097,6 +1122,8 @@ mod tests {
             MiscFlags: 0,
         };
         let mut texture = None;
+        // SAFETY: `desc` is fully initialized, no initial pixels are supplied,
+        // and `texture` is a live out-parameter.
         unsafe {
             device
                 .CreateTexture2D(&desc, None, Some(&mut texture))
@@ -1144,6 +1171,8 @@ mod tests {
             MiscFlags: 0,
         };
         let mut texture = None;
+        // SAFETY: `desc` is fully initialized for a render target, no initial
+        // pixels are supplied, and `texture` is a live out-parameter.
         unsafe {
             device
                 .CreateTexture2D(&desc, None, Some(&mut texture))
@@ -1270,6 +1299,9 @@ mod tests {
     )> {
         let mut device = None;
         let mut context = None;
+        // SAFETY: adapter/software pointers are intentionally null for the
+        // hardware driver path, feature-level defaults are requested, and
+        // `device`/`context` are live correctly typed out-parameters.
         let result = unsafe {
             D3D11CreateDevice(
                 None,
@@ -1293,6 +1325,8 @@ mod tests {
         let info = device.cast::<ID3D11InfoQueue>().ok()?;
         // The report is one message per live object and can exceed the
         // queue's default limit on its own.
+        // SAFETY: `info` is the live debug info queue for this device and the
+        // count is an unrestricted scalar limit.
         unsafe { info.SetMessageCountLimit(u64::MAX) }.ok()?;
         Some((device, Arc::new(Mutex::new(context)), debug, info))
     }
@@ -1301,6 +1335,8 @@ mod tests {
     /// identical work means anything — the device, its context, and this
     /// element's own construction-time state are always counted.
     fn live_objects(debug: &ID3D11Debug, info: &ID3D11InfoQueue) -> u64 {
+        // SAFETY: both interfaces belong to the same live debug device; the
+        // report synchronously appends messages before their count is read.
         unsafe {
             info.ClearStoredMessages();
             debug

@@ -46,6 +46,9 @@ struct AVD3D11VAFramesContext {
 /// Creates an FFmpeg D3D11VA hardware device context with an independently
 /// owned COM reference to `device`.
 pub(crate) unsafe fn create_hw_device_ctx(device: &ID3D11Device) -> Result<AvBufferRef, i32> {
+    // SAFETY: the caller supplies a live D3D11 device. The allocated FFmpeg
+    // buffer is wrapped before any failure can occur; `IUnknown::clone` adds
+    // the reference transferred into FFmpeg's D3D11VA device context.
     unsafe {
         let buf = AvBufferRef::from_raw(ffi::av_hwdevice_ctx_alloc(
             ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_D3D11VA,
@@ -67,6 +70,8 @@ pub(crate) unsafe fn create_hw_device_ctx(device: &ID3D11Device) -> Result<AvBuf
 }
 
 unsafe extern "C" fn release_d3d11_texture(_opaque: *mut c_void, data: *mut u8) {
+    // SAFETY: `wrap_d3d11_texture` stores exactly one `ID3D11Texture2D`
+    // reference as `data` and installs this callback to reclaim it once.
     unsafe {
         drop(ID3D11Texture2D::from_raw(data as *mut c_void));
     }
@@ -86,6 +91,9 @@ pub(crate) fn wrap_d3d11_texture(
 ) -> ffmpeg::frame::Video {
     let mut frame = ffmpeg::frame::Video::empty();
     let raw = texture.into_raw();
+    // SAFETY: `frame` owns a live, writable `AVFrame`; `raw` is the COM
+    // reference transferred into the matching `av_buffer_create` callback,
+    // and the array-slice encoding is stored as an integer and never dereferenced.
     unsafe {
         let ptr = frame.as_mut_ptr();
         (*ptr).format = ffi::AVPixelFormat::AV_PIX_FMT_D3D11 as i32;
@@ -113,6 +121,8 @@ pub(crate) fn wrap_d3d11_texture(
 /// ORs resource bind flags into an existing FFmpeg-allocated D3D11VA frames
 /// context before `av_hwframe_ctx_init`.
 pub(crate) unsafe fn or_frames_bind_flags(frames_ctx: *mut ffi::AVHWFramesContext, flags: u32) {
+    // SAFETY: the caller guarantees a live, not-yet-initialized D3D11VA frames
+    // context, whose `hwctx` is FFmpeg's initialized `AVD3D11VAFramesContext`.
     unsafe {
         let d3d11_frames = (*frames_ctx).hwctx as *mut AVD3D11VAFramesContext;
         (*d3d11_frames).bind_flags |= flags;
@@ -125,6 +135,8 @@ pub(crate) fn d3d11va_texture(frame: &ffmpeg::frame::Video) -> Option<(*mut c_vo
     if frame.format() != ffmpeg::format::Pixel::D3D11 {
         return None;
     }
+    // SAFETY: `frame` is live and its fixed-size `data` array is initialized;
+    // D3D11 frames encode the borrowed texture and slice in entries 0 and 1.
     unsafe {
         let ptr = frame.as_ptr();
         let texture = (*ptr).data[0] as *mut c_void;
@@ -142,6 +154,8 @@ mod tests {
     #[test]
     fn rejects_a_d3d11_tagged_frame_without_a_texture() {
         let mut frame = ffmpeg::frame::Video::empty();
+        // SAFETY: the test exclusively owns this live frame and writes only
+        // its pixel-format discriminator.
         unsafe {
             (*frame.as_mut_ptr()).format = ffi::AVPixelFormat::AV_PIX_FMT_D3D11 as i32;
         }

@@ -91,6 +91,8 @@ impl D3d12Decoder {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::D3d12Decoder, &name, None);
 
+        // SAFETY: `device` is live and the helper clones its COM reference
+        // into the returned FFmpeg hardware-device context.
         let hw_device_ctx =
             unsafe { create_hw_device_ctx(device) }.map_err(D3d12DecoderError::HwDeviceInit)?;
 
@@ -101,6 +103,9 @@ impl D3d12Decoder {
         let codec_device_ctx = hw_device_ctx
             .try_clone()
             .ok_or(D3d12DecoderError::HwDeviceRef)?;
+        // SAFETY: `context` is exclusively owned and unopened. Ownership of
+        // `codec_device_ctx` is transferred to FFmpeg and the callback is set
+        // before decoder construction can inspect either field.
         unsafe {
             let ctx_ptr = context.as_mut_ptr();
             (*ctx_ptr).hw_device_ctx = codec_device_ctx.into_raw();
@@ -216,6 +221,8 @@ unsafe extern "C" fn get_format(
     _ctx: *mut ffi::AVCodecContext,
     mut fmt: *const ffi::AVPixelFormat,
 ) -> ffi::AVPixelFormat {
+    // SAFETY: FFmpeg supplies a readable `AV_PIX_FMT_NONE`-terminated array
+    // for the duration of this callback.
     unsafe {
         while *fmt != ffi::AVPixelFormat::AV_PIX_FMT_NONE {
             if *fmt == ffi::AVPixelFormat::AV_PIX_FMT_D3D12 {

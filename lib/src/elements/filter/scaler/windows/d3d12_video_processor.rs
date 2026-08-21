@@ -79,6 +79,9 @@ pub(super) struct D3d12VideoProcessor {
     output_height: u32,
 }
 
+// SAFETY: the D3D12 COM interfaces are free-threaded. Mutable command-list,
+// slot, and fence bookkeeping is reachable only through `&mut self`, and the
+// event handle is used only for signalling/waiting rather than Rust memory.
 unsafe impl Send for D3d12VideoProcessor {}
 
 impl D3d12VideoProcessor {
@@ -92,16 +95,27 @@ impl D3d12VideoProcessor {
             Type: D3D12_COMMAND_LIST_TYPE_VIDEO_PROCESS,
             ..Default::default()
         };
+        // SAFETY: the descriptor is fully initialized for video-process work
+        // and `device` is live.
         let queue = unsafe { device.CreateCommandQueue(&queue_desc) }?;
+        // SAFETY: `device` is live and the initial fence value and flags are
+        // valid D3D12 values.
         let fence = unsafe { device.CreateFence(0, D3D12_FENCE_FLAG_NONE) }?;
+        // SAFETY: default security, auto-reset, initially nonsignalled, and no
+        // name are valid; the returned owned handle is closed on every path.
         let fence_event = unsafe { CreateEventW(None, false, false, None) }?;
 
         let slots_result = (|| -> std::result::Result<Vec<_>, windows::core::Error> {
             let mut slots = Vec::with_capacity(COMMAND_SLOT_COUNT);
             for _ in 0..COMMAND_SLOT_COUNT {
+                // SAFETY: the live device creates an allocator whose type
+                // matches the queue and command lists used by this processor.
                 let allocator = unsafe {
                     device.CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_VIDEO_PROCESS)
                 }?;
+                // SAFETY: the allocator is live, belongs to `device`, and has
+                // the requested list type; video process lists need no initial
+                // pipeline-state object.
                 let list: ID3D12VideoProcessCommandList = unsafe {
                     device.CreateCommandList(
                         0,
@@ -110,6 +124,8 @@ impl D3d12VideoProcessor {
                         None,
                     )
                 }?;
+                // SAFETY: a newly created command list is open; closing it
+                // establishes the reset-before-recording lifecycle below.
                 unsafe { list.Close()? };
                 slots.push(CommandSlot {
                     allocator,
@@ -123,6 +139,8 @@ impl D3d12VideoProcessor {
         let slots = match slots_result {
             Ok(slots) => slots,
             Err(error) => {
+                // SAFETY: this is the live handle created above, not yet
+                // transferred into `Self`, and it is closed exactly once.
                 unsafe { CloseHandle(fence_event).ok() };
                 return Err(error.into());
             }
@@ -158,12 +176,17 @@ impl D3d12VideoProcessor {
             output_fence_value,
         } = frame;
         self.ensure_processor(shape)?;
+        // SAFETY: queue and producer fence are live objects and the value is
+        // the completion value carried with this input texture.
         unsafe { self.queue.Wait(&input_fence, input_fence_value)? };
         self.prepare_slot()?;
 
         let slot_index = self.next_slot;
         let processor = &self.processor.as_ref().unwrap().1;
         let slot = &mut self.slots[slot_index];
+        // SAFETY: `prepare_slot` waited for this slot's previous submission,
+        // so neither allocator nor list is in GPU use; their types and device
+        // match each other.
         unsafe {
             slot.allocator.Reset()?;
             slot.list.Reset(&slot.allocator)?;
@@ -181,6 +204,8 @@ impl D3d12VideoProcessor {
                 D3D12_RESOURCE_STATE_VIDEO_PROCESS_WRITE,
             ),
         ];
+        // SAFETY: each barrier owns a live resource and describes its tracked
+        // COMMON-to-video-process transition for this open command list.
         unsafe { slot.list.ResourceBarrier(&before) };
         drop_barrier_resources(&mut before);
 
@@ -194,6 +219,9 @@ impl D3d12VideoProcessor {
         let mut output_args = D3D12_VIDEO_PROCESS_OUTPUT_STREAM_ARGUMENTS::default();
         output_args.OutputStream[0].pTexture2D = ManuallyDrop::new(Some(output_texture.clone()));
         output_args.TargetRectangle = rect(self.output_width, self.output_height);
+        // SAFETY: processor/list and argument resources belong to one device;
+        // the argument arrays retain their textures through `ProcessFrames`.
+        // Both manually held references are then released exactly once.
         unsafe {
             slot.list
                 .ProcessFrames(processor, &output_args, &input_args);
@@ -213,6 +241,8 @@ impl D3d12VideoProcessor {
                 D3D12_RESOURCE_STATE_COMMON,
             ),
         ];
+        // SAFETY: these live resources are in the video-process states set by
+        // `before`; the list is still open and is closed exactly once here.
         unsafe {
             slot.list.ResourceBarrier(&after);
             slot.list.Close()?;
@@ -220,12 +250,16 @@ impl D3d12VideoProcessor {
         drop_barrier_resources(&mut after);
 
         let command_list: ID3D12CommandList = slot.list.cast()?;
+        // SAFETY: the command list is closed, belongs to this queue's device,
+        // and the internal fence value is monotonically unique.
         unsafe {
             self.queue.ExecuteCommandLists(&[Some(command_list)]);
             self.queue.Signal(&self.fence, self.next_fence_value)?;
         }
         slot.fence_value = self.next_fence_value;
         slot.input = Some(source);
+        // SAFETY: `output_fence` is the live fence embedded in `destination`;
+        // the same signalled value is stored back into that frame below.
         if let Err(error) = unsafe { self.queue.Signal(&output_fence, output_fence_value) } {
             self.wait_and_release_slot(slot_index)?;
             return Err(error.into());
@@ -284,6 +318,8 @@ impl D3d12VideoProcessor {
             OutputFrameRate: rate,
             ..Default::default()
         };
+        // SAFETY: `support` is the correctly typed live in/out structure and
+        // the byte count exactly matches the selected feature's structure.
         unsafe {
             self.video_device.CheckFeatureSupport(
                 D3D12_FEATURE_VIDEO_PROCESS_SUPPORT,
@@ -332,6 +368,8 @@ impl D3d12VideoProcessor {
             FrameRate: rate,
             ..Default::default()
         };
+        // SAFETY: the stream descriptions are fully initialized from the
+        // feature-supported shape and the video device remains live.
         let processor = unsafe {
             self.video_device
                 .CreateVideoProcessor(0, &output_desc, &[input_desc])?
@@ -361,6 +399,8 @@ impl D3d12VideoProcessor {
 impl Drop for D3d12VideoProcessor {
     fn drop(&mut self) {
         let _ = self.wait_all();
+        // SAFETY: `fence_event` is the owned live handle created in `new` and
+        // is closed exactly once after pending submissions have been waited.
         unsafe { CloseHandle(self.fence_event).ok() };
     }
 }
@@ -404,6 +444,8 @@ fn transition_barrier(
 
 fn drop_barrier_resources(barriers: &mut [D3D12_RESOURCE_BARRIER]) {
     for barrier in barriers {
+        // SAFETY: `transition_barrier` initialized this union arm with one
+        // cloned resource reference; this is its single matching drop site.
         unsafe {
             let transition = &mut barrier.Anonymous.Transition;
             ManuallyDrop::drop(&mut transition.pResource);
@@ -416,9 +458,13 @@ fn wait_for_fence(
     value: u64,
     event: HANDLE,
 ) -> std::result::Result<(), D3d12ScalerError> {
+    // SAFETY: `fence` is live and querying its completed value borrows no
+    // external memory.
     if unsafe { fence.GetCompletedValue() } >= value {
         return Ok(());
     }
+    // SAFETY: `event` is this processor's live auto-reset event and `fence`
+    // remains alive through registration and the wait for `value`.
     unsafe {
         fence.SetEventOnCompletion(value, event)?;
         if WaitForSingleObject(event, INFINITE) != WAIT_OBJECT_0 {

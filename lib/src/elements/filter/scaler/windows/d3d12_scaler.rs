@@ -124,6 +124,9 @@ pub struct D3d12Scaler {
     pool: UnboundObjectPool<ffmpeg::frame::Video>,
 }
 
+// SAFETY: D3D12 COM interfaces and the FFmpeg buffer owners are free-threaded;
+// the video processor documents its own `Send` contract, and all mutable
+// scaler/pool state is accessible only through `&mut self`.
 unsafe impl Send for D3d12Scaler {}
 
 impl D3d12Scaler {
@@ -139,10 +142,14 @@ impl D3d12Scaler {
 
         let processor = D3d12VideoProcessor::new(device, width, height)?;
 
+        // SAFETY: `device` is live and the helper clones its COM reference
+        // into the returned FFmpeg hardware-device context.
         let hw_device_ctx = match unsafe { create_hw_device_ctx(device) } {
             Ok(ctx) => ctx,
             Err(code) => return Err(D3d12ScalerError::HwDeviceInit(code)),
         };
+        // SAFETY: the device context is initialized and kept alive by this
+        // scaler; dimensions were validated and the pool size is positive.
         let hw_frames_ctx = match unsafe {
             create_hw_frames_ctx(&hw_device_ctx, width, height, OUTPUT_POOL_SIZE)
         } {
@@ -171,6 +178,8 @@ impl D3d12Scaler {
         let (shape, texture, input_fence, input_fence_value) = self.validate_input(&source)?;
 
         let mut destination = self.pool.get();
+        // SAFETY: the destination is exclusively owned, unreffed before pool
+        // reuse, and allocated from this scaler's live frames context.
         unsafe {
             ffi::av_frame_unref(destination.as_mut_ptr());
             let ret = ffi::av_hwframe_get_buffer(
@@ -194,11 +203,15 @@ impl D3d12Scaler {
         if output_texture_raw.is_null() || output_fence_raw.is_null() {
             return Err(D3d12ScalerError::InvalidD3d12Frame.into());
         }
+        // SAFETY: the validated destination frame owns this non-null resource
+        // pointer; cloning the borrowed wrapper acquires an independent COM ref.
         let output_texture = unsafe {
             ID3D12Resource::from_raw_borrowed(&output_texture_raw)
                 .unwrap()
                 .clone()
         };
+        // SAFETY: as above for the non-null fence pointer stored in the same
+        // live D3D12VA frame payload.
         let output_fence = unsafe {
             ID3D12Fence::from_raw_borrowed(&output_fence_raw)
                 .unwrap()
@@ -229,6 +242,9 @@ impl D3d12Scaler {
             return Err(D3d12ScalerError::UnsupportedFormat(source.format()));
         }
         validate_dimensions(source.width(), source.height())?;
+        // SAFETY: `source` is live and confirmed D3D12. Its hardware-frame
+        // reference is null-checked before dereference, and only the device
+        // identity is read while the source retains both contexts.
         unsafe {
             let frames_ref = (*source.as_ptr()).hw_frames_ctx;
             if frames_ref.is_null() || (*frames_ref).data.is_null() {
@@ -249,13 +265,19 @@ impl D3d12Scaler {
         if texture_raw.is_null() || fence_raw.is_null() {
             return Err(D3d12ScalerError::InvalidD3d12Frame);
         }
+        // SAFETY: the live validated source owns this non-null resource;
+        // cloning the borrowed wrapper takes an independent COM reference.
         let texture = unsafe {
             ID3D12Resource::from_raw_borrowed(&texture_raw)
                 .unwrap()
                 .clone()
         };
+        // SAFETY: the non-null fence belongs to the same live D3D12VA payload;
+        // cloning the borrowed wrapper takes an independent COM reference.
         let fence = unsafe { ID3D12Fence::from_raw_borrowed(&fence_raw).unwrap().clone() };
         let mut texture_device: Option<ID3D12Device> = None;
+        // SAFETY: `texture` is live and `texture_device` is a correctly typed
+        // out-parameter for its creating device.
         unsafe { texture.GetDevice(&mut texture_device) }
             .map_err(|_| D3d12ScalerError::DeviceMismatch)?;
         if texture_device
@@ -263,6 +285,8 @@ impl D3d12Scaler {
         {
             return Err(D3d12ScalerError::DeviceMismatch);
         }
+        // SAFETY: `texture` is a live resource and `GetDesc` returns its plain
+        // descriptor by value.
         let desc = unsafe { texture.GetDesc() };
         if desc.Format != DXGI_FORMAT_NV12 {
             return Err(D3d12ScalerError::UnsupportedTextureFormat(desc.Format));
@@ -416,10 +440,16 @@ mod tests {
     }
 
     fn try_distinct_device(first: &ID3D12Device) -> Option<ID3D12Device> {
+        // SAFETY: creates the documented DXGI factory interface with no raw
+        // caller-owned storage.
         let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }.ok()?;
         let mut index = 0;
+        // SAFETY: indices are enumerated monotonically until this live factory
+        // reports exhaustion.
         while let Ok(adapter) = unsafe { factory.EnumAdapters1(index) } {
             let mut device: Option<ID3D12Device> = None;
+            // SAFETY: `adapter` is live and `device` is the correctly typed
+            // out-parameter for the requested minimum feature level.
             if unsafe { D3D12CreateDevice(&adapter, D3D_FEATURE_LEVEL_11_0, &mut device) }.is_ok()
                 && let Some(device) = device
                 && device.as_raw() != first.as_raw()
@@ -477,6 +507,8 @@ mod tests {
         source.set_pts(Some(42));
         source.set_color_space(ffmpeg::color::Space::BT709);
         source.set_color_range(ffmpeg::color::Range::MPEG);
+        // SAFETY: the test exclusively owns this live frame and writes only
+        // its plain duration metadata before publishing it.
         unsafe { (*source.as_mut_ptr()).duration = 3 };
 
         let result = upload.consume(MediaBuffer::Video(Arc::new(source)));
@@ -498,6 +530,7 @@ mod tests {
         );
         assert_eq!(frame.format(), ffmpeg::format::Pixel::NV12);
         assert_eq!(frame.pts(), Some(42));
+        // SAFETY: `frame` is live for this read of its plain metadata field.
         assert_eq!(unsafe { (*frame.as_ptr()).duration }, 3);
         assert_eq!(frame.color_space(), ffmpeg::color::Space::BT709);
         assert_eq!(frame.color_range(), ffmpeg::color::Range::MPEG);

@@ -308,6 +308,10 @@ unsafe fn create_hw_frames_ctx(
     hw_device_ctx: &AvBufferRef,
     options: &D3d11NvencEncoderOptions,
 ) -> std::result::Result<AvBufferRef, D3d11NvencEncoderError> {
+    // SAFETY: `hw_device_ctx` owns a live initialized D3D11VA device context;
+    // the allocation is wrapped immediately, only public
+    // `AVHWFramesContext` fields are written before initialization, and the
+    // helper updating bind flags has the same pre-init lifetime.
     unsafe {
         let buf = AvBufferRef::from_raw(ffi::av_hwframe_ctx_alloc(hw_device_ctx.as_ptr()))
             .ok_or(D3d11NvencEncoderError::HwFramesAlloc)?;
@@ -368,6 +372,8 @@ impl D3d11NvencEncoder {
             let context = context
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
+            // SAFETY: `context` is a live immediate context and `GetDevice`
+            // returns an owned reference to its creating device.
             unsafe { context.GetDevice() }?
         };
         if context_device.as_raw() != device.as_raw() {
@@ -378,8 +384,12 @@ impl D3d11NvencEncoder {
         let codec = ffmpeg::encoder::find_by_name(encoder_name)
             .ok_or_else(|| D3d11NvencEncoderError::CodecNotFound(encoder_name.into()))?;
 
+        // SAFETY: `device` is live and the helper transfers a cloned COM
+        // reference into the returned FFmpeg device context.
         let hw_device_ctx = unsafe { create_hw_device_ctx(device) }
             .map_err(D3d11NvencEncoderError::HwDeviceInit)?;
+        // SAFETY: the device context remains live and `options` has already
+        // passed the constructor's dimension/format validation.
         let hw_frames_ctx = unsafe { create_hw_frames_ctx(&hw_device_ctx, &options) }?;
 
         // From here on every early return has to release both contexts, so
@@ -398,6 +408,9 @@ impl D3d11NvencEncoder {
             video.set_frame_rate(Some(options.frame_rate));
             video.set_bit_rate(options.bit_rate);
             video.set_gop(options.gop_size);
+            // SAFETY: `video` exclusively owns an unopened codec context;
+            // ownership of the cloned frames-context reference is transferred
+            // into the field before `open_as` can consume it.
             unsafe {
                 let ptr = video.as_mut_ptr();
                 (*ptr).hw_frames_ctx = hw_frames_ctx
@@ -458,6 +471,8 @@ impl D3d11NvencEncoder {
         source_box: &D3D11_BOX,
     ) -> std::result::Result<ffmpeg::frame::Video, D3d11NvencEncoderError> {
         let mut staged = ffmpeg::frame::Video::empty();
+        // SAFETY: `staged` is a fresh writable frame and this encoder retains
+        // the initialized frames context used to allocate its texture.
         unsafe {
             let code =
                 ffi::av_hwframe_get_buffer(self.hw_frames_ctx.as_ptr(), staged.as_mut_ptr(), 0);
@@ -479,6 +494,10 @@ impl D3d11NvencEncoder {
             .context
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // SAFETY: `destination` is the non-null borrowed texture stored in the
+        // live staged frame; `ManuallyDrop` prevents releasing that borrowed
+        // reference. Slice/subresource bounds are validated before the copy,
+        // and source/destination belong to the locked context's device.
         unsafe {
             // Borrowed, not owned: `ManuallyDrop` keeps this from releasing
             // a COM reference the pool frame still holds.
@@ -545,12 +564,16 @@ impl D3d11NvencEncoder {
 
         let (source, source_slice) =
             d3d11va_texture(frame).ok_or(D3d11NvencEncoderError::MissingTexture)?;
+        // SAFETY: `source` is borrowed from the still-live frame; null is
+        // rejected and cloning the borrowed wrapper acquires an independent ref.
         let source = unsafe {
             ID3D11Texture2D::from_raw_borrowed(&source)
                 .ok_or(D3d11NvencEncoderError::MissingTexture)?
                 .clone()
         };
 
+        // SAFETY: `source` is a live COM texture; `GetDevice` returns an owned
+        // reference to its creating device.
         let texture_device = unsafe { source.GetDevice() }.map_err(D3d11NvencEncoderError::from)?;
         if texture_device.as_raw() != self.device.as_raw() {
             let error = D3d11NvencEncoderError::DeviceMismatch;
@@ -561,6 +584,7 @@ impl D3d11NvencEncoder {
         // The clone above owns one temporary COM reference; the incoming
         // frame keeps its independent ownership throughout the copy.
         let mut description = Default::default();
+        // SAFETY: `description` is a live out-parameter for the live texture.
         unsafe { source.GetDesc(&mut description) };
         if description.Format != self.input_format.dxgi_format() {
             let error = D3d11NvencEncoderError::TextureFormatMismatch {
@@ -724,6 +748,8 @@ mod tests {
             MiscFlags: 0,
         };
         let mut texture = None;
+        // SAFETY: the texture descriptor is fully initialized, no initial
+        // data is supplied, and `texture` is a live out-parameter.
         unsafe { device.CreateTexture2D(&description, None, Some(&mut texture)) }
             .expect("creating a plain D3D11 texture should succeed on a working device");
         crate::platform::windows::d3d11va::wrap_d3d11_texture(
@@ -960,6 +986,8 @@ mod tests {
             |_| {},
         );
         let mut invalid_slice = invalid_slice_pool.get();
+        // SAFETY: this test uniquely owns the unpublished frame; address 1 is
+        // the D3D11VA integer encoding for slice 1 and is never dereferenced.
         unsafe {
             // D3D11 frames encode the integer array slice in this pointer
             // slot; a dangling address of 1 therefore represents slice 1.

@@ -172,6 +172,9 @@ impl D3d11Download {
             .context
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // SAFETY: validation established the source slice bounds and format;
+        // the staging texture matches the visible dimensions. A successful
+        // map keeps `pData` valid and row-pitched through the paired `Unmap`.
         unsafe {
             let source_box = D3D11_BOX {
                 left: 0,
@@ -259,7 +262,7 @@ impl Sink for D3d11Download {
 
                 let (texture_raw, index) =
                     d3d11va_texture(&frame).ok_or(D3d11DownloadError::InvalidD3d11Frame)?;
-                // Safety: `texture_raw` is a borrowed raw `ID3D11Texture2D*`
+                // SAFETY: `texture_raw` is a borrowed raw `ID3D11Texture2D*`
                 // — still owned by `frame`'s own buffer reference, not by
                 // us. `.clone()` (`AddRef`) gives us an independently
                 // ref-counted handle, valid for the rest of this call.
@@ -269,6 +272,8 @@ impl Sink for D3d11Download {
                         .clone()
                 };
 
+                // SAFETY: `texture` is a live cloned COM interface and
+                // `GetDevice` returns an owned reference to its creator.
                 let texture_device =
                     unsafe { texture.GetDevice() }.map_err(D3d11DownloadError::from)?;
                 if texture_device.as_raw() != self.device.as_raw() {
@@ -277,6 +282,7 @@ impl Sink for D3d11Download {
                 }
 
                 let mut desc = D3D11_TEXTURE2D_DESC::default();
+                // SAFETY: `desc` is a live out-parameter for the live texture.
                 unsafe { texture.GetDesc(&mut desc) };
                 if desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM {
                     pp_error!(self, "unsupported texture format: {:?}", desc.Format);
@@ -352,6 +358,8 @@ fn create_staging_texture(
         MiscFlags: 0,
     };
     let mut texture: Option<ID3D11Texture2D> = None;
+    // SAFETY: `desc` fully describes a staging allocation, no initial data is
+    // supplied, and `texture` is a live COM out-parameter.
     unsafe {
         device.CreateTexture2D(&desc, None, Some(&mut texture))?;
     }
@@ -384,6 +392,9 @@ mod tests {
         let pixels: Vec<u8> = (0..width * height)
             .flat_map(|index| [index as u8, (index * 2) as u8, (index * 3) as u8, 255])
             .collect();
+        // SAFETY: the initial-data pointer addresses the live `pixels` buffer
+        // with the exact row pitch and extent in the texture description; the
+        // returned interface is captured in a live out-parameter.
         let source_texture = unsafe {
             let desc = D3D11_TEXTURE2D_DESC {
                 Width: width,
@@ -466,6 +477,8 @@ mod tests {
                 SysMemSlicePitch: 0,
             },
         ];
+        // SAFETY: both initial subresources point at live, correctly pitched
+        // pixel buffers matching the two array slices declared below.
         let texture = unsafe {
             let desc = D3D11_TEXTURE2D_DESC {
                 Width: width,
@@ -489,6 +502,8 @@ mod tests {
             texture.expect("CreateTexture2D succeeded without producing a texture")
         };
         let mut source_frame = wrap_d3d11_texture(texture, width, height);
+        // SAFETY: this test exclusively owns the unpublished frame; address 1
+        // encodes slice index 1 in `data[1]` and is never dereferenced.
         unsafe {
             (*source_frame.as_mut_ptr()).data[1] = std::ptr::dangling_mut::<u8>();
         }

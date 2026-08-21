@@ -176,7 +176,7 @@ impl D3d12Renderer {
             stride: frame.stride(index),
         };
 
-        // Safety: `plane(0..3)` point into `frame`'s own buffers, which
+        // SAFETY: `plane(0..3)` point into `frame`'s own buffers, which
         // outlive this call — `submit_yuv420p` only reads them before
         // returning.
         unsafe {
@@ -196,7 +196,7 @@ impl D3d12Renderer {
         let width = frame.width();
         let height = frame.height();
 
-        // Safety: `texture_raw`/`fence_raw` are borrowed raw COM pointers
+        // SAFETY: `texture_raw`/`fence_raw` are borrowed raw COM pointers
         // — still owned by `frame`'s own hw frame pool reference, not by
         // us. `.clone()` (`AddRef`) gives us our own independently
         // ref-counted handle, valid for as long as *we* hold it,
@@ -216,6 +216,8 @@ impl D3d12Renderer {
         // device by convention — verify it, since drawing a different
         // device's texture is invalid, not just wrong output.
         let mut texture_device: Option<ID3D12Device> = None;
+        // SAFETY: `texture` is live and `texture_device` is a correctly typed
+        // out-parameter for the resource's creating device.
         unsafe { texture.GetDevice(&mut texture_device) }
             .map_err(|_| D3d12RendererError::DeviceMismatch)?;
         let texture_device = texture_device.ok_or(D3d12RendererError::DeviceMismatch)?;
@@ -227,6 +229,9 @@ impl D3d12Renderer {
         // memory from being recycled by the decoder's frame pool while
         // the renderer still has it queued to draw — independent of, and
         // in addition to, the `texture`/`fence` COM references above.
+        // SAFETY: validation established the resource device, NV12 layout,
+        // visible dimensions, and matching producer fence. The boxed frame
+        // keeps the pooled allocation alive until the renderer releases it.
         unsafe {
             self.inner
                 .submit_nv12_texture(texture, fence, fence_value, width, height, Box::new(frame))

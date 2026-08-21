@@ -163,7 +163,11 @@ impl WasapiRenderer {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::WasapiRenderer, &name, None);
         let device = open_device(&options.device.id)?;
+        // SAFETY: COM is initialized and `device` is live; WASAPI documents
+        // activation of `IAudioClient` for an endpoint.
         let audio_client: IAudioClient = unsafe { device.Activate(CLSCTX_ALL, None)? };
+        // SAFETY: the live audio client returns a non-null COM-task allocation
+        // that remains valid until explicitly freed below.
         let mix_format = unsafe { audio_client.GetMixFormat()? };
         let format = resolve_mix_format(mix_format).map_err(|error| {
             WasapiRendererError::UnsupportedMixFormat {
@@ -171,6 +175,8 @@ impl WasapiRenderer {
                 bits: error.bits,
             }
         })?;
+        // SAFETY: `mix_format` remains live and readable, flags and periods are
+        // valid shared-mode values, and WASAPI finishes reading it on return.
         let initialize_result = unsafe {
             audio_client.Initialize(
                 AUDCLNT_SHAREMODE_SHARED,
@@ -181,17 +187,25 @@ impl WasapiRenderer {
                 None,
             )
         };
+        // SAFETY: balances ownership of the allocation returned by
+        // `GetMixFormat` exactly once, after `Initialize` has returned.
         unsafe { CoTaskMemFree(Some(mix_format as *const c_void)) };
         initialize_result?;
 
+        // SAFETY: the audio client is successfully initialized and returns
+        // its documented render service interface.
         let render_client: IAudioRenderClient = unsafe { audio_client.GetService()? };
+        // SAFETY: the same initialized client exposes its documented clock
+        // service interface.
         let audio_clock: IAudioClock = unsafe { audio_client.GetService()? };
+        // SAFETY: `audio_clock` is live and returns its frequency by value.
         let audio_clock_frequency = unsafe { audio_clock.GetFrequency()? };
         if audio_clock_frequency == 0 {
             return Err(WasapiRendererError::InvalidClockFrequency(
                 audio_clock_frequency,
             ));
         }
+        // SAFETY: the initialized live client returns its fixed buffer size.
         let buffer_frames = unsafe { audio_client.GetBufferSize()? };
         pp_info!(
             pp_log: &pp_log,
@@ -281,6 +295,8 @@ impl WasapiRenderer {
 
     fn start(&mut self) -> Result<()> {
         if !self.running {
+            // SAFETY: this initialized client is stopped and this method
+            // exclusively sequences its lifecycle on a COM-initialized thread.
             unsafe { self.audio_client.Start() }.map_err(|error| self.classify_error(error))?;
             self.running = true;
         }
@@ -289,10 +305,14 @@ impl WasapiRenderer {
 
     fn stop_and_reset(&mut self) -> Result<()> {
         if self.running {
+            // SAFETY: this initialized client is currently running and the
+            // renderer exclusively sequences lifecycle calls.
             unsafe { self.audio_client.Stop() }.map_err(|error| self.classify_error(error))?;
         }
         self.running = false;
         self.publish_device_position(false)?;
+        // SAFETY: the initialized client is stopped, the state required for
+        // resetting its queued audio.
         unsafe { self.audio_client.Reset() }.map_err(|error| self.classify_error(error))?;
         self.timeline = None;
         Ok(())
@@ -300,6 +320,8 @@ impl WasapiRenderer {
 
     fn device_position(&self) -> std::result::Result<u64, WasapiRendererError> {
         let mut position = 0;
+        // SAFETY: `audio_clock` is live and `position` is a live out-parameter;
+        // the optional performance-counter output is intentionally omitted.
         unsafe { self.audio_clock.GetPosition(&mut position, None) }
             .map_err(|error| self.classify_error(error))?;
         Ok(position)
@@ -371,6 +393,8 @@ impl WasapiRenderer {
         }
 
         while frame_offset < frame.samples() {
+            // SAFETY: the initialized live client returns padding by value;
+            // this renderer serializes access to it.
             let padding = unsafe { self.audio_client.GetCurrentPadding() }
                 .map_err(|error| self.classify_error(error))?;
             // IAudioClock keeps advancing through an endpoint underrun.
@@ -387,10 +411,16 @@ impl WasapiRenderer {
             }
 
             let take = available.min(frame.samples() - frame_offset);
+            // SAFETY: `take` is no larger than the available endpoint space;
+            // the returned pointer is writable for that many interleaved
+            // frames until the matching `ReleaseBuffer`.
             let destination = unsafe { self.render_client.GetBuffer(take as u32) }
                 .map_err(|error| self.classify_error(error))?;
             let byte_offset = frame_offset * bytes_per_frame;
             let byte_count = take * bytes_per_frame;
+            // SAFETY: source bounds follow from `take` and `frame_offset`, and
+            // `GetBuffer` guarantees a non-overlapping writable destination of
+            // exactly `byte_count` bytes for the negotiated format.
             unsafe {
                 ptr::copy_nonoverlapping(
                     bytes[byte_offset..byte_offset + byte_count].as_ptr(),
@@ -398,6 +428,8 @@ impl WasapiRenderer {
                     byte_count,
                 );
             }
+            // SAFETY: balances the successful `GetBuffer` above with the exact
+            // frame count written, after all borrowed destination access ended.
             unsafe { self.render_client.ReleaseBuffer(take as u32, 0) }
                 .map_err(|error| self.classify_error(error))?;
             if let Some(frame_pts_ns) = frame_pts_ns {
@@ -422,12 +454,16 @@ impl WasapiRenderer {
     }
 
     fn drain(&mut self) -> Result<()> {
+        // SAFETY: the initialized live client returns its current padding by
+        // value and this renderer serializes calls.
         let padding = unsafe { self.audio_client.GetCurrentPadding() }
             .map_err(|error| self.classify_error(error))?;
         if padding > 0 {
             self.start()?;
         }
         loop {
+            // SAFETY: same live-client query as above; no buffer pointer is
+            // borrowed across this call.
             let padding = unsafe { self.audio_client.GetCurrentPadding() }
                 .map_err(|error| self.classify_error(error))?;
             if padding == 0 {
@@ -521,6 +557,8 @@ impl Sink for WasapiRenderer {
         match msg {
             ControlMsg::Pause => {
                 if self.running {
+                    // SAFETY: the initialized client is running and this
+                    // renderer exclusively sequences the stop transition.
                     unsafe { self.audio_client.Stop() }
                         .map_err(|error| self.classify_error(error))?;
                     self.running = false;
@@ -530,6 +568,8 @@ impl Sink for WasapiRenderer {
             }
             ControlMsg::Resume => {
                 self.paused = false;
+                // SAFETY: the initialized client returns queued padding by
+                // value before deciding whether it needs to restart.
                 let padding = unsafe { self.audio_client.GetCurrentPadding() }
                     .map_err(|error| self.classify_error(error))?;
                 if padding > 0 {
@@ -543,11 +583,15 @@ impl Sink for WasapiRenderer {
             }
             ControlMsg::Seek(_) => {
                 if self.running {
+                    // SAFETY: this renderer exclusively stops the live client
+                    // before resetting its queue for the seek.
                     unsafe { self.audio_client.Stop() }
                         .map_err(|error| self.classify_error(error))?;
                 }
                 self.running = false;
                 self.paused = false;
+                // SAFETY: the initialized client is now stopped, which is the
+                // required state for `Reset`.
                 unsafe { self.audio_client.Reset() }.map_err(|error| self.classify_error(error))?;
                 self.timeline = None;
                 if let Some(master) = self.clock_binding.registration() {
@@ -565,6 +609,8 @@ impl Drop for WasapiRenderer {
             return;
         };
         if self.running {
+            // SAFETY: best-effort cleanup of the live running client on a
+            // COM-initialized thread; this is its sole lifecycle owner.
             let _ = unsafe { self.audio_client.Stop() };
             self.running = false;
         }
@@ -573,6 +619,8 @@ impl Drop for WasapiRenderer {
         // Otherwise video can resume wall-clock pacing from the last periodic
         // update, a few milliseconds behind the audible handoff point.
         let _ = self.publish_device_position(false);
+        // SAFETY: the live client has been stopped above (or was already
+        // stopped); reset is best-effort final queue cleanup.
         let _ = unsafe { self.audio_client.Reset() };
         self.timeline = None;
     }

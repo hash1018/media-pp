@@ -113,6 +113,9 @@ mod windows_gpu {
         };
         let mut device = None;
         let mut context = None;
+        // SAFETY: null adapter/software pointers select the hardware path,
+        // optional feature levels use D3D defaults, and both interface slots
+        // are live correctly typed out-parameters.
         let result = unsafe {
             D3D11CreateDevice(
                 None,
@@ -144,11 +147,15 @@ mod windows_gpu {
     /// pool — and nothing that belongs to another process.
     pub fn vram_bytes(device: &ID3D11Device) -> u64 {
         let dxgi_device: IDXGIDevice = device.cast().expect("a D3D11 device is an IDXGIDevice");
+        // SAFETY: `dxgi_device` is live and returns an owned reference to its
+        // creating adapter.
         let adapter: IDXGIAdapter3 = unsafe { dxgi_device.GetAdapter() }
             .expect("IDXGIDevice::GetAdapter")
             .cast()
             .expect("IDXGIAdapter3 needs Windows 10 or newer");
         let mut info = DXGI_QUERY_VIDEO_MEMORY_INFO::default();
+        // SAFETY: `adapter` is live and `info` is the correctly typed live
+        // out-parameter for node 0's local-memory segment.
         unsafe { adapter.QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &mut info) }
             .expect("QueryVideoMemoryInfo");
         info.CurrentUsage
@@ -159,11 +166,19 @@ mod windows_gpu {
     /// the same adapter by its LUID before asking DXGI for the process gauge.
     #[cfg(feature = "d3d12")]
     pub fn d3d12_vram_bytes(device: &ID3D12Device) -> u64 {
+        // SAFETY: `device` is live and returns its immutable adapter identity
+        // by value.
         let luid = unsafe { device.GetAdapterLuid() };
+        // SAFETY: creates the documented DXGI factory interface without
+        // borrowing caller storage.
         let factory: IDXGIFactory4 = unsafe { CreateDXGIFactory1() }.expect("CreateDXGIFactory1");
+        // SAFETY: `factory` is live and `luid` came from the live D3D12 device
+        // whose adapter is requested.
         let adapter: IDXGIAdapter3 =
             unsafe { factory.EnumAdapterByLuid(luid) }.expect("EnumAdapterByLuid for D3D12 device");
         let mut info = DXGI_QUERY_VIDEO_MEMORY_INFO::default();
+        // SAFETY: `adapter` is live and `info` is the correctly typed live
+        // out-parameter for node 0's local-memory segment.
         unsafe { adapter.QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &mut info) }
             .expect("QueryVideoMemoryInfo");
         info.CurrentUsage
@@ -189,6 +204,8 @@ mod windows_gpu {
             let info: ID3D11InfoQueue = device.cast().ok()?;
             // The queue drops messages past its default limit, which a
             // detailed live-object report can exceed on its own.
+            // SAFETY: `info` is a live debug queue and the count is an
+            // unrestricted scalar limit.
             unsafe { info.SetMessageCountLimit(u64::MAX) }.ok()?;
             Some(Self { debug, info })
         }
@@ -199,25 +216,41 @@ mod windows_gpu {
         /// trend across identical cycles does.
         pub fn count(&self) -> u64 {
             self.report_into_queue();
+            // SAFETY: `info` is live and the report call completed before this
+            // by-value count query.
             unsafe { self.info.GetNumStoredMessages() }
         }
 
         /// One line per live object, for a failure message.
         pub fn describe(&self) -> Vec<String> {
             self.report_into_queue();
+            // SAFETY: `info` is live and returns its stored count by value.
             let stored = unsafe { self.info.GetNumStoredMessages() };
             let mut lines = Vec::with_capacity(stored as usize);
             for index in 0..stored {
                 let mut length = 0usize;
+                // SAFETY: `index` is bounded by this queue's count; a null
+                // message pointer is the documented size-query form and
+                // `length` is a live out-parameter.
                 if unsafe { self.info.GetMessage(index, None, &mut length) }.is_err() {
                     continue;
                 }
-                let mut buffer = vec![0u8; length];
+                let units = length.div_ceil(std::mem::size_of::<D3D11_MESSAGE>()).max(1);
+                let mut buffer = Vec::with_capacity(units);
+                buffer.resize_with(units, std::mem::MaybeUninit::<D3D11_MESSAGE>::uninit);
                 let message = buffer.as_mut_ptr().cast::<D3D11_MESSAGE>();
+                // SAFETY: `buffer` is aligned for `D3D11_MESSAGE` and writable
+                // for at least the queried byte length; `message` and `length`
+                // remain live through the fill call.
                 if unsafe { self.info.GetMessage(index, Some(message), &mut length) }.is_err() {
                     continue;
                 }
+                // SAFETY: the successful fill initialized a `D3D11_MESSAGE`
+                // in the aligned buffer for the duration of this iteration.
                 let message = unsafe { &*message };
+                // SAFETY: the message owns a description readable for
+                // `DescriptionByteLength`; subtracting one omits its terminator
+                // while the backing `buffer` remains alive.
                 let description = unsafe {
                     std::slice::from_raw_parts(
                         message.pDescription.cast::<u8>(),
@@ -230,6 +263,9 @@ mod windows_gpu {
         }
 
         fn report_into_queue(&self) {
+            // SAFETY: both interfaces belong to the same live debug device;
+            // reporting synchronously appends messages after the queue is
+            // cleared and retains no caller pointer.
             unsafe {
                 self.info.ClearStoredMessages();
                 self.debug

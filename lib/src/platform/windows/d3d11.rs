@@ -27,6 +27,9 @@ pub(crate) unsafe fn compile_shader(
     } else {
         D3DCOMPILE_OPTIMIZATION_LEVEL3
     };
+    // SAFETY: `source` is readable for its exact length, `file_name`, `entry`,
+    // and `target` are static NUL-terminated strings supplied by the callers,
+    // and both blob slots are live out-parameters.
     let result = unsafe {
         D3DCompile(
             source.as_ptr().cast::<c_void>(),
@@ -44,6 +47,8 @@ pub(crate) unsafe fn compile_shader(
     };
     if let Err(error) = result {
         let message = errors
+            // SAFETY: a compiler error blob owns `GetBufferSize()` readable
+            // bytes at `GetBufferPointer()` for the lifetime of the blob.
             .map(|blob| unsafe {
                 let bytes = std::slice::from_raw_parts(
                     blob.GetBufferPointer().cast::<u8>(),

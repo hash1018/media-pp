@@ -431,6 +431,8 @@ impl DxgiCaptureSource {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::DxgiCaptureSource, &name, None);
 
+        // SAFETY: creates the documented DXGI factory interface without
+        // borrowing caller-owned storage.
         let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }?;
         let gpu_mode = matches!(options.capture_mode, CaptureMode::Gpu);
         // `CaptureMode::Gpu` has no `include_cursor` field at all (see its
@@ -455,6 +457,9 @@ impl DxgiCaptureSource {
         let adapter = &targets[0].0;
         let mut device: Option<ID3D11Device> = None;
         let mut context: Option<ID3D11DeviceContext> = None;
+        // SAFETY: the selected live adapter is passed with UNKNOWN driver
+        // type as required, optional feature levels use D3D defaults, and
+        // device/context are live correctly typed out-parameters.
         unsafe {
             D3D11CreateDevice(
                 &adapter.cast::<windows::Win32::Graphics::Dxgi::IDXGIAdapter>()?,
@@ -478,7 +483,11 @@ impl DxgiCaptureSource {
 
         let mut units = Vec::with_capacity(targets.len());
         for (_, output, desktop_rect) in &targets {
+            // SAFETY: output and DXGI device are live and originate from the
+            // same adapter established by `resolve_area`.
             let duplication = unsafe { output.DuplicateOutput(&dxgi_device) }?;
+            // SAFETY: the duplication interface is live and returns its plain
+            // immutable description by value.
             let desc = unsafe { duplication.GetDesc() };
             let unit_width = desc.ModeDesc.Width;
             let unit_height = desc.ModeDesc.Height;
@@ -533,6 +542,8 @@ impl DxgiCaptureSource {
                 MiscFlags: 0,
             };
             let mut staging_texture: Option<ID3D11Texture2D> = None;
+            // SAFETY: `staging_desc` is fully initialized for the selected
+            // mode, no initial data is supplied, and the output slot is live.
             unsafe { device.CreateTexture2D(&staging_desc, None, Some(&mut staging_texture)) }?;
             let staging_texture =
                 staging_texture.expect("CreateTexture2D succeeded without producing a texture");
@@ -638,6 +649,9 @@ impl DxgiCaptureSource {
         let mut buffer = vec![0u8; buffer_size];
         let mut required = 0u32;
         let mut info = DXGI_OUTDUPL_POINTER_SHAPE_INFO::default();
+        // SAFETY: `unit_index` names a live duplication, `buffer` is writable
+        // for the advertised shape size, and `required`/`info` are live
+        // out-parameters. Success guarantees `required <= buffer.len()`.
         unsafe {
             self.units[unit_index].duplication.GetFramePointerShape(
                 buffer.len() as u32,
@@ -676,6 +690,8 @@ impl DxgiCaptureSource {
         for index in 0..self.units.len() {
             let mut info = DXGI_OUTDUPL_FRAME_INFO::default();
             let mut resource: Option<IDXGIResource> = None;
+            // SAFETY: this live duplication has no outstanding acquired frame;
+            // `info` and `resource` are correctly typed live out-parameters.
             let acquire = unsafe {
                 self.units[index].duplication.AcquireNextFrame(
                     per_unit_timeout,
@@ -714,6 +730,8 @@ impl DxgiCaptureSource {
             // regardless; there's just no new *image* to copy out, so
             // release and move to the next unit.
             if info.AccumulatedFrames == 0 {
+                // SAFETY: balances this unit's successful `AcquireNextFrame`;
+                // no borrowed resource access remains.
                 unsafe { self.units[index].duplication.ReleaseFrame() }?;
                 continue;
             }
@@ -726,6 +744,9 @@ impl DxgiCaptureSource {
             // propagated directly.
             let copy_result: std::result::Result<(), DxgiCaptureSourceError> = (|| {
                 let texture: ID3D11Texture2D = resource.cast()?;
+                // SAFETY: acquired source and matching per-output staging
+                // texture belong to this context and have identical dimensions
+                // and format; the immediate context is source-thread confined.
                 unsafe {
                     self.context.CopyResource(
                         &self.units[index].staging_texture.cast::<ID3D11Resource>()?,
@@ -739,6 +760,8 @@ impl DxgiCaptureSource {
             // rather than holding it while we map/read (Cpu mode) the
             // (independent) staging copy below — and unconditionally,
             // even if the copy above failed.
+            // SAFETY: balances the successful acquisition above after the
+            // desktop image has been copied and no acquired-resource use remains.
             let release_result = unsafe { self.units[index].duplication.ReleaseFrame() };
             copy_result?;
             release_result?;
@@ -757,6 +780,9 @@ impl DxgiCaptureSource {
             // texture needed, the crop lands directly in CPU memory at
             // its final position.
             let mut mapped = Default::default();
+            // SAFETY: CPU mode created this live staging texture with READ
+            // access; `mapped` is a live out-parameter and no earlier map is
+            // outstanding for it.
             unsafe {
                 self.context.Map(
                     &self.units[index].staging_texture.cast::<ID3D11Resource>()?,
@@ -780,6 +806,9 @@ impl DxgiCaptureSource {
                 let dst = staging.data_mut(0);
                 for row in 0..crop_height {
                     let src_row = box_.top as usize + row;
+                    // SAFETY: the mapped pointer remains valid until `Unmap`;
+                    // `source_box` is the output intersection, so row/column
+                    // offsets and `row_bytes` stay within RowPitch and height.
                     let src = unsafe {
                         std::slice::from_raw_parts(
                             (mapped.pData as *const u8)
@@ -793,6 +822,8 @@ impl DxgiCaptureSource {
                         .copy_from_slice(src);
                 }
             }
+            // SAFETY: balances the successful map above after all slices made
+            // from `mapped.pData` have gone out of scope.
             unsafe {
                 self.context.Unmap(
                     &self.units[index].staging_texture.cast::<ID3D11Resource>()?,
@@ -921,6 +952,8 @@ impl DxgiCaptureSource {
             MiscFlags: 0,
         };
         let mut texture: Option<ID3D11Texture2D> = None;
+        // SAFETY: `desc` is a fully initialized GPU texture description, no
+        // initial data is supplied, and `texture` is a live out-parameter.
         unsafe {
             self.device
                 .CreateTexture2D(&desc, None, Some(&mut texture))?;
@@ -930,6 +963,9 @@ impl DxgiCaptureSource {
         for unit in &self.units {
             let src_resource: ID3D11Resource = unit.staging_texture.cast()?;
             let box_ = unit.source_box;
+            // SAFETY: source/destination resources belong to this device;
+            // `source_box` was derived from their intersection and its
+            // destination offset is bounded by the composite dimensions.
             unsafe {
                 self.context.CopySubresourceRegion(
                     &dst_resource,
@@ -1047,12 +1083,16 @@ fn pick_output(
     let mut remaining = output_index;
     let mut adapter_index = 0u32;
     loop {
+        // SAFETY: adapters are enumerated monotonically on this live factory
+        // until DXGI reports exhaustion.
         let adapter = match unsafe { factory.EnumAdapters1(adapter_index) } {
             Ok(adapter) => adapter,
             Err(_) => return Err(DxgiCaptureSourceError::NoSuchOutput(output_index)),
         };
         let mut output_i = 0u32;
         loop {
+            // SAFETY: outputs are enumerated monotonically on the live adapter
+            // until DXGI reports exhaustion.
             let output = match unsafe { adapter.EnumOutputs(output_i) } {
                 Ok(output) => output,
                 Err(_) => break,
@@ -1089,6 +1129,8 @@ fn resolve_area(
     match *area {
         CaptureArea::Output { output_index } => {
             let (adapter, output) = pick_output(factory, output_index)?;
+            // SAFETY: the output is a live DXGI interface; `GetDesc` returns
+            // its plain descriptor without retaining caller pointers.
             let desktop_rect = unsafe {
                 output
                     .cast::<windows::Win32::Graphics::Dxgi::IDXGIOutput>()?
@@ -1107,17 +1149,23 @@ fn resolve_area(
             let mut targets = Vec::new();
             let mut adapter_index = 0u32;
             loop {
+                // SAFETY: adapters are enumerated monotonically on the live
+                // factory until DXGI reports exhaustion.
                 let adapter = match unsafe { factory.EnumAdapters1(adapter_index) } {
                     Ok(adapter) => adapter,
                     Err(_) => break,
                 };
                 let mut output_i = 0u32;
                 loop {
+                    // SAFETY: outputs are enumerated monotonically on this live
+                    // adapter until DXGI reports exhaustion.
                     let output = match unsafe { adapter.EnumOutputs(output_i) } {
                         Ok(output) => output,
                         Err(_) => break,
                     };
                     let output1: IDXGIOutput1 = output.cast()?;
+                    // SAFETY: `output1` and its base interface are live;
+                    // `GetDesc` returns a plain value.
                     let desktop_rect = unsafe {
                         output1
                             .cast::<windows::Win32::Graphics::Dxgi::IDXGIOutput>()?
@@ -1138,6 +1186,8 @@ fn resolve_area(
             if targets.is_empty() {
                 return Err(DxgiCaptureSourceError::RegionOutsideDesktop(rect));
             }
+            // SAFETY: the first target's live adapter returns its immutable
+            // descriptor by value.
             let first_luid = unsafe {
                 targets[0]
                     .0
@@ -1146,6 +1196,8 @@ fn resolve_area(
             }?
             .AdapterLuid;
             for (adapter, _, _) in &targets[1..] {
+                // SAFETY: each target adapter is live and returns its immutable
+                // descriptor by value for the identity comparison.
                 let luid = unsafe {
                     adapter
                         .cast::<windows::Win32::Graphics::Dxgi::IDXGIAdapter>()?

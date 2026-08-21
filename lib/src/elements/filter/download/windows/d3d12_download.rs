@@ -110,6 +110,9 @@ impl D3d12Download {
             return Err(error.into());
         }
 
+        // SAFETY: `source` is a live D3D12 hardware frame. Its hardware-frame
+        // reference is null-checked before dereferencing, and only the device
+        // context identity is read while the frame keeps both contexts alive.
         unsafe {
             let frames_ref = (*source.as_ptr()).hw_frames_ctx;
             if frames_ref.is_null() || (*frames_ref).data.is_null() {
@@ -126,6 +129,9 @@ impl D3d12Download {
         }
 
         let mut destination = self.pool.get();
+        // SAFETY: `destination` is this element's writable pooled frame and
+        // `source` is the validated live hardware frame. FFmpeg initializes
+        // the destination pixels, after which copying properties is valid.
         unsafe {
             let dst = destination.as_mut_ptr();
             let ret = ffi::av_hwframe_transfer_data(dst, source.as_ptr(), 0);
@@ -270,6 +276,8 @@ mod tests {
         source.set_pts(Some(42));
         source.set_color_space(ffmpeg::color::Space::BT709);
         source.set_color_range(ffmpeg::color::Range::MPEG);
+        // SAFETY: the test uniquely owns the live frame and mutates its plain
+        // `duration` metadata field before publishing it.
         unsafe { (*source.as_mut_ptr()).duration = 3 };
 
         upload
@@ -284,6 +292,7 @@ mod tests {
         assert_eq!(frame.pts(), Some(42));
         assert_eq!(frame.color_space(), ffmpeg::color::Space::BT709);
         assert_eq!(frame.color_range(), ffmpeg::color::Range::MPEG);
+        // SAFETY: `frame` is live for this read of its plain metadata field.
         assert_eq!(unsafe { (*frame.as_ptr()).duration }, 3);
 
         for row in 0..height as usize {

@@ -305,6 +305,9 @@ fn create_processor_input_texture(
         MiscFlags: 0,
     };
     let mut texture = None;
+    // SAFETY: `desc` is fully initialized, no initial subresource data is
+    // supplied, and `texture` is a live out-parameter for the returned COM
+    // interface.
     unsafe {
         device.CreateTexture2D(&desc, None, Some(&mut texture))?;
     }
@@ -344,6 +347,8 @@ impl D3d11Scaler {
             let context = context
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
+            // SAFETY: `context` is a live immediate-context COM interface;
+            // `GetDevice` returns an owned reference to its creating device.
             let context_device = unsafe { context.GetDevice() }?;
             if context_device.as_raw() != device.as_raw() {
                 return Err(D3d11ScalerError::ContextDeviceMismatch);
@@ -387,7 +392,7 @@ impl D3d11Scaler {
         if texture_raw.is_null() {
             return Err(D3d11ScalerError::InvalidD3d11Frame);
         }
-        // Safety: `texture_raw` is a borrowed raw `ID3D11Texture2D*` — still
+        // SAFETY: `texture_raw` is a borrowed raw `ID3D11Texture2D*` — still
         // owned by `frame`'s own buffer reference, not by us. `.clone()`
         // (`AddRef`) gives an independently ref-counted handle, valid for as
         // long as the caller keeps it.
@@ -397,12 +402,16 @@ impl D3d11Scaler {
                 .clone()
         };
 
+        // SAFETY: `texture` is a live COM interface cloned above; `GetDevice`
+        // returns an owned reference to its creating device.
         let texture_device = unsafe { texture.GetDevice() }?;
         if texture_device.as_raw() != self.device.as_raw() {
             return Err(D3d11ScalerError::DeviceMismatch);
         }
 
         let mut desc = D3D11_TEXTURE2D_DESC::default();
+        // SAFETY: `desc` is a live, correctly typed out-parameter and `texture`
+        // remains alive for the call.
         unsafe { texture.GetDesc(&mut desc) };
         if desc.Format != DXGI_FORMAT_NV12 && desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM {
             return Err(D3d11ScalerError::UnsupportedTextureFormat(desc.Format));
@@ -499,6 +508,9 @@ impl D3d11Scaler {
             let (processor_input, processor_slice) = match &input_copy {
                 Some(copy) => {
                     let source_subresource = validated.array_slice * validated.desc.MipLevels;
+                    // SAFETY: both textures belong to this device, validation
+                    // bounds `source_subresource`, and the destination is the
+                    // same-sized single-slice normalization texture.
                     unsafe {
                         context.CopySubresourceRegion(
                             copy,
@@ -647,6 +659,8 @@ fn create_output_texture(
         MiscFlags: 0,
     };
     let mut texture: Option<ID3D11Texture2D> = None;
+    // SAFETY: `desc` is fully initialized, no initial data is supplied, and
+    // `texture` is a live out-parameter for the created COM interface.
     unsafe {
         device.CreateTexture2D(&desc, None, Some(&mut texture))?;
     }
@@ -774,6 +788,9 @@ mod tests {
             MiscFlags: 0,
         };
         let mut texture = None;
+        // SAFETY: every entry in `initial` describes one live `planes` slice,
+        // all slices have the dimensions and pitch declared by `desc`, and
+        // `texture` is a live out-parameter.
         unsafe {
             device
                 .CreateTexture2D(&desc, Some(initial.as_ptr()), Some(&mut texture))
@@ -842,6 +859,8 @@ mod tests {
             MiscFlags: 0,
         };
         let mut staging = None;
+        // SAFETY: `desc` describes a valid CPU-readable staging texture and
+        // `staging` is a live out-parameter; no initial data is supplied.
         unsafe {
             device
                 .CreateTexture2D(&desc, None, Some(&mut staging))
@@ -851,6 +870,9 @@ mod tests {
 
         let context = context.lock().unwrap();
         let (mut luma, mut chroma) = (Vec::new(), Vec::new());
+        // SAFETY: source and staging textures share dimensions/format/device.
+        // A successful `Map` keeps `pData` valid through `Unmap`; `RowPitch`
+        // bounds every luma and chroma row slice constructed below.
         unsafe {
             context.CopyResource(&staging, texture);
             let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
@@ -969,12 +991,15 @@ mod tests {
         assert_eq!(scaled.pts(), Some(5));
 
         let (texture_raw, _) = d3d11va_texture(scaled).expect("the output carries a texture");
+        // SAFETY: `texture_raw` is borrowed from the still-live frame; cloning
+        // the borrowed wrapper takes an independent COM reference.
         let texture = unsafe {
             ID3D11Texture2D::from_raw_borrowed(&texture_raw)
                 .expect("the output texture must not be null")
                 .clone()
         };
         let mut desc = D3D11_TEXTURE2D_DESC::default();
+        // SAFETY: `desc` is a live out-parameter for the live texture.
         unsafe { texture.GetDesc(&mut desc) };
         assert_eq!(
             desc.Format, DXGI_FORMAT_NV12,
@@ -1004,6 +1029,9 @@ mod tests {
         let MediaBuffer::Video(video) = &mut source else {
             panic!("expected a Video buffer");
         };
+        // SAFETY: this test has unique access to the unpublished frame and
+        // writes the array-slice encoding expected by `d3d11va_texture`;
+        // dangling address 1 is used only as the encoded integer, never read.
         unsafe {
             // Same encoding `wrap_d3d11_texture` documents: the array
             // slice index goes directly in `data[1]`, so index 1 is a
@@ -1303,12 +1331,15 @@ mod tests {
             panic!("expected a Video buffer, got {}", received[0].kind());
         };
         let (texture_raw, _) = d3d11va_texture(converted).expect("the output carries a texture");
+        // SAFETY: `texture_raw` is borrowed from the still-live frame; cloning
+        // the borrowed wrapper takes an independent COM reference.
         let texture = unsafe {
             ID3D11Texture2D::from_raw_borrowed(&texture_raw)
                 .expect("the output texture must not be null")
                 .clone()
         };
         let mut desc = D3D11_TEXTURE2D_DESC::default();
+        // SAFETY: `desc` is a live out-parameter for the live texture.
         unsafe { texture.GetDesc(&mut desc) };
         assert_eq!(
             desc.Format, DXGI_FORMAT_NV12,

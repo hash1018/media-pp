@@ -117,6 +117,8 @@ impl ScaleProcessor {
             OutputHeight: output_height,
             Usage: D3D11_VIDEO_USAGE_PLAYBACK_NORMAL,
         };
+        // SAFETY: `desc` is fully initialized and the live video device owns
+        // the returned enumerator interface.
         let enumerator = unsafe { video_device.CreateVideoProcessorEnumerator(&desc) }?;
 
         // Each side is asked for only the direction it is actually used in:
@@ -129,6 +131,8 @@ impl ScaleProcessor {
             (input.format, D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_INPUT),
             (output_format, D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_OUTPUT),
         ] {
+            // SAFETY: `enumerator` is live and `format` is a DXGI enum value;
+            // the method returns the support mask by value.
             let support = unsafe { enumerator.CheckVideoProcessorFormat(format) }?;
             if support & needed.0 as u32 == 0 {
                 return Err(D3d11ScalerError::UnsupportedByVideoProcessor(format));
@@ -138,6 +142,8 @@ impl ScaleProcessor {
         // Index 0 is the plain rate-conversion capability every driver
         // exposes; the others exist for frame-rate conversion, which this
         // element does not do.
+        // SAFETY: `enumerator` is live and capability index 0 is guaranteed by
+        // the enumerator created for this content description.
         let processor = unsafe { video_device.CreateVideoProcessor(&enumerator, 0) }?;
 
         let source = RECT {
@@ -152,6 +158,9 @@ impl ScaleProcessor {
             right: output_width as i32,
             bottom: output_height as i32,
         };
+        // SAFETY: processor/context/enumerator are live and belong to the same
+        // device; stream 0 and both rectangles are within the declared input
+        // and output dimensions.
         unsafe {
             video_context.VideoProcessorSetStreamFrameFormat(
                 &processor,
@@ -216,6 +225,9 @@ impl ScaleProcessor {
         color_space: BltColorSpaces,
     ) -> Result<(), D3d11ScalerError> {
         if self.color_space != Some(color_space) {
+            // SAFETY: the processor and video context are live, stream 0 was
+            // configured at construction, and both color-space values are
+            // fully initialized D3D11 descriptors.
             unsafe {
                 video_context.VideoProcessorSetStreamColorSpace(
                     &self.processor,
@@ -242,6 +254,9 @@ impl ScaleProcessor {
             },
         };
         let mut input_view = None;
+        // SAFETY: `source` is a validated texture, `array_slice` is bounded by
+        // its description, and `input_view` is a live out-parameter tied to
+        // this processor's enumerator.
         unsafe {
             video_device.CreateVideoProcessorInputView(
                 source,
@@ -260,6 +275,8 @@ impl ScaleProcessor {
             },
         };
         let mut output_view = None;
+        // SAFETY: `output` was allocated for this processor/device and
+        // `output_view` is a live out-parameter using the matching enumerator.
         unsafe {
             video_device.CreateVideoProcessorOutputView(
                 output,
@@ -279,8 +296,13 @@ impl ScaleProcessor {
             pInputSurface: ManuallyDrop::new(Some(input_view)),
             ..Default::default()
         }];
+        // SAFETY: input/output views and processor all remain live for the
+        // synchronous submission; `streams` contains exactly the configured
+        // stream and its manually-held COM reference.
         let result =
             unsafe { video_context.VideoProcessorBlt(&self.processor, &output_view, 0, &streams) };
+        // SAFETY: the `ManuallyDrop` owns exactly the reference placed into it
+        // above and has not otherwise been dropped.
         unsafe { ManuallyDrop::drop(&mut streams[0].pInputSurface) };
         result?;
         Ok(())

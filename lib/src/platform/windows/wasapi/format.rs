@@ -18,10 +18,14 @@ pub(crate) struct WasapiMixFormatError {
 pub(crate) fn resolve_mix_format(
     mix_format: *const WAVEFORMATEX,
 ) -> std::result::Result<AudioFormat, WasapiMixFormatError> {
+    // SAFETY: callers pass the non-null mix-format allocation returned by
+    // `IAudioClient::GetMixFormat`, valid until they free it after this call.
     let wf = unsafe { &*mix_format };
     let bits = wf.wBitsPerSample;
     let format_tag = if wf.wFormatTag as u32 == WAVE_FORMAT_EXTENSIBLE {
         let ext = mix_format as *const WAVEFORMATEXTENSIBLE;
+        // SAFETY: the format tag above identifies the same allocation as a
+        // `WAVEFORMATEXTENSIBLE`, whose fixed extension includes `SubFormat`.
         let sub_format = unsafe { (*ext).SubFormat };
         if sub_format == KSDATAFORMAT_SUBTYPE_IEEE_FLOAT {
             WAVE_FORMAT_IEEE_FLOAT
