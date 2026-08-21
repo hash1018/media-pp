@@ -18,7 +18,10 @@ fn main() -> impl std::process::Termination {
 
 #[cfg(target_os = "windows")]
 mod windows_example {
-    use std::thread;
+    use std::{
+        sync::{Arc, Mutex},
+        thread,
+    };
 
     use media_pp::{
         bus::BusEvent,
@@ -58,10 +61,9 @@ mod windows_example {
         let mut app = App {
             proxy,
             window: None,
-            // Kept alive for the app's duration so the window doesn't outlive
-            // the thread rendering into it; not otherwise joined — the window
-            // closes itself once playback finishes (see `user_event` below).
-            _playback: None,
+            shutdown: Arc::new(Shutdown::default()),
+            stopper: None,
+            playback: None,
         };
         event_loop.run_app(&mut app).expect("event loop failed");
     }
@@ -71,10 +73,90 @@ mod windows_example {
     /// until someone closes it by hand.
     struct PlaybackDone;
 
+    /// What lets the window outlive the thread presenting into it.
+    ///
+    /// Two things have to happen in order when the window is closed, and the
+    /// event loop thread can do neither of them directly:
+    ///
+    /// * [`Pipeline::stop`] blocks until every element's control cascade
+    ///   acknowledges, and the renderer's own `consume` can only acknowledge
+    ///   once the swapchain releases an image — which needs this event loop
+    ///   to keep pumping. Stopping from the event loop thread therefore
+    ///   deadlocks, so [`App::window_event`] hands the stop to its own thread.
+    /// * The window must not be dropped until the capture thread is done
+    ///   presenting to that `HWND`, so [`App::drop`] joins first.
+    ///
+    /// `requested` covers the order where the window is closed before the
+    /// capture thread has a pipeline to stop at all.
+    #[derive(Default)]
+    struct Shutdown {
+        state: Mutex<ShutdownState>,
+    }
+
+    #[derive(Default)]
+    struct ShutdownState {
+        requested: bool,
+        pipeline: Option<Arc<Pipeline>>,
+    }
+
+    impl Shutdown {
+        /// Main thread: records the close and hands back the pipeline to stop,
+        /// if the capture thread got far enough to publish one.
+        fn request(&self) -> Option<Arc<Pipeline>> {
+            let mut state = self.state.lock().expect("shutdown state poisoned");
+            state.requested = true;
+            state.pipeline.clone()
+        }
+
+        /// Capture thread: publishes the pipeline and reports whether a close
+        /// already arrived, which is what makes the two orders equivalent.
+        fn publish(&self, pipeline: Arc<Pipeline>) -> bool {
+            let mut state = self.state.lock().expect("shutdown state poisoned");
+            state.pipeline = Some(pipeline);
+            state.requested
+        }
+    }
+
     struct App {
         proxy: EventLoopProxy<PlaybackDone>,
         window: Option<Window>,
-        _playback: Option<thread::JoinHandle<()>>,
+        shutdown: Arc<Shutdown>,
+        /// Runs [`Pipeline::stop`] off the event loop thread; see [`Shutdown`].
+        stopper: Option<thread::JoinHandle<()>>,
+        /// Joined — not merely held — in [`App::drop`], since dropping a
+        /// `JoinHandle` detaches its thread rather than waiting for it.
+        playback: Option<thread::JoinHandle<()>>,
+    }
+
+    impl App {
+        /// Ends the capture without blocking the event loop. Idempotent: a
+        /// second close request while the first stop is still running is
+        /// ignored.
+        fn begin_stop(&mut self) {
+            if self.stopper.is_some() {
+                return;
+            }
+            let shutdown = self.shutdown.clone();
+            self.stopper = Some(thread::spawn(move || {
+                if let Some(pipeline) = shutdown.request() {
+                    pipeline.stop();
+                }
+            }));
+        }
+    }
+
+    impl Drop for App {
+        fn drop(&mut self) {
+            self.begin_stop();
+            if let Some(stopper) = self.stopper.take() {
+                let _ = stopper.join();
+            }
+            if let Some(playback) = self.playback.take() {
+                let _ = playback.join();
+            }
+            // Only now is it safe to let go of the window.
+            self.window = None;
+        }
     }
 
     impl ApplicationHandler<PlaybackDone> for App {
@@ -105,8 +187,9 @@ mod windows_example {
             let size = window.inner_size();
 
             let proxy = self.proxy.clone();
-            self._playback = Some(thread::spawn(move || {
-                if let Err(e) = play(hwnd, size.width, size.height) {
+            let shutdown = self.shutdown.clone();
+            self.playback = Some(thread::spawn(move || {
+                if let Err(e) = play(hwnd, size.width, size.height, &shutdown) {
                     eprintln!("playback failed: {e}");
                 }
                 let _ = proxy.send_event(PlaybackDone);
@@ -116,7 +199,7 @@ mod windows_example {
 
         fn window_event(
             &mut self,
-            event_loop: &ActiveEventLoop,
+            _event_loop: &ActiveEventLoop,
             window_id: WindowId,
             event: WindowEvent,
         ) {
@@ -124,7 +207,10 @@ mod windows_example {
                 return;
             }
             if let WindowEvent::CloseRequested = event {
-                event_loop.exit();
+                // Not `exit()`: the window has to stay mapped, and this loop
+                // has to keep dispatching, until capture is done with it.
+                // `PlaybackDone` is what exits. See `Shutdown`.
+                self.begin_stop();
             }
         }
 
@@ -133,7 +219,12 @@ mod windows_example {
         }
     }
 
-    fn play(hwnd: isize, window_width: u32, window_height: u32) -> media_pp::Result<()> {
+    fn play(
+        hwnd: isize,
+        window_width: u32,
+        window_height: u32,
+        shutdown: &Shutdown,
+    ) -> media_pp::Result<()> {
         media_pp::init()?;
         let _log_guard = media_pp::log::init(
             env!("CARGO_PKG_NAME"),
@@ -176,6 +267,13 @@ mod windows_example {
             ctx.attach(source, 0, branch)?;
             Ok(())
         })?;
+
+        // Published before `run`, so a close that arrives from here on finds
+        // a pipeline to stop. `true` means one already did, and nothing has
+        // presented yet.
+        if shutdown.publish(pipeline.clone()) {
+            return Ok(());
+        }
 
         // `run()` starts capture on a background thread and returns right
         // away — any failure shows up as a `BusEvent::Error` here instead of
@@ -228,7 +326,10 @@ mod windows_example {
 ///     cargo run -p screen_capture_gpu -- [monitor|window] [restore-token]
 #[cfg(target_os = "linux")]
 mod linux_example {
-    use std::thread;
+    use std::{
+        sync::{Arc, Mutex},
+        thread,
+    };
 
     use media_pp::{
         bus::BusEvent,
@@ -257,7 +358,9 @@ mod linux_example {
         let mut app = App {
             proxy,
             window: None,
-            _playback: None,
+            shutdown: Arc::new(Shutdown::default()),
+            stopper: None,
+            playback: None,
         };
         event_loop.run_app(&mut app).expect("event loop failed");
     }
@@ -266,14 +369,64 @@ mod linux_example {
     /// closes itself when the pipeline finishes.
     struct PlaybackDone;
 
+    /// What lets the window outlive the thread presenting into it.
+    ///
+    /// Two things have to happen in order when the window is closed, and the
+    /// event loop thread can do neither of them directly:
+    ///
+    /// * [`Pipeline::stop`] blocks until every element's control cascade
+    ///   acknowledges, and the renderer's own `consume` can only acknowledge
+    ///   once the compositor releases a swapchain image — which needs this
+    ///   event loop to keep dispatching. Stopping from the event loop thread
+    ///   therefore deadlocks, so [`App::window_event`] hands the stop to its
+    ///   own thread and keeps pumping.
+    /// * The window must not be dropped until the capture thread is done with
+    ///   it. On Wayland, tearing down the `wl_surface` under a
+    ///   `vkQueuePresentKHR` is a use-after-free, not a lost frame, so
+    ///   [`App::drop`] joins before letting go of the window.
+    ///
+    /// `requested` covers the order where the window is closed while
+    /// `open_gpu` is still blocked on the portal dialog and there is no
+    /// pipeline to stop at all.
+    #[derive(Default)]
+    struct Shutdown {
+        state: Mutex<ShutdownState>,
+    }
+
+    #[derive(Default)]
+    struct ShutdownState {
+        requested: bool,
+        pipeline: Option<Arc<Pipeline>>,
+    }
+
+    impl Shutdown {
+        /// Main thread: records the close and hands back the pipeline to stop,
+        /// if the capture thread got far enough to publish one.
+        fn request(&self) -> Option<Arc<Pipeline>> {
+            let mut state = self.state.lock().expect("shutdown state poisoned");
+            state.requested = true;
+            state.pipeline.clone()
+        }
+
+        /// Capture thread: publishes the pipeline and reports whether a close
+        /// already arrived, which is what makes the two orders equivalent.
+        fn publish(&self, pipeline: Arc<Pipeline>) -> bool {
+            let mut state = self.state.lock().expect("shutdown state poisoned");
+            state.pipeline = Some(pipeline);
+            state.requested
+        }
+    }
+
     /// Where the renderer presents, handed to the capture thread.
     ///
     /// # Safety of the `Send` impl
     ///
     /// On Wayland these are raw pointers into the window the main thread
-    /// owns, valid only while it lives. `App` holds the window for the whole
-    /// run and exits the event loop only once the capture thread has reported
-    /// back, so the thread never outlives them.
+    /// owns, valid only while it lives. `App` holds the window until
+    /// `run_app` returns, and [`App::finish`] — the only path to that return
+    /// — stops the pipeline and joins the capture thread first, so the
+    /// pointers outlive every use of them. See [`Shutdown`] for why merely
+    /// holding the `JoinHandle` was not enough.
     struct WindowTarget {
         display: RawDisplayHandle,
         window: RawWindowHandle,
@@ -287,10 +440,43 @@ mod linux_example {
     struct App {
         proxy: EventLoopProxy<PlaybackDone>,
         window: Option<Window>,
-        /// Kept alive for the app's duration so the window does not outlive
-        /// the thread rendering into it; the window closes itself once
-        /// capture ends (see `user_event`).
-        _playback: Option<thread::JoinHandle<()>>,
+        shutdown: Arc<Shutdown>,
+        /// Runs [`Pipeline::stop`] off the event loop thread; see [`Shutdown`].
+        stopper: Option<thread::JoinHandle<()>>,
+        /// Joined — not merely held — in [`App::drop`], since dropping a
+        /// `JoinHandle` detaches its thread rather than waiting for it.
+        playback: Option<thread::JoinHandle<()>>,
+    }
+
+    impl App {
+        /// Ends the capture without blocking the event loop. Idempotent: a
+        /// second close request while the first stop is still running is
+        /// ignored.
+        fn begin_stop(&mut self) {
+            if self.stopper.is_some() {
+                return;
+            }
+            let shutdown = self.shutdown.clone();
+            self.stopper = Some(thread::spawn(move || {
+                if let Some(pipeline) = shutdown.request() {
+                    pipeline.stop();
+                }
+            }));
+        }
+    }
+
+    impl Drop for App {
+        fn drop(&mut self) {
+            self.begin_stop();
+            if let Some(stopper) = self.stopper.take() {
+                let _ = stopper.join();
+            }
+            if let Some(playback) = self.playback.take() {
+                let _ = playback.join();
+            }
+            // Only now is it safe to let go of the window.
+            self.window = None;
+        }
     }
 
     impl ApplicationHandler<PlaybackDone> for App {
@@ -323,8 +509,9 @@ mod linux_example {
             };
 
             let proxy = self.proxy.clone();
-            self._playback = Some(thread::spawn(move || {
-                if let Err(error) = play(target) {
+            let shutdown = self.shutdown.clone();
+            self.playback = Some(thread::spawn(move || {
+                if let Err(error) = play(target, &shutdown) {
                     eprintln!("capture failed: {error}");
                 }
                 let _ = proxy.send_event(PlaybackDone);
@@ -334,7 +521,7 @@ mod linux_example {
 
         fn window_event(
             &mut self,
-            event_loop: &ActiveEventLoop,
+            _event_loop: &ActiveEventLoop,
             window_id: WindowId,
             event: WindowEvent,
         ) {
@@ -342,7 +529,10 @@ mod linux_example {
                 return;
             }
             if let WindowEvent::CloseRequested = event {
-                event_loop.exit();
+                // Not `exit()`: the window has to stay mapped, and this loop
+                // has to keep dispatching, until capture is done with it.
+                // `PlaybackDone` is what exits. See `Shutdown`.
+                self.begin_stop();
             }
         }
 
@@ -351,7 +541,7 @@ mod linux_example {
         }
     }
 
-    fn play(target: WindowTarget) -> media_pp::Result<()> {
+    fn play(target: WindowTarget, shutdown: &Shutdown) -> media_pp::Result<()> {
         media_pp::init()?;
         let _log_guard = media_pp::log::init(
             env!("CARGO_PKG_NAME"),
@@ -417,6 +607,13 @@ mod linux_example {
             ctx.attach(source, 0, branch)?;
             Ok(())
         })?;
+
+        // Published before `run`, so a close that arrives from here on finds
+        // a pipeline to stop. `true` means one already did — while the portal
+        // dialog was up, say — and nothing has presented yet.
+        if shutdown.publish(pipeline.clone()) {
+            return Ok(());
+        }
 
         println!("presenting a {width}x{height} capture — close the window to stop");
         // `run()` starts capture on a background thread and returns right

@@ -28,7 +28,11 @@ fn main() -> impl std::process::Termination {
 
 #[cfg(target_os = "windows")]
 mod windows_example {
-    use std::{thread, time::Duration};
+    use std::{
+        sync::{Arc, Mutex},
+        thread,
+        time::Duration,
+    };
 
     use ffmpeg_next as ffmpeg;
     use media_pp::{
@@ -79,19 +83,110 @@ mod windows_example {
             window: None,
             path,
             seconds,
-            _playback: None,
+            shutdown: Arc::new(Shutdown::default()),
+            stopper: None,
+            playback: None,
         };
         event_loop.run_app(&mut app).expect("event loop failed");
     }
 
     struct PlaybackDone;
 
+    /// What lets the window outlive the thread presenting into it.
+    ///
+    /// Two things have to happen in order when the window is closed, and the
+    /// event loop thread can do neither of them directly:
+    ///
+    /// * [`Pipeline::stop`] blocks until every element's control cascade
+    ///   acknowledges, and the renderer's own `consume` can only acknowledge
+    ///   once the swapchain releases an image — which needs this event loop
+    ///   to keep pumping. Stopping from the event loop thread therefore
+    ///   deadlocks, so [`App::window_event`] hands the stop to its own thread.
+    /// * The window must not be dropped until the playback thread is done
+    ///   presenting to that `HWND`, so [`App::drop`] joins first.
+    ///
+    /// `requested` covers the order where the window is closed before the
+    /// playback thread has pipelines to stop at all.
+    #[derive(Default)]
+    struct Shutdown {
+        state: Mutex<ShutdownState>,
+    }
+
+    #[derive(Default)]
+    struct ShutdownState {
+        requested: bool,
+        pipelines: Vec<Arc<Pipeline>>,
+    }
+
+    impl Shutdown {
+        /// Records the close and hands back the pipelines to stop — however
+        /// many the playback thread got far enough to publish.
+        fn request(&self) -> Vec<Arc<Pipeline>> {
+            let mut state = self.state.lock().expect("shutdown state poisoned");
+            state.requested = true;
+            state.pipelines.clone()
+        }
+
+        /// Playback thread: publishes its pipelines and reports whether a
+        /// close already arrived, which is what makes the two orders
+        /// equivalent.
+        fn publish(&self, pipelines: &[Arc<Pipeline>]) -> bool {
+            let mut state = self.state.lock().expect("shutdown state poisoned");
+            state.pipelines = pipelines.to_vec();
+            state.requested
+        }
+
+        /// Whether the window has been closed, for the animation loop to end
+        /// early instead of running out its fixed duration.
+        fn requested(&self) -> bool {
+            self.state
+                .lock()
+                .expect("shutdown state poisoned")
+                .requested
+        }
+    }
+
     struct App {
         proxy: EventLoopProxy<PlaybackDone>,
         window: Option<Window>,
         path: String,
         seconds: u64,
-        _playback: Option<thread::JoinHandle<()>>,
+        shutdown: Arc<Shutdown>,
+        /// Runs [`Pipeline::stop`] off the event loop thread; see [`Shutdown`].
+        stopper: Option<thread::JoinHandle<()>>,
+        /// Joined — not merely held — in [`App::drop`], since dropping a
+        /// `JoinHandle` detaches its thread rather than waiting for it.
+        playback: Option<thread::JoinHandle<()>>,
+    }
+
+    impl App {
+        /// Ends playback without blocking the event loop. Idempotent: a second
+        /// close request while the first stop is still running is ignored.
+        fn begin_stop(&mut self) {
+            if self.stopper.is_some() {
+                return;
+            }
+            let shutdown = self.shutdown.clone();
+            self.stopper = Some(thread::spawn(move || {
+                for pipeline in shutdown.request() {
+                    pipeline.stop();
+                }
+            }));
+        }
+    }
+
+    impl Drop for App {
+        fn drop(&mut self) {
+            self.begin_stop();
+            if let Some(stopper) = self.stopper.take() {
+                let _ = stopper.join();
+            }
+            if let Some(playback) = self.playback.take() {
+                let _ = playback.join();
+            }
+            // Only now is it safe to let go of the window.
+            self.window = None;
+        }
     }
 
     impl ApplicationHandler<PlaybackDone> for App {
@@ -121,8 +216,9 @@ mod windows_example {
             let proxy = self.proxy.clone();
             let path = self.path.clone();
             let seconds = self.seconds;
-            self._playback = Some(thread::spawn(move || {
-                if let Err(e) = play(hwnd, &path, seconds) {
+            let shutdown = self.shutdown.clone();
+            self.playback = Some(thread::spawn(move || {
+                if let Err(e) = play(hwnd, &path, seconds, &shutdown) {
                     eprintln!("playback failed: {e}");
                 }
                 let _ = proxy.send_event(PlaybackDone);
@@ -132,7 +228,7 @@ mod windows_example {
 
         fn window_event(
             &mut self,
-            event_loop: &ActiveEventLoop,
+            _event_loop: &ActiveEventLoop,
             window_id: WindowId,
             event: WindowEvent,
         ) {
@@ -140,7 +236,10 @@ mod windows_example {
                 return;
             }
             if let WindowEvent::CloseRequested = event {
-                event_loop.exit();
+                // Not `exit()`: the window has to stay alive, and this loop
+                // has to keep pumping, until playback is done with it.
+                // `PlaybackDone` is what exits. See `Shutdown`.
+                self.begin_stop();
             }
         }
 
@@ -149,7 +248,7 @@ mod windows_example {
         }
     }
 
-    fn play(hwnd: isize, path: &str, seconds: u64) -> media_pp::Result<()> {
+    fn play(hwnd: isize, path: &str, seconds: u64, shutdown: &Shutdown) -> media_pp::Result<()> {
         media_pp::init()?;
         let _log_guard = media_pp::log::init(
             env!("CARGO_PKG_NAME"),
@@ -317,6 +416,17 @@ mod windows_example {
             Ok(())
         })?;
 
+        // Published before `run`, so a close that arrives from here on finds
+        // the pipelines to stop. `true` means one already did, and nothing
+        // has presented yet.
+        if shutdown.publish(&[
+            background_pipeline.clone(),
+            foreground_pipeline.clone(),
+            output_pipeline.clone(),
+        ]) {
+            return Ok(());
+        }
+
         output_pipeline.run();
         background_pipeline.run();
         foreground_pipeline.run();
@@ -324,6 +434,11 @@ mod windows_example {
         let steps = seconds.saturating_mul(30);
         let travel = output_width - foreground_width;
         for step in 0..steps {
+            // Closing the window ends the animation early rather than leaving
+            // it to run out the fixed duration with nothing to present to.
+            if shutdown.requested() {
+                break;
+            }
             let x = if steps <= 1 {
                 0
             } else {
@@ -363,7 +478,11 @@ mod windows_example {
 /// download-and-encode recording branch — so only the GPU stack differs.
 #[cfg(target_os = "linux")]
 mod linux_example {
-    use std::{thread, time::Duration};
+    use std::{
+        sync::{Arc, Mutex},
+        thread,
+        time::Duration,
+    };
 
     use ffmpeg_next as ffmpeg;
     use media_pp::{
@@ -404,12 +523,71 @@ mod linux_example {
             window: None,
             path,
             seconds,
-            _playback: None,
+            shutdown: Arc::new(Shutdown::default()),
+            stopper: None,
+            playback: None,
         };
         event_loop.run_app(&mut app).expect("event loop failed");
     }
 
     struct PlaybackDone;
+
+    /// What lets the window outlive the thread presenting into it.
+    ///
+    /// Two things have to happen in order when the window is closed, and the
+    /// event loop thread can do neither of them directly:
+    ///
+    /// * [`Pipeline::stop`] blocks until every element's control cascade
+    ///   acknowledges, and the renderer's own `consume` can only acknowledge
+    ///   once the compositor releases a swapchain image — which needs this
+    ///   event loop to keep dispatching. Stopping from the event loop thread
+    ///   therefore deadlocks, so [`App::window_event`] hands the stop to its
+    ///   own thread and keeps pumping.
+    /// * The window must not be dropped until the playback thread is done
+    ///   with it. On Wayland, tearing down the `wl_surface` under a
+    ///   `vkQueuePresentKHR` is a use-after-free, not a lost frame, so
+    ///   [`App::drop`] joins before letting go of the window.
+    ///
+    /// `requested` covers the order where the window is closed before the
+    /// playback thread has a pipeline to stop at all.
+    #[derive(Default)]
+    struct Shutdown {
+        state: Mutex<ShutdownState>,
+    }
+
+    #[derive(Default)]
+    struct ShutdownState {
+        requested: bool,
+        pipelines: Vec<Arc<Pipeline>>,
+    }
+
+    impl Shutdown {
+        /// Records the close and hands back the pipelines to stop — however
+        /// many the playback thread got far enough to publish.
+        fn request(&self) -> Vec<Arc<Pipeline>> {
+            let mut state = self.state.lock().expect("shutdown state poisoned");
+            state.requested = true;
+            state.pipelines.clone()
+        }
+
+        /// Playback thread: publishes its pipelines and reports whether a
+        /// close already arrived, which is what makes the two orders
+        /// equivalent.
+        fn publish(&self, pipelines: &[Arc<Pipeline>]) -> bool {
+            let mut state = self.state.lock().expect("shutdown state poisoned");
+            state.pipelines = pipelines.to_vec();
+            state.requested
+        }
+
+        /// Whether the window has been closed, for the animation loop to end
+        /// early instead of running out its fixed duration.
+        fn requested(&self) -> bool {
+            self.state
+                .lock()
+                .expect("shutdown state poisoned")
+                .requested
+        }
+    }
 
     /// Where the composited output is presented, handed to the playback
     /// thread.
@@ -417,10 +595,9 @@ mod linux_example {
     /// # Safety of the `Send` impl
     ///
     /// On Wayland these handles are raw pointers into the window the main
-    /// thread owns, so they are only valid while it lives. The playback
-    /// thread finishes on its own fixed duration and the window is not
-    /// dropped until the event loop exits, which happens after
-    /// `PlaybackDone` — the same arrangement `av_playback`'s shell documents.
+    /// thread owns, so they are only valid while it lives. [`App::drop`] is
+    /// what makes that hold: it joins the playback thread before the window
+    /// is dropped, whichever way the event loop ended. See [`Shutdown`].
     struct WindowTarget {
         display: RawDisplayHandle,
         window: RawWindowHandle,
@@ -434,7 +611,42 @@ mod linux_example {
         window: Option<Window>,
         path: String,
         seconds: u64,
-        _playback: Option<thread::JoinHandle<()>>,
+        shutdown: Arc<Shutdown>,
+        /// Runs [`Pipeline::stop`] off the event loop thread; see [`Shutdown`].
+        stopper: Option<thread::JoinHandle<()>>,
+        /// Joined — not merely held — in [`App::drop`], since dropping a
+        /// `JoinHandle` detaches its thread rather than waiting for it.
+        playback: Option<thread::JoinHandle<()>>,
+    }
+
+    impl App {
+        /// Ends playback without blocking the event loop. Idempotent: a second
+        /// close request while the first stop is still running is ignored.
+        fn begin_stop(&mut self) {
+            if self.stopper.is_some() {
+                return;
+            }
+            let shutdown = self.shutdown.clone();
+            self.stopper = Some(thread::spawn(move || {
+                for pipeline in shutdown.request() {
+                    pipeline.stop();
+                }
+            }));
+        }
+    }
+
+    impl Drop for App {
+        fn drop(&mut self) {
+            self.begin_stop();
+            if let Some(stopper) = self.stopper.take() {
+                let _ = stopper.join();
+            }
+            if let Some(playback) = self.playback.take() {
+                let _ = playback.join();
+            }
+            // Only now is it safe to let go of the window.
+            self.window = None;
+        }
     }
 
     impl ApplicationHandler<PlaybackDone> for App {
@@ -466,8 +678,9 @@ mod linux_example {
             let proxy = self.proxy.clone();
             let path = self.path.clone();
             let seconds = self.seconds;
-            self._playback = Some(thread::spawn(move || {
-                if let Err(e) = play(target, &path, seconds) {
+            let shutdown = self.shutdown.clone();
+            self.playback = Some(thread::spawn(move || {
+                if let Err(e) = play(target, &path, seconds, &shutdown) {
                     eprintln!("playback failed: {e}");
                 }
                 let _ = proxy.send_event(PlaybackDone);
@@ -477,7 +690,7 @@ mod linux_example {
 
         fn window_event(
             &mut self,
-            event_loop: &ActiveEventLoop,
+            _event_loop: &ActiveEventLoop,
             window_id: WindowId,
             event: WindowEvent,
         ) {
@@ -485,7 +698,10 @@ mod linux_example {
                 return;
             }
             if let WindowEvent::CloseRequested = event {
-                event_loop.exit();
+                // Not `exit()`: the window has to stay mapped, and this loop
+                // has to keep dispatching, until playback is done with it.
+                // `PlaybackDone` is what exits. See `Shutdown`.
+                self.begin_stop();
             }
         }
 
@@ -494,7 +710,12 @@ mod linux_example {
         }
     }
 
-    fn play(target: WindowTarget, path: &str, seconds: u64) -> media_pp::Result<()> {
+    fn play(
+        target: WindowTarget,
+        path: &str,
+        seconds: u64,
+        shutdown: &Shutdown,
+    ) -> media_pp::Result<()> {
         media_pp::init()?;
         let _log_guard = media_pp::log::init(
             env!("CARGO_PKG_NAME"),
@@ -671,6 +892,17 @@ mod linux_example {
             Ok(())
         })?;
 
+        // Published before `run`, so a close that arrives from here on finds
+        // the pipelines to stop. `true` means one already did, and nothing
+        // has presented yet.
+        if shutdown.publish(&[
+            background_pipeline.clone(),
+            foreground_pipeline.clone(),
+            output_pipeline.clone(),
+        ]) {
+            return Ok(());
+        }
+
         output_pipeline.run();
         background_pipeline.run();
         foreground_pipeline.run();
@@ -678,6 +910,11 @@ mod linux_example {
         let steps = seconds.saturating_mul(30);
         let travel = output_width - foreground_width;
         for step in 0..steps {
+            // Closing the window ends the animation early rather than leaving
+            // it to run out the fixed duration with nothing to present to.
+            if shutdown.requested() {
+                break;
+            }
             let x = if steps <= 1 {
                 0
             } else {
