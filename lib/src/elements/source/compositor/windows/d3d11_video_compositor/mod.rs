@@ -48,13 +48,13 @@ use crate::{
     bus::{Bus, BusEvent},
     control::{ControlMsg, ControlReceiver, drain_control},
     element::{Element, ElementType, Sink, Source, SourceElement, element_pp_log},
-    elements::{
-        VideoCompositorOptions,
-        filter::decoder::d3d11va_decoder::{d3d11va_texture, wrap_d3d11_texture},
-    },
+    elements::VideoCompositorOptions,
     error::Result,
     pad::SrcPad,
-    platform::windows::d3d11::compile_shader,
+    platform::windows::{
+        d3d11::compile_shader,
+        d3d11va::{d3d11va_texture, wrap_d3d11_texture},
+    },
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
     schedule::PeriodicSchedule,
 };

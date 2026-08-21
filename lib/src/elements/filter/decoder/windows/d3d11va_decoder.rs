@@ -1,79 +1,20 @@
-use std::{ffi::c_void, sync::Arc};
+use std::sync::Arc;
 
 use crate::pp_log::{PpLog, pp_error, pp_info};
 use ffmpeg_next::{self as ffmpeg, ffi};
 use thiserror::Error as ThisError;
-use windows::{
-    Win32::Graphics::Direct3D11::{D3D11_BIND_SHADER_RESOURCE, ID3D11Device, ID3D11Texture2D},
-    core::Interface,
-};
+use windows::Win32::Graphics::Direct3D11::{D3D11_BIND_SHADER_RESOURCE, ID3D11Device};
 
 use crate::{
     buffer::MediaBuffer,
     control::ControlMsg,
     element::{Element, ElementType, Sink, Source, element_pp_log},
     pad::SrcPad,
+    platform::windows::d3d11va::{create_hw_device_ctx, free_buffer, or_frames_bind_flags},
     pool::UnboundObjectPool,
 };
 
 use crate::elements::filter::is_codec_drain_boundary;
-
-/// Mirrors of the D3D11VA-specific structs from FFmpeg's
-/// `libavutil/hwcontext_d3d11va.h` (verified against the actual header
-/// linked on this machine, `C:\ffmpeg-lib\include\libavutil\hwcontext_d3d11va.h`
-/// — not from memory; see [`crate::elements::D3d12Decoder`]'s own D3D12
-/// mirrors for the sibling case and why this hand-mirroring is needed at
-/// all: `ffmpeg-sys-next` only binds the type-agnostic
-/// `AVHWDeviceContext`/`AVHWFramesContext`). COM pointers are kept as
-/// `*mut c_void` so this struct's layout depends only on pointer size, not
-/// on `windows-rs`'s own representation. If a future FFmpeg version
-/// changes this header's layout, these silently go stale — there's no
-/// compile-time check tying them together.
-///
-/// D3D11VA's actual per-frame representation is notably **not** shaped
-/// like D3D12's `AVD3D12VAFrame` (a wrapper struct pointed to by
-/// `AVFrame.data[0]`): per `AVD3D11FrameDescriptor`'s own doc comment in
-/// the header, a normal (non-custom-pool) D3D11VA frame stores the
-/// `ID3D11Texture2D*` directly in `AVFrame.data[0]` and the array-texture
-/// slice index directly in `AVFrame.data[1]` (cast from `intptr_t`) — no
-/// wrapper struct dereference needed at all, and no fence/sync info here
-/// either (see [`crate::elements::D3d11Renderer`]'s own docs on why: this
-/// crate only ever uses a single shared `ID3D11Device`+context, so there's
-/// nothing to synchronize explicitly).
-#[repr(C)]
-struct AVD3D11VADeviceContext {
-    device: *mut c_void,
-    device_context: *mut c_void,
-    video_device: *mut c_void,
-    video_context: *mut c_void,
-    lock: Option<unsafe extern "C" fn(lock_ctx: *mut c_void)>,
-    unlock: Option<unsafe extern "C" fn(lock_ctx: *mut c_void)>,
-    lock_ctx: *mut c_void,
-}
-
-/// `AVHWFramesContext.hwctx` once cast for `AV_HWDEVICE_TYPE_D3D11VA` — used
-/// **only** by [`configure_hw_frames_ctx`] to OR in `D3D11_BIND_SHADER_RESOURCE`
-/// onto whatever `bind_flags` libavcodec's own `avcodec_get_hw_frames_parameters`
-/// already set (typically just `D3D11_BIND_DECODER`, enough for the decode
-/// API itself but not for `CreateShaderResourceView`, which is what
-/// [`crate::elements::D3d11Renderer`] needs to draw a decoded frame at all).
-/// This is deliberately a much narrower use of this struct than an earlier,
-/// abandoned version of this module made: that version built an entire
-/// `AVHWFramesContext`+`AVD3D11VAFramesContext` from scratch by hand and
-/// corrupted memory badly enough to trip `/GS` (see [`wrap_d3d11_texture`]'s
-/// own docs on that history). Here, every field except this one `bind_flags`
-/// write is populated by FFmpeg's own C code (`avcodec_get_hw_frames_parameters`
-/// for the base `AVHWFramesContext`, and its own D3D11VA-specific internals
-/// for whatever it already put in `hwctx`) — this function only ever reads
-/// or ORs into one already-initialized `u32`, never constructs this struct
-/// itself.
-#[repr(C)]
-struct AVD3D11VAFramesContext {
-    texture: *mut c_void,
-    bind_flags: u32,
-    misc_flags: u32,
-    texture_infos: *mut c_void,
-}
 
 /// Errors specific to `D3d11Decoder`. Converts into the crate-wide
 /// `Error` via `?` (see [`crate::error::Error`]).
@@ -282,186 +223,11 @@ impl Drop for D3d11Decoder {
     }
 }
 
-/// Shared with [`crate::elements::D3d11Upload`] and
-/// [`crate::elements::DxgiCaptureSource`]'s GPU capture mode — every
-/// producer of a `Pixel::D3D11` frame in this crate goes through this same
-/// device-context setup, which is what lets [`d3d11va_texture`] read any
-/// of their frames identically. Returns a raw `AVERROR` code rather than
-/// `D3d11DecoderError` so it doesn't tie those callers to this module's
-/// own error type; each call site maps it into its own error variant.
-pub(crate) unsafe fn create_hw_device_ctx(
-    device: &ID3D11Device,
-) -> Result<*mut ffi::AVBufferRef, i32> {
-    unsafe {
-        let buf = ffi::av_hwdevice_ctx_alloc(ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_D3D11VA);
-        if buf.is_null() {
-            return Err(-1);
-        }
-
-        let hw_device_ctx = (*buf).data as *mut ffi::AVHWDeviceContext;
-        let d3d11_ctx = (*hw_device_ctx).hwctx as *mut AVD3D11VADeviceContext;
-        // AddRef'd, not borrowed — unlike the D3D12 sibling
-        // (`platform::windows::d3d12va::create_hw_device_ctx`),
-        // whose comment this one used to copy verbatim. Verified against
-        // the real `libavutil/hwcontext_d3d11va.c` (n8.0): `d3d11va_device_uninit`
-        // unconditionally calls `ID3D11Device_Release(device_hwctx->device)`
-        // when the hw device context is freed — i.e. it assumes ownership
-        // of whatever's in this field, not a borrow. `d3d12va_device_uninit`
-        // does the opposite (never releases the caller-provided device),
-        // which is what the old comment's claim was actually true for.
-        // Handing over a bare `device.as_raw()` here (no `AddRef`) meant
-        // FFmpeg's own `Release()` decremented a reference count `device`'s
-        // own Rust-side ownership still believed it held — a genuine
-        // one-too-many `Release()` that didn't crash immediately, only
-        // later, once every other reference (including this crate's own
-        // final `ID3D11Device` drop) had also released, at which point the
-        // COM object was already gone (`STATUS_ACCESS_VIOLATION`/
-        // `STATUS_BREAKPOINT` from the debug heap, depending on the run).
-        // `.clone()` here gives FFmpeg its own independent, genuinely
-        // owned reference to release — `device` is the header's one
-        // mandatory field; `device_context`/`video_device`/`video_context`
-        // are all derived from it on init if left unset.
-        (*d3d11_ctx).device = device.clone().into_raw();
-
-        let result = ffi::av_hwdevice_ctx_init(buf);
-        if result < 0 {
-            free_buffer(buf);
-            return Err(result);
-        }
-
-        Ok(buf)
-    }
-}
-
-/// Shared with [`crate::elements::D3d11Upload`]/[`crate::elements::DxgiCaptureSource`]
-/// — see [`create_hw_device_ctx`]'s own docs.
-pub(crate) unsafe fn free_buffer(mut buf: *mut ffi::AVBufferRef) {
-    unsafe { ffi::av_buffer_unref(&mut buf) };
-}
-
-unsafe extern "C" fn release_d3d11_texture(_opaque: *mut c_void, data: *mut u8) {
-    // `data` is the exact raw COM pointer `wrap_d3d11_texture` handed off
-    // via `Interface::into_raw` — reconstructing it here and letting it
-    // drop is what actually releases the texture, exactly once, whenever
-    // FFmpeg's own refcounting (`av_frame_unref`/the last
-    // `Arc<UnboundObjectPoolRef<..>>` clone dropping) determines nothing
-    // references this buffer anymore.
-    unsafe {
-        drop(ID3D11Texture2D::from_raw(data as *mut c_void));
-    }
-}
-
-/// Wraps `texture` (a COM reference this function takes ownership of) as a
-/// `Pixel::D3D11` `ffmpeg::frame::Video`, *without* going through FFmpeg's
-/// own `AVHWDeviceContext`/`AVHWFramesContext` machinery at all —
-/// `av_hwframe_ctx_init`'s real D3D11VA implementation
-/// (`libavutil/hwcontext_d3d11va.c`, verified against the exact `n8.0`
-/// source matching this project's linked FFmpeg) turned out to be unsafe
-/// to drive from a hand-mirrored `AVD3D11VAFramesContext*` — an earlier
-/// version of this function did exactly that and corrupted memory badly
-/// enough to trip `/GS` (`STATUS_STACK_BUFFER_OVERRUN`), for a reason not
-/// fully root-caused. [`crate::elements::D3d11Upload`] and
-/// [`crate::elements::DxgiCaptureSource`]'s GPU capture mode build their
-/// own `ID3D11Texture2D` directly via plain `windows-rs` calls instead
-/// (safe, ordinary D3D11 API usage, no struct-layout guessing) and use
-/// this function only to make the *result* look like a normal
-/// `Pixel::D3D11` frame to the rest of this crate (in particular
-/// [`d3d11va_texture`], which reads any `Pixel::D3D11` frame the same way
-/// regardless of how it was produced).
-///
-/// Uses `av_buffer_create` — a plain, stable, generically-documented
-/// libavutil API, not a hand-mirrored struct — to give the resulting
-/// `AVFrame` real reference-counted ownership of `texture`: FFmpeg calls
-/// [`release_d3d11_texture`] (which drops the COM reference) exactly once,
-/// once the last reference — including any downstream
-/// `Arc<UnboundObjectPoolRef<..>>` clone — is gone. [`D3d11Decoder`] doesn't
-/// need this: real hardware decode still goes through
-/// `av_hwframe_get_buffer`/libavcodec's own D3D11VA hwaccel internally
-/// allocating its frames context (see [`configure_hw_frames_ctx`] for the
-/// one thing this crate *does* still need to customize about it — bind
-/// flags, not the struct layout that corrupted memory here).
-pub(crate) fn wrap_d3d11_texture(
-    texture: ID3D11Texture2D,
-    width: u32,
-    height: u32,
-) -> ffmpeg::frame::Video {
-    let mut frame = ffmpeg::frame::Video::empty();
-    let raw = texture.into_raw();
-    unsafe {
-        let ptr = frame.as_mut_ptr();
-        (*ptr).format = ffi::AVPixelFormat::AV_PIX_FMT_D3D11 as i32;
-        (*ptr).width = width as i32;
-        (*ptr).height = height as i32;
-        // Per `AVD3D11FrameDescriptor`'s own doc comment (see this
-        // module's top-of-file docs): the texture pointer goes directly
-        // in `data[0]`, the array-texture slice index directly in
-        // `data[1]` — `0` here since this is never an array texture.
-        (*ptr).data[0] = raw as *mut u8;
-        (*ptr).data[1] = std::ptr::null_mut();
-        let buf = ffi::av_buffer_create(
-            raw as *mut u8,
-            std::mem::size_of::<*mut c_void>(),
-            Some(release_d3d11_texture),
-            std::ptr::null_mut(),
-            0,
-        );
-        if buf.is_null() {
-            // `av_buffer_create`'s own allocation failed — nothing will
-            // ever call `release_d3d11_texture` for the COM reference
-            // `into_raw()` already handed off above, and `data[0]` must
-            // not keep pointing at it (whatever reads this frame next
-            // would treat it as a still-live texture). Release it here
-            // ourselves instead of leaking it or leaving a dangling
-            // pointer behind, then fail loudly: this is an allocation
-            // failure with no sane per-frame recovery, not a condition
-            // worth threading a `Result` through every one of this
-            // function's callers for.
-            (*ptr).data[0] = std::ptr::null_mut();
-            drop(ID3D11Texture2D::from_raw(raw));
-            panic!("av_buffer_create failed to allocate a D3D11 texture buffer wrapper");
-        }
-        (*ptr).buf[0] = buf;
-    }
-    frame
-}
-
-/// Builds and initializes `avctx->hw_frames_ctx` for D3D11VA decode, with
-/// `D3D11_BIND_SHADER_RESOURCE` added on top of whatever libavcodec's own
-/// `avcodec_get_hw_frames_parameters` already sets — see
-/// [`AVD3D11VAFramesContext`]'s own docs on why that's the one thing this
-/// crate needs to customize. Must run from inside `get_format` (FFmpeg's
-/// own documented contract for this API — see `avcodec_get_hw_frames_parameters`'s
-/// doc comment) with the exact same `avctx` `get_format` received.
-///
-/// Without this, decode still succeeds and produces valid `Pixel::D3D11`
-/// frames (this is what an earlier version of this function — which just
-/// picked the format and returned, leaving `hw_frames_ctx` to libavcodec's
-/// own automatic fallback path — actually did), but
-/// `ID3D11Device::CreateShaderResourceView` fails on the resulting textures:
-/// libavcodec's own default `bind_flags` only cover what the D3D11 video
-/// decode API itself needs (`D3D11_BIND_DECODER`), not sampling from a
-/// pixel shader.
-/// ORs `flags` into `frames_ctx`'s D3D11VA-specific `bind_flags`.
-///
-/// The one and only place this crate touches [`AVD3D11VAFramesContext`], so
-/// the hand-mirrored layout stays confined to the module that documents its
-/// provenance. `frames_ctx` must be a context libavutil itself allocated —
-/// through `avcodec_get_hw_frames_parameters` (this module) or
-/// `av_hwframe_ctx_alloc` ([`crate::elements::D3d11NvencEncoder`]) — and
-/// must not yet have been passed to `av_hwframe_ctx_init`, since the
-/// struct's own documentation forbids modifying it once frames exist.
-///
-/// libavutil applies no default here: `hwcontext_d3d11va.c` copies
-/// `BindFlags` straight into its `D3D11_TEXTURE2D_DESC`, so leaving it zero
-/// makes `CreateTexture2D` fail with `E_INVALIDARG` rather than producing a
-/// usable pool. Every caller has to say what it needs the textures for.
-pub(crate) unsafe fn or_frames_bind_flags(frames_ctx: *mut ffi::AVHWFramesContext, flags: u32) {
-    unsafe {
-        let d3d11_frames = (*frames_ctx).hwctx as *mut AVD3D11VAFramesContext;
-        (*d3d11_frames).bind_flags |= flags;
-    }
-}
-
+/// Builds and initializes `avctx->hw_frames_ctx` during D3D11VA format
+/// negotiation. Decoder surfaces need `D3D11_BIND_SHADER_RESOURCE` in
+/// addition to the decoder bind flags so downstream renderers and filters can
+/// sample them. The shared ABI write is confined to
+/// [`crate::platform::windows::d3d11va::or_frames_bind_flags`].
 unsafe fn configure_hw_frames_ctx(ctx: *mut ffi::AVCodecContext) -> Result<(), i32> {
     unsafe {
         let mut frames_ref: *mut ffi::AVBufferRef = std::ptr::null_mut();
@@ -513,27 +279,6 @@ unsafe extern "C" fn get_format(
             fmt = fmt.add(1);
         }
         ffi::AVPixelFormat::AV_PIX_FMT_NONE
-    }
-}
-
-/// Extracts `(texture, array_index)` from a `Pixel::D3D11` frame — `None`
-/// if `frame` isn't actually a D3D11VA frame. Unlike
-/// [`crate::elements::D3d12Decoder`]'s `d3d12va_texture` (which
-/// dereferences a wrapper struct pointed to by `data[0]`), a normal
-/// D3D11VA frame stores the `ID3D11Texture2D*` directly in `data[0]` and
-/// the array-texture slice index directly in `data[1]` — see this
-/// module's own doc comment on `AVD3D11VADeviceContext` for why. `texture`
-/// is a borrowed raw `ID3D11Texture2D*` — still owned by `frame`'s own hw
-/// frame pool reference; the caller must `AddRef` (e.g. via
-/// `Interface::from_raw_borrowed(..).clone()`) before holding onto it
-/// independently of `frame`.
-pub(crate) fn d3d11va_texture(frame: &ffmpeg::frame::Video) -> Option<(*mut c_void, isize)> {
-    if frame.format() != ffmpeg::format::Pixel::D3D11 {
-        return None;
-    }
-    unsafe {
-        let ptr = frame.as_ptr();
-        Some(((*ptr).data[0] as *mut c_void, (*ptr).data[1] as isize))
     }
 }
 

@@ -21,12 +21,12 @@ use crate::{
     buffer::MediaBuffer,
     control::ControlMsg,
     element::{Element, ElementType, Sink, Source, element_pp_log},
-    elements::filter::decoder::d3d11va_decoder::{
-        create_hw_device_ctx, d3d11va_texture, free_buffer, or_frames_bind_flags,
-    },
     elements::filter::is_codec_drain_boundary,
     error::Result,
     pad::SrcPad,
+    platform::windows::d3d11va::{
+        create_hw_device_ctx, d3d11va_texture, free_buffer, or_frames_bind_flags,
+    },
 };
 
 /// Errors specific to `D3d11NvencEncoder`. Converts into the crate-wide
@@ -221,7 +221,7 @@ pub struct D3d11NvencEncoderOptions {
 /// [`crate::elements::DxgiCaptureSource`]'s GPU mode and
 /// [`crate::elements::D3d11VideoCompositor`] all build their textures with
 /// plain `windows-rs` calls and wrap them via
-/// `d3d11va_decoder::wrap_d3d11_texture`, deliberately bypassing FFmpeg's
+/// `platform::windows::d3d11va::wrap_d3d11_texture`, deliberately bypassing FFmpeg's
 /// frames-context machinery altogether (that function's own docs explain
 /// why: driving it from a hand-mirrored `AVD3D11VAFramesContext*` corrupted
 /// memory badly enough to trip `/GS`).
@@ -775,7 +775,7 @@ mod tests {
         let mut texture = None;
         unsafe { device.CreateTexture2D(&description, None, Some(&mut texture)) }
             .expect("creating a plain D3D11 texture should succeed on a working device");
-        crate::elements::filter::decoder::d3d11va_decoder::wrap_d3d11_texture(
+        crate::platform::windows::d3d11va::wrap_d3d11_texture(
             texture.expect("CreateTexture2D succeeded without producing a texture"),
             frame_width,
             frame_height,

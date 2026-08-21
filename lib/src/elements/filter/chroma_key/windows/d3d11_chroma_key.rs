@@ -21,10 +21,10 @@ use crate::{
     color::Color,
     control::ControlMsg,
     element::{Element, ElementType, Sink, Source, element_pp_log},
-    elements::filter::decoder::d3d11va_decoder::{d3d11va_texture, wrap_d3d11_texture},
     error::Result,
     pad::SrcPad,
     platform::windows::d3d11::compile_shader,
+    platform::windows::d3d11va::{d3d11va_texture, wrap_d3d11_texture},
     pool::UnboundObjectPool,
 };
 

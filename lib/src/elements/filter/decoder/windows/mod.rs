@@ -1,5 +1,5 @@
 #[cfg(feature = "d3d11")]
-pub(crate) mod d3d11va_decoder;
+mod d3d11va_decoder;
 #[cfg(feature = "d3d12")]
 mod d3d12va_decoder;
 

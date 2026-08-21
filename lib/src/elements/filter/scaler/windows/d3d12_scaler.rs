@@ -644,7 +644,7 @@ fn validate_dimensions(width: u32, height: u32) -> std::result::Result<(), D3d12
     if width == 0 || height == 0 {
         return Err(D3d12ScalerError::InvalidOutputDimensions { width, height });
     }
-    if width % 2 != 0 || height % 2 != 0 {
+    if !width.is_multiple_of(2) || !height.is_multiple_of(2) {
         return Err(D3d12ScalerError::OddNv12Dimensions { width, height });
     }
     Ok(())

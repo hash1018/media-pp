@@ -18,8 +18,7 @@ use windows::Win32::Graphics::{
 
 use super::{D3d11VideoCompositorError, video_handle::D3d11VideoLayerHandle};
 use crate::{
-    color::Color, elements::filter::decoder::d3d11va_decoder::wrap_d3d11_texture,
-    pool::UnboundObjectPool,
+    color::Color, platform::windows::d3d11va::wrap_d3d11_texture, pool::UnboundObjectPool,
 };
 
 use super::super::super::text_layer::{TextRasterError, rasterize_coverage};

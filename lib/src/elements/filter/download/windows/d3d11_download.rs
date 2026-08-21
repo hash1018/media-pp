@@ -19,9 +19,9 @@ use crate::{
     buffer::MediaBuffer,
     control::ControlMsg,
     element::{Element, ElementType, Sink, Source, element_pp_log},
-    elements::filter::decoder::d3d11va_decoder::d3d11va_texture,
     error::Result,
     pad::SrcPad,
+    platform::windows::d3d11va::d3d11va_texture,
     pool::UnboundObjectPool,
 };
 
@@ -371,7 +371,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::elements::filter::decoder::d3d11va_decoder::wrap_d3d11_texture;
+    use crate::platform::windows::d3d11va::wrap_d3d11_texture;
 
     /// Real hardware round trip: build a small BGRA texture directly (the
     /// same shape a `D3d11VideoCompositor` output would have), wrap it as

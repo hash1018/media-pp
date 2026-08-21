@@ -38,9 +38,9 @@ use crate::{
     control::{ControlReceiver, drain_control},
     element::{Element, ElementType, Source, SourceElement, element_pp_log},
     elements::VideoFormat,
-    elements::filter::decoder::d3d11va_decoder::wrap_d3d11_texture,
     error::Result,
     pad::SrcPad,
+    platform::windows::d3d11va::wrap_d3d11_texture,
     pool::UnboundObjectPool,
     schedule::PeriodicSchedule,
 };
