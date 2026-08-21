@@ -44,9 +44,10 @@ pub use driver::{
 };
 pub use filter::{
     AudioCodec, AudioResampler, AudioResamplerError, AudioVolume, AudioVolumeError,
-    AudioVolumeHandle, AudioVolumeOptions, Pacer, PacerError, SwAudioEncoder, SwAudioEncoderError,
-    SwAudioEncoderOptions, SwDecoder, SwDecoderError, SwEncoder, SwEncoderError, SwEncoderOptions,
-    SwScaler, SwScalerError, Tee, TeeBuilder, TeeHandle, VideoCodec, VideoSynchronizer,
+    AudioVolumeHandle, AudioVolumeOptions, ChromaKeyMethod, ChromaKeyOptions, Pacer, PacerError,
+    SwAudioEncoder, SwAudioEncoderError, SwAudioEncoderOptions, SwChromaKey, SwChromaKeyError,
+    SwDecoder, SwDecoderError, SwEncoder, SwEncoderError, SwEncoderOptions, SwScaler,
+    SwScalerError, Tee, TeeBuilder, TeeHandle, VideoCodec, VideoSynchronizer,
     VideoSynchronizerError,
 };
 #[cfg(feature = "cuda")]

@@ -33,7 +33,7 @@ use crate::{
     elements::{
         AppSourceError, AudioMixerError, AudioResamplerError, AudioVolumeError, FileDemuxError,
         HlsMuxerError, Mp4MuxerError, PacerError, RtspSourceError, SwAudioEncoderError,
-        SwDecoderError, SwEncoderError, SwScalerError, SwVideoCompositorError,
+        SwChromaKeyError, SwDecoderError, SwEncoderError, SwScalerError, SwVideoCompositorError,
         TestAudioSourceError, TestVideoSourceError, VideoSynchronizerError,
     },
     graph::GraphError,
@@ -122,6 +122,9 @@ pub enum Error {
 
     #[error(transparent)]
     SwScalerError(#[from] SwScalerError),
+
+    #[error(transparent)]
+    SwChromaKeyError(#[from] SwChromaKeyError),
 
     #[error(transparent)]
     QueueError(#[from] QueueError),

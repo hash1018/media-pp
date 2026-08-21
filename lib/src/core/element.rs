@@ -53,6 +53,7 @@ pub enum ElementType {
     Pacer,
     VideoSynchronizer,
     SwScaler,
+    SwChromaKey,
     CudaScaler,
     D3d11Scaler,
     Tee,
