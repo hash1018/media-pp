@@ -25,35 +25,47 @@ use crate::{
 /// via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum D3d11UploadError {
+    /// Creating or updating a D3D11 texture failed.
     #[error("windows error: {0}")]
     Windows(#[from] windows::core::Error),
+    /// The CPU pixel format cannot be represented by this uploader.
 
     #[error(
         "D3d11Upload only accepts Pixel::NV12 and Pixel::BGRA frames (chain a \
          SwScaler in front of it), got {0:?}"
     )]
     UnsupportedFormat(ffmpeg::format::Pixel),
+    /// A CPU frame plane is shorter than its stride and height require.
 
     #[error(
         "frame's plane holds {actual} bytes, too few for {height} rows of \
          stride {stride}; uploading it would read past the end of the buffer"
     )]
     PlaneTooSmall {
+        /// Bytes actually available in the plane.
         actual: usize,
+        /// Declared row stride in bytes.
         stride: usize,
+        /// Number of rows that must be uploaded.
         height: u32,
     },
+    /// Input dimensions differ from the fixed texture dimensions.
 
     #[error(
         "frame is {actual_width}x{actual_height}, but D3d11Upload was \
          opened for {expected_width}x{expected_height}"
     )]
     DimensionMismatch {
+        /// Input frame width in pixels.
         actual_width: u32,
+        /// Input frame height in pixels.
         actual_height: u32,
+        /// Width configured for this uploader.
         expected_width: u32,
+        /// Height configured for this uploader.
         expected_height: u32,
     },
+    /// The sink received a buffer other than decoded video or end-of-stream.
 
     #[error("D3d11Upload only handles Video frames, got a {0}")]
     UnsupportedBuffer(&'static str),

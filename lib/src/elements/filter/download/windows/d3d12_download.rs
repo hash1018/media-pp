@@ -16,31 +16,42 @@ use crate::{
 /// Errors specific to [`D3d12Download`].
 #[derive(Debug, ThisError)]
 pub enum D3d12DownloadError {
+    /// The input frame is not backed by a D3D12 texture.
     #[error("D3d12Download only accepts Pixel::D3D12 frames, got {0:?}")]
     UnsupportedFormat(ffmpeg::format::Pixel),
+    /// The sink received a buffer other than decoded video or end-of-stream.
 
     #[error("D3d12Download only accepts Video and Eos buffers, got a {0}")]
     UnsupportedBuffer(&'static str),
+    /// Input dimensions differ from the fixed download dimensions.
 
     #[error(
         "frame is {actual_width}x{actual_height}, but D3d12Download was opened for \
          {expected_width}x{expected_height}"
     )]
     DimensionMismatch {
+        /// Input frame width in pixels.
         actual_width: u32,
+        /// Input frame height in pixels.
         actual_height: u32,
+        /// Width configured for this downloader.
         expected_width: u32,
+        /// Height configured for this downloader.
         expected_height: u32,
     },
+    /// The frame does not retain the D3D12 hardware frames context that owns it.
 
     #[error("D3D12 frame has no valid hardware frames context")]
     MissingFramesContext,
+    /// The D3D12 hardware surface is not NV12.
 
     #[error("D3d12Download only reads NV12 D3D12 surfaces, got {0:?}")]
     UnsupportedSurfaceFormat(ffmpeg::format::Pixel),
+    /// FFmpeg failed to transfer D3D12 pixels into a CPU frame.
 
     #[error("failed to download D3D12 frame (code {0})")]
     TransferData(i32),
+    /// FFmpeg could not copy timing and color metadata to the CPU frame.
 
     #[error("failed to copy downloaded frame metadata (code {0})")]
     CopyProperties(i32),
@@ -74,6 +85,7 @@ pub struct D3d12Download {
 }
 
 impl D3d12Download {
+    /// Creates a downloader for fixed-size NV12 D3D12 frames.
     pub fn new(name: impl Into<String>, width: u32, height: u32) -> Self {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::D3d12Download, &name, None);

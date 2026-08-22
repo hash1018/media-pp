@@ -29,20 +29,25 @@ use crate::{
 /// via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum D3d11DownloadError {
+    /// Creating, copying, or mapping a D3D11 staging texture failed.
     #[error("windows error: {0}")]
     Windows(#[from] windows::core::Error),
+    /// The input frame is not backed by a D3D11 texture.
 
     #[error("D3d11Download only accepts Pixel::D3D11 frames, got {0:?}")]
     UnsupportedFormat(ffmpeg::format::Pixel),
+    /// A frame tagged as D3D11 contains no valid texture reference.
 
     #[error(
         "frame claimed the D3D11 pixel format but carries no texture — must \
          come from D3d11Upload/D3d11Decoder/DxgiCaptureSource's GPU mode/D3d11VideoCompositor"
     )]
     InvalidD3d11Frame,
+    /// The input texture uses a DXGI format this downloader cannot copy.
 
     #[error("D3d11Download only reads DXGI_FORMAT_B8G8R8A8_UNORM textures, got {0:?}")]
     UnsupportedTextureFormat(DXGI_FORMAT),
+    /// The input texture belongs to another D3D11 device.
 
     #[error(
         "a Pixel::D3D11 frame's texture lives on a different ID3D11Device \
@@ -50,30 +55,47 @@ pub enum D3d11DownloadError {
          one pipeline must share exactly one device for zero-copy to be valid"
     )]
     DeviceMismatch,
+    /// Input dimensions differ from the fixed download dimensions.
 
     #[error(
         "frame is {actual_width}x{actual_height}, but D3d11Download was \
          opened for {expected_width}x{expected_height}"
     )]
     DimensionMismatch {
+        /// Input frame width in pixels.
         actual_width: u32,
+        /// Input frame height in pixels.
         actual_height: u32,
+        /// Width configured for this downloader.
         expected_width: u32,
+        /// Height configured for this downloader.
         expected_height: u32,
     },
+    /// The backing texture is smaller than the visible frame.
 
     #[error(
         "D3D11 texture is {actual_width}x{actual_height}, smaller than {expected_width}x{expected_height}"
     )]
     TextureTooSmall {
+        /// Backing texture width in pixels.
         actual_width: u32,
+        /// Backing texture height in pixels.
         actual_height: u32,
+        /// Visible frame width in pixels.
         expected_width: u32,
+        /// Visible frame height in pixels.
         expected_height: u32,
     },
+    /// The frame selects a texture-array slice outside the resource bounds.
 
     #[error("D3D11 texture array index {index} is outside ArraySize {array_size}")]
-    InvalidArrayIndex { index: isize, array_size: u32 },
+    InvalidArrayIndex {
+        /// Invalid texture-array index.
+        index: isize,
+        /// Number of slices in the texture array.
+        array_size: u32,
+    },
+    /// The sink received a buffer other than decoded video or end-of-stream.
 
     #[error("D3d11Download only handles Video frames, got a {0}")]
     UnsupportedBuffer(&'static str),

@@ -34,37 +34,49 @@ const POOL_SIZE: i32 = 4;
 /// via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum D3d12UploadError {
+    /// FFmpeg could not wrap the supplied D3D12 device.
     #[error("failed to create D3D12VA hw device context (code {0})")]
     HwDeviceInit(i32),
+    /// FFmpeg could not initialize the D3D12 hardware frame pool.
 
     #[error("failed to create D3D12VA hw frames context (code {0})")]
     HwFramesInit(i32),
+    /// FFmpeg could not acquire a texture from the D3D12 frame pool.
 
     #[error("failed to allocate a GPU frame (code {0})")]
     GetBuffer(i32),
+    /// FFmpeg failed to transfer CPU pixels into the D3D12 texture.
 
     #[error("failed to upload frame to the GPU (code {0})")]
     TransferData(i32),
+    /// FFmpeg could not copy timing and color metadata to the GPU frame.
 
     #[error("failed to copy uploaded frame metadata (code {0})")]
     CopyProperties(i32),
+    /// The CPU frame format is not the required NV12 layout.
 
     #[error(
         "D3d12Upload only accepts Pixel::NV12 frames (chain a SwScaler in \
          front of it), got {0:?}"
     )]
     UnsupportedFormat(ffmpeg::format::Pixel),
+    /// Input dimensions differ from the fixed upload dimensions.
 
     #[error(
         "frame is {actual_width}x{actual_height}, but D3d12Upload was \
          opened for {expected_width}x{expected_height}"
     )]
     DimensionMismatch {
+        /// Input frame width in pixels.
         actual_width: u32,
+        /// Input frame height in pixels.
         actual_height: u32,
+        /// Width configured for this uploader.
         expected_width: u32,
+        /// Height configured for this uploader.
         expected_height: u32,
     },
+    /// The sink received a buffer other than decoded video or end-of-stream.
 
     #[error("D3d12Upload only handles Video frames, got a {0}")]
     UnsupportedBuffer(&'static str),

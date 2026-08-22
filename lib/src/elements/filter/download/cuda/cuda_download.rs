@@ -22,22 +22,30 @@ use crate::{
 /// via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum CudaDownloadError {
+    /// The input frame is not backed by CUDA hardware surfaces.
     #[error("CudaDownload only downloads CUDA frames, got {0:?}")]
     UnsupportedFormat(ffmpeg::format::Pixel),
+    /// The sink received a buffer other than decoded video or end-of-stream.
 
     #[error("CudaDownload only accepts Video and Eos buffers, got a {0}")]
     UnsupportedBuffer(&'static str),
+    /// Input dimensions differ from the fixed download dimensions.
 
     #[error(
         "frame is {actual_width}x{actual_height}, but this CudaDownload was built for \
          {expected_width}x{expected_height}"
     )]
     DimensionMismatch {
+        /// Input frame width in pixels.
         actual_width: u32,
+        /// Input frame height in pixels.
         actual_height: u32,
+        /// Width configured for this downloader.
         expected_width: u32,
+        /// Height configured for this downloader.
         expected_height: u32,
     },
+    /// The CUDA surface layout differs from the expected CPU output format.
 
     /// The frame carries no hardware frames context, so it did not come from
     /// a CUDA producer at all.
@@ -49,11 +57,15 @@ pub enum CudaDownloadError {
     #[error("CUDA frame belongs to a different CUDA context than this CudaDownload")]
     ForeignContext,
 
+    /// The CUDA surface layout differs from the expected CPU output format.
     #[error("this CudaDownload was built for {expected:?} surfaces, got {actual:?}")]
     UnsupportedSurfaceFormat {
+        /// Surface format expected by this downloader.
         expected: ffmpeg::format::Pixel,
+        /// Surface format carried by the input frame.
         actual: ffmpeg::format::Pixel,
     },
+    /// FFmpeg failed to transfer CUDA pixels into a CPU frame.
 
     #[error("CUDA to CPU transfer failed (code {0})")]
     Transfer(i32),

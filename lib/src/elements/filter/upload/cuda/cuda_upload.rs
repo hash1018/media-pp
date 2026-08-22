@@ -23,34 +23,47 @@ use crate::{
 /// `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum CudaUploadError {
+    /// The CPU frame format differs from the upload surface format.
     #[error("this CudaUpload uploads {expected:?} frames, got {actual:?}")]
     UnsupportedFormat {
+        /// CPU pixel format configured for this uploader.
         expected: ffmpeg::format::Pixel,
+        /// Pixel format carried by the input frame.
         actual: ffmpeg::format::Pixel,
     },
+    /// The sink received a buffer other than decoded video or end-of-stream.
 
     #[error("CudaUpload only accepts Video buffers, got a {0}")]
     UnsupportedBuffer(&'static str),
+    /// Input dimensions differ from the fixed upload dimensions.
 
     #[error(
         "frame is {actual_width}x{actual_height}, but this CudaUpload was built for \
          {expected_width}x{expected_height}"
     )]
     DimensionMismatch {
+        /// Input frame width in pixels.
         actual_width: u32,
+        /// Input frame height in pixels.
         actual_height: u32,
+        /// Width configured for this uploader.
         expected_width: u32,
+        /// Height configured for this uploader.
         expected_height: u32,
     },
+    /// FFmpeg could not allocate the CUDA hardware frames context.
 
     #[error("failed to allocate the CUDA frames context")]
     HwFramesAlloc,
+    /// FFmpeg could not initialize the fixed-size CUDA frame pool.
 
     #[error("failed to initialize the CUDA frames context (code {0}) for {1}x{2}")]
     HwFramesInit(i32, u32, u32),
+    /// FFmpeg could not acquire a surface from the CUDA frame pool.
 
     #[error("failed to take a frame from the CUDA pool (code {0})")]
     HwFrameGet(i32),
+    /// FFmpeg failed to transfer CPU pixels into the CUDA surface.
 
     #[error("CPU to CUDA transfer failed (code {0})")]
     Transfer(i32),

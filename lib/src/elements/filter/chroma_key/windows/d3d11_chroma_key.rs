@@ -36,9 +36,9 @@ const SHADER_SOURCE: &[u8] = include_bytes!("../../../../shaders/d3d11/chroma_ke
 pub enum D3d11ChromaKeyError {
     /// A Direct3D resource, shader, or draw operation failed.
     #[error("windows error: {0}")]
-    /// The input frame is not backed by a D3D11 texture.
     Windows(#[from] windows::core::Error),
 
+    /// The input frame is not backed by a D3D11 texture.
     #[error("D3d11ChromaKey only keys Pixel::D3D11 frames, got {0:?}")]
     UnsupportedFormat(ffmpeg::format::Pixel),
     /// A frame tagged as D3D11 contains no valid texture reference.
