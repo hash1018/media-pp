@@ -5,7 +5,7 @@ description: Review recent commits or a diff in media-pp for correctness regress
 
 # Review media-pp changes
 
-Treat review as read-only. Read `README.md`, `AGENT_GUIDELINES.md`, the
+Treat review as read-only. Read `README.md`, `AGENTS.md`, the
 requested commit range or worktree diff, and the affected implementation and
 tests. Do not infer permission to fix findings, stage files, or rewrite the
 working tree.

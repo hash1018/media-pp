@@ -5,7 +5,7 @@ description: Diagnose memory, GPU-resource, handle, or worker-lifetime growth in
 
 # media-pp soak analysis
 
-Read `README.md` and `AGENT_GUIDELINES.md`. Use the repository's existing soak
+Read `README.md` and `AGENTS.md`. Use the repository's existing soak
 harness instead of inventing a parallel benchmark. Read the module
 documentation and the nearest comparable scenario in `lib/tests/soak.rs`, then
 read the relevant helpers in `lib/tests/common/mod.rs` and, for GPU resources,

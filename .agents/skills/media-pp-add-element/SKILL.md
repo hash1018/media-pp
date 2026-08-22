@@ -5,7 +5,7 @@ description: Add a new SourceElement, filter Sink, terminal Sink, driver, or ele
 
 # Add a media-pp element
 
-Read `README.md`, `AGENT_GUIDELINES.md`, the core traits in
+Read `README.md`, `AGENTS.md`, the core traits in
 `lib/src/core/element.rs`, and the nearest existing element before designing the
 new type. Choose the analogue by matching its graph role, buffer type, backend,
 threading, control behavior, and resource ownership—not merely by a similar
@@ -84,6 +84,6 @@ name.
   corresponding lifecycle scenario.
 - Run the narrow tests first, then the affected Cargo feature set and the default
   build where feature-gated exports changed. Run a changed example end to end
-  and inspect recorded or visual output as required by `AGENT_GUIDELINES.md`.
+  and inspect recorded or visual output as required by `AGENTS.md`.
 - Finish with `cargo fmt --all -- --check`, `git diff --check`, and
   `git status --short`, preserving unrelated worktree changes.

@@ -5,7 +5,7 @@ description: Add or substantially change a media-pp example, including platform 
 
 # Add or change a media-pp example
 
-Read `README.md`, `AGENT_GUIDELINES.md`, the target example's source and
+Read `README.md`, `AGENTS.md`, the target example's source and
 README, and the nearest example with the same purpose before editing. Derive the
 pipeline from its wiring closure rather than from imports or filenames.
 
