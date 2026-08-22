@@ -70,6 +70,7 @@ pub struct VideoSynchronizer {
 }
 
 impl VideoSynchronizer {
+    /// Creates a video scheduler using `time_base` for incoming frame PTS values.
     pub fn new(
         name: impl Into<String>,
         time_base: ffmpeg::Rational,

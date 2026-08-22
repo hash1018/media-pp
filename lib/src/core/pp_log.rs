@@ -28,14 +28,17 @@ impl PpLog {
         }
     }
 
+    /// Returns the pipeline identity attached to this logging context, if any.
     pub fn pipeline_id(&self) -> Option<&str> {
         self.pipeline_id.as_deref()
     }
 
+    /// Returns the element type label attached to this logging context.
     pub fn element(&self) -> &str {
         &self.element
     }
 
+    /// Returns the element instance name attached to this logging context.
     pub fn name(&self) -> &str {
         &self.name
     }

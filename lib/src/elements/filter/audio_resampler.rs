@@ -158,6 +158,7 @@ pub struct AudioResampler {
 }
 
 impl AudioResampler {
+    /// Creates a resampler with fixed output format and explicit input timestamp units.
     pub fn new(
         name: impl Into<String>,
         target: AudioFormat,
@@ -193,10 +194,12 @@ impl AudioResampler {
         })
     }
 
+    /// Returns the fixed output audio format.
     pub fn format(&self) -> AudioFormat {
         self.target
     }
 
+    /// Returns the output PTS time base, `1 / sample_rate`.
     pub fn time_base(&self) -> ffmpeg::Rational {
         ffmpeg::Rational::new(1, self.target.sample_rate as i32)
     }

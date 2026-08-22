@@ -67,6 +67,7 @@ pub struct SwChromaKey {
 }
 
 impl SwChromaKey {
+    /// Creates a software chroma-key filter with fixed keying parameters.
     pub fn new(name: impl Into<String>, options: ChromaKeyOptions) -> Self {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::SwChromaKey, &name, None);

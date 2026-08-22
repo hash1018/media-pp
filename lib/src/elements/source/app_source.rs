@@ -85,6 +85,7 @@ impl AppSource {
 }
 
 impl AppSourceHandle {
+    /// Returns the source instance name shared by this handle.
     pub fn name(&self) -> Arc<str> {
         self.name.clone()
     }

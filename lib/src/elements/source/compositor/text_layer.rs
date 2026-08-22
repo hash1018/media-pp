@@ -154,6 +154,7 @@ pub struct TextLayer {
 }
 
 impl TextLayer {
+    /// Creates a text layer with the supplied font bytes and default visual settings.
     pub const fn new(font_data: Vec<u8>) -> Self {
         Self {
             font_data,

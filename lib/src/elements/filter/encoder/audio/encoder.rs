@@ -154,6 +154,7 @@ pub struct SwAudioEncoder {
 unsafe impl Send for SwAudioEncoder {}
 
 impl SwAudioEncoder {
+    /// Opens the requested audio encoder and configures its output definition.
     pub fn new(name: impl Into<String>, options: SwAudioEncoderOptions) -> Result<Self> {
         let encoder_name = options.codec.encoder_name();
         let codec = ffmpeg::encoder::find_by_name(encoder_name)

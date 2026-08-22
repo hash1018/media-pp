@@ -101,6 +101,7 @@ pub struct TestAudioSource {
 unsafe impl Send for TestAudioSource {}
 
 impl TestAudioSource {
+    /// Creates an unbounded synthetic sine-wave source with the requested output definition.
     pub fn new(name: impl Into<String>, options: TestAudioOptions) -> Self {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::TestAudioSource, &name, None);

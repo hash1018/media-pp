@@ -113,6 +113,7 @@ pub struct TestVideoSource {
 }
 
 impl TestVideoSource {
+    /// Creates an unbounded synthetic video source with the requested output definition.
     pub fn new(name: impl Into<String>, options: TestVideoOptions) -> Self {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::TestVideoSource, &name, None);

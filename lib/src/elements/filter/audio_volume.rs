@@ -142,10 +142,14 @@ impl AudioVolumeHandle {
         self.control.muted.store(muted, Ordering::Release);
     }
 
+    /// Returns the configured linear gain, independent of mute state.
     pub fn gain(&self) -> f32 {
         self.control.gain()
     }
 
+    /// Returns [`Self::gain`] converted to decibels.
+    ///
+    /// Zero gain is reported as negative infinity.
     pub fn gain_db(&self) -> f32 {
         let gain = self.gain();
         if gain == 0.0 {
@@ -155,6 +159,7 @@ impl AudioVolumeHandle {
         }
     }
 
+    /// Returns whether output is currently muted.
     pub fn is_muted(&self) -> bool {
         self.control.muted.load(Ordering::Acquire)
     }
@@ -191,6 +196,7 @@ impl AudioVolume {
             .expect("the default AudioVolumeOptions are valid")
     }
 
+    /// Creates a volume filter and a thread-safe runtime control handle.
     pub fn with_options(
         name: impl Into<String>,
         options: AudioVolumeOptions,

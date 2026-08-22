@@ -30,6 +30,7 @@ pub struct VideoRect {
 }
 
 impl VideoRect {
+    /// Creates an output-space rectangle without validating its dimensions.
     pub const fn new(x: i32, y: i32, width: u32, height: u32) -> Self {
         Self {
             x,
@@ -67,6 +68,7 @@ pub struct VideoLayer {
 }
 
 impl VideoLayer {
+    /// Creates a visible, fully opaque contained layer at `rect` and z-index zero.
     pub const fn new(rect: VideoRect) -> Self {
         Self {
             rect,

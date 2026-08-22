@@ -118,6 +118,7 @@ pub struct ActiveTimeline {
 }
 
 impl ActiveTimeline {
+    /// Starts an active timeline anchored at `now`.
     pub fn new(now: Instant) -> Self {
         Self { anchor: now }
     }

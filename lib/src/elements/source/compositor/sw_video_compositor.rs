@@ -180,6 +180,9 @@ impl SwVideoCompositorHandle {
         }
     }
 
+    /// Returns the number of compositor inputs currently registered.
+    ///
+    /// Returns zero after the compositor has been dropped.
     pub fn source_count(&self) -> usize {
         self.shared
             .upgrade()
@@ -198,43 +201,54 @@ pub struct SwVideoLayerHandle {
 }
 
 impl SwVideoLayerHandle {
+    /// Returns the stable identity of this particular input registration.
     pub fn id(&self) -> VideoInputId {
         self.id
     }
 
+    /// Returns the registration name, which may be reused by a newer input.
     pub fn name(&self) -> Arc<str> {
         self.name.clone()
     }
 
+    /// Returns the current layer settings, or `None` after this registration is removed.
     pub fn layer(&self) -> Option<VideoLayer> {
         self.input
             .upgrade()
             .map(|input| *input.layer.lock().unwrap())
     }
 
+    /// Atomically replaces every layer setting.
+    ///
+    /// Returns [`SwVideoCompositorError::SourceRemoved`] if this handle is stale.
     pub fn set_layer(&self, layer: VideoLayer) -> std::result::Result<(), SwVideoCompositorError> {
         validate_layer(layer)?;
         self.update(|current| *current = layer)
     }
 
+    /// Replaces the destination rectangle while retaining the other layer settings.
     pub fn set_rect(&self, rect: VideoRect) -> std::result::Result<(), SwVideoCompositorError> {
         validate_rect(rect)?;
         self.update(|layer| layer.rect = rect)
     }
 
+    /// Replaces the layer opacity after validating the `0.0..=1.0` range.
     pub fn set_opacity(&self, opacity: f32) -> std::result::Result<(), SwVideoCompositorError> {
         validate_opacity(opacity)?;
         self.update(|layer| layer.opacity = opacity)
     }
 
+    /// Changes the stacking order; larger values are drawn later.
     pub fn set_z_index(&self, z_index: i32) -> std::result::Result<(), SwVideoCompositorError> {
         self.update(|layer| layer.z_index = z_index)
     }
 
+    /// Shows or hides the input without removing its registration.
     pub fn set_visible(&self, visible: bool) -> std::result::Result<(), SwVideoCompositorError> {
         self.update(|layer| layer.visible = visible)
     }
 
+    /// Changes how the input aspect ratio maps into its rectangle.
     pub fn set_fit(&self, fit: VideoFit) -> std::result::Result<(), SwVideoCompositorError> {
         self.update(|layer| layer.fit = fit)
     }
@@ -423,6 +437,7 @@ pub struct SwVideoCompositor {
 unsafe impl Send for SwVideoCompositor {}
 
 impl SwVideoCompositor {
+    /// Creates a compositor and a weak runtime handle for registering inputs.
     pub fn new(
         name: impl Into<String>,
         options: VideoCompositorOptions,
@@ -468,22 +483,27 @@ impl SwVideoCompositor {
         ))
     }
 
+    /// Returns the fixed output pixel format, [`ffmpeg::format::Pixel::BGRA`].
     pub fn format(&self) -> ffmpeg::format::Pixel {
         ffmpeg::format::Pixel::BGRA
     }
 
+    /// Returns the fixed output width in pixels.
     pub fn width(&self) -> u32 {
         self.options.width
     }
 
+    /// Returns the fixed output height in pixels.
     pub fn height(&self) -> u32 {
         self.options.height
     }
 
+    /// Returns the configured output frame rate.
     pub fn frame_rate(&self) -> ffmpeg::Rational {
         self.options.frame_rate
     }
 
+    /// Returns the reciprocal of [`Self::frame_rate`], used as output PTS units.
     pub fn time_base(&self) -> ffmpeg::Rational {
         ffmpeg::Rational::new(
             self.options.frame_rate.denominator(),

@@ -23,6 +23,7 @@ pub struct FrameCounter {
 }
 
 impl FrameCounter {
+    /// Creates a sink and a shared counter that increments for each video frame.
     pub fn new(name: impl Into<String>) -> (Self, Arc<AtomicUsize>) {
         let count = Arc::new(AtomicUsize::new(0));
         let name: Arc<str> = name.into().into();

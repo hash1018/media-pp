@@ -21,6 +21,7 @@ pub struct AudioFormat {
 }
 
 impl AudioFormat {
+    /// Creates an audio format from its sample representation, rate, and channel count.
     pub fn new(sample_format: ffmpeg::format::Sample, sample_rate: u32, channels: u16) -> Self {
         Self {
             sample_format,
@@ -29,10 +30,12 @@ impl AudioFormat {
         }
     }
 
+    /// Returns the configured channel count.
     pub fn channels(self) -> u16 {
         self.channels
     }
 
+    /// Returns FFmpeg's default channel layout for [`Self::channels`].
     pub fn channel_layout(self) -> ffmpeg::ChannelLayout {
         ffmpeg::ChannelLayout::default(i32::from(self.channels))
     }

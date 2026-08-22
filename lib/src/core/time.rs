@@ -43,6 +43,7 @@ pub struct InvalidTimeBase {
 pub struct TimeBase(ffmpeg::Rational);
 
 impl TimeBase {
+    /// Validates that both rational components are positive.
     pub fn try_new(value: ffmpeg::Rational) -> Result<Self, InvalidTimeBase> {
         if value.numerator() <= 0 || value.denominator() <= 0 {
             return Err(InvalidTimeBase {
@@ -110,11 +111,13 @@ impl MediaTimestamp {
     }
 
     #[cfg(feature = "webrtc")]
+    /// Returns the presentation timestamp component.
     pub fn pts(self) -> i64 {
         self.pts
     }
 
     #[cfg(feature = "webrtc")]
+    /// Returns the validated unit in which [`Self::pts`] is expressed.
     pub fn time_base(self) -> TimeBase {
         self.time_base
     }

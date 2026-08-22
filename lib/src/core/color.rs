@@ -8,8 +8,11 @@
 /// alpha here).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Color {
+    /// Red component.
     pub red: u8,
+    /// Green component.
     pub green: u8,
+    /// Blue component.
     pub blue: u8,
 }
 
@@ -19,6 +22,7 @@ impl Color {
     /// Opaque white.
     pub const WHITE: Self = Self::new(255, 255, 255);
 
+    /// Creates an opaque color from 8-bit red, green, and blue components.
     pub const fn new(red: u8, green: u8, blue: u8) -> Self {
         Self { red, green, blue }
     }

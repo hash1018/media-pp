@@ -197,6 +197,9 @@ impl MixerHandle {
         }
     }
 
+    /// Returns the number of inputs currently registered with the live mixer.
+    ///
+    /// Returns zero after the mixer has been dropped.
     pub fn source_count(&self) -> usize {
         self.shared
             .upgrade()

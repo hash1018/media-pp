@@ -95,6 +95,7 @@ pub struct Pacer {
 }
 
 impl Pacer {
+    /// Creates a pacer using `time_base` to convert input PTS values to wall time.
     pub fn new(
         name: impl Into<String>,
         time_base: ffmpeg::Rational,

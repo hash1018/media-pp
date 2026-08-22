@@ -42,6 +42,7 @@ pub struct StopReceiver {
 }
 
 impl StopReceiver {
+    /// Returns whether the owning [`DriverRunner`] has requested shutdown.
     pub fn is_stopped(&self) -> bool {
         self.flag.load(Ordering::Acquire)
     }
@@ -89,6 +90,7 @@ pub struct DriverRunner {
 }
 
 impl DriverRunner {
+    /// Wraps `driver` in a stopped runner ready for one call to [`Self::run`].
     pub fn new(driver: impl Driver + 'static) -> Arc<Self> {
         let (bus, bus_rx) = Bus::new();
         Arc::new(DriverRunner {
@@ -100,6 +102,7 @@ impl DriverRunner {
         })
     }
 
+    /// Returns the receiver used to observe driver errors and completion.
     pub fn bus(&self) -> &BusReceiver {
         &self.bus_rx
     }

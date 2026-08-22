@@ -323,6 +323,9 @@ impl TeeHandle {
         self.detach(branch_id)
     }
 
+    /// Returns the number of currently attached output branches.
+    ///
+    /// Returns zero after the tee element has been dropped.
     pub fn sink_count(&self) -> usize {
         self.shared
             .upgrade()
