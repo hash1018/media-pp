@@ -16,12 +16,15 @@ use str0m::{
     Candidate, Rtc,
     change::SdpOffer,
     format::Codec,
-    media::{Direction, MediaKind},
+    media::{Direction, MediaKind, Mid},
 };
 
 use super::command::Command;
 use super::peer::packet_rtp_time;
-use super::{WebRtcError, WebRtcHandle, WebRtcPeer, WebRtcTrackSink, WebRtcTrackSource};
+use super::{
+    AttachedTrack, TrackEndpoints, TrackId, WebRtcError, WebRtcHandle, WebRtcPeer, WebRtcTrackSink,
+    WebRtcTrackSource,
+};
 use crate::{
     buffer::MediaBuffer,
     bus::BusEvent,
@@ -181,6 +184,26 @@ fn connected_pair() -> (Rtc, UdpSocket, Rtc, UdpSocket) {
     (rtc_a, socket_a, rtc_b, socket_b)
 }
 
+/// Both halves of a `Direction::SendRecv` track, panicking if the track
+/// attached with anything else — the direction is what the test asked
+/// `add_track` for, so a different one is a failure of the code under
+/// test rather than a case to handle.
+fn send_recv(track: AttachedTrack) -> (WebRtcTrackSink, WebRtcTrackSource) {
+    let TrackEndpoints::SendRecv(sink, source) = track.endpoints else {
+        panic!("expected a SendRecv track");
+    };
+    (sink, source)
+}
+
+/// The inbound half of a receive-only track — what the peer that did
+/// *not* call `add_track` sees for a `Direction::SendOnly` one.
+fn recv_only(track: AttachedTrack) -> WebRtcTrackSource {
+    let TrackEndpoints::Recv(source) = track.endpoints else {
+        panic!("expected a RecvOnly track");
+    };
+    source
+}
+
 fn push_packets(sink: &mut WebRtcTrackSink) {
     for i in 0..5 {
         // `write_track` needs a real time base to build str0m's own
@@ -257,13 +280,14 @@ fn one_sendrecv_track_carries_data_both_ways() {
     // `next_track()` returns for peer-a's own track the moment
     // `add_track`'s negotiation mints a `Mid` — before the offer even
     // leaves this process, let alone before an answer comes back.
-    let (returned_id, _mid, _kind, mut sink_a, source_a) = handle_a
+    let attached_a = handle_a
         .next_track()
         .expect("peer-a's own track should attach");
     assert_eq!(
-        track_id, returned_id,
+        track_id, attached_a.id,
         "next_track should report the TrackId add_track just returned"
     );
+    let (mut sink_a, source_a) = send_recv(attached_a);
 
     let offer = offer_rx
         .recv_timeout(Duration::from_secs(2))
@@ -274,9 +298,11 @@ fn one_sendrecv_track_carries_data_both_ways() {
     handle_a.set_answer(answer);
     // peer-b's track attaches as part of accepting the offer (its
     // `Event::MediaAdded`), independent of the answer round-trip.
-    let (_id, _mid, _kind, mut sink_b, source_b) = handle_b
-        .next_track()
-        .expect("peer-b's remote track should attach");
+    let (mut sink_b, source_b) = send_recv(
+        handle_b
+            .next_track()
+            .expect("peer-b's remote track should attach"),
+    );
 
     let received_by_a = Arc::new(AtomicUsize::new(0));
     let received_by_b = Arc::new(AtomicUsize::new(0));
@@ -391,9 +417,14 @@ fn stopping_a_peer_ends_its_inbound_track_source_with_a_clean_eos() {
         .expect("peer-b should accept the offer");
     handle_a.set_answer(answer);
 
-    let (_id, _mid, _kind, _sink_b, source_b) = handle_b
-        .next_track()
-        .expect("peer-b's remote track should attach");
+    // peer-a asked for `SendOnly`, so peer-b sees the inverse: a track it
+    // can only receive on, and one this crate hands out without a sink at
+    // all rather than with an inert one.
+    let source_b = recv_only(
+        handle_b
+            .next_track()
+            .expect("peer-b's remote track should attach"),
+    );
 
     let received = Arc::new(AtomicUsize::new(0));
     let track_pipeline_b = wire_counting(source_b, received);
@@ -509,4 +540,238 @@ fn packet_rtp_time_rejects_timestamp_overflow() {
         packet_rtp_time(&packet),
         Err(WebRtcError::PacketTimestampOverflow { .. })
     ));
+}
+
+/// The endpoints handed out have to be exactly what the negotiated
+/// direction allows, on *both* sides of one `SendOnly` track: the side
+/// that added it gets a sink and nothing to receive on, and the side that
+/// only receives gets a source and no sink it could push into to no
+/// effect. This is the contract that replaced handing out an inert half.
+#[test]
+fn a_send_only_track_yields_a_sink_on_one_side_and_a_source_on_the_other() {
+    let (rtc_a, socket_a, rtc_b, socket_b) = connected_pair();
+
+    let (offer_tx, offer_rx) = crossbeam_channel::unbounded::<SdpOffer>();
+    let (peer_a, handle_a) = WebRtcPeer::new(
+        "peer-a",
+        rtc_a,
+        socket_a,
+        move |offer| {
+            let _ = offer_tx.send(offer);
+        },
+        |_id| {},
+    );
+    let (peer_b, handle_b) = WebRtcPeer::new("peer-b", rtc_b, socket_b, |_offer| {}, |_id| {});
+    let driver_a = DriverRunner::new(peer_a);
+    let driver_b = DriverRunner::new(peer_b);
+    driver_a.run().unwrap();
+    driver_b.run().unwrap();
+    thread::sleep(Duration::from_millis(200));
+
+    handle_a
+        .add_track(MediaKind::Video, Direction::SendOnly, Codec::Vp8)
+        .expect("running peer should accept AddTrack");
+    let attached_a = handle_a
+        .next_track()
+        .expect("peer-a's own track should attach");
+    assert!(
+        matches!(attached_a.endpoints, TrackEndpoints::Send(_)),
+        "a SendOnly track must not hand its adder a source"
+    );
+
+    let offer = offer_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("peer-a should generate a renegotiation offer");
+    let answer = handle_b
+        .accept_remote_offer(offer)
+        .expect("peer-b should accept the offer");
+    handle_a.set_answer(answer);
+
+    let attached_b = handle_b
+        .next_track()
+        .expect("peer-b's remote track should attach");
+    assert!(
+        matches!(attached_b.endpoints, TrackEndpoints::Recv(_)),
+        "the receiving side of a SendOnly track must not get a sink"
+    );
+
+    driver_a.stop();
+    driver_b.stop();
+}
+
+/// The mirror of the `SendOnly` case, so neither direction is covered
+/// only by inference from the other: asking for `RecvOnly` gives the
+/// *adder* the inbound half, and the remote peer — which sees the
+/// inverse — the outbound one.
+#[test]
+fn a_recv_only_track_yields_a_source_on_one_side_and_a_sink_on_the_other() {
+    let (rtc_a, socket_a, rtc_b, socket_b) = connected_pair();
+
+    let (offer_tx, offer_rx) = crossbeam_channel::unbounded::<SdpOffer>();
+    let (peer_a, handle_a) = WebRtcPeer::new(
+        "peer-a",
+        rtc_a,
+        socket_a,
+        move |offer| {
+            let _ = offer_tx.send(offer);
+        },
+        |_id| {},
+    );
+    let (peer_b, handle_b) = WebRtcPeer::new("peer-b", rtc_b, socket_b, |_offer| {}, |_id| {});
+    let driver_a = DriverRunner::new(peer_a);
+    let driver_b = DriverRunner::new(peer_b);
+    driver_a.run().unwrap();
+    driver_b.run().unwrap();
+    thread::sleep(Duration::from_millis(200));
+
+    handle_a
+        .add_track(MediaKind::Video, Direction::RecvOnly, Codec::Vp8)
+        .expect("running peer should accept AddTrack");
+    let attached_a = handle_a
+        .next_track()
+        .expect("peer-a's own track should attach");
+    assert!(
+        matches!(attached_a.endpoints, TrackEndpoints::Recv(_)),
+        "a RecvOnly track must not hand its adder a sink"
+    );
+
+    let offer = offer_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("peer-a should generate a renegotiation offer");
+    let answer = handle_b
+        .accept_remote_offer(offer)
+        .expect("peer-b should accept the offer");
+    handle_a.set_answer(answer);
+
+    let attached_b = handle_b
+        .next_track()
+        .expect("peer-b's remote track should attach");
+    assert!(
+        matches!(attached_b.endpoints, TrackEndpoints::Send(_)),
+        "the sending side of a RecvOnly track must not get a source"
+    );
+
+    driver_a.stop();
+    driver_b.stop();
+}
+
+/// A `WebRtcPeer` with nothing running on it, for exercising the
+/// attach/event handling directly. Driving a *real* direction change
+/// end to end would mean hand-rolling one side's whole ICE/DTLS poll
+/// loop just to reach `SdpApi::set_direction`; what actually needs
+/// covering is this element's own reaction to the event, so the event is
+/// what the tests below supply.
+fn idle_peer(name: &str) -> (WebRtcPeer, WebRtcHandle) {
+    let (rtc, socket, _rtc_b, _socket_b) = connected_pair();
+    WebRtcPeer::new(name, rtc, socket, |_offer| {}, |_id| {})
+}
+
+/// `TrackEndpoints` is minted once, from the direction the track
+/// attached with, so a remote peer renegotiating a different one leaves
+/// the caller holding endpoints that no longer describe the connection.
+/// Nothing can be re-issued at that point, which is exactly why it has
+/// to be reported rather than silently tolerated.
+#[test]
+fn a_direction_change_after_attaching_is_reported_on_the_bus() {
+    let (mut peer, handle) = idle_peer("peer");
+    let (bus, bus_rx) = crate::bus::Bus::new();
+    let mid: Mid = "0".into();
+
+    peer.attach_track(TrackId(0), mid, MediaKind::Video, Direction::SendOnly);
+    let attached = handle.next_track().expect("the track should attach");
+    assert!(matches!(attached.endpoints, TrackEndpoints::Send(_)));
+
+    peer.handle_event(
+        str0m::Event::MediaChanged(str0m::media::MediaChanged {
+            mid,
+            direction: Direction::RecvOnly,
+        }),
+        &bus,
+    );
+
+    let event = bus_rx
+        .try_recv()
+        .expect("a changed direction should reach the bus");
+    let BusEvent::Error { error, .. } = event else {
+        panic!("expected BusEvent::Error");
+    };
+    let crate::Error::WebRtcError(WebRtcError::DirectionChanged { mid: at, from, to }) = error
+    else {
+        panic!("expected WebRtcError::DirectionChanged, got {error}");
+    };
+    assert_eq!(at, mid);
+    assert_eq!(from, Direction::SendOnly);
+    assert_eq!(to, Direction::RecvOnly);
+}
+
+/// `MediaChanged` also fires when a renegotiation restates the direction
+/// already in force. Reporting that would turn every unrelated
+/// renegotiation into a bus error, so only an actual change counts.
+#[test]
+fn restating_the_direction_a_track_already_has_is_not_reported() {
+    let (mut peer, handle) = idle_peer("peer");
+    let (bus, bus_rx) = crate::bus::Bus::new();
+    let mid: Mid = "0".into();
+
+    peer.attach_track(TrackId(0), mid, MediaKind::Video, Direction::SendRecv);
+    let _attached = handle.next_track().expect("the track should attach");
+
+    peer.handle_event(
+        str0m::Event::MediaChanged(str0m::media::MediaChanged {
+            mid,
+            direction: Direction::SendRecv,
+        }),
+        &bus,
+    );
+
+    assert!(
+        bus_rx.try_recv().is_none(),
+        "an unchanged direction must not be reported as a change"
+    );
+}
+
+/// `MediaChanged` can name a `mid` this element never attached — data
+/// channels and media it does not track go through the same event
+/// stream. There is nothing to compare against and nothing the caller
+/// holds, so there is nothing to report either.
+#[test]
+fn a_direction_change_on_an_unattached_track_is_ignored() {
+    let (mut peer, _handle) = idle_peer("peer");
+    let (bus, bus_rx) = crate::bus::Bus::new();
+
+    peer.handle_event(
+        str0m::Event::MediaChanged(str0m::media::MediaChanged {
+            mid: "99".into(),
+            direction: Direction::RecvOnly,
+        }),
+        &bus,
+    );
+
+    assert!(
+        bus_rx.try_recv().is_none(),
+        "a mid this element never attached has nothing to report"
+    );
+}
+
+/// `Direction::Inactive` still attaches: the track exists and its `mid`
+/// is negotiated, so a caller matching attachments against its own
+/// `add_track` calls has to see it — it just has nothing to send or
+/// receive on yet.
+#[test]
+fn an_inactive_track_attaches_with_no_endpoints() {
+    let (mut peer, handle) = idle_peer("peer");
+
+    peer.attach_track(
+        TrackId(7),
+        "0".into(),
+        MediaKind::Audio,
+        Direction::Inactive,
+    );
+
+    let attached = handle
+        .next_track()
+        .expect("an inactive track should still attach");
+    assert_eq!(attached.id, TrackId(7));
+    assert_eq!(attached.kind, MediaKind::Audio);
+    assert!(matches!(attached.endpoints, TrackEndpoints::Inactive));
 }

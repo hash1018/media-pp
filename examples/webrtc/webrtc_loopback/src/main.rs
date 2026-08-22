@@ -21,7 +21,7 @@ mod example {
         control::ControlMsg,
         driver::DriverRunner,
         element::{Element, ElementType, Sink, element_pp_log},
-        elements::{WebRtcPeer, WebRtcTrackSink, WebRtcTrackSource},
+        elements::{AttachedTrack, TrackEndpoints, WebRtcPeer, WebRtcTrackSink, WebRtcTrackSource},
         pipeline::Pipeline,
     };
     use str0m::{
@@ -116,9 +116,11 @@ mod example {
             .expect("running peer should accept AddTrack");
         // `next_track()` returns for peer-a's own track the moment `add_track`'s
         // negotiation mints a Mid — before the offer even leaves this process.
-        let (_id, _mid, kind, mut sink_a, source_a) = handle_a
+        let attached_a = handle_a
             .next_track()
             .expect("peer-a's own track should attach");
+        let kind = attached_a.kind;
+        let (mut sink_a, source_a) = send_recv(attached_a);
         println!("peer-a: track attached ({kind:?}) — got a WebRtcTrackSink to reply on");
 
         let offer = offer_rx
@@ -131,9 +133,11 @@ mod example {
         handle_a.set_answer(answer);
         // peer-b's track attaches as part of accepting the offer, independent
         // of the answer round-trip.
-        let (_id, _mid, kind, mut sink_b, source_b) = handle_b
+        let attached_b = handle_b
             .next_track()
             .expect("peer-b's remote track should attach");
+        let kind = attached_b.kind;
+        let (mut sink_b, source_b) = send_recv(attached_b);
         println!("peer-b: track attached ({kind:?}) — got a WebRtcTrackSink to reply on");
 
         let received_by_a = Arc::new(AtomicUsize::new(0));
@@ -184,6 +188,18 @@ mod example {
     /// produces into a `CountingSink` that increments `count` — a
     /// `WebRtcTrackSource` is a plain `SourceElement`, so it plugs into
     /// `Pipeline`/`ChainBuilder` exactly like any other source.
+    /// Both halves of the one `Direction::SendRecv` track this example
+    /// opens. `TrackEndpoints` carries only what the negotiated direction
+    /// permits, so this is where "we asked for SendRecv" turns back into a
+    /// sink and a source — and where anything else would fail loudly
+    /// instead of leaving a half that silently does nothing.
+    fn send_recv(track: AttachedTrack) -> (WebRtcTrackSink, WebRtcTrackSource) {
+        let TrackEndpoints::SendRecv(sink, source) = track.endpoints else {
+            panic!("this example opens one SendRecv track and expects both halves back");
+        };
+        (sink, source)
+    }
+
     fn wire_counting(source: WebRtcTrackSource, count: Arc<AtomicUsize>) -> Arc<Pipeline> {
         let sink = CountingSink {
             count,

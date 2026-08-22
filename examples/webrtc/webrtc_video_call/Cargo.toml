@@ -1,0 +1,13 @@
+[package]
+name = "webrtc_video_call"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[target.'cfg(windows)'.dependencies]
+media-pp = { path = "../../../lib", features = ["webrtc", "d3d12"] }
+render_common = { path = "../../render/render_common" }
+str0m = { version = "0.21", default-features = false, features = [
+    "rust-crypto",
+] }
+winit = "0.30"

@@ -28,6 +28,50 @@ use crate::{
 
 use super::command::{Command, TrackId, WebRtcError};
 
+/// The endpoints a track actually has, which is exactly what its
+/// negotiated [`Direction`] allows — a `SendOnly` track carries no
+/// `WebRtcTrackSource` because nothing will ever arrive on it, and a
+/// `RecvOnly` one carries no [`WebRtcTrackSink`] because str0m has no
+/// send capability for it.
+///
+/// The variant *is* the direction, so there is no separate field the two
+/// could disagree with. Pushing into a sink that does not exist, or
+/// waiting on a source that does not, is a compile error rather than
+/// something that silently does nothing.
+///
+/// Fixed for the life of the track: these are handed out once, when the
+/// track attaches, and a remote peer that later renegotiates a different
+/// direction is reported on the [`Bus`] instead (see
+/// [`WebRtcHandle::next_track`]).
+pub enum TrackEndpoints {
+    /// `Direction::SendOnly` — outbound only.
+    Send(WebRtcTrackSink),
+    /// `Direction::RecvOnly` — inbound only.
+    Recv(WebRtcTrackSource),
+    /// `Direction::SendRecv` — both, on the one track.
+    SendRecv(WebRtcTrackSink, WebRtcTrackSource),
+    /// `Direction::Inactive` — neither, for now. Still handed out: the
+    /// track exists and its `mid` is negotiated, so a caller matching
+    /// attachments against its own [`WebRtcHandle::add_track`] calls has
+    /// to see it.
+    Inactive,
+}
+
+/// One newly-attached track, from [`WebRtcHandle::next_track`].
+pub struct AttachedTrack {
+    /// Matches what [`WebRtcHandle::add_track`] returned for a track this
+    /// side requested. A track the *remote* peer added has an id issued
+    /// here that the caller has never seen before — which is how the two
+    /// are told apart.
+    pub id: TrackId,
+    /// The `mid` str0m assigned during the SDP exchange.
+    pub mid: Mid,
+    /// Audio or video.
+    pub kind: MediaKind,
+    /// What can actually be done with this track — see [`TrackEndpoints`].
+    pub endpoints: TrackEndpoints,
+}
+
 /// Cheaply-cloneable handle for requesting new tracks, completing
 /// renegotiation, and picking up newly-attached tracks — same spirit as
 /// [`crate::elements::AppSourceHandle`]. Cloning shares one queue of
@@ -39,8 +83,7 @@ use super::command::{Command, TrackId, WebRtcError};
 pub struct WebRtcHandle {
     pub(super) next_id: Arc<AtomicU64>,
     pub(super) command_tx: Sender<Command>,
-    pub(super) new_track_rx:
-        Receiver<(TrackId, Mid, MediaKind, WebRtcTrackSink, WebRtcTrackSource)>,
+    pub(super) new_track_rx: Receiver<AttachedTrack>,
 }
 
 impl WebRtcHandle {
@@ -78,16 +121,25 @@ impl WebRtcHandle {
 
     /// Blocks until the next track attaches — either one requested via
     /// [`WebRtcHandle::add_track`] (on either side) once its `Mid` exists,
-    /// or one the remote peer added on its own. Returns the `TrackId` (so
-    /// the caller can match it against what `add_track` returned — a `Mid`
-    /// alone doesn't exist yet at `add_track` time, see [`TrackId`]'s own
-    /// docs) alongside the `Mid`/`MediaKind` str0m assigned it and the
-    /// `WebRtcTrackSink`/`WebRtcTrackSource` pair to send/receive on it.
-    /// `Err` once `WebRtcPeer` (and its `run`) is gone and every
-    /// already-attached track has been drained.
-    pub fn next_track(
-        &self,
-    ) -> Result<(TrackId, Mid, MediaKind, WebRtcTrackSink, WebRtcTrackSource)> {
+    /// or one the remote peer added on its own. `Err` once `WebRtcPeer`
+    /// (and its `run`) is gone and every already-attached track has been
+    /// drained.
+    ///
+    /// Which track this is has to be established from
+    /// [`AttachedTrack::id`]: a remote peer adding a track of its own is
+    /// delivered through this same queue, so "the call right after my
+    /// `add_track`" is not a guarantee of anything. Match the id against
+    /// what `add_track` returned.
+    ///
+    /// [`AttachedTrack::endpoints`] carries only what the track's
+    /// negotiated direction actually permits. That direction is read once,
+    /// as the track attaches, and the endpoints are never re-issued — so a
+    /// remote peer that renegotiates a different direction afterwards
+    /// makes them wrong. That case is reported as
+    /// [`WebRtcError::DirectionChanged`] on the [`Bus`] rather than
+    /// silently tolerated; recovering from it means tearing the track down
+    /// and adding a new one.
+    pub fn next_track(&self) -> Result<AttachedTrack> {
         self.new_track_rx
             .recv()
             .map_err(|_| WebRtcError::Closed.into())

@@ -24,7 +24,7 @@
 
 mod window_shell;
 
-pub use window_shell::{Shutdown, WindowTarget, run_window};
+pub use window_shell::{Shutdown, WindowTarget, run_window, run_windows};
 
 #[cfg(target_os = "linux")]
 mod linux;

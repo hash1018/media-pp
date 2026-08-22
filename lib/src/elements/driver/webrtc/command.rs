@@ -64,6 +64,24 @@ pub enum WebRtcError {
         /// Packet time-base denominator.
         denominator: i32,
     },
+    /// The remote peer renegotiated a track's direction after this element
+    /// had already handed out its endpoints. Those describe the direction
+    /// the track attached with (see
+    /// [`super::track::TrackEndpoints`]) and cannot be re-issued, so what
+    /// the caller holds no longer matches the connection. Reported rather
+    /// than silently tolerated — the outbound half of a track that just
+    /// became receive-only is dropped by str0m without an error, and the
+    /// inbound half of one that just became send-only simply goes quiet.
+    #[error("track {mid} renegotiated its direction from {from:?} to {to:?} after attaching")]
+    DirectionChanged {
+        /// The `mid` of the track whose direction changed.
+        mid: Mid,
+        /// The direction the track attached with.
+        from: Direction,
+        /// The direction the remote peer renegotiated it to.
+        to: Direction,
+    },
+
     /// The peer run loop has ended and accepts no further commands.
 
     #[error("WebRtcPeer's run() has already ended")]

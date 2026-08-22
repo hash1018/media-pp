@@ -1,0 +1,416 @@
+#[cfg(not(target_os = "windows"))]
+fn main() {
+    eprintln!("{} example only supports Windows", env!("CARGO_PKG_NAME"));
+}
+
+#[cfg(target_os = "windows")]
+fn main() -> impl std::process::Termination {
+    windows_example::run()
+}
+
+#[cfg(target_os = "windows")]
+mod windows_example {
+    use std::{
+        net::UdpSocket,
+        sync::Arc,
+        thread,
+        time::{Duration, Instant},
+    };
+
+    use media_pp::{
+        bus::BusEvent,
+        clock::Clock,
+        elements::{
+            AttachedTrack, FileDemuxer, Pacer, SwDecoder, SwEncoder, SwEncoderOptions, SwScaler,
+            TestVideoOptions, TestVideoSource, TrackEndpoints, VideoCodec, WebRtcPeer,
+            WebRtcTrackSink, WebRtcTrackSource,
+        },
+        ffmpeg,
+        pipeline::Pipeline,
+    };
+    use render_common::{D3d12GpuContext, Shutdown, WindowTarget};
+    use str0m::{
+        Candidate, Rtc,
+        change::SdpOffer,
+        format::Codec,
+        media::{Direction, MediaKind},
+    };
+    use winit::raw_window_handle::RawWindowHandle;
+
+    /// What both directions of the call are encoded at. Fixed rather than
+    /// derived from either source: the file side is scaled to it, and both
+    /// window renderers are wired up once at this size.
+    const WIDTH: u32 = 640;
+    const HEIGHT: u32 = 480;
+    const FPS: i32 = 30;
+
+    /// A two-way video call between two `WebRtcPeer`s in one process, each
+    /// presenting what the *other* sent into its own window.
+    ///
+    /// One `Direction::SendRecv` track carries both directions on a single
+    /// connection (see `webrtc_loopback` for the minimal version of that), so
+    /// `next_track` hands each side a `TrackEndpoints::SendRecv` — a sink to
+    /// encode into and a source to decode from.
+    ///
+    /// The two callers deliberately differ in where their video comes from:
+    /// peer-a generates it, peer-b transcodes a real file at playback speed.
+    ///
+    ///     cargo run -p webrtc_video_call -- path/to/video.mp4
+    pub(super) fn run() {
+        let Some(path) = std::env::args().nth(1) else {
+            eprintln!("usage: webrtc_video_call <video.mp4>");
+            std::process::exit(1);
+        };
+
+        render_common::run_windows(
+            &[
+                "media-pp webrtc_video_call — peer-a (showing peer-b's file)",
+                "media-pp webrtc_video_call — peer-b (showing peer-a's test pattern)",
+            ],
+            WIDTH,
+            HEIGHT,
+            move |targets, shutdown| {
+                let [target_a, target_b] = <[WindowTarget; 2]>::try_from(targets)
+                    .unwrap_or_else(|_| panic!("run_windows opened the two windows asked for"));
+                play(&path, hwnd_of(&target_a), hwnd_of(&target_b), shutdown)
+            },
+        );
+    }
+
+    fn hwnd_of(target: &WindowTarget) -> isize {
+        let RawWindowHandle::Win32(handle) = target.window else {
+            panic!("webrtc_video_call example only supports Windows");
+        };
+        handle.hwnd.get()
+    }
+
+    fn play(
+        path: &str,
+        hwnd_a: isize,
+        hwnd_b: isize,
+        shutdown: Arc<Shutdown>,
+    ) -> media_pp::Result<()> {
+        media_pp::init()?;
+        let _log_guard = media_pp::log::init(
+            env!("CARGO_PKG_NAME"),
+            "logs",
+            media_pp::log::Level::Trace,
+            7,
+        )?;
+
+        // Before anything else: bringing up two peers, negotiating a track,
+        // and opening a GPU context are all slow and all pointless if the
+        // file cannot be read. Failing here costs nothing and says why.
+        let file = FileSource::open(path)?;
+
+        let (handle_a, handle_b, driver_a, driver_b, offer_rx) = connect_peers();
+
+        // One SendRecv track, so each side gets both halves back and the
+        // call needs no second `add_track` for the return direction.
+        handle_a
+            .add_track(MediaKind::Video, Direction::SendRecv, Codec::H264)
+            .expect("running peer should accept AddTrack");
+        let (sink_a, source_a) = send_recv(
+            handle_a
+                .next_track()
+                .expect("peer-a's own track should attach"),
+        );
+        let offer = offer_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("peer-a should generate a renegotiation offer");
+        let answer = handle_b
+            .accept_remote_offer(offer)
+            .expect("peer-b should accept the offer");
+        handle_a.set_answer(answer);
+        let (sink_b, source_b) = send_recv(
+            handle_b
+                .next_track()
+                .expect("peer-b's remote track should attach"),
+        );
+        thread::sleep(Duration::from_millis(100)); // let the answer apply
+        println!("call established — one SendRecv track carrying both directions");
+
+        // One GPU context for both windows: `render_common` owns the device
+        // and shader pipeline process-wide, not per window.
+        let gpu = D3d12GpuContext::new().map_err(|e| {
+            media_pp::Error::Other(format!("failed to create the D3D12 context: {e:?}"))
+        })?;
+
+        let send_a = generated_send_pipeline(sink_a)?;
+        let (send_b, encoder_params) = file_send_pipeline(file, sink_b)?;
+        // Both directions encode with the same `SwEncoderOptions`, so one
+        // set of parameters describes either stream. A real deployment
+        // derives these from the negotiated SDP instead; here both peers
+        // live in one process, so the encoder's own answer is available
+        // directly and there is no signaling to invent.
+        let recv_a = receive_pipeline("peer-a-recv", source_a, &encoder_params, &gpu, hwnd_a)?;
+        let recv_b = receive_pipeline("peer-b-recv", source_b, &encoder_params, &gpu, hwnd_b)?;
+
+        let pipelines = [
+            send_a.clone(),
+            send_b.clone(),
+            recv_a.clone(),
+            recv_b.clone(),
+        ];
+        if shutdown.publish(&pipelines) {
+            return Ok(());
+        }
+        for pipeline in &pipelines {
+            pipeline.run()?;
+        }
+        println!("both windows are live — close either one to end the call");
+
+        // The generated side runs until a window closes; the file side ends
+        // on its own. Watching the file pipeline's bus is what keeps the call
+        // up for exactly as long as there is still something to send.
+        for event in send_b.bus().iter() {
+            match &event {
+                BusEvent::Eos { name, .. } => println!("[{name}] eos"),
+                BusEvent::Error { name, error, .. } => eprintln!("[{name}] error: {error}"),
+                BusEvent::Dropped { name, .. } => {
+                    eprintln!("[{name}] dropped a buffer (queue full)")
+                }
+                // `BusEvent` is `#[non_exhaustive]`; this example only acts
+                // on the events above.
+                _ => {}
+            }
+            if matches!(event, BusEvent::Eos { .. } | BusEvent::Error { .. }) {
+                break;
+            }
+        }
+
+        for pipeline in &pipelines {
+            pipeline.stop();
+        }
+        driver_a.stop();
+        driver_b.stop();
+        Ok(())
+    }
+
+    /// Both halves of the one `Direction::SendRecv` track this example opens.
+    fn send_recv(track: AttachedTrack) -> (WebRtcTrackSink, WebRtcTrackSource) {
+        let TrackEndpoints::SendRecv(sink, source) = track.endpoints else {
+            panic!("a SendRecv track should carry both halves");
+        };
+        (sink, source)
+    }
+
+    fn encoder_options(time_base: ffmpeg::Rational) -> SwEncoderOptions {
+        SwEncoderOptions {
+            // Cisco's BSD-licensed H.264 encoder, so this needs no
+            // `--enable-gpl` ffmpeg build — and H.264 is what the track
+            // above negotiates.
+            codec: VideoCodec::OpenH264,
+            width: WIDTH,
+            height: HEIGHT,
+            time_base,
+            frame_rate: ffmpeg::Rational::new(FPS, 1),
+            bit_rate: 1_500_000,
+            gop_size: 30,
+        }
+    }
+
+    /// peer-a's outbound half: `TestVideoSource -> Queue -> SwEncoder ->
+    /// WebRtcTrackSink`. The source paces itself, so nothing else has to.
+    fn generated_send_pipeline(sink: WebRtcTrackSink) -> media_pp::Result<Arc<Pipeline>> {
+        let options = TestVideoOptions {
+            width: WIDTH,
+            height: HEIGHT,
+            framerate: ffmpeg::Rational::new(FPS, 1),
+        };
+        let source = TestVideoSource::new("test-video", options);
+        let time_base = source.time_base();
+        let encoder = SwEncoder::new("encode-a", encoder_options(time_base))?;
+
+        Pipeline::new("peer-a-send", source, move |source, ctx| {
+            let branch = ctx
+                .branch()
+                .queue("to-encode", 8)
+                .pipe(encoder)
+                .to(Box::new(sink))?;
+            ctx.attach(source, 0, branch)?;
+            Ok(())
+        })
+    }
+
+    /// An opened video file, and everything about it the call needs — kept
+    /// separate from building the pipeline so the one step that depends on
+    /// user input can happen before any of the setup that does not.
+    struct FileSource {
+        demuxer: FileDemuxer,
+        index: usize,
+        params: ffmpeg::codec::Parameters,
+        time_base: ffmpeg::Rational,
+    }
+
+    impl FileSource {
+        /// Both failure modes name the path: ffmpeg reports an unreadable or
+        /// non-media file as a bare "Invalid data found when processing
+        /// input", which says nothing about which argument was wrong.
+        fn open(path: &str) -> media_pp::Result<Self> {
+            let (demuxer, streams) = FileDemuxer::open("demux", path).map_err(|error| {
+                media_pp::Error::Other(format!("cannot read `{path}` as a media file: {error}"))
+            })?;
+            let video = streams
+                .iter()
+                .find(|s| s.kind == ffmpeg::media::Type::Video)
+                .ok_or_else(|| {
+                    media_pp::Error::Other(format!("`{path}` has no video stream to send"))
+                })?;
+            let index = video.index;
+            let params = demuxer
+                .stream_parameters(index)
+                .expect("the stream just found still exists");
+            let time_base = demuxer
+                .stream_time_base(index)
+                .expect("the stream just found still exists");
+            Ok(Self {
+                demuxer,
+                index,
+                params,
+                time_base,
+            })
+        }
+    }
+
+    /// peer-b's outbound half: `FileDemuxer -> SwDecoder -> Queue -> Pacer ->
+    /// SwScaler -> Queue -> SwEncoder -> WebRtcTrackSink`.
+    ///
+    /// The transcode is what makes the file usable as a call source at all:
+    /// its frames are whatever size the file holds, and its packets arrive as
+    /// fast as the disk can serve them. `SwScaler` fixes the first, `Pacer`
+    /// the second — without it the whole file would be encoded and sent in a
+    /// couple of seconds.
+    ///
+    /// Also returns the encoder's own codec parameters, which is what the
+    /// receiving side needs to open a decoder for a stream that never came
+    /// from a demuxer.
+    fn file_send_pipeline(
+        file: FileSource,
+        sink: WebRtcTrackSink,
+    ) -> media_pp::Result<(Arc<Pipeline>, ffmpeg::codec::Parameters)> {
+        let FileSource {
+            demuxer: source,
+            index,
+            params,
+            time_base,
+        } = file;
+
+        let decoder = SwDecoder::new("decode-file", params)?;
+        let pacer = Pacer::new("pace-file", time_base, Arc::new(Clock::new()))?;
+        let scaler = SwScaler::new(
+            "scale-file",
+            ffmpeg::format::Pixel::YUV420P,
+            WIDTH,
+            HEIGHT,
+            ffmpeg::software::scaling::Flags::BILINEAR,
+        );
+        let encoder = SwEncoder::new("encode-b", encoder_options(time_base))?;
+        let encoder_params = encoder.parameters();
+
+        let pipeline = Pipeline::new("peer-b-send", source, move |source, ctx| {
+            let branch = ctx
+                .branch()
+                .pipe(decoder)
+                .queue("frames", 8) // the pacer sleeps; let demux/decode run ahead
+                .pipe(pacer)
+                .pipe(scaler)
+                .queue("to-encode", 8)
+                .pipe(encoder)
+                .to(Box::new(sink))?;
+            ctx.attach(source, index, branch)?;
+            Ok(())
+        })?;
+        Ok((pipeline, encoder_params))
+    }
+
+    /// Either peer's inbound half: `WebRtcTrackSource -> Queue -> SwDecoder ->
+    /// Renderer`.
+    ///
+    /// No `Pacer`: these packets arrive over the network at the rate the
+    /// other side encoded them, so the timeline is already real.
+    fn receive_pipeline(
+        name: &str,
+        source: WebRtcTrackSource,
+        params: &ffmpeg::codec::Parameters,
+        gpu: &D3d12GpuContext,
+        hwnd: isize,
+    ) -> media_pp::Result<Arc<Pipeline>> {
+        let decoder = SwDecoder::new(format!("{name}-decode"), params.clone())?;
+        let renderer = render_common::d3d12_window_renderer(
+            format!("{name}-render"),
+            gpu,
+            hwnd,
+            WIDTH,
+            HEIGHT,
+        )
+        .map_err(|e| media_pp::Error::Other(format!("failed to open a renderer: {e:?}")))?;
+
+        Pipeline::new(name, source, move |source, ctx| {
+            let branch = ctx
+                .branch()
+                .queue("packets", 16)
+                .pipe(decoder)
+                .to(Box::new(renderer))?;
+            ctx.attach(source, 0, branch)?;
+            Ok(())
+        })
+    }
+
+    /// Two `Rtc`s brought up over loopback UDP with a throwaway data channel,
+    /// then handed to `WebRtcPeer`s — the same signaling stand-in
+    /// `webrtc_loopback` uses, since this example is about the media, not
+    /// about transporting SDP.
+    #[allow(clippy::type_complexity)]
+    fn connect_peers() -> (
+        media_pp::elements::WebRtcHandle,
+        media_pp::elements::WebRtcHandle,
+        Arc<media_pp::driver::DriverRunner>,
+        Arc<media_pp::driver::DriverRunner>,
+        std::sync::mpsc::Receiver<SdpOffer>,
+    ) {
+        let socket_a = UdpSocket::bind("127.0.0.1:0").expect("bind a");
+        let socket_b = UdpSocket::bind("127.0.0.1:0").expect("bind b");
+        let addr_a = socket_a.local_addr().expect("addr a");
+        let addr_b = socket_b.local_addr().expect("addr b");
+
+        let mut rtc_a = Rtc::builder().build(Instant::now());
+        rtc_a
+            .add_local_candidate(Candidate::host(addr_a, "udp").expect("candidate a"))
+            .expect("add candidate a");
+        let mut rtc_b = Rtc::builder().build(Instant::now());
+        rtc_b
+            .add_local_candidate(Candidate::host(addr_b, "udp").expect("candidate b"))
+            .expect("add candidate b");
+
+        let mut changes = rtc_a.sdp_api();
+        changes.add_channel("bootstrap".to_string());
+        let (offer, pending) = changes.apply().expect("adding a channel always offers");
+        let answer = rtc_b.sdp_api().accept_offer(offer).expect("b accepts");
+        rtc_a
+            .sdp_api()
+            .accept_answer(pending, answer)
+            .expect("a accepts answer");
+
+        let (offer_tx, offer_rx) = std::sync::mpsc::channel::<SdpOffer>();
+        let (peer_a, handle_a) = WebRtcPeer::new(
+            "peer-a",
+            rtc_a,
+            socket_a,
+            move |offer| {
+                let _ = offer_tx.send(offer);
+            },
+            |_id| {},
+        );
+        let (peer_b, handle_b) = WebRtcPeer::new("peer-b", rtc_b, socket_b, |_offer| {}, |_id| {});
+
+        let driver_a = media_pp::driver::DriverRunner::new(peer_a);
+        let driver_b = media_pp::driver::DriverRunner::new(peer_b);
+        driver_a.run().expect("peer-a should start");
+        driver_b.run().expect("peer-b should start");
+        thread::sleep(Duration::from_millis(200));
+        println!("ICE/DTLS-SRTP established over loopback UDP");
+
+        (handle_a, handle_b, driver_a, driver_b, offer_rx)
+    }
+}

@@ -15,7 +15,7 @@ use str0m::{
     Event, Input, Output, Rtc,
     change::{SdpOffer, SdpPendingOffer},
     format::Codec,
-    media::{MediaKind, MediaTime, Mid},
+    media::{Direction, MediaKind, MediaTime, Mid},
     net::{Protocol, Receive},
 };
 
@@ -30,7 +30,7 @@ use crate::{
 
 use super::{
     command::{Command, TrackId, TrackOutState, WebRtcError},
-    track::{WebRtcHandle, WebRtcTrackSink, WebRtcTrackSource},
+    track::{AttachedTrack, TrackEndpoints, WebRtcHandle, WebRtcTrackSink, WebRtcTrackSource},
 };
 
 /// How often `WebRtcPeer::run` re-checks `stop`/its command channel while
@@ -70,17 +70,23 @@ const CHANNEL_CAPACITY: usize = 128;
 /// [`WebRtcHandle::add_track`] or one the remote peer added (`str0m`'s
 /// `Event::MediaAdded`, which — critically — *never fires for a track this
 /// side added itself*) — is attached the same way, the moment its `Mid`
-/// exists: a [`WebRtcTrackSink`] (to reply on) and a [`WebRtcTrackSource`]
-/// (whatever the remote side sends on it) are minted together and handed
-/// out through [`WebRtcHandle::next_track`], no closure required. A single
-/// `Direction::SendRecv` track therefore needs exactly one
-/// [`WebRtcHandle::add_track`] call (on either side) and one
+/// exists: a [`TrackEndpoints`] is minted from the track's negotiated
+/// direction and handed out through [`WebRtcHandle::next_track`], no
+/// closure required. A single `Direction::SendRecv` track therefore needs
+/// exactly one [`WebRtcHandle::add_track`] call (on either side) and one
 /// `next_track()` on *each* side — no separate outbound API, and no
 /// special-casing for which side happened to originate it.
-/// (`Direction::SendOnly`/`RecvOnly` still work the same way; the unused
-/// half of the pair — a `WebRtcTrackSource` nothing ever sends on, or a
-/// `WebRtcTrackSink` str0m has no send capability for — is simply inert,
-/// not an error.) This is the same idea as
+///
+/// What that direction allows is decided once, here, rather than left to
+/// the caller to observe: a `SendOnly` track yields a [`WebRtcTrackSink`]
+/// and no source, a `RecvOnly` one a [`WebRtcTrackSource`] and no sink.
+/// The endpoints are never re-issued, so a remote peer that renegotiates
+/// a different direction afterwards invalidates what the caller is
+/// holding; that is reported as
+/// [`WebRtcError::DirectionChanged`] on the [`Bus`] rather than quietly
+/// changing behavior underneath it.
+///
+/// Attachment itself is the same idea as
 /// [`crate::elements::TeeHandle::attach`]'s dynamic attachment, just
 /// without `Tee`'s `Mutex` (nothing but this one thread ever touches
 /// `tracks_in`).
@@ -107,6 +113,11 @@ pub struct WebRtcPeer {
     /// being pushed instead of guessing at whatever this connection
     /// happened to negotiate first for that `Mid`.
     track_codec: HashMap<TrackId, Codec>,
+    /// The direction each attached track was handed out with, so
+    /// `Event::MediaChanged` can tell an actual renegotiation apart from a
+    /// re-announcement of the direction already in force. Keyed by `Mid`
+    /// because that is what the event carries.
+    track_direction: HashMap<Mid, Direction>,
     /// The one SDP exchange currently in flight (str0m only allows one at a
     /// time — see `chat.rs`'s own `pending.is_some()` guard), plus which
     /// `TrackId`s it covers, so [`Command::SetAnswer`] knows which entries
@@ -126,7 +137,7 @@ pub struct WebRtcPeer {
     /// newly-attached track, in attachment order (see [`TrackId`]'s own
     /// docs for why the caller has to match on it, not just take these in
     /// order, when more than one track can appear).
-    new_track_tx: Sender<(TrackId, Mid, MediaKind, WebRtcTrackSink, WebRtcTrackSource)>,
+    new_track_tx: Sender<AttachedTrack>,
     on_offer: Box<dyn FnMut(SdpOffer) + Send>,
     on_keyframe_request: Box<dyn FnMut(TrackId) + Send>,
 }
@@ -164,6 +175,7 @@ impl WebRtcPeer {
                 tracks_in: HashMap::new(),
                 tracks_out: HashMap::new(),
                 track_codec: HashMap::new(),
+                track_direction: HashMap::new(),
                 pending: None,
                 next_id: next_id.clone(),
                 command_tx: command_tx.clone(),
@@ -184,14 +196,46 @@ impl WebRtcPeer {
     /// `mid`/`kind` and hands both out via [`WebRtcHandle::next_track`] —
     /// see the type docs for why this is the one path both locally- and
     /// remotely-added tracks go through.
-    fn attach_track(&mut self, id: TrackId, mid: Mid, kind: MediaKind) {
-        pp_info!(self, "track attached: id={id:?}, mid={mid}, kind={kind:?}");
-        let reply = WebRtcTrackSink::new(id, self.command_tx.clone());
-        let (tx, rx) = bounded(CHANNEL_CAPACITY);
-        let codec = Arc::new(Mutex::new(None));
-        self.tracks_in.insert(mid, (tx, codec.clone()));
-        let source = WebRtcTrackSource::new(format!("webrtc-track-{}-in", id.0), rx, codec);
-        let _ = self.new_track_tx.send((id, mid, kind, reply, source));
+    pub(super) fn attach_track(
+        &mut self,
+        id: TrackId,
+        mid: Mid,
+        kind: MediaKind,
+        direction: Direction,
+    ) {
+        pp_info!(
+            self,
+            "track attached: id={id:?}, mid={mid}, kind={kind:?}, direction={direction:?}"
+        );
+        self.track_direction.insert(mid, direction);
+
+        // Only build the inbound half when the direction can actually
+        // deliver on it: `tracks_in` is what `Event::MediaData` routes
+        // through, so leaving a receive-less track out of it is also what
+        // makes a stray inbound packet on it visibly a dropped one rather
+        // than something feeding a source nobody was given.
+        let sink = direction
+            .is_sending()
+            .then(|| WebRtcTrackSink::new(id, self.command_tx.clone()));
+        let source = direction.is_receiving().then(|| {
+            let (tx, rx) = bounded(CHANNEL_CAPACITY);
+            let codec = Arc::new(Mutex::new(None));
+            self.tracks_in.insert(mid, (tx, codec.clone()));
+            WebRtcTrackSource::new(format!("webrtc-track-{}-in", id.0), rx, codec)
+        });
+
+        let endpoints = match (sink, source) {
+            (Some(sink), Some(source)) => TrackEndpoints::SendRecv(sink, source),
+            (Some(sink), None) => TrackEndpoints::Send(sink),
+            (None, Some(source)) => TrackEndpoints::Recv(source),
+            (None, None) => TrackEndpoints::Inactive,
+        };
+        let _ = self.new_track_tx.send(AttachedTrack {
+            id,
+            mid,
+            kind,
+            endpoints,
+        });
     }
 
     fn apply_command(&mut self, cmd: Command, bus: &Bus) -> Result<()> {
@@ -280,7 +324,7 @@ impl WebRtcPeer {
             let (kind, direction) = (*kind, *direction);
             let mid = api.add_media(kind, direction, None, None, None);
             self.tracks_out.insert(id, TrackOutState::Negotiating(mid));
-            newly_negotiating.push((id, mid, kind));
+            newly_negotiating.push((id, mid, kind, direction));
         }
 
         if let Some((offer, pending)) = api.apply() {
@@ -293,8 +337,8 @@ impl WebRtcPeer {
         // added (see the type docs) — so this is the only place these
         // newly-minted `Mid`s ever reach `attach_track`, unlike the remote
         // side's own `Event::MediaAdded` handling below.
-        for (id, mid, kind) in newly_negotiating {
-            self.attach_track(id, mid, kind);
+        for (id, mid, kind, direction) in newly_negotiating {
+            self.attach_track(id, mid, kind, direction);
         }
     }
 
@@ -357,7 +401,7 @@ impl WebRtcPeer {
         }
     }
 
-    fn handle_event(&mut self, event: Event, bus: &Bus) {
+    pub(super) fn handle_event(&mut self, event: Event, bus: &Bus) {
         match event {
             Event::MediaAdded(added) => {
                 // Only reached for media the *remote* peer added (see the
@@ -368,7 +412,7 @@ impl WebRtcPeer {
                 // send.
                 let id = TrackId(self.next_id.fetch_add(1, Ordering::Relaxed));
                 self.tracks_out.insert(id, TrackOutState::Open(added.mid));
-                self.attach_track(id, added.mid, added.kind);
+                self.attach_track(id, added.mid, added.kind, added.direction);
             }
             Event::MediaData(data) => {
                 if let Some((tx, codec)) = self.tracks_in.get(&data.mid) {
@@ -441,6 +485,36 @@ impl WebRtcPeer {
                     changed.mid,
                     changed.direction
                 );
+                // A track's endpoints are minted once, from the direction it
+                // attached with, and `next_track` has already handed them to
+                // the caller — there is no way to hand out a half that did
+                // not exist then, or to take back one that no longer works.
+                // So a direction the remote peer actually changed makes what
+                // the caller holds wrong, and saying so is all this element
+                // can do about it. Recovering means tearing the track down
+                // and adding a new one.
+                //
+                // `MediaChanged` also fires when a renegotiation re-states
+                // the direction already in force; comparing keeps that from
+                // being reported as a change.
+                if let Some(&from) = self.track_direction.get(&changed.mid)
+                    && from != changed.direction
+                {
+                    self.track_direction.insert(changed.mid, changed.direction);
+                    bus.post(
+                        &self.pp_log,
+                        BusEvent::Error {
+                            element_type: ElementType::WebRtcPeer,
+                            name: self.name.clone(),
+                            error: WebRtcError::DirectionChanged {
+                                mid: changed.mid,
+                                from,
+                                to: changed.direction,
+                            }
+                            .into(),
+                        },
+                    );
+                }
             }
             // `Event` is `#[non_exhaustive]` — data channels, stats, etc.
             // are still outside this element's concern for now.

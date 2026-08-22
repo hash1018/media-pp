@@ -142,7 +142,9 @@ The examples are grouped by purpose:
   source (PipeWire) are genuinely Linux-only.
 - `examples/rtsp`: publishing, seeking, and receiving RTSP streams.
 - `examples/vision`: scaling and ONNX object detection.
-- `examples/webrtc`: data and encoded A/V loopback pipelines.
+- `examples/webrtc`: data and encoded A/V loopback pipelines, plus a two-way
+  video call that decodes and presents each peer's incoming track in its own
+  window (Windows only, like the other windowed examples).
 
 Useful starting points:
 

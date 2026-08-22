@@ -126,17 +126,39 @@ pub fn run_window<F>(title: &str, width: u32, height: u32, play: F)
 where
     F: FnOnce(WindowTarget, Arc<Shutdown>) -> media_pp::Result<()> + Send + 'static,
 {
+    run_windows(&[title], width, height, move |mut targets, shutdown| {
+        play(targets.remove(0), shutdown)
+    });
+}
+
+/// [`run_window`] for more than one window at a time: opens one per entry in
+/// `titles`, all the same size, and hands `play` their targets in that order.
+///
+/// Still *one* worker thread and one [`Shutdown`], because the windows are
+/// halves of a single piece of work — closing either one ends all of it, and
+/// the worker owns every pipeline involved. Two independent workers would
+/// need two shutdown handshakes and could not present a pipeline into both.
+///
+/// Closing *any* window begins the same stop the single-window case does, and
+/// [`App::drop`] joins the worker before letting go of any of them — the same
+/// ordering the module docs describe, which is what makes
+/// [`WindowTarget`]'s `Send` sound for every target handed out here.
+pub fn run_windows<F>(titles: &[&str], width: u32, height: u32, play: F)
+where
+    F: FnOnce(Vec<WindowTarget>, Arc<Shutdown>) -> media_pp::Result<()> + Send + 'static,
+{
+    assert!(!titles.is_empty(), "run_windows needs at least one window");
     let event_loop = EventLoop::<PlaybackDone>::with_user_event()
         .build()
         .expect("failed to create event loop");
     let proxy = event_loop.create_proxy();
     let mut app = App {
-        title: title.to_string(),
+        titles: titles.iter().map(|title| title.to_string()).collect(),
         width,
         height,
         proxy,
         play: Some(play),
-        window: None,
+        windows: Vec::new(),
         shutdown: Arc::new(Shutdown::default()),
         stopper: None,
         playback: None,
@@ -175,13 +197,14 @@ impl<F: FnOnce()> Drop for CompletionGuard<F> {
 }
 
 struct App<F> {
-    title: String,
+    titles: Vec<String>,
     width: u32,
     height: u32,
     proxy: EventLoopProxy<PlaybackDone>,
     /// Taken by `resumed`, which may be called more than once.
     play: Option<F>,
-    window: Option<Window>,
+    /// One per entry in `titles`, in that order — empty until `resumed`.
+    windows: Vec<Window>,
     shutdown: Arc<Shutdown>,
     /// Runs [`Pipeline::stop`] off the event loop thread; see the module docs.
     stopper: Option<thread::JoinHandle<()>>,
@@ -214,41 +237,45 @@ impl<F> Drop for App<F> {
         if let Some(playback) = self.playback.take() {
             let _ = playback.join();
         }
-        // Only now is it safe to let go of the window.
-        self.window = None;
+        // Only now is it safe to let go of the windows.
+        self.windows.clear();
     }
 }
 
 impl<F> ApplicationHandler<PlaybackDone> for App<F>
 where
-    F: FnOnce(WindowTarget, Arc<Shutdown>) -> media_pp::Result<()> + Send + 'static,
+    F: FnOnce(Vec<WindowTarget>, Arc<Shutdown>) -> media_pp::Result<()> + Send + 'static,
 {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.window.is_some() {
+        if !self.windows.is_empty() {
             return;
         }
-        let window = event_loop
-            .create_window(
-                Window::default_attributes()
-                    .with_title(self.title.clone())
-                    .with_inner_size(LogicalSize::new(self.width, self.height))
-                    .with_resizable(false),
-            )
-            .expect("failed to create window");
+        let mut targets = Vec::with_capacity(self.titles.len());
+        for title in &self.titles {
+            let window = event_loop
+                .create_window(
+                    Window::default_attributes()
+                        .with_title(title.clone())
+                        .with_inner_size(LogicalSize::new(self.width, self.height))
+                        .with_resizable(false),
+                )
+                .expect("failed to create window");
 
-        let size = window.inner_size();
-        let target = WindowTarget {
-            display: window
-                .display_handle()
-                .expect("failed to get display handle")
-                .as_raw(),
-            window: window
-                .window_handle()
-                .expect("failed to get window handle")
-                .as_raw(),
-            width: size.width,
-            height: size.height,
-        };
+            let size = window.inner_size();
+            targets.push(WindowTarget {
+                display: window
+                    .display_handle()
+                    .expect("failed to get display handle")
+                    .as_raw(),
+                window: window
+                    .window_handle()
+                    .expect("failed to get window handle")
+                    .as_raw(),
+                width: size.width,
+                height: size.height,
+            });
+            self.windows.push(window);
+        }
 
         let play = self.play.take().expect("resumed already started the work");
         let shutdown = self.shutdown.clone();
@@ -261,11 +288,10 @@ where
                 }
                 let _ = proxy.send_event(PlaybackDone);
             });
-            if let Err(error) = play(target, shutdown) {
+            if let Err(error) = play(targets, shutdown) {
                 eprintln!("playback failed: {error}");
             }
         }));
-        self.window = Some(window);
     }
 
     fn window_event(
@@ -274,7 +300,9 @@ where
         window_id: WindowId,
         event: WindowEvent,
     ) {
-        if self.window.as_ref().map(Window::id) != Some(window_id) {
+        // Closing any one window ends the whole job — the worker owns every
+        // pipeline behind them, and none of the windows can outlive it.
+        if !self.windows.iter().any(|window| window.id() == window_id) {
             return;
         }
         if let WindowEvent::CloseRequested = event {

@@ -21,9 +21,9 @@ mod example {
         driver::DriverRunner,
         element::{Element, ElementType, Sink, element_pp_log},
         elements::{
-            AudioCodec, SwAudioEncoder, SwAudioEncoderOptions, SwEncoder, SwEncoderOptions,
-            TestAudioOptions, TestAudioSource, TestVideoOptions, TestVideoSource, VideoCodec,
-            WebRtcPeer,
+            AttachedTrack, AudioCodec, SwAudioEncoder, SwAudioEncoderOptions, SwEncoder,
+            SwEncoderOptions, TestAudioOptions, TestAudioSource, TestVideoOptions, TestVideoSource,
+            TrackEndpoints, VideoCodec, WebRtcPeer,
         },
         pipeline::PipelineBuilder,
     };
@@ -105,12 +105,24 @@ mod example {
         // -- Track 1: video. One full renegotiation round before starting the
         // second track — str0m only allows one SDP exchange in flight at a
         // time.
-        handle_a
+        let video_id = handle_a
             .add_track(MediaKind::Video, Direction::SendOnly, Codec::H264)
             .expect("running peer should accept AddTrack");
-        let (_id, _mid, kind, video_sink_a, _unused) = handle_a
+        // `next_track` yields whichever track attaches next — including one
+        // the *remote* peer added — so the `TrackId` it returns has to be
+        // matched against the one `add_track` handed back. Nothing else adds
+        // a track here, but pushing an encoder onto the wrong track's sink
+        // fails silently (see `WebRtcHandle::add_track`), so the check is
+        // what makes that impossible rather than merely unlikely.
+        let attached = handle_a
             .next_track()
             .expect("peer-a's video track should attach");
+        assert_eq!(
+            attached.id, video_id,
+            "peer-a attached a track it did not add"
+        );
+        let kind = attached.kind;
+        let video_sink_a = send_only(attached);
         println!("peer-a: track attached ({kind:?})");
         let offer = offer_rx
             .recv_timeout(Duration::from_secs(2))
@@ -119,19 +131,36 @@ mod example {
             .accept_remote_offer(offer)
             .expect("peer-b should accept the video offer");
         handle_a.set_answer(answer);
-        let (_id, _mid, kind, _unused, video_source_b) = handle_b
+        // Nothing to match on this side: peer-b never calls `add_track`, so
+        // every track it sees is one the remote peer added and there is no
+        // locally-issued `TrackId` to compare against. peer-a asked for
+        // `SendOnly`, so what peer-b gets is the inverse — a track with no
+        // sink at all, rather than one it could push into to no effect.
+        let attached = handle_b
             .next_track()
             .expect("peer-b's video track should attach");
+        let kind = attached.kind;
+        let video_source_b = recv_only(attached);
         println!("peer-b: track attached ({kind:?})");
         thread::sleep(Duration::from_millis(100)); // let the answer actually apply
 
         // -- Track 2: audio, on the *same* connection.
-        handle_a
+        let audio_id = handle_a
             .add_track(MediaKind::Audio, Direction::SendOnly, Codec::Opus)
             .expect("running peer should accept a second AddTrack");
-        let (_id, _mid, kind, audio_sink_a, _unused) = handle_a
+        let attached = handle_a
             .next_track()
             .expect("peer-a's audio track should attach");
+        assert_eq!(
+            attached.id, audio_id,
+            "peer-a attached a track it did not add"
+        );
+        assert_ne!(
+            attached.id, video_id,
+            "the audio track reused the video track's id"
+        );
+        let kind = attached.kind;
+        let audio_sink_a = send_only(attached);
         println!("peer-a: track attached ({kind:?})");
         let offer = offer_rx
             .recv_timeout(Duration::from_secs(2))
@@ -140,9 +169,11 @@ mod example {
             .accept_remote_offer(offer)
             .expect("peer-b should accept the audio offer");
         handle_a.set_answer(answer);
-        let (_id, _mid, kind, _unused, audio_source_b) = handle_b
+        let attached = handle_b
             .next_track()
             .expect("peer-b's audio track should attach");
+        let kind = attached.kind;
+        let audio_source_b = recv_only(attached);
         println!("peer-b: track attached ({kind:?})");
         thread::sleep(Duration::from_millis(100));
 
@@ -274,6 +305,27 @@ mod example {
         );
         println!("ok — two tracks, one connection, no cross-contamination");
         Ok(())
+    }
+
+    /// The outbound half of a `Direction::SendOnly` track — every track
+    /// peer-a opens here. `TrackEndpoints` carries only what the direction
+    /// permits, so there is no inbound half to name and discard, and a
+    /// track that somehow negotiated otherwise fails here rather than
+    /// downstream.
+    fn send_only(track: AttachedTrack) -> media_pp::elements::WebRtcTrackSink {
+        let TrackEndpoints::Send(sink) = track.endpoints else {
+            panic!("peer-a opens SendOnly tracks and expects a sink back");
+        };
+        sink
+    }
+
+    /// The mirror image on peer-b: `SendOnly` from peer-a arrives as
+    /// receive-only here.
+    fn recv_only(track: AttachedTrack) -> media_pp::elements::WebRtcTrackSource {
+        let TrackEndpoints::Recv(source) = track.endpoints else {
+            panic!("peer-b receives SendOnly tracks and expects a source back");
+        };
+        source
     }
 
     struct CountingSink {

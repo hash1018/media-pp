@@ -57,7 +57,8 @@ pub use crate::platform::linux::pipewire::{
 };
 #[cfg(feature = "webrtc")]
 pub use driver::{
-    TrackId, WebRtcError, WebRtcHandle, WebRtcPeer, WebRtcTrackSink, WebRtcTrackSource,
+    AttachedTrack, TrackEndpoints, TrackId, WebRtcError, WebRtcHandle, WebRtcPeer, WebRtcTrackSink,
+    WebRtcTrackSource,
 };
 pub use filter::{
     AudioCodec, AudioResampler, AudioResamplerError, AudioVolume, AudioVolumeError,
