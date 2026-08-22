@@ -224,3 +224,56 @@ impl SourceElement for RtspSource {
         Err(RtspSourceError::SeekUnsupported.into())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::time::Instant;
+
+    use super::*;
+
+    /// `RtspOptions::timeout`'s whole reason for existing: without it
+    /// ffmpeg applies *no* timeout at all and `open` blocks forever against
+    /// a server that never answers. `192.0.2.1` is RFC 5737 TEST-NET-1,
+    /// reserved for documentation and guaranteed not to be routed, so this
+    /// exercises the "no answer" path rather than a fast connection refusal.
+    ///
+    /// Only the upper bound is asserted: a network that replies with an ICMP
+    /// unreachable makes this fail even sooner, which is equally correct. The
+    /// bound sits well under the OS-level TCP connect timeout (~21s on
+    /// Windows, far longer on Linux), so a regression that stops passing the
+    /// option through is what actually trips it.
+    #[test]
+    fn open_gives_up_within_the_configured_timeout_instead_of_hanging() {
+        let options = RtspOptions {
+            timeout: Duration::from_millis(500),
+            ..Default::default()
+        };
+
+        let started = Instant::now();
+        let result = RtspSource::open("rtsp", "rtsp://192.0.2.1:554/none", options);
+        let elapsed = started.elapsed();
+
+        assert!(
+            result.is_err(),
+            "opening an unroutable address must not succeed"
+        );
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "open took {elapsed:?} — the configured timeout is not reaching ffmpeg"
+        );
+    }
+
+    /// A caller that never touches `RtspOptions` still has to get a bounded
+    /// `open`, since the default this type supplies is the only thing
+    /// standing between them and ffmpeg's unbounded one.
+    #[test]
+    fn the_default_options_still_bound_the_connection() {
+        let options = RtspOptions::default();
+
+        assert_eq!(options.transport, RtspTransport::Tcp);
+        assert!(
+            options.timeout > Duration::ZERO,
+            "the default timeout must not be ffmpeg's unbounded one"
+        );
+    }
+}

@@ -123,3 +123,95 @@ where
         (self.control)(msg)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        sync::{Arc, Mutex},
+        time::Duration,
+    };
+
+    use ffmpeg_next as ffmpeg;
+
+    use super::*;
+
+    fn control_messages() -> [ControlMsg; 4] {
+        [
+            ControlMsg::Pause,
+            ControlMsg::Resume,
+            ControlMsg::Stop,
+            ControlMsg::Seek(Duration::from_secs(1)),
+        ]
+    }
+
+    /// `AppSink::new`'s docs promise every `ControlMsg` is *silently*
+    /// ignored — accepting it and doing nothing, not failing the control
+    /// cascade the way an `Err` here would.
+    #[test]
+    fn new_accepts_and_ignores_every_control_message() {
+        let mut sink = AppSink::new("counter", |_buf| Ok(()));
+
+        for msg in control_messages() {
+            sink.control(msg).unwrap();
+        }
+    }
+
+    /// The whole point of `with_control` over `new`: no variant is
+    /// filtered out on the way to the closure.
+    #[test]
+    fn with_control_forwards_every_control_message() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let recorded = seen.clone();
+        let mut sink = AppSink::with_control(
+            "detector",
+            |_buf| Ok(()),
+            move |msg| {
+                recorded.lock().unwrap().push(msg);
+                Ok(())
+            },
+        );
+
+        for msg in control_messages() {
+            sink.control(msg).unwrap();
+        }
+
+        assert_eq!(&*seen.lock().unwrap(), &control_messages());
+    }
+
+    /// A terminal `Sink`'s error has to come back out of `consume`
+    /// unchanged: that return value is what a direct caller propagates
+    /// with `?`, and what a `Queue` worker turns into `BusEvent::Error`.
+    /// Swallowing it here would make both silently impossible.
+    #[test]
+    fn consume_error_propagates_to_the_caller() {
+        let mut sink = AppSink::new("failing", |_buf| {
+            Err(crate::error::Error::Other("closure failed".into()))
+        });
+
+        let error = sink.consume(MediaBuffer::Eos).unwrap_err();
+
+        assert!(error.to_string().contains("closure failed"));
+    }
+
+    /// `Eos` reaches the closure like any other buffer rather than being
+    /// consumed by the sink itself — a caller that finalizes on EOS (a
+    /// muxer wrapper, a channel it closes) only ever learns about it here.
+    #[test]
+    fn every_buffer_including_eos_reaches_the_closure() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let recorded = seen.clone();
+        let mut sink = AppSink::new("recorder", move |buf| {
+            recorded
+                .lock()
+                .unwrap()
+                .push(matches!(buf, MediaBuffer::Eos));
+            Ok(())
+        });
+
+        sink.consume(MediaBuffer::Audio(Arc::new(ffmpeg::frame::Audio::empty())))
+            .unwrap();
+        sink.consume(MediaBuffer::Eos).unwrap();
+
+        assert_eq!(&*seen.lock().unwrap(), &[false, true]);
+    }
+}

@@ -215,3 +215,209 @@ fn drain_audio(decoder: &mut ffmpeg::decoder::Audio, pad: &mut SrcPad) -> crate:
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use super::*;
+    use crate::{element::ElementType, error::Result, test_support::try_test_video};
+
+    #[derive(Default)]
+    struct Received {
+        buffers: Vec<MediaBuffer>,
+        controls: Vec<ControlMsg>,
+    }
+
+    struct CapturingSink {
+        pp_log: PpLog,
+        received: Arc<Mutex<Received>>,
+    }
+
+    impl Element for CapturingSink {
+        fn name(&self) -> Arc<str> {
+            "capture".into()
+        }
+
+        fn element_type(&self) -> ElementType {
+            ElementType::Other
+        }
+
+        fn pp_log(&self) -> &PpLog {
+            &self.pp_log
+        }
+
+        fn pp_log_mut(&mut self) -> &mut PpLog {
+            &mut self.pp_log
+        }
+    }
+
+    impl Sink for CapturingSink {
+        fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+            self.received.lock().unwrap().buffers.push(buf);
+            Ok(())
+        }
+
+        fn control(&mut self, msg: ControlMsg) -> Result<()> {
+            self.received.lock().unwrap().controls.push(msg);
+            Ok(())
+        }
+    }
+
+    fn link_capture(decoder: &mut SwDecoder) -> Arc<Mutex<Received>> {
+        let received = Arc::new(Mutex::new(Received::default()));
+        decoder.src_pads()[0].link(Box::new(CapturingSink {
+            received: received.clone(),
+            pp_log: element_pp_log(ElementType::Other, "capture", None),
+        }));
+        received
+    }
+
+    /// A bare H.264 decoder, built without any fixture: only `codec_type`/
+    /// `codec_id` decide which decoder `SwDecoder::new` opens, and libavcodec
+    /// takes an Annex B stream's parameters from the bitstream itself rather
+    /// than from `extradata`. Lets the control/passthrough contracts below
+    /// run on every machine instead of only where `MEDIA_PP_TEST_VIDEO` is set.
+    fn video_decoder(name: &str) -> SwDecoder {
+        let mut params = ffmpeg::codec::Parameters::new();
+        // SAFETY: `as_mut_ptr` on parameters this test just created and still
+        // owns exclusively; both are plain fields of `AVCodecParameters`.
+        unsafe {
+            (*params.as_mut_ptr()).codec_type = ffmpeg::media::Type::Video.into();
+            (*params.as_mut_ptr()).codec_id = ffmpeg::codec::Id::H264.into();
+        }
+        SwDecoder::new(name, params).expect("failed to open the built-in H.264 decoder")
+    }
+
+    /// Neither audio nor video has to fail here with this element's own typed
+    /// error, not somewhere inside libavcodec later. Freshly allocated
+    /// parameters report `Unknown`, which is exactly that case.
+    #[test]
+    fn parameters_that_are_neither_audio_nor_video_are_rejected() {
+        let error = SwDecoder::new("decoder", ffmpeg::codec::Parameters::new())
+            .err()
+            .expect("unknown-medium parameters must not open a decoder");
+
+        assert!(
+            matches!(
+                error,
+                SwDecoderError::UnsupportedMediaType(ffmpeg::media::Type::Unknown)
+            ),
+            "expected UnsupportedMediaType, got {error:?}"
+        );
+    }
+
+    /// `Seek` is the one control this element reacts to locally — it flushes
+    /// the codec's reference/reordering state so packets from the new position
+    /// don't decode against stale state. It must still reach the rest of the
+    /// branch afterwards; swallowing it would silently strand every downstream
+    /// element at the old position.
+    #[test]
+    fn seek_is_forwarded_downstream_after_flushing() {
+        let mut decoder = video_decoder("decoder");
+        let received = link_capture(&mut decoder);
+
+        decoder
+            .control(ControlMsg::Seek(std::time::Duration::from_secs(3)))
+            .expect("seek must not fail");
+
+        assert_eq!(
+            received.lock().unwrap().controls,
+            [ControlMsg::Seek(std::time::Duration::from_secs(3))]
+        );
+    }
+
+    /// Every other control passes straight through — this element has no
+    /// local reaction to them (see `SwDecoder::control`'s own comment).
+    #[test]
+    fn other_controls_are_forwarded_unchanged() {
+        let mut decoder = video_decoder("decoder");
+        let received = link_capture(&mut decoder);
+
+        for msg in [ControlMsg::Pause, ControlMsg::Resume, ControlMsg::Stop] {
+            decoder.control(msg).expect("control must not fail");
+        }
+
+        assert_eq!(
+            received.lock().unwrap().controls,
+            [ControlMsg::Pause, ControlMsg::Resume, ControlMsg::Stop]
+        );
+    }
+
+    /// A buffer this decoder has nothing to do with is dropped, not forwarded:
+    /// its src pad carries what *this* element decoded, so passing an
+    /// already-decoded frame along would put a buffer on the pad that never
+    /// came out of the codec.
+    #[test]
+    fn buffers_other_than_packets_and_eos_are_dropped() {
+        let mut decoder = video_decoder("decoder");
+        let received = link_capture(&mut decoder);
+
+        decoder
+            .consume(MediaBuffer::Audio(Arc::new(ffmpeg::frame::Audio::empty())))
+            .expect("an unrelated buffer must not fail the decoder");
+
+        assert!(
+            received.lock().unwrap().buffers.is_empty(),
+            "a buffer this decoder never produced was pushed downstream"
+        );
+    }
+
+    /// The contract EOS draining exists for: frames the codec was still
+    /// holding (B-frame reordering, decoder latency) must come out *before*
+    /// the `Eos` that ends the branch, and each must keep its timestamp.
+    /// Asserted against whatever fixture is configured — nothing here depends
+    /// on its codec, size, or duration.
+    #[test]
+    fn eos_drains_delayed_frames_before_forwarding_it() {
+        let Some(path) = try_test_video() else {
+            return;
+        };
+
+        let mut input = ffmpeg::format::input(&path).expect("failed to open the test video");
+        let stream = input
+            .streams()
+            .best(ffmpeg::media::Type::Video)
+            .expect("the test video has no video stream");
+        let stream_index = stream.index();
+        let params = stream.parameters();
+
+        let mut decoder = SwDecoder::new("decoder", params).expect("failed to open the decoder");
+        let received = link_capture(&mut decoder);
+
+        let mut sent = 0;
+        for (stream, packet) in input.packets() {
+            if stream.index() != stream_index {
+                continue;
+            }
+            decoder
+                .consume(MediaBuffer::Packet(Arc::new(packet)))
+                .expect("decode failed");
+            sent += 1;
+            if sent >= 30 {
+                break;
+            }
+        }
+        decoder.consume(MediaBuffer::Eos).expect("eos failed");
+
+        let received = received.lock().unwrap();
+        let (last, frames) = received
+            .buffers
+            .split_last()
+            .expect("the decoder pushed nothing at all");
+        assert!(
+            last.is_eos(),
+            "Eos was not the last buffer — delayed frames escaped after it"
+        );
+        assert!(
+            !frames.is_empty(),
+            "no frames were decoded from the configured fixture"
+        );
+        for buf in frames {
+            let MediaBuffer::Video(frame) = buf else {
+                panic!("a video decoder pushed a buffer that was not a video frame");
+            };
+            assert!(frame.pts().is_some(), "a decoded frame lost its pts");
+        }
+    }
+}
