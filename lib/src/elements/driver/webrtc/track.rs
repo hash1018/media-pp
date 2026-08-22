@@ -7,7 +7,7 @@ use std::{
 };
 
 use crate::pp_log::{PpLog, pp_error, pp_info};
-use crossbeam_channel::{Receiver, Sender, TrySendError, select};
+use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TrySendError, select};
 use str0m::{
     change::{SdpAnswer, SdpOffer},
     format::Codec,
@@ -26,7 +26,10 @@ use crate::{
     pad::SrcPad,
 };
 
-use super::command::{Command, TrackId, WebRtcError};
+use super::{
+    command::{Command, TrackId, WebRtcError},
+    stream_info::WebRtcStreamInfo,
+};
 
 /// The endpoints a track actually has, which is exactly what its
 /// negotiated [`Direction`] allows — a `SendOnly` track carries no
@@ -98,8 +101,9 @@ impl WebRtcHandle {
     /// will actually be fed (an encoder's output, or a packet relayed
     /// verbatim from another track) — used to pick the matching payload
     /// type out of whatever this connection negotiates for the track,
-    /// instead of guessing. If this connection never negotiates `codec` for
-    /// it, pushed buffers are silently dropped, same as an unopened track.
+    /// instead of guessing. If this connection does not negotiate `codec`,
+    /// consuming a packet returns
+    /// [`WebRtcError::OutboundCodecNotNegotiated`].
     ///
     /// Declaring one codec and pushing another is not detected anywhere:
     /// str0m packetizes whatever bytes it is handed under the payload type
@@ -139,6 +143,14 @@ impl WebRtcHandle {
     /// [`WebRtcError::DirectionChanged`] on the [`Bus`] rather than
     /// silently tolerated; recovering from it means tearing the track down
     /// and adding a new one.
+    ///
+    /// Both endpoints expose their currently negotiated codec lists. A send
+    /// endpoint for a track this side requested already selects the codec
+    /// passed to [`WebRtcHandle::add_track`]. For a track the remote side
+    /// added, choose the application's encoder output from
+    /// [`WebRtcTrackSink::negotiated_codecs`] and pass it to
+    /// [`WebRtcTrackSink::set_codec`] before pushing packets. The matching
+    /// source separately reports the codec actually received once RTP starts.
     pub fn next_track(&self) -> Result<AttachedTrack> {
         self.new_track_rx
             .recv()
@@ -173,16 +185,32 @@ impl WebRtcHandle {
 /// [`crate::elements::RtspSink`] or any other terminal sink.
 /// `consume()` only ever hands off to `WebRtcPeer::run`'s own thread via a
 /// channel send; the actual str0m write happens over there.
+///
+/// Its negotiated codec capabilities are available immediately through
+/// [`WebRtcTrackSink::negotiated_codecs`]. The outbound selection is initialized
+/// automatically for a track created by [`WebRtcHandle::add_track`]. A
+/// send-capable track added by the remote peer instead requires one validated
+/// [`WebRtcTrackSink::set_codec`] call before packets are consumed; omitting it
+/// returns a typed error rather than guessing an RTP payload type.
 pub struct WebRtcTrackSink {
     pp_log: PpLog,
     id: TrackId,
+    codec: Option<Codec>,
+    negotiated_codecs: Arc<Mutex<Vec<Codec>>>,
     command_tx: Sender<Command>,
 }
 
 impl WebRtcTrackSink {
-    pub(super) fn new(id: TrackId, command_tx: Sender<Command>) -> Self {
+    pub(super) fn new(
+        id: TrackId,
+        codec: Option<Codec>,
+        negotiated_codecs: Arc<Mutex<Vec<Codec>>>,
+        command_tx: Sender<Command>,
+    ) -> Self {
         Self {
             id,
+            codec,
+            negotiated_codecs,
             command_tx,
             pp_log: element_pp_log(
                 ElementType::WebRtcPeer,
@@ -190,6 +218,48 @@ impl WebRtcTrackSink {
                 None,
             ),
         }
+    }
+
+    /// Returns the distinct codec families this track can currently send
+    /// after SDP negotiation. The order is informational; select the codec
+    /// produced by the application's encoder.
+    ///
+    /// A locally-created endpoint is handed out while its offer is still
+    /// pending, so its initial value is the offered list and is narrowed when
+    /// [`WebRtcHandle::set_answer`] applies the answer. A remotely-created
+    /// endpoint is already negotiated when it is handed out.
+    pub fn negotiated_codecs(&self) -> Vec<Codec> {
+        self.negotiated_codecs.lock().unwrap().clone()
+    }
+
+    /// Declares the codec carried by packets pushed into this sink.
+    ///
+    /// A sink returned for this side's own [`WebRtcHandle::add_track`] call
+    /// is initialized from that call's `codec`. A send-capable track added
+    /// by the remote peer cannot be initialized automatically: one SDP media
+    /// section can negotiate several codecs, and only this application knows
+    /// which encoder feeds its outbound half. Call this before pushing a
+    /// packet into such a sink; the choice is validated against
+    /// [`WebRtcTrackSink::negotiated_codecs`]. If no choice is made,
+    /// [`Sink::consume`] returns [`WebRtcError::OutboundCodecNotDeclared`]
+    /// instead of guessing a payload type and emitting a mislabeled RTP
+    /// stream.
+    ///
+    /// Returns [`WebRtcError::OutboundCodecNotNegotiated`] without changing
+    /// the previous selection when `codec` is unavailable. Already-enqueued
+    /// packets retain the declaration they were submitted with.
+    pub fn set_codec(&mut self, codec: Codec) -> Result<()> {
+        let negotiated = self.negotiated_codecs();
+        if !negotiated.contains(&codec) {
+            return Err(WebRtcError::OutboundCodecNotNegotiated {
+                track_id: self.id,
+                codec,
+                negotiated,
+            }
+            .into());
+        }
+        self.codec = Some(codec);
+        Ok(())
     }
 }
 
@@ -222,6 +292,23 @@ impl Sink for WebRtcTrackSink {
             pp_error!(self, "unsupported buffer: {kind}");
             return Err(WebRtcError::UnsupportedBuffer(kind).into());
         }
+        if matches!(buf, MediaBuffer::Packet(_)) && self.codec.is_none() {
+            pp_error!(self, "outbound codec is not declared");
+            return Err(WebRtcError::OutboundCodecNotDeclared(self.id).into());
+        }
+        if let MediaBuffer::Packet(_) = &buf {
+            let codec = self.codec.expect("checked above");
+            let negotiated = self.negotiated_codecs();
+            if !negotiated.contains(&codec) {
+                pp_error!(self, "outbound codec {codec:?} is not negotiated");
+                return Err(WebRtcError::OutboundCodecNotNegotiated {
+                    track_id: self.id,
+                    codec,
+                    negotiated,
+                }
+                .into());
+            }
+        }
         // `WebRtcPeer::run` gone (channel disconnected) means this track is
         // dead — surface it as `Err` rather than swallowing it, so whatever
         // pipeline this `Sink` is plugged into (its own `Queue`, its own
@@ -238,7 +325,10 @@ impl Sink for WebRtcTrackSink {
         // `Driver::stop()`, so storing one here would keep that `Bus`'s
         // channel open indefinitely — including past whatever's waiting on
         // `BusReceiver::iter()` to finish once every sender is gone.
-        match self.command_tx.try_send(Command::Push(self.id, buf)) {
+        match self
+            .command_tx
+            .try_send(Command::Push(self.id, self.codec, buf))
+        {
             Ok(()) | Err(TrySendError::Full(_)) => Ok(()),
             Err(TrySendError::Disconnected(_)) => {
                 pp_error!(self, "WebRtcPeer::run gone — track is dead");
@@ -266,29 +356,89 @@ impl Sink for WebRtcTrackSink {
 /// this crate's own types (see the module docs for why `WebRtcPeer` hands
 /// tracks out through [`WebRtcHandle::next_track`] instead of a callback).
 pub struct WebRtcTrackSource {
+    id: TrackId,
     pp_log: PpLog,
     name: Arc<str>,
     pad: SrcPad,
     data_rx: Receiver<MediaBuffer>,
     codec: Arc<Mutex<Option<Codec>>>,
+    negotiated_codecs: Arc<Mutex<Vec<Codec>>>,
+    stream_info: Mutex<StreamInfoState>,
+}
+
+struct StreamInfoState {
+    rx: Receiver<WebRtcStreamInfo>,
+    cached: Option<WebRtcStreamInfo>,
 }
 
 impl WebRtcTrackSource {
     pub(super) fn new(
+        id: TrackId,
         name: impl Into<String>,
         data_rx: Receiver<MediaBuffer>,
         codec: Arc<Mutex<Option<Codec>>>,
+        negotiated_codecs: Arc<Mutex<Vec<Codec>>>,
+        stream_info_rx: Receiver<WebRtcStreamInfo>,
     ) -> Self {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::WebRtcPeer, &name, None);
         let pad = SrcPad::new(format!("{name}_src"));
         Self {
+            id,
             name,
             pp_log,
             pad,
             data_rx,
             codec,
+            negotiated_codecs,
+            stream_info: Mutex::new(StreamInfoState {
+                rx: stream_info_rx,
+                cached: None,
+            }),
         }
+    }
+
+    /// Blocks for at most `timeout` until the first actual RTP media payload
+    /// confirms this track's stream parameters. The returned
+    /// [`WebRtcStreamInfo`] can derive the RTP time base and minimal FFmpeg
+    /// parameters needed to construct a decoder.
+    ///
+    /// A timeout returns [`WebRtcError::StreamInfoTimeout`] without consuming
+    /// or invalidating anything, so the caller may retry. Once confirmed, the
+    /// value is cached and every later call returns it immediately. If the
+    /// peer closes before any media arrives, this returns
+    /// [`WebRtcError::Closed`]. This method does not consume the media packet
+    /// itself: it remains buffered for [`SourceElement::run`].
+    pub fn wait_stream_info(&self, timeout: Duration) -> Result<WebRtcStreamInfo> {
+        let mut state = self.stream_info.lock().unwrap();
+        if let Some(info) = state.cached {
+            return Ok(info);
+        }
+
+        match state.rx.recv_timeout(timeout) {
+            Ok(info) => {
+                state.cached = Some(info);
+                Ok(info)
+            }
+            Err(RecvTimeoutError::Timeout) => Err(WebRtcError::StreamInfoTimeout {
+                track_id: self.id,
+                timeout,
+            }
+            .into()),
+            Err(RecvTimeoutError::Disconnected) => Err(WebRtcError::Closed.into()),
+        }
+    }
+
+    /// Returns the distinct codec families this track can currently receive
+    /// after SDP negotiation. The order is informational.
+    ///
+    /// This is available as soon as the source is created. For a source on
+    /// the side that originated the media section, the initial offered list
+    /// is narrowed when [`WebRtcHandle::set_answer`] applies the answer.
+    /// [`WebRtcTrackSource::codec`] remains separate: it reports which codec
+    /// the remote sender actually chose once media starts arriving.
+    pub fn negotiated_codecs(&self) -> Vec<Codec> {
+        self.negotiated_codecs.lock().unwrap().clone()
     }
 
     /// The codec this track is actually carrying, as seen on the most
@@ -301,7 +451,8 @@ impl WebRtcTrackSource {
     /// `Event::MediaData`'s own `params` field). Whatever's downstream
     /// (e.g. a decoder) needs a keyframe before it can do anything useful
     /// anyway, so waiting for the first packet to learn the codec isn't an
-    /// extra constraint in practice.
+    /// extra constraint in practice. Use [`Self::wait_stream_info`] when the
+    /// downstream graph must be configured before this source starts running.
     pub fn codec(&self) -> Option<Codec> {
         *self.codec.lock().unwrap()
     }

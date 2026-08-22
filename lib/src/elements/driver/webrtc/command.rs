@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use crossbeam_channel::Sender;
 use str0m::{
     RtcError,
@@ -16,7 +18,7 @@ use crate::buffer::MediaBuffer;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TrackId(pub(super) u64);
 
-/// Errors specific to `WebRtcPeer`/`WebRtcHandle`/`WebRtcTrackSink`.
+/// Errors specific to `WebRtcPeer`, its handle, and its track endpoints.
 /// Converts into the crate-wide `Error` via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum WebRtcError {
@@ -64,6 +66,57 @@ pub enum WebRtcError {
         /// Packet time-base denominator.
         denominator: i32,
     },
+    /// A sink for a track added by the remote peer was pushed before the
+    /// caller declared which codec its packets contain. SDP can negotiate
+    /// several codecs for one track, so the peer cannot infer this from the
+    /// track itself without risking a payload-type mismatch.
+    #[error("track {0:?} has no outbound codec declaration; call WebRtcTrackSink::set_codec first")]
+    OutboundCodecNotDeclared(TrackId),
+    /// The caller selected or tried to send an outbound codec that this
+    /// track's SDP negotiation did not retain. A failed
+    /// [`super::track::WebRtcTrackSink::set_codec`] leaves the previous valid
+    /// selection unchanged.
+    #[error(
+        "codec {codec:?} is not negotiated for track {track_id:?}; negotiated codecs: {negotiated:?}"
+    )]
+    OutboundCodecNotNegotiated {
+        /// Track whose outbound codec was being selected.
+        track_id: TrackId,
+        /// Codec rejected by the negotiated media section.
+        codec: Codec,
+        /// Distinct codecs currently available on that media section.
+        negotiated: Vec<Codec>,
+    },
+    /// No RTP media arrived before a caller's explicit wait deadline. The
+    /// source remains usable and the caller may retry with another timeout.
+    #[error("timed out after {timeout:?} waiting for stream info on track {track_id:?}")]
+    StreamInfoTimeout {
+        /// Track whose first actual payload has not arrived yet.
+        track_id: TrackId,
+        /// Caller-supplied maximum wait.
+        timeout: Duration,
+    },
+    /// The selected RTP payload is not media FFmpeg can decode (for example,
+    /// an RTX repair payload rather than an audio/video codec).
+    #[error("WebRTC codec {0:?} cannot be converted to FFmpeg decoder parameters")]
+    UnsupportedDecoderCodec(Codec),
+    /// str0m accepts any non-zero `u32` clock rate, while FFmpeg's Rational
+    /// denominator and audio sample rate are signed 32-bit values.
+    #[error("WebRTC codec {codec:?} has a clock rate FFmpeg cannot represent: {clock_rate}")]
+    InvalidStreamClockRate {
+        /// Codec whose RTP clock rate was being converted.
+        codec: Codec,
+        /// Clock rate outside FFmpeg's signed range.
+        clock_rate: u32,
+    },
+    /// An audio payload declared a channel count that FFmpeg cannot use.
+    #[error("WebRTC codec {codec:?} has an invalid audio channel count: {channels}")]
+    InvalidStreamChannelCount {
+        /// Audio codec whose channel count was being converted.
+        codec: Codec,
+        /// Invalid channel count from the payload specification.
+        channels: u8,
+    },
     /// The remote peer renegotiated a track's direction after this element
     /// had already handed out its endpoints. Those describe the direction
     /// the track attached with (see
@@ -92,7 +145,7 @@ pub enum WebRtcError {
 /// thread) into [`super::peer::WebRtcPeer::run`]'s own thread.
 pub(super) enum Command {
     AddTrack(TrackId, MediaKind, Direction, Codec),
-    Push(TrackId, MediaBuffer),
+    Push(TrackId, Option<Codec>, MediaBuffer),
     SetAnswer(SdpAnswer),
     /// A fresh offer from the *remote* peer (their own renegotiation, e.g.
     /// them adding a track) — out of scope to originate ourselves in v1

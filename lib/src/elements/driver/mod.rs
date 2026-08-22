@@ -11,6 +11,6 @@ mod webrtc;
 
 #[cfg(feature = "webrtc")]
 pub use webrtc::{
-    AttachedTrack, TrackEndpoints, TrackId, WebRtcError, WebRtcHandle, WebRtcPeer, WebRtcTrackSink,
-    WebRtcTrackSource,
+    AttachedTrack, TrackEndpoints, TrackId, WebRtcError, WebRtcHandle, WebRtcPeer,
+    WebRtcStreamInfo, WebRtcTrackSink, WebRtcTrackSource,
 };

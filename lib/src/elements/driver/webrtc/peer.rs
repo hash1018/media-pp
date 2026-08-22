@@ -30,6 +30,7 @@ use crate::{
 
 use super::{
     command::{Command, TrackId, TrackOutState, WebRtcError},
+    stream_info::WebRtcStreamInfo,
     track::{AttachedTrack, TrackEndpoints, WebRtcHandle, WebRtcTrackSink, WebRtcTrackSource},
 };
 
@@ -99,25 +100,35 @@ pub struct WebRtcPeer {
     /// `Sender`, not a `Box<dyn Sink>` — the matching `Receiver` lives
     /// inside that track's own [`WebRtcTrackSource`], driven by *its own*
     /// `Pipeline` on its own thread, so nothing here needs to know about
-    /// `ControlMsg` at all. The `Mutex` alongside it is the same
+    /// `ControlMsg` at all. Its codec cell is the same
     /// `WebRtcTrackSource`'s [`WebRtcTrackSource::codec`] cell — written
     /// here (from `Event::MediaData`), read there, from whatever thread the
-    /// caller checks it on. It's the one piece of `tracks_in` shared across
-    /// threads; the map itself still isn't (see below).
-    #[allow(clippy::type_complexity)]
-    tracks_in: HashMap<Mid, (Sender<MediaBuffer>, Arc<Mutex<Option<Codec>>>)>,
+    /// caller checks it on. A separate one-slot channel confirms the first
+    /// payload's full [`str0m::format::CodecSpec`] for `wait_stream_info`;
+    /// both are shared across threads, while the map itself still isn't (see
+    /// below).
+    tracks_in: HashMap<Mid, TrackInState>,
     tracks_out: HashMap<TrackId, TrackOutState>,
-    /// The codec each `tracks_out` entry was opened with — what
-    /// [`WebRtcHandle::add_track`] was told to expect, consulted by
-    /// `write_track` to pick the payload type matching what's actually
-    /// being pushed instead of guessing at whatever this connection
-    /// happened to negotiate first for that `Mid`.
+    /// Pending outbound codec selections for locally-requested tracks. Each entry
+    /// moves into that track's [`WebRtcTrackSink`] when it attaches; a
+    /// remotely-added track has no such declaration and its caller supplies
+    /// one through [`WebRtcTrackSink::set_codec`] from the endpoint's
+    /// negotiated codec list before pushing packets.
     track_codec: HashMap<TrackId, Codec>,
+    /// The currently negotiated codec families for each attached media
+    /// section, shared with both endpoints. A locally-created track is
+    /// attached while its offer is pending, so [`Command::SetAnswer`]
+    /// refreshes this cell after applying the answer.
+    negotiated_codecs: HashMap<Mid, Arc<Mutex<Vec<Codec>>>>,
     /// The direction each attached track was handed out with, so
     /// `Event::MediaChanged` can tell an actual renegotiation apart from a
     /// re-announcement of the direction already in force. Keyed by `Mid`
     /// because that is what the event carries.
     track_direction: HashMap<Mid, Direction>,
+    /// Set when str0m reports the remote DTLS/SCTP connection closing. The
+    /// current `drive_until_timeout` call is still allowed to drain any
+    /// reciprocal protocol output before the run loop tears down tracks.
+    remote_closed: bool,
     /// The one SDP exchange currently in flight (str0m only allows one at a
     /// time — see `chat.rs`'s own `pending.is_some()` guard), plus which
     /// `TrackId`s it covers, so [`Command::SetAnswer`] knows which entries
@@ -141,6 +152,13 @@ pub struct WebRtcPeer {
     on_offer: Box<dyn FnMut(SdpOffer) + Send>,
     on_keyframe_request: Box<dyn FnMut(TrackId) + Send>,
 }
+
+struct TrackInState {
+    data_tx: Sender<MediaBuffer>,
+    codec: Arc<Mutex<Option<Codec>>>,
+    stream_info_tx: Sender<WebRtcStreamInfo>,
+}
+
 impl WebRtcPeer {
     /// `rtc`/`socket` must already be connected — see the type-level docs.
     /// `on_offer` receives every renegotiation offer this element generates
@@ -175,7 +193,9 @@ impl WebRtcPeer {
                 tracks_in: HashMap::new(),
                 tracks_out: HashMap::new(),
                 track_codec: HashMap::new(),
+                negotiated_codecs: HashMap::new(),
                 track_direction: HashMap::new(),
+                remote_closed: false,
                 pending: None,
                 next_id: next_id.clone(),
                 command_tx: command_tx.clone(),
@@ -208,20 +228,44 @@ impl WebRtcPeer {
             "track attached: id={id:?}, mid={mid}, kind={kind:?}, direction={direction:?}"
         );
         self.track_direction.insert(mid, direction);
+        let negotiated_codecs = Arc::new(Mutex::new(self.codecs_for_mid(mid)));
+        self.negotiated_codecs
+            .insert(mid, negotiated_codecs.clone());
 
         // Only build the inbound half when the direction can actually
         // deliver on it: `tracks_in` is what `Event::MediaData` routes
         // through, so leaving a receive-less track out of it is also what
         // makes a stray inbound packet on it visibly a dropped one rather
         // than something feeding a source nobody was given.
-        let sink = direction
-            .is_sending()
-            .then(|| WebRtcTrackSink::new(id, self.command_tx.clone()));
+        let outbound_codec = self.track_codec.remove(&id);
+        let sink = direction.is_sending().then(|| {
+            WebRtcTrackSink::new(
+                id,
+                outbound_codec,
+                negotiated_codecs.clone(),
+                self.command_tx.clone(),
+            )
+        });
         let source = direction.is_receiving().then(|| {
             let (tx, rx) = bounded(CHANNEL_CAPACITY);
+            let (stream_info_tx, stream_info_rx) = bounded(1);
             let codec = Arc::new(Mutex::new(None));
-            self.tracks_in.insert(mid, (tx, codec.clone()));
-            WebRtcTrackSource::new(format!("webrtc-track-{}-in", id.0), rx, codec)
+            self.tracks_in.insert(
+                mid,
+                TrackInState {
+                    data_tx: tx,
+                    codec: codec.clone(),
+                    stream_info_tx,
+                },
+            );
+            WebRtcTrackSource::new(
+                id,
+                format!("webrtc-track-{}-in", id.0),
+                rx,
+                codec,
+                negotiated_codecs.clone(),
+                stream_info_rx,
+            )
         });
 
         let endpoints = match (sink, source) {
@@ -238,6 +282,26 @@ impl WebRtcPeer {
         });
     }
 
+    fn codecs_for_mid(&mut self, mid: Mid) -> Vec<Codec> {
+        let Some(writer) = self.rtc.writer(mid) else {
+            return Vec::new();
+        };
+        let mut codecs = Vec::new();
+        for codec in writer.payload_params().map(|params| params.spec().codec) {
+            if !codecs.contains(&codec) {
+                codecs.push(codec);
+            }
+        }
+        codecs
+    }
+
+    fn refresh_codecs(&mut self, mid: Mid) {
+        let codecs = self.codecs_for_mid(mid);
+        if let Some(shared) = self.negotiated_codecs.get(&mid) {
+            *shared.lock().unwrap() = codecs;
+        }
+    }
+
     fn apply_command(&mut self, cmd: Command, bus: &Bus) -> Result<()> {
         match cmd {
             Command::AddTrack(id, kind, direction, codec) => {
@@ -249,12 +313,12 @@ impl WebRtcPeer {
                     .insert(id, TrackOutState::ToOpen(kind, direction));
                 self.track_codec.insert(id, codec);
             }
-            Command::Push(id, buf) => {
+            Command::Push(id, codec, buf) => {
                 // A malformed media packet is local to this one track and
                 // buffer. Report and drop it without tearing down the
                 // entire live WebRTC connection, matching Queue's
                 // consume-error contract.
-                if let Err(error) = self.write_track(id, buf) {
+                if let Err(error) = self.write_track(id, codec, buf) {
                     bus.post(
                         &self.pp_log,
                         BusEvent::Error {
@@ -279,6 +343,7 @@ impl WebRtcPeer {
                     if let Some(state @ TrackOutState::Negotiating(_)) = self.tracks_out.get(&id) {
                         let mid = state.mid().expect("Negotiating always carries a Mid");
                         self.tracks_out.insert(id, TrackOutState::Open(mid));
+                        self.refresh_codecs(mid);
                     }
                 }
             }
@@ -342,7 +407,7 @@ impl WebRtcPeer {
         }
     }
 
-    fn write_track(&mut self, id: TrackId, buf: MediaBuffer) -> Result<()> {
+    fn write_track(&mut self, id: TrackId, codec: Option<Codec>, buf: MediaBuffer) -> Result<()> {
         let Some(TrackOutState::Open(mid)) = self.tracks_out.get(&id) else {
             // Not open yet (or unknown/never added) — dropped, see
             // `WebRtcHandle::add_track`'s docs.
@@ -354,20 +419,28 @@ impl WebRtcPeer {
         let Some(writer) = self.rtc.writer(*mid) else {
             return Ok(());
         };
-        // Only a locally-`add_track`ed track has a declared codec (the
-        // caller told us what it intends to push — see `add_track`'s
-        // docs). A remotely-added one (`Event::MediaAdded`) has no such
-        // declaration available at attach time, so this falls back to
-        // whatever this connection negotiated first for the `Mid` — same
-        // best-effort guess this always made, just now scoped to only the
-        // case that has no better option.
-        let pt = match self.track_codec.get(&id) {
-            Some(&codec) => writer.payload_params().find(|p| p.spec().codec == codec),
-            None => writer.payload_params().next(),
+        let codec = codec.ok_or(WebRtcError::OutboundCodecNotDeclared(id))?;
+        // Never guess the first negotiated codec: str0m packetizes whatever
+        // bytes it receives under the selected payload type, so guessing VP8
+        // for an H.264 packet creates a valid-looking but mislabeled stream.
+        let mut negotiated = Vec::new();
+        let mut pt = None;
+        for params in writer.payload_params() {
+            let candidate = params.spec().codec;
+            if !negotiated.contains(&candidate) {
+                negotiated.push(candidate);
+            }
+            if candidate == codec && pt.is_none() {
+                pt = Some(params.pt());
+            }
         }
-        .map(|p| p.pt());
         let Some(pt) = pt else {
-            return Ok(()); // no negotiated codec (matching or otherwise) yet
+            return Err(WebRtcError::OutboundCodecNotNegotiated {
+                track_id: id,
+                codec,
+                negotiated,
+            }
+            .into());
         };
         let data = packet.data().unwrap_or(&[]).to_vec();
         let rtp_time = packet_rtp_time(&packet)?;
@@ -445,14 +518,21 @@ impl WebRtcPeer {
                 self.attach_track(id, added.mid, added.kind, added.direction);
             }
             Event::MediaData(data) => {
-                if let Some((tx, codec)) = self.tracks_in.get(&data.mid) {
+                if let Some(track) = self.tracks_in.get(&data.mid) {
                     // Every packet, not just the first: cheap (one lock),
                     // and correct if the remote side ever actually changes
                     // codec mid-stream (rare, but the payload type is free
                     // to vary packet-to-packet — see `WebRtcTrackSource::
                     // codec`'s own docs for why this can't be pinned down
                     // any earlier than "whatever the last packet said").
-                    *codec.lock().unwrap() = Some(data.params.spec().codec);
+                    let codec = data.params.spec();
+                    let first_packet = track.codec.lock().unwrap().replace(codec.codec).is_none();
+                    if first_packet {
+                        // Signal before queueing the first packet. The caller
+                        // may now build a downstream graph while that packet
+                        // remains buffered in `data_tx`.
+                        let _ = track.stream_info_tx.try_send(codec.into());
+                    }
 
                     let mut packet = ffmpeg::Packet::copy(&data.data);
                     // `data.time` is str0m's own RTP timestamp (numerator)
@@ -468,7 +548,10 @@ impl WebRtcPeer {
                         let flags = packet.flags() | ffmpeg::codec::packet::Flags::KEY;
                         packet.set_flags(flags);
                     }
-                    match tx.try_send(MediaBuffer::Packet(Arc::new(packet))) {
+                    match track
+                        .data_tx
+                        .try_send(MediaBuffer::Packet(Arc::new(packet)))
+                    {
                         Ok(()) => {}
                         Err(TrySendError::Full(_)) => {
                             // This track's `WebRtcTrackSource` (or whatever
@@ -515,6 +598,7 @@ impl WebRtcPeer {
                     changed.mid,
                     changed.direction
                 );
+                self.refresh_codecs(changed.mid);
                 // A track's endpoints are minted once, from the direction it
                 // attached with, and `next_track` has already handed them to
                 // the caller — there is no way to hand out a half that did
@@ -545,6 +629,10 @@ impl WebRtcPeer {
                         },
                     );
                 }
+            }
+            Event::Closed => {
+                pp_info!(self, "event=close phase=remote_received outcome=ok");
+                self.remote_closed = true;
             }
             // `Event` is `#[non_exhaustive]` — data channels, stats, etc.
             // are still outside this element's concern for now.
@@ -660,9 +748,16 @@ impl Driver for WebRtcPeer {
             self.negotiate_if_needed();
 
             let deadline = self.drive_until_timeout(bus)?;
-            if !self.rtc.is_alive() || stop.is_stopped() {
-                pp_info!(self, "stopped rtc_alive={}", self.rtc.is_alive());
-                self.close_connection(bus);
+            if self.remote_closed || !self.rtc.is_alive() || stop.is_stopped() {
+                pp_info!(
+                    self,
+                    "stopped rtc_alive={} remote_closed={}",
+                    self.rtc.is_alive(),
+                    self.remote_closed
+                );
+                if !self.remote_closed {
+                    self.close_connection(bus);
+                }
                 self.tracks_in.clear();
                 return Ok(());
             }

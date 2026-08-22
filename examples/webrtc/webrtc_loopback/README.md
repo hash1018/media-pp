@@ -8,7 +8,13 @@ just added (str0m never fires `Event::MediaAdded` for a track a side added
 itself), and peer-b pushes back on the exact same `Mid` via the
 `WebRtcTrackSink` its own `next_track()` returned for the incoming
 `Event::MediaAdded` — no second `add_track`/renegotiation needed for the
-reverse direction. Each side's inbound track is wired as its own
+reverse direction. Because peer-b did not originate the track, it calls
+`WebRtcTrackSink::set_codec(Codec::Vp8)` before replying. Both endpoints expose
+the codec families retained by SDP negotiation at attachment time: the source
+list says what may arrive, while the sink list says what peer-b may send.
+`set_codec` validates peer-b's encoder choice against the latter; the source's
+`codec()` separately reports the codec actually observed in incoming RTP.
+Each side's inbound track is wired as its own
 `WebRtcTrackSource -> CountingSink` `Pipeline` — a `WebRtcPeer` connection
 isn't one pipeline node, it mints one source per track.
 

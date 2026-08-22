@@ -24,7 +24,7 @@ mod windows_example {
         elements::{
             AttachedTrack, FileDemuxer, Pacer, SwDecoder, SwEncoder, SwEncoderOptions, SwScaler,
             TestVideoOptions, TestVideoSource, TrackEndpoints, VideoCodec, WebRtcPeer,
-            WebRtcTrackSink, WebRtcTrackSource,
+            WebRtcStreamInfo, WebRtcTrackSink, WebRtcTrackSource,
         },
         ffmpeg,
         pipeline::Pipeline,
@@ -44,6 +44,7 @@ mod windows_example {
     const WIDTH: u32 = 640;
     const HEIGHT: u32 = 480;
     const FPS: i32 = 30;
+    const STREAM_INFO_TIMEOUT: Duration = Duration::from_secs(2);
 
     /// A two-way video call between two `WebRtcPeer`s in one process, each
     /// presenting what the *other* sent into its own window.
@@ -123,11 +124,24 @@ mod windows_example {
             .accept_remote_offer(offer)
             .expect("peer-b should accept the offer");
         handle_a.set_answer(answer);
-        let (sink_b, source_b) = send_recv(
+        let (mut sink_b, source_b) = send_recv(
             handle_b
                 .next_track()
                 .expect("peer-b's remote track should attach"),
         );
+        println!(
+            "peer-b negotiated inbound codecs: {:?}",
+            source_b.negotiated_codecs()
+        );
+        println!(
+            "peer-b negotiated outbound codecs: {:?}",
+            sink_b.negotiated_codecs()
+        );
+        // The negotiated list is known when the endpoints attach, but only
+        // this pipeline knows which encoder feeds the outbound half.
+        sink_b
+            .set_codec(Codec::H264)
+            .expect("H.264 should be negotiated for peer-b's outbound half");
         thread::sleep(Duration::from_millis(100)); // let the answer apply
         println!("call established — one SendRecv track carrying both directions");
 
@@ -141,14 +155,27 @@ mod windows_example {
         // Kept before the sink moves into the pipeline: it is the name the
         // bus reports EOS under, and the one event below actually waits for.
         let track_sink_name = sink_b.name();
-        let (send_b, encoder_params) = file_send_pipeline(file, sink_b)?;
-        // Both directions encode with the same `SwEncoderOptions`, so one
-        // set of parameters describes either stream. A real deployment
-        // derives these from the negotiated SDP instead; here both peers
-        // live in one process, so the encoder's own answer is available
-        // directly and there is no signaling to invent.
-        let recv_a = receive_pipeline("peer-a-recv", source_a, &encoder_params, &gpu, hwnd_a)?;
-        let recv_b = receive_pipeline("peer-b-recv", source_b, &encoder_params, &gpu, hwnd_b)?;
+        let send_b = file_send_pipeline(file, sink_b)?;
+
+        // Publish before starting, so a window close can reach both senders
+        // while we wait for the first actual RTP payload on each source.
+        let send_pipelines = [send_a.clone(), send_b.clone()];
+        if shutdown.publish(&send_pipelines) {
+            return Ok(());
+        }
+        for pipeline in &send_pipelines {
+            pipeline.run()?;
+        }
+
+        // SDP only says which codecs may arrive. The first payload confirms
+        // what each remote sender actually chose; its packet stays queued in
+        // the source while the matching decoder pipeline is constructed.
+        let info_a = source_a.wait_stream_info(STREAM_INFO_TIMEOUT)?;
+        let info_b = source_b.wait_stream_info(STREAM_INFO_TIMEOUT)?;
+        println!("peer-a receiving actual codec: {info_a:?}");
+        println!("peer-b receiving actual codec: {info_b:?}");
+        let recv_a = receive_pipeline("peer-a-recv", source_a, info_a, &gpu, hwnd_a)?;
+        let recv_b = receive_pipeline("peer-b-recv", source_b, info_b, &gpu, hwnd_b)?;
 
         let pipelines = [
             send_a.clone(),
@@ -159,7 +186,7 @@ mod windows_example {
         if shutdown.publish(&pipelines) {
             return Ok(());
         }
-        for pipeline in &pipelines {
+        for pipeline in [&recv_a, &recv_b] {
             pipeline.run()?;
         }
         println!("both windows are live — close either one to end the call");
@@ -235,7 +262,7 @@ mod windows_example {
         let time_base = source.time_base();
         let encoder = SwEncoder::new("encode-a", encoder_options(time_base))?;
 
-        Pipeline::new("peer-a-send", source, move |source, ctx| {
+        let pipeline = Pipeline::new("peer-a-send", source, move |source, ctx| {
             let branch = ctx
                 .branch()
                 .queue("to-encode", 8)
@@ -243,7 +270,8 @@ mod windows_example {
                 .to(Box::new(sink))?;
             ctx.attach(source, 0, branch)?;
             Ok(())
-        })
+        })?;
+        Ok(pipeline)
     }
 
     /// An opened video file, and everything about it the call needs — kept
@@ -294,14 +322,10 @@ mod windows_example {
     /// fast as the disk can serve them. `SwScaler` fixes the first, `Pacer`
     /// the second — without it the whole file would be encoded and sent in a
     /// couple of seconds.
-    ///
-    /// Also returns the encoder's own codec parameters, which is what the
-    /// receiving side needs to open a decoder for a stream that never came
-    /// from a demuxer.
     fn file_send_pipeline(
         file: FileSource,
         sink: WebRtcTrackSink,
-    ) -> media_pp::Result<(Arc<Pipeline>, ffmpeg::codec::Parameters)> {
+    ) -> media_pp::Result<Arc<Pipeline>> {
         let FileSource {
             demuxer: source,
             index,
@@ -319,7 +343,6 @@ mod windows_example {
             ffmpeg::software::scaling::Flags::BILINEAR,
         );
         let encoder = SwEncoder::new("encode-b", encoder_options(time_base))?;
-        let encoder_params = encoder.parameters();
 
         let pipeline = Pipeline::new("peer-b-send", source, move |source, ctx| {
             let branch = ctx
@@ -334,7 +357,7 @@ mod windows_example {
             ctx.attach(source, index, branch)?;
             Ok(())
         })?;
-        Ok((pipeline, encoder_params))
+        Ok(pipeline)
     }
 
     /// Either peer's inbound half: `WebRtcTrackSource -> Queue -> SwDecoder ->
@@ -345,11 +368,17 @@ mod windows_example {
     fn receive_pipeline(
         name: &str,
         source: WebRtcTrackSource,
-        params: &ffmpeg::codec::Parameters,
+        stream_info: WebRtcStreamInfo,
         gpu: &D3d12GpuContext,
         hwnd: isize,
     ) -> media_pp::Result<Arc<Pipeline>> {
-        let decoder = SwDecoder::new(format!("{name}-decode"), params.clone())?;
+        if stream_info.codec() != Codec::H264 {
+            return Err(media_pp::Error::Other(format!(
+                "{name} cannot decode the received {:?} stream; this example expects H.264",
+                stream_info.codec()
+            )));
+        }
+        let decoder = SwDecoder::new(format!("{name}-decode"), stream_info.decoder_parameters()?)?;
         let renderer = render_common::d3d12_window_renderer(
             format!("{name}-render"),
             gpu,

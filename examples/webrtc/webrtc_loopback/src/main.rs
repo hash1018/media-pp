@@ -138,6 +138,16 @@ mod example {
             .expect("peer-b's remote track should attach");
         let kind = attached_b.kind;
         let (mut sink_b, source_b) = send_recv(attached_b);
+        println!(
+            "peer-b: inbound codecs={:?}, outbound codecs={:?}",
+            source_b.negotiated_codecs(),
+            sink_b.negotiated_codecs()
+        );
+        // This endpoint belongs to a track peer-a added, so peer-b selects
+        // its outbound codec from the negotiated capability list.
+        sink_b
+            .set_codec(Codec::Vp8)
+            .expect("VP8 should be negotiated for peer-b's outbound half");
         println!("peer-b: track attached ({kind:?}) — got a WebRtcTrackSink to reply on");
 
         let received_by_a = Arc::new(AtomicUsize::new(0));

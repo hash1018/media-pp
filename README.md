@@ -179,6 +179,17 @@ The library has no default features.
 | `ort` | ONNX Runtime object detection | All supported targets |
 | `webrtc` | `str0m`-based WebRTC peer and track elements | All supported targets |
 
+Each attached WebRTC source and sink exposes the codec families retained by
+SDP negotiation. `WebRtcTrackSource::codec()` separately reports the codec
+actually observed after RTP starts arriving, while a remotely-created
+`WebRtcTrackSink` validates the application's outbound encoder choice through
+`set_codec` before accepting packets. A receiver that must configure its graph
+from the sender's actual payload can call `WebRtcTrackSource::wait_stream_info`
+with an explicit timeout; the first packet stays buffered while the downstream
+graph is built. The returned `WebRtcStreamInfo` derives the RTP time base and
+minimal FFmpeg decoder parameters. It is not muxer-ready: container headers may
+also require codec configuration and dimensions that SDP does not carry.
+
 For example, build all Windows API documentation locally. Nightly rustdoc is
 what labels each item with the feature that enables it:
 
