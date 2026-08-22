@@ -297,6 +297,10 @@ fn receive_pipeline(
         .build())
 }
 
+// Naming this tuple would only move the same five types somewhere else:
+// they are the whole result of bringing two peers up, and nothing else in
+// this example refers to the shape. `webrtc_video_call` does the same.
+#[allow(clippy::type_complexity)]
 fn connect_peers() -> std::result::Result<
     (
         WebRtcHandle,

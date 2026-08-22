@@ -646,4 +646,87 @@ mod tests {
             })
         ));
     }
+
+    /// A payload that never completes the parameter sets leaves the probe
+    /// unconfirmed rather than panicking: this runs on `WebRtcPeer`'s own
+    /// ICE/DTLS thread, directly on bytes a remote peer chose, so the only
+    /// two acceptable outcomes are "confirmed" and "not yet". The caller
+    /// sees the second as a `wait_stream_info` timeout it can retry.
+    ///
+    /// `parse_h264_dimensions` and `BitReader` return `Option` throughout
+    /// today, and `annex_b_h264_extradata`'s own validation is unreachable
+    /// behind that — these cases exist so a later rewrite reaching for
+    /// indexing or `unwrap` fails here instead of taking the connection
+    /// down.
+    #[test]
+    fn malformed_h264_payloads_never_confirm_and_never_panic() {
+        let codec = spec(Codec::H264, Frequency::NINETY_KHZ, None);
+        let annex_b = |nalu: &[u8]| {
+            let mut payload = vec![0, 0, 0, 1];
+            payload.extend_from_slice(nalu);
+            payload
+        };
+
+        // Nothing at all, and a start code with no NAL behind it.
+        for payload in [vec![], vec![0, 0, 0, 1], vec![0, 0, 1]] {
+            let mut probe = StreamInfoProbe::new();
+            assert!(
+                probe.observe(codec, &payload).is_none(),
+                "an empty payload cannot confirm a stream"
+            );
+        }
+
+        // NAL types that are neither SPS (7) nor PPS (8) — an IDR slice and
+        // an SEI, both of which a real sender emits constantly.
+        for nal_type in [1u8, 5, 6, 9, 31] {
+            let mut probe = StreamInfoProbe::new();
+            let payload = annex_b(&[0x60 | nal_type, 0x42, 0xc0, 0x1f]);
+            assert!(
+                probe.observe(codec, &payload).is_none(),
+                "NAL type {nal_type} must not be mistaken for a parameter set"
+            );
+        }
+
+        // Every truncation of a real SPS, each followed by a valid PPS, so a
+        // parameter set that cannot be parsed is never rescued by the other
+        // one arriving intact.
+        //
+        // Not every truncation fails to parse: an SPS carries its dimension
+        // fields well before its end, so cutting off only the trailing VUI
+        // still yields the real width and height rather than garbage. What
+        // has to hold for *all* of them is that the outcome is one of the
+        // two the caller can act on — unconfirmed, or confirmed with
+        // parameters that actually build — and never a panic on this
+        // thread. Anything shorter than the NAL header plus profile bytes
+        // is rejected outright by `parse_h264_dimensions`' own guard.
+        for length in 0..SPS.len() {
+            let mut probe = StreamInfoProbe::new();
+            let _ = probe.observe(codec, &annex_b(&SPS[..length]));
+            let confirmed = probe.observe(codec, &annex_b(PPS));
+            if length < 4 {
+                assert!(
+                    confirmed.is_none(),
+                    "a {length}-byte SPS is too short to describe anything"
+                );
+            }
+            if let Some(info) = confirmed {
+                info.codec_parameters().unwrap_or_else(|error| {
+                    panic!("a {length}-byte SPS confirmed but then failed to build: {error}")
+                });
+            }
+        }
+
+        // Exp-Golomb with more leading zeroes than `read_ue` accepts: a
+        // valid SPS NAL header and profile bytes, then a run of zero bits
+        // long enough to overflow the shift the suffix is built with.
+        let mut sps = vec![0x67, 0x42, 0xc0, 0x1f];
+        sps.extend(std::iter::repeat_n(0x00, 16));
+        sps.push(0x01);
+        let mut probe = StreamInfoProbe::new();
+        let _ = probe.observe(codec, &annex_b(&sps));
+        assert!(
+            probe.observe(codec, &annex_b(PPS)).is_none(),
+            "an over-long Exp-Golomb code must fail the parse, not the process"
+        );
+    }
 }
