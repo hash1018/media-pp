@@ -5,10 +5,11 @@ description: Diagnose memory, GPU-resource, handle, or worker-lifetime growth in
 
 # media-pp soak analysis
 
-Use the repository's existing soak harness instead of inventing a parallel
-benchmark. Read the module documentation and the nearest comparable scenario
-in `lib/tests/soak.rs`, then read the relevant helpers in
-`lib/tests/common/mod.rs` and, for GPU resources, `lib/tests/common/gpu.rs`.
+Read `README.md` and `AGENT_GUIDELINES.md`. Use the repository's existing soak
+harness instead of inventing a parallel benchmark. Read the module
+documentation and the nearest comparable scenario in `lib/tests/soak.rs`, then
+read the relevant helpers in `lib/tests/common/mod.rs` and, for GPU resources,
+`lib/tests/common/gpu.rs`.
 
 ## Establish the experiment
 
