@@ -51,8 +51,8 @@ pub enum SwEncoderError {
 /// permissively-licensed (BSD/similar) alternative that needs no special
 /// build flag beyond being enabled at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-/// `libx264` — H.264. GPL.
 pub enum VideoCodec {
+    /// `libx264` — H.264. GPL.
     H264,
     /// `libopenh264` — H.264, Cisco's BSD-2-Clause encoder (Cisco covers
     /// H.264 patent royalties for binary redistributions of it). The

@@ -31,59 +31,113 @@ use crate::{
 /// see [`Element::element_type`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ElementType {
+    /// File or container demultiplexer source.
     FileDemuxer,
+    /// Application-fed buffer source.
     AppSource,
+    /// RTSP network stream source.
     RtspSource,
+    /// Synthetic video source.
     TestVideoSource,
+    /// Synthetic audio source.
     TestAudioSource,
+    /// Windows desktop-duplication capture source.
     DxgiCaptureSource,
+    /// PipeWire audio capture source.
     PipeWireAudioCaptureSource,
+    /// PipeWire screen capture source.
     PipeWireScreenCaptureSource,
+    /// Windows WASAPI audio capture source.
     WasapiCaptureSource,
+    /// Multi-input audio mixer source.
     AudioMixer,
+    /// CPU video compositor source.
     SwVideoCompositor,
+    /// CUDA video compositor source.
     CudaVideoCompositor,
+    /// D3D11 video compositor source.
     D3d11VideoCompositor,
+    /// WebRTC connection driver.
     WebRtcPeer,
+    /// FFmpeg software decoder filter.
     SwDecoder,
+    /// CUDA hardware decoder filter.
     CudaDecoder,
+    /// System-memory to CUDA upload filter.
     CudaUpload,
+    /// CUDA to system-memory download filter.
     CudaDownload,
+    /// CUDA pixel-format converter filter.
     CudaConverter,
+    /// D3D12 hardware decoder filter.
     D3d12Decoder,
+    /// System-memory to D3D12 upload filter.
     D3d12Upload,
+    /// D3D12 to system-memory download filter.
     D3d12Download,
+    /// D3D12 video scaler filter.
     D3d12Scaler,
+    /// D3D11 hardware decoder filter.
     D3d11Decoder,
+    /// System-memory to D3D11 upload filter.
     D3d11Upload,
+    /// D3D11 to system-memory download filter.
     D3d11Download,
+    /// Software video encoder filter.
     SwEncoder,
+    /// CUDA video encoder filter.
     CudaEncoder,
+    /// D3D11-backed NVENC filter.
     D3d11NvencEncoder,
+    /// Software audio encoder filter.
     SwAudioEncoder,
+    /// Audio format and rate converter filter.
     AudioResampler,
+    /// Runtime-adjustable audio gain filter.
     AudioVolume,
+    /// Timestamp-to-wall-clock pacing filter.
     Pacer,
+    /// Playback-master-aware video scheduling filter.
     VideoSynchronizer,
+    /// CPU video scaler filter.
     SwScaler,
+    /// CPU chroma-key filter.
     SwChromaKey,
+    /// CUDA video scaler filter.
     CudaScaler,
+    /// D3D11 video scaler filter.
     D3d11Scaler,
+    /// D3D11 chroma-key filter.
     D3d11ChromaKey,
+    /// Dynamic one-to-many branch filter.
     Tee,
+    /// Bounded asynchronous queue filter.
     Queue,
+    /// Diagnostic decoded-frame counter sink.
     FrameCounter,
+    /// Diagnostic compressed-packet counter sink.
     PacketCounter,
+    /// CUDA video renderer sink.
     CudaRenderer,
+    /// D3D12 video renderer sink.
     D3d12Renderer,
+    /// D3D11 video renderer sink.
     D3d11Renderer,
+    /// PipeWire audio renderer sink.
     PipeWireAudioRenderer,
+    /// Windows WASAPI audio renderer sink.
     WasapiRenderer,
+    /// RTSP publishing sink.
     RtspSink,
+    /// Application callback or channel sink.
     AppSink,
+    /// ONNX Runtime object-detection sink.
     OrtDetector,
+    /// HTTP Live Streaming muxer sink.
     HlsMuxer,
+    /// MP4 muxer sink.
     Mp4Muxer,
+    /// Rotating segmented MP4 muxer sink.
     SegmentedMp4Muxer,
     /// Anything outside this crate's own elements — a test double, or a
     /// custom `Sink`/`SourceElement` implemented downstream of this
