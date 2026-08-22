@@ -482,11 +482,11 @@ struct Terminate;
 /// PipeWire buffers (`MemFd`/`MemPtr`) only, so a GPU-resident capture never
 /// arrives as a buffer it would have to drop.
 ///
-/// # GPU capture
+/// # GPU capture (`cuda` feature)
 ///
-/// [`Self::open_gpu`] captures the same desktop into **CUDA-resident**
-/// `Pixel::CUDA` frames instead, by negotiating DMA-BUF and importing each
-/// buffer onto the GPU. That is the mode to use in front of
+/// When built with `cuda`, the `open_gpu` constructor captures the same desktop
+/// into **CUDA-resident** `Pixel::CUDA` frames instead, by negotiating DMA-BUF
+/// and importing each buffer onto the GPU. That is the mode to use in front of
 /// `CudaEncoder`: no compositor readback, no host copy, and
 /// no `CudaUpload` in the pipeline. It is a separate
 /// constructor rather than an option because it needs a
