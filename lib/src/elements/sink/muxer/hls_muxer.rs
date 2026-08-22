@@ -26,7 +26,9 @@ pub enum HlsMode {
     /// entries kept in the manifest; `delete_old_segments` also removes
     /// segment files after they fall outside that window.
     Live {
+        /// Maximum number of completed media segments retained in the playlist.
         window_size: usize,
+        /// Whether FFmpeg deletes segment files after they leave the window.
         delete_old_segments: bool,
     },
     /// An append-only event playlist. Every segment remains listed and the
@@ -58,7 +60,9 @@ pub struct HlsOptions {
     /// Target segment duration. FFmpeg cuts on the next video keyframe, so
     /// the actual duration can be longer when keyframes are sparse.
     pub segment_duration: Duration,
+    /// Playlist retention and finalization policy.
     pub mode: HlsMode,
+    /// Container format used for media segments.
     pub segment_format: HlsSegmentFormat,
     /// fMP4 initialization filename written beside the playlist and used
     /// in `#EXT-X-MAP`. Ignored for [`HlsSegmentFormat::MpegTs`].

@@ -98,8 +98,11 @@ impl VideoCodec {
 /// before this can be opened at all.
 #[derive(Debug, Clone, Copy)]
 pub struct SwEncoderOptions {
+    /// Compressed video codec to open.
     pub codec: VideoCodec,
+    /// Encoded frame width in pixels.
     pub width: u32,
+    /// Encoded frame height in pixels.
     pub height: u32,
     /// Must match the `pts` unit of whatever frames this receives — e.g.
     /// [`crate::elements::TestVideoSource::time_base`] or a demuxed
@@ -124,6 +127,7 @@ pub struct SwEncoderOptions {
     /// either way, so muxing stays correct regardless of how well this
     /// nominal rate matches the true one.
     pub frame_rate: ffmpeg::Rational,
+    /// Target encoded bit rate, in bits per second.
     pub bit_rate: usize,
     /// How many frames between keyframes — `AVCodecContext.gop_size`
     /// directly (not a duration; multiply by `frame_rate` yourself, e.g.

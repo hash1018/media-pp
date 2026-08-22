@@ -36,7 +36,9 @@ pub enum TestAudioSourceError {
 /// Construction-time options for [`TestAudioSource::new`].
 #[derive(Debug, Clone, Copy)]
 pub struct TestAudioOptions {
+    /// Sample rate of the generated audio, in hertz.
     pub sample_rate: u32,
+    /// Channel count of the generated audio.
     pub channels: u16,
     /// The generated sine tone's frequency, in Hz. `440.0` (concert pitch
     /// A) by default — audible, easy to recognize on a scope or by ear;

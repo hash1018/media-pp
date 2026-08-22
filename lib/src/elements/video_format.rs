@@ -12,7 +12,10 @@ use ffmpeg_next as ffmpeg;
 /// own placement): it crosses source/filter/sink, not owned by any single one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VideoFormat {
+    /// Frame width in pixels.
     pub width: u32,
+    /// Frame height in pixels.
     pub height: u32,
+    /// Unit used by frame presentation timestamps.
     pub time_base: ffmpeg::Rational,
 }

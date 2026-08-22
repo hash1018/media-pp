@@ -12,8 +12,11 @@ use ffmpeg_next as ffmpeg;
 /// placement): it crosses source/filter/sink, not owned by any single one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AudioFormat {
+    /// In-memory representation and planar/packed layout of each sample.
     pub sample_format: ffmpeg::format::Sample,
+    /// Number of samples per channel per second, in hertz.
     pub sample_rate: u32,
+    /// Number of interleaved or planar audio channels.
     pub channels: u16,
 }
 

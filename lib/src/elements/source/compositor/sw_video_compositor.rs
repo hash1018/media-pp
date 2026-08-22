@@ -36,9 +36,13 @@ const CONTROL_POLL_INTERVAL: Duration = Duration::from_millis(5);
 /// opaque [`ffmpeg::format::Pixel::BGRA`] frame at `width` x `height`.
 #[derive(Debug, Clone, Copy)]
 pub struct VideoCompositorOptions {
+    /// Width of the composed output frame in pixels.
     pub width: u32,
+    /// Height of the composed output frame in pixels.
     pub height: u32,
+    /// Fixed output frame rate; both rational components must be positive.
     pub frame_rate: ffmpeg::Rational,
+    /// Color used for output pixels not covered by an opaque layer.
     pub background: Color,
 }
 
@@ -121,7 +125,9 @@ pub struct SwVideoCompositorHandle {
 /// Move `sink` into the upstream pipeline and retain `layer` in application
 /// code for runtime placement changes.
 pub struct SwVideoCompositorInput {
+    /// Terminal sink to attach to the input pipeline branch.
     pub sink: Box<dyn Sink>,
+    /// Runtime control for this input's placement and visibility.
     pub layer: SwVideoLayerHandle,
 }
 

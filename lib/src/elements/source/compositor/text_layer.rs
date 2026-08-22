@@ -138,15 +138,18 @@ pub(crate) fn rasterize_coverage(
 /// reassignable before the call to `add_text_layer`.
 #[derive(Debug, Clone)]
 pub struct TextLayer {
+    /// Raw TrueType or OpenType font bytes owned by the layer.
     pub font_data: Vec<u8>,
     /// Pixel height of rendered glyphs (not a point size).
     pub font_size: f32,
+    /// Initial glyph color, including alpha.
     pub color: Color,
     /// Initial top-left corner of the layer — like `VideoLayer::rect`'s
     /// `x`/`y`, but with no `width`/`height` counterpart, since a text
     /// layer's size is only known once something has actually rasterized
     /// its content (e.g. `D3d11TextLayerHandle::set_text`).
     pub x: i32,
+    /// Initial vertical offset of the layer's top edge, in output pixels.
     pub y: i32,
 }
 

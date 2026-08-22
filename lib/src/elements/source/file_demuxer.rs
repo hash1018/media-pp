@@ -24,7 +24,9 @@ pub enum FileDemuxError {
 /// callers can decide what to build downstream before the pipeline runs.
 #[derive(Debug, Clone, Copy)]
 pub struct StreamInfo {
+    /// Zero-based stream index used by the matching source pad.
     pub index: usize,
+    /// Media kind reported by the container, such as audio or video.
     pub kind: ffmpeg::media::Type,
 }
 

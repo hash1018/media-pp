@@ -48,7 +48,9 @@ pub enum AudioMixerError {
 /// input happens to produce.
 #[derive(Debug, Clone, Copy)]
 pub struct AudioMixerOptions {
+    /// Sample rate of every mixed output frame, in hertz.
     pub sample_rate: u32,
+    /// Channel count of every mixed output frame.
     pub channels: u16,
 }
 

@@ -29,7 +29,9 @@ pub enum TestVideoSourceError {
 /// Construction-time options for [`TestVideoSource::new`].
 #[derive(Debug, Clone, Copy)]
 pub struct TestVideoOptions {
+    /// Width of each generated frame in pixels.
     pub width: u32,
+    /// Height of each generated frame in pixels.
     pub height: u32,
     /// How fast `pts` advances per generated frame, and — since
     /// [`TestVideoSource`] self-paces to this same rate on a drift-free

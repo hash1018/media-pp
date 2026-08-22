@@ -19,9 +19,13 @@ pub struct VideoInputId(pub(crate) u64);
 /// moved partially outside the canvas while its size remains positive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VideoRect {
+    /// Horizontal offset of the rectangle's left edge, in output pixels.
     pub x: i32,
+    /// Vertical offset of the rectangle's top edge, in output pixels.
     pub y: i32,
+    /// Rectangle width in output pixels; must be nonzero.
     pub width: u32,
+    /// Rectangle height in output pixels; must be nonzero.
     pub height: u32,
 }
 
@@ -50,10 +54,15 @@ pub enum VideoFit {
 /// Runtime-adjustable spatial settings for one compositor input.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct VideoLayer {
+    /// Output-space destination and clipping rectangle.
     pub rect: VideoRect,
+    /// Stacking order; larger values are drawn over smaller values.
     pub z_index: i32,
+    /// Layer alpha in the inclusive range `0.0..=1.0`.
     pub opacity: f32,
+    /// Whether the compositor draws this layer.
     pub visible: bool,
+    /// Aspect-ratio policy used to map the input into [`Self::rect`].
     pub fit: VideoFit,
 }
 

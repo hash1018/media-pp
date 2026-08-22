@@ -29,6 +29,7 @@ pub enum RtspSourceError {
 /// Construction-time options for [`RtspSource::open`].
 #[derive(Debug, Clone, Copy)]
 pub struct RtspOptions {
+    /// Transport used for RTSP media delivery.
     pub transport: RtspTransport,
     /// Socket I/O timeout — ffmpeg's own `timeout` RTSP demuxer option,
     /// which covers the initial connect/handshake reads too, not just

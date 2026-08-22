@@ -73,13 +73,17 @@ impl AudioCodec {
 /// see [`SwAudioEncoder`]'s own docs on why.
 #[derive(Debug, Clone, Copy)]
 pub struct SwAudioEncoderOptions {
+    /// Compressed audio codec to open.
     pub codec: AudioCodec,
+    /// Encoder output sample rate, in hertz.
     pub sample_rate: u32,
+    /// Encoder output channel count.
     pub channels: u16,
     /// Must match the `pts` unit of whatever frames this receives — e.g.
     /// [`crate::elements::TestAudioSource::time_base`]/
     /// [`crate::elements::AudioMixer::time_base`].
     pub time_base: ffmpeg::Rational,
+    /// Target encoded bit rate, in bits per second.
     pub bit_rate: usize,
 }
 

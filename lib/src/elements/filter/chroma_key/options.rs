@@ -11,8 +11,11 @@ use crate::color::Color;
 /// a screen at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChromaKeyMethod {
+    /// Key the conventional pure-green screen color.
     Green,
+    /// Key the conventional pure-blue screen color.
     Blue,
+    /// Key an explicitly supplied RGB color.
     Custom(Color),
 }
 
@@ -29,6 +32,7 @@ impl ChromaKeyMethod {
 /// Construction-time options for either chroma-key backend.
 #[derive(Debug, Clone, Copy)]
 pub struct ChromaKeyOptions {
+    /// Color selection used as the transparent key.
     pub method: ChromaKeyMethod,
     /// How far (as a fraction of the maximum possible RGB distance, so
     /// `0.0..=1.0` is the meaningful range) a pixel may differ from the key
