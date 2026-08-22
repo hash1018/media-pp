@@ -70,69 +70,113 @@ const NV12_SHADER_SOURCE: &[u8] =
 /// Errors specific to [`D3d11VideoCompositor`].
 #[derive(Debug, ThisError)]
 pub enum D3d11VideoCompositorError {
+    /// FFmpeg could not allocate a reference-counted wrapper for an output texture.
     #[error(transparent)]
     FrameWrap(#[from] D3d11FrameWrapError),
 
+    /// A Direct3D device, resource, or command operation failed.
     #[error("windows error: {0}")]
     Windows(#[from] windows::core::Error),
 
+    /// The output canvas dimensions are zero or exceed the safety limit.
     #[error(
         "invalid output dimensions {width}x{height}; each dimension must be 1..={MAX_DIMENSION}"
     )]
-    InvalidOutputDimensions { width: u32, height: u32 },
+    InvalidOutputDimensions {
+        /// Invalid output width in pixels.
+        width: u32,
+        /// Invalid output height in pixels.
+        height: u32,
+    },
 
+    /// The output frame-rate numerator or denominator is non-positive.
     #[error("invalid frame rate {0}; numerator and denominator must both be positive")]
     InvalidFrameRate(ffmpeg::Rational),
 
+    /// A layer destination rectangle is zero-sized or exceeds the safety limit.
     #[error(
         "invalid layer dimensions {width}x{height}; each dimension must be 1..={MAX_DIMENSION}"
     )]
-    InvalidLayerDimensions { width: u32, height: u32 },
+    InvalidLayerDimensions {
+        /// Invalid layer width in output pixels.
+        width: u32,
+        /// Invalid layer height in output pixels.
+        height: u32,
+    },
 
+    /// A layer opacity is non-finite or outside `0.0..=1.0`.
     #[error("layer opacity must be finite and between 0.0 and 1.0, got {0}")]
     InvalidOpacity(f32),
 
+    /// An input frame reports a zero width or height.
     #[error("input frame has invalid dimensions {width}x{height}")]
-    InvalidInputDimensions { width: u32, height: u32 },
+    InvalidInputDimensions {
+        /// Invalid input width in pixels.
+        width: u32,
+        /// Invalid input height in pixels.
+        height: u32,
+    },
 
+    /// Aspect-ratio fitting would create an intermediate image above the safety limit.
     #[error("scaled layer would exceed {MAX_DIMENSION}px: {width}x{height}")]
-    ScaledLayerTooLarge { width: u32, height: u32 },
+    ScaledLayerTooLarge {
+        /// Computed scaled width in pixels.
+        width: u32,
+        /// Computed scaled height in pixels.
+        height: u32,
+    },
 
+    /// A runtime layer handle refers to an input that has been removed or replaced.
     #[error("the compositor input has been removed")]
     SourceRemoved,
 
+    /// The input frame is not backed by a D3D11 texture.
     #[error(
         "D3d11VideoCompositorInputSink only accepts Pixel::D3D11 frames, got {0:?}; \
          upload/decode/capture to GPU first"
     )]
     UnsupportedFormat(ffmpeg::format::Pixel),
 
+    /// A frame tagged as D3D11 does not contain a valid texture reference.
     #[error(
         "frame claimed the D3D11 pixel format but carries no texture — must come from \
          D3d11Upload/D3d11Decoder/DxgiCaptureSource's GPU mode"
     )]
     InvalidD3d11Frame,
 
+    /// The D3D11 texture uses a DXGI format unsupported by the compositor shaders.
     #[error(
         "D3d11VideoCompositor only draws DXGI_FORMAT_B8G8R8A8_UNORM or DXGI_FORMAT_NV12 input \
          textures, got {0:?}"
     )]
     UnsupportedTextureFormat(DXGI_FORMAT),
 
+    /// The frame selects a texture-array slice outside the resource bounds.
     #[error("D3D11 texture array index {index} is outside ArraySize {array_size}")]
-    InvalidArrayIndex { index: isize, array_size: u32 },
+    InvalidArrayIndex {
+        /// Invalid texture-array index from the frame.
+        index: isize,
+        /// Number of slices in the backing texture array.
+        array_size: u32,
+    },
 
+    /// The visible frame region is larger than its backing texture.
     #[error(
         "frame dimensions {frame_width}x{frame_height} exceed the backing D3D11 texture's \
          {texture_width}x{texture_height} dimensions"
     )]
     FrameExceedsTexture {
+        /// Declared frame width in pixels.
         frame_width: u32,
+        /// Declared frame height in pixels.
         frame_height: u32,
+        /// Backing texture width in pixels.
         texture_width: u32,
+        /// Backing texture height in pixels.
         texture_height: u32,
     },
 
+    /// The input texture was created by a different D3D11 device.
     #[error(
         "a Pixel::D3D11 frame's texture lives on a different ID3D11Device than this \
          D3d11VideoCompositor was created with — every D3D11 element in one pipeline must share \
@@ -140,12 +184,14 @@ pub enum D3d11VideoCompositorError {
     )]
     DeviceMismatch,
 
+    /// An input sink received a buffer other than decoded video.
     #[error(
         "D3d11VideoCompositorInputSink only accepts decoded Video frames, got a {0}; link it \
          after a decoder or video source"
     )]
     UnsupportedBuffer(&'static str),
 
+    /// Seeking was requested on a live compositor with no stored timeline.
     #[error("D3d11VideoCompositor doesn't support seeking a live composition")]
     SeekUnsupported,
 }
@@ -199,7 +245,9 @@ pub struct D3d11VideoCompositorHandle {
 
 /// The two endpoints created for one compositor input registration.
 pub struct D3d11VideoCompositorInput {
+    /// Terminal sink to attach to the input pipeline branch.
     pub sink: Box<dyn Sink>,
+    /// Runtime control for this input's placement and visibility.
     pub layer: D3d11VideoLayerHandle,
 }
 
@@ -276,12 +324,14 @@ impl D3d11VideoCompositorHandle {
         self.register_input(name, layer)
     }
 
+    /// Removes `name`; existing sinks and handles become stale immediately.
     pub fn remove_source(&self, name: &str) {
         if let Some(shared) = self.shared.upgrade() {
             shared.inputs.lock().unwrap().remove(name);
         }
     }
 
+    /// Returns the number of inputs currently registered, or zero after shutdown.
     pub fn source_count(&self) -> usize {
         self.shared
             .upgrade()
@@ -622,18 +672,22 @@ impl D3d11VideoCompositor {
         ))
     }
 
+    /// Returns the fixed output width in pixels.
     pub fn width(&self) -> u32 {
         self.options.width
     }
 
+    /// Returns the fixed output height in pixels.
     pub fn height(&self) -> u32 {
         self.options.height
     }
 
+    /// Returns the configured output frame rate.
     pub fn frame_rate(&self) -> ffmpeg::Rational {
         self.options.frame_rate
     }
 
+    /// Returns the reciprocal of [`Self::frame_rate`], used as output PTS units.
     pub fn time_base(&self) -> ffmpeg::Rational {
         ffmpeg::Rational::new(
             self.options.frame_rate.denominator(),

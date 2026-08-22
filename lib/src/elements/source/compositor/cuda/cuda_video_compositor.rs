@@ -45,78 +45,129 @@ const CONTROL_POLL_INTERVAL: Duration = Duration::from_millis(5);
 /// Errors specific to [`CudaVideoCompositor`].
 #[derive(Debug, ThisError)]
 pub enum CudaVideoCompositorError {
+    /// FFmpeg rejected frame or hardware-context allocation.
     #[error("ffmpeg error: {0}")]
     Ffmpeg(#[from] ffmpeg::Error),
 
+    /// A CUDA driver call failed.
     #[error(transparent)]
     Driver(#[from] CudaDriverError),
 
+    /// Scaling an input layer into its destination rectangle failed.
     #[error("failed to scale a layer: {0}")]
     Scale(#[from] crate::elements::CudaScalerError),
 
+    /// Output dimensions are odd, too small, or above the safety limit.
     #[error(
         "invalid output dimensions {width}x{height}; each dimension must be even and 2..={MAX_DIMENSION}"
     )]
-    InvalidOutputDimensions { width: u32, height: u32 },
+    InvalidOutputDimensions {
+        /// Invalid output width in pixels.
+        width: u32,
+        /// Invalid output height in pixels.
+        height: u32,
+    },
 
+    /// The output frame-rate numerator or denominator is non-positive.
     #[error("invalid frame rate {0}; numerator and denominator must both be positive")]
     InvalidFrameRate(ffmpeg::Rational),
 
+    /// A layer destination rectangle is zero-sized or exceeds the safety limit.
     #[error(
         "invalid layer dimensions {width}x{height}; each dimension must be 1..={MAX_DIMENSION}"
     )]
-    InvalidLayerDimensions { width: u32, height: u32 },
+    InvalidLayerDimensions {
+        /// Invalid layer width in output pixels.
+        width: u32,
+        /// Invalid layer height in output pixels.
+        height: u32,
+    },
 
+    /// A layer opacity is non-finite or outside `0.0..=1.0`.
     #[error("layer opacity must be finite and between 0.0 and 1.0, got {0}")]
     InvalidOpacity(f32),
 
+    /// An input frame reports a zero width or height.
     #[error("input frame has invalid dimensions {width}x{height}")]
-    InvalidInputDimensions { width: u32, height: u32 },
+    InvalidInputDimensions {
+        /// Invalid input width in pixels.
+        width: u32,
+        /// Invalid input height in pixels.
+        height: u32,
+    },
 
+    /// Aspect-ratio fitting would create an intermediate image above the safety limit.
     #[error("scaled layer would exceed {MAX_DIMENSION}px: {width}x{height}")]
-    ScaledLayerTooLarge { width: u32, height: u32 },
+    ScaledLayerTooLarge {
+        /// Computed scaled width in pixels.
+        width: u32,
+        /// Computed scaled height in pixels.
+        height: u32,
+    },
 
+    /// A runtime layer handle refers to an input that has been removed or replaced.
     #[error("the compositor input has been removed")]
     SourceRemoved,
 
+    /// The input frame is not backed by CUDA hardware surfaces.
     #[error("CudaVideoCompositorInputSink only composites CUDA frames, got {0:?}")]
     UnsupportedFormat(ffmpeg::format::Pixel),
 
+    /// The CUDA surface is not in the NV12 format required by the compositor kernel.
     #[error("CudaVideoCompositor only composites NV12 surfaces, got {0:?}")]
     UnsupportedSurfaceFormat(ffmpeg::format::Pixel),
 
+    /// A CUDA frame does not retain the hardware frames context that owns it.
     #[error("CUDA frame has no hardware frames context")]
     MissingFramesContext,
 
+    /// An input frame belongs to a different CUDA context.
     #[error("CUDA frame belongs to a different CUDA context than this compositor")]
     ForeignContext,
 
+    /// A CUDA frame contains no usable device-memory plane.
     #[error("CUDA frame carries no device pointers")]
     MissingPlane,
 
+    /// An input sink received a buffer other than decoded video.
     #[error(
         "CudaVideoCompositorInputSink only accepts decoded Video frames, got a {0}; link it after a decoder or upload"
     )]
     UnsupportedBuffer(&'static str),
 
+    /// FFmpeg could not allocate the compositor's CUDA output frame pool.
     #[error("failed to allocate the CUDA frames context")]
     HwFramesAlloc,
 
+    /// FFmpeg could not acquire a frame from the CUDA output pool.
     #[error("failed to take an output frame from the CUDA pool (code {0})")]
     HwFrameGet(i32),
 
+    /// The supplied bytes are not a supported TrueType or OpenType font.
     #[error("invalid font data: {0}")]
     InvalidFont(String),
 
+    /// The glyph pixel height is non-positive or non-finite.
     #[error("font size must be finite and greater than zero, got {0}")]
     InvalidFontSize(f32),
 
+    /// Rasterizing the requested text would exceed supported dimensions.
     #[error("rasterized text is too large: {width}x{height}")]
-    TextTooLarge { width: u64, height: u64 },
+    TextTooLarge {
+        /// Computed raster width in pixels.
+        width: u64,
+        /// Computed raster height in pixels.
+        height: u64,
+    },
 
+    /// Host memory for the rasterized pixel buffer could not be reserved.
     #[error("could not allocate {bytes} bytes for rasterized text")]
-    AllocationFailed { bytes: usize },
+    AllocationFailed {
+        /// Number of bytes requested for the text bitmap.
+        bytes: usize,
+    },
 
+    /// Seeking was requested on a live compositor with no stored timeline.
     #[error("CudaVideoCompositor doesn't support seeking a live composition")]
     SeekUnsupported,
 }
@@ -168,7 +219,9 @@ pub struct CudaVideoCompositorHandle {
 /// Move `sink` into the upstream pipeline and retain `layer` in application
 /// code for runtime placement changes.
 pub struct CudaVideoCompositorInput {
+    /// Terminal sink to attach to the input pipeline branch.
     pub sink: Box<dyn Sink>,
+    /// Runtime control for this input's placement and visibility.
     pub layer: CudaVideoLayerHandle,
 }
 
@@ -223,6 +276,7 @@ impl CudaVideoCompositorHandle {
         }
     }
 
+    /// Returns the number of inputs currently registered, or zero after shutdown.
     pub fn source_count(&self) -> usize {
         self.shared
             .upgrade()
@@ -241,20 +295,24 @@ pub struct CudaVideoLayerHandle {
 }
 
 impl CudaVideoLayerHandle {
+    /// Returns the stable identity of this particular input registration.
     pub fn id(&self) -> VideoInputId {
         self.id
     }
 
+    /// Returns the registration name, which may be reused by a newer input.
     pub fn name(&self) -> Arc<str> {
         self.name.clone()
     }
 
+    /// Returns the current settings, or `None` after the input is removed.
     pub fn layer(&self) -> Option<VideoLayer> {
         self.input
             .upgrade()
             .map(|input| *input.layer.lock().unwrap())
     }
 
+    /// Atomically replaces every layer setting.
     pub fn set_layer(
         &self,
         layer: VideoLayer,
@@ -263,24 +321,29 @@ impl CudaVideoLayerHandle {
         self.update(|current| *current = layer)
     }
 
+    /// Replaces the destination rectangle while retaining other settings.
     pub fn set_rect(&self, rect: VideoRect) -> std::result::Result<(), CudaVideoCompositorError> {
         validate_rect(rect)?;
         self.update(|layer| layer.rect = rect)
     }
 
+    /// Replaces opacity after validating the `0.0..=1.0` range.
     pub fn set_opacity(&self, opacity: f32) -> std::result::Result<(), CudaVideoCompositorError> {
         validate_opacity(opacity)?;
         self.update(|layer| layer.opacity = opacity)
     }
 
+    /// Changes the stacking order; larger values are drawn later.
     pub fn set_z_index(&self, z_index: i32) -> std::result::Result<(), CudaVideoCompositorError> {
         self.update(|layer| layer.z_index = z_index)
     }
 
+    /// Shows or hides the input without removing its registration.
     pub fn set_visible(&self, visible: bool) -> std::result::Result<(), CudaVideoCompositorError> {
         self.update(|layer| layer.visible = visible)
     }
 
+    /// Changes how the input aspect ratio maps into its rectangle.
     pub fn set_fit(&self, fit: VideoFit) -> std::result::Result<(), CudaVideoCompositorError> {
         self.update(|layer| layer.fit = fit)
     }
@@ -548,14 +611,17 @@ impl CudaVideoCompositor {
         ffmpeg::format::Pixel::CUDA
     }
 
+    /// Returns the fixed output width in pixels.
     pub fn width(&self) -> u32 {
         self.options.width
     }
 
+    /// Returns the fixed output height in pixels.
     pub fn height(&self) -> u32 {
         self.options.height
     }
 
+    /// Returns the configured output frame rate.
     pub fn frame_rate(&self) -> ffmpeg::Rational {
         self.options.frame_rate
     }
@@ -1658,6 +1724,7 @@ impl CudaTextLayerHandle {
         Ok(())
     }
 
+    /// Shows or hides the text without discarding its uploaded mask.
     pub fn set_visible(&self, visible: bool) {
         self.state.visible.store(visible, Ordering::Relaxed);
     }

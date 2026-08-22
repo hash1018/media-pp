@@ -26,20 +26,24 @@ pub struct D3d11VideoLayerHandle {
 }
 
 impl D3d11VideoLayerHandle {
+    /// Returns the stable identity of this particular input registration.
     pub fn id(&self) -> video_layer::VideoInputId {
         self.id
     }
 
+    /// Returns the registration name, which may be reused by a newer input.
     pub fn name(&self) -> Arc<str> {
         self.name.clone()
     }
 
+    /// Returns the current settings, or `None` after the input is removed.
     pub fn layer(&self) -> Option<VideoLayer> {
         self.input
             .upgrade()
             .map(|input| *input.layer.lock().unwrap())
     }
 
+    /// Atomically replaces every layer setting.
     pub fn set_layer(
         &self,
         layer: VideoLayer,
@@ -48,6 +52,7 @@ impl D3d11VideoLayerHandle {
         self.update(|current| *current = layer)
     }
 
+    /// Replaces the destination rectangle while retaining other settings.
     pub fn set_rect(
         &self,
         rect: video_layer::VideoRect,
@@ -56,19 +61,23 @@ impl D3d11VideoLayerHandle {
         self.update(|layer| layer.rect = rect)
     }
 
+    /// Replaces opacity after validating the `0.0..=1.0` range.
     pub fn set_opacity(&self, opacity: f32) -> std::result::Result<(), D3d11VideoCompositorError> {
         video_layer::validate_opacity(opacity).map_err(map_layer_error)?;
         self.update(|layer| layer.opacity = opacity)
     }
 
+    /// Changes the stacking order; larger values are drawn later.
     pub fn set_z_index(&self, z_index: i32) -> std::result::Result<(), D3d11VideoCompositorError> {
         self.update(|layer| layer.z_index = z_index)
     }
 
+    /// Shows or hides the input without removing its registration.
     pub fn set_visible(&self, visible: bool) -> std::result::Result<(), D3d11VideoCompositorError> {
         self.update(|layer| layer.visible = visible)
     }
 
+    /// Changes how the input aspect ratio maps into its rectangle.
     pub fn set_fit(
         &self,
         fit: video_layer::VideoFit,

@@ -30,24 +30,39 @@ use super::super::super::video_layer::VideoRect;
 /// Errors specific to [`D3d11TextLayerHandle`].
 #[derive(Debug, ThisError)]
 pub enum D3d11TextLayerError {
+    /// FFmpeg could not allocate a reference-counted wrapper for the text texture.
     #[error(transparent)]
     FrameWrap(#[from] D3d11FrameWrapError),
 
+    /// The supplied bytes are not a supported TrueType or OpenType font.
     #[error("invalid font data: {0}")]
     InvalidFont(#[from] InvalidFont),
 
+    /// The glyph pixel height is non-positive or non-finite.
     #[error("font size must be finite and greater than zero, got {0}")]
     InvalidFontSize(f32),
 
+    /// Rasterizing the requested text would exceed supported texture dimensions.
     #[error("rasterized text is too large: {width}x{height}")]
-    TextTooLarge { width: u64, height: u64 },
+    TextTooLarge {
+        /// Computed raster width in pixels.
+        width: u64,
+        /// Computed raster height in pixels.
+        height: u64,
+    },
 
+    /// Host memory for the rasterized pixel buffer could not be reserved.
     #[error("could not allocate {bytes} bytes for rasterized text")]
-    AllocationFailed { bytes: usize },
+    AllocationFailed {
+        /// Number of bytes requested for the text bitmap.
+        bytes: usize,
+    },
 
+    /// Updating the compositor's underlying video layer failed.
     #[error(transparent)]
     Compositor(#[from] D3d11VideoCompositorError),
 
+    /// Creating or uploading the D3D11 text texture failed.
     #[error("windows error: {0}")]
     Windows(#[from] windows::core::Error),
 }
@@ -172,16 +187,19 @@ impl D3d11TextLayerHandle {
         Ok(())
     }
 
+    /// Replaces text-layer opacity after validating the `0.0..=1.0` range.
     pub fn set_opacity(&self, opacity: f32) -> std::result::Result<(), D3d11TextLayerError> {
         self.layer.set_opacity(opacity)?;
         Ok(())
     }
 
+    /// Changes the stacking order; larger values are drawn later.
     pub fn set_z_index(&self, z_index: i32) -> std::result::Result<(), D3d11TextLayerError> {
         self.layer.set_z_index(z_index)?;
         Ok(())
     }
 
+    /// Shows or hides the text without discarding its uploaded texture.
     pub fn set_visible(&self, visible: bool) -> std::result::Result<(), D3d11TextLayerError> {
         self.layer.set_visible(visible)?;
         Ok(())
