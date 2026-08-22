@@ -34,23 +34,28 @@ const SHADER_SOURCE: &[u8] = include_bytes!("../../../../shaders/d3d11/chroma_ke
 /// `Error` via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum D3d11ChromaKeyError {
+    /// A Direct3D resource, shader, or draw operation failed.
     #[error("windows error: {0}")]
+    /// The input frame is not backed by a D3D11 texture.
     Windows(#[from] windows::core::Error),
 
     #[error("D3d11ChromaKey only keys Pixel::D3D11 frames, got {0:?}")]
     UnsupportedFormat(ffmpeg::format::Pixel),
+    /// A frame tagged as D3D11 contains no valid texture reference.
 
     #[error(
         "frame claimed the D3D11 pixel format but carries no texture — must \
          come from D3d11Upload/D3d11Decoder/DxgiCaptureSource's GPU mode/D3d11VideoCompositor"
     )]
     InvalidD3d11Frame,
+    /// The texture format has no writable alpha channel.
 
     #[error(
         "D3d11ChromaKey only keys DXGI_FORMAT_B8G8R8A8_UNORM textures, got {0:?}; \
          keying writes per-pixel alpha, which an NV12 surface has nowhere to store"
     )]
     UnsupportedTextureFormat(DXGI_FORMAT),
+    /// The input texture belongs to another D3D11 device.
 
     #[error(
         "a Pixel::D3D11 frame's texture lives on a different ID3D11Device \
@@ -58,38 +63,59 @@ pub enum D3d11ChromaKeyError {
          pipeline must share exactly one device for zero-copy to be valid"
     )]
     DeviceMismatch,
+    /// The supplied immediate context belongs to another D3D11 device.
 
     #[error(
         "the supplied ID3D11DeviceContext belongs to a different ID3D11Device than this \
          D3d11ChromaKey"
     )]
     ContextDeviceMismatch,
+    /// The backing texture is smaller than the visible input frame.
 
     #[error(
         "D3D11 texture is {actual_width}x{actual_height}, smaller than the \
          frame's {expected_width}x{expected_height} visible size"
     )]
     TextureTooSmall {
+        /// Backing texture width in pixels.
         actual_width: u32,
+        /// Backing texture height in pixels.
         actual_height: u32,
+        /// Visible frame width in pixels.
         expected_width: u32,
+        /// Visible frame height in pixels.
         expected_height: u32,
     },
+    /// The frame selects a texture-array slice outside the resource bounds.
 
     #[error("D3D11 texture array index {index} is outside ArraySize {array_size}")]
-    InvalidArrayIndex { index: isize, array_size: u32 },
+    InvalidArrayIndex {
+        /// Invalid texture-array index.
+        index: isize,
+        /// Number of slices in the texture array.
+        array_size: u32,
+    },
+    /// The texture is multisampled and cannot be sampled by this path.
 
     #[error("D3d11ChromaKey does not accept multisampled textures (SampleDesc.Count={0})")]
     MultisampledTexture(u32),
+    /// The texture was not created with shader-resource binding.
 
     #[error(
         "the input texture was created without D3D11_BIND_SHADER_RESOURCE (BindFlags={0:#x}), \
          so this element's pixel shader cannot read it"
     )]
     MissingShaderResourceBind(u32),
+    /// The visible input dimensions are zero.
 
     #[error("frame has invalid dimensions {width}x{height}")]
-    InvalidFrameDimensions { width: u32, height: u32 },
+    InvalidFrameDimensions {
+        /// Invalid frame width in pixels.
+        width: u32,
+        /// Invalid frame height in pixels.
+        height: u32,
+    },
+    /// The sink received a buffer other than decoded video or end-of-stream.
 
     #[error("D3d11ChromaKey only accepts Video and Eos buffers, got a {0}")]
     UnsupportedBuffer(&'static str),

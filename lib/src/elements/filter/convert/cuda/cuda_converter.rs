@@ -25,40 +25,59 @@ use crate::{
 /// via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum CudaConverterError {
+    /// The input frame is not backed by CUDA hardware surfaces.
     #[error("CudaConverter converts CUDA frames, got {0:?}")]
     UnsupportedFormat(ffmpeg::format::Pixel),
+    /// The sink received a buffer other than decoded video.
 
     #[error("CudaConverter only accepts Video buffers, got a {0}")]
     UnsupportedBuffer(&'static str),
+    /// The frame does not retain the CUDA hardware frames context that owns it.
 
     #[error("the frame carries no CUDA frames context")]
     MissingFramesContext,
+    /// The input frame belongs to another CUDA context.
 
     #[error("the frame belongs to a different CUDA device than this CudaConverter")]
     ForeignContext,
+    /// The CUDA surface is not BGRA.
 
     #[error("CudaConverter converts BGRA surfaces, got {0:?}")]
     UnsupportedSurfaceFormat(ffmpeg::format::Pixel),
+    /// Input dimensions differ from the converter's fixed dimensions.
 
     #[error(
         "frame is {actual_width}x{actual_height}, but this CudaConverter was built for \
          {expected_width}x{expected_height}"
     )]
     DimensionMismatch {
+        /// Input frame width in pixels.
         actual_width: u32,
+        /// Input frame height in pixels.
         actual_height: u32,
+        /// Width configured for the converter.
         expected_width: u32,
+        /// Height configured for the converter.
         expected_height: u32,
     },
+    /// NV12 output was requested with odd dimensions.
 
     #[error("NV12 needs even dimensions, got {width}x{height}")]
-    OddDimensions { width: u32, height: u32 },
+    OddDimensions {
+        /// Odd output width in pixels.
+        width: u32,
+        /// Odd output height in pixels.
+        height: u32,
+    },
+    /// A CUDA frame contains no usable device-memory plane.
 
     #[error("a surface arrived with no device pointer")]
     MissingSurface,
+    /// Allocating or initializing the CUDA output frame failed.
 
     #[error(transparent)]
     Frames(#[from] CudaUploadError),
+    /// The CUDA color-conversion kernel failed.
 
     #[error(transparent)]
     Driver(#[from] CudaDriverError),
