@@ -57,6 +57,12 @@ impl WebRtcHandle {
     /// type out of whatever this connection negotiates for the track,
     /// instead of guessing. If this connection never negotiates `codec` for
     /// it, pushed buffers are silently dropped, same as an unopened track.
+    ///
+    /// Declaring one codec and pushing another is not detected anywhere:
+    /// str0m packetizes whatever bytes it is handed under the payload type
+    /// chosen here, so the mismatch leaves as a well-formed stream that no
+    /// receiver can decode. Audio is where this bites — WebRTC negotiates
+    /// Opus, and there is no AAC payload type to fall back to.
     pub fn add_track(
         &self,
         kind: MediaKind,

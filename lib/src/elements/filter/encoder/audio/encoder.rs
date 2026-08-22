@@ -35,34 +35,52 @@ pub enum SwAudioEncoderError {
     /// planar, whichever the codec itself reports) — see its own docs on
     /// why. This is what a codec whose *only* supported formats are
     /// something else entirely (integer PCM, `f64`, ...) gets instead of
-    /// a silently-wrong guess. Every codec this crate actually opens
-    /// today (`aac`) doesn't hit this.
+    /// a silently-wrong guess. Neither codec this crate opens today
+    /// (`aac`, `libopus`) hits this.
     #[error("{0:?} doesn't support any Sample::F32 format — only {1:?} (unsupported)")]
     NoF32Format(String, Vec<ffmpeg::format::Sample>),
+
+    /// The codec publishes a fixed list of sample rates and
+    /// [`SwAudioEncoderOptions::sample_rate`] is not on it — `libopus`
+    /// takes only 48/24/16/12/8 kHz, for example. Caught here because
+    /// `avcodec_open2` reports it as a bare `Invalid argument` that names
+    /// neither the rate nor the alternatives.
+    #[error("{0:?} does not support {1} Hz — only {2:?}")]
+    UnsupportedSampleRate(String, u32, Vec<u32>),
 
     /// FFmpeg rejected encoder, resampler, frame, or packet processing.
     #[error("ffmpeg error: {0}")]
     Ffmpeg(#[from] ffmpeg::Error),
 }
 
-/// Which software audio encoder to open. Just [`AudioCodec::Aac`] today —
-/// unlike [`crate::elements::VideoCodec`]'s several real alternatives,
-/// this crate only needs one working audio path right now (feeding an MP4
-/// muxer); more can be added the same way `VideoCodec` was once something
-/// actually needs a second one.
+/// Which software audio encoder to open.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AudioCodec {
-    /// FFmpeg's own native `aac` encoder — no GPL/nonfree build flag
-    /// needed (unlike [`crate::elements::VideoCodec::H264`]/
-    /// [`crate::elements::VideoCodec::H265`]), always present on a
-    /// standard ffmpeg build. The standard choice for MP4 audio.
+    /// FFmpeg's own native `aac` encoder — built in rather than an
+    /// external library, so unlike [`AudioCodec::Opus`] it needs nothing
+    /// added to the ffmpeg build (and no `--enable-gpl`, unlike
+    /// [`crate::elements::VideoCodec::H264`]/
+    /// [`crate::elements::VideoCodec::H265`]). The standard choice for
+    /// MP4 audio.
     Aac,
+    /// `libopus` — Opus (RFC 6716), BSD-3-Clause. A general-purpose
+    /// codec covering speech and music alike, whose very short frames are
+    /// why interactive systems standardized on it; WebRTC requires it,
+    /// and Ogg, WebM/Matroska, and MP4 all carry it.
+    ///
+    /// Unlike [`AudioCodec::Aac`] this is an external library, so a
+    /// stripped ffmpeg build may not have it; that surfaces as
+    /// [`SwAudioEncoderError::CodecNotFound`]. It accepts only
+    /// 48/24/16/12/8 kHz — see
+    /// [`SwAudioEncoderError::UnsupportedSampleRate`].
+    Opus,
 }
 
 impl AudioCodec {
     fn encoder_name(self) -> &'static str {
         match self {
             AudioCodec::Aac => "aac",
+            AudioCodec::Opus => "libopus",
         }
     }
 }
@@ -78,7 +96,11 @@ impl AudioCodec {
 pub struct SwAudioEncoderOptions {
     /// Compressed audio codec to open.
     pub codec: AudioCodec,
-    /// Encoder output sample rate, in hertz.
+    /// Encoder output sample rate, in hertz. A codec that accepts only
+    /// certain rates rejects the rest at construction with
+    /// [`SwAudioEncoderError::UnsupportedSampleRate`] —
+    /// [`AudioCodec::Opus`] takes 48/24/16/12/8 kHz and nothing else,
+    /// where [`AudioCodec::Aac`] takes any.
     pub sample_rate: u32,
     /// Encoder output channel count.
     pub channels: u16,
@@ -190,6 +212,26 @@ impl SwAudioEncoder {
                     SwAudioEncoderError::NoF32Format(encoder_name.into(), available.clone())
                 })?
         };
+
+        // Asked of the codec rather than hardcoded per `AudioCodec`, the
+        // same way the format above is. A codec that publishes no list
+        // (`aac`) takes any rate and is left alone; one that does
+        // (`libopus`) would otherwise fail inside `avcodec_open2` with a
+        // bare `Invalid argument`.
+        {
+            let capabilities = codec.audio().map_err(SwAudioEncoderError::from)?;
+            if let Some(rates) = capabilities.rates() {
+                let supported: Vec<u32> = rates.map(|rate| rate as u32).collect();
+                if !supported.contains(&options.sample_rate) {
+                    return Err(SwAudioEncoderError::UnsupportedSampleRate(
+                        encoder_name.into(),
+                        options.sample_rate,
+                        supported,
+                    )
+                    .into());
+                }
+            }
+        }
         let target_layout = ffmpeg::ChannelLayout::default(options.channels as i32);
 
         let mut context = ffmpeg::codec::context::Context::new_with_codec(codec);
@@ -726,5 +768,109 @@ mod tests {
                  not FFmpeg's 0/1 unset sentinel"
             );
         }
+    }
+
+    fn opus_options(sample_rate: u32) -> SwAudioEncoderOptions {
+        SwAudioEncoderOptions {
+            codec: AudioCodec::Opus,
+            sample_rate,
+            channels: 2,
+            time_base: ffmpeg::Rational::new(1, sample_rate as i32),
+            bit_rate: 96_000,
+        }
+    }
+
+    /// Opus exists here because WebRTC negotiates nothing else for audio,
+    /// so what matters is that it actually produces packets and drains on
+    /// `Eos` — the same contract `aac` has. `libopus` is an external
+    /// library rather than one of ffmpeg's own, so a build without it
+    /// skips instead of failing, the way a missing device does.
+    #[test]
+    fn opus_encodes_into_packets_and_flushes_on_eos() {
+        let Ok(mut encoder) = SwAudioEncoder::new("encoder", opus_options(48000)) else {
+            eprintln!("skipping: libopus not available in this ffmpeg build");
+            return;
+        };
+
+        let packets = Arc::new(std::sync::Mutex::new(0usize));
+        let eos = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        encoder.src_pads()[0].link(Box::new(RecordingSink {
+            packets: packets.clone(),
+            eos: eos.clone(),
+            pp_log: element_pp_log(ElementType::Other, "recorder", None),
+        }));
+
+        for _ in 0..20 {
+            encoder
+                .consume(MediaBuffer::Audio(Arc::new(constant_stereo_frame(
+                    0.1, 960, 48000,
+                ))))
+                .expect("consume should succeed");
+        }
+        encoder
+            .consume(MediaBuffer::Eos)
+            .expect("consume(Eos) should succeed");
+
+        assert!(
+            *packets.lock().unwrap() > 0,
+            "expected at least one encoded packet"
+        );
+        assert!(
+            eos.load(std::sync::atomic::Ordering::SeqCst),
+            "expected Eos to cascade"
+        );
+    }
+
+    /// Opus publishes a fixed rate list, and 44100 is deliberately not on
+    /// it. The point of the check is the message: `avcodec_open2` rejects
+    /// this too, but as a bare `Invalid argument` naming neither the rate
+    /// nor what would have worked.
+    #[test]
+    fn opus_rejects_a_sample_rate_it_cannot_encode() {
+        if ffmpeg::encoder::find_by_name("libopus").is_none() {
+            eprintln!("skipping: libopus not available in this ffmpeg build");
+            return;
+        }
+
+        let error = SwAudioEncoder::new("encoder", opus_options(44100))
+            .err()
+            .expect("44100 Hz must not open an Opus encoder");
+        let crate::error::Error::SwAudioEncoderError(SwAudioEncoderError::UnsupportedSampleRate(
+            _,
+            rate,
+            supported,
+        )) = error
+        else {
+            panic!("expected UnsupportedSampleRate, got {error}");
+        };
+
+        assert_eq!(rate, 44100);
+        assert!(
+            supported.contains(&48000),
+            "the reported alternatives should include Opus's own 48 kHz, got {supported:?}"
+        );
+    }
+
+    /// The rate check must stay scoped to codecs that publish a list.
+    /// `aac` publishes none and takes 44100 happily, so a check that
+    /// rejected an empty list would break the codec this crate already
+    /// shipped.
+    #[test]
+    fn aac_still_accepts_a_rate_no_codec_list_covers() {
+        let result = SwAudioEncoder::new(
+            "encoder",
+            SwAudioEncoderOptions {
+                codec: AudioCodec::Aac,
+                sample_rate: 44100,
+                channels: 2,
+                time_base: ffmpeg::Rational::new(1, 44100),
+                bit_rate: 128_000,
+            },
+        );
+
+        assert!(
+            result.is_ok(),
+            "aac publishes no rate list, so no rate should be rejected here"
+        );
     }
 }

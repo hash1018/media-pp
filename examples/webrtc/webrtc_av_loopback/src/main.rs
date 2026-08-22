@@ -179,7 +179,12 @@ mod example {
         let audio_encoder = SwAudioEncoder::new(
             "audio-encoder",
             SwAudioEncoderOptions {
-                codec: AudioCodec::Aac,
+                // Must be the codec the audio track was declared with
+                // below: str0m packetizes whatever bytes it is handed as
+                // that codec, so AAC here would put AAC on the wire under
+                // an Opus payload type. Opus is also the only audio codec
+                // WebRTC negotiates at all.
+                codec: AudioCodec::Opus,
                 sample_rate: audio_options.sample_rate,
                 channels: audio_options.channels,
                 time_base: audio_time_base,
