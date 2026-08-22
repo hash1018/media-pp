@@ -41,9 +41,11 @@ pub enum PlaybackMaster {
 /// another master already holds the clock, or this registration was superseded.
 /// Neither is fatal to playback: the position simply stays with whoever owns it.
 pub enum PlaybackClockError {
+    /// Another live audio renderer already owns the playback clock.
     #[error("this pipeline already has an audio playback-clock master")]
     AudioMasterAlreadyRegistered,
 
+    /// The registration was released or superseded before this operation.
     #[error("the audio playback-clock registration is stale")]
     StaleAudioMaster,
 }
@@ -109,6 +111,10 @@ impl PlaybackClock {
         }
     }
 
+    /// Reports which timing source currently defines media position.
+    ///
+    /// This is a lock-protected snapshot; ownership may change immediately
+    /// afterward as an audio renderer starts or stops.
     pub fn master(&self) -> PlaybackMaster {
         match *self.state.lock().unwrap() {
             State::Unavailable { .. } => PlaybackMaster::Unavailable,

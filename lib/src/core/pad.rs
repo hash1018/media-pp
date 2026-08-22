@@ -34,6 +34,7 @@ pub struct SrcPad {
 }
 
 impl SrcPad {
+    /// Creates an unlinked output pad with the caller-selected diagnostic name.
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -41,10 +42,12 @@ impl SrcPad {
         }
     }
 
+    /// Returns the pad name used by topology and flow diagnostics.
     pub fn name(&self) -> &str {
         &self.name
     }
 
+    /// Returns whether this pad currently owns a downstream sink connection.
     pub fn is_linked(&self) -> bool {
         self.peer.is_some()
     }

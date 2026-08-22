@@ -43,6 +43,10 @@ pub struct DetachedBranch {
 }
 
 impl DetachedBranch {
+    /// Returns the stable graph identity of the first element in this branch.
+    ///
+    /// The ID is reserved during construction but does not appear in the live
+    /// graph until a successful [`Context::attach`].
     pub fn root_id(&self) -> ElementId {
         self.plan.root
     }
@@ -398,16 +402,27 @@ impl ChainBuilder {
         })
     }
 
+    /// Alias of [`Self::to`] retained for callers that prefer builder-style
+    /// terminology when supplying the terminal sink.
     pub fn build(self, terminal: Box<dyn Sink>) -> Result<DetachedBranch> {
         self.to(terminal)
     }
 }
 
 impl Context {
+    /// Starts a detached branch plan scoped to this source and pipeline.
+    ///
+    /// Building the branch allocates its runtime elements but does not publish
+    /// them in the graph until [`Self::attach`] succeeds.
     pub fn branch(self: &Arc<Self>) -> ChainBuilder {
         ChainBuilder::new(self.clone())
     }
 
+    /// Atomically attaches a completed branch to one source pad.
+    ///
+    /// Returns the stable branch identity used by later dynamic graph
+    /// operations. An invalid index or already-linked pad returns a
+    /// [`GraphError`] without changing either the runtime connection or graph.
     pub fn attach<S: Source>(
         &self,
         source: &mut S,

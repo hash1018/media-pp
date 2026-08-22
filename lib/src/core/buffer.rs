@@ -31,15 +31,38 @@ use crate::pool::UnboundObjectPoolRef;
 /// `Arc` clone downstream has been dropped, instead of it just being freed.
 #[derive(Clone)]
 pub enum MediaBuffer {
+    /// Encoded media packet produced by a demuxer or encoder.
+    ///
+    /// Its PTS, DTS, duration, stream index, and time base remain part of the
+    /// packet contract while it travels through packet-level elements.
     Packet(Arc<ffmpeg::Packet>),
+
+    /// Decoded video frame whose backing storage returns to its producer's
+    /// [`crate::pool::UnboundObjectPool`] after the last `Arc` clone drops.
+    ///
+    /// Treat the published frame as immutable. A transforming element creates
+    /// a replacement frame and preserves PTS, duration, and color metadata
+    /// unless it intentionally establishes a new timeline.
     Video(Arc<UnboundObjectPoolRef<ffmpeg::frame::Video>>),
+
+    /// Decoded audio frame shared immutably between downstream branches.
+    ///
+    /// Sample format, sample rate, channel layout, PTS, and duration describe
+    /// the audio contract a transforming element must either preserve or
+    /// deliberately replace.
     Audio(Arc<ffmpeg::frame::Audio>),
-    /// End of stream marker. Elements that hold resources (encoders with
-    /// delayed frames, muxers, ...) should flush when they see this.
+
+    /// Ordered end-of-stream marker.
+    ///
+    /// Stateful elements flush delayed output before forwarding it, and
+    /// muxers finalize their output after receiving it. Unlike
+    /// [`crate::control::ControlMsg::Stop`], this requests natural completion
+    /// rather than abandoning buffered work.
     Eos,
 }
 
 impl MediaBuffer {
+    /// Returns whether this buffer is the ordered [`MediaBuffer::Eos`] marker.
     pub fn is_eos(&self) -> bool {
         matches!(self, MediaBuffer::Eos)
     }

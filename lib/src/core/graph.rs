@@ -54,15 +54,20 @@ impl fmt::Display for BranchId {
 /// One element as it appears in a [`GraphSnapshot`] — its stable identity, its
 /// type, and the name its caller chose.
 pub struct NodeInfo {
+    /// Stable identity assigned by the owning pipeline graph.
     pub id: ElementId,
+    /// Built-in kind reported by the element.
     pub element_type: ElementType,
+    /// Caller-selected instance name; names need not be unique within a graph.
     pub name: Arc<str>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// One end of an edge: the element, and the name of the pad on it.
 pub struct PortRef {
+    /// Stable identity of the element that owns this port.
     pub element: ElementId,
+    /// Element-defined port name used in topology output.
     pub port: Arc<str>,
 }
 
@@ -70,9 +75,13 @@ pub struct PortRef {
 /// One link from a source pad to a downstream element, together with the
 /// branch whose attachment created it.
 pub struct EdgeInfo {
+    /// Stable identity of this connection.
     pub id: EdgeId,
+    /// Attachment transaction that created this edge.
     pub branch_id: BranchId,
+    /// Upstream source pad.
     pub from: PortRef,
+    /// Downstream sink port.
     pub to: PortRef,
 }
 
@@ -85,12 +94,17 @@ pub struct EdgeInfo {
 /// [`crate::pipeline::Pipeline::topology`] renders and what a `run`/`attach`/
 /// `detach` log record embeds.
 pub struct GraphSnapshot {
+    /// Monotonically increasing graph version. Each successful mutation
+    /// increments it exactly once.
     pub revision: u64,
+    /// Elements attached when this snapshot was taken.
     pub nodes: Vec<NodeInfo>,
+    /// Connections attached when this snapshot was taken.
     pub edges: Vec<EdgeInfo>,
 }
 
 impl GraphSnapshot {
+    /// Finds one node by stable identity within this snapshot.
     pub fn node(&self, id: ElementId) -> Option<&NodeInfo> {
         self.nodes.iter().find(|node| node.id == id)
     }
@@ -257,26 +271,44 @@ pub(crate) fn log_topology(pp_log: &PpLog, event: &str, snapshot: &GraphSnapshot
 /// before it mutates, so a graph that returns one of these is left exactly as
 /// it was.
 pub enum GraphError {
+    /// The requested source pad index does not exist.
     #[error("source pad index {index} is out of range (source has {pad_count} pads)")]
-    PadOutOfRange { index: usize, pad_count: usize },
+    PadOutOfRange {
+        /// Requested zero-based source pad index.
+        index: usize,
+        /// Number of source pads available on the element.
+        pad_count: usize,
+    },
 
+    /// Attachment targeted a source pad that already owns a downstream sink.
     #[error("source pad '{0}' is already linked")]
     PadAlreadyLinked(String),
 
+    /// A dynamic attachment named an element that is no longer in this graph.
     #[error("element {0} is not attached to this pipeline")]
     ParentNotAttached(ElementId),
 
+    /// An attachment plan attempted to publish an already-attached node.
     #[error("element {0} is already attached to this pipeline")]
     NodeAlreadyAttached(ElementId),
 
+    /// A detach operation named a branch that is no longer attached.
     #[error("branch {0} is not attached")]
     BranchNotAttached(BranchId),
 
+    /// An attachment plan contained no terminal or processing element.
     #[error("a branch must contain at least one element")]
     EmptyBranch,
 
+    /// [`crate::pipeline::ChainBuilder::pipe`] received a filter whose output
+    /// shape cannot be represented as one linear chain stage.
     #[error("ChainBuilder::pipe requires exactly one output pad, but {name} has {count}")]
-    NotSingleOutput { name: Arc<str>, count: usize },
+    NotSingleOutput {
+        /// Caller-selected name of the rejected filter.
+        name: Arc<str>,
+        /// Number of source pads exposed by the rejected filter.
+        count: usize,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -315,10 +347,13 @@ struct GraphState {
 pub struct PipelineGraph(Arc<Mutex<GraphState>>);
 
 impl PipelineGraph {
+    /// Creates an empty graph with revision zero and fresh ID counters.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Copies nodes, edges, and revision under the graph lock, then releases
+    /// the lock before returning.
     pub fn snapshot(&self) -> GraphSnapshot {
         let state = self.0.lock().unwrap();
         GraphSnapshot {
@@ -328,6 +363,10 @@ impl PipelineGraph {
         }
     }
 
+    /// Returns the attached branch that owns `element`, if the element was
+    /// introduced by a branch attachment transaction.
+    ///
+    /// Source nodes are created directly and therefore return `None`.
     pub fn branch_containing(&self, element: ElementId) -> Option<BranchId> {
         let state = self.0.lock().unwrap();
         state

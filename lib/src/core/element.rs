@@ -164,9 +164,18 @@ pub(crate) fn pipeline_pp_log(pipeline_id: &str) -> PpLog {
 /// the handle cannot keep the pipeline's `Bus` open after the `Tee` itself
 /// is gone.
 pub struct Context {
+    /// Sender used by this source and its attached branches for asynchronous
+    /// errors, EOS, drops, and seek completion.
     pub bus: Bus,
+
+    /// Caller-selected identity of the pipeline currently being wired.
     pub pipeline_id: Arc<str>,
+
+    /// Shared live topology graph updated by successful attach and detach
+    /// operations.
     pub graph: PipelineGraph,
+
+    /// Wall-time clock shared by paced elements in this pipeline.
     pub clock: Arc<Clock>,
     /// Shared media-position clock used to hand video scheduling from the
     /// wall clock to an audio output master without changing pipelines.
@@ -206,6 +215,13 @@ impl Context {
 /// a `Sink` in a [`crate::queue::Queue`], not by elements spawning their
 /// own threads.
 pub trait Sink: Element {
+    /// Processes one buffer synchronously on the caller's thread.
+    ///
+    /// An error is returned directly to upstream until the call crosses a
+    /// [`crate::queue::Queue`] boundary. A queue instead reports the error on
+    /// its [`crate::bus::Bus`], drops that buffer, and keeps its worker alive.
+    /// Implementations must forward [`MediaBuffer::Eos`] after flushing any
+    /// delayed state they own.
     fn consume(&mut self, buf: MediaBuffer) -> Result<()>;
 
     /// Reacts to a [`ControlMsg`] (pause/resume/stop) and, for anything
@@ -231,6 +247,12 @@ pub trait Sink: Element {
 /// from inside `consume`. There's no separate "processing element" trait
 /// or wrapper needed for that.
 pub trait Source: Element {
+    /// Returns every output pad owned by this element.
+    ///
+    /// The slice order is the element's public pad-index contract. Implementors
+    /// use the mutable access to push buffers and propagate control; callers
+    /// normally connect pads through [`Context::attach`] instead of linking
+    /// them directly.
     fn src_pads(&mut self) -> &mut [SrcPad];
 }
 

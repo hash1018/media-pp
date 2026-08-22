@@ -53,6 +53,8 @@ impl Default for Clock {
 }
 
 impl Clock {
+    /// Creates an unstarted clock whose first [`Self::start`] call establishes
+    /// the shared playback anchor.
     pub fn new() -> Self {
         Self {
             state: Mutex::new(State::Unset),

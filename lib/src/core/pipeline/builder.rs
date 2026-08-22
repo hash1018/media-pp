@@ -49,6 +49,10 @@ pub struct PipelineBuilder {
 }
 
 impl PipelineBuilder {
+    /// Starts an empty multi-source pipeline builder with the caller-selected
+    /// pipeline identity and fresh bus, graph, and clocks.
+    ///
+    /// Add at least one source before calling [`Self::build`].
     pub fn new(id: impl Into<String>) -> Self {
         let id: Arc<str> = id.into().into();
         let (bus, bus_rx) = Bus::new();

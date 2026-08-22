@@ -39,9 +39,15 @@ use crate::{
 /// `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum QueueError {
+    /// The operating system could not create the queue's worker thread.
+    ///
+    /// Construction returns without retaining the supplied downstream sink.
     #[error(transparent)]
     ThreadSpawn(#[from] ThreadSpawnError),
 
+    /// The worker has exited and can no longer receive media buffers.
+    ///
+    /// A queue does not restart its worker; stop or rebuild the owning pipeline.
     #[error("downstream channel closed")]
     ChannelClosed,
 
@@ -53,7 +59,11 @@ pub enum QueueError {
     /// surfaced as a real error precisely because it isn't expected —
     /// see [`OverflowPolicy::Block`]'s own docs.
     #[error("downstream didn't accept a buffer within {after:?} — send timed out")]
-    SendTimedOut { after: Duration },
+    SendTimedOut {
+        /// Maximum time spent waiting for free capacity before the current
+        /// buffer was returned to the caller as undelivered.
+        after: Duration,
+    },
 }
 
 /// How often the worker's blocking wait wakes up on its own (nothing
@@ -166,6 +176,9 @@ pub struct Queue {
 impl Queue {
     /// Spawns with [`OverflowPolicy::default`]. Use
     /// [`Queue::spawn_with_policy`] to drop instead of blocking when full.
+    ///
+    /// `capacity` is the number of ordinary media buffers that may wait ahead
+    /// of the worker; zero creates a rendezvous channel with no backlog.
     /// Returns [`QueueError::ThreadSpawn`] if its worker cannot be created.
     pub fn spawn(
         name: impl Into<String>,
@@ -191,6 +204,8 @@ impl Queue {
     /// one when this `Queue` came from a `.queue()`/`.queue_with_policy()`
     /// call) becomes this `Queue`'s `pp_log` `pipeline_id`; `None` if it
     /// wasn't built through a `Pipeline` at all (e.g. the tests below).
+    /// `capacity` may be zero for a rendezvous channel; otherwise it is the
+    /// maximum number of ordinary media buffers waiting ahead of the worker.
     /// Returns [`QueueError::ThreadSpawn`] without retaining `downstream` if
     /// the worker cannot be created.
     pub fn spawn_with_policy(

@@ -150,6 +150,13 @@ impl Pipeline {
         &self.id
     }
 
+    /// Returns the receiver for asynchronous element and thread-boundary
+    /// events produced by this pipeline.
+    ///
+    /// Calling [`BusReceiver::iter`](crate::bus::BusReceiver::iter) blocks
+    /// until every sender has dropped, which normally coincides with all source
+    /// and queue workers finishing. A custom element that retains a cloned
+    /// [`Context`] can intentionally keep the receiver connected longer.
     pub fn bus(&self) -> &BusReceiver {
         &self.bus_rx
     }
@@ -161,6 +168,12 @@ impl Pipeline {
         self.graph.snapshot()
     }
 
+    /// Returns the nodes in a consistent snapshot of the currently attached
+    /// graph.
+    ///
+    /// The returned values are owned copies and do not hold graph locks.
+    /// Detached branch plans are absent until attachment succeeds, and removed
+    /// branches disappear from later calls.
     pub fn elements(&self) -> Vec<NodeInfo> {
         self.graph().nodes
     }
