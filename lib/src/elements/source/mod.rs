@@ -8,9 +8,11 @@
 //! accept buffers from several upstream branches and emit one combined stream
 //! on their own schedule.
 //!
-//! A pipeline is driven by exactly one of these, the one implementing
-//! [`SourceElement`](crate::element::SourceElement) — its `run` loop is what
-//! makes the whole graph move.
+//! [`Pipeline::new`](crate::pipeline::Pipeline::new) builds the common
+//! single-source case. [`PipelineBuilder`](crate::pipeline::PipelineBuilder)
+//! can register one or more of these in the same pipeline; each one's
+//! [`SourceElement::run`](crate::element::SourceElement::run) loop drives its
+//! own branches on a separate background thread.
 
 mod app_source;
 mod audio_mixer;

@@ -196,6 +196,28 @@ struct PixelBuffer {
     height: u32,
 }
 
+/// Completes the two fallible steps that turn a fresh GL name into an owned
+/// interop resource. Until both succeed, `buffer` is temporary and `delete`
+/// must reclaim it on the caller's behalf.
+fn initialize_temporary_buffer<T, E>(
+    buffer: c_uint,
+    allocate: impl FnOnce() -> Result<(), E>,
+    register: impl FnOnce(c_uint) -> Result<T, E>,
+    delete: impl Fn(c_uint),
+) -> Result<T, E> {
+    if let Err(error) = allocate() {
+        delete(buffer);
+        return Err(error);
+    }
+    match register(buffer) {
+        Ok(resource) => Ok(resource),
+        Err(error) => {
+            delete(buffer);
+            Err(error)
+        }
+    }
+}
+
 impl DmaBufCudaImporter {
     /// Opens the EGL device that backs CUDA device 0, makes a surfaceless
     /// GLES context current on the calling thread, and queries the DMA-BUF
@@ -396,30 +418,46 @@ impl DmaBufCudaImporter {
             // reallocates its buffers, and an fd may be reused for a buffer
             // of the new size.
             self.release_images();
-            if let Some(old) = self.pixel_buffer.take() {
+            // Build and register the replacement before taking the old one.
+            // Every failure path in `create_pixel_buffer` deletes its temporary
+            // GL name, and the previously working registration remains owned
+            // here until the replacement is complete.
+            let replacement = self.create_pixel_buffer(width, height)?;
+            if let Some(old) = self.pixel_buffer.replace(replacement) {
                 let _ = self.cuda.unregister(old.resource);
                 self.gl.delete_buffer(old.buffer);
             }
-            let buffer = self.gl.gen_buffer();
-            self.gl.bind_buffer(GL_PIXEL_PACK_BUFFER, buffer);
-            self.gl.buffer_data(
-                GL_PIXEL_PACK_BUFFER,
-                (width as isize) * (height as isize) * 4,
-                std::ptr::null(),
-                GL_STREAM_READ,
-            );
-            self.gl.bind_buffer(GL_PIXEL_PACK_BUFFER, 0);
-            self.gl.check("glBufferData")?;
-            let resource = self.cuda.register_buffer(buffer)?;
-            self.pixel_buffer = Some(PixelBuffer {
-                buffer,
-                resource,
-                width,
-                height,
-            });
         }
         let pixel_buffer = self.pixel_buffer.as_ref().expect("built above");
         Ok((pixel_buffer.buffer, pixel_buffer.resource))
+    }
+
+    /// Allocates one replacement PBO without publishing it into `self` until
+    /// both GL allocation and CUDA registration have succeeded.
+    fn create_pixel_buffer(&self, width: u32, height: u32) -> Result<PixelBuffer, DmaBufCudaError> {
+        let buffer = self.gl.gen_buffer();
+        let resource = initialize_temporary_buffer(
+            buffer,
+            || {
+                self.gl.bind_buffer(GL_PIXEL_PACK_BUFFER, buffer);
+                self.gl.buffer_data(
+                    GL_PIXEL_PACK_BUFFER,
+                    (width as isize) * (height as isize) * 4,
+                    std::ptr::null(),
+                    GL_STREAM_READ,
+                );
+                self.gl.bind_buffer(GL_PIXEL_PACK_BUFFER, 0);
+                self.gl.check("glBufferData")
+            },
+            |buffer| self.cuda.register_buffer(buffer),
+            |buffer| self.gl.delete_buffer(buffer),
+        )?;
+        Ok(PixelBuffer {
+            buffer,
+            resource,
+            width,
+            height,
+        })
     }
 
     fn release_images(&mut self) {
@@ -1199,6 +1237,8 @@ fn check_cuda(op: &'static str, result: c_int) -> Result<(), DmaBufCudaError> {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+
     use super::*;
 
     fn plane() -> DmaBufPlane {
@@ -1208,6 +1248,56 @@ mod tests {
             stride: 7680,
             modifier: 0x0300_0000_0060_6010,
         }
+    }
+
+    #[test]
+    fn temporary_buffer_is_deleted_when_allocation_fails() {
+        let deleted = Cell::new(None);
+        let register_called = Cell::new(false);
+
+        let result = initialize_temporary_buffer(
+            7,
+            || Err("allocation failed"),
+            |_: u32| {
+                register_called.set(true);
+                Ok(())
+            },
+            |buffer| deleted.set(Some(buffer)),
+        );
+
+        assert_eq!(result, Err("allocation failed"));
+        assert_eq!(deleted.get(), Some(7));
+        assert!(!register_called.get());
+    }
+
+    #[test]
+    fn temporary_buffer_is_deleted_when_registration_fails() {
+        let deleted = Cell::new(None);
+
+        let result: Result<(), _> = initialize_temporary_buffer(
+            11,
+            || Ok(()),
+            |_| Err("registration failed"),
+            |buffer| deleted.set(Some(buffer)),
+        );
+
+        assert_eq!(result, Err("registration failed"));
+        assert_eq!(deleted.get(), Some(11));
+    }
+
+    #[test]
+    fn registered_buffer_is_not_deleted_before_ownership_transfers() {
+        let deleted = Cell::new(None);
+
+        let result = initialize_temporary_buffer(
+            13,
+            || Ok::<_, &str>(()),
+            |buffer| Ok(buffer + 1),
+            |buffer| deleted.set(Some(buffer)),
+        );
+
+        assert_eq!(result, Ok(14));
+        assert_eq!(deleted.get(), None);
     }
 
     /// An fd number identifies a buffer only while that buffer is open, so a

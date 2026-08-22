@@ -1,21 +1,23 @@
 //! A small, GStreamer-flavored media pipeline library built on
 //! [`ffmpeg-next`](https://docs.rs/ffmpeg-next).
 //!
-//! A pipeline is one [`SourceElement`](element::SourceElement) feeding a
-//! graph of [`Filter`](element::Filter)s that ends in a
+//! A pipeline has one or more [`SourceElement`](element::SourceElement)s,
+//! each feeding a graph of [`Filter`](element::Filter)s that ends in a
 //! [`Sink`](element::Sink):
 //!
 //! ```text
 //! FileDemuxer -> SwDecoder -> Queue -> Pacer -> FrameCounter
 //! ```
 //!
-//! Everything is synchronous by default. [`Sink::consume`](element::Sink::consume)
-//! is a plain call that returns [`Result`], so a stage's failure propagates
-//! straight back up the call stack with `?`. Threads enter the picture only
-//! where a [`Queue`](queue::Queue) is placed: it owns a worker thread and a
-//! bounded channel, which is also where error handling changes shape —
-//! past that boundary a downstream failure can no longer be returned to the
-//! pusher, so it is reported on the [`Bus`](bus::Bus) as
+//! Each source registered with a [`Pipeline`](pipeline::Pipeline) runs on its
+//! own background thread. Within that source's graph,
+//! [`Sink::consume`](element::Sink::consume) is otherwise a plain synchronous
+//! call that returns [`Result`], so a stage's failure propagates straight back
+//! up the call stack with `?`. A [`Queue`](queue::Queue) adds another explicit
+//! thread boundary inside a branch: it owns a worker thread and a bounded
+//! channel, which is also where error handling changes shape — past that
+//! boundary a downstream failure can no longer be returned to the pusher, so
+//! it is reported on the [`Bus`](bus::Bus) as
 //! [`BusEvent::Error`](bus::BusEvent::Error) and the worker keeps going.
 //!
 //! ```no_run

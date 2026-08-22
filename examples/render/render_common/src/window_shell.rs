@@ -144,9 +144,35 @@ where
     event_loop.run_app(&mut app).expect("event loop failed");
 }
 
-/// Sent once `play` returns, so the window closes itself when the work is
-/// done instead of sitting there until someone closes it by hand.
+/// Sent once `play` returns or unwinds, so the window closes itself when the
+/// work is done instead of sitting there until someone closes it by hand.
 struct PlaybackDone;
+
+/// Runs one completion callback on both normal return and unwind.
+///
+/// The playback thread uses this instead of sending `PlaybackDone` after
+/// `play`: several examples deliberately use `expect` for invariants, and a
+/// panic there must still stop any published pipelines while the event loop is
+/// pumping, then let the loop exit and tear the window down in the safe order.
+struct CompletionGuard<F: FnOnce()> {
+    complete: Option<F>,
+}
+
+impl<F: FnOnce()> CompletionGuard<F> {
+    fn new(complete: F) -> Self {
+        Self {
+            complete: Some(complete),
+        }
+    }
+}
+
+impl<F: FnOnce()> Drop for CompletionGuard<F> {
+    fn drop(&mut self) {
+        if let Some(complete) = self.complete.take() {
+            complete();
+        }
+    }
+}
 
 struct App<F> {
     title: String,
@@ -226,12 +252,18 @@ where
 
         let play = self.play.take().expect("resumed already started the work");
         let shutdown = self.shutdown.clone();
+        let completion_shutdown = shutdown.clone();
         let proxy = self.proxy.clone();
         self.playback = Some(thread::spawn(move || {
+            let _completion = CompletionGuard::new(move || {
+                for pipeline in completion_shutdown.request() {
+                    pipeline.stop();
+                }
+                let _ = proxy.send_event(PlaybackDone);
+            });
             if let Err(error) = play(target, shutdown) {
                 eprintln!("playback failed: {error}");
             }
-            let _ = proxy.send_event(PlaybackDone);
         }));
         self.window = Some(window);
     }
@@ -255,5 +287,24 @@ where
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, _event: PlaybackDone) {
         event_loop.exit();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{cell::Cell, panic::AssertUnwindSafe};
+
+    use super::CompletionGuard;
+
+    #[test]
+    fn completion_runs_when_the_guard_is_dropped_during_unwind() {
+        let completed = Cell::new(false);
+        let panic = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            let _completion = CompletionGuard::new(|| completed.set(true));
+            panic!("playback thread failed");
+        }));
+
+        assert!(panic.is_err());
+        assert!(completed.get());
     }
 }
