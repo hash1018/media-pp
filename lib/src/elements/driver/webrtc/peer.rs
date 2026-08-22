@@ -8,7 +8,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::pp_log::{PpLog, pp_error, pp_info};
+use crate::pp_log::{PpLog, pp_error, pp_info, pp_warn};
 use crossbeam_channel::{Receiver, Sender, TrySendError, bounded, unbounded};
 use ffmpeg_next as ffmpeg;
 use str0m::{
@@ -401,6 +401,36 @@ impl WebRtcPeer {
         }
     }
 
+    /// Tells the remote peer this connection is over, instead of simply
+    /// going quiet.
+    ///
+    /// Without this a stopped peer is indistinguishable from a crashed or
+    /// unplugged one: nothing is sent, and the remote only finds out when
+    /// its own ICE checks time out — or, on a path that happens to return
+    /// ICMP port-unreachable, when a `recv_from` fails. Neither is a
+    /// contract; both are accidents of the network in between.
+    ///
+    /// `Rtc::close` queues a DTLS `close_notify` that only leaves via
+    /// `poll_output`, and str0m requires draining until it reports a
+    /// timeout, so this drives the loop one more time rather than
+    /// returning straight away. Best-effort throughout: this runs while
+    /// shutting down, so a send that fails has nowhere left to be
+    /// reported and nothing left to retry into.
+    fn close_connection(&mut self, bus: &Bus) {
+        if !self.rtc.is_alive() {
+            return; // already gone — nothing to notify, nothing to drain
+        }
+        if let Err(error) = self.rtc.close() {
+            pp_warn!(self, "close failed, ending without notifying: {error}");
+            return;
+        }
+        if let Err(error) = self.drive_until_timeout(bus) {
+            pp_warn!(self, "draining close_notify failed: {error}");
+            return;
+        }
+        pp_info!(self, "event=close phase=completed outcome=ok");
+    }
+
     pub(super) fn handle_event(&mut self, event: Event, bus: &Bus) {
         match event {
             Event::MediaAdded(added) => {
@@ -632,6 +662,7 @@ impl Driver for WebRtcPeer {
             let deadline = self.drive_until_timeout(bus)?;
             if !self.rtc.is_alive() || stop.is_stopped() {
                 pp_info!(self, "stopped rtc_alive={}", self.rtc.is_alive());
+                self.close_connection(bus);
                 self.tracks_in.clear();
                 return Ok(());
             }

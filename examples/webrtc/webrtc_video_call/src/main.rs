@@ -20,6 +20,7 @@ mod windows_example {
     use media_pp::{
         bus::BusEvent,
         clock::Clock,
+        element::Element,
         elements::{
             AttachedTrack, FileDemuxer, Pacer, SwDecoder, SwEncoder, SwEncoderOptions, SwScaler,
             TestVideoOptions, TestVideoSource, TrackEndpoints, VideoCodec, WebRtcPeer,
@@ -137,6 +138,9 @@ mod windows_example {
         })?;
 
         let send_a = generated_send_pipeline(sink_a)?;
+        // Kept before the sink moves into the pipeline: it is the name the
+        // bus reports EOS under, and the one event below actually waits for.
+        let track_sink_name = sink_b.name();
         let (send_b, encoder_params) = file_send_pipeline(file, sink_b)?;
         // Both directions encode with the same `SwEncoderOptions`, so one
         // set of parameters describes either stream. A real deployment
@@ -163,6 +167,13 @@ mod windows_example {
         // The generated side runs until a window closes; the file side ends
         // on its own. Watching the file pipeline's bus is what keeps the call
         // up for exactly as long as there is still something to send.
+        //
+        // Specifically the `WebRtcTrackSink`'s own EOS, not the first one to
+        // appear: every `Queue` along the way reports its own as EOS passes
+        // through it, and the earliest of those means only that a queue has
+        // drained — the encoder still has delayed frames to flush behind it.
+        // The terminal sink's EOS is the one that means everything this side
+        // had to send has actually been handed to the peer.
         for event in send_b.bus().iter() {
             match &event {
                 BusEvent::Eos { name, .. } => println!("[{name}] eos"),
@@ -174,7 +185,9 @@ mod windows_example {
                 // on the events above.
                 _ => {}
             }
-            if matches!(event, BusEvent::Eos { .. } | BusEvent::Error { .. }) {
+            let sent_everything =
+                matches!(&event, BusEvent::Eos { name, .. } if *name == track_sink_name);
+            if sent_everything || matches!(event, BusEvent::Error { .. }) {
                 break;
             }
         }

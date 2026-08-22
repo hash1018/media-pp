@@ -775,3 +775,99 @@ fn an_inactive_track_attaches_with_no_endpoints() {
     assert_eq!(attached.kind, MediaKind::Audio);
     assert!(matches!(attached.endpoints, TrackEndpoints::Inactive));
 }
+
+/// The other half of `stopping_a_peer_ends_its_inbound_track_source_with_a_clean_eos`:
+/// what the peer that *survives* observes. Both endpoints it was handed
+/// have to learn that the connection is over — the sink because there is
+/// nowhere left to send, the source because its stream has ended — and
+/// each says so in its own terms rather than going quiet.
+///
+/// Guards the contract, not the mechanism. Over loopback the survivor
+/// also learns from an ICMP port-unreachable turning its next `recv_from`
+/// into an error, so this passes with or without the `Rtc::close` that
+/// `WebRtcPeer` sends on shutdown. That close is what makes the same
+/// thing true on a path with no ICMP to rely on — a real network, or a
+/// firewall that drops it — which is not reproducible here.
+#[test]
+fn a_peer_that_dies_notifies_the_surviving_peer_on_both_endpoints() {
+    let (rtc_a, socket_a, rtc_b, socket_b) = connected_pair();
+
+    let (offer_tx, offer_rx) = crossbeam_channel::unbounded::<SdpOffer>();
+    let (peer_a, handle_a) = WebRtcPeer::new(
+        "peer-a",
+        rtc_a,
+        socket_a,
+        move |offer| {
+            let _ = offer_tx.send(offer);
+        },
+        |_id| {},
+    );
+    let (peer_b, handle_b) = WebRtcPeer::new("peer-b", rtc_b, socket_b, |_offer| {}, |_id| {});
+    let driver_a = DriverRunner::new(peer_a);
+    let driver_b = DriverRunner::new(peer_b);
+    driver_a.run().unwrap();
+    driver_b.run().unwrap();
+    thread::sleep(Duration::from_millis(200));
+
+    handle_a
+        .add_track(MediaKind::Video, Direction::SendRecv, Codec::Vp8)
+        .expect("running peer should accept AddTrack");
+    let (mut sink_a, source_a) = send_recv(
+        handle_a
+            .next_track()
+            .expect("peer-a's own track should attach"),
+    );
+    let offer = offer_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("peer-a should generate a renegotiation offer");
+    let answer = handle_b
+        .accept_remote_offer(offer)
+        .expect("peer-b should accept the offer");
+    handle_a.set_answer(answer);
+    let (_sink_b, _source_b) = send_recv(
+        handle_b
+            .next_track()
+            .expect("peer-b's remote track should attach"),
+    );
+    thread::sleep(Duration::from_millis(200));
+
+    // peer-a's inbound half runs in its own `Pipeline`, the way a real
+    // caller drives it, so an `Eos` shows up on that pipeline's bus.
+    let received = Arc::new(AtomicUsize::new(0));
+    let track_pipeline_a = wire_counting(source_a, received);
+    track_pipeline_a.run().unwrap();
+
+    driver_b.stop();
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut sink_errored = false;
+    let mut source_ended = false;
+    while Instant::now() < deadline && !(sink_errored && source_ended) {
+        if !sink_errored {
+            let mut packet = ffmpeg::Packet::copy(&[1, 2, 3, 4]);
+            packet.set_time_base(ffmpeg::Rational::new(1, 90_000));
+            packet.set_pts(Some(0));
+            sink_errored = sink_a
+                .consume(MediaBuffer::Packet(Arc::new(packet)))
+                .is_err();
+        }
+        while let Some(event) = track_pipeline_a.bus().try_recv() {
+            if matches!(event, BusEvent::Eos { .. }) {
+                source_ended = true;
+            }
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+
+    assert!(
+        sink_errored,
+        "the surviving peer's sink kept accepting buffers with nowhere to send them"
+    );
+    assert!(
+        source_ended,
+        "the surviving peer's source never ended, so its pipeline would wait forever"
+    );
+
+    track_pipeline_a.stop();
+    driver_a.stop();
+}
