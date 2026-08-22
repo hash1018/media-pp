@@ -34,6 +34,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(2);
 /// here: the renderer resolves the format from the endpoint and requires the
 /// incoming audio to already match it.
 pub struct WasapiRendererOptions {
+    /// Render endpoint to open in shared mode.
     pub device: WasapiDevice,
 }
 
@@ -47,43 +48,62 @@ pub struct WasapiRendererOptions {
 /// [`WasapiRendererError::DeviceInvalidated`] is the endpoint disappearing
 /// underneath a running pipeline — the default device changing, for instance.
 pub enum WasapiRendererError {
+    /// A COM or WASAPI operation failed.
     #[error("windows error: {0}")]
     Windows(#[from] windows::core::Error),
+    /// The endpoint disappeared or the system invalidated its audio client.
 
     #[error("AUDCLNT_E_DEVICE_INVALIDATED — audio device needs to be reopened")]
     DeviceInvalidated,
+    /// A capture endpoint was supplied where a render endpoint is required.
 
     #[error("WasapiRenderer requires a Render endpoint, got {0:?}")]
     NotRenderDevice(WasapiDeviceKind),
+    /// The endpoint mix format cannot be represented by [`AudioFormat`].
 
     #[error("unsupported WASAPI mix format: format_tag={format_tag}, bits_per_sample={bits}")]
-    UnsupportedMixFormat { format_tag: u32, bits: u16 },
+    UnsupportedMixFormat {
+        /// WAVE format tag reported by WASAPI.
+        format_tag: u32,
+        /// Bits per sample reported by WASAPI.
+        bits: u16,
+    },
+    /// The input audio does not exactly match the endpoint mix format.
 
     #[error(
         "audio format mismatch: expected {expected:?}, got {actual:?}; insert AudioResampler before WasapiRenderer"
     )]
     FormatMismatch {
+        /// Mix format required by the endpoint.
         expected: AudioFormat,
+        /// Format carried by the input frame.
         actual: AudioFormat,
     },
+    /// The input data plane is shorter than its declared samples require.
 
     #[error("audio frame buffer is shorter than its declared sample count")]
     TruncatedFrame,
+    /// The sink received a buffer other than decoded audio.
 
     #[error("WasapiRenderer only renders decoded Audio frames, got a {0}")]
     UnsupportedBuffer(&'static str),
+    /// Registering or updating the shared playback clock failed.
 
     #[error(transparent)]
     PlaybackClock(#[from] PlaybackClockError),
+    /// Clock binding was attempted after audio submission began.
 
     #[error("cannot bind a playback clock after this audio endpoint has started")]
     PlaybackClockBoundAfterStart,
+    /// This renderer already owns a playback-clock registration.
 
     #[error("this WasapiRenderer is already bound to a playback clock")]
     PlaybackClockAlreadyBound,
+    /// A clock-master audio frame has no presentation timestamp.
 
     #[error("audio frames need a PTS when WasapiRenderer is the playback-clock master")]
     MissingPts,
+    /// WASAPI returned a zero or otherwise unusable device-clock frequency.
 
     #[error("WASAPI reported an invalid audio-clock frequency of {0}")]
     InvalidClockFrequency(u64),
@@ -160,10 +180,12 @@ struct DeviceTimeline {
 unsafe impl Send for WasapiRenderer {}
 
 impl WasapiRenderer {
+    /// Lists active WASAPI render endpoints and their mix formats.
     pub fn list_devices() -> std::result::Result<Vec<WasapiDevice>, WasapiRendererError> {
         Ok(enumerate_wasapi_devices(Some(WasapiDeviceKind::Render))?)
     }
 
+    /// Opens the selected endpoint and returns its required input format.
     pub fn open(
         name: impl Into<String>,
         options: WasapiRendererOptions,
@@ -248,6 +270,7 @@ impl WasapiRenderer {
         ))
     }
 
+    /// Returns the endpoint mix format required by [`Sink::consume`](crate::element::Sink::consume).
     pub fn format(&self) -> AudioFormat {
         self.format
     }

@@ -61,6 +61,7 @@ pub trait CudaFrameRenderer: Send {
 /// via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum CudaRendererError {
+    /// The input frame is not backed by CUDA hardware surfaces.
     #[error("CudaRenderer only accepts CUDA frames, got {0:?}")]
     UnsupportedFormat(ffmpeg::format::Pixel),
 
@@ -77,15 +78,19 @@ pub enum CudaRendererError {
     #[error("CUDA frame belongs to a different CUDA context than this renderer")]
     ForeignContext,
 
+    /// The CUDA surface is not NV12.
     #[error("CudaRenderer only presents NV12 CUDA frames, got {0:?}")]
     UnsupportedSoftwareFormat(ffmpeg::format::Pixel),
 
+    /// The CUDA frame contains no usable device-memory plane.
     #[error("frame has no CUDA device pointer")]
     MissingPlane,
 
+    /// The caller-provided renderer rejected frame submission.
     #[error("submit failed: {0:?}")]
     Submit(SubmitError),
 
+    /// The caller-provided renderer rejected a size change.
     #[error("resize failed: {0:?}")]
     Resize(SubmitError),
 }

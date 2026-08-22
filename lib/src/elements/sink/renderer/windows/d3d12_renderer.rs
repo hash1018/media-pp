@@ -27,8 +27,11 @@ use crate::{
 /// anything about their concrete rendering setup for the CPU-upload path.
 #[derive(Clone, Copy)]
 pub struct RawPlane {
+    /// Pointer to the first byte of the plane.
     pub data: *const u8,
+    /// Total readable byte length beginning at [`Self::data`].
     pub len: usize,
+    /// Distance between adjacent rows, in bytes.
     pub stride: usize,
 }
 
@@ -81,6 +84,7 @@ pub trait D3d12FrameRenderer: Send {
         keep_alive: Box<dyn Any + Send>,
     ) -> std::result::Result<(), SubmitError>;
 
+    /// Updates the presentation target dimensions.
     fn resize(&self, width: u32, height: u32) -> std::result::Result<(), SubmitError>;
 }
 
@@ -88,23 +92,28 @@ pub trait D3d12FrameRenderer: Send {
 /// via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum D3d12RendererError {
+    /// The caller-provided renderer rejected frame submission.
     #[error("failed to submit frame: {0:?}")]
     Submit(SubmitError),
+    /// The caller-provided renderer rejected a size change.
 
     #[error("failed to resize: {0:?}")]
     Resize(SubmitError),
+    /// The input is neither CPU YUV420P nor a D3D12 hardware frame.
 
     #[error(
         "D3d12Renderer only handles YUV420P frames (CPU) or D3D12 frames \
          (from D3d12Decoder), got {0:?}"
     )]
     UnsupportedFormat(ffmpeg::format::Pixel),
+    /// A frame tagged as D3D12 lacks its texture or synchronization payload.
 
     #[error(
         "frame claimed the D3D12 pixel format but has no AVD3D12VAFrame \
          payload — must come from D3d12Decoder"
     )]
     InvalidD3d12Frame,
+    /// The input texture belongs to another D3D12 device.
 
     #[error(
         "a Pixel::D3D12 frame's texture lives on a different ID3D12Device \

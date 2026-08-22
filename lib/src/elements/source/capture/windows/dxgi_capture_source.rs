@@ -57,11 +57,14 @@ const POLL_GRANULARITY: Duration = Duration::from_millis(100);
 /// `Error` via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum DxgiCaptureSourceError {
+    /// FFmpeg could not allocate a reference-counted wrapper for a captured texture.
     #[error(transparent)]
     FrameWrap(#[from] D3d11FrameWrapError),
+    /// A DXGI, D3D11, or Win32 operation failed.
 
     #[error("windows error: {0}")]
     Windows(#[from] windows::core::Error),
+    /// The flat adapter/output enumeration has no requested index.
 
     #[error("no DXGI output at index {0} (across every adapter)")]
     NoSuchOutput(u32),
@@ -79,9 +82,11 @@ pub enum DxgiCaptureSourceError {
     #[error("DXGI_ERROR_ACCESS_LOST — desktop duplication needs to be reopened")]
     AccessLost,
 
+    /// Seeking was requested on a live desktop capture.
     #[error("DxgiCaptureSource doesn't support seeking a live capture")]
     SeekUnsupported,
 
+    /// The requested region does not intersect an attached output.
     #[error("CaptureArea::Region {0:?} doesn't overlap any display output")]
     RegionOutsideDesktop(CaptureRect),
 
@@ -93,6 +98,7 @@ pub enum DxgiCaptureSourceError {
     )]
     RegionSpansMultipleAdapters,
 
+    /// Cursor composition was requested for a multi-output region.
     #[error("include_cursor isn't supported when CaptureArea::Region spans more than one output")]
     CursorUnsupportedForRegion,
 }
@@ -121,7 +127,10 @@ pub enum CaptureMode {
     /// [`DxgiCaptureSourceError::CursorUnsupportedForRegion`]) when
     /// [`DxgiCaptureOptions::area`] is a [`CaptureArea::Region`] spanning
     /// more than one output — see that variant's own docs on why.
-    Cpu { include_cursor: bool },
+    Cpu {
+        /// Whether to blend the current mouse pointer into emitted CPU frames.
+        include_cursor: bool,
+    },
     /// Captures straight to a GPU-resident frame tagged `Pixel::D3D11`
     /// (BGRA — desktop content has no reason to go through YUV) — no
     /// `Map`, no CPU pixel copy at all, just GPU-side `CopyResource`/
@@ -159,9 +168,13 @@ pub enum CaptureMode {
 /// See [`CaptureArea::Region`].
 #[derive(Debug, Clone, Copy)]
 pub struct CaptureRect {
+    /// Absolute virtual-desktop x coordinate of the left edge.
     pub x: i32,
+    /// Absolute virtual-desktop y coordinate of the top edge.
     pub y: i32,
+    /// Region width in pixels.
     pub width: u32,
+    /// Region height in pixels.
     pub height: u32,
 }
 
@@ -178,7 +191,10 @@ pub enum CaptureArea {
     ///
     /// The simple case: exactly one `IDXGIOutputDuplication`, no
     /// cropping, no compositing.
-    Output { output_index: u32 },
+    Output {
+        /// Flat index across every adapter's outputs.
+        output_index: u32,
+    },
     /// An arbitrary rectangle in absolute virtual-desktop coordinates —
     /// for callers that only know "this screen area" (e.g. a
     /// user-dragged region-selection UI), not which monitor index owns

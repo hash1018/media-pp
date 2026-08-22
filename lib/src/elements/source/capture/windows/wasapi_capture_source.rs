@@ -54,6 +54,7 @@ const BUFFER_DURATION_100NS: i64 = 200 * 10_000;
 /// `Error` via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum WasapiCaptureSourceError {
+    /// A COM or WASAPI operation failed.
     #[error("windows error: {0}")]
     Windows(#[from] windows::core::Error),
 
@@ -68,11 +69,18 @@ pub enum WasapiCaptureSourceError {
     #[error("AUDCLNT_E_DEVICE_INVALIDATED — audio device needs to be reopened")]
     DeviceInvalidated,
 
+    /// Seeking was requested on a live audio capture.
     #[error("WasapiCaptureSource doesn't support seeking a live capture")]
     SeekUnsupported,
 
+    /// The endpoint mix format cannot be represented by [`AudioFormat`](crate::elements::AudioFormat).
     #[error("unsupported WASAPI mix format: format_tag={format_tag}, bits_per_sample={bits}")]
-    UnsupportedMixFormat { format_tag: u32, bits: u16 },
+    UnsupportedMixFormat {
+        /// WAVE format tag reported by WASAPI.
+        format_tag: u32,
+        /// Bits per sample reported by WASAPI.
+        bits: u16,
+    },
 }
 
 /// Construction-time options for [`WasapiCaptureSource::open`].
