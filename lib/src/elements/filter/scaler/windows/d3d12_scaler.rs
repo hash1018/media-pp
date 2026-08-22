@@ -40,71 +40,107 @@ const OUTPUT_POOL_SIZE: i32 = 8;
 /// while the rest report a failed Direct3D or FFmpeg allocation. Neither kind
 /// leaves the scaler's device state bound.
 pub enum D3d12ScalerError {
+    /// A Direct3D device, resource, or video-processor operation failed.
     #[error("windows error: {0}")]
     Windows(#[from] windows::core::Error),
 
+    /// Output dimensions are zero.
     #[error("D3d12Scaler output dimensions must be non-zero, got {width}x{height}")]
-    InvalidOutputDimensions { width: u32, height: u32 },
+    InvalidOutputDimensions {
+        /// Invalid output width in pixels.
+        width: u32,
+        /// Invalid output height in pixels.
+        height: u32,
+    },
 
+    /// NV12 input or output dimensions are odd.
     #[error("NV12 dimensions must both be even, got {width}x{height}")]
-    OddNv12Dimensions { width: u32, height: u32 },
+    OddNv12Dimensions {
+        /// Odd width in pixels.
+        width: u32,
+        /// Odd height in pixels.
+        height: u32,
+    },
 
+    /// FFmpeg could not wrap the supplied D3D12 device.
     #[error("failed to create D3D12VA hardware device context (code {0})")]
     HwDeviceInit(i32),
 
+    /// FFmpeg could not initialize the D3D12 output frame pool.
     #[error("failed to create D3D12VA output frames context (code {0})")]
     HwFramesInit(i32),
 
+    /// FFmpeg could not acquire a frame from the output pool.
     #[error("failed to allocate a D3D12 output frame (code {0})")]
     GetBuffer(i32),
 
+    /// FFmpeg could not copy input timing and color metadata to the output.
     #[error("failed to copy scaled frame metadata (code {0})")]
     CopyProperties(i32),
 
+    /// The input frame is not backed by a D3D12 texture.
     #[error("D3d12Scaler only accepts Pixel::D3D12 frames, got {0:?}")]
     UnsupportedFormat(ffmpeg::format::Pixel),
 
+    /// The hardware surface layout is not NV12.
     #[error("D3d12Scaler only scales NV12 D3D12 surfaces, got {0:?}")]
     UnsupportedSurfaceFormat(ffmpeg::format::Pixel),
 
+    /// The backing texture does not use `DXGI_FORMAT_NV12`.
     #[error("D3d12Scaler only scales DXGI_FORMAT_NV12 textures, got {0:?}")]
     UnsupportedTextureFormat(DXGI_FORMAT),
 
+    /// A D3D12 frame does not retain the hardware frames context that owns it.
     #[error("D3D12 frame has no valid hardware frames context")]
     MissingFramesContext,
 
+    /// A frame tagged as D3D12 lacks its texture or synchronization fence.
     #[error("D3D12 frame has no valid texture or synchronization fence")]
     InvalidD3d12Frame,
 
+    /// The input texture belongs to another D3D12 device.
     #[error("D3D12 texture belongs to a different device than this scaler")]
     DeviceMismatch,
 
+    /// The backing texture is smaller than the visible input frame.
     #[error(
         "D3D12 texture is {actual_width}x{actual_height}, smaller than the frame's {expected_width}x{expected_height} visible size"
     )]
     TextureTooSmall {
+        /// Backing texture width in pixels.
         actual_width: u64,
+        /// Backing texture height in pixels.
         actual_height: u32,
+        /// Visible frame width in pixels.
         expected_width: u32,
+        /// Visible frame height in pixels.
         expected_height: u32,
     },
 
+    /// The input texture is multisampled and cannot be used by this path.
     #[error("D3d12Scaler requires single-sample NV12 textures, got sample count {0}")]
     MultisampledTexture(u32),
 
+    /// The GPU video processor cannot perform the requested resize.
     #[error(
         "this GPU does not support D3D12 NV12 video-process scaling from {input_width}x{input_height} to {output_width}x{output_height}"
     )]
     UnsupportedByVideoProcessor {
+        /// Input width in pixels.
         input_width: u32,
+        /// Input height in pixels.
         input_height: u32,
+        /// Requested output width in pixels.
         output_width: u32,
+        /// Requested output height in pixels.
         output_height: u32,
     },
 
+    /// The sink received a buffer other than decoded video or end-of-stream.
     #[error("D3d12Scaler only accepts Video and Eos buffers, got a {0}")]
     UnsupportedBuffer(&'static str),
 
+    /// Waiting for GPU completion returned an invalid or failed status.
     #[error("waiting for the D3D12 video-process fence failed")]
     FenceWaitFailed,
 }
@@ -136,6 +172,7 @@ pub struct D3d12Scaler {
 unsafe impl Send for D3d12Scaler {}
 
 impl D3d12Scaler {
+    /// Creates a fixed-size NV12 scaler on `device`.
     pub fn new(
         name: impl Into<String>,
         device: &ID3D12Device,

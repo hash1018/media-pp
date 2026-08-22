@@ -34,23 +34,28 @@ use crate::{
 /// via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum D3d11ScalerError {
+    /// A Direct3D device, resource, or video-processor operation failed.
     #[error("windows error: {0}")]
     Windows(#[from] windows::core::Error),
 
+    /// The input frame is not backed by a D3D11 texture.
     #[error("D3d11Scaler only scales Pixel::D3D11 frames, got {0:?}")]
     UnsupportedFormat(ffmpeg::format::Pixel),
 
+    /// A frame tagged as D3D11 does not contain a valid texture reference.
     #[error(
         "frame claimed the D3D11 pixel format but carries no texture — must \
          come from D3d11Upload/D3d11Decoder/DxgiCaptureSource's GPU mode/D3d11VideoCompositor"
     )]
     InvalidD3d11Frame,
 
+    /// The input texture uses a DXGI format this scaler cannot process.
     #[error(
         "D3d11Scaler only scales DXGI_FORMAT_NV12 or DXGI_FORMAT_B8G8R8A8_UNORM textures, got {0:?}"
     )]
     UnsupportedTextureFormat(DXGI_FORMAT),
 
+    /// The input texture belongs to another D3D11 device.
     #[error(
         "a Pixel::D3D11 frame's texture lives on a different ID3D11Device \
          than this D3d11Scaler was created with — every D3D11 element in one \
@@ -58,41 +63,68 @@ pub enum D3d11ScalerError {
     )]
     DeviceMismatch,
 
+    /// The supplied immediate context belongs to another D3D11 device.
     #[error(
         "the supplied ID3D11DeviceContext belongs to a different ID3D11Device than this \
          D3d11Scaler"
     )]
     ContextDeviceMismatch,
 
+    /// Output dimensions are zero.
     #[error("D3d11Scaler output dimensions must be non-zero, got {width}x{height}")]
-    InvalidOutputDimensions { width: u32, height: u32 },
+    InvalidOutputDimensions {
+        /// Invalid output width in pixels.
+        width: u32,
+        /// Invalid output height in pixels.
+        height: u32,
+    },
 
+    /// The backing texture is smaller than the visible input frame.
     #[error(
         "D3D11 texture is {actual_width}x{actual_height}, smaller than the \
          frame's {expected_width}x{expected_height} visible size"
     )]
     TextureTooSmall {
+        /// Backing texture width in pixels.
         actual_width: u32,
+        /// Backing texture height in pixels.
         actual_height: u32,
+        /// Visible frame width in pixels.
         expected_width: u32,
+        /// Visible frame height in pixels.
         expected_height: u32,
     },
 
+    /// The frame selects a texture-array slice outside the resource bounds.
     #[error("D3D11 texture array index {index} is outside ArraySize {array_size}")]
-    InvalidArrayIndex { index: isize, array_size: u32 },
+    InvalidArrayIndex {
+        /// Invalid texture-array index from the frame.
+        index: isize,
+        /// Number of slices in the backing texture array.
+        array_size: u32,
+    },
 
+    /// The input texture is multisampled and cannot be used by this path.
     #[error("D3d11Scaler does not accept multisampled textures (SampleDesc.Count={0})")]
     MultisampledTexture(u32),
 
+    /// NV12 output was requested with odd dimensions.
     #[error(
         "an NV12 surface cannot be {width}x{height}: its chroma plane is half \
          resolution in both directions, so both must be even"
     )]
-    OddNv12Output { width: u32, height: u32 },
+    OddNv12Output {
+        /// Odd output width in pixels.
+        width: u32,
+        /// Odd output height in pixels.
+        height: u32,
+    },
 
+    /// The D3D11 video processor does not support a required texture format.
     #[error("this GPU's video processor does not support {0:?} on the side it is needed for")]
     UnsupportedByVideoProcessor(DXGI_FORMAT),
 
+    /// The sink received a buffer other than decoded video or end-of-stream.
     #[error("D3d11Scaler only accepts Video and Eos buffers, got a {0}")]
     UnsupportedBuffer(&'static str),
 }

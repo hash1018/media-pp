@@ -23,18 +23,22 @@ use crate::{
 /// via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum CudaScalerError {
+    /// FFmpeg rejected filter-graph or frame processing.
     #[error("ffmpeg error: {0}")]
     Ffmpeg(#[from] ffmpeg::Error),
 
+    /// The linked FFmpeg build does not provide a required CUDA filter.
     #[error(
         "filter `{0}` not found in this ffmpeg build — a CUDA-enabled build \
          (`--enable-ffnvcodec` plus `--enable-cuda-nvcc` or `--enable-cuda-llvm`) is required"
     )]
     FilterNotFound(&'static str),
 
+    /// The input frame is not backed by CUDA hardware surfaces.
     #[error("CudaScaler only scales CUDA frames, got {0:?}")]
     UnsupportedFormat(ffmpeg::format::Pixel),
 
+    /// The sink received a buffer other than decoded video or end-of-stream.
     #[error("CudaScaler only accepts Video and Eos buffers, got a {0}")]
     UnsupportedBuffer(&'static str),
 
@@ -48,24 +52,31 @@ pub enum CudaScalerError {
     #[error("CUDA frame belongs to a different CUDA context than this CudaScaler")]
     ForeignContext,
 
+    /// The CUDA surface layout cannot be processed by `scale_cuda`.
     #[error("CudaScaler cannot scale {0:?} surfaces")]
     UnsupportedSurfaceFormat(ffmpeg::format::Pixel),
 
+    /// FFmpeg could not allocate the filter graph's buffer source.
     #[error("failed to allocate the buffer source filter")]
     BufferSrcAlloc,
 
+    /// FFmpeg could not allocate buffer-source parameters.
     #[error("failed to allocate the buffer source parameters")]
     BufferSrcParamsAlloc,
 
+    /// FFmpeg rejected the buffer-source parameters.
     #[error("failed to configure the buffer source (code {0})")]
     BufferSrcConfig(i32),
 
+    /// FFmpeg could not initialize the configured buffer source.
     #[error("failed to initialize the buffer source (code {0})")]
     BufferSrcInit(i32),
 
+    /// FFmpeg rejected an input frame pushed into the graph.
     #[error("the filter graph rejected a frame (code {0})")]
     BufferSrcPush(i32),
 
+    /// FFmpeg failed to return a scaled frame from the graph.
     #[error("failed to read a scaled frame out of the filter graph (code {0})")]
     BufferSinkPull(i32),
 }
@@ -77,9 +88,13 @@ pub enum CudaScalerError {
 /// scaler sits in a quality-sensitive path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CudaScalerInterp {
+    /// Select the nearest input texel without interpolation.
     Nearest,
+    /// Interpolate from the nearest four texels.
     Bilinear,
+    /// Use cubic interpolation for smoother scaling.
     Bicubic,
+    /// Use Lanczos interpolation for sharper high-quality scaling.
     Lanczos,
 }
 
