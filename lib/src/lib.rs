@@ -123,6 +123,20 @@ pub(crate) use core::{schedule, time};
 
 pub use error::{Error, Result};
 
+/// The [`ffmpeg-next`](https://docs.rs/ffmpeg-next) this crate is built on.
+///
+/// Re-exported because it is part of this crate's API, not an implementation
+/// detail behind it: [`MediaBuffer`](buffer::MediaBuffer) carries `ffmpeg`
+/// packets and frames directly, an encoder's `parameters()`/`time_base` are
+/// `ffmpeg` types, and [`Error::Ffmpeg`] wraps `ffmpeg`'s own error.
+///
+/// Use this rather than depending on `ffmpeg-next` separately. A separate
+/// dependency has to resolve to the same version as this crate's — when it
+/// does not, the two `ffmpeg-next`s are distinct crates to the compiler and
+/// every one of the types above stops matching, with nothing in the error
+/// pointing at the version as the cause.
+pub use ffmpeg_next as ffmpeg;
+
 /// Must be called once before using any element that touches ffmpeg.
 pub fn init() -> Result<()> {
     ffmpeg_next::init()?;

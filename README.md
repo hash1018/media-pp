@@ -20,6 +20,22 @@ Add the crate to your project:
 media-pp = "0.1"
 ```
 
+That is the only dependency you need. `ffmpeg-next` is part of this crate's
+API — `MediaBuffer` carries its frames and packets, and an encoder's
+`parameters()`/`time_base` are its types — so it is re-exported as
+`media_pp::ffmpeg`:
+
+```rust
+use media_pp::ffmpeg;
+
+let time_base = ffmpeg::Rational::new(1, 30);
+```
+
+Depending on `ffmpeg-next` separately works only while that dependency
+resolves to the same version this crate uses. When it does not, the compiler
+sees two unrelated crates and every type above stops matching, without naming
+the version as the cause.
+
 This minimal pipeline generates video for one second and counts the frames:
 
 ```rust
