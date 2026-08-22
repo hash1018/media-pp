@@ -120,7 +120,6 @@ checksum = "940b3a0ca603d1eade50a4846a2afffd5ef57a9feac2c0e2ec2e14f9ead76000"
 name = "app_sink"
 version = "0.1.0"
 dependencies = [
- "ffmpeg-next",
  "media-pp",
 ]
 
@@ -128,7 +127,6 @@ dependencies = [
 name = "app_source"
 version = "0.1.0"
 dependencies = [
- "ffmpeg-next",
  "media-pp",
 ]
 
@@ -400,7 +398,6 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 name = "av_playback"
 version = "0.1.0"
 dependencies = [
- "ffmpeg-next",
  "media-pp",
  "render_common",
  "winit",
@@ -924,7 +921,6 @@ dependencies = [
 name = "cuda_record"
 version = "0.1.0"
 dependencies = [
- "ffmpeg-next",
  "media-pp",
 ]
 
@@ -932,7 +928,6 @@ dependencies = [
 name = "cuda_text_overlay"
 version = "0.1.0"
 dependencies = [
- "ffmpeg-next",
  "libc",
  "media-pp",
  "windows",
@@ -974,7 +969,6 @@ dependencies = [
 name = "d3d11_decode_render"
 version = "0.1.0"
 dependencies = [
- "ffmpeg-next",
  "media-pp",
  "render_common",
  "winit",
@@ -984,7 +978,6 @@ dependencies = [
 name = "d3d11_scale_render"
 version = "0.1.0"
 dependencies = [
- "ffmpeg-next",
  "media-pp",
  "render_common",
  "winit",
@@ -994,7 +987,6 @@ dependencies = [
 name = "d3d11_upload"
 version = "0.1.0"
 dependencies = [
- "ffmpeg-next",
  "media-pp",
  "render_common",
  "winit",
@@ -1004,7 +996,6 @@ dependencies = [
 name = "d3d12_upload"
 version = "0.1.0"
 dependencies = [
- "ffmpeg-next",
  "media-pp",
  "render_common",
  "winit",
@@ -1020,7 +1011,6 @@ checksum = "4583a4551df46e2792f82ceeac45e850d2e2d5debba0b91f102385cda5b11f06"
 name = "decode"
 version = "0.1.0"
 dependencies = [
- "ffmpeg-next",
  "media-pp",
 ]
 
@@ -1082,7 +1072,6 @@ checksum = "7cd812cc2bc1d69d4764bd80df88b4317eaef9e773c75226407d9bc0876b211c"
 name = "detect"
 version = "0.1.0"
 dependencies = [
- "ffmpeg-next",
  "media-pp",
  "softbuffer",
  "winit",
@@ -1352,7 +1341,6 @@ dependencies = [
 name = "fanout"
 version = "0.1.0"
 dependencies = [
- "ffmpeg-next",
  "media-pp",
 ]
 
@@ -1601,7 +1589,6 @@ checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
 name = "gpu_chroma_key"
 version = "0.1.0"
 dependencies = [
- "ffmpeg-next",
  "media-pp",
  "render_common",
 ]
@@ -1610,7 +1597,6 @@ dependencies = [
 name = "gpu_video_compositor"
 version = "0.1.0"
 dependencies = [
- "ffmpeg-next",
  "media-pp",
  "render_common",
  "winit",
@@ -1679,7 +1665,6 @@ dependencies = [
 name = "hls"
 version = "0.1.0"
 dependencies = [
- "ffmpeg-next",
  "media-pp",
 ]
 
@@ -1718,7 +1703,6 @@ checksum = "6dbf3de79e51f3d586ab4cb9d5c3e2c14aa28ed23d180cf89b4df0454a69cc87"
 name = "hw_decode_render"
 version = "0.1.0"
 dependencies = [
- "ffmpeg-next",
  "media-pp",
  "render_common",
  "winit",
@@ -2230,7 +2214,6 @@ dependencies = [
 name = "nvenc_record"
 version = "0.1.0"
 dependencies = [
- "ffmpeg-next",
  "media-pp",
  "render_common",
 ]
@@ -2659,7 +2642,6 @@ dependencies = [
 name = "pace"
 version = "0.1.0"
 dependencies = [
- "ffmpeg-next",
  "media-pp",
 ]
 
@@ -2863,7 +2845,6 @@ dependencies = [
 name = "probe"
 version = "0.1.0"
 dependencies = [
- "ffmpeg-next",
  "media-pp",
 ]
 
@@ -3050,7 +3031,6 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 name = "remux"
 version = "0.1.0"
 dependencies = [
- "ffmpeg-next",
  "media-pp",
 ]
 
@@ -3081,7 +3061,6 @@ dependencies = [
 name = "rtsp_serve"
 version = "0.1.0"
 dependencies = [
- "ffmpeg-next",
  "media-pp",
 ]
 
@@ -3089,7 +3068,6 @@ dependencies = [
 name = "rtsp_serve_seek"
 version = "0.1.0"
 dependencies = [
- "ffmpeg-next",
  "media-pp",
 ]
 
@@ -3097,7 +3075,6 @@ dependencies = [
 name = "rtsp_source"
 version = "0.1.0"
 dependencies = [
- "ffmpeg-next",
  "media-pp",
 ]
 
@@ -3185,7 +3162,6 @@ dependencies = [
 name = "scale"
 version = "0.1.0"
 dependencies = [
- "ffmpeg-next",
  "media-pp",
 ]
 
@@ -3208,7 +3184,6 @@ checksum = "e1cf6437eb19a8f4a6cc0f7dca544973b0b78843adbfeb3683d1a94a0024a294"
 name = "screen_audio_record"
 version = "0.1.0"
 dependencies = [
- "ffmpeg-next",
  "media-pp",
 ]
 
@@ -3216,7 +3191,6 @@ dependencies = [
 name = "screen_capture"
 version = "0.1.0"
 dependencies = [
- "ffmpeg-next",
  "media-pp",
  "render_common",
  "winit",
@@ -3235,7 +3209,6 @@ dependencies = [
 name = "screen_overlay_record"
 version = "0.1.0"
 dependencies = [
- "ffmpeg-next",
  "media-pp",
 ]
 
@@ -3243,7 +3216,6 @@ dependencies = [
 name = "screen_record"
 version = "0.1.0"
 dependencies = [
- "ffmpeg-next",
  "media-pp",
 ]
 
@@ -3251,7 +3223,6 @@ dependencies = [
 name = "screen_record_nvenc"
 version = "0.1.0"
 dependencies = [
- "ffmpeg-next",
  "media-pp",
  "render_common",
 ]
@@ -3325,7 +3296,6 @@ dependencies = [
 name = "seek_render"
 version = "0.1.0"
 dependencies = [
- "ffmpeg-next",
  "media-pp",
  "render_common",
  "winit",
@@ -3643,7 +3613,6 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 name = "sw_decode_render"
 version = "0.1.0"
 dependencies = [
- "ffmpeg-next",
  "media-pp",
  "render_common",
  "winit",
@@ -3711,7 +3680,6 @@ checksum = "adb6935a6f5c20170eeceb1a3835a49e12e19d792f6dd344ccc76a985ca5a6ca"
 name = "tee"
 version = "0.1.0"
 dependencies = [
- "ffmpeg-next",
  "media-pp",
 ]
 
@@ -3732,7 +3700,6 @@ dependencies = [
 name = "test_video"
 version = "0.1.0"
 dependencies = [
- "ffmpeg-next",
  "media-pp",
  "render_common",
  "winit",
@@ -3742,7 +3709,6 @@ dependencies = [
 name = "text_overlay"
 version = "0.1.0"
 dependencies = [
- "ffmpeg-next",
  "media-pp",
  "render_common",
  "windows",
@@ -3977,7 +3943,6 @@ dependencies = [
 name = "transcode_render"
 version = "0.1.0"
 dependencies = [
- "ffmpeg-next",
  "media-pp",
  "render_common",
  "winit",
@@ -4109,7 +4074,6 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 name = "video_compositor"
 version = "0.1.0"
 dependencies = [
- "ffmpeg-next",
  "media-pp",
 ]
 
@@ -4335,7 +4299,6 @@ dependencies = [
 name = "webrtc_av_loopback"
 version = "0.1.0"
 dependencies = [
- "ffmpeg-next",
  "media-pp",
  "str0m",
 ]
@@ -4344,7 +4307,6 @@ dependencies = [
 name = "webrtc_loopback"
 version = "0.1.0"
 dependencies = [
- "ffmpeg-next",
  "media-pp",
  "str0m",
 ]

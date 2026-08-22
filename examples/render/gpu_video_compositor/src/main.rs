@@ -30,7 +30,7 @@ fn main() -> impl std::process::Termination {
 mod windows_example {
     use std::{thread, time::Duration};
 
-    use ffmpeg_next as ffmpeg;
+    use media_pp::ffmpeg;
     use media_pp::{
         bus::BusEvent,
         color::Color,
@@ -308,7 +308,7 @@ mod windows_example {
 mod linux_example {
     use std::{thread, time::Duration};
 
-    use ffmpeg_next as ffmpeg;
+    use media_pp::ffmpeg;
     use media_pp::{
         bus::BusEvent,
         color::Color,

@@ -1,6 +1,6 @@
 use std::{path::PathBuf, thread, time::Duration};
 
-use ffmpeg_next as ffmpeg;
+use media_pp::ffmpeg;
 use media_pp::{
     bus::BusEvent,
     elements::{

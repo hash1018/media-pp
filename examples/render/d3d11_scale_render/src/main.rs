@@ -10,7 +10,7 @@ fn main() -> impl std::process::Termination {
 
 #[cfg(target_os = "windows")]
 mod windows_example {
-    use ffmpeg_next::media;
+    use media_pp::ffmpeg::media;
     use media_pp::{
         Error,
         bus::BusEvent,

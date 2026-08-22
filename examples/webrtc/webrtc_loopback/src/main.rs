@@ -13,7 +13,7 @@ mod example {
         time::{Duration, Instant},
     };
 
-    use ffmpeg_next as ffmpeg;
+    use media_pp::ffmpeg;
     use media_pp::pp_log::PpLog;
     use media_pp::{
         Result,

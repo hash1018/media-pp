@@ -5,7 +5,6 @@ edition = "2024"
 publish = false
 
 [dependencies]
-ffmpeg-next = "8"
 render_common = { path = "../render_common" }
 winit = "0.30"
 

@@ -6,5 +6,4 @@ publish = false
 
 [dependencies]
 media-pp = { path = "../../../lib", features = ["webrtc"] }
-ffmpeg-next = "8"
 str0m = { version = "0.21", default-features = false, features = ["rust-crypto"] }

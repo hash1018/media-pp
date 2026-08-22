@@ -23,7 +23,7 @@ mod windows_example {
         thread,
     };
 
-    use ffmpeg_next as ffmpeg;
+    use media_pp::ffmpeg;
     use media_pp::{
         bus::BusEvent,
         elements::{
@@ -201,7 +201,7 @@ mod linux_example {
         thread,
     };
 
-    use ffmpeg_next as ffmpeg;
+    use media_pp::ffmpeg;
     use media_pp::{
         bus::BusEvent,
         elements::{

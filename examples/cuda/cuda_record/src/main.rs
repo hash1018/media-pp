@@ -18,7 +18,7 @@
 
 mod common;
 
-use ffmpeg_next as ffmpeg;
+use media_pp::ffmpeg;
 use media_pp::{
     elements::{
         AppSource, CudaCodec, CudaDevice, CudaEncoder, CudaEncoderOptions, CudaFrameFormat,

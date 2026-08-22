@@ -42,7 +42,7 @@ fn main() -> impl std::process::Termination {
 
 #[cfg(target_os = "windows")]
 mod windows_example {
-    use ffmpeg_next as ffmpeg;
+    use media_pp::ffmpeg;
     use media_pp::{
         elements::{
             CaptureMode, D3d11NvencCodec, D3d11NvencEncoder, D3d11NvencEncoderOptions,
@@ -135,7 +135,7 @@ mod windows_example {
 /// and hands back a restore token that skips the prompt next time.
 #[cfg(target_os = "linux")]
 mod linux_example {
-    use ffmpeg_next as ffmpeg;
+    use media_pp::ffmpeg;
     use media_pp::{
         elements::{
             CaptureSourceKind, CudaCodec, CudaDevice, CudaEncoder, CudaEncoderOptions,

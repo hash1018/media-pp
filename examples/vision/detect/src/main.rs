@@ -1,6 +1,6 @@
 use std::{num::NonZeroU32, rc::Rc, thread};
 
-use ffmpeg_next::{format::Pixel, frame::Video, media, software::scaling::Flags};
+use media_pp::ffmpeg::{format::Pixel, frame::Video, media, software::scaling::Flags};
 use media_pp::{
     Error, Result,
     bus::BusEvent,

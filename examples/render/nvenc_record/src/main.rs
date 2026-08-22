@@ -34,7 +34,7 @@ fn main() -> impl std::process::Termination {
 
 #[cfg(target_os = "windows")]
 mod windows_example {
-    use ffmpeg_next as ffmpeg;
+    use media_pp::ffmpeg;
     use media_pp::{
         elements::{
             AppSource, D3d11NvencCodec, D3d11NvencEncoder, D3d11NvencEncoderOptions,

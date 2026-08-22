@@ -3,7 +3,7 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
-use ffmpeg_next::{format::Pixel, media, software::scaling::Flags};
+use media_pp::ffmpeg::{format::Pixel, media, software::scaling::Flags};
 use media_pp::pp_log::PpLog;
 use media_pp::{
     Error, Result,

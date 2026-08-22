@@ -9,7 +9,7 @@ mod example {
         time::Duration,
     };
 
-    use ffmpeg_next::media;
+    use media_pp::ffmpeg::media;
     use media_pp::{
         Error,
         bus::BusEvent,

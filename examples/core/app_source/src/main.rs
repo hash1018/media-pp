@@ -1,6 +1,6 @@
 use std::{sync::Arc, thread};
 
-use ffmpeg_next as ffmpeg;
+use media_pp::ffmpeg;
 use media_pp::{
     Result,
     buffer::MediaBuffer,
@@ -9,7 +9,7 @@ use media_pp::{
     pipeline::Pipeline,
 };
 
-/// A background thread demuxes a file with plain `ffmpeg_next` — standing
+/// A background thread demuxes a file with plain `ffmpeg` — standing
 /// in for whatever a real caller would push from (a network receive loop,
 /// a camera SDK's callback, ...) — and pushes its video packets into an
 /// `AppSource` one by one via `AppSourceHandle::push`. The pipeline itself

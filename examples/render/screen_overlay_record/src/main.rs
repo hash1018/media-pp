@@ -46,7 +46,7 @@ fn main() -> impl std::process::Termination {
 mod linux_example {
     use std::time::{Duration, Instant};
 
-    use ffmpeg_next as ffmpeg;
+    use media_pp::ffmpeg;
     use media_pp::{
         bus::BusEvent,
         color::Color,

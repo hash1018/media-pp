@@ -1,6 +1,6 @@
 use std::sync::atomic::Ordering;
 
-use ffmpeg_next::media;
+use media_pp::ffmpeg::media;
 use media_pp::{
     elements::{FileDemuxer, PacketCounter},
     pipeline::Pipeline,

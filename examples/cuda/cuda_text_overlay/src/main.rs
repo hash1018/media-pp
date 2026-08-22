@@ -25,7 +25,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use ffmpeg_next as ffmpeg;
+use media_pp::ffmpeg;
 use media_pp::{
     bus::BusEvent,
     color::Color,

@@ -60,7 +60,7 @@ fn main() {
 /// and locating the two streams it needs.
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 mod common {
-    use ffmpeg_next::{Rational, codec::Parameters, media};
+    use media_pp::ffmpeg::{Rational, codec::Parameters, media};
     use media_pp::{Error, elements::FileDemuxer};
 
     pub struct Streams {
@@ -198,8 +198,8 @@ mod windows_example {
     fn attach_audio(
         pipeline: &Pipeline,
         audio_tee: &media_pp::elements::TeeHandle,
-        audio_params: &ffmpeg_next::codec::Parameters,
-        audio_time_base: ffmpeg_next::Rational,
+        audio_params: &media_pp::ffmpeg::codec::Parameters,
+        audio_time_base: media_pp::ffmpeg::Rational,
     ) -> media_pp::Result<media_pp::graph::BranchId> {
         let device = WasapiRenderer::list_devices()
             .map_err(|error| Error::Other(error.to_string()))?
@@ -345,8 +345,8 @@ mod linux_example {
     fn attach_audio(
         pipeline: &Pipeline,
         audio_tee: &TeeHandle,
-        audio_params: &ffmpeg_next::codec::Parameters,
-        audio_time_base: ffmpeg_next::Rational,
+        audio_params: &media_pp::ffmpeg::codec::Parameters,
+        audio_time_base: media_pp::ffmpeg::Rational,
     ) -> media_pp::Result<media_pp::graph::BranchId> {
         let device = PipeWireAudioRenderer::list_devices()
             .map_err(|error| Error::Other(error.to_string()))?

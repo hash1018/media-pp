@@ -3,7 +3,7 @@ fn main() -> impl std::process::Termination {
 }
 
 mod example {
-    use ffmpeg_next::media;
+    use media_pp::ffmpeg::media;
     use media_pp::{
         Error,
         bus::BusEvent,

@@ -9,7 +9,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use ffmpeg_next as ffmpeg;
+use media_pp::ffmpeg;
 use media_pp::{
     buffer::MediaBuffer, bus::BusEvent, elements::AppSourceHandle, pipeline::Pipeline,
     pool::UnboundObjectPool,
