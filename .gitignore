@@ -1,5 +1,4 @@
 /target
-/.claude
 /.vscode
 
 # `media_pp::log::init` output — every example writes ./logs
