@@ -422,7 +422,7 @@ mod tests {
                 .expect("CreateTexture2D failed");
             texture.expect("CreateTexture2D succeeded without producing a texture")
         };
-        let source_frame = wrap_d3d11_texture(source_texture, width, height);
+        let source_frame = wrap_d3d11_texture(source_texture, width, height).unwrap();
 
         let mut download = D3d11Download::new("test-download", &device, context, width, height)
             .expect("D3d11Download::new should succeed");
@@ -501,7 +501,7 @@ mod tests {
                 .expect("CreateTexture2D array failed");
             texture.expect("CreateTexture2D succeeded without producing a texture")
         };
-        let mut source_frame = wrap_d3d11_texture(texture, width, height);
+        let mut source_frame = wrap_d3d11_texture(texture, width, height).unwrap();
         // SAFETY: this test exclusively owns the unpublished frame; address 1
         // encodes slice index 1 in `data[1]` and is never dereferenced.
         unsafe {

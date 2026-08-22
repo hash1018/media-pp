@@ -66,7 +66,7 @@ fn main() -> media_pp::Result<()> {
         "recording {seconds}s of a {}Hz tone to {path} ...",
         audio_options.frequency
     );
-    pipeline.run();
+    pipeline.run()?;
 
     thread::sleep(Duration::from_secs(seconds));
     pipeline.stop();

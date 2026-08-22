@@ -58,7 +58,7 @@ fn main() -> media_pp::Result<()> {
         Ok(())
     })?;
 
-    pipeline.run(); // starts the source on a background thread, returns right away
+    pipeline.run()?; // starts the source on a background thread, returns right away
     // Blocks until the demuxer hits EOS and both branch queues have
     // drained and joined (i.e. every `Bus` handle in the pipeline dropped).
     pipeline.bus().log_events();

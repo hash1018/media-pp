@@ -162,9 +162,9 @@ fn main() -> media_pp::Result<()> {
         Ok(())
     })?;
 
-    output_pipeline.run();
-    background_pipeline.run();
-    foreground_pipeline.run();
+    output_pipeline.run()?;
+    background_pipeline.run()?;
+    foreground_pipeline.run()?;
 
     let steps = seconds.saturating_mul(30);
     let travel = output_width - foreground_width;

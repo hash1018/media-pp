@@ -38,7 +38,7 @@ fn main() -> media_pp::Result<()> {
         ctx.attach(source, 0, branch)?;
         Ok(())
     })?;
-    pipeline.run();
+    pipeline.run()?;
     std::thread::sleep(Duration::from_secs(1));
     pipeline.stop();
     println!("frames: {}", frames.load(Ordering::Relaxed));

@@ -288,7 +288,7 @@ mod tests {
         let (source, handle) = AppSource::new("app-source", 4);
         let count = Arc::new(AtomicUsize::new(0));
         let pipeline = wire(source, count.clone());
-        pipeline.run();
+        pipeline.run().unwrap();
 
         for _ in 0..5 {
             handle.push(packet()).unwrap();
@@ -309,7 +309,7 @@ mod tests {
         let (source, handle) = AppSource::new("app-source", 4);
         let count = Arc::new(AtomicUsize::new(0));
         let pipeline = wire(source, count.clone());
-        pipeline.run();
+        pipeline.run().unwrap();
 
         handle.push(packet()).unwrap();
         handle.push(packet()).unwrap();
@@ -334,7 +334,7 @@ mod tests {
         let (source, _handle) = AppSource::new("app-source", 4);
         let count = Arc::new(AtomicUsize::new(0));
         let pipeline = wire(source, count.clone());
-        pipeline.run();
+        pipeline.run().unwrap();
 
         // Give the background thread a moment to actually start looping
         // (blocked in `select!`, waiting on data that's never coming)

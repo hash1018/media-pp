@@ -84,11 +84,35 @@ unsafe extern "C" fn release_d3d11_texture(_opaque: *mut c_void, data: *mut u8) 
 /// its texture-array slice in `data[1]`. `av_buffer_create` gives FFmpeg
 /// reference-counted ownership of the COM reference and calls
 /// `release_d3d11_texture` exactly once when the last frame reference drops.
+/// Returns [`crate::error::D3d11FrameWrapError`] and releases the transferred
+/// COM reference if FFmpeg cannot allocate that owner buffer.
 pub(crate) fn wrap_d3d11_texture(
     texture: ID3D11Texture2D,
     width: u32,
     height: u32,
-) -> ffmpeg::frame::Video {
+) -> std::result::Result<ffmpeg::frame::Video, crate::error::D3d11FrameWrapError> {
+    wrap_d3d11_texture_with(texture, width, height, |raw, size| {
+        // SAFETY: `raw` is the owned COM reference transferred by the helper;
+        // the callback is its exact inverse and FFmpeg retains it only when a
+        // non-null buffer reference is returned.
+        unsafe {
+            ffi::av_buffer_create(
+                raw,
+                size,
+                Some(release_d3d11_texture),
+                std::ptr::null_mut(),
+                0,
+            )
+        }
+    })
+}
+
+fn wrap_d3d11_texture_with(
+    texture: ID3D11Texture2D,
+    width: u32,
+    height: u32,
+    create_buffer: impl FnOnce(*mut u8, usize) -> *mut ffi::AVBufferRef,
+) -> std::result::Result<ffmpeg::frame::Video, crate::error::D3d11FrameWrapError> {
     let mut frame = ffmpeg::frame::Video::empty();
     let raw = texture.into_raw();
     // SAFETY: `frame` owns a live, writable `AVFrame`; `raw` is the COM
@@ -101,21 +125,15 @@ pub(crate) fn wrap_d3d11_texture(
         (*ptr).height = height as i32;
         (*ptr).data[0] = raw as *mut u8;
         (*ptr).data[1] = std::ptr::null_mut();
-        let buf = ffi::av_buffer_create(
-            raw as *mut u8,
-            std::mem::size_of::<*mut c_void>(),
-            Some(release_d3d11_texture),
-            std::ptr::null_mut(),
-            0,
-        );
+        let buf = create_buffer(raw as *mut u8, std::mem::size_of::<*mut c_void>());
         if buf.is_null() {
             (*ptr).data[0] = std::ptr::null_mut();
             drop(ID3D11Texture2D::from_raw(raw));
-            panic!("av_buffer_create failed to allocate a D3D11 texture buffer wrapper");
+            return Err(crate::error::D3d11FrameWrapError);
         }
         (*ptr).buf[0] = buf;
     }
-    frame
+    Ok(frame)
 }
 
 /// ORs resource bind flags into an existing FFmpeg-allocated D3D11VA frames
@@ -149,7 +167,13 @@ pub(crate) fn d3d11va_texture(frame: &ffmpeg::frame::Video) -> Option<(*mut c_vo
 
 #[cfg(test)]
 mod tests {
+    use windows::Win32::Graphics::{
+        Direct3D11::{D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, ID3D11Texture2D},
+        Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC},
+    };
+
     use super::*;
+    use crate::test_support::try_d3d11_device;
 
     #[test]
     fn rejects_a_d3d11_tagged_frame_without_a_texture() {
@@ -160,5 +184,41 @@ mod tests {
             (*frame.as_mut_ptr()).format = ffi::AVPixelFormat::AV_PIX_FMT_D3D11 as i32;
         }
         assert!(d3d11va_texture(&frame).is_none());
+    }
+
+    #[test]
+    fn buffer_allocation_failure_returns_an_error_and_releases_the_owned_reference() {
+        let Some((device, _context)) = try_d3d11_device() else {
+            return;
+        };
+        let desc = D3D11_TEXTURE2D_DESC {
+            Width: 1,
+            Height: 1,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Usage: D3D11_USAGE_DEFAULT,
+            ..Default::default()
+        };
+        let mut texture = None;
+        // SAFETY: `desc` is initialized for a one-pixel default texture and
+        // no initial subresource data is supplied.
+        unsafe { device.CreateTexture2D(&desc, None, Some(&mut texture)) }.unwrap();
+        let texture: ID3D11Texture2D = texture.unwrap();
+        let retained = texture.clone();
+
+        let result = wrap_d3d11_texture_with(texture, 1, 1, |_raw, _size| std::ptr::null_mut());
+
+        assert!(result.is_err());
+        let mut retained_desc = D3D11_TEXTURE2D_DESC::default();
+        // SAFETY: `retained` owns an independent COM reference; a failed wrap
+        // must release only the reference transferred into it.
+        unsafe { retained.GetDesc(&mut retained_desc) };
+        assert_eq!(retained_desc.Width, 1);
+        assert_eq!(retained_desc.Height, 1);
     }
 }

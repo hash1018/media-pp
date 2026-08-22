@@ -18,7 +18,8 @@ use windows::Win32::Graphics::{
 
 use super::{D3d11VideoCompositorError, video_handle::D3d11VideoLayerHandle};
 use crate::{
-    color::Color, platform::windows::d3d11va::wrap_d3d11_texture, pool::UnboundObjectPool,
+    color::Color, error::D3d11FrameWrapError, platform::windows::d3d11va::wrap_d3d11_texture,
+    pool::UnboundObjectPool,
 };
 
 use super::super::super::text_layer::{TextRasterError, rasterize_coverage};
@@ -29,6 +30,9 @@ use super::super::super::video_layer::VideoRect;
 /// Errors specific to [`D3d11TextLayerHandle`].
 #[derive(Debug, ThisError)]
 pub enum D3d11TextLayerError {
+    #[error(transparent)]
+    FrameWrap(#[from] D3d11FrameWrapError),
+
     #[error("invalid font data: {0}")]
     InvalidFont(#[from] InvalidFont),
 
@@ -145,7 +149,7 @@ impl D3d11TextLayerHandle {
         // `D3d11Upload::consume`'s identical pattern for why this is safe
         // (the old GPU texture is released by `ffmpeg::frame::Video`'s own
         // `Drop` right here, once nothing downstream still holds it).
-        *frame = wrap_d3d11_texture(texture, width, height);
+        *frame = wrap_d3d11_texture(texture, width, height)?;
         self.layer.set_frame(Arc::new(frame))?;
         self.layer.set_rect(VideoRect::new(x, y, width, height))?;
         self.layer.set_visible(true)?;

@@ -233,9 +233,9 @@ mod windows_example {
         })?;
 
         println!("recording {seconds}s of {CANVAS_WIDTH}x{CANVAS_HEIGHT} to {path} ...");
-        record_pipeline.run();
-        background_pipeline.run();
-        keyed_pipeline.run();
+        record_pipeline.run()?;
+        background_pipeline.run()?;
+        keyed_pipeline.run()?;
 
         let feeding = Arc::new(AtomicBool::new(true));
         let feeder = spawn_green_screen_feeder(green_screen_handle, feeding.clone());

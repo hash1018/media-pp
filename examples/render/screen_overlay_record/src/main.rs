@@ -214,8 +214,8 @@ mod linux_example {
             Ok(())
         })?;
 
-        record_pipeline.run();
-        capture_pipeline.run();
+        record_pipeline.run()?;
+        capture_pipeline.run()?;
 
         println!("recording {seconds}s of {width}x{height} desktop with an overlay to {path} ...");
         let started = Instant::now();

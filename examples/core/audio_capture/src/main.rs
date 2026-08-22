@@ -91,7 +91,7 @@ mod windows_example {
             ctx.attach(source, 0, branch)?;
             Ok(())
         })?;
-        pipeline.run();
+        pipeline.run()?;
 
         thread::sleep(Duration::from_secs(3));
         pipeline.stop();
@@ -207,7 +207,7 @@ mod linux_example {
             ctx.attach(source, 0, branch)?;
             Ok(())
         })?;
-        pipeline.run();
+        pipeline.run()?;
 
         thread::sleep(Duration::from_secs(3));
         pipeline.stop();

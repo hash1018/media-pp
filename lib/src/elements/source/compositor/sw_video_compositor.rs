@@ -1089,7 +1089,7 @@ mod tests {
         })
         .expect("test pipeline wiring must succeed");
 
-        pipeline.run();
+        pipeline.run().unwrap();
         // Warm up, then pause the instant a frame is observed — `next_due`
         // is then a known one interval away.
         for _ in 0..2 {

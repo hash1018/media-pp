@@ -108,7 +108,7 @@ mod windows_example {
         })?;
 
         println!("recording {seconds}s of the desktop to {path} ...");
-        pipeline.run();
+        pipeline.run()?;
 
         thread::sleep(Duration::from_secs(seconds));
         pipeline.stop();
@@ -244,7 +244,7 @@ mod linux_example {
         })?;
 
         println!("recording {seconds}s of {width}x{height} desktop to {path} ...");
-        pipeline.run();
+        pipeline.run()?;
 
         thread::sleep(Duration::from_secs(seconds));
         pipeline.stop();

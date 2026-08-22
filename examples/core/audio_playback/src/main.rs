@@ -95,7 +95,7 @@ mod windows_example {
             Ok(())
         })?;
 
-        pipeline.run();
+        pipeline.run()?;
         thread::sleep(Duration::from_secs(1));
         println!("volume: -12 dB");
         volume_handle.set_gain_db(-12.0)?;
@@ -204,7 +204,7 @@ mod linux_example {
             Ok(())
         })?;
 
-        pipeline.run();
+        pipeline.run()?;
         thread::sleep(Duration::from_secs(1));
         println!("volume: -12 dB");
         volume_handle.set_gain_db(-12.0)?;

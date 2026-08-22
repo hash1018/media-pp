@@ -752,7 +752,7 @@ mod tests {
         })
         .expect("failed to build the pipeline");
 
-        pipeline.run();
+        pipeline.run().unwrap();
         std::thread::sleep(std::time::Duration::from_secs(2));
         pipeline.stop();
 

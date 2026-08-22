@@ -54,7 +54,7 @@ fn main() -> media_pp::Result<()> {
         Ok(())
     })?;
 
-    pipeline.run();
+    pipeline.run()?;
 
     // Same output `log_events()` would print, but also calls `stop()` on
     // `Eos`/`Error` — errors no longer end the pipeline on their own (see

@@ -510,7 +510,7 @@ impl D3d11ChromaKey {
         // Overwrites the pooled slot's previous contents in place —
         // `ffmpeg::frame::Video`'s own `Drop` runs on whatever was there
         // before, releasing that frame's GPU texture right here.
-        *keyed = wrap_d3d11_texture(output, input.width, input.height);
+        *keyed = wrap_d3d11_texture(output, input.width, input.height)?;
         keyed.set_pts(frame.pts());
         keyed.set_color_space(frame.color_space());
         keyed.set_color_range(frame.color_range());
@@ -838,7 +838,7 @@ mod tests {
     fn frame(texture: ID3D11Texture2D, width: u32, height: u32, pts: i64) -> MediaBuffer {
         let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
         let mut slot = pool.get();
-        *slot = wrap_d3d11_texture(texture, width, height);
+        *slot = wrap_d3d11_texture(texture, width, height).unwrap();
         slot.set_pts(Some(pts));
         MediaBuffer::Video(Arc::new(slot))
     }

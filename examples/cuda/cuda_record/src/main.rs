@@ -97,7 +97,7 @@ fn run() -> media_pp::Result<()> {
         recording.frame_count / 30,
         recording.path
     );
-    pipeline.run();
+    pipeline.run()?;
     let feeder = common::spawn_feeder(source_handle, width, height, recording.frame_count);
     common::finish(&pipeline, feeder, &recording.path)
 }

@@ -51,7 +51,7 @@ pub fn parse_args(usage_tail: &str) -> media_pp::Result<Recording> {
 /// finalized; a pipeline that already failed is stopped instead, since there
 /// is nothing worth draining.
 pub fn record(pipeline: &Pipeline, seconds: u64) -> media_pp::Result<()> {
-    pipeline.run();
+    pipeline.run()?;
 
     let deadline = Instant::now() + Duration::from_secs(seconds);
     let mut pipeline_error = None;

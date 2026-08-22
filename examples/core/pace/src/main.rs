@@ -62,7 +62,7 @@ fn main() -> media_pp::Result<()> {
     })?;
 
     let start = Instant::now();
-    pipeline.run();
+    pipeline.run()?;
 
     // Watch for `Eos`/`Error` and `stop()` on either — errors no longer
     // end the pipeline on their own, so this is what makes the loop

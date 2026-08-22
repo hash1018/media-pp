@@ -100,7 +100,7 @@ mod windows_example {
             return Ok(());
         }
 
-        pipeline.run();
+        pipeline.run()?;
 
         for event in pipeline.bus().iter() {
             match &event {

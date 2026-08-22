@@ -8,6 +8,8 @@
 //! Backend variants are behind the same Cargo features as the elements that
 //! raise them, so this enum is exactly as wide as the build it belongs to.
 
+use std::io;
+
 use thiserror::Error;
 
 #[cfg(all(target_os = "windows", feature = "dxgi-capture"))]
@@ -54,6 +56,40 @@ use crate::{
     queue::QueueError,
 };
 
+/// Failure to create one of the background threads owned by this crate.
+///
+/// The operation that requested the thread returns this error before claiming
+/// that it started successfully. The `thread` field identifies the worker so
+/// callers can distinguish pipeline, queue, and standalone-driver failures.
+#[derive(Debug, Error)]
+#[error("failed to spawn {thread} thread: {source}")]
+pub struct ThreadSpawnError {
+    thread: String,
+    #[source]
+    source: io::Error,
+}
+
+impl ThreadSpawnError {
+    pub(crate) fn new(thread: impl Into<String>, source: io::Error) -> Self {
+        Self {
+            thread: thread.into(),
+            source,
+        }
+    }
+
+    /// Name of the worker that could not be created.
+    pub fn thread(&self) -> &str {
+        &self.thread
+    }
+}
+
+/// FFmpeg could not allocate the reference-counted buffer that owns a D3D11
+/// texture attached to an `AVFrame`.
+#[cfg(all(target_os = "windows", feature = "d3d11"))]
+#[derive(Debug, Error)]
+#[error("FFmpeg could not allocate a D3D11 texture buffer wrapper")]
+pub struct D3d11FrameWrapError;
+
 /// Crate-wide error. Each element defines its own `{Element}Error` (see
 /// [`FileDemuxError`], [`SwDecoderError`], [`QueueError`]) for its own
 /// domain-specific failures; this enum just aggregates them so trait
@@ -65,6 +101,13 @@ use crate::{
 /// this top-level `Result`, it's converted here via `#[from]`.
 #[derive(Debug, Error)]
 pub enum Error {
+    #[error(transparent)]
+    ThreadSpawnError(#[from] ThreadSpawnError),
+
+    #[cfg(all(target_os = "windows", feature = "d3d11"))]
+    #[error(transparent)]
+    D3d11FrameWrapError(#[from] D3d11FrameWrapError),
+
     #[error(transparent)]
     FileDemuxError(#[from] FileDemuxError),
 

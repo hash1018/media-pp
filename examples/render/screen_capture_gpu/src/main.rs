@@ -115,7 +115,7 @@ mod windows_example {
         // away — any failure shows up as a `BusEvent::Error` here instead of
         // through a returned `Result`. `DxgiCaptureSource` never reaches `Eos`
         // on its own — closing the window is what ends this.
-        pipeline.run();
+        pipeline.run()?;
 
         for event in pipeline.bus().iter() {
             match &event {
@@ -262,7 +262,7 @@ mod linux_example {
         // through a returned `Result`. This source never reaches `Eos` on its
         // own; closing the window, or the captured source going away, is what
         // ends this.
-        pipeline.run();
+        pipeline.run()?;
 
         for event in pipeline.bus().iter() {
             match &event {

@@ -757,6 +757,7 @@ mod tests {
             frame_width,
             frame_height,
         )
+        .unwrap()
     }
 
     fn gpu_frame(

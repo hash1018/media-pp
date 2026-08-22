@@ -61,7 +61,7 @@ fn main() -> media_pp::Result<()> {
         Ok(())
     })?;
 
-    pipeline.run();
+    pipeline.run()?;
     pipeline.bus().log_events();
 
     println!("decoded frames: {}", frame_count.load(Ordering::Relaxed));

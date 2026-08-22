@@ -73,7 +73,7 @@ fn main() -> media_pp::Result<()> {
     })?;
 
     println!("remuxing {input_path} -> {output_path} ...");
-    pipeline.run();
+    pipeline.run()?;
 
     // Multiple tracks means multiple `BusEvent::Eos` (one per stream's own
     // `Mp4Muxer` sink) — only `stop()` once every kept stream has reported

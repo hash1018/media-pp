@@ -49,7 +49,7 @@ use crate::{
     control::{ControlMsg, ControlReceiver, drain_control},
     element::{Element, ElementType, Sink, Source, SourceElement, element_pp_log},
     elements::VideoCompositorOptions,
-    error::Result,
+    error::{D3d11FrameWrapError, Result},
     pad::SrcPad,
     platform::windows::{
         d3d11::compile_shader,
@@ -70,6 +70,9 @@ const NV12_SHADER_SOURCE: &[u8] =
 /// Errors specific to [`D3d11VideoCompositor`].
 #[derive(Debug, ThisError)]
 pub enum D3d11VideoCompositorError {
+    #[error(transparent)]
+    FrameWrap(#[from] D3d11FrameWrapError),
+
     #[error("windows error: {0}")]
     Windows(#[from] windows::core::Error),
 
@@ -691,7 +694,7 @@ impl D3d11VideoCompositor {
             let key = target.texture.as_raw() as usize;
             self.output_views
                 .insert(key, target.render_target_view.clone());
-            *output_frame = wrap_d3d11_texture(target.texture, canvas_width, canvas_height);
+            *output_frame = wrap_d3d11_texture(target.texture, canvas_width, canvas_height)?;
         }
         let (output_raw, _) = d3d11va_texture(&output_frame)
             .expect("output pool frames are initialized immediately after checkout");
@@ -1513,10 +1516,12 @@ mod tests {
         let red_texture = bgra_texture(&device, 4, 4, [0, 0, 255, 255]);
         let blue_texture = bgra_texture(&device, 2, 2, [255, 0, 0, 255]);
         red_sink
-            .consume(pooled_video(wrap_d3d11_texture(red_texture, 4, 4)))
+            .consume(pooled_video(wrap_d3d11_texture(red_texture, 4, 4).unwrap()))
             .unwrap();
         blue_sink
-            .consume(pooled_video(wrap_d3d11_texture(blue_texture, 2, 2)))
+            .consume(pooled_video(
+                wrap_d3d11_texture(blue_texture, 2, 2).unwrap(),
+            ))
             .unwrap();
 
         let composed = compositor
@@ -1562,7 +1567,7 @@ mod tests {
             pixels.extend((0..4).flat_map(|_| color));
         }
         let texture = bgra_texture_from_pixels(&device, 4, 4, &pixels);
-        sink.consume(pooled_video(wrap_d3d11_texture(texture, 4, 3)))
+        sink.consume(pooled_video(wrap_d3d11_texture(texture, 4, 3).unwrap()))
             .unwrap();
 
         let composed = compositor
@@ -1608,21 +1613,17 @@ mod tests {
         layer.fit = video_layer::VideoFit::Stretch;
         let mut sink = handle.add_source("input", layer).unwrap().unwrap().sink;
 
-        sink.consume(pooled_video(wrap_d3d11_texture(
-            bgra_texture(&device, 1, 1, [0, 0, 255, 255]),
-            1,
-            1,
-        )))
+        sink.consume(pooled_video(
+            wrap_d3d11_texture(bgra_texture(&device, 1, 1, [0, 0, 255, 255]), 1, 1).unwrap(),
+        ))
         .unwrap();
         let first = compositor
             .compose_frame(&test_bus())
             .expect("first compose failed");
 
-        sink.consume(pooled_video(wrap_d3d11_texture(
-            bgra_texture(&device, 1, 1, [255, 0, 0, 255]),
-            1,
-            1,
-        )))
+        sink.consume(pooled_video(
+            wrap_d3d11_texture(bgra_texture(&device, 1, 1, [255, 0, 0, 255]), 1, 1).unwrap(),
+        ))
         .unwrap();
         let mut later = Vec::new();
         for _ in 0..OUTPUT_POOL_SIZE {
@@ -1669,7 +1670,7 @@ mod tests {
         let mut sink = handle.add_source("input", layer).unwrap().unwrap().sink;
         let texture = nv12_texture(&device, 2, 2, 81, 90, 240);
 
-        let mut bt601 = wrap_d3d11_texture(texture.clone(), 2, 2);
+        let mut bt601 = wrap_d3d11_texture(texture.clone(), 2, 2).unwrap();
         bt601.set_color_space(ffmpeg::color::Space::SMPTE170M);
         bt601.set_color_range(ffmpeg::color::Range::MPEG);
         sink.consume(pooled_video(bt601)).unwrap();
@@ -1678,7 +1679,7 @@ mod tests {
             .expect("BT.601 compose failed");
         let bt601 = download_frame(&device, context.clone(), bt601);
 
-        let mut bt709 = wrap_d3d11_texture(texture, 2, 2);
+        let mut bt709 = wrap_d3d11_texture(texture, 2, 2).unwrap();
         bt709.set_color_space(ffmpeg::color::Space::BT709);
         bt709.set_color_range(ffmpeg::color::Range::MPEG);
         sink.consume(pooled_video(bt709)).unwrap();
@@ -1744,8 +1745,10 @@ mod tests {
         let layer_handle = input.layer;
 
         let white_texture = bgra_texture(&device, 1, 1, [255, 255, 255, 255]);
-        sink.consume(pooled_video(wrap_d3d11_texture(white_texture, 1, 1)))
-            .unwrap();
+        sink.consume(pooled_video(
+            wrap_d3d11_texture(white_texture, 1, 1).unwrap(),
+        ))
+        .unwrap();
 
         layer_handle.set_rect(VideoRect::new(1, 0, 1, 1)).unwrap();
         layer_handle.set_opacity(0.5).unwrap();
@@ -1805,8 +1808,10 @@ mod tests {
             .sink;
 
         let foreign_texture = bgra_texture(&device_b, 1, 1, [255, 255, 255, 255]);
-        sink.consume(pooled_video(wrap_d3d11_texture(foreign_texture, 1, 1)))
-            .unwrap();
+        sink.consume(pooled_video(
+            wrap_d3d11_texture(foreign_texture, 1, 1).unwrap(),
+        ))
+        .unwrap();
 
         let (bus, bus_rx) = Bus::new();
         let composed = compositor
@@ -1900,7 +1905,7 @@ mod tests {
         })
         .expect("test pipeline wiring must succeed");
 
-        pipeline.run();
+        pipeline.run().unwrap();
         for _ in 0..2 {
             rx.recv_timeout(Duration::from_millis(500))
                 .expect("expected steady frames before pausing");

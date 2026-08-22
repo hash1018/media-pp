@@ -19,6 +19,38 @@ use crate::{
     pad::SrcPad,
 };
 
+#[test]
+fn partial_thread_spawn_failure_stops_and_joins_started_sources() {
+    let pipeline = PipelineBuilder::new("spawn-failure")
+        .add_source(
+            TestVideoSource::new("first", TestVideoOptions::default()),
+            |_source, _ctx| Ok(()),
+        )
+        .unwrap()
+        .add_source(
+            TestVideoSource::new("second", TestVideoOptions::default()),
+            |_source, _ctx| Ok(()),
+        )
+        .unwrap()
+        .build();
+
+    let mut spawn_count = 0;
+    let error = pipeline
+        .run_with_spawner(|thread_name, task| {
+            spawn_count += 1;
+            if spawn_count == 2 {
+                Err(std::io::Error::other("injected spawn failure"))
+            } else {
+                thread::Builder::new().name(thread_name).spawn(task)
+            }
+        })
+        .expect_err("the injected second spawn failure must be returned");
+
+    assert!(matches!(error, crate::Error::ThreadSpawnError(_)));
+    assert_eq!(pipeline.running.load(Ordering::Acquire), 0);
+    assert!(pipeline.workers.lock().unwrap().is_empty());
+}
+
 /// End-to-end: `run()` (async — starts the background thread and
 /// returns right away), then `pause()`/`stop()` (skipping `resume()`)
 /// from the test's own thread — exercises the whole cascade (source's
@@ -47,7 +79,7 @@ fn pause_then_stop_returns_promptly() {
     })
     .expect("test pipeline wiring must succeed");
 
-    pipeline.run();
+    pipeline.run().unwrap();
 
     // Give the background thread a moment to actually start looping
     // so `pause()`/`stop()` land while `running` is true, not before.
@@ -264,7 +296,7 @@ fn finish_drains_queued_data_and_eos_even_while_paused() {
     })
     .expect("test pipeline wiring must succeed");
 
-    pipeline.run();
+    pipeline.run().unwrap();
     while !ready.load(Ordering::Acquire) {
         thread::yield_now();
     }
@@ -343,7 +375,7 @@ fn multi_source_pipeline_stops_every_source_from_one_stop_call() {
         ]
     );
 
-    pipeline.run();
+    pipeline.run().unwrap();
     thread::sleep(Duration::from_millis(100));
     pipeline.stop();
 
@@ -382,7 +414,7 @@ fn pipeline_clock_includes_a_slow_pause_cascade_in_its_frozen_time() {
     .expect("test pipeline wiring must succeed");
     let original_start = pipeline.clock().start();
 
-    pipeline.run();
+    pipeline.run().unwrap();
     thread::sleep(Duration::from_millis(50));
     pipeline.pause();
     pipeline.resume();
@@ -408,7 +440,7 @@ fn dropping_a_running_pipeline_stops_and_releases_it() {
         .expect("test pipeline wiring must succeed");
     let weak = Arc::downgrade(&pipeline);
 
-    pipeline.run();
+    pipeline.run().unwrap();
     thread::sleep(Duration::from_millis(50));
 
     let (dropped_tx, dropped_rx) = mpsc::sync_channel(0);
@@ -472,7 +504,7 @@ fn tee_handle_retained_across_a_multi_source_pipeline_does_not_leak() {
         .build();
     let tee_handle = tee_handle_slot.expect("wire ran");
 
-    pipeline.run();
+    pipeline.run().unwrap();
     thread::sleep(Duration::from_millis(100));
     pipeline.stop();
 
@@ -526,7 +558,7 @@ fn seek_repositions_and_playback_continues() {
     })
     .expect("test pipeline wiring must succeed");
 
-    pipeline.run();
+    pipeline.run().unwrap();
     thread::sleep(Duration::from_millis(50));
     pipeline.seek(Duration::from_secs(1));
     // Let packets flow again post-seek before tearing down.
@@ -589,7 +621,7 @@ fn seek_reports_where_it_actually_landed_when_target_is_not_a_keyframe() {
     })
     .expect("test pipeline wiring must succeed");
 
-    pipeline.run();
+    pipeline.run().unwrap();
     thread::sleep(Duration::from_millis(50));
     pipeline.seek(Duration::from_secs(3));
     thread::sleep(Duration::from_millis(100));
@@ -1203,7 +1235,7 @@ fn tee_handle_changes_branches_after_the_pipeline_starts() {
     .expect("test pipeline wiring must succeed");
     let handle = handle_slot.expect("wire ran");
 
-    pipeline.run();
+    pipeline.run().unwrap();
     thread::sleep(Duration::from_millis(75));
     let dynamic_branch = handle
         .branch()
@@ -1263,7 +1295,7 @@ fn bus_messages_carry_the_posting_elements_stable_graph_id() {
         .expect("sink is attached")
         .id;
 
-    pipeline.run();
+    pipeline.run().unwrap();
     let messages: Vec<_> = pipeline.bus().iter_with_ids().collect();
     assert!(messages.iter().any(|message| {
         message.element_id == Some(sink_id)
@@ -1295,7 +1327,7 @@ fn a_source_that_fails_still_stops_its_own_branch() {
     })
     .expect("wiring succeeds");
 
-    pipeline.run();
+    pipeline.run().unwrap();
     // Drained to exhaustion, not searched lazily: the error is posted
     // before the branch is stopped, so a `find` that returns on the first
     // `Error` can observe `stopped` while the source thread is still on its

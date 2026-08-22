@@ -73,7 +73,7 @@ mod example {
         // `run()` starts publishing on a background thread and returns right
         // away — that's what makes this terminal prompt possible on the same
         // thread that would otherwise just be blocked waiting for it.
-        pipeline.run();
+        pipeline.run()?;
 
         // Reads seek requests for as long as the process lives, on its own
         // thread — a blocked stdin read can't also notice natural playback

@@ -105,8 +105,8 @@ mod example {
         // instead, each into its own `Pipeline`.
         let driver_a = DriverRunner::new(peer_a);
         let driver_b = DriverRunner::new(peer_b);
-        driver_a.run();
-        driver_b.run();
+        driver_a.run()?;
+        driver_b.run()?;
 
         thread::sleep(Duration::from_millis(200));
         println!("ICE/DTLS-SRTP established over loopback UDP");
@@ -140,8 +140,8 @@ mod example {
         let received_by_b = Arc::new(AtomicUsize::new(0));
         let track_pipeline_a = wire_counting(source_a, received_by_a.clone());
         let track_pipeline_b = wire_counting(source_b, received_by_b.clone());
-        track_pipeline_a.run();
-        track_pipeline_b.run();
+        track_pipeline_a.run()?;
+        track_pipeline_b.run()?;
 
         thread::sleep(Duration::from_millis(100)); // let the answer actually apply
 

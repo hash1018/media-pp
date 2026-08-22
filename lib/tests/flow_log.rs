@@ -36,7 +36,7 @@ fn pipeline_logs_topology_eos_and_control_at_each_boundary() {
     })
     .expect("test pipeline must build");
 
-    pipeline.run();
+    pipeline.run().unwrap();
     pipeline.pause();
     pipeline.resume();
     handle

@@ -198,8 +198,8 @@ fn run() -> media_pp::Result<()> {
         Ok(())
     })?;
 
-    output_pipeline.run();
-    background_pipeline.run();
+    output_pipeline.run()?;
+    background_pipeline.run()?;
 
     println!("controls: arrow keys move the text by {MOVE_STEP}px; q stops recording");
     let commands = terminal::commands();

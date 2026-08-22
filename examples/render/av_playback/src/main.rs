@@ -176,7 +176,7 @@ mod windows_example {
         if shutdown.publish(std::slice::from_ref(&pipeline)) {
             return Ok(());
         }
-        pipeline.run();
+        pipeline.run()?;
         {
             let pipeline = pipeline.clone();
             let tee = audio_tee_handle.clone();
@@ -323,7 +323,7 @@ mod linux_example {
         if shutdown.publish(std::slice::from_ref(&pipeline)) {
             return Ok(());
         }
-        pipeline.run();
+        pipeline.run()?;
         {
             let pipeline = pipeline.clone();
             let tee = audio_tee_handle.clone();

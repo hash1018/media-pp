@@ -77,7 +77,7 @@ fn main() -> media_pp::Result<()> {
         "writing a live fMP4 HLS stream for {seconds}s to {}",
         playlist_path.display()
     );
-    pipeline.run();
+    pipeline.run()?;
     thread::sleep(Duration::from_secs(seconds));
     pipeline.stop();
 

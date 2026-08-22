@@ -402,7 +402,7 @@ mod tests {
             Ok(())
         })
         .expect("test pipeline wiring must succeed");
-        pipeline.run();
+        pipeline.run().unwrap();
         std::thread::sleep(Duration::from_secs(3));
         pipeline.stop();
         pipeline.bus().log_events();
@@ -552,7 +552,7 @@ mod tests {
             Ok(())
         })
         .expect("test pipeline wiring must succeed");
-        pipeline.run();
+        pipeline.run().unwrap();
 
         // Wait (bounded) for at least one rotation — the pipeline is
         // deliberately still running past this point.

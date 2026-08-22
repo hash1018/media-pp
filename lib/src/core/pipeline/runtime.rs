@@ -14,7 +14,7 @@ use crate::{
     clock::Clock,
     control::{ControlMsg, ControlReceiver, ControlSender},
     element::{Context, SourceElement},
-    error::Result,
+    error::{Result, ThreadSpawnError},
     graph::{GraphSnapshot, NodeInfo, PipelineGraph, log_topology},
     playback_clock::PlaybackClock,
 };
@@ -28,7 +28,11 @@ use super::{PipelineBuilder, builder::SourceEntry};
 ///
 /// `run()` is asynchronous: it starts every source on its own background
 /// thread and returns immediately, rather than blocking the caller for the
-/// whole play-through. Returned as `Arc<Pipeline>` (that's what
+/// whole play-through. It returns a
+/// [`ThreadSpawnError`](crate::error::ThreadSpawnError) if a source worker
+/// cannot be created; any workers already created for that call are stopped
+/// and joined before the error is returned. The one-shot pipeline is not
+/// reusable after that failure. Returned as `Arc<Pipeline>` (that's what
 /// [`Pipeline::new`]/[`PipelineBuilder::build`] return) — the background
 /// threads deliberately do not retain an owning handle, so dropping the
 /// last external `Arc` can stop them. The `Arc` also lets [`Pipeline::pause`]/
@@ -189,30 +193,49 @@ impl Pipeline {
     /// actually done. A no-op if this `Pipeline` is already running or
     /// has already finished a previous run — this type has no "reset"
     /// path; build a fresh `Pipeline` for another play-through.
-    pub fn run(&self) {
+    /// If a source worker cannot be created, any source workers already
+    /// started by this call are stopped and joined before the error returns.
+    /// The one-shot pipeline is not reusable after that failure.
+    pub fn run(&self) -> Result<()> {
+        self.run_with_spawner(|thread_name, task| {
+            thread::Builder::new().name(thread_name).spawn(task)
+        })
+    }
+
+    pub(super) fn run_with_spawner(
+        &self,
+        mut spawn: impl FnMut(
+            String,
+            Box<dyn FnOnce() + Send + 'static>,
+        ) -> std::io::Result<JoinHandle<()>>,
+    ) -> Result<()> {
         let Some(sources) = self.sources.lock().unwrap().take() else {
-            return;
+            return Ok(());
         };
         // Always `Some` in lockstep with `sources` above — all three taken
         // exactly once, on whichever `run()` call actually wins the
         // `sources` guard.
         let Some(bus) = self.bus.lock().unwrap().take() else {
-            return;
+            return Ok(());
         };
         let Some(control_rxs) = self.control_rxs.lock().unwrap().take() else {
-            return;
+            return Ok(());
         };
 
         if crate::log::enabled(crate::log::Level::Info) {
             log_topology(&self.pp_log, "run", &self.graph());
         }
-        self.running.store(sources.len(), Ordering::Release);
-        for ((source_id, source), control_rx) in sources.into_iter().zip(control_rxs) {
+        let source_count = sources.len();
+        self.running.store(source_count, Ordering::Release);
+        for (index, ((source_id, source), control_rx)) in
+            sources.into_iter().zip(control_rxs).enumerate()
+        {
             let bus = bus.for_element(source_id);
             let running = Arc::clone(&self.running);
-            let handle = thread::Builder::new()
-                .name("pipeline:source".into())
-                .spawn(move || {
+            let thread_name = "pipeline:source".to_owned();
+            let spawn_result = spawn(
+                thread_name.clone(),
+                Box::new(move || {
                     // Keep these as locals in this order. During unwinding the
                     // guard is dropped first, then the receiver, then the
                     // source. That makes a Pipeline indirectly retained by a
@@ -262,10 +285,28 @@ impl Pipeline {
                         "ok"
                     };
                     pp_info!(pp_log: source.pp_log(), "finished outcome={outcome}");
-                })
-                .expect("failed to spawn pipeline source thread");
-            self.workers.lock().unwrap().push(handle);
+                }),
+            );
+            match spawn_result {
+                Ok(handle) => self.workers.lock().unwrap().push(handle),
+                Err(source) => {
+                    // This pipeline is one-shot, so sources already started
+                    // cannot be reconstructed for a retry. Stop and join them,
+                    // then account for the failed and not-yet-started sources
+                    // so callers never observe a half-running pipeline after
+                    // this error returns.
+                    self.running
+                        .fetch_sub(source_count - index, Ordering::AcqRel);
+                    self.clock.interrupt();
+                    for control_tx in self.control_txs.iter().take(index) {
+                        control_tx.send(ControlMsg::Stop);
+                    }
+                    self.join_workers();
+                    return Err(ThreadSpawnError::new(thread_name, source).into());
+                }
+            }
         }
+        Ok(())
     }
 
     /// Blocks until every element downstream of every source has paused —

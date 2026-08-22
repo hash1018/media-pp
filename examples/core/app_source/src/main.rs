@@ -57,7 +57,7 @@ fn main() -> Result<()> {
         ctx.attach(source, 0, branch)?;
         Ok(())
     })?;
-    pipeline.run();
+    pipeline.run()?;
 
     // The "external producer": wholly separate from the thread
     // `Pipeline::run` spawned for `app_source` above.

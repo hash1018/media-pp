@@ -573,7 +573,7 @@ impl D3d11Scaler {
         // Overwrites the pooled slot's previous contents in place —
         // `ffmpeg::frame::Video`'s own `Drop` runs on whatever was there
         // before, releasing that frame's GPU texture right here.
-        *scaled = wrap_d3d11_texture(output, self.width, self.height);
+        *scaled = wrap_d3d11_texture(output, self.width, self.height)?;
         scaled.set_pts(frame.pts());
         // A pure resize carries the source's tags through unchanged; a
         // conversion replaces them, because the pixels are no longer what
@@ -804,7 +804,7 @@ mod tests {
     fn frame(texture: ID3D11Texture2D, width: u32, height: u32, pts: i64) -> MediaBuffer {
         let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
         let mut slot = pool.get();
-        *slot = wrap_d3d11_texture(texture, width, height);
+        *slot = wrap_d3d11_texture(texture, width, height).unwrap();
         slot.set_pts(Some(pts));
         MediaBuffer::Video(Arc::new(slot))
     }

@@ -244,8 +244,8 @@ fn one_sendrecv_track_carries_data_both_ways() {
     // `next_track()` instead, each into its own `Pipeline`.
     let driver_a = DriverRunner::new(peer_a);
     let driver_b = DriverRunner::new(peer_b);
-    driver_a.run();
-    driver_b.run();
+    driver_a.run().unwrap();
+    driver_b.run().unwrap();
 
     // Let ICE/DTLS actually finish over the real loopback sockets
     // before renegotiating.
@@ -282,8 +282,8 @@ fn one_sendrecv_track_carries_data_both_ways() {
     let received_by_b = Arc::new(AtomicUsize::new(0));
     let track_pipeline_a = wire_counting(source_a, received_by_a.clone());
     let track_pipeline_b = wire_counting(source_b, received_by_b.clone());
-    track_pipeline_a.run();
-    track_pipeline_b.run();
+    track_pipeline_a.run().unwrap();
+    track_pipeline_b.run().unwrap();
 
     // Let the answer actually apply before pushing media through it.
     thread::sleep(Duration::from_millis(100));
@@ -375,8 +375,8 @@ fn stopping_a_peer_ends_its_inbound_track_source_with_a_clean_eos() {
 
     let driver_a = DriverRunner::new(peer_a);
     let driver_b = DriverRunner::new(peer_b);
-    driver_a.run();
-    driver_b.run();
+    driver_a.run().unwrap();
+    driver_b.run().unwrap();
 
     thread::sleep(Duration::from_millis(200));
 
@@ -397,7 +397,7 @@ fn stopping_a_peer_ends_its_inbound_track_source_with_a_clean_eos() {
 
     let received = Arc::new(AtomicUsize::new(0));
     let track_pipeline_b = wire_counting(source_b, received);
-    track_pipeline_b.run();
+    track_pipeline_b.run().unwrap();
 
     // Let the answer actually apply before tearing the connection down.
     thread::sleep(Duration::from_millis(100));

@@ -96,8 +96,8 @@ mod example {
 
         let driver_a = DriverRunner::new(peer_a);
         let driver_b = DriverRunner::new(peer_b);
-        driver_a.run();
-        driver_b.run();
+        driver_a.run()?;
+        driver_b.run()?;
 
         thread::sleep(Duration::from_millis(200));
         println!("ICE/DTLS-SRTP established over loopback UDP");
@@ -243,8 +243,8 @@ mod example {
             .expect("audio receive pipeline wiring must succeed")
             .build();
 
-        send_pipeline.run();
-        recv_pipeline.run();
+        send_pipeline.run()?;
+        recv_pipeline.run()?;
 
         thread::sleep(Duration::from_secs(2));
 

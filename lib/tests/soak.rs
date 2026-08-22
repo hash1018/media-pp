@@ -216,7 +216,7 @@ fn record_once(path: &Path, teardown: Teardown) {
     })
     .expect("wire the recording pipeline");
 
-    pipeline.run();
+    pipeline.run().unwrap();
     thread::sleep(Duration::from_millis(250));
     teardown.apply(&pipeline);
 }
@@ -272,7 +272,7 @@ fn pause_resume_storm_does_not_grow_process_memory() {
     })
     .expect("wire the control-storm pipeline");
 
-    pipeline.run();
+    pipeline.run().unwrap();
     thread::sleep(Duration::from_millis(200));
 
     let iterations = iterations(60);
@@ -327,7 +327,7 @@ fn seek_storm_does_not_grow_process_memory() {
     })
     .expect("wire the seek-storm pipeline");
 
-    pipeline.run();
+    pipeline.run().unwrap();
     thread::sleep(Duration::from_millis(200));
 
     let iterations = iterations(30);
@@ -385,7 +385,7 @@ fn tee_branch_churn_does_not_grow_process_memory() {
     .expect("wire the tee-churn pipeline");
     let tee_handle = tee_handle.expect("the wire closure provides the handle");
 
-    pipeline.run();
+    pipeline.run().unwrap();
     thread::sleep(Duration::from_millis(200));
 
     let iterations = iterations(40);
@@ -451,7 +451,7 @@ fn compositor_input_churn_does_not_grow_process_memory() {
         Ok(())
     })
     .expect("wire the compositor output pipeline");
-    output.run();
+    output.run().unwrap();
 
     let iterations = iterations(20);
     let mut memory = Trend::private_bytes("compositor churn private bytes");
@@ -472,7 +472,7 @@ fn compositor_input_churn_does_not_grow_process_memory() {
             }
         })
         .expect("wire the compositor input pipeline");
-        feeder.run();
+        feeder.run().unwrap();
         thread::sleep(Duration::from_millis(150));
 
         // The input's own pipeline is torn down first, the way a real
@@ -540,7 +540,7 @@ fn segment_rotation_does_not_grow_process_memory_or_hold_files() {
         Ok(())
     })
     .expect("wire the segmented pipeline");
-    pipeline.run();
+    pipeline.run().unwrap();
 
     let duration = soak_duration(20);
     let sample_interval = Duration::from_secs(1);
@@ -656,7 +656,7 @@ mod d3d11 {
         })
         .expect("wire the D3D11 pipeline");
 
-        pipeline.run();
+        pipeline.run().unwrap();
         thread::sleep(Duration::from_millis(250));
         teardown.apply(&pipeline);
         frames.load(Ordering::Relaxed)
@@ -742,8 +742,8 @@ mod d3d11 {
         })
         .expect("wire the chroma-key pipeline");
 
-        output_pipeline.run();
-        input_pipeline.run();
+        output_pipeline.run().unwrap();
+        input_pipeline.run().unwrap();
         thread::sleep(Duration::from_millis(250));
         // The input goes first: the compositor keeps drawing from whatever
         // it last received, so tearing it down first would leave the input
@@ -783,7 +783,7 @@ mod d3d11 {
              an earlier decoder never released its fixed-size surface pool",
         );
 
-        pipeline.run();
+        pipeline.run().unwrap();
         thread::sleep(Duration::from_millis(250));
         teardown.apply(&pipeline);
         frames.load(Ordering::Relaxed)
@@ -850,7 +850,7 @@ mod d3d11 {
              earlier encoder never closed its NVENC session",
         );
 
-        pipeline.run();
+        pipeline.run().unwrap();
         thread::sleep(Duration::from_millis(250));
         teardown.apply(&pipeline);
         packets.load(Ordering::Relaxed)
@@ -1152,7 +1152,7 @@ mod d3d11 {
         })
         .expect("wire the capture pipeline");
 
-        pipeline.run();
+        pipeline.run().unwrap();
         // Longer than the other cycles: this source emits on its own fixed
         // schedule, so a cycle has to span several of its ticks to prove
         // frames really flowed.
@@ -1334,7 +1334,7 @@ mod d3d12 {
              an earlier FFmpeg D3D12VA frames context retained its surface pool",
         );
 
-        pipeline.run();
+        pipeline.run().unwrap();
         thread::sleep(Duration::from_millis(250));
         teardown.apply(&pipeline);
         frames.load(Ordering::Relaxed)
@@ -1447,7 +1447,7 @@ mod cuda {
         })
         .expect("wire the CUDA pipeline");
 
-        pipeline.run();
+        pipeline.run().unwrap();
         thread::sleep(Duration::from_millis(250));
         teardown.apply(&pipeline);
         frames.load(Ordering::Relaxed)
@@ -1493,7 +1493,7 @@ mod cuda {
              an earlier decoder never released its NVDEC surfaces, which are capped at 32",
         );
 
-        pipeline.run();
+        pipeline.run().unwrap();
         thread::sleep(Duration::from_millis(250));
         teardown.apply(&pipeline);
         frames.load(Ordering::Relaxed)
@@ -1546,7 +1546,7 @@ mod cuda {
              earlier encoder never closed its NVENC session",
         );
 
-        pipeline.run();
+        pipeline.run().unwrap();
         thread::sleep(Duration::from_millis(250));
         teardown.apply(&pipeline);
         packets.load(Ordering::Relaxed)
@@ -1777,7 +1777,7 @@ mod pipewire {
         })
         .expect("wire the capture pipeline");
 
-        pipeline.run();
+        pipeline.run().unwrap();
         thread::sleep(Duration::from_millis(CAPTURE_MILLIS));
         teardown.apply(&pipeline);
         frames.load(Ordering::Relaxed)
@@ -1810,7 +1810,7 @@ mod pipewire {
         })
         .expect("wire the GPU capture pipeline");
 
-        pipeline.run();
+        pipeline.run().unwrap();
         thread::sleep(Duration::from_millis(CAPTURE_MILLIS));
         teardown.apply(&pipeline);
         frames.load(Ordering::Relaxed)

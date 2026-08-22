@@ -32,13 +32,16 @@ use crate::{
     bus::{Bus, BusEvent},
     control::{self, ControlMsg, ControlReceiver, ControlSender, RequestKind},
     element::{Element, ElementType, Sink, element_pp_log},
-    error::Result,
+    error::{Result, ThreadSpawnError},
 };
 
 /// Errors specific to `Queue`. Converts into the crate-wide `Error` via
 /// `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum QueueError {
+    #[error(transparent)]
+    ThreadSpawn(#[from] ThreadSpawnError),
+
     #[error("downstream channel closed")]
     ChannelClosed,
 
@@ -163,13 +166,14 @@ pub struct Queue {
 impl Queue {
     /// Spawns with [`OverflowPolicy::default`]. Use
     /// [`Queue::spawn_with_policy`] to drop instead of blocking when full.
+    /// Returns [`QueueError::ThreadSpawn`] if its worker cannot be created.
     pub fn spawn(
         name: impl Into<String>,
         capacity: usize,
         downstream: Box<dyn Sink>,
         bus: Bus,
         pipeline_id: Option<&str>,
-    ) -> Queue {
+    ) -> Result<Queue> {
         Self::spawn_with_policy(
             name,
             capacity,
@@ -187,6 +191,8 @@ impl Queue {
     /// one when this `Queue` came from a `.queue()`/`.queue_with_policy()`
     /// call) becomes this `Queue`'s `pp_log` `pipeline_id`; `None` if it
     /// wasn't built through a `Pipeline` at all (e.g. the tests below).
+    /// Returns [`QueueError::ThreadSpawn`] without retaining `downstream` if
+    /// the worker cannot be created.
     pub fn spawn_with_policy(
         name: impl Into<String>,
         capacity: usize,
@@ -194,14 +200,36 @@ impl Queue {
         bus: Bus,
         policy: OverflowPolicy,
         pipeline_id: Option<&str>,
-    ) -> Queue {
+    ) -> Result<Queue> {
+        Self::spawn_with_policy_using(
+            name,
+            capacity,
+            downstream,
+            bus,
+            policy,
+            pipeline_id,
+            |thread_name, task| thread::Builder::new().name(thread_name).spawn(task),
+        )
+    }
+
+    fn spawn_with_policy_using(
+        name: impl Into<String>,
+        capacity: usize,
+        downstream: Box<dyn Sink>,
+        bus: Bus,
+        policy: OverflowPolicy,
+        pipeline_id: Option<&str>,
+        spawn: impl FnOnce(
+            String,
+            Box<dyn FnOnce() + Send + 'static>,
+        ) -> std::io::Result<JoinHandle<()>>,
+    ) -> Result<Queue> {
         // Stored as `Arc<str>` (not `String`) so the `worker_name.clone()`
         // below, and every subsequent `BusEvent` this posts, are a
         // refcount bump instead of a fresh allocation — `Dropped` in
         // particular can fire once per buffer under sustained overflow.
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::Queue, &name, pipeline_id);
-        pp_info!(pp_log: &pp_log, "spawned: capacity={capacity}, policy={policy:?}");
         let (tx, rx) = bounded::<MediaBuffer>(capacity);
         let (control_tx, control_rx) = control::channel();
         let worker_name = name.clone();
@@ -210,9 +238,13 @@ impl Queue {
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = stop.clone();
 
-        let handle = thread::Builder::new()
-            .name(format!("queue:{worker_name}"))
-            .spawn(move || {
+        // `Builder::name` panics on interior NULs. Queue names are caller
+        // input and remain unchanged for element/log identity; only the OS
+        // thread's diagnostic label needs this sanitization.
+        let thread_name = format!("queue:{worker_name}").replace('\0', "�");
+        let handle = spawn(
+            thread_name.clone(),
+            Box::new(move || {
                 worker_loop(
                     rx,
                     control_rx,
@@ -222,10 +254,12 @@ impl Queue {
                     worker_pp_log,
                     worker_stop,
                 )
-            })
-            .expect("failed to spawn queue worker thread");
+            }),
+        )
+        .map_err(|source| QueueError::ThreadSpawn(ThreadSpawnError::new(thread_name, source)))?;
+        pp_info!(pp_log: &pp_log, "spawned: capacity={capacity}, policy={policy:?}");
 
-        Queue {
+        Ok(Queue {
             name,
             pp_log,
             tx,
@@ -234,7 +268,7 @@ impl Queue {
             handle: Some(handle),
             control: control_tx,
             stop,
-        }
+        })
     }
 }
 
@@ -663,6 +697,90 @@ mod tests {
         MediaBuffer::Packet(Arc::new(ffmpeg_next::Packet::empty()))
     }
 
+    struct DropAwareSink {
+        dropped: Arc<AtomicBool>,
+        pp_log: PpLog,
+    }
+
+    impl Drop for DropAwareSink {
+        fn drop(&mut self) {
+            self.dropped.store(true, Ordering::Release);
+        }
+    }
+
+    impl Element for DropAwareSink {
+        fn name(&self) -> Arc<str> {
+            "drop-aware".into()
+        }
+
+        fn element_type(&self) -> ElementType {
+            ElementType::Other
+        }
+
+        fn pp_log(&self) -> &PpLog {
+            &self.pp_log
+        }
+
+        fn pp_log_mut(&mut self) -> &mut PpLog {
+            &mut self.pp_log
+        }
+    }
+
+    impl Sink for DropAwareSink {
+        fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
+            Ok(())
+        }
+
+        fn control(&mut self, _msg: ControlMsg) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn thread_spawn_failure_is_returned_and_releases_downstream() {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let (bus, _bus_rx) = Bus::new();
+
+        let result = Queue::spawn_with_policy_using(
+            "queue",
+            1,
+            Box::new(DropAwareSink {
+                dropped: dropped.clone(),
+                pp_log: element_pp_log(ElementType::Other, "drop-aware", None),
+            }),
+            bus,
+            OverflowPolicy::default(),
+            None,
+            |_thread_name, _task| Err(std::io::Error::other("injected spawn failure")),
+        );
+
+        assert!(matches!(
+            result,
+            Err(crate::Error::QueueError(QueueError::ThreadSpawn(_)))
+        ));
+        assert!(dropped.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn interior_nul_in_queue_name_does_not_panic_while_naming_the_worker() {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let (bus, _bus_rx) = Bus::new();
+        let queue = Queue::spawn(
+            "nul\0queue",
+            1,
+            Box::new(DropAwareSink {
+                dropped: dropped.clone(),
+                pp_log: element_pp_log(ElementType::Other, "drop-aware", None),
+            }),
+            bus,
+            None,
+        )
+        .unwrap();
+
+        drop(queue);
+        assert!(dropped.load(Ordering::Acquire));
+    }
+
     #[test]
     fn block_never_drops() {
         let count = Arc::new(AtomicUsize::new(0));
@@ -679,7 +797,8 @@ mod tests {
             bus,
             OverflowPolicy::default(),
             None,
-        );
+        )
+        .unwrap();
         for _ in 0..10 {
             queue.consume(packet()).unwrap();
         }
@@ -709,7 +828,8 @@ mod tests {
             bus,
             OverflowPolicy::Block(Duration::from_millis(5)),
             None,
-        );
+        )
+        .unwrap();
         let mut timed_out = 0;
         for _ in 0..10 {
             match queue.consume(packet()) {
@@ -745,7 +865,8 @@ mod tests {
             bus,
             OverflowPolicy::DropNewest,
             None,
-        );
+        )
+        .unwrap();
         // Pushed much faster than the 20ms/item downstream can drain a
         // capacity-1 channel, so some of these must get dropped.
         for _ in 0..10 {
@@ -784,7 +905,8 @@ mod tests {
             bus,
             OverflowPolicy::default(),
             None,
-        );
+        )
+        .unwrap();
         queue.control(ControlMsg::Pause).unwrap(); // blocks until the worker is actually paused
 
         for _ in 0..3 {
@@ -825,7 +947,8 @@ mod tests {
             bus,
             OverflowPolicy::default(),
             None,
-        );
+        )
+        .unwrap();
         drop(queue);
     }
 
@@ -852,7 +975,8 @@ mod tests {
             bus,
             OverflowPolicy::default(),
             None,
-        );
+        )
+        .unwrap();
         queue.control(ControlMsg::Pause).unwrap(); // blocks until the worker is actually paused
         drop(queue);
     }
@@ -873,7 +997,8 @@ mod tests {
             bus,
             OverflowPolicy::default(),
             None,
-        );
+        )
+        .unwrap();
         queue.consume(packet()).unwrap();
         queue.control(ControlMsg::Stop).unwrap(); // blocks until the worker has exited
         drop(queue); // join should return immediately — the worker already returned
@@ -980,7 +1105,8 @@ mod tests {
             bus,
             OverflowPolicy::default(),
             None,
-        );
+        )
+        .unwrap();
         for _ in 0..3 {
             queue.consume(packet()).unwrap();
         }
@@ -1016,7 +1142,8 @@ mod tests {
             bus,
             OverflowPolicy::default(),
             None,
-        );
+        )
+        .unwrap();
 
         queue.control(ControlMsg::Pause).unwrap();
         queue.control(ControlMsg::Resume).unwrap();

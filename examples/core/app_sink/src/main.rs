@@ -63,7 +63,7 @@ fn main() -> media_pp::Result<()> {
         Ok(())
     })?;
 
-    pipeline.run();
+    pipeline.run()?;
 
     for event in pipeline.bus().iter() {
         match &event {

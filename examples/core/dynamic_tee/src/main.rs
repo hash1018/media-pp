@@ -34,7 +34,7 @@ fn main() -> media_pp::Result<()> {
     })?;
     let tee_handle = tee_handle.expect("wire closure must provide the TeeHandle");
 
-    pipeline.run();
+    pipeline.run()?;
     thread::sleep(Duration::from_millis(500));
 
     let (dynamic_counter, dynamic_count) = FrameCounter::new("dynamic-counter");

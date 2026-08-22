@@ -302,7 +302,7 @@ mod tests {
         })
         .expect("test pipeline wiring must succeed");
 
-        pipeline.run();
+        pipeline.run().unwrap();
         // Long enough to observe several ticks at the 20ms `TICK_INTERVAL`.
         std::thread::sleep(Duration::from_millis(200));
         pipeline.stop();
@@ -369,7 +369,7 @@ mod tests {
         })
         .expect("test pipeline wiring must succeed");
 
-        pipeline.run();
+        pipeline.run().unwrap();
         thread::sleep(Duration::from_millis(60));
         pipeline.pause();
         thread::sleep(Duration::from_millis(400));

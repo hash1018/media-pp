@@ -38,7 +38,7 @@ use crate::{
     control::{ControlReceiver, drain_control},
     element::{Element, ElementType, Source, SourceElement, element_pp_log},
     elements::VideoFormat,
-    error::Result,
+    error::{D3d11FrameWrapError, Result},
     pad::SrcPad,
     platform::windows::d3d11va::wrap_d3d11_texture,
     pool::UnboundObjectPool,
@@ -57,6 +57,9 @@ const POLL_GRANULARITY: Duration = Duration::from_millis(100);
 /// `Error` via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum DxgiCaptureSourceError {
+    #[error(transparent)]
+    FrameWrap(#[from] D3d11FrameWrapError),
+
     #[error("windows error: {0}")]
     Windows(#[from] windows::core::Error),
 
@@ -985,7 +988,7 @@ impl DxgiCaptureSource {
         // `ffmpeg::frame::Video`'s own `Drop` runs on whatever was there
         // before, releasing that frame's GPU texture right here (same
         // pattern `D3d11Upload::consume` documents).
-        *frame = wrap_d3d11_texture(texture, self.width, self.height);
+        *frame = wrap_d3d11_texture(texture, self.width, self.height)?;
         Ok(frame)
     }
 }
@@ -1453,7 +1456,7 @@ mod tests {
                 Ok(())
             })
             .expect("wiring a capture source to an AppSink should succeed");
-            pipeline.run();
+            pipeline.run().unwrap();
             std::thread::sleep(std::time::Duration::from_millis(300));
             pipeline.stop();
 

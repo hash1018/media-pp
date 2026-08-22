@@ -329,7 +329,7 @@ mod tests {
         })
         .expect("test pipeline wiring must succeed");
 
-        pipeline.run();
+        pipeline.run().unwrap();
         // Long enough to observe several ticks at the 30fps `framerate`
         // above (self-paced since `TestVideoSource` now generates at that
         // rate itself — see its own docs), not just one or two.
@@ -428,7 +428,7 @@ mod tests {
         })
         .expect("test pipeline wiring must succeed");
 
-        pipeline.run();
+        pipeline.run().unwrap();
         thread::sleep(Duration::from_millis(60));
         pipeline.pause();
         thread::sleep(Duration::from_millis(400));
@@ -536,7 +536,7 @@ mod tests {
         })
         .expect("test pipeline wiring must succeed");
 
-        pipeline.run();
+        pipeline.run().unwrap();
         let slow_done = rx
             .recv_timeout(Duration::from_secs(1))
             .expect("expected the first (slow) frame to finish");

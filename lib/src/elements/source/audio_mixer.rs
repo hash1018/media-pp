@@ -690,7 +690,7 @@ mod tests {
             Ok(())
         })
         .expect("test pipeline wiring must succeed");
-        pipeline.run();
+        pipeline.run().unwrap();
 
         let mut input_a = handle.add_source("a").expect("mixer still alive");
         let mut input_b = handle.add_source("b").expect("mixer still alive");
@@ -759,7 +759,7 @@ mod tests {
             Ok(())
         })
         .expect("test pipeline wiring must succeed");
-        pipeline.run();
+        pipeline.run().unwrap();
 
         let mut input_a = handle.add_source("a").expect("mixer still alive");
         let mut input_b = handle.add_source("b").expect("mixer still alive");
@@ -823,7 +823,7 @@ mod tests {
             Ok(())
         })
         .expect("test pipeline wiring must succeed");
-        pipeline.run();
+        pipeline.run().unwrap();
 
         let mut input_a = handle.add_source("a").unwrap();
         input_a
@@ -874,7 +874,7 @@ mod tests {
             Ok(())
         })
         .expect("test pipeline wiring must succeed");
-        pipeline.run();
+        pipeline.run().unwrap();
 
         let mut input_a = handle.add_source("a").unwrap();
         input_a

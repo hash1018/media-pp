@@ -148,7 +148,7 @@ mod windows_example {
             .build();
 
         println!("recording desktop + system audio to {path} — type `q` + Enter to stop");
-        pipeline.run();
+        pipeline.run()?;
 
         {
             let pipeline = pipeline.clone();
@@ -345,7 +345,7 @@ mod linux_example {
             .build();
 
         println!("recording desktop + system audio to {path} — type `q` + Enter to stop");
-        pipeline.run();
+        pipeline.run()?;
 
         {
             let pipeline = pipeline.clone();

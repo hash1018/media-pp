@@ -50,7 +50,7 @@ fn main() -> media_pp::Result<()> {
         Ok(())
     })?;
 
-    pipeline.run();
+    pipeline.run()?;
 
     // A live camera never reaches Eos on its own — run for a fixed
     // window, then stop and report what came in. A real connection

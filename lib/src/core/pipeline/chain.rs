@@ -54,7 +54,7 @@ trait StageBuilder: Send {
         downstream: Box<dyn Sink>,
         bus: &Bus,
         pipeline_id: &str,
-    ) -> Box<dyn Sink>;
+    ) -> Result<Box<dyn Sink>>;
 }
 
 struct DirectStage<T>(T);
@@ -144,12 +144,12 @@ where
         downstream: Box<dyn Sink>,
         _bus: &Bus,
         pipeline_id: &str,
-    ) -> Box<dyn Sink> {
+    ) -> Result<Box<dyn Sink>> {
         let mut element = self.0;
         *element.pp_log_mut() =
             element_pp_log(element.element_type(), &element.name(), Some(pipeline_id));
         element.src_pads()[0].link(downstream);
-        Box::new(FlowTracer { inner: element })
+        Ok(Box::new(FlowTracer { inner: element }))
     }
 }
 
@@ -249,15 +249,15 @@ impl StageBuilder for QueueStage {
         downstream: Box<dyn Sink>,
         bus: &Bus,
         pipeline_id: &str,
-    ) -> Box<dyn Sink> {
-        Box::new(Queue::spawn_with_policy(
+    ) -> Result<Box<dyn Sink>> {
+        Ok(Box::new(Queue::spawn_with_policy(
             self.name,
             self.capacity,
             downstream,
             bus.for_element(self.id),
             self.policy,
             Some(pipeline_id),
-        ))
+        )?))
     }
 }
 
@@ -385,9 +385,9 @@ impl ChainBuilder {
             .elements
             .into_iter()
             .rev()
-            .fold(terminal, |downstream, stage| {
+            .try_fold(terminal, |downstream, stage| {
                 stage.wrap(downstream, &self.context.bus, &self.context.pipeline_id)
-            });
+            })?;
         Ok(DetachedBranch {
             root,
             plan: BranchPlan {

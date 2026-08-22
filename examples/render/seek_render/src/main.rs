@@ -110,7 +110,7 @@ mod windows_example {
             return Ok(());
         }
 
-        pipeline.run();
+        pipeline.run()?;
 
         // Reads seek requests for as long as the process lives, on its own
         // thread — a blocked stdin read can't also notice natural playback

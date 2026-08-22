@@ -22,7 +22,7 @@ use std::{
 use crate::{
     bus::{Bus, BusEvent, BusReceiver},
     element::Element,
-    error::Result,
+    error::{Result, ThreadSpawnError},
 };
 
 /// Checked, not blocked on: a [`Driver`] owns a single self-contained loop
@@ -72,7 +72,9 @@ pub trait Driver: Element {
 /// for a dataflow graph (`Clock`, `Pause`, `Seek`, the `wire` callback).
 ///
 /// `run()` is asynchronous, same as `Pipeline::run`: it starts the driver
-/// on a background thread and returns immediately. Watch
+/// on a background thread and returns immediately, or returns a
+/// [`ThreadSpawnError`](crate::error::ThreadSpawnError) if the worker cannot
+/// be created. Watch
 /// [`DriverRunner::bus`] to learn when it's actually done — draining it
 /// blocks until every `Bus` sender has been dropped. The built-in drivers
 /// keep that sender only for the duration of their background `run` call,
@@ -106,12 +108,25 @@ impl DriverRunner {
     /// immediately. A no-op if this `DriverRunner` is already running or
     /// has already finished a previous run — same posture as
     /// [`crate::pipeline::Pipeline::run`], not reusable afterward.
-    pub fn run(self: &Arc<Self>) {
+    /// Returns a typed error if the worker thread cannot be created.
+    pub fn run(self: &Arc<Self>) -> Result<()> {
+        self.run_with_spawner(|thread_name, task| {
+            thread::Builder::new().name(thread_name).spawn(task)
+        })
+    }
+
+    fn run_with_spawner(
+        self: &Arc<Self>,
+        spawn: impl FnOnce(
+            String,
+            Box<dyn FnOnce() + Send + 'static>,
+        ) -> std::io::Result<thread::JoinHandle<()>>,
+    ) -> Result<()> {
         let Some(mut driver) = self.driver.lock().unwrap().take() else {
-            return;
+            return Ok(());
         };
         let Some(bus) = self.bus.lock().unwrap().take() else {
-            return;
+            return Ok(());
         };
 
         self.running.store(true, Ordering::Release);
@@ -126,9 +141,10 @@ impl DriverRunner {
         // `stop_flag` for a caller that just drops its handle (see `Drop`
         // below, which depends on this being a `Weak`).
         let this = Arc::downgrade(self);
-        thread::Builder::new()
-            .name("driver".into())
-            .spawn(move || {
+        let thread_name = "driver".to_owned();
+        let spawn_result = spawn(
+            thread_name.clone(),
+            Box::new(move || {
                 let name = driver.name();
                 let element_type = driver.element_type();
                 if let Err(error) = driver.run(&stop, &bus) {
@@ -144,8 +160,13 @@ impl DriverRunner {
                 if let Some(this) = this.upgrade() {
                     this.running.store(false, Ordering::Release);
                 }
-            })
-            .expect("failed to spawn driver thread");
+            }),
+        );
+        if let Err(source) = spawn_result {
+            self.running.store(false, Ordering::Release);
+            return Err(ThreadSpawnError::new(thread_name, source).into());
+        }
+        Ok(())
     }
 
     /// Requests an early stop — see [`StopReceiver`]'s own docs for why
@@ -228,7 +249,7 @@ mod tests {
             stopped: stopped_tx,
             pp_log: element_pp_log(ElementType::Other, "looping", None),
         });
-        runner.run();
+        runner.run().unwrap();
         started_rx
             .recv_timeout(Duration::from_secs(1))
             .expect("driver should start");
@@ -238,5 +259,26 @@ mod tests {
         stopped_rx
             .recv_timeout(Duration::from_secs(1))
             .expect("dropping the last DriverRunner handle should stop the background thread");
+    }
+
+    #[test]
+    fn thread_spawn_failure_is_returned_and_runner_is_not_left_running() {
+        let (started_tx, started_rx) = mpsc::channel();
+        let (stopped_tx, _stopped_rx) = mpsc::channel();
+        let runner = DriverRunner::new(LoopingDriver {
+            started: started_tx,
+            stopped: stopped_tx,
+            pp_log: element_pp_log(ElementType::Other, "looping", None),
+        });
+
+        let error = runner
+            .run_with_spawner(|_thread_name, _task| {
+                Err(std::io::Error::other("injected spawn failure"))
+            })
+            .expect_err("the injected spawn failure must be returned");
+
+        assert!(matches!(error, crate::Error::ThreadSpawnError(_)));
+        assert!(!runner.running.load(Ordering::Acquire));
+        assert!(started_rx.try_recv().is_err());
     }
 }

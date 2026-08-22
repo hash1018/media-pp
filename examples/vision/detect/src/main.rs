@@ -210,7 +210,7 @@ fn play(model_path: &str, video_path: &str, proxy: EventLoopProxy<AppEvent>) -> 
         Ok(())
     })?;
 
-    pipeline.run();
+    pipeline.run()?;
 
     for event in pipeline.bus().iter() {
         match &event {

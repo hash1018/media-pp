@@ -64,7 +64,7 @@ mod example {
         // `run()` starts publishing on a background thread and returns right
         // away — any failure shows up as a `BusEvent::Error` here instead of
         // through a returned `Result`.
-        pipeline.run();
+        pipeline.run()?;
 
         // Errors no longer end the pipeline on their own (see `BusEvent`'s
         // docs) — watch for one here and `stop()`, or this would just keep
