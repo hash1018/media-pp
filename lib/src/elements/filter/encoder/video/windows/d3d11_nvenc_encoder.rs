@@ -34,27 +34,33 @@ use crate::{
 /// `Error` via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum D3d11NvencEncoderError {
+    /// The requested NVENC implementation is unavailable in the FFmpeg build.
     #[error(
         "encoder {0:?} not found — this ffmpeg build wasn't compiled with \
          NVENC support (run `ffmpeg -encoders` to check)"
     )]
     CodecNotFound(String),
 
+    /// FFmpeg could not wrap the supplied D3D11 device as a hardware device context.
     #[error("failed to create D3D11VA hw device context (code {0})")]
     HwDeviceInit(i32),
 
+    /// FFmpeg could not allocate the encoder's D3D11 frame-pool description.
     #[error("failed to allocate a D3D11 hw frames context")]
     HwFramesAlloc,
 
+    /// FFmpeg could not initialize the encoder's fixed-size D3D11 frame pool.
     #[error(
         "failed to initialize the D3D11 hw frames context (code {0}) — most \
          often the requested {1}x{2} exceeds what this GPU's encoder accepts"
     )]
     HwFramesInit(i32, u32, u32),
 
+    /// FFmpeg could not acquire a frame from the encoder-owned D3D11 pool.
     #[error("failed to acquire a frame from the encoder's own D3D11 pool (code {0})")]
     HwFrameGet(i32),
 
+    /// The input frame is not backed by a D3D11 texture.
     #[error(
         "D3d11NvencEncoder only accepts Pixel::D3D11 frames (chain a \
          D3d11Upload, or feed it a D3d11VideoCompositor/DxgiCaptureSource \
@@ -62,52 +68,80 @@ pub enum D3d11NvencEncoderError {
     )]
     UnsupportedFormat(ffmpeg::format::Pixel),
 
+    /// Input dimensions differ from the fixed encoder dimensions.
     #[error(
         "frame is {actual_width}x{actual_height}, but D3d11NvencEncoder was \
          opened for {expected_width}x{expected_height}"
     )]
     DimensionMismatch {
+        /// Input frame width in pixels.
         actual_width: u32,
+        /// Input frame height in pixels.
         actual_height: u32,
+        /// Width configured for the encoder.
         expected_width: u32,
+        /// Height configured for the encoder.
         expected_height: u32,
     },
 
+    /// The supplied immediate context belongs to another D3D11 device.
     #[error("the shared ID3D11DeviceContext belongs to a different ID3D11Device than the encoder")]
     ContextDeviceMismatch,
 
+    /// The input texture belongs to another D3D11 device.
     #[error("a Pixel::D3D11 frame's texture lives on a different ID3D11Device than this encoder")]
     DeviceMismatch,
 
+    /// The backing texture is smaller than the visible frame to encode.
     #[error(
         "D3D11 texture is {actual_width}x{actual_height}, smaller than the encoder's {expected_width}x{expected_height} visible frame"
     )]
     TextureTooSmall {
+        /// Backing texture width in pixels.
         actual_width: u32,
+        /// Backing texture height in pixels.
         actual_height: u32,
+        /// Minimum width required by the encoder.
         expected_width: u32,
+        /// Minimum height required by the encoder.
         expected_height: u32,
     },
 
+    /// The frame selects a texture-array slice outside the resource bounds.
     #[error("D3D11 texture array index {index} is outside ArraySize {array_size}")]
-    InvalidArrayIndex { index: isize, array_size: u32 },
+    InvalidArrayIndex {
+        /// Invalid texture-array index from the frame.
+        index: isize,
+        /// Number of slices in the backing texture array.
+        array_size: u32,
+    },
 
+    /// The texture format differs from the format fixed at encoder creation.
     #[error(
         "frame carries a {actual:?} texture, but D3d11NvencEncoder was opened \
          for {expected:?} — an encoder's input format is fixed at \
          avcodec_open2 time and cannot change mid-stream"
     )]
-    TextureFormatMismatch { actual: i32, expected: i32 },
+    TextureFormatMismatch {
+        /// Actual DXGI format numeric value.
+        actual: i32,
+        /// Expected DXGI format numeric value.
+        expected: i32,
+    },
 
+    /// A frame tagged as D3D11 contains no valid texture reference.
     #[error("a Pixel::D3D11 frame arrived without a texture in data[0]")]
     MissingTexture,
 
+    /// The sink received a buffer other than decoded video or end-of-stream.
     #[error("D3d11NvencEncoder only accepts Video or Eos buffers, got {0}")]
     UnsupportedBuffer(&'static str),
 
+    /// A Direct3D resource or copy operation failed.
     #[error("windows error: {0}")]
     Windows(#[from] windows::core::Error),
 
+    /// FFmpeg rejected encoder, hardware-context, frame, or packet processing.
     #[error("ffmpeg error: {0}")]
     Ffmpeg(#[from] ffmpeg::Error),
 }
@@ -186,11 +220,14 @@ impl D3d11NvencInputFormat {
 /// derived from the other.
 #[derive(Debug, Clone, Copy)]
 pub struct D3d11NvencEncoderOptions {
+    /// NVENC bitstream codec to open.
     pub codec: D3d11NvencCodec,
     /// The texture format every input frame must carry. See
     /// [`D3d11NvencInputFormat`].
     pub input_format: D3d11NvencInputFormat,
+    /// Encoded frame width in pixels.
     pub width: u32,
+    /// Encoded frame height in pixels.
     pub height: u32,
     /// Must match the `pts` unit of whatever frames this receives.
     pub time_base: ffmpeg::Rational,
@@ -198,6 +235,7 @@ pub struct D3d11NvencEncoderOptions {
     /// bitstream — not required to match the real interval between
     /// `consume` calls. See [`crate::elements::SwEncoderOptions::frame_rate`].
     pub frame_rate: ffmpeg::Rational,
+    /// Target encoded bit rate, in bits per second.
     pub bit_rate: usize,
     /// Frames between keyframes (`AVCodecContext.gop_size`). Always set
     /// explicitly, for the join-latency and segmenting reasons

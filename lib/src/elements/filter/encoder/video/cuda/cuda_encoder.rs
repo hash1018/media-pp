@@ -43,6 +43,7 @@ impl CudaCodec {
 /// only be expressible, never reachable.
 #[derive(Debug, Clone, Copy)]
 pub struct CudaEncoderOptions {
+    /// NVENC bitstream codec to open.
     pub codec: CudaCodec,
     /// What the incoming CUDA surfaces hold. NVENC takes `Bgra` as directly
     /// as `Nv12`, converting to YUV in hardware, so a screen-capture
@@ -52,7 +53,9 @@ pub struct CudaEncoderOptions {
     /// actually produces; a mismatch is refused per frame rather than
     /// encoded as garbage.
     pub input_format: CudaFrameFormat,
+    /// Encoded frame width in pixels.
     pub width: u32,
+    /// Encoded frame height in pixels.
     pub height: u32,
     /// Must match the `pts` unit of whatever frames this receives.
     pub time_base: ffmpeg::Rational,
@@ -60,6 +63,7 @@ pub struct CudaEncoderOptions {
     /// bitstream — not required to match the real interval between `consume`
     /// calls. See [`crate::elements::SwEncoderOptions::frame_rate`].
     pub frame_rate: ffmpeg::Rational,
+    /// Target encoded bit rate, in bits per second.
     pub bit_rate: usize,
     /// Frames between keyframes (`AVCodecContext.gop_size`). Always set
     /// explicitly, for the join-latency and segmenting reasons
@@ -71,32 +75,44 @@ pub struct CudaEncoderOptions {
 /// via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum CudaEncoderError {
+    /// The requested NVENC implementation is unavailable in the FFmpeg build.
     #[error("encoder `{0}` not found in this ffmpeg build")]
     CodecNotFound(&'static str),
 
+    /// FFmpeg rejected encoder or hardware-context processing.
     #[error("ffmpeg error: {0}")]
     Ffmpeg(#[from] ffmpeg::Error),
 
+    /// The input frame is not backed by CUDA hardware surfaces.
     #[error("CudaEncoder only encodes CUDA frames, got {0:?}")]
     UnsupportedFormat(ffmpeg::format::Pixel),
 
+    /// The CUDA surface layout differs from the format fixed at encoder creation.
     #[error("this CudaEncoder was opened for {expected:?} surfaces, got {actual:?}")]
     UnsupportedSurfaceFormat {
+        /// Surface format configured for the encoder.
         expected: ffmpeg::format::Pixel,
+        /// Surface format carried by the input frame.
         actual: ffmpeg::format::Pixel,
     },
 
+    /// The sink received a buffer other than decoded video or end-of-stream.
     #[error("CudaEncoder only accepts Video and Eos buffers, got a {0}")]
     UnsupportedBuffer(&'static str),
 
+    /// Input dimensions differ from the fixed encoder dimensions.
     #[error(
         "frame is {actual_width}x{actual_height}, but this CudaEncoder was built for \
          {expected_width}x{expected_height}"
     )]
     DimensionMismatch {
+        /// Input frame width in pixels.
         actual_width: u32,
+        /// Input frame height in pixels.
         actual_height: u32,
+        /// Width configured for the encoder.
         expected_width: u32,
+        /// Height configured for the encoder.
         expected_height: u32,
     },
 
@@ -110,9 +126,11 @@ pub enum CudaEncoderError {
     #[error("CUDA frame belongs to a different CUDA context than this encoder")]
     ForeignContext,
 
+    /// Creating the CUDA hardware frames context failed.
     #[error("failed to build the CUDA frames context: {0}")]
     HwFrames(String),
 
+    /// FFmpeg could not retain the CUDA device context for the encoder.
     #[error("failed to reference the CUDA device context")]
     HwDeviceRef,
 }
