@@ -198,6 +198,10 @@ pub struct WebRtcTrackSink {
     codec: Option<Codec>,
     negotiated_codecs: Arc<Mutex<Vec<Codec>>>,
     command_tx: Sender<Command>,
+    /// libavcodec may express encoder delay as a negative first PTS (Opus is
+    /// a common example), while RTP media time is unsigned. The first packet
+    /// establishes one track-wide shift so relative timing is preserved.
+    timestamp_offset: Option<i64>,
 }
 
 impl WebRtcTrackSink {
@@ -212,6 +216,7 @@ impl WebRtcTrackSink {
             codec,
             negotiated_codecs,
             command_tx,
+            timestamp_offset: None,
             pp_log: element_pp_log(
                 ElementType::WebRtcPeer,
                 &format!("webrtc-track-{}", id.0),
@@ -309,6 +314,7 @@ impl Sink for WebRtcTrackSink {
                 .into());
             }
         }
+        let buf = self.normalize_packet_timestamp(buf)?;
         // `WebRtcPeer::run` gone (channel disconnected) means this track is
         // dead — surface it as `Err` rather than swallowing it, so whatever
         // pipeline this `Sink` is plugged into (its own `Queue`, its own
@@ -341,6 +347,42 @@ impl Sink for WebRtcTrackSink {
         // Terminal, same as AppSink/RtspSink: nothing buffered or
         // downstream to flush/forward for any ControlMsg.
         Ok(())
+    }
+}
+
+impl WebRtcTrackSink {
+    fn normalize_packet_timestamp(&mut self, buf: MediaBuffer) -> Result<MediaBuffer> {
+        let MediaBuffer::Packet(packet) = buf else {
+            return Ok(buf);
+        };
+        let Some(pts) = packet.pts() else {
+            return Ok(MediaBuffer::Packet(packet));
+        };
+        let offset = match self.timestamp_offset {
+            Some(offset) => offset,
+            None if pts < 0 => {
+                pts.checked_neg()
+                    .ok_or(WebRtcError::PacketTimestampNormalizationOverflow {
+                        value: pts,
+                        offset: 0,
+                    })?
+            }
+            None => 0,
+        };
+        self.timestamp_offset = Some(offset);
+        if offset == 0 {
+            return Ok(MediaBuffer::Packet(packet));
+        }
+
+        let shifted = |value: i64| {
+            value
+                .checked_add(offset)
+                .ok_or(WebRtcError::PacketTimestampNormalizationOverflow { value, offset })
+        };
+        let mut normalized = (*packet).clone();
+        normalized.set_pts(Some(shifted(pts)?));
+        normalized.set_dts(packet.dts().map(shifted).transpose()?);
+        Ok(MediaBuffer::Packet(Arc::new(normalized)))
     }
 }
 
@@ -398,26 +440,27 @@ impl WebRtcTrackSource {
         }
     }
 
-    /// Blocks for at most `timeout` until the first actual RTP media payload
-    /// confirms this track's stream parameters. The returned
-    /// [`WebRtcStreamInfo`] can derive the RTP time base and minimal FFmpeg
-    /// parameters needed to construct a decoder.
+    /// Blocks for at most `timeout` until actual RTP media confirms enough
+    /// stream parameters to construct downstream consumers. Most codecs are
+    /// known from the first payload; H.264 waits until both SPS and PPS have
+    /// arrived. The returned [`WebRtcStreamInfo`] can derive the RTP time base
+    /// and FFmpeg parameters for a decoder or supported muxer.
     ///
     /// A timeout returns [`WebRtcError::StreamInfoTimeout`] without consuming
     /// or invalidating anything, so the caller may retry. Once confirmed, the
     /// value is cached and every later call returns it immediately. If the
-    /// peer closes before any media arrives, this returns
-    /// [`WebRtcError::Closed`]. This method does not consume the media packet
-    /// itself: it remains buffered for [`SourceElement::run`].
+    /// peer closes before the required media information arrives, this returns
+    /// [`WebRtcError::Closed`]. This method does not consume media packets:
+    /// they remain buffered for [`SourceElement::run`].
     pub fn wait_stream_info(&self, timeout: Duration) -> Result<WebRtcStreamInfo> {
         let mut state = self.stream_info.lock().unwrap();
-        if let Some(info) = state.cached {
-            return Ok(info);
+        if let Some(info) = &state.cached {
+            return Ok(info.clone());
         }
 
         match state.rx.recv_timeout(timeout) {
             Ok(info) => {
-                state.cached = Some(info);
+                state.cached = Some(info.clone());
                 Ok(info)
             }
             Err(RecvTimeoutError::Timeout) => Err(WebRtcError::StreamInfoTimeout {

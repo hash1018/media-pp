@@ -44,6 +44,15 @@ pub enum WebRtcError {
 
     #[error("WebRTC packet has a negative PTS: {0}")]
     NegativePacketPts(i64),
+    /// Applying the track's initial timestamp shift overflowed an FFmpeg
+    /// packet timestamp.
+    #[error("WebRTC packet timestamp normalization overflows: value={value}, offset={offset}")]
+    PacketTimestampNormalizationOverflow {
+        /// PTS or DTS before normalization.
+        value: i64,
+        /// Track-wide shift established by its first packet.
+        offset: i64,
+    },
     /// A packet time base has a non-positive component.
 
     #[error("WebRTC packet has an invalid time base: {numerator}/{denominator}")]
@@ -96,10 +105,30 @@ pub enum WebRtcError {
         /// Caller-supplied maximum wait.
         timeout: Duration,
     },
-    /// The selected RTP payload is not media FFmpeg can decode (for example,
-    /// an RTX repair payload rather than an audio/video codec).
-    #[error("WebRTC codec {0:?} cannot be converted to FFmpeg decoder parameters")]
-    UnsupportedDecoderCodec(Codec),
+    /// The selected RTP payload is not media that can be represented as
+    /// FFmpeg codec parameters (for example, RTX repair payload).
+    #[error("WebRTC codec {0:?} cannot be converted to FFmpeg codec parameters")]
+    UnsupportedCodecParameters(Codec),
+    /// H.264 codec parameters were requested from an SDP-only value rather
+    /// than stream info confirmed from received SPS/PPS.
+    #[error("H.264 SPS/PPS have not been received yet")]
+    H264ParameterSetsNotReceived,
+    /// A received H.264 parameter set cannot form codec configuration.
+    #[error("received H.264 {0} is invalid")]
+    InvalidH264ParameterSet(&'static str),
+    /// Codec configuration cannot fit FFmpeg's signed extradata length.
+    #[error("codec configuration is too large: {size} bytes")]
+    CodecConfigurationTooLarge {
+        /// Configuration size that could not be represented.
+        size: usize,
+    },
+    /// FFmpeg could not allocate owned codec extradata plus its required
+    /// padding.
+    #[error("failed to allocate {size} bytes for FFmpeg codec parameters")]
+    CodecParametersAllocationFailed {
+        /// Requested allocation size including FFmpeg padding.
+        size: usize,
+    },
     /// str0m accepts any non-zero `u32` clock rate, while FFmpeg's Rational
     /// denominator and audio sample rate are signed 32-bit values.
     #[error("WebRTC codec {codec:?} has a clock rate FFmpeg cannot represent: {clock_rate}")]

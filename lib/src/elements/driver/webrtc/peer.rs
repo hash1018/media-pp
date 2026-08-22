@@ -30,7 +30,7 @@ use crate::{
 
 use super::{
     command::{Command, TrackId, TrackOutState, WebRtcError},
-    stream_info::WebRtcStreamInfo,
+    stream_info::{StreamInfoProbe, WebRtcStreamInfo},
     track::{AttachedTrack, TrackEndpoints, WebRtcHandle, WebRtcTrackSink, WebRtcTrackSource},
 };
 
@@ -103,10 +103,10 @@ pub struct WebRtcPeer {
     /// `ControlMsg` at all. Its codec cell is the same
     /// `WebRtcTrackSource`'s [`WebRtcTrackSource::codec`] cell — written
     /// here (from `Event::MediaData`), read there, from whatever thread the
-    /// caller checks it on. A separate one-slot channel confirms the first
-    /// payload's full [`str0m::format::CodecSpec`] for `wait_stream_info`;
-    /// both are shared across threads, while the map itself still isn't (see
-    /// below).
+    /// caller checks it on. A separate one-slot channel confirms enough actual
+    /// payload information for `wait_stream_info` (including received H.264
+    /// SPS/PPS); both are shared across threads, while the map itself still
+    /// isn't (see below).
     tracks_in: HashMap<Mid, TrackInState>,
     tracks_out: HashMap<TrackId, TrackOutState>,
     /// Pending outbound codec selections for locally-requested tracks. Each entry
@@ -157,6 +157,8 @@ struct TrackInState {
     data_tx: Sender<MediaBuffer>,
     codec: Arc<Mutex<Option<Codec>>>,
     stream_info_tx: Sender<WebRtcStreamInfo>,
+    stream_info_probe: StreamInfoProbe,
+    stream_info_sent: bool,
 }
 
 impl WebRtcPeer {
@@ -256,6 +258,8 @@ impl WebRtcPeer {
                     data_tx: tx,
                     codec: codec.clone(),
                     stream_info_tx,
+                    stream_info_probe: StreamInfoProbe::new(),
+                    stream_info_sent: false,
                 },
             );
             WebRtcTrackSource::new(
@@ -518,7 +522,7 @@ impl WebRtcPeer {
                 self.attach_track(id, added.mid, added.kind, added.direction);
             }
             Event::MediaData(data) => {
-                if let Some(track) = self.tracks_in.get(&data.mid) {
+                if let Some(track) = self.tracks_in.get_mut(&data.mid) {
                     // Every packet, not just the first: cheap (one lock),
                     // and correct if the remote side ever actually changes
                     // codec mid-stream (rare, but the payload type is free
@@ -526,12 +530,15 @@ impl WebRtcPeer {
                     // codec`'s own docs for why this can't be pinned down
                     // any earlier than "whatever the last packet said").
                     let codec = data.params.spec();
-                    let first_packet = track.codec.lock().unwrap().replace(codec.codec).is_none();
-                    if first_packet {
-                        // Signal before queueing the first packet. The caller
-                        // may now build a downstream graph while that packet
-                        // remains buffered in `data_tx`.
-                        let _ = track.stream_info_tx.try_send(codec.into());
+                    track.codec.lock().unwrap().replace(codec.codec);
+                    if !track.stream_info_sent
+                        && let Some(info) = track.stream_info_probe.observe(codec, &data.data)
+                    {
+                        // Signal before queueing the payload that completed
+                        // the information. Earlier payloads are already in
+                        // `data_tx`; all of them stay buffered while the caller
+                        // builds its downstream graph.
+                        track.stream_info_sent = track.stream_info_tx.try_send(info).is_ok();
                     }
 
                     let mut packet = ffmpeg::Packet::copy(&data.data);

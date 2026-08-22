@@ -4312,6 +4312,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "webrtc_record"
+version = "0.1.0"
+dependencies = [
+ "media-pp",
+ "str0m",
+]
+
+[[package]]
 name = "webrtc_video_call"
 version = "0.1.0"
 dependencies = [

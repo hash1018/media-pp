@@ -141,6 +141,37 @@ fn a_remote_track_sink_rejects_packets_until_its_codec_is_declared() {
 }
 
 #[test]
+fn track_sink_shifts_a_negative_encoder_delay_without_changing_packet_spacing() {
+    let (handle, command_rx) = command_only_handle(2);
+    let negotiated = Arc::new(std::sync::Mutex::new(vec![Codec::Opus]));
+    let mut sink = WebRtcTrackSink::new(
+        TrackId(8),
+        Some(Codec::Opus),
+        negotiated,
+        handle.command_tx.clone(),
+    );
+
+    for pts in [-312, 648] {
+        let mut packet = ffmpeg::Packet::copy(&[1, 2, 3]);
+        packet.set_time_base(ffmpeg::Rational::new(1, 48_000));
+        packet.set_pts(Some(pts));
+        packet.set_dts(Some(pts));
+        sink.consume(MediaBuffer::Packet(Arc::new(packet)))
+            .expect("negative encoder delay should be normalized before RTP");
+    }
+
+    for expected in [0, 960] {
+        let Command::Push(TrackId(8), Some(Codec::Opus), MediaBuffer::Packet(packet)) =
+            command_rx.recv().expect("normalized packet was queued")
+        else {
+            panic!("expected an Opus packet command");
+        };
+        assert_eq!(packet.pts(), Some(expected));
+        assert_eq!(packet.dts(), Some(expected));
+    }
+}
+
+#[test]
 fn selecting_an_unnegotiated_codec_preserves_the_previous_selection() {
     let (handle, command_rx) = command_only_handle(1);
     let negotiated = Arc::new(std::sync::Mutex::new(vec![Codec::Vp8]));
@@ -203,7 +234,9 @@ fn wait_stream_info_can_retry_after_timeout_and_caches_the_result() {
         channels: None,
         format: FormatParams::default(),
     });
-    info_tx.send(expected).expect("source still owns receiver");
+    info_tx
+        .send(expected.clone())
+        .expect("source still owns receiver");
     assert_eq!(
         source
             .wait_stream_info(Duration::from_secs(1))
@@ -331,7 +364,19 @@ fn push_packets(sink: &mut WebRtcTrackSink) {
         // `write_track` needs a real time base to build str0m's own
         // `MediaTime` from — a bare `Packet::copy` defaults to 0/0,
         // which is silently unusable (dropped, not an error).
-        let mut packet = ffmpeg::Packet::copy(&[1, 2, 3, 4]);
+        let payload: &[u8] = if i == 0 {
+            // A complete Annex-B access unit with SPS/PPS. H.264 stream info
+            // intentionally does not become ready from a merely-labeled
+            // payload; the actual parameter sets must cross RTP first.
+            &[
+                0, 0, 0, 1, 0x67, 0x42, 0xc0, 0x1f, 0x1a, 0x32, 0x35, 0x01, 0x40, 0x7a, 0x40, 0x3c,
+                0x22, 0x11, 0xa8, 0, 0, 0, 1, 0x68, 0x1a, 0x34, 0xe3, 0xc8, 0, 0, 0, 1, 0x65, 0x88,
+                0x84,
+            ]
+        } else {
+            &[1, 2, 3, 4]
+        };
+        let mut packet = ffmpeg::Packet::copy(payload);
         packet.set_time_base(ffmpeg::Rational::new(1, 90_000));
         packet.set_pts(Some(i * 3_000));
         sink.consume(MediaBuffer::Packet(Arc::new(packet)))
@@ -501,8 +546,8 @@ fn one_h264_sendrecv_track_carries_data_both_ways_with_the_declared_payload_type
     let decoder = SwDecoder::new(
         "peer-a-h264-decode",
         info_a
-            .decoder_parameters()
-            .expect("actual H.264 info should create decoder parameters"),
+            .codec_parameters()
+            .expect("actual H.264 info should create codec parameters"),
     )
     .expect("peer-a H.264 decoder should open");
     let (counter, decoded_by_a) = FrameCounter::new("decoded-by-a");

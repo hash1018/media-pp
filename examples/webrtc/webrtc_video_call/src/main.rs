@@ -378,7 +378,7 @@ mod windows_example {
                 stream_info.codec()
             )));
         }
-        let decoder = SwDecoder::new(format!("{name}-decode"), stream_info.decoder_parameters()?)?;
+        let decoder = SwDecoder::new(format!("{name}-decode"), stream_info.codec_parameters()?)?;
         let renderer = render_common::d3d12_window_renderer(
             format!("{name}-render"),
             gpu,

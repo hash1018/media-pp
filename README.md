@@ -142,9 +142,9 @@ The examples are grouped by purpose:
   source (PipeWire) are genuinely Linux-only.
 - `examples/rtsp`: publishing, seeking, and receiving RTSP streams.
 - `examples/vision`: scaling and ONNX object detection.
-- `examples/webrtc`: data and encoded A/V loopback pipelines, plus a two-way
-  video call that decodes and presents each peer's incoming track in its own
-  window (Windows only, like the other windowed examples).
+- `examples/webrtc`: data and encoded A/V loopback pipelines, a two-way video
+  call that presents both incoming tracks (Windows only), and an all-platform
+  H.264/Opus receive-record example that muxes both WebRTC tracks into MP4.
 
 Useful starting points:
 
@@ -185,10 +185,12 @@ actually observed after RTP starts arriving, while a remotely-created
 `WebRtcTrackSink` validates the application's outbound encoder choice through
 `set_codec` before accepting packets. A receiver that must configure its graph
 from the sender's actual payload can call `WebRtcTrackSource::wait_stream_info`
-with an explicit timeout; the first packet stays buffered while the downstream
-graph is built. The returned `WebRtcStreamInfo` derives the RTP time base and
-minimal FFmpeg decoder parameters. It is not muxer-ready: container headers may
-also require codec configuration and dimensions that SDP does not carry.
+with an explicit timeout; received packets stay buffered while the downstream
+graph is built. H.264 waits until actual SPS/PPS have arrived. The returned
+`WebRtcStreamInfo` derives the RTP time base and purpose-independent FFmpeg
+codec parameters. H.264 parameters include received SPS/PPS and dimensions,
+and Opus parameters include its negotiated channel layout and `OpusHead`;
+decoder and muxer compatibility is decided by the consuming element.
 
 For example, build all Windows API documentation locally. Nightly rustdoc is
 what labels each item with the feature that enables it:
