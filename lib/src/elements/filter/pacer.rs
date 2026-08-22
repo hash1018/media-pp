@@ -29,14 +29,24 @@ pub enum PacerError {
     #[error(
         "invalid time base {numerator}/{denominator}: both numerator and denominator must be positive"
     )]
-    InvalidTimeBase { numerator: i32, denominator: i32 },
+    InvalidTimeBase {
+        /// Invalid rational numerator.
+        numerator: i32,
+        /// Invalid rational denominator.
+        denominator: i32,
+    },
 
     /// `pts` is external input too (see [`PacerError::InvalidTimeBase`]) —
     /// an adversarial or corrupt jump this far from this pacer's own
     /// `first_pts` overflows the subtraction used to compute how long to
     /// wait, leaving nothing sane to pace against.
     #[error("pts {pts} is too far from this pacer's first pts {first_pts} to pace against")]
-    TimestampDeltaOverflow { pts: i64, first_pts: i64 },
+    TimestampDeltaOverflow {
+        /// Timestamp that could not be subtracted safely.
+        pts: i64,
+        /// First timestamp used as this pacer's media origin.
+        first_pts: i64,
+    },
 }
 
 /// [`TimeBase::new_unchecked`] is fine here — `1/1_000_000_000` is a

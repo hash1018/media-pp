@@ -20,12 +20,14 @@ use crate::elements::filter::is_codec_drain_boundary;
 /// `Error` via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum SwAudioEncoderError {
+    /// The requested encoder is unavailable in the linked FFmpeg build.
     #[error(
         "encoder {0:?} not found — this ffmpeg build wasn't compiled with it \
          (run `ffmpeg -encoders` to see what's actually available)"
     )]
     CodecNotFound(String),
 
+    /// The sink received a buffer other than decoded audio or end-of-stream.
     #[error("SwAudioEncoder only accepts Audio or Eos buffers, got {0}")]
     UnsupportedBuffer(&'static str),
 
@@ -38,6 +40,7 @@ pub enum SwAudioEncoderError {
     #[error("{0:?} doesn't support any Sample::F32 format — only {1:?} (unsupported)")]
     NoF32Format(String, Vec<ffmpeg::format::Sample>),
 
+    /// FFmpeg rejected encoder, resampler, frame, or packet processing.
     #[error("ffmpeg error: {0}")]
     Ffmpeg(#[from] ffmpeg::Error),
 }

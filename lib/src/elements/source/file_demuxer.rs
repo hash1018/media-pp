@@ -16,6 +16,7 @@ use crate::{
 /// via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum FileDemuxError {
+    /// FFmpeg rejected opening, reading, or seeking the input container.
     #[error("ffmpeg error: {0}")]
     Ffmpeg(#[from] ffmpeg::Error),
 }

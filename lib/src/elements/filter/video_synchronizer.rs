@@ -26,14 +26,22 @@ fn nanoseconds() -> TimeBase {
 /// Scheduling needs a decoded video frame with a PTS and a usable time base;
 /// anything else is rejected rather than passed through unscheduled.
 pub enum VideoSynchronizerError {
+    /// The supplied input timestamp unit has a non-positive component.
     #[error(
         "invalid time base {numerator}/{denominator}: both numerator and denominator must be positive"
     )]
-    InvalidTimeBase { numerator: i32, denominator: i32 },
+    InvalidTimeBase {
+        /// Invalid rational numerator.
+        numerator: i32,
+        /// Invalid rational denominator.
+        denominator: i32,
+    },
 
+    /// The sink received a buffer other than decoded video or end-of-stream.
     #[error("VideoSynchronizer only schedules decoded Video frames, got a {0}")]
     UnsupportedBuffer(&'static str),
 
+    /// A decoded video frame has no presentation timestamp to schedule.
     #[error("VideoSynchronizer cannot schedule a video frame without a PTS")]
     MissingPts,
 }

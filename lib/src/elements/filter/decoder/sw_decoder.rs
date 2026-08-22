@@ -18,9 +18,11 @@ use crate::elements::filter::is_codec_drain_boundary;
 /// via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum SwDecoderError {
+    /// The selected stream is neither audio nor video.
     #[error("unsupported media type: {0:?}")]
     UnsupportedMediaType(ffmpeg::media::Type),
 
+    /// FFmpeg rejected decoder creation or packet/frame processing.
     #[error("ffmpeg error: {0}")]
     Ffmpeg(#[from] ffmpeg::Error),
 }

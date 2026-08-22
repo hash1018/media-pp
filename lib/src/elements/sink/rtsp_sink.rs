@@ -15,15 +15,18 @@ use crate::{
 /// Errors produced while opening or writing an [`RtspSink`].
 #[derive(Debug, ThisError)]
 pub enum RtspSinkError {
+    /// FFmpeg rejected connection setup or packet writing.
     #[error("ffmpeg error: {0}")]
     Ffmpeg(#[from] ffmpeg::Error),
 
+    /// The sink received a decoded frame instead of compressed packet data.
     #[error(
         "RtspSink only remuxes compressed Packets, got a decoded {0}; \
          connect an encoder or demuxer packet pad instead"
     )]
     UnsupportedBuffer(&'static str),
 
+    /// The URL contains an interior NUL byte rejected by FFmpeg's C API.
     #[error("RTSP URL contains a NUL byte")]
     InvalidUrl,
 }

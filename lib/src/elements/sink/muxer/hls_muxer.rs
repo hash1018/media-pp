@@ -259,33 +259,50 @@ fn has_integer_conversion(pattern: &str) -> bool {
 /// Errors specific to [`HlsMuxer`].
 #[derive(Debug, ThisError)]
 pub enum HlsMuxerError {
+    /// A stream sink received a buffer other than a packet or end-of-stream.
     #[error("HlsMuxer stream sinks only accept Packet or Eos buffers, got {0}")]
     UnsupportedBuffer(&'static str),
 
+    /// [`HlsOptions::segment_duration`] is zero.
     #[error("HLS segment duration must be greater than zero")]
     ZeroSegmentDuration,
 
+    /// A live playlist window cannot be represented by FFmpeg.
     #[error(
         "HLS live window size must be between 1 and {max}, got {0}",
         max = i32::MAX
     )]
     InvalidWindowSize(usize),
 
+    /// fMP4 output was selected without an initialization filename.
     #[error("HLS fMP4 init filename must not be empty")]
     EmptyInitFilename,
 
+    /// The segment pattern has no integer conversion for unique filenames.
     #[error("HLS segment pattern must contain an integer conversion such as %05d: {0:?}")]
     MissingSegmentIndex(PathBuf),
 
+    /// A path option cannot be passed through FFmpeg's UTF-8 API.
     #[error("HLS {field} must be valid UTF-8: {path:?}")]
-    NonUtf8Path { field: &'static str, path: PathBuf },
+    NonUtf8Path {
+        /// Name of the invalid option field.
+        field: &'static str,
+        /// Non-UTF-8 path supplied by the caller.
+        path: PathBuf,
+    },
 
+    /// A string option contains an interior NUL byte rejected by FFmpeg's C API.
     #[error("HLS {field} must not contain a NUL byte")]
-    EmbeddedNul { field: &'static str },
+    EmbeddedNul {
+        /// Name of the invalid option field.
+        field: &'static str,
+    },
 
+    /// The muxer was opened before any media stream was registered.
     #[error("HLS muxer requires at least one stream")]
     NoStreams,
 
+    /// FFmpeg rejected muxer creation, packet writing, or finalization.
     #[error("ffmpeg error: {0}")]
     Ffmpeg(#[from] ffmpeg::Error),
 }

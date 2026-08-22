@@ -20,8 +20,10 @@ use super::file_demuxer::StreamInfo;
 /// via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum RtspSourceError {
+    /// FFmpeg rejected connection setup, stream reading, or shutdown.
     #[error("ffmpeg error: {0}")]
     Ffmpeg(#[from] ffmpeg::Error),
+    /// Seeking was requested on a live RTSP stream.
     #[error("RtspSource doesn't support seeking a live stream")]
     SeekUnsupported,
 }

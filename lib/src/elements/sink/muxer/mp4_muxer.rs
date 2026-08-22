@@ -18,9 +18,11 @@ use crate::{
 /// `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum Mp4MuxerError {
+    /// A stream sink received a buffer other than a packet or end-of-stream.
     #[error("Mp4Muxer stream sinks only accept Packet or Eos buffers, got {0}")]
     UnsupportedBuffer(&'static str),
 
+    /// FFmpeg rejected muxer creation, packet writing, or finalization.
     #[error("ffmpeg error: {0}")]
     Ffmpeg(#[from] ffmpeg::Error),
 }

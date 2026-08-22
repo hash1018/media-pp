@@ -60,39 +60,69 @@ impl Default for VideoCompositorOptions {
 /// Errors specific to [`SwVideoCompositor`].
 #[derive(Debug, ThisError)]
 pub enum SwVideoCompositorError {
+    /// FFmpeg rejected frame allocation or software scaling.
     #[error("ffmpeg error: {0}")]
     Ffmpeg(#[from] ffmpeg::Error),
 
+    /// The output canvas dimensions are zero or exceed the safety limit.
     #[error(
         "invalid output dimensions {width}x{height}; each dimension must be 1..={MAX_DIMENSION}"
     )]
-    InvalidOutputDimensions { width: u32, height: u32 },
+    InvalidOutputDimensions {
+        /// Invalid output width in pixels.
+        width: u32,
+        /// Invalid output height in pixels.
+        height: u32,
+    },
 
+    /// The output frame-rate numerator or denominator is non-positive.
     #[error("invalid frame rate {0}; numerator and denominator must both be positive")]
     InvalidFrameRate(ffmpeg::Rational),
 
+    /// A layer destination rectangle is zero-sized or exceeds the safety limit.
     #[error(
         "invalid layer dimensions {width}x{height}; each dimension must be 1..={MAX_DIMENSION}"
     )]
-    InvalidLayerDimensions { width: u32, height: u32 },
+    InvalidLayerDimensions {
+        /// Invalid layer width in output pixels.
+        width: u32,
+        /// Invalid layer height in output pixels.
+        height: u32,
+    },
 
+    /// A layer opacity is non-finite or outside `0.0..=1.0`.
     #[error("layer opacity must be finite and between 0.0 and 1.0, got {0}")]
     InvalidOpacity(f32),
 
+    /// An input frame reports a zero width or height.
     #[error("input frame has invalid dimensions {width}x{height}")]
-    InvalidInputDimensions { width: u32, height: u32 },
+    InvalidInputDimensions {
+        /// Invalid input width in pixels.
+        width: u32,
+        /// Invalid input height in pixels.
+        height: u32,
+    },
 
+    /// Aspect-ratio fitting would create an intermediate image above the safety limit.
     #[error("scaled layer would exceed {MAX_DIMENSION}px: {width}x{height}")]
-    ScaledLayerTooLarge { width: u32, height: u32 },
+    ScaledLayerTooLarge {
+        /// Computed scaled width in pixels.
+        width: u32,
+        /// Computed scaled height in pixels.
+        height: u32,
+    },
 
+    /// A runtime layer handle refers to an input that has been removed or replaced.
     #[error("the compositor input has been removed")]
     SourceRemoved,
 
+    /// An input sink received a buffer other than decoded video.
     #[error(
         "SwVideoCompositorInputSink only accepts decoded Video frames, got a {0}; link it after a decoder or video source"
     )]
     UnsupportedBuffer(&'static str),
 
+    /// Seeking was requested on a live compositor with no stored timeline.
     #[error("SwVideoCompositor doesn't support seeking a live composition")]
     SeekUnsupported,
 }

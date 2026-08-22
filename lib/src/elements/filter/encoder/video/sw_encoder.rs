@@ -19,6 +19,7 @@ use crate::elements::filter::is_codec_drain_boundary;
 /// via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum SwEncoderError {
+    /// The requested encoder is unavailable in the linked FFmpeg build.
     #[error(
         "encoder {0:?} not found — this ffmpeg build wasn't compiled with it \
          (see VideoCodec's own docs: GPL-licensed ones need --enable-gpl; \
@@ -26,9 +27,11 @@ pub enum SwEncoderError {
     )]
     CodecNotFound(String),
 
+    /// The sink received a buffer other than decoded video or end-of-stream.
     #[error("SwEncoder only accepts Video or Eos buffers, got {0}")]
     UnsupportedBuffer(&'static str),
 
+    /// FFmpeg rejected encoder creation or frame/packet processing.
     #[error("ffmpeg error: {0}")]
     Ffmpeg(#[from] ffmpeg::Error),
 }

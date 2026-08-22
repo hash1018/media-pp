@@ -101,202 +101,258 @@ pub struct D3d11FrameWrapError;
 /// this top-level `Result`, it's converted here via `#[from]`.
 #[derive(Debug, Error)]
 pub enum Error {
+    /// A pipeline, queue, or driver worker thread could not be created.
     #[error(transparent)]
     ThreadSpawnError(#[from] ThreadSpawnError),
 
+    /// FFmpeg could not allocate a D3D11 frame buffer wrapper.
     #[cfg(all(target_os = "windows", feature = "d3d11"))]
     #[error(transparent)]
     D3d11FrameWrapError(#[from] D3d11FrameWrapError),
 
+    /// A file demuxer operation failed.
     #[error(transparent)]
     FileDemuxError(#[from] FileDemuxError),
 
+    /// An application source channel is closed.
     #[error(transparent)]
     AppSourceError(#[from] AppSourceError),
 
+    /// An RTSP source operation failed.
     #[error(transparent)]
     RtspSourceError(#[from] RtspSourceError),
 
+    /// A synthetic video source rejected an operation.
     #[error(transparent)]
     TestVideoSourceError(#[from] TestVideoSourceError),
 
+    /// A synthetic audio source rejected an operation.
     #[error(transparent)]
     TestAudioSourceError(#[from] TestAudioSourceError),
 
+    /// A software decoder operation failed.
     #[error(transparent)]
     SwDecoderError(#[from] SwDecoderError),
 
+    /// A CUDA decoder operation failed.
     #[cfg(feature = "cuda")]
     #[error(transparent)]
     CudaDecoderError(#[from] CudaDecoderError),
 
+    /// A CUDA renderer operation failed.
     #[cfg(feature = "cuda")]
     #[error(transparent)]
     CudaRendererError(#[from] CudaRendererError),
 
+    /// Uploading a frame to CUDA failed.
     #[cfg(feature = "cuda")]
     #[error(transparent)]
     CudaUploadError(#[from] CudaUploadError),
 
+    /// Downloading a frame from CUDA failed.
     #[cfg(feature = "cuda")]
     #[error(transparent)]
     CudaDownloadError(#[from] CudaDownloadError),
 
+    /// A CUDA scaling operation failed.
     #[cfg(feature = "cuda")]
     #[error(transparent)]
     CudaScalerError(#[from] CudaScalerError),
 
+    /// A CUDA pixel-format conversion failed.
     #[cfg(feature = "cuda")]
     #[error(transparent)]
     CudaConverterError(#[from] CudaConverterError),
 
+    /// A CUDA compositor operation failed.
     #[cfg(feature = "cuda")]
     #[error(transparent)]
     CudaVideoCompositorError(#[from] CudaVideoCompositorError),
 
+    /// A CUDA encoder operation failed.
     #[cfg(feature = "cuda")]
     #[error(transparent)]
     CudaEncoderError(#[from] CudaEncoderError),
 
+    /// A software video encoder operation failed.
     #[error(transparent)]
     SwEncoderError(#[from] SwEncoderError),
 
+    /// A pacer could not schedule an input timestamp.
     #[error(transparent)]
     PacerError(#[from] PacerError),
 
+    /// A video synchronizer could not schedule an input frame.
     #[error(transparent)]
     VideoSynchronizerError(#[from] VideoSynchronizerError),
 
+    /// A software audio encoder operation failed.
     #[error(transparent)]
     SwAudioEncoderError(#[from] SwAudioEncoderError),
 
+    /// An audio resampling operation failed.
     #[error(transparent)]
     AudioResamplerError(#[from] AudioResamplerError),
 
+    /// An audio gain operation failed.
     #[error(transparent)]
     AudioVolumeError(#[from] AudioVolumeError),
 
+    /// A software scaling operation failed.
     #[error(transparent)]
     SwScalerError(#[from] SwScalerError),
 
+    /// A software chroma-key operation failed.
     #[error(transparent)]
     SwChromaKeyError(#[from] SwChromaKeyError),
 
+    /// A queue worker or capacity policy failed.
     #[error(transparent)]
     QueueError(#[from] QueueError),
 
+    /// A pipeline graph mutation violated a topology invariant.
     #[error(transparent)]
     GraphError(#[from] GraphError),
 
+    /// Private file logging could not be initialized.
     #[error(transparent)]
     LogInitError(#[from] LogInitError),
 
+    /// An audio mixer operation failed.
     #[error(transparent)]
     AudioMixerError(#[from] AudioMixerError),
 
+    /// A software video compositor operation failed.
     #[error(transparent)]
     SwVideoCompositorError(#[from] SwVideoCompositorError),
 
+    /// MP4 muxing failed.
     #[error(transparent)]
     Mp4MuxerError(#[from] Mp4MuxerError),
 
+    /// HLS muxing or option validation failed.
     #[error(transparent)]
     HlsMuxerError(#[from] HlsMuxerError),
 
+    /// Sending a stream to an RTSP endpoint failed.
     #[error(transparent)]
     RtspSinkError(#[from] RtspSinkError),
 
+    /// A D3D12 renderer operation failed.
     #[cfg(all(target_os = "windows", feature = "d3d12"))]
     #[error(transparent)]
     D3d12RendererError(#[from] D3d12RendererError),
 
+    /// A D3D12 decoder operation failed.
     #[cfg(all(target_os = "windows", feature = "d3d12"))]
     #[error(transparent)]
     D3d12DecoderError(#[from] D3d12DecoderError),
 
+    /// Uploading a frame to D3D12 failed.
     #[cfg(all(target_os = "windows", feature = "d3d12"))]
     #[error(transparent)]
     D3d12UploadError(#[from] D3d12UploadError),
 
+    /// Downloading a frame from D3D12 failed.
     #[cfg(all(target_os = "windows", feature = "d3d12"))]
     #[error(transparent)]
     D3d12DownloadError(#[from] D3d12DownloadError),
 
+    /// A D3D12 scaling operation failed.
     #[cfg(all(target_os = "windows", feature = "d3d12"))]
     #[error(transparent)]
     D3d12ScalerError(#[from] D3d12ScalerError),
 
+    /// A D3D11 decoder operation failed.
     #[cfg(all(target_os = "windows", feature = "d3d11"))]
     #[error(transparent)]
     D3d11DecoderError(#[from] D3d11DecoderError),
 
+    /// Uploading a frame to D3D11 failed.
     #[cfg(all(target_os = "windows", feature = "d3d11"))]
     #[error(transparent)]
     D3d11UploadError(#[from] D3d11UploadError),
 
+    /// Downloading a frame from D3D11 failed.
     #[cfg(all(target_os = "windows", feature = "d3d11"))]
     #[error(transparent)]
     D3d11DownloadError(#[from] D3d11DownloadError),
 
+    /// A D3D11 scaling operation failed.
     #[cfg(all(target_os = "windows", feature = "d3d11"))]
     #[error(transparent)]
     D3d11ScalerError(#[from] D3d11ScalerError),
 
+    /// A D3D11 chroma-key operation failed.
     #[cfg(all(target_os = "windows", feature = "d3d11"))]
     #[error(transparent)]
     D3d11ChromaKeyError(#[from] D3d11ChromaKeyError),
 
+    /// A D3D11-backed NVENC operation failed.
     #[cfg(all(target_os = "windows", feature = "d3d11"))]
     #[error(transparent)]
     D3d11NvencEncoderError(#[from] D3d11NvencEncoderError),
 
+    /// A D3D11 renderer operation failed.
     #[cfg(all(target_os = "windows", feature = "d3d11"))]
     #[error(transparent)]
     D3d11RendererError(#[from] D3d11RendererError),
 
+    /// A D3D11 compositor operation failed.
     #[cfg(all(target_os = "windows", feature = "d3d11"))]
     #[error(transparent)]
     D3d11VideoCompositorError(#[from] D3d11VideoCompositorError),
 
+    /// A D3D11 text-layer operation failed.
     #[cfg(all(target_os = "windows", feature = "d3d11"))]
     #[error(transparent)]
     D3d11TextLayerError(#[from] D3d11TextLayerError),
 
+    /// Desktop duplication capture failed.
     #[cfg(all(target_os = "windows", feature = "dxgi-capture"))]
     #[error(transparent)]
     DxgiCaptureSourceError(#[from] DxgiCaptureSourceError),
 
+    /// PipeWire audio capture failed.
     #[cfg(all(target_os = "linux", feature = "pipewire-audio-capture"))]
     #[error(transparent)]
     PipeWireAudioCaptureSourceError(#[from] PipeWireAudioCaptureSourceError),
 
+    /// PipeWire audio rendering failed.
     #[cfg(all(target_os = "linux", feature = "pipewire-audio-renderer"))]
     #[error(transparent)]
     PipeWireAudioRendererError(#[from] PipeWireAudioRendererError),
 
+    /// PipeWire screen capture failed.
     #[cfg(all(target_os = "linux", feature = "pipewire-screen-capture"))]
     #[error(transparent)]
     PipeWireScreenCaptureSourceError(#[from] PipeWireScreenCaptureSourceError),
 
+    /// WASAPI audio capture failed.
     #[cfg(all(target_os = "windows", feature = "wasapi-capture"))]
     #[error(transparent)]
     WasapiCaptureSourceError(#[from] WasapiCaptureSourceError),
 
+    /// WASAPI audio rendering failed.
     #[cfg(all(target_os = "windows", feature = "wasapi-renderer"))]
     #[error(transparent)]
     WasapiRendererError(#[from] WasapiRendererError),
 
+    /// ONNX Runtime inference or detector processing failed.
     #[cfg(feature = "ort")]
     #[error(transparent)]
     OrtDetectorError(#[from] OrtDetectorError),
 
+    /// A WebRTC peer operation failed.
     #[cfg(feature = "webrtc")]
     #[error(transparent)]
     WebRtcError(#[from] WebRtcError),
 
+    /// An FFmpeg error not assigned to a more specific element error.
     #[error("ffmpeg error: {0}")]
     Ffmpeg(#[from] ffmpeg_next::Error),
 
+    /// An application-defined error message without a more specific category.
     #[error("{0}")]
     Other(String),
 }

@@ -56,10 +56,15 @@ fn thread_tag() -> String {
 /// Severity threshold for the private `media-pp` file logger.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Level {
+    /// Error conditions that prevent an operation from completing.
     Error,
+    /// Recoverable problems or unexpected conditions.
     Warn,
+    /// High-level lifecycle and topology events.
     Info,
+    /// Detailed diagnostic events useful during development.
     Debug,
+    /// Fine-grained per-operation tracing.
     Trace,
 }
 
@@ -78,15 +83,20 @@ impl fmt::Display for Level {
 #[derive(Debug, ThisError)]
 /// Why [`init`] could not install the file logger.
 pub enum LogInitError {
+    /// The process already installed media-pp's global private logger.
     #[error("the media-pp file logger has already been initialized")]
     AlreadyInitialized,
 
+    /// The configured log directory could not be created.
     #[error("failed to create log directory `{path}`: {source}")]
     LogDirectory {
+        /// Directory that could not be created.
         path: PathBuf,
+        /// Operating-system error returned while creating the directory.
         source: std::io::Error,
     },
 
+    /// The rolling file appender could not be initialized.
     #[error("failed to create log file appender: {0}")]
     FileAppender(#[from] InitError),
 }

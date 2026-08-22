@@ -22,6 +22,7 @@ use crate::{
 /// `Error` via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum TestVideoSourceError {
+    /// Seeking was requested on an unbounded generated stream.
     #[error("TestVideoSource doesn't support seeking a generated stream")]
     SeekUnsupported,
 }

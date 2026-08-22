@@ -20,6 +20,7 @@ use crate::{
 /// via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum AppSourceError {
+    /// The source has stopped or end-of-stream was already submitted.
     #[error("AppSource has already ended (its Pipeline finished, or Eos was already pushed)")]
     Closed,
 }

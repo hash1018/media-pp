@@ -124,18 +124,26 @@ impl AudioFrameResampler {
 /// Errors specific to [`AudioResampler`].
 #[derive(Debug, ThisError)]
 pub enum AudioResamplerError {
+    /// FFmpeg rejected creation or use of the resampling context.
     #[error("ffmpeg error: {0}")]
     Ffmpeg(#[from] ffmpeg::Error),
 
+    /// The sink received a buffer other than decoded audio or end-of-stream.
     #[error(
         "AudioResampler only converts decoded Audio frames, got a {0}; link it after an audio decoder or source"
     )]
     UnsupportedBuffer(&'static str),
 
+    /// The supplied input timestamp unit has a non-positive component.
     #[error(
         "invalid input time base {numerator}/{denominator}: both numerator and denominator must be positive"
     )]
-    InvalidTimeBase { numerator: i32, denominator: i32 },
+    InvalidTimeBase {
+        /// Invalid rational numerator.
+        numerator: i32,
+        /// Invalid rational denominator.
+        denominator: i32,
+    },
 }
 
 /// Converts decoded audio to one fixed [`AudioFormat`] via

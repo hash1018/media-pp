@@ -49,27 +49,36 @@ impl Default for AudioVolumeOptions {
 /// Errors specific to [`AudioVolume`].
 #[derive(Debug, ThisError, PartialEq)]
 pub enum AudioVolumeError {
+    /// A linear gain is negative, NaN, or infinite.
     #[error("gain must be finite and non-negative, got {0}")]
     InvalidGain(f32),
 
+    /// A decibel gain is NaN or positive infinity.
     #[error("gain in dB must be finite or negative infinity, got {0}")]
     InvalidGainDb(f32),
 
+    /// The input frame does not describe any audio channels.
     #[error("audio frame has no channel layout")]
     MissingChannels,
 
+    /// The input sample representation is not supported by the gain processor.
     #[error("unsupported audio sample format: {0:?}")]
     UnsupportedSampleFormat(ffmpeg::format::Sample),
 
+    /// A frame plane is shorter than its declared sample layout requires.
     #[error(
         "audio plane {plane} is too small for its declared format: need {required} bytes, got {actual}"
     )]
     InvalidPlaneSize {
+        /// Zero-based plane index that is too short.
         plane: usize,
+        /// Minimum number of bytes required for the declared samples.
         required: usize,
+        /// Number of bytes actually available in the plane.
         actual: usize,
     },
 
+    /// The sink received a buffer other than decoded audio or end-of-stream.
     #[error(
         "AudioVolume only processes decoded Audio frames, got a {0}; link it after an audio decoder or source"
     )]

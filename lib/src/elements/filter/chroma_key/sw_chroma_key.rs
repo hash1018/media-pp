@@ -27,11 +27,13 @@ const POOL_SIZE: usize = 4;
 /// via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum SwChromaKeyError {
+    /// The input video is not in the BGRA pixel format required by this filter.
     #[error(
         "SwChromaKey only keys BGRA frames (place it after a Scaler converting to BGRA), got {0:?}"
     )]
     UnsupportedFormat(ffmpeg::format::Pixel),
 
+    /// The sink received a buffer other than decoded video or end-of-stream.
     #[error(
         "SwChromaKey only processes decoded Video frames, got a {0}; \
          connect it after a decoder/scaler, not a demuxer"

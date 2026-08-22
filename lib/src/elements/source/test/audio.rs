@@ -29,6 +29,7 @@ const TICK_INTERVAL: Duration = Duration::from_millis(20);
 /// `Error` via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum TestAudioSourceError {
+    /// Seeking was requested on an unbounded generated stream.
     #[error("TestAudioSource doesn't support seeking a generated stream")]
     SeekUnsupported,
 }

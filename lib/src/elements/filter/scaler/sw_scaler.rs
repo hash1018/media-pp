@@ -28,9 +28,11 @@ const POOL_SIZE: usize = 4;
 /// `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum SwScalerError {
+    /// FFmpeg rejected creation or use of the scaling context.
     #[error("ffmpeg error: {0}")]
     Ffmpeg(#[from] ffmpeg::Error),
 
+    /// The sink received a buffer other than decoded video or end-of-stream.
     #[error(
         "SwScaler only converts/resizes decoded Video frames, got a {0}; \
          link it straight after a decoder, not a demuxer"

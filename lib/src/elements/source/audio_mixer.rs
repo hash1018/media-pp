@@ -32,12 +32,15 @@ const TICK_INTERVAL: Duration = Duration::from_millis(20);
 /// via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum AudioMixerError {
+    /// FFmpeg rejected resampler creation or audio conversion.
     #[error("ffmpeg error: {0}")]
     Ffmpeg(#[from] ffmpeg_next::Error),
 
+    /// Seeking was requested on a live mixer with no stored timeline.
     #[error("AudioMixer doesn't support seeking a live mix")]
     SeekUnsupported,
 
+    /// An input sink received a buffer other than decoded audio or end-of-stream.
     #[error("AudioMixer inputs only accept Audio or Eos buffers, got {0}")]
     UnsupportedBuffer(&'static str),
 }
