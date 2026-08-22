@@ -48,7 +48,32 @@ struct StreamDef {
 /// [`Mp4Muxer::add_stream`], `open` writes the first segment's header and
 /// returns one [`Sink`] per track.
 ///
-/// ```ignore
+/// ```no_run
+/// # use std::{path::PathBuf, time::Duration};
+/// # use media_pp::ffmpeg;
+/// # use media_pp::elements::{
+/// #     AudioCodec, SegmentPolicy, SegmentedMp4Muxer, SwAudioEncoder,
+/// #     SwAudioEncoderOptions, SwEncoder, SwEncoderOptions, VideoCodec,
+/// # };
+/// # fn main() -> media_pp::Result<()> {
+/// # let video_time_base = ffmpeg::Rational(1, 30);
+/// # let audio_time_base = ffmpeg::Rational(1, 48_000);
+/// # let video_encoder = SwEncoder::new("video", SwEncoderOptions {
+/// #     codec: VideoCodec::H264,
+/// #     width: 640,
+/// #     height: 360,
+/// #     time_base: video_time_base,
+/// #     frame_rate: ffmpeg::Rational(30, 1),
+/// #     bit_rate: 2_000_000,
+/// #     gop_size: 30,
+/// # })?;
+/// # let audio_encoder = SwAudioEncoder::new("audio", SwAudioEncoderOptions {
+/// #     codec: AudioCodec::Aac,
+/// #     sample_rate: 48_000,
+/// #     channels: 2,
+/// #     time_base: audio_time_base,
+/// #     bit_rate: 128_000,
+/// # })?;
 /// let mut muxer = SegmentedMp4Muxer::create(
 ///     SegmentPolicy::Duration(Duration::from_secs(600)),
 ///     |index| PathBuf::from(format!("rec_{index:04}.mp4")),
@@ -56,6 +81,8 @@ struct StreamDef {
 /// muxer.add_stream("video", video_encoder.parameters(), video_time_base);
 /// muxer.add_stream("audio", audio_encoder.parameters(), audio_time_base);
 /// let mut sinks = muxer.open()?;
+/// # Ok(())
+/// # }
 /// ```
 pub struct SegmentedMp4Muxer {
     policy: SegmentPolicy,
