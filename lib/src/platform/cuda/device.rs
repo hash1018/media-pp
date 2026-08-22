@@ -8,8 +8,10 @@ use crate::platform::ffmpeg::AvBufferRef;
 /// Errors from opening the CUDA device context.
 #[derive(Debug, ThisError)]
 pub enum CudaDeviceError {
+    /// FFmpeg could not open the default CUDA primary context.
     #[error("failed to open the CUDA device: {0}")]
     Open(ffmpeg::Error),
+    /// FFmpeg reported success without returning a context reference.
 
     #[error("FFmpeg opened CUDA without returning a device context")]
     MissingContext,
@@ -70,6 +72,7 @@ pub struct CudaDevice {
 const AV_CUDA_USE_PRIMARY_CONTEXT: i32 = 1 << 0;
 
 impl CudaDevice {
+    /// Opens and retains the default device's CUDA primary context.
     pub fn new() -> Result<Self, CudaDeviceError> {
         let mut ctx: *mut ffi::AVBufferRef = std::ptr::null_mut();
         // Unlike D3D11VA/D3D12VA, nothing has to be filled in by hand here:

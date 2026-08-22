@@ -20,17 +20,22 @@ use crate::elements::filter::is_codec_drain_boundary;
 /// `Error` via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum D3d12DecoderError {
+    /// The selected stream is not video.
     #[error("unsupported media type: {0:?} (D3D12VA decode is video-only)")]
     UnsupportedMediaType(ffmpeg::media::Type),
+    /// FFmpeg rejected decoder or packet/frame processing.
 
     #[error("ffmpeg error: {0}")]
     Ffmpeg(#[from] ffmpeg::Error),
+    /// FFmpeg could not wrap the supplied D3D12 device.
 
     #[error("failed to create D3D12VA hw device context (code {0})")]
     HwDeviceInit(i32),
+    /// FFmpeg could not retain the D3D12 hardware device context.
 
     #[error("failed to reference the D3D12VA hw device context")]
     HwDeviceRef,
+    /// FFmpeg could not negotiate D3D12VA hardware output for the stream.
 
     #[error(
         "decoder did not select the D3D12VA pixel format — hardware decode \

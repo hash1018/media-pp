@@ -21,12 +21,16 @@ pub struct Detection {
     /// Index into whatever label set the model was trained on — see
     /// [`COCO_CLASS_LABELS`] for stock Ultralytics YOLOv8/v11 weights.
     pub class_id: usize,
+    /// Model confidence score after thresholding and NMS.
     pub score: f32,
     /// Top-left corner (not center — already converted from the model's
     /// own center/width/height encoding).
     pub x: f32,
+    /// Top edge in input-frame pixels.
     pub y: f32,
+    /// Detection-box width in input-frame pixels.
     pub width: f32,
+    /// Detection-box height in input-frame pixels.
     pub height: f32,
 }
 
@@ -50,14 +54,17 @@ pub const COCO_CLASS_LABELS: [&str; 80] = [
 /// `Error` via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum OrtDetectorError {
+    /// ONNX Runtime rejected model loading, tensor binding, or inference.
     #[error("onnxruntime error: {0}")]
     Ort(#[from] ort::Error),
+    /// The input video is not RGB24 as required by the model tensor conversion.
 
     #[error(
         "OrtDetector only accepts RGB24 Video frames, got {0:?}; \
          link it straight after a SwScaler configured with Pixel::RGB24"
     )]
     UnsupportedFormat(ffmpeg::format::Pixel),
+    /// The sink received a buffer other than decoded video.
 
     #[error(
         "OrtDetector only accepts decoded Video frames, got a {0}; \

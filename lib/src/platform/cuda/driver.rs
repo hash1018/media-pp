@@ -521,11 +521,19 @@ MDONE:
 /// Errors from the CUDA driver calls this crate makes directly.
 #[derive(Debug, ThisError)]
 pub enum CudaDriverError {
+    /// A named CUDA Driver API call returned an error.
     #[error("{call} failed: {message}")]
-    Call { call: &'static str, message: String },
+    Call {
+        /// CUDA Driver API function that failed.
+        call: &'static str,
+        /// Driver-provided error description.
+        message: String,
+    },
+    /// Loading or launching the built-in blend kernel failed.
 
     #[error("the CUDA driver rejected this crate's blend kernel: {0}")]
     KernelRejected(String),
+    /// A text mask is too small to contain an NV12 chroma sample.
 
     #[error("a coverage mask smaller than 2x2 has no chroma samples to blend into")]
     EmptyMask,

@@ -19,14 +19,18 @@ use crate::{
 /// via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum CudaDecoderError {
+    /// The selected stream is not video.
     #[error("unsupported media type: {0:?} (NVDEC decode is video-only)")]
     UnsupportedMediaType(ffmpeg::media::Type),
+    /// FFmpeg rejected decoder or packet/frame processing.
 
     #[error("ffmpeg error: {0}")]
     Ffmpeg(#[from] ffmpeg::Error),
+    /// FFmpeg could not retain the CUDA device context.
 
     #[error("failed to reference the CUDA device context")]
     HwDeviceRef,
+    /// FFmpeg could not negotiate CUDA hardware output for the stream.
 
     #[error(
         "decoder did not select the CUDA pixel format — hardware decode \

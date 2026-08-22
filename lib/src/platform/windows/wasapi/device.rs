@@ -38,6 +38,7 @@ pub struct WasapiDevice {
     /// Human-readable endpoint name, falling back to `id` when Windows
     /// does not expose a friendly name.
     pub name: String,
+    /// Whether the endpoint captures or renders audio.
     pub kind: WasapiDeviceKind,
     /// Whether this was the default console endpoint for `kind` when it
     /// was enumerated.
