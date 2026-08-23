@@ -1,4 +1,4 @@
-# text_overlay
+# d3d11_text_overlay
 
 A moving-gradient `TestVideoSource` background composited with a
 `D3d11TextLayerHandle` clock in front of it, recorded to an mp4 — proves
@@ -25,7 +25,7 @@ coverage is drawn — a D3D11 blend state on one side, a CUDA blend kernel on th
 other.
 
 ```sh
-cargo run -p text_overlay -- [output.mp4] [seconds]
+cargo run -p d3d11_text_overlay -- [output.mp4] [seconds]
 ```
 
 While recording, use the arrow keys to move the text, or `q` to stop early.

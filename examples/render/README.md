@@ -41,7 +41,7 @@ restore token can be passed as the last argument on later runs.
 | [`d3d12_upload`](d3d12_upload/) | Demonstrate D3D12 upload | Windows | CPU -> D3D12 | Close window | None |
 | [`gpu_chroma_key`](gpu_chroma_key/) | Apply a GPU chroma key | Windows | D3D11 GPU path | Close window | None |
 | [`nvenc_record`](nvenc_record/) | Demonstrate D3D11 NVENC | Windows | D3D11 -> NVENC | Fixed duration | `[output.mp4] [seconds]` |
-| [`text_overlay`](text_overlay/) | Demonstrate D3D11 text overlay | Windows | D3D11 compositor | Close window | None |
+| [`d3d11_text_overlay`](d3d11_text_overlay/) | Demonstrate D3D11 text overlay | Windows | D3D11 compositor | Fixed duration / `q` | `[output.mp4] [seconds]` |
 
 `render_common` is a support crate shared by windowed examples, not an
 executable example.

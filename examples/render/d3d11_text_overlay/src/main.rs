@@ -8,7 +8,7 @@
 //! because CUDA is a vendor backend rather than a platform one and runs on
 //! Windows too.
 //!
-//!     cargo run -p text_overlay -- [output.mp4] [seconds]
+//!     cargo run -p d3d11_text_overlay -- [output.mp4] [seconds]
 //!     (use the arrow keys to move the text, or `q` to stop early)
 
 #[cfg(not(target_os = "windows"))]
@@ -62,7 +62,7 @@ mod windows_example {
     /// output file's frames differ over time if `D3d11TextLayerHandle::set_text` is
     /// really re-rasterizing and re-uploading each call.
     ///
-    ///     cargo run -p text_overlay -- [output.mp4] [seconds]
+    ///     cargo run -p d3d11_text_overlay -- [output.mp4] [seconds]
     ///     (use the arrow keys to move the text, or `q` to stop early)
     pub(super) fn run() -> media_pp::Result<()> {
         media_pp::init()?;
@@ -75,7 +75,7 @@ mod windows_example {
 
         let path = std::env::args()
             .nth(1)
-            .unwrap_or_else(|| "text_overlay.mp4".into());
+            .unwrap_or_else(|| "d3d11_text_overlay.mp4".into());
         let seconds: u64 = std::env::args()
             .nth(2)
             .and_then(|value| value.parse().ok())

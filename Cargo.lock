@@ -984,6 +984,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "d3d11_text_overlay"
+version = "0.1.0"
+dependencies = [
+ "media-pp",
+ "render_common",
+ "windows",
+]
+
+[[package]]
 name = "d3d11_upload"
 version = "0.1.0"
 dependencies = [
@@ -3703,15 +3712,6 @@ dependencies = [
  "media-pp",
  "render_common",
  "winit",
-]
-
-[[package]]
-name = "text_overlay"
-version = "0.1.0"
-dependencies = [
- "media-pp",
- "render_common",
- "windows",
 ]
 
 [[package]]

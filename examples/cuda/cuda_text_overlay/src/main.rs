@@ -10,8 +10,8 @@
 //! frame only comes back for the software encoder.
 //!
 //! Nothing about the graph is platform-specific — CUDA is a vendor backend,
-//! not a Linux one, so this runs unchanged on Windows and Linux. `text_overlay`
-//! is the D3D11 counterpart for the same graph. Only the raw-key terminal in
+//! not a Linux one, so this runs unchanged on Windows and Linux.
+//! `d3d11_text_overlay` is the D3D11 counterpart for the same graph. Only the raw-key terminal in
 //! [`terminal`] and the system font path below differ per OS.
 //!
 //!     cargo run -p cuda_text_overlay -- [output.mp4] [seconds]

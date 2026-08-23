@@ -32,6 +32,6 @@ publish.
 
 Depended on by the other `examples/render/*` crates, including `av_playback`,
 `screen_record_nvenc`, `seek_render`, `sw_decode_render`, `test_video`,
-`text_overlay`, `transcode_render`, `nvenc_record`, `screen_preview_cpu`,
+`d3d11_text_overlay`, `transcode_render`, `nvenc_record`, `screen_preview_cpu`,
 `screen_preview_gpu`, `hw_decode_render`, `gpu_video_compositor`,
 `d3d11_upload`, `d3d12_upload`, and `d3d11_decode_render`.
