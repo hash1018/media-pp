@@ -65,7 +65,7 @@ impl Sink for FrameCounter {
     /// in. PacketCounter is the encoded-side counterpart.
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(PortContract {
-            media: MediaKindSet::from_slice(&[MediaKind::Video, MediaKind::Audio]),
+            media: MediaKindSet::from_slice(&[MediaKind::VideoFrame, MediaKind::AudioFrame]),
             memory: None,
         })
     }

@@ -84,7 +84,7 @@ impl SwChromaKey {
         let pad = SrcPad::with_contract(
             format!("{name}_src"),
             OutputContract::Fixed(
-                PortContract::of(MediaKind::Video).in_memory(MemoryDomain::System),
+                PortContract::of(MediaKind::VideoFrame).in_memory(MemoryDomain::System),
             ),
         );
         Self {
@@ -140,7 +140,9 @@ impl Source for SwChromaKey {
 impl Sink for SwChromaKey {
     /// Keys pixel by pixel on the CPU; the GPU counterpart is D3d11ChromaKey.
     fn input_contract(&self) -> InputContract {
-        InputContract::Fixed(PortContract::of(MediaKind::Video).in_memory(MemoryDomain::System))
+        InputContract::Fixed(
+            PortContract::of(MediaKind::VideoFrame).in_memory(MemoryDomain::System),
+        )
     }
 
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {

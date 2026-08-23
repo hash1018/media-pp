@@ -32,6 +32,16 @@ use super::{
     stream_info::WebRtcStreamInfo,
 };
 
+/// The encoded kind a str0m track of `kind` carries. Both media flow
+/// through `MediaBuffer::Packet`, so this is the only thing that tells an
+/// audio track apart from a video one at wiring time.
+fn packet_kind(kind: MediaKind) -> crate::contract::MediaKind {
+    match kind {
+        MediaKind::Audio => crate::contract::MediaKind::AudioPacket,
+        MediaKind::Video => crate::contract::MediaKind::VideoPacket,
+    }
+}
+
 /// The endpoints a track actually has, which is exactly what its
 /// negotiated [`Direction`] allows — a `SendOnly` track carries no
 /// `WebRtcTrackSource` because nothing will ever arrive on it, and a
@@ -196,6 +206,8 @@ impl WebRtcHandle {
 pub struct WebRtcTrackSink {
     pp_log: PpLog,
     id: TrackId,
+    /// What this track was negotiated to carry — audio or video.
+    kind: MediaKind,
     codec: Option<Codec>,
     negotiated_codecs: Arc<Mutex<Vec<Codec>>>,
     command_tx: Sender<Command>,
@@ -208,12 +220,14 @@ pub struct WebRtcTrackSink {
 impl WebRtcTrackSink {
     pub(super) fn new(
         id: TrackId,
+        kind: MediaKind,
         codec: Option<Codec>,
         negotiated_codecs: Arc<Mutex<Vec<Codec>>>,
         command_tx: Sender<Command>,
     ) -> Self {
         Self {
             id,
+            kind,
             codec,
             negotiated_codecs,
             command_tx,
@@ -292,7 +306,7 @@ impl Sink for WebRtcTrackSink {
     /// encoder of its own, so a decoded frame has no route through it.
     fn input_contract(&self) -> InputContract {
         // Path-qualified: `MediaKind` in this module is str0m's own.
-        InputContract::Fixed(PortContract::of(crate::contract::MediaKind::Packet))
+        InputContract::Fixed(PortContract::of(packet_kind(self.kind)))
     }
 
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
@@ -424,6 +438,7 @@ struct StreamInfoState {
 impl WebRtcTrackSource {
     pub(super) fn new(
         id: TrackId,
+        kind: MediaKind,
         name: impl Into<String>,
         data_rx: Receiver<MediaBuffer>,
         codec: Arc<Mutex<Option<Codec>>>,
@@ -436,7 +451,7 @@ impl WebRtcTrackSource {
         // negotiated with the peer at runtime, but the kind never varies.
         let pad = SrcPad::with_contract(
             format!("{name}_src"),
-            OutputContract::Fixed(PortContract::of(crate::contract::MediaKind::Packet)),
+            OutputContract::Fixed(PortContract::of(packet_kind(kind))),
         );
         Self {
             id,

@@ -125,7 +125,13 @@ fn add_track_returns_closed_instead_of_a_phantom_id() {
 fn a_remote_track_sink_rejects_packets_until_its_codec_is_declared() {
     let (handle, _command_rx) = command_only_handle(1);
     let negotiated = Arc::new(std::sync::Mutex::new(vec![Codec::Vp8]));
-    let mut sink = WebRtcTrackSink::new(TrackId(7), None, negotiated, handle.command_tx.clone());
+    let mut sink = WebRtcTrackSink::new(
+        TrackId(7),
+        MediaKind::Video,
+        None,
+        negotiated,
+        handle.command_tx.clone(),
+    );
     let mut packet = ffmpeg::Packet::copy(&[1, 2, 3, 4]);
     packet.set_time_base(ffmpeg::Rational::new(1, 90_000));
     packet.set_pts(Some(0));
@@ -146,6 +152,7 @@ fn track_sink_shifts_a_negative_encoder_delay_without_changing_packet_spacing() 
     let negotiated = Arc::new(std::sync::Mutex::new(vec![Codec::Opus]));
     let mut sink = WebRtcTrackSink::new(
         TrackId(8),
+        MediaKind::Audio,
         Some(Codec::Opus),
         negotiated,
         handle.command_tx.clone(),
@@ -175,7 +182,13 @@ fn track_sink_shifts_a_negative_encoder_delay_without_changing_packet_spacing() 
 fn selecting_an_unnegotiated_codec_preserves_the_previous_selection() {
     let (handle, command_rx) = command_only_handle(1);
     let negotiated = Arc::new(std::sync::Mutex::new(vec![Codec::Vp8]));
-    let mut sink = WebRtcTrackSink::new(TrackId(7), None, negotiated, handle.command_tx.clone());
+    let mut sink = WebRtcTrackSink::new(
+        TrackId(7),
+        MediaKind::Video,
+        None,
+        negotiated,
+        handle.command_tx.clone(),
+    );
 
     sink.set_codec(Codec::Vp8)
         .expect("VP8 is negotiated for this track");
@@ -209,6 +222,7 @@ fn wait_stream_info_can_retry_after_timeout_and_caches_the_result() {
     let (info_tx, info_rx) = bounded(1);
     let source = WebRtcTrackSource::new(
         TrackId(9),
+        MediaKind::Video,
         "track-in",
         data_rx,
         Arc::new(std::sync::Mutex::new(None)),
@@ -258,6 +272,7 @@ fn wait_stream_info_returns_closed_if_the_peer_ends_before_media() {
     let (info_tx, info_rx) = bounded(1);
     let source = WebRtcTrackSource::new(
         TrackId(10),
+        MediaKind::Video,
         "track-in",
         data_rx,
         Arc::new(std::sync::Mutex::new(None)),

@@ -301,7 +301,7 @@ impl D3d11ChromaKey {
         let pad = SrcPad::with_contract(
             format!("{name}_src"),
             OutputContract::Fixed(
-                PortContract::of(MediaKind::Video).in_memory(MemoryDomain::D3d11),
+                PortContract::of(MediaKind::VideoFrame).in_memory(MemoryDomain::D3d11),
             ),
         );
         let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
@@ -578,7 +578,7 @@ impl Source for D3d11ChromaKey {
 impl Sink for D3d11ChromaKey {
     /// Keying happens on the GPU; a system-memory frame belongs in SwChromaKey.
     fn input_contract(&self) -> InputContract {
-        InputContract::Fixed(PortContract::of(MediaKind::Video).in_memory(MemoryDomain::D3d11))
+        InputContract::Fixed(PortContract::of(MediaKind::VideoFrame).in_memory(MemoryDomain::D3d11))
     }
 
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {

@@ -36,6 +36,9 @@ pub enum Mp4MuxerError {
 struct PendingStream {
     name: Arc<str>,
     input_time_base: ffmpeg::Rational,
+    /// Taken from the parameters this track was registered with, so its
+    /// sink can refuse the other medium's packets at wiring time.
+    kind: Option<MediaKind>,
 }
 
 /// Builds an MP4 (or any other container ffmpeg infers from `path`'s
@@ -122,11 +125,13 @@ impl Mp4Muxer {
             .output
             .add_stream(parameters.id())
             .map_err(Mp4MuxerError::from)?;
+        let kind = MediaKind::packet_for(parameters.medium());
         stream.set_time_base(time_base);
         stream.set_parameters(parameters);
         self.streams.push(PendingStream {
             name: name.into().into(),
             input_time_base: time_base,
+            kind,
         });
         Ok(())
     }
@@ -181,6 +186,7 @@ impl Mp4Muxer {
                     shared: shared.clone(),
                     stream_index: index,
                     input_time_base: stream.input_time_base,
+                    kind: stream.kind,
                     done: false,
                 })
             })
@@ -266,6 +272,9 @@ pub struct Mp4MuxerStreamSink {
     shared: Arc<Mp4MuxerShared>,
     stream_index: usize,
     input_time_base: ffmpeg::Rational,
+    /// The medium this track was registered for; `None` for one this
+    /// crate does not model, which then declares nothing.
+    kind: Option<MediaKind>,
     /// Set once this sink has contributed to
     /// [`Mp4MuxerShared::finish_track`] — guards against double-counting
     /// if both a natural `Eos` and a later `Stop` arrive for the same
@@ -305,9 +314,14 @@ impl Element for Mp4MuxerStreamSink {
 
 impl Sink for Mp4MuxerStreamSink {
     /// A muxer interleaves already-encoded data; it has no encoder of
-    /// its own, so a decoded frame has no route through it.
+    /// its own, so a decoded frame has no route through it. The medium is
+    /// this track's own, so a video encoder wired into the audio track is
+    /// refused rather than writing a file no player can make sense of.
     fn input_contract(&self) -> InputContract {
-        InputContract::Fixed(PortContract::of(MediaKind::Packet))
+        match self.kind {
+            Some(kind) => InputContract::Fixed(PortContract::of(kind)),
+            None => InputContract::Unknown,
+        }
     }
 
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {

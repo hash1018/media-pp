@@ -583,11 +583,13 @@ impl DxgiCaptureSource {
         // captured size and format are runtime values.
         let pad = SrcPad::with_contract(
             format!("{name}_src"),
-            OutputContract::Fixed(PortContract::of(MediaKind::Video).in_memory(if gpu_mode {
-                MemoryDomain::D3d11
-            } else {
-                MemoryDomain::System
-            })),
+            OutputContract::Fixed(
+                PortContract::of(MediaKind::VideoFrame).in_memory(if gpu_mode {
+                    MemoryDomain::D3d11
+                } else {
+                    MemoryDomain::System
+                }),
+            ),
         );
         // Gpu: only the small CPU-side `AVFrame` wrapper is ever pooled
         // (`ffmpeg::frame::Video::empty` — same as `D3d11Upload`'s own

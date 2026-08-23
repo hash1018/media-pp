@@ -1440,7 +1440,7 @@ fn audio_decoder(name: &str) -> SwDecoder {
 }
 
 fn video_frames() -> InputContract {
-    InputContract::Fixed(PortContract::of(MediaKind::Video).in_memory(MemoryDomain::System))
+    InputContract::Fixed(PortContract::of(MediaKind::VideoFrame).in_memory(MemoryDomain::System))
 }
 
 #[test]
@@ -1465,7 +1465,7 @@ fn a_queue_in_the_middle_does_not_hide_a_mismatch() {
         .queue("q", 4)
         .to(DeclaringSink::boxed(
             "muxer",
-            InputContract::Fixed(PortContract::of(MediaKind::Packet)),
+            InputContract::Fixed(PortContract::of(MediaKind::VideoPacket)),
         ))
     else {
         panic!("decoded frames cannot be fed to a packet-only sink");
@@ -1541,7 +1541,7 @@ fn attaching_a_packet_pad_to_a_video_branch_changes_nothing() {
 
     let mut pad = SrcPad::with_contract(
         "demuxer_src",
-        OutputContract::Fixed(PortContract::of(MediaKind::Packet)),
+        OutputContract::Fixed(PortContract::of(MediaKind::VideoPacket)),
     );
     let error = context
         .attach_pad(&mut pad, branch)
@@ -1573,15 +1573,18 @@ fn a_demuxer_declares_packets_on_every_stream_pad() {
         eprintln!("skipped: MEDIA_PP_TEST_VIDEO is not set to a readable file");
         return;
     };
-    let (mut demuxer, _streams) =
+    let (mut demuxer, streams) =
         FileDemuxer::open("demuxer", &path).expect("the fixture must open");
 
-    for pad in demuxer.src_pads() {
-        assert_eq!(
-            pad.contract(),
-            OutputContract::Fixed(PortContract::of(MediaKind::Packet)),
-            "a container yields encoded packets on every stream pad"
-        );
+    // Per stream, from the medium the container announced — a video pad
+    // and an audio pad are both `MediaBuffer::Packet` but not the same
+    // contract, which is the whole point of splitting the kind.
+    for (pad, stream) in demuxer.src_pads().iter().zip(&streams) {
+        let expected = match MediaKind::packet_for(stream.kind) {
+            Some(kind) => OutputContract::Fixed(PortContract::of(kind)),
+            None => OutputContract::Unknown,
+        };
+        assert_eq!(pad.contract(), expected);
     }
 }
 
@@ -1598,8 +1601,9 @@ fn a_system_memory_frame_cannot_feed_a_d3d11_filter() {
         eprintln!("skipped: no D3D11 hardware device available");
         return;
     };
-    let gpu_frames =
-        InputContract::Fixed(PortContract::of(MediaKind::Video).in_memory(MemoryDomain::D3d11));
+    let gpu_frames = InputContract::Fixed(
+        PortContract::of(MediaKind::VideoFrame).in_memory(MemoryDomain::D3d11),
+    );
     let scaler = |name: &str| {
         crate::elements::D3d11Scaler::new(
             name,
@@ -1752,7 +1756,7 @@ fn an_audio_filter_refuses_video_frames() {
         .to(DeclaringSink::boxed(
             "sink",
             InputContract::Fixed(
-                PortContract::of(MediaKind::Audio).in_memory(MemoryDomain::System),
+                PortContract::of(MediaKind::AudioFrame).in_memory(MemoryDomain::System),
             ),
         ))
         .expect("decoded audio through a gain filter is the intended chain");
@@ -1788,7 +1792,9 @@ fn a_d3d11_texture_cannot_feed_a_cuda_filter() {
         ))
         .to(DeclaringSink::boxed(
             "sink",
-            InputContract::Fixed(PortContract::of(MediaKind::Video).in_memory(MemoryDomain::Cuda)),
+            InputContract::Fixed(
+                PortContract::of(MediaKind::VideoFrame).in_memory(MemoryDomain::Cuda),
+            ),
         ))
     else {
         panic!("a D3D11 texture is not reachable from a CUDA kernel");
@@ -1936,7 +1942,7 @@ fn a_video_source_cannot_be_attached_to_an_audio_branch() {
         .to(DeclaringSink::boxed(
             "speakers",
             InputContract::Fixed(
-                PortContract::of(MediaKind::Audio).in_memory(MemoryDomain::System),
+                PortContract::of(MediaKind::AudioFrame).in_memory(MemoryDomain::System),
             ),
         ))
         .expect("the branch itself is consistent");
@@ -1957,4 +1963,78 @@ fn a_video_source_cannot_be_attached_to_an_audio_branch() {
         !source.src_pads()[0].is_linked(),
         "a refused attach must not link the pad"
     );
+}
+
+/// The mistake the medium split exists for. A container's audio and video
+/// pads both emit `MediaBuffer::Packet`, so before the kind carried the
+/// medium this wired up cleanly and failed somewhere inside libavcodec on
+/// the first packet instead.
+#[test]
+fn a_containers_audio_stream_cannot_feed_a_video_decoder() {
+    let Some(path) = try_test_video() else {
+        eprintln!("skipped: MEDIA_PP_TEST_VIDEO is not set to a readable file");
+        return;
+    };
+    let (mut demuxer, streams) =
+        FileDemuxer::open("demuxer", &path).expect("the fixture must open");
+    eprintln!(
+        "fixture streams: {:?}",
+        streams
+            .iter()
+            .map(|s| (s.index, s.kind))
+            .collect::<Vec<_>>()
+    );
+    let Some(audio) = streams
+        .iter()
+        .find(|s| s.kind == ffmpeg::media::Type::Audio)
+    else {
+        eprintln!("skipped: the fixture has no audio stream to mis-wire");
+        return;
+    };
+    let audio_index = audio.index;
+    let video = streams
+        .iter()
+        .find(|s| s.kind == ffmpeg::media::Type::Video)
+        .expect("the fixture must have a video stream");
+    let video_params = demuxer
+        .stream_parameters(video.index)
+        .expect("the video stream must expose parameters");
+
+    let context = contract_context();
+    let branch = context
+        .branch()
+        .pipe(SwDecoder::new("video-decoder", video_params).expect("the decoder must open"))
+        .to(DeclaringSink::boxed("renderer", video_frames()))
+        .expect("the branch itself is consistent");
+
+    let Err(error) = context.attach(&mut demuxer, audio_index, branch) else {
+        panic!("an audio stream has nothing a video decoder can decode");
+    };
+
+    let crate::Error::GraphError(GraphError::IncompatibleLink {
+        produced, accepted, ..
+    }) = error
+    else {
+        panic!("expected an IncompatibleLink, got {error}");
+    };
+    assert_eq!(produced.to_string(), "AudioPacket");
+    assert_eq!(accepted.to_string(), "VideoPacket");
+
+    // The video stream of the same container is what that decoder is for.
+    let branch = context
+        .branch()
+        .pipe(
+            SwDecoder::new(
+                "video-decoder",
+                demuxer
+                    .stream_parameters(video.index)
+                    .expect("the video stream must expose parameters"),
+            )
+            .expect("the decoder must open"),
+        )
+        .to(DeclaringSink::boxed("renderer", video_frames()))
+        .expect("the branch itself is consistent");
+    context
+        .attach(&mut demuxer, video.index, branch)
+        .expect("the video pad and a video decoder are exactly the intended link");
 }

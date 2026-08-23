@@ -410,7 +410,7 @@ impl Element for CudaVideoCompositorInputSink {
 impl Sink for CudaVideoCompositorInputSink {
     /// Every layer is composited on the device, so each input arrives there just as the composed output does.
     fn input_contract(&self) -> InputContract {
-        InputContract::Fixed(PortContract::of(MediaKind::Video).in_memory(MemoryDomain::Cuda))
+        InputContract::Fixed(PortContract::of(MediaKind::VideoFrame).in_memory(MemoryDomain::Cuda))
     }
 
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
@@ -607,7 +607,7 @@ impl CudaVideoCompositor {
                 pad: SrcPad::with_contract(
                     format!("{name}_src"),
                     OutputContract::Fixed(
-                        PortContract::of(MediaKind::Video).in_memory(MemoryDomain::Cuda),
+                        PortContract::of(MediaKind::VideoFrame).in_memory(MemoryDomain::Cuda),
                     ),
                 ),
             },

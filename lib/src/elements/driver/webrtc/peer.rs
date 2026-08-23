@@ -243,6 +243,7 @@ impl WebRtcPeer {
         let sink = direction.is_sending().then(|| {
             WebRtcTrackSink::new(
                 id,
+                kind,
                 outbound_codec,
                 negotiated_codecs.clone(),
                 self.command_tx.clone(),
@@ -264,6 +265,7 @@ impl WebRtcPeer {
             );
             WebRtcTrackSource::new(
                 id,
+                kind,
                 format!("webrtc-track-{}-in", id.0),
                 rx,
                 codec,

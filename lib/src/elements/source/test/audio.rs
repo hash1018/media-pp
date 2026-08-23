@@ -117,7 +117,7 @@ impl TestAudioSource {
         let pad = SrcPad::with_contract(
             format!("{name}_src"),
             OutputContract::Fixed(
-                PortContract::of(MediaKind::Audio).in_memory(MemoryDomain::System),
+                PortContract::of(MediaKind::AudioFrame).in_memory(MemoryDomain::System),
             ),
         );
         Self {

@@ -311,6 +311,9 @@ pub enum HlsMuxerError {
 struct PendingStream {
     name: Arc<str>,
     input_time_base: ffmpeg::Rational,
+    /// Taken from the parameters this track was registered with, so its
+    /// sink can refuse the other medium's packets at wiring time.
+    kind: Option<MediaKind>,
 }
 
 /// Builds one HLS media playlist and returns one [`Sink`] per registered
@@ -354,11 +357,13 @@ impl HlsMuxer {
             .output
             .add_stream(parameters.id())
             .map_err(HlsMuxerError::from)?;
+        let kind = MediaKind::packet_for(parameters.medium());
         stream.set_time_base(time_base);
         stream.set_parameters(parameters);
         self.streams.push(PendingStream {
             name: name.into().into(),
             input_time_base: time_base,
+            kind,
         });
         Ok(())
     }
@@ -396,6 +401,7 @@ impl HlsMuxer {
                     shared: shared.clone(),
                     stream_index: index,
                     input_time_base: stream.input_time_base,
+                    kind: stream.kind,
                     done: false,
                 })
             })
@@ -460,6 +466,9 @@ pub struct HlsMuxerStreamSink {
     shared: Arc<HlsMuxerShared>,
     stream_index: usize,
     input_time_base: ffmpeg::Rational,
+    /// The medium this track was registered for; `None` for one this
+    /// crate does not model, which then declares nothing.
+    kind: Option<MediaKind>,
     done: bool,
 }
 
@@ -496,7 +505,10 @@ impl Element for HlsMuxerStreamSink {
 impl Sink for HlsMuxerStreamSink {
     /// A muxer interleaves already-encoded data, so a decoded frame has no route through it.
     fn input_contract(&self) -> InputContract {
-        InputContract::Fixed(PortContract::of(MediaKind::Packet))
+        match self.kind {
+            Some(kind) => InputContract::Fixed(PortContract::of(kind)),
+            None => InputContract::Unknown,
+        }
     }
 
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {

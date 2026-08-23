@@ -12,7 +12,8 @@ fn main() -> impl std::process::Termination {
 mod windows_example {
     use media_pp::{
         bus::BusEvent,
-        elements::{TestVideoOptions, TestVideoSource},
+        elements::{D3d12Upload, SwScaler, TestVideoOptions, TestVideoSource},
+        ffmpeg,
         pipeline::Pipeline,
     };
     use render_common::{D3d12GpuContext, Shutdown};
@@ -68,6 +69,20 @@ mod windows_example {
             let branch = ctx
                 .branch()
                 .queue("frames", 8) // thread boundary so rendering doesn't block generation
+                // `D3d12Renderer` draws from a device resource only, so the
+                // generated system-memory frames are converted to the NV12
+                // layout `D3d12Upload` writes and uploaded here.
+                .pipe(SwScaler::new(
+                    "to-nv12",
+                    ffmpeg::format::Pixel::NV12,
+                    width,
+                    height,
+                    ffmpeg::software::scaling::Flags::BILINEAR,
+                ))
+                .pipe(
+                    D3d12Upload::new("upload", gpu.device(), width, height)
+                        .expect("failed to create the D3D12 upload"),
+                )
                 .to(Box::new(renderer))?;
             ctx.attach(source, 0, branch)?;
             Ok(())

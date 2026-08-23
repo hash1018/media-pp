@@ -123,7 +123,7 @@ impl D3d12Decoder {
         let pad = SrcPad::with_contract(
             format!("{name}_src"),
             OutputContract::Fixed(
-                PortContract::of(MediaKind::Video).in_memory(MemoryDomain::D3d12),
+                PortContract::of(MediaKind::VideoFrame).in_memory(MemoryDomain::D3d12),
             ),
         );
         let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
@@ -185,7 +185,7 @@ impl Source for D3d12Decoder {
 impl Sink for D3d12Decoder {
     /// Decodes into D3D12VA resources, so what it accepts is the same encoded data any decoder takes.
     fn input_contract(&self) -> InputContract {
-        InputContract::Fixed(PortContract::of(MediaKind::Packet))
+        InputContract::Fixed(PortContract::of(MediaKind::VideoPacket))
     }
 
     fn consume(&mut self, buf: MediaBuffer) -> crate::error::Result<()> {

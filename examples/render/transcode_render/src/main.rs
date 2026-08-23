@@ -13,9 +13,10 @@ mod windows_example {
     use media_pp::{
         bus::BusEvent,
         elements::{
-            Pacer, SwDecoder, SwEncoder, SwEncoderOptions, TestVideoOptions, TestVideoSource,
-            VideoCodec,
+            D3d12Upload, Pacer, SwDecoder, SwEncoder, SwEncoderOptions, SwScaler, TestVideoOptions,
+            TestVideoSource, VideoCodec,
         },
+        ffmpeg,
         pipeline::Pipeline,
     };
     use render_common::{D3d12GpuContext, Shutdown};
@@ -99,6 +100,20 @@ mod windows_example {
                 .pipe(decoder)
                 .queue("frames", 8) // pacer sleeps on its own thread; let decode run ahead into this
                 .pipe(pacer)
+                // `D3d12Renderer` draws from a device resource only, so the
+                // system-memory frames are converted to the NV12 layout
+                // `D3d12Upload` writes and uploaded here.
+                .pipe(SwScaler::new(
+                    "to-nv12",
+                    ffmpeg::format::Pixel::NV12,
+                    width,
+                    height,
+                    ffmpeg::software::scaling::Flags::BILINEAR,
+                ))
+                .pipe(
+                    D3d12Upload::new("upload", gpu.device(), width, height)
+                        .expect("failed to create the D3D12 upload"),
+                )
                 .to(Box::new(renderer))?;
             ctx.attach(source, 0, branch)?;
             Ok(())

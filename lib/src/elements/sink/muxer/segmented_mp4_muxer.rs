@@ -160,9 +160,13 @@ impl SegmentedMp4Muxer {
     /// outgoing segment before opening the next one.
     pub fn open(mut self) -> Result<Vec<Box<dyn Sink>>> {
         // Captured before `self.streams` moves into `GroupState` below —
-        // just the names, in order, for building each `SegmentedTrackSink`
-        // afterward.
-        let names: Vec<Arc<str>> = self.streams.iter().map(|s| s.name.clone()).collect();
+        // the name and medium of each track, in order, for building every
+        // `SegmentedTrackSink` afterward.
+        let tracks: Vec<(Arc<str>, Option<MediaKind>)> = self
+            .streams
+            .iter()
+            .map(|s| (s.name.clone(), MediaKind::packet_for(s.parameters.medium())))
+            .collect();
         let path = (self.naming)(0);
         let current_sinks = open_segment(&self.streams, path)?;
         let group = Arc::new(SegmentGroup {
@@ -175,14 +179,15 @@ impl SegmentedMp4Muxer {
                 segment_started: Instant::now(),
             }),
         });
-        Ok(names
+        Ok(tracks
             .into_iter()
             .enumerate()
-            .map(|(index, name)| -> Box<dyn Sink> {
+            .map(|(index, (name, kind))| -> Box<dyn Sink> {
                 Box::new(SegmentedTrackSink {
                     pp_log: element_pp_log(ElementType::SegmentedMp4Muxer, &name, None),
                     name,
                     track_index: index,
+                    kind,
                     group: group.clone(),
                 })
             })
@@ -303,6 +308,9 @@ struct SegmentedTrackSink {
     pp_log: PpLog,
     name: Arc<str>,
     track_index: usize,
+    /// The medium this track was registered for; `None` for one this
+    /// crate does not model, which then declares nothing.
+    kind: Option<MediaKind>,
     group: Arc<SegmentGroup>,
 }
 
@@ -327,7 +335,10 @@ impl Element for SegmentedTrackSink {
 impl Sink for SegmentedTrackSink {
     /// Same as Mp4Muxer: encoded packets only, cut into segments on keyframes.
     fn input_contract(&self) -> InputContract {
-        InputContract::Fixed(PortContract::of(MediaKind::Packet))
+        match self.kind {
+            Some(kind) => InputContract::Fixed(PortContract::of(kind)),
+            None => InputContract::Unknown,
+        }
     }
 
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {

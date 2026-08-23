@@ -11,9 +11,9 @@
 //! device identity stay where they already are — validated against the
 //! real buffer when it arrives, by the element that is about to use it.
 //! A contract only rules out wiring that could never have worked at all,
-//! such as feeding [`MediaBuffer::Packet`](crate::buffer::MediaBuffer)
-//! into an encoder that only accepts decoded video, or handing a D3D11
-//! texture to a CUDA filter.
+//! such as feeding encoded packets into an encoder that only accepts
+//! decoded video, wiring a container's audio stream into a video decoder,
+//! or handing a D3D11 texture to a CUDA filter.
 //!
 //! Most elements declare nothing and default to [`InputContract::Unknown`]
 //! / [`OutputContract::Unknown`], which always links. Declaring a contract
@@ -21,39 +21,73 @@
 
 use std::fmt;
 
-/// Which [`MediaBuffer`](crate::buffer::MediaBuffer) payloads a port deals in.
+use ffmpeg_next as ffmpeg;
+
+/// Which [`MediaBuffer`](crate::buffer::MediaBuffer) payloads a port deals
+/// in, split by medium as well as by encoding.
+///
+/// The medium is part of the kind because
+/// [`MediaBuffer::Packet`](crate::buffer::MediaBuffer::Packet) alone does
+/// not carry it: a demuxer's audio and video pads emit the same variant,
+/// so without this split, wiring a container's audio stream into a video
+/// decoder is a link the check cannot see. Every element that deals in
+/// packets does know its own medium when it is constructed — from the
+/// stream parameters it was opened with, or from being an audio encoder
+/// rather than a video one — so the distinction costs nothing to state.
 ///
 /// [`MediaBuffer::Eos`](crate::buffer::MediaBuffer::Eos) is deliberately
 /// absent: every sink must accept EOS, so it is never part of what a
 /// contract can rule out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MediaKind {
-    /// Encoded [`MediaBuffer::Packet`](crate::buffer::MediaBuffer::Packet).
-    Packet,
+    /// Encoded video, as [`MediaBuffer::Packet`](crate::buffer::MediaBuffer::Packet).
+    VideoPacket,
+    /// Encoded audio, as [`MediaBuffer::Packet`](crate::buffer::MediaBuffer::Packet).
+    AudioPacket,
     /// Decoded [`MediaBuffer::Video`](crate::buffer::MediaBuffer::Video).
-    Video,
+    VideoFrame,
     /// Decoded [`MediaBuffer::Audio`](crate::buffer::MediaBuffer::Audio).
-    Audio,
+    AudioFrame,
 }
 
 impl MediaKind {
-    const fn bit(self) -> u8 {
-        match self {
-            MediaKind::Packet => 1 << 0,
-            MediaKind::Video => 1 << 1,
-            MediaKind::Audio => 1 << 2,
+    /// The encoded kind a stream of `medium` carries, or `None` for a
+    /// medium none of this crate's elements handle (subtitles, data). A
+    /// caller with no kind to state declares
+    /// [`OutputContract::Unknown`]/[`InputContract::Unknown`] and leaves
+    /// that pad to the runtime check, rather than guessing.
+    pub fn packet_for(medium: ffmpeg::media::Type) -> Option<Self> {
+        match medium {
+            ffmpeg::media::Type::Video => Some(MediaKind::VideoPacket),
+            ffmpeg::media::Type::Audio => Some(MediaKind::AudioPacket),
+            _ => None,
         }
     }
 
-    const ALL: [MediaKind; 3] = [MediaKind::Packet, MediaKind::Video, MediaKind::Audio];
+    const fn bit(self) -> u8 {
+        match self {
+            MediaKind::VideoPacket => 1 << 0,
+            MediaKind::AudioPacket => 1 << 1,
+            MediaKind::VideoFrame => 1 << 2,
+            MediaKind::AudioFrame => 1 << 3,
+        }
+    }
+
+    const ALL: [MediaKind; 4] = [
+        MediaKind::VideoPacket,
+        MediaKind::AudioPacket,
+        MediaKind::VideoFrame,
+        MediaKind::AudioFrame,
+    ];
 }
 
 impl fmt::Display for MediaKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let name = match self {
-            MediaKind::Packet => "Packet",
-            MediaKind::Video => "Video",
-            MediaKind::Audio => "Audio",
+            MediaKind::VideoPacket => "VideoPacket",
+            MediaKind::AudioPacket => "AudioPacket",
+            MediaKind::VideoFrame => "VideoFrame",
+            MediaKind::AudioFrame => "AudioFrame",
         };
         f.write_str(name)
     }
@@ -64,7 +98,9 @@ impl fmt::Display for MediaKind {
 /// A set rather than a single kind because the two sides mean different
 /// things: a producer's set is everything it *may* emit, a consumer's is
 /// everything it *can* accept, and compatibility is the former being a
-/// subset of the latter. A producer emitting `Video|Audio` into a
+/// subset of the latter. A demuxer feeding a muxer may emit either
+/// encoded kind, while a video decoder accepts only one of them — a
+/// distinction a single kind could not express.|Audio` into a
 /// video-only sink is a real mismatch for half its buffers, which a single
 /// kind could not express.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,6 +122,14 @@ impl MediaKindSet {
         }
         Self(bits)
     }
+
+    /// Both encoded kinds — what a muxer, a packet counter, or any other
+    /// element that interleaves or forwards encoded media deals in.
+    pub const PACKETS: Self = Self::from_slice(&[MediaKind::VideoPacket, MediaKind::AudioPacket]);
+
+    /// Both decoded kinds — what an element that handles frames without
+    /// caring which medium they are deals in.
+    pub const FRAMES: Self = Self::from_slice(&[MediaKind::VideoFrame, MediaKind::AudioFrame]);
 
     /// Returns whether `kind` is in this set.
     pub const fn contains(self, kind: MediaKind) -> bool {
@@ -283,9 +327,9 @@ mod tests {
 
     #[test]
     fn a_producers_kinds_must_all_be_accepted() {
-        let video_only = PortContract::of(MediaKind::Video);
+        let video_only = PortContract::of(MediaKind::VideoFrame);
         let both = PortContract {
-            media: MediaKindSet::from_slice(&[MediaKind::Video, MediaKind::Audio]),
+            media: MediaKindSet::FRAMES,
             memory: None,
         };
 
@@ -295,11 +339,44 @@ mod tests {
         assert!(!video_only.accepts(&both));
     }
 
+    /// The split the medium exists for: both are `MediaBuffer::Packet`, so
+    /// nothing else separates a container's audio stream from its video one.
+    #[test]
+    fn encoded_audio_and_encoded_video_are_different_kinds() {
+        let video = PortContract::of(MediaKind::VideoPacket);
+        let audio = PortContract::of(MediaKind::AudioPacket);
+
+        assert!(!video.accepts(&audio));
+        assert!(!audio.accepts(&video));
+        // A muxer takes either, and a demuxer pad of either kind fits it.
+        let muxer = PortContract {
+            media: MediaKindSet::PACKETS,
+            memory: None,
+        };
+        assert!(muxer.accepts(&video));
+        assert!(muxer.accepts(&audio));
+    }
+
+    #[test]
+    fn a_medium_maps_to_its_encoded_kind_or_to_nothing() {
+        assert_eq!(
+            MediaKind::packet_for(ffmpeg::media::Type::Video),
+            Some(MediaKind::VideoPacket)
+        );
+        assert_eq!(
+            MediaKind::packet_for(ffmpeg::media::Type::Audio),
+            Some(MediaKind::AudioPacket)
+        );
+        // Subtitles and data streams are not modelled, and a caller with
+        // no kind to state leaves that pad Unknown rather than guessing.
+        assert_eq!(MediaKind::packet_for(ffmpeg::media::Type::Subtitle), None);
+    }
+
     #[test]
     fn a_stated_memory_domain_must_match_but_an_absent_one_never_blocks() {
-        let system = PortContract::of(MediaKind::Video).in_memory(MemoryDomain::System);
-        let d3d11 = PortContract::of(MediaKind::Video).in_memory(MemoryDomain::D3d11);
-        let unstated = PortContract::of(MediaKind::Video);
+        let system = PortContract::of(MediaKind::VideoFrame).in_memory(MemoryDomain::System);
+        let d3d11 = PortContract::of(MediaKind::VideoFrame).in_memory(MemoryDomain::D3d11);
+        let unstated = PortContract::of(MediaKind::VideoFrame);
 
         assert!(system.accepts(&system));
         assert!(!system.accepts(&d3d11));
@@ -309,16 +386,16 @@ mod tests {
 
     #[test]
     fn kinds_render_for_diagnostics() {
-        assert_eq!(PortContract::of(MediaKind::Packet).to_string(), "Packet");
         assert_eq!(
-            PortContract::of(MediaKind::Video)
+            PortContract::of(MediaKind::VideoPacket).to_string(),
+            "VideoPacket"
+        );
+        assert_eq!(
+            PortContract::of(MediaKind::VideoFrame)
                 .in_memory(MemoryDomain::D3d11)
                 .to_string(),
-            "Video (D3D11)"
+            "VideoFrame (D3D11)"
         );
-        assert_eq!(
-            MediaKindSet::from_slice(&[MediaKind::Audio, MediaKind::Packet]).to_string(),
-            "Packet|Audio"
-        );
+        assert_eq!(MediaKindSet::PACKETS.to_string(), "VideoPacket|AudioPacket");
     }
 }

@@ -20,7 +20,8 @@ mod windows_example {
     use media_pp::{
         Error,
         bus::BusEvent,
-        elements::{FileDemuxer, Pacer, SwDecoder},
+        elements::{D3d12Upload, FileDemuxer, Pacer, SwDecoder, SwScaler},
+        ffmpeg,
         pipeline::Pipeline,
     };
     use render_common::{D3d12GpuContext, Shutdown};
@@ -98,6 +99,20 @@ mod windows_example {
                 .pipe(decoder) // same thread as the demux — cheap enough not to need a queue
                 .queue("frames", 32) // pacer sleeps on its own thread; let decode run ahead into this
                 .pipe(pacer)
+                // `D3d12Renderer` draws from a device resource only, so the
+                // decoder's system-memory frames are converted to the NV12
+                // layout `D3d12Upload` writes and uploaded here.
+                .pipe(SwScaler::new(
+                    "to-nv12",
+                    ffmpeg::format::Pixel::NV12,
+                    width,
+                    height,
+                    ffmpeg::software::scaling::Flags::BILINEAR,
+                ))
+                .pipe(
+                    D3d12Upload::new("upload", gpu.device(), width, height)
+                        .expect("failed to create the D3D12 upload"),
+                )
                 .to(Box::new(renderer))?;
             ctx.attach(source, video.index, branch)?;
             Ok(())

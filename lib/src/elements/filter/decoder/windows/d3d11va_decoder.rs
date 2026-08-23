@@ -133,7 +133,7 @@ impl D3d11Decoder {
         let pad = SrcPad::with_contract(
             format!("{name}_src"),
             OutputContract::Fixed(
-                PortContract::of(MediaKind::Video).in_memory(MemoryDomain::D3d11),
+                PortContract::of(MediaKind::VideoFrame).in_memory(MemoryDomain::D3d11),
             ),
         );
         let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
@@ -195,7 +195,7 @@ impl Source for D3d11Decoder {
 impl Sink for D3d11Decoder {
     /// Decodes into D3D11VA surfaces, so what it accepts is the same encoded data any decoder takes.
     fn input_contract(&self) -> InputContract {
-        InputContract::Fixed(PortContract::of(MediaKind::Packet))
+        InputContract::Fixed(PortContract::of(MediaKind::VideoPacket))
     }
 
     fn consume(&mut self, buf: MediaBuffer) -> crate::error::Result<()> {

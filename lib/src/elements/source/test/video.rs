@@ -122,7 +122,7 @@ impl TestVideoSource {
         let pad = SrcPad::with_contract(
             format!("{name}_src"),
             OutputContract::Fixed(
-                PortContract::of(MediaKind::Video).in_memory(MemoryDomain::System),
+                PortContract::of(MediaKind::VideoFrame).in_memory(MemoryDomain::System),
             ),
         );
         pp_info!(

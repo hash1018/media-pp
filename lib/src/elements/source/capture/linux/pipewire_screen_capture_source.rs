@@ -695,11 +695,13 @@ impl PipeWireScreenCaptureSource {
                 // downstream filter can be checked against it.
                 pad: SrcPad::with_contract(
                     format!("{name}_src"),
-                    OutputContract::Fixed(PortContract::of(MediaKind::Video).in_memory(if gpu {
-                        MemoryDomain::Cuda
-                    } else {
-                        MemoryDomain::System
-                    })),
+                    OutputContract::Fixed(PortContract::of(MediaKind::VideoFrame).in_memory(
+                        if gpu {
+                            MemoryDomain::Cuda
+                        } else {
+                            MemoryDomain::System
+                        },
+                    )),
                 ),
                 name: name.into(),
                 pp_log,

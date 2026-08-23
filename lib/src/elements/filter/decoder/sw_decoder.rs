@@ -79,8 +79,8 @@ impl SwDecoder {
         // not known until the first frame comes back out. That split is
         // exactly what a link check can and cannot know at wiring time.
         let produced = match &kind {
-            Kind::Video(_) => PortContract::of(MediaKind::Video),
-            Kind::Audio(_) => PortContract::of(MediaKind::Audio),
+            Kind::Video(_) => PortContract::of(MediaKind::VideoFrame),
+            Kind::Audio(_) => PortContract::of(MediaKind::AudioFrame),
         }
         .in_memory(MemoryDomain::System);
         let pad = SrcPad::with_contract(format!("{name}_src"), OutputContract::Fixed(produced));
@@ -128,8 +128,14 @@ impl Source for SwDecoder {
 }
 
 impl Sink for SwDecoder {
+    /// The medium, not just "a packet": an audio stream wired into a
+    /// decoder opened for video is the mistake this rules out, and both
+    /// sides of it are `MediaBuffer::Packet`.
     fn input_contract(&self) -> InputContract {
-        InputContract::Fixed(PortContract::of(MediaKind::Packet))
+        InputContract::Fixed(PortContract::of(match &self.kind {
+            Kind::Video(_) => MediaKind::VideoPacket,
+            Kind::Audio(_) => MediaKind::AudioPacket,
+        }))
     }
 
     fn consume(&mut self, buf: MediaBuffer) -> crate::error::Result<()> {

@@ -274,7 +274,7 @@ impl CudaEncoder {
 
         let pad = SrcPad::with_contract(
             format!("{name}_src"),
-            OutputContract::Fixed(PortContract::of(MediaKind::Packet)),
+            OutputContract::Fixed(PortContract::of(MediaKind::VideoPacket)),
         );
         pp_info!(
             pp_log: &pp_log,
@@ -408,7 +408,7 @@ impl Source for CudaEncoder {
 impl Sink for CudaEncoder {
     /// NVENC reads device memory directly; a system-memory frame needs a CudaUpload first.
     fn input_contract(&self) -> InputContract {
-        InputContract::Fixed(PortContract::of(MediaKind::Video).in_memory(MemoryDomain::Cuda))
+        InputContract::Fixed(PortContract::of(MediaKind::VideoFrame).in_memory(MemoryDomain::Cuda))
     }
 
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {

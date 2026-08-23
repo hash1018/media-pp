@@ -464,7 +464,7 @@ impl D3d11NvencEncoder {
 
         let pad = SrcPad::with_contract(
             format!("{name}_src"),
-            OutputContract::Fixed(PortContract::of(MediaKind::Packet)),
+            OutputContract::Fixed(PortContract::of(MediaKind::VideoPacket)),
         );
         pp_info!(
             pp_log: &pp_log,
@@ -715,7 +715,7 @@ impl Source for D3d11NvencEncoder {
 impl Sink for D3d11NvencEncoder {
     /// NVENC reads the texture directly; a system-memory frame needs a D3d11Upload first.
     fn input_contract(&self) -> InputContract {
-        InputContract::Fixed(PortContract::of(MediaKind::Video).in_memory(MemoryDomain::D3d11))
+        InputContract::Fixed(PortContract::of(MediaKind::VideoFrame).in_memory(MemoryDomain::D3d11))
     }
 
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {

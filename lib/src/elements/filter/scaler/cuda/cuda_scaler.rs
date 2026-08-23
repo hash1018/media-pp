@@ -203,7 +203,9 @@ impl CudaScaler {
 
         let pad = SrcPad::with_contract(
             format!("{name}_src"),
-            OutputContract::Fixed(PortContract::of(MediaKind::Video).in_memory(MemoryDomain::Cuda)),
+            OutputContract::Fixed(
+                PortContract::of(MediaKind::VideoFrame).in_memory(MemoryDomain::Cuda),
+            ),
         );
         pp_info!(pp_log: &pp_log, "created: dst={width}x{height}, interp={interp:?}");
         Self {
@@ -312,7 +314,7 @@ impl Source for CudaScaler {
 impl Sink for CudaScaler {
     /// Resizes on the device; a system-memory frame belongs in SwScaler.
     fn input_contract(&self) -> InputContract {
-        InputContract::Fixed(PortContract::of(MediaKind::Video).in_memory(MemoryDomain::Cuda))
+        InputContract::Fixed(PortContract::of(MediaKind::VideoFrame).in_memory(MemoryDomain::Cuda))
     }
 
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {

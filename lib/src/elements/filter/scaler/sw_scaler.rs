@@ -104,7 +104,7 @@ impl SwScaler {
         let pad = SrcPad::with_contract(
             format!("{name}_src"),
             OutputContract::Fixed(
-                PortContract::of(MediaKind::Video).in_memory(MemoryDomain::System),
+                PortContract::of(MediaKind::VideoFrame).in_memory(MemoryDomain::System),
             ),
         );
         let pool = UnboundObjectPool::new(
@@ -168,7 +168,9 @@ impl Source for SwScaler {
 impl Sink for SwScaler {
     /// swscale reads the planes on the CPU, so a device texture is unreachable memory here rather than merely the wrong format.
     fn input_contract(&self) -> InputContract {
-        InputContract::Fixed(PortContract::of(MediaKind::Video).in_memory(MemoryDomain::System))
+        InputContract::Fixed(
+            PortContract::of(MediaKind::VideoFrame).in_memory(MemoryDomain::System),
+        )
     }
 
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {

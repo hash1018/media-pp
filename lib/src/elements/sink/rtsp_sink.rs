@@ -53,6 +53,9 @@ pub struct RtspSink {
     pp_log: PpLog,
     name: Arc<str>,
     url: String,
+    /// The medium this session publishes; `None` for one this crate does
+    /// not model, which then declares nothing.
+    kind: Option<MediaKind>,
     output: ffmpeg::format::context::Output,
     input_time_base: ffmpeg::Rational,
     last_output_dts: Option<i64>,
@@ -76,6 +79,7 @@ impl RtspSink {
         time_base: ffmpeg::Rational,
     ) -> Result<Self> {
         let url = url.into();
+        let kind = MediaKind::packet_for(params.medium());
         let mut output = alloc_output(&url)?;
 
         {
@@ -108,6 +112,7 @@ impl RtspSink {
             pp_log,
             name,
             url,
+            kind,
             output,
             input_time_base: time_base,
             last_output_dts: None,
@@ -173,7 +178,10 @@ impl Element for RtspSink {
 impl Sink for RtspSink {
     /// Republishes encoded data as-is; it has no encoder of its own.
     fn input_contract(&self) -> InputContract {
-        InputContract::Fixed(PortContract::of(MediaKind::Packet))
+        match self.kind {
+            Some(kind) => InputContract::Fixed(PortContract::of(kind)),
+            None => InputContract::Unknown,
+        }
     }
 
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {

@@ -116,23 +116,26 @@ D3D11 texture to a CPU filter. The check runs before the pipeline starts and
 returns `GraphError::IncompatibleLink`:
 
 ```text
-SwDecoder(decoder) produces Video (System), which Mp4Muxer(rec) cannot
-accept (it takes Packet)
+SwDecoder(decoder) produces VideoFrame (System), which Mp4Muxer(rec) cannot
+accept (it takes VideoPacket)
 ```
 
 It compares only what an element already knows when it is constructed: the
-`MediaKind` a port deals in (`Packet`, `Video`, `Audio`) and the
-`MemoryDomain` a decoded frame lives in (`System`, `Cuda`, `D3d11`, `D3d12`).
-Pixel format, resolution, stride, color space, and the identity of a specific
-GPU device are not part of it and stay validated against the real buffer when
-it arrives.
+`MediaKind` a port deals in (`VideoPacket`, `AudioPacket`, `VideoFrame`,
+`AudioFrame`) and the `MemoryDomain` a decoded frame lives in (`System`,
+`Cuda`, `D3d11`, `D3d12`). Pixel format, resolution, stride, color space, and
+the identity of a specific GPU device are not part of it and stay validated
+against the real buffer when it arrives.
 
-The memory domain is what separates frames the buffer type cannot: a decoded
-`MediaBuffer::Video` in system memory and one holding a D3D11 texture are the
-same variant, so only the domain catches a `SwDecoder` wired straight into a
-`D3d11Scaler` with no `D3d11Upload` between them. It names the backend rather
-than just marking a frame as "on a GPU", so a D3D11 texture handed to a CUDA
-filter is caught the same way.
+Both halves of the kind separate buffers the `MediaBuffer` variant cannot.
+The medium splits encoded data, because a container's audio and video pads
+emit the same `Packet` — so wiring the audio stream into a video decoder is
+caught rather than failing inside libavcodec on the first packet. The memory
+domain splits decoded data, because a frame in system memory and one holding
+a D3D11 texture are both `Video` — so a `SwDecoder` wired straight into a
+`D3d11Scaler` with no `D3d11Upload` between them is caught too. The domain
+names the backend rather than just marking a frame as "on a GPU", so a D3D11
+texture handed to a CUDA filter is caught the same way.
 
 This is not caps negotiation. Nothing selects a codec, inserts a converter,
 renegotiates mid-stream, or reallocates a pool. Declaring a contract is

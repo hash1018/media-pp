@@ -74,12 +74,18 @@ impl FileDemuxer {
         let pads = streams
             .iter()
             .map(|s| {
-                SrcPad::with_contract(
-                    format!("src_{}", s.index),
-                    // A container yields encoded packets for every stream it
-                    // carries; which codec they are is the runtime question.
-                    OutputContract::Fixed(PortContract::of(MediaKind::Packet)),
-                )
+                // Per stream, from the medium the container announced:
+                // both pads emit `MediaBuffer::Packet`, so only this tells
+                // an audio stream apart from a video one. A medium this
+                // crate does not model (subtitles, data) declares nothing
+                // and is left to the runtime check.
+                match MediaKind::packet_for(s.kind) {
+                    Some(kind) => SrcPad::with_contract(
+                        format!("src_{}", s.index),
+                        OutputContract::Fixed(PortContract::of(kind)),
+                    ),
+                    None => SrcPad::new(format!("src_{}", s.index)),
+                }
             })
             .collect();
 

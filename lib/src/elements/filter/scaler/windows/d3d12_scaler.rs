@@ -204,7 +204,7 @@ impl D3d12Scaler {
         let pad = SrcPad::with_contract(
             format!("{name}_src"),
             OutputContract::Fixed(
-                PortContract::of(MediaKind::Video).in_memory(MemoryDomain::D3d12),
+                PortContract::of(MediaKind::VideoFrame).in_memory(MemoryDomain::D3d12),
             ),
         );
         let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
@@ -389,7 +389,7 @@ impl Source for D3d12Scaler {
 impl Sink for D3d12Scaler {
     /// Scales on the GPU; a system-memory frame belongs in SwScaler.
     fn input_contract(&self) -> InputContract {
-        InputContract::Fixed(PortContract::of(MediaKind::Video).in_memory(MemoryDomain::D3d12))
+        InputContract::Fixed(PortContract::of(MediaKind::VideoFrame).in_memory(MemoryDomain::D3d12))
     }
 
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {

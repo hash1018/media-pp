@@ -228,7 +228,7 @@ impl Sink for D3d12Renderer {
     /// through [`crate::elements::D3d12Upload`], not through a second
     /// path inside this sink.
     fn input_contract(&self) -> InputContract {
-        InputContract::Fixed(PortContract::of(MediaKind::Video).in_memory(MemoryDomain::D3d12))
+        InputContract::Fixed(PortContract::of(MediaKind::VideoFrame).in_memory(MemoryDomain::D3d12))
     }
 
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {

@@ -884,7 +884,9 @@ impl Element for PipeWireAudioRenderer {
 impl Sink for PipeWireAudioRenderer {
     /// Writes samples into the PipeWire stream buffer.
     fn input_contract(&self) -> InputContract {
-        InputContract::Fixed(PortContract::of(MediaKind::Audio).in_memory(MemoryDomain::System))
+        InputContract::Fixed(
+            PortContract::of(MediaKind::AudioFrame).in_memory(MemoryDomain::System),
+        )
     }
 
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {

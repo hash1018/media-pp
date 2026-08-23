@@ -93,7 +93,7 @@ impl D3d12Download {
         let pad = SrcPad::with_contract(
             format!("{name}_src"),
             OutputContract::Fixed(
-                PortContract::of(MediaKind::Video).in_memory(MemoryDomain::System),
+                PortContract::of(MediaKind::VideoFrame).in_memory(MemoryDomain::System),
             ),
         );
         let pool = UnboundObjectPool::new(
@@ -195,7 +195,7 @@ impl Source for D3d12Download {
 impl Sink for D3d12Download {
     /// The mirror of D3d12Upload: only a device resource has anything to bring back.
     fn input_contract(&self) -> InputContract {
-        InputContract::Fixed(PortContract::of(MediaKind::Video).in_memory(MemoryDomain::D3d12))
+        InputContract::Fixed(PortContract::of(MediaKind::VideoFrame).in_memory(MemoryDomain::D3d12))
     }
 
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
