@@ -8,10 +8,14 @@ use std::{
 };
 
 use super::*;
+use ffmpeg_next as ffmpeg;
+
+use crate::contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract};
 use crate::elements::{
-    FileDemuxer, Pacer, TeeBuilder, TestAudioOptions, TestAudioSource, TestVideoOptions,
+    FileDemuxer, Pacer, SwDecoder, TeeBuilder, TestAudioOptions, TestAudioSource, TestVideoOptions,
     TestVideoSource,
 };
+use crate::graph::GraphError;
 use crate::test_support::try_test_video;
 use crate::{
     control::{ControlReceiver, drain_control},
@@ -1345,4 +1349,238 @@ fn a_source_that_fails_still_stops_its_own_branch() {
         "the branch behind a failed source must still be stopped, \
          or anything holding state downstream can never finalize it"
     );
+}
+
+// ---------------------------------------------------------------------
+// Link contracts (see `crate::contract`).
+//
+// These cover the check itself rather than any one element: that a
+// mismatch is refused before anything runs, that a `Queue` in the middle
+// does not hide one, that an undeclared contract still links, and that
+// the pad-to-branch boundary an attach crosses is checked too.
+// ---------------------------------------------------------------------
+
+/// A terminal sink declaring whatever a given test needs to check against.
+struct DeclaringSink {
+    name: Arc<str>,
+    pp_log: PpLog,
+    contract: InputContract,
+}
+
+impl DeclaringSink {
+    fn boxed(name: &'static str, contract: InputContract) -> Box<Self> {
+        Box::new(Self {
+            name: name.into(),
+            pp_log: element_pp_log(ElementType::Other, name, None),
+            contract,
+        })
+    }
+}
+
+impl Element for DeclaringSink {
+    fn name(&self) -> Arc<str> {
+        self.name.clone()
+    }
+
+    fn element_type(&self) -> ElementType {
+        ElementType::Other
+    }
+
+    fn pp_log(&self) -> &PpLog {
+        &self.pp_log
+    }
+
+    fn pp_log_mut(&mut self) -> &mut PpLog {
+        &mut self.pp_log
+    }
+}
+
+impl Sink for DeclaringSink {
+    fn input_contract(&self) -> InputContract {
+        self.contract
+    }
+
+    fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
+        Ok(())
+    }
+
+    fn control(&mut self, _msg: ControlMsg) -> Result<()> {
+        Ok(())
+    }
+}
+
+fn contract_context() -> Arc<Context> {
+    let (bus, _rx) = Bus::new();
+    let graph = PipelineGraph::new();
+    let source_id = graph.add_source(ElementType::Other, "source".into());
+    Arc::new(Context::for_test(bus, "contracts", graph, source_id))
+}
+
+/// A decoder built without any fixture — only `codec_type`/`codec_id`
+/// decide which one `SwDecoder::new` opens. Same approach as that
+/// element's own tests, so these run everywhere rather than only where
+/// `MEDIA_PP_TEST_VIDEO` is set.
+fn decoder(name: &str, medium: ffmpeg::media::Type, codec: ffmpeg::codec::Id) -> SwDecoder {
+    let mut params = ffmpeg::codec::Parameters::new();
+    // SAFETY: `as_mut_ptr` on parameters this test just created and still
+    // owns exclusively; both are plain fields of `AVCodecParameters`.
+    unsafe {
+        (*params.as_mut_ptr()).codec_type = medium.into();
+        (*params.as_mut_ptr()).codec_id = codec.into();
+    }
+    SwDecoder::new(name, params).expect("the built-in decoder must open")
+}
+
+fn video_decoder(name: &str) -> SwDecoder {
+    decoder(name, ffmpeg::media::Type::Video, ffmpeg::codec::Id::H264)
+}
+
+fn audio_decoder(name: &str) -> SwDecoder {
+    decoder(name, ffmpeg::media::Type::Audio, ffmpeg::codec::Id::AAC)
+}
+
+fn video_frames() -> InputContract {
+    InputContract::Fixed(PortContract::of(MediaKind::Video).in_memory(MemoryDomain::System))
+}
+
+#[test]
+fn a_decoder_reaches_a_matching_sink_through_a_queue() {
+    contract_context()
+        .branch()
+        .pipe(video_decoder("decoder"))
+        .queue("q", 4)
+        .to(DeclaringSink::boxed("renderer", video_frames()))
+        .expect("decoded video into a video sink is a valid link");
+}
+
+/// The one that makes the whole feature worth having: a `Queue` is a
+/// thread boundary, not a transform, so a mismatch two stages apart must
+/// still be caught — and must still name the decoder that actually
+/// produces the frames rather than the queue that would have relayed them.
+#[test]
+fn a_queue_in_the_middle_does_not_hide_a_mismatch() {
+    let Err(error) = contract_context()
+        .branch()
+        .pipe(video_decoder("decoder"))
+        .queue("q", 4)
+        .to(DeclaringSink::boxed(
+            "muxer",
+            InputContract::Fixed(PortContract::of(MediaKind::Packet)),
+        ))
+    else {
+        panic!("decoded frames cannot be fed to a packet-only sink");
+    };
+
+    let crate::Error::GraphError(GraphError::IncompatibleLink {
+        producer, consumer, ..
+    }) = error
+    else {
+        panic!("expected an IncompatibleLink, got {error}");
+    };
+    assert_eq!(&*producer, "decoder");
+    assert_eq!(&*consumer, "muxer");
+}
+
+/// Two `SwDecoder`s of the same `ElementType` legitimately produce
+/// different kinds, decided by the stream parameters each was built with.
+/// This is what makes a contract a property of the instance rather than
+/// something a table keyed by `ElementType` could ever answer.
+#[test]
+fn an_audio_decoder_is_rejected_where_a_video_decoder_would_link() {
+    contract_context()
+        .branch()
+        .pipe(video_decoder("video"))
+        .to(DeclaringSink::boxed("encoder", video_frames()))
+        .expect("the video decoder is the case this sink accepts");
+
+    let Err(error) = contract_context()
+        .branch()
+        .pipe(audio_decoder("audio"))
+        .to(DeclaringSink::boxed("encoder", video_frames()))
+    else {
+        panic!("an audio decoder cannot feed a video-only sink");
+    };
+
+    assert!(
+        matches!(
+            error,
+            crate::Error::GraphError(GraphError::IncompatibleLink { .. })
+        ),
+        "got {error}"
+    );
+}
+
+/// Over-rejection is the real risk of a check like this: a wrong
+/// declaration refuses a pipeline that works. An element that declares
+/// nothing must keep linking to anything, exactly as before contracts
+/// existed.
+#[test]
+fn an_undeclared_contract_still_links_to_anything() {
+    contract_context()
+        .branch()
+        .pipe(video_decoder("decoder"))
+        .to(Box::new(NoOpSink {
+            name: "undeclared".into(),
+            pp_log: element_pp_log(ElementType::Other, "undeclared", None),
+        }))
+        .expect("an Unknown contract is missing information, not a refusal");
+}
+
+/// The boundary `ChainBuilder::to` cannot see: a branch is built on its
+/// own and only meets the pad feeding it at attach time. A refusal there
+/// has to leave both the pad and the graph exactly as they were.
+#[test]
+fn attaching_a_packet_pad_to_a_video_branch_changes_nothing() {
+    let context = contract_context();
+    let branch = context
+        .branch()
+        .queue("q", 4)
+        .to(DeclaringSink::boxed("encoder", video_frames()))
+        .expect("the branch itself is consistent");
+    let before = context.graph.snapshot();
+
+    let mut pad = SrcPad::with_contract(
+        "demuxer_src",
+        OutputContract::Fixed(PortContract::of(MediaKind::Packet)),
+    );
+    let error = context
+        .attach_pad(&mut pad, branch)
+        .expect_err("a packet pad cannot feed a branch that decodes nothing");
+
+    let crate::Error::GraphError(GraphError::IncompatibleLink {
+        producer, consumer, ..
+    }) = error
+    else {
+        panic!("expected an IncompatibleLink, got {error}");
+    };
+    assert_eq!(&*producer, "demuxer_src");
+    assert_eq!(
+        &*consumer, "encoder",
+        "the leading Queue defers the question rather than answering it"
+    );
+
+    assert!(!pad.is_linked(), "a refused attach must not link the pad");
+    let after = context.graph.snapshot();
+    assert_eq!(before.revision, after.revision);
+    assert_eq!(before.nodes.len(), after.nodes.len());
+}
+
+/// The declaration on a real source pad rather than on a test double.
+/// Needs a container to open, so it only runs where one is configured.
+#[test]
+fn a_demuxer_declares_packets_on_every_stream_pad() {
+    let Some(path) = try_test_video() else {
+        eprintln!("skipped: MEDIA_PP_TEST_VIDEO is not set to a readable file");
+        return;
+    };
+    let (mut demuxer, _streams) =
+        FileDemuxer::open("demuxer", &path).expect("the fixture must open");
+
+    for pad in demuxer.src_pads() {
+        assert_eq!(
+            pad.contract(),
+            OutputContract::Fixed(PortContract::of(MediaKind::Packet)),
+            "a container yields encoded packets on every stream pad"
+        );
+    }
 }

@@ -5,7 +5,7 @@ use crate::pp_log::{PpLog, pp_trace};
 use crate::{
     buffer::MediaBuffer,
     bus::{Bus, BusEvent},
-    contract::InputContract,
+    contract::{InputContract, OutputContract, PortContract},
     control::ControlMsg,
     element::{Context, Element, ElementType, Filter, Sink, Source, element_pp_log},
     error::Result,
@@ -34,6 +34,59 @@ pub struct ChainBuilder {
 struct PlannedNode {
     info: NodeInfo,
     output_port: Arc<str>,
+    input: InputContract,
+    output: OutputContract,
+}
+
+/// Walks a chain front-to-back once, rejecting any link whose two sides
+/// cannot meet and reporting what the branch as a whole accepts.
+///
+/// `carried` is what is currently flowing, when that is known at all.
+/// A [`OutputContract::Passthrough`] stage leaves it — including the name
+/// of whichever element actually produced it — untouched, which is what
+/// keeps the diagnostic pointing at the real producer rather than at the
+/// `Queue` that happened to relay it.
+fn validate_chain(
+    stages: impl IntoIterator<Item = (Arc<str>, InputContract, OutputContract)>,
+) -> Result<(Arc<str>, InputContract)> {
+    let mut carried: Option<(Arc<str>, PortContract)> = None;
+    let mut accepted_by: Option<(Arc<str>, InputContract)> = None;
+
+    for (name, input, output) in stages {
+        if let (Some((producer, produced)), InputContract::Fixed(accepted)) = (&carried, input)
+            && !accepted.accepts(produced)
+        {
+            return Err(GraphError::IncompatibleLink {
+                producer: producer.clone(),
+                produced: *produced,
+                consumer: name,
+                accepted,
+            }
+            .into());
+        }
+
+        // The branch's own input is decided by the first stage that
+        // actually constrains it. A leading `Any` stage only defers that
+        // question when it also forwards what it received; one that
+        // produces something of its own leaves the branch input
+        // unconstrained for good.
+        if accepted_by.is_none()
+            && !matches!(
+                (input, output),
+                (InputContract::Any, OutputContract::Passthrough)
+            )
+        {
+            accepted_by = Some((name.clone(), input));
+        }
+
+        carried = match output {
+            OutputContract::Fixed(contract) => Some((name, contract)),
+            OutputContract::Passthrough => carried,
+            OutputContract::Unknown => None,
+        };
+    }
+
+    Ok(accepted_by.unwrap_or_else(|| ("".into(), InputContract::Any)))
 }
 
 /// A fully constructed runtime chain whose graph nodes are still detached.
@@ -300,11 +353,11 @@ impl ChainBuilder {
                 count: pad_count,
             });
         }
-        let output_port = element
+        let (output_port, output) = element
             .src_pads()
             .first()
-            .map(|pad| Arc::<str>::from(pad.name()))
-            .unwrap_or_else(|| "src".into());
+            .map(|pad| (Arc::<str>::from(pad.name()), pad.contract()))
+            .unwrap_or_else(|| ("src".into(), OutputContract::Unknown));
         self.planned.push(PlannedNode {
             info: NodeInfo {
                 id: self.context.graph.reserve_element_id(),
@@ -312,6 +365,8 @@ impl ChainBuilder {
                 name,
             },
             output_port,
+            input: element.input_contract(),
+            output,
         });
         self.elements.push(Box::new(DirectStage(element)));
         self
@@ -342,6 +397,12 @@ impl ChainBuilder {
                 name: name.clone(),
             },
             output_port: format!("{name}_src").into(),
+            // A Queue is a thread boundary, not a transform: it hands
+            // downstream exactly what it was given. Declared here rather
+            // than on the element because a Queue owns its downstream
+            // sink directly and so has no pad to carry it.
+            input: InputContract::Any,
+            output: OutputContract::Passthrough,
         });
         self.elements.push(Box::new(QueueStage {
             id,
@@ -373,6 +434,20 @@ impl ChainBuilder {
             name: terminal.name(),
         };
         let terminal_id = terminal_info.id;
+
+        // The terminal has no src pad, so its stage ends the walk with
+        // nothing flowing onward.
+        let (input_element, input) = validate_chain(
+            self.planned
+                .iter()
+                .map(|node| (node.info.name.clone(), node.input, node.output))
+                .chain([(
+                    terminal_info.name.clone(),
+                    terminal.input_contract(),
+                    OutputContract::Unknown,
+                )]),
+        )?;
+
         let mut nodes: Vec<_> = self.planned.iter().map(|node| node.info.clone()).collect();
         nodes.push(terminal_info);
         let edges = nodes
@@ -406,6 +481,8 @@ impl ChainBuilder {
             plan: BranchPlan {
                 nodes,
                 edges,
+                input,
+                input_element,
                 root: root_id,
             },
         })
@@ -452,6 +529,23 @@ impl Context {
             return Err(GraphError::PadAlreadyLinked(pad.name().to_owned()).into());
         }
         let from_port: Arc<str> = pad.name().into();
+        // The source boundary, where a branch built in isolation meets the
+        // pad it will actually be fed from. `ChainBuilder::to` has already
+        // checked everything *inside* the branch; this is the one link it
+        // could not see. Rejecting here leaves the pad unlinked and the
+        // graph untouched, same as any other attach failure.
+        if let (OutputContract::Fixed(produced), InputContract::Fixed(accepted)) =
+            (pad.contract(), branch.plan.input)
+            && !accepted.accepts(&produced)
+        {
+            return Err(GraphError::IncompatibleLink {
+                producer: from_port,
+                produced,
+                consumer: branch.plan.input_element.clone(),
+                accepted,
+            }
+            .into());
+        }
         let DetachedBranch { root, plan } = branch;
         Ok(self
             .graph

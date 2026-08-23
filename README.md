@@ -107,6 +107,34 @@ The core types are deliberately small:
 Buffers use shared ownership, so fan-out clones references rather than media
 payloads. PTS, duration, packet time bases, video color information, and EOS
 are preserved through stages that do not intentionally create a new timeline.
+
+### Link contracts
+
+Building or attaching a branch rejects a connection that could never carry
+data — feeding encoded packets to an encoder that takes decoded frames, or a
+D3D11 texture to a CPU filter. The check runs before the pipeline starts and
+returns `GraphError::IncompatibleLink`:
+
+```text
+SwDecoder(decoder) produces Video (System), which Mp4Muxer(rec) cannot
+accept (it takes Packet)
+```
+
+It compares only what an element already knows when it is constructed: the
+`MediaKind` a port deals in (`Packet`, `Video`, `Audio`) and the
+`MemoryDomain` a decoded frame lives in (`System`, `Cuda`, `D3d11`, `D3d12`).
+Pixel format, resolution, stride, color space, and the identity of a specific
+GPU device are not part of it and stay validated against the real buffer when
+it arrives.
+
+This is not caps negotiation. Nothing selects a codec, inserts a converter,
+renegotiates mid-stream, or reallocates a pool. Declaring a contract is
+opt-in: `Queue`, `Tee`, `Pacer`, `FileDemuxer`, `SwDecoder`, `SwEncoder`, and
+`Mp4Muxer` declare one, every other element defaults to "unknown", and an
+unknown contract always links and leaves the runtime check in charge. A
+`Queue` or `Tee` passes its upstream contract through, so a mismatch is still
+caught across a thread boundary and still names the element that actually
+produces the data.
 Use `Pipeline::finish` to stop a live source with ordered EOS and drain queued
 buffers, codecs, and muxers; `Pipeline::stop` abandons buffered work immediately.
 

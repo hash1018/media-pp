@@ -19,6 +19,7 @@ use std::{
 use thiserror::Error as ThisError;
 
 use crate::{
+    contract::{InputContract, PortContract},
     element::ElementType,
     log::{Level, enabled},
     pp_log::{PpLog, pp_info},
@@ -300,6 +301,22 @@ pub enum GraphError {
     #[error("a branch must contain at least one element")]
     EmptyBranch,
 
+    /// Two elements were wired together even though what one produces can
+    /// never reach the other — see [`crate::contract`]. Reported when the
+    /// branch is built or attached, before anything runs, because no
+    /// buffer could have made this link work.
+    #[error("{producer} produces {produced}, which {consumer} cannot accept (it takes {accepted})")]
+    IncompatibleLink {
+        /// Name of the element or pad on the producing side.
+        producer: Arc<str>,
+        /// What that side emits.
+        produced: PortContract,
+        /// Caller-selected name of the element that rejected the link.
+        consumer: Arc<str>,
+        /// What the consuming side accepts.
+        accepted: PortContract,
+    },
+
     /// [`crate::pipeline::ChainBuilder::pipe`] received a filter whose output
     /// shape cannot be represented as one linear chain stage.
     #[error("ChainBuilder::pipe requires exactly one output pad, but {name} has {count}")]
@@ -322,6 +339,12 @@ pub(crate) struct BranchPlan {
     pub nodes: Vec<NodeInfo>,
     pub edges: Vec<PlannedEdge>,
     pub root: ElementId,
+    /// What this branch as a whole can be fed, and the element that
+    /// decides it — the first one past any leading passthrough stages.
+    /// Carried here so an attach can check the branch against the pad it
+    /// is being linked to without walking the built chain again.
+    pub input: InputContract,
+    pub input_element: Arc<str>,
 }
 
 #[derive(Debug)]
