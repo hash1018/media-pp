@@ -9,6 +9,7 @@ use thiserror::Error as ThisError;
 
 use crate::{
     buffer::MediaBuffer,
+    contract::{InputContract, MediaKind, PortContract},
     control::ControlMsg,
     element::{Element, ElementType, Sink, element_pp_log},
     error::Result,
@@ -303,6 +304,12 @@ impl Element for Mp4MuxerStreamSink {
 }
 
 impl Sink for Mp4MuxerStreamSink {
+    /// A muxer interleaves already-encoded data; it has no encoder of
+    /// its own, so a decoded frame has no route through it.
+    fn input_contract(&self) -> InputContract {
+        InputContract::Fixed(PortContract::of(MediaKind::Packet))
+    }
+
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         match buf {
             MediaBuffer::Packet(packet) => self

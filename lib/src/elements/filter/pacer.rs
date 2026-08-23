@@ -12,6 +12,7 @@ use thiserror::Error as ThisError;
 use crate::{
     buffer::MediaBuffer,
     clock::Clock,
+    contract::{InputContract, OutputContract},
     control::ControlMsg,
     element::{Element, ElementType, Sink, Source, element_pp_log},
     pad::SrcPad,
@@ -114,7 +115,7 @@ impl Pacer {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::Pacer, &name, None);
         pp_info!(pp_log: &pp_log, "created: time_base={time_base}");
-        let pad = SrcPad::new(format!("{name}_src"));
+        let pad = SrcPad::with_contract(format!("{name}_src"), OutputContract::Passthrough);
         let interrupt_epoch = clock.interrupt_epoch();
         let time_base = TimeBase::try_new(time_base).map_err(
             |InvalidTimeBase {
@@ -206,6 +207,12 @@ impl Source for Pacer {
 }
 
 impl Sink for Pacer {
+    /// Pacing is a delay, not a transform: every kind is held until its
+    /// own PTS comes due and then forwarded unchanged.
+    fn input_contract(&self) -> InputContract {
+        InputContract::Any
+    }
+
     fn consume(&mut self, buf: MediaBuffer) -> crate::error::Result<()> {
         self.pending.push_back(buf);
         while let Some(buf) = self.pending.pop_front() {

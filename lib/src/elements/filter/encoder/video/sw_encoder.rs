@@ -7,6 +7,7 @@ use thiserror::Error as ThisError;
 
 use crate::{
     buffer::MediaBuffer,
+    contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
     control::ControlMsg,
     element::{Element, ElementType, Sink, Source, element_pp_log},
     error::Result,
@@ -214,7 +215,10 @@ impl SwEncoder {
 
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::SwEncoder, &name, None);
-        let pad = SrcPad::new(format!("{name}_src"));
+        let pad = SrcPad::with_contract(
+            format!("{name}_src"),
+            OutputContract::Fixed(PortContract::of(MediaKind::Packet)),
+        );
         pp_info!(
             pp_log: &pp_log,
             "opened: codec={encoder_name}, {}x{}, bit_rate={}",
@@ -288,6 +292,13 @@ impl Source for SwEncoder {
 }
 
 impl Sink for SwEncoder {
+    /// System memory specifically: this encoder reads the frame's planes
+    /// on the CPU, so a D3D11 or CUDA frame is not merely the wrong
+    /// format here, it is unreachable memory.
+    fn input_contract(&self) -> InputContract {
+        InputContract::Fixed(PortContract::of(MediaKind::Video).in_memory(MemoryDomain::System))
+    }
+
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         match buf {
             MediaBuffer::Video(frame) => {

@@ -8,6 +8,7 @@ use crate::pp_log::{PpLog, pp_info};
 use crate::{
     buffer::MediaBuffer,
     bus::BusEvent,
+    contract::{InputContract, OutputContract},
     control::ControlMsg,
     element::{Context, Element, ElementType, Sink, element_pp_log},
     error::Result,
@@ -149,7 +150,10 @@ impl Tee {
 impl TeeShared {
     fn next_pad(&self, tee_name: &str) -> SrcPad {
         let id = self.next_pad_id.fetch_add(1, Ordering::Relaxed);
-        SrcPad::new(format!("{tee_name}_src{id}"))
+        // Every branch of a Tee sees the same buffers this Tee was given,
+        // so each pad carries the upstream contract through unchanged and
+        // a dynamically attached branch is checked against it too.
+        SrcPad::with_contract(format!("{tee_name}_src{id}"), OutputContract::Passthrough)
     }
 }
 
@@ -357,6 +361,12 @@ impl Element for Tee {
 }
 
 impl Sink for Tee {
+    /// A Tee duplicates rather than transforms, so it accepts every kind
+    /// and hands each branch exactly what it received.
+    fn input_contract(&self) -> InputContract {
+        InputContract::Any
+    }
+
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         let branches = lock_unpoisoned(&self.shared.branches).clone();
         // One branch failing must not stop the buffer from reaching its

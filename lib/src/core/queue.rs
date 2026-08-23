@@ -30,6 +30,7 @@ use thiserror::Error as ThisError;
 use crate::{
     buffer::MediaBuffer,
     bus::{Bus, BusEvent},
+    contract::InputContract,
     control::{self, ControlMsg, ControlReceiver, ControlSender, RequestKind},
     element::{Element, ElementType, Sink, element_pp_log},
     error::{Result, ThreadSpawnError},
@@ -306,6 +307,15 @@ impl Element for Queue {
 }
 
 impl Sink for Queue {
+    /// A Queue neither inspects nor transforms what it carries, so it
+    /// accepts every kind and — see `ChainBuilder::queue_with_policy` —
+    /// passes the upstream contract straight through to whatever it
+    /// feeds. Without that, a check would go dark at the first thread
+    /// boundary in the pipeline.
+    fn input_contract(&self) -> InputContract {
+        InputContract::Any
+    }
+
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         // EOS must never be dropped, regardless of policy: unlike an
         // explicit Stop or Queue::drop's private stop flag, this is the

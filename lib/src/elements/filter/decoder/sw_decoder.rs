@@ -6,6 +6,7 @@ use thiserror::Error as ThisError;
 
 use crate::{
     buffer::MediaBuffer,
+    contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
     control::ControlMsg,
     element::{Element, ElementType, Sink, Source, element_pp_log},
     pad::SrcPad,
@@ -73,7 +74,16 @@ impl SwDecoder {
             other => return Err(SwDecoderError::UnsupportedMediaType(other)),
         };
 
-        let pad = SrcPad::new(format!("{name}_src"));
+        // Which of the two this decoder emits is settled here, by the
+        // stream parameters, even though the decoded format and size are
+        // not known until the first frame comes back out. That split is
+        // exactly what a link check can and cannot know at wiring time.
+        let produced = match &kind {
+            Kind::Video(_) => PortContract::of(MediaKind::Video),
+            Kind::Audio(_) => PortContract::of(MediaKind::Audio),
+        }
+        .in_memory(MemoryDomain::System);
+        let pad = SrcPad::with_contract(format!("{name}_src"), OutputContract::Fixed(produced));
         let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
         pp_info!(
             pp_log: &pp_log,
@@ -118,6 +128,10 @@ impl Source for SwDecoder {
 }
 
 impl Sink for SwDecoder {
+    fn input_contract(&self) -> InputContract {
+        InputContract::Fixed(PortContract::of(MediaKind::Packet))
+    }
+
     fn consume(&mut self, buf: MediaBuffer) -> crate::error::Result<()> {
         match buf {
             MediaBuffer::Packet(packet) => match &mut self.kind {

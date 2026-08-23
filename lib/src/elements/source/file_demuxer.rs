@@ -7,6 +7,7 @@ use thiserror::Error as ThisError;
 use crate::{
     buffer::MediaBuffer,
     bus::{Bus, BusEvent},
+    contract::{MediaKind, OutputContract, PortContract},
     control::{ControlReceiver, drain_control},
     element::{Element, ElementType, Source, SourceElement, element_pp_log},
     pad::SrcPad,
@@ -72,7 +73,14 @@ impl FileDemuxer {
 
         let pads = streams
             .iter()
-            .map(|s| SrcPad::new(format!("src_{}", s.index)))
+            .map(|s| {
+                SrcPad::with_contract(
+                    format!("src_{}", s.index),
+                    // A container yields encoded packets for every stream it
+                    // carries; which codec they are is the runtime question.
+                    OutputContract::Fixed(PortContract::of(MediaKind::Packet)),
+                )
+            })
             .collect();
 
         let name: Arc<str> = name.into().into();
