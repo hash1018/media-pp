@@ -5,6 +5,7 @@ use crate::pp_log::{PpLog, pp_trace};
 use crate::{
     buffer::MediaBuffer,
     bus::{Bus, BusEvent},
+    contract::InputContract,
     control::ControlMsg,
     element::{Context, Element, ElementType, Filter, Sink, Source, element_pp_log},
     error::Result,
@@ -98,6 +99,10 @@ impl<T: Source> Source for FlowTracer<T> {
 }
 
 impl<T: Sink> Sink for FlowTracer<T> {
+    fn input_contract(&self) -> InputContract {
+        self.inner.input_contract()
+    }
+
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         let is_eos = buf.is_eos();
         if is_eos {
@@ -197,6 +202,10 @@ impl Element for TerminalTracer {
 }
 
 impl Sink for TerminalTracer {
+    fn input_contract(&self) -> InputContract {
+        self.inner.input_contract()
+    }
+
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         let is_eos = buf.is_eos();
         if is_eos {

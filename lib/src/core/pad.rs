@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use crate::{
     buffer::MediaBuffer,
+    contract::OutputContract,
     control::ControlMsg,
     element::{ElementType, Sink},
     error::Result,
@@ -30,21 +31,43 @@ use crate::{
 /// thread than whatever is driving it; see that module for why.
 pub struct SrcPad {
     name: String,
+    contract: OutputContract,
     peer: Option<Box<dyn Sink>>,
 }
 
 impl SrcPad {
-    /// Creates an unlinked output pad with the caller-selected diagnostic name.
+    /// Creates an unlinked output pad with the caller-selected diagnostic
+    /// name, declaring nothing about what it emits.
+    ///
+    /// Use [`SrcPad::with_contract`] on a pad whose payload is already
+    /// settled by the time its element is constructed; this plain
+    /// constructor leaves the link check to defer to the runtime one, the
+    /// same as before contracts existed.
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
+            contract: OutputContract::Unknown,
             peer: None,
+        }
+    }
+
+    /// Creates an unlinked output pad that declares what it emits — see
+    /// [`crate::contract`].
+    pub fn with_contract(name: impl Into<String>, contract: OutputContract) -> Self {
+        Self {
+            contract,
+            ..Self::new(name)
         }
     }
 
     /// Returns the pad name used by topology and flow diagnostics.
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// Returns what this pad declares it emits.
+    pub fn contract(&self) -> OutputContract {
+        self.contract
     }
 
     /// Returns whether this pad currently owns a downstream sink connection.

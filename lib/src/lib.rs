@@ -108,8 +108,8 @@ mod test_support;
 // its module doc) — every external and internal caller keeps using
 // `crate::pipeline`/`media_pp::pipeline` etc., never `crate::core::...`.
 pub use core::{
-    buffer, bus, clock, color, control, driver, element, graph, log, pad, pipeline, playback_clock,
-    pool, pp_log, queue,
+    buffer, bus, clock, color, contract, control, driver, element, graph, log, pad, pipeline,
+    playback_clock, pool, pp_log, queue,
 };
 
 // Same flat-namespace reasoning as above, but crate-private: `schedule`/

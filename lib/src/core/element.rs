@@ -17,6 +17,7 @@ use crate::{
     buffer::MediaBuffer,
     bus::Bus,
     clock::Clock,
+    contract::InputContract,
     control::{ControlMsg, ControlReceiver},
     error::Result,
     graph::{ElementId, PipelineGraph},
@@ -277,6 +278,19 @@ pub trait Sink: Element {
     /// Implementations must forward [`MediaBuffer::Eos`] after flushing any
     /// delayed state they own.
     fn consume(&mut self, buf: MediaBuffer) -> Result<()>;
+
+    /// What this sink can be fed, checked when it is wired rather than
+    /// when the first buffer arrives — see [`crate::contract`].
+    ///
+    /// The default declares nothing, so an element that does not override
+    /// it links to anything and is validated exactly as before, when a
+    /// buffer reaches `consume`. Declaring a contract never replaces that
+    /// runtime check; it only moves the subset of failures that are
+    /// knowable at wiring time to where they are unambiguously a wiring
+    /// mistake rather than a bad buffer.
+    fn input_contract(&self) -> InputContract {
+        InputContract::Unknown
+    }
 
     /// Reacts to a [`ControlMsg`] (pause/resume/stop) and, for anything
     /// with a downstream of its own, forwards it on — same shape as
