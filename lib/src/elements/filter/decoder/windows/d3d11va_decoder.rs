@@ -7,6 +7,7 @@ use windows::Win32::Graphics::Direct3D11::{D3D11_BIND_SHADER_RESOURCE, ID3D11Dev
 
 use crate::{
     buffer::MediaBuffer,
+    contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
     control::ControlMsg,
     element::{Element, ElementType, Sink, Source, element_pp_log},
     pad::SrcPad,
@@ -129,7 +130,12 @@ impl D3d11Decoder {
 
         let decoder = context.decoder().video()?;
 
-        let pad = SrcPad::new(format!("{name}_src"));
+        let pad = SrcPad::with_contract(
+            format!("{name}_src"),
+            OutputContract::Fixed(
+                PortContract::of(MediaKind::Video).in_memory(MemoryDomain::D3d11),
+            ),
+        );
         let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
         pp_info!(pp_log: &pp_log, "opened: codec={:?}", decoder.id());
         Ok(Self {
@@ -187,6 +193,11 @@ impl Source for D3d11Decoder {
 }
 
 impl Sink for D3d11Decoder {
+    /// Decodes into D3D11VA surfaces, so what it accepts is the same encoded data any decoder takes.
+    fn input_contract(&self) -> InputContract {
+        InputContract::Fixed(PortContract::of(MediaKind::Packet))
+    }
+
     fn consume(&mut self, buf: MediaBuffer) -> crate::error::Result<()> {
         match buf {
             MediaBuffer::Packet(packet) => {

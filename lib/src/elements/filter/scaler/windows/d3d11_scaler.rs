@@ -22,6 +22,7 @@ use super::d3d11_video_processor::{BltColorSpaces, InputShape, ScaleProcessor, c
 
 use crate::{
     buffer::MediaBuffer,
+    contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
     control::ControlMsg,
     element::{Element, ElementType, Sink, Source, element_pp_log},
     error::Result,
@@ -388,7 +389,12 @@ impl D3d11Scaler {
             context.cast()?
         };
         let video_device: ID3D11VideoDevice = device.cast()?;
-        let pad = SrcPad::new(format!("{name}_src"));
+        let pad = SrcPad::with_contract(
+            format!("{name}_src"),
+            OutputContract::Fixed(
+                PortContract::of(MediaKind::Video).in_memory(MemoryDomain::D3d11),
+            ),
+        );
         let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
         pp_info!(pp_log: &pp_log, "opened: dst={width}x{height} {format:?}");
         Ok(Self {
@@ -643,6 +649,11 @@ impl Source for D3d11Scaler {
 }
 
 impl Sink for D3d11Scaler {
+    /// Scaling happens on the GPU; a system-memory frame belongs in SwScaler.
+    fn input_contract(&self) -> InputContract {
+        InputContract::Fixed(PortContract::of(MediaKind::Video).in_memory(MemoryDomain::D3d11))
+    }
+
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         match buf {
             MediaBuffer::Video(frame) => self.scale(&frame),

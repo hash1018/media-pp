@@ -19,6 +19,7 @@ use crate::pp_log::{PpLog, pp_error, pp_info};
 
 use crate::{
     buffer::MediaBuffer,
+    contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
     control::ControlMsg,
     element::{Element, ElementType, Sink, Source, element_pp_log},
     elements::filter::is_codec_drain_boundary,
@@ -461,7 +462,10 @@ impl D3d11NvencEncoder {
 
         let encoder = opened?;
 
-        let pad = SrcPad::new(format!("{name}_src"));
+        let pad = SrcPad::with_contract(
+            format!("{name}_src"),
+            OutputContract::Fixed(PortContract::of(MediaKind::Packet)),
+        );
         pp_info!(
             pp_log: &pp_log,
             "opened: codec={encoder_name}, {}x{}, input={:?}, bit_rate={}, gop_size={}",
@@ -709,6 +713,11 @@ impl Source for D3d11NvencEncoder {
 }
 
 impl Sink for D3d11NvencEncoder {
+    /// NVENC reads the texture directly; a system-memory frame needs a D3d11Upload first.
+    fn input_contract(&self) -> InputContract {
+        InputContract::Fixed(PortContract::of(MediaKind::Video).in_memory(MemoryDomain::D3d11))
+    }
+
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         match buf {
             MediaBuffer::Video(frame) => self.encode(&frame),

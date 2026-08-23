@@ -19,6 +19,7 @@ use super::super::options::ChromaKeyOptions;
 use crate::{
     buffer::MediaBuffer,
     color::Color,
+    contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
     control::ControlMsg,
     element::{Element, ElementType, Sink, Source, element_pp_log},
     error::Result,
@@ -297,7 +298,12 @@ impl D3d11ChromaKey {
             unsafe { build_pipeline_state(device) }?;
 
         let key_color = options.method.key_color();
-        let pad = SrcPad::new(format!("{name}_src"));
+        let pad = SrcPad::with_contract(
+            format!("{name}_src"),
+            OutputContract::Fixed(
+                PortContract::of(MediaKind::Video).in_memory(MemoryDomain::D3d11),
+            ),
+        );
         let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
         pp_info!(
             pp_log: &pp_log,
@@ -570,6 +576,11 @@ impl Source for D3d11ChromaKey {
 }
 
 impl Sink for D3d11ChromaKey {
+    /// Keying happens on the GPU; a system-memory frame belongs in SwChromaKey.
+    fn input_contract(&self) -> InputContract {
+        InputContract::Fixed(PortContract::of(MediaKind::Video).in_memory(MemoryDomain::D3d11))
+    }
+
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         match buf {
             MediaBuffer::Video(frame) => self.key(&frame),

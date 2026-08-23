@@ -8,6 +8,7 @@ use super::options::ChromaKeyOptions;
 use crate::{
     buffer::MediaBuffer,
     color::Color,
+    contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
     control::ControlMsg,
     element::{Element, ElementType, Sink, Source, element_pp_log},
     error::Result,
@@ -80,7 +81,12 @@ impl SwChromaKey {
             options.threshold,
             options.smoothing
         );
-        let pad = SrcPad::new(format!("{name}_src"));
+        let pad = SrcPad::with_contract(
+            format!("{name}_src"),
+            OutputContract::Fixed(
+                PortContract::of(MediaKind::Video).in_memory(MemoryDomain::System),
+            ),
+        );
         Self {
             name,
             pp_log,
@@ -132,6 +138,11 @@ impl Source for SwChromaKey {
 }
 
 impl Sink for SwChromaKey {
+    /// Keys pixel by pixel on the CPU; the GPU counterpart is D3d11ChromaKey.
+    fn input_contract(&self) -> InputContract {
+        InputContract::Fixed(PortContract::of(MediaKind::Video).in_memory(MemoryDomain::System))
+    }
+
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         match buf {
             MediaBuffer::Video(frame) => {

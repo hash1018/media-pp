@@ -21,6 +21,7 @@ use crate::{
     buffer::MediaBuffer,
     bus::{Bus, BusEvent},
     color::Color,
+    contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
     control::{ControlMsg, ControlReceiver, drain_control},
     element::{Element, ElementType, Sink, Source, SourceElement, element_pp_log},
     error::Result,
@@ -341,6 +342,12 @@ impl Element for SwVideoCompositorInputSink {
 }
 
 impl Sink for SwVideoCompositorInputSink {
+    /// The CPU counterpart of D3d11VideoCompositor: layers are blended
+    /// plane by plane, so every input arrives in system memory.
+    fn input_contract(&self) -> InputContract {
+        InputContract::Fixed(PortContract::of(MediaKind::Video).in_memory(MemoryDomain::System))
+    }
+
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         let Some(input) = self.input.upgrade() else {
             return Ok(());
@@ -505,7 +512,12 @@ impl SwVideoCompositor {
                 frame_index: 0,
                 scalers: HashMap::new(),
                 output_pool,
-                pad: SrcPad::new(format!("{name}_src")),
+                pad: SrcPad::with_contract(
+                    format!("{name}_src"),
+                    OutputContract::Fixed(
+                        PortContract::of(MediaKind::Video).in_memory(MemoryDomain::System),
+                    ),
+                ),
             },
             SwVideoCompositorHandle {
                 shared: Arc::downgrade(&shared),

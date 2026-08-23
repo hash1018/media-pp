@@ -127,14 +127,21 @@ Pixel format, resolution, stride, color space, and the identity of a specific
 GPU device are not part of it and stay validated against the real buffer when
 it arrives.
 
+The memory domain is what separates frames the buffer type cannot: a decoded
+`MediaBuffer::Video` in system memory and one holding a D3D11 texture are the
+same variant, so only the domain catches a `SwDecoder` wired straight into a
+`D3d11Scaler` with no `D3d11Upload` between them.
+
 This is not caps negotiation. Nothing selects a codec, inserts a converter,
 renegotiates mid-stream, or reallocates a pool. Declaring a contract is
-opt-in: `Queue`, `Tee`, `Pacer`, `FileDemuxer`, `SwDecoder`, `SwEncoder`, and
-`Mp4Muxer` declare one, every other element defaults to "unknown", and an
-unknown contract always links and leaves the runtime check in charge. A
-`Queue` or `Tee` passes its upstream contract through, so a mismatch is still
-caught across a thread boundary and still names the element that actually
-produces the data.
+opt-in: the packet path (`FileDemuxer`, `SwDecoder`, `SwEncoder`, `Mp4Muxer`),
+the video filters (`SwScaler`, `SwChromaKey`, and the `D3d11*` upload,
+download, scaler, chroma key, decoder, encoder, renderer, and compositor),
+and the passthrough elements (`Queue`, `Tee`, `Pacer`) declare one. Every
+other element defaults to "unknown", which always links and leaves the
+runtime check in charge. A `Queue` or `Tee` passes its upstream contract
+through, so a mismatch is still caught across a thread boundary and still
+names the element that actually produces the data.
 Use `Pipeline::finish` to stop a live source with ordered EOS and drain queued
 buffers, codecs, and muxers; `Pipeline::stop` abandons buffered work immediately.
 

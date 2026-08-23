@@ -6,6 +6,7 @@ use thiserror::Error as ThisError;
 
 use crate::{
     buffer::MediaBuffer,
+    contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
     control::ControlMsg,
     element::{Element, ElementType, Sink, Source, element_pp_log},
     error::Result,
@@ -100,7 +101,12 @@ impl SwScaler {
             pp_log: &pp_log,
             "created: dst_format={dst_format:?}, dst={dst_width}x{dst_height}"
         );
-        let pad = SrcPad::new(format!("{name}_src"));
+        let pad = SrcPad::with_contract(
+            format!("{name}_src"),
+            OutputContract::Fixed(
+                PortContract::of(MediaKind::Video).in_memory(MemoryDomain::System),
+            ),
+        );
         let pool = UnboundObjectPool::new(
             POOL_SIZE,
             move || ffmpeg::frame::Video::new(dst_format, dst_width, dst_height),
@@ -160,6 +166,11 @@ impl Source for SwScaler {
 }
 
 impl Sink for SwScaler {
+    /// swscale reads the planes on the CPU, so a device texture is unreachable memory here rather than merely the wrong format.
+    fn input_contract(&self) -> InputContract {
+        InputContract::Fixed(PortContract::of(MediaKind::Video).in_memory(MemoryDomain::System))
+    }
+
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         match buf {
             MediaBuffer::Video(frame) => {

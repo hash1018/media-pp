@@ -17,6 +17,7 @@ use windows::{
 
 use crate::{
     buffer::MediaBuffer,
+    contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
     control::ControlMsg,
     element::{Element, ElementType, Sink, Source, element_pp_log},
     error::Result,
@@ -157,7 +158,12 @@ impl D3d11Download {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::D3d11Download, &name, None);
         let staging = create_staging_texture(device, width, height)?;
-        let pad = SrcPad::new(format!("{name}_src"));
+        let pad = SrcPad::with_contract(
+            format!("{name}_src"),
+            OutputContract::Fixed(
+                PortContract::of(MediaKind::Video).in_memory(MemoryDomain::System),
+            ),
+        );
         let pool = UnboundObjectPool::new(
             0,
             move || ffmpeg::frame::Video::new(ffmpeg::format::Pixel::BGRA, width, height),
@@ -263,6 +269,11 @@ impl Source for D3d11Download {
 }
 
 impl Sink for D3d11Download {
+    /// The mirror of D3d11Upload: only a device texture has anything to bring back.
+    fn input_contract(&self) -> InputContract {
+        InputContract::Fixed(PortContract::of(MediaKind::Video).in_memory(MemoryDomain::D3d11))
+    }
+
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         match buf {
             MediaBuffer::Video(frame) => {

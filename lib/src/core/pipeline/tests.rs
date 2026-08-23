@@ -1584,3 +1584,95 @@ fn a_demuxer_declares_packets_on_every_stream_pad() {
         );
     }
 }
+
+/// What the memory domain was added for. Both frames here are
+/// `MediaBuffer::Video`, so nothing about the buffer type distinguishes
+/// them — only the domain says one lives in system memory and the other
+/// in a texture, and only that catches the missing `D3d11Upload`.
+#[cfg(all(target_os = "windows", feature = "d3d11"))]
+#[test]
+fn a_system_memory_frame_cannot_feed_a_d3d11_filter() {
+    use crate::elements::{D3d11ScalerFormat, D3d11Upload};
+
+    let Some((device, d3d_context)) = crate::test_support::try_d3d11_device() else {
+        eprintln!("skipped: no D3D11 hardware device available");
+        return;
+    };
+    let gpu_frames =
+        InputContract::Fixed(PortContract::of(MediaKind::Video).in_memory(MemoryDomain::D3d11));
+    let scaler = |name: &str| {
+        crate::elements::D3d11Scaler::new(
+            name,
+            &device,
+            d3d_context.clone(),
+            D3d11ScalerFormat::Preserve,
+            64,
+            64,
+        )
+        .expect("the scaler must open on a live device")
+    };
+
+    let Err(error) = contract_context()
+        .branch()
+        .pipe(video_decoder("decoder"))
+        .pipe(scaler("scaler"))
+        .to(DeclaringSink::boxed("renderer", gpu_frames))
+    else {
+        panic!("a software decoder's frames never reach a GPU scaler");
+    };
+
+    let crate::Error::GraphError(GraphError::IncompatibleLink {
+        producer, consumer, ..
+    }) = error
+    else {
+        panic!("expected an IncompatibleLink, got {error}");
+    };
+    assert_eq!(&*producer, "decoder");
+    assert_eq!(&*consumer, "scaler");
+
+    // The same chain with the upload that was missing.
+    contract_context()
+        .branch()
+        .pipe(video_decoder("decoder"))
+        .pipe(D3d11Upload::new("upload", &device, 64, 64))
+        .pipe(scaler("scaler"))
+        .to(DeclaringSink::boxed("renderer", gpu_frames))
+        .expect("a D3d11Upload is exactly what makes this chain valid");
+}
+
+/// The reverse direction, which is just as easy to get wrong: a device
+/// texture handed to a CPU filter.
+#[cfg(all(target_os = "windows", feature = "d3d11"))]
+#[test]
+fn a_d3d11_frame_cannot_feed_a_cpu_filter() {
+    use crate::elements::{D3d11Upload, SwScaler};
+
+    let Some((device, _d3d_context)) = crate::test_support::try_d3d11_device() else {
+        eprintln!("skipped: no D3D11 hardware device available");
+        return;
+    };
+
+    let Err(error) = contract_context()
+        .branch()
+        .pipe(video_decoder("decoder"))
+        .pipe(D3d11Upload::new("upload", &device, 64, 64))
+        .pipe(SwScaler::new(
+            "scaler",
+            ffmpeg::format::Pixel::YUV420P,
+            64,
+            64,
+            ffmpeg::software::scaling::Flags::BILINEAR,
+        ))
+        .to(DeclaringSink::boxed("sink", video_frames()))
+    else {
+        panic!("a device texture has no CPU-readable planes for swscale");
+    };
+
+    assert!(
+        matches!(
+            error,
+            crate::Error::GraphError(GraphError::IncompatibleLink { .. })
+        ),
+        "got {error}"
+    );
+}

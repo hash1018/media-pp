@@ -46,6 +46,7 @@ use super::super::{
 use crate::{
     buffer::MediaBuffer,
     bus::{Bus, BusEvent},
+    contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
     control::{ControlMsg, ControlReceiver, drain_control},
     element::{Element, ElementType, Sink, Source, SourceElement, element_pp_log},
     elements::VideoCompositorOptions,
@@ -429,6 +430,12 @@ impl Element for D3d11VideoCompositorInputSink {
 }
 
 impl Sink for D3d11VideoCompositorInputSink {
+    /// Every layer is composited on the GPU, so each input takes a
+    /// device texture just as the composed output produces one.
+    fn input_contract(&self) -> InputContract {
+        InputContract::Fixed(PortContract::of(MediaKind::Video).in_memory(MemoryDomain::D3d11))
+    }
+
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         let Some(input) = self.input.upgrade() else {
             return Ok(());
@@ -664,7 +671,12 @@ impl D3d11VideoCompositor {
                     |_| {},
                 ),
                 output_views: HashMap::new(),
-                pad: SrcPad::new(format!("{name}_src")),
+                pad: SrcPad::with_contract(
+                    format!("{name}_src"),
+                    OutputContract::Fixed(
+                        PortContract::of(MediaKind::Video).in_memory(MemoryDomain::D3d11),
+                    ),
+                ),
             },
             D3d11VideoCompositorHandle {
                 shared: Arc::downgrade(&shared),
