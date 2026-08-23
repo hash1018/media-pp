@@ -1676,3 +1676,84 @@ fn a_d3d11_frame_cannot_feed_a_cpu_filter() {
         "got {error}"
     );
 }
+
+/// A port that deals in more than one kind is why the contract holds a
+/// set rather than a single `MediaKind`: `FrameCounter` tallies decoded
+/// buffers of either medium, and both must link.
+#[test]
+fn a_frame_counter_takes_either_decoded_medium() {
+    use crate::elements::FrameCounter;
+
+    for decoder in [video_decoder("video"), audio_decoder("audio")] {
+        let (counter, _count) = FrameCounter::new("counter");
+        contract_context()
+            .branch()
+            .pipe(decoder)
+            .to(Box::new(counter))
+            .expect("a decoded-buffer counter accepts both video and audio");
+    }
+}
+
+/// The same counter pair in the other direction: `PacketCounter` deals in
+/// encoded data only, so the decoder that feeds its sibling cannot feed it.
+#[test]
+fn a_decoded_frame_cannot_feed_a_packet_only_sink() {
+    use crate::elements::PacketCounter;
+
+    let (counter, _count) = PacketCounter::new("counter");
+    let Err(error) = contract_context()
+        .branch()
+        .pipe(video_decoder("decoder"))
+        .to(Box::new(counter))
+    else {
+        panic!("decoded frames are not packets");
+    };
+
+    let crate::Error::GraphError(GraphError::IncompatibleLink {
+        producer, consumer, ..
+    }) = error
+    else {
+        panic!("expected an IncompatibleLink, got {error}");
+    };
+    assert_eq!(&*producer, "decoder");
+    assert_eq!(&*consumer, "counter");
+}
+
+/// Video and audio are both decoded frames, so nothing but the media kind
+/// separates a video filter from an audio one.
+#[test]
+fn an_audio_filter_refuses_video_frames() {
+    use crate::elements::AudioVolume;
+
+    let (volume, _handle) = AudioVolume::new("volume");
+    let Err(error) = contract_context()
+        .branch()
+        .pipe(video_decoder("decoder"))
+        .pipe(volume)
+        .to(DeclaringSink::boxed("sink", video_frames()))
+    else {
+        panic!("a gain filter has no samples to scale in a video frame");
+    };
+
+    assert!(
+        matches!(
+            error,
+            crate::Error::GraphError(GraphError::IncompatibleLink { .. })
+        ),
+        "got {error}"
+    );
+
+    // The audio decoder is the case that filter is for.
+    let (volume, _handle) = AudioVolume::new("volume");
+    contract_context()
+        .branch()
+        .pipe(audio_decoder("decoder"))
+        .pipe(volume)
+        .to(DeclaringSink::boxed(
+            "sink",
+            InputContract::Fixed(
+                PortContract::of(MediaKind::Audio).in_memory(MemoryDomain::System),
+            ),
+        ))
+        .expect("decoded audio through a gain filter is the intended chain");
+}

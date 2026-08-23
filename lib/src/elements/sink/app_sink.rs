@@ -4,6 +4,7 @@ use crate::pp_log::{PpLog, pp_info};
 
 use crate::{
     buffer::MediaBuffer,
+    contract::InputContract,
     control::ControlMsg,
     element::{Element, ElementType, Sink, element_pp_log},
     error::Result,
@@ -115,6 +116,15 @@ where
     F: FnMut(MediaBuffer) -> Result<()> + Send + 'static,
     C: FnMut(ControlMsg) -> Result<()> + Send + 'static,
 {
+    /// Every buffer reaches the closure verbatim, so this element never
+    /// rejects one itself. It is a claim about this sink, not about the
+    /// closure: one that only understands packets still returns its own
+    /// error for a frame, which is application behavior a link check
+    /// cannot see.
+    fn input_contract(&self) -> InputContract {
+        InputContract::Any
+    }
+
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         (self.consume)(buf)
     }

@@ -7,6 +7,7 @@ use crate::pp_log::{PpLog, pp_info};
 
 use crate::{
     buffer::MediaBuffer,
+    contract::{InputContract, MediaKind, PortContract},
     control::ControlMsg,
     element::{Element, ElementType, Sink, element_pp_log},
     error::Result,
@@ -58,6 +59,11 @@ impl Element for PacketCounter {
 }
 
 impl Sink for PacketCounter {
+    /// Counts encoded packets specifically — FrameCounter is the decoded-side counterpart.
+    fn input_contract(&self) -> InputContract {
+        InputContract::Fixed(PortContract::of(MediaKind::Packet))
+    }
+
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         if let MediaBuffer::Packet(_) = buf {
             self.count.fetch_add(1, Ordering::Relaxed);

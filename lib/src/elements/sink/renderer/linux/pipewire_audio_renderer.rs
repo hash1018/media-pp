@@ -21,6 +21,7 @@ use crate::pp_log::{PpLog, pp_info, pp_trace, pp_warn};
 
 use crate::{
     buffer::MediaBuffer,
+    contract::{InputContract, MediaKind, MemoryDomain, PortContract},
     control::ControlMsg,
     element::{Element, ElementType, Sink, element_pp_log},
     elements::AudioFormat,
@@ -881,6 +882,11 @@ impl Element for PipeWireAudioRenderer {
 }
 
 impl Sink for PipeWireAudioRenderer {
+    /// Writes samples into the PipeWire stream buffer.
+    fn input_contract(&self) -> InputContract {
+        InputContract::Fixed(PortContract::of(MediaKind::Audio).in_memory(MemoryDomain::System))
+    }
+
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         match buf {
             MediaBuffer::Audio(frame) => self.render(&frame),

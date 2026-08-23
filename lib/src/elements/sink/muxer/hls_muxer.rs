@@ -13,6 +13,7 @@ use thiserror::Error as ThisError;
 
 use crate::{
     buffer::MediaBuffer,
+    contract::{InputContract, MediaKind, PortContract},
     control::ControlMsg,
     element::{Element, ElementType, Sink, element_pp_log},
     error::Result,
@@ -493,6 +494,11 @@ impl Element for HlsMuxerStreamSink {
 }
 
 impl Sink for HlsMuxerStreamSink {
+    /// A muxer interleaves already-encoded data, so a decoded frame has no route through it.
+    fn input_contract(&self) -> InputContract {
+        InputContract::Fixed(PortContract::of(MediaKind::Packet))
+    }
+
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         match buf {
             MediaBuffer::Packet(packet) => self

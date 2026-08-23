@@ -134,11 +134,19 @@ same variant, so only the domain catches a `SwDecoder` wired straight into a
 
 This is not caps negotiation. Nothing selects a codec, inserts a converter,
 renegotiates mid-stream, or reallocates a pool. Declaring a contract is
-opt-in: the packet path (`FileDemuxer`, `SwDecoder`, `SwEncoder`, `Mp4Muxer`),
-the video filters (`SwScaler`, `SwChromaKey`, and the `D3d11*` upload,
-download, scaler, chroma key, decoder, encoder, renderer, and compositor),
-and the passthrough elements (`Queue`, `Tee`, `Pacer`) declare one. Every
-other element defaults to "unknown", which always links and leaves the
+opt-in, and these elements declare one:
+
+- Packet path: `FileDemuxer`, `SwDecoder`, `SwEncoder`, `SwAudioEncoder`,
+  `Mp4Muxer`, `SegmentedMp4Muxer`, `HlsMuxer`, `RtspSink`, `PacketCounter`.
+- Video: `SwScaler`, `SwChromaKey`, `SwVideoCompositor`, `OrtDetector`, and
+  the `D3d11*` upload, download, scaler, chroma key, decoder, encoder,
+  renderer, and compositor.
+- Audio: `AudioResampler`, `AudioVolume`, `AudioMixer`, `WasapiRenderer`,
+  `PipeWireAudioRenderer`.
+- Either decoded medium: `FrameCounter`.
+- Passthrough: `Queue`, `Tee`, `Pacer`. `AppSink` accepts anything.
+
+Every other element defaults to "unknown", which always links and leaves the
 runtime check in charge. A `Queue` or `Tee` passes its upstream contract
 through, so a mismatch is still caught across a thread boundary and still
 names the element that actually produces the data.

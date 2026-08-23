@@ -8,6 +8,7 @@ use thiserror::Error as ThisError;
 
 use crate::{
     buffer::MediaBuffer,
+    contract::{InputContract, MediaKind, MemoryDomain, PortContract},
     control::ControlMsg,
     element::{Element, ElementType, Sink, element_pp_log},
     error::Result,
@@ -263,6 +264,11 @@ impl<F> Sink for OrtDetector<F>
 where
     F: FnMut(&ffmpeg::frame::Video, &[Detection]) -> Result<()> + Send + 'static,
 {
+    /// Reads the pixels on the CPU to build its input tensor.
+    fn input_contract(&self) -> InputContract {
+        InputContract::Fixed(PortContract::of(MediaKind::Video).in_memory(MemoryDomain::System))
+    }
+
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         match buf {
             MediaBuffer::Video(frame) => {

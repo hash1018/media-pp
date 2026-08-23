@@ -6,6 +6,7 @@ use thiserror::Error as ThisError;
 
 use crate::{
     buffer::MediaBuffer,
+    contract::{InputContract, MediaKind, PortContract},
     control::ControlMsg,
     element::{Element, ElementType, Sink, element_pp_log},
     elements::RtspTransport,
@@ -170,6 +171,11 @@ impl Element for RtspSink {
 }
 
 impl Sink for RtspSink {
+    /// Republishes encoded data as-is; it has no encoder of its own.
+    fn input_contract(&self) -> InputContract {
+        InputContract::Fixed(PortContract::of(MediaKind::Packet))
+    }
+
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         match buf {
             MediaBuffer::Packet(packet) => {

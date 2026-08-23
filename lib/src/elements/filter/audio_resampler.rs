@@ -6,6 +6,7 @@ use thiserror::Error as ThisError;
 
 use crate::{
     buffer::MediaBuffer,
+    contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
     control::ControlMsg,
     element::{Element, ElementType, Sink, Source, element_pp_log},
     elements::AudioFormat,
@@ -174,7 +175,12 @@ impl AudioResampler {
     ) -> std::result::Result<Self, AudioResamplerError> {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::AudioResampler, &name, None);
-        let pad = SrcPad::new(format!("{name}_src"));
+        let pad = SrcPad::with_contract(
+            format!("{name}_src"),
+            OutputContract::Fixed(
+                PortContract::of(MediaKind::Audio).in_memory(MemoryDomain::System),
+            ),
+        );
         pp_info!(
             pp_log: &pp_log,
             "created: {}Hz, {} channel(s), format={:?}",
@@ -272,6 +278,11 @@ impl Source for AudioResampler {
 }
 
 impl Sink for AudioResampler {
+    /// Converts one audio layout to another; the rate and format it changes are runtime values, not part of this.
+    fn input_contract(&self) -> InputContract {
+        InputContract::Fixed(PortContract::of(MediaKind::Audio).in_memory(MemoryDomain::System))
+    }
+
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         match buf {
             MediaBuffer::Audio(frame) => {

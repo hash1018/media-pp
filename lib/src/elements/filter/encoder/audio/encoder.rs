@@ -6,6 +6,7 @@ use thiserror::Error as ThisError;
 
 use crate::{
     buffer::MediaBuffer,
+    contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
     control::ControlMsg,
     element::{Element, ElementType, Sink, Source, element_pp_log},
     error::Result,
@@ -252,7 +253,10 @@ impl SwAudioEncoder {
 
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::SwAudioEncoder, &name, None);
-        let pad = SrcPad::new(format!("{name}_src"));
+        let pad = SrcPad::with_contract(
+            format!("{name}_src"),
+            OutputContract::Fixed(PortContract::of(MediaKind::Packet)),
+        );
         pp_info!(
             pp_log: &pp_log,
             "opened: codec={encoder_name}, {}Hz, {} channel(s), format={:?}, frame_size={}, bit_rate={}",
@@ -507,6 +511,11 @@ impl Source for SwAudioEncoder {
 }
 
 impl Sink for SwAudioEncoder {
+    /// The audio mirror of SwEncoder: decoded samples in, encoded packets out.
+    fn input_contract(&self) -> InputContract {
+        InputContract::Fixed(PortContract::of(MediaKind::Audio).in_memory(MemoryDomain::System))
+    }
+
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         match buf {
             MediaBuffer::Audio(frame) => {

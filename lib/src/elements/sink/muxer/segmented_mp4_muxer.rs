@@ -10,6 +10,7 @@ use ffmpeg_next as ffmpeg;
 use super::mp4_muxer::{Mp4Muxer, Mp4MuxerError};
 use crate::{
     buffer::MediaBuffer,
+    contract::{InputContract, MediaKind, PortContract},
     control::ControlMsg,
     element::{Element, ElementType, Sink, element_pp_log},
     error::Result,
@@ -324,6 +325,11 @@ impl Element for SegmentedTrackSink {
 }
 
 impl Sink for SegmentedTrackSink {
+    /// Same as Mp4Muxer: encoded packets only, cut into segments on keyframes.
+    fn input_contract(&self) -> InputContract {
+        InputContract::Fixed(PortContract::of(MediaKind::Packet))
+    }
+
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         match buf {
             MediaBuffer::Packet(packet) => {

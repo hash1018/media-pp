@@ -15,6 +15,7 @@ use thiserror::Error as ThisError;
 use crate::{
     buffer::MediaBuffer,
     bus::{Bus, BusEvent},
+    contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
     control::{ControlMsg, ControlReceiver, drain_control},
     element::{Element, ElementType, Sink, Source, SourceElement, element_pp_log},
     error::Result,
@@ -257,6 +258,12 @@ impl Element for MixerInputSink {
 }
 
 impl Sink for MixerInputSink {
+    /// Every input is summed sample by sample, so each carries decoded
+    /// audio just as the mixed output does.
+    fn input_contract(&self) -> InputContract {
+        InputContract::Fixed(PortContract::of(MediaKind::Audio).in_memory(MemoryDomain::System))
+    }
+
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         let Some(shared) = self.shared.upgrade() else {
             return Ok(()); // mixer's own pipeline already ended — nothing to feed
@@ -403,7 +410,12 @@ impl AudioMixer {
             inputs: Mutex::new(HashMap::new()),
             next_input_id: AtomicU64::new(0),
         });
-        let pad = SrcPad::new(format!("{name}_src"));
+        let pad = SrcPad::with_contract(
+            format!("{name}_src"),
+            OutputContract::Fixed(
+                PortContract::of(MediaKind::Audio).in_memory(MemoryDomain::System),
+            ),
+        );
         (
             Self {
                 name: name.clone(),
