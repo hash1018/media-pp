@@ -1,28 +1,32 @@
 //! TestVideoSource -> Renderer: a synthetic moving-gradient stream, no
 //! file/camera/decoder involved at all, presented in a native window via
-//! `render_common`'s own `D3d12WindowRenderer` (wrapped as a
-//! `D3d12Renderer`) — proves `TestVideoSource`'s frames and
-//! `D3d12Renderer`'s CPU-upload path work end to end without needing a
-//! real video source.
+//! the platform GPU renderer — D3D12 on Windows and CUDA/Vulkan on Linux.
+//! This proves the source, conversion, upload, and presentation path works
+//! end to end without needing a real video source.
 //!
 //! No `Pacer` here, deliberately, as an experiment: `TestVideoSource`
 //! self-paces with a drift-free absolute schedule (see its own docs) and
-//! nothing sits between it and the renderer here (no `SwScaler`, unlike
-//! `screen_preview_cpu`). Testing confirmed that schedule is enough on its own
+//! only format conversion/upload sits between it and the renderer. Testing
+//! confirmed that schedule is enough on its own
 //! for a vsync-locked renderer to stay smooth without a separate pacing
 //! stage; `screen_preview_cpu` reached the same result after its source moved
 //! from variable-rate emission to the same absolute scheduling scheme.
 //!
 //!     cargo run -p test_video
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 fn main() {
-    eprintln!("{} example only supports Windows", env!("CARGO_PKG_NAME"));
+    eprintln!("{} supports Windows and Linux only", env!("CARGO_PKG_NAME"));
 }
 
 #[cfg(target_os = "windows")]
 fn main() -> impl std::process::Termination {
     windows_example::run()
+}
+
+#[cfg(target_os = "linux")]
+fn main() -> impl std::process::Termination {
+    linux_example::run()
 }
 
 #[cfg(target_os = "windows")]
@@ -118,5 +122,102 @@ mod windows_example {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(target_os = "linux")]
+mod linux_example {
+    use media_pp::{
+        bus::BusEvent,
+        elements::{
+            CudaDevice, CudaFrameFormat, CudaUpload, SwScaler, TestVideoOptions, TestVideoSource,
+        },
+        ffmpeg,
+        pipeline::Pipeline,
+    };
+    use render_common::{Shutdown, VulkanGpuContext, WindowTarget};
+
+    pub(super) fn run() {
+        render_common::run_window("media-pp test_video", 1280, 720, |target, shutdown| {
+            play(target, &shutdown)
+        });
+    }
+
+    fn play(target: WindowTarget, shutdown: &Shutdown) -> media_pp::Result<()> {
+        media_pp::init()?;
+        let _log_guard = media_pp::log::init(
+            env!("CARGO_PKG_NAME"),
+            "logs",
+            media_pp::log::Level::Trace,
+            7,
+        )?;
+
+        let options = TestVideoOptions {
+            width: target.width,
+            height: target.height,
+            ..TestVideoOptions::default()
+        };
+        let source = TestVideoSource::new("test-video", options);
+        let cuda = CudaDevice::new().map_err(|error| media_pp::Error::Other(error.to_string()))?;
+        let gpu = VulkanGpuContext::new(target.display).map_err(media_pp::Error::Other)?;
+
+        let pipeline = Pipeline::new("test-video", source, |source, ctx| {
+            let scaler = SwScaler::new(
+                "to-nv12",
+                ffmpeg::format::Pixel::NV12,
+                target.width,
+                target.height,
+                ffmpeg::software::scaling::Flags::BILINEAR,
+            );
+            let upload = CudaUpload::new(
+                "upload",
+                &cuda,
+                CudaFrameFormat::Nv12,
+                target.width,
+                target.height,
+            )
+            .map_err(|error| media_pp::Error::Other(error.to_string()))?;
+            let renderer = render_common::cuda_window_renderer(
+                "renderer",
+                &gpu,
+                &cuda,
+                target.display,
+                target.window,
+                target.width,
+                target.height,
+            )
+            .map_err(media_pp::Error::Other)?;
+            let branch = ctx
+                .branch()
+                .queue("frames", 8)
+                .pipe(scaler)
+                .pipe(upload)
+                .to(Box::new(renderer))?;
+            ctx.attach(source, 0, branch)?;
+            Ok(())
+        })?;
+
+        if shutdown.publish(std::slice::from_ref(&pipeline)) {
+            return Ok(());
+        }
+        pipeline.run()?;
+        drain_bus(&pipeline);
+        Ok(())
+    }
+
+    fn drain_bus(pipeline: &Pipeline) {
+        for event in pipeline.bus().iter() {
+            match &event {
+                BusEvent::Eos { name, .. } => println!("[{name}] eos"),
+                BusEvent::Error { name, error, .. } => eprintln!("[{name}] error: {error}"),
+                BusEvent::Dropped { name, .. } => {
+                    eprintln!("[{name}] dropped a buffer (queue full)")
+                }
+                _ => {}
+            }
+            if matches!(event, BusEvent::Eos { .. } | BusEvent::Error { .. }) {
+                pipeline.stop();
+            }
+        }
     }
 }

@@ -12,7 +12,8 @@ This example keeps a `Pacer` after the encode/decode round trip. The source
 itself is already paced accurately enough for direct rendering, but the
 encoder and decoder add their own buffering and per-frame variance; this
 particular chain has not been validated without the final clock-anchored
-pacing stage. Windows only.
+pacing stage. Windows presents through D3D12; Linux uploads the decoded frames
+to CUDA and presents through Vulkan.
 
 ```sh
 cargo run -p transcode_render

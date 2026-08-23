@@ -1,18 +1,26 @@
-//! Previews Windows desktop capture through the CPU-frame path:
-//! `DxgiCaptureSource -> SwScaler -> D3d12Upload -> D3d12Renderer`.
+//! Previews desktop capture through the CPU-frame path. Windows uses DXGI and
+//! D3D12; Linux uses the desktop portal/PipeWire and CUDA/Vulkan.
 //! The capture includes the cursor, converts directly to window-sized NV12,
 //! and needs no encode/decode round trip or separate `Pacer`.
 //!
 //!     cargo run -p screen_preview_cpu
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 fn main() {
-    eprintln!("{} example only supports Windows", env!("CARGO_PKG_NAME"));
+    eprintln!(
+        "{} example only supports Windows and Linux",
+        env!("CARGO_PKG_NAME")
+    );
 }
 
 #[cfg(target_os = "windows")]
 fn main() -> impl std::process::Termination {
     windows_example::run()
+}
+
+#[cfg(target_os = "linux")]
+fn main() -> impl std::process::Termination {
+    linux_example::run()
 }
 
 #[cfg(target_os = "windows")]
@@ -159,6 +167,140 @@ mod windows_example {
             if matches!(event, BusEvent::Eos { .. }) || source_died {
                 pipeline.stop();
             }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "linux")]
+mod linux_example {
+    use media_pp::{
+        bus::BusEvent,
+        element::ElementType,
+        elements::{
+            CaptureSourceKind, CudaDevice, CudaFrameFormat, CudaUpload,
+            PipeWireScreenCaptureOptions, PipeWireScreenCaptureSource, SwScaler,
+        },
+        ffmpeg,
+        pipeline::Pipeline,
+    };
+    use render_common::{Shutdown, VulkanGpuContext, WindowTarget};
+
+    pub(super) fn run() {
+        render_common::run_window(
+            "media-pp screen_preview_cpu",
+            1280,
+            720,
+            |target, shutdown| play(target, &shutdown),
+        );
+    }
+
+    fn play(target: WindowTarget, shutdown: &Shutdown) -> media_pp::Result<()> {
+        media_pp::init()?;
+        let _log_guard = media_pp::log::init(
+            env!("CARGO_PKG_NAME"),
+            "logs",
+            media_pp::log::Level::Trace,
+            7,
+        )?;
+
+        let source_kind = match std::env::args().nth(1).as_deref() {
+            Some("window") => CaptureSourceKind::Window,
+            _ => CaptureSourceKind::Monitor,
+        };
+        let restore_token = std::env::args().nth(2);
+        if restore_token.is_none() {
+            eprintln!("opening the portal — approve the screen-share dialog to continue...");
+        }
+        let (source, capture_format, restore_token) = PipeWireScreenCaptureSource::open(
+            "screen",
+            PipeWireScreenCaptureOptions {
+                fps: 60,
+                source_kind,
+                include_cursor: true,
+                restore_token,
+            },
+        )?;
+
+        let cuda = CudaDevice::new().map_err(|error| media_pp::Error::Other(error.to_string()))?;
+        let gpu = VulkanGpuContext::new(target.display).map_err(media_pp::Error::Other)?;
+
+        let pipeline = Pipeline::new("screen-preview-cpu", source, |source, ctx| {
+            let scaler = SwScaler::new(
+                "to-nv12",
+                ffmpeg::format::Pixel::NV12,
+                target.width,
+                target.height,
+                ffmpeg::software::scaling::Flags::BILINEAR,
+            );
+            let upload = CudaUpload::new(
+                "upload",
+                &cuda,
+                CudaFrameFormat::Nv12,
+                target.width,
+                target.height,
+            )
+            .map_err(|error| media_pp::Error::Other(error.to_string()))?;
+            let renderer = render_common::cuda_window_renderer(
+                "renderer",
+                &gpu,
+                &cuda,
+                target.display,
+                target.window,
+                target.width,
+                target.height,
+            )
+            .map_err(media_pp::Error::Other)?;
+
+            let branch = ctx
+                .branch()
+                .queue("captured", 4)
+                .pipe(scaler)
+                .queue("frames", 8)
+                .pipe(upload)
+                .to(Box::new(renderer))?;
+            ctx.attach(source, 0, branch)?;
+            Ok(())
+        })?;
+
+        if shutdown.publish(std::slice::from_ref(&pipeline)) {
+            return Ok(());
+        }
+        println!(
+            "presenting a {}x{} capture — close the window to stop",
+            capture_format.width, capture_format.height
+        );
+        pipeline.run()?;
+
+        for event in pipeline.bus().iter() {
+            match &event {
+                BusEvent::Eos { name, .. } => println!("[{name}] eos"),
+                BusEvent::Error { name, error, .. } => eprintln!("[{name}] error: {error}"),
+                BusEvent::Dropped { name, .. } => {
+                    eprintln!("[{name}] dropped a buffer (queue full)")
+                }
+                _ => {}
+            }
+            let source_died = matches!(
+                &event,
+                BusEvent::Error { element_type, .. }
+                    if *element_type == ElementType::PipeWireScreenCaptureSource
+            );
+            if matches!(event, BusEvent::Eos { .. }) || source_died {
+                pipeline.stop();
+            }
+        }
+
+        match restore_token {
+            Some(token) => println!(
+                "re-run without a dialog:\n  cargo run -p screen_preview_cpu -- {} {token}",
+                if matches!(source_kind, CaptureSourceKind::Window) {
+                    "window"
+                } else {
+                    "monitor"
+                }
+            ),
+            None => println!("the compositor issued no restore token; the next run will prompt"),
         }
         Ok(())
     }

@@ -6,14 +6,22 @@
 //!     cargo run -p seek_render -- path/to/video.mp4
 //!     (then use `pause`, `resume`, `seek 30`, `seek 1:15`, or `q`)
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 fn main() {
-    eprintln!("{} example only supports Windows", env!("CARGO_PKG_NAME"));
+    eprintln!(
+        "{} example only supports Windows and Linux",
+        env!("CARGO_PKG_NAME")
+    );
 }
 
 #[cfg(target_os = "windows")]
 fn main() -> impl std::process::Termination {
     windows_example::run()
+}
+
+#[cfg(target_os = "linux")]
+fn main() -> impl std::process::Termination {
+    linux_example::run()
 }
 
 #[cfg(target_os = "windows")]
@@ -225,6 +233,197 @@ mod windows_example {
         };
         if secs.is_finite() && secs >= 0.0 {
             Some(Duration::from_secs_f64(secs))
+        } else {
+            None
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+mod linux_example {
+    use std::{
+        io::{self, BufRead},
+        thread,
+        time::Duration,
+    };
+
+    use media_pp::ffmpeg::media;
+    use media_pp::{
+        Error,
+        bus::BusEvent,
+        elements::{
+            CudaDevice, CudaFrameFormat, CudaUpload, FileDemuxer, Pacer, SwDecoder, SwScaler,
+        },
+        ffmpeg,
+        pipeline::Pipeline,
+    };
+    use render_common::{Shutdown, VulkanGpuContext, WindowTarget};
+
+    pub(super) fn run() {
+        let Some(path) = std::env::args().nth(1) else {
+            eprintln!("usage: seek_render <video.mp4>");
+            std::process::exit(1);
+        };
+        render_common::run_window(
+            "media-pp seek_render",
+            1280,
+            720,
+            move |target, shutdown| play(&path, target, &shutdown),
+        );
+    }
+
+    fn play(path: &str, target: WindowTarget, shutdown: &Shutdown) -> media_pp::Result<()> {
+        media_pp::init()?;
+        let _log_guard = media_pp::log::init(
+            env!("CARGO_PKG_NAME"),
+            "logs",
+            media_pp::log::Level::Trace,
+            7,
+        )?;
+
+        let (source, streams) = FileDemuxer::open("demux", path)?;
+        let video = streams
+            .iter()
+            .find(|stream| stream.kind == media::Type::Video)
+            .ok_or_else(|| Error::Other("no video stream in file".into()))?;
+        let params = source
+            .stream_parameters(video.index)
+            .ok_or_else(|| Error::Other("stream disappeared".into()))?;
+        let time_base = source
+            .stream_time_base(video.index)
+            .ok_or_else(|| Error::Other("stream disappeared".into()))?;
+        let cuda = CudaDevice::new().map_err(|error| Error::Other(error.to_string()))?;
+        let gpu = VulkanGpuContext::new(target.display).map_err(Error::Other)?;
+
+        let pipeline = Pipeline::new("seek-render", source, |source, ctx| {
+            let decoder = SwDecoder::new("decoder", params)?;
+            let pacer = Pacer::new("pacer", time_base, ctx.clock.clone())?;
+            let scaler = SwScaler::new(
+                "to-nv12",
+                ffmpeg::format::Pixel::NV12,
+                target.width,
+                target.height,
+                ffmpeg::software::scaling::Flags::BILINEAR,
+            );
+            let upload = CudaUpload::new(
+                "upload",
+                &cuda,
+                CudaFrameFormat::Nv12,
+                target.width,
+                target.height,
+            )
+            .map_err(|error| Error::Other(error.to_string()))?;
+            let renderer = render_common::cuda_window_renderer(
+                "renderer",
+                &gpu,
+                &cuda,
+                target.display,
+                target.window,
+                target.width,
+                target.height,
+            )
+            .map_err(Error::Other)?;
+            let branch = ctx
+                .branch()
+                .pipe(decoder)
+                .queue("frames", 32)
+                .pipe(pacer)
+                .pipe(scaler)
+                .pipe(upload)
+                .to(Box::new(renderer))?;
+            ctx.attach(source, video.index, branch)?;
+            Ok(())
+        })?;
+
+        if shutdown.publish(std::slice::from_ref(&pipeline)) {
+            return Ok(());
+        }
+        pipeline.run()?;
+        {
+            let pipeline = pipeline.clone();
+            thread::spawn(move || read_seek_commands(&pipeline));
+        }
+        drain_bus(&pipeline);
+        Ok(())
+    }
+
+    fn drain_bus(pipeline: &Pipeline) {
+        for event in pipeline.bus().iter() {
+            match &event {
+                BusEvent::Eos { name, .. } => println!("[{name}] eos"),
+                BusEvent::Error { name, error, .. } => eprintln!("[{name}] error: {error}"),
+                BusEvent::Dropped { name, .. } => {
+                    eprintln!("[{name}] dropped a buffer (queue full)")
+                }
+                BusEvent::Seeked {
+                    name,
+                    requested,
+                    landed,
+                    ..
+                } => println!("[{name}] seeked: requested {requested:.2?}, landed {landed:.2?}"),
+                _ => {}
+            }
+            if matches!(event, BusEvent::Eos { .. } | BusEvent::Error { .. }) {
+                pipeline.stop();
+            }
+        }
+    }
+
+    fn read_seek_commands(pipeline: &Pipeline) {
+        print_help();
+        for line in io::stdin().lock().lines() {
+            let Ok(line) = line else { break };
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            if line.eq_ignore_ascii_case("q") {
+                pipeline.stop();
+                break;
+            }
+            if line.eq_ignore_ascii_case("pause") {
+                pipeline.pause();
+                println!("paused");
+                continue;
+            }
+            if line.eq_ignore_ascii_case("resume") {
+                pipeline.resume();
+                println!("resumed");
+                continue;
+            }
+            if line.eq_ignore_ascii_case("help") {
+                print_help();
+                continue;
+            }
+            let value = line.strip_prefix("seek ").unwrap_or(line).trim();
+            match parse_timestamp(value) {
+                Some(target) => {
+                    println!("seeking to {target:.2?}...");
+                    pipeline.seek(target);
+                }
+                None => eprintln!("couldn't parse {line:?} — use seconds (`30`) or mm:ss (`1:15`)"),
+            }
+        }
+    }
+
+    fn print_help() {
+        println!("commands:");
+        println!("  pause             pause playback");
+        println!("  resume            resume playback");
+        println!("  seek <seconds>    seek, for example `seek 30` or `seek 1:15`");
+        println!("  help              print this help");
+        println!("  q                 stop playback");
+    }
+
+    fn parse_timestamp(value: &str) -> Option<Duration> {
+        let seconds = match value.split_once(':') {
+            Some((minutes, seconds)) => {
+                minutes.parse::<f64>().ok()? * 60.0 + seconds.parse::<f64>().ok()?
+            }
+            None => value.parse::<f64>().ok()?,
+        };
+        if seconds.is_finite() && seconds >= 0.0 {
+            Some(Duration::from_secs_f64(seconds))
         } else {
             None
         }

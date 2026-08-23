@@ -13,14 +13,22 @@
 //!
 //!     cargo run -p transcode_render
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 fn main() {
-    eprintln!("{} example only supports Windows", env!("CARGO_PKG_NAME"));
+    eprintln!(
+        "{} example only supports Windows and Linux",
+        env!("CARGO_PKG_NAME")
+    );
 }
 
 #[cfg(target_os = "windows")]
 fn main() -> impl std::process::Termination {
     windows_example::run()
+}
+
+#[cfg(target_os = "linux")]
+fn main() -> impl std::process::Termination {
+    linux_example::run()
 }
 
 #[cfg(target_os = "windows")]
@@ -148,5 +156,127 @@ mod windows_example {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(target_os = "linux")]
+mod linux_example {
+    use media_pp::{
+        bus::BusEvent,
+        elements::{
+            CudaDevice, CudaFrameFormat, CudaUpload, Pacer, SwDecoder, SwEncoder, SwEncoderOptions,
+            SwScaler, TestVideoOptions, TestVideoSource, VideoCodec,
+        },
+        ffmpeg,
+        pipeline::Pipeline,
+    };
+    use render_common::{Shutdown, VulkanGpuContext, WindowTarget};
+
+    pub(super) fn run() {
+        render_common::run_window(
+            "media-pp transcode_render",
+            1280,
+            720,
+            |target, shutdown| play(target, &shutdown),
+        );
+    }
+
+    fn play(target: WindowTarget, shutdown: &Shutdown) -> media_pp::Result<()> {
+        media_pp::init()?;
+        let _log_guard = media_pp::log::init(
+            env!("CARGO_PKG_NAME"),
+            "logs",
+            media_pp::log::Level::Trace,
+            7,
+        )?;
+
+        let options = TestVideoOptions {
+            width: target.width,
+            height: target.height,
+            ..TestVideoOptions::default()
+        };
+        let source = TestVideoSource::new("test-video", options);
+        let time_base = source.time_base();
+        let cuda = CudaDevice::new().map_err(|error| media_pp::Error::Other(error.to_string()))?;
+        let gpu = VulkanGpuContext::new(target.display).map_err(media_pp::Error::Other)?;
+
+        let pipeline = Pipeline::new("transcode-render", source, |source, ctx| {
+            let encoder = SwEncoder::new(
+                "encoder",
+                SwEncoderOptions {
+                    codec: VideoCodec::OpenH264,
+                    width: target.width,
+                    height: target.height,
+                    time_base,
+                    frame_rate: options.framerate,
+                    bit_rate: 2_000_000,
+                    gop_size: 60,
+                },
+            )?;
+            let decoder = SwDecoder::new("decoder", encoder.parameters())?;
+            let pacer = Pacer::new("pacer", time_base, ctx.clock.clone())?;
+            let scaler = SwScaler::new(
+                "to-nv12",
+                ffmpeg::format::Pixel::NV12,
+                target.width,
+                target.height,
+                ffmpeg::software::scaling::Flags::BILINEAR,
+            );
+            let upload = CudaUpload::new(
+                "upload",
+                &cuda,
+                CudaFrameFormat::Nv12,
+                target.width,
+                target.height,
+            )
+            .map_err(|error| media_pp::Error::Other(error.to_string()))?;
+            let renderer = render_common::cuda_window_renderer(
+                "renderer",
+                &gpu,
+                &cuda,
+                target.display,
+                target.window,
+                target.width,
+                target.height,
+            )
+            .map_err(media_pp::Error::Other)?;
+
+            let branch = ctx
+                .branch()
+                .queue("to-encode", 8)
+                .pipe(encoder)
+                .queue("to-decode", 8)
+                .pipe(decoder)
+                .queue("frames", 8)
+                .pipe(pacer)
+                .pipe(scaler)
+                .pipe(upload)
+                .to(Box::new(renderer))?;
+            ctx.attach(source, 0, branch)?;
+            Ok(())
+        })?;
+
+        if shutdown.publish(std::slice::from_ref(&pipeline)) {
+            return Ok(());
+        }
+        pipeline.run()?;
+        drain_bus(&pipeline);
+        Ok(())
+    }
+
+    fn drain_bus(pipeline: &Pipeline) {
+        for event in pipeline.bus().iter() {
+            match &event {
+                BusEvent::Eos { name, .. } => println!("[{name}] eos"),
+                BusEvent::Error { name, error, .. } => eprintln!("[{name}] error: {error}"),
+                BusEvent::Dropped { name, .. } => {
+                    eprintln!("[{name}] dropped a buffer (queue full)")
+                }
+                _ => {}
+            }
+            if matches!(event, BusEvent::Eos { .. } | BusEvent::Error { .. }) {
+                pipeline.stop();
+            }
+        }
     }
 }

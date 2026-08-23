@@ -1,12 +1,9 @@
 # screen_preview_cpu
 
-Windows only.
-
-`DxgiCaptureSource -> SwScaler -> D3d12Upload -> Renderer`: captures the desktop
-live via DXGI Desktop Duplication (cursor included) at a constant frame rate
-(`DxgiCaptureOptions::fps`), converts/resizes it to the window's own size as
-`Pixel::NV12` in one pass, and uploads that to the GPU — no
-`SwEncoder`/`SwDecoder` round trip.
+Captures the desktop into system memory, converts/resizes it to window-sized
+NV12, uploads it to the GPU, and presents it without an encode/decode round
+trip. Windows uses DXGI capture and D3D12 upload/rendering. Linux uses the
+xdg-desktop-portal PipeWire CPU path, CUDA upload, and Vulkan presentation.
 
 No `Pacer` here, confirmed unneeded: `DxgiCaptureSource` previously emitted
 variable-rate (real wall-clock pts, push-on-change), and removing `Pacer`
@@ -19,4 +16,11 @@ presence of a `Pacer` stage.
 
 ```sh
 cargo run -p screen_preview_cpu
+```
+
+On Linux the portal chooses the capture target. Select a window instead of the
+default monitor with `window`, and pass the printed restore token on later runs:
+
+```sh
+cargo run -p screen_preview_cpu -- [monitor|window] [restore-token]
 ```

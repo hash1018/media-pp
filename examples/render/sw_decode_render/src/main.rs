@@ -1,18 +1,22 @@
-//! Demux -> SwDecoder -> Queue -> Pacer -> Renderer: decodes a video file
-//! and presents it in a native window at real playback speed, via
-//! `render_common`'s own `D3d12WindowRenderer` (wrapped as a
-//! `D3d12Renderer`).
+//! Demux -> SwDecoder -> Queue -> Pacer -> GPU upload -> Renderer: decodes a
+//! video file in system memory and presents it in a native window at real
+//! playback speed. Windows uses D3D12; Linux uses CUDA/Vulkan.
 //!
 //!     cargo run -p sw_decode_render -- path/to/video.mp4
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 fn main() {
-    eprintln!("{} example only supports Windows", env!("CARGO_PKG_NAME"));
+    eprintln!("{} supports Windows and Linux only", env!("CARGO_PKG_NAME"));
 }
 
 #[cfg(target_os = "windows")]
 fn main() -> impl std::process::Termination {
     windows_example::run()
+}
+
+#[cfg(target_os = "linux")]
+fn main() -> impl std::process::Termination {
+    linux_example::run()
 }
 
 #[cfg(target_os = "windows")]
@@ -142,5 +146,127 @@ mod windows_example {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(target_os = "linux")]
+mod linux_example {
+    use media_pp::ffmpeg::media;
+    use media_pp::{
+        Error,
+        bus::BusEvent,
+        elements::{
+            CudaDevice, CudaFrameFormat, CudaUpload, FileDemuxer, Pacer, SwDecoder, SwScaler,
+        },
+        ffmpeg,
+        pipeline::Pipeline,
+    };
+    use render_common::{Shutdown, VulkanGpuContext, WindowTarget};
+
+    pub(super) fn run() {
+        let Some(path) = std::env::args().nth(1) else {
+            eprintln!("usage: sw_decode_render <video.mp4>");
+            std::process::exit(1);
+        };
+        render_common::run_window(
+            "media-pp sw_decode_render",
+            1280,
+            720,
+            move |target, shutdown| play(&path, target, &shutdown),
+        );
+    }
+
+    fn play(path: &str, target: WindowTarget, shutdown: &Shutdown) -> media_pp::Result<()> {
+        media_pp::init()?;
+        let _log_guard = media_pp::log::init(
+            env!("CARGO_PKG_NAME"),
+            "logs",
+            media_pp::log::Level::Trace,
+            7,
+        )?;
+        let (source, streams) = FileDemuxer::open("demux", path)?;
+        let video = streams
+            .iter()
+            .find(|stream| stream.kind == media::Type::Video)
+            .ok_or_else(|| Error::Other("no video stream in file".into()))?;
+        let params = source
+            .stream_parameters(video.index)
+            .ok_or_else(|| Error::Other("stream disappeared".into()))?;
+        let time_base = source
+            .stream_time_base(video.index)
+            .ok_or_else(|| Error::Other("stream disappeared".into()))?;
+        let cuda = CudaDevice::new().map_err(|error| Error::Other(error.to_string()))?;
+        let gpu = VulkanGpuContext::new(target.display).map_err(Error::Other)?;
+
+        let pipeline = Pipeline::new("sw-decode-render", source, |source, ctx| {
+            let decoder = SwDecoder::new("decoder", params)?;
+            let pacer = Pacer::new("pacer", time_base, ctx.clock.clone())?;
+            let scaler = SwScaler::new(
+                "to-nv12",
+                ffmpeg::format::Pixel::NV12,
+                target.width,
+                target.height,
+                ffmpeg::software::scaling::Flags::BILINEAR,
+            );
+            let upload = CudaUpload::new(
+                "upload",
+                &cuda,
+                CudaFrameFormat::Nv12,
+                target.width,
+                target.height,
+            )
+            .map_err(|error| Error::Other(error.to_string()))?;
+            let renderer = render_common::cuda_window_renderer(
+                "renderer",
+                &gpu,
+                &cuda,
+                target.display,
+                target.window,
+                target.width,
+                target.height,
+            )
+            .map_err(Error::Other)?;
+            let branch = ctx
+                .branch()
+                .pipe(decoder)
+                .queue("frames", 32)
+                .pipe(pacer)
+                .pipe(scaler)
+                .pipe(upload)
+                .to(Box::new(renderer))?;
+            ctx.attach(source, video.index, branch)?;
+            Ok(())
+        })?;
+
+        if shutdown.publish(std::slice::from_ref(&pipeline)) {
+            return Ok(());
+        }
+        pipeline.run()?;
+        drain_bus(&pipeline);
+        Ok(())
+    }
+
+    fn drain_bus(pipeline: &Pipeline) {
+        for event in pipeline.bus().iter() {
+            match &event {
+                BusEvent::Eos { name, .. } => println!("[{name}] eos"),
+                BusEvent::Error { name, error, .. } => eprintln!("[{name}] error: {error}"),
+                BusEvent::Dropped { name, .. } => {
+                    eprintln!("[{name}] dropped a buffer (queue full)")
+                }
+                BusEvent::Seeked {
+                    name,
+                    requested,
+                    landed,
+                    ..
+                } => {
+                    println!("[{name}] seeked: requested {requested:.2?}, landed {landed:.2?}")
+                }
+                _ => {}
+            }
+            if matches!(event, BusEvent::Eos { .. } | BusEvent::Error { .. }) {
+                pipeline.stop();
+            }
+        }
     }
 }

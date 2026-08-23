@@ -11,8 +11,8 @@ On Windows the capture is a `Pixel::D3D11` BGRA texture on the renderer's own
 `ID3D11Device` — no `Map`, no CPU pixel copy at all — and `D3d11Renderer`
 presents it directly. No `SwScaler`: desktop content is already BGRA/RGB, and
 the renderer letterboxes any capture size into the window on its own. Compare
-against the Windows-only `screen_preview_cpu`, which captures to a plain CPU
-`Pixel::BGRA` frame and converts it to NV12 for a `D3d12Upload`.
+against `screen_preview_cpu`, which captures to a plain CPU `Pixel::BGRA`
+frame and converts it to NV12 before the platform GPU upload.
 
 The Linux graph is one element longer, and the platform forces exactly that
 one. PipeWire hands over a DMA-BUF that `open_gpu` imports as a BGRA CUDA
@@ -22,7 +22,7 @@ encoded — NVENC ingests BGRA directly, which is what `screen_record_nvenc`
 does — never shown or composited.
 
 No cursor on Windows: `CaptureMode::Gpu` doesn't support cursor compositing
-yet, while the Windows-only `screen_preview_cpu` CPU-capture path does. On
+yet, while the Windows `screen_preview_cpu` CPU-capture path does. On
 Linux the compositor draws the cursor itself, so this asks for it.
 
 ```sh
