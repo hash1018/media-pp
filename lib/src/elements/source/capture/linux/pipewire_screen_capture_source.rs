@@ -620,6 +620,18 @@ impl PipeWireScreenCaptureSource {
         #[cfg(feature = "cuda")]
         let gpu = matches!(target, CaptureTarget::Gpu(_));
 
+        // Which memory the emitted frames live in, settled here so the pad
+        // below can declare it. Without the `cuda` feature there is no
+        // `open_gpu` to call at all, so every frame is a CPU one.
+        #[cfg(feature = "cuda")]
+        let memory = if gpu {
+            MemoryDomain::Cuda
+        } else {
+            MemoryDomain::System
+        };
+        #[cfg(not(feature = "cuda"))]
+        let memory = MemoryDomain::System;
+
         let worker = {
             let latest = latest.clone();
             let fps = options.fps.max(1);
@@ -695,14 +707,7 @@ impl PipeWireScreenCaptureSource {
                 // downstream filter can be checked against it.
                 pad: SrcPad::with_contract(
                     format!("{name}_src"),
-                    OutputContract::Fixed(PortContract::frame(
-                        MediaKind::VideoFrame,
-                        if gpu {
-                            MemoryDomain::Cuda
-                        } else {
-                            MemoryDomain::System
-                        },
-                    )),
+                    OutputContract::Fixed(PortContract::frame(MediaKind::VideoFrame, memory)),
                 ),
                 name: name.into(),
                 pp_log,
