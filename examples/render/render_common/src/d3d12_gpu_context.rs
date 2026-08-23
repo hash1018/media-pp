@@ -18,7 +18,7 @@ use windows::{
     core::{Error, Result, s},
 };
 
-const YUV420P_SHADER_SOURCE: &[u8] = include_bytes!("shaders/d3d12/yuv420p.hlsl");
+const FRAME_SHADER_SOURCE: &[u8] = include_bytes!("shaders/d3d12/frame.hlsl");
 const NV12_SHADER_SOURCE: &[u8] = include_bytes!("shaders/d3d12/nv12.hlsl");
 
 /// Owns the `ID3D12Device` and everything derived from it that every
@@ -34,7 +34,6 @@ pub struct D3d12GpuContext {
     pub(crate) device: ID3D12Device,
     pub(crate) command_queue: ID3D12CommandQueue,
     pub(crate) root_signature: ID3D12RootSignature,
-    pub(crate) yuv_pipeline: ID3D12PipelineState,
     pub(crate) nv12_pipeline: ID3D12PipelineState,
 }
 
@@ -78,11 +77,9 @@ impl D3d12GpuContext {
             };
             let command_queue: ID3D12CommandQueue = device.CreateCommandQueue(&queue_desc)?;
 
-            let vertex_shader = compile_shader(YUV420P_SHADER_SOURCE, s!("vs_main"), s!("vs_5_1"))?;
-            let yuv_shader = compile_shader(YUV420P_SHADER_SOURCE, s!("ps_yuv420p"), s!("ps_5_1"))?;
-            // Compiled from its own source file (not `YUV420P_SHADER_SOURCE`)
-            // so its `t0`/`t1` register declarations don't collide with the
-            // ones above — see d3d12/nv12.hlsl for why.
+            let vertex_shader = compile_shader(FRAME_SHADER_SOURCE, s!("vs_main"), s!("vs_5_1"))?;
+            // Its own source file, so its texture registers are declared
+            // exactly once — see d3d12/nv12.hlsl for why.
             let nv12_shader = compile_shader(NV12_SHADER_SOURCE, s!("ps_nv12"), s!("ps_5_1"))?;
 
             // Extract the serialized root signature from HLSL's
@@ -99,8 +96,6 @@ impl D3d12GpuContext {
             );
             let root_signature: ID3D12RootSignature = device.CreateRootSignature(0, root_bytes)?;
 
-            let yuv_pipeline =
-                create_pipeline(&device, &root_signature, &vertex_shader, &yuv_shader)?;
             let nv12_pipeline =
                 create_pipeline(&device, &root_signature, &vertex_shader, &nv12_shader)?;
 
@@ -109,7 +104,6 @@ impl D3d12GpuContext {
                 device,
                 command_queue,
                 root_signature,
-                yuv_pipeline,
                 nv12_pipeline,
             })
         }

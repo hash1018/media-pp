@@ -103,9 +103,10 @@ mod windows_example {
         Error,
         bus::BusEvent,
         elements::{
-            AudioResampler, SwDecoder, TeeBuilder, VideoSynchronizer, WasapiRenderer,
-            WasapiRendererOptions,
+            AudioResampler, D3d12Upload, SwDecoder, SwScaler, TeeBuilder, VideoSynchronizer,
+            WasapiRenderer, WasapiRendererOptions,
         },
+        ffmpeg,
         pipeline::Pipeline,
     };
     use render_common::{D3d12GpuContext, Shutdown, WindowTarget};
@@ -147,6 +148,21 @@ mod windows_example {
                     streams.video_time_base,
                     context.playback_clock.clone(),
                 )?)
+                // After the synchronizer, not before: a frame it drops for
+                // being late never pays for the conversion or the upload.
+                // `D3d12Renderer` draws from a device resource only, so this
+                // pair is what carries CPU-decoded frames to the GPU.
+                .pipe(SwScaler::new(
+                    "to-nv12",
+                    ffmpeg::format::Pixel::NV12,
+                    target.width,
+                    target.height,
+                    ffmpeg::software::scaling::Flags::BILINEAR,
+                ))
+                .pipe(
+                    D3d12Upload::new("video-upload", gpu.device(), target.width, target.height)
+                        .map_err(|error| Error::Other(error.to_string()))?,
+                )
                 .to(Box::new(
                     render_common::d3d12_window_renderer(
                         "video-renderer",

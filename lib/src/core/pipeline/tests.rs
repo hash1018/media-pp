@@ -1804,22 +1804,18 @@ fn a_d3d11_texture_cannot_feed_a_cuda_filter() {
     assert_eq!(&*consumer, "scaler");
 }
 
-/// Regression: `D3d12Renderer` was declared as taking a device resource
-/// only, which refused the CPU-decode pipelines that legitimately feed it
-/// — it uploads a `Pixel::YUV420P` frame itself. Two examples stopped
-/// building their pipeline before this was caught.
-///
-/// This is the failure mode a contract can introduce and a runtime check
-/// cannot: refusing a chain that works. An element accepting more than
-/// one domain must claim neither.
+/// `D3d12Renderer` takes device resources only, matching `D3d11Renderer`
+/// and `CudaRenderer`. A CPU-decoded stream reaches it through
+/// `D3d12Upload` — the one place a system frame crosses to the GPU —
+/// rather than through a second upload path inside the sink.
 #[cfg(all(target_os = "windows", feature = "d3d12"))]
 #[test]
-fn a_renderer_that_uploads_cpu_frames_does_not_claim_a_memory_domain() {
+fn a_d3d12_renderer_takes_device_resources_only() {
     use std::any::Any;
 
     use windows::Win32::Graphics::Direct3D12::{ID3D12Device, ID3D12Fence, ID3D12Resource};
 
-    use crate::elements::{D3d12FrameRenderer, D3d12Renderer, RawPlane, SubmitError};
+    use crate::elements::{D3d12FrameRenderer, D3d12Renderer, D3d12Upload, SubmitError};
 
     /// Never submitted to: the link check runs when the branch is built,
     /// so no buffer ever reaches these.
@@ -1828,17 +1824,6 @@ fn a_renderer_that_uploads_cpu_frames_does_not_claim_a_memory_domain() {
     impl D3d12FrameRenderer for StubRenderer {
         fn device(&self) -> ID3D12Device {
             self.0.clone()
-        }
-
-        unsafe fn submit_yuv420p(
-            &self,
-            _y: RawPlane,
-            _u: RawPlane,
-            _v: RawPlane,
-            _width: u32,
-            _height: u32,
-        ) -> std::result::Result<(), SubmitError> {
-            unreachable!("the link check never pushes a buffer")
         }
 
         unsafe fn submit_nv12_texture(
@@ -1863,29 +1848,39 @@ fn a_renderer_that_uploads_cpu_frames_does_not_claim_a_memory_domain() {
         return;
     };
 
-    // A software decoder's system-memory frames must still reach it.
-    contract_context()
+    let Err(error) = contract_context()
         .branch()
         .pipe(video_decoder("decoder"))
         .to(Box::new(D3d12Renderer::new(
             "renderer",
             Box::new(StubRenderer(device.clone())),
         )))
-        .expect("this renderer uploads a YUV420P frame itself");
+    else {
+        panic!("a software decoder's frames have no path to the swap chain");
+    };
 
-    // And so must a device resource, through the upload that produces one.
+    let crate::Error::GraphError(GraphError::IncompatibleLink {
+        producer, consumer, ..
+    }) = error
+    else {
+        panic!("expected an IncompatibleLink, got {error}");
+    };
+    assert_eq!(&*producer, "decoder");
+    assert_eq!(&*consumer, "renderer");
+
+    // The upload that was missing is what makes the same chain valid.
     contract_context()
         .branch()
         .pipe(video_decoder("decoder"))
         .pipe(
-            crate::elements::D3d12Upload::new("upload", &device, 64, 64)
+            D3d12Upload::new("upload", &device, 64, 64)
                 .expect("the upload must open on a live device"),
         )
         .to(Box::new(D3d12Renderer::new(
             "renderer",
             Box::new(StubRenderer(device)),
         )))
-        .expect("a D3D12 resource is the other half of what it accepts");
+        .expect("a D3D12 resource is exactly what this renderer accepts");
 }
 
 /// A passthrough element that declared nothing used to end the check at

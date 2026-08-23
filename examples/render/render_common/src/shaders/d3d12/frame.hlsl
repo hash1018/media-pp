@@ -1,3 +1,10 @@
+// The shared vertex stage and root signature every frame shader in this
+// renderer draws with. The pixel stage lives in its own translation unit
+// (nv12.hlsl) so its texture registers are declared exactly once.
+//
+// `numDescriptors=3` is one more than NV12's luma/chroma pair needs. The
+// table is sized by the SRV heap the renderer allocates, not by any one
+// shader, so the spare slot simply goes unbound.
 #define FRAME_ROOT_SIGNATURE \
     "RootFlags(ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT)," \
     "DescriptorTable(SRV(t0, numDescriptors=3))," \
@@ -26,28 +33,4 @@ VertexOutput vs_main(uint vertex_id : SV_VertexID)
         1.0
     );
     return output;
-}
-
-Texture2D<float> texture0 : register(t0);
-Texture2D<float> texture1 : register(t1);
-Texture2D<float> texture2 : register(t2);
-SamplerState frame_sampler : register(s0);
-
-// Converts the three YUV420P planes directly to RGB on the GPU.
-// The defaults assume BT.601 limited range, typical for standard SDR video.
-[RootSignature(FRAME_ROOT_SIGNATURE)]
-float4 ps_yuv420p(VertexOutput input) : SV_Target
-{
-    float y = texture0.Sample(frame_sampler, input.uv).r;
-    float u = texture1.Sample(frame_sampler, input.uv).r - 0.5;
-    float v = texture2.Sample(frame_sampler, input.uv).r - 0.5;
-
-    y = 1.16438356 * (y - 16.0 / 255.0);
-
-    float3 rgb;
-    rgb.r = y + 1.59602678 * v;
-    rgb.g = y - 0.39176229 * u - 0.81296764 * v;
-    rgb.b = y + 2.01723214 * u;
-
-    return float4(saturate(rgb), 1.0);
 }

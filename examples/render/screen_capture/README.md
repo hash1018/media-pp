@@ -1,9 +1,10 @@
 # screen_capture
 
-`DxgiCaptureSource -> SwScaler -> Renderer`: captures the desktop live via DXGI
-Desktop Duplication (cursor included) at a constant frame rate
-(`DxgiCaptureOptions::fps`) and converts/resizes it to the window's own size
-as `Pixel::YUV420P` before rendering — no `SwEncoder`/`SwDecoder` round trip.
+`DxgiCaptureSource -> SwScaler -> D3d12Upload -> Renderer`: captures the desktop
+live via DXGI Desktop Duplication (cursor included) at a constant frame rate
+(`DxgiCaptureOptions::fps`), converts/resizes it to the window's own size as
+`Pixel::NV12` in one pass, and uploads that to the GPU — no
+`SwEncoder`/`SwDecoder` round trip.
 
 No `Pacer` here, confirmed unneeded: `DxgiCaptureSource` previously emitted
 variable-rate (real wall-clock pts, push-on-change), and removing `Pacer`

@@ -12,7 +12,7 @@ On Windows the capture is a `Pixel::D3D11` BGRA texture on the renderer's own
 presents it directly. No `SwScaler`: desktop content is already BGRA/RGB, and
 the renderer letterboxes any capture size into the window on its own. Compare
 against `screen_capture`, which captures to a plain CPU `Pixel::BGRA` frame
-and converts it to YUV420P for the D3D12 CPU-upload path.
+and converts it to NV12 for a `D3d12Upload`.
 
 The Linux graph is one element longer, and the platform forces exactly that
 one. PipeWire hands over a DMA-BUF that `open_gpu` imports as a BGRA CUDA

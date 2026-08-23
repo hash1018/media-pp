@@ -14,7 +14,8 @@ mod windows_example {
     use media_pp::{
         Error,
         bus::BusEvent,
-        elements::{FileDemuxer, Pacer, SwDecoder},
+        elements::{D3d12Upload, FileDemuxer, Pacer, SwDecoder, SwScaler},
+        ffmpeg,
         pipeline::Pipeline,
     };
     use render_common::{D3d12GpuContext, Shutdown};
@@ -86,11 +87,27 @@ mod windows_example {
             let renderer =
                 render_common::d3d12_window_renderer("renderer", &gpu, hwnd, width, height)
                     .expect("failed to create renderer");
+            // `D3d12Renderer` draws from a device resource only, so the
+            // decoder's system-memory frames are converted to the NV12
+            // layout `D3d12Upload` writes and uploaded here. Without this
+            // pair the branch is refused as it is built, naming the
+            // decoder — see `media_pp::contract`.
+            let scaler = SwScaler::new(
+                "to-nv12",
+                ffmpeg::format::Pixel::NV12,
+                width,
+                height,
+                ffmpeg::software::scaling::Flags::BILINEAR,
+            );
+            let upload = D3d12Upload::new("upload", gpu.device(), width, height)
+                .expect("failed to create the D3D12 upload");
             let branch = ctx
                 .branch()
                 .pipe(decoder)
                 .queue("frames", 32)
                 .pipe(pacer)
+                .pipe(scaler)
+                .pipe(upload)
                 .to(Box::new(renderer))?;
             ctx.attach(source, video.index, branch)?;
             Ok(())

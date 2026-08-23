@@ -30,8 +30,7 @@ use crate::{
 /// see [`crate::elements::D3d11Renderer`]'s own docs on why a single
 /// shared `ID3D11Device` needs no explicit GPU-side synchronization at
 /// all, and this doc comment's own note below on why lifetime-keeping is
-/// unnecessary too. Both paths here are zero-copy (no CPU-upload method
-/// the way `D3d12FrameRenderer::submit_yuv420p` is one): everything in
+/// unnecessary too. Both paths here are zero-copy: everything in
 /// this crate's D3D11 stack already produces GPU-resident `Pixel::D3D11`
 /// textures (see [`crate::elements::D3d11Upload`]/
 /// `DxgiCaptureSource`'s GPU capture mode/

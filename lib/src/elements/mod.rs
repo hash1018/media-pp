@@ -98,7 +98,7 @@ pub use sink::{CudaFrameRenderer, CudaRenderer, CudaRendererError};
 #[cfg(all(target_os = "windows", feature = "d3d11"))]
 pub use sink::{D3d11FrameRenderer, D3d11Renderer, D3d11RendererError};
 #[cfg(all(target_os = "windows", feature = "d3d12"))]
-pub use sink::{D3d12FrameRenderer, D3d12Renderer, D3d12RendererError, RawPlane};
+pub use sink::{D3d12FrameRenderer, D3d12Renderer, D3d12RendererError};
 #[cfg(all(target_os = "linux", feature = "pipewire-audio-renderer"))]
 pub use sink::{PipeWireAudioRenderer, PipeWireAudioRendererError, PipeWireAudioRendererOptions};
 #[cfg(all(target_os = "windows", feature = "wasapi-renderer"))]

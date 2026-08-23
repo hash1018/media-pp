@@ -14,17 +14,17 @@ mod windows_example {
     use media_pp::{
         bus::BusEvent,
         element::ElementType,
-        elements::{CaptureMode, DxgiCaptureOptions, DxgiCaptureSource, SwScaler},
+        elements::{CaptureMode, D3d12Upload, DxgiCaptureOptions, DxgiCaptureSource, SwScaler},
         pipeline::Pipeline,
     };
     use render_common::{D3d12GpuContext, Shutdown};
     use winit::raw_window_handle::RawWindowHandle;
 
-    /// DxgiCaptureSource -> SwScaler -> Renderer: captures the desktop live via
-    /// DXGI Desktop Duplication (cursor included) at a constant frame rate
-    /// (`DxgiCaptureOptions::fps`) and converts/resizes it to the window's own
-    /// size as `Pixel::YUV420P` before rendering — no `SwEncoder`/`SwDecoder`
-    /// round trip.
+    /// DxgiCaptureSource -> SwScaler -> D3d12Upload -> Renderer: captures the
+    /// desktop live via DXGI Desktop Duplication (cursor included) at a
+    /// constant frame rate (`DxgiCaptureOptions::fps`), converts/resizes it to
+    /// the window's own size as `Pixel::NV12` in one pass, and uploads that to
+    /// the GPU — no `SwEncoder`/`SwDecoder` round trip.
     ///
     /// No `Pacer` here, confirmed unneeded: `DxgiCaptureSource` previously
     /// emitted variable-rate (real wall-clock pts, push-on-change), and
@@ -73,16 +73,19 @@ mod windows_example {
 
         let pipeline = Pipeline::new("screen-capture", source, |source, ctx| {
             // Converts the captured `Pixel::BGRA` desktop frames down to the
-            // window's own size as `Pixel::YUV420P` in one pass —
-            // `D3d12Renderer`'s CPU-upload path only understands
-            // YUV420P/D3D12, not BGRA.
+            // window's own size as `Pixel::NV12` in one pass — the layout
+            // `D3d12Upload` writes, and the only one it accepts.
             let scaler = SwScaler::new(
-                "to-yuv",
-                ffmpeg::format::Pixel::YUV420P,
+                "to-nv12",
+                ffmpeg::format::Pixel::NV12,
                 window_width,
                 window_height,
                 ffmpeg::software::scaling::Flags::BILINEAR,
             );
+            // `D3d12Renderer` draws from a device resource only, so this is
+            // where the captured pixels cross to the GPU.
+            let upload = D3d12Upload::new("upload", gpu.device(), window_width, window_height)
+                .expect("failed to create the D3D12 upload");
             let renderer = render_common::d3d12_window_renderer(
                 "renderer",
                 &gpu,
@@ -97,6 +100,7 @@ mod windows_example {
                 .queue("captured", 4) // thread boundary so scaling doesn't block capture
                 .pipe(scaler)
                 .queue("frames", 8) // thread boundary so rendering doesn't block scaling
+                .pipe(upload)
                 .to(Box::new(renderer))?;
             ctx.attach(source, 0, branch)?;
             Ok(())

@@ -1,16 +1,15 @@
 // Pixel shader for zero-copy NV12 (semi-planar 4:2:0) submission — the
-// format hardware video decode (e.g. D3D12VA) produces directly, as one
-// resource with a full-resolution luma plane and a half-resolution
-// interleaved-chroma plane, as opposed to the three separate planes
-// `ps_yuv420p` (yuv420p.hlsl) expects from a CPU-side YUV420P upload.
+// format hardware video decode (e.g. D3D12VA) produces directly, and the
+// one `D3d12Upload` writes for a CPU-decoded stream: a single resource
+// with a full-resolution luma plane and a half-resolution
+// interleaved-chroma plane.
 //
 // Compiled as its own translation unit (own `D3DCompile` call, see
-// `gpu_context.rs`) specifically so its `t0`/`t1` register declarations
-// don't collide with yuv420p.hlsl's `texture0`/`texture1`/`texture2` — the
-// root signature is still the one extracted from yuv420p.hlsl's `vs_main`
-// (`FRAME_ROOT_SIGNATURE`: 3 contiguous SRVs at t0, static sampler s0),
-// which this shader fits inside without needing its own copy of that
-// attribute.
+// `d3d12_gpu_context.rs`) so its texture registers are declared exactly
+// once. The root signature is the one extracted from frame.hlsl's
+// `vs_main` (`FRAME_ROOT_SIGNATURE`: 3 contiguous SRVs at t0, static
+// sampler s0), which this shader fits inside without needing its own
+// copy of that attribute.
 
 struct VertexOutput
 {
@@ -23,7 +22,7 @@ Texture2D<float2> chroma : register(t1);
 SamplerState frame_sampler : register(s0);
 
 // Converts an NV12 texture pair directly to RGB on the GPU. Same BT.601
-// limited-range assumption as `ps_yuv420p`.
+// limited-range assumption the rest of this renderer uses.
 float4 ps_nv12(VertexOutput input) : SV_Target
 {
     float y = luma.Sample(frame_sampler, input.uv).r;

@@ -157,11 +157,12 @@ leaves the runtime check in charge. A passthrough element carries its
 upstream contract forward, so a mismatch is still caught across a thread
 boundary and still names the element that actually produces the data.
 
-An element that accepts more than one memory domain — `D3d12Renderer`
-uploads a system frame as readily as it presents a device resource —
-declares no domain at all. Claiming one it does not need would refuse a
-pipeline that works, which is worse than the runtime error the contract was
-meant to pre-empt.
+An element that genuinely handles more than one memory domain declares none
+at all — `VideoSynchronizer` paces a system frame and a device texture alike,
+because it never reads the pixels. Claiming a domain an element does not need
+would refuse a pipeline that works, which is worse than the runtime error the
+contract was meant to pre-empt.
+
 Use `Pipeline::finish` to stop a live source with ordered EOS and drain queued
 buffers, codecs, and muxers; `Pipeline::stop` abandons buffered work immediately.
 

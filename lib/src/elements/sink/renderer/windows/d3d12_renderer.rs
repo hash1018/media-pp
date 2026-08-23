@@ -19,27 +19,9 @@ use crate::{
     pool::UnboundObjectPoolRef,
 };
 
-/// One CPU-resident image plane — data pointer, byte length, and row
-/// stride. Deliberately a plain, GPU-vendor-agnostic struct (no
-/// dependency on any particular rendering crate's own type) — unlike
-/// [`D3d12FrameRenderer::submit_nv12_texture`]'s COM types, this is the
-/// one part of the trait that isn't D3D12-specific, so
-/// [`D3d12FrameRenderer`] implementors only need this crate to know
-/// anything about their concrete rendering setup for the CPU-upload path.
-#[derive(Clone, Copy)]
-pub struct RawPlane {
-    /// Pointer to the first byte of the plane.
-    pub data: *const u8,
-    /// Total readable byte length beginning at [`Self::data`].
-    pub len: usize,
-    /// Distance between adjacent rows, in bytes.
-    pub stride: usize,
-}
-
 /// What [`D3d12Renderer`] needs from an actual DX12 window/rendering
 /// implementation — deliberately the *only* thing this crate knows about
-/// D3D12 rendering. Not GPU-vendor-agnostic despite `submit_yuv420p`'s
-/// plain `RawPlane` args: `submit_nv12_texture`'s zero-copy path takes
+/// D3D12 rendering. `submit_nv12_texture` takes
 /// `ID3D12Resource`/`ID3D12Fence` directly, so this trait (and any
 /// element built on it) is inherently D3D12-only — a Vulkan/CUDA renderer
 /// would need its own trait, not an impl of this one. `D3d12Renderer`
@@ -57,18 +39,6 @@ pub trait D3d12FrameRenderer: Send {
     /// (not just wrong-looking), so it's checked against this rather than
     /// trusted.
     fn device(&self) -> ID3D12Device;
-
-    /// # Safety
-    /// All plane pointers must be readable for the given length and
-    /// remain valid until this call returns.
-    unsafe fn submit_yuv420p(
-        &self,
-        y: RawPlane,
-        u: RawPlane,
-        v: RawPlane,
-        width: u32,
-        height: u32,
-    ) -> std::result::Result<(), SubmitError>;
 
     /// # Safety
     /// `texture` must be a valid `ID3D12Resource` on the same
@@ -131,12 +101,14 @@ pub enum D3d12RendererError {
 /// neither this nor the `windows` dependency it needs for the zero-copy
 /// path.
 ///
-/// Handles two kinds of input, dispatched on `frame.format()`:
-///   - `Pixel::YUV420P`: CPU-decoded (e.g. from `SwDecoder`) — copies
-///     pixel bytes to the GPU via `D3d12FrameRenderer::submit_yuv420p`.
-///   - `Pixel::D3D12`: GPU-decoded (from `D3d12Decoder`) — zero-copy,
-///     draws straight from the decoder's own texture via
-///     `D3d12FrameRenderer::submit_nv12_texture`.
+/// Takes `Pixel::D3D12` frames only, drawn zero-copy straight from
+/// whatever produced the texture via
+/// `D3d12FrameRenderer::submit_nv12_texture` — a `D3d12Decoder`'s output,
+/// or a [`crate::elements::D3d12Upload`] for a CPU-decoded stream. That
+/// upload is the one place a system-memory frame reaches the GPU, rather
+/// than this sink keeping a second, separate CPU path of its own; see
+/// [`crate::contract`] for how a chain missing it is refused when the
+/// branch is built.
 pub struct D3d12Renderer {
     pp_log: PpLog,
     name: Arc<str>,
@@ -176,24 +148,6 @@ impl D3d12Renderer {
             .inspect_err(|error| pp_error!(self, "resize failed: {error:?}"))
             .map_err(D3d12RendererError::Resize)?;
         pp_info!(self, "resized: {width}x{height}");
-        Ok(())
-    }
-
-    fn submit_yuv420p_frame(&self, frame: &ffmpeg::frame::Video) -> Result<()> {
-        let plane = |index: usize| RawPlane {
-            data: frame.data(index).as_ptr(),
-            len: frame.data(index).len(),
-            stride: frame.stride(index),
-        };
-
-        // SAFETY: `plane(0..3)` point into `frame`'s own buffers, which
-        // outlive this call — `submit_yuv420p` only reads them before
-        // returning.
-        unsafe {
-            self.inner
-                .submit_yuv420p(plane(0), plane(1), plane(2), frame.width(), frame.height())
-                .map_err(D3d12RendererError::Submit)?;
-        }
         Ok(())
     }
 
@@ -270,13 +224,11 @@ impl Element for D3d12Renderer {
 }
 
 impl Sink for D3d12Renderer {
-    /// Deliberately no memory-domain claim: unlike `D3d11Renderer` and
-    /// `CudaRenderer`, this one presents a `Pixel::D3D12` resource *and*
-    /// uploads a `Pixel::YUV420P` system frame itself, so narrowing it to
-    /// the device would refuse the CPU-decode pipelines that legitimately
-    /// feed it (see the `sw_decode_render` and `screen_capture` examples).
+    /// Presents a device resource; a system-memory frame reaches the GPU
+    /// through [`crate::elements::D3d12Upload`], not through a second
+    /// path inside this sink.
     fn input_contract(&self) -> InputContract {
-        InputContract::Fixed(PortContract::of(MediaKind::Video))
+        InputContract::Fixed(PortContract::of(MediaKind::Video).in_memory(MemoryDomain::D3d12))
     }
 
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
@@ -285,9 +237,6 @@ impl Sink for D3d12Renderer {
         };
 
         match frame.format() {
-            ffmpeg::format::Pixel::YUV420P => self
-                .submit_yuv420p_frame(&frame)
-                .inspect_err(|error| pp_error!(self, "submit_yuv420p_frame failed: {error}")),
             ffmpeg::format::Pixel::D3D12 => self
                 .submit_d3d12_frame(frame)
                 .inspect_err(|error| pp_error!(self, "submit_d3d12_frame failed: {error}")),

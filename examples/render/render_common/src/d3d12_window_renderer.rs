@@ -25,7 +25,7 @@ use std::{
     },
 };
 
-use media_pp::elements::{D3d12FrameRenderer, RawPlane, SubmitError};
+use media_pp::elements::{D3d12FrameRenderer, SubmitError};
 use windows::{
     Win32::{
         Foundation::{CloseHandle, HANDLE, HWND, RECT},
@@ -52,46 +52,6 @@ use crate::d3d12_gpu_context::D3d12GpuContext;
 /// Double-buffered, same as the `renderer-engine` crate this replaces.
 const FRAME_COUNT: usize = 2;
 
-/// One packed CPU-writable upload-heap buffer holding all 3 YUV420P
-/// planes back to back (see [`pack_planes`]) — copied plane-by-plane into
-/// `yuv_planes`' own default-heap textures every `submit_yuv420p` call.
-/// Grown (never shrunk) on demand; `None` until the first submit.
-struct UploadBuffer {
-    resource: ID3D12Resource,
-    mapped_address: usize,
-    capacity: usize,
-}
-
-/// One owned default-heap texture backing a single YUV420P plane, plus
-/// its already-written SRV in `srv_heap`. `has_content` tracks whether
-/// this texture has ever been copied into yet, so the first copy doesn't
-/// try to transition out of `PIXEL_SHADER_RESOURCE` state it was never
-/// actually placed into (it starts life in `COPY_DEST`).
-struct TexturePlane {
-    texture: ID3D12Resource,
-    width: u32,
-    height: u32,
-    format: DXGI_FORMAT,
-    has_content: bool,
-}
-
-#[derive(Clone, Copy, PartialEq)]
-struct PlaneSpec {
-    width: u32,
-    height: u32,
-    format: DXGI_FORMAT,
-}
-
-/// One plane's byte layout inside [`UploadBuffer`] — where `pack_planes`
-/// put it, needed by `CopyTextureRegion`'s `PlacedFootprint` source.
-struct PlaneLayout {
-    offset: u64,
-    row_pitch: usize,
-    width: u32,
-    height: u32,
-    format: DXGI_FORMAT,
-}
-
 struct RendererState {
     swap_chain: IDXGISwapChain3,
     command_allocator: ID3D12CommandAllocator,
@@ -101,8 +61,6 @@ struct RendererState {
     render_targets: Vec<ID3D12Resource>,
     srv_heap: ID3D12DescriptorHeap,
     srv_size: usize,
-    yuv_upload: Option<UploadBuffer>,
-    yuv_planes: Vec<TexturePlane>,
     /// The fence value signaled by the last frame *this window* submitted
     /// — waited on at the start of the next `submit_*`/`resize` call
     /// before touching any resource that frame might still be using.
@@ -120,7 +78,6 @@ pub struct D3d12WindowRenderer {
     device: ID3D12Device,
     command_queue: ID3D12CommandQueue,
     root_signature: ID3D12RootSignature,
-    yuv_pipeline: ID3D12PipelineState,
     nv12_pipeline: ID3D12PipelineState,
     fence: ID3D12Fence,
     fence_event: HANDLE,
@@ -231,7 +188,6 @@ impl D3d12WindowRenderer {
                 device: gpu.device.clone(),
                 command_queue: gpu.command_queue.clone(),
                 root_signature: gpu.root_signature.clone(),
-                yuv_pipeline: gpu.yuv_pipeline.clone(),
                 nv12_pipeline: gpu.nv12_pipeline.clone(),
                 fence,
                 fence_event,
@@ -245,8 +201,6 @@ impl D3d12WindowRenderer {
                     render_targets,
                     srv_heap,
                     srv_size,
-                    yuv_upload: None,
-                    yuv_planes: Vec::new(),
                     last_submitted: 0,
                     pending_keep_alive: None,
                     width,
@@ -286,122 +240,6 @@ impl D3d12WindowRenderer {
 impl D3d12FrameRenderer for D3d12WindowRenderer {
     fn device(&self) -> ID3D12Device {
         self.device.clone()
-    }
-
-    unsafe fn submit_yuv420p(
-        &self,
-        y: RawPlane,
-        u: RawPlane,
-        v: RawPlane,
-        width: u32,
-        height: u32,
-    ) -> Result<(), SubmitError> {
-        if self.device_lost.load(Ordering::Relaxed) {
-            return Err(SubmitError::DeviceRemoved);
-        }
-        if y.data.is_null() || u.data.is_null() || v.data.is_null() {
-            return Err(SubmitError::NullBuffer);
-        }
-        if width == 0 || height == 0 {
-            return Err(SubmitError::InvalidFrame);
-        }
-
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| SubmitError::RendererStopped)?;
-        self.check_device_lost(self.wait_for_value(state.last_submitted))?;
-        state.pending_keep_alive = None;
-
-        let chroma_width = width.div_ceil(2);
-        let chroma_height = height.div_ceil(2);
-        let specs = [
-            PlaneSpec {
-                width,
-                height,
-                format: DXGI_FORMAT_R8_UNORM,
-            },
-            PlaneSpec {
-                width: chroma_width,
-                height: chroma_height,
-                format: DXGI_FORMAT_R8_UNORM,
-            },
-            PlaneSpec {
-                width: chroma_width,
-                height: chroma_height,
-                format: DXGI_FORMAT_R8_UNORM,
-            },
-        ];
-        self.check_device_lost(ensure_yuv_planes(&self.device, &mut state, &specs))?;
-
-        let inputs = [
-            (y, y.stride, specs[0]),
-            (u, u.stride, specs[1]),
-            (v, v.stride, specs[2]),
-        ];
-        let layouts = pack_planes(&inputs.iter().map(|(_, _, spec)| *spec).collect::<Vec<_>>())?;
-        let required = layouts
-            .last()
-            .map(|layout| layout.offset as usize + layout.row_pitch * layout.height as usize)
-            .ok_or(SubmitError::InvalidFrame)?;
-        self.check_device_lost(ensure_upload_capacity(&self.device, &mut state, required))?;
-
-        {
-            let upload = state.yuv_upload.as_ref().expect("ensured above");
-            for ((plane, stride, _), layout) in inputs.iter().zip(&layouts) {
-                let src = unsafe { std::slice::from_raw_parts(plane.data, plane.len) };
-                let row_bytes = layout.width as usize; // 1 byte/pixel, R8_UNORM
-                let dst = upload.mapped_address as *mut u8;
-                for row in 0..layout.height as usize {
-                    let src_start = row * stride;
-                    let dst_start = layout.offset as usize + row * layout.row_pitch;
-                    unsafe {
-                        std::ptr::copy_nonoverlapping(
-                            src.as_ptr().add(src_start),
-                            dst.add(dst_start),
-                            row_bytes,
-                        );
-                    }
-                }
-            }
-        }
-
-        self.check_device_lost(unsafe { state.command_allocator.Reset() })?;
-        self.check_device_lost(unsafe {
-            state.command_list.Reset(&state.command_allocator, None)
-        })?;
-
-        {
-            let upload_resource = state
-                .yuv_upload
-                .as_ref()
-                .expect("ensured above")
-                .resource
-                .clone();
-            let command_list = state.command_list.clone();
-            for (index, layout) in layouts.iter().enumerate() {
-                unsafe {
-                    copy_uploaded_plane(
-                        &command_list,
-                        &mut state.yuv_planes[index],
-                        &upload_resource,
-                        layout,
-                    );
-                }
-            }
-        }
-
-        let (window_width, window_height) = (state.width, state.height);
-        self.check_device_lost(unsafe {
-            self.record_and_present(
-                &mut state,
-                self.yuv_pipeline.clone(),
-                (width, height),
-                (window_width, window_height),
-                None,
-                None,
-            )
-        })
     }
 
     unsafe fn submit_nv12_texture(
@@ -701,225 +539,6 @@ fn plane_srv_desc(format: DXGI_FORMAT, plane_slice: u32) -> D3D12_SHADER_RESOURC
         },
     }
 }
-
-/// (Re)builds `state.yuv_planes` if `specs` doesn't match what's already
-/// there — 3 owned default-heap textures, one per YUV420P plane, each
-/// with its SRV written into `state.srv_heap` once at creation time (not
-/// every frame).
-fn ensure_yuv_planes(
-    device: &ID3D12Device,
-    state: &mut RendererState,
-    specs: &[PlaneSpec; 3],
-) -> windows::core::Result<()> {
-    let matches = state.yuv_planes.len() == specs.len()
-        && state.yuv_planes.iter().zip(specs).all(|(plane, spec)| {
-            plane.width == spec.width && plane.height == spec.height && plane.format == spec.format
-        });
-    if matches {
-        return Ok(());
-    }
-
-    let mut planes = Vec::with_capacity(specs.len());
-    for spec in specs {
-        planes.push(create_texture_plane(device, *spec)?);
-    }
-    for (index, plane) in planes.iter().enumerate() {
-        unsafe {
-            device.CreateShaderResourceView(
-                &plane.texture,
-                None,
-                srv_cpu_handle(&state.srv_heap, state.srv_size, index),
-            );
-        }
-    }
-    state.yuv_planes = planes;
-    Ok(())
-}
-
-fn create_texture_plane(
-    device: &ID3D12Device,
-    spec: PlaneSpec,
-) -> windows::core::Result<TexturePlane> {
-    let texture_desc = D3D12_RESOURCE_DESC {
-        Dimension: D3D12_RESOURCE_DIMENSION_TEXTURE2D,
-        Width: spec.width as u64,
-        Height: spec.height,
-        DepthOrArraySize: 1,
-        MipLevels: 1,
-        Format: spec.format,
-        SampleDesc: DXGI_SAMPLE_DESC {
-            Count: 1,
-            Quality: 0,
-        },
-        Layout: D3D12_TEXTURE_LAYOUT_UNKNOWN,
-        ..Default::default()
-    };
-    let heap = D3D12_HEAP_PROPERTIES {
-        Type: D3D12_HEAP_TYPE_DEFAULT,
-        CreationNodeMask: 1,
-        VisibleNodeMask: 1,
-        ..Default::default()
-    };
-    let mut texture = None;
-    unsafe {
-        device.CreateCommittedResource(
-            &heap,
-            D3D12_HEAP_FLAG_NONE,
-            &texture_desc,
-            D3D12_RESOURCE_STATE_COPY_DEST,
-            None,
-            &mut texture,
-        )?;
-    }
-    Ok(TexturePlane {
-        texture: texture.unwrap(),
-        width: spec.width,
-        height: spec.height,
-        format: spec.format,
-        has_content: false,
-    })
-}
-
-/// Grows (never shrinks) `state.yuv_upload` to at least `capacity` bytes,
-/// mapping it persistently — a plain `BUFFER` resource on an `UPLOAD`
-/// heap, written into directly from the CPU in `submit_yuv420p`.
-fn ensure_upload_capacity(
-    device: &ID3D12Device,
-    state: &mut RendererState,
-    capacity: usize,
-) -> windows::core::Result<()> {
-    if let Some(upload) = &state.yuv_upload
-        && upload.capacity >= capacity
-    {
-        return Ok(());
-    }
-    if let Some(upload) = state.yuv_upload.take() {
-        unsafe { upload.resource.Unmap(0, None) };
-    }
-    let desc = D3D12_RESOURCE_DESC {
-        Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
-        Width: capacity as u64,
-        Height: 1,
-        DepthOrArraySize: 1,
-        MipLevels: 1,
-        SampleDesc: DXGI_SAMPLE_DESC {
-            Count: 1,
-            Quality: 0,
-        },
-        Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
-        ..Default::default()
-    };
-    let heap = D3D12_HEAP_PROPERTIES {
-        Type: D3D12_HEAP_TYPE_UPLOAD,
-        CreationNodeMask: 1,
-        VisibleNodeMask: 1,
-        ..Default::default()
-    };
-    let mut resource: Option<ID3D12Resource> = None;
-    unsafe {
-        device.CreateCommittedResource(
-            &heap,
-            D3D12_HEAP_FLAG_NONE,
-            &desc,
-            D3D12_RESOURCE_STATE_GENERIC_READ,
-            None,
-            &mut resource,
-        )?;
-    }
-    let resource = resource.unwrap();
-    let mut mapped = std::ptr::null_mut();
-    unsafe { resource.Map(0, None, Some(&mut mapped))? };
-    state.yuv_upload = Some(UploadBuffer {
-        resource,
-        mapped_address: mapped as usize,
-        capacity,
-    });
-    Ok(())
-}
-
-/// Computes each plane's packed byte offset/row-pitch inside one shared
-/// upload buffer, respecting D3D12's texture data placement/pitch
-/// alignment — mirrors what `CopyTextureRegion`'s `PlacedFootprint`
-/// source requires.
-fn pack_planes(specs: &[PlaneSpec]) -> Result<Vec<PlaneLayout>, SubmitError> {
-    let mut offset = 0usize;
-    let mut layouts = Vec::with_capacity(specs.len());
-    for spec in specs {
-        if spec.width == 0 || spec.height == 0 {
-            return Err(SubmitError::InvalidFrame);
-        }
-        let row_bytes = spec.width as usize; // 1 byte/pixel, R8_UNORM
-        offset = align_up(offset, D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT as usize);
-        let row_pitch = align_up(row_bytes, D3D12_TEXTURE_DATA_PITCH_ALIGNMENT as usize);
-        layouts.push(PlaneLayout {
-            offset: offset as u64,
-            row_pitch,
-            width: spec.width,
-            height: spec.height,
-            format: spec.format,
-        });
-        offset += row_pitch * spec.height as usize;
-    }
-    Ok(layouts)
-}
-
-fn align_up(value: usize, alignment: usize) -> usize {
-    value.div_ceil(alignment) * alignment
-}
-
-unsafe fn copy_uploaded_plane(
-    command_list: &ID3D12GraphicsCommandList,
-    target: &mut TexturePlane,
-    upload: &ID3D12Resource,
-    layout: &PlaneLayout,
-) {
-    if target.has_content {
-        unsafe {
-            record_transition(
-                command_list,
-                &target.texture,
-                D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
-                D3D12_RESOURCE_STATE_COPY_DEST,
-            );
-        }
-    }
-    let mut source = D3D12_TEXTURE_COPY_LOCATION {
-        pResource: ManuallyDrop::new(Some(upload.clone())),
-        Type: D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
-        Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
-            PlacedFootprint: D3D12_PLACED_SUBRESOURCE_FOOTPRINT {
-                Offset: layout.offset,
-                Footprint: D3D12_SUBRESOURCE_FOOTPRINT {
-                    Format: layout.format,
-                    Width: layout.width,
-                    Height: layout.height,
-                    Depth: 1,
-                    RowPitch: layout.row_pitch as u32,
-                },
-            },
-        },
-    };
-    let mut destination = D3D12_TEXTURE_COPY_LOCATION {
-        pResource: ManuallyDrop::new(Some(target.texture.clone())),
-        Type: D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
-        Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
-            SubresourceIndex: 0,
-        },
-    };
-    unsafe {
-        command_list.CopyTextureRegion(&destination, 0, 0, 0, &source, None);
-        ManuallyDrop::drop(&mut source.pResource);
-        ManuallyDrop::drop(&mut destination.pResource);
-        record_transition(
-            command_list,
-            &target.texture,
-            D3D12_RESOURCE_STATE_COPY_DEST,
-            D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
-        );
-    }
-    target.has_content = true;
-}
-
 #[allow(clippy::explicit_auto_deref)]
 unsafe fn record_transition(
     command_list: &ID3D12GraphicsCommandList,
