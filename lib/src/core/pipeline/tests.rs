@@ -1887,3 +1887,79 @@ fn a_renderer_that_uploads_cpu_frames_does_not_claim_a_memory_domain() {
         )))
         .expect("a D3D12 resource is the other half of what it accepts");
 }
+
+/// A passthrough element that declared nothing used to end the check at
+/// itself, because `Unknown` output means nothing is known to be flowing
+/// onward. `VideoSynchronizer` sits mid-branch in every A/V playback
+/// pipeline, so leaving it undeclared blinded the rest of the chain.
+#[test]
+fn a_video_synchronizer_carries_the_contract_past_itself() {
+    use crate::elements::{PacketCounter, VideoSynchronizer};
+
+    let context = contract_context();
+    let sync = VideoSynchronizer::new(
+        "sync",
+        ffmpeg::Rational::new(1, 90_000),
+        context.playback_clock.clone(),
+    )
+    .expect("a valid time base opens the synchronizer");
+
+    let (counter, _count) = PacketCounter::new("counter");
+    let Err(error) = context
+        .branch()
+        .pipe(video_decoder("decoder"))
+        .pipe(sync)
+        .to(Box::new(counter))
+    else {
+        panic!("scheduling frames does not turn them into packets");
+    };
+
+    let crate::Error::GraphError(GraphError::IncompatibleLink {
+        producer, consumer, ..
+    }) = error
+    else {
+        panic!("expected an IncompatibleLink, got {error}");
+    };
+    assert_eq!(
+        &*producer, "decoder",
+        "a passthrough stage forwards the contract and the producer's name with it"
+    );
+    assert_eq!(&*consumer, "counter");
+}
+
+/// The head of a chain. A source pad that declares nothing leaves the
+/// attach boundary unchecked for that whole pipeline, so the synthetic
+/// and capture sources have to declare theirs too.
+#[test]
+fn a_video_source_cannot_be_attached_to_an_audio_branch() {
+    use crate::elements::{TestVideoOptions, TestVideoSource};
+
+    let context = contract_context();
+    let branch = context
+        .branch()
+        .queue("q", 4)
+        .to(DeclaringSink::boxed(
+            "speakers",
+            InputContract::Fixed(
+                PortContract::of(MediaKind::Audio).in_memory(MemoryDomain::System),
+            ),
+        ))
+        .expect("the branch itself is consistent");
+
+    let mut source = TestVideoSource::new("video", TestVideoOptions::default());
+    let Err(error) = context.attach(&mut source, 0, branch) else {
+        panic!("a video source has no samples for an audio renderer");
+    };
+
+    assert!(
+        matches!(
+            error,
+            crate::Error::GraphError(GraphError::IncompatibleLink { .. })
+        ),
+        "got {error}"
+    );
+    assert!(
+        !source.src_pads()[0].is_linked(),
+        "a refused attach must not link the pad"
+    );
+}

@@ -145,13 +145,23 @@ opt-in, and these elements declare one:
   encoder, renderer, and compositor (`D3d11*`, `D3d12*`, `Cuda*`).
 - Audio: `AudioResampler`, `AudioVolume`, `AudioMixer`, `WasapiRenderer`,
   `PipeWireAudioRenderer`.
+- Sources: `FileDemuxer`, `RtspSource`, `TestVideoSource`, `TestAudioSource`,
+  the capture sources, and inbound WebRTC tracks.
 - Either decoded medium: `FrameCounter`.
-- Passthrough: `Queue`, `Tee`, `Pacer`. `AppSink` accepts anything.
+- Passthrough: `Queue`, `Tee`, `Pacer`, `VideoSynchronizer`. `AppSink`
+  accepts anything.
 
-Every other element defaults to "unknown", which always links and leaves the
-runtime check in charge. A `Queue` or `Tee` passes its upstream contract
-through, so a mismatch is still caught across a thread boundary and still
-names the element that actually produces the data.
+`AppSource` stays undeclared, since only the application knows what it will
+push. Anything else undeclared defaults to "unknown", which always links and
+leaves the runtime check in charge. A passthrough element carries its
+upstream contract forward, so a mismatch is still caught across a thread
+boundary and still names the element that actually produces the data.
+
+An element that accepts more than one memory domain — `D3d12Renderer`
+uploads a system frame as readily as it presents a device resource —
+declares no domain at all. Claiming one it does not need would refuse a
+pipeline that works, which is worse than the runtime error the contract was
+meant to pre-empt.
 Use `Pipeline::finish` to stop a live source with ordered EOS and drain queued
 buffers, codecs, and muxers; `Pipeline::stop` abandons buffered work immediately.
 

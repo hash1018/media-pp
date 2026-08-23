@@ -11,6 +11,7 @@ use thiserror::Error as ThisError;
 use crate::{
     buffer::MediaBuffer,
     bus::{Bus, BusEvent},
+    contract::{MediaKind, MemoryDomain, OutputContract, PortContract},
     control::{ControlReceiver, drain_control},
     element::{Element, ElementType, Source, SourceElement, element_pp_log},
     pad::SrcPad,
@@ -118,7 +119,12 @@ impl TestVideoSource {
     pub fn new(name: impl Into<String>, options: TestVideoOptions) -> Self {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::TestVideoSource, &name, None);
-        let pad = SrcPad::new(format!("{name}_src"));
+        let pad = SrcPad::with_contract(
+            format!("{name}_src"),
+            OutputContract::Fixed(
+                PortContract::of(MediaKind::Video).in_memory(MemoryDomain::System),
+            ),
+        );
         pp_info!(
             pp_log: &pp_log,
             "created: {}x{}, framerate={}",

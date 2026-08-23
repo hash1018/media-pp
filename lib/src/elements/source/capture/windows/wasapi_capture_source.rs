@@ -20,6 +20,7 @@ use windows::Win32::{
 use crate::{
     buffer::MediaBuffer,
     bus::{Bus, BusEvent},
+    contract::{MediaKind, MemoryDomain, OutputContract, PortContract},
     control::{self, ControlMsg, ControlOutcome, ControlReceiver, RequestKind},
     element::{Element, ElementType, Source, SourceElement, element_pp_log},
     elements::AudioFormat,
@@ -237,7 +238,12 @@ impl WasapiCaptureSource {
                 audio_format.channels,
                 audio_format.sample_format
             );
-            let pad = SrcPad::new(format!("{name}_src"));
+            let pad = SrcPad::with_contract(
+                format!("{name}_src"),
+                OutputContract::Fixed(
+                    PortContract::of(MediaKind::Audio).in_memory(MemoryDomain::System),
+                ),
+            );
 
             Ok((
                 Self {

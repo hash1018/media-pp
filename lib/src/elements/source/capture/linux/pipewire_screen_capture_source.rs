@@ -49,6 +49,7 @@ use crate::{
 use crate::{
     buffer::MediaBuffer,
     bus::{Bus, BusEvent},
+    contract::{MediaKind, MemoryDomain, OutputContract, PortContract},
     control::{ControlReceiver, drain_control},
     element::{Element, ElementType, Source, SourceElement, element_pp_log},
     elements::VideoFormat,
@@ -689,7 +690,17 @@ impl PipeWireScreenCaptureSource {
 
         Ok((
             Self {
-                pad: SrcPad::new(format!("{name}_src")),
+                // `open` emits CPU frames and `open_gpu` CUDA-resident
+                // ones, and which of the two is settled here — so a
+                // downstream filter can be checked against it.
+                pad: SrcPad::with_contract(
+                    format!("{name}_src"),
+                    OutputContract::Fixed(PortContract::of(MediaKind::Video).in_memory(if gpu {
+                        MemoryDomain::Cuda
+                    } else {
+                        MemoryDomain::System
+                    })),
+                ),
                 name: name.into(),
                 pp_log,
                 width,

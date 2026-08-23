@@ -12,6 +12,7 @@ use thiserror::Error as ThisError;
 use crate::{
     buffer::MediaBuffer,
     bus::{Bus, BusEvent},
+    contract::{MediaKind, MemoryDomain, OutputContract, PortContract},
     control::{ControlReceiver, drain_control},
     element::{Element, ElementType, Source, SourceElement, element_pp_log},
     error::Result,
@@ -113,7 +114,12 @@ impl TestAudioSource {
             options.channels,
             options.frequency
         );
-        let pad = SrcPad::new(format!("{name}_src"));
+        let pad = SrcPad::with_contract(
+            format!("{name}_src"),
+            OutputContract::Fixed(
+                PortContract::of(MediaKind::Audio).in_memory(MemoryDomain::System),
+            ),
+        );
         Self {
             name,
             pp_log,

@@ -6,6 +6,7 @@ use thiserror::Error as ThisError;
 
 use crate::{
     buffer::MediaBuffer,
+    contract::{InputContract, MediaKind, OutputContract, PortContract},
     control::ControlMsg,
     element::{Element, ElementType, Sink, Source, element_pp_log},
     pad::SrcPad,
@@ -106,7 +107,7 @@ impl VideoSynchronizer {
             last_pts: None,
             frame_duration: FALLBACK_FRAME_DURATION,
             pending: VecDeque::new(),
-            pad: SrcPad::new(format!("{name}_src")),
+            pad: SrcPad::with_contract(format!("{name}_src"), OutputContract::Passthrough),
         })
     }
 
@@ -206,6 +207,14 @@ impl Source for VideoSynchronizer {
 }
 
 impl Sink for VideoSynchronizer {
+    /// Scheduling is a delay, not a transform: frames are held until the
+    /// playback clock says they are due and forwarded unchanged. No
+    /// memory-domain claim, because it never touches the pixels — it
+    /// paces a system frame and a device texture alike.
+    fn input_contract(&self) -> InputContract {
+        InputContract::Fixed(PortContract::of(MediaKind::Video))
+    }
+
     fn consume(&mut self, buf: MediaBuffer) -> crate::error::Result<()> {
         match &buf {
             MediaBuffer::Video(_) | MediaBuffer::Eos => {}

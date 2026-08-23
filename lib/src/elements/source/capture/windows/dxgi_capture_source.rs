@@ -35,6 +35,7 @@ use windows::{
 use crate::{
     buffer::MediaBuffer,
     bus::{Bus, BusEvent},
+    contract::{MediaKind, MemoryDomain, OutputContract, PortContract},
     control::{ControlReceiver, drain_control},
     element::{Element, ElementType, Source, SourceElement, element_pp_log},
     elements::VideoFormat,
@@ -577,7 +578,17 @@ impl DxgiCaptureSource {
             });
         }
 
-        let pad = SrcPad::new(format!("{name}_src"));
+        // Which domain this emits in is settled by `capture_mode` right
+        // here, so downstream can be checked against it even though the
+        // captured size and format are runtime values.
+        let pad = SrcPad::with_contract(
+            format!("{name}_src"),
+            OutputContract::Fixed(PortContract::of(MediaKind::Video).in_memory(if gpu_mode {
+                MemoryDomain::D3d11
+            } else {
+                MemoryDomain::System
+            })),
+        );
         // Gpu: only the small CPU-side `AVFrame` wrapper is ever pooled
         // (`ffmpeg::frame::Video::empty` — same as `D3d11Upload`'s own
         // pool); the GPU texture itself is a fresh allocation every

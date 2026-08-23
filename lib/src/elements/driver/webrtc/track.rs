@@ -17,6 +17,7 @@ use str0m::{
 use crate::{
     buffer::MediaBuffer,
     bus::{Bus, BusEvent},
+    contract::{InputContract, OutputContract, PortContract},
     control::{
         ControlMsg, ControlReceiver, RequestKind, apply_finish, apply_one, drain_control,
         wait_out_pause,
@@ -287,6 +288,13 @@ impl Element for WebRtcTrackSink {
 }
 
 impl Sink for WebRtcTrackSink {
+    /// A track carries encoded media to the peer; this sink has no
+    /// encoder of its own, so a decoded frame has no route through it.
+    fn input_contract(&self) -> InputContract {
+        // Path-qualified: `MediaKind` in this module is str0m's own.
+        InputContract::Fixed(PortContract::of(crate::contract::MediaKind::Packet))
+    }
+
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         if !matches!(buf, MediaBuffer::Packet(_) | MediaBuffer::Eos) {
             let kind = match buf {
@@ -424,7 +432,12 @@ impl WebRtcTrackSource {
     ) -> Self {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::WebRtcPeer, &name, None);
-        let pad = SrcPad::new(format!("{name}_src"));
+        // An inbound track always delivers encoded media; which codec is
+        // negotiated with the peer at runtime, but the kind never varies.
+        let pad = SrcPad::with_contract(
+            format!("{name}_src"),
+            OutputContract::Fixed(PortContract::of(crate::contract::MediaKind::Packet)),
+        );
         Self {
             id,
             name,

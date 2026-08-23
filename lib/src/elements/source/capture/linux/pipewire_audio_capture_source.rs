@@ -22,6 +22,7 @@ use crate::pp_log::{PpLog, pp_error, pp_info, pp_warn};
 use crate::{
     buffer::MediaBuffer,
     bus::{Bus, BusEvent},
+    contract::{MediaKind, MemoryDomain, OutputContract, PortContract},
     control::{self, ControlMsg, ControlOutcome, ControlReceiver, RequestKind},
     element::{Element, ElementType, Source, SourceElement, element_pp_log},
     elements::AudioFormat,
@@ -319,7 +320,12 @@ impl PipeWireAudioCaptureSource {
 
         Ok((
             Self {
-                pad: SrcPad::new(format!("{name}_src")),
+                pad: SrcPad::with_contract(
+                    format!("{name}_src"),
+                    OutputContract::Fixed(
+                        PortContract::of(MediaKind::Audio).in_memory(MemoryDomain::System),
+                    ),
+                ),
                 name: name.into(),
                 pp_log,
                 format,
