@@ -216,6 +216,11 @@ impl TeeBuilder {
             });
             tee_branch.plan.nodes.extend(plan.nodes);
             tee_branch.plan.edges.extend(plan.edges);
+            // Merged as one plan, so the source attach that eventually
+            // commits this `Tee` validates every initial branch in the
+            // same walk — the fan-out edge above is what carries this
+            // `Tee`'s incoming contract into each of them.
+            tee_branch.plan.contracts.extend(plan.contracts);
 
             pad.link(root);
             runtime_branches.push(Arc::new(TeeBranch {

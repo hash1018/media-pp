@@ -2063,3 +2063,142 @@ fn an_incompatible_link_reads_the_way_the_readme_shows_it() {
          (it takes VideoPacket|AudioPacket)"
     );
 }
+
+/// A `D3d11FrameRenderer` that is never submitted to: the link check runs
+/// when a branch is built or attached, so no buffer ever reaches it.
+#[cfg(all(target_os = "windows", feature = "d3d11"))]
+struct StubD3d11Renderer(windows::Win32::Graphics::Direct3D11::ID3D11Device);
+
+#[cfg(all(target_os = "windows", feature = "d3d11"))]
+impl crate::elements::D3d11FrameRenderer for StubD3d11Renderer {
+    fn device(&self) -> windows::Win32::Graphics::Direct3D11::ID3D11Device {
+        self.0.clone()
+    }
+
+    unsafe fn submit_bgra_texture(
+        &self,
+        _texture: windows::Win32::Graphics::Direct3D11::ID3D11Texture2D,
+        _array_index: u32,
+        _width: u32,
+        _height: u32,
+    ) -> std::result::Result<(), crate::elements::SubmitError> {
+        unreachable!("the link check never pushes a buffer")
+    }
+
+    unsafe fn submit_nv12_texture(
+        &self,
+        _texture: windows::Win32::Graphics::Direct3D11::ID3D11Texture2D,
+        _array_index: u32,
+        _width: u32,
+        _height: u32,
+    ) -> std::result::Result<(), crate::elements::SubmitError> {
+        unreachable!("the link check never pushes a buffer")
+    }
+
+    fn resize(
+        &self,
+        _width: u32,
+        _height: u32,
+    ) -> std::result::Result<(), crate::elements::SubmitError> {
+        unreachable!("the link check never resizes")
+    }
+}
+
+/// A branch whose leading stages are all passthrough has no requirement of
+/// its own — the one that matters belongs to an element further down, and
+/// summarizing the branch as "what its first stage accepts" threw that
+/// away. `VideoSynchronizer` takes a frame from any backend, so before the
+/// branch was re-walked at attach time a system-memory source linked to a
+/// D3D11 renderer cleanly and failed per frame at runtime.
+#[cfg(all(target_os = "windows", feature = "d3d11"))]
+#[test]
+fn a_passthrough_at_the_head_of_a_branch_still_carries_the_downstream_requirement() {
+    use crate::elements::{TestVideoOptions, TestVideoSource, VideoSynchronizer};
+
+    let Some((device, d3d_context)) = crate::test_support::try_d3d11_device() else {
+        eprintln!("skipped: no D3D11 hardware device available");
+        return;
+    };
+    let context = contract_context();
+    let renderer = crate::elements::D3d11Renderer::new(
+        "renderer",
+        Box::new(StubD3d11Renderer(device.clone())),
+    );
+    let _ = &d3d_context;
+
+    let branch = context
+        .branch()
+        .pipe(
+            VideoSynchronizer::new(
+                "sync",
+                ffmpeg::Rational::new(1, 90_000),
+                context.playback_clock.clone(),
+            )
+            .expect("a valid time base opens the synchronizer"),
+        )
+        .to(Box::new(renderer))
+        .expect("nothing is flowing yet, so the branch alone is consistent");
+    let before = context.graph.snapshot();
+
+    let mut source = TestVideoSource::new("video", TestVideoOptions::default());
+    let Err(error) = context.attach(&mut source, 0, branch) else {
+        panic!("system-memory frames never reach a D3D11 swap chain");
+    };
+
+    let crate::Error::GraphError(GraphError::IncompatibleLink {
+        producer, consumer, ..
+    }) = error
+    else {
+        panic!("expected an IncompatibleLink, got {error}");
+    };
+    assert_eq!(
+        &*producer, "video_src",
+        "the synchronizer forwards the pad's own contract rather than replacing it"
+    );
+    assert_eq!(
+        &*consumer, "renderer",
+        "the requirement belongs to the element past the passthrough stage"
+    );
+
+    assert!(!source.src_pads()[0].is_linked());
+    let after = context.graph.snapshot();
+    assert_eq!(before.revision, after.revision);
+    assert_eq!(before.nodes.len(), after.nodes.len());
+}
+
+/// The same shape with the upload that was missing, to prove the walk is
+/// not simply refusing every branch that starts with a passthrough stage.
+#[cfg(all(target_os = "windows", feature = "d3d11"))]
+#[test]
+fn a_passthrough_at_the_head_of_a_branch_accepts_a_matching_source() {
+    use crate::elements::{D3d11Upload, TestVideoOptions, TestVideoSource, VideoSynchronizer};
+
+    let Some((device, _d3d_context)) = crate::test_support::try_d3d11_device() else {
+        eprintln!("skipped: no D3D11 hardware device available");
+        return;
+    };
+    let context = contract_context();
+    let renderer = crate::elements::D3d11Renderer::new(
+        "renderer",
+        Box::new(StubD3d11Renderer(device.clone())),
+    );
+
+    let branch = context
+        .branch()
+        .pipe(
+            VideoSynchronizer::new(
+                "sync",
+                ffmpeg::Rational::new(1, 90_000),
+                context.playback_clock.clone(),
+            )
+            .expect("a valid time base opens the synchronizer"),
+        )
+        .pipe(D3d11Upload::new("upload", &device, 64, 64))
+        .to(Box::new(renderer))
+        .expect("the branch itself is consistent");
+
+    let mut source = TestVideoSource::new("video", TestVideoOptions::default());
+    context
+        .attach(&mut source, 0, branch)
+        .expect("the upload is exactly what makes this source reach the renderer");
+}

@@ -19,7 +19,7 @@ use std::{
 use thiserror::Error as ThisError;
 
 use crate::{
-    contract::{InputContract, PortContract},
+    contract::{InputContract, OutputContract, PortContract},
     element::ElementType,
     log::{Level, enabled},
     pp_log::{PpLog, pp_info},
@@ -334,17 +334,96 @@ pub(crate) struct PlannedEdge {
     pub to: PortRef,
 }
 
+/// What is actually flowing along one edge, once every stage upstream of
+/// it has been resolved — together with the element that produced it, so a
+/// rejection names the real producer rather than whichever passthrough
+/// stage last relayed it.
+#[derive(Debug, Clone)]
+pub(crate) struct ResolvedFlow {
+    pub producer: Arc<str>,
+    pub contract: PortContract,
+}
+
+/// One planned element's two contracts, kept per node so a branch can be
+/// re-validated against whatever it eventually gets attached to.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PortContracts {
+    pub input: InputContract,
+    pub output: OutputContract,
+}
+
 #[derive(Debug)]
 pub(crate) struct BranchPlan {
     pub nodes: Vec<NodeInfo>,
     pub edges: Vec<PlannedEdge>,
     pub root: ElementId,
-    /// What this branch as a whole can be fed, and the element that
-    /// decides it — the first one past any leading passthrough stages.
-    /// Carried here so an attach can check the branch against the pad it
-    /// is being linked to without walking the built chain again.
-    pub input: InputContract,
-    pub input_element: Arc<str>,
+    /// Every node's contracts, keyed by element. A branch is a tree — one
+    /// chain, plus a fan-out edge per initial `Tee` branch — so validating
+    /// it means walking `edges` from `root` and carrying the flow along
+    /// each one, not folding a linear list.
+    pub contracts: HashMap<ElementId, PortContracts>,
+}
+
+impl BranchPlan {
+    /// Rejects any link in this branch whose two sides cannot meet, given
+    /// what is flowing into its root.
+    ///
+    /// `incoming` is `None` while the branch is still detached — nothing is
+    /// known to be flowing yet, so only links downstream of a stage that
+    /// produces something of its own get checked. The same walk runs again
+    /// at attach time with the real upstream contract, which is what
+    /// catches a branch whose leading stages are all passthrough: those
+    /// carry the flow through untouched, so the requirement that matters
+    /// belongs to an element further down.
+    pub(crate) fn validate(&self, incoming: Option<ResolvedFlow>) -> Result<(), GraphError> {
+        let name_of = |id: ElementId| {
+            self.nodes
+                .iter()
+                .find(|node| node.id == id)
+                .map(|node| node.name.clone())
+                .unwrap_or_else(|| "<unknown>".into())
+        };
+
+        // A plan is a tree, so every node is reached exactly once; the
+        // visited set only keeps a malformed plan from looping forever.
+        let mut visited = HashSet::new();
+        let mut pending = vec![(self.root, incoming)];
+        while let Some((id, flow)) = pending.pop() {
+            if !visited.insert(id) {
+                continue;
+            }
+            let Some(contracts) = self.contracts.get(&id) else {
+                continue;
+            };
+
+            if let (Some(flow), InputContract::Fixed(accepted)) = (&flow, contracts.input)
+                && !accepted.accepts(&flow.contract)
+            {
+                return Err(GraphError::IncompatibleLink {
+                    producer: flow.producer.clone(),
+                    produced: flow.contract,
+                    consumer: name_of(id),
+                    accepted,
+                });
+            }
+
+            let outgoing = match contracts.output {
+                OutputContract::Fixed(contract) => Some(ResolvedFlow {
+                    producer: name_of(id),
+                    contract,
+                }),
+                OutputContract::Passthrough => flow,
+                OutputContract::Unknown => None,
+            };
+
+            // Fan-out: every branch of a `Tee` receives the same buffers,
+            // so each outgoing edge carries the same resolved flow.
+            for edge in self.edges.iter().filter(|edge| edge.from.element == id) {
+                pending.push((edge.to.element, outgoing.clone()));
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
