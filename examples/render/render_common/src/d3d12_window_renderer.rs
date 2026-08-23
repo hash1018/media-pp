@@ -1,6 +1,6 @@
-//! A single window's D3D12 renderer — swap chain, the two draw paths
-//! [`media_pp::elements::D3d12FrameRenderer`] needs (`submit_yuv420p`
-//! CPU-upload, `submit_nv12_texture` zero-copy), and resize. Reuses
+//! A single window's D3D12 renderer — swap chain, the zero-copy draw path
+//! [`media_pp::elements::D3d12FrameRenderer`] needs
+//! (`submit_nv12_texture`), and resize. Reuses
 //! [`crate::D3d12GpuContext`]'s device/queue/root-signature/PSOs; everything
 //! else here (swap chain, RTV heap, SRV heap, command allocator/list,
 //! fence) is this window's own.

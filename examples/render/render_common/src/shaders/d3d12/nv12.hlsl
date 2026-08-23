@@ -7,9 +7,9 @@
 // Compiled as its own translation unit (own `D3DCompile` call, see
 // `d3d12_gpu_context.rs`) so its texture registers are declared exactly
 // once. The root signature is the one extracted from frame.hlsl's
-// `vs_main` (`FRAME_ROOT_SIGNATURE`: 3 contiguous SRVs at t0, static
-// sampler s0), which this shader fits inside without needing its own
-// copy of that attribute.
+// `vs_main` (`FRAME_ROOT_SIGNATURE`: the luma/chroma SRV pair at t0, plus
+// a static sampler at s0), which this shader fits inside without needing
+// its own copy of that attribute.
 
 struct VertexOutput
 {

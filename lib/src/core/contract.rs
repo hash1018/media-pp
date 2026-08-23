@@ -103,9 +103,7 @@ impl fmt::Display for MediaKind {
 /// everything it *can* accept, and compatibility is the former being a
 /// subset of the latter. A demuxer feeding a muxer may emit either
 /// encoded kind, while a video decoder accepts only one of them — a
-/// distinction a single kind could not express.|Audio` into a
-/// video-only sink is a real mismatch for half its buffers, which a single
-/// kind could not express.
+/// distinction a single kind could not express.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MediaKindSet(u8);
 
