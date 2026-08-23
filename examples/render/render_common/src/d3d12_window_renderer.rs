@@ -153,7 +153,7 @@ impl D3d12WindowRenderer {
 
             let srv_heap_desc = D3D12_DESCRIPTOR_HEAP_DESC {
                 Type: D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
-                NumDescriptors: 3,
+                NumDescriptors: 2,
                 Flags: D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE,
                 ..Default::default()
             };
@@ -270,15 +270,10 @@ impl D3d12FrameRenderer for D3d12WindowRenderer {
             let chroma_srv = plane_srv_desc(DXGI_FORMAT_R8G8_UNORM, 1);
             let handle0 = srv_cpu_handle(&state.srv_heap, state.srv_size, 0);
             let handle1 = srv_cpu_handle(&state.srv_heap, state.srv_size, 1);
-            let handle2 = srv_cpu_handle(&state.srv_heap, state.srv_size, 2);
             self.device
                 .CreateShaderResourceView(&texture, Some(&luma_srv), handle0);
             self.device
                 .CreateShaderResourceView(&texture, Some(&chroma_srv), handle1);
-            // t2 is unused by `ps_nv12` but the root signature reserves 3
-            // contiguous SRVs — point it at the luma view too.
-            self.device
-                .CreateShaderResourceView(&texture, Some(&luma_srv), handle2);
         }
 
         self.check_device_lost(unsafe { state.command_allocator.Reset() })?;

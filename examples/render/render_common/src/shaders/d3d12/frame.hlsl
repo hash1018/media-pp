@@ -2,12 +2,11 @@
 // renderer draws with. The pixel stage lives in its own translation unit
 // (nv12.hlsl) so its texture registers are declared exactly once.
 //
-// `numDescriptors=3` is one more than NV12's luma/chroma pair needs. The
-// table is sized by the SRV heap the renderer allocates, not by any one
-// shader, so the spare slot simply goes unbound.
+// The table is exactly NV12's luma/chroma pair, matching the two-entry
+// SRV heap the renderer allocates.
 #define FRAME_ROOT_SIGNATURE \
     "RootFlags(ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT)," \
-    "DescriptorTable(SRV(t0, numDescriptors=3))," \
+    "DescriptorTable(SRV(t0, numDescriptors=2))," \
     "StaticSampler(s0," \
         "filter=FILTER_MIN_MAG_LINEAR_MIP_POINT," \
         "addressU=TEXTURE_ADDRESS_CLAMP," \
