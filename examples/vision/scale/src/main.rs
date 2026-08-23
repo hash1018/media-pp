@@ -1,153 +1,163 @@
-use std::sync::{
-    Arc,
-    atomic::{AtomicUsize, Ordering},
-};
+//! Demux -> SwDecoder -> SwScaler -> (prints the first scaled frame's actual
+//! format/size, then counts the rest). Proves `SwScaler` really converts
+//! pixel format (whatever the decoder produces -> RGB24) and resizes
+//! (source resolution -> a fixed 640x640, the kind of input an ONNX
+//! object-detection model would want), not just that it compiles.
+//!
+//!     cargo run -p scale -- path/to/video.mp4
 
-use media_pp::ffmpeg::{format::Pixel, media, software::scaling::Flags};
-use media_pp::pp_log::PpLog;
-use media_pp::{
-    Error, Result,
-    buffer::MediaBuffer,
-    bus::BusEvent,
-    control::ControlMsg,
-    element::{Element, ElementType, Sink, element_pp_log},
-    elements::{FileDemuxer, SwDecoder, SwScaler},
-    pipeline::Pipeline,
-};
+fn main() -> impl std::process::Termination {
+    example::run()
+}
 
-const DST_FORMAT: Pixel = Pixel::RGB24;
-const DST_WIDTH: u32 = 640;
-const DST_HEIGHT: u32 = 640;
-
-/// Demux -> SwDecoder -> SwScaler -> (prints the first scaled frame's actual
-/// format/size, then counts the rest). Proves `SwScaler` really converts
-/// pixel format (whatever the decoder produces -> RGB24) and resizes
-/// (source resolution -> a fixed 640x640, the kind of input an ONNX
-/// object-detection model would want), not just that it compiles.
-///
-///     cargo run -p scale -- path/to/video.mp4
-fn main() -> media_pp::Result<()> {
-    media_pp::init()?;
-    let _log_guard = media_pp::log::init(
-        env!("CARGO_PKG_NAME"),
-        "logs",
-        media_pp::log::Level::Trace,
-        7,
-    )?;
-
-    let Some(path) = std::env::args().nth(1) else {
-        eprintln!("usage: scale <video.mp4>");
-        std::process::exit(1);
+mod example {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
     };
 
-    let (source, streams) = FileDemuxer::open("demux", &path)?;
-    let video = streams
-        .iter()
-        .find(|s| s.kind == media::Type::Video)
-        .ok_or_else(|| Error::Other("no video stream in file".into()))?;
-    let params = source
-        .stream_parameters(video.index)
-        .ok_or_else(|| Error::Other("stream disappeared".into()))?;
-
-    let count = Arc::new(AtomicUsize::new(0));
-    let sink = VerifyingSink {
-        count: count.clone(),
-        pp_log: element_pp_log(ElementType::Other, "verify", None),
+    use media_pp::ffmpeg::{format::Pixel, media, software::scaling::Flags};
+    use media_pp::pp_log::PpLog;
+    use media_pp::{
+        Error, Result,
+        buffer::MediaBuffer,
+        bus::BusEvent,
+        control::ControlMsg,
+        element::{Element, ElementType, Sink, element_pp_log},
+        elements::{FileDemuxer, SwDecoder, SwScaler},
+        pipeline::Pipeline,
     };
 
-    let pipeline = Pipeline::new("scale", source, |source, ctx| {
-        let decoder = SwDecoder::new("decoder", params).expect("failed to open decoder");
-        let scaler = SwScaler::new("scaler", DST_FORMAT, DST_WIDTH, DST_HEIGHT, Flags::BILINEAR);
-        let branch = ctx
-            .branch()
-            .pipe(decoder) // same thread as the demux — cheap enough not to need a queue
-            .queue("frames", 8) // scaler/sink run on their own thread
-            .pipe(scaler)
-            .to(Box::new(sink))?;
-        ctx.attach(source, video.index, branch)?;
-        Ok(())
-    })?;
+    const DST_FORMAT: Pixel = Pixel::RGB24;
+    const DST_WIDTH: u32 = 640;
+    const DST_HEIGHT: u32 = 640;
 
-    pipeline.run()?;
+    pub(super) fn run() -> media_pp::Result<()> {
+        media_pp::init()?;
+        let _log_guard = media_pp::log::init(
+            env!("CARGO_PKG_NAME"),
+            "logs",
+            media_pp::log::Level::Trace,
+            7,
+        )?;
 
-    // Watch for `Eos`/`Error` and `stop()` on either — errors no longer
-    // end the pipeline on their own, so this is what makes the loop
-    // below actually finish instead of running forever after a failure.
-    for event in pipeline.bus().iter() {
-        match &event {
-            BusEvent::Eos { name, .. } => println!("[{name}] eos"),
-            BusEvent::Error { name, error, .. } => eprintln!("[{name}] error: {error}"),
-            BusEvent::Dropped { name, .. } => eprintln!("[{name}] dropped a buffer (queue full)"),
-            BusEvent::Seeked {
-                name,
-                requested,
-                landed,
-                ..
-            } => println!("[{name}] seeked: requested {requested:.2?}, landed {landed:.2?}"),
-            // `BusEvent` is `#[non_exhaustive]`; this example only acts
-            // on the events above.
-            _ => {}
+        let Some(path) = std::env::args().nth(1) else {
+            eprintln!("usage: scale <video.mp4>");
+            std::process::exit(1);
+        };
+
+        let (source, streams) = FileDemuxer::open("demux", &path)?;
+        let video = streams
+            .iter()
+            .find(|s| s.kind == media::Type::Video)
+            .ok_or_else(|| Error::Other("no video stream in file".into()))?;
+        let params = source
+            .stream_parameters(video.index)
+            .ok_or_else(|| Error::Other("stream disappeared".into()))?;
+
+        let count = Arc::new(AtomicUsize::new(0));
+        let sink = VerifyingSink {
+            count: count.clone(),
+            pp_log: element_pp_log(ElementType::Other, "verify", None),
+        };
+
+        let pipeline = Pipeline::new("scale", source, |source, ctx| {
+            let decoder = SwDecoder::new("decoder", params).expect("failed to open decoder");
+            let scaler =
+                SwScaler::new("scaler", DST_FORMAT, DST_WIDTH, DST_HEIGHT, Flags::BILINEAR);
+            let branch = ctx
+                .branch()
+                .pipe(decoder) // same thread as the demux — cheap enough not to need a queue
+                .queue("frames", 8) // scaler/sink run on their own thread
+                .pipe(scaler)
+                .to(Box::new(sink))?;
+            ctx.attach(source, video.index, branch)?;
+            Ok(())
+        })?;
+
+        pipeline.run()?;
+
+        // Watch for `Eos`/`Error` and `stop()` on either — errors no longer
+        // end the pipeline on their own, so this is what makes the loop
+        // below actually finish instead of running forever after a failure.
+        for event in pipeline.bus().iter() {
+            match &event {
+                BusEvent::Eos { name, .. } => println!("[{name}] eos"),
+                BusEvent::Error { name, error, .. } => eprintln!("[{name}] error: {error}"),
+                BusEvent::Dropped { name, .. } => {
+                    eprintln!("[{name}] dropped a buffer (queue full)")
+                }
+                BusEvent::Seeked {
+                    name,
+                    requested,
+                    landed,
+                    ..
+                } => println!("[{name}] seeked: requested {requested:.2?}, landed {landed:.2?}"),
+                // `BusEvent` is `#[non_exhaustive]`; this example only acts
+                // on the events above.
+                _ => {}
+            }
+            if matches!(event, BusEvent::Eos { .. } | BusEvent::Error { .. }) {
+                pipeline.stop();
+            }
         }
-        if matches!(event, BusEvent::Eos { .. } | BusEvent::Error { .. }) {
-            pipeline.stop();
-        }
-    }
 
-    println!("scaled frames: {}", count.load(Ordering::Relaxed));
-    Ok(())
-}
-
-/// Terminal sink that prints the *first* scaled frame's actual
-/// format/dimensions — proof `SwScaler` really produced `DST_FORMAT` at
-/// `DST_WIDTH`x`DST_HEIGHT`, not just that the pipeline ran to
-/// completion — then counts every frame after that the same way
-/// `FrameCounter` would.
-struct VerifyingSink {
-    pp_log: PpLog,
-    count: Arc<AtomicUsize>,
-}
-
-impl Element for VerifyingSink {
-    fn name(&self) -> Arc<str> {
-        "verify".into()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::Other
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
-    }
-}
-
-impl Sink for VerifyingSink {
-    fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
-        if let MediaBuffer::Video(frame) = &buf
-            && self.count.fetch_add(1, Ordering::Relaxed) == 0
-        {
-            println!(
-                "first scaled frame: {:?} {}x{} (expected {DST_FORMAT:?} {DST_WIDTH}x{DST_HEIGHT})",
-                frame.format(),
-                frame.width(),
-                frame.height(),
-            );
-            assert_eq!(
-                frame.format(),
-                DST_FORMAT,
-                "SwScaler didn't convert pixel format"
-            );
-            assert_eq!(frame.width(), DST_WIDTH, "SwScaler didn't resize width");
-            assert_eq!(frame.height(), DST_HEIGHT, "SwScaler didn't resize height");
-        }
+        println!("scaled frames: {}", count.load(Ordering::Relaxed));
         Ok(())
     }
 
-    fn control(&mut self, _msg: ControlMsg) -> Result<()> {
-        Ok(())
+    /// Terminal sink that prints the *first* scaled frame's actual
+    /// format/dimensions — proof `SwScaler` really produced `DST_FORMAT` at
+    /// `DST_WIDTH`x`DST_HEIGHT`, not just that the pipeline ran to
+    /// completion — then counts every frame after that the same way
+    /// `FrameCounter` would.
+    struct VerifyingSink {
+        pp_log: PpLog,
+        count: Arc<AtomicUsize>,
+    }
+
+    impl Element for VerifyingSink {
+        fn name(&self) -> Arc<str> {
+            "verify".into()
+        }
+
+        fn element_type(&self) -> ElementType {
+            ElementType::Other
+        }
+
+        fn pp_log(&self) -> &PpLog {
+            &self.pp_log
+        }
+
+        fn pp_log_mut(&mut self) -> &mut PpLog {
+            &mut self.pp_log
+        }
+    }
+
+    impl Sink for VerifyingSink {
+        fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+            if let MediaBuffer::Video(frame) = &buf
+                && self.count.fetch_add(1, Ordering::Relaxed) == 0
+            {
+                println!(
+                    "first scaled frame: {:?} {}x{} (expected {DST_FORMAT:?} {DST_WIDTH}x{DST_HEIGHT})",
+                    frame.format(),
+                    frame.width(),
+                    frame.height(),
+                );
+                assert_eq!(
+                    frame.format(),
+                    DST_FORMAT,
+                    "SwScaler didn't convert pixel format"
+                );
+                assert_eq!(frame.width(), DST_WIDTH, "SwScaler didn't resize width");
+                assert_eq!(frame.height(), DST_HEIGHT, "SwScaler didn't resize height");
+            }
+            Ok(())
+        }
+
+        fn control(&mut self, _msg: ControlMsg) -> Result<()> {
+            Ok(())
+        }
     }
 }

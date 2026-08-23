@@ -1,3 +1,14 @@
+//! Records desktop video and system audio into one MP4 from two independent
+//! live capture sources sharing one `PipelineBuilder` pipeline.
+//! Windows uses DXGI + WASAPI; Linux uses PipeWire screen capture and a
+//! PipeWire sink monitor. Enter `q` in the terminal to stop both sources and
+//! finalize the file.
+//!
+//! ```text
+//! cargo run -p screen_record_av -- [output.mp4]
+//! cargo run -p screen_record_av -- [output.mp4] [monitor|window] [restore-token] # Linux
+//! ```
+
 #[cfg(not(any(target_os = "windows", target_os = "linux")))]
 fn main() {
     eprintln!(
@@ -42,14 +53,14 @@ mod windows_example {
     /// thread, but one `pipeline.stop()` reaches both.
     ///
     /// Neither capture source ever reaches a natural `Eos` (same as
-    /// `screen_record`'s own docs) — this runs until `q` + Enter in the same
+    /// `screen_record_software`'s own docs) — this runs until `q` + Enter in the same
     /// terminal, which is also what finalizes the MP4's trailer (`Mp4Muxer`
     /// writes it once *every* track — video and audio both — reports done via
     /// `Eos` *or* `Stop`, not on whichever finishes first; see `Mp4Muxer::open`'s
     /// own docs, and `PipelineBuilder`'s for why one `stop()` call is enough to
     /// reach both tracks even though they're two independent sources).
     ///
-    ///     cargo run -p screen_audio_record -- [output.mp4]
+    ///     cargo run -p screen_record_av -- [output.mp4]
     ///     (then in the same terminal: `q` + Enter to stop and finalize)
     pub(super) fn run() -> media_pp::Result<()> {
         media_pp::init()?;
@@ -62,7 +73,7 @@ mod windows_example {
 
         let path = std::env::args()
             .nth(1)
-            .unwrap_or_else(|| "screen_audio_record.mp4".into());
+            .unwrap_or_else(|| "screen_record_av.mp4".into());
 
         let capture_options = DxgiCaptureOptions {
             fps: 30,
@@ -121,7 +132,7 @@ mod windows_example {
         let audio_sink = sinks.pop().expect("two streams were added");
         let video_sink = sinks.pop().expect("two streams were added");
 
-        let pipeline = PipelineBuilder::new("screen-audio-record")
+        let pipeline = PipelineBuilder::new("screen-record-av")
             .add_source(video_source, |source, ctx| {
                 let scaler = SwScaler::new(
                     "to-yuv",
@@ -221,7 +232,7 @@ mod linux_example {
     /// `q` + Enter in the same terminal, which is also what finalizes the MP4's
     /// trailer.
     ///
-    ///     cargo run -p screen_audio_record -- [output.mp4] [monitor|window] [restore-token]
+    ///     cargo run -p screen_record_av -- [output.mp4] [monitor|window] [restore-token]
     ///     (then in the same terminal: `q` + Enter to stop and finalize)
     pub(super) fn run() -> media_pp::Result<()> {
         media_pp::init()?;
@@ -234,7 +245,7 @@ mod linux_example {
 
         let path = std::env::args()
             .nth(1)
-            .unwrap_or_else(|| "screen_audio_record.mp4".into());
+            .unwrap_or_else(|| "screen_record_av.mp4".into());
         // Monitor by default, matching the Windows branch's whole-desktop
         // capture. `window` is worth reaching for when one application is the
         // subject: a monitor stream stalls while any client is fullscreen,
@@ -318,7 +329,7 @@ mod linux_example {
         let audio_sink = sinks.pop().expect("two streams were added");
         let video_sink = sinks.pop().expect("two streams were added");
 
-        let pipeline = PipelineBuilder::new("screen-audio-record")
+        let pipeline = PipelineBuilder::new("screen-record-av")
             .add_source(video_source, |source, ctx| {
                 let scaler = SwScaler::new(
                     "to-yuv",

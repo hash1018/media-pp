@@ -87,7 +87,7 @@ impl D3d11GpuContext {
     /// creating a new one — e.g. the `ID3D11Device` returned by
     /// [`media_pp::elements::DxgiCaptureSource::open`]'s `CaptureMode::Gpu`
     /// path, which is already pinned to whichever adapter the captured
-    /// monitor is actually attached to (`screen_capture_gpu`'s own case).
+    /// monitor is actually attached to (`screen_preview_gpu`'s own case).
     /// Reusing that exact device instead of separately creating a
     /// same-adapter one and relying on the two matching is what lets this
     /// whole stack skip a device-mismatch check entirely — there's only
@@ -127,7 +127,7 @@ impl D3d11GpuContext {
             // Not created with `D3D11_CREATE_DEVICE_SINGLETHREADED`, which
             // is supposed to mean the runtime already auto-serializes
             // cross-thread calls into this context — but that alone
-            // wasn't enough in testing (`screen_capture_gpu`, which really
+            // wasn't enough in testing (`screen_preview_gpu`, which really
             // does drive this context from two threads: this crate's
             // window renderer and `DxgiCaptureSource`'s own capture thread,
             // via its own `ID3D11DeviceContext` handle obtained from

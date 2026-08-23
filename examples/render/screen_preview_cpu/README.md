@@ -1,4 +1,4 @@
-# screen_capture
+# screen_preview_cpu
 
 Windows only.
 
@@ -18,5 +18,5 @@ back. The constant-rate/drift-free change was the actual fix, not the
 presence of a `Pacer` stage.
 
 ```sh
-cargo run -p screen_capture
+cargo run -p screen_preview_cpu
 ```

@@ -78,8 +78,8 @@ cargo test -p media-pp --features d3d11,d3d12,cuda --test soak -- --ignored --no
 
 On Linux, `pipewire-screen-capture` takes the place of `d3d11`. Its two capture
 scenarios also need `MEDIA_PP_SOAK_RESTORE_TOKEN`, since xdg-desktop-portal
-would otherwise show its picker and block; any run of `screen_record` prints a
-token to reuse.
+would otherwise show its picker and block; any run of `screen_record_software`
+prints a token to reuse.
 
 File-based examples require a media path. No media files are checked into the
 repository and examples do not use a default path.
@@ -202,12 +202,15 @@ The examples are grouped by purpose:
   GPU scaling/compositing, chroma keying, NVENC hardware encoding, and
   recording. The CUDA halves of the display and screen-capture examples stay
   here because their renderer (Vulkan external memory over an fd) and capture
-  source (PipeWire) are genuinely Linux-only.
+  source (PipeWire) are genuinely Linux-only. Start with the
+  [render example index](examples/render/README.md) when choosing among the
+  screen preview and recording variants.
 - `examples/rtsp`: publishing, seeking, and receiving RTSP streams.
 - `examples/vision`: scaling and ONNX object detection.
 - `examples/webrtc`: data and encoded A/V loopback pipelines, a two-way video
-  call that presents both incoming tracks (Windows only), and an all-platform
-  H.264/Opus receive-record example that muxes both WebRTC tracks into MP4.
+  call that presents both incoming tracks on Windows and Linux, and an
+  all-platform H.264/Opus receive-record example that muxes both WebRTC tracks
+  into MP4.
 
 Useful starting points:
 

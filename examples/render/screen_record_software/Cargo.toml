@@ -1,5 +1,5 @@
 [package]
-name = "screen_record"
+name = "screen_record_software"
 version = "0.1.0"
 edition = "2024"
 publish = false

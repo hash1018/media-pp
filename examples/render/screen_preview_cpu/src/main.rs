@@ -1,3 +1,10 @@
+//! Previews Windows desktop capture through the CPU-frame path:
+//! `DxgiCaptureSource -> SwScaler -> D3d12Upload -> D3d12Renderer`.
+//! The capture includes the cursor, converts directly to window-sized NV12,
+//! and needs no encode/decode round trip or separate `Pacer`.
+//!
+//!     cargo run -p screen_preview_cpu
+
 #[cfg(not(target_os = "windows"))]
 fn main() {
     eprintln!("{} example only supports Windows", env!("CARGO_PKG_NAME"));
@@ -36,14 +43,19 @@ mod windows_example {
     /// judder back. The constant-rate/drift-free change was the actual fix,
     /// not the presence of a `Pacer` stage.
     ///
-    ///     cargo run -p screen_capture
+    ///     cargo run -p screen_preview_cpu
     pub(super) fn run() {
-        render_common::run_window("media-pp screen_capture", 1280, 720, |target, shutdown| {
-            let RawWindowHandle::Win32(handle) = target.window else {
-                panic!("screen_capture example only supports Windows");
-            };
-            play(handle.hwnd.get(), target.width, target.height, &shutdown)
-        });
+        render_common::run_window(
+            "media-pp screen_preview_cpu",
+            1280,
+            720,
+            |target, shutdown| {
+                let RawWindowHandle::Win32(handle) = target.window else {
+                    panic!("screen_preview_cpu example only supports Windows");
+                };
+                play(handle.hwnd.get(), target.width, target.height, &shutdown)
+            },
+        );
     }
 
     fn play(
@@ -71,7 +83,7 @@ mod windows_example {
 
         let gpu = D3d12GpuContext::new().map_err(|e| media_pp::Error::Other(format!("{e:?}")))?;
 
-        let pipeline = Pipeline::new("screen-capture", source, |source, ctx| {
+        let pipeline = Pipeline::new("screen-preview-cpu", source, |source, ctx| {
             // Converts the captured `Pixel::BGRA` desktop frames down to the
             // window's own size as `Pixel::NV12` in one pass — the layout
             // `D3d12Upload` writes, and the only one it accepts.

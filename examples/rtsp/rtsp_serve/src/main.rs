@@ -1,3 +1,10 @@
+//! Demux -> Queue -> Pacer -> RtspSink: remuxes a file's video packets
+//! (no re-encoding) and publishes them at real playback speed to an
+//! already-running RTSP server.
+//!
+//!     cargo run -p rtsp_serve -- path/to/video.mp4 rtsp://127.0.0.1:8554/stream
+//!     ffplay rtsp://127.0.0.1:8554/stream                    # in another terminal
+
 fn main() -> impl std::process::Termination {
     example::run()
 }
@@ -11,12 +18,6 @@ mod example {
         pipeline::Pipeline,
     };
 
-    /// Demux -> Queue -> Pacer -> RtspSink: remuxes a file's video packets
-    /// (no re-encoding) and publishes them at real playback speed to an
-    /// already-running RTSP server.
-    ///
-    ///     cargo run -p rtsp_serve -- path/to/video.mp4 rtsp://127.0.0.1:8554/stream
-    ///     ffplay rtsp://127.0.0.1:8554/stream                    # in another terminal
     pub(super) fn run() -> media_pp::Result<()> {
         media_pp::init()?;
         let _log_guard = media_pp::log::init(

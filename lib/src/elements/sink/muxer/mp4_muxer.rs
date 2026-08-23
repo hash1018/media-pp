@@ -152,7 +152,7 @@ impl Mp4Muxer {
     /// "this track is finished" rather than "abandon the whole file" —
     /// not on whichever track finishes first, which would silently
     /// truncate whatever the other track(s) still had left to write. A
-    /// single-track file (e.g. `screen_record`/`audio_record`) degenerates
+    /// single-track file (e.g. `screen_record_software`/`audio_record`) degenerates
     /// to finalizing on that one track's own `Eos`/`Stop`, same as before
     /// this type supported more than one.
     ///

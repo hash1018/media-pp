@@ -1,5 +1,5 @@
 [package]
-name = "screen_overlay_record"
+name = "screen_record_overlay"
 version = "0.1.0"
 edition = "2024"
 publish = false

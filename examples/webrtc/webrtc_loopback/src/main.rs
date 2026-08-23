@@ -1,3 +1,14 @@
+//! Connects two `WebRtcPeer`s over real loopback UDP with no browser or
+//! signaling server. One `Direction::SendRecv` track carries packets both
+//! ways, and each peer drives its inbound `WebRtcTrackSource -> CountingSink`
+//! pipeline independently.
+//!
+//! The initial ICE/DTLS connection uses a bootstrap data channel directly
+//! through str0m. A real application would carry the same offer and answer
+//! over its own HTTP, WebSocket, or other signaling transport.
+//!
+//!     cargo run -p webrtc_loopback
+
 fn main() -> impl std::process::Termination {
     example::run()
 }
@@ -31,28 +42,6 @@ mod example {
         media::{Direction, MediaKind},
     };
 
-    /// Two `WebRtcPeer`s, connected over real loopback UDP — no browser, no
-    /// signaling server. One `Direction::SendRecv` track, opened by
-    /// `WebRtcHandle::add_track` on peer-a, carries data *both* ways: peer-a
-    /// pushes into the `WebRtcTrackSink` its own `next_track()` returned for
-    /// the track it just added (str0m never fires `Event::MediaAdded` for a
-    /// track a side added itself — see `WebRtcPeer`'s own doc comment), and
-    /// peer-b pushes back on the exact same `Mid` via the `WebRtcTrackSink`
-    /// its own `next_track()` returned for the incoming `Event::MediaAdded` —
-    /// no second `add_track`/renegotiation needed for the reverse direction.
-    /// Each side's inbound `WebRtcTrackSource` is driven by its own,
-    /// independent `Pipeline` — a `WebRtcPeer` connection isn't one pipeline
-    /// node, it mints one per track (see the design discussion this example
-    /// grew out of).
-    ///
-    /// The initial connection (ICE candidates + a bootstrap data channel, just
-    /// to get DTLS established with zero media) is done directly against
-    /// str0m, exactly like a real caller would before ever touching
-    /// `WebRtcPeer` — see its own doc comment. In a real app, the offer/answer
-    /// exchanged here would travel over your own signaling transport (HTTP,
-    /// WebSocket, ...) instead of a direct function call.
-    ///
-    ///     cargo run -p webrtc_loopback
     pub(super) fn run() -> std::result::Result<(), Box<dyn std::error::Error>> {
         media_pp::init()?;
         let _log_guard = media_pp::log::init(

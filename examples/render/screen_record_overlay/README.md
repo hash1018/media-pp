@@ -1,4 +1,4 @@
-# screen_overlay_record
+# screen_record_overlay
 
 Records the desktop with a live overlay drawn on top, with every pixel staying
 on the GPU from the moment it is captured to the moment it is encoded.
@@ -29,13 +29,13 @@ it, since D3D11 composites BGRA directly.
 Needs an NVIDIA GPU and an ffmpeg build with NVENC.
 
 ```sh
-cargo run -p screen_overlay_record -- <output.mp4> [seconds]
+cargo run -p screen_record_overlay -- <output.mp4> [seconds]
 ```
 
 The compositor's own dialog decides what is captured, so the first run prompts
 and prints a restore token that later runs can pass to skip it — the same
-arguments `screen_record` documents:
+arguments `screen_record_software` documents:
 
 ```sh
-cargo run -p screen_overlay_record -- <output.mp4> [seconds] [monitor|window] [restore-token]
+cargo run -p screen_record_overlay -- <output.mp4> [seconds] [monitor|window] [restore-token]
 ```

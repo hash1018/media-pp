@@ -1,3 +1,16 @@
+//! Proves that one `WebRtcPeer` connection can carry video and audio tracks at
+//! the same time. Peer-a adds both tracks through two sequential negotiations,
+//! encodes `TestVideoSource` and `TestAudioSource` in one multi-source
+//! pipeline, and peer-b counts the two received packet streams independently.
+//!
+//! Send:
+//! `TestVideoSource -> Queue -> SwEncoder -> WebRtcTrackSink` and
+//! `TestAudioSource -> Queue -> SwAudioEncoder -> WebRtcTrackSink`.
+//!
+//! Receive: one `WebRtcTrackSource -> CountingSink` pipeline per track.
+//!
+//!     cargo run -p webrtc_av_loopback
+
 fn main() -> impl std::process::Termination {
     example::run()
 }
@@ -34,20 +47,6 @@ mod example {
         media::{Direction, MediaKind},
     };
 
-    /// Answers the question that came up while reviewing `WebRtcTrackSink`'s
-    /// docs: can *one* `WebRtcPeer` connection carry more than one track at
-    /// once? Two `WebRtcPeer`s over loopback UDP (same setup as
-    /// `webrtc_loopback`), but peer-a adds *two* tracks — one video, one
-    /// audio — onto the *same* connection (two `WebRtcHandle::add_track`
-    /// calls, two sequential renegotiations, no second `Rtc`/socket/peer). A
-    /// real `TestVideoSource`/`TestAudioSource` are encoded (`SwEncoder`/
-    /// `SwAudioEncoder`) and pushed independently onto each track via one
-    /// `PipelineBuilder`-built `Pipeline` (two sources — the same shape
-    /// `screen_audio_record` uses for two *capture* sources); peer-b receives
-    /// both tracks and counts packets on each independently, proving they
-    /// don't cross-contaminate.
-    ///
-    ///     cargo run -p webrtc_av_loopback
     pub(super) fn run() -> std::result::Result<(), Box<dyn std::error::Error>> {
         media_pp::init()?;
         let _log_guard = media_pp::log::init(
@@ -182,7 +181,7 @@ mod example {
         // -- Send side: TestVideoSource/TestAudioSource, each through its own
         // real encoder, straight onto the track `add_track` gave us for it.
         // Two independent sources feeding one `Pipeline` — same shape
-        // `screen_audio_record` uses for two *capture* sources.
+        // `screen_record_av` uses for two *capture* sources.
         let video_options = TestVideoOptions {
             width: 320,
             height: 240,

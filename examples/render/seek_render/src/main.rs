@@ -1,3 +1,11 @@
+//! Demux -> SwDecoder -> Queue -> Pacer -> Renderer, same chain as
+//! `sw_decode_render`, plus a terminal prompt that reads timestamps and
+//! calls `Pipeline::seek` with them while the window is open — proves
+//! `seek` actually changes what's on screen, not just that it compiles.
+//!
+//!     cargo run -p seek_render -- path/to/video.mp4
+//!     (then use `pause`, `resume`, `seek 30`, `seek 1:15`, or `q`)
+
 #[cfg(not(target_os = "windows"))]
 fn main() {
     eprintln!("{} example only supports Windows", env!("CARGO_PKG_NAME"));
@@ -27,13 +35,6 @@ mod windows_example {
     use render_common::{D3d12GpuContext, Shutdown};
     use winit::raw_window_handle::RawWindowHandle;
 
-    /// Demux -> SwDecoder -> Queue -> Pacer -> Renderer, same chain as
-    /// `sw_decode_render`, plus a terminal prompt that reads timestamps and
-    /// calls `Pipeline::seek` with them while the window is open — proves
-    /// `seek` actually changes what's on screen, not just that it compiles.
-    ///
-    ///     cargo run -p seek_render -- path/to/video.mp4
-    ///     (then use `pause`, `resume`, `seek 30`, `seek 1:15`, or `q`)
     pub(super) fn run() {
         let Some(path) = std::env::args().nth(1) else {
             eprintln!("usage: seek_render <video.mp4>");

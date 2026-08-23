@@ -21,8 +21,6 @@
 //! every frame in CUDA memory and the renderer copies it straight into
 //! Vulkan-owned memory.
 
-mod shell;
-
 #[cfg(not(any(target_os = "windows", target_os = "linux")))]
 fn main() {
     eprintln!("{} supports Windows and Linux only", env!("CARGO_PKG_NAME"));
@@ -55,6 +53,8 @@ fn main() {
         move |target, shutdown| linux_example::play(path, target, shutdown),
     );
 }
+
+mod shell;
 
 /// The parts of `play` that are the same on every backend: opening the file
 /// and locating the two streams it needs.

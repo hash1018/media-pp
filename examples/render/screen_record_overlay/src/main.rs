@@ -27,7 +27,7 @@
 //!
 //! Needs an NVIDIA GPU and an ffmpeg build with NVENC.
 //!
-//!     cargo run -p screen_overlay_record -- <output.mp4> [seconds] [monitor|window] [restore-token]
+//!     cargo run -p screen_record_overlay -- <output.mp4> [seconds] [monitor|window] [restore-token]
 
 #[cfg(not(target_os = "linux"))]
 fn main() {
@@ -79,7 +79,7 @@ mod linux_example {
 
         let Some(path) = std::env::args().nth(1) else {
             eprintln!(
-                "usage: screen_overlay_record <output.mp4> [seconds] [monitor|window] \
+                "usage: screen_record_overlay <output.mp4> [seconds] [monitor|window] \
                  [restore-token]"
             );
             std::process::exit(2);

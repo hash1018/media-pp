@@ -1,15 +1,207 @@
-#[cfg(not(target_os = "windows"))]
+//! A two-way video call between two `WebRtcPeer`s in one process, each
+//! presenting what the *other* sent into its own window.
+//!
+//! One `Direction::SendRecv` track carries both directions on a single
+//! connection (see `webrtc_loopback` for the minimal version of that), so
+//! `next_track` hands each side a `TrackEndpoints::SendRecv` — a sink to
+//! encode into and a source to decode from.
+//!
+//! The two callers deliberately differ in where their video comes from:
+//! peer-a generates it, peer-b transcodes a real file at playback speed.
+//!
+//!     cargo run -p webrtc_video_call -- path/to/video.mp4
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 fn main() {
-    eprintln!("{} example only supports Windows", env!("CARGO_PKG_NAME"));
+    eprintln!(
+        "{} example supports Windows and Linux only",
+        env!("CARGO_PKG_NAME")
+    );
 }
 
 #[cfg(target_os = "windows")]
-fn main() -> impl std::process::Termination {
+fn main() {
     windows_example::run()
+}
+
+#[cfg(target_os = "linux")]
+fn main() {
+    linux_example::run()
 }
 
 #[cfg(target_os = "windows")]
 mod windows_example {
+    use std::sync::Arc;
+
+    use media_pp::{
+        elements::{SwDecoder, WebRtcStreamInfo, WebRtcTrackSource},
+        pipeline::Pipeline,
+    };
+    use render_common::{D3d12GpuContext, WindowTarget};
+    use str0m::format::Codec;
+    use winit::raw_window_handle::RawWindowHandle;
+
+    use super::common::{HEIGHT, WIDTH};
+
+    pub(super) fn run() {
+        super::common::run();
+    }
+
+    pub(super) struct RenderContext {
+        gpu: D3d12GpuContext,
+    }
+
+    impl RenderContext {
+        pub(super) fn new(_target: &WindowTarget) -> media_pp::Result<Self> {
+            let gpu = D3d12GpuContext::new().map_err(|error| {
+                media_pp::Error::Other(format!("failed to create the D3D12 context: {error:?}"))
+            })?;
+            Ok(Self { gpu })
+        }
+    }
+
+    /// `WebRtcTrackSource -> Queue -> SwDecoder -> D3d12Renderer`.
+    pub(super) fn receive_pipeline(
+        name: &str,
+        source: WebRtcTrackSource,
+        stream_info: WebRtcStreamInfo,
+        render: &RenderContext,
+        target: WindowTarget,
+    ) -> media_pp::Result<Arc<Pipeline>> {
+        validate_h264(name, &stream_info)?;
+        let decoder = SwDecoder::new(format!("{name}-decode"), stream_info.codec_parameters()?)?;
+        let RawWindowHandle::Win32(handle) = target.window else {
+            panic!("webrtc_video_call Windows branch received a non-Win32 window");
+        };
+        let renderer = render_common::d3d12_window_renderer(
+            format!("{name}-render"),
+            &render.gpu,
+            handle.hwnd.get(),
+            WIDTH,
+            HEIGHT,
+        )
+        .map_err(|error| media_pp::Error::Other(format!("failed to open a renderer: {error:?}")))?;
+
+        Pipeline::new(name, source, move |source, ctx| {
+            let branch = ctx
+                .branch()
+                .queue("packets", 16)
+                .pipe(decoder)
+                .to(Box::new(renderer))?;
+            ctx.attach(source, 0, branch)?;
+            Ok(())
+        })
+    }
+
+    fn validate_h264(name: &str, stream_info: &WebRtcStreamInfo) -> media_pp::Result<()> {
+        if stream_info.codec() != Codec::H264 {
+            return Err(media_pp::Error::Other(format!(
+                "{name} cannot decode the received {:?} stream; this example expects H.264",
+                stream_info.codec()
+            )));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "linux")]
+mod linux_example {
+    use std::sync::Arc;
+
+    use media_pp::{
+        elements::{
+            CudaDevice, CudaFrameFormat, CudaUpload, SwDecoder, SwScaler, WebRtcStreamInfo,
+            WebRtcTrackSource,
+        },
+        ffmpeg,
+        pipeline::Pipeline,
+    };
+    use render_common::{VulkanGpuContext, WindowTarget};
+    use str0m::format::Codec;
+
+    use super::common::{HEIGHT, WIDTH};
+
+    pub(super) fn run() {
+        super::common::run();
+    }
+
+    pub(super) struct RenderContext {
+        cuda: CudaDevice,
+        gpu: VulkanGpuContext,
+    }
+
+    impl RenderContext {
+        pub(super) fn new(target: &WindowTarget) -> media_pp::Result<Self> {
+            let cuda =
+                CudaDevice::new().map_err(|error| media_pp::Error::Other(error.to_string()))?;
+            let gpu = VulkanGpuContext::new(target.display).map_err(media_pp::Error::Other)?;
+            Ok(Self { cuda, gpu })
+        }
+    }
+
+    /// `WebRtcTrackSource -> Queue -> SwDecoder -> SwScaler(NV12) ->
+    /// CudaUpload -> CudaRenderer(Vulkan)`.
+    pub(super) fn receive_pipeline(
+        name: &str,
+        source: WebRtcTrackSource,
+        stream_info: WebRtcStreamInfo,
+        render: &RenderContext,
+        target: WindowTarget,
+    ) -> media_pp::Result<Arc<Pipeline>> {
+        validate_h264(name, &stream_info)?;
+        let decoder = SwDecoder::new(format!("{name}-decode"), stream_info.codec_parameters()?)?;
+        let scaler = SwScaler::new(
+            format!("{name}-nv12"),
+            ffmpeg::format::Pixel::NV12,
+            WIDTH,
+            HEIGHT,
+            ffmpeg::software::scaling::Flags::BILINEAR,
+        );
+        let upload = CudaUpload::new(
+            format!("{name}-upload"),
+            &render.cuda,
+            CudaFrameFormat::Nv12,
+            WIDTH,
+            HEIGHT,
+        )
+        .map_err(|error| media_pp::Error::Other(error.to_string()))?;
+        let renderer = render_common::cuda_window_renderer(
+            format!("{name}-render"),
+            &render.gpu,
+            &render.cuda,
+            target.display,
+            target.window,
+            target.width,
+            target.height,
+        )
+        .map_err(media_pp::Error::Other)?;
+
+        Pipeline::new(name, source, move |source, ctx| {
+            let branch = ctx
+                .branch()
+                .queue("packets", 16)
+                .pipe(decoder)
+                .pipe(scaler)
+                .pipe(upload)
+                .to(Box::new(renderer))?;
+            ctx.attach(source, 0, branch)?;
+            Ok(())
+        })
+    }
+
+    fn validate_h264(name: &str, stream_info: &WebRtcStreamInfo) -> media_pp::Result<()> {
+        if stream_info.codec() != Codec::H264 {
+            return Err(media_pp::Error::Other(format!(
+                "{name} cannot decode the received {:?} stream; this example expects H.264",
+                stream_info.codec()
+            )));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+mod common {
     use std::{
         net::UdpSocket,
         sync::Arc,
@@ -17,6 +209,10 @@ mod windows_example {
         time::{Duration, Instant},
     };
 
+    #[cfg(target_os = "linux")]
+    use super::linux_example as platform;
+    #[cfg(target_os = "windows")]
+    use super::windows_example as platform;
     use media_pp::{
         bus::BusEvent,
         clock::Clock,
@@ -24,40 +220,27 @@ mod windows_example {
         elements::{
             AttachedTrack, FileDemuxer, Pacer, SwDecoder, SwEncoder, SwEncoderOptions, SwScaler,
             TestVideoOptions, TestVideoSource, TrackEndpoints, VideoCodec, WebRtcPeer,
-            WebRtcStreamInfo, WebRtcTrackSink, WebRtcTrackSource,
+            WebRtcTrackSink, WebRtcTrackSource,
         },
         ffmpeg,
         pipeline::Pipeline,
     };
-    use render_common::{D3d12GpuContext, Shutdown, WindowTarget};
+    use render_common::{Shutdown, WindowTarget};
     use str0m::{
         Candidate, Rtc,
         change::SdpOffer,
         format::Codec,
         media::{Direction, MediaKind},
     };
-    use winit::raw_window_handle::RawWindowHandle;
 
     /// What both directions of the call are encoded at. Fixed rather than
     /// derived from either source: the file side is scaled to it, and both
     /// window renderers are wired up once at this size.
-    const WIDTH: u32 = 640;
-    const HEIGHT: u32 = 480;
+    pub(super) const WIDTH: u32 = 640;
+    pub(super) const HEIGHT: u32 = 480;
     const FPS: i32 = 30;
     const STREAM_INFO_TIMEOUT: Duration = Duration::from_secs(2);
 
-    /// A two-way video call between two `WebRtcPeer`s in one process, each
-    /// presenting what the *other* sent into its own window.
-    ///
-    /// One `Direction::SendRecv` track carries both directions on a single
-    /// connection (see `webrtc_loopback` for the minimal version of that), so
-    /// `next_track` hands each side a `TrackEndpoints::SendRecv` — a sink to
-    /// encode into and a source to decode from.
-    ///
-    /// The two callers deliberately differ in where their video comes from:
-    /// peer-a generates it, peer-b transcodes a real file at playback speed.
-    ///
-    ///     cargo run -p webrtc_video_call -- path/to/video.mp4
     pub(super) fn run() {
         let Some(path) = std::env::args().nth(1) else {
             eprintln!("usage: webrtc_video_call <video.mp4>");
@@ -74,22 +257,15 @@ mod windows_example {
             move |targets, shutdown| {
                 let [target_a, target_b] = <[WindowTarget; 2]>::try_from(targets)
                     .unwrap_or_else(|_| panic!("run_windows opened the two windows asked for"));
-                play(&path, hwnd_of(&target_a), hwnd_of(&target_b), shutdown)
+                play(&path, target_a, target_b, shutdown)
             },
         );
     }
 
-    fn hwnd_of(target: &WindowTarget) -> isize {
-        let RawWindowHandle::Win32(handle) = target.window else {
-            panic!("webrtc_video_call example only supports Windows");
-        };
-        handle.hwnd.get()
-    }
-
     fn play(
         path: &str,
-        hwnd_a: isize,
-        hwnd_b: isize,
+        target_a: WindowTarget,
+        target_b: WindowTarget,
         shutdown: Arc<Shutdown>,
     ) -> media_pp::Result<()> {
         media_pp::init()?;
@@ -145,11 +321,10 @@ mod windows_example {
         thread::sleep(Duration::from_millis(100)); // let the answer apply
         println!("call established — one SendRecv track carrying both directions");
 
-        // One GPU context for both windows: `render_common` owns the device
-        // and shader pipeline process-wide, not per window.
-        let gpu = D3d12GpuContext::new().map_err(|e| {
-            media_pp::Error::Other(format!("failed to create the D3D12 context: {e:?}"))
-        })?;
+        // One backend context for both windows. On Linux this also includes
+        // the CUDA device into which decoded system-memory frames are
+        // uploaded before the Vulkan presentation bridge consumes them.
+        let render = platform::RenderContext::new(&target_a)?;
 
         let send_a = generated_send_pipeline(sink_a)?;
         // Kept before the sink moves into the pipeline: it is the name the
@@ -174,8 +349,10 @@ mod windows_example {
         let info_b = source_b.wait_stream_info(STREAM_INFO_TIMEOUT)?;
         println!("peer-a receiving actual codec: {info_a:?}");
         println!("peer-b receiving actual codec: {info_b:?}");
-        let recv_a = receive_pipeline("peer-a-recv", source_a, info_a, &gpu, hwnd_a)?;
-        let recv_b = receive_pipeline("peer-b-recv", source_b, info_b, &gpu, hwnd_b)?;
+        let recv_a =
+            platform::receive_pipeline("peer-a-recv", source_a, info_a, &render, target_a)?;
+        let recv_b =
+            platform::receive_pipeline("peer-b-recv", source_b, info_b, &render, target_b)?;
 
         let pipelines = [
             send_a.clone(),
@@ -358,45 +535,6 @@ mod windows_example {
             Ok(())
         })?;
         Ok(pipeline)
-    }
-
-    /// Either peer's inbound half: `WebRtcTrackSource -> Queue -> SwDecoder ->
-    /// Renderer`.
-    ///
-    /// No `Pacer`: these packets arrive over the network at the rate the
-    /// other side encoded them, so the timeline is already real.
-    fn receive_pipeline(
-        name: &str,
-        source: WebRtcTrackSource,
-        stream_info: WebRtcStreamInfo,
-        gpu: &D3d12GpuContext,
-        hwnd: isize,
-    ) -> media_pp::Result<Arc<Pipeline>> {
-        if stream_info.codec() != Codec::H264 {
-            return Err(media_pp::Error::Other(format!(
-                "{name} cannot decode the received {:?} stream; this example expects H.264",
-                stream_info.codec()
-            )));
-        }
-        let decoder = SwDecoder::new(format!("{name}-decode"), stream_info.codec_parameters()?)?;
-        let renderer = render_common::d3d12_window_renderer(
-            format!("{name}-render"),
-            gpu,
-            hwnd,
-            WIDTH,
-            HEIGHT,
-        )
-        .map_err(|e| media_pp::Error::Other(format!("failed to open a renderer: {e:?}")))?;
-
-        Pipeline::new(name, source, move |source, ctx| {
-            let branch = ctx
-                .branch()
-                .queue("packets", 16)
-                .pipe(decoder)
-                .to(Box::new(renderer))?;
-            ctx.attach(source, 0, branch)?;
-            Ok(())
-        })
     }
 
     /// Two `Rtc`s brought up over loopback UDP with a throwaway data channel,

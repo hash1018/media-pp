@@ -1,3 +1,10 @@
+//! Demux -> SwDecoder -> Queue -> Pacer -> Renderer: decodes a video file
+//! and presents it in a native window at real playback speed, via
+//! `render_common`'s own `D3d12WindowRenderer` (wrapped as a
+//! `D3d12Renderer`).
+//!
+//!     cargo run -p sw_decode_render -- path/to/video.mp4
+
 #[cfg(not(target_os = "windows"))]
 fn main() {
     eprintln!("{} example only supports Windows", env!("CARGO_PKG_NAME"));
@@ -21,12 +28,6 @@ mod windows_example {
     use render_common::{D3d12GpuContext, Shutdown};
     use winit::raw_window_handle::RawWindowHandle;
 
-    /// Demux -> SwDecoder -> Queue -> Pacer -> Renderer: decodes a video file
-    /// and presents it in a native window at real playback speed, via
-    /// `render_common`'s own `D3d12WindowRenderer` (wrapped as a
-    /// `D3d12Renderer`).
-    ///
-    ///     cargo run -p sw_decode_render -- path/to/video.mp4
     pub(super) fn run() {
         let Some(path) = std::env::args().nth(1) else {
             eprintln!("usage: sw_decode_render <video.mp4>");

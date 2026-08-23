@@ -1,3 +1,13 @@
+//! Same Demux -> Queue -> Pacer -> RtspSink chain as `rtsp_serve`, plus a
+//! terminal prompt (same as `seek_render`'s) that reads timestamps and calls
+//! `Pipeline::seek` with them while the stream is live — lets a viewer
+//! jump around a live-served RTSP stream instead of only watching it play
+//! straight through.
+//!
+//!     cargo run -p rtsp_serve_seek -- path/to/video.mp4 rtsp://127.0.0.1:8554/stream
+//!     ffplay rtsp://127.0.0.1:8554/stream                    # in another terminal
+//!     (then use `pause`, `resume`, `seek 30`, `seek 1:15`, or `q`)
+
 fn main() -> impl std::process::Termination {
     example::run()
 }
@@ -17,15 +27,6 @@ mod example {
         pipeline::Pipeline,
     };
 
-    /// Same Demux -> Queue -> Pacer -> RtspSink chain as `rtsp_serve`, plus a
-    /// terminal prompt (same as `seek_render`'s) that reads timestamps and calls
-    /// `Pipeline::seek` with them while the stream is live — lets a viewer
-    /// jump around a live-served RTSP stream instead of only watching it play
-    /// straight through.
-    ///
-    ///     cargo run -p rtsp_serve_seek -- path/to/video.mp4 rtsp://127.0.0.1:8554/stream
-    ///     ffplay rtsp://127.0.0.1:8554/stream                    # in another terminal
-    ///     (then use `pause`, `resume`, `seek 30`, `seek 1:15`, or `q`)
     pub(super) fn run() -> media_pp::Result<()> {
         media_pp::init()?;
         let _log_guard = media_pp::log::init(

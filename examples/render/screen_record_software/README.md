@@ -1,8 +1,8 @@
-# screen_record
+# screen_record_software
 
 `CaptureSource -> SwScaler -> SwEncoder -> Mp4Muxer`: captures the desktop live
 and encodes it straight into a playable `.mp4` file — no window, no renderer,
-just a headless recording (compare the Windows-only `screen_capture`, which
+just a headless recording (compare the Windows-only `screen_preview_cpu`, which
 renders instead of encoding).
 
 The capture source never reaches `Eos` on its own; this just captures for a
@@ -18,8 +18,8 @@ run and hands back a restore token that skips the prompt on later runs.
 
 ```sh
 # Windows
-cargo run -p screen_record -- [output.mp4] [seconds]
+cargo run -p screen_record_software -- [output.mp4] [seconds]
 
 # Linux
-cargo run -p screen_record -- [output.mp4] [seconds] [monitor|window] [restore-token]
+cargo run -p screen_record_software -- [output.mp4] [seconds] [monitor|window] [restore-token]
 ```

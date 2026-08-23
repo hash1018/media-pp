@@ -1,3 +1,13 @@
+//! Demux -> D3d12Decoder -> Queue -> Pacer -> Renderer: decodes on the
+//! GPU via D3D12VA hardware acceleration and presents the frames in a
+//! native window at real playback speed, without ever copying the
+//! decoded pixels back to system memory — `D3d12Renderer` draws straight
+//! from the decoder's own D3D12 texture. Compare against
+//! `sw_decode_render`, which uses `SwDecoder` (CPU decode) and a
+//! CPU-upload submit path instead.
+//!
+//!     cargo run -p hw_decode_render -- path/to/video.mp4
+
 #[cfg(not(target_os = "windows"))]
 fn main() {
     eprintln!("{} example only supports Windows", env!("CARGO_PKG_NAME"));
@@ -20,15 +30,6 @@ mod windows_example {
     use render_common::{D3d12GpuContext, Shutdown};
     use winit::raw_window_handle::RawWindowHandle;
 
-    /// Demux -> D3d12Decoder -> Queue -> Pacer -> Renderer: decodes on the
-    /// GPU via D3D12VA hardware acceleration and presents the frames in a
-    /// native window at real playback speed, without ever copying the
-    /// decoded pixels back to system memory — `D3d12Renderer` draws straight
-    /// from the decoder's own D3D12 texture. Compare against
-    /// `sw_decode_render`, which uses `SwDecoder` (CPU decode) and a
-    /// CPU-upload submit path instead.
-    ///
-    ///     cargo run -p hw_decode_render -- path/to/video.mp4
     pub(super) fn run() {
         let Some(path) = std::env::args().nth(1) else {
             eprintln!("usage: hw_decode_render <video.mp4>");

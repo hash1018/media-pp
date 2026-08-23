@@ -1,3 +1,18 @@
+//! TestVideoSource -> SwEncoder -> SwDecoder -> Pacer -> Renderer: encodes
+//! a synthetic moving-gradient stream (via `libopenh264`) and decodes it
+//! straight back — no file, camera, or container/mux involved at all —
+//! presented in a native window at real playback speed. Proves
+//! `SwEncoder`'s `Packet`s are actually valid, decodable H.264 (not just
+//! "avcodec_open2 succeeded"): if the round trip corrupted anything, the
+//! gradient would visibly glitch or freeze instead of scrolling smoothly.
+//! This example keeps a `Pacer` after the encode/decode round trip. The
+//! source itself is already paced accurately enough for direct rendering,
+//! but the encoder and decoder add their own buffering and per-frame
+//! variance; this particular chain has not been validated without the
+//! final clock-anchored pacing stage.
+//!
+//!     cargo run -p transcode_render
+
 #[cfg(not(target_os = "windows"))]
 fn main() {
     eprintln!("{} example only supports Windows", env!("CARGO_PKG_NAME"));
@@ -22,20 +37,6 @@ mod windows_example {
     use render_common::{D3d12GpuContext, Shutdown};
     use winit::raw_window_handle::RawWindowHandle;
 
-    /// TestVideoSource -> SwEncoder -> SwDecoder -> Pacer -> Renderer: encodes
-    /// a synthetic moving-gradient stream (via `libopenh264`) and decodes it
-    /// straight back — no file, camera, or container/mux involved at all —
-    /// presented in a native window at real playback speed. Proves
-    /// `SwEncoder`'s `Packet`s are actually valid, decodable H.264 (not just
-    /// "avcodec_open2 succeeded"): if the round trip corrupted anything, the
-    /// gradient would visibly glitch or freeze instead of scrolling smoothly.
-    /// This example keeps a `Pacer` after the encode/decode round trip. The
-    /// source itself is already paced accurately enough for direct rendering,
-    /// but the encoder and decoder add their own buffering and per-frame
-    /// variance; this particular chain has not been validated without the
-    /// final clock-anchored pacing stage.
-    ///
-    ///     cargo run -p transcode_render
     pub(super) fn run() {
         render_common::run_window(
             "media-pp transcode_render",

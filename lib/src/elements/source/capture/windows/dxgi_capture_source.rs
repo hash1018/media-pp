@@ -336,7 +336,7 @@ struct CaptureUnit {
 /// is `1 / fps` and `pts` is a plain incrementing tick counter, one per
 /// *emitted* frame, not per real capture.
 ///
-/// Confirmed (`examples/render/screen_capture`, with and without a
+/// Confirmed (`examples/render/screen_preview_cpu`, with and without a
 /// downstream [`crate::elements::Pacer`]) that this constant-rate,
 /// drift-free schedule is what actually mattered — not whether a
 /// separate `Pacer` stage exists. The VFR version needed one to paper

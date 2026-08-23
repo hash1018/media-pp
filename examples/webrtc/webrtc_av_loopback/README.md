@@ -7,7 +7,7 @@ onto the *same* connection (two `WebRtcHandle::add_track` calls, two
 sequential renegotiations, no second `Rtc`/socket/peer).
 
 Send side, one `PipelineBuilder`-built `Pipeline` with two sources (the same
-shape `screen_audio_record` uses for two *capture* sources): `TestVideoSource
+shape `screen_record_av` uses for two *capture* sources): `TestVideoSource
 -> Queue -> SwEncoder -> WebRtcTrackSink` and `TestAudioSource -> Queue ->
 SwAudioEncoder -> WebRtcTrackSink`, each track's real encoded output pushed
 straight onto the `WebRtcTrackSink` its own `add_track` call returned. Receive

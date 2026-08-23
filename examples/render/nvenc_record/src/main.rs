@@ -16,9 +16,6 @@
 //!
 //!     cargo run -p nvenc_record -- [output.mp4] [seconds]
 
-#[cfg(target_os = "windows")]
-mod common;
-
 #[cfg(not(target_os = "windows"))]
 fn main() {
     eprintln!(
@@ -31,6 +28,9 @@ fn main() {
 fn main() -> impl std::process::Termination {
     windows_example::run()
 }
+
+#[cfg(target_os = "windows")]
+mod common;
 
 #[cfg(target_os = "windows")]
 mod windows_example {

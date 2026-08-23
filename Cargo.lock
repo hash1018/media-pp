@@ -3181,14 +3181,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e1cf6437eb19a8f4a6cc0f7dca544973b0b78843adbfeb3683d1a94a0024a294"
 
 [[package]]
-name = "screen_audio_record"
-version = "0.1.0"
-dependencies = [
- "media-pp",
-]
-
-[[package]]
-name = "screen_capture"
+name = "screen_preview_cpu"
 version = "0.1.0"
 dependencies = [
  "media-pp",
@@ -3197,7 +3190,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "screen_capture_gpu"
+name = "screen_preview_gpu"
 version = "0.1.0"
 dependencies = [
  "media-pp",
@@ -3206,14 +3199,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "screen_overlay_record"
-version = "0.1.0"
-dependencies = [
- "media-pp",
-]
-
-[[package]]
-name = "screen_record"
+name = "screen_record_av"
 version = "0.1.0"
 dependencies = [
  "media-pp",
@@ -3225,6 +3211,20 @@ version = "0.1.0"
 dependencies = [
  "media-pp",
  "render_common",
+]
+
+[[package]]
+name = "screen_record_overlay"
+version = "0.1.0"
+dependencies = [
+ "media-pp",
+]
+
+[[package]]
+name = "screen_record_software"
+version = "0.1.0"
+dependencies = [
+ "media-pp",
 ]
 
 [[package]]

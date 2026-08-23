@@ -1,3 +1,11 @@
+//! Plays a generated 440 Hz tone for three seconds and demonstrates click-free
+//! runtime gain and mute changes:
+//! `TestAudioSource -> AudioResampler -> AudioVolume -> Queue -> renderer`.
+//! Windows uses `WasapiRenderer`; Linux uses `PipeWireAudioRenderer`.
+//!
+//!     cargo run -p audio_playback
+//!     cargo run -p audio_playback -- list|<device-name-substring>
+
 #[cfg(not(any(target_os = "windows", target_os = "linux")))]
 fn main() {
     eprintln!(

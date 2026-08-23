@@ -21,7 +21,7 @@
 //!   and no hardware decoder has anything to decode.
 //! - `MEDIA_PP_SOAK_RESTORE_TOKEN` — an xdg-desktop-portal restore token.
 //!   The Linux screen-capture scenarios skip without one, since the portal
-//!   would otherwise show its picker and block; `cargo run -p screen_record
+//!   would otherwise show its picker and block; `cargo run -p screen_record_software
 //!   -- out.mp4 2 monitor` prints a token to reuse.
 //!
 //! What the numbers mean, and how the thresholds were picked, is in

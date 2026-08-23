@@ -1,3 +1,13 @@
+//! Records the desktop through the software-encoding path:
+//! `CaptureSource -> SwScaler -> SwEncoder -> Mp4Muxer`.
+//! Windows captures through DXGI; Linux uses PipeWire and the desktop portal.
+//! Both run for a fixed duration and stop the pipeline to finalize the MP4.
+//!
+//! ```text
+//! cargo run -p screen_record_software -- [output.mp4] [seconds]
+//! cargo run -p screen_record_software -- [output.mp4] [seconds] [monitor|window] [restore-token] # Linux
+//! ```
+
 #[cfg(not(any(target_os = "windows", target_os = "linux")))]
 fn main() {
     eprintln!(
@@ -33,7 +43,7 @@ mod windows_example {
     /// DxgiCaptureSource -> SwScaler -> SwEncoder -> Mp4Muxer: captures the
     /// desktop live via DXGI Desktop Duplication and encodes it straight into
     /// a playable `.mp4` file — no window, no renderer, just a headless
-    /// recording (compare the Windows-only `screen_capture`, which renders
+    /// recording (compare the Windows-only `screen_preview_cpu`, which renders
     /// instead of encoding).
     ///
     /// `DxgiCaptureSource` never reaches `Eos` on its own (see its own docs);
@@ -42,7 +52,7 @@ mod windows_example {
     /// `Stop` as well as `Eos`, unlike `RtspSink`, since an MP4 file needs a
     /// valid trailer to be playable at all (see `Mp4Muxer`'s own docs).
     ///
-    ///     cargo run -p screen_record -- [output.mp4] [seconds]
+    ///     cargo run -p screen_record_software -- [output.mp4] [seconds]
     pub(super) fn run() -> media_pp::Result<()> {
         media_pp::init()?;
         let _log_guard = media_pp::log::init(
@@ -54,7 +64,7 @@ mod windows_example {
 
         let path = std::env::args()
             .nth(1)
-            .unwrap_or_else(|| "screen_record.mp4".into());
+            .unwrap_or_else(|| "screen_record_software.mp4".into());
         let seconds: u64 = std::env::args()
             .nth(2)
             .and_then(|s| s.parse().ok())
@@ -89,7 +99,7 @@ mod windows_example {
         muxer.add_stream("video", encoder.parameters(), format.time_base)?;
         let muxer_sink = muxer.open()?.pop().expect("exactly one stream was added");
 
-        let pipeline = Pipeline::new("screen-record", source, |source, ctx| {
+        let pipeline = Pipeline::new("screen-record-software", source, |source, ctx| {
             let scaler = SwScaler::new(
                 "to-yuv",
                 ffmpeg::format::Pixel::YUV420P,
@@ -161,7 +171,7 @@ mod linux_example {
     /// Windows path this captures for a fixed duration and then
     /// `pipeline.stop()`s, which is also what finalizes the MP4's trailer.
     ///
-    ///     cargo run -p screen_record -- [output.mp4] [seconds] [monitor|window] [restore-token]
+    ///     cargo run -p screen_record_software -- [output.mp4] [seconds] [monitor|window] [restore-token]
     pub(super) fn run() -> media_pp::Result<()> {
         media_pp::init()?;
         let _log_guard = media_pp::log::init(
@@ -173,7 +183,7 @@ mod linux_example {
 
         let path = std::env::args()
             .nth(1)
-            .unwrap_or_else(|| "screen_record.mp4".into());
+            .unwrap_or_else(|| "screen_record_software.mp4".into());
         let seconds: u64 = std::env::args()
             .nth(2)
             .and_then(|s| s.parse().ok())
@@ -225,7 +235,7 @@ mod linux_example {
         muxer.add_stream("video", encoder.parameters(), capture_format.time_base)?;
         let muxer_sink = muxer.open()?.pop().expect("exactly one stream was added");
 
-        let pipeline = Pipeline::new("screen-record", source, |source, ctx| {
+        let pipeline = Pipeline::new("screen-record-software", source, |source, ctx| {
             let scaler = SwScaler::new(
                 "to-yuv",
                 ffmpeg::format::Pixel::YUV420P,

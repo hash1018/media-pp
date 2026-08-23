@@ -6,7 +6,7 @@ with no CPU color conversion anywhere in the graph.
 - Windows: `DxgiCaptureSource` (GPU mode) `-> D3d11NvencEncoder -> Mp4Muxer`
 - Linux: `PipeWireScreenCaptureSource` (GPU mode) `-> CudaEncoder -> Mp4Muxer`
 
-The contrast with `screen_record` is the whole point. That example runs
+The contrast with `screen_record_software` is the whole point. That example runs
 `capture -> SwScaler -> SwEncoder`: every frame is converted BGRA->YUV420P by
 libswscale and encoded on the CPU. Here NVENC consumes the captured BGRA
 directly — `D3d11NvencInputFormat::Bgra` / `CudaFrameFormat::Bgra`, since NVENC
@@ -31,7 +31,7 @@ cargo run -p screen_record_nvenc -- <output.mp4> [seconds]
 
 On Linux the compositor's own dialog decides what is captured, so the first
 run prompts and prints a restore token that later runs can pass to skip it —
-the same arguments `screen_record` documents:
+the same arguments `screen_record_software` documents:
 
 ```sh
 cargo run -p screen_record_nvenc -- <output.mp4> [seconds] [monitor|window] [restore-token]

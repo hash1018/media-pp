@@ -16,88 +16,92 @@
 //!
 //!     cargo run -p cuda_record -- [output.mp4] [seconds]
 
-mod common;
-
-use media_pp::ffmpeg;
-use media_pp::{
-    elements::{
-        AppSource, CudaCodec, CudaDevice, CudaEncoder, CudaEncoderOptions, CudaFrameFormat,
-        CudaUpload, Mp4Muxer, SwScaler,
-    },
-    pipeline::Pipeline,
-};
-
 fn main() -> impl std::process::Termination {
-    run()
+    example::run()
 }
 
-fn run() -> media_pp::Result<()> {
-    media_pp::init()?;
-    let _log_guard = media_pp::log::init(
-        env!("CARGO_PKG_NAME"),
-        "logs",
-        media_pp::log::Level::Trace,
-        7,
-    )?;
-    let recording = common::parse_args()?;
-    let (width, height) = (recording.width, recording.height);
+mod common;
 
-    // One CUDA context for both stages — the invariant every CUDA element in
-    // this crate is built around, and what the encoder validates every
-    // incoming frame against.
-    let cuda = CudaDevice::new().map_err(|e| media_pp::Error::Other(e.to_string()))?;
-    let (source, source_handle) = AppSource::new("source", 8);
-
-    let encoder = CudaEncoder::new(
-        "encoder",
-        &cuda,
-        CudaEncoderOptions {
-            codec: CudaCodec::H264,
-            input_format: CudaFrameFormat::Nv12,
-            width,
-            height,
-            time_base: recording.time_base,
-            frame_rate: recording.frame_rate,
-            bit_rate: 4_000_000,
-            gop_size: 60,
+mod example {
+    use media_pp::ffmpeg;
+    use media_pp::{
+        elements::{
+            AppSource, CudaCodec, CudaDevice, CudaEncoder, CudaEncoderOptions, CudaFrameFormat,
+            CudaUpload, Mp4Muxer, SwScaler,
         },
-    )
-    .map_err(|e| media_pp::Error::Other(e.to_string()))?;
+        pipeline::Pipeline,
+    };
 
-    let mut muxer = Mp4Muxer::create(&recording.path)?;
-    muxer.add_stream("video", encoder.parameters(), recording.time_base)?;
-    let muxer_sink = muxer.open()?.pop().expect("exactly one stream was added");
+    use crate::common;
 
-    let pipeline = Pipeline::new("cuda-record", source, |source, ctx| {
-        // AppSource emits YUV420P on the CPU, so this one SwScaler is the only
-        // format conversion in the graph; the upload requires NV12 and
-        // everything downstream of it is GPU-resident.
-        let scaler = SwScaler::new(
-            "to-nv12",
-            ffmpeg::format::Pixel::NV12,
-            width,
-            height,
-            ffmpeg::software::scaling::Flags::BILINEAR,
+    pub(super) fn run() -> media_pp::Result<()> {
+        media_pp::init()?;
+        let _log_guard = media_pp::log::init(
+            env!("CARGO_PKG_NAME"),
+            "logs",
+            media_pp::log::Level::Trace,
+            7,
+        )?;
+        let recording = common::parse_args()?;
+        let (width, height) = (recording.width, recording.height);
+
+        // One CUDA context for both stages — the invariant every CUDA element in
+        // this crate is built around, and what the encoder validates every
+        // incoming frame against.
+        let cuda = CudaDevice::new().map_err(|e| media_pp::Error::Other(e.to_string()))?;
+        let (source, source_handle) = AppSource::new("source", 8);
+
+        let encoder = CudaEncoder::new(
+            "encoder",
+            &cuda,
+            CudaEncoderOptions {
+                codec: CudaCodec::H264,
+                input_format: CudaFrameFormat::Nv12,
+                width,
+                height,
+                time_base: recording.time_base,
+                frame_rate: recording.frame_rate,
+                bit_rate: 4_000_000,
+                gop_size: 60,
+            },
+        )
+        .map_err(|e| media_pp::Error::Other(e.to_string()))?;
+
+        let mut muxer = Mp4Muxer::create(&recording.path)?;
+        muxer.add_stream("video", encoder.parameters(), recording.time_base)?;
+        let muxer_sink = muxer.open()?.pop().expect("exactly one stream was added");
+
+        let pipeline = Pipeline::new("cuda-record", source, |source, ctx| {
+            // AppSource emits YUV420P on the CPU, so this one SwScaler is the only
+            // format conversion in the graph; the upload requires NV12 and
+            // everything downstream of it is GPU-resident.
+            let scaler = SwScaler::new(
+                "to-nv12",
+                ffmpeg::format::Pixel::NV12,
+                width,
+                height,
+                ffmpeg::software::scaling::Flags::BILINEAR,
+            );
+            let upload = CudaUpload::new("upload", &cuda, CudaFrameFormat::Nv12, width, height)
+                .map_err(|e| media_pp::Error::Other(e.to_string()))?;
+            let branch = ctx
+                .branch()
+                .pipe(scaler)
+                .pipe(upload)
+                .queue("encode-frames", 8)
+                .pipe(encoder)
+                .to(muxer_sink)?;
+            ctx.attach(source, 0, branch)?;
+            Ok(())
+        })?;
+
+        println!(
+            "recording {}s of {width}x{height} h264_nvenc to {} ...",
+            recording.frame_count / 30,
+            recording.path
         );
-        let upload = CudaUpload::new("upload", &cuda, CudaFrameFormat::Nv12, width, height)
-            .map_err(|e| media_pp::Error::Other(e.to_string()))?;
-        let branch = ctx
-            .branch()
-            .pipe(scaler)
-            .pipe(upload)
-            .queue("encode-frames", 8)
-            .pipe(encoder)
-            .to(muxer_sink)?;
-        ctx.attach(source, 0, branch)?;
-        Ok(())
-    })?;
-
-    println!(
-        "recording {}s of {width}x{height} h264_nvenc to {} ...",
-        recording.frame_count / 30,
-        recording.path
-    );
-    pipeline.run()?;
-    let feeder = common::spawn_feeder(source_handle, width, height, recording.frame_count);
-    common::finish(&pipeline, feeder, &recording.path)
+        pipeline.run()?;
+        let feeder = common::spawn_feeder(source_handle, width, height, recording.frame_count);
+        common::finish(&pipeline, feeder, &recording.path)
+    }
 }

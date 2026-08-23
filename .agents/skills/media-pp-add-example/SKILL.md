@@ -39,6 +39,16 @@ pipeline from its wiring closure rather than from imports or filenames.
 
 ## Document what runs
 
+- Start every executable example's `src/main.rs` with `//!` crate docs that
+  explain the example's purpose, actual graph, platform/backend differences,
+  and CLI. Put the `main` function or `cfg`-selected `main` functions
+  immediately after those docs, before imports and module declarations.
+- Keep `main` as a thin delegate to `example::run()` or the selected
+  `windows_example::run()`/`linux_example::run()`. Put imports, constants, and
+  implementation in that module; declarations for shared file modules may
+  follow the `main` functions. Do not attach the example overview as `///`
+  item docs to `main` or an internal `run`; reserve item docs for contracts
+  specific to that item.
 - Every new example crate includes `README.md` in the same change. Update the
   README whenever the pipeline, CLI, outputs, or observable behavior changes.
 - Source the README from an existing crate-level doc comment where available,

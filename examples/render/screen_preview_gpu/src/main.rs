@@ -1,3 +1,15 @@
+//! Captures the desktop straight into GPU memory and presents it without a
+//! system-memory pixel round trip.
+//!
+//! - Windows: `DxgiCaptureSource(GPU) -> Queue -> D3d11Renderer`
+//! - Linux: `PipeWireScreenCaptureSource(GPU) -> Queue -> CudaConverter ->
+//!   CudaRenderer(Vulkan)`
+//!
+//! ```text
+//! cargo run -p screen_preview_gpu
+//! cargo run -p screen_preview_gpu -- [monitor|window] [restore-token] # Linux
+//! ```
+
 #[cfg(not(any(target_os = "windows", target_os = "linux")))]
 fn main() {
     eprintln!(
@@ -33,23 +45,23 @@ mod windows_example {
     /// `CaptureMode::Gpu`'s own docs) and presents it directly, no `SwScaler`
     /// (desktop content is already BGRA/RGB, no YUV conversion needed, and
     /// `D3d11Renderer` letterboxes any capture size into the window on its
-    /// own). Compare against the Windows-only `screen_capture`, which captures
+    /// own). Compare against the Windows-only `screen_preview_cpu`, which captures
     /// to a plain CPU `Pixel::BGRA` frame instead and converts it to YUV420P
     /// for the D3D12 CPU-upload path.
     ///
     /// No cursor: `CaptureMode::Gpu` doesn't support cursor compositing yet
-    /// (see that variant's own docs) — the Windows-only `screen_capture` CPU
-    /// path does.
+    /// (see that variant's own docs) — the Windows-only `screen_preview_cpu`
+    /// CPU-capture path does.
     ///
-    ///     cargo run -p screen_capture_gpu
+    ///     cargo run -p screen_preview_gpu
     pub(super) fn run() {
         render_common::run_window(
-            "media-pp screen_capture_gpu",
+            "media-pp screen_preview_gpu",
             1280,
             720,
             |target, shutdown| {
                 let RawWindowHandle::Win32(handle) = target.window else {
-                    panic!("screen_capture_gpu example only supports Windows");
+                    panic!("screen_preview_gpu example only supports Windows");
                 };
                 play(handle.hwnd.get(), target.width, target.height, &shutdown)
             },
@@ -87,7 +99,7 @@ mod windows_example {
         let gpu = D3d11GpuContext::new(Some(device))
             .map_err(|e| media_pp::Error::Other(format!("{e:?}")))?;
 
-        let pipeline = Pipeline::new("screen-capture-gpu", source, |source, ctx| {
+        let pipeline = Pipeline::new("screen-preview-gpu", source, |source, ctx| {
             let renderer = render_common::d3d11_window_renderer(
                 "renderer",
                 &gpu,
@@ -129,7 +141,7 @@ mod windows_example {
                 // on the events above.
                 _ => {}
             }
-            // Same reasoning as `screen_capture`'s own loop: only stop for
+            // Same reasoning as `screen_preview_cpu`'s own loop: only stop for
             // `Eos`, or an `Error` that means `DxgiCaptureSource`'s own `run()`
             // thread actually ended — an occasional dropped/backpressured
             // frame elsewhere isn't a reason to end the demo.
@@ -156,11 +168,11 @@ mod windows_example {
 /// shape: without it a GPU capture can only be encoded (NVENC ingests BGRA
 /// directly), never shown or composited.
 ///
-/// The CLI differences are the ones `screen_record` documents: Wayland has no
+/// The CLI differences are the ones `screen_record_software` documents: Wayland has no
 /// way to name a monitor, so the compositor prompts on the first run and
 /// hands back a restore token later runs can pass to skip the dialog.
 ///
-///     cargo run -p screen_capture_gpu -- [monitor|window] [restore-token]
+///     cargo run -p screen_preview_gpu -- [monitor|window] [restore-token]
 #[cfg(target_os = "linux")]
 mod linux_example {
     use media_pp::{
@@ -176,7 +188,7 @@ mod linux_example {
 
     pub(super) fn run() {
         render_common::run_window(
-            "media-pp screen_capture_gpu",
+            "media-pp screen_preview_gpu",
             1280,
             720,
             |target, shutdown| play(target, &shutdown),
@@ -221,7 +233,7 @@ mod linux_example {
         let gpu = VulkanGpuContext::new(target.display).map_err(media_pp::Error::Other)?;
 
         let (width, height) = (format.width, format.height);
-        let pipeline = Pipeline::new("screen-capture-gpu", source, |source, ctx| {
+        let pipeline = Pipeline::new("screen-preview-gpu", source, |source, ctx| {
             // The capture's own size, not a rounded one: the converter is
             // fixed-size, so anything else would reject every frame. An odd
             // capture is refused here rather than at the first frame — see

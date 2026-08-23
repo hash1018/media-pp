@@ -417,7 +417,7 @@ pub fn try_test_video() -> Option<String> {
 /// absence skips rather than prompts.
 ///
 /// Mint one by running an example that prints it, e.g.
-/// `cargo run -p screen_record -- out.mp4 2 monitor`. A successful restore
+/// `cargo run -p screen_record_software -- out.mp4 2 monitor`. A successful restore
 /// hands the same token back, so one value keeps working across cycles and
 /// across runs.
 pub fn try_restore_token() -> Option<String> {
@@ -427,7 +427,7 @@ pub fn try_restore_token() -> Option<String> {
             eprintln!(
                 "skipping: set MEDIA_PP_SOAK_RESTORE_TOKEN to an xdg-desktop-portal restore \
                  token to run this test (without one the portal would show its picker and \
-                 block); `cargo run -p screen_record -- out.mp4 2 monitor` prints one"
+                 block); `cargo run -p screen_record_software -- out.mp4 2 monitor` prints one"
             );
             None
         }

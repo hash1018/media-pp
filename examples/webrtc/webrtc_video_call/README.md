@@ -1,7 +1,7 @@
 # webrtc_video_call
 
 A two-way video call between two `WebRtcPeer`s in one process, each presenting
-what the *other* peer sent into its own window. Windows only.
+what the *other* peer sent into its own window. It runs on Windows and Linux.
 
 One `Direction::SendRecv` track carries both directions on a single connection
 (`webrtc_loopback` is the minimal version of that), so `WebRtcHandle::next_track`
@@ -24,9 +24,13 @@ call has a generated stream going one way and a real file the other:
   fixed 640x480 both renderers are wired up at, and `Pacer` holds it to
   playback speed — without it the whole file would be encoded and sent in
   seconds rather than played as a call.
-- Both receive `WebRtcTrackSource -> Queue -> SwDecoder -> D3d12Renderer`. No
-  `Pacer` here: these packets arrive at the rate the other side encoded them,
-  so the timeline is already real. The send pipelines start first, then each
+- Windows receives `WebRtcTrackSource -> Queue -> SwDecoder -> D3d12Renderer`.
+  Linux receives `WebRtcTrackSource -> Queue -> SwDecoder -> SwScaler(NV12) ->
+  CudaUpload -> CudaRenderer(Vulkan)`: the Linux window bridge consumes CUDA
+  NV12 frames, so the decoded system-memory frame needs that conversion and
+  upload. Neither receive path needs a `Pacer`: these packets arrive at the
+  rate the other side encoded them, so the timeline is already real. The send
+  pipelines start first, then each
   receiver calls `WebRtcTrackSource::wait_stream_info` with a two-second
   timeout. That reports the codec from the first actual RTP payload, not from
   the other peer's encoder object or merely from the SDP capability list. The
@@ -35,8 +39,9 @@ call has a generated stream going one way and a real file the other:
   pipeline is built. No cross-peer encoder-parameter wiring or example-local
   FFmpeg FFI is needed.
 
-Both windows come from one `render_common::run_windows` call, sharing one
-worker thread and one `D3d12GpuContext`. Closing either window ends the whole
+Both windows come from one `render_common::run_windows` call and share one
+worker thread. They also share one `D3d12GpuContext` on Windows, or one CUDA
+device and `VulkanGpuContext` on Linux. Closing either window ends the whole
 call; the file side also ends on its own when the file runs out.
 
 ```sh

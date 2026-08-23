@@ -1,3 +1,14 @@
+//! Lists audio devices, selects one, captures about three seconds, and counts
+//! the buffers received.
+//!
+//! - Windows: `WasapiCaptureSource -> FrameCounter`
+//! - Linux: `PipeWireAudioCaptureSource -> FrameCounter`
+//!
+//! ```text
+//! cargo run -p audio_capture
+//! cargo run -p audio_capture -- mic|list|<device-name-substring>
+//! ```
+
 #[cfg(not(any(target_os = "windows", target_os = "linux")))]
 fn main() {
     eprintln!(

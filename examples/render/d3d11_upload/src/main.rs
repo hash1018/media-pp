@@ -1,3 +1,14 @@
+//! TestVideoSource -> SwScaler -> D3d11Upload -> Renderer: a synthetic
+//! `Pixel::YUV420P` stream converted to `Pixel::NV12` on the CPU, then
+//! uploaded to a GPU `Pixel::D3D11` texture on the *renderer's own*
+//! `ID3D11Device` before being presented — proves `D3d11Upload`'s frames
+//! (built via plain `windows-rs` calls + `av_buffer_create`, not FFmpeg's
+//! own hwframe pool — see `D3d11Upload`'s own docs) are readable by
+//! `D3d11Renderer`'s zero-copy path. Compare against `d3d12_upload`, the
+//! D3D12 sibling of this same smoke test.
+//!
+//!     cargo run -p d3d11_upload
+
 #[cfg(not(target_os = "windows"))]
 fn main() {
     eprintln!("{} example only supports Windows", env!("CARGO_PKG_NAME"));
@@ -19,16 +30,6 @@ mod windows_example {
     use render_common::{D3d11GpuContext, Shutdown};
     use winit::raw_window_handle::RawWindowHandle;
 
-    /// TestVideoSource -> SwScaler -> D3d11Upload -> Renderer: a synthetic
-    /// `Pixel::YUV420P` stream converted to `Pixel::NV12` on the CPU, then
-    /// uploaded to a GPU `Pixel::D3D11` texture on the *renderer's own*
-    /// `ID3D11Device` before being presented — proves `D3d11Upload`'s frames
-    /// (built via plain `windows-rs` calls + `av_buffer_create`, not FFmpeg's
-    /// own hwframe pool — see `D3d11Upload`'s own docs) are readable by
-    /// `D3d11Renderer`'s zero-copy path. Compare against `d3d12_upload`, the
-    /// D3D12 sibling of this same smoke test.
-    ///
-    ///     cargo run -p d3d11_upload
     pub(super) fn run() {
         render_common::run_window("media-pp d3d11_upload", 1280, 720, |target, shutdown| {
             let RawWindowHandle::Win32(handle) = target.window else {

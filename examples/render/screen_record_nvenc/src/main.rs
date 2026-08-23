@@ -1,7 +1,7 @@
 //! `capture -> NVENC -> Mp4Muxer`: records the desktop into a playable
 //! `.mp4` with no CPU color conversion anywhere in the graph.
 //!
-//! The contrast with `screen_record` is the whole point. That example runs
+//! The contrast with `screen_record_software` is the whole point. That example runs
 //! `capture -> SwScaler -> SwEncoder`: every frame is converted BGRA->YUV420P
 //! by libswscale and encoded on the CPU. Here NVENC consumes the captured
 //! BGRA directly — it does its own color conversion inside the encode block —
@@ -18,9 +18,6 @@
 //! typed error rather than panicking on anything else.
 //!
 //!     cargo run -p screen_record_nvenc -- <output.mp4> [seconds]
-
-#[cfg(any(target_os = "windows", target_os = "linux"))]
-mod common;
 
 #[cfg(not(any(target_os = "windows", target_os = "linux")))]
 fn main() {
@@ -39,6 +36,9 @@ fn main() -> impl std::process::Termination {
 fn main() -> impl std::process::Termination {
     linux_example::run()
 }
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+mod common;
 
 #[cfg(target_os = "windows")]
 mod windows_example {
@@ -130,7 +130,7 @@ mod windows_example {
 /// is no upload element here and the BGRA stays BGRA all the way into the
 /// encode block — which is what keeps libswscale out of this graph.
 ///
-/// The CLI differences are the same ones `screen_record` documents: Wayland
+/// The CLI differences are the same ones `screen_record_software` documents: Wayland
 /// has no way to name a monitor, so the compositor prompts on the first run
 /// and hands back a restore token that skips the prompt next time.
 #[cfg(target_os = "linux")]
