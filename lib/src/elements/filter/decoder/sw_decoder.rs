@@ -78,11 +78,13 @@ impl SwDecoder {
         // stream parameters, even though the decoded format and size are
         // not known until the first frame comes back out. That split is
         // exactly what a link check can and cannot know at wiring time.
-        let produced = match &kind {
-            Kind::Video(_) => PortContract::of(MediaKind::VideoFrame),
-            Kind::Audio(_) => PortContract::of(MediaKind::AudioFrame),
-        }
-        .in_memory(MemoryDomain::System);
+        let produced = PortContract::frame(
+            match &kind {
+                Kind::Video(_) => MediaKind::VideoFrame,
+                Kind::Audio(_) => MediaKind::AudioFrame,
+            },
+            MemoryDomain::System,
+        );
         let pad = SrcPad::with_contract(format!("{name}_src"), OutputContract::Fixed(produced));
         let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
         pp_info!(
@@ -132,7 +134,7 @@ impl Sink for SwDecoder {
     /// decoder opened for video is the mistake this rules out, and both
     /// sides of it are `MediaBuffer::Packet`.
     fn input_contract(&self) -> InputContract {
-        InputContract::Fixed(PortContract::of(match &self.kind {
+        InputContract::Fixed(PortContract::packet(match &self.kind {
             Kind::Video(_) => MediaKind::VideoPacket,
             Kind::Audio(_) => MediaKind::AudioPacket,
         }))

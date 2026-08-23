@@ -113,7 +113,7 @@ impl RtspSource {
                 match MediaKind::packet_for(s.kind) {
                     Some(kind) => SrcPad::with_contract(
                         format!("src_{}", s.index),
-                        OutputContract::Fixed(PortContract::of(kind)),
+                        OutputContract::Fixed(PortContract::packet(kind)),
                     ),
                     None => SrcPad::new(format!("src_{}", s.index)),
                 }

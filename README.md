@@ -120,12 +120,15 @@ SwDecoder(decoder) produces VideoFrame (System), which Mp4Muxer(rec) cannot
 accept (it takes VideoPacket)
 ```
 
-It compares only what an element already knows when it is constructed: the
-`MediaKind` a port deals in (`VideoPacket`, `AudioPacket`, `VideoFrame`,
-`AudioFrame`) and the `MemoryDomain` a decoded frame lives in (`System`,
-`Cuda`, `D3d11`, `D3d12`). Pixel format, resolution, stride, color space, and
-the identity of a specific GPU device are not part of it and stay validated
-against the real buffer when it arrives.
+It compares only what an element already knows when it is constructed. A
+`PortContract` is either `Packets` — which `MediaKind`s of encoded media
+(`VideoPacket`, `AudioPacket`) — or `Frames`, which decoded kinds
+(`VideoFrame`, `AudioFrame`) plus the `MemoryDomain`s they may live in
+(`System`, `Cuda`, `D3d11`, `D3d12`). Encoded media is always host memory, so
+a packet contract has nowhere to put a domain and nowhere to forget one.
+Pixel format, resolution, stride, color space, and the identity of a specific
+GPU device are not part of it and stay validated against the real buffer when
+it arrives.
 
 Both halves of the kind separate buffers the `MediaBuffer` variant cannot.
 The medium splits encoded data, because a container's audio and video pads
@@ -160,11 +163,12 @@ leaves the runtime check in charge. A passthrough element carries its
 upstream contract forward, so a mismatch is still caught across a thread
 boundary and still names the element that actually produces the data.
 
-An element that genuinely handles more than one memory domain declares none
-at all — `VideoSynchronizer` paces a system frame and a device texture alike,
-because it never reads the pixels. Claiming a domain an element does not need
-would refuse a pipeline that works, which is worse than the runtime error the
-contract was meant to pre-empt.
+An element that genuinely handles any backend says so — `VideoSynchronizer`
+paces a system frame and a device texture alike, because it never reads the
+pixels, so it declares `MemoryDomainSet::ALL`. That is a claim, not a blank:
+claiming a narrower domain than an element needs would refuse a pipeline that
+works, which is worse than the runtime error the contract was meant to
+pre-empt.
 
 Use `Pipeline::finish` to stop a live source with ordered EOS and drain queued
 buffers, codecs, and muxers; `Pipeline::stop` abandons buffered work immediately.

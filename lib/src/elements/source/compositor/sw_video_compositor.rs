@@ -345,9 +345,10 @@ impl Sink for SwVideoCompositorInputSink {
     /// The CPU counterpart of D3d11VideoCompositor: layers are blended
     /// plane by plane, so every input arrives in system memory.
     fn input_contract(&self) -> InputContract {
-        InputContract::Fixed(
-            PortContract::of(MediaKind::VideoFrame).in_memory(MemoryDomain::System),
-        )
+        InputContract::Fixed(PortContract::frame(
+            MediaKind::VideoFrame,
+            MemoryDomain::System,
+        ))
     }
 
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
@@ -516,9 +517,10 @@ impl SwVideoCompositor {
                 output_pool,
                 pad: SrcPad::with_contract(
                     format!("{name}_src"),
-                    OutputContract::Fixed(
-                        PortContract::of(MediaKind::VideoFrame).in_memory(MemoryDomain::System),
-                    ),
+                    OutputContract::Fixed(PortContract::frame(
+                        MediaKind::VideoFrame,
+                        MemoryDomain::System,
+                    )),
                 ),
             },
             SwVideoCompositorHandle {

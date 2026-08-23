@@ -319,7 +319,7 @@ impl Sink for Mp4MuxerStreamSink {
     /// refused rather than writing a file no player can make sense of.
     fn input_contract(&self) -> InputContract {
         match self.kind {
-            Some(kind) => InputContract::Fixed(PortContract::of(kind)),
+            Some(kind) => InputContract::Fixed(PortContract::packet(kind)),
             None => InputContract::Unknown,
         }
     }

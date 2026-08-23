@@ -217,7 +217,7 @@ impl SwEncoder {
         let pp_log = element_pp_log(ElementType::SwEncoder, &name, None);
         let pad = SrcPad::with_contract(
             format!("{name}_src"),
-            OutputContract::Fixed(PortContract::of(MediaKind::VideoPacket)),
+            OutputContract::Fixed(PortContract::packet(MediaKind::VideoPacket)),
         );
         pp_info!(
             pp_log: &pp_log,
@@ -296,9 +296,10 @@ impl Sink for SwEncoder {
     /// on the CPU, so a D3D11 or CUDA frame is not merely the wrong
     /// format here, it is unreachable memory.
     fn input_contract(&self) -> InputContract {
-        InputContract::Fixed(
-            PortContract::of(MediaKind::VideoFrame).in_memory(MemoryDomain::System),
-        )
+        InputContract::Fixed(PortContract::frame(
+            MediaKind::VideoFrame,
+            MemoryDomain::System,
+        ))
     }
 
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {

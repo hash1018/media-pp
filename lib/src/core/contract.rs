@@ -184,6 +184,24 @@ pub enum MemoryDomain {
     D3d12,
 }
 
+impl MemoryDomain {
+    const fn bit(self) -> u8 {
+        match self {
+            MemoryDomain::System => 1 << 0,
+            MemoryDomain::Cuda => 1 << 1,
+            MemoryDomain::D3d11 => 1 << 2,
+            MemoryDomain::D3d12 => 1 << 3,
+        }
+    }
+
+    const ALL: [MemoryDomain; 4] = [
+        MemoryDomain::System,
+        MemoryDomain::Cuda,
+        MemoryDomain::D3d11,
+        MemoryDomain::D3d12,
+    ];
+}
+
 impl fmt::Display for MemoryDomain {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let name = match self {
@@ -196,60 +214,137 @@ impl fmt::Display for MemoryDomain {
     }
 }
 
-/// What one port deals in: which payloads, and where their memory lives.
+/// A set of [`MemoryDomain`]s — everywhere a port's frames may live.
 ///
-/// `memory` is `None` when the question does not apply (a compressed
-/// packet is always host memory) or when the element cannot promise an
-/// answer at construction time. `None` on either side of a link means the
-/// memory domain simply is not checked there.
+/// A producer's set is what it may emit and a consumer's is what it can
+/// take, so compatibility is the former being a subset of the latter,
+/// exactly as for [`MediaKindSet`]. An element that genuinely does not
+/// care — one that never reads the pixels — declares [`Self::ALL`], which
+/// is a claim rather than an omission: there is no "unstated" domain to
+/// forget, because [`PortContract::Frames`] has nowhere to leave it out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PortContract {
-    /// Payload variants this port deals in.
-    pub media: MediaKindSet,
-    /// Backend owning the memory, when that is both applicable and known.
-    pub memory: Option<MemoryDomain>,
+pub struct MemoryDomainSet(u8);
+
+impl MemoryDomainSet {
+    /// Every backend — for an element that passes frames through without
+    /// reading them.
+    pub const ALL: Self = Self::from_slice(&MemoryDomain::ALL);
+
+    /// A set holding exactly `domain`.
+    pub const fn of(domain: MemoryDomain) -> Self {
+        Self(domain.bit())
+    }
+
+    /// A set holding every domain in `domains`. Duplicates are harmless.
+    pub const fn from_slice(domains: &[MemoryDomain]) -> Self {
+        let mut bits = 0;
+        let mut index = 0;
+        while index < domains.len() {
+            bits |= domains[index].bit();
+            index += 1;
+        }
+        Self(bits)
+    }
+
+    /// Returns whether `domain` is in this set.
+    pub const fn contains(self, domain: MemoryDomain) -> bool {
+        self.0 & domain.bit() != 0
+    }
+
+    /// Returns whether every domain in this set is also in `other` — the
+    /// producer-into-consumer direction the link check asks about.
+    pub const fn is_subset_of(self, other: Self) -> bool {
+        self.0 & !other.0 == 0
+    }
+}
+
+impl fmt::Display for MemoryDomainSet {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if *self == Self::ALL {
+            return f.write_str("any memory");
+        }
+        let mut first = true;
+        for domain in MemoryDomain::ALL {
+            if !self.contains(domain) {
+                continue;
+            }
+            if !first {
+                f.write_str("|")?;
+            }
+            write!(f, "{domain}")?;
+            first = false;
+        }
+        if first {
+            f.write_str("nothing")
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// What one port deals in.
+///
+/// Split by encoding rather than carrying an optional domain, because the
+/// two halves ask different questions. Encoded media is always host
+/// memory, so [`Self::Packets`] has nowhere to put a domain and nowhere to
+/// forget one. Decoded frames always live somewhere specific, so
+/// [`Self::Frames`] always states it — an element that genuinely takes any
+/// backend says [`MemoryDomainSet::ALL`], which reads as the deliberate
+/// claim it is rather than as an omission.
+///
+/// The two never link to each other. That falls out of the shape, and it
+/// matches [`MediaKind`]: no packet kind is a frame kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PortContract {
+    /// Encoded media — [`MediaKind::VideoPacket`]/[`MediaKind::AudioPacket`].
+    Packets(MediaKindSet),
+    /// Decoded frames — [`MediaKind::VideoFrame`]/[`MediaKind::AudioFrame`]
+    /// — together with the backends their memory may live in.
+    Frames(MediaKindSet, MemoryDomainSet),
 }
 
 impl PortContract {
-    /// A contract for exactly one [`MediaKind`], with no memory-domain claim.
-    pub const fn of(kind: MediaKind) -> Self {
-        Self {
-            media: MediaKindSet::of(kind),
-            memory: None,
-        }
+    /// One encoded kind.
+    pub const fn packet(kind: MediaKind) -> Self {
+        Self::Packets(MediaKindSet::of(kind))
     }
 
-    /// The same contract, narrowed to one [`MemoryDomain`].
-    pub const fn in_memory(self, memory: MemoryDomain) -> Self {
-        Self {
-            memory: Some(memory),
-            ..self
-        }
+    /// One decoded kind in one backend's memory.
+    pub const fn frame(kind: MediaKind, memory: MemoryDomain) -> Self {
+        Self::Frames(MediaKindSet::of(kind), MemoryDomainSet::of(memory))
+    }
+
+    /// One decoded kind, wherever it lives — for an element that forwards
+    /// or counts frames without reading them.
+    pub const fn any_frame(kind: MediaKind) -> Self {
+        Self::Frames(MediaKindSet::of(kind), MemoryDomainSet::ALL)
     }
 
     /// Returns whether a producer emitting `produced` can feed a consumer
     /// accepting `self`.
     ///
-    /// Every kind the producer may emit has to be accepted, and the memory
-    /// domains must agree whenever both sides state one. An unstated domain
-    /// on either side is not a mismatch — it is missing information, which
-    /// this check always resolves in favor of allowing the link.
+    /// Every kind the producer may emit has to be accepted, and so does
+    /// every domain its frames may live in. Encoded media and decoded
+    /// frames never satisfy each other.
     pub fn accepts(&self, produced: &PortContract) -> bool {
-        if !produced.media.is_subset_of(self.media) {
-            return false;
-        }
-        match (self.memory, produced.memory) {
-            (Some(accepted), Some(produced)) => accepted == produced,
-            _ => true,
+        match (self, produced) {
+            (PortContract::Packets(accepted), PortContract::Packets(produced)) => {
+                produced.is_subset_of(*accepted)
+            }
+            (
+                PortContract::Frames(accepted, accepted_memory),
+                PortContract::Frames(produced, produced_memory),
+            ) => produced.is_subset_of(*accepted) && produced_memory.is_subset_of(*accepted_memory),
+            _ => false,
         }
     }
 }
 
 impl fmt::Display for PortContract {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.memory {
-            Some(memory) => write!(f, "{} ({memory})", self.media),
-            None => write!(f, "{}", self.media),
+        match self {
+            PortContract::Packets(kinds) => write!(f, "{kinds}"),
+            PortContract::Frames(kinds, memory) => write!(f, "{kinds} ({memory})"),
         }
     }
 }
@@ -327,11 +422,8 @@ mod tests {
 
     #[test]
     fn a_producers_kinds_must_all_be_accepted() {
-        let video_only = PortContract::of(MediaKind::VideoFrame);
-        let both = PortContract {
-            media: MediaKindSet::FRAMES,
-            memory: None,
-        };
+        let video_only = PortContract::any_frame(MediaKind::VideoFrame);
+        let both = PortContract::Frames(MediaKindSet::FRAMES, MemoryDomainSet::ALL);
 
         assert!(video_only.accepts(&video_only));
         assert!(both.accepts(&video_only));
@@ -343,18 +435,26 @@ mod tests {
     /// nothing else separates a container's audio stream from its video one.
     #[test]
     fn encoded_audio_and_encoded_video_are_different_kinds() {
-        let video = PortContract::of(MediaKind::VideoPacket);
-        let audio = PortContract::of(MediaKind::AudioPacket);
+        let video = PortContract::packet(MediaKind::VideoPacket);
+        let audio = PortContract::packet(MediaKind::AudioPacket);
 
         assert!(!video.accepts(&audio));
         assert!(!audio.accepts(&video));
         // A muxer takes either, and a demuxer pad of either kind fits it.
-        let muxer = PortContract {
-            media: MediaKindSet::PACKETS,
-            memory: None,
-        };
+        let muxer = PortContract::Packets(MediaKindSet::PACKETS);
         assert!(muxer.accepts(&video));
         assert!(muxer.accepts(&audio));
+    }
+
+    /// Encoded and decoded ports never satisfy each other, and the shape
+    /// is what says so — there is no domain to compare across them.
+    #[test]
+    fn packets_and_frames_never_link() {
+        let packets = PortContract::Packets(MediaKindSet::PACKETS);
+        let frames = PortContract::Frames(MediaKindSet::FRAMES, MemoryDomainSet::ALL);
+
+        assert!(!packets.accepts(&frames));
+        assert!(!frames.accepts(&packets));
     }
 
     #[test]
@@ -372,29 +472,35 @@ mod tests {
         assert_eq!(MediaKind::packet_for(ffmpeg::media::Type::Subtitle), None);
     }
 
+    /// Domains are a set on both sides now, so "takes any backend" is a
+    /// claim an element makes rather than a field it left empty.
     #[test]
-    fn a_stated_memory_domain_must_match_but_an_absent_one_never_blocks() {
-        let system = PortContract::of(MediaKind::VideoFrame).in_memory(MemoryDomain::System);
-        let d3d11 = PortContract::of(MediaKind::VideoFrame).in_memory(MemoryDomain::D3d11);
-        let unstated = PortContract::of(MediaKind::VideoFrame);
+    fn every_domain_a_producer_may_emit_must_be_accepted() {
+        let system = PortContract::frame(MediaKind::VideoFrame, MemoryDomain::System);
+        let d3d11 = PortContract::frame(MediaKind::VideoFrame, MemoryDomain::D3d11);
+        let anywhere = PortContract::any_frame(MediaKind::VideoFrame);
 
         assert!(system.accepts(&system));
         assert!(!system.accepts(&d3d11));
-        assert!(unstated.accepts(&d3d11));
-        assert!(d3d11.accepts(&unstated));
+        // A pass-through element takes either; neither takes everything.
+        assert!(anywhere.accepts(&d3d11));
+        assert!(anywhere.accepts(&system));
+        assert!(!d3d11.accepts(&anywhere));
     }
 
     #[test]
     fn kinds_render_for_diagnostics() {
         assert_eq!(
-            PortContract::of(MediaKind::VideoPacket).to_string(),
+            PortContract::packet(MediaKind::VideoPacket).to_string(),
             "VideoPacket"
         );
         assert_eq!(
-            PortContract::of(MediaKind::VideoFrame)
-                .in_memory(MemoryDomain::D3d11)
-                .to_string(),
+            PortContract::frame(MediaKind::VideoFrame, MemoryDomain::D3d11).to_string(),
             "VideoFrame (D3D11)"
+        );
+        assert_eq!(
+            PortContract::any_frame(MediaKind::VideoFrame).to_string(),
+            "VideoFrame (any memory)"
         );
         assert_eq!(MediaKindSet::PACKETS.to_string(), "VideoPacket|AudioPacket");
     }

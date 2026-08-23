@@ -255,7 +255,7 @@ impl SwAudioEncoder {
         let pp_log = element_pp_log(ElementType::SwAudioEncoder, &name, None);
         let pad = SrcPad::with_contract(
             format!("{name}_src"),
-            OutputContract::Fixed(PortContract::of(MediaKind::AudioPacket)),
+            OutputContract::Fixed(PortContract::packet(MediaKind::AudioPacket)),
         );
         pp_info!(
             pp_log: &pp_log,
@@ -513,9 +513,10 @@ impl Source for SwAudioEncoder {
 impl Sink for SwAudioEncoder {
     /// The audio mirror of SwEncoder: decoded samples in, encoded packets out.
     fn input_contract(&self) -> InputContract {
-        InputContract::Fixed(
-            PortContract::of(MediaKind::AudioFrame).in_memory(MemoryDomain::System),
-        )
+        InputContract::Fixed(PortContract::frame(
+            MediaKind::AudioFrame,
+            MemoryDomain::System,
+        ))
     }
 
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {

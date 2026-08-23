@@ -156,9 +156,10 @@ impl CudaUpload {
 
         let pad = SrcPad::with_contract(
             format!("{name}_src"),
-            OutputContract::Fixed(
-                PortContract::of(MediaKind::VideoFrame).in_memory(MemoryDomain::Cuda),
-            ),
+            OutputContract::Fixed(PortContract::frame(
+                MediaKind::VideoFrame,
+                MemoryDomain::Cuda,
+            )),
         );
         let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
         pp_info!(
@@ -257,9 +258,10 @@ impl Source for CudaUpload {
 impl Sink for CudaUpload {
     /// CPU-readable planes: uploading is what this does, so a frame already in device memory has no work here.
     fn input_contract(&self) -> InputContract {
-        InputContract::Fixed(
-            PortContract::of(MediaKind::VideoFrame).in_memory(MemoryDomain::System),
-        )
+        InputContract::Fixed(PortContract::frame(
+            MediaKind::VideoFrame,
+            MemoryDomain::System,
+        ))
     }
 
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {

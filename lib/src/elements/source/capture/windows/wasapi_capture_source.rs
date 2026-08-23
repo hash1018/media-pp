@@ -240,9 +240,10 @@ impl WasapiCaptureSource {
             );
             let pad = SrcPad::with_contract(
                 format!("{name}_src"),
-                OutputContract::Fixed(
-                    PortContract::of(MediaKind::AudioFrame).in_memory(MemoryDomain::System),
-                ),
+                OutputContract::Fixed(PortContract::frame(
+                    MediaKind::AudioFrame,
+                    MemoryDomain::System,
+                )),
             );
 
             Ok((

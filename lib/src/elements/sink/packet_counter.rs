@@ -61,10 +61,7 @@ impl Element for PacketCounter {
 impl Sink for PacketCounter {
     /// Counts encoded packets specifically — FrameCounter is the decoded-side counterpart.
     fn input_contract(&self) -> InputContract {
-        InputContract::Fixed(PortContract {
-            media: MediaKindSet::PACKETS,
-            memory: None,
-        })
+        InputContract::Fixed(PortContract::Packets(MediaKindSet::PACKETS))
     }
 
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {

@@ -179,7 +179,7 @@ impl Sink for RtspSink {
     /// Republishes encoded data as-is; it has no encoder of its own.
     fn input_contract(&self) -> InputContract {
         match self.kind {
-            Some(kind) => InputContract::Fixed(PortContract::of(kind)),
+            Some(kind) => InputContract::Fixed(PortContract::packet(kind)),
             None => InputContract::Unknown,
         }
     }

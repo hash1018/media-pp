@@ -243,7 +243,10 @@ impl Element for CudaRenderer {
 impl Sink for CudaRenderer {
     /// Presents a device-resident frame; nothing else reaches its interop path.
     fn input_contract(&self) -> InputContract {
-        InputContract::Fixed(PortContract::of(MediaKind::VideoFrame).in_memory(MemoryDomain::Cuda))
+        InputContract::Fixed(PortContract::frame(
+            MediaKind::VideoFrame,
+            MemoryDomain::Cuda,
+        ))
     }
 
     fn consume(&mut self, buf: MediaBuffer) -> crate::error::Result<()> {

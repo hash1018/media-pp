@@ -336,7 +336,7 @@ impl Sink for SegmentedTrackSink {
     /// Same as Mp4Muxer: encoded packets only, cut into segments on keyframes.
     fn input_contract(&self) -> InputContract {
         match self.kind {
-            Some(kind) => InputContract::Fixed(PortContract::of(kind)),
+            Some(kind) => InputContract::Fixed(PortContract::packet(kind)),
             None => InputContract::Unknown,
         }
     }

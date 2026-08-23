@@ -161,9 +161,10 @@ impl D3d12Upload {
 
         let pad = SrcPad::with_contract(
             format!("{name}_src"),
-            OutputContract::Fixed(
-                PortContract::of(MediaKind::VideoFrame).in_memory(MemoryDomain::D3d12),
-            ),
+            OutputContract::Fixed(PortContract::frame(
+                MediaKind::VideoFrame,
+                MemoryDomain::D3d12,
+            )),
         );
         let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
         pp_info!(pp_log: &pp_log, "opened: {width}x{height}");
@@ -207,9 +208,10 @@ impl Source for D3d12Upload {
 impl Sink for D3d12Upload {
     /// CPU-readable planes: the D3D12 counterpart of D3d11Upload.
     fn input_contract(&self) -> InputContract {
-        InputContract::Fixed(
-            PortContract::of(MediaKind::VideoFrame).in_memory(MemoryDomain::System),
-        )
+        InputContract::Fixed(PortContract::frame(
+            MediaKind::VideoFrame,
+            MemoryDomain::System,
+        ))
     }
 
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {

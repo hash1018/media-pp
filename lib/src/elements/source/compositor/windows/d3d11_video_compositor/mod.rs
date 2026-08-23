@@ -433,7 +433,10 @@ impl Sink for D3d11VideoCompositorInputSink {
     /// Every layer is composited on the GPU, so each input takes a
     /// device texture just as the composed output produces one.
     fn input_contract(&self) -> InputContract {
-        InputContract::Fixed(PortContract::of(MediaKind::VideoFrame).in_memory(MemoryDomain::D3d11))
+        InputContract::Fixed(PortContract::frame(
+            MediaKind::VideoFrame,
+            MemoryDomain::D3d11,
+        ))
     }
 
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
@@ -673,9 +676,10 @@ impl D3d11VideoCompositor {
                 output_views: HashMap::new(),
                 pad: SrcPad::with_contract(
                     format!("{name}_src"),
-                    OutputContract::Fixed(
-                        PortContract::of(MediaKind::VideoFrame).in_memory(MemoryDomain::D3d11),
-                    ),
+                    OutputContract::Fixed(PortContract::frame(
+                        MediaKind::VideoFrame,
+                        MemoryDomain::D3d11,
+                    )),
                 ),
             },
             D3d11VideoCompositorHandle {

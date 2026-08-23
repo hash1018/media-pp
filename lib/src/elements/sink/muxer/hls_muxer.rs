@@ -506,7 +506,7 @@ impl Sink for HlsMuxerStreamSink {
     /// A muxer interleaves already-encoded data, so a decoded frame has no route through it.
     fn input_contract(&self) -> InputContract {
         match self.kind {
-            Some(kind) => InputContract::Fixed(PortContract::of(kind)),
+            Some(kind) => InputContract::Fixed(PortContract::packet(kind)),
             None => InputContract::Unknown,
         }
     }

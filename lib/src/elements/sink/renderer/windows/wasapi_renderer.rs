@@ -577,9 +577,10 @@ impl Element for WasapiRenderer {
 impl Sink for WasapiRenderer {
     /// Writes samples to the shared-mode endpoint buffer.
     fn input_contract(&self) -> InputContract {
-        InputContract::Fixed(
-            PortContract::of(MediaKind::AudioFrame).in_memory(MemoryDomain::System),
-        )
+        InputContract::Fixed(PortContract::frame(
+            MediaKind::AudioFrame,
+            MemoryDomain::System,
+        ))
     }
 
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {

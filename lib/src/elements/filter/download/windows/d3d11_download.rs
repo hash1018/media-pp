@@ -160,9 +160,10 @@ impl D3d11Download {
         let staging = create_staging_texture(device, width, height)?;
         let pad = SrcPad::with_contract(
             format!("{name}_src"),
-            OutputContract::Fixed(
-                PortContract::of(MediaKind::VideoFrame).in_memory(MemoryDomain::System),
-            ),
+            OutputContract::Fixed(PortContract::frame(
+                MediaKind::VideoFrame,
+                MemoryDomain::System,
+            )),
         );
         let pool = UnboundObjectPool::new(
             0,
@@ -271,7 +272,10 @@ impl Source for D3d11Download {
 impl Sink for D3d11Download {
     /// The mirror of D3d11Upload: only a device texture has anything to bring back.
     fn input_contract(&self) -> InputContract {
-        InputContract::Fixed(PortContract::of(MediaKind::VideoFrame).in_memory(MemoryDomain::D3d11))
+        InputContract::Fixed(PortContract::frame(
+            MediaKind::VideoFrame,
+            MemoryDomain::D3d11,
+        ))
     }
 
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {

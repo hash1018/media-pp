@@ -97,9 +97,13 @@ documentation and implementation differ.
   plane/stride bounds, texture array index, and device ownership as applicable.
 - Declare a new element's link contract through `Sink::input_contract` and
   `SrcPad::with_contract`, limited to what construction already settles: the
-  `MediaKind`s a port deals in and a decoded frame's `MemoryDomain`. This never
-  replaces the runtime validation above — it only refuses wiring no buffer could
-  have made work, before the pipeline starts. Both sides default to `Unknown`,
+  `MediaKind`s a port deals in, and for a decoded one the `MemoryDomain`s its
+  frames may live in. `PortContract::Packets` has no domain field at all,
+  since encoded media is always host memory; `PortContract::Frames` always
+  states one, and an element that takes any backend says `MemoryDomainSet::ALL`
+  rather than leaving a blank. This never replaces the runtime validation above
+  — it only refuses wiring no buffer could have made work, before the pipeline
+  starts. Both sides default to `Unknown`,
   which always links, so an element with a genuinely runtime-dependent contract
   simply leaves it alone rather than guessing.
 - Preserve media metadata across transforms unless the element intentionally

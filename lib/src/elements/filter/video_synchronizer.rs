@@ -212,7 +212,7 @@ impl Sink for VideoSynchronizer {
     /// memory-domain claim, because it never touches the pixels — it
     /// paces a system frame and a device texture alike.
     fn input_contract(&self) -> InputContract {
-        InputContract::Fixed(PortContract::of(MediaKind::VideoFrame))
+        InputContract::Fixed(PortContract::any_frame(MediaKind::VideoFrame))
     }
 
     fn consume(&mut self, buf: MediaBuffer) -> crate::error::Result<()> {

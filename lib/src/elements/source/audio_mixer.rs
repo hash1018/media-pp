@@ -261,9 +261,10 @@ impl Sink for MixerInputSink {
     /// Every input is summed sample by sample, so each carries decoded
     /// audio just as the mixed output does.
     fn input_contract(&self) -> InputContract {
-        InputContract::Fixed(
-            PortContract::of(MediaKind::AudioFrame).in_memory(MemoryDomain::System),
-        )
+        InputContract::Fixed(PortContract::frame(
+            MediaKind::AudioFrame,
+            MemoryDomain::System,
+        ))
     }
 
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
@@ -414,9 +415,10 @@ impl AudioMixer {
         });
         let pad = SrcPad::with_contract(
             format!("{name}_src"),
-            OutputContract::Fixed(
-                PortContract::of(MediaKind::AudioFrame).in_memory(MemoryDomain::System),
-            ),
+            OutputContract::Fixed(PortContract::frame(
+                MediaKind::AudioFrame,
+                MemoryDomain::System,
+            )),
         );
         (
             Self {

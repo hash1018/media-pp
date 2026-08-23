@@ -306,7 +306,7 @@ impl Sink for WebRtcTrackSink {
     /// encoder of its own, so a decoded frame has no route through it.
     fn input_contract(&self) -> InputContract {
         // Path-qualified: `MediaKind` in this module is str0m's own.
-        InputContract::Fixed(PortContract::of(packet_kind(self.kind)))
+        InputContract::Fixed(PortContract::packet(packet_kind(self.kind)))
     }
 
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
@@ -451,7 +451,7 @@ impl WebRtcTrackSource {
         // negotiated with the peer at runtime, but the kind never varies.
         let pad = SrcPad::with_contract(
             format!("{name}_src"),
-            OutputContract::Fixed(PortContract::of(packet_kind(kind))),
+            OutputContract::Fixed(PortContract::packet(packet_kind(kind))),
         );
         Self {
             id,

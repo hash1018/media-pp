@@ -177,9 +177,10 @@ impl AudioResampler {
         let pp_log = element_pp_log(ElementType::AudioResampler, &name, None);
         let pad = SrcPad::with_contract(
             format!("{name}_src"),
-            OutputContract::Fixed(
-                PortContract::of(MediaKind::AudioFrame).in_memory(MemoryDomain::System),
-            ),
+            OutputContract::Fixed(PortContract::frame(
+                MediaKind::AudioFrame,
+                MemoryDomain::System,
+            )),
         );
         pp_info!(
             pp_log: &pp_log,
@@ -280,9 +281,10 @@ impl Source for AudioResampler {
 impl Sink for AudioResampler {
     /// Converts one audio layout to another; the rate and format it changes are runtime values, not part of this.
     fn input_contract(&self) -> InputContract {
-        InputContract::Fixed(
-            PortContract::of(MediaKind::AudioFrame).in_memory(MemoryDomain::System),
-        )
+        InputContract::Fixed(PortContract::frame(
+            MediaKind::AudioFrame,
+            MemoryDomain::System,
+        ))
     }
 
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {

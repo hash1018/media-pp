@@ -1440,7 +1440,10 @@ fn audio_decoder(name: &str) -> SwDecoder {
 }
 
 fn video_frames() -> InputContract {
-    InputContract::Fixed(PortContract::of(MediaKind::VideoFrame).in_memory(MemoryDomain::System))
+    InputContract::Fixed(PortContract::frame(
+        MediaKind::VideoFrame,
+        MemoryDomain::System,
+    ))
 }
 
 #[test]
@@ -1465,7 +1468,7 @@ fn a_queue_in_the_middle_does_not_hide_a_mismatch() {
         .queue("q", 4)
         .to(DeclaringSink::boxed(
             "muxer",
-            InputContract::Fixed(PortContract::of(MediaKind::VideoPacket)),
+            InputContract::Fixed(PortContract::packet(MediaKind::VideoPacket)),
         ))
     else {
         panic!("decoded frames cannot be fed to a packet-only sink");
@@ -1541,7 +1544,7 @@ fn attaching_a_packet_pad_to_a_video_branch_changes_nothing() {
 
     let mut pad = SrcPad::with_contract(
         "demuxer_src",
-        OutputContract::Fixed(PortContract::of(MediaKind::VideoPacket)),
+        OutputContract::Fixed(PortContract::packet(MediaKind::VideoPacket)),
     );
     let error = context
         .attach_pad(&mut pad, branch)
@@ -1581,7 +1584,7 @@ fn a_demuxer_declares_packets_on_every_stream_pad() {
     // contract, which is the whole point of splitting the kind.
     for (pad, stream) in demuxer.src_pads().iter().zip(&streams) {
         let expected = match MediaKind::packet_for(stream.kind) {
-            Some(kind) => OutputContract::Fixed(PortContract::of(kind)),
+            Some(kind) => OutputContract::Fixed(PortContract::packet(kind)),
             None => OutputContract::Unknown,
         };
         assert_eq!(pad.contract(), expected);
@@ -1601,9 +1604,10 @@ fn a_system_memory_frame_cannot_feed_a_d3d11_filter() {
         eprintln!("skipped: no D3D11 hardware device available");
         return;
     };
-    let gpu_frames = InputContract::Fixed(
-        PortContract::of(MediaKind::VideoFrame).in_memory(MemoryDomain::D3d11),
-    );
+    let gpu_frames = InputContract::Fixed(PortContract::frame(
+        MediaKind::VideoFrame,
+        MemoryDomain::D3d11,
+    ));
     let scaler = |name: &str| {
         crate::elements::D3d11Scaler::new(
             name,
@@ -1755,9 +1759,10 @@ fn an_audio_filter_refuses_video_frames() {
         .pipe(volume)
         .to(DeclaringSink::boxed(
             "sink",
-            InputContract::Fixed(
-                PortContract::of(MediaKind::AudioFrame).in_memory(MemoryDomain::System),
-            ),
+            InputContract::Fixed(PortContract::frame(
+                MediaKind::AudioFrame,
+                MemoryDomain::System,
+            )),
         ))
         .expect("decoded audio through a gain filter is the intended chain");
 }
@@ -1792,9 +1797,10 @@ fn a_d3d11_texture_cannot_feed_a_cuda_filter() {
         ))
         .to(DeclaringSink::boxed(
             "sink",
-            InputContract::Fixed(
-                PortContract::of(MediaKind::VideoFrame).in_memory(MemoryDomain::Cuda),
-            ),
+            InputContract::Fixed(PortContract::frame(
+                MediaKind::VideoFrame,
+                MemoryDomain::Cuda,
+            )),
         ))
     else {
         panic!("a D3D11 texture is not reachable from a CUDA kernel");
@@ -1941,9 +1947,10 @@ fn a_video_source_cannot_be_attached_to_an_audio_branch() {
         .queue("q", 4)
         .to(DeclaringSink::boxed(
             "speakers",
-            InputContract::Fixed(
-                PortContract::of(MediaKind::AudioFrame).in_memory(MemoryDomain::System),
-            ),
+            InputContract::Fixed(PortContract::frame(
+                MediaKind::AudioFrame,
+                MemoryDomain::System,
+            )),
         ))
         .expect("the branch itself is consistent");
 

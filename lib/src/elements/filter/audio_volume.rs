@@ -239,9 +239,10 @@ impl AudioVolume {
                 gain_envelope: Vec::new(),
                 pad: SrcPad::with_contract(
                     format!("{name}_src"),
-                    OutputContract::Fixed(
-                        PortContract::of(MediaKind::AudioFrame).in_memory(MemoryDomain::System),
-                    ),
+                    OutputContract::Fixed(PortContract::frame(
+                        MediaKind::AudioFrame,
+                        MemoryDomain::System,
+                    )),
                 ),
             },
             handle,
@@ -349,9 +350,10 @@ impl Source for AudioVolume {
 impl Sink for AudioVolume {
     /// Scales samples in place; nothing else has samples to scale.
     fn input_contract(&self) -> InputContract {
-        InputContract::Fixed(
-            PortContract::of(MediaKind::AudioFrame).in_memory(MemoryDomain::System),
-        )
+        InputContract::Fixed(PortContract::frame(
+            MediaKind::AudioFrame,
+            MemoryDomain::System,
+        ))
     }
 
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
