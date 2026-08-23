@@ -9,6 +9,7 @@ use super::scale_graph::CudaScaleGraph;
 
 use crate::{
     buffer::MediaBuffer,
+    contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
     control::ControlMsg,
     element::{Element, ElementType, Sink, Source, element_pp_log},
     error::Result,
@@ -200,7 +201,10 @@ impl CudaScaler {
         // identity from being reused by a different context.
         let device_ctx = unsafe { (*hw_device_ctx.as_ptr()).data as *const ffi::AVHWDeviceContext };
 
-        let pad = SrcPad::new(format!("{name}_src"));
+        let pad = SrcPad::with_contract(
+            format!("{name}_src"),
+            OutputContract::Fixed(PortContract::of(MediaKind::Video).in_memory(MemoryDomain::Cuda)),
+        );
         pp_info!(pp_log: &pp_log, "created: dst={width}x{height}, interp={interp:?}");
         Self {
             name,
@@ -306,6 +310,11 @@ impl Source for CudaScaler {
 }
 
 impl Sink for CudaScaler {
+    /// Resizes on the device; a system-memory frame belongs in SwScaler.
+    fn input_contract(&self) -> InputContract {
+        InputContract::Fixed(PortContract::of(MediaKind::Video).in_memory(MemoryDomain::Cuda))
+    }
+
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         match buf {
             MediaBuffer::Video(frame) => self.scale(&frame),

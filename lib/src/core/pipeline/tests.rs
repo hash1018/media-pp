@@ -1757,3 +1757,49 @@ fn an_audio_filter_refuses_video_frames() {
         ))
         .expect("decoded audio through a gain filter is the intended chain");
 }
+
+/// Two GPU frames of different backends. Neither the buffer variant nor a
+/// single "is on a GPU" flag separates a D3D11 texture from a CUDA
+/// allocation — only naming the backend does, which is why the domain is
+/// an enum rather than a boolean.
+#[cfg(all(target_os = "windows", feature = "d3d11", feature = "cuda"))]
+#[test]
+fn a_d3d11_texture_cannot_feed_a_cuda_filter() {
+    use crate::elements::{CudaScaler, CudaScalerInterp, D3d11Upload};
+
+    let Some((device, _d3d_context)) = crate::test_support::try_d3d11_device() else {
+        eprintln!("skipped: no D3D11 hardware device available");
+        return;
+    };
+    let Some((cuda, _cuda_guard)) = crate::test_support::try_cuda_device() else {
+        return;
+    };
+
+    let Err(error) = contract_context()
+        .branch()
+        .pipe(video_decoder("decoder"))
+        .pipe(D3d11Upload::new("upload", &device, 64, 64))
+        .pipe(CudaScaler::new(
+            "scaler",
+            &cuda,
+            64,
+            64,
+            CudaScalerInterp::Bilinear,
+        ))
+        .to(DeclaringSink::boxed(
+            "sink",
+            InputContract::Fixed(PortContract::of(MediaKind::Video).in_memory(MemoryDomain::Cuda)),
+        ))
+    else {
+        panic!("a D3D11 texture is not reachable from a CUDA kernel");
+    };
+
+    let crate::Error::GraphError(GraphError::IncompatibleLink {
+        producer, consumer, ..
+    }) = error
+    else {
+        panic!("expected an IncompatibleLink, got {error}");
+    };
+    assert_eq!(&*producer, "upload");
+    assert_eq!(&*consumer, "scaler");
+}

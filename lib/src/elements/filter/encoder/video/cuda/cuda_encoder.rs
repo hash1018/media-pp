@@ -7,6 +7,7 @@ use crate::pp_log::{PpLog, pp_error, pp_info};
 
 use crate::{
     buffer::MediaBuffer,
+    contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
     control::ControlMsg,
     element::{Element, ElementType, Sink, Source, element_pp_log},
     elements::filter::is_codec_drain_boundary,
@@ -271,7 +272,10 @@ impl CudaEncoder {
 
         let encoder = opened?;
 
-        let pad = SrcPad::new(format!("{name}_src"));
+        let pad = SrcPad::with_contract(
+            format!("{name}_src"),
+            OutputContract::Fixed(PortContract::of(MediaKind::Packet)),
+        );
         pp_info!(
             pp_log: &pp_log,
             "opened: {} {}x{} {:?}, {} bps, gop={}",
@@ -402,6 +406,11 @@ impl Source for CudaEncoder {
 }
 
 impl Sink for CudaEncoder {
+    /// NVENC reads device memory directly; a system-memory frame needs a CudaUpload first.
+    fn input_contract(&self) -> InputContract {
+        InputContract::Fixed(PortContract::of(MediaKind::Video).in_memory(MemoryDomain::Cuda))
+    }
+
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         match buf {
             MediaBuffer::Video(frame) => self.encode(&frame),

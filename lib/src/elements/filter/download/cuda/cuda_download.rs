@@ -7,6 +7,7 @@ use crate::pp_log::{PpLog, pp_error, pp_info};
 
 use crate::{
     buffer::MediaBuffer,
+    contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
     control::ControlMsg,
     element::{Element, ElementType, Sink, Source, element_pp_log},
     error::Result,
@@ -158,7 +159,12 @@ impl CudaDownload {
         // identity from being reused by a different context.
         let device_ctx = unsafe { (*hw_device_ctx.as_ptr()).data as *const ffi::AVHWDeviceContext };
 
-        let pad = SrcPad::new(format!("{name}_src"));
+        let pad = SrcPad::with_contract(
+            format!("{name}_src"),
+            OutputContract::Fixed(
+                PortContract::of(MediaKind::Video).in_memory(MemoryDomain::System),
+            ),
+        );
         let pixel = format.pixel();
         let pool = UnboundObjectPool::new(
             0,
@@ -270,6 +276,11 @@ impl Source for CudaDownload {
 }
 
 impl Sink for CudaDownload {
+    /// The mirror of CudaUpload: only device memory has anything to bring back.
+    fn input_contract(&self) -> InputContract {
+        InputContract::Fixed(PortContract::of(MediaKind::Video).in_memory(MemoryDomain::Cuda))
+    }
+
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         match buf {
             MediaBuffer::Video(frame) => self.download(&frame),

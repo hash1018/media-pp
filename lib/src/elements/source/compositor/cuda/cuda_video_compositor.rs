@@ -24,6 +24,7 @@ use crate::{
     buffer::MediaBuffer,
     bus::{Bus, BusEvent},
     color::Color,
+    contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
     control::{ControlMsg, ControlReceiver, drain_control},
     element::{Element, ElementType, Sink, Source, SourceElement, element_pp_log},
     elements::{CudaScalerInterp, filter::scaler::cuda::scale_graph::CudaScaleGraph},
@@ -407,6 +408,11 @@ impl Element for CudaVideoCompositorInputSink {
 }
 
 impl Sink for CudaVideoCompositorInputSink {
+    /// Every layer is composited on the device, so each input arrives there just as the composed output does.
+    fn input_contract(&self) -> InputContract {
+        InputContract::Fixed(PortContract::of(MediaKind::Video).in_memory(MemoryDomain::Cuda))
+    }
+
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         match buf {
             MediaBuffer::Video(frame) => {
@@ -598,7 +604,12 @@ impl CudaVideoCompositor {
                     ffmpeg::frame::Video::empty,
                     |_| {},
                 ),
-                pad: SrcPad::new(format!("{name}_src")),
+                pad: SrcPad::with_contract(
+                    format!("{name}_src"),
+                    OutputContract::Fixed(
+                        PortContract::of(MediaKind::Video).in_memory(MemoryDomain::Cuda),
+                    ),
+                ),
             },
             CudaVideoCompositorHandle {
                 shared: Arc::downgrade(&shared),

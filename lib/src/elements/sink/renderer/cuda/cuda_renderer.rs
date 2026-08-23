@@ -7,6 +7,7 @@ use crate::pp_log::{PpLog, pp_error, pp_info};
 
 use crate::{
     buffer::MediaBuffer,
+    contract::{InputContract, MediaKind, MemoryDomain, PortContract},
     control::ControlMsg,
     element::{Element, ElementType, Sink, element_pp_log},
     elements::sink::renderer::SubmitError,
@@ -240,6 +241,11 @@ impl Element for CudaRenderer {
 }
 
 impl Sink for CudaRenderer {
+    /// Presents a device-resident frame; nothing else reaches its interop path.
+    fn input_contract(&self) -> InputContract {
+        InputContract::Fixed(PortContract::of(MediaKind::Video).in_memory(MemoryDomain::Cuda))
+    }
+
     fn consume(&mut self, buf: MediaBuffer) -> crate::error::Result<()> {
         let MediaBuffer::Video(frame) = buf else {
             return Ok(());

@@ -10,6 +10,7 @@ use windows::{
 
 use crate::{
     buffer::MediaBuffer,
+    contract::{InputContract, MediaKind, MemoryDomain, PortContract},
     control::ControlMsg,
     element::{Element, ElementType, Sink, element_pp_log},
     elements::SubmitError,
@@ -269,6 +270,11 @@ impl Element for D3d12Renderer {
 }
 
 impl Sink for D3d12Renderer {
+    /// Presents a device resource; nothing else has a path to the swap chain.
+    fn input_contract(&self) -> InputContract {
+        InputContract::Fixed(PortContract::of(MediaKind::Video).in_memory(MemoryDomain::D3d12))
+    }
+
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         let MediaBuffer::Video(frame) = buf else {
             return Ok(());

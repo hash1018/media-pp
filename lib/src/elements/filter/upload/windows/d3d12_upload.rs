@@ -7,6 +7,7 @@ use windows::Win32::Graphics::Direct3D12::ID3D12Device;
 
 use crate::{
     buffer::MediaBuffer,
+    contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
     control::ControlMsg,
     element::{Element, ElementType, Sink, Source, element_pp_log},
     error::Result,
@@ -158,7 +159,12 @@ impl D3d12Upload {
             unsafe { create_hw_frames_ctx(&hw_device_ctx, width, height, POOL_SIZE) }
                 .map_err(D3d12UploadError::HwFramesInit)?;
 
-        let pad = SrcPad::new(format!("{name}_src"));
+        let pad = SrcPad::with_contract(
+            format!("{name}_src"),
+            OutputContract::Fixed(
+                PortContract::of(MediaKind::Video).in_memory(MemoryDomain::D3d12),
+            ),
+        );
         let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
         pp_info!(pp_log: &pp_log, "opened: {width}x{height}");
         Ok(Self {
@@ -199,6 +205,11 @@ impl Source for D3d12Upload {
 }
 
 impl Sink for D3d12Upload {
+    /// CPU-readable planes: the D3D12 counterpart of D3d11Upload.
+    fn input_contract(&self) -> InputContract {
+        InputContract::Fixed(PortContract::of(MediaKind::Video).in_memory(MemoryDomain::System))
+    }
+
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         match buf {
             MediaBuffer::Video(frame) => {

@@ -7,6 +7,7 @@ use crate::pp_log::{PpLog, pp_error, pp_info};
 
 use crate::{
     buffer::MediaBuffer,
+    contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
     control::ControlMsg,
     element::{Element, ElementType, Sink, Source, element_pp_log},
     elements::{CudaDriverError, CudaUploadError},
@@ -173,7 +174,10 @@ impl CudaConverter {
         // identity from being reused by a different context.
         let device_ctx = unsafe { (*hw_device_ctx.as_ptr()).data as *mut ffi::AVHWDeviceContext };
 
-        let pad = SrcPad::new(format!("{name}_src"));
+        let pad = SrcPad::with_contract(
+            format!("{name}_src"),
+            OutputContract::Fixed(PortContract::of(MediaKind::Video).in_memory(MemoryDomain::Cuda)),
+        );
         let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
         pp_info!(pp_log: &pp_log, "opened: {width}x{height} BGRA -> NV12");
         Ok(Self {
@@ -320,6 +324,11 @@ impl Source for CudaConverter {
 }
 
 impl Sink for CudaConverter {
+    /// Converts pixel layout on the device; the layout itself is a runtime value, not part of this.
+    fn input_contract(&self) -> InputContract {
+        InputContract::Fixed(PortContract::of(MediaKind::Video).in_memory(MemoryDomain::Cuda))
+    }
+
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         match buf {
             MediaBuffer::Video(frame) => self.convert(&frame),

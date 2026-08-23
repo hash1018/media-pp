@@ -130,7 +130,9 @@ it arrives.
 The memory domain is what separates frames the buffer type cannot: a decoded
 `MediaBuffer::Video` in system memory and one holding a D3D11 texture are the
 same variant, so only the domain catches a `SwDecoder` wired straight into a
-`D3d11Scaler` with no `D3d11Upload` between them.
+`D3d11Scaler` with no `D3d11Upload` between them. It names the backend rather
+than just marking a frame as "on a GPU", so a D3D11 texture handed to a CUDA
+filter is caught the same way.
 
 This is not caps negotiation. Nothing selects a codec, inserts a converter,
 renegotiates mid-stream, or reallocates a pool. Declaring a contract is
@@ -139,8 +141,8 @@ opt-in, and these elements declare one:
 - Packet path: `FileDemuxer`, `SwDecoder`, `SwEncoder`, `SwAudioEncoder`,
   `Mp4Muxer`, `SegmentedMp4Muxer`, `HlsMuxer`, `RtspSink`, `PacketCounter`.
 - Video: `SwScaler`, `SwChromaKey`, `SwVideoCompositor`, `OrtDetector`, and
-  the `D3d11*` upload, download, scaler, chroma key, decoder, encoder,
-  renderer, and compositor.
+  every backend's upload, download, scaler, converter, chroma key, decoder,
+  encoder, renderer, and compositor (`D3d11*`, `D3d12*`, `Cuda*`).
 - Audio: `AudioResampler`, `AudioVolume`, `AudioMixer`, `WasapiRenderer`,
   `PipeWireAudioRenderer`.
 - Either decoded medium: `FrameCounter`.

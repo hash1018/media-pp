@@ -6,6 +6,7 @@ use thiserror::Error as ThisError;
 use crate::pp_log::{PpLog, pp_error, pp_info};
 use crate::{
     buffer::MediaBuffer,
+    contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
     control::ControlMsg,
     element::{Element, ElementType, Sink, Source, element_pp_log},
     error::Result,
@@ -89,7 +90,12 @@ impl D3d12Download {
     pub fn new(name: impl Into<String>, width: u32, height: u32) -> Self {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::D3d12Download, &name, None);
-        let pad = SrcPad::new(format!("{name}_src"));
+        let pad = SrcPad::with_contract(
+            format!("{name}_src"),
+            OutputContract::Fixed(
+                PortContract::of(MediaKind::Video).in_memory(MemoryDomain::System),
+            ),
+        );
         let pool = UnboundObjectPool::new(
             0,
             move || ffmpeg::frame::Video::new(ffmpeg::format::Pixel::NV12, width, height),
@@ -187,6 +193,11 @@ impl Source for D3d12Download {
 }
 
 impl Sink for D3d12Download {
+    /// The mirror of D3d12Upload: only a device resource has anything to bring back.
+    fn input_contract(&self) -> InputContract {
+        InputContract::Fixed(PortContract::of(MediaKind::Video).in_memory(MemoryDomain::D3d12))
+    }
+
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         match buf {
             MediaBuffer::Video(frame) => self.download(&frame),

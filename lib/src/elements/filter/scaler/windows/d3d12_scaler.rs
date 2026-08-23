@@ -17,6 +17,7 @@ use windows::{
 use crate::pp_log::{PpLog, pp_error, pp_info};
 use crate::{
     buffer::MediaBuffer,
+    contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
     control::ControlMsg,
     element::{Element, ElementType, Sink, Source, element_pp_log},
     error::Result,
@@ -200,7 +201,12 @@ impl D3d12Scaler {
             Err(code) => return Err(D3d12ScalerError::HwFramesInit(code)),
         };
 
-        let pad = SrcPad::new(format!("{name}_src"));
+        let pad = SrcPad::with_contract(
+            format!("{name}_src"),
+            OutputContract::Fixed(
+                PortContract::of(MediaKind::Video).in_memory(MemoryDomain::D3d12),
+            ),
+        );
         let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
         pp_info!(pp_log: &pp_log, "opened: NV12 -> {width}x{height} NV12");
         Ok(Self {
@@ -381,6 +387,11 @@ impl Source for D3d12Scaler {
 }
 
 impl Sink for D3d12Scaler {
+    /// Scales on the GPU; a system-memory frame belongs in SwScaler.
+    fn input_contract(&self) -> InputContract {
+        InputContract::Fixed(PortContract::of(MediaKind::Video).in_memory(MemoryDomain::D3d12))
+    }
+
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         match buf {
             MediaBuffer::Video(frame) => self.scale(frame),
