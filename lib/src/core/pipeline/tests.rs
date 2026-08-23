@@ -1803,3 +1803,87 @@ fn a_d3d11_texture_cannot_feed_a_cuda_filter() {
     assert_eq!(&*producer, "upload");
     assert_eq!(&*consumer, "scaler");
 }
+
+/// Regression: `D3d12Renderer` was declared as taking a device resource
+/// only, which refused the CPU-decode pipelines that legitimately feed it
+/// — it uploads a `Pixel::YUV420P` frame itself. Two examples stopped
+/// building their pipeline before this was caught.
+///
+/// This is the failure mode a contract can introduce and a runtime check
+/// cannot: refusing a chain that works. An element accepting more than
+/// one domain must claim neither.
+#[cfg(all(target_os = "windows", feature = "d3d12"))]
+#[test]
+fn a_renderer_that_uploads_cpu_frames_does_not_claim_a_memory_domain() {
+    use std::any::Any;
+
+    use windows::Win32::Graphics::Direct3D12::{ID3D12Device, ID3D12Fence, ID3D12Resource};
+
+    use crate::elements::{D3d12FrameRenderer, D3d12Renderer, RawPlane, SubmitError};
+
+    /// Never submitted to: the link check runs when the branch is built,
+    /// so no buffer ever reaches these.
+    struct StubRenderer(ID3D12Device);
+
+    impl D3d12FrameRenderer for StubRenderer {
+        fn device(&self) -> ID3D12Device {
+            self.0.clone()
+        }
+
+        unsafe fn submit_yuv420p(
+            &self,
+            _y: RawPlane,
+            _u: RawPlane,
+            _v: RawPlane,
+            _width: u32,
+            _height: u32,
+        ) -> std::result::Result<(), SubmitError> {
+            unreachable!("the link check never pushes a buffer")
+        }
+
+        unsafe fn submit_nv12_texture(
+            &self,
+            _texture: ID3D12Resource,
+            _fence: ID3D12Fence,
+            _fence_value: u64,
+            _width: u32,
+            _height: u32,
+            _keep_alive: Box<dyn Any + Send>,
+        ) -> std::result::Result<(), SubmitError> {
+            unreachable!("the link check never pushes a buffer")
+        }
+
+        fn resize(&self, _width: u32, _height: u32) -> std::result::Result<(), SubmitError> {
+            unreachable!("the link check never resizes")
+        }
+    }
+
+    let Some(device) = crate::test_support::try_d3d12_device() else {
+        eprintln!("skipped: no D3D12 hardware device available");
+        return;
+    };
+
+    // A software decoder's system-memory frames must still reach it.
+    contract_context()
+        .branch()
+        .pipe(video_decoder("decoder"))
+        .to(Box::new(D3d12Renderer::new(
+            "renderer",
+            Box::new(StubRenderer(device.clone())),
+        )))
+        .expect("this renderer uploads a YUV420P frame itself");
+
+    // And so must a device resource, through the upload that produces one.
+    contract_context()
+        .branch()
+        .pipe(video_decoder("decoder"))
+        .pipe(
+            crate::elements::D3d12Upload::new("upload", &device, 64, 64)
+                .expect("the upload must open on a live device"),
+        )
+        .to(Box::new(D3d12Renderer::new(
+            "renderer",
+            Box::new(StubRenderer(device)),
+        )))
+        .expect("a D3D12 resource is the other half of what it accepts");
+}

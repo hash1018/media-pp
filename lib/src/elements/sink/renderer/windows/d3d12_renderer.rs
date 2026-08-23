@@ -270,9 +270,13 @@ impl Element for D3d12Renderer {
 }
 
 impl Sink for D3d12Renderer {
-    /// Presents a device resource; nothing else has a path to the swap chain.
+    /// Deliberately no memory-domain claim: unlike `D3d11Renderer` and
+    /// `CudaRenderer`, this one presents a `Pixel::D3D12` resource *and*
+    /// uploads a `Pixel::YUV420P` system frame itself, so narrowing it to
+    /// the device would refuse the CPU-decode pipelines that legitimately
+    /// feed it (see the `sw_decode_render` and `screen_capture` examples).
     fn input_contract(&self) -> InputContract {
-        InputContract::Fixed(PortContract::of(MediaKind::Video).in_memory(MemoryDomain::D3d12))
+        InputContract::Fixed(PortContract::of(MediaKind::Video))
     }
 
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
