@@ -95,6 +95,13 @@ documentation and implementation differ.
 - Match the `MediaBuffer` variant before reading it and return a typed error for
   incompatible input. Before FFI or GPU calls, validate format, dimensions,
   plane/stride bounds, texture array index, and device ownership as applicable.
+- Declare a new element's link contract through `Sink::input_contract` and
+  `SrcPad::with_contract`, limited to what construction already settles: the
+  `MediaKind`s a port deals in and a decoded frame's `MemoryDomain`. This never
+  replaces the runtime validation above — it only refuses wiring no buffer could
+  have made work, before the pipeline starts. Both sides default to `Unknown`,
+  which always links, so an element with a genuinely runtime-dependent contract
+  simply leaves it alone rather than guessing.
 - Preserve media metadata across transforms unless the element intentionally
   creates a new timeline: PTS, duration, packet `time_base`, and video
   color-space/range are part of the buffer contract, not optional decoration.
