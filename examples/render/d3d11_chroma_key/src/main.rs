@@ -25,7 +25,7 @@
 //! `video_compositor` is the same graph on the CPU, with `SwChromaKey` and
 //! `SwVideoCompositor`.
 //!
-//!     cargo run -p gpu_chroma_key -- [output.mp4] [seconds]
+//!     cargo run -p d3d11_chroma_key -- [output.mp4] [seconds]
 
 #[cfg(not(target_os = "windows"))]
 fn main() {
@@ -85,7 +85,7 @@ mod windows_example {
 
         let path = std::env::args()
             .nth(1)
-            .unwrap_or_else(|| "gpu_chroma_key.mp4".into());
+            .unwrap_or_else(|| "d3d11_chroma_key.mp4".into());
         let seconds: u64 = std::env::args()
             .nth(2)
             .and_then(|value| value.parse().ok())

@@ -1,4 +1,4 @@
-# gpu_chroma_key
+# d3d11_chroma_key
 
 A green screen keyed out on the GPU and composited over live video, with the
 frame never leaving video memory between the upload and the recording branch's
@@ -36,5 +36,5 @@ here rejects a texture that came from a different device.
 No window and no media file are involved, so this runs headless.
 
 ```sh
-cargo run -p gpu_chroma_key -- [output.mp4] [seconds]
+cargo run -p d3d11_chroma_key -- [output.mp4] [seconds]
 ```
