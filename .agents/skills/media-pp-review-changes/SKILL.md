@@ -33,6 +33,11 @@ working tree.
   that retained handles do not keep unrelated pipelines or buses alive.
 - For data paths, validate buffer variants and backend invariants, metadata
   preservation, EOS drain/forwarding, and `Stop` abandonment semantics.
+- For a declared link contract, check that it states only what construction
+  settles and no more. A contract narrower than what the element really accepts
+  refuses a working pipeline at build time, which is a worse failure than the
+  runtime error it was meant to pre-empt; confirm a passing chain is covered,
+  not just a refused one.
 - For concurrency, check lock scope, callbacks and blocking calls under locks,
   source control responsiveness, Queue recovery boundaries, and fan-in/fan-out
   failure isolation.

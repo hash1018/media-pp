@@ -20,6 +20,20 @@ name.
 - Define accepted and produced `MediaBuffer` variants, formats, dimensions,
   metadata, number and meaning of pads, EOS behavior, control behavior, error
   boundary, thread ownership, and teardown before choosing the public API.
+- Declare the link contract from that classification: `Sink::input_contract`
+  and `SrcPad::with_contract` (see `crate::contract`). Both default to
+  `Unknown`, so a new element that skips this silently opts out of the check
+  and the wiring mistake it would have caught surfaces per buffer at runtime
+  instead. State only what construction already settles — the `MediaKind`s the
+  port deals in, and the `MemoryDomain` for a decoded frame. Pixel format,
+  resolution, stride, color space, and device identity stay in the runtime
+  validation below; a contract that claims more than the element can promise
+  refuses a pipeline that works, which is worse than declaring nothing.
+- Use `Any` only for an element that genuinely handles every kind, and pair it
+  with `OutputContract::Passthrough` when it forwards what it received — that
+  combination is what keeps a contract propagating to the elements downstream.
+  An element whose output depends on something it cannot know at construction
+  stays `Unknown`.
 - Keep backend-specific public names prefixed. An unprefixed type must have a
   deliberately backend-independent contract.
 - Expose only construction and runtime controls required by the current use
@@ -76,6 +90,10 @@ name.
   metadata preservation, EOS draining and forwarding, control propagation,
   recoverable downstream failure, and teardown according to the element's
   contract.
+- For a declared link contract, cover both directions: the mismatch it is meant
+  to refuse, and a valid chain it must still allow. The second half is not
+  optional — over-rejection is the failure mode this check can introduce, and
+  only a passing case proves the declaration is not too narrow.
 - Make hardware tests detect unavailable devices and skip with a reason. Tests
   needing media use `test_support::try_test_video` and must not assume a
   particular fixture's codec, dimensions, duration, or keyframe layout.
