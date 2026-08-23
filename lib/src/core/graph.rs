@@ -490,6 +490,11 @@ impl PipelineGraph {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn resolved_output_count(&self) -> usize {
+        self.0.lock().unwrap().outgoing.len()
+    }
+
     /// Returns the attached branch that owns `element`, if the element was
     /// introduced by a branch attachment transaction.
     ///
@@ -633,6 +638,9 @@ impl PipelineGraph {
         state
             .edges
             .retain(|edge| !removed_branches.contains(&edge.branch_id));
+        state
+            .outgoing
+            .retain(|element, _| !removed_nodes.contains(element));
         state.revision += 1;
         Ok(())
     }

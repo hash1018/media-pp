@@ -2348,3 +2348,46 @@ fn a_dynamic_tee_branch_is_checked_and_a_refusal_changes_nothing() {
         .attach(good)
         .expect("a video branch is what this Tee can feed");
 }
+
+/// Resolved contracts are live-graph state just like nodes and edges. A
+/// detached dynamic branch must release those entries too; element IDs are
+/// never reused, so leaving one behind would grow the graph for every churn
+/// cycle even though snapshots and `sink_count` said the branch was gone.
+#[test]
+fn detaching_a_dynamic_tee_branch_releases_its_resolved_contracts() {
+    use crate::elements::{TestVideoOptions, TestVideoSource};
+
+    let context = contract_context();
+    let fixed = context
+        .branch()
+        .to(DeclaringSink::boxed("fixed", video_frames()))
+        .expect("consistent");
+    let (tee, handle) = TeeBuilder::new("tee", context.clone())
+        .branch(fixed)
+        .build_dynamic()
+        .expect("consistent");
+    let mut source = TestVideoSource::new("video", TestVideoOptions::default());
+    context
+        .attach(&mut source, 0, tee)
+        .expect("the fixed branch matches the source");
+    let baseline = context.graph.resolved_output_count();
+
+    let dynamic = handle
+        .branch()
+        .expect("the Tee is alive")
+        .queue("dynamic-q", 4)
+        .to(DeclaringSink::boxed("dynamic", video_frames()))
+        .expect("consistent");
+    let branch_id = handle.attach(dynamic).expect("attach the dynamic branch");
+    assert!(
+        context.graph.resolved_output_count() > baseline,
+        "the attached branch must contribute resolved contract entries"
+    );
+
+    handle.detach(branch_id).expect("detach the dynamic branch");
+    assert_eq!(
+        context.graph.resolved_output_count(),
+        baseline,
+        "detaching must release every resolved contract owned by the branch"
+    );
+}
