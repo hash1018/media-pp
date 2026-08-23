@@ -1608,6 +1608,10 @@ fn a_system_memory_frame_cannot_feed_a_d3d11_filter() {
         MediaKind::VideoFrame,
         MemoryDomain::D3d11,
     ));
+    // A device existing is not the same as it supporting the video
+    // processor this scaler opens: CI machines routinely have one without
+    // the other, and that is a missing capability to skip on, not a
+    // failure of what this test is checking.
     let scaler = |name: &str| {
         crate::elements::D3d11Scaler::new(
             name,
@@ -1617,8 +1621,12 @@ fn a_system_memory_frame_cannot_feed_a_d3d11_filter() {
             64,
             64,
         )
-        .expect("the scaler must open on a live device")
     };
+    if let Err(error) = scaler("probe") {
+        eprintln!("skipped: this D3D11 device has no usable video processor ({error})");
+        return;
+    }
+    let scaler = |name: &str| scaler(name).expect("the probe above already opened one");
 
     let Err(error) = contract_context()
         .branch()
@@ -1859,6 +1867,16 @@ fn a_d3d12_renderer_takes_device_resources_only() {
         eprintln!("skipped: no D3D12 hardware device available");
         return;
     };
+    // The second half of this test needs a working D3D12VA hw frames
+    // context, which a device alone does not guarantee. Probe for it up
+    // front so a machine without one skips rather than failing halfway.
+    let upload = match D3d12Upload::new("upload", &device, 64, 64) {
+        Ok(upload) => upload,
+        Err(error) => {
+            eprintln!("skipped: this D3D12 device cannot open a frames context ({error})");
+            return;
+        }
+    };
 
     let Err(error) = contract_context()
         .branch()
@@ -1884,10 +1902,7 @@ fn a_d3d12_renderer_takes_device_resources_only() {
     contract_context()
         .branch()
         .pipe(video_decoder("decoder"))
-        .pipe(
-            D3d12Upload::new("upload", &device, 64, 64)
-                .expect("the upload must open on a live device"),
-        )
+        .pipe(upload)
         .to(Box::new(D3d12Renderer::new(
             "renderer",
             Box::new(StubRenderer(device)),
