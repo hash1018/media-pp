@@ -33,12 +33,13 @@ mod windows_example {
     /// `CaptureMode::Gpu`'s own docs) and presents it directly, no `SwScaler`
     /// (desktop content is already BGRA/RGB, no YUV conversion needed, and
     /// `D3d11Renderer` letterboxes any capture size into the window on its
-    /// own). Compare against `screen_capture`, which captures to a plain CPU
-    /// `Pixel::BGRA` frame instead and converts it to YUV420P for the D3D12
-    /// CPU-upload path.
+    /// own). Compare against the Windows-only `screen_capture`, which captures
+    /// to a plain CPU `Pixel::BGRA` frame instead and converts it to YUV420P
+    /// for the D3D12 CPU-upload path.
     ///
     /// No cursor: `CaptureMode::Gpu` doesn't support cursor compositing yet
-    /// (see that variant's own docs) — `screen_capture`'s CPU path does.
+    /// (see that variant's own docs) — the Windows-only `screen_capture` CPU
+    /// path does.
     ///
     ///     cargo run -p screen_capture_gpu
     pub(super) fn run() {

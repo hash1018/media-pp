@@ -1,5 +1,7 @@
 # screen_capture
 
+Windows only.
+
 `DxgiCaptureSource -> SwScaler -> D3d12Upload -> Renderer`: captures the desktop
 live via DXGI Desktop Duplication (cursor included) at a constant frame rate
 (`DxgiCaptureOptions::fps`), converts/resizes it to the window's own size as

@@ -33,7 +33,8 @@ mod windows_example {
     /// DxgiCaptureSource -> SwScaler -> SwEncoder -> Mp4Muxer: captures the
     /// desktop live via DXGI Desktop Duplication and encodes it straight into
     /// a playable `.mp4` file — no window, no renderer, just a headless
-    /// recording (compare `screen_capture`, which renders instead of encoding).
+    /// recording (compare the Windows-only `screen_capture`, which renders
+    /// instead of encoding).
     ///
     /// `DxgiCaptureSource` never reaches `Eos` on its own (see its own docs);
     /// this just captures for a fixed duration and then `pipeline.stop()`s,

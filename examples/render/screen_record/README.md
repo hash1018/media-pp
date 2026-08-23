@@ -2,8 +2,8 @@
 
 `CaptureSource -> SwScaler -> SwEncoder -> Mp4Muxer`: captures the desktop live
 and encodes it straight into a playable `.mp4` file — no window, no renderer,
-just a headless recording (compare `screen_capture`, which renders instead of
-encoding).
+just a headless recording (compare the Windows-only `screen_capture`, which
+renders instead of encoding).
 
 The capture source never reaches `Eos` on its own; this just captures for a
 fixed duration and then `pipeline.stop()`s, which is also what finalizes the

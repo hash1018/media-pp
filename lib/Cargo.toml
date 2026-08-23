@@ -72,7 +72,7 @@ futures-util = { version = "0.3", optional = true }
 # `requested` is documented "Since 0.3.50", so the older `v0_3_49` pin named a
 # version that did not have it. Raises the minimum libpipewire to 0.3.50
 # (2022); distributions ship far newer.
-pipewire = { version = "0.10", optional = true, features = ["v0_3_50"] }
+pipewire = { version = "0.10.1", optional = true, features = ["v0_3_50"] }
 pollster = { version = "1", optional = true }
 
 # Every `unsafe` block in this crate states why it is sound. The rule is
