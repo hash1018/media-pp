@@ -5,13 +5,13 @@ use crate::pp_log::{PpLog, pp_trace};
 use crate::{
     buffer::MediaBuffer,
     bus::{Bus, BusEvent},
-    contract::{InputContract, OutputContract, PortContract},
+    contract::{InputContract, OutputContract},
     control::ControlMsg,
     element::{Context, Element, ElementType, Filter, Sink, Source, element_pp_log},
     error::Result,
     graph::{
-        BranchId, BranchPlan, ElementId, GraphError, NodeInfo, PlannedEdge, PortContracts, PortRef,
-        ResolvedFlow,
+        BranchId, BranchPlan, ElementId, GraphError, Incoming, NodeInfo, PlannedEdge,
+        PortContracts, PortRef, ResolvedFlow,
     },
     pad::SrcPad,
     queue::{OverflowPolicy, Queue},
@@ -440,7 +440,7 @@ impl ChainBuilder {
         // catches links downstream of a stage that produces something of
         // its own — a decoder feeding a muxer, say. The same walk runs
         // again at attach time with the real upstream contract.
-        plan.validate(None)?;
+        plan.resolve(None)?;
 
         let root = self
             .elements
@@ -497,14 +497,14 @@ impl Context {
         // it. Re-walking the whole branch rather than comparing one
         // summarized input contract is what makes a leading passthrough
         // stage work: it carries this pad's contract through to whichever
-        // element downstream actually constrains it. Rejecting here leaves
-        // the pad unlinked and the graph untouched, same as any other
-        // attach failure.
-        branch.plan.validate(incoming_from(pad))?;
+        // element downstream actually constrains it. The check runs inside
+        // `attach_with`'s own transaction, so a rejected branch leaves the
+        // pad unlinked and the graph untouched.
+        let incoming = Incoming::Known(incoming_from(pad));
         let DetachedBranch { root, plan } = branch;
         Ok(self
             .graph
-            .attach_with(self.source_id, from_port, plan, |_| {
+            .attach_with(self.source_id, from_port, incoming, plan, |_| {
                 pad.link(root);
                 Ok(())
             })?)
@@ -512,7 +512,7 @@ impl Context {
 }
 
 /// What a pad is known to be putting onto the wire, for
-/// [`BranchPlan::validate`].
+/// [`BranchPlan::resolve`].
 ///
 /// A [`OutputContract::Passthrough`] pad — a [`crate::elements::Tee`]'s —
 /// carries whatever reached the element that owns it, which this cannot

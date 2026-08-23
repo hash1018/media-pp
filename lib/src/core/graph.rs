@@ -344,6 +344,17 @@ pub(crate) struct ResolvedFlow {
     pub contract: PortContract,
 }
 
+/// Where the contract feeding a new branch comes from.
+#[derive(Debug)]
+pub(crate) enum Incoming {
+    /// The caller already knows it — a source pad states its own.
+    Known(Option<ResolvedFlow>),
+    /// Read it from whatever the parent element was resolved to emit.
+    /// Resolved under the graph lock, so a dynamic attach cannot race the
+    /// transaction that established it.
+    FromParent,
+}
+
 /// One planned element's two contracts, kept per node so a branch can be
 /// re-validated against whatever it eventually gets attached to.
 #[derive(Debug, Clone, Copy)]
@@ -366,7 +377,9 @@ pub(crate) struct BranchPlan {
 
 impl BranchPlan {
     /// Rejects any link in this branch whose two sides cannot meet, given
-    /// what is flowing into its root.
+    /// what is flowing into its root, and reports what each node was
+    /// resolved to emit so a later attach onto one of them can be checked
+    /// against the same answer.
     ///
     /// `incoming` is `None` while the branch is still detached — nothing is
     /// known to be flowing yet, so only links downstream of a stage that
@@ -375,7 +388,11 @@ impl BranchPlan {
     /// catches a branch whose leading stages are all passthrough: those
     /// carry the flow through untouched, so the requirement that matters
     /// belongs to an element further down.
-    pub(crate) fn validate(&self, incoming: Option<ResolvedFlow>) -> Result<(), GraphError> {
+    pub(crate) fn resolve(
+        &self,
+        incoming: Option<ResolvedFlow>,
+    ) -> Result<HashMap<ElementId, Option<ResolvedFlow>>, GraphError> {
+        let mut outgoing_by_node = HashMap::new();
         let name_of = |id: ElementId| {
             self.nodes
                 .iter()
@@ -418,11 +435,12 @@ impl BranchPlan {
 
             // Fan-out: every branch of a `Tee` receives the same buffers,
             // so each outgoing edge carries the same resolved flow.
+            outgoing_by_node.insert(id, outgoing.clone());
             for edge in self.edges.iter().filter(|edge| edge.from.element == id) {
                 pending.push((edge.to.element, outgoing.clone()));
             }
         }
-        Ok(())
+        Ok(outgoing_by_node)
     }
 }
 
@@ -441,6 +459,13 @@ struct GraphState {
     nodes: Vec<NodeInfo>,
     edges: Vec<EdgeInfo>,
     branches: HashMap<BranchId, BranchRecord>,
+    /// What each attached element was resolved to emit, recorded by the
+    /// attach that committed it. Internal bookkeeping, not part of
+    /// [`GraphSnapshot`]: its only reader is a later attach onto one of
+    /// these elements — a [`crate::elements::Tee`] gaining a branch while
+    /// the pipeline runs — which has no other way to know what is already
+    /// flowing through it.
+    outgoing: HashMap<ElementId, Option<ResolvedFlow>>,
 }
 
 /// Live, transactionally-updated graph behind [`crate::pipeline::Pipeline`].
@@ -501,6 +526,7 @@ impl PipelineGraph {
         &self,
         parent: ElementId,
         from_port: Arc<str>,
+        incoming: Incoming,
         plan: BranchPlan,
         attach_runtime: impl FnOnce(BranchId) -> Result<(), GraphError>,
     ) -> Result<BranchId, GraphError> {
@@ -516,6 +542,14 @@ impl PipelineGraph {
                 return Err(GraphError::NodeAlreadyAttached(node.id));
             }
         }
+
+        // Everything below mutates; this is the last thing that can
+        // refuse, so a rejected branch leaves the graph untouched.
+        let incoming = match incoming {
+            Incoming::Known(flow) => flow,
+            Incoming::FromParent => state.outgoing.get(&parent).cloned().flatten(),
+        };
+        let outgoing = plan.resolve(incoming)?;
 
         state.next_branch_id += 1;
         let branch_id = BranchId(state.next_branch_id);
@@ -546,6 +580,7 @@ impl PipelineGraph {
         }
 
         let owned_nodes = plan.nodes.iter().map(|node| node.id).collect();
+        state.outgoing.extend(outgoing);
         state.nodes.extend(plan.nodes);
         state.edges.extend(edges);
         state.branches.insert(

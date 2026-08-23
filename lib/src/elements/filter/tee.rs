@@ -12,7 +12,7 @@ use crate::{
     control::ControlMsg,
     element::{Context, Element, ElementType, Sink, element_pp_log},
     error::Result,
-    graph::{BranchId, ElementId, GraphError, PlannedEdge, PortRef, log_topology},
+    graph::{BranchId, ElementId, GraphError, Incoming, PlannedEdge, PortRef, log_topology},
     pad::SrcPad,
     pipeline::{ChainBuilder, DetachedBranch},
 };
@@ -196,6 +196,15 @@ impl TeeBuilder {
         let shared = tee.shared.clone();
         let context = shared.context.clone();
         let mut tee_branch = context.branch().to(Box::new(tee))?;
+        // `ChainBuilder` ends a chain at a terminal `Sink`, which by
+        // definition emits nothing, so it recorded this `Tee` as producing
+        // `Unknown`. A `Tee` is the one terminal that does have outputs —
+        // its pads just live behind a lock instead of in `src_pads` — and
+        // every one of them forwards what it was given. Without this the
+        // flow stops at the `Tee` and no branch below it is ever checked.
+        if let Some(contracts) = tee_branch.plan.contracts.get_mut(&tee_id) {
+            contracts.output = OutputContract::Passthrough;
+        }
         let mut runtime_branches = lock_unpoisoned(&shared.branches);
 
         for branch in initial_branches {
@@ -260,20 +269,25 @@ impl TeeHandle {
         let from_port: Arc<str> = pad.name().into();
         let DetachedBranch { root, plan } = branch;
         let root_id = plan.root;
-        let branch_id =
-            shared
-                .context
-                .graph
-                .attach_with(self.id, from_port, plan, |branch_id| {
-                    pad.link(root);
-                    branches.push(Arc::new(TeeBranch {
-                        id: Some(branch_id),
-                        root_id,
-                        active: AtomicBool::new(true),
-                        pad: Mutex::new(pad),
-                    }));
-                    Ok(())
-                })?;
+        let branch_id = shared.context.graph.attach_with(
+            self.id,
+            from_port,
+            // What this `Tee` was itself resolved to receive: a
+            // branch added while the pipeline runs is checked
+            // against the same flow its siblings already carry.
+            Incoming::FromParent,
+            plan,
+            |branch_id| {
+                pad.link(root);
+                branches.push(Arc::new(TeeBranch {
+                    id: Some(branch_id),
+                    root_id,
+                    active: AtomicBool::new(true),
+                    pad: Mutex::new(pad),
+                }));
+                Ok(())
+            },
+        )?;
         let snapshot =
             crate::log::enabled(crate::log::Level::Info).then(|| shared.context.graph.snapshot());
         drop(branches);

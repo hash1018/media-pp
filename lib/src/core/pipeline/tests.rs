@@ -2202,3 +2202,149 @@ fn a_passthrough_at_the_head_of_a_branch_accepts_a_matching_source() {
         .attach(&mut source, 0, branch)
         .expect("the upload is exactly what makes this source reach the renderer");
 }
+
+// ---------------------------------------------------------------------
+// Tee branches, initial and dynamic.
+//
+// A Tee's pads are Passthrough, so nothing about the pad alone says what
+// a branch attached to it will receive. Both of these used to link
+// unchecked: the initial branches because their plans were merged into
+// the Tee's without their contracts, and the dynamic ones because
+// TeeHandle::attach committed straight to the graph.
+// ---------------------------------------------------------------------
+
+fn audio_sink(name: &'static str) -> Box<DeclaringSink> {
+    DeclaringSink::boxed(
+        name,
+        InputContract::Fixed(PortContract::frame(
+            MediaKind::AudioFrame,
+            MemoryDomain::System,
+        )),
+    )
+}
+
+/// An initial branch is merged into the `Tee`'s own plan, so the attach
+/// that commits the `Tee` has to check it against what the `Tee` receives.
+#[test]
+fn an_initial_tee_branch_is_checked_against_what_the_tee_receives() {
+    use crate::elements::{TestVideoOptions, TestVideoSource};
+
+    let context = contract_context();
+    let audio_branch = context
+        .branch()
+        .to(audio_sink("speakers"))
+        .expect("the branch itself is consistent");
+    let tee = TeeBuilder::new("tee", context.clone())
+        .branch(audio_branch)
+        .build()
+        .expect("building the fan-out does not check it against a source");
+    let before = context.graph.snapshot();
+
+    let mut source = TestVideoSource::new("video", TestVideoOptions::default());
+    let Err(error) = context.attach(&mut source, 0, tee) else {
+        panic!("a video source has no samples for an audio sink behind a Tee");
+    };
+
+    let crate::Error::GraphError(GraphError::IncompatibleLink {
+        producer, consumer, ..
+    }) = error
+    else {
+        panic!("expected an IncompatibleLink, got {error}");
+    };
+    assert_eq!(
+        &*producer, "video_src",
+        "the Tee forwards what it was given rather than producing its own"
+    );
+    assert_eq!(&*consumer, "speakers");
+
+    assert!(!source.src_pads()[0].is_linked());
+    let after = context.graph.snapshot();
+    assert_eq!(before.revision, after.revision);
+    assert_eq!(before.nodes.len(), after.nodes.len());
+}
+
+/// Valid siblings all attach — the fan-out edge hands each branch the same
+/// flow, so a Tee with several good branches is not refused.
+#[test]
+fn every_valid_initial_tee_branch_attaches() {
+    use crate::elements::{TestVideoOptions, TestVideoSource};
+
+    let context = contract_context();
+    let one = context
+        .branch()
+        .to(DeclaringSink::boxed("first", video_frames()))
+        .expect("consistent");
+    let two = context
+        .branch()
+        .queue("q", 4)
+        .to(DeclaringSink::boxed("second", video_frames()))
+        .expect("consistent");
+    let tee = TeeBuilder::new("tee", context.clone())
+        .branch(one)
+        .branch(two)
+        .build()
+        .expect("consistent");
+
+    let mut source = TestVideoSource::new("video", TestVideoOptions::default());
+    context
+        .attach(&mut source, 0, tee)
+        .expect("both branches take the frames this source produces");
+}
+
+/// A branch added while the pipeline runs is checked against the flow its
+/// siblings already carry, which the graph recorded when the `Tee` was
+/// committed. A failure leaves the fan-out exactly as it was.
+#[test]
+fn a_dynamic_tee_branch_is_checked_and_a_refusal_changes_nothing() {
+    use crate::elements::{TestVideoOptions, TestVideoSource};
+
+    let context = contract_context();
+    let initial = context
+        .branch()
+        .to(DeclaringSink::boxed("renderer", video_frames()))
+        .expect("consistent");
+    let (tee, handle) = TeeBuilder::new("tee", context.clone())
+        .branch(initial)
+        .build_dynamic()
+        .expect("consistent");
+    let mut source = TestVideoSource::new("video", TestVideoOptions::default());
+    context
+        .attach(&mut source, 0, tee)
+        .expect("the initial fan-out matches the source");
+
+    let attached = context.graph.snapshot();
+    let audio_branch = handle
+        .branch()
+        .expect("the Tee is alive")
+        .to(audio_sink("speakers"))
+        .expect("the branch itself is consistent");
+
+    let Err(error) = handle.attach(audio_branch) else {
+        panic!("this Tee carries video frames, not samples");
+    };
+    assert!(
+        matches!(
+            error,
+            crate::Error::GraphError(GraphError::IncompatibleLink { .. })
+        ),
+        "got {error}"
+    );
+
+    let after = context.graph.snapshot();
+    assert_eq!(
+        attached.revision, after.revision,
+        "a refused dynamic attach must not bump the graph revision"
+    );
+    assert_eq!(attached.nodes.len(), after.nodes.len());
+    assert_eq!(attached.edges.len(), after.edges.len());
+
+    // The Tee still works, and a matching branch still attaches.
+    let good = handle
+        .branch()
+        .expect("the Tee is alive")
+        .to(DeclaringSink::boxed("second", video_frames()))
+        .expect("consistent");
+    handle
+        .attach(good)
+        .expect("a video branch is what this Tee can feed");
+}
