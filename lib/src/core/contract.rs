@@ -15,9 +15,12 @@
 //! decoded video, wiring a container's audio stream into a video decoder,
 //! or handing a D3D11 texture to a CUDA filter.
 //!
-//! Most elements declare nothing and default to [`InputContract::Unknown`]
-//! / [`OutputContract::Unknown`], which always links. Declaring a contract
-//! is opt-in, so an element outside this crate keeps working untouched.
+//! Declaring a contract is opt-in: both sides default to
+//! [`InputContract::Unknown`] / [`OutputContract::Unknown`], which always
+//! links, so an element outside this crate keeps working untouched. This
+//! crate's own elements do declare one, with the deliberate exceptions of
+//! [`AppSource`](crate::elements::AppSource) — only the application knows
+//! what it will push — and a demuxer pad for a medium not modelled here.
 
 use std::fmt;
 

@@ -2045,3 +2045,21 @@ fn a_containers_audio_stream_cannot_feed_a_video_decoder() {
         .attach(&mut demuxer, video.index, branch)
         .expect("the video pad and a video decoder are exactly the intended link");
 }
+
+/// Guards the exact text README quotes, so the two cannot drift.
+#[test]
+fn an_incompatible_link_reads_the_way_the_readme_shows_it() {
+    let (counter, _count) = crate::elements::PacketCounter::new("rec");
+    let Err(error) = contract_context()
+        .branch()
+        .pipe(video_decoder("decoder"))
+        .to(Box::new(counter))
+    else {
+        panic!("decoded frames are not packets");
+    };
+    assert_eq!(
+        error.to_string(),
+        "decoder produces VideoFrame (System), which rec cannot accept \
+         (it takes VideoPacket|AudioPacket)"
+    );
+}

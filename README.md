@@ -116,8 +116,8 @@ D3D11 texture to a CPU filter. The check runs before the pipeline starts and
 returns `GraphError::IncompatibleLink`:
 
 ```text
-SwDecoder(decoder) produces VideoFrame (System), which Mp4Muxer(rec) cannot
-accept (it takes VideoPacket)
+decoder produces VideoFrame (System), which rec cannot accept
+(it takes VideoPacket|AudioPacket)
 ```
 
 It compares only what an element already knows when it is constructed. A
