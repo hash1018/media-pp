@@ -50,7 +50,7 @@ pub struct FileDemuxer {
     /// playback actually landed (see `seek`'s docs), and that packet still
     /// needs to be delivered, not discarded, so it's stashed here for
     /// `run`'s next iteration to pick up instead of reading a fresh one.
-    pending: Option<(usize, ffmpeg::Packet)>,
+    pending: Option<(usize, ffmpeg::Rational, ffmpeg::Packet)>,
 }
 
 impl FileDemuxer {
@@ -173,11 +173,22 @@ impl SourceElement for FileDemuxer {
             // that before reading a fresh one, or it'd be silently lost.
             let next = match self.pending.take() {
                 Some(next) => Some(next),
-                None => self.input.packets().next().map(|(s, p)| (s.index(), p)),
+                None => self
+                    .input
+                    .packets()
+                    .next()
+                    .map(|(s, p)| (s.index(), s.time_base(), p)),
             };
-            let Some((index, packet)) = next else {
+            let Some((index, time_base, mut packet)) = next else {
                 break;
             };
+            // `AVCodecParameters` does not carry the container stream's
+            // timestamp unit, and FFmpeg does not guarantee that demuxers
+            // populate `AVPacket::time_base`. Make it explicit at this source
+            // boundary so every downstream decoder/filter can interpret PTS,
+            // DTS, and duration without requiring the caller to supply the
+            // same stream time base separately.
+            packet.set_time_base(time_base);
             if let Some(pad) = self.pads.get_mut(index) {
                 // A downstream failure drops just this one packet — same
                 // "report, don't die" contract `Queue`'s worker gives a
@@ -233,7 +244,7 @@ impl SourceElement for FileDemuxer {
                     .or_else(|| packet.dts())
                     .map(|ts| ts_to_duration(ts, time_base))
                     .unwrap_or(Duration::ZERO);
-                self.pending = Some((stream.index(), packet));
+                self.pending = Some((stream.index(), time_base, packet));
                 Ok(landed)
             }
             // Nothing left to read right after seeking (`target` at/past
@@ -261,6 +272,8 @@ mod tests {
         pp_log: PpLog,
         count: Arc<AtomicUsize>,
         saw_eos: Arc<AtomicBool>,
+        expected_time_base: ffmpeg::Rational,
+        time_base_matches: Arc<AtomicBool>,
     }
 
     impl Element for CountingSink {
@@ -285,9 +298,13 @@ mod tests {
         fn consume(&mut self, buf: MediaBuffer) -> crate::error::Result<()> {
             match buf {
                 MediaBuffer::Eos => self.saw_eos.store(true, Ordering::SeqCst),
-                _ => {
+                MediaBuffer::Packet(packet) => {
+                    if packet.time_base() != self.expected_time_base {
+                        self.time_base_matches.store(false, Ordering::SeqCst);
+                    }
                     self.count.fetch_add(1, Ordering::SeqCst);
                 }
+                _ => {}
             }
             Ok(())
         }
@@ -332,9 +349,15 @@ mod tests {
 
         let count = Arc::new(AtomicUsize::new(0));
         let saw_eos = Arc::new(AtomicBool::new(false));
+        let time_base_matches = Arc::new(AtomicBool::new(true));
+        let expected_time_base = demuxer
+            .stream_time_base(video.index)
+            .expect("video stream has a time base");
         demuxer.src_pads()[video.index].link(Box::new(CountingSink {
             count: count.clone(),
             saw_eos: saw_eos.clone(),
+            expected_time_base,
+            time_base_matches: time_base_matches.clone(),
             pp_log: element_pp_log(ElementType::Other, "counting-sink", None),
         }));
 
@@ -352,10 +375,56 @@ mod tests {
             saw_eos.load(Ordering::SeqCst),
             "expected an Eos once the file is exhausted"
         );
+        assert!(
+            time_base_matches.load(Ordering::SeqCst),
+            "every delivered packet must carry its stream time base"
+        );
         drop(bus);
         assert!(
             bus_rx.iter().all(|e| !matches!(e, BusEvent::Error { .. })),
             "run must not report any errors demuxing a well-formed file"
+        );
+    }
+
+    #[test]
+    fn seek_read_ahead_packet_carries_its_stream_time_base_when_delivered() {
+        let Some(path) = try_test_video() else { return };
+        let (mut demuxer, _) = FileDemuxer::open("demux", &path).expect("open test video");
+
+        demuxer
+            .seek(Duration::from_secs(1))
+            .expect("seek within the test video");
+        let (pending_index, expected_time_base, _) = demuxer
+            .pending
+            .as_ref()
+            .expect("seek must retain the first packet at or after the target");
+        let pending_index = *pending_index;
+        let expected_time_base = *expected_time_base;
+
+        let count = Arc::new(AtomicUsize::new(0));
+        let saw_eos = Arc::new(AtomicBool::new(false));
+        let time_base_matches = Arc::new(AtomicBool::new(true));
+        demuxer.src_pads()[pending_index].link(Box::new(CountingSink {
+            count: count.clone(),
+            saw_eos,
+            expected_time_base,
+            time_base_matches: time_base_matches.clone(),
+            pp_log: element_pp_log(ElementType::Other, "counting-sink", None),
+        }));
+
+        let (bus, _bus_rx) = Bus::new();
+        let (_tx, rx) = control::channel();
+        demuxer
+            .run(&rx, &bus)
+            .expect("run after seek must reach eos cleanly");
+
+        assert!(
+            count.load(Ordering::SeqCst) > 0,
+            "the packet retained by seek must be delivered"
+        );
+        assert!(
+            time_base_matches.load(Ordering::SeqCst),
+            "the packet retained by seek must carry its stream time base"
         );
     }
 }
