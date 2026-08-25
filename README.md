@@ -117,6 +117,11 @@ non-seekable source and a recording muxer branch reject the check before any
 mutation. Once every terminal in the starting topology snapshot reports its
 first new-timeline sample, the pipeline restores the caller-requested state:
 paused stays paused, while playing resumes.
+For decoded playback branches, `Pacer` and `VideoSynchronizer` use the seek
+target carried by `PrerollContext` to discard timestamped decoded samples before the
+requested timestamp; this preserves keyframe decode warm-up while making the
+first forwarded decoded sample land at or after the target. Packet-only
+branches still preroll on their first post-seek packet.
 `Preroll` is a distinct control phase: it releases workers parked by `Pause`
 and carries a shared `PrerollContext` that can wait for every expected
 terminal to report its first sample (or EOS) without blocking the synchronous

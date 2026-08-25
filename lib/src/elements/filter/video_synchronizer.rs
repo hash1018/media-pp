@@ -74,6 +74,7 @@ pub struct VideoSynchronizer {
     interrupt_epoch: u64,
     /// Preroll forwards frames without waiting on the paused playback clock.
     prerolling: bool,
+    preroll_target: Option<Duration>,
     last_pts: Option<i64>,
     frame_duration: Duration,
     pending: VecDeque<MediaBuffer>,
@@ -107,6 +108,7 @@ impl VideoSynchronizer {
             playback_clock,
             interrupt_epoch,
             prerolling: false,
+            preroll_target: None,
             last_pts: None,
             frame_duration: FALLBACK_FRAME_DURATION,
             pending: VecDeque::new(),
@@ -152,6 +154,11 @@ impl VideoSynchronizer {
                 Decision::Hold => thread::sleep(INTERRUPT_POLL_INTERVAL),
             }
         }
+    }
+
+    fn before_preroll_target(&self, pts: i64) -> bool {
+        self.preroll_target
+            .is_some_and(|target| self.timestamp_ns(pts) < duration_ns(target))
     }
 
     fn decision_without_observing(&self, pts: i64) -> Decision {
@@ -232,7 +239,11 @@ impl Sink for VideoSynchronizer {
             let outcome = match &buf {
                 MediaBuffer::Video(frame) => {
                     let pts = frame.pts().ok_or(VideoSynchronizerError::MissingPts)?;
-                    self.wait_for(pts)
+                    if self.prerolling && self.before_preroll_target(pts) {
+                        WaitOutcome::Drop
+                    } else {
+                        self.wait_for(pts)
+                    }
                 }
                 MediaBuffer::Eos => WaitOutcome::Render,
                 _ => unreachable!("buffer kind validated before queueing"),
@@ -257,8 +268,14 @@ impl Sink for VideoSynchronizer {
                 self.last_pts = None;
                 self.frame_duration = FALLBACK_FRAME_DURATION;
             }
-            ControlMsg::Preroll(_) => self.prerolling = true,
-            ControlMsg::Pause | ControlMsg::Resume => self.prerolling = false,
+            ControlMsg::Preroll(ref context) => {
+                self.prerolling = true;
+                self.preroll_target = context.target();
+            }
+            ControlMsg::Pause | ControlMsg::Resume => {
+                self.prerolling = false;
+                self.preroll_target = None;
+            }
             ControlMsg::Seek(_) | ControlMsg::CheckSeek(_) => {}
         }
         self.pad.control(msg)
@@ -276,7 +293,10 @@ fn duration_ns(duration: Duration) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{clock::Clock, playback_clock::PlaybackClock, pool::UnboundObjectPool};
+    use crate::{
+        clock::Clock, control::PrerollContext, playback_clock::PlaybackClock,
+        pool::UnboundObjectPool,
+    };
 
     fn synchronizer(clock: Arc<PlaybackClock>) -> VideoSynchronizer {
         VideoSynchronizer::new("sync", ffmpeg::Rational::new(1, 1_000), clock).unwrap()
@@ -323,5 +343,18 @@ mod tests {
                 VideoSynchronizerError::MissingPts
             ))
         ));
+    }
+
+    #[test]
+    fn seek_preroll_opens_at_the_requested_video_timestamp() {
+        let playback = Arc::new(PlaybackClock::new(Arc::new(Clock::new())));
+        let mut sync = synchronizer(playback);
+        let context = Arc::new(PrerollContext::for_seek([], Duration::from_secs(2)));
+
+        sync.control(ControlMsg::Preroll(context)).expect("preroll");
+        assert!(sync.before_preroll_target(1_999));
+        assert!(!sync.before_preroll_target(2_000));
+        sync.control(ControlMsg::Resume).expect("resume");
+        assert!(!sync.before_preroll_target(1_999));
     }
 }

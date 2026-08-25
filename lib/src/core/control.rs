@@ -181,6 +181,7 @@ struct PrerollState {
 #[derive(Debug)]
 pub struct PrerollContext {
     expected: HashSet<ElementId>,
+    target: Option<Duration>,
     state: Mutex<PrerollState>,
     changed: Condvar,
 }
@@ -191,9 +192,28 @@ impl PrerollContext {
     pub fn new(terminals: impl IntoIterator<Item = ElementId>) -> Self {
         Self {
             expected: terminals.into_iter().collect(),
+            target: None,
             state: Mutex::new(PrerollState::default()),
             changed: Condvar::new(),
         }
+    }
+
+    /// Creates a seek preroll whose decoded timing gates should discard
+    /// samples before `target` while decoding forward from the landed
+    /// keyframe.
+    pub fn for_seek(terminals: impl IntoIterator<Item = ElementId>, target: Duration) -> Self {
+        Self {
+            expected: terminals.into_iter().collect(),
+            target: Some(target),
+            state: Mutex::new(PrerollState::default()),
+            changed: Condvar::new(),
+        }
+    }
+
+    /// Exact requested position for seek preroll, or `None` for ordinary
+    /// first-sample preroll.
+    pub fn target(&self) -> Option<Duration> {
+        self.target
     }
 
     /// Marks one expected terminal's first valid sample as ready.

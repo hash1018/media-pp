@@ -537,7 +537,7 @@ impl Pipeline {
             control_tx.send(msg.clone());
         }
         let terminals = self.graph().terminal_ids();
-        let preroll = Arc::new(PrerollContext::new(terminals));
+        let preroll = Arc::new(PrerollContext::for_seek(terminals, target));
         for control_tx in &self.control_txs {
             control_tx.send(ControlMsg::Preroll(Arc::clone(&preroll)));
         }
