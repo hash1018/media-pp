@@ -44,8 +44,19 @@ pub(super) fn hw_surface_budget(downstream_frames: i32) -> Option<i32> {
 /// which stream "owns" the seek.
 #[derive(Default)]
 pub(super) struct PrerollGate {
-    /// `None` outside a seek preroll, which is the pass-everything state.
+    /// Whether a preroll is still selecting its one preview sample.
+    ///
+    /// Kept separately from `target_ns`: keyframe preroll has no exact target
+    /// but must still close after its first decoded sample.
+    active: bool,
+    /// Exact target for accurate seek. `None` also covers keyframe preroll;
+    /// `active` distinguishes that from ordinary playback.
     target_ns: Option<i64>,
+    /// Whether this decoder already forwarded its one sample for the active
+    /// preroll. A decoder may return several frames from one `receive_frame`
+    /// drain, before downstream readiness can be checked again, so the gate
+    /// itself must suppress the rest until Pause or Resume ends the preroll.
+    delivered: bool,
     /// Learned from the packets being fed in; decoded frames carry a `pts`
     /// in this unit but not the unit itself.
     time_base: Option<ffmpeg::Rational>,
@@ -57,9 +68,12 @@ pub(super) struct PrerollGate {
 }
 
 impl PrerollGate {
-    /// Arms the gate for `context`, or disarms it when that preroll carries no
-    /// target (a first-sample preroll has nothing to suppress).
+    /// Arms the gate for `context`. A targetless keyframe preroll forwards its
+    /// first sample, while accurate seek first suppresses samples before its
+    /// target; both then stay closed until the preroll ends.
     pub(super) fn begin(&mut self, context: &PrerollContext) {
+        self.active = true;
+        self.delivered = false;
         self.candidate = None;
         self.target_ns = context
             .target()
@@ -69,14 +83,18 @@ impl PrerollGate {
     /// Ends suppression. Pause and Resume both restore ordinary delivery: the
     /// preroll they belong to is over either way.
     pub(super) fn clear(&mut self) {
+        self.active = false;
         self.target_ns = None;
+        self.delivered = false;
         self.candidate = None;
     }
 
     /// Forgets the learned time base along with any target, for a `Flush` that
     /// begins a new timeline.
     pub(super) fn reset(&mut self) {
+        self.active = false;
         self.target_ns = None;
+        self.delivered = false;
         self.time_base = None;
         self.candidate = None;
     }
@@ -109,12 +127,17 @@ impl PrerollGate {
 
     /// Admits one decoded sample, retaining at most one pre-target candidate.
     pub(super) fn admit(&mut self, buffer: MediaBuffer) -> Option<MediaBuffer> {
-        let Some(target_ns) = self.target_ns else {
+        if !self.active {
             return Some(buffer);
+        }
+        if self.delivered {
+            return None;
+        }
+        let Some(target_ns) = self.target_ns else {
+            return self.deliver(buffer);
         };
         let Some(time_base) = self.time_base else {
-            self.clear();
-            return Some(buffer);
+            return self.deliver(buffer);
         };
         let (pts, audio_end_ns) = match &buffer {
             MediaBuffer::Video(frame) => (frame.pts(), None),
@@ -131,13 +154,11 @@ impl PrerollGate {
                 (frame.pts(), end)
             }
             _ => {
-                self.clear();
-                return Some(buffer);
+                return self.deliver(buffer);
             }
         };
         let Some(pts) = pts else {
-            self.clear();
-            return Some(buffer);
+            return self.deliver(buffer);
         };
         let start_ns = pts.rescale(time_base, NANOS);
 
@@ -145,8 +166,7 @@ impl PrerollGate {
         // requested instant; do not discard the whole frame just because its
         // first sample precedes the target.
         if audio_end_ns.is_some_and(|end| start_ns <= target_ns && end > target_ns) {
-            self.clear();
-            return Some(buffer);
+            return self.deliver(buffer);
         }
 
         if start_ns < target_ns {
@@ -159,15 +179,29 @@ impl PrerollGate {
         } else {
             buffer
         };
-        self.clear();
-        Some(selected)
+        self.deliver(selected)
+    }
+
+    /// Forwards the selected sample and keeps the active preroll closed. The
+    /// following Pause/Resume control clears this state after every terminal
+    /// has independently accepted its own sample.
+    fn deliver(&mut self, buffer: MediaBuffer) -> Option<MediaBuffer> {
+        self.target_ns = None;
+        self.delivered = true;
+        self.candidate = None;
+        Some(buffer)
     }
 
     /// Selects the last decoded pre-target sample when EOS proves no later
     /// sample can cover the requested instant.
     pub(super) fn finish_on_eos(&mut self) -> Option<MediaBuffer> {
+        if !self.active || self.delivered {
+            return None;
+        }
         self.target_ns = None;
-        self.candidate.take()
+        self.candidate
+            .take()
+            .and_then(|candidate| self.deliver(candidate))
     }
 }
 
@@ -222,7 +256,7 @@ mod tests {
     }
 
     #[test]
-    fn a_preroll_without_a_target_suppresses_nothing() {
+    fn a_preroll_without_a_target_has_no_timestamp_cutoff() {
         let mut gate = PrerollGate::default();
         gate.observe_packet(&millis(ffmpeg::Rational(1, 1_000)));
         gate.begin(&PrerollContext::new([]));
@@ -270,6 +304,40 @@ mod tests {
             panic!("selected a non-video buffer");
         };
         assert_eq!(selected.pts(), Some(1_967));
+    }
+
+    /// `ready_consume` is observed between upstream buffers, not between all
+    /// frames one decoder packet may yield. The gate therefore owns the
+    /// within-drain boundary and must stay closed after its selected frame.
+    #[test]
+    fn a_decoder_burst_stops_after_the_accurate_preroll_sample() {
+        let mut gate = PrerollGate::default();
+        gate.observe_packet(&millis(ffmpeg::Rational(1, 1_000)));
+        gate.begin(&PrerollContext::for_seek([], Duration::from_secs(2)));
+
+        assert!(gate.admit(video(1_967)).is_none());
+        let selected = gate.admit(video(2_033)).expect("one frame selected");
+        let MediaBuffer::Video(selected) = selected else {
+            panic!("selected a non-video buffer");
+        };
+        assert_eq!(selected.pts(), Some(1_967));
+        assert!(gate.admit(video(2_067)).is_none());
+        assert!(gate.admit(video(2_100)).is_none());
+
+        gate.clear();
+        assert!(gate.admit(video(2_133)).is_some());
+    }
+
+    #[test]
+    fn a_keyframe_preroll_also_stops_after_its_first_sample() {
+        let mut gate = PrerollGate::default();
+        gate.begin(&PrerollContext::new([]));
+
+        assert!(gate.admit(video(1_000)).is_some());
+        assert!(gate.admit(video(1_033)).is_none());
+
+        gate.clear();
+        assert!(gate.admit(video(1_067)).is_some());
     }
 
     #[test]
