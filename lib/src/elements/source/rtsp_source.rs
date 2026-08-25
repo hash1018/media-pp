@@ -183,6 +183,10 @@ impl Source for RtspSource {
 }
 
 impl SourceElement for RtspSource {
+    fn is_live(&self) -> bool {
+        true
+    }
+
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
         pp_info!(self, "started");
         loop {

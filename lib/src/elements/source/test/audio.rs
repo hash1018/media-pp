@@ -198,6 +198,10 @@ impl Source for TestAudioSource {
 }
 
 impl SourceElement for TestAudioSource {
+    fn is_live(&self) -> bool {
+        true
+    }
+
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
         pp_info!(self, "started");
         let mut timeline = ActiveTimeline::new(Instant::now());

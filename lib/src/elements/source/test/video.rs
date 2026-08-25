@@ -222,6 +222,10 @@ impl Source for TestVideoSource {
 }
 
 impl SourceElement for TestVideoSource {
+    fn is_live(&self) -> bool {
+        true
+    }
+
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> crate::error::Result<()> {
         pp_info!(self, "started");
         let mut schedule = PeriodicSchedule::new(self.frame_interval, Instant::now());

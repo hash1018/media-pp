@@ -537,6 +537,10 @@ impl Source for AudioMixer {
 }
 
 impl SourceElement for AudioMixer {
+    fn is_live(&self) -> bool {
+        true
+    }
+
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
         pp_info!(self, "started");
         let mut timeline = ActiveTimeline::new(Instant::now());

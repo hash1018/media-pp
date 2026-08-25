@@ -1048,6 +1048,10 @@ impl Source for DxgiCaptureSource {
 }
 
 impl SourceElement for DxgiCaptureSource {
+    fn is_live(&self) -> bool {
+        true
+    }
+
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
         pp_info!(self, "started");
         let mut schedule = PeriodicSchedule::new(self.frame_interval, Instant::now());

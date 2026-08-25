@@ -152,6 +152,10 @@ impl Source for FileDemuxer {
 }
 
 impl SourceElement for FileDemuxer {
+    fn is_live(&self) -> bool {
+        false
+    }
+
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> crate::error::Result<()> {
         pp_info!(self, "started");
         // Deliberately re-creates `self.input.packets()` fresh every

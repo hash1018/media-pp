@@ -1003,6 +1003,10 @@ impl Source for D3d11VideoCompositor {
 }
 
 impl SourceElement for D3d11VideoCompositor {
+    fn is_live(&self) -> bool {
+        true
+    }
+
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
         pp_info!(self, "started");
         let mut schedule = PeriodicSchedule::new(self.frame_interval, Instant::now());

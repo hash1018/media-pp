@@ -331,6 +331,16 @@ pub trait Source: Element {
 /// concrete implementation directly. Sources typically wrap blocking I/O
 /// reads (demuxer, file/network source).
 pub trait SourceElement: Source {
+    /// Whether this source produces data from a live, externally advancing
+    /// input rather than from a finite or application-controlled timeline.
+    ///
+    /// A live source cannot normally produce a first buffer while a pipeline
+    /// is paused, so pipeline state handling may use this distinction to
+    /// report that preroll is unavailable. Sources are non-live by default;
+    /// capture, network, and other live implementations should override this
+    /// method explicitly.
+    fn is_live(&self) -> bool;
+
     /// Drives this source until `Eos` (normal completion),
     /// [`crate::pipeline::Pipeline::finish`], or `Stop` (see
     /// [`ControlMsg::Stop`]) — call [`crate::control::drain_control`]

@@ -133,6 +133,10 @@ impl Source for FailingSource {
 }
 
 impl SourceElement for FailingSource {
+    fn is_live(&self) -> bool {
+        false
+    }
+
     fn run(&mut self, _control: &ControlReceiver, _bus: &Bus) -> Result<()> {
         Err(crate::Error::Other("the source went away".into()))
     }
@@ -212,6 +216,10 @@ impl Source for BurstSource {
 }
 
 impl SourceElement for BurstSource {
+    fn is_live(&self) -> bool {
+        false
+    }
+
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
         for _ in 0..self.buffers {
             self.pad

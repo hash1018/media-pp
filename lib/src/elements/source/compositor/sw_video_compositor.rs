@@ -659,6 +659,10 @@ impl Source for SwVideoCompositor {
 }
 
 impl SourceElement for SwVideoCompositor {
+    fn is_live(&self) -> bool {
+        true
+    }
+
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
         pp_info!(self, "started");
         let mut schedule = PeriodicSchedule::new(self.frame_interval, Instant::now());

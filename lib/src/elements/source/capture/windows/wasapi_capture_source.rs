@@ -551,6 +551,10 @@ impl Source for WasapiCaptureSource {
 }
 
 impl SourceElement for WasapiCaptureSource {
+    fn is_live(&self) -> bool {
+        true
+    }
+
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
         pp_info!(self, "started");
 

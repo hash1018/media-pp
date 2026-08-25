@@ -138,6 +138,10 @@ impl Source for AppSource {
 }
 
 impl SourceElement for AppSource {
+    fn is_live(&self) -> bool {
+        false
+    }
+
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
         pp_info!(self, "started");
         loop {

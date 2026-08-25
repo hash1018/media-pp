@@ -421,6 +421,10 @@ mod tests {
     }
 
     impl SourceElement for DummySource {
+        fn is_live(&self) -> bool {
+            false
+        }
+
         fn run(&mut self, _control: &ControlReceiver, _bus: &Bus) -> Result<()> {
             unreachable!("not exercised by these tests")
         }
