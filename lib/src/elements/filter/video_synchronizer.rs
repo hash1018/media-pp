@@ -72,6 +72,8 @@ pub struct VideoSynchronizer {
     time_base: TimeBase,
     playback_clock: Arc<PlaybackClock>,
     interrupt_epoch: u64,
+    /// Preroll forwards frames without waiting on the paused playback clock.
+    prerolling: bool,
     last_pts: Option<i64>,
     frame_duration: Duration,
     pending: VecDeque<MediaBuffer>,
@@ -104,6 +106,7 @@ impl VideoSynchronizer {
             time_base,
             playback_clock,
             interrupt_epoch,
+            prerolling: false,
             last_pts: None,
             frame_duration: FALLBACK_FRAME_DURATION,
             pending: VecDeque::new(),
@@ -134,6 +137,9 @@ impl VideoSynchronizer {
     }
 
     fn wait_for(&mut self, pts: i64) -> WaitOutcome {
+        if self.prerolling {
+            return WaitOutcome::Render;
+        }
         self.observe_frame_duration(pts);
         loop {
             if self.playback_clock.interrupt_epoch() != self.interrupt_epoch {
@@ -251,10 +257,9 @@ impl Sink for VideoSynchronizer {
                 self.last_pts = None;
                 self.frame_duration = FALLBACK_FRAME_DURATION;
             }
-            ControlMsg::Pause
-            | ControlMsg::Resume
-            | ControlMsg::Seek(_)
-            | ControlMsg::CheckSeek(_) => {}
+            ControlMsg::Preroll(_) => self.prerolling = true,
+            ControlMsg::Pause | ControlMsg::Resume => self.prerolling = false,
+            ControlMsg::Seek(_) | ControlMsg::CheckSeek(_) => {}
         }
         self.pad.control(msg)
     }

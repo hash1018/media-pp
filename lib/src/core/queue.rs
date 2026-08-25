@@ -547,7 +547,7 @@ fn worker_loop(
 
 /// Applies one control message to `downstream`, acking it, then — only
 /// for `Pause` — blocking this thread on `control_rx` alone (never
-/// touching `data_rx`) until `Resume`/`Stop`. Returns `true` once `Stop`
+/// touching `data_rx`) until `Resume`/`Preroll`/`Stop`. Returns `true` once `Stop`
 /// has been handled, meaning the caller (`worker_loop`) should exit.
 fn apply_control(
     data_rx: &Receiver<MediaBuffer>,
@@ -611,7 +611,7 @@ fn apply_control(
         if is_stop {
             return true;
         }
-        if msg == ControlMsg::Resume {
+        if matches!(msg, ControlMsg::Resume | ControlMsg::Preroll(_)) {
             return false;
         }
         // Another Pause while already paused: already forwarded above, keep waiting.
@@ -676,7 +676,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::bus::Bus;
+    use crate::{bus::Bus, control::PrerollContext};
 
     #[test]
     fn flush_discards_backlog_but_seek_does_not() {
@@ -959,6 +959,39 @@ mod tests {
         drop(queue);
 
         assert_eq!(count.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn preroll_releases_a_paused_worker_into_data_processing() {
+        let count = Arc::new(AtomicUsize::new(0));
+        let sink = SlowCounter {
+            count: count.clone(),
+            pp_log: element_pp_log(ElementType::Other, "slow-counter", None),
+        };
+        let (bus, _bus_rx) = Bus::new();
+        let mut queue = Queue::spawn_with_policy(
+            "test",
+            8,
+            Box::new(sink),
+            bus,
+            OverflowPolicy::default(),
+            None,
+        )
+        .unwrap();
+        queue.control(ControlMsg::Pause).unwrap();
+        queue.consume(packet()).unwrap();
+
+        queue
+            .control(ControlMsg::Preroll(Arc::new(PrerollContext::new([]))))
+            .unwrap();
+        for _ in 0..50 {
+            if count.load(Ordering::SeqCst) == 1 {
+                break;
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+        queue.control(ControlMsg::Stop).unwrap();
     }
 
     /// Regression test: before `Queue::drop` set its own `stop` flag,

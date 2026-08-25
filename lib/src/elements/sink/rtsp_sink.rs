@@ -253,7 +253,8 @@ impl Sink for RtspSink {
             | ControlMsg::Resume
             | ControlMsg::Stop
             | ControlMsg::Flush
-            | ControlMsg::CheckSeek(_) => {}
+            | ControlMsg::CheckSeek(_)
+            | ControlMsg::Preroll(_) => {}
         }
         Ok(())
     }

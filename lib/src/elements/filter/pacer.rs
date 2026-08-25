@@ -98,6 +98,8 @@ pub struct Pacer {
     /// it can't preempt a `consume()` call already in flight, and this
     /// pacer's own wait is exactly that kind of long-running call.
     interrupt_epoch: u64,
+    /// Preroll advances data without consulting the paused pipeline clock.
+    prerolling: bool,
     /// Buffers whose paced wait was interrupted before the owning worker
     /// could process pause/seek/stop. Pause retains them for resume; seek
     /// and stop discard them in `control()`.
@@ -133,6 +135,7 @@ impl Pacer {
             clock,
             first_pts: None,
             interrupt_epoch,
+            prerolling: false,
             pending: VecDeque::new(),
             pad,
         })
@@ -150,6 +153,9 @@ impl Pacer {
     fn wait_for(&mut self, pts: Option<i64>) -> Result<bool, PacerError> {
         if self.clock.interrupt_epoch() != self.interrupt_epoch {
             return Ok(false);
+        }
+        if self.prerolling {
+            return Ok(true);
         }
         let Some(pts) = pts else { return Ok(true) };
         let first_pts = *self.first_pts.get_or_insert(pts);
@@ -243,7 +249,9 @@ impl Sink for Pacer {
                 self.clock.reset();
             }
             ControlMsg::Stop => self.pending.clear(),
-            ControlMsg::Pause | ControlMsg::Resume | ControlMsg::CheckSeek(_) => {}
+            ControlMsg::Preroll(_) => self.prerolling = true,
+            ControlMsg::Pause | ControlMsg::Resume => self.prerolling = false,
+            ControlMsg::CheckSeek(_) => {}
         }
         self.pad.control(msg)
     }

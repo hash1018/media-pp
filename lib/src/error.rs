@@ -45,7 +45,7 @@ use crate::elements::{
     D3d12DecoderError, D3d12DownloadError, D3d12RendererError, D3d12ScalerError, D3d12UploadError,
 };
 use crate::{
-    control::SeekError,
+    control::{PrerollError, SeekError},
     elements::{
         AppSourceError, AudioMixerError, AudioResamplerError, AudioVolumeError, FileDemuxError,
         HlsMuxerError, Mp4MuxerError, PacerError, RtspSourceError, SwAudioEncoderError,
@@ -102,6 +102,10 @@ pub struct D3d11FrameWrapError;
 /// this top-level `Result`, it's converted here via `#[from]`.
 #[derive(Debug, Error)]
 pub enum Error {
+    /// Waiting for a pipeline-wide preroll failed.
+    #[error(transparent)]
+    PrerollError(#[from] PrerollError),
+
     /// One or more elements rejected a pipeline-wide seek check.
     #[error(transparent)]
     SeekError(#[from] SeekError),

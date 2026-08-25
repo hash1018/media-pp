@@ -382,7 +382,8 @@ impl Sink for SwVideoCompositorInputSink {
             ControlMsg::Pause
             | ControlMsg::Resume
             | ControlMsg::Seek(_)
-            | ControlMsg::CheckSeek(_) => {}
+            | ControlMsg::CheckSeek(_)
+            | ControlMsg::Preroll(_) => {}
         }
         Ok(())
     }

@@ -13,7 +13,8 @@
 //! look like a burst of catch-up work owed all at once.
 
 use std::{
-    sync::{Arc, Mutex},
+    collections::HashSet,
+    sync::{Arc, Condvar, Mutex},
     time::{Duration, Instant},
 };
 
@@ -26,6 +27,7 @@ use crate::{
     bus::{Bus, BusEvent},
     element::{ElementType, SourceElement},
     error::Result,
+    graph::ElementId,
 };
 
 /// A command that can be sent down a running [`crate::pipeline::Pipeline`]
@@ -58,6 +60,9 @@ pub enum ControlMsg {
     /// Rejections are collected without mutating playback state; the caller
     /// inspects the shared context after the synchronous cascade returns.
     CheckSeek(Arc<SeekCheckContext>),
+    /// Temporarily lets paused source and queue workers process data until
+    /// every expected terminal reports its first new-timeline sample.
+    Preroll(Arc<PrerollContext>),
     /// Jump to an absolute position from the start of the media.
     /// The source repositions via [`crate::element::SourceElement::seek`]
     /// before this is forwarded downstream. Timeline state is discarded by
@@ -74,6 +79,7 @@ impl PartialEq for ControlMsg {
             | (Self::Flush, Self::Flush) => true,
             (Self::Seek(left), Self::Seek(right)) => left == right,
             (Self::CheckSeek(left), Self::CheckSeek(right)) => Arc::ptr_eq(left, right),
+            (Self::Preroll(left), Self::Preroll(right)) => Arc::ptr_eq(left, right),
             _ => false,
         }
     }
@@ -163,6 +169,103 @@ impl SeekError {
     pub fn rejections(&self) -> &[SeekRejection] {
         &self.rejections
     }
+}
+
+#[derive(Debug, Default)]
+struct PrerollState {
+    ready: HashSet<ElementId>,
+    cancelled: bool,
+}
+
+/// Shared completion state for one preroll pass.
+#[derive(Debug)]
+pub struct PrerollContext {
+    expected: HashSet<ElementId>,
+    state: Mutex<PrerollState>,
+    changed: Condvar,
+}
+
+impl PrerollContext {
+    /// Creates a preroll that completes once every supplied terminal ID is
+    /// marked ready (or EOS-equivalent).
+    pub fn new(terminals: impl IntoIterator<Item = ElementId>) -> Self {
+        Self {
+            expected: terminals.into_iter().collect(),
+            state: Mutex::new(PrerollState::default()),
+            changed: Condvar::new(),
+        }
+    }
+
+    /// Marks one expected terminal's first valid sample as ready.
+    pub fn mark_ready(&self, terminal: ElementId) {
+        if !self.expected.contains(&terminal) {
+            return;
+        }
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.ready.insert(terminal) {
+            self.changed.notify_all();
+        }
+    }
+
+    /// EOS means this terminal cannot produce a sample and therefore must not
+    /// leave the whole preroll waiting forever.
+    pub fn mark_eos(&self, terminal: ElementId) {
+        self.mark_ready(terminal);
+    }
+
+    /// Cancels a pending wait, used by stop and failed seek recovery.
+    pub fn cancel(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.cancelled = true;
+        self.changed.notify_all();
+    }
+
+    /// Waits until every expected terminal is ready, cancellation is
+    /// requested, or `timeout` expires.
+    pub fn wait(&self, timeout: Duration) -> std::result::Result<(), PrerollError> {
+        let deadline = Instant::now() + timeout;
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        loop {
+            if state.cancelled {
+                return Err(PrerollError::Cancelled);
+            }
+            let mut pending: Vec<_> = self.expected.difference(&state.ready).copied().collect();
+            pending.sort_unstable();
+            if pending.is_empty() {
+                return Ok(());
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return Err(PrerollError::TimedOut { pending });
+            }
+            let remaining = deadline.saturating_duration_since(now);
+            let (next, _) = self
+                .changed
+                .wait_timeout(state, remaining)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state = next;
+        }
+    }
+}
+
+/// Failure while waiting for terminal preroll completion.
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum PrerollError {
+    /// Stop or recovery cancelled the in-flight preroll.
+    #[error("preroll was cancelled")]
+    Cancelled,
+    /// At least one terminal did not receive a first sample in time.
+    #[error("preroll timed out with pending terminals {pending:?}")]
+    TimedOut { pending: Vec<ElementId> },
 }
 
 /// A request carried by a control channel. Ordinary controls cascade through
@@ -431,7 +534,7 @@ pub(crate) fn apply_one_unacked<S: SourceElement>(
 /// otherwise waiting on — until `Resume`, `Stop`, or `Finish`, applying (and
 /// acking) every request seen in between. Returns `true` if `Stop`/`Finish`
 /// ended it (including the sender simply going away, treated the same as
-/// `Stop`); `false` once `Resume` arrives.
+/// `Stop`); `false` once `Resume` or `Preroll` arrives.
 pub(crate) fn wait_out_pause<S: SourceElement>(
     control: &ControlReceiver,
     source: &mut S,
@@ -448,7 +551,7 @@ pub(crate) fn wait_out_pause<S: SourceElement>(
         if apply_one(source, bus, &msg, &ack)? {
             return Ok(true);
         }
-        if msg == ControlMsg::Resume {
+        if matches!(msg, ControlMsg::Resume | ControlMsg::Preroll(_)) {
             return Ok(false);
         }
         // Another Pause while already paused: already forwarded above
@@ -645,6 +748,47 @@ mod tests {
                 reason: SeekRejectReason::SourceNotSeekable,
             }]
         );
+    }
+
+    #[test]
+    fn preroll_waits_for_every_terminal_and_reports_pending_ids() {
+        let first = ElementId::for_test(1);
+        let second = ElementId::for_test(2);
+        let context = PrerollContext::new([first, second]);
+
+        context.mark_ready(first);
+        assert_eq!(
+            context.wait(Duration::ZERO),
+            Err(PrerollError::TimedOut {
+                pending: vec![second]
+            })
+        );
+
+        context.mark_eos(second);
+        assert_eq!(context.wait(Duration::ZERO), Ok(()));
+    }
+
+    #[test]
+    fn preroll_wait_can_be_cancelled() {
+        let context = PrerollContext::new([ElementId::for_test(1)]);
+        context.cancel();
+        assert_eq!(
+            context.wait(Duration::from_secs(1)),
+            Err(PrerollError::Cancelled)
+        );
+    }
+
+    #[test]
+    fn wait_out_pause_returns_when_preroll_arrives() {
+        let (tx, rx) = channel();
+        let (bus, _bus_rx) = Bus::new();
+        let mut source = DummySource::new();
+        let context = Arc::new(PrerollContext::new([]));
+
+        let worker = thread::spawn(move || wait_out_pause(&rx, &mut source, &bus));
+        tx.send(ControlMsg::Preroll(context));
+
+        assert!(!worker.join().unwrap().unwrap());
     }
 
     /// `wait_out_pause` blocks past any number of redundant `Pause`s and

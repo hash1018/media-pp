@@ -113,6 +113,10 @@ stateful data from the old timeline, then send `Seek` to reposition sources and
 announce the new timeline. Before either mutation, a synchronous `CheckSeek`
 cascade rejects live or non-seekable sources and recording muxer branches;
 `Pipeline::seek` returns that refusal to its caller.
+`Preroll` is a distinct control phase: it releases workers parked by `Pause`
+and carries a shared `PrerollContext` that can wait for every expected
+terminal to report its first sample (or EOS) without blocking the synchronous
+control cascade itself.
 
 Buffers use shared ownership, so fan-out clones references rather than media
 payloads. PTS, duration, packet time bases, video color information, and EOS
