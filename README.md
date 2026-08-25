@@ -122,8 +122,9 @@ For decoded playback branches, decoders use the seek target carried by
 discarding earlier warm-up output. At EOS, the last pre-target frame becomes
 the preview fallback. `Pacer` and `VideoSynchronizer` only bypass their paused
 clocks during preroll. Packet-only branches still preroll on their first
-post-seek packet. `Pipeline::seek_keyframe` skips the decoded target gate and
-previews the first sample at the demuxer's keyframe landing point.
+post-seek packet. `Pipeline::seek(target, SeekMode::Keyframe)` skips the
+decoded target gate and previews the first sample at the demuxer's keyframe
+landing point; `SeekMode::Accurate` decodes forward to the target.
 `Preroll` is a distinct control phase: it releases workers parked by `Pause`
 and carries a shared `PrerollContext` that can wait for every expected
 terminal to report its first sample (or EOS) without blocking the synchronous

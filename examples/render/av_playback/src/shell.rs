@@ -7,7 +7,11 @@ use std::{
     time::Duration,
 };
 
-use media_pp::{elements::TeeHandle, graph::BranchId, pipeline::Pipeline};
+use media_pp::{
+    elements::TeeHandle,
+    graph::BranchId,
+    pipeline::{Pipeline, SeekMode},
+};
 
 /// The terminal command loop. `attach_audio` is the one backend-specific
 /// piece — everything else here is identical on every platform.
@@ -66,7 +70,7 @@ pub fn read_commands(
                         "wall clock"
                     };
                     println!("seeking to {target:.2?} ({clock})...");
-                    if let Err(error) = pipeline.seek(target) {
+                    if let Err(error) = pipeline.seek(target, SeekMode::Accurate) {
                         eprintln!("seek rejected: {error}");
                     }
                 }
@@ -77,7 +81,7 @@ pub fn read_commands(
             ["keyseek", target] => match parse_timestamp(target) {
                 Some(target) => {
                     println!("keyframe seeking to {target:.2?}...");
-                    if let Err(error) = pipeline.seek_keyframe(target) {
+                    if let Err(error) = pipeline.seek(target, SeekMode::Keyframe) {
                         eprintln!("keyframe seek rejected: {error}");
                     }
                 }

@@ -117,7 +117,7 @@ fn seek_check_rejects_a_live_source_before_flushing() {
 
     pipeline.run().expect("run");
     let error = pipeline
-        .seek(Duration::from_secs(1))
+        .seek(Duration::from_secs(1), SeekMode::Accurate)
         .expect_err("live source must reject seek");
     pipeline.stop();
 
@@ -193,6 +193,7 @@ struct ControlRecordingSink {
     pp_log: PpLog,
     count: Arc<AtomicUsize>,
     controls: Arc<Mutex<Vec<&'static str>>>,
+    preroll_targets: Arc<Mutex<Vec<Option<Duration>>>>,
 }
 
 impl Element for ControlRecordingSink {
@@ -226,7 +227,10 @@ impl Sink for ControlRecordingSink {
             ControlMsg::Stop => "stop",
             ControlMsg::Flush => "flush",
             ControlMsg::CheckSeek(_) => "check-seek",
-            ControlMsg::Preroll(_) => "preroll",
+            ControlMsg::Preroll(context) => {
+                self.preroll_targets.lock().unwrap().push(context.target());
+                "preroll"
+            }
             ControlMsg::Seek(_) => "seek",
         };
         self.controls.lock().unwrap().push(label);
@@ -239,6 +243,7 @@ fn paused_seek_prerolls_one_timeline_and_restores_pause() {
     let seeks = Arc::new(AtomicUsize::new(0));
     let count = Arc::new(AtomicUsize::new(0));
     let controls = Arc::new(Mutex::new(Vec::new()));
+    let preroll_targets = Arc::new(Mutex::new(Vec::new()));
     let source = SeekLoopSource {
         pp_log: element_pp_log(ElementType::Other, "seek-loop", None),
         pad: SrcPad::new("src"),
@@ -249,6 +254,7 @@ fn paused_seek_prerolls_one_timeline_and_restores_pause() {
             pp_log: element_pp_log(ElementType::Other, "control-recorder", None),
             count: Arc::clone(&count),
             controls: Arc::clone(&controls),
+            preroll_targets: Arc::clone(&preroll_targets),
         }))?;
         ctx.attach(source, 0, branch)?;
         Ok(())
@@ -262,7 +268,9 @@ fn paused_seek_prerolls_one_timeline_and_restores_pause() {
     pipeline.pause();
     controls.lock().unwrap().clear();
 
-    pipeline.seek(Duration::from_secs(2)).expect("paused seek");
+    pipeline
+        .seek(Duration::from_secs(2), SeekMode::Accurate)
+        .expect("paused seek");
     assert_eq!(seeks.load(Ordering::SeqCst), 1);
     let after_preroll = count.load(Ordering::SeqCst);
     thread::sleep(Duration::from_millis(20));
@@ -271,9 +279,28 @@ fn paused_seek_prerolls_one_timeline_and_restores_pause() {
         controls.lock().unwrap().as_slice(),
         ["check-seek", "flush", "seek", "preroll", "pause"]
     );
+    assert_eq!(
+        preroll_targets.lock().unwrap().as_slice(),
+        [Some(Duration::from_secs(2))]
+    );
+
+    controls.lock().unwrap().clear();
+    preroll_targets.lock().unwrap().clear();
+    pipeline
+        .seek(Duration::from_secs(3), SeekMode::Keyframe)
+        .expect("paused keyframe seek");
+    let after_keyframe_preroll = count.load(Ordering::SeqCst);
+    assert_eq!(after_keyframe_preroll, after_preroll + 1);
+    thread::sleep(Duration::from_millis(20));
+    assert_eq!(count.load(Ordering::SeqCst), after_keyframe_preroll);
+    assert_eq!(
+        controls.lock().unwrap().as_slice(),
+        ["check-seek", "flush", "seek", "preroll", "pause"]
+    );
+    assert_eq!(preroll_targets.lock().unwrap().as_slice(), [None]);
 
     pipeline.resume();
-    while count.load(Ordering::SeqCst) == after_preroll {
+    while count.load(Ordering::SeqCst) == after_keyframe_preroll {
         thread::yield_now();
     }
     pipeline.stop();
@@ -284,6 +311,7 @@ fn playing_seek_uses_an_internal_pause_then_resumes() {
     let seeks = Arc::new(AtomicUsize::new(0));
     let count = Arc::new(AtomicUsize::new(0));
     let controls = Arc::new(Mutex::new(Vec::new()));
+    let preroll_targets = Arc::new(Mutex::new(Vec::new()));
     let source = SeekLoopSource {
         pp_log: element_pp_log(ElementType::Other, "seek-loop", None),
         pad: SrcPad::new("src"),
@@ -294,6 +322,7 @@ fn playing_seek_uses_an_internal_pause_then_resumes() {
             pp_log: element_pp_log(ElementType::Other, "control-recorder", None),
             count: Arc::clone(&count),
             controls: Arc::clone(&controls),
+            preroll_targets,
         }))?;
         ctx.attach(source, 0, branch)?;
         Ok(())
@@ -306,7 +335,9 @@ fn playing_seek_uses_an_internal_pause_then_resumes() {
     }
     controls.lock().unwrap().clear();
 
-    pipeline.seek(Duration::from_secs(2)).expect("playing seek");
+    pipeline
+        .seek(Duration::from_secs(2), SeekMode::Accurate)
+        .expect("playing seek");
     let after_preroll = count.load(Ordering::SeqCst);
     while count.load(Ordering::SeqCst) == after_preroll {
         thread::yield_now();
@@ -798,7 +829,9 @@ fn seek_repositions_and_playback_continues() {
 
     pipeline.run().unwrap();
     thread::sleep(Duration::from_millis(50));
-    pipeline.seek(Duration::from_secs(1)).expect("seek");
+    pipeline
+        .seek(Duration::from_secs(1), SeekMode::Accurate)
+        .expect("seek");
     // Let packets flow again post-seek before tearing down.
     thread::sleep(Duration::from_millis(100));
     pipeline.stop();
@@ -861,7 +894,9 @@ fn seek_reports_where_it_actually_landed_when_target_is_not_a_keyframe() {
 
     pipeline.run().unwrap();
     thread::sleep(Duration::from_millis(50));
-    pipeline.seek(Duration::from_secs(3)).expect("seek");
+    pipeline
+        .seek(Duration::from_secs(3), SeekMode::Accurate)
+        .expect("seek");
     thread::sleep(Duration::from_millis(100));
     pipeline.stop();
 
@@ -2804,7 +2839,7 @@ fn a_paused_seek_leaves_every_branch_holding_one_sample_at_the_target() {
     audio_samples.lock().unwrap().clear();
 
     pipeline
-        .seek(target)
+        .seek(target, SeekMode::Accurate)
         .expect("a decoded A/V graph accepts a seek");
     let taken = |samples: &Arc<Mutex<Vec<i64>>>| samples.lock().unwrap().clone();
     let video = taken(&video_samples);
@@ -2873,7 +2908,7 @@ fn a_completed_tee_branch_does_not_starve_a_sibling_preroll() {
     frames.lock().unwrap().clear();
 
     pipeline
-        .seek(Duration::from_secs(3))
+        .seek(Duration::from_secs(3), SeekMode::Accurate)
         .expect("both Tee branches preroll");
     assert_eq!(packets.load(Ordering::SeqCst), 1);
     assert_eq!(frames.lock().unwrap().len(), 1);
@@ -2925,7 +2960,9 @@ fn accurate_seek_at_known_eof_selects_the_last_presentable_frame() {
     thread::sleep(Duration::from_millis(50));
     pipeline.pause();
     samples.lock().unwrap().clear();
-    pipeline.seek(target).expect("known EOF seek prerolls");
+    pipeline
+        .seek(target, SeekMode::Accurate)
+        .expect("known EOF seek prerolls");
     assert_eq!(
         samples.lock().unwrap().len(),
         1,
@@ -3026,7 +3063,7 @@ fn stopping_during_a_seek_does_not_wait_out_the_preroll_timeout() {
     }
 
     let seeking = Arc::clone(&pipeline);
-    let seek = thread::spawn(move || seeking.seek(Duration::from_secs(2)));
+    let seek = thread::spawn(move || seeking.seek(Duration::from_secs(2), SeekMode::Accurate));
     // The seek has to be inside its preroll wait for this to prove anything.
     while !sought.load(Ordering::Acquire) {
         thread::yield_now();
@@ -3132,7 +3169,7 @@ fn detaching_a_branch_mid_seek_does_not_strand_its_preroll() {
     pipeline.pause();
 
     let seeking = Arc::clone(&pipeline);
-    let seek = thread::spawn(move || seeking.seek(Duration::from_secs(1)));
+    let seek = thread::spawn(move || seeking.seek(Duration::from_secs(1), SeekMode::Accurate));
     // Give the seek time to reach its preroll wait before the topology moves.
     thread::sleep(Duration::from_millis(200));
     tee.detach(stuck_id).expect("detach mid-seek");

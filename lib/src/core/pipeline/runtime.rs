@@ -23,9 +23,13 @@ use crate::{
 
 use super::{PipelineBuilder, builder::SourceEntry};
 
-#[derive(Clone, Copy)]
-enum SeekMode {
+/// How [`Pipeline::seek`] chooses the sample shown at the requested position.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SeekMode {
+    /// Land at the preceding keyframe and preview the first decodable sample.
     Keyframe,
+    /// Decode forward from the preceding keyframe and preview the sample that
+    /// covers the requested timestamp.
     Accurate,
 }
 
@@ -625,23 +629,14 @@ impl Pipeline {
     /// returns [`crate::control::SeekError`] without flushing the current
     /// timeline.
     ///
+    /// `mode` chooses whether decoding stops at the preceding keyframe or
+    /// advances to the sample covering `target`.
+    ///
     /// Completion means every terminal accepted its first new-timeline sample
     /// according to [`Sink::consume`](crate::element::Sink::consume). For a
     /// video renderer that includes installing or submitting the preview
     /// frame, but not waiting for physical display scanout.
-    pub fn seek(&self, target: Duration) -> Result<()> {
-        self.seek_with_mode(target, SeekMode::Accurate)
-    }
-
-    /// Seeks to the demuxer's preceding keyframe and prerolls one sample per
-    /// terminal without decoding forward to the exact requested timestamp.
-    /// It uses the same terminal-acceptance completion boundary as
-    /// [`Self::seek`].
-    pub fn seek_keyframe(&self, target: Duration) -> Result<()> {
-        self.seek_with_mode(target, SeekMode::Keyframe)
-    }
-
-    fn seek_with_mode(&self, target: Duration, mode: SeekMode) -> Result<()> {
+    pub fn seek(&self, target: Duration, mode: SeekMode) -> Result<()> {
         const PREROLL_TIMEOUT: Duration = Duration::from_secs(5);
 
         let _operation = self

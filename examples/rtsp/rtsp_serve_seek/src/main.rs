@@ -24,7 +24,7 @@ mod example {
         Error,
         bus::BusEvent,
         elements::{FileDemuxer, Pacer, RtspSink, RtspTransport},
-        pipeline::Pipeline,
+        pipeline::{Pipeline, SeekMode},
     };
 
     pub(super) fn run() -> media_pp::Result<()> {
@@ -144,7 +144,7 @@ mod example {
             match parse_timestamp(value) {
                 Some(target) => {
                     println!("seeking to {target:.2?}...");
-                    if let Err(error) = pipeline.seek(target) {
+                    if let Err(error) = pipeline.seek(target, SeekMode::Accurate) {
                         eprintln!("seek rejected: {error}");
                     }
                 }

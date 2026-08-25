@@ -39,7 +39,7 @@ mod windows_example {
         bus::BusEvent,
         elements::{D3d12Upload, FileDemuxer, Pacer, SwDecoder, SwScaler},
         ffmpeg,
-        pipeline::Pipeline,
+        pipeline::{Pipeline, SeekMode},
     };
     use render_common::{D3d12GpuContext, Shutdown};
     use winit::raw_window_handle::RawWindowHandle;
@@ -209,7 +209,7 @@ mod windows_example {
             match parse_timestamp(value) {
                 Some(target) => {
                     println!("seeking to {target:.2?}...");
-                    if let Err(error) = pipeline.seek(target) {
+                    if let Err(error) = pipeline.seek(target, SeekMode::Accurate) {
                         eprintln!("seek rejected: {error}");
                     }
                 }
@@ -258,7 +258,7 @@ mod linux_example {
             CudaDevice, CudaFrameFormat, CudaUpload, FileDemuxer, Pacer, SwDecoder, SwScaler,
         },
         ffmpeg,
-        pipeline::Pipeline,
+        pipeline::{Pipeline, SeekMode},
     };
     use render_common::{Shutdown, VulkanGpuContext, WindowTarget};
 
@@ -402,7 +402,7 @@ mod linux_example {
             match parse_timestamp(value) {
                 Some(target) => {
                     println!("seeking to {target:.2?}...");
-                    if let Err(error) = pipeline.seek(target) {
+                    if let Err(error) = pipeline.seek(target, SeekMode::Accurate) {
                         eprintln!("seek rejected: {error}");
                     }
                 }

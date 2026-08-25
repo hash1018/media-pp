@@ -63,7 +63,7 @@ use media_pp::{
         SwEncoder, SwEncoderOptions, SwVideoCompositor, TeeBuilder, TestVideoOptions,
         TestVideoSource, VideoCodec, VideoCompositorOptions, VideoFit, VideoLayer, VideoRect,
     },
-    pipeline::Pipeline,
+    pipeline::{Pipeline, SeekMode},
 };
 
 /// Hands the scenario its own process, and returns from the parent once
@@ -340,7 +340,7 @@ fn seek_storm_does_not_grow_process_memory() {
         } else {
             Duration::from_millis(1200)
         };
-        pipeline.seek(target).expect("seek");
+        pipeline.seek(target, SeekMode::Accurate).expect("seek");
         thread::sleep(Duration::from_millis(60));
         if round + 1 == WARMUP {
             settle();
