@@ -104,6 +104,11 @@ The core types are deliberately small:
 - `Tee` provides fan-out; `AudioMixer` and the video compositors provide
   fan-in.
 
+Every `SourceElement` explicitly classifies whether it is live and whether it
+can reposition its own input timeline through `is_live()` and
+`is_seekable()`. These are independent source capabilities: seekability does
+not imply that every attached downstream branch can accept a pipeline seek.
+
 Buffers use shared ownership, so fan-out clones references rather than media
 payloads. PTS, duration, packet time bases, video color information, and EOS
 are preserved through stages that do not intentionally create a new timeline.

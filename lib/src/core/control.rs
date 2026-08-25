@@ -425,6 +425,10 @@ mod tests {
             false
         }
 
+        fn is_seekable(&self) -> bool {
+            false
+        }
+
         fn run(&mut self, _control: &ControlReceiver, _bus: &Bus) -> Result<()> {
             unreachable!("not exercised by these tests")
         }

@@ -226,6 +226,10 @@ impl SourceElement for TestVideoSource {
         true
     }
 
+    fn is_seekable(&self) -> bool {
+        false
+    }
+
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> crate::error::Result<()> {
         pp_info!(self, "started");
         let mut schedule = PeriodicSchedule::new(self.frame_interval, Instant::now());

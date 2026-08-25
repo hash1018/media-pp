@@ -336,10 +336,18 @@ pub trait SourceElement: Source {
     ///
     /// A live source cannot normally produce a first buffer while a pipeline
     /// is paused, so pipeline state handling may use this distinction to
-    /// report that preroll is unavailable. Sources are non-live by default;
-    /// capture, network, and other live implementations should override this
-    /// method explicitly.
+    /// report that preroll is unavailable. Every implementation must classify
+    /// itself explicitly so a new live source cannot silently opt into file-
+    /// style preroll behavior.
     fn is_live(&self) -> bool;
+
+    /// Whether this source can reposition its own input timeline through
+    /// [`Self::seek`].
+    ///
+    /// This only describes the source's capability. A seekable source does
+    /// not imply that every downstream branch can accept a pipeline seek;
+    /// that must be validated across the complete graph before mutation.
+    fn is_seekable(&self) -> bool;
 
     /// Drives this source until `Eos` (normal completion),
     /// [`crate::pipeline::Pipeline::finish`], or `Stop` (see

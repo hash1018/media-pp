@@ -142,6 +142,10 @@ impl SourceElement for AppSource {
         false
     }
 
+    fn is_seekable(&self) -> bool {
+        false
+    }
+
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
         pp_info!(self, "started");
         loop {

@@ -663,6 +663,10 @@ impl SourceElement for SwVideoCompositor {
         true
     }
 
+    fn is_seekable(&self) -> bool {
+        false
+    }
+
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
         pp_info!(self, "started");
         let mut schedule = PeriodicSchedule::new(self.frame_interval, Instant::now());

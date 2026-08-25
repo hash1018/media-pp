@@ -137,6 +137,10 @@ impl SourceElement for FailingSource {
         false
     }
 
+    fn is_seekable(&self) -> bool {
+        false
+    }
+
     fn run(&mut self, _control: &ControlReceiver, _bus: &Bus) -> Result<()> {
         Err(crate::Error::Other("the source went away".into()))
     }
@@ -217,6 +221,10 @@ impl Source for BurstSource {
 
 impl SourceElement for BurstSource {
     fn is_live(&self) -> bool {
+        false
+    }
+
+    fn is_seekable(&self) -> bool {
         false
     }
 

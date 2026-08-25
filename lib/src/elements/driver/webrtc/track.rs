@@ -558,6 +558,10 @@ impl SourceElement for WebRtcTrackSource {
         true
     }
 
+    fn is_seekable(&self) -> bool {
+        false
+    }
+
     /// Identical shape to [`crate::elements::AppSource::run`]: selects on
     /// `control` and its own data channel together, so `Stop`/`Pause`
     /// never wait behind a remote peer that's gone quiet. The data channel
