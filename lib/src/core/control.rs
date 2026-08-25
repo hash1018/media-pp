@@ -566,9 +566,7 @@ pub(crate) fn apply_one_unacked<S: SourceElement>(
     );
     let result: Result<bool> = (|| {
         apply_seek_check(source, msg);
-        if *msg == ControlMsg::Flush {
-            source.flush();
-        }
+        source.on_control(msg);
         apply_seek(source, bus, msg)?;
         for pad in source.src_pads() {
             pad.control(msg.clone())?;
@@ -722,8 +720,10 @@ mod tests {
             unreachable!("not exercised by these tests")
         }
 
-        fn flush(&mut self) {
-            self.flushes += 1;
+        fn on_control(&mut self, msg: &ControlMsg) {
+            if *msg == ControlMsg::Flush {
+                self.flushes += 1;
+            }
         }
 
         fn seek(&mut self, target: Duration) -> Result<Duration> {
