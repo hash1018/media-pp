@@ -2903,3 +2903,108 @@ fn stopping_during_a_seek_does_not_wait_out_the_preroll_timeout() {
         "stop waited {elapsed:?} for a preroll it was abandoning"
     );
 }
+
+/// Never accepts a buffer, so a `Queue` in front of it parks and the terminal
+/// behind it never reports a preroll sample — a branch that cannot preroll.
+struct NeverReadySink {
+    pp_log: PpLog,
+}
+
+impl Element for NeverReadySink {
+    fn name(&self) -> Arc<str> {
+        "never-ready".into()
+    }
+
+    fn element_type(&self) -> ElementType {
+        ElementType::Other
+    }
+
+    fn pp_log(&self) -> &PpLog {
+        &self.pp_log
+    }
+
+    fn pp_log_mut(&mut self) -> &mut PpLog {
+        &mut self.pp_log
+    }
+}
+
+impl Sink for NeverReadySink {
+    fn ready_consume(&mut self) -> bool {
+        false
+    }
+
+    fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
+        Ok(())
+    }
+
+    fn control(&mut self, _msg: ControlMsg) -> Result<()> {
+        Ok(())
+    }
+}
+
+/// Preroll expects the terminals the graph had when the seek started. A branch
+/// detached while that seek is still waiting takes its terminal out of the
+/// graph but not out of the expected set, so the seek waited for a sample
+/// nobody was left to produce.
+#[test]
+fn detaching_a_branch_mid_seek_does_not_strand_its_preroll() {
+    let seen = Arc::new(AtomicUsize::new(0));
+    let source = SeekLoopSource {
+        pp_log: element_pp_log(ElementType::Other, "seek-loop", None),
+        pad: SrcPad::new("src"),
+        seeks: Arc::new(AtomicUsize::new(0)),
+    };
+
+    let handle = Arc::new(Mutex::new(None));
+    let stash = Arc::clone(&handle);
+    let pipeline = Pipeline::new("detach-mid-seek", source, move |source, ctx| {
+        let live = ctx.branch().to(Box::new(CountingSink {
+            name: "live".into(),
+            count: Arc::clone(&seen),
+            pp_log: element_pp_log(ElementType::Other, "live", None),
+        }))?;
+        let (tee, tee_handle) = TeeBuilder::new("tee", ctx.clone())
+            .branch(live)
+            .build_dynamic()?;
+        ctx.attach(source, 0, tee)?;
+        *stash.lock().unwrap() = Some(tee_handle);
+        Ok(())
+    })
+    .expect("pipeline wiring");
+    let tee = handle.lock().unwrap().take().expect("tee handle");
+
+    // A branch that can never take a preroll sample: the queue in front of it
+    // parks because its terminal is never ready.
+    let stuck = tee
+        .branch()
+        .expect("dynamic tee")
+        .queue("stuck-queue", 4)
+        .to(Box::new(NeverReadySink {
+            pp_log: element_pp_log(ElementType::Other, "never-ready", None),
+        }))
+        .expect("stuck branch");
+    let stuck_id = tee.attach(stuck).expect("attach stuck branch");
+
+    pipeline.run().expect("run");
+    pipeline.pause();
+
+    let seeking = Arc::clone(&pipeline);
+    let seek = thread::spawn(move || seeking.seek(Duration::from_secs(1)));
+    // Give the seek time to reach its preroll wait before the topology moves.
+    thread::sleep(Duration::from_millis(200));
+    tee.detach(stuck_id).expect("detach mid-seek");
+
+    let started = Instant::now();
+    let outcome = seek.join().expect("seek thread");
+    let elapsed = started.elapsed();
+    pipeline.stop();
+
+    assert!(
+        outcome.is_ok(),
+        "the seek should complete once the branch it was waiting on is gone, got {outcome:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(3),
+        "the seek waited {elapsed:?} on a terminal that had left the graph"
+    );
+}

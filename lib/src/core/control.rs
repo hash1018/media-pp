@@ -236,6 +236,17 @@ impl PrerollContext {
         self.mark_ready(terminal);
     }
 
+    /// Stops expecting a terminal that has left the graph.
+    ///
+    /// The expected set is fixed when the seek starts, but the topology is
+    /// not: detaching a `Tee` branch mid-seek removes its terminal without
+    /// removing the obligation to hear from it, and the wait would run to its
+    /// timeout for a sample nobody is left to produce. Like EOS, this is
+    /// "cannot produce one", not "produced one".
+    pub fn mark_departed(&self, terminal: ElementId) {
+        self.mark_ready(terminal);
+    }
+
     /// Whether this one terminal has already taken its preroll sample.
     ///
     /// A terminal stops accepting as soon as *it* is ready, not when the whole

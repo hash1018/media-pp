@@ -4,7 +4,7 @@ use std::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     thread::{self, JoinHandle},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use crate::pp_log::{PpLog, pp_info, pp_trace, pp_warn};
@@ -12,7 +12,9 @@ use crate::pp_log::{PpLog, pp_info, pp_trace, pp_warn};
 use crate::{
     bus::{Bus, BusEvent, BusReceiver},
     clock::Clock,
-    control::{ControlMsg, ControlReceiver, ControlSender, PrerollContext, SeekCheckContext},
+    control::{
+        ControlMsg, ControlReceiver, ControlSender, PrerollContext, PrerollError, SeekCheckContext,
+    },
     element::{Context, SourceElement},
     error::{Result, ThreadSpawnError},
     graph::{GraphSnapshot, NodeInfo, PipelineGraph, log_topology},
@@ -456,6 +458,55 @@ impl Pipeline {
             .active = None;
     }
 
+    /// Waits for `preroll`, rechecking the topology whenever it has not
+    /// finished yet.
+    ///
+    /// The expected terminals are fixed when the seek starts; the graph is
+    /// not. Detaching a `Tee` branch mid-seek removes its terminal without
+    /// removing the obligation to hear from it, and nothing is left to report
+    /// a sample for it. Rather than lock topology changes out for the whole
+    /// wait, this simply stops expecting whoever has since left — which also
+    /// covers any other way a terminal can disappear, not just that one.
+    ///
+    /// The graph snapshot only happens on a poll that found work still
+    /// pending, so a preroll that completes promptly never takes one.
+    fn await_preroll(
+        &self,
+        preroll: &PrerollContext,
+        timeout: Duration,
+    ) -> std::result::Result<(), PrerollError> {
+        const TOPOLOGY_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+        let deadline = Instant::now() + timeout;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let slice = remaining.min(TOPOLOGY_POLL_INTERVAL);
+            match preroll.wait(slice) {
+                Err(PrerollError::TimedOut { pending }) => {
+                    let live = self.graph().terminal_ids();
+                    for terminal in pending
+                        .iter()
+                        .filter(|terminal| !live.contains(terminal))
+                        .copied()
+                    {
+                        pp_trace!(
+                            pp_log: &self.pp_log,
+                            "event=control control=Preroll phase=pending \
+                             outcome=departed terminal={terminal:?}"
+                        );
+                        preroll.mark_departed(terminal);
+                    }
+                    if remaining <= TOPOLOGY_POLL_INTERVAL {
+                        // Deadline reached; report what is still owed, minus
+                        // anything the prune above just resolved.
+                        return preroll.wait(Duration::ZERO);
+                    }
+                }
+                outcome => return outcome,
+            }
+        }
+    }
+
     /// Ends an in-flight seek's preroll wait and refuses any that starts
     /// afterwards. Safe with none in flight, and deliberately takes no other
     /// lock: the whole point is to run *before* the operation lock a seek is
@@ -608,7 +659,7 @@ impl Pipeline {
         for control_tx in &self.control_txs {
             control_tx.send(ControlMsg::Preroll(Arc::clone(&preroll)));
         }
-        let preroll_result = preroll.wait(PREROLL_TIMEOUT);
+        let preroll_result = self.await_preroll(&preroll, PREROLL_TIMEOUT);
         self.retire_preroll();
         if restore_paused {
             self.pause_runtime();
