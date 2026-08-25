@@ -12,7 +12,7 @@ use crate::pp_log::{PpLog, pp_info, pp_trace, pp_warn};
 use crate::{
     bus::{Bus, BusEvent, BusReceiver},
     clock::Clock,
-    control::{ControlMsg, ControlReceiver, ControlSender, SeekCheckContext},
+    control::{ControlMsg, ControlReceiver, ControlSender, PrerollContext, SeekCheckContext},
     element::{Context, SourceElement},
     error::{Result, ThreadSpawnError},
     graph::{GraphSnapshot, NodeInfo, PipelineGraph, log_topology},
@@ -111,6 +111,9 @@ pub struct Pipeline {
     /// media timestamp leaves an unset clock unchanged while downstream
     /// queues are nevertheless paused.
     pub(super) paused: AtomicBool,
+    /// Serializes public lifecycle/timeline operations. `paused` remains the
+    /// caller-requested state while seek temporarily pauses the runtime.
+    pub(super) operation: Mutex<()>,
     /// Handles for every source thread started by [`Pipeline::run`]. They
     /// are retained so dropping the pipeline can synchronously stop and
     /// join live sources instead of leaving detached work behind.
@@ -331,9 +334,18 @@ impl Pipeline {
     /// once resumed. No-op if `run()` isn't currently in progress on
     /// another thread.
     pub fn pause(&self) {
+        let _operation = self
+            .operation
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if self.running.load(Ordering::Acquire) == 0 {
             return;
         }
+        self.paused.store(true, Ordering::Release);
+        self.pause_runtime();
+    }
+
+    fn pause_runtime(&self) {
         let msg = ControlMsg::Pause;
         pp_trace!(
             pp_log: &self.pp_log,
@@ -341,7 +353,6 @@ impl Pipeline {
         );
         self.clock.interrupt();
         self.clock.pause();
-        self.paused.store(true, Ordering::Release);
         for control_tx in &self.control_txs {
             control_tx.send(msg.clone());
         }
@@ -355,10 +366,18 @@ impl Pipeline {
     /// already shifted forward by the time `Pacer`s start receiving
     /// frames again.
     pub fn resume(&self) {
+        let _operation = self
+            .operation
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if self.running.load(Ordering::Acquire) == 0 {
             return;
         }
         self.paused.store(false, Ordering::Release);
+        self.resume_runtime();
+    }
+
+    fn resume_runtime(&self) {
         let msg = ControlMsg::Resume;
         pp_trace!(
             pp_log: &self.pp_log,
@@ -386,9 +405,17 @@ impl Pipeline {
     /// for every source's background thread to finish. Not reusable
     /// afterward — build a new `Pipeline` for the next play-through.
     pub fn stop(&self) {
+        let _operation = self
+            .operation
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if self.running.load(Ordering::Acquire) == 0 {
             return;
         }
+        self.stop_runtime();
+    }
+
+    fn stop_runtime(&self) {
         let msg = ControlMsg::Stop;
         self.paused.store(false, Ordering::Release);
         pp_trace!(
@@ -416,6 +443,10 @@ impl Pipeline {
     /// call returns only after every source thread (and the Queue workers each
     /// source owns) has finished. The pipeline is not reusable afterward.
     pub fn finish(&self) {
+        let _operation = self
+            .operation
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if self.running.load(Ordering::Acquire) == 0 {
             self.join_workers();
             return;
@@ -427,7 +458,8 @@ impl Pipeline {
         );
         self.clock.interrupt();
         if self.paused.load(Ordering::Acquire) {
-            self.resume();
+            self.paused.store(false, Ordering::Release);
+            self.resume_runtime();
         }
         for control_tx in &self.control_txs {
             control_tx.finish();
@@ -452,15 +484,14 @@ impl Pipeline {
         }
     }
 
-    /// Jumps to an absolute position from the start of the media. Blocks
-    /// until every queue and stateful element has flushed its old timeline,
-    /// every source has repositioned (see
-    /// [`crate::element::SourceElement::seek`]) and every element
-    /// downstream of each has reacted (a `Pacer` re-anchors both its pts
-    /// reference and this pipeline's `Clock`) — same synchronous cascade as `pause`/
-    /// `resume`/`stop`. One-shot, unlike `pause`: nothing further to undo
-    /// afterward, playback just continues from the new position. No-op
-    /// if `run()` isn't currently in progress on another thread.
+    /// Jumps to an absolute position from the start of the media. The whole
+    /// operation is serialized against lifecycle controls and internally runs
+    /// `Pause -> Flush -> Seek -> Preroll`. Every source repositions (see
+    /// [`crate::element::SourceElement::seek`]) and every downstream element
+    /// reacts before preroll begins. Once every terminal in the starting
+    /// topology snapshot has
+    /// accepted a first sample (or EOS), a paused pipeline remains paused and
+    /// a playing pipeline resumes. No-op if `run()` isn't currently active.
     ///
     /// Signals the clock's interrupt epoch before starting the synchronous
     /// cascade so a `Pacer` in a long wait can return its worker promptly.
@@ -474,6 +505,12 @@ impl Pipeline {
     /// returns [`crate::control::SeekError`] without flushing the current
     /// timeline.
     pub fn seek(&self, target: Duration) -> Result<()> {
+        const PREROLL_TIMEOUT: Duration = Duration::from_secs(5);
+
+        let _operation = self
+            .operation
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if self.running.load(Ordering::Acquire) == 0 {
             return Ok(());
         }
@@ -482,6 +519,10 @@ impl Pipeline {
             control_tx.send(ControlMsg::CheckSeek(Arc::clone(&check)));
         }
         check.result()?;
+        let restore_paused = self.paused.load(Ordering::Acquire);
+        if !restore_paused {
+            self.pause_runtime();
+        }
         let msg = ControlMsg::Seek(target);
         pp_trace!(
             pp_log: &self.pp_log,
@@ -495,6 +536,18 @@ impl Pipeline {
         for control_tx in &self.control_txs {
             control_tx.send(msg.clone());
         }
+        let terminals = self.graph().terminal_ids();
+        let preroll = Arc::new(PrerollContext::new(terminals));
+        for control_tx in &self.control_txs {
+            control_tx.send(ControlMsg::Preroll(Arc::clone(&preroll)));
+        }
+        let preroll_result = preroll.wait(PREROLL_TIMEOUT);
+        if restore_paused {
+            self.pause_runtime();
+        } else {
+            self.resume_runtime();
+        }
+        preroll_result?;
         pp_trace!(
             pp_log: &self.pp_log,
             "event=control control={msg:?} phase=completed outcome=ok"

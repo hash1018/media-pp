@@ -117,6 +117,23 @@ impl GraphSnapshot {
         self.nodes.iter().find(|node| node.id == id)
     }
 
+    /// Returns the attached terminal sinks in this snapshot.
+    ///
+    /// A terminal has an incoming edge and no outgoing edge. An empty dynamic
+    /// [`crate::elements::Tee`] is excluded: it is a leaf in the drawing, but
+    /// has no terminal sink that can acknowledge preroll.
+    pub fn terminal_ids(&self) -> Vec<ElementId> {
+        self.nodes
+            .iter()
+            .filter(|node| {
+                node.element_type != ElementType::Tee
+                    && self.edges.iter().any(|edge| edge.to.element == node.id)
+                    && !self.edges.iter().any(|edge| edge.from.element == node.id)
+            })
+            .map(|node| node.id)
+            .collect()
+    }
+
     /// Renders every root-to-leaf path in insertion order. Keeping edges
     /// separate from nodes means this also remains meaningful for fan-in
     /// graphs, where a node can have more than one upstream.

@@ -111,11 +111,12 @@ Every `SourceElement` explicitly classifies whether it is live and whether it
 can reposition its own input timeline through `is_live()` and
 `is_seekable()`. These are independent source capabilities: seekability does
 not imply that every attached downstream branch can accept a pipeline seek.
-Pipeline seeks first send an explicit `Flush` control to discard buffered and
-stateful data from the old timeline, then send `Seek` to reposition sources and
-announce the new timeline. Before either mutation, a synchronous `CheckSeek`
-cascade rejects live or non-seekable sources and recording muxer branches;
-`Pipeline::seek` returns that refusal to its caller.
+Pipeline seeks first run a synchronous `CheckSeek` cascade, then execute
+`Pause -> Flush -> Seek -> Preroll` under one operation lock. A live or
+non-seekable source and a recording muxer branch reject the check before any
+mutation. Once every terminal in the starting topology snapshot reports its
+first new-timeline sample, the pipeline restores the caller-requested state:
+paused stays paused, while playing resumes.
 `Preroll` is a distinct control phase: it releases workers parked by `Pause`
 and carries a shared `PrerollContext` that can wait for every expected
 terminal to report its first sample (or EOS) without blocking the synchronous

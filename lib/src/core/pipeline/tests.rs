@@ -1,5 +1,6 @@
 use std::{
     sync::{
+        Mutex,
         atomic::{AtomicBool, AtomicUsize},
         mpsc,
     },
@@ -128,6 +129,194 @@ fn seek_check_rejects_a_live_source_before_flushing() {
         error.rejections()[0].reason,
         crate::control::SeekRejectReason::LiveSource
     );
+}
+
+struct SeekLoopSource {
+    pp_log: PpLog,
+    pad: SrcPad,
+    seeks: Arc<AtomicUsize>,
+}
+
+impl Element for SeekLoopSource {
+    fn name(&self) -> Arc<str> {
+        "seek-loop".into()
+    }
+
+    fn element_type(&self) -> ElementType {
+        ElementType::Other
+    }
+
+    fn pp_log(&self) -> &PpLog {
+        &self.pp_log
+    }
+
+    fn pp_log_mut(&mut self) -> &mut PpLog {
+        &mut self.pp_log
+    }
+}
+
+impl Source for SeekLoopSource {
+    fn src_pads(&mut self) -> &mut [SrcPad] {
+        std::slice::from_mut(&mut self.pad)
+    }
+}
+
+impl SourceElement for SeekLoopSource {
+    fn is_live(&self) -> bool {
+        false
+    }
+
+    fn is_seekable(&self) -> bool {
+        true
+    }
+
+    fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
+        loop {
+            if drain_control(control, self, bus)?.stopped {
+                return Ok(());
+            }
+            if self.pad.ready_consume() {
+                self.pad
+                    .push(MediaBuffer::Packet(Arc::new(ffmpeg_next::Packet::empty())))?;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    fn seek(&mut self, target: Duration) -> Result<Duration> {
+        self.seeks.fetch_add(1, Ordering::SeqCst);
+        Ok(target)
+    }
+}
+
+struct ControlRecordingSink {
+    pp_log: PpLog,
+    count: Arc<AtomicUsize>,
+    controls: Arc<Mutex<Vec<&'static str>>>,
+}
+
+impl Element for ControlRecordingSink {
+    fn name(&self) -> Arc<str> {
+        "control-recorder".into()
+    }
+
+    fn element_type(&self) -> ElementType {
+        ElementType::Other
+    }
+
+    fn pp_log(&self) -> &PpLog {
+        &self.pp_log
+    }
+
+    fn pp_log_mut(&mut self) -> &mut PpLog {
+        &mut self.pp_log
+    }
+}
+
+impl Sink for ControlRecordingSink {
+    fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
+        self.count.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn control(&mut self, msg: ControlMsg) -> Result<()> {
+        let label = match msg {
+            ControlMsg::Pause => "pause",
+            ControlMsg::Resume => "resume",
+            ControlMsg::Stop => "stop",
+            ControlMsg::Flush => "flush",
+            ControlMsg::CheckSeek(_) => "check-seek",
+            ControlMsg::Preroll(_) => "preroll",
+            ControlMsg::Seek(_) => "seek",
+        };
+        self.controls.lock().unwrap().push(label);
+        Ok(())
+    }
+}
+
+#[test]
+fn paused_seek_prerolls_one_timeline_and_restores_pause() {
+    let seeks = Arc::new(AtomicUsize::new(0));
+    let count = Arc::new(AtomicUsize::new(0));
+    let controls = Arc::new(Mutex::new(Vec::new()));
+    let source = SeekLoopSource {
+        pp_log: element_pp_log(ElementType::Other, "seek-loop", None),
+        pad: SrcPad::new("src"),
+        seeks: Arc::clone(&seeks),
+    };
+    let pipeline = Pipeline::new("paused-seek-preroll", source, |source, ctx| {
+        let branch = ctx.branch().to(Box::new(ControlRecordingSink {
+            pp_log: element_pp_log(ElementType::Other, "control-recorder", None),
+            count: Arc::clone(&count),
+            controls: Arc::clone(&controls),
+        }))?;
+        ctx.attach(source, 0, branch)?;
+        Ok(())
+    })
+    .expect("pipeline wiring");
+
+    pipeline.run().expect("run");
+    while count.load(Ordering::SeqCst) == 0 {
+        thread::yield_now();
+    }
+    pipeline.pause();
+    controls.lock().unwrap().clear();
+
+    pipeline.seek(Duration::from_secs(2)).expect("paused seek");
+    assert_eq!(seeks.load(Ordering::SeqCst), 1);
+    let after_preroll = count.load(Ordering::SeqCst);
+    thread::sleep(Duration::from_millis(20));
+    assert_eq!(count.load(Ordering::SeqCst), after_preroll);
+    assert_eq!(
+        controls.lock().unwrap().as_slice(),
+        ["check-seek", "flush", "seek", "preroll", "pause"]
+    );
+
+    pipeline.resume();
+    while count.load(Ordering::SeqCst) == after_preroll {
+        thread::yield_now();
+    }
+    pipeline.stop();
+}
+
+#[test]
+fn playing_seek_uses_an_internal_pause_then_resumes() {
+    let seeks = Arc::new(AtomicUsize::new(0));
+    let count = Arc::new(AtomicUsize::new(0));
+    let controls = Arc::new(Mutex::new(Vec::new()));
+    let source = SeekLoopSource {
+        pp_log: element_pp_log(ElementType::Other, "seek-loop", None),
+        pad: SrcPad::new("src"),
+        seeks: Arc::clone(&seeks),
+    };
+    let pipeline = Pipeline::new("playing-seek-preroll", source, |source, ctx| {
+        let branch = ctx.branch().to(Box::new(ControlRecordingSink {
+            pp_log: element_pp_log(ElementType::Other, "control-recorder", None),
+            count: Arc::clone(&count),
+            controls: Arc::clone(&controls),
+        }))?;
+        ctx.attach(source, 0, branch)?;
+        Ok(())
+    })
+    .expect("pipeline wiring");
+
+    pipeline.run().expect("run");
+    while count.load(Ordering::SeqCst) == 0 {
+        thread::yield_now();
+    }
+    controls.lock().unwrap().clear();
+
+    pipeline.seek(Duration::from_secs(2)).expect("playing seek");
+    let after_preroll = count.load(Ordering::SeqCst);
+    while count.load(Ordering::SeqCst) == after_preroll {
+        thread::yield_now();
+    }
+    assert_eq!(seeks.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        controls.lock().unwrap()[..6],
+        ["check-seek", "pause", "flush", "seek", "preroll", "resume"]
+    );
+    pipeline.stop();
 }
 
 /// Fails on its first `run`, the way a live capture whose source disappears

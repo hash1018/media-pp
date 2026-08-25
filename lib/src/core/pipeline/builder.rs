@@ -119,6 +119,7 @@ impl PipelineBuilder {
             bus_rx: self.bus_rx,
             running: Arc::new(AtomicUsize::new(0)),
             paused: AtomicBool::new(false),
+            operation: Mutex::new(()),
             workers: Mutex::new(Vec::new()),
             graph: self.graph,
         })
