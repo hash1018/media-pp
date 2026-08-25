@@ -1,7 +1,9 @@
-//! Previews desktop capture through the CPU-frame path. Windows uses DXGI and
-//! D3D12; Linux uses the desktop portal/PipeWire and CUDA/Vulkan.
-//! The capture includes the cursor, converts directly to window-sized NV12,
-//! and needs no encode/decode round trip or separate `Pacer`.
+//! Previews desktop capture through the CPU-frame path —
+//! `CaptureSource -> Queue -> SwScaler(NV12) -> Queue -> GPU upload ->
+//! Renderer`. Windows uses DXGI and D3D12; Linux uses the desktop
+//! portal/PipeWire and CUDA/Vulkan. The capture includes the cursor, converts
+//! directly to window-sized NV12, and needs no encode/decode round trip or
+//! separate `Pacer`.
 //!
 //!     cargo run -p screen_preview_cpu
 

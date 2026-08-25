@@ -1,8 +1,8 @@
-//! TestVideoSource -> Renderer: a synthetic moving-gradient stream, no
-//! file/camera/decoder involved at all, presented in a native window via
-//! the platform GPU renderer — D3D12 on Windows and CUDA/Vulkan on Linux.
-//! This proves the source, conversion, upload, and presentation path works
-//! end to end without needing a real video source.
+//! TestVideoSource -> Queue -> SwScaler -> GPU upload -> Renderer: a synthetic
+//! moving-gradient stream, no file/camera/decoder involved at all, presented in
+//! a native window via the platform GPU renderer — D3D12 on Windows and
+//! CUDA/Vulkan on Linux. This proves the source, conversion, upload, and
+//! presentation path works end to end without needing a real video source.
 //!
 //! No `Pacer` here, deliberately, as an experiment: `TestVideoSource`
 //! self-paces with a drift-free absolute schedule (see its own docs) and

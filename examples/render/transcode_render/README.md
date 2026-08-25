@@ -1,7 +1,7 @@
 # transcode_render
 
-`TestVideoSource -> SwEncoder -> SwDecoder -> Pacer -> Renderer`: encodes a
-synthetic moving-gradient stream (via `libopenh264`) and decodes it straight
+`TestVideoSource -> SwEncoder -> SwDecoder -> Pacer -> SwScaler -> GPU upload
+-> Renderer`: encodes a synthetic moving-gradient stream (via `libopenh264`) and decodes it straight
 back — no file, camera, or container/mux involved at all — presented in a
 native window at real playback speed. Proves `SwEncoder`'s `Packet`s are
 actually valid, decodable H.264 (not just "avcodec_open2 succeeded"): if the

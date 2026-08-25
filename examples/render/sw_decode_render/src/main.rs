@@ -1,6 +1,6 @@
-//! Demux -> SwDecoder -> Queue -> Pacer -> GPU upload -> Renderer: decodes a
-//! video file in system memory and presents it in a native window at real
-//! playback speed. Windows uses D3D12; Linux uses CUDA/Vulkan.
+//! Demux -> SwDecoder -> Queue -> Pacer -> SwScaler -> GPU upload -> Renderer:
+//! decodes a video file in system memory and presents it in a native window at
+//! real playback speed. Windows uses D3D12; Linux uses CUDA/Vulkan.
 //!
 //!     cargo run -p sw_decode_render -- path/to/video.mp4
 

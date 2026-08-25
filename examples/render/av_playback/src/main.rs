@@ -13,14 +13,21 @@
 //!     keyseek 30
 //!     q
 //!
-//! Both platforms run the identical graph —
-//! `FileDemuxer -> decoder -> Queue -> VideoSynchronizer -> renderer`, with a
-//! dynamic `Tee` holding the audio pad open. Only the backend types differ:
-//! `SwDecoder`/`D3d12Renderer`/`WasapiRenderer` on Windows,
-//! `CudaDecoder`/`CudaRenderer`/`PipeWireAudioRenderer` on Linux. The Linux
-//! branch is the one that never brings decoded pixels to the CPU: NVDEC keeps
-//! every frame in CUDA memory and the renderer copies it straight into
-//! Vulkan-owned memory.
+//! Both platforms hold the audio pad open with a dynamic `Tee` and run the same
+//! audio branch — `SwDecoder -> AudioResampler -> Queue -> renderer`
+//! (`WasapiRenderer` on Windows, `PipeWireAudioRenderer` on Linux). The video
+//! branches differ in more than backend types, because only one of them decodes
+//! on the GPU:
+//!
+//!     Windows: FileDemuxer -> SwDecoder -> Queue -> VideoSynchronizer
+//!              -> SwScaler(NV12) -> D3d12Upload -> D3d12Renderer
+//!     Linux:   FileDemuxer -> CudaDecoder -> Queue -> VideoSynchronizer
+//!              -> CudaRenderer
+//!
+//! The Linux branch is the one that never brings decoded pixels to the CPU:
+//! NVDEC keeps every frame in CUDA memory and the renderer copies it straight
+//! into Vulkan-owned memory. Windows decodes in system memory, so it has to
+//! convert and upload before the renderer can take it.
 
 #[cfg(not(any(target_os = "windows", target_os = "linux")))]
 fn main() {

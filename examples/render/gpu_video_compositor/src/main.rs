@@ -1,6 +1,6 @@
 //! Two live video sources composited on the GPU, displayed and recorded at
-//! the same time — `2 x (source -> upload) -> compositor -> Tee -> {renderer,
-//! download -> encode -> mp4}`.
+//! the same time — `2 x (source -> SwScaler(NV12) -> upload) -> compositor ->
+//! Tee -> {renderer, download -> SwScaler(YUV420P) -> SwEncoder -> mp4}`.
 //!
 //! Both platforms run the identical graph, terminal sinks, and CLI; only the
 //! GPU stack differs — `D3d11Upload`/`D3d11VideoCompositor`/`D3d11Download`

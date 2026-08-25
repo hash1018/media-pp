@@ -1,6 +1,7 @@
 # test_video
 
-`TestVideoSource -> Renderer`: a synthetic moving-gradient stream, no
+`TestVideoSource -> Queue -> SwScaler -> GPU upload -> Renderer`: a synthetic
+moving-gradient stream, no
 file/camera/decoder involved at all, presented in a native window via
 the platform renderer. Windows converts to NV12 and uploads to D3D12; Linux
 converts to NV12, uploads to CUDA, and presents through Vulkan. This proves the

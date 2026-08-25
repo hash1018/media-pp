@@ -4,9 +4,10 @@
 //! `ID3D12Device` before being presented — proves `D3d12Upload`'s frames
 //! are structurally identical to `D3d12Decoder`'s own (same
 //! `AVD3D12VAFrame` payload), so `D3d12Renderer` takes its zero-copy path
-//! unmodified even though nothing here ever decoded anything. Compare
-//! against `test_video`, which feeds `D3d12Renderer`'s CPU-upload path
-//! directly instead.
+//! unmodified even though nothing here ever decoded anything. Every stage sits
+//! behind its own `Queue` so each one is exercised on a separate thread;
+//! `test_video` runs the same conversion and upload as a single-thread tail
+//! instead, to show `TestVideoSource` pacing itself without a `Pacer`.
 //!
 //!     cargo run -p d3d12_upload
 

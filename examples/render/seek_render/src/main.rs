@@ -1,6 +1,7 @@
-//! Demux -> SwDecoder -> Queue -> Pacer -> Renderer, same chain as
-//! `sw_decode_render`, plus a terminal prompt that reads timestamps and
-//! calls `Pipeline::seek` with them while the window is open — proves
+//! Demux -> SwDecoder -> Queue -> Pacer -> SwScaler -> GPU upload -> Renderer,
+//! the same chain as `sw_decode_render`, plus a terminal prompt that reads
+//! timestamps and calls `Pipeline::seek` with them while the window is open —
+//! proves
 //! `seek` actually changes what's on screen, not just that it compiles.
 //!
 //!     cargo run -p seek_render -- path/to/video.mp4
