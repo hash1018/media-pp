@@ -61,6 +61,9 @@ pub struct FileDemuxer {
     pending: VecDeque<(usize, ffmpeg::Rational, ffmpeg::Packet)>,
     /// Total payload parked in `pending`.
     pending_bytes: usize,
+    /// How many parked packets each pad owes, so a freshly read one never
+    /// overtakes them.
+    parked_per_pad: Vec<usize>,
 }
 
 impl FileDemuxer {
@@ -81,7 +84,7 @@ impl FileDemuxer {
             })
             .collect();
 
-        let pads = streams
+        let pads: Vec<SrcPad> = streams
             .iter()
             .map(|s| {
                 // Per stream, from the medium the container announced:
@@ -112,6 +115,7 @@ impl FileDemuxer {
                 name,
                 pp_log,
                 input,
+                parked_per_pad: vec![0; pads.len()],
                 pads,
                 pending: VecDeque::new(),
                 pending_bytes: 0,
@@ -156,16 +160,24 @@ impl FileDemuxer {
         // a blocked pad arrives downstream describing itself the same way an
         // immediately delivered one does.
         packet.set_time_base(time_base);
-        let Some(pad) = self.pads.get_mut(index) else {
+        if self.pads.get(index).is_none() {
             // No pad for this stream: nobody selected it, so it is dropped
             // rather than parked. Parking it would grow without bound.
             return Ok(());
-        };
-        if !pad.ready_consume() {
+        }
+        // Anything already parked for this pad was read first and must stay
+        // first. Overtaking it would hand a decoder its stream out of decode
+        // order.
+        if self.parked_per_pad[index] > 0 || !self.pads[index].ready_consume() {
             self.park((index, time_base, packet));
             return Ok(());
         }
-        if let Err(error) = pad.push(MediaBuffer::Packet(Arc::new(packet))) {
+        self.push_to_pad(index, packet, bus);
+        Ok(())
+    }
+
+    fn push_to_pad(&mut self, index: usize, packet: ffmpeg::Packet, bus: &Bus) {
+        if let Err(error) = self.pads[index].push(MediaBuffer::Packet(Arc::new(packet))) {
             bus.post(
                 &self.pp_log,
                 BusEvent::Error {
@@ -175,38 +187,43 @@ impl FileDemuxer {
                 },
             );
         }
-        Ok(())
     }
 
-    /// Holds one packet back, keeping the byte total that bounds the backlog
-    /// in step with the queue. The one place anything enters `pending`.
+    /// Holds one packet back, keeping the totals that bound the backlog in
+    /// step with the queue. The one place anything enters `pending`, so it is
+    /// also where the stream time base is guaranteed onto a packet that will
+    /// be delivered later — `seek` parks its read-ahead packet directly.
     fn park(&mut self, item: (usize, ffmpeg::Rational, ffmpeg::Packet)) {
-        self.pending_bytes = self.pending_bytes.saturating_add(item.2.size());
-        self.pending.push_back(item);
+        let (index, time_base, mut packet) = item;
+        packet.set_time_base(time_base);
+        self.pending_bytes = self.pending_bytes.saturating_add(packet.size());
+        self.parked_per_pad[index] += 1;
+        self.pending.push_back((index, time_base, packet));
     }
 
-    /// Delivers every parked packet whose pad has since become ready, oldest
-    /// first, leaving the rest in place.
+    /// Delivers every parked packet whose pad can take one, oldest first,
+    /// leaving the rest in place.
+    ///
+    /// Once a pad has held one packet back, every later packet of *that* pad
+    /// is held too, even if the pad reports itself ready again a moment later.
+    /// Readiness here is a `Queue`'s "not full", which its worker changes on
+    /// another thread while this loop runs — so re-asking per packet would let
+    /// the second overtake the first the instant a slot opened, and a decoder
+    /// handed its stream out of order produces garbage and a flood of
+    /// `co located POCs unavailable`. Other pads are unaffected: keeping the
+    /// read cursor moving for them is the whole reason parking exists.
     fn drain_pending(&mut self, bus: &Bus) -> crate::error::Result<()> {
         let mut deferred = VecDeque::with_capacity(self.pending.len());
+        let mut blocked = vec![false; self.pads.len()];
         while let Some((index, time_base, packet)) = self.pending.pop_front() {
-            let ready = self
-                .pads
-                .get_mut(index)
-                .is_some_and(SrcPad::ready_consume)
-                // A pad this packet has no home for is dropped, not carried.
-                || self.pads.get(index).is_none();
-            if !ready {
+            if blocked[index] || !self.pads[index].ready_consume() {
+                blocked[index] = true;
                 deferred.push_back((index, time_base, packet));
                 continue;
             }
             self.pending_bytes = self.pending_bytes.saturating_sub(packet.size());
-            self.deliver_or_park((index, time_base, packet), bus)?;
-        }
-        // `deliver_or_park` may have parked something again; keep the older
-        // entries in front of it so per-pad order survives.
-        while let Some(item) = self.pending.pop_back() {
-            deferred.push_back(item);
+            self.parked_per_pad[index] -= 1;
+            self.push_to_pad(index, packet, bus);
         }
         self.pending = deferred;
         Ok(())
@@ -325,6 +342,7 @@ impl SourceElement for FileDemuxer {
     fn flush(&mut self) {
         self.pending.clear();
         self.pending_bytes = 0;
+        self.parked_per_pad.fill(0);
     }
 
     fn seek(&mut self, target: Duration) -> crate::error::Result<Duration> {
@@ -379,6 +397,7 @@ fn ts_to_duration(ts: i64, time_base: ffmpeg::Rational) -> Duration {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use super::*;
@@ -601,6 +620,205 @@ mod tests {
         assert_eq!(
             demuxer.pending_bytes, counted,
             "the parked byte total must stay in step with the queue"
+        );
+    }
+
+    /// Reports "full" until asked a given number of times, then reports room
+    /// again — a `Queue` whose worker frees a slot partway through a drain.
+    /// Readiness flipping *during* the loop is the real behaviour: the worker
+    /// runs on its own thread, so the answer is not stable across the packets
+    /// of one pass.
+    struct FlipToReadySink {
+        refusals_left: Arc<AtomicUsize>,
+        seen: Arc<Mutex<Vec<i64>>>,
+        pp_log: PpLog,
+    }
+
+    impl Element for FlipToReadySink {
+        fn name(&self) -> Arc<str> {
+            "flip-to-ready".into()
+        }
+        fn element_type(&self) -> ElementType {
+            ElementType::Other
+        }
+        fn pp_log(&self) -> &PpLog {
+            &self.pp_log
+        }
+        fn pp_log_mut(&mut self) -> &mut PpLog {
+            &mut self.pp_log
+        }
+    }
+
+    impl crate::element::Sink for FlipToReadySink {
+        fn ready_consume(&mut self) -> bool {
+            let left = self.refusals_left.load(Ordering::SeqCst);
+            if left > 0 {
+                self.refusals_left.store(left - 1, Ordering::SeqCst);
+                return false;
+            }
+            true
+        }
+
+        fn consume(&mut self, buf: MediaBuffer) -> crate::error::Result<()> {
+            if let MediaBuffer::Packet(packet) = &buf
+                && let Some(pts) = packet.pts()
+            {
+                self.seen.lock().unwrap().push(pts);
+            }
+            Ok(())
+        }
+
+        fn control(&mut self, _msg: crate::control::ControlMsg) -> crate::error::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A pad that says "full" for the first packet of a drain and "ready" for
+    /// the next must not let the second overtake the first.
+    ///
+    /// This is what a `Queue` does: its worker frees a slot on another thread
+    /// while the drain loop is running, so asking again per packet gives a
+    /// different answer mid-pass. Re-asking let the later packet through
+    /// first, handing the decoder its stream out of decode order — libavcodec
+    /// answers with a flood of `co located POCs unavailable`, and the picture
+    /// is wrong. Reproduced by launching `av_playback` with no seek at all:
+    /// 45 warnings against 0 before this branch.
+    #[test]
+    fn a_pad_that_becomes_ready_mid_drain_does_not_reorder_its_stream() {
+        let Some(path) = try_test_video() else { return };
+        let (mut demuxer, streams) = FileDemuxer::open("demux", &path).expect("open");
+        let video = streams
+            .iter()
+            .find(|stream| stream.kind == ffmpeg::media::Type::Video)
+            .expect("video stream");
+        let time_base = demuxer.stream_time_base(video.index).expect("time base");
+
+        // Refuse once: the first packet of the drain is held back, and every
+        // later one finds the pad ready again.
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        demuxer.pads[video.index].link(Box::new(FlipToReadySink {
+            refusals_left: Arc::new(AtomicUsize::new(1)),
+            seen: Arc::clone(&seen),
+            pp_log: element_pp_log(ElementType::Other, "flip-to-ready", None),
+        }));
+
+        let mut input = ffmpeg::format::input(&path).expect("second handle");
+        let mut order = Vec::new();
+        for (stream, packet) in input.packets() {
+            if stream.index() != video.index {
+                continue;
+            }
+            order.push(packet.pts().expect("fixture packets carry a pts"));
+            demuxer.park((stream.index(), time_base, packet));
+            if order.len() == 4 {
+                break;
+            }
+        }
+
+        let (bus, _bus_rx) = Bus::new();
+        demuxer.drain_pending(&bus).expect("first drain");
+        demuxer.drain_pending(&bus).expect("second drain");
+
+        assert_eq!(
+            *seen.lock().unwrap(),
+            order,
+            "a packet overtook one still parked for the same pad"
+        );
+    }
+
+    /// Accepts a bounded number of buffers, then blocks — the shape of a
+    /// `Queue` filling up mid-drain.
+    struct BoundedSink {
+        remaining: Arc<AtomicUsize>,
+        seen: Arc<Mutex<Vec<i64>>>,
+        pp_log: PpLog,
+    }
+
+    impl Element for BoundedSink {
+        fn name(&self) -> Arc<str> {
+            "bounded".into()
+        }
+        fn element_type(&self) -> ElementType {
+            ElementType::Other
+        }
+        fn pp_log(&self) -> &PpLog {
+            &self.pp_log
+        }
+        fn pp_log_mut(&mut self) -> &mut PpLog {
+            &mut self.pp_log
+        }
+    }
+
+    impl crate::element::Sink for BoundedSink {
+        fn ready_consume(&mut self) -> bool {
+            self.remaining.load(Ordering::SeqCst) > 0
+        }
+
+        fn consume(&mut self, buf: MediaBuffer) -> crate::error::Result<()> {
+            if let MediaBuffer::Packet(packet) = &buf
+                && let Some(pts) = packet.pts()
+            {
+                self.seen.lock().unwrap().push(pts);
+            }
+            self.remaining.fetch_sub(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn control(&mut self, _msg: crate::control::ControlMsg) -> crate::error::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A stream's packets must reach its pad in the order they were read.
+    /// Parking exists so a blocked pad does not stall the read cursor; it must
+    /// not reorder that pad's own packets, or the decoder is handed frames out
+    /// of decode order and produces `co located POCs unavailable` and garbage.
+    #[test]
+    fn parked_packets_keep_their_per_pad_order_when_the_pad_blocks_mid_drain() {
+        let Some(path) = try_test_video() else { return };
+        let (mut demuxer, streams) = FileDemuxer::open("demux", &path).expect("open");
+        let video = streams
+            .iter()
+            .find(|stream| stream.kind == ffmpeg::media::Type::Video)
+            .expect("video stream");
+        let time_base = demuxer.stream_time_base(video.index).expect("time base");
+
+        // Room for one buffer only, so the pad blocks partway through the
+        // drain and the rest have to be parked again.
+        let remaining = Arc::new(AtomicUsize::new(1));
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        demuxer.pads[video.index].link(Box::new(BoundedSink {
+            remaining: Arc::clone(&remaining),
+            seen: Arc::clone(&seen),
+            pp_log: element_pp_log(ElementType::Other, "bounded", None),
+        }));
+
+        let mut input = ffmpeg::format::input(&path).expect("second handle");
+        let mut order = Vec::new();
+        for (stream, packet) in input.packets() {
+            if stream.index() != video.index {
+                continue;
+            }
+            order.push(packet.pts().expect("fixture packets carry a pts"));
+            demuxer.park((stream.index(), time_base, packet));
+            if order.len() == 5 {
+                break;
+            }
+        }
+
+        let (bus, _bus_rx) = Bus::new();
+        // Drain repeatedly, opening one slot at a time, until everything has
+        // been delivered.
+        for _ in 0..order.len() {
+            demuxer.drain_pending(&bus).expect("drain");
+            remaining.fetch_add(1, Ordering::SeqCst);
+        }
+        demuxer.drain_pending(&bus).expect("final drain");
+
+        assert_eq!(
+            *seen.lock().unwrap(),
+            order,
+            "packets reached the pad out of the order they were read"
         );
     }
 }
