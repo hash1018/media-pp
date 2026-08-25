@@ -626,7 +626,7 @@ impl Sink for WasapiRenderer {
                 self.paused = false;
                 self.stop_and_reset()?;
             }
-            ControlMsg::Seek(_) => {
+            ControlMsg::Flush => {
                 if self.running {
                     // SAFETY: this renderer exclusively stops the live client
                     // before resetting its queue for the seek.
@@ -643,6 +643,7 @@ impl Sink for WasapiRenderer {
                     master.reset_for_seek().map_err(WasapiRendererError::from)?;
                 }
             }
+            ControlMsg::Seek(_) => {}
         }
         Ok(())
     }

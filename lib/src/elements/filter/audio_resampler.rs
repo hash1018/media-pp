@@ -313,7 +313,7 @@ impl Sink for AudioResampler {
     }
 
     fn control(&mut self, msg: ControlMsg) -> Result<()> {
-        if matches!(msg, ControlMsg::Seek(_) | ControlMsg::Stop) {
+        if matches!(msg, ControlMsg::Flush | ControlMsg::Stop) {
             self.reset();
         }
         self.pad.control(msg)

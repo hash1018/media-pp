@@ -246,12 +246,12 @@ impl Sink for VideoSynchronizer {
     fn control(&mut self, msg: ControlMsg) -> crate::error::Result<()> {
         self.interrupt_epoch = self.playback_clock.interrupt_epoch();
         match msg {
-            ControlMsg::Seek(_) | ControlMsg::Stop => {
+            ControlMsg::Flush | ControlMsg::Stop => {
                 self.pending.clear();
                 self.last_pts = None;
                 self.frame_duration = FALLBACK_FRAME_DURATION;
             }
-            ControlMsg::Pause | ControlMsg::Resume => {}
+            ControlMsg::Pause | ControlMsg::Resume | ControlMsg::Seek(_) => {}
         }
         self.pad.control(msg)
     }

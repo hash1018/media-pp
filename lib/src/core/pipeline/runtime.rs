@@ -453,11 +453,11 @@ impl Pipeline {
     }
 
     /// Jumps to an absolute position from the start of the media. Blocks
-    /// until every source has repositioned (see
+    /// until every queue and stateful element has flushed its old timeline,
+    /// every source has repositioned (see
     /// [`crate::element::SourceElement::seek`]) and every element
-    /// downstream of each has reacted (a `Queue` drops its stale backlog, a
-    /// decoder flushes, a `Pacer` re-anchors both its pts reference and
-    /// this pipeline's `Clock`) — same synchronous cascade as `pause`/
+    /// downstream of each has reacted (a `Pacer` re-anchors both its pts
+    /// reference and this pipeline's `Clock`) — same synchronous cascade as `pause`/
     /// `resume`/`stop`. One-shot, unlike `pause`: nothing further to undo
     /// afterward, playback just continues from the new position. No-op
     /// if `run()` isn't currently in progress on another thread.
@@ -487,6 +487,7 @@ impl Pipeline {
         self.clock.interrupt();
         self.playback_clock.reset_for_seek();
         for control_tx in &self.control_txs {
+            control_tx.send(ControlMsg::Flush);
             control_tx.send(msg);
         }
         pp_trace!(

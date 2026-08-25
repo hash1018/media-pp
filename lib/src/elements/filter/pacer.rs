@@ -233,12 +233,12 @@ impl Sink for Pacer {
 
     fn control(&mut self, msg: ControlMsg) -> crate::error::Result<()> {
         // Acknowledge the interrupt that made any in-flight wait return.
-        // Seek additionally resets both halves of pacing so the next frame
-        // establishes a fresh pts and wall-clock anchor.
+        // Flush discards an interrupted old-timeline buffer; Seek then resets
+        // the timestamp and clock anchors for the new timeline.
         self.interrupt_epoch = self.clock.interrupt_epoch();
         match msg {
+            ControlMsg::Flush => self.pending.clear(),
             ControlMsg::Seek(_) => {
-                self.pending.clear();
                 self.first_pts = None;
                 self.clock.reset();
             }
@@ -289,7 +289,7 @@ mod tests {
     }
 
     #[test]
-    fn pause_retains_interrupted_buffer_but_seek_and_stop_discard_it() {
+    fn pause_retains_interrupted_buffer_but_flush_and_stop_discard_it() {
         let clock = Arc::new(Clock::new());
         let mut pacer = Pacer::new("pacer", ffmpeg::Rational::new(1, 1), clock.clone()).unwrap();
 
@@ -300,10 +300,12 @@ mod tests {
         pacer.control(ControlMsg::Pause).expect("pause");
         assert_eq!(pacer.pending.len(), 1, "pause must retain the buffer");
 
+        pacer.control(ControlMsg::Flush).expect("flush");
+        assert!(pacer.pending.is_empty(), "flush must discard stale data");
+
         pacer
             .control(ControlMsg::Seek(Duration::ZERO))
             .expect("seek");
-        assert!(pacer.pending.is_empty(), "seek must discard stale data");
 
         clock.interrupt();
         pacer.consume(packet(1)).expect("interrupted consume");

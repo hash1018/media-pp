@@ -932,12 +932,12 @@ impl Sink for PipeWireAudioRenderer {
                 self.primed = false;
                 position_result?;
             }
-            ControlMsg::Seek(_) => {
-                // A seek invalidates everything queued and restarts the media
-                // timeline at whatever arrives next.
+            ControlMsg::Flush => {
+                // Discard everything queued from the old timeline.
                 self.flush()?;
                 self.timeline = None;
             }
+            ControlMsg::Seek(_) => {}
         }
         Ok(())
     }

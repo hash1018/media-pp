@@ -189,12 +189,9 @@ impl Sink for SwDecoder {
         // nothing to flush before this decoder's own `Drop` frees the
         // codec context.
         //
-        // `Seek`: unlike `Stop`, playback continues after this from a
-        // new position, so leftover reference/reordering state from
-        // before the jump has to go now — otherwise the next packets
-        // (from the new position) would decode against stale state and
-        // produce corrupt frames.
-        if let ControlMsg::Seek(_) = msg {
+        // `Flush` discards leftover reference/reordering state before a new
+        // timeline starts. `Seek` itself only announces the new position.
+        if msg == ControlMsg::Flush {
             match &mut self.kind {
                 Kind::Video(decoder) => decoder.flush(),
                 Kind::Audio(decoder) => decoder.flush(),
@@ -329,24 +326,21 @@ mod tests {
         );
     }
 
-    /// `Seek` is the one control this element reacts to locally — it flushes
+    /// `Flush` is the one control this element reacts to locally — it resets
     /// the codec's reference/reordering state so packets from the new position
     /// don't decode against stale state. It must still reach the rest of the
     /// branch afterwards; swallowing it would silently strand every downstream
     /// element at the old position.
     #[test]
-    fn seek_is_forwarded_downstream_after_flushing() {
+    fn flush_is_forwarded_downstream_after_resetting() {
         let mut decoder = video_decoder("decoder");
         let received = link_capture(&mut decoder);
 
         decoder
-            .control(ControlMsg::Seek(std::time::Duration::from_secs(3)))
-            .expect("seek must not fail");
+            .control(ControlMsg::Flush)
+            .expect("flush must not fail");
 
-        assert_eq!(
-            received.lock().unwrap().controls,
-            [ControlMsg::Seek(std::time::Duration::from_secs(3))]
-        );
+        assert_eq!(received.lock().unwrap().controls, [ControlMsg::Flush]);
     }
 
     /// Every other control passes straight through — this element has no
@@ -356,13 +350,23 @@ mod tests {
         let mut decoder = video_decoder("decoder");
         let received = link_capture(&mut decoder);
 
-        for msg in [ControlMsg::Pause, ControlMsg::Resume, ControlMsg::Stop] {
+        for msg in [
+            ControlMsg::Pause,
+            ControlMsg::Resume,
+            ControlMsg::Stop,
+            ControlMsg::Seek(std::time::Duration::from_secs(3)),
+        ] {
             decoder.control(msg).expect("control must not fail");
         }
 
         assert_eq!(
             received.lock().unwrap().controls,
-            [ControlMsg::Pause, ControlMsg::Resume, ControlMsg::Stop]
+            [
+                ControlMsg::Pause,
+                ControlMsg::Resume,
+                ControlMsg::Stop,
+                ControlMsg::Seek(std::time::Duration::from_secs(3)),
+            ]
         );
     }
 

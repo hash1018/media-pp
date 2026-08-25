@@ -218,10 +218,10 @@ impl Sink for D3d12Decoder {
         // same reasoning applies to the hw device context, freed in
         // `Drop`.
         //
-        // `Seek`: same reasoning as `SwDecoder::control` too — flush
+        // `Flush`: same reasoning as `SwDecoder::control` too — discard
         // leftover reference-frame state before decoding resumes from
         // the new position.
-        if let ControlMsg::Seek(_) = msg {
+        if msg == ControlMsg::Flush {
             self.decoder.flush();
         }
         self.pad.control(msg)

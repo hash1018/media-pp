@@ -230,7 +230,7 @@ impl Sink for CudaDecoder {
         // Same reasoning as `D3d11Decoder::control`: nothing to do on `Stop`
         // (the hw device reference is released in `Drop`), flush
         // reference-frame state on `Seek`.
-        if let ControlMsg::Seek(_) = msg {
+        if msg == ControlMsg::Flush {
             self.decoder.flush();
         }
         self.pad.control(msg)

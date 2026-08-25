@@ -1,4 +1,4 @@
-//! Pause, Resume, Stop, Seek, and Finish — and the channel they travel
+//! Pause, Resume, Stop, Flush, Seek, and Finish — and the channel they travel
 //! through.
 //!
 //! Control follows the same pad-to-pad path as data but on a dedicated
@@ -44,15 +44,15 @@ pub enum ControlMsg {
     /// whatever's in flight is dropped, not flushed. The pipeline isn't
     /// reusable afterward; build a new one for the next run.
     Stop,
+    /// Discard buffered data and reset state that belongs to the current
+    /// timeline without changing the source position. Pipelines issue this
+    /// before `Seek`; keeping the two controls separate lets paused preroll
+    /// and future timeline operations compose the same flush boundary.
+    Flush,
     /// Jump to an absolute position from the start of the media.
-    /// Handled in two parts, both inside [`drain_control`]: the source
-    /// itself repositions via [`crate::element::SourceElement::seek`]
-    /// *before* this is forwarded downstream, then the forward cascades
-    /// as usual — a [`crate::queue::Queue`] drops whatever it has
-    /// buffered (it predates the seek) instead of delivering it, and a
-    /// decoder flushes its internal reference-frame state. Unlike
-    /// `Pause`, this doesn't block waiting for anything further: it's a
-    /// one-shot repositioning, not a state to later undo with `Resume`.
+    /// The source repositions via [`crate::element::SourceElement::seek`]
+    /// before this is forwarded downstream. Timeline state is discarded by
+    /// the preceding `Flush`, not implicitly by this message.
     Seek(Duration),
 }
 

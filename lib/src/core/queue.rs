@@ -652,15 +652,14 @@ fn forward_control(
 }
 
 /// Drops everything already buffered in `data_rx` without processing it —
-/// only for `Seek`. That data predates the seek point (this Queue's
-/// worker hasn't gotten to it yet, but it was read/produced before the
-/// jump), so delivering it downstream afterward would show stale
-/// frames instead of skipping straight to the new position.
+/// only for `Flush`. That data belongs to the old timeline, so delivering it
+/// after the following seek would show stale frames instead of starting at
+/// the new position.
 /// `Pause`/`Resume`/`Stop` leave `data_rx` alone — see the type-level
 /// docs on why that's safe (nothing feeds a paused/stopped queue in the
 /// first place).
 fn discard_stale_data(data_rx: &Receiver<MediaBuffer>, msg: ControlMsg) {
-    if matches!(msg, ControlMsg::Seek(_)) {
+    if msg == ControlMsg::Flush {
         while data_rx.try_recv().is_ok() {}
     }
 }
@@ -678,6 +677,19 @@ mod tests {
 
     use super::*;
     use crate::bus::Bus;
+
+    #[test]
+    fn flush_discards_backlog_but_seek_does_not() {
+        let (tx, rx) = crossbeam_channel::bounded(2);
+        tx.send(packet()).unwrap();
+
+        discard_stale_data(&rx, ControlMsg::Seek(Duration::from_secs(1)));
+        assert!(rx.try_recv().is_ok(), "Seek must not own Queue flushing");
+
+        tx.send(packet()).unwrap();
+        discard_stale_data(&rx, ControlMsg::Flush);
+        assert!(rx.try_recv().is_err(), "Flush must discard queued data");
+    }
 
     /// A downstream that's slower than the producer, so a small queue
     /// behind it actually fills up during the test.

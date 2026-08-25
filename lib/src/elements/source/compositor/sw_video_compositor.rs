@@ -374,12 +374,12 @@ impl Sink for SwVideoCompositorInputSink {
     fn control(&mut self, msg: ControlMsg) -> Result<()> {
         match msg {
             ControlMsg::Stop => self.detach(),
-            ControlMsg::Seek(_) => {
+            ControlMsg::Flush => {
                 if let Some(input) = self.input.upgrade() {
                     input.latest_frame.store(None);
                 }
             }
-            ControlMsg::Pause | ControlMsg::Resume => {}
+            ControlMsg::Pause | ControlMsg::Resume | ControlMsg::Seek(_) => {}
         }
         Ok(())
     }
