@@ -634,7 +634,13 @@ impl Sink for WasapiRenderer {
                         .map_err(|error| self.classify_error(error))?;
                 }
                 self.running = false;
-                self.paused = false;
+                // `paused` is deliberately left alone. Flush discards the old
+                // timeline; whether this renderer is playing is a lifecycle
+                // question owned by Pause/Resume. Clearing it here let the one
+                // preroll sample of a *paused* seek reach the device, which is
+                // audible as a blip and a click as the client starts and stops
+                // around it.
+                //
                 // SAFETY: the initialized client is now stopped, which is the
                 // required state for `Reset`.
                 unsafe { self.audio_client.Reset() }.map_err(|error| self.classify_error(error))?;
@@ -737,5 +743,48 @@ mod tests {
     fn priming_trim_rounds_forward_to_the_first_sample_not_before_wall_position() {
         assert_eq!(priming_trim_samples(0, 10_000_001, 48_000), 481);
         assert_eq!(priming_trim_samples(20_000_000, 10_000_000, 48_000), 0);
+    }
+
+    /// A paused seek runs `Flush` and then prerolls exactly one sample per
+    /// terminal, so this renderer receives audio while the pipeline is still
+    /// paused. Resuming here made that sample reach the device: a blip of
+    /// sound and a click as the client started and stopped around it.
+    ///
+    /// Flush owns the timeline, not the transport. Only Pause and Resume may
+    /// move this flag.
+    #[test]
+    fn flush_preserves_an_existing_paused_state() {
+        let devices = match WasapiRenderer::list_devices() {
+            Ok(devices) => devices,
+            Err(error) => {
+                eprintln!("skipping: unable to enumerate WASAPI render devices: {error}");
+                return;
+            }
+        };
+        let Some(device) = devices.into_iter().next() else {
+            eprintln!("skipping: no active WASAPI render device");
+            return;
+        };
+        let (mut renderer, _) =
+            match WasapiRenderer::open("flush-pause-test", WasapiRendererOptions { device }) {
+                Ok(opened) => opened,
+                Err(error) => {
+                    eprintln!("skipping: unable to open a WASAPI render device: {error}");
+                    return;
+                }
+            };
+
+        renderer
+            .control(ControlMsg::Pause)
+            .expect("pause the renderer");
+        renderer
+            .control(ControlMsg::Flush)
+            .expect("flush must reset the endpoint");
+        assert!(renderer.paused, "a flush must not resume a paused renderer");
+
+        renderer
+            .control(ControlMsg::Resume)
+            .expect("resume the renderer");
+        assert!(!renderer.paused, "only Resume lifts the pause");
     }
 }
