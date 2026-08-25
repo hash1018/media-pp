@@ -24,11 +24,12 @@ call has a generated stream going one way and a real file the other:
   fixed 640x480 both renderers are wired up at, and `Pacer` holds it to
   playback speed — without it the whole file would be encoded and sent in
   seconds rather than played as a call.
-- Windows receives `WebRtcTrackSource -> Queue -> SwDecoder -> D3d12Renderer`.
-  Linux receives `WebRtcTrackSource -> Queue -> SwDecoder -> SwScaler(NV12) ->
-  CudaUpload -> CudaRenderer(Vulkan)`: the Linux window bridge consumes CUDA
-  NV12 frames, so the decoded system-memory frame needs that conversion and
-  upload. Neither receive path needs a `Pacer`: these packets arrive at the
+- Windows receives `WebRtcTrackSource -> Queue -> SwDecoder -> SwScaler(NV12)
+  -> D3d12Upload -> D3d12Renderer`. Linux receives
+  `WebRtcTrackSource -> Queue -> SwDecoder -> SwScaler(NV12) -> CudaUpload ->
+  CudaRenderer(Vulkan)`. Both renderers draw from a device resource, so the
+  decoded system-memory frame needs that conversion and upload on either
+  backend. Neither receive path needs a `Pacer`: these packets arrive at the
   rate the other side encoded them, so the timeline is already real. The send
   pipelines start first, then each
   receiver calls `WebRtcTrackSource::wait_stream_info` with a two-second

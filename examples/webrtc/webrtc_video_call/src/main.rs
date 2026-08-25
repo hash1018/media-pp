@@ -34,7 +34,8 @@ mod windows_example {
     use std::sync::Arc;
 
     use media_pp::{
-        elements::{SwDecoder, WebRtcStreamInfo, WebRtcTrackSource},
+        elements::{D3d12Upload, SwDecoder, SwScaler, WebRtcStreamInfo, WebRtcTrackSource},
+        ffmpeg,
         pipeline::Pipeline,
     };
     use render_common::{D3d12GpuContext, WindowTarget};
@@ -60,7 +61,8 @@ mod windows_example {
         }
     }
 
-    /// `WebRtcTrackSource -> Queue -> SwDecoder -> D3d12Renderer`.
+    /// `WebRtcTrackSource -> Queue -> SwDecoder -> SwScaler(NV12) ->
+    /// D3d12Upload -> D3d12Renderer`.
     pub(super) fn receive_pipeline(
         name: &str,
         source: WebRtcTrackSource,
@@ -70,6 +72,18 @@ mod windows_example {
     ) -> media_pp::Result<Arc<Pipeline>> {
         validate_h264(name, &stream_info)?;
         let decoder = SwDecoder::new(format!("{name}-decode"), stream_info.codec_parameters()?)?;
+        // `D3d12Renderer` draws from a device resource only, so decoded frames
+        // have to be converted to the layout it samples and uploaded first —
+        // the same pair the Linux branch below uses for CUDA.
+        let scaler = SwScaler::new(
+            format!("{name}-nv12"),
+            ffmpeg::format::Pixel::NV12,
+            WIDTH,
+            HEIGHT,
+            ffmpeg::software::scaling::Flags::BILINEAR,
+        );
+        let upload = D3d12Upload::new(format!("{name}-upload"), render.gpu.device(), WIDTH, HEIGHT)
+            .map_err(|error| media_pp::Error::Other(error.to_string()))?;
         let RawWindowHandle::Win32(handle) = target.window else {
             panic!("webrtc_video_call Windows branch received a non-Win32 window");
         };
@@ -87,6 +101,8 @@ mod windows_example {
                 .branch()
                 .queue("packets", 16)
                 .pipe(decoder)
+                .pipe(scaler)
+                .pipe(upload)
                 .to(Box::new(renderer))?;
             ctx.attach(source, 0, branch)?;
             Ok(())
