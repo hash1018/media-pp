@@ -114,6 +114,15 @@ pub struct Pipeline {
     /// Serializes public lifecycle/timeline operations. `paused` remains the
     /// caller-requested state while seek temporarily pauses the runtime.
     pub(super) operation: Mutex<()>,
+    /// The preroll a [`Pipeline::seek`] is currently waiting on, and whether
+    /// the pipeline has since been abandoned.
+    ///
+    /// Held here rather than only inside `seek` so a caller that wants the
+    /// pipeline to end can reach it *without* the operation lock. `Stop` would
+    /// otherwise have to queue behind that wait, which is the one thing it
+    /// promises not to do — and the cancellation the terminals already forward
+    /// on `Stop` cannot arrive either, because sending it needs the same lock.
+    pub(super) preroll_slot: Mutex<PrerollSlot>,
     /// Handles for every source thread started by [`Pipeline::run`]. They
     /// are retained so dropping the pipeline can synchronously stop and
     /// join live sources instead of leaving detached work behind.
@@ -405,6 +414,12 @@ impl Pipeline {
     /// for every source's background thread to finish. Not reusable
     /// afterward — build a new `Pipeline` for the next play-through.
     pub fn stop(&self) {
+        // Before the operation lock, not after: a seek holds that lock for as
+        // long as its preroll wait, and an abandoning caller must not be made
+        // to sit through it. Cancelling first turns that wait into an
+        // immediate return, so this only waits for the seek's own control
+        // cascade to unwind.
+        self.abandon_preroll();
         let _operation = self
             .operation
             .lock()
@@ -413,6 +428,50 @@ impl Pipeline {
             return;
         }
         self.stop_runtime();
+    }
+
+    /// Announces the preroll a seek is about to wait on, cancelling it
+    /// immediately if the pipeline has already been abandoned.
+    ///
+    /// That second case is not hypothetical: `stop` runs before the operation
+    /// lock, so it can arrive in the window between the seek repositioning its
+    /// sources and reaching this call. One mutex covers both sides — either
+    /// `stop` finds the preroll here, or this finds `stop`'s flag.
+    fn publish_preroll(&self, preroll: &Arc<PrerollContext>) {
+        let mut slot = self
+            .preroll_slot
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if slot.abandoned {
+            preroll.cancel();
+            return;
+        }
+        slot.active = Some(Arc::clone(preroll));
+    }
+
+    fn retire_preroll(&self) {
+        self.preroll_slot
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .active = None;
+    }
+
+    /// Ends an in-flight seek's preroll wait and refuses any that starts
+    /// afterwards. Safe with none in flight, and deliberately takes no other
+    /// lock: the whole point is to run *before* the operation lock a seek is
+    /// holding.
+    fn abandon_preroll(&self) {
+        let preroll = {
+            let mut slot = self
+                .preroll_slot
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            slot.abandoned = true;
+            slot.active.take()
+        };
+        if let Some(preroll) = preroll {
+            preroll.cancel();
+        }
     }
 
     fn stop_runtime(&self) {
@@ -443,6 +502,10 @@ impl Pipeline {
     /// call returns only after every source thread (and the Queue workers each
     /// source owns) has finished. The pipeline is not reusable afterward.
     pub fn finish(&self) {
+        // Same reasoning as `Pipeline::stop`: an in-flight seek's preroll wait
+        // is about to be discarded by this completion, so there is nothing to
+        // gain by sitting through it first.
+        self.abandon_preroll();
         let _operation = self
             .operation
             .lock()
@@ -538,10 +601,15 @@ impl Pipeline {
         }
         let terminals = self.graph().terminal_ids();
         let preroll = Arc::new(PrerollContext::for_seek(terminals, target));
+        // Publish before waiting, so `stop` can end this wait rather than
+        // queue behind it. Cleared on every exit below, including the error
+        // one, so no later `stop` cancels a preroll that already finished.
+        self.publish_preroll(&preroll);
         for control_tx in &self.control_txs {
             control_tx.send(ControlMsg::Preroll(Arc::clone(&preroll)));
         }
         let preroll_result = preroll.wait(PREROLL_TIMEOUT);
+        self.retire_preroll();
         if restore_paused {
             self.pause_runtime();
         } else {
@@ -581,4 +649,16 @@ impl Drop for Pipeline {
 
         self.join_workers();
     }
+}
+
+/// Seek's preroll wait, reachable without the operation lock.
+///
+/// `abandoned` is sticky because the calls that set it — `stop` and `finish` —
+/// both end the pipeline for good. Once set, a seek that has not yet published
+/// its preroll cancels it on arrival instead of waiting out a timeout nobody
+/// is going to collect.
+#[derive(Default)]
+pub(super) struct PrerollSlot {
+    active: Option<Arc<PrerollContext>>,
+    abandoned: bool,
 }

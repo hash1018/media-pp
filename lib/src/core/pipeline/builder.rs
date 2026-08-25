@@ -13,7 +13,7 @@ use crate::{
     playback_clock::PlaybackClock,
 };
 
-use super::Pipeline;
+use super::{Pipeline, runtime::PrerollSlot};
 
 pub(super) type SourceEntry = (ElementId, Box<dyn SourceElement>);
 
@@ -120,6 +120,7 @@ impl PipelineBuilder {
             running: Arc::new(AtomicUsize::new(0)),
             paused: AtomicBool::new(false),
             operation: Mutex::new(()),
+            preroll_slot: PrerollSlot::default().into(),
             workers: Mutex::new(Vec::new()),
             graph: self.graph,
         })

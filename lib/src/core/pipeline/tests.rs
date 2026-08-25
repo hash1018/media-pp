@@ -5,7 +5,7 @@ use std::{
         mpsc,
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use super::*;
@@ -2789,4 +2789,117 @@ fn a_paused_seek_leaves_every_branch_holding_one_sample_at_the_target() {
             seconds(samples)
         );
     }
+}
+
+/// Seekable, and deliberately silent once it has repositioned — the shape of
+/// a source whose preroll can never complete, so the pipeline's wait runs to
+/// its full timeout.
+struct MuteAfterSeekSource {
+    pp_log: PpLog,
+    pad: SrcPad,
+    sought: Arc<AtomicBool>,
+}
+
+impl Element for MuteAfterSeekSource {
+    fn name(&self) -> Arc<str> {
+        "mute-after-seek".into()
+    }
+
+    fn element_type(&self) -> ElementType {
+        ElementType::Other
+    }
+
+    fn pp_log(&self) -> &PpLog {
+        &self.pp_log
+    }
+
+    fn pp_log_mut(&mut self) -> &mut PpLog {
+        &mut self.pp_log
+    }
+}
+
+impl Source for MuteAfterSeekSource {
+    fn src_pads(&mut self) -> &mut [SrcPad] {
+        std::slice::from_mut(&mut self.pad)
+    }
+}
+
+impl SourceElement for MuteAfterSeekSource {
+    fn is_live(&self) -> bool {
+        false
+    }
+
+    fn is_seekable(&self) -> bool {
+        true
+    }
+
+    fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
+        loop {
+            if drain_control(control, self, bus)?.stopped {
+                return Ok(());
+            }
+            if !self.sought.load(Ordering::Acquire) && self.pad.ready_consume() {
+                self.pad
+                    .push(MediaBuffer::Packet(Arc::new(ffmpeg::Packet::empty())))?;
+            }
+            thread::yield_now();
+        }
+    }
+
+    fn seek(&mut self, target: Duration) -> Result<Duration> {
+        self.sought.store(true, Ordering::Release);
+        Ok(target)
+    }
+}
+
+/// `stop` promises to abandon immediately. A seek holds the operation lock
+/// for the whole of its preroll wait, so without a way to end that wait from
+/// outside the lock, stopping during a seek that cannot preroll waited out the
+/// full timeout — and the cancellation terminals already forward on `Stop`
+/// could not arrive either, since sending it needs the very same lock.
+#[test]
+fn stopping_during_a_seek_does_not_wait_out_the_preroll_timeout() {
+    let sought = Arc::new(AtomicBool::new(false));
+    let seen = Arc::new(AtomicUsize::new(0));
+    let source = MuteAfterSeekSource {
+        pp_log: element_pp_log(ElementType::Other, "mute-after-seek", None),
+        pad: SrcPad::new("src"),
+        sought: Arc::clone(&sought),
+    };
+    let pipeline = Pipeline::new("stop-during-seek", source, |source, ctx| {
+        let branch = ctx.branch().to(Box::new(CountingSink {
+            name: "sink".into(),
+            count: Arc::clone(&seen),
+            pp_log: element_pp_log(ElementType::Other, "sink", None),
+        }))?;
+        ctx.attach(source, 0, branch)?;
+        Ok(())
+    })
+    .expect("pipeline wiring");
+
+    pipeline.run().expect("run");
+    while seen.load(Ordering::SeqCst) == 0 {
+        thread::yield_now();
+    }
+
+    let seeking = Arc::clone(&pipeline);
+    let seek = thread::spawn(move || seeking.seek(Duration::from_secs(2)));
+    // The seek has to be inside its preroll wait for this to prove anything.
+    while !sought.load(Ordering::Acquire) {
+        thread::yield_now();
+    }
+
+    let started = Instant::now();
+    pipeline.stop();
+    let elapsed = started.elapsed();
+
+    let outcome = seek.join().expect("seek thread");
+    assert!(
+        outcome.is_err(),
+        "a cancelled preroll must report failure, not success"
+    );
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "stop waited {elapsed:?} for a preroll it was abandoning"
+    );
 }
