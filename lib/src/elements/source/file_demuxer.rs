@@ -226,6 +226,11 @@ impl FileDemuxer {
     /// `co located POCs unavailable`. Other pads are unaffected: keeping the
     /// read cursor moving for them is the whole reason parking exists.
     fn drain_pending(&mut self, bus: &Bus) -> crate::error::Result<()> {
+        // The ordinary case, now that holding back is scoped to preroll: this
+        // runs once per packet read, so it must not allocate to find nothing.
+        if self.pending.is_empty() {
+            return Ok(());
+        }
         let mut deferred = VecDeque::with_capacity(self.pending.len());
         let mut blocked = vec![false; self.pads.len()];
         while let Some((index, time_base, packet)) = self.pending.pop_front() {
