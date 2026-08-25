@@ -48,6 +48,11 @@ use crate::{
 /// whatever `Arc<UnboundObjectPoolRef<..>>` produced it) drops, the
 /// runtime — not this crate — is what keeps the actual texture memory
 /// valid for as long as the GPU still needs it.
+///
+/// A successful submit must install the frame as the current presentation
+/// content or enqueue its swap-chain presentation before returning. Pipeline
+/// preroll treats that return as the terminal's presentation commitment; it
+/// does not require the implementation to wait for physical scanout.
 pub trait D3d11FrameRenderer: Send {
     /// The `ID3D11Device` this implementation actually renders/submits
     /// with. [`D3d11Renderer`] reads this once at construction to guard

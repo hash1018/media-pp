@@ -503,6 +503,8 @@ impl Inner {
             .wait_semaphores(&signal)
             .swapchains(&swapchains)
             .image_indices(&indices);
+        // Must precede successful return: terminal preroll completion means
+        // this renderer has committed the frame to presentation.
         let out_of_date = match unsafe { self.swapchain_fn.queue_present(self.queue, &present) } {
             Ok(suboptimal_present) => suboptimal || suboptimal_present,
             Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => true,

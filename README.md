@@ -326,8 +326,9 @@ buffers are not logged one record per buffer.
   hardware. Check available accelerators with `ffmpeg -hwaccels`.
 - D3D11 elements in one pipeline must share the same `ID3D11Device` and
   immediate context.
-- `D3d11Decoder` uses a fixed-size FFmpeg surface pool; `extra_hw_frames` must
-  cover the deepest downstream buffering.
+- `D3d11Decoder` uses a fixed-size FFmpeg surface pool; its downstream-frame
+  budget must cover the deepest buffering. The decoder reserves its accurate-
+  seek candidate surface internally.
 - `PipeWireScreenCaptureSource` needs `libpipewire-0.3` development files, a
   running PipeWire session, and an `xdg-desktop-portal` backend implementing
   `org.freedesktop.portal.ScreenCast`. See its own Rust documentation for the

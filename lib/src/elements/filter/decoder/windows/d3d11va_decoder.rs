@@ -18,7 +18,7 @@ use crate::{
     pool::UnboundObjectPool,
 };
 
-use super::super::preroll_gate::PrerollGate;
+use super::super::preroll_gate::{PrerollGate, hw_surface_budget};
 use crate::elements::filter::is_codec_drain_boundary;
 
 /// Errors specific to `D3d11Decoder`. Converts into the crate-wide
@@ -47,6 +47,10 @@ pub enum D3d11DecoderError {
          unavailable for this stream/GPU/driver"
     )]
     HwAccelUnavailable,
+    /// The caller supplied a negative downstream surface budget, or adding
+    /// the internally retained accurate-seek candidate would overflow it.
+    #[error("invalid downstream hardware-frame budget: {0}")]
+    InvalidSurfaceBudget(i32),
 }
 
 /// Decodes one video stream's `Packet`s into GPU-resident `Video` frames
@@ -85,9 +89,10 @@ impl D3d11Decoder {
     /// stack requires exactly one shared device/context, not just a
     /// same-adapter one.
     ///
-    /// `extra_hw_frames` sets `AVCodecContext.extra_hw_frames` — how many
-    /// *additional* decode surfaces to allocate beyond what the codec's own
-    /// reference-frame count strictly requires. Unlike
+    /// `downstream_hw_frames` is the deepest number of decoded frames that
+    /// downstream queues and sinks may retain. The decoder adds its own one-
+    /// frame accurate-seek candidate and writes the sum to
+    /// `AVCodecContext.extra_hw_frames`. Unlike
     /// `D3d12Decoder` (no equivalent parameter needed),
     /// D3D11VA's decode surface pool is a **fixed-size** texture array,
     /// sized once at `av_hwframe_ctx_init()` time and never grown — every
@@ -95,20 +100,21 @@ impl D3d11Decoder {
     /// [`crate::queue::Queue`], held by a slow renderer, ...) keeps one pool
     /// slot occupied, and once the pool runs out, decode itself starts
     /// failing (`AVERROR(ENOMEM)`, "Static surface pool size exceeded" in
-    /// the log) instead of just blocking. Pass at least as many extra frames
-    /// as the deepest queue/buffer this decoder's output can pile up in,
-    /// plus one surface for accurate seek's last-frame candidate. For example,
-    /// a downstream queue of depth N requires at least N + 1 — too few
-    /// reproduces exactly that failure under real playback, not just in
-    /// theory.
+    /// the log) instead of just blocking. Pass the deepest downstream
+    /// queue/buffer depth; the internal candidate must not be counted again.
+    /// Too small a downstream budget reproduces exactly that failure under
+    /// real playback, not just in theory.
     pub fn new(
         name: impl Into<String>,
         params: ffmpeg::codec::Parameters,
         device: &ID3D11Device,
-        extra_hw_frames: i32,
+        downstream_hw_frames: i32,
     ) -> Result<Self, D3d11DecoderError> {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::D3d11Decoder, &name, None);
+        let extra_hw_frames = hw_surface_budget(downstream_hw_frames).ok_or(
+            D3d11DecoderError::InvalidSurfaceBudget(downstream_hw_frames),
+        )?;
 
         // SAFETY: `device` is a live D3D11 device; the returned FFmpeg
         // context takes its own COM reference as documented by the helper.

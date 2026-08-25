@@ -448,6 +448,8 @@ impl D3d12WindowRenderer {
             }
             self.command_queue
                 .ExecuteCommandLists(&[Some(base_command_list)]);
+            // Must precede successful return: terminal preroll completion
+            // means this renderer has committed the frame to presentation.
             state.swap_chain.Present(1, DXGI_PRESENT(0)).ok()?;
 
             let fence_value = {

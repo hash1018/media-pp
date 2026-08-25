@@ -265,8 +265,8 @@ mod linux_example {
     use crate::common;
 
     /// Matches the `video-frames` queue below. NVDEC's surface pool is fixed
-    /// at open time, and accurate seek may retain one additional candidate
-    /// frame, so construction requests `VIDEO_QUEUE_DEPTH + 1` extra frames.
+    /// at open time. `CudaDecoder` reserves its accurate-seek candidate
+    /// internally, so construction supplies only this downstream queue depth.
     /// NVDEC also caps the total pool at 32 surfaces, which is why this is far
     /// shallower than the Windows branch's software decoder can afford; see
     /// `CudaDecoder::new`'s docs. Eight frames are about 266 ms at 30 fps.
@@ -301,7 +301,7 @@ mod linux_example {
                         "video-decoder",
                         streams.video_params.clone(),
                         &cuda,
-                        VIDEO_QUEUE_DEPTH.saturating_add(1) as i32,
+                        VIDEO_QUEUE_DEPTH as i32,
                     )
                     .map_err(|error| Error::Other(error.to_string()))?,
                 )

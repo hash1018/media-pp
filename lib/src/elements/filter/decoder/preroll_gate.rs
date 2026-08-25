@@ -4,6 +4,15 @@ use crate::buffer::MediaBuffer;
 use crate::control::PrerollContext;
 
 const NANOS: ffmpeg::Rational = ffmpeg::Rational(1, 1_000_000_000);
+#[cfg(any(test, feature = "cuda", all(target_os = "windows", feature = "d3d11")))]
+pub(super) const ACCURATE_SEEK_CANDIDATE_FRAMES: i32 = 1;
+
+#[cfg(any(test, feature = "cuda", all(target_os = "windows", feature = "d3d11")))]
+pub(super) fn hw_surface_budget(downstream_frames: i32) -> Option<i32> {
+    (downstream_frames >= 0)
+        .then(|| downstream_frames.checked_add(ACCURATE_SEEK_CANDIDATE_FRAMES))
+        .flatten()
+}
 
 /// Suppresses decoded media that precedes a seek target.
 ///
@@ -180,6 +189,13 @@ mod tests {
         let mut frame = pool.get();
         frame.set_pts(Some(pts));
         MediaBuffer::Video(std::sync::Arc::new(frame))
+    }
+
+    #[test]
+    fn hardware_surface_budget_includes_the_internal_seek_candidate() {
+        assert_eq!(hw_surface_budget(8), Some(9));
+        assert_eq!(hw_surface_budget(-1), None);
+        assert_eq!(hw_surface_budget(i32::MAX), None);
     }
 
     #[test]

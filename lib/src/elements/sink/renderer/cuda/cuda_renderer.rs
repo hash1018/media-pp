@@ -34,6 +34,11 @@ use crate::{
 /// genuinely zero-copy submits. It never touches the CPU, but it is a
 /// copy, and it is unavoidable as long as the decoder and the presenter
 /// are different APIs.
+///
+/// A successful submit must install the frame as the current presentation
+/// content or enqueue its presentation before returning. Pipeline preroll
+/// treats that return as the terminal's presentation commitment; it does not
+/// require the implementation to wait for physical scanout.
 pub trait CudaFrameRenderer: Send {
     /// Presents one NV12 frame.
     ///

@@ -322,6 +322,8 @@ impl D3d11WindowRenderer {
             context.PSSetShaderResources(0, Some(&clear_srvs));
         }
 
+        // Must precede successful return: terminal preroll completion means
+        // this renderer has committed the frame to presentation.
         self.check_device_lost(unsafe { state.swap_chain.Present(1, DXGI_PRESENT(0)) }.ok())?;
         drop(context);
         drop(state);

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use super::super::preroll_gate::PrerollGate;
+use super::super::preroll_gate::{PrerollGate, hw_surface_budget};
 use ffmpeg_next::{self as ffmpeg, ffi};
 use thiserror::Error as ThisError;
 
@@ -39,6 +39,10 @@ pub enum CudaDecoderError {
          unavailable for this stream/GPU/driver"
     )]
     HwAccelUnavailable,
+    /// The caller supplied a negative downstream surface budget, or adding
+    /// the internally retained accurate-seek candidate would overflow it.
+    #[error("invalid downstream hardware-frame budget: {0}")]
+    InvalidSurfaceBudget(i32),
 }
 
 /// Decodes one video stream's `Packet`s into GPU-resident `Video` frames on
@@ -85,15 +89,17 @@ impl CudaDecoder {
     /// context is not readable from another. This decoder takes its own
     /// FFmpeg reference, so `device` itself need not outlive the call.
     ///
-    /// `extra_hw_frames` sets `AVCodecContext.extra_hw_frames`: how many
-    /// decode surfaces to allocate beyond what the codec's reference-frame
-    /// count requires. NVDEC's surface pool is fixed-size like D3D11VA's
+    /// `downstream_hw_frames` is the deepest number of decoded frames that
+    /// downstream queues and sinks may retain. The decoder adds its own one-
+    /// frame accurate-seek candidate and writes the sum to
+    /// `AVCodecContext.extra_hw_frames`. NVDEC's surface pool is fixed-size
+    /// like D3D11VA's
     /// (unlike the growable pools used elsewhere in this crate), so every
     /// decoded frame still alive downstream — sitting in a
     /// [`crate::queue::Queue`], held by a slow renderer — occupies a slot,
-    /// and running out fails decode rather than blocking it. Pass at least
-    /// the depth of the deepest downstream buffering plus one surface for
-    /// accurate seek's last-frame candidate.
+    /// and running out fails decode rather than blocking it. Callers therefore
+    /// pass the downstream buffering depth only; the internal candidate must
+    /// not be counted again.
     ///
     /// Unlike D3D11VA, though, NVDEC also imposes a hard **upper** bound: the
     /// pool may hold at most 32 surfaces in total, counting the codec's own
@@ -106,10 +112,12 @@ impl CudaDecoder {
         name: impl Into<String>,
         params: ffmpeg::codec::Parameters,
         device: &CudaDevice,
-        extra_hw_frames: i32,
+        downstream_hw_frames: i32,
     ) -> Result<Self, CudaDecoderError> {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::CudaDecoder, &name, None);
+        let extra_hw_frames = hw_surface_budget(downstream_hw_frames)
+            .ok_or(CudaDecoderError::InvalidSurfaceBudget(downstream_hw_frames))?;
 
         let mut context = ffmpeg::codec::context::Context::from_parameters(params)?;
         if context.medium() != ffmpeg::media::Type::Video {

@@ -624,12 +624,19 @@ impl Pipeline {
     /// every source and branch. A live/non-seekable source or recording muxer
     /// returns [`crate::control::SeekError`] without flushing the current
     /// timeline.
+    ///
+    /// Completion means every terminal accepted its first new-timeline sample
+    /// according to [`Sink::consume`](crate::element::Sink::consume). For a
+    /// video renderer that includes installing or submitting the preview
+    /// frame, but not waiting for physical display scanout.
     pub fn seek(&self, target: Duration) -> Result<()> {
         self.seek_with_mode(target, SeekMode::Accurate)
     }
 
     /// Seeks to the demuxer's preceding keyframe and prerolls one sample per
     /// terminal without decoding forward to the exact requested timestamp.
+    /// It uses the same terminal-acceptance completion boundary as
+    /// [`Self::seek`].
     pub fn seek_keyframe(&self, target: Duration) -> Result<()> {
         self.seek_with_mode(target, SeekMode::Keyframe)
     }

@@ -182,7 +182,10 @@ struct QueueStage {
 /// the sink's own `Element::name()`) once EOS completes — mirrors what
 /// `Queue` does for its own downstream, but without introducing a thread
 /// boundary. This is what lets a fully direct chain (no `queue()` calls at
-/// all) still report EOS on the bus.
+/// all) still report EOS on the bus. During preroll it marks a terminal ready
+/// only after the wrapped sink's synchronous `consume` has returned `Ok`:
+/// accepted/submitted, not necessarily scanned out, played, or remotely
+/// received.
 struct TerminalTracer {
     bus: Bus,
     id: ElementId,
@@ -242,6 +245,9 @@ impl Sink for TerminalTracer {
             pp_trace!(pp_log: self.inner.pp_log(), "event=eos phase=received");
         }
         let result = self.inner.consume(buf);
+        // `Sink::consume` defines successful terminal return as acceptance
+        // into that sink's output path. This is the preroll completion point;
+        // deliberately do not claim physical presentation has completed.
         if result.is_ok()
             && let Some(context) = &self.preroll
         {

@@ -31,6 +31,11 @@ use crate::{
 /// render implements this for its own window/rendering stack; this
 /// repository's examples use `examples/render/render_common` for that
 /// implementation, outside the `media-pp` crate itself.
+///
+/// A successful submit must install the frame as the current presentation
+/// content or enqueue its swap-chain presentation before returning. Pipeline
+/// preroll treats that return as the terminal's presentation commitment; it
+/// does not require the implementation to wait for physical scanout.
 pub trait D3d12FrameRenderer: Send {
     /// The `ID3D12Device` this implementation actually renders/submits
     /// with. [`D3d12Renderer`] reads this once at construction to guard

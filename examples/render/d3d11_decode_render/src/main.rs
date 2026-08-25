@@ -95,10 +95,10 @@ mod windows_example {
         let pipeline = Pipeline::new("d3d11-decode-render", source, |source, ctx| {
             // Same device the renderer draws with — required for the
             // zero-copy path to be valid at all (see D3d11Decoder::new).
-            // `extra_hw_frames` must cover the `"frames"` queue's own depth
-            // below (see D3d11Decoder::new's own docs on why, unlike
-            // D3d12Decoder) — decode can legitimately run that far ahead of
-            // playback while the queue buffers up.
+            // The decoder's downstream-frame budget must cover the `"frames"`
+            // queue depth below (see D3d11Decoder::new's docs). Its accurate-
+            // seek candidate surface is reserved internally, so it is not
+            // included in this value.
             let decoder = D3d11Decoder::new("decoder", params, gpu.device(), 32)
                 .expect("failed to open D3D11VA decoder");
             let pacer = Pacer::new("pacer", time_base, ctx.clock.clone())?;

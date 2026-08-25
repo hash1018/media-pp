@@ -298,6 +298,13 @@ pub trait Sink: Element {
     /// its [`crate::bus::Bus`], drops that buffer, and keeps its worker alive.
     /// Implementations must forward [`MediaBuffer::Eos`] after flushing any
     /// delayed state they own.
+    ///
+    /// For a terminal sink, returning `Ok(())` means the buffer has been
+    /// accepted into that sink's output path. Pipeline preroll uses precisely
+    /// this boundary: a video renderer must not return success until it has
+    /// installed the frame as its current presentation content or submitted
+    /// it to its presentation queue. This does not promise physical display
+    /// scanout, audible playback, or remote receipt.
     fn consume(&mut self, buf: MediaBuffer) -> Result<()>;
 
     /// What this sink can be fed, checked when it is wired rather than
