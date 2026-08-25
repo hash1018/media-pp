@@ -588,7 +588,7 @@ impl SourceElement for WebRtcTrackSource {
                                     return Ok(());
                                 }
                                 RequestKind::Control(msg) => {
-                                    if apply_one(self, bus, msg, &req.ack)? {
+                                    if apply_one(self, bus, &msg, &req.ack)? {
                                         pp_info!(self, "stopped");
                                         return Ok(());
                                     }

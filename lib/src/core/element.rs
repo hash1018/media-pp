@@ -372,7 +372,9 @@ pub trait SourceElement: Source {
     /// [`crate::control::drain_control`] as part of handling
     /// [`ControlMsg::Seek`], *before* that message is forwarded to the
     /// source's own pads — so whatever's read next comes from the new
-    /// position by the time downstream elements are told to flush for it.
+    /// position by the time downstream elements receive the new timeline
+    /// announcement. Buffered and stateful old-timeline data is discarded by
+    /// the preceding [`ControlMsg::Flush`].
     ///
     /// Returns where this actually landed, which is allowed to differ
     /// from `target` — a container seek can only ever reposition to a

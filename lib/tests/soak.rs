@@ -340,7 +340,7 @@ fn seek_storm_does_not_grow_process_memory() {
         } else {
             Duration::from_millis(1200)
         };
-        pipeline.seek(target);
+        pipeline.seek(target).expect("seek");
         thread::sleep(Duration::from_millis(60));
         if round + 1 == WARMUP {
             settle();

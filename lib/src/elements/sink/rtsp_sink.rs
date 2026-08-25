@@ -249,7 +249,11 @@ impl Sink for RtspSink {
     fn control(&mut self, msg: ControlMsg) -> Result<()> {
         match msg {
             ControlMsg::Seek(_) => self.pending_seek = true,
-            ControlMsg::Pause | ControlMsg::Resume | ControlMsg::Stop | ControlMsg::Flush => {}
+            ControlMsg::Pause
+            | ControlMsg::Resume
+            | ControlMsg::Stop
+            | ControlMsg::Flush
+            | ControlMsg::CheckSeek(_) => {}
         }
         Ok(())
     }

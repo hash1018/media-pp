@@ -101,6 +101,35 @@ fn pause_then_stop_returns_promptly() {
     );
 }
 
+#[test]
+fn seek_check_rejects_a_live_source_before_flushing() {
+    let source = TestVideoSource::new("live", TestVideoOptions::default());
+    let pipeline = Pipeline::new("seek-check", source, |source, ctx| {
+        let branch = ctx.branch().to(Box::new(NoOpSink {
+            name: "noop".into(),
+            pp_log: element_pp_log(ElementType::Other, "noop", None),
+        }))?;
+        ctx.attach(source, 0, branch)?;
+        Ok(())
+    })
+    .expect("pipeline wiring");
+
+    pipeline.run().expect("run");
+    let error = pipeline
+        .seek(Duration::from_secs(1))
+        .expect_err("live source must reject seek");
+    pipeline.stop();
+
+    let crate::Error::SeekError(error) = error else {
+        panic!("expected SeekError, got {error:?}");
+    };
+    assert_eq!(error.rejections().len(), 1);
+    assert_eq!(
+        error.rejections()[0].reason,
+        crate::control::SeekRejectReason::LiveSource
+    );
+}
+
 /// Fails on its first `run`, the way a live capture whose source disappears
 /// does.
 struct FailingSource {
@@ -580,7 +609,7 @@ fn seek_repositions_and_playback_continues() {
 
     pipeline.run().unwrap();
     thread::sleep(Duration::from_millis(50));
-    pipeline.seek(Duration::from_secs(1));
+    pipeline.seek(Duration::from_secs(1)).expect("seek");
     // Let packets flow again post-seek before tearing down.
     thread::sleep(Duration::from_millis(100));
     pipeline.stop();
@@ -643,7 +672,7 @@ fn seek_reports_where_it_actually_landed_when_target_is_not_a_keyframe() {
 
     pipeline.run().unwrap();
     thread::sleep(Duration::from_millis(50));
-    pipeline.seek(Duration::from_secs(3));
+    pipeline.seek(Duration::from_secs(3)).expect("seek");
     thread::sleep(Duration::from_millis(100));
     pipeline.stop();
 

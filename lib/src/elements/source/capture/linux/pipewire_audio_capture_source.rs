@@ -380,7 +380,7 @@ impl PipeWireAudioCaptureSource {
                 });
             };
             if msg != ControlMsg::Pause {
-                if control::apply_one(self, bus, msg, &ack)? {
+                if control::apply_one(self, bus, &msg, &ack)? {
                     return Ok(ControlOutcome {
                         stopped: true,
                         paused_for,
@@ -393,7 +393,7 @@ impl PipeWireAudioCaptureSource {
             // frozen interval: this source produces no media during either.
             let pause_start = Instant::now();
             self.set_active(false)?;
-            control::apply_one(self, bus, msg, &ack)?;
+            control::apply_one(self, bus, &msg, &ack)?;
 
             loop {
                 let Some((paused_msg, paused_ack)) = control.recv() else {
@@ -417,7 +417,7 @@ impl PipeWireAudioCaptureSource {
                     // has resumed, then discard whatever the pause boundary
                     // left queued so `Resume` starts from live audio, and only
                     // then acknowledge.
-                    control::apply_one_unacked(self, bus, paused_msg)?;
+                    control::apply_one_unacked(self, bus, &paused_msg)?;
                     discard_captured(&self.packets);
                     self.set_active(true)?;
                     let _ = paused_ack.send(());
@@ -425,7 +425,7 @@ impl PipeWireAudioCaptureSource {
                     break;
                 }
 
-                if control::apply_one(self, bus, paused_msg, &paused_ack)? {
+                if control::apply_one(self, bus, &paused_msg, &paused_ack)? {
                     paused_for += pause_start.elapsed();
                     return Ok(ControlOutcome {
                         stopped: true,

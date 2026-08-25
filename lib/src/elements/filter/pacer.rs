@@ -243,7 +243,7 @@ impl Sink for Pacer {
                 self.clock.reset();
             }
             ControlMsg::Stop => self.pending.clear(),
-            ControlMsg::Pause | ControlMsg::Resume => {}
+            ControlMsg::Pause | ControlMsg::Resume | ControlMsg::CheckSeek(_) => {}
         }
         self.pad.control(msg)
     }

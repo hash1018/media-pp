@@ -66,7 +66,9 @@ pub fn read_commands(
                         "wall clock"
                     };
                     println!("seeking to {target:.2?} ({clock})...");
-                    pipeline.seek(target);
+                    if let Err(error) = pipeline.seek(target) {
+                        eprintln!("seek rejected: {error}");
+                    }
                 }
                 None => eprintln!(
                     "could not parse {target:?}; use seconds (`seek 30`) or mm:ss (`seek 1:15`)"

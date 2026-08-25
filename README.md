@@ -110,7 +110,9 @@ can reposition its own input timeline through `is_live()` and
 not imply that every attached downstream branch can accept a pipeline seek.
 Pipeline seeks first send an explicit `Flush` control to discard buffered and
 stateful data from the old timeline, then send `Seek` to reposition sources and
-announce the new timeline.
+announce the new timeline. Before either mutation, a synchronous `CheckSeek`
+cascade rejects live or non-seekable sources and recording muxer branches;
+`Pipeline::seek` returns that refusal to its caller.
 
 Buffers use shared ownership, so fan-out clones references rather than media
 payloads. PTS, duration, packet time bases, video color information, and EOS

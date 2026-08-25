@@ -387,7 +387,7 @@ impl WasapiCaptureSource {
                 });
             };
             if msg != ControlMsg::Pause {
-                if control::apply_one(self, bus, msg, &ack)? {
+                if control::apply_one(self, bus, &msg, &ack)? {
                     return Ok(ControlOutcome {
                         stopped: true,
                         paused_for,
@@ -409,7 +409,7 @@ impl WasapiCaptureSource {
             // SAFETY: the client was successfully stopped immediately above,
             // which is the required state for `Reset`.
             unsafe { self.audio_client.Reset() }.map_err(|error| self.classify_error(error))?;
-            control::apply_one(self, bus, msg, &ack)?;
+            control::apply_one(self, bus, &msg, &ack)?;
 
             loop {
                 let Some((paused_msg, paused_ack)) = control.recv() else {
@@ -434,7 +434,7 @@ impl WasapiCaptureSource {
                     // has resumed. Start the device and only then ack, so
                     // the synchronous caller cannot observe a half-resumed
                     // source and no audio accumulates during a slow cascade.
-                    control::apply_one_unacked(self, bus, paused_msg)?;
+                    control::apply_one_unacked(self, bus, &paused_msg)?;
                     // SAFETY: this initialized client is stopped/reset and the
                     // source thread exclusively sequences its lifecycle.
                     unsafe { self.audio_client.Start() }
@@ -444,7 +444,7 @@ impl WasapiCaptureSource {
                     break;
                 }
 
-                if control::apply_one(self, bus, paused_msg, &paused_ack)? {
+                if control::apply_one(self, bus, &paused_msg, &paused_ack)? {
                     paused_for += pause_start.elapsed();
                     return Ok(ControlOutcome {
                         stopped: true,

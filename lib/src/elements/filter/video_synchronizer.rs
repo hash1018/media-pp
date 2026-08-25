@@ -251,7 +251,10 @@ impl Sink for VideoSynchronizer {
                 self.last_pts = None;
                 self.frame_duration = FALLBACK_FRAME_DURATION;
             }
-            ControlMsg::Pause | ControlMsg::Resume | ControlMsg::Seek(_) => {}
+            ControlMsg::Pause
+            | ControlMsg::Resume
+            | ControlMsg::Seek(_)
+            | ControlMsg::CheckSeek(_) => {}
         }
         self.pad.control(msg)
     }

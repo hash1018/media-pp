@@ -643,7 +643,7 @@ impl Sink for WasapiRenderer {
                     master.reset_for_seek().map_err(WasapiRendererError::from)?;
                 }
             }
-            ControlMsg::Seek(_) => {}
+            ControlMsg::Seek(_) | ControlMsg::CheckSeek(_) => {}
         }
         Ok(())
     }

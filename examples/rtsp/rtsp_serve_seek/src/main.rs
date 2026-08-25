@@ -144,7 +144,9 @@ mod example {
             match parse_timestamp(value) {
                 Some(target) => {
                     println!("seeking to {target:.2?}...");
-                    pipeline.seek(target);
+                    if let Err(error) = pipeline.seek(target) {
+                        eprintln!("seek rejected: {error}");
+                    }
                 }
                 None => eprintln!("couldn't parse {line:?} — use seconds (`30`) or mm:ss (`1:15`)"),
             }

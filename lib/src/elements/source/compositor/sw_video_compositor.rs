@@ -379,7 +379,10 @@ impl Sink for SwVideoCompositorInputSink {
                     input.latest_frame.store(None);
                 }
             }
-            ControlMsg::Pause | ControlMsg::Resume | ControlMsg::Seek(_) => {}
+            ControlMsg::Pause
+            | ControlMsg::Resume
+            | ControlMsg::Seek(_)
+            | ControlMsg::CheckSeek(_) => {}
         }
         Ok(())
     }

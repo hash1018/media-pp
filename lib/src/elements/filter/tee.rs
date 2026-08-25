@@ -428,7 +428,7 @@ impl Sink for Tee {
                 continue;
             }
             let peer = pad.peer_identity();
-            let outcome = pad.control(msg);
+            let outcome = pad.control(msg.clone());
             drop(pad);
             if let Err(error) = outcome {
                 self.report_branch_error(branch.root_id, peer, error);

@@ -12,7 +12,7 @@ use crate::pp_log::{PpLog, pp_info, pp_trace, pp_warn};
 use crate::{
     bus::{Bus, BusEvent, BusReceiver},
     clock::Clock,
-    control::{ControlMsg, ControlReceiver, ControlSender},
+    control::{ControlMsg, ControlReceiver, ControlSender, SeekCheckContext},
     element::{Context, SourceElement},
     error::{Result, ThreadSpawnError},
     graph::{GraphSnapshot, NodeInfo, PipelineGraph, log_topology},
@@ -343,7 +343,7 @@ impl Pipeline {
         self.clock.pause();
         self.paused.store(true, Ordering::Release);
         for control_tx in &self.control_txs {
-            control_tx.send(msg);
+            control_tx.send(msg.clone());
         }
         pp_trace!(
             pp_log: &self.pp_log,
@@ -366,7 +366,7 @@ impl Pipeline {
         );
         self.clock.resume();
         for control_tx in &self.control_txs {
-            control_tx.send(msg);
+            control_tx.send(msg.clone());
         }
         pp_trace!(
             pp_log: &self.pp_log,
@@ -397,7 +397,7 @@ impl Pipeline {
         );
         self.clock.interrupt();
         for control_tx in &self.control_txs {
-            control_tx.send(msg);
+            control_tx.send(msg.clone());
         }
         pp_trace!(
             pp_log: &self.pp_log,
@@ -469,16 +469,19 @@ impl Pipeline {
     /// that in-flight frame is
     /// out of the way.
     ///
-    /// A source that doesn't support seeking (e.g. a live capture) reports
-    /// that via its own [`crate::element::SourceElement::seek`] returning
-    /// an error — surfaced on [`Pipeline::bus`] as a
-    /// [`BusEvent::Error`] under that source's name, same as any other
-    /// per-source failure, rather than failing this call outright or
-    /// skipping that source silently.
-    pub fn seek(&self, target: Duration) {
+    /// Before changing anything, a synchronous `CheckSeek` cascade verifies
+    /// every source and branch. A live/non-seekable source or recording muxer
+    /// returns [`crate::control::SeekError`] without flushing the current
+    /// timeline.
+    pub fn seek(&self, target: Duration) -> Result<()> {
         if self.running.load(Ordering::Acquire) == 0 {
-            return;
+            return Ok(());
         }
+        let check = Arc::new(SeekCheckContext::new());
+        for control_tx in &self.control_txs {
+            control_tx.send(ControlMsg::CheckSeek(Arc::clone(&check)));
+        }
+        check.result()?;
         let msg = ControlMsg::Seek(target);
         pp_trace!(
             pp_log: &self.pp_log,
@@ -488,12 +491,15 @@ impl Pipeline {
         self.playback_clock.reset_for_seek();
         for control_tx in &self.control_txs {
             control_tx.send(ControlMsg::Flush);
-            control_tx.send(msg);
+        }
+        for control_tx in &self.control_txs {
+            control_tx.send(msg.clone());
         }
         pp_trace!(
             pp_log: &self.pp_log,
             "event=control control={msg:?} phase=completed outcome=ok"
         );
+        Ok(())
     }
 }
 

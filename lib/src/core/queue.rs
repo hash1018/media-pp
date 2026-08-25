@@ -380,7 +380,7 @@ impl Sink for Queue {
             pp_log: &self.pp_log,
             "event=control control={msg:?} phase=received"
         );
-        self.control.send(msg);
+        self.control.send(msg.clone());
         pp_trace!(
             pp_log: &self.pp_log,
             "event=control control={msg:?} phase=completed outcome=ok"
@@ -562,8 +562,8 @@ fn apply_control(
         pp_log: error_reporter.pp_log,
         "event=control control={msg:?} phase=forwarding"
     );
-    discard_stale_data(data_rx, msg);
-    forward_control(downstream, msg, error_reporter);
+    discard_stale_data(data_rx, &msg);
+    forward_control(downstream, msg.clone(), error_reporter);
     let is_stop = msg == ControlMsg::Stop;
     let _ = ack.send(());
     if is_stop {
@@ -604,8 +604,8 @@ fn apply_control(
             pp_log: error_reporter.pp_log,
             "event=control control={msg:?} phase=forwarding"
         );
-        discard_stale_data(data_rx, msg);
-        forward_control(downstream, msg, error_reporter);
+        discard_stale_data(data_rx, &msg);
+        forward_control(downstream, msg.clone(), error_reporter);
         let is_stop = msg == ControlMsg::Stop;
         let _ = ack.send(());
         if is_stop {
@@ -658,8 +658,8 @@ fn forward_control(
 /// `Pause`/`Resume`/`Stop` leave `data_rx` alone — see the type-level
 /// docs on why that's safe (nothing feeds a paused/stopped queue in the
 /// first place).
-fn discard_stale_data(data_rx: &Receiver<MediaBuffer>, msg: ControlMsg) {
-    if msg == ControlMsg::Flush {
+fn discard_stale_data(data_rx: &Receiver<MediaBuffer>, msg: &ControlMsg) {
+    if *msg == ControlMsg::Flush {
         while data_rx.try_recv().is_ok() {}
     }
 }
@@ -683,11 +683,11 @@ mod tests {
         let (tx, rx) = crossbeam_channel::bounded(2);
         tx.send(packet()).unwrap();
 
-        discard_stale_data(&rx, ControlMsg::Seek(Duration::from_secs(1)));
+        discard_stale_data(&rx, &ControlMsg::Seek(Duration::from_secs(1)));
         assert!(rx.try_recv().is_ok(), "Seek must not own Queue flushing");
 
         tx.send(packet()).unwrap();
-        discard_stale_data(&rx, ControlMsg::Flush);
+        discard_stale_data(&rx, &ControlMsg::Flush);
         assert!(rx.try_recv().is_err(), "Flush must discard queued data");
     }
 

@@ -12,14 +12,19 @@
 //! wall clock must add `paused_for` back into its own timing, or resuming will
 //! look like a burst of catch-up work owed all at once.
 
-use std::time::{Duration, Instant};
+use std::{
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
+
+use thiserror::Error;
 
 use crate::pp_log::pp_trace;
 use crossbeam_channel::{Receiver, Sender, unbounded};
 
 use crate::{
     bus::{Bus, BusEvent},
-    element::SourceElement,
+    element::{ElementType, SourceElement},
     error::Result,
 };
 
@@ -29,7 +34,7 @@ use crate::{
 /// instead of riding along as data: unlike `Eos`, it has to be able to
 /// reach every element even mid-stream, and (for `Queue`) jump ahead of
 /// whatever data is already backed up rather than wait in line behind it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum ControlMsg {
     /// Freeze in place. Every [`crate::queue::Queue`] downstream stops
     /// pulling from its data channel until `Resume`/`Stop` — which also
@@ -49,6 +54,10 @@ pub enum ControlMsg {
     /// before `Seek`; keeping the two controls separate lets paused preroll
     /// and future timeline operations compose the same flush boundary.
     Flush,
+    /// Ask every reachable element whether it can participate in a seek.
+    /// Rejections are collected without mutating playback state; the caller
+    /// inspects the shared context after the synchronous cascade returns.
+    CheckSeek(Arc<SeekCheckContext>),
     /// Jump to an absolute position from the start of the media.
     /// The source repositions via [`crate::element::SourceElement::seek`]
     /// before this is forwarded downstream. Timeline state is discarded by
@@ -56,10 +65,110 @@ pub enum ControlMsg {
     Seek(Duration),
 }
 
+impl PartialEq for ControlMsg {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Pause, Self::Pause)
+            | (Self::Resume, Self::Resume)
+            | (Self::Stop, Self::Stop)
+            | (Self::Flush, Self::Flush) => true,
+            (Self::Seek(left), Self::Seek(right)) => left == right,
+            (Self::CheckSeek(left), Self::CheckSeek(right)) => Arc::ptr_eq(left, right),
+            _ => false,
+        }
+    }
+}
+
+impl Eq for ControlMsg {}
+
+/// Why one element refused a pipeline-wide seek check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SeekRejectReason {
+    /// The source follows an external timeline that cannot be repositioned.
+    LiveSource,
+    /// The source cannot reposition its input timeline.
+    SourceNotSeekable,
+    /// A downstream element cannot preserve its contract across a seek.
+    ElementNotSeekable,
+}
+
+/// One element that prevents a pipeline-wide seek.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SeekRejection {
+    /// Kind of the element that rejected the check.
+    pub element_type: ElementType,
+    /// Caller-selected instance name of the rejecting element.
+    pub name: Arc<str>,
+    /// Capability that made this element incompatible with seeking.
+    pub reason: SeekRejectReason,
+}
+
+/// Shared result accumulator carried by [`ControlMsg::CheckSeek`].
+#[derive(Debug, Default)]
+pub struct SeekCheckContext {
+    rejections: Mutex<Vec<SeekRejection>>,
+}
+
+impl SeekCheckContext {
+    /// Creates an empty accumulator for one synchronous seek check cascade.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Records an element refusal. Repeated visits to the same graph path do
+    /// not make the public result noisy with identical entries.
+    pub fn reject(&self, element_type: ElementType, name: Arc<str>, reason: SeekRejectReason) {
+        let rejection = SeekRejection {
+            element_type,
+            name,
+            reason,
+        };
+        let mut rejections = self
+            .rejections
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !rejections.contains(&rejection) {
+            rejections.push(rejection);
+        }
+    }
+
+    /// Returns a snapshot of every distinct rejection collected so far.
+    pub fn rejections(&self) -> Vec<SeekRejection> {
+        self.rejections
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    /// Succeeds when every visited element accepted the seek check.
+    pub fn result(&self) -> std::result::Result<(), SeekError> {
+        let rejections = self.rejections();
+        if rejections.is_empty() {
+            Ok(())
+        } else {
+            Err(SeekError { rejections })
+        }
+    }
+}
+
+/// A pipeline-wide seek check found at least one incompatible element.
+#[derive(Debug, Error)]
+#[error("pipeline seek rejected by {rejections:?}")]
+pub struct SeekError {
+    rejections: Vec<SeekRejection>,
+}
+
+impl SeekError {
+    /// Elements that rejected the attempted pipeline seek.
+    pub fn rejections(&self) -> &[SeekRejection] {
+        &self.rejections
+    }
+}
+
 /// A request carried by a control channel. Ordinary controls cascade through
 /// the graph immediately; `Finish` is source-only because graceful completion
 /// must enter the graph as an ordered [`crate::buffer::MediaBuffer::Eos`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RequestKind {
     Control(ControlMsg),
     Finish,
@@ -212,7 +321,7 @@ pub fn drain_control<S: SourceElement>(
             // produces no media during that time, so it belongs to the
             // frozen interval just as much as the later wait for Resume.
             let pause_start = Instant::now();
-            apply_one(source, bus, msg, &ack)?;
+            apply_one(source, bus, &msg, &ack)?;
             let stopped = wait_out_pause(control, source, bus)?;
             paused_for += pause_start.elapsed();
             if stopped {
@@ -223,7 +332,7 @@ pub fn drain_control<S: SourceElement>(
             }
             continue;
         }
-        if apply_one(source, bus, msg, &ack)? {
+        if apply_one(source, bus, &msg, &ack)? {
             return Ok(ControlOutcome {
                 stopped: true,
                 paused_for,
@@ -275,7 +384,7 @@ pub(crate) fn apply_finish<S: SourceElement>(source: &mut S, bus: &Bus, ack: &Se
 pub(crate) fn apply_one<S: SourceElement>(
     source: &mut S,
     bus: &Bus,
-    msg: ControlMsg,
+    msg: &ControlMsg,
     ack: &Sender<()>,
 ) -> Result<bool> {
     let is_stop = apply_one_unacked(source, bus, msg)?;
@@ -291,18 +400,19 @@ pub(crate) fn apply_one<S: SourceElement>(
 pub(crate) fn apply_one_unacked<S: SourceElement>(
     source: &mut S,
     bus: &Bus,
-    msg: ControlMsg,
+    msg: &ControlMsg,
 ) -> Result<bool> {
     pp_trace!(
         pp_log: source.pp_log(),
         "event=control control={msg:?} phase=received"
     );
     let result: Result<bool> = (|| {
+        apply_seek_check(source, msg);
         apply_seek(source, bus, msg)?;
         for pad in source.src_pads() {
-            pad.control(msg)?;
+            pad.control(msg.clone())?;
         }
-        Ok(msg == ControlMsg::Stop)
+        Ok(*msg == ControlMsg::Stop)
     })();
     match &result {
         Ok(_) => pp_trace!(
@@ -335,7 +445,7 @@ pub(crate) fn wait_out_pause<S: SourceElement>(
             apply_finish(source, bus, &ack);
             return Ok(true);
         };
-        if apply_one(source, bus, msg, &ack)? {
+        if apply_one(source, bus, &msg, &ack)? {
             return Ok(true);
         }
         if msg == ControlMsg::Resume {
@@ -350,15 +460,31 @@ pub(crate) fn wait_out_pause<S: SourceElement>(
 /// `source` (see [`SourceElement::seek`]) and reports where it actually
 /// landed via [`BusEvent::Seeked`], since that can differ from what was
 /// requested. No-op for every other [`ControlMsg`].
-fn apply_seek<S: SourceElement>(source: &mut S, bus: &Bus, msg: ControlMsg) -> Result<()> {
+fn apply_seek_check<S: SourceElement>(source: &S, msg: &ControlMsg) {
+    let ControlMsg::CheckSeek(context) = msg else {
+        return;
+    };
+    let reason = if source.is_live() {
+        Some(SeekRejectReason::LiveSource)
+    } else if !source.is_seekable() {
+        Some(SeekRejectReason::SourceNotSeekable)
+    } else {
+        None
+    };
+    if let Some(reason) = reason {
+        context.reject(source.element_type(), source.name(), reason);
+    }
+}
+
+fn apply_seek<S: SourceElement>(source: &mut S, bus: &Bus, msg: &ControlMsg) -> Result<()> {
     if let ControlMsg::Seek(target) = msg {
-        let landed = source.seek(target)?;
+        let landed = source.seek(*target)?;
         bus.post(
             source.pp_log(),
             BusEvent::Seeked {
                 element_type: source.element_type(),
                 name: source.name(),
-                requested: target,
+                requested: *target,
                 landed,
             },
         );
@@ -492,6 +618,32 @@ mod tests {
         assert!(
             stopped,
             "a dropped ControlSender must be treated the same as an explicit Stop"
+        );
+    }
+
+    #[test]
+    fn seek_check_collects_a_non_seekable_source_without_mutating_it() {
+        let context = Arc::new(SeekCheckContext::new());
+        let (ack, _ack_rx) = crossbeam_channel::bounded(1);
+        let (bus, _bus_rx) = Bus::new();
+        let mut source = DummySource::new();
+
+        apply_one(
+            &mut source,
+            &bus,
+            &ControlMsg::CheckSeek(Arc::clone(&context)),
+            &ack,
+        )
+        .expect("capability checks must not fail the control cascade");
+
+        let error = context.result().expect_err("dummy source is not seekable");
+        assert_eq!(
+            error.rejections(),
+            [SeekRejection {
+                element_type: ElementType::Other,
+                name: "dummy".into(),
+                reason: SeekRejectReason::SourceNotSeekable,
+            }]
         );
     }
 

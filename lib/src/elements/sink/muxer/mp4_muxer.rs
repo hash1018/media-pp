@@ -10,7 +10,7 @@ use thiserror::Error as ThisError;
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, PortContract},
-    control::ControlMsg,
+    control::{ControlMsg, SeekRejectReason},
     element::{Element, ElementType, Sink, element_pp_log},
     error::Result,
 };
@@ -336,6 +336,13 @@ impl Sink for Mp4MuxerStreamSink {
     }
 
     fn control(&mut self, msg: ControlMsg) -> Result<()> {
+        if let ControlMsg::CheckSeek(context) = &msg {
+            context.reject(
+                self.element_type(),
+                self.name(),
+                SeekRejectReason::ElementNotSeekable,
+            );
+        }
         // Terminal, nothing to forward. `Stop` still contributes to this
         // track's own "done" count — see `Mp4Muxer::open`'s own docs on
         // why the trailer waits for every track rather than finalizing on
@@ -350,6 +357,7 @@ impl Sink for Mp4MuxerStreamSink {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::control::{SeekCheckContext, SeekRejectReason};
     use crate::element::Source;
     use crate::elements::{AudioCodec, SwAudioEncoder, SwAudioEncoderOptions};
 
@@ -385,6 +393,37 @@ mod tests {
         // floats (`avcodec_send_frame` then rejects the frame outright).
         frame.data_mut(0).fill(0);
         frame
+    }
+
+    #[test]
+    fn seek_check_rejects_a_muxer_track() {
+        let encoder = open_aac_encoder(48000, 1);
+        let path = std::env::temp_dir().join(format!(
+            "mp4_muxer_seek_check_test_{}.mp4",
+            std::process::id()
+        ));
+        let mut muxer = Mp4Muxer::create(&path).expect("create muxer");
+        muxer
+            .add_stream(
+                "audio",
+                encoder.parameters(),
+                ffmpeg::Rational::new(1, 48000),
+            )
+            .expect("add stream");
+        let mut sink = muxer.open().expect("open muxer").pop().unwrap();
+        let context = Arc::new(SeekCheckContext::new());
+
+        sink.control(ControlMsg::CheckSeek(Arc::clone(&context)))
+            .expect("check control");
+
+        let error = context.result().expect_err("muxer must reject seek");
+        assert_eq!(error.rejections().len(), 1);
+        assert_eq!(
+            error.rejections()[0].reason,
+            SeekRejectReason::ElementNotSeekable
+        );
+        sink.control(ControlMsg::Stop).expect("finalize muxer");
+        std::fs::remove_file(path).ok();
     }
 
     /// One track, driven end to end (encode -> mux -> write_trailer on

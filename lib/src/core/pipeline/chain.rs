@@ -134,7 +134,7 @@ impl<T: Sink> Sink for FlowTracer<T> {
             pp_log: self.inner.pp_log(),
             "event=control control={msg:?} phase=received"
         );
-        let result = self.inner.control(msg);
+        let result = self.inner.control(msg.clone());
         match &result {
             Ok(()) => pp_trace!(
                 pp_log: self.inner.pp_log(),
@@ -246,7 +246,7 @@ impl Sink for TerminalTracer {
             pp_log: self.inner.pp_log(),
             "event=control control={msg:?} phase=received"
         );
-        let result = self.inner.control(msg);
+        let result = self.inner.control(msg.clone());
         match &result {
             Ok(()) => pp_trace!(
                 pp_log: self.inner.pp_log(),

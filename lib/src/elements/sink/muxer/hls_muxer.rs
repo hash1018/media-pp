@@ -14,7 +14,7 @@ use thiserror::Error as ThisError;
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, PortContract},
-    control::ControlMsg,
+    control::{ControlMsg, SeekRejectReason},
     element::{Element, ElementType, Sink, element_pp_log},
     error::Result,
 };
@@ -523,6 +523,13 @@ impl Sink for HlsMuxerStreamSink {
     }
 
     fn control(&mut self, msg: ControlMsg) -> Result<()> {
+        if let ControlMsg::CheckSeek(context) = &msg {
+            context.reject(
+                self.element_type(),
+                self.name(),
+                SeekRejectReason::ElementNotSeekable,
+            );
+        }
         if msg == ControlMsg::Stop {
             self.finish()?;
         }
