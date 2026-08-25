@@ -92,7 +92,8 @@ impl CudaDecoder {
     /// decoded frame still alive downstream — sitting in a
     /// [`crate::queue::Queue`], held by a slow renderer — occupies a slot,
     /// and running out fails decode rather than blocking it. Pass at least
-    /// the depth of the deepest downstream buffering.
+    /// the depth of the deepest downstream buffering plus one surface for
+    /// accurate seek's last-frame candidate.
     ///
     /// Unlike D3D11VA, though, NVDEC also imposes a hard **upper** bound: the
     /// pool may hold at most 32 surfaces in total, counting the codec's own
@@ -168,8 +169,10 @@ impl CudaDecoder {
                     // Reassigning `frame` releases a suppressed one right here,
                     // returning its fixed-pool surface a whole branch earlier
                     // than dropping it downstream would.
-                    if !self.preroll_gate.suppresses(frame.pts()) {
-                        self.pad.push(MediaBuffer::Video(Arc::new(frame)))?;
+                    if let Some(frame) =
+                        self.preroll_gate.admit(MediaBuffer::Video(Arc::new(frame)))
+                    {
+                        self.pad.push(frame)?;
                     }
                     frame = self.pool.get();
                 }
@@ -228,6 +231,9 @@ impl Sink for CudaDecoder {
                     .inspect_err(|error| pp_error!(self, "send_eof failed: {error}"))
                     .map_err(CudaDecoderError::from)?;
                 self.drain()?;
+                if let Some(candidate) = self.preroll_gate.finish_on_eos() {
+                    self.pad.push(candidate)?;
+                }
                 self.pad.push(MediaBuffer::Eos)
             }
             other => {

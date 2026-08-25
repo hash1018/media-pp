@@ -283,7 +283,10 @@ impl Sink for TerminalTracer {
         let result = self.inner.control(msg.clone());
         if result.is_ok() {
             match &msg {
-                ControlMsg::Pause => self.paused = true,
+                ControlMsg::Pause => {
+                    self.paused = true;
+                    self.preroll = None;
+                }
                 ControlMsg::Resume => {
                     self.paused = false;
                     self.preroll = None;
@@ -530,6 +533,9 @@ impl Context {
     /// Returns the stable branch identity used by later dynamic graph
     /// operations. An invalid index or already-linked pad returns a
     /// [`GraphError`] without changing either the runtime connection or graph.
+    /// If a lifecycle or seek operation is in progress, this returns
+    /// [`GraphError::TimelineOperationInProgress`] immediately; build a fresh
+    /// detached branch and retry after that operation finishes.
     pub fn attach<S: Source>(
         &self,
         source: &mut S,
@@ -546,6 +552,13 @@ impl Context {
     }
 
     pub(crate) fn attach_pad(&self, pad: &mut SrcPad, branch: DetachedBranch) -> Result<BranchId> {
+        let _operation = match self.operation.try_lock() {
+            Ok(guard) => guard,
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                return Err(GraphError::TimelineOperationInProgress.into());
+            }
+        };
         if pad.is_linked() {
             return Err(GraphError::PadAlreadyLinked(pad.name().to_owned()).into());
         }

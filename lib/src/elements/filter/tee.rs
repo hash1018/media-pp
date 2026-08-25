@@ -38,6 +38,7 @@ pub struct Tee {
     id: ElementId,
     name: Arc<str>,
     shared: Arc<TeeShared>,
+    preroll: Option<Arc<crate::control::PrerollContext>>,
 }
 
 struct TeeShared {
@@ -109,6 +110,7 @@ impl Tee {
                 name: name.clone(),
                 pp_log: pp_log.clone(),
                 shared: shared.clone(),
+                preroll: None,
             },
             TeeHandle {
                 id,
@@ -258,12 +260,22 @@ impl TeeHandle {
     }
 
     /// Attaches a runtime branch, returning the stable ID used to remove it.
-    /// Fixed initial branches belong in [`TeeBuilder`].
+    /// Fixed initial branches belong in [`TeeBuilder`]. During a lifecycle or
+    /// seek operation this returns
+    /// [`GraphError::TimelineOperationInProgress`] immediately; build a fresh
+    /// detached branch and retry after the operation finishes.
     pub fn attach(&self, branch: DetachedBranch) -> Result<BranchId> {
         let shared = self
             .shared
             .upgrade()
             .ok_or(GraphError::ParentNotAttached(self.id))?;
+        let _operation = match shared.context.operation.try_lock() {
+            Ok(guard) => guard,
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                return Err(GraphError::TimelineOperationInProgress.into());
+            }
+        };
         let mut branches = lock_unpoisoned(&shared.branches);
         let mut pad = shared.next_pad(&self.name);
         let from_port: Arc<str> = pad.name().into();
@@ -382,8 +394,21 @@ impl Element for Tee {
 impl Sink for Tee {
     fn ready_consume(&mut self) -> bool {
         let branches = lock_unpoisoned(&self.shared.branches).clone();
+        let graph = self
+            .preroll
+            .as_ref()
+            .map(|_| self.shared.context.graph.snapshot());
         branches.into_iter().all(|branch| {
-            !branch.active.load(Ordering::Acquire) || lock_unpoisoned(&branch.pad).ready_consume()
+            if !branch.active.load(Ordering::Acquire) {
+                return true;
+            }
+            if let (Some(context), Some(graph)) = (&self.preroll, &graph) {
+                let terminals = graph.terminal_ids_from(branch.root_id);
+                if context.are_ready(&terminals) {
+                    return true;
+                }
+            }
+            lock_unpoisoned(&branch.pad).ready_consume()
         })
     }
 
@@ -395,6 +420,10 @@ impl Sink for Tee {
 
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         let branches = lock_unpoisoned(&self.shared.branches).clone();
+        let graph = self
+            .preroll
+            .as_ref()
+            .map(|_| self.shared.context.graph.snapshot());
         // One branch failing must not stop the buffer from reaching its
         // siblings — same "errors never kill anything, just get reported"
         // rule `Queue`'s worker loop follows. That buffer is dropped for
@@ -404,6 +433,12 @@ impl Sink for Tee {
         for branch in branches {
             if !branch.active.load(Ordering::Acquire) {
                 continue;
+            }
+            if let (Some(context), Some(graph)) = (&self.preroll, &graph) {
+                let terminals = graph.terminal_ids_from(branch.root_id);
+                if context.are_ready(&terminals) {
+                    continue;
+                }
             }
             let mut pad = lock_unpoisoned(&branch.pad);
             // Detach may have won the race while this thread waited for a
@@ -440,6 +475,11 @@ impl Sink for Tee {
             if let Err(error) = outcome {
                 self.report_branch_error(branch.root_id, peer, error);
             }
+        }
+        match &msg {
+            ControlMsg::Preroll(context) => self.preroll = Some(Arc::clone(context)),
+            ControlMsg::Pause | ControlMsg::Resume | ControlMsg::Stop => self.preroll = None,
+            ControlMsg::Flush | ControlMsg::CheckSeek(_) | ControlMsg::Seek(_) => {}
         }
         Ok(())
     }

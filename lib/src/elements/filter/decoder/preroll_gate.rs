@@ -1,5 +1,6 @@
 use ffmpeg_next::{self as ffmpeg, Rescale};
 
+use crate::buffer::MediaBuffer;
 use crate::control::PrerollContext;
 
 const NANOS: ffmpeg::Rational = ffmpeg::Rational(1, 1_000_000_000);
@@ -7,9 +8,10 @@ const NANOS: ffmpeg::Rational = ffmpeg::Rational(1, 1_000_000_000);
 /// Suppresses decoded media that precedes a seek target.
 ///
 /// A seek lands on the keyframe at or before the requested position, so a
-/// decoder has to decode forward from there to rebuild reference state. Only
-/// the samples at or after the target may be delivered; the rest exist purely
-/// to warm the codec up.
+/// decoder has to decode forward from there to rebuild reference state. Video
+/// holds one preceding frame until the next PTS proves which frame covers the
+/// requested instant; audio uses its sample count and rate for the same
+/// decision. Earlier output exists purely to warm the codec up.
 ///
 /// # Why this lives in the decoder
 ///
@@ -38,12 +40,18 @@ pub(super) struct PrerollGate {
     /// Learned from the packets being fed in; decoded frames carry a `pts`
     /// in this unit but not the unit itself.
     time_base: Option<ffmpeg::Rational>,
+    /// Last decoded sample before the target. Video needs one-sample
+    /// lookahead to select the frame that actually covers the requested
+    /// instant, and EOF uses the same candidate as its last-presentable
+    /// fallback.
+    candidate: Option<MediaBuffer>,
 }
 
 impl PrerollGate {
     /// Arms the gate for `context`, or disarms it when that preroll carries no
     /// target (a first-sample preroll has nothing to suppress).
     pub(super) fn begin(&mut self, context: &PrerollContext) {
+        self.candidate = None;
         self.target_ns = context
             .target()
             .map(|target| target.as_nanos().min(i64::MAX as u128) as i64);
@@ -53,6 +61,7 @@ impl PrerollGate {
     /// preroll they belong to is over either way.
     pub(super) fn clear(&mut self) {
         self.target_ns = None;
+        self.candidate = None;
     }
 
     /// Forgets the learned time base along with any target, for a `Flush` that
@@ -60,6 +69,7 @@ impl PrerollGate {
     pub(super) fn reset(&mut self) {
         self.target_ns = None;
         self.time_base = None;
+        self.candidate = None;
     }
 
     /// Records the unit this decoder's `pts` values will be expressed in.
@@ -79,12 +89,76 @@ impl PrerollGate {
     /// through. Suppressing on a guess would freeze the branch outright, and a
     /// branch that shows slightly early media is recoverable where one that
     /// shows none is not.
+    #[cfg(test)]
     pub(super) fn suppresses(&self, pts: Option<i64>) -> bool {
         let (Some(target_ns), Some(time_base), Some(pts)) = (self.target_ns, self.time_base, pts)
         else {
             return false;
         };
         pts.rescale(time_base, NANOS) < target_ns
+    }
+
+    /// Admits one decoded sample, retaining at most one pre-target candidate.
+    pub(super) fn admit(&mut self, buffer: MediaBuffer) -> Option<MediaBuffer> {
+        let Some(target_ns) = self.target_ns else {
+            return Some(buffer);
+        };
+        let Some(time_base) = self.time_base else {
+            self.clear();
+            return Some(buffer);
+        };
+        let (pts, audio_end_ns) = match &buffer {
+            MediaBuffer::Video(frame) => (frame.pts(), None),
+            MediaBuffer::Audio(frame) => {
+                let end = frame.pts().and_then(|pts| {
+                    let rate = u128::from(frame.rate());
+                    (rate > 0).then(|| {
+                        let start = pts.rescale(time_base, NANOS);
+                        let duration =
+                            (frame.samples() as u128).saturating_mul(1_000_000_000) / rate;
+                        start.saturating_add(duration.min(i64::MAX as u128) as i64)
+                    })
+                });
+                (frame.pts(), end)
+            }
+            _ => {
+                self.clear();
+                return Some(buffer);
+            }
+        };
+        let Some(pts) = pts else {
+            self.clear();
+            return Some(buffer);
+        };
+        let start_ns = pts.rescale(time_base, NANOS);
+
+        // An audio frame crossing the target is the audio that exists at the
+        // requested instant; do not discard the whole frame just because its
+        // first sample precedes the target.
+        if audio_end_ns.is_some_and(|end| start_ns <= target_ns && end > target_ns) {
+            self.clear();
+            return Some(buffer);
+        }
+
+        if start_ns < target_ns {
+            self.candidate = Some(buffer);
+            return None;
+        }
+
+        let selected = if start_ns > target_ns && matches!(&buffer, MediaBuffer::Video(_)) {
+            self.candidate.take().unwrap_or(buffer)
+        } else {
+            buffer
+        };
+        self.clear();
+        Some(selected)
+    }
+
+    /// Selects the last decoded pre-target sample when EOS proves no later
+    /// sample can cover the requested instant.
+    pub(super) fn finish_on_eos(&mut self) -> Option<MediaBuffer> {
+        self.target_ns = None;
+        self.candidate.take()
     }
 }
 
@@ -93,11 +167,19 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+    use crate::pool::UnboundObjectPool;
 
     fn millis(time_base: ffmpeg::Rational) -> ffmpeg::Packet {
         let mut packet = ffmpeg::Packet::empty();
         packet.set_time_base(time_base);
         packet
+    }
+
+    fn video(pts: i64) -> MediaBuffer {
+        let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
+        let mut frame = pool.get();
+        frame.set_pts(Some(pts));
+        MediaBuffer::Video(std::sync::Arc::new(frame))
     }
 
     #[test]
@@ -158,5 +240,55 @@ mod tests {
         gate.begin(&PrerollContext::for_seek([], Duration::from_secs(2)));
         gate.reset();
         assert!(gate.time_base.is_none());
+    }
+
+    #[test]
+    fn video_selects_the_frame_covering_the_target() {
+        let mut gate = PrerollGate::default();
+        gate.observe_packet(&millis(ffmpeg::Rational(1, 1_000)));
+        gate.begin(&PrerollContext::for_seek([], Duration::from_secs(2)));
+
+        assert!(gate.admit(video(1_967)).is_none());
+        let selected = gate.admit(video(2_033)).expect("one frame selected");
+        let MediaBuffer::Video(selected) = selected else {
+            panic!("selected a non-video buffer");
+        };
+        assert_eq!(selected.pts(), Some(1_967));
+    }
+
+    #[test]
+    fn eos_selects_the_last_presentable_frame() {
+        let mut gate = PrerollGate::default();
+        gate.observe_packet(&millis(ffmpeg::Rational(1, 1_000)));
+        gate.begin(&PrerollContext::for_seek([], Duration::from_secs(2)));
+
+        assert!(gate.admit(video(1_967)).is_none());
+        let selected = gate.finish_on_eos().expect("last frame selected");
+        let MediaBuffer::Video(selected) = selected else {
+            panic!("selected a non-video buffer");
+        };
+        assert_eq!(selected.pts(), Some(1_967));
+    }
+
+    #[test]
+    fn audio_frame_crossing_the_target_is_not_discarded() {
+        let mut gate = PrerollGate::default();
+        gate.observe_packet(&millis(ffmpeg::Rational(1, 48_000)));
+        gate.begin(&PrerollContext::for_seek([], Duration::from_millis(10)));
+        let mut frame = ffmpeg::frame::Audio::new(
+            ffmpeg::format::Sample::F32(ffmpeg::format::sample::Type::Packed),
+            1_024,
+            ffmpeg::ChannelLayout::MONO,
+        );
+        frame.set_rate(48_000);
+        frame.set_pts(Some(0));
+
+        assert!(
+            matches!(
+                gate.admit(MediaBuffer::Audio(std::sync::Arc::new(frame))),
+                Some(MediaBuffer::Audio(_))
+            ),
+            "0..21.3ms audio covers a 10ms target"
+        );
     }
 }

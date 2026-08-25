@@ -96,8 +96,9 @@ impl D3d11Decoder {
     /// slot occupied, and once the pool runs out, decode itself starts
     /// failing (`AVERROR(ENOMEM)`, "Static surface pool size exceeded" in
     /// the log) instead of just blocking. Pass at least as many extra frames
-    /// as the deepest queue/buffer this decoder's output can pile up in
-    /// (e.g. match a downstream `ChainBuilder::queue` depth) — too few
+    /// as the deepest queue/buffer this decoder's output can pile up in,
+    /// plus one surface for accurate seek's last-frame candidate. For example,
+    /// a downstream queue of depth N requires at least N + 1 — too few
     /// reproduces exactly that failure under real playback, not just in
     /// theory.
     pub fn new(
@@ -165,8 +166,10 @@ impl D3d11Decoder {
                     // Reassigning `frame` releases a suppressed one right here,
                     // returning its fixed-pool surface a whole branch earlier
                     // than dropping it downstream would.
-                    if !self.preroll_gate.suppresses(frame.pts()) {
-                        self.pad.push(MediaBuffer::Video(Arc::new(frame)))?;
+                    if let Some(frame) =
+                        self.preroll_gate.admit(MediaBuffer::Video(Arc::new(frame)))
+                    {
+                        self.pad.push(frame)?;
                     }
                     frame = self.pool.get();
                 }
@@ -225,6 +228,9 @@ impl Sink for D3d11Decoder {
                     .inspect_err(|error| pp_error!(self, "send_eof failed: {error}"))
                     .map_err(D3d11DecoderError::from)?;
                 self.drain()?;
+                if let Some(candidate) = self.preroll_gate.finish_on_eos() {
+                    self.pad.push(candidate)?;
+                }
                 self.pad.push(MediaBuffer::Eos)
             }
             other => {

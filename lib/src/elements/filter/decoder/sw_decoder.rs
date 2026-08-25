@@ -156,14 +156,14 @@ impl Sink for SwDecoder {
                             .send_packet(&*packet)
                             .inspect_err(|error| pp_error!(self, "send_packet failed: {error}"))
                             .map_err(SwDecoderError::from)?;
-                        drain_video(decoder, &mut self.pad, &self.pool, &self.preroll_gate)
+                        drain_video(decoder, &mut self.pad, &self.pool, &mut self.preroll_gate)
                     }
                     Kind::Audio(decoder) => {
                         decoder
                             .send_packet(&*packet)
                             .inspect_err(|error| pp_error!(self, "send_packet failed: {error}"))
                             .map_err(SwDecoderError::from)?;
-                        drain_audio(decoder, &mut self.pad, &self.preroll_gate)
+                        drain_audio(decoder, &mut self.pad, &mut self.preroll_gate)
                     }
                 }
             }
@@ -174,15 +174,18 @@ impl Sink for SwDecoder {
                             .send_eof()
                             .inspect_err(|error| pp_error!(self, "send_eof failed: {error}"))
                             .map_err(SwDecoderError::from)?;
-                        drain_video(decoder, &mut self.pad, &self.pool, &self.preroll_gate)?;
+                        drain_video(decoder, &mut self.pad, &self.pool, &mut self.preroll_gate)?;
                     }
                     Kind::Audio(decoder) => {
                         decoder
                             .send_eof()
                             .inspect_err(|error| pp_error!(self, "send_eof failed: {error}"))
                             .map_err(SwDecoderError::from)?;
-                        drain_audio(decoder, &mut self.pad, &self.preroll_gate)?;
+                        drain_audio(decoder, &mut self.pad, &mut self.preroll_gate)?;
                     }
+                }
+                if let Some(candidate) = self.preroll_gate.finish_on_eos() {
+                    self.pad.push(candidate)?;
                 }
                 self.pad.push(MediaBuffer::Eos)
             }
@@ -224,7 +227,7 @@ fn drain_video(
     decoder: &mut ffmpeg::decoder::Video,
     pad: &mut SrcPad,
     pool: &UnboundObjectPool<ffmpeg::frame::Video>,
-    gate: &PrerollGate,
+    gate: &mut PrerollGate,
 ) -> crate::error::Result<()> {
     let mut frame = pool.get();
     loop {
@@ -233,8 +236,8 @@ fn drain_video(
                 // Reassigning `frame` releases the suppressed one right here.
                 // On a fixed hardware pool that returns its surface a whole
                 // branch earlier than dropping it downstream would.
-                if !gate.suppresses(frame.pts()) {
-                    pad.push(MediaBuffer::Video(Arc::new(frame)))?;
+                if let Some(frame) = gate.admit(MediaBuffer::Video(Arc::new(frame))) {
+                    pad.push(frame)?;
                 }
                 frame = pool.get();
             }
@@ -248,14 +251,14 @@ fn drain_video(
 fn drain_audio(
     decoder: &mut ffmpeg::decoder::Audio,
     pad: &mut SrcPad,
-    gate: &PrerollGate,
+    gate: &mut PrerollGate,
 ) -> crate::error::Result<()> {
     let mut frame = ffmpeg::frame::Audio::empty();
     loop {
         match decoder.receive_frame(&mut frame) {
             Ok(()) => {
-                if !gate.suppresses(frame.pts()) {
-                    pad.push(MediaBuffer::Audio(Arc::new(frame)))?;
+                if let Some(frame) = gate.admit(MediaBuffer::Audio(Arc::new(frame))) {
+                    pad.push(frame)?;
                 }
                 frame = ffmpeg::frame::Audio::empty();
             }

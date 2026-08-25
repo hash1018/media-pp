@@ -74,6 +74,17 @@ pub fn read_commands(
                     "could not parse {target:?}; use seconds (`seek 30`) or mm:ss (`seek 1:15`)"
                 ),
             },
+            ["keyseek", target] => match parse_timestamp(target) {
+                Some(target) => {
+                    println!("keyframe seeking to {target:.2?}...");
+                    if let Err(error) = pipeline.seek_keyframe(target) {
+                        eprintln!("keyframe seek rejected: {error}");
+                    }
+                }
+                None => eprintln!(
+                    "could not parse {target:?}; use seconds (`keyseek 30`) or mm:ss (`keyseek 1:15`)"
+                ),
+            },
             ["help"] => print_help(audio_output),
             ["q"] | ["quit"] => {
                 pipeline.stop();
@@ -91,6 +102,7 @@ fn print_help(audio_output: &str) {
     println!("  pause             pause playback");
     println!("  resume            resume playback");
     println!("  seek <seconds>    seek, for example `seek 30` or `seek 1:15`");
+    println!("  keyseek <seconds> seek to the preceding keyframe and preview it");
     println!("  help              print this help");
     println!("  q                 stop playback");
 }

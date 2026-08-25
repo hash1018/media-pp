@@ -9,7 +9,10 @@
 //! caller-chosen name, which every log record and every
 //! [`BusEvent`](crate::bus::BusEvent) is attributed to.
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use crate::pp_log::PpLog;
 
@@ -235,6 +238,13 @@ pub struct Context {
     /// Shared media-position clock used to hand video scheduling from the
     /// wall clock to an audio output master without changing pipelines.
     pub playback_clock: Arc<PlaybackClock>,
+    /// Serializes topology attachment with pipeline timeline operations.
+    ///
+    /// A branch may be detached while preroll is waiting (the waiter removes
+    /// the departed terminal), but publishing a new branch in the middle of a
+    /// seek would leave it outside the seek's terminal snapshot and control
+    /// cascade.
+    pub(crate) operation: Arc<Mutex<()>>,
     /// Graph identity of the source whose wiring closure owns this context.
     pub source_id: ElementId,
 }
@@ -254,6 +264,7 @@ impl Context {
             graph,
             playback_clock: Arc::new(PlaybackClock::new(clock.clone())),
             clock,
+            operation: Arc::new(Mutex::new(())),
             source_id,
         }
     }

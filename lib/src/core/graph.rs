@@ -134,6 +134,34 @@ impl GraphSnapshot {
             .collect()
     }
 
+    /// Returns terminal sinks reachable from `root` in this snapshot.
+    ///
+    /// Used by `Tee` during preroll so a branch that has already delivered
+    /// all of its terminal samples can close without backpressuring sibling
+    /// branches that still need more input.
+    pub(crate) fn terminal_ids_from(&self, root: ElementId) -> Vec<ElementId> {
+        let terminals: HashSet<_> = self.terminal_ids().into_iter().collect();
+        let mut found = Vec::new();
+        let mut visiting = vec![root];
+        let mut visited = HashSet::new();
+        while let Some(current) = visiting.pop() {
+            if !visited.insert(current) {
+                continue;
+            }
+            if terminals.contains(&current) {
+                found.push(current);
+                continue;
+            }
+            visiting.extend(
+                self.edges
+                    .iter()
+                    .filter(|edge| edge.from.element == current)
+                    .map(|edge| edge.to.element),
+            );
+        }
+        found
+    }
+
     /// Renders every root-to-leaf path in insertion order. Keeping edges
     /// separate from nodes means this also remains meaningful for fan-in
     /// graphs, where a node can have more than one upstream.
@@ -320,6 +348,11 @@ pub enum GraphError {
     /// A detach operation named a branch that is no longer attached.
     #[error("branch {0} is not attached")]
     BranchNotAttached(BranchId),
+
+    /// A branch cannot join while a seek/lifecycle transaction is taking its
+    /// topology and control snapshots.
+    #[error("a pipeline timeline operation is in progress")]
+    TimelineOperationInProgress,
 
     /// An attachment plan contained no terminal or processing element.
     #[error("a branch must contain at least one element")]

@@ -308,7 +308,14 @@ impl Element for Queue {
 
 impl Sink for Queue {
     fn ready_consume(&mut self) -> bool {
-        !self.tx.is_full()
+        match self.policy {
+            // Dropping the incoming buffer is this policy's defined way to
+            // make progress. Reporting "not ready" here would make an
+            // upstream Queue stop before `consume` can perform that drop,
+            // silently turning DropNewest into blocking backpressure.
+            OverflowPolicy::DropNewest => true,
+            OverflowPolicy::Block(_) => !self.tx.is_full(),
+        }
     }
 
     /// A Queue neither inspects nor transforms what it carries, so it
@@ -942,6 +949,10 @@ mod tests {
         // Pushed much faster than the 20ms/item downstream can drain a
         // capacity-1 channel, so some of these must get dropped.
         for _ in 0..10 {
+            assert!(
+                queue.ready_consume(),
+                "DropNewest makes progress by dropping even when full"
+            );
             queue.consume(packet()).unwrap();
         }
         queue.consume(MediaBuffer::Eos).unwrap(); // never dropped, even under this policy

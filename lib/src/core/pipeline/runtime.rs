@@ -23,6 +23,12 @@ use crate::{
 
 use super::{PipelineBuilder, builder::SourceEntry};
 
+#[derive(Clone, Copy)]
+enum SeekMode {
+    Keyframe,
+    Accurate,
+}
+
 /// Top-level pipeline: one or more sources (see [`PipelineBuilder`], with
 /// everything reachable from each source's own src pads already linked)
 /// plus the bus every source reports events on and the [`Clock`] every
@@ -115,7 +121,7 @@ pub struct Pipeline {
     pub(super) paused: AtomicBool,
     /// Serializes public lifecycle/timeline operations. `paused` remains the
     /// caller-requested state while seek temporarily pauses the runtime.
-    pub(super) operation: Mutex<()>,
+    pub(super) operation: Arc<Mutex<()>>,
     /// The preroll a [`Pipeline::seek`] is currently waiting on, and whether
     /// the pipeline has since been abandoned.
     ///
@@ -619,6 +625,16 @@ impl Pipeline {
     /// returns [`crate::control::SeekError`] without flushing the current
     /// timeline.
     pub fn seek(&self, target: Duration) -> Result<()> {
+        self.seek_with_mode(target, SeekMode::Accurate)
+    }
+
+    /// Seeks to the demuxer's preceding keyframe and prerolls one sample per
+    /// terminal without decoding forward to the exact requested timestamp.
+    pub fn seek_keyframe(&self, target: Duration) -> Result<()> {
+        self.seek_with_mode(target, SeekMode::Keyframe)
+    }
+
+    fn seek_with_mode(&self, target: Duration, mode: SeekMode) -> Result<()> {
         const PREROLL_TIMEOUT: Duration = Duration::from_secs(5);
 
         let _operation = self
@@ -651,7 +667,10 @@ impl Pipeline {
             control_tx.send(msg.clone());
         }
         let terminals = self.graph().terminal_ids();
-        let preroll = Arc::new(PrerollContext::for_seek(terminals, target));
+        let preroll = Arc::new(match mode {
+            SeekMode::Keyframe => PrerollContext::new(terminals),
+            SeekMode::Accurate => PrerollContext::for_seek(terminals, target),
+        });
         // Publish before waiting, so `stop` can end this wait rather than
         // queue behind it. Cleared on every exit below, including the error
         // one, so no later `stop` cancels a preroll that already finished.

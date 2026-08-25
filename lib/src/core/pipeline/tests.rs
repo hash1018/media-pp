@@ -1452,6 +1452,47 @@ fn dynamic_attach_and_detach_each_publish_one_graph_revision() {
 }
 
 #[test]
+fn dynamic_attach_is_rejected_during_a_timeline_operation() {
+    let Some(path) = try_test_video() else { return };
+    let (source, streams) = FileDemuxer::open("demux", &path).expect("open test video");
+    let index = streams
+        .iter()
+        .find(|stream| stream.kind == ffmpeg::media::Type::Video)
+        .expect("test video has a video stream")
+        .index;
+    let mut handle = None;
+    let pipeline = Pipeline::new("attach-during-seek", source, |source, ctx| {
+        let (tee, tee_handle) = TeeBuilder::new("tee", ctx.clone()).build_dynamic()?;
+        ctx.attach(source, index, tee)?;
+        handle = Some(tee_handle);
+        Ok(())
+    })
+    .expect("pipeline wiring");
+    let handle = handle.expect("tee handle");
+    let branch = handle
+        .branch()
+        .expect("tee alive")
+        .to(Box::new(NoOpSink {
+            name: "late".into(),
+            pp_log: element_pp_log(ElementType::Other, "late", None),
+        }))
+        .expect("late branch");
+
+    let operation = pipeline
+        .operation
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let error = handle
+        .attach(branch)
+        .expect_err("attach must not cross a timeline operation");
+    assert!(matches!(
+        error,
+        crate::Error::GraphError(GraphError::TimelineOperationInProgress)
+    ));
+    drop(operation);
+}
+
+#[test]
 fn tee_handle_changes_branches_after_the_pipeline_starts() {
     let source = TestVideoSource::new("video", TestVideoOptions::default());
     let initial_count = Arc::new(AtomicUsize::new(0));
@@ -2770,7 +2811,6 @@ fn a_paused_seek_leaves_every_branch_holding_one_sample_at_the_target() {
     let audio = taken(&audio_samples);
     pipeline.stop();
 
-    let target_ns = target.as_nanos() as i64;
     let seconds = |ns: &[i64]| {
         ns.iter()
             .map(|ns| format!("{:.3}s", *ns as f64 / 1e9))
@@ -2783,12 +2823,115 @@ fn a_paused_seek_leaves_every_branch_holding_one_sample_at_the_target() {
             "{label} must hold exactly one preview sample, got {:?}",
             seconds(samples)
         );
-        assert!(
-            samples[0] >= target_ns,
-            "{label} preview is before the target: {:?}",
-            seconds(samples)
-        );
     }
+}
+
+/// A packet terminal can finish on the landed keyframe while a sibling
+/// decoder still needs many more packets to reach the accurate target. The
+/// completed branch must close independently without closing the whole Tee.
+#[test]
+fn a_completed_tee_branch_does_not_starve_a_sibling_preroll() {
+    let Some(path) = try_test_video() else { return };
+    let (source, streams) = FileDemuxer::open("demux", &path).expect("open test video");
+    let video = streams
+        .iter()
+        .find(|stream| stream.kind == ffmpeg::media::Type::Video)
+        .expect("test video has a video stream");
+    let params = source.stream_parameters(video.index).expect("video params");
+    let time_base = source.stream_time_base(video.index).expect("video tb");
+    let packets = Arc::new(AtomicUsize::new(0));
+    let frames = Arc::new(Mutex::new(Vec::new()));
+
+    let pipeline = Pipeline::new("tee-preroll", source, |source, ctx| {
+        let packet_branch = ctx.branch().to(Box::new(CountingSink {
+            name: "packet-terminal".into(),
+            count: Arc::clone(&packets),
+            pp_log: element_pp_log(ElementType::Other, "packet-terminal", None),
+        }))?;
+        let decoded_branch = ctx
+            .branch()
+            .pipe(SwDecoder::new("decoder", params)?)
+            .to(Box::new(PrerollProbe {
+                label: "video-terminal",
+                time_base,
+                samples: Arc::clone(&frames),
+                pp_log: element_pp_log(ElementType::Other, "video-terminal", None),
+            }))?;
+        let tee = TeeBuilder::new("tee", ctx.clone())
+            .branch(packet_branch)
+            .branch(decoded_branch)
+            .build()?;
+        ctx.attach(source, video.index, tee)?;
+        Ok(())
+    })
+    .expect("pipeline wiring");
+
+    pipeline.run().expect("run");
+    thread::sleep(Duration::from_millis(100));
+    pipeline.pause();
+    packets.store(0, Ordering::SeqCst);
+    frames.lock().unwrap().clear();
+
+    pipeline
+        .seek(Duration::from_secs(3))
+        .expect("both Tee branches preroll");
+    assert_eq!(packets.load(Ordering::SeqCst), 1);
+    assert_eq!(frames.lock().unwrap().len(), 1);
+    pipeline.stop();
+}
+
+/// Container duration can extend beyond the last video PTS (for example when
+/// audio is longer). Seeking there still has a well-defined paused-preview
+/// result: the last decoded video frame, not a silent EOS success that leaves
+/// the old picture on screen.
+#[test]
+fn accurate_seek_at_known_eof_selects_the_last_presentable_frame() {
+    let Some(path) = try_test_video() else { return };
+    let input = ffmpeg::format::input(&path).expect("open fixture duration");
+    let duration = input.duration();
+    if duration <= 0 {
+        eprintln!("skipping: fixture has no known container duration");
+        return;
+    }
+    drop(input);
+    let target = Duration::from_micros(duration as u64);
+
+    let (source, streams) = FileDemuxer::open("demux", &path).expect("open test video");
+    let video = streams
+        .iter()
+        .find(|stream| stream.kind == ffmpeg::media::Type::Video)
+        .expect("test video has a video stream");
+    let params = source.stream_parameters(video.index).expect("video params");
+    let time_base = source.stream_time_base(video.index).expect("video tb");
+    let samples = Arc::new(Mutex::new(Vec::new()));
+
+    let pipeline = Pipeline::new("eof-preview", source, |source, ctx| {
+        let branch = ctx
+            .branch()
+            .pipe(SwDecoder::new("decoder", params)?)
+            .pipe(Pacer::new("pacer", time_base, Arc::clone(&ctx.clock))?)
+            .to(Box::new(PrerollProbe {
+                label: "video-terminal",
+                time_base,
+                samples: Arc::clone(&samples),
+                pp_log: element_pp_log(ElementType::Other, "video-terminal", None),
+            }))?;
+        ctx.attach(source, video.index, branch)?;
+        Ok(())
+    })
+    .expect("pipeline wiring");
+
+    pipeline.run().expect("run");
+    thread::sleep(Duration::from_millis(50));
+    pipeline.pause();
+    samples.lock().unwrap().clear();
+    pipeline.seek(target).expect("known EOF seek prerolls");
+    assert_eq!(
+        samples.lock().unwrap().len(),
+        1,
+        "EOF seek must replace the paused picture with the last frame"
+    );
+    pipeline.stop();
 }
 
 /// Seekable, and deliberately silent once it has repositioned — the shape of

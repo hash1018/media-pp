@@ -46,6 +46,7 @@ pub struct PipelineBuilder {
     graph: PipelineGraph,
     sources: Vec<SourceEntry>,
     control_pairs: Vec<(ControlSender, ControlReceiver)>,
+    operation: Arc<Mutex<()>>,
 }
 
 impl PipelineBuilder {
@@ -66,6 +67,7 @@ impl PipelineBuilder {
             graph: PipelineGraph::new(),
             sources: Vec::new(),
             control_pairs: Vec::new(),
+            operation: Arc::new(Mutex::new(())),
         }
     }
 
@@ -87,6 +89,7 @@ impl PipelineBuilder {
             graph: self.graph.clone(),
             clock: self.clock.clone(),
             playback_clock: self.playback_clock.clone(),
+            operation: Arc::clone(&self.operation),
             source_id,
         });
         wire(&mut source, &context)?;
@@ -119,7 +122,7 @@ impl PipelineBuilder {
             bus_rx: self.bus_rx,
             running: Arc::new(AtomicUsize::new(0)),
             paused: AtomicBool::new(false),
-            operation: Mutex::new(()),
+            operation: self.operation,
             preroll_slot: PrerollSlot::default().into(),
             workers: Mutex::new(Vec::new()),
             graph: self.graph,

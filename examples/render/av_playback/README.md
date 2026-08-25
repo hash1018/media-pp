@@ -22,5 +22,9 @@ pause
 resume
 seek 30
 seek 1:15
+keyseek 30
 q
 ```
+
+`seek` decodes forward to the frame covering the requested instant.
+`keyseek` previews the first decodable frame at the preceding keyframe.

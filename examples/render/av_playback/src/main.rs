@@ -10,6 +10,7 @@
 //!     resume
 //!     seek 30
 //!     seek 1:15
+//!     keyseek 30
 //!     q
 //!
 //! Both platforms run the identical graph —
@@ -263,13 +264,12 @@ mod linux_example {
 
     use crate::common;
 
-    /// Matches the `video-frames` queue below: NVDEC's surface pool is fixed
-    /// at open time and every frame sitting in that queue holds a slot, so
-    /// too few fails decode once the queue fills. NVDEC also caps the pool at
-    /// 32 surfaces *including* the codec's own reference frames, which is why
-    /// this is far shallower than the Windows branch's software decoder can
-    /// afford — see `CudaDecoder::new`'s docs. 8 frames is ~266ms at 30fps,
-    /// well past what the synchronizer's waits need.
+    /// Matches the `video-frames` queue below. NVDEC's surface pool is fixed
+    /// at open time, and accurate seek may retain one additional candidate
+    /// frame, so construction requests `VIDEO_QUEUE_DEPTH + 1` extra frames.
+    /// NVDEC also caps the total pool at 32 surfaces, which is why this is far
+    /// shallower than the Windows branch's software decoder can afford; see
+    /// `CudaDecoder::new`'s docs. Eight frames are about 266 ms at 30 fps.
     const VIDEO_QUEUE_DEPTH: usize = 8;
 
     pub fn play(
@@ -301,7 +301,7 @@ mod linux_example {
                         "video-decoder",
                         streams.video_params.clone(),
                         &cuda,
-                        VIDEO_QUEUE_DEPTH as i32,
+                        VIDEO_QUEUE_DEPTH.saturating_add(1) as i32,
                     )
                     .map_err(|error| Error::Other(error.to_string()))?,
                 )
