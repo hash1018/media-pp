@@ -15,6 +15,7 @@ use crate::{
     pool::UnboundObjectPool,
 };
 
+use super::super::preroll_gate::PrerollGate;
 use crate::elements::filter::is_codec_drain_boundary;
 
 /// Errors specific to `D3d12Decoder`. Converts into the crate-wide
@@ -71,6 +72,8 @@ pub struct D3d12Decoder {
     /// wrapper, not the texture) — but `MediaBuffer::Video` requires
     /// this either way, so there's no reason not to.
     pool: UnboundObjectPool<ffmpeg::frame::Video>,
+    /// Suppresses decoded samples before a seek target during preroll.
+    preroll_gate: PrerollGate,
 }
 
 // SAFETY: `hw_device_ctx` is a heap-allocated FFmpeg buffer with no
@@ -136,6 +139,7 @@ impl D3d12Decoder {
             _hw_device_ctx: hw_device_ctx,
             pad,
             pool,
+            preroll_gate: PrerollGate::default(),
         })
     }
 
@@ -148,7 +152,12 @@ impl D3d12Decoder {
                         pp_error!(self, "decoder did not select the D3D12VA pixel format");
                         return Err(D3d12DecoderError::HwAccelUnavailable.into());
                     }
-                    self.pad.push(MediaBuffer::Video(Arc::new(frame)))?;
+                    // Reassigning `frame` releases a suppressed one right here,
+                    // returning its fixed-pool surface a whole branch earlier
+                    // than dropping it downstream would.
+                    if !self.preroll_gate.suppresses(frame.pts()) {
+                        self.pad.push(MediaBuffer::Video(Arc::new(frame)))?;
+                    }
                     frame = self.pool.get();
                 }
                 Err(error) if is_codec_drain_boundary(&error) => break,
@@ -192,6 +201,8 @@ impl Sink for D3d12Decoder {
     fn consume(&mut self, buf: MediaBuffer) -> crate::error::Result<()> {
         match buf {
             MediaBuffer::Packet(packet) => {
+                // Decoded frames carry a `pts` but not the unit it is in.
+                self.preroll_gate.observe_packet(&packet);
                 self.decoder
                     .send_packet(&*packet)
                     .inspect_err(|error| pp_error!(self, "send_packet failed: {error}"))
@@ -221,8 +232,17 @@ impl Sink for D3d12Decoder {
         // `Flush`: same reasoning as `SwDecoder::control` too — discard
         // leftover reference-frame state before decoding resumes from
         // the new position.
-        if msg == ControlMsg::Flush {
-            self.decoder.flush();
+        //
+        // `Preroll` may carry a seek target; the samples decoded while
+        // catching up to it exist only to warm the codec.
+        match &msg {
+            ControlMsg::Flush => {
+                self.decoder.flush();
+                self.preroll_gate.reset();
+            }
+            ControlMsg::Preroll(context) => self.preroll_gate.begin(context),
+            ControlMsg::Pause | ControlMsg::Resume | ControlMsg::Stop => self.preroll_gate.clear(),
+            ControlMsg::CheckSeek(_) | ControlMsg::Seek(_) => {}
         }
         self.pad.control(msg)
     }

@@ -13,6 +13,7 @@ use crate::{
     pool::UnboundObjectPool,
 };
 
+use super::preroll_gate::PrerollGate;
 use crate::elements::filter::is_codec_drain_boundary;
 
 /// Errors specific to `SwDecoder`. Converts into the crate-wide `Error`
@@ -55,6 +56,8 @@ pub struct SwDecoder {
     /// frames get returned. Unused (harmlessly) if this turns out to be
     /// an audio decoder — `MediaBuffer::Audio` isn't pooled.
     pool: UnboundObjectPool<ffmpeg::frame::Video>,
+    /// Suppresses decoded samples before a seek target during preroll.
+    preroll_gate: PrerollGate,
 }
 
 impl SwDecoder {
@@ -101,6 +104,7 @@ impl SwDecoder {
             kind,
             pad,
             pool,
+            preroll_gate: PrerollGate::default(),
         })
     }
 }
@@ -142,22 +146,27 @@ impl Sink for SwDecoder {
 
     fn consume(&mut self, buf: MediaBuffer) -> crate::error::Result<()> {
         match buf {
-            MediaBuffer::Packet(packet) => match &mut self.kind {
-                Kind::Video(decoder) => {
-                    decoder
-                        .send_packet(&*packet)
-                        .inspect_err(|error| pp_error!(self, "send_packet failed: {error}"))
-                        .map_err(SwDecoderError::from)?;
-                    drain_video(decoder, &mut self.pad, &self.pool)
+            MediaBuffer::Packet(packet) => {
+                // Decoded frames carry a `pts` but not the unit it is in, so
+                // the gate learns that from the packets on the way in.
+                self.preroll_gate.observe_packet(&packet);
+                match &mut self.kind {
+                    Kind::Video(decoder) => {
+                        decoder
+                            .send_packet(&*packet)
+                            .inspect_err(|error| pp_error!(self, "send_packet failed: {error}"))
+                            .map_err(SwDecoderError::from)?;
+                        drain_video(decoder, &mut self.pad, &self.pool, &self.preroll_gate)
+                    }
+                    Kind::Audio(decoder) => {
+                        decoder
+                            .send_packet(&*packet)
+                            .inspect_err(|error| pp_error!(self, "send_packet failed: {error}"))
+                            .map_err(SwDecoderError::from)?;
+                        drain_audio(decoder, &mut self.pad, &self.preroll_gate)
+                    }
                 }
-                Kind::Audio(decoder) => {
-                    decoder
-                        .send_packet(&*packet)
-                        .inspect_err(|error| pp_error!(self, "send_packet failed: {error}"))
-                        .map_err(SwDecoderError::from)?;
-                    drain_audio(decoder, &mut self.pad)
-                }
-            },
+            }
             MediaBuffer::Eos => {
                 match &mut self.kind {
                     Kind::Video(decoder) => {
@@ -165,14 +174,14 @@ impl Sink for SwDecoder {
                             .send_eof()
                             .inspect_err(|error| pp_error!(self, "send_eof failed: {error}"))
                             .map_err(SwDecoderError::from)?;
-                        drain_video(decoder, &mut self.pad, &self.pool)?;
+                        drain_video(decoder, &mut self.pad, &self.pool, &self.preroll_gate)?;
                     }
                     Kind::Audio(decoder) => {
                         decoder
                             .send_eof()
                             .inspect_err(|error| pp_error!(self, "send_eof failed: {error}"))
                             .map_err(SwDecoderError::from)?;
-                        drain_audio(decoder, &mut self.pad)?;
+                        drain_audio(decoder, &mut self.pad, &self.preroll_gate)?;
                     }
                 }
                 self.pad.push(MediaBuffer::Eos)
@@ -191,11 +200,21 @@ impl Sink for SwDecoder {
         //
         // `Flush` discards leftover reference/reordering state before a new
         // timeline starts. `Seek` itself only announces the new position.
-        if msg == ControlMsg::Flush {
-            match &mut self.kind {
-                Kind::Video(decoder) => decoder.flush(),
-                Kind::Audio(decoder) => decoder.flush(),
+        //
+        // `Preroll` may carry a seek target, in which case the decoded samples
+        // this decoder produces while catching up to it exist only to warm the
+        // codec and must not be forwarded.
+        match &msg {
+            ControlMsg::Flush => {
+                match &mut self.kind {
+                    Kind::Video(decoder) => decoder.flush(),
+                    Kind::Audio(decoder) => decoder.flush(),
+                }
+                self.preroll_gate.reset();
             }
+            ControlMsg::Preroll(context) => self.preroll_gate.begin(context),
+            ControlMsg::Pause | ControlMsg::Resume | ControlMsg::Stop => self.preroll_gate.clear(),
+            ControlMsg::CheckSeek(_) | ControlMsg::Seek(_) => {}
         }
         self.pad.control(msg)
     }
@@ -205,12 +224,18 @@ fn drain_video(
     decoder: &mut ffmpeg::decoder::Video,
     pad: &mut SrcPad,
     pool: &UnboundObjectPool<ffmpeg::frame::Video>,
+    gate: &PrerollGate,
 ) -> crate::error::Result<()> {
     let mut frame = pool.get();
     loop {
         match decoder.receive_frame(&mut frame) {
             Ok(()) => {
-                pad.push(MediaBuffer::Video(Arc::new(frame)))?;
+                // Reassigning `frame` releases the suppressed one right here.
+                // On a fixed hardware pool that returns its surface a whole
+                // branch earlier than dropping it downstream would.
+                if !gate.suppresses(frame.pts()) {
+                    pad.push(MediaBuffer::Video(Arc::new(frame)))?;
+                }
                 frame = pool.get();
             }
             Err(error) if is_codec_drain_boundary(&error) => break,
@@ -220,12 +245,18 @@ fn drain_video(
     Ok(())
 }
 
-fn drain_audio(decoder: &mut ffmpeg::decoder::Audio, pad: &mut SrcPad) -> crate::error::Result<()> {
+fn drain_audio(
+    decoder: &mut ffmpeg::decoder::Audio,
+    pad: &mut SrcPad,
+    gate: &PrerollGate,
+) -> crate::error::Result<()> {
     let mut frame = ffmpeg::frame::Audio::empty();
     loop {
         match decoder.receive_frame(&mut frame) {
             Ok(()) => {
-                pad.push(MediaBuffer::Audio(Arc::new(frame)))?;
+                if !gate.suppresses(frame.pts()) {
+                    pad.push(MediaBuffer::Audio(Arc::new(frame)))?;
+                }
                 frame = ffmpeg::frame::Audio::empty();
             }
             Err(error) if is_codec_drain_boundary(&error) => break,

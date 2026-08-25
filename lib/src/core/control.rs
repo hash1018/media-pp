@@ -236,6 +236,21 @@ impl PrerollContext {
         self.mark_ready(terminal);
     }
 
+    /// Whether this one terminal has already taken its preroll sample.
+    ///
+    /// A terminal stops accepting as soon as *it* is ready, not when the whole
+    /// preroll is. Waiting for the others would let a branch that reached the
+    /// target first keep consuming for as long as the slowest branch takes —
+    /// which is how the two streams end up at different positions when preroll
+    /// finally completes.
+    pub fn is_ready(&self, terminal: ElementId) -> bool {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        !state.cancelled && state.ready.contains(&terminal)
+    }
+
     /// Returns whether every expected terminal has completed this preroll.
     pub fn is_complete(&self) -> bool {
         let state = self

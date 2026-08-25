@@ -218,10 +218,14 @@ impl Sink for TerminalTracer {
         if self.paused {
             return false;
         }
+        // This terminal's own readiness, not the whole preroll's. Closing only
+        // once every branch is done would let whichever reached the target
+        // first keep consuming for as long as the slowest one takes, leaving
+        // the streams at different positions when preroll finally completes.
         if self
             .preroll
             .as_ref()
-            .is_some_and(|context| context.is_complete())
+            .is_some_and(|context| context.is_ready(self.id))
         {
             return false;
         }
@@ -238,13 +242,13 @@ impl Sink for TerminalTracer {
             pp_trace!(pp_log: self.inner.pp_log(), "event=eos phase=received");
         }
         let result = self.inner.consume(buf);
-        if result.is_ok() {
-            if let Some(context) = &self.preroll {
-                if is_eos {
-                    context.mark_eos(self.id);
-                } else {
-                    context.mark_ready(self.id);
-                }
+        if result.is_ok()
+            && let Some(context) = &self.preroll
+        {
+            if is_eos {
+                context.mark_eos(self.id);
+            } else {
+                context.mark_ready(self.id);
             }
         }
         if is_eos {
@@ -639,8 +643,12 @@ mod tests {
         }
     }
 
+    /// Each terminal closes on its *own* sample. Holding it open until every
+    /// branch is done would let whichever reached the target first keep
+    /// consuming for as long as the slowest takes, so the two streams would
+    /// sit at different positions once preroll completed.
     #[test]
-    fn terminal_readiness_closes_only_after_the_whole_preroll_completes() {
+    fn terminal_readiness_closes_on_its_own_sample_not_the_whole_preroll() {
         let first = ElementId::for_test(1);
         let second = ElementId::for_test(2);
         let context = Arc::new(PrerollContext::new([first, second]));
@@ -661,7 +669,15 @@ mod tests {
         first_terminal
             .consume(MediaBuffer::Packet(Arc::new(ffmpeg_next::Packet::empty())))
             .expect("consume first terminal sample");
-        assert!(first_terminal.ready_consume());
+        assert!(
+            !first_terminal.ready_consume(),
+            "the first terminal stops as soon as it has its own sample"
+        );
+        assert!(
+            second_terminal.ready_consume(),
+            "the second is still owed one"
+        );
+        assert!(!context.is_complete());
 
         second_terminal
             .consume(MediaBuffer::Packet(Arc::new(ffmpeg_next::Packet::empty())))

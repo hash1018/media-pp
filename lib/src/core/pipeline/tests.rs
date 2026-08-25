@@ -9,7 +9,7 @@ use std::{
 };
 
 use super::*;
-use ffmpeg_next as ffmpeg;
+use ffmpeg_next::{self as ffmpeg, Rescale};
 
 use crate::contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract};
 use crate::elements::{
@@ -2639,4 +2639,154 @@ fn detaching_a_dynamic_tee_branch_releases_its_resolved_contracts() {
         baseline,
         "detaching must release every resolved contract owned by the branch"
     );
+}
+
+/// Records where each branch's decoded media actually landed, so a preroll can
+/// be checked against the position it was asked for rather than just against
+/// "something arrived".
+struct PrerollProbe {
+    label: &'static str,
+    time_base: ffmpeg::Rational,
+    samples: Arc<Mutex<Vec<i64>>>,
+    pp_log: PpLog,
+}
+
+impl Element for PrerollProbe {
+    fn name(&self) -> Arc<str> {
+        self.label.into()
+    }
+
+    fn element_type(&self) -> ElementType {
+        ElementType::Other
+    }
+
+    fn pp_log(&self) -> &PpLog {
+        &self.pp_log
+    }
+
+    fn pp_log_mut(&mut self) -> &mut PpLog {
+        &mut self.pp_log
+    }
+}
+
+impl Sink for PrerollProbe {
+    fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+        let pts = match &buf {
+            MediaBuffer::Video(frame) => frame.pts(),
+            MediaBuffer::Audio(frame) => frame.pts(),
+            _ => None,
+        };
+        if let Some(pts) = pts {
+            let ns = pts.rescale(self.time_base, ffmpeg::Rational(1, 1_000_000_000));
+            self.samples.lock().unwrap().push(ns);
+        }
+        Ok(())
+    }
+
+    fn control(&mut self, _msg: ControlMsg) -> Result<()> {
+        Ok(())
+    }
+}
+
+/// A paused seek has to leave *every* decoded branch holding one sample at the
+/// requested position — not just the branch that happens to carry a pacing
+/// element, and not a burst of them.
+///
+/// Two separate defects showed up here, and the assertions below fail on
+/// either. Measured against the real fixture at a 3s target:
+///
+/// - With the suppression gate living in `Pacer`/`VideoSynchronizer`, the
+///   audio branch had neither, so it delivered 86 samples spanning 0.000s to
+///   2.007s while video correctly delivered one at 3.003s — the two streams
+///   ended a second apart, which on resume is a second of frozen picture.
+/// - With terminals staying open until the *whole* preroll completed, the
+///   branch that reached the target first kept consuming while the other
+///   caught up: video ran 31 samples from 3.003s to 4.004s.
+#[test]
+fn a_paused_seek_leaves_every_branch_holding_one_sample_at_the_target() {
+    let Some(path) = try_test_video() else { return };
+    let (source, streams) = FileDemuxer::open("demux", &path).expect("open test video");
+    let video = streams
+        .iter()
+        .find(|stream| stream.kind == ffmpeg::media::Type::Video)
+        .expect("test video has a video stream");
+    let Some(audio) = streams
+        .iter()
+        .find(|stream| stream.kind == ffmpeg::media::Type::Audio)
+    else {
+        eprintln!("skipping: fixture has no audio stream");
+        return;
+    };
+    let video_params = source.stream_parameters(video.index).expect("video params");
+    let audio_params = source.stream_parameters(audio.index).expect("audio params");
+    let video_tb = source.stream_time_base(video.index).expect("video tb");
+    let audio_tb = source.stream_time_base(audio.index).expect("audio tb");
+
+    let target = Duration::from_secs(3);
+    let video_samples = Arc::new(Mutex::new(Vec::new()));
+    let audio_samples = Arc::new(Mutex::new(Vec::new()));
+
+    let pipeline = Pipeline::new("paused-av-seek", source, |source, ctx| {
+        // Only the video branch is paced, which is the ordinary shape: an
+        // audio renderer schedules itself against its own device clock.
+        let video_branch = ctx
+            .branch()
+            .pipe(SwDecoder::new("video-decoder", video_params)?)
+            .pipe(Pacer::new("video-pacer", video_tb, ctx.clock.clone())?)
+            .queue("video-frames", 8)
+            .to(Box::new(PrerollProbe {
+                label: "video",
+                time_base: video_tb,
+                samples: Arc::clone(&video_samples),
+                pp_log: element_pp_log(ElementType::Other, "video", None),
+            }))?;
+        ctx.attach(source, video.index, video_branch)?;
+        let audio_branch = ctx
+            .branch()
+            .queue("audio-packets", 8)
+            .pipe(SwDecoder::new("audio-decoder", audio_params)?)
+            .to(Box::new(PrerollProbe {
+                label: "audio",
+                time_base: audio_tb,
+                samples: Arc::clone(&audio_samples),
+                pp_log: element_pp_log(ElementType::Other, "audio", None),
+            }))?;
+        ctx.attach(source, audio.index, audio_branch)?;
+        Ok(())
+    })
+    .expect("test pipeline wiring must succeed");
+
+    pipeline.run().unwrap();
+    thread::sleep(Duration::from_millis(100));
+    pipeline.pause();
+    video_samples.lock().unwrap().clear();
+    audio_samples.lock().unwrap().clear();
+
+    pipeline
+        .seek(target)
+        .expect("a decoded A/V graph accepts a seek");
+    let taken = |samples: &Arc<Mutex<Vec<i64>>>| samples.lock().unwrap().clone();
+    let video = taken(&video_samples);
+    let audio = taken(&audio_samples);
+    pipeline.stop();
+
+    let target_ns = target.as_nanos() as i64;
+    let seconds = |ns: &[i64]| {
+        ns.iter()
+            .map(|ns| format!("{:.3}s", *ns as f64 / 1e9))
+            .collect::<Vec<_>>()
+    };
+    for (label, samples) in [("video", &video), ("audio", &audio)] {
+        assert_eq!(
+            samples.len(),
+            1,
+            "{label} must hold exactly one preview sample, got {:?}",
+            seconds(samples)
+        );
+        assert!(
+            samples[0] >= target_ns,
+            "{label} preview is before the target: {:?}",
+            seconds(samples)
+        );
+    }
 }

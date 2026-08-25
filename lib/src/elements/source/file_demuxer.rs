@@ -1,4 +1,4 @@
-use std::{path::Path, sync::Arc, time::Duration};
+use std::{collections::VecDeque, path::Path, sync::Arc, time::Duration};
 
 use crate::pp_log::{PpLog, pp_error, pp_info};
 use ffmpeg_next as ffmpeg;
@@ -45,12 +45,22 @@ pub struct FileDemuxer {
     name: Arc<str>,
     input: ffmpeg::format::context::Input,
     pads: Vec<SrcPad>,
-    /// One packet read ahead of `run`'s own loop, set only by `seek` —
-    /// peeking a packet right after `Input::seek` is how it learns where
-    /// playback actually landed (see `seek`'s docs), and that packet still
-    /// needs to be delivered, not discarded, so it's stashed here for
-    /// `run`'s next iteration to pick up instead of reading a fresh one.
-    pending: Option<(usize, ffmpeg::Rational, ffmpeg::Packet)>,
+    /// Packets read but not yet delivered, in file order.
+    ///
+    /// `seek` puts one here: peeking a packet right after `Input::seek` is how
+    /// it learns where playback actually landed (see `seek`'s docs), and that
+    /// packet is real data that still has to be delivered.
+    ///
+    /// `run` also parks a packet here when its own pad cannot accept one yet.
+    /// A container interleaves every stream into one read cursor, so refusing
+    /// to read at all while a single pad is blocked stalls the streams that
+    /// *are* ready — during preroll that starves whichever branch has not yet
+    /// taken its sample, and the seek times out waiting for it. Holding the
+    /// blocked pad's packets keeps the cursor moving; per-pad order is what
+    /// matters and each pad's packets stay in the order they were read.
+    pending: VecDeque<(usize, ffmpeg::Rational, ffmpeg::Packet)>,
+    /// Total payload parked in `pending`.
+    pending_bytes: usize,
 }
 
 impl FileDemuxer {
@@ -103,7 +113,8 @@ impl FileDemuxer {
                 pp_log,
                 input,
                 pads,
-                pending: None,
+                pending: VecDeque::new(),
+                pending_bytes: 0,
             },
             streams,
         ))
@@ -124,6 +135,92 @@ impl FileDemuxer {
 
     fn stream(&self, index: usize) -> Option<ffmpeg::format::stream::Stream<'_>> {
         self.input.streams().find(|s| s.index() == index)
+    }
+
+    /// Pushes `item` if its pad can take one now, otherwise parks it.
+    ///
+    /// A downstream failure drops just that one packet — the same
+    /// "report, don't die" contract `Queue`'s worker gives a failing `Sink` —
+    /// rather than ending this whole source thread over it. `Pipeline::stop`
+    /// is how a caller who decides an error is fatal actually ends things.
+    fn deliver_or_park(
+        &mut self,
+        item: (usize, ffmpeg::Rational, ffmpeg::Packet),
+        bus: &Bus,
+    ) -> crate::error::Result<()> {
+        let (index, time_base, mut packet) = item;
+        // `AVCodecParameters` does not carry the container stream's timestamp
+        // unit, and FFmpeg does not guarantee that demuxers populate
+        // `AVPacket::time_base`. Stamping it here — the one place every packet
+        // leaves this source through, parked or not — means a packet held for
+        // a blocked pad arrives downstream describing itself the same way an
+        // immediately delivered one does.
+        packet.set_time_base(time_base);
+        let Some(pad) = self.pads.get_mut(index) else {
+            // No pad for this stream: nobody selected it, so it is dropped
+            // rather than parked. Parking it would grow without bound.
+            return Ok(());
+        };
+        if !pad.ready_consume() {
+            self.pending_bytes = self.pending_bytes.saturating_add(packet.size());
+            self.pending.push_back((index, time_base, packet));
+            return Ok(());
+        }
+        if let Err(error) = pad.push(MediaBuffer::Packet(Arc::new(packet))) {
+            bus.post(
+                &self.pp_log,
+                BusEvent::Error {
+                    element_type: ElementType::FileDemuxer,
+                    name: self.name.clone(),
+                    error,
+                },
+            );
+        }
+        Ok(())
+    }
+
+    /// Delivers every parked packet whose pad has since become ready, oldest
+    /// first, leaving the rest in place.
+    fn drain_pending(&mut self, bus: &Bus) -> crate::error::Result<()> {
+        let mut deferred = VecDeque::with_capacity(self.pending.len());
+        while let Some((index, time_base, packet)) = self.pending.pop_front() {
+            let ready = self
+                .pads
+                .get_mut(index)
+                .is_some_and(SrcPad::ready_consume)
+                // A pad this packet has no home for is dropped, not carried.
+                || self.pads.get(index).is_none();
+            if !ready {
+                deferred.push_back((index, time_base, packet));
+                continue;
+            }
+            self.pending_bytes = self.pending_bytes.saturating_sub(packet.size());
+            self.deliver_or_park((index, time_base, packet), bus)?;
+        }
+        // `deliver_or_park` may have parked something again; keep the older
+        // entries in front of it so per-pad order survives.
+        while let Some(item) = self.pending.pop_back() {
+            deferred.push_back(item);
+        }
+        self.pending = deferred;
+        Ok(())
+    }
+
+    /// Whether reading another packet would only deepen the parked backlog.
+    ///
+    /// Not a tuning knob: a branch that is briefly behind parks a handful of
+    /// packets and clears them within milliseconds. These ceilings only bound
+    /// a pad that has stopped accepting altogether, so the read cursor cannot
+    /// pull an arbitrary amount of the file into memory waiting for it. Both
+    /// are needed — a few large keyframes reach the byte limit at a packet
+    /// count that would never trip on its own.
+    fn pending_blocked(&mut self) -> bool {
+        const MAX_PENDING_PACKETS: usize = 4_096;
+        const MAX_PENDING_BYTES: usize = 64 * 1024 * 1024;
+
+        self.pending.len() >= MAX_PENDING_PACKETS
+            || self.pending_bytes >= MAX_PENDING_BYTES
+            || !self.pads.iter_mut().any(SrcPad::ready_consume)
     }
 }
 
@@ -176,48 +273,36 @@ impl SourceElement for FileDemuxer {
                 pp_info!(self, "stopped");
                 return Ok(());
             }
-            if !self.pads.iter_mut().all(SrcPad::ready_consume) {
+            // Deliver whatever is parked and now accepted, oldest first.
+            // Skipping a still-blocked pad's entry to reach a later one is
+            // safe: only each pad's own order has to hold, and this preserves
+            // it because entries for one pad are never reordered against each
+            // other.
+            self.drain_pending(bus)?;
+            // Read on unless everything is blocked, or the parked backlog has
+            // grown past what one branch briefly falling behind can explain.
+            // Sleeping is the only option then: the container cannot hand out
+            // a different stream's packet without reading this one.
+            if self.pending_blocked() {
                 std::thread::sleep(Duration::from_millis(1));
                 continue;
             }
-            // `seek` (called from within `drain_control`, above) already
-            // consumed one packet to find out where it landed — deliver
-            // that before reading a fresh one, or it'd be silently lost.
-            let next = match self.pending.take() {
-                Some(next) => Some(next),
-                None => self
-                    .input
-                    .packets()
-                    .next()
-                    .map(|(s, p)| (s.index(), s.time_base(), p)),
-            };
-            let Some((index, time_base, mut packet)) = next else {
-                break;
-            };
-            // `AVCodecParameters` does not carry the container stream's
-            // timestamp unit, and FFmpeg does not guarantee that demuxers
-            // populate `AVPacket::time_base`. Make it explicit at this source
-            // boundary so every downstream decoder/filter can interpret PTS,
-            // DTS, and duration without requiring the caller to supply the
-            // same stream time base separately.
-            packet.set_time_base(time_base);
-            if let Some(pad) = self.pads.get_mut(index) {
-                // A downstream failure drops just this one packet — same
-                // "report, don't die" contract `Queue`'s worker gives a
-                // failing `Sink` — rather than ending this whole source
-                // thread over it. `Pipeline::stop` is how a caller who
-                // decides an error is fatal actually ends things.
-                if let Err(error) = pad.push(MediaBuffer::Packet(Arc::new(packet))) {
-                    bus.post(
-                        &self.pp_log,
-                        BusEvent::Error {
-                            element_type: ElementType::FileDemuxer,
-                            name: self.name.clone(),
-                            error,
-                        },
-                    );
+            let next = self
+                .input
+                .packets()
+                .next()
+                .map(|(s, p)| (s.index(), s.time_base(), p));
+            let Some((index, time_base, packet)) = next else {
+                if self.pending.is_empty() {
+                    break;
                 }
-            }
+                // Nothing left to read, but a blocked pad still owes delivery.
+                std::thread::sleep(Duration::from_millis(1));
+                continue;
+            };
+            // `deliver_or_park` stamps the stream time base; every packet
+            // leaves this source through it, parked or not.
+            self.deliver_or_park((index, time_base, packet), bus)?;
         }
         for pad in self.pads.iter_mut() {
             pad.push_eos(&self.pp_log)?;
@@ -256,7 +341,7 @@ impl SourceElement for FileDemuxer {
                     .or_else(|| packet.dts())
                     .map(|ts| ts_to_duration(ts, time_base))
                     .unwrap_or(Duration::ZERO);
-                self.pending = Some((stream.index(), time_base, packet));
+                self.pending.push_back((stream.index(), time_base, packet));
                 Ok(landed)
             }
             // Nothing left to read right after seeking (`target` at/past
@@ -408,7 +493,7 @@ mod tests {
             .expect("seek within the test video");
         let (pending_index, expected_time_base, _) = demuxer
             .pending
-            .as_ref()
+            .front()
             .expect("seek must retain the first packet at or after the target");
         let pending_index = *pending_index;
         let expected_time_base = *expected_time_base;

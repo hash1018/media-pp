@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use super::super::preroll_gate::PrerollGate;
 use ffmpeg_next::{self as ffmpeg, ffi};
 use thiserror::Error as ThisError;
 
@@ -67,6 +68,8 @@ pub struct CudaDecoder {
     /// pooled by FFmpeg's own hw frames context, so this only recycles the
     /// small CPU-side `AVFrame` wrapper. Same reasoning as `D3d11Decoder`.
     pool: UnboundObjectPool<ffmpeg::frame::Video>,
+    /// Suppresses decoded samples before a seek target during preroll.
+    preroll_gate: PrerollGate,
 }
 
 // SAFETY: `hw_device_ctx` is a heap-allocated FFmpeg buffer with no thread
@@ -149,6 +152,7 @@ impl CudaDecoder {
             _hw_device_ctx: hw_device_ctx,
             pad,
             pool,
+            preroll_gate: PrerollGate::default(),
         })
     }
 
@@ -161,7 +165,12 @@ impl CudaDecoder {
                         pp_error!(self, "decoder did not select the CUDA pixel format");
                         return Err(CudaDecoderError::HwAccelUnavailable.into());
                     }
-                    self.pad.push(MediaBuffer::Video(Arc::new(frame)))?;
+                    // Reassigning `frame` releases a suppressed one right here,
+                    // returning its fixed-pool surface a whole branch earlier
+                    // than dropping it downstream would.
+                    if !self.preroll_gate.suppresses(frame.pts()) {
+                        self.pad.push(MediaBuffer::Video(Arc::new(frame)))?;
+                    }
                     frame = self.pool.get();
                 }
                 Err(error) if is_codec_drain_boundary(&error) => break,
@@ -205,6 +214,8 @@ impl Sink for CudaDecoder {
     fn consume(&mut self, buf: MediaBuffer) -> crate::error::Result<()> {
         match buf {
             MediaBuffer::Packet(packet) => {
+                // Decoded frames carry a `pts` but not the unit it is in.
+                self.preroll_gate.observe_packet(&packet);
                 self.decoder
                     .send_packet(&*packet)
                     .inspect_err(|error| pp_error!(self, "send_packet failed: {error}"))
@@ -230,8 +241,17 @@ impl Sink for CudaDecoder {
         // Same reasoning as `D3d11Decoder::control`: nothing to do on `Stop`
         // (the hw device reference is released in `Drop`), flush
         // reference-frame state on `Seek`.
-        if msg == ControlMsg::Flush {
-            self.decoder.flush();
+        //
+        // `Preroll` may carry a seek target; the samples decoded while
+        // catching up to it exist only to warm the codec.
+        match &msg {
+            ControlMsg::Flush => {
+                self.decoder.flush();
+                self.preroll_gate.reset();
+            }
+            ControlMsg::Preroll(context) => self.preroll_gate.begin(context),
+            ControlMsg::Pause | ControlMsg::Resume | ControlMsg::Stop => self.preroll_gate.clear(),
+            ControlMsg::CheckSeek(_) | ControlMsg::Seek(_) => {}
         }
         self.pad.control(msg)
     }

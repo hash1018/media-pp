@@ -18,6 +18,7 @@ use crate::{
     pool::UnboundObjectPool,
 };
 
+use super::super::preroll_gate::PrerollGate;
 use crate::elements::filter::is_codec_drain_boundary;
 
 /// Errors specific to `D3d11Decoder`. Converts into the crate-wide
@@ -66,6 +67,8 @@ pub struct D3d11Decoder {
     /// GPU texture itself is already pooled by ffmpeg's own hw frames
     /// context, this only reuses the small CPU-side `AVFrame` wrapper).
     pool: UnboundObjectPool<ffmpeg::frame::Video>,
+    /// Suppresses decoded samples before a seek target during preroll.
+    preroll_gate: PrerollGate,
 }
 
 // SAFETY: `hw_device_ctx` is a heap-allocated FFmpeg buffer with no
@@ -146,6 +149,7 @@ impl D3d11Decoder {
             _hw_device_ctx: hw_device_ctx,
             pad,
             pool,
+            preroll_gate: PrerollGate::default(),
         })
     }
 
@@ -158,7 +162,12 @@ impl D3d11Decoder {
                         pp_error!(self, "decoder did not select the D3D11VA pixel format");
                         return Err(D3d11DecoderError::HwAccelUnavailable.into());
                     }
-                    self.pad.push(MediaBuffer::Video(Arc::new(frame)))?;
+                    // Reassigning `frame` releases a suppressed one right here,
+                    // returning its fixed-pool surface a whole branch earlier
+                    // than dropping it downstream would.
+                    if !self.preroll_gate.suppresses(frame.pts()) {
+                        self.pad.push(MediaBuffer::Video(Arc::new(frame)))?;
+                    }
                     frame = self.pool.get();
                 }
                 Err(error) if is_codec_drain_boundary(&error) => break,
@@ -202,6 +211,8 @@ impl Sink for D3d11Decoder {
     fn consume(&mut self, buf: MediaBuffer) -> crate::error::Result<()> {
         match buf {
             MediaBuffer::Packet(packet) => {
+                // Decoded frames carry a `pts` but not the unit it is in.
+                self.preroll_gate.observe_packet(&packet);
                 self.decoder
                     .send_packet(&*packet)
                     .inspect_err(|error| pp_error!(self, "send_packet failed: {error}"))
@@ -227,8 +238,17 @@ impl Sink for D3d11Decoder {
         // Same reasoning as `D3d12Decoder::control`: nothing to do on
         // `Stop` (the hw device context is freed in `Drop`), flush
         // reference-frame state on `Flush`.
-        if msg == ControlMsg::Flush {
-            self.decoder.flush();
+        //
+        // `Preroll` may carry a seek target; the samples decoded while
+        // catching up to it exist only to warm the codec.
+        match &msg {
+            ControlMsg::Flush => {
+                self.decoder.flush();
+                self.preroll_gate.reset();
+            }
+            ControlMsg::Preroll(context) => self.preroll_gate.begin(context),
+            ControlMsg::Pause | ControlMsg::Resume | ControlMsg::Stop => self.preroll_gate.clear(),
+            ControlMsg::CheckSeek(_) | ControlMsg::Seek(_) => {}
         }
         self.pad.control(msg)
     }

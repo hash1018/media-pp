@@ -100,9 +100,6 @@ pub struct Pacer {
     interrupt_epoch: u64,
     /// Preroll advances data without consulting the paused pipeline clock.
     prerolling: bool,
-    /// Requested seek position; decoded frames before it are consumed for
-    /// codec state but not forwarded to the terminal during preroll.
-    preroll_target: Option<Duration>,
     /// Buffers whose paced wait was interrupted before the owning worker
     /// could process pause/seek/stop. Pause retains them for resume; seek
     /// and stop discard them in `control()`.
@@ -139,7 +136,6 @@ impl Pacer {
             first_pts: None,
             interrupt_epoch,
             prerolling: false,
-            preroll_target: None,
             pending: VecDeque::new(),
             pad,
         })
@@ -190,14 +186,6 @@ impl Pacer {
             thread::sleep((due - now).min(INTERRUPT_POLL_INTERVAL));
         }
     }
-
-    fn before_preroll_target(&self, pts: Option<i64>) -> bool {
-        let (Some(target), Some(pts)) = (self.preroll_target, pts) else {
-            return false;
-        };
-        let pts_ns = MediaTimestamp::new_unchecked(pts, self.time_base).rescale(nanoseconds());
-        pts_ns < target.as_nanos().min(i64::MAX as u128) as i64
-    }
 }
 
 impl Element for Pacer {
@@ -234,14 +222,6 @@ impl Sink for Pacer {
     fn consume(&mut self, buf: MediaBuffer) -> crate::error::Result<()> {
         self.pending.push_back(buf);
         while let Some(buf) = self.pending.pop_front() {
-            let decoded_pts = match &buf {
-                MediaBuffer::Video(frame) => frame.pts(),
-                MediaBuffer::Audio(frame) => frame.pts(),
-                MediaBuffer::Packet(_) | MediaBuffer::Eos => None,
-            };
-            if self.prerolling && self.before_preroll_target(decoded_pts) {
-                continue;
-            }
             let ready = match &buf {
                 MediaBuffer::Packet(packet) => self.wait_for(packet.pts())?,
                 MediaBuffer::Video(frame) => self.wait_for(frame.pts())?,
@@ -269,13 +249,11 @@ impl Sink for Pacer {
                 self.clock.reset();
             }
             ControlMsg::Stop => self.pending.clear(),
-            ControlMsg::Preroll(ref context) => {
+            ControlMsg::Preroll(_) => {
                 self.prerolling = true;
-                self.preroll_target = context.target();
             }
             ControlMsg::Pause | ControlMsg::Resume => {
                 self.prerolling = false;
-                self.preroll_target = None;
             }
             ControlMsg::CheckSeek(_) => {}
         }
@@ -368,19 +346,32 @@ mod tests {
         }
     }
 
+    /// Preroll has to outrun the paused clock — that is the whole reason a
+    /// `Pacer` reacts to it. Suppressing pre-target media is *not* its job:
+    /// that needs the time base a decoder has on every decoded branch, and a
+    /// `Pacer` is only on some of them.
+    /// Preroll has to outrun the paused clock — that is the whole reason a
+    /// `Pacer` reacts to it, and a paused pipeline could otherwise never
+    /// deliver a preview sample. Suppressing pre-target media is *not* its
+    /// job: that needs the time base a decoder has on every decoded branch,
+    /// and a `Pacer` is only on some of them.
     #[test]
-    fn seek_preroll_discards_decoded_timestamps_before_the_target() {
+    fn preroll_forwards_without_waiting_out_the_presentation_time() {
         let clock = Arc::new(Clock::new());
-        let mut pacer = Pacer::new("pacer", ffmpeg::Rational::new(1, 1_000), clock).unwrap();
+        let mut pacer = Pacer::new("pacer", ffmpeg::Rational::new(1, 1), clock).unwrap();
         let context = Arc::new(PrerollContext::for_seek([], Duration::from_secs(2)));
-
         pacer
             .control(ControlMsg::Preroll(context))
             .expect("preroll");
-        assert!(pacer.before_preroll_target(Some(1_999)));
-        assert!(!pacer.before_preroll_target(Some(2_000)));
-        pacer.control(ControlMsg::Pause).expect("pause");
-        assert!(!pacer.before_preroll_target(Some(1_999)));
+
+        let started = Instant::now();
+        pacer.consume(packet(0)).expect("first preroll packet");
+        pacer.consume(packet(60)).expect("distant preroll packet");
+
+        assert!(
+            started.elapsed() < Duration::from_millis(100),
+            "a minute of presentation time must not be waited out during preroll"
+        );
     }
 
     /// Regression test: a `pts` this far from `first_pts` used to overflow
