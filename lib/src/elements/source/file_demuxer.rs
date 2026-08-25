@@ -176,6 +176,10 @@ impl SourceElement for FileDemuxer {
                 pp_info!(self, "stopped");
                 return Ok(());
             }
+            if !self.pads.iter_mut().all(SrcPad::ready_consume) {
+                std::thread::sleep(Duration::from_millis(1));
+                continue;
+            }
             // `seek` (called from within `drain_control`, above) already
             // consumed one packet to find out where it landed — deliver
             // that before reading a fresh one, or it'd be silently lost.

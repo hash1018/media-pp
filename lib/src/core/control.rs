@@ -216,6 +216,15 @@ impl PrerollContext {
         self.mark_ready(terminal);
     }
 
+    /// Returns whether every expected terminal has completed this preroll.
+    pub fn is_complete(&self) -> bool {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        !state.cancelled && self.expected.is_subset(&state.ready)
+    }
+
     /// Cancels a pending wait, used by stop and failed seek recovery.
     pub fn cancel(&self) {
         let mut state = self

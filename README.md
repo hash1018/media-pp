@@ -96,6 +96,9 @@ The core types are deliberately small:
 
 - `MediaBuffer` carries packets, video, audio, and EOS.
 - `Sink::consume` is a synchronous call and may return an error.
+- `Sink::ready_consume` propagates downstream readiness back toward sources
+  and queue workers, so pause/preroll backpressure does not consume or drop the
+  next buffered item.
 - `SrcPad` connects one source output to one downstream sink.
 - `Queue` introduces a bounded worker-thread boundary. Downstream errors are
   reported through the pipeline `Bus`, and the worker continues.

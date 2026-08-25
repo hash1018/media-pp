@@ -270,6 +270,16 @@ impl Context {
 /// a `Sink` in a [`crate::queue::Queue`], not by elements spawning their
 /// own threads.
 pub trait Sink: Element {
+    /// Returns whether calling [`Self::consume`] can make progress now.
+    ///
+    /// Thread boundaries check this before removing the next queued buffer,
+    /// so a paused or completed-preroll terminal applies backpressure without
+    /// dropping that buffer. Filters should delegate to their downstream pad;
+    /// sinks that are always ready may keep the default.
+    fn ready_consume(&mut self) -> bool {
+        true
+    }
+
     /// Processes one buffer synchronously on the caller's thread.
     ///
     /// An error is returned directly to upstream until the call crosses a

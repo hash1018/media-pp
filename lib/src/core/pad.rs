@@ -103,6 +103,15 @@ impl SrcPad {
         }
     }
 
+    /// Returns whether the linked peer can currently accept its next buffer.
+    /// An unlinked pad is ready because pushing to it is a no-op.
+    pub fn ready_consume(&mut self) -> bool {
+        self.peer
+            .as_mut()
+            .map(|sink| sink.ready_consume())
+            .unwrap_or(true)
+    }
+
     /// Sends a source-originated EOS with explicit pad-level trace records.
     /// Filters are traced by the pipeline's common element wrapper; this is
     /// for the source boundary where EOS first enters the dataflow graph.

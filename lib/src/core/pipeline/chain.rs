@@ -103,7 +103,11 @@ impl<T: Source> Source for FlowTracer<T> {
     }
 }
 
-impl<T: Sink> Sink for FlowTracer<T> {
+impl<T: Filter> Sink for FlowTracer<T> {
+    fn ready_consume(&mut self) -> bool {
+        self.inner.ready_consume() && self.inner.src_pads().iter_mut().all(SrcPad::ready_consume)
+    }
+
     fn input_contract(&self) -> InputContract {
         self.inner.input_contract()
     }
@@ -181,7 +185,10 @@ struct QueueStage {
 /// all) still report EOS on the bus.
 struct TerminalTracer {
     bus: Bus,
+    id: ElementId,
     inner: Box<dyn Sink>,
+    paused: bool,
+    preroll: Option<Arc<crate::control::PrerollContext>>,
 }
 
 impl Element for TerminalTracer {
@@ -207,6 +214,20 @@ impl Element for TerminalTracer {
 }
 
 impl Sink for TerminalTracer {
+    fn ready_consume(&mut self) -> bool {
+        if self.paused {
+            return false;
+        }
+        if self
+            .preroll
+            .as_ref()
+            .is_some_and(|context| context.is_complete())
+        {
+            return false;
+        }
+        self.inner.ready_consume()
+    }
+
     fn input_contract(&self) -> InputContract {
         self.inner.input_contract()
     }
@@ -217,6 +238,15 @@ impl Sink for TerminalTracer {
             pp_trace!(pp_log: self.inner.pp_log(), "event=eos phase=received");
         }
         let result = self.inner.consume(buf);
+        if result.is_ok() {
+            if let Some(context) = &self.preroll {
+                if is_eos {
+                    context.mark_eos(self.id);
+                } else {
+                    context.mark_ready(self.id);
+                }
+            }
+        }
         if is_eos {
             match &result {
                 Ok(()) => {
@@ -247,6 +277,26 @@ impl Sink for TerminalTracer {
             "event=control control={msg:?} phase=received"
         );
         let result = self.inner.control(msg.clone());
+        if result.is_ok() {
+            match &msg {
+                ControlMsg::Pause => self.paused = true,
+                ControlMsg::Resume => {
+                    self.paused = false;
+                    self.preroll = None;
+                }
+                ControlMsg::Preroll(context) => {
+                    self.paused = false;
+                    self.preroll = Some(Arc::clone(context));
+                }
+                ControlMsg::Stop => {
+                    if let Some(context) = self.preroll.take() {
+                        context.cancel();
+                    }
+                    self.paused = true;
+                }
+                ControlMsg::Flush | ControlMsg::CheckSeek(_) | ControlMsg::Seek(_) => {}
+            }
+        }
         match &result {
             Ok(()) => pp_trace!(
                 pp_log: self.inner.pp_log(),
@@ -428,7 +478,10 @@ impl ChainBuilder {
         let root_id = nodes.first().expect("terminal always supplies one node").id;
         let terminal: Box<dyn Sink> = Box::new(TerminalTracer {
             bus: self.context.bus.for_element(terminal_id),
+            id: terminal_id,
             inner: terminal,
+            paused: false,
+            preroll: None,
         });
         let plan = BranchPlan {
             nodes,
@@ -525,5 +578,101 @@ pub(crate) fn incoming_from(pad: &SrcPad) -> Option<ResolvedFlow> {
             contract,
         }),
         OutputContract::Passthrough | OutputContract::Unknown => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    use super::*;
+    use crate::{control::PrerollContext, element::element_pp_log};
+
+    struct CountingTerminal {
+        count: Arc<AtomicUsize>,
+        pp_log: PpLog,
+    }
+
+    impl Element for CountingTerminal {
+        fn name(&self) -> Arc<str> {
+            "terminal".into()
+        }
+
+        fn element_type(&self) -> ElementType {
+            ElementType::Other
+        }
+
+        fn pp_log(&self) -> &PpLog {
+            &self.pp_log
+        }
+
+        fn pp_log_mut(&mut self) -> &mut PpLog {
+            &mut self.pp_log
+        }
+    }
+
+    impl Sink for CountingTerminal {
+        fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
+            self.count.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn control(&mut self, _msg: ControlMsg) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    fn terminal(id: ElementId, count: Arc<AtomicUsize>) -> TerminalTracer {
+        let (bus, _rx) = Bus::new();
+        TerminalTracer {
+            bus: bus.for_element(id),
+            id,
+            inner: Box::new(CountingTerminal {
+                count,
+                pp_log: element_pp_log(ElementType::Other, "terminal", None),
+            }),
+            paused: false,
+            preroll: None,
+        }
+    }
+
+    #[test]
+    fn terminal_readiness_closes_only_after_the_whole_preroll_completes() {
+        let first = ElementId::for_test(1);
+        let second = ElementId::for_test(2);
+        let context = Arc::new(PrerollContext::new([first, second]));
+        let mut first_terminal = terminal(first, Arc::new(AtomicUsize::new(0)));
+        let mut second_terminal = terminal(second, Arc::new(AtomicUsize::new(0)));
+
+        first_terminal
+            .control(ControlMsg::Pause)
+            .expect("pause first terminal");
+        assert!(!first_terminal.ready_consume());
+        first_terminal
+            .control(ControlMsg::Preroll(Arc::clone(&context)))
+            .expect("preroll first terminal");
+        second_terminal
+            .control(ControlMsg::Preroll(Arc::clone(&context)))
+            .expect("preroll second terminal");
+
+        first_terminal
+            .consume(MediaBuffer::Packet(Arc::new(ffmpeg_next::Packet::empty())))
+            .expect("consume first terminal sample");
+        assert!(first_terminal.ready_consume());
+
+        second_terminal
+            .consume(MediaBuffer::Packet(Arc::new(ffmpeg_next::Packet::empty())))
+            .expect("consume second terminal sample");
+        assert!(context.is_complete());
+        assert!(!first_terminal.ready_consume());
+        assert!(!second_terminal.ready_consume());
+
+        first_terminal
+            .control(ControlMsg::Resume)
+            .expect("resume first terminal");
+        assert!(first_terminal.ready_consume());
     }
 }

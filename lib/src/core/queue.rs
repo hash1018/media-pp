@@ -307,6 +307,10 @@ impl Element for Queue {
 }
 
 impl Sink for Queue {
+    fn ready_consume(&mut self) -> bool {
+        !self.tx.is_full()
+    }
+
     /// A Queue neither inspects nor transforms what it carries, so it
     /// accepts every kind and — see `ChainBuilder::queue_with_policy` —
     /// passes the upstream contract straight through to whatever it
@@ -458,6 +462,37 @@ fn worker_loop(
             ) {
                 pp_info!(pp_log: &pp_log, "worker: stopped");
                 return;
+            }
+            continue;
+        }
+
+        if !downstream.ready_consume() {
+            match control_rx.rx.recv_timeout(STOP_POLL_INTERVAL) {
+                Ok(request) => {
+                    let RequestKind::Control(msg) = request.kind else {
+                        let _ = request.ack.send(());
+                        continue;
+                    };
+                    if apply_control(
+                        &data_rx,
+                        &mut downstream,
+                        msg,
+                        &request.ack,
+                        &control_rx,
+                        &error_reporter,
+                        &stop,
+                    ) {
+                        pp_info!(pp_log: &pp_log, "worker: stopped");
+                        return;
+                    }
+                }
+                Err(RecvTimeoutError::Timeout) => {
+                    if stop.load(Ordering::Relaxed) {
+                        pp_info!(pp_log: &pp_log, "worker: stop flag set, ending");
+                        return;
+                    }
+                }
+                Err(RecvTimeoutError::Disconnected) => return,
             }
             continue;
         }

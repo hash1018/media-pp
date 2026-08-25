@@ -380,6 +380,13 @@ impl Element for Tee {
 }
 
 impl Sink for Tee {
+    fn ready_consume(&mut self) -> bool {
+        let branches = lock_unpoisoned(&self.shared.branches).clone();
+        branches.into_iter().all(|branch| {
+            !branch.active.load(Ordering::Acquire) || lock_unpoisoned(&branch.pad).ready_consume()
+        })
+    }
+
     /// A Tee duplicates rather than transforms, so it accepts every kind
     /// and hands each branch exactly what it received.
     fn input_contract(&self) -> InputContract {
