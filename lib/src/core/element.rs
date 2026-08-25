@@ -376,6 +376,19 @@ pub trait SourceElement: Source {
     /// itself.
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()>;
 
+    /// Discards whatever this source has read but not yet delivered.
+    ///
+    /// Called by [`crate::control::drain_control`] when [`ControlMsg::Flush`]
+    /// arrives, before that message is forwarded to this source's own pads —
+    /// the same ordering [`Self::seek`] gets, and for the same reason. The
+    /// data held here belongs to the timeline being left behind, so releasing
+    /// it afterwards would feed pre-seek media to elements that have just
+    /// reset their own state for the new one.
+    ///
+    /// The default is a no-op: a source that hands every packet straight to a
+    /// pad holds nothing to discard.
+    fn flush(&mut self) {}
+
     /// Repositions this source to `target`, an absolute position from the
     /// start of the media (e.g. `av_seek_frame` for
     /// [`crate::elements::FileDemuxer`]). Called by

@@ -162,8 +162,7 @@ impl FileDemuxer {
             return Ok(());
         };
         if !pad.ready_consume() {
-            self.pending_bytes = self.pending_bytes.saturating_add(packet.size());
-            self.pending.push_back((index, time_base, packet));
+            self.park((index, time_base, packet));
             return Ok(());
         }
         if let Err(error) = pad.push(MediaBuffer::Packet(Arc::new(packet))) {
@@ -177,6 +176,13 @@ impl FileDemuxer {
             );
         }
         Ok(())
+    }
+
+    /// Holds one packet back, keeping the byte total that bounds the backlog
+    /// in step with the queue. The one place anything enters `pending`.
+    fn park(&mut self, item: (usize, ffmpeg::Rational, ffmpeg::Packet)) {
+        self.pending_bytes = self.pending_bytes.saturating_add(item.2.size());
+        self.pending.push_back(item);
     }
 
     /// Delivers every parked packet whose pad has since become ready, oldest
@@ -311,6 +317,16 @@ impl SourceElement for FileDemuxer {
         Ok(())
     }
 
+    /// Drops the parked backlog. Those packets were read from the timeline
+    /// being left behind, and this source is the only place they exist —
+    /// every downstream stage discards its own on the same `Flush`, so
+    /// releasing these afterwards would be the one way old media could
+    /// reach a decoder that had already reset for the new position.
+    fn flush(&mut self) {
+        self.pending.clear();
+        self.pending_bytes = 0;
+    }
+
     fn seek(&mut self, target: Duration) -> crate::error::Result<Duration> {
         // `Input::seek` takes microseconds (`AV_TIME_BASE` units) when
         // seeking the whole container (stream index -1, which is what it
@@ -333,15 +349,19 @@ impl SourceElement for FileDemuxer {
         // look at its own timestamp. That packet is real data (not a
         // probe to throw away), so it's stashed in `pending` for `run`'s
         // next iteration instead of being dropped here.
-        match self.input.packets().next() {
-            Some((stream, packet)) => {
-                let time_base = stream.time_base();
+        let landed_packet = self
+            .input
+            .packets()
+            .next()
+            .map(|(stream, packet)| (stream.index(), stream.time_base(), packet));
+        match landed_packet {
+            Some((index, time_base, packet)) => {
                 let landed = packet
                     .pts()
                     .or_else(|| packet.dts())
                     .map(|ts| ts_to_duration(ts, time_base))
                     .unwrap_or(Duration::ZERO);
-                self.pending.push_back((stream.index(), time_base, packet));
+                self.park((index, time_base, packet));
                 Ok(landed)
             }
             // Nothing left to read right after seeking (`target` at/past
@@ -522,6 +542,65 @@ mod tests {
         assert!(
             time_base_matches.load(Ordering::SeqCst),
             "the packet retained by seek must carry its stream time base"
+        );
+    }
+
+    /// A seek starts a new timeline. Anything the demuxer had already read and
+    /// parked for a blocked pad belongs to the old one, so delivering it after the
+    /// reposition feeds pre-seek packets to a decoder whose reference state was
+    /// just flushed — corrupt output, and a stream of `co located POCs
+    /// unavailable` from libavcodec.
+    #[test]
+    fn seeking_discards_packets_parked_before_the_jump() {
+        let Some(path) = try_test_video() else { return };
+        let (mut demuxer, streams) = FileDemuxer::open("demux", &path).expect("open test video");
+        let video = streams
+            .iter()
+            .find(|stream| stream.kind == ffmpeg::media::Type::Video)
+            .expect("test video has a video stream");
+        let time_base = demuxer
+            .stream_time_base(video.index)
+            .expect("video stream disappeared");
+
+        // Read a little of the start into the parked queue by hand, the way `run`
+        // does when a pad cannot accept a packet yet.
+        let mut input = ffmpeg::format::input(&path).expect("second handle");
+        let mut parked = 0usize;
+        for (stream, packet) in input.packets() {
+            if stream.index() != video.index {
+                continue;
+            }
+            demuxer.park((stream.index(), time_base, packet));
+            parked += 1;
+            if parked == 4 {
+                break;
+            }
+        }
+        assert_eq!(parked, 4, "the fixture must have packets to park");
+
+        // The order a pipeline uses: Flush marks the timeline boundary, Seek
+        // then moves the cursor and reads one packet ahead to learn where it
+        // landed. Counting rather than comparing timestamps, because a seek
+        // that lands back at the start legitimately re-reads a packet with
+        // the same pts as one of the discarded ones.
+        demuxer.flush();
+        demuxer
+            .seek(Duration::from_secs(3))
+            .expect("seek within the test video");
+
+        assert_eq!(
+            demuxer.pending.len(),
+            1,
+            "only the seek's own read-ahead packet may survive the flush"
+        );
+        let counted: usize = demuxer
+            .pending
+            .iter()
+            .map(|(_, _, packet)| packet.size())
+            .sum();
+        assert_eq!(
+            demuxer.pending_bytes, counted,
+            "the parked byte total must stay in step with the queue"
         );
     }
 }

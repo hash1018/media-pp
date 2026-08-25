@@ -566,6 +566,9 @@ pub(crate) fn apply_one_unacked<S: SourceElement>(
     );
     let result: Result<bool> = (|| {
         apply_seek_check(source, msg);
+        if *msg == ControlMsg::Flush {
+            source.flush();
+        }
         apply_seek(source, bus, msg)?;
         for pad in source.src_pads() {
             pad.control(msg.clone())?;
@@ -669,11 +672,13 @@ mod tests {
     struct DummySource {
         pp_log: PpLog,
         pad: SrcPad,
+        flushes: usize,
     }
 
     impl DummySource {
         fn new() -> Self {
             Self {
+                flushes: 0,
                 pp_log: element_pp_log(ElementType::Other, "dummy", None),
                 pad: SrcPad::new("dummy_src"),
             }
@@ -717,9 +722,37 @@ mod tests {
             unreachable!("not exercised by these tests")
         }
 
+        fn flush(&mut self) {
+            self.flushes += 1;
+        }
+
         fn seek(&mut self, target: Duration) -> Result<Duration> {
             Ok(target)
         }
+    }
+
+    /// A source that holds data of its own — `FileDemuxer` parks packets for a
+    /// pad that cannot accept one yet — has to discard it on the same boundary
+    /// every downstream element does. Nothing else can: the packets exist only
+    /// there, so releasing them after the reposition is the one way old media
+    /// reaches a decoder that has already reset for the new timeline.
+    #[test]
+    fn flush_reaches_the_source_itself_and_nothing_else_does() {
+        let (bus, _bus_rx) = Bus::new();
+        let mut source = DummySource::new();
+
+        for msg in [
+            ControlMsg::Pause,
+            ControlMsg::Resume,
+            ControlMsg::Seek(Duration::from_secs(1)),
+            ControlMsg::CheckSeek(Arc::new(SeekCheckContext::new())),
+        ] {
+            apply_one_unacked(&mut source, &bus, &msg).expect("control applies");
+        }
+        assert_eq!(source.flushes, 0, "only Flush may discard source-held data");
+
+        apply_one_unacked(&mut source, &bus, &ControlMsg::Flush).expect("flush applies");
+        assert_eq!(source.flushes, 1);
     }
 
     struct SlowPauseSink {
