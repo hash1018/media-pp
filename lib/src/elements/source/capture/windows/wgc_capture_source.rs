@@ -20,7 +20,7 @@ use windows::{
         SizeInt32,
     },
     Win32::{
-        Foundation::{HMODULE, HWND, RPC_E_CHANGED_MODE},
+        Foundation::{CloseHandle, HMODULE, HWND, RPC_E_CHANGED_MODE, STILL_ACTIVE},
         Graphics::{
             Direct3D::D3D_DRIVER_TYPE_HARDWARE,
             Direct3D11::{
@@ -34,12 +34,15 @@ use windows::{
                 IDXGIDevice,
             },
         },
-        System::WinRT::{
-            Direct3D11::{CreateDirect3D11DeviceFromDXGIDevice, IDirect3DDxgiInterfaceAccess},
-            Graphics::Capture::IGraphicsCaptureItemInterop,
-            RO_INIT_MULTITHREADED, RoInitialize, RoUninitialize,
+        System::{
+            Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION},
+            WinRT::{
+                Direct3D11::{CreateDirect3D11DeviceFromDXGIDevice, IDirect3DDxgiInterfaceAccess},
+                Graphics::Capture::IGraphicsCaptureItemInterop,
+                RO_INIT_MULTITHREADED, RoInitialize, RoUninitialize,
+            },
         },
-        UI::WindowsAndMessaging::IsWindow,
+        UI::WindowsAndMessaging::{GetWindowThreadProcessId, IsWindow},
     },
     core::{IInspectable, Interface, factory},
 };
@@ -135,7 +138,11 @@ impl Default for WgcCaptureOptions {
 /// on its source thread, where it also owns the WinRT apartment, frame pool,
 /// capture session, and event registrations for their complete lifetime.
 /// Dropping or stopping the pipeline therefore releases every callback and
-/// capture object before that thread exits.
+/// capture object before that thread exits — with one deliberate exception,
+/// documented on this module's `WgcRuntime::drop`: when the process that owned
+/// the target window has itself exited, the capture session is leaked rather
+/// than released, because releasing it there deadlocks the source thread
+/// permanently.
 ///
 /// One source pad emits BGRA [`MediaBuffer::Video`] frames in
 /// [`MemoryDomain::D3d11`]. [`Self::open`] returns the exact device it creates;
@@ -585,6 +592,31 @@ fn output_contract() -> OutputContract {
     ))
 }
 
+/// Whether the process that owned the capture target has exited. A pid of
+/// zero, an unopenable process, or an unreadable exit code all answer `false`:
+/// the caller uses this only to skip an otherwise-deadlocking teardown, so
+/// anything short of proof that the owner is gone must take the normal path.
+fn owner_exited(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    // SAFETY: opens the pid for a query-only handle; failure is reported as
+    // `Err` and retains nothing.
+    let Ok(process) = (unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) })
+    else {
+        // The pid can no longer be opened at all, which for a process that
+        // existed moments ago means it is gone.
+        return true;
+    };
+    let mut code = 0u32;
+    // SAFETY: `process` is a live handle opened just above and `code` is a
+    // live out-parameter.
+    let read = unsafe { GetExitCodeProcess(process, &mut code) };
+    // SAFETY: `process` came from `OpenProcess` and is not used afterwards.
+    let _ = unsafe { CloseHandle(process) };
+    read.is_ok() && code != STILL_ACTIVE.0 as u32
+}
+
 struct CaptureFrameGuard(Direct3D11CaptureFrame);
 
 impl Drop for CaptureFrameGuard {
@@ -625,9 +657,16 @@ impl Drop for WinRtApartment {
 }
 
 struct WgcRuntime {
+    /// The target window's owning process, read while the window was still
+    /// alive. Teardown needs it because a destroyed window and a dead owner
+    /// call for opposite handling — see [`Drop`].
+    owner_pid: u32,
     item: GraphicsCaptureItem,
     frame_pool: Direct3D11CaptureFramePool,
-    session: GraphicsCaptureSession,
+    /// Held in a [`ManuallyDrop`](std::mem::ManuallyDrop) so [`Drop`] can
+    /// decline to release it — see that impl for why a destroyed target
+    /// makes releasing this object unsafe to do on this thread.
+    session: std::mem::ManuallyDrop<GraphicsCaptureSession>,
     direct3d_device: IDirect3DDevice,
     frame_token: Option<i64>,
     closed_token: Option<i64>,
@@ -675,10 +714,16 @@ impl WgcRuntime {
 
         let (frame_tx, frame_rx) = bounded(1);
         let closed = Arc::new(AtomicBool::new(false));
+        let mut owner_pid = 0;
+        // SAFETY: `hwnd` is still a live window here, and `owner_pid` is a
+        // live out-parameter. A failure leaves it zero, which `owner_exited`
+        // treats as "cannot tell", i.e. the safe full-teardown path.
+        unsafe { GetWindowThreadProcessId(hwnd, Some(&mut owner_pid)) };
         let mut runtime = Self {
+            owner_pid,
             item,
             frame_pool,
-            session,
+            session: std::mem::ManuallyDrop::new(session),
             direct3d_device,
             frame_token: None,
             closed_token: None,
@@ -727,7 +772,6 @@ impl WgcRuntime {
 
 impl Drop for WgcRuntime {
     fn drop(&mut self) {
-        let _ = self.session.Close();
         if let Some(token) = self.frame_token.take() {
             let _ = self.frame_pool.RemoveFrameArrived(token);
         }
@@ -735,12 +779,34 @@ impl Drop for WgcRuntime {
             let _ = self.item.RemoveClosed(token);
         }
         let _ = self.frame_pool.Close();
+
+        // Once the target's *process* is gone, every way of retiring the
+        // capture session blocks this thread forever: `Close` and the final
+        // `Release` both deadlock, and neither unblocks after two minutes.
+        // Detaching the handlers first, closing the frame pool first, and
+        // giving WGC its own device were each measured and changed nothing.
+        // So the session is deliberately leaked on that one path — a COM
+        // reference the process reclaims at exit, in exchange for a source
+        // thread that actually finishes. Everything else still releases
+        // normally.
+        //
+        // A destroyed window whose owner is still running is *not* that case:
+        // there the session retires in milliseconds, and leaking it instead
+        // crashes the process on the way out. Hence the owner check rather
+        // than a window check alone.
+        if owner_exited(self.owner_pid) {
+            return;
+        }
+        let _ = self.session.Close();
+        // SAFETY: the session is released exactly once, only on the path that
+        // did not take the early return above, and never touched afterwards.
+        unsafe { std::mem::ManuallyDrop::drop(&mut self.session) };
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{sync::mpsc, time::Duration};
+    use std::{sync::mpsc, thread, time::Duration};
 
     use windows::{
         Win32::UI::WindowsAndMessaging::{
@@ -907,5 +973,64 @@ mod tests {
             .filter(|event| matches!(event, BusEvent::Error { .. }))
             .count();
         assert_eq!(errors, 1, "only the simulated push failure is expected");
+    }
+
+    /// Destroying the target must end the source, not park it: `Closed` does
+    /// not fire even for this in-process `DestroyWindow`, so without the
+    /// handle check the loop waits forever. The bus draining at all is what
+    /// proves the thread finished — `iter` only returns once every sender is
+    /// gone.
+    ///
+    /// This does not cover the teardown deadlock [`WgcRuntime::drop`]
+    /// describes. That one needs the target's whole *process* to die, which
+    /// an in-process window cannot reproduce; destroying a window whose owner
+    /// is still alive retires the session normally.
+    #[test]
+    #[ignore = "requires an interactive Windows Graphics Capture session"]
+    fn destroying_the_target_window_ends_the_source() {
+        crate::init().expect("initialize FFmpeg");
+        let window = TestWindow::create().expect("create capture target window");
+        let (source, _device) = match WgcCaptureSource::open(
+            "capture",
+            window.0,
+            WgcCaptureOptions {
+                fps: 30,
+                include_cursor: false,
+            },
+        ) {
+            Ok(opened) => opened,
+            Err(error) => {
+                eprintln!("skipping: cannot create WGC source ({error})");
+                return;
+            }
+        };
+        let pipeline = Pipeline::new("wgc-target-closed", source, |source, ctx| {
+            let branch = ctx
+                .branch()
+                .to(Box::new(AppSink::new("sink", |_| Ok(()))))?;
+            ctx.attach(source, 0, branch)?;
+            Ok(())
+        })
+        .expect("wire WGC pipeline");
+
+        pipeline.run().expect("start WGC pipeline");
+        // Let the session actually start before the target goes away, so this
+        // exercises teardown of a running capture rather than a failed start.
+        thread::sleep(Duration::from_millis(500));
+        drop(window);
+
+        let (done_tx, done_rx) = mpsc::sync_channel(1);
+        let draining = Arc::clone(&pipeline);
+        thread::spawn(move || {
+            let saw_eos = draining
+                .bus()
+                .iter()
+                .any(|event| matches!(event, BusEvent::Eos { .. }));
+            let _ = done_tx.send(saw_eos);
+        });
+        let saw_eos = done_rx
+            .recv_timeout(Duration::from_secs(15))
+            .expect("the source thread must finish once its target window is destroyed");
+        assert!(saw_eos, "a destroyed target window must forward EOS");
     }
 }

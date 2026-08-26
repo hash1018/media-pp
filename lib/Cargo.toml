@@ -121,6 +121,9 @@ wgc-capture = [
     "windows/Graphics_Capture",
     "windows/Graphics_DirectX_Direct3D11",
     "windows/Win32_Graphics_Dxgi",
+    # Teardown has to tell a destroyed window apart from a dead owning
+    # process; see `WgcRuntime::drop`.
+    "windows/Win32_System_Threading",
     "windows/Win32_System_WinRT_Direct3D11",
     "windows/Win32_System_WinRT_Graphics_Capture",
     "windows/Win32_UI_WindowsAndMessaging",
