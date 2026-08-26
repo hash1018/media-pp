@@ -1,8 +1,7 @@
 use std::{
-    cell::RefCell,
     sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     thread::{self, JoinHandle},
     time::{Duration, Instant},
@@ -22,7 +21,9 @@ use windows::{
         SizeInt32,
     },
     Win32::{
-        Foundation::{CloseHandle, HANDLE, HMODULE, HWND, RPC_E_CHANGED_MODE, WAIT_OBJECT_0},
+        Foundation::{
+            CloseHandle, HANDLE, HMODULE, HWND, LPARAM, RPC_E_CHANGED_MODE, WAIT_OBJECT_0, WPARAM,
+        },
         Graphics::{
             Direct3D::D3D_DRIVER_TYPE_HARDWARE,
             Direct3D11::{
@@ -37,7 +38,9 @@ use windows::{
             },
         },
         System::{
-            Threading::{OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject},
+            Threading::{
+                GetCurrentThreadId, OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
+            },
             WinRT::{
                 Direct3D11::{CreateDirect3D11DeviceFromDXGIDevice, IDirect3DDxgiInterfaceAccess},
                 Graphics::Capture::IGraphicsCaptureItemInterop,
@@ -47,9 +50,9 @@ use windows::{
         UI::{
             Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent},
             WindowsAndMessaging::{
-                CHILDID_SELF, DispatchMessageW, EVENT_OBJECT_DESTROY, GetWindowThreadProcessId,
-                MSG, OBJID_WINDOW, PM_REMOVE, PeekMessageW, TranslateMessage,
-                WINEVENT_OUTOFCONTEXT,
+                CHILDID_SELF, DispatchMessageW, EVENT_OBJECT_DESTROY, GetMessageW,
+                GetWindowThreadProcessId, MSG, OBJID_WINDOW, PM_NOREMOVE, PeekMessageW,
+                PostThreadMessageW, TranslateMessage, WINEVENT_OUTOFCONTEXT, WM_QUIT, WM_USER,
             },
         },
     },
@@ -807,14 +810,33 @@ impl Drop for WinRtApartment {
     }
 }
 
-struct DestroyWatchState {
+/// One registered interest in a window's destruction, owned by the
+/// [`WindowLifetimeWatch`] that created it. The id is what removal matches on,
+/// so two sources watching the same window stay independent.
+struct WatchEntry {
+    id: u64,
     hwnd: usize,
     destroyed: Arc<AtomicBool>,
 }
 
-thread_local! {
-    static DESTROY_WATCH: RefCell<Option<DestroyWatchState>> = const { RefCell::new(None) };
+/// The watcher thread, alive exactly while [`WATCH_ENTRIES`] is non-empty.
+/// `thread_id` is its message-queue address; the thread forces that queue into
+/// existence before reporting itself ready, so posting `WM_QUIT` to it cannot
+/// fail for a thread that has not exited.
+struct WatcherThread {
+    thread_id: u32,
+    worker: JoinHandle<()>,
 }
+
+/// Registrations the hook callback matches against. Locked by the watcher
+/// thread on every desktop window destruction, so nothing slow may happen
+/// while it is held.
+static WATCH_ENTRIES: Mutex<Vec<WatchEntry>> = Mutex::new(Vec::new());
+/// The watcher's lifecycle. Always locked *before* [`WATCH_ENTRIES`], and
+/// never held together with it across the join in [`stop_watcher_thread`] —
+/// the thread being joined needs the entries lock to run its callback.
+static WATCH_THREAD: Mutex<Option<WatcherThread>> = Mutex::new(None);
+static NEXT_WATCH_ID: AtomicU64 = AtomicU64::new(1);
 
 unsafe extern "system" fn window_event_proc(
     _hook: HWINEVENTHOOK,
@@ -831,36 +853,30 @@ unsafe extern "system" fn window_event_proc(
     {
         return;
     }
-    DESTROY_WATCH.with(|watch| {
-        if let Some(watch) = watch.borrow().as_ref()
-            && watch.hwnd == hwnd.0 as usize
-        {
-            watch.destroyed.store(true, Ordering::Release);
-        }
-    });
+    let hwnd = hwnd.0 as usize;
+    let Ok(entries) = WATCH_ENTRIES.lock() else {
+        return;
+    };
+    for entry in entries.iter().filter(|entry| entry.hwnd == hwnd) {
+        entry.destroyed.store(true, Ordering::Release);
+    }
 }
 
-struct WindowDestroyHook {
-    hook: HWINEVENTHOOK,
-}
+struct WindowDestroyHook(HWINEVENTHOOK);
 
 impl WindowDestroyHook {
-    fn install(
-        hwnd: HWND,
-        destroyed: Arc<AtomicBool>,
-    ) -> std::result::Result<Self, WgcCaptureSourceError> {
-        DESTROY_WATCH.with(|watch| {
-            debug_assert!(watch.borrow().is_none());
-            *watch.borrow_mut() = Some(DestroyWatchState {
-                hwnd: hwnd.0 as usize,
-                destroyed: destroyed.clone(),
-            });
-        });
-        // SAFETY: the callback is a static function, out-of-context delivery
-        // keeps it in this process. A global hook avoids a race where the
-        // target is destroyed before its pid/tid-filtered hook is installed;
-        // the callback itself ignores every HWND except the selected value.
-        // This watcher thread pumps its queue until the hook is removed.
+    fn install() -> windows::core::Result<Self> {
+        // SAFETY: the callback is a static function and out-of-context delivery
+        // keeps it in this process, on the thread installing the hook.
+        //
+        // The hook is deliberately unfiltered. Filtering it to the target's own
+        // thread would mean reading that thread id first, which reopens exactly
+        // the race this watcher exists to close: the original window can be
+        // destroyed and its handle value reissued to a new window on the same
+        // UI thread before the filtered hook is in place, and an owner pid/tid
+        // recheck cannot tell those two windows apart. One unfiltered hook for
+        // the whole process is the price; see `WATCH_ENTRIES` for why it is
+        // paid once rather than once per capture source.
         let hook = unsafe {
             SetWinEventHook(
                 EVENT_OBJECT_DESTROY,
@@ -873,30 +889,36 @@ impl WindowDestroyHook {
             )
         };
         if hook.is_invalid() {
-            DESTROY_WATCH.with(|watch| *watch.borrow_mut() = None);
-            return Err(windows::core::Error::from_thread().into());
+            return Err(windows::core::Error::from_thread());
         }
-        Ok(Self { hook })
+        Ok(Self(hook))
     }
 }
 
 impl Drop for WindowDestroyHook {
     fn drop(&mut self) {
         // SAFETY: this hook was installed successfully by `install`, remains
-        // owned by this guard, and is removed on the same source thread.
-        let _ = unsafe { UnhookWinEvent(self.hook) };
-        DESTROY_WATCH.with(|watch| *watch.borrow_mut() = None);
+        // owned by this guard, and is removed on the thread that installed it,
+        // as `UnhookWinEvent` requires.
+        let _ = unsafe { UnhookWinEvent(self.0) };
     }
 }
 
-fn pump_window_events() {
+/// Blocks until `WM_QUIT`, delivering hook callbacks as they arrive. There is
+/// nothing to poll for: an out-of-context WinEvent is delivered through this
+/// queue, so the thread costs nothing while the desktop is quiet.
+fn run_watcher_message_loop() {
     let mut message = MSG::default();
-    // SAFETY: `message` is a live out-parameter. The watcher thread owns no UI
-    // window, so draining and dispatching its queue only delivers the WinEvent
-    // callback and other messages addressed to this helper thread.
-    while unsafe { PeekMessageW(&mut message, None, 0, 0, PM_REMOVE) }.as_bool() {
-        // SAFETY: `message` was initialized by successful `PeekMessageW` and
-        // remains live for translation and synchronous dispatch.
+    loop {
+        // SAFETY: `message` is a live out-parameter. This thread owns no UI
+        // window, so its queue carries only the hook callbacks and the stop
+        // message posted by `stop_watcher_thread`.
+        let result = unsafe { GetMessageW(&mut message, None, 0, 0) };
+        if result.0 <= 0 {
+            return;
+        }
+        // SAFETY: `message` was filled by a successful `GetMessageW` and stays
+        // live for translation and synchronous dispatch.
         unsafe {
             let _ = TranslateMessage(&message);
             DispatchMessageW(&message);
@@ -904,61 +926,102 @@ fn pump_window_events() {
     }
 }
 
+/// Starts the shared watcher if it is not already running. The caller holds
+/// the [`WATCH_THREAD`] lock.
+fn start_watcher_thread(
+    thread: &mut Option<WatcherThread>,
+) -> std::result::Result<(), WgcCaptureSourceError> {
+    if thread.is_some() {
+        return Ok(());
+    }
+    let (ready_tx, ready_rx) = bounded(1);
+    let worker = thread::Builder::new()
+        .name("wgc-window-watch".into())
+        .spawn(move || {
+            let hook = match WindowDestroyHook::install() {
+                Ok(hook) => hook,
+                Err(error) => {
+                    let _ = ready_tx.send(Err(error));
+                    return;
+                }
+            };
+            let mut message = MSG::default();
+            // SAFETY: `message` is a live out-parameter. This peek creates this
+            // thread's message queue, which is what makes the later
+            // `PostThreadMessageW` well defined; nothing is dispatched here.
+            unsafe {
+                let _ = PeekMessageW(&mut message, None, WM_USER, WM_USER, PM_NOREMOVE);
+            }
+            // SAFETY: reads this thread's own id and retains nothing.
+            let _ = ready_tx.send(Ok(unsafe { GetCurrentThreadId() }));
+            run_watcher_message_loop();
+            drop(hook);
+        })
+        .map_err(|error| WgcCaptureSourceError::WindowWatcherUnavailable(error.to_string()))?;
+
+    match ready_rx.recv() {
+        Ok(Ok(thread_id)) => {
+            *thread = Some(WatcherThread { thread_id, worker });
+            Ok(())
+        }
+        Ok(Err(error)) => {
+            let _ = worker.join();
+            Err(error.into())
+        }
+        Err(_) => {
+            let _ = worker.join();
+            Err(WgcCaptureSourceError::WindowWatcherUnavailable(
+                "watcher stopped during startup".into(),
+            ))
+        }
+    }
+}
+
+/// Stops the shared watcher. The caller holds the [`WATCH_THREAD`] lock and
+/// must not hold [`WATCH_ENTRIES`]: the thread being joined takes that lock in
+/// its hook callback.
+fn stop_watcher_thread(thread: &mut Option<WatcherThread>) {
+    let Some(WatcherThread { thread_id, worker }) = thread.take() else {
+        return;
+    };
+    // SAFETY: the thread created its message queue before reporting itself
+    // ready and only leaves the loop on this message, so the post targets a
+    // live queue and borrows nothing.
+    let _ = unsafe { PostThreadMessageW(thread_id, WM_QUIT, WPARAM(0), LPARAM(0)) };
+    let _ = worker.join();
+}
+
+/// One source's registered interest in its target window's destruction.
+///
+/// The hook and the thread behind this are process-wide and shared: a host
+/// that captures several windows pays for one desktop-wide hook, not one per
+/// source. Dropping the last watch stops that thread.
 struct WindowLifetimeWatch {
+    id: u64,
     destroyed: Arc<AtomicBool>,
-    stop_tx: crossbeam_channel::Sender<()>,
-    worker: Option<JoinHandle<()>>,
 }
 
 impl WindowLifetimeWatch {
     fn start(hwnd: HWND) -> std::result::Result<Self, WgcCaptureSourceError> {
-        let hwnd = hwnd.0 as usize;
+        let id = NEXT_WATCH_ID.fetch_add(1, Ordering::Relaxed);
         let destroyed = Arc::new(AtomicBool::new(false));
-        let worker_destroyed = destroyed.clone();
-        let (stop_tx, stop_rx) = bounded(1);
-        let (ready_tx, ready_rx) = bounded(1);
-        let worker = thread::Builder::new()
-            .name("wgc-window-watch".into())
-            .spawn(move || {
-                let hwnd = HWND(hwnd as *mut _);
-                let hook = match WindowDestroyHook::install(hwnd, worker_destroyed) {
-                    Ok(hook) => {
-                        let _ = ready_tx.send(Ok(()));
-                        hook
-                    }
-                    Err(error) => {
-                        let _ = ready_tx.send(Err(error));
-                        return;
-                    }
-                };
-                loop {
-                    pump_window_events();
-                    match stop_rx.recv_timeout(Duration::from_millis(10)) {
-                        Ok(()) | Err(RecvTimeoutError::Disconnected) => break,
-                        Err(RecvTimeoutError::Timeout) => {}
-                    }
-                }
-                drop(hook);
-            })
-            .map_err(|error| WgcCaptureSourceError::WindowWatcherUnavailable(error.to_string()))?;
 
-        match ready_rx.recv() {
-            Ok(Ok(())) => Ok(Self {
-                destroyed,
-                stop_tx,
-                worker: Some(worker),
-            }),
-            Ok(Err(error)) => {
-                let _ = worker.join();
-                Err(error)
-            }
-            Err(_) => {
-                let _ = worker.join();
-                Err(WgcCaptureSourceError::WindowWatcherUnavailable(
-                    "watcher stopped during startup".into(),
-                ))
-            }
+        let mut thread = WATCH_THREAD.lock().expect("watcher thread lock");
+        // Registered before the thread starts, so no destruction can slip
+        // between the hook going live and this window being watched.
+        WATCH_ENTRIES
+            .lock()
+            .expect("watch entries lock")
+            .push(WatchEntry {
+                id,
+                hwnd: hwnd.0 as usize,
+                destroyed: destroyed.clone(),
+            });
+        if let Err(error) = start_watcher_thread(&mut thread) {
+            remove_watch_entry(id);
+            return Err(error);
         }
+        Ok(Self { id, destroyed })
     }
 
     fn destroyed(&self) -> bool {
@@ -970,11 +1033,18 @@ impl WindowLifetimeWatch {
     }
 }
 
+/// Returns whether the registry is now empty.
+fn remove_watch_entry(id: u64) -> bool {
+    let mut entries = WATCH_ENTRIES.lock().expect("watch entries lock");
+    entries.retain(|entry| entry.id != id);
+    entries.is_empty()
+}
+
 impl Drop for WindowLifetimeWatch {
     fn drop(&mut self) {
-        let _ = self.stop_tx.try_send(());
-        if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
+        let mut thread = WATCH_THREAD.lock().expect("watcher thread lock");
+        if remove_watch_entry(self.id) {
+            stop_watcher_thread(&mut thread);
         }
     }
 }
@@ -1269,59 +1339,68 @@ mod tests {
         assert!(!system.accepts(&produced));
     }
 
+    /// Drives the real hook end to end: a live registration, a real
+    /// `DestroyWindow`, and the flag the source loop actually reads. The
+    /// callback comparison alone would not prove the hook is installed, that
+    /// the shared watcher thread pumps it, or that delivery reaches this
+    /// process at all.
     #[test]
-    fn destroy_callback_remains_set_when_the_hwnd_value_can_be_reused() {
-        let destroyed = Arc::new(AtomicBool::new(false));
-        DESTROY_WATCH.with(|watch| {
-            *watch.borrow_mut() = Some(DestroyWatchState {
-                hwnd: 0x1234,
-                destroyed: destroyed.clone(),
-            });
-        });
-        // SAFETY: directly invokes the callback with plain test values; it
-        // only compares them and updates the thread-local atomic flag.
-        unsafe {
-            window_event_proc(
-                HWINEVENTHOOK::default(),
-                EVENT_OBJECT_DESTROY,
-                HWND(0x5678usize as *mut _),
-                OBJID_WINDOW.0,
-                CHILDID_SELF as i32,
-                0,
-                0,
-            );
+    fn the_shared_hook_reports_a_real_window_destruction() {
+        let window = TestWindow::create().expect("create test window");
+        let watch = WindowLifetimeWatch::start(window.0).expect("start the lifetime watch");
+        assert!(!watch.destroyed());
+
+        // An unrelated window's destruction must not disturb this watch.
+        let other = TestWindow::create().expect("create second test window");
+        drop(other);
+        drop(window);
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !watch.destroyed() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
         }
-        assert!(!destroyed.load(Ordering::Acquire));
-        // SAFETY: same callback contract as above, now with the watched HWND.
-        unsafe {
-            window_event_proc(
-                HWINEVENTHOOK::default(),
-                EVENT_OBJECT_DESTROY,
-                HWND(0x1234usize as *mut _),
-                OBJID_WINDOW.0,
-                CHILDID_SELF as i32,
-                0,
-                0,
-            );
+        assert!(
+            watch.destroyed(),
+            "the destroy hook must report the watched window"
+        );
+    }
+
+    /// Two sources watching different windows share one hook and one thread,
+    /// and neither registration may see the other's destruction.
+    #[test]
+    fn watches_are_independent_and_share_one_watcher_thread() {
+        let first_window = TestWindow::create().expect("create first test window");
+        let second_window = TestWindow::create().expect("create second test window");
+        let first = WindowLifetimeWatch::start(first_window.0).expect("start first watch");
+        let second = WindowLifetimeWatch::start(second_window.0).expect("start second watch");
+        let (first_id, second_id) = (first.id, second.id);
+        // A live registration always implies a running watcher.
+        assert!(WATCH_THREAD.lock().expect("watcher thread lock").is_some());
+
+        drop(first_window);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !first.destroyed() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
         }
-        assert!(destroyed.load(Ordering::Acquire));
-        // A later live window can reuse the numeric value, but no subsequent
-        // event can clear the original object's terminal state.
-        //
-        // SAFETY: same callback contract as above, with a reused HWND value.
-        unsafe {
-            window_event_proc(
-                HWINEVENTHOOK::default(),
-                EVENT_OBJECT_DESTROY,
-                HWND(0x5678usize as *mut _),
-                OBJID_WINDOW.0,
-                CHILDID_SELF as i32,
-                0,
-                0,
-            );
-        }
-        assert!(destroyed.load(Ordering::Acquire));
-        DESTROY_WATCH.with(|watch| *watch.borrow_mut() = None);
+        assert!(first.destroyed());
+        assert!(
+            !second.destroyed(),
+            "one window's destruction must not end another watch"
+        );
+
+        drop(second_window);
+        drop(second);
+        drop(first);
+        // Both registrations are gone. Whether the shared thread stopped is
+        // not asserted here: another test in this process may legitimately
+        // hold a watch of its own at the same moment.
+        let entries = WATCH_ENTRIES.lock().expect("watch entries lock");
+        assert!(
+            !entries
+                .iter()
+                .any(|entry| entry.id == first_id || entry.id == second_id),
+            "dropping a watch must unregister it"
+        );
     }
 
     /// The destroy hook is asynchronous and can be missed, so the identity
