@@ -105,7 +105,13 @@ The core types are deliberately small:
 - `Pipeline` owns source threads, control flow, the shared clock, bus, and
   topology graph.
 - `Tee` provides fan-out; `AudioMixer` and the video compositors provide
-  fan-in.
+  fan-in. `TeeHandle` adds and removes branches while the pipeline runs:
+  `attach` joins one, `finish_branch` ends one cleanly — an ordered EOS so
+  codecs flush and muxers finalize, then detach — and `detach` abandons one
+  outright, for a branch that is failing rather than finishing. Recording
+  while a preview keeps running is `finish_branch`; it returns without
+  waiting for the drain, and the terminal's `BusEvent::Eos` says when the
+  output is actually complete.
 
 Every `SourceElement` explicitly classifies whether it is live and whether it
 can reposition its own input timeline through `is_live()` and

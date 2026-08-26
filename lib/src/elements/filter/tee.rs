@@ -2,6 +2,7 @@ use std::sync::{
     Arc, Mutex, MutexGuard, Weak,
     atomic::{AtomicBool, AtomicU64, Ordering},
 };
+use std::thread::{self, JoinHandle};
 
 use crate::pp_log::{PpLog, pp_info};
 
@@ -45,6 +46,22 @@ struct TeeShared {
     branches: Mutex<Vec<Arc<TeeBranch>>>,
     next_pad_id: AtomicU64,
     context: Arc<Context>,
+    /// Threads started by [`TeeHandle::finish_branch`], each owning one
+    /// removed branch until its EOS has drained through it. Retained so the
+    /// `Tee` joins them rather than leaving a finalizing recording to race
+    /// process exit; finished ones are reaped on every `finish_branch`.
+    finishers: Mutex<Vec<JoinHandle<()>>>,
+}
+
+impl Drop for TeeShared {
+    fn drop(&mut self) {
+        // Not under the branch lock: a branch's own `Drop` may inspect the
+        // graph or call back into `Tee`, exactly as `detach` documents.
+        let finishers = std::mem::take(&mut *lock_unpoisoned(&self.finishers));
+        for finisher in finishers {
+            let _ = finisher.join();
+        }
+    }
 }
 
 struct TeeBranch {
@@ -103,6 +120,7 @@ impl Tee {
             branches: Mutex::new(Vec::new()),
             next_pad_id: AtomicU64::new(0),
             context,
+            finishers: Mutex::new(Vec::new()),
         });
         (
             Self {
@@ -312,11 +330,100 @@ impl TeeHandle {
     /// Detaches exactly the branch returned by [`TeeHandle::attach`]. The
     /// runtime peer and every graph node owned by it disappear in the same
     /// transaction. Names are deliberately not used as graph keys.
+    ///
+    /// This abandons whatever the branch still held: no EOS is sent, so a
+    /// stateful codec does not flush and a muxer does not finalize. That is
+    /// what makes it the right call for a branch that is failing or wedged —
+    /// see [`TeeHandle::finish_branch`] for ending one that is working.
     pub fn detach(&self, branch_id: BranchId) -> Result<()> {
         let shared = self
             .shared
             .upgrade()
             .ok_or(GraphError::BranchNotAttached(branch_id))?;
+        // The last Arc owns the downstream sink. Dropping it outside both
+        // the branch-list and graph locks allows arbitrary Sink::drop code
+        // to inspect the graph or call back into Tee without deadlocking.
+        let (removed, snapshot) = self.remove_branch(&shared, branch_id)?;
+        drop(removed);
+        if let Some(snapshot) = snapshot {
+            log_topology(&self.pp_log, "detach", &snapshot);
+        }
+        Ok(())
+    }
+
+    /// Ends one branch the way a recording ends: sends it an ordered `Eos`
+    /// behind everything already queued for it, so stateful codecs flush
+    /// their delayed output and a muxer writes its trailer, and detaches it.
+    ///
+    /// Returns as soon as the `Eos` is on its way. Draining it — which means
+    /// an encoder flush, a container's trailer, and joining the branch's own
+    /// `Queue` workers — happens on a thread this `Tee` owns and joins, so a
+    /// caller on a UI thread neither blocks nor has anything left to remember:
+    /// `branch_id` is already invalid when this returns, exactly as after
+    /// [`TeeHandle::detach`]. Watch the bus for the terminal's
+    /// [`BusEvent::Eos`] to learn when the branch's output is actually
+    /// complete — a file is only finished then, not when this call returns.
+    ///
+    /// Siblings are untouched: the `Eos` goes into this branch's pad alone,
+    /// unlike one arriving at the `Tee` itself, which every branch sees.
+    pub fn finish_branch(&self, branch_id: BranchId) -> Result<()> {
+        let shared = self
+            .shared
+            .upgrade()
+            .ok_or(GraphError::BranchNotAttached(branch_id))?;
+
+        let branch = {
+            let branches = lock_unpoisoned(&shared.branches);
+            branches
+                .iter()
+                .find(|branch| branch.id == Some(branch_id))
+                .ok_or(GraphError::BranchNotAttached(branch_id))?
+                .clone()
+        };
+        // Deactivating under the pad lock is what puts the `Eos` last: a
+        // concurrent `consume` either already holds this lock and finishes
+        // its push first, or rechecks `active` after taking it and skips.
+        // The branch-list lock is released first, because an unqueued branch
+        // consumes the `Eos` synchronously right here.
+        let eos = {
+            let mut pad = lock_unpoisoned(&branch.pad);
+            branch.active.store(false, Ordering::Release);
+            pad.push_eos(&self.pp_log)
+        };
+        drop(branch);
+
+        // Detached even if the `Eos` failed: the branch is finished either
+        // way, and leaving a dead one attached is the outcome this call
+        // exists to make impossible. The error is still returned.
+        let (removed, snapshot) = self.remove_branch(&shared, branch_id)?;
+        if let Some(snapshot) = snapshot {
+            log_topology(&self.pp_log, "detach", &snapshot);
+        }
+
+        if let Some(removed) = removed {
+            let mut finishers = lock_unpoisoned(&shared.finishers);
+            finishers.retain(|finisher| !finisher.is_finished());
+            match thread::Builder::new()
+                .name(format!("{}-finish", self.name))
+                .spawn(move || drop(removed))
+            {
+                Ok(finisher) => finishers.push(finisher),
+                // Nothing is leaked by falling back to this thread; the
+                // caller just waits for the drain it was meant to be spared.
+                Err(_) => drop(finishers),
+            }
+        }
+        eos
+    }
+
+    /// Takes the branch out of the graph and the branch list in one
+    /// transaction, handing its last `Arc` back rather than dropping it —
+    /// the caller decides which thread pays for that drop.
+    fn remove_branch(
+        &self,
+        shared: &Arc<TeeShared>,
+        branch_id: BranchId,
+    ) -> Result<(Option<Arc<TeeBranch>>, Option<crate::graph::GraphSnapshot>)> {
         let mut branches = lock_unpoisoned(&shared.branches);
         let index = branches
             .iter()
@@ -332,14 +439,7 @@ impl TeeHandle {
         let snapshot =
             crate::log::enabled(crate::log::Level::Info).then(|| shared.context.graph.snapshot());
         drop(branches);
-        // The last Arc owns the downstream sink. Dropping it outside both
-        // the branch-list and graph locks allows arbitrary Sink::drop code
-        // to inspect the graph or call back into Tee without deadlocking.
-        drop(removed);
-        if let Some(snapshot) = snapshot {
-            log_topology(&self.pp_log, "detach", &snapshot);
-        }
-        Ok(())
+        Ok((removed, snapshot))
     }
 
     /// Resolves the owning branch from any element ID inside it and
@@ -895,6 +995,110 @@ mod tests {
             .push(packet())
             .expect("the poisoned branch pad should be recovered on the next push");
         assert_eq!(successful.load(Ordering::SeqCst), 1);
+    }
+
+    /// Records what a branch actually received, in order — enough to tell an
+    /// EOS that arrived from one that never did, and to prove a sibling was
+    /// not dragged along.
+    struct RecordingSink {
+        pp_log: PpLog,
+        name: &'static str,
+        seen: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    impl Element for RecordingSink {
+        fn name(&self) -> Arc<str> {
+            self.name.into()
+        }
+
+        fn element_type(&self) -> ElementType {
+            ElementType::Other
+        }
+
+        fn pp_log(&self) -> &PpLog {
+            &self.pp_log
+        }
+
+        fn pp_log_mut(&mut self) -> &mut PpLog {
+            &mut self.pp_log
+        }
+    }
+
+    impl Sink for RecordingSink {
+        fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+            lock_unpoisoned(&self.seen).push(if buf.is_eos() { "eos" } else { "data" });
+            Ok(())
+        }
+
+        fn control(&mut self, _msg: ControlMsg) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    /// The whole point of `finish_branch`: one branch is ended cleanly while
+    /// its siblings keep running, and the caller is left with nothing to
+    /// remember — the branch is gone when the call returns.
+    #[test]
+    fn finish_branch_sends_eos_to_that_branch_alone_and_detaches_it() {
+        let (bus, _bus_rx) = Bus::new();
+        let graph = PipelineGraph::new();
+        let source_id = graph.add_source(ElementType::Other, "source".into());
+        let context = Arc::new(Context::for_test(bus, "test", graph, source_id));
+
+        let kept = Arc::new(Mutex::new(Vec::new()));
+        let keep_branch = context
+            .branch()
+            .to(Box::new(RecordingSink {
+                name: "preview",
+                seen: kept.clone(),
+                pp_log: element_pp_log(ElementType::Other, "preview", None),
+            }))
+            .unwrap();
+        let (tee_branch, handle) = TeeBuilder::new("tee", context.clone())
+            .branch(keep_branch)
+            .build_dynamic()
+            .unwrap();
+        let mut upstream = SrcPad::new("source_src");
+        context.attach_pad(&mut upstream, tee_branch).unwrap();
+
+        let recorded = Arc::new(Mutex::new(Vec::new()));
+        let recording = handle
+            .branch()
+            .unwrap()
+            .to(Box::new(RecordingSink {
+                name: "recording",
+                seen: recorded.clone(),
+                pp_log: element_pp_log(ElementType::Other, "recording", None),
+            }))
+            .unwrap();
+        let branch_id = handle.attach(recording).unwrap();
+
+        upstream.push(packet()).unwrap();
+        assert_eq!(*lock_unpoisoned(&recorded), ["data"]);
+
+        handle.finish_branch(branch_id).unwrap();
+        assert_eq!(
+            *lock_unpoisoned(&recorded),
+            ["data", "eos"],
+            "the finished branch must see EOS behind its data"
+        );
+        assert_eq!(handle.sink_count(), 1, "finish_branch also detaches");
+        assert!(
+            matches!(
+                handle.detach(branch_id),
+                Err(crate::Error::GraphError(GraphError::BranchNotAttached(_)))
+            ),
+            "the branch id is spent once finished"
+        );
+
+        // The sibling saw the data and nothing else, before or after.
+        upstream.push(packet()).unwrap();
+        assert_eq!(*lock_unpoisoned(&kept), ["data", "data"]);
+        assert_eq!(
+            *lock_unpoisoned(&recorded),
+            ["data", "eos"],
+            "a detached branch must not receive anything more"
+        );
     }
 
     #[test]
