@@ -1385,9 +1385,9 @@ mod d3d11 {
     }
 
     /// Opens and tears down the complete WGC graph. WGC owns a fresh device,
-    /// frame pool, session, two event registrations, and changing textures in
-    /// every cycle, so the process-wide adapter gauge is used just like the
-    /// DXGI source above.
+    /// frame pool, session, WinRT callbacks, WinEvent destroy hook, stable
+    /// owner-process handle, and changing textures in every cycle, so the
+    /// process-wide adapter gauge is used just like the DXGI source above.
     #[cfg(feature = "wgc-capture")]
     fn wgc_capture_cycle(hwnd: windows::Win32::Foundation::HWND, teardown: Teardown) -> usize {
         use media_pp::elements::{WgcCaptureOptions, WgcCaptureSource};

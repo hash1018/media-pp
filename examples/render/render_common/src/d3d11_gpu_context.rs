@@ -26,11 +26,8 @@ const NV12_SHADER_SOURCE: &[u8] = include_bytes!("shaders/d3d11/nv12.hlsl");
 /// objects every window's renderer shares read-only.
 ///
 /// `context` is behind an `Arc<Mutex<_>>`, not a bare clone, even though
-/// the immediate context's individual methods are already safe to call
-/// from multiple threads (the runtime auto-serializes them for a device
-/// created without `D3D11_CREATE_DEVICE_SINGLETHREADED`, which is exactly
-/// the property this whole D3D11 stack's fence-free design leans on — see
-/// [`crate::D3d11WindowRenderer`]'s own docs). What that guarantee does
+/// individual immediate-context calls are only safe across threads after
+/// `ID3D11Multithread` protection is enabled below. What that protection does
 /// *not* cover is a multi-call *sequence*: bind-RTV → bind-shaders →
 /// bind-SRVs → set-viewport → `Draw` is several calls against context
 /// state that's global to the device, not scoped to a command list the
@@ -123,16 +120,13 @@ impl D3d11GpuContext {
                     (device.unwrap(), context.unwrap())
                 }
             };
-            // Not created with `D3D11_CREATE_DEVICE_SINGLETHREADED`, which
-            // is supposed to mean the runtime already auto-serializes
-            // cross-thread calls into this context — but that alone
-            // wasn't enough in testing (`screen_preview_gpu`, which really
+            // `screen_preview_gpu` really
             // does drive this context from two threads: this crate's
             // window renderer and `DxgiCaptureSource`'s own capture thread,
             // via its own `ID3D11DeviceContext` handle obtained from
             // `GetImmediateContext()` on the same shared device — see
-            // `CaptureMode::Gpu`'s own docs — crashed without this).
-            // Setting it explicitly is what actually made that stable.
+            // `CaptureMode::Gpu`'s own docs — and crashed without runtime
+            // multithread protection. Setting it explicitly made that stable.
             let _ = context
                 .cast::<windows::Win32::Graphics::Direct3D11::ID3D11Multithread>()?
                 .SetMultithreadProtected(true);

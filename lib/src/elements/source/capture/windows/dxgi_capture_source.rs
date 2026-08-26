@@ -41,7 +41,10 @@ use crate::{
     elements::VideoFormat,
     error::{D3d11FrameWrapError, Result},
     pad::SrcPad,
-    platform::windows::d3d11va::wrap_d3d11_texture,
+    platform::windows::{
+        d3d11::{MultithreadProtectionError, enable_multithread_protection},
+        d3d11va::wrap_d3d11_texture,
+    },
     pool::UnboundObjectPool,
     schedule::PeriodicSchedule,
 };
@@ -102,6 +105,12 @@ pub enum DxgiCaptureSourceError {
     /// A caller-supplied device does not belong to the captured output's adapter.
     #[error("the supplied D3D11 device belongs to a different adapter than the capture area")]
     DeviceAdapterMismatch,
+
+    /// A device created for use from only one thread cannot cross a Queue boundary.
+    #[error(
+        "the D3D11 device was created with D3D11_CREATE_DEVICE_SINGLETHREADED and cannot be shared by capture and downstream elements"
+    )]
+    SingleThreadedDevice,
 
     /// Cursor composition was requested for a multi-output region.
     #[error("include_cursor isn't supported when CaptureArea::Region spans more than one output")]
@@ -457,6 +466,8 @@ impl DxgiCaptureSource {
     /// remove the existing GPU copies: duplication surfaces first refresh the
     /// internal latest-image textures, then each emission gets an independent
     /// composite texture that downstream may retain after `ReleaseFrame`.
+    /// A `D3D11_CREATE_DEVICE_SINGLETHREADED` device is rejected; otherwise
+    /// this enables its immediate context's runtime multithread protection.
     pub fn open_with_device(
         name: impl Into<String>,
         options: DxgiCaptureOptions,
@@ -527,6 +538,7 @@ impl DxgiCaptureSource {
                 context.expect("D3D11CreateDevice succeeded without producing a context"),
             )
         };
+        protect_context(&device, &context)?;
         // Cloned before `device` moves into `Self` below — the only copy
         // handed back to the caller (a COM ref-count bump, not a deep
         // copy).
@@ -1053,6 +1065,18 @@ impl DxgiCaptureSource {
         *frame = wrap_d3d11_texture(texture, self.width, self.height)?;
         Ok(frame)
     }
+}
+
+fn protect_context(
+    device: &ID3D11Device,
+    context: &ID3D11DeviceContext,
+) -> std::result::Result<(), DxgiCaptureSourceError> {
+    enable_multithread_protection(device, context).map_err(|error| match error {
+        MultithreadProtectionError::SingleThreadedDevice => {
+            DxgiCaptureSourceError::SingleThreadedDevice
+        }
+        MultithreadProtectionError::Windows(error) => error.into(),
+    })
 }
 
 impl Element for DxgiCaptureSource {

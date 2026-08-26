@@ -80,9 +80,8 @@ mod windows_example {
     /// to a plain CPU `Pixel::BGRA` frame instead and converts it to YUV420P
     /// for the D3D12 CPU-upload path.
     ///
-    /// No cursor: `CaptureMode::Gpu` doesn't support cursor compositing yet
-    /// (see that variant's own docs) — the Windows-only `screen_preview_cpu`
-    /// CPU-capture path does.
+    /// The DXGI GPU path has no cursor because `CaptureMode::Gpu` doesn't
+    /// support cursor compositing yet; the WGC path requests cursor capture.
     ///
     ///     cargo run -p screen_preview_gpu -- dxgi
     ///     cargo run -p screen_preview_gpu -- wgc 0x0000000000123456

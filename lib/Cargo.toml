@@ -126,6 +126,7 @@ wgc-capture = [
     "windows/Win32_System_Threading",
     "windows/Win32_System_WinRT_Direct3D11",
     "windows/Win32_System_WinRT_Graphics_Capture",
+    "windows/Win32_UI_Accessibility",
     "windows/Win32_UI_WindowsAndMessaging",
 ]
 pipewire-audio-capture = ["dep:pipewire"]

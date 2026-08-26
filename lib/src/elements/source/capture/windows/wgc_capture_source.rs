@@ -1,8 +1,10 @@
 use std::{
+    cell::RefCell,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
+    thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
 
@@ -20,7 +22,7 @@ use windows::{
         SizeInt32,
     },
     Win32::{
-        Foundation::{CloseHandle, HMODULE, HWND, RPC_E_CHANGED_MODE, STILL_ACTIVE},
+        Foundation::{CloseHandle, HANDLE, HMODULE, HWND, RPC_E_CHANGED_MODE, WAIT_OBJECT_0},
         Graphics::{
             Direct3D::D3D_DRIVER_TYPE_HARDWARE,
             Direct3D11::{
@@ -35,14 +37,21 @@ use windows::{
             },
         },
         System::{
-            Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION},
+            Threading::{OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject},
             WinRT::{
                 Direct3D11::{CreateDirect3D11DeviceFromDXGIDevice, IDirect3DDxgiInterfaceAccess},
                 Graphics::Capture::IGraphicsCaptureItemInterop,
                 RO_INIT_MULTITHREADED, RoInitialize, RoUninitialize,
             },
         },
-        UI::WindowsAndMessaging::{GetWindowThreadProcessId, IsWindow},
+        UI::{
+            Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent},
+            WindowsAndMessaging::{
+                CHILDID_SELF, DispatchMessageW, EVENT_OBJECT_DESTROY, GetWindowThreadProcessId,
+                MSG, OBJID_WINDOW, PM_REMOVE, PeekMessageW, TranslateMessage,
+                WINEVENT_OUTOFCONTEXT,
+            },
+        },
     },
     core::{IInspectable, Interface, factory},
 };
@@ -55,7 +64,10 @@ use crate::{
     element::{Element, ElementType, Source, SourceElement, element_pp_log},
     error::{D3d11FrameWrapError, Result},
     pad::SrcPad,
-    platform::windows::d3d11va::wrap_d3d11_texture,
+    platform::windows::{
+        d3d11::{MultithreadProtectionError, enable_multithread_protection},
+        d3d11va::wrap_d3d11_texture,
+    },
     pool::UnboundObjectPool,
     pp_log::{PpLog, pp_error, pp_info},
     schedule::PeriodicSchedule,
@@ -94,6 +106,21 @@ pub enum WgcCaptureSourceError {
     /// WGC interop requires a BGRA-capable D3D11 device.
     #[error("the supplied D3D11 device wasn't created with D3D11_CREATE_DEVICE_BGRA_SUPPORT")]
     MissingBgraSupport,
+    /// A device created for use from only one thread cannot cross a Queue boundary.
+    #[error(
+        "the D3D11 device was created with D3D11_CREATE_DEVICE_SINGLETHREADED and cannot be shared by capture and downstream elements"
+    )]
+    SingleThreadedDevice,
+    /// The target owner's lifetime could not be monitored safely.
+    #[error("cannot monitor the capture target's owner process {pid}: {source}")]
+    OwnerProcessUnavailable {
+        pid: u32,
+        #[source]
+        source: windows::core::Error,
+    },
+    /// The helper thread that watches the original HWND could not start.
+    #[error("cannot start the WGC window lifetime watcher: {0}")]
+    WindowWatcherUnavailable(String),
     /// WGC reported a frame with unusable visible dimensions.
     #[error("Windows Graphics Capture reported an invalid content size {width}x{height}")]
     InvalidContentSize { width: i32, height: i32 },
@@ -142,9 +169,12 @@ impl Default for WgcCaptureOptions {
 /// Captures one existing Win32 window through Windows Graphics Capture.
 ///
 /// The caller selects the target and passes its `HWND`; this element does not
-/// show `GraphicsCapturePicker` or own application UI. It creates the WGC item
-/// on its source thread, where it also owns the WinRT apartment, frame pool,
-/// capture session, and event registrations for their complete lifetime.
+/// show `GraphicsCapturePicker` or own application UI. Construction starts a
+/// lifetime watcher before retaining the selected window's owner identity, so
+/// a later HWND reuse cannot redirect capture to another window. Dropping the
+/// source stops and joins that owned helper thread. The source thread owns the
+/// WinRT apartment used for the frame pool, capture session, and event
+/// registrations for their complete lifetime.
 /// Dropping or stopping the pipeline therefore releases every callback and
 /// capture object before that thread exits — with one deliberate exception,
 /// documented on this module's `WgcRuntime::drop`: when the process that owned
@@ -156,7 +186,9 @@ impl Default for WgcCaptureOptions {
 /// [`MemoryDomain::D3d11`]. [`Self::open`] returns the exact device it creates;
 /// [`Self::open_with_device`] instead uses a caller-owned shared device. Every
 /// downstream D3D11 element interacting with these textures must use that same
-/// device and its shared immediate context.
+/// device and its shared immediate context. Construction rejects a
+/// `D3D11_CREATE_DEVICE_SINGLETHREADED` device and enables the runtime's
+/// immediate-context multithread protection before the source can run.
 /// Each WGC update is copied once into a new immutable texture, so later WGC
 /// updates can never mutate a frame while downstream `Arc` clones still exist.
 /// When the fixed output cadence repeats an unchanged image, only the small
@@ -189,8 +221,13 @@ pub struct WgcCaptureSource {
     /// Raw HWND value. Stored as an integer because windows-rs deliberately
     /// does not mark borrowed Win32 handles `Send`; this element does not own
     /// the window, and reconstructs the by-value handle only on its source
-    /// thread after revalidating it.
+    /// thread only after the original window's lifetime and owner identity
+    /// were retained.
     hwnd: usize,
+    owner_pid: u32,
+    owner_thread_id: u32,
+    owner_process: ProcessHandle,
+    target_watch: WindowLifetimeWatch,
     device: ID3D11Device,
     context: ID3D11DeviceContext,
     include_cursor: bool,
@@ -202,16 +239,17 @@ pub struct WgcCaptureSource {
 }
 
 impl WgcCaptureSource {
-    /// Validates `hwnd`, creates the capture's D3D11 device, and returns both
-    /// the source and a cloned device reference for downstream construction.
-    /// WGC activation itself happens in [`SourceElement::run`] so its WinRT
-    /// apartment is initialized and torn down on the same source thread.
+    /// Validates `hwnd`, starts its lifetime watcher, creates the capture's D3D11
+    /// device, and returns both the source and a cloned device reference for
+    /// downstream construction. The frame pool and session are activated in
+    /// [`SourceElement::run`] on their owning source thread.
     pub fn open(
         name: impl Into<String>,
         hwnd: HWND,
         options: WgcCaptureOptions,
     ) -> std::result::Result<(Self, ID3D11Device), WgcCaptureSourceError> {
-        validate_open(hwnd, &options)?;
+        validate_options(&options)?;
+        let target = CaptureTarget::open(hwnd)?;
 
         let mut device = None;
         let mut context = None;
@@ -234,8 +272,9 @@ impl WgcCaptureSource {
         }
         let device = device.expect("D3D11CreateDevice succeeded without producing a device");
         let context = context.expect("D3D11CreateDevice succeeded without producing a context");
+        protect_context(&device, &context)?;
         let returned_device = device.clone();
-        let source = Self::from_device(name, hwnd, options, device, context);
+        let source = Self::from_device(name, target, options, device, context);
 
         Ok((source, returned_device))
     }
@@ -244,17 +283,20 @@ impl WgcCaptureSource {
     /// filtering, compositing, encoding, and rendering to share one device.
     ///
     /// The device must have been created with
-    /// `D3D11_CREATE_DEVICE_BGRA_SUPPORT`. WGC surfaces and emitted frames
-    /// remain GPU-resident on this exact device; each new captured image still
-    /// needs one GPU copy to separate its lifetime from WGC's reusable frame
-    /// pool surface.
+    /// `D3D11_CREATE_DEVICE_BGRA_SUPPORT` and without
+    /// `D3D11_CREATE_DEVICE_SINGLETHREADED`. This method enables its immediate
+    /// context's D3D11 runtime multithread protection. WGC surfaces and emitted
+    /// frames remain GPU-resident on this exact device; each new captured image
+    /// still needs one GPU copy to separate its lifetime from WGC's reusable
+    /// frame pool surface.
     pub fn open_with_device(
         name: impl Into<String>,
         hwnd: HWND,
         options: WgcCaptureOptions,
         device: &ID3D11Device,
     ) -> std::result::Result<Self, WgcCaptureSourceError> {
-        validate_open(hwnd, &options)?;
+        validate_options(&options)?;
+        let target = CaptureTarget::open(hwnd)?;
         // SAFETY: this reads immutable creation metadata from a live device.
         let creation_flags = unsafe { device.GetCreationFlags() };
         if creation_flags & D3D11_CREATE_DEVICE_BGRA_SUPPORT.0 == 0 {
@@ -262,9 +304,10 @@ impl WgcCaptureSource {
         }
         // SAFETY: returns the shared immediate context owned by this device.
         let context = unsafe { device.GetImmediateContext()? };
+        protect_context(device, &context)?;
         Ok(Self::from_device(
             name,
-            hwnd,
+            target,
             options,
             device.clone(),
             context,
@@ -273,7 +316,7 @@ impl WgcCaptureSource {
 
     fn from_device(
         name: impl Into<String>,
-        hwnd: HWND,
+        target: CaptureTarget,
         options: WgcCaptureOptions,
         device: ID3D11Device,
         context: ID3D11DeviceContext,
@@ -286,7 +329,11 @@ impl WgcCaptureSource {
         Self {
             pp_log,
             name,
-            hwnd: hwnd.0 as usize,
+            hwnd: target.hwnd,
+            owner_pid: target.owner_pid,
+            owner_thread_id: target.owner_thread_id,
+            owner_process: target.owner_process,
+            target_watch: target.watch,
             device,
             context,
             include_cursor: options.include_cursor,
@@ -477,17 +524,16 @@ impl SourceElement for WgcCaptureSource {
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
         let _apartment = WinRtApartment::initialize()?;
         let hwnd = HWND(self.hwnd as *mut _);
-        // The caller can close or destroy the selected window after `open` and
-        // before the source thread starts; reject that stale handle before
-        // creating any WGC object.
-        //
-        // SAFETY: reads only whether `hwnd` still identifies a window; it
-        // retains no caller storage and a stale handle simply returns false.
-        if !unsafe { IsWindow(Some(hwnd)) }.as_bool() {
-            return Err(WgcCaptureSourceError::InvalidWindow.into());
-        }
-        let runtime = WgcRuntime::start(hwnd, &self.device, self.include_cursor)
-            .inspect_err(|error| pp_error!(self, "capture start failed: {error}"))?;
+        let runtime = WgcRuntime::start(
+            hwnd,
+            self.owner_pid,
+            self.owner_thread_id,
+            self.owner_process.raw(),
+            self.target_watch.flag(),
+            &self.device,
+            self.include_cursor,
+        )
+        .inspect_err(|error| pp_error!(self, "capture start failed: {error}"))?;
         pp_info!(
             self,
             "started: window={:?}, fps={}, include_cursor={}",
@@ -499,18 +545,6 @@ impl SourceElement for WgcCaptureSource {
         let mut latest = None;
         let mut visible_size = None;
         let mut schedule = PeriodicSchedule::new(self.frame_interval, Instant::now());
-        // `Closed` is the documented signal, but it does not reliably fire
-        // for every way a target window goes away (observed: neither a
-        // forceful process kill nor a plain `WM_CLOSE` ever raised it in
-        // practice, leaving the loop parked with no EOS and no error). Treat
-        // the handle no longer resolving as equally conclusive; this is
-        // cheap enough to check on every wake-up, which happens at least
-        // every `POLL_GRANULARITY` even without new frames.
-        let target_gone = |runtime: &WgcRuntime| -> bool {
-            // SAFETY: reads only whether `hwnd` still identifies a window;
-            // it retains no caller storage.
-            runtime.closed.load(Ordering::Acquire) || !unsafe { IsWindow(Some(hwnd)) }.as_bool()
-        };
         loop {
             let outcome = drain_control(control, self, bus)?;
             if outcome.stopped {
@@ -520,7 +554,7 @@ impl SourceElement for WgcCaptureSource {
             if outcome.paused_for > Duration::ZERO {
                 schedule.resume_after_pause(outcome.paused_for, Instant::now());
             }
-            if target_gone(&runtime) {
+            if runtime.target_gone() {
                 return Err(WgcCaptureSourceError::TargetGone.into());
             }
 
@@ -530,7 +564,7 @@ impl SourceElement for WgcCaptureSource {
                     // `Closed` shares this bounded wake-up channel with
                     // `FrameArrived`. Do not touch the frame pool after the
                     // close notification won the race.
-                    if target_gone(&runtime) {
+                    if runtime.target_gone() {
                         return Err(WgcCaptureSourceError::TargetGone.into());
                     }
                     self.receive_latest(&runtime, &mut latest, &mut visible_size)
@@ -542,7 +576,7 @@ impl SourceElement for WgcCaptureSource {
                 }
             }
 
-            if target_gone(&runtime) {
+            if runtime.target_gone() {
                 return Err(WgcCaptureSourceError::TargetGone.into());
             }
             if !schedule.is_due(Instant::now()) {
@@ -580,17 +614,9 @@ impl SourceElement for WgcCaptureSource {
     }
 }
 
-fn validate_open(
-    hwnd: HWND,
-    options: &WgcCaptureOptions,
-) -> std::result::Result<(), WgcCaptureSourceError> {
+fn validate_options(options: &WgcCaptureOptions) -> std::result::Result<(), WgcCaptureSourceError> {
     if options.fps == 0 {
         return Err(WgcCaptureSourceError::InvalidFps);
-    }
-    // SAFETY: `IsWindow` only inspects the by-value handle and retains no
-    // caller storage. A stale or null handle simply returns false.
-    if !unsafe { IsWindow(Some(hwnd)) }.as_bool() {
-        return Err(WgcCaptureSourceError::InvalidWindow);
     }
     Ok(())
 }
@@ -602,29 +628,96 @@ fn output_contract() -> OutputContract {
     ))
 }
 
-/// Whether the process that owned the capture target has exited. A pid of
-/// zero, an unopenable process, or an unreadable exit code all answer `false`:
-/// the caller uses this only to skip an otherwise-deadlocking teardown, so
-/// anything short of proof that the owner is gone must take the normal path.
-fn owner_exited(pid: u32) -> bool {
-    if pid == 0 {
-        return false;
+struct ProcessHandle(HANDLE);
+
+// SAFETY: a process synchronization handle is a kernel object reference whose
+// wait/close operations are thread-independent. Ownership remains unique while
+// this wrapper moves with the source onto its worker thread.
+unsafe impl Send for ProcessHandle {}
+
+impl ProcessHandle {
+    fn open(pid: u32) -> std::result::Result<Self, WgcCaptureSourceError> {
+        // SAFETY: opens one synchronization-only reference to the live owner
+        // pid. The returned handle is closed exactly once by `Drop`.
+        let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, pid) }
+            .map_err(|source| WgcCaptureSourceError::OwnerProcessUnavailable { pid, source })?;
+        Ok(Self(handle))
     }
-    // SAFETY: opens the pid for a query-only handle; failure is reported as
-    // `Err` and retains nothing.
-    let Ok(process) = (unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) })
-    else {
-        // The pid can no longer be opened at all, which for a process that
-        // existed moments ago means it is gone.
-        return true;
-    };
-    let mut code = 0u32;
-    // SAFETY: `process` is a live handle opened just above and `code` is a
-    // live out-parameter.
-    let read = unsafe { GetExitCodeProcess(process, &mut code) };
-    // SAFETY: `process` came from `OpenProcess` and is not used afterwards.
-    let _ = unsafe { CloseHandle(process) };
-    read.is_ok() && code != STILL_ACTIVE.0 as u32
+
+    fn raw(&self) -> HANDLE {
+        self.0
+    }
+}
+
+impl Drop for ProcessHandle {
+    fn drop(&mut self) {
+        // SAFETY: this type owns the successful `OpenProcess` result and does
+        // not expose ownership of it elsewhere.
+        let _ = unsafe { CloseHandle(self.0) };
+    }
+}
+
+fn process_has_exited(process: HANDLE) -> bool {
+    // SAFETY: every caller supplies the live synchronization handle retained
+    // from construction. A zero-time wait observes state without blocking.
+    (unsafe { WaitForSingleObject(process, 0) }) == WAIT_OBJECT_0
+}
+
+fn target_still_matches(hwnd: HWND, owner_pid: u32, owner_thread_id: u32) -> bool {
+    let mut current_pid = 0;
+    // SAFETY: reads the identity currently associated with this by-value HWND
+    // and writes to the live pid out-parameter without retaining either.
+    let current_thread_id = unsafe { GetWindowThreadProcessId(hwnd, Some(&mut current_pid)) };
+    current_thread_id == owner_thread_id && current_pid == owner_pid
+}
+
+struct CaptureTarget {
+    hwnd: usize,
+    owner_pid: u32,
+    owner_thread_id: u32,
+    owner_process: ProcessHandle,
+    watch: WindowLifetimeWatch,
+}
+
+impl CaptureTarget {
+    fn open(hwnd: HWND) -> std::result::Result<Self, WgcCaptureSourceError> {
+        // Install the destroy watcher before reading the current owner. This
+        // closes the open-to-run reuse window even when Windows recycles the
+        // same numeric HWND for another window on the same UI thread.
+        let watch = WindowLifetimeWatch::start(hwnd)?;
+        let mut owner_pid = 0;
+        // SAFETY: this inspects the by-value handle and fills a live pid
+        // out-parameter. Zero means the handle did not identify a window.
+        let owner_thread_id = unsafe { GetWindowThreadProcessId(hwnd, Some(&mut owner_pid)) };
+        if owner_thread_id == 0 || owner_pid == 0 {
+            return Err(WgcCaptureSourceError::InvalidWindow);
+        }
+        let owner_process = ProcessHandle::open(owner_pid)?;
+
+        if watch.destroyed() || !target_still_matches(hwnd, owner_pid, owner_thread_id) {
+            return Err(WgcCaptureSourceError::InvalidWindow);
+        }
+
+        Ok(Self {
+            hwnd: hwnd.0 as usize,
+            owner_pid,
+            owner_thread_id,
+            owner_process,
+            watch,
+        })
+    }
+}
+
+fn protect_context(
+    device: &ID3D11Device,
+    context: &ID3D11DeviceContext,
+) -> std::result::Result<(), WgcCaptureSourceError> {
+    enable_multithread_protection(device, context).map_err(|error| match error {
+        MultithreadProtectionError::SingleThreadedDevice => {
+            WgcCaptureSourceError::SingleThreadedDevice
+        }
+        MultithreadProtectionError::Windows(error) => error.into(),
+    })
 }
 
 struct CaptureFrameGuard(Direct3D11CaptureFrame);
@@ -666,11 +759,184 @@ impl Drop for WinRtApartment {
     }
 }
 
+struct DestroyWatchState {
+    hwnd: usize,
+    destroyed: Arc<AtomicBool>,
+}
+
+thread_local! {
+    static DESTROY_WATCH: RefCell<Option<DestroyWatchState>> = const { RefCell::new(None) };
+}
+
+unsafe extern "system" fn window_event_proc(
+    _hook: HWINEVENTHOOK,
+    event: u32,
+    hwnd: HWND,
+    id_object: i32,
+    id_child: i32,
+    _event_thread: u32,
+    _event_time: u32,
+) {
+    if event != EVENT_OBJECT_DESTROY
+        || id_object != OBJID_WINDOW.0
+        || id_child != CHILDID_SELF as i32
+    {
+        return;
+    }
+    DESTROY_WATCH.with(|watch| {
+        if let Some(watch) = watch.borrow().as_ref()
+            && watch.hwnd == hwnd.0 as usize
+        {
+            watch.destroyed.store(true, Ordering::Release);
+        }
+    });
+}
+
+struct WindowDestroyHook {
+    hook: HWINEVENTHOOK,
+}
+
+impl WindowDestroyHook {
+    fn install(
+        hwnd: HWND,
+        destroyed: Arc<AtomicBool>,
+    ) -> std::result::Result<Self, WgcCaptureSourceError> {
+        DESTROY_WATCH.with(|watch| {
+            debug_assert!(watch.borrow().is_none());
+            *watch.borrow_mut() = Some(DestroyWatchState {
+                hwnd: hwnd.0 as usize,
+                destroyed: destroyed.clone(),
+            });
+        });
+        // SAFETY: the callback is a static function, out-of-context delivery
+        // keeps it in this process. A global hook avoids a race where the
+        // target is destroyed before its pid/tid-filtered hook is installed;
+        // the callback itself ignores every HWND except the selected value.
+        // This watcher thread pumps its queue until the hook is removed.
+        let hook = unsafe {
+            SetWinEventHook(
+                EVENT_OBJECT_DESTROY,
+                EVENT_OBJECT_DESTROY,
+                None,
+                Some(window_event_proc),
+                0,
+                0,
+                WINEVENT_OUTOFCONTEXT,
+            )
+        };
+        if hook.is_invalid() {
+            DESTROY_WATCH.with(|watch| *watch.borrow_mut() = None);
+            return Err(windows::core::Error::from_thread().into());
+        }
+        Ok(Self { hook })
+    }
+}
+
+impl Drop for WindowDestroyHook {
+    fn drop(&mut self) {
+        // SAFETY: this hook was installed successfully by `install`, remains
+        // owned by this guard, and is removed on the same source thread.
+        let _ = unsafe { UnhookWinEvent(self.hook) };
+        DESTROY_WATCH.with(|watch| *watch.borrow_mut() = None);
+    }
+}
+
+fn pump_window_events() {
+    let mut message = MSG::default();
+    // SAFETY: `message` is a live out-parameter. The watcher thread owns no UI
+    // window, so draining and dispatching its queue only delivers the WinEvent
+    // callback and other messages addressed to this helper thread.
+    while unsafe { PeekMessageW(&mut message, None, 0, 0, PM_REMOVE) }.as_bool() {
+        // SAFETY: `message` was initialized by successful `PeekMessageW` and
+        // remains live for translation and synchronous dispatch.
+        unsafe {
+            let _ = TranslateMessage(&message);
+            DispatchMessageW(&message);
+        }
+    }
+}
+
+struct WindowLifetimeWatch {
+    destroyed: Arc<AtomicBool>,
+    stop_tx: crossbeam_channel::Sender<()>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl WindowLifetimeWatch {
+    fn start(hwnd: HWND) -> std::result::Result<Self, WgcCaptureSourceError> {
+        let hwnd = hwnd.0 as usize;
+        let destroyed = Arc::new(AtomicBool::new(false));
+        let worker_destroyed = destroyed.clone();
+        let (stop_tx, stop_rx) = bounded(1);
+        let (ready_tx, ready_rx) = bounded(1);
+        let worker = thread::Builder::new()
+            .name("wgc-window-watch".into())
+            .spawn(move || {
+                let hwnd = HWND(hwnd as *mut _);
+                let hook = match WindowDestroyHook::install(hwnd, worker_destroyed) {
+                    Ok(hook) => {
+                        let _ = ready_tx.send(Ok(()));
+                        hook
+                    }
+                    Err(error) => {
+                        let _ = ready_tx.send(Err(error));
+                        return;
+                    }
+                };
+                loop {
+                    pump_window_events();
+                    match stop_rx.recv_timeout(Duration::from_millis(10)) {
+                        Ok(()) | Err(RecvTimeoutError::Disconnected) => break,
+                        Err(RecvTimeoutError::Timeout) => {}
+                    }
+                }
+                drop(hook);
+            })
+            .map_err(|error| WgcCaptureSourceError::WindowWatcherUnavailable(error.to_string()))?;
+
+        match ready_rx.recv() {
+            Ok(Ok(())) => Ok(Self {
+                destroyed,
+                stop_tx,
+                worker: Some(worker),
+            }),
+            Ok(Err(error)) => {
+                let _ = worker.join();
+                Err(error)
+            }
+            Err(_) => {
+                let _ = worker.join();
+                Err(WgcCaptureSourceError::WindowWatcherUnavailable(
+                    "watcher stopped during startup".into(),
+                ))
+            }
+        }
+    }
+
+    fn destroyed(&self) -> bool {
+        self.destroyed.load(Ordering::Acquire)
+    }
+
+    fn flag(&self) -> Arc<AtomicBool> {
+        self.destroyed.clone()
+    }
+}
+
+impl Drop for WindowLifetimeWatch {
+    fn drop(&mut self) {
+        let _ = self.stop_tx.try_send(());
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
 struct WgcRuntime {
-    /// The target window's owning process, read while the window was still
-    /// alive. Teardown needs it because a destroyed window and a dead owner
-    /// call for opposite handling — see [`Drop`].
-    owner_pid: u32,
+    /// Stable handle opened while the owner was alive. Unlike reopening its
+    /// pid during `Drop`, this cannot confuse access denial or pid reuse with
+    /// process termination.
+    owner_process: HANDLE,
+    target_destroyed: Arc<AtomicBool>,
     item: GraphicsCaptureItem,
     frame_pool: Direct3D11CaptureFramePool,
     /// Held in a [`ManuallyDrop`](std::mem::ManuallyDrop) so [`Drop`] can
@@ -688,16 +954,33 @@ struct WgcRuntime {
 impl WgcRuntime {
     fn start(
         hwnd: HWND,
+        owner_pid: u32,
+        owner_thread_id: u32,
+        owner_process: HANDLE,
+        target_destroyed: Arc<AtomicBool>,
         device: &ID3D11Device,
         include_cursor: bool,
     ) -> std::result::Result<Self, WgcCaptureSourceError> {
         if !GraphicsCaptureSession::IsSupported()? {
             return Err(WgcCaptureSourceError::Unsupported);
         }
+        if target_destroyed.load(Ordering::Acquire)
+            || process_has_exited(owner_process)
+            || !target_still_matches(hwnd, owner_pid, owner_thread_id)
+        {
+            return Err(WgcCaptureSourceError::TargetGone);
+        }
         let interop: IGraphicsCaptureItemInterop = factory::<GraphicsCaptureItem, _>()?;
-        // SAFETY: `hwnd` was validated during construction and remains the
-        // caller-selected capture target. The returned item owns its refs.
+        // SAFETY: the lifetime watcher was installed before construction read
+        // the original owner identity, and the checks on both sides of this
+        // call reject any destruction or reuse that races item creation.
         let item: GraphicsCaptureItem = unsafe { interop.CreateForWindow(hwnd)? };
+        if target_destroyed.load(Ordering::Acquire)
+            || process_has_exited(owner_process)
+            || !target_still_matches(hwnd, owner_pid, owner_thread_id)
+        {
+            return Err(WgcCaptureSourceError::TargetGone);
+        }
         let size = item.Size()?;
         if size.Width <= 0 || size.Height <= 0 {
             return Err(WgcCaptureSourceError::InvalidContentSize {
@@ -724,13 +1007,9 @@ impl WgcRuntime {
 
         let (frame_tx, frame_rx) = bounded(1);
         let closed = Arc::new(AtomicBool::new(false));
-        let mut owner_pid = 0;
-        // SAFETY: `hwnd` is still a live window here, and `owner_pid` is a
-        // live out-parameter. A failure leaves it zero, which `owner_exited`
-        // treats as "cannot tell", i.e. the safe full-teardown path.
-        unsafe { GetWindowThreadProcessId(hwnd, Some(&mut owner_pid)) };
         let mut runtime = Self {
-            owner_pid,
+            owner_process,
+            target_destroyed,
             item,
             frame_pool,
             session: std::mem::ManuallyDrop::new(session),
@@ -762,6 +1041,12 @@ impl WgcRuntime {
         }))?);
         runtime.session.StartCapture()?;
         Ok(runtime)
+    }
+
+    fn target_gone(&self) -> bool {
+        self.closed.load(Ordering::Acquire)
+            || self.target_destroyed.load(Ordering::Acquire)
+            || process_has_exited(self.owner_process)
     }
 
     fn size(&self) -> SizeInt32 {
@@ -802,9 +1087,10 @@ impl Drop for WgcRuntime {
         //
         // A destroyed window whose owner is still running is *not* that case:
         // there the session retires in milliseconds, and leaking it instead
-        // crashes the process on the way out. Hence the owner check rather
-        // than a window check alone.
-        if owner_exited(self.owner_pid) {
+        // crashes the process on the way out. The synchronization handle was
+        // opened while the original owner was alive, so access denial or pid
+        // reuse at teardown cannot choose the leak path accidentally.
+        if process_has_exited(self.owner_process) {
             return;
         }
         let _ = self.session.Close();
@@ -816,18 +1102,29 @@ impl Drop for WgcRuntime {
 
 #[cfg(test)]
 mod tests {
-    use std::{sync::mpsc, thread, time::Duration};
+    use std::{
+        sync::{Arc, Mutex, mpsc},
+        thread,
+        time::Duration,
+    };
 
     use windows::{
-        Win32::UI::WindowsAndMessaging::{
-            CreateWindowExW, DestroyWindow, WINDOW_EX_STYLE, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+        Win32::{
+            Graphics::Direct3D11::ID3D11Multithread,
+            UI::WindowsAndMessaging::{
+                CreateWindowExW, DestroyWindow, WINDOW_EX_STYLE, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+            },
         },
-        core::w,
+        core::{Interface, w},
     };
 
     use super::*;
     use crate::{
-        Error, bus::BusEvent, contract::InputContract, elements::AppSink, pipeline::Pipeline,
+        Error,
+        bus::BusEvent,
+        contract::InputContract,
+        elements::{AppSink, D3d11Scaler, D3d11ScalerFormat, FrameCounter},
+        pipeline::Pipeline,
         platform::windows::d3d11va::d3d11va_texture,
     };
 
@@ -911,6 +1208,135 @@ mod tests {
         };
         assert!(d3d11.accepts(&produced));
         assert!(!system.accepts(&produced));
+    }
+
+    #[test]
+    fn destroy_callback_remains_set_when_the_hwnd_value_can_be_reused() {
+        let destroyed = Arc::new(AtomicBool::new(false));
+        DESTROY_WATCH.with(|watch| {
+            *watch.borrow_mut() = Some(DestroyWatchState {
+                hwnd: 0x1234,
+                destroyed: destroyed.clone(),
+            });
+        });
+        // SAFETY: directly invokes the callback with plain test values; it
+        // only compares them and updates the thread-local atomic flag.
+        unsafe {
+            window_event_proc(
+                HWINEVENTHOOK::default(),
+                EVENT_OBJECT_DESTROY,
+                HWND(0x5678usize as *mut _),
+                OBJID_WINDOW.0,
+                CHILDID_SELF as i32,
+                0,
+                0,
+            );
+        }
+        assert!(!destroyed.load(Ordering::Acquire));
+        // SAFETY: same callback contract as above, now with the watched HWND.
+        unsafe {
+            window_event_proc(
+                HWINEVENTHOOK::default(),
+                EVENT_OBJECT_DESTROY,
+                HWND(0x1234usize as *mut _),
+                OBJID_WINDOW.0,
+                CHILDID_SELF as i32,
+                0,
+                0,
+            );
+        }
+        assert!(destroyed.load(Ordering::Acquire));
+        // A later live window can reuse the numeric value, but no subsequent
+        // event can clear the original object's terminal state.
+        //
+        // SAFETY: same callback contract as above, with a reused HWND value.
+        unsafe {
+            window_event_proc(
+                HWINEVENTHOOK::default(),
+                EVENT_OBJECT_DESTROY,
+                HWND(0x5678usize as *mut _),
+                OBJID_WINDOW.0,
+                CHILDID_SELF as i32,
+                0,
+                0,
+            );
+        }
+        assert!(destroyed.load(Ordering::Acquire));
+        DESTROY_WATCH.with(|watch| *watch.borrow_mut() = None);
+    }
+
+    #[test]
+    fn retained_process_handle_distinguishes_live_and_exited_owners() {
+        let current = ProcessHandle::open(std::process::id()).expect("open current process");
+        assert!(!process_has_exited(current.raw()));
+
+        let mut child = std::process::Command::new("cmd")
+            .args(["/C", "exit", "0"])
+            .spawn()
+            .expect("spawn short-lived owner process");
+        let retained = ProcessHandle::open(child.id()).expect("retain child process identity");
+        child.wait().expect("wait for owner process");
+        assert!(process_has_exited(retained.raw()));
+    }
+
+    #[test]
+    #[ignore = "requires an interactive Windows Graphics Capture session"]
+    fn queue_and_d3d11_scaler_share_the_capture_context_safely() {
+        crate::init().expect("initialize FFmpeg");
+        let window = TestWindow::create().expect("create capture target window");
+        let (source, device) = match WgcCaptureSource::open(
+            "capture",
+            window.0,
+            WgcCaptureOptions {
+                fps: 60,
+                include_cursor: false,
+            },
+        ) {
+            Ok(opened) => opened,
+            Err(error) => {
+                eprintln!("skipping: cannot create WGC source ({error})");
+                return;
+            }
+        };
+        // SAFETY: returns the one live immediate context owned by `device`.
+        let context = unsafe { device.GetImmediateContext() }.expect("immediate context");
+        let multithread: ID3D11Multithread = context.cast().expect("multithread interface");
+        // SAFETY: reads one boolean property from the live context interface.
+        assert!(unsafe { multithread.GetMultithreadProtected() }.as_bool());
+        let scaler = D3d11Scaler::new(
+            "scale",
+            &device,
+            Arc::new(Mutex::new(context)),
+            D3d11ScalerFormat::Preserve,
+            160,
+            120,
+        )
+        .expect("create scaler");
+        let (counter, frames) = FrameCounter::new("frames");
+        let pipeline = Pipeline::new("wgc-d3d11-queue", source, |source, ctx| {
+            let branch = ctx
+                .branch()
+                .queue("captured", 4)
+                .pipe(scaler)
+                .to(Box::new(counter))?;
+            ctx.attach(source, 0, branch)?;
+            Ok(())
+        })
+        .expect("wire WGC D3D11 pipeline");
+
+        pipeline.run().expect("start WGC pipeline");
+        thread::sleep(Duration::from_secs(2));
+        pipeline.stop();
+        assert!(
+            frames.load(Ordering::Relaxed) > 0,
+            "scaled frames must flow"
+        );
+        let errors: Vec<_> = pipeline
+            .bus()
+            .iter()
+            .filter(|event| matches!(event, BusEvent::Error { .. }))
+            .collect();
+        assert!(errors.is_empty(), "unexpected WGC/D3D11 errors: {errors:?}");
     }
 
     #[test]

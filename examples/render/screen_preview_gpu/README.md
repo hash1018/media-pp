@@ -29,9 +29,9 @@ them. That element exists for this shape: without it a GPU capture can only be
 encoded — NVENC ingests BGRA directly, which is what `screen_record_nvenc`
 does — never shown or composited.
 
-No cursor on Windows: `CaptureMode::Gpu` doesn't support cursor compositing
-yet, while the Windows `screen_preview_cpu` CPU-capture path does. On
-Linux the compositor draws the cursor itself, so this asks for it.
+The Windows DXGI GPU path has no cursor because `CaptureMode::Gpu` doesn't
+support cursor compositing yet; the WGC window path requests WGC's cursor
+capture. On Linux the compositor draws the cursor itself, so this asks for it.
 
 ```powershell
 cargo run -p screen_preview_gpu -- dxgi

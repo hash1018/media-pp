@@ -169,13 +169,15 @@ pub enum D3d11RendererError {
 /// unlike `D3d12Renderer`'s `submit_nv12_texture`
 /// (which needs one because the D3D12 decoder and renderer are genuinely
 /// different devices/queues with nothing else to serialize them): an
-/// `ID3D11Device` created without `D3D11_CREATE_DEVICE_SINGLETHREADED` has
-/// its immediate context auto-serialized by the runtime across threads,
-/// and as long as every element funnels its GPU commands through that one
-/// context, the driver executes them in submission order — no separate
-/// sync object needed. This only holds because everything shares the
-/// *same* context; a second `ID3D11Device` in the mix would need its own
-/// explicit synchronization, same as the D3D12 case.
+/// immediate-context `ID3D11Multithread` protection serializes calls from
+/// multiple threads. As long as every element funnels its GPU commands through
+/// that one context, the driver executes them in submission order — no
+/// separate sync object is needed. Capture sources in this crate enable that
+/// protection and reject
+/// `D3D11_CREATE_DEVICE_SINGLETHREADED`; other device providers must make the
+/// same guarantee. This only holds because everything shares the *same*
+/// context; a second `ID3D11Device` in the mix would need its own explicit
+/// synchronization, same as the D3D12 case.
 ///
 /// Dispatches on the *texture's own* `DXGI_FORMAT` (via `GetDesc`), not on
 /// any extra tag carried by the frame. `D3d11Upload` and GPU screen capture
