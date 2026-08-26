@@ -4,7 +4,7 @@ use std::sync::{
 };
 use std::thread::{self, JoinHandle};
 
-use crate::pp_log::{PpLog, pp_info};
+use crate::pp_log::{PpLog, pp_error, pp_info};
 
 use crate::{
     buffer::MediaBuffer,
@@ -46,21 +46,52 @@ struct TeeShared {
     branches: Mutex<Vec<Arc<TeeBranch>>>,
     next_pad_id: AtomicU64,
     context: Arc<Context>,
+    /// The identity the `Tee` element logs under, cloned once at
+    /// construction for the same reason [`TeeHandle`] clones it: a finisher
+    /// thread's outcome has to be reported under the `Tee`'s own identity,
+    /// including from [`Drop`], where the element itself is already gone.
+    pp_log: PpLog,
     /// Threads started by [`TeeHandle::finish_branch`], each owning one
     /// removed branch until its EOS has drained through it. Retained so the
     /// `Tee` joins them rather than leaving a finalizing recording to race
-    /// process exit; finished ones are reaped on every `finish_branch`.
+    /// process exit.
     finishers: Mutex<Vec<JoinHandle<()>>>,
+}
+
+/// Joins the finisher threads in `finishers` that `select` picks, reporting
+/// any that panicked.
+///
+/// Every handle is joined rather than dropped, even one already finished:
+/// dropping it detaches the thread and discards its result, which is the one
+/// way a panicking branch teardown — a `Sink::drop` or a `Queue` worker that
+/// died mid-flush — would leave no trace at all. Joining a finished thread
+/// returns immediately, so the reaping caller pays nothing for it.
+fn join_finishers(
+    finishers: &mut Vec<JoinHandle<()>>,
+    pp_log: &PpLog,
+    select: impl Fn(&JoinHandle<()>) -> bool,
+) {
+    let mut index = 0;
+    while index < finishers.len() {
+        if !select(&finishers[index]) {
+            index += 1;
+            continue;
+        }
+        if finishers.remove(index).join().is_err() {
+            pp_error!(
+                pp_log: pp_log,
+                "a finished branch's teardown panicked; its output may be incomplete"
+            );
+        }
+    }
 }
 
 impl Drop for TeeShared {
     fn drop(&mut self) {
         // Not under the branch lock: a branch's own `Drop` may inspect the
         // graph or call back into `Tee`, exactly as `detach` documents.
-        let finishers = std::mem::take(&mut *lock_unpoisoned(&self.finishers));
-        for finisher in finishers {
-            let _ = finisher.join();
-        }
+        let mut finishers = std::mem::take(&mut *lock_unpoisoned(&self.finishers));
+        join_finishers(&mut finishers, &self.pp_log, |_| true);
     }
 }
 
@@ -120,6 +151,7 @@ impl Tee {
             branches: Mutex::new(Vec::new()),
             next_pad_id: AtomicU64::new(0),
             context,
+            pp_log: pp_log.clone(),
             finishers: Mutex::new(Vec::new()),
         });
         (
@@ -366,6 +398,13 @@ impl TeeHandle {
     ///
     /// Siblings are untouched: the `Eos` goes into this branch's pad alone,
     /// unlike one arriving at the `Tee` itself, which every branch sees.
+    ///
+    /// The ordering guarantee is against what this `Tee` has already handed
+    /// the branch — everything queued for it arrives before the `Eos`. It is
+    /// not against buffers still upstream: anything the `Tee` has not consumed
+    /// yet when this is called belongs to the stream after the stop point and
+    /// never reaches this branch. There is no ordering between the two except
+    /// the one the caller creates by waiting for what it wants included.
     pub fn finish_branch(&self, branch_id: BranchId) -> Result<()> {
         let shared = self
             .shared
@@ -402,7 +441,7 @@ impl TeeHandle {
 
         if let Some(removed) = removed {
             let mut finishers = lock_unpoisoned(&shared.finishers);
-            finishers.retain(|finisher| !finisher.is_finished());
+            join_finishers(&mut finishers, &self.pp_log, JoinHandle::is_finished);
             match thread::Builder::new()
                 .name(format!("{}-finish", self.name))
                 .spawn(move || drop(removed))
@@ -1099,6 +1138,182 @@ mod tests {
             ["data", "eos"],
             "a detached branch must not receive anything more"
         );
+    }
+
+    /// The synchronous test above proves the EOS goes to one branch only.
+    /// This one proves the part that is actually hard: with a `Queue` between
+    /// the `Tee` and the sink, `finish_branch` is called while the worker is
+    /// still chewing on the first buffer, and the EOS still has to land
+    /// *behind* everything already handed to that branch rather than racing
+    /// past it or cutting it short.
+    #[test]
+    fn finish_branch_lands_behind_buffers_still_queued_for_that_branch() {
+        let (bus, _bus_rx) = Bus::new();
+        let graph = PipelineGraph::new();
+        let source_id = graph.add_source(ElementType::Other, "source".into());
+        let context = Arc::new(Context::for_test(bus, "test", graph, source_id));
+        let (tee_branch, handle) = TeeBuilder::new("tee", context.clone())
+            .build_dynamic()
+            .unwrap();
+        let mut upstream = SrcPad::new("source_src");
+        context.attach_pad(&mut upstream, tee_branch).unwrap();
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let recording = handle
+            .branch()
+            .unwrap()
+            .queue("recording", 8)
+            .to(Box::new(SlowRecordingSink {
+                name: "recorder",
+                seen: seen.clone(),
+                pp_log: element_pp_log(ElementType::Other, "recorder", None),
+            }))
+            .unwrap();
+        let branch_id = handle.attach(recording).unwrap();
+
+        // These return once the Queue has accepted them, long before its
+        // worker has consumed them: the sink deliberately takes its time.
+        for _ in 0..3 {
+            upstream.push(packet()).unwrap();
+        }
+        handle.finish_branch(branch_id).unwrap();
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while std::time::Instant::now() < deadline && lock_unpoisoned(&seen).last() != Some(&"eos")
+        {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            *lock_unpoisoned(&seen),
+            ["data", "data", "data", "eos"],
+            "every buffer already queued for the branch must be delivered, and the EOS last"
+        );
+    }
+
+    /// A finisher thread runs arbitrary `Sink::drop` code. One that panics
+    /// must be joined and reported rather than detached and forgotten, and it
+    /// must not take the `Tee` — or any other branch — with it.
+    #[test]
+    fn a_panicking_branch_teardown_is_joined_rather_than_lost() {
+        let (bus, _bus_rx) = Bus::new();
+        let graph = PipelineGraph::new();
+        let source_id = graph.add_source(ElementType::Other, "source".into());
+        let context = Arc::new(Context::for_test(bus, "test", graph, source_id));
+
+        let survivor_count = Arc::new(AtomicUsize::new(0));
+        let survivor = context
+            .branch()
+            .to(Box::new(CountingSink {
+                name: "survivor",
+                count: survivor_count.clone(),
+                pp_log: element_pp_log(ElementType::Other, "survivor", None),
+            }))
+            .unwrap();
+        let (tee_branch, handle) = TeeBuilder::new("tee", context.clone())
+            .branch(survivor)
+            .build_dynamic()
+            .unwrap();
+        let mut upstream = SrcPad::new("source_src");
+        context.attach_pad(&mut upstream, tee_branch).unwrap();
+
+        let branch = handle
+            .branch()
+            .unwrap()
+            .to(Box::new(PanicOnDropSink {
+                pp_log: element_pp_log(ElementType::Other, "panics-on-drop", None),
+            }))
+            .unwrap();
+        let branch_id = handle.attach(branch).unwrap();
+        handle.finish_branch(branch_id).unwrap();
+
+        // The next `finish_branch` reaps it; there is nothing else to finish,
+        // so drop the Tee and let its own teardown do the joining.
+        upstream.push(packet()).unwrap();
+        assert_eq!(survivor_count.load(Ordering::SeqCst), 1);
+        drop(upstream);
+        drop(handle);
+        drop(context);
+        // Reaching here at all is the assertion: a detached panicking thread
+        // would otherwise be free to outlive everything it borrowed.
+    }
+
+    struct PanicOnDropSink {
+        pp_log: PpLog,
+    }
+
+    impl Element for PanicOnDropSink {
+        fn name(&self) -> Arc<str> {
+            "panics-on-drop".into()
+        }
+
+        fn element_type(&self) -> ElementType {
+            ElementType::Other
+        }
+
+        fn pp_log(&self) -> &PpLog {
+            &self.pp_log
+        }
+
+        fn pp_log_mut(&mut self) -> &mut PpLog {
+            &mut self.pp_log
+        }
+    }
+
+    impl Sink for PanicOnDropSink {
+        fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
+            Ok(())
+        }
+
+        fn control(&mut self, _msg: ControlMsg) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Drop for PanicOnDropSink {
+        fn drop(&mut self) {
+            panic!("teardown of a finished branch panics");
+        }
+    }
+
+    /// Consumes slowly enough that `finish_branch` is guaranteed to run while
+    /// buffers are still sitting in the branch's `Queue`.
+    struct SlowRecordingSink {
+        pp_log: PpLog,
+        name: &'static str,
+        seen: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    impl Element for SlowRecordingSink {
+        fn name(&self) -> Arc<str> {
+            self.name.into()
+        }
+
+        fn element_type(&self) -> ElementType {
+            ElementType::Other
+        }
+
+        fn pp_log(&self) -> &PpLog {
+            &self.pp_log
+        }
+
+        fn pp_log_mut(&mut self) -> &mut PpLog {
+            &mut self.pp_log
+        }
+    }
+
+    impl Sink for SlowRecordingSink {
+        fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+            let is_eos = buf.is_eos();
+            if !is_eos {
+                thread::sleep(Duration::from_millis(30));
+            }
+            lock_unpoisoned(&self.seen).push(if is_eos { "eos" } else { "data" });
+            Ok(())
+        }
+
+        fn control(&mut self, _msg: ControlMsg) -> Result<()> {
+            Ok(())
+        }
     }
 
     #[test]
