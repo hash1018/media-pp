@@ -1259,7 +1259,8 @@ mod tests {
         Win32::{
             Graphics::Direct3D11::ID3D11Multithread,
             UI::WindowsAndMessaging::{
-                CreateWindowExW, DestroyWindow, WINDOW_EX_STYLE, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+                CreateWindowExW, DestroyWindow, FindWindowW, WINDOW_EX_STYLE, WS_OVERLAPPEDWINDOW,
+                WS_VISIBLE,
             },
         },
         core::{Interface, w},
@@ -1678,6 +1679,145 @@ mod tests {
     /// describes. That one needs the target's whole *process* to die, which
     /// an in-process window cannot reproduce; destroying a window whose owner
     /// is still alive retires the session normally.
+    /// Hosts one top-level window in a separate process, so a test can end
+    /// that process outright rather than destroying a window this process
+    /// owns. `title` is what [`Self::find`] matches on.
+    struct WindowHostProcess {
+        child: std::process::Child,
+        title: String,
+    }
+
+    impl WindowHostProcess {
+        fn start(title: &str) -> Option<Self> {
+            let script = format!(
+                "Add-Type -AssemblyName System.Windows.Forms; \
+                 $f = New-Object Windows.Forms.Form; \
+                 $f.Text = '{title}'; $f.Width = 320; $f.Height = 240; $f.Show(); \
+                 while ($true) {{ [Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 20 }}"
+            );
+            let child = std::process::Command::new("powershell")
+                .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+                .spawn()
+                .ok()?;
+            Some(Self {
+                child,
+                title: title.to_string(),
+            })
+        }
+
+        /// The host's window once it exists, or `None` if it never showed up.
+        fn find(&self) -> Option<HWND> {
+            let wide: Vec<u16> = self
+                .title
+                .encode_utf16()
+                .chain(std::iter::once(0))
+                .collect();
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while Instant::now() < deadline {
+                // SAFETY: both arguments are read-only; the class name is
+                // absent and the title is a live NUL-terminated wide string.
+                if let Ok(hwnd) = unsafe { FindWindowW(None, windows::core::PCWSTR(wide.as_ptr())) }
+                    && !hwnd.is_invalid()
+                {
+                    return Some(hwnd);
+                }
+                thread::sleep(Duration::from_millis(100));
+            }
+            None
+        }
+
+        fn kill(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+
+    impl Drop for WindowHostProcess {
+        fn drop(&mut self) {
+            self.kill();
+        }
+    }
+
+    /// Killing the window's *owner* has to end the source the same way
+    /// destroying the window does — an error on the bus, no EOS — and the
+    /// source thread has to actually finish.
+    ///
+    /// This is the common shape of "the user closed the app being captured",
+    /// and it is not the same code path as a destroyed window whose owner
+    /// lives on: teardown deliberately leaks the capture session here,
+    /// because retiring it against a dead owner blocks the source thread
+    /// forever.
+    #[test]
+    #[ignore = "requires an interactive Windows Graphics Capture session"]
+    fn killing_the_target_windows_owner_ends_the_source() {
+        crate::init().expect("initialize FFmpeg");
+        let title = format!("media-pp wgc owner test {}", std::process::id());
+        let Some(mut host) = WindowHostProcess::start(&title) else {
+            eprintln!("skipping: cannot start the window host process");
+            return;
+        };
+        let Some(hwnd) = host.find() else {
+            eprintln!("skipping: the window host never showed a window");
+            return;
+        };
+
+        let (source, _device) = match WgcCaptureSource::open(
+            "capture",
+            hwnd,
+            WgcCaptureOptions {
+                fps: 30,
+                include_cursor: false,
+            },
+        ) {
+            Ok(opened) => opened,
+            Err(error) => {
+                eprintln!("skipping: cannot create WGC source ({error})");
+                return;
+            }
+        };
+        let pipeline = Pipeline::new("wgc-owner-killed", source, |source, ctx| {
+            let branch = ctx
+                .branch()
+                .to(Box::new(AppSink::new("sink", |_| Ok(()))))?;
+            ctx.attach(source, 0, branch)?;
+            Ok(())
+        })
+        .expect("wire WGC pipeline");
+
+        pipeline.run().expect("start WGC pipeline");
+        // Let the session actually start, so this exercises a running capture
+        // losing its owner rather than a failed start.
+        thread::sleep(Duration::from_millis(500));
+        host.kill();
+
+        let (done_tx, done_rx) = mpsc::sync_channel(1);
+        let draining = Arc::clone(&pipeline);
+        thread::spawn(move || {
+            let events: Vec<_> = draining.bus().iter().collect();
+            let _ = done_tx.send(events);
+        });
+        let events = done_rx
+            .recv_timeout(Duration::from_secs(15))
+            .expect("the source thread must finish once its target's owner is gone");
+
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                BusEvent::Error {
+                    element_type: ElementType::WgcCaptureSource,
+                    ..
+                }
+            )),
+            "a dead owner must be reported as an error, not EOS: {events:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, BusEvent::Eos { .. })),
+            "a live capture has no natural end, so nothing may report EOS: {events:?}"
+        );
+    }
+
     #[test]
     #[ignore = "requires an interactive Windows Graphics Capture session"]
     fn destroying_the_target_window_ends_the_source() {
