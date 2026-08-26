@@ -342,8 +342,9 @@ mod windows_example {
         }
 
         // `run()` starts capture on a background thread and returns right
-        // away — failures show up as `BusEvent::Error`. DXGI ends when the
-        // preview closes; WGC also reaches EOS when its captured window closes.
+        // away — failures show up as `BusEvent::Error`. Neither source ends on
+        // its own: closing the preview is what stops DXGI, and WGC's captured
+        // window going away arrives as an error from the source, not an EOS.
         pipeline.run()?;
 
         for event in pipeline.bus().iter() {

@@ -77,6 +77,14 @@ pub enum WgcCaptureSourceError {
     /// The supplied handle does not currently identify a window.
     #[error("the supplied HWND doesn't identify a live window")]
     InvalidWindow,
+    /// The captured window went away while the capture was running.
+    ///
+    /// Reopening is the caller's decision, the same contract
+    /// `DxgiCaptureSourceError::AccessLost` and
+    /// `PipeWireScreenCaptureSourceError::SourceGone` set for the other
+    /// capture sources.
+    #[error("the captured window is gone")]
+    TargetGone,
     /// A fixed output cadence cannot be constructed from zero frames per second.
     #[error("WgcCaptureOptions::fps must be greater than zero")]
     InvalidFps,
@@ -162,13 +170,19 @@ impl Default for WgcCaptureOptions {
 /// frames carry the new visible dimensions. BGRA frames are tagged RGB/full
 /// range.
 ///
-/// The target window closing is the natural end of this finite capture and
-/// forwards [`MediaBuffer::Eos`]. `Stop` abandons immediately, while
-/// [`Pipeline::finish`](crate::pipeline::Pipeline::finish) forwards ordered EOS
-/// through the normal source-control path. The source is live and not seekable.
-/// A downstream push error is posted to the source [`Bus`] and only that frame
-/// is dropped; WGC/session/device failures are fatal because capture cannot
-/// meaningfully continue.
+/// Runs until `Stop` — a live capture has no natural end, so this never
+/// reaches [`MediaBuffer::Eos`] on its own. The captured window going away
+/// ends `run` with [`WgcCaptureSourceError::TargetGone`] instead, which
+/// reaches the caller as a [`BusEvent::Error`]; whether that means reopening,
+/// [`Pipeline::stop`](crate::pipeline::Pipeline::stop), or
+/// [`Pipeline::finish`](crate::pipeline::Pipeline::finish) is the caller's
+/// decision, the same "fail fast, caller rebuilds" contract
+/// `DxgiCaptureSource` and `PipeWireScreenCaptureSource` follow.
+/// `Pipeline::finish` still forwards
+/// ordered EOS through the normal source-control path. The source is live and
+/// not seekable. A downstream push error is posted to the source [`Bus`] and
+/// only that frame is dropped; WGC/session/device failures are fatal because
+/// capture cannot meaningfully continue.
 pub struct WgcCaptureSource {
     pp_log: PpLog,
     name: Arc<str>,
@@ -425,10 +439,6 @@ impl WgcCaptureSource {
         self.frame_index += 1;
         Ok(frame)
     }
-
-    fn push_eos(&mut self) -> Result<()> {
-        self.pad.push(MediaBuffer::Eos)
-    }
 }
 
 impl Element for WgcCaptureSource {
@@ -508,8 +518,7 @@ impl SourceElement for WgcCaptureSource {
                 schedule.resume_after_pause(outcome.paused_for, Instant::now());
             }
             if target_gone(&runtime) {
-                pp_info!(self, "target window closed; forwarding EOS");
-                return self.push_eos();
+                return Err(WgcCaptureSourceError::TargetGone.into());
             }
 
             let timeout = schedule.remaining(Instant::now()).min(POLL_GRANULARITY);
@@ -519,8 +528,7 @@ impl SourceElement for WgcCaptureSource {
                     // `FrameArrived`. Do not touch the frame pool after the
                     // close notification won the race.
                     if target_gone(&runtime) {
-                        pp_info!(self, "target window closed; forwarding EOS");
-                        return self.push_eos();
+                        return Err(WgcCaptureSourceError::TargetGone.into());
                     }
                     self.receive_latest(&runtime, &mut latest, &mut visible_size)
                         .inspect_err(|error| pp_error!(self, "capture frame failed: {error}"))?;
@@ -532,8 +540,7 @@ impl SourceElement for WgcCaptureSource {
             }
 
             if target_gone(&runtime) {
-                pp_info!(self, "target window closed; forwarding EOS");
-                return self.push_eos();
+                return Err(WgcCaptureSourceError::TargetGone.into());
             }
             if !schedule.is_due(Instant::now()) {
                 continue;
@@ -979,7 +986,8 @@ mod tests {
     /// not fire even for this in-process `DestroyWindow`, so without the
     /// handle check the loop waits forever. The bus draining at all is what
     /// proves the thread finished — `iter` only returns once every sender is
-    /// gone.
+    /// gone — and it must drain carrying an error rather than an EOS, since a
+    /// live capture has no natural end.
     ///
     /// This does not cover the teardown deadlock [`WgcRuntime::drop`]
     /// describes. That one needs the target's whole *process* to die, which
@@ -1022,15 +1030,28 @@ mod tests {
         let (done_tx, done_rx) = mpsc::sync_channel(1);
         let draining = Arc::clone(&pipeline);
         thread::spawn(move || {
-            let saw_eos = draining
-                .bus()
-                .iter()
-                .any(|event| matches!(event, BusEvent::Eos { .. }));
-            let _ = done_tx.send(saw_eos);
+            let events: Vec<_> = draining.bus().iter().collect();
+            let _ = done_tx.send(events);
         });
-        let saw_eos = done_rx
+        let events = done_rx
             .recv_timeout(Duration::from_secs(15))
             .expect("the source thread must finish once its target window is destroyed");
-        assert!(saw_eos, "a destroyed target window must forward EOS");
+
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                BusEvent::Error {
+                    element_type: ElementType::WgcCaptureSource,
+                    ..
+                }
+            )),
+            "a destroyed target must be reported as an error, not EOS: {events:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, BusEvent::Eos { .. })),
+            "a live capture has no natural end, so nothing may report EOS: {events:?}"
+        );
     }
 }
