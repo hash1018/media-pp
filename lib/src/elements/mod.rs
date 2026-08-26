@@ -139,3 +139,5 @@ pub use source::{
 };
 #[cfg(all(target_os = "windows", feature = "wasapi-capture"))]
 pub use source::{WasapiCaptureOptions, WasapiCaptureSource, WasapiCaptureSourceError};
+#[cfg(all(target_os = "windows", feature = "wgc-capture"))]
+pub use source::{WgcCaptureOptions, WgcCaptureSource, WgcCaptureSourceError};

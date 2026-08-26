@@ -55,10 +55,9 @@ impl D3d11GpuContext {
     /// [`media_pp::elements::D3d11Scaler::new`] so every producer/filter
     /// lands on the same device (and, transitively, the same immediate context
     /// — see this type's own docs) [`crate::d3d11_window_renderer`] draws
-    /// with. Not for [`media_pp::elements::DxgiCaptureSource::open`]'s
-    /// `CaptureMode::Gpu` path — that one runs the other way round (see
-    /// [`D3d11GpuContext::new`]'s own docs): `open` resolves the device,
-    /// this type reuses it.
+    /// with. Capture sources can use the same value through
+    /// `DxgiCaptureSource::open_with_device` or
+    /// `WgcCaptureSource::open_with_device`.
     pub fn device(&self) -> &ID3D11Device {
         &self.device
     }
@@ -84,10 +83,8 @@ impl D3d11GpuContext {
     /// pipeline cares which adapter that is, e.g. `d3d11_upload`/
     /// `d3d11_decode_render`, which only ever talk to this one device).
     /// `Some(device)` reuses an already-created device as-is instead of
-    /// creating a new one — e.g. the `ID3D11Device` returned by
-    /// [`media_pp::elements::DxgiCaptureSource::open`]'s `CaptureMode::Gpu`
-    /// path, which is already pinned to whichever adapter the captured
-    /// monitor is actually attached to (`screen_preview_gpu`'s own case).
+    /// creating a new one — e.g. a device already pinned to the adapter of a
+    /// captured monitor.
     /// Reusing that exact device instead of separately creating a
     /// same-adapter one and relying on the two matching is what lets this
     /// whole stack skip a device-mismatch check entirely — there's only
@@ -103,10 +100,12 @@ impl D3d11GpuContext {
                     (device, context)
                 }
                 None => {
+                    // BGRA support is harmless for the other examples and is
+                    // required when this shared device is injected into WGC.
                     let flags = if cfg!(debug_assertions) {
-                        D3D11_CREATE_DEVICE_DEBUG
+                        D3D11_CREATE_DEVICE_DEBUG | D3D11_CREATE_DEVICE_BGRA_SUPPORT
                     } else {
-                        D3D11_CREATE_DEVICE_FLAG(0)
+                        D3D11_CREATE_DEVICE_BGRA_SUPPORT
                     };
                     let mut device = None;
                     let mut context = None;

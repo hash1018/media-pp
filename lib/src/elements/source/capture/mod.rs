@@ -8,7 +8,11 @@
 mod linux;
 #[cfg(all(
     target_os = "windows",
-    any(feature = "dxgi-capture", feature = "wasapi-capture")
+    any(
+        feature = "dxgi-capture",
+        feature = "wgc-capture",
+        feature = "wasapi-capture"
+    )
 ))]
 mod windows;
 
@@ -22,6 +26,10 @@ mod windows;
 pub use linux::*;
 #[cfg(all(
     target_os = "windows",
-    any(feature = "dxgi-capture", feature = "wasapi-capture")
+    any(
+        feature = "dxgi-capture",
+        feature = "wgc-capture",
+        feature = "wasapi-capture"
+    )
 ))]
 pub use windows::*;

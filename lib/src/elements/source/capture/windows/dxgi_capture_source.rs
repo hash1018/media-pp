@@ -99,6 +99,10 @@ pub enum DxgiCaptureSourceError {
     )]
     RegionSpansMultipleAdapters,
 
+    /// A caller-supplied device does not belong to the captured output's adapter.
+    #[error("the supplied D3D11 device belongs to a different adapter than the capture area")]
+    DeviceAdapterMismatch,
+
     /// Cursor composition was requested for a multi-output region.
     #[error("include_cursor isn't supported when CaptureArea::Region spans more than one output")]
     CursorUnsupportedForRegion,
@@ -143,20 +147,12 @@ pub enum CaptureMode {
     /// [`crate::elements::D3d11Upload`] documents for building a fresh
     /// texture per call rather than reusing one).
     ///
-    /// Unlike [`CaptureMode::Cpu`], this variant carries no device of its
-    /// own to inject: `open` always builds the device itself, from
-    /// whichever adapter [`DxgiCaptureOptions::area`] actually selects
-    /// (the *only* place that resolves "which adapter" — see
-    /// `resolve_area`), and hands it back as `open`'s own return value
-    /// for the caller to reuse. That's the one `ID3D11Device` every other
-    /// D3D11 element sharing this capture's output should be built from
-    /// (e.g. `render_common::D3d11GpuContext::new(Some(device))`) — for
-    /// `open`'s own zero-copy path to mean anything, see
-    /// [`crate::elements::D3d11Renderer`]'s own docs on why. Taking a
-    /// caller-supplied device here instead would only reopen the exact
-    /// adapter-mismatch problem this design avoids: two independently
-    /// resolved "which adapter" answers that would need to be checked
-    /// against each other instead of structurally being the same one.
+    /// [`DxgiCaptureSource::open`] creates a device on the resolved adapter
+    /// and returns it for downstream reuse. Alternatively,
+    /// [`DxgiCaptureSource::open_with_device`] accepts an existing shared
+    /// device and validates its adapter LUID before opening duplication.
+    /// Either path establishes one exact `ID3D11Device` for every D3D11
+    /// element sharing this capture.
     ///
     /// No cursor option — see [`CaptureMode::Cpu`]'s own docs on why.
     Gpu,
@@ -448,6 +444,34 @@ impl DxgiCaptureSource {
         options: DxgiCaptureOptions,
     ) -> std::result::Result<(Self, VideoFormat, Option<ID3D11Device>), DxgiCaptureSourceError>
     {
+        Self::open_impl(name, options, None)
+    }
+
+    /// Opens the capture on a caller-owned D3D11 device.
+    ///
+    /// The device must belong to the same DXGI adapter as every output touched
+    /// by [`DxgiCaptureOptions::area`]; a mismatch is rejected before desktop
+    /// duplication or textures are created. Under [`CaptureMode::Gpu`], this
+    /// lets capture, filters, compositors, encoders, and renderers share one
+    /// device without a system-memory round trip. Device injection does not
+    /// remove the existing GPU copies: duplication surfaces first refresh the
+    /// internal latest-image textures, then each emission gets an independent
+    /// composite texture that downstream may retain after `ReleaseFrame`.
+    pub fn open_with_device(
+        name: impl Into<String>,
+        options: DxgiCaptureOptions,
+        device: &ID3D11Device,
+    ) -> std::result::Result<(Self, VideoFormat), DxgiCaptureSourceError> {
+        let (source, format, _returned_device) = Self::open_impl(name, options, Some(device))?;
+        Ok((source, format))
+    }
+
+    fn open_impl(
+        name: impl Into<String>,
+        options: DxgiCaptureOptions,
+        supplied_device: Option<&ID3D11Device>,
+    ) -> std::result::Result<(Self, VideoFormat, Option<ID3D11Device>), DxgiCaptureSourceError>
+    {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::DxgiCaptureSource, &name, None);
 
@@ -469,32 +493,40 @@ impl DxgiCaptureSource {
         let width = (requested.right - requested.left) as u32;
         let height = (requested.bottom - requested.top) as u32;
 
-        // Always built from `area`'s own adapter (every target shares
-        // one — `resolve_area` already checked), `Cpu` and `Gpu` alike —
-        // see `CaptureMode::Gpu`'s own docs on why this element is the
-        // sole place that resolves "which adapter", rather than trusting
-        // (and validating) a caller-supplied device.
+        // Every target shares one adapter (`resolve_area` already checked).
+        // Either create the device there or validate the caller's device
+        // before opening any duplication.
         let adapter = &targets[0].0;
-        let mut device: Option<ID3D11Device> = None;
-        let mut context: Option<ID3D11DeviceContext> = None;
-        // SAFETY: the selected live adapter is passed with UNKNOWN driver
-        // type as required, optional feature levels use D3D defaults, and
-        // device/context are live correctly typed out-parameters.
-        unsafe {
-            D3D11CreateDevice(
-                &adapter.cast::<windows::Win32::Graphics::Dxgi::IDXGIAdapter>()?,
-                D3D_DRIVER_TYPE_UNKNOWN,
-                HMODULE::default(),
-                D3D11_CREATE_DEVICE_FLAG(0),
-                None,
-                D3D11_SDK_VERSION,
-                Some(&mut device),
-                None,
-                Some(&mut context),
-            )?;
-        }
-        let device = device.expect("D3D11CreateDevice succeeded without producing a device");
-        let context = context.expect("D3D11CreateDevice succeeded without producing a context");
+        let (device, context) = if let Some(device) = supplied_device {
+            validate_device_adapter(device, adapter)?;
+            // SAFETY: returns the shared immediate context owned by this live
+            // caller-supplied device.
+            let context = unsafe { device.GetImmediateContext()? };
+            (device.clone(), context)
+        } else {
+            let mut device: Option<ID3D11Device> = None;
+            let mut context: Option<ID3D11DeviceContext> = None;
+            // SAFETY: the selected live adapter is passed with UNKNOWN driver
+            // type as required, optional feature levels use D3D defaults, and
+            // device/context are live correctly typed out-parameters.
+            unsafe {
+                D3D11CreateDevice(
+                    &adapter.cast::<windows::Win32::Graphics::Dxgi::IDXGIAdapter>()?,
+                    D3D_DRIVER_TYPE_UNKNOWN,
+                    HMODULE::default(),
+                    D3D11_CREATE_DEVICE_FLAG(0),
+                    None,
+                    D3D11_SDK_VERSION,
+                    Some(&mut device),
+                    None,
+                    Some(&mut context),
+                )?;
+            }
+            (
+                device.expect("D3D11CreateDevice succeeded without producing a device"),
+                context.expect("D3D11CreateDevice succeeded without producing a context"),
+            )
+        };
         // Cloned before `device` moves into `Self` below — the only copy
         // handed back to the caller (a COM ref-count bump, not a deep
         // copy).
@@ -1117,6 +1149,24 @@ impl SourceElement for DxgiCaptureSource {
     }
 }
 
+fn validate_device_adapter(
+    device: &ID3D11Device,
+    target: &IDXGIAdapter1,
+) -> std::result::Result<(), DxgiCaptureSourceError> {
+    let dxgi_device: IDXGIDevice = device.cast()?;
+    // SAFETY: both interfaces are live and return owned adapter references or
+    // plain immutable descriptors. Adapter LUID is the stable identity used
+    // across independently obtained DXGI interface versions.
+    let device_adapter = unsafe { dxgi_device.GetAdapter()? };
+    let device_luid = unsafe { device_adapter.GetDesc()? }.AdapterLuid;
+    let target_adapter: windows::Win32::Graphics::Dxgi::IDXGIAdapter = target.cast()?;
+    let target_luid = unsafe { target_adapter.GetDesc()? }.AdapterLuid;
+    if (device_luid.LowPart, device_luid.HighPart) != (target_luid.LowPart, target_luid.HighPart) {
+        return Err(DxgiCaptureSourceError::DeviceAdapterMismatch);
+    }
+    Ok(())
+}
+
 fn pick_output(
     factory: &IDXGIFactory1,
     output_index: u32,
@@ -1517,5 +1567,25 @@ mod tests {
                 "{capture_mode:?} must describe desktop pixels as full range"
             );
         }
+    }
+
+    #[test]
+    fn gpu_capture_accepts_its_adapter_device_from_the_caller() {
+        let options = DxgiCaptureOptions {
+            capture_mode: CaptureMode::Gpu,
+            ..DxgiCaptureOptions::default()
+        };
+        let Ok((source, _format, Some(device))) =
+            DxgiCaptureSource::open("device-provider", options.clone())
+        else {
+            eprintln!("skipping: no duplicable desktop on this machine");
+            return;
+        };
+        drop(source);
+
+        let (source, _format) =
+            DxgiCaptureSource::open_with_device("device-consumer", options, &device)
+                .expect("the device created for this output must pass adapter validation");
+        assert_eq!(source.device.as_raw(), device.as_raw());
     }
 }

@@ -9,7 +9,7 @@ the same across platforms.
 | Example | Purpose | Platform | Capture and memory path | Output | Ends by | Arguments |
 |---|---|---|---|---|---|---|
 | [`screen_preview_cpu`](screen_preview_cpu/) | Preview a CPU-captured desktop | Windows / Linux | DXGI / PipeWire system memory -> D3D12 / CUDA upload | Window | Close window | Linux: `[monitor\|window] [restore-token]` |
-| [`screen_preview_gpu`](screen_preview_gpu/) | Preview without a system-memory pixel copy | Windows / Linux | DXGI D3D11 / PipeWire DMA-BUF -> CUDA | D3D11 / CUDA renderer | Close window | Linux: `[monitor\|window] [restore-token]` |
+| [`screen_preview_gpu`](screen_preview_gpu/) | Preview without a system-memory pixel copy | Windows / Linux | DXGI/WGC D3D11 / PipeWire DMA-BUF -> CUDA | D3D11 / CUDA renderer | Close window | Windows: `[dxgi\|wgc [<HWND>]]` (`wgc` with no `HWND` prompts); Linux: `[monitor\|window] [restore-token]` |
 | [`screen_record_software`](screen_record_software/) | Record with software conversion and encoding | Windows / Linux | DXGI / PipeWire -> system-memory BGRA | OpenH264 MP4 | Fixed duration (`Stop`) | `[output.mp4] [seconds]` plus Linux source/token |
 | [`screen_record_nvenc`](screen_record_nvenc/) | Record GPU-resident frames with NVENC | Windows / Linux | DXGI D3D11 / PipeWire DMA-BUF -> CUDA | NVENC MP4 | Fixed duration (`Finish`) | `<output.mp4> [seconds]` plus Linux source/token |
 | [`screen_record_overlay`](screen_record_overlay/) | Draw a live CUDA overlay and record it | Linux | PipeWire DMA-BUF -> CUDA compositor | NVENC MP4 | Fixed duration | `<output.mp4> [seconds] [monitor\|window] [restore-token]` |

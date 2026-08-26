@@ -1119,7 +1119,7 @@ mod d3d11 {
     /// So the measurement window has to start after saturation. What the
     /// scenario still catches is the thing that matters: growth that keeps
     /// going, which no cache explains.
-    #[cfg(feature = "dxgi-capture")]
+    #[cfg(any(feature = "dxgi-capture", feature = "wgc-capture"))]
     const CAPTURE_WARMUP: usize = 10;
 
     /// One capture session: open it, let it emit for a while, tear it all
@@ -1262,6 +1262,193 @@ mod d3d11 {
                 vram: 1.0 * MIB,
             },
             |teardown| capture_cycle(CaptureMode::Gpu, teardown),
+        );
+    }
+
+    #[cfg(feature = "wgc-capture")]
+    struct WgcTestWindow {
+        hwnd: usize,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+
+    #[cfg(feature = "wgc-capture")]
+    impl WgcTestWindow {
+        fn create() -> windows::core::Result<Self> {
+            use windows::{
+                Win32::UI::WindowsAndMessaging::{
+                    CreateWindowExW, DestroyWindow, DispatchMessageW, GetMessageW, IsWindow, MSG,
+                    TranslateMessage, WINDOW_EX_STYLE, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+                },
+                core::w,
+            };
+
+            let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+            let thread = thread::spawn(move || {
+                let created = unsafe {
+                    CreateWindowExW(
+                        WINDOW_EX_STYLE::default(),
+                        w!("STATIC"),
+                        w!("media-pp WGC soak window"),
+                        WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+                        0,
+                        0,
+                        320,
+                        240,
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
+                };
+                let hwnd = match created {
+                    Ok(hwnd) => hwnd,
+                    Err(error) => {
+                        let _ = ready_tx.send(Err(error));
+                        return;
+                    }
+                };
+                if ready_tx.send(Ok(hwnd.0 as usize)).is_err() {
+                    let _ = unsafe { DestroyWindow(hwnd) };
+                    return;
+                }
+
+                let mut message = MSG::default();
+                while unsafe { GetMessageW(&mut message, None, 0, 0) }.0 > 0 {
+                    unsafe {
+                        let _ = TranslateMessage(&message);
+                        DispatchMessageW(&message);
+                    }
+                    if !unsafe { IsWindow(Some(hwnd)) }.as_bool() {
+                        break;
+                    }
+                }
+                if unsafe { IsWindow(Some(hwnd)) }.as_bool() {
+                    let _ = unsafe { DestroyWindow(hwnd) };
+                }
+            });
+            let hwnd = ready_rx
+                .recv()
+                .expect("WGC window thread stopped before reporting readiness")?;
+            Ok(Self {
+                hwnd,
+                thread: Some(thread),
+            })
+        }
+
+        fn hwnd(&self) -> windows::Win32::Foundation::HWND {
+            windows::Win32::Foundation::HWND(self.hwnd as *mut _)
+        }
+    }
+
+    #[cfg(feature = "wgc-capture")]
+    impl Drop for WgcTestWindow {
+        fn drop(&mut self) {
+            use windows::Win32::{
+                Foundation::{LPARAM, WPARAM},
+                UI::WindowsAndMessaging::{PostMessageW, WM_CLOSE},
+            };
+
+            let _ = unsafe {
+                PostMessageW(
+                    Some(self.hwnd()),
+                    WM_CLOSE,
+                    WPARAM::default(),
+                    LPARAM::default(),
+                )
+            };
+            if let Some(thread) = self.thread.take() {
+                thread.join().expect("WGC window thread panicked");
+            }
+        }
+    }
+
+    /// Opens and tears down the complete WGC graph. WGC owns a fresh device,
+    /// frame pool, session, two event registrations, and changing textures in
+    /// every cycle, so the process-wide adapter gauge is used just like the
+    /// DXGI source above.
+    #[cfg(feature = "wgc-capture")]
+    fn wgc_capture_cycle(hwnd: windows::Win32::Foundation::HWND, teardown: Teardown) -> usize {
+        use media_pp::elements::{WgcCaptureOptions, WgcCaptureSource};
+        use windows::Win32::UI::WindowsAndMessaging::{
+            SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SetWindowPos,
+        };
+
+        static CYCLE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+        let (counter, frames) = FrameCounter::new("counter");
+        let (source, _device) = WgcCaptureSource::open(
+            "window-capture",
+            hwnd,
+            WgcCaptureOptions {
+                fps: 30,
+                include_cursor: false,
+            },
+        )
+        .expect("open WGC source");
+        let pipeline = Pipeline::new("soak-wgc-capture", source, |source, ctx| {
+            let branch = ctx.branch().queue("captured", 4).to(Box::new(counter))?;
+            ctx.attach(source, 0, branch)?;
+            Ok(())
+        })
+        .expect("wire WGC pipeline");
+
+        pipeline.run().expect("start WGC pipeline");
+        // WGC is change-driven. Repeatedly capturing an otherwise motionless
+        // test window is allowed to produce no new notification, so resize by
+        // one pixel after every session starts. This also exercises the frame-
+        // pool recreation path instead of relying on a cosmetic repaint.
+        let cycle = CYCLE.fetch_add(1, Ordering::Relaxed);
+        let width = if cycle.is_multiple_of(2) { 320 } else { 321 };
+        unsafe {
+            SetWindowPos(
+                hwnd,
+                None,
+                0,
+                0,
+                width,
+                240,
+                SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+            )
+        }
+        .expect("resize WGC target window");
+        thread::sleep(Duration::from_millis(750));
+        teardown.apply(&pipeline);
+        frames.load(Ordering::Relaxed)
+    }
+
+    #[test]
+    #[ignore = "soak test; requires an interactive Windows Graphics Capture session"]
+    #[cfg(feature = "wgc-capture")]
+    fn window_capture_cycles_do_not_grow_gpu_memory() {
+        isolate!();
+        let _exclusive = exclusive();
+        media_pp::init().expect("ffmpeg init");
+        let window = match WgcTestWindow::create() {
+            Ok(window) => window,
+            Err(error) => {
+                eprintln!("skipping: cannot create WGC target window ({error})");
+                return;
+            }
+        };
+        let Some((gauge_device, _context, _live)) = try_d3d11_device() else {
+            return;
+        };
+
+        // WGC and the user-mode driver retain bounded initialization caches,
+        // so discard the same longer warm-up used for GPU DXGI sessions. The
+        // source devices differ per cycle; adapter memory is process-wide,
+        // while a live-object gauge on `gauge_device` could not see them.
+        measure_cycles(
+            "WGC window capture cycle",
+            &gauge_device,
+            None,
+            Budget {
+                warmup: CAPTURE_WARMUP,
+                iterations: iterations(10),
+                memory: None,
+                vram: 1.0 * MIB,
+            },
+            |teardown| wgc_capture_cycle(window.hwnd(), teardown),
         );
     }
 }

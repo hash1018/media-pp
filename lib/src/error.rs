@@ -29,6 +29,8 @@ use crate::elements::WasapiCaptureSourceError;
 use crate::elements::WasapiRendererError;
 #[cfg(feature = "webrtc")]
 use crate::elements::WebRtcError;
+#[cfg(all(target_os = "windows", feature = "wgc-capture"))]
+use crate::elements::WgcCaptureSourceError;
 #[cfg(feature = "cuda")]
 use crate::elements::{
     CudaConverterError, CudaDecoderError, CudaDownloadError, CudaEncoderError, CudaRendererError,
@@ -321,6 +323,11 @@ pub enum Error {
     #[cfg(all(target_os = "windows", feature = "dxgi-capture"))]
     #[error(transparent)]
     DxgiCaptureSourceError(#[from] DxgiCaptureSourceError),
+
+    /// Windows Graphics Capture failed.
+    #[cfg(all(target_os = "windows", feature = "wgc-capture"))]
+    #[error(transparent)]
+    WgcCaptureSourceError(#[from] WgcCaptureSourceError),
 
     /// PipeWire audio capture failed.
     #[cfg(all(target_os = "linux", feature = "pipewire-audio-capture"))]

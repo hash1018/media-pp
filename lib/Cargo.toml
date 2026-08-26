@@ -116,6 +116,15 @@ dxgi-capture = [
     # `HMONITOR`, so windows-rs omits `GetDesc` without the GDI feature.
     "windows/Win32_Graphics_Gdi",
 ]
+wgc-capture = [
+    "d3d11",
+    "windows/Graphics_Capture",
+    "windows/Graphics_DirectX_Direct3D11",
+    "windows/Win32_Graphics_Dxgi",
+    "windows/Win32_System_WinRT_Direct3D11",
+    "windows/Win32_System_WinRT_Graphics_Capture",
+    "windows/Win32_UI_WindowsAndMessaging",
+]
 pipewire-audio-capture = ["dep:pipewire"]
 pipewire-audio-renderer = ["dep:pipewire"]
 pipewire-screen-capture = [

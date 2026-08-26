@@ -57,6 +57,8 @@ pub use capture::{
 };
 #[cfg(all(target_os = "windows", feature = "wasapi-capture"))]
 pub use capture::{WasapiCaptureOptions, WasapiCaptureSource, WasapiCaptureSourceError};
+#[cfg(all(target_os = "windows", feature = "wgc-capture"))]
+pub use capture::{WgcCaptureOptions, WgcCaptureSource, WgcCaptureSourceError};
 #[cfg(feature = "cuda")]
 pub use compositor::{
     CudaTextLayerHandle, CudaVideoCompositor, CudaVideoCompositorError, CudaVideoCompositorHandle,

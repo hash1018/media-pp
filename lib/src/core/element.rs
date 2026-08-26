@@ -47,6 +47,8 @@ pub enum ElementType {
     TestAudioSource,
     /// Windows desktop-duplication capture source.
     DxgiCaptureSource,
+    /// Windows Graphics Capture window source.
+    WgcCaptureSource,
     /// PipeWire audio capture source.
     PipeWireAudioCaptureSource,
     /// PipeWire screen capture source.
