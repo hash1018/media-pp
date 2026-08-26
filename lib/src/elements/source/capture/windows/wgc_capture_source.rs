@@ -69,7 +69,7 @@ use crate::{
         d3d11va::wrap_d3d11_texture,
     },
     pool::UnboundObjectPool,
-    pp_log::{PpLog, pp_error, pp_info},
+    pp_log::{PpLog, pp_error, pp_info, pp_warn},
     schedule::PeriodicSchedule,
 };
 
@@ -111,13 +111,6 @@ pub enum WgcCaptureSourceError {
         "the D3D11 device was created with D3D11_CREATE_DEVICE_SINGLETHREADED and cannot be shared by capture and downstream elements"
     )]
     SingleThreadedDevice,
-    /// The target owner's lifetime could not be monitored safely.
-    #[error("cannot monitor the capture target's owner process {pid}: {source}")]
-    OwnerProcessUnavailable {
-        pid: u32,
-        #[source]
-        source: windows::core::Error,
-    },
     /// The helper thread that watches the original HWND could not start.
     #[error("cannot start the WGC window lifetime watcher: {0}")]
     WindowWatcherUnavailable(String),
@@ -226,7 +219,9 @@ pub struct WgcCaptureSource {
     hwnd: usize,
     owner_pid: u32,
     owner_thread_id: u32,
-    owner_process: ProcessHandle,
+    /// `None` when the owner denied a synchronization handle; see
+    /// [`process_has_exited`] for what that costs.
+    owner_process: Option<ProcessHandle>,
     target_watch: WindowLifetimeWatch,
     device: ID3D11Device,
     context: ID3D11DeviceContext,
@@ -325,6 +320,14 @@ impl WgcCaptureSource {
         let pp_log = element_pp_log(ElementType::WgcCaptureSource, &name, None);
         let fps = options.fps as i32;
         let pad = SrcPad::with_contract(format!("{name}_src"), output_contract());
+        if let Some(error) = target.owner_process_error {
+            pp_warn!(
+                pp_log: &pp_log,
+                "owner process {} cannot be monitored ({error}); teardown will always take the \
+                 full path and owner exit alone will not end this source",
+                target.owner_pid
+            );
+        }
 
         Self {
             pp_log,
@@ -531,7 +534,7 @@ impl SourceElement for WgcCaptureSource {
         };
         let runtime = WgcRuntime::start(
             target,
-            self.owner_process.raw(),
+            self.owner_process.as_ref().map(ProcessHandle::raw),
             self.target_watch.flag(),
             &self.device,
             self.include_cursor,
@@ -639,11 +642,10 @@ struct ProcessHandle(HANDLE);
 unsafe impl Send for ProcessHandle {}
 
 impl ProcessHandle {
-    fn open(pid: u32) -> std::result::Result<Self, WgcCaptureSourceError> {
+    fn open(pid: u32) -> windows::core::Result<Self> {
         // SAFETY: opens one synchronization-only reference to the live owner
         // pid. The returned handle is closed exactly once by `Drop`.
-        let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, pid) }
-            .map_err(|source| WgcCaptureSourceError::OwnerProcessUnavailable { pid, source })?;
+        let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, pid) }?;
         Ok(Self(handle))
     }
 
@@ -660,7 +662,15 @@ impl Drop for ProcessHandle {
     }
 }
 
-fn process_has_exited(process: HANDLE) -> bool {
+/// Whether the retained owner is known to have exited. `None` means the owner
+/// could never be opened for synchronization — a protected or higher-integrity
+/// process denies even `PROCESS_SYNCHRONIZE` — and answers `false`, because
+/// every caller uses this only to take a shortcut that requires proof the owner
+/// is gone.
+fn process_has_exited(process: Option<HANDLE>) -> bool {
+    let Some(process) = process else {
+        return false;
+    };
     // SAFETY: every caller supplies the live synchronization handle retained
     // from construction. A zero-time wait observes state without blocking.
     (unsafe { WaitForSingleObject(process, 0) }) == WAIT_OBJECT_0
@@ -697,7 +707,10 @@ struct CaptureTarget {
     hwnd: usize,
     owner_pid: u32,
     owner_thread_id: u32,
-    owner_process: ProcessHandle,
+    /// `None` when the owner could not be opened for synchronization; see
+    /// [`process_has_exited`]. Reported once by [`WgcCaptureSource::from_device`].
+    owner_process: Option<ProcessHandle>,
+    owner_process_error: Option<windows::core::Error>,
     watch: WindowLifetimeWatch,
 }
 
@@ -714,7 +727,14 @@ impl CaptureTarget {
         if owner_thread_id == 0 || owner_pid == 0 {
             return Err(WgcCaptureSourceError::InvalidWindow);
         }
-        let owner_process = ProcessHandle::open(owner_pid)?;
+        // A capturable window does not imply an openable owner: an elevated or
+        // otherwise protected process denies even `PROCESS_SYNCHRONIZE`. WGC
+        // still captures it, so losing owner-exit detection degrades teardown
+        // to the always-safe full path rather than refusing the target.
+        let (owner_process, owner_process_error) = match ProcessHandle::open(owner_pid) {
+            Ok(handle) => (Some(handle), None),
+            Err(error) => (None, Some(error)),
+        };
 
         let identity = TargetIdentity {
             hwnd,
@@ -730,6 +750,7 @@ impl CaptureTarget {
             owner_pid,
             owner_thread_id,
             owner_process,
+            owner_process_error,
             watch,
         })
     }
@@ -964,8 +985,8 @@ struct WgcRuntime {
     target: TargetIdentity,
     /// Stable handle opened while the owner was alive. Unlike reopening its
     /// pid during `Drop`, this cannot confuse access denial or pid reuse with
-    /// process termination.
-    owner_process: HANDLE,
+    /// process termination. `None` when the owner refused one at all.
+    owner_process: Option<HANDLE>,
     target_destroyed: Arc<AtomicBool>,
     item: GraphicsCaptureItem,
     frame_pool: Direct3D11CaptureFramePool,
@@ -984,7 +1005,7 @@ struct WgcRuntime {
 impl WgcRuntime {
     fn start(
         target: TargetIdentity,
-        owner_process: HANDLE,
+        owner_process: Option<HANDLE>,
         target_destroyed: Arc<AtomicBool>,
         device: &ID3D11Device,
         include_cursor: bool,
@@ -1125,7 +1146,9 @@ impl Drop for WgcRuntime {
         // there the session retires in milliseconds, and leaking it instead
         // crashes the process on the way out. The synchronization handle was
         // opened while the original owner was alive, so access denial or pid
-        // reuse at teardown cannot choose the leak path accidentally.
+        // reuse at teardown cannot choose the leak path accidentally — and an
+        // owner that never granted one takes this normal path too, which is
+        // the safe direction to be wrong in.
         if process_has_exited(self.owner_process) {
             return;
         }
@@ -1339,7 +1362,7 @@ mod tests {
     #[test]
     fn retained_process_handle_distinguishes_live_and_exited_owners() {
         let current = ProcessHandle::open(std::process::id()).expect("open current process");
-        assert!(!process_has_exited(current.raw()));
+        assert!(!process_has_exited(Some(current.raw())));
 
         let mut child = std::process::Command::new("cmd")
             .args(["/C", "exit", "0"])
@@ -1347,7 +1370,11 @@ mod tests {
             .expect("spawn short-lived owner process");
         let retained = ProcessHandle::open(child.id()).expect("retain child process identity");
         child.wait().expect("wait for owner process");
-        assert!(process_has_exited(retained.raw()));
+        assert!(process_has_exited(Some(retained.raw())));
+
+        // An owner that never granted a handle is not evidence of exit, so it
+        // must take the full-teardown path rather than the leak shortcut.
+        assert!(!process_has_exited(None));
     }
 
     #[test]
