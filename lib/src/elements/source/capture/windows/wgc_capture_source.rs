@@ -524,10 +524,13 @@ impl SourceElement for WgcCaptureSource {
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
         let _apartment = WinRtApartment::initialize()?;
         let hwnd = HWND(self.hwnd as *mut _);
-        let runtime = WgcRuntime::start(
+        let target = TargetIdentity {
             hwnd,
-            self.owner_pid,
-            self.owner_thread_id,
+            owner_pid: self.owner_pid,
+            owner_thread_id: self.owner_thread_id,
+        };
+        let runtime = WgcRuntime::start(
+            target,
             self.owner_process.raw(),
             self.target_watch.flag(),
             &self.device,
@@ -663,12 +666,31 @@ fn process_has_exited(process: HANDLE) -> bool {
     (unsafe { WaitForSingleObject(process, 0) }) == WAIT_OBJECT_0
 }
 
-fn target_still_matches(hwnd: HWND, owner_pid: u32, owner_thread_id: u32) -> bool {
-    let mut current_pid = 0;
-    // SAFETY: reads the identity currently associated with this by-value HWND
-    // and writes to the live pid out-parameter without retaining either.
-    let current_thread_id = unsafe { GetWindowThreadProcessId(hwnd, Some(&mut current_pid)) };
-    current_thread_id == owner_thread_id && current_pid == owner_pid
+/// The capture target, identified by more than its raw handle value. Windows
+/// recycles `HWND` values, so the owner pid/tid read while the original window
+/// was alive is what distinguishes it from a later window that happened to be
+/// given the same number.
+#[derive(Clone, Copy)]
+struct TargetIdentity {
+    hwnd: HWND,
+    owner_pid: u32,
+    owner_thread_id: u32,
+}
+
+impl TargetIdentity {
+    /// Whether the handle still resolves to the exact window this source was
+    /// opened on. A destroyed window reports thread zero, so this answers
+    /// `false` for destruction and for reuse by another thread alike — the
+    /// destroy hook covers the remaining case of the same UI thread recreating
+    /// a window under the same handle value.
+    fn still_matches(self) -> bool {
+        let mut current_pid = 0;
+        // SAFETY: reads the identity currently associated with this by-value
+        // HWND and writes to the live pid out-parameter, retaining neither.
+        let current_thread_id =
+            unsafe { GetWindowThreadProcessId(self.hwnd, Some(&mut current_pid)) };
+        current_thread_id == self.owner_thread_id && current_pid == self.owner_pid
+    }
 }
 
 struct CaptureTarget {
@@ -694,7 +716,12 @@ impl CaptureTarget {
         }
         let owner_process = ProcessHandle::open(owner_pid)?;
 
-        if watch.destroyed() || !target_still_matches(hwnd, owner_pid, owner_thread_id) {
+        let identity = TargetIdentity {
+            hwnd,
+            owner_pid,
+            owner_thread_id,
+        };
+        if watch.destroyed() || !identity.still_matches() {
             return Err(WgcCaptureSourceError::InvalidWindow);
         }
 
@@ -932,6 +959,9 @@ impl Drop for WindowLifetimeWatch {
 }
 
 struct WgcRuntime {
+    /// The window and owner identity this session was started on, rechecked
+    /// on every wake-up — see [`WgcRuntime::target_gone`].
+    target: TargetIdentity,
     /// Stable handle opened while the owner was alive. Unlike reopening its
     /// pid during `Drop`, this cannot confuse access denial or pid reuse with
     /// process termination.
@@ -953,9 +983,7 @@ struct WgcRuntime {
 
 impl WgcRuntime {
     fn start(
-        hwnd: HWND,
-        owner_pid: u32,
-        owner_thread_id: u32,
+        target: TargetIdentity,
         owner_process: HANDLE,
         target_destroyed: Arc<AtomicBool>,
         device: &ID3D11Device,
@@ -964,21 +992,20 @@ impl WgcRuntime {
         if !GraphicsCaptureSession::IsSupported()? {
             return Err(WgcCaptureSourceError::Unsupported);
         }
-        if target_destroyed.load(Ordering::Acquire)
-            || process_has_exited(owner_process)
-            || !target_still_matches(hwnd, owner_pid, owner_thread_id)
-        {
+        let gone = || {
+            target_destroyed.load(Ordering::Acquire)
+                || !target.still_matches()
+                || process_has_exited(owner_process)
+        };
+        if gone() {
             return Err(WgcCaptureSourceError::TargetGone);
         }
         let interop: IGraphicsCaptureItemInterop = factory::<GraphicsCaptureItem, _>()?;
         // SAFETY: the lifetime watcher was installed before construction read
         // the original owner identity, and the checks on both sides of this
         // call reject any destruction or reuse that races item creation.
-        let item: GraphicsCaptureItem = unsafe { interop.CreateForWindow(hwnd)? };
-        if target_destroyed.load(Ordering::Acquire)
-            || process_has_exited(owner_process)
-            || !target_still_matches(hwnd, owner_pid, owner_thread_id)
-        {
+        let item: GraphicsCaptureItem = unsafe { interop.CreateForWindow(target.hwnd)? };
+        if gone() {
             return Err(WgcCaptureSourceError::TargetGone);
         }
         let size = item.Size()?;
@@ -1008,6 +1035,7 @@ impl WgcRuntime {
         let (frame_tx, frame_rx) = bounded(1);
         let closed = Arc::new(AtomicBool::new(false));
         let mut runtime = Self {
+            target,
             owner_process,
             target_destroyed,
             item,
@@ -1043,9 +1071,17 @@ impl WgcRuntime {
         Ok(runtime)
     }
 
+    /// Cheapest-first, and deliberately three independent signals rather than
+    /// one: `Closed` is documented but has been observed not to fire for a
+    /// forceful kill or a plain `WM_CLOSE`; the destroy hook is delivered
+    /// asynchronously and a higher-integrity owner may never reach it; and the
+    /// identity read is the only one that costs nothing to be wrong about. A
+    /// missed target death parks the loop emitting the last frame forever, so
+    /// each signal stays as a backstop for the others.
     fn target_gone(&self) -> bool {
         self.closed.load(Ordering::Acquire)
             || self.target_destroyed.load(Ordering::Acquire)
+            || !self.target.still_matches()
             || process_has_exited(self.owner_process)
     }
 
@@ -1263,6 +1299,41 @@ mod tests {
         }
         assert!(destroyed.load(Ordering::Acquire));
         DESTROY_WATCH.with(|watch| *watch.borrow_mut() = None);
+    }
+
+    /// The destroy hook is asynchronous and can be missed, so the identity
+    /// read is what has to keep answering for a window that went away while
+    /// its owner kept running — otherwise the source loop parks forever on
+    /// its last frame.
+    #[test]
+    fn window_identity_stops_matching_once_the_window_is_destroyed() {
+        let window = TestWindow::create().expect("create test window");
+        let mut owner_pid = 0;
+        // SAFETY: reads the identity of the live window this test owns and
+        // fills a live pid out-parameter.
+        let owner_thread_id = unsafe { GetWindowThreadProcessId(window.0, Some(&mut owner_pid)) };
+        let identity = TargetIdentity {
+            hwnd: window.0,
+            owner_pid,
+            owner_thread_id,
+        };
+        assert!(identity.still_matches());
+
+        // A different owner never matches, even for this very much alive
+        // handle — that is the HWND-reuse case.
+        assert!(
+            !TargetIdentity {
+                owner_pid: owner_pid.wrapping_add(1),
+                ..identity
+            }
+            .still_matches()
+        );
+
+        drop(window);
+        assert!(
+            !identity.still_matches(),
+            "a destroyed window must stop matching its recorded identity"
+        );
     }
 
     #[test]
