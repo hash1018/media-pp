@@ -479,6 +479,18 @@ impl SourceElement for WgcCaptureSource {
         let mut latest = None;
         let mut visible_size = None;
         let mut schedule = PeriodicSchedule::new(self.frame_interval, Instant::now());
+        // `Closed` is the documented signal, but it does not reliably fire
+        // for every way a target window goes away (observed: neither a
+        // forceful process kill nor a plain `WM_CLOSE` ever raised it in
+        // practice, leaving the loop parked with no EOS and no error). Treat
+        // the handle no longer resolving as equally conclusive; this is
+        // cheap enough to check on every wake-up, which happens at least
+        // every `POLL_GRANULARITY` even without new frames.
+        let target_gone = |runtime: &WgcRuntime| -> bool {
+            // SAFETY: reads only whether `hwnd` still identifies a window;
+            // it retains no caller storage.
+            runtime.closed.load(Ordering::Acquire) || !unsafe { IsWindow(Some(hwnd)) }.as_bool()
+        };
         loop {
             let outcome = drain_control(control, self, bus)?;
             if outcome.stopped {
@@ -488,7 +500,7 @@ impl SourceElement for WgcCaptureSource {
             if outcome.paused_for > Duration::ZERO {
                 schedule.resume_after_pause(outcome.paused_for, Instant::now());
             }
-            if runtime.closed.load(Ordering::Acquire) {
+            if target_gone(&runtime) {
                 pp_info!(self, "target window closed; forwarding EOS");
                 return self.push_eos();
             }
@@ -499,7 +511,7 @@ impl SourceElement for WgcCaptureSource {
                     // `Closed` shares this bounded wake-up channel with
                     // `FrameArrived`. Do not touch the frame pool after the
                     // close notification won the race.
-                    if runtime.closed.load(Ordering::Acquire) {
+                    if target_gone(&runtime) {
                         pp_info!(self, "target window closed; forwarding EOS");
                         return self.push_eos();
                     }
@@ -512,7 +524,7 @@ impl SourceElement for WgcCaptureSource {
                 }
             }
 
-            if runtime.closed.load(Ordering::Acquire) {
+            if target_gone(&runtime) {
                 pp_info!(self, "target window closed; forwarding EOS");
                 return self.push_eos();
             }
