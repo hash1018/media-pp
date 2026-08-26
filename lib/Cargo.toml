@@ -121,6 +121,10 @@ wgc-capture = [
     "windows/Graphics_Capture",
     "windows/Graphics_DirectX_Direct3D11",
     "windows/Win32_Graphics_Dxgi",
+    # One never-released MTA reference keeps the WinRT component DLLs that
+    # windows-rs caches activation factories from loaded; see
+    # `retain_process_mta`.
+    "windows/Win32_System_Com",
     # Teardown has to tell a destroyed window apart from a dead owning
     # process; see `WgcRuntime::drop`.
     "windows/Win32_System_Threading",

@@ -1,6 +1,6 @@
 use std::{
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, Once,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     thread::{self, JoinHandle},
@@ -38,6 +38,7 @@ use windows::{
             },
         },
         System::{
+            Com::CoIncrementMTAUsage,
             Threading::{
                 GetCurrentThreadId, OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
             },
@@ -760,12 +761,48 @@ impl Drop for CaptureFrameGuard {
     }
 }
 
+/// Holds one never-released reference to the process's multithreaded
+/// apartment.
+///
+/// `windows-rs` caches every WinRT activation factory in a process-global slot
+/// and deliberately leaks the reference (see `FactoryCache::call`), which is
+/// only sound while the component DLL behind it stays loaded. The *last*
+/// `RoUninitialize` in a process unloads it — `GraphicsCapture.dll` here — and
+/// leaves that cached pointer dangling; the next
+/// `GraphicsCaptureSession::IsSupported` then jumps through a freed vtable and
+/// takes the process down with an access violation. A host that stops one
+/// window capture and starts another reaches exactly that, because each source
+/// thread owns its own apartment and the one it leaves behind is routinely the
+/// process's last.
+///
+/// One MTA reference that is never decremented removes the condition instead of
+/// racing it: the apartment a source thread joins and leaves is no longer the
+/// last one, so nothing gets unloaded out from under the cache. It is taken
+/// before the first `RoInitialize` and intentionally kept for the life of the
+/// process, because the cached factories it protects live that long too.
+fn retain_process_mta() {
+    static MTA: Once = Once::new();
+    MTA.call_once(|| {
+        // SAFETY: takes one reference to the process MTA and returns its
+        // cookie by value, borrowing nothing. The cookie is dropped without
+        // `CoDecrementMTAUsage` on purpose — see this function's docs.
+        if let Err(error) = unsafe { CoIncrementMTAUsage() } {
+            // Nothing here can proceed more safely by reacting to this: the
+            // apartment initialization that follows reports its own failure,
+            // and a capture that somehow works anyway is no worse off than it
+            // was before this guard existed.
+            debug_assert!(false, "CoIncrementMTAUsage failed: {error}");
+        }
+    });
+}
+
 struct WinRtApartment {
     uninitialize: bool,
 }
 
 impl WinRtApartment {
     fn initialize() -> std::result::Result<Self, WgcCaptureSourceError> {
+        retain_process_mta();
         // SAFETY: initializes WinRT for this source thread. A successful call
         // is balanced by this guard's Drop on the same thread. Changed mode
         // means the caller already initialized another apartment, which is
@@ -1382,6 +1419,37 @@ mod tests {
                 .any(|entry| entry.id == first_id || entry.id == second_id),
             "dropping a watch must unregister it"
         );
+    }
+
+    /// Starting a capture, stopping it, and starting another one must not take
+    /// the process down.
+    ///
+    /// Each source thread owns its own WinRT apartment, so the one a stopped
+    /// capture leaves behind is routinely the process's last — which used to
+    /// unload `GraphicsCapture.dll` while `windows-rs` still held a cached,
+    /// deliberately leaked activation factory pointing into it. The next
+    /// `IsSupported` call then read a freed vtable and died with an access
+    /// violation. No window or capture session is needed to reproduce that:
+    /// the factory is what goes stale.
+    ///
+    /// Another live MTA reference elsewhere in the process hides the unload, so
+    /// this can pass for the wrong reason in a busy parallel run. It cannot
+    /// fail for the wrong reason, and it is exact when run on its own.
+    #[test]
+    fn winrt_factories_survive_an_apartment_cycle() {
+        fn probe_in_a_fresh_apartment() {
+            thread::spawn(|| {
+                let apartment = WinRtApartment::initialize().expect("initialize WinRT apartment");
+                // Primes, then later re-reads, the process-global factory cache.
+                let _ = GraphicsCaptureSession::IsSupported();
+                drop(apartment);
+            })
+            .join()
+            .expect("apartment thread must not panic or fault");
+        }
+
+        probe_in_a_fresh_apartment();
+        probe_in_a_fresh_apartment();
     }
 
     /// Capture runs on the source thread while everything past the first
