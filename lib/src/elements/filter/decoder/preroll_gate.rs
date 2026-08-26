@@ -126,7 +126,7 @@ impl PrerollGate {
     }
 
     /// Admits one decoded sample, retaining at most one pre-target candidate.
-    pub(super) fn admit(&mut self, buffer: MediaBuffer) -> Option<MediaBuffer> {
+    fn admit(&mut self, buffer: MediaBuffer) -> Option<MediaBuffer> {
         if !self.active {
             return Some(buffer);
         }
@@ -134,10 +134,10 @@ impl PrerollGate {
             return None;
         }
         let Some(target_ns) = self.target_ns else {
-            return self.deliver(buffer);
+            return Some(buffer);
         };
         let Some(time_base) = self.time_base else {
-            return self.deliver(buffer);
+            return Some(buffer);
         };
         let (pts, audio_end_ns) = match &buffer {
             MediaBuffer::Video(frame) => (frame.pts(), None),
@@ -154,11 +154,11 @@ impl PrerollGate {
                 (frame.pts(), end)
             }
             _ => {
-                return self.deliver(buffer);
+                return Some(buffer);
             }
         };
         let Some(pts) = pts else {
-            return self.deliver(buffer);
+            return Some(buffer);
         };
         let start_ns = pts.rescale(time_base, NANOS);
 
@@ -166,7 +166,7 @@ impl PrerollGate {
         // requested instant; do not discard the whole frame just because its
         // first sample precedes the target.
         if audio_end_ns.is_some_and(|end| start_ns <= target_ns && end > target_ns) {
-            return self.deliver(buffer);
+            return Some(buffer);
         }
 
         if start_ns < target_ns {
@@ -179,29 +179,56 @@ impl PrerollGate {
         } else {
             buffer
         };
-        self.deliver(selected)
+        Some(selected)
     }
 
-    /// Forwards the selected sample and keeps the active preroll closed. The
-    /// following Pause/Resume control clears this state after every terminal
-    /// has independently accepted its own sample.
-    fn deliver(&mut self, buffer: MediaBuffer) -> Option<MediaBuffer> {
+    /// Pushes one admitted sample and closes the active preroll only after the
+    /// downstream path accepts it. A recoverable push error leaves the gate
+    /// open so the next decoded sample can satisfy the preroll instead.
+    pub(super) fn push_admitted<E>(
+        &mut self,
+        buffer: MediaBuffer,
+        push: impl FnOnce(MediaBuffer) -> Result<(), E>,
+    ) -> Result<(), E> {
+        if let Some(buffer) = self.admit(buffer) {
+            push(buffer)?;
+            self.commit_delivery();
+        }
+        Ok(())
+    }
+
+    /// Keeps the active preroll closed after its selected sample was accepted.
+    /// The following Pause/Resume control clears this state after every
+    /// terminal has independently accepted its own sample.
+    fn commit_delivery(&mut self) {
+        if !self.active {
+            return;
+        }
         self.target_ns = None;
         self.delivered = true;
         self.candidate = None;
-        Some(buffer)
     }
 
     /// Selects the last decoded pre-target sample when EOS proves no later
     /// sample can cover the requested instant.
-    pub(super) fn finish_on_eos(&mut self) -> Option<MediaBuffer> {
+    fn finish_on_eos(&mut self) -> Option<MediaBuffer> {
         if !self.active || self.delivered {
             return None;
         }
-        self.target_ns = None;
-        self.candidate
-            .take()
-            .and_then(|candidate| self.deliver(candidate))
+        self.candidate.take()
+    }
+
+    /// Pushes the EOF fallback candidate with the same transactional delivery
+    /// rule as [`Self::push_admitted`].
+    pub(super) fn push_eos_candidate<E>(
+        &mut self,
+        push: impl FnOnce(MediaBuffer) -> Result<(), E>,
+    ) -> Result<(), E> {
+        if let Some(candidate) = self.finish_on_eos() {
+            push(candidate)?;
+            self.commit_delivery();
+        }
+        Ok(())
     }
 }
 
@@ -321,6 +348,7 @@ mod tests {
             panic!("selected a non-video buffer");
         };
         assert_eq!(selected.pts(), Some(1_967));
+        gate.commit_delivery();
         assert!(gate.admit(video(2_067)).is_none());
         assert!(gate.admit(video(2_100)).is_none());
 
@@ -334,10 +362,37 @@ mod tests {
         gate.begin(&PrerollContext::new([]));
 
         assert!(gate.admit(video(1_000)).is_some());
+        gate.commit_delivery();
         assert!(gate.admit(video(1_033)).is_none());
 
         gate.clear();
         assert!(gate.admit(video(1_067)).is_some());
+    }
+
+    #[test]
+    fn a_failed_downstream_push_leaves_the_gate_open_for_the_next_sample() {
+        let mut gate = PrerollGate::default();
+        gate.observe_packet(&millis(ffmpeg::Rational(1, 1_000)));
+        gate.begin(&PrerollContext::for_seek([], Duration::from_secs(2)));
+
+        let failed: Result<(), &'static str> =
+            gate.push_admitted(video(2_000), |_| Err("simulated downstream failure"));
+        assert_eq!(failed, Err("simulated downstream failure"));
+
+        let mut accepted_pts = None;
+        gate.push_admitted(video(2_033), |buffer| {
+            let MediaBuffer::Video(frame) = buffer else {
+                panic!("selected a non-video buffer");
+            };
+            accepted_pts = frame.pts();
+            Ok::<_, &'static str>(())
+        })
+        .expect("the next sample is retried");
+        assert_eq!(accepted_pts, Some(2_033));
+        assert!(
+            gate.admit(video(2_067)).is_none(),
+            "a successful retry closes the active preroll"
+        );
     }
 
     #[test]

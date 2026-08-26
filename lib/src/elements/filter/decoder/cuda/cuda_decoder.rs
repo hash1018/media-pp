@@ -177,11 +177,10 @@ impl CudaDecoder {
                     // Reassigning `frame` releases a suppressed one right here,
                     // returning its fixed-pool surface a whole branch earlier
                     // than dropping it downstream would.
-                    if let Some(frame) =
-                        self.preroll_gate.admit(MediaBuffer::Video(Arc::new(frame)))
-                    {
-                        self.pad.push(frame)?;
-                    }
+                    self.preroll_gate
+                        .push_admitted(MediaBuffer::Video(Arc::new(frame)), |frame| {
+                            self.pad.push(frame)
+                        })?;
                     frame = self.pool.get();
                 }
                 Err(error) if is_codec_drain_boundary(&error) => break,
@@ -239,9 +238,8 @@ impl Sink for CudaDecoder {
                     .inspect_err(|error| pp_error!(self, "send_eof failed: {error}"))
                     .map_err(CudaDecoderError::from)?;
                 self.drain()?;
-                if let Some(candidate) = self.preroll_gate.finish_on_eos() {
-                    self.pad.push(candidate)?;
-                }
+                self.preroll_gate
+                    .push_eos_candidate(|candidate| self.pad.push(candidate))?;
                 self.pad.push(MediaBuffer::Eos)
             }
             other => {

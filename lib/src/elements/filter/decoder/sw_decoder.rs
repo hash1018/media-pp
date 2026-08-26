@@ -184,9 +184,8 @@ impl Sink for SwDecoder {
                         drain_audio(decoder, &mut self.pad, &mut self.preroll_gate)?;
                     }
                 }
-                if let Some(candidate) = self.preroll_gate.finish_on_eos() {
-                    self.pad.push(candidate)?;
-                }
+                self.preroll_gate
+                    .push_eos_candidate(|candidate| self.pad.push(candidate))?;
                 self.pad.push(MediaBuffer::Eos)
             }
             other => {
@@ -236,9 +235,7 @@ fn drain_video(
                 // Reassigning `frame` releases the suppressed one right here.
                 // On a fixed hardware pool that returns its surface a whole
                 // branch earlier than dropping it downstream would.
-                if let Some(frame) = gate.admit(MediaBuffer::Video(Arc::new(frame))) {
-                    pad.push(frame)?;
-                }
+                gate.push_admitted(MediaBuffer::Video(Arc::new(frame)), |frame| pad.push(frame))?;
                 frame = pool.get();
             }
             Err(error) if is_codec_drain_boundary(&error) => break,
@@ -257,9 +254,7 @@ fn drain_audio(
     loop {
         match decoder.receive_frame(&mut frame) {
             Ok(()) => {
-                if let Some(frame) = gate.admit(MediaBuffer::Audio(Arc::new(frame))) {
-                    pad.push(frame)?;
-                }
+                gate.push_admitted(MediaBuffer::Audio(Arc::new(frame)), |frame| pad.push(frame))?;
                 frame = ffmpeg::frame::Audio::empty();
             }
             Err(error) if is_codec_drain_boundary(&error) => break,
