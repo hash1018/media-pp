@@ -17,8 +17,8 @@ use crate::{
     control::ControlMsg,
     element::{Element, ElementType, Sink, element_pp_log},
     elements::SubmitError,
-    error::Result,
-    platform::windows::d3d11va::d3d11va_texture,
+    error::{D3d11SharedDeviceError, Result},
+    platform::windows::{d3d11::protect_shared_device, d3d11va::d3d11va_texture},
     pool::UnboundObjectPoolRef,
 };
 
@@ -153,6 +153,12 @@ pub enum D3d11RendererError {
 
     #[error("windows error: {0}")]
     Windows(#[from] windows::core::Error),
+
+    /// The renderer's device cannot be shared across a pipeline's threads.
+    /// Detected at construction, reported on the first frame — see
+    /// [`D3d11Renderer::new`].
+    #[error(transparent)]
+    SharedDevice(#[from] D3d11SharedDeviceError),
 }
 
 /// Terminal sink that submits `Pixel::D3D11` video frames to a
@@ -172,12 +178,13 @@ pub enum D3d11RendererError {
 /// immediate-context `ID3D11Multithread` protection serializes calls from
 /// multiple threads. As long as every element funnels its GPU commands through
 /// that one context, the driver executes them in submission order — no
-/// separate sync object is needed. Capture sources in this crate enable that
-/// protection and reject
-/// `D3D11_CREATE_DEVICE_SINGLETHREADED`; other device providers must make the
-/// same guarantee. This only holds because everything shares the *same*
-/// context; a second `ID3D11Device` in the mix would need its own explicit
-/// synchronization, same as the D3D12 case.
+/// separate sync object is needed. That protection is *off* by default, so
+/// every element in this crate that is handed an `ID3D11Device` — this one
+/// included — enables it and rejects `D3D11_CREATE_DEVICE_SINGLETHREADED`
+/// rather than assuming some other element got there first. This only holds
+/// because everything shares the *same* context; a second `ID3D11Device` in
+/// the mix would need its own explicit synchronization, same as the D3D12
+/// case.
 ///
 /// Dispatches on the *texture's own* `DXGI_FORMAT` (via `GetDesc`), not on
 /// any extra tag carried by the frame. `D3d11Upload` and GPU screen capture
@@ -193,22 +200,41 @@ pub struct D3d11Renderer {
     /// `D3d12Renderer`'s own `device` field docs for why (fetched from
     /// `inner` itself rather than a separate constructor parameter).
     device: ID3D11Device,
+    /// Why the renderer's device could not be made safe to share, if it
+    /// could not. This constructor is infallible, and it is not worth
+    /// breaking that for a condition every other element already reports —
+    /// so the answer is kept and returned by the first `consume`, before a
+    /// single frame has been submitted.
+    shared_device_error: Option<D3d11SharedDeviceError>,
 }
 
 impl D3d11Renderer {
     /// `renderer` is whatever the caller's own [`D3d11FrameRenderer`]
     /// implementation is — already constructed and pointed at a real
     /// window/device by the time it gets here.
+    ///
+    /// A renderer is the far side of a `Queue` almost by definition, so its
+    /// device gets the same multithread protection every other D3D11 element
+    /// applies to the device it is handed. A device that refuses it fails the
+    /// first `consume` rather than this call.
     pub fn new(name: impl Into<String>, renderer: Box<dyn D3d11FrameRenderer>) -> Self {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::D3d11Renderer, &name, None);
-        pp_info!(pp_log: &pp_log, "created");
         let device = renderer.device();
+        let shared_device_error = match protect_shared_device(&device) {
+            Ok(_) => None,
+            Err(error) => {
+                pp_error!(pp_log: &pp_log, "device cannot be shared: {error}");
+                Some(error)
+            }
+        };
+        pp_info!(pp_log: &pp_log, "created");
         Self {
             name,
             pp_log,
             inner: renderer,
             device,
+            shared_device_error,
         }
     }
 
@@ -319,6 +345,9 @@ impl Sink for D3d11Renderer {
     }
 
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+        if let Some(error) = &self.shared_device_error {
+            return Err(error.clone().into());
+        }
         let MediaBuffer::Video(frame) = buf else {
             return Ok(());
         };

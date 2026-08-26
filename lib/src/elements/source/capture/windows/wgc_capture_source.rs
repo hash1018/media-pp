@@ -65,12 +65,9 @@ use crate::{
     contract::{MediaKind, MemoryDomain, OutputContract, PortContract},
     control::{ControlReceiver, drain_control},
     element::{Element, ElementType, Source, SourceElement, element_pp_log},
-    error::{D3d11FrameWrapError, Result},
+    error::{D3d11FrameWrapError, D3d11SharedDeviceError, Result},
     pad::SrcPad,
-    platform::windows::{
-        d3d11::{MultithreadProtectionError, enable_multithread_protection},
-        d3d11va::wrap_d3d11_texture,
-    },
+    platform::windows::{d3d11::protect_shared_device, d3d11va::wrap_d3d11_texture},
     pool::UnboundObjectPool,
     pp_log::{PpLog, pp_error, pp_info, pp_warn},
     schedule::PeriodicSchedule,
@@ -109,11 +106,9 @@ pub enum WgcCaptureSourceError {
     /// WGC interop requires a BGRA-capable D3D11 device.
     #[error("the supplied D3D11 device wasn't created with D3D11_CREATE_DEVICE_BGRA_SUPPORT")]
     MissingBgraSupport,
-    /// A device created for use from only one thread cannot cross a Queue boundary.
-    #[error(
-        "the D3D11 device was created with D3D11_CREATE_DEVICE_SINGLETHREADED and cannot be shared by capture and downstream elements"
-    )]
-    SingleThreadedDevice,
+    /// The capture device cannot be shared across a pipeline's threads.
+    #[error(transparent)]
+    SharedDevice(#[from] D3d11SharedDeviceError),
     /// The helper thread that watches the original HWND could not start.
     #[error("cannot start the WGC window lifetime watcher: {0}")]
     WindowWatcherUnavailable(String),
@@ -269,8 +264,8 @@ impl WgcCaptureSource {
             )?;
         }
         let device = device.expect("D3D11CreateDevice succeeded without producing a device");
-        let context = context.expect("D3D11CreateDevice succeeded without producing a context");
-        protect_context(&device, &context)?;
+        drop(context);
+        let context = protect_shared_device(&device)?;
         let returned_device = device.clone();
         let source = Self::from_device(name, target, options, device, context);
 
@@ -300,9 +295,7 @@ impl WgcCaptureSource {
         if creation_flags & D3D11_CREATE_DEVICE_BGRA_SUPPORT.0 == 0 {
             return Err(WgcCaptureSourceError::MissingBgraSupport);
         }
-        // SAFETY: returns the shared immediate context owned by this device.
-        let context = unsafe { device.GetImmediateContext()? };
-        protect_context(device, &context)?;
+        let context = protect_shared_device(device)?;
         Ok(Self::from_device(
             name,
             target,
@@ -757,18 +750,6 @@ impl CaptureTarget {
             watch,
         })
     }
-}
-
-fn protect_context(
-    device: &ID3D11Device,
-    context: &ID3D11DeviceContext,
-) -> std::result::Result<(), WgcCaptureSourceError> {
-    enable_multithread_protection(device, context).map_err(|error| match error {
-        MultithreadProtectionError::SingleThreadedDevice => {
-            WgcCaptureSourceError::SingleThreadedDevice
-        }
-        MultithreadProtectionError::Windows(error) => error.into(),
-    })
 }
 
 struct CaptureFrameGuard(Direct3D11CaptureFrame);
@@ -1401,6 +1382,30 @@ mod tests {
                 .any(|entry| entry.id == first_id || entry.id == second_id),
             "dropping a watch must unregister it"
         );
+    }
+
+    /// Capture runs on the source thread while everything past the first
+    /// `Queue` runs on another, so a device that promised single-threaded use
+    /// has to be refused at `open_with_device` — before a window is watched or
+    /// a WGC object exists.
+    #[test]
+    fn rejects_a_single_threaded_device() {
+        let Some(device) = crate::test_support::try_single_threaded_d3d11_device() else {
+            return;
+        };
+        let window = TestWindow::create().expect("create capture target window");
+        let result = WgcCaptureSource::open_with_device(
+            "capture",
+            window.0,
+            WgcCaptureOptions::default(),
+            &device,
+        );
+        assert!(matches!(
+            result,
+            Err(WgcCaptureSourceError::SharedDevice(
+                D3d11SharedDeviceError::SingleThreaded
+            ))
+        ));
     }
 
     /// The destroy hook is asynchronous and can be missed, so the identity

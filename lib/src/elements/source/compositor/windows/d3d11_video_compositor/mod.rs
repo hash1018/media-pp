@@ -50,10 +50,10 @@ use crate::{
     control::{ControlMsg, ControlReceiver, drain_control},
     element::{Element, ElementType, Sink, Source, SourceElement, element_pp_log},
     elements::VideoCompositorOptions,
-    error::{D3d11FrameWrapError, Result},
+    error::{D3d11FrameWrapError, D3d11SharedDeviceError, Result},
     pad::SrcPad,
     platform::windows::{
-        d3d11::compile_shader,
+        d3d11::{compile_shader, protect_shared_device},
         d3d11va::{d3d11va_texture, wrap_d3d11_texture},
     },
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
@@ -78,6 +78,10 @@ pub enum D3d11VideoCompositorError {
     /// A Direct3D device, resource, or command operation failed.
     #[error("windows error: {0}")]
     Windows(#[from] windows::core::Error),
+
+    /// The device cannot be shared across a pipeline's threads.
+    #[error(transparent)]
+    SharedDevice(#[from] D3d11SharedDeviceError),
 
     /// The output canvas dimensions are zero or exceed the safety limit.
     #[error(
@@ -625,6 +629,9 @@ impl D3d11VideoCompositor {
         options: VideoCompositorOptions,
     ) -> std::result::Result<(Self, D3d11VideoCompositorHandle), D3d11VideoCompositorError> {
         validate_output_options(options)?;
+        // Every input arrives from another thread, and the compositor draws
+        // through the same immediate context those producers write with.
+        protect_shared_device(device)?;
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::D3d11VideoCompositor, &name, None);
         let shared = Arc::new(D3d11CompositorShared {

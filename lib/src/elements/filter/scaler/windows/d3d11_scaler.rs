@@ -25,9 +25,12 @@ use crate::{
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
     control::ControlMsg,
     element::{Element, ElementType, Sink, Source, element_pp_log},
-    error::Result,
+    error::{D3d11SharedDeviceError, Result},
     pad::SrcPad,
-    platform::windows::d3d11va::{d3d11va_texture, wrap_d3d11_texture},
+    platform::windows::{
+        d3d11::protect_shared_device,
+        d3d11va::{d3d11va_texture, wrap_d3d11_texture},
+    },
     pool::UnboundObjectPool,
 };
 
@@ -38,6 +41,10 @@ pub enum D3d11ScalerError {
     /// A Direct3D device, resource, or video-processor operation failed.
     #[error("windows error: {0}")]
     Windows(#[from] windows::core::Error),
+
+    /// The device cannot be shared across a pipeline's threads.
+    #[error(transparent)]
+    SharedDevice(#[from] D3d11SharedDeviceError),
 
     /// The input frame is not backed by a D3D11 texture.
     #[error("D3d11Scaler only scales Pixel::D3D11 frames, got {0:?}")]
@@ -371,6 +378,10 @@ impl D3d11Scaler {
         if width == 0 || height == 0 {
             return Err(D3d11ScalerError::InvalidOutputDimensions { width, height });
         }
+        // This element sits behind a `Queue` more often than not, so the
+        // device has to be usable from a thread other than the one that
+        // created it before any command is issued.
+        protect_shared_device(device)?;
         // The caller's own mistake is diagnosed before the adapter's
         // capabilities are: a context belonging to another device is
         // reported as `ContextDeviceMismatch` even on hardware with no
@@ -758,6 +769,32 @@ mod tests {
         fn control(&mut self, _msg: ControlMsg) -> Result<()> {
             Ok(())
         }
+    }
+
+    /// A filter is the classic far side of a `Queue`, so a device that
+    /// promised single-threaded use has to be refused where it is handed
+    /// over, not where the race would show up.
+    #[test]
+    fn rejects_a_single_threaded_device() {
+        let Some(device) = crate::test_support::try_single_threaded_d3d11_device() else {
+            return;
+        };
+        // SAFETY: returns the one immediate context owned by this live device.
+        let context = unsafe { device.GetImmediateContext() }.expect("immediate context");
+        let result = D3d11Scaler::new(
+            "scale",
+            &device,
+            Arc::new(Mutex::new(context)),
+            D3d11ScalerFormat::Preserve,
+            160,
+            120,
+        );
+        assert!(matches!(
+            result,
+            Err(D3d11ScalerError::SharedDevice(
+                D3d11SharedDeviceError::SingleThreaded
+            ))
+        ));
     }
 
     fn capture(element: &mut dyn Source) -> Arc<Mutex<Vec<MediaBuffer>>> {

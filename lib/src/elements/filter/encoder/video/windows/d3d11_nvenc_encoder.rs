@@ -23,10 +23,11 @@ use crate::{
     control::ControlMsg,
     element::{Element, ElementType, Sink, Source, element_pp_log},
     elements::filter::is_codec_drain_boundary,
-    error::Result,
+    error::{D3d11SharedDeviceError, Result},
     pad::SrcPad,
     platform::{
         ffmpeg::AvBufferRef,
+        windows::d3d11::protect_shared_device,
         windows::d3d11va::{create_hw_device_ctx, d3d11va_texture, or_frames_bind_flags},
     },
 };
@@ -141,6 +142,10 @@ pub enum D3d11NvencEncoderError {
     /// A Direct3D resource or copy operation failed.
     #[error("windows error: {0}")]
     Windows(#[from] windows::core::Error),
+
+    /// The device cannot be shared across a pipeline's threads.
+    #[error(transparent)]
+    SharedDevice(#[from] D3d11SharedDeviceError),
 
     /// FFmpeg rejected encoder, hardware-context, frame, or packet processing.
     #[error("ffmpeg error: {0}")]
@@ -406,6 +411,10 @@ impl D3d11NvencEncoder {
     ) -> std::result::Result<Self, D3d11NvencEncoderError> {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::D3d11NvencEncoder, &name, None);
+        // This element sits behind a `Queue` more often than not, so the
+        // device has to be usable from a thread other than the one that
+        // created it before any command is issued.
+        protect_shared_device(device)?;
 
         let context_device = {
             let context = context

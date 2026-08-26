@@ -127,6 +127,12 @@ impl D3d11GpuContext {
             // `GetImmediateContext()` on the same shared device — see
             // `CaptureMode::Gpu`'s own docs — and crashed without runtime
             // multithread protection. Setting it explicitly made that stable.
+            //
+            // `media-pp` now enables the same protection itself the moment
+            // any of its elements is handed this device, so this call is no
+            // longer what makes the difference. It stays because this context
+            // is drawn with here, in this crate, before any of those elements
+            // necessarily exists.
             let _ = context
                 .cast::<windows::Win32::Graphics::Direct3D11::ID3D11Multithread>()?
                 .SetMultithreadProtected(true);

@@ -219,9 +219,12 @@ On Windows, `DxgiCaptureSource` captures a monitor or desktop region, while
 Enable `wgc-capture`, then either build downstream D3D11 elements from the
 device returned by `WgcCaptureSource::open`, or inject an existing shared
 device through `open_with_device`. `DxgiCaptureSource` exposes the same choice.
-Both capture sources reject `D3D11_CREATE_DEVICE_SINGLETHREADED` and enable the
-shared immediate context's D3D11 runtime multithread protection before capture
-and a queued downstream element can issue commands concurrently.
+Every element here that accepts an `ID3D11Device` — both capture sources, the
+D3D11 decoder, scaler, chroma key, download, NVENC encoder, video compositor,
+and renderer — rejects `D3D11_CREATE_DEVICE_SINGLETHREADED` and enables the
+shared immediate context's runtime multithread protection before issuing any
+command, because a `Queue` puts the elements on either side of it on different
+threads and that context is not free-threaded by default.
 The WGC source intentionally does not show `GraphicsCapturePicker`; selecting
 a window in application UI and resolving its `HWND` remain the application's
 responsibility. See `screen_preview_gpu` for both shared-device paths.

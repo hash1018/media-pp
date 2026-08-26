@@ -39,12 +39,9 @@ use crate::{
     control::{ControlReceiver, drain_control},
     element::{Element, ElementType, Source, SourceElement, element_pp_log},
     elements::VideoFormat,
-    error::{D3d11FrameWrapError, Result},
+    error::{D3d11FrameWrapError, D3d11SharedDeviceError, Result},
     pad::SrcPad,
-    platform::windows::{
-        d3d11::{MultithreadProtectionError, enable_multithread_protection},
-        d3d11va::wrap_d3d11_texture,
-    },
+    platform::windows::{d3d11::protect_shared_device, d3d11va::wrap_d3d11_texture},
     pool::UnboundObjectPool,
     schedule::PeriodicSchedule,
 };
@@ -106,11 +103,9 @@ pub enum DxgiCaptureSourceError {
     #[error("the supplied D3D11 device belongs to a different adapter than the capture area")]
     DeviceAdapterMismatch,
 
-    /// A device created for use from only one thread cannot cross a Queue boundary.
-    #[error(
-        "the D3D11 device was created with D3D11_CREATE_DEVICE_SINGLETHREADED and cannot be shared by capture and downstream elements"
-    )]
-    SingleThreadedDevice,
+    /// The capture device cannot be shared across a pipeline's threads.
+    #[error(transparent)]
+    SharedDevice(#[from] D3d11SharedDeviceError),
 
     /// Cursor composition was requested for a multi-output region.
     #[error("include_cursor isn't supported when CaptureArea::Region spans more than one output")]
@@ -508,12 +503,9 @@ impl DxgiCaptureSource {
         // Either create the device there or validate the caller's device
         // before opening any duplication.
         let adapter = &targets[0].0;
-        let (device, context) = if let Some(device) = supplied_device {
+        let device = if let Some(device) = supplied_device {
             validate_device_adapter(device, adapter)?;
-            // SAFETY: returns the shared immediate context owned by this live
-            // caller-supplied device.
-            let context = unsafe { device.GetImmediateContext()? };
-            (device.clone(), context)
+            device.clone()
         } else {
             let mut device: Option<ID3D11Device> = None;
             let mut context: Option<ID3D11DeviceContext> = None;
@@ -533,12 +525,9 @@ impl DxgiCaptureSource {
                     Some(&mut context),
                 )?;
             }
-            (
-                device.expect("D3D11CreateDevice succeeded without producing a device"),
-                context.expect("D3D11CreateDevice succeeded without producing a context"),
-            )
+            device.expect("D3D11CreateDevice succeeded without producing a device")
         };
-        protect_context(&device, &context)?;
+        let context = protect_shared_device(&device)?;
         // Cloned before `device` moves into `Self` below — the only copy
         // handed back to the caller (a COM ref-count bump, not a deep
         // copy).
@@ -1065,18 +1054,6 @@ impl DxgiCaptureSource {
         *frame = wrap_d3d11_texture(texture, self.width, self.height)?;
         Ok(frame)
     }
-}
-
-fn protect_context(
-    device: &ID3D11Device,
-    context: &ID3D11DeviceContext,
-) -> std::result::Result<(), DxgiCaptureSourceError> {
-    enable_multithread_protection(device, context).map_err(|error| match error {
-        MultithreadProtectionError::SingleThreadedDevice => {
-            DxgiCaptureSourceError::SingleThreadedDevice
-        }
-        MultithreadProtectionError::Windows(error) => error.into(),
-    })
 }
 
 impl Element for DxgiCaptureSource {

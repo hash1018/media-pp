@@ -20,9 +20,9 @@ use crate::{
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
     control::ControlMsg,
     element::{Element, ElementType, Sink, Source, element_pp_log},
-    error::Result,
+    error::{D3d11SharedDeviceError, Result},
     pad::SrcPad,
-    platform::windows::d3d11va::d3d11va_texture,
+    platform::windows::{d3d11::protect_shared_device, d3d11va::d3d11va_texture},
     pool::UnboundObjectPool,
 };
 
@@ -33,6 +33,11 @@ pub enum D3d11DownloadError {
     /// Creating, copying, or mapping a D3D11 staging texture failed.
     #[error("windows error: {0}")]
     Windows(#[from] windows::core::Error),
+
+    /// The device cannot be shared across a pipeline's threads.
+    #[error(transparent)]
+    SharedDevice(#[from] D3d11SharedDeviceError),
+
     /// The input frame is not backed by a D3D11 texture.
 
     #[error("D3d11Download only accepts Pixel::D3D11 frames, got {0:?}")]
@@ -157,6 +162,10 @@ impl D3d11Download {
     ) -> std::result::Result<Self, D3d11DownloadError> {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::D3d11Download, &name, None);
+        // This element sits behind a `Queue` more often than not, so the
+        // device has to be usable from a thread other than the one that
+        // created it before any command is issued.
+        protect_shared_device(device)?;
         let staging = create_staging_texture(device, width, height)?;
         let pad = SrcPad::with_contract(
             format!("{name}_src"),

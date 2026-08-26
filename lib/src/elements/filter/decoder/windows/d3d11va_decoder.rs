@@ -10,9 +10,11 @@ use crate::{
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
     control::ControlMsg,
     element::{Element, ElementType, Sink, Source, element_pp_log},
+    error::D3d11SharedDeviceError,
     pad::SrcPad,
     platform::{
         ffmpeg::AvBufferRef,
+        windows::d3d11::protect_shared_device,
         windows::d3d11va::{create_hw_device_ctx, or_frames_bind_flags},
     },
     pool::UnboundObjectPool,
@@ -51,6 +53,10 @@ pub enum D3d11DecoderError {
     /// the internally retained accurate-seek candidate would overflow it.
     #[error("invalid downstream hardware-frame budget: {0}")]
     InvalidSurfaceBudget(i32),
+
+    /// The device cannot be shared across a pipeline's threads.
+    #[error(transparent)]
+    SharedDevice(#[from] D3d11SharedDeviceError),
 }
 
 /// Decodes one video stream's `Packet`s into GPU-resident `Video` frames
@@ -115,6 +121,10 @@ impl D3d11Decoder {
         let extra_hw_frames = hw_surface_budget(downstream_hw_frames).ok_or(
             D3d11DecoderError::InvalidSurfaceBudget(downstream_hw_frames),
         )?;
+        // FFmpeg reaches this device's immediate context for the video
+        // context it decodes through, and decoded frames are consumed on
+        // another thread past the next `Queue`.
+        protect_shared_device(device)?;
 
         // SAFETY: `device` is a live D3D11 device; the returned FFmpeg
         // context takes its own COM reference as documented by the helper.

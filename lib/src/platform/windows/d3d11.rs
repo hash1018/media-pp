@@ -15,38 +15,43 @@ use windows::{
     core::Interface,
 };
 
-/// Why an immediate context could not be made safe for cross-thread use.
-#[derive(Debug)]
-pub(crate) enum MultithreadProtectionError {
-    /// The device explicitly opted out of all D3D11 cross-thread use.
-    SingleThreadedDevice,
-    /// The immediate context did not expose the standard protection interface.
-    Windows(windows::core::Error),
-}
+use crate::error::D3d11SharedDeviceError;
 
-/// Enables the runtime critical section around every immediate-context call.
+/// Prepares `device` to be shared by the elements of one pipeline and returns
+/// the immediate context they all have to funnel their GPU commands through.
 ///
-/// D3D11 device methods are free-threaded, but the one immediate context shared
-/// by a device is not. Pipeline queues deliberately move downstream work to
-/// another thread, so a device crossing an element boundary must have this
-/// protection before either side starts issuing context commands.
-pub(crate) fn enable_multithread_protection(
+/// D3D11 device methods are free-threaded; the single immediate context a
+/// device owns is not. A `Queue` deliberately puts the elements on either side
+/// of it on different threads, so every entry point in this crate that accepts
+/// a caller-owned device routes it through here first — the whole fence-free
+/// design of this D3D11 stack rests on the runtime serializing those calls, and
+/// that serialization is off by default.
+///
+/// Enabling is idempotent, so it does not matter which element gets there
+/// first, and the result is read back rather than assumed: a device that ends
+/// up unprotected must fail loudly at construction instead of racing later.
+pub(crate) fn protect_shared_device(
     device: &ID3D11Device,
-    context: &ID3D11DeviceContext,
-) -> Result<(), MultithreadProtectionError> {
+) -> Result<ID3D11DeviceContext, D3d11SharedDeviceError> {
     // SAFETY: reads immutable creation metadata from a live device.
     let flags = unsafe { device.GetCreationFlags() };
     if flags & D3D11_CREATE_DEVICE_SINGLETHREADED.0 != 0 {
-        return Err(MultithreadProtectionError::SingleThreadedDevice);
+        return Err(D3d11SharedDeviceError::SingleThreaded);
     }
-    let multithread: ID3D11Multithread = context
-        .cast()
-        .map_err(MultithreadProtectionError::Windows)?;
+    // SAFETY: returns the one immediate context owned by this live device.
+    let context = unsafe { device.GetImmediateContext()? };
+    let multithread: ID3D11Multithread = context.cast()?;
     // SAFETY: `multithread` is the live immediate context's standard runtime
-    // synchronization interface. Enabling protection is process-local and
-    // does not borrow caller storage.
-    let _ = unsafe { multithread.SetMultithreadProtected(true) };
-    Ok(())
+    // synchronization interface. Both calls are process-local and borrow
+    // nothing; `SetMultithreadProtected` returns the previous setting, which
+    // says nothing about whether the new one took, hence the read back.
+    unsafe {
+        let _ = multithread.SetMultithreadProtected(true);
+        if !multithread.GetMultithreadProtected().as_bool() {
+            return Err(D3d11SharedDeviceError::ProtectionRefused);
+        }
+    }
+    Ok(context)
 }
 
 /// Compiles one HLSL entry point at runtime, turning a compiler diagnostic
@@ -110,68 +115,34 @@ pub(crate) unsafe fn compile_shader(
 
 #[cfg(test)]
 mod tests {
-    use windows::Win32::Graphics::{
-        Direct3D::D3D_DRIVER_TYPE_HARDWARE,
-        Direct3D11::{
-            D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_FLAG, D3D11_SDK_VERSION,
-            D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Multithread,
-        },
-    };
+    use windows::Win32::Graphics::Direct3D11::ID3D11Multithread;
 
     use super::*;
-
-    fn try_device(single_threaded: bool) -> Option<(ID3D11Device, ID3D11DeviceContext)> {
-        let mut device = None;
-        let mut context = None;
-        let flags = D3D11_CREATE_DEVICE_FLAG(
-            D3D11_CREATE_DEVICE_BGRA_SUPPORT.0
-                | if single_threaded {
-                    D3D11_CREATE_DEVICE_SINGLETHREADED.0
-                } else {
-                    0
-                },
-        );
-        // SAFETY: the default hardware adapter and feature levels are used;
-        // both output slots are correctly typed and live for the call.
-        let result = unsafe {
-            D3D11CreateDevice(
-                None,
-                D3D_DRIVER_TYPE_HARDWARE,
-                Default::default(),
-                flags,
-                None,
-                D3D11_SDK_VERSION,
-                Some(&mut device),
-                None,
-                Some(&mut context),
-            )
-        };
-        if let Err(error) = result {
-            eprintln!("skipping: D3D11CreateDevice failed on this machine: {error}");
-            return None;
-        }
-        Some((device.unwrap(), context.unwrap()))
-    }
+    use crate::test_support::{try_d3d11_device, try_single_threaded_d3d11_device};
 
     #[test]
     fn enables_runtime_protection_on_a_multithread_capable_device() {
-        let Some((device, context)) = try_device(false) else {
+        let Some((device, _context)) = try_d3d11_device() else {
             return;
         };
-        enable_multithread_protection(&device, &context).expect("enable protection");
+        let context = protect_shared_device(&device).expect("protect the shared device");
         let multithread: ID3D11Multithread = context.cast().expect("multithread interface");
         // SAFETY: reads one boolean property from the live context interface.
         assert!(unsafe { multithread.GetMultithreadProtected() }.as_bool());
+
+        // Idempotent: whichever element reaches the device second must not be
+        // told the device is unusable.
+        protect_shared_device(&device).expect("protect an already protected device");
     }
 
     #[test]
     fn rejects_a_device_that_promised_single_threaded_use() {
-        let Some((device, context)) = try_device(true) else {
+        let Some(device) = try_single_threaded_d3d11_device() else {
             return;
         };
         assert!(matches!(
-            enable_multithread_protection(&device, &context),
-            Err(MultithreadProtectionError::SingleThreadedDevice)
+            protect_shared_device(&device),
+            Err(D3d11SharedDeviceError::SingleThreaded)
         ));
     }
 }

@@ -81,6 +81,50 @@ pub(crate) fn try_d3d11_device() -> Option<(
     ))
 }
 
+/// A hardware D3D11 device created with `D3D11_CREATE_DEVICE_SINGLETHREADED`.
+///
+/// Every entry point here that accepts a caller-owned device has to refuse one
+/// of these, because the flag promises the runtime that the device is used from
+/// a single thread and a pipeline cannot keep that promise. Skips the same way
+/// as [`try_d3d11_device`].
+#[cfg(all(target_os = "windows", feature = "d3d11"))]
+pub(crate) fn try_single_threaded_d3d11_device()
+-> Option<windows::Win32::Graphics::Direct3D11::ID3D11Device> {
+    use windows::Win32::Graphics::{
+        Direct3D::D3D_DRIVER_TYPE_HARDWARE,
+        Direct3D11::{
+            D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_FLAG,
+            D3D11_CREATE_DEVICE_SINGLETHREADED, D3D11_SDK_VERSION, D3D11CreateDevice,
+        },
+    };
+
+    let mut device = None;
+    let mut context = None;
+    // SAFETY: null adapter/software pointers select the hardware driver path,
+    // feature levels use D3D defaults, and `device`/`context` are live,
+    // correctly typed out-parameters.
+    let result = unsafe {
+        D3D11CreateDevice(
+            None,
+            D3D_DRIVER_TYPE_HARDWARE,
+            Default::default(),
+            D3D11_CREATE_DEVICE_FLAG(
+                D3D11_CREATE_DEVICE_BGRA_SUPPORT.0 | D3D11_CREATE_DEVICE_SINGLETHREADED.0,
+            ),
+            None,
+            D3D11_SDK_VERSION,
+            Some(&mut device),
+            None,
+            Some(&mut context),
+        )
+    };
+    if let Err(error) = result {
+        eprintln!("skipping: D3D11CreateDevice failed on this machine: {error}");
+        return None;
+    }
+    device
+}
+
 /// A hardware D3D12 device for unit tests, with the same graceful skip
 /// behavior as the D3D11 test-device helper.
 #[cfg(all(target_os = "windows", feature = "d3d12"))]

@@ -93,6 +93,36 @@ impl ThreadSpawnError {
 #[error("FFmpeg could not allocate a D3D11 texture buffer wrapper")]
 pub struct D3d11FrameWrapError;
 
+/// A D3D11 device cannot be shared by the elements of one pipeline.
+///
+/// Every D3D11 element here funnels its GPU commands through the one immediate
+/// context its device owns, and a `Queue` deliberately puts elements on
+/// different threads. That context is not free-threaded, so each element
+/// enables the runtime's `ID3D11Multithread` protection on the device it is
+/// handed and refuses a device that cannot be protected — rather than leaving
+/// the resulting data race to a caller who has no way to see it.
+#[cfg(all(target_os = "windows", feature = "d3d11"))]
+#[derive(Debug, Clone, Error)]
+pub enum D3d11SharedDeviceError {
+    /// The device was created with `D3D11_CREATE_DEVICE_SINGLETHREADED`, which
+    /// promises the runtime that it is used from one thread only. Nothing can
+    /// make that device safe here; create it without the flag.
+    #[error(
+        "the D3D11 device was created with D3D11_CREATE_DEVICE_SINGLETHREADED and cannot be shared across a pipeline's threads"
+    )]
+    SingleThreaded,
+
+    /// The runtime accepted the request but the protection did not take
+    /// effect, so cross-thread use would still be undefined.
+    #[error("the D3D11 runtime did not enable multithread protection on the shared context")]
+    ProtectionRefused,
+
+    /// The immediate context or its `ID3D11Multithread` interface could not be
+    /// obtained from the device.
+    #[error("windows error: {0}")]
+    Windows(#[from] windows::core::Error),
+}
+
 /// Crate-wide error. Each element defines its own `{Element}Error` (see
 /// [`FileDemuxError`], [`SwDecoderError`], [`QueueError`]) for its own
 /// domain-specific failures; this enum just aggregates them so trait
@@ -120,6 +150,11 @@ pub enum Error {
     #[cfg(all(target_os = "windows", feature = "d3d11"))]
     #[error(transparent)]
     D3d11FrameWrapError(#[from] D3d11FrameWrapError),
+
+    /// A D3D11 device cannot be shared across a pipeline's threads.
+    #[cfg(all(target_os = "windows", feature = "d3d11"))]
+    #[error(transparent)]
+    D3d11SharedDeviceError(#[from] D3d11SharedDeviceError),
 
     /// A file demuxer operation failed.
     #[error(transparent)]
