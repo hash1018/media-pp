@@ -1149,17 +1149,25 @@ impl SourceElement for DxgiCaptureSource {
     }
 }
 
+/// Confirms `device` was created on the same adapter as `target`.
+///
+/// Compared by adapter LUID rather than by interface pointer: the two sides are
+/// obtained independently, so the same physical adapter can arrive as different
+/// COM objects, while the LUID stays stable across DXGI interface versions.
 fn validate_device_adapter(
     device: &ID3D11Device,
     target: &IDXGIAdapter1,
 ) -> std::result::Result<(), DxgiCaptureSourceError> {
     let dxgi_device: IDXGIDevice = device.cast()?;
-    // SAFETY: both interfaces are live and return owned adapter references or
-    // plain immutable descriptors. Adapter LUID is the stable identity used
-    // across independently obtained DXGI interface versions.
+    // SAFETY: `dxgi_device` is live, and `GetAdapter` hands back an owned
+    // reference this function is responsible for.
     let device_adapter = unsafe { dxgi_device.GetAdapter()? };
+    // SAFETY: `device_adapter` is the live reference returned just above, and
+    // `GetDesc` only fills a plain descriptor it does not retain.
     let device_luid = unsafe { device_adapter.GetDesc()? }.AdapterLuid;
     let target_adapter: windows::Win32::Graphics::Dxgi::IDXGIAdapter = target.cast()?;
+    // SAFETY: `target_adapter` is live from the cast above, and `GetDesc` again
+    // only fills a plain descriptor it does not retain.
     let target_luid = unsafe { target_adapter.GetDesc()? }.AdapterLuid;
     if (device_luid.LowPart, device_luid.HighPart) != (target_luid.LowPart, target_luid.HighPart) {
         return Err(DxgiCaptureSourceError::DeviceAdapterMismatch);

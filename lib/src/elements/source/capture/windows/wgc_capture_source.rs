@@ -257,7 +257,7 @@ impl WgcCaptureSource {
         validate_open(hwnd, &options)?;
         // SAFETY: this reads immutable creation metadata from a live device.
         let creation_flags = unsafe { device.GetCreationFlags() };
-        if creation_flags & D3D11_CREATE_DEVICE_BGRA_SUPPORT.0 as u32 == 0 {
+        if creation_flags & D3D11_CREATE_DEVICE_BGRA_SUPPORT.0 == 0 {
             return Err(WgcCaptureSourceError::MissingBgraSupport);
         }
         // SAFETY: returns the shared immediate context owned by this device.
@@ -480,6 +480,9 @@ impl SourceElement for WgcCaptureSource {
         // The caller can close or destroy the selected window after `open` and
         // before the source thread starts; reject that stale handle before
         // creating any WGC object.
+        //
+        // SAFETY: reads only whether `hwnd` still identifies a window; it
+        // retains no caller storage and a stale handle simply returns false.
         if !unsafe { IsWindow(Some(hwnd)) }.as_bool() {
             return Err(WgcCaptureSourceError::InvalidWindow.into());
         }
@@ -835,6 +838,10 @@ mod tests {
             // The built-in STATIC class avoids registering process-global
             // test state. The window stays owned by this test thread and is
             // destroyed before the thread returns.
+            //
+            // SAFETY: `STATIC` is a preregistered window class and every other
+            // argument is a plain value or absent parent/menu/instance, so this
+            // borrows nothing that has to outlive the call.
             let hwnd = unsafe {
                 CreateWindowExW(
                     WINDOW_EX_STYLE::default(),
@@ -857,6 +864,8 @@ mod tests {
 
     impl Drop for TestWindow {
         fn drop(&mut self) {
+            // SAFETY: `DestroyWindow` runs on the thread that created this
+            // window, as it requires, and the handle is destroyed exactly once.
             let _ = unsafe { DestroyWindow(self.0) };
         }
     }

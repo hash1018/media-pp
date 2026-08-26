@@ -1284,6 +1284,11 @@ mod d3d11 {
 
             let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
             let thread = thread::spawn(move || {
+                // SAFETY: `STATIC` is a preregistered window class and every
+                // other argument is a plain value or an absent
+                // parent/menu/instance, so nothing here has to outlive the
+                // call. This thread owns the window for its whole lifetime,
+                // which is what `GetMessageW`/`DestroyWindow` below require.
                 let created = unsafe {
                     CreateWindowExW(
                         WINDOW_EX_STYLE::default(),
@@ -1308,21 +1313,35 @@ mod d3d11 {
                     }
                 };
                 if ready_tx.send(Ok(hwnd.0 as usize)).is_err() {
+                    // SAFETY: this thread created `hwnd` and no one else has
+                    // seen it, so destroying it here happens exactly once on
+                    // the owning thread.
                     let _ = unsafe { DestroyWindow(hwnd) };
                     return;
                 }
 
                 let mut message = MSG::default();
+                // SAFETY: `message` is a live out-parameter and a `None` window
+                // filter asks for this thread's own queue, which is the queue
+                // the window above belongs to.
                 while unsafe { GetMessageW(&mut message, None, 0, 0) }.0 > 0 {
+                    // SAFETY: both calls only read the message `GetMessageW`
+                    // just filled in.
                     unsafe {
                         let _ = TranslateMessage(&message);
                         DispatchMessageW(&message);
                     }
+                    // SAFETY: reads only whether `hwnd` still identifies a
+                    // window; it retains no caller storage.
                     if !unsafe { IsWindow(Some(hwnd)) }.as_bool() {
                         break;
                     }
                 }
+                // SAFETY: same as the check above — a stale handle simply
+                // reports false.
                 if unsafe { IsWindow(Some(hwnd)) }.as_bool() {
+                    // SAFETY: the loop exited with the window still alive, so
+                    // this destroys it once, on the thread that created it.
                     let _ = unsafe { DestroyWindow(hwnd) };
                 }
             });
@@ -1348,6 +1367,9 @@ mod d3d11 {
                 UI::WindowsAndMessaging::{PostMessageW, WM_CLOSE},
             };
 
+            // SAFETY: posting is thread-agnostic by design — it queues
+            // `WM_CLOSE` for the owning thread's loop to dispatch rather than
+            // touching the window here. A stale handle only fails the call.
             let _ = unsafe {
                 PostMessageW(
                     Some(self.hwnd()),
@@ -1399,6 +1421,9 @@ mod d3d11 {
         // pool recreation path instead of relying on a cosmetic repaint.
         let cycle = CYCLE.fetch_add(1, Ordering::Relaxed);
         let width = if cycle.is_multiple_of(2) { 320 } else { 321 };
+        // SAFETY: `hwnd` is the live window owned by `WgcTestWindow`, which
+        // outlives this call, and `SWP_NOMOVE`/`SWP_NOZORDER` make the ignored
+        // position and z-order arguments inert.
         unsafe {
             SetWindowPos(
                 hwnd,
