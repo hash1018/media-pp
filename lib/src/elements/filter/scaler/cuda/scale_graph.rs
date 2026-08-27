@@ -31,13 +31,33 @@ struct GraphState {
     /// frame from a *different* pool — an upstream decoder rebuilt after a
     /// seek, say — still needs a rebuild, and comparing sizes alone would
     /// miss it.
-    input_frames_ctx: *mut ffi::AVBufferRef,
+    ///
+    /// The pool itself, not a reference to it: `av_buffer_ref` allocates a
+    /// fresh `AVBufferRef` per reference, so every frame in a pool carries a
+    /// different one to the same context. Comparing the references finds a
+    /// difference on every frame and rebuilds a graph that already matched.
+    input_frames_ctx: *const ffi::AVHWFramesContext,
     /// The colorimetry the link was configured with. libavfilter reports a
     /// frame whose tags differ from its link as "video frame properties
     /// changing on the fly" and keeps the link's own values, so a change here
     /// is a rebuild like any other.
     input_color_space: ffi::AVColorSpace,
     input_color_range: ffi::AVColorRange,
+}
+
+/// The pool an `AVBufferRef` refers to, rather than the reference itself.
+///
+/// Returns null for a null reference, which no live pool ever is, so a graph
+/// compared against it rebuilds rather than matching by accident.
+fn pool_of(frames_ctx: *mut ffi::AVBufferRef) -> *const ffi::AVHWFramesContext {
+    if frames_ctx.is_null() {
+        return std::ptr::null();
+    }
+    // SAFETY: a non-null hardware-frames `AVBufferRef` — which is what a
+    // validated CUDA frame's `hw_frames_ctx` is — has `data` pointing at its
+    // `AVHWFramesContext`, by FFmpeg's own definition. Only the pointer's
+    // identity is taken; it is never dereferenced past this.
+    unsafe { (*frames_ctx).data as *const ffi::AVHWFramesContext }
 }
 
 /// A lazily built `scale_cuda` graph. Construct it, then hand it frames; it
@@ -87,7 +107,7 @@ impl CudaScaleGraph {
                     && state.input_height == frame.height()
                     && state.output_width == width
                     && state.output_height == height
-                    && std::ptr::eq(state.input_frames_ctx, frames_ctx)
+                    && std::ptr::eq(state.input_frames_ctx, pool_of(frames_ctx))
                     && state.input_color_space == frame_color_space(frame)
                     && state.input_color_range == frame_color_range(frame)
             }
@@ -258,7 +278,7 @@ impl CudaScaleGraph {
             input_height: frame.height(),
             output_width: width,
             output_height: height,
-            input_frames_ctx: frames_ctx,
+            input_frames_ctx: pool_of(frames_ctx),
             input_color_space: frame_color_space(frame),
             input_color_range: frame_color_range(frame),
         });

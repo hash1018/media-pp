@@ -450,6 +450,53 @@ mod tests {
         Some(frame)
     }
 
+    /// Every frame in a pool carries its own `AVBufferRef` to the one
+    /// `AVHWFramesContext` behind it, because `av_buffer_ref` allocates a
+    /// fresh reference rather than sharing one. Comparing the references
+    /// therefore found a difference on every frame and rebuilt the graph for
+    /// a pool it was already configured for — about a frame's worth of work
+    /// each time, which surfaced as a compositor running at 60/N fps for N
+    /// layers rather than 60.
+    #[test]
+    fn a_second_reference_to_the_same_pool_reuses_the_graph() {
+        let Some((device, _cuda_lock)) = try_cuda_device() else {
+            return;
+        };
+        let Some(buffer) = cuda_frame(&device, 128, 128, 200, 0) else {
+            return;
+        };
+        let MediaBuffer::Video(frame) = &buffer else {
+            panic!("the upload produces a Video buffer");
+        };
+        // SAFETY: `frame` is a live CUDA frame from the upload above, so
+        // `hw_frames_ctx` is its own pool. Only the pointer is taken.
+        let first_ctx = unsafe { (*frame.as_ptr()).hw_frames_ctx };
+
+        // What every later frame from the same pool looks like: `av_frame_ref`
+        // takes its own reference to the same context, exactly as an upstream
+        // element handing on a pooled frame does.
+        let mut second = ffmpeg::frame::Video::empty();
+        // SAFETY: `frame` is the live frame above and the target is the empty
+        // local on the line before, so the two cannot alias.
+        unsafe { ffi::av_frame_ref(second.as_mut_ptr(), frame.as_ptr()) };
+        // SAFETY: `second` was just filled by `av_frame_ref` from a frame with
+        // a hardware context, so it carries one too.
+        let second_ctx = unsafe { (*second.as_ptr()).hw_frames_ctx };
+        assert!(
+            !std::ptr::eq(first_ctx, second_ctx),
+            "the two references must be distinct for this test to mean anything"
+        );
+
+        let mut graph = CudaScaleGraph::new(CudaScalerInterp::Bilinear);
+        graph
+            .scale(frame, first_ctx, 64, 64)
+            .expect("the first frame builds the graph");
+        assert!(
+            graph.matches(&second, second_ctx, 64, 64),
+            "a second reference to the same pool must not rebuild the graph"
+        );
+    }
+
     /// libavfilter keeps the colorimetry its link was configured with and
     /// reports every frame that disagrees as "video frame properties changing
     /// on the fly" — once per frame, for the whole run. The link is built
