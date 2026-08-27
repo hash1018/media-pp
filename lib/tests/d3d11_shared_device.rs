@@ -210,3 +210,140 @@ fn four_d3d11_elements_share_one_device_across_queue_boundaries() {
         frames.load(Ordering::Relaxed)
     );
 }
+
+/// A compositor keeps its configured rate while a desktop capture shares its
+/// device.
+///
+/// Sharing one device is not only about correctness — it is also a place one
+/// element can quietly take the others' throughput. `AcquireNextFrame` holds
+/// the device's own lock for as long as it waits, so a capture that waited
+/// out its whole frame interval inside that call stalled everything else on
+/// the device for most of every tick: a 60 fps compositor measured about 40,
+/// and dropping the capture to 30 fps — a longer wait each tick — took it to
+/// about 21. The rate asserted here is the compositor's, deliberately: it is
+/// what a recording would be made of, and it must not follow its input's.
+///
+/// Hardware test: skips when the machine has no desktop duplication.
+#[cfg(feature = "dxgi-capture")]
+#[test]
+fn a_capture_sharing_the_device_does_not_slow_the_compositor() {
+    use media_pp::{
+        color::Color,
+        elements::{
+            CaptureArea, CaptureMode, D3d11VideoCompositor, DxgiCaptureOptions, DxgiCaptureSource,
+            VideoCompositorOptions, VideoFit, VideoLayer, VideoRect,
+        },
+    };
+
+    const FPS: u32 = 60;
+    /// One second of measurement, less the ramp-up a first tick costs.
+    const MEASURED: Duration = Duration::from_millis(1500);
+    /// The regression showed as roughly two thirds of the configured rate, so
+    /// this sits above that and below what a healthy run reaches. A machine
+    /// too slow to composite 1080p60 at all would trip it, which is why the
+    /// canvas below is small.
+    const MINIMUM: f64 = 0.85;
+
+    media_pp::init().expect("initialize FFmpeg");
+    let Some((device, context)) = try_shared_device() else {
+        return;
+    };
+
+    // Composited at the capture's own resolution, which is the desktop's and
+    // not something this test picks. A smaller canvas does not reproduce the
+    // regression: the stall only shows once a composite tick is long enough
+    // to collide with the capture's, and a tiny canvas finishes inside
+    // whatever slice the capture leaves.
+    let (capture, format) = match DxgiCaptureSource::open_with_device(
+        "capture",
+        DxgiCaptureOptions {
+            area: CaptureArea::Output { output_index: 0 },
+            fps: FPS,
+            capture_mode: CaptureMode::Gpu,
+        },
+        &device,
+    ) {
+        Ok(opened) => opened,
+        Err(error) => {
+            eprintln!("skipping: no desktop duplication available here ({error})");
+            return;
+        }
+    };
+
+    let (compositor, handle) = D3d11VideoCompositor::new(
+        "compositor",
+        &device,
+        context.clone(),
+        VideoCompositorOptions {
+            width: format.width,
+            height: format.height,
+            frame_rate: ffmpeg_next::Rational::new(FPS as i32, 1),
+            background: Color::BLACK,
+        },
+    )
+    .expect("create the compositor");
+
+    let input = handle
+        .add_source(
+            "desktop",
+            VideoLayer {
+                fit: VideoFit::Stretch,
+                ..VideoLayer::new(VideoRect::new(0, 0, format.width, format.height))
+            },
+        )
+        .expect("register the capture's layer")
+        .expect("the compositor is still running");
+
+    let composited = Arc::new(AtomicUsize::new(0));
+    let counted = composited.clone();
+    let sink = AppSink::new("composited", move |buffer| {
+        if matches!(buffer, MediaBuffer::Video(_)) {
+            counted.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(())
+    });
+
+    let capture_pipeline = Pipeline::new("capture", capture, |source, ctx| {
+        let branch = ctx.branch().queue("captured", 4).to(input.sink)?;
+        ctx.attach(source, 0, branch)?;
+        Ok(())
+    })
+    .expect("wire the capture pipeline");
+    // Counted synchronously: a queue here would report its own worker's pace
+    // rather than the compositor's, which is the number under test.
+    let composite_pipeline = Pipeline::new("composite", compositor, |source, ctx| {
+        let branch = ctx.branch().to(Box::new(sink))?;
+        ctx.attach(source, 0, branch)?;
+        Ok(())
+    })
+    .expect("wire the compositing pipeline");
+
+    composite_pipeline.run().expect("start compositing");
+    capture_pipeline.run().expect("start capturing");
+    // Counted from after the first frames, so neither pipeline's start-up is
+    // charged against the rate.
+    std::thread::sleep(Duration::from_millis(300));
+    let started = std::time::Instant::now();
+    let before = composited.load(Ordering::Relaxed);
+    std::thread::sleep(MEASURED);
+    let measured = composited.load(Ordering::Relaxed) - before;
+    let elapsed = started.elapsed().as_secs_f64();
+    capture_pipeline.stop();
+    composite_pipeline.stop();
+
+    for pipeline in [&capture_pipeline, &composite_pipeline] {
+        let errors: Vec<_> = pipeline
+            .bus()
+            .iter()
+            .filter(|event| matches!(event, BusEvent::Error { .. }))
+            .collect();
+        assert!(errors.is_empty(), "unexpected pipeline errors: {errors:?}");
+    }
+
+    let rate = measured as f64 / elapsed;
+    assert!(
+        rate >= FPS as f64 * MINIMUM,
+        "the compositor produced {rate:.1} fps of its configured {FPS} while a capture \
+         shared its device"
+    );
+}
