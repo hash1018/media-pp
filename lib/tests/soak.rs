@@ -502,6 +502,95 @@ fn compositor_input_churn_does_not_grow_process_memory() {
     memory.assert_flat(1.0 * MIB);
 }
 
+/// A compositor left running, rather than built and torn down: what the
+/// scenarios above cannot see.
+///
+/// Answering a repeated picture with the one already composed is retention
+/// per *frame*, not per cycle. The compositor holds the picture it may offer
+/// again, and holds a replaced one until nothing references it any more —
+/// `buffer::picture_is_referenced`, checked on every composite. If that
+/// release ever fails to happen, this is where it shows: an output frame is
+/// a whole picture, so a retained one per tick at this rate is megabytes a
+/// second, and a cycle-driven scenario that runs for 150 ms would not notice.
+///
+/// The input changes on every frame, which is deliberately the case the
+/// repeat path cannot help with: every tick composes, every tick replaces
+/// what was held, and the queue behind it keeps some of those frames alive
+/// while it does. The still case retains strictly less.
+#[test]
+#[ignore = "soak test; run with --ignored"]
+fn a_running_compositor_does_not_grow_while_it_answers_frames() {
+    isolate!();
+    let _exclusive = common::exclusive();
+    media_pp::init().expect("ffmpeg init");
+    let (compositor, handle) = SwVideoCompositor::new(
+        "compositor",
+        VideoCompositorOptions {
+            width: WIDTH,
+            height: HEIGHT,
+            frame_rate: frame_rate(),
+            background: Color::new(16, 16, 16),
+        },
+    )
+    .expect("create the compositor");
+
+    let mut layer = VideoLayer::new(VideoRect::new(0, 0, WIDTH, HEIGHT));
+    layer.fit = VideoFit::Cover;
+    let input = handle
+        .add_source("moving", layer)
+        .expect("add a compositor input")
+        .expect("the compositor is alive");
+
+    let (counter, frames) = FrameCounter::new("counter");
+    let output = Pipeline::new("soak-running-compositor", compositor, |source, ctx| {
+        // A queue, so composited frames are still referenced when the next
+        // composite replaces them — with a synchronous sink nothing is ever
+        // held and the release has nothing to prove.
+        let branch = ctx.branch().queue("composited", 4).to(Box::new(counter))?;
+        ctx.attach(source, 0, branch)?;
+        Ok(())
+    })
+    .expect("wire the compositor output pipeline");
+    let feeder = Pipeline::new("soak-running-input", test_source("input"), {
+        let sink = input.sink;
+        move |source, ctx| {
+            let branch = ctx.branch().to(sink)?;
+            ctx.attach(source, 0, branch)?;
+            Ok(())
+        }
+    })
+    .expect("wire the compositor input pipeline");
+    output.run().unwrap();
+    feeder.run().unwrap();
+
+    let duration = soak_duration(20);
+    let sample_interval = Duration::from_secs(1);
+    let deadline = Instant::now() + duration;
+    let mut memory = Trend::private_bytes("running compositor private bytes");
+    // The first interval is the pools filling; every later one is steady
+    // state, which is the only part a trend can be read from.
+    thread::sleep(sample_interval);
+    settle();
+    let started = frames.load(Ordering::Relaxed);
+    while Instant::now() < deadline {
+        thread::sleep(sample_interval);
+        memory.sample();
+    }
+    let composited = frames.load(Ordering::Relaxed) - started;
+    feeder.finish();
+    output.finish();
+
+    assert!(
+        composited > 0,
+        "the compositor stopped emitting, so a flat trend proves nothing"
+    );
+    eprintln!("composited {composited} frames over {duration:?}");
+    // One retained 1280x720 BGRA frame is 3.5 MiB, so a per-tick leak is
+    // hundreds of times this slope; the budget is the allocator's own
+    // jitter, not a fraction of what would be leaked.
+    memory.assert_flat(0.5 * MIB);
+}
+
 /// A long segmented recording: one pipeline, many files. Rotation reopens a
 /// muxer per segment, which is the per-file allocation most likely to
 /// accumulate over a recording that runs for hours.
@@ -588,7 +677,7 @@ mod d3d11 {
     use std::{
         sync::{Arc, Mutex, atomic::Ordering},
         thread,
-        time::Duration,
+        time::{Duration, Instant},
     };
 
     use ffmpeg_next as ffmpeg;
@@ -607,9 +696,14 @@ mod d3d11 {
     use crate::common::{
         MIB, Trend, Unit, exclusive,
         gpu::{D3d11LiveObjects, try_d3d11_device, vram_bytes},
-        iterations, settle, try_test_video,
+        iterations, settle, soak_duration, try_test_video,
     };
     use crate::{HEIGHT, Teardown, WARMUP, WIDTH, frame_rate, test_source};
+
+    /// How long the running-compositor scenario feeds the graph before its
+    /// measurement window opens — see that scenario's own comment on the
+    /// driver allocation cache this waits out.
+    const WARMUP_SECS: Duration = Duration::from_secs(20);
 
     /// Deliberately not a multiple of the input size, so the scaler really
     /// scales, and even in both axes, which NV12 requires.
@@ -1040,6 +1134,141 @@ mod d3d11 {
             },
             |teardown| chroma_key_cycle(&device, &context, teardown),
         );
+    }
+
+    /// The GPU half of `a_running_compositor_does_not_grow_while_it_answers_frames`.
+    ///
+    /// What is retained here is a texture rather than a heap allocation, so
+    /// the gauges that matter are adapter memory and the device's live-object
+    /// count. A frame the compositor holds past its release — the picture it
+    /// may offer again, or one replaced while a queue still refers to it — is
+    /// a whole render target, and at this rate a per-tick retention is tens of
+    /// MiB a second. `D3d11Upload` answers repeats the same way, so its
+    /// retention is inside this window too.
+    ///
+    /// The input changes on every frame, deliberately: that is the case where
+    /// every tick composes, replaces what was held, and asks the release to
+    /// happen again.
+    #[test]
+    #[ignore = "soak test; run with --ignored"]
+    fn a_running_d3d11_compositor_does_not_grow_gpu_memory() {
+        isolate!();
+        let _exclusive = exclusive();
+        media_pp::init().expect("ffmpeg init");
+        let Some((device, context, live)) = try_d3d11_device() else {
+            return;
+        };
+
+        let (compositor, handle) = D3d11VideoCompositor::new(
+            "compositor",
+            &device,
+            context.clone(),
+            VideoCompositorOptions {
+                width: WIDTH,
+                height: HEIGHT,
+                frame_rate: frame_rate(),
+                background: Color::new(16, 16, 16),
+            },
+        )
+        .expect("build the compositor");
+        let layer_sink = handle
+            .add_source(
+                "moving",
+                VideoLayer::new(VideoRect::new(0, 0, WIDTH, HEIGHT)),
+            )
+            .expect("register the compositor input")
+            .expect("the compositor is alive")
+            .sink;
+
+        let input_device = device.clone();
+        let feeder = Pipeline::new("soak-running-d3d11-input", test_source("video"), {
+            move |source, ctx| {
+                let to_nv12 = SwScaler::new(
+                    "to-nv12",
+                    ffmpeg::format::Pixel::NV12,
+                    WIDTH,
+                    HEIGHT,
+                    ffmpeg::software::scaling::Flags::BILINEAR,
+                );
+                let upload = D3d11Upload::new("upload", &input_device, WIDTH, HEIGHT);
+                let branch = ctx.branch().pipe(to_nv12).pipe(upload).to(layer_sink)?;
+                ctx.attach(source, 0, branch)?;
+                Ok(())
+            }
+        })
+        .expect("wire the compositor input pipeline");
+
+        let (counter, frames) = FrameCounter::new("counter");
+        let output = Pipeline::new("soak-running-d3d11", compositor, |source, ctx| {
+            // As in the software scenario: without a queue nothing is ever
+            // still referenced when the next composite replaces it.
+            let branch = ctx.branch().queue("composited", 4).to(Box::new(counter))?;
+            ctx.attach(source, 0, branch)?;
+            Ok(())
+        })
+        .expect("wire the compositor output pipeline");
+        output.run().unwrap();
+        feeder.run().unwrap();
+
+        let duration = soak_duration(20);
+        let sample_interval = Duration::from_secs(1);
+        let mut memory = Trend::private_bytes("running d3d11 compositor private bytes");
+        let mut vram = Trend::new("running d3d11 compositor adapter memory", Unit::Bytes, {
+            let device = device.clone();
+            move || vram_bytes(&device)
+        });
+        let mut objects = live.map(Arc::new).map(|live| {
+            Trend::new(
+                "running d3d11 compositor live objects",
+                Unit::Objects,
+                move || live.count(),
+            )
+        });
+        // Far more warm-up than the software scenario, and measured rather
+        // than guessed: `D3d11Upload` allocates a texture per frame, and the
+        // user-mode driver keeps freed ones in its own allocation cache
+        // instead of returning the pages. Private bytes therefore climb
+        // about 4 MiB a second from a cold device and stop dead once that
+        // cache is saturated — a run that opened its window at one second
+        // measured +2.1 MiB/iter over the rise and flat over the rest of the
+        // same run. This waits for the plateau, which is what the scenario
+        // is about; `CAPTURE_WARMUP` documents the same driver behavior for
+        // the capture scenarios.
+        thread::sleep(WARMUP_SECS);
+        settle();
+        let started = frames.load(Ordering::Relaxed);
+        let deadline = Instant::now() + duration;
+        while Instant::now() < deadline {
+            thread::sleep(sample_interval);
+            memory.sample();
+            vram.sample();
+            if let Some(objects) = objects.as_mut() {
+                objects.sample();
+            }
+        }
+        let composited = frames.load(Ordering::Relaxed) - started;
+        feeder.finish();
+        output.finish();
+
+        assert!(
+            composited > 0,
+            "the compositor stopped emitting, so a flat trend proves nothing"
+        );
+        eprintln!("composited {composited} frames over {duration:?}");
+        memory.assert_flat(0.5 * MIB);
+        // One retained 1280x720 BGRA render target is 3.5 MiB.
+        vram.assert_flat(1.0 * MIB);
+        if let Some(objects) = objects {
+            objects.print();
+            eprintln!(
+                "  recorded, not asserted: a running graph creates D3D11 objects per frame — an \
+                 upload texture and the shader-resource views a draw binds — and dropping the \
+                 last reference only queues one for destruction, so this gauge climbs and then \
+                 falls back wholesale when the driver flushes. It measures that queue rather \
+                 than what this graph owns; the cycle scenarios above are where it is an \
+                 ownership gauge, and adapter memory carries the assertion here"
+            );
+        }
     }
 
     #[test]
