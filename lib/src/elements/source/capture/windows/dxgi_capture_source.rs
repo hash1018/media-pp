@@ -22,7 +22,7 @@ use windows::{
             Dxgi::{
                 Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC},
                 CreateDXGIFactory1, DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_WAIT_TIMEOUT,
-                DXGI_OUTDUPL_FRAME_INFO, DXGI_OUTDUPL_POINTER_SHAPE_INFO,
+                DXGI_OUTDUPL_FRAME_INFO, DXGI_OUTDUPL_MOVE_RECT, DXGI_OUTDUPL_POINTER_SHAPE_INFO,
                 DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR,
                 DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MASKED_COLOR,
                 DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME, IDXGIAdapter1, IDXGIDevice,
@@ -331,7 +331,11 @@ struct CaptureUnit {
     /// shader-bindable, not this one. Sized to this output's own
     /// resolution, not the final composite's — see `source_box` for the
     /// (possibly smaller) piece of it actually used.
-    staging_texture: ID3D11Texture2D,
+    ///
+    /// `None` where a frame goes straight into a composite instead: one
+    /// output under [`CaptureMode::Gpu`], where a surface of this element's
+    /// own would only be something to copy out of again.
+    staging_texture: Option<ID3D11Texture2D>,
     /// The sub-rectangle of `staging_texture`, in this output's own
     /// local pixel coordinates, that actually falls inside the
     /// requested capture area. The whole texture under
@@ -505,6 +509,16 @@ pub struct DxgiCaptureSource {
     picture_cursor: CursorState,
     /// Bumped every time `cursor_shape` is replaced — see [`CursorState`].
     cursor_shape_version: u64,
+    /// Scratch for the per-frame change metadata DXGI writes — see
+    /// [`DxgiCaptureSource::changed_regions`]. One buffer, grown to the
+    /// largest frame seen and reused, rather than an allocation per frame on
+    /// the path whose whole point is to stop copying per frame.
+    metadata: Vec<u8>,
+    /// Whether an acquired frame goes straight into a composite, with no
+    /// surface of this element's own in between: one output under
+    /// [`CaptureMode::Gpu`]. Settled at construction, since it is a property
+    /// of the capture area and the mode — see [`DxgiCaptureSource::open`].
+    direct: bool,
     /// Whether any unit has captured since the picture a repeat would offer
     /// again was built — the `composite` texture under
     /// [`CaptureMode::Gpu`], `last_picture`'s pixels under
@@ -625,6 +639,14 @@ impl DxgiCaptureSource {
         let returned_device = gpu_mode.then(|| device.clone());
         let dxgi_device: IDXGIDevice = device.cast()?;
 
+        // One output under [`CaptureMode::Gpu`] is the case where an acquired
+        // frame can go straight into a composite, with no surface of this
+        // element's own in between — see [`DxgiCaptureSource::poll_capture`].
+        // Several outputs cannot: a composite is only complete once every one
+        // of them has contributed, so each keeps its own latest image to be
+        // assembled from.
+        let direct = gpu_mode && targets.len() == 1;
+
         let mut units = Vec::with_capacity(targets.len());
         for (_, output, desktop_rect) in &targets {
             // SAFETY: output and DXGI device are live and originate from the
@@ -685,12 +707,19 @@ impl DxgiCaptureSource {
                 },
                 MiscFlags: 0,
             };
-            let mut staging_texture: Option<ID3D11Texture2D> = None;
-            // SAFETY: `staging_desc` is fully initialized for the selected
-            // mode, no initial data is supplied, and the output slot is live.
-            unsafe { device.CreateTexture2D(&staging_desc, None, Some(&mut staging_texture)) }?;
-            let staging_texture =
-                staging_texture.expect("CreateTexture2D succeeded without producing a texture");
+            let staging_texture = if direct {
+                // The frame goes into a composite instead, so this surface
+                // would only ever be copied out of into that same composite.
+                None
+            } else {
+                let mut staging_texture: Option<ID3D11Texture2D> = None;
+                // SAFETY: `staging_desc` is fully initialized for the selected
+                // mode, no initial data is supplied, and the output slot is live.
+                unsafe { device.CreateTexture2D(&staging_desc, None, Some(&mut staging_texture)) }?;
+                Some(
+                    staging_texture.expect("CreateTexture2D succeeded without producing a texture"),
+                )
+            };
 
             units.push(CaptureUnit {
                 duplication,
@@ -782,6 +811,8 @@ impl DxgiCaptureSource {
                 retired: Vec::new(),
                 picture_cursor: CursorState::default(),
                 cursor_shape_version: 0,
+                metadata: Vec::new(),
+                direct,
                 captured_since_picture: false,
             },
             VideoFormat {
@@ -804,6 +835,127 @@ impl DxgiCaptureSource {
     /// image yet — see [`CaptureUnit::has_captured`]'s own docs.
     fn all_captured(&self) -> bool {
         self.units.iter().all(|unit| unit.has_captured)
+    }
+
+    /// Which parts of `unit_index`'s output changed in the frame just
+    /// acquired, in that output's own pixel coordinates — or `None` for "copy
+    /// all of it", which is what a frame with no usable metadata means.
+    ///
+    /// Desktop Duplication reports this per frame, and most of what a desktop
+    /// does is small: a caret, a clock, a menu opening. Copying the whole
+    /// surface for it is 8 MiB at 1080p where the change is a few hundred
+    /// kilobytes, and that copy is the largest per-frame cost this element
+    /// has on a screen that *is* changing — the one case none of the repeat
+    /// handling can help with.
+    ///
+    /// Two lists describe a frame. The dirty rectangles are regions drawn
+    /// afresh. The move rectangles are regions the compositor blitted from
+    /// somewhere else in the previous frame — a scrolling window. Both are
+    /// answered here by copying that region out of the *acquired* texture,
+    /// which already holds the finished desktop image: a move is only an
+    /// optimization DXGI offers, never a region it left unwritten, so the
+    /// destination of one is exactly as copyable as a dirty rectangle. That
+    /// is what keeps this from needing D3D11's forbidden overlapping
+    /// same-resource copy, or a scratch texture to route one through.
+    fn changed_regions(
+        &mut self,
+        unit_index: usize,
+        info: &DXGI_OUTDUPL_FRAME_INFO,
+    ) -> Option<Vec<RECT>> {
+        let size = info.TotalMetadataBufferSize as usize;
+        if size == 0 || !self.units[unit_index].has_captured {
+            // No metadata to read, or nothing to add it to: the first frame
+            // of a duplication has to fill the whole surface, whatever the
+            // metadata says changed since a frame this element never saw.
+            return None;
+        }
+        if self.metadata.len() < size {
+            self.metadata.resize(size, 0);
+        }
+        let duplication = self.units[unit_index].duplication.clone();
+
+        let mut moves_bytes = 0u32;
+        // SAFETY: the buffer is at least `TotalMetadataBufferSize` long and
+        // correctly aligned for the move-rect array DXGI writes into it, and
+        // `moves_bytes` is a live out-parameter.
+        let moves = unsafe {
+            duplication.GetFrameMoveRects(
+                self.metadata.len() as u32,
+                self.metadata.as_mut_ptr().cast::<DXGI_OUTDUPL_MOVE_RECT>(),
+                &mut moves_bytes,
+            )
+        };
+        if moves.is_err() {
+            return None;
+        }
+        let move_count = moves_bytes as usize / size_of::<DXGI_OUTDUPL_MOVE_RECT>();
+        // SAFETY: DXGI wrote `moves_bytes` of move rectangles into the buffer
+        // above, so that many entries are initialized and owned by this call.
+        let moved: Vec<RECT> = unsafe {
+            std::slice::from_raw_parts(
+                self.metadata.as_ptr().cast::<DXGI_OUTDUPL_MOVE_RECT>(),
+                move_count,
+            )
+        }
+        .iter()
+        .map(|rect| rect.DestinationRect)
+        .collect();
+
+        // The dirty rectangles go after the move ones, which is what the
+        // single `TotalMetadataBufferSize` covers.
+        let dirty_offset = moves_bytes as usize;
+        let mut dirty_bytes = 0u32;
+        // SAFETY: the remaining buffer is what DXGI asked for, and
+        // `dirty_bytes` is a live out-parameter.
+        let dirty = unsafe {
+            duplication.GetFrameDirtyRects(
+                (self.metadata.len() - dirty_offset) as u32,
+                self.metadata.as_mut_ptr().add(dirty_offset).cast::<RECT>(),
+                &mut dirty_bytes,
+            )
+        };
+        if dirty.is_err() {
+            return None;
+        }
+        let dirty_count = dirty_bytes as usize / size_of::<RECT>();
+        // SAFETY: as above, for the dirty-rectangle half of the same buffer.
+        let dirty = unsafe {
+            std::slice::from_raw_parts(
+                self.metadata.as_ptr().add(dirty_offset).cast::<RECT>(),
+                dirty_count,
+            )
+        };
+
+        // Clipped to the piece of this output the caller actually asked for:
+        // nothing outside `source_box` is ever composited, so copying it
+        // would be work for pixels no frame will carry.
+        let source_box = self.units[unit_index].source_box;
+        let regions: Vec<RECT> = moved
+            .iter()
+            .chain(dirty)
+            .filter_map(|rect| clip_to_box(*rect, &source_box))
+            .collect();
+        // Nothing usable to copy — a frame that only moved the cursor is
+        // already handled before this is reached, so this means metadata that
+        // described nothing inside the captured area.
+        if regions.is_empty() {
+            return None;
+        }
+        // A change that covers most of the surface is cheaper to answer with
+        // the whole surface. Copying a sub-rectangle out of the acquired
+        // desktop texture costs measurably more per pixel than copying all of
+        // it — on this hardware, a screen-sized window repainting at 30 fps
+        // measured about four points of a core more through the rectangles
+        // than through the whole-resource copy, for pixels it would have
+        // copied anyway. Below the threshold that per-pixel premium is what
+        // buys the saving; above it, it is all there is.
+        let area: i64 = regions
+            .iter()
+            .map(|rect| i64::from(rect.right - rect.left) * i64::from(rect.bottom - rect.top))
+            .sum();
+        let captured = i64::from(source_box.right - source_box.left)
+            * i64::from(source_box.bottom - source_box.top);
+        (area * 4 < captured * 3).then_some(regions)
     }
 
     /// Refreshes `self.cursor_shape` from `unit_index`'s duplication
@@ -915,16 +1067,112 @@ impl DxgiCaptureSource {
             // unable to `AcquireNextFrame` again until it's torn down
             // entirely, so the copy's own result is captured instead of
             // propagated directly.
+            // What actually moved on this output, so the copy below is the
+            // size of the change rather than the size of the screen — see
+            // `changed_regions`.
+            let mut changed = self.changed_regions(index, &info);
+            // Where this frame lands. With one output on the GPU path that is
+            // a composite nothing is reading, which is the whole of the work:
+            // the frame is never copied again on its way out. A composite that
+            // is not the one drawn into last is missing everything that
+            // happened before this frame, so it takes the whole picture rather
+            // than what changed since.
+            let target = if self.direct {
+                let (composite, current) = self.composite_to_draw_into()?;
+                if !current {
+                    changed = None;
+                }
+                Some(composite)
+            } else {
+                None
+            };
             let copy_result: std::result::Result<(), DxgiCaptureSourceError> = (|| {
                 let texture: ID3D11Texture2D = resource.cast()?;
-                // SAFETY: acquired source and matching per-output staging
-                // texture belong to this context and have identical dimensions
-                // and format; the immediate context is source-thread confined.
-                unsafe {
-                    self.context.CopyResource(
-                        &self.units[index].staging_texture.cast::<ID3D11Resource>()?,
-                        &texture.cast::<ID3D11Resource>()?,
-                    );
+                let source: ID3D11Resource = texture.cast()?;
+                let destination: ID3D11Resource = match &target {
+                    Some(composite) => composite_resource(composite)?,
+                    None => self.units[index]
+                        .staging_texture
+                        .as_ref()
+                        .expect("a unit without a composite of its own has its own surface")
+                        .cast::<ID3D11Resource>()?,
+                };
+                let unit = &self.units[index];
+                // A unit's own surface mirrors its whole output, so a region
+                // lands where it came from. A composite holds only the piece
+                // that was asked for, at the offset that piece occupies in
+                // the capture area — the same mapping `source_box` and
+                // `dest_x`/`dest_y` describe for the assembled path.
+                let destination_of = |left: i32, top: i32| -> (u32, u32) {
+                    match &target {
+                        Some(_) => (
+                            unit.dest_x + (left as u32 - unit.source_box.left),
+                            unit.dest_y + (top as u32 - unit.source_box.top),
+                        ),
+                        None => (left as u32, top as u32),
+                    }
+                };
+                match &changed {
+                    None => match &target {
+                        // The composite is the capture area and the acquired
+                        // texture is the whole output; those are the same
+                        // extent only when the area is the whole output, so
+                        // the crop is taken explicitly.
+                        // SAFETY: source and destination belong to this
+                        // context, and `source_box` is the intersection
+                        // `open` computed, so it and its destination offset
+                        // are inside both textures.
+                        Some(_) => unsafe {
+                            let (x, y) = destination_of(
+                                unit.source_box.left as i32,
+                                unit.source_box.top as i32,
+                            );
+                            self.context.CopySubresourceRegion(
+                                &destination,
+                                0,
+                                x,
+                                y,
+                                0,
+                                &source,
+                                0,
+                                Some(&unit.source_box as *const D3D11_BOX),
+                            );
+                        },
+                        // SAFETY: acquired source and this unit's own surface
+                        // belong to this context and have identical dimensions
+                        // and format; the immediate context is source-thread
+                        // confined.
+                        None => unsafe { self.context.CopyResource(&destination, &source) },
+                    },
+                    Some(regions) => {
+                        for region in regions {
+                            let box_ = D3D11_BOX {
+                                left: region.left as u32,
+                                top: region.top as u32,
+                                front: 0,
+                                right: region.right as u32,
+                                bottom: region.bottom as u32,
+                                back: 1,
+                            };
+                            let (x, y) = destination_of(region.left, region.top);
+                            // SAFETY: as above, and every region was clipped
+                            // to `source_box` by `changed_regions`, so the box
+                            // and its destination offset are both inside the
+                            // two textures.
+                            unsafe {
+                                self.context.CopySubresourceRegion(
+                                    &destination,
+                                    0,
+                                    x,
+                                    y,
+                                    0,
+                                    &source,
+                                    0,
+                                    Some(&box_ as *const D3D11_BOX),
+                                );
+                            }
+                        }
+                    }
                 }
                 Ok(())
             })();
@@ -936,17 +1184,34 @@ impl DxgiCaptureSource {
             // SAFETY: balances the successful acquisition above after the
             // desktop image has been copied and no acquired-resource use remains.
             let release_result = unsafe { self.units[index].duplication.ReleaseFrame() };
+            if let Some(composite) = target {
+                match &copy_result {
+                    // The composite now holds this frame, so emitting is only
+                    // wrapping it — there is nothing left to build.
+                    Ok(()) => {
+                        self.composite = Some(composite);
+                        self.captured_since_picture = false;
+                    }
+                    // A composite half-drawn or not drawn at all: back among
+                    // the spares, and the one being shown stays the one being
+                    // shown.
+                    Err(_) => self.spare_composites.push(composite),
+                }
+            }
             copy_result?;
             release_result?;
 
             if self.gpu_mode {
-                // No `Map`/CPU copy at all — `staging_texture` itself
-                // *is* this unit's latest capture; `emit_frame_gpu` reads
-                // straight from it. See `CaptureMode::Gpu`'s own docs.
+                // No `Map`/CPU copy at all — what this unit captured is
+                // already where `emit_frame_gpu` reads it from, either the
+                // composite above or this unit's own surface. See
+                // `CaptureMode::Gpu`'s own docs.
                 self.units[index].has_captured = true;
-                // This unit's latest image changed, so the next composite is
-                // no longer the one `composite` already holds.
-                self.captured_since_picture = true;
+                if !self.direct {
+                    // This unit's latest image changed, so the next composite
+                    // is no longer the one `composite` already holds.
+                    self.captured_since_picture = true;
+                }
                 continue;
             }
             // Cpu: the same, for the picture `last_picture` already holds —
@@ -966,7 +1231,7 @@ impl DxgiCaptureSource {
             // outstanding for it.
             unsafe {
                 self.context.Map(
-                    &self.units[index].staging_texture.cast::<ID3D11Resource>()?,
+                    &staging_of(&self.units[index])?,
                     0,
                     D3D11_MAP_READ,
                     0,
@@ -1006,10 +1271,7 @@ impl DxgiCaptureSource {
             // SAFETY: balances the successful map above after all slices made
             // from `mapped.pData` have gone out of scope.
             unsafe {
-                self.context.Unmap(
-                    &self.units[index].staging_texture.cast::<ID3D11Resource>()?,
-                    0,
-                );
+                self.context.Unmap(&staging_of(&self.units[index])?, 0);
             }
             self.units[index].has_captured = true;
         }
@@ -1206,15 +1468,18 @@ impl DxgiCaptureSource {
         crate::pool::UnboundObjectPoolRef<ffmpeg::frame::Video>,
         DxgiCaptureSourceError,
     > {
-        if self.composite.is_none() || self.captured_since_picture {
+        // Nothing to assemble on the direct path: `poll_capture` drew this
+        // tick's capture into the composite as it arrived, and a tick that
+        // captured nothing left the one before it in place.
+        if !self.direct && (self.composite.is_none() || self.captured_since_picture) {
             self.build_composite()?;
         }
 
         let mut wrapper = self.pool.get();
-        let composite = self
-            .composite
-            .as_ref()
-            .expect("build_composite leaves a composite behind");
+        let composite = self.composite.as_ref().expect(
+            "a composite exists by the time anything is emitted — `run` waits for every unit \
+             to have captured, which is what puts one there",
+        );
         // SAFETY: `ptr` is the pooled wrapper's own `AVFrame`, unreferenced
         // before it is given a new one, and the source is the composite this
         // element holds — both live, and distinct from each other. Every
@@ -1278,7 +1543,7 @@ impl DxgiCaptureSource {
         };
         let dst_resource: ID3D11Resource = texture.cast()?;
         for unit in &self.units {
-            let src_resource: ID3D11Resource = unit.staging_texture.cast()?;
+            let src_resource: ID3D11Resource = staging_of(unit)?;
             let box_ = unit.source_box;
             // SAFETY: source/destination resources belong to this device;
             // `source_box` was derived from their intersection and its
@@ -1300,6 +1565,41 @@ impl DxgiCaptureSource {
         self.composite = Some(composite);
         self.captured_since_picture = false;
         Ok(())
+    }
+
+    /// The composite this tick's capture should be drawn into, and whether it
+    /// already holds the frame before this one.
+    ///
+    /// The one drawn into last, when nothing is reading it: then only what
+    /// changed since has to be copied, which is what makes a still window on
+    /// a busy screen cost the window rather than the screen. Otherwise a
+    /// composite nothing is reading, which is missing everything up to now
+    /// and so takes the whole picture. Taken out of `self` either way — the
+    /// caller puts it back once the copy has either succeeded or failed, so a
+    /// failure cannot leave a half-drawn composite as the one being shown.
+    fn composite_to_draw_into(
+        &mut self,
+    ) -> std::result::Result<(ffmpeg::frame::Video, bool), DxgiCaptureSourceError> {
+        if let Some(current) = self.composite.take() {
+            if !picture_is_referenced(&current) {
+                return Ok((current, true));
+            }
+            self.spare_composites.push(current);
+        }
+        let reusable = self
+            .spare_composites
+            .iter()
+            .position(|spare| !picture_is_referenced(spare));
+        let composite = match reusable {
+            // Oldest first, which is what `remove` preserves and
+            // `swap_remove` would not: a composite the GPU may still be
+            // sampling is one the driver has to wait for before this frame's
+            // copy into it can start, and the oldest free one is the one it
+            // is least likely to still be reading.
+            Some(index) => self.spare_composites.remove(index),
+            None => self.new_composite()?,
+        };
+        Ok((composite, false))
     }
 
     /// One more composite texture, wrapped as the frame that owns it.
@@ -1501,6 +1801,55 @@ type ResolvedOutput = (IDXGIAdapter1, IDXGIOutput1, RECT);
 /// `DesktopCoordinates` doubles as the requested rectangle — the whole
 /// monitor). [`CaptureArea::Region`] resolves to every output whose own
 /// desktop rectangle intersects the requested one —
+/// A unit's own surface, as the resource a copy or a map takes.
+///
+/// Only reached where the unit has one: the paths that do not draw straight
+/// into a composite — [`CaptureMode::Cpu`], and several outputs assembled
+/// into one image.
+fn staging_of(unit: &CaptureUnit) -> std::result::Result<ID3D11Resource, DxgiCaptureSourceError> {
+    Ok(unit
+        .staging_texture
+        .as_ref()
+        .expect("a unit that does not draw into a composite has its own surface")
+        .cast()?)
+}
+
+/// The texture a composite frame owns, as the resource a copy takes.
+fn composite_resource(
+    composite: &ffmpeg::frame::Video,
+) -> std::result::Result<ID3D11Resource, DxgiCaptureSourceError> {
+    let (texture_raw, _) =
+        d3d11va_texture(composite).expect("a composite is a D3D11 frame with its texture");
+    // SAFETY: `texture_raw` is borrowed from the live composite frame that
+    // owns it; cloning the wrapper acquires an independent COM reference for
+    // the copy that follows.
+    let texture = unsafe {
+        ID3D11Texture2D::from_raw_borrowed(&texture_raw)
+            .expect("a composite's texture pointer is never null")
+            .clone()
+    };
+    Ok(texture.cast()?)
+}
+
+/// The part of `rect` inside `source_box`, or `None` when they do not meet.
+///
+/// A changed region DXGI reports covers the whole output, while a capture may
+/// have asked for a piece of it ([`CaptureArea::Region`]); and a rectangle
+/// arrives as `RECT`, which is signed, so this is also what keeps a negative
+/// or inverted one out of the unsigned copy that follows.
+fn clip_to_box(rect: RECT, source_box: &D3D11_BOX) -> Option<RECT> {
+    let left = rect.left.max(source_box.left as i32);
+    let top = rect.top.max(source_box.top as i32);
+    let right = rect.right.min(source_box.right as i32);
+    let bottom = rect.bottom.min(source_box.bottom as i32);
+    (left < right && top < bottom).then_some(RECT {
+        left,
+        top,
+        right,
+        bottom,
+    })
+}
+
 /// [`DxgiCaptureSourceError::RegionOutsideDesktop`] if none do — and fails
 /// with [`DxgiCaptureSourceError::RegionSpansMultipleAdapters`] if those
 /// outputs aren't all on the same adapter, checked here before
@@ -1825,33 +2174,100 @@ mod tests {
             "an unchanged tick rebuilt the composite instead of re-wrapping it"
         );
 
-        // A tick that did capture must not draw over a texture the frames
-        // above still hold.
-        source.captured_since_picture = true;
-        let third = source.emit_frame_gpu().expect("emit a changed tick");
-        let third_texture = d3d11va_texture(&third).expect("a D3D11 frame").0;
+        // The next capture must not be drawn over a texture those frames are
+        // still showing, and a composite it has never drawn into holds
+        // nothing of the frames before this one — so it takes the whole
+        // picture rather than what changed since.
+        let (target, up_to_date) = source
+            .composite_to_draw_into()
+            .expect("a composite to draw into");
+        let target_texture = d3d11va_texture(&target).expect("a D3D11 frame").0;
         assert_ne!(
-            third_texture, first_texture,
-            "a changed tick overwrote a composite still referenced downstream"
+            target_texture, first_texture,
+            "a capture would have been drawn over a composite still referenced downstream"
         );
+        assert!(
+            !up_to_date,
+            "a composite this element has not drawn into cannot be treated as current"
+        );
+        // What `poll_capture` does once its copy has succeeded.
+        source.composite = Some(target);
 
-        // ...but once those frames are gone, the texture they were showing is
-        // the one the next changed tick draws into. A screen with real motion
-        // changes on every tick, and allocating a screen-sized texture per
-        // frame is what this avoids.
+        // With nothing reading it any more, the composite drawn last is the
+        // one to draw into again — that is what lets a tick copy only the
+        // region DXGI says changed instead of the whole screen.
         drop(first);
         drop(second);
-        source.captured_since_picture = true;
-        let fourth = source.emit_frame_gpu().expect("emit another changed tick");
+        let (again, up_to_date) = source
+            .composite_to_draw_into()
+            .expect("a composite to draw into");
         assert_eq!(
-            d3d11va_texture(&fourth).expect("a D3D11 frame").0,
-            first_texture,
-            "a changed tick allocated a new composite while an unreferenced one was free"
+            d3d11va_texture(&again).expect("a D3D11 frame").0,
+            target_texture,
+            "a capture allocated or recycled a composite while the current one was free"
         );
-        assert_ne!(
-            d3d11va_texture(&fourth).expect("a D3D11 frame").0,
-            third_texture,
-            "and it must not be the one the frame above is still showing"
+        assert!(
+            up_to_date,
+            "the composite drawn into last holds the frame before this one"
+        );
+    }
+
+    /// Every changed region DXGI reports is answered inside the piece of the
+    /// output actually being captured, and a rectangle that falls outside it
+    /// is not copied at all.
+    #[test]
+    fn a_changed_region_is_clipped_to_what_was_asked_for() {
+        let source_box = D3D11_BOX {
+            left: 100,
+            top: 50,
+            front: 0,
+            right: 400,
+            bottom: 250,
+            back: 1,
+        };
+        let inside = RECT {
+            left: 150,
+            top: 60,
+            right: 200,
+            bottom: 100,
+        };
+        assert_eq!(clip_to_box(inside, &source_box), Some(inside));
+
+        let straddling = RECT {
+            left: 0,
+            top: 0,
+            right: 150,
+            bottom: 80,
+        };
+        assert_eq!(
+            clip_to_box(straddling, &source_box),
+            Some(RECT {
+                left: 100,
+                top: 50,
+                right: 150,
+                bottom: 80
+            }),
+            "the part inside is what gets copied"
+        );
+
+        let outside = RECT {
+            left: 500,
+            top: 300,
+            right: 600,
+            bottom: 400,
+        };
+        assert_eq!(clip_to_box(outside, &source_box), None);
+
+        let inverted = RECT {
+            left: 200,
+            top: 100,
+            right: 150,
+            bottom: 80,
+        };
+        assert_eq!(
+            clip_to_box(inverted, &source_box),
+            None,
+            "a rectangle with no area cannot become an unsigned copy extent"
         );
     }
     fn blank_frame(width: u32, height: u32) -> (Vec<u8>, usize) {
