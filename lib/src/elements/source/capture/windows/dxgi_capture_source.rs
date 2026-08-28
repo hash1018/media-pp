@@ -55,20 +55,26 @@ use crate::{
 /// [`crate::queue::Queue`]'s own `STOP_POLL_INTERVAL`.
 const POLL_GRANULARITY: Duration = Duration::from_millis(100);
 
-/// The longest a single `AcquireNextFrame` may block waiting for the desktop
-/// to change.
+/// How long `AcquireNextFrame` is allowed to wait for the desktop to change:
+/// not at all.
 ///
-/// Not a responsiveness knob — a throughput one. That wait is not a free way
-/// to pass the time: it holds the D3D11 device's own lock for its whole
-/// duration, so under [`CaptureMode::Gpu`], where the device is deliberately
-/// shared with a compositor, a downloader, or an encoder, every one of them
-/// stalls for as long as this call blocks. Waiting out a whole frame interval
-/// inside it dragged a 60 fps `D3d11VideoCompositor` sharing the device down
-/// to roughly 40, and configuring the capture at 30 fps — a *longer* wait per
-/// tick — took that compositor to about 21. So [`DxgiCaptureSource::run`]
-/// waits for its next tick in a plain sleep, which holds nothing, and gives
-/// the acquire only enough time to pick up a change already pending.
-const ACQUIRE_TIMEOUT: Duration = Duration::from_millis(2);
+/// That wait is not a free way to pass the time. It holds the D3D11 device's
+/// own lock for its whole duration, so under [`CaptureMode::Gpu`], where the
+/// device is deliberately shared with a compositor, a downloader, or an
+/// encoder, every one of them stalls for exactly as long as this call blocks.
+/// Waiting out a whole frame interval inside it dragged a 60 fps
+/// `D3d11VideoCompositor` sharing the device down to roughly 40, and
+/// configuring the capture at 30 fps — a *longer* wait per tick — took that
+/// compositor to about 21. Even 2 ms of it, paid on every tick as a still
+/// screen does since nothing is ever already queued, cost that compositor
+/// 3 to 5 fps of its configured 60.
+///
+/// Nothing is lost by not waiting. Desktop Duplication queues a change until
+/// it is acquired, so a poll that finds none simply finds it at the next
+/// tick, and [`DxgiCaptureSource::run`] polls at the last moment before each
+/// emission — which bounds that to the one tick a fixed-rate emitter
+/// quantizes to anyway.
+const ACQUIRE_TIMEOUT_MS: u32 = 0;
 
 /// Errors specific to `DxgiCaptureSource`. Converts into the crate-wide
 /// `Error` via `?` (see [`crate::error::Error`]).
@@ -1117,18 +1123,17 @@ impl SourceElement for DxgiCaptureSource {
             if outcome.paused_for > Duration::ZERO {
                 schedule.resume_after_pause(outcome.paused_for, Instant::now());
             }
-
             // The wait for the next tick happens here, in a sleep that holds
             // nothing, rather than inside `AcquireNextFrame` — see
-            // `ACQUIRE_TIMEOUT` on why that call is the wrong place to spend
-            // time when the device is shared. Still bounded by
-            // `POLL_GRANULARITY`, so `Stop` stays responsive at a low `fps`.
+            // `ACQUIRE_TIMEOUT_MS` on why that call is never given time to
+            // wait in. Bounded by `POLL_GRANULARITY` so `Stop` stays
+            // responsive at a low configured `fps`.
             let remaining = schedule.remaining(Instant::now());
-            if remaining > ACQUIRE_TIMEOUT {
-                thread::sleep((remaining - ACQUIRE_TIMEOUT).min(POLL_GRANULARITY));
+            if !remaining.is_zero() {
+                thread::sleep(remaining.min(POLL_GRANULARITY));
                 continue;
             }
-            if let Err(error) = self.poll_capture(ACQUIRE_TIMEOUT.as_millis() as u32) {
+            if let Err(error) = self.poll_capture(ACQUIRE_TIMEOUT_MS) {
                 pp_error!(self, "capture failed: {error}");
                 return Err(error.into());
             }
