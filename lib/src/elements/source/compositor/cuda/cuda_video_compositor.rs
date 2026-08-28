@@ -33,7 +33,7 @@ use crate::{
     platform::cuda::{
         CudaDevice, CudaFrameFormat,
         driver::{CudaDriver, CudaDriverError, CudaMask, Nv12Region, Nv12Surface},
-        frame::create_hw_frames_ctx,
+        frame::{create_hw_frames_ctx, surface_id},
     },
     platform::ffmpeg::AvBufferRef,
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
@@ -143,6 +143,11 @@ pub enum CudaVideoCompositorError {
     /// FFmpeg could not acquire a frame from the CUDA output pool.
     #[error("failed to take an output frame from the CUDA pool (code {0})")]
     HwFrameGet(i32),
+
+    /// FFmpeg could not take a second reference to the surface last
+    /// composed, which is how an unchanged frame is re-emitted.
+    #[error("failed to reference the previous composite (code {0})")]
+    FrameRef(i32),
 
     /// The supplied bytes are not a supported TrueType or OpenType font.
     #[error("invalid font data: {0}")]
@@ -455,10 +460,91 @@ impl Sink for CudaVideoCompositorInputSink {
     }
 }
 
+#[derive(Clone)]
 struct InputSnapshot {
     id: VideoInputId,
     layer: VideoLayer,
     frame: Option<Arc<UnboundObjectPoolRef<ffmpeg::frame::Video>>>,
+}
+
+impl InputSnapshot {
+    /// Same input, in the same place, showing the same pixels.
+    ///
+    /// The pixels are compared by which surface they live in rather than by
+    /// the frame around them: an input with nothing new to show still hands
+    /// over a fresh `AVFrame`, in a fresh `Arc`, on every tick. See
+    /// [`surface_id`] for why that identity is sound here — this snapshot
+    /// holds the frame, so its surface cannot be recycled underneath it.
+    fn same_as(&self, other: &Self) -> bool {
+        self.id == other.id
+            && self.layer == other.layer
+            && match (&self.frame, &other.frame) {
+                (Some(drawn), Some(now)) => surface_id(drawn) == surface_id(now),
+                (None, None) => true,
+                _ => false,
+            }
+    }
+}
+
+/// One text layer as the compositor found it, resolved out of the atomics
+/// it is actually stored in so that drawing it and deciding whether it
+/// changed both see the same values.
+#[derive(Clone)]
+struct TextSnapshot {
+    mask: Option<Arc<CudaMask>>,
+    x: i32,
+    y: i32,
+    /// `f32` bits, compared rather than interpreted.
+    opacity: u32,
+    visible: bool,
+    color: Color,
+}
+
+impl PartialEq for TextSnapshot {
+    fn eq(&self, other: &Self) -> bool {
+        self.x == other.x
+            && self.y == other.y
+            && self.opacity == other.opacity
+            && self.visible == other.visible
+            && self.color == other.color
+            && match (&self.mask, &other.mask) {
+                // Identity again: `set_text` replaces a mask wholesale.
+                (Some(drawn), Some(now)) => Arc::ptr_eq(drawn, now),
+                (None, None) => true,
+                _ => false,
+            }
+    }
+}
+
+/// What the last composite was made from, and what it produced.
+///
+/// A tick that finds every input frame, every layer and every text layer
+/// exactly as the last one left them has nothing to draw: the picture it
+/// would compose is the picture already composed. It hands out that surface
+/// again instead — a new timestamp on a new reference to the same pixels,
+/// never a copy.
+///
+/// This is what makes a still Scene cost nothing. A screen capture produces
+/// a frame only when something on the screen changed, so a desktop nobody is
+/// touching would otherwise leave this filling a background and blitting an
+/// unchanged layer at the full output rate, for a picture no viewer and no
+/// encoder could tell from the last one.
+struct Composed {
+    inputs: Vec<InputSnapshot>,
+    texts: Vec<TextSnapshot>,
+    /// A reference to the surface last emitted. Holding it is also what
+    /// keeps that surface out of the output pool, so nothing draws over the
+    /// pixels this may hand out again.
+    frame: ffmpeg::frame::Video,
+}
+
+impl Composed {
+    fn matches(&self, inputs: &[InputSnapshot], texts: &[TextSnapshot]) -> bool {
+        self.inputs.len() == inputs.len()
+            && self.texts.len() == texts.len()
+            && std::iter::zip(&self.inputs, inputs).all(|(drawn, now)| drawn.same_as(now))
+            && self.texts == texts
+    }
 }
 
 /// Composites the latest frames from any number of independent CUDA input
@@ -520,6 +606,8 @@ pub struct CudaVideoCompositor {
     /// The pool output surfaces are allocated from.
     hw_frames_ctx: AvBufferRef,
     scalers: HashMap<VideoInputId, CudaScaleGraph>,
+    /// The last composite and what it was made from — see [`Composed`].
+    composed: Option<Composed>,
     /// Reuses only the small CPU-side `AVFrame` wrapper; the surface itself
     /// comes from `hw_frames_ctx`'s own pool.
     output_pool: UnboundObjectPool<ffmpeg::frame::Video>,
@@ -602,6 +690,7 @@ impl CudaVideoCompositor {
                 _hw_device_ctx: hw_device_ctx,
                 hw_frames_ctx,
                 scalers: HashMap::new(),
+                composed: None,
                 output_pool: UnboundObjectPool::new(
                     OUTPUT_POOL_SIZE,
                     ffmpeg::frame::Video::empty,
@@ -666,6 +755,56 @@ impl CudaVideoCompositor {
             .collect()
     }
 
+    /// Every text layer as it stands right now, read once so that drawing
+    /// and change detection cannot disagree about it.
+    fn text_snapshots(&self) -> Vec<TextSnapshot> {
+        self.shared
+            .text_layers
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(_, state)| TextSnapshot {
+                mask: state.mask.load_full(),
+                x: state.x.load(Ordering::Relaxed),
+                y: state.y.load(Ordering::Relaxed),
+                opacity: state.opacity.load(Ordering::Relaxed),
+                visible: state.visible.load(Ordering::Relaxed),
+                color: state.color,
+            })
+            .collect()
+    }
+
+    /// Hands out the surface already composed, under this tick's timestamp.
+    ///
+    /// `av_frame_ref` takes a reference to the same surface rather than
+    /// copying it, so this costs a refcount and nothing on the GPU at all.
+    fn repeat_frame(
+        &mut self,
+    ) -> std::result::Result<UnboundObjectPoolRef<ffmpeg::frame::Video>, CudaVideoCompositorError>
+    {
+        let mut output = self.output_pool.get();
+        let composed = self
+            .composed
+            .as_ref()
+            .expect("only reached with a previous composite");
+        // SAFETY: `ptr` is the pooled wrapper's own `AVFrame`, unreferenced
+        // before it is given a new one, and the source is the reference this
+        // element has held since it composed that surface — so both are live
+        // `AVFrame`s and `av_frame_ref` adds a reference rather than copying
+        // any pixels.
+        unsafe {
+            let ptr = output.as_mut_ptr();
+            ffi::av_frame_unref(ptr);
+            let code = ffi::av_frame_ref(ptr, composed.frame.as_ptr());
+            if code < 0 {
+                return Err(CudaVideoCompositorError::FrameRef(code));
+            }
+        }
+        output.set_pts(Some(self.frame_index));
+        self.frame_index += 1;
+        Ok(output)
+    }
+
     /// Takes one surface from the output pool. The wrapper is pooled; the
     /// surface behind it comes from `hw_frames_ctx`, same split as
     /// [`crate::elements::CudaUpload`].
@@ -703,6 +842,18 @@ impl CudaVideoCompositor {
                 .cmp(&right.layer.z_index)
                 .then_with(|| left.id.cmp(&right.id))
         });
+        let texts = self.text_snapshots();
+        let snapshots_kept = snapshots.clone();
+
+        // Nothing moved and no input produced a frame, so this tick's
+        // picture is the one already on the last surface — see [`Composed`].
+        if self
+            .composed
+            .as_ref()
+            .is_some_and(|composed| composed.matches(&snapshots, &texts))
+        {
+            return self.repeat_frame();
+        }
 
         let mut output = self.output_frame()?;
         let canvas =
@@ -767,28 +918,20 @@ impl CudaVideoCompositor {
             }
         }
 
-        let text_layers: Vec<_> = self
-            .shared
-            .text_layers
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|(_, state)| state.clone())
-            .collect();
-        for text in text_layers {
-            if !text.visible.load(Ordering::Relaxed) {
+        for text in &texts {
+            if !text.visible {
                 continue;
             }
-            let Some(mask) = text.mask.load_full() else {
+            let Some(mask) = &text.mask else {
                 continue;
             };
-            let opacity = f32::from_bits(text.opacity.load(Ordering::Relaxed));
+            let opacity = f32::from_bits(text.opacity);
             if opacity <= 0.0 {
                 continue;
             }
             let Some(placement) = TextPlacement::new(
-                text.x.load(Ordering::Relaxed),
-                text.y.load(Ordering::Relaxed),
+                text.x,
+                text.y,
                 mask.width,
                 mask.height,
                 self.options.width,
@@ -800,7 +943,7 @@ impl CudaVideoCompositor {
                 canvas,
                 placement.destination_x,
                 placement.destination_y,
-                &mask,
+                mask,
                 placement.mask_x,
                 placement.mask_y,
                 placement.width,
@@ -817,6 +960,22 @@ impl CudaVideoCompositor {
             // to hand downstream.
             self.driver.synchronize()?;
         }
+        // Held so the next tick can tell whether it has anything to draw,
+        // and so the surface it may hand out again stays out of the pool.
+        let mut kept = ffmpeg::frame::Video::empty();
+        // SAFETY: both are live `AVFrame`s — `kept` the empty local above and
+        // `output` the surface just composed — so this adds a reference to
+        // that surface rather than copying it.
+        let code = unsafe { ffi::av_frame_ref(kept.as_mut_ptr(), output.as_ptr()) };
+        if code < 0 {
+            return Err(CudaVideoCompositorError::FrameRef(code));
+        }
+        self.composed = Some(Composed {
+            inputs: snapshots_kept,
+            texts,
+            frame: kept,
+        });
+
         output.set_pts(Some(self.frame_index));
         self.frame_index += 1;
         Ok(output)
@@ -1276,6 +1435,57 @@ mod tests {
             luma_at(&out, 120, 10),
             16,
             "everything outside a layer must be the background"
+        );
+    }
+
+    /// A tick that finds nothing changed hands out the surface it composed
+    /// last rather than composing the same picture again — and a layer that
+    /// moves puts it straight back to work.
+    #[test]
+    fn an_unchanged_scene_is_composed_once() {
+        let Some((device, _cuda_lock)) = try_cuda_device() else {
+            return;
+        };
+        let (width, height) = (128u32, 128u32);
+        let Ok((mut compositor, handle)) =
+            CudaVideoCompositor::new("compositor", &device, options(width, height))
+        else {
+            eprintln!("skipping: this machine cannot open a CUDA compositor");
+            return;
+        };
+        let mut input = handle
+            .add_source("only", VideoLayer::new(VideoRect::new(0, 0, 64, 64)))
+            .expect("add source");
+        let Some(frame) = cuda_frame(&device, 32, 32, 100) else {
+            return;
+        };
+        input.sink.consume(frame).expect("frame");
+
+        let composed = compositor.compose_frame().expect("compose");
+        let surface = surface_id(&composed);
+        assert_eq!(composed.pts(), Some(0));
+
+        let repeated = compositor.compose_frame().expect("repeat");
+        assert_eq!(
+            surface_id(&repeated),
+            surface,
+            "nothing changed, so this is the picture already composed"
+        );
+        assert_eq!(
+            repeated.pts(),
+            Some(1),
+            "a repeat carries this tick's timestamp, not the one it copies"
+        );
+
+        input
+            .layer
+            .set_layer(VideoLayer::new(VideoRect::new(16, 16, 64, 64)))
+            .expect("move the layer");
+        let moved = compositor.compose_frame().expect("compose again");
+        assert_ne!(
+            surface_id(&moved),
+            surface,
+            "a moved layer is a different picture and must be composed"
         );
     }
 

@@ -52,3 +52,25 @@ pub(crate) unsafe fn create_hw_frames_ctx(
         Ok(buf)
     }
 }
+
+/// Which CUDA surface a frame's pixels live in.
+///
+/// Not the frame: a producer with nothing new to show re-emits a fresh
+/// `AVFrame` referencing the same surface every tick — a screen capture of a
+/// still desktop does exactly that — so comparing frames, or the `Arc`s
+/// around them, says "changed" every time while the pixels have not moved.
+/// The plane pointers do not.
+///
+/// Only sound as an identity while the frame that produced it is still
+/// referenced: a surface that returns to its pool can be handed out again at
+/// the same address. Every caller here holds that reference for as long as it
+/// holds the identity.
+pub(crate) fn surface_id(frame: &ffmpeg_next::frame::Video) -> (usize, usize) {
+    // SAFETY: `as_ptr` is a live `AVFrame`. Only the values of the first two
+    // plane pointers are read; nothing dereferences them, which for CUDA
+    // device memory would not be valid from the host anyway.
+    unsafe {
+        let ptr = frame.as_ptr();
+        ((*ptr).data[0] as usize, (*ptr).data[1] as usize)
+    }
+}

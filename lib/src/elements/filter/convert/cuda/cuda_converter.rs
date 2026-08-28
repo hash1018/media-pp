@@ -16,7 +16,7 @@ use crate::{
     platform::cuda::{
         CudaDevice, CudaFrameFormat,
         driver::{BgraSurface, CudaDriver, Nv12Surface},
-        frame::create_hw_frames_ctx,
+        frame::{create_hw_frames_ctx, surface_id},
     },
     platform::ffmpeg::AvBufferRef,
     pool::UnboundObjectPool,
@@ -122,6 +122,9 @@ pub struct CudaConverter {
     name: Arc<str>,
     /// This element's own reference to the shared context, released in `Drop`.
     _hw_device_ctx: Arc<AvBufferRef>,
+    /// The last conversion, and the surface it was made from — see
+    /// [`Converted`].
+    converted: Option<Converted>,
     /// The pool converted frames are allocated from.
     hw_frames_ctx: AvBufferRef,
     /// The device context incoming frames must belong to, compared by
@@ -193,6 +196,7 @@ impl CudaConverter {
             width,
             height,
             pad,
+            converted: None,
             pool,
         })
     }
@@ -242,6 +246,16 @@ impl CudaConverter {
     fn convert(&mut self, source: &ffmpeg::frame::Video) -> Result<()> {
         self.validate(source)
             .inspect_err(|error| pp_error!(self, "{error}"))?;
+
+        // The same surface as last time is the same pixels as last time, and
+        // converting them again produces the frame already in hand.
+        if self
+            .converted
+            .as_ref()
+            .is_some_and(|converted| converted.matches(source))
+        {
+            return self.repeat(source);
+        }
 
         let mut destination = self.pool.get();
         // SAFETY: `ptr` is the pooled wrapper's own `AVFrame`, and the unref before
@@ -298,7 +312,82 @@ impl CudaConverter {
         // the fly.
         destination.set_color_space(ffmpeg::color::Space::BT709);
         destination.set_color_range(ffmpeg::color::Range::MPEG);
+        self.converted = Converted::of(source, &destination);
         self.pad.push(MediaBuffer::Video(Arc::new(destination)))
+    }
+
+    /// Pushes the conversion already in hand, under this frame's own
+    /// timestamp.
+    ///
+    /// `av_frame_ref` takes a second reference to the same surface rather
+    /// than copying it, so a producer repeating an unchanged image costs a
+    /// refcount here instead of a kernel over every pixel.
+    fn repeat(&mut self, source: &ffmpeg::frame::Video) -> Result<()> {
+        let mut destination = self.pool.get();
+        let converted = self
+            .converted
+            .as_ref()
+            .expect("only reached with a previous conversion");
+        // SAFETY: `dst` is the pooled wrapper's own `AVFrame`, unreferenced
+        // before it is given a new one, and the source of that reference is
+        // the output this element has held since it converted it — both live,
+        // and distinct from each other.
+        unsafe {
+            let dst = destination.as_mut_ptr();
+            ffi::av_frame_unref(dst);
+            let code = ffi::av_frame_ref(dst, converted.output.as_ptr());
+            if code < 0 {
+                pp_error!(self, "av_frame_ref failed: {code}");
+                return Err(CudaConverterError::Frames(CudaUploadError::HwFrameGet(code)).into());
+            }
+            // This tick's timestamp, not the one the cached frame carries.
+            ffi::av_frame_copy_props(dst, source.as_ptr());
+        }
+        destination.set_color_space(ffmpeg::color::Space::BT709);
+        destination.set_color_range(ffmpeg::color::Range::MPEG);
+        self.pad.push(MediaBuffer::Video(Arc::new(destination)))
+    }
+}
+
+/// One conversion, kept so that the next frame carrying the same pixels can
+/// be answered with it.
+///
+/// Both frames are held as references, and both for the same reason: a
+/// surface still referenced cannot return to its pool and be handed out
+/// again at the same address, which is what makes comparing plane pointers a
+/// sound identity — see [`surface_id`].
+struct Converted {
+    source: (usize, usize),
+    /// A reference to the frame this converted, so `source` cannot come to
+    /// name a different surface.
+    _source: ffmpeg::frame::Video,
+    /// A reference to what that conversion produced.
+    output: ffmpeg::frame::Video,
+}
+
+impl Converted {
+    fn of(source: &ffmpeg::frame::Video, output: &ffmpeg::frame::Video) -> Option<Self> {
+        let mut kept_source = ffmpeg::frame::Video::empty();
+        let mut kept_output = ffmpeg::frame::Video::empty();
+        // SAFETY: all four are live `AVFrame`s and pairwise distinct — the two
+        // locals were just created empty — so each call adds a reference to a
+        // surface rather than copying it.
+        unsafe {
+            if ffi::av_frame_ref(kept_source.as_mut_ptr(), source.as_ptr()) < 0
+                || ffi::av_frame_ref(kept_output.as_mut_ptr(), output.as_ptr()) < 0
+            {
+                return None;
+            }
+        }
+        Some(Self {
+            source: surface_id(source),
+            _source: kept_source,
+            output: kept_output,
+        })
+    }
+
+    fn matches(&self, source: &ffmpeg::frame::Video) -> bool {
+        self.source == surface_id(source)
     }
 }
 
@@ -446,6 +535,95 @@ mod tests {
                 None
             }
         }
+    }
+
+    /// Another `AVFrame` over the same surface, with its own timestamp —
+    /// what a screen capture with nothing new to show hands over on every
+    /// tick.
+    fn repeat_of(buffer: &MediaBuffer, pts: i64) -> MediaBuffer {
+        let MediaBuffer::Video(frame) = buffer else {
+            panic!("expected a Video buffer");
+        };
+        let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
+        let mut slot = pool.get();
+        // SAFETY: both are live `AVFrame`s and distinct — the slot is the
+        // empty one just taken from the pool — so this references the
+        // surface rather than copying it.
+        unsafe {
+            assert!(ffi::av_frame_ref(slot.as_mut_ptr(), frame.as_ptr()) >= 0);
+        }
+        slot.set_pts(Some(pts));
+        MediaBuffer::Video(Arc::new(slot))
+    }
+
+    fn video(buffer: &MediaBuffer) -> &ffmpeg::frame::Video {
+        let MediaBuffer::Video(frame) = buffer else {
+            panic!("expected a Video buffer");
+        };
+        frame
+    }
+
+    /// A producer repeating an unchanged image is answered out of the last
+    /// conversion rather than converted again — the kernel is the expensive
+    /// part, and it would write the pixels that are already there.
+    #[test]
+    fn an_unchanged_surface_is_converted_once() {
+        let Some((device, _cuda_lock)) = try_cuda_device() else {
+            return;
+        };
+        let Some(mut converter) = converter(&device, 64, 32) else {
+            return;
+        };
+        let Some(first) = cuda_frame(&device, CudaFrameFormat::Bgra, 64, 32, 1) else {
+            return;
+        };
+        let repeat = repeat_of(&first, 2);
+        let converted = capture(&mut converter);
+
+        converter.consume(first).expect("convert");
+        converter.consume(repeat).expect("repeat");
+
+        let received = converted.lock().unwrap();
+        assert_eq!(received.len(), 2, "a repeat still produces a frame");
+        assert_eq!(
+            surface_id(video(&received[0])),
+            surface_id(video(&received[1])),
+            "the same pixels must not be converted into a second surface"
+        );
+        assert_eq!(video(&received[0]).pts(), Some(1));
+        assert_eq!(
+            video(&received[1]).pts(),
+            Some(2),
+            "a repeat carries its own timestamp, not the cached frame's"
+        );
+    }
+
+    /// The other half: new pixels are converted, and land somewhere else.
+    #[test]
+    fn a_new_surface_is_converted_again() {
+        let Some((device, _cuda_lock)) = try_cuda_device() else {
+            return;
+        };
+        let Some(mut converter) = converter(&device, 64, 32) else {
+            return;
+        };
+        let Some(first) = cuda_frame(&device, CudaFrameFormat::Bgra, 64, 32, 1) else {
+            return;
+        };
+        let Some(second) = cuda_frame(&device, CudaFrameFormat::Bgra, 64, 32, 2) else {
+            return;
+        };
+        let converted = capture(&mut converter);
+
+        converter.consume(first).expect("convert");
+        converter.consume(second).expect("convert again");
+
+        let received = converted.lock().unwrap();
+        assert_ne!(
+            surface_id(video(&received[0])),
+            surface_id(video(&received[1])),
+            "a different capture must not be answered with the previous conversion"
+        );
     }
 
     #[test]
