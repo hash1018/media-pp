@@ -11,7 +11,8 @@ use crate::{
     element::{Element, ElementType, Sink, Source, element_pp_log},
     error::Result,
     pad::SrcPad,
-    pool::UnboundObjectPool,
+    pool::{UnboundObjectPool, UnboundObjectPoolRef},
+    repeat::{PerFrameTransform, RepeatedOutput},
 };
 
 /// How many output frames [`SwScaler`] pre-allocates up front. Unlike
@@ -32,6 +33,11 @@ pub enum SwScalerError {
     /// FFmpeg rejected creation or use of the scaling context.
     #[error("ffmpeg error: {0}")]
     Ffmpeg(#[from] ffmpeg::Error),
+
+    /// FFmpeg could not take a second reference to the scale already in
+    /// hand, which is how an unchanged input picture is answered.
+    #[error("failed to reference the previous scale (code {0})")]
+    FrameRef(i32),
 
     /// The sink received a buffer other than decoded video or end-of-stream.
     #[error(
@@ -70,6 +76,10 @@ pub struct SwScaler {
     /// pool, the output shape here is known up front, not learned from
     /// the first frame).
     pool: UnboundObjectPool<ffmpeg::frame::Video>,
+    /// The last scale and the picture it was made from, so a producer that
+    /// re-emits an unchanged frame is answered with it instead of another
+    /// pass over every pixel — see [`RepeatedOutput`].
+    repeated: RepeatedOutput,
     pad: SrcPad,
 }
 
@@ -122,6 +132,7 @@ impl SwScaler {
             flags,
             context: None,
             pool,
+            repeated: RepeatedOutput::new(),
             pad,
         }
     }
@@ -177,80 +188,13 @@ impl Sink for SwScaler {
 
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         match buf {
+            // The same picture as last time scales to the frame already in
+            // hand — see [`PerFrameTransform`], which is where that is
+            // decided. `DxgiCaptureSource` under `CaptureMode::Cpu` re-emits
+            // one on every tick of a still screen.
             MediaBuffer::Video(frame) => {
-                if !self.context_matches(&frame) {
-                    match &mut self.context {
-                        Some(context) => {
-                            // A live source can renegotiate mid-stream — a
-                            // captured window being resized, say. Absorbing that
-                            // is exactly what keeps a fixed-geometry encoder
-                            // downstream working, but it is also the kind of
-                            // change worth seeing in a log when output suddenly
-                            // looks stretched.
-                            let previous = context.input();
-                            pp_info!(
-                                self,
-                                "input changed: {}x{} {:?} -> {}x{} {:?}, rebuilding context",
-                                previous.width,
-                                previous.height,
-                                previous.format,
-                                frame.width(),
-                                frame.height(),
-                                frame.format()
-                            );
-                            context.cached(
-                                frame.format(),
-                                frame.width(),
-                                frame.height(),
-                                self.dst_format,
-                                self.dst_width,
-                                self.dst_height,
-                                self.flags,
-                            );
-                        }
-                        None => {
-                            pp_debug!(
-                                self,
-                                "input is {}x{} {:?}, building context",
-                                frame.width(),
-                                frame.height(),
-                                frame.format()
-                            );
-                            self.context = Some(
-                                ffmpeg::software::scaling::Context::get(
-                                    frame.format(),
-                                    frame.width(),
-                                    frame.height(),
-                                    self.dst_format,
-                                    self.dst_width,
-                                    self.dst_height,
-                                    self.flags,
-                                )
-                                .inspect_err(|error| {
-                                    pp_error!(self, "failed to build scaling context: {error}")
-                                })
-                                .map_err(SwScalerError::from)?,
-                            );
-                        }
-                    }
-                }
-
-                // Already allocated to `dst_format`/`dst_width`/
-                // `dst_height` (see `pool`'s docs), so `run` skips its own
-                // allocation and scales straight into this buffer.
-                let mut output = self.pool.get();
-                self.context
-                    .as_mut()
-                    .expect("built or confirmed matching above")
-                    .run(&frame, &mut output)
-                    .inspect_err(|error| pp_error!(self, "scale failed: {error}"))
-                    .map_err(SwScalerError::from)?;
-                // `run` only copies pixel data, not metadata — carry the
-                // pts through by hand so downstream pacing/muxing still
-                // sees the original timestamp.
-                output.set_pts(frame.pts());
-
-                self.pad.push(MediaBuffer::Video(Arc::new(output)))
+                let scaled = self.transform(&frame)?;
+                self.pad.push(MediaBuffer::Video(scaled))
             }
             MediaBuffer::Eos => self.pad.push(MediaBuffer::Eos),
             MediaBuffer::Packet(_) => {
@@ -265,11 +209,103 @@ impl Sink for SwScaler {
     }
 
     fn control(&mut self, msg: ControlMsg) -> Result<()> {
-        // Nothing local to react to for any `ControlMsg`: unlike a
-        // decoder, this has no reference-frame/reordering state to
-        // flush on `Seek`, and nothing buffered to drop on `Stop` — a
-        // pure per-frame spatial transform, so just forward.
+        // Nothing local to react to beyond the cached scale: unlike a
+        // decoder, this has no reference-frame/reordering state to flush on
+        // `Seek`, and nothing buffered to drop on `Stop` — a pure per-frame
+        // spatial transform.
+        if matches!(msg, ControlMsg::Flush | ControlMsg::Stop) {
+            self.repeated.clear();
+        }
         self.pad.control(msg)
+    }
+}
+
+impl PerFrameTransform for SwScaler {
+    fn repeated(&mut self) -> &mut RepeatedOutput {
+        &mut self.repeated
+    }
+
+    fn frame_ref_failed(&self, code: i32) -> crate::error::Error {
+        pp_error!(self, "av_frame_ref failed: {code}");
+        SwScalerError::FrameRef(code).into()
+    }
+
+    fn produce(
+        &mut self,
+        frame: &Arc<UnboundObjectPoolRef<ffmpeg::frame::Video>>,
+    ) -> Result<UnboundObjectPoolRef<ffmpeg::frame::Video>> {
+        if !self.context_matches(frame) {
+            match &mut self.context {
+                Some(context) => {
+                    // A live source can renegotiate mid-stream — a
+                    // captured window being resized, say. Absorbing that
+                    // is exactly what keeps a fixed-geometry encoder
+                    // downstream working, but it is also the kind of
+                    // change worth seeing in a log when output suddenly
+                    // looks stretched.
+                    let previous = context.input();
+                    pp_info!(
+                        self,
+                        "input changed: {}x{} {:?} -> {}x{} {:?}, rebuilding context",
+                        previous.width,
+                        previous.height,
+                        previous.format,
+                        frame.width(),
+                        frame.height(),
+                        frame.format()
+                    );
+                    context.cached(
+                        frame.format(),
+                        frame.width(),
+                        frame.height(),
+                        self.dst_format,
+                        self.dst_width,
+                        self.dst_height,
+                        self.flags,
+                    );
+                }
+                None => {
+                    pp_debug!(
+                        self,
+                        "input is {}x{} {:?}, building context",
+                        frame.width(),
+                        frame.height(),
+                        frame.format()
+                    );
+                    self.context = Some(
+                        ffmpeg::software::scaling::Context::get(
+                            frame.format(),
+                            frame.width(),
+                            frame.height(),
+                            self.dst_format,
+                            self.dst_width,
+                            self.dst_height,
+                            self.flags,
+                        )
+                        .inspect_err(|error| {
+                            pp_error!(self, "failed to build scaling context: {error}")
+                        })
+                        .map_err(SwScalerError::from)?,
+                    );
+                }
+            }
+        }
+
+        // Already allocated to `dst_format`/`dst_width`/
+        // `dst_height` (see `pool`'s docs), so `run` skips its own
+        // allocation and scales straight into this buffer.
+        let mut output = self.pool.get();
+        self.context
+            .as_mut()
+            .expect("built or confirmed matching above")
+            .run(frame, &mut output)
+            .inspect_err(|error| pp_error!(self, "scale failed: {error}"))
+            .map_err(SwScalerError::from)?;
+        // `run` only copies pixel data, not metadata — carry the
+        // pts through by hand so downstream pacing/muxing still
+        // sees the original timestamp.
+        output.set_pts(frame.pts());
+        Ok(output)
     }
 }
 
@@ -347,6 +383,56 @@ mod tests {
             pp_log: element_pp_log(ElementType::Other, "capture", None),
         }));
         (scaler, received)
+    }
+
+    /// Another `AVFrame` over the same picture, with its own timestamp —
+    /// what a capture with nothing new to show hands over on every tick.
+    fn repeat_of(buffer: &MediaBuffer, pts: i64) -> MediaBuffer {
+        let MediaBuffer::Video(source) = buffer else {
+            panic!("expected a Video buffer");
+        };
+        let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
+        let mut slot = pool.get();
+        // SAFETY: both are live `AVFrame`s and distinct — the slot is the
+        // empty one just taken from the pool.
+        unsafe {
+            assert!(ffmpeg::ffi::av_frame_ref(slot.as_mut_ptr(), source.as_ptr()) >= 0);
+        }
+        slot.set_pts(Some(pts));
+        MediaBuffer::Video(Arc::new(slot))
+    }
+
+    /// A capture of a still screen re-emits the picture it already has, and
+    /// scaling it again would produce the frame already in hand — another
+    /// `libswscale` pass over every pixel for nothing. The repeat carries
+    /// its own timestamp; only the pixels are shared.
+    #[test]
+    fn a_repeated_input_is_scaled_once() {
+        let (mut scaler, received) = new_scaler(ffmpeg::format::Pixel::RGB24, 80, 60);
+        let source = video_frame(ffmpeg::format::Pixel::YUV420P, 160, 120, 100);
+        let repeat = repeat_of(&source, 200);
+
+        scaler.consume(source).expect("scale the first frame");
+        scaler.consume(repeat).expect("scale the repeat");
+
+        let received = received.lock().unwrap();
+        assert_eq!(received.len(), 2, "every frame still produces one");
+        let (MediaBuffer::Video(first), MediaBuffer::Video(repeated)) =
+            (&received[0], &received[1])
+        else {
+            panic!("expected Video buffers");
+        };
+        assert_eq!(
+            crate::buffer::picture_id(repeated),
+            crate::buffer::picture_id(first),
+            "an unchanged picture was scaled a second time"
+        );
+        assert_eq!(
+            repeated.pts(),
+            Some(200),
+            "a repeat carries this frame's timestamp, not the one it points at"
+        );
+        assert_eq!(repeated.format(), ffmpeg::format::Pixel::RGB24);
     }
 
     #[test]

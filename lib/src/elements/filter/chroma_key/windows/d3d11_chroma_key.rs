@@ -587,7 +587,7 @@ impl PerFrameTransform for D3d11ChromaKey {
 
     fn produce(
         &mut self,
-        frame: &ffmpeg::frame::Video,
+        frame: &Arc<UnboundObjectPoolRef<ffmpeg::frame::Video>>,
     ) -> Result<UnboundObjectPoolRef<ffmpeg::frame::Video>> {
         self.key(frame)
     }

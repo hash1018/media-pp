@@ -120,9 +120,11 @@ documentation and implementation differ.
   scale, convert, key — answers such a repeat with what it already produced,
   through `repeat::PerFrameTransform`. An element whose output depends on more
   than that frame (the compositors' layers, a capture's cursor) recognises its
-  own repeats against its own state, and one whose contract is a *rate* — an
-  encoder, a muxer — is where repeats must keep flowing, since a picture
-  identical to the last one is what an encoder is cheapest at.
+  own repeats against its own state; one whose graph answers a frame with none
+  or several (`CudaScaler`) has no single output to offer again; and one whose
+  contract is a *rate* — an encoder, a muxer — is where repeats must keep
+  flowing, since a picture identical to the last one is what an encoder is
+  cheapest at.
 - Whatever compares pictures by address holds the `Arc<UnboundObjectPoolRef<_>>`
   it was handed, never just an `av_frame_ref` of what is inside it. A frame
   reference keeps the buffer alive but leaves the producer's pool free to hand

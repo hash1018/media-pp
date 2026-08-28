@@ -6,7 +6,7 @@ use thiserror::Error as ThisError;
 use crate::pp_log::{PpLog, pp_error, pp_info};
 
 use crate::{
-    buffer::{MediaBuffer, picture_id},
+    buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
     control::ControlMsg,
     element::{Element, ElementType, Sink, Source, element_pp_log},
@@ -19,13 +19,19 @@ use crate::{
         frame::create_hw_frames_ctx,
     },
     platform::ffmpeg::AvBufferRef,
-    pool::UnboundObjectPool,
+    pool::{UnboundObjectPool, UnboundObjectPoolRef},
+    repeat::{PerFrameTransform, RepeatedOutput},
 };
 
 /// Errors specific to `CudaConverter`. Converts into the crate-wide `Error`
 /// via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum CudaConverterError {
+    /// FFmpeg could not take a second reference to the conversion already in
+    /// hand, which is how an unchanged surface is answered.
+    #[error("failed to reference the previous conversion (code {0})")]
+    FrameRef(i32),
+
     /// The input frame is not backed by CUDA hardware surfaces.
     #[error("CudaConverter converts CUDA frames, got {0:?}")]
     UnsupportedFormat(ffmpeg::format::Pixel),
@@ -122,9 +128,10 @@ pub struct CudaConverter {
     name: Arc<str>,
     /// This element's own reference to the shared context, released in `Drop`.
     _hw_device_ctx: Arc<AvBufferRef>,
-    /// The last conversion, and the surface it was made from — see
-    /// [`Converted`].
-    converted: Option<Converted>,
+    /// The last conversion and the surface it was made from, so a producer
+    /// that re-emits an unchanged picture is answered with it instead of
+    /// another kernel over every pixel — see [`RepeatedOutput`].
+    repeated: RepeatedOutput,
     /// The pool converted frames are allocated from.
     hw_frames_ctx: AvBufferRef,
     /// The device context incoming frames must belong to, compared by
@@ -196,7 +203,7 @@ impl CudaConverter {
             width,
             height,
             pad,
-            converted: None,
+            repeated: RepeatedOutput::new(),
             pool,
         })
     }
@@ -243,19 +250,12 @@ impl CudaConverter {
         Ok(())
     }
 
-    fn convert(&mut self, source: &ffmpeg::frame::Video) -> Result<()> {
+    fn convert(
+        &mut self,
+        source: &ffmpeg::frame::Video,
+    ) -> Result<UnboundObjectPoolRef<ffmpeg::frame::Video>> {
         self.validate(source)
             .inspect_err(|error| pp_error!(self, "{error}"))?;
-
-        // The same surface as last time is the same pixels as last time, and
-        // converting them again produces the frame already in hand.
-        if self
-            .converted
-            .as_ref()
-            .is_some_and(|converted| converted.matches(source))
-        {
-            return self.repeat(source);
-        }
 
         let mut destination = self.pool.get();
         // SAFETY: `ptr` is the pooled wrapper's own `AVFrame`, and the unref before
@@ -312,82 +312,25 @@ impl CudaConverter {
         // the fly.
         destination.set_color_space(ffmpeg::color::Space::BT709);
         destination.set_color_range(ffmpeg::color::Range::MPEG);
-        self.converted = Converted::of(source, &destination);
-        self.pad.push(MediaBuffer::Video(Arc::new(destination)))
-    }
-
-    /// Pushes the conversion already in hand, under this frame's own
-    /// timestamp.
-    ///
-    /// `av_frame_ref` takes a second reference to the same surface rather
-    /// than copying it, so a producer repeating an unchanged image costs a
-    /// refcount here instead of a kernel over every pixel.
-    fn repeat(&mut self, source: &ffmpeg::frame::Video) -> Result<()> {
-        let mut destination = self.pool.get();
-        let converted = self
-            .converted
-            .as_ref()
-            .expect("only reached with a previous conversion");
-        // SAFETY: `dst` is the pooled wrapper's own `AVFrame`, unreferenced
-        // before it is given a new one, and the source of that reference is
-        // the output this element has held since it converted it — both live,
-        // and distinct from each other.
-        unsafe {
-            let dst = destination.as_mut_ptr();
-            ffi::av_frame_unref(dst);
-            let code = ffi::av_frame_ref(dst, converted.output.as_ptr());
-            if code < 0 {
-                pp_error!(self, "av_frame_ref failed: {code}");
-                return Err(CudaConverterError::Frames(CudaUploadError::HwFrameGet(code)).into());
-            }
-            // This tick's timestamp, not the one the cached frame carries.
-            ffi::av_frame_copy_props(dst, source.as_ptr());
-        }
-        destination.set_color_space(ffmpeg::color::Space::BT709);
-        destination.set_color_range(ffmpeg::color::Range::MPEG);
-        self.pad.push(MediaBuffer::Video(Arc::new(destination)))
+        Ok(destination)
     }
 }
 
-/// One conversion, kept so that the next frame carrying the same pixels can
-/// be answered with it.
-///
-/// Both frames are held as references, and both for the same reason: a
-/// surface still referenced cannot return to its pool and be handed out
-/// again at the same address, which is what makes comparing plane pointers a
-/// sound identity — see [`picture_id`].
-struct Converted {
-    source: (usize, usize),
-    /// A reference to the frame this converted, so `source` cannot come to
-    /// name a different surface.
-    _source: ffmpeg::frame::Video,
-    /// A reference to what that conversion produced.
-    output: ffmpeg::frame::Video,
-}
-
-impl Converted {
-    fn of(source: &ffmpeg::frame::Video, output: &ffmpeg::frame::Video) -> Option<Self> {
-        let mut kept_source = ffmpeg::frame::Video::empty();
-        let mut kept_output = ffmpeg::frame::Video::empty();
-        // SAFETY: all four are live `AVFrame`s and pairwise distinct — the two
-        // locals were just created empty — so each call adds a reference to a
-        // surface rather than copying it.
-        unsafe {
-            if ffi::av_frame_ref(kept_source.as_mut_ptr(), source.as_ptr()) < 0
-                || ffi::av_frame_ref(kept_output.as_mut_ptr(), output.as_ptr()) < 0
-            {
-                return None;
-            }
-        }
-        Some(Self {
-            source: picture_id(source),
-            _source: kept_source,
-            output: kept_output,
-        })
+impl PerFrameTransform for CudaConverter {
+    fn repeated(&mut self) -> &mut RepeatedOutput {
+        &mut self.repeated
     }
 
-    fn matches(&self, source: &ffmpeg::frame::Video) -> bool {
-        self.source == picture_id(source)
+    fn frame_ref_failed(&self, code: i32) -> crate::error::Error {
+        pp_error!(self, "av_frame_ref failed: {code}");
+        CudaConverterError::FrameRef(code).into()
+    }
+
+    fn produce(
+        &mut self,
+        source: &Arc<UnboundObjectPoolRef<ffmpeg::frame::Video>>,
+    ) -> Result<UnboundObjectPoolRef<ffmpeg::frame::Video>> {
+        self.convert(source)
     }
 }
 
@@ -426,15 +369,24 @@ impl Sink for CudaConverter {
 
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         match buf {
-            MediaBuffer::Video(frame) => self.convert(&frame),
+            // The same surface as last time is the same pixels as last time,
+            // and converting them again produces the frame already in hand —
+            // see [`PerFrameTransform`].
+            MediaBuffer::Video(frame) => {
+                let converted = self.transform(&frame)?;
+                self.pad.push(MediaBuffer::Video(converted))
+            }
             MediaBuffer::Eos => self.pad.push(MediaBuffer::Eos),
             other => Err(CudaConverterError::UnsupportedBuffer(other.kind()).into()),
         }
     }
 
     fn control(&mut self, msg: ControlMsg) -> Result<()> {
-        // Nothing local to react to — a pure per-frame conversion, same
-        // reasoning as `CudaUpload::control`.
+        // Nothing local to react to beyond the cached conversion — a pure
+        // per-frame conversion, same reasoning as `CudaUpload::control`.
+        if matches!(msg, ControlMsg::Flush | ControlMsg::Stop) {
+            self.repeated.clear();
+        }
         self.pad.control(msg)
     }
 }
@@ -450,6 +402,7 @@ mod tests {
     use std::sync::Mutex;
 
     use super::*;
+    use crate::buffer::picture_id;
     use crate::elements::CudaUpload;
     use crate::test_support::try_cuda_device;
 

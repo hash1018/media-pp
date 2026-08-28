@@ -345,7 +345,7 @@ impl PerFrameTransform for D3d11Download {
 
     fn produce(
         &mut self,
-        frame: &ffmpeg::frame::Video,
+        frame: &Arc<UnboundObjectPoolRef<ffmpeg::frame::Video>>,
     ) -> Result<UnboundObjectPoolRef<ffmpeg::frame::Video>> {
         if frame.format() != ffmpeg::format::Pixel::D3D11 {
             let format = frame.format();

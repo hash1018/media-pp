@@ -13,7 +13,8 @@ use crate::{
     element::{Element, ElementType, Sink, Source, element_pp_log},
     error::Result,
     pad::SrcPad,
-    pool::UnboundObjectPool,
+    pool::{UnboundObjectPool, UnboundObjectPoolRef},
+    repeat::{PerFrameTransform, RepeatedOutput},
 };
 
 /// How many output frames [`SwChromaKey`] pre-allocates once it learns its
@@ -28,6 +29,11 @@ const POOL_SIZE: usize = 4;
 /// via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum SwChromaKeyError {
+    /// FFmpeg could not take a second reference to the keyed frame already
+    /// in hand, which is how an unchanged input picture is answered.
+    #[error("failed to reference the previous keyed frame (code {0})")]
+    FrameRef(i32),
+
     /// The input video is not in the BGRA pixel format required by this filter.
     #[error(
         "SwChromaKey only keys BGRA frames (place it after a Scaler converting to BGRA), got {0:?}"
@@ -66,6 +72,12 @@ pub struct SwChromaKey {
     /// per-resolution state.
     dims: Option<(u32, u32)>,
     pool: Option<UnboundObjectPool<ffmpeg::frame::Video>>,
+    /// The last keyed frame and the picture it was made from, so a producer
+    /// that re-emits an unchanged frame is answered with it instead of
+    /// another pass over every pixel — see [`RepeatedOutput`]. The key
+    /// settings are fixed at construction, so the input is the whole of
+    /// what the result depends on.
+    repeated: RepeatedOutput,
     pad: SrcPad,
 }
 
@@ -96,6 +108,7 @@ impl SwChromaKey {
             smoothing: options.smoothing,
             dims: None,
             pool: None,
+            repeated: RepeatedOutput::new(),
             pad,
         }
     }
@@ -149,26 +162,12 @@ impl Sink for SwChromaKey {
 
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         match buf {
+            // The same picture as last time keys to the frame already in
+            // hand — see [`PerFrameTransform`], which is where that is
+            // decided.
             MediaBuffer::Video(frame) => {
-                if frame.format() != ffmpeg::format::Pixel::BGRA {
-                    pp_error!(self, "unsupported pixel format: {:?}", frame.format());
-                    return Err(SwChromaKeyError::UnsupportedFormat(frame.format()).into());
-                }
-                self.ensure_pool(frame.width(), frame.height());
-                let mut output = self
-                    .pool
-                    .as_ref()
-                    .expect("built above for this exact size")
-                    .get();
-                key_bgra(
-                    &frame,
-                    &mut output,
-                    self.key_color,
-                    self.threshold,
-                    self.smoothing,
-                );
-                output.set_pts(frame.pts());
-                self.pad.push(MediaBuffer::Video(Arc::new(output)))
+                let keyed = self.transform(&frame)?;
+                self.pad.push(MediaBuffer::Video(keyed))
             }
             MediaBuffer::Eos => self.pad.push(MediaBuffer::Eos),
             MediaBuffer::Packet(_) => {
@@ -184,8 +183,47 @@ impl Sink for SwChromaKey {
 
     fn control(&mut self, msg: ControlMsg) -> Result<()> {
         // A pure per-pixel transform, same as `SwScaler` — nothing local
-        // buffered or ordered to flush on any `ControlMsg`.
+        // buffered or ordered to flush beyond the cached keyed frame.
+        if matches!(msg, ControlMsg::Flush | ControlMsg::Stop) {
+            self.repeated.clear();
+        }
         self.pad.control(msg)
+    }
+}
+
+impl PerFrameTransform for SwChromaKey {
+    fn repeated(&mut self) -> &mut RepeatedOutput {
+        &mut self.repeated
+    }
+
+    fn frame_ref_failed(&self, code: i32) -> crate::error::Error {
+        pp_error!(self, "av_frame_ref failed: {code}");
+        SwChromaKeyError::FrameRef(code).into()
+    }
+
+    fn produce(
+        &mut self,
+        frame: &Arc<UnboundObjectPoolRef<ffmpeg::frame::Video>>,
+    ) -> Result<UnboundObjectPoolRef<ffmpeg::frame::Video>> {
+        if frame.format() != ffmpeg::format::Pixel::BGRA {
+            pp_error!(self, "unsupported pixel format: {:?}", frame.format());
+            return Err(SwChromaKeyError::UnsupportedFormat(frame.format()).into());
+        }
+        self.ensure_pool(frame.width(), frame.height());
+        let mut output = self
+            .pool
+            .as_ref()
+            .expect("built above for this exact size")
+            .get();
+        key_bgra(
+            frame,
+            &mut output,
+            self.key_color,
+            self.threshold,
+            self.smoothing,
+        );
+        output.set_pts(frame.pts());
+        Ok(output)
     }
 }
 
@@ -336,6 +374,55 @@ mod tests {
             threshold: 0.15,
             smoothing: 0.1,
         }
+    }
+
+    /// Another `AVFrame` over the same picture, with its own timestamp —
+    /// what a capture with nothing new to show hands over on every tick.
+    fn repeat_of(buffer: &MediaBuffer, pts: i64) -> MediaBuffer {
+        let MediaBuffer::Video(source) = buffer else {
+            panic!("expected a Video buffer");
+        };
+        let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
+        let mut slot = pool.get();
+        // SAFETY: both are live `AVFrame`s and distinct — the slot is the
+        // empty one just taken from the pool.
+        unsafe {
+            assert!(ffmpeg::ffi::av_frame_ref(slot.as_mut_ptr(), source.as_ptr()) >= 0);
+        }
+        slot.set_pts(Some(pts));
+        MediaBuffer::Video(Arc::new(slot))
+    }
+
+    /// A capture of a still screen re-emits the picture it already has, and
+    /// keying it again would produce the frame already in hand. The repeat
+    /// carries its own timestamp; only the pixels are shared.
+    #[test]
+    fn a_repeated_input_is_keyed_once() {
+        let (mut key, received) = new_chroma_key(default_options());
+        let source = bgra_frame(2, 2, |_, _| [0, 255, 0, 255]);
+        let repeat = repeat_of(&source, 200);
+
+        key.consume(source).expect("key the first frame");
+        key.consume(repeat).expect("key the repeat");
+
+        let received = received.lock().unwrap();
+        assert_eq!(received.len(), 2, "every frame still produces one");
+        let (MediaBuffer::Video(first), MediaBuffer::Video(repeated)) =
+            (&received[0], &received[1])
+        else {
+            panic!("expected Video buffers");
+        };
+        assert_eq!(
+            crate::buffer::picture_id(repeated),
+            crate::buffer::picture_id(first),
+            "an unchanged picture was keyed a second time"
+        );
+        assert_eq!(
+            repeated.pts(),
+            Some(200),
+            "a repeat carries this frame's timestamp, not the one it points at"
+        );
+        assert_eq!(pixel(repeated, 0, 0)[3], 0, "and it is still keyed out");
     }
 
     #[test]

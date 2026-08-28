@@ -27,6 +27,7 @@ use crate::{
         windows::d3d12va::{create_hw_device_ctx, create_hw_frames_ctx, d3d12va_texture},
     },
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
+    repeat::{PerFrameTransform, RepeatedOutput},
 };
 
 use super::d3d12_video_processor::{D3d12VideoProcessor, ProcessorShape, VideoProcessFrame};
@@ -41,6 +42,11 @@ const OUTPUT_POOL_SIZE: i32 = 8;
 /// while the rest report a failed Direct3D or FFmpeg allocation. Neither kind
 /// leaves the scaler's device state bound.
 pub enum D3d12ScalerError {
+    /// FFmpeg could not take a second reference to the scale already in
+    /// hand, which is how an unchanged input texture is answered.
+    #[error("failed to reference the previous scale (code {0})")]
+    FrameRef(i32),
+
     /// A Direct3D device, resource, or video-processor operation failed.
     #[error("windows error: {0}")]
     Windows(#[from] windows::core::Error),
@@ -165,6 +171,11 @@ pub struct D3d12Scaler {
     height: u32,
     pad: SrcPad,
     pool: UnboundObjectPool<ffmpeg::frame::Video>,
+    /// The last scale and the texture it was made from, so a producer that
+    /// re-emits an unchanged picture is answered with it instead of another
+    /// output surface and another queued video-process command — see
+    /// [`RepeatedOutput`].
+    repeated: RepeatedOutput,
 }
 
 // SAFETY: D3D12 COM interfaces and the FFmpeg buffer owners are free-threaded;
@@ -221,11 +232,15 @@ impl D3d12Scaler {
             height,
             pad,
             pool,
+            repeated: RepeatedOutput::new(),
         })
     }
 
-    fn scale(&mut self, source: Arc<UnboundObjectPoolRef<ffmpeg::frame::Video>>) -> Result<()> {
-        let (shape, texture, input_fence, input_fence_value) = self.validate_input(&source)?;
+    fn scale(
+        &mut self,
+        source: &Arc<UnboundObjectPoolRef<ffmpeg::frame::Video>>,
+    ) -> Result<UnboundObjectPoolRef<ffmpeg::frame::Video>> {
+        let (shape, texture, input_fence, input_fence_value) = self.validate_input(source)?;
 
         let mut destination = self.pool.get();
         // SAFETY: the destination is exclusively owned, unreffed before pool
@@ -269,7 +284,10 @@ impl D3d12Scaler {
         };
         let new_output_fence_value = output_fence_value.saturating_add(1);
         self.processor.process(VideoProcessFrame {
-            source,
+            // The command slot holds this until its fence signals, which is
+            // why `produce` is handed the pooled reference rather than the
+            // frame inside it.
+            source: Arc::clone(source),
             shape,
             input_texture: texture,
             input_fence,
@@ -279,8 +297,7 @@ impl D3d12Scaler {
             output_fence,
             output_fence_value: new_output_fence_value,
         })?;
-
-        self.pad.push(MediaBuffer::Video(Arc::new(destination)))
+        Ok(destination)
     }
 
     fn validate_input(
@@ -398,7 +415,13 @@ impl Sink for D3d12Scaler {
 
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         match buf {
-            MediaBuffer::Video(frame) => self.scale(frame),
+            // The same texture as last time is the same pixels as last time,
+            // and scaling them again produces the surface already in hand —
+            // see [`PerFrameTransform`].
+            MediaBuffer::Video(frame) => {
+                let scaled = self.transform(&frame)?;
+                self.pad.push(MediaBuffer::Video(scaled))
+            }
             MediaBuffer::Eos => {
                 self.processor.wait_all()?;
                 self.pad.push(MediaBuffer::Eos)
@@ -412,7 +435,29 @@ impl Sink for D3d12Scaler {
     }
 
     fn control(&mut self, msg: ControlMsg) -> Result<()> {
+        // Nothing local to react to beyond the cached scale.
+        if matches!(msg, ControlMsg::Flush | ControlMsg::Stop) {
+            self.repeated.clear();
+        }
         self.pad.control(msg)
+    }
+}
+
+impl PerFrameTransform for D3d12Scaler {
+    fn repeated(&mut self) -> &mut RepeatedOutput {
+        &mut self.repeated
+    }
+
+    fn frame_ref_failed(&self, code: i32) -> crate::error::Error {
+        pp_error!(self, "av_frame_ref failed: {code}");
+        D3d12ScalerError::FrameRef(code).into()
+    }
+
+    fn produce(
+        &mut self,
+        source: &Arc<UnboundObjectPoolRef<ffmpeg::frame::Video>>,
+    ) -> Result<UnboundObjectPoolRef<ffmpeg::frame::Video>> {
+        self.scale(source)
     }
 }
 
@@ -517,6 +562,87 @@ mod tests {
             index += 1;
         }
         None
+    }
+
+    /// The whole D3D12 chain answers a repeat with what it already made:
+    /// upload, scale and download each recognise it, so what comes out the
+    /// far end is the very frame the first pass produced, under this
+    /// frame's own timestamp. If any one stage had done its work again, the
+    /// picture at the end would be a different one.
+    #[test]
+    fn a_repeated_input_travels_the_chain_without_redoing_it() {
+        let Some(device) = try_device() else {
+            return;
+        };
+        let (input_width, input_height) = (128, 128);
+        let (output_width, output_height) = (64, 64);
+        let Ok(mut upload) = D3d12Upload::new("upload", &device, input_width, input_height) else {
+            eprintln!("skipping: FFmpeg could not create D3D12VA frames");
+            return;
+        };
+        let Ok(mut scaler) = D3d12Scaler::new("scaler", &device, output_width, output_height)
+        else {
+            eprintln!("skipping: D3D12 video processing is unavailable");
+            return;
+        };
+        let mut download = D3d12Download::new("download", output_width, output_height);
+        let received = Arc::new(Mutex::new(Vec::new()));
+        download.src_pads()[0].link(Box::new(CapturingSink {
+            pp_log: element_pp_log(ElementType::Other, "capture", None),
+            received: received.clone(),
+        }));
+        scaler.src_pads()[0].link(Box::new(download));
+        upload.src_pads()[0].link(Box::new(scaler));
+
+        let pool = UnboundObjectPool::new(
+            0,
+            move || {
+                ffmpeg::frame::Video::new(ffmpeg::format::Pixel::NV12, input_width, input_height)
+            },
+            |_| {},
+        );
+        let mut source = pool.get();
+        source.set_pts(Some(100));
+        let source = Arc::new(source);
+        // Another `AVFrame` over the same picture — what a capture with
+        // nothing new to show hands over on every tick.
+        let mut repeat = pool.get();
+        // SAFETY: both are live `AVFrame`s and distinct — the slot is the
+        // empty one just taken from the pool.
+        unsafe {
+            assert!(ffi::av_frame_ref(repeat.as_mut_ptr(), source.as_ptr()) >= 0);
+        }
+        repeat.set_pts(Some(200));
+
+        let result = upload.consume(MediaBuffer::Video(source));
+        if let Err(error) = &result
+            && error.to_string().contains("does not support D3D12 NV12")
+        {
+            eprintln!("skipping: {error}");
+            return;
+        }
+        result.expect("the first pass should succeed");
+        upload
+            .consume(MediaBuffer::Video(Arc::new(repeat)))
+            .expect("the repeat should succeed");
+
+        let received = received.lock().unwrap();
+        assert_eq!(received.len(), 2, "every frame still produces one");
+        let (MediaBuffer::Video(first), MediaBuffer::Video(repeated)) =
+            (&received[0], &received[1])
+        else {
+            panic!("expected Video buffers");
+        };
+        assert_eq!(
+            crate::buffer::picture_id(repeated),
+            crate::buffer::picture_id(first),
+            "some stage in the chain did its work a second time"
+        );
+        assert_eq!(
+            repeated.pts(),
+            Some(200),
+            "a repeat carries this frame's timestamp, not the one it points at"
+        );
     }
 
     #[test]

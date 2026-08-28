@@ -30,11 +30,6 @@ pub mod playback_clock;
 pub mod pool;
 pub mod pp_log;
 pub mod queue;
-// Answering a repeated input with the output already made from it. Only
-// the D3D11 filters use it today; the software, CUDA and D3D12 ones are
-// candidates that have not been converted, so a build without D3D11 would
-// otherwise carry an unused module.
-#[cfg(feature = "d3d11")]
 pub mod repeat;
 pub mod schedule;
 pub mod time;

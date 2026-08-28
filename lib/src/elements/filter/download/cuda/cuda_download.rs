@@ -16,13 +16,19 @@ use crate::{
         cuda::{CudaDevice, CudaFrameFormat},
         ffmpeg::AvBufferRef,
     },
-    pool::UnboundObjectPool,
+    pool::{UnboundObjectPool, UnboundObjectPoolRef},
+    repeat::{PerFrameTransform, RepeatedOutput},
 };
 
 /// Errors specific to `CudaDownload`. Converts into the crate-wide `Error`
 /// via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum CudaDownloadError {
+    /// FFmpeg could not take a second reference to the download already in
+    /// hand, which is how an unchanged surface is answered.
+    #[error("failed to reference the previous download (code {0})")]
+    FrameRef(i32),
+
     /// The input frame is not backed by CUDA hardware surfaces.
     #[error("CudaDownload only downloads CUDA frames, got {0:?}")]
     UnsupportedFormat(ffmpeg::format::Pixel),
@@ -123,6 +129,11 @@ pub struct CudaDownload {
     /// download is ordinary host memory rather than a surface from a frames
     /// context.
     pool: UnboundObjectPool<ffmpeg::frame::Video>,
+    /// The last download and the surface it came from, so a producer that
+    /// re-emits an unchanged surface is answered with the bytes already in
+    /// system memory instead of another transfer across PCIe — see
+    /// [`RepeatedOutput`].
+    repeated: RepeatedOutput,
 }
 
 // SAFETY: `hw_device_ctx` is a heap-allocated FFmpeg buffer with no thread
@@ -183,10 +194,14 @@ impl CudaDownload {
             height,
             pad,
             pool,
+            repeated: RepeatedOutput::new(),
         }
     }
 
-    fn download(&mut self, source: &ffmpeg::frame::Video) -> Result<()> {
+    fn download(
+        &mut self,
+        source: &ffmpeg::frame::Video,
+    ) -> Result<UnboundObjectPoolRef<ffmpeg::frame::Video>> {
         if source.format() != ffmpeg::format::Pixel::CUDA {
             pp_error!(self, "unsupported pixel format: {:?}", source.format());
             return Err(CudaDownloadError::UnsupportedFormat(source.format()).into());
@@ -247,8 +262,25 @@ impl CudaDownload {
             // otherwise be dropped here.
             ffi::av_frame_copy_props(dst, source.as_ptr());
         }
+        Ok(destination)
+    }
+}
 
-        self.pad.push(MediaBuffer::Video(Arc::new(destination)))
+impl PerFrameTransform for CudaDownload {
+    fn repeated(&mut self) -> &mut RepeatedOutput {
+        &mut self.repeated
+    }
+
+    fn frame_ref_failed(&self, code: i32) -> crate::error::Error {
+        pp_error!(self, "av_frame_ref failed: {code}");
+        CudaDownloadError::FrameRef(code).into()
+    }
+
+    fn produce(
+        &mut self,
+        source: &Arc<UnboundObjectPoolRef<ffmpeg::frame::Video>>,
+    ) -> Result<UnboundObjectPoolRef<ffmpeg::frame::Video>> {
+        self.download(source)
     }
 }
 
@@ -287,15 +319,25 @@ impl Sink for CudaDownload {
 
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         match buf {
-            MediaBuffer::Video(frame) => self.download(&frame),
+            // The same surface as last time is the same pixels as last time,
+            // and reading them back again produces the frame already in hand
+            // — see [`PerFrameTransform`].
+            MediaBuffer::Video(frame) => {
+                let downloaded = self.transform(&frame)?;
+                self.pad.push(MediaBuffer::Video(downloaded))
+            }
             MediaBuffer::Eos => self.pad.push(MediaBuffer::Eos),
             other => Err(CudaDownloadError::UnsupportedBuffer(other.kind()).into()),
         }
     }
 
     fn control(&mut self, msg: ControlMsg) -> Result<()> {
-        // Nothing local to react to — a pure per-frame GPU->CPU transfer,
-        // same reasoning as `CudaUpload::control`.
+        // Nothing local to react to beyond the cached download — a pure
+        // per-frame GPU->CPU transfer, same reasoning as
+        // `CudaUpload::control`.
+        if matches!(msg, ControlMsg::Flush | ControlMsg::Stop) {
+            self.repeated.clear();
+        }
         self.pad.control(msg)
     }
 }
@@ -383,6 +425,67 @@ mod tests {
             }
         }
         frame
+    }
+
+    /// A compositor with nothing to recompose hands out the surface it
+    /// already composed, and reading it back again would produce the bytes
+    /// already in system memory. The repeat carries its own timestamp; only
+    /// the pixels are shared.
+    #[test]
+    fn a_repeated_input_is_downloaded_once() {
+        let Some((device, _cuda_lock)) = try_cuda_device() else {
+            return;
+        };
+        let (width, height) = (64u32, 64u32);
+        let Ok(mut upload) =
+            CudaUpload::new("upload", &device, CudaFrameFormat::Nv12, width, height)
+        else {
+            eprintln!("skipping: this machine has no usable CUDA frames context");
+            return;
+        };
+        // One surface, then a second `AVFrame` over it — what a producer with
+        // nothing new to show hands over.
+        let uploaded = capture(&mut upload);
+        upload
+            .consume(pooled(nv12_pattern(width, height, 100)))
+            .expect("upload");
+        let source = uploaded.lock().unwrap().remove(0);
+        let MediaBuffer::Video(surface) = &source else {
+            panic!("expected a Video buffer");
+        };
+        let mut repeat = ffmpeg::frame::Video::empty();
+        // SAFETY: both are live `AVFrame`s and distinct — `repeat` is the
+        // empty local above.
+        unsafe {
+            assert!(ffi::av_frame_ref(repeat.as_mut_ptr(), surface.as_ptr()) >= 0);
+        }
+        repeat.set_pts(Some(200));
+
+        let mut download =
+            CudaDownload::new("download", &device, CudaFrameFormat::Nv12, width, height);
+        let received = capture(&mut download);
+        download.consume(source).expect("download the first frame");
+        download
+            .consume(pooled(repeat))
+            .expect("download the repeat");
+
+        let received = received.lock().unwrap();
+        assert_eq!(received.len(), 2, "every frame still produces one");
+        let (MediaBuffer::Video(first), MediaBuffer::Video(repeated)) =
+            (&received[0], &received[1])
+        else {
+            panic!("expected Video buffers");
+        };
+        assert_eq!(
+            crate::buffer::picture_id(repeated),
+            crate::buffer::picture_id(first),
+            "an unchanged surface was transferred a second time"
+        );
+        assert_eq!(
+            repeated.pts(),
+            Some(200),
+            "a repeat carries this frame's timestamp, not the one it points at"
+        );
     }
 
     /// The contract: pixels that went up come back down unchanged, on the CPU,

@@ -661,7 +661,7 @@ impl PerFrameTransform for D3d11Scaler {
 
     fn produce(
         &mut self,
-        frame: &ffmpeg::frame::Video,
+        frame: &Arc<UnboundObjectPoolRef<ffmpeg::frame::Video>>,
     ) -> Result<UnboundObjectPoolRef<ffmpeg::frame::Video>> {
         self.scale(frame)
     }

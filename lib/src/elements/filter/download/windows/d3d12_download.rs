@@ -11,12 +11,18 @@ use crate::{
     element::{Element, ElementType, Sink, Source, element_pp_log},
     error::Result,
     pad::SrcPad,
-    pool::UnboundObjectPool,
+    pool::{UnboundObjectPool, UnboundObjectPoolRef},
+    repeat::{PerFrameTransform, RepeatedOutput},
 };
 
 /// Errors specific to [`D3d12Download`].
 #[derive(Debug, ThisError)]
 pub enum D3d12DownloadError {
+    /// FFmpeg could not take a second reference to the download already in
+    /// hand, which is how an unchanged texture is answered.
+    #[error("failed to reference the previous download (code {0})")]
+    FrameRef(i32),
+
     /// The input frame is not backed by a D3D12 texture.
     #[error("D3d12Download only accepts Pixel::D3D12 frames, got {0:?}")]
     UnsupportedFormat(ffmpeg::format::Pixel),
@@ -83,6 +89,10 @@ pub struct D3d12Download {
     height: u32,
     pad: SrcPad,
     pool: UnboundObjectPool<ffmpeg::frame::Video>,
+    /// The last download and the texture it came from, so a producer that
+    /// re-emits an unchanged picture is answered with the bytes already in
+    /// system memory — see [`RepeatedOutput`].
+    repeated: RepeatedOutput,
 }
 
 impl D3d12Download {
@@ -110,10 +120,14 @@ impl D3d12Download {
             height,
             pad,
             pool,
+            repeated: RepeatedOutput::new(),
         }
     }
 
-    fn download(&mut self, source: &ffmpeg::frame::Video) -> Result<()> {
+    fn download(
+        &mut self,
+        source: &ffmpeg::frame::Video,
+    ) -> Result<UnboundObjectPoolRef<ffmpeg::frame::Video>> {
         if source.format() != ffmpeg::format::Pixel::D3D12 {
             pp_error!(self, "unsupported pixel format: {:?}", source.format());
             return Err(D3d12DownloadError::UnsupportedFormat(source.format()).into());
@@ -165,7 +179,25 @@ impl D3d12Download {
             }
         }
 
-        self.pad.push(MediaBuffer::Video(Arc::new(destination)))
+        Ok(destination)
+    }
+}
+
+impl PerFrameTransform for D3d12Download {
+    fn repeated(&mut self) -> &mut RepeatedOutput {
+        &mut self.repeated
+    }
+
+    fn frame_ref_failed(&self, code: i32) -> crate::error::Error {
+        pp_error!(self, "av_frame_ref failed: {code}");
+        D3d12DownloadError::FrameRef(code).into()
+    }
+
+    fn produce(
+        &mut self,
+        source: &Arc<UnboundObjectPoolRef<ffmpeg::frame::Video>>,
+    ) -> Result<UnboundObjectPoolRef<ffmpeg::frame::Video>> {
+        self.download(source)
     }
 }
 
@@ -204,7 +236,13 @@ impl Sink for D3d12Download {
 
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         match buf {
-            MediaBuffer::Video(frame) => self.download(&frame),
+            // The same texture as last time is the same pixels as last time,
+            // and reading them back again produces the frame already in hand
+            // — see [`PerFrameTransform`].
+            MediaBuffer::Video(frame) => {
+                let downloaded = self.transform(&frame)?;
+                self.pad.push(MediaBuffer::Video(downloaded))
+            }
             MediaBuffer::Eos => self.pad.push(MediaBuffer::Eos),
             other => {
                 let error = D3d12DownloadError::UnsupportedBuffer(other.kind());
@@ -215,6 +253,10 @@ impl Sink for D3d12Download {
     }
 
     fn control(&mut self, msg: ControlMsg) -> Result<()> {
+        // Nothing local to react to beyond the cached download.
+        if matches!(msg, ControlMsg::Flush | ControlMsg::Stop) {
+            self.repeated.clear();
+        }
         self.pad.control(msg)
     }
 }

@@ -17,13 +17,19 @@ use crate::{
         frame::{CudaFramesContextError, create_hw_frames_ctx},
     },
     platform::ffmpeg::AvBufferRef,
-    pool::UnboundObjectPool,
+    pool::{UnboundObjectPool, UnboundObjectPoolRef},
+    repeat::{PerFrameTransform, RepeatedOutput},
 };
 
 /// Errors specific to `CudaUpload`. Converts into the crate-wide `Error` via
 /// `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum CudaUploadError {
+    /// FFmpeg could not take a second reference to the upload already in
+    /// hand, which is how an unchanged CPU picture is answered.
+    #[error("failed to reference the previous upload (code {0})")]
+    FrameRef(i32),
+
     /// The CPU frame format differs from the upload surface format.
     #[error("this CudaUpload uploads {expected:?} frames, got {actual:?}")]
     UnsupportedFormat {
@@ -127,6 +133,11 @@ pub struct CudaUpload {
     /// itself comes from `hw_frames_ctx`'s own pool. Same split as
     /// `D3d11Upload`.
     pool: UnboundObjectPool<ffmpeg::frame::Video>,
+    /// The last upload and the CPU picture it came from, so a producer that
+    /// re-emits an unchanged picture is answered with the surface already on
+    /// the GPU instead of another transfer across PCIe — see
+    /// [`RepeatedOutput`].
+    repeated: RepeatedOutput,
 }
 
 // SAFETY: both buffers are heap-allocated FFmpeg buffers with no thread
@@ -177,10 +188,14 @@ impl CudaUpload {
             height,
             pad,
             pool,
+            repeated: RepeatedOutput::new(),
         })
     }
 
-    fn upload(&mut self, source: &ffmpeg::frame::Video) -> Result<()> {
+    fn upload(
+        &mut self,
+        source: &ffmpeg::frame::Video,
+    ) -> Result<UnboundObjectPoolRef<ffmpeg::frame::Video>> {
         if source.format() != self.format.pixel() {
             pp_error!(self, "unsupported pixel format: {:?}", source.format());
             return Err(CudaUploadError::UnsupportedFormat {
@@ -226,8 +241,25 @@ impl CudaUpload {
             // otherwise be dropped here.
             ffi::av_frame_copy_props(dst, source.as_ptr());
         }
+        Ok(destination)
+    }
+}
 
-        self.pad.push(MediaBuffer::Video(Arc::new(destination)))
+impl PerFrameTransform for CudaUpload {
+    fn repeated(&mut self) -> &mut RepeatedOutput {
+        &mut self.repeated
+    }
+
+    fn frame_ref_failed(&self, code: i32) -> crate::error::Error {
+        pp_error!(self, "av_frame_ref failed: {code}");
+        CudaUploadError::FrameRef(code).into()
+    }
+
+    fn produce(
+        &mut self,
+        source: &Arc<UnboundObjectPoolRef<ffmpeg::frame::Video>>,
+    ) -> Result<UnboundObjectPoolRef<ffmpeg::frame::Video>> {
+        self.upload(source)
     }
 }
 
@@ -266,15 +298,25 @@ impl Sink for CudaUpload {
 
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         match buf {
-            MediaBuffer::Video(frame) => self.upload(&frame),
+            // The same CPU buffer as last time is the same pixels as last
+            // time, and uploading them again produces the surface already on
+            // the GPU — see [`PerFrameTransform`].
+            MediaBuffer::Video(frame) => {
+                let uploaded = self.transform(&frame)?;
+                self.pad.push(MediaBuffer::Video(uploaded))
+            }
             MediaBuffer::Eos => self.pad.push(MediaBuffer::Eos),
             other => Err(CudaUploadError::UnsupportedBuffer(other.kind()).into()),
         }
     }
 
     fn control(&mut self, msg: ControlMsg) -> Result<()> {
-        // Nothing local to react to — a pure per-frame CPU->GPU transfer,
-        // same reasoning as `D3d11Upload::control`.
+        // Nothing local to react to beyond the cached upload — a pure
+        // per-frame CPU->GPU transfer, same reasoning as
+        // `D3d11Upload::control`.
+        if matches!(msg, ControlMsg::Flush | ControlMsg::Stop) {
+            self.repeated.clear();
+        }
         self.pad.control(msg)
     }
 }
@@ -350,6 +392,55 @@ mod tests {
             pp_log: element_pp_log(ElementType::Other, "capture", None),
         }));
         Some((upload, received, cuda_lock))
+    }
+
+    /// Another `AVFrame` over the same picture, with its own timestamp —
+    /// what a capture with nothing new to show hands over on every tick.
+    fn repeat_of(buffer: &MediaBuffer, pts: i64) -> MediaBuffer {
+        let MediaBuffer::Video(source) = buffer else {
+            panic!("expected a Video buffer");
+        };
+        let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
+        let mut slot = pool.get();
+        // SAFETY: both are live `AVFrame`s and distinct — the slot is the
+        // empty one just taken from the pool.
+        unsafe {
+            assert!(ffi::av_frame_ref(slot.as_mut_ptr(), source.as_ptr()) >= 0);
+        }
+        slot.set_pts(Some(pts));
+        MediaBuffer::Video(Arc::new(slot))
+    }
+
+    /// A capture of a still screen re-emits the picture it already has, and
+    /// uploading it again would produce the surface already on the GPU. The
+    /// repeat carries its own timestamp; only the surface is shared.
+    #[test]
+    fn a_repeated_input_is_uploaded_once() {
+        let Some((mut upload, received, _cuda_lock)) = new_upload(64, 64) else {
+            return;
+        };
+        let source = nv12_frame(64, 64, 100);
+        let repeat = repeat_of(&source, 200);
+        upload.consume(source).expect("upload the first frame");
+        upload.consume(repeat).expect("upload the repeat");
+
+        let received = received.lock().unwrap();
+        assert_eq!(received.len(), 2, "every frame still produces one");
+        let (MediaBuffer::Video(first), MediaBuffer::Video(repeated)) =
+            (&received[0], &received[1])
+        else {
+            panic!("expected Video buffers");
+        };
+        assert_eq!(
+            crate::buffer::picture_id(repeated),
+            crate::buffer::picture_id(first),
+            "an unchanged picture was uploaded into a second surface"
+        );
+        assert_eq!(
+            repeated.pts(),
+            Some(200),
+            "a repeat carries this frame's timestamp, not the one it points at"
+        );
     }
 
     /// The contract: what comes out is GPU-resident and keeps its timestamp.

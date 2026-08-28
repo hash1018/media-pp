@@ -21,6 +21,11 @@
 //! against its own state. This is for the ordinary case: one frame in, one
 //! frame out, the output a function of the input alone.
 //!
+//! `CudaScaler` is the other exclusion, and for the other reason: it scales
+//! through a libavfilter graph, which answers one frame with none or several
+//! and holds frames of its own to flush at end of stream. "The output" is not
+//! a single frame there, so there is nothing for this to hand out again.
+//!
 //! Nothing here belongs in front of an element whose contract is a *rate*.
 //! An encoder or a muxer needs the frame per tick, and an encoder given a
 //! picture identical to the last one is already at its cheapest.
@@ -86,9 +91,15 @@ pub(crate) trait PerFrameTransform {
     /// Makes one output frame from `input` — the work this element exists to
     /// do, including whatever properties it stamps on the result. Called
     /// only when the input is not one already answered.
+    ///
+    /// Handed the pooled reference rather than the frame inside it, because
+    /// an element that leaves GPU work running past this call has to keep
+    /// the input checked out until it completes — `D3d12Scaler` holds it in
+    /// the command slot it just queued. One that reads the pixels and is
+    /// done simply derefs.
     fn produce(
         &mut self,
-        input: &ffmpeg::frame::Video,
+        input: &Arc<UnboundObjectPoolRef<ffmpeg::frame::Video>>,
     ) -> Result<UnboundObjectPoolRef<ffmpeg::frame::Video>>;
 
     /// This element's own error for a failed `av_frame_ref`, so that a

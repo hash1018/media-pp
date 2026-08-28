@@ -16,7 +16,8 @@ use crate::{
         ffmpeg::AvBufferRef,
         windows::d3d12va::{create_hw_device_ctx, create_hw_frames_ctx},
     },
-    pool::UnboundObjectPool,
+    pool::{UnboundObjectPool, UnboundObjectPoolRef},
+    repeat::{PerFrameTransform, RepeatedOutput},
 };
 
 /// How many GPU frames [`D3d12Upload`]'s `hw_frames_ctx` pool starts with.
@@ -35,6 +36,11 @@ const POOL_SIZE: i32 = 4;
 /// via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum D3d12UploadError {
+    /// FFmpeg could not take a second reference to the upload already in
+    /// hand, which is how an unchanged CPU picture is answered.
+    #[error("failed to reference the previous upload (code {0})")]
+    FrameRef(i32),
+
     /// FFmpeg could not wrap the supplied D3D12 device.
     #[error("failed to create D3D12VA hw device context (code {0})")]
     HwDeviceInit(i32),
@@ -122,6 +128,10 @@ pub struct D3d12Upload {
     /// same division of labor [`crate::elements::D3d12Decoder`]'s own
     /// `pool` field docs describe.
     pool: UnboundObjectPool<ffmpeg::frame::Video>,
+    /// The last upload and the CPU picture it came from, so a producer that
+    /// re-emits an unchanged picture is answered with the texture already on
+    /// the GPU — see [`RepeatedOutput`].
+    repeated: RepeatedOutput,
 }
 
 // SAFETY: `hw_device_ctx`/`hw_frames_ctx` are heap-allocated FFmpeg
@@ -177,6 +187,7 @@ impl D3d12Upload {
             height,
             pad,
             pool,
+            repeated: RepeatedOutput::new(),
         })
     }
 }
@@ -216,7 +227,51 @@ impl Sink for D3d12Upload {
 
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         match buf {
+            // The same CPU buffer as last time is the same pixels as last
+            // time, and uploading them again produces the texture already on
+            // the GPU — see [`PerFrameTransform`].
             MediaBuffer::Video(frame) => {
+                let uploaded = self.transform(&frame)?;
+                self.pad.push(MediaBuffer::Video(uploaded))
+            }
+            MediaBuffer::Eos => self.pad.push(MediaBuffer::Eos),
+            MediaBuffer::Packet(_) => {
+                pp_error!(self, "unsupported buffer: Packet");
+                Err(D3d12UploadError::UnsupportedBuffer("Packet").into())
+            }
+            MediaBuffer::Audio(_) => {
+                pp_error!(self, "unsupported buffer: Audio");
+                Err(D3d12UploadError::UnsupportedBuffer("Audio").into())
+            }
+        }
+    }
+
+    fn control(&mut self, msg: ControlMsg) -> Result<()> {
+        // Nothing local to react to beyond the cached upload — a pure
+        // per-frame CPU->GPU transfer.
+        if matches!(msg, ControlMsg::Flush | ControlMsg::Stop) {
+            self.repeated.clear();
+        }
+        self.pad.control(msg)
+    }
+}
+
+impl PerFrameTransform for D3d12Upload {
+    fn repeated(&mut self) -> &mut RepeatedOutput {
+        &mut self.repeated
+    }
+
+    fn frame_ref_failed(&self, code: i32) -> crate::error::Error {
+        pp_error!(self, "av_frame_ref failed: {code}");
+        D3d12UploadError::FrameRef(code).into()
+    }
+
+    fn produce(
+        &mut self,
+        frame: &Arc<UnboundObjectPoolRef<ffmpeg::frame::Video>>,
+    ) -> Result<UnboundObjectPoolRef<ffmpeg::frame::Video>> {
+        {
+            {
                 if frame.format() != ffmpeg::format::Pixel::NV12 {
                     pp_error!(self, "unsupported pixel format: {:?}", frame.format());
                     return Err(D3d12UploadError::UnsupportedFormat(frame.format()).into());
@@ -271,24 +326,9 @@ impl Sink for D3d12Upload {
                     }
                 }
 
-                self.pad.push(MediaBuffer::Video(Arc::new(gpu_frame)))
-            }
-            MediaBuffer::Eos => self.pad.push(MediaBuffer::Eos),
-            MediaBuffer::Packet(_) => {
-                pp_error!(self, "unsupported buffer: Packet");
-                Err(D3d12UploadError::UnsupportedBuffer("Packet").into())
-            }
-            MediaBuffer::Audio(_) => {
-                pp_error!(self, "unsupported buffer: Audio");
-                Err(D3d12UploadError::UnsupportedBuffer("Audio").into())
+                Ok(gpu_frame)
             }
         }
-    }
-
-    fn control(&mut self, msg: ControlMsg) -> Result<()> {
-        // Nothing local to react to — a pure per-frame CPU->GPU transfer,
-        // same reasoning as `SwScaler::control`.
-        self.pad.control(msg)
     }
 }
 

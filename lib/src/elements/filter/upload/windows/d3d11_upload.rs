@@ -356,7 +356,7 @@ impl PerFrameTransform for D3d11Upload {
 
     fn produce(
         &mut self,
-        frame: &ffmpeg::frame::Video,
+        frame: &Arc<UnboundObjectPoolRef<ffmpeg::frame::Video>>,
     ) -> Result<UnboundObjectPoolRef<ffmpeg::frame::Video>> {
         let Some(format) = texture_format(frame.format()) else {
             pp_error!(self, "unsupported pixel format: {:?}", frame.format());
