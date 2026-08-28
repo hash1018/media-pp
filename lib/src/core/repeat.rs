@@ -35,7 +35,7 @@ use std::sync::Arc;
 use ffmpeg_next::{self as ffmpeg, ffi};
 
 use crate::{
-    buffer::{picture_id, picture_is_referenced},
+    buffer::{picture_id, picture_is_referenced, release_picture},
     error::Result,
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
 };
@@ -163,7 +163,7 @@ impl RepeatedOutput {
         Self {
             held: None,
             retired: Vec::new(),
-            wrappers: UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {}),
+            wrappers: UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, release_picture),
         }
     }
 
@@ -356,10 +356,15 @@ mod tests {
             0,
             "the pool handed back a frame a repeat is still showing"
         );
+        // Dropping the repeat returns its wrapper to the pool it came from,
+        // which is where it lets go of the picture — see `release_picture`.
         drop(in_flight);
-        // Nothing refers to the first output any more, so the next store
-        // lets it go.
         cache.store(&picture(3), Arc::new(pool.get()));
-        assert_eq!(pool.size(), 1, "a picture nobody holds must be reusable");
+        assert_eq!(
+            pool.size(),
+            2,
+            "a picture nobody holds must be reusable — both the one the repeat \
+             was showing and the one that replaced it"
+        );
     }
 }

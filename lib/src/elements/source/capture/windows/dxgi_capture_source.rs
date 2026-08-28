@@ -34,7 +34,7 @@ use windows::{
 };
 
 use crate::{
-    buffer::{MediaBuffer, picture_is_referenced},
+    buffer::{MediaBuffer, picture_is_referenced, release_picture},
     bus::{Bus, BusEvent},
     contract::{MediaKind, MemoryDomain, OutputContract, PortContract},
     control::{ControlReceiver, drain_control},
@@ -42,7 +42,10 @@ use crate::{
     elements::VideoFormat,
     error::{D3d11FrameWrapError, D3d11SharedDeviceError, Result},
     pad::SrcPad,
-    platform::windows::{d3d11::protect_shared_device, d3d11va::wrap_d3d11_texture},
+    platform::windows::{
+        d3d11::protect_shared_device,
+        d3d11va::{d3d11va_texture, wrap_d3d11_texture},
+    },
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
     schedule::PeriodicSchedule,
 };
@@ -470,12 +473,21 @@ pub struct DxgiCaptureSource {
     /// the wrapper is what lets several ticks in a row show it under their
     /// own `pts`. Unused under [`CaptureMode::Gpu`].
     wrapper_pool: UnboundObjectPool<ffmpeg::frame::Video>,
-    /// The composite texture the last [`CaptureMode::Gpu`] emission built,
-    /// kept so a tick that captured nothing new can wrap it again instead of
-    /// building an identical one. `None` before the first emission and under
-    /// [`CaptureMode::Cpu`]. See [`DxgiCaptureSource::emit_frame_gpu`].
-    last_composite: Option<ID3D11Texture2D>,
-    /// [`CaptureMode::Cpu`]'s equivalent of `last_composite`: the pooled
+    /// The composite the last [`CaptureMode::Gpu`] emission drew, held as the
+    /// frame that owns its texture: every emission is a reference to this, so
+    /// a tick that captured nothing hands out another one, and the buffer's
+    /// reference count is what says whether the texture may be drawn into
+    /// again. `None` before the first emission and under [`CaptureMode::Cpu`].
+    /// See [`DxgiCaptureSource::emit_frame_gpu`].
+    composite: Option<ffmpeg::frame::Video>,
+    /// Composites drawn earlier, kept rather than freed. A screen-sized
+    /// texture is 8 MiB at 1080p, and a screen with real motion changes on
+    /// every tick, so allocating one per changed frame is what this avoids —
+    /// see [`DxgiCaptureSource::build_composite`], which takes one back only
+    /// once nothing refers to it. Grows to however many emitted frames are in
+    /// flight at once, and no further.
+    spare_composites: Vec<ffmpeg::frame::Video>,
+    /// [`CaptureMode::Cpu`]'s equivalent of `composite`: the pooled
     /// frame the desktop image was last copied into, kept so a tick that
     /// captured nothing can point a wrapper at it instead of copying
     /// identical pixels again. `None` before the first emission and under
@@ -494,7 +506,7 @@ pub struct DxgiCaptureSource {
     /// Bumped every time `cursor_shape` is replaced — see [`CursorState`].
     cursor_shape_version: u64,
     /// Whether any unit has captured since the picture a repeat would offer
-    /// again was built — `last_composite`'s texture under
+    /// again was built — the `composite` texture under
     /// [`CaptureMode::Gpu`], `last_picture`'s pixels under
     /// [`CaptureMode::Cpu`]. That is, whether producing it again would give
     /// different pixels.
@@ -710,7 +722,9 @@ impl DxgiCaptureSource {
         // `emit_frame` call (see that method's own docs on why). Cpu:
         // pre-sized real `Pixel::BGRA` CPU buffers, as before.
         let pool = if gpu_mode {
-            UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {})
+            // Wrappers, so a returned one lets go of the composite it was
+            // showing rather than pinning that texture until its next use.
+            UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, release_picture)
         } else {
             UnboundObjectPool::new(
                 0,
@@ -757,8 +771,13 @@ impl DxgiCaptureSource {
                 frame_index: 0,
                 pad,
                 pool,
-                wrapper_pool: UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {}),
-                last_composite: None,
+                wrapper_pool: UnboundObjectPool::new(
+                    0,
+                    ffmpeg::frame::Video::empty,
+                    release_picture,
+                ),
+                composite: None,
+                spare_composites: Vec::new(),
                 last_picture: None,
                 retired: Vec::new(),
                 picture_cursor: CursorState::default(),
@@ -926,7 +945,7 @@ impl DxgiCaptureSource {
                 // straight from it. See `CaptureMode::Gpu`'s own docs.
                 self.units[index].has_captured = true;
                 // This unit's latest image changed, so the next composite is
-                // no longer the one `last_composite` already holds.
+                // no longer the one `composite` already holds.
                 self.captured_since_picture = true;
                 continue;
             }
@@ -1169,13 +1188,14 @@ impl DxgiCaptureSource {
     /// a fresh full-size texture and a full-size copy to produce an image
     /// pixel-identical to the one just emitted — at 1080p60 that is around
     /// 480 MB/s of allocation for no new pixels. Such a tick re-wraps
-    /// `last_composite` instead. The rate downstream sees does not change: a
+    /// the composite it already has instead. The rate downstream sees does not change: a
     /// frame is still pushed every tick, with its own wrapper and its own
     /// advancing `pts`.
     ///
-    /// Handing two frames the same texture is sound because that texture is
-    /// written exactly once, by the emission that created it: a tick that *did*
-    /// capture something builds a new one rather than overwriting this. So a
+    /// Handing two frames the same texture is sound because a composite is
+    /// written only while nothing is reading it: a tick that *did* capture
+    /// something draws into one no emitted frame still refers to, and
+    /// allocates another when every composite it holds is in flight. So a
     /// frame still held downstream can never see its pixels change — the
     /// property [`crate::pool::UnboundObjectPool`]'s own contract protects for
     /// pooled frames, established here by never writing to a published texture
@@ -1186,26 +1206,104 @@ impl DxgiCaptureSource {
         crate::pool::UnboundObjectPoolRef<ffmpeg::frame::Video>,
         DxgiCaptureSourceError,
     > {
-        let texture = match &self.last_composite {
-            Some(texture) if !self.captured_since_picture => texture.clone(),
-            _ => self.build_composite()?,
-        };
+        if self.composite.is_none() || self.captured_since_picture {
+            self.build_composite()?;
+        }
 
-        let mut frame = self.pool.get();
-        // Overwrites the pooled slot's previous contents in place —
-        // `ffmpeg::frame::Video`'s own `Drop` runs on whatever was there
-        // before, releasing that frame's reference to whatever texture it
-        // wrapped (same pattern `D3d11Upload::consume` documents).
-        *frame = wrap_d3d11_texture(texture, self.width, self.height)?;
-        Ok(frame)
+        let mut wrapper = self.pool.get();
+        let composite = self
+            .composite
+            .as_ref()
+            .expect("build_composite leaves a composite behind");
+        // SAFETY: `ptr` is the pooled wrapper's own `AVFrame`, unreferenced
+        // before it is given a new one, and the source is the composite this
+        // element holds — both live, and distinct from each other. Every
+        // emission being a reference to that one frame is also what makes its
+        // buffer's reference count say whether the texture is still being
+        // read, which is what `build_composite` asks.
+        unsafe {
+            let ptr = wrapper.as_mut_ptr();
+            ffi::av_frame_unref(ptr);
+            let code = ffi::av_frame_ref(ptr, composite.as_ptr());
+            if code < 0 {
+                return Err(DxgiCaptureSourceError::FrameRef(code));
+            }
+        }
+        Ok(wrapper)
     }
 
-    /// Builds one fresh composite texture from every unit's latest capture.
+    /// Draws every unit's latest capture into a composite nothing is reading,
+    /// and makes it the one emitted from here on.
     ///
-    /// Fresh rather than drawn over `last_composite`: that one may still be
-    /// wrapped by frames downstream, and overwriting it would change pixels
-    /// under whoever is reading them.
-    fn build_composite(&mut self) -> std::result::Result<ID3D11Texture2D, DxgiCaptureSourceError> {
+    /// Into a texture rather than a fresh one wherever possible. A tick that
+    /// captured something used to allocate a screen-sized texture — 8 MiB at
+    /// 1080p, and at 60 fps on a screen with real motion that is an allocation
+    /// per frame, which is exactly the case none of the repeat handling above
+    /// can help with. What it may *not* do is draw over pixels an emitted
+    /// frame is still showing, so a composite becomes eligible again only once
+    /// [`picture_is_referenced`] reads false for it: every emission is a
+    /// reference to the composite's own frame, so that count is the number of
+    /// frames still in flight over it.
+    ///
+    /// That rule is also what keeps a reused texture from being mistaken for
+    /// an unchanged picture downstream. Everything that recognises a repeat by
+    /// address — the video compositors, `ChangeGate` — holds the frame whose
+    /// address it compares, which is exactly the reference this checks, so a
+    /// texture cannot come back carrying different pixels while anything still
+    /// names it.
+    fn build_composite(&mut self) -> std::result::Result<(), DxgiCaptureSourceError> {
+        // The composite being replaced goes back among the spares rather than
+        // being freed; it is reusable as soon as nothing refers to it.
+        if let Some(previous) = self.composite.take() {
+            self.spare_composites.push(previous);
+        }
+        let reusable = self
+            .spare_composites
+            .iter()
+            .position(|spare| !picture_is_referenced(spare));
+        let composite = match reusable {
+            Some(index) => self.spare_composites.swap_remove(index),
+            None => self.new_composite()?,
+        };
+
+        let (texture_raw, _) =
+            d3d11va_texture(&composite).expect("a composite is a D3D11 frame with its texture");
+        // SAFETY: `texture_raw` is borrowed from the live composite frame that
+        // owns it; cloning the wrapper acquires an independent COM reference
+        // for the copies below.
+        let texture = unsafe {
+            ID3D11Texture2D::from_raw_borrowed(&texture_raw)
+                .expect("a composite's texture pointer is never null")
+                .clone()
+        };
+        let dst_resource: ID3D11Resource = texture.cast()?;
+        for unit in &self.units {
+            let src_resource: ID3D11Resource = unit.staging_texture.cast()?;
+            let box_ = unit.source_box;
+            // SAFETY: source/destination resources belong to this device;
+            // `source_box` was derived from their intersection and its
+            // destination offset is bounded by the composite dimensions.
+            unsafe {
+                self.context.CopySubresourceRegion(
+                    &dst_resource,
+                    0,
+                    unit.dest_x,
+                    unit.dest_y,
+                    0,
+                    &src_resource,
+                    0,
+                    Some(&box_ as *const D3D11_BOX),
+                );
+            }
+        }
+
+        self.composite = Some(composite);
+        self.captured_since_picture = false;
+        Ok(())
+    }
+
+    /// One more composite texture, wrapped as the frame that owns it.
+    fn new_composite(&self) -> std::result::Result<ffmpeg::frame::Video, DxgiCaptureSourceError> {
         let desc = D3D11_TEXTURE2D_DESC {
             Width: self.width,
             Height: self.height,
@@ -1229,30 +1327,7 @@ impl DxgiCaptureSource {
                 .CreateTexture2D(&desc, None, Some(&mut texture))?;
         }
         let texture = texture.expect("CreateTexture2D succeeded without producing a texture");
-        let dst_resource: ID3D11Resource = texture.cast()?;
-        for unit in &self.units {
-            let src_resource: ID3D11Resource = unit.staging_texture.cast()?;
-            let box_ = unit.source_box;
-            // SAFETY: source/destination resources belong to this device;
-            // `source_box` was derived from their intersection and its
-            // destination offset is bounded by the composite dimensions.
-            unsafe {
-                self.context.CopySubresourceRegion(
-                    &dst_resource,
-                    0,
-                    unit.dest_x,
-                    unit.dest_y,
-                    0,
-                    &src_resource,
-                    0,
-                    Some(&box_ as *const D3D11_BOX),
-                );
-            }
-        }
-
-        self.last_composite = Some(texture.clone());
-        self.captured_since_picture = false;
-        Ok(texture)
+        Ok(wrap_d3d11_texture(texture, self.width, self.height)?)
     }
 }
 
@@ -1754,10 +1829,29 @@ mod tests {
         // above still hold.
         source.captured_since_picture = true;
         let third = source.emit_frame_gpu().expect("emit a changed tick");
+        let third_texture = d3d11va_texture(&third).expect("a D3D11 frame").0;
         assert_ne!(
-            d3d11va_texture(&third).expect("a D3D11 frame").0,
-            first_texture,
+            third_texture, first_texture,
             "a changed tick overwrote a composite still referenced downstream"
+        );
+
+        // ...but once those frames are gone, the texture they were showing is
+        // the one the next changed tick draws into. A screen with real motion
+        // changes on every tick, and allocating a screen-sized texture per
+        // frame is what this avoids.
+        drop(first);
+        drop(second);
+        source.captured_since_picture = true;
+        let fourth = source.emit_frame_gpu().expect("emit another changed tick");
+        assert_eq!(
+            d3d11va_texture(&fourth).expect("a D3D11 frame").0,
+            first_texture,
+            "a changed tick allocated a new composite while an unreferenced one was free"
+        );
+        assert_ne!(
+            d3d11va_texture(&fourth).expect("a D3D11 frame").0,
+            third_texture,
+            "and it must not be the one the frame above is still showing"
         );
     }
     fn blank_frame(width: u32, height: u32) -> (Vec<u8>, usize) {

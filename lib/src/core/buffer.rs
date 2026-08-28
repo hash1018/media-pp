@@ -105,6 +105,25 @@ pub(crate) fn picture_id(frame: &ffmpeg::frame::Video) -> (usize, usize) {
     }
 }
 
+/// Lets go of the picture a pooled wrapper was pointing at, as it returns to
+/// its pool.
+///
+/// The `release` an [`UnboundObjectPool`](crate::pool::UnboundObjectPool) of
+/// *wrappers* wants: an empty frame is given a picture with `av_frame_ref` on
+/// every checkout, and without this it would keep that reference until its
+/// next one. Nothing reads those pixels in the meantime, but everything that
+/// asks whether a picture is still in use — [`picture_is_referenced`] — would
+/// go on answering yes, so a producer would keep a buffer, or a screen-sized
+/// texture, alive for an idle wrapper.
+///
+/// Only for a pool whose items own no picture of their own. A pool of real
+/// frames composited or decoded into would be emptied by this.
+pub(crate) fn release_picture(frame: &mut ffmpeg::frame::Video) {
+    // SAFETY: `as_mut_ptr` is this frame's own live `AVFrame`, and the pool
+    // has taken it back, so nothing else refers to it.
+    unsafe { ffi::av_frame_unref(frame.as_mut_ptr()) }
+}
+
 /// Whether anything besides this frame itself still points at its picture.
 ///
 /// The companion to [`picture_id`], for an element that offers an unchanged

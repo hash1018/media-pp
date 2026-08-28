@@ -18,7 +18,7 @@ use super::video_layer::{
     VideoRect,
 };
 use crate::{
-    buffer::{MediaBuffer, picture_id, picture_is_referenced},
+    buffer::{MediaBuffer, picture_id, picture_is_referenced, release_picture},
     bus::{Bus, BusEvent},
     color::Color,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
@@ -589,7 +589,11 @@ impl SwVideoCompositor {
                 frame_index: 0,
                 scalers: HashMap::new(),
                 output_pool,
-                repeat_pool: UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {}),
+                repeat_pool: UnboundObjectPool::new(
+                    0,
+                    ffmpeg::frame::Video::empty,
+                    release_picture,
+                ),
                 composed: None,
                 retired: Vec::new(),
                 pad: SrcPad::with_contract(
