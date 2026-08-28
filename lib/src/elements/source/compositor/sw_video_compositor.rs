@@ -10,7 +10,7 @@ use std::{
 
 use crate::pp_log::{PpLog, pp_info};
 use arc_swap::ArcSwapOption;
-use ffmpeg_next as ffmpeg;
+use ffmpeg_next::{self as ffmpeg, ffi};
 use thiserror::Error as ThisError;
 
 use super::video_layer::{
@@ -18,7 +18,7 @@ use super::video_layer::{
     VideoRect,
 };
 use crate::{
-    buffer::MediaBuffer,
+    buffer::{MediaBuffer, picture_id},
     bus::{Bus, BusEvent},
     color::Color,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
@@ -64,6 +64,11 @@ pub enum SwVideoCompositorError {
     /// FFmpeg rejected frame allocation or software scaling.
     #[error("ffmpeg error: {0}")]
     Ffmpeg(#[from] ffmpeg::Error),
+
+    /// FFmpeg could not take a second reference to the frame last composed,
+    /// which is how an unchanged picture is offered again.
+    #[error("failed to reference the previous composite (code {0})")]
+    FrameRef(i32),
 
     /// The output canvas dimensions are zero or exceed the safety limit.
     #[error(
@@ -396,6 +401,54 @@ struct InputSnapshot {
     frame: Option<Arc<UnboundObjectPoolRef<ffmpeg::frame::Video>>>,
 }
 
+impl InputSnapshot {
+    /// Same input, in the same place, showing the same pixels.
+    ///
+    /// The pixels are compared by which buffer they live in rather than by
+    /// the frame around them: an input with nothing new to show still hands
+    /// over a fresh frame on every tick. See [`picture_id`] for why that
+    /// identity is sound here — this snapshot holds the frame, so its buffer
+    /// cannot be released and reallocated underneath it.
+    fn same_as(&self, other: &Self) -> bool {
+        self.id == other.id
+            && self.layer == other.layer
+            && match (&self.frame, &other.frame) {
+                (Some(drawn), Some(now)) => picture_id(drawn) == picture_id(now),
+                (None, None) => true,
+                _ => false,
+            }
+    }
+}
+
+/// What the last composite was made from, and what it produced.
+///
+/// A tick that finds every input frame and every layer exactly as the last
+/// one left them has nothing to draw: the picture it would compose is the
+/// picture already composed. It hands out that frame again instead, under a
+/// new timestamp, never a copy.
+///
+/// # Why this holds the pooled reference rather than a frame reference
+///
+/// `CudaVideoCompositor` does the same thing by holding an `av_frame_ref` of
+/// the surface it composed, which is safe there because its output pool
+/// acquires a *fresh* surface per composite and will not hand back one still
+/// referenced. This pool is the other kind: it holds a fixed set of frames
+/// and composites into their existing buffers. A plain frame reference would
+/// not stop the pool handing that frame out again, and the next background
+/// fill would then write over the pixels this is still offering. Holding the
+/// pooled reference is what keeps it out of the pool at all.
+struct Composed {
+    inputs: Vec<InputSnapshot>,
+    frame: Arc<UnboundObjectPoolRef<ffmpeg::frame::Video>>,
+}
+
+impl Composed {
+    fn matches(&self, inputs: &[InputSnapshot]) -> bool {
+        self.inputs.len() == inputs.len()
+            && std::iter::zip(&self.inputs, inputs).all(|(drawn, now)| drawn.same_as(now))
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ScaleDefinition {
     source_format: ffmpeg::format::Pixel,
@@ -472,6 +525,12 @@ pub struct SwVideoCompositor {
     frame_index: i64,
     scalers: HashMap<VideoInputId, InputScaler>,
     output_pool: UnboundObjectPool<ffmpeg::frame::Video>,
+    /// Wrappers for re-emitting an unchanged composite. Empty frames, never
+    /// composited into: each one is pointed at the picture in [`Composed`]
+    /// and carries only this tick's timestamp.
+    repeat_pool: UnboundObjectPool<ffmpeg::frame::Video>,
+    /// The last composite and what it was made from — see [`Composed`].
+    composed: Option<Composed>,
     pad: SrcPad,
 }
 
@@ -519,6 +578,8 @@ impl SwVideoCompositor {
                 frame_index: 0,
                 scalers: HashMap::new(),
                 output_pool,
+                repeat_pool: UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {}),
+                composed: None,
                 pad: SrcPad::with_contract(
                     format!("{name}_src"),
                     OutputContract::Fixed(PortContract::frame(
@@ -580,9 +641,14 @@ impl SwVideoCompositor {
             .collect()
     }
 
+    /// The picture for this tick, composed or — where nothing changed — the
+    /// one already composed.
+    ///
+    /// Returns what will be pushed rather than the pooled reference itself:
+    /// the shared reference is the thing [`Composed`] has to hold on to.
     fn compose_frame(
         &mut self,
-    ) -> std::result::Result<UnboundObjectPoolRef<ffmpeg::frame::Video>, SwVideoCompositorError>
+    ) -> std::result::Result<Arc<UnboundObjectPoolRef<ffmpeg::frame::Video>>, SwVideoCompositorError>
     {
         let mut snapshots = self.snapshots();
         let active: HashSet<_> = snapshots.iter().map(|snapshot| snapshot.id).collect();
@@ -593,6 +659,17 @@ impl SwVideoCompositor {
                 .cmp(&right.layer.z_index)
                 .then_with(|| left.id.cmp(&right.id))
         });
+
+        // Nothing moved and no input produced a frame, so this tick's picture
+        // is the one already composed — see [`Composed`].
+        if self
+            .composed
+            .as_ref()
+            .is_some_and(|composed| composed.matches(&snapshots))
+        {
+            return self.repeat_frame();
+        }
+        let kept = snapshots.clone();
 
         let mut output = self.output_pool.get();
         fill_background(&mut output, self.options.background);
@@ -619,12 +696,50 @@ impl SwVideoCompositor {
         }
         output.set_pts(Some(self.frame_index));
         self.frame_index += 1;
+        let output = Arc::new(output);
+        // Held so the next tick can tell whether it has anything to draw, and
+        // so the frame it may offer again stays out of the output pool.
+        self.composed = Some(Composed {
+            inputs: kept,
+            frame: Arc::clone(&output),
+        });
         Ok(output)
+    }
+
+    /// Offers the picture already composed, under this tick's timestamp.
+    ///
+    /// `av_frame_ref` points an empty wrapper at the same buffer rather than
+    /// copying it, so an unchanged scene costs a refcount instead of a
+    /// background fill and a blend per layer.
+    fn repeat_frame(
+        &mut self,
+    ) -> std::result::Result<Arc<UnboundObjectPoolRef<ffmpeg::frame::Video>>, SwVideoCompositorError>
+    {
+        let mut output = self.repeat_pool.get();
+        let composed = self
+            .composed
+            .as_ref()
+            .expect("only reached with a previous composite");
+        // SAFETY: `ptr` is the pooled wrapper's own `AVFrame`, unreferenced
+        // before it is given a new one, and the source is the composite this
+        // element still holds a pooled reference to — both live, and distinct
+        // from each other.
+        unsafe {
+            let ptr = output.as_mut_ptr();
+            ffi::av_frame_unref(ptr);
+            let code = ffi::av_frame_ref(ptr, composed.frame.as_ptr());
+            if code < 0 {
+                return Err(SwVideoCompositorError::FrameRef(code));
+            }
+        }
+        output.set_pts(Some(self.frame_index));
+        self.frame_index += 1;
+        Ok(Arc::new(output))
     }
 
     fn push_frame(&mut self, bus: &Bus) -> std::result::Result<(), SwVideoCompositorError> {
         let output = self.compose_frame()?;
-        if let Err(error) = self.pad.push(MediaBuffer::Video(Arc::new(output))) {
+        if let Err(error) = self.pad.push(MediaBuffer::Video(output)) {
             bus.post(
                 &self.pp_log,
                 BusEvent::Error {
@@ -932,6 +1047,53 @@ mod tests {
         assert_eq!(frame.pts(), Some(0));
         assert_eq!(pixel(&frame, 0, 0), [0, 0, 255, 255]);
         assert_eq!(pixel(&frame, 1, 1), [255, 0, 0, 255]);
+    }
+
+    /// A tick that finds nothing changed offers the picture it composed
+    /// last rather than composing the same one again — and a layer that
+    /// moves puts it straight back to work.
+    #[test]
+    fn an_unchanged_scene_is_composed_once() {
+        let (mut compositor, handle) = SwVideoCompositor::new("compositor", options(4, 4)).unwrap();
+        let mut layer = VideoLayer::new(VideoRect::new(0, 0, 4, 4));
+        layer.fit = VideoFit::Stretch;
+        let (mut sink, layer_handle) = input(&handle, "only", layer);
+        sink.consume(MediaBuffer::Video(solid_frame(4, 4, Color::new(255, 0, 0))))
+            .unwrap();
+
+        let composed = compositor.compose_frame().unwrap();
+        let picture = picture_id(&composed);
+        assert_eq!(composed.pts(), Some(0));
+
+        let repeated = compositor.compose_frame().unwrap();
+        assert_eq!(
+            picture_id(&repeated),
+            picture,
+            "nothing changed, so this is the picture already composed"
+        );
+        assert_eq!(
+            repeated.pts(),
+            Some(1),
+            "a repeat carries this tick's timestamp, not the one it points at"
+        );
+        assert_eq!(
+            pixel(&repeated, 0, 0),
+            [0, 0, 255, 255],
+            "and it still shows what was composed"
+        );
+
+        layer_handle.set_rect(VideoRect::new(1, 1, 2, 2)).unwrap();
+        let moved = compositor.compose_frame().unwrap();
+        assert_ne!(
+            picture_id(&moved),
+            picture,
+            "a moved layer is a different picture and must be composed"
+        );
+        assert_eq!(
+            pixel(&composed, 0, 0),
+            [0, 0, 255, 255],
+            "composing again must not draw over the picture still held"
+        );
     }
 
     #[test]
