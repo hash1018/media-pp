@@ -79,6 +79,32 @@ impl MediaBuffer {
     }
 }
 
+/// Which buffer a video frame's pixels live in.
+///
+/// Not the frame: a producer with nothing new to show re-emits a fresh
+/// `AVFrame` referencing the same picture every tick — a screen capture of a
+/// still desktop does exactly that — so comparing frames, or the `Arc`s
+/// around them, answers "changed" every time while the pixels have not
+/// moved. The plane pointers do not.
+///
+/// The first two planes are enough for every layout this crate carries:
+/// packed formats use one, and the semi-planar and planar ones this crate
+/// composites in differ in the first two whenever they differ at all.
+///
+/// Only sound as an identity while the frame it came from is still
+/// referenced. A picture whose buffer has been released can be handed out
+/// again at the same address, so every caller here holds that reference for
+/// as long as it holds the identity.
+pub(crate) fn picture_id(frame: &ffmpeg::frame::Video) -> (usize, usize) {
+    // SAFETY: `as_ptr` is a live `AVFrame`. Only the values of the first two
+    // plane pointers are read; nothing dereferences them, which for GPU
+    // memory would not be valid from the host anyway.
+    unsafe {
+        let ptr = frame.as_ptr();
+        ((*ptr).data[0] as usize, (*ptr).data[1] as usize)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

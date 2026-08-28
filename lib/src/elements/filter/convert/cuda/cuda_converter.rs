@@ -6,7 +6,7 @@ use thiserror::Error as ThisError;
 use crate::pp_log::{PpLog, pp_error, pp_info};
 
 use crate::{
-    buffer::MediaBuffer,
+    buffer::{MediaBuffer, picture_id},
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
     control::ControlMsg,
     element::{Element, ElementType, Sink, Source, element_pp_log},
@@ -16,7 +16,7 @@ use crate::{
     platform::cuda::{
         CudaDevice, CudaFrameFormat,
         driver::{BgraSurface, CudaDriver, Nv12Surface},
-        frame::{create_hw_frames_ctx, surface_id},
+        frame::create_hw_frames_ctx,
     },
     platform::ffmpeg::AvBufferRef,
     pool::UnboundObjectPool,
@@ -355,7 +355,7 @@ impl CudaConverter {
 /// Both frames are held as references, and both for the same reason: a
 /// surface still referenced cannot return to its pool and be handed out
 /// again at the same address, which is what makes comparing plane pointers a
-/// sound identity — see [`surface_id`].
+/// sound identity — see [`picture_id`].
 struct Converted {
     source: (usize, usize),
     /// A reference to the frame this converted, so `source` cannot come to
@@ -380,14 +380,14 @@ impl Converted {
             }
         }
         Some(Self {
-            source: surface_id(source),
+            source: picture_id(source),
             _source: kept_source,
             output: kept_output,
         })
     }
 
     fn matches(&self, source: &ffmpeg::frame::Video) -> bool {
-        self.source == surface_id(source)
+        self.source == picture_id(source)
     }
 }
 
@@ -586,8 +586,8 @@ mod tests {
         let received = converted.lock().unwrap();
         assert_eq!(received.len(), 2, "a repeat still produces a frame");
         assert_eq!(
-            surface_id(video(&received[0])),
-            surface_id(video(&received[1])),
+            picture_id(video(&received[0])),
+            picture_id(video(&received[1])),
             "the same pixels must not be converted into a second surface"
         );
         assert_eq!(video(&received[0]).pts(), Some(1));
@@ -620,8 +620,8 @@ mod tests {
 
         let received = converted.lock().unwrap();
         assert_ne!(
-            surface_id(video(&received[0])),
-            surface_id(video(&received[1])),
+            picture_id(video(&received[0])),
+            picture_id(video(&received[1])),
             "a different capture must not be answered with the previous conversion"
         );
     }

@@ -4,7 +4,8 @@
 //! Codecs, scalers, pixel-format conversion, GPU upload and download, audio
 //! resampling and gain, chroma keying, and the two elements that change *when*
 //! rather than *what* — [`Pacer`], which holds a frame until its presentation
-//! time, and [`VideoSynchronizer`]. [`Tee`] is here too, as the one filter
+//! time, [`VideoSynchronizer`], and [`ChangeGate`], which forwards a picture
+//! only when it is not the one it forwarded last. [`Tee`] is here too, as the one filter
 //! whose fan-out can change while the pipeline runs.
 //!
 //! Where the same job exists on more than one backend the types are separate
@@ -14,6 +15,7 @@
 
 mod audio_resampler;
 mod audio_volume;
+mod change_gate;
 pub(crate) mod chroma_key;
 pub(crate) mod convert;
 pub(crate) mod decoder;
@@ -27,6 +29,7 @@ mod video_synchronizer;
 
 pub use audio_resampler::{AudioResampler, AudioResamplerError};
 pub use audio_volume::{AudioVolume, AudioVolumeError, AudioVolumeHandle, AudioVolumeOptions};
+pub use change_gate::{ChangeGate, ChangeGateError};
 pub use chroma_key::{ChromaKeyMethod, ChromaKeyOptions, SwChromaKey, SwChromaKeyError};
 #[cfg(all(target_os = "windows", feature = "d3d11"))]
 pub use chroma_key::{D3d11ChromaKey, D3d11ChromaKeyError};

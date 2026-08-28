@@ -49,10 +49,10 @@ use crate::elements::{
 use crate::{
     control::{PrerollError, SeekError},
     elements::{
-        AppSourceError, AudioMixerError, AudioResamplerError, AudioVolumeError, FileDemuxError,
-        HlsMuxerError, Mp4MuxerError, PacerError, RtspSourceError, SwAudioEncoderError,
-        SwChromaKeyError, SwDecoderError, SwEncoderError, SwScalerError, SwVideoCompositorError,
-        TestAudioSourceError, TestVideoSourceError, VideoSynchronizerError,
+        AppSourceError, AudioMixerError, AudioResamplerError, AudioVolumeError, ChangeGateError,
+        FileDemuxError, HlsMuxerError, Mp4MuxerError, PacerError, RtspSourceError,
+        SwAudioEncoderError, SwChromaKeyError, SwDecoderError, SwEncoderError, SwScalerError,
+        SwVideoCompositorError, TestAudioSourceError, TestVideoSourceError, VideoSynchronizerError,
     },
     graph::GraphError,
     log::LogInitError,
@@ -227,6 +227,10 @@ pub enum Error {
     /// A pacer could not schedule an input timestamp.
     #[error(transparent)]
     PacerError(#[from] PacerError),
+
+    /// A change gate could not reference the frame it was forwarding.
+    #[error(transparent)]
+    ChangeGateError(#[from] ChangeGateError),
 
     /// A video synchronizer could not schedule an input frame.
     #[error(transparent)]

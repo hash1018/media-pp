@@ -21,7 +21,7 @@ use super::super::video_layer::{
     VideoRect, layer_geometry,
 };
 use crate::{
-    buffer::MediaBuffer,
+    buffer::{MediaBuffer, picture_id},
     bus::{Bus, BusEvent},
     color::Color,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
@@ -33,7 +33,7 @@ use crate::{
     platform::cuda::{
         CudaDevice, CudaFrameFormat,
         driver::{CudaDriver, CudaDriverError, CudaMask, Nv12Region, Nv12Surface},
-        frame::{create_hw_frames_ctx, surface_id},
+        frame::create_hw_frames_ctx,
     },
     platform::ffmpeg::AvBufferRef,
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
@@ -473,13 +473,13 @@ impl InputSnapshot {
     /// The pixels are compared by which surface they live in rather than by
     /// the frame around them: an input with nothing new to show still hands
     /// over a fresh `AVFrame`, in a fresh `Arc`, on every tick. See
-    /// [`surface_id`] for why that identity is sound here — this snapshot
+    /// [`picture_id`] for why that identity is sound here — this snapshot
     /// holds the frame, so its surface cannot be recycled underneath it.
     fn same_as(&self, other: &Self) -> bool {
         self.id == other.id
             && self.layer == other.layer
             && match (&self.frame, &other.frame) {
-                (Some(drawn), Some(now)) => surface_id(drawn) == surface_id(now),
+                (Some(drawn), Some(now)) => picture_id(drawn) == picture_id(now),
                 (None, None) => true,
                 _ => false,
             }
@@ -1462,12 +1462,12 @@ mod tests {
         input.sink.consume(frame).expect("frame");
 
         let composed = compositor.compose_frame().expect("compose");
-        let surface = surface_id(&composed);
+        let surface = picture_id(&composed);
         assert_eq!(composed.pts(), Some(0));
 
         let repeated = compositor.compose_frame().expect("repeat");
         assert_eq!(
-            surface_id(&repeated),
+            picture_id(&repeated),
             surface,
             "nothing changed, so this is the picture already composed"
         );
@@ -1483,7 +1483,7 @@ mod tests {
             .expect("move the layer");
         let moved = compositor.compose_frame().expect("compose again");
         assert_ne!(
-            surface_id(&moved),
+            picture_id(&moved),
             surface,
             "a moved layer is a different picture and must be composed"
         );
