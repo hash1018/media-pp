@@ -442,6 +442,15 @@ pub struct DxgiCaptureSource {
     /// docs. Pre-sized to `width`/`height` up front, same reasoning as
     /// `SwScaler`'s own pool.
     pool: UnboundObjectPool<ffmpeg::frame::Video>,
+    /// The composite texture the last [`CaptureMode::Gpu`] emission built,
+    /// kept so a tick that captured nothing new can wrap it again instead of
+    /// building an identical one. `None` before the first emission and under
+    /// [`CaptureMode::Cpu`]. See [`DxgiCaptureSource::emit_frame_gpu`].
+    last_composite: Option<ID3D11Texture2D>,
+    /// Whether any unit's `staging_texture` has been refreshed since
+    /// `last_composite` was built — that is, whether rebuilding it would
+    /// produce different pixels.
+    captured_since_composite: bool,
 }
 
 // SAFETY: every D3D11/DXGI handle here is a `windows-rs` COM interface
@@ -700,6 +709,8 @@ impl DxgiCaptureSource {
                 frame_index: 0,
                 pad,
                 pool,
+                last_composite: None,
+                captured_since_composite: false,
             },
             VideoFormat {
                 width,
@@ -859,6 +870,9 @@ impl DxgiCaptureSource {
                 // *is* this unit's latest capture; `emit_frame_gpu` reads
                 // straight from it. See `CaptureMode::Gpu`'s own docs.
                 self.units[index].has_captured = true;
+                // This unit's latest image changed, so the next composite is
+                // no longer the one `last_composite` already holds.
+                self.captured_since_composite = true;
                 continue;
             }
 
@@ -1005,25 +1019,59 @@ impl DxgiCaptureSource {
     }
 
     /// `CaptureMode::Gpu`'s equivalent of [`DxgiCaptureSource::emit_frame_cpu`]:
-    /// builds a fresh composite `ID3D11Texture2D` (`self.width` x
-    /// `self.height`) and `CopySubresourceRegion`s every unit's own
-    /// `source_box` crop into it at that unit's `dest_x`/`dest_y` — one
-    /// GPU-side copy per contributing output, same reasoning
-    /// `D3d11Upload::upload` documents for allocating fresh every call
-    /// rather than reusing one texture: each unit's own `staging_texture`
-    /// gets overwritten by its next real capture, so a frame already
-    /// pushed downstream needs its own, independently stable copy of
-    /// what it was capturing at push time. Wraps the fresh texture as a
-    /// `Pixel::D3D11` frame via [`wrap_d3d11_texture`], reusing the
-    /// pooled `AVFrame` wrapper (the pool built by `open` for
-    /// `CaptureMode::Gpu` only holds these small wrappers, not GPU
-    /// memory — see that pool's own construction site).
+    /// builds a composite `ID3D11Texture2D` (`self.width` x `self.height`) and
+    /// `CopySubresourceRegion`s every unit's own `source_box` crop into it at
+    /// that unit's `dest_x`/`dest_y` — one GPU-side copy per contributing
+    /// output. Wraps it as a `Pixel::D3D11` frame via [`wrap_d3d11_texture`],
+    /// reusing the pooled `AVFrame` wrapper (the pool built by `open` for
+    /// [`CaptureMode::Gpu`] only holds these small wrappers, not GPU memory —
+    /// see that pool's own construction site).
+    ///
+    /// # Why a tick that captured nothing builds nothing
+    ///
+    /// This element emits at a constant rate rather than only when the desktop
+    /// changes, so most ticks on a mostly-still screen find every unit's
+    /// `staging_texture` exactly as the last one left it. Rebuilding then costs
+    /// a fresh full-size texture and a full-size copy to produce an image
+    /// pixel-identical to the one just emitted — at 1080p60 that is around
+    /// 480 MB/s of allocation for no new pixels. Such a tick re-wraps
+    /// `last_composite` instead. The rate downstream sees does not change: a
+    /// frame is still pushed every tick, with its own wrapper and its own
+    /// advancing `pts`.
+    ///
+    /// Handing two frames the same texture is sound because that texture is
+    /// written exactly once, by the emission that created it: a tick that *did*
+    /// capture something builds a new one rather than overwriting this. So a
+    /// frame still held downstream can never see its pixels change — the
+    /// property [`crate::pool::UnboundObjectPool`]'s own contract protects for
+    /// pooled frames, established here by never writing to a published texture
+    /// at all.
     fn emit_frame_gpu(
         &mut self,
     ) -> std::result::Result<
         crate::pool::UnboundObjectPoolRef<ffmpeg::frame::Video>,
         DxgiCaptureSourceError,
     > {
+        let texture = match &self.last_composite {
+            Some(texture) if !self.captured_since_composite => texture.clone(),
+            _ => self.build_composite()?,
+        };
+
+        let mut frame = self.pool.get();
+        // Overwrites the pooled slot's previous contents in place —
+        // `ffmpeg::frame::Video`'s own `Drop` runs on whatever was there
+        // before, releasing that frame's reference to whatever texture it
+        // wrapped (same pattern `D3d11Upload::consume` documents).
+        *frame = wrap_d3d11_texture(texture, self.width, self.height)?;
+        Ok(frame)
+    }
+
+    /// Builds one fresh composite texture from every unit's latest capture.
+    ///
+    /// Fresh rather than drawn over `last_composite`: that one may still be
+    /// wrapped by frames downstream, and overwriting it would change pixels
+    /// under whoever is reading them.
+    fn build_composite(&mut self) -> std::result::Result<ID3D11Texture2D, DxgiCaptureSourceError> {
         let desc = D3D11_TEXTURE2D_DESC {
             Width: self.width,
             Height: self.height,
@@ -1068,13 +1116,9 @@ impl DxgiCaptureSource {
             }
         }
 
-        let mut frame = self.pool.get();
-        // Overwrites the pooled slot's previous contents in place —
-        // `ffmpeg::frame::Video`'s own `Drop` runs on whatever was there
-        // before, releasing that frame's GPU texture right here (same
-        // pattern `D3d11Upload::consume` documents).
-        *frame = wrap_d3d11_texture(texture, self.width, self.height)?;
-        Ok(frame)
+        self.last_composite = Some(texture.clone());
+        self.captured_since_composite = false;
+        Ok(texture)
     }
 }
 
@@ -1454,7 +1498,69 @@ fn composite_cursor(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::platform::windows::d3d11va::d3d11va_texture;
 
+    /// A tick that captured nothing re-wraps the composite instead of
+    /// building an identical one, and one that captured something builds a
+    /// new one rather than overwriting what may still be held downstream.
+    ///
+    /// Asserted on the texture identity rather than on a frame rate, because
+    /// the saving is an allocation and a full-size copy per tick, not a rate:
+    /// the element still emits every tick either way, which is the part that
+    /// must not change.
+    ///
+    /// Hardware test: skips when the machine has no desktop duplication.
+    #[test]
+    fn an_unchanged_tick_reuses_the_composite_it_already_built() {
+        let (mut source, _format, _device) = match DxgiCaptureSource::open(
+            "reuse",
+            DxgiCaptureOptions {
+                area: CaptureArea::Output { output_index: 0 },
+                fps: 60,
+                capture_mode: CaptureMode::Gpu,
+            },
+        ) {
+            Ok(opened) => opened,
+            Err(error) => {
+                eprintln!("skipping: no desktop duplication available here ({error})");
+                return;
+            }
+        };
+
+        // Wait for the first real capture rather than assuming one is ready:
+        // `emit_frame_gpu` has nothing to composite until a unit has copied
+        // something, which is what `all_captured` gates on.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !source.all_captured() && Instant::now() < deadline {
+            source.poll_capture(16).expect("poll the duplication");
+        }
+        if !source.all_captured() {
+            eprintln!("skipping: the desktop never produced a frame to capture");
+            return;
+        }
+
+        let first = source.emit_frame_gpu().expect("build the first composite");
+        let first_texture = d3d11va_texture(&first).expect("a D3D11 frame").0;
+
+        // No `poll_capture` in between, so nothing was captured and the
+        // composite cannot have changed.
+        let second = source.emit_frame_gpu().expect("emit an unchanged tick");
+        assert_eq!(
+            d3d11va_texture(&second).expect("a D3D11 frame").0,
+            first_texture,
+            "an unchanged tick rebuilt the composite instead of re-wrapping it"
+        );
+
+        // A tick that did capture must not draw over a texture the frames
+        // above still hold.
+        source.captured_since_composite = true;
+        let third = source.emit_frame_gpu().expect("emit a changed tick");
+        assert_ne!(
+            d3d11va_texture(&third).expect("a D3D11 frame").0,
+            first_texture,
+            "a changed tick overwrote a composite still referenced downstream"
+        );
+    }
     fn blank_frame(width: u32, height: u32) -> (Vec<u8>, usize) {
         let stride = width as usize * 4;
         (vec![0u8; stride * height as usize], stride)
