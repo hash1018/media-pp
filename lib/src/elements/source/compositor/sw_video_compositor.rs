@@ -18,7 +18,7 @@ use super::video_layer::{
     VideoRect,
 };
 use crate::{
-    buffer::{MediaBuffer, picture_id},
+    buffer::{MediaBuffer, picture_id, picture_is_referenced},
     bus::{Bus, BusEvent},
     color::Color,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
@@ -531,6 +531,17 @@ pub struct SwVideoCompositor {
     repeat_pool: UnboundObjectPool<ffmpeg::frame::Video>,
     /// The last composite and what it was made from — see [`Composed`].
     composed: Option<Composed>,
+    /// Pictures a repeat published earlier may still be pointing at.
+    ///
+    /// A repeat shares the picture's *buffer*, not its pool slot: once
+    /// [`Composed`] stops holding that slot, the pool is free to hand the
+    /// frame back and the next background fill writes over pixels a repeat
+    /// still queued downstream is showing. So a replaced picture moves here
+    /// instead, and is released only once nothing but the frame itself
+    /// references its pixels — see [`picture_is_referenced`], which is
+    /// checked on every composite, so this holds only what is genuinely
+    /// still in flight.
+    retired: Vec<Arc<UnboundObjectPoolRef<ffmpeg::frame::Video>>>,
     pad: SrcPad,
 }
 
@@ -580,6 +591,7 @@ impl SwVideoCompositor {
                 output_pool,
                 repeat_pool: UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {}),
                 composed: None,
+                retired: Vec::new(),
                 pad: SrcPad::with_contract(
                     format!("{name}_src"),
                     OutputContract::Fixed(PortContract::frame(
@@ -670,6 +682,16 @@ impl SwVideoCompositor {
             return self.repeat_frame();
         }
         let kept = snapshots.clone();
+
+        // This tick draws, so the picture behind the last one stops being the
+        // one to offer again — but a repeat already pushed downstream may
+        // still be showing it, so it goes to `retired` rather than straight
+        // back to the pool.
+        if let Some(previous) = self.composed.take() {
+            self.retired.push(previous.frame);
+        }
+        self.retired
+            .retain(|picture| picture_is_referenced(picture));
 
         let mut output = self.output_pool.get();
         fill_background(&mut output, self.options.background);
@@ -1047,6 +1069,47 @@ mod tests {
         assert_eq!(frame.pts(), Some(0));
         assert_eq!(pixel(&frame, 0, 0), [0, 0, 255, 255]);
         assert_eq!(pixel(&frame, 1, 1), [255, 0, 0, 255]);
+    }
+
+    /// A repeat holds the picture's buffer but not its pool slot, so the
+    /// slot must stay out of the pool while that repeat is still in flight —
+    /// otherwise a later composite fills a background over the pixels it is
+    /// showing.
+    #[test]
+    fn a_repeat_still_in_flight_is_never_composed_over() {
+        let (mut compositor, handle) = SwVideoCompositor::new("compositor", options(4, 4)).unwrap();
+        let mut layer = VideoLayer::new(VideoRect::new(0, 0, 4, 4));
+        layer.fit = VideoFit::Stretch;
+        let (mut sink, _layer_handle) = input(&handle, "only", layer);
+        sink.consume(MediaBuffer::Video(solid_frame(4, 4, Color::new(255, 0, 0))))
+            .unwrap();
+
+        // Composed, pushed, and consumed downstream: only the repeat below
+        // still refers to this picture.
+        drop(compositor.compose_frame().unwrap());
+        let in_flight = compositor.compose_frame().unwrap();
+        let showing = picture_id(&in_flight);
+
+        // Every one of these gives the input a new frame, so every one really
+        // composes, and each result is dropped immediately — the pool recycles
+        // as fast as it can, which is exactly the case that would reuse the
+        // picture the repeat above is still showing.
+        for _ in 0..(OUTPUT_POOL_SIZE * 2 + 2) {
+            sink.consume(MediaBuffer::Video(solid_frame(4, 4, Color::new(0, 255, 0))))
+                .unwrap();
+            let composed = compositor.compose_frame().unwrap();
+            assert_ne!(
+                picture_id(&composed),
+                showing,
+                "composed into the buffer a repeat still in flight is showing"
+            );
+        }
+
+        assert_eq!(
+            pixel(&in_flight, 0, 0),
+            [0, 0, 255, 255],
+            "the repeat still shows the picture it was published with"
+        );
     }
 
     /// A tick that finds nothing changed offers the picture it composed

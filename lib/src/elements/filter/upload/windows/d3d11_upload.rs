@@ -19,7 +19,8 @@ use crate::{
     error::Result,
     pad::SrcPad,
     platform::windows::d3d11va::wrap_d3d11_texture,
-    pool::UnboundObjectPool,
+    pool::{UnboundObjectPool, UnboundObjectPoolRef},
+    repeat::{PerFrameTransform, RepeatedOutput},
 };
 
 /// Errors specific to `D3d11Upload`. Converts into the crate-wide `Error`
@@ -29,6 +30,11 @@ pub enum D3d11UploadError {
     /// Creating or updating a D3D11 texture failed.
     #[error("windows error: {0}")]
     Windows(#[from] windows::core::Error),
+
+    /// FFmpeg could not take a second reference to the upload already in
+    /// hand, which is how an unchanged CPU picture is answered.
+    #[error("failed to reference the previous upload (code {0})")]
+    FrameRef(i32),
     /// The CPU pixel format cannot be represented by this uploader.
 
     #[error(
@@ -131,6 +137,13 @@ pub struct D3d11Upload {
     /// still a fresh allocation per frame (see [`D3d11Upload::upload`]'s
     /// own docs on why there's no GPU-side pool here to reuse from).
     pool: UnboundObjectPool<ffmpeg::frame::Video>,
+    /// The last upload and the CPU picture it came from, so a producer that
+    /// re-emits an unchanged picture — `DxgiCaptureSource` under
+    /// [`CaptureMode::Cpu`](crate::elements::CaptureMode::Cpu) does exactly
+    /// that on a still screen — is answered with the texture already on the
+    /// GPU, instead of a fresh full-size allocation and a copy across PCIe
+    /// per frame. See [`RepeatedOutput`].
+    repeated: RepeatedOutput,
 }
 
 impl D3d11Upload {
@@ -158,6 +171,7 @@ impl D3d11Upload {
             height,
             pad,
             pool,
+            repeated: RepeatedOutput::new(),
         }
     }
 
@@ -299,36 +313,13 @@ impl Sink for D3d11Upload {
 
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         match buf {
+            // The same CPU buffer as last time is the same pixels as last
+            // time, and uploading them again produces the texture already on
+            // the GPU — see [`PerFrameTransform`], which is where that is
+            // decided.
             MediaBuffer::Video(frame) => {
-                let Some(format) = texture_format(frame.format()) else {
-                    pp_error!(self, "unsupported pixel format: {:?}", frame.format());
-                    return Err(D3d11UploadError::UnsupportedFormat(frame.format()).into());
-                };
-                if frame.width() != self.width || frame.height() != self.height {
-                    let error = D3d11UploadError::DimensionMismatch {
-                        actual_width: frame.width(),
-                        actual_height: frame.height(),
-                        expected_width: self.width,
-                        expected_height: self.height,
-                    };
-                    pp_error!(self, "{error}");
-                    return Err(error.into());
-                }
-
-                let texture = self
-                    .upload(&frame, format)
-                    .inspect_err(|error| pp_error!(self, "GPU upload failed: {error}"))?;
-                let mut gpu_frame = self.pool.get();
-                // Overwrites the pooled slot's previous contents in
-                // place — `ffmpeg::frame::Video`'s own `Drop` runs on
-                // whatever was there before, releasing that frame's GPU
-                // texture (via `release_d3d11_texture`) right here.
-                *gpu_frame = wrap_d3d11_texture(texture, self.width, self.height)?;
-                gpu_frame.set_pts(frame.pts());
-                gpu_frame.set_color_space(frame.color_space());
-                gpu_frame.set_color_range(frame.color_range());
-
-                self.pad.push(MediaBuffer::Video(Arc::new(gpu_frame)))
+                let uploaded = self.transform(&frame)?;
+                self.pad.push(MediaBuffer::Video(uploaded))
             }
             MediaBuffer::Eos => self.pad.push(MediaBuffer::Eos),
             MediaBuffer::Packet(_) => {
@@ -343,9 +334,58 @@ impl Sink for D3d11Upload {
     }
 
     fn control(&mut self, msg: ControlMsg) -> Result<()> {
-        // Nothing local to react to — a pure per-frame CPU->GPU transfer,
-        // same reasoning as `D3d12Upload::control`.
+        // Nothing local to react to beyond the cached upload — a pure
+        // per-frame CPU->GPU transfer, same reasoning as
+        // `D3d12Upload::control`.
+        if matches!(msg, ControlMsg::Flush | ControlMsg::Stop) {
+            self.repeated.clear();
+        }
         self.pad.control(msg)
+    }
+}
+
+impl PerFrameTransform for D3d11Upload {
+    fn repeated(&mut self) -> &mut RepeatedOutput {
+        &mut self.repeated
+    }
+
+    fn frame_ref_failed(&self, code: i32) -> crate::error::Error {
+        pp_error!(self, "av_frame_ref failed: {code}");
+        D3d11UploadError::FrameRef(code).into()
+    }
+
+    fn produce(
+        &mut self,
+        frame: &ffmpeg::frame::Video,
+    ) -> Result<UnboundObjectPoolRef<ffmpeg::frame::Video>> {
+        let Some(format) = texture_format(frame.format()) else {
+            pp_error!(self, "unsupported pixel format: {:?}", frame.format());
+            return Err(D3d11UploadError::UnsupportedFormat(frame.format()).into());
+        };
+        if frame.width() != self.width || frame.height() != self.height {
+            let error = D3d11UploadError::DimensionMismatch {
+                actual_width: frame.width(),
+                actual_height: frame.height(),
+                expected_width: self.width,
+                expected_height: self.height,
+            };
+            pp_error!(self, "{error}");
+            return Err(error.into());
+        }
+
+        let texture = self
+            .upload(frame, format)
+            .inspect_err(|error| pp_error!(self, "GPU upload failed: {error}"))?;
+        let mut gpu_frame = self.pool.get();
+        // Overwrites the pooled slot's previous contents in place —
+        // `ffmpeg::frame::Video`'s own `Drop` runs on whatever was there
+        // before, releasing that frame's GPU texture (via
+        // `release_d3d11_texture`) right here.
+        *gpu_frame = wrap_d3d11_texture(texture, self.width, self.height)?;
+        gpu_frame.set_pts(frame.pts());
+        gpu_frame.set_color_space(frame.color_space());
+        gpu_frame.set_color_range(frame.color_range());
+        Ok(gpu_frame)
     }
 }
 
@@ -406,6 +446,77 @@ mod tests {
             pp_log: element_pp_log(ElementType::Other, "capture", None),
         }));
         received
+    }
+
+    /// One pooled CPU frame, as an upstream element hands one over.
+    fn cpu_frame(width: u32, height: u32, pts: i64) -> MediaBuffer {
+        let mut frame = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::BGRA, width, height);
+        frame.set_pts(Some(pts));
+        frame.data_mut(0).fill(0x40);
+        let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
+        let mut slot = pool.get();
+        *slot = frame;
+        MediaBuffer::Video(Arc::new(slot))
+    }
+
+    /// Another `AVFrame` over the same picture, with its own timestamp —
+    /// what `DxgiCaptureSource` under `CaptureMode::Cpu` hands over on every
+    /// tick of a still screen.
+    fn repeat_of(buffer: &MediaBuffer, pts: i64) -> MediaBuffer {
+        let MediaBuffer::Video(source) = buffer else {
+            panic!("expected a Video buffer");
+        };
+        let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
+        let mut slot = pool.get();
+        // SAFETY: both are live `AVFrame`s and distinct — the slot is the
+        // empty one just taken from the pool.
+        unsafe {
+            assert!(ffmpeg::ffi::av_frame_ref(slot.as_mut_ptr(), source.as_ptr()) >= 0);
+        }
+        slot.set_pts(Some(pts));
+        MediaBuffer::Video(Arc::new(slot))
+    }
+
+    /// The texture a frame's pixels live in.
+    fn texture_of(buffer: &MediaBuffer) -> *mut std::ffi::c_void {
+        let MediaBuffer::Video(frame) = buffer else {
+            panic!("expected a Video buffer");
+        };
+        d3d11va_texture(frame).expect("a D3D11 frame").0
+    }
+
+    /// A capture of a still screen re-emits the picture it already has, and
+    /// uploading it again would produce the texture already on the GPU —
+    /// another full-size allocation and another crossing of PCIe. The
+    /// repeat carries its own timestamp; only the texture is shared.
+    #[test]
+    fn a_repeated_input_is_uploaded_once() {
+        let Some((device, _context)) = try_d3d11_device() else {
+            return;
+        };
+        let mut upload = D3d11Upload::new("upload", &device, 4, 4);
+        let received = capture(&mut upload);
+        let source = cpu_frame(4, 4, 100);
+        let repeat = repeat_of(&source, 200);
+
+        upload.consume(source).expect("upload the first frame");
+        upload.consume(repeat).expect("upload the repeat");
+
+        let received = received.lock().unwrap();
+        assert_eq!(received.len(), 2, "every tick still produces a frame");
+        assert_eq!(
+            texture_of(&received[1]),
+            texture_of(&received[0]),
+            "an unchanged picture was uploaded a second time"
+        );
+        let MediaBuffer::Video(repeated) = &received[1] else {
+            panic!("expected a Video buffer");
+        };
+        assert_eq!(
+            repeated.pts(),
+            Some(200),
+            "a repeat carries this frame's timestamp, not the one it points at"
+        );
     }
 
     /// Reads a BGRA texture back through a staging copy, tightly packed —

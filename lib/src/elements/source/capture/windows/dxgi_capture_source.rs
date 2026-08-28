@@ -6,7 +6,7 @@ use std::{
 };
 
 use crate::pp_log::{PpLog, pp_error, pp_info};
-use ffmpeg_next as ffmpeg;
+use ffmpeg_next::{self as ffmpeg, ffi};
 use thiserror::Error as ThisError;
 use windows::{
     Win32::{
@@ -34,7 +34,7 @@ use windows::{
 };
 
 use crate::{
-    buffer::MediaBuffer,
+    buffer::{MediaBuffer, picture_is_referenced},
     bus::{Bus, BusEvent},
     contract::{MediaKind, MemoryDomain, OutputContract, PortContract},
     control::{ControlReceiver, drain_control},
@@ -43,7 +43,7 @@ use crate::{
     error::{D3d11FrameWrapError, D3d11SharedDeviceError, Result},
     pad::SrcPad,
     platform::windows::{d3d11::protect_shared_device, d3d11va::wrap_d3d11_texture},
-    pool::UnboundObjectPool,
+    pool::{UnboundObjectPool, UnboundObjectPoolRef},
     schedule::PeriodicSchedule,
 };
 
@@ -104,6 +104,11 @@ pub enum DxgiCaptureSourceError {
     /// [`DxgiCaptureSource::open`] again.
     #[error("DXGI_ERROR_ACCESS_LOST — desktop duplication needs to be reopened")]
     AccessLost,
+
+    /// FFmpeg could not take a second reference to the picture last copied,
+    /// which is how [`CaptureMode::Cpu`] emits a tick that captured nothing.
+    #[error("failed to reference the captured picture (code {0})")]
+    FrameRef(i32),
 
     /// Seeking was requested on a live desktop capture.
     #[error("DxgiCaptureSource doesn't support seeking a live capture")]
@@ -292,6 +297,22 @@ struct CursorShape {
     data: Vec<u8>,
 }
 
+/// The cursor as one comparable value: everything
+/// [`DxgiCaptureSource::copy_picture`] would draw of it.
+///
+/// The mouse moves independently of the desktop image, so a tick that
+/// captured nothing can still owe a new picture. The shape is compared by a
+/// counter bumped on every refresh rather than by its pixels — a shape is
+/// replaced wholesale, never edited. Left at its default when
+/// `include_cursor` is off, where none of it is drawn.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+struct CursorState {
+    visible: bool,
+    x: i32,
+    y: i32,
+    shape: u64,
+}
+
 /// One contributing output's own duplication plus this element's copy of
 /// its capture, and where that output's portion belongs in the final
 /// composite image. Exactly one of these exists under
@@ -442,15 +463,42 @@ pub struct DxgiCaptureSource {
     /// docs. Pre-sized to `width`/`height` up front, same reasoning as
     /// `SwScaler`'s own pool.
     pool: UnboundObjectPool<ffmpeg::frame::Video>,
+    /// [`CaptureMode::Cpu`]'s wrappers: empty frames pointed at
+    /// `last_picture`, carrying only this tick's own timestamp. The same
+    /// split [`CaptureMode::Gpu`] already has between `pool`'s wrappers and
+    /// the composite texture inside them — with the picture in CPU memory,
+    /// the wrapper is what lets several ticks in a row show it under their
+    /// own `pts`. Unused under [`CaptureMode::Gpu`].
+    wrapper_pool: UnboundObjectPool<ffmpeg::frame::Video>,
     /// The composite texture the last [`CaptureMode::Gpu`] emission built,
     /// kept so a tick that captured nothing new can wrap it again instead of
     /// building an identical one. `None` before the first emission and under
     /// [`CaptureMode::Cpu`]. See [`DxgiCaptureSource::emit_frame_gpu`].
     last_composite: Option<ID3D11Texture2D>,
-    /// Whether any unit's `staging_texture` has been refreshed since
-    /// `last_composite` was built — that is, whether rebuilding it would
-    /// produce different pixels.
-    captured_since_composite: bool,
+    /// [`CaptureMode::Cpu`]'s equivalent of `last_composite`: the pooled
+    /// frame the desktop image was last copied into, kept so a tick that
+    /// captured nothing can point a wrapper at it instead of copying
+    /// identical pixels again. `None` before the first emission and under
+    /// [`CaptureMode::Gpu`]. See [`DxgiCaptureSource::emit_frame_cpu`].
+    last_picture: Option<Arc<UnboundObjectPoolRef<ffmpeg::frame::Video>>>,
+    /// Pictures a wrapper already pushed downstream may still be pointing
+    /// at. A wrapper shares the picture's *buffer*, not its pool slot, so a
+    /// replaced picture waits here until nothing but the frame itself
+    /// references its pixels — otherwise the next copy would write over what
+    /// a frame still queued downstream is showing. See
+    /// [`picture_is_referenced`].
+    retired: Vec<Arc<UnboundObjectPoolRef<ffmpeg::frame::Video>>>,
+    /// The cursor as it was drawn into `last_picture`, so a tick where only
+    /// the mouse moved still copies a new picture. See [`CursorState`].
+    picture_cursor: CursorState,
+    /// Bumped every time `cursor_shape` is replaced — see [`CursorState`].
+    cursor_shape_version: u64,
+    /// Whether any unit has captured since the picture a repeat would offer
+    /// again was built — `last_composite`'s texture under
+    /// [`CaptureMode::Gpu`], `last_picture`'s pixels under
+    /// [`CaptureMode::Cpu`]. That is, whether producing it again would give
+    /// different pixels.
+    captured_since_picture: bool,
 }
 
 // SAFETY: every D3D11/DXGI handle here is a `windows-rs` COM interface
@@ -709,8 +757,13 @@ impl DxgiCaptureSource {
                 frame_index: 0,
                 pad,
                 pool,
+                wrapper_pool: UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {}),
                 last_composite: None,
-                captured_since_composite: false,
+                last_picture: None,
+                retired: Vec::new(),
+                picture_cursor: CursorState::default(),
+                cursor_shape_version: 0,
+                captured_since_picture: false,
             },
             VideoFormat {
                 width,
@@ -767,6 +820,8 @@ impl DxgiCaptureSource {
             pitch: info.Pitch,
             data: buffer,
         });
+        // A different shape from here on — see [`CursorState`].
+        self.cursor_shape_version += 1;
         Ok(())
     }
 
@@ -872,9 +927,14 @@ impl DxgiCaptureSource {
                 self.units[index].has_captured = true;
                 // This unit's latest image changed, so the next composite is
                 // no longer the one `last_composite` already holds.
-                self.captured_since_composite = true;
+                self.captured_since_picture = true;
                 continue;
             }
+            // Cpu: the same, for the picture `last_picture` already holds —
+            // set before the copy below rather than after it, so a failure
+            // part way through cannot leave a half-written `staging` looking
+            // like the picture that was already emitted.
+            self.captured_since_picture = true;
 
             // Cpu mode: Map this unit's own staging texture and copy
             // just its `source_box` crop into the shared composite
@@ -965,7 +1025,7 @@ impl DxgiCaptureSource {
         let mut frame = if self.gpu_mode {
             self.emit_frame_gpu()?
         } else {
-            self.emit_frame_cpu()
+            self.emit_frame_cpu()?
         };
         frame.set_pts(Some(self.frame_index));
         frame.set_color_space(ffmpeg::color::Space::RGB);
@@ -974,17 +1034,90 @@ impl DxgiCaptureSource {
         Ok(frame)
     }
 
-    /// Copies `self.staging` (the latest captured composite image,
-    /// however stale — already assembled from every unit's own crop by
-    /// `poll_capture`) into a fresh pooled CPU frame, compositing the
-    /// cursor onto that copy if enabled. Copying instead of sharing
-    /// `self.staging` directly is what lets each emitted frame carry its
-    /// own distinct, correctly-incrementing `pts` (stamped by the
-    /// caller, `emit_frame`) even when several emissions in a row show
-    /// the same content — an `Arc`-shared frame can't have its `pts`
-    /// safely rewritten in place once downstream might already hold a
-    /// clone of it.
-    fn emit_frame_cpu(&mut self) -> crate::pool::UnboundObjectPoolRef<ffmpeg::frame::Video> {
+    /// Emits one wrapper around the picture `self.staging` was last copied
+    /// into, copying a new one first when this tick has something new to
+    /// show. The wrapper is what carries this tick's own `pts` (stamped by
+    /// the caller, `emit_frame`): `self.staging` itself is written in place
+    /// by `poll_capture` and an `Arc`-shared frame cannot have its `pts`
+    /// rewritten once downstream may hold a clone, so what is shared is a
+    /// picture nothing writes to again.
+    ///
+    /// # Why a tick with nothing new copies nothing
+    ///
+    /// The same reason [`DxgiCaptureSource::emit_frame_gpu`] builds nothing:
+    /// this element emits at a constant rate rather than only when the
+    /// desktop changes, so most ticks on a mostly-still screen would copy
+    /// the full picture — 8 MiB per tick at 1080p, around 480 MB/s at 60 fps
+    /// — to produce pixels identical to the ones just emitted. Such a tick
+    /// points another wrapper at the picture already copied instead. What
+    /// downstream sees does not change: a frame every tick, each with its
+    /// own wrapper and its own advancing `pts`.
+    ///
+    /// The cursor is part of "something new" here, not just the desktop
+    /// image: it is drawn into the picture, and it moves independently — see
+    /// [`CursorState`].
+    fn emit_frame_cpu(
+        &mut self,
+    ) -> std::result::Result<UnboundObjectPoolRef<ffmpeg::frame::Video>, DxgiCaptureSourceError>
+    {
+        let cursor = self.cursor_state();
+        if self.last_picture.is_none()
+            || self.captured_since_picture
+            || cursor != self.picture_cursor
+        {
+            self.copy_picture(cursor);
+        }
+
+        let mut wrapper = self.wrapper_pool.get();
+        let picture = self
+            .last_picture
+            .as_ref()
+            .expect("copy_picture leaves a picture behind");
+        // SAFETY: `ptr` is the pooled wrapper's own `AVFrame`, unreferenced
+        // before it is given a new one, and the source is the picture this
+        // element holds the pooled reference to — both live, and distinct
+        // from each other.
+        unsafe {
+            let ptr = wrapper.as_mut_ptr();
+            ffi::av_frame_unref(ptr);
+            let code = ffi::av_frame_ref(ptr, picture.as_ptr());
+            if code < 0 {
+                return Err(DxgiCaptureSourceError::FrameRef(code));
+            }
+        }
+        Ok(wrapper)
+    }
+
+    /// The cursor as this tick would draw it — see [`CursorState`].
+    fn cursor_state(&self) -> CursorState {
+        if !self.include_cursor {
+            return CursorState::default();
+        }
+        CursorState {
+            visible: self.cursor_visible && self.cursor_shape.is_some(),
+            x: self.cursor_position.x,
+            y: self.cursor_position.y,
+            shape: self.cursor_shape_version,
+        }
+    }
+
+    /// Copies `self.staging` (the latest captured composite image, however
+    /// stale — already assembled from every unit's own crop by
+    /// `poll_capture`) into a pooled frame, compositing the cursor onto that
+    /// copy if enabled, and makes it the picture emitted from here on.
+    ///
+    /// Into a frame the pool considers free, never over the previous
+    /// picture: that one is still what earlier wrappers are showing.
+    fn copy_picture(&mut self, cursor: CursorState) {
+        // The picture being replaced may still be under a wrapper pushed
+        // downstream, so it waits in `retired` rather than going straight
+        // back to the pool — see that field's own docs.
+        if let Some(previous) = self.last_picture.take() {
+            self.retired.push(previous);
+        }
+        self.retired
+            .retain(|picture| picture_is_referenced(picture));
+
         let mut frame = self.pool.get();
         let staging = self
             .staging
@@ -1000,8 +1133,7 @@ impl DxgiCaptureSource {
                 dst[row * dst_stride..row * dst_stride + row_bytes]
                     .copy_from_slice(&src[row * src_stride..row * src_stride + row_bytes]);
             }
-            if self.include_cursor
-                && self.cursor_visible
+            if cursor.visible
                 && let Some(shape) = &self.cursor_shape
             {
                 composite_cursor(
@@ -1009,13 +1141,15 @@ impl DxgiCaptureSource {
                     dst_stride,
                     self.width,
                     self.height,
-                    self.cursor_position.x,
-                    self.cursor_position.y,
+                    cursor.x,
+                    cursor.y,
                     shape,
                 );
             }
         }
-        frame
+        self.last_picture = Some(Arc::new(frame));
+        self.picture_cursor = cursor;
+        self.captured_since_picture = false;
     }
 
     /// `CaptureMode::Gpu`'s equivalent of [`DxgiCaptureSource::emit_frame_cpu`]:
@@ -1053,7 +1187,7 @@ impl DxgiCaptureSource {
         DxgiCaptureSourceError,
     > {
         let texture = match &self.last_composite {
-            Some(texture) if !self.captured_since_composite => texture.clone(),
+            Some(texture) if !self.captured_since_picture => texture.clone(),
             _ => self.build_composite()?,
         };
 
@@ -1117,7 +1251,7 @@ impl DxgiCaptureSource {
         }
 
         self.last_composite = Some(texture.clone());
-        self.captured_since_composite = false;
+        self.captured_since_picture = false;
         Ok(texture)
     }
 }
@@ -1498,7 +1632,72 @@ fn composite_cursor(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::windows::d3d11va::d3d11va_texture;
+    use crate::{buffer::picture_id, platform::windows::d3d11va::d3d11va_texture};
+
+    /// [`CaptureMode::Cpu`]'s half of the same contract: a tick that
+    /// captured nothing points another wrapper at the picture already
+    /// copied, and one that captured something copies into a frame the
+    /// pool considers free rather than over pixels a wrapper is showing.
+    ///
+    /// Asserted on the picture identity rather than on a frame rate,
+    /// because the saving is a full-size copy per tick, not a rate: the
+    /// element still emits every tick either way, which is the part that
+    /// must not change.
+    ///
+    /// Hardware test: skips when the machine has no desktop duplication.
+    #[test]
+    fn an_unchanged_tick_reuses_the_picture_it_already_copied() {
+        let (mut source, _format, _device) = match DxgiCaptureSource::open(
+            "reuse-cpu",
+            DxgiCaptureOptions {
+                area: CaptureArea::Output { output_index: 0 },
+                fps: 60,
+                capture_mode: CaptureMode::Cpu {
+                    include_cursor: false,
+                },
+            },
+        ) {
+            Ok(opened) => opened,
+            Err(error) => {
+                eprintln!("skipping: no desktop duplication available here ({error})");
+                return;
+            }
+        };
+
+        // Wait for a real capture rather than assuming one is ready: until a
+        // unit has copied something there is nothing to emit, which is what
+        // `all_captured` gates on.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !source.all_captured() && Instant::now() < deadline {
+            source.poll_capture(16).expect("poll the duplication");
+        }
+        if !source.all_captured() {
+            eprintln!("skipping: the desktop never produced a frame to capture");
+            return;
+        }
+
+        let first = source.emit_frame_cpu().expect("copy the first picture");
+        let picture = picture_id(&first);
+
+        // No `poll_capture` in between and the cursor is not drawn, so
+        // nothing this tick would show has changed.
+        let second = source.emit_frame_cpu().expect("emit an unchanged tick");
+        assert_eq!(
+            picture_id(&second),
+            picture,
+            "an unchanged tick copied the picture again instead of re-wrapping it"
+        );
+
+        // A tick that did capture must not copy over the picture the frames
+        // above are still showing.
+        source.captured_since_picture = true;
+        let third = source.emit_frame_cpu().expect("emit a changed tick");
+        assert_ne!(
+            picture_id(&third),
+            picture,
+            "a changed tick copied over a picture still referenced downstream"
+        );
+    }
 
     /// A tick that captured nothing re-wraps the composite instead of
     /// building an identical one, and one that captured something builds a
@@ -1553,7 +1752,7 @@ mod tests {
 
         // A tick that did capture must not draw over a texture the frames
         // above still hold.
-        source.captured_since_composite = true;
+        source.captured_since_picture = true;
         let third = source.emit_frame_gpu().expect("emit a changed tick");
         assert_ne!(
             d3d11va_texture(&third).expect("a D3D11 frame").0,

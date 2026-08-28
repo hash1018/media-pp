@@ -29,7 +29,7 @@ mod video_synchronizer;
 
 pub use audio_resampler::{AudioResampler, AudioResamplerError};
 pub use audio_volume::{AudioVolume, AudioVolumeError, AudioVolumeHandle, AudioVolumeOptions};
-pub use change_gate::{ChangeGate, ChangeGateError};
+pub use change_gate::ChangeGate;
 pub use chroma_key::{ChromaKeyMethod, ChromaKeyOptions, SwChromaKey, SwChromaKeyError};
 #[cfg(all(target_os = "windows", feature = "d3d11"))]
 pub use chroma_key::{D3d11ChromaKey, D3d11ChromaKeyError};

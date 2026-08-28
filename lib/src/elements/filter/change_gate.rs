@@ -2,7 +2,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use ffmpeg_next as ffmpeg;
-use thiserror::Error as ThisError;
 
 use crate::pp_log::{PpLog, pp_info};
 
@@ -13,15 +12,8 @@ use crate::{
     element::{Element, ElementType, Sink, Source, element_pp_log},
     error::Result,
     pad::SrcPad,
+    pool::UnboundObjectPoolRef,
 };
-
-/// Errors specific to [`ChangeGate`].
-#[derive(Debug, ThisError, PartialEq, Eq)]
-pub enum ChangeGateError {
-    /// FFmpeg could not take a second reference to a frame being forwarded.
-    #[error("failed to reference the frame being forwarded (code {0})")]
-    FrameRef(i32),
-}
 
 /// Forwards a video frame only when its picture is not the one it last
 /// forwarded, and never more often than `min_interval`.
@@ -57,9 +49,20 @@ pub enum ChangeGateError {
 /// # What it compares
 ///
 /// Which buffer the pixels live in, not the frame around them — see
-/// [`picture_id`]. It holds a reference to the frame it forwarded, which is
-/// what makes that identity sound: a picture still referenced cannot be
-/// released and handed out again at the same address.
+/// [`picture_id`]. It holds the frame it forwarded, which is what makes that
+/// identity sound: a picture still held cannot be handed out again with
+/// something else in it.
+///
+/// What it holds is the *pooled* reference it was given, not an
+/// `av_frame_ref` of the picture inside it. A frame reference keeps the
+/// buffer allocated but leaves the producer's pool free to hand that slot
+/// out again — and a producer that composites or scales into its pooled
+/// frames then puts new pixels at the very address this is comparing
+/// against, so a real change reads as "unchanged" and, if the scene goes
+/// still right after, the display stays on the picture before it. Holding
+/// the pooled reference keeps that slot checked out for exactly as long as
+/// this names it. It costs the producer one frame, which its pool simply
+/// grows by.
 ///
 /// It reads no pixels, so it works the same on a GPU frame as on one in
 /// system memory, and costs a pointer comparison either way.
@@ -74,9 +77,10 @@ pub struct ChangeGate {
 /// The last picture forwarded, and when.
 struct Forwarded {
     picture: (usize, usize),
-    /// A reference to that frame, held so its buffer cannot be released and
-    /// reallocated at the same address while `picture` still names it.
-    _frame: ffmpeg::frame::Video,
+    /// The pooled frame itself, held so nothing can be composed or scaled
+    /// into that slot while `picture` still names it — see this element's
+    /// own docs on why a frame reference is not enough.
+    _frame: Arc<UnboundObjectPoolRef<ffmpeg::frame::Video>>,
     at: Instant,
 }
 
@@ -110,25 +114,12 @@ impl ChangeGate {
         }
     }
 
-    fn remember(
-        &mut self,
-        frame: &ffmpeg::frame::Video,
-        now: Instant,
-    ) -> std::result::Result<(), ChangeGateError> {
-        let mut kept = ffmpeg::frame::Video::empty();
-        // SAFETY: both are live `AVFrame`s and distinct — `kept` is the empty
-        // local above — so this adds a reference to the picture rather than
-        // copying it.
-        let code = unsafe { ffmpeg::ffi::av_frame_ref(kept.as_mut_ptr(), frame.as_ptr()) };
-        if code < 0 {
-            return Err(ChangeGateError::FrameRef(code));
-        }
+    fn remember(&mut self, frame: &Arc<UnboundObjectPoolRef<ffmpeg::frame::Video>>, now: Instant) {
         self.forwarded = Some(Forwarded {
             picture: picture_id(frame),
-            _frame: kept,
+            _frame: Arc::clone(frame),
             at: now,
         });
-        Ok(())
     }
 }
 
@@ -173,7 +164,7 @@ impl Sink for ChangeGate {
         if !self.is_new(frame, now) {
             return Ok(());
         }
-        self.remember(frame, now)?;
+        self.remember(frame, now);
         self.pad.push(buf)
     }
 
@@ -287,6 +278,44 @@ mod tests {
             timestamps(&forwarded),
             vec![Some(1)],
             "only the first arrival carried a picture downstream had not seen"
+        );
+    }
+
+    /// A producer that composites into its pooled frames puts new pixels at
+    /// an address this gate may already be naming. Holding the pooled frame
+    /// is what stops that: while the gate names a slot, the pool cannot hand
+    /// it back, so the same address never comes to mean a different picture.
+    #[test]
+    fn a_recycled_pool_slot_cannot_come_back_as_an_unchanged_picture() {
+        let mut gate = ChangeGate::new("gate", Duration::ZERO);
+        let forwarded = capture(&mut gate);
+        // One frame's worth of pool, as a producer that reuses its output
+        // buffer has: whatever it hands out next is this same slot, unless
+        // something still holds it.
+        let pool = UnboundObjectPool::new(
+            1,
+            || ffmpeg::frame::Video::new(ffmpeg::format::Pixel::NV12, 16, 16),
+            |_| {},
+        );
+        let produce = |pts: i64| {
+            let mut slot = pool.get();
+            slot.set_pts(Some(pts));
+            MediaBuffer::Video(Arc::new(slot))
+        };
+
+        // Forwarded, then consumed downstream — nothing but the gate is left
+        // holding it.
+        gate.consume(produce(1)).expect("first");
+        forwarded.lock().unwrap().clear();
+
+        // A second composite. It only lands at the same address if the pool
+        // handed the slot back, which is the case being pinned.
+        gate.consume(produce(2)).expect("a new picture");
+
+        assert_eq!(
+            timestamps(&forwarded),
+            vec![Some(2)],
+            "a new picture was suppressed because it reused a recycled address"
         );
     }
 

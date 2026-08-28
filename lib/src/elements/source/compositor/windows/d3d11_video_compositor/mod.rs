@@ -18,7 +18,7 @@ use std::{
 
 use crate::pp_log::{PpLog, pp_info};
 use arc_swap::ArcSwapOption;
-use ffmpeg_next as ffmpeg;
+use ffmpeg_next::{self as ffmpeg, ffi};
 use thiserror::Error as ThisError;
 use windows::{
     Win32::Foundation::RECT,
@@ -44,7 +44,7 @@ use super::super::{
     video_layer::{self, LayerGeometry, MAX_DIMENSION, VideoLayer, VideoLayerError},
 };
 use crate::{
-    buffer::MediaBuffer,
+    buffer::{MediaBuffer, picture_id, picture_is_referenced},
     bus::{Bus, BusEvent},
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
     control::{ControlMsg, ControlReceiver, drain_control},
@@ -78,6 +78,11 @@ pub enum D3d11VideoCompositorError {
     /// A Direct3D device, resource, or command operation failed.
     #[error("windows error: {0}")]
     Windows(#[from] windows::core::Error),
+
+    /// FFmpeg could not take a second reference to the frame last composed,
+    /// which is how an unchanged picture is offered again.
+    #[error("failed to reference the previous composite (code {0})")]
+    FrameRef(i32),
 
     /// The device cannot be shared across a pipeline's threads.
     #[error(transparent)]
@@ -493,6 +498,95 @@ struct InputSnapshot {
     frame: Option<Arc<UnboundObjectPoolRef<ffmpeg::frame::Video>>>,
 }
 
+impl InputSnapshot {
+    /// Same input, in the same place, drawing the same thing.
+    fn same_as(&self, other: &Self) -> bool {
+        self.id == other.id
+            && self.layer == other.layer
+            && match (&self.frame, &other.frame) {
+                (Some(drawn), Some(now)) => draw_identity(drawn) == draw_identity(now),
+                (None, None) => true,
+                _ => false,
+            }
+    }
+}
+
+/// Everything [`D3d11VideoCompositor::draw_layer`] reads out of an input
+/// frame: which texture and array slice its pixels live in, and the
+/// properties that decide how they are sampled — the visible size the
+/// sampling rectangle comes from, and for an NV12 layer the color matrix and
+/// range its shader constants are built from. Two frames that agree on all
+/// of it draw the same picture.
+///
+/// The pixels are compared by which texture they live in rather than by the
+/// frame around them: an input with nothing new to show still hands over a
+/// fresh frame on every tick — `DxgiCaptureSource` under
+/// [`CaptureMode::Gpu`](crate::elements::CaptureMode::Gpu) re-wraps one
+/// composite exactly that way. See [`picture_id`] for why that identity is
+/// sound here: for a `Pixel::D3D11` frame the two values it reads are the
+/// texture pointer and the array slice, and every caller holds the frame it
+/// compared, so neither can be released and reused underneath it.
+///
+/// The properties beyond the picture are what makes this more than the
+/// `picture_id` comparison `SwVideoCompositor` and `CudaVideoCompositor`
+/// use. Neither of those reads a frame's color description while composing;
+/// this one hands it to a shader, so one texture re-tagged BT.601 and then
+/// BT.709 is genuinely two different pictures here.
+fn draw_identity(
+    frame: &ffmpeg::frame::Video,
+) -> (
+    (usize, usize),
+    ffmpeg::format::Pixel,
+    u32,
+    u32,
+    ffmpeg::color::Space,
+    ffmpeg::color::Range,
+) {
+    (
+        picture_id(frame),
+        frame.format(),
+        frame.width(),
+        frame.height(),
+        frame.color_space(),
+        frame.color_range(),
+    )
+}
+
+/// What the last composite was made from, and what it produced.
+///
+/// A tick that finds every input frame and every layer exactly as the last
+/// one left them has nothing to draw: the picture it would compose is the
+/// picture already composed. It hands out that frame again instead, under a
+/// new timestamp, never a redraw — the D3D11 sibling of what
+/// [`crate::elements::SwVideoCompositor`] and
+/// [`crate::elements::CudaVideoCompositor`] already do. Text layers need no
+/// separate handling here: [`D3d11TextLayerHandle::set_text`] rasterizes
+/// into a texture and publishes it as an ordinary input frame, so a text
+/// change is a new `picture_id` like any other.
+///
+/// # Why this holds the pooled reference rather than a frame reference
+///
+/// `CudaVideoCompositor` holds an `av_frame_ref` of the surface it composed,
+/// which is safe there because its output pool acquires a *fresh* surface
+/// per composite and will not hand back one still referenced. This pool is
+/// the other kind, the same as `SwVideoCompositor`'s: a fixed set of frames,
+/// each keeping the output texture it was given, composited into again on
+/// every checkout. A plain frame reference would not stop the pool handing
+/// that frame out again, and the next `ClearRenderTargetView` would then
+/// draw over the pixels this is still offering. Holding the pooled reference
+/// is what keeps it out of the pool at all.
+struct Composed {
+    inputs: Vec<InputSnapshot>,
+    frame: Arc<UnboundObjectPoolRef<ffmpeg::frame::Video>>,
+}
+
+impl Composed {
+    fn matches(&self, inputs: &[InputSnapshot]) -> bool {
+        self.inputs.len() == inputs.len()
+            && std::iter::zip(&self.inputs, inputs).all(|(drawn, now)| drawn.same_as(now))
+    }
+}
+
 struct OutputTarget {
     texture: ID3D11Texture2D,
     render_target_view: ID3D11RenderTargetView,
@@ -597,6 +691,23 @@ pub struct D3d11VideoCompositor {
     /// is dropped. The unbounded pool grows when all prefilled frames are
     /// still queued or being consumed instead of aliasing a live texture.
     output_pool: UnboundObjectPool<ffmpeg::frame::Video>,
+    /// Wrappers for re-emitting an unchanged composite. Empty frames, never
+    /// composited into: each one is pointed at the texture in [`Composed`]
+    /// and carries only this tick's timestamp.
+    repeat_pool: UnboundObjectPool<ffmpeg::frame::Video>,
+    /// The last composite and what it was made from — see [`Composed`].
+    composed: Option<Composed>,
+    /// Pictures a repeat published earlier may still be pointing at.
+    ///
+    /// A repeat shares the picture's *buffer*, not its pool slot: once
+    /// [`Composed`] stops holding that slot, the pool is free to hand the
+    /// frame back and the next `ClearRenderTargetView` draws into a texture
+    /// a repeat still queued downstream is showing. So a replaced picture
+    /// moves here instead, and is released only once nothing but the frame
+    /// itself references its pixels — see [`picture_is_referenced`], which
+    /// is checked on every composite, so this holds only what is genuinely
+    /// still in flight.
+    retired: Vec<Arc<UnboundObjectPoolRef<ffmpeg::frame::Video>>>,
     /// Immutable RTVs cached by the corresponding texture's COM pointer.
     output_views: HashMap<usize, ID3D11RenderTargetView>,
     pad: SrcPad,
@@ -684,6 +795,9 @@ impl D3d11VideoCompositor {
                     ffmpeg::frame::Video::empty,
                     |_| {},
                 ),
+                repeat_pool: UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {}),
+                composed: None,
+                retired: Vec::new(),
                 output_views: HashMap::new(),
                 pad: SrcPad::with_contract(
                     format!("{name}_src"),
@@ -751,11 +865,16 @@ impl D3d11VideoCompositor {
     /// end this compositor's output permanently, which one misbehaving
     /// input has no business doing). Only a genuine infrastructure failure
     /// (e.g. `create_output_target` failing) still returns `Err`.
+    ///
+    /// Returns what will be pushed rather than the pooled reference itself:
+    /// the shared reference is the thing [`Composed`] has to hold on to.
     fn compose_frame(
         &mut self,
         bus: &Bus,
-    ) -> std::result::Result<UnboundObjectPoolRef<ffmpeg::frame::Video>, D3d11VideoCompositorError>
-    {
+    ) -> std::result::Result<
+        Arc<UnboundObjectPoolRef<ffmpeg::frame::Video>>,
+        D3d11VideoCompositorError,
+    > {
         let mut snapshots = self.snapshots();
         snapshots.sort_by(|left, right| {
             left.layer
@@ -763,6 +882,27 @@ impl D3d11VideoCompositor {
                 .cmp(&right.layer.z_index)
                 .then_with(|| left.id.cmp(&right.id))
         });
+
+        // Nothing moved and no input produced a frame, so this tick's picture
+        // is the one already drawn — see [`Composed`].
+        if self
+            .composed
+            .as_ref()
+            .is_some_and(|composed| composed.matches(&snapshots))
+        {
+            return self.repeat_frame();
+        }
+        let kept = snapshots.clone();
+
+        // This tick draws, so the picture behind the last one stops being the
+        // one to offer again — but a repeat already pushed downstream may
+        // still be showing it, so it goes to `retired` rather than straight
+        // back to the pool.
+        if let Some(previous) = self.composed.take() {
+            self.retired.push(previous.frame);
+        }
+        self.retired
+            .retain(|picture| picture_is_referenced(picture));
 
         let (canvas_width, canvas_height) = (self.options.width, self.options.height);
         let mut output_frame = self.output_pool.get();
@@ -858,7 +998,51 @@ impl D3d11VideoCompositor {
         output_frame.set_color_space(ffmpeg::color::Space::RGB);
         output_frame.set_color_range(ffmpeg::color::Range::JPEG);
         self.frame_index += 1;
+        let output_frame = Arc::new(output_frame);
+        // Held so the next tick can tell whether it has anything to draw, and
+        // so the frame it may offer again stays out of the output pool.
+        self.composed = Some(Composed {
+            inputs: kept,
+            frame: Arc::clone(&output_frame),
+        });
         Ok(output_frame)
+    }
+
+    /// Offers the picture already composed, under this tick's timestamp.
+    ///
+    /// `av_frame_ref` points an empty wrapper at the same texture rather
+    /// than copying it — for a `Pixel::D3D11` frame it takes a reference to
+    /// the buffer holding that texture's COM reference — so an unchanged
+    /// scene costs a refcount instead of a render pass per layer. It also
+    /// carries the color description over with the rest of the frame's
+    /// properties, so a repeat is tagged exactly like the composite it
+    /// points at.
+    fn repeat_frame(
+        &mut self,
+    ) -> std::result::Result<
+        Arc<UnboundObjectPoolRef<ffmpeg::frame::Video>>,
+        D3d11VideoCompositorError,
+    > {
+        let mut output = self.repeat_pool.get();
+        let composed = self
+            .composed
+            .as_ref()
+            .expect("only reached with a previous composite");
+        // SAFETY: `ptr` is the pooled wrapper's own `AVFrame`, unreferenced
+        // before it is given a new one, and the source is the composite this
+        // element still holds a pooled reference to — both live, and distinct
+        // from each other.
+        unsafe {
+            let ptr = output.as_mut_ptr();
+            ffi::av_frame_unref(ptr);
+            let code = ffi::av_frame_ref(ptr, composed.frame.as_ptr());
+            if code < 0 {
+                return Err(D3d11VideoCompositorError::FrameRef(code));
+            }
+        }
+        output.set_pts(Some(self.frame_index));
+        self.frame_index += 1;
+        Ok(Arc::new(output))
     }
 
     unsafe fn draw_layer(
@@ -975,7 +1159,7 @@ impl D3d11VideoCompositor {
 
     fn push_frame(&mut self, bus: &Bus) -> std::result::Result<(), D3d11VideoCompositorError> {
         let output = self.compose_frame(bus)?;
-        if let Err(error) = self.pad.push(MediaBuffer::Video(Arc::new(output))) {
+        if let Err(error) = self.pad.push(MediaBuffer::Video(output)) {
             bus.post(
                 &self.pp_log,
                 BusEvent::Error {
@@ -1519,7 +1703,7 @@ mod tests {
     fn download_frame(
         device: &ID3D11Device,
         context: Arc<Mutex<ID3D11DeviceContext>>,
-        composed: UnboundObjectPoolRef<ffmpeg::frame::Video>,
+        composed: Arc<UnboundObjectPoolRef<ffmpeg::frame::Video>>,
     ) -> Arc<UnboundObjectPoolRef<ffmpeg::frame::Video>> {
         let (width, height) = (composed.width(), composed.height());
         let mut download = D3d11Download::new("download", device, context, width, height)
@@ -1530,7 +1714,7 @@ mod tests {
             pp_log: element_pp_log(ElementType::Other, "capture", None),
         }));
         download
-            .consume(MediaBuffer::Video(Arc::new(composed)))
+            .consume(MediaBuffer::Video(composed))
             .expect("download consume should succeed");
         let mut received = received.lock().unwrap();
         let MediaBuffer::Video(frame) = received.remove(0) else {
@@ -1710,12 +1894,16 @@ mod tests {
             .compose_frame(&test_bus())
             .expect("first compose failed");
 
-        sink.consume(pooled_video(
-            wrap_d3d11_texture(bgra_texture(&device, 1, 1, [255, 0, 0, 255]), 1, 1).unwrap(),
-        ))
-        .unwrap();
+        // A new input texture before each one: this is about frames that were
+        // really composed, and a tick whose input has not changed hands out
+        // the picture already composed rather than drawing a new one (see
+        // `an_unchanged_scene_is_composed_once`).
         let mut later = Vec::new();
         for _ in 0..OUTPUT_POOL_SIZE {
+            sink.consume(pooled_video(
+                wrap_d3d11_texture(bgra_texture(&device, 1, 1, [255, 0, 0, 255]), 1, 1).unwrap(),
+            ))
+            .unwrap();
             later.push(
                 compositor
                     .compose_frame(&test_bus())
@@ -1811,6 +1999,139 @@ mod tests {
         for channel in limited_white.into_iter().chain(full_white) {
             assert!((channel - 1.0).abs() < 1e-5, "white mapped to {channel}");
         }
+    }
+
+    /// A tick that finds nothing changed hands out the picture it composed
+    /// last rather than drawing the same one again — and a layer that moves
+    /// puts it straight back to work.
+    #[test]
+    fn an_unchanged_scene_is_composed_once() {
+        let Some((device, context)) = try_device() else {
+            return;
+        };
+        let options = VideoCompositorOptions {
+            width: 2,
+            height: 2,
+            frame_rate: ffmpeg::Rational::new(30, 1),
+            background: Color::BLACK,
+        };
+        let (mut compositor, handle) =
+            D3d11VideoCompositor::new("compositor", &device, context.clone(), options)
+                .expect("D3d11VideoCompositor::new should succeed");
+        let mut layer = VideoLayer::new(VideoRect::new(0, 0, 2, 2));
+        layer.fit = video_layer::VideoFit::Stretch;
+        let input = handle.add_source("input", layer).unwrap().unwrap();
+        let mut sink = input.sink;
+        let layer_handle = input.layer;
+        sink.consume(pooled_video(
+            wrap_d3d11_texture(bgra_texture(&device, 2, 2, [0, 0, 255, 255]), 2, 2).unwrap(),
+        ))
+        .unwrap();
+
+        let composed = compositor
+            .compose_frame(&test_bus())
+            .expect("first compose failed");
+        let picture = texture_key(&composed);
+        assert_eq!(composed.pts(), Some(0));
+
+        let repeated = compositor
+            .compose_frame(&test_bus())
+            .expect("repeat failed");
+        assert_eq!(
+            texture_key(&repeated),
+            picture,
+            "nothing changed, so this is the picture already composed"
+        );
+        assert_eq!(
+            repeated.pts(),
+            Some(1),
+            "a repeat carries this tick's timestamp, not the one it points at"
+        );
+        let downloaded = download_frame(&device, context.clone(), repeated);
+        assert_eq!(
+            pixel(&downloaded, 0, 0),
+            [0, 0, 255, 255],
+            "and it still shows what was composed"
+        );
+
+        layer_handle.set_rect(VideoRect::new(1, 1, 1, 1)).unwrap();
+        let moved = compositor
+            .compose_frame(&test_bus())
+            .expect("compose after the move failed");
+        assert_ne!(
+            texture_key(&moved),
+            picture,
+            "a moved layer is a different picture and must be composed"
+        );
+        let downloaded = download_frame(&device, context, composed);
+        assert_eq!(
+            pixel(&downloaded, 0, 0),
+            [0, 0, 255, 255],
+            "composing again must not draw over the picture still held"
+        );
+    }
+
+    /// A repeat holds the picture's buffer but not its pool slot, so the
+    /// slot must stay out of the pool while that repeat is still in flight —
+    /// otherwise a later composite draws into the texture it is showing.
+    #[test]
+    fn a_repeat_still_in_flight_is_never_composed_over() {
+        let Some((device, context)) = try_device() else {
+            return;
+        };
+        let options = VideoCompositorOptions {
+            width: 2,
+            height: 2,
+            frame_rate: ffmpeg::Rational::new(30, 1),
+            background: Color::BLACK,
+        };
+        let (mut compositor, handle) =
+            D3d11VideoCompositor::new("compositor", &device, context.clone(), options)
+                .expect("D3d11VideoCompositor::new should succeed");
+        let mut layer = VideoLayer::new(VideoRect::new(0, 0, 2, 2));
+        layer.fit = video_layer::VideoFit::Stretch;
+        let mut sink = handle.add_source("input", layer).unwrap().unwrap().sink;
+        let blue = |device: &ID3D11Device| {
+            pooled_video(
+                wrap_d3d11_texture(bgra_texture(device, 2, 2, [255, 0, 0, 255]), 2, 2).unwrap(),
+            )
+        };
+
+        sink.consume(blue(&device)).unwrap();
+        // Composed, pushed, and consumed downstream: only the repeat below
+        // still refers to this picture.
+        drop(
+            compositor
+                .compose_frame(&test_bus())
+                .expect("first compose failed"),
+        );
+        let in_flight = compositor
+            .compose_frame(&test_bus())
+            .expect("repeat failed");
+        let showing = texture_key(&in_flight);
+
+        // Every one of these changes the input, so every one really draws,
+        // and each result is dropped immediately — the pool recycles as fast
+        // as it can, which is exactly the case that would reuse the picture
+        // the repeat above is still showing.
+        for _ in 0..(OUTPUT_POOL_SIZE * 2 + 2) {
+            sink.consume(blue(&device)).unwrap();
+            let composed = compositor
+                .compose_frame(&test_bus())
+                .expect("later compose failed");
+            assert_ne!(
+                texture_key(&composed),
+                showing,
+                "composed into the texture a repeat still in flight is showing"
+            );
+        }
+
+        let downloaded = download_frame(&device, context, in_flight);
+        assert_eq!(
+            pixel(&downloaded, 0, 0),
+            [255, 0, 0, 255],
+            "the repeat still shows the picture it was published with"
+        );
     }
 
     #[test]

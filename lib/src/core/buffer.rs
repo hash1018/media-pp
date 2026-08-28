@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use ffmpeg_next as ffmpeg;
+use ffmpeg_next::{self as ffmpeg, ffi};
 
 use crate::pool::UnboundObjectPoolRef;
 
@@ -102,6 +102,31 @@ pub(crate) fn picture_id(frame: &ffmpeg::frame::Video) -> (usize, usize) {
     unsafe {
         let ptr = frame.as_ptr();
         ((*ptr).data[0] as usize, (*ptr).data[1] as usize)
+    }
+}
+
+/// Whether anything besides this frame itself still points at its picture.
+///
+/// The companion to [`picture_id`], for an element that offers an unchanged
+/// picture again by pointing an empty wrapper at it with `av_frame_ref`.
+/// Such a wrapper shares the picture's *buffer*, not the pool slot the frame
+/// came from, so an [`UnboundObjectPoolRef`] that has gone back to its pool
+/// says nothing about whether a wrapper downstream is still showing those
+/// pixels — the buffer's own reference count is the only record of it, and
+/// a producer that recycles its frames has to keep one out of the pool until
+/// this reads false for it.
+///
+/// Only the first buffer is examined, for the same reason [`picture_id`]
+/// reads only the first plane pointers: a wrapper references either all of a
+/// frame's buffers or none of them.
+pub(crate) fn picture_is_referenced(frame: &ffmpeg::frame::Video) -> bool {
+    // SAFETY: `as_ptr` is a live `AVFrame`. `buf[0]` is either null (a frame
+    // that owns no picture) or a live `AVBufferRef`, and reading its count
+    // does not touch the picture itself — which for GPU memory would not be
+    // valid from the host anyway.
+    unsafe {
+        let buf = (*frame.as_ptr()).buf[0];
+        !buf.is_null() && ffi::av_buffer_get_ref_count(buf) > 1
     }
 }
 

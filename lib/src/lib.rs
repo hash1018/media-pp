@@ -119,6 +119,8 @@ pub use core::{
 // `MediaTimestamp`/`TimeBase` itself. `pub(crate) use` keeps the same
 // `crate::schedule`/`crate::time` paths working for every internal caller
 // without also making them part of this crate's external API surface.
+#[cfg(feature = "d3d11")]
+pub(crate) use core::repeat;
 pub(crate) use core::{schedule, time};
 
 pub use error::{Error, Result};

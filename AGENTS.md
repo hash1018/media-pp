@@ -114,6 +114,22 @@ documentation and implementation differ.
 - Video frames from `UnboundObjectPool` travel as
   `Arc<UnboundObjectPoolRef<_>>`. Never mutate a frame after publishing it, and
   never return/reuse its backing resource while downstream `Arc` clones exist.
+- A live graph emits at a rate, not on change: a capture of a still screen and a
+  compositor with nothing to recompose both re-emit the picture they already
+  have. An element that makes a new picture out of one frame — upload, readback,
+  scale, convert, key — answers such a repeat with what it already produced,
+  through `repeat::PerFrameTransform`. An element whose output depends on more
+  than that frame (the compositors' layers, a capture's cursor) recognises its
+  own repeats against its own state, and one whose contract is a *rate* — an
+  encoder, a muxer — is where repeats must keep flowing, since a picture
+  identical to the last one is what an encoder is cheapest at.
+- Whatever compares pictures by address holds the `Arc<UnboundObjectPoolRef<_>>`
+  it was handed, never just an `av_frame_ref` of what is inside it. A frame
+  reference keeps the buffer alive but leaves the producer's pool free to hand
+  that slot out again and put new pixels at the same address. The same applies
+  in reverse to a picture offered again: it stays checked out of its own pool
+  until `buffer::picture_is_referenced` reads false for it, or the next output
+  is written over pixels still queued downstream.
 
 ## Control, lifetime, and concurrency
 

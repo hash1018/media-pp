@@ -26,7 +26,8 @@ use crate::{
     pad::SrcPad,
     platform::windows::d3d11::{compile_shader, protect_shared_device},
     platform::windows::d3d11va::{d3d11va_texture, wrap_d3d11_texture},
-    pool::UnboundObjectPool,
+    pool::{UnboundObjectPool, UnboundObjectPoolRef},
+    repeat::{PerFrameTransform, RepeatedOutput},
 };
 
 const SHADER_SOURCE: &[u8] = include_bytes!("../../../../shaders/d3d11/chroma_key_bgra.hlsl");
@@ -42,6 +43,11 @@ pub enum D3d11ChromaKeyError {
     /// The device cannot be shared across a pipeline's threads.
     #[error(transparent)]
     SharedDevice(#[from] D3d11SharedDeviceError),
+
+    /// FFmpeg could not take a second reference to the keyed frame already
+    /// in hand, which is how an unchanged input texture is answered.
+    #[error("failed to reference the previous keyed frame (code {0})")]
+    FrameRef(i32),
 
     /// The input frame is not backed by a D3D11 texture.
     #[error("D3d11ChromaKey only keys Pixel::D3D11 frames, got {0:?}")]
@@ -246,6 +252,12 @@ pub struct D3d11ChromaKey {
     /// output texture itself is a fresh allocation per frame, since
     /// downstream may still hold `Arc` clones of the previous one.
     pool: UnboundObjectPool<ffmpeg::frame::Video>,
+    /// The last keyed frame and the texture it was made from, so a producer
+    /// that re-emits an unchanged picture is answered with it instead of
+    /// another output texture and another shader pass — see
+    /// [`RepeatedOutput`]. The key settings are fixed at construction, so
+    /// the input is the whole of what the result depends on.
+    repeated: RepeatedOutput,
 }
 
 // SAFETY: every field is either a `windows-rs` COM interface wrapper (the
@@ -336,6 +348,7 @@ impl D3d11ChromaKey {
             constant_buffer,
             pad,
             pool,
+            repeated: RepeatedOutput::new(),
         })
     }
 
@@ -426,7 +439,10 @@ impl D3d11ChromaKey {
         })
     }
 
-    fn key(&mut self, frame: &ffmpeg::frame::Video) -> Result<()> {
+    fn key(
+        &mut self,
+        frame: &ffmpeg::frame::Video,
+    ) -> Result<UnboundObjectPoolRef<ffmpeg::frame::Video>> {
         let input = self
             .validate(frame)
             .inspect_err(|error| pp_error!(self, "{error}"))?;
@@ -555,8 +571,25 @@ impl D3d11ChromaKey {
         keyed.set_pts(frame.pts());
         keyed.set_color_space(frame.color_space());
         keyed.set_color_range(frame.color_range());
+        Ok(keyed)
+    }
+}
 
-        self.pad.push(MediaBuffer::Video(Arc::new(keyed)))
+impl PerFrameTransform for D3d11ChromaKey {
+    fn repeated(&mut self) -> &mut RepeatedOutput {
+        &mut self.repeated
+    }
+
+    fn frame_ref_failed(&self, code: i32) -> crate::error::Error {
+        pp_error!(self, "av_frame_ref failed: {code}");
+        D3d11ChromaKeyError::FrameRef(code).into()
+    }
+
+    fn produce(
+        &mut self,
+        frame: &ffmpeg::frame::Video,
+    ) -> Result<UnboundObjectPoolRef<ffmpeg::frame::Video>> {
+        self.key(frame)
     }
 }
 
@@ -595,7 +628,13 @@ impl Sink for D3d11ChromaKey {
 
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         match buf {
-            MediaBuffer::Video(frame) => self.key(&frame),
+            // The same texture as last time is the same pixels as last time,
+            // and keying them again produces the surface already in hand —
+            // see [`PerFrameTransform`], which is where that is decided.
+            MediaBuffer::Video(frame) => {
+                let keyed = self.transform(&frame)?;
+                self.pad.push(MediaBuffer::Video(keyed))
+            }
             // Nothing is buffered here — one `Draw` per frame, pushed
             // before `consume` returns — so there is nothing to drain.
             MediaBuffer::Eos => self.pad.push(MediaBuffer::Eos),
@@ -609,7 +648,10 @@ impl Sink for D3d11ChromaKey {
 
     fn control(&mut self, msg: ControlMsg) -> Result<()> {
         // A pure per-pixel transform, same as `D3d11Scaler` — nothing local
-        // buffered or ordered to flush on any `ControlMsg`.
+        // buffered or ordered to flush beyond the cached keyed frame.
+        if matches!(msg, ControlMsg::Flush | ControlMsg::Stop) {
+            self.repeated.clear();
+        }
         self.pad.control(msg)
     }
 }
@@ -890,6 +932,65 @@ mod tests {
         *slot = wrap_d3d11_texture(texture, width, height).unwrap();
         slot.set_pts(Some(pts));
         MediaBuffer::Video(Arc::new(slot))
+    }
+
+    /// Another `AVFrame` over the same picture, with its own timestamp —
+    /// what a capture with nothing new to show hands over on every tick.
+    fn repeat_of(buffer: &MediaBuffer, pts: i64) -> MediaBuffer {
+        let MediaBuffer::Video(source) = buffer else {
+            panic!("expected a Video buffer");
+        };
+        let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
+        let mut slot = pool.get();
+        // SAFETY: both are live `AVFrame`s and distinct — the slot is the
+        // empty one just taken from the pool.
+        unsafe {
+            assert!(ffmpeg::ffi::av_frame_ref(slot.as_mut_ptr(), source.as_ptr()) >= 0);
+        }
+        slot.set_pts(Some(pts));
+        MediaBuffer::Video(Arc::new(slot))
+    }
+
+    /// The texture a frame's pixels live in.
+    fn texture_of(buffer: &MediaBuffer) -> *mut c_void {
+        let MediaBuffer::Video(frame) = buffer else {
+            panic!("expected a Video buffer");
+        };
+        d3d11va_texture(frame).expect("a D3D11 frame").0
+    }
+
+    /// A capture of a still screen re-emits the picture it already has, and
+    /// keying it again would produce the surface already in hand. The
+    /// repeat carries its own timestamp; only the pixels are shared.
+    #[test]
+    fn a_repeated_input_is_keyed_once() {
+        let Some((device, context)) = try_device() else {
+            return;
+        };
+        let source = frame(bgra_texture(&device, 4, 4, [0, 255, 0, 255], 1), 4, 4, 100);
+        let repeat = repeat_of(&source, 200);
+        let mut key = D3d11ChromaKey::new("key", &device, context, default_options())
+            .expect("D3d11ChromaKey::new should succeed");
+        let received = capture(&mut key);
+
+        key.consume(source).expect("key the first frame");
+        key.consume(repeat).expect("key the repeat");
+
+        let received = received.lock().unwrap();
+        assert_eq!(received.len(), 2, "every tick still produces a frame");
+        assert_eq!(
+            texture_of(&received[1]),
+            texture_of(&received[0]),
+            "an unchanged input was keyed a second time"
+        );
+        let MediaBuffer::Video(repeated) = &received[1] else {
+            panic!("expected a Video buffer");
+        };
+        assert_eq!(
+            repeated.pts(),
+            Some(200),
+            "a repeat carries this frame's timestamp, not the one it points at"
+        );
     }
 
     /// Keys one flat `color` frame and hands back the downloaded BGRA

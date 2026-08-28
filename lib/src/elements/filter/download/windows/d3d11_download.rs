@@ -23,7 +23,8 @@ use crate::{
     error::{D3d11SharedDeviceError, Result},
     pad::SrcPad,
     platform::windows::{d3d11::protect_shared_device, d3d11va::d3d11va_texture},
-    pool::UnboundObjectPool,
+    pool::{UnboundObjectPool, UnboundObjectPoolRef},
+    repeat::{PerFrameTransform, RepeatedOutput},
 };
 
 /// Errors specific to `D3d11Download`. Converts into the crate-wide `Error`
@@ -37,6 +38,11 @@ pub enum D3d11DownloadError {
     /// The device cannot be shared across a pipeline's threads.
     #[error(transparent)]
     SharedDevice(#[from] D3d11SharedDeviceError),
+
+    /// FFmpeg could not take a second reference to the download already in
+    /// hand, which is how an unchanged texture is answered.
+    #[error("failed to reference the previous download (code {0})")]
+    FrameRef(i32),
 
     /// The input frame is not backed by a D3D11 texture.
 
@@ -138,6 +144,13 @@ pub struct D3d11Download {
     staging: ID3D11Texture2D,
     pad: SrcPad,
     pool: UnboundObjectPool<ffmpeg::frame::Video>,
+    /// The last download and the texture it came from, so a producer that
+    /// re-emits an unchanged picture is answered with the bytes already in
+    /// system memory — see [`RepeatedOutput`]. This is the most expensive
+    /// per-frame step a D3D11 graph has: a full-size copy into the staging
+    /// texture, a `Map` that waits for the GPU, and a full-size copy back
+    /// across PCIe, all under the shared context lock.
+    repeated: RepeatedOutput,
 }
 
 // SAFETY: every field is either a `windows-rs` COM interface wrapper (free
@@ -190,6 +203,7 @@ impl D3d11Download {
             staging,
             pad,
             pool,
+            repeated: RepeatedOutput::new(),
         })
     }
 
@@ -289,80 +303,12 @@ impl Sink for D3d11Download {
 
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         match buf {
+            // The same texture as last time is the same pixels as last time,
+            // and reading them back again produces the frame already in hand
+            // — see [`PerFrameTransform`], which is where that is decided.
             MediaBuffer::Video(frame) => {
-                if frame.format() != ffmpeg::format::Pixel::D3D11 {
-                    let format = frame.format();
-                    pp_error!(self, "unsupported pixel format: {format:?}");
-                    return Err(D3d11DownloadError::UnsupportedFormat(format).into());
-                }
-                if frame.width() != self.width || frame.height() != self.height {
-                    let error = D3d11DownloadError::DimensionMismatch {
-                        actual_width: frame.width(),
-                        actual_height: frame.height(),
-                        expected_width: self.width,
-                        expected_height: self.height,
-                    };
-                    pp_error!(self, "{error}");
-                    return Err(error.into());
-                }
-
-                let (texture_raw, index) =
-                    d3d11va_texture(&frame).ok_or(D3d11DownloadError::InvalidD3d11Frame)?;
-                // SAFETY: `texture_raw` is a borrowed raw `ID3D11Texture2D*`
-                // — still owned by `frame`'s own buffer reference, not by
-                // us. `.clone()` (`AddRef`) gives us an independently
-                // ref-counted handle, valid for the rest of this call.
-                let texture = unsafe {
-                    ID3D11Texture2D::from_raw_borrowed(&texture_raw)
-                        .expect("D3d11 frame's texture pointer must not be null")
-                        .clone()
-                };
-
-                // SAFETY: `texture` is a live cloned COM interface and
-                // `GetDevice` returns an owned reference to its creator.
-                let texture_device =
-                    unsafe { texture.GetDevice() }.map_err(D3d11DownloadError::from)?;
-                if texture_device.as_raw() != self.device.as_raw() {
-                    pp_error!(self, "device mismatch");
-                    return Err(D3d11DownloadError::DeviceMismatch.into());
-                }
-
-                let mut desc = D3D11_TEXTURE2D_DESC::default();
-                // SAFETY: `desc` is a live out-parameter for the live texture.
-                unsafe { texture.GetDesc(&mut desc) };
-                if desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM {
-                    pp_error!(self, "unsupported texture format: {:?}", desc.Format);
-                    return Err(D3d11DownloadError::UnsupportedTextureFormat(desc.Format).into());
-                }
-                if desc.Width < self.width || desc.Height < self.height {
-                    let error = D3d11DownloadError::TextureTooSmall {
-                        actual_width: desc.Width,
-                        actual_height: desc.Height,
-                        expected_width: self.width,
-                        expected_height: self.height,
-                    };
-                    pp_error!(self, "{error}");
-                    return Err(error.into());
-                }
-                if index < 0 || index as u64 >= u64::from(desc.ArraySize) {
-                    let error = D3d11DownloadError::InvalidArrayIndex {
-                        index,
-                        array_size: desc.ArraySize,
-                    };
-                    pp_error!(self, "{error}");
-                    return Err(error.into());
-                }
-                let source_subresource = (index as u32) * desc.MipLevels;
-
-                let mut cpu_frame = self
-                    .download(&texture, source_subresource)
-                    .inspect_err(|error| pp_error!(self, "GPU download failed: {error}"))
-                    .map_err(D3d11DownloadError::from)?;
-                cpu_frame.set_pts(frame.pts());
-                cpu_frame.set_color_space(frame.color_space());
-                cpu_frame.set_color_range(frame.color_range());
-
-                self.pad.push(MediaBuffer::Video(Arc::new(cpu_frame)))
+                let downloaded = self.transform(&frame)?;
+                self.pad.push(MediaBuffer::Video(downloaded))
             }
             MediaBuffer::Eos => self.pad.push(MediaBuffer::Eos),
             MediaBuffer::Packet(_) => {
@@ -377,9 +323,102 @@ impl Sink for D3d11Download {
     }
 
     fn control(&mut self, msg: ControlMsg) -> Result<()> {
-        // Nothing local to react to — a pure per-frame GPU->CPU transfer,
-        // same reasoning as `D3d11Upload::control`.
+        // Nothing local to react to beyond the cached download — a pure
+        // per-frame GPU->CPU transfer, same reasoning as
+        // `D3d11Upload::control`.
+        if matches!(msg, ControlMsg::Flush | ControlMsg::Stop) {
+            self.repeated.clear();
+        }
         self.pad.control(msg)
+    }
+}
+
+impl PerFrameTransform for D3d11Download {
+    fn repeated(&mut self) -> &mut RepeatedOutput {
+        &mut self.repeated
+    }
+
+    fn frame_ref_failed(&self, code: i32) -> crate::error::Error {
+        pp_error!(self, "av_frame_ref failed: {code}");
+        D3d11DownloadError::FrameRef(code).into()
+    }
+
+    fn produce(
+        &mut self,
+        frame: &ffmpeg::frame::Video,
+    ) -> Result<UnboundObjectPoolRef<ffmpeg::frame::Video>> {
+        if frame.format() != ffmpeg::format::Pixel::D3D11 {
+            let format = frame.format();
+            pp_error!(self, "unsupported pixel format: {format:?}");
+            return Err(D3d11DownloadError::UnsupportedFormat(format).into());
+        }
+        if frame.width() != self.width || frame.height() != self.height {
+            let error = D3d11DownloadError::DimensionMismatch {
+                actual_width: frame.width(),
+                actual_height: frame.height(),
+                expected_width: self.width,
+                expected_height: self.height,
+            };
+            pp_error!(self, "{error}");
+            return Err(error.into());
+        }
+
+        let (texture_raw, index) =
+            d3d11va_texture(frame).ok_or(D3d11DownloadError::InvalidD3d11Frame)?;
+        // SAFETY: `texture_raw` is a borrowed raw `ID3D11Texture2D*`
+        // — still owned by `frame`'s own buffer reference, not by
+        // us. `.clone()` (`AddRef`) gives us an independently
+        // ref-counted handle, valid for the rest of this call.
+        let texture = unsafe {
+            ID3D11Texture2D::from_raw_borrowed(&texture_raw)
+                .expect("D3d11 frame's texture pointer must not be null")
+                .clone()
+        };
+
+        // SAFETY: `texture` is a live cloned COM interface and
+        // `GetDevice` returns an owned reference to its creator.
+        let texture_device = unsafe { texture.GetDevice() }.map_err(D3d11DownloadError::from)?;
+        if texture_device.as_raw() != self.device.as_raw() {
+            pp_error!(self, "device mismatch");
+            return Err(D3d11DownloadError::DeviceMismatch.into());
+        }
+
+        let mut desc = D3D11_TEXTURE2D_DESC::default();
+        // SAFETY: `desc` is a live out-parameter for the live texture.
+        unsafe { texture.GetDesc(&mut desc) };
+        if desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM {
+            pp_error!(self, "unsupported texture format: {:?}", desc.Format);
+            return Err(D3d11DownloadError::UnsupportedTextureFormat(desc.Format).into());
+        }
+        if desc.Width < self.width || desc.Height < self.height {
+            let error = D3d11DownloadError::TextureTooSmall {
+                actual_width: desc.Width,
+                actual_height: desc.Height,
+                expected_width: self.width,
+                expected_height: self.height,
+            };
+            pp_error!(self, "{error}");
+            return Err(error.into());
+        }
+        if index < 0 || index as u64 >= u64::from(desc.ArraySize) {
+            let error = D3d11DownloadError::InvalidArrayIndex {
+                index,
+                array_size: desc.ArraySize,
+            };
+            pp_error!(self, "{error}");
+            return Err(error.into());
+        }
+        let source_subresource = (index as u32) * desc.MipLevels;
+
+        let mut cpu_frame = self
+            .download(&texture, source_subresource)
+            .inspect_err(|error| pp_error!(self, "GPU download failed: {error}"))
+            .map_err(D3d11DownloadError::from)?;
+        cpu_frame.set_pts(frame.pts());
+        cpu_frame.set_color_space(frame.color_space());
+        cpu_frame.set_color_range(frame.color_range());
+
+        Ok(cpu_frame)
     }
 }
 
@@ -423,6 +462,96 @@ mod tests {
     use super::*;
     use crate::platform::windows::d3d11va::wrap_d3d11_texture;
     use crate::test_support::try_d3d11_device;
+
+    /// A compositor with nothing to recompose hands out the picture it
+    /// already composed, and reading it back again would produce the bytes
+    /// already in system memory — the most expensive step in a D3D11 graph,
+    /// paid for nothing. The repeat carries its own timestamp; only the
+    /// pixels are shared.
+    #[test]
+    fn a_repeated_input_is_downloaded_once() {
+        let Some((device, context)) = try_d3d11_device() else {
+            return;
+        };
+        let (width, height) = (4u32, 4u32);
+        let pixels = vec![0x40u8; (width * height * 4) as usize];
+        // SAFETY: the initial-data pointer addresses the live `pixels` buffer
+        // with the exact row pitch and extent in the texture description; the
+        // returned interface is captured in a live out-parameter.
+        let texture = unsafe {
+            let desc = D3D11_TEXTURE2D_DESC {
+                Width: width,
+                Height: height,
+                MipLevels: 1,
+                ArraySize: 1,
+                Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                SampleDesc: DXGI_SAMPLE_DESC {
+                    Count: 1,
+                    Quality: 0,
+                },
+                Usage: D3D11_USAGE_DEFAULT,
+                BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
+                CPUAccessFlags: 0,
+                MiscFlags: 0,
+            };
+            let initial = D3D11_SUBRESOURCE_DATA {
+                pSysMem: pixels.as_ptr() as *const c_void,
+                SysMemPitch: width * 4,
+                SysMemSlicePitch: 0,
+            };
+            let mut texture = None;
+            device
+                .CreateTexture2D(&desc, Some(&initial), Some(&mut texture))
+                .expect("CreateTexture2D failed");
+            texture.expect("CreateTexture2D succeeded without producing a texture")
+        };
+
+        let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
+        let mut source = pool.get();
+        *source = wrap_d3d11_texture(texture, width, height).unwrap();
+        source.set_pts(Some(100));
+        let source = Arc::new(source);
+        let mut repeat = pool.get();
+        // SAFETY: both are live `AVFrame`s and distinct — the slot is the
+        // empty one just taken from the pool.
+        unsafe {
+            assert!(ffmpeg::ffi::av_frame_ref(repeat.as_mut_ptr(), source.as_ptr()) >= 0);
+        }
+        repeat.set_pts(Some(200));
+
+        let mut download = D3d11Download::new("download", &device, context, width, height)
+            .expect("D3d11Download::new should succeed");
+        let received = Arc::new(std::sync::Mutex::new(Vec::new()));
+        download.src_pads()[0].link(Box::new(CapturingSink {
+            received: received.clone(),
+            pp_log: element_pp_log(ElementType::Other, "capture", None),
+        }));
+
+        download
+            .consume(MediaBuffer::Video(source))
+            .expect("download the first frame");
+        download
+            .consume(MediaBuffer::Video(Arc::new(repeat)))
+            .expect("download the repeat");
+
+        let received = received.lock().unwrap();
+        assert_eq!(received.len(), 2, "every tick still produces a frame");
+        let (MediaBuffer::Video(first), MediaBuffer::Video(repeated)) =
+            (&received[0], &received[1])
+        else {
+            panic!("expected Video buffers");
+        };
+        assert_eq!(
+            crate::buffer::picture_id(repeated),
+            crate::buffer::picture_id(first),
+            "an unchanged texture was read back a second time"
+        );
+        assert_eq!(
+            repeated.pts(),
+            Some(200),
+            "a repeat carries this frame's timestamp, not the one it points at"
+        );
+    }
 
     /// Real hardware round trip: build a small BGRA texture directly (the
     /// same shape a `D3d11VideoCompositor` output would have), wrap it as

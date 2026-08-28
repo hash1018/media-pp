@@ -31,7 +31,8 @@ use crate::{
         d3d11::protect_shared_device,
         d3d11va::{d3d11va_texture, wrap_d3d11_texture},
     },
-    pool::UnboundObjectPool,
+    pool::{UnboundObjectPool, UnboundObjectPoolRef},
+    repeat::{PerFrameTransform, RepeatedOutput},
 };
 
 /// Errors specific to `D3d11Scaler`. Converts into the crate-wide `Error`
@@ -45,6 +46,11 @@ pub enum D3d11ScalerError {
     /// The device cannot be shared across a pipeline's threads.
     #[error(transparent)]
     SharedDevice(#[from] D3d11SharedDeviceError),
+
+    /// FFmpeg could not take a second reference to the scale already in
+    /// hand, which is how an unchanged input texture is answered.
+    #[error("failed to reference the previous scale (code {0})")]
+    FrameRef(i32),
 
     /// The input frame is not backed by a D3D11 texture.
     #[error("D3d11Scaler only scales Pixel::D3D11 frames, got {0:?}")]
@@ -263,6 +269,10 @@ pub struct D3d11Scaler {
     /// output texture itself is a fresh allocation per frame, since
     /// downstream may still hold `Arc` clones of the previous one.
     pool: UnboundObjectPool<ffmpeg::frame::Video>,
+    /// The last scale and the texture it was made from, so a producer that
+    /// re-emits an unchanged picture is answered with it instead of another
+    /// output texture and another `Blt` — see [`RepeatedOutput`].
+    repeated: RepeatedOutput,
 }
 
 struct ValidatedInput {
@@ -422,6 +432,7 @@ impl D3d11Scaler {
             processor: None,
             pad,
             pool,
+            repeated: RepeatedOutput::new(),
         })
     }
 
@@ -499,7 +510,10 @@ impl D3d11Scaler {
         })
     }
 
-    fn scale(&mut self, frame: &ffmpeg::frame::Video) -> Result<()> {
+    fn scale(
+        &mut self,
+        frame: &ffmpeg::frame::Video,
+    ) -> Result<UnboundObjectPoolRef<ffmpeg::frame::Video>> {
         let validated = self
             .validate(frame)
             .inspect_err(|error| pp_error!(self, "{error}"))?;
@@ -631,8 +645,25 @@ impl D3d11Scaler {
         // those this was.
         scaled.set_color_space(output_space);
         scaled.set_color_range(output_range);
+        Ok(scaled)
+    }
+}
 
-        self.pad.push(MediaBuffer::Video(Arc::new(scaled)))
+impl PerFrameTransform for D3d11Scaler {
+    fn repeated(&mut self) -> &mut RepeatedOutput {
+        &mut self.repeated
+    }
+
+    fn frame_ref_failed(&self, code: i32) -> crate::error::Error {
+        pp_error!(self, "av_frame_ref failed: {code}");
+        D3d11ScalerError::FrameRef(code).into()
+    }
+
+    fn produce(
+        &mut self,
+        frame: &ffmpeg::frame::Video,
+    ) -> Result<UnboundObjectPoolRef<ffmpeg::frame::Video>> {
+        self.scale(frame)
     }
 }
 
@@ -671,7 +702,13 @@ impl Sink for D3d11Scaler {
 
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         match buf {
-            MediaBuffer::Video(frame) => self.scale(&frame),
+            // The same texture as last time is the same pixels as last time,
+            // and scaling them again produces the surface already in hand —
+            // see [`PerFrameTransform`], which is where that is decided.
+            MediaBuffer::Video(frame) => {
+                let scaled = self.transform(&frame)?;
+                self.pad.push(MediaBuffer::Video(scaled))
+            }
             // Nothing is buffered here — one `Blt` per frame, pushed
             // before `consume` returns — so there is nothing to drain.
             MediaBuffer::Eos => self.pad.push(MediaBuffer::Eos),
@@ -684,8 +721,12 @@ impl Sink for D3d11Scaler {
     }
 
     fn control(&mut self, msg: ControlMsg) -> Result<()> {
-        // Nothing local to react to — a pure per-frame spatial transform,
-        // same reasoning as `CudaScaler::control`.
+        // Nothing local to react to beyond the cached scale — a pure
+        // per-frame spatial transform, same reasoning as
+        // `CudaScaler::control`.
+        if matches!(msg, ControlMsg::Flush | ControlMsg::Stop) {
+            self.repeated.clear();
+        }
         self.pad.control(msg)
     }
 }
@@ -891,6 +932,85 @@ mod tests {
         *slot = wrap_d3d11_texture(texture, width, height).unwrap();
         slot.set_pts(Some(pts));
         MediaBuffer::Video(Arc::new(slot))
+    }
+
+    /// Another `AVFrame` over the same picture, with its own timestamp —
+    /// what a capture with nothing new to show hands over on every tick.
+    fn repeat_of(buffer: &MediaBuffer, pts: i64) -> MediaBuffer {
+        let MediaBuffer::Video(source) = buffer else {
+            panic!("expected a Video buffer");
+        };
+        let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
+        let mut slot = pool.get();
+        // SAFETY: both are live `AVFrame`s and distinct — the slot is the
+        // empty one just taken from the pool.
+        unsafe {
+            assert!(ffmpeg::ffi::av_frame_ref(slot.as_mut_ptr(), source.as_ptr()) >= 0);
+        }
+        slot.set_pts(Some(pts));
+        MediaBuffer::Video(Arc::new(slot))
+    }
+
+    /// The texture a frame's pixels live in.
+    fn texture_of(buffer: &MediaBuffer) -> *mut c_void {
+        let MediaBuffer::Video(frame) = buffer else {
+            panic!("expected a Video buffer");
+        };
+        d3d11va_texture(frame).expect("a D3D11 frame").0
+    }
+
+    /// A capture of a still screen re-emits the picture it already has, and
+    /// scaling it again would produce the surface already in hand — no
+    /// second output texture, no second `Blt`. The repeat carries its own
+    /// timestamp and the tags this element stamps.
+    #[test]
+    fn a_repeated_input_is_scaled_once() {
+        let Some((device, context)) = try_video_device() else {
+            return;
+        };
+        let source = frame(
+            bgra_texture(&device, 16, 16, [20, 40, 60, 255], 1),
+            16,
+            16,
+            100,
+        );
+        let repeat = repeat_of(&source, 200);
+        let mut scaler = D3d11Scaler::new(
+            "scaler",
+            &device,
+            context,
+            D3d11ScalerFormat::Preserve,
+            8,
+            8,
+        )
+        .expect("D3d11Scaler::new should succeed");
+        let received = capture(&mut scaler);
+
+        scaler.consume(source).expect("scale the first frame");
+        scaler.consume(repeat).expect("scale the repeat");
+
+        let received = received.lock().unwrap();
+        assert_eq!(received.len(), 2, "every tick still produces a frame");
+        assert_eq!(
+            texture_of(&received[1]),
+            texture_of(&received[0]),
+            "an unchanged input was scaled a second time"
+        );
+        let (MediaBuffer::Video(first), MediaBuffer::Video(repeated)) =
+            (&received[0], &received[1])
+        else {
+            panic!("expected Video buffers");
+        };
+        assert_eq!(
+            repeated.pts(),
+            Some(200),
+            "a repeat carries this frame's timestamp, not the one it points at"
+        );
+        assert_eq!(
+            (repeated.color_space(), repeated.color_range()),
+            (first.color_space(), first.color_range()),
+            "and the description this element stamped on what it produced"
+        );
     }
 
     /// One flat NV12 GPU frame, built through `D3d11Upload` so the input is
