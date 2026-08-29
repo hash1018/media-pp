@@ -66,6 +66,7 @@ pub enum ElementType {
     /// WebRTC connection driver.
     WebRtcPeer,
     /// Packet timestamp rebase filter.
+    FrameRateLimiter,
     TimestampOrigin,
     /// Video change/rate gate filter.
     ChangeGate,

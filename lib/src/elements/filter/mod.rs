@@ -5,8 +5,9 @@
 //! resampling and gain, chroma keying, and the elements that change *when*
 //! rather than *what* — [`Pacer`], which holds a frame until its presentation
 //! time, [`VideoSynchronizer`], [`ChangeGate`], which forwards a picture only
-//! when it is not the one it forwarded last, and [`TimestampOrigin`], which
-//! moves a branch's timeline back to zero. [`Tee`] is here too, as the one filter
+//! when it is not the one it forwarded last, [`FrameRateLimiter`], which
+//! forwards them at a lower rate than they arrive at, and
+//! [`TimestampOrigin`], which moves a branch's timeline back to zero. [`Tee`] is here too, as the one filter
 //! whose fan-out can change while the pipeline runs.
 //!
 //! Where the same job exists on more than one backend the types are separate
@@ -21,6 +22,7 @@ pub(crate) mod chroma_key;
 pub(crate) mod convert;
 pub(crate) mod decoder;
 mod download;
+mod frame_rate_limiter;
 mod encoder;
 mod pacer;
 pub(crate) mod scaler;
@@ -70,6 +72,7 @@ pub use scaler::{D3d11Scaler, D3d11ScalerError, D3d11ScalerFormat};
 pub use scaler::{D3d12Scaler, D3d12ScalerError};
 pub use scaler::{SwScaler, SwScalerError};
 pub use tee::{Tee, TeeBuilder, TeeHandle};
+pub use frame_rate_limiter::FrameRateLimiter;
 pub use timestamp_origin::TimestampOrigin;
 
 #[cfg(feature = "cuda")]
