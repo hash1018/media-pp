@@ -47,7 +47,7 @@ use crate::{
 };
 
 use crate::{
-    buffer::MediaBuffer,
+    buffer::{MediaBuffer, picture_is_referenced, release_picture},
     bus::{Bus, BusEvent},
     contract::{MediaKind, MemoryDomain, OutputContract, PortContract},
     control::{ControlReceiver, drain_control},
@@ -55,7 +55,7 @@ use crate::{
     elements::VideoFormat,
     error::Result,
     pad::SrcPad,
-    pool::UnboundObjectPool,
+    pool::{UnboundObjectPool, UnboundObjectPoolRef},
     schedule::PeriodicSchedule,
 };
 
@@ -254,6 +254,23 @@ struct Latest {
     /// `false` until the first real (non-empty) frame lands, so `run` can
     /// tell "nothing captured yet" apart from "a genuinely black screen".
     have_frame: bool,
+    /// Bumped every time the PipeWire thread writes a new image into
+    /// `pixels`.
+    ///
+    /// The compositor produces frames on damage while `run` emits at a fixed
+    /// rate, so most ticks of a still desktop find `pixels` holding exactly
+    /// what the last one copied out of it. Comparing this against the count
+    /// behind the picture already being offered is what lets such a tick hand
+    /// that picture out again instead of copying the whole screen a second
+    /// time — see [`PipeWireScreenCaptureSource::emit_frame`].
+    ///
+    /// A counter rather than a flag the reader clears, because the two
+    /// threads write here under the same lock but at unrelated moments: the
+    /// count behind a picture stays meaningful even if a capture lands
+    /// between the copy and the next tick, where a cleared flag would be
+    /// lost. Only the CPU path uses it; GPU mode compares the surface
+    /// itself.
+    captures: u64,
     /// The latest captured CUDA surface, in GPU mode only — `pixels` stays
     /// empty there and this carries the frame instead.
     ///
@@ -509,6 +526,29 @@ pub struct PipeWireScreenCaptureSource {
     /// Reused across every emitted frame — see [`UnboundObjectPool`]'s own
     /// docs on why frames are pooled rather than allocated per push.
     pool: UnboundObjectPool<ffmpeg::frame::Video>,
+    /// The CPU path's wrappers: empty frames pointed at `last_picture`,
+    /// carrying only this tick's own timestamp. The same split GPU mode
+    /// already has between `pool`'s wrappers and the CUDA surface inside
+    /// them — with the picture in system memory, the wrapper is what lets
+    /// several ticks in a row show it under their own `pts`. Unused in GPU
+    /// mode.
+    wrapper_pool: UnboundObjectPool<ffmpeg::frame::Video>,
+    /// The pooled frame the desktop image was last copied into, kept so a
+    /// tick that found nothing newly captured can point a wrapper at it
+    /// instead of copying identical pixels again. `None` before the first
+    /// emission and in GPU mode. Same shape `DxgiCaptureSource` documents
+    /// for its own CPU mode.
+    last_picture: Option<Arc<UnboundObjectPoolRef<ffmpeg::frame::Video>>>,
+    /// The `Latest::captures` count behind `last_picture`, so a tick can tell
+    /// whether producing the picture again would give different pixels.
+    picture_captures: u64,
+    /// Pictures a wrapper already pushed downstream may still be pointing at.
+    /// A wrapper shares the picture's *buffer*, not its pool slot, so a
+    /// replaced picture waits here until nothing but the frame itself
+    /// references its pixels — otherwise the next copy would write over what
+    /// a frame still queued downstream is showing. See
+    /// [`picture_is_referenced`].
+    retired: Vec<Arc<UnboundObjectPoolRef<ffmpeg::frame::Video>>>,
     latest: Arc<Mutex<Latest>>,
     /// Ends the PipeWire thread's main loop. `Option` only so `Drop` can take
     /// it; always `Some` while this element is alive.
@@ -610,6 +650,7 @@ impl PipeWireScreenCaptureSource {
             unmappable_buffers: 0,
             short_buffers: 0,
             have_frame: false,
+            captures: 0,
             #[cfg(feature = "cuda")]
             frame: None,
             error: None,
@@ -738,6 +779,14 @@ impl PipeWireScreenCaptureSource {
                     move || ffmpeg::frame::Video::new(ffmpeg::format::Pixel::BGRA, width, height),
                     |_| {},
                 ),
+                wrapper_pool: UnboundObjectPool::new(
+                    0,
+                    ffmpeg::frame::Video::empty,
+                    release_picture,
+                ),
+                last_picture: None,
+                picture_captures: 0,
+                retired: Vec::new(),
                 latest,
                 terminate: Some(terminate_tx),
                 worker: Some(worker),
@@ -764,24 +813,41 @@ impl PipeWireScreenCaptureSource {
         ffmpeg::Rational::new(1, self.fps as i32)
     }
 
-    /// Copies the latest captured image into a fresh pooled frame.
+    /// Offers the latest captured image under this tick's own `pts`, copying
+    /// it out of the shared buffer only when the PipeWire thread has captured
+    /// since the last copy.
     ///
-    /// Copying rather than sharing is what lets each emitted frame carry its
-    /// own correctly-incrementing `pts` even when several emissions in a row
-    /// show identical content — an `Arc`-shared frame can't have its `pts`
-    /// rewritten in place once downstream might hold a clone. Same reasoning
-    /// `DxgiCaptureSource::emit_frame_cpu` documents.
+    /// The compositor produces frames on damage and `run` emits at a fixed
+    /// rate, so on a still desktop most ticks find the image they already
+    /// copied — one measured run captured a single frame in fourteen seconds
+    /// and had thirty ticks a second to answer with it. Such a tick points an
+    /// empty wrapper at the picture already copied instead of moving the
+    /// whole screen again, which is also what lets everything downstream
+    /// recognise the repeat: `SwScaler`, `SwVideoCompositor` and `ChangeGate`
+    /// compare which buffer the pixels live in, and a fresh copy every tick
+    /// defeats all three. Same shape `DxgiCaptureSource::emit_frame_cpu`
+    /// documents for its own CPU mode.
+    ///
+    /// The wrapper is what carries the timestamp: an emitted frame's `pts`
+    /// cannot be rewritten in place once downstream might hold a clone, so
+    /// each tick needs an `AVFrame` of its own even when the pixels are the
+    /// ones the last tick showed.
     ///
     /// Returns `None` when nothing has been captured yet, so `run` can skip
     /// the tick instead of pushing an uninitialised frame.
-    fn emit_frame(&mut self) -> Option<crate::pool::UnboundObjectPoolRef<ffmpeg::frame::Video>> {
+    fn emit_frame(&mut self) -> Option<UnboundObjectPoolRef<ffmpeg::frame::Video>> {
         #[cfg(feature = "cuda")]
         if self.gpu {
             return self.emit_gpu_frame();
         }
-        let (src_width, src_height, ready) = {
+        let (src_width, src_height, ready, captures) = {
             let latest = self.latest.lock().ok()?;
-            (latest.width, latest.height, latest.have_frame)
+            (
+                latest.width,
+                latest.height,
+                latest.have_frame,
+                latest.captures,
+            )
         };
         if !ready || src_width == 0 || src_height == 0 {
             return None;
@@ -813,7 +879,57 @@ impl PipeWireScreenCaptureSource {
                 },
                 |_| {},
             );
+            // A picture of the old size cannot be offered again at the new
+            // one, and its pool is gone with it — but a wrapper already
+            // pushed downstream may still be showing those pixels, so it goes
+            // to `retired` like any other replacement.
+            if let Some(previous) = self.last_picture.take() {
+                self.retired.push(previous);
+            }
         }
+
+        if self.last_picture.is_none() || captures != self.picture_captures {
+            self.copy_picture(src_width, src_height, captures)?;
+        }
+
+        let mut wrapper = self.wrapper_pool.get();
+        let picture = self
+            .last_picture
+            .as_ref()
+            .expect("copy_picture leaves a picture behind");
+        // SAFETY: `ptr` is the pooled wrapper's own `AVFrame`, unreferenced
+        // before it is given a new one, and the source is the picture this
+        // element holds the pooled reference to — both live, and distinct
+        // from each other.
+        unsafe {
+            let ptr = wrapper.as_mut_ptr();
+            ffi::av_frame_unref(ptr);
+            if ffi::av_frame_ref(ptr, picture.as_ptr()) < 0 {
+                return None;
+            }
+        }
+        // After the reference, which copies the picture's own properties over
+        // whatever the wrapper carried: the timestamp is this tick's, the
+        // colour description the picture's.
+        wrapper.set_pts(Some(self.frame_index));
+        self.frame_index += 1;
+        Some(wrapper)
+    }
+
+    /// Copies the shared buffer's current image into a frame the pool
+    /// considers free, and makes it the picture emitted from here on.
+    ///
+    /// Never over the previous picture: that one is still what earlier
+    /// wrappers are showing.
+    fn copy_picture(&mut self, src_width: u32, src_height: u32, captures: u64) -> Option<()> {
+        // The picture being replaced may still be under a wrapper pushed
+        // downstream, so it waits in `retired` rather than going straight
+        // back to the pool — see that field's own docs.
+        if let Some(previous) = self.last_picture.take() {
+            self.retired.push(previous);
+        }
+        self.retired
+            .retain(|picture| picture_is_referenced(picture));
 
         let row_bytes = src_width as usize * 4;
         let mut frame = self.pool.get();
@@ -836,11 +952,11 @@ impl PipeWireScreenCaptureSource {
                 return None;
             }
         }
-        frame.set_pts(Some(self.frame_index));
         frame.set_color_space(ffmpeg::color::Space::RGB);
         frame.set_color_range(ffmpeg::color::Range::JPEG);
-        self.frame_index += 1;
-        Some(frame)
+        self.last_picture = Some(Arc::new(frame));
+        self.picture_captures = captures;
+        Some(())
     }
 
     /// Takes a new reference to the latest captured CUDA surface and stamps
@@ -854,9 +970,7 @@ impl PipeWireScreenCaptureSource {
     /// still referenced — so an already-pushed frame's pixels cannot change
     /// under whatever is still reading them.
     #[cfg(feature = "cuda")]
-    fn emit_gpu_frame(
-        &mut self,
-    ) -> Option<crate::pool::UnboundObjectPoolRef<ffmpeg::frame::Video>> {
+    fn emit_gpu_frame(&mut self) -> Option<UnboundObjectPoolRef<ffmpeg::frame::Video>> {
         let mut frame = self.pool.get();
         let (src_width, src_height) = {
             let latest = self.latest.lock().ok()?;
@@ -1462,6 +1576,10 @@ fn run_pipewire(
                     latest.width = width;
                     latest.height = height;
                     latest.have_frame = false;
+                    // The buffer is a different one now, so a picture copied
+                    // out of the old one must not be offered again as though
+                    // nothing had happened.
+                    latest.captures += 1;
                 }
 
                 // Constrain the buffer negotiation to memory this element can
@@ -1605,6 +1723,10 @@ fn run_pipewire(
                     height as usize,
                 ) {
                     latest.have_frame = true;
+                    // Only on a whole image: the count is what says the
+                    // pixels differ from the ones already copied out, and a
+                    // short chunk left them alone.
+                    latest.captures += 1;
                 } else {
                     // The chunk described less than a frame; the previous
                     // image is left alone rather than half-overwritten.
@@ -1877,6 +1999,8 @@ fn serialize_object(object: spa::pod::Object) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::buffer::picture_id;
 
     /// Builds a padded source: every row is `row_bytes` of `fill` followed by
     /// `pad` bytes of `0xAA`, so a repack that reads the padding is visible in
@@ -2304,6 +2428,161 @@ mod tests {
         assert_eq!(options.source_kind, CaptureSourceKind::Monitor);
         assert!(!options.include_cursor);
         assert!(options.restore_token.is_none());
+    }
+
+    /// A source with no PipeWire thread behind it.
+    ///
+    /// `emit_frame` reads nothing but `latest`, and a test can write that
+    /// directly — which is what makes the repeat path testable at all: opening
+    /// a real one needs the portal, and therefore a user answering a dialog.
+    /// Everything `Drop` touches is `None`.
+    fn offline_source(width: u32, height: u32) -> PipeWireScreenCaptureSource {
+        let name = "offline";
+        PipeWireScreenCaptureSource {
+            name: name.into(),
+            pp_log: element_pp_log(ElementType::PipeWireScreenCaptureSource, name, None),
+            pad: SrcPad::with_contract(
+                format!("{name}_src"),
+                OutputContract::Fixed(PortContract::frame(
+                    MediaKind::VideoFrame,
+                    MemoryDomain::System,
+                )),
+            ),
+            width,
+            height,
+            fps: 30,
+            frame_interval: Duration::from_secs_f64(1.0 / 30.0),
+            frame_index: 0,
+            pool: UnboundObjectPool::new(
+                0,
+                move || ffmpeg::frame::Video::new(ffmpeg::format::Pixel::BGRA, width, height),
+                |_| {},
+            ),
+            wrapper_pool: UnboundObjectPool::new(
+                0,
+                ffmpeg::frame::Video::empty,
+                release_picture,
+            ),
+            last_picture: None,
+            picture_captures: 0,
+            retired: Vec::new(),
+            latest: Arc::new(Mutex::new(Latest {
+                pixels: vec![0; width as usize * height as usize * 4],
+                width,
+                height,
+                unmappable_buffers: 0,
+                short_buffers: 0,
+                have_frame: false,
+                captures: 0,
+                #[cfg(feature = "cuda")]
+                frame: None,
+                error: None,
+            })),
+            terminate: None,
+            worker: None,
+            watching: Arc::new(AtomicBool::new(false)),
+            session_watcher: None,
+            #[cfg(feature = "cuda")]
+            gpu: false,
+        }
+    }
+
+    /// What the PipeWire thread does when a whole image arrives: fill the
+    /// shared buffer and say a capture happened.
+    fn capture_into(source: &PipeWireScreenCaptureSource, fill: u8) {
+        let mut latest = source.latest.lock().unwrap();
+        latest.pixels.fill(fill);
+        latest.have_frame = true;
+        latest.captures += 1;
+    }
+
+    /// The compositor produces frames on damage, so most ticks of a still
+    /// desktop have nothing new to copy. Copying anyway would also defeat
+    /// every downstream repeat check, which compares the buffer the pixels
+    /// live in.
+    #[test]
+    fn an_unchanged_tick_offers_the_picture_it_already_copied() {
+        let mut source = offline_source(16, 8);
+        capture_into(&source, 0x11);
+
+        let first = source.emit_frame().expect("a captured frame");
+        let second = source.emit_frame().expect("a repeat of it");
+
+        assert_eq!(
+            picture_id(&first),
+            picture_id(&second),
+            "a tick with nothing newly captured copied the screen again"
+        );
+        assert_eq!(
+            (first.pts(), second.pts()),
+            (Some(0), Some(1)),
+            "each tick carries its own timestamp, repeat or not"
+        );
+    }
+
+    #[test]
+    fn a_tick_after_a_capture_copies_the_new_pixels() {
+        let mut source = offline_source(16, 8);
+        capture_into(&source, 0x11);
+        let first = source.emit_frame().expect("a captured frame");
+
+        capture_into(&source, 0x22);
+        let second = source.emit_frame().expect("the new capture");
+
+        assert_ne!(
+            picture_id(&first),
+            picture_id(&second),
+            "a new capture was offered as the picture already copied"
+        );
+        assert_eq!(second.data(0)[0], 0x22, "the new pixels were not copied");
+    }
+
+    /// A wrapper shares the picture's *buffer*, not its pool slot, so the
+    /// slot must stay out of the pool while a wrapper downstream is still
+    /// showing those pixels — otherwise the next copy writes over them.
+    /// Reproduces on the very next tick, with no queue behind the element.
+    #[test]
+    fn a_picture_a_repeat_is_still_showing_is_never_copied_over() {
+        let mut source = offline_source(16, 8);
+        capture_into(&source, 0x11);
+        let held = source.emit_frame().expect("a captured frame");
+
+        capture_into(&source, 0x22);
+        let _next = source.emit_frame().expect("the new capture");
+
+        assert_eq!(
+            held.data(0)[0],
+            0x11,
+            "copied over the picture a frame still in flight is showing"
+        );
+    }
+
+    /// A renegotiation replaces the shared buffer, so the picture copied out
+    /// of the old one is not what the next tick should offer — even at the
+    /// same size, where nothing else would say so.
+    #[test]
+    fn a_renegotiated_buffer_is_copied_rather_than_repeated() {
+        let mut source = offline_source(16, 8);
+        capture_into(&source, 0x11);
+        let first = source.emit_frame().expect("a captured frame");
+
+        // What `param_changed` does at the same size: a fresh buffer, nothing
+        // captured into it yet, and a count that says so.
+        {
+            let mut latest = source.latest.lock().unwrap();
+            latest.pixels = vec![0; 16 * 8 * 4];
+            latest.have_frame = false;
+            latest.captures += 1;
+        }
+        assert!(
+            source.emit_frame().is_none(),
+            "an empty buffer was emitted as a picture"
+        );
+
+        capture_into(&source, 0x33);
+        let second = source.emit_frame().expect("the first capture after it");
+        assert_ne!(picture_id(&first), picture_id(&second));
+        assert_eq!(second.data(0)[0], 0x33);
     }
 
     #[test]
