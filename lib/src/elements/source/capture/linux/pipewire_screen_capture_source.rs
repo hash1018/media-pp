@@ -763,7 +763,11 @@ impl PipeWireScreenCaptureSource {
                 // `CudaUpload`.
                 #[cfg(feature = "cuda")]
                 pool: if gpu {
-                    UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {})
+                    // `release_picture` rather than a no-op: an idle wrapper
+                    // that kept its reference would pin a CUDA surface out of
+                    // the frames context the PipeWire thread allocates the
+                    // *next* capture from, for as long as it sat unused.
+                    UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, release_picture)
                 } else {
                     UnboundObjectPool::new(
                         0,

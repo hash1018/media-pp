@@ -11,7 +11,9 @@
 
 use ffmpeg_next::{self as ffmpeg, ffi};
 
-use crate::{elements::filter::is_codec_drain_boundary, pool::UnboundObjectPool};
+use crate::{
+    buffer::release_picture, elements::filter::is_codec_drain_boundary, pool::UnboundObjectPool,
+};
 
 use super::cuda_scaler::{CudaScalerError, CudaScalerInterp};
 
@@ -88,7 +90,10 @@ impl CudaScaleGraph {
         Self {
             interp,
             state: None,
-            pool: UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {}),
+            // `release_picture` rather than a no-op: a wrapper that held its
+            // reference while sitting in the pool would keep a surface out of
+            // `scale_cuda`'s own output pool for as long as it sat unused.
+            pool: UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, release_picture),
         }
     }
 
@@ -305,9 +310,9 @@ impl CudaScaleGraph {
             // it. `sink` is the live buffersink read out just above.
             let code = unsafe {
                 let ptr = output.as_mut_ptr();
-                // The pooled wrapper may still reference the previous frame's
-                // surface; releasing it here is what returns that surface to
-                // the filter's pool rather than leaking it.
+                // The pool already released whatever this wrapper held when it
+                // came back; this is what makes a wrapper that never went
+                // anywhere — one a failed pull left behind — safe to reuse.
                 ffi::av_frame_unref(ptr);
                 ffi::av_buffersink_get_frame(sink, ptr)
             };

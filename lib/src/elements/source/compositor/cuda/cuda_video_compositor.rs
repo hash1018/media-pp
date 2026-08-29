@@ -21,7 +21,7 @@ use super::super::video_layer::{
     VideoRect, layer_geometry,
 };
 use crate::{
-    buffer::{MediaBuffer, picture_id},
+    buffer::{MediaBuffer, picture_id, release_picture},
     bus::{Bus, BusEvent},
     color::Color,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
@@ -694,7 +694,14 @@ impl CudaVideoCompositor {
                 output_pool: UnboundObjectPool::new(
                     OUTPUT_POOL_SIZE,
                     ffmpeg::frame::Video::empty,
-                    |_| {},
+                    // `release_picture` rather than a no-op: a wrapper that
+                    // held its reference while sitting in the pool would keep
+                    // a surface out of `hw_frames_ctx`'s own pool for no
+                    // reason, forcing an allocation the next composite should
+                    // have been able to reuse. Both users unref before taking
+                    // a new surface anyway, so this only moves that release
+                    // to the moment the wrapper comes back.
+                    release_picture,
                 ),
                 pad: SrcPad::with_contract(
                     format!("{name}_src"),
