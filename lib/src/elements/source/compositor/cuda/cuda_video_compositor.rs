@@ -570,6 +570,47 @@ impl Composed {
 /// hiding, or reordering a layer costs nothing at all — only a change in a
 /// layer's *scaled size* rebuilds anything.
 ///
+/// # Every layer is scaled before any is drawn
+///
+/// The two halves above cannot be interleaved, and this is the reason a
+/// frame is composed in two passes with one wait between them rather than
+/// one layer at a time.
+///
+/// `scale_cuda` is libavfilter's, and libavfilter issues it on the stream in
+/// FFmpeg's own device context — created `CU_STREAM_NON_BLOCKING`, so it is
+/// ordered against nothing else. The copy that places the result is this
+/// crate's, issued as a plain `cuMemcpy2D` on the legacy default stream,
+/// which a non-blocking stream does not synchronize with. Drawn one layer at
+/// a time, the copy is therefore free to read the scaler's destination
+/// *before the scaler has written it* — handing on whatever that surface
+/// held on its last trip through the pool, which is a picture some ten
+/// frames old.
+///
+/// It is a race, so it does not fail every frame or reproducibly: measured
+/// on a 60 fps desktop capture it struck about 1.4 times a second with two
+/// layers and 0.2 with one, rising with load, and each strike put one stale
+/// frame into the output. That is subtle enough to read as judder rather
+/// than as a defect, which is why it stood so long.
+///
+/// The wait itself is `cuCtxSynchronize`, because the ordering cannot be
+/// expressed any more cheaply from here: pairing a CUDA event across the two
+/// streams needs FFmpeg's `CUstream`, which lives in `AVCUDADeviceContext` —
+/// a struct `ffmpeg-sys-next` does not bind and that this crate refuses to
+/// mirror by hand, for the reasons [`crate::elements::CudaDevice`] gives.
+/// Scaling every layer first turns what would be one wait per layer into one
+/// per frame, which is the cost this design already carried for the handoff
+/// below.
+///
+/// # One more wait before it is handed on
+///
+/// The composed surface is read by whatever comes next — an encoder, a
+/// renderer — on FFmpeg's stream again, which nothing here has ordered
+/// against either. So a frame ends with a second `cuCtxSynchronize`,
+/// unconditionally: a scene whose layers are all opaque issues no blend
+/// kernel at all, only copies, and it is tempting to conclude nothing needs
+/// waiting for. The background fill in front of them is a kernel, and the
+/// reader has no way to know whether it or the copies have landed.
+///
 /// # NV12 only
 ///
 /// Inputs and output are NV12 CUDA surfaces. A capture produces BGRA and
@@ -862,17 +903,10 @@ impl CudaVideoCompositor {
             return self.repeat_frame();
         }
 
-        let mut output = self.output_frame()?;
-        let canvas =
-            Nv12Surface::from_frame(&output).ok_or(CudaVideoCompositorError::MissingPlane)?;
-        self.driver.fill_nv12(
-            canvas,
-            self.options.width,
-            self.options.height,
-            self.options.background,
-        )?;
-
-        let mut blended = false;
+        // Every layer is scaled first and drawn afterwards, with one wait in
+        // between — see [`CudaVideoCompositor`] on why the two cannot be
+        // interleaved.
+        let mut layers = Vec::with_capacity(snapshots.len());
         for snapshot in snapshots {
             if !snapshot.layer.visible || snapshot.layer.opacity == 0.0 {
                 continue;
@@ -909,19 +943,40 @@ impl CudaVideoCompositor {
                 // it held this one back for any reason.
                 continue;
             };
+            // Held rather than drawn from here: the surface behind it is not
+            // finished yet, and the frame has to stay alive until it is.
+            layers.push((scaled, placement, snapshot.layer.opacity));
+        }
+
+        // Everything `scale_cuda` was asked for is now queued. This is the
+        // one wait that makes all of it readable by what draws below.
+        if !layers.is_empty() {
+            self.driver.synchronize()?;
+        }
+
+        let mut output = self.output_frame()?;
+        let canvas =
+            Nv12Surface::from_frame(&output).ok_or(CudaVideoCompositorError::MissingPlane)?;
+        self.driver.fill_nv12(
+            canvas,
+            self.options.width,
+            self.options.height,
+            self.options.background,
+        )?;
+
+        for (scaled, placement, opacity) in &layers {
             let layer_surface =
-                Nv12Surface::from_frame(&scaled).ok_or(CudaVideoCompositorError::MissingPlane)?;
-            if snapshot.layer.opacity >= 1.0 {
+                Nv12Surface::from_frame(scaled).ok_or(CudaVideoCompositorError::MissingPlane)?;
+            if *opacity >= 1.0 {
                 // A copy moves whole rows at the memory system's own rate,
                 // where the kernel reads, mixes, and writes every byte. Worth
                 // keeping apart, since opaque is the common case.
                 self.driver
                     .blit_nv12(layer_surface, canvas, placement.region)?;
             } else {
-                let alpha = (snapshot.layer.opacity * 255.0).round().clamp(0.0, 255.0) as u8;
+                let alpha = (opacity * 255.0).round().clamp(0.0, 255.0) as u8;
                 self.driver
                     .blend_nv12(layer_surface, canvas, placement.region, alpha)?;
-                blended = true;
             }
         }
 
@@ -958,15 +1013,14 @@ impl CudaVideoCompositor {
                 text.color,
                 (opacity * 255.0).round().clamp(0.0, 255.0) as u8,
             )?;
-            blended = true;
         }
 
-        if blended {
-            // Blends are kernel launches, so they are asynchronous; a copy is
-            // not. One wait per frame is what makes the finished surface safe
-            // to hand downstream.
-            self.driver.synchronize()?;
-        }
+        // Unconditional: what is handed downstream is read on FFmpeg's own
+        // stream, which nothing above has ordered against this one. A frame
+        // whose layers were all opaque — every blit a copy, no blend kernel
+        // at all — still has the background fill in front of it, and the
+        // reader has no way to know either has landed.
+        self.driver.synchronize()?;
         // Held so the next tick can tell whether it has anything to draw,
         // and so the surface it may hand out again stays out of the pool.
         let mut kept = ffmpeg::frame::Video::empty();
