@@ -60,6 +60,11 @@ const POLL_GRANULARITY: Duration = Duration::from_millis(100);
 /// arrives whenever it arrives.
 const SESSION_POLL_GRANULARITY: Duration = Duration::from_millis(250);
 
+/// How long `Drop` waits for the portal to acknowledge `Close`. Generous for
+/// what is one D-Bus round trip, and finite because this runs inside `Drop` —
+/// see [`close_session`].
+const SESSION_CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// Errors specific to `PipeWireScreenCaptureSource`. Converts into the crate-wide
 /// `Error` via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
@@ -550,6 +555,11 @@ pub struct PipeWireScreenCaptureSource {
     /// Watches the portal session for the one signal that distinguishes a
     /// vanished source from an idle screen — see `watch_session_closed`.
     session_watcher: Option<JoinHandle<()>>,
+    /// The portal session, shared with `session_watcher` so that `Drop` still
+    /// holds one after that thread has gone — which is what lets it be closed
+    /// explicitly. See [`close_session`] on why nothing else may be
+    /// listening when that happens.
+    session: Option<Arc<ashpd::desktop::Session<ashpd::desktop::screencast::Screencast>>>,
     /// Whether captured frames are CUDA surfaces rather than CPU pixels.
     /// Fixed at construction by which of `open`/`open_gpu` was used.
     #[cfg(feature = "cuda")]
@@ -629,8 +639,10 @@ impl PipeWireScreenCaptureSource {
         let mut cast = portal_handshake(&options)?;
         let restore_token = cast.restore_token.clone();
         // Taken out before `cast` moves into the PipeWire thread: the session
-        // is watched here, the stream is opened there.
-        let session = cast.session.take();
+        // is watched here, the stream is opened there. Shared rather than
+        // moved into the watcher, so `Drop` can close it once that thread has
+        // finished — see [`close_session`].
+        let session = cast.session.take().map(Arc::new);
         let captured = cast.captured;
 
         let latest = Arc::new(Mutex::new(Latest {
@@ -713,8 +725,12 @@ impl PipeWireScreenCaptureSource {
         };
 
         let watching = Arc::new(AtomicBool::new(true));
-        let session_watcher =
-            watch_session_closed(session, captured, latest.clone(), watching.clone());
+        let session_watcher = watch_session_closed(
+            session.clone(),
+            captured,
+            latest.clone(),
+            watching.clone(),
+        );
 
         let fps = options.fps.max(1); // a `0` fps is nonsensical; treat it as 1 rather than dividing by zero
         // Same `1 / fps` convention as `PipeWireScreenCaptureSource::time_base`
@@ -787,6 +803,7 @@ impl PipeWireScreenCaptureSource {
                 worker: Some(worker),
                 watching,
                 session_watcher,
+                session,
                 #[cfg(feature = "cuda")]
                 gpu,
             },
@@ -1045,7 +1062,54 @@ impl Drop for PipeWireScreenCaptureSource {
         {
             pp_warn!(self, "the portal session watcher panicked");
         }
+        // Last, and only once the watcher has joined — see `close_session`.
+        if let Some(session) = self.session.take()
+            && let Err(error) = close_session(&session)
+        {
+            pp_warn!(self, "could not close the portal session: {error}");
+        }
     }
+}
+
+/// Ends the portal session this element opened.
+///
+/// Nothing else does. `ashpd::desktop::Session` has no `Drop` of its own, only
+/// this call, and every proxy in the process shares one cached `zbus`
+/// connection (`ashpd`'s `static SESSION: OnceLock<Connection>`) — so dropping
+/// the last handle closes no connection and the portal keeps the session, and
+/// its "screen is being shared" indicator, for as long as the process lives. A
+/// caller that opens and drops captures over a long run accumulates one per
+/// capture.
+///
+/// # Only once nothing is listening
+///
+/// This makes the portal emit the session's `Closed` signal, which is the very
+/// signal `watch_session_closed` reads as [`CapturedSource::source_gone`]. Call
+/// it while that watcher still runs and the element reports its own teardown as
+/// a vanished source — for a monitor capture, "the captured monitor is gone",
+/// invented out of nothing. `Drop` therefore clears `watching` and joins the
+/// watcher before reaching here, which is also why the session is shared rather
+/// than owned by that thread: after the join there would otherwise be no handle
+/// left to close.
+///
+/// Bounded rather than awaited outright: this runs inside `Drop`, and a portal
+/// that never answers must not wedge a caller's shutdown. Giving up leaves
+/// exactly the session that would have leaked anyway.
+fn close_session(
+    session: &ashpd::desktop::Session<ashpd::desktop::screencast::Screencast>,
+) -> std::result::Result<(), String> {
+    pollster::block_on(async {
+        let close = std::pin::pin!(session.close());
+        let deadline = std::pin::pin!(async_io::Timer::after(SESSION_CLOSE_TIMEOUT));
+        match futures_util::future::select(close, deadline).await {
+            futures_util::future::Either::Left((result, _)) => {
+                result.map_err(|error| error.to_string())
+            }
+            futures_util::future::Either::Right(_) => {
+                Err(format!("the portal did not answer in {SESSION_CLOSE_TIMEOUT:?}"))
+            }
+        }
+    })
 }
 
 impl Element for PipeWireScreenCaptureSource {
@@ -1425,7 +1489,7 @@ fn repack_rows(
 /// Returns `None` when there is no session to watch, which leaves the element
 /// reporting stalls exactly as before rather than failing to open.
 fn watch_session_closed(
-    session: Option<ashpd::desktop::Session<ashpd::desktop::screencast::Screencast>>,
+    session: Option<Arc<ashpd::desktop::Session<ashpd::desktop::screencast::Screencast>>>,
     captured: CapturedSource,
     latest: Arc<Mutex<Latest>>,
     watching: Arc<AtomicBool>,
@@ -2609,6 +2673,7 @@ mod tests {
             worker: None,
             watching: Arc::new(AtomicBool::new(false)),
             session_watcher: None,
+            session: None,
             #[cfg(feature = "cuda")]
             gpu: false,
         }

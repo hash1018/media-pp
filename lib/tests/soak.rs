@@ -2318,6 +2318,134 @@ mod pipewire {
     use crate::common::{MIB, Trend, exclusive, iterations, settle, try_restore_token};
     use crate::{Teardown, WARMUP};
 
+    /// Every ScreenCast session **this process** holds open on the portal, by
+    /// object path.
+    ///
+    /// Read from the portal itself rather than from anything this crate
+    /// tracks, because what is being tested is the portal's own view: a
+    /// session it still holds is one still shown as "screen is being shared",
+    /// whatever the process believes.
+    ///
+    /// Filtered by the owning connection's pid, which is the only thing that
+    /// makes this scenario sound. Every gauge in this file is isolated by
+    /// `isolate!` giving the scenario its own process — but the portal's
+    /// session tree is system-wide, and `exclusive()` is an in-process mutex
+    /// that the parent never reaches, so the capture scenarios above really do
+    /// run alongside this one, opening and dropping sessions of their own. The
+    /// portal files each session under the unique name of the connection that
+    /// opened it, and the bus will say which pid owns that name.
+    ///
+    /// This also settles what `ashpd` will not: it opens its connection lazily
+    /// into a private `OnceLock` and never exposes it, so the unique name its
+    /// sessions live under cannot be asked for directly.
+    fn portal_sessions() -> Vec<String> {
+        use ashpd::zbus;
+
+        const ROOT: &str = "/org/freedesktop/portal/desktop/session";
+
+        async fn children(connection: &zbus::Connection, path: &str) -> Vec<String> {
+            let Ok(proxy) = zbus::fdo::IntrospectableProxy::builder(connection)
+                .destination("org.freedesktop.portal.Desktop")
+                .expect("a valid destination")
+                .path(path.to_owned())
+                .expect("a valid path")
+                .build()
+                .await
+            else {
+                return Vec::new();
+            };
+            // A path with no node is not a failure — it is zero children.
+            let Ok(xml) = proxy.introspect().await else {
+                return Vec::new();
+            };
+            xml.split("<node name=\"")
+                .skip(1)
+                .filter_map(|rest| rest.split('"').next())
+                .map(|name| format!("{path}/{name}"))
+                .collect()
+        }
+
+        pollster::block_on(async {
+            let connection = zbus::Connection::session()
+                .await
+                .expect("a session bus to read the portal from");
+            let bus = zbus::fdo::DBusProxy::new(&connection)
+                .await
+                .expect("the bus's own interface");
+            let me = std::process::id();
+
+            let mut sessions = Vec::new();
+            for owner in children(&connection, ROOT).await {
+                // The node name is the owning connection's unique name with
+                // its dots turned into underscores: `1_290` is `:1.290`.
+                let unique = format!(
+                    ":{}",
+                    owner.rsplit('/').next().expect("a non-empty node name").replace('_', ".")
+                );
+                let Ok(name) = zbus::names::BusName::try_from(unique) else {
+                    continue;
+                };
+                // A connection that has gone since the tree was read is not
+                // ours, and asking about it fails rather than answering.
+                if bus.get_connection_unix_process_id(name).await != Ok(me) {
+                    continue;
+                }
+                sessions.extend(children(&connection, &owner).await);
+            }
+            sessions.sort();
+            sessions
+        })
+    }
+
+    /// `ashpd::desktop::Session` has no `Drop` of its own, and every proxy in
+    /// the process shares one cached `zbus` connection — so nothing about
+    /// dropping a capture closes its portal session, and without an explicit
+    /// `Close` the portal keeps it, and its "screen is being shared"
+    /// indicator, until the process exits.
+    ///
+    /// A cycle scenario would not catch this. The sessions are on the portal's
+    /// side of the bus, so they cost this process almost nothing and no memory
+    /// gauge here moves; the only thing that notices is the user, and the
+    /// compositor.
+    #[test]
+    #[ignore = "soak test; run with --ignored"]
+    fn dropping_a_capture_closes_its_portal_session() {
+        isolate!();
+        let _exclusive = exclusive();
+        media_pp::init().expect("ffmpeg init");
+        let Some(restore_token) = try_restore_token() else {
+            return;
+        };
+        if !capture_supported(&restore_token) {
+            return;
+        }
+
+        let before = portal_sessions();
+        let opened: Vec<_> = (0..3)
+            .map(|index| {
+                PipeWireScreenCaptureSource::open(format!("probe-{index}"), options(&restore_token))
+                    .expect("open a capture with the restore token")
+                    .0
+            })
+            .collect();
+
+        let during = portal_sessions();
+        assert_eq!(
+            during.len(),
+            before.len() + 3,
+            "three captures did not open three portal sessions; before {before:?}, during \
+             {during:?}"
+        );
+
+        drop(opened);
+        let after = portal_sessions();
+        assert_eq!(
+            after, before,
+            "a dropped capture left its portal session open — the portal still shows the screen \
+             as being shared. before {before:?}, after {after:?}"
+        );
+    }
+
     /// What every cycle below opens with. A monitor rather than a window:
     /// the token restores whichever source was picked once, and a monitor
     /// is the one kind that is certain to still exist on a later run.
