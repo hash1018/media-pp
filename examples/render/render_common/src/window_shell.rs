@@ -51,7 +51,7 @@ use winit::{
 /// # Safety of the `Send` impl
 ///
 /// These are raw pointers into a window the main thread owns, valid only
-/// while it lives. [`App::drop`] is what makes handing them to another thread
+/// while it lives. `App::drop` is what makes handing them to another thread
 /// sound: it joins the worker before the `Window` is dropped, on every path
 /// out of the event loop. See this module's own docs.
 pub struct WindowTarget {
@@ -140,7 +140,7 @@ where
 /// need two shutdown handshakes and could not present a pipeline into both.
 ///
 /// Closing *any* window begins the same stop the single-window case does, and
-/// [`App::drop`] joins the worker before letting go of any of them — the same
+/// `App::drop` joins the worker before letting go of any of them — the same
 /// ordering the module docs describe, which is what makes
 /// [`WindowTarget`]'s `Send` sound for every target handed out here.
 pub fn run_windows<F>(titles: &[&str], width: u32, height: u32, play: F)

@@ -10,7 +10,7 @@ use super::cuda_ffi::{
 
 /// The process-wide Vulkan device this stack renders with, paired with the
 /// CUDA context it is allowed to import memory into — the Linux sibling of
-/// [`crate::D3d11GpuContext`]. Create one per stack and share it across
+/// `D3d11GpuContext`. Create one per stack and share it across
 /// every window.
 ///
 /// # The pairing is verified, not assumed

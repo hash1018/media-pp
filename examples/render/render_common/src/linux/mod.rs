@@ -12,7 +12,7 @@ pub use cuda_window_renderer::CudaWindowRenderer;
 pub use vulkan_context::VulkanGpuContext;
 
 /// Opens a window renderer for `window` and wraps it as a `CudaRenderer` —
-/// the Linux counterpart of [`crate::d3d11_window_renderer`], so callers
+/// the Linux counterpart of `d3d11_window_renderer`, so callers
 /// don't write the wrapper themselves.
 pub fn cuda_window_renderer(
     name: impl Into<String>,

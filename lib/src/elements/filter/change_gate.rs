@@ -49,7 +49,7 @@ use crate::{
 /// # What it compares
 ///
 /// Which buffer the pixels live in, not the frame around them — see
-/// [`picture_id`]. It holds the frame it forwarded, which is what makes that
+/// `buffer::picture_id`. It holds the frame it forwarded, which is what makes that
 /// identity sound: a picture still held cannot be handed out again with
 /// something else in it.
 ///

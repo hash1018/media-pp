@@ -1,10 +1,14 @@
 //! Owns the D3D11/D3D12 rendering this project's render examples share —
-//! no external `renderer-engine` dependency. [`D3d12GpuContext`]/
-//! [`D3d11GpuContext`] are the process-wide device/queue/shader-pipeline
+//! no external `renderer-engine` dependency. `D3d12GpuContext`/
+//! `D3d11GpuContext` are the process-wide device/queue/shader-pipeline
 //! owners (create one per stack, share it across every window);
-//! [`d3d12_window_renderer`]/[`d3d11_window_renderer`] open one window's
-//! [`D3d12WindowRenderer`]/[`D3d11WindowRenderer`], already wrapped as a
-//! `media_pp::elements::D3d12Renderer`/`D3d11Renderer`. The two stacks are
+//! `d3d12_window_renderer`/`d3d11_window_renderer` open one window's
+//! `D3d12WindowRenderer`/`D3d11WindowRenderer`, already wrapped as a
+//! `media_pp::elements::D3d12Renderer`/`D3d11Renderer`.
+//!
+//! Named rather than linked, all of them: they are `#[cfg(windows)]`, so on
+//! any other host the links this file is read on would be broken ones. The
+//! same reason the Linux modules name their D3D siblings in plain text. The two stacks are
 //! independent — separate device, separate shader set, nothing shared
 //! between them.
 //!
