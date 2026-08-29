@@ -1830,16 +1830,18 @@ mod cuda {
 
     use ffmpeg_next as ffmpeg;
     use media_pp::{
+        color::Color,
         elements::{
             CudaCodec, CudaDecoder, CudaDevice, CudaDownload, CudaEncoder, CudaEncoderOptions,
-            CudaFrameFormat, CudaScaler, CudaScalerInterp, CudaUpload, FrameCounter, PacketCounter,
-            SwScaler,
+            CudaFrameFormat, CudaScaler, CudaScalerInterp, CudaUpload, CudaVideoCompositor,
+            FrameCounter, PacketCounter, SwScaler, VideoCompositorOptions, VideoLayer, VideoRect,
         },
         pipeline::Pipeline,
     };
 
     use crate::common::{
-        MIB, Trend, Unit, exclusive, gpu::nvidia_process_bytes, iterations, settle, try_test_video,
+        MIB, Trend, Unit, exclusive, gpu::nvidia_process_bytes, iterations, settle, soak_duration,
+        try_test_video,
     };
     use crate::{HEIGHT, Teardown, WARMUP, WIDTH, frame_rate, test_source};
 
@@ -2159,6 +2161,137 @@ mod cuda {
             1.0 * MIB,
             |teardown| encode_cycle(&device, teardown),
         );
+    }
+
+    /// The CUDA half of `a_running_compositor_does_not_grow_while_it_answers_frames`.
+    ///
+    /// The cycle scenarios above build and tear a graph down, which is the
+    /// wrong shape to see retention per *frame*: `CudaVideoCompositor` holds
+    /// the surface it may offer again when nothing changed, and `CudaUpload`
+    /// and `CudaConverter` hold their own inputs and outputs for the same
+    /// reason. What is retained is a surface out of an FFmpeg hardware frames
+    /// pool, so the gauge that matters is the driver's per-process GPU
+    /// memory; at this rate a per-tick retention is tens of MiB a second, and
+    /// a 250 ms cycle would not notice.
+    ///
+    /// The input changes on every frame, deliberately: that is the case the
+    /// repeat path cannot help with, where every tick composes and replaces
+    /// what was held. A queue behind the compositor keeps some of those
+    /// frames alive while it does, so the release has something to prove.
+    /// The still case retains strictly less.
+    #[test]
+    #[ignore = "soak test; run with --ignored"]
+    fn a_running_cuda_compositor_does_not_grow_gpu_memory() {
+        isolate!();
+        let _exclusive = exclusive();
+        media_pp::init().expect("ffmpeg init");
+        let Some(device) = try_device() else { return };
+
+        let (compositor, handle) = CudaVideoCompositor::new(
+            "compositor",
+            &device,
+            VideoCompositorOptions {
+                width: WIDTH,
+                height: HEIGHT,
+                frame_rate: frame_rate(),
+                background: Color::new(16, 16, 16),
+            },
+        )
+        .expect("build the compositor");
+        let layer_sink = handle
+            .add_source(
+                "moving",
+                VideoLayer::new(VideoRect::new(0, 0, WIDTH, HEIGHT)),
+            )
+            .expect("register the compositor input")
+            .sink;
+
+        // Borrowed into the builder, the way every cycle above does it:
+        // `CudaDevice` is not cloneable, and retaining the primary context a
+        // second time is what its own docs warn against next to in-flight work.
+        let input_device = &device;
+        let feeder = Pipeline::new("soak-running-cuda-input", test_source("video"), {
+            move |source, ctx| {
+                let to_nv12 = SwScaler::new(
+                    "to-nv12",
+                    ffmpeg::format::Pixel::NV12,
+                    WIDTH,
+                    HEIGHT,
+                    ffmpeg::software::scaling::Flags::BILINEAR,
+                );
+                let upload =
+                    CudaUpload::new("upload", input_device, CudaFrameFormat::Nv12, WIDTH, HEIGHT)?;
+                let branch = ctx.branch().pipe(to_nv12).pipe(upload).to(layer_sink)?;
+                ctx.attach(source, 0, branch)?;
+                Ok(())
+            }
+        })
+        .expect("wire the compositor input pipeline");
+
+        let (counter, frames) = FrameCounter::new("counter");
+        let output = Pipeline::new("soak-running-cuda", compositor, |source, ctx| {
+            // As in the software and D3D11 scenarios: without a queue nothing
+            // is ever still referenced when the next composite replaces it.
+            let branch = ctx.branch().queue("composited", 4).to(Box::new(counter))?;
+            ctx.attach(source, 0, branch)?;
+            Ok(())
+        })
+        .expect("wire the compositor output pipeline");
+        output.run().unwrap();
+        feeder.run().unwrap();
+
+        let duration = soak_duration(20);
+        let sample_interval = Duration::from_secs(1);
+        let mut memory = Trend::private_bytes("running cuda compositor private bytes");
+        let mut gpu = match nvidia_process_bytes() {
+            Some(_) => Some(Trend::new(
+                "running cuda compositor driver-reported GPU memory",
+                Unit::Bytes,
+                || nvidia_process_bytes().unwrap_or_default(),
+            )),
+            None => {
+                eprintln!(
+                    "note: this driver does not report per-process GPU memory; measuring private \
+                     bytes only"
+                );
+                None
+            }
+        };
+        // The hardware frames pools fill over the first interval — the
+        // compositor's own, `CudaUpload`'s, and the surface the compositor
+        // holds to offer again — and every later one is steady state, which
+        // is the only part a trend can be read from.
+        thread::sleep(sample_interval);
+        settle();
+        let started = frames.load(Ordering::Relaxed);
+        let deadline = std::time::Instant::now() + duration;
+        while std::time::Instant::now() < deadline {
+            thread::sleep(sample_interval);
+            memory.sample();
+            if let Some(gpu) = gpu.as_mut() {
+                gpu.sample();
+            }
+        }
+        let composited = frames.load(Ordering::Relaxed) - started;
+        feeder.finish();
+        output.finish();
+
+        assert!(
+            composited > 0,
+            "the compositor stopped emitting, so a flat trend proves nothing"
+        );
+        eprintln!("composited {composited} frames over {duration:?}");
+        // Private bytes carry the CUDA driver's own host-side jitter, which
+        // the cycle scenarios above measure at several MiB peak to peak, so
+        // this gauge is deliberately the looser of the two.
+        memory.assert_flat(1.0 * MIB);
+        if let Some(gpu) = gpu {
+            // One retained NV12 surface at this size is a fraction of a MiB
+            // and the driver reports in whole MiB, so the threshold is
+            // quantization rather than a fraction of what a per-tick leak
+            // would be: that is tens of MiB a second.
+            gpu.assert_flat(1.0 * MIB);
+        }
     }
 }
 
