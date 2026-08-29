@@ -879,6 +879,56 @@ mod tests {
         );
     }
 
+    /// The mixer must keep emitting with nothing feeding it at all.
+    ///
+    /// It is what a recording attached later is made of, and what the
+    /// application's own mixer dock is built on: a file whose audio track
+    /// stopped because the last source was removed would be a worse answer
+    /// than one carrying silence. The compositor's own version of this — an
+    /// empty Scene still composites black — had to be fixed once, so this
+    /// says so for the mixer before anybody has to find out.
+    ///
+    /// `removed_source_stops_contributing` above cannot see it: it asserts
+    /// every sample that arrives is zero, which an empty vector satisfies.
+    #[test]
+    fn a_mixer_with_no_sources_still_emits_silence() {
+        let (mixer, handle) = AudioMixer::new(
+            "mixer",
+            AudioMixerOptions {
+                sample_rate: 48000,
+                channels: 1,
+            },
+        );
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let sink = RecordingSink {
+            seen: seen.clone(),
+            pp_log: element_pp_log(ElementType::Other, "recorder", None),
+        };
+        let pipeline = Pipeline::new("mixer-test-idle", mixer, |source, ctx| {
+            let branch = ctx.branch().to(Box::new(sink))?;
+            ctx.attach(source, 0, branch)?;
+            Ok(())
+        })
+        .expect("test pipeline wiring must succeed");
+        pipeline.run().unwrap();
+
+        // Nothing is ever added: no `add_source`, no buffer, no removal.
+        std::thread::sleep(Duration::from_millis(200));
+        pipeline.stop();
+        pipeline.bus().log_events();
+
+        let seen = seen.lock().unwrap();
+        assert_eq!(handle.source_count(), 0, "this test adds no sources");
+        assert!(
+            !seen.is_empty(),
+            "the mixer must go on emitting with nothing feeding it"
+        );
+        assert!(
+            seen.iter().all(|&sample| sample == 0.0),
+            "what it emits with no sources must be silence: {seen:?}"
+        );
+    }
+
     /// Regression test: a capture pipeline ending via `Stop` — the only
     /// shutdown signal a live source like `WasapiCaptureSource` ever sends,
     /// since it never reaches `Eos` on its own — used to leave a stale
