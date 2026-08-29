@@ -7,7 +7,7 @@ use crate::pp_log::{PpLog, pp_info};
 
 use crate::{
     buffer::{MediaBuffer, release_picture},
-    contract::{InputContract, MediaKind, OutputContract, PortContract},
+    contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
     control::ControlMsg,
     element::{Element, ElementType, Sink, Source, element_pp_log},
     error::Result,
@@ -17,6 +17,13 @@ use crate::{
 
 /// Stops a branch taking frames, and takes the paused span out of the
 /// timeline of what it does take.
+///
+/// Video ([`PauseGate::new`]) or audio ([`PauseGate::for_audio`]) — one type
+/// rather than two, because a recording of both needs its two gates to remove
+/// *the same span*, and two implementations would be two chances for them to
+/// stop meaning the same thing. Which kind it takes is fixed at construction
+/// and declared, so wiring one to the wrong stream is a link error rather
+/// than a file whose sound has slid away from its picture.
 ///
 /// # What it is for
 ///
@@ -77,15 +84,55 @@ pub struct PauseGate {
     /// How much of the source's timeline has been paused away in total, and
     /// so how far back every frame after it is moved.
     skipped: i64,
-    /// Empty frames to point at the pictures this forwards, so each carries
-    /// its own timestamp without touching the one the source stamped — a
-    /// sibling branch off the same `Tee` must keep seeing that.
+    /// What this was built to take, and what it declares — see
+    /// [`PauseGate::for_audio`].
+    input: PortContract,
+    /// Empty frames to point at what this forwards, so each carries its own
+    /// timestamp without touching the one the source stamped — a sibling
+    /// branch off the same `Tee` must keep seeing that.
     ///
-    /// `release_picture` when one comes back, so an idle wrapper does not pin
-    /// a picture the producer's pool wants returned.
-    wrappers: UnboundObjectPool<ffmpeg::frame::Video>,
+    /// Released when one comes back, so an idle wrapper does not pin a
+    /// picture the producer's pool wants returned.
+    wrappers: Wrappers,
     control: Arc<PauseControl>,
     pad: SrcPad,
+}
+
+/// Where the empty frames this forwards come from, in whichever medium the
+/// gate was built for.
+enum Wrappers {
+    /// Pooled, because a video wrapper checked back in has to let go of the
+    /// picture it points at — see [`release_picture`] — and because a
+    /// screen-sized frame is worth not reallocating 60 times a second.
+    Video(UnboundObjectPool<ffmpeg::frame::Video>),
+    /// Made as needed. Audio is not pooled anywhere in this crate —
+    /// `MediaBuffer::Audio` carries a plain `Arc` — and what is allocated is
+    /// an `AVFrame` header, not samples: the samples are referenced, exactly
+    /// as on the video side.
+    Audio,
+}
+
+/// Points a pooled wrapper at `source`, letting go of whatever it held.
+///
+/// # Safety
+///
+/// `wrapper` must be a live `AVFrame` nothing else refers to, and `source` a
+/// live `AVFrame` distinct from it — which is what the pool and the buffer
+/// this element was handed are.
+unsafe fn reference(
+    wrapper: *mut ffmpeg::ffi::AVFrame,
+    source: *const ffmpeg::ffi::AVFrame,
+) -> Result<()> {
+    // SAFETY: the caller guarantees both pointers are live and distinct, so
+    // the wrapper can be emptied and then pointed at the source.
+    let code = unsafe {
+        ffmpeg::ffi::av_frame_unref(wrapper);
+        ffmpeg::ffi::av_frame_ref(wrapper, source)
+    };
+    if code < 0 {
+        return Err(ffmpeg::Error::from(code).into());
+    }
+    Ok(())
 }
 
 /// What [`PauseGateHandle`] and the element share.
@@ -116,8 +163,39 @@ impl PauseGateHandle {
 }
 
 impl PauseGate {
-    /// Starts running. Nothing is paused until a handle says so.
+    /// A gate on video frames. Starts running; nothing is paused until a
+    /// handle says so.
     pub fn new(name: impl Into<String>) -> (Self, PauseGateHandle) {
+        Self::build(
+            name,
+            PortContract::any_frame(MediaKind::VideoFrame),
+            Wrappers::Video(UnboundObjectPool::new(
+                0,
+                ffmpeg::frame::Video::empty,
+                release_picture,
+            )),
+        )
+    }
+
+    /// A gate on audio frames, for the other track of the same recording.
+    ///
+    /// `MemoryDomain::System` because that is where audio is: there is no
+    /// GPU-resident audio frame in this crate, and stating it rather than
+    /// accepting any domain keeps the link check as sharp here as it is on
+    /// the video side.
+    pub fn for_audio(name: impl Into<String>) -> (Self, PauseGateHandle) {
+        Self::build(
+            name,
+            PortContract::frame(MediaKind::AudioFrame, MemoryDomain::System),
+            Wrappers::Audio,
+        )
+    }
+
+    fn build(
+        name: impl Into<String>,
+        input: PortContract,
+        wrappers: Wrappers,
+    ) -> (Self, PauseGateHandle) {
         let name: Arc<str> = name.into().into();
         let pad = SrcPad::with_contract(format!("{name}_src"), OutputContract::Passthrough);
         let pp_log = element_pp_log(ElementType::PauseGate, &name, None);
@@ -130,7 +208,8 @@ impl PauseGate {
             name,
             paused_from: None,
             skipped: 0,
-            wrappers: UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, release_picture),
+            input,
+            wrappers,
             control,
             pad,
         };
@@ -166,18 +245,32 @@ impl Sink for PauseGate {
     /// Video frames. It reads a timestamp and forwards a reference, so where
     /// the pixels live is not its business.
     fn input_contract(&self) -> InputContract {
-        InputContract::Fixed(PortContract::any_frame(MediaKind::VideoFrame))
+        InputContract::Fixed(self.input)
     }
 
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
-        let MediaBuffer::Video(frame) = &buf else {
+        // The frame's own `AVFrame` and its timestamp, whichever medium it
+        // is. Everything from here to the wrapper is the same for both: a
+        // pause is a span of timestamps, and neither pixels nor samples are
+        // read to measure it.
+        //
+        let (source, pts) = match &buf {
+            MediaBuffer::Video(frame) => {
+                // SAFETY: the live `AVFrame` of the buffer this call was
+                // handed, used only while `buf` is alive — the whole call.
+                (unsafe { frame.as_ref().as_ptr() }, frame.pts())
+            }
+            MediaBuffer::Audio(frame) => {
+                // SAFETY: as above, for the other medium.
+                (unsafe { frame.as_ref().as_ptr() }, frame.pts())
+            }
             // `Eos` above all: whatever follows finalizes on it, and it
             // carries no timeline to move.
-            return self.pad.push(buf);
+            _ => return self.pad.push(buf),
         };
         // Nothing can be placed on the output timeline without one, and
         // guessing would put it wherever the last one happened to land.
-        let Some(pts) = frame.pts() else {
+        let Some(pts) = pts else {
             return Ok(());
         };
 
@@ -206,22 +299,30 @@ impl Sink for PauseGate {
         // moves a timestamp, and the `Arc` may be shared with a sibling branch
         // off the same `Tee` which must keep the source's. What the wrapper
         // takes is a reference to the picture, not a copy of it.
-        let mut moved = self.wrappers.get();
-        // SAFETY: `ptr` is the pooled wrapper's own `AVFrame`, unreferenced
-        // before it is given a new one, and the source is the frame this call
-        // was handed — both live, and distinct from each other.
-        let code = unsafe {
-            let ptr = moved.as_mut_ptr();
-            ffmpeg::ffi::av_frame_unref(ptr);
-            ffmpeg::ffi::av_frame_ref(ptr, frame.as_ref().as_ptr())
-        };
-        if code < 0 {
-            return Err(ffmpeg::Error::from(code).into());
-        }
+        //
         // After the reference, which copies the source's properties over
-        // whatever the wrapper carried.
-        moved.set_pts(Some(pts.saturating_sub(self.skipped)));
-        self.pad.push(MediaBuffer::Video(Arc::new(moved)))
+        // whatever the wrapper carried, the moved timestamp is written on.
+        let moved = pts.saturating_sub(self.skipped);
+        let forwarded = match &mut self.wrappers {
+            Wrappers::Video(pool) => {
+                let mut wrapper = pool.get();
+                // SAFETY: the wrapper is this element's own, freshly out of
+                // its pool, so nothing else refers to it; `source` is the
+                // buffer handed to this call, a different frame from it.
+                unsafe { reference(wrapper.as_mut_ptr(), source) }?;
+                wrapper.set_pts(Some(moved));
+                MediaBuffer::Video(Arc::new(wrapper))
+            }
+            Wrappers::Audio => {
+                let mut wrapper = ffmpeg::frame::Audio::empty();
+                // SAFETY: as above — the wrapper was made a line ago and is
+                // named nowhere else.
+                unsafe { reference(wrapper.as_mut_ptr(), source) }?;
+                wrapper.set_pts(Some(moved));
+                MediaBuffer::Audio(Arc::new(wrapper))
+            }
+        };
+        self.pad.push(forwarded)
     }
 
     fn control(&mut self, msg: ControlMsg) -> Result<()> {
@@ -372,6 +473,78 @@ mod tests {
             kept(&received),
             vec![0, 1, 2, 3, 64, 65, 66, 67],
             "the frames themselves are the ones that were live on either side"
+        );
+    }
+
+    /// The same on the other track of the same recording.
+    ///
+    /// Audio matters here beyond "it also works": a recording pauses both
+    /// tracks at once, and a gate that took the span out of one and not the
+    /// other would leave a file whose sound has slid away from its picture by
+    /// however long the pause was. The arithmetic is the same because a pause
+    /// is a span of timestamps and nothing else — this says the audio path
+    /// really does share it, rather than only looking as though it does.
+    #[test]
+    fn an_audio_gate_takes_the_span_out_of_its_own_timeline() {
+        // 1024 samples per buffer at 48 kHz, which is what an AAC frame is.
+        const STEP: i64 = 1024;
+        let (mut gate, handle) = PauseGate::for_audio("gate");
+        let received = capture(&mut gate);
+
+        let samples = |pts: i64| {
+            let mut audio = ffmpeg::frame::Audio::new(
+                ffmpeg::format::Sample::F32(ffmpeg::format::sample::Type::Planar),
+                STEP as usize,
+                ffmpeg::ChannelLayout::MONO,
+            );
+            audio.set_pts(Some(pts));
+            // The value stands in for "which buffer this is", so the frames
+            // either side of the pause can be told apart.
+            audio.plane_mut::<f32>(0)[0] = pts as f32;
+            MediaBuffer::Audio(Arc::new(audio))
+        };
+
+        for tick in 0..4 {
+            gate.consume(samples(tick * STEP)).unwrap();
+        }
+        handle.set_paused(true);
+        for tick in 4..64 {
+            gate.consume(samples(tick * STEP)).unwrap();
+        }
+        handle.set_paused(false);
+        for tick in 64..68 {
+            gate.consume(samples(tick * STEP)).unwrap();
+        }
+
+        let out: Vec<(i64, f32)> = received
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|buf| match buf {
+                MediaBuffer::Audio(frame) => Some((frame.pts()?, frame.plane::<f32>(0)[0])),
+                _ => None,
+            })
+            .collect();
+        let stamps: Vec<i64> = out.iter().map(|(pts, _)| *pts).collect();
+        let carried: Vec<i64> = out.iter().map(|(_, tag)| *tag as i64).collect();
+        assert_eq!(
+            stamps,
+            (0..8).map(|tick| tick * STEP).collect::<Vec<_>>(),
+            "the output must continue where it left off, with the pause gone"
+        );
+        assert_eq!(
+            carried,
+            vec![
+                0,
+                STEP,
+                2 * STEP,
+                3 * STEP,
+                64 * STEP,
+                65 * STEP,
+                66 * STEP,
+                67 * STEP
+            ],
+            "the samples themselves are the ones that were live on either side"
         );
     }
 
