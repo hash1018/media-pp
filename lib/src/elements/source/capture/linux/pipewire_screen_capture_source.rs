@@ -10,7 +10,6 @@ use std::{
 
 use enumflags2::BitFlags;
 use ffmpeg_next as ffmpeg;
-#[cfg(feature = "cuda")]
 use ffmpeg_next::ffi;
 use pipewire as pw;
 use pw::{properties::properties, spa};
