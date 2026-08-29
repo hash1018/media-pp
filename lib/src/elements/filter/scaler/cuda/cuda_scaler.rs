@@ -474,14 +474,24 @@ mod tests {
             let Some(frame) = cuda_frame(&device, 128, 128, LUMA, 0) else {
                 return;
             };
-            let mut scaler =
-                CudaScaler::new("scaler", &device, out_width, out_height, CudaScalerInterp::Bilinear);
+            let mut scaler = CudaScaler::new(
+                "scaler",
+                &device,
+                out_width,
+                out_height,
+                CudaScalerInterp::Bilinear,
+            );
             let scaled = capture(&mut scaler);
             scaler.consume(frame).expect("scale");
             let buffer = scaled.lock().unwrap().remove(0);
 
-            let mut download =
-                CudaDownload::new("download", &device, CudaFrameFormat::Nv12, out_width, out_height);
+            let mut download = CudaDownload::new(
+                "download",
+                &device,
+                CudaFrameFormat::Nv12,
+                out_width,
+                out_height,
+            );
             let got = capture(&mut download);
             download.consume(buffer).expect("download");
             let MediaBuffer::Video(cpu) = got.lock().unwrap().remove(0) else {
@@ -507,12 +517,10 @@ mod tests {
             // twice, and a second bilinear pass over a constant picture
             // rounds some pixels down by one. Measured 199 on 1536 of 8192
             // here, 200 on the rest.
-            let off = pixels
-                .iter()
-                .filter(|luma| luma.abs_diff(LUMA) > 1)
-                .count();
+            let off = pixels.iter().filter(|luma| luma.abs_diff(LUMA) > 1).count();
             assert_eq!(
-                off, 0,
+                off,
+                0,
                 "{label}: {off} of {} pixels are more than one level from {LUMA}",
                 pixels.len()
             );

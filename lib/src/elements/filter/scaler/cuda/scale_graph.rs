@@ -96,12 +96,7 @@ struct GraphState {
 /// was found in — dragging a layer whose scaled height passes exactly through
 /// the capture's own — that is roughly one frame in six hundred, which is the
 /// rate `obs-rs` reported the corruption at.
-fn detour(
-    input_width: u32,
-    input_height: u32,
-    width: u32,
-    height: u32,
-) -> Option<(u32, u32)> {
+fn detour(input_width: u32, input_height: u32, width: u32, height: u32) -> Option<(u32, u32)> {
     let same_width = width == input_width;
     let same_height = height == input_height;
     // Both unchanged is the filter's passthrough, which is correct; neither
@@ -116,10 +111,7 @@ fn detour(
         }
         via
     };
-    Some((
-        step(width, input_width),
-        step(height, input_height),
-    ))
+    Some((step(width, input_width), step(height, input_height)))
 }
 
 fn pool_of(frames_ctx: *mut ffi::AVBufferRef) -> *const ffi::AVHWFramesContext {
@@ -342,8 +334,11 @@ impl CudaScaleGraph {
         // see [`detour`], which is where the whole explanation lives.
         let mut last = match detour(frame.width(), frame.height(), width, height) {
             None => {
-                let mut only =
-                    graph.add(&scale, "scale", &format!("w={width}:h={height}:interp_algo={algo}"))?;
+                let mut only = graph.add(
+                    &scale,
+                    "scale",
+                    &format!("w={width}:h={height}:interp_algo={algo}"),
+                )?;
                 source.link(0, &mut only, 0);
                 only
             }

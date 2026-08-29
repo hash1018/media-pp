@@ -725,12 +725,8 @@ impl PipeWireScreenCaptureSource {
         };
 
         let watching = Arc::new(AtomicBool::new(true));
-        let session_watcher = watch_session_closed(
-            session.clone(),
-            captured,
-            latest.clone(),
-            watching.clone(),
-        );
+        let session_watcher =
+            watch_session_closed(session.clone(), captured, latest.clone(), watching.clone());
 
         let fps = options.fps.max(1); // a `0` fps is nonsensical; treat it as 1 rather than dividing by zero
         // Same `1 / fps` convention as `PipeWireScreenCaptureSource::time_base`
@@ -1105,9 +1101,9 @@ fn close_session(
             futures_util::future::Either::Left((result, _)) => {
                 result.map_err(|error| error.to_string())
             }
-            futures_util::future::Either::Right(_) => {
-                Err(format!("the portal did not answer in {SESSION_CLOSE_TIMEOUT:?}"))
-            }
+            futures_util::future::Either::Right(_) => Err(format!(
+                "the portal did not answer in {SESSION_CLOSE_TIMEOUT:?}"
+            )),
         }
     })
 }
@@ -2649,11 +2645,7 @@ mod tests {
                 move || ffmpeg::frame::Video::new(ffmpeg::format::Pixel::BGRA, width, height),
                 |_| {},
             ),
-            wrapper_pool: UnboundObjectPool::new(
-                0,
-                ffmpeg::frame::Video::empty,
-                release_picture,
-            ),
+            wrapper_pool: UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, release_picture),
             last_picture: None,
             picture_captures: 0,
             retired: Vec::new(),

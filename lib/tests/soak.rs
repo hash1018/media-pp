@@ -2380,7 +2380,11 @@ mod pipewire {
                 // its dots turned into underscores: `1_290` is `:1.290`.
                 let unique = format!(
                     ":{}",
-                    owner.rsplit('/').next().expect("a non-empty node name").replace('_', ".")
+                    owner
+                        .rsplit('/')
+                        .next()
+                        .expect("a non-empty node name")
+                        .replace('_', ".")
                 );
                 let Ok(name) = zbus::names::BusName::try_from(unique) else {
                     continue;
