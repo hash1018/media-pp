@@ -100,7 +100,7 @@ pub enum ElementType {
     /// CUDA video encoder filter.
     CudaEncoder,
     /// D3D11-backed NVENC filter.
-    D3d11NvencEncoder,
+    D3d11VideoEncoder,
     /// Software audio encoder filter.
     SwAudioEncoder,
     /// Audio format and rate converter filter.

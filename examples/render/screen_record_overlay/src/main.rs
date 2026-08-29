@@ -22,7 +22,7 @@
 //!
 //! Linux only: it is the GPU screen capture that is Linux-specific here, not
 //! the CUDA half. The Windows shape of the same graph is `DxgiCaptureSource`
-//! (GPU mode) `-> D3d11VideoCompositor -> D3d11NvencEncoder`, with no
+//! (GPU mode) `-> D3d11VideoCompositor -> D3d11VideoEncoder`, with no
 //! conversion in it, since D3D11 composites BGRA directly.
 //!
 //! Needs an NVIDIA GPU and an ffmpeg build with NVENC.

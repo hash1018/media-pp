@@ -38,7 +38,7 @@ impl CudaCodec {
 /// Construction-time options for [`CudaEncoder`].
 ///
 /// Carries no input-format choice, unlike
-/// `D3d11NvencEncoderOptions`: every producer of a CUDA
+/// `D3d11VideoEncoderOptions`: every producer of a CUDA
 /// frame in this crate ([`crate::elements::CudaDecoder`],
 /// [`crate::elements::CudaUpload`]) emits NV12, so a second variant would
 /// only be expressible, never reachable.
@@ -139,7 +139,7 @@ pub enum CudaEncoderError {
 /// Encodes GPU-resident `Pixel::CUDA` `Video` frames into `Packet`s on the
 /// GPU's dedicated NVENC block — the CUDA counterpart to
 /// [`crate::elements::SwEncoder`] and the sibling of
-/// `D3d11NvencEncoder`. A `Filter`: receives via `Sink`,
+/// `D3d11VideoEncoder`. A `Filter`: receives via `Sink`,
 /// pushes what it produces into its own single src pad.
 ///
 /// Fed by [`crate::elements::CudaDecoder`] this is a transcode that never
@@ -304,7 +304,7 @@ impl CudaEncoder {
 
     /// The encoded stream's parameters, for
     /// [`crate::elements::Mp4Muxer::add_stream`] — same accessor
-    /// `SwEncoder`/`D3d11NvencEncoder` expose for the same reason.
+    /// `SwEncoder`/`D3d11VideoEncoder` expose for the same reason.
     pub fn parameters(&self) -> ffmpeg::codec::Parameters {
         ffmpeg::codec::Parameters::from(&self.encoder)
     }
@@ -430,7 +430,7 @@ impl Sink for CudaEncoder {
     }
 
     fn control(&mut self, msg: ControlMsg) -> Result<()> {
-        // Same deliberate choice as `SwEncoder`/`D3d11NvencEncoder`: Seek is
+        // Same deliberate choice as `SwEncoder`/`D3d11VideoEncoder`: Seek is
         // forwarded without flushing, since NVENC can still emit packets
         // originating before the seek from later `send_frame` calls. A caller
         // needing a hard encoded-stream discontinuity rebuilds the encoder.

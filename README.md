@@ -210,7 +210,7 @@ buffers, codecs, and muxers; `Pipeline::stop` abandons buffered work immediately
 | Kind | Elements |
 |---|---|
 | Sources | `FileDemuxer`, `AppSource`, `RtspSource`, `TestVideoSource`, `TestAudioSource`, `DxgiCaptureSource`, `WgcCaptureSource`, `PipeWireScreenCaptureSource`, `PipeWireAudioCaptureSource`, `WasapiCaptureSource`, `AudioMixer`, `SwVideoCompositor`, `CudaVideoCompositor`, `D3d11VideoCompositor`, `WebRtcTrackSource` |
-| Filters | `SwDecoder`, `CudaDecoder`, `D3d11Decoder`, `D3d12Decoder`, `SwEncoder`, `CudaEncoder`, `D3d11NvencEncoder`, `SwAudioEncoder`, `AudioResampler`, `AudioVolume`, `SwScaler`, `SwChromaKey`, `D3d11ChromaKey`, `Pacer`, `VideoSynchronizer`, `CudaScaler`, `D3d11Scaler`, `D3d12Scaler`, `CudaUpload`, `CudaDownload`, `CudaConverter`, `D3d11Upload`, `D3d11Download`, `D3d12Upload`, `D3d12Download`, `Tee`, `ChangeGate`, `TimestampOrigin` |
+| Filters | `SwDecoder`, `CudaDecoder`, `D3d11Decoder`, `D3d12Decoder`, `SwEncoder`, `CudaEncoder`, `D3d11VideoEncoder`, `SwAudioEncoder`, `AudioResampler`, `AudioVolume`, `SwScaler`, `SwChromaKey`, `D3d11ChromaKey`, `Pacer`, `VideoSynchronizer`, `CudaScaler`, `D3d11Scaler`, `D3d12Scaler`, `CudaUpload`, `CudaDownload`, `CudaConverter`, `D3d11Upload`, `D3d11Download`, `D3d12Upload`, `D3d12Download`, `Tee`, `ChangeGate`, `TimestampOrigin` |
 | Sinks | `FrameCounter`, `PacketCounter`, `AppSink`, `Mp4Muxer`, `SegmentedMp4Muxer`, `HlsMuxer`, `RtspSink`, `CudaRenderer`, `D3d11Renderer`, `D3d12Renderer`, `PipeWireAudioRenderer`, `WasapiRenderer`, `OrtDetector`, `WebRtcTrackSink` |
 
 Backend-specific elements require their corresponding Cargo feature and are
@@ -388,9 +388,14 @@ buffers are not logged one record per buffer.
   on Linux, `nvcuda.dll` on Windows) for those copies and for the blend
   kernel. No CUDA toolkit is needed — the driver ships both the library and
   the PTX compiler.
-- `D3d11NvencEncoder` needs an NVIDIA GPU and an FFmpeg build with NVENC. It
-  fails to open with a typed error, not a panic, on any other GPU. The other
-  `d3d11` elements are vendor-neutral.
+- `D3d11VideoEncoder` reaches whichever encode hardware the machine has, and
+  which of its codecs open depends on that. The `*Nvenc` variants need an
+  NVIDIA GPU and an FFmpeg build with NVENC; the `*MediaFoundation` ones need
+  a driver that registers a hardware H.264/HEVC transform, which Intel, AMD
+  and NVIDIA all do — so those are what give an Intel or AMD machine hardware
+  encoding rather than a fall back to the CPU. Either fails to open with a
+  typed error, not a panic, so a caller can probe the list. The other `d3d11`
+  elements are vendor-neutral.
 - RTSP publishing requires an external server that accepts publishing, such as
   MediaMTX.
 - Tests needing real media read `MEDIA_PP_TEST_VIDEO`. They skip when it is

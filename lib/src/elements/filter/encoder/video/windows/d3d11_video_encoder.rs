@@ -32,11 +32,11 @@ use crate::{
     },
 };
 
-/// Errors specific to `D3d11NvencEncoder`. Converts into the crate-wide
+/// Errors specific to `D3d11VideoEncoder`. Converts into the crate-wide
 /// `Error` via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
-pub enum D3d11NvencEncoderError {
-    /// The requested NVENC implementation is unavailable in the FFmpeg build.
+pub enum D3d11VideoEncoderError {
+    /// The requested encoder is unavailable in the FFmpeg build.
     #[error(
         "encoder {0:?} not found — this ffmpeg build wasn't compiled with \
          NVENC support (run `ffmpeg -encoders` to check)"
@@ -64,7 +64,7 @@ pub enum D3d11NvencEncoderError {
 
     /// The input frame is not backed by a D3D11 texture.
     #[error(
-        "D3d11NvencEncoder only accepts Pixel::D3D11 frames (chain a \
+        "D3d11VideoEncoder only accepts Pixel::D3D11 frames (chain a \
          D3d11Upload, or feed it a D3d11VideoCompositor/DxgiCaptureSource \
          GPU-mode output), got {0:?}"
     )]
@@ -72,7 +72,7 @@ pub enum D3d11NvencEncoderError {
 
     /// Input dimensions differ from the fixed encoder dimensions.
     #[error(
-        "frame is {actual_width}x{actual_height}, but D3d11NvencEncoder was \
+        "frame is {actual_width}x{actual_height}, but D3d11VideoEncoder was \
          opened for {expected_width}x{expected_height}"
     )]
     DimensionMismatch {
@@ -120,7 +120,7 @@ pub enum D3d11NvencEncoderError {
 
     /// The texture format differs from the format fixed at encoder creation.
     #[error(
-        "frame carries a {actual:?} texture, but D3d11NvencEncoder was opened \
+        "frame carries a {actual:?} texture, but D3d11VideoEncoder was opened \
          for {expected:?} — an encoder's input format is fixed at \
          avcodec_open2 time and cannot change mid-stream"
     )]
@@ -136,7 +136,7 @@ pub enum D3d11NvencEncoderError {
     MissingTexture,
 
     /// The sink received a buffer other than decoded video or end-of-stream.
-    #[error("D3d11NvencEncoder only accepts Video or Eos buffers, got {0}")]
+    #[error("D3d11VideoEncoder only accepts Video or Eos buffers, got {0}")]
     UnsupportedBuffer(&'static str),
 
     /// A Direct3D resource or copy operation failed.
@@ -152,32 +152,63 @@ pub enum D3d11NvencEncoderError {
     Ffmpeg(#[from] ffmpeg::Error),
 }
 
-/// Which NVENC encoder to open. Both are hardware encoders on the GPU's
-/// dedicated encode block, so neither carries the GPL/licensing question
-/// [`crate::elements::VideoCodec`]'s software encoders document — but both
-/// still have to actually exist in the linked ffmpeg build, and
-/// [`D3d11NvencEncoder::new`] fails with
-/// [`D3d11NvencEncoderError::CodecNotFound`] (not a panic) if they don't.
+/// Which encoder to open, and therefore which hardware does the work.
 ///
-/// AV1 is deliberately absent: `av1_nvenc` exists in ffmpeg, but NVENC's
-/// AV1 encode block only shipped with Ada (RTX 40) and later, so offering
-/// it here would mean a variant that fails at `open` on a large share of
-/// otherwise-working GPUs. Add it when there is a real requirement and a
-/// machine to verify it on.
+/// Two families, both encoding on a GPU's dedicated encode block, so neither
+/// carries the GPL/licensing question [`crate::elements::VideoCodec`]'s
+/// software encoders document. Both still have to exist in the linked ffmpeg
+/// build, and [`D3d11VideoEncoder::new`] fails with
+/// [`D3d11VideoEncoderError::CodecNotFound`] (not a panic) if they do not.
+///
+/// # Which family to ask for
+///
+/// **NVENC** talks to NVIDIA's encoder through NVIDIA's own API, and is what
+/// to prefer where it opens.
+///
+/// **Media Foundation** asks Windows for whichever hardware H.264/HEVC
+/// transform the installed driver provides, so one variant covers every
+/// vendor — Intel's Quick Sync transform, AMD's, and NVIDIA's own, which is
+/// the same encode block `h264_nvenc` reaches by a shorter path. Its reason
+/// to exist is the first two: without it an Intel or AMD machine has working
+/// encode hardware and no way to reach it, and falls back to encoding on the
+/// CPU.
+///
+/// So the useful order is NVENC, then Media Foundation, then software — and
+/// since either can be absent, ask by opening rather than by guessing from
+/// the GPU's name.
+///
+/// AV1 is deliberately absent from both. `av1_nvenc` and `av1_mf` exist in
+/// ffmpeg, but the hardware behind them only shipped with Ada (RTX 40) and
+/// its contemporaries, so offering it here would mean a variant that fails at
+/// `open` on a large share of otherwise-working GPUs. Add it when there is a
+/// real requirement and a machine to verify it on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum D3d11NvencCodec {
-    /// `h264_nvenc` — H.264/AVC.
-    H264,
-    /// `hevc_nvenc` — H.265/HEVC.
-    H265,
+pub enum D3d11VideoCodec {
+    /// `h264_nvenc` — H.264/AVC on NVIDIA's encoder, through NVIDIA's API.
+    H264Nvenc,
+    /// `hevc_nvenc` — H.265/HEVC on NVIDIA's encoder, through NVIDIA's API.
+    H265Nvenc,
+    /// `h264_mf` — H.264/AVC on whichever hardware transform Windows offers.
+    H264MediaFoundation,
+    /// `hevc_mf` — H.265/HEVC on whichever hardware transform Windows offers.
+    H265MediaFoundation,
 }
 
-impl D3d11NvencCodec {
+impl D3d11VideoCodec {
     fn encoder_name(self) -> &'static str {
         match self {
-            Self::H264 => "h264_nvenc",
-            Self::H265 => "hevc_nvenc",
+            Self::H264Nvenc => "h264_nvenc",
+            Self::H265Nvenc => "hevc_nvenc",
+            Self::H264MediaFoundation => "h264_mf",
+            Self::H265MediaFoundation => "hevc_mf",
         }
+    }
+
+    /// Whether this variant reaches its hardware through Media Foundation,
+    /// which needs one option set that the NVENC ones do not — see
+    /// [`D3d11VideoEncoder::new`].
+    fn is_media_foundation(self) -> bool {
+        matches!(self, Self::H264MediaFoundation | Self::H265MediaFoundation)
     }
 }
 
@@ -187,13 +218,13 @@ impl D3d11NvencCodec {
 /// inferred from the first frame, for the same reason
 /// [`crate::elements::SwEncoderOptions`] takes `width`/`height` up front.
 ///
-/// Both variants were verified against `h264_nvenc`/`hevc_nvenc` on real
-/// hardware. [`D3d11NvencInputFormat::Bgra`] is what makes a screen
+/// Both were verified against `h264_nvenc`/`hevc_nvenc` and `h264_mf` on real
+/// hardware. [`D3d11VideoInputFormat::Bgra`] is what makes a screen
 /// recording need no color conversion at all: `D3d11VideoCompositor` and
-/// `DxgiCaptureSource`'s GPU mode both produce BGRA textures, and NVENC
-/// converts to its own internal YUV as part of encoding.
+/// `DxgiCaptureSource`'s GPU mode both produce BGRA textures, and every
+/// encoder here converts to its own internal YUV as part of encoding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum D3d11NvencInputFormat {
+pub enum D3d11VideoInputFormat {
     /// `DXGI_FORMAT_NV12` — what [`crate::elements::D3d11Upload`] and
     /// [`crate::elements::D3d11Decoder`] produce.
     Nv12,
@@ -203,7 +234,7 @@ pub enum D3d11NvencInputFormat {
     Bgra,
 }
 
-impl D3d11NvencInputFormat {
+impl D3d11VideoInputFormat {
     fn sw_format(self) -> ffi::AVPixelFormat {
         match self {
             Self::Nv12 => ffi::AVPixelFormat::AV_PIX_FMT_NV12,
@@ -225,19 +256,19 @@ impl D3d11NvencInputFormat {
 /// `time_base` and `frame_rate` are separate values rather than one
 /// derived from the other.
 #[derive(Debug, Clone, Copy)]
-pub struct D3d11NvencEncoderOptions {
-    /// NVENC bitstream codec to open.
-    pub codec: D3d11NvencCodec,
+pub struct D3d11VideoEncoderOptions {
+    /// Which encoder to open, and so which hardware encodes.
+    pub codec: D3d11VideoCodec,
     /// The texture format every input frame must carry. See
-    /// [`D3d11NvencInputFormat`].
-    pub input_format: D3d11NvencInputFormat,
+    /// [`D3d11VideoInputFormat`].
+    pub input_format: D3d11VideoInputFormat,
     /// Encoded frame width in pixels.
     pub width: u32,
     /// Encoded frame height in pixels.
     pub height: u32,
     /// Must match the `pts` unit of whatever frames this receives.
     pub time_base: ffmpeg::Rational,
-    /// The nominal rate NVENC uses for rate control and writes into the
+    /// The nominal rate the encoder uses for rate control and writes into the
     /// bitstream — not required to match the real interval between
     /// `consume` calls. See [`crate::elements::SwEncoderOptions::frame_rate`].
     pub frame_rate: ffmpeg::Rational,
@@ -249,8 +280,8 @@ pub struct D3d11NvencEncoderOptions {
     pub gop_size: u32,
 }
 
-/// Encodes GPU-resident `Pixel::D3D11` `Video` frames into `Packet`s on the
-/// GPU's dedicated NVENC block — the hardware counterpart to
+/// Encodes GPU-resident `Pixel::D3D11` `Video` frames into `Packet`s on a
+/// GPU's dedicated encode block — the hardware counterpart to
 /// [`crate::elements::SwEncoder`], for a pipeline built entirely on one
 /// shared `ID3D11Device` (see [`crate::elements::D3d11Renderer`]'s own docs
 /// on why that means no explicit fence/sync is needed anywhere in this
@@ -259,10 +290,10 @@ pub struct D3d11NvencEncoderOptions {
 ///
 /// # Why the input texture is copied rather than handed over directly
 ///
-/// NVENC needs `AVCodecContext.hw_frames_ctx` set before `avcodec_open2`,
-/// and every frame passed to `send_frame` must come from *that* context's
-/// own pool. The `Pixel::D3D11` frames flowing through this crate don't:
-/// [`crate::elements::D3d11Upload`],
+/// Either encoder needs `AVCodecContext.hw_frames_ctx` set before
+/// `avcodec_open2`, and every frame passed to `send_frame` must come from
+/// *that* context's own pool. The `Pixel::D3D11` frames flowing through this
+/// crate do not: [`crate::elements::D3d11Upload`],
 /// `DxgiCaptureSource`'s GPU mode and
 /// [`crate::elements::D3d11VideoCompositor`] all build their textures with
 /// plain `windows-rs` calls and wrap them via
@@ -285,12 +316,12 @@ pub struct D3d11NvencEncoderOptions {
 ///
 /// # Frame delay
 ///
-/// One frame can turn into zero or one packets per `send_frame` — NVENC's
+/// One frame can turn into zero or one packets per `send_frame`: an encoder's
 /// lookahead and B-frame reordering delay some packets until later frames
 /// arrive, or until `Eos` flushes what's left. `consume` drains
 /// `receive_packet` in a loop after every `send_frame`/`send_eof`, the same
 /// shape as [`crate::elements::SwEncoder`]'s own drain loop.
-pub struct D3d11NvencEncoder {
+pub struct D3d11VideoEncoder {
     pp_log: PpLog,
     name: Arc<str>,
     encoder: ffmpeg::encoder::Video,
@@ -311,8 +342,8 @@ pub struct D3d11NvencEncoder {
     hw_frames_ctx: AvBufferRef,
     width: u32,
     height: u32,
-    input_format: D3d11NvencInputFormat,
-    /// Nominal frame duration in `time_base` ticks. NVENC leaves
+    input_format: D3d11VideoInputFormat,
+    /// Nominal frame duration in `time_base` ticks. These encoders leave
     /// `AVPacket::duration` at zero; muxers such as
     /// [`crate::elements::HlsMuxer`] need it for precise segment durations.
     packet_duration: i64,
@@ -327,7 +358,7 @@ pub struct D3d11NvencEncoder {
 // with no thread affinity, and `encoder`'s own `Send` covers the codec
 // context. `&mut self` on every method that touches them rules out
 // concurrent access — same reasoning as `D3d11Decoder`.
-unsafe impl Send for D3d11NvencEncoder {}
+unsafe impl Send for D3d11VideoEncoder {}
 
 fn nominal_packet_duration(time_base: ffmpeg::Rational, frame_rate: ffmpeg::Rational) -> i64 {
     if frame_rate.numerator() <= 0 || time_base.numerator() <= 0 || time_base.denominator() <= 0 {
@@ -350,15 +381,15 @@ fn nominal_packet_duration(time_base: ffmpeg::Rational, frame_rate: ffmpeg::Rati
 /// `wrap_d3d11_texture`'s docs as having corrupted memory.
 unsafe fn create_hw_frames_ctx(
     hw_device_ctx: &AvBufferRef,
-    options: &D3d11NvencEncoderOptions,
-) -> std::result::Result<AvBufferRef, D3d11NvencEncoderError> {
+    options: &D3d11VideoEncoderOptions,
+) -> std::result::Result<AvBufferRef, D3d11VideoEncoderError> {
     // SAFETY: `hw_device_ctx` owns a live initialized D3D11VA device context;
     // the allocation is wrapped immediately, only public
     // `AVHWFramesContext` fields are written before initialization, and the
     // helper updating bind flags has the same pre-init lifetime.
     unsafe {
         let buf = AvBufferRef::from_raw(ffi::av_hwframe_ctx_alloc(hw_device_ctx.as_ptr()))
-            .ok_or(D3d11NvencEncoderError::HwFramesAlloc)?;
+            .ok_or(D3d11VideoEncoderError::HwFramesAlloc)?;
 
         let frames_ctx = (*buf.as_ptr()).data as *mut ffi::AVHWFramesContext;
         (*frames_ctx).format = ffi::AVPixelFormat::AV_PIX_FMT_D3D11;
@@ -384,7 +415,7 @@ unsafe fn create_hw_frames_ctx(
 
         let code = ffi::av_hwframe_ctx_init(buf.as_ptr());
         if code < 0 {
-            return Err(D3d11NvencEncoderError::HwFramesInit(
+            return Err(D3d11VideoEncoderError::HwFramesInit(
                 code,
                 options.width,
                 options.height,
@@ -394,23 +425,23 @@ unsafe fn create_hw_frames_ctx(
     }
 }
 
-impl D3d11NvencEncoder {
+impl D3d11VideoEncoder {
     /// `device` must be the same `ID3D11Device`, and `context` the same
     /// shared immediate context, every other D3D11 element in this pipeline
     /// uses — see this type's own docs on why.
     ///
-    /// Opens the encoder eagerly, so a missing `h264_nvenc`/`hevc_nvenc`, a
-    /// driver too old for the linked ffmpeg's NVENC API version, or a
+    /// Opens the encoder eagerly, so an encoder this ffmpeg build lacks, a
+    /// driver too old for the API version it was built against, or a
     /// resolution this GPU's encode block rejects all surface here as a
     /// typed error rather than at the first frame.
     pub fn new(
         name: impl Into<String>,
         device: &ID3D11Device,
         context: Arc<Mutex<ID3D11DeviceContext>>,
-        options: D3d11NvencEncoderOptions,
-    ) -> std::result::Result<Self, D3d11NvencEncoderError> {
+        options: D3d11VideoEncoderOptions,
+    ) -> std::result::Result<Self, D3d11VideoEncoderError> {
         let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::D3d11NvencEncoder, &name, None);
+        let pp_log = element_pp_log(ElementType::D3d11VideoEncoder, &name, None);
         // This element sits behind a `Queue` more often than not, so the
         // device has to be usable from a thread other than the one that
         // created it before any command is issued.
@@ -425,24 +456,25 @@ impl D3d11NvencEncoder {
             unsafe { context.GetDevice() }?
         };
         if context_device.as_raw() != device.as_raw() {
-            return Err(D3d11NvencEncoderError::ContextDeviceMismatch);
+            return Err(D3d11VideoEncoderError::ContextDeviceMismatch);
         }
 
-        let encoder_name = options.codec.encoder_name();
+        let options_codec = options.codec;
+        let encoder_name = options_codec.encoder_name();
         let codec = ffmpeg::encoder::find_by_name(encoder_name)
-            .ok_or_else(|| D3d11NvencEncoderError::CodecNotFound(encoder_name.into()))?;
+            .ok_or_else(|| D3d11VideoEncoderError::CodecNotFound(encoder_name.into()))?;
 
         // SAFETY: `device` is live and the helper transfers a cloned COM
         // reference into the returned FFmpeg device context.
         let hw_device_ctx = unsafe { create_hw_device_ctx(device) }
-            .map_err(D3d11NvencEncoderError::HwDeviceInit)?;
+            .map_err(D3d11VideoEncoderError::HwDeviceInit)?;
         // SAFETY: the device context remains live and `options` has already
         // passed the constructor's dimension/format validation.
         let hw_frames_ctx = unsafe { create_hw_frames_ctx(&hw_device_ctx, &options) }?;
 
         // From here on every early return has to release both contexts, so
         // the work is done in a closure and the cleanup written once.
-        let opened = (|| -> std::result::Result<ffmpeg::encoder::Video, D3d11NvencEncoderError> {
+        let opened = (|| -> std::result::Result<ffmpeg::encoder::Video, D3d11VideoEncoderError> {
             let mut ctx = ffmpeg::codec::context::Context::new_with_codec(codec);
             ctx.set_time_base(options.time_base);
 
@@ -463,10 +495,20 @@ impl D3d11NvencEncoder {
                 let ptr = video.as_mut_ptr();
                 (*ptr).hw_frames_ctx = hw_frames_ctx
                     .try_clone()
-                    .ok_or(D3d11NvencEncoderError::HwFramesAlloc)?
+                    .ok_or(D3d11VideoEncoderError::HwFramesAlloc)?
                     .into_raw();
             }
-            Ok(video.open_as(codec)?)
+            // Media Foundation picks a transform for itself, and left alone
+            // it may pick a software one — a hardware encoder that quietly
+            // encodes on the CPU is the one outcome this element exists to
+            // avoid. Asking explicitly makes it fail to open instead, which
+            // a caller probing the list can act on. NVENC needs no such
+            // option: there is no software `h264_nvenc` to fall into.
+            let mut options = ffmpeg::Dictionary::new();
+            if options_codec.is_media_foundation() {
+                options.set("hw_encoding", "1");
+            }
+            Ok(video.open_as_with(codec, options)?)
         })();
 
         let encoder = opened?;
@@ -520,7 +562,7 @@ impl D3d11NvencEncoder {
         texture: &ID3D11Texture2D,
         source_subresource: u32,
         source_box: &D3D11_BOX,
-    ) -> std::result::Result<ffmpeg::frame::Video, D3d11NvencEncoderError> {
+    ) -> std::result::Result<ffmpeg::frame::Video, D3d11VideoEncoderError> {
         let mut staged = ffmpeg::frame::Video::empty();
         // SAFETY: `staged` is a fresh writable frame and this encoder retains
         // the initialized frames context used to allocate its texture.
@@ -528,7 +570,7 @@ impl D3d11NvencEncoder {
             let code =
                 ffi::av_hwframe_get_buffer(self.hw_frames_ctx.as_ptr(), staged.as_mut_ptr(), 0);
             if code < 0 {
-                return Err(D3d11NvencEncoderError::HwFrameGet(code));
+                return Err(D3d11VideoEncoderError::HwFrameGet(code));
             }
         }
 
@@ -536,9 +578,9 @@ impl D3d11NvencEncoder {
         // `Pixel::D3D11` frame in this crate does — pointer in `data[0]`,
         // array slice in `data[1]` — so the same reader works here.
         let (destination, destination_slice) =
-            d3d11va_texture(&staged).ok_or(D3d11NvencEncoderError::MissingTexture)?;
+            d3d11va_texture(&staged).ok_or(D3d11VideoEncoderError::MissingTexture)?;
         if destination.is_null() {
-            return Err(D3d11NvencEncoderError::MissingTexture);
+            return Err(D3d11VideoEncoderError::MissingTexture);
         }
 
         let context = self
@@ -558,7 +600,7 @@ impl D3d11NvencEncoder {
             if destination_slice < 0
                 || destination_slice as u64 >= u64::from(destination_desc.ArraySize)
             {
-                return Err(D3d11NvencEncoderError::InvalidArrayIndex {
+                return Err(D3d11VideoEncoderError::InvalidArrayIndex {
                     index: destination_slice,
                     array_size: destination_desc.ArraySize,
                 });
@@ -591,7 +633,7 @@ impl D3d11NvencEncoder {
                     packet = ffmpeg::Packet::empty();
                 }
                 Err(error) if is_codec_drain_boundary(&error) => break,
-                Err(error) => return Err(D3d11NvencEncoderError::from(error).into()),
+                Err(error) => return Err(D3d11VideoEncoderError::from(error).into()),
             }
         }
         Ok(())
@@ -600,10 +642,10 @@ impl D3d11NvencEncoder {
     fn encode(&mut self, frame: &ffmpeg::frame::Video) -> Result<()> {
         if frame.format() != ffmpeg::format::Pixel::D3D11 {
             pp_error!(self, "unsupported pixel format: {:?}", frame.format());
-            return Err(D3d11NvencEncoderError::UnsupportedFormat(frame.format()).into());
+            return Err(D3d11VideoEncoderError::UnsupportedFormat(frame.format()).into());
         }
         if frame.width() != self.width || frame.height() != self.height {
-            let error = D3d11NvencEncoderError::DimensionMismatch {
+            let error = D3d11VideoEncoderError::DimensionMismatch {
                 actual_width: frame.width(),
                 actual_height: frame.height(),
                 expected_width: self.width,
@@ -614,20 +656,20 @@ impl D3d11NvencEncoder {
         }
 
         let (source, source_slice) =
-            d3d11va_texture(frame).ok_or(D3d11NvencEncoderError::MissingTexture)?;
+            d3d11va_texture(frame).ok_or(D3d11VideoEncoderError::MissingTexture)?;
         // SAFETY: `source` is borrowed from the still-live frame; null is
         // rejected and cloning the borrowed wrapper acquires an independent ref.
         let source = unsafe {
             ID3D11Texture2D::from_raw_borrowed(&source)
-                .ok_or(D3d11NvencEncoderError::MissingTexture)?
+                .ok_or(D3d11VideoEncoderError::MissingTexture)?
                 .clone()
         };
 
         // SAFETY: `source` is a live COM texture; `GetDevice` returns an owned
         // reference to its creating device.
-        let texture_device = unsafe { source.GetDevice() }.map_err(D3d11NvencEncoderError::from)?;
+        let texture_device = unsafe { source.GetDevice() }.map_err(D3d11VideoEncoderError::from)?;
         if texture_device.as_raw() != self.device.as_raw() {
-            let error = D3d11NvencEncoderError::DeviceMismatch;
+            let error = D3d11VideoEncoderError::DeviceMismatch;
             pp_error!(self, "{error}");
             return Err(error.into());
         }
@@ -638,7 +680,7 @@ impl D3d11NvencEncoder {
         // SAFETY: `description` is a live out-parameter for the live texture.
         unsafe { source.GetDesc(&mut description) };
         if description.Format != self.input_format.dxgi_format() {
-            let error = D3d11NvencEncoderError::TextureFormatMismatch {
+            let error = D3d11VideoEncoderError::TextureFormatMismatch {
                 actual: description.Format.0,
                 expected: self.input_format.dxgi_format().0,
             };
@@ -647,7 +689,7 @@ impl D3d11NvencEncoder {
         }
 
         if description.Width < self.width || description.Height < self.height {
-            let error = D3d11NvencEncoderError::TextureTooSmall {
+            let error = D3d11VideoEncoderError::TextureTooSmall {
                 actual_width: description.Width,
                 actual_height: description.Height,
                 expected_width: self.width,
@@ -657,7 +699,7 @@ impl D3d11NvencEncoder {
             return Err(error.into());
         }
         if source_slice < 0 || source_slice as u64 >= u64::from(description.ArraySize) {
-            let error = D3d11NvencEncoderError::InvalidArrayIndex {
+            let error = D3d11VideoEncoderError::InvalidArrayIndex {
                 index: source_slice,
                 array_size: description.ArraySize,
             };
@@ -686,24 +728,24 @@ impl D3d11NvencEncoder {
         self.encoder
             .send_frame(&staged)
             .inspect_err(|error| pp_error!(self, "send_frame failed: {error}"))
-            .map_err(D3d11NvencEncoderError::from)?;
+            .map_err(D3d11VideoEncoderError::from)?;
         self.drain()
     }
 }
 
-impl Drop for D3d11NvencEncoder {
+impl Drop for D3d11VideoEncoder {
     fn drop(&mut self) {
         pp_info!(self, "dropped: freeing hw_frames_ctx and hw_device_ctx");
     }
 }
 
-impl Element for D3d11NvencEncoder {
+impl Element for D3d11VideoEncoder {
     fn name(&self) -> Arc<str> {
         self.name.clone()
     }
 
     fn element_type(&self) -> ElementType {
-        ElementType::D3d11NvencEncoder
+        ElementType::D3d11VideoEncoder
     }
 
     fn pp_log(&self) -> &PpLog {
@@ -715,14 +757,14 @@ impl Element for D3d11NvencEncoder {
     }
 }
 
-impl Source for D3d11NvencEncoder {
+impl Source for D3d11VideoEncoder {
     fn src_pads(&mut self) -> &mut [SrcPad] {
         std::slice::from_mut(&mut self.pad)
     }
 }
 
-impl Sink for D3d11NvencEncoder {
-    /// NVENC reads the texture directly; a system-memory frame needs a D3d11Upload first.
+impl Sink for D3d11VideoEncoder {
+    /// The encoder reads the texture directly; a system-memory frame needs a D3d11Upload first.
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(PortContract::frame(
             MediaKind::VideoFrame,
@@ -737,17 +779,17 @@ impl Sink for D3d11NvencEncoder {
                 self.encoder
                     .send_eof()
                     .inspect_err(|error| pp_error!(self, "send_eof failed: {error}"))
-                    .map_err(D3d11NvencEncoderError::from)?;
+                    .map_err(D3d11VideoEncoderError::from)?;
                 self.drain()?;
                 self.pad.push(MediaBuffer::Eos)
             }
-            other => Err(D3d11NvencEncoderError::UnsupportedBuffer(other.kind()).into()),
+            other => Err(D3d11VideoEncoderError::UnsupportedBuffer(other.kind()).into()),
         }
     }
 
     fn control(&mut self, msg: ControlMsg) -> Result<()> {
         // Same deliberate choice as `SwEncoder::control`: Seek is forwarded
-        // without flushing, since NVENC can still emit packets originating
+        // without flushing, since the encoder can still emit packets originating
         // before the seek from later `send_frame` calls. A caller needing a
         // hard encoded-stream discontinuity rebuilds the encoder.
         self.pad.control(msg)
@@ -760,10 +802,10 @@ mod tests {
     use crate::test_support::try_d3d11_device as try_device;
 
     fn options(
-        codec: D3d11NvencCodec,
-        input_format: D3d11NvencInputFormat,
-    ) -> D3d11NvencEncoderOptions {
-        D3d11NvencEncoderOptions {
+        codec: D3d11VideoCodec,
+        input_format: D3d11VideoInputFormat,
+    ) -> D3d11VideoEncoderOptions {
+        D3d11VideoEncoderOptions {
             codec,
             input_format,
             width: 320,
@@ -828,6 +870,35 @@ mod tests {
         gpu_frame_with_backing_size(device, format, width, height, width, height)
     }
 
+    /// Every codec this element offers, against both input formats. Whichever
+    /// of them this machine cannot open is skipped with a reason rather than
+    /// failed: the NVENC pair needs an NVIDIA GPU, and the Media Foundation
+    /// pair needs a driver that registers a hardware transform — a machine
+    /// having one and not the other is the ordinary case, and is the reason
+    /// both exist.
+    const CODEC_MATRIX: [(D3d11VideoCodec, D3d11VideoInputFormat); 8] = [
+        (D3d11VideoCodec::H264Nvenc, D3d11VideoInputFormat::Nv12),
+        (D3d11VideoCodec::H264Nvenc, D3d11VideoInputFormat::Bgra),
+        (D3d11VideoCodec::H265Nvenc, D3d11VideoInputFormat::Nv12),
+        (D3d11VideoCodec::H265Nvenc, D3d11VideoInputFormat::Bgra),
+        (
+            D3d11VideoCodec::H264MediaFoundation,
+            D3d11VideoInputFormat::Nv12,
+        ),
+        (
+            D3d11VideoCodec::H264MediaFoundation,
+            D3d11VideoInputFormat::Bgra,
+        ),
+        (
+            D3d11VideoCodec::H265MediaFoundation,
+            D3d11VideoInputFormat::Nv12,
+        ),
+        (
+            D3d11VideoCodec::H265MediaFoundation,
+            D3d11VideoInputFormat::Bgra,
+        ),
+    ];
+
     /// The whole point of this element, end to end: real GPU textures in,
     /// real encoded packets out, for both input formats. Asserts on the
     /// packets rather than on `consume` merely returning `Ok`, since a
@@ -839,23 +910,16 @@ mod tests {
         };
         let (width, height) = (320u32, 240u32);
 
-        for (codec, input_format) in [
-            (D3d11NvencCodec::H264, D3d11NvencInputFormat::Nv12),
-            (D3d11NvencCodec::H264, D3d11NvencInputFormat::Bgra),
-            (D3d11NvencCodec::H265, D3d11NvencInputFormat::Nv12),
-            (D3d11NvencCodec::H265, D3d11NvencInputFormat::Bgra),
-        ] {
-            let mut encoder = match D3d11NvencEncoder::new(
-                format!("test-nvenc-encode-{codec:?}-{input_format:?}"),
+        for (codec, input_format) in CODEC_MATRIX {
+            let mut encoder = match D3d11VideoEncoder::new(
+                format!("test-encode-{codec:?}-{input_format:?}"),
                 &device,
                 context.clone(),
                 options(codec, input_format),
             ) {
                 Ok(encoder) => encoder,
                 Err(error) if is_absent_hardware(&error) => {
-                    eprintln!(
-                        "skipping {codec:?}/{input_format:?}: NVENC unavailable here: {error}"
-                    );
+                    eprintln!("skipping {codec:?}/{input_format:?}: unavailable here: {error}");
                     continue;
                 }
                 Err(error) => panic!("{codec:?}/{input_format:?} failed to open: {error}"),
@@ -910,14 +974,14 @@ mod tests {
     /// failure and must not be swallowed: an earlier version of this test
     /// treated *every* error as "skip" and reported a green run while
     /// `av_hwframe_ctx_init` was failing with `E_INVALIDARG` on every call.
-    fn is_absent_hardware(error: &D3d11NvencEncoderError) -> bool {
+    fn is_absent_hardware(error: &D3d11VideoEncoderError) -> bool {
         match error {
-            D3d11NvencEncoderError::CodecNotFound(_) => true,
+            D3d11VideoEncoderError::CodecNotFound(_) => true,
             // `AVERROR_EXTERNAL` is what NVENC returns when no capable
             // NVIDIA device is present. An old driver reports `ENOSYS`.
             // Other codec-open failures are real regressions, not skips.
-            D3d11NvencEncoderError::Ffmpeg(ffmpeg::Error::External) => true,
-            D3d11NvencEncoderError::Ffmpeg(ffmpeg::Error::Other { errno })
+            D3d11VideoEncoderError::Ffmpeg(ffmpeg::Error::External) => true,
+            D3d11VideoEncoderError::Ffmpeg(ffmpeg::Error::Other { errno })
                 if *errno == ffmpeg::util::error::ENOSYS =>
             {
                 true
@@ -930,29 +994,22 @@ mod tests {
     /// once: `h264_nvenc` present in the linked ffmpeg, a driver new enough
     /// for its NVENC API version, and a frames context this GPU accepts.
     #[test]
-    fn opens_for_both_codecs_and_input_formats_on_real_hardware() {
+    fn opens_for_every_codec_and_input_format_on_real_hardware() {
         let Some((device, context)) = try_device() else {
             return;
         };
-        for (codec, input_format) in [
-            (D3d11NvencCodec::H264, D3d11NvencInputFormat::Nv12),
-            (D3d11NvencCodec::H264, D3d11NvencInputFormat::Bgra),
-            (D3d11NvencCodec::H265, D3d11NvencInputFormat::Nv12),
-            (D3d11NvencCodec::H265, D3d11NvencInputFormat::Bgra),
-        ] {
-            match D3d11NvencEncoder::new(
-                format!("test-nvenc-{codec:?}-{input_format:?}"),
+        for (codec, input_format) in CODEC_MATRIX {
+            match D3d11VideoEncoder::new(
+                format!("test-open-{codec:?}-{input_format:?}"),
                 &device,
                 context.clone(),
                 options(codec, input_format),
             ) {
                 Ok(encoder) => {
-                    assert_eq!(encoder.element_type(), ElementType::D3d11NvencEncoder);
+                    assert_eq!(encoder.element_type(), ElementType::D3d11VideoEncoder);
                 }
                 Err(error) if is_absent_hardware(&error) => {
-                    eprintln!(
-                        "skipping {codec:?}/{input_format:?}: NVENC unavailable here: {error}"
-                    );
+                    eprintln!("skipping {codec:?}/{input_format:?}: unavailable here: {error}");
                 }
                 Err(error) => panic!("{codec:?}/{input_format:?} failed to open: {error}"),
             }
@@ -968,18 +1025,18 @@ mod tests {
             return;
         };
 
-        let error = match D3d11NvencEncoder::new(
+        let error = match D3d11VideoEncoder::new(
             "test-nvenc-context-mismatch",
             &device,
             other_context,
-            options(D3d11NvencCodec::H264, D3d11NvencInputFormat::Nv12),
+            options(D3d11VideoCodec::H264Nvenc, D3d11VideoInputFormat::Nv12),
         ) {
             Ok(_) => panic!("a context from another device must be rejected"),
             Err(error) => error,
         };
         assert!(matches!(
             error,
-            D3d11NvencEncoderError::ContextDeviceMismatch
+            D3d11VideoEncoderError::ContextDeviceMismatch
         ));
     }
 
@@ -994,11 +1051,11 @@ mod tests {
         let Some((foreign_device, _)) = try_device() else {
             return;
         };
-        let mut encoder = match D3d11NvencEncoder::new(
+        let mut encoder = match D3d11VideoEncoder::new(
             "test-nvenc-texture-validation",
             &device,
             context,
-            options(D3d11NvencCodec::H264, D3d11NvencInputFormat::Nv12),
+            options(D3d11VideoCodec::H264Nvenc, D3d11VideoInputFormat::Nv12),
         ) {
             Ok(encoder) => encoder,
             Err(error) if is_absent_hardware(&error) => {
@@ -1018,7 +1075,7 @@ mod tests {
             .expect_err("a foreign-device texture must be rejected");
         assert!(matches!(
             error,
-            crate::error::Error::D3d11NvencEncoderError(D3d11NvencEncoderError::DeviceMismatch)
+            crate::error::Error::D3d11VideoEncoderError(D3d11VideoEncoderError::DeviceMismatch)
         ));
 
         let small_device = device.clone();
@@ -1034,8 +1091,8 @@ mod tests {
             .expect_err("a too-small backing texture must be rejected");
         assert!(matches!(
             error,
-            crate::error::Error::D3d11NvencEncoderError(
-                D3d11NvencEncoderError::TextureTooSmall { .. }
+            crate::error::Error::D3d11VideoEncoderError(
+                D3d11VideoEncoderError::TextureTooSmall { .. }
             )
         ));
 
@@ -1058,8 +1115,8 @@ mod tests {
             .expect_err("an out-of-range texture-array slice must be rejected");
         assert!(matches!(
             error,
-            crate::error::Error::D3d11NvencEncoderError(
-                D3d11NvencEncoderError::InvalidArrayIndex { .. }
+            crate::error::Error::D3d11VideoEncoderError(
+                D3d11VideoEncoderError::InvalidArrayIndex { .. }
             )
         ));
 
@@ -1119,11 +1176,11 @@ mod tests {
         let Some((device, context)) = try_device() else {
             return;
         };
-        let mut encoder = match D3d11NvencEncoder::new(
+        let mut encoder = match D3d11VideoEncoder::new(
             "test-nvenc-reject",
             &device,
             context,
-            options(D3d11NvencCodec::H264, D3d11NvencInputFormat::Nv12),
+            options(D3d11VideoCodec::H264Nvenc, D3d11VideoInputFormat::Nv12),
         ) {
             Ok(encoder) => encoder,
             Err(error) if is_absent_hardware(&error) => {

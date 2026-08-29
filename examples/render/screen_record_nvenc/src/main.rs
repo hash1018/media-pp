@@ -45,8 +45,8 @@ mod windows_example {
     use media_pp::ffmpeg;
     use media_pp::{
         elements::{
-            CaptureMode, D3d11NvencCodec, D3d11NvencEncoder, D3d11NvencEncoderOptions,
-            D3d11NvencInputFormat, DxgiCaptureOptions, DxgiCaptureSource, Mp4Muxer,
+            CaptureMode, D3d11VideoCodec, D3d11VideoEncoder, D3d11VideoEncoderOptions,
+            D3d11VideoInputFormat, DxgiCaptureOptions, DxgiCaptureSource, Mp4Muxer,
         },
         pipeline::Pipeline,
     };
@@ -78,15 +78,15 @@ mod windows_example {
         let gpu = D3d11GpuContext::new(Some(device))
             .map_err(|e| media_pp::Error::Other(format!("{e:?}")))?;
 
-        let encoder = D3d11NvencEncoder::new(
+        let encoder = D3d11VideoEncoder::new(
             "encoder",
             gpu.device(),
             gpu.context(),
-            D3d11NvencEncoderOptions {
-                codec: D3d11NvencCodec::H264,
+            D3d11VideoEncoderOptions {
+                codec: D3d11VideoCodec::H264Nvenc,
                 // What removes the conversion step: DXGI desktop duplication
                 // produces BGRA and NVENC accepts BGRA textures as-is.
-                input_format: D3d11NvencInputFormat::Bgra,
+                input_format: D3d11VideoInputFormat::Bgra,
                 width: format.width,
                 height: format.height,
                 time_base: format.time_base,

@@ -182,7 +182,7 @@ impl D3d11ScalerFormat {
 /// the scaled frame into its own single src pad.
 ///
 /// This is what makes a resolution change possible inside a D3D11 pipeline
-/// at all — `D3d11Decoder -> D3d11Scaler -> D3d11NvencEncoder` stays on the
+/// at all — `D3d11Decoder -> D3d11Scaler -> D3d11VideoEncoder` stays on the
 /// GPU end to end, where the alternatives were
 /// [`crate::elements::D3d11Download`] plus [`crate::elements::SwScaler`]
 /// plus [`crate::elements::D3d11Upload`] (two PCIe crossings per frame), or
@@ -206,7 +206,7 @@ impl D3d11ScalerFormat {
 /// `D3d11Decoder -> D3d11Scaler(Bgra) -> D3d11ChromaKey` is what lets a
 /// decoded green screen be keyed without ever leaving the GPU. The other
 /// direction exists for the same reason in reverse, though it is needed
-/// less often: [`crate::elements::D3d11NvencEncoder`] ingests either format
+/// less often: [`crate::elements::D3d11VideoEncoder`] ingests either format
 /// and [`crate::elements::D3d11Renderer`] draws either.
 ///
 /// A converted frame is retagged for what it now holds rather than

@@ -684,10 +684,10 @@ mod d3d11 {
     use media_pp::{
         color::Color,
         elements::{
-            ChromaKeyMethod, ChromaKeyOptions, D3d11ChromaKey, D3d11Decoder, D3d11NvencCodec,
-            D3d11NvencEncoder, D3d11NvencEncoderOptions, D3d11NvencInputFormat, D3d11Scaler,
-            D3d11ScalerFormat, D3d11Upload, D3d11VideoCompositor, FrameCounter, PacketCounter,
-            SwScaler, VideoCompositorOptions, VideoLayer, VideoRect,
+            ChromaKeyMethod, ChromaKeyOptions, D3d11ChromaKey, D3d11Decoder, D3d11Scaler,
+            D3d11ScalerFormat, D3d11Upload, D3d11VideoCodec, D3d11VideoCompositor,
+            D3d11VideoEncoder, D3d11VideoEncoderOptions, D3d11VideoInputFormat, FrameCounter,
+            PacketCounter, SwScaler, VideoCompositorOptions, VideoLayer, VideoRect,
         },
         pipeline::Pipeline,
     };
@@ -887,10 +887,10 @@ mod d3d11 {
     /// the support probe has to open an encoder with exactly the options a
     /// cycle will use — a codec or input format the driver refuses is a
     /// skip, not a leak.
-    fn nvenc_options(time_base: ffmpeg::Rational) -> D3d11NvencEncoderOptions {
-        D3d11NvencEncoderOptions {
-            codec: D3d11NvencCodec::H264,
-            input_format: D3d11NvencInputFormat::Nv12,
+    fn nvenc_options(time_base: ffmpeg::Rational) -> D3d11VideoEncoderOptions {
+        D3d11VideoEncoderOptions {
+            codec: D3d11VideoCodec::H264Nvenc,
+            input_format: D3d11VideoInputFormat::Nv12,
             width: WIDTH,
             height: HEIGHT,
             time_base,
@@ -923,7 +923,7 @@ mod d3d11 {
                 ffmpeg::software::scaling::Flags::BILINEAR,
             );
             let upload = D3d11Upload::new("upload", &device, WIDTH, HEIGHT);
-            let encoder = D3d11NvencEncoder::new(
+            let encoder = D3d11VideoEncoder::new(
                 "encoder",
                 &device,
                 context.clone(),
@@ -953,7 +953,7 @@ mod d3d11 {
     /// Whether this GPU and FFmpeg build have NVENC at all.
     fn nvenc_supported(device: &ID3D11Device, context: &Arc<Mutex<ID3D11DeviceContext>>) -> bool {
         let time_base = test_source("probe").time_base();
-        match D3d11NvencEncoder::new("probe", device, context.clone(), nvenc_options(time_base)) {
+        match D3d11VideoEncoder::new("probe", device, context.clone(), nvenc_options(time_base)) {
             Ok(_) => true,
             Err(error) => {
                 eprintln!("skipping: no D3D11 NVENC encoder on this machine ({error})");

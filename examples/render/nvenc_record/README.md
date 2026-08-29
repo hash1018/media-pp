@@ -13,7 +13,7 @@ upload onward.
 `cuda_record` is the same graph on the CUDA backend, in its own crate because
 CUDA is a vendor backend rather than a platform one and runs on Windows too.
 
-Needs an NVIDIA GPU and an ffmpeg build with NVENC; `D3d11NvencEncoder` reports
+Needs an NVIDIA GPU and an ffmpeg build with NVENC; `D3d11VideoEncoder` reports
 a typed error rather than panicking on anything else. No window and no media
 file are involved, so this runs headless.
 

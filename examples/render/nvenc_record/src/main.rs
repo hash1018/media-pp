@@ -11,7 +11,7 @@
 //! `cuda_record` is the same graph on the CUDA backend, in its own crate
 //! because CUDA is a vendor backend rather than a platform one and runs on
 //! Windows too. Needs an NVIDIA GPU and an ffmpeg build with NVENC;
-//! `D3d11NvencEncoder` reports a typed error rather than panicking on anything
+//! `D3d11VideoEncoder` reports a typed error rather than panicking on anything
 //! else. No window and no media file are involved, so this runs headless.
 //!
 //!     cargo run -p nvenc_record -- [output.mp4] [seconds]
@@ -37,8 +37,8 @@ mod windows_example {
     use media_pp::ffmpeg;
     use media_pp::{
         elements::{
-            AppSource, D3d11NvencCodec, D3d11NvencEncoder, D3d11NvencEncoderOptions,
-            D3d11NvencInputFormat, D3d11Upload, Mp4Muxer, SwScaler,
+            AppSource, D3d11Upload, D3d11VideoCodec, D3d11VideoEncoder, D3d11VideoEncoderOptions,
+            D3d11VideoInputFormat, Mp4Muxer, SwScaler,
         },
         pipeline::Pipeline,
     };
@@ -63,17 +63,17 @@ mod windows_example {
             D3d11GpuContext::new(None).map_err(|e| media_pp::Error::Other(format!("{e:?}")))?;
         let (source, source_handle) = AppSource::new("source", 8);
 
-        let encoder = D3d11NvencEncoder::new(
+        let encoder = D3d11VideoEncoder::new(
             "encoder",
             gpu.device(),
             gpu.context(),
-            D3d11NvencEncoderOptions {
-                codec: D3d11NvencCodec::H264,
+            D3d11VideoEncoderOptions {
+                codec: D3d11VideoCodec::H264Nvenc,
                 // D3d11Upload produces NV12 textures. Feeding this element a
                 // D3d11VideoCompositor or DxgiCaptureSource GPU-mode output
                 // instead means `Bgra` here and no SwScaler at all — NVENC takes
                 // BGRA textures directly.
-                input_format: D3d11NvencInputFormat::Nv12,
+                input_format: D3d11VideoInputFormat::Nv12,
                 width,
                 height,
                 time_base: recording.time_base,

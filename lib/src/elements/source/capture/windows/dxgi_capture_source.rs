@@ -1292,7 +1292,7 @@ impl DxgiCaptureSource {
     ///
     /// Downstream consumers read this rather than guessing:
     /// `D3d11VideoCompositor` uses it to pick its NV12 conversion matrix,
-    /// and [`crate::elements::D3d11NvencEncoder`] forwards it. Note it does
+    /// and [`crate::elements::D3d11VideoEncoder`] forwards it. Note it does
     /// **not** change what a BGRA-input NVENC recording is tagged with —
     /// NVENC converts RGB to YUV inside its own encode block with a fixed
     /// matrix and tags the bitstream to match what it actually did, which
