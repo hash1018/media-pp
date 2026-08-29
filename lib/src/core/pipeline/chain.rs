@@ -518,6 +518,89 @@ impl ChainBuilder {
         Ok(DetachedBranch { root, plan })
     }
 
+    /// Ends the chain at an already-assembled [`DetachedBranch`] — a
+    /// [`crate::elements::TeeBuilder`]'s fan-out, in practice — instead of a
+    /// plain `Sink`.
+    ///
+    /// A `Tee` cannot be a [`Self::pipe`] stage: its outputs live behind a
+    /// lock rather than in `src_pads`, so it is not a `Source` and nothing
+    /// can be chained onto it. It is still where a chain *ends*, though, and
+    /// without this the only way to put stages in front of one is to attach
+    /// the fan-out to a mid-chain element's own pad and then attach that
+    /// element separately.
+    ///
+    /// That wires the buffers correctly but misrecords the topology.
+    /// [`Context::attach`] always names the pipeline's source as the parent
+    /// node, because the element whose pad it was handed is not in the graph
+    /// yet — there is no other id it could use. The fan-out then renders as
+    /// the source's own, leaving an element it never passed through.
+    ///
+    /// Joining the two plans here keeps the edge on the stage that really
+    /// feeds the branch, so one attach commits the whole subgraph and the
+    /// diagram shows the fan-out where it occurs.
+    pub fn to_branch(self, downstream: DetachedBranch) -> Result<DetachedBranch> {
+        if let Some(error) = self.error {
+            return Err(error.into());
+        }
+        let DetachedBranch {
+            root: sink,
+            mut plan,
+        } = downstream;
+
+        // This chain's stages, in front of the plan that arrived. What the
+        // branch ends in is untouched: it was assembled by its own `to`.
+        let mut nodes: Vec<_> = self.planned.iter().map(|node| node.info.clone()).collect();
+        let mut edges = Vec::with_capacity(self.planned.len() + plan.edges.len());
+        for (index, node) in self.planned.iter().enumerate() {
+            // The last stage feeds the branch's root; every other one feeds
+            // the stage after it.
+            let consumer = self
+                .planned
+                .get(index + 1)
+                .map_or(plan.root, |next| next.info.id);
+            edges.push(PlannedEdge {
+                from: PortRef {
+                    element: node.info.id,
+                    port: node.output_port.clone(),
+                },
+                to: PortRef {
+                    element: consumer,
+                    port: "sink".into(),
+                },
+            });
+            plan.contracts.insert(
+                node.info.id,
+                PortContracts {
+                    input: node.input,
+                    output: node.output,
+                },
+            );
+        }
+        // A chain with no stages of its own is the branch itself, root
+        // included — there is nothing in front of it to become the new one.
+        let root_id = nodes.first().map_or(plan.root, |node| node.id);
+        edges.append(&mut plan.edges);
+        nodes.append(&mut plan.nodes);
+        let plan = BranchPlan {
+            nodes,
+            edges,
+            contracts: plan.contracts,
+            root: root_id,
+        };
+        // The same walk `to` runs, over the joined plan: a stage added in
+        // front can be what makes a link below the branch's root impossible.
+        plan.resolve(None)?;
+
+        let root = self
+            .elements
+            .into_iter()
+            .rev()
+            .try_fold(sink, |downstream, stage| {
+                stage.wrap(downstream, &self.context.bus, &self.context.pipeline_id)
+            })?;
+        Ok(DetachedBranch { root, plan })
+    }
+
     /// Alias of [`Self::to`] retained for callers that prefer builder-style
     /// terminology when supplying the terminal sink.
     pub fn build(self, terminal: Box<dyn Sink>) -> Result<DetachedBranch> {

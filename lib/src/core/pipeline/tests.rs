@@ -1189,6 +1189,80 @@ fn topology_attributes_tee_branches_to_the_tee_not_the_source() {
     );
 }
 
+/// A fan-out that a chain reaches through [`ChainBuilder::to_branch`] should
+/// render under the stage that feeds it, not under the pipeline's source.
+///
+/// The two-step alternative — attach the `Tee` to a mid-chain element's pad,
+/// then attach that element — links the buffers identically but records the
+/// edge as the source's, because the element it was really handed is not in
+/// the graph yet when [`Context::attach`] runs. That put the fan-out on the
+/// wrong element in every diagram and in every bus attribution derived from
+/// the graph.
+#[test]
+fn topology_attributes_a_fan_out_to_the_stage_that_feeds_it() {
+    let Some(path) = try_test_video() else { return };
+    let (source, streams) = FileDemuxer::open("demux", &path).expect("open test video");
+    let video = streams
+        .iter()
+        .find(|s| s.kind == ffmpeg_next::media::Type::Video)
+        .expect("test video has a video stream");
+    let index = video.index;
+    let time_base = source.stream_time_base(index).expect("stream disappeared");
+
+    let pipeline = Pipeline::new("test", source, |source, ctx| {
+        let branch_a = ctx.branch().to(Box::new(NoOpSink {
+            name: "sink-a".into(),
+            pp_log: element_pp_log(ElementType::Other, "sink-a", None),
+        }))?;
+        let branch_b = ctx.branch().to(Box::new(NoOpSink {
+            name: "sink-b".into(),
+            pp_log: element_pp_log(ElementType::Other, "sink-b", None),
+        }))?;
+        let tee_branch = TeeBuilder::new("tee", ctx.clone())
+            .branch(branch_a)
+            .branch(branch_b)
+            .build()?;
+
+        let pacer = Pacer::new("pacer", time_base, ctx.clock.clone())?;
+        let branch = ctx.branch().pipe(pacer).to_branch(tee_branch)?;
+        ctx.attach(source, index, branch)?;
+        Ok(())
+    })
+    .expect("test pipeline wiring must succeed");
+
+    let graph = pipeline.graph();
+    assert_eq!(
+        graph.revision, 2,
+        "the stage in front and the whole fan-out commit as one subgraph"
+    );
+    let branch_id = graph.edges[0].branch_id;
+    assert!(
+        graph.edges.iter().all(|edge| edge.branch_id == branch_id),
+        "one attach must commit every edge, the joining one included"
+    );
+    assert_eq!(
+        graph.topology_diagram(),
+        concat!(
+            "FileDemuxer(demux)#1\n",
+            "└── [src_0] → Pacer(pacer)#5\n",
+            "              └── [pacer_src] → Tee(tee)#4\n",
+            "                                ├── [tee_src0] → Other(sink-a)#2\n",
+            "                                └── [tee_src1] → Other(sink-b)#3",
+        )
+    );
+
+    let topology = pipeline.topology();
+    let mut branches: Vec<&str> = topology.split('\n').collect();
+    branches.sort_unstable();
+    assert_eq!(
+        branches,
+        vec![
+            "FileDemuxer(demux) - Pacer(pacer) - Tee(tee) - Other(sink-a)",
+            "FileDemuxer(demux) - Pacer(pacer) - Tee(tee) - Other(sink-b)",
+        ]
+    );
+}
+
 /// Once a branch is pulled off a [`Tee`] via [`TeeHandle::detach`],
 /// it should stop showing up in [`Pipeline::topology`] entirely — not
 /// keep rendering as still attached under `Tee(...)`, which is what a
