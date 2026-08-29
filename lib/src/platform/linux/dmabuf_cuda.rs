@@ -359,8 +359,33 @@ impl DmaBufCudaImporter {
             return Err(error);
         }
 
-        // Mapping is the synchronization point: CUDA guarantees GL work
-        // issued before it completes first, so no glFinish is needed.
+        // The readback has to have *happened*, not merely been issued.
+        //
+        // `glReadPixels` into a pixel-pack buffer is asynchronous, and mapping
+        // that buffer into CUDA does not reliably wait for it here — whatever
+        // the interop is documented to guarantee, measured behaviour on this
+        // driver is that it does not. Without this wait the copy below reads
+        // the buffer's *previous* contents, which under load is a picture
+        // some ten frames old: the GPU is that far behind the commands the
+        // CPU has queued, and the last readback to have actually landed is
+        // that far back.
+        //
+        // Measured by reading a frame counter straight back out of the
+        // imported surface, on a 60 fps desktop capture under load, counting
+        // how often it goes backwards over 20 seconds:
+        //
+        // ```text
+        // without this wait   14, 168, 9   times
+        // with it              1,   1, 1
+        // ```
+        //
+        // `glFinish` rather than a fence: this EGL context belongs to the
+        // importer alone and the readback just issued is the only work in it,
+        // so a narrower wait would wait for exactly the same thing. It costs
+        // no throughput — the capture keeps as many frames per second as it
+        // did without it — because the result is needed on the very next
+        // line either way.
+        self.gl.finish();
         let source = self.cuda.map_buffer(resource);
         let result = source.and_then(|source| {
             self.cuda.copy_2d(
@@ -861,6 +886,7 @@ struct Gl {
     bind_buffer: unsafe extern "C" fn(c_uint, c_uint),
     buffer_data: unsafe extern "C" fn(c_uint, isize, *const c_void, c_uint),
     read_pixels: unsafe extern "C" fn(c_int, c_int, c_int, c_int, c_uint, c_uint, *mut c_void),
+    finish: unsafe extern "C" fn(),
     get_error: unsafe extern "C" fn() -> c_uint,
     /// From `GL_OES_EGL_image`, resolved through `eglGetProcAddress` — this
     /// is the call that makes the imported DMA-BUF a GL texture.
@@ -904,6 +930,7 @@ impl Gl {
                 bind_buffer: cast(resolve("glBindBuffer")?),
                 buffer_data: cast(resolve("glBufferData")?),
                 read_pixels: cast(resolve("glReadPixels")?),
+                finish: cast(resolve("glFinish")?),
                 get_error: cast(resolve("glGetError")?),
                 image_target_texture: cast(image_target),
             }
@@ -1001,6 +1028,12 @@ impl Gl {
     fn delete_buffer(&self, buffer: c_uint) {
         // SAFETY: reads one name, which is what `buffer` is.
         unsafe { (self.delete_buffers)(1, &buffer) };
+    }
+
+    /// Blocks until the GL commands issued on this context have completed.
+    fn finish(&self) {
+        // SAFETY: resolved from the live GL library and takes no arguments.
+        unsafe { (self.finish)() };
     }
 
     fn bind_buffer(&self, target: c_uint, buffer: c_uint) {
