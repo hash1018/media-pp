@@ -43,23 +43,38 @@ use crate::{
 ///
 /// # What the origin is
 ///
-/// The earliest timestamp on the first packet, which with B-frames is its
-/// `dts` rather than its `pts`. Taking the earlier of the two is what keeps
-/// the shifted stream from starting before zero: an encoder that reorders
-/// emits its first packet for decoding before it is displayed, and a negative
-/// `dts` is a thing muxers work around rather than something to hand them.
-/// The reorder delay survives as a `pts` a frame or two above zero, which is
-/// what it is.
+/// The first packet's `pts` — where the recording begins to be *seen*, which
+/// is what has to land at zero.
+///
+/// With a reordering encoder that is not its `dts`: the first packet is
+/// decoded before it is displayed, so `dts` runs a reorder delay behind. Take
+/// `dts` as the origin and the shifted stream starts at zero for decoding but
+/// a frame or two above it for presentation — and a muxer writes that as
+/// content genuinely beginning that far in. Alone in a file nothing notices.
+/// Beside an audio track, which has no reordering and so starts at zero, the
+/// picture is simply late by the delay: about 50 ms for H.264 with two
+/// B-frames at 60 fps, and on the side of the sync window a listener notices
+/// first.
+///
+/// So `dts` is allowed to go negative for those first packets, which is what
+/// FFmpeg's own encoders hand a muxer and what an mp4 muxer's edit list
+/// exists to absorb. Checked against `ffmpeg -c:v h264_nvenc -c:a aac`, whose
+/// output starts `pts 0.000 / dts -0.050` on the video track and `0.000` on
+/// the audio one, with both streams reporting a `start_time` of zero.
 ///
 /// # One stream at a time
 ///
-/// Each of these establishes its own origin from its own first packet. Two of
-/// them, on the two tracks of one file, would each start at their own first
-/// packet and so disagree by up to one packet's worth of time — audio packets
-/// being much longer than video ones, that is audible. A file whose tracks
-/// must stay in sync needs one shared origin, which this deliberately does
-/// not have: there is one track today, and a shared one is a different type
-/// with a handle rather than a flag added here.
+/// Each of these establishes its own origin from its own first packet, so two
+/// of them on the two tracks of one file agree only to within whatever
+/// separates those first packets. That has been measured rather than left as
+/// a worry: a flash and a beep recorded together through `obs-rs`, on four
+/// runs, landed −1.7, +5.0, +8.3 and +16.7 ms apart — scatter the width of
+/// one video frame, which is the measurement's own resolution rather than a
+/// systematic offset.
+///
+/// So a shared origin is still not here, and now for a reason: it would be a
+/// different type carrying a handle, and nothing has yet been shown to need
+/// it.
 ///
 /// # Cost
 ///
@@ -91,22 +106,27 @@ impl TimestampOrigin {
     /// The origin to subtract, establishing it from this packet if it is the
     /// first one carrying a timestamp at all.
     ///
-    /// `None` for a packet with neither `pts` nor `dts`: there is nothing to
-    /// shift, and nothing to shift it by, so such a packet must not become
-    /// the origin either — the next one that does carry a timestamp is what
-    /// this branch actually starts at.
+    /// The first `pts`, not the earlier of `pts` and `dts`. With a reordering
+    /// encoder the two differ, and taking `dts` would leave the presentation
+    /// timeline starting at the reorder delay rather than at zero — see the
+    /// type's own docs for why that is the wrong end to anchor.
+    ///
+    /// `None` for a packet with neither: there is nothing to shift, and
+    /// nothing to shift it by, so such a packet must not become the origin
+    /// either — the next one that does carry a timestamp is what this branch
+    /// actually starts at.
     fn origin_for(&mut self, packet: &ffmpeg::Packet) -> Option<i64> {
         if let Some(origin) = self.origin {
             return Some(origin);
         }
-        let earliest = match (packet.dts(), packet.pts()) {
-            (Some(dts), Some(pts)) => dts.min(pts),
-            (Some(only), None) | (None, Some(only)) => only,
+        let first = match (packet.pts(), packet.dts()) {
+            (Some(pts), _) => pts,
+            (None, Some(dts)) => dts,
             (None, None) => return None,
         };
-        self.origin = Some(earliest);
-        pp_info!(self, "timeline starts at {earliest}");
-        Some(earliest)
+        self.origin = Some(first);
+        pp_info!(self, "timeline starts at {first}");
+        Some(first)
     }
 }
 
@@ -268,16 +288,21 @@ mod tests {
     }
 
     /// A reordering encoder emits its first packet for decoding before it is
-    /// displayed. Taking the `pts` as the origin would put that packet's
-    /// `dts` below zero, which is exactly what muxers have workarounds for.
+    /// displayed, so its `dts` trails its `pts`. The `pts` is the origin: the
+    /// picture has to start being shown at zero, or an audio track beside it
+    /// — which has no reordering — starts before it does.
+    ///
+    /// The `dts` therefore goes negative for those first packets, which is
+    /// what FFmpeg's own encoders hand a muxer and what an mp4 edit list
+    /// absorbs.
     #[test]
-    fn a_reordered_stream_does_not_start_before_zero() {
+    fn a_reordered_stream_is_anchored_on_what_is_seen_first() {
         let mut origin = TimestampOrigin::new("origin");
         let received = capture(&mut origin);
 
-        // What NVENC produces with B-frames: dts trails pts by the reorder
-        // delay, and the first packet's dts is the earliest thing in the
-        // stream.
+        // What NVENC produces with two B-frames at 60 fps in a 1/15360 time
+        // base: the first packet is displayed 768 ticks (50 ms) after the
+        // first one is decoded.
         origin
             .consume(packet(Some(247_803), Some(247_035)))
             .unwrap();
@@ -287,8 +312,8 @@ mod tests {
 
         assert_eq!(
             stamps(&received),
-            vec![(Some(768), Some(0)), (Some(1792), Some(256))],
-            "the earliest timestamp is the origin, so nothing lands below zero"
+            vec![(Some(0), Some(-768)), (Some(1024), Some(-512))],
+            "presentation starts at zero and decoding runs the reorder delay ahead of it"
         );
     }
 
