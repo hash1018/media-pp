@@ -67,6 +67,7 @@ pub enum ElementType {
     WebRtcPeer,
     /// Packet timestamp rebase filter.
     FrameRateLimiter,
+    PauseGate,
     TimestampOrigin,
     /// Video change/rate gate filter.
     ChangeGate,

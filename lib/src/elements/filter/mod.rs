@@ -6,7 +6,8 @@
 //! rather than *what* — [`Pacer`], which holds a frame until its presentation
 //! time, [`VideoSynchronizer`], [`ChangeGate`], which forwards a picture only
 //! when it is not the one it forwarded last, [`FrameRateLimiter`], which
-//! forwards them at a lower rate than they arrive at, and
+//! forwards them at a lower rate than they arrive at, [`PauseGate`], which
+//! stops a branch taking them and closes the timeline over the gap, and
 //! [`TimestampOrigin`], which moves a branch's timeline back to zero. [`Tee`] is here too, as the one filter
 //! whose fan-out can change while the pipeline runs.
 //!
@@ -25,6 +26,7 @@ mod download;
 mod frame_rate_limiter;
 mod encoder;
 mod pacer;
+mod pause_gate;
 pub(crate) mod scaler;
 mod tee;
 mod timestamp_origin;
@@ -73,6 +75,7 @@ pub use scaler::{D3d12Scaler, D3d12ScalerError};
 pub use scaler::{SwScaler, SwScalerError};
 pub use tee::{Tee, TeeBuilder, TeeHandle};
 pub use frame_rate_limiter::FrameRateLimiter;
+pub use pause_gate::{PauseGate, PauseGateHandle};
 pub use timestamp_origin::TimestampOrigin;
 
 #[cfg(feature = "cuda")]
