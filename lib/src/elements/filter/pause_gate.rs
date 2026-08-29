@@ -51,6 +51,19 @@ use crate::{
 /// In front of the encoder, on frames. Behind one, the encoder would spend
 /// the whole pause compressing frames that are about to be thrown away.
 ///
+/// Directly in front of it, with nothing that buffers in between. What this
+/// forwards is a wrapper holding a *reference* to the picture rather than the
+/// pooled reference it was handed, and a frame reference keeps the buffer
+/// allocated while leaving the producer's pool free to hand that slot out
+/// again — the distinction [`ChangeGate`](crate::elements::ChangeGate) and
+/// both video compositors keep retire lists for. This needs none, because the
+/// wrapper never outlives the call that made it: the push downstream is
+/// synchronous, the encoder copies what it is given before returning, and the
+/// pooled reference this was handed is alive for the whole of that. A `Queue`
+/// between the two would end that — the wrapper would outlive the pooled
+/// reference, and the compositor would be free to draw into the slot it still
+/// names.
+///
 /// # Cost
 ///
 /// A reference to the frames it forwards and nothing at all for the ones it
@@ -182,7 +195,11 @@ impl Sink for PauseGate {
             // what has to come out of everything from here on.
             let span = pts.saturating_sub(from).max(0);
             self.skipped = self.skipped.saturating_add(span);
-            pp_info!(self, "resumed at {pts}, {span} skipped ({} total)", self.skipped);
+            pp_info!(
+                self,
+                "resumed at {pts}, {span} skipped ({} total)",
+                self.skipped
+            );
         }
 
         // A wrapper of its own rather than the buffer it was handed: this
