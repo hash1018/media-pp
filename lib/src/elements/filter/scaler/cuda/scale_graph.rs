@@ -51,6 +51,77 @@ struct GraphState {
 ///
 /// Returns null for a null reference, which no live pool ever is, so a graph
 /// compared against it rebuilds rather than matching by accident.
+/// The size to scale *through*, when scaling straight to the requested one
+/// would come out blank. `None` when the direct scale is safe, which is
+/// almost always.
+///
+/// # The defect this exists for
+///
+/// `scale_cuda`'s interpolating kernels produce an entirely zero surface when
+/// **exactly one** output dimension equals the corresponding input one.
+/// Measured against FFmpeg n8.1.2 on this machine, scaling a 1920x1080 frame:
+///
+///     -> 640x1080   every byte zero      (height unchanged)
+///     -> 1920x720   every byte zero      (width unchanged)
+///     -> 1919x1080  every byte zero      (height unchanged)
+///     -> 640x1079   correct              (neither unchanged)
+///     -> 1920x1080  correct              (both unchanged: the filter's own
+///                                         passthrough, which does not scale)
+///
+/// It is `scale_cuda`, not this crate: the same sizes reproduce through the
+/// `ffmpeg` command-line tool with no media-pp in the picture, on a graph of
+/// `format=nv12,hwupload,scale_cuda=640:1080,hwdownload`. `passthrough=0` does
+/// not avoid it and neither does `format=nv12`; only `interp_algo=nearest`
+/// does, which is a different kernel and not a quality this crate will silently
+/// drop to.
+///
+/// # Why a detour rather than a nudge
+///
+/// The obvious workaround — ask for a size one or two pixels off and use part
+/// of the result — changes the picture: the scale factor is no longer the one
+/// the caller asked for, and the difference is a silent crop or stretch. This
+/// keeps the requested size exactly, at the cost of resampling twice for the
+/// frames that would otherwise be blank.
+///
+/// The intermediate has to differ in **both** axes from both ends, or one of
+/// the two passes lands on the defect again. Since the destination shares
+/// exactly one axis with the source, `+2` on both of the destination's
+/// dimensions satisfies that everywhere except where it happens to land on the
+/// source's own size, which is why that case is stepped over. `+2` rather than
+/// `+1` keeps the parity of an NV12 frame's dimensions.
+///
+/// # What it costs
+///
+/// A second resample, on the frames that hit the defect only. In the case this
+/// was found in — dragging a layer whose scaled height passes exactly through
+/// the capture's own — that is roughly one frame in six hundred, which is the
+/// rate `obs-rs` reported the corruption at.
+fn detour(
+    input_width: u32,
+    input_height: u32,
+    width: u32,
+    height: u32,
+) -> Option<(u32, u32)> {
+    let same_width = width == input_width;
+    let same_height = height == input_height;
+    // Both unchanged is the filter's passthrough, which is correct; neither
+    // unchanged is the ordinary path. Only exactly one is broken.
+    if same_width == same_height {
+        return None;
+    }
+    let step = |wanted: u32, source: u32| {
+        let mut via = wanted + 2;
+        if via == source {
+            via += 2;
+        }
+        via
+    };
+    Some((
+        step(width, input_width),
+        step(height, input_height),
+    ))
+}
+
 fn pool_of(frames_ctx: *mut ffi::AVBufferRef) -> *const ffi::AVHWFramesContext {
     if frames_ctx.is_null() {
         return std::ptr::null();
@@ -264,15 +335,36 @@ impl CudaScaleGraph {
             ffmpeg::filter::Context::wrap(context)
         };
 
-        let mut scale = graph.add(
-            &scale,
-            "scale",
-            &format!("w={width}:h={height}:interp_algo={}", self.interp.algo()),
-        )?;
         let mut sink = graph.add(&buffersink, "out", "")?;
+        let algo = self.interp.algo();
 
-        source.link(0, &mut scale, 0);
-        scale.link(0, &mut sink, 0);
+        // One `scale_cuda`, unless this is the size that filter gets wrong —
+        // see [`detour`], which is where the whole explanation lives.
+        let mut last = match detour(frame.width(), frame.height(), width, height) {
+            None => {
+                let mut only =
+                    graph.add(&scale, "scale", &format!("w={width}:h={height}:interp_algo={algo}"))?;
+                source.link(0, &mut only, 0);
+                only
+            }
+            Some((via_width, via_height)) => {
+                let mut first = graph.add(
+                    &scale,
+                    "scale_via",
+                    &format!("w={via_width}:h={via_height}:interp_algo={algo}"),
+                )?;
+                let mut second = graph.add(
+                    &scale,
+                    "scale",
+                    &format!("w={width}:h={height}:interp_algo={algo}"),
+                )?;
+                source.link(0, &mut first, 0);
+                first.link(0, &mut second, 0);
+                second
+            }
+        };
+
+        last.link(0, &mut sink, 0);
         graph.validate()?;
 
         self.state = Some(GraphState {

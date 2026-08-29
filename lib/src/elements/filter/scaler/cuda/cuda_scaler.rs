@@ -450,6 +450,75 @@ mod tests {
         Some(frame)
     }
 
+    /// `scale_cuda` returns an entirely zero surface when exactly one output
+    /// dimension equals the input's — see `scale_graph::detour`, which is what
+    /// keeps this crate off that path.
+    ///
+    /// A flat input makes this exact rather than plausible: whatever the
+    /// interpolation does to a constant picture, every output pixel is that
+    /// same constant, so anything else is the defect.
+    #[test]
+    fn scaling_with_one_dimension_unchanged_is_not_blank() {
+        let Some((device, _cuda_lock)) = try_cuda_device() else {
+            return;
+        };
+        const LUMA: u8 = 200;
+        // Small enough to stay quick, and each case names which axis it holds.
+        for (label, out_width, out_height) in [
+            ("height unchanged", 64u32, 128u32),
+            ("width unchanged", 128, 64),
+            ("height unchanged, growing", 256, 128),
+            ("neither unchanged", 64, 64),
+            ("both unchanged", 128, 128),
+        ] {
+            let Some(frame) = cuda_frame(&device, 128, 128, LUMA, 0) else {
+                return;
+            };
+            let mut scaler =
+                CudaScaler::new("scaler", &device, out_width, out_height, CudaScalerInterp::Bilinear);
+            let scaled = capture(&mut scaler);
+            scaler.consume(frame).expect("scale");
+            let buffer = scaled.lock().unwrap().remove(0);
+
+            let mut download =
+                CudaDownload::new("download", &device, CudaFrameFormat::Nv12, out_width, out_height);
+            let got = capture(&mut download);
+            download.consume(buffer).expect("download");
+            let MediaBuffer::Video(cpu) = got.lock().unwrap().remove(0) else {
+                panic!("the download produces a Video buffer");
+            };
+
+            let stride = cpu.stride(0);
+            let pixels: Vec<u8> = (0..out_height as usize)
+                .flat_map(|y| {
+                    let row = &cpu.data(0)[y * stride..y * stride + out_width as usize];
+                    row.to_vec()
+                })
+                .collect();
+            let blank = pixels.iter().filter(|luma| **luma == 0).count();
+            assert_eq!(
+                blank,
+                0,
+                "{label}: 128x128 -> {out_width}x{out_height} came back {blank}/{} blank, which \
+                 is the `scale_cuda` defect `scale_graph::detour` exists to route around",
+                pixels.len()
+            );
+            // Within one level, not exactly equal: the detour resamples
+            // twice, and a second bilinear pass over a constant picture
+            // rounds some pixels down by one. Measured 199 on 1536 of 8192
+            // here, 200 on the rest.
+            let off = pixels
+                .iter()
+                .filter(|luma| luma.abs_diff(LUMA) > 1)
+                .count();
+            assert_eq!(
+                off, 0,
+                "{label}: {off} of {} pixels are more than one level from {LUMA}",
+                pixels.len()
+            );
+        }
+    }
+
     /// Every frame in a pool carries its own `AVBufferRef` to the one
     /// `AVHWFramesContext` behind it, because `av_buffer_ref` allocates a
     /// fresh reference rather than sharing one. Comparing the references

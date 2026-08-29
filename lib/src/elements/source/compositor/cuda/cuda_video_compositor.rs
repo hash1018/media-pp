@@ -1380,6 +1380,64 @@ mod tests {
         frame.data(0)[y * frame.stride(0) + x]
     }
 
+    /// A layer scaled so that exactly one of its dimensions matches the
+    /// source's must still be drawn.
+    ///
+    /// This is the shape `obs-rs` reported as a green flash roughly once in
+    /// six hundred frames while a layer was dragged: `scale_cuda` answers such
+    /// a size with an entirely zero surface, the blit copies that into the
+    /// composite, and zeroed NV12 resolves to green. Dragging sweeps the
+    /// scaled size continuously, so it passes through the source's own on the
+    /// way. See `scale_graph::detour`.
+    #[test]
+    fn a_layer_scaled_along_one_axis_is_not_blank() {
+        let Some((device, _cuda_lock)) = try_cuda_device() else {
+            return;
+        };
+        let (width, height) = (256u32, 128u32);
+        let Ok((mut compositor, handle)) =
+            CudaVideoCompositor::new("compositor", &device, options(width, height))
+        else {
+            eprintln!("skipping: this machine cannot open a CUDA compositor");
+            return;
+        };
+        // The layer keeps the source's height and takes half its width, which
+        // is what a horizontal drag passes through.
+        let mut input = handle
+            .add_source(
+                "layer",
+                VideoLayer {
+                    fit: VideoFit::Stretch,
+                    ..VideoLayer::new(VideoRect::new(0, 0, 64, height))
+                },
+            )
+            .expect("add source");
+        let Some(frame) = cuda_frame(&device, 128, height, 200) else {
+            return;
+        };
+        input.sink.consume(frame).expect("frame");
+
+        let composed = compositor.compose_frame().expect("compose");
+        let out = download(&device, composed, width, height);
+
+        // Inside the layer: the source's own value, within the one level a
+        // second resampling pass can round away.
+        for (x, y) in [(2, 2), (32, 64), (61, 125)] {
+            let luma = luma_at(&out, x, y);
+            assert!(
+                luma.abs_diff(200) <= 1,
+                "the layer is blank at ({x},{y}): luma {luma}, not 200"
+            );
+        }
+        // Outside it: still the background, so the layer has not been
+        // stretched over the whole canvas to hide the defect.
+        assert_eq!(
+            luma_at(&out, 200, 64),
+            16,
+            "everything outside the layer must be the background"
+        );
+    }
+
     /// The composition contract: layers land where their rectangles say, the
     /// higher `z_index` wins where they overlap, and everything else is the
     /// background.
