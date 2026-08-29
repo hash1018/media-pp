@@ -57,12 +57,14 @@ struct GraphState {
 /// **exactly one** output dimension equals the corresponding input one.
 /// Measured against FFmpeg n8.1.2 on this machine, scaling a 1920x1080 frame:
 ///
-///     -> 640x1080   every byte zero      (height unchanged)
-///     -> 1920x720   every byte zero      (width unchanged)
-///     -> 1919x1080  every byte zero      (height unchanged)
-///     -> 640x1079   correct              (neither unchanged)
-///     -> 1920x1080  correct              (both unchanged: the filter's own
-///                                         passthrough, which does not scale)
+/// ```text
+/// -> 640x1080   every byte zero      (height unchanged)
+/// -> 1920x720   every byte zero      (width unchanged)
+/// -> 1919x1080  every byte zero      (height unchanged)
+/// -> 640x1079   correct              (neither unchanged)
+/// -> 1920x1080  correct              (both unchanged: the filter's own
+///                                     passthrough, which does not scale)
+/// ```
 ///
 /// It is `scale_cuda`, not this crate: the same sizes reproduce through the
 /// `ffmpeg` command-line tool with no media-pp in the picture, on a graph of
