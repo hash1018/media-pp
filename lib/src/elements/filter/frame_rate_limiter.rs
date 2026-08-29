@@ -126,8 +126,8 @@ impl FrameRateLimiter {
         let numerator = i128::from(pts)
             * i128::from(self.input_time_base.numerator())
             * i128::from(self.rate.numerator());
-        let denominator = i128::from(self.input_time_base.denominator())
-            * i128::from(self.rate.denominator());
+        let denominator =
+            i128::from(self.input_time_base.denominator()) * i128::from(self.rate.denominator());
         // Floor division, not truncation: a negative timestamp belongs to the
         // tick before zero rather than to zero itself, and rounding it the
         // wrong way would let two frames share a tick.
@@ -384,7 +384,11 @@ mod tests {
         }
 
         let kept = kept(&received);
-        assert_eq!(kept.len(), 24, "a second of input must be a second of output");
+        assert_eq!(
+            kept.len(),
+            24,
+            "a second of input must be a second of output"
+        );
         assert_eq!(&kept[..6], &[0, 3, 5, 8, 10, 13]);
         // Consecutive all the way, which is what makes the file constant-rate.
         assert_eq!(stamps(&received), (0..24).collect::<Vec<_>>());
@@ -456,6 +460,10 @@ mod tests {
 
         limiter.control(ControlMsg::Stop).unwrap();
         limiter.consume(frame(Some(200))).unwrap();
-        assert_eq!(stamps(&received).last(), Some(&0), "a stopped run starts over");
+        assert_eq!(
+            stamps(&received).last(),
+            Some(&0),
+            "a stopped run starts over"
+        );
     }
 }

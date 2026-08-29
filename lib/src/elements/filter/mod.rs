@@ -23,8 +23,8 @@ pub(crate) mod chroma_key;
 pub(crate) mod convert;
 pub(crate) mod decoder;
 mod download;
-mod frame_rate_limiter;
 mod encoder;
+mod frame_rate_limiter;
 mod pacer;
 mod pause_gate;
 pub(crate) mod scaler;
@@ -65,7 +65,9 @@ pub use encoder::{
     D3d11NvencCodec, D3d11NvencEncoder, D3d11NvencEncoderError, D3d11NvencEncoderOptions,
     D3d11NvencInputFormat,
 };
+pub use frame_rate_limiter::FrameRateLimiter;
 pub use pacer::{Pacer, PacerError};
+pub use pause_gate::{PauseGate, PauseGateHandle};
 #[cfg(feature = "cuda")]
 pub use scaler::{CudaScaler, CudaScalerError, CudaScalerInterp};
 #[cfg(all(target_os = "windows", feature = "d3d11"))]
@@ -74,8 +76,6 @@ pub use scaler::{D3d11Scaler, D3d11ScalerError, D3d11ScalerFormat};
 pub use scaler::{D3d12Scaler, D3d12ScalerError};
 pub use scaler::{SwScaler, SwScalerError};
 pub use tee::{Tee, TeeBuilder, TeeHandle};
-pub use frame_rate_limiter::FrameRateLimiter;
-pub use pause_gate::{PauseGate, PauseGateHandle};
 pub use timestamp_origin::TimestampOrigin;
 
 #[cfg(feature = "cuda")]
