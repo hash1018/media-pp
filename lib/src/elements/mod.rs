@@ -63,7 +63,7 @@ pub use driver::{
 pub use filter::{
     AudioCodec, AudioResampler, AudioResamplerError, AudioVolume, AudioVolumeError,
     AudioVolumeHandle, AudioVolumeOptions, ChangeGate, ChromaKeyMethod, ChromaKeyOptions,
-    FrameRateLimiter, FrameRateLimiterHandle, Pacer,
+    FrameRateLimiter, Pacer,
     PacerError, SwAudioEncoder, SwAudioEncoderError, SwAudioEncoderOptions, SwChromaKey,
     SwChromaKeyError, SwDecoder, SwDecoderError, SwEncoder, SwEncoderError, SwEncoderOptions,
     SwScaler, SwScalerError, Tee, TeeBuilder, TeeHandle, TimestampOrigin, VideoCodec,

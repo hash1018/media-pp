@@ -72,7 +72,7 @@ pub use scaler::{D3d11Scaler, D3d11ScalerError, D3d11ScalerFormat};
 pub use scaler::{D3d12Scaler, D3d12ScalerError};
 pub use scaler::{SwScaler, SwScalerError};
 pub use tee::{Tee, TeeBuilder, TeeHandle};
-pub use frame_rate_limiter::{FrameRateLimiter, FrameRateLimiterHandle};
+pub use frame_rate_limiter::FrameRateLimiter;
 pub use timestamp_origin::TimestampOrigin;
 
 #[cfg(feature = "cuda")]
