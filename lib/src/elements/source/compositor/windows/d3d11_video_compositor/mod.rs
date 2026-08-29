@@ -235,9 +235,33 @@ struct GpuVideoInput {
     layer: Mutex<VideoLayer>,
 }
 
+/// Packs a positive frame rate into one word, so a reader can never catch a
+/// numerator from one setting and a denominator from another.
+///
+/// Rejected rates never get here — see
+/// [`D3d11VideoCompositorHandle::set_frame_rate`], which is the only writer
+/// besides construction, and which refuses anything this could not represent.
+fn pack_rate(rate: ffmpeg::Rational) -> u64 {
+    ((rate.numerator() as u32 as u64) << 32) | rate.denominator() as u32 as u64
+}
+
+fn unpack_rate(packed: u64) -> ffmpeg::Rational {
+    ffmpeg::Rational::new((packed >> 32) as u32 as i32, packed as u32 as i32)
+}
+
+/// How long one frame lasts at `rate`.
+fn frame_interval_of(rate: ffmpeg::Rational) -> Duration {
+    Duration::from_secs_f64(rate.denominator() as f64 / rate.numerator() as f64)
+}
+
 struct D3d11CompositorShared {
     inputs: Mutex<HashMap<Arc<str>, Arc<GpuVideoInput>>>,
     next_input_id: AtomicU64,
+    /// The output rate, as a numerator and denominator packed into one
+    /// word so a reader can never catch half of a change. Written by
+    /// [`D3d11VideoCompositorHandle::set_frame_rate`], read by the tick loop
+    /// and by [`D3d11VideoCompositor::frame_rate`].
+    frame_rate: AtomicU64,
     /// Lets [`D3d11VideoCompositorHandle::add_text_layer`] build GPU
     /// resources guaranteed to match this compositor's own device, without
     /// requiring a separately-threaded-through device parameter that could
@@ -342,6 +366,54 @@ impl D3d11VideoCompositorHandle {
     }
 
     /// Returns the number of inputs currently registered, or zero after shutdown.
+    /// Changes the rate this compositor emits at, from the next tick.
+    ///
+    /// Returns `false` for a rate that is not positive, and for a compositor
+    /// that has already been dropped.
+    ///
+    /// # What moves with it
+    ///
+    /// [`D3d11VideoCompositor::time_base`] is the reciprocal of this, and the
+    /// output `pts` is a plain tick counter in those units. So changing the
+    /// rate changes what every timestamp *since* the change means, while the
+    /// ones already downstream were stamped under the old one. Nothing here
+    /// can fix that after the fact — a muxer holding a `time_base` from
+    /// `avformat_write_header` will not be told, and an encoder's rate control
+    /// was configured once.
+    ///
+    /// So this is safe exactly while nothing downstream is reading timestamps
+    /// — a Preview, a frame counter — and it is the caller's job to know
+    /// that. In practice: change it between recordings, not during one. A
+    /// branch attached *after* the change is entirely consistent, because it
+    /// takes its `time_base` when it is built.
+    ///
+    /// The alternative would have been to refuse the change while any branch
+    /// is attached, which this cannot tell apart from a Preview, and which
+    /// would make the setting useless exactly when it is worth having.
+    pub fn set_frame_rate(&self, frame_rate: ffmpeg::Rational) -> bool {
+        if frame_rate.numerator() <= 0 || frame_rate.denominator() <= 0 {
+            return false;
+        }
+        let Some(shared) = self.shared.upgrade() else {
+            return false;
+        };
+        shared
+            .frame_rate
+            .store(pack_rate(frame_rate), Ordering::Relaxed);
+        true
+    }
+
+    /// The rate this compositor is emitting at, or `None` once it is gone.
+    ///
+    /// Read back rather than remembered by the caller: a rate refused by
+    /// [`Self::set_frame_rate`] leaves the old one in place, and the two
+    /// disagreeing is how a recording ends up configured for a rate nothing
+    /// is producing.
+    pub fn frame_rate(&self) -> Option<ffmpeg::Rational> {
+        let shared = self.shared.upgrade()?;
+        Some(unpack_rate(shared.frame_rate.load(Ordering::Relaxed)))
+    }
+
     pub fn source_count(&self) -> usize {
         self.shared
             .upgrade()
@@ -676,7 +748,6 @@ pub struct D3d11VideoCompositor {
     name: Arc<str>,
     shared: Arc<D3d11CompositorShared>,
     options: VideoCompositorOptions,
-    frame_interval: Duration,
     frame_index: i64,
     device: ID3D11Device,
     context: Arc<Mutex<ID3D11DeviceContext>>,
@@ -748,11 +819,9 @@ impl D3d11VideoCompositor {
         let shared = Arc::new(D3d11CompositorShared {
             inputs: Mutex::new(HashMap::new()),
             next_input_id: AtomicU64::new(1),
+            frame_rate: AtomicU64::new(pack_rate(options.frame_rate)),
             device: device.clone(),
         });
-        let frame_interval = Duration::from_secs_f64(
-            options.frame_rate.denominator() as f64 / options.frame_rate.numerator() as f64,
-        );
 
         // SAFETY: `device` is live; the helper reads only static shader bytes
         // and fully initialized descriptors and returns owned COM interfaces.
@@ -779,7 +848,6 @@ impl D3d11VideoCompositor {
                 pp_log,
                 shared: shared.clone(),
                 options,
-                frame_interval,
                 frame_index: 0,
                 device: device.clone(),
                 context,
@@ -827,17 +895,19 @@ impl D3d11VideoCompositor {
         self.options.height
     }
 
-    /// Returns the configured output frame rate.
+    /// The output frame rate, which is what construction was given unless
+    /// [`D3d11VideoCompositorHandle::set_frame_rate`] has changed it since.
     pub fn frame_rate(&self) -> ffmpeg::Rational {
-        self.options.frame_rate
+        unpack_rate(self.shared.frame_rate.load(Ordering::Relaxed))
     }
 
-    /// Returns the reciprocal of [`Self::frame_rate`], used as output PTS units.
+    /// The reciprocal of [`Self::frame_rate`], used as output PTS units —
+    /// and so a value that moves with it. See
+    /// [`D3d11VideoCompositorHandle::set_frame_rate`] for what that means for
+    /// anything already reading this compositor's timestamps.
     pub fn time_base(&self) -> ffmpeg::Rational {
-        ffmpeg::Rational::new(
-            self.options.frame_rate.denominator(),
-            self.options.frame_rate.numerator(),
-        )
+        let rate = self.frame_rate();
+        ffmpeg::Rational::new(rate.denominator(), rate.numerator())
     }
 
     fn snapshots(&self) -> Vec<InputSnapshot> {
@@ -1212,7 +1282,8 @@ impl SourceElement for D3d11VideoCompositor {
 
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
         pp_info!(self, "started");
-        let mut schedule = PeriodicSchedule::new(self.frame_interval, Instant::now());
+        let mut schedule =
+            PeriodicSchedule::new(frame_interval_of(self.frame_rate()), Instant::now());
         loop {
             let outcome = drain_control(control, self, bus)?;
             if outcome.stopped {
@@ -1223,7 +1294,14 @@ impl SourceElement for D3d11VideoCompositor {
                 schedule.resume_after_pause(outcome.paused_for, Instant::now());
             }
 
+            // Followed here rather than at construction, so a rate set while
+            // this is running is kept from the next tick on.
+            let interval = frame_interval_of(self.frame_rate());
             let now = Instant::now();
+            if schedule.interval() != interval {
+                pp_info!(self, "frame rate is now {}", self.frame_rate());
+                schedule.set_interval(interval, now);
+            }
             if !schedule.is_due(now) {
                 thread::sleep(schedule.remaining(now).min(CONTROL_POLL_INTERVAL));
                 continue;
@@ -2343,5 +2421,91 @@ mod tests {
              pause), not almost immediately (phase reset to the resume \
              instant): got {gap:?}"
         );
+    }
+
+    /// The whole point of the setter: the rate a running compositor emits at
+    /// can be changed, and reading it back says so.
+    #[test]
+    fn the_frame_rate_can_be_changed_while_it_is_running() {
+        let Some((device, context)) = try_device() else {
+            return;
+        };
+        let (compositor, handle) = D3d11VideoCompositor::new(
+            "rate",
+            &device,
+            context,
+            VideoCompositorOptions {
+                width: 64,
+                height: 64,
+                frame_rate: ffmpeg::Rational::new(60, 1),
+                background: Color::BLACK,
+            },
+        )
+        .expect("compositor");
+
+        assert_eq!(compositor.frame_rate(), ffmpeg::Rational::new(60, 1));
+        assert_eq!(compositor.time_base(), ffmpeg::Rational::new(1, 60));
+
+        assert!(handle.set_frame_rate(ffmpeg::Rational::new(30, 1)));
+        assert_eq!(handle.frame_rate(), Some(ffmpeg::Rational::new(30, 1)));
+        // The element and the handle are reading one value, not two.
+        assert_eq!(compositor.frame_rate(), ffmpeg::Rational::new(30, 1));
+        // And the unit every output timestamp is in moves with it.
+        assert_eq!(compositor.time_base(), ffmpeg::Rational::new(1, 30));
+    }
+
+    /// A rate that cannot be kept is refused, and refusing leaves the old one
+    /// running rather than a compositor ticking on a nonsense interval.
+    #[test]
+    fn an_impossible_frame_rate_is_refused_and_changes_nothing() {
+        let Some((device, context)) = try_device() else {
+            return;
+        };
+        let (compositor, handle) = D3d11VideoCompositor::new(
+            "rate-refused",
+            &device,
+            context,
+            VideoCompositorOptions {
+                width: 64,
+                height: 64,
+                frame_rate: ffmpeg::Rational::new(60, 1),
+                background: Color::BLACK,
+            },
+        )
+        .expect("compositor");
+
+        for refused in [
+            ffmpeg::Rational::new(0, 1),
+            ffmpeg::Rational::new(-30, 1),
+            ffmpeg::Rational::new(30, 0),
+        ] {
+            assert!(!handle.set_frame_rate(refused), "{refused} was accepted");
+            assert_eq!(compositor.frame_rate(), ffmpeg::Rational::new(60, 1));
+        }
+    }
+
+    /// Once the compositor is gone the handle answers rather than panicking,
+    /// the same way every other method on it does.
+    #[test]
+    fn the_setter_reports_a_compositor_that_is_gone() {
+        let Some((device, context)) = try_device() else {
+            return;
+        };
+        let (compositor, handle) = D3d11VideoCompositor::new(
+            "rate-dropped",
+            &device,
+            context,
+            VideoCompositorOptions {
+                width: 64,
+                height: 64,
+                frame_rate: ffmpeg::Rational::new(60, 1),
+                background: Color::BLACK,
+            },
+        )
+        .expect("compositor");
+        drop(compositor);
+
+        assert!(!handle.set_frame_rate(ffmpeg::Rational::new(30, 1)));
+        assert_eq!(handle.frame_rate(), None);
     }
 }

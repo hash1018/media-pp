@@ -85,6 +85,30 @@ impl PeriodicSchedule {
         self.resync_if_behind(now);
     }
 
+    /// Changes the cadence, taking effect at the next tick.
+    ///
+    /// The deadline is re-anchored to one *new* interval from `now` rather
+    /// than kept: the pending one was measured against the old cadence, and
+    /// on a change from slow to fast it can already be far enough out that
+    /// keeping it would stall the source for the remainder of an interval it
+    /// no longer has. Re-anchoring also means a change from fast to slow
+    /// cannot leave a deadline already in the past, which is the burst every
+    /// other method here exists to prevent.
+    ///
+    /// One tick's worth of phase is the cost, once, at the moment the caller
+    /// asked for a different rate.
+    pub fn set_interval(&mut self, interval: Duration, now: Instant) {
+        self.interval = interval;
+        self.next_due = now + interval;
+    }
+
+    /// The cadence currently being kept, so a caller driving this from
+    /// changeable configuration can tell whether it still matches without
+    /// storing a second copy of the answer.
+    pub fn interval(&self) -> Duration {
+        self.interval
+    }
+
     fn resync_if_behind(&mut self, now: Instant) {
         if self.next_due < now {
             self.next_due = now + self.interval;
@@ -266,5 +290,37 @@ mod tests {
         assert_eq!(schedule.remaining(t0 + INTERVAL / 2), INTERVAL / 2);
         assert!(schedule.is_due(t0 + INTERVAL));
         assert_eq!(schedule.remaining(t0 + INTERVAL), Duration::ZERO);
+    }
+
+    /// A rate change has to take effect from the moment it is asked for, not
+    /// from a deadline set under the old one.
+    #[test]
+    fn set_interval_reanchors_instead_of_keeping_a_stale_deadline() {
+        let start = Instant::now();
+        let mut schedule = PeriodicSchedule::new(Duration::from_millis(100), start);
+        schedule.advance_after_tick(start);
+        assert_eq!(schedule.interval(), Duration::from_millis(100));
+
+        // Slow to fast: the pending deadline is 100 ms out, which is four of
+        // the new intervals. Keeping it would stall the source for three of
+        // them before the new rate was ever kept.
+        let now = start + Duration::from_millis(10);
+        schedule.set_interval(Duration::from_millis(25), now);
+        assert_eq!(schedule.interval(), Duration::from_millis(25));
+        assert!(!schedule.is_due(now));
+        assert_eq!(schedule.remaining(now), Duration::from_millis(25));
+        assert!(schedule.is_due(now + Duration::from_millis(25)));
+    }
+
+    /// And fast to slow must not leave a deadline already behind, which
+    /// would fire immediately and then again a full interval later.
+    #[test]
+    fn set_interval_never_leaves_the_deadline_in_the_past() {
+        let start = Instant::now();
+        let mut schedule = PeriodicSchedule::new(Duration::from_millis(10), start);
+        let now = start + Duration::from_millis(500);
+        schedule.set_interval(Duration::from_millis(200), now);
+        assert!(!schedule.is_due(now));
+        assert_eq!(schedule.remaining(now), Duration::from_millis(200));
     }
 }

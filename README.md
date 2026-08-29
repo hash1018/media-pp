@@ -112,6 +112,15 @@ The core types are deliberately small:
   while a preview keeps running is `finish_branch`; it returns without
   waiting for the drain, and the terminal's `BusEvent::Eos` says when the
   output is actually complete.
+- The video compositors emit at a rate their handle can change while they run
+  — `set_frame_rate`, and `frame_rate` to read back what was actually kept.
+  Their `time_base` is the reciprocal of that and their output `pts` a tick
+  counter in those units, so a change re-means every timestamp after it while
+  the ones already downstream were stamped under the old rate. It is therefore
+  safe exactly while nothing downstream reads timestamps — a preview, a frame
+  counter — and a branch attached after the change is consistent, because it
+  takes its `time_base` when it is built. Changing it during a recording is
+  the caller's to refuse.
 
 Every `SourceElement` explicitly classifies whether it is live and whether it
 can reposition its own input timeline through `is_live()` and
