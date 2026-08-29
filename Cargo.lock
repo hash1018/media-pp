@@ -1961,7 +1961,7 @@ dependencies = [
 
 [[package]]
 name = "media-pp"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "ab_glyph",
  "arc-swap",
