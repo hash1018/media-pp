@@ -1,19 +1,3 @@
-/// # Closing a captured window ends the capture
-///
-/// Not via the stream, which reports nothing useful: a closed window, a
-/// fullscreen-starved monitor, and a desktop where nothing happens to be moving
-/// are identical from there — zero frames, zero buffers, zero callbacks. The
-/// stream even stays `Streaming` throughout.
-///
-/// The portal knows, though, and says so: closing a captured window makes it
-/// emit the session's `Closed` signal, measured at about six seconds after the
-/// fact on GNOME 50. This element watches for it and ends `run` with
-/// [`PipeWireScreenCaptureSourceError::SourceGone`]. A capture that merely
-/// stopped receiving frames is left alone, since it may still recover.
-/// Reopening is
-/// the caller's decision, the same contract `DxgiCaptureSourceError::AccessLost`
-/// sets on Windows.
-///
 use std::{
     sync::{
         Arc, Mutex,
@@ -452,23 +436,28 @@ struct Terminate;
 /// monitor's worth of pixels, and capturing a small window still encodes a
 /// full-size frame that is mostly black.
 ///
-/// # Closing a captured window cannot be detected
+/// # A vanished source ends the capture, and a stalled one does not
 ///
-/// It looks exactly like the fullscreen stall above. Measured on GNOME 50,
-/// closing a captured window leaves the PipeWire stream in `Streaming` — no
-/// error, no disconnect — and simply stops the process callbacks. A monitor
-/// stream starved by a fullscreen client produces the identical signature:
-/// zero frames, zero empty buffers, zero callbacks. The only difference is that
-/// one recovers and the other never will, which is not knowable at the time.
+/// The stream cannot tell the two apart. Measured on GNOME 50, closing a
+/// captured window leaves the PipeWire stream in `Streaming` — no error, no
+/// disconnect — and simply stops the process callbacks, which is exactly the
+/// signature of the fullscreen stall above and of a desktop where nothing
+/// happens to be moving. Zero frames, zero empty buffers, zero callbacks, three
+/// different situations.
 ///
-/// So this element reports a stall for both and keeps running, rather than
-/// guessing. A caller that must distinguish them has to look outside the
-/// stream — at whether the window it asked for still exists. Ending the capture
-/// on a long stall would kill recordings that were about to resume.
+/// The portal knows, and says so: it emits the session's `Closed` signal when
+/// what was being captured no longer exists, measured at about six seconds
+/// after the fact. This element watches for that signal and ends `run` with
+/// [`PipeWireScreenCaptureSourceError::SourceGone`]; a capture that merely
+/// stopped receiving frames is left alone, since it may still recover. Ending
+/// on a long stall instead would kill recordings that were about to resume.
+/// Reopening is the caller's decision, the same contract
+/// `DxgiCaptureSourceError::AccessLost` sets on Windows.
 ///
-/// [`PipeWireScreenCaptureSourceError::SourceGone`] therefore only covers a
-/// stream that genuinely reports an error or disconnects, which a closed window
-/// on this compositor does not.
+/// The error says which kind of source went, because the signal means
+/// different things for each: a window stream ends when its window does, while
+/// a monitor stream outlives every window on it and ends only when the monitor
+/// itself goes or the user stops the share.
 ///
 /// # A captured window can be resized — put a `SwScaler` downstream
 ///
@@ -642,6 +631,7 @@ impl PipeWireScreenCaptureSource {
         // Taken out before `cast` moves into the PipeWire thread: the session
         // is watched here, the stream is opened there.
         let session = cast.session.take();
+        let captured = cast.captured;
 
         let latest = Arc::new(Mutex::new(Latest {
             pixels: Vec::new(),
@@ -723,7 +713,8 @@ impl PipeWireScreenCaptureSource {
         };
 
         let watching = Arc::new(AtomicBool::new(true));
-        let session_watcher = watch_session_closed(session, latest.clone(), watching.clone());
+        let session_watcher =
+            watch_session_closed(session, captured, latest.clone(), watching.clone());
 
         let fps = options.fps.max(1); // a `0` fps is nonsensical; treat it as 1 rather than dividing by zero
         // Same `1 / fps` convention as `PipeWireScreenCaptureSource::time_base`
@@ -1172,6 +1163,68 @@ struct PortalCast {
     fd: std::os::fd::OwnedFd,
     node_id: u32,
     restore_token: Option<String>,
+    /// What the user actually picked, which decides what a `Closed` signal
+    /// means — see [`CapturedSource`].
+    captured: CapturedSource,
+}
+
+/// What a session turned out to be capturing, as opposed to what its
+/// [`CaptureSourceKind`] offered.
+///
+/// The portal's `Closed` signal says only that the session ended, and what
+/// that means depends entirely on this: a window stream ends when its window
+/// does, while a monitor stream outlives every window on it and ends only
+/// when the monitor itself goes or the user stops the share. Reporting the
+/// same sentence for both leaves a caller unable to tell a routine "the user
+/// closed the app you were recording" from "a display was unplugged".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CapturedSource {
+    Monitor,
+    Window,
+    /// The portal named no source type and the request allowed either, so
+    /// there is nothing to say beyond that the session ended.
+    Unknown,
+}
+
+impl CapturedSource {
+    /// What the stream says it is, falling back to what was asked for.
+    ///
+    /// The stream's own answer is the one that counts: a request for
+    /// [`CaptureSourceKind::MonitorOrWindow`] is resolved by the user in the
+    /// dialog, and only the response records which way they went.
+    fn resolve(
+        reported: Option<ashpd::desktop::screencast::SourceType>,
+        requested: CaptureSourceKind,
+    ) -> Self {
+        use ashpd::desktop::screencast::SourceType;
+        match reported {
+            Some(SourceType::Monitor) => Self::Monitor,
+            Some(SourceType::Window) => Self::Window,
+            // `Virtual`, and anything a later portal adds: not a window whose
+            // closing explains the signal, and not a monitor either.
+            Some(_) => Self::Unknown,
+            None => match requested {
+                CaptureSourceKind::Monitor => Self::Monitor,
+                CaptureSourceKind::Window => Self::Window,
+                CaptureSourceKind::MonitorOrWindow => Self::Unknown,
+            },
+        }
+    }
+
+    /// Why the capture ended, in the terms of what it was capturing.
+    ///
+    /// `signalled` separates the two ways the watch ends: the portal actually
+    /// emitting `Closed`, or its signal stream running out — which says the
+    /// session is over without saying anything about the source.
+    fn source_gone(self, signalled: bool) -> PipeWireScreenCaptureSourceError {
+        let reason = match (self, signalled) {
+            (_, false) => "the portal session ended",
+            (Self::Window, true) => "the captured window was closed, or the share was stopped",
+            (Self::Monitor, true) => "the captured monitor is gone, or the share was stopped",
+            (Self::Unknown, true) => "the portal closed the session",
+        };
+        PipeWireScreenCaptureSourceError::SourceGone(reason.to_owned())
+    }
 }
 
 /// Drives the whole ScreenCast portal handshake to completion synchronously.
@@ -1240,6 +1293,7 @@ fn portal_handshake(
             .first()
             .ok_or(PipeWireScreenCaptureSourceError::NoStream)?;
         let node_id = stream.pipe_wire_node_id();
+        let captured = CapturedSource::resolve(stream.source_type(), options.source_kind);
         let restore_token = response.restore_token().map(str::to_owned);
 
         let fd = proxy
@@ -1252,6 +1306,7 @@ fn portal_handshake(
             fd,
             node_id,
             restore_token,
+            captured,
         })
     })
 }
@@ -1364,10 +1419,14 @@ fn repack_rows(
 /// frames, zero buffers, zero callbacks. One of them never recovers, and only
 /// the portal knows which.
 ///
+/// What the signal *means* is `captured`'s to say, not this function's — see
+/// [`CapturedSource`].
+///
 /// Returns `None` when there is no session to watch, which leaves the element
 /// reporting stalls exactly as before rather than failing to open.
 fn watch_session_closed(
     session: Option<ashpd::desktop::Session<ashpd::desktop::screencast::Screencast>>,
+    captured: CapturedSource,
     latest: Arc<Mutex<Latest>>,
     watching: Arc<AtomicBool>,
 ) -> Option<JoinHandle<()>> {
@@ -1389,15 +1448,9 @@ fn watch_session_closed(
                     match futures_util::future::select(next, slice).await {
                         futures_util::future::Either::Left((signal, _)) => {
                             if let Ok(mut latest) = latest.lock() {
-                                latest.error.get_or_insert(
-                                    PipeWireScreenCaptureSourceError::SourceGone(
-                                        if signal.is_some() {
-                                            "the portal closed the session".to_owned()
-                                        } else {
-                                            "the portal session ended".to_owned()
-                                        },
-                                    ),
-                                );
+                                latest
+                                    .error
+                                    .get_or_insert(captured.source_gone(signal.is_some()));
                             }
                             return;
                         }
@@ -2432,6 +2485,76 @@ mod tests {
         assert_eq!(options.source_kind, CaptureSourceKind::Monitor);
         assert!(!options.include_cursor);
         assert!(options.restore_token.is_none());
+    }
+
+    /// The stream's own answer is what resolves `MonitorOrWindow`, which the
+    /// request by itself cannot.
+    #[test]
+    fn what_the_stream_reports_settles_what_was_captured() {
+        use ashpd::desktop::screencast::SourceType;
+
+        for requested in [
+            CaptureSourceKind::Monitor,
+            CaptureSourceKind::Window,
+            CaptureSourceKind::MonitorOrWindow,
+        ] {
+            assert_eq!(
+                CapturedSource::resolve(Some(SourceType::Window), requested),
+                CapturedSource::Window,
+                "the stream said window and the request said {requested:?}"
+            );
+            assert_eq!(
+                CapturedSource::resolve(Some(SourceType::Monitor), requested),
+                CapturedSource::Monitor,
+                "the stream said monitor and the request said {requested:?}"
+            );
+        }
+    }
+
+    /// A portal that names no source type leaves the request as the only
+    /// evidence, and it is conclusive except where it offered both.
+    #[test]
+    fn an_unreported_source_type_falls_back_to_what_was_asked_for() {
+        assert_eq!(
+            CapturedSource::resolve(None, CaptureSourceKind::Monitor),
+            CapturedSource::Monitor
+        );
+        assert_eq!(
+            CapturedSource::resolve(None, CaptureSourceKind::Window),
+            CapturedSource::Window
+        );
+        assert_eq!(
+            CapturedSource::resolve(None, CaptureSourceKind::MonitorOrWindow),
+            CapturedSource::Unknown
+        );
+    }
+
+    /// A window stream ends when its window does; a monitor stream outlives
+    /// every window on it, so the same signal cannot mean the same thing.
+    #[test]
+    fn a_closed_session_is_reported_in_terms_of_what_was_captured() {
+        let message = |captured: CapturedSource, signalled| match captured.source_gone(signalled) {
+            PipeWireScreenCaptureSourceError::SourceGone(reason) => reason,
+            other => panic!("expected SourceGone, got {other:?}"),
+        };
+
+        assert!(message(CapturedSource::Window, true).contains("window was closed"));
+        assert!(message(CapturedSource::Monitor, true).contains("monitor is gone"));
+        assert_ne!(
+            message(CapturedSource::Window, true),
+            message(CapturedSource::Monitor, true),
+            "a caller cannot tell a closed app from an unplugged display"
+        );
+
+        // The signal stream running out says the session is over and nothing
+        // about the source, so all three report it the same way.
+        for captured in [
+            CapturedSource::Window,
+            CapturedSource::Monitor,
+            CapturedSource::Unknown,
+        ] {
+            assert_eq!(message(captured, false), "the portal session ended");
+        }
     }
 
     /// A source with no PipeWire thread behind it.
