@@ -9,7 +9,7 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/hash1018/media-pp"
 documentation = "https://docs.rs/media-pp"
 readme = "../README.md"
-description = "A small, GStreamer-flavored media pipeline library built on FFmpeg."
+description = "A small, GStreamer-flavored media pipeline library built on FFmpeg. Capture, composite and encode without leaving the GPU, on D3D11 and CUDA."
 keywords = ["ffmpeg", "gstreamer", "video", "audio", "screen-capture"]
 categories = ["multimedia::video", "multimedia::audio", "multimedia::encoding"]
 
