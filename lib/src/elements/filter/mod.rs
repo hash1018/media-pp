@@ -2,10 +2,11 @@
 //! [`Source`](crate::element::Source).
 //!
 //! Codecs, scalers, pixel-format conversion, GPU upload and download, audio
-//! resampling and gain, chroma keying, and the two elements that change *when*
+//! resampling and gain, chroma keying, and the elements that change *when*
 //! rather than *what* — [`Pacer`], which holds a frame until its presentation
-//! time, [`VideoSynchronizer`], and [`ChangeGate`], which forwards a picture
-//! only when it is not the one it forwarded last. [`Tee`] is here too, as the one filter
+//! time, [`VideoSynchronizer`], [`ChangeGate`], which forwards a picture only
+//! when it is not the one it forwarded last, and [`TimestampOrigin`], which
+//! moves a branch's timeline back to zero. [`Tee`] is here too, as the one filter
 //! whose fan-out can change while the pipeline runs.
 //!
 //! Where the same job exists on more than one backend the types are separate
@@ -24,6 +25,7 @@ mod encoder;
 mod pacer;
 pub(crate) mod scaler;
 mod tee;
+mod timestamp_origin;
 pub(crate) mod upload;
 mod video_synchronizer;
 
@@ -68,6 +70,8 @@ pub use scaler::{D3d11Scaler, D3d11ScalerError, D3d11ScalerFormat};
 pub use scaler::{D3d12Scaler, D3d12ScalerError};
 pub use scaler::{SwScaler, SwScalerError};
 pub use tee::{Tee, TeeBuilder, TeeHandle};
+pub use timestamp_origin::TimestampOrigin;
+
 #[cfg(feature = "cuda")]
 pub use upload::{CudaUpload, CudaUploadError};
 #[cfg(all(target_os = "windows", feature = "d3d11"))]

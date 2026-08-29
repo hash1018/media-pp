@@ -65,8 +65,8 @@ pub use filter::{
     AudioVolumeHandle, AudioVolumeOptions, ChangeGate, ChromaKeyMethod, ChromaKeyOptions, Pacer,
     PacerError, SwAudioEncoder, SwAudioEncoderError, SwAudioEncoderOptions, SwChromaKey,
     SwChromaKeyError, SwDecoder, SwDecoderError, SwEncoder, SwEncoderError, SwEncoderOptions,
-    SwScaler, SwScalerError, Tee, TeeBuilder, TeeHandle, VideoCodec, VideoSynchronizer,
-    VideoSynchronizerError,
+    SwScaler, SwScalerError, Tee, TeeBuilder, TeeHandle, TimestampOrigin, VideoCodec,
+    VideoSynchronizer, VideoSynchronizerError,
 };
 #[cfg(feature = "cuda")]
 pub use filter::{

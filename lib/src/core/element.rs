@@ -65,6 +65,8 @@ pub enum ElementType {
     D3d11VideoCompositor,
     /// WebRTC connection driver.
     WebRtcPeer,
+    /// Packet timestamp rebase filter.
+    TimestampOrigin,
     /// Video change/rate gate filter.
     ChangeGate,
     /// FFmpeg software decoder filter.
