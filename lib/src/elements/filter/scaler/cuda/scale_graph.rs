@@ -47,10 +47,6 @@ struct GraphState {
     input_color_range: ffi::AVColorRange,
 }
 
-/// The pool an `AVBufferRef` refers to, rather than the reference itself.
-///
-/// Returns null for a null reference, which no live pool ever is, so a graph
-/// compared against it rebuilds rather than matching by accident.
 /// The size to scale *through*, when scaling straight to the requested one
 /// would come out blank. `None` when the direct scale is safe, which is
 /// almost always.
@@ -114,6 +110,10 @@ fn detour(input_width: u32, input_height: u32, width: u32, height: u32) -> Optio
     Some((step(width, input_width), step(height, input_height)))
 }
 
+/// The pool an `AVBufferRef` refers to, rather than the reference itself.
+///
+/// Returns null for a null reference, which no live pool ever is, so a graph
+/// compared against it rebuilds rather than matching by accident.
 fn pool_of(frames_ctx: *mut ffi::AVBufferRef) -> *const ffi::AVHWFramesContext {
     if frames_ctx.is_null() {
         return std::ptr::null();
