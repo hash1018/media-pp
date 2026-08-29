@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use ffmpeg_next as ffmpeg;
 
@@ -57,6 +58,21 @@ use crate::{
 /// asked for; counting arrivals instead would let a stall shift every frame
 /// after it.
 ///
+/// # Pausing
+///
+/// [`FrameRateLimiterHandle::set_paused`] stops it forwarding anything, and
+/// what falls out of the count above is that the paused span leaves no trace:
+/// the frame after a resume takes the timestamp the frame before it would
+/// have, so a file recorded across a pause is continuous rather than holding
+/// a still picture for however long it lasted. That is what pausing a
+/// recording is expected to mean.
+///
+/// Pausing here rather than with [`ControlMsg::Pause`] deliberately. That
+/// control stops queues pulling, which backpressures whatever feeds them —
+/// on a `Tee` branch it would reach back through the fan-out and stall the
+/// source for every other branch too. This drops frames instead, so nothing
+/// upstream can tell.
+///
 /// # Cost
 ///
 /// A reference to the frames it keeps and nothing at all for the ones it
@@ -82,7 +98,37 @@ pub struct FrameRateLimiter {
     /// `release_picture` when one comes back, so an idle wrapper does not
     /// pin a picture the producer's pool wants returned.
     wrappers: UnboundObjectPool<ffmpeg::frame::Video>,
+    control: Arc<RateControl>,
     pad: SrcPad,
+}
+
+/// What [`FrameRateLimiterHandle`] and the element share.
+#[derive(Default)]
+struct RateControl {
+    paused: AtomicBool,
+}
+
+/// Pauses and resumes a [`FrameRateLimiter`] from another thread.
+///
+/// Cloneable and cheap: the UI thread that owns a button and the pipeline
+/// thread that owns the element are never the same one.
+#[derive(Clone)]
+pub struct FrameRateLimiterHandle {
+    control: Arc<RateControl>,
+}
+
+impl FrameRateLimiterHandle {
+    /// Stops or resumes forwarding. Frames that arrive while paused are
+    /// dropped, and the output timeline closes over the gap — see
+    /// [`FrameRateLimiter`]'s own docs on pausing.
+    pub fn set_paused(&self, paused: bool) {
+        self.control.paused.store(paused, Ordering::Relaxed);
+    }
+
+    /// Whether it is currently paused.
+    pub fn is_paused(&self) -> bool {
+        self.control.paused.load(Ordering::Relaxed)
+    }
 }
 
 impl FrameRateLimiter {
@@ -94,11 +140,15 @@ impl FrameRateLimiter {
         name: impl Into<String>,
         input_time_base: ffmpeg::Rational,
         rate: ffmpeg::Rational,
-    ) -> Self {
+    ) -> (Self, FrameRateLimiterHandle) {
         let name: Arc<str> = name.into().into();
         let pad = SrcPad::with_contract(format!("{name}_src"), OutputContract::Passthrough);
         let pp_log = element_pp_log(ElementType::FrameRateLimiter, &name, None);
-        Self {
+        let control = Arc::new(RateControl::default());
+        let handle = FrameRateLimiterHandle {
+            control: Arc::clone(&control),
+        };
+        let limiter = Self {
             pp_log,
             name,
             input_time_base,
@@ -106,8 +156,10 @@ impl FrameRateLimiter {
             next_tick: None,
             forwarded: 0,
             wrappers: UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, release_picture),
+            control,
             pad,
-        }
+        };
+        (limiter, handle)
     }
 
     /// The unit this element's output `pts` are in, which is what an encoder
@@ -174,6 +226,12 @@ impl Sink for FrameRateLimiter {
             // carries no timestamp to place.
             return self.pad.push(buf);
         };
+        if self.control.paused.load(Ordering::Relaxed) {
+            // Dropped, and `next_tick` left where it is: the frame that
+            // resumes takes the timestamp this one would have, which is what
+            // closes the output over the paused span.
+            return Ok(());
+        }
         // A frame with no timestamp cannot be placed on the output timeline,
         // and guessing would put it wherever the last one happened to land.
         let Some(pts) = frame.pts() else {
@@ -334,6 +392,10 @@ mod tests {
     }
 
     fn sixty_into(rate: i32) -> FrameRateLimiter {
+        sixty_into_with_handle(rate).0
+    }
+
+    fn sixty_into_with_handle(rate: i32) -> (FrameRateLimiter, FrameRateLimiterHandle) {
         FrameRateLimiter::new(
             "limit",
             ffmpeg::Rational::new(1, 60),
@@ -434,6 +496,50 @@ mod tests {
             received.lock().unwrap().first(),
             Some(MediaBuffer::Eos)
         ));
+    }
+
+    /// What pausing a recording is expected to mean: the paused span leaves
+    /// no trace, rather than a still picture lasting as long as it did.
+    #[test]
+    fn a_pause_closes_the_output_over_itself() {
+        let (mut limiter, handle) = sixty_into_with_handle(30);
+        let received = capture(&mut limiter);
+
+        for pts in 0..4 {
+            limiter.consume(frame(Some(pts))).unwrap();
+        }
+        handle.set_paused(true);
+        // A long pause: sixty input frames, a whole second of them.
+        for pts in 4..64 {
+            limiter.consume(frame(Some(pts))).unwrap();
+        }
+        handle.set_paused(false);
+        for pts in 64..68 {
+            limiter.consume(frame(Some(pts))).unwrap();
+        }
+
+        assert_eq!(
+            stamps(&received),
+            vec![0, 1, 2, 3],
+            "the output must continue where it left off, not jump the pause"
+        );
+        assert_eq!(
+            kept(&received),
+            vec![0, 2, 64, 66],
+            "the frames on either side of the pause are the ones that were live"
+        );
+    }
+
+    /// A handle is how another thread asks, so it has to answer too.
+    #[test]
+    fn the_handle_reports_what_it_set() {
+        let (_limiter, handle) = sixty_into_with_handle(30);
+
+        assert!(!handle.is_paused());
+        handle.set_paused(true);
+        assert!(handle.is_paused());
+        handle.set_paused(false);
+        assert!(!handle.is_paused());
     }
 
     /// `Stop` ends this run, so a pipeline started again writes a new stream
