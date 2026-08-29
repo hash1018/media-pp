@@ -10,7 +10,7 @@ repository = "https://github.com/hash1018/media-pp"
 documentation = "https://docs.rs/media-pp"
 readme = "../README.md"
 description = "A small, GStreamer-flavored media pipeline library built on FFmpeg."
-keywords = ["ffmpeg", "video", "audio", "pipeline", "streaming"]
+keywords = ["ffmpeg", "gstreamer", "video", "audio", "screen-capture"]
 categories = ["multimedia::video", "multimedia::audio", "multimedia::encoding"]
 
 # Build docs.rs on its native Linux target. `ffmpeg-sys-next` generates FFI
