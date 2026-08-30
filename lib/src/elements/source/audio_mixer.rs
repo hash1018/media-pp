@@ -58,6 +58,91 @@ pub struct AudioMixerOptions {
     pub channels: u16,
 }
 
+/// The format every input is resampled to and every output frame carries.
+///
+/// One value rather than three fields, packed into a word, so an input
+/// resampling on its own thread can never catch a sample rate from one
+/// setting and a channel count from another. `format` and `channel_layout`
+/// are derived from it rather than stored: this mixer works in interleaved
+/// `f32` and the layout is whatever is default for the channel count, so a
+/// stored copy of either could only ever disagree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MixFormat {
+    pub sample_rate: u32,
+    pub channels: u16,
+}
+
+impl MixFormat {
+    /// Interleaved `f32` — see [`AudioMixer`] on why the mix is summed in
+    /// one fixed sample format rather than whatever arrived.
+    fn sample_format(self) -> ffmpeg::format::Sample {
+        ffmpeg::format::Sample::F32(ffmpeg::format::sample::Type::Packed)
+    }
+
+    fn channel_layout(self) -> ffmpeg::ChannelLayout {
+        ffmpeg::ChannelLayout::default(self.channels as i32)
+    }
+
+    fn pack(self) -> u64 {
+        ((self.sample_rate as u64) << 16) | self.channels as u64
+    }
+
+    fn unpack(packed: u64) -> Self {
+        Self {
+            sample_rate: (packed >> 16) as u32,
+            channels: packed as u16,
+        }
+    }
+}
+
+/// Where the sample deficit is measured from.
+///
+/// Not `Duration::ZERO` and zero samples, because the mix format can change
+/// while this runs and `elapsed × sample_rate` only means anything against
+/// the rate that produced the count it is compared to — see
+/// [`AudioMixer::mix_tick`].
+#[derive(Debug, Clone, Copy)]
+struct MixAnchor {
+    format: MixFormat,
+    elapsed: Duration,
+    samples: i64,
+}
+
+/// The mix format, shared between the mixer's own tick and every input
+/// resampling into it from another thread.
+#[derive(Debug)]
+struct SharedMixFormat(AtomicU64);
+
+impl SharedMixFormat {
+    fn new(format: MixFormat) -> Self {
+        Self(AtomicU64::new(format.pack()))
+    }
+
+    fn get(&self) -> MixFormat {
+        MixFormat::unpack(self.0.load(Ordering::Relaxed))
+    }
+
+    /// `false` for a format nothing could be resampled to, which leaves the
+    /// running one alone rather than a mixer summing into nothing.
+    fn set(&self, format: MixFormat) -> bool {
+        if format.sample_rate == 0 || format.channels == 0 {
+            return false;
+        }
+        self.0.store(format.pack(), Ordering::Relaxed);
+        true
+    }
+}
+
+/// Both ends of one resampler, so a stale one can be recognised rather than
+/// assumed to still fit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ResamplerShape {
+    from_format: ffmpeg::format::Sample,
+    from_channels: u16,
+    from_rate: u32,
+    to: MixFormat,
+}
+
 /// One input's own resampler and accumulated (already-resampled,
 /// interleaved `f32`) samples, waiting to be drained by the next
 /// [`AudioMixer::mix_tick`]. The resampler is built lazily from the first
@@ -68,7 +153,12 @@ struct InputBuffer {
     /// Identity of this particular registration. The name can be reused,
     /// but an older sink must not be allowed to touch its replacement.
     id: u64,
-    resampler: Option<ffmpeg::software::resampling::Context>,
+    /// Built lazily, and rebuilt whenever either end of it has moved — the
+    /// format arriving, or the mix format it is resampling to. Kept beside
+    /// it rather than walked and invalidated from outside: an input that
+    /// notices for itself needs no lock held across somebody else's state,
+    /// and an input registered after a change is correct without being told.
+    resampler: Option<(ResamplerShape, ffmpeg::software::resampling::Context)>,
     samples: VecDeque<f32>,
     /// Set once this input's `Eos` arrives — [`AudioMixer::mix_tick`]
     /// drops the input entirely once it's both `eos` and fully drained,
@@ -82,24 +172,37 @@ impl InputBuffer {
     fn push(
         &mut self,
         frame: &ffmpeg::frame::Audio,
-        target_format: ffmpeg::format::Sample,
-        target_layout: ffmpeg::ChannelLayout,
-        target_rate: u32,
+        to: MixFormat,
     ) -> std::result::Result<(), AudioMixerError> {
-        let resampler = match &mut self.resampler {
-            Some(resampler) => resampler,
-            None => {
-                let resampler = ffmpeg::software::resampling::Context::get(
-                    frame.format(),
-                    frame.channel_layout(),
-                    frame.rate(),
-                    target_format,
-                    target_layout,
-                    target_rate,
-                )?;
-                self.resampler.insert(resampler)
-            }
+        let shape = ResamplerShape {
+            from_format: frame.format(),
+            from_channels: frame.channel_layout().channels() as u16,
+            from_rate: frame.rate(),
+            to,
         };
+        // Rebuilt when either end has moved. A resampler is fixed at both
+        // ends when it is created, so one built for the old mix format would
+        // keep producing it — silently, and into a mix that no longer wants
+        // it.
+        if self
+            .resampler
+            .as_ref()
+            .is_none_or(|(built, _)| *built != shape)
+        {
+            let resampler = ffmpeg::software::resampling::Context::get(
+                shape.from_format,
+                frame.channel_layout(),
+                shape.from_rate,
+                to.sample_format(),
+                to.channel_layout(),
+                to.sample_rate,
+            )?;
+            self.resampler = Some((shape, resampler));
+        }
+        let (_, resampler) = self
+            .resampler
+            .as_mut()
+            .expect("just built if it was missing or stale");
         let mut output = ffmpeg::frame::Audio::empty();
         resampler.run(frame, &mut output)?;
         // Raw bytes, not `plane::<f32>(0)`: `ffmpeg_next`'s `plane::<T>()`
@@ -108,12 +211,12 @@ impl InputBuffer {
         // `Sample::F32(Packed)` target — see `AudioMixer::new`) covers only
         // the first `samples()` of the real `samples() * channels`
         // interleaved scalars actually in the buffer, silently dropping
-        // every channel past the first once `target_layout` has more than
+        // every channel past the first once the mix layout has more than
         // one. Same fix, and the same root cause, as
         // `crate::elements::SwAudioEncoder`'s own `absorb_resampled`
         // (found while building that element — this call predates it).
         let samples = output.samples();
-        let channels = target_layout.channels() as usize;
+        let channels = to.channels as usize;
         let bytes = &output.data(0)[..samples * channels * 4];
         let interleaved =
             // SAFETY: `bytes` is a prefix of an FFmpeg audio plane, which is aligned
@@ -132,6 +235,10 @@ impl InputBuffer {
 /// tick already needs to visit every input together anyway).
 struct MixerShared {
     inputs: Mutex<HashMap<Arc<str>, InputBuffer>>,
+    /// What every input resamples to and every output frame carries. Here
+    /// rather than on the mixer, because the inputs reading it are on other
+    /// threads and this is the only thing they share with it.
+    format: SharedMixFormat,
     /// Issues a distinct identity for every `add_source` call, including
     /// replacements registered under an existing name.
     next_input_id: AtomicU64,
@@ -148,9 +255,6 @@ struct MixerShared {
 #[derive(Clone)]
 pub struct MixerHandle {
     shared: Weak<MixerShared>,
-    sample_rate: u32,
-    format: ffmpeg::format::Sample,
-    channel_layout: ffmpeg::ChannelLayout,
 }
 
 impl MixerHandle {
@@ -186,10 +290,45 @@ impl MixerHandle {
             id,
             pp_log: element_pp_log(ElementType::AudioMixer, &name, None),
             shared: self.shared.clone(),
-            target_format: self.format,
-            target_layout: self.channel_layout,
-            target_rate: self.sample_rate,
         }))
+    }
+
+    /// The format the mix is summed into and emitted at.
+    ///
+    /// `None` once the mixer is gone.
+    pub fn mix_format(&self) -> Option<MixFormat> {
+        Some(self.shared.upgrade()?.format.get())
+    }
+
+    /// Changes it, from the next tick.
+    ///
+    /// Returns `false` for a format nothing could be resampled to, and for a
+    /// mixer that has already been dropped.
+    ///
+    /// # What moves with it
+    ///
+    /// Every input rebuilds its own resampler when it next pushes — each
+    /// remembers what its own was built for, so none has to be found and
+    /// invalidated from here, and an input registered after this call is
+    /// correct without being told.
+    ///
+    /// [`AudioMixer::time_base`] is `1/sample_rate`, and the output `pts` is
+    /// a running sample count in those units. So changing the rate re-means
+    /// every timestamp after it, while the ones already downstream were
+    /// stamped under the old one. Nothing here can repair that: a muxer
+    /// holding a time base from `avformat_write_header` will not be told, and
+    /// an encoder was opened for a channel count.
+    ///
+    /// So this is safe exactly while nothing downstream is reading timestamps
+    /// — a level meter, an idle mixer — and it is the caller's to know. In
+    /// practice: change it between recordings, not during one. The mixer
+    /// itself keeps running either way, which is the point: its `pts` stays
+    /// continuous, and a rate change is not a reason to restart the one
+    /// element every audio source in the application is registered with.
+    pub fn set_mix_format(&self, format: MixFormat) -> bool {
+        self.shared
+            .upgrade()
+            .is_some_and(|shared| shared.format.set(format))
     }
 
     /// Drops `name`'s input immediately, discarding whatever it had
@@ -227,9 +366,6 @@ pub struct MixerInputSink {
     /// write to or remove a same-name replacement.
     id: u64,
     shared: Weak<MixerShared>,
-    target_format: ffmpeg::format::Sample,
-    target_layout: ffmpeg::ChannelLayout,
-    target_rate: u32,
 }
 
 // SAFETY: `ffmpeg::ChannelLayout` wraps `AVChannelLayout`, which carries a
@@ -277,12 +413,10 @@ impl Sink for MixerInputSink {
                 if let Some(input) = inputs.get_mut(&self.name)
                     && input.id == self.id
                 {
-                    input.push(
-                        &frame,
-                        self.target_format,
-                        self.target_layout,
-                        self.target_rate,
-                    )?;
+                    // Read per buffer rather than copied in at `add_source`: this
+                    // sink lives on the input's own thread, and a mix format
+                    // changed while it is running has to reach it there.
+                    input.push(&frame, shared.format.get())?;
                 }
                 // Absent means `remove_source` raced ahead of this frame;
                 // an ID mismatch means this name was replaced. Dropping
@@ -350,10 +484,12 @@ impl Sink for MixerInputSink {
 /// `WasapiCaptureSource` synthesizes silence for gaps
 /// rather than just emitting nothing.
 ///
-/// Every input is resampled to this mixer's own fixed
-/// `sample_rate`/`channels` (always `Sample::F32(Packed)` internally —
-/// float headroom during summation, same reason real mixing consoles
-/// work in float even when everything else is integer PCM) — an input
+/// Every input is resampled to this mixer's own `sample_rate`/`channels`,
+/// which [`MixerHandle::set_mix_format`] can change while it runs — each
+/// input notices for itself and rebuilds its own resampler. The sample
+/// format is fixed at `Sample::F32(Packed)`: float headroom during
+/// summation, the same reason real mixing consoles work in float even when
+/// everything else is integer PCM. An input
 /// short on samples for a given tick contributes silence for the
 /// shortfall rather than blocking the whole mix. Samples are summed and
 /// **hard-clipped** to `[-1.0, 1.0]`, not averaged: two or three sources
@@ -376,13 +512,11 @@ pub struct AudioMixer {
     name: Arc<str>,
     shared: Arc<MixerShared>,
     pad: SrcPad,
-    sample_rate: u32,
-    format: ffmpeg::format::Sample,
-    channel_layout: ffmpeg::ChannelLayout,
-    channels: u16,
     /// Cumulative sample count across every emitted frame — see
     /// [`AudioMixer::time_base`].
     samples_emitted: i64,
+    /// What the deficit is measured from — see [`MixAnchor`].
+    anchor: MixAnchor,
 }
 
 // SAFETY: see `MixerInputSink`'s own `unsafe impl Send` docs — same
@@ -407,10 +541,14 @@ impl AudioMixer {
             options.sample_rate,
             options.channels
         );
-        let format = ffmpeg::format::Sample::F32(ffmpeg::format::sample::Type::Packed);
-        let channel_layout = ffmpeg::ChannelLayout::default(options.channels as i32);
+
+        let format = MixFormat {
+            sample_rate: options.sample_rate,
+            channels: options.channels,
+        };
         let shared = Arc::new(MixerShared {
             inputs: Mutex::new(HashMap::new()),
+            format: SharedMixFormat::new(format),
             next_input_id: AtomicU64::new(0),
         });
         let pad = SrcPad::with_contract(
@@ -426,24 +564,22 @@ impl AudioMixer {
                 pp_log,
                 shared: shared.clone(),
                 pad,
-                sample_rate: options.sample_rate,
-                format,
-                channel_layout,
-                channels: options.channels,
                 samples_emitted: 0,
+                anchor: MixAnchor {
+                    format,
+                    elapsed: Duration::ZERO,
+                    samples: 0,
+                },
             },
             MixerHandle {
                 shared: Arc::downgrade(&shared),
-                sample_rate: options.sample_rate,
-                format,
-                channel_layout,
             },
         )
     }
 
     /// The unit each emitted frame's `pts` is expressed in.
     pub fn time_base(&self) -> ffmpeg::Rational {
-        ffmpeg::Rational::new(1, self.sample_rate as i32)
+        ffmpeg::Rational::new(1, self.shared.format.get().sample_rate as i32)
     }
 
     /// Sums however many samples are needed to keep `samples_emitted` in
@@ -458,8 +594,32 @@ impl AudioMixer {
     /// fully drained — it contributed its last real samples on a previous
     /// tick and has nothing left to give.
     fn mix_tick(&mut self, elapsed: Duration, bus: &Bus) {
-        let channels = self.channels as usize;
-        let expected = (elapsed.as_secs_f64() * self.sample_rate as f64) as i64;
+        let format = self.shared.format.get();
+        // Re-anchored when the format moves. The deficit below is
+        // `elapsed × sample_rate` against a running count, and those two are
+        // only comparable while the rate that produced them is the same one:
+        // measured straight, a drop from 48 kHz to 44.1 makes `expected` fall
+        // *below* what has already been emitted, and the mixer goes silent
+        // for the minute it takes the new rate to catch up. So the count is
+        // kept — `pts` must stay continuous — and only the deficit starts
+        // again, from here.
+        if format != self.anchor.format {
+            pp_info!(
+                self,
+                "mix format is now {}Hz, {} channel(s)",
+                format.sample_rate,
+                format.channels
+            );
+            self.anchor = MixAnchor {
+                format,
+                elapsed,
+                samples: self.samples_emitted,
+            };
+        }
+        let channels = format.channels as usize;
+        let since = elapsed.saturating_sub(self.anchor.elapsed);
+        let expected =
+            self.anchor.samples + (since.as_secs_f64() * format.sample_rate as f64) as i64;
         let needed = (expected - self.samples_emitted).max(0) as usize;
         if needed == 0 {
             return;
@@ -480,8 +640,9 @@ impl AudioMixer {
             *sample = sample.clamp(-1.0, 1.0);
         }
 
-        let mut frame = ffmpeg::frame::Audio::new(self.format, needed, self.channel_layout);
-        frame.set_rate(self.sample_rate);
+        let mut frame =
+            ffmpeg::frame::Audio::new(format.sample_format(), needed, format.channel_layout());
+        frame.set_rate(format.sample_rate);
         // SAFETY: viewing an `f32` slice as bytes, which is always aligned and
         // exactly `size_of_val` long. The read is only as wide as `mixed` itself;
         // what the *destination* can take is the separate bound the comment below
@@ -614,6 +775,45 @@ mod tests {
                 && frame.samples() > 0
             {
                 self.seen.lock().unwrap().push(frame.plane::<f32>(0)[0]);
+            }
+            Ok(())
+        }
+        fn control(&mut self, _msg: ControlMsg) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Records the *shape* of every frame rather than a sample of it — what
+    /// a format change is visible in.
+    struct ShapeSink {
+        pp_log: PpLog,
+        seen: Arc<StdMutex<Vec<(u32, u16)>>>,
+    }
+
+    impl Element for ShapeSink {
+        fn name(&self) -> Arc<str> {
+            "shapes".into()
+        }
+        fn element_type(&self) -> ElementType {
+            ElementType::Other
+        }
+        fn pp_log(&self) -> &PpLog {
+            &self.pp_log
+        }
+        fn pp_log_mut(&mut self) -> &mut PpLog {
+            &mut self.pp_log
+        }
+    }
+
+    impl Sink for ShapeSink {
+        fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+            if let MediaBuffer::Audio(frame) = buf
+                && frame.samples() > 0
+            {
+                self.seen
+                    .lock()
+                    .unwrap()
+                    .push((frame.rate(), frame.channel_layout().channels() as u16));
             }
             Ok(())
         }
@@ -1070,5 +1270,119 @@ mod tests {
         );
 
         drop(mixer);
+    }
+
+    /// A rate change reaches the output frames, and the mix does not stop
+    /// while the new rate "catches up" with the samples already emitted.
+    ///
+    /// That stall is the whole reason `MixAnchor` exists: the deficit is
+    /// `elapsed × sample_rate` against a running count, and measured straight
+    /// across a change to a lower rate it goes negative for as long as it
+    /// takes the new rate to reach the old count — a minute of silence for a
+    /// setting somebody just applied.
+    #[test]
+    fn changing_the_mix_format_keeps_the_mix_going() {
+        let (mixer, handle) = AudioMixer::new(
+            "mixer",
+            AudioMixerOptions {
+                sample_rate: 48000,
+                channels: 2,
+            },
+        );
+        let seen: Arc<StdMutex<Vec<(u32, u16)>>> = Arc::new(StdMutex::new(Vec::new()));
+        let sink = ShapeSink {
+            seen: seen.clone(),
+            pp_log: element_pp_log(ElementType::Other, "shapes", None),
+        };
+        let pipeline = Pipeline::new("mixer-test-rate", mixer, |source, ctx| {
+            let branch = ctx.branch().to(Box::new(sink))?;
+            ctx.attach(source, 0, branch)?;
+            Ok(())
+        })
+        .expect("test pipeline wiring must succeed");
+        pipeline.run().unwrap();
+
+        std::thread::sleep(Duration::from_millis(150));
+        assert_eq!(
+            handle.mix_format(),
+            Some(MixFormat {
+                sample_rate: 48000,
+                channels: 2
+            })
+        );
+        // Down, which is the direction that stalls without the anchor, and
+        // to mono so the frame's own shape has to move as well.
+        assert!(handle.set_mix_format(MixFormat {
+            sample_rate: 16000,
+            channels: 1,
+        }));
+        let before = seen.lock().unwrap().len();
+        std::thread::sleep(Duration::from_millis(250));
+        pipeline.stop();
+        pipeline.bus().log_events();
+
+        let seen = seen.lock().unwrap();
+        assert!(
+            seen.len() > before,
+            "the mix stopped after the format changed: {before} frames before, {} after",
+            seen.len()
+        );
+        assert_eq!(
+            seen.last().copied(),
+            Some((16000, 1)),
+            "the new rate and channel count have to reach the output"
+        );
+    }
+
+    /// A format nothing could be resampled to is refused, and refusing leaves
+    /// the running one alone rather than a mixer summing into nothing.
+    #[test]
+    fn an_impossible_mix_format_is_refused_and_changes_nothing() {
+        let (_mixer, handle) = AudioMixer::new(
+            "mixer",
+            AudioMixerOptions {
+                sample_rate: 48000,
+                channels: 2,
+            },
+        );
+        for refused in [
+            MixFormat {
+                sample_rate: 0,
+                channels: 2,
+            },
+            MixFormat {
+                sample_rate: 48000,
+                channels: 0,
+            },
+        ] {
+            assert!(!handle.set_mix_format(refused), "{refused:?} was accepted");
+            assert_eq!(
+                handle.mix_format(),
+                Some(MixFormat {
+                    sample_rate: 48000,
+                    channels: 2
+                })
+            );
+        }
+    }
+
+    /// And the handle answers rather than taking effect once the mixer is
+    /// gone, like every other method on it.
+    #[test]
+    fn the_mix_format_setter_reports_a_mixer_that_is_gone() {
+        let (mixer, handle) = AudioMixer::new(
+            "mixer",
+            AudioMixerOptions {
+                sample_rate: 48000,
+                channels: 2,
+            },
+        );
+        drop(mixer);
+
+        assert!(!handle.set_mix_format(MixFormat {
+            sample_rate: 16000,
+            channels: 1,
+        }));
+        assert_eq!(handle.mix_format(), None);
     }
 }

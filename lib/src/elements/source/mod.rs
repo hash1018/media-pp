@@ -39,7 +39,7 @@ pub use crate::platform::linux::pipewire::{
 pub use crate::platform::windows::wasapi::{WasapiDevice, WasapiDeviceKind};
 pub use app_source::{AppSource, AppSourceError, AppSourceHandle};
 pub use audio_mixer::{
-    AudioMixer, AudioMixerError, AudioMixerOptions, MixerHandle, MixerInputSink,
+    AudioMixer, AudioMixerError, AudioMixerOptions, MixFormat, MixerHandle, MixerInputSink,
 };
 #[cfg(all(target_os = "windows", feature = "dxgi-capture"))]
 pub use capture::{

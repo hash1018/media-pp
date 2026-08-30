@@ -124,6 +124,17 @@ The core types are deliberately small:
   a branch attached after the change is consistent, because it takes its
   `time_base` when it is built. Changing it during a recording is the caller's
   to refuse.
+- `AudioMixer` sums into a format its handle can change while it runs —
+  `set_mix_format`, and `mix_format` to read back what was kept. Every input
+  rebuilds its own resampler when it next pushes, because each remembers what
+  its own was built for, so none has to be found and invalidated from
+  outside and an input registered after the change is correct without being
+  told. Its `time_base` is `1/sample_rate` and its `pts` a running sample
+  count in those units, so the same caveat as the compositors' rate applies —
+  safe while nothing downstream reads timestamps, and the caller's to refuse
+  during a recording. The mixer itself keeps running either way, which is the
+  point: a format change is not a reason to restart the one element every
+  audio source is registered with.
 
 Every `SourceElement` explicitly classifies whether it is live and whether it
 can reposition its own input timeline through `is_live()` and
