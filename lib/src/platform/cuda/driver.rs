@@ -284,6 +284,127 @@ LUMA_DONE:
 CHROMA_DONE:
     ret;
 }
+
+.visible .entry extract_alpha(
+    .param .u64 dst,
+    .param .u32 dst_pitch,
+    .param .u64 src,
+    .param .u32 src_pitch,
+    .param .u32 width,
+    .param .u32 height
+)
+{
+    .reg .pred  %p<4>;
+    .reg .b16   %rs<4>;
+    .reg .b32   %r<20>;
+    .reg .b64   %rd<12>;
+
+    ld.param.u64    %rd1, [dst];
+    ld.param.u32    %r1, [dst_pitch];
+    ld.param.u64    %rd2, [src];
+    ld.param.u32    %r2, [src_pitch];
+    ld.param.u32    %r3, [width];
+    ld.param.u32    %r4, [height];
+
+    mov.u32         %r5, %ctaid.x;
+    mov.u32         %r6, %ntid.x;
+    mov.u32         %r7, %tid.x;
+    mad.lo.s32      %r8, %r5, %r6, %r7;
+    mov.u32         %r9, %ctaid.y;
+    mov.u32         %r10, %ntid.y;
+    mov.u32         %r11, %tid.y;
+    mad.lo.s32      %r12, %r9, %r10, %r11;
+
+    setp.ge.u32     %p1, %r8, %r3;
+    @%p1 bra        ALPHA_DONE;
+    setp.ge.u32     %p2, %r12, %r4;
+    @%p2 bra        ALPHA_DONE;
+
+    mul.lo.s32      %r13, %r12, %r2;
+    shl.b32         %r14, %r8, 2;
+    add.s32         %r15, %r13, %r14;
+    cvt.u64.u32     %rd3, %r15;
+    add.s64         %rd4, %rd2, %rd3;
+    ld.global.u8    %rs1, [%rd4+3];
+
+    mul.lo.s32      %r16, %r12, %r1;
+    add.s32         %r17, %r16, %r8;
+    cvt.u64.u32     %rd5, %r17;
+    add.s64         %rd6, %rd1, %rd5;
+    st.global.u8    [%rd6], %rs1;
+
+ALPHA_DONE:
+    ret;
+}
+
+
+.visible .entry extract_alpha_half(
+    .param .u64 dst,
+    .param .u32 dst_pitch,
+    .param .u64 src,
+    .param .u32 src_pitch,
+    .param .u32 half_width,
+    .param .u32 half_height
+)
+{
+    .reg .pred  %p<4>;
+    .reg .b16   %rs<8>;
+    .reg .b32   %r<30>;
+    .reg .b64   %rd<14>;
+
+    ld.param.u64    %rd1, [dst];
+    ld.param.u32    %r1, [dst_pitch];
+    ld.param.u64    %rd2, [src];
+    ld.param.u32    %r2, [src_pitch];
+    ld.param.u32    %r3, [half_width];
+    ld.param.u32    %r4, [half_height];
+
+    mov.u32         %r5, %ctaid.x;
+    mov.u32         %r6, %ntid.x;
+    mov.u32         %r7, %tid.x;
+    mad.lo.s32      %r8, %r5, %r6, %r7;
+    mov.u32         %r9, %ctaid.y;
+    mov.u32         %r10, %ntid.y;
+    mov.u32         %r11, %tid.y;
+    mad.lo.s32      %r12, %r9, %r10, %r11;
+
+    setp.ge.u32     %p1, %r8, %r3;
+    @%p1 bra        ALPHA_HALF_DONE;
+    setp.ge.u32     %p2, %r12, %r4;
+    @%p2 bra        ALPHA_HALF_DONE;
+
+    shl.b32         %r13, %r12, 1;
+    shl.b32         %r14, %r8, 1;
+    mul.lo.s32      %r15, %r13, %r2;
+    shl.b32         %r16, %r14, 2;
+    add.s32         %r17, %r15, %r16;
+    cvt.u64.u32     %rd3, %r17;
+    add.s64         %rd4, %rd2, %rd3;
+    cvt.u64.u32     %rd5, %r2;
+    add.s64         %rd6, %rd4, %rd5;
+
+    ld.global.u8    %r18, [%rd4+3];
+    ld.global.u8    %r19, [%rd4+7];
+    ld.global.u8    %r20, [%rd6+3];
+    ld.global.u8    %r21, [%rd6+7];
+
+    add.s32         %r22, %r18, %r19;
+    add.s32         %r23, %r22, %r20;
+    add.s32         %r24, %r23, %r21;
+    add.s32         %r25, %r24, 2;
+    shr.u32         %r26, %r25, 2;
+
+    mul.lo.s32      %r27, %r12, %r1;
+    add.s32         %r28, %r27, %r8;
+    cvt.u64.u32     %rd7, %r28;
+    add.s64         %rd8, %rd1, %rd7;
+    cvt.u16.u32     %rs1, %r26;
+    st.global.u8    [%rd8], %rs1;
+
+ALPHA_HALF_DONE:
+    ret;
+}
+
 "#;
 
 // SAFETY of the block: these are the driver's own C ABI declarations, and
@@ -516,6 +637,84 @@ DONE:
 MDONE:
     ret;
 }
+
+.visible .entry blend_plane_masked(
+    .param .u64 dst,
+    .param .u32 dst_pitch,
+    .param .u64 src,
+    .param .u32 src_pitch,
+    .param .u64 mask,
+    .param .u32 mask_pitch,
+    .param .u32 width,
+    .param .u32 height,
+    .param .u32 opacity,
+    .param .u32 mask_shift
+)
+{
+    .reg .pred  %p<4>;
+    .reg .b16   %rs<4>;
+    .reg .b32   %r<40>;
+    .reg .b64   %rd<20>;
+
+    ld.param.u64    %rd1, [dst];
+    ld.param.u32    %r1, [dst_pitch];
+    ld.param.u64    %rd7, [src];
+    ld.param.u32    %r33, [src_pitch];
+    ld.param.u64    %rd2, [mask];
+    ld.param.u32    %r2, [mask_pitch];
+    ld.param.u32    %r3, [width];
+    ld.param.u32    %r4, [height];
+    ld.param.u32    %r7, [opacity];
+    ld.param.u32    %r31, [mask_shift];
+
+    mov.u32         %r8, %ctaid.x;
+    mov.u32         %r9, %ntid.x;
+    mov.u32         %r10, %tid.x;
+    mad.lo.s32      %r11, %r8, %r9, %r10;
+    mov.u32         %r12, %ctaid.y;
+    mov.u32         %r13, %ntid.y;
+    mov.u32         %r14, %tid.y;
+    mad.lo.s32      %r15, %r12, %r13, %r14;
+
+    setp.ge.u32     %p1, %r11, %r3;
+    @%p1 bra        PMDONE;
+    setp.ge.u32     %p2, %r15, %r4;
+    @%p2 bra        PMDONE;
+
+    mad.lo.s32      %r16, %r15, %r1, %r11;
+    cvt.u64.u32     %rd3, %r16;
+    add.s64         %rd4, %rd1, %rd3;
+
+    mad.lo.s32      %r34, %r15, %r33, %r11;
+    cvt.u64.u32     %rd8, %r34;
+    add.s64         %rd9, %rd7, %rd8;
+
+    shr.u32         %r32, %r11, %r31;
+    mad.lo.s32      %r17, %r15, %r2, %r32;
+    cvt.u64.u32     %rd5, %r17;
+    add.s64         %rd6, %rd2, %rd5;
+
+    ld.global.u8    %r18, [%rd4];
+    ld.global.u8    %r19, [%rd6];
+    ld.global.u8    %r24, [%rd9];
+
+    mul.lo.s32      %r20, %r19, %r7;
+    add.s32         %r21, %r20, 127;
+    div.u32         %r22, %r21, 255;
+
+    mul.lo.s32      %r25, %r24, %r22;
+    sub.s32         %r26, 255, %r22;
+    mul.lo.s32      %r27, %r18, %r26;
+    add.s32         %r28, %r25, %r27;
+    add.s32         %r29, %r28, 127;
+    div.u32         %r30, %r29, 255;
+
+    cvt.u16.u32     %rs2, %r30;
+    st.global.u8    [%rd4], %rs2;
+PMDONE:
+    ret;
+}
+
 "#;
 
 /// Errors from the CUDA driver calls this crate makes directly.
@@ -575,12 +774,28 @@ pub(crate) struct CudaDriver {
     module: CUmodule,
     blend: CUfunction,
     blend_masked: CUfunction,
+    /// A layer blended with a per-pixel alpha *and* per-pixel colour, which
+    /// is what an overlay carrying its own transparency needs. Loaded but not
+    /// yet called: the surfaces it reads from have no owner until the
+    /// compositor grows a path for a layer that brings its own alpha.
+    #[allow(dead_code)]
+    blend_plane_masked: CUfunction,
     /// [`CONVERT_PTX`] and its entry points, loaded alongside the blend
     /// module: one JIT at construction rather than one on the first frame
     /// that needs a conversion.
     convert_module: CUmodule,
     bgra_to_luma: CUfunction,
     bgra_to_chroma: CUfunction,
+    /// Lifts a BGRA surface's alpha into a plane of its own, so a blend can
+    /// read it per pixel. Loaded but not yet called — see
+    /// `blend_plane_masked`.
+    #[allow(dead_code)]
+    extract_alpha: CUfunction,
+    /// The same at half resolution, averaging each 2x2 block — what the
+    /// chroma pass reads, for the reason `upload_mask` averages too. Loaded
+    /// but not yet called — see `blend_plane_masked`.
+    #[allow(dead_code)]
+    extract_alpha_half: CUfunction,
 }
 
 // SAFETY: a `CUcontext` is not thread-affine — it is pushed onto whichever
@@ -621,28 +836,49 @@ impl CudaDriver {
             // Loading a module needs a current context, and this is before
             // there is a `Self` to push it through.
             check("cuCtxPushCurrent", cuCtxPushCurrent_v2(ctx))?;
-            let loaded =
-                load_module(BLEND_PTX, ["blend_plane", "blend_masked"]).and_then(|blend| {
-                    match load_module(CONVERT_PTX, ["bgra_to_luma", "bgra_to_chroma"]) {
-                        Ok(convert) => Ok((blend, convert)),
-                        Err(error) => {
-                            // The first module has no owner yet, so nothing else
-                            // would ever unload it.
-                            cuModuleUnload(blend.0);
-                            Err(error)
-                        }
+            let loaded = load_module(
+                BLEND_PTX,
+                ["blend_plane", "blend_masked", "blend_plane_masked"],
+            )
+            .and_then(|blend| {
+                match load_module(
+                    CONVERT_PTX,
+                    [
+                        "bgra_to_luma",
+                        "bgra_to_chroma",
+                        "extract_alpha",
+                        "extract_alpha_half",
+                    ],
+                ) {
+                    Ok(convert) => Ok((blend, convert)),
+                    Err(error) => {
+                        // The first module has no owner yet, so nothing else
+                        // would ever unload it.
+                        cuModuleUnload(blend.0);
+                        Err(error)
                     }
-                });
+                }
+            });
             let mut popped: CUcontext = std::ptr::null_mut();
             check("cuCtxPopCurrent", cuCtxPopCurrent_v2(&mut popped))?;
-            let ((module, blend, blend_masked), (convert_module, bgra_to_luma, bgra_to_chroma)) =
-                match loaded {
-                    Ok(modules) => modules,
-                    Err(error) => {
-                        cuDevicePrimaryCtxRelease_v2(device);
-                        return Err(error);
-                    }
-                };
+            let (
+                (module, [blend, blend_masked, blend_plane_masked]),
+                (
+                    convert_module,
+                    [
+                        bgra_to_luma,
+                        bgra_to_chroma,
+                        extract_alpha,
+                        extract_alpha_half,
+                    ],
+                ),
+            ) = match loaded {
+                Ok(modules) => modules,
+                Err(error) => {
+                    cuDevicePrimaryCtxRelease_v2(device);
+                    return Err(error);
+                }
+            };
 
             Ok(Self {
                 device,
@@ -650,9 +886,12 @@ impl CudaDriver {
                 module,
                 blend,
                 blend_masked,
+                blend_plane_masked,
                 convert_module,
                 bgra_to_luma,
                 bgra_to_chroma,
+                extract_alpha,
+                extract_alpha_half,
             })
         }
     }
@@ -1246,10 +1485,10 @@ impl CudaDriver {
 
 /// Hands the driver one PTX module and looks up its two entry points. The
 /// context must already be current.
-unsafe fn load_module(
+unsafe fn load_module<const N: usize>(
     ptx: &str,
-    entry_names: [&str; 2],
-) -> Result<(CUmodule, CUfunction, CUfunction), CudaDriverError> {
+    entry_names: [&str; N],
+) -> Result<(CUmodule, [CUfunction; N]), CudaDriverError> {
     // SAFETY: the caller has a context current, which is this function's own
     // documented contract. `image` and each `name` are live NUL-terminated
     // `CString`s, and a failed lookup unloads the module before returning, so no
@@ -1263,7 +1502,7 @@ unsafe fn load_module(
             cuModuleLoadData(&mut module, image.as_ptr().cast()),
         )
         .map_err(|error| CudaDriverError::KernelRejected(error.to_string()))?;
-        let mut entries = [std::ptr::null_mut(); 2];
+        let mut entries = [std::ptr::null_mut(); N];
         for (entry, name) in entries.iter_mut().zip(entry_names) {
             let name = std::ffi::CString::new(name).expect("a literal without a nul");
             if let Err(error) = check(
@@ -1274,7 +1513,7 @@ unsafe fn load_module(
                 return Err(CudaDriverError::KernelRejected(error.to_string()));
             }
         }
-        Ok((module, entries[0], entries[1]))
+        Ok((module, entries))
     }
 }
 
