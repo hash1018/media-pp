@@ -146,6 +146,92 @@ fn a_remote_track_sink_rejects_packets_until_its_codec_is_declared() {
     ));
 }
 
+/// An encoder that keeps its SPS/PPS in `parameters()` sends a bitstream with
+/// none, and nothing downstream of RTP can decode that — so the sender puts
+/// them back, on every keyframe and only on keyframes.
+///
+/// The time base is the part worth guarding: rebuilding a packet drops it to
+/// 0/0, and str0m answers a packet it cannot build a `MediaTime` from by
+/// dropping it rather than refusing it, so getting this wrong is a peer that
+/// silently receives nothing.
+#[test]
+fn parameter_sets_go_in_front_of_every_keyframe_and_nothing_else() {
+    let (handle, command_rx) = command_only_handle(4);
+    let negotiated = Arc::new(std::sync::Mutex::new(vec![Codec::H264]));
+    let mut sink = WebRtcTrackSink::new(
+        TrackId(9),
+        MediaKind::Video,
+        Some(Codec::H264),
+        negotiated,
+        handle.command_tx.clone(),
+    );
+
+    const HEADERS: [u8; 8] = [0, 0, 0, 1, 0x67, 0x42, 0xc0, 0x1f];
+    let mut parameters = ffmpeg::codec::Parameters::new();
+    // SAFETY: `parameters` is a live `AVCodecParameters` this test owns, and
+    // the allocation it is given is FFmpeg's to free with it.
+    unsafe {
+        let padded = HEADERS.len() + ffmpeg::ffi::AV_INPUT_BUFFER_PADDING_SIZE as usize;
+        let allocation = ffmpeg::ffi::av_mallocz(padded) as *mut u8;
+        std::ptr::copy_nonoverlapping(HEADERS.as_ptr(), allocation, HEADERS.len());
+        let raw = parameters.as_mut_ptr();
+        (*raw).extradata = allocation;
+        (*raw).extradata_size = HEADERS.len() as i32;
+    }
+    sink.set_parameter_sets(&parameters);
+
+    // A keyframe without them, one that already carries them, and a
+    // non-keyframe.
+    let payloads: [(&[u8], bool); 3] = [
+        (&[0, 0, 0, 1, 0x65, 0x88], true),
+        (
+            &[0, 0, 0, 1, 0x67, 0x42, 0xc0, 0x1f, 0, 0, 0, 1, 0x65, 0x88],
+            true,
+        ),
+        (&[0, 0, 0, 1, 0x41, 0x9a], false),
+    ];
+    for (payload, key) in payloads {
+        let mut packet = ffmpeg::Packet::copy(payload);
+        packet.set_time_base(ffmpeg::Rational::new(1, 90_000));
+        packet.set_pts(Some(0));
+        if key {
+            packet.set_flags(ffmpeg::packet::Flags::KEY);
+        }
+        sink.consume(MediaBuffer::Packet(Arc::new(packet)))
+            .expect("push");
+    }
+
+    let sent: Vec<Vec<u8>> = (0..3)
+        .map(|_| {
+            let Command::Push(TrackId(9), _, MediaBuffer::Packet(packet)) =
+                command_rx.recv().expect("packet was queued")
+            else {
+                panic!("expected a packet command");
+            };
+            assert_eq!(
+                packet.time_base(),
+                ffmpeg::Rational::new(1, 90_000),
+                "a rebuilt packet keeps the time base str0m needs"
+            );
+            packet.data().expect("packet has a payload").to_vec()
+        })
+        .collect();
+
+    assert_eq!(
+        sent[0],
+        [&HEADERS[..], &[0, 0, 0, 1, 0x65, 0x88][..]].concat(),
+        "a keyframe without the headers gets them"
+    );
+    assert_eq!(
+        sent[1], payloads[1].0,
+        "a keyframe that already carries them is left alone"
+    );
+    assert_eq!(
+        sent[2], payloads[2].0,
+        "a non-keyframe is left alone: the headers are only useful where          decoding can start"
+    );
+}
+
 #[test]
 fn track_sink_shifts_a_negative_encoder_delay_without_changing_packet_spacing() {
     let (handle, command_rx) = command_only_handle(2);
@@ -534,6 +620,11 @@ fn one_h264_sendrecv_track_carries_data_both_ways_with_the_declared_payload_type
         },
     )
     .expect("OpenH264 encoder should open");
+    // The encoder keeps its SPS/PPS in `parameters()` rather than in the
+    // bitstream, so the sender is what has to put them back — see
+    // `WebRtcTrackSink::set_parameter_sets`. Without this the peer never
+    // sees them and `wait_stream_info` below times out.
+    sink_b.set_parameter_sets(&encoder.parameters());
     let send_b = Pipeline::new("peer-b-h264-send", video_source, |source, ctx| {
         let branch = ctx.branch().pipe(encoder).to(Box::new(sink_b))?;
         ctx.attach(source, 0, branch)?;

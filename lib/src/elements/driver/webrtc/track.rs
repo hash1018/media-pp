@@ -6,6 +6,8 @@ use std::{
     time::Duration,
 };
 
+use ffmpeg_next as ffmpeg;
+
 use crate::pp_log::{PpLog, pp_error, pp_info};
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TrySendError, select};
 use str0m::{
@@ -215,6 +217,9 @@ pub struct WebRtcTrackSink {
     /// a common example), while RTP media time is unsigned. The first packet
     /// establishes one track-wide shift so relative timing is preserved.
     timestamp_offset: Option<i64>,
+    /// The Annex-B codec headers to put back in front of every keyframe —
+    /// see [`WebRtcTrackSink::set_parameter_sets`].
+    parameter_sets: Option<Vec<u8>>,
 }
 
 impl WebRtcTrackSink {
@@ -232,6 +237,7 @@ impl WebRtcTrackSink {
             negotiated_codecs,
             command_tx,
             timestamp_offset: None,
+            parameter_sets: None,
             pp_log: element_pp_log(
                 ElementType::WebRtcPeer,
                 &format!("webrtc-track-{}", id.0),
@@ -268,6 +274,47 @@ impl WebRtcTrackSink {
     /// Returns [`WebRtcError::OutboundCodecNotNegotiated`] without changing
     /// the previous selection when `codec` is unavailable. Already-enqueued
     /// packets retain the declaration they were submitted with.
+    /// Hands this sink the encoder's codec headers, so it can put them back
+    /// in front of every keyframe it sends.
+    ///
+    /// # Why a sender has to
+    ///
+    /// An encoder opened with `AV_CODEC_FLAG_GLOBAL_HEADER` — which every
+    /// encoder in this crate is, so that a container has a `CodecPrivate` to
+    /// write — moves its SPS/PPS out of the bitstream and into
+    /// `parameters()`. A file is then complete, because the container carries
+    /// them; an RTP stream is not, because nothing in it does. The receiving
+    /// half of this driver builds its decoder parameters by watching for
+    /// SPS/PPS to go past (see `stream_info`), so without this a peer never
+    /// learns what it is being sent and simply times out waiting.
+    ///
+    /// # What to pass
+    ///
+    /// The encoder's own `parameters()`, which is where the headers went.
+    /// libavcodec writes H.264's there in Annex-B, the same form a packet's
+    /// payload is already in, so they only have to go in front. Repeating
+    /// them on every keyframe rather than once is what lets a peer that
+    /// joins late — or one that lost the first of them — start decoding at
+    /// the next one.
+    ///
+    /// Parameters carrying no extradata leave this sink as it was, so an
+    /// encoder that still writes its headers in-band, or a codec with none
+    /// to write, can be passed here without special-casing.
+    pub fn set_parameter_sets(&mut self, parameters: &ffmpeg::codec::Parameters) {
+        // SAFETY: `parameters` is a live `AVCodecParameters`; `extradata` and
+        // `extradata_size` are plain fields of it, and the slice is copied
+        // out before this borrow ends.
+        let bytes = unsafe {
+            let raw = parameters.as_ptr();
+            let size = usize::try_from((*raw).extradata_size).unwrap_or(0);
+            match ((*raw).extradata.is_null() || size == 0).then_some(()) {
+                Some(()) => Vec::new(),
+                None => std::slice::from_raw_parts((*raw).extradata, size).to_vec(),
+            }
+        };
+        self.parameter_sets = (!bytes.is_empty()).then_some(bytes);
+    }
+
     pub fn set_codec(&mut self, codec: Codec) -> Result<()> {
         let negotiated = self.negotiated_codecs();
         if !negotiated.contains(&codec) {
@@ -336,6 +383,7 @@ impl Sink for WebRtcTrackSink {
                 .into());
             }
         }
+        let buf = self.prepend_parameter_sets(buf);
         let buf = self.normalize_packet_timestamp(buf)?;
         // `WebRtcPeer::run` gone (channel disconnected) means this track is
         // dead — surface it as `Err` rather than swallowing it, so whatever
@@ -373,6 +421,42 @@ impl Sink for WebRtcTrackSink {
 }
 
 impl WebRtcTrackSink {
+    /// Puts the codec headers in front of a keyframe, if this sink was given
+    /// any — see [`WebRtcTrackSink::set_parameter_sets`].
+    ///
+    /// Only in front of keyframes, and only when the payload does not open
+    /// with them already: an encoder that was *not* opened with a global
+    /// header still writes them in-band, and doubling them costs bytes on
+    /// every keyframe for nothing.
+    fn prepend_parameter_sets(&self, buf: MediaBuffer) -> MediaBuffer {
+        let Some(headers) = self.parameter_sets.as_deref() else {
+            return buf;
+        };
+        let MediaBuffer::Packet(packet) = &buf else {
+            return buf;
+        };
+        let Some(payload) = packet.data() else {
+            return buf;
+        };
+        if !packet.is_key() || payload.starts_with(headers) {
+            return buf;
+        }
+        let mut joined = Vec::with_capacity(headers.len() + payload.len());
+        joined.extend_from_slice(headers);
+        joined.extend_from_slice(payload);
+        let mut rewritten = ffmpeg::Packet::copy(&joined);
+        // The time base above all: `Packet::copy` leaves it 0/0, and a packet
+        // str0m cannot build a `MediaTime` from is dropped rather than
+        // refused — the failure would be a peer that simply receives nothing.
+        rewritten.set_time_base(packet.time_base());
+        rewritten.set_pts(packet.pts());
+        rewritten.set_dts(packet.dts());
+        rewritten.set_stream(packet.stream());
+        rewritten.set_flags(packet.flags());
+        rewritten.set_duration(packet.duration());
+        MediaBuffer::Packet(Arc::new(rewritten))
+    }
+
     fn normalize_packet_timestamp(&mut self, buf: MediaBuffer) -> Result<MediaBuffer> {
         let MediaBuffer::Packet(packet) = buf else {
             return Ok(buf);
