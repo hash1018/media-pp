@@ -56,6 +56,38 @@ fn partial_thread_spawn_failure_stops_and_joins_started_sources() {
     assert!(pipeline.workers.lock().unwrap().is_empty());
 }
 
+/// `is_running` answers the one question a caller polling for the end has:
+/// whether anything is still producing. Before `run` there is nothing;
+/// after `stop` there is nothing again, however the source got there.
+#[test]
+fn is_running_spans_exactly_the_time_a_source_is_on_its_thread() {
+    let pipeline = Pipeline::new(
+        "running",
+        TestVideoSource::new("gen", TestVideoOptions::default()),
+        |source, ctx| {
+            let branch = ctx.branch().to(Box::new(NoOpSink {
+                name: "noop".into(),
+                pp_log: element_pp_log(ElementType::Other, "noop", None),
+            }))?;
+            ctx.attach(source, 0, branch)?;
+            Ok(())
+        },
+    )
+    .expect("test pipeline wiring must succeed");
+
+    assert!(!pipeline.is_running(), "nothing runs before run()");
+
+    pipeline.run().unwrap();
+    thread::sleep(Duration::from_millis(50));
+    assert!(pipeline.is_running(), "the source thread is still going");
+
+    pipeline.stop();
+    // Blocks until every `Bus` handle is dropped, which is the source
+    // thread actually being over rather than merely asked to stop.
+    let _: Vec<_> = pipeline.bus().iter().collect();
+    assert!(!pipeline.is_running(), "the source thread has finished");
+}
+
 /// End-to-end: `run()` (async — starts the background thread and
 /// returns right away), then `pause()`/`stop()` (skipping `resume()`)
 /// from the test's own thread — exercises the whole cascade (source's

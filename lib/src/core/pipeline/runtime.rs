@@ -225,6 +225,24 @@ impl Pipeline {
         &self.playback_clock
     }
 
+    /// Whether any source of this pipeline is still on a thread of its own.
+    ///
+    /// `false` before [`Pipeline::run`], and `true` from then until every
+    /// source has finished — by its own `Eos`, by [`Pipeline::stop`] or
+    /// [`Pipeline::finish`], or by returning an error it could not continue
+    /// past. Those endings look different on the bus and identical here,
+    /// which is what a caller wanting only "is this still producing?" is
+    /// asking: a live capture whose target went away has to be noticed by
+    /// whoever might reopen it, and that caller has no reason to care which
+    /// way it ended.
+    ///
+    /// Draining the bus stays the way to learn *why* — see this type's own
+    /// docs — and remains the only way to wait for the end rather than poll
+    /// for it.
+    pub fn is_running(&self) -> bool {
+        self.running.load(Ordering::Acquire) > 0
+    }
+
     /// Starts driving the source on a background thread and returns
     /// immediately — see the type-level docs for how to learn when it's
     /// actually done. A no-op if this `Pipeline` is already running or
