@@ -112,8 +112,8 @@ The core types are deliberately small:
   while a preview keeps running is `finish_branch`; it returns without
   waiting for the drain, and the terminal's `BusEvent::Eos` says when the
   output is actually complete.
-- The video compositors and the screen captures emit at a rate that can be
-  changed while they run. The compositors take it on their existing handle
+- Every video compositor and every screen capture emits at a rate that can be
+  changed while it runs. The compositors take it on their existing handle
   (`set_frame_rate`, and `frame_rate` to read back what was actually kept); a
   capture has no handle of its own, so it hands out a `FrameRateHandle` from
   `frame_rate()` before it is moved into a `Pipeline`. Their `time_base` is

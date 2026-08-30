@@ -9,6 +9,7 @@ use std::{
 };
 
 use crate::pp_log::{PpLog, pp_info};
+use crate::rate::FrameRate;
 use arc_swap::ArcSwapOption;
 use ffmpeg_next::{self as ffmpeg, ffi};
 use thiserror::Error as ThisError;
@@ -147,6 +148,9 @@ struct VideoInput {
 struct CompositorShared {
     inputs: Mutex<HashMap<Arc<str>, Arc<VideoInput>>>,
     next_input_id: AtomicU64,
+    /// The output rate, which the tick loop reads each pass and
+    /// [`SwVideoCompositorHandle::set_frame_rate`] writes.
+    frame_rate: Arc<FrameRate>,
 }
 
 /// A cheaply cloneable handle for adding and removing compositor inputs.
@@ -219,6 +223,29 @@ impl SwVideoCompositorHandle {
     /// Returns the number of compositor inputs currently registered.
     ///
     /// Returns zero after the compositor has been dropped.
+    /// Changes the rate this compositor emits at, from the next tick.
+    ///
+    /// Returns `false` for a rate that is not positive, and for a compositor
+    /// that has already been dropped. The same contract as the GPU
+    /// compositors' setters, and with the same caveat: [`
+    /// SwVideoCompositor::time_base`] is the reciprocal of this and the output
+    /// `pts` is a tick counter in those units, so a change re-means every
+    /// timestamp after it while the ones already downstream were stamped under
+    /// the old rate — see [`crate::rate`].
+    pub fn set_frame_rate(&self, frame_rate: ffmpeg::Rational) -> bool {
+        self.shared
+            .upgrade()
+            .is_some_and(|shared| shared.frame_rate.set(frame_rate))
+    }
+
+    /// The rate this compositor is emitting at, or `None` once it is gone.
+    ///
+    /// Read back rather than remembered by the caller: a rate refused by
+    /// [`Self::set_frame_rate`] leaves the old one in place.
+    pub fn frame_rate(&self) -> Option<ffmpeg::Rational> {
+        Some(self.shared.upgrade()?.frame_rate.get())
+    }
+
     pub fn source_count(&self) -> usize {
         self.shared
             .upgrade()
@@ -521,7 +548,6 @@ pub struct SwVideoCompositor {
     name: Arc<str>,
     shared: Arc<CompositorShared>,
     options: VideoCompositorOptions,
-    frame_interval: Duration,
     frame_index: i64,
     scalers: HashMap<VideoInputId, InputScaler>,
     output_pool: UnboundObjectPool<ffmpeg::frame::Video>,
@@ -562,10 +588,8 @@ impl SwVideoCompositor {
         let shared = Arc::new(CompositorShared {
             inputs: Mutex::new(HashMap::new()),
             next_input_id: AtomicU64::new(1),
+            frame_rate: FrameRate::new(options.frame_rate),
         });
-        let frame_interval = Duration::from_secs_f64(
-            options.frame_rate.denominator() as f64 / options.frame_rate.numerator() as f64,
-        );
         let (width, height) = (options.width, options.height);
         let output_pool = UnboundObjectPool::new(
             OUTPUT_POOL_SIZE,
@@ -585,7 +609,6 @@ impl SwVideoCompositor {
                 pp_log,
                 shared: shared.clone(),
                 options,
-                frame_interval,
                 frame_index: 0,
                 scalers: HashMap::new(),
                 output_pool,
@@ -625,17 +648,16 @@ impl SwVideoCompositor {
         self.options.height
     }
 
-    /// Returns the configured output frame rate.
+    /// The output frame rate, which is what construction was given unless
+    /// [`SwVideoCompositorHandle::set_frame_rate`] has changed it since.
     pub fn frame_rate(&self) -> ffmpeg::Rational {
-        self.options.frame_rate
+        self.shared.frame_rate.get()
     }
 
-    /// Returns the reciprocal of [`Self::frame_rate`], used as output PTS units.
+    /// The reciprocal of [`Self::frame_rate`], used as output PTS units — and
+    /// so a value that moves with it.
     pub fn time_base(&self) -> ffmpeg::Rational {
-        ffmpeg::Rational::new(
-            self.options.frame_rate.denominator(),
-            self.options.frame_rate.numerator(),
-        )
+        self.frame_rate().invert()
     }
 
     fn snapshots(&self) -> Vec<InputSnapshot> {
@@ -814,7 +836,7 @@ impl SourceElement for SwVideoCompositor {
 
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
         pp_info!(self, "started");
-        let mut schedule = PeriodicSchedule::new(self.frame_interval, Instant::now());
+        let mut schedule = PeriodicSchedule::new(self.shared.frame_rate.interval(), Instant::now());
         loop {
             let outcome = drain_control(control, self, bus)?;
             if outcome.stopped {
@@ -825,7 +847,14 @@ impl SourceElement for SwVideoCompositor {
                 schedule.resume_after_pause(outcome.paused_for, Instant::now());
             }
 
+            // Followed here rather than at construction, so a rate set while
+            // this is running is kept from the next tick on.
+            let interval = self.shared.frame_rate.interval();
             let now = Instant::now();
+            if schedule.interval() != interval {
+                pp_info!(self, "frame rate is now {}", self.frame_rate());
+                schedule.set_interval(interval, now);
+            }
             if !schedule.is_due(now) {
                 thread::sleep(schedule.remaining(now).min(CONTROL_POLL_INTERVAL));
                 continue;
@@ -1428,5 +1457,39 @@ mod tests {
              pause), not almost immediately (phase reset to the resume \
              instant): got {gap:?}"
         );
+    }
+
+    /// The rate a running compositor emits at can be changed, and the unit its
+    /// output timestamps are in moves with it.
+    #[test]
+    fn the_frame_rate_can_be_changed_while_it_is_running() {
+        let (compositor, handle) = SwVideoCompositor::new(
+            "rate",
+            VideoCompositorOptions {
+                width: 64,
+                height: 64,
+                frame_rate: ffmpeg::Rational::new(60, 1),
+                background: Color::BLACK,
+            },
+        )
+        .expect("compositor");
+
+        assert_eq!(compositor.frame_rate(), ffmpeg::Rational::new(60, 1));
+        assert_eq!(compositor.time_base(), ffmpeg::Rational::new(1, 60));
+
+        assert!(handle.set_frame_rate(ffmpeg::Rational::new(24, 1)));
+        assert_eq!(handle.frame_rate(), Some(ffmpeg::Rational::new(24, 1)));
+        // The element and the handle read one value, not two.
+        assert_eq!(compositor.frame_rate(), ffmpeg::Rational::new(24, 1));
+        assert_eq!(compositor.time_base(), ffmpeg::Rational::new(1, 24));
+
+        // Refused, leaving the running rate alone.
+        assert!(!handle.set_frame_rate(ffmpeg::Rational::new(0, 1)));
+        assert_eq!(compositor.frame_rate(), ffmpeg::Rational::new(24, 1));
+
+        // And answered rather than applied once the compositor is gone.
+        drop(compositor);
+        assert!(!handle.set_frame_rate(ffmpeg::Rational::new(30, 1)));
+        assert_eq!(handle.frame_rate(), None);
     }
 }
