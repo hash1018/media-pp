@@ -87,9 +87,9 @@ pub use filter::{
     D3d12ScalerError, D3d12Upload, D3d12UploadError,
 };
 pub use sink::{
-    AppSink, FrameCounter, HlsMode, HlsMuxer, HlsMuxerError, HlsMuxerStreamSink, HlsOptions,
-    HlsSegmentFormat, Mp4Muxer, Mp4MuxerError, Mp4MuxerStreamSink, PacketCounter, RtspSink,
-    RtspSinkError, SegmentPolicy, SegmentedMp4Muxer, SubmitError,
+    AppSink, FileMuxer, FileMuxerError, FileMuxerStreamSink, FrameCounter, HlsMode, HlsMuxer,
+    HlsMuxerError, HlsMuxerStreamSink, HlsOptions, HlsSegmentFormat, PacketCounter, RtspSink,
+    RtspSinkError, SegmentPolicy, SegmentedFileMuxer, SubmitError,
 };
 #[cfg(feature = "ort")]
 pub use sink::{COCO_CLASS_LABELS, Detection, OrtDetector, OrtDetectorError};

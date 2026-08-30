@@ -2,7 +2,7 @@
 
 Two `TestVideoSource` pipelines -> `SwScaler(NV12)` -> upload -> GPU compositor
 -> `Tee` -> {renderer for live display,
-`download -> SwScaler(YUV420P) -> SwEncoder -> Mp4Muxer` for simultaneous
+`download -> SwScaler(YUV420P) -> SwEncoder -> FileMuxer` for simultaneous
 recording}. The foreground layer moves at runtime through
 its layer handle, same as the CPU `video_compositor` example, but every frame
 this composites never touches the CPU until the recording branch's own

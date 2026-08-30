@@ -35,7 +35,7 @@ mod windows_example {
         bus::BusEvent,
         color::Color,
         elements::{
-            D3d11Download, D3d11Upload, D3d11VideoCompositor, Mp4Muxer, SwEncoder,
+            D3d11Download, D3d11Upload, D3d11VideoCompositor, FileMuxer, SwEncoder,
             SwEncoderOptions, SwScaler, TeeBuilder, TestVideoOptions, TestVideoSource, VideoCodec,
             VideoCompositorOptions, VideoFit, VideoLayer, VideoRect,
         },
@@ -47,7 +47,7 @@ mod windows_example {
     /// Two TestVideoSource pipelines -> D3d11Upload -> D3d11VideoCompositor
     /// (GPU shader compositing, no CPU round trip for the inputs or the
     /// composited output) -> Tee -> {D3d11Renderer for live display,
-    /// D3d11Download -> SwScaler -> SwEncoder -> Mp4Muxer for simultaneous
+    /// D3d11Download -> SwScaler -> SwEncoder -> FileMuxer for simultaneous
     /// recording}. The foreground layer moves at runtime through its
     /// D3d11VideoLayerHandle, same as the CPU `video_compositor` example, but
     /// every frame this composites never touches the CPU until the recording
@@ -197,7 +197,7 @@ mod windows_example {
                 gop_size: 60,
             },
         )?;
-        let mut muxer = Mp4Muxer::create(path)?;
+        let mut muxer = FileMuxer::create(path)?;
         muxer.add_stream("video", encoder.parameters(), time_base)?;
         let muxer_sink = muxer.open()?.pop().expect("one video stream");
 
@@ -313,7 +313,7 @@ mod linux_example {
         bus::BusEvent,
         color::Color,
         elements::{
-            CudaDevice, CudaDownload, CudaFrameFormat, CudaUpload, CudaVideoCompositor, Mp4Muxer,
+            CudaDevice, CudaDownload, CudaFrameFormat, CudaUpload, CudaVideoCompositor, FileMuxer,
             SwEncoder, SwEncoderOptions, SwScaler, TeeBuilder, TestVideoOptions, TestVideoSource,
             VideoCodec, VideoCompositorOptions, VideoFit, VideoLayer, VideoRect,
         },
@@ -472,7 +472,7 @@ mod linux_example {
                 gop_size: 60,
             },
         )?;
-        let mut muxer = Mp4Muxer::create(path)?;
+        let mut muxer = FileMuxer::create(path)?;
         muxer.add_stream("video", encoder.parameters(), time_base)?;
         let muxer_sink = muxer.open()?.pop().expect("one video stream");
 

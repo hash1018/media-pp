@@ -544,7 +544,7 @@ impl D3d11VideoEncoder {
     }
 
     /// This encoder's own codec parameters — what a
-    /// [`crate::elements::Mp4Muxer`] track needs when there's no
+    /// [`crate::elements::FileMuxer`] track needs when there's no
     /// container/demuxer in the loop to get them from, same as
     /// [`crate::elements::SwEncoder::parameters`].
     pub fn parameters(&self) -> ffmpeg::codec::Parameters {

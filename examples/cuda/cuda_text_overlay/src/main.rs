@@ -6,7 +6,7 @@
 //!
 //! `TestVideoSource -> SwScaler(NV12) -> CudaUpload -> CudaVideoCompositor
 //! (+ CudaTextLayerHandle) -> CudaDownload -> SwScaler(YUV420P) -> SwEncoder
-//! -> Mp4Muxer`. Every composite and every text blend happens on the GPU; the
+//! -> FileMuxer`. Every composite and every text blend happens on the GPU; the
 //! frame only comes back for the software encoder.
 //!
 //! Nothing about the graph is platform-specific — CUDA is a vendor backend,
@@ -35,7 +35,7 @@ mod example {
         bus::BusEvent,
         color::Color,
         elements::{
-            CudaDevice, CudaDownload, CudaFrameFormat, CudaUpload, CudaVideoCompositor, Mp4Muxer,
+            CudaDevice, CudaDownload, CudaFrameFormat, CudaUpload, CudaVideoCompositor, FileMuxer,
             SwEncoder, SwEncoderOptions, SwScaler, TestVideoOptions, TestVideoSource, TextLayer,
             VideoCodec, VideoCompositorOptions, VideoFit, VideoLayer, VideoRect,
         },
@@ -169,7 +169,7 @@ mod example {
                 gop_size: 60,
             },
         )?;
-        let mut muxer = Mp4Muxer::create(&path)?;
+        let mut muxer = FileMuxer::create(&path)?;
         muxer.add_stream("video", encoder.parameters(), time_base)?;
         let muxer_sink = muxer.open()?.pop().expect("one video stream");
 

@@ -15,7 +15,7 @@
 //!
 //! ```text
 //! WebRtcTrackSource(H.264) -\
-//!                            -> Mp4Muxer
+//!                            -> FileMuxer
 //! WebRtcTrackSource(Opus)  --/
 //! ```
 //!
@@ -41,7 +41,7 @@ mod example {
         driver::DriverRunner,
         element::Element,
         elements::{
-            AudioCodec, FileDemuxer, Mp4Muxer, Pacer, SwAudioEncoder, SwAudioEncoderOptions,
+            AudioCodec, FileDemuxer, FileMuxer, Pacer, SwAudioEncoder, SwAudioEncoderOptions,
             SwDecoder, SwEncoder, SwEncoderOptions, SwScaler, TrackEndpoints, VideoCodec,
             WebRtcHandle, WebRtcPeer, WebRtcTrackSink, WebRtcTrackSource,
         },
@@ -274,7 +274,7 @@ mod example {
         audio_source: WebRtcTrackSource,
         audio_info: media_pp::elements::WebRtcStreamInfo,
     ) -> media_pp::Result<Arc<Pipeline>> {
-        let mut muxer = Mp4Muxer::create(output)?;
+        let mut muxer = FileMuxer::create(output)?;
         muxer.add_stream(
             "received-video",
             video_info.codec_parameters()?,

@@ -581,7 +581,7 @@ impl PipeWireScreenCaptureSource {
     /// issue one) — the same shape `DxgiCaptureSource::open`
     /// returns, so a caller can build a matching downstream
     /// [`crate::elements::SwScaler`]/[`crate::elements::SwEncoder`]/
-    /// [`crate::elements::Mp4Muxer`] from one value. The size comes from the
+    /// [`crate::elements::FileMuxer`] from one value. The size comes from the
     /// stream's negotiated format rather than the portal's reported monitor
     /// size, because compositor scaling can make the two differ.
     pub fn open(
@@ -594,7 +594,7 @@ impl PipeWireScreenCaptureSource {
 
     /// Opens the same capture, but emits **CUDA-resident** `Pixel::CUDA`
     /// frames (`CudaFrameFormat::Bgra`) instead of CPU ones, so a recording
-    /// pipeline is `PipeWireScreenCaptureSource -> CudaEncoder -> Mp4Muxer`
+    /// pipeline is `PipeWireScreenCaptureSource -> CudaEncoder -> FileMuxer`
     /// with no `CudaUpload` in between and no captured
     /// pixel ever touching system memory.
     ///

@@ -200,7 +200,7 @@ renegotiates mid-stream, or reallocates a pool. Declaring a contract is
 opt-in, and these elements declare one:
 
 - Packet path: `FileDemuxer`, `SwDecoder`, `SwEncoder`, `SwAudioEncoder`,
-  `Mp4Muxer`, `SegmentedMp4Muxer`, `HlsMuxer`, `RtspSink`, `PacketCounter`.
+  `FileMuxer`, `SegmentedFileMuxer`, `HlsMuxer`, `RtspSink`, `PacketCounter`.
 - Video: `SwScaler`, `SwChromaKey`, `SwVideoCompositor`, `OrtDetector`, and
   every backend's upload, download, scaler, converter, chroma key, decoder,
   encoder, renderer, and compositor (`D3d11*`, `D3d12*`, `Cuda*`).
@@ -234,7 +234,7 @@ buffers, codecs, and muxers; `Pipeline::stop` abandons buffered work immediately
 |---|---|
 | Sources | `FileDemuxer`, `AppSource`, `RtspSource`, `TestVideoSource`, `TestAudioSource`, `DxgiCaptureSource`, `WgcCaptureSource`, `PipeWireScreenCaptureSource`, `PipeWireAudioCaptureSource`, `WasapiCaptureSource`, `AudioMixer`, `SwVideoCompositor`, `CudaVideoCompositor`, `D3d11VideoCompositor`, `WebRtcTrackSource` |
 | Filters | `SwDecoder`, `CudaDecoder`, `D3d11Decoder`, `D3d12Decoder`, `SwEncoder`, `CudaEncoder`, `D3d11VideoEncoder`, `SwAudioEncoder`, `AudioResampler`, `AudioVolume`, `SwScaler`, `SwChromaKey`, `D3d11ChromaKey`, `Pacer`, `VideoSynchronizer`, `CudaScaler`, `D3d11Scaler`, `D3d12Scaler`, `CudaUpload`, `CudaDownload`, `CudaConverter`, `D3d11Upload`, `D3d11Download`, `D3d12Upload`, `D3d12Download`, `Tee`, `ChangeGate`, `TimestampOrigin` |
-| Sinks | `FrameCounter`, `PacketCounter`, `AppSink`, `Mp4Muxer`, `SegmentedMp4Muxer`, `HlsMuxer`, `RtspSink`, `CudaRenderer`, `D3d11Renderer`, `D3d12Renderer`, `PipeWireAudioRenderer`, `WasapiRenderer`, `OrtDetector`, `WebRtcTrackSink` |
+| Sinks | `FrameCounter`, `PacketCounter`, `AppSink`, `FileMuxer`, `SegmentedFileMuxer`, `HlsMuxer`, `RtspSink`, `CudaRenderer`, `D3d11Renderer`, `D3d12Renderer`, `PipeWireAudioRenderer`, `WasapiRenderer`, `OrtDetector`, `WebRtcTrackSink` |
 
 Backend-specific elements require their corresponding Cargo feature and are
 available only on that backend's platform. See each type's Rust documentation

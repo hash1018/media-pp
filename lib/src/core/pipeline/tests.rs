@@ -587,7 +587,7 @@ fn finish_drains_queued_data_and_eos_even_while_paused() {
 
 /// [`PipelineBuilder`] with two independent, indefinitely-running
 /// sources (standing in for a real video capture + audio capture pair
-/// feeding one [`crate::elements::Mp4Muxer`]) sharing one `Pipeline`:
+/// feeding one [`crate::elements::FileMuxer`]) sharing one `Pipeline`:
 /// both should show up in `topology()` under their *own* root, not
 /// both defaulted to whichever source was added first (the exact bug
 /// `Tee`'s own registration had before `default_upstream` existed —

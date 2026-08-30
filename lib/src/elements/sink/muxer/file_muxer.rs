@@ -15,12 +15,12 @@ use crate::{
     error::Result,
 };
 
-/// Errors specific to `Mp4Muxer`. Converts into the crate-wide `Error` via
+/// Errors specific to `FileMuxer`. Converts into the crate-wide `Error` via
 /// `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
-pub enum Mp4MuxerError {
+pub enum FileMuxerError {
     /// A stream sink received a buffer other than a packet or end-of-stream.
-    #[error("Mp4Muxer stream sinks only accept Packet or Eos buffers, got {0}")]
+    #[error("FileMuxer stream sinks only accept Packet or Eos buffers, got {0}")]
     UnsupportedBuffer(&'static str),
 
     /// FFmpeg rejected muxer creation, packet writing, or finalization.
@@ -28,8 +28,8 @@ pub enum Mp4MuxerError {
     Ffmpeg(#[from] ffmpeg::Error),
 }
 
-/// One track registered via [`Mp4Muxer::add_stream`], waiting for
-/// [`Mp4Muxer::open`] to turn it into a real [`Mp4MuxerStreamSink`] — its
+/// One track registered via [`FileMuxer::add_stream`], waiting for
+/// [`FileMuxer::open`] to turn it into a real [`FileMuxerStreamSink`] — its
 /// `name` becomes that sink's own [`Element::name`]/`pp_log` identity, and
 /// `input_time_base` is what every `Packet` it receives already carries
 /// `pts`/`dts` in (the same one its upstream encoder was opened with).
@@ -41,11 +41,16 @@ struct PendingStream {
     kind: Option<MediaKind>,
 }
 
-/// Builds an MP4 (or any other container ffmpeg infers from `path`'s
-/// extension) with one or more tracks, then opens it into one [`Sink`] per
-/// track. Two-phase on purpose: a container's header has to describe
+/// Builds one container file with one or more tracks, then opens it into
+/// one [`Sink`] per track.
+///
+/// Which container is the path's own: `format::output` asks FFmpeg to guess
+/// a muxer from the file name, so `.mp4` gets MP4 and `.mkv` gets Matroska
+/// out of the same type. Nothing here is MP4-specific.
+///
+/// Two-phase on purpose: a container's header has to describe
 /// every stream's codec parameters up front — `avformat_write_header`
-/// can't run until every [`Mp4Muxer::add_stream`] this file will ever hold
+/// can't run until every [`FileMuxer::add_stream`] this file will ever hold
 /// has already happened — so there's no way to make this a single
 /// long-lived `Sink` that tracks attach to one at a time as their encoders
 /// come online (contrast [`crate::elements::AudioMixer`], whose inputs
@@ -55,7 +60,7 @@ struct PendingStream {
 /// ```no_run
 /// # use media_pp::ffmpeg;
 /// # use media_pp::elements::{
-/// #     AudioCodec, Mp4Muxer, SwAudioEncoder, SwAudioEncoderOptions, SwEncoder,
+/// #     AudioCodec, FileMuxer, SwAudioEncoder, SwAudioEncoderOptions, SwEncoder,
 /// #     SwEncoderOptions, VideoCodec,
 /// # };
 /// # fn main() -> media_pp::Result<()> {
@@ -77,7 +82,7 @@ struct PendingStream {
 /// #     time_base: audio_time_base,
 /// #     bit_rate: 128_000,
 /// # })?;
-/// let mut muxer = Mp4Muxer::create("out.mp4")?;
+/// let mut muxer = FileMuxer::create("out.mp4")?;
 /// muxer.add_stream("video", video_encoder.parameters(), video_time_base)?;
 /// muxer.add_stream("audio", audio_encoder.parameters(), audio_time_base)?;
 /// let mut sinks = muxer.open()?; // writes the header
@@ -86,16 +91,16 @@ struct PendingStream {
 /// # Ok(())
 /// # }
 /// ```
-pub struct Mp4Muxer {
+pub struct FileMuxer {
     output: ffmpeg::format::context::Output,
     streams: Vec<PendingStream>,
 }
 
-impl Mp4Muxer {
+impl FileMuxer {
     /// Allocates the output file. No header is written yet — nothing is on
-    /// disk in a readable shape until [`Mp4Muxer::open`] runs.
+    /// disk in a readable shape until [`FileMuxer::open`] runs.
     pub fn create(path: impl AsRef<Path>) -> Result<Self> {
-        let output = ffmpeg::format::output(&path).map_err(Mp4MuxerError::from)?;
+        let output = ffmpeg::format::output(&path).map_err(FileMuxerError::from)?;
         Ok(Self {
             output,
             streams: Vec::new(),
@@ -108,12 +113,12 @@ impl Mp4Muxer {
     /// passed to its own `SwEncoderOptions` (or the
     /// [`crate::elements::SwAudioEncoder`] equivalents). `name` becomes
     /// this track's own [`Element::name`]/`pp_log` identity once
-    /// [`Mp4Muxer::open`] turns it into a `Sink` — pick something that
+    /// [`FileMuxer::open`] turns it into a `Sink` — pick something that
     /// tells multiple tracks apart in logs/[`crate::bus::BusEvent`]s,
     /// e.g. `"video"`/`"audio"`.
     ///
     /// Add streams in the same order the caller will treat
-    /// [`Mp4Muxer::open`]'s returned `Vec` — index 0 is whichever stream
+    /// [`FileMuxer::open`]'s returned `Vec` — index 0 is whichever stream
     /// was added first, and so on.
     pub fn add_stream(
         &mut self,
@@ -124,7 +129,7 @@ impl Mp4Muxer {
         let mut stream = self
             .output
             .add_stream(parameters.id())
-            .map_err(Mp4MuxerError::from)?;
+            .map_err(FileMuxerError::from)?;
         let kind = MediaKind::packet_for(parameters.medium());
         stream.set_time_base(time_base);
         stream.set_parameters(parameters);
@@ -136,9 +141,9 @@ impl Mp4Muxer {
         Ok(())
     }
 
-    /// Writes the container header — every [`Mp4Muxer::add_stream`] call
+    /// Writes the container header — every [`FileMuxer::add_stream`] call
     /// this file will ever get must already have happened — and returns
-    /// one [`Sink`] per track, in the order [`Mp4Muxer::add_stream`] added
+    /// one [`Sink`] per track, in the order [`FileMuxer::add_stream`] added
     /// them.
     ///
     /// All returned `Sink`s write into the same underlying file behind a
@@ -165,9 +170,9 @@ impl Mp4Muxer {
     /// stopping only one pipeline while another keeps running leaves the
     /// file un-finalized (and unplayable) until the rest catch up too.
     pub fn open(mut self) -> Result<Vec<Box<dyn Sink>>> {
-        self.output.write_header().map_err(Mp4MuxerError::from)?;
+        self.output.write_header().map_err(FileMuxerError::from)?;
         let total = self.streams.len();
-        let shared = Arc::new(Mp4MuxerShared {
+        let shared = Arc::new(FileMuxerShared {
             state: Mutex::new(MuxerState {
                 output: self.output,
                 done: 0,
@@ -180,8 +185,8 @@ impl Mp4Muxer {
             .into_iter()
             .enumerate()
             .map(|(index, stream)| -> Box<dyn Sink> {
-                Box::new(Mp4MuxerStreamSink {
-                    pp_log: element_pp_log(ElementType::Mp4Muxer, &stream.name, None),
+                Box::new(FileMuxerStreamSink {
+                    pp_log: element_pp_log(ElementType::FileMuxer, &stream.name, None),
                     name: stream.name,
                     shared: shared.clone(),
                     stream_index: index,
@@ -198,27 +203,27 @@ struct MuxerState {
     output: ffmpeg::format::context::Output,
     /// How many tracks have reported themselves finished (`Eos` or
     /// `Stop`) — the trailer is written once this reaches
-    /// [`Mp4MuxerShared::total`], not on the first one (see
-    /// [`Mp4Muxer::open`]'s own docs for why).
+    /// [`FileMuxerShared::total`], not on the first one (see
+    /// [`FileMuxer::open`]'s own docs for why).
     done: usize,
     /// Set once the trailer has been written. Each
-    /// [`Mp4MuxerStreamSink`]'s own `done` flag already prevents
+    /// [`FileMuxerStreamSink`]'s own `done` flag already prevents
     /// double-counting *that* track's contribution to `done`; this
-    /// additionally guards [`Mp4MuxerShared::write_packet`] against
+    /// additionally guards [`FileMuxerShared::write_packet`] against
     /// writing into a file whose trailer has already closed it.
     finished: bool,
 }
 
-/// Shared between every [`Mp4MuxerStreamSink`] [`Mp4Muxer::open`] hands
+/// Shared between every [`FileMuxerStreamSink`] [`FileMuxer::open`] hands
 /// out for the same file — one lock around the whole
 /// [`ffmpeg::format::context::Output`] so concurrent tracks never
-/// interleave two writes against it (see [`Mp4Muxer::open`]'s own docs).
-struct Mp4MuxerShared {
+/// interleave two writes against it (see [`FileMuxer::open`]'s own docs).
+struct FileMuxerShared {
     state: Mutex<MuxerState>,
     total: usize,
 }
 
-impl Mp4MuxerShared {
+impl FileMuxerShared {
     fn write_packet(
         &self,
         stream_index: usize,
@@ -237,14 +242,14 @@ impl Mp4MuxerShared {
         let output_time_base = state
             .output
             .stream(stream_index)
-            .expect("stream was added in Mp4Muxer::add_stream")
+            .expect("stream was added in FileMuxer::add_stream")
             .time_base();
         packet.rescale_ts(input_time_base, output_time_base);
         packet.set_stream(stream_index);
         packet.set_position(-1);
         packet
             .write_interleaved(&mut state.output)
-            .map_err(Mp4MuxerError::from)?;
+            .map_err(FileMuxerError::from)?;
         Ok(())
     }
 
@@ -257,32 +262,32 @@ impl Mp4MuxerShared {
             return Ok(());
         }
         state.finished = true;
-        state.output.write_trailer().map_err(Mp4MuxerError::from)?;
+        state.output.write_trailer().map_err(FileMuxerError::from)?;
         Ok(())
     }
 }
 
 /// One track's own [`Sink`] — a lightweight handle sharing a
-/// `Mp4MuxerShared` with every other track [`Mp4Muxer::open`] returned
-/// alongside it. See [`Mp4Muxer::open`]'s own docs for the
+/// `FileMuxerShared` with every other track [`FileMuxer::open`] returned
+/// alongside it. See [`FileMuxer::open`]'s own docs for the
 /// finalize-once-every-track-is-done contract this relies on.
-pub struct Mp4MuxerStreamSink {
+pub struct FileMuxerStreamSink {
     pp_log: PpLog,
     name: Arc<str>,
-    shared: Arc<Mp4MuxerShared>,
+    shared: Arc<FileMuxerShared>,
     stream_index: usize,
     input_time_base: ffmpeg::Rational,
     /// The medium this track was registered for; `None` for one this
     /// crate does not model, which then declares nothing.
     kind: Option<MediaKind>,
     /// Set once this sink has contributed to
-    /// [`Mp4MuxerShared::finish_track`] — guards against double-counting
+    /// [`FileMuxerShared::finish_track`] — guards against double-counting
     /// if both a natural `Eos` and a later `Stop` arrive for the same
     /// track.
     done: bool,
 }
 
-impl Mp4MuxerStreamSink {
+impl FileMuxerStreamSink {
     fn finish(&mut self) -> Result<()> {
         if self.done {
             return Ok(());
@@ -294,13 +299,13 @@ impl Mp4MuxerStreamSink {
     }
 }
 
-impl Element for Mp4MuxerStreamSink {
+impl Element for FileMuxerStreamSink {
     fn name(&self) -> Arc<str> {
         self.name.clone()
     }
 
     fn element_type(&self) -> ElementType {
-        ElementType::Mp4Muxer
+        ElementType::FileMuxer
     }
 
     fn pp_log(&self) -> &PpLog {
@@ -312,7 +317,7 @@ impl Element for Mp4MuxerStreamSink {
     }
 }
 
-impl Sink for Mp4MuxerStreamSink {
+impl Sink for FileMuxerStreamSink {
     /// A muxer interleaves already-encoded data; it has no encoder of
     /// its own, so a decoded frame has no route through it. The medium is
     /// this track's own, so a video encoder wired into the audio track is
@@ -331,7 +336,7 @@ impl Sink for Mp4MuxerStreamSink {
                 .write_packet(self.stream_index, self.input_time_base, &packet)
                 .inspect_err(|error| pp_error!(self, "write_interleaved failed: {error}")),
             MediaBuffer::Eos => self.finish(),
-            other => Err(Mp4MuxerError::UnsupportedBuffer(other.kind()).into()),
+            other => Err(FileMuxerError::UnsupportedBuffer(other.kind()).into()),
         }
     }
 
@@ -344,7 +349,7 @@ impl Sink for Mp4MuxerStreamSink {
             );
         }
         // Terminal, nothing to forward. `Stop` still contributes to this
-        // track's own "done" count — see `Mp4Muxer::open`'s own docs on
+        // track's own "done" count — see `FileMuxer::open`'s own docs on
         // why the trailer waits for every track rather than finalizing on
         // whichever stops first.
         if msg == ControlMsg::Stop {
@@ -399,10 +404,10 @@ mod tests {
     fn seek_check_rejects_a_muxer_track() {
         let encoder = open_aac_encoder(48000, 1);
         let path = std::env::temp_dir().join(format!(
-            "mp4_muxer_seek_check_test_{}.mp4",
+            "file_muxer_seek_check_test_{}.mp4",
             std::process::id()
         ));
-        let mut muxer = Mp4Muxer::create(&path).expect("create muxer");
+        let mut muxer = FileMuxer::create(&path).expect("create muxer");
         muxer
             .add_stream(
                 "audio",
@@ -428,15 +433,15 @@ mod tests {
 
     /// One track, driven end to end (encode -> mux -> write_trailer on
     /// `Eos`), still produces a real, playable file — the single-track
-    /// case `Mp4Muxer` degenerates to.
+    /// case `FileMuxer` degenerates to.
     #[test]
     fn single_track_still_produces_a_playable_file() {
         let mut encoder = open_aac_encoder(48000, 1);
 
         let dir = std::env::temp_dir();
-        let path = dir.join(format!("mp4_muxer_single_test_{}.mp4", std::process::id()));
+        let path = dir.join(format!("file_muxer_single_test_{}.mp4", std::process::id()));
 
-        let mut muxer = Mp4Muxer::create(&path).expect("mp4 muxer must open");
+        let mut muxer = FileMuxer::create(&path).expect("the muxer must open");
         muxer
             .add_stream(
                 "audio",
@@ -483,9 +488,9 @@ mod tests {
         let encoder = open_aac_encoder(48000, 1);
 
         let dir = std::env::temp_dir();
-        let path = dir.join(format!("mp4_muxer_drop_test_{}.mp4", std::process::id()));
+        let path = dir.join(format!("file_muxer_drop_test_{}.mp4", std::process::id()));
 
-        let mut muxer = Mp4Muxer::create(&path).expect("mp4 muxer must open");
+        let mut muxer = FileMuxer::create(&path).expect("the muxer must open");
         muxer
             .add_stream(
                 "audio",
@@ -504,7 +509,7 @@ mod tests {
     }
 
     /// Two independent tracks (standing in for a real video+audio pair —
-    /// `Mp4Muxer` treats every stream as an opaque `codec::Parameters`, so
+    /// `FileMuxer` treats every stream as an opaque `codec::Parameters`, so
     /// two AAC tracks at different sample rates exercise the same
     /// stream-index/trailer-timing machinery a real video+audio pair
     /// would) muxed into one file. Track `a` reaches `Eos` well before
@@ -517,9 +522,9 @@ mod tests {
         let mut encoder_b = open_aac_encoder(44100, 1);
 
         let dir = std::env::temp_dir();
-        let path = dir.join(format!("mp4_muxer_multi_test_{}.mp4", std::process::id()));
+        let path = dir.join(format!("file_muxer_multi_test_{}.mp4", std::process::id()));
 
-        let mut muxer = Mp4Muxer::create(&path).expect("mp4 muxer must open");
+        let mut muxer = FileMuxer::create(&path).expect("the muxer must open");
         muxer
             .add_stream("a", encoder_a.parameters(), ffmpeg::Rational::new(1, 48000))
             .expect("add_stream a");
@@ -605,7 +610,7 @@ mod tests {
         let path = dir.join(format!("muxer_container_test_{}.mkv", std::process::id()));
         let _ = std::fs::remove_file(&path);
 
-        let mut muxer = Mp4Muxer::create(&path).expect("the muxer must open a .mkv path");
+        let mut muxer = FileMuxer::create(&path).expect("the muxer must open a .mkv path");
         muxer
             .add_stream(
                 "audio",

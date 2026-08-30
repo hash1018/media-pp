@@ -80,7 +80,7 @@ use crate::{
 ///
 /// One packet copy each, to leave the `Arc` this was handed untouched — a
 /// sibling branch off the same `Tee` must not see this branch's timeline.
-/// The same copy [`crate::elements::Mp4Muxer`] already makes to rescale.
+/// The same copy [`crate::elements::FileMuxer`] already makes to rescale.
 pub struct TimestampOrigin {
     pp_log: PpLog,
     name: Arc<str>,

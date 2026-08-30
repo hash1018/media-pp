@@ -59,7 +59,7 @@ use media_pp::{
     bus::BusEvent,
     color::Color,
     elements::{
-        FileDemuxer, FrameCounter, Mp4Muxer, SegmentPolicy, SegmentedMp4Muxer, SwDecoder,
+        FileDemuxer, FileMuxer, FrameCounter, SegmentPolicy, SegmentedFileMuxer, SwDecoder,
         SwEncoder, SwEncoderOptions, SwVideoCompositor, TeeBuilder, TestVideoOptions,
         TestVideoSource, VideoCodec, VideoCompositorOptions, VideoFit, VideoLayer, VideoRect,
     },
@@ -195,7 +195,7 @@ fn record_once(path: &Path, teardown: Teardown) {
     let source = test_source("video");
     let time_base = source.time_base();
     let encoder = encoder("encoder", time_base, 30);
-    let mut muxer = Mp4Muxer::create(path).expect("create the recording");
+    let mut muxer = FileMuxer::create(path).expect("create the recording");
     muxer
         .add_stream("video", encoder.parameters(), time_base)
         .expect("add the video track");
@@ -608,7 +608,7 @@ fn segment_rotation_does_not_grow_process_memory_or_hold_files() {
     let encoder = encoder("encoder", time_base, 15);
 
     let segment_dir = dir.path().to_path_buf();
-    let mut muxer = SegmentedMp4Muxer::create(
+    let mut muxer = SegmentedFileMuxer::create(
         SegmentPolicy::Duration(Duration::from_secs(1)),
         move |index| segment_dir.join(format!("segment_{index:04}.mp4")),
     );

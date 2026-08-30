@@ -50,7 +50,7 @@ use crate::{
     control::{PrerollError, SeekError},
     elements::{
         AppSourceError, AudioMixerError, AudioResamplerError, AudioVolumeError, FileDemuxError,
-        HlsMuxerError, Mp4MuxerError, PacerError, RtspSourceError, SwAudioEncoderError,
+        FileMuxerError, HlsMuxerError, PacerError, RtspSourceError, SwAudioEncoderError,
         SwChromaKeyError, SwDecoderError, SwEncoderError, SwScalerError, SwVideoCompositorError,
         TestAudioSourceError, TestVideoSourceError, VideoSynchronizerError,
     },
@@ -272,9 +272,9 @@ pub enum Error {
     #[error(transparent)]
     SwVideoCompositorError(#[from] SwVideoCompositorError),
 
-    /// MP4 muxing failed.
+    /// Writing a container file failed.
     #[error(transparent)]
-    Mp4MuxerError(#[from] Mp4MuxerError),
+    FileMuxerError(#[from] FileMuxerError),
 
     /// HLS muxing or option validation failed.
     #[error(transparent)]

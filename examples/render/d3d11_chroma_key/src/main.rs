@@ -7,7 +7,7 @@
 //!     AppSource(BGRA) -> D3d11Upload -> D3d11ChromaKey -> "keyed" layer
 //!     TestVideoSource -> SwScaler(NV12) -> D3d11Upload -> "background" layer
 //!     D3d11VideoCompositor -> D3d11Download -> SwScaler(YUV420P)
-//!         -> SwEncoder -> Mp4Muxer
+//!         -> SwEncoder -> FileMuxer
 //!
 //! `AppSource` stands in for a real external producer — a camera or capture
 //! SDK's callback — handing over `BGRA` frames of a figure on a green
@@ -58,7 +58,7 @@ mod windows_example {
         color::Color,
         elements::{
             AppSource, AppSourceHandle, ChromaKeyMethod, ChromaKeyOptions, D3d11ChromaKey,
-            D3d11Download, D3d11Upload, D3d11VideoCompositor, Mp4Muxer, SwEncoder,
+            D3d11Download, D3d11Upload, D3d11VideoCompositor, FileMuxer, SwEncoder,
             SwEncoderOptions, SwScaler, TestVideoOptions, TestVideoSource, VideoCodec,
             VideoCompositorOptions, VideoFit, VideoLayer, VideoRect,
         },
@@ -200,7 +200,7 @@ mod windows_example {
                 gop_size: 60,
             },
         )?;
-        let mut muxer = Mp4Muxer::create(&path)?;
+        let mut muxer = FileMuxer::create(&path)?;
         muxer.add_stream("video", encoder.parameters(), time_base)?;
         let muxer_sink = muxer.open()?.pop().expect("exactly one stream was added");
 

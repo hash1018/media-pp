@@ -33,7 +33,7 @@ pub(super) type SourceEntry = (ElementId, Box<dyn SourceElement>);
 /// own entry point so existing single-source callers don't need to change.
 /// Reach for `PipelineBuilder` directly once there's more than one live
 /// source to combine into one file/output — e.g. a video capture and an
-/// audio capture both feeding the same [`crate::elements::Mp4Muxer`]: two
+/// audio capture both feeding the same [`crate::elements::FileMuxer`]: two
 /// independent sources under today's [`crate::element::SourceElement`]
 /// model, but one [`Pipeline`] so `run()`/`pause()`/`resume()`/`stop()`
 /// only need to be called once, not once per source.

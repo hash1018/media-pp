@@ -303,7 +303,7 @@ impl CudaEncoder {
     }
 
     /// The encoded stream's parameters, for
-    /// [`crate::elements::Mp4Muxer::add_stream`] — same accessor
+    /// [`crate::elements::FileMuxer::add_stream`] — same accessor
     /// `SwEncoder`/`D3d11VideoEncoder` expose for the same reason.
     pub fn parameters(&self) -> ffmpeg::codec::Parameters {
         ffmpeg::codec::Parameters::from(&self.encoder)

@@ -1,4 +1,4 @@
-//! `AppSource -> SwScaler(NV12) -> upload -> NVENC -> Mp4Muxer`: encodes
+//! `AppSource -> SwScaler(NV12) -> upload -> NVENC -> FileMuxer`: encodes
 //! GPU-resident frames on the GPU's own NVENC block straight into a playable
 //! `.mp4`, with no CPU readback anywhere after the upload.
 //!
@@ -38,7 +38,7 @@ mod windows_example {
     use media_pp::{
         elements::{
             AppSource, D3d11Upload, D3d11VideoCodec, D3d11VideoEncoder, D3d11VideoEncoderOptions,
-            D3d11VideoInputFormat, Mp4Muxer, SwScaler,
+            D3d11VideoInputFormat, FileMuxer, SwScaler,
         },
         pipeline::Pipeline,
     };
@@ -84,7 +84,7 @@ mod windows_example {
         )
         .map_err(|e| media_pp::Error::Other(e.to_string()))?;
 
-        let mut muxer = Mp4Muxer::create(&recording.path)?;
+        let mut muxer = FileMuxer::create(&recording.path)?;
         muxer.add_stream("video", encoder.parameters(), recording.time_base)?;
         let muxer_sink = muxer.open()?.pop().expect("exactly one stream was added");
 

@@ -18,7 +18,7 @@ bitstream; Opus parameters come from its negotiated stream definition:
 
 ```text
 WebRtcTrackSource(H.264) -\
-                           -> Mp4Muxer
+                           -> FileMuxer
 WebRtcTrackSource(Opus)  --/
 ```
 

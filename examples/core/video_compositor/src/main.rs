@@ -1,6 +1,6 @@
 //! A TestVideoSource background, and a green-screen foreground fed from an
 //! `AppSource` through `SwChromaKey` — both into one `SwVideoCompositor` ->
-//! `SwScaler` -> `SwEncoder` -> `Mp4Muxer`. The foreground layer's on-canvas
+//! `SwScaler` -> `SwEncoder` -> `FileMuxer`. The foreground layer's on-canvas
 //! position moves at runtime through its `SwVideoLayerHandle`; the "figure"
 //! inside its own frame stays put, so the only thing chroma-keying visibly
 //! changes is that the green around it disappears to reveal the moving
@@ -28,7 +28,7 @@ mod example {
         bus::BusEvent,
         color::Color,
         elements::{
-            AppSource, AppSourceHandle, ChromaKeyMethod, ChromaKeyOptions, Mp4Muxer, SwChromaKey,
+            AppSource, AppSourceHandle, ChromaKeyMethod, ChromaKeyOptions, FileMuxer, SwChromaKey,
             SwEncoder, SwEncoderOptions, SwScaler, SwVideoCompositor, TestVideoOptions,
             TestVideoSource, VideoCodec, VideoCompositorOptions, VideoFit, VideoLayer, VideoRect,
         },
@@ -148,7 +148,7 @@ mod example {
                 gop_size: 60,
             },
         )?;
-        let mut muxer = Mp4Muxer::create(&path)?;
+        let mut muxer = FileMuxer::create(&path)?;
         muxer.add_stream("video", encoder.parameters(), time_base)?;
         let muxer_sink = muxer.open()?.pop().expect("one video stream");
         let output_pipeline = Pipeline::new("composited-output", compositor, |source, ctx| {

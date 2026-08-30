@@ -322,7 +322,7 @@ struct PendingStream {
 /// `#EXT-X-ENDLIST` generation.
 ///
 /// This deliberately has the same two-phase shape as
-/// [`crate::elements::Mp4Muxer`]: call [`HlsMuxer::add_stream`] for every
+/// [`crate::elements::FileMuxer`]: call [`HlsMuxer::add_stream`] for every
 /// track before [`HlsMuxer::open`] writes the header. The returned sinks
 /// share one output lock and finalize the playlist only after every track
 /// reports `Eos` or [`ControlMsg::Stop`].

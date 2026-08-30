@@ -5,7 +5,7 @@ on the GPU from the moment it is captured to the moment it is encoded.
 
 `PipeWireScreenCaptureSource` (GPU mode) `-> Queue -> CudaConverter ->
 CudaVideoCompositor` (+ `CudaTextLayerHandle`) `-> Queue -> CudaEncoder ->
-Mp4Muxer`
+FileMuxer`
 
 The contrast with `screen_record_nvenc` is the point of the graph. That
 example records the capture untouched, which needs no conversion at all: the

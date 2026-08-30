@@ -1,5 +1,5 @@
 //! Records the desktop through the software-encoding path:
-//! `CaptureSource -> SwScaler -> SwEncoder -> Mp4Muxer`.
+//! `CaptureSource -> SwScaler -> SwEncoder -> FileMuxer`.
 //! Windows captures through DXGI; Linux uses PipeWire and the desktop portal.
 //! Both run for a fixed duration and stop the pipeline to finalize the MP4.
 //!
@@ -34,13 +34,13 @@ mod windows_example {
     use media_pp::{
         bus::BusEvent,
         elements::{
-            CaptureMode, DxgiCaptureOptions, DxgiCaptureSource, Mp4Muxer, SwEncoder,
+            CaptureMode, DxgiCaptureOptions, DxgiCaptureSource, FileMuxer, SwEncoder,
             SwEncoderOptions, SwScaler, VideoCodec,
         },
         pipeline::Pipeline,
     };
 
-    /// DxgiCaptureSource -> SwScaler -> SwEncoder -> Mp4Muxer: captures the
+    /// DxgiCaptureSource -> SwScaler -> SwEncoder -> FileMuxer: captures the
     /// desktop live via DXGI Desktop Duplication and encodes it straight into
     /// a playable `.mp4` file — no window, no renderer, just a headless
     /// recording (compare the Windows-only `screen_preview_cpu`, which renders
@@ -48,9 +48,9 @@ mod windows_example {
     ///
     /// `DxgiCaptureSource` never reaches `Eos` on its own (see its own docs);
     /// this just captures for a fixed duration and then `pipeline.stop()`s,
-    /// which is also what finalizes the MP4's trailer — `Mp4Muxer` writes it on
+    /// which is also what finalizes the MP4's trailer — `FileMuxer` writes it on
     /// `Stop` as well as `Eos`, unlike `RtspSink`, since an MP4 file needs a
-    /// valid trailer to be playable at all (see `Mp4Muxer`'s own docs).
+    /// valid trailer to be playable at all (see `FileMuxer`'s own docs).
     ///
     ///     cargo run -p screen_record_software -- [output.mp4] [seconds]
     pub(super) fn run() -> media_pp::Result<()> {
@@ -95,7 +95,7 @@ mod windows_example {
         // No container/demuxer in this loop to get these from — SwEncoder
         // exposes its own codec parameters for exactly this case (see
         // `transcode_render`'s own use of this, wiring a decoder instead).
-        let mut muxer = Mp4Muxer::create(&path)?;
+        let mut muxer = FileMuxer::create(&path)?;
         muxer.add_stream("video", encoder.parameters(), format.time_base)?;
         let muxer_sink = muxer.open()?.pop().expect("exactly one stream was added");
 
@@ -141,7 +141,7 @@ mod windows_example {
 
 /// The Linux half of the same example. Deliberately the same pipeline as
 /// `windows_example` — capture -> Queue -> SwScaler -> Queue -> SwEncoder ->
-/// Mp4Muxer, same codec, same terminus — so only the capture source differs.
+/// FileMuxer, same codec, same terminus — so only the capture source differs.
 ///
 /// The one CLI difference is forced by the platform: Wayland has no way to
 /// name a monitor, so the compositor prompts on the first run and hands back a
@@ -156,13 +156,13 @@ mod linux_example {
     use media_pp::{
         bus::BusEvent,
         elements::{
-            CaptureSourceKind, Mp4Muxer, PipeWireScreenCaptureOptions, PipeWireScreenCaptureSource,
-            SwEncoder, SwEncoderOptions, SwScaler, VideoCodec,
+            CaptureSourceKind, FileMuxer, PipeWireScreenCaptureOptions,
+            PipeWireScreenCaptureSource, SwEncoder, SwEncoderOptions, SwScaler, VideoCodec,
         },
         pipeline::Pipeline,
     };
 
-    /// PipeWireScreenCaptureSource -> SwScaler -> SwEncoder -> Mp4Muxer: captures
+    /// PipeWireScreenCaptureSource -> SwScaler -> SwEncoder -> FileMuxer: captures
     /// the desktop live through xdg-desktop-portal and encodes it straight into
     /// a playable `.mp4` file — no window, no renderer, just a headless
     /// recording.
@@ -231,7 +231,7 @@ mod linux_example {
             },
         )
         .expect("failed to open encoder");
-        let mut muxer = Mp4Muxer::create(&path)?;
+        let mut muxer = FileMuxer::create(&path)?;
         muxer.add_stream("video", encoder.parameters(), capture_format.time_base)?;
         let muxer_sink = muxer.open()?.pop().expect("exactly one stream was added");
 

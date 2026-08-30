@@ -7,7 +7,7 @@ use std::{
 use crate::pp_log::{PpLog, pp_info};
 use ffmpeg_next as ffmpeg;
 
-use super::mp4_muxer::{Mp4Muxer, Mp4MuxerError};
+use super::file_muxer::{FileMuxer, FileMuxerError};
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, PortContract},
@@ -16,14 +16,14 @@ use crate::{
     error::Result,
 };
 
-/// How a [`SegmentedMp4Muxer`] decides a segment is done and it's time to
+/// How a [`SegmentedFileMuxer`] decides a segment is done and it's time to
 /// cut to a new file.
 #[derive(Debug, Clone, Copy)]
 pub enum SegmentPolicy {
     /// Roughly this long per segment. "Roughly" because the actual cut
     /// only happens once this much time has elapsed *and* the video
     /// track's own next packet is a keyframe (see
-    /// [`SegmentedMp4Muxer::open`]'s own docs) — a segment can run a bit
+    /// [`SegmentedFileMuxer::open`]'s own docs) — a segment can run a bit
     /// longer than requested if keyframes are sparse.
     Duration(Duration),
     /// Roughly this many bytes per segment, counted as the packets this
@@ -43,9 +43,9 @@ pub enum SegmentPolicy {
     Size(u64),
 }
 
-/// One track's fixed description — everything [`SegmentedMp4Muxer::open`]
-/// needs to re-add it to a fresh [`Mp4Muxer`] on every rotation.
-/// `parameters` is cloned each time ([`Mp4Muxer::add_stream`] consumes its
+/// One track's fixed description — everything [`SegmentedFileMuxer::open`]
+/// needs to re-add it to a fresh [`FileMuxer`] on every rotation.
+/// `parameters` is cloned each time ([`FileMuxer::add_stream`] consumes its
 /// own copy); the original stays here as the template.
 struct StreamDef {
     name: Arc<str>,
@@ -53,22 +53,22 @@ struct StreamDef {
     time_base: ffmpeg::Rational,
     /// Whether this is the track [`SegmentGroup::maybe_rotate`] waits for
     /// a keyframe on before actually cutting — see
-    /// [`SegmentedMp4Muxer::open`]'s own docs.
+    /// [`SegmentedFileMuxer::open`]'s own docs.
     is_video: bool,
 }
 
-/// Builds a [`SegmentedMp4Muxer`] the same two-phase way as a plain
-/// [`Mp4Muxer`] (every track's shape must be known before the first byte
+/// Builds a [`SegmentedFileMuxer`] the same two-phase way as a plain
+/// [`FileMuxer`] (every track's shape must be known before the first byte
 /// is written) — `create` picks the rotation policy and how segments get
 /// named, `add_stream` registers each track exactly like
-/// [`Mp4Muxer::add_stream`], `open` writes the first segment's header and
+/// [`FileMuxer::add_stream`], `open` writes the first segment's header and
 /// returns one [`Sink`] per track.
 ///
 /// ```no_run
 /// # use std::{path::PathBuf, time::Duration};
 /// # use media_pp::ffmpeg;
 /// # use media_pp::elements::{
-/// #     AudioCodec, SegmentPolicy, SegmentedMp4Muxer, SwAudioEncoder,
+/// #     AudioCodec, SegmentPolicy, SegmentedFileMuxer, SwAudioEncoder,
 /// #     SwAudioEncoderOptions, SwEncoder, SwEncoderOptions, VideoCodec,
 /// # };
 /// # fn main() -> media_pp::Result<()> {
@@ -90,7 +90,7 @@ struct StreamDef {
 /// #     time_base: audio_time_base,
 /// #     bit_rate: 128_000,
 /// # })?;
-/// let mut muxer = SegmentedMp4Muxer::create(
+/// let mut muxer = SegmentedFileMuxer::create(
 ///     SegmentPolicy::Duration(Duration::from_secs(600)),
 ///     |index| PathBuf::from(format!("rec_{index:04}.mp4")),
 /// );
@@ -100,13 +100,13 @@ struct StreamDef {
 /// # Ok(())
 /// # }
 /// ```
-pub struct SegmentedMp4Muxer {
+pub struct SegmentedFileMuxer {
     policy: SegmentPolicy,
     naming: Box<dyn FnMut(u64) -> PathBuf + Send>,
     streams: Vec<StreamDef>,
 }
 
-impl SegmentedMp4Muxer {
+impl SegmentedFileMuxer {
     /// `naming(index)` names each segment file, `index` starting at `0` —
     /// called once up front for the first segment and again on every
     /// rotation. Typically a closure building a path from a fixed
@@ -125,14 +125,14 @@ impl SegmentedMp4Muxer {
     }
 
     /// Registers one more track every segment file will hold — same
-    /// contract as [`Mp4Muxer::add_stream`] (same order rules, same
+    /// contract as [`FileMuxer::add_stream`] (same order rules, same
     /// `name`/`parameters`/`time_base` meaning), except this can't fail:
     /// nothing here touches ffmpeg yet, it's only recorded for
-    /// [`SegmentedMp4Muxer::open`] (and every later rotation) to replay.
+    /// [`SegmentedFileMuxer::open`] (and every later rotation) to replay.
     ///
     /// Whichever stream's `parameters.medium()` is
     /// [`ffmpeg::media::Type::Video`] (at most one is expected) becomes
-    /// the keyframe-gating track described in [`SegmentedMp4Muxer::open`]'s
+    /// the keyframe-gating track described in [`SegmentedFileMuxer::open`]'s
     /// own docs — no separate flag to pass.
     pub fn add_stream(
         &mut self,
@@ -150,10 +150,10 @@ impl SegmentedMp4Muxer {
     }
 
     /// Writes the first segment's header and returns one [`Sink`] per
-    /// track, in the order [`SegmentedMp4Muxer::add_stream`] added them —
-    /// same shape as [`Mp4Muxer::open`]. All returned `Sink`s share one
+    /// track, in the order [`SegmentedFileMuxer::add_stream`] added them —
+    /// same shape as [`FileMuxer::open`]. All returned `Sink`s share one
     /// rotation lock: a track's `consume` blocks while another track (on
-    /// its own thread) is mid-rotation, same tradeoff [`Mp4Muxer`]'s own
+    /// its own thread) is mid-rotation, same tradeoff [`FileMuxer`]'s own
     /// shared file lock already makes.
     ///
     /// **Rotation timing**: once a segment has run at least as long as the
@@ -168,9 +168,9 @@ impl SegmentedMp4Muxer {
     /// an equally valid cut point, so rotation happens as soon as the
     /// policy is due.
     ///
-    /// The final segment is finalized the same way a plain [`Mp4Muxer`]
+    /// The final segment is finalized the same way a plain [`FileMuxer`]
     /// finalizes its one file: once every track has reported `Eos` *or*
-    /// [`ControlMsg::Stop`] (see [`Mp4Muxer::open`]'s own docs) — a
+    /// [`ControlMsg::Stop`] (see [`FileMuxer::open`]'s own docs) — a
     /// rotation mid-recording reuses that exact mechanism to close the
     /// outgoing segment before opening the next one.
     pub fn open(mut self) -> Result<Vec<Box<dyn Sink>>> {
@@ -200,7 +200,7 @@ impl SegmentedMp4Muxer {
             .enumerate()
             .map(|(index, (name, kind))| -> Box<dyn Sink> {
                 Box::new(SegmentedTrackSink {
-                    pp_log: element_pp_log(ElementType::SegmentedMp4Muxer, &name, None),
+                    pp_log: element_pp_log(ElementType::SegmentedFileMuxer, &name, None),
                     name,
                     track_index: index,
                     kind,
@@ -212,7 +212,7 @@ impl SegmentedMp4Muxer {
 }
 
 fn open_segment(streams: &[StreamDef], path: PathBuf) -> Result<Vec<Box<dyn Sink>>> {
-    let mut muxer = Mp4Muxer::create(&path)?;
+    let mut muxer = FileMuxer::create(&path)?;
     for stream in streams {
         muxer.add_stream(
             stream.name.to_string(),
@@ -245,7 +245,7 @@ struct GroupState {
     segment_started: Instant,
 }
 
-/// Shared between every [`SegmentedTrackSink`] [`SegmentedMp4Muxer::open`]
+/// Shared between every [`SegmentedTrackSink`] [`SegmentedFileMuxer::open`]
 /// hands out — one rotation lock around the whole group of tracks, so a
 /// rotation triggered by one track's packet arrival is atomic with respect
 /// to every other track (either all of them are still writing into the
@@ -260,7 +260,7 @@ struct SegmentGroup {
 impl SegmentGroup {
     /// Called for every `Packet` on every track, before it's written.
     /// Rotates first if this is the packet that should trigger it (see
-    /// [`SegmentedMp4Muxer::open`]'s own docs), then writes into whichever
+    /// [`SegmentedFileMuxer::open`]'s own docs), then writes into whichever
     /// segment is current by the time this returns.
     fn consume_packet(
         &self,
@@ -321,7 +321,7 @@ impl SegmentGroup {
 
     /// One track's own [`ControlMsg::Stop`] — same as
     /// [`SegmentGroup::finish_eos`], just forwarded as `Stop` instead of
-    /// `Eos` (matters for `Mp4Muxer`'s own docs on `Stop` finalizing a
+    /// `Eos` (matters for `FileMuxer`'s own docs on `Stop` finalizing a
     /// container even though it otherwise means "abandon, don't drain").
     fn finish_stop(&self, track_index: usize) -> Result<()> {
         let mut state = self.state.lock().unwrap();
@@ -330,7 +330,7 @@ impl SegmentGroup {
 }
 
 /// One track's own [`Sink`] — a lightweight handle sharing a
-/// [`SegmentGroup`] with every other track [`SegmentedMp4Muxer::open`]
+/// [`SegmentGroup`] with every other track [`SegmentedFileMuxer::open`]
 /// returned alongside it.
 struct SegmentedTrackSink {
     pp_log: PpLog,
@@ -348,7 +348,7 @@ impl Element for SegmentedTrackSink {
     }
 
     fn element_type(&self) -> ElementType {
-        ElementType::SegmentedMp4Muxer
+        ElementType::SegmentedFileMuxer
     }
 
     fn pp_log(&self) -> &PpLog {
@@ -361,7 +361,7 @@ impl Element for SegmentedTrackSink {
 }
 
 impl Sink for SegmentedTrackSink {
-    /// Same as Mp4Muxer: encoded packets only, cut into segments on keyframes.
+    /// Same as FileMuxer: encoded packets only, cut into segments on keyframes.
     fn input_contract(&self) -> InputContract {
         match self.kind {
             Some(kind) => InputContract::Fixed(PortContract::packet(kind)),
@@ -376,11 +376,11 @@ impl Sink for SegmentedTrackSink {
                     .consume_packet(self.track_index, packet, &self.pp_log)
             }
             MediaBuffer::Eos => self.group.finish_eos(self.track_index),
-            // The `Mp4Muxer` each rotated segment wraps already rejects
-            // this — matching its own `Mp4MuxerStreamSink::consume` here
+            // The `FileMuxer` each rotated segment wraps already rejects
+            // this — matching its own `FileMuxerStreamSink::consume` here
             // instead of silently no-op'ing keeps that protection visible
             // through the rotation wrapper instead of swallowing it.
-            other => Err(Mp4MuxerError::UnsupportedBuffer(other.kind()).into()),
+            other => Err(FileMuxerError::UnsupportedBuffer(other.kind()).into()),
         }
     }
 
@@ -422,12 +422,12 @@ mod tests {
             })
     }
 
-    /// Drives a real `TestVideoSource -> SwEncoder -> SegmentedMp4Muxer`
+    /// Drives a real `TestVideoSource -> SwEncoder -> SegmentedFileMuxer`
     /// chain for a few real seconds with a short rotation policy, then
     /// checks every segment file it produced: each one has to be a real,
     /// independently-readable `.mp4` whose very first packet is a
     /// keyframe — proof the cut actually waited for one (see
-    /// `SegmentedMp4Muxer::open`'s own docs on why that matters: cutting
+    /// `SegmentedFileMuxer::open`'s own docs on why that matters: cutting
     /// on an arbitrary packet would leave a segment starting mid-GOP,
     /// undecodable from its own frame 0).
     #[test]
@@ -463,7 +463,7 @@ mod tests {
         let paths: Arc<Mutex<Vec<PathBuf>>> = Arc::new(Mutex::new(Vec::new()));
         let recorded_paths = paths.clone();
 
-        let mut muxer = SegmentedMp4Muxer::create(
+        let mut muxer = SegmentedFileMuxer::create(
             SegmentPolicy::Duration(Duration::from_millis(300)),
             move |index| {
                 let path = dir.join(format!("{prefix}_{index:03}.mp4"));
@@ -554,7 +554,7 @@ mod tests {
         let paths: Arc<Mutex<Vec<PathBuf>>> = Arc::new(Mutex::new(Vec::new()));
         let recorded_paths = paths.clone();
 
-        let mut muxer = SegmentedMp4Muxer::create(SegmentPolicy::Size(3_000), move |index| {
+        let mut muxer = SegmentedFileMuxer::create(SegmentPolicy::Size(3_000), move |index| {
             let path = dir.join(format!("{prefix}_{index:03}.mp4"));
             recorded_paths.lock().unwrap().push(path.clone());
             path
@@ -600,11 +600,11 @@ mod tests {
     }
 
     /// A misrouted `Audio` buffer used to be silently dropped by
-    /// `SegmentedTrackSink::consume`. The `Mp4Muxer` each segment wraps
-    /// already rejects this via `Mp4MuxerError::UnsupportedBuffer` — the
+    /// `SegmentedTrackSink::consume`. The `FileMuxer` each segment wraps
+    /// already rejects this via `FileMuxerError::UnsupportedBuffer` — the
     /// rotation wrapper must surface that instead of swallowing it.
     #[test]
-    fn rejects_a_buffer_type_the_wrapped_mp4_muxer_does_not_accept() {
+    fn rejects_a_buffer_type_the_wrapped_file_muxer_does_not_accept() {
         let video_options = TestVideoOptions {
             width: 160,
             height: 120,
@@ -633,7 +633,7 @@ mod tests {
             std::process::id()
         ));
         let recorded_path = path.clone();
-        let mut muxer = SegmentedMp4Muxer::create(
+        let mut muxer = SegmentedFileMuxer::create(
             SegmentPolicy::Duration(Duration::from_secs(3600)),
             move |_index| recorded_path.clone(),
         );
@@ -647,7 +647,7 @@ mod tests {
         assert!(
             matches!(
                 error,
-                crate::error::Error::Mp4MuxerError(Mp4MuxerError::UnsupportedBuffer("Audio"))
+                crate::error::Error::FileMuxerError(FileMuxerError::UnsupportedBuffer("Audio"))
             ),
             "unexpected error: {error:?}"
         );
@@ -658,7 +658,7 @@ mod tests {
 
     /// Regression test against a leaked file handle on the *previous*
     /// segment specifically: a rotation has to fully close (write the
-    /// trailer, drop the underlying `Mp4Muxer` for that segment) the
+    /// trailer, drop the underlying `FileMuxer` for that segment) the
     /// outgoing file the moment it cuts — not defer that until the whole
     /// recording later stops. Proven by reading the first segment back
     /// *while the pipeline is still running* (recording into the second
@@ -696,7 +696,7 @@ mod tests {
         let paths: Arc<Mutex<Vec<PathBuf>>> = Arc::new(Mutex::new(Vec::new()));
         let recorded_paths = paths.clone();
 
-        let mut muxer = SegmentedMp4Muxer::create(
+        let mut muxer = SegmentedFileMuxer::create(
             SegmentPolicy::Duration(Duration::from_millis(300)),
             move |index| {
                 let path = dir.join(format!("{prefix}_{index:03}.mp4"));

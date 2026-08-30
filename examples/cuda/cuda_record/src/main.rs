@@ -1,4 +1,4 @@
-//! `AppSource -> SwScaler(NV12) -> CudaUpload -> CudaEncoder -> Mp4Muxer`:
+//! `AppSource -> SwScaler(NV12) -> CudaUpload -> CudaEncoder -> FileMuxer`:
 //! encodes GPU-resident frames on the GPU's own NVENC block straight into a
 //! playable `.mp4`, with no CPU readback anywhere after the upload.
 //!
@@ -27,7 +27,7 @@ mod example {
     use media_pp::{
         elements::{
             AppSource, CudaCodec, CudaDevice, CudaEncoder, CudaEncoderOptions, CudaFrameFormat,
-            CudaUpload, Mp4Muxer, SwScaler,
+            CudaUpload, FileMuxer, SwScaler,
         },
         pipeline::Pipeline,
     };
@@ -67,7 +67,7 @@ mod example {
         )
         .map_err(|e| media_pp::Error::Other(e.to_string()))?;
 
-        let mut muxer = Mp4Muxer::create(&recording.path)?;
+        let mut muxer = FileMuxer::create(&recording.path)?;
         muxer.add_stream("video", encoder.parameters(), recording.time_base)?;
         let muxer_sink = muxer.open()?.pop().expect("exactly one stream was added");
 

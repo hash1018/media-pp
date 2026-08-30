@@ -1,6 +1,6 @@
-//! TestAudioSource -> SwAudioEncoder -> Mp4Muxer: encodes a generated sine
+//! TestAudioSource -> SwAudioEncoder -> FileMuxer: encodes a generated sine
 //! tone straight into a playable `.mp4` file — the audio-only counterpart
-//! to `screen_record_software`'s video path, and `Mp4Muxer`'s single-track path
+//! to `screen_record_software`'s video path, and `FileMuxer`'s single-track path
 //! (see `screen_record_av` for a video+audio track combined into one
 //! file instead).
 //!
@@ -16,7 +16,7 @@ mod example {
     use media_pp::{
         bus::BusEvent,
         elements::{
-            AudioCodec, Mp4Muxer, SwAudioEncoder, SwAudioEncoderOptions, TestAudioOptions,
+            AudioCodec, FileMuxer, SwAudioEncoder, SwAudioEncoderOptions, TestAudioOptions,
             TestAudioSource,
         },
         pipeline::Pipeline,
@@ -58,7 +58,7 @@ mod example {
             },
         )
         .expect("failed to open aac encoder");
-        let mut muxer = Mp4Muxer::create(&path)?;
+        let mut muxer = FileMuxer::create(&path)?;
         muxer.add_stream("audio", encoder.parameters(), time_base)?;
         let muxer_sink = muxer.open()?.pop().expect("exactly one stream was added");
 

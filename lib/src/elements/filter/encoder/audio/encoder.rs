@@ -286,7 +286,7 @@ impl SwAudioEncoder {
     }
 
     /// This encoder's own codec parameters — what a
-    /// [`crate::elements::Mp4Muxer`] track needs, same pattern
+    /// [`crate::elements::FileMuxer`] track needs, same pattern
     /// [`crate::elements::SwEncoder::parameters`] documents for video.
     pub fn parameters(&self) -> ffmpeg::codec::Parameters {
         ffmpeg::codec::Parameters::from(&self.encoder)

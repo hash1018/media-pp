@@ -5,7 +5,7 @@ use ffmpeg_next as ffmpeg;
 /// Unlike a `(width, height, time_base)` tuple, this can be passed directly
 /// from a capture source such as `DxgiCaptureSource` to a
 /// downstream [`crate::elements::SwScaler`]/[`crate::elements::SwEncoder`]/
-/// [`crate::elements::Mp4Muxer`] without the caller re-threading three
+/// [`crate::elements::FileMuxer`] without the caller re-threading three
 /// separate values by hand — same role [`crate::elements::AudioFormat`]
 /// plays for uncompressed audio. Kept directly under `elements` rather than
 /// under any one of those (same reasoning as [`crate::elements::RtspTransport`]'s

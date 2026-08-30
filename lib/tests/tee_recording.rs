@@ -15,7 +15,7 @@ use media_pp::{
     buffer::MediaBuffer,
     bus::BusEvent,
     elements::{
-        AppSource, FrameCounter, Mp4Muxer, SwEncoder, SwEncoderOptions, SwScaler, TeeBuilder,
+        AppSource, FileMuxer, FrameCounter, SwEncoder, SwEncoderOptions, SwScaler, TeeBuilder,
         TestVideoOptions, TestVideoSource, VideoCodec,
     },
     pipeline::Pipeline,
@@ -80,7 +80,7 @@ fn finishing_a_recording_branch_leaves_a_playable_file_and_a_running_preview() {
         },
     )
     .expect("open the encoder");
-    let mut muxer = Mp4Muxer::create(&path_str).expect("create the MP4");
+    let mut muxer = FileMuxer::create(&path_str).expect("create the MP4");
     muxer
         .add_stream("video", encoder.parameters(), time_base)
         .expect("add the video stream");
@@ -201,7 +201,7 @@ fn finishing_a_recording_branch_loses_no_frame_that_reached_it() {
         },
     )
     .expect("open the encoder");
-    let mut muxer = Mp4Muxer::create(&path_str).expect("create the MP4");
+    let mut muxer = FileMuxer::create(&path_str).expect("create the MP4");
     muxer
         .add_stream("video", encoder.parameters(), time_base)
         .expect("add the video stream");

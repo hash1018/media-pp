@@ -147,10 +147,11 @@ pub enum ElementType {
     OrtDetector,
     /// HTTP Live Streaming muxer sink.
     HlsMuxer,
-    /// MP4 muxer sink.
-    Mp4Muxer,
-    /// Rotating segmented MP4 muxer sink.
-    SegmentedMp4Muxer,
+    /// Container file muxer sink — the container is whichever one
+    /// FFmpeg infers from the output path.
+    FileMuxer,
+    /// Rotating segmented container file muxer sink.
+    SegmentedFileMuxer,
     /// Anything outside this crate's own elements — a test double, or a
     /// custom `Sink`/`SourceElement` implemented downstream of this
     /// crate. Keeps this enum from needing to grow every time someone

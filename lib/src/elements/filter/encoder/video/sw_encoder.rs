@@ -137,7 +137,7 @@ pub struct SwEncoderOptions {
     /// directly (not a duration; multiply by `frame_rate` yourself, e.g.
     /// `frame_rate * 2` for "roughly every 2 seconds"). Not every codec's
     /// own default is a periodic interval at all — `libopenh264` was
-    /// found, building [`crate::elements::SegmentedMp4Muxer`], to rely on
+    /// found, building [`crate::elements::SegmentedFileMuxer`], to rely on
     /// scene-change detection alone and go an *entire* recording without
     /// a second keyframe against smoothly-changing content — so this is
     /// always set explicitly rather than left to whatever a given codec
@@ -238,7 +238,7 @@ impl SwEncoder {
 
     /// This encoder's own codec parameters — what you need to construct
     /// a matching [`crate::elements::SwDecoder`] to decode the `Packet`s
-    /// this produces, or what a [`crate::elements::Mp4Muxer`] track needs
+    /// this produces, or what a [`crate::elements::FileMuxer`] track needs
     /// (same pattern [`crate::elements::SwAudioEncoder::parameters`]
     /// documents for audio), when there's no container/demuxer in the loop
     /// to get them from otherwise (e.g. encoding straight into a `Tee`/RTSP

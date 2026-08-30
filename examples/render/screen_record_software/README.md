@@ -1,13 +1,13 @@
 # screen_record_software
 
-`CaptureSource -> SwScaler -> SwEncoder -> Mp4Muxer`: captures the desktop live
+`CaptureSource -> SwScaler -> SwEncoder -> FileMuxer`: captures the desktop live
 and encodes it straight into a playable `.mp4` file — no window, no renderer,
 just a headless recording (compare `screen_preview_cpu`, which renders the
 same CPU-frame path instead of encoding it on Windows and Linux).
 
 The capture source never reaches `Eos` on its own; this just captures for a
 fixed duration and then `pipeline.stop()`s, which is also what finalizes the
-MP4's trailer — `Mp4Muxer` writes it on `Stop` as well as `Eos`, since an MP4
+MP4's trailer — `FileMuxer` writes it on `Stop` as well as `Eos`, since an MP4
 file needs a valid trailer to be playable at all.
 
 Both platforms run the same graph, codec, and terminus. On Windows,

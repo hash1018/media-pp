@@ -38,7 +38,7 @@ mod windows_example {
     use media_pp::{
         bus::BusEvent,
         elements::{
-            AudioCodec, CaptureMode, DxgiCaptureOptions, DxgiCaptureSource, Mp4Muxer,
+            AudioCodec, CaptureMode, DxgiCaptureOptions, DxgiCaptureSource, FileMuxer,
             SwAudioEncoder, SwAudioEncoderOptions, SwEncoder, SwEncoderOptions, SwScaler,
             VideoCodec, WasapiCaptureOptions, WasapiCaptureSource, WasapiDeviceKind,
         },
@@ -47,16 +47,16 @@ mod windows_example {
 
     /// DxgiCaptureSource + WasapiCaptureSource (system-audio loopback — whatever
     /// the default playback device is putting out, i.e. "PC 소리") -> one
-    /// Mp4Muxer: records the desktop and its system audio together into a
+    /// FileMuxer: records the desktop and its system audio together into a
     /// single playable `.mp4`. Two independent live sources sharing one
     /// `Pipeline` via `PipelineBuilder` (see its own docs) — each on its own
     /// thread, but one `pipeline.stop()` reaches both.
     ///
     /// Neither capture source ever reaches a natural `Eos` (same as
     /// `screen_record_software`'s own docs) — this runs until `q` + Enter in the same
-    /// terminal, which is also what finalizes the MP4's trailer (`Mp4Muxer`
+    /// terminal, which is also what finalizes the MP4's trailer (`FileMuxer`
     /// writes it once *every* track — video and audio both — reports done via
-    /// `Eos` *or* `Stop`, not on whichever finishes first; see `Mp4Muxer::open`'s
+    /// `Eos` *or* `Stop`, not on whichever finishes first; see `FileMuxer::open`'s
     /// own docs, and `PipelineBuilder`'s for why one `stop()` call is enough to
     /// reach both tracks even though they're two independent sources).
     ///
@@ -125,7 +125,7 @@ mod windows_example {
 
         // No container/demuxer in this loop to get these from — each encoder
         // exposes its own codec parameters for exactly this case.
-        let mut muxer = Mp4Muxer::create(&path)?;
+        let mut muxer = FileMuxer::create(&path)?;
         muxer.add_stream("video", video_encoder.parameters(), video_time_base)?;
         muxer.add_stream("audio", audio_encoder.parameters(), audio_time_base)?;
         let mut sinks = muxer.open()?;
@@ -197,7 +197,7 @@ mod windows_example {
 
 /// The Linux half of the same example. Deliberately the same shape as
 /// `windows_example`: two independent live capture sources sharing one
-/// `PipelineBuilder`, one `Mp4Muxer` with a video and an audio track, and one
+/// `PipelineBuilder`, one `FileMuxer` with a video and an audio track, and one
 /// `stop()` reaching both.
 ///
 /// The one CLI difference is forced by the platform — Wayland cannot name a
@@ -216,7 +216,7 @@ mod linux_example {
     use media_pp::{
         bus::BusEvent,
         elements::{
-            AudioCodec, CaptureSourceKind, Mp4Muxer, PipeWireAudioCaptureOptions,
+            AudioCodec, CaptureSourceKind, FileMuxer, PipeWireAudioCaptureOptions,
             PipeWireAudioCaptureSource, PipeWireAudioDeviceKind, PipeWireScreenCaptureOptions,
             PipeWireScreenCaptureSource, SwAudioEncoder, SwAudioEncoderOptions, SwEncoder,
             SwEncoderOptions, SwScaler, VideoCodec,
@@ -225,7 +225,7 @@ mod linux_example {
     };
 
     /// PipeWireScreenCaptureSource + PipeWireAudioCaptureSource (a sink's
-    /// monitor — whatever the system is playing) -> one Mp4Muxer: records the
+    /// monitor — whatever the system is playing) -> one FileMuxer: records the
     /// desktop and its system audio together into a single playable `.mp4`.
     ///
     /// Neither capture source ever reaches a natural `Eos`, so this runs until
@@ -322,7 +322,7 @@ mod linux_example {
         )
         .expect("failed to open audio encoder");
 
-        let mut muxer = Mp4Muxer::create(&path)?;
+        let mut muxer = FileMuxer::create(&path)?;
         muxer.add_stream("video", video_encoder.parameters(), video_time_base)?;
         muxer.add_stream("audio", audio_encoder.parameters(), audio_time_base)?;
         let mut sinks = muxer.open()?;

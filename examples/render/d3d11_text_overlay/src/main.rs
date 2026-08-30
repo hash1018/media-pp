@@ -37,7 +37,7 @@ mod windows_example {
         bus::BusEvent,
         color::Color,
         elements::{
-            D3d11Download, D3d11Upload, D3d11VideoCompositor, Mp4Muxer, SwEncoder,
+            D3d11Download, D3d11Upload, D3d11VideoCompositor, FileMuxer, SwEncoder,
             SwEncoderOptions, SwScaler, TestVideoOptions, TestVideoSource, TextLayer, VideoCodec,
             VideoCompositorOptions, VideoFit, VideoLayer, VideoRect,
         },
@@ -164,7 +164,7 @@ mod windows_example {
                 gop_size: 60,
             },
         )?;
-        let mut muxer = Mp4Muxer::create(&path)?;
+        let mut muxer = FileMuxer::create(&path)?;
         muxer.add_stream("video", encoder.parameters(), time_base)?;
         let muxer_sink = muxer.open()?.pop().expect("one video stream");
 

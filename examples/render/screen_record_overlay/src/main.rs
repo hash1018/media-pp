@@ -4,7 +4,7 @@
 //!
 //! `PipeWireScreenCaptureSource` (GPU mode) `-> Queue -> CudaConverter ->
 //! CudaVideoCompositor` (+ `CudaTextLayerHandle`) `-> Queue -> CudaEncoder ->
-//! Mp4Muxer`.
+//! FileMuxer`.
 //!
 //! The contrast with `screen_record_nvenc` is the point of the graph. That
 //! example records the capture untouched, which needs no conversion at all:
@@ -52,7 +52,7 @@ mod linux_example {
         color::Color,
         elements::{
             CaptureSourceKind, CudaCodec, CudaConverter, CudaDevice, CudaEncoder,
-            CudaEncoderOptions, CudaFrameFormat, CudaVideoCompositor, Mp4Muxer,
+            CudaEncoderOptions, CudaFrameFormat, CudaVideoCompositor, FileMuxer,
             PipeWireScreenCaptureOptions, PipeWireScreenCaptureSource, TextLayer,
             VideoCompositorOptions, VideoFit, VideoLayer, VideoRect,
         },
@@ -199,7 +199,7 @@ mod linux_example {
             },
         )
         .map_err(|e| media_pp::Error::Other(e.to_string()))?;
-        let mut muxer = Mp4Muxer::create(&path)?;
+        let mut muxer = FileMuxer::create(&path)?;
         muxer.add_stream("video", encoder.parameters(), time_base)?;
         let muxer_sink = muxer.open()?.pop().expect("exactly one stream was added");
 

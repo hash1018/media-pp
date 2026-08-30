@@ -1,4 +1,4 @@
-//! `capture -> NVENC -> Mp4Muxer`: records the desktop into a playable
+//! `capture -> NVENC -> FileMuxer`: records the desktop into a playable
 //! `.mp4` with no CPU color conversion anywhere in the graph.
 //!
 //! The contrast with `screen_record_software` is the whole point. That example runs
@@ -46,7 +46,7 @@ mod windows_example {
     use media_pp::{
         elements::{
             CaptureMode, D3d11VideoCodec, D3d11VideoEncoder, D3d11VideoEncoderOptions,
-            D3d11VideoInputFormat, DxgiCaptureOptions, DxgiCaptureSource, Mp4Muxer,
+            D3d11VideoInputFormat, DxgiCaptureOptions, DxgiCaptureSource, FileMuxer,
         },
         pipeline::Pipeline,
     };
@@ -97,7 +97,7 @@ mod windows_example {
         )
         .map_err(|e| media_pp::Error::Other(e.to_string()))?;
 
-        let mut muxer = Mp4Muxer::create(&recording.path)?;
+        let mut muxer = FileMuxer::create(&recording.path)?;
         muxer.add_stream("video", encoder.parameters(), format.time_base)?;
         let muxer_sink = muxer.open()?.pop().expect("exactly one stream was added");
 
@@ -125,7 +125,7 @@ mod windows_example {
 
 /// The Linux half of the same example, and the same graph as
 /// `windows_example` down to the element count: capture -> Queue -> NVENC ->
-/// Mp4Muxer, same codec, same terminus. `open_gpu` negotiates DMA-BUF and
+/// FileMuxer, same codec, same terminus. `open_gpu` negotiates DMA-BUF and
 /// imports each captured buffer straight into a CUDA BGRA surface, so there
 /// is no upload element here and the BGRA stays BGRA all the way into the
 /// encode block — which is what keeps libswscale out of this graph.
@@ -139,7 +139,7 @@ mod linux_example {
     use media_pp::{
         elements::{
             CaptureSourceKind, CudaCodec, CudaDevice, CudaEncoder, CudaEncoderOptions,
-            CudaFrameFormat, Mp4Muxer, PipeWireScreenCaptureOptions, PipeWireScreenCaptureSource,
+            CudaFrameFormat, FileMuxer, PipeWireScreenCaptureOptions, PipeWireScreenCaptureSource,
         },
         pipeline::Pipeline,
     };
@@ -211,7 +211,7 @@ mod linux_example {
         )
         .map_err(|e| media_pp::Error::Other(e.to_string()))?;
 
-        let mut muxer = Mp4Muxer::create(&recording.path)?;
+        let mut muxer = FileMuxer::create(&recording.path)?;
         muxer.add_stream("video", encoder.parameters(), format.time_base)?;
         let muxer_sink = muxer.open()?.pop().expect("exactly one stream was added");
 

@@ -9,7 +9,7 @@ re-rasterizing and re-uploading each call.
 
 The background runs as its own `Pipeline` (`TestVideoSource -> SwScaler ->
 upload`) feeding a compositor source input; the compositor's output runs as a
-second `Pipeline` (`download -> SwScaler -> SwEncoder -> Mp4Muxer`). The text
+second `Pipeline` (`download -> SwScaler -> SwEncoder -> FileMuxer`). The text
 layer itself never receives `Pipeline` frames — it's a handle driven directly
 by `set_text`/`set_position`, built through the compositor's own
 `add_text_layer`.

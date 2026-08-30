@@ -1,7 +1,7 @@
 # screen_record_av
 
 Screen capture + system-audio capture (whatever the default playback device
-is putting out) -> one `Mp4Muxer`: records the desktop and its system audio
+is putting out) -> one `FileMuxer`: records the desktop and its system audio
 together into a single playable `.mp4`. Two independent live sources sharing
 one `Pipeline` via `PipelineBuilder` — each on its own thread, but one
 `pipeline.stop()` reaches both.
@@ -12,7 +12,7 @@ finalizes the MP4's trailer — written once *every* track, video and audio
 both, reports done via `Eos` *or* `Stop`, not on whichever finishes first.
 
 Both platforms run the same shape: two independent live capture sources, one
-`Mp4Muxer` with a video and an audio track, one `stop()` reaching both. On
+`FileMuxer` with a video and an audio track, one `stop()` reaching both. On
 Windows, video comes from `DxgiCaptureSource` and audio from
 `WasapiCaptureSource` (loopback on the default render device). On Linux, video
 comes from `PipeWireScreenCaptureSource` (through the portal, so the CLI takes
