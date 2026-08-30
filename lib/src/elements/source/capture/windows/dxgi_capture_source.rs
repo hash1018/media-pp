@@ -1691,6 +1691,14 @@ impl SourceElement for DxgiCaptureSource {
             if outcome.paused_for > Duration::ZERO {
                 schedule.resume_after_pause(outcome.paused_for, Instant::now());
             }
+
+            // Followed here rather than at construction, so a rate set through
+            // `frame_rate()` while this is running is kept from the next tick.
+            let interval = self.frame_rate.interval();
+            if schedule.interval() != interval {
+                pp_info!(self, "frame rate is now {}", self.frame_rate.get());
+                schedule.set_interval(interval, Instant::now());
+            }
             // The wait for the next tick happens here, in a sleep that holds
             // nothing, rather than inside `AcquireNextFrame` — see
             // `ACQUIRE_TIMEOUT_MS` on why that call is never given time to

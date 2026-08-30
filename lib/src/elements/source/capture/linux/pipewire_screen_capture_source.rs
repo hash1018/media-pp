@@ -1168,6 +1168,14 @@ impl SourceElement for PipeWireScreenCaptureSource {
                 schedule.resume_after_pause(outcome.paused_for, Instant::now());
             }
 
+            // Followed here rather than at construction, so a rate set through
+            // `frame_rate()` while this is running is kept from the next tick.
+            let interval = self.frame_rate.interval();
+            if schedule.interval() != interval {
+                pp_info!(self, "frame rate is now {}", self.frame_rate.get());
+                schedule.set_interval(interval, Instant::now());
+            }
+
             if let Some(count) = self.take_unmappable_report() {
                 pp_warn!(
                     self,
