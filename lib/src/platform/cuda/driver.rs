@@ -1282,6 +1282,50 @@ unsafe impl Send for CudaMask {}
 // another.
 unsafe impl Sync for CudaMask {}
 
+/// The scratch a BGRA layer needs on its way into an NV12 canvas.
+///
+/// A layer that brings its own transparency cannot be blitted: its colour has
+/// to be converted into the canvas's own space, and its alpha has to be read
+/// per pixel while that happens. Both need somewhere to land, and that is
+/// this — an NV12 pair for the converted colour and an alpha plane at each
+/// resolution the two passes read.
+///
+/// About 2.75 bytes a pixel, so a canvas-sized overlay is a few megabytes.
+/// Held by whoever draws the layer and reused for as long as its size is
+/// unchanged, because the alternative is allocating that per frame.
+pub(crate) struct CudaOverlayScratch {
+    ctx: CUcontext,
+    luma: CUdeviceptr,
+    chroma: CUdeviceptr,
+    alpha_full: CUdeviceptr,
+    alpha_half: CUdeviceptr,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+}
+
+// SAFETY: plain device allocations with no thread affinity, and `Drop` pushes
+// the context it captured before freeing them — the same contract `CudaMask`
+// documents just below.
+unsafe impl Send for CudaOverlayScratch {}
+
+impl Drop for CudaOverlayScratch {
+    fn drop(&mut self) {
+        // SAFETY: every pointer came from `cuMemAlloc` in `overlay_scratch` and
+        // is freed once, in the context it was allocated in — hence the push,
+        // and hence the frees only running when it succeeded.
+        unsafe {
+            if cuCtxPushCurrent_v2(self.ctx) == CUDA_SUCCESS {
+                cuMemFree_v2(self.luma);
+                cuMemFree_v2(self.chroma);
+                cuMemFree_v2(self.alpha_full);
+                cuMemFree_v2(self.alpha_half);
+                let mut popped: CUcontext = std::ptr::null_mut();
+                cuCtxPopCurrent_v2(&mut popped);
+            }
+        }
+    }
+}
+
 impl Drop for CudaMask {
     fn drop(&mut self) {
         // SAFETY: both pointers came from `cuMemAlloc` in `upload_mask` and are
@@ -1306,6 +1350,60 @@ impl CudaDriver {
     /// Dimensions are rounded down to even: a text layer is blended into an
     /// NV12 surface, whose chroma covers 2x2 blocks, so an odd trailing row
     /// or column has nowhere to land.
+    /// Allocates the scratch a BGRA layer of this size needs — see
+    /// [`CudaOverlayScratch`].
+    ///
+    /// The dimensions are rounded down to even, as every NV12 size in this
+    /// module is: chroma is 2x2 subsampled and a half-sample has nowhere to
+    /// go.
+    #[allow(dead_code)]
+    pub(crate) fn overlay_scratch(
+        &self,
+        width: u32,
+        height: u32,
+    ) -> Result<CudaOverlayScratch, CudaDriverError> {
+        let width = width & !1;
+        let height = height & !1;
+        if width == 0 || height == 0 {
+            return Err(CudaDriverError::EmptyMask);
+        }
+        let pixels = (width * height) as usize;
+        // SAFETY: `with_context` has the context current, every out-param is a
+        // live local, and a failure frees whatever was already taken before
+        // returning, so no path leaks an allocation.
+        self.with_context(|| unsafe {
+            let mut taken = Vec::with_capacity(4);
+            let mut alloc = |bytes: usize| -> Result<CUdeviceptr, CudaDriverError> {
+                let mut pointer = 0;
+                match check("cuMemAlloc", cuMemAlloc_v2(&mut pointer, bytes)) {
+                    Ok(()) => {
+                        taken.push(pointer);
+                        Ok(pointer)
+                    }
+                    Err(error) => {
+                        for pointer in taken.drain(..) {
+                            cuMemFree_v2(pointer);
+                        }
+                        Err(error)
+                    }
+                }
+            };
+            let luma = alloc(pixels)?;
+            let chroma = alloc(pixels / 2)?;
+            let alpha_full = alloc(pixels)?;
+            let alpha_half = alloc(pixels / 4)?;
+            Ok(CudaOverlayScratch {
+                ctx: self.ctx,
+                luma,
+                chroma,
+                alpha_full,
+                alpha_half,
+                width,
+                height,
+            })
+        })
+    }
+
     pub(crate) fn upload_mask(
         &self,
         coverage: &[u8],
@@ -1380,6 +1478,129 @@ impl CudaDriver {
     /// `x`/`y` are where the mask's top-left corner lands on the surface and
     /// must be even; `width`/`height` are the already-clipped extent.
     /// Launches asynchronously, like [`CudaDriver::blend_nv12`].
+    /// Draws a BGRA layer into an NV12 canvas, honouring the layer's own
+    /// per-pixel alpha.
+    ///
+    /// This is what a `blit` cannot do. A blit moves bytes, so a layer that is
+    /// transparent in places arrives opaque in all of them; and the scalar
+    /// blend fades a whole layer evenly rather than pixel by pixel. An overlay
+    /// — anything drawn over a capture rather than beside it — needs the third
+    /// thing, and this is it.
+    ///
+    /// # Three passes, because the colour has to change space first
+    ///
+    /// The canvas is NV12 and the layer is BGRA, so its colour is converted
+    /// into `scratch`'s own NV12 pair with the same kernels
+    /// [`CudaDriver::bgra_to_nv12`] uses. Its alpha is lifted out separately,
+    /// at both resolutions, because the luma pass reads one sample per pixel
+    /// and the chroma pass one per 2x2. Then each plane is mixed under that
+    /// alpha.
+    ///
+    /// `scratch` has to be at least `width` x `height`; anything larger is
+    /// fine and is what lets one allocation serve a layer whose size is
+    /// unchanged between frames.
+    #[allow(dead_code, clippy::too_many_arguments)]
+    pub(crate) fn blend_bgra_nv12(
+        &self,
+        source: BgraSurface,
+        scratch: &CudaOverlayScratch,
+        destination: Nv12Surface,
+        region: Nv12Region,
+        opacity: u8,
+    ) -> Result<(), CudaDriverError> {
+        let Nv12Region {
+            source_x,
+            source_y,
+            destination_x,
+            destination_y,
+            width,
+            height,
+        } = region;
+        if width == 0 || height == 0 {
+            return Ok(());
+        }
+        debug_assert!(
+            width <= scratch.width && height <= scratch.height,
+            "scratch is smaller than the region it is asked to hold"
+        );
+        // The layer's own top-left, since everything below works in the
+        // scratch's coordinates rather than the source's.
+        let pixels =
+            source.pixels + u64::from(source_y) * source.pitch as u64 + u64::from(source_x) * 4;
+        let scratch_pitch = scratch.width;
+        let half_pitch = scratch.width / 2;
+
+        self.with_context(|| {
+            self.launch_plane(
+                self.bgra_to_luma,
+                scratch.luma,
+                scratch_pitch,
+                pixels,
+                source.pitch as u32,
+                width,
+                height,
+            )?;
+            self.launch_plane(
+                self.bgra_to_chroma,
+                scratch.chroma,
+                scratch_pitch,
+                pixels,
+                source.pitch as u32,
+                width / 2,
+                height / 2,
+            )?;
+            self.launch_plane(
+                self.extract_alpha,
+                scratch.alpha_full,
+                scratch_pitch,
+                pixels,
+                source.pitch as u32,
+                width,
+                height,
+            )?;
+            self.launch_plane(
+                self.extract_alpha_half,
+                scratch.alpha_half,
+                half_pitch,
+                pixels,
+                source.pitch as u32,
+                width / 2,
+                height / 2,
+            )?;
+            self.launch_plane_masked(
+                destination.luma
+                    + u64::from(destination_y) * destination.luma_pitch as u64
+                    + u64::from(destination_x),
+                destination.luma_pitch as u32,
+                scratch.luma,
+                scratch_pitch,
+                scratch.alpha_full,
+                scratch_pitch,
+                width,
+                height,
+                opacity,
+                0,
+            )?;
+            // Chroma is interleaved `(U, V)`, so its width in bytes is the
+            // layer's own and each byte's alpha comes from the half-resolution
+            // plane one sample to the right of every pair — the `1` shift.
+            self.launch_plane_masked(
+                destination.chroma
+                    + u64::from(destination_y / 2) * destination.chroma_pitch as u64
+                    + u64::from(destination_x),
+                destination.chroma_pitch as u32,
+                scratch.chroma,
+                scratch_pitch,
+                scratch.alpha_half,
+                half_pitch,
+                width,
+                height / 2,
+                opacity,
+                1,
+            )
+        })
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn blend_mask_nv12(
         &self,
@@ -1426,6 +1647,106 @@ impl CudaDriver {
                 1,
             )
         })
+    }
+
+    /// One 6-parameter convert-shaped launch: `(dst, dst_pitch, src,
+    /// src_pitch, width, height)`, which is the shape both alpha extractions
+    /// and both colour conversions share.
+    #[allow(clippy::too_many_arguments)]
+    fn launch_plane(
+        &self,
+        entry: CUfunction,
+        mut dst: CUdeviceptr,
+        mut dst_pitch: u32,
+        mut src: CUdeviceptr,
+        mut src_pitch: u32,
+        mut width: u32,
+        mut height: u32,
+    ) -> Result<(), CudaDriverError> {
+        const BLOCK: u32 = 16;
+        let (grid_x, grid_y) = (width.div_ceil(BLOCK), height.div_ceil(BLOCK));
+        let mut params: [*mut c_void; 6] = [
+            (&mut dst) as *mut _ as *mut c_void,
+            (&mut dst_pitch) as *mut _ as *mut c_void,
+            (&mut src) as *mut _ as *mut c_void,
+            (&mut src_pitch) as *mut _ as *mut c_void,
+            (&mut width) as *mut _ as *mut c_void,
+            (&mut height) as *mut _ as *mut c_void,
+        ];
+        // SAFETY: one pointer per parameter each of these kernels declares, in
+        // that order, at a live local; the context is current because every
+        // caller reaches this inside `with_context`.
+        unsafe {
+            check(
+                "cuLaunchKernel",
+                cuLaunchKernel(
+                    entry,
+                    grid_x,
+                    grid_y,
+                    1,
+                    BLOCK,
+                    BLOCK,
+                    1,
+                    0,
+                    std::ptr::null_mut(),
+                    params.as_mut_ptr(),
+                    std::ptr::null_mut(),
+                ),
+            )
+        }
+    }
+
+    /// `blend_plane_masked`: the mix `launch_masked` does, with the colour
+    /// read per pixel from `src` instead of taken from a constant.
+    #[allow(clippy::too_many_arguments)]
+    fn launch_plane_masked(
+        &self,
+        mut dst: CUdeviceptr,
+        mut dst_pitch: u32,
+        mut src: CUdeviceptr,
+        mut src_pitch: u32,
+        mut mask: CUdeviceptr,
+        mut mask_pitch: u32,
+        mut width: u32,
+        mut height: u32,
+        opacity: u8,
+        mut shift: u32,
+    ) -> Result<(), CudaDriverError> {
+        const BLOCK: u32 = 16;
+        let (grid_x, grid_y) = (width.div_ceil(BLOCK), height.div_ceil(BLOCK));
+        let mut opacity = u32::from(opacity);
+        let mut params: [*mut c_void; 10] = [
+            (&mut dst) as *mut _ as *mut c_void,
+            (&mut dst_pitch) as *mut _ as *mut c_void,
+            (&mut src) as *mut _ as *mut c_void,
+            (&mut src_pitch) as *mut _ as *mut c_void,
+            (&mut mask) as *mut _ as *mut c_void,
+            (&mut mask_pitch) as *mut _ as *mut c_void,
+            (&mut width) as *mut _ as *mut c_void,
+            (&mut height) as *mut _ as *mut c_void,
+            (&mut opacity) as *mut _ as *mut c_void,
+            (&mut shift) as *mut _ as *mut c_void,
+        ];
+        // SAFETY: as `launch_masked`, with the one extra pair its own kernel
+        // declares.
+        unsafe {
+            check(
+                "cuLaunchKernel",
+                cuLaunchKernel(
+                    self.blend_plane_masked,
+                    grid_x,
+                    grid_y,
+                    1,
+                    BLOCK,
+                    BLOCK,
+                    1,
+                    0,
+                    std::ptr::null_mut(),
+                    params.as_mut_ptr(),
+                    std::ptr::null_mut(),
+                ),
+            )
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1848,6 +2169,90 @@ mod tests {
             .consume(MediaBuffer::Video(Arc::new(slot)))
             .expect("upload");
         Some(uploaded.lock().unwrap().remove(0))
+    }
+
+    /// The blend that exists so an overlay can be transparent: where the
+    /// layer's own alpha is zero the canvas has to come through untouched,
+    /// and where it is full the layer has to replace it.
+    ///
+    /// This is the property a blit cannot have. Converting a BGRA overlay to
+    /// NV12 and blitting it puts opaque black everywhere nothing was drawn,
+    /// which is what made a Drawing hide the capture beneath it.
+    #[test]
+    fn a_bgra_layer_blends_under_its_own_alpha_rather_than_covering() {
+        let Some((device, _cuda_lock)) = crate::test_support::try_cuda_device() else {
+            return;
+        };
+        let Ok(driver) = CudaDriver::retain_primary() else {
+            eprintln!("skipping: no usable CUDA driver on this machine");
+            return;
+        };
+        const WIDTH: u32 = 64;
+        const HEIGHT: u32 = 32;
+        const CANVAS_LUMA: u8 = 90;
+
+        // Opaque red on the left half, entirely transparent on the right —
+        // and the transparent half is still *red*, so a kernel ignoring alpha
+        // would fail rather than accidentally agree.
+        let pixel = |x: u32, _y: u32| {
+            if x < WIDTH / 2 {
+                [0, 0, 255, 255]
+            } else {
+                [0, 0, 255, 0]
+            }
+        };
+        let Some(layer) = cuda_bgra_surface(&device, WIDTH, HEIGHT, pixel) else {
+            return;
+        };
+        let Some(canvas) = cuda_surface(&device, WIDTH, HEIGHT, CANVAS_LUMA) else {
+            return;
+        };
+        let (MediaBuffer::Video(layer_frame), MediaBuffer::Video(canvas_frame)) = (&layer, &canvas)
+        else {
+            panic!("both uploads produce Video buffers");
+        };
+        let scratch = driver
+            .overlay_scratch(WIDTH, HEIGHT)
+            .expect("scratch for a layer this size");
+
+        driver
+            .blend_bgra_nv12(
+                BgraSurface::from_frame(layer_frame).expect("a BGRA surface"),
+                &scratch,
+                Nv12Surface::from_frame(canvas_frame).expect("an NV12 surface"),
+                Nv12Region {
+                    source_x: 0,
+                    source_y: 0,
+                    destination_x: 0,
+                    destination_y: 0,
+                    width: WIDTH,
+                    height: HEIGHT,
+                },
+                255,
+            )
+            .expect("blend");
+        driver.synchronize().expect("synchronize");
+
+        let blended = download(&device, canvas, WIDTH, HEIGHT);
+        let stride = blended.stride(0);
+        let luma = blended.data(0);
+        let (expected_red, _, _) = bt709_limited(255.0, 0.0, 0.0);
+        for y in 0..HEIGHT as usize {
+            for x in 0..(WIDTH / 2) as usize {
+                assert_eq!(
+                    luma[y * stride + x],
+                    expected_red,
+                    "the opaque half should be the layer's own colour at ({x}, {y})"
+                );
+            }
+            for x in (WIDTH / 2) as usize..WIDTH as usize {
+                assert_eq!(
+                    luma[y * stride + x],
+                    CANVAS_LUMA,
+                    "the transparent half should leave the canvas alone at ({x}, {y})"
+                );
+            }
+        }
     }
 
     /// The conversion nothing else on the CUDA path can do, checked against
