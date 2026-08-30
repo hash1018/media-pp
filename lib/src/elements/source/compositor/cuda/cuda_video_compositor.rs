@@ -13,6 +13,7 @@ use ffmpeg_next::{self as ffmpeg, ffi};
 use thiserror::Error as ThisError;
 
 use crate::pp_log::{PpLog, pp_debug, pp_error, pp_info};
+use crate::rate::FrameRate;
 
 use super::super::sw_video_compositor::VideoCompositorOptions;
 use super::super::text_layer::{TextLayer, TextRasterError, rasterize_coverage};
@@ -187,23 +188,6 @@ struct VideoInput {
     layer: Mutex<VideoLayer>,
 }
 
-/// Packs a positive frame rate into one word, so a reader can never catch a
-/// numerator from one setting and a denominator from another. The D3D11
-/// compositor keeps its own copy of this pair for the same reason; they are
-/// four lines each and share nothing else.
-fn pack_rate(rate: ffmpeg::Rational) -> u64 {
-    ((rate.numerator() as u32 as u64) << 32) | rate.denominator() as u32 as u64
-}
-
-fn unpack_rate(packed: u64) -> ffmpeg::Rational {
-    ffmpeg::Rational::new((packed >> 32) as u32 as i32, packed as u32 as i32)
-}
-
-/// How long one frame lasts at `rate`.
-fn frame_interval_of(rate: ffmpeg::Rational) -> Duration {
-    Duration::from_secs_f64(rate.denominator() as f64 / rate.numerator() as f64)
-}
-
 struct CompositorShared {
     inputs: Mutex<HashMap<Arc<str>, Arc<VideoInput>>>,
     /// Text layers are kept apart from video inputs because they are not
@@ -211,10 +195,9 @@ struct CompositorShared {
     /// every video layer, in registration order.
     text_layers: Mutex<Vec<(Arc<str>, Arc<TextLayerState>)>>,
     next_input_id: AtomicU64,
-    /// The output rate, packed as numerator and denominator into one word so
-    /// a reader can never catch half of a change — see
-    /// [`CudaVideoCompositorHandle::set_frame_rate`].
-    frame_rate: AtomicU64,
+    /// The output rate, which the tick loop reads each pass and
+    /// [`CudaVideoCompositorHandle::set_frame_rate`] writes.
+    frame_rate: Arc<FrameRate>,
     /// Shared so a [`CudaTextLayerHandle`] can upload a freshly rasterized
     /// mask from whichever thread called `set_text`.
     driver: Arc<CudaDriver>,
@@ -319,16 +302,9 @@ impl CudaVideoCompositorHandle {
     /// attached after the change is consistent, because it takes its
     /// `time_base` when it is built.
     pub fn set_frame_rate(&self, frame_rate: ffmpeg::Rational) -> bool {
-        if frame_rate.numerator() <= 0 || frame_rate.denominator() <= 0 {
-            return false;
-        }
-        let Some(shared) = self.shared.upgrade() else {
-            return false;
-        };
-        shared
-            .frame_rate
-            .store(pack_rate(frame_rate), Ordering::Relaxed);
-        true
+        self.shared
+            .upgrade()
+            .is_some_and(|shared| shared.frame_rate.set(frame_rate))
     }
 
     /// The rate this compositor is emitting at, or `None` once it is gone.
@@ -339,7 +315,7 @@ impl CudaVideoCompositorHandle {
     /// is producing.
     pub fn frame_rate(&self) -> Option<ffmpeg::Rational> {
         let shared = self.shared.upgrade()?;
-        Some(unpack_rate(shared.frame_rate.load(Ordering::Relaxed)))
+        Some(shared.frame_rate.get())
     }
 
     pub fn source_count(&self) -> usize {
@@ -764,7 +740,7 @@ impl CudaVideoCompositor {
             inputs: Mutex::new(HashMap::new()),
             text_layers: Mutex::new(Vec::new()),
             next_input_id: AtomicU64::new(1),
-            frame_rate: AtomicU64::new(pack_rate(options.frame_rate)),
+            frame_rate: FrameRate::new(options.frame_rate),
             driver: driver.clone(),
             device_ctx,
         });
@@ -831,7 +807,7 @@ impl CudaVideoCompositor {
     /// The output frame rate, which is what construction was given unless
     /// [`CudaVideoCompositorHandle::set_frame_rate`] has changed it since.
     pub fn frame_rate(&self) -> ffmpeg::Rational {
-        unpack_rate(self.shared.frame_rate.load(Ordering::Relaxed))
+        self.shared.frame_rate.get()
     }
 
     /// The reciprocal of [`Self::frame_rate`] — output PTS advance by one
@@ -1149,8 +1125,7 @@ impl SourceElement for CudaVideoCompositor {
 
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
         pp_info!(self, "started");
-        let mut schedule =
-            PeriodicSchedule::new(frame_interval_of(self.frame_rate()), Instant::now());
+        let mut schedule = PeriodicSchedule::new(self.shared.frame_rate.interval(), Instant::now());
         loop {
             let outcome = drain_control(control, self, bus)?;
             if outcome.stopped {
@@ -1163,7 +1138,7 @@ impl SourceElement for CudaVideoCompositor {
 
             // Followed here rather than at construction, so a rate set while
             // this is running is kept from the next tick on.
-            let interval = frame_interval_of(self.frame_rate());
+            let interval = self.shared.frame_rate.interval();
             let now = Instant::now();
             if schedule.interval() != interval {
                 pp_info!(self, "frame rate is now {}", self.frame_rate());

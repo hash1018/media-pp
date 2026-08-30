@@ -109,7 +109,7 @@ mod test_support;
 // `crate::pipeline`/`media_pp::pipeline` etc., never `crate::core::...`.
 pub use core::{
     buffer, bus, clock, color, contract, control, driver, element, graph, log, pad, pipeline,
-    playback_clock, pool, pp_log, queue,
+    playback_clock, pool, pp_log, queue, rate,
 };
 
 // Same flat-namespace reasoning as above, but crate-private: `schedule`/

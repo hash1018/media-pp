@@ -5,6 +5,7 @@
 //! sibling ([`text_handle::D3d11TextLayerHandle`]) each split into their
 //! own file since neither is small enough to justify inlining here.
 
+use crate::rate::FrameRate;
 use std::{
     collections::HashMap,
     ffi::c_void,
@@ -235,33 +236,12 @@ struct GpuVideoInput {
     layer: Mutex<VideoLayer>,
 }
 
-/// Packs a positive frame rate into one word, so a reader can never catch a
-/// numerator from one setting and a denominator from another.
-///
-/// Rejected rates never get here — see
-/// [`D3d11VideoCompositorHandle::set_frame_rate`], which is the only writer
-/// besides construction, and which refuses anything this could not represent.
-fn pack_rate(rate: ffmpeg::Rational) -> u64 {
-    ((rate.numerator() as u32 as u64) << 32) | rate.denominator() as u32 as u64
-}
-
-fn unpack_rate(packed: u64) -> ffmpeg::Rational {
-    ffmpeg::Rational::new((packed >> 32) as u32 as i32, packed as u32 as i32)
-}
-
-/// How long one frame lasts at `rate`.
-fn frame_interval_of(rate: ffmpeg::Rational) -> Duration {
-    Duration::from_secs_f64(rate.denominator() as f64 / rate.numerator() as f64)
-}
-
 struct D3d11CompositorShared {
     inputs: Mutex<HashMap<Arc<str>, Arc<GpuVideoInput>>>,
     next_input_id: AtomicU64,
-    /// The output rate, as a numerator and denominator packed into one
-    /// word so a reader can never catch half of a change. Written by
-    /// [`D3d11VideoCompositorHandle::set_frame_rate`], read by the tick loop
-    /// and by [`D3d11VideoCompositor::frame_rate`].
-    frame_rate: AtomicU64,
+    /// The output rate, which the tick loop reads each pass and
+    /// [`D3d11VideoCompositorHandle::set_frame_rate`] writes.
+    frame_rate: Arc<FrameRate>,
     /// Lets [`D3d11VideoCompositorHandle::add_text_layer`] build GPU
     /// resources guaranteed to match this compositor's own device, without
     /// requiring a separately-threaded-through device parameter that could
@@ -391,16 +371,9 @@ impl D3d11VideoCompositorHandle {
     /// is attached, which this cannot tell apart from a Preview, and which
     /// would make the setting useless exactly when it is worth having.
     pub fn set_frame_rate(&self, frame_rate: ffmpeg::Rational) -> bool {
-        if frame_rate.numerator() <= 0 || frame_rate.denominator() <= 0 {
-            return false;
-        }
-        let Some(shared) = self.shared.upgrade() else {
-            return false;
-        };
-        shared
-            .frame_rate
-            .store(pack_rate(frame_rate), Ordering::Relaxed);
-        true
+        self.shared
+            .upgrade()
+            .is_some_and(|shared| shared.frame_rate.set(frame_rate))
     }
 
     /// The rate this compositor is emitting at, or `None` once it is gone.
@@ -411,7 +384,7 @@ impl D3d11VideoCompositorHandle {
     /// is producing.
     pub fn frame_rate(&self) -> Option<ffmpeg::Rational> {
         let shared = self.shared.upgrade()?;
-        Some(unpack_rate(shared.frame_rate.load(Ordering::Relaxed)))
+        Some(shared.frame_rate.get())
     }
 
     pub fn source_count(&self) -> usize {
@@ -819,7 +792,7 @@ impl D3d11VideoCompositor {
         let shared = Arc::new(D3d11CompositorShared {
             inputs: Mutex::new(HashMap::new()),
             next_input_id: AtomicU64::new(1),
-            frame_rate: AtomicU64::new(pack_rate(options.frame_rate)),
+            frame_rate: FrameRate::new(options.frame_rate),
             device: device.clone(),
         });
 
@@ -898,7 +871,7 @@ impl D3d11VideoCompositor {
     /// The output frame rate, which is what construction was given unless
     /// [`D3d11VideoCompositorHandle::set_frame_rate`] has changed it since.
     pub fn frame_rate(&self) -> ffmpeg::Rational {
-        unpack_rate(self.shared.frame_rate.load(Ordering::Relaxed))
+        self.shared.frame_rate.get()
     }
 
     /// The reciprocal of [`Self::frame_rate`], used as output PTS units —
@@ -1282,8 +1255,7 @@ impl SourceElement for D3d11VideoCompositor {
 
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
         pp_info!(self, "started");
-        let mut schedule =
-            PeriodicSchedule::new(frame_interval_of(self.frame_rate()), Instant::now());
+        let mut schedule = PeriodicSchedule::new(self.shared.frame_rate.interval(), Instant::now());
         loop {
             let outcome = drain_control(control, self, bus)?;
             if outcome.stopped {
@@ -1296,7 +1268,7 @@ impl SourceElement for D3d11VideoCompositor {
 
             // Followed here rather than at construction, so a rate set while
             // this is running is kept from the next tick on.
-            let interval = frame_interval_of(self.frame_rate());
+            let interval = self.shared.frame_rate.interval();
             let now = Instant::now();
             if schedule.interval() != interval {
                 pp_info!(self, "frame rate is now {}", self.frame_rate());

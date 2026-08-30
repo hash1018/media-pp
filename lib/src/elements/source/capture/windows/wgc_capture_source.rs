@@ -60,6 +60,7 @@ use windows::{
     core::{IInspectable, Interface, factory},
 };
 
+use crate::rate::{FrameRate, FrameRateHandle};
 use crate::{
     buffer::MediaBuffer,
     bus::{Bus, BusEvent},
@@ -225,8 +226,9 @@ pub struct WgcCaptureSource {
     device: ID3D11Device,
     context: ID3D11DeviceContext,
     include_cursor: bool,
-    fps: i32,
-    frame_interval: Duration,
+    /// Shared rather than a plain field so [`WgcCaptureSource::frame_rate`]
+    /// can hand out a handle that changes it while this is running.
+    frame_rate: Arc<FrameRate>,
     frame_index: i64,
     pad: SrcPad,
     frame_pool: UnboundObjectPool<ffmpeg::frame::Video>,
@@ -337,17 +339,26 @@ impl WgcCaptureSource {
             device,
             context,
             include_cursor: options.include_cursor,
-            fps,
-            frame_interval: Duration::from_secs_f64(1.0 / f64::from(options.fps)),
+            frame_rate: FrameRate::new(ffmpeg::Rational::new(fps, 1)),
             frame_index: 0,
             pad,
             frame_pool: UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {}),
         }
     }
 
-    /// PTS unit of frames emitted by this source.
+    /// PTS unit of frames emitted by this source — the reciprocal of the
+    /// capture rate, and so a value that moves with [`Self::frame_rate`].
     pub fn time_base(&self) -> ffmpeg::Rational {
-        ffmpeg::Rational::new(1, self.fps)
+        self.frame_rate.get().invert()
+    }
+
+    /// Runtime control for the rate this captures at.
+    ///
+    /// Taken before this is moved into a `Pipeline`, which is the only chance
+    /// to. Changing the rate re-means [`Self::time_base`] and every timestamp
+    /// after the change — see [`crate::rate`].
+    pub fn frame_rate(&self) -> FrameRateHandle {
+        self.frame_rate.handle()
     }
 
     fn create_texture(
@@ -541,13 +552,13 @@ impl SourceElement for WgcCaptureSource {
             self,
             "started: window={:?}, fps={}, include_cursor={}",
             hwnd,
-            self.fps,
+            self.frame_rate.get(),
             self.include_cursor
         );
 
         let mut latest = None;
         let mut visible_size = None;
-        let mut schedule = PeriodicSchedule::new(self.frame_interval, Instant::now());
+        let mut schedule = PeriodicSchedule::new(self.frame_rate.interval(), Instant::now());
         loop {
             let outcome = drain_control(control, self, bus)?;
             if outcome.stopped {

@@ -30,6 +30,7 @@ pub mod playback_clock;
 pub mod pool;
 pub mod pp_log;
 pub mod queue;
+pub mod rate;
 pub mod repeat;
 pub mod schedule;
 pub mod time;

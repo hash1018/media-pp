@@ -6,6 +6,7 @@ use std::{
 };
 
 use crate::pp_log::{PpLog, pp_error, pp_info};
+use crate::rate::{FrameRate, FrameRateHandle};
 use ffmpeg_next::{self as ffmpeg, ffi};
 use thiserror::Error as ThisError;
 use windows::{
@@ -456,12 +457,10 @@ pub struct DxgiCaptureSource {
     /// composites straight from each unit's own `staging_texture` at
     /// emit time instead (see [`DxgiCaptureSource::emit_frame_gpu`]).
     staging: Option<ffmpeg::frame::Video>,
-    /// See [`DxgiCaptureOptions::fps`] — kept alongside `frame_interval`
-    /// so [`DxgiCaptureSource::time_base`] doesn't have to recover it from
-    /// a `Duration`.
-    fps: i32,
-    /// `1 / fps`.
-    frame_interval: Duration,
+    /// See [`DxgiCaptureOptions::fps`]. Shared rather than a plain field so
+    /// [`DxgiCaptureSource::frame_rate`] can hand out a handle that changes
+    /// it while this is running.
+    frame_rate: Arc<FrameRate>,
     /// This element's `pts` tick counter — one per *emitted* frame (see
     /// [`DxgiCaptureSource::time_base`]'s own docs), not per real capture.
     frame_index: i64,
@@ -795,8 +794,7 @@ impl DxgiCaptureSource {
                 cursor_position: POINT::default(),
                 cursor_visible: false,
                 staging,
-                fps: fps as i32,
-                frame_interval: Duration::from_secs_f64(1.0 / fps as f64),
+                frame_rate: FrameRate::new(ffmpeg::Rational::new(fps as i32, 1)),
                 frame_index: 0,
                 pad,
                 pool,
@@ -825,10 +823,27 @@ impl DxgiCaptureSource {
     }
 
     /// The unit each emitted frame's `pts` is expressed in — what you
-    /// need to construct a matching [`crate::elements::Pacer`]. `1 /
-    /// fps`, same convention as [`crate::elements::TestVideoSource::time_base`].
+    /// need to construct a matching [`crate::elements::Pacer`]. The
+    /// reciprocal of the capture rate, same convention as
+    /// [`crate::elements::TestVideoSource::time_base`], and so a value that
+    /// moves with [`Self::frame_rate`].
     pub fn time_base(&self) -> ffmpeg::Rational {
-        ffmpeg::Rational::new(1, self.fps)
+        self.frame_rate.get().invert()
+    }
+
+    /// Runtime control for the rate this captures at.
+    ///
+    /// Taken before this is moved into a `Pipeline`, which is the only chance
+    /// to: after that the element belongs to its own thread, and this handle
+    /// is what is left to reach it with.
+    ///
+    /// Changing the rate re-means [`Self::time_base`] and so every timestamp
+    /// after the change, while the ones already downstream were stamped under
+    /// the old one — see [`crate::rate`] for the whole of that. For a capture
+    /// feeding a compositor it usually does not arise: the compositor stamps
+    /// its own output and this element's timestamps go no further.
+    pub fn frame_rate(&self) -> FrameRateHandle {
+        self.frame_rate.handle()
     }
 
     /// Whether every contributing output has captured at least one real
@@ -1666,7 +1681,7 @@ impl SourceElement for DxgiCaptureSource {
 
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
         pp_info!(self, "started");
-        let mut schedule = PeriodicSchedule::new(self.frame_interval, Instant::now());
+        let mut schedule = PeriodicSchedule::new(self.frame_rate.interval(), Instant::now());
         loop {
             let outcome = drain_control(control, self, bus)?;
             if outcome.stopped {
@@ -2441,5 +2456,38 @@ mod tests {
             DxgiCaptureSource::open_with_device("device-consumer", options, &device)
                 .expect("the device created for this output must pass adapter validation");
         assert_eq!(source.device.as_raw(), device.as_raw());
+    }
+
+    /// The rate a capture was opened at can be changed afterwards, and
+    /// `time_base` — the unit its `pts` counts in — moves with it.
+    #[test]
+    fn the_capture_rate_can_be_changed_after_opening() {
+        let options = DxgiCaptureOptions {
+            fps: 60,
+            ..DxgiCaptureOptions::default()
+        };
+        let Ok((source, _format, _device)) = DxgiCaptureSource::open("rate", options) else {
+            eprintln!("skipping: no duplicable desktop on this machine");
+            return;
+        };
+
+        let rate = source.frame_rate();
+        assert_eq!(rate.get(), Some(ffmpeg::Rational::new(60, 1)));
+        assert_eq!(source.time_base(), ffmpeg::Rational::new(1, 60));
+
+        assert!(rate.set(ffmpeg::Rational::new(24, 1)));
+        assert_eq!(rate.get(), Some(ffmpeg::Rational::new(24, 1)));
+        // The element and the handle read one value, not two.
+        assert_eq!(source.time_base(), ffmpeg::Rational::new(1, 24));
+
+        // Refused, and refusing leaves the running rate alone rather than a
+        // capture pacing on a nonsense interval.
+        assert!(!rate.set(ffmpeg::Rational::new(0, 1)));
+        assert_eq!(source.time_base(), ffmpeg::Rational::new(1, 24));
+
+        // And the handle stops taking effect once the capture is gone.
+        drop(source);
+        assert!(!rate.set(ffmpeg::Rational::new(30, 1)));
+        assert_eq!(rate.get(), None);
     }
 }

@@ -18,6 +18,7 @@ use spa::sys as spa_sys;
 use thiserror::Error as ThisError;
 
 use crate::pp_log::{PpLog, pp_error, pp_info, pp_warn};
+use crate::rate::{FrameRate, FrameRateHandle};
 
 #[cfg(feature = "cuda")]
 use crate::{
@@ -509,11 +510,12 @@ pub struct PipeWireScreenCaptureSource {
     pad: SrcPad,
     width: u32,
     height: u32,
-    /// The configured output rate, kept because it is the unit `pts` counts in
-    /// and so what [`PipeWireScreenCaptureSource::time_base`] must report —
-    /// `frame_interval` below is derived from it for scheduling.
-    fps: u32,
-    frame_interval: Duration,
+    /// The configured output rate: the unit `pts` counts in, what
+    /// [`PipeWireScreenCaptureSource::time_base`] reports, and what the tick
+    /// loop paces on. Shared rather than a plain field so
+    /// [`PipeWireScreenCaptureSource::frame_rate`] can hand out a handle that
+    /// changes it while this is running.
+    frame_rate: Arc<FrameRate>,
     /// Monotonic frame counter used as the emitted `pts`.
     frame_index: i64,
     /// Reused across every emitted frame — see [`UnboundObjectPool`]'s own
@@ -756,8 +758,7 @@ impl PipeWireScreenCaptureSource {
                 pp_log,
                 width,
                 height,
-                fps,
-                frame_interval: Duration::from_secs_f64(1.0 / fps as f64),
+                frame_rate: FrameRate::new(ffmpeg::Rational::new(fps as i32, 1)),
                 frame_index: 0,
                 // GPU mode pools only the small `AVFrame` wrapper: the
                 // surface it references comes from the CUDA frames context
@@ -817,7 +818,21 @@ impl PipeWireScreenCaptureSource {
     /// configured output rate, not the compositor's irregular capture rate.
     /// Same contract as `DxgiCaptureSource::time_base`.
     pub fn time_base(&self) -> ffmpeg::Rational {
-        ffmpeg::Rational::new(1, self.fps as i32)
+        self.frame_rate.get().invert()
+    }
+
+    /// Runtime control for the rate this captures at.
+    ///
+    /// Taken before this is moved into a `Pipeline`, which is the only chance
+    /// to. Changing the rate re-means [`Self::time_base`] and every timestamp
+    /// after the change — see [`crate::rate`].
+    ///
+    /// It changes only how often this element emits. The portal stream keeps
+    /// delivering at whatever rate the compositor chose, and a tick that finds
+    /// nothing new answers with the picture it already has, exactly as it does
+    /// at the configured rate.
+    pub fn frame_rate(&self) -> FrameRateHandle {
+        self.frame_rate.handle()
     }
 
     /// Offers the latest captured image under this tick's own `pts`, copying
@@ -1142,7 +1157,7 @@ impl SourceElement for PipeWireScreenCaptureSource {
 
     fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
         pp_info!(self, "started");
-        let mut schedule = PeriodicSchedule::new(self.frame_interval, Instant::now());
+        let mut schedule = PeriodicSchedule::new(self.frame_rate.interval(), Instant::now());
         loop {
             let outcome = drain_control(control, self, bus)?;
             if outcome.stopped {
@@ -2623,8 +2638,7 @@ mod tests {
             ),
             width,
             height,
-            fps: 30,
-            frame_interval: Duration::from_secs_f64(1.0 / 30.0),
+            frame_rate: FrameRate::new(ffmpeg::Rational::new(30, 1)),
             frame_index: 0,
             pool: UnboundObjectPool::new(
                 0,
