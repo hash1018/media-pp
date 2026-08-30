@@ -26,6 +26,21 @@ pub enum SegmentPolicy {
     /// [`SegmentedMp4Muxer::open`]'s own docs) — a segment can run a bit
     /// longer than requested if keyframes are sparse.
     Duration(Duration),
+    /// Roughly this many bytes per segment, counted as the packets this
+    /// group writes.
+    ///
+    /// "Roughly" twice over. The cut waits for the same keyframe the
+    /// duration policy does, so a segment overruns by however much is
+    /// written between reaching the figure and the next one — the size
+    /// equivalent of a GOP. And the count is of packet payloads, where a
+    /// file also carries its container: headers, an index, and per-frame
+    /// framing, so the file on disk is somewhat larger than the figure
+    /// asked for rather than exactly it.
+    ///
+    /// Neither is worth correcting for. What this is for is keeping files
+    /// under a limit something downstream imposes, and a caller who needs
+    /// to be sure has to leave headroom for the GOP overrun anyway.
+    Size(u64),
 }
 
 /// One track's fixed description — everything [`SegmentedMp4Muxer::open`]
@@ -177,6 +192,7 @@ impl SegmentedMp4Muxer {
                 current_sinks,
                 segment_index: 0,
                 segment_started: Instant::now(),
+                segment_bytes: 0,
             }),
         });
         Ok(tracks
@@ -222,6 +238,9 @@ struct GroupState {
     /// order as `streams` — index-aligned with
     /// [`SegmentedTrackSink::track_index`].
     current_sinks: Vec<Box<dyn Sink>>,
+    /// What this segment has been given so far, for [`SegmentPolicy::Size`]
+    /// — every track's packets, since they all land in the one file.
+    segment_bytes: u64,
     segment_index: u64,
     segment_started: Instant,
 }
@@ -250,9 +269,15 @@ impl SegmentGroup {
         pp_log: &PpLog,
     ) -> Result<()> {
         let mut state = self.state.lock().unwrap();
-        let SegmentPolicy::Duration(due_after) = self.policy;
+        // Counted before the check, so a segment that is already over its
+        // size cuts at this keyframe rather than one packet later.
+        state.segment_bytes += packet.size() as u64;
+        let due = match self.policy {
+            SegmentPolicy::Duration(after) => state.segment_started.elapsed() >= after,
+            SegmentPolicy::Size(bytes) => state.segment_bytes >= bytes,
+        };
         let mut rotated_to = None;
-        if state.segment_started.elapsed() >= due_after {
+        if due {
             let has_video = state.streams.iter().any(|s| s.is_video);
             let this_is_video = state.streams[track_index].is_video;
             let should_cut = if has_video {
@@ -269,6 +294,9 @@ impl SegmentGroup {
                 state.current_sinks = open_segment(&state.streams, path)?;
                 state.segment_index = index;
                 state.segment_started = Instant::now();
+                // This packet is the first of the new segment, so what was
+                // counted for it above belongs to that one.
+                state.segment_bytes = packet.size() as u64;
                 rotated_to = Some(index);
             }
         }
@@ -473,6 +501,89 @@ mod tests {
                 1,
                 "segment {path:?} should have exactly one stream"
             );
+            let mut packet = ffmpeg::Packet::empty();
+            if packet.read(&mut input).is_err() {
+                panic!("segment {path:?} has no packets at all");
+            }
+            assert!(
+                packet.is_key(),
+                "segment {path:?}'s first packet must be a keyframe"
+            );
+        }
+
+        for path in &paths {
+            std::fs::remove_file(path).ok();
+        }
+    }
+
+    /// The size policy cuts on the same keyframe the duration one does, and
+    /// the segments it produces are as independently readable.
+    ///
+    /// The figure is deliberately small so a three-second run crosses it
+    /// several times. What is asserted is that it rotated *and* that every
+    /// segment still starts at a keyframe — the overrun past the figure is
+    /// the GOP the cut waits for, which `SegmentPolicy::Size` documents and
+    /// which is why no assertion here compares a file's length to it.
+    #[test]
+    fn the_size_policy_rotates_and_still_waits_for_a_keyframe() {
+        let video_options = TestVideoOptions {
+            width: 160,
+            height: 120,
+            framerate: ffmpeg::Rational::new(15, 1),
+        };
+        let video_source = TestVideoSource::new("video", video_options);
+        let time_base = video_source.time_base();
+        let Some(encoder) = open_h264_encoder(
+            "encoder",
+            SwEncoderOptions {
+                codec: VideoCodec::OpenH264,
+                width: video_options.width,
+                height: video_options.height,
+                time_base,
+                frame_rate: video_options.framerate,
+                bit_rate: 200_000,
+                gop_size: 8,
+            },
+        ) else {
+            eprintln!("skipping: no H.264 encoder available (openh264 or libx264)");
+            return;
+        };
+
+        let dir = std::env::temp_dir();
+        let prefix = format!("segmented_size_test_{}", std::process::id());
+        let paths: Arc<Mutex<Vec<PathBuf>>> = Arc::new(Mutex::new(Vec::new()));
+        let recorded_paths = paths.clone();
+
+        let mut muxer = SegmentedMp4Muxer::create(SegmentPolicy::Size(3_000), move |index| {
+            let path = dir.join(format!("{prefix}_{index:03}.mp4"));
+            recorded_paths.lock().unwrap().push(path.clone());
+            path
+        });
+        muxer.add_stream("video", encoder.parameters(), time_base);
+        let mut sinks = muxer.open().expect("open must succeed");
+        let sink = sinks.pop().expect("exactly one stream was added");
+
+        let pipeline = Pipeline::new("segmented-size-test", video_source, |source, ctx| {
+            let branch = ctx.branch().pipe(encoder).to(sink)?;
+            ctx.attach(source, 0, branch)?;
+            Ok(())
+        })
+        .expect("test pipeline wiring must succeed");
+        pipeline.run().unwrap();
+        std::thread::sleep(Duration::from_secs(3));
+        pipeline.stop();
+        pipeline.bus().log_events();
+
+        let paths = paths.lock().unwrap().clone();
+        assert!(
+            paths.len() >= 2,
+            "expected at least 2 segments, got {}: {paths:?}",
+            paths.len()
+        );
+
+        for path in &paths {
+            let mut input = ffmpeg::format::input(path)
+                .unwrap_or_else(|error| panic!("segment {path:?} must be readable: {error}"));
             let mut packet = ffmpeg::Packet::empty();
             if packet.read(&mut input).is_err() {
                 panic!("segment {path:?} has no packets at all");

@@ -582,4 +582,63 @@ mod tests {
         );
         std::fs::remove_file(&path).ok();
     }
+
+    /// The container comes from the path's own extension, not from this
+    /// type's name.
+    ///
+    /// `format::output` asks FFmpeg to guess a muxer from the filename, so
+    /// this writes Matroska for a `.mkv` as readily as MP4 for a `.mp4` — the
+    /// name says what it was written for, not what it is limited to. Worth a
+    /// test rather than a comment: it is the difference between "we would
+    /// have to add a muxer" and "name the file .mkv", and nothing else here
+    /// would have caught the day it stopped being true.
+    ///
+    /// Written with real packets rather than a header and a trailer alone: a
+    /// Matroska file with no cluster in it is not something FFmpeg will read
+    /// back, so an empty one would fail here for a reason that has nothing to
+    /// do with which muxer was picked.
+    #[test]
+    fn the_container_follows_the_path_extension() {
+        let mut encoder = open_aac_encoder(48000, 1);
+
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("muxer_container_test_{}.mkv", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+
+        let mut muxer = Mp4Muxer::create(&path).expect("the muxer must open a .mkv path");
+        muxer
+            .add_stream(
+                "audio",
+                encoder.parameters(),
+                ffmpeg::Rational::new(1, 48000),
+            )
+            .expect("add_stream must succeed");
+        let mut sinks = muxer.open().expect("open must write the header");
+        encoder.src_pads()[0].link(sinks.pop().expect("exactly one stream was added"));
+
+        for tick in 0..20i64 {
+            encoder
+                .consume(MediaBuffer::Audio(Arc::new(silent_frame(
+                    48000,
+                    1,
+                    960,
+                    tick * 960,
+                ))))
+                .expect("consume must succeed");
+        }
+        encoder
+            .consume(MediaBuffer::Eos)
+            .expect("eos must flush cleanly");
+        drop(encoder);
+
+        let input = ffmpeg::format::input(&path).expect("the file must be readable");
+        let format = input.format();
+        assert!(
+            format.name().contains("matroska"),
+            "a .mkv path should have produced Matroska, got {:?}",
+            format.name()
+        );
+        assert_eq!(input.streams().count(), 1);
+        std::fs::remove_file(&path).ok();
+    }
 }
