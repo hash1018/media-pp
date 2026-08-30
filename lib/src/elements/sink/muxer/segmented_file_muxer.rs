@@ -193,6 +193,7 @@ impl SegmentedFileMuxer {
                 segment_index: 0,
                 segment_started: Instant::now(),
                 segment_bytes: 0,
+                segment_origin: None,
             }),
         });
         Ok(tracks
@@ -243,6 +244,9 @@ struct GroupState {
     segment_bytes: u64,
     segment_index: u64,
     segment_started: Instant,
+    /// Where this segment's timeline starts, as `(track, timestamp)` in that
+    /// track's own time base — see [`SegmentGroup::rebase`].
+    segment_origin: Option<(usize, i64)>,
 }
 
 /// Shared between every [`SegmentedTrackSink`] [`SegmentedFileMuxer::open`]
@@ -272,6 +276,11 @@ impl SegmentGroup {
         // Counted before the check, so a segment that is already over its
         // size cuts at this keyframe rather than one packet later.
         state.segment_bytes += packet.size() as u64;
+        if state.segment_origin.is_none()
+            && let Some(dts) = packet.dts()
+        {
+            state.segment_origin = Some((track_index, dts));
+        }
         let due = match self.policy {
             SegmentPolicy::Duration(after) => state.segment_started.elapsed() >= after,
             SegmentPolicy::Size(bytes) => state.segment_bytes >= bytes,
@@ -297,9 +306,13 @@ impl SegmentGroup {
                 // This packet is the first of the new segment, so what was
                 // counted for it above belongs to that one.
                 state.segment_bytes = packet.size() as u64;
+                // This packet opens the new segment, so its timeline starts
+                // here — see [`SegmentGroup::rebase`].
+                state.segment_origin = packet.dts().map(|dts| (track_index, dts));
                 rotated_to = Some(index);
             }
         }
+        let packet = Self::rebase(&state, track_index, packet);
         let result = state.current_sinks[track_index].consume(MediaBuffer::Packet(packet));
         // Formatting and emitting happen off the group lock: every track's
         // `consume_packet` contends for it, so nothing that isn't required
@@ -309,6 +322,61 @@ impl SegmentGroup {
             pp_info!(pp_log: pp_log, "rotated segment_index={index}");
         }
         result
+    }
+
+    /// Moves a packet onto its segment's own timeline, so each file starts
+    /// near zero instead of carrying on from where the last one stopped.
+    ///
+    /// # One origin for every track, not one each
+    ///
+    /// Zeroing each track against its own first packet would start both at
+    /// exactly zero and pull them apart by however much they were
+    /// interleaved — up to an audio packet, which is audible. So the origin
+    /// is whichever packet opened the segment, converted into each track's
+    /// own time base, and every track is moved by that same instant.
+    ///
+    /// The rotation happens on a video keyframe, so a track interleaved just
+    /// behind it can carry a packet fractionally older than that origin.
+    /// Those clamp to zero rather than going negative, which no muxer
+    /// accepts; it costs those few packets their spacing and nothing after
+    /// them.
+    ///
+    /// # What this trades away
+    ///
+    /// Concatenating the segments back into one file no longer works by
+    /// appending them, since each starts at zero again. That is the choice
+    /// this makes: the files are for playing one at a time, which is what a
+    /// split recording is for, and a player opening the third of them should
+    /// not find two segments' worth of nothing in front of it.
+    fn rebase(
+        state: &GroupState,
+        track_index: usize,
+        packet: Arc<ffmpeg::Packet>,
+    ) -> Arc<ffmpeg::Packet> {
+        let Some((origin_track, origin)) = state.segment_origin else {
+            return packet;
+        };
+        let origin = if origin_track == track_index {
+            origin
+        } else {
+            // SAFETY: plain arithmetic on two rationals; it reads nothing
+            // through a pointer.
+            unsafe {
+                ffmpeg::ffi::av_rescale_q(
+                    origin,
+                    state.streams[origin_track].time_base.into(),
+                    state.streams[track_index].time_base.into(),
+                )
+            }
+        };
+        if origin == 0 {
+            return packet;
+        }
+        let moved = |value: i64| (value - origin).max(0);
+        let mut rebased = (*packet).clone();
+        rebased.set_pts(packet.pts().map(moved));
+        rebased.set_dts(packet.dts().map(moved));
+        Arc::new(rebased)
     }
 
     /// One track's own natural `Eos` — forwarded into whatever segment is
@@ -511,6 +579,86 @@ mod tests {
             );
         }
 
+        for path in &paths {
+            std::fs::remove_file(path).ok();
+        }
+    }
+
+    /// Every segment starts its own timeline rather than carrying on from
+    /// where the last one stopped.
+    ///
+    /// Without this the third file of a long recording opens with two
+    /// segments' worth of nothing in front of it, which is not what a player
+    /// handed one file should show.
+    #[test]
+    fn each_segment_starts_its_own_timeline() {
+        let video_options = TestVideoOptions {
+            width: 160,
+            height: 120,
+            framerate: ffmpeg::Rational::new(15, 1),
+        };
+        let video_source = TestVideoSource::new("video", video_options);
+        let time_base = video_source.time_base();
+        let Some(encoder) = open_h264_encoder(
+            "encoder",
+            SwEncoderOptions {
+                codec: VideoCodec::OpenH264,
+                width: video_options.width,
+                height: video_options.height,
+                time_base,
+                frame_rate: video_options.framerate,
+                bit_rate: 200_000,
+                gop_size: 8,
+            },
+        ) else {
+            eprintln!("skipping: no H.264 encoder available (openh264 or libx264)");
+            return;
+        };
+
+        let dir = std::env::temp_dir();
+        let prefix = format!("segmented_rebase_test_{}", std::process::id());
+        let paths: Arc<Mutex<Vec<PathBuf>>> = Arc::new(Mutex::new(Vec::new()));
+        let recorded_paths = paths.clone();
+        let mut muxer = SegmentedFileMuxer::create(
+            SegmentPolicy::Duration(Duration::from_millis(300)),
+            move |index| {
+                let path = dir.join(format!("{prefix}_{index:03}.mp4"));
+                recorded_paths.lock().unwrap().push(path.clone());
+                path
+            },
+        );
+        muxer.add_stream("video", encoder.parameters(), time_base);
+        let mut sinks = muxer.open().expect("open must succeed");
+        let sink = sinks.pop().expect("exactly one stream was added");
+        let pipeline = Pipeline::new("segmented-rebase-test", video_source, |source, ctx| {
+            let branch = ctx.branch().pipe(encoder).to(sink)?;
+            ctx.attach(source, 0, branch)?;
+            Ok(())
+        })
+        .expect("test pipeline wiring must succeed");
+        pipeline.run().unwrap();
+        std::thread::sleep(Duration::from_secs(3));
+        pipeline.stop();
+        pipeline.bus().log_events();
+
+        let paths = paths.lock().unwrap().clone();
+        assert!(paths.len() >= 3, "expected several segments, got {paths:?}");
+        for path in &paths {
+            let mut input = ffmpeg::format::input(path)
+                .unwrap_or_else(|error| panic!("segment {path:?} must be readable: {error}"));
+            let mut packet = ffmpeg::Packet::empty();
+            assert!(
+                packet.read(&mut input).is_ok(),
+                "segment {path:?} has no packets at all"
+            );
+            let dts = packet.dts().expect("a written packet carries a dts");
+            // Its own start, not the recording's: a segment a minute in would
+            // otherwise open somewhere around a minute.
+            assert_eq!(
+                dts, 0,
+                "segment {path:?} should start at zero, not at {dts}"
+            );
+        }
         for path in &paths {
             std::fs::remove_file(path).ok();
         }
