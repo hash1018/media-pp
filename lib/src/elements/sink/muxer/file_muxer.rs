@@ -380,6 +380,22 @@ mod tests {
         .expect("aac encoder must be available")
     }
 
+    /// `None` where the build has no `libopus`, so a stripped FFmpeg skips
+    /// rather than failing on something it was never going to have.
+    fn open_opus_encoder(sample_rate: u32, channels: u16) -> Option<SwAudioEncoder> {
+        SwAudioEncoder::new(
+            "encoder",
+            SwAudioEncoderOptions {
+                codec: AudioCodec::Opus,
+                sample_rate,
+                channels,
+                time_base: ffmpeg::Rational::new(1, sample_rate as i32),
+                bit_rate: 64_000,
+            },
+        )
+        .ok()
+    }
+
     fn silent_frame(
         sample_rate: u32,
         channels: u16,
@@ -699,6 +715,79 @@ mod tests {
             .open()
             .expect("Matroska must accept a video track's header");
         drop(sinks);
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// Opus in Matroska reads back as Opus.
+    ///
+    /// Not a guard on the global-header flag, which is what it was written to
+    /// check: FFmpeg's `libopus` wrapper writes `OpusHead` into `extradata`
+    /// whether or not the flag is set, so this passes with the flag reverted.
+    /// Unlike the video track above, Opus was never at risk here.
+    ///
+    /// Kept because the pairing is worth an actual check rather than an
+    /// assumption from the AAC one: `libopus` is an external library, the
+    /// only audio codec here that a build can be missing, and Matroska is the
+    /// container that writes a `CodecPrivate` for it up front.
+    ///
+    /// Skips where the build has no `libopus`, which is a real configuration
+    /// — which is also why the application probes for it rather than
+    /// offering it blind.
+    #[test]
+    fn opus_carries_its_own_header_into_matroska() {
+        // 48 kHz because libopus takes nothing else.
+        let Some(mut encoder) = open_opus_encoder(48_000, 2) else {
+            eprintln!("skipping: this FFmpeg build has no libopus");
+            return;
+        };
+
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("file_muxer_opus_mkv_{}.mkv", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+
+        let mut muxer = FileMuxer::create(&path).expect("the muxer must open");
+        muxer
+            .add_stream(
+                "audio",
+                encoder.parameters(),
+                ffmpeg::Rational::new(1, 48_000),
+            )
+            .expect("add_stream must succeed");
+        let mut sinks = muxer
+            .open()
+            .expect("Matroska must accept an Opus track's header");
+        encoder.src_pads()[0].link(sinks.pop().expect("exactly one stream was added"));
+
+        for tick in 0..20i64 {
+            encoder
+                .consume(MediaBuffer::Audio(Arc::new(silent_frame(
+                    48_000,
+                    2,
+                    960,
+                    tick * 960,
+                ))))
+                .expect("consume must succeed");
+        }
+        encoder
+            .consume(MediaBuffer::Eos)
+            .expect("eos must flush cleanly");
+        drop(encoder);
+
+        let input = ffmpeg::format::input(&path).expect("the file must be readable");
+        assert!(
+            input.format().name().contains("matroska"),
+            "got {:?}",
+            input.format().name()
+        );
+        let stream = input
+            .streams()
+            .best(ffmpeg::media::Type::Audio)
+            .expect("the file must hold the audio track it was given");
+        assert_eq!(
+            stream.parameters().id(),
+            ffmpeg::codec::Id::OPUS,
+            "the track must read back as Opus, not as whatever the header defaulted to"
+        );
         std::fs::remove_file(&path).ok();
     }
 }
