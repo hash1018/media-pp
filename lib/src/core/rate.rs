@@ -1,10 +1,9 @@
 //! The rate a periodic source emits at, changeable while it runs.
 //!
-//! Every element that paces itself with a [`crate::schedule::PeriodicSchedule`]
-//! took that rate at construction and had no way to be told another. This is
-//! the pair that lets one be: the element holds an [`Arc<FrameRate>`] its own
-//! loop reads each tick, and hands out a [`FrameRateHandle`] that another
-//! thread can write.
+//! Every element that paces itself on a fixed interval took that rate at
+//! construction and had no way to be told another. This is the pair that lets
+//! one be: the element holds an [`Arc<FrameRate>`] its own loop reads each
+//! tick, and hands out a [`FrameRateHandle`] that another thread can write.
 //!
 //! # What a change means
 //!
@@ -52,8 +51,8 @@ impl FrameRate {
         unpack(self.0.load(Ordering::Relaxed))
     }
 
-    /// How long one frame lasts at the current rate — what a
-    /// [`crate::schedule::PeriodicSchedule`] is driven with.
+    /// How long one frame lasts at the current rate — the interval the
+    /// element's own tick loop waits out.
     pub fn interval(&self) -> Duration {
         let rate = self.get();
         Duration::from_secs_f64(rate.denominator() as f64 / rate.numerator() as f64)
