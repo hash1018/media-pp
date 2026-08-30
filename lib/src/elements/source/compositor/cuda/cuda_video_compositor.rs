@@ -33,7 +33,10 @@ use crate::{
     pad::SrcPad,
     platform::cuda::{
         CudaDevice, CudaFrameFormat,
-        driver::{CudaDriver, CudaDriverError, CudaMask, Nv12Region, Nv12Surface},
+        driver::{
+            BgraSurface, CudaDriver, CudaDriverError, CudaMask, CudaOverlayScratch, Nv12Region,
+            Nv12Surface,
+        },
         frame::create_hw_frames_ctx,
     },
     platform::ffmpeg::AvBufferRef,
@@ -681,6 +684,10 @@ pub struct CudaVideoCompositor {
     /// The pool output surfaces are allocated from.
     hw_frames_ctx: AvBufferRef,
     scalers: HashMap<VideoInputId, CudaScaleGraph>,
+    /// The scratch each BGRA layer is drawn through, kept per input for the
+    /// reason `scalers` is: it is sized to that layer and rebuilding it every
+    /// frame would be a few megabytes of allocation for nothing.
+    overlays: HashMap<VideoInputId, CudaOverlayScratch>,
     /// The last composite and what it was made from — see [`Composed`].
     composed: Option<Composed>,
     /// Reuses only the small CPU-side `AVFrame` wrapper; the surface itself
@@ -762,6 +769,7 @@ impl CudaVideoCompositor {
                 _hw_device_ctx: hw_device_ctx,
                 hw_frames_ctx,
                 scalers: HashMap::new(),
+                overlays: HashMap::new(),
                 composed: None,
                 output_pool: UnboundObjectPool::new(
                     OUTPUT_POOL_SIZE,
@@ -916,6 +924,7 @@ impl CudaVideoCompositor {
         let mut snapshots = self.snapshots();
         let active: HashSet<_> = snapshots.iter().map(|snapshot| snapshot.id).collect();
         self.scalers.retain(|id, _| active.contains(id));
+        self.overlays.retain(|id, _| active.contains(id));
         snapshots.sort_by(|left, right| {
             left.layer
                 .z_index
@@ -946,7 +955,7 @@ impl CudaVideoCompositor {
             let Some(frame) = snapshot.frame else {
                 continue;
             };
-            let frames_ctx = validate_input_frame(&frame, self.shared.device_ctx)?;
+            let (frames_ctx, format) = validate_input_frame(&frame, self.shared.device_ctx)?;
             let geometry = layer_geometry(
                 frame.width(),
                 frame.height(),
@@ -977,7 +986,13 @@ impl CudaVideoCompositor {
             };
             // Held rather than drawn from here: the surface behind it is not
             // finished yet, and the frame has to stay alive until it is.
-            layers.push((scaled, placement, snapshot.layer.opacity));
+            layers.push((
+                scaled,
+                placement,
+                snapshot.layer.opacity,
+                format,
+                snapshot.id,
+            ));
         }
 
         // Everything `scale_cuda` was asked for is now queued. This is the
@@ -996,19 +1011,62 @@ impl CudaVideoCompositor {
             self.options.background,
         )?;
 
-        for (scaled, placement, opacity) in &layers {
-            let layer_surface =
-                Nv12Surface::from_frame(scaled).ok_or(CudaVideoCompositorError::MissingPlane)?;
-            if *opacity >= 1.0 {
-                // A copy moves whole rows at the memory system's own rate,
-                // where the kernel reads, mixes, and writes every byte. Worth
-                // keeping apart, since opaque is the common case.
-                self.driver
-                    .blit_nv12(layer_surface, canvas, placement.region)?;
-            } else {
-                let alpha = (opacity * 255.0).round().clamp(0.0, 255.0) as u8;
-                self.driver
-                    .blend_nv12(layer_surface, canvas, placement.region, alpha)?;
+        for (scaled, placement, opacity, format, id) in &layers {
+            let alpha = (opacity * 255.0).round().clamp(0.0, 255.0) as u8;
+            match format {
+                // A layer bringing its own transparency, which is the only
+                // reason a layer would be BGRA here at all — see
+                // [`LayerFormat`]. The scratch is kept per input and rebuilt
+                // only when the size it was made for changes, because it is a
+                // few megabytes and the size is stable between frames.
+                LayerFormat::Bgra => {
+                    let layer_surface = BgraSurface::from_frame(scaled)
+                        .ok_or(CudaVideoCompositorError::MissingPlane)?;
+                    let scratch = match self.overlays.entry(*id) {
+                        std::collections::hash_map::Entry::Occupied(slot)
+                            if slot.get().width >= placement.region.width
+                                && slot.get().height >= placement.region.height =>
+                        {
+                            slot.into_mut()
+                        }
+                        slot => {
+                            let scratch = self
+                                .driver
+                                .overlay_scratch(placement.image_width, placement.image_height)?;
+                            match slot {
+                                std::collections::hash_map::Entry::Occupied(mut slot) => {
+                                    slot.insert(scratch);
+                                    slot.into_mut()
+                                }
+                                std::collections::hash_map::Entry::Vacant(slot) => {
+                                    slot.insert(scratch)
+                                }
+                            }
+                        }
+                    };
+                    self.driver.blend_bgra_nv12(
+                        layer_surface,
+                        scratch,
+                        canvas,
+                        placement.region,
+                        alpha,
+                    )?;
+                }
+                LayerFormat::Nv12 if *opacity >= 1.0 => {
+                    let layer_surface = Nv12Surface::from_frame(scaled)
+                        .ok_or(CudaVideoCompositorError::MissingPlane)?;
+                    // A copy moves whole rows at the memory system's own rate,
+                    // where the kernel reads, mixes, and writes every byte.
+                    // Worth keeping apart, since opaque is the common case.
+                    self.driver
+                        .blit_nv12(layer_surface, canvas, placement.region)?;
+                }
+                LayerFormat::Nv12 => {
+                    let layer_surface = Nv12Surface::from_frame(scaled)
+                        .ok_or(CudaVideoCompositorError::MissingPlane)?;
+                    self.driver
+                        .blend_nv12(layer_surface, canvas, placement.region, alpha)?;
+                }
             }
         }
 
@@ -1261,10 +1319,28 @@ fn align_up_nonnegative(value: i64) -> i64 {
 /// Reads the frames context out of a CUDA frame after checking it is one
 /// this compositor can actually draw: the right pixel format, a real frames
 /// context, this compositor's own CUDA context, and an NV12 layout.
+/// How a layer's own surface is laid out, which decides how it reaches the
+/// canvas.
+///
+/// # Why two
+///
+/// NV12 is what everything else on this path speaks and what the canvas is,
+/// so an NV12 layer is placed with a copy — the cheapest thing there is.
+/// NV12 has no alpha, though, which makes it the wrong thing for a layer that
+/// is meant to be see-through in places: converting one to NV12 first would
+/// paint opaque black over everything it did not draw on. So a layer may
+/// arrive as BGRA instead and keep its alpha as far as the blend, which reads
+/// it per pixel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LayerFormat {
+    Nv12,
+    Bgra,
+}
+
 fn validate_input_frame(
     frame: &ffmpeg::frame::Video,
     device_ctx: *const ffi::AVHWDeviceContext,
-) -> std::result::Result<*mut ffi::AVBufferRef, CudaVideoCompositorError> {
+) -> std::result::Result<(*mut ffi::AVBufferRef, LayerFormat), CudaVideoCompositorError> {
     if frame.format() != ffmpeg::format::Pixel::CUDA {
         return Err(CudaVideoCompositorError::UnsupportedFormat(frame.format()));
     }
@@ -1289,12 +1365,15 @@ fn validate_input_frame(
             return Err(CudaVideoCompositorError::ForeignContext);
         }
         let sw_format = ffmpeg::format::Pixel::from((*frames_ctx).sw_format);
-        if sw_format != ffmpeg::format::Pixel::NV12 {
-            return Err(CudaVideoCompositorError::UnsupportedSurfaceFormat(
-                sw_format,
-            ));
+        match sw_format {
+            // What every capture and every converter on this path produces,
+            // and what the canvas itself is.
+            ffmpeg::format::Pixel::NV12 => Ok((frames_ref, LayerFormat::Nv12)),
+            // An overlay, which is here precisely because it has an alpha
+            // channel to keep — see `LayerFormat`.
+            ffmpeg::format::Pixel::BGRA => Ok((frames_ref, LayerFormat::Bgra)),
+            other => Err(CudaVideoCompositorError::UnsupportedSurfaceFormat(other)),
         }
-        Ok(frames_ref)
     }
 }
 
@@ -1418,6 +1497,38 @@ mod tests {
     /// a composed output checkable pixel by pixel.
     fn cuda_frame(device: &CudaDevice, width: u32, height: u32, luma: u8) -> Option<MediaBuffer> {
         cuda_frame_with_pts(device, width, height, luma, 0)
+    }
+
+    /// A CUDA-resident BGRA frame, which is how an overlay arrives.
+    fn cuda_bgra_frame(
+        device: &CudaDevice,
+        width: u32,
+        height: u32,
+        pixel: impl Fn(u32, u32) -> [u8; 4],
+    ) -> Option<MediaBuffer> {
+        let Ok(mut upload) =
+            CudaUpload::new("upload", device, CudaFrameFormat::Bgra, width, height)
+        else {
+            eprintln!("skipping: this machine has no usable CUDA frames context");
+            return None;
+        };
+        let uploaded = capture(&mut upload);
+        let mut frame = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::BGRA, width, height);
+        frame.set_pts(Some(0));
+        let stride = frame.stride(0);
+        for y in 0..height {
+            let row = &mut frame.data_mut(0)[y as usize * stride..];
+            for x in 0..width {
+                row[x as usize * 4..x as usize * 4 + 4].copy_from_slice(&pixel(x, y));
+            }
+        }
+        let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
+        let mut slot = pool.get();
+        *slot = frame;
+        upload
+            .consume(MediaBuffer::Video(Arc::new(slot)))
+            .expect("upload");
+        Some(uploaded.lock().unwrap().remove(0))
     }
 
     fn cuda_frame_with_pts(
@@ -1593,6 +1704,79 @@ mod tests {
             luma_at(&out, 120, 10),
             16,
             "everything outside a layer must be the background"
+        );
+    }
+
+    /// An overlay is the layer that does not cover what is under it.
+    ///
+    /// A capture is opaque and is placed with a copy; a Drawing, a caption,
+    /// anything drawn *over* the scene, is mostly nothing at all and has to
+    /// leave the picture beneath showing. That is why a layer may arrive as
+    /// BGRA — see [`LayerFormat`] — and this is the property that costs it.
+    #[test]
+    fn a_bgra_overlay_leaves_the_layer_under_it_showing() {
+        let Some((device, _cuda_lock)) = try_cuda_device() else {
+            return;
+        };
+        let (width, height) = (128u32, 128u32);
+        let Ok((mut compositor, handle)) =
+            CudaVideoCompositor::new("compositor", &device, options(width, height))
+        else {
+            eprintln!("skipping: this machine cannot open a CUDA compositor");
+            return;
+        };
+        let mut back = handle
+            .add_source(
+                "back",
+                VideoLayer {
+                    z_index: 0,
+                    fit: VideoFit::Stretch,
+                    ..VideoLayer::new(VideoRect::new(0, 0, 128, 128))
+                },
+            )
+            .expect("add back");
+        let mut overlay = handle
+            .add_source(
+                "overlay",
+                VideoLayer {
+                    z_index: 1,
+                    fit: VideoFit::Stretch,
+                    ..VideoLayer::new(VideoRect::new(0, 0, 128, 128))
+                },
+            )
+            .expect("add overlay");
+
+        let Some(back_frame) = cuda_frame(&device, 64, 64, 100) else {
+            return;
+        };
+        // Opaque white down the left half, nothing at all down the right.
+        let Some(overlay_frame) = cuda_bgra_frame(&device, 64, 64, |x, _| {
+            if x < 32 {
+                [255, 255, 255, 255]
+            } else {
+                [0, 0, 0, 0]
+            }
+        }) else {
+            return;
+        };
+        back.sink.consume(back_frame).expect("back frame");
+        overlay
+            .sink
+            .consume(overlay_frame)
+            .expect("the compositor takes a BGRA overlay");
+
+        let composed = compositor.compose_frame().expect("compose");
+        let out = download(&device, composed, width, height);
+
+        assert_eq!(
+            luma_at(&out, 100, 64),
+            100,
+            "where the overlay is transparent the layer under it has to show"
+        );
+        assert!(
+            luma_at(&out, 20, 64) > 200,
+            "and where it is opaque the overlay itself has to, got {}",
+            luma_at(&out, 20, 64)
         );
     }
 

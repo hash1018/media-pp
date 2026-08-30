@@ -792,12 +792,15 @@ mod tests {
         let Some(bgra) = cuda_frame(&device, CudaFrameFormat::Bgra, 64, 64, 0) else {
             return;
         };
-        // The same surface before conversion is what the compositor is built
-        // to refuse, so this is a real gate rather than a formality.
-        assert!(
-            layer.sink.consume(clone_buffer(&bgra)).is_err(),
-            "a BGRA surface must not compose"
-        );
+        // The compositor takes BGRA too, but as an *overlay* — it keeps the
+        // alpha and blends per pixel, which costs a conversion and two
+        // extractions every frame. What this element is for is the other
+        // case: a capture that has no transparency to keep and should be
+        // placed with a copy, which means handing the compositor NV12.
+        layer
+            .sink
+            .consume(clone_buffer(&bgra))
+            .expect("an overlay's own format still composes");
 
         let converted = capture(&mut converter);
         converter.consume(bgra).expect("convert");
