@@ -870,6 +870,26 @@ mod tests {
         gpu_frame_with_backing_size(device, format, width, height, width, height)
     }
 
+    /// Serialises every test here that opens a hardware encoder.
+    ///
+    /// A GPU allows a limited number of concurrent encode sessions, and
+    /// `cargo test` runs these on threads of its own. Each test closes its
+    /// encoders as it goes, but two matrix tests walking eight combinations
+    /// apiece overlap enough to exhaust them — which surfaces as whichever
+    /// test happened to be unlucky failing to open with `Invalid argument`,
+    /// a different one each run.
+    ///
+    /// Held for the whole test rather than per open, so the count is bounded
+    /// by one test's own sequence. Poison is stepped over: a test that
+    /// panicked while holding this must not turn every later encoder test
+    /// into a poison error instead of its own real result — the same
+    /// reasoning as `test_support::try_cuda_device`, which serialises the
+    /// CUDA device for the same kind of reason.
+    fn encoder_session() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     /// Every codec this element offers, against both input formats. Whichever
     /// of them this machine cannot open is skipped with a reason rather than
     /// failed: the NVENC pair needs an NVIDIA GPU, and the Media Foundation
@@ -905,9 +925,13 @@ mod tests {
     /// silently-empty encoder would pass the latter.
     #[test]
     fn encodes_gpu_textures_into_packets() {
+        let _session = encoder_session();
         let Some((device, context)) = try_device() else {
             return;
         };
+        if !supports_d3d11va(&device) {
+            return;
+        }
         let (width, height) = (320u32, 240u32);
 
         for (codec, input_format) in CODEC_MATRIX {
@@ -974,6 +998,36 @@ mod tests {
     /// failure and must not be swallowed: an earlier version of this test
     /// treated *every* error as "skip" and reported a green run while
     /// `av_hwframe_ctx_init` was failing with `E_INVALIDARG` on every call.
+    /// Whether this machine's D3D11 device can back a D3D11VA context at all
+    /// — the precondition every codec below shares, and the one a machine
+    /// with no video acceleration fails.
+    ///
+    /// Asked once, up front, rather than folded into
+    /// [`is_absent_hardware`]. A device that cannot do this fails *every*
+    /// combination identically and before any of them reaches its own
+    /// encoder, so it is a reason to skip the test rather than one entry; and
+    /// leaving it out of the per-entry predicate keeps a genuine
+    /// `HwDeviceInit` regression on a working machine a failure instead of a
+    /// silent skip.
+    ///
+    /// CI is where this bites: a runner with no GPU falls back to WARP, which
+    /// serves every other D3D11 test here and reports `AVERROR_UNKNOWN` for
+    /// this one.
+    fn supports_d3d11va(device: &ID3D11Device) -> bool {
+        // SAFETY: `device` is the live device the fixture just created; the
+        // helper only reads it and returns an owned FFmpeg buffer reference.
+        match unsafe { create_hw_device_ctx(device) } {
+            Ok(_) => true,
+            Err(code) => {
+                eprintln!(
+                    "skipping: this device cannot back a D3D11VA context (code {code}), \
+                     so no hardware encoder here can be opened"
+                );
+                false
+            }
+        }
+    }
+
     fn is_absent_hardware(error: &D3d11VideoEncoderError) -> bool {
         match error {
             D3d11VideoEncoderError::CodecNotFound(_) => true,
@@ -995,9 +1049,13 @@ mod tests {
     /// for its NVENC API version, and a frames context this GPU accepts.
     #[test]
     fn opens_for_every_codec_and_input_format_on_real_hardware() {
+        let _session = encoder_session();
         let Some((device, context)) = try_device() else {
             return;
         };
+        if !supports_d3d11va(&device) {
+            return;
+        }
         for (codec, input_format) in CODEC_MATRIX {
             match D3d11VideoEncoder::new(
                 format!("test-open-{codec:?}-{input_format:?}"),
@@ -1018,6 +1076,7 @@ mod tests {
 
     #[test]
     fn rejects_a_context_from_a_different_device() {
+        let _session = encoder_session();
         let Some((device, _)) = try_device() else {
             return;
         };
@@ -1045,6 +1104,7 @@ mod tests {
     /// bad frame does not poison the encoder's subsequent state.
     #[test]
     fn rejects_invalid_textures_then_continues_encoding() {
+        let _session = encoder_session();
         let Some((device, context)) = try_device() else {
             return;
         };
@@ -1173,6 +1233,7 @@ mod tests {
     /// producing garbage or tripping a Windows API failure later.
     #[test]
     fn rejects_a_non_d3d11_frame() {
+        let _session = encoder_session();
         let Some((device, context)) = try_device() else {
             return;
         };
