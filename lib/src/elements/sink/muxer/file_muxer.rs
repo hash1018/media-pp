@@ -646,4 +646,59 @@ mod tests {
         assert_eq!(input.streams().count(), 1);
         std::fs::remove_file(&path).ok();
     }
+
+    /// A video track's codec extradata has to be in the container's header
+    /// for Matroska, which writes `CodecPrivate` up front. MP4 does not need
+    /// it there — `avcC` is written in the trailer, and the mov muxer will
+    /// take the Annex-B SPS/PPS out of the packets themselves — so a
+    /// video encoder opened without `AV_CODEC_FLAG_GLOBAL_HEADER` produces
+    /// a working `.mp4` and an `avformat_write_header` that fails with
+    /// `INVALIDDATA` for `.mkv`.
+    ///
+    /// Which is the whole reason this test exists at the muxer rather than at
+    /// the encoder: the flag is the encoder's, and nothing but a non-MP4
+    /// container ever notices it is missing.
+    #[test]
+    fn a_video_track_carries_its_extradata_into_a_matroska_header() {
+        use crate::elements::{SwEncoder, SwEncoderOptions, VideoCodec};
+
+        let time_base = ffmpeg::Rational::new(1, 30);
+        let options = |codec| SwEncoderOptions {
+            codec,
+            width: 320,
+            height: 180,
+            time_base,
+            frame_rate: ffmpeg::Rational::new(30, 1),
+            bit_rate: 400_000,
+            gop_size: 30,
+        };
+        // Either software H.264 will do; a build carrying neither is one this
+        // cannot be asked about, so it skips the way a hardware test does.
+        let Some(encoder) = [VideoCodec::OpenH264, VideoCodec::H264]
+            .into_iter()
+            .find_map(|codec| SwEncoder::new("video", options(codec)).ok())
+        else {
+            eprintln!("skipping: this FFmpeg build has no libopenh264 or libx264");
+            return;
+        };
+
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("file_muxer_mkv_video_{}.mkv", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+
+        let mut muxer = FileMuxer::create(&path).expect("the muxer must open");
+        muxer
+            .add_stream("video", encoder.parameters(), time_base)
+            .expect("add_stream must succeed");
+        // `open` is the whole assertion: it is `avformat_write_header`, and
+        // that is what refuses a video track it has no `CodecPrivate` for.
+        // Nothing is read back afterwards because a Matroska file with no
+        // cluster in it is not readable at all — proving that would mean
+        // encoding frames, which is a different element's contract.
+        let sinks = muxer
+            .open()
+            .expect("Matroska must accept a video track's header");
+        drop(sinks);
+        std::fs::remove_file(&path).ok();
+    }
 }

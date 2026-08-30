@@ -199,6 +199,14 @@ impl SwEncoder {
             .ok_or_else(|| SwEncoderError::CodecNotFound(encoder_name.into()))?;
 
         let mut context = ffmpeg::codec::context::Context::new_with_codec(codec);
+        // The codec's own headers — SPS/PPS and the like — go into
+        // `extradata` for the container to write, rather than only in-band.
+        // MP4 does not need that (`avcC` is built in the trailer out of the
+        // packets themselves), but Matroska writes `CodecPrivate` before the
+        // first frame and fails outright without it, and RTSP needs it to
+        // describe the stream in its SDP. Muxers that want the headers
+        // in-band as well — MPEG-TS — reinsert them from here themselves.
+        context.set_flags(ffmpeg::codec::Flags::GLOBAL_HEADER);
         context.set_time_base(options.time_base);
 
         let mut video = context.encoder().video().map_err(SwEncoderError::from)?;

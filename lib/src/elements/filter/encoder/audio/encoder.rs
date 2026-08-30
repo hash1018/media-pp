@@ -236,6 +236,9 @@ impl SwAudioEncoder {
         let target_layout = ffmpeg::ChannelLayout::default(options.channels as i32);
 
         let mut context = ffmpeg::codec::context::Context::new_with_codec(codec);
+        // Codec headers into `extradata` for the container to write, not only
+        // in-band — see `SwEncoder::new`, which says why in full.
+        context.set_flags(ffmpeg::codec::Flags::GLOBAL_HEADER);
         context.set_time_base(options.time_base);
 
         let mut audio = context

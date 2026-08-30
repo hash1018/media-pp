@@ -476,6 +476,9 @@ impl D3d11VideoEncoder {
         // the work is done in a closure and the cleanup written once.
         let opened = (|| -> std::result::Result<ffmpeg::encoder::Video, D3d11VideoEncoderError> {
             let mut ctx = ffmpeg::codec::context::Context::new_with_codec(codec);
+            // Codec headers into `extradata` for the container to write, not only
+            // in-band — see `SwEncoder::new`, which says why in full.
+            ctx.set_flags(ffmpeg::codec::Flags::GLOBAL_HEADER);
             ctx.set_time_base(options.time_base);
 
             let mut video = ctx.encoder().video()?;

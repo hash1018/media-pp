@@ -246,8 +246,11 @@ impl CudaEncoder {
             .ok_or_else(|| CudaEncoderError::HwFrames("failed to reference the pool".into()))?;
 
         let opened = (|| -> std::result::Result<ffmpeg::encoder::Video, ffmpeg::Error> {
-            let context = ffmpeg::codec::context::Context::new_with_codec(codec);
-            let mut video = context.encoder().video()?;
+            let mut ctx = ffmpeg::codec::context::Context::new_with_codec(codec);
+            // Codec headers into `extradata` for the container to write, not only
+            // in-band — see `SwEncoder::new`, which says why in full.
+            ctx.set_flags(ffmpeg::codec::Flags::GLOBAL_HEADER);
+            let mut video = ctx.encoder().video()?;
             video.set_width(options.width);
             video.set_height(options.height);
             video.set_format(ffmpeg::format::Pixel::CUDA);
