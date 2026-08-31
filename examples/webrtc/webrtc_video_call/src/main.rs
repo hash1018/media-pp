@@ -316,7 +316,7 @@ mod common {
             .accept_remote_offer(offer)
             .expect("peer-b should accept the offer");
         handle_a.set_answer(answer);
-        let (mut sink_b, source_b) = send_recv(
+        let (sink_b, source_b) = send_recv(
             handle_b
                 .next_track()
                 .expect("peer-b's remote track should attach"),
@@ -329,11 +329,9 @@ mod common {
             "peer-b negotiated outbound codecs: {:?}",
             sink_b.negotiated_codecs()
         );
-        // The negotiated list is known when the endpoints attach, but only
-        // this pipeline knows which encoder feeds the outbound half.
-        sink_b
-            .set_codec(Codec::H264)
-            .expect("H.264 should be negotiated for peer-b's outbound half");
+        // The negotiated list is known when the endpoints attach; which
+        // encoder feeds the outbound half is declared where that encoder is
+        // built, in `file_send_pipeline` below.
         thread::sleep(Duration::from_millis(100)); // let the answer apply
         println!("call established — one SendRecv track carrying both directions");
 
@@ -445,7 +443,7 @@ mod common {
 
     /// peer-a's outbound half: `TestVideoSource -> Queue -> SwEncoder ->
     /// WebRtcTrackSink`. The source paces itself, so nothing else has to.
-    fn generated_send_pipeline(sink: WebRtcTrackSink) -> media_pp::Result<Arc<Pipeline>> {
+    fn generated_send_pipeline(mut sink: WebRtcTrackSink) -> media_pp::Result<Arc<Pipeline>> {
         let options = TestVideoOptions {
             width: WIDTH,
             height: HEIGHT,
@@ -454,6 +452,12 @@ mod common {
         let source = TestVideoSource::new("test-video", options);
         let time_base = source.time_base();
         let encoder = SwEncoder::new("encode-a", encoder_options(time_base))?;
+        // Declares the whole outbound half from one value: the payload type,
+        // and the SPS/PPS the encoder keeps in `parameters()` rather than in
+        // the bitstream. RTP has no container to carry those, so without this
+        // the far side's `wait_stream_info` waits for parameter sets that
+        // never arrive.
+        sink.set_source_parameters(&encoder.parameters())?;
 
         let pipeline = Pipeline::new("peer-a-send", source, move |source, ctx| {
             let branch = ctx
@@ -517,7 +521,7 @@ mod common {
     /// couple of seconds.
     fn file_send_pipeline(
         file: FileSource,
-        sink: WebRtcTrackSink,
+        mut sink: WebRtcTrackSink,
     ) -> media_pp::Result<Arc<Pipeline>> {
         let FileSource {
             demuxer: source,
@@ -536,6 +540,10 @@ mod common {
             ffmpeg::software::scaling::Flags::BILINEAR,
         );
         let encoder = SwEncoder::new("encode-b", encoder_options(time_base))?;
+        // As above, and this is also where peer-b's outbound codec is
+        // settled — the track was added by the remote peer, so nothing chose
+        // it for this sink until now.
+        sink.set_source_parameters(&encoder.parameters())?;
 
         let pipeline = Pipeline::new("peer-b-send", source, move |source, ctx| {
             let branch = ctx

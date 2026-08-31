@@ -121,7 +121,7 @@ mod example {
             "peer-a attached a track it did not add"
         );
         let kind = attached.kind;
-        let video_sink_a = send_only(attached);
+        let mut video_sink_a = send_only(attached);
         println!("peer-a: track attached ({kind:?})");
         let offer = offer_rx
             .recv_timeout(Duration::from_secs(2))
@@ -159,7 +159,7 @@ mod example {
             "the audio track reused the video track's id"
         );
         let kind = attached.kind;
-        let audio_sink_a = send_only(attached);
+        let mut audio_sink_a = send_only(attached);
         println!("peer-a: track attached ({kind:?})");
         let offer = offer_rx
             .recv_timeout(Duration::from_secs(2))
@@ -202,6 +202,15 @@ mod example {
             },
         )
         .expect("failed to open video encoder");
+        // Declares what feeds the sink: the payload type, and H.264's SPS/PPS,
+        // which live in `parameters()` rather than in the bitstream while RTP
+        // has no container to carry them — so the sender puts them in front of
+        // every keyframe itself. Opus needs nothing of the kind, and its
+        // `OpusHead` is not something to prepend to packets, so the audio
+        // declaration below settles only the codec.
+        video_sink_a
+            .set_source_parameters(&video_encoder.parameters())
+            .expect("H.264 is negotiated for peer-a's video track");
 
         let audio_options = TestAudioOptions::default();
         let audio_source = TestAudioSource::new("audio", audio_options);
@@ -222,6 +231,9 @@ mod example {
             },
         )
         .expect("failed to open audio encoder");
+        audio_sink_a
+            .set_source_parameters(&audio_encoder.parameters())
+            .expect("Opus is negotiated for peer-a's audio track");
 
         let send_pipeline = PipelineBuilder::new("peer-a-send")
             .add_source(video_source, |source, ctx| {

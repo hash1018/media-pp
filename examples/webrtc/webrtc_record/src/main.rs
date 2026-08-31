@@ -206,8 +206,8 @@ mod example {
 
     fn send_pipeline(
         input: FileInput,
-        video_sink: WebRtcTrackSink,
-        audio_sink: WebRtcTrackSink,
+        mut video_sink: WebRtcTrackSink,
+        mut audio_sink: WebRtcTrackSink,
     ) -> media_pp::Result<Arc<Pipeline>> {
         let clock = Arc::new(Clock::new());
         let video_decoder = SwDecoder::new("decode-video", input.video_parameters)?;
@@ -231,6 +231,13 @@ mod example {
                 gop_size: 60,
             },
         )?;
+        // Each sink is told what feeds it, which settles its payload type and
+        // its codec headers together. H.264's SPS/PPS are in `parameters()`
+        // rather than in the bitstream, and RTP has no container to carry
+        // them, so they go out in front of every keyframe — which is what
+        // lets the receiver build its decoder parameters at all. Opus has
+        // nothing of the kind, and its declaration is only the codec.
+        video_sink.set_source_parameters(&video_encoder.parameters())?;
         let audio_decoder = SwDecoder::new("decode-audio", input.audio_parameters)?;
         let audio_pacer = Pacer::new("pace-audio", input.audio_time_base, clock)?;
         let audio_encoder = SwAudioEncoder::new(
@@ -243,6 +250,7 @@ mod example {
                 bit_rate: 96_000,
             },
         )?;
+        audio_sink.set_source_parameters(&audio_encoder.parameters())?;
 
         Pipeline::new("webrtc-send", input.source, move |source, ctx| {
             let video = ctx
