@@ -70,11 +70,17 @@ fn carries_parameter_sets(payload: &[u8], codec: Codec) -> Option<bool> {
     let (sps, pps) = match codec {
         Codec::H264 => (7, 8),
         Codec::H265 => (33, 34),
+        Codec::H266 => (15, 16),
         _ => return None,
     };
+    // Three codecs, three places to read one field from. H.264 keeps the
+    // type in the low five bits of a one-byte header; HEVC widened the
+    // header to two bytes and took six bits of the first for the type; VVC
+    // kept two bytes but moved the type into the top five bits of the
+    // *second*, the first now being nothing but the layer id.
     let nal_type = |nalu: &&[u8]| match codec {
         Codec::H264 => nalu.first().map(|byte| byte & 0x1f),
-        // HEVC's NAL header is two bytes, six of the first being the type.
+        Codec::H266 => nalu.get(1).map(|byte| byte >> 3),
         _ => nalu.first().map(|byte| (byte >> 1) & 0x3f),
     };
     let present: Vec<u8> = annex_b_nalus(payload).iter().filter_map(nal_type).collect();
@@ -85,10 +91,16 @@ fn carries_parameter_sets(payload: &[u8], codec: Codec) -> Option<bool> {
 /// in `extradata` — as Annex-B parameter sets plus the NAL length prefix
 /// size its packets use.
 ///
-/// Returns `None` for anything that is not one, which is how Annex-B
-/// extradata, an unrelated codec's configuration, and HEVC's differently
-/// laid out `hvcC` all keep the verbatim handling they had before.
-fn avcc_parameter_sets(config: &[u8]) -> Option<(Vec<u8>, usize)> {
+/// The outer `None` is for anything that is not such a record, which is how
+/// Annex-B extradata, an unrelated codec's configuration, and HEVC's
+/// differently laid out `hvcC` all keep the verbatim handling they had
+/// before. The inner one is a record that holds no parameter sets, which is
+/// a different thing entirely and still worth having: the two facts a record
+/// carries are separate fields, so one can be absent while the other is
+/// exactly what a caller needs. Such a file keeps its parameter sets in the
+/// bitstream, and refusing the record would leave nothing to state the
+/// length prefix with — the packets are still length-prefixed either way.
+fn avcc_parameter_sets(config: &[u8]) -> Option<(Option<Vec<u8>>, usize)> {
     // configurationVersion(1) profile(3) lengthSizeMinusOne(1) numOfSPS(1),
     // then each parameter set as a 16-bit length and its bytes, SPS first.
     const HEADER: usize = 6;
@@ -116,7 +128,10 @@ fn avcc_parameter_sets(config: &[u8]) -> Option<(Vec<u8>, usize)> {
             offset = end;
         }
     }
-    (!parameter_sets.is_empty()).then_some((parameter_sets, nal_length_size))
+    Some((
+        (!parameter_sets.is_empty()).then_some(parameter_sets),
+        nal_length_size,
+    ))
 }
 
 /// Rewrites a length-prefixed access unit as Annex-B, replacing each NAL
@@ -472,7 +487,11 @@ impl WebRtcTrackSink {
             _ if bytes.is_empty() => (None, None),
             _ if starts_with_start_code(&bytes) => (Some(bytes), None),
             _ if codec == Codec::H264 => match avcc_parameter_sets(&bytes) {
-                Some((annex_b, length_size)) => (Some(annex_b), Some(length_size)),
+                // A record with no parameter sets still says the packets are
+                // length-prefixed. Nothing is left to prepend, so a keyframe
+                // that turns out not to carry them in-band either is caught
+                // by `prepare_bitstream` — at the only place that can see it.
+                Some((annex_b, length_size)) => (annex_b, Some(length_size)),
                 None => {
                     return Err(WebRtcError::ParameterSetsNotSupported {
                         track_id: self.id,

@@ -169,12 +169,16 @@ fn parameters_for(id: ffmpeg::codec::Id, extradata: &[u8]) -> ffmpeg::codec::Par
 /// An H.264 video sink for a track whose negotiation retained H.264, with
 /// the receiver its pushes land in.
 fn h264_sink(id: u64, capacity: usize) -> (WebRtcTrackSink, Receiver<Command>) {
+    video_sink(id, capacity, Codec::H264)
+}
+
+fn video_sink(id: u64, capacity: usize, codec: Codec) -> (WebRtcTrackSink, Receiver<Command>) {
     let (handle, command_rx) = command_only_handle(capacity);
     let sink = WebRtcTrackSink::new(
         TrackId(id),
         MediaKind::Video,
-        Some(Codec::H264),
-        Arc::new(std::sync::Mutex::new(vec![Codec::H264])),
+        Some(codec),
+        Arc::new(std::sync::Mutex::new(vec![codec])),
         handle.command_tx.clone(),
     );
     (sink, command_rx)
@@ -375,6 +379,103 @@ fn set_codec_forgets_what_a_previous_declaration_said() {
         packet.data().expect("packet has a payload"),
         payload,
         "nothing of the previous declaration is left to rewrite or prepend"
+    );
+}
+
+/// An `avcC` holding no parameter sets at all, which is legal: such a file
+/// keeps them in the bitstream. Its packets are length-prefixed all the
+/// same, and that is the half of the record the sink still needs — refusing
+/// it outright would leave nothing able to state the prefix size.
+const AVCC_WITHOUT_PARAMETER_SETS: [u8; 7] = [0x01, 0x64, 0x00, 0x28, 0xff, 0xe0, 0x00];
+
+#[test]
+fn an_avcc_with_no_parameter_sets_still_rewrites_its_packets() {
+    let (mut sink, command_rx) = h264_sink(17, 1);
+    sink.set_source_parameters(&parameters_for(
+        ffmpeg::codec::Id::H264,
+        &AVCC_WITHOUT_PARAMETER_SETS,
+    ))
+    .expect("a record with only a prefix size is still a record");
+
+    // In-band, which is where a file like this keeps them.
+    let payload: &[u8] = &[
+        0, 0, 0, 4, 0x67, 0x64, 0x00, 0x1f, 0, 0, 0, 4, 0x68, 0xee, 0x3c, 0x80, 0, 0, 0, 2, 0x65,
+        0x88,
+    ];
+    sink.consume(video_packet(payload, true))
+        .expect("a keyframe carrying its own parameter sets is accepted");
+
+    let Command::Push(TrackId(17), _, MediaBuffer::Packet(packet)) =
+        command_rx.recv().expect("packet was queued")
+    else {
+        panic!("expected a packet command");
+    };
+    assert_eq!(
+        packet.data().expect("packet has a payload"),
+        [
+            0, 0, 0, 1, 0x67, 0x64, 0x00, 0x1f, 0, 0, 0, 1, 0x68, 0xee, 0x3c, 0x80, 0, 0, 0, 1,
+            0x65, 0x88
+        ],
+        "the prefix size the record did carry is used, and nothing is prepended"
+    );
+}
+
+/// And the guard the empty record leaves in place. With no parameter sets
+/// declared, a keyframe that does not carry its own is the failure this
+/// whole declaration exists to prevent, caught where it can still be seen.
+#[test]
+fn an_avcc_with_no_parameter_sets_still_refuses_a_keyframe_that_has_none() {
+    let (mut sink, _command_rx) = h264_sink(18, 1);
+    sink.set_source_parameters(&parameters_for(
+        ffmpeg::codec::Id::H264,
+        &AVCC_WITHOUT_PARAMETER_SETS,
+    ))
+    .expect("a record with only a prefix size is still a record");
+
+    let error = sink
+        .consume(video_packet(&[0, 0, 0, 2, 0x65, 0x88], true))
+        .expect_err("a keyframe with no parameter sets anywhere cannot be sent");
+    assert!(
+        matches!(
+            error,
+            crate::Error::WebRtcError(WebRtcError::MissingParameterSets(TrackId(18)))
+        ),
+        "unexpected error: {error:?}"
+    );
+}
+
+/// VVC moved the NAL unit type into the second byte of its header, so a
+/// reader written for H.264 and HEVC finds nothing there and every keyframe
+/// looks like one carrying parameter sets. The guard has to see this codec's
+/// keyframes as they are, not conclude they are fine because it cannot read
+/// them.
+#[test]
+fn a_vvc_keyframe_is_read_by_its_own_nal_header() {
+    // Type in the top five bits of the second byte, temporal id in the rest:
+    // SPS 15, PPS 16, and an IDR slice 7.
+    const SPS: [u8; 6] = [0, 0, 0, 1, 0x00, 0x79];
+    const PPS: [u8; 6] = [0, 0, 0, 1, 0x00, 0x81];
+    const IDR: [u8; 7] = [0, 0, 0, 1, 0x00, 0x39, 0xaa];
+
+    let (mut refused, _rx) = video_sink(19, 1, Codec::H266);
+    let error = refused
+        .consume(video_packet(&IDR, true))
+        .expect_err("a VVC keyframe with no parameter sets cannot be sent either");
+    assert!(
+        matches!(
+            error,
+            crate::Error::WebRtcError(WebRtcError::MissingParameterSets(TrackId(19)))
+        ),
+        "unexpected error: {error:?}"
+    );
+
+    let (mut accepted, command_rx) = video_sink(20, 1, Codec::H266);
+    accepted
+        .consume(video_packet(&[&SPS[..], &PPS[..], &IDR[..]].concat(), true))
+        .expect("a VVC keyframe that carries its own parameter sets is accepted");
+    assert!(
+        command_rx.recv().is_ok(),
+        "the accepted keyframe reaches the peer"
     );
 }
 
