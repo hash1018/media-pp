@@ -32,8 +32,8 @@ use crate::{
     driver::DriverRunner,
     element::{Element, ElementType, Sink, element_pp_log},
     elements::{
-        FrameCounter, SwDecoder, SwEncoder, SwEncoderOptions, TestVideoOptions, TestVideoSource,
-        VideoCodec,
+        FileDemuxer, FrameCounter, SwDecoder, SwEncoder, SwEncoderOptions, TestVideoOptions,
+        TestVideoSource, VideoCodec,
     },
     error::Result,
     pipeline::Pipeline,
@@ -769,6 +769,132 @@ fn wait_stream_info_returns_closed_if_the_peer_ends_before_media() {
         source.wait_stream_info(Duration::from_secs(1)),
         Err(crate::Error::WebRtcError(WebRtcError::Closed))
     ));
+}
+
+/// The other kind of source a sink is fed from, end to end: a container's
+/// own packets, which no example sends and nothing but a unit test had ever
+/// put on the wire.
+///
+/// Everything about this path differs from an encoder's. The packets are
+/// length-prefixed rather than Annex-B, so each one is rewritten; the
+/// parameter sets come out of an `avcC` record rather than from Annex-B
+/// extradata; and the far side has to end up with a stream it can decode
+/// all the same. `wait_stream_info` returning at all is the load-bearing
+/// assertion — for H.264 it waits for real SPS/PPS to cross RTP, which is
+/// precisely what a mis-framed payload would never deliver.
+#[test]
+fn a_demuxers_own_packets_reach_a_peer_and_decode() {
+    let Some(path) = crate::test_support::try_test_video() else {
+        return;
+    };
+    let (rtc_a, socket_a, rtc_b, socket_b) = connected_pair();
+    let (offer_tx, offer_rx) = crossbeam_channel::unbounded::<SdpOffer>();
+    let (peer_a, handle_a) = WebRtcPeer::new(
+        "peer-a",
+        rtc_a,
+        socket_a,
+        move |offer| {
+            let _ = offer_tx.send(offer);
+        },
+        |_id| {},
+    );
+    let (peer_b, handle_b) = WebRtcPeer::new("peer-b", rtc_b, socket_b, |_offer| {}, |_id| {});
+    let driver_a = DriverRunner::new(peer_a);
+    let driver_b = DriverRunner::new(peer_b);
+    driver_a.run().unwrap();
+    driver_b.run().unwrap();
+    thread::sleep(Duration::from_millis(200));
+
+    handle_a
+        .add_track(MediaKind::Video, Direction::SendOnly, Codec::H264)
+        .expect("running peer should accept AddTrack");
+    let TrackEndpoints::Send(mut sink) = handle_a
+        .next_track()
+        .expect("peer-a's own track should attach")
+        .endpoints
+    else {
+        panic!("expected a SendOnly track");
+    };
+    let offer = offer_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("peer-a should generate a renegotiation offer");
+    let answer = handle_b
+        .accept_remote_offer(offer)
+        .expect("peer-b should accept the offer");
+    handle_a.set_answer(answer);
+    let source = recv_only(
+        handle_b
+            .next_track()
+            .expect("peer-b's remote track should attach"),
+    );
+    thread::sleep(Duration::from_millis(100));
+
+    let (demuxer, streams) = FileDemuxer::open("demux", &path).expect("test video should open");
+    let video = streams
+        .iter()
+        .find(|stream| stream.kind == ffmpeg::media::Type::Video)
+        .expect("test video has a video stream");
+    let index = video.index;
+    let parameters = demuxer
+        .stream_parameters(index)
+        .expect("a demuxed stream describes itself");
+    // The whole declaration, from the container rather than an encoder: the
+    // payload type, the parameter sets the record holds, and the fact that
+    // the packets behind it are length-prefixed.
+    sink.set_source_parameters(&parameters)
+        .expect("a container's H.264 is the H.264 this track negotiated");
+
+    // Unpaced deliberately: this sends as fast as the file reads and is
+    // stopped as soon as the far side has decoded something, so the test
+    // does not run for the length of whatever fixture it was given.
+    let send = Pipeline::new("demux-send", demuxer, move |source, ctx| {
+        let branch = ctx.branch().queue("packets", 32).to(Box::new(sink))?;
+        ctx.attach(source, index, branch)?;
+        Ok(())
+    })
+    .expect("send pipeline should wire");
+    send.run().expect("send pipeline should start");
+
+    let info = source
+        .wait_stream_info(Duration::from_secs(5))
+        .expect("the peer should observe H.264 parameter sets crossing RTP");
+    assert_eq!(info.codec(), Codec::H264);
+
+    let decoder = SwDecoder::new(
+        "recv-decode",
+        info.codec_parameters()
+            .expect("observed H.264 info should create codec parameters"),
+    )
+    .expect("H.264 decoder should open");
+    let (counter, decoded) = FrameCounter::new("decoded");
+    let receive = Pipeline::new("demux-recv", source, |source, ctx| {
+        let branch = ctx.branch().pipe(decoder).to(Box::new(counter))?;
+        ctx.attach(source, 0, branch)?;
+        Ok(())
+    })
+    .expect("receive pipeline should wire");
+    receive.run().expect("receive pipeline should start");
+    wait_for_frames(&decoded);
+
+    send.stop();
+    driver_a.stop();
+    driver_b.stop();
+    receive.stop();
+
+    let send_events: Vec<_> = send.bus().iter().collect();
+    assert!(
+        !send_events
+            .iter()
+            .any(|event| matches!(event, BusEvent::Error { .. })),
+        "unexpected error event(s) while sending a demuxer's packets: {send_events:?}"
+    );
+    let receive_events: Vec<_> = receive.bus().iter().collect();
+    assert!(
+        !receive_events
+            .iter()
+            .any(|event| matches!(event, BusEvent::Error { .. })),
+        "unexpected error event(s) while receiving them: {receive_events:?}"
+    );
 }
 
 struct CountingSink {
