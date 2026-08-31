@@ -313,6 +313,71 @@ fn a_demuxers_avcc_configuration_rewrites_its_packets_as_annex_b() {
     );
 }
 
+/// The record says the payloads are length-prefixed, and this one is not.
+///
+/// A caller can have reason to pass a demuxer's parameters — the parameter
+/// sets are only there — while something upstream has already converted the
+/// packets. Read as length-prefixed, an Annex-B payload's leading start code
+/// parses as a one-byte NAL unit and the packet is refused as malformed,
+/// which names neither the cause nor the fix.
+#[test]
+fn a_sink_declared_from_an_avcc_record_still_takes_annex_b_packets() {
+    let (mut sink, command_rx) = h264_sink(15, 1);
+    sink.set_source_parameters(&parameters_for(ffmpeg::codec::Id::H264, &AVCC))
+        .expect("H.264 is negotiated for this track");
+
+    let payload: &[u8] = &[0, 0, 0, 1, 0x65, 0x88];
+    sink.consume(video_packet(payload, true))
+        .expect("a payload already in the form RTP carries is not a malformed one");
+
+    let Command::Push(TrackId(15), _, MediaBuffer::Packet(packet)) =
+        command_rx.recv().expect("packet was queued")
+    else {
+        panic!("expected a packet command");
+    };
+    assert_eq!(
+        packet.data().expect("packet has a payload"),
+        [&AVCC_AS_ANNEX_B[..], payload].concat(),
+        "the payload is passed through and still gets the record's parameter sets"
+    );
+}
+
+/// `set_codec` says the codec and nothing else, including after a
+/// declaration that said more.
+///
+/// Both halves of what the earlier call left have to go. The length prefix
+/// would refuse every Annex-B packet that follows, and the headers would be
+/// put in front of keyframes that are no longer the ones they describe.
+#[test]
+fn set_codec_forgets_what_a_previous_declaration_said() {
+    let (mut sink, command_rx) = h264_sink(16, 1);
+    sink.set_source_parameters(&parameters_for(ffmpeg::codec::Id::H264, &AVCC))
+        .expect("H.264 is negotiated for this track");
+    sink.set_codec(Codec::H264)
+        .expect("H.264 is negotiated for this track");
+
+    // Its own parameter sets, and deliberately not the record's: headers that
+    // survived the redeclaration would be prepended to this, where the ones
+    // it carries would have hidden that by matching.
+    let payload: &[u8] = &[
+        0, 0, 0, 1, 0x67, 0x64, 0x00, 0x1f, 0, 0, 0, 1, 0x68, 0xee, 0x3c, 0x80, 0, 0, 0, 1, 0x65,
+        0x88,
+    ];
+    sink.consume(video_packet(payload, true))
+        .expect("a self-assembled Annex-B keyframe carrying its own parameter sets is accepted");
+
+    let Command::Push(TrackId(16), _, MediaBuffer::Packet(packet)) =
+        command_rx.recv().expect("packet was queued")
+    else {
+        panic!("expected a packet command");
+    };
+    assert_eq!(
+        packet.data().expect("packet has a payload"),
+        payload,
+        "nothing of the previous declaration is left to rewrite or prepend"
+    );
+}
+
 /// Without the record there is no prefix size to rewrite by, and str0m would
 /// packetize the length bytes as a NAL header — well-formed RTP that decodes
 /// to nothing, reported nowhere. Refusing says which end is wrong.

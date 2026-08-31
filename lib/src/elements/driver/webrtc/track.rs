@@ -337,10 +337,10 @@ pub struct WebRtcTrackSink {
     /// establishes one track-wide shift so relative timing is preserved.
     timestamp_offset: Option<i64>,
     /// The Annex-B codec headers to put back in front of every keyframe —
-    /// see [`WebRtcTrackSink::set_parameter_sets`].
+    /// see [`WebRtcTrackSink::set_source_parameters`].
     parameter_sets: Option<Vec<u8>>,
     /// The NAL length prefix size of incoming payloads, set when
-    /// [`WebRtcTrackSink::set_parameter_sets`] was given an `avcC` record
+    /// [`WebRtcTrackSink::set_source_parameters`] was given an `avcC` record
     /// instead of Annex-B headers. Its presence is what says every payload
     /// has to be rewritten before RTP.
     nal_length_size: Option<usize>,
@@ -495,6 +495,7 @@ impl WebRtcTrackSink {
         self.codec = Some(codec);
         self.parameter_sets = parameter_sets;
         self.nal_length_size = nal_length_size;
+        self.forget_what_was_checked();
         Ok(())
     }
 
@@ -509,6 +510,13 @@ impl WebRtcTrackSink {
     /// checks that on the first keyframe rather than letting a peer wait for
     /// configuration that is never coming.
     ///
+    /// Declaring only the codec means exactly that, including after a
+    /// [`WebRtcTrackSink::set_source_parameters`] that said more: whatever
+    /// that call left — headers to prepend, a length prefix to rewrite — is
+    /// dropped here. Keeping it would apply one source's shape to another's
+    /// packets, which for the length prefix means rejecting every Annex-B
+    /// packet that follows.
+    ///
     /// Returns [`WebRtcError::OutboundCodecNotNegotiated`] without changing
     /// the previous selection when `codec` is unavailable.
     pub fn set_codec(&mut self, codec: Codec) -> Result<()> {
@@ -522,7 +530,20 @@ impl WebRtcTrackSink {
             .into());
         }
         self.codec = Some(codec);
+        self.parameter_sets = None;
+        self.nal_length_size = None;
+        self.forget_what_was_checked();
         Ok(())
+    }
+
+    /// Puts the once-per-track checks back to their unexamined state.
+    ///
+    /// Called by both declarations, because "once per track" is really once
+    /// per source: what feeds a sink is exactly what those checks are about,
+    /// and a sink told about a new one has examined nothing yet.
+    fn forget_what_was_checked(&mut self) {
+        self.bitstream_checked = false;
+        self.parameter_sets_checked = false;
     }
 }
 
@@ -619,7 +640,7 @@ impl Sink for WebRtcTrackSink {
 
 impl WebRtcTrackSink {
     /// Puts the codec headers in front of a keyframe, if this sink was given
-    /// any — see [`WebRtcTrackSink::set_parameter_sets`].
+    /// any — see [`WebRtcTrackSink::set_source_parameters`].
     ///
     /// Only in front of keyframes, and only when the payload does not open
     /// with them already: an encoder that was *not* opened with a global
@@ -670,6 +691,16 @@ impl WebRtcTrackSink {
         };
 
         let converted = match self.nal_length_size {
+            // Already in the form RTP carries, whatever the record said. A
+            // caller can declare a demuxer's parameters — for the parameter
+            // sets, which are only there — while what reaches this sink has
+            // been converted on the way. Read as length-prefixed, such a
+            // payload's leading start code parses as a one-byte NAL unit and
+            // the packet is refused as malformed, which names neither the
+            // cause nor the fix. Four bytes to rule out, per packet rather
+            // than once, because this is the one thing about a payload that
+            // something upstream can change without redeclaring anything.
+            Some(_) if starts_with_start_code(payload) => None,
             Some(nal_length_size) => {
                 let Some(annex_b) = length_prefixed_to_annex_b(payload, nal_length_size) else {
                     pp_error!(

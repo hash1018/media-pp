@@ -131,7 +131,7 @@ pub enum WebRtcError {
     /// a well-formed stream no receiver can decode.
     #[error(
         "track {0:?} was pushed a length-prefixed H.264 packet and has no avcC configuration; \
-         push an encoder's output, or call WebRtcTrackSink::set_parameter_sets with the \
+         push an encoder's output, or call WebRtcTrackSink::set_source_parameters with the \
          demuxer's stream parameters first"
     )]
     NotAnnexB(TrackId),
