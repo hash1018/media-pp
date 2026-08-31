@@ -318,9 +318,17 @@ The library has no default features.
 
 Each attached WebRTC source and sink exposes the codec families retained by
 SDP negotiation. `WebRtcTrackSource::codec()` separately reports the codec
-actually observed after RTP starts arriving, while a remotely-created
-`WebRtcTrackSink` validates the application's outbound encoder choice through
-`set_codec` before accepting packets. A receiver that must configure its graph
+actually observed after RTP starts arriving. A `WebRtcTrackSink` is told what
+feeds it through `set_source_parameters`, taking the `parameters()` of an
+encoder, a demuxer's stream, or another track: that one value settles the
+outbound payload type, validated against the negotiated list, and the codec
+headers H.264 keeps outside its bitstream, which the sink then puts in front
+of every keyframe because RTP has no container to carry them. A caller
+pushing packets it assembled itself, with no parameters to hand, declares the
+codec alone through `set_codec` and must carry its own parameter sets in-band;
+`consume` refuses a keyframe that has neither. `set_source_parameters` also
+accepts a demuxer's length-prefixed H.264, rewriting each packet as Annex-B.
+A receiver that must configure its graph
 from the sender's actual payload can call `WebRtcTrackSource::wait_stream_info`
 with an explicit timeout; received packets stay buffered while the downstream
 graph is built. H.264 waits until actual SPS/PPS have arrived. The returned

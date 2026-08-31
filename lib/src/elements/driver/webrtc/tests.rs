@@ -146,6 +146,52 @@ fn a_remote_track_sink_rejects_packets_until_its_codec_is_declared() {
     ));
 }
 
+/// Codec parameters naming `id` and carrying `extradata`, the way an
+/// encoder's or a demuxer's `parameters()` does.
+fn parameters_for(id: ffmpeg::codec::Id, extradata: &[u8]) -> ffmpeg::codec::Parameters {
+    let mut parameters = ffmpeg::codec::Parameters::new();
+    // SAFETY: `parameters` is a live `AVCodecParameters` this test owns, and
+    // the allocation it is given is FFmpeg's to free with it.
+    unsafe {
+        let raw = parameters.as_mut_ptr();
+        (*raw).codec_id = id.into();
+        if !extradata.is_empty() {
+            let padded = extradata.len() + ffmpeg::ffi::AV_INPUT_BUFFER_PADDING_SIZE as usize;
+            let allocation = ffmpeg::ffi::av_mallocz(padded) as *mut u8;
+            std::ptr::copy_nonoverlapping(extradata.as_ptr(), allocation, extradata.len());
+            (*raw).extradata = allocation;
+            (*raw).extradata_size = extradata.len() as i32;
+        }
+    }
+    parameters
+}
+
+/// An H.264 video sink for a track whose negotiation retained H.264, with
+/// the receiver its pushes land in.
+fn h264_sink(id: u64, capacity: usize) -> (WebRtcTrackSink, Receiver<Command>) {
+    let (handle, command_rx) = command_only_handle(capacity);
+    let sink = WebRtcTrackSink::new(
+        TrackId(id),
+        MediaKind::Video,
+        Some(Codec::H264),
+        Arc::new(std::sync::Mutex::new(vec![Codec::H264])),
+        handle.command_tx.clone(),
+    );
+    (sink, command_rx)
+}
+
+/// One encoded video packet with the time base str0m needs to build a
+/// `MediaTime` from.
+fn video_packet(payload: &[u8], key: bool) -> MediaBuffer {
+    let mut packet = ffmpeg::Packet::copy(payload);
+    packet.set_time_base(ffmpeg::Rational::new(1, 90_000));
+    packet.set_pts(Some(0));
+    if key {
+        packet.set_flags(ffmpeg::packet::Flags::KEY);
+    }
+    MediaBuffer::Packet(Arc::new(packet))
+}
+
 /// An encoder that keeps its SPS/PPS in `parameters()` sends a bitstream with
 /// none, and nothing downstream of RTP can decode that — so the sender puts
 /// them back, on every keyframe and only on keyframes.
@@ -156,29 +202,11 @@ fn a_remote_track_sink_rejects_packets_until_its_codec_is_declared() {
 /// silently receives nothing.
 #[test]
 fn parameter_sets_go_in_front_of_every_keyframe_and_nothing_else() {
-    let (handle, command_rx) = command_only_handle(4);
-    let negotiated = Arc::new(std::sync::Mutex::new(vec![Codec::H264]));
-    let mut sink = WebRtcTrackSink::new(
-        TrackId(9),
-        MediaKind::Video,
-        Some(Codec::H264),
-        negotiated,
-        handle.command_tx.clone(),
-    );
+    let (mut sink, command_rx) = h264_sink(9, 4);
 
     const HEADERS: [u8; 8] = [0, 0, 0, 1, 0x67, 0x42, 0xc0, 0x1f];
-    let mut parameters = ffmpeg::codec::Parameters::new();
-    // SAFETY: `parameters` is a live `AVCodecParameters` this test owns, and
-    // the allocation it is given is FFmpeg's to free with it.
-    unsafe {
-        let padded = HEADERS.len() + ffmpeg::ffi::AV_INPUT_BUFFER_PADDING_SIZE as usize;
-        let allocation = ffmpeg::ffi::av_mallocz(padded) as *mut u8;
-        std::ptr::copy_nonoverlapping(HEADERS.as_ptr(), allocation, HEADERS.len());
-        let raw = parameters.as_mut_ptr();
-        (*raw).extradata = allocation;
-        (*raw).extradata_size = HEADERS.len() as i32;
-    }
-    sink.set_parameter_sets(&parameters);
+    sink.set_source_parameters(&parameters_for(ffmpeg::codec::Id::H264, &HEADERS))
+        .expect("H.264 is negotiated for this track");
 
     // A keyframe without them, one that already carries them, and a
     // non-keyframe.
@@ -191,14 +219,7 @@ fn parameter_sets_go_in_front_of_every_keyframe_and_nothing_else() {
         (&[0, 0, 0, 1, 0x41, 0x9a], false),
     ];
     for (payload, key) in payloads {
-        let mut packet = ffmpeg::Packet::copy(payload);
-        packet.set_time_base(ffmpeg::Rational::new(1, 90_000));
-        packet.set_pts(Some(0));
-        if key {
-            packet.set_flags(ffmpeg::packet::Flags::KEY);
-        }
-        sink.consume(MediaBuffer::Packet(Arc::new(packet)))
-            .expect("push");
+        sink.consume(video_packet(payload, key)).expect("push");
     }
 
     let sent: Vec<Vec<u8>> = (0..3)
@@ -230,6 +251,217 @@ fn parameter_sets_go_in_front_of_every_keyframe_and_nothing_else() {
         sent[2], payloads[2].0,
         "a non-keyframe is left alone: the headers are only useful where          decoding can start"
     );
+}
+
+/// An `AVCDecoderConfigurationRecord` as a container demuxer reports one:
+/// version, profile/compatibility/level, four-byte NAL lengths (`0xff`), one
+/// SPS (`0xe1`) and its bytes, then one PPS and its bytes.
+const AVCC: [u8; 19] = [
+    0x01, 0x42, 0xc0, 0x1f, 0xff, 0xe1, 0x00, 0x04, 0x67, 0x42, 0xc0, 0x1f, 0x01, 0x00, 0x04, 0x68,
+    0xce, 0x3c, 0x80,
+];
+
+/// The same parameter sets in the form RTP carries.
+const AVCC_AS_ANNEX_B: [u8; 16] = [
+    0, 0, 0, 1, 0x67, 0x42, 0xc0, 0x1f, 0, 0, 0, 1, 0x68, 0xce, 0x3c, 0x80,
+];
+
+/// A demuxer describes H.264 with an `avcC` record and emits length-prefixed
+/// packets to match. Both facts come out of the one record, so handing it
+/// over is all a caller relaying such packets has to do.
+#[test]
+fn a_demuxers_avcc_configuration_rewrites_its_packets_as_annex_b() {
+    let (mut sink, command_rx) = h264_sink(11, 2);
+    sink.set_source_parameters(&parameters_for(ffmpeg::codec::Id::H264, &AVCC))
+        .expect("H.264 is negotiated for this track");
+
+    // One four-byte length, then the NAL unit it introduces.
+    let payloads: [(&[u8], bool); 2] = [
+        (&[0, 0, 0, 2, 0x65, 0x88], true),
+        (&[0, 0, 0, 2, 0x41, 0x9a], false),
+    ];
+    for (payload, key) in payloads {
+        sink.consume(video_packet(payload, key))
+            .expect("an avcC-configured sink accepts the packets that record describes");
+    }
+
+    let sent: Vec<Vec<u8>> = (0..2)
+        .map(|_| {
+            let Command::Push(TrackId(11), _, MediaBuffer::Packet(packet)) =
+                command_rx.recv().expect("packet was queued")
+            else {
+                panic!("expected a packet command");
+            };
+            assert_eq!(
+                packet.time_base(),
+                ffmpeg::Rational::new(1, 90_000),
+                "a rewritten packet keeps the time base str0m needs"
+            );
+            packet.data().expect("packet has a payload").to_vec()
+        })
+        .collect();
+
+    assert_eq!(
+        sent[0],
+        [&AVCC_AS_ANNEX_B[..], &[0, 0, 0, 1, 0x65, 0x88][..]].concat(),
+        "a keyframe is rewritten and gets the record's parameter sets in Annex-B"
+    );
+    assert_eq!(
+        sent[1],
+        [0, 0, 0, 1, 0x41, 0x9a],
+        "every packet is rewritten, not only the ones the headers go in front of"
+    );
+}
+
+/// Without the record there is no prefix size to rewrite by, and str0m would
+/// packetize the length bytes as a NAL header — well-formed RTP that decodes
+/// to nothing, reported nowhere. Refusing says which end is wrong.
+#[test]
+fn a_length_prefixed_packet_is_refused_when_no_avcc_configuration_was_given() {
+    let (mut sink, _command_rx) = h264_sink(12, 2);
+
+    for _ in 0..2 {
+        let error = sink
+            .consume(video_packet(&[0, 0, 0, 2, 0x65, 0x88], true))
+            .expect_err("a length-prefixed packet cannot be sent as Annex-B");
+        assert!(
+            matches!(
+                error,
+                crate::Error::WebRtcError(WebRtcError::NotAnnexB(TrackId(12)))
+            ),
+            "every such packet is refused, not just the first: {error}"
+        );
+    }
+}
+
+/// A prefix size that does not match the payload means the two disagree
+/// about what is being sent. Emitting whatever the bytes happen to split
+/// into would be the same invisible failure by another route.
+#[test]
+fn a_malformed_length_prefixed_packet_is_refused() {
+    let (mut sink, _command_rx) = h264_sink(13, 2);
+    sink.set_source_parameters(&parameters_for(ffmpeg::codec::Id::H264, &AVCC))
+        .expect("H.264 is negotiated for this track");
+
+    // A length of nine with two bytes behind it.
+    let error = sink
+        .consume(video_packet(&[0, 0, 0, 9, 0x65, 0x88], true))
+        .expect_err("a truncated access unit cannot be rewritten");
+    assert!(matches!(
+        error,
+        crate::Error::WebRtcError(WebRtcError::MalformedLengthPrefixedPacket(TrackId(13)))
+    ));
+}
+
+/// The failure the whole declaration exists to prevent: an encoder whose
+/// headers went to `parameters()` sends keyframes with none, and a peer waits
+/// for configuration that is never coming. Nothing about the packets is
+/// malformed, so this is the only place it can be caught.
+#[test]
+fn a_keyframe_with_no_parameter_sets_and_none_declared_is_refused() {
+    let (mut sink, _command_rx) = h264_sink(14, 2);
+
+    // An IDR slice, correctly Annex-B, with no SPS or PPS in front of it.
+    for _ in 0..2 {
+        let error = sink
+            .consume(video_packet(&[0, 0, 0, 1, 0x65, 0x88], true))
+            .expect_err("a keyframe no receiver could configure a decoder from");
+        assert!(
+            matches!(
+                error,
+                crate::Error::WebRtcError(WebRtcError::MissingParameterSets(TrackId(14)))
+            ),
+            "every such keyframe is refused, not just the first: {error}"
+        );
+    }
+
+    // In-band parameter sets are the other way to satisfy it, and need no
+    // declaration at all.
+    sink.consume(video_packet(
+        &[
+            0, 0, 0, 1, 0x67, 0x42, 0xc0, 0x1f, 0, 0, 0, 1, 0x68, 0xce, 0, 0, 0, 1, 0x65, 0x88,
+        ],
+        true,
+    ))
+    .expect("a keyframe carrying its own SPS/PPS needs nothing prepended");
+}
+
+/// HEVC keeps its configuration in `hvcC`, which is neither Annex-B nor the
+/// `avcC` this sink converts. Storing it would put a decoder configuration
+/// record into the bitstream in front of every keyframe.
+#[test]
+fn hevc_configuration_that_is_not_annex_b_is_refused() {
+    let (handle, _command_rx) = command_only_handle(1);
+    let mut sink = WebRtcTrackSink::new(
+        TrackId(15),
+        MediaKind::Video,
+        Some(Codec::H265),
+        Arc::new(std::sync::Mutex::new(vec![Codec::H265])),
+        handle.command_tx.clone(),
+    );
+
+    let error = sink
+        .set_source_parameters(&parameters_for(
+            ffmpeg::codec::Id::HEVC,
+            &[0x01, 0x01, 0x60],
+        ))
+        .expect_err("hvcC cannot be prepended and cannot be converted");
+    assert!(matches!(
+        error,
+        crate::Error::WebRtcError(WebRtcError::ParameterSetsNotSupported {
+            track_id: TrackId(15),
+            codec: Codec::H265,
+        })
+    ));
+}
+
+/// Only the Annex-B codecs prepend anything. `OpusHead` in front of every
+/// Opus packet — and libavcodec flags them all as keyframes — would be
+/// corruption, so an audio source's parameters declare the codec and nothing
+/// else.
+#[test]
+fn audio_parameters_declare_the_codec_without_leaving_headers_to_prepend() {
+    let (handle, command_rx) = command_only_handle(1);
+    let mut sink = WebRtcTrackSink::new(
+        TrackId(16),
+        MediaKind::Audio,
+        None,
+        Arc::new(std::sync::Mutex::new(vec![Codec::Opus])),
+        handle.command_tx.clone(),
+    );
+    let opus_head = [b'O', b'p', b'u', b's', b'H', b'e', b'a', b'd', 1, 2];
+
+    sink.set_source_parameters(&parameters_for(ffmpeg::codec::Id::OPUS, &opus_head))
+        .expect("Opus is negotiated for this track");
+
+    let payload: &[u8] = &[0xfc, 0xff, 0xfe];
+    sink.consume(video_packet(payload, true))
+        .expect("an Opus packet needs no bitstream handling");
+    let Command::Push(TrackId(16), Some(Codec::Opus), MediaBuffer::Packet(packet)) =
+        command_rx.recv().expect("packet was queued")
+    else {
+        panic!("expected an Opus packet command");
+    };
+    assert_eq!(
+        packet.data().expect("packet has a payload"),
+        payload,
+        "the payload must reach str0m exactly as the encoder produced it"
+    );
+}
+
+/// A codec WebRTC has no payload type for cannot be sent at all, and saying
+/// so beats letting str0m label it as whatever was negotiated.
+#[test]
+fn parameters_naming_a_codec_webrtc_does_not_carry_are_refused() {
+    let (mut sink, _command_rx) = h264_sink(17, 1);
+
+    let error = sink
+        .set_source_parameters(&parameters_for(ffmpeg::codec::Id::AAC, &[]))
+        .expect_err("WebRTC negotiates no AAC payload type");
+    assert!(matches!(
+        error,
+        crate::Error::WebRtcError(WebRtcError::SourceCodecUnsupported(_))
+    ));
 }
 
 #[test]
@@ -589,9 +821,6 @@ fn one_h264_sendrecv_track_carries_data_both_ways_with_the_declared_payload_type
     assert!(sink_b.negotiated_codecs().contains(&Codec::H264));
     assert_eq!(sink_b.negotiated_codecs(), source_b.negotiated_codecs());
     assert_eq!(source_b.codec(), None);
-    sink_b
-        .set_codec(Codec::H264)
-        .expect("H.264 should be negotiated for peer-b's outbound half");
 
     // Let the answer actually apply before pushing media through it.
     thread::sleep(Duration::from_millis(100));
@@ -620,11 +849,14 @@ fn one_h264_sendrecv_track_carries_data_both_ways_with_the_declared_payload_type
         },
     )
     .expect("OpenH264 encoder should open");
-    // The encoder keeps its SPS/PPS in `parameters()` rather than in the
-    // bitstream, so the sender is what has to put them back — see
-    // `WebRtcTrackSink::set_parameter_sets`. Without this the peer never
-    // sees them and `wait_stream_info` below times out.
-    sink_b.set_parameter_sets(&encoder.parameters());
+    // One declaration covers peer-b's whole outbound half: the payload type
+    // (validated against the negotiated list asserted above) and the SPS/PPS
+    // the encoder keeps in `parameters()` rather than in the bitstream.
+    // Without the latter the peer never sees them and `wait_stream_info`
+    // below times out.
+    sink_b
+        .set_source_parameters(&encoder.parameters())
+        .expect("H.264 should be negotiated for peer-b's outbound half");
     let send_b = Pipeline::new("peer-b-h264-send", video_source, |source, ctx| {
         let branch = ctx.branch().pipe(encoder).to(Box::new(sink_b))?;
         ctx.attach(source, 0, branch)?;

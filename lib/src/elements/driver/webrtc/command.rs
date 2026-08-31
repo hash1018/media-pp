@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use crossbeam_channel::Sender;
+use ffmpeg_next as ffmpeg;
 use str0m::{
     RtcError,
     change::{SdpAnswer, SdpOffer},
@@ -79,8 +80,36 @@ pub enum WebRtcError {
     /// caller declared which codec its packets contain. SDP can negotiate
     /// several codecs for one track, so the peer cannot infer this from the
     /// track itself without risking a payload-type mismatch.
-    #[error("track {0:?} has no outbound codec declaration; call WebRtcTrackSink::set_codec first")]
+    #[error(
+        "track {0:?} has no outbound codec declaration; call \
+         WebRtcTrackSink::set_source_parameters with what feeds it, or \
+         set_codec when there are no parameters to hand"
+    )]
     OutboundCodecNotDeclared(TrackId),
+    /// Codec parameters describe a codec WebRTC does not carry, so there is
+    /// no RTP payload type this sink could send them under.
+    #[error("codec parameters describe {0:?}, which WebRTC does not carry")]
+    SourceCodecUnsupported(ffmpeg::codec::Id),
+    /// Codec parameters carry configuration this sink cannot put in front of
+    /// a keyframe. H.264's `avcC` is converted; HEVC's `hvcC` and VVC's
+    /// `vvcC` are not, so those need an encoder writing Annex-B headers.
+    #[error(
+        "track {track_id:?} was given {codec:?} configuration that is not Annex-B parameter sets"
+    )]
+    ParameterSetsNotSupported {
+        /// Track whose source was being declared.
+        track_id: TrackId,
+        /// Codec the unusable configuration describes.
+        codec: Codec,
+    },
+    /// The first keyframe on a track whose parameter sets live outside the
+    /// bitstream carries none, and none were declared to put in front of it.
+    /// RTP has no container to carry them, so a receiver would wait forever.
+    #[error(
+        "track {0:?} sent a keyframe with no SPS/PPS and has none to prepend; \
+         call WebRtcTrackSink::set_source_parameters with the encoder's parameters"
+    )]
+    MissingParameterSets(TrackId),
     /// The caller selected or tried to send an outbound codec that this
     /// track's SDP negotiation did not retain. A failed
     /// [`super::track::WebRtcTrackSink::set_codec`] leaves the previous valid
@@ -96,6 +125,20 @@ pub enum WebRtcError {
         /// Distinct codecs currently available on that media section.
         negotiated: Vec<Codec>,
     },
+    /// An outbound H.264 packet is length-prefixed — the form a container
+    /// demuxer produces — and this sink has no `avcC` configuration to
+    /// convert it with. RTP carries Annex-B, so such a packet would leave as
+    /// a well-formed stream no receiver can decode.
+    #[error(
+        "track {0:?} was pushed a length-prefixed H.264 packet and has no avcC configuration; \
+         push an encoder's output, or call WebRtcTrackSink::set_parameter_sets with the \
+         demuxer's stream parameters first"
+    )]
+    NotAnnexB(TrackId),
+    /// A packet this sink's `avcC` configuration says is length-prefixed does
+    /// not parse as one — truncated, or carrying a different prefix size.
+    #[error("track {0:?} was pushed a malformed length-prefixed H.264 packet")]
+    MalformedLengthPrefixedPacket(TrackId),
     /// No RTP media arrived before a caller's explicit wait deadline. The
     /// source remains usable and the caller may retry with another timeout.
     #[error("timed out after {timeout:?} waiting for stream info on track {track_id:?}")]

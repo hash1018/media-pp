@@ -31,7 +31,7 @@ use crate::{
 
 use super::{
     command::{Command, TrackId, WebRtcError},
-    stream_info::WebRtcStreamInfo,
+    stream_info::{WebRtcStreamInfo, annex_b_nalus, str0m_codec},
 };
 
 /// The encoded kind a str0m track of `kind` carries. Both media flow
@@ -42,6 +42,125 @@ fn packet_kind(kind: MediaKind) -> crate::contract::MediaKind {
         MediaKind::Audio => crate::contract::MediaKind::AudioPacket,
         MediaKind::Video => crate::contract::MediaKind::VideoPacket,
     }
+}
+
+/// The four-byte Annex-B start code. The three-byte form is equally valid
+/// and is recognized on input, but nothing here has a reason to emit it.
+const START_CODE: [u8; 4] = [0, 0, 0, 1];
+
+/// Whether `data` opens an Annex-B access unit. Every Annex-B NAL unit is
+/// introduced by a start code, keyframe or not, so one look at the front of
+/// the first payload settles which form a track carries.
+fn starts_with_start_code(data: &[u8]) -> bool {
+    data.starts_with(&START_CODE) || data.starts_with(&START_CODE[1..])
+}
+
+/// Whether RTP carries `codec` as an Annex-B byte stream whose parameter
+/// sets travel in the stream itself. Only these have headers to put in front
+/// of a keyframe; another codec's extradata configures a decoder and has no
+/// business in the bitstream.
+fn annex_b_codec(codec: Codec) -> bool {
+    matches!(codec, Codec::H264 | Codec::H265 | Codec::H266)
+}
+
+/// Whether an access unit already carries the parameter sets a receiver
+/// needs to start decoding, or `None` for a codec whose NAL header layout
+/// this does not read.
+fn carries_parameter_sets(payload: &[u8], codec: Codec) -> Option<bool> {
+    let (sps, pps) = match codec {
+        Codec::H264 => (7, 8),
+        Codec::H265 => (33, 34),
+        _ => return None,
+    };
+    let nal_type = |nalu: &&[u8]| match codec {
+        Codec::H264 => nalu.first().map(|byte| byte & 0x1f),
+        // HEVC's NAL header is two bytes, six of the first being the type.
+        _ => nalu.first().map(|byte| (byte >> 1) & 0x3f),
+    };
+    let present: Vec<u8> = annex_b_nalus(payload).iter().filter_map(nal_type).collect();
+    Some(present.contains(&sps) && present.contains(&pps))
+}
+
+/// Reads an `AVCDecoderConfigurationRecord` — what a container demuxer puts
+/// in `extradata` — as Annex-B parameter sets plus the NAL length prefix
+/// size its packets use.
+///
+/// Returns `None` for anything that is not one, which is how Annex-B
+/// extradata, an unrelated codec's configuration, and HEVC's differently
+/// laid out `hvcC` all keep the verbatim handling they had before.
+fn avcc_parameter_sets(config: &[u8]) -> Option<(Vec<u8>, usize)> {
+    // configurationVersion(1) profile(3) lengthSizeMinusOne(1) numOfSPS(1),
+    // then each parameter set as a 16-bit length and its bytes, SPS first.
+    const HEADER: usize = 6;
+    if config.len() < HEADER || config[0] != 1 || starts_with_start_code(config) {
+        return None;
+    }
+    let nal_length_size = (config[4] & 0x03) as usize + 1;
+    let mut parameter_sets = Vec::new();
+    let mut offset = HEADER - 1;
+    // The SPS count is five bits (the top three are reserved ones); the PPS
+    // count that follows them is a whole byte.
+    for count_mask in [0x1f_u8, 0xff] {
+        let count = config.get(offset)? & count_mask;
+        offset += 1;
+        for _ in 0..count {
+            let length =
+                u16::from_be_bytes([*config.get(offset)?, *config.get(offset + 1)?]) as usize;
+            offset += 2;
+            let end = offset.checked_add(length)?;
+            if end > config.len() || length == 0 {
+                return None;
+            }
+            parameter_sets.extend_from_slice(&START_CODE);
+            parameter_sets.extend_from_slice(&config[offset..end]);
+            offset = end;
+        }
+    }
+    (!parameter_sets.is_empty()).then_some((parameter_sets, nal_length_size))
+}
+
+/// Rewrites a length-prefixed access unit as Annex-B, replacing each NAL
+/// unit's length with a start code.
+///
+/// Returns `None` when the payload does not consume exactly — a truncated
+/// unit, or a prefix size that does not match the one the `avcC` record
+/// declared. Guessing at either would emit a stream that looks well formed
+/// and decodes to nothing.
+fn length_prefixed_to_annex_b(payload: &[u8], nal_length_size: usize) -> Option<Vec<u8>> {
+    let mut annex_b = Vec::with_capacity(payload.len() + START_CODE.len());
+    let mut offset = 0;
+    while offset < payload.len() {
+        let prefix = payload.get(offset..offset + nal_length_size)?;
+        let length = prefix
+            .iter()
+            .fold(0usize, |value, byte| (value << 8) | usize::from(*byte));
+        offset += nal_length_size;
+        let end = offset.checked_add(length)?;
+        if length == 0 || end > payload.len() {
+            return None;
+        }
+        annex_b.extend_from_slice(&START_CODE);
+        annex_b.extend_from_slice(&payload[offset..end]);
+        offset = end;
+    }
+    (!annex_b.is_empty()).then_some(annex_b)
+}
+
+/// Rebuilds `packet` around a new payload, carrying every field the RTP
+/// write needs with it.
+///
+/// The time base above all: `Packet::copy` leaves it 0/0, and a packet str0m
+/// cannot build a `MediaTime` from is dropped rather than refused — the
+/// failure would be a peer that simply receives nothing.
+fn rewritten_packet(packet: &ffmpeg::Packet, payload: &[u8]) -> MediaBuffer {
+    let mut rewritten = ffmpeg::Packet::copy(payload);
+    rewritten.set_time_base(packet.time_base());
+    rewritten.set_pts(packet.pts());
+    rewritten.set_dts(packet.dts());
+    rewritten.set_stream(packet.stream());
+    rewritten.set_flags(packet.flags());
+    rewritten.set_duration(packet.duration());
+    MediaBuffer::Packet(Arc::new(rewritten))
 }
 
 /// The endpoints a track actually has, which is exactly what its
@@ -220,6 +339,18 @@ pub struct WebRtcTrackSink {
     /// The Annex-B codec headers to put back in front of every keyframe —
     /// see [`WebRtcTrackSink::set_parameter_sets`].
     parameter_sets: Option<Vec<u8>>,
+    /// The NAL length prefix size of incoming payloads, set when
+    /// [`WebRtcTrackSink::set_parameter_sets`] was given an `avcC` record
+    /// instead of Annex-B headers. Its presence is what says every payload
+    /// has to be rewritten before RTP.
+    nal_length_size: Option<usize>,
+    /// Whether the first packet's bitstream form has been examined. A track
+    /// does not change form part-way through, so the check costs one
+    /// comparison per track rather than one per packet.
+    bitstream_checked: bool,
+    /// Whether a keyframe has been seen to carry its own parameter sets.
+    /// Only consulted while this sink has none of its own to prepend.
+    parameter_sets_checked: bool,
 }
 
 impl WebRtcTrackSink {
@@ -238,6 +369,9 @@ impl WebRtcTrackSink {
             command_tx,
             timestamp_offset: None,
             parameter_sets: None,
+            nal_length_size: None,
+            bitstream_checked: false,
+            parameter_sets_checked: false,
             pp_log: element_pp_log(
                 ElementType::WebRtcPeer,
                 &format!("webrtc-track-{}", id.0),
@@ -258,26 +392,17 @@ impl WebRtcTrackSink {
         self.negotiated_codecs.lock().unwrap().clone()
     }
 
-    /// Declares the codec carried by packets pushed into this sink.
+    /// Declares what feeds this sink, from the parameters of whatever does —
+    /// an encoder, a demuxer's stream, or another track's
+    /// [`WebRtcStreamInfo::codec_parameters`].
     ///
-    /// A sink returned for this side's own [`WebRtcHandle::add_track`] call
-    /// is initialized from that call's `codec`. A send-capable track added
-    /// by the remote peer cannot be initialized automatically: one SDP media
-    /// section can negotiate several codecs, and only this application knows
-    /// which encoder feeds its outbound half. Call this before pushing a
-    /// packet into such a sink; the choice is validated against
-    /// [`WebRtcTrackSink::negotiated_codecs`]. If no choice is made,
-    /// [`Sink::consume`] returns [`WebRtcError::OutboundCodecNotDeclared`]
-    /// instead of guessing a payload type and emitting a mislabeled RTP
-    /// stream.
+    /// Everything this sink needs is in that one value, so nothing is asked
+    /// for twice: the RTP payload type comes from the codec the parameters
+    /// name, the headers to put in front of keyframes from their extradata,
+    /// and whether payloads arrive length-prefixed from the shape of that
+    /// extradata.
     ///
-    /// Returns [`WebRtcError::OutboundCodecNotNegotiated`] without changing
-    /// the previous selection when `codec` is unavailable. Already-enqueued
-    /// packets retain the declaration they were submitted with.
-    /// Hands this sink the encoder's codec headers, so it can put them back
-    /// in front of every keyframe it sends.
-    ///
-    /// # Why a sender has to
+    /// # Why the headers have to travel
     ///
     /// An encoder opened with `AV_CODEC_FLAG_GLOBAL_HEADER` — which every
     /// encoder in this crate is, so that a container has a `CodecPrivate` to
@@ -285,22 +410,46 @@ impl WebRtcTrackSink {
     /// `parameters()`. A file is then complete, because the container carries
     /// them; an RTP stream is not, because nothing in it does. The receiving
     /// half of this driver builds its decoder parameters by watching for
-    /// SPS/PPS to go past (see `stream_info`), so without this a peer never
-    /// learns what it is being sent and simply times out waiting.
-    ///
-    /// # What to pass
-    ///
-    /// The encoder's own `parameters()`, which is where the headers went.
-    /// libavcodec writes H.264's there in Annex-B, the same form a packet's
-    /// payload is already in, so they only have to go in front. Repeating
-    /// them on every keyframe rather than once is what lets a peer that
-    /// joins late — or one that lost the first of them — start decoding at
+    /// SPS/PPS to go past (see `stream_info`), so without them a peer never
+    /// learns what it is being sent and simply times out waiting. They go in
+    /// front of every keyframe rather than once, which is what lets a peer
+    /// that joins late — or that lost the first of them — start decoding at
     /// the next one.
     ///
-    /// Parameters carrying no extradata leave this sink as it was, so an
-    /// encoder that still writes its headers in-band, or a codec with none
-    /// to write, can be passed here without special-casing.
-    pub fn set_parameter_sets(&mut self, parameters: &ffmpeg::codec::Parameters) {
+    /// # A demuxer's parameters
+    ///
+    /// A container demuxer describes H.264 with an `avcC` record, and its
+    /// packets are length-prefixed to match rather than Annex-B. Passing
+    /// those parameters is therefore two statements at once: the parameter
+    /// sets are these, and the payloads to come are length-prefixed. Both are
+    /// read out of the one record, and every payload is rewritten as Annex-B
+    /// on its way to RTP.
+    ///
+    /// # Errors
+    ///
+    /// [`WebRtcError::OutboundCodecNotNegotiated`] when this connection did
+    /// not retain the codec the parameters name,
+    /// [`WebRtcError::SourceCodecUnsupported`] when WebRTC does not carry it
+    /// at all, and [`WebRtcError::ParameterSetsNotSupported`] for HEVC or VVC
+    /// configuration in `hvcC`/`vvcC` form, which this sink cannot convert.
+    /// A failed call changes nothing, so the previous declaration stays
+    /// usable and already-enqueued packets keep the one they were sent with.
+    ///
+    /// Parameters carrying no extradata are accepted as they are: an encoder
+    /// that still writes its headers in-band needs none prepended, and most
+    /// codecs have none to prepend.
+    pub fn set_source_parameters(&mut self, parameters: &ffmpeg::codec::Parameters) -> Result<()> {
+        let id = parameters.id();
+        let codec = str0m_codec(id).ok_or(WebRtcError::SourceCodecUnsupported(id))?;
+        let negotiated = self.negotiated_codecs();
+        if !negotiated.contains(&codec) {
+            return Err(WebRtcError::OutboundCodecNotNegotiated {
+                track_id: self.id,
+                codec,
+                negotiated,
+            }
+            .into());
+        }
         // SAFETY: `parameters` is a live `AVCodecParameters`; `extradata` and
         // `extradata_size` are plain fields of it, and the slice is copied
         // out before this borrow ends.
@@ -312,9 +461,56 @@ impl WebRtcTrackSink {
                 None => std::slice::from_raw_parts((*raw).extradata, size).to_vec(),
             }
         };
-        self.parameter_sets = (!bytes.is_empty()).then_some(bytes);
+        // Decided before anything is written, so a refusal leaves the
+        // previous declaration whole.
+        let (parameter_sets, nal_length_size) = match () {
+            // Only the Annex-B codecs prepend anything. Another codec's
+            // extradata describes a decoder rather than introducing a
+            // keyframe — `OpusHead` in front of every Opus packet would be
+            // corruption, not configuration.
+            _ if !annex_b_codec(codec) => (None, None),
+            _ if bytes.is_empty() => (None, None),
+            _ if starts_with_start_code(&bytes) => (Some(bytes), None),
+            _ if codec == Codec::H264 => match avcc_parameter_sets(&bytes) {
+                Some((annex_b, length_size)) => (Some(annex_b), Some(length_size)),
+                None => {
+                    return Err(WebRtcError::ParameterSetsNotSupported {
+                        track_id: self.id,
+                        codec,
+                    }
+                    .into());
+                }
+            },
+            // `hvcC`/`vvcC`: a real configuration record this sink has no
+            // conversion for. Refused rather than prepended verbatim, which
+            // would put a decoder configuration into the bitstream.
+            _ => {
+                return Err(WebRtcError::ParameterSetsNotSupported {
+                    track_id: self.id,
+                    codec,
+                }
+                .into());
+            }
+        };
+        self.codec = Some(codec);
+        self.parameter_sets = parameter_sets;
+        self.nal_length_size = nal_length_size;
+        Ok(())
     }
 
+    /// Declares only the codec, for a caller with no parameters to hand —
+    /// one pushing packets it assembled itself rather than an encoder's or a
+    /// demuxer's.
+    ///
+    /// Prefer [`WebRtcTrackSink::set_source_parameters`] wherever the source
+    /// has `parameters()`: this leaves the sink with no headers to put in
+    /// front of keyframes, which for H.264, HEVC and VVC means the packets
+    /// themselves must carry their parameter sets in-band. [`Sink::consume`]
+    /// checks that on the first keyframe rather than letting a peer wait for
+    /// configuration that is never coming.
+    ///
+    /// Returns [`WebRtcError::OutboundCodecNotNegotiated`] without changing
+    /// the previous selection when `codec` is unavailable.
     pub fn set_codec(&mut self, codec: Codec) -> Result<()> {
         let negotiated = self.negotiated_codecs();
         if !negotiated.contains(&codec) {
@@ -383,6 +579,7 @@ impl Sink for WebRtcTrackSink {
                 .into());
             }
         }
+        let buf = self.prepare_bitstream(buf)?;
         let buf = self.prepend_parameter_sets(buf);
         let buf = self.normalize_packet_timestamp(buf)?;
         // `WebRtcPeer::run` gone (channel disconnected) means this track is
@@ -444,17 +641,74 @@ impl WebRtcTrackSink {
         let mut joined = Vec::with_capacity(headers.len() + payload.len());
         joined.extend_from_slice(headers);
         joined.extend_from_slice(payload);
-        let mut rewritten = ffmpeg::Packet::copy(&joined);
-        // The time base above all: `Packet::copy` leaves it 0/0, and a packet
-        // str0m cannot build a `MediaTime` from is dropped rather than
-        // refused — the failure would be a peer that simply receives nothing.
-        rewritten.set_time_base(packet.time_base());
-        rewritten.set_pts(packet.pts());
-        rewritten.set_dts(packet.dts());
-        rewritten.set_stream(packet.stream());
-        rewritten.set_flags(packet.flags());
-        rewritten.set_duration(packet.duration());
-        MediaBuffer::Packet(Arc::new(rewritten))
+        rewritten_packet(packet, &joined)
+    }
+
+    /// Puts an Annex-B codec's payload into the form RTP carries, and refuses
+    /// what cannot reach a decoder.
+    ///
+    /// Two things can be wrong, and both are invisible without this. str0m
+    /// splits an outbound payload on Annex-B start codes, so a
+    /// length-prefixed one is packetized as a single NAL unit whose type byte
+    /// is really the first byte of a length. And a keyframe with no parameter
+    /// sets — neither in-band nor prepended — is valid RTP that no receiver
+    /// can configure a decoder from. Either way every packet leaves, nothing
+    /// reports an error, and the symptom belongs to the far end: a wait for
+    /// SPS/PPS that never ends.
+    ///
+    /// Each check runs once per track, since neither the bitstream form nor
+    /// where an encoder keeps its headers changes part-way through.
+    fn prepare_bitstream(&mut self, buf: MediaBuffer) -> Result<MediaBuffer> {
+        let Some(codec) = self.codec.filter(|codec| annex_b_codec(*codec)) else {
+            return Ok(buf);
+        };
+        let MediaBuffer::Packet(packet) = &buf else {
+            return Ok(buf);
+        };
+        let Some(payload) = packet.data() else {
+            return Ok(buf);
+        };
+
+        let converted = match self.nal_length_size {
+            Some(nal_length_size) => {
+                let Some(annex_b) = length_prefixed_to_annex_b(payload, nal_length_size) else {
+                    pp_error!(
+                        self,
+                        "outbound packet is not a valid length-prefixed access unit"
+                    );
+                    return Err(WebRtcError::MalformedLengthPrefixedPacket(self.id).into());
+                };
+                Some(annex_b)
+            }
+            None => {
+                // Not marked checked on failure: a `Queue` reports this and
+                // carries on with the next buffer, and refusing only the
+                // first of them would put the silent failure back for every
+                // packet after it. The same goes for the check below.
+                if !self.bitstream_checked {
+                    if !starts_with_start_code(payload) {
+                        pp_error!(self, "outbound packet is not Annex-B");
+                        return Err(WebRtcError::NotAnnexB(self.id).into());
+                    }
+                    self.bitstream_checked = true;
+                }
+                None
+            }
+        };
+
+        if packet.is_key() && self.parameter_sets.is_none() && !self.parameter_sets_checked {
+            let outgoing = converted.as_deref().unwrap_or(payload);
+            if carries_parameter_sets(outgoing, codec) == Some(false) {
+                pp_error!(self, "outbound keyframe carries no parameter sets");
+                return Err(WebRtcError::MissingParameterSets(self.id).into());
+            }
+            self.parameter_sets_checked = true;
+        }
+
+        match converted {
+            Some(annex_b) => Ok(rewritten_packet(packet, &annex_b)),
+            None => Ok(buf),
+        }
     }
 
     fn normalize_packet_timestamp(&mut self, buf: MediaBuffer) -> Result<MediaBuffer> {

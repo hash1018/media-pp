@@ -112,8 +112,9 @@ pub struct WebRtcPeer {
     /// Pending outbound codec selections for locally-requested tracks. Each entry
     /// moves into that track's [`WebRtcTrackSink`] when it attaches; a
     /// remotely-added track has no such declaration and its caller supplies
-    /// one through [`WebRtcTrackSink::set_codec`] from the endpoint's
-    /// negotiated codec list before pushing packets.
+    /// one through [`WebRtcTrackSink::set_source_parameters`] — or
+    /// [`WebRtcTrackSink::set_codec`], with no parameters to hand — validated
+    /// against the endpoint's negotiated codec list before pushing packets.
     track_codec: HashMap<TrackId, Codec>,
     /// The currently negotiated codec families for each attached media
     /// section, shared with both endpoints. A locally-created track is

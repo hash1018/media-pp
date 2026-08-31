@@ -310,7 +310,26 @@ fn ffmpeg_codec(codec: Codec) -> Option<(ffmpeg::media::Type, ffmpeg::codec::Id)
     }
 }
 
-fn annex_b_nalus(data: &[u8]) -> Vec<&[u8]> {
+/// The str0m codec an encoder or demuxer describing itself with `id` feeds.
+/// The inverse of [`ffmpeg_codec`], and deliberately its mirror image: a
+/// codec added to one has to be added to the other.
+pub(super) fn str0m_codec(id: ffmpeg::codec::Id) -> Option<Codec> {
+    use ffmpeg::codec::Id;
+    match id {
+        Id::OPUS => Some(Codec::Opus),
+        Id::PCM_MULAW => Some(Codec::PCMU),
+        Id::PCM_ALAW => Some(Codec::PCMA),
+        Id::H264 => Some(Codec::H264),
+        Id::HEVC => Some(Codec::H265),
+        Id::VVC => Some(Codec::H266),
+        Id::VP8 => Some(Codec::Vp8),
+        Id::VP9 => Some(Codec::Vp9),
+        Id::AV1 => Some(Codec::Av1),
+        _ => None,
+    }
+}
+
+pub(super) fn annex_b_nalus(data: &[u8]) -> Vec<&[u8]> {
     let mut starts = Vec::new();
     let mut offset = 0;
     while offset + 3 <= data.len() {
