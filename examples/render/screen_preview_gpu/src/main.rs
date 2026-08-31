@@ -318,7 +318,7 @@ mod windows_example {
         let pipeline = Pipeline::new("screen-preview-gpu", source, |source, ctx| {
             let renderer = render_common::d3d11_window_renderer(
                 "renderer",
-                &gpu,
+                gpu,
                 hwnd,
                 window_width,
                 window_height,
