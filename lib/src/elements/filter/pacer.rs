@@ -91,7 +91,7 @@ const INTERRUPT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 /// anchoring to its own first frame. That agreement is what keeps the
 /// picture with the sound: the offset a container gives its streams is part
 /// of their sync, and a pacer zeroing on its own stream would throw it away.
-/// See [`Clock::media_origin_ns`].
+/// The clock's own `media_origin_ns` is where that agreement is kept.
 pub struct Pacer {
     pp_log: PpLog,
     name: Arc<str>,

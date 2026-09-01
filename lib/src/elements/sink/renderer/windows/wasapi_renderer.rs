@@ -114,11 +114,17 @@ pub enum WasapiRendererError {
 /// The endpoint's mix format is returned by [`WasapiRenderer::open`] so a
 /// caller can place an [`crate::elements::AudioResampler`] immediately
 /// before this sink. This element intentionally performs no hidden format
-/// conversion. Call [`WasapiRenderer::bind_playback_clock`] while wiring a
-/// fixed A/V pipeline to publish this endpoint's actual played-sample position
-/// as that pipeline's audio master. A branch attached to a running dynamic Tee
-/// uses [`WasapiRenderer::bind_playback_clock_deferred`] instead, so it cannot
-/// stall video before the first audio frame reaches the renderer.
+/// conversion.
+///
+/// It publishes this endpoint's actual played-sample position as its
+/// pipeline's audio master, and takes the clock to do that from the pipeline
+/// rather than from the caller — see `Element::attach_context`. The master
+/// slot is claimed on the first frame rather than when the element is wired:
+/// claiming it at wiring time would move the clock into `AudioPriming` there
+/// and then, and video scheduled against the same clock would wait for audio
+/// that has not started — which for a branch attached to a running `Tee` is a
+/// deadlock. An exclusive-master conflict therefore surfaces from the first
+/// `consume` rather than from the wiring.
 ///
 /// Device-buffer backpressure is the playback clock: `consume` waits for
 /// enough WASAPI ring-buffer space to submit the whole input frame. Put a
