@@ -146,8 +146,10 @@ The core types are deliberately small:
   otherwise never ends on its own, and the two existing ways still apply
   mid-lap: `Pipeline::finish` for ordered EOS now, `Pipeline::stop` to
   abandon. The consequence of carrying the timeline is that a looping
-  source's timestamps are no longer positions in the file; `seek` still
-  speaks in the file's own.
+  source's timestamps are no longer positions in the file. `seek` still
+  speaks in the file's own, and `lap_offset` on the same handle is what turns
+  one of those timestamps back into a position in it — a progress bar's
+  number.
 
 Every `SourceElement` explicitly classifies whether it is live and whether it
 can reposition its own input timeline through `is_live()` and

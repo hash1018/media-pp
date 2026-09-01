@@ -3,7 +3,7 @@ use std::{
     path::Path,
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicI64, Ordering},
     },
     time::Duration,
 };
@@ -51,6 +51,7 @@ pub struct StreamInfo {
 #[derive(Clone)]
 pub struct FileDemuxerHandle {
     looping: Arc<AtomicBool>,
+    published_offset: Arc<AtomicI64>,
 }
 
 impl FileDemuxerHandle {
@@ -72,6 +73,24 @@ impl FileDemuxerHandle {
     /// What [`FileDemuxerHandle::set_looping`] last set.
     pub fn is_looping(&self) -> bool {
         self.looping.load(Ordering::Relaxed)
+    }
+
+    /// How far this source's output timeline has been carried past the
+    /// file's own — the sum of every lap already played.
+    ///
+    /// Zero until the first wrap, so a source that never loops never needs
+    /// this. What it is for is reading a timestamp *back*: subtract it from
+    /// a packet's or frame's timestamp and the result is a position in the
+    /// file, which is what a progress bar means by one. See
+    /// [`FileDemuxer`]'s own docs on why the two are not the same number.
+    ///
+    /// It moves once per lap, so a reader that samples it beside a timestamp
+    /// from the same moment can be one lap out for the instant either side of
+    /// a wrap. Nothing here can close that window, and a progress bar that is
+    /// wrong for one frame at the moment it jumps back to zero is not wrong
+    /// in a way anyone can see.
+    pub fn lap_offset(&self) -> Duration {
+        Duration::from_micros(self.published_offset.load(Ordering::Relaxed).max(0) as u64)
     }
 }
 
@@ -125,6 +144,13 @@ pub struct FileDemuxer {
     /// Set through [`FileDemuxerHandle::set_looping`], read only where the
     /// container runs out.
     looping: Arc<AtomicBool>,
+    /// `loop_offset`, published for [`FileDemuxerHandle::lap_offset`].
+    ///
+    /// A copy rather than the field itself: the offset is read and written
+    /// once per packet on this thread, and making that an atomic to serve a
+    /// reader that looks a few times a second is the wrong way round. This
+    /// is stored only where the offset moves, which is once per lap.
+    published_offset: Arc<AtomicI64>,
     /// How far this source's output timeline has been carried past the
     /// file's own, in microseconds: the sum of every lap already played.
     /// Zero until the first wrap, so a source that never loops emits the
@@ -201,6 +227,7 @@ impl FileDemuxer {
                 pending: VecDeque::new(),
                 pending_bytes: 0,
                 looping: Arc::new(AtomicBool::new(false)),
+                published_offset: Arc::new(AtomicI64::new(0)),
                 loop_offset: 0,
                 lap_end: 0,
             },
@@ -215,6 +242,7 @@ impl FileDemuxer {
     pub fn looping_handle(&self) -> FileDemuxerHandle {
         FileDemuxerHandle {
             looping: self.looping.clone(),
+            published_offset: self.published_offset.clone(),
         }
     }
 
@@ -279,6 +307,8 @@ impl FileDemuxer {
     /// timeline like every packet after it.
     fn wrap(&mut self) -> crate::error::Result<()> {
         self.loop_offset = self.loop_offset.saturating_add(self.lap_end);
+        self.published_offset
+            .store(self.loop_offset, Ordering::Relaxed);
         self.lap_end = 0;
         let landed = self.seek(Duration::ZERO)?;
         pp_debug!(
@@ -841,6 +871,13 @@ mod tests {
         assert!(
             saw_eos.load(Ordering::SeqCst),
             "switching looping off must end the lap it is in with an Eos"
+        );
+        // What a reader needs to turn one of those climbing timestamps back
+        // into a position in the file. It only moves at a wrap, so a run that
+        // wrapped has one and a run that did not has zero.
+        assert!(
+            handle.lap_offset() > Duration::ZERO,
+            "a lap that has been stepped over must be reported"
         );
         drop(bus);
         assert!(
