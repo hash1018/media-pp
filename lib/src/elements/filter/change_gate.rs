@@ -81,7 +81,10 @@ struct Forwarded {
     /// into that slot while `picture` still names it — see this element's
     /// own docs on why a frame reference is not enough.
     _frame: Arc<UnboundObjectPoolRef<ffmpeg::frame::Video>>,
-    at: Instant,
+    /// The earliest the next picture may be forwarded — see
+    /// [`ChangeGate::remember`] for why this is a deadline rather than the
+    /// moment this one went out.
+    due: Instant,
 }
 
 impl ChangeGate {
@@ -106,19 +109,35 @@ impl ChangeGate {
         match &self.forwarded {
             // The rate first, so that a change dropped here is still carried
             // by the repeats that follow it — see this type's own docs.
-            Some(forwarded) => {
-                now.duration_since(forwarded.at) >= self.min_interval
-                    && forwarded.picture != picture_id(frame)
-            }
+            Some(forwarded) => now >= forwarded.due && forwarded.picture != picture_id(frame),
             None => true,
         }
     }
 
+    /// Moves the deadline on by `min_interval` from the deadline itself,
+    /// not from this moment.
+    ///
+    /// Measured from the moment instead, a source running at the gate's own
+    /// rate is halved — and that is the ordinary case, not a corner one: a
+    /// preview limited to the rate its compositor already produces. Every
+    /// frame then arrives a hair inside the interval, since a real source is
+    /// never exact and a shade fast is as likely as a shade slow, and each
+    /// one that misses moves the reference later still. Half the frames go,
+    /// irregularly, which is worse to watch than an honest half rate. A
+    /// deadline on its own grid absorbs that jitter and drops a frame only
+    /// when the source really is faster than the limit.
+    ///
+    /// It never runs ahead of `now`, so a scene that sat still for a minute
+    /// saves up no credit to spend on a burst when it finally changes.
     fn remember(&mut self, frame: &Arc<UnboundObjectPoolRef<ffmpeg::frame::Video>>, now: Instant) {
+        let due = match &self.forwarded {
+            Some(previous) => (previous.due + self.min_interval).max(now),
+            None => now + self.min_interval,
+        };
         self.forwarded = Some(Forwarded {
             picture: picture_id(frame),
             _frame: Arc::clone(frame),
-            at: now,
+            due,
         });
     }
 }
@@ -345,6 +364,40 @@ mod tests {
             timestamps(&forwarded),
             vec![Some(1)],
             "the first frame sets the clock; the rest are inside the interval"
+        );
+    }
+
+    /// What a preview is limited to is normally the rate its compositor
+    /// already produces, so a source running *at* the interval is the
+    /// ordinary case rather than a corner one — and it must not come out at
+    /// half of it.
+    ///
+    /// The frames below are a shade fast, which a real source is as often as
+    /// it is a shade slow. Timed from each forward, every one of them lands
+    /// just inside the interval and every other one is dropped; the frames
+    /// have to be scheduled against a fixed start for that to be true, since
+    /// sleeping between them would overshoot into being late and pass either
+    /// way.
+    #[test]
+    fn a_source_running_at_the_interval_is_not_halved() {
+        const INTERVAL: Duration = Duration::from_millis(10);
+        const FRAMES: u32 = 10;
+        let mut gate = ChangeGate::new("gate", INTERVAL);
+        let forwarded = capture(&mut gate);
+
+        let period = INTERVAL - Duration::from_micros(100);
+        let start = Instant::now();
+        for pts in 0..FRAMES {
+            while start.elapsed() < period * pts {
+                std::thread::yield_now();
+            }
+            gate.consume(picture(pts.into())).expect("frame");
+        }
+
+        let count = forwarded.lock().unwrap().len() as u32;
+        assert!(
+            count >= FRAMES - 2,
+            "a source at the gate's own rate must pass it: {count} of {FRAMES} forwarded"
         );
     }
 
