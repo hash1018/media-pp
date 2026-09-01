@@ -18,6 +18,8 @@ use crate::{
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
     control::{ControlMsg, ControlReceiver, drain_control},
     element::{Element, ElementType, Sink, Source, SourceElement, element_pp_log},
+    elements::AudioFormat,
+    elements::filter::audio_resampler::AudioFrameResampler,
     error::Result,
     pad::SrcPad,
     schedule::ActiveTimeline,
@@ -133,16 +135,6 @@ impl SharedMixFormat {
     }
 }
 
-/// Both ends of one resampler, so a stale one can be recognised rather than
-/// assumed to still fit.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ResamplerShape {
-    from_format: ffmpeg::format::Sample,
-    from_channels: u16,
-    from_rate: u32,
-    to: MixFormat,
-}
-
 /// One input's own resampler and accumulated (already-resampled,
 /// interleaved `f32`) samples, waiting to be drained by the next
 /// [`AudioMixer::mix_tick`]. The resampler is built lazily from the first
@@ -153,12 +145,14 @@ struct InputBuffer {
     /// Identity of this particular registration. The name can be reused,
     /// but an older sink must not be allowed to touch its replacement.
     id: u64,
-    /// Built lazily, and rebuilt whenever either end of it has moved — the
-    /// format arriving, or the mix format it is resampling to. Kept beside
-    /// it rather than walked and invalidated from outside: an input that
-    /// notices for itself needs no lock held across somebody else's state,
-    /// and an input registered after a change is correct without being told.
-    resampler: Option<(ResamplerShape, ffmpeg::software::resampling::Context)>,
+    /// Built lazily from the first frame, and rebuilt when the mix format
+    /// moves under it. Kept beside it rather than walked and invalidated
+    /// from outside: an input that notices for itself needs no lock held
+    /// across somebody else's state, and an input registered after a change
+    /// is correct without being told. The *arriving* format moving is the
+    /// resampler's own business — [`AudioFrameResampler`] rebuilds for that,
+    /// draining what the old context still held first.
+    resampler: Option<(MixFormat, AudioFrameResampler)>,
     samples: VecDeque<f32>,
     /// Set once this input's `Eos` arrives — [`AudioMixer::mix_tick`]
     /// drops the input entirely once it's both `eos` and fully drained,
@@ -174,56 +168,63 @@ impl InputBuffer {
         frame: &ffmpeg::frame::Audio,
         to: MixFormat,
     ) -> std::result::Result<(), AudioMixerError> {
-        let shape = ResamplerShape {
-            from_format: frame.format(),
-            from_channels: frame.channel_layout().channels() as u16,
-            from_rate: frame.rate(),
-            to,
-        };
-        // Rebuilt when either end has moved. A resampler is fixed at both
-        // ends when it is created, so one built for the old mix format would
-        // keep producing it — silently, and into a mix that no longer wants
-        // it.
+        // Rebuilt when the mix format has moved. A resampler is fixed at
+        // both ends when it is created, so one built for the old mix format
+        // would keep producing it — silently, and into a mix that no longer
+        // wants it.
         if self
             .resampler
             .as_ref()
-            .is_none_or(|(built, _)| *built != shape)
+            .is_none_or(|(built, _)| *built != to)
         {
-            let resampler = ffmpeg::software::resampling::Context::get(
-                shape.from_format,
-                frame.channel_layout(),
-                shape.from_rate,
-                to.sample_format(),
-                to.channel_layout(),
-                to.sample_rate,
-            )?;
-            self.resampler = Some((shape, resampler));
+            self.resampler = Some((
+                to,
+                AudioFrameResampler::new(AudioFormat::new(
+                    to.sample_format(),
+                    to.sample_rate,
+                    to.channels,
+                )),
+            ));
         }
-        let (_, resampler) = self
-            .resampler
-            .as_mut()
-            .expect("just built if it was missing or stale");
-        let mut output = ffmpeg::frame::Audio::empty();
-        resampler.run(frame, &mut output)?;
-        // Raw bytes, not `plane::<f32>(0)`: `ffmpeg_next`'s `plane::<T>()`
-        // always returns exactly `output.samples()` elements of type `T`,
-        // which for **packed multi-channel** data (this mixer's own fixed
-        // `Sample::F32(Packed)` target — see `AudioMixer::new`) covers only
-        // the first `samples()` of the real `samples() * channels`
-        // interleaved scalars actually in the buffer, silently dropping
-        // every channel past the first once the mix layout has more than
-        // one. Same fix, and the same root cause, as
-        // `crate::elements::SwAudioEncoder`'s own `absorb_resampled`
-        // (found while building that element — this call predates it).
-        let samples = output.samples();
-        let channels = to.channels as usize;
-        let bytes = &output.data(0)[..samples * channels * 4];
-        let interleaved =
-            // SAFETY: `bytes` is a prefix of an FFmpeg audio plane, which is aligned
-            // well past 4 and whose length here is an exact multiple of four bytes —
-            // `samples * channels * 4`.
-            unsafe { std::slice::from_raw_parts(bytes.as_ptr() as *const f32, bytes.len() / 4) };
-        self.samples.extend(interleaved.iter().copied());
+        // Through the shared engine rather than a `Context` of this
+        // element's own, for the sizing above all. Handed an unallocated
+        // output frame, `Context::run` gives it room for exactly as many
+        // samples as went in — which is short by the rate ratio whenever an
+        // input is *slower* than the mix, so 44.1kHz media into a 48kHz mix
+        // left 8% of every frame behind in libswresample's own delay. It is
+        // not dropped, which would merely be a click: it comes back on the
+        // next call, which is short by the same 8% again, so the input feeds
+        // the mix at 92% of real time. The mixer fills the shortfall of each
+        // tick with silence — a chop at the tick rate — and what does arrive
+        // falls further behind its own picture every second.
+        let resampled = {
+            let (_, resampler) = self
+                .resampler
+                .as_mut()
+                .expect("just built if it was missing or stale");
+            resampler.run(frame)?
+        };
+        for output in &resampled {
+            // Raw bytes, not `plane::<f32>(0)`: `ffmpeg_next`'s `plane::<T>()`
+            // always returns exactly `output.samples()` elements of type `T`,
+            // which for **packed multi-channel** data (this mixer's own fixed
+            // `Sample::F32(Packed)` target — see `AudioMixer::new`) covers only
+            // the first `samples()` of the real `samples() * channels`
+            // interleaved scalars actually in the buffer, silently dropping
+            // every channel past the first once the mix layout has more than
+            // one. Same fix, and the same root cause, as
+            // `crate::elements::SwAudioEncoder`'s own `absorb_resampled`
+            // (found while building that element — this call predates it).
+            let samples = output.samples();
+            let channels = to.channels as usize;
+            let bytes = &output.data(0)[..samples * channels * 4];
+            let interleaved =
+                // SAFETY: `bytes` is a prefix of an FFmpeg audio plane, which is aligned
+                // well past 4 and whose length here is an exact multiple of four bytes —
+                // `samples * channels * 4`.
+                unsafe { std::slice::from_raw_parts(bytes.as_ptr() as *const f32, bytes.len() / 4) };
+            self.samples.extend(interleaved.iter().copied());
+        }
         Ok(())
     }
 }
@@ -747,6 +748,45 @@ mod tests {
         frame.set_rate(rate);
         frame.plane_mut::<f32>(0).fill(value);
         frame
+    }
+
+    /// A file's 44.1kHz sound into a 48kHz mix — the ordinary case, since
+    /// most media is 44.1kHz and a capture device is usually 48kHz.
+    ///
+    /// What the mixer takes per tick is fixed by the wall clock, so an input
+    /// resampled *short* is not merely quieter: the shortfall is filled with
+    /// silence at the tick rate, and what does arrive falls further behind
+    /// its own picture every second. Handed an unallocated output frame,
+    /// libswresample sizes it for as many samples as went in, which is 8%
+    /// short at this ratio.
+    #[test]
+    fn a_slower_input_arrives_at_the_mix_s_own_rate() {
+        const FRAMES: usize = 43;
+        const PER_FRAME: usize = 1024;
+        let to = MixFormat {
+            sample_rate: 48_000,
+            channels: 1,
+        };
+        let mut input = InputBuffer {
+            id: 1,
+            resampler: None,
+            samples: VecDeque::new(),
+            eos: false,
+        };
+
+        for _ in 0..FRAMES {
+            input
+                .push(&constant_frame(0.5, PER_FRAME, 44_100), to)
+                .expect("push");
+        }
+
+        let arrived = input.samples.len();
+        let expected = FRAMES * PER_FRAME * 48_000 / 44_100;
+        assert!(
+            arrived * 100 >= expected * 99,
+            "a second of 44.1kHz sound is still a second of mix: \
+             {arrived} samples arrived, {expected} expected"
+        );
     }
 
     struct RecordingSink {

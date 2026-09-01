@@ -16,7 +16,7 @@
 //! a runtime switch, because the buffers they accept genuinely differ: a GPU
 //! filter requires frames already resident on the device that created them.
 
-mod audio_resampler;
+pub(crate) mod audio_resampler;
 mod audio_volume;
 mod change_gate;
 pub(crate) mod chroma_key;
