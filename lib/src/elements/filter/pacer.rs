@@ -5,7 +5,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::pp_log::{PpLog, pp_info};
+use crate::pp_log::{PpLog, pp_info, pp_warn};
 use ffmpeg_next as ffmpeg;
 use thiserror::Error as ThisError;
 
@@ -123,6 +123,11 @@ pub struct Pacer {
     /// it can't preempt a `consume()` call already in flight, and this
     /// pacer's own wait is exactly that kind of long-running call.
     interrupt_epoch: u64,
+    /// The longest a single buffer may hold this pacer before its timestamp
+    /// is read as a new timeline rather than a distant one, or `None` for a
+    /// timeline that cannot restart — see
+    /// [`Pacer::with_discontinuity_limit`].
+    discontinuity_limit: Option<Duration>,
     /// Preroll advances data without consulting the paused pipeline clock.
     prerolling: bool,
     /// Buffers whose paced wait was interrupted before the owning worker
@@ -158,11 +163,44 @@ impl Pacer {
             time_base,
             clock: None,
             origin_ns: None,
+            discontinuity_limit: None,
             interrupt_epoch: 0,
             prerolling: false,
             pending: VecDeque::new(),
             pad,
         })
+    }
+
+    /// The same, for a stream whose timeline can restart under it.
+    ///
+    /// A file's timestamps only ever move forward from where they began, so
+    /// a buffer due far ahead is a real gap in the stream and waiting it out
+    /// is the correct thing to do. A live sender is not like that: a camera
+    /// that reboots, or an RTP timestamp base that wraps, hands over a
+    /// timestamp with no relation to the one before it, and a pacer that
+    /// believes it sleeps for as long as the jump says — a still picture,
+    /// no error, and nothing to reconnect from, since as far as the pipeline
+    /// is concerned it is working.
+    ///
+    /// Past `limit` such a jump is read as a new timeline: the origin
+    /// re-anchors so the buffer that carried it is due now, and a warning
+    /// says so. Both branches of one source see the same jump and re-anchor
+    /// within a buffer of each other, so the picture keeps its sound.
+    ///
+    /// Pick a `limit` longer than the longest gap the stream can really
+    /// have — for most cameras a second or two of nothing is already a
+    /// problem, not a pause. Shorter than the spacing between its own
+    /// frames and every ordinary wait reads as a jump, which is this pacer
+    /// no longer pacing at all.
+    pub fn with_discontinuity_limit(
+        name: impl Into<String>,
+        time_base: ffmpeg::Rational,
+        limit: Duration,
+    ) -> Result<Self, PacerError> {
+        let mut pacer = Self::new(name, time_base)?;
+        pp_info!(pp_log: &pacer.pp_log, "timeline jumps beyond {limit:?} re-anchor it");
+        pacer.discontinuity_limit = Some(limit);
+        Ok(pacer)
     }
 
     /// Blocks until `pts` is due, based on this pacer's `first_pts` (set
@@ -216,7 +254,24 @@ impl Pacer {
             return Ok(true);
         }
 
-        let due = anchor + Duration::from_nanos(elapsed_ns as u64);
+        let mut due = anchor + Duration::from_nanos(elapsed_ns as u64);
+        if let Some(limit) = self.discontinuity_limit {
+            let now = Instant::now();
+            if due > now + limit {
+                // A jump this far forward is a sender that restarted its
+                // timeline, not a stream with a gap that long in it — see
+                // `with_discontinuity_limit`. Re-anchored so this buffer is
+                // due now, which is where the new timeline starts.
+                pp_warn!(
+                    self,
+                    "timeline jumped {:?} ahead; re-anchoring on it",
+                    due.saturating_duration_since(now)
+                );
+                let ahead = now.saturating_duration_since(anchor).as_nanos();
+                self.origin_ns = Some(pts_ns.saturating_sub(ahead.min(i64::MAX as u128) as i64));
+                due = now;
+            }
+        }
         loop {
             if clock.interrupt_epoch() != self.interrupt_epoch {
                 return Ok(false);
@@ -333,6 +388,83 @@ mod tests {
             Arc::clone(clock),
         )));
         pacer
+    }
+
+    /// The same, with a limit on how long one buffer may hold it.
+    fn paced_live(
+        name: &str,
+        time_base: ffmpeg::Rational,
+        clock: &Arc<Clock>,
+        limit: Duration,
+    ) -> Pacer {
+        let mut pacer =
+            Pacer::with_discontinuity_limit(name, time_base, limit).expect("valid time base");
+        pacer.attach_context(&Arc::new(crate::element::Context::for_test_with_clock(
+            crate::bus::Bus::new().0,
+            "test",
+            crate::graph::PipelineGraph::new(),
+            crate::graph::ElementId::for_test(1),
+            Arc::clone(clock),
+        )));
+        pacer
+    }
+
+    /// A camera that reboots hands over a timestamp with no relation to the
+    /// one before it. Waited out, that is a still picture for as long as the
+    /// jump says — and nothing reports it, because as far as the pipeline is
+    /// concerned the pacer is doing its job.
+    #[test]
+    fn a_live_timeline_that_jumps_is_re_anchored_rather_than_waited_out() {
+        let clock = Arc::new(Clock::new());
+        // Milliseconds, and a limit longer than the spacing between the
+        // frames below — a limit shorter than that would read the ordinary
+        // wait for the next frame as a jump, which is what it is for the
+        // caller to pick against its own stream.
+        let mut pacer = paced_live(
+            "pacer",
+            ffmpeg::Rational::new(1, 1000),
+            &clock,
+            Duration::from_millis(300),
+        );
+        assert!(pacer.wait_for(Some(0)).unwrap(), "the first pts anchors");
+
+        let started = Instant::now();
+        assert!(
+            pacer.wait_for(Some(3_600_000)).unwrap(),
+            "a jumped timestamp is released, not refused"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "an hour ahead must not be an hour of waiting: took {:?}",
+            started.elapsed()
+        );
+
+        // And the new timeline is the one it paces against from here: 200ms
+        // after the jump is 200ms of waiting, not another hour.
+        let after = Instant::now();
+        assert!(pacer.wait_for(Some(3_600_200)).unwrap(), "the next frame");
+        let waited = after.elapsed();
+        assert!(
+            waited >= Duration::from_millis(150) && waited < Duration::from_secs(2),
+            "200ms past the re-anchored origin: waited {waited:?}"
+        );
+    }
+
+    /// The limit is not the default, and must not be: a file's timeline does
+    /// not restart, so a gap in it is real and waiting it out is correct.
+    #[test]
+    fn a_pacer_without_a_limit_still_waits_out_a_distant_timestamp() {
+        let clock = Arc::new(Clock::new());
+        let mut pacer = paced("pacer", ffmpeg::Rational::new(1, 1000), &clock);
+        assert!(pacer.wait_for(Some(0)).unwrap(), "the first pts anchors");
+
+        let started = Instant::now();
+        assert!(pacer.wait_for(Some(300)).unwrap(), "300ms into the stream");
+        assert!(
+            started.elapsed() >= Duration::from_millis(250),
+            "the gap is the stream's own and has to be waited out: took {:?}",
+            started.elapsed()
+        );
     }
 
     fn packet(pts: i64) -> MediaBuffer {
