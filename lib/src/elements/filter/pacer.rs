@@ -50,6 +50,16 @@ pub enum PacerError {
         /// The timestamp, in its own stream's units.
         pts: i64,
     },
+
+    /// A buffer arrived before the pipeline gave this pacer its clock, which
+    /// cannot happen through ordinary wiring: `attach_context` runs when the
+    /// branch is built and a branch cannot carry buffers before it exists.
+    ///
+    /// Reported rather than passed through, because pacing nothing is a
+    /// whole stream arriving at once and there is no quieter way for that to
+    /// go wrong.
+    #[error("this pacer was never wired into a pipeline, so it has no clock to pace against")]
+    NotAttached,
 }
 
 /// [`TimeBase::new_unchecked`] is fine here — `1/1_000_000_000` is a
@@ -86,7 +96,9 @@ pub struct Pacer {
     pp_log: PpLog,
     name: Arc<str>,
     time_base: TimeBase,
-    clock: Arc<Clock>,
+    /// The pipeline's, given by [`Element::attach_context`] — see there for
+    /// why this is not something the caller supplies.
+    clock: Option<Arc<Clock>>,
     /// The media timestamp this pipeline's t=0 stands for, in nanoseconds —
     /// asked of the shared [`Clock`] on the first timestamped buffer and
     /// held until a seek clears it.
@@ -121,17 +133,16 @@ pub struct Pacer {
 }
 
 impl Pacer {
-    /// Creates a pacer using `time_base` to convert input PTS values to wall time.
-    pub fn new(
-        name: impl Into<String>,
-        time_base: ffmpeg::Rational,
-        clock: Arc<Clock>,
-    ) -> Result<Self, PacerError> {
+    /// Creates a pacer using `time_base` to convert input PTS values to wall
+    /// time.
+    ///
+    /// The clock it paces against is the pipeline's and arrives when this is
+    /// wired into one — see [`Element::attach_context`].
+    pub fn new(name: impl Into<String>, time_base: ffmpeg::Rational) -> Result<Self, PacerError> {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::Pacer, &name, None);
         pp_info!(pp_log: &pp_log, "created: time_base={time_base}");
         let pad = SrcPad::with_contract(format!("{name}_src"), OutputContract::Passthrough);
-        let interrupt_epoch = clock.interrupt_epoch();
         let time_base = TimeBase::try_new(time_base).map_err(
             |InvalidTimeBase {
                  numerator,
@@ -145,9 +156,9 @@ impl Pacer {
             name,
             pp_log,
             time_base,
-            clock,
+            clock: None,
             origin_ns: None,
-            interrupt_epoch,
+            interrupt_epoch: 0,
             prerolling: false,
             pending: VecDeque::new(),
             pad,
@@ -164,7 +175,8 @@ impl Pacer {
     /// [`PacerError::UnpaceableTimestamp`]) — the caller drops that one
     /// buffer rather than treating it as interrupted.
     fn wait_for(&mut self, pts: Option<i64>) -> Result<bool, PacerError> {
-        if self.clock.interrupt_epoch() != self.interrupt_epoch {
+        let clock = self.clock.clone().ok_or(PacerError::NotAttached)?;
+        if clock.interrupt_epoch() != self.interrupt_epoch {
             return Ok(false);
         }
         if self.prerolling {
@@ -187,12 +199,12 @@ impl Pacer {
         }
         let origin_ns = *self
             .origin_ns
-            .get_or_insert_with(|| self.clock.media_origin_ns(pts_ns));
+            .get_or_insert_with(|| clock.media_origin_ns(pts_ns));
         // Read before the early return below, so the clock anchors on the
         // first buffer *any* stream releases rather than on the first one
         // that happens to have something to wait for. An offset measured
         // from it is then measured from when playback actually began.
-        let anchor = self.clock.start();
+        let anchor = clock.start();
 
         let elapsed_ns = pts_ns
             .checked_sub(origin_ns)
@@ -206,7 +218,7 @@ impl Pacer {
 
         let due = anchor + Duration::from_nanos(elapsed_ns as u64);
         loop {
-            if self.clock.interrupt_epoch() != self.interrupt_epoch {
+            if clock.interrupt_epoch() != self.interrupt_epoch {
                 return Ok(false);
             }
             let now = Instant::now();
@@ -233,6 +245,11 @@ impl Element for Pacer {
 
     fn pp_log_mut(&mut self) -> &mut PpLog {
         &mut self.pp_log
+    }
+
+    fn attach_context(&mut self, context: &Arc<crate::element::Context>) {
+        self.interrupt_epoch = context.clock.interrupt_epoch();
+        self.clock = Some(Arc::clone(&context.clock));
     }
 }
 
@@ -271,12 +288,19 @@ impl Sink for Pacer {
         // Acknowledge the interrupt that made any in-flight wait return.
         // Flush discards an interrupted old-timeline buffer; Seek then resets
         // the timestamp and clock anchors for the new timeline.
-        self.interrupt_epoch = self.clock.interrupt_epoch();
+        // A pacer that was never wired has no clock to acknowledge, and
+        // nothing is going to send it control either — see
+        // `PacerError::NotAttached`.
+        if let Some(clock) = &self.clock {
+            self.interrupt_epoch = clock.interrupt_epoch();
+        }
         match msg {
             ControlMsg::Flush => self.pending.clear(),
             ControlMsg::Seek(_) => {
                 self.origin_ns = None;
-                self.clock.reset();
+                if let Some(clock) = &self.clock {
+                    clock.reset();
+                }
             }
             ControlMsg::Stop => self.pending.clear(),
             ControlMsg::Preroll(_) => {
@@ -297,6 +321,20 @@ mod tests {
     use crate::control::PrerollContext;
     use std::{sync::mpsc, time::Duration};
 
+    /// A pacer wired the way a pipeline wires one, around a clock the test
+    /// keeps so it can interrupt and pause it.
+    fn paced(name: &str, time_base: ffmpeg::Rational, clock: &Arc<Clock>) -> Pacer {
+        let mut pacer = Pacer::new(name, time_base).expect("valid time base");
+        pacer.attach_context(&Arc::new(crate::element::Context::for_test_with_clock(
+            crate::bus::Bus::new().0,
+            "test",
+            crate::graph::PipelineGraph::new(),
+            crate::graph::ElementId::for_test(1),
+            Arc::clone(clock),
+        )));
+        pacer
+    }
+
     fn packet(pts: i64) -> MediaBuffer {
         let mut packet = ffmpeg::Packet::empty();
         packet.set_pts(Some(pts));
@@ -306,7 +344,7 @@ mod tests {
     #[test]
     fn long_wait_returns_promptly_when_control_interrupts_it() {
         let clock = Arc::new(Clock::new());
-        let mut pacer = Pacer::new("pacer", ffmpeg::Rational::new(1, 1), clock.clone()).unwrap();
+        let mut pacer = paced("pacer", ffmpeg::Rational::new(1, 1), &clock);
         assert!(
             pacer.wait_for(Some(0)).unwrap(),
             "first pts should establish the anchor"
@@ -334,7 +372,7 @@ mod tests {
     #[test]
     fn pause_retains_interrupted_buffer_but_flush_and_stop_discard_it() {
         let clock = Arc::new(Clock::new());
-        let mut pacer = Pacer::new("pacer", ffmpeg::Rational::new(1, 1), clock.clone()).unwrap();
+        let mut pacer = paced("pacer", ffmpeg::Rational::new(1, 1), &clock);
 
         clock.interrupt();
         pacer.consume(packet(0)).expect("interrupted consume");
@@ -359,7 +397,6 @@ mod tests {
 
     #[test]
     fn new_rejects_an_invalid_time_base() {
-        let clock = Arc::new(Clock::new());
         for rational in [
             ffmpeg::Rational::new(0, 1),
             ffmpeg::Rational::new(1, 0),
@@ -368,7 +405,7 @@ mod tests {
         ] {
             assert!(
                 matches!(
-                    Pacer::new("pacer", rational, clock.clone()),
+                    Pacer::new("pacer", rational),
                     Err(PacerError::InvalidTimeBase { .. })
                 ),
                 "expected {rational} to be rejected"
@@ -388,7 +425,7 @@ mod tests {
     #[test]
     fn preroll_forwards_without_waiting_out_the_presentation_time() {
         let clock = Arc::new(Clock::new());
-        let mut pacer = Pacer::new("pacer", ffmpeg::Rational::new(1, 1), clock).unwrap();
+        let mut pacer = paced("pacer", ffmpeg::Rational::new(1, 1), &clock);
         let context = Arc::new(PrerollContext::for_seek([], Duration::from_secs(2)));
         pacer
             .control(ControlMsg::Preroll(context))
@@ -402,6 +439,23 @@ mod tests {
             started.elapsed() < Duration::from_millis(100),
             "a minute of presentation time must not be waited out during preroll"
         );
+    }
+
+    /// A pacer that was never wired into a pipeline has no clock, and the
+    /// one thing it must not do is let the buffer through: unpaced is a
+    /// whole stream arriving at once, and silently.
+    ///
+    /// Unreachable through ordinary wiring — `attach_context` runs when a
+    /// branch is built, and a branch cannot carry buffers before it exists —
+    /// which is exactly why it is worth a typed error rather than a
+    /// debug_assert nobody runs.
+    #[test]
+    fn an_unwired_pacer_refuses_rather_than_passing_a_buffer_through() {
+        let mut pacer = Pacer::new("pacer", ffmpeg::Rational::new(1, 1)).unwrap();
+        assert!(matches!(
+            pacer.consume(packet(0)),
+            Err(crate::error::Error::PacerError(PacerError::NotAttached))
+        ));
     }
 
     /// Regression test for the sync this exists to keep. A container's
@@ -418,8 +472,8 @@ mod tests {
         let clock = Arc::new(Clock::new());
         // Milliseconds, so the numbers below read as what they are.
         let unit = ffmpeg::Rational::new(1, 1000);
-        let mut audio = Pacer::new("audio", unit, clock.clone()).unwrap();
-        let mut video = Pacer::new("video", unit, clock.clone()).unwrap();
+        let mut audio = paced("audio", unit, &clock);
+        let mut video = paced("video", unit, &clock);
 
         let started = Instant::now();
         assert!(
@@ -449,7 +503,7 @@ mod tests {
     #[test]
     fn a_pathological_pts_jump_is_a_typed_error_not_silent_passthrough() {
         let clock = Arc::new(Clock::new());
-        let mut pacer = Pacer::new("pacer", ffmpeg::Rational::new(1, 1), clock).unwrap();
+        let mut pacer = paced("pacer", ffmpeg::Rational::new(1, 1), &clock);
 
         assert!(pacer.consume(packet(-1)).is_ok(), "establishes the origin");
 

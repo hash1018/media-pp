@@ -96,7 +96,7 @@ mod windows_example {
             // exposes its own codec parameters for exactly this case.
             let params = encoder.parameters();
             let decoder = SwDecoder::new("decoder", params).expect("failed to open decoder");
-            let pacer = Pacer::new("pacer", time_base, ctx.clock.clone())?;
+            let pacer = Pacer::new("pacer", time_base)?;
             let renderer =
                 render_common::d3d12_window_renderer("renderer", &gpu, hwnd, width, height)
                     .expect("failed to create renderer");
@@ -214,7 +214,7 @@ mod linux_example {
                 },
             )?;
             let decoder = SwDecoder::new("decoder", encoder.parameters())?;
-            let pacer = Pacer::new("pacer", time_base, ctx.clock.clone())?;
+            let pacer = Pacer::new("pacer", time_base)?;
             let scaler = SwScaler::new(
                 "to-nv12",
                 ffmpeg::format::Pixel::NV12,

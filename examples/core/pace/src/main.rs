@@ -56,7 +56,7 @@ mod example {
 
         let pipeline = Pipeline::new("pace", source, |source, ctx| {
             let decoder = SwDecoder::new("decoder", params).expect("failed to open decoder");
-            let pacer = Pacer::new("pacer", time_base, ctx.clock.clone())?;
+            let pacer = Pacer::new("pacer", time_base)?;
             let branch = ctx
                 .branch()
                 .pipe(decoder) // same thread as the demux — cheap enough not to need a queue

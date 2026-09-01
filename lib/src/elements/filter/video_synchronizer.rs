@@ -70,7 +70,9 @@ pub struct VideoSynchronizer {
     pp_log: PpLog,
     name: Arc<str>,
     time_base: TimeBase,
-    playback_clock: Arc<PlaybackClock>,
+    /// The pipeline's, given by `Element::attach_context` — see there for
+    /// why this is not something the caller supplies.
+    playback_clock: Option<Arc<PlaybackClock>>,
     interrupt_epoch: u64,
     /// Preroll forwards frames without waiting on the paused playback clock.
     prerolling: bool,
@@ -85,7 +87,6 @@ impl VideoSynchronizer {
     pub fn new(
         name: impl Into<String>,
         time_base: ffmpeg::Rational,
-        playback_clock: Arc<PlaybackClock>,
     ) -> Result<Self, VideoSynchronizerError> {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::VideoSynchronizer, &name, None);
@@ -98,14 +99,14 @@ impl VideoSynchronizer {
                 denominator,
             },
         )?;
-        let interrupt_epoch = playback_clock.interrupt_epoch();
+
         pp_info!(pp_log: &pp_log, "created: time_base={time_base:?}");
         Ok(Self {
             name: name.clone(),
             pp_log,
             time_base,
-            playback_clock,
-            interrupt_epoch,
+            playback_clock: None,
+            interrupt_epoch: 0,
             prerolling: false,
             last_pts: None,
             frame_duration: FALLBACK_FRAME_DURATION,
@@ -141,8 +142,16 @@ impl VideoSynchronizer {
             return WaitOutcome::Render;
         }
         self.observe_frame_duration(pts);
+        // Unwired: nothing has given this one a pipeline, so there is no
+        // position to schedule against and nothing to interrupt it either.
+        // Rendering is the only answer that does not stall a branch that
+        // was built wrong — and `attach_context` runs before any frame can
+        // reach here, so it is unreachable through ordinary wiring.
+        let Some(playback_clock) = self.playback_clock.clone() else {
+            return WaitOutcome::Render;
+        };
         loop {
-            if self.playback_clock.interrupt_epoch() != self.interrupt_epoch {
+            if playback_clock.interrupt_epoch() != self.interrupt_epoch {
                 return WaitOutcome::Interrupted;
             }
             match self.decision_without_observing(pts) {
@@ -156,7 +165,10 @@ impl VideoSynchronizer {
 
     fn decision_without_observing(&self, pts: i64) -> Decision {
         let frame_ns = self.timestamp_ns(pts);
-        let (master, position) = self.playback_clock.video_snapshot(frame_ns);
+        let Some(playback_clock) = &self.playback_clock else {
+            return Decision::Render;
+        };
+        let (master, position) = playback_clock.video_snapshot(frame_ns);
         match master {
             PlaybackMaster::Unavailable => Decision::Render,
             PlaybackMaster::AudioPriming => Decision::Hold,
@@ -204,6 +216,11 @@ impl Element for VideoSynchronizer {
     fn pp_log_mut(&mut self) -> &mut PpLog {
         &mut self.pp_log
     }
+
+    fn attach_context(&mut self, context: &Arc<crate::element::Context>) {
+        self.interrupt_epoch = context.playback_clock.interrupt_epoch();
+        self.playback_clock = Some(Arc::clone(&context.playback_clock));
+    }
 }
 
 impl Source for VideoSynchronizer {
@@ -250,7 +267,9 @@ impl Sink for VideoSynchronizer {
     }
 
     fn control(&mut self, msg: ControlMsg) -> crate::error::Result<()> {
-        self.interrupt_epoch = self.playback_clock.interrupt_epoch();
+        if let Some(playback_clock) = &self.playback_clock {
+            self.interrupt_epoch = playback_clock.interrupt_epoch();
+        }
         match msg {
             ControlMsg::Flush | ControlMsg::Stop => {
                 self.pending.clear();
@@ -285,14 +304,28 @@ mod tests {
         pool::UnboundObjectPool,
     };
 
-    fn synchronizer(clock: Arc<PlaybackClock>) -> VideoSynchronizer {
-        VideoSynchronizer::new("sync", ffmpeg::Rational::new(1, 1_000), clock).unwrap()
+    /// A synchronizer wired the way a pipeline wires one, and the playback
+    /// clock it will schedule against.
+    ///
+    /// The clock comes back out of the context rather than going in: a test
+    /// cannot hand one to the element any more, which is the point of the
+    /// change these tests are checking.
+    fn synchronizer() -> (VideoSynchronizer, Arc<PlaybackClock>) {
+        let context = Arc::new(crate::element::Context::for_test_with_clock(
+            crate::bus::Bus::new().0,
+            "test",
+            crate::graph::PipelineGraph::new(),
+            crate::graph::ElementId::for_test(1),
+            Arc::new(Clock::new()),
+        ));
+        let mut sync = VideoSynchronizer::new("sync", ffmpeg::Rational::new(1, 1_000)).unwrap();
+        sync.attach_context(&context);
+        (sync, Arc::clone(&context.playback_clock))
     }
 
     #[test]
     fn first_video_timestamp_establishes_wall_origin() {
-        let playback = Arc::new(PlaybackClock::new(Arc::new(Clock::new())));
-        let mut sync = synchronizer(playback.clone());
+        let (mut sync, playback) = synchronizer();
         assert!(matches!(sync.decision(5_000), Decision::Render));
         assert_eq!(playback.master(), PlaybackMaster::Wall);
         assert!(playback.position_ns().unwrap() >= 5_000_000_000);
@@ -300,8 +333,7 @@ mod tests {
 
     #[test]
     fn audio_priming_holds_video_and_audio_master_drops_late_frames() {
-        let playback = Arc::new(PlaybackClock::new(Arc::new(Clock::new())));
-        let mut sync = synchronizer(playback.clone());
+        let (mut sync, playback) = synchronizer();
         let audio = playback.register_audio_master().unwrap();
         assert!(matches!(sync.decision(1_000), Decision::Hold));
 
@@ -312,12 +344,11 @@ mod tests {
 
     #[test]
     fn invalid_time_base_and_non_video_input_are_typed_errors() {
-        let playback = Arc::new(PlaybackClock::new(Arc::new(Clock::new())));
         assert!(matches!(
-            VideoSynchronizer::new("sync", ffmpeg::Rational::new(0, 1), playback.clone()),
+            VideoSynchronizer::new("sync", ffmpeg::Rational::new(0, 1)),
             Err(VideoSynchronizerError::InvalidTimeBase { .. })
         ));
-        let mut sync = synchronizer(playback);
+        let (mut sync, _playback) = synchronizer();
         assert!(matches!(
             sync.consume(MediaBuffer::Packet(Arc::new(ffmpeg::Packet::empty()))),
             Err(crate::error::Error::VideoSynchronizerError(_))
@@ -340,9 +371,8 @@ mod tests {
     /// branches it happens to be on.
     #[test]
     fn preroll_bypasses_clock_scheduling_and_resume_restores_it() {
-        let playback = Arc::new(PlaybackClock::new(Arc::new(Clock::new())));
+        let (mut sync, playback) = synchronizer();
         let _audio = playback.register_audio_master().unwrap();
-        let mut sync = synchronizer(playback);
         let context = Arc::new(PrerollContext::for_seek([], Duration::from_secs(2)));
 
         // Audio has primed nothing, so ordinary scheduling would hold here.

@@ -102,6 +102,14 @@ The core types are deliberately small:
 - `SrcPad` connects one source output to one downstream sink.
 - `Queue` introduces a bounded worker-thread boundary. Downstream errors are
   reported through the pipeline `Bus`, and the worker continues.
+- An element takes what it *is* — its name, the stream it handles, its own
+  options — and the pipeline gives it the rest. `Element::attach_context`
+  hands over the clock, the playback clock and the bus when the element is
+  wired, the same way the pipeline's identity is stamped onto its log. This
+  is not tidiness: a `Pacer` handed a clock from somewhere else goes on
+  pacing through a paused pipeline, and an audio renderer registered on a
+  foreign `PlaybackClock` claims a master slot nothing reads. Both fail
+  silently, and neither is now expressible.
 - `Pipeline` owns source threads, control flow, the shared clock, bus, and
   topology graph.
 - `Tee` provides fan-out; `AudioMixer` and the video compositors provide

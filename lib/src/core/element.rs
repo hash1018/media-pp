@@ -195,6 +195,49 @@ pub trait Element: Send {
     /// passes through it, via [`element_pp_log`]. Not meant to be called
     /// from anywhere else.
     fn pp_log_mut(&mut self) -> &mut PpLog;
+
+    /// Hands this element the pipeline it is being wired into, at the moment
+    /// and for the reason [`Element::pp_log_mut`] hands it the pipeline's
+    /// identity: the clock, the playback clock and the bus are the
+    /// pipeline's to give, not the caller's to choose.
+    ///
+    /// # Why this is not a constructor argument
+    ///
+    /// It used to be, and an element could then be handed a clock from
+    /// somewhere else entirely. That fails quietly. A [`Pacer`] on a foreign
+    /// clock never sees `Pipeline::pause` shift the anchor and goes on
+    /// pacing through a paused pipeline; an audio renderer registered on a
+    /// foreign [`PlaybackClock`] *succeeds* — nothing is holding that one —
+    /// and the video scheduled against the pipeline's own clock simply never
+    /// hears about it. No error either way, just timing that does not work.
+    ///
+    /// Taking it here instead makes the mistake unrepresentable: there is
+    /// nowhere else to get one from.
+    ///
+    /// # What an implementation should do
+    ///
+    /// Take what it needs and let the rest go. Holding the context keeps the
+    /// graph and the bus alive for as long as the element, and invites
+    /// reaching into the pipeline at moments it is not expecting one.
+    /// [`crate::elements::Tee`] is the exception and has a reason: it builds
+    /// branches later.
+    ///
+    /// Called once, before any buffer arrives — from the branch wiring for a
+    /// filter or a terminal, and from
+    /// [`crate::pipeline::PipelineBuilder::add_source`] for a source. An
+    /// element that needs something from it and never receives one has been
+    /// built outside a pipeline, which is a wiring mistake rather than a
+    /// runtime condition; say so with a typed error rather than carrying on
+    /// unpaced.
+    ///
+    /// Claiming something exclusive here — the playback clock's audio master
+    /// is the only such thing today — is settled once, when the element is
+    /// wired. A second claimant loses and is not offered the role again if
+    /// the first one later goes away.
+    ///
+    /// [`Pacer`]: crate::elements::Pacer
+    /// [`PlaybackClock`]: crate::playback_clock::PlaybackClock
+    fn attach_context(&mut self, _context: &Arc<Context>) {}
 }
 
 /// Builds the [`PpLog`] every element constructs for its own [`Element::pp_log`]
@@ -266,7 +309,19 @@ impl Context {
         graph: PipelineGraph,
         source_id: ElementId,
     ) -> Self {
-        let clock = Arc::new(Clock::new());
+        Self::for_test_with_clock(bus, pipeline_id, graph, source_id, Arc::new(Clock::new()))
+    }
+
+    /// The same, around a clock the test already holds — what a test that
+    /// interrupts or pauses a paced element needs, since the element now
+    /// takes its clock from a context rather than from the caller.
+    pub(crate) fn for_test_with_clock(
+        bus: Bus,
+        pipeline_id: impl Into<Arc<str>>,
+        graph: PipelineGraph,
+        source_id: ElementId,
+        clock: Arc<Clock>,
+    ) -> Self {
         Self {
             bus,
             pipeline_id: pipeline_id.into(),

@@ -77,7 +77,7 @@ mod windows_example {
             .ok_or_else(|| media_pp::Error::Other("no matching render device found".into()))?;
         println!("selected: {}", device.name);
 
-        let (mut renderer, output_format) =
+        let (renderer, output_format) =
             WasapiRenderer::open("speakers", WasapiRendererOptions { device })
                 .map_err(|error| media_pp::Error::Other(error.to_string()))?;
         println!(
@@ -92,7 +92,6 @@ mod windows_example {
         let resampler = AudioResampler::new("resampler", output_format, source.time_base())?;
         let (volume, volume_handle) = AudioVolume::new("volume");
         let pipeline = Pipeline::new("audio-playback", source, |source, context| {
-            renderer.bind_playback_clock(context.playback_clock.clone())?;
             let branch = context
                 .branch()
                 .pipe(resampler)
@@ -186,7 +185,7 @@ mod linux_example {
             .ok_or_else(|| media_pp::Error::Other("no matching playback device found".into()))?;
         println!("selected: {}", device.name);
 
-        let (mut renderer, output_format) =
+        let (renderer, output_format) =
             PipeWireAudioRenderer::open("speakers", PipeWireAudioRendererOptions { device })
                 .map_err(|error| media_pp::Error::Other(error.to_string()))?;
         println!(
@@ -201,7 +200,6 @@ mod linux_example {
         let resampler = AudioResampler::new("resampler", output_format, source.time_base())?;
         let (volume, volume_handle) = AudioVolume::new("volume");
         let pipeline = Pipeline::new("audio-playback", source, |source, context| {
-            renderer.bind_playback_clock(context.playback_clock.clone())?;
             let branch = context
                 .branch()
                 .pipe(resampler)

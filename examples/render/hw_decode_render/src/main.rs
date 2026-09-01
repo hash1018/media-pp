@@ -94,7 +94,7 @@ mod windows_example {
             // zero-copy path to be valid at all (see D3d12Decoder::new).
             let decoder = D3d12Decoder::new("decoder", params, gpu.device())
                 .expect("failed to open D3D12VA decoder");
-            let pacer = Pacer::new("pacer", time_base, ctx.clock.clone())?;
+            let pacer = Pacer::new("pacer", time_base)?;
             let renderer =
                 render_common::d3d12_window_renderer("renderer", &gpu, hwnd, width, height)
                     .expect("failed to create renderer");
@@ -201,7 +201,7 @@ mod linux_example {
         let pipeline = Pipeline::new("hw-decode-render", source, |source, ctx| {
             let decoder = CudaDecoder::new("decoder", params, &cuda, VIDEO_QUEUE_DEPTH as i32)
                 .map_err(|error| Error::Other(error.to_string()))?;
-            let pacer = Pacer::new("pacer", time_base, ctx.clock.clone())?;
+            let pacer = Pacer::new("pacer", time_base)?;
             let renderer = render_common::cuda_window_renderer(
                 "renderer",
                 &gpu,

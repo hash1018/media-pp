@@ -92,6 +92,7 @@ impl PipelineBuilder {
             operation: Arc::clone(&self.operation),
             source_id,
         });
+        source.attach_context(&context);
         wire(&mut source, &context)?;
         self.sources.push((source_id, Box::new(source)));
         self.control_pairs.push(control::channel());

@@ -108,7 +108,7 @@ mod windows_example {
                 OUTPUT_WIDTH,
                 OUTPUT_HEIGHT,
             )?;
-            let pacer = Pacer::new("pacer", time_base, ctx.clock.clone())?;
+            let pacer = Pacer::new("pacer", time_base)?;
             let renderer =
                 render_common::d3d11_window_renderer("renderer", &gpu, hwnd, width, height)
                     .expect("failed to create renderer");

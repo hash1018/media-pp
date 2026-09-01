@@ -154,7 +154,6 @@ mod windows_example {
                 .pipe(VideoSynchronizer::new(
                     "video-sync",
                     streams.video_time_base,
-                    context.playback_clock.clone(),
                 )?)
                 // After the synchronizer, not before: a frame it drops for
                 // being late never pays for the conversion or the upload.
@@ -208,9 +207,8 @@ mod windows_example {
             let time_base = streams.audio_time_base;
             std::thread::spawn(move || {
                 let attach_tee = tee.clone();
-                let attach_pipeline = pipeline.clone();
                 crate::shell::read_commands(pipeline.clone(), tee, "WASAPI", move || {
-                    attach_audio(&attach_pipeline, &attach_tee, &params, time_base)
+                    attach_audio(&attach_tee, &params, time_base)
                 });
             });
         }
@@ -220,7 +218,6 @@ mod windows_example {
     }
 
     fn attach_audio(
-        pipeline: &Pipeline,
         audio_tee: &media_pp::elements::TeeHandle,
         audio_params: &media_pp::ffmpeg::codec::Parameters,
         audio_time_base: media_pp::ffmpeg::Rational,
@@ -231,9 +228,8 @@ mod windows_example {
             .find(|device| device.is_default)
             .ok_or_else(|| Error::Other("no default WASAPI render endpoint".into()))?;
         let device_name = device.name.clone();
-        let (mut audio_renderer, output_format) =
+        let (audio_renderer, output_format) =
             WasapiRenderer::open("speakers", WasapiRendererOptions { device })?;
-        audio_renderer.bind_playback_clock_deferred(pipeline.playback_clock().clone())?;
 
         let branch = audio_tee
             .branch()
@@ -316,7 +312,6 @@ mod linux_example {
                 .pipe(VideoSynchronizer::new(
                     "video-sync",
                     streams.video_time_base,
-                    context.playback_clock.clone(),
                 )?)
                 .to(Box::new(
                     render_common::cuda_window_renderer(
@@ -354,9 +349,8 @@ mod linux_example {
             let time_base = streams.audio_time_base;
             std::thread::spawn(move || {
                 let attach_tee = tee.clone();
-                let attach_pipeline = pipeline.clone();
                 crate::shell::read_commands(pipeline.clone(), tee, "PipeWire", move || {
-                    attach_audio(&attach_pipeline, &attach_tee, &params, time_base)
+                    attach_audio(&attach_tee, &params, time_base)
                 });
             });
         }
@@ -366,7 +360,6 @@ mod linux_example {
     }
 
     fn attach_audio(
-        pipeline: &Pipeline,
         audio_tee: &TeeHandle,
         audio_params: &media_pp::ffmpeg::codec::Parameters,
         audio_time_base: media_pp::ffmpeg::Rational,
@@ -377,10 +370,9 @@ mod linux_example {
             .find(|device| device.is_default)
             .ok_or_else(|| Error::Other("no default PipeWire playback device".into()))?;
         let device_name = device.name.clone();
-        let (mut audio_renderer, output_format) =
+        let (audio_renderer, output_format) =
             PipeWireAudioRenderer::open("speakers", PipeWireAudioRendererOptions { device })
                 .map_err(|error| Error::Other(error.to_string()))?;
-        audio_renderer.bind_playback_clock_deferred(pipeline.playback_clock().clone())?;
 
         let branch = audio_tee
             .branch()

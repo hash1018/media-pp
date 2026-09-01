@@ -101,7 +101,7 @@ mod windows_example {
             // included in this value.
             let decoder = D3d11Decoder::new("decoder", params, gpu.device(), 32)
                 .expect("failed to open D3D11VA decoder");
-            let pacer = Pacer::new("pacer", time_base, ctx.clock.clone())?;
+            let pacer = Pacer::new("pacer", time_base)?;
             let renderer =
                 render_common::d3d11_window_renderer("renderer", &gpu, hwnd, width, height)
                     .expect("failed to create renderer");

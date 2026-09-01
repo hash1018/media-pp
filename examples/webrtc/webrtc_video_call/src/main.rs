@@ -231,7 +231,6 @@ mod common {
     use super::windows_example as platform;
     use media_pp::{
         bus::BusEvent,
-        clock::Clock,
         element::Element,
         elements::{
             AttachedTrack, FileDemuxer, Pacer, SwDecoder, SwEncoder, SwEncoderOptions, SwScaler,
@@ -531,7 +530,7 @@ mod common {
         } = file;
 
         let decoder = SwDecoder::new("decode-file", params)?;
-        let pacer = Pacer::new("pace-file", time_base, Arc::new(Clock::new()))?;
+        let pacer = Pacer::new("pace-file", time_base)?;
         let scaler = SwScaler::new(
             "scale-file",
             ffmpeg::format::Pixel::YUV420P,

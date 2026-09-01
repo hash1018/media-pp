@@ -51,7 +51,7 @@ mod example {
 
         let pipeline = Pipeline::new("rtsp-publish", source, |source, ctx| {
             let sink = RtspSink::open("rtsp", url.clone(), RtspTransport::Tcp, params, time_base)?;
-            let pacer = Pacer::new("pacer", time_base, ctx.clock.clone())?;
+            let pacer = Pacer::new("pacer", time_base)?;
             let branch = ctx
                 .branch()
                 .queue("packets", 32) // pacer sleeps on its own thread; let demux run ahead into this

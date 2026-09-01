@@ -59,11 +59,17 @@ impl DetachedBranch {
 }
 
 trait StageBuilder: Send {
+    /// Turns one planned stage into a live `Sink` in front of `downstream`.
+    ///
+    /// Takes the whole `Context` rather than the pieces it needs, because
+    /// what a stage needs from its pipeline has grown twice already — the
+    /// bus, the id, and now the clocks — and each addition changed every
+    /// implementation. One handle is also what makes it impossible to build
+    /// a stage against one pipeline's identity and another's timing.
     fn wrap(
         self: Box<Self>,
         downstream: Box<dyn Sink>,
-        bus: &Bus,
-        pipeline_id: &str,
+        context: &Arc<Context>,
     ) -> Result<Box<dyn Sink>>;
 }
 
@@ -160,12 +166,15 @@ where
     fn wrap(
         self: Box<Self>,
         downstream: Box<dyn Sink>,
-        _bus: &Bus,
-        pipeline_id: &str,
+        context: &Arc<Context>,
     ) -> Result<Box<dyn Sink>> {
         let mut element = self.0;
-        *element.pp_log_mut() =
-            element_pp_log(element.element_type(), &element.name(), Some(pipeline_id));
+        *element.pp_log_mut() = element_pp_log(
+            element.element_type(),
+            &element.name(),
+            Some(&context.pipeline_id),
+        );
+        element.attach_context(context);
         element.src_pads()[0].link(downstream);
         Ok(Box::new(FlowTracer { inner: element }))
     }
@@ -328,16 +337,18 @@ impl StageBuilder for QueueStage {
     fn wrap(
         self: Box<Self>,
         downstream: Box<dyn Sink>,
-        bus: &Bus,
-        pipeline_id: &str,
+        context: &Arc<Context>,
     ) -> Result<Box<dyn Sink>> {
+        // No `attach_context`: a `Queue` is built here rather than handed in,
+        // so there is no chance of it having been given another pipeline's
+        // anything.
         Ok(Box::new(Queue::spawn_with_policy(
             self.name,
             self.capacity,
             downstream,
-            bus.for_element(self.id),
+            context.bus.for_element(self.id),
             self.policy,
-            Some(pipeline_id),
+            Some(&context.pipeline_id),
         )?))
     }
 }
@@ -441,6 +452,7 @@ impl ChainBuilder {
             &terminal.name(),
             Some(&self.context.pipeline_id),
         );
+        terminal.attach_context(&self.context);
         let terminal_info = NodeInfo {
             id: terminal
                 .graph_id()
@@ -513,7 +525,7 @@ impl ChainBuilder {
             .into_iter()
             .rev()
             .try_fold(terminal, |downstream, stage| {
-                stage.wrap(downstream, &self.context.bus, &self.context.pipeline_id)
+                stage.wrap(downstream, &self.context)
             })?;
         Ok(DetachedBranch { root, plan })
     }
@@ -596,7 +608,7 @@ impl ChainBuilder {
             .into_iter()
             .rev()
             .try_fold(sink, |downstream, stage| {
-                stage.wrap(downstream, &self.context.bus, &self.context.pipeline_id)
+                stage.wrap(downstream, &self.context)
             })?;
         Ok(DetachedBranch { root, plan })
     }

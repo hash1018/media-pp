@@ -529,45 +529,6 @@ impl PipeWireAudioRenderer {
         self.format
     }
 
-    /// Makes this node the pipeline's exclusive audio playback master. Call
-    /// during the wiring closure, before boxing the renderer into its terminal
-    /// branch.
-    pub fn bind_playback_clock(
-        &mut self,
-        playback_clock: Arc<PlaybackClock>,
-    ) -> std::result::Result<(), PipeWireAudioRendererError> {
-        self.check_bindable()?;
-        let master = playback_clock.register_audio_master()?;
-        self.clock_binding = PlaybackClockBinding::Registered(master);
-        Ok(())
-    }
-
-    /// Binds a dynamically attached node without claiming the audio-master slot
-    /// until its first audio frame arrives.
-    ///
-    /// This avoids a priming deadlock when an upstream demuxer can block on a
-    /// full video queue before reaching the first packet for the newly attached
-    /// audio branch. Unlike [`Self::bind_playback_clock`], an exclusive-master
-    /// conflict is therefore returned from that first [`Sink::consume`] call.
-    pub fn bind_playback_clock_deferred(
-        &mut self,
-        playback_clock: Arc<PlaybackClock>,
-    ) -> std::result::Result<(), PipeWireAudioRendererError> {
-        self.check_bindable()?;
-        self.clock_binding = PlaybackClockBinding::Deferred(playback_clock);
-        Ok(())
-    }
-
-    fn check_bindable(&self) -> std::result::Result<(), PipeWireAudioRendererError> {
-        if self.clock_binding.is_bound() {
-            return Err(PipeWireAudioRendererError::PlaybackClockAlreadyBound);
-        }
-        if self.timeline.is_some() {
-            return Err(PipeWireAudioRendererError::PlaybackClockBoundAfterStart);
-        }
-        Ok(())
-    }
-
     /// Nanoseconds `frames` samples occupy at the negotiated rate.
     /// The same span as [`Self::frames_ns`], as a `Duration` to wait for.
     fn frames_duration(&self, frames: u64) -> Duration {
@@ -878,6 +839,23 @@ impl Element for PipeWireAudioRenderer {
 
     fn pp_log_mut(&mut self) -> &mut PpLog {
         &mut self.pp_log
+    }
+
+    /// Takes the pipeline's playback clock, and claims its audio-master slot
+    /// on the first frame rather than here.
+    ///
+    /// Deferred deliberately. Claiming it now would move the clock into
+    /// `AudioPriming` the moment this is wired, and video scheduled against
+    /// the same clock would then hold for audio that has not started — a
+    /// branch attached to a running `Tee` can sit behind a demuxer blocked on
+    /// a full video queue, which is exactly the deadlock this ordering
+    /// avoids. An exclusive-master conflict therefore surfaces from the first
+    /// `consume` rather than from wiring.
+    fn attach_context(&mut self, context: &Arc<crate::element::Context>) {
+        if !self.clock_binding.is_bound() {
+            self.clock_binding =
+                PlaybackClockBinding::Deferred(Arc::clone(&context.playback_clock));
+        }
     }
 }
 

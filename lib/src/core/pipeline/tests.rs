@@ -852,7 +852,7 @@ fn seek_repositions_and_playback_continues() {
     // `seek_reports_where_it_actually_landed_when_target_is_not_a_keyframe`
     // for how this was found).
     let pipeline = Pipeline::new("test", source, |source, ctx| {
-        let pacer = Pacer::new("pacer", time_base, ctx.clock.clone())?;
+        let pacer = Pacer::new("pacer", time_base)?;
         let branch = ctx.branch().queue("q", 4).pipe(pacer).to(Box::new(sink))?;
         ctx.attach(source, index, branch)?;
         Ok(())
@@ -910,7 +910,7 @@ fn seek_reports_where_it_actually_landed_when_target_is_not_a_keyframe() {
     // Paced for the same reason as `seek_repositions_and_playback_continues`
     // — otherwise the file finishes before `seek()` is even called.
     let pipeline = Pipeline::new("test", source, |source, ctx| {
-        let pacer = Pacer::new("pacer", time_base, ctx.clock.clone())?;
+        let pacer = Pacer::new("pacer", time_base)?;
         let branch = ctx
             .branch()
             .queue("q", 4)
@@ -1118,7 +1118,7 @@ fn topology_lists_source_through_terminal_per_branch() {
     let time_base = source.stream_time_base(index).expect("stream disappeared");
 
     let pipeline = Pipeline::new("test", source, |source, ctx| {
-        let pacer = Pacer::new("pacer", time_base, ctx.clock.clone())?;
+        let pacer = Pacer::new("pacer", time_base)?;
         let branch = ctx
             .branch()
             .queue("q", 4)
@@ -1255,7 +1255,7 @@ fn topology_attributes_a_fan_out_to_the_stage_that_feeds_it() {
             .branch(branch_b)
             .build()?;
 
-        let pacer = Pacer::new("pacer", time_base, ctx.clock.clone())?;
+        let pacer = Pacer::new("pacer", time_base)?;
         let branch = ctx.branch().pipe(pacer).to_branch(tee_branch)?;
         ctx.attach(source, index, branch)?;
         Ok(())
@@ -2335,12 +2335,8 @@ fn a_video_synchronizer_carries_the_contract_past_itself() {
     use crate::elements::{PacketCounter, VideoSynchronizer};
 
     let context = contract_context();
-    let sync = VideoSynchronizer::new(
-        "sync",
-        ffmpeg::Rational::new(1, 90_000),
-        context.playback_clock.clone(),
-    )
-    .expect("a valid time base opens the synchronizer");
+    let sync = VideoSynchronizer::new("sync", ffmpeg::Rational::new(1, 90_000))
+        .expect("a valid time base opens the synchronizer");
 
     let (counter, _count) = PacketCounter::new("counter");
     let Err(error) = context
@@ -2560,12 +2556,8 @@ fn a_passthrough_at_the_head_of_a_branch_still_carries_the_downstream_requiremen
     let branch = context
         .branch()
         .pipe(
-            VideoSynchronizer::new(
-                "sync",
-                ffmpeg::Rational::new(1, 90_000),
-                context.playback_clock.clone(),
-            )
-            .expect("a valid time base opens the synchronizer"),
+            VideoSynchronizer::new("sync", ffmpeg::Rational::new(1, 90_000))
+                .expect("a valid time base opens the synchronizer"),
         )
         .to(Box::new(renderer))
         .expect("nothing is flowing yet, so the branch alone is consistent");
@@ -2617,12 +2609,8 @@ fn a_passthrough_at_the_head_of_a_branch_accepts_a_matching_source() {
     let branch = context
         .branch()
         .pipe(
-            VideoSynchronizer::new(
-                "sync",
-                ffmpeg::Rational::new(1, 90_000),
-                context.playback_clock.clone(),
-            )
-            .expect("a valid time base opens the synchronizer"),
+            VideoSynchronizer::new("sync", ffmpeg::Rational::new(1, 90_000))
+                .expect("a valid time base opens the synchronizer"),
         )
         .pipe(D3d11Upload::new("upload", &device, 64, 64))
         .to(Box::new(renderer))
@@ -2914,7 +2902,7 @@ fn a_paused_seek_leaves_every_branch_holding_one_sample_at_the_target() {
         let video_branch = ctx
             .branch()
             .pipe(SwDecoder::new("video-decoder", video_params)?)
-            .pipe(Pacer::new("video-pacer", video_tb, ctx.clock.clone())?)
+            .pipe(Pacer::new("video-pacer", video_tb)?)
             .queue("video-frames", 8)
             .to(Box::new(PrerollProbe {
                 label: "video",
@@ -3050,7 +3038,7 @@ fn accurate_seek_at_known_eof_selects_the_last_presentable_frame() {
         let branch = ctx
             .branch()
             .pipe(SwDecoder::new("decoder", params)?)
-            .pipe(Pacer::new("pacer", time_base, Arc::clone(&ctx.clock))?)
+            .pipe(Pacer::new("pacer", time_base)?)
             .to(Box::new(PrerollProbe {
                 label: "video-terminal",
                 time_base,
