@@ -75,7 +75,7 @@ pub use compositor::{
     SwVideoCompositorInputSink, SwVideoLayerHandle, TextLayer, VideoCompositorOptions, VideoFit,
     VideoInputId, VideoLayer, VideoRect,
 };
-pub use file_demuxer::{FileDemuxError, FileDemuxer, StreamInfo};
+pub use file_demuxer::{FileDemuxError, FileDemuxer, FileDemuxerHandle, StreamInfo};
 pub use rtsp_source::{RtspOptions, RtspSource, RtspSourceError};
 pub use test::{
     TestAudioOptions, TestAudioSource, TestAudioSourceError, TestVideoOptions, TestVideoSource,

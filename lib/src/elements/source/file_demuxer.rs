@@ -1,7 +1,15 @@
-use std::{collections::VecDeque, path::Path, sync::Arc, time::Duration};
+use std::{
+    collections::VecDeque,
+    path::Path,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
-use crate::pp_log::{PpLog, pp_error, pp_info};
-use ffmpeg_next as ffmpeg;
+use crate::pp_log::{PpLog, pp_debug, pp_error, pp_info};
+use ffmpeg_next::{self as ffmpeg, Rescale};
 use thiserror::Error as ThisError;
 
 use crate::{
@@ -32,6 +40,41 @@ pub struct StreamInfo {
     pub kind: ffmpeg::media::Type,
 }
 
+/// Runtime control for a [`FileDemuxer`], taken with
+/// [`FileDemuxer::looping_handle`] before the demuxer is moved into its
+/// pipeline.
+///
+/// Cheap to clone and safe to share: it holds one atomic flag and nothing
+/// else, so it keeps neither the demuxer, its file, nor its pipeline alive.
+/// No call blocks or does any work beyond that store. A call after the
+/// source has finished is simply never read.
+#[derive(Clone)]
+pub struct FileDemuxerHandle {
+    looping: Arc<AtomicBool>,
+}
+
+impl FileDemuxerHandle {
+    /// Whether reaching the end of the file starts it again instead of
+    /// ending the stream. Off unless this says otherwise.
+    ///
+    /// Read once per lap, at the end of the file — never mid-file. So
+    /// turning it off part way through means "play this lap out and then
+    /// finish", not "stop now", and the stream still ends with a real
+    /// `Eos` rather than being abandoned the way [`ControlMsg::Stop`]
+    /// abandons it. Turning it on part way through takes effect at the end
+    /// the source was already heading for.
+    ///
+    /// [`ControlMsg::Stop`]: crate::control::ControlMsg::Stop
+    pub fn set_looping(&self, looping: bool) {
+        self.looping.store(looping, Ordering::Relaxed);
+    }
+
+    /// What [`FileDemuxerHandle::set_looping`] last set.
+    pub fn is_looping(&self) -> bool {
+        self.looping.load(Ordering::Relaxed)
+    }
+}
+
 /// Demuxes a file, exposing one src pad per container stream (indexed the
 /// same way as `StreamInfo::index`). Linking a pad "selects" that stream;
 /// leaving it unlinked just drops its packets. Real demuxer I/O is
@@ -40,6 +83,18 @@ pub struct StreamInfo {
 /// Fan-out (e.g. routing video and audio to separate branches) needs no
 /// separate "Tee" element here — it's just a matter of linking more than
 /// one of these pads.
+///
+/// Set to loop through [`FileDemuxer::looping_handle`] and the end of the
+/// file rewinds to the start instead of ending the stream. Timestamps then
+/// keep climbing across the join rather than restarting: what a lap already
+/// reached is added to every later one, so a `Pacer` still paces, a muxer
+/// still sees its timestamps advance, and nothing downstream has to know a
+/// join happened. The consequence is that a looping source's timestamps are
+/// no longer positions *in the file* — one second into the third lap is at
+/// twice the file's length plus a second — and [`FileDemuxer::seek`] stays
+/// the way to speak in the file's own timeline.
+///
+/// [`FileDemuxer::seek`]: crate::element::SourceElement::seek
 pub struct FileDemuxer {
     pp_log: PpLog,
     name: Arc<str>,
@@ -67,6 +122,28 @@ pub struct FileDemuxer {
     /// Whether a preroll is running. Parking is only correct then: outside
     /// one, a blocked pad is ordinary backpressure this source must wait on.
     prerolling: bool,
+    /// Set through [`FileDemuxerHandle::set_looping`], read only where the
+    /// container runs out.
+    looping: Arc<AtomicBool>,
+    /// How far this source's output timeline has been carried past the
+    /// file's own, in microseconds: the sum of every lap already played.
+    /// Zero until the first wrap, so a source that never loops emits the
+    /// file's timestamps untouched.
+    ///
+    /// Microseconds because one lap has to be one length for every stream.
+    /// Measuring each stream's own end separately would let audio and video
+    /// restart at different points and drift apart by that difference on
+    /// every lap.
+    loop_offset: i64,
+    /// The furthest into the file, in the same units, any packet read this
+    /// lap reaches — what `loop_offset` grows by at the next wrap.
+    ///
+    /// A running maximum that only the wrap resets. A seek backwards does
+    /// not un-deliver what already went downstream, so the lap stays as long
+    /// as its furthest packet; growing the offset by what was *played*
+    /// instead would drop the next lap on top of timestamps a muxer has
+    /// already written.
+    lap_end: i64,
 }
 
 impl FileDemuxer {
@@ -123,9 +200,22 @@ impl FileDemuxer {
                 pads,
                 pending: VecDeque::new(),
                 pending_bytes: 0,
+                looping: Arc::new(AtomicBool::new(false)),
+                loop_offset: 0,
+                lap_end: 0,
             },
             streams,
         ))
+    }
+
+    /// The control endpoint for looping this file, valid for as long as the
+    /// demuxer runs — take it here, before moving the demuxer into its
+    /// pipeline, and keep it for as long as the loop is meant to be
+    /// switchable. See [`FileDemuxerHandle::set_looping`].
+    pub fn looping_handle(&self) -> FileDemuxerHandle {
+        FileDemuxerHandle {
+            looping: self.looping.clone(),
+        }
     }
 
     /// Codec parameters for one of this file's streams — what you need to
@@ -143,6 +233,60 @@ impl FileDemuxer {
 
     fn stream(&self, index: usize) -> Option<ffmpeg::format::stream::Stream<'_>> {
         self.input.streams().find(|s| s.index() == index)
+    }
+
+    /// Puts a freshly read packet on this source's output timeline, and
+    /// records how far into the file this lap has now reached.
+    ///
+    /// Called at each of the two places a packet is read out of the
+    /// container — `run`'s cursor and `seek`'s read-ahead — rather than
+    /// where they are delivered. Stamping a time base is idempotent and
+    /// `deliver_or_park` can do it to the same packet twice; shifting a
+    /// timestamp is not.
+    ///
+    /// Only a linked pad's stream counts towards the lap's length. An
+    /// unlinked one is dropped rather than delivered, so letting a longer
+    /// audio track nobody selected decide where the video restarts would
+    /// only open a gap at every join.
+    fn stamp_lap(
+        &mut self,
+        index: usize,
+        time_base: ffmpeg::Rational,
+        packet: &mut ffmpeg::Packet,
+    ) {
+        if let Some(start) = packet.pts().or_else(|| packet.dts())
+            && self.pads.get(index).is_some_and(SrcPad::is_linked)
+        {
+            // A packet carrying no duration of its own still ends after it
+            // starts, and one tick is the least that keeps the next lap's
+            // first timestamp past this one's rather than equal to it.
+            let end = start.saturating_add(packet.duration().max(1));
+            self.lap_end = self.lap_end.max(end.rescale(time_base, microseconds()));
+        }
+        if self.loop_offset == 0 {
+            return;
+        }
+        let shift = self.loop_offset.rescale(microseconds(), time_base);
+        packet.set_pts(packet.pts().map(|pts| pts.saturating_add(shift)));
+        packet.set_dts(packet.dts().map(|dts| dts.saturating_add(shift)));
+    }
+
+    /// Starts the file again: carries the output timeline past the lap that
+    /// just ended, then rewinds the container.
+    ///
+    /// Ordering matters. The offset moves first so that the read-ahead
+    /// packet `seek` parks — the new lap's first — is stamped onto the new
+    /// timeline like every packet after it.
+    fn wrap(&mut self) -> crate::error::Result<()> {
+        self.loop_offset = self.loop_offset.saturating_add(self.lap_end);
+        self.lap_end = 0;
+        let landed = self.seek(Duration::ZERO)?;
+        pp_debug!(
+            self,
+            "looped: restarted at {landed:?}, timeline now {}us past the file's own",
+            self.loop_offset
+        );
+        Ok(())
     }
 
     /// Pushes `item` if its pad can take one now, otherwise parks it.
@@ -342,14 +486,37 @@ impl SourceElement for FileDemuxer {
                 .packets()
                 .next()
                 .map(|(s, p)| (s.index(), s.time_base(), p));
-            let Some((index, time_base, packet)) = next else {
-                if self.pending.is_empty() {
-                    break;
+            let Some((index, time_base, mut packet)) = next else {
+                if !self.pending.is_empty() {
+                    // Nothing left to read, but a blocked pad still owes
+                    // delivery.
+                    std::thread::sleep(Duration::from_millis(1));
+                    continue;
                 }
-                // Nothing left to read, but a blocked pad still owes delivery.
-                std::thread::sleep(Duration::from_millis(1));
-                continue;
+                // The end of the file, and the one place the loop flag is
+                // read: a change made mid-file lands here, at the end the
+                // source was already heading for.
+                if self.looping.load(Ordering::Relaxed) {
+                    match self.wrap() {
+                        Ok(()) => continue,
+                        // A file that cannot be rewound cannot be looped,
+                        // but it has been fully read — so report why the
+                        // loop stopped and end the stream properly, rather
+                        // than failing a source that delivered everything
+                        // it was asked for.
+                        Err(error) => bus.post(
+                            &self.pp_log,
+                            BusEvent::Error {
+                                element_type: ElementType::FileDemuxer,
+                                name: self.name.clone(),
+                                error,
+                            },
+                        ),
+                    }
+                }
+                break;
             };
+            self.stamp_lap(index, time_base, &mut packet);
             // `deliver_or_park` stamps the stream time base; every packet
             // leaves this source through it, parked or not.
             self.deliver_or_park((index, time_base, packet), bus)?;
@@ -410,12 +577,16 @@ impl SourceElement for FileDemuxer {
             .next()
             .map(|(stream, packet)| (stream.index(), stream.time_base(), packet));
         match landed_packet {
-            Some((index, time_base, packet)) => {
+            Some((index, time_base, mut packet)) => {
+                // Read before `stamp_lap` moves it: where a seek landed is a
+                // position in the *file*, which a loop's accumulated offset
+                // must not be added to.
                 let landed = packet
                     .pts()
                     .or_else(|| packet.dts())
                     .map(|ts| ts_to_duration(ts, time_base))
                     .unwrap_or(Duration::ZERO);
+                self.stamp_lap(index, time_base, &mut packet);
                 self.park((index, time_base, packet));
                 Ok(landed)
             }
@@ -425,6 +596,16 @@ impl SourceElement for FileDemuxer {
             None => Ok(target),
         }
     }
+}
+
+/// The unit a lap's length is kept in, so it can be one length for every
+/// stream. Also what `Input::seek` takes, which is why the wrap needs no
+/// conversion of its own.
+///
+/// A hardcoded constant, not external input, so there is nothing to
+/// validate.
+fn microseconds() -> ffmpeg::Rational {
+    ffmpeg::Rational::new(1, 1_000_000)
 }
 
 fn ts_to_duration(ts: i64, time_base: ffmpeg::Rational) -> Duration {
@@ -505,6 +686,226 @@ mod tests {
             "an out-of-range stream index must report nothing, not panic"
         );
         assert!(demuxer.stream_time_base(out_of_range).is_none());
+    }
+
+    /// Follows the output timeline across a loop's join, and switches the
+    /// loop off once the file has been through once so `run` finishes
+    /// instead of going round forever.
+    struct LoopSink {
+        pp_log: PpLog,
+        count: Arc<AtomicUsize>,
+        saw_eos: Arc<AtomicBool>,
+        /// Cleared the first time a decode timestamp goes backwards.
+        climbing: Arc<AtomicBool>,
+        last_dts: Arc<Mutex<Option<i64>>>,
+        /// How many packets one pass of this stream delivers.
+        lap: usize,
+        handle: FileDemuxerHandle,
+    }
+
+    impl Element for LoopSink {
+        fn name(&self) -> Arc<str> {
+            "loop-sink".into()
+        }
+
+        fn element_type(&self) -> ElementType {
+            ElementType::Other
+        }
+
+        fn pp_log(&self) -> &PpLog {
+            &self.pp_log
+        }
+
+        fn pp_log_mut(&mut self) -> &mut PpLog {
+            &mut self.pp_log
+        }
+    }
+
+    impl crate::element::Sink for LoopSink {
+        fn consume(&mut self, buf: MediaBuffer) -> crate::error::Result<()> {
+            match buf {
+                MediaBuffer::Eos => self.saw_eos.store(true, Ordering::SeqCst),
+                MediaBuffer::Packet(packet) => {
+                    if let Some(dts) = packet.dts().or_else(|| packet.pts()) {
+                        let mut last = self.last_dts.lock().unwrap();
+                        if last.is_some_and(|last| dts < last) {
+                            self.climbing.store(false, Ordering::SeqCst);
+                        }
+                        *last = Some(dts);
+                    }
+                    // Past a whole pass of the file: the source is into its
+                    // second lap, so let that one play out and then end.
+                    if self.count.fetch_add(1, Ordering::SeqCst) + 1 > self.lap {
+                        self.handle.set_looping(false);
+                    }
+                }
+                _ => {}
+            }
+            Ok(())
+        }
+
+        fn control(&mut self, _msg: crate::control::ControlMsg) -> crate::error::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// The index of this file's video stream, and the time base its packets
+    /// carry.
+    fn video_stream(demuxer: &FileDemuxer, streams: &[StreamInfo]) -> (usize, ffmpeg::Rational) {
+        let index = streams
+            .iter()
+            .find(|s| s.kind == ffmpeg::media::Type::Video)
+            .expect("test video has a video stream")
+            .index;
+        let time_base = demuxer
+            .stream_time_base(index)
+            .expect("video stream has a time base");
+        (index, time_base)
+    }
+
+    /// How many packets one pass of this file's video stream delivers, so a
+    /// test can tell a second lap has begun without assuming anything about
+    /// the fixture.
+    fn packets_in_one_pass(path: impl AsRef<Path>) -> usize {
+        let (mut demuxer, streams) = FileDemuxer::open("demux", path).expect("open test video");
+        let (index, expected_time_base) = video_stream(&demuxer, &streams);
+        let count = Arc::new(AtomicUsize::new(0));
+        demuxer.src_pads()[index].link(Box::new(CountingSink {
+            count: count.clone(),
+            saw_eos: Arc::new(AtomicBool::new(false)),
+            expected_time_base,
+            time_base_matches: Arc::new(AtomicBool::new(true)),
+            pp_log: element_pp_log(ElementType::Other, "counting-sink", None),
+        }));
+        let (bus, _bus_rx) = Bus::new();
+        let (_tx, rx) = control::channel();
+        demuxer.run(&rx, &bus).expect("run must reach eos cleanly");
+        count.load(Ordering::SeqCst)
+    }
+
+    /// Looping puts the start of the file where its end was, and the
+    /// timestamps that come out keep climbing across that join instead of
+    /// restarting at zero.
+    ///
+    /// That is the whole point of the offset. A `Pacer` downstream anchors
+    /// on the first timestamp it sees and waits for each later one to come
+    /// due; hand it a second lap starting back at zero and every frame of it
+    /// is already overdue, so the lap is emitted as fast as it can be read
+    /// rather than played. A muxer refuses it outright.
+    ///
+    /// Also covers when the flag is read: it is switched off part way into
+    /// the second lap, and that lap still plays out and ends with a real
+    /// `Eos`.
+    #[test]
+    fn looping_restarts_the_file_and_carries_the_timeline_past_the_join() {
+        let Some(path) = try_test_video() else { return };
+        let lap = packets_in_one_pass(&path);
+        assert!(lap > 0, "the fixture must deliver something to loop");
+
+        let (mut demuxer, streams) = FileDemuxer::open("demux", &path).expect("open test video");
+        let (index, _) = video_stream(&demuxer, &streams);
+        let handle = demuxer.looping_handle();
+        assert!(
+            !handle.is_looping(),
+            "a file plays once unless asked not to"
+        );
+        handle.set_looping(true);
+
+        let count = Arc::new(AtomicUsize::new(0));
+        let saw_eos = Arc::new(AtomicBool::new(false));
+        let climbing = Arc::new(AtomicBool::new(true));
+        demuxer.src_pads()[index].link(Box::new(LoopSink {
+            count: count.clone(),
+            saw_eos: saw_eos.clone(),
+            climbing: climbing.clone(),
+            last_dts: Arc::new(Mutex::new(None)),
+            lap,
+            handle: handle.clone(),
+            pp_log: element_pp_log(ElementType::Other, "loop-sink", None),
+        }));
+
+        let (bus, bus_rx) = Bus::new();
+        let (_tx, rx) = control::channel();
+        demuxer
+            .run(&rx, &bus)
+            .expect("run must reach eos cleanly, not error");
+
+        assert!(
+            count.load(Ordering::SeqCst) > lap,
+            "the end of the file must start it again, not end the stream"
+        );
+        assert!(
+            climbing.load(Ordering::SeqCst),
+            "timestamps must not fall back to the file's own at the join"
+        );
+        assert!(
+            saw_eos.load(Ordering::SeqCst),
+            "switching looping off must end the lap it is in with an Eos"
+        );
+        drop(bus);
+        assert!(
+            bus_rx.iter().all(|e| !matches!(e, BusEvent::Error { .. })),
+            "looping a well-formed file must not report any errors"
+        );
+    }
+
+    /// Regression test for how far a wrap carries the timeline. It has to be
+    /// how far into the file the lap *reached*, not how much of it was
+    /// played: a seek backwards does not un-deliver the packets that already
+    /// went downstream, so a shorter step would drop the next lap on top of
+    /// timestamps a muxer has already written.
+    #[test]
+    fn a_backward_seek_leaves_the_lap_as_long_as_its_furthest_packet() {
+        let Some(path) = try_test_video() else { return };
+        let (mut demuxer, streams) = FileDemuxer::open("demux", &path).expect("open test video");
+
+        // Every pad linked, because only a linked pad's stream counts
+        // towards the lap — and `seek` parks whichever stream's packet it
+        // happens to read first.
+        let time_bases: Vec<ffmpeg::Rational> = (0..streams.len())
+            .map(|index| {
+                demuxer
+                    .stream_time_base(index)
+                    .expect("every stream has a time base")
+            })
+            .collect();
+        for (index, expected_time_base) in time_bases.into_iter().enumerate() {
+            demuxer.src_pads()[index].link(Box::new(CountingSink {
+                count: Arc::new(AtomicUsize::new(0)),
+                saw_eos: Arc::new(AtomicBool::new(false)),
+                expected_time_base,
+                time_base_matches: Arc::new(AtomicBool::new(true)),
+                pp_log: element_pp_log(ElementType::Other, "counting-sink", None),
+            }));
+        }
+
+        demuxer
+            .seek(Duration::ZERO)
+            .expect("seek to the start of the test video");
+        let at_start = demuxer.lap_end;
+
+        // Half way in, so the keyframe this lands on is somewhere past the
+        // first one for any file that has more than one — which is what the
+        // guard below checks rather than assumes.
+        let half = Duration::from_micros((demuxer.input.duration().max(0) / 2) as u64);
+        demuxer
+            .seek(half)
+            .expect("seek half way into the test video");
+        let reached = demuxer.lap_end;
+        if reached <= at_start {
+            // Nothing in this fixture is reachable past its own start, so
+            // there is no reach for a seek back to lose.
+            return;
+        }
+
+        demuxer
+            .seek(Duration::ZERO)
+            .expect("seek back to the start of the test video");
+
+        assert_eq!(
+            demuxer.lap_end, reached,
+            "going back must not shorten the lap the next wrap steps over"
+        );
     }
 
     /// Drives `FileDemuxer::run` directly (no `Pipeline`) to prove the

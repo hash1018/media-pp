@@ -135,6 +135,19 @@ The core types are deliberately small:
   during a recording. The mixer itself keeps running either way, which is the
   point: a format change is not a reason to restart the one element every
   audio source is registered with.
+- `FileDemuxer` plays its file once unless a `FileDemuxerHandle`
+  (`looping_handle()`, taken before the demuxer is moved into a `Pipeline`)
+  says otherwise. Looping rewinds at the end of the file instead of ending
+  the stream, and carries the timestamps: each lap starts where the last one
+  reached, so a `Pacer` still paces the second lap rather than dumping it as
+  fast as it can be read, and a muxer still sees its timestamps advance. The
+  flag is read only at the end of the file, so switching it off part way
+  through plays that lap out and ends at the file's own end. A looping source
+  otherwise never ends on its own, and the two existing ways still apply
+  mid-lap: `Pipeline::finish` for ordered EOS now, `Pipeline::stop` to
+  abandon. The consequence of carrying the timeline is that a looping
+  source's timestamps are no longer positions in the file; `seek` still
+  speaks in the file's own.
 
 Every `SourceElement` explicitly classifies whether it is live and whether it
 can reposition its own input timeline through `is_live()` and
