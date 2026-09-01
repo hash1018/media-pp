@@ -38,15 +38,17 @@ pub enum PacerError {
     },
 
     /// `pts` is external input too (see [`PacerError::InvalidTimeBase`]) —
-    /// an adversarial or corrupt jump this far from this pacer's own
-    /// `first_pts` overflows the subtraction used to compute how long to
-    /// wait, leaving nothing sane to pace against.
-    #[error("pts {pts} is too far from this pacer's first pts {first_pts} to pace against")]
-    TimestampDeltaOverflow {
-        /// Timestamp that could not be subtracted safely.
+    /// an adversarial or corrupt value that cannot be turned into a wait at
+    /// all. Either it does not fit in nanoseconds at this stream's time
+    /// base, or it is so far from the pipeline's media origin that the
+    /// subtraction overflows.
+    ///
+    /// Reported rather than swallowed because the alternative is the buffer
+    /// going through *unpaced*, which is a whole stream arriving at once.
+    #[error("pts {pts} cannot be paced against this pipeline's timeline")]
+    UnpaceableTimestamp {
+        /// The timestamp, in its own stream's units.
         pts: i64,
-        /// First timestamp used as this pacer's media origin.
-        first_pts: i64,
     },
 }
 
@@ -76,13 +78,24 @@ const INTERRUPT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 ///
 /// `clock` is shared across every `Pacer` in the pipeline (one per stream
 /// — video, audio, ...) so they all agree on the same t=0 instead of each
-/// anchoring to its own first frame.
+/// anchoring to its own first frame. That agreement is what keeps the
+/// picture with the sound: the offset a container gives its streams is part
+/// of their sync, and a pacer zeroing on its own stream would throw it away.
+/// See [`Clock::media_origin_ns`].
 pub struct Pacer {
     pp_log: PpLog,
     name: Arc<str>,
     time_base: TimeBase,
     clock: Arc<Clock>,
-    /// This pacer's first timestamped frame's pts — set on first call.
+    /// The media timestamp this pipeline's t=0 stands for, in nanoseconds —
+    /// asked of the shared [`Clock`] on the first timestamped buffer and
+    /// held until a seek clears it.
+    ///
+    /// The clock's and not this pacer's, which is the whole point: a
+    /// container's streams do not start together — see
+    /// [`Clock::media_origin_ns`] — and a pacer that zeroed on its own
+    /// first timestamp would play them as though they did.
+    ///
     /// Deliberately *not* paired with a cached wall-clock anchor: the
     /// anchor has to come fresh from `clock.start()` on every call
     /// instead, since [`Clock::pause`]/[`Clock::resume`] can shift it —
@@ -90,7 +103,7 @@ pub struct Pacer {
     /// blasts through however many frames piled up during the pause
     /// (their `due` times would all already be in the past relative to a
     /// stale anchor).
-    first_pts: Option<i64>,
+    origin_ns: Option<i64>,
     /// The latest pipeline interrupt this pacer has acknowledged through
     /// `control()`. A newer clock epoch means pause/seek/stop is waiting for
     /// the current `consume()` call to return. `Queue`'s own worker only
@@ -133,7 +146,7 @@ impl Pacer {
             pp_log,
             time_base,
             clock,
-            first_pts: None,
+            origin_ns: None,
             interrupt_epoch,
             prerolling: false,
             pending: VecDeque::new(),
@@ -148,7 +161,7 @@ impl Pacer {
     /// worker can process the pending control request. Frames without a
     /// pts (`None`) pass straight through. `Err` only for a `pts` too
     /// pathological to pace against at all (see
-    /// [`PacerError::TimestampDeltaOverflow`]) — the caller drops that one
+    /// [`PacerError::UnpaceableTimestamp`]) — the caller drops that one
     /// buffer rather than treating it as interrupted.
     fn wait_for(&mut self, pts: Option<i64>) -> Result<bool, PacerError> {
         if self.clock.interrupt_epoch() != self.interrupt_epoch {
@@ -158,23 +171,40 @@ impl Pacer {
             return Ok(true);
         }
         let Some(pts) = pts else { return Ok(true) };
-        let first_pts = *self.first_pts.get_or_insert(pts);
+        // Rescaled before the subtraction, not after, because the origin is
+        // shared with streams in other units — a container's audio and video
+        // rarely count in the same ticks. Integer rescale rather than
+        // `pts as f64 * f64::from(time_base)`: the latter loses precision
+        // (and the numerator, if computed by naive division) over a
+        // long-running stream; see `MediaTimestamp`'s own docs.
+        let pts_ns = MediaTimestamp::new_unchecked(pts, self.time_base).rescale(nanoseconds());
+        // `av_rescale_q_rnd` answers a value it cannot represent with
+        // `INT64_MIN`, which is also FFmpeg's "no timestamp". Checked before
+        // the origin is established, so a pathological first buffer cannot
+        // become the timeline every other stream is measured against.
+        if pts_ns == i64::MIN {
+            return Err(PacerError::UnpaceableTimestamp { pts });
+        }
+        let origin_ns = *self
+            .origin_ns
+            .get_or_insert_with(|| self.clock.media_origin_ns(pts_ns));
+        // Read before the early return below, so the clock anchors on the
+        // first buffer *any* stream releases rather than on the first one
+        // that happens to have something to wait for. An offset measured
+        // from it is then measured from when playback actually began.
+        let anchor = self.clock.start();
 
-        let elapsed_ticks = pts
-            .checked_sub(first_pts)
-            .ok_or(PacerError::TimestampDeltaOverflow { pts, first_pts })?;
-        if elapsed_ticks <= 0 {
+        let elapsed_ns = pts_ns
+            .checked_sub(origin_ns)
+            .ok_or(PacerError::UnpaceableTimestamp { pts })?;
+        // At or before the origin: the stream that set it, on its own first
+        // buffer, and any stream that starts earlier still. Neither has
+        // anything to wait for.
+        if elapsed_ns <= 0 {
             return Ok(true);
         }
-        // Integer rescale straight to nanoseconds rather than
-        // `elapsed_ticks as f64 * f64::from(time_base)` — the latter loses
-        // precision (and the numerator, if computed by naive division)
-        // over a long-running stream; see `MediaTimestamp`'s own docs.
-        let elapsed_ns = MediaTimestamp::new_unchecked(elapsed_ticks, self.time_base)
-            .rescale(nanoseconds())
-            .max(0) as u64;
 
-        let due = self.clock.start() + Duration::from_nanos(elapsed_ns);
+        let due = anchor + Duration::from_nanos(elapsed_ns as u64);
         loop {
             if self.clock.interrupt_epoch() != self.interrupt_epoch {
                 return Ok(false);
@@ -245,7 +275,7 @@ impl Sink for Pacer {
         match msg {
             ControlMsg::Flush => self.pending.clear(),
             ControlMsg::Seek(_) => {
-                self.first_pts = None;
+                self.origin_ns = None;
                 self.clock.reset();
             }
             ControlMsg::Stop => self.pending.clear(),
@@ -374,8 +404,43 @@ mod tests {
         );
     }
 
-    /// Regression test: a `pts` this far from `first_pts` used to overflow
-    /// `pts - first_pts` silently (a plain `-`) or let the buffer through
+    /// Regression test for the sync this exists to keep. A container's
+    /// streams do not start together — `sample.mp4`'s audio starts at zero
+    /// and its video one frame in, 33 ms later — and that offset is part of
+    /// what puts the picture with the sound.
+    ///
+    /// Each pacer used to zero on its own stream's first timestamp, which
+    /// released both first buffers at once and played the sound 33 ms early
+    /// for the rest of the file. The origin is the *pipeline's* now, so the
+    /// stream that starts later waits for its turn.
+    #[test]
+    fn streams_that_start_apart_stay_apart() {
+        let clock = Arc::new(Clock::new());
+        // Milliseconds, so the numbers below read as what they are.
+        let unit = ffmpeg::Rational::new(1, 1000);
+        let mut audio = Pacer::new("audio", unit, clock.clone()).unwrap();
+        let mut video = Pacer::new("video", unit, clock.clone()).unwrap();
+
+        let started = Instant::now();
+        assert!(
+            audio.wait_for(Some(0)).unwrap(),
+            "the first stream sets the origin and has nothing to wait for"
+        );
+        assert!(
+            started.elapsed() < Duration::from_millis(20),
+            "it must not wait for itself"
+        );
+
+        assert!(video.wait_for(Some(80)).unwrap(), "paced, not refused");
+        assert!(
+            started.elapsed() >= Duration::from_millis(70),
+            "a stream starting 80ms into the file must be held back by it, \
+             not released alongside the one that starts at zero"
+        );
+    }
+
+    /// Regression test: a `pts` this far from the origin used to overflow
+    /// the subtraction silently (a plain `-`) or let the buffer through
     /// unpaced (an earlier `checked_sub` that swallowed the error). Now
     /// it's a typed `PacerError` `consume` propagates via `?`, and — since
     /// `Queue`/a pushing source both treat a `Sink::consume` failure as
@@ -386,17 +451,14 @@ mod tests {
         let clock = Arc::new(Clock::new());
         let mut pacer = Pacer::new("pacer", ffmpeg::Rational::new(1, 1), clock).unwrap();
 
-        assert!(pacer.consume(packet(-1)).is_ok(), "establishes first_pts");
+        assert!(pacer.consume(packet(-1)).is_ok(), "establishes the origin");
 
         let error = pacer
             .consume(packet(i64::MAX))
-            .expect_err("pts far enough from first_pts to overflow the subtraction");
+            .expect_err("pts far enough from the origin to overflow the subtraction");
         assert!(matches!(
             error,
-            crate::Error::PacerError(PacerError::TimestampDeltaOverflow {
-                pts: i64::MAX,
-                first_pts: -1,
-            })
+            crate::Error::PacerError(PacerError::UnpaceableTimestamp { pts: i64::MAX })
         ));
         assert!(
             pacer.pending.is_empty(),
@@ -405,7 +467,7 @@ mod tests {
 
         // The pacer itself must still be usable afterward: a `Some` result
         // (not a further error) for an ordinary pts relative to the same
-        // `first_pts`.
+        // origin.
         assert!(pacer.wait_for(Some(0)).is_ok());
     }
 }
