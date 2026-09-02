@@ -895,4 +895,208 @@ mod tests {
             .filter_map(|(_, packet)| Some((packet.dts()?, packet.pts()?)))
             .collect()
     }
+
+    /// What a written file's timeline looks like from outside it.
+    #[derive(Debug, Clone, Copy)]
+    struct Shape {
+        video_frames: usize,
+        video_seconds: f64,
+        audio_seconds: f64,
+        video_start: f64,
+        audio_start: f64,
+    }
+
+    impl Shape {
+        fn video_fps(self) -> f64 {
+            self.video_frames as f64 / self.video_seconds
+        }
+    }
+
+    /// Reads one back, the way anything that plays it would.
+    fn shape_of(path: &str) -> Shape {
+        let input = ffmpeg::format::input(path).expect("the file opens");
+        let stream = |medium| {
+            input
+                .streams()
+                .find(|stream| stream.parameters().medium() == medium)
+                .unwrap_or_else(|| panic!("{path} carries no {medium:?}"))
+        };
+        let seconds = |stream: &ffmpeg::format::stream::Stream<'_>| {
+            stream.duration() as f64 * f64::from(stream.time_base())
+        };
+        let start = |stream: &ffmpeg::format::stream::Stream<'_>| {
+            stream.start_time() as f64 * f64::from(stream.time_base())
+        };
+        let video = stream(ffmpeg::media::Type::Video);
+        let audio = stream(ffmpeg::media::Type::Audio);
+        Shape {
+            video_frames: video.frames() as usize,
+            video_seconds: seconds(&video),
+            audio_seconds: seconds(&audio),
+            video_start: start(&video),
+            audio_start: start(&audio),
+        }
+    }
+
+    /// A file decoded, re-encoded and written back keeps the shape it had.
+    ///
+    /// The path a recording really takes, and the one every defect found in
+    /// this crate's timeline handling has lived on. What makes it worth a
+    /// test of its own is that each of those was invisible from inside: every
+    /// element returned `Ok`, every buffer went where it was sent, and the
+    /// file that came out was the wrong length, or its sound no longer sat
+    /// against its picture. None of that can be seen without reading the
+    /// result back.
+    ///
+    /// The tolerances are deliberately loose. What this is watching for is a
+    /// stream that lost or gained *time* — an encoder dropping samples, a
+    /// muxer restamping a track, a time base that means something different
+    /// at each end — not the frame or two an encoder is entitled to hold.
+    #[test]
+    fn a_transcoded_file_keeps_the_shape_of_what_went_in() {
+        use crate::elements::{FileDemuxer, SwDecoder, SwEncoder, SwEncoderOptions, VideoCodec};
+        use crate::pipeline::Pipeline;
+
+        let fixture = crate::test_support::synthesize("transcode-shape", 4.0, 44_100);
+        let source_path = fixture.path.to_string_lossy().into_owned();
+        let arriving = shape_of(&source_path);
+
+        let path = std::env::temp_dir().join("media-pp-transcode-shape.mp4");
+        let _ = std::fs::remove_file(&path);
+
+        let (demuxer, streams) = FileDemuxer::open("demuxer", &source_path).expect("open");
+        let index = |medium| {
+            streams
+                .iter()
+                .find(|stream| stream.kind == medium)
+                .unwrap_or_else(|| panic!("the fixture carries no {medium:?}"))
+                .index
+        };
+        let video = index(ffmpeg::media::Type::Video);
+        let audio = index(ffmpeg::media::Type::Audio);
+        let video_decoder = SwDecoder::new(
+            "video-decoder",
+            demuxer.stream_parameters(video).expect("video parameters"),
+        )
+        .expect("open the video decoder");
+        let audio_decoder = SwDecoder::new(
+            "audio-decoder",
+            demuxer.stream_parameters(audio).expect("audio parameters"),
+        )
+        .expect("open the audio decoder");
+
+        // Re-encoded at the same rates it arrived with, so a difference in
+        // the result is this crate's doing rather than a conversion's.
+        let width = 320;
+        let height = 240;
+        // The container's own unit, not `1/frame_rate`: what the decoder
+        // hands over is stamped in whatever the container counts in, and an
+        // encoder told a different unit writes those same numbers meaning
+        // something else. Which is not hypothetical — the first version of
+        // this test said `1/30` and produced 121 frames across 34 minutes.
+        let video_time_base = demuxer.stream_time_base(video).expect("video time base");
+        let video_encoder = SwEncoder::new(
+            "video-encoder",
+            SwEncoderOptions {
+                codec: VideoCodec::OpenH264,
+                width,
+                height,
+                time_base: video_time_base,
+                frame_rate: ffmpeg::Rational::new(30, 1),
+                bit_rate: 800_000,
+                gop_size: 30,
+                max_b_frames: None,
+            },
+        )
+        .expect("open the video encoder");
+        // Written at 48kHz from a 44.1kHz source, which is what a recording
+        // really does — a file's own rate is rarely the one everything else
+        // in the graph runs at. It also puts a rate conversion inside what
+        // this measures, and an audio path losing a fraction of every frame
+        // to one is a defect this crate has actually had.
+        let audio_encoder = open_aac_encoder(48_000, 2);
+
+        let mut muxer = FileMuxer::create(&path).expect("create the output");
+        muxer
+            .add_stream("video", video_encoder.parameters(), video_time_base)
+            .expect("add the video stream");
+        muxer
+            .add_stream(
+                "audio",
+                audio_encoder.parameters(),
+                audio_encoder.time_base(),
+            )
+            .expect("add the audio stream");
+        let mut sinks = muxer.open().expect("write the header");
+        let audio_sink = sinks.pop().expect("audio was added second");
+        let video_sink = sinks.pop().expect("video was added first");
+
+        let scaler = crate::elements::SwScaler::new(
+            "to-yuv",
+            ffmpeg::format::Pixel::YUV420P,
+            width,
+            height,
+            ffmpeg::software::scaling::Flags::BILINEAR,
+        );
+
+        let pipeline = Pipeline::new("transcode", demuxer, move |source, context| {
+            let picture = context
+                .branch()
+                .pipe(video_decoder)
+                .pipe(scaler)
+                .pipe(video_encoder)
+                .to(video_sink)?;
+            context.attach(source, video, picture)?;
+            let sound = context
+                .branch()
+                .pipe(audio_decoder)
+                .pipe(audio_encoder)
+                .to(audio_sink)?;
+            context.attach(source, audio, sound)?;
+            Ok(())
+        })
+        .expect("wire the transcode");
+        pipeline.run().expect("run the transcode");
+        for event in pipeline.bus().iter() {
+            if matches!(event, crate::bus::BusEvent::Eos { .. }) {
+                break;
+            }
+        }
+        pipeline.stop();
+
+        let written = shape_of(&path.to_string_lossy());
+        eprintln!("SHAPE in : {arriving:?} fps={:.3}", arriving.video_fps());
+        eprintln!("SHAPE out: {written:?} fps={:.3}", written.video_fps());
+
+        assert!(
+            (written.video_fps() - arriving.video_fps()).abs() < 0.5,
+            "the picture came out at a different rate: {:.3} in, {:.3} out",
+            arriving.video_fps(),
+            written.video_fps()
+        );
+        assert!(
+            (written.video_seconds - arriving.video_seconds).abs() < 0.25,
+            "the picture came out a different length: {:.3}s in, {:.3}s out",
+            arriving.video_seconds,
+            written.video_seconds
+        );
+        assert!(
+            (written.audio_seconds - written.video_seconds).abs() < 0.25,
+            "the sound and the picture came out different lengths: \
+             {:.3}s of sound against {:.3}s of picture",
+            written.audio_seconds,
+            written.video_seconds
+        );
+        assert!(
+            (written.audio_start - written.video_start).abs()
+                <= (arriving.audio_start - arriving.video_start).abs() + 0.05,
+            "the two tracks no longer start where they did: \
+             in {:.3}s/{:.3}s, out {:.3}s/{:.3}s",
+            arriving.video_start,
+            arriving.audio_start,
+            written.video_start,
+            written.audio_start
+        );
+        std::fs::remove_file(&path).ok();
+    }
 }
