@@ -92,6 +92,10 @@ pub enum CudaVideoCompositorError {
     #[error("layer opacity must be finite and between 0.0 and 1.0, got {0}")]
     InvalidOpacity(f32),
 
+    /// The surface a cropped layer is copied through could not be made.
+    #[error("failed to allocate a surface for a cropped layer: {0}")]
+    CropSurface(String),
+
     /// A layer's source region is empty. Hiding a layer is
     /// [`VideoLayer::visible`]; asking it to draw nothing is a mistake.
     #[error("layer source region has invalid dimensions {width}x{height}")]
@@ -704,7 +708,7 @@ pub struct CudaVideoCompositor {
     driver: Arc<CudaDriver>,
     /// This element's own reference to the shared context, released in
     /// `Drop` — it is what keeps `shared.device_ctx` a valid identity.
-    _hw_device_ctx: Arc<AvBufferRef>,
+    hw_device_ctx: Arc<AvBufferRef>,
     /// The pool output surfaces are allocated from.
     hw_frames_ctx: AvBufferRef,
     scalers: HashMap<VideoInputId, CudaScaleGraph>,
@@ -712,6 +716,9 @@ pub struct CudaVideoCompositor {
     /// reason `scalers` is: it is sized to that layer and rebuilding it every
     /// frame would be a few megabytes of allocation for nothing.
     overlays: HashMap<VideoInputId, CudaOverlayScratch>,
+    /// The surface a cropped layer is copied into before it is scaled, kept
+    /// per input for the reason `overlays` is — see [`CropScratch`].
+    crops: HashMap<VideoInputId, CropScratch>,
     /// The last composite and what it was made from — see [`Composed`].
     composed: Option<Composed>,
     /// Reuses only the small CPU-side `AVFrame` wrapper; the surface itself
@@ -790,10 +797,11 @@ impl CudaVideoCompositor {
                 options,
                 frame_index: 0,
                 driver,
-                _hw_device_ctx: hw_device_ctx,
+                hw_device_ctx,
                 hw_frames_ctx,
                 scalers: HashMap::new(),
                 overlays: HashMap::new(),
+                crops: HashMap::new(),
                 composed: None,
                 output_pool: UnboundObjectPool::new(
                     OUTPUT_POOL_SIZE,
@@ -1002,14 +1010,28 @@ impl CudaVideoCompositor {
                 continue;
             };
 
+            // A crop is copied into a surface of its own before it is
+            // scaled — see [`CropScratch`]. The uncropped path hands the
+            // frame over untouched, which is every layer that is not cropped.
+            let (frame, frames_ctx) = match Self::crop(
+                &mut self.crops,
+                &self.driver,
+                &self.hw_device_ctx,
+                snapshot.id,
+                &frame,
+                format,
+                source,
+            )? {
+                Some(cropped) => cropped,
+                None => (frame, frames_ctx),
+            };
             let scaled = self
                 .scalers
                 .entry(snapshot.id)
                 .or_insert_with(|| CudaScaleGraph::new(CudaScalerInterp::Bilinear))
-                .scale_region(
+                .scale(
                     &frame,
                     frames_ctx,
-                    Some((format.surface(), source)),
                     placement.image_width,
                     placement.image_height,
                 )?;
@@ -1382,6 +1404,167 @@ impl LayerFormat {
     }
 }
 
+/// The surface a cropped layer is copied into before it is scaled.
+///
+/// # Why a copy at all
+///
+/// The obvious way to crop is to hand `scale_cuda` a view of the frame with
+/// its plane pointers moved to the region's first pixel. That works only when
+/// the horizontal offset lands on CUDA's texture alignment: the filter binds
+/// its input as a texture object, and `cuTexObjectCreate` refuses a device
+/// pointer that is not 512-byte aligned. Measured on this machine, cropping
+/// 512 or 1024 pixels off the left of a 1080p frame scales fine and cropping
+/// 64 or 960 fails outright — which is to say a view works for one crop in
+/// five hundred and twelve.
+///
+/// So the region is copied into a surface of its own first — a
+/// device-to-device 2D copy, which has no such constraint — and that is what
+/// gets scaled. It costs one pass over the *kept* pixels, which is less than
+/// the alternative of scaling the whole frame and throwing most of it away,
+/// and it is paid only by layers that are actually cropped.
+///
+/// Kept per input and rebuilt only when the region's size or format changes,
+/// for the reason the overlay scratch is: a crop is dragged and then left
+/// alone, so almost every frame finds the surface it needs already there.
+/// A cropped frame and the pool it came from — what the scaler is handed in
+/// place of the input's own.
+type CroppedFrame = (
+    Arc<UnboundObjectPoolRef<ffmpeg::frame::Video>>,
+    *mut ffi::AVBufferRef,
+);
+
+struct CropScratch {
+    frames_ctx: AvBufferRef,
+    frame: ffmpeg::frame::Video,
+    width: u32,
+    height: u32,
+    format: LayerFormat,
+}
+
+impl CudaVideoCompositor {
+    /// The cropped copy of `frame`, or `None` when the layer draws all of it.
+    ///
+    /// Takes the map rather than `&mut self` so the caller can keep its own
+    /// borrows on the driver and the device context.
+    fn crop(
+        crops: &mut HashMap<VideoInputId, CropScratch>,
+        driver: &CudaDriver,
+        hw_device_ctx: &AvBufferRef,
+        id: VideoInputId,
+        frame: &ffmpeg::frame::Video,
+        format: LayerFormat,
+        region: VideoSourceRect,
+    ) -> std::result::Result<Option<CroppedFrame>, CudaVideoCompositorError> {
+        if region.x == 0
+            && region.y == 0
+            && region.width == frame.width()
+            && region.height == frame.height()
+        {
+            return Ok(None);
+        }
+
+        let scratch = match crops.entry(id) {
+            std::collections::hash_map::Entry::Occupied(slot)
+                if slot.get().width == region.width
+                    && slot.get().height == region.height
+                    && slot.get().format == format =>
+            {
+                slot.into_mut()
+            }
+            slot => {
+                // SAFETY: `create_hw_frames_ctx`'s contract is a live device
+                // context, which is what this reference is.
+                let frames_ctx = unsafe {
+                    create_hw_frames_ctx(
+                        hw_device_ctx,
+                        format.surface(),
+                        region.width,
+                        region.height,
+                    )
+                }
+                .map_err(|error| CudaVideoCompositorError::CropSurface(error.to_string()))?;
+                let scratch = CropScratch {
+                    frames_ctx,
+                    frame: ffmpeg::frame::Video::empty(),
+                    width: region.width,
+                    height: region.height,
+                    format,
+                };
+                match slot {
+                    std::collections::hash_map::Entry::Occupied(mut slot) => {
+                        slot.insert(scratch);
+                        slot.into_mut()
+                    }
+                    std::collections::hash_map::Entry::Vacant(slot) => slot.insert(scratch),
+                }
+            }
+        };
+
+        // SAFETY: `frame` is the scratch's own `AVFrame`, unreferenced before
+        // it is given a new surface — which is what hands the previous one
+        // back to the pool rather than holding it for this element's life.
+        unsafe {
+            let ptr = scratch.frame.as_mut_ptr();
+            ffi::av_frame_unref(ptr);
+            let code = ffi::av_hwframe_get_buffer(scratch.frames_ctx.as_ptr(), ptr, 0);
+            if code < 0 {
+                return Err(CudaVideoCompositorError::HwFrameGet(code));
+            }
+        }
+
+        match format {
+            LayerFormat::Nv12 => {
+                let source =
+                    Nv12Surface::from_frame(frame).ok_or(CudaVideoCompositorError::MissingPlane)?;
+                let destination = Nv12Surface::from_frame(&scratch.frame)
+                    .ok_or(CudaVideoCompositorError::MissingPlane)?;
+                driver.blit_nv12(
+                    source,
+                    destination,
+                    Nv12Region {
+                        source_x: region.x,
+                        source_y: region.y,
+                        destination_x: 0,
+                        destination_y: 0,
+                        width: region.width,
+                        height: region.height,
+                    },
+                )?;
+            }
+            LayerFormat::Bgra => {
+                let source =
+                    BgraSurface::from_frame(frame).ok_or(CudaVideoCompositorError::MissingPlane)?;
+                let destination = BgraSurface::from_frame(&scratch.frame)
+                    .ok_or(CudaVideoCompositorError::MissingPlane)?;
+                driver.blit_bgra(
+                    source,
+                    destination,
+                    region.x,
+                    region.y,
+                    region.width,
+                    region.height,
+                )?;
+            }
+        }
+
+        // The scaler needs the frame and the pool it came from, and the pool
+        // is this scratch's rather than the input's.
+        let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
+        let mut held = pool.get();
+        // SAFETY: both frames are live and distinct, and `av_frame_ref` only
+        // adds a reference to the surface the scratch holds.
+        let code = unsafe { ffi::av_frame_ref(held.as_mut_ptr(), scratch.frame.as_ptr()) };
+        if code < 0 {
+            return Err(CudaVideoCompositorError::FrameRef(code));
+        }
+        // SAFETY: the scratch's frame carries the hardware frames context it
+        // was allocated from, which is what the scaler has to be configured
+        // against.
+        let frames_ctx = unsafe { (*scratch.frame.as_ptr()).hw_frames_ctx };
+        Ok(Some((Arc::new(held), frames_ctx)))
+    }
+}
+
 /// The part of the frame this layer draws, aligned to what its surface can
 /// address.
 ///
@@ -1715,8 +1898,11 @@ mod tests {
                 VideoLayer {
                     fit: VideoFit::Stretch,
                     // The bottom-right quadrant, which nothing else in the
-                    // frame shares a value with.
-                    source: Some(VideoSourceRect::new(128, 128, 128, 128)),
+                    // frame shares a value with. Its offset is deliberately
+                    // not a multiple of CUDA's 512-byte texture alignment:
+                    // handing `scale_cuda` a view at such an offset fails
+                    // outright, which is what `CropScratch` exists for.
+                    source: Some(VideoSourceRect::new(130, 128, 126, 128)),
                     ..VideoLayer::new(VideoRect::new(0, 0, width, height))
                 },
             )
@@ -1729,7 +1915,7 @@ mod tests {
         let composed = compositor.compose_frame().expect("compose");
         let out = download(&device, composed, width, height);
 
-        for (x, y) in [(2, 2), (64, 64), (125, 125)] {
+        for (x, y) in [(4, 4), (64, 64), (123, 123)] {
             let luma = luma_at(&out, x, y);
             assert!(
                 luma.abs_diff(220) <= 2,

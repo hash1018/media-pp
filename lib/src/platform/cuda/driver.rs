@@ -1033,6 +1033,45 @@ impl CudaDriver {
         })
     }
 
+    /// Copies a rectangle of one BGRA surface into the start of another,
+    /// device to device.
+    ///
+    /// One plane and four bytes a pixel, so there is no chroma grid to keep
+    /// to and no alignment to respect: a 2D copy addresses bytes.
+    pub(crate) fn blit_bgra(
+        &self,
+        source: BgraSurface,
+        destination: BgraSurface,
+        source_x: u32,
+        source_y: u32,
+        width: u32,
+        height: u32,
+    ) -> Result<(), CudaDriverError> {
+        if width == 0 || height == 0 {
+            return Ok(());
+        }
+        // SAFETY: `with_context` has the context current, and the descriptor is
+        // a live local with both memory types set to device — the host and
+        // array fields `Default` left null are ignored. Keeping the rectangle
+        // inside both surfaces is the caller's contract.
+        self.with_context(|| unsafe {
+            let copy = CudaMemcpy2D {
+                src_memory_type: CU_MEMORYTYPE_DEVICE,
+                src_device: source.pixels,
+                src_pitch: source.pitch,
+                src_x_in_bytes: source_x as usize * 4,
+                src_y: source_y as usize,
+                dst_memory_type: CU_MEMORYTYPE_DEVICE,
+                dst_device: destination.pixels,
+                dst_pitch: destination.pitch,
+                width_in_bytes: width as usize * 4,
+                height: height as usize,
+                ..CudaMemcpy2D::default()
+            };
+            check("cuMemcpy2D", cuMemcpy2D_v2(&copy))
+        })
+    }
+
     /// Blends a rectangle of one NV12 surface into another with a uniform
     /// `alpha`, on the GPU — what [`CudaDriver::blit_nv12`] cannot do, since
     /// a copy has no way to mix with what is already there.
