@@ -1913,6 +1913,76 @@ mod tests {
         assert_eq!(pixel(&downloaded, 1, 1), [255, 0, 0, 255], "blue overlay");
     }
 
+    /// The crop, per pixel, on the hardware that draws it.
+    ///
+    /// `the_sampled_window_covers_the_frame_or_the_region_inside_it` checks
+    /// the arithmetic that produces `uv_offset`/`uv_scale` and needs no
+    /// device; what it cannot check is that the shader then samples where
+    /// those say. Software and CUDA each have this test; Direct3D did not,
+    /// because the machine the crop was written on could not run it.
+    ///
+    /// Every texel carries its own coordinates, and the region is taken at
+    /// an odd offset scaled one-to-one, so the assertion is exact: output
+    /// (x, y) must be input (3 + x, 1 + y) and nothing else. A half-texel
+    /// error, an offset applied in the wrong direction, or a region measured
+    /// from the wrong corner all move at least one of them.
+    #[test]
+    fn a_layer_draws_only_its_source_region() {
+        let Some((device, context)) = try_device() else {
+            return;
+        };
+        const SOURCE: u32 = 8;
+        const REGION: u32 = 4;
+        const AT_X: u32 = 3;
+        const AT_Y: u32 = 1;
+
+        // BGRA, and blue/green carry the texel's own coordinates.
+        let texel = |x: u32, y: u32| [(x * 16) as u8, (y * 16) as u8, 128, 255];
+        let pixels: Vec<u8> = (0..SOURCE)
+            .flat_map(|y| (0..SOURCE).flat_map(move |x| texel(x, y)))
+            .collect();
+
+        let options = VideoCompositorOptions {
+            width: REGION,
+            height: REGION,
+            frame_rate: ffmpeg::Rational::new(30, 1),
+            background: Color::BLACK,
+        };
+        let (mut compositor, handle) =
+            D3d11VideoCompositor::new("compositor", &device, context.clone(), options)
+                .expect("D3d11VideoCompositor::new should succeed");
+
+        let mut layer = VideoLayer::new(VideoRect::new(0, 0, REGION, REGION));
+        layer.fit = video_layer::VideoFit::Stretch;
+        layer.source = Some(video_layer::VideoSourceRect::new(
+            AT_X, AT_Y, REGION, REGION,
+        ));
+        let mut sink = handle.add_source("input", layer).unwrap().unwrap().sink;
+
+        let texture = bgra_texture_from_pixels(&device, SOURCE, SOURCE, &pixels);
+        sink.consume(pooled_video(
+            wrap_d3d11_texture(texture, SOURCE, SOURCE).unwrap(),
+        ))
+        .unwrap();
+
+        let composed = compositor
+            .compose_frame(&test_bus())
+            .expect("compose_frame failed");
+        let downloaded = download_frame(&device, context, composed);
+
+        for y in 0..REGION {
+            for x in 0..REGION {
+                assert_eq!(
+                    pixel(&downloaded, x as usize, y as usize),
+                    texel(AT_X + x, AT_Y + y),
+                    "output ({x}, {y}) must be input ({}, {})",
+                    AT_X + x,
+                    AT_Y + y
+                );
+            }
+        }
+    }
+
     #[test]
     fn ignores_rows_outside_the_frame_visible_dimensions() {
         let Some((device, context)) = try_device() else {
