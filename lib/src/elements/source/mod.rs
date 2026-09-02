@@ -19,6 +19,7 @@ mod audio_mixer;
 mod capture;
 mod compositor;
 mod file_demuxer;
+mod pipeline_bridge;
 mod rtsp_source;
 mod test;
 
@@ -76,6 +77,9 @@ pub use compositor::{
     VideoInputId, VideoLayer, VideoRect, VideoSourceRect,
 };
 pub use file_demuxer::{FileDemuxError, FileDemuxer, FileDemuxerHandle, StreamInfo};
+pub use pipeline_bridge::{
+    PipelineBridge, PipelineBridgeError, PipelineBridgeHandle, PipelineBridgeOptions,
+};
 pub use rtsp_source::{RtspOptions, RtspSource, RtspSourceError};
 pub use test::{
     TestAudioOptions, TestAudioSource, TestAudioSourceError, TestVideoOptions, TestVideoSource,

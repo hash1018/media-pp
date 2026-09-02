@@ -106,11 +106,12 @@ pub use sink::{WasapiRenderer, WasapiRendererError, WasapiRendererOptions};
 pub use source::{
     AppSource, AppSourceError, AppSourceHandle, AudioMixer, AudioMixerError, AudioMixerOptions,
     FileDemuxError, FileDemuxer, FileDemuxerHandle, MixFormat, MixerHandle, MixerInputSink,
-    RtspOptions, RtspSource, RtspSourceError, StreamInfo, SwVideoCompositor,
-    SwVideoCompositorError, SwVideoCompositorHandle, SwVideoCompositorInput,
-    SwVideoCompositorInputSink, SwVideoLayerHandle, TestAudioOptions, TestAudioSource,
-    TestAudioSourceError, TestVideoOptions, TestVideoSource, TestVideoSourceError, TextLayer,
-    VideoCompositorOptions, VideoFit, VideoInputId, VideoLayer, VideoRect, VideoSourceRect,
+    PipelineBridge, PipelineBridgeError, PipelineBridgeHandle, PipelineBridgeOptions, RtspOptions,
+    RtspSource, RtspSourceError, StreamInfo, SwVideoCompositor, SwVideoCompositorError,
+    SwVideoCompositorHandle, SwVideoCompositorInput, SwVideoCompositorInputSink,
+    SwVideoLayerHandle, TestAudioOptions, TestAudioSource, TestAudioSourceError, TestVideoOptions,
+    TestVideoSource, TestVideoSourceError, TextLayer, VideoCompositorOptions, VideoFit,
+    VideoInputId, VideoLayer, VideoRect, VideoSourceRect,
 };
 #[cfg(all(target_os = "windows", feature = "dxgi-capture"))]
 pub use source::{

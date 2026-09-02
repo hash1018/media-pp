@@ -112,6 +112,14 @@ The core types are deliberately small:
   silently, and neither is now expressible.
 - `Pipeline` owns source threads, control flow, the shared clock, bus, and
   topology graph.
+- `PipelineBridge` carries buffers from one `Pipeline` into another, so a
+  source that dies takes only its own pipeline with it. `AudioMixer` and the
+  video compositors already join pipelines that meet at one of them; a bridge
+  is the case where nothing should be mixed or composited on the way — it
+  carries anything, and passes timestamps through untouched, which is why
+  what follows one is a muxer or a `TimestampOrigin` rather than a `Pacer`.
+  One input at a time: connecting again replaces it, which is how a
+  reconnection works.
 - `Tee` provides fan-out; `AudioMixer` and the video compositors provide
   fan-in. `TeeHandle` adds and removes branches while the pipeline runs:
   `attach` joins one, `finish_branch` ends one cleanly — an ordered EOS so
@@ -233,7 +241,7 @@ opt-in, and these elements declare one:
   the capture sources, and inbound WebRTC tracks.
 - Either decoded medium: `FrameCounter`.
 - Passthrough: `Queue`, `Tee`, `Pacer`, `VideoSynchronizer`, `ChangeGate`,
-  `TimestampOrigin`. `AppSink` accepts anything.
+  `TimestampOrigin`, `PipelineBridge`. `AppSink` accepts anything.
 
 `AppSource` stays undeclared, since only the application knows what it will
 push. Anything else undeclared defaults to "unknown", which always links and

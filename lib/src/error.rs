@@ -256,6 +256,10 @@ pub enum Error {
     #[error(transparent)]
     QueueError(#[from] QueueError),
 
+    /// See [`crate::elements::PipelineBridgeError`].
+    #[error(transparent)]
+    PipelineBridgeError(#[from] crate::elements::PipelineBridgeError),
+
     /// A pipeline graph mutation violated a topology invariant.
     #[error(transparent)]
     GraphError(#[from] GraphError),
