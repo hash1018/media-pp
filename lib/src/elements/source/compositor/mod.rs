@@ -21,6 +21,6 @@ mod cuda;
 #[cfg(feature = "cuda")]
 pub use cuda::*;
 pub use text_layer::TextLayer;
-pub use video_layer::{VideoFit, VideoInputId, VideoLayer, VideoRect};
+pub use video_layer::{VideoFit, VideoInputId, VideoLayer, VideoRect, VideoSourceRect};
 #[cfg(all(target_os = "windows", feature = "d3d11"))]
 pub use windows::*;

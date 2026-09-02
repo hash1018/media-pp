@@ -19,7 +19,7 @@ use super::super::sw_video_compositor::VideoCompositorOptions;
 use super::super::text_layer::{TextLayer, TextRasterError, rasterize_coverage};
 use super::super::video_layer::{
     self, LayerGeometry, MAX_DIMENSION, VideoFit, VideoInputId, VideoLayer, VideoLayerError,
-    VideoRect, layer_geometry,
+    VideoRect, VideoSourceRect, layer_geometry,
 };
 use crate::{
     buffer::{MediaBuffer, picture_id, release_picture},
@@ -91,6 +91,16 @@ pub enum CudaVideoCompositorError {
     /// A layer opacity is non-finite or outside `0.0..=1.0`.
     #[error("layer opacity must be finite and between 0.0 and 1.0, got {0}")]
     InvalidOpacity(f32),
+
+    /// A layer's source region is empty. Hiding a layer is
+    /// [`VideoLayer::visible`]; asking it to draw nothing is a mistake.
+    #[error("layer source region has invalid dimensions {width}x{height}")]
+    InvalidSourceRegion {
+        /// Region width as given.
+        width: u32,
+        /// Region height as given.
+        height: u32,
+    },
 
     /// An input frame reports a zero width or height.
     #[error("input frame has invalid dimensions {width}x{height}")]
@@ -390,6 +400,20 @@ impl CudaVideoLayerHandle {
     /// Changes how the input aspect ratio maps into its rectangle.
     pub fn set_fit(&self, fit: VideoFit) -> std::result::Result<(), CudaVideoCompositorError> {
         self.update(|layer| layer.fit = fit)
+    }
+
+    /// Draws only part of the input, or all of it again with `None`.
+    ///
+    /// Not checked against the frame, which may not have arrived yet and may
+    /// change size later — see [`VideoSourceRect`]. On NV12 surfaces the
+    /// region is aligned inwards to even pixels when it is drawn, since a
+    /// chroma sample covers two.
+    pub fn set_source(
+        &self,
+        source: Option<VideoSourceRect>,
+    ) -> std::result::Result<(), CudaVideoCompositorError> {
+        video_layer::validate_source(source).map_err(layer_error)?;
+        self.update(|layer| layer.source = source)
     }
 
     fn update(
@@ -956,9 +980,18 @@ impl CudaVideoCompositor {
                 continue;
             };
             let (frames_ctx, format) = validate_input_frame(&frame, self.shared.device_ctx)?;
+            let Some(source) = source_region(snapshot.layer, frame.width(), frame.height(), format)
+            else {
+                // A crop the frame is too small for, or one that shrank to
+                // nothing once aligned: this layer has nothing in the picture,
+                // which is not an error — see `video_layer::source_region`.
+                continue;
+            };
+            // The region's own size, not the frame's: a crop decides what the
+            // fit is fitting.
             let geometry = layer_geometry(
-                frame.width(),
-                frame.height(),
+                source.width,
+                source.height,
                 snapshot.layer.rect,
                 snapshot.layer.fit,
             )
@@ -973,9 +1006,10 @@ impl CudaVideoCompositor {
                 .scalers
                 .entry(snapshot.id)
                 .or_insert_with(|| CudaScaleGraph::new(CudaScalerInterp::Bilinear))
-                .scale(
+                .scale_region(
                     &frame,
                     frames_ctx,
+                    Some((format.surface(), source)),
                     placement.image_width,
                     placement.image_height,
                 )?;
@@ -1337,6 +1371,44 @@ enum LayerFormat {
     Bgra,
 }
 
+impl LayerFormat {
+    /// The surface layout behind it, for the pointer arithmetic a cropped
+    /// view needs.
+    fn surface(self) -> CudaFrameFormat {
+        match self {
+            Self::Nv12 => CudaFrameFormat::Nv12,
+            Self::Bgra => CudaFrameFormat::Bgra,
+        }
+    }
+}
+
+/// The part of the frame this layer draws, aligned to what its surface can
+/// address.
+///
+/// Aligned *inwards* on both edges: an NV12 chroma sample covers two pixels
+/// each way, so an odd offset has no pointer to name it and an odd extent has
+/// no last sample. Rounding the origin down and the extent down keeps the
+/// region inside what was asked for — a crop that grew by a pixel would show
+/// something the user had cut off.
+fn source_region(
+    layer: VideoLayer,
+    frame_width: u32,
+    frame_height: u32,
+    format: LayerFormat,
+) -> Option<VideoSourceRect> {
+    let region = video_layer::source_region(layer.source, frame_width, frame_height)?;
+    if matches!(format, LayerFormat::Bgra) {
+        return Some(region);
+    }
+    let x = align_down(region.x);
+    let y = align_down(region.y);
+    // Measured from the aligned origin, so the region never reaches past
+    // where it was asked to stop.
+    let width = align_down(region.width + (region.x - x));
+    let height = align_down(region.height + (region.y - y));
+    (width >= 2 && height >= 2).then_some(VideoSourceRect::new(x, y, width, height))
+}
+
 fn validate_input_frame(
     frame: &ffmpeg::frame::Video,
     device_ctx: *const ffi::AVHWDeviceContext,
@@ -1430,6 +1502,9 @@ fn layer_error(error: VideoLayerError) -> CudaVideoCompositorError {
         }
         VideoLayerError::ScaledLayerTooLarge { width, height } => {
             CudaVideoCompositorError::ScaledLayerTooLarge { width, height }
+        }
+        VideoLayerError::InvalidSourceRegion { width, height } => {
+            CudaVideoCompositorError::InvalidSourceRegion { width, height }
         }
     }
 }
@@ -1582,6 +1657,85 @@ mod tests {
 
     fn luma_at(frame: &ffmpeg::frame::Video, x: usize, y: usize) -> u8 {
         frame.data(0)[y * frame.stride(0) + x]
+    }
+
+    /// A CUDA-resident NV12 frame whose luma says which quadrant a pixel is
+    /// in, so what was drawn is readable from the output alone.
+    fn cuda_quadrant_frame(device: &CudaDevice, width: u32, height: u32) -> Option<MediaBuffer> {
+        let Ok(mut upload) =
+            CudaUpload::new("upload", device, CudaFrameFormat::Nv12, width, height)
+        else {
+            eprintln!("skipping: this machine has no usable CUDA frames context");
+            return None;
+        };
+        let uploaded = capture(&mut upload);
+        let mut frame = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::NV12, width, height);
+        frame.set_pts(Some(0));
+        let stride = frame.stride(0);
+        for y in 0..height as usize {
+            for x in 0..width as usize {
+                frame.data_mut(0)[y * stride + x] =
+                    match (x >= width as usize / 2, y >= height as usize / 2) {
+                        (false, false) => 40,
+                        (true, false) => 90,
+                        (false, true) => 150,
+                        (true, true) => 220,
+                    };
+            }
+        }
+        let uv_stride = frame.stride(1);
+        frame.data_mut(1)[..uv_stride * (height / 2) as usize].fill(128);
+        let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
+        let mut slot = pool.get();
+        *slot = frame;
+        upload
+            .consume(MediaBuffer::Video(Arc::new(slot)))
+            .expect("upload");
+        Some(uploaded.lock().unwrap().remove(0))
+    }
+
+    /// Cropping, all the way through the GPU path: the layer draws its source
+    /// region and nothing else, and the region is what the scaler is asked
+    /// for rather than something trimmed off a full-frame scale.
+    #[test]
+    fn a_layer_draws_only_its_source_region() {
+        let Some((device, _cuda_lock)) = try_cuda_device() else {
+            return;
+        };
+        let (width, height) = (128u32, 128u32);
+        let Ok((mut compositor, handle)) =
+            CudaVideoCompositor::new("compositor", &device, options(width, height))
+        else {
+            eprintln!("skipping: this machine cannot open a CUDA compositor");
+            return;
+        };
+        let mut input = handle
+            .add_source(
+                "layer",
+                VideoLayer {
+                    fit: VideoFit::Stretch,
+                    // The bottom-right quadrant, which nothing else in the
+                    // frame shares a value with.
+                    source: Some(VideoSourceRect::new(128, 128, 128, 128)),
+                    ..VideoLayer::new(VideoRect::new(0, 0, width, height))
+                },
+            )
+            .expect("add source");
+        let Some(frame) = cuda_quadrant_frame(&device, 256, 256) else {
+            return;
+        };
+        input.sink.consume(frame).expect("frame");
+
+        let composed = compositor.compose_frame().expect("compose");
+        let out = download(&device, composed, width, height);
+
+        for (x, y) in [(2, 2), (64, 64), (125, 125)] {
+            let luma = luma_at(&out, x, y);
+            assert!(
+                luma.abs_diff(220) <= 2,
+                "every pixel must come from the cropped quadrant; got {luma} at ({x},{y})"
+            );
+        }
     }
 
     /// A layer scaled so that exactly one of its dimensions matches the

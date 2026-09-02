@@ -73,7 +73,7 @@ pub use compositor::{
 pub use compositor::{
     SwVideoCompositor, SwVideoCompositorError, SwVideoCompositorHandle, SwVideoCompositorInput,
     SwVideoCompositorInputSink, SwVideoLayerHandle, TextLayer, VideoCompositorOptions, VideoFit,
-    VideoInputId, VideoLayer, VideoRect,
+    VideoInputId, VideoLayer, VideoRect, VideoSourceRect,
 };
 pub use file_demuxer::{FileDemuxError, FileDemuxer, FileDemuxerHandle, StreamInfo};
 pub use rtsp_source::{RtspOptions, RtspSource, RtspSourceError};

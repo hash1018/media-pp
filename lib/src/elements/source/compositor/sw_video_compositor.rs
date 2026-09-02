@@ -16,7 +16,7 @@ use thiserror::Error as ThisError;
 
 use super::video_layer::{
     self, LayerGeometry, MAX_DIMENSION, VideoFit, VideoInputId, VideoLayer, VideoLayerError,
-    VideoRect,
+    VideoRect, VideoSourceRect,
 };
 use crate::{
     buffer::{MediaBuffer, picture_id, picture_is_referenced, release_picture},
@@ -100,6 +100,16 @@ pub enum SwVideoCompositorError {
     /// A layer opacity is non-finite or outside `0.0..=1.0`.
     #[error("layer opacity must be finite and between 0.0 and 1.0, got {0}")]
     InvalidOpacity(f32),
+
+    /// A layer's source region is empty. Hiding a layer is
+    /// [`VideoLayer::visible`]; asking it to draw nothing is a mistake.
+    #[error("layer source region has invalid dimensions {width}x{height}")]
+    InvalidSourceRegion {
+        /// Region width as given.
+        width: u32,
+        /// Region height as given.
+        height: u32,
+    },
 
     /// An input frame reports a zero width or height.
     #[error("input frame has invalid dimensions {width}x{height}")]
@@ -316,6 +326,19 @@ impl SwVideoLayerHandle {
         self.update(|layer| layer.fit = fit)
     }
 
+    /// Draws only part of the input, or all of it again with `None`.
+    ///
+    /// Not checked against the frame, which may not have arrived yet and may
+    /// change size later — see [`VideoSourceRect`]. Only an empty region is
+    /// refused here.
+    pub fn set_source(
+        &self,
+        source: Option<VideoSourceRect>,
+    ) -> std::result::Result<(), SwVideoCompositorError> {
+        video_layer::validate_source(source).map_err(map_layer_error)?;
+        self.update(|layer| layer.source = source)
+    }
+
     fn update(
         &self,
         update: impl FnOnce(&mut VideoLayer),
@@ -502,10 +525,13 @@ impl InputScaler {
 
     fn scale(
         &mut self,
-        source: &ffmpeg::frame::Video,
+        frame: &ffmpeg::frame::Video,
+        region: VideoSourceRect,
         width: u32,
         height: u32,
     ) -> std::result::Result<&ffmpeg::frame::Video, ffmpeg::Error> {
+        let source = cropped(frame, region)?;
+        let source = source.as_ref().unwrap_or(frame);
         let definition = ScaleDefinition {
             source_format: source.format(),
             source_width: source.width(),
@@ -728,9 +754,18 @@ impl SwVideoCompositor {
             let Some(frame) = snapshot.frame else {
                 continue;
             };
+            let Some(source) =
+                video_layer::source_region(snapshot.layer.source, frame.width(), frame.height())
+            else {
+                // A crop the frame is too small for: nothing of this layer is
+                // in the picture, which is not an error — see `source_region`.
+                continue;
+            };
+            // The region's own size, not the frame's: a crop decides what the
+            // fit is fitting.
             let geometry = layer_geometry(
-                frame.width(),
-                frame.height(),
+                source.width,
+                source.height,
                 snapshot.layer.rect,
                 snapshot.layer.fit,
             )?;
@@ -738,7 +773,7 @@ impl SwVideoCompositor {
                 .scalers
                 .entry(snapshot.id)
                 .or_insert_with(InputScaler::new)
-                .scale(&frame, geometry.image_width, geometry.image_height)
+                .scale(&frame, source, geometry.image_width, geometry.image_height)
                 .map_err(SwVideoCompositorError::from)?;
             blend_bgra(&mut output, scaled, geometry, snapshot.layer.opacity);
         }
@@ -889,6 +924,54 @@ fn validate_output_options(
     Ok(())
 }
 
+/// A view of `frame` holding only `region`, or `None` when that is the whole
+/// frame already.
+///
+/// `av_frame_apply_cropping` rather than pointer arithmetic of this file's
+/// own: which byte a pixel starts at depends on the format — how many planes
+/// there are, how far the chroma ones are subsampled, how wide a pixel is —
+/// and libavutil already has every format's descriptor to answer that. The
+/// view shares the frame's buffers, so this costs a reference and some
+/// arithmetic rather than a copy.
+///
+/// `UNALIGNED` because a crop is where the user put it: refusing an odd
+/// offset would silently move the region, and the scaler that reads this does
+/// not need the alignment SIMD paths want.
+fn cropped(
+    frame: &ffmpeg::frame::Video,
+    region: VideoSourceRect,
+) -> std::result::Result<Option<ffmpeg::frame::Video>, ffmpeg::Error> {
+    if region.x == 0
+        && region.y == 0
+        && region.width == frame.width()
+        && region.height == frame.height()
+    {
+        return Ok(None);
+    }
+    let mut view = ffmpeg::frame::Video::empty();
+    // SAFETY: both frames are live and distinct — `view` was just created
+    // empty — and `av_frame_ref` only adds a reference to `frame`'s buffers.
+    let code = unsafe { ffi::av_frame_ref(view.as_mut_ptr(), frame.as_ptr()) };
+    if code < 0 {
+        return Err(ffmpeg::Error::from(code));
+    }
+    // SAFETY: `view` owns this `AVFrame`, and these are the plain integer
+    // fields `av_frame_apply_cropping` is documented to read.
+    let code = unsafe {
+        let raw = view.as_mut_ptr();
+        (*raw).crop_left = usize::try_from(region.x).unwrap_or(0);
+        (*raw).crop_top = usize::try_from(region.y).unwrap_or(0);
+        (*raw).crop_right = usize::try_from(frame.width() - region.x - region.width).unwrap_or(0);
+        (*raw).crop_bottom =
+            usize::try_from(frame.height() - region.y - region.height).unwrap_or(0);
+        ffi::av_frame_apply_cropping(raw, ffi::AV_FRAME_CROP_UNALIGNED as i32)
+    };
+    if code < 0 {
+        return Err(ffmpeg::Error::from(code));
+    }
+    Ok(Some(view))
+}
+
 /// Thin adapters over the shared, backend-agnostic logic in
 /// [`super::video_layer`] — translate its [`VideoLayerError`] into this
 /// backend's own [`SwVideoCompositorError`] variants so every existing call
@@ -905,6 +988,9 @@ fn map_layer_error(error: VideoLayerError) -> SwVideoCompositorError {
         }
         VideoLayerError::ScaledLayerTooLarge { width, height } => {
             SwVideoCompositorError::ScaledLayerTooLarge { width, height }
+        }
+        VideoLayerError::InvalidSourceRegion { width, height } => {
+            SwVideoCompositorError::InvalidSourceRegion { width, height }
         }
     }
 }
@@ -1077,6 +1163,96 @@ mod tests {
     ) -> (Box<dyn Sink>, SwVideoLayerHandle) {
         let input = handle.add_source(name, layer).unwrap().unwrap();
         (input.sink, input.layer)
+    }
+
+    /// Four quadrants in one frame, so which part of it was drawn is
+    /// readable from the output's colour alone.
+    fn quadrant_frame(width: u32, height: u32) -> Arc<UnboundObjectPoolRef<ffmpeg::frame::Video>> {
+        let pool = UnboundObjectPool::new(
+            0,
+            move || ffmpeg::frame::Video::new(ffmpeg::format::Pixel::BGRA, width, height),
+            |_| {},
+        );
+        let mut frame = pool.get();
+        let stride = frame.stride(0);
+        for y in 0..height as usize {
+            for x in 0..width as usize {
+                let bgra = match (x >= width as usize / 2, y >= height as usize / 2) {
+                    (false, false) => [0, 0, 255, 255],
+                    (true, false) => [0, 255, 0, 255],
+                    (false, true) => [255, 0, 0, 255],
+                    (true, true) => [0, 255, 255, 255],
+                };
+                let offset = y * stride + x * 4;
+                frame.data_mut(0)[offset..offset + 4].copy_from_slice(&bgra);
+            }
+        }
+        Arc::new(frame)
+    }
+
+    /// The whole of cropping, in one composite: what is drawn is the region,
+    /// and the fit then works on the region rather than on the frame.
+    #[test]
+    fn a_layer_draws_only_its_source_region() {
+        let (mut compositor, handle) = SwVideoCompositor::new("compositor", options(4, 4)).unwrap();
+        let mut layer = VideoLayer::new(VideoRect::new(0, 0, 4, 4));
+        layer.fit = VideoFit::Stretch;
+        // The bottom-right quadrant, which is the one nothing else is.
+        layer.source = Some(VideoSourceRect::new(4, 4, 4, 4));
+        let (mut sink, _) = input(&handle, "input", layer);
+        sink.consume(MediaBuffer::Video(quadrant_frame(8, 8)))
+            .unwrap();
+
+        let frame = compositor.compose_frame().unwrap();
+
+        for (x, y) in [(0, 0), (3, 0), (0, 3), (3, 3)] {
+            assert_eq!(
+                pixel(&frame, x, y),
+                [0, 255, 255, 255],
+                "every output pixel must come from the cropped quadrant, at {x},{y}"
+            );
+        }
+    }
+
+    /// A crop the frame turned out to be too small for is a frame arriving
+    /// late to a decision, not a fault: the layer is left out and the rest of
+    /// the scene is composed.
+    #[test]
+    fn a_source_region_outside_the_frame_leaves_the_layer_out() {
+        let (mut compositor, handle) = SwVideoCompositor::new("compositor", options(4, 4)).unwrap();
+        let mut layer = VideoLayer::new(VideoRect::new(0, 0, 4, 4));
+        layer.fit = VideoFit::Stretch;
+        layer.source = Some(VideoSourceRect::new(64, 64, 4, 4));
+        let (mut sink, _) = input(&handle, "input", layer);
+        sink.consume(MediaBuffer::Video(solid_frame(8, 8, Color::new(255, 0, 0))))
+            .unwrap();
+
+        let frame = compositor.compose_frame().unwrap();
+
+        assert_eq!(
+            pixel(&frame, 0, 0),
+            [0, 0, 0, 255],
+            "the background is what a layer with nothing to draw leaves"
+        );
+    }
+
+    /// Hiding a layer is `visible`. An empty region is a mistake, and one
+    /// that would otherwise reach a scaler as a zero-sized picture.
+    #[test]
+    fn an_empty_source_region_is_refused() {
+        let (_compositor, handle) = SwVideoCompositor::new("compositor", options(4, 4)).unwrap();
+        let (_sink, layer) = input(
+            &handle,
+            "input",
+            VideoLayer::new(VideoRect::new(0, 0, 4, 4)),
+        );
+
+        let refused = layer.set_source(Some(VideoSourceRect::new(0, 0, 4, 0)));
+
+        assert!(matches!(
+            refused,
+            Err(SwVideoCompositorError::InvalidSourceRegion { .. })
+        ));
     }
 
     #[test]

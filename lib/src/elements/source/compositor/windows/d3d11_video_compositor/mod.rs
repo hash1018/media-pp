@@ -42,7 +42,9 @@ pub use video_handle::D3d11VideoLayerHandle;
 
 use super::super::{
     text_layer::TextLayer,
-    video_layer::{self, LayerGeometry, MAX_DIMENSION, VideoLayer, VideoLayerError},
+    video_layer::{
+        self, LayerGeometry, MAX_DIMENSION, VideoLayer, VideoLayerError, VideoSourceRect,
+    },
 };
 use crate::{
     buffer::{MediaBuffer, picture_id, picture_is_referenced, release_picture},
@@ -118,6 +120,16 @@ pub enum D3d11VideoCompositorError {
     /// A layer opacity is non-finite or outside `0.0..=1.0`.
     #[error("layer opacity must be finite and between 0.0 and 1.0, got {0}")]
     InvalidOpacity(f32),
+
+    /// A layer's source region is empty. Hiding a layer is
+    /// [`VideoLayer::visible`]; asking it to draw nothing is a mistake.
+    #[error("layer source region has invalid dimensions {width}x{height}")]
+    InvalidSourceRegion {
+        /// Region width as given.
+        width: u32,
+        /// Region height as given.
+        height: u32,
+    },
 
     /// An input frame reports a zero width or height.
     #[error("input frame has invalid dimensions {width}x{height}")]
@@ -220,6 +232,9 @@ fn map_layer_error(error: VideoLayerError) -> D3d11VideoCompositorError {
         }
         VideoLayerError::ScaledLayerTooLarge { width, height } => {
             D3d11VideoCompositorError::ScaledLayerTooLarge { width, height }
+        }
+        VideoLayerError::InvalidSourceRegion { width, height } => {
+            D3d11VideoCompositorError::InvalidSourceRegion { width, height }
         }
     }
 }
@@ -646,23 +661,23 @@ struct LayerConstants {
     opacity: f32,
     _padding: [f32; 3],
     uv_scale: [f32; 2],
-    _uv_padding: [f32; 2],
+    uv_offset: [f32; 2],
 }
 
 impl LayerConstants {
-    fn bgra(opacity: f32, uv_scale: [f32; 2]) -> Self {
+    fn bgra(opacity: f32, uv: UvWindow) -> Self {
         Self {
             red: [0.0; 4],
             green: [0.0; 4],
             blue: [0.0; 4],
             opacity,
             _padding: [0.0; 3],
-            uv_scale,
-            _uv_padding: [0.0; 2],
+            uv_scale: uv.scale,
+            uv_offset: uv.offset,
         }
     }
 
-    fn nv12(frame: &ffmpeg::frame::Video, opacity: f32, uv_scale: [f32; 2]) -> Self {
+    fn nv12(frame: &ffmpeg::frame::Video, opacity: f32, uv: UvWindow) -> Self {
         let [red, green, blue] =
             yuv_to_rgb_rows(frame.color_space(), frame.color_range(), frame.height());
         Self {
@@ -671,18 +686,33 @@ impl LayerConstants {
             blue,
             opacity,
             _padding: [0.0; 3],
-            uv_scale,
-            _uv_padding: [0.0; 2],
+            uv_scale: uv.scale,
+            uv_offset: uv.offset,
         }
     }
 }
 
-fn visible_uv_scale(
+/// The part of the texture a layer samples, in texture coordinates.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct UvWindow {
+    scale: [f32; 2],
+    offset: [f32; 2],
+}
+
+/// Where this layer's source region sits inside the texture behind its frame.
+///
+/// Two things are folded together here. A decoder's texture can be larger
+/// than the frame it carries — 1088 rows for a 1080-row picture — so even an
+/// uncropped layer samples only part of it; and a crop takes part of the
+/// frame. Both are the same arithmetic against the texture's size, which is
+/// why one function answers both.
+fn visible_uv_window(
+    region: VideoSourceRect,
     frame_width: u32,
     frame_height: u32,
     texture_width: u32,
     texture_height: u32,
-) -> std::result::Result<[f32; 2], D3d11VideoCompositorError> {
+) -> std::result::Result<UvWindow, D3d11VideoCompositorError> {
     if frame_width > texture_width || frame_height > texture_height {
         return Err(D3d11VideoCompositorError::FrameExceedsTexture {
             frame_width,
@@ -691,10 +721,16 @@ fn visible_uv_scale(
             texture_height,
         });
     }
-    Ok([
-        frame_width as f32 / texture_width as f32,
-        frame_height as f32 / texture_height as f32,
-    ])
+    Ok(UvWindow {
+        scale: [
+            region.width as f32 / texture_width as f32,
+            region.height as f32 / texture_height as f32,
+        ],
+        offset: [
+            region.x as f32 / texture_width as f32,
+            region.y as f32 / texture_height as f32,
+        ],
+    })
 }
 
 /// Composites the latest frames from any number of independent GPU-backed
@@ -1129,10 +1165,24 @@ impl D3d11VideoCompositor {
             });
         }
         let array_index = index as u32;
-        let uv_scale = visible_uv_scale(frame.width(), frame.height(), desc.Width, desc.Height)?;
+        let Some(region) = video_layer::source_region(layer.source, frame.width(), frame.height())
+        else {
+            // A crop the frame is too small for: nothing of this layer is in
+            // the picture, which is not an error — see `source_region`.
+            return Ok(());
+        };
+        let uv = visible_uv_window(
+            region,
+            frame.width(),
+            frame.height(),
+            desc.Width,
+            desc.Height,
+        )?;
 
+        // The region's own size, not the frame's: a crop decides what the fit
+        // is fitting.
         let geometry =
-            video_layer::layer_geometry(frame.width(), frame.height(), layer.rect, layer.fit)
+            video_layer::layer_geometry(region.width, region.height, layer.rect, layer.fit)
                 .map_err(map_layer_error)?;
         let Some((viewport, scissor)) = clipped_viewport(&geometry, canvas_width, canvas_height)
         else {
@@ -1140,8 +1190,8 @@ impl D3d11VideoCompositor {
         };
 
         let constants = match desc.Format {
-            DXGI_FORMAT_B8G8R8A8_UNORM => LayerConstants::bgra(layer.opacity, uv_scale),
-            DXGI_FORMAT_NV12 => LayerConstants::nv12(frame, layer.opacity, uv_scale),
+            DXGI_FORMAT_B8G8R8A8_UNORM => LayerConstants::bgra(layer.opacity, uv),
+            DXGI_FORMAT_NV12 => LayerConstants::nv12(frame, layer.opacity, uv),
             other => return Err(D3d11VideoCompositorError::UnsupportedTextureFormat(other)),
         };
         // SAFETY: `constants` is readable for the declared constant-buffer
@@ -1908,9 +1958,48 @@ mod tests {
         }
     }
 
+    /// The window a layer samples, with and without a crop: an uncropped
+    /// layer takes the frame out of its (possibly taller) texture from the
+    /// origin, and a cropped one takes its region out of the same texture.
+    #[test]
+    fn the_sampled_window_covers_the_frame_or_the_region_inside_it() {
+        let whole = visible_uv_window(
+            VideoSourceRect::new(0, 0, 1920, 1080),
+            1920,
+            1080,
+            1920,
+            1088,
+        )
+        .expect("a frame inside its texture");
+        assert_eq!(whole.offset, [0.0, 0.0]);
+        assert!((whole.scale[1] - 1080.0 / 1088.0).abs() < 1e-6);
+
+        let quadrant = visible_uv_window(
+            VideoSourceRect::new(960, 540, 960, 540),
+            1920,
+            1080,
+            1920,
+            1088,
+        )
+        .expect("a region inside the frame");
+        assert!((quadrant.offset[0] - 0.5).abs() < 1e-6);
+        assert!((quadrant.scale[0] - 0.5).abs() < 1e-6);
+        assert!(
+            (quadrant.offset[1] - 540.0 / 1088.0).abs() < 1e-6,
+            "the offset is measured against the texture, not the frame"
+        );
+    }
+
     #[test]
     fn rejects_frame_dimensions_larger_than_the_backing_texture() {
-        let error = visible_uv_scale(1920, 1088, 1920, 1080).unwrap_err();
+        let error = visible_uv_window(
+            VideoSourceRect::new(0, 0, 1920, 1088),
+            1920,
+            1088,
+            1920,
+            1080,
+        )
+        .unwrap_err();
         assert!(matches!(
             error,
             D3d11VideoCompositorError::FrameExceedsTexture {

@@ -80,6 +80,19 @@ pub enum CudaScalerError {
     /// FFmpeg failed to return a scaled frame from the graph.
     #[error("failed to read a scaled frame out of the filter graph (code {0})")]
     BufferSinkPull(i32),
+
+    /// FFmpeg could not reference a frame while building a cropped view of it.
+    #[error("failed to reference a frame to crop it (code {0})")]
+    FrameRef(i32),
+
+    /// A source region reaches past the frame it was asked of.
+    #[error("the source region does not fit inside the frame")]
+    SourceRegionOutsideFrame,
+
+    /// A source region whose offset or extent the surface cannot address —
+    /// an odd one on NV12, whose chroma samples cover two pixels each.
+    #[error("the source region is not aligned to what this surface can address")]
+    SourceRegionMisaligned,
 }
 
 /// Interpolation `scale_cuda` uses when resampling — the CUDA counterpart to

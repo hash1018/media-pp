@@ -16,6 +16,8 @@ use crate::{
 };
 
 use super::cuda_scaler::{CudaScalerError, CudaScalerInterp};
+use crate::elements::VideoSourceRect;
+use crate::platform::cuda::CudaFrameFormat;
 
 /// One configured graph, plus what it was configured *for*, so a changed
 /// input or output can be detected.
@@ -145,6 +147,79 @@ pub(crate) struct CudaScaleGraph {
 // once.
 unsafe impl Send for CudaScaleGraph {}
 
+/// An `AVFrame` over the same surface holding only `region`.
+///
+/// Pointer arithmetic rather than `av_frame_apply_cropping`, which refuses a
+/// hardware frame: it works from a pixel-format descriptor, and
+/// `AV_PIX_FMT_CUDA` has none — the layout lives in the frames context's
+/// `sw_format` instead, which is what the caller passes here.
+///
+/// `None` when the region is the whole frame, so the ordinary path pushes the
+/// caller's own frame and allocates nothing.
+///
+/// The offsets must already be aligned to what the format can address: NV12's
+/// chroma plane covers two luma pixels per sample in each direction, so an
+/// odd offset there has no pointer to name it. Misalignment is rejected
+/// rather than rounded, because rounding here would move a region the caller
+/// believes it placed exactly.
+fn cropped_view(
+    frame: &ffmpeg::frame::Video,
+    format: CudaFrameFormat,
+    region: VideoSourceRect,
+) -> Result<Option<ffmpeg::frame::Video>, CudaScalerError> {
+    if region.x == 0
+        && region.y == 0
+        && region.width == frame.width()
+        && region.height == frame.height()
+    {
+        return Ok(None);
+    }
+    if region.x.saturating_add(region.width) > frame.width()
+        || region.y.saturating_add(region.height) > frame.height()
+    {
+        return Err(CudaScalerError::SourceRegionOutsideFrame);
+    }
+    if matches!(format, CudaFrameFormat::Nv12)
+        && (region.x | region.y | region.width | region.height) & 1 != 0
+    {
+        return Err(CudaScalerError::SourceRegionMisaligned);
+    }
+
+    let mut view = ffmpeg::frame::Video::empty();
+    // SAFETY: `view` was just created empty and is distinct from `frame`;
+    // `av_frame_ref` only takes references to the source's buffers, the
+    // hardware frames context included, so the view keeps the surface alive
+    // for as long as it exists.
+    let code = unsafe { ffi::av_frame_ref(view.as_mut_ptr(), frame.as_ptr()) };
+    if code < 0 {
+        return Err(CudaScalerError::FrameRef(code));
+    }
+    // SAFETY: `view` owns the `AVFrame` this writes to, and the planes moved
+    // here are the ones the format has: NV12 carries luma in plane 0 and
+    // interleaved chroma at half resolution in plane 1, BGRA one packed plane
+    // of four bytes a pixel. The offsets stay inside the surface because the
+    // region was bounds-checked against the frame above, and the device
+    // pointers are only arithmetic here — nothing dereferences them.
+    unsafe {
+        let raw = view.as_mut_ptr();
+        (*raw).width = region.width as i32;
+        (*raw).height = region.height as i32;
+        let luma_stride = (*raw).linesize[0] as isize;
+        let chroma_stride = (*raw).linesize[1] as isize;
+        let (x, y) = (region.x as isize, region.y as isize);
+        match format {
+            CudaFrameFormat::Nv12 => {
+                (*raw).data[0] = (*raw).data[0].offset(y * luma_stride + x);
+                (*raw).data[1] = (*raw).data[1].offset((y / 2) * chroma_stride + x);
+            }
+            CudaFrameFormat::Bgra => {
+                (*raw).data[0] = (*raw).data[0].offset(y * luma_stride + x * 4);
+            }
+        }
+    }
+    Ok(Some(view))
+}
+
 /// What one call produced. `scale_cuda` emits one frame per frame, but a
 /// graph is allowed to hold or emit more than that, so callers drain a list
 /// rather than assuming.
@@ -195,6 +270,35 @@ impl CudaScaleGraph {
         width: u32,
         height: u32,
     ) -> Result<ScaledFrames, CudaScalerError> {
+        self.scale_region(frame, frames_ctx, None, width, height)
+    }
+
+    /// The same, drawing only part of the frame.
+    ///
+    /// `region` is in the frame's own pixels and must be aligned to what the
+    /// surface's format can address — even offsets and extents on NV12, where
+    /// one chroma sample covers two luma ones. The caller aligns, because it
+    /// is the one that knows what it is willing to lose.
+    ///
+    /// The region reaches `scale_cuda` as a *view*: an `AVFrame` sharing the
+    /// same surface with its plane pointers moved to the region's first pixel
+    /// and its dimensions cut to the region. Nothing is copied, and the
+    /// scaler is configured for the region's size rather than the frame's —
+    /// so a crop scales only what it keeps, instead of scaling the whole
+    /// frame and throwing most of it away.
+    pub(crate) fn scale_region(
+        &mut self,
+        frame: &ffmpeg::frame::Video,
+        frames_ctx: *mut ffi::AVBufferRef,
+        region: Option<(CudaFrameFormat, VideoSourceRect)>,
+        width: u32,
+        height: u32,
+    ) -> Result<ScaledFrames, CudaScalerError> {
+        let view = match region {
+            Some((format, region)) => cropped_view(frame, format, region)?,
+            None => None,
+        };
+        let frame = view.as_ref().unwrap_or(frame);
         if !self.matches(frame, frames_ctx, width, height) {
             self.build(frame, frames_ctx, width, height)?;
         }

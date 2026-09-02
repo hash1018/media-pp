@@ -85,6 +85,18 @@ impl D3d11VideoLayerHandle {
         self.update(|layer| layer.fit = fit)
     }
 
+    /// Draws only part of the input, or all of it again with `None`.
+    ///
+    /// Not checked against the frame, which may not have arrived yet and may
+    /// change size later — see [`video_layer::VideoSourceRect`].
+    pub fn set_source(
+        &self,
+        source: Option<video_layer::VideoSourceRect>,
+    ) -> std::result::Result<(), D3d11VideoCompositorError> {
+        video_layer::validate_source(source).map_err(map_layer_error)?;
+        self.update(|layer| layer.source = source)
+    }
+
     /// Pushes a new `Pixel::D3D11` frame for this input to draw next
     /// composite, without going through a `Sink` at all — for handles
     /// obtained via [`super::D3d11VideoCompositorHandle::add_layer`], which

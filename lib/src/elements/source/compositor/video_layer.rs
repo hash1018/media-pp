@@ -41,6 +41,41 @@ impl VideoRect {
     }
 }
 
+/// An input-space rectangle: the part of a frame a layer draws.
+///
+/// Unsigned, unlike [`VideoRect`]: a layer may hang off the canvas, but there
+/// is nothing outside a frame to take.
+///
+/// Set on the layer rather than asked of the frame, and therefore possibly
+/// out of range — a layer is placed before any frame arrives, and the frame
+/// can change size underneath it when a captured window is resized. What
+/// falls outside is brought back in when it is drawn, not refused when it is
+/// set; the compositors bring it inside the frame when they draw.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VideoSourceRect {
+    /// Distance from the frame's left edge, in input pixels.
+    pub x: u32,
+    /// Distance from the frame's top edge, in input pixels.
+    pub y: u32,
+    /// Width of the region, in input pixels; must be nonzero.
+    pub width: u32,
+    /// Height of the region, in input pixels; must be nonzero.
+    pub height: u32,
+}
+
+impl VideoSourceRect {
+    /// Creates an input-space rectangle without validating it against any
+    /// frame — there is not one yet when a layer is placed.
+    pub const fn new(x: u32, y: u32, width: u32, height: u32) -> Self {
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+}
+
 /// How an input's aspect ratio is mapped into its [`VideoRect`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VideoFit {
@@ -65,6 +100,14 @@ pub struct VideoLayer {
     pub visible: bool,
     /// Aspect-ratio policy used to map the input into [`Self::rect`].
     pub fit: VideoFit,
+    /// The part of the input to draw, or `None` for all of it.
+    ///
+    /// Applied *before* [`Self::fit`]: what is drawn is this region, and the
+    /// aspect ratio the fit preserves is this region's rather than the whole
+    /// frame's. Cropping a 16:9 capture to a square and containing it in a
+    /// square rectangle therefore fills it, which is what asking for both
+    /// means.
+    pub source: Option<VideoSourceRect>,
 }
 
 impl VideoLayer {
@@ -76,6 +119,7 @@ impl VideoLayer {
             opacity: 1.0,
             visible: true,
             fit: VideoFit::Contain,
+            source: None,
         }
     }
 }
@@ -100,11 +144,50 @@ pub(crate) enum VideoLayerError {
 
     #[error("scaled layer would exceed {MAX_DIMENSION}px: {width}x{height}")]
     ScaledLayerTooLarge { width: u32, height: u32 },
+
+    #[error("layer source region has invalid dimensions {width}x{height}")]
+    InvalidSourceRegion { width: u32, height: u32 },
 }
 
 pub(crate) fn validate_layer(layer: VideoLayer) -> Result<(), VideoLayerError> {
     validate_rect(layer.rect)?;
+    validate_source(layer.source)?;
     validate_opacity(layer.opacity)
+}
+
+/// The one thing about a source region that can be judged without a frame:
+/// an empty region is a layer that draws nothing, which is a mistake rather
+/// than a way to hide it — [`VideoLayer::visible`] is that.
+pub(crate) fn validate_source(source: Option<VideoSourceRect>) -> Result<(), VideoLayerError> {
+    match source {
+        Some(source) if source.width == 0 || source.height == 0 => {
+            Err(VideoLayerError::InvalidSourceRegion {
+                width: source.width,
+                height: source.height,
+            })
+        }
+        _ => Ok(()),
+    }
+}
+
+/// The part of a frame this layer draws, brought inside what the frame
+/// actually has.
+///
+/// `None` when the region falls entirely outside the frame — a layer with
+/// nothing to draw, which a caller skips rather than reports: a capture that
+/// came back smaller than the crop that was set on it is a frame arriving
+/// late to a decision, not a fault.
+pub(crate) fn source_region(
+    source: Option<VideoSourceRect>,
+    frame_width: u32,
+    frame_height: u32,
+) -> Option<VideoSourceRect> {
+    let Some(source) = source else {
+        return Some(VideoSourceRect::new(0, 0, frame_width, frame_height));
+    };
+    let width = frame_width.checked_sub(source.x)?.min(source.width);
+    let height = frame_height.checked_sub(source.y)?.min(source.height);
+    (width > 0 && height > 0).then_some(VideoSourceRect::new(source.x, source.y, width, height))
 }
 
 pub(crate) fn validate_rect(rect: VideoRect) -> Result<(), VideoLayerError> {

@@ -110,7 +110,7 @@ pub use source::{
     SwVideoCompositorError, SwVideoCompositorHandle, SwVideoCompositorInput,
     SwVideoCompositorInputSink, SwVideoLayerHandle, TestAudioOptions, TestAudioSource,
     TestAudioSourceError, TestVideoOptions, TestVideoSource, TestVideoSourceError, TextLayer,
-    VideoCompositorOptions, VideoFit, VideoInputId, VideoLayer, VideoRect,
+    VideoCompositorOptions, VideoFit, VideoInputId, VideoLayer, VideoRect, VideoSourceRect,
 };
 #[cfg(all(target_os = "windows", feature = "dxgi-capture"))]
 pub use source::{
