@@ -108,6 +108,7 @@ mod windows_example {
                 frame_rate: ffmpeg::Rational::new(30, 1),
                 bit_rate: 4_000_000,
                 gop_size: 60, // ~2s @ 30fps
+                max_b_frames: None,
             },
         )
         .expect("failed to open video encoder");
@@ -307,6 +308,7 @@ mod linux_example {
                 frame_rate: ffmpeg::Rational::new(30, 1),
                 bit_rate: 4_000_000,
                 gop_size: 60, // ~2s @ 30fps
+                max_b_frames: None,
             },
         )
         .expect("failed to open video encoder");

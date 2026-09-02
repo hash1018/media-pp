@@ -59,6 +59,7 @@ mod example {
                 // Match the two-second HLS target so each requested boundary
                 // has a keyframe available at 30 fps.
                 gop_size: 60,
+                max_b_frames: None,
             },
         )?;
 

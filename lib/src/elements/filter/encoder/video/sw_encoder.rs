@@ -78,6 +78,23 @@ pub enum VideoCodec {
     /// faster than [`VideoCodec::Av1`] (`libaom-av1`) at a given quality
     /// target — the practical default for real-time AV1 encoding.
     Svtav1,
+    /// `mpeg4` — MPEG-4 Part 2, and the only encoder here that is FFmpeg's
+    /// own rather than a library it was linked against.
+    ///
+    /// Which is the whole reason it is offered. Every variant above needs
+    /// its library to have been enabled at build time, and an FFmpeg with
+    /// none of them cannot encode video at all through this element. This
+    /// one is in every build there is.
+    ///
+    /// It is also the only always-present encoder that will emit B-frames
+    /// (see [`SwEncoderOptions::max_b_frames`]) — `libopenh264` emits none
+    /// whatever it is asked for, and the H.264 encoders that would are the
+    /// GPL ones. That makes it what a test reaches for when what it is
+    /// testing is reordering.
+    ///
+    /// Not a codec to choose for output anyone has to play: it predates
+    /// H.264 and compresses far worse at the same quality.
+    Mpeg4,
 }
 
 impl VideoCodec {
@@ -91,6 +108,7 @@ impl VideoCodec {
             VideoCodec::Vp9 => "libvpx-vp9",
             VideoCodec::Av1 => "libaom-av1",
             VideoCodec::Svtav1 => "libsvtav1",
+            VideoCodec::Mpeg4 => "mpeg4",
         }
     }
 }
@@ -147,6 +165,20 @@ pub struct SwEncoderOptions {
     /// next keyframe, so an unbounded interval is a real join-latency
     /// problem, not just a segmenting one.
     pub gop_size: u32,
+    /// How many consecutive B-frames the encoder may insert, or `None` to
+    /// leave the codec's own default alone — which is what every caller
+    /// wanting nothing to do with this should pass, since the defaults
+    /// differ (`libx264` picks 3, `libopenh264` emits none at all whatever
+    /// this says).
+    ///
+    /// A B-frame is coded from frames on both sides of it, so the encoder
+    /// hands packets over in a different order than it was given them and
+    /// their `dts` stops equalling their `pts`. That is the reason to reach
+    /// for this deliberately rather than to compress a little better:
+    /// reordering is a path a muxer, an RTP payloader and a seek all have to
+    /// get right, and a pipeline whose every packet arrives in presentation
+    /// order never exercises it.
+    pub max_b_frames: Option<u32>,
 }
 
 /// Encodes `Pixel::YUV420P` `Video` frames into `Packet`s via a software
@@ -217,6 +249,9 @@ impl SwEncoder {
         video.set_frame_rate(Some(options.frame_rate));
         video.set_bit_rate(options.bit_rate);
         video.set_gop(options.gop_size);
+        if let Some(frames) = options.max_b_frames {
+            video.set_max_b_frames(frames as usize);
+        }
 
         let encoder = video.open_as(codec).map_err(SwEncoderError::from)?;
         let packet_duration = nominal_packet_duration(options.time_base, options.frame_rate);
@@ -397,6 +432,7 @@ mod tests {
                     frame_rate: ffmpeg::Rational::new(30, 1),
                     bit_rate: 1_000_000,
                     gop_size: 60, // ~2s @ 30fps
+                    max_b_frames: None,
                 },
             );
             // Whether it succeeds or fails depends on how this machine's
@@ -476,6 +512,7 @@ mod tests {
             frame_rate: ffmpeg::Rational::new(30, 1),
             bit_rate: 200_000,
             gop_size: 30,
+            max_b_frames: None,
         };
         let Ok(mut encoder) = SwEncoder::new("encoder", options) else {
             return; // openh264 unavailable on this build, see codec_not_found_is_a_clean_error_not_a_panic

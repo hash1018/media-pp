@@ -437,6 +437,7 @@ mod common {
             frame_rate: ffmpeg::Rational::new(FPS, 1),
             bit_rate: 1_500_000,
             gop_size: 30,
+            max_b_frames: None,
         }
     }
 

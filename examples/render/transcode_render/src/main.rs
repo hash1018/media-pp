@@ -89,6 +89,7 @@ mod windows_example {
                     frame_rate: options.framerate,
                     bit_rate: 2_000_000,
                     gop_size: 60, // ~2s @ 30fps (TestVideoOptions::default's own framerate)
+                    max_b_frames: None,
                 },
             )
             .expect("failed to open encoder");
@@ -211,6 +212,7 @@ mod linux_example {
                     frame_rate: options.framerate,
                     bit_rate: 2_000_000,
                     gop_size: 60,
+                    max_b_frames: None,
                 },
             )?;
             let decoder = SwDecoder::new("decoder", encoder.parameters())?;

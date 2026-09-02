@@ -82,6 +82,7 @@ struct StreamDef {
 /// #     frame_rate: ffmpeg::Rational(30, 1),
 /// #     bit_rate: 2_000_000,
 /// #     gop_size: 30,
+/// #     max_b_frames: None,
 /// # })?;
 /// # let audio_encoder = SwAudioEncoder::new("audio", SwAudioEncoderOptions {
 /// #     codec: AudioCodec::Aac,
@@ -520,6 +521,7 @@ mod tests {
                 // several real keyframes to show up quickly, not the
                 // ~2s default every other caller uses.
                 gop_size: 8,
+                max_b_frames: None,
             },
         ) else {
             eprintln!("skipping: no H.264 encoder available (openh264 or libx264)");
@@ -609,6 +611,7 @@ mod tests {
                 frame_rate: video_options.framerate,
                 bit_rate: 200_000,
                 gop_size: 8,
+                max_b_frames: None,
             },
         ) else {
             eprintln!("skipping: no H.264 encoder available (openh264 or libx264)");
@@ -691,6 +694,7 @@ mod tests {
                 frame_rate: video_options.framerate,
                 bit_rate: 200_000,
                 gop_size: 8,
+                max_b_frames: None,
             },
         ) else {
             eprintln!("skipping: no H.264 encoder available (openh264 or libx264)");
@@ -770,6 +774,7 @@ mod tests {
                 frame_rate: video_options.framerate,
                 bit_rate: 200_000,
                 gop_size: 8,
+                max_b_frames: None,
             },
         ) else {
             eprintln!("skipping: no H.264 encoder available (openh264 or libx264)");
@@ -833,6 +838,7 @@ mod tests {
                 frame_rate: video_options.framerate,
                 bit_rate: 200_000,
                 gop_size: 8, // ~0.5s @ 15fps — see the other test's own note
+                max_b_frames: None,
             },
         ) else {
             eprintln!("skipping: no H.264 encoder available (openh264 or libx264)");

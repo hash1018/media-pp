@@ -77,6 +77,7 @@ fn finishing_a_recording_branch_leaves_a_playable_file_and_a_running_preview() {
             frame_rate: ffmpeg_next::Rational::new(30, 1),
             bit_rate: 1_000_000,
             gop_size: 30,
+            max_b_frames: None,
         },
     )
     .expect("open the encoder");
@@ -198,6 +199,7 @@ fn finishing_a_recording_branch_loses_no_frame_that_reached_it() {
             frame_rate: ffmpeg_next::Rational::new(30, 1),
             bit_rate: 1_000_000,
             gop_size: 30,
+            max_b_frames: None,
         },
     )
     .expect("open the encoder");

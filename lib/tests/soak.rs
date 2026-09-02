@@ -167,6 +167,7 @@ fn encoder(name: &str, time_base: ffmpeg::Rational, gop_size: u32) -> SwEncoder 
             frame_rate: frame_rate(),
             bit_rate: 1_000_000,
             gop_size,
+            max_b_frames: None,
         },
     )
     .expect("libopenh264 encoder")

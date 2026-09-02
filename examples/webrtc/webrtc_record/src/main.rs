@@ -227,6 +227,7 @@ mod example {
                 frame_rate: ffmpeg::Rational::new(30, 1),
                 bit_rate: 2_000_000,
                 gop_size: 60,
+                max_b_frames: None,
             },
         )?;
         // Each sink is told what feeds it, which settles its payload type and

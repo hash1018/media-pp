@@ -195,6 +195,7 @@ mod windows_example {
                 frame_rate,
                 bit_rate: 2_000_000,
                 gop_size: 60,
+                max_b_frames: None,
             },
         )?;
         let mut muxer = FileMuxer::create(path)?;
@@ -470,6 +471,7 @@ mod linux_example {
                 frame_rate,
                 bit_rate: 2_000_000,
                 gop_size: 60,
+                max_b_frames: None,
             },
         )?;
         let mut muxer = FileMuxer::create(path)?;
