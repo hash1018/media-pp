@@ -278,6 +278,17 @@ pub struct D3d11VideoEncoderOptions {
     /// explicitly, for the join-latency and segmenting reasons
     /// [`crate::elements::SwEncoderOptions::gop_size`] documents.
     pub gop_size: u32,
+    /// How many consecutive B-frames the encoder may insert, or `None` to
+    /// leave the encoder's own default alone — the same knob, and the same
+    /// meaning, as [`crate::elements::SwEncoderOptions::max_b_frames`].
+    ///
+    /// NVENC does emit them, unlike the software H.264 encoder this project
+    /// can rely on being installed, so this is a real setting here rather
+    /// than one the encoder ignores. What it costs is latency: a B-frame
+    /// cannot be encoded until the frame after it has arrived, so a live
+    /// stream pays the delay for the compression. `None` for anything
+    /// latency-sensitive; a recording is where it earns its place.
+    pub max_b_frames: Option<u32>,
 }
 
 /// Encodes GPU-resident `Pixel::D3D11` `Video` frames into `Packet`s on a
@@ -491,6 +502,9 @@ impl D3d11VideoEncoder {
             video.set_frame_rate(Some(options.frame_rate));
             video.set_bit_rate(options.bit_rate);
             video.set_gop(options.gop_size);
+            if let Some(frames) = options.max_b_frames {
+                video.set_max_b_frames(frames as usize);
+            }
             // SAFETY: `video` exclusively owns an unopened codec context;
             // ownership of the cloned frames-context reference is transferred
             // into the field before `open_as` can consume it.
@@ -817,6 +831,7 @@ mod tests {
             frame_rate: ffmpeg::Rational::new(30, 1),
             bit_rate: 1_000_000,
             gop_size: 30,
+            max_b_frames: None,
         }
     }
 
@@ -1265,6 +1280,105 @@ mod tests {
         assert!(
             error.to_string().contains("Pixel::D3D11"),
             "expected an UnsupportedFormat error, got: {error}"
+        );
+    }
+
+    /// The B-frame count is honoured, in both directions.
+    ///
+    /// The same contract `CudaEncoder` is held to, over this element's own
+    /// copy of it. Worth asserting rather than assuming, because the software
+    /// side of this crate cannot: `libopenh264` accepts `max_b_frames` and
+    /// emits none anyway. An encoder that quietly ignored the setting would
+    /// leave a caller paying B-frame latency for nothing.
+    ///
+    /// Both directions, because the hardware encoder's own default already
+    /// uses B-frames: a test that only asked for some and found some would
+    /// pass against an encoder ignoring the option entirely. What it looks
+    /// like from here is `dts` no longer equalling `pts` — the packet
+    /// carrying a frame displayed later has to be decoded first.
+    #[test]
+    fn the_b_frame_count_is_honoured_in_both_directions() {
+        let _session = encoder_session();
+        let Some((device, context)) = try_device() else {
+            return;
+        };
+        if !supports_d3d11va(&device) {
+            return;
+        }
+        let (width, height) = (320u32, 240u32);
+        let codec = D3d11VideoCodec::H264Nvenc;
+        let input_format = D3d11VideoInputFormat::Nv12;
+
+        let encode = |max_b_frames: Option<u32>| -> Option<Vec<(i64, i64)>> {
+            let mut encoder = match D3d11VideoEncoder::new(
+                "test-b-frames",
+                &device,
+                context.clone(),
+                D3d11VideoEncoderOptions {
+                    max_b_frames,
+                    ..options(codec, input_format)
+                },
+            ) {
+                Ok(encoder) => encoder,
+                Err(error) if is_absent_hardware(&error) => {
+                    eprintln!("skipping: no hardware H.264 encoder here: {error}");
+                    return None;
+                }
+                Err(error) => panic!("failed to open: {error}"),
+            };
+
+            let timestamps = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let collected = timestamps.clone();
+            let sink = crate::elements::AppSink::new("test-b-frame-sink", move |buf| {
+                if let MediaBuffer::Packet(packet) = &buf
+                    && let (Some(dts), Some(pts)) = (packet.dts(), packet.pts())
+                {
+                    collected.lock().unwrap().push((dts, pts));
+                }
+                Ok(())
+            });
+            encoder.src_pads()[0].link(Box::new(sink));
+
+            let pool = crate::pool::UnboundObjectPool::new(
+                0,
+                {
+                    let device = device.clone();
+                    let format = input_format.dxgi_format();
+                    move || gpu_frame(&device, format, width, height)
+                },
+                |_| {},
+            );
+            for index in 0..30i64 {
+                let mut frame = pool.get();
+                frame.set_pts(Some(index));
+                encoder
+                    .consume(MediaBuffer::Video(Arc::new(frame)))
+                    .unwrap_or_else(|error| panic!("frame {index}: {error}"));
+            }
+            encoder.consume(MediaBuffer::Eos).expect("Eos");
+
+            let timestamps = timestamps.lock().unwrap().clone();
+            assert!(!timestamps.is_empty(), "30 GPU frames produced no packets");
+            Some(timestamps)
+        };
+
+        let Some(none) = encode(Some(0)) else { return };
+        let Some(some) = encode(Some(2)) else { return };
+
+        assert!(
+            !none.iter().any(|(dts, pts)| dts != pts),
+            "asked for no B-frames and the packets came back reordered: {:?}",
+            &none[..none.len().min(8)]
+        );
+        assert!(
+            some.iter().any(|(dts, pts)| dts != pts),
+            "asked for B-frames and got none: {:?}",
+            &some[..some.len().min(8)]
+        );
+        assert!(
+            some.windows(2).all(|pair| pair[0].0 <= pair[1].0),
+            "decode order is what `dts` is for and it has to keep rising: {:?}",
+            &some[..some.len().min(8)]
         );
     }
 }

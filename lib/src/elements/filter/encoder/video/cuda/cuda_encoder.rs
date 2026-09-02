@@ -70,6 +70,17 @@ pub struct CudaEncoderOptions {
     /// explicitly, for the join-latency and segmenting reasons
     /// [`crate::elements::SwEncoderOptions::gop_size`] documents.
     pub gop_size: u32,
+    /// How many consecutive B-frames the encoder may insert, or `None` to
+    /// leave the encoder's own default alone — the same knob, and the same
+    /// meaning, as [`crate::elements::SwEncoderOptions::max_b_frames`].
+    ///
+    /// NVENC does emit them, unlike the software H.264 encoder this project
+    /// can rely on being installed, so this is a real setting here rather
+    /// than one the encoder ignores. What it costs is latency: a B-frame
+    /// cannot be encoded until the frame after it has arrived, so a live
+    /// stream pays the delay for the compression. `None` for anything
+    /// latency-sensitive; a recording is where it earns its place.
+    pub max_b_frames: Option<u32>,
 }
 
 /// Errors specific to `CudaEncoder`. Converts into the crate-wide `Error`
@@ -258,6 +269,9 @@ impl CudaEncoder {
             video.set_frame_rate(Some(options.frame_rate));
             video.set_bit_rate(options.bit_rate);
             video.set_gop(options.gop_size);
+            if let Some(frames) = options.max_b_frames {
+                video.set_max_b_frames(frames as usize);
+            }
             // SAFETY: `ptr` is the encoder's own context, not yet opened — which is
             // exactly when NVENC needs both of these, as the comment beside them
             // records. Both references are transferred with `into_raw`, so the codec
@@ -499,6 +513,7 @@ mod tests {
             frame_rate: ffmpeg::Rational::new(30, 1),
             bit_rate: 2_000_000,
             gop_size: 30,
+            max_b_frames: None,
         }
     }
 
@@ -830,5 +845,115 @@ mod tests {
             error.to_string().contains("only encodes CUDA frames"),
             "expected UnsupportedFormat, got {error}"
         );
+    }
+
+    /// The B-frame count is honoured, in both directions.
+    ///
+    /// Worth asserting rather than assuming, because the software side of
+    /// this crate cannot: `libopenh264` accepts `max_b_frames` and emits none
+    /// anyway. An encoder that quietly ignored the setting would leave a
+    /// caller paying B-frame latency for nothing, and nothing else here would
+    /// notice.
+    ///
+    /// Both directions, because NVENC's own default already uses B-frames on
+    /// this driver: a test that only asked for some and found some would pass
+    /// against an encoder ignoring the option entirely. What it looks like
+    /// from here is `dts` no longer equalling `pts` — the packet carrying a
+    /// frame displayed later has to be decoded first.
+    #[test]
+    fn the_b_frame_count_is_honoured_in_both_directions() {
+        let Some((device, _cuda_lock)) = try_cuda_device() else {
+            return;
+        };
+        let (width, height) = (320u32, 240u32);
+        let Some(none) = encoded_timestamps(&device, width, height, Some(0)) else {
+            return;
+        };
+        let Some(some) = encoded_timestamps(&device, width, height, Some(2)) else {
+            return;
+        };
+
+        assert!(
+            !none.iter().any(|(dts, pts)| dts != pts),
+            "asked for no B-frames and the packets came back reordered: {:?}",
+            &none[..none.len().min(8)]
+        );
+        assert!(
+            some.iter().any(|(dts, pts)| dts != pts),
+            "asked for B-frames and got none: {:?}",
+            &some[..some.len().min(8)]
+        );
+        assert!(
+            some.windows(2).all(|pair| pair[0].0 <= pair[1].0),
+            "decode order is what `dts` is for and it has to keep rising: {:?}",
+            &some[..some.len().min(8)]
+        );
+    }
+
+    /// Thirty frames through the real CUDA path into NVENC, as `(dts, pts)`
+    /// per packet. `None` when this machine cannot run it at all, which the
+    /// caller turns into the ordinary hardware skip.
+    fn encoded_timestamps(
+        device: &crate::elements::CudaDevice,
+        width: u32,
+        height: u32,
+        max_b_frames: Option<u32>,
+    ) -> Option<Vec<(i64, i64)>> {
+        let mut upload =
+            match CudaUpload::new("upload", device, CudaFrameFormat::Nv12, width, height) {
+                Ok(upload) => upload,
+                Err(error) => {
+                    eprintln!("skipping: CUDA upload unavailable ({error})");
+                    return None;
+                }
+            };
+        let mut encoder = match CudaEncoder::new(
+            "encoder",
+            device,
+            CudaEncoderOptions {
+                max_b_frames,
+                ..options(width, height)
+            },
+        ) {
+            Ok(encoder) => encoder,
+            Err(error) => {
+                eprintln!("skipping: NVENC unavailable on this machine ({error})");
+                return None;
+            }
+        };
+
+        let received = Arc::new(Mutex::new(Vec::new()));
+        encoder.src_pads()[0].link(Box::new(CapturingSink {
+            received: received.clone(),
+            pp_log: element_pp_log(ElementType::Other, "capture", None),
+        }));
+        let uploaded = Arc::new(Mutex::new(Vec::new()));
+        upload.src_pads()[0].link(Box::new(CapturingSink {
+            received: uploaded.clone(),
+            pp_log: element_pp_log(ElementType::Other, "uploaded", None),
+        }));
+
+        let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
+        for index in 0..30 {
+            let mut pooled = pool.get();
+            *pooled = nv12_frame(width, height, index);
+            upload
+                .consume(MediaBuffer::Video(Arc::new(pooled)))
+                .expect("upload failed");
+            let frame = uploaded.lock().unwrap().pop().expect("nothing uploaded");
+            encoder.consume(frame).expect("encode failed");
+        }
+        encoder.consume(MediaBuffer::Eos).expect("eos failed");
+
+        let received = received.lock().unwrap();
+        let timestamps: Vec<(i64, i64)> = received
+            .iter()
+            .filter_map(|buf| match buf {
+                MediaBuffer::Packet(packet) => Some((packet.dts()?, packet.pts()?)),
+                _ => None,
+            })
+            .collect();
+        assert!(!timestamps.is_empty(), "NVENC produced no packets");
+        Some(timestamps)
     }
 }

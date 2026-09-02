@@ -93,6 +93,7 @@ mod windows_example {
                 frame_rate: ffmpeg::Rational::new(30, 1),
                 bit_rate: 8_000_000,
                 gop_size: 60, // ~2s @ 30fps
+                max_b_frames: None,
             },
         )
         .map_err(|e| media_pp::Error::Other(e.to_string()))?;
@@ -207,6 +208,7 @@ mod linux_example {
                 frame_rate: ffmpeg::Rational::new(30, 1),
                 bit_rate: 8_000_000,
                 gop_size: 60, // ~2s @ 30fps
+                max_b_frames: None,
             },
         )
         .map_err(|e| media_pp::Error::Other(e.to_string()))?;

@@ -898,6 +898,7 @@ mod d3d11 {
             frame_rate: frame_rate(),
             bit_rate: 1_000_000,
             gop_size: 30,
+            max_b_frames: None,
         }
     }
 
@@ -1957,6 +1958,7 @@ mod cuda {
             frame_rate: frame_rate(),
             bit_rate: 1_000_000,
             gop_size: 30,
+            max_b_frames: None,
         }
     }
 

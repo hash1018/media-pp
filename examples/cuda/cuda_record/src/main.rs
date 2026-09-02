@@ -63,6 +63,7 @@ mod example {
                 frame_rate: recording.frame_rate,
                 bit_rate: 4_000_000,
                 gop_size: 60,
+                max_b_frames: None,
             },
         )
         .map_err(|e| media_pp::Error::Other(e.to_string()))?;
