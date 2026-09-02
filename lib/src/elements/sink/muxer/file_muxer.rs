@@ -74,6 +74,7 @@ struct PendingStream {
 /// #     frame_rate: ffmpeg::Rational(30, 1),
 /// #     bit_rate: 2_000_000,
 /// #     gop_size: 30,
+/// #     max_b_frames: None,
 /// # })?;
 /// # let audio_encoder = SwAudioEncoder::new("audio", SwAudioEncoderOptions {
 /// #     codec: AudioCodec::Aac,
@@ -687,6 +688,7 @@ mod tests {
             frame_rate: ffmpeg::Rational::new(30, 1),
             bit_rate: 400_000,
             gop_size: 30,
+            max_b_frames: None,
         };
         // Either software H.264 will do; a build carrying neither is one this
         // cannot be asked about, so it skips the way a hardware test does.
@@ -789,5 +791,108 @@ mod tests {
             "the track must read back as Opus, not as whatever the header defaulted to"
         );
         std::fs::remove_file(&path).ok();
+    }
+
+    /// Packets whose `dts` and `pts` differ, remuxed, still differ.
+    ///
+    /// A B-frame is coded from frames on both sides of it, so a container
+    /// holding any carries its packets in decode order and their timestamps
+    /// stop being the same number. A muxer that wrote `pts` into both — or
+    /// that reordered on the way through — produces a file whose decode order
+    /// no longer matches its timestamps, and every player of it either stalls
+    /// or shows the frames in the wrong order.
+    ///
+    /// The ordinary fixture cannot show this: `libopenh264` emits no
+    /// B-frames. This one is MPEG-4 Part 2 for that reason alone — see
+    /// `test_support::synthesize_reordered`.
+    #[test]
+    fn a_reordered_stream_keeps_its_decode_order_through_the_muxer() {
+        use crate::elements::FileDemuxer;
+        use crate::pipeline::Pipeline;
+
+        let fixture = crate::test_support::synthesize_reordered("reordered", 3.0);
+        let source = fixture.path.to_string_lossy().into_owned();
+
+        // The fixture has to actually be reordered, or the rest of this
+        // asserts nothing. Measured rather than assumed: whether an encoder
+        // honours `max_b_frames` is the encoder's business, not this crate's.
+        let arriving = timestamps(&source);
+        assert!(
+            arriving.iter().any(|(dts, pts)| dts != pts),
+            "the fixture carries no reordering to preserve: {:?}",
+            &arriving[..arriving.len().min(8)]
+        );
+
+        let path = std::env::temp_dir().join("media-pp-reordered-remux.mp4");
+        let _ = std::fs::remove_file(&path);
+        let (demuxer, streams) = FileDemuxer::open("demuxer", &source).expect("open the fixture");
+        let video = streams
+            .iter()
+            .find(|stream| stream.kind == ffmpeg::media::Type::Video)
+            .expect("the fixture has video")
+            .index;
+        let parameters = demuxer.stream_parameters(video).expect("video parameters");
+        let time_base = demuxer.stream_time_base(video).expect("video time base");
+
+        let mut muxer = FileMuxer::create(&path).expect("create the remux");
+        muxer
+            .add_stream("video", parameters, time_base)
+            .expect("add the video stream");
+        let sink = muxer
+            .open()
+            .expect("write the header")
+            .pop()
+            .expect("one stream was added");
+
+        let pipeline = Pipeline::new("remux", demuxer, move |source, context| {
+            let branch = context.branch().to(sink)?;
+            context.attach(source, video, branch)?;
+            Ok(())
+        })
+        .expect("wire the remux");
+        pipeline.run().expect("run the remux");
+        for event in pipeline.bus().iter() {
+            if matches!(event, crate::bus::BusEvent::Eos { .. }) {
+                break;
+            }
+        }
+        pipeline.stop();
+
+        let written = timestamps(&path.to_string_lossy());
+        assert_eq!(
+            written.len(),
+            arriving.len(),
+            "every packet that came in has to come out"
+        );
+        assert!(
+            written.iter().any(|(dts, pts)| dts != pts),
+            "the reordering did not survive being written"
+        );
+        assert!(
+            written.windows(2).all(|pair| pair[0].0 <= pair[1].0),
+            "decode order is what `dts` is for and it has to keep rising: {:?}",
+            &written[..written.len().min(8)]
+        );
+        assert_eq!(
+            written, arriving,
+            "a remux copies packets; it does not restamp them"
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// Every video packet's `(dts, pts)`, in the order the container holds
+    /// them.
+    fn timestamps(path: &str) -> Vec<(i64, i64)> {
+        let mut input = ffmpeg::format::input(path).expect("the file opens");
+        let video = input
+            .streams()
+            .find(|stream| stream.parameters().medium() == ffmpeg::media::Type::Video)
+            .expect("it has video")
+            .index();
+        input
+            .packets()
+            .filter(|(stream, _)| stream.index() == video)
+            .filter_map(|(_, packet)| Some((packet.dts()?, packet.pts()?)))
+            .collect()
     }
 }

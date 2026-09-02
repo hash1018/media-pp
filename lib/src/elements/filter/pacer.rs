@@ -656,4 +656,80 @@ mod tests {
         // origin.
         assert!(pacer.wait_for(Some(0)).is_ok());
     }
+
+    /// Packets whose `pts` goes backwards are still paced to their own
+    /// timeline.
+    ///
+    /// A `Pacer` in front of a decoder — where `webrtc_record` and
+    /// `rtsp_serve` both put one — waits on `pts`, and a stream carrying
+    /// B-frames hands it packets in decode order: `pts` jumps forward, then
+    /// back behind a frame already released, over and over. Each of those is
+    /// simply already due, so what comes out is bursty within a frame or two
+    /// and correct across the stream. What must not happen is either end of
+    /// getting that wrong — a wait on a timestamp read as far in the future,
+    /// or an origin that moves and lets the whole stream through at once.
+    #[test]
+    fn a_reordered_packet_stream_is_paced_to_its_own_length() {
+        use crate::elements::FileDemuxer;
+        use crate::pipeline::Pipeline;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        const SECONDS: f64 = 2.0;
+
+        let fixture = crate::test_support::synthesize_reordered("paced-reorder", SECONDS);
+        let path = fixture.path.to_string_lossy().into_owned();
+        let (demuxer, streams) = FileDemuxer::open("demuxer", &path).expect("open the fixture");
+        let video = streams
+            .iter()
+            .find(|stream| stream.kind == ffmpeg::media::Type::Video)
+            .expect("the fixture has video")
+            .index;
+        let time_base = demuxer.stream_time_base(video).expect("video time base");
+
+        let seen = Arc::new(AtomicUsize::new(0));
+        let counter = crate::elements::AppSink::new("paced", {
+            let seen = Arc::clone(&seen);
+            move |_| {
+                seen.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            }
+        });
+
+        let started = Instant::now();
+        let pipeline = Pipeline::new("paced-reorder", demuxer, move |source, context| {
+            let branch = context
+                .branch()
+                .pipe(Pacer::new("pacer", time_base)?)
+                .to(Box::new(counter))?;
+            context.attach(source, video, branch)?;
+            Ok(())
+        })
+        .expect("wire the paced stream");
+        pipeline.run().expect("run it");
+        for event in pipeline.bus().iter() {
+            if matches!(event, crate::bus::BusEvent::Eos { .. }) {
+                break;
+            }
+        }
+        let elapsed = started.elapsed();
+        pipeline.stop();
+
+        assert!(
+            seen.load(Ordering::Relaxed) > 0,
+            "no packet reached the far side of the pacer"
+        );
+        // Generous on both sides: what this is watching for is a stall or a
+        // whole stream let through at once, not a few milliseconds either
+        // way.
+        let content = Duration::from_secs_f64(SECONDS);
+        assert!(
+            elapsed >= content.mul_f64(0.5),
+            "a reordered stream was let through in {elapsed:?}, well under the \
+             {content:?} it describes"
+        );
+        assert!(
+            elapsed <= content.mul_f64(2.5),
+            "a reordered stream took {elapsed:?} to pace {content:?} of packets"
+        );
+    }
 }
