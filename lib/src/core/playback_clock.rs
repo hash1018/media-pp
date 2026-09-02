@@ -151,6 +151,82 @@ impl PlaybackClock {
         position_at(*state, self.wall_clock.elapsed())
     }
 
+    /// How long from now until `media_ns` is its turn.
+    ///
+    /// The other direction of what [`PlaybackClock::video_snapshot`] reads:
+    /// that answers *what media time is it*, this answers *when is this media
+    /// time*. Both are the same relation between the media timeline and this
+    /// pipeline's own, and keeping them in one place is what stops a paced
+    /// element and a synchronized one from scheduling the same picture
+    /// against two authorities that drift apart.
+    ///
+    /// A `Duration` rather than an `Instant`, because under an audio master
+    /// there is no wall-clock moment to name: the position advances at the
+    /// device's own rate, so the honest answer is how much is left *as of
+    /// now*. A caller sleeps some of it and asks again, which is what
+    /// [`crate::elements::Pacer`] already did with its own arithmetic.
+    ///
+    /// Establishes the origin from the first caller to ask, exactly as
+    /// `video_snapshot` does — whichever of the two arrives first speaks for
+    /// the pipeline, which is the point: a container's streams do not start
+    /// at the same timestamp, and that offset is part of their sync.
+    ///
+    /// `Duration::ZERO` while an audio master is priming and has said
+    /// nothing about where it is. Holding a caller there would be waiting on
+    /// audio that has not started, which is the stall a renderer's deferred
+    /// registration exists to avoid.
+    pub(crate) fn remaining(&self, media_ns: i64) -> Duration {
+        let mut state = self.state.lock().unwrap();
+        if let State::Unavailable { next_registration } = *state {
+            self.wall_clock.start();
+            let elapsed = self.wall_clock.elapsed();
+            *state = State::Wall {
+                anchor_ns: media_ns,
+                anchor_elapsed: elapsed,
+                next_registration,
+            };
+        }
+        let Some(position) = position_at(*state, self.wall_clock.elapsed()) else {
+            return Duration::ZERO;
+        };
+        let ahead = media_ns.saturating_sub(position);
+        if ahead <= 0 {
+            return Duration::ZERO;
+        }
+        Duration::from_nanos(ahead as u64)
+    }
+
+    /// Moves the origin so that `media_ns` is due now.
+    ///
+    /// For a sender whose timeline restarts under the pipeline — a camera
+    /// rebooting, an RTP timestamp base that wraps — where the timestamps
+    /// that follow have no relation to the ones before them. Paced literally
+    /// such a jump is a still picture for as long as it claims to be worth.
+    ///
+    /// A no-op while an audio master owns the position: what it is playing is
+    /// what the pipeline is at, and a stream that jumped is the stream's
+    /// problem to reconcile, not the clock's.
+    pub(crate) fn re_anchor(&self, media_ns: i64) {
+        let mut state = self.state.lock().unwrap();
+        let next_registration = match *state {
+            State::Unavailable {
+                next_registration, ..
+            }
+            | State::Wall {
+                next_registration, ..
+            } => next_registration,
+            State::AudioPriming { .. } | State::Audio { .. } | State::AudioFallback { .. } => {
+                return;
+            }
+        };
+        self.wall_clock.start();
+        *state = State::Wall {
+            anchor_ns: media_ns,
+            anchor_elapsed: self.wall_clock.elapsed(),
+            next_registration,
+        };
+    }
+
     pub(crate) fn video_snapshot(&self, media_ns: i64) -> (PlaybackMaster, Option<i64>) {
         let mut state = self.state.lock().unwrap();
         if let State::Unavailable { next_registration } = *state {

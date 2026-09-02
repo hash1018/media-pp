@@ -31,9 +31,6 @@ pub struct Clock {
     /// acknowledged in `control()` so a long presentation-time wait can
     /// return promptly and let the owning worker process that request.
     interrupt_epoch: AtomicU64,
-    /// The media timestamp this clock's zero stands for, in nanoseconds —
-    /// see [`Clock::media_origin_ns`].
-    media_origin_ns: Mutex<Option<i64>>,
 }
 
 #[derive(Clone, Copy)]
@@ -62,35 +59,7 @@ impl Clock {
         Self {
             state: Mutex::new(State::Unset),
             interrupt_epoch: AtomicU64::new(0),
-            media_origin_ns: Mutex::new(None),
         }
-    }
-
-    /// The media timestamp this clock's zero stands for, establishing it
-    /// from `first` if nothing has yet.
-    ///
-    /// One origin for the whole pipeline, not one per stream, and that is
-    /// the whole point. **A container's streams do not start at the same
-    /// timestamp** — an MP4's video commonly starts one frame in while its
-    /// audio starts at zero, tens of milliseconds apart — and that offset is
-    /// part of what keeps the picture with the sound. A stream that zeroed on
-    /// its own first timestamp would throw it away and be played as though it
-    /// began with every other, which is audible as lip sync a frame out.
-    ///
-    /// So the first stream to produce a timestamp sets the origin and every
-    /// other measures from it, keeping whatever the container gave them.
-    /// Cleared by [`Clock::reset`], because a seek starts a new timeline and
-    /// the streams land at their own places in it.
-    ///
-    /// Callers hold onto what this returns rather than asking per buffer:
-    /// the answer cannot change until a reset, and the reset reaches them as
-    /// a control message first.
-    pub(crate) fn media_origin_ns(&self, first: i64) -> i64 {
-        *self
-            .media_origin_ns
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .get_or_insert(first)
     }
 
     /// Signals paced waits to return without changing the clock's playback
@@ -176,13 +145,6 @@ impl Clock {
     pub fn reset(&self) {
         let mut state = self.state.lock().unwrap();
         *state = State::Unset;
-        // The media origin goes with it: a seek lands each stream at its own
-        // place in a new timeline, and the first one to arrive there is what
-        // the others should be measured against — see `media_origin_ns`.
-        *self
-            .media_origin_ns
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
     }
 }
 

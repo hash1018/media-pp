@@ -1,9 +1,4 @@
-use std::{
-    collections::VecDeque,
-    sync::Arc,
-    thread,
-    time::{Duration, Instant},
-};
+use std::{collections::VecDeque, sync::Arc, thread, time::Duration};
 
 use crate::pp_log::{PpLog, pp_info, pp_warn};
 use ffmpeg_next as ffmpeg;
@@ -11,11 +6,11 @@ use thiserror::Error as ThisError;
 
 use crate::{
     buffer::MediaBuffer,
-    clock::Clock,
     contract::{InputContract, OutputContract},
     control::ControlMsg,
     element::{Element, ElementType, Sink, Source, element_pp_log},
     pad::SrcPad,
+    playback_clock::PlaybackClock,
     time::{InvalidTimeBase, MediaTimestamp, TimeBase},
 };
 
@@ -39,9 +34,7 @@ pub enum PacerError {
 
     /// `pts` is external input too (see [`PacerError::InvalidTimeBase`]) —
     /// an adversarial or corrupt value that cannot be turned into a wait at
-    /// all. Either it does not fit in nanoseconds at this stream's time
-    /// base, or it is so far from the pipeline's media origin that the
-    /// subtraction overflows.
+    /// all: it does not fit in nanoseconds at this stream's time base.
     ///
     /// Reported rather than swallowed because the alternative is the buffer
     /// going through *unpaced*, which is a whole stream arriving at once.
@@ -51,7 +44,8 @@ pub enum PacerError {
         pts: i64,
     },
 
-    /// A buffer arrived before the pipeline gave this pacer its clock, which
+    /// A buffer arrived before the pipeline gave this pacer its playback
+    /// clock, which
     /// cannot happen through ordinary wiring: `attach_context` runs when the
     /// branch is built and a branch cannot carry buffers before it exists.
     ///
@@ -86,36 +80,33 @@ const INTERRUPT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 /// into the queue. The type does not enforce that placement; without the
 /// queue, pacing simply blocks the upstream caller on the same thread.
 ///
-/// `clock` is shared across every `Pacer` in the pipeline (one per stream
-/// — video, audio, ...) so they all agree on the same t=0 instead of each
-/// anchoring to its own first frame. That agreement is what keeps the
-/// picture with the sound: the offset a container gives its streams is part
-/// of their sync, and a pacer zeroing on its own stream would throw it away.
-/// The clock's own `media_origin_ns` is where that agreement is kept.
+/// Every `Pacer` in a pipeline (one per stream — video, audio, ...) measures
+/// against the same [`crate::playback_clock::PlaybackClock`], so they agree
+/// on one t=0 instead of each anchoring to its own first frame. That
+/// agreement is what keeps the picture with the sound: the offset a
+/// container gives its streams is part of their sync, and a pacer zeroing on
+/// its own stream would throw it away.
+///
+/// Which clock that is can change while it runs. A pipeline starts on the
+/// pause-aware wall clock and hands the position to an audio renderer once
+/// its endpoint is running, and a pacer follows: what it waits on is where
+/// playback has actually reached, not where a wall-clock deadline computed
+/// at the start says it should be.
 pub struct Pacer {
     pp_log: PpLog,
     name: Arc<str>,
     time_base: TimeBase,
     /// The pipeline's, given by [`Element::attach_context`] — see there for
     /// why this is not something the caller supplies.
-    clock: Option<Arc<Clock>>,
-    /// The media timestamp this pipeline's t=0 stands for, in nanoseconds —
-    /// asked of the shared [`Clock`] on the first timestamped buffer and
-    /// held until a seek clears it.
     ///
-    /// The clock's and not this pacer's, which is the whole point: a
-    /// container's streams do not start together — see
-    /// [`Clock::media_origin_ns`] — and a pacer that zeroed on its own
-    /// first timestamp would play them as though they did.
-    ///
-    /// Deliberately *not* paired with a cached wall-clock anchor: the
-    /// anchor has to come fresh from `clock.start()` on every call
-    /// instead, since [`Clock::pause`]/[`Clock::resume`] can shift it —
-    /// caching it once here would mean a paused-then-resumed pipeline
-    /// blasts through however many frames piled up during the pause
-    /// (their `due` times would all already be in the past relative to a
-    /// stale anchor).
-    origin_ns: Option<i64>,
+    /// The playback clock rather than the wall one, and it holds the origin
+    /// too: a container's streams do not start at the same timestamp, and a
+    /// pacer that zeroed on its own first timestamp would play them as
+    /// though they did. Nothing is cached here — not the origin, not an
+    /// anchor — because both can move underneath: a pause shifts the wall
+    /// timeline, a seek clears the origin, and an audio renderer taking the
+    /// clock replaces the rate the position advances at.
+    playback_clock: Option<Arc<PlaybackClock>>,
     /// The latest pipeline interrupt this pacer has acknowledged through
     /// `control()`. A newer clock epoch means pause/seek/stop is waiting for
     /// the current `consume()` call to return. `Queue`'s own worker only
@@ -161,8 +152,7 @@ impl Pacer {
             name,
             pp_log,
             time_base,
-            clock: None,
-            origin_ns: None,
+            playback_clock: None,
             discontinuity_limit: None,
             interrupt_epoch: 0,
             prerolling: false,
@@ -203,84 +193,66 @@ impl Pacer {
         Ok(pacer)
     }
 
-    /// Blocks until `pts` is due, based on this pacer's `first_pts` (set
-    /// here, on the first call) and the shared `clock`'s *current*
-    /// anchor. Returns `Ok(false)` if pause/seek/stop interrupts the wait;
-    /// the caller retains that in-flight buffer and returns so the owning
-    /// worker can process the pending control request. Frames without a
-    /// pts (`None`) pass straight through. `Err` only for a `pts` too
-    /// pathological to pace against at all (see
-    /// [`PacerError::UnpaceableTimestamp`]) — the caller drops that one
-    /// buffer rather than treating it as interrupted.
+    /// Blocks until `pts` is due against the pipeline's playback clock.
+    ///
+    /// Returns `Ok(false)` if pause/seek/stop interrupts the wait; the caller
+    /// retains that in-flight buffer and returns so the owning worker can
+    /// process the pending control request. Frames without a pts (`None`)
+    /// pass straight through. `Err` only for a `pts` too pathological to
+    /// pace against at all (see [`PacerError::UnpaceableTimestamp`]) — the
+    /// caller drops that one buffer rather than treating it as interrupted.
+    ///
+    /// How long is left is asked again on every pass rather than computed
+    /// once into a deadline. Under a wall-clock master the two are the same
+    /// arithmetic; under an audio one they are not, because the position
+    /// advances at the device's rate and a deadline named up front would be
+    /// wrong by however far that rate differs.
     fn wait_for(&mut self, pts: Option<i64>) -> Result<bool, PacerError> {
-        let clock = self.clock.clone().ok_or(PacerError::NotAttached)?;
-        if clock.interrupt_epoch() != self.interrupt_epoch {
+        let playback = self.playback_clock.clone().ok_or(PacerError::NotAttached)?;
+        if playback.interrupt_epoch() != self.interrupt_epoch {
             return Ok(false);
         }
         if self.prerolling {
             return Ok(true);
         }
         let Some(pts) = pts else { return Ok(true) };
-        // Rescaled before the subtraction, not after, because the origin is
-        // shared with streams in other units — a container's audio and video
-        // rarely count in the same ticks. Integer rescale rather than
-        // `pts as f64 * f64::from(time_base)`: the latter loses precision
-        // (and the numerator, if computed by naive division) over a
-        // long-running stream; see `MediaTimestamp`'s own docs.
+        // Rescaled before anything is compared, because the origin this is
+        // measured against is shared with streams in other units — a
+        // container's audio and video rarely count in the same ticks.
+        // Integer rescale rather than `pts as f64 * f64::from(time_base)`:
+        // the latter loses precision (and the numerator, if computed by
+        // naive division) over a long-running stream; see `MediaTimestamp`'s
+        // own docs.
         let pts_ns = MediaTimestamp::new_unchecked(pts, self.time_base).rescale(nanoseconds());
         // `av_rescale_q_rnd` answers a value it cannot represent with
         // `INT64_MIN`, which is also FFmpeg's "no timestamp". Checked before
-        // the origin is established, so a pathological first buffer cannot
-        // become the timeline every other stream is measured against.
+        // the clock is asked, so a pathological first buffer cannot become
+        // the timeline every other stream is measured against.
         if pts_ns == i64::MIN {
             return Err(PacerError::UnpaceableTimestamp { pts });
         }
-        let origin_ns = *self
-            .origin_ns
-            .get_or_insert_with(|| clock.media_origin_ns(pts_ns));
-        // Read before the early return below, so the clock anchors on the
-        // first buffer *any* stream releases rather than on the first one
-        // that happens to have something to wait for. An offset measured
-        // from it is then measured from when playback actually began.
-        let anchor = clock.start();
-
-        let elapsed_ns = pts_ns
-            .checked_sub(origin_ns)
-            .ok_or(PacerError::UnpaceableTimestamp { pts })?;
-        // At or before the origin: the stream that set it, on its own first
-        // buffer, and any stream that starts earlier still. Neither has
-        // anything to wait for.
-        if elapsed_ns <= 0 {
-            return Ok(true);
-        }
-
-        let mut due = anchor + Duration::from_nanos(elapsed_ns as u64);
-        if let Some(limit) = self.discontinuity_limit {
-            let now = Instant::now();
-            if due > now + limit {
-                // A jump this far forward is a sender that restarted its
-                // timeline, not a stream with a gap that long in it — see
-                // `with_discontinuity_limit`. Re-anchored so this buffer is
-                // due now, which is where the new timeline starts.
-                pp_warn!(
-                    self,
-                    "timeline jumped {:?} ahead; re-anchoring on it",
-                    due.saturating_duration_since(now)
-                );
-                let ahead = now.saturating_duration_since(anchor).as_nanos();
-                self.origin_ns = Some(pts_ns.saturating_sub(ahead.min(i64::MAX as u128) as i64));
-                due = now;
-            }
-        }
         loop {
-            if clock.interrupt_epoch() != self.interrupt_epoch {
+            if playback.interrupt_epoch() != self.interrupt_epoch {
                 return Ok(false);
             }
-            let now = Instant::now();
-            if due <= now {
+            let remaining = playback.remaining(pts_ns);
+            if remaining.is_zero() {
                 return Ok(true);
             }
-            thread::sleep((due - now).min(INTERRUPT_POLL_INTERVAL));
+            if let Some(limit) = self.discontinuity_limit
+                && remaining > limit
+            {
+                // A jump this far forward is a sender that restarted its
+                // timeline, not a stream with a gap that long in it — see
+                // `with_discontinuity_limit`.
+                pp_warn!(
+                    self,
+                    "timeline jumped {remaining:?} ahead; re-anchoring on it"
+                );
+                playback.re_anchor(pts_ns);
+                return Ok(true);
+            }
+            thread::sleep(remaining.min(INTERRUPT_POLL_INTERVAL));
         }
     }
 }
@@ -303,8 +275,8 @@ impl Element for Pacer {
     }
 
     fn attach_context(&mut self, context: &Arc<crate::element::Context>) {
-        self.interrupt_epoch = context.clock.interrupt_epoch();
-        self.clock = Some(Arc::clone(&context.clock));
+        self.interrupt_epoch = context.playback_clock.interrupt_epoch();
+        self.playback_clock = Some(Arc::clone(&context.playback_clock));
     }
 }
 
@@ -341,20 +313,28 @@ impl Sink for Pacer {
 
     fn control(&mut self, msg: ControlMsg) -> crate::error::Result<()> {
         // Acknowledge the interrupt that made any in-flight wait return.
-        // Flush discards an interrupted old-timeline buffer; Seek then resets
-        // the timestamp and clock anchors for the new timeline.
+        // Flush discards an interrupted old-timeline buffer; Seek then drops
+        // the origin so the new timeline anchors on whichever stream reaches
+        // its landing place first.
         // A pacer that was never wired has no clock to acknowledge, and
         // nothing is going to send it control either — see
         // `PacerError::NotAttached`.
-        if let Some(clock) = &self.clock {
-            self.interrupt_epoch = clock.interrupt_epoch();
+        if let Some(playback) = &self.playback_clock {
+            self.interrupt_epoch = playback.interrupt_epoch();
         }
         match msg {
             ControlMsg::Flush => self.pending.clear(),
             ControlMsg::Seek(_) => {
-                self.origin_ns = None;
-                if let Some(clock) = &self.clock {
-                    clock.reset();
+                // The wall clock is left alone, which it could not be while
+                // the origin was paired with `Clock::start()`: post-seek
+                // timestamps restart near zero, and against a stale anchor
+                // every one of them was already overdue. The playback clock
+                // holds its origin as an elapsed offset instead, so it
+                // re-anchors itself on the next buffer and the pipeline's
+                // monotonic time — which a seek does not stop — keeps
+                // running for everything else that reads it.
+                if let Some(playback) = &self.playback_clock {
+                    playback.reset_for_seek();
                 }
             }
             ControlMsg::Stop => self.pending.clear(),
@@ -373,20 +353,38 @@ impl Sink for Pacer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::clock::Clock;
     use crate::control::PrerollContext;
-    use std::{sync::mpsc, time::Duration};
+    use std::{
+        sync::mpsc,
+        time::{Duration, Instant},
+    };
 
-    /// A pacer wired the way a pipeline wires one, around a clock the test
-    /// keeps so it can interrupt and pause it.
-    fn paced(name: &str, time_base: ffmpeg::Rational, clock: &Arc<Clock>) -> Pacer {
-        let mut pacer = Pacer::new(name, time_base).expect("valid time base");
-        pacer.attach_context(&Arc::new(crate::element::Context::for_test_with_clock(
+    /// One pipeline's context, around a clock the test keeps so it can
+    /// interrupt and pause it.
+    ///
+    /// Shared between every pacer a test wires, because that is what a
+    /// pipeline does and what the origin depends on: two contexts are two
+    /// playback clocks, and two streams measured against separate origins
+    /// have lost the offset between them before the test starts.
+    fn context(clock: &Arc<Clock>) -> Arc<crate::element::Context> {
+        Arc::new(crate::element::Context::for_test_with_clock(
             crate::bus::Bus::new().0,
             "test",
             crate::graph::PipelineGraph::new(),
             crate::graph::ElementId::for_test(1),
             Arc::clone(clock),
-        )));
+        ))
+    }
+
+    /// A pacer wired the way a pipeline wires one.
+    fn paced(
+        name: &str,
+        time_base: ffmpeg::Rational,
+        context: &Arc<crate::element::Context>,
+    ) -> Pacer {
+        let mut pacer = Pacer::new(name, time_base).expect("valid time base");
+        pacer.attach_context(context);
         pacer
     }
 
@@ -394,18 +392,12 @@ mod tests {
     fn paced_live(
         name: &str,
         time_base: ffmpeg::Rational,
-        clock: &Arc<Clock>,
+        context: &Arc<crate::element::Context>,
         limit: Duration,
     ) -> Pacer {
         let mut pacer =
             Pacer::with_discontinuity_limit(name, time_base, limit).expect("valid time base");
-        pacer.attach_context(&Arc::new(crate::element::Context::for_test_with_clock(
-            crate::bus::Bus::new().0,
-            "test",
-            crate::graph::PipelineGraph::new(),
-            crate::graph::ElementId::for_test(1),
-            Arc::clone(clock),
-        )));
+        pacer.attach_context(context);
         pacer
     }
 
@@ -416,6 +408,7 @@ mod tests {
     #[test]
     fn a_live_timeline_that_jumps_is_re_anchored_rather_than_waited_out() {
         let clock = Arc::new(Clock::new());
+        let context = context(&clock);
         // Milliseconds, and a limit longer than the spacing between the
         // frames below — a limit shorter than that would read the ordinary
         // wait for the next frame as a jump, which is what it is for the
@@ -423,7 +416,7 @@ mod tests {
         let mut pacer = paced_live(
             "pacer",
             ffmpeg::Rational::new(1, 1000),
-            &clock,
+            &context,
             Duration::from_millis(300),
         );
         assert!(pacer.wait_for(Some(0)).unwrap(), "the first pts anchors");
@@ -455,7 +448,8 @@ mod tests {
     #[test]
     fn a_pacer_without_a_limit_still_waits_out_a_distant_timestamp() {
         let clock = Arc::new(Clock::new());
-        let mut pacer = paced("pacer", ffmpeg::Rational::new(1, 1000), &clock);
+        let context = context(&clock);
+        let mut pacer = paced("pacer", ffmpeg::Rational::new(1, 1000), &context);
         assert!(pacer.wait_for(Some(0)).unwrap(), "the first pts anchors");
 
         let started = Instant::now();
@@ -476,7 +470,8 @@ mod tests {
     #[test]
     fn long_wait_returns_promptly_when_control_interrupts_it() {
         let clock = Arc::new(Clock::new());
-        let mut pacer = paced("pacer", ffmpeg::Rational::new(1, 1), &clock);
+        let context = context(&clock);
+        let mut pacer = paced("pacer", ffmpeg::Rational::new(1, 1), &context);
         assert!(
             pacer.wait_for(Some(0)).unwrap(),
             "first pts should establish the anchor"
@@ -504,7 +499,8 @@ mod tests {
     #[test]
     fn pause_retains_interrupted_buffer_but_flush_and_stop_discard_it() {
         let clock = Arc::new(Clock::new());
-        let mut pacer = paced("pacer", ffmpeg::Rational::new(1, 1), &clock);
+        let context = context(&clock);
+        let mut pacer = paced("pacer", ffmpeg::Rational::new(1, 1), &context);
 
         clock.interrupt();
         pacer.consume(packet(0)).expect("interrupted consume");
@@ -557,7 +553,8 @@ mod tests {
     #[test]
     fn preroll_forwards_without_waiting_out_the_presentation_time() {
         let clock = Arc::new(Clock::new());
-        let mut pacer = paced("pacer", ffmpeg::Rational::new(1, 1), &clock);
+        let context = context(&clock);
+        let mut pacer = paced("pacer", ffmpeg::Rational::new(1, 1), &context);
         let context = Arc::new(PrerollContext::for_seek([], Duration::from_secs(2)));
         pacer
             .control(ControlMsg::Preroll(context))
@@ -602,10 +599,11 @@ mod tests {
     #[test]
     fn streams_that_start_apart_stay_apart() {
         let clock = Arc::new(Clock::new());
+        let context = context(&clock);
         // Milliseconds, so the numbers below read as what they are.
         let unit = ffmpeg::Rational::new(1, 1000);
-        let mut audio = paced("audio", unit, &clock);
-        let mut video = paced("video", unit, &clock);
+        let mut audio = paced("audio", unit, &context);
+        let mut video = paced("video", unit, &context);
 
         let started = Instant::now();
         assert!(
@@ -625,6 +623,77 @@ mod tests {
         );
     }
 
+    /// Where the position comes from once an audio renderer owns it.
+    ///
+    /// A pacer measures against the pipeline's playback clock rather than
+    /// against the first timestamp it happened to see, so a stream joining a
+    /// pipeline whose audio is already a second in is a second late, not at
+    /// its own zero. Held apart from the wall clock on purpose: with an
+    /// origin of its own this pacer would have released the two buffers
+    /// below 200ms apart, and against the audio position both are already
+    /// past.
+    #[test]
+    fn a_pacer_measures_against_the_audio_master_not_its_own_first_buffer() {
+        let clock = Arc::new(Clock::new());
+        let context = context(&clock);
+        let mut pacer = paced("pacer", ffmpeg::Rational::new(1, 1000), &context);
+
+        let audio = context
+            .playback_clock
+            .register_audio_master()
+            .expect("nothing else holds the clock");
+        // A second of audio played, five submitted, and still running.
+        audio
+            .publish(1_000_000_000, 5_000_000_000, true)
+            .expect("the registration is live");
+
+        let started = Instant::now();
+        assert!(pacer.wait_for(Some(100)).unwrap(), "100ms is already past");
+        assert!(pacer.wait_for(Some(300)).unwrap(), "so is 300ms");
+        assert!(
+            started.elapsed() < Duration::from_millis(100),
+            "both are behind a position already at 1s and neither has \
+             anything to wait for: took {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// An audio master that has taken the clock but not started must not
+    /// hold a pacer.
+    ///
+    /// This is the deadlock a renderer's deferred registration exists to
+    /// avoid, seen from the other side: a branch attached to a running `Tee`
+    /// sits behind a demuxer that cannot reach its first audio packet until
+    /// the video queue drains, and a pacer waiting on a position no one has
+    /// published yet is what would stop that queue draining.
+    #[test]
+    fn priming_does_not_hold_a_pacer() {
+        let clock = Arc::new(Clock::new());
+        let context = context(&clock);
+        let mut pacer = paced("pacer", ffmpeg::Rational::new(1, 1000), &context);
+
+        let _audio = context
+            .playback_clock
+            .register_audio_master()
+            .expect("nothing else holds the clock");
+        assert_eq!(
+            context.playback_clock.master(),
+            crate::playback_clock::PlaybackMaster::AudioPriming
+        );
+
+        let started = Instant::now();
+        assert!(
+            pacer.wait_for(Some(10_000)).unwrap(),
+            "ten seconds ahead, and released anyway"
+        );
+        assert!(
+            started.elapsed() < Duration::from_millis(100),
+            "a priming master says nothing about where it is, and waiting on \
+             that is the stall this is here to rule out: took {:?}",
+            started.elapsed()
+        );
+    }
+
     /// Regression test: a `pts` this far from the origin used to overflow
     /// the subtraction silently (a plain `-`) or let the buffer through
     /// unpaced (an earlier `checked_sub` that swallowed the error). Now
@@ -635,7 +704,8 @@ mod tests {
     #[test]
     fn a_pathological_pts_jump_is_a_typed_error_not_silent_passthrough() {
         let clock = Arc::new(Clock::new());
-        let mut pacer = paced("pacer", ffmpeg::Rational::new(1, 1), &clock);
+        let context = context(&clock);
+        let mut pacer = paced("pacer", ffmpeg::Rational::new(1, 1), &context);
 
         assert!(pacer.consume(packet(-1)).is_ok(), "establishes the origin");
 
