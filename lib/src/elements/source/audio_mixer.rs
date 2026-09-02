@@ -1483,8 +1483,9 @@ mod tests {
             fn absorb(&mut self, frame: &ffmpeg::frame::Audio) {
                 let bytes = frame.samples() * frame.channels() as usize * 4;
                 let data = &frame.data(0)[..bytes.min(frame.data(0).len())];
-                for chunk in data.chunks_exact(4) {
-                    let sample = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                let (samples, _) = data.as_chunks::<4>();
+                for chunk in samples {
+                    let sample = f32::from_le_bytes(*chunk);
                     self.samples += 1;
                     if sample == 0.0 {
                         self.silent += 1;
