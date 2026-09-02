@@ -386,9 +386,17 @@ fn env_parsed<T: std::str::FromStr>(name: &str, default: T) -> T {
 }
 
 /// Path to a real video file for the scenarios that need one, from
-/// `MEDIA_PP_TEST_VIDEO` — the same variable, and the same skip-with-a-
-/// reason contract, as the library's own `test_support::try_test_video`
-/// (which is `pub(crate)`, so an integration test cannot call it).
+/// `MEDIA_PP_TEST_VIDEO`.
+///
+/// The library's own `test_support::try_test_video` no longer reads this: its
+/// tests synthesize a fixture instead, so they run everywhere and run against
+/// the same file every time. These do not, and deliberately. A soak scenario
+/// is measuring what a real workload costs over thousands of cycles, and a
+/// 320x240 clip of this crate's own making is not one — a real recording's
+/// resolution, bitrate and frame structure are most of what the decoders and
+/// pools being measured here actually have to hold. They are `--ignored` and
+/// run by hand, so skipping is a person reading the reason rather than a CI
+/// run quietly reporting a pass.
 pub fn try_test_video() -> Option<String> {
     let Ok(path) = std::env::var("MEDIA_PP_TEST_VIDEO") else {
         eprintln!(

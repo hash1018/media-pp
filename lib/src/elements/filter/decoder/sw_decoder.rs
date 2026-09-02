@@ -325,7 +325,7 @@ mod tests {
     /// `codec_id` decide which decoder `SwDecoder::new` opens, and libavcodec
     /// takes an Annex B stream's parameters from the bitstream itself rather
     /// than from `extradata`. Lets the control/passthrough contracts below
-    /// run on every machine instead of only where `MEDIA_PP_TEST_VIDEO` is set.
+    /// run without waiting on a fixture to be built.
     fn video_decoder(name: &str) -> SwDecoder {
         let mut params = ffmpeg::codec::Parameters::new();
         // SAFETY: `as_mut_ptr` on parameters this test just created and still

@@ -1834,8 +1834,8 @@ fn contract_context() -> Arc<Context> {
 
 /// A decoder built without any fixture — only `codec_type`/`codec_id`
 /// decide which one `SwDecoder::new` opens. Same approach as that
-/// element's own tests, so these run everywhere rather than only where
-/// `MEDIA_PP_TEST_VIDEO` is set.
+/// element's own tests, so these run without waiting on a fixture to be
+/// built.
 fn decoder(name: &str, medium: ffmpeg::media::Type, codec: ffmpeg::codec::Id) -> SwDecoder {
     let mut params = ffmpeg::codec::Parameters::new();
     // SAFETY: `as_mut_ptr` on parameters this test just created and still
@@ -1988,10 +1988,7 @@ fn attaching_a_packet_pad_to_a_video_branch_changes_nothing() {
 /// Needs a container to open, so it only runs where one is configured.
 #[test]
 fn a_demuxer_declares_packets_on_every_stream_pad() {
-    let Some(path) = try_test_video() else {
-        eprintln!("skipped: MEDIA_PP_TEST_VIDEO is not set to a readable file");
-        return;
-    };
+    let Some(path) = try_test_video() else { return };
     let (mut demuxer, streams) =
         FileDemuxer::open("demuxer", &path).expect("the fixture must open");
 
@@ -2405,10 +2402,7 @@ fn a_video_source_cannot_be_attached_to_an_audio_branch() {
 /// the first packet instead.
 #[test]
 fn a_containers_audio_stream_cannot_feed_a_video_decoder() {
-    let Some(path) = try_test_video() else {
-        eprintln!("skipped: MEDIA_PP_TEST_VIDEO is not set to a readable file");
-        return;
-    };
+    let Some(path) = try_test_video() else { return };
     let (mut demuxer, streams) =
         FileDemuxer::open("demuxer", &path).expect("the fixture must open");
     eprintln!(
@@ -2996,7 +2990,16 @@ fn a_completed_tee_branch_does_not_starve_a_sibling_preroll() {
     .expect("pipeline wiring");
 
     pipeline.run().expect("run");
-    thread::sleep(Duration::from_millis(100));
+    // Paused once it is demonstrably running, rather than after a fixed wait.
+    // A fixed one has to be long enough to have started and short enough not
+    // to have *finished*, and how long the second of those is depends on the
+    // fixture: a full-length recording is nowhere near its end after 100ms,
+    // while the synthesized one is consumed inside that and the seek below
+    // then has a finished source to preroll — which it reports as success,
+    // having delivered nothing.
+    while packets.load(Ordering::SeqCst) == 0 {
+        thread::yield_now();
+    }
     pipeline.pause();
     packets.store(0, Ordering::SeqCst);
     frames.lock().unwrap().clear();

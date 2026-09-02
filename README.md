@@ -452,8 +452,11 @@ buffers are not logged one record per buffer.
   elements are vendor-neutral.
 - RTSP publishing requires an external server that accepts publishing, such as
   MediaMTX.
-- Tests needing real media read `MEDIA_PP_TEST_VIDEO`. They skip when it is
-  unset or unreadable, so set it when testing demuxing, seeking, or decoding.
+- Tests needing media build their own: `cargo test` synthesizes a fixture from
+  the crate's own synthetic sources, so nothing has to be installed or
+  downloaded and every machine tests the same file. The soak scenarios in
+  `lib/tests/soak.rs` are the exception and still read `MEDIA_PP_TEST_VIDEO`,
+  where a real recording is the point.
 - Windows-backed examples compile as unsupported stubs on other targets.
 
 ## License

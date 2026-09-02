@@ -1425,4 +1425,275 @@ mod tests {
         }));
         assert_eq!(handle.mix_format(), None);
     }
+
+    /// A file whose sound is not at the mix's rate, played into the mix.
+    ///
+    /// The ordinary case, not a corner one: most media is 44.1kHz and most
+    /// capture devices are 48kHz, so an application playing a file alongside
+    /// a device has a resampler in the path whether it asked for one or not.
+    ///
+    /// What broke there was invisible to a test of the parts. Every element
+    /// reported success, the mix kept coming out at its own rate, and the
+    /// resampler was quietly handing back 8% less audio than went in — which
+    /// this mixer, whose contract is to keep producing on a wall clock, made
+    /// up with silence. So these measure the mix itself.
+    mod against_a_file {
+        use std::sync::Mutex as StdMutex;
+
+        use super::*;
+        use crate::{
+            elements::{AppSink, FileDemuxer, Pacer, SwDecoder, TestAudioOptions, TestAudioSource},
+            pipeline::Pipeline,
+            test_support,
+        };
+
+        const MIX_RATE: u32 = 48_000;
+        const FILE_RATE: u32 = 44_100;
+
+        /// How long the mix is watched. Long enough for a shortfall of a few
+        /// percent per tick to be unmistakable, short enough to stay a test.
+        const WATCH: Duration = Duration::from_secs(3);
+
+        /// How much of a mix carrying a continuous tone may be silence, in
+        /// parts per thousand.
+        ///
+        /// The tone never lands exactly on 0.0 for a run of samples, so what
+        /// this counts is the mixer's own padding: what it puts in when an
+        /// input is short for a tick. A resampler handing back less than it
+        /// was given pads *every* tick — 80‰ at the ratio used here. What is
+        /// left when nothing is wrong is the occasional scheduling hiccup, a
+        /// sub-millisecond gap every few seconds, measured at well under one
+        /// part in a thousand.
+        const SILENT_PER_MILLE: usize = 10;
+
+        /// Runs shorter than this are a waveform touching zero rather than a
+        /// gap in it.
+        const HOLE: usize = 4;
+
+        #[derive(Default, Clone)]
+        struct MixShape {
+            samples: usize,
+            silent: usize,
+            holes: usize,
+            longest_hole: usize,
+            current_run: usize,
+        }
+
+        impl MixShape {
+            fn absorb(&mut self, frame: &ffmpeg::frame::Audio) {
+                let bytes = frame.samples() * frame.channels() as usize * 4;
+                let data = &frame.data(0)[..bytes.min(frame.data(0).len())];
+                for chunk in data.chunks_exact(4) {
+                    let sample = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                    self.samples += 1;
+                    if sample == 0.0 {
+                        self.silent += 1;
+                        self.current_run += 1;
+                    } else {
+                        if self.current_run >= HOLE {
+                            self.holes += 1;
+                            self.longest_hole = self.longest_hole.max(self.current_run);
+                        }
+                        self.current_run = 0;
+                    }
+                }
+            }
+
+            fn silent_per_mille(&self) -> usize {
+                if self.samples == 0 {
+                    return 0;
+                }
+                self.silent * 1000 / self.samples
+            }
+
+            fn report(&self) -> String {
+                format!(
+                    "{} of {} samples silent ({}per mille), in {} hole(s), longest {}",
+                    self.silent,
+                    self.samples,
+                    self.silent_per_mille(),
+                    self.holes,
+                    self.longest_hole
+                )
+            }
+        }
+
+        /// A mixer running on its own pipeline, with everything it emits
+        /// measured.
+        fn watched_mix(rate: u32) -> (Arc<Pipeline>, MixerHandle, Arc<StdMutex<MixShape>>) {
+            let shape = Arc::new(StdMutex::new(MixShape::default()));
+            let listener = AppSink::new("mix-listener", {
+                let shape = Arc::clone(&shape);
+                move |buffer| {
+                    if let MediaBuffer::Audio(frame) = &buffer {
+                        shape.lock().expect("mix shape poisoned").absorb(frame);
+                    }
+                    Ok(())
+                }
+            });
+            let (mixer, handle) = AudioMixer::new(
+                "mixer",
+                AudioMixerOptions {
+                    sample_rate: rate,
+                    channels: 2,
+                },
+            );
+            let pipeline = Pipeline::new("mix", mixer, move |source, context| {
+                let branch = context.branch().to(Box::new(listener))?;
+                context.attach(source, 0, branch)?;
+                Ok(())
+            })
+            .expect("wire the mix");
+            pipeline.run().expect("run the mix");
+            (pipeline, handle, shape)
+        }
+
+        /// The fixture's sound, decoded, paced and pushed into the mix on a
+        /// pipeline of its own — which is how an application does it, the
+        /// mixer on its own thread with sources coming and going around it.
+        ///
+        /// The `Pacer` is not decoration. Without one the demuxer reads the
+        /// file as fast as it decodes and the mixer's input never runs dry,
+        /// so an input handing back less audio than it was given only fills a
+        /// queue more slowly and nothing downstream can tell. Paced, the file
+        /// arrives at the rate it claims and a shortfall is a tick the mixer
+        /// has to finish with silence — which is the whole of what this
+        /// measures.
+        fn play_into(path: &str, mixer: &MixerHandle) -> Arc<Pipeline> {
+            let (demuxer, streams) = FileDemuxer::open("fixture", path).expect("open the fixture");
+            let audio = streams
+                .iter()
+                .find(|stream| stream.kind == ffmpeg::media::Type::Audio)
+                .expect("the fixture has sound")
+                .index;
+            let parameters = demuxer
+                .stream_parameters(audio)
+                .expect("the audio stream describes itself");
+            let time_base = demuxer
+                .stream_time_base(audio)
+                .expect("the audio stream has a unit");
+            let decoder = SwDecoder::new("fixture-decoder", parameters).expect("open the decoder");
+            let sink = mixer
+                .add_source("fixture".to_owned())
+                .expect("the mixer is running");
+
+            let pipeline = Pipeline::new("playback", demuxer, move |source, context| {
+                let branch = context
+                    .branch()
+                    .pipe(decoder)
+                    .queue("audio", 32)
+                    .pipe(Pacer::new("fixture-pacer", time_base)?)
+                    .to(sink)?;
+                context.attach(source, audio, branch)?;
+                Ok(())
+            })
+            .expect("wire the playback pipeline");
+            pipeline.run().expect("play the fixture");
+            pipeline
+        }
+
+        /// The fixture has to be what these tests assume, or what they measure
+        /// is something else. Cheap, and it fails at the generator rather than
+        /// three assertions later.
+        #[test]
+        fn the_fixture_carries_sound_at_a_rate_the_mix_does_not_run_at() {
+            let fixture = test_support::synthesize("mixed-rate", 2.0, FILE_RATE);
+            let input =
+                ffmpeg::format::input(&fixture.path).expect("the fixture is a readable container");
+            let audio = input
+                .streams()
+                .find(|stream| stream.parameters().medium() == ffmpeg::media::Type::Audio)
+                .expect("the fixture has an audio stream");
+            let decoder = ffmpeg::codec::context::Context::from_parameters(audio.parameters())
+                .expect("the audio stream describes itself")
+                .decoder()
+                .audio()
+                .expect("it is audio");
+
+            assert_eq!(
+                decoder.rate(),
+                fixture.audio_rate,
+                "the fixture must carry the rate it was asked for"
+            );
+            assert_ne!(FILE_RATE, MIX_RATE, "otherwise nothing is resampled");
+            assert_eq!(decoder.channels(), fixture.channels);
+            assert!(
+                input
+                    .streams()
+                    .any(|stream| stream.parameters().medium() == ffmpeg::media::Type::Video),
+                "a Source that occupies a rectangle needs its picture too"
+            );
+        }
+
+        /// A 44.1kHz file into a 48kHz mix has to fill every tick of it.
+        ///
+        /// Not "arrive" as in the mix keeps producing — it does that with or
+        /// without an input, filling whatever an input is short by with
+        /// silence, which is exactly what made this so quiet. What is
+        /// measured is the silence.
+        #[test]
+        fn a_file_below_the_mix_rate_fills_every_tick_of_it() {
+            let fixture = test_support::synthesize("mixed-rate-mix", 6.0, FILE_RATE);
+            let (mix, handle, shape) = watched_mix(MIX_RATE);
+            let playback = play_into(&fixture.path.to_string_lossy(), &handle);
+
+            // What a mix emits before its input has said anything is silence,
+            // correctly, so the measurement starts after the first samples.
+            thread::sleep(Duration::from_millis(500));
+            *shape.lock().expect("mix shape poisoned") = MixShape::default();
+            thread::sleep(WATCH);
+            let measured = shape.lock().expect("mix shape poisoned").clone();
+            playback.stop();
+            mix.stop();
+
+            assert!(
+                measured.samples > 0,
+                "the mix produced nothing to look at in {WATCH:?}"
+            );
+            assert!(
+                measured.silent_per_mille() <= SILENT_PER_MILLE,
+                "a {FILE_RATE}Hz file did not fill a {MIX_RATE}Hz mix: {}",
+                measured.report()
+            );
+        }
+
+        /// The same mixer fed at its own rate, so a failure above is read as
+        /// what it is. Nothing is resampled here, and a hole would mean
+        /// something other than the rate conversion.
+        #[test]
+        fn a_source_at_the_mix_rate_fills_it_too() {
+            let (mix, handle, shape) = watched_mix(MIX_RATE);
+            let tone = TestAudioSource::new(
+                "tone",
+                TestAudioOptions {
+                    sample_rate: MIX_RATE,
+                    channels: 2,
+                    frequency: 440.0,
+                },
+            );
+            let sink = handle
+                .add_source("tone".to_owned())
+                .expect("the mixer is running");
+            let source = Pipeline::new("tone", tone, move |source, context| {
+                let branch = context.branch().to(sink)?;
+                context.attach(source, 0, branch)?;
+                Ok(())
+            })
+            .expect("wire the tone");
+            source.run().expect("run the tone");
+
+            thread::sleep(Duration::from_millis(500));
+            *shape.lock().expect("mix shape poisoned") = MixShape::default();
+            thread::sleep(WATCH);
+            let measured = shape.lock().expect("mix shape poisoned").clone();
+            source.stop();
+            mix.stop();
+
+            assert!(
+                measured.silent_per_mille() <= SILENT_PER_MILLE,
+                "a source at the mix's own rate did not fill it: {}",
+                measured.report()
+            );
+        }
+    }
 }

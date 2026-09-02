@@ -211,12 +211,29 @@ documentation and implementation differ.
 - Hardware-dependent tests use a `try_device()`-style helper and skip with a
   clear reason when the required device is unavailable. Detect absence rather
   than panicking whenever a system font, device, or media file is unavoidable.
-- No media is checked into this repository. A test needing a real video calls
-  `test_support::try_test_video`, which reads `MEDIA_PP_TEST_VIDEO` and skips
-  with a reason when it is unset or unreadable; run the affected tests with that
-  variable actually set, since a skipped test reports as passing. Such a test
-  must assert a contract that holds for any fixture — never a particular file's
-  codec, resolution, duration, or keyframe spacing.
+- No media is checked into this repository, and the library's tests do not ask
+  for any: `test_support::try_test_video` synthesizes a fixture through
+  `test_support::synthesize`, built from this crate's own synthetic sources and
+  the two encoders that are always present (`VideoCodec::OpenH264`,
+  `AudioCodec::Aac`). Nothing there shells out to an `ffmpeg` binary; CI
+  installs FFmpeg's development libraries and no command-line tool at all. So
+  these tests run everywhere, and everywhere against the same file.
+- `MEDIA_PP_TEST_VIDEO` is now read by `lib/tests/soak.rs` alone, where a real
+  recording is the point — what a real workload costs is not what a 320x240
+  clip costs. Do not reintroduce it in the library's own tests.
+- Know what the fixture cannot show. It has no B-frames, no edit list, constant
+  frame duration and a start time of exactly zero, so demuxing, seeking and
+  decoding are exercised against this crate's own encoder output and no other.
+  A test must assert a contract that holds for *any* fixture — never a
+  particular file's codec, resolution, duration, or keyframe spacing — and
+  never a fixed wait that assumes the source is still running, which is what a
+  full-length recording used to hide.
+- End-to-end audio and timing tests must pace what they feed. An unpaced branch
+  delivers a file as fast as it decodes, which keeps every downstream buffer
+  full and hides exactly the defects such a test is for — an input handing over
+  less audio than it was given then only fills a queue more slowly. See
+  `audio_mixer.rs`'s `against_a_file` tests, where removing the `Pacer` makes a
+  test that reproduces an 8% shortfall pass against the bug.
 - For stress tests, leak investigations, fitted-slope interpretation, or new
   per-cycle resource coverage, apply the repository skill
   `media-pp-soak-analysis`. Its hardware, fixture, and portal prerequisites must
