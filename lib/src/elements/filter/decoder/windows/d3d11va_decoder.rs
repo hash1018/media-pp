@@ -381,8 +381,24 @@ mod tests {
         let video_index = video_stream.index();
         let params = video_stream.parameters();
 
-        let mut decoder = D3d11Decoder::new("test-decoder", params, &device, 32)
-            .expect("failed to open D3D11VA decoder");
+        // A D3D11 device is not the same thing as a D3D11 *video* device.
+        // `try_d3d11_device` gets one on any machine that can render at all,
+        // including the Basic Render Driver a CI runner falls back to, and
+        // wrapping that as a D3D11VA hardware device is what fails there —
+        // `AVERROR_UNKNOWN`, arriving as `HwDeviceInit(-1313558101)`. That is
+        // the absence of hardware rather than a regression, and this skips
+        // for it the way every other hardware test skips for its own.
+        let mut decoder = match D3d11Decoder::new("test-decoder", params, &device, 32) {
+            Ok(decoder) => decoder,
+            Err(D3d11DecoderError::HwDeviceInit(code)) => {
+                eprintln!(
+                    "skipping: this machine's D3D11 device does not do video decoding \
+                     (hw device init failed with {code})"
+                );
+                return;
+            }
+            Err(error) => panic!("failed to open D3D11VA decoder: {error}"),
+        };
 
         for (stream, packet) in input.packets() {
             if stream.index() != video_index {
