@@ -57,6 +57,15 @@ pub enum ElementType {
     WasapiCaptureSource,
     /// Multi-input audio mixer source.
     AudioMixer,
+    /// One input registered with an [`ElementType::AudioMixer`], which is a
+    /// `Sink` in whichever pipeline feeds it rather than part of the mixer's
+    /// own.
+    ///
+    /// Its own variant because it reads as one: an input that called itself
+    /// `AudioMixer` put a mixer at the end of every branch feeding one, and a
+    /// topology diagram with four of them in it is a diagram nobody can count
+    /// the mixers from.
+    AudioMixerInput,
     /// CPU video compositor source.
     SwVideoCompositor,
     /// CUDA video compositor source.

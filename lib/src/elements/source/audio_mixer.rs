@@ -289,7 +289,7 @@ impl MixerHandle {
         Some(Box::new(MixerInputSink {
             name: name.clone(),
             id,
-            pp_log: element_pp_log(ElementType::AudioMixer, &name, None),
+            pp_log: element_pp_log(ElementType::AudioMixerInput, &name, None),
             shared: self.shared.clone(),
         }))
     }
@@ -382,7 +382,7 @@ impl Element for MixerInputSink {
     }
 
     fn element_type(&self) -> ElementType {
-        ElementType::AudioMixer
+        ElementType::AudioMixerInput
     }
 
     fn pp_log(&self) -> &PpLog {
