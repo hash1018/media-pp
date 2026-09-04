@@ -42,6 +42,15 @@ use crate::{
     pool::UnboundObjectPool,
 };
 
+/// How many packets in a row the decoder may refuse before the source gives
+/// up on the device.
+///
+/// A second of them at any ordinary rate. Long enough that a camera dropping
+/// the occasional frame — a truncated JPEG, a USB hiccup — is ridden out, and
+/// short enough that a stream which has gone bad is handed back while someone
+/// is still looking at it.
+const UNDECODABLE_LIMIT: u32 = 30;
+
 /// Errors specific to [`V4l2CaptureSource`]. Converts into the crate-wide
 /// [`crate::error::Error`] via `?`.
 #[derive(Debug, ThisError)]
@@ -59,6 +68,13 @@ pub enum V4l2CaptureSourceError {
     /// is being held by something else can do.
     #[error("{0:?} offers no video stream")]
     NoVideoStream(String),
+
+    /// Nothing the camera sent could be decoded. Its stream has gone bad —
+    /// a device wedged by a driver reset, or one whose Motion JPEG is
+    /// arriving truncated — and the Source is given back rather than left
+    /// running and blank.
+    #[error("{0} frames in a row would not decode")]
+    Undecodable(u32),
 
     /// The camera negotiated a frame size NV12 cannot describe: its chroma is
     /// half-sized in both axes, so an odd dimension has no whole pixel to
@@ -97,6 +113,8 @@ pub struct V4l2CaptureSource {
     input: ffmpeg::format::context::Input,
     stream: usize,
     decoder: ffmpeg::decoder::Video,
+    /// How many packets in a row the decoder has refused — see `deliver`.
+    undecodable: u32,
     /// Built on the first frame rather than at open: what the decoder
     /// actually produces is not knowable until it has produced one, and a
     /// camera can be asked for a format it answers in a different pixel
@@ -239,6 +257,7 @@ impl V4l2CaptureSource {
                 stream: index,
                 decoder,
                 scaler: None,
+                undecodable: 0,
                 format,
                 pads,
                 pool: UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {}),
@@ -259,14 +278,31 @@ impl V4l2CaptureSource {
 
     /// Decodes one packet and pushes whatever pictures it made.
     fn deliver(&mut self, packet: &ffmpeg::Packet, bus: &Bus) -> Result<()> {
-        if self.decoder.send_packet(packet).is_err() {
+        if let Err(error) = self.decoder.send_packet(packet) {
             // One packet the decoder would not take — a truncated JPEG from a
             // camera that was unplugged mid-frame, most often. The next one
             // usually decodes, and ending the source over a dropped frame
             // would be worse than the frame.
-            pp_warn!(self, "a frame did not decode; dropping it");
+            //
+            // Unless they all do. A camera whose stream has gone bad answers
+            // every packet the same way, and a Source that reports nothing but
+            // draws nothing is the hardest kind of failure to place: the
+            // device is open, the graph is running, and the picture is
+            // missing. So a run of them ends the source, which is what puts it
+            // back in reach of whoever reopens it — see this module's parent.
+            self.undecodable += 1;
+            if self.undecodable >= UNDECODABLE_LIMIT {
+                pp_error!(
+                    self,
+                    "{UNDECODABLE_LIMIT} frames in a row would not decode ({error}); \
+                     giving the camera back"
+                );
+                return Err(V4l2CaptureSourceError::Undecodable(UNDECODABLE_LIMIT).into());
+            }
+            pp_warn!(self, "a frame did not decode ({error}); dropping it");
             return Ok(());
         }
+        self.undecodable = 0;
         let mut decoded = ffmpeg::frame::Video::empty();
         while self.decoder.receive_frame(&mut decoded).is_ok() {
             let mut converted = self.pool.get();
@@ -498,6 +534,36 @@ mod tests {
         fn control(&mut self, _message: ControlMsg) -> Result<()> {
             Ok(())
         }
+    }
+
+    /// A stream that decodes nothing is handed back rather than left
+    /// running.
+    ///
+    /// The failure this is for looked like a compositing defect: the device
+    /// opens, the graph runs, every packet is refused, and the layer is
+    /// simply blank. Ending the source is what puts it back in reach of
+    /// whoever reopens it — a camera wedged by a driver reset comes back when
+    /// it is replugged, and nothing else would have noticed.
+    #[test]
+    fn a_stream_that_never_decodes_ends_rather_than_running_blank() {
+        // The limit is what makes the two cases distinguishable: below it a
+        // camera dropping the occasional frame is ridden out, at it the
+        // Source gives up. A limit of one would end a capture over a single
+        // truncated JPEG, which USB cameras produce in the ordinary course of
+        // things; one of thousands would be a blank layer for a minute.
+        let limit = UNDECODABLE_LIMIT;
+        assert!(
+            (10..=120).contains(&limit),
+            "the limit has to ride out a hiccup and still give a dead stream back \
+             while someone is looking: {limit}"
+        );
+
+        let error: crate::error::Error =
+            V4l2CaptureSourceError::Undecodable(UNDECODABLE_LIMIT).into();
+        assert!(
+            error.to_string().contains("decode"),
+            "the reason has to survive into what the bus reports: {error}"
+        );
     }
 
     /// Automatic has to mean the camera's *best* mode, not whatever the
