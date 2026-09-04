@@ -27,11 +27,22 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v6
 
-      - name: Install Rust
+      # One command per step throughout this job, deliberately. GitHub's pwsh
+      # wrapper exits with `$LASTEXITCODE`, which is the *last* command's, and
+      # a failing native command does not otherwise stop the script — so a
+      # multi-command step reports whichever command happened to run last and
+      # silently swallows every failure before it. That is not hypothetical:
+      # it hid a real rustdoc error in "Check API documentation" below for
+      # two releases, until a tag build ran the same command on its own and
+      # failed. The same hazard is documented in `setup-ffmpeg`, which
+      # defends against it with explicit `$LASTEXITCODE` checks.
+      - name: Install Rust toolchain
         shell: pwsh
-        run: |
-          rustup toolchain install stable --profile minimal --component rustfmt,clippy
-          rustup default stable
+        run: rustup toolchain install stable --profile minimal --component rustfmt,clippy
+
+      - name: Select Rust toolchain
+        shell: pwsh
+        run: rustup default stable
 
       - name: Set up FFmpeg
         uses: ./.github/actions/setup-ffmpeg
@@ -89,14 +100,23 @@ jobs:
       # Run rustdoc against the same isolated feature sets as Clippy. A link
       # to a type from another optional backend only breaks while that backend
       # is absent, so one all-features documentation build cannot catch it.
-      - name: Check API documentation
+      - name: Check API documentation (no features)
         shell: pwsh
         env:
           RUSTDOCFLAGS: -D warnings
-        run: |
-          cargo doc -p media-pp --no-deps
-          cargo doc -p media-pp --no-deps --features d3d11,d3d12,dxgi-capture,wgc-capture,mf-capture,wasapi-capture,wasapi-renderer
-          cargo doc -p media-pp --no-deps --features cuda
+        run: cargo doc -p media-pp --no-deps
+
+      - name: Check API documentation (Windows backends)
+        shell: pwsh
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc -p media-pp --no-deps --features d3d11,d3d12,dxgi-capture,wgc-capture,mf-capture,wasapi-capture,wasapi-renderer
+
+      - name: Check API documentation (CUDA)
+        shell: pwsh
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc -p media-pp --no-deps --features cuda
 
       # Hardware-dependent tests detect the missing device and skip with a
       # reason (`try_device()`), so these run the whole logic suite here and

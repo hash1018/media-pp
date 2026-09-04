@@ -31,15 +31,8 @@ use crate::{
 };
 
 /// The unit every emitted `pts` counts in: Media Foundation's own 100ns
-/// tick.
-///
-/// Unlike [`DxgiCaptureSource`](crate::elements::DxgiCaptureSource), whose
-/// `1 / fps` time base is honest because it decides itself when a frame
-/// happens, a camera decides that on its own — exposure lengthens a frame
-/// interval, and a mode nominally at 30 fps is not delivered on a 1/30
-/// grid. Counting the device's own clock keeps every one of those intervals
-/// as it actually was, rather than rounding it onto a grid the camera never
-/// promised.
+/// tick. See [`MfCaptureSource::time_base`] for why the device's clock
+/// rather than `1 / fps`.
 const TIME_BASE_DENOMINATOR: i32 = 10_000_000;
 
 /// Errors specific to `MfCaptureSource`. Converts into the crate-wide
@@ -440,9 +433,16 @@ impl MfCaptureSource {
         })
     }
 
-    /// The unit each emitted frame's `pts` is expressed in — see
-    /// [`TIME_BASE_DENOMINATOR`] on why it is the device's clock rather
-    /// than `1 / fps`.
+    /// The unit each emitted frame's `pts` is expressed in: Media
+    /// Foundation's own 100ns tick, so `1 / 10_000_000`.
+    ///
+    /// The device's clock rather than `1 / fps`, unlike
+    /// [`DxgiCaptureSource`](crate::elements::DxgiCaptureSource), whose
+    /// `1 / fps` is honest because it decides itself when a frame happens. A
+    /// camera does not: exposure lengthens an interval, and a mode nominally
+    /// at 30 fps is not delivered on a 1/30 grid. Counting the device's own
+    /// clock keeps every one of those intervals as it actually was, rather
+    /// than rounding it onto a grid the camera never promised.
     pub fn time_base(&self) -> ffmpeg::Rational {
         ffmpeg::Rational::new(1, TIME_BASE_DENOMINATOR)
     }

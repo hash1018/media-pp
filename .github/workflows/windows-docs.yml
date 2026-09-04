@@ -25,11 +25,16 @@ jobs:
       # Nightly only for rustdoc: `doc_cfg` is what labels each item with the
       # Cargo feature that enables it, and it is still unstable. The library
       # itself builds on stable (see `rust-version` in `lib/Cargo.toml`).
-      - name: Install Rust
+      # One command per step, for the reason the CI workflow gives at length:
+      # GitHub's pwsh wrapper exits with the *last* command's `$LASTEXITCODE`,
+      # so anything that fails before it is swallowed.
+      - name: Install Rust toolchain
         shell: pwsh
-        run: |
-          rustup toolchain install nightly --profile minimal
-          rustup default nightly
+        run: rustup toolchain install nightly --profile minimal
+
+      - name: Select Rust toolchain
+        shell: pwsh
+        run: rustup default nightly
 
       # Shared with the CI workflow, which is also what keeps the FFmpeg cache
       # this restores alive: cache entries are readable from the default branch
@@ -53,8 +58,13 @@ jobs:
         env:
           RUSTDOCFLAGS: --cfg docsrs -D warnings
           DOCS_RS: "1"
+        run: cargo doc -p media-pp --no-deps --features d3d11,d3d12,dxgi-capture,wgc-capture,mf-capture,wasapi-capture,wasapi-renderer,webrtc,ort
+
+      # `target/doc` has no top-level page, and Pages will not serve the
+      # `.lock` cargo leaves behind.
+      - name: Prepare the Pages directory
+        shell: pwsh
         run: |
-          cargo doc -p media-pp --no-deps --features d3d11,d3d12,dxgi-capture,wgc-capture,mf-capture,wasapi-capture,wasapi-renderer,webrtc,ort
           '<meta http-equiv="refresh" content="0; url=media_pp/">' | Set-Content -Encoding utf8 target/doc/index.html
           Remove-Item target/doc/.lock -ErrorAction SilentlyContinue
 
