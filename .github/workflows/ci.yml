@@ -150,7 +150,7 @@ jobs:
         run: cargo clippy -p media-pp --all-targets -- -D warnings
 
       - name: Lint (Linux backends)
-        run: cargo clippy -p media-pp --all-targets --features pipewire-audio-capture,pipewire-audio-renderer,pipewire-screen-capture -- -D warnings
+        run: cargo clippy -p media-pp --all-targets --features pipewire-audio-capture,pipewire-audio-renderer,pipewire-screen-capture,v4l2-capture -- -D warnings
 
       # Linted but not run: hosted runners have no NVIDIA driver, so a test
       # binary built with this feature will not start. See the same job on
@@ -170,7 +170,7 @@ jobs:
           RUSTDOCFLAGS: -D warnings
         run: |
           cargo doc -p media-pp --no-deps
-          cargo doc -p media-pp --no-deps --features pipewire-audio-capture,pipewire-audio-renderer,pipewire-screen-capture
+          cargo doc -p media-pp --no-deps --features pipewire-audio-capture,pipewire-audio-renderer,pipewire-screen-capture,v4l2-capture
           cargo doc -p media-pp --no-deps --features cuda
 
       - name: Test (no features)
@@ -181,4 +181,4 @@ jobs:
       # no session to open; the screen-capture portal handshake itself is
       # only exercised by the `#[ignore]`d soak scenario, not by this suite.
       - name: Test (Linux backends)
-        run: cargo test -p media-pp --features pipewire-audio-capture,pipewire-audio-renderer,pipewire-screen-capture
+        run: cargo test -p media-pp --features pipewire-audio-capture,pipewire-audio-renderer,pipewire-screen-capture,v4l2-capture

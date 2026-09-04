@@ -17,8 +17,11 @@ Add the crate to your project:
 
 ```toml
 [dependencies]
-media-pp = "0.1"
+media-pp = "0.2"
 ```
+
+0.2.0 renames two elements and takes a pair of binding methods away. See
+[`CHANGELOG.md`] for what to write instead.
 
 That is the only dependency you need. `ffmpeg-next` is part of this crate's
 API — `MediaBuffer` carries its frames and packets, and an encoder's
@@ -477,6 +480,7 @@ Licensed under either the [Apache License, Version 2.0](LICENSE-APACHE) or the
 `media-pp` does not bundle FFmpeg. Users are responsible for complying with
 the license of their FFmpeg build and optional codecs.
 
+[`CHANGELOG.md`]: https://github.com/hash1018/media-pp/blob/main/CHANGELOG.md
 [`ffmpeg-next`]: https://github.com/zmwangx/rust-ffmpeg
 [docs.rs]: https://docs.rs/media-pp
 [Windows API documentation]: https://hash1018.github.io/media-pp/media_pp/
