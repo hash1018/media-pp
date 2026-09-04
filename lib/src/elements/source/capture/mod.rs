@@ -2,7 +2,8 @@
     target_os = "linux",
     any(
         feature = "pipewire-screen-capture",
-        feature = "pipewire-audio-capture"
+        feature = "pipewire-audio-capture",
+        feature = "v4l2-capture"
     )
 ))]
 mod linux;
@@ -21,7 +22,8 @@ mod windows;
     target_os = "linux",
     any(
         feature = "pipewire-screen-capture",
-        feature = "pipewire-audio-capture"
+        feature = "pipewire-audio-capture",
+        feature = "v4l2-capture"
     )
 ))]
 pub use linux::*;

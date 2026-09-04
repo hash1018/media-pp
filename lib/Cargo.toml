@@ -72,6 +72,10 @@ futures-util = { version = "0.3", optional = true }
 # `requested` is documented "Since 0.3.50", so the older `v0_3_49` pin named a
 # version that did not have it. Raises the minimum libpipewire to 0.3.50
 # (2022); distributions ship far newer.
+# The four read-only V4L2 ioctls a camera picker needs — see
+# `platform::linux::v4l2`. Capture itself goes through FFmpeg's own
+# `video4linux2` demuxer, which is why this is the whole of the dependency.
+libc = { version = "0.2", optional = true }
 pipewire = { version = "0.10.1", optional = true, features = ["v0_3_50"] }
 pollster = { version = "1", optional = true }
 
@@ -140,6 +144,7 @@ mf-capture = [
     "windows/Win32_System_Com",
     "windows/Win32_System_Com_StructuredStorage",
 ]
+v4l2-capture = ["dep:libc"]
 pipewire-audio-capture = ["dep:pipewire"]
 pipewire-audio-renderer = ["dep:pipewire"]
 pipewire-screen-capture = [

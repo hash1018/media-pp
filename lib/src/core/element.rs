@@ -57,6 +57,8 @@ pub enum ElementType {
     WasapiCaptureSource,
     /// Windows Media Foundation camera capture source.
     MfCaptureSource,
+    /// Linux V4L2 camera capture source.
+    V4l2CaptureSource,
     /// Multi-input audio mixer source.
     AudioMixer,
     /// One input registered with an [`ElementType::AudioMixer`], which is a

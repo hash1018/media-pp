@@ -1973,6 +1973,7 @@ dependencies = [
  "ffmpeg-next",
  "ffmpeg-sys-next",
  "futures-util",
+ "libc",
  "log",
  "ndarray",
  "ort",

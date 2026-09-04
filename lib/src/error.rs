@@ -25,6 +25,8 @@ use crate::elements::PipeWireAudioRendererError;
 #[cfg(all(target_os = "linux", feature = "pipewire-screen-capture"))]
 use crate::elements::PipeWireScreenCaptureSourceError;
 use crate::elements::RtspSinkError;
+#[cfg(all(target_os = "linux", feature = "v4l2-capture"))]
+use crate::elements::V4l2CaptureSourceError;
 #[cfg(all(target_os = "windows", feature = "wasapi-capture"))]
 use crate::elements::WasapiCaptureSourceError;
 #[cfg(all(target_os = "windows", feature = "wasapi-renderer"))]
@@ -389,6 +391,11 @@ pub enum Error {
     #[cfg(all(target_os = "windows", feature = "mf-capture"))]
     #[error(transparent)]
     MfCaptureSourceError(#[from] MfCaptureSourceError),
+
+    /// V4L2 camera capture failed.
+    #[cfg(all(target_os = "linux", feature = "v4l2-capture"))]
+    #[error(transparent)]
+    V4l2CaptureSourceError(#[from] V4l2CaptureSourceError),
 
     /// WASAPI audio capture failed.
     #[cfg(all(target_os = "windows", feature = "wasapi-capture"))]

@@ -58,6 +58,8 @@ pub use capture::{MfCaptureOptions, MfCaptureSource, MfCaptureSourceError};
 pub use capture::{
     PipeWireAudioCaptureOptions, PipeWireAudioCaptureSource, PipeWireAudioCaptureSourceError,
 };
+#[cfg(all(target_os = "linux", feature = "v4l2-capture"))]
+pub use capture::{V4l2CaptureOptions, V4l2CaptureSource, V4l2CaptureSourceError};
 #[cfg(all(target_os = "windows", feature = "wasapi-capture"))]
 pub use capture::{WasapiCaptureOptions, WasapiCaptureSource, WasapiCaptureSourceError};
 #[cfg(all(target_os = "windows", feature = "wgc-capture"))]

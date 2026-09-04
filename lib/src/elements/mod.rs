@@ -29,6 +29,8 @@ pub use video_format::VideoFormat;
 
 #[cfg(feature = "cuda")]
 pub use crate::platform::cuda::{CudaDevice, CudaDeviceError, CudaDriverError, CudaFrameFormat};
+#[cfg(all(target_os = "linux", feature = "v4l2-capture"))]
+pub use crate::platform::linux::v4l2::{V4l2CaptureFormat, V4l2Device};
 #[cfg(all(target_os = "windows", feature = "mf-capture"))]
 pub use crate::platform::windows::mf::{MfCaptureFormat, MfDevice};
 #[cfg(all(
@@ -142,6 +144,8 @@ pub use source::{MfCaptureOptions, MfCaptureSource, MfCaptureSourceError};
 pub use source::{
     PipeWireAudioCaptureOptions, PipeWireAudioCaptureSource, PipeWireAudioCaptureSourceError,
 };
+#[cfg(all(target_os = "linux", feature = "v4l2-capture"))]
+pub use source::{V4l2CaptureOptions, V4l2CaptureSource, V4l2CaptureSourceError};
 #[cfg(all(target_os = "windows", feature = "wasapi-capture"))]
 pub use source::{WasapiCaptureOptions, WasapiCaptureSource, WasapiCaptureSourceError};
 #[cfg(all(target_os = "windows", feature = "wgc-capture"))]
