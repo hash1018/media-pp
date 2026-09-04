@@ -138,8 +138,26 @@ impl V4l2CaptureSource {
             return Err(V4l2CaptureSourceError::NoV4l2Demuxer);
         }
 
+        // No mode asked for means the camera's own first offered one, which
+        // is what a caller that showed a mode list has already told the user
+        // it will open at.
+        //
+        // Left to the demuxer it would mean something else entirely: V4L2
+        // hands back whatever the device is *currently* set to, which on this
+        // machine is 640x480 where the camera's best mode is 1280x720. A
+        // caller sizing a layer from the list it showed would then size it
+        // for a picture it does not get — and cropping against a width the
+        // frame does not have makes a layer vanish rather than merely look
+        // wrong.
+        let requested = options.format.or_else(|| {
+            crate::platform::linux::v4l2::list_formats(&options.device.id)
+                .ok()?
+                .into_iter()
+                .next()
+        });
+
         let mut settings = ffmpeg::Dictionary::new();
-        if let Some(format) = options.format {
+        if let Some(format) = requested {
             settings.set("video_size", &format!("{}x{}", format.width, format.height));
             settings.set(
                 "framerate",
@@ -164,7 +182,20 @@ impl V4l2CaptureSource {
             }
         }
 
-        let input = open_input(demuxer, &options.device.id, settings)?;
+        // The camera's own default is the fallback rather than the failure: a
+        // device that will not give the mode it just listed is still a device
+        // worth showing, and a caller cannot pick differently for it.
+        let input = match open_input(demuxer, &options.device.id, settings) {
+            Ok(input) => input,
+            Err(error) if requested.is_some() => {
+                pp_warn!(
+                    pp_log: &pp_log,
+                    "the camera refused its own first mode ({error}); taking whatever it is set to"
+                );
+                open_input(demuxer, &options.device.id, ffmpeg::Dictionary::new())?
+            }
+            Err(error) => return Err(error),
+        };
         let stream = input
             .streams()
             .best(ffmpeg::media::Type::Video)
@@ -415,6 +446,25 @@ mod tests {
     use crate::element::Sink;
     use std::sync::Mutex as StdMutex;
 
+    /// One camera, one test at a time.
+    ///
+    /// A V4L2 node is exclusive: two tests opening it at once make one of
+    /// them fail with `EBUSY`, which would read as a defect in whichever
+    /// happened to lose. The same arrangement `try_cuda_device` makes, and
+    /// for the same reason.
+    fn camera() -> Option<(V4l2Device, std::sync::MutexGuard<'static, ()>)> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let guard = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let device = V4l2CaptureSource::list_devices().ok()?.into_iter().next();
+        match device {
+            Some(device) => Some((device, guard)),
+            None => {
+                eprintln!("skipping: this machine has no camera");
+                None
+            }
+        }
+    }
+
     struct CountingSink {
         pp_log: PpLog,
         frames: Arc<StdMutex<Vec<(u32, u32, ffmpeg::format::Pixel)>>>,
@@ -450,6 +500,46 @@ mod tests {
         }
     }
 
+    /// Automatic has to mean the camera's *best* mode, not whatever the
+    /// device happens to be set to.
+    ///
+    /// The two differ on real hardware — this camera lists 1280x720 first and
+    /// sits at 640x480 until something sets it — and a caller that showed the
+    /// list and sized a layer from its first row would be sizing it for a
+    /// picture it does not get. Cropping against a width the frame does not
+    /// have then makes the layer vanish, which is how this was found.
+    #[test]
+    fn no_mode_asked_for_opens_the_first_one_offered() {
+        let Some((device, _camera_lock)) = camera() else {
+            return;
+        };
+        let Some(best) = V4l2CaptureSource::list_formats(&device.id)
+            .ok()
+            .and_then(|modes| modes.into_iter().next())
+        else {
+            eprintln!("skipping: this camera lists no modes");
+            return;
+        };
+
+        let opened = V4l2CaptureSource::open(
+            "camera",
+            V4l2CaptureOptions {
+                device: device.clone(),
+                format: None,
+            },
+        );
+        let Ok((_source, format)) = opened else {
+            eprintln!("skipping: {:?} would not open", device.id);
+            return;
+        };
+
+        assert_eq!(
+            (format.width, format.height),
+            (best.width, best.height),
+            "automatic must open the mode a picker's first row promised"
+        );
+    }
+
     /// The whole path on real hardware: open the first camera this machine
     /// has, take a few frames, and check they are the shape a compositor
     /// takes. Skipped where there is no camera, which is every CI runner.
@@ -459,11 +549,7 @@ mod tests {
     /// on would compile, run, and produce a picture nothing could draw.
     #[test]
     fn a_camera_delivers_nv12_frames_a_compositor_can_take() {
-        let Ok(devices) = V4l2CaptureSource::list_devices() else {
-            return;
-        };
-        let Some(device) = devices.into_iter().next() else {
-            eprintln!("skipping: this machine has no camera");
+        let Some((device, _camera_lock)) = camera() else {
             return;
         };
         // The best mode rather than any: on this machine that is 1280x720,

@@ -1924,6 +1924,58 @@ mod tests {
         }
     }
 
+    /// What dragging a crop handle is: the region changes on every frame,
+    /// for as long as the pointer is down. Every one of those has to compose,
+    /// because a compositor that fails part way through a gesture leaves the
+    /// Scene blank and does not come back.
+    #[test]
+    fn a_region_that_changes_every_frame_keeps_composing() {
+        let Some((device, _cuda_lock)) = try_cuda_device() else {
+            return;
+        };
+        let (width, height) = (256u32, 256u32);
+        let Ok((mut compositor, handle)) =
+            CudaVideoCompositor::new("compositor", &device, options(width, height))
+        else {
+            eprintln!("skipping: this machine cannot open a CUDA compositor");
+            return;
+        };
+        let mut input = handle
+            .add_source(
+                "layer",
+                VideoLayer {
+                    fit: VideoFit::Stretch,
+                    ..VideoLayer::new(VideoRect::new(0, 0, width, height))
+                },
+            )
+            .expect("add source");
+
+        for step in 0..60u32 {
+            let Some(frame) = cuda_frame_with_pts(&device, 640, 480, 200, i64::from(step)) else {
+                return;
+            };
+            input.sink.consume(frame).expect("frame");
+            // Only the left edge moves, so the region's shape changes as it
+            // shrinks and each axis passes the output's size on its own —
+            // which is the case `scale_cuda` answers with a blank surface
+            // and `scale_graph::detour` exists for. Odd amounts, so the
+            // alignment the NV12 path applies is exercised too.
+            let cut = step * 3;
+            input
+                .layer
+                .set_source(Some(VideoSourceRect::new(cut, 0, 640 - cut, 480)))
+                .expect("set source");
+
+            let composed = compositor.compose_frame().expect("compose");
+            let out = download(&device, composed, width, height);
+            let luma = luma_at(&out, 128, 128);
+            assert!(
+                luma.abs_diff(200) <= 2,
+                "the layer went blank at step {step} (cut {cut}): luma {luma}"
+            );
+        }
+    }
+
     /// A layer scaled so that exactly one of its dimensions matches the
     /// source's must still be drawn.
     ///
