@@ -54,9 +54,9 @@ use crate::{
     control::{PrerollError, SeekError},
     elements::{
         AppSourceError, AudioMixerError, AudioResamplerError, AudioVolumeError, FileDemuxError,
-        FileMuxerError, HlsMuxerError, PacerError, RtspSourceError, SwAudioEncoderError,
-        SwChromaKeyError, SwDecoderError, SwEncoderError, SwScalerError, SwVideoCompositorError,
-        TestAudioSourceError, TestVideoSourceError, VideoSynchronizerError,
+        FileMuxerError, HlsMuxerError, PacerError, RtmpMuxerError, RtspSourceError,
+        SwAudioEncoderError, SwChromaKeyError, SwDecoderError, SwEncoderError, SwScalerError,
+        SwVideoCompositorError, TestAudioSourceError, TestVideoSourceError, VideoSynchronizerError,
     },
     graph::GraphError,
     log::LogInitError,
@@ -291,6 +291,10 @@ pub enum Error {
     /// Sending a stream to an RTSP endpoint failed.
     #[error(transparent)]
     RtspSinkError(#[from] RtspSinkError),
+
+    /// Publishing to an RTMP server failed.
+    #[error(transparent)]
+    RtmpMuxerError(#[from] RtmpMuxerError),
 
     /// A D3D12 renderer operation failed.
     #[cfg(all(target_os = "windows", feature = "d3d12"))]

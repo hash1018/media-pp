@@ -8,6 +8,27 @@ The crate is pre-1.0, so a `0.x` bump is where breaking changes land. Each one
 below says what to write instead, because a rename with no migration line is a
 compile error with no explanation.
 
+## Unreleased
+
+### Added
+
+- **`RtmpMuxer` publishes a live broadcast to an RTMP server** — Twitch,
+  YouTube, or a local MediaMTX. It is the publishing half only: nothing here
+  runs a server, and the address and stream key come from whoever receives.
+  Shaped like `FileMuxer` rather than `RtspSink`, because a broadcast is video
+  *and* audio in one FLV container and the header has to describe both up
+  front: `create` connects, `add_stream` registers each track, and `open`
+  writes the header and returns one `Sink` per track. It remuxes and does not
+  encode, so H.264 and AAC come from the encoders upstream.
+
+  A publish URL ends in a credential, so nothing logs the URL it was given —
+  `redacted_url` is what reaches a log and what a caller should display. It
+  does not reconnect: a connection lost mid-broadcast is a write error, and
+  recovering means a new `RtmpMuxer` and so a fresh keyframe.
+
+  New: `Error::RtmpMuxerError`, `ElementType::RtmpMuxer`, and the
+  `rtmp_publish` example.
+
 ## 0.2.0
 
 Two renames, a camera source on both platforms, and a good deal of runtime

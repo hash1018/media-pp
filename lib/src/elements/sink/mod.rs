@@ -1,7 +1,8 @@
 //! Elements that terminate a branch.
 //!
 //! Muxers write to files or streams ([`FileMuxer`], [`SegmentedFileMuxer`],
-//! [`HlsMuxer`], [`RtspSink`]), renderers present to a device or window, and
+//! [`HlsMuxer`], [`RtmpMuxer`], [`RtspSink`]), renderers present to a device
+//! or window, and
 //! [`AppSink`] hands buffers back to the application. [`FrameCounter`] and
 //! [`PacketCounter`] are the trivial terminals that make a graph runnable
 //! while something upstream is being tested.
@@ -29,6 +30,7 @@ pub use muxer::{
 pub use muxer::{
     HlsMode, HlsMuxer, HlsMuxerError, HlsMuxerStreamSink, HlsOptions, HlsSegmentFormat,
 };
+pub use muxer::{RtmpMuxer, RtmpMuxerError, RtmpMuxerStreamSink};
 #[cfg(feature = "ort")]
 pub use ort_detector::{COCO_CLASS_LABELS, Detection, OrtDetector, OrtDetectorError};
 pub use packet_counter::PacketCounter;

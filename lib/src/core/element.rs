@@ -165,6 +165,8 @@ pub enum ElementType {
     FileMuxer,
     /// Rotating segmented container file muxer sink.
     SegmentedFileMuxer,
+    /// RTMP publishing muxer sink, one FLV stream to an external server.
+    RtmpMuxer,
     /// Anything outside this crate's own elements — a test double, or a
     /// custom `Sink`/`SourceElement` implemented downstream of this
     /// crate. Keeps this enum from needing to grow every time someone

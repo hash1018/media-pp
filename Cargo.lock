@@ -3068,6 +3068,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rtmp_publish"
+version = "0.1.0"
+dependencies = [
+ "media-pp",
+]
+
+[[package]]
 name = "rtsp_serve"
 version = "0.1.0"
 dependencies = [
