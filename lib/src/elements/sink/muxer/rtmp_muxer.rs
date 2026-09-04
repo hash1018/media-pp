@@ -177,7 +177,9 @@ impl RtmpMuxer {
     /// written yet — the server has a connection and nothing to play until
     /// [`RtmpMuxer::open`] runs.
     ///
-    /// Blocks for the handshake, bounded by [`IO_TIMEOUT`].
+    /// Blocks for the handshake, and for no more than ten seconds — the
+    /// timeout this puts on every network operation the publish makes,
+    /// since an unbounded one would park a pipeline thread.
     pub fn create(url: impl AsRef<str>) -> Result<Self> {
         let url = url.as_ref();
         if url.contains('\0') {
