@@ -55,6 +55,8 @@ pub enum ElementType {
     PipeWireScreenCaptureSource,
     /// Windows WASAPI audio capture source.
     WasapiCaptureSource,
+    /// Windows Media Foundation camera capture source.
+    MfCaptureSource,
     /// Multi-input audio mixer source.
     AudioMixer,
     /// One input registered with an [`ElementType::AudioMixer`], which is a

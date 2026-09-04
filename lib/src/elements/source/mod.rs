@@ -52,6 +52,8 @@ pub use capture::{
     CaptureSourceKind, PipeWireScreenCaptureOptions, PipeWireScreenCaptureSource,
     PipeWireScreenCaptureSourceError,
 };
+#[cfg(all(target_os = "windows", feature = "mf-capture"))]
+pub use capture::{MfCaptureOptions, MfCaptureSource, MfCaptureSourceError};
 #[cfg(all(target_os = "linux", feature = "pipewire-audio-capture"))]
 pub use capture::{
     PipeWireAudioCaptureOptions, PipeWireAudioCaptureSource, PipeWireAudioCaptureSourceError,

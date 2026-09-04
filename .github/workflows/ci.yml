@@ -65,7 +65,7 @@ jobs:
 
       - name: Lint (Windows backends)
         shell: pwsh
-        run: cargo clippy -p media-pp --all-targets --features d3d11,d3d12,dxgi-capture,wgc-capture,wasapi-capture,wasapi-renderer -- -D warnings
+        run: cargo clippy -p media-pp --all-targets --features d3d11,d3d12,dxgi-capture,wgc-capture,mf-capture,wasapi-capture,wasapi-renderer -- -D warnings
 
       # Linted but not run: `nvcuda.dll` is linked by name through `raw-dylib`,
       # so a test binary built with this feature will not start on a machine
@@ -95,7 +95,7 @@ jobs:
           RUSTDOCFLAGS: -D warnings
         run: |
           cargo doc -p media-pp --no-deps
-          cargo doc -p media-pp --no-deps --features d3d11,d3d12,dxgi-capture,wgc-capture,wasapi-capture,wasapi-renderer
+          cargo doc -p media-pp --no-deps --features d3d11,d3d12,dxgi-capture,wgc-capture,mf-capture,wasapi-capture,wasapi-renderer
           cargo doc -p media-pp --no-deps --features cuda
 
       # Hardware-dependent tests detect the missing device and skip with a
@@ -108,7 +108,7 @@ jobs:
 
       - name: Test (Windows backends)
         shell: pwsh
-        run: cargo test -p media-pp --features d3d11,d3d12,dxgi-capture,wgc-capture,wasapi-capture,wasapi-renderer
+        run: cargo test -p media-pp --features d3d11,d3d12,dxgi-capture,wgc-capture,mf-capture,wasapi-capture,wasapi-renderer
 
   linux:
     runs-on: ubuntu-26.04

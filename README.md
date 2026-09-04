@@ -263,7 +263,7 @@ buffers, codecs, and muxers; `Pipeline::stop` abandons buffered work immediately
 
 | Kind | Elements |
 |---|---|
-| Sources | `FileDemuxer`, `AppSource`, `RtspSource`, `TestVideoSource`, `TestAudioSource`, `DxgiCaptureSource`, `WgcCaptureSource`, `PipeWireScreenCaptureSource`, `PipeWireAudioCaptureSource`, `WasapiCaptureSource`, `AudioMixer`, `SwVideoCompositor`, `CudaVideoCompositor`, `D3d11VideoCompositor`, `WebRtcTrackSource` |
+| Sources | `FileDemuxer`, `AppSource`, `RtspSource`, `TestVideoSource`, `TestAudioSource`, `DxgiCaptureSource`, `WgcCaptureSource`, `MfCaptureSource`, `PipeWireScreenCaptureSource`, `PipeWireAudioCaptureSource`, `WasapiCaptureSource`, `AudioMixer`, `SwVideoCompositor`, `CudaVideoCompositor`, `D3d11VideoCompositor`, `WebRtcTrackSource` |
 | Filters | `SwDecoder`, `CudaDecoder`, `D3d11Decoder`, `D3d12Decoder`, `SwEncoder`, `CudaEncoder`, `D3d11VideoEncoder`, `SwAudioEncoder`, `AudioResampler`, `AudioVolume`, `SwScaler`, `SwChromaKey`, `D3d11ChromaKey`, `Pacer`, `VideoSynchronizer`, `CudaScaler`, `D3d11Scaler`, `D3d12Scaler`, `CudaUpload`, `CudaDownload`, `CudaConverter`, `D3d11Upload`, `D3d11Download`, `D3d12Upload`, `D3d12Download`, `Tee`, `ChangeGate`, `TimestampOrigin` |
 | Sinks | `FrameCounter`, `PacketCounter`, `AppSink`, `FileMuxer`, `SegmentedFileMuxer`, `HlsMuxer`, `RtspSink`, `CudaRenderer`, `D3d11Renderer`, `D3d12Renderer`, `PipeWireAudioRenderer`, `WasapiRenderer`, `OrtDetector`, `WebRtcTrackSink` |
 
@@ -339,6 +339,7 @@ The library has no default features.
 | `d3d12` | D3D12VA decode, scaling, upload/download, and rendering interfaces | Windows |
 | `dxgi-capture` | Desktop capture; also enables `d3d11` | Windows |
 | `wgc-capture` | Individual-window capture through Windows Graphics Capture; also enables `d3d11` | Windows |
+| `mf-capture` | Camera capture through Media Foundation | Windows |
 | `pipewire-audio-capture` | System-audio and microphone capture through PipeWire | Linux |
 | `pipewire-audio-renderer` | Audio playback through PipeWire | Linux |
 | `pipewire-screen-capture` | Desktop capture through xdg-desktop-portal and PipeWire | Linux |
@@ -373,7 +374,7 @@ what labels each item with the feature that enables it:
 
 ```powershell
 $env:RUSTDOCFLAGS = "--cfg docsrs"
-cargo +nightly doc -p media-pp --open --features d3d11,d3d12,dxgi-capture,wgc-capture,wasapi-capture,wasapi-renderer,webrtc
+cargo +nightly doc -p media-pp --open --features d3d11,d3d12,dxgi-capture,wgc-capture,mf-capture,wasapi-capture,wasapi-renderer,webrtc
 ```
 
 [docs.rs] builds this crate for Linux, so it documents only the

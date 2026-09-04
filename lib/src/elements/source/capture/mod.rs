@@ -11,7 +11,8 @@ mod linux;
     any(
         feature = "dxgi-capture",
         feature = "wgc-capture",
-        feature = "wasapi-capture"
+        feature = "wasapi-capture",
+        feature = "mf-capture"
     )
 ))]
 mod windows;
@@ -29,7 +30,8 @@ pub use linux::*;
     any(
         feature = "dxgi-capture",
         feature = "wgc-capture",
-        feature = "wasapi-capture"
+        feature = "wasapi-capture",
+        feature = "mf-capture"
     )
 ))]
 pub use windows::*;

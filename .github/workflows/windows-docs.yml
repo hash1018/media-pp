@@ -54,7 +54,7 @@ jobs:
           RUSTDOCFLAGS: --cfg docsrs -D warnings
           DOCS_RS: "1"
         run: |
-          cargo doc -p media-pp --no-deps --features d3d11,d3d12,dxgi-capture,wasapi-capture,wasapi-renderer,webrtc,ort
+          cargo doc -p media-pp --no-deps --features d3d11,d3d12,dxgi-capture,wgc-capture,mf-capture,wasapi-capture,wasapi-renderer,webrtc,ort
           '<meta http-equiv="refresh" content="0; url=media_pp/">' | Set-Content -Encoding utf8 target/doc/index.html
           Remove-Item target/doc/.lock -ErrorAction SilentlyContinue
 

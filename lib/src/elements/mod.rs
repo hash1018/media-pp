@@ -29,6 +29,8 @@ pub use video_format::VideoFormat;
 
 #[cfg(feature = "cuda")]
 pub use crate::platform::cuda::{CudaDevice, CudaDeviceError, CudaDriverError, CudaFrameFormat};
+#[cfg(all(target_os = "windows", feature = "mf-capture"))]
+pub use crate::platform::windows::mf::{MfCaptureFormat, MfDevice};
 #[cfg(all(
     target_os = "windows",
     any(feature = "wasapi-capture", feature = "wasapi-renderer")
@@ -134,6 +136,8 @@ pub use source::{
     D3d11VideoCompositorHandle, D3d11VideoCompositorInput, D3d11VideoCompositorInputSink,
     D3d11VideoLayerHandle,
 };
+#[cfg(all(target_os = "windows", feature = "mf-capture"))]
+pub use source::{MfCaptureOptions, MfCaptureSource, MfCaptureSourceError};
 #[cfg(all(target_os = "linux", feature = "pipewire-audio-capture"))]
 pub use source::{
     PipeWireAudioCaptureOptions, PipeWireAudioCaptureSource, PipeWireAudioCaptureSourceError,

@@ -1,17 +1,15 @@
-//! WASAPI endpoint enumeration and COM apartment management.
+//! WASAPI endpoint enumeration.
 
 use windows::{
     Win32::{
         Devices::FunctionDiscovery::PKEY_Device_FriendlyName,
-        Foundation::RPC_E_CHANGED_MODE,
         Media::Audio::{
             DEVICE_STATE_ACTIVE, IMMDevice, IMMDeviceEnumerator, MMDeviceEnumerator, eCapture,
             eConsole, eRender,
         },
         System::{
             Com::{
-                CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize,
-                STGM_READ,
+                CLSCTX_ALL, CoCreateInstance, STGM_READ,
                 StructuredStorage::{PROPVARIANT, PropVariantClear},
             },
             Variant::VT_LPWSTR,
@@ -20,6 +18,8 @@ use windows::{
     },
     core::HSTRING,
 };
+
+use super::super::com::ComApartment;
 
 /// Which direction a WASAPI endpoint flows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,39 +43,6 @@ pub struct WasapiDevice {
     /// Whether this was the default console endpoint for `kind` when it
     /// was enumerated.
     pub is_default: bool,
-}
-
-/// Balances one successful `CoInitializeEx` on the current thread.
-pub(crate) struct ComApartment {
-    uninitialize: bool,
-}
-
-impl ComApartment {
-    pub(crate) fn new() -> windows::core::Result<Self> {
-        // SAFETY: initializes COM for the current thread with no reserved
-        // pointer; the successful initialization is balanced in `Drop`.
-        let result = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
-        if result == RPC_E_CHANGED_MODE {
-            // The caller already initialized this thread as STA. COM is
-            // available and WASAPI works there; only the apartment model
-            // cannot be changed, and this call must not be balanced.
-            return Ok(Self {
-                uninitialize: false,
-            });
-        }
-        result.ok()?;
-        Ok(Self { uninitialize: true })
-    }
-}
-
-impl Drop for ComApartment {
-    fn drop(&mut self) {
-        if self.uninitialize {
-            // SAFETY: this instance records a successful `CoInitializeEx` on
-            // this same thread, so this call balances it exactly once.
-            unsafe { CoUninitialize() };
-        }
-    }
 }
 
 pub(crate) fn list_devices(

@@ -133,6 +133,13 @@ wgc-capture = [
     "windows/Win32_UI_Accessibility",
     "windows/Win32_UI_WindowsAndMessaging",
 ]
+mf-capture = [
+    "dep:windows",
+    "windows/Win32_Foundation",
+    "windows/Win32_Media_MediaFoundation",
+    "windows/Win32_System_Com",
+    "windows/Win32_System_Com_StructuredStorage",
+]
 pipewire-audio-capture = ["dep:pipewire"]
 pipewire-audio-renderer = ["dep:pipewire"]
 pipewire-screen-capture = [

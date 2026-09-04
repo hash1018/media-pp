@@ -14,6 +14,8 @@ use thiserror::Error;
 
 #[cfg(all(target_os = "windows", feature = "dxgi-capture"))]
 use crate::elements::DxgiCaptureSourceError;
+#[cfg(all(target_os = "windows", feature = "mf-capture"))]
+use crate::elements::MfCaptureSourceError;
 #[cfg(feature = "ort")]
 use crate::elements::OrtDetectorError;
 #[cfg(all(target_os = "linux", feature = "pipewire-audio-capture"))]
@@ -382,6 +384,11 @@ pub enum Error {
     #[cfg(all(target_os = "linux", feature = "pipewire-screen-capture"))]
     #[error(transparent)]
     PipeWireScreenCaptureSourceError(#[from] PipeWireScreenCaptureSourceError),
+
+    /// Media Foundation camera capture failed.
+    #[cfg(all(target_os = "windows", feature = "mf-capture"))]
+    #[error(transparent)]
+    MfCaptureSourceError(#[from] MfCaptureSourceError),
 
     /// WASAPI audio capture failed.
     #[cfg(all(target_os = "windows", feature = "wasapi-capture"))]
