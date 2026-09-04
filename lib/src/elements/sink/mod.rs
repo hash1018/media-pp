@@ -1,7 +1,7 @@
 //! Elements that terminate a branch.
 //!
 //! Muxers write to files or streams ([`FileMuxer`], [`SegmentedFileMuxer`],
-//! [`HlsMuxer`], [`RtmpMuxer`], [`RtspSink`]), renderers present to a device
+//! [`HlsMuxer`], [`RtmpMuxer`], [`RtspMuxer`]), renderers present to a device
 //! or window, and
 //! [`AppSink`] hands buffers back to the application. [`FrameCounter`] and
 //! [`PacketCounter`] are the trivial terminals that make a graph runnable
@@ -20,7 +20,6 @@ mod muxer;
 mod ort_detector;
 mod packet_counter;
 mod renderer;
-mod rtsp_sink;
 
 pub use app_sink::AppSink;
 pub use frame_counter::FrameCounter;
@@ -31,6 +30,7 @@ pub use muxer::{
     HlsMode, HlsMuxer, HlsMuxerError, HlsMuxerStreamSink, HlsOptions, HlsSegmentFormat,
 };
 pub use muxer::{RtmpMuxer, RtmpMuxerError, RtmpMuxerStreamSink};
+pub use muxer::{RtspMuxer, RtspMuxerError, RtspMuxerStreamSink};
 #[cfg(feature = "ort")]
 pub use ort_detector::{COCO_CLASS_LABELS, Detection, OrtDetector, OrtDetectorError};
 pub use packet_counter::PacketCounter;
@@ -47,4 +47,3 @@ pub use renderer::{
 };
 #[cfg(all(target_os = "windows", feature = "wasapi-renderer"))]
 pub use renderer::{WasapiRenderer, WasapiRendererError, WasapiRendererOptions};
-pub use rtsp_sink::{RtspSink, RtspSinkError};

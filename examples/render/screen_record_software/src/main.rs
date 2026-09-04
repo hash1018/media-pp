@@ -49,7 +49,7 @@ mod windows_example {
     /// `DxgiCaptureSource` never reaches `Eos` on its own (see its own docs);
     /// this just captures for a fixed duration and then `pipeline.stop()`s,
     /// which is also what finalizes the MP4's trailer — `FileMuxer` writes it on
-    /// `Stop` as well as `Eos`, unlike `RtspSink`, since an MP4 file needs a
+    /// `Stop` as well as `Eos`, unlike `RtspMuxer`, since an MP4 file needs a
     /// valid trailer to be playable at all (see `FileMuxer`'s own docs).
     ///
     ///     cargo run -p screen_record_software -- [output.mp4] [seconds]

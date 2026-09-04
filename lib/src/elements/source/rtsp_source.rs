@@ -52,7 +52,7 @@ impl Default for RtspOptions {
 }
 
 /// Demuxes a live RTSP stream — the client/receive counterpart to
-/// [`crate::elements::RtspSink`] (which publishes). One src pad per
+/// [`crate::elements::RtspMuxer`] (which publishes). One src pad per
 /// stream the server advertises, same shape as
 /// [`crate::elements::FileDemuxer`].
 ///

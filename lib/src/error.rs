@@ -24,7 +24,7 @@ use crate::elements::PipeWireAudioCaptureSourceError;
 use crate::elements::PipeWireAudioRendererError;
 #[cfg(all(target_os = "linux", feature = "pipewire-screen-capture"))]
 use crate::elements::PipeWireScreenCaptureSourceError;
-use crate::elements::RtspSinkError;
+use crate::elements::RtspMuxerError;
 #[cfg(all(target_os = "linux", feature = "v4l2-capture"))]
 use crate::elements::V4l2CaptureSourceError;
 #[cfg(all(target_os = "windows", feature = "wasapi-capture"))]
@@ -290,7 +290,7 @@ pub enum Error {
 
     /// Sending a stream to an RTSP endpoint failed.
     #[error(transparent)]
-    RtspSinkError(#[from] RtspSinkError),
+    RtspMuxerError(#[from] RtspMuxerError),
 
     /// Publishing to an RTMP server failed.
     #[error(transparent)]

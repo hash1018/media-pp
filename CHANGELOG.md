@@ -10,6 +10,48 @@ compile error with no explanation.
 
 ## Unreleased
 
+### Breaking
+
+- **`RtspSink` is now `RtspMuxer`, and carries more than one track.** It
+  could only ever publish a single stream, so video and audio could not share
+  one RTSP session — which is what the rename is about: every other muxer in
+  this crate registers its tracks and then hands out one `Sink` each, because
+  a header has to describe them all before the first packet, and this one now
+  does the same. A type that returns sinks rather than being one is a
+  `*Muxer` here.
+
+  Rename `RtspSink` -> `RtspMuxer`, `RtspSinkError` -> `RtspMuxerError`,
+  `Error::RtspSinkError` -> `Error::RtspMuxerError`, and
+  `ElementType::RtspSink` -> `ElementType::RtspMuxer`. Deliberately without a
+  compatibility alias.
+
+  The call changes shape with the name:
+
+  ```rust
+  // before
+  let sink = RtspSink::open("rtsp", url, RtspTransport::Tcp, params, time_base)?;
+
+  // after
+  let mut muxer = RtspMuxer::create(url, RtspTransport::Tcp)?;
+  muxer.add_stream("video", params, time_base)?;   // and "audio", if there is one
+  let mut sinks = muxer.open()?;                   // the RTSP handshake happens here
+  let sink = sinks.pop().expect("one stream was registered");
+  ```
+
+  The element name moves from `open` to each `add_stream`, so the tracks are
+  told apart in logs and `BusEvent`s. `create` no longer touches the network:
+  RTSP announces its streams in the header, so the
+  `ANNOUNCE`/`SETUP`/`RECORD` handshake is `open`'s to perform and to fail
+  at.
+
+  `RtspSink::url` is gone; `RtspMuxer::redacted_url` replaces it. An RTSP URL
+  can carry a password in its authority, and the old type logged the URL it
+  was given.
+
+  Unchanged: it still remuxes rather than encodes, still keeps a published
+  timeline monotonic across an upstream seek (now per track), and still
+  finalizes on `Eos` alone rather than on `Stop`.
+
 ### Added
 
 - **`RtmpMuxer` publishes a live broadcast to an RTMP server** — Twitch,

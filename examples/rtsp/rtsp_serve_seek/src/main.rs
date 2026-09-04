@@ -1,4 +1,4 @@
-//! Same Demux -> Queue -> Pacer -> RtspSink chain as `rtsp_serve`, plus a
+//! Same Demux -> Queue -> Pacer -> RtspMuxer chain as `rtsp_serve`, plus a
 //! terminal prompt (same as `seek_render`'s) that reads timestamps and calls
 //! `Pipeline::seek` with them while the stream is live — lets a viewer
 //! jump around a live-served RTSP stream instead of only watching it play
@@ -23,7 +23,8 @@ mod example {
     use media_pp::{
         Error,
         bus::BusEvent,
-        elements::{FileDemuxer, Pacer, RtspSink, RtspTransport},
+        element::ElementType,
+        elements::{FileDemuxer, Pacer, RtspMuxer, RtspTransport},
         pipeline::{Pipeline, SeekMode},
     };
 
@@ -49,24 +50,62 @@ mod example {
             .iter()
             .find(|s| s.kind == media::Type::Video)
             .ok_or_else(|| Error::Other("no video stream in file".into()))?;
-        let params = source
-            .stream_parameters(video.index)
+        let video_index = video.index;
+        let video_params = source
+            .stream_parameters(video_index)
             .ok_or_else(|| Error::Other("stream disappeared".into()))?;
-        let time_base = source
-            .stream_time_base(video.index)
+        let video_time_base = source
+            .stream_time_base(video_index)
             .ok_or_else(|| Error::Other("stream disappeared".into()))?;
+
+        // Optional, as in `rtsp_serve`. Two tracks are also what makes the
+        // seek below worth watching here: each rebases its own published
+        // timestamps onto its own last ones.
+        let audio_track = match streams.iter().find(|s| s.kind == media::Type::Audio) {
+            Some(audio) => {
+                let params = source
+                    .stream_parameters(audio.index)
+                    .ok_or_else(|| Error::Other("stream disappeared".into()))?;
+                let time_base = source
+                    .stream_time_base(audio.index)
+                    .ok_or_else(|| Error::Other("stream disappeared".into()))?;
+                Some((audio.index, params, time_base))
+            }
+            None => None,
+        };
+        let tracks = 1 + usize::from(audio_track.is_some());
 
         println!("publishing to {url} (the RTSP server must already be running) ...");
 
         let pipeline = Pipeline::new("rtsp-publish-seek", source, |source, ctx| {
-            let sink = RtspSink::open("rtsp", url.clone(), RtspTransport::Tcp, params, time_base)?;
-            let pacer = Pacer::new("pacer", time_base)?;
+            let mut muxer = RtspMuxer::create(&url, RtspTransport::Tcp)?;
+            muxer.add_stream("video", video_params, video_time_base)?;
+            let audio = match audio_track {
+                Some((index, params, time_base)) => {
+                    muxer.add_stream("audio", params, time_base)?;
+                    Some((index, time_base))
+                }
+                None => None,
+            };
+            let mut sinks = muxer.open()?;
+            let audio_sink = audio.map(|_| sinks.pop().expect("audio was registered second"));
+            let video_sink = sinks.pop().expect("video was registered first");
+
             let branch = ctx
                 .branch()
-                .queue("packets", 32) // pacer sleeps on its own thread; let demux run ahead into this
-                .pipe(pacer)
-                .to(Box::new(sink))?;
-            ctx.attach(source, video.index, branch)?;
+                .queue("video-packets", 32) // pacer sleeps on its own thread; let demux run ahead into this
+                .pipe(Pacer::new("video-pacer", video_time_base)?)
+                .to(video_sink)?;
+            ctx.attach(source, video_index, branch)?;
+
+            if let (Some((index, time_base)), Some(audio_sink)) = (audio, audio_sink) {
+                let branch = ctx
+                    .branch()
+                    .queue("audio-packets", 32)
+                    .pipe(Pacer::new("audio-pacer", time_base)?)
+                    .to(audio_sink)?;
+                ctx.attach(source, index, branch)?;
+            }
             Ok(())
         })?;
 
@@ -88,11 +127,21 @@ mod example {
         // Errors no longer end the pipeline on their own (see `BusEvent`'s
         // docs) — watch for one here and `stop()`, or this would just keep
         // trying to publish into a broken server connection forever
-        // instead of exiting. Single video stream, so `Eos` calling `stop()`
-        // is a harmless no-op too.
+        // instead of exiting.
+        //
+        // Natural completion waits for *every* track, not the first: the
+        // session's trailer is only written once all of them report `Eos`,
+        // so stopping on whichever finishes first would cut the other off.
+        let mut finished = 0;
         for event in pipeline.bus().iter() {
             match &event {
-                BusEvent::Eos { name, .. } => println!("[{name}] eos"),
+                BusEvent::Eos {
+                    name,
+                    element_type: ElementType::RtspMuxer,
+                } => {
+                    finished += 1;
+                    println!("[{name}] eos ({finished}/{tracks})");
+                }
                 BusEvent::Error { name, error, .. } => eprintln!("[{name}] error: {error}"),
                 BusEvent::Dropped { name, .. } => {
                     eprintln!("[{name}] dropped a buffer (queue full)")
@@ -107,7 +156,7 @@ mod example {
                 // on the events above.
                 _ => {}
             }
-            if matches!(event, BusEvent::Eos { .. } | BusEvent::Error { .. }) {
+            if finished == tracks || matches!(event, BusEvent::Error { .. }) {
                 pipeline.stop();
             }
         }

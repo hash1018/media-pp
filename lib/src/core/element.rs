@@ -152,8 +152,9 @@ pub enum ElementType {
     PipeWireAudioRenderer,
     /// Windows WASAPI audio renderer sink.
     WasapiRenderer,
-    /// RTSP publishing sink.
-    RtspSink,
+    /// RTSP publishing muxer sink, one or more tracks to an external
+    /// server.
+    RtspMuxer,
     /// Application callback or channel sink.
     AppSink,
     /// ONNX Runtime object-detection sink.

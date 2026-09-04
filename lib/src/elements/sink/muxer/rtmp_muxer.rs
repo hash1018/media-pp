@@ -90,9 +90,8 @@ struct PendingStream {
 /// A broadcast is video *and* audio in one FLV container, so the header has
 /// to describe both before the first packet goes out — the same two-phase
 /// constraint `FileMuxer` has, and the reason this is a builder that returns
-/// sinks rather than a `Sink` itself. Contrast
-/// [`RtspSink`](crate::elements::RtspSink), which publishes a single stream
-/// and so can be one.
+/// sinks rather than a `Sink` itself. Every muxer in this crate is shaped
+/// that way, including [`RtspMuxer`](crate::elements::RtspMuxer).
 ///
 /// It is a remuxer: incoming buffers are compressed
 /// [`MediaBuffer::Packet`] values, and nothing here encodes. FLV carries a

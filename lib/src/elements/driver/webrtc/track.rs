@@ -329,7 +329,7 @@ impl WebRtcHandle {
 
 /// One outbound track. A plain [`Sink`] — no bespoke push API, it links
 /// into a [`crate::pipeline::ChainBuilder`] exactly like
-/// [`crate::elements::RtspSink`] or any other terminal sink.
+/// [`crate::elements::RtspMuxer`] or any other terminal sink.
 /// `consume()` only ever hands off to `WebRtcPeer::run`'s own thread via a
 /// channel send; the actual str0m write happens over there.
 ///
@@ -651,7 +651,7 @@ impl Sink for WebRtcTrackSink {
     }
 
     fn control(&mut self, _msg: ControlMsg) -> Result<()> {
-        // Terminal, same as AppSink/RtspSink: nothing buffered or
+        // Terminal, same as AppSink/RtspMuxer: nothing buffered or
         // downstream to flush/forward for any ControlMsg.
         Ok(())
     }
