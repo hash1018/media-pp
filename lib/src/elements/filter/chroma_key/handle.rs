@@ -1,54 +1,58 @@
 //! Runtime control shared by both chroma-key backends.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use arc_swap::ArcSwap;
 
 use super::options::ChromaKeyOptions;
 
 /// The live settings one chroma-key element reads and its
 /// [`ChromaKeyHandle`] writes.
 ///
-/// One lock around the whole [`ChromaKeyOptions`] rather than an atomic per
+/// One slot holding the whole [`ChromaKeyOptions`] rather than an atomic per
 /// field, which is where this differs from [`AudioVolume`]'s control block:
 /// gain and mute are independent, but a key color, its threshold, and its
 /// feather width are one setting in three parts, and a frame keyed with a
 /// new color against the old threshold is a frame nobody asked for.
 ///
-/// The lock costs nothing where it is taken. An element reads it once per
-/// frame — not once per pixel — because both backends rebuild their keying
-/// parameters per frame anyway: the D3D11 one writes a constant buffer
-/// before each draw, and the software one passes the values into its own
-/// per-pixel loop.
+/// An [`ArcSwap`] rather than a `Mutex` around the same struct. Both give
+/// that group consistency, but the reader here is a pipeline thread with a
+/// frame to finish and the writer is whatever drives the UI, so a reader
+/// that cannot be made to wait for a writer at all is worth the one
+/// allocation a write costs — and a write is somebody moving a slider. It
+/// is also the shape this crate already reaches for when a value is
+/// replaced wholesale on one thread and read on another; see
+/// `CudaVideoCompositor`'s latest-frame slot.
+///
+/// Either way the read is once per frame, not once per pixel: both backends
+/// rebuild their keying parameters per frame anyway — the D3D11 one writes a
+/// constant buffer before each draw, the CUDA one passes them as kernel
+/// arguments, and the software one hands them to its own per-pixel loop.
 ///
 /// [`AudioVolume`]: crate::elements::AudioVolume
 #[derive(Debug)]
 pub(super) struct ChromaKeyControl {
-    options: Mutex<ChromaKeyOptions>,
+    options: ArcSwap<ChromaKeyOptions>,
 }
 
 impl ChromaKeyControl {
     pub(super) fn new(options: ChromaKeyOptions) -> Self {
         Self {
-            options: Mutex::new(options),
+            options: ArcSwap::from_pointee(options),
         }
     }
 
     /// A consistent copy of every setting, for one frame to be keyed with.
     ///
-    /// Take this once and key from the copy. Reading it again mid-frame
-    /// could pick up a change made in between, which is the one thing the
-    /// single lock is here to prevent.
+    /// Take this once and key from the copy. Loading it again mid-frame
+    /// could pick up a change made in between, which is the one thing
+    /// keeping the settings in a single slot is here to prevent.
     pub(super) fn get(&self) -> ChromaKeyOptions {
-        *self
-            .options
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        **self.options.load()
     }
 
     fn set(&self, options: ChromaKeyOptions) {
-        *self
-            .options
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = options;
+        self.options.store(Arc::new(options));
     }
 }
 
@@ -80,7 +84,7 @@ impl ChromaKeyHandle {
     ///
     /// All of them together rather than one method per field: a caller
     /// changing only the threshold reads [`ChromaKeyHandle::options`],
-    /// adjusts, and writes back, which is one lock instead of three and
+    /// adjusts, and writes back, which is one store instead of three and
     /// leaves no window where half a change is live.
     ///
     /// Values are not validated, exactly as they are not at construction:
