@@ -1,6 +1,7 @@
 //! Runtime control shared by both chroma-key backends.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use arc_swap::ArcSwap;
 
@@ -30,16 +31,37 @@ use super::options::ChromaKeyOptions;
 /// arguments, and the software one hands them to its own per-pixel loop.
 ///
 /// [`AudioVolume`]: crate::elements::AudioVolume
+/// Whether to key at all, kept apart from the settings rather than inside
+/// them.
+///
+/// `ChromaKeyOptions` says *how* to key and this says *whether* to, which
+/// is the same split [`AudioVolume`] has between its gain and its mute:
+/// independent of each other, and turning one off must not cost the other
+/// its value. Keeping it out of the settings also means no construction
+/// site can produce a chroma key that silently does nothing by forgetting
+/// a field.
 #[derive(Debug)]
 pub(super) struct ChromaKeyControl {
     options: ArcSwap<ChromaKeyOptions>,
+    enabled: AtomicBool,
 }
 
 impl ChromaKeyControl {
     pub(super) fn new(options: ChromaKeyOptions) -> Self {
         Self {
             options: ArcSwap::from_pointee(options),
+            // An element somebody built keys; nothing else would be worth
+            // putting in a graph.
+            enabled: AtomicBool::new(true),
         }
+    }
+
+    pub(super) fn enabled(&self) -> bool {
+        self.enabled.load(Ordering::Acquire)
+    }
+
+    fn set_enabled(&self, enabled: bool) {
+        self.enabled.store(enabled, Ordering::Release);
     }
 
     /// A consistent copy of every setting, for one frame to be keyed with.
@@ -99,6 +121,26 @@ impl ChromaKeyHandle {
     /// back through [`ChromaKeyHandle::set_options`].
     pub fn options(&self) -> ChromaKeyOptions {
         self.control.get()
+    }
+
+    /// Turns keying on or off without disturbing the settings, taking
+    /// effect on the next frame.
+    ///
+    /// A disabled element is still in the graph and still passes frames —
+    /// it hands each one straight through untouched, which costs nothing at
+    /// all. That is the point: a checkbox beside a filter has to be cheap,
+    /// and rebuilding the branch to take the element out would mean
+    /// reopening whatever produces its frames.
+    ///
+    /// Enabled is what a newly built element is.
+    pub fn set_enabled(&self, enabled: bool) {
+        self.control.set_enabled(enabled);
+    }
+
+    /// Whether keying is on. See [`ChromaKeyHandle::set_enabled`] for what
+    /// off means.
+    pub fn enabled(&self) -> bool {
+        self.control.enabled()
     }
 }
 

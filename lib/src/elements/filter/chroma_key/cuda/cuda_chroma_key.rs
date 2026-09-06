@@ -151,6 +151,10 @@ pub struct CudaChromaKey {
     /// see `refresh_options`.
     options: ChromaKeyOptions,
     control: Arc<ChromaKeyControl>,
+    /// Whether this element is keying at all, refreshed alongside
+    /// `options`. A disabled one hands every frame straight through.
+    enabled: bool,
+
     pad: SrcPad,
     /// Reuses only the small CPU-side `AVFrame` wrapper; the CUDA surface
     /// itself comes from `hw_frames_ctx`'s own pool. Same split as
@@ -226,6 +230,7 @@ impl CudaChromaKey {
             height,
             options,
             control,
+            enabled: true,
             pad,
             repeated: RepeatedOutput::new(),
             pool,
@@ -250,6 +255,17 @@ impl CudaChromaKey {
                 options.smoothing
             );
             self.options = options;
+            self.repeated.clear();
+        }
+        let enabled = self.control.enabled();
+        if enabled != self.enabled {
+            pp_debug!(self, "keying {}", if enabled { "on" } else { "off" });
+            self.enabled = enabled;
+            // Not for correctness: a toggle does not change how a frame
+            // would be keyed, so what is held would still be the right
+            // answer when keying resumes. It is the pooled output the cache
+            // has checked out, which a disabled element cannot use and
+            // would otherwise hold for as long as the filter stays off.
             self.repeated.clear();
         }
     }
@@ -419,6 +435,10 @@ impl Sink for CudaChromaKey {
             // see [`PerFrameTransform`].
             MediaBuffer::Video(frame) => {
                 self.refresh_options();
+                if !self.enabled {
+                    // Straight through: the same picture, not a copy of it.
+                    return self.pad.push(MediaBuffer::Video(frame));
+                }
                 let keyed = self.transform(&frame)?;
                 self.pad.push(MediaBuffer::Video(keyed))
             }

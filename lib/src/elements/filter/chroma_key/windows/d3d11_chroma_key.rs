@@ -230,6 +230,10 @@ pub struct D3d11ChromaKey {
     /// see `refresh_options`.
     options: ChromaKeyOptions,
     control: Arc<ChromaKeyControl>,
+    /// Whether this element is keying at all, refreshed alongside
+    /// `options`. A disabled one hands every frame straight through.
+    enabled: bool,
+
     vertex_shader: ID3D11VertexShader,
     pixel_shader: ID3D11PixelShader,
     sampler: ID3D11SamplerState,
@@ -337,6 +341,7 @@ impl D3d11ChromaKey {
             context,
             options,
             control,
+            enabled: true,
             vertex_shader,
             pixel_shader,
             sampler,
@@ -367,6 +372,17 @@ impl D3d11ChromaKey {
                 options.smoothing
             );
             self.options = options;
+            self.repeated.clear();
+        }
+        let enabled = self.control.enabled();
+        if enabled != self.enabled {
+            pp_debug!(self, "keying {}", if enabled { "on" } else { "off" });
+            self.enabled = enabled;
+            // Not for correctness: a toggle does not change how a frame
+            // would be keyed, so what is held would still be the right
+            // answer when keying resumes. It is the pooled output the cache
+            // has checked out, which a disabled element cannot use and
+            // would otherwise hold for as long as the filter stays off.
             self.repeated.clear();
         }
     }
@@ -652,6 +668,10 @@ impl Sink for D3d11ChromaKey {
             // see [`PerFrameTransform`], which is where that is decided.
             MediaBuffer::Video(frame) => {
                 self.refresh_options();
+                if !self.enabled {
+                    // Straight through: the same picture, not a copy of it.
+                    return self.pad.push(MediaBuffer::Video(frame));
+                }
                 let keyed = self.transform(&frame)?;
                 self.pad.push(MediaBuffer::Video(keyed))
             }

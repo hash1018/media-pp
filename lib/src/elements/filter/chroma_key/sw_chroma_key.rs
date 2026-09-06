@@ -68,6 +68,10 @@ pub struct SwChromaKey {
     /// see `refresh_options`.
     options: ChromaKeyOptions,
     control: Arc<ChromaKeyControl>,
+    /// Whether this element is keying at all, refreshed alongside
+    /// `options`. A disabled one hands every frame straight through.
+    enabled: bool,
+
     /// `None` until the first frame arrives, then rebuilt only if a later
     /// frame's dimensions differ — mirrors `SwScaler`'s lazily-built
     /// scaling `context`, except what's cached here is just the output
@@ -116,6 +120,7 @@ impl SwChromaKey {
             pp_log,
             options,
             control,
+            enabled: true,
             dims: None,
             pool: None,
             repeated: RepeatedOutput::new(),
@@ -141,6 +146,17 @@ impl SwChromaKey {
                 options.smoothing
             );
             self.options = options;
+            self.repeated.clear();
+        }
+        let enabled = self.control.enabled();
+        if enabled != self.enabled {
+            pp_debug!(self, "keying {}", if enabled { "on" } else { "off" });
+            self.enabled = enabled;
+            // Not for correctness: a toggle does not change how a frame
+            // would be keyed, so what is held would still be the right
+            // answer when keying resumes. It is the pooled output the cache
+            // has checked out, which a disabled element cannot use and
+            // would otherwise hold for as long as the filter stays off.
             self.repeated.clear();
         }
     }
@@ -199,6 +215,10 @@ impl Sink for SwChromaKey {
             // decided.
             MediaBuffer::Video(frame) => {
                 self.refresh_options();
+                if !self.enabled {
+                    // Straight through: the same picture, not a copy of it.
+                    return self.pad.push(MediaBuffer::Video(frame));
+                }
                 let keyed = self.transform(&frame)?;
                 self.pad.push(MediaBuffer::Video(keyed))
             }
@@ -638,6 +658,69 @@ mod tests {
         );
     }
 
+    /// Disabled is not "keyed with nothing" — the picture that arrived is
+    /// the picture that leaves, the same one, with no pool slot spent and no
+    /// pass over any pixel.
+    #[test]
+    fn a_disabled_key_hands_the_picture_straight_through() {
+        let (mut key, handle, received) = new_chroma_key(default_options());
+        handle.set_enabled(false);
+
+        let source = bgra_frame(2, 2, |_, _| [0, 255, 0, 255]);
+        let MediaBuffer::Video(input) = &source else {
+            panic!("expected a Video buffer");
+        };
+        let input_id = crate::buffer::picture_id(input);
+
+        key.consume(source.clone()).expect("pass the frame through");
+
+        let received = received.lock().unwrap();
+        let MediaBuffer::Video(output) = &received[0] else {
+            panic!("expected a Video buffer");
+        };
+        assert_eq!(
+            crate::buffer::picture_id(output),
+            input_id,
+            "a disabled key must forward its input, not a copy of it"
+        );
+        assert_eq!(
+            pixel(output, 0, 0),
+            [0, 255, 0, 255],
+            "and must not have touched the alpha it would have keyed"
+        );
+    }
+
+    /// A repeat arriving while keying is off is passed through unkeyed
+    /// rather than answered out of the keyed frame still in hand — and
+    /// keying resumes on the next one once it is back on.
+    ///
+    /// Turning it off mid-stream is the case worth pinning: a still capture
+    /// re-emits one picture forever, so the frame after the checkbox is
+    /// almost always a repeat of the frame before it.
+    #[test]
+    fn a_repeat_follows_the_checkbox_rather_than_the_cache() {
+        let (mut key, handle, received) = new_chroma_key(default_options());
+        let source = bgra_frame(2, 2, |_, _| [0, 255, 0, 255]);
+
+        key.consume(source.clone()).expect("key the first frame");
+        handle.set_enabled(false);
+        key.consume(repeat_of(&source, 200))
+            .expect("pass the repeat through");
+        handle.set_enabled(true);
+        key.consume(repeat_of(&source, 300))
+            .expect("key the repeat again");
+
+        let received = received.lock().unwrap();
+        let alpha = |index: usize| {
+            let MediaBuffer::Video(frame) = &received[index] else {
+                panic!("expected a Video buffer");
+            };
+            pixel(frame, 0, 0)[3]
+        };
+        assert_eq!(alpha(0), 0, "keyed while it was on");
+        assert_eq!(alpha(1), 255, "passed through while it was off");
+        assert_eq!(alpha(2), 0, "and keyed again once it was back on");
+    }
     #[test]
     fn eos_is_forwarded() {
         let (mut key, _handle, received) = new_chroma_key(default_options());

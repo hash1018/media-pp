@@ -37,6 +37,14 @@ compile error with no explanation.
   handle.set_options(options);
   ```
 
+  `ChromaKeyHandle::set_enabled` turns keying off without disturbing the
+  settings, and a disabled element hands each frame straight through — the
+  same picture, not a copy. It is kept out of `ChromaKeyOptions` on purpose:
+  that struct says how to key and this says whether to, the split
+  `AudioVolume` has between its gain and its mute. It also means no
+  construction site can produce a chroma key that silently does nothing by
+  forgetting a field.
+
   `ChromaKeyOptions` now derives `PartialEq`, which is how each element
   notices a change and retires the frame its repeat cache was holding. That
   cache is why this is not purely additive: a picture keyed green is not an
