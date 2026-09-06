@@ -817,7 +817,7 @@ mod d3d11 {
         let key_device = device.clone();
         let key_context = context.clone();
         let output_pipeline = Pipeline::new("soak-d3d11-key", compositor, move |source, ctx| {
-            let key = D3d11ChromaKey::new(
+            let (key, _key_handle) = D3d11ChromaKey::new(
                 "key",
                 &key_device,
                 key_context,

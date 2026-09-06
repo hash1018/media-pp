@@ -100,7 +100,7 @@ fn four_d3d11_elements_share_one_device_across_queue_boundaries() {
             return;
         }
     };
-    let chroma_key = D3d11ChromaKey::new(
+    let (chroma_key, _key_handle) = D3d11ChromaKey::new(
         "d3d11-key",
         &device,
         context.clone(),

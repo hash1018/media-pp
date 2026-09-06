@@ -141,7 +141,10 @@ mod windows_example {
         let (green_screen, green_screen_handle) = AppSource::new("green-screen", 8);
         let keyed_pipeline = Pipeline::new("keyed-foreground", green_screen, |source, ctx| {
             let upload = D3d11Upload::new("upload", gpu.device(), SHOT_WIDTH, SHOT_HEIGHT);
-            let key = D3d11ChromaKey::new(
+            // The handle is what retunes the key while it runs, without
+            // rebuilding the branch — this example sets the threshold once
+            // and keeps it, so it has no use for one.
+            let (key, _key_handle) = D3d11ChromaKey::new(
                 "key",
                 gpu.device(),
                 gpu.context(),

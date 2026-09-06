@@ -3,7 +3,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use crate::pp_log::{PpLog, pp_error, pp_info};
+use crate::pp_log::{PpLog, pp_debug, pp_error, pp_info};
 use ffmpeg_next as ffmpeg;
 use thiserror::Error as ThisError;
 use windows::{
@@ -15,6 +15,7 @@ use windows::{
     core::{Interface, s},
 };
 
+use super::super::handle::{ChromaKeyControl, ChromaKeyHandle};
 use super::super::options::ChromaKeyOptions;
 use crate::{
     buffer::MediaBuffer,
@@ -237,9 +238,11 @@ pub struct D3d11ChromaKey {
     name: Arc<str>,
     device: ID3D11Device,
     context: Arc<Mutex<ID3D11DeviceContext>>,
-    key_color: Color,
-    threshold: f32,
-    smoothing: f32,
+    /// What this element is keying by right now, refreshed from `control`
+    /// once per frame. Kept alongside it so a change can be recognized —
+    /// see `refresh_options`.
+    options: ChromaKeyOptions,
+    control: Arc<ChromaKeyControl>,
     vertex_shader: ID3D11VertexShader,
     pixel_shader: ID3D11PixelShader,
     sampler: ID3D11SamplerState,
@@ -255,8 +258,14 @@ pub struct D3d11ChromaKey {
     /// The last keyed frame and the texture it was made from, so a producer
     /// that re-emits an unchanged picture is answered with it instead of
     /// another output texture and another shader pass — see
-    /// [`RepeatedOutput`]. The key settings are fixed at construction, so
-    /// the input is the whole of what the result depends on.
+    /// [`RepeatedOutput`].
+    ///
+    /// The input is not the whole of what the result depends on: the key
+    /// settings can change under a [`ChromaKeyHandle`], and a texture keyed
+    /// green is not an answer to the same texture once the key turned blue.
+    /// `refresh_options` forgets what is held here when that happens, which
+    /// is what `PerFrameTransform`'s own docs mean by an element with a
+    /// runtime setting comparing its own state.
     repeated: RepeatedOutput,
 }
 
@@ -289,7 +298,7 @@ impl D3d11ChromaKey {
         device: &ID3D11Device,
         context: Arc<Mutex<ID3D11DeviceContext>>,
         options: ChromaKeyOptions,
-    ) -> std::result::Result<Self, D3d11ChromaKeyError> {
+    ) -> std::result::Result<(Self, ChromaKeyHandle), D3d11ChromaKeyError> {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::D3d11ChromaKey, &name, None);
         // This element sits behind a `Queue` more often than not, so the
@@ -332,14 +341,15 @@ impl D3d11ChromaKey {
             options.threshold,
             options.smoothing
         );
-        Ok(Self {
+        let control = Arc::new(ChromaKeyControl::new(options));
+        let handle = ChromaKeyHandle::new(control.clone());
+        let element = Self {
             name,
             pp_log,
             device: device.clone(),
             context,
-            key_color,
-            threshold: options.threshold,
-            smoothing: options.smoothing,
+            options,
+            control,
             vertex_shader,
             pixel_shader,
             sampler,
@@ -349,7 +359,29 @@ impl D3d11ChromaKey {
             pad,
             pool,
             repeated: RepeatedOutput::new(),
-        })
+        };
+        Ok((element, handle))
+    }
+
+    /// Picks up whatever the handle has been set to, and forgets the cached
+    /// keyed texture if it was made with something else.
+    ///
+    /// Called once per frame, before keying. Reading the settings again
+    /// mid-frame could pick up a change made in between, which is the one
+    /// thing [`ChromaKeyControl`]'s single lock exists to prevent.
+    fn refresh_options(&mut self) {
+        let options = self.control.get();
+        if options != self.options {
+            pp_debug!(
+                self,
+                "retuned: key_color={:?}, threshold={}, smoothing={}",
+                options.method.key_color(),
+                options.threshold,
+                options.smoothing
+            );
+            self.options = options;
+            self.repeated.clear();
+        }
     }
 
     /// Rejects anything this element cannot key, so a bad frame fails here
@@ -485,9 +517,9 @@ impl D3d11ChromaKey {
         }
 
         let constants = ChromaKeyConstants::new(
-            self.key_color,
-            self.threshold,
-            self.smoothing,
+            self.options.method.key_color(),
+            self.options.threshold,
+            self.options.smoothing,
             input.uv_scale,
         );
         let viewport = D3D11_VIEWPORT {
@@ -632,6 +664,7 @@ impl Sink for D3d11ChromaKey {
             // and keying them again produces the surface already in hand —
             // see [`PerFrameTransform`], which is where that is decided.
             MediaBuffer::Video(frame) => {
+                self.refresh_options();
                 let keyed = self.transform(&frame)?;
                 self.pad.push(MediaBuffer::Video(keyed))
             }
@@ -969,7 +1002,7 @@ mod tests {
         };
         let source = frame(bgra_texture(&device, 4, 4, [0, 255, 0, 255], 1), 4, 4, 100);
         let repeat = repeat_of(&source, 200);
-        let mut key = D3d11ChromaKey::new("key", &device, context, default_options())
+        let (mut key, _) = D3d11ChromaKey::new("key", &device, context, default_options())
             .expect("D3d11ChromaKey::new should succeed");
         let received = capture(&mut key);
 
@@ -993,6 +1026,39 @@ mod tests {
         );
     }
 
+    /// The GPU half of `SwChromaKey`'s test of the same name: a cache
+    /// filled under the old key is not an answer to a repeat that arrives
+    /// after the key moved. For a still screen capture, which re-emits the
+    /// same texture forever, answering out of it would leave the picture
+    /// frozen at the old settings with nothing to ever dislodge it.
+    #[test]
+    fn a_repeat_is_keyed_again_after_a_retune() {
+        let Some((device, context)) = try_device() else {
+            return;
+        };
+        let source = frame(bgra_texture(&device, 4, 4, [0, 255, 0, 255], 1), 4, 4, 100);
+        let repeat = repeat_of(&source, 200);
+        let (mut key, handle) = D3d11ChromaKey::new("key", &device, context, default_options())
+            .expect("D3d11ChromaKey::new should succeed");
+        let received = capture(&mut key);
+
+        key.consume(source).expect("key the first frame");
+
+        let mut retuned = handle.options();
+        retuned.method = ChromaKeyMethod::Blue;
+        handle.set_options(retuned);
+
+        key.consume(repeat).expect("key the repeat");
+
+        let received = received.lock().unwrap();
+        assert_eq!(received.len(), 2, "every tick still produces a frame");
+        assert_ne!(
+            texture_of(&received[1]),
+            texture_of(&received[0]),
+            "a retune must retire the texture the cache was holding"
+        );
+    }
+
     /// Keys one flat `color` frame and hands back the downloaded BGRA
     /// result, so a test can assert on actual pixels rather than on the
     /// fact that a `Draw` returned without complaint.
@@ -1002,7 +1068,7 @@ mod tests {
         options: ChromaKeyOptions,
         color: [u8; 4],
     ) -> [u8; 4] {
-        let mut key = D3d11ChromaKey::new("key", device, context.clone(), options)
+        let (mut key, _) = D3d11ChromaKey::new("key", device, context.clone(), options)
             .expect("D3d11ChromaKey::new should succeed");
         let mut download = D3d11Download::new("download", device, context.clone(), 8, 8)
             .expect("D3d11Download::new should succeed");
@@ -1120,7 +1186,7 @@ mod tests {
         source_frame.set_color_space(ffmpeg::color::Space::RGB);
         source_frame.set_color_range(ffmpeg::color::Range::JPEG);
 
-        let mut key = D3d11ChromaKey::new("key", &device, context, default_options())
+        let (mut key, _) = D3d11ChromaKey::new("key", &device, context, default_options())
             .expect("D3d11ChromaKey::new should succeed");
         let received = capture(&mut key);
         key.consume(source).expect("keying must succeed");
@@ -1160,7 +1226,7 @@ mod tests {
         // the uv_scale did not shrink the picture into a corner.
         let padded = bgra_texture(&device, 16, 16, [0, 255, 0, 255], 1);
 
-        let mut key = D3d11ChromaKey::new("key", &device, context.clone(), default_options())
+        let (mut key, _) = D3d11ChromaKey::new("key", &device, context.clone(), default_options())
             .expect("D3d11ChromaKey::new should succeed");
         let mut download = D3d11Download::new("download", &device, context, 8, 8)
             .expect("D3d11Download::new should succeed");
@@ -1201,7 +1267,7 @@ mod tests {
         // fully opaque rather than keyed.
         let array = bgra_texture(&device, 8, 8, [0, 255, 0, 255], 2);
 
-        let mut key = D3d11ChromaKey::new("key", &device, context.clone(), default_options())
+        let (mut key, _) = D3d11ChromaKey::new("key", &device, context.clone(), default_options())
             .expect("D3d11ChromaKey::new should succeed");
         let mut download = D3d11Download::new("download", &device, context, 8, 8)
             .expect("D3d11Download::new should succeed");
@@ -1226,7 +1292,7 @@ mod tests {
         let Some((device, context)) = try_device() else {
             return;
         };
-        let mut key = D3d11ChromaKey::new("key", &device, context, default_options())
+        let (mut key, _) = D3d11ChromaKey::new("key", &device, context, default_options())
             .expect("D3d11ChromaKey::new should succeed");
         let pool = UnboundObjectPool::new(
             0,
@@ -1281,7 +1347,7 @@ mod tests {
         }
         let texture = texture.expect("CreateTexture2D succeeded without producing a texture");
 
-        let mut key = D3d11ChromaKey::new("key", &device, context, default_options())
+        let (mut key, _) = D3d11ChromaKey::new("key", &device, context, default_options())
             .expect("D3d11ChromaKey::new should succeed");
         let error = key
             .consume(frame(texture, 16, 16, 1))
@@ -1330,7 +1396,7 @@ mod tests {
         }
         let texture = texture.expect("CreateTexture2D succeeded without producing a texture");
 
-        let mut key = D3d11ChromaKey::new("key", &device, context, default_options())
+        let (mut key, _) = D3d11ChromaKey::new("key", &device, context, default_options())
             .expect("D3d11ChromaKey::new should succeed");
         let error = key
             .consume(frame(texture, 8, 8, 1))
@@ -1358,7 +1424,7 @@ mod tests {
         };
         let foreign = bgra_texture(&other_device, 8, 8, [0, 255, 0, 255], 1);
 
-        let mut key = D3d11ChromaKey::new("key", &device, context, default_options())
+        let (mut key, _) = D3d11ChromaKey::new("key", &device, context, default_options())
             .expect("D3d11ChromaKey::new should succeed");
         let error = key
             .consume(frame(foreign, 8, 8, 1))
@@ -1394,7 +1460,7 @@ mod tests {
         let Some((device, context)) = try_device() else {
             return;
         };
-        let mut key = D3d11ChromaKey::new("key", &device, context, default_options())
+        let (mut key, _) = D3d11ChromaKey::new("key", &device, context, default_options())
             .expect("D3d11ChromaKey::new should succeed");
 
         let error = key
@@ -1513,7 +1579,7 @@ mod tests {
             return;
         };
         let texture = bgra_texture(&device, 64, 64, [0, 255, 0, 255], 1);
-        let mut key = D3d11ChromaKey::new("key", &device, context, default_options())
+        let (mut key, _) = D3d11ChromaKey::new("key", &device, context, default_options())
             .expect("D3d11ChromaKey::new should succeed");
         let received = capture(&mut key);
 

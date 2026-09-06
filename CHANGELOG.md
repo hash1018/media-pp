@@ -12,6 +12,38 @@ compile error with no explanation.
 
 ### Breaking
 
+- **Both chroma keys hand out a `ChromaKeyHandle`, so their constructors
+  return a tuple.** Keying is tuned by eye, and rebuilding the element for
+  each nudge of a threshold means reopening whatever produces its frames —
+  a visible stall for a camera, a portal dialog for a Wayland capture.
+
+  ```rust
+  // before
+  let key = SwChromaKey::new("key", options);
+  let key = D3d11ChromaKey::new("key", &device, context, options)?;
+
+  // after
+  let (key, handle) = SwChromaKey::new("key", options);
+  let (key, handle) = D3d11ChromaKey::new("key", &device, context, options)?;
+  ```
+
+  Discard the handle with `let (key, _) = ...` where the settings never
+  change. To retune, read, adjust and write back — one lock, and no window
+  where half a change is live:
+
+  ```rust
+  let mut options = handle.options();
+  options.threshold = 0.25;
+  handle.set_options(options);
+  ```
+
+  `ChromaKeyOptions` now derives `PartialEq`, which is how each element
+  notices a change and retires the frame its repeat cache was holding. That
+  cache is why this is not purely additive: a picture keyed green is not an
+  answer to the same picture once the key turned blue, and a still capture
+  re-emitting one texture forever would otherwise stay frozen at the old
+  settings with nothing to dislodge it.
+
 - **`RtspSink` is now `RtspMuxer`, and carries more than one track.** It
   could only ever publish a single stream, so video and audio could not share
   one RTSP session — which is what the rename is about: every other muxer in

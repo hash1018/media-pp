@@ -116,7 +116,7 @@ mod example {
         let (foreground_source, foreground_app_handle) = AppSource::new("foreground-source", 4);
         let foreground_pipeline =
             Pipeline::new("foreground-input", foreground_source, |source, ctx| {
-                let chroma_key = SwChromaKey::new(
+                let (chroma_key, _key_handle) = SwChromaKey::new(
                     "green-screen",
                     ChromaKeyOptions {
                         method: ChromaKeyMethod::Green,

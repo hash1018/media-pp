@@ -29,8 +29,11 @@ impl ChromaKeyMethod {
     }
 }
 
-/// Construction-time options for either chroma-key backend.
-#[derive(Debug, Clone, Copy)]
+/// The settings either chroma-key backend keys by.
+///
+/// Passed at construction and changed afterwards through
+/// [`ChromaKeyHandle`](super::ChromaKeyHandle).
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ChromaKeyOptions {
     /// Color selection used as the transparent key.
     pub method: ChromaKeyMethod,

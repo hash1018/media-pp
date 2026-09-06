@@ -4,6 +4,7 @@ use crate::pp_log::{PpLog, pp_debug, pp_error, pp_info};
 use ffmpeg_next as ffmpeg;
 use thiserror::Error as ThisError;
 
+use super::handle::{ChromaKeyControl, ChromaKeyHandle};
 use super::options::ChromaKeyOptions;
 use crate::{
     buffer::MediaBuffer,
@@ -62,9 +63,11 @@ pub enum SwChromaKeyError {
 pub struct SwChromaKey {
     pp_log: PpLog,
     name: Arc<str>,
-    key_color: Color,
-    threshold: f32,
-    smoothing: f32,
+    /// What this element is keying by right now, refreshed from `control`
+    /// once per frame. Kept alongside it so a change can be recognized —
+    /// see `refresh_options`.
+    options: ChromaKeyOptions,
+    control: Arc<ChromaKeyControl>,
     /// `None` until the first frame arrives, then rebuilt only if a later
     /// frame's dimensions differ — mirrors `SwScaler`'s lazily-built
     /// scaling `context`, except what's cached here is just the output
@@ -74,16 +77,22 @@ pub struct SwChromaKey {
     pool: Option<UnboundObjectPool<ffmpeg::frame::Video>>,
     /// The last keyed frame and the picture it was made from, so a producer
     /// that re-emits an unchanged frame is answered with it instead of
-    /// another pass over every pixel — see [`RepeatedOutput`]. The key
-    /// settings are fixed at construction, so the input is the whole of
-    /// what the result depends on.
+    /// another pass over every pixel — see [`RepeatedOutput`].
+    ///
+    /// The input is not the whole of what the result depends on: the key
+    /// settings can change under a [`ChromaKeyHandle`], and a frame keyed
+    /// green is not an answer to the same frame once the key turned blue.
+    /// `refresh_options` forgets what is held here when that happens, which
+    /// is what `PerFrameTransform`'s own docs mean by an element with a
+    /// runtime setting comparing its own state.
     repeated: RepeatedOutput,
     pad: SrcPad,
 }
 
 impl SwChromaKey {
-    /// Creates a software chroma-key filter with fixed keying parameters.
-    pub fn new(name: impl Into<String>, options: ChromaKeyOptions) -> Self {
+    /// Creates a software chroma-key filter, and the handle that retunes it
+    /// while it runs.
+    pub fn new(name: impl Into<String>, options: ChromaKeyOptions) -> (Self, ChromaKeyHandle) {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::SwChromaKey, &name, None);
         let key_color = options.method.key_color();
@@ -100,16 +109,39 @@ impl SwChromaKey {
                 MemoryDomain::System,
             )),
         );
-        Self {
+        let control = Arc::new(ChromaKeyControl::new(options));
+        let handle = ChromaKeyHandle::new(control.clone());
+        let element = Self {
             name,
             pp_log,
-            key_color,
-            threshold: options.threshold,
-            smoothing: options.smoothing,
+            options,
+            control,
             dims: None,
             pool: None,
             repeated: RepeatedOutput::new(),
             pad,
+        };
+        (element, handle)
+    }
+
+    /// Picks up whatever the handle has been set to, and forgets the cached
+    /// keyed frame if it was made with something else.
+    ///
+    /// Called once per frame, before keying. Reading the settings again
+    /// mid-frame could pick up a change made in between, which is the one
+    /// thing [`ChromaKeyControl`]'s single lock exists to prevent.
+    fn refresh_options(&mut self) {
+        let options = self.control.get();
+        if options != self.options {
+            pp_debug!(
+                self,
+                "retuned: key_color={:?}, threshold={}, smoothing={}",
+                options.method.key_color(),
+                options.threshold,
+                options.smoothing
+            );
+            self.options = options;
+            self.repeated.clear();
         }
     }
 
@@ -166,6 +198,7 @@ impl Sink for SwChromaKey {
             // hand — see [`PerFrameTransform`], which is where that is
             // decided.
             MediaBuffer::Video(frame) => {
+                self.refresh_options();
                 let keyed = self.transform(&frame)?;
                 self.pad.push(MediaBuffer::Video(keyed))
             }
@@ -218,9 +251,9 @@ impl PerFrameTransform for SwChromaKey {
         key_bgra(
             frame,
             &mut output,
-            self.key_color,
-            self.threshold,
-            self.smoothing,
+            self.options.method.key_color(),
+            self.options.threshold,
+            self.options.smoothing,
         );
         output.set_pts(frame.pts());
         Ok(output)
@@ -330,14 +363,16 @@ mod tests {
         }
     }
 
-    fn new_chroma_key(options: ChromaKeyOptions) -> (SwChromaKey, Arc<Mutex<Vec<MediaBuffer>>>) {
-        let mut key = SwChromaKey::new("key", options);
+    fn new_chroma_key(
+        options: ChromaKeyOptions,
+    ) -> (SwChromaKey, ChromaKeyHandle, Arc<Mutex<Vec<MediaBuffer>>>) {
+        let (mut key, handle) = SwChromaKey::new("key", options);
         let received = Arc::new(Mutex::new(Vec::new()));
         key.src_pads()[0].link(Box::new(CapturingSink {
             received: received.clone(),
             pp_log: element_pp_log(ElementType::Other, "capture", None),
         }));
-        (key, received)
+        (key, handle, received)
     }
 
     /// Builds a `BGRA` frame of `width`x`height` whose pixel at `(x, y)` is
@@ -398,7 +433,7 @@ mod tests {
     /// carries its own timestamp; only the pixels are shared.
     #[test]
     fn a_repeated_input_is_keyed_once() {
-        let (mut key, received) = new_chroma_key(default_options());
+        let (mut key, _handle, received) = new_chroma_key(default_options());
         let source = bgra_frame(2, 2, |_, _| [0, 255, 0, 255]);
         let repeat = repeat_of(&source, 200);
 
@@ -427,7 +462,7 @@ mod tests {
 
     #[test]
     fn a_pixel_matching_the_key_color_becomes_fully_transparent() {
-        let (mut key, received) = new_chroma_key(default_options());
+        let (mut key, _handle, received) = new_chroma_key(default_options());
         let green = [0, 255, 0, 255]; // BGRA: pure green
         key.consume(bgra_frame(2, 2, |_, _| green))
             .expect("keying must succeed");
@@ -441,7 +476,7 @@ mod tests {
 
     #[test]
     fn a_clearly_different_pixel_stays_fully_opaque_and_unchanged() {
-        let (mut key, received) = new_chroma_key(default_options());
+        let (mut key, _handle, received) = new_chroma_key(default_options());
         let red = [0, 0, 255, 255]; // BGRA: pure red, far from the green key
         key.consume(bgra_frame(2, 2, |_, _| red))
             .expect("keying must succeed");
@@ -455,7 +490,7 @@ mod tests {
 
     #[test]
     fn a_pixel_inside_the_smoothing_band_gets_a_partial_alpha() {
-        let (mut key, received) = new_chroma_key(default_options());
+        let (mut key, _handle, received) = new_chroma_key(default_options());
         // A slightly-off green sitting inside the feather band around
         // threshold=0.15 (half-width 0.05, so the band is 0.10..0.20):
         // only the red channel differs, by 60/255, so distance =
@@ -477,7 +512,7 @@ mod tests {
 
     #[test]
     fn a_custom_key_color_replaces_the_green_default() {
-        let (mut key, received) = new_chroma_key(ChromaKeyOptions {
+        let (mut key, _handle, received) = new_chroma_key(ChromaKeyOptions {
             method: ChromaKeyMethod::Custom(Color::new(10, 20, 30)),
             threshold: 0.05,
             smoothing: 0.0,
@@ -494,7 +529,7 @@ mod tests {
 
     #[test]
     fn pts_is_carried_through() {
-        let (mut key, received) = new_chroma_key(default_options());
+        let (mut key, _handle, received) = new_chroma_key(default_options());
         key.consume(bgra_frame(1, 1, |_, _| [0, 255, 0, 255]))
             .expect("keying must succeed");
 
@@ -507,7 +542,7 @@ mod tests {
 
     #[test]
     fn non_bgra_input_is_a_typed_error_not_a_panic() {
-        let (mut key, _received) = new_chroma_key(default_options());
+        let (mut key, _handle, _received) = new_chroma_key(default_options());
         let pool = UnboundObjectPool::new(
             0,
             move || ffmpeg::frame::Video::new(ffmpeg::format::Pixel::YUV420P, 4, 4),
@@ -526,7 +561,7 @@ mod tests {
 
     #[test]
     fn packet_and_audio_buffers_are_rejected_not_silently_dropped() {
-        let (mut key, _received) = new_chroma_key(default_options());
+        let (mut key, _handle, _received) = new_chroma_key(default_options());
 
         let error = key
             .consume(MediaBuffer::Audio(Arc::new(ffmpeg::frame::Audio::empty())))
@@ -537,9 +572,75 @@ mod tests {
         ));
     }
 
+    /// Retuning has to reach the pixels, not just the settings — the whole
+    /// point of the handle is a slider that changes what is on screen.
+    #[test]
+    fn retuning_through_the_handle_changes_what_is_keyed() {
+        let (mut key, handle, received) = new_chroma_key(default_options());
+
+        key.consume(bgra_frame(2, 2, |_, _| [0, 255, 0, 255]))
+            .expect("key a green frame");
+
+        let mut retuned = handle.options();
+        retuned.method = ChromaKeyMethod::Blue;
+        handle.set_options(retuned);
+
+        key.consume(bgra_frame(2, 2, |_, _| [0, 255, 0, 255]))
+            .expect("key the same green against a blue key");
+
+        let received = received.lock().unwrap();
+        let (MediaBuffer::Video(before), MediaBuffer::Video(after)) = (&received[0], &received[1])
+        else {
+            panic!("expected Video buffers");
+        };
+        assert_eq!(pixel(before, 0, 0)[3], 0, "green keys out against green");
+        assert_eq!(
+            pixel(after, 0, 0)[3],
+            255,
+            "and stays once the key is blue instead"
+        );
+    }
+
+    /// The repeat cache holds one keyed frame and the picture it came from,
+    /// which is a complete answer only while the settings have not moved.
+    /// Answering a repeat out of a cache filled under the old key would
+    /// leave the picture on screen unchanged until the source happened to
+    /// send something new — which, for a still capture, is never.
+    #[test]
+    fn a_repeat_is_keyed_again_after_a_retune() {
+        let (mut key, handle, received) = new_chroma_key(default_options());
+        let source = bgra_frame(2, 2, |_, _| [0, 255, 0, 255]);
+        let repeat = repeat_of(&source, 200);
+
+        key.consume(source).expect("key the first frame");
+
+        let mut retuned = handle.options();
+        retuned.method = ChromaKeyMethod::Blue;
+        handle.set_options(retuned);
+
+        key.consume(repeat).expect("key the repeat");
+
+        let received = received.lock().unwrap();
+        let (MediaBuffer::Video(first), MediaBuffer::Video(second)) = (&received[0], &received[1])
+        else {
+            panic!("expected Video buffers");
+        };
+        assert_ne!(
+            crate::buffer::picture_id(second),
+            crate::buffer::picture_id(first),
+            "a retune must retire what the cache was holding"
+        );
+        assert_eq!(pixel(first, 0, 0)[3], 0);
+        assert_eq!(
+            pixel(second, 0, 0)[3],
+            255,
+            "the repeat was answered out of a cache keyed by the old settings"
+        );
+    }
+
     #[test]
     fn eos_is_forwarded() {
-        let (mut key, received) = new_chroma_key(default_options());
+        let (mut key, _handle, received) = new_chroma_key(default_options());
         key.consume(MediaBuffer::Eos).expect("Eos must forward");
 
         let received = received.lock().unwrap();
