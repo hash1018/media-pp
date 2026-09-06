@@ -512,6 +512,117 @@ ALPHA_HALF_DONE:
 KEY_DONE:
     ret;
 }
+.visible .entry nv12_to_bgra(
+    .param .u64 dst,
+    .param .u32 dst_pitch,
+    .param .u64 luma,
+    .param .u32 luma_pitch,
+    .param .u64 chroma,
+    .param .u32 chroma_pitch,
+    .param .u32 width,
+    .param .u32 height
+)
+{
+    .reg .pred  %p<4>;
+    .reg .b16   %rs<12>;
+    .reg .b32   %r<40>;
+    .reg .f32   %f<40>;
+    .reg .b64   %rd<20>;
+
+    ld.param.u64    %rd1, [dst];
+    ld.param.u32    %r1, [dst_pitch];
+    ld.param.u64    %rd2, [luma];
+    ld.param.u32    %r2, [luma_pitch];
+    ld.param.u64    %rd3, [chroma];
+    ld.param.u32    %r3, [chroma_pitch];
+    ld.param.u32    %r4, [width];
+    ld.param.u32    %r5, [height];
+
+    mov.u32         %r6, %ctaid.x;
+    mov.u32         %r7, %ntid.x;
+    mov.u32         %r8, %tid.x;
+    mad.lo.s32      %r9, %r6, %r7, %r8;
+    mov.u32         %r10, %ctaid.y;
+    mov.u32         %r11, %ntid.y;
+    mov.u32         %r12, %tid.y;
+    mad.lo.s32      %r13, %r10, %r11, %r12;
+
+    setp.ge.u32     %p1, %r9, %r4;
+    @%p1 bra        NV12_BGRA_DONE;
+    setp.ge.u32     %p2, %r13, %r5;
+    @%p2 bra        NV12_BGRA_DONE;
+
+    mad.lo.s32      %r14, %r13, %r2, %r9;
+    cvt.u64.u32     %rd4, %r14;
+    add.s64         %rd5, %rd2, %rd4;
+    ld.global.u8    %rs1, [%rd5];
+
+    shr.u32         %r15, %r13, 1;
+    shr.u32         %r16, %r9, 1;
+    shl.b32         %r17, %r16, 1;
+    mad.lo.s32      %r18, %r15, %r3, %r17;
+    cvt.u64.u32     %rd6, %r18;
+    add.s64         %rd7, %rd3, %rd6;
+    ld.global.u8    %rs2, [%rd7];
+    ld.global.u8    %rs3, [%rd7+1];
+
+    cvt.u32.u16     %r19, %rs1;
+    cvt.rn.f32.u32  %f1, %r19;
+    cvt.u32.u16     %r20, %rs2;
+    cvt.rn.f32.u32  %f2, %r20;
+    cvt.u32.u16     %r21, %rs3;
+    cvt.rn.f32.u32  %f3, %r21;
+
+    sub.f32         %f4, %f1, 0f41800000;
+    mul.f32         %f5, %f4, 0f3F950A85;
+    sub.f32         %f6, %f2, 0f43000000;
+    mul.f32         %f7, %f6, 0f3F91B6DB;
+    sub.f32         %f8, %f3, 0f43000000;
+    mul.f32         %f9, %f8, 0f3F91B6DB;
+
+    mul.f32         %f10, %f7, 0f3FED844D;
+    add.f32         %f11, %f5, %f10;
+    mul.f32         %f12, %f9, 0f3FC9930C;
+    add.f32         %f13, %f5, %f12;
+
+    mul.f32         %f14, %f13, 0f3E59B3D0;
+    sub.f32         %f15, %f5, %f14;
+    mul.f32         %f16, %f11, 0f3D93DD98;
+    sub.f32         %f17, %f15, %f16;
+    mul.f32         %f18, %f17, 0f3FB2F88E;
+
+    max.f32         %f19, %f11, 0f00000000;
+    min.f32         %f20, %f19, 0f437F0000;
+    add.f32         %f21, %f20, 0f3F000000;
+    cvt.rzi.u32.f32 %r22, %f21;
+    cvt.u16.u32     %rs4, %r22;
+
+    max.f32         %f22, %f18, 0f00000000;
+    min.f32         %f23, %f22, 0f437F0000;
+    add.f32         %f24, %f23, 0f3F000000;
+    cvt.rzi.u32.f32 %r23, %f24;
+    cvt.u16.u32     %rs5, %r23;
+
+    max.f32         %f25, %f13, 0f00000000;
+    min.f32         %f26, %f25, 0f437F0000;
+    add.f32         %f27, %f26, 0f3F000000;
+    cvt.rzi.u32.f32 %r24, %f27;
+    cvt.u16.u32     %rs6, %r24;
+
+    mov.u16         %rs7, 255;
+
+    shl.b32         %r25, %r9, 2;
+    mad.lo.s32      %r26, %r13, %r1, %r25;
+    cvt.u64.u32     %rd8, %r26;
+    add.s64         %rd9, %rd1, %rd8;
+    st.global.u8    [%rd9], %rs4;
+    st.global.u8    [%rd9+1], %rs5;
+    st.global.u8    [%rd9+2], %rs6;
+    st.global.u8    [%rd9+3], %rs7;
+
+NV12_BGRA_DONE:
+    ret;
+}
 "#;
 
 // SAFETY of the block: these are the driver's own C ABI declarations, and
@@ -906,6 +1017,9 @@ pub(crate) struct CudaDriver {
     /// Writes a BGRA surface's alpha from each pixel's distance to a key
     /// colour — what [`crate::elements::CudaChromaKey`] is.
     key_bgra: CUfunction,
+    /// Turns an NV12 surface into a BGRA one, which is what a filter
+    /// wanting BGRA needs in front of a camera.
+    nv12_to_bgra: CUfunction,
 }
 
 // SAFETY: a `CUcontext` is not thread-affine — it is pushed onto whichever
@@ -959,6 +1073,7 @@ impl CudaDriver {
                         "extract_alpha",
                         "extract_alpha_half",
                         "key_bgra",
+                        "nv12_to_bgra",
                     ],
                 ) {
                     Ok(convert) => Ok((blend, convert)),
@@ -982,6 +1097,7 @@ impl CudaDriver {
                         extract_alpha,
                         extract_alpha_half,
                         key_bgra,
+                        nv12_to_bgra,
                     ],
                 ),
             ) = match loaded {
@@ -1005,6 +1121,7 @@ impl CudaDriver {
                 extract_alpha,
                 extract_alpha_half,
                 key_bgra,
+                nv12_to_bgra,
             })
         }
     }
@@ -1253,6 +1370,77 @@ impl CudaDriver {
                     "cuLaunchKernel",
                     cuLaunchKernel(
                         self.key_bgra,
+                        grid_x,
+                        grid_y,
+                        1,
+                        BLOCK,
+                        BLOCK,
+                        1,
+                        0,
+                        std::ptr::null_mut(),
+                        params.as_mut_ptr(),
+                        std::ptr::null_mut(),
+                    ),
+                )
+            }
+        })
+    }
+
+    /// Converts an NV12 surface into a BGRA one, on the GPU.
+    ///
+    /// The direction `scale_cuda` refuses and
+    /// [`CudaScaler`](crate::elements::CudaScaler) documents as impossible:
+    /// its module carries no kernel for a YUV/RGB pair either way, so this
+    /// one does.
+    ///
+    /// The colour maths is the exact inverse of [`bt709_limited`], written
+    /// in the order that undoes it, so a round trip through both is off by
+    /// rounding and by chroma subsampling and by nothing else.
+    ///
+    /// Launches asynchronously. [`CudaDriver::synchronize`] is what makes
+    /// the result visible to anything outside this context's stream
+    /// ordering.
+    pub(crate) fn nv12_to_bgra(
+        &self,
+        source: Nv12Surface,
+        destination: BgraSurface,
+        width: u32,
+        height: u32,
+    ) -> Result<(), CudaDriverError> {
+        if width == 0 || height == 0 {
+            return Ok(());
+        }
+        const BLOCK: u32 = 16;
+        let (grid_x, grid_y) = (width.div_ceil(BLOCK), height.div_ceil(BLOCK));
+
+        let mut dst = destination.pixels;
+        let mut dst_pitch = destination.pitch as u32;
+        let mut luma = source.luma;
+        let mut luma_pitch = source.luma_pitch as u32;
+        let mut chroma = source.chroma;
+        let mut chroma_pitch = source.chroma_pitch as u32;
+        let mut width = width;
+        let mut height = height;
+
+        self.with_context(|| {
+            let mut params: [*mut c_void; 8] = [
+                (&mut dst) as *mut _ as *mut c_void,
+                (&mut dst_pitch) as *mut _ as *mut c_void,
+                (&mut luma) as *mut _ as *mut c_void,
+                (&mut luma_pitch) as *mut _ as *mut c_void,
+                (&mut chroma) as *mut _ as *mut c_void,
+                (&mut chroma_pitch) as *mut _ as *mut c_void,
+                (&mut width) as *mut _ as *mut c_void,
+                (&mut height) as *mut _ as *mut c_void,
+            ];
+            // SAFETY: one pointer per parameter `nv12_to_bgra` declares, in
+            // that order, at a live local; the context is current inside
+            // `with_context`.
+            unsafe {
+                check(
+                    "cuLaunchKernel",
+                    cuLaunchKernel(
+                        self.nv12_to_bgra,
                         grid_x,
                         grid_y,
                         1,
@@ -2322,6 +2510,102 @@ mod tests {
         }
     }
 
+    /// The exact inverse of [`bt709_limited`], as the kernel computes it, so
+    /// a test can say what a colour should come back as instead of allowing
+    /// a tolerance and hoping.
+    fn bt709_limited_inverse(luma: u8, u: u8, v: u8) -> (u8, u8, u8) {
+        let y = (f32::from(luma) - 16.0) * (255.0 / 219.0);
+        let u = (f32::from(u) - 128.0) * (255.0 / 224.0);
+        let v = (f32::from(v) - 128.0) * (255.0 / 224.0);
+        let b = y + 1.8556 * u;
+        let r = y + 1.5748 * v;
+        let g = (y - 0.2126 * r - 0.0722 * b) / 0.7152;
+        let byte = |value: f32| (value.clamp(0.0, 255.0) + 0.5) as u8;
+        (byte(r), byte(g), byte(b))
+    }
+
+    /// The conversion `CudaScaler` refuses, at the driver layer.
+    ///
+    /// This is also what proves the PTX assembles: it is hand written, and
+    /// the driver JITs it when the module loads.
+    #[test]
+    fn nv12_to_bgra_undoes_the_conversion_that_made_it() {
+        let Some((device, _cuda_lock)) = try_cuda_device() else {
+            return;
+        };
+        let driver = match CudaDriver::retain_primary() {
+            Ok(driver) => driver,
+            Err(error) => {
+                eprintln!("skipping: no usable CUDA driver context ({error})");
+                return;
+            }
+        };
+
+        // Four flat colours, one per 2x2 block so chroma subsampling has
+        // nothing to average across.
+        let colours = [[0u8, 255, 0], [0, 0, 255], [255, 255, 255], [16, 32, 48]];
+        let (width, height) = (8u32, 2u32);
+        let block_of = |x: u32| colours[(x / 2) as usize];
+
+        let Some(source) = cuda_bgra_surface(&device, width, height, |x, _| {
+            let [b, g, r] = block_of(x);
+            [b, g, r, 255]
+        }) else {
+            return;
+        };
+        let Some(nv12) = cuda_surface(&device, width, height, 0) else {
+            return;
+        };
+        let Some(back) = cuda_bgra_surface(&device, width, height, |_, _| [7, 7, 7, 7]) else {
+            return;
+        };
+
+        let (MediaBuffer::Video(source_frame), MediaBuffer::Video(nv12_frame)) = (&source, &nv12)
+        else {
+            panic!("expected Video buffers");
+        };
+        let MediaBuffer::Video(back_frame) = &back else {
+            panic!("expected a Video buffer");
+        };
+
+        // There and back: the round trip is what makes the two kernels each
+        // other's check rather than two separate guesses at BT.709.
+        driver
+            .bgra_to_nv12(
+                BgraSurface::from_frame(source_frame).expect("a BGRA source"),
+                Nv12Surface::from_frame(nv12_frame).expect("an NV12 destination"),
+                width,
+                height,
+            )
+            .expect("bgra_to_nv12");
+        driver
+            .nv12_to_bgra(
+                Nv12Surface::from_frame(nv12_frame).expect("an NV12 source"),
+                BgraSurface::from_frame(back_frame).expect("a BGRA destination"),
+                width,
+                height,
+            )
+            .expect("the conversion kernel must launch");
+        driver.synchronize().expect("synchronize");
+
+        let out = download_bgra(&device, back.clone(), width, height);
+        let row = out.data(0);
+        for x in 0..width {
+            let [b, g, r] = block_of(x);
+            let (expected_y, expected_u, expected_v) =
+                bt709_limited(f32::from(r), f32::from(g), f32::from(b));
+            let (want_r, want_g, want_b) =
+                bt709_limited_inverse(expected_y, expected_u, expected_v);
+            let at = x as usize * 4;
+            let got = [row[at], row[at + 1], row[at + 2], row[at + 3]];
+            assert_eq!(
+                got,
+                [want_b, want_g, want_r, 255],
+                "pixel {x} came back wrong; it started as {:?}",
+                [b, g, r]
+            );
+        }
+    }
     /// The keying kernel, at the driver layer: the key colour goes fully
     /// transparent, a clearly different colour stays fully opaque and keeps
     /// its RGB, and something inside the feather band lands in between.

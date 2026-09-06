@@ -12,6 +12,22 @@ compile error with no explanation.
 
 ### Breaking
 
+- **`CudaConverter` converts either way round, so its constructor is told
+  which.** `CudaConverter::new(name, device, width, height)` becomes
+  `CudaConverter::new(name, device, output, width, height)`; pass
+  `CudaFrameFormat::Nv12` for what it used to do.
+
+  The new direction exists because a camera hands over NV12 and a chroma key
+  takes BGRA, so a green screen had nowhere to be keyed on this backend.
+  `CudaScaler` cannot fill the gap — it refuses a YUV/RGB pair either way
+  and says so in its own docs. On Windows nothing was needed: `D3d11Scaler`
+  already takes an output format, and `D3d11ScalerFormat::Bgra` names the
+  chroma key among the things it is for.
+
+  The kernel is the exact inverse of the one beside it, written in the order
+  that undoes it, and the test asserts a round trip against that inverse
+  computed in Rust rather than against a tolerance.
+
 - **Both chroma keys hand out a `ChromaKeyHandle`, so their constructors
   return a tuple.** Keying is tuned by eye, and rebuilding the element for
   each nudge of a threshold means reopening whatever produces its frames —

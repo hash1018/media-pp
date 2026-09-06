@@ -453,8 +453,14 @@ mod linux_example {
             // fixed-size, so anything else would reject every frame. An odd
             // capture is refused here rather than at the first frame — see
             // `CudaConverter`, whose chroma has no half sample to write.
-            let converter = CudaConverter::new("convert", &cuda, width, height)
-                .map_err(|error| media_pp::Error::Other(error.to_string()))?;
+            let converter = CudaConverter::new(
+                "convert",
+                &cuda,
+                media_pp::elements::CudaFrameFormat::Nv12,
+                width,
+                height,
+            )
+            .map_err(|error| media_pp::Error::Other(error.to_string()))?;
             let renderer = render_common::cuda_window_renderer(
                 "renderer",
                 &gpu,

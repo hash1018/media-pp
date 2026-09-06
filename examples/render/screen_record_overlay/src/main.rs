@@ -169,8 +169,14 @@ mod linux_example {
             .map_err(|e| media_pp::Error::Other(e.to_string()))?;
 
         let capture_pipeline = Pipeline::new("desktop-capture", source, |source, ctx| {
-            let converter = CudaConverter::new("convert", &cuda, width, height)
-                .map_err(|e| media_pp::Error::Other(e.to_string()))?;
+            let converter = CudaConverter::new(
+                "convert",
+                &cuda,
+                media_pp::elements::CudaFrameFormat::Nv12,
+                width,
+                height,
+            )
+            .map_err(|e| media_pp::Error::Other(e.to_string()))?;
             let branch = ctx
                 .branch()
                 // Thread boundary so conversion and compositing cannot stall
