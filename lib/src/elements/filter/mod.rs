@@ -39,6 +39,8 @@ pub use change_gate::ChangeGate;
 pub use chroma_key::{
     ChromaKeyHandle, ChromaKeyMethod, ChromaKeyOptions, SwChromaKey, SwChromaKeyError,
 };
+#[cfg(feature = "cuda")]
+pub use chroma_key::{CudaChromaKey, CudaChromaKeyError};
 #[cfg(all(target_os = "windows", feature = "d3d11"))]
 pub use chroma_key::{D3d11ChromaKey, D3d11ChromaKeyError};
 #[cfg(feature = "cuda")]

@@ -37,8 +37,8 @@ use crate::elements::WebRtcError;
 use crate::elements::WgcCaptureSourceError;
 #[cfg(feature = "cuda")]
 use crate::elements::{
-    CudaConverterError, CudaDecoderError, CudaDownloadError, CudaEncoderError, CudaRendererError,
-    CudaScalerError, CudaUploadError, CudaVideoCompositorError,
+    CudaChromaKeyError, CudaConverterError, CudaDecoderError, CudaDownloadError, CudaEncoderError,
+    CudaRendererError, CudaScalerError, CudaUploadError, CudaVideoCompositorError,
 };
 #[cfg(all(target_os = "windows", feature = "d3d11"))]
 use crate::elements::{
@@ -213,6 +213,11 @@ pub enum Error {
     #[cfg(feature = "cuda")]
     #[error(transparent)]
     CudaConverterError(#[from] CudaConverterError),
+
+    /// Keying a CUDA surface failed.
+    #[cfg(feature = "cuda")]
+    #[error(transparent)]
+    CudaChromaKeyError(#[from] CudaChromaKeyError),
 
     /// A CUDA compositor operation failed.
     #[cfg(feature = "cuda")]

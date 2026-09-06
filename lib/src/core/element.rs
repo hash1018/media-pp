@@ -130,6 +130,8 @@ pub enum ElementType {
     SwChromaKey,
     /// CUDA video scaler filter.
     CudaScaler,
+    /// CUDA chroma-key filter.
+    CudaChromaKey,
     /// D3D11 video scaler filter.
     D3d11Scaler,
     /// D3D11 chroma-key filter.

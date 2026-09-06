@@ -29,6 +29,33 @@ impl ChromaKeyMethod {
     }
 }
 
+/// Resolves `threshold`/`smoothing` into the feather band a GPU backend
+/// evaluates: `saturate((distance - band_low) * inv_band_width)`.
+///
+/// A hard key (`smoothing <= 0.0`) is a band of no width, which that
+/// expression cannot represent directly — so it is given a `band_low` of
+/// exactly `threshold` and an `inv_band_width` large enough that any
+/// distance above `threshold`, by however little, saturates to 1.0 while
+/// `threshold` itself still lands on 0.0. That is precisely
+/// [`SwChromaKey`](super::SwChromaKey)'s own step, and it costs neither a
+/// branch nor a division by zero.
+///
+/// Shared rather than resolved per backend: the D3D11 shader and the CUDA
+/// kernel evaluate the same expression, and two copies of this would be two
+/// chances for one of them to drift into keying differently from the other.
+/// Only the GPU backends resolve the band ahead of time; the software one
+/// evaluates `threshold`/`smoothing` directly where it needs them, so a build
+/// with neither backend has no caller for this.
+#[cfg(any(feature = "cuda", all(target_os = "windows", feature = "d3d11")))]
+pub(crate) fn feather_band(threshold: f32, smoothing: f32) -> (f32, f32) {
+    let smoothing = smoothing.max(0.0);
+    if smoothing > 0.0 {
+        (threshold - smoothing / 2.0, 1.0 / smoothing)
+    } else {
+        (threshold, f32::MAX)
+    }
+}
+
 /// The settings either chroma-key backend keys by.
 ///
 /// Passed at construction and changed afterwards through

@@ -16,7 +16,7 @@ use windows::{
 };
 
 use super::super::handle::{ChromaKeyControl, ChromaKeyHandle};
-use super::super::options::ChromaKeyOptions;
+use super::super::options::{ChromaKeyOptions, feather_band};
 use crate::{
     buffer::MediaBuffer,
     color::Color,
@@ -148,24 +148,11 @@ struct ChromaKeyConstants {
 }
 
 impl ChromaKeyConstants {
-    /// Resolves `threshold`/`smoothing` into the feather band the shader
-    /// actually evaluates: `saturate((distance - band_low) *
-    /// inv_band_width)`.
-    ///
-    /// A hard key (`smoothing <= 0.0`) is a band of no width, which that
-    /// expression cannot represent directly — so it is given a `band_low`
-    /// of exactly `threshold` and an `inv_band_width` large enough that any
-    /// distance above `threshold`, by however little, saturates to 1.0
-    /// while `threshold` itself still lands on 0.0. That is precisely
-    /// [`crate::elements::SwChromaKey`]'s own step, and it costs the shader
-    /// neither a branch nor a division by zero.
+    /// Fills in what `chroma_key_bgra.hlsl` reads. The band itself is
+    /// [`feather_band`]'s answer, shared with the CUDA kernel that
+    /// evaluates the same expression.
     fn new(key_color: Color, threshold: f32, smoothing: f32, uv_scale: [f32; 2]) -> Self {
-        let smoothing = smoothing.max(0.0);
-        let (band_low, inv_band_width) = if smoothing > 0.0 {
-            (threshold - smoothing / 2.0, 1.0 / smoothing)
-        } else {
-            (threshold, f32::MAX)
-        };
+        let (band_low, inv_band_width) = feather_band(threshold, smoothing);
         Self {
             key_color: [
                 f32::from(key_color.red) / 255.0,

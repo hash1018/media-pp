@@ -86,6 +86,28 @@ compile error with no explanation.
 
 ### Added
 
+- **`CudaChromaKey` keys a green screen on the GPU under CUDA.** Chroma
+  keying existed for the CPU and for D3D11, which left Linux without one at
+  all: the compositor there is CUDA, and this crate refuses to wire a branch
+  whose memory domains do not match, so the software element could only have
+  gone in behind a `CudaDownload` and back out through a `CudaUpload` — two
+  PCIe crossings per frame around a per-pixel transform.
+
+  BGRA in, BGRA out, like both siblings, and it keeps PTS, duration and the
+  colour tags: keying writes alpha and leaves the colour alone. Odd
+  dimensions are fine, unlike `CudaConverter` — BGRA has no subsampled
+  plane to halve. `CudaChromaKey::new` returns a `ChromaKeyHandle` beside
+  the element.
+
+  The kernel is hand-written PTX carried in the existing BGRA module, so a
+  build needs no CUDA toolkit — the driver JIT-compiles it when the module
+  loads, exactly as it already did for the conversion and blend kernels. It
+  computes the same normalized BGR distance and the same feather ramp
+  `SwChromaKey` does, from the same resolved band the D3D11 shader reads,
+  which is now one shared `feather_band` rather than a copy per backend.
+
+  New: `Error::CudaChromaKeyError` and `ElementType::CudaChromaKey`.
+
 - **`RtmpMuxer` publishes a live broadcast to an RTMP server** — Twitch,
   YouTube, or a local MediaMTX. It is the publishing half only: nothing here
   runs a server, and the address and stream key come from whoever receives.
