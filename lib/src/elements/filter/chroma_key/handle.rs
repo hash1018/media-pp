@@ -31,18 +31,18 @@ use super::options::ChromaKeyOptions;
 /// arguments, and the software one hands them to its own per-pixel loop.
 ///
 /// [`AudioVolume`]: crate::elements::AudioVolume
-/// Whether to key at all, kept apart from the settings rather than inside
-/// them.
-///
-/// `ChromaKeyOptions` says *how* to key and this says *whether* to, which
-/// is the same split [`AudioVolume`] has between its gain and its mute:
-/// independent of each other, and turning one off must not cost the other
-/// its value. Keeping it out of the settings also means no construction
-/// site can produce a chroma key that silently does nothing by forgetting
-/// a field.
 #[derive(Debug)]
 pub(super) struct ChromaKeyControl {
     options: ArcSwap<ChromaKeyOptions>,
+    /// Whether to key at all, kept apart from the settings rather than
+    /// inside them.
+    ///
+    /// `ChromaKeyOptions` says *how* to key and this says *whether* to,
+    /// which is the same split `AudioVolume` has between its gain and its
+    /// mute: independent of each other, and turning one off must not cost
+    /// the other its value. Keeping it out of the settings also means no
+    /// construction site can produce a chroma key that silently does
+    /// nothing by forgetting a field.
     enabled: AtomicBool,
 }
 
