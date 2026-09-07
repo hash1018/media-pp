@@ -7,7 +7,8 @@ use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, OutputContract},
     control::ControlMsg,
-    element::{Element, ElementType, Filter, Sink, Source, element_pp_log},
+    core::pipeline::chain::FlowTracer,
+    element::{Context, Element, ElementType, Filter, Sink, Source, element_pp_log},
     error::Result,
     pad::SrcPad,
 };
@@ -85,6 +86,21 @@ pub enum RackError {
 /// Control does not install one either. A Flush or a Seek addresses what is
 /// running, and elements that have not seen a buffer yet have nothing to
 /// flush or seek.
+///
+/// # What is in one is still in the pipeline
+///
+/// Being inside a rack changes nothing about how an element is treated. On
+/// its way in it is given exactly what
+/// [`ChainBuilder`](crate::pipeline::ChainBuilder) gives a stage it builds:
+/// its log records name the pipeline it is in, it is offered the
+/// [`Context`] so it can pace itself or claim a clock, and it is wrapped in
+/// the same tracer, so a failure it raises reaches a
+/// [`Queue`](crate::queue::Queue) naming *it* rather than naming the rack
+/// that was holding it.
+///
+/// The one thing it is not is a graph node. A rack is a single element in
+/// the topology diagram and what it holds does not appear there — which is
+/// why filling one logs what went in, at `Info`.
 pub struct Rack {
     pp_log: PpLog,
     name: Arc<str>,
@@ -104,6 +120,13 @@ pub struct Rack {
     /// unchanged.
     made: Arc<Mutex<Vec<MediaBuffer>>>,
     control: Arc<RackControl>,
+    /// The pipeline this rack was wired into, kept so that what is put in it
+    /// afterwards can be given the same start a chain stage gets.
+    ///
+    /// `None` for a rack that is not in a pipeline — one under test, or one
+    /// built and never attached. A fill then does everything except the two
+    /// things that need a pipeline to be meaningful.
+    context: Option<Arc<Context>>,
     pad: SrcPad,
 }
 
@@ -193,6 +216,7 @@ impl Rack {
             head: None,
             made: Arc::new(Mutex::new(Vec::new())),
             control: control.clone(),
+            context: None,
         };
         (rack, RackHandle { control })
     }
@@ -233,10 +257,26 @@ impl Rack {
             pp_log: element_pp_log(ElementType::Rack, &self.name, None),
             made: self.made.clone(),
         });
+        // Cloned out of `self` so the fold below borrows nothing of it.
+        let context = self.context.clone();
         let head = elements
             .into_iter()
             .rev()
             .fold(collector, |downstream, mut element| {
+                // The same three things `ChainBuilder` does to a stage it
+                // builds, because an element in a rack is a stage: it is in
+                // a pipeline, so its records say which one; it may need the
+                // context to pace itself or claim a clock; and a failure it
+                // raises has to arrive naming it rather than naming the rack
+                // that happened to be holding it.
+                if let Some(context) = &context {
+                    *element.pp_log_mut() = element_pp_log(
+                        element.element_type(),
+                        &element.name(),
+                        Some(&context.pipeline_id),
+                    );
+                    element.attach_context(context);
+                }
                 // One output apiece is `RackHandle::replace`'s contract, and
                 // it checked. An element that changed its own pad count
                 // since then would lose what came after it, so this leaves
@@ -244,7 +284,7 @@ impl Rack {
                 if let Some(pad) = element.src_pads().first_mut() {
                     pad.link(downstream);
                 }
-                element
+                Box::new(FlowTracer::new(element)) as Box<dyn Sink>
             });
         self.head = Some(head);
         pp_info!(self, "filled: {line}");
@@ -294,6 +334,13 @@ impl Sink for Collector {
 }
 
 impl Element for Rack {
+    /// Remembers the pipeline, so that what is put in this rack afterwards
+    /// can be given the same start a chain stage gets — see this type's own
+    /// docs on what is in a rack still being in the pipeline.
+    fn attach_context(&mut self, context: &Arc<Context>) {
+        self.context = Some(context.clone());
+    }
+
     fn name(&self) -> Arc<str> {
         self.name.clone()
     }
@@ -724,5 +771,148 @@ mod tests {
         handle
             .replace(Vec::new())
             .expect("a replacement nobody will pick up is not a failure");
+    }
+    /// An element that refuses every buffer, so a test can ask who gets the
+    /// blame for it.
+    struct Boom {
+        pp_log: PpLog,
+        name: Arc<str>,
+        pad: SrcPad,
+    }
+
+    impl Boom {
+        fn new(name: &str) -> Self {
+            let name: Arc<str> = name.into();
+            Self {
+                pp_log: element_pp_log(ElementType::Other, &name, None),
+                pad: SrcPad::new(format!("{name}_src")),
+                name,
+            }
+        }
+    }
+
+    impl Element for Boom {
+        fn name(&self) -> Arc<str> {
+            self.name.clone()
+        }
+        fn element_type(&self) -> ElementType {
+            ElementType::Other
+        }
+        fn pp_log(&self) -> &PpLog {
+            &self.pp_log
+        }
+        fn pp_log_mut(&mut self) -> &mut PpLog {
+            &mut self.pp_log
+        }
+    }
+
+    impl Source for Boom {
+        fn src_pads(&mut self) -> &mut [SrcPad] {
+            std::slice::from_mut(&mut self.pad)
+        }
+    }
+
+    impl Sink for Boom {
+        fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
+            Err(crate::error::Error::Other("this element refuses".into()))
+        }
+        fn control(&mut self, msg: ControlMsg) -> Result<()> {
+            self.pad.control(msg)
+        }
+    }
+
+    /// What a `Queue` reports is the element that failed, and being inside a
+    /// rack must not turn that back into the rack.
+    ///
+    /// The rack is not the first thing in the line here: `first` is, and it
+    /// succeeds. Naming the head would be as wrong as naming the rack, and
+    /// only the per-element wrapping tells them apart.
+    #[test]
+    fn a_failure_inside_a_rack_names_the_element_that_raised_it() {
+        let mut rig = rig();
+        rig.handle
+            .replace(vec![
+                Box::new(Marker::new("first", 1, rig.controls.clone())),
+                Box::new(Boom::new("second")),
+            ])
+            .expect("two ordinary filters");
+
+        let error = rig
+            .rack
+            .consume(frame(0))
+            .expect_err("the second element refuses");
+
+        let origin = error.origin().expect("a failure inside a rack is traced");
+        assert_eq!(
+            &*origin.name, "second",
+            "the element that refused, not the rack and not the head"
+        );
+    }
+
+    /// The rack passes a control message into what it holds, and a refusal
+    /// there is traced the same way a refused buffer is.
+    #[test]
+    fn a_control_refused_inside_a_rack_is_traced_too() {
+        struct Deaf {
+            pp_log: PpLog,
+            pad: SrcPad,
+        }
+        impl Element for Deaf {
+            fn name(&self) -> Arc<str> {
+                "deaf".into()
+            }
+            fn element_type(&self) -> ElementType {
+                ElementType::Other
+            }
+            fn pp_log(&self) -> &PpLog {
+                &self.pp_log
+            }
+            fn pp_log_mut(&mut self) -> &mut PpLog {
+                &mut self.pp_log
+            }
+        }
+        impl Source for Deaf {
+            fn src_pads(&mut self) -> &mut [SrcPad] {
+                std::slice::from_mut(&mut self.pad)
+            }
+        }
+        impl Sink for Deaf {
+            fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+                self.pad.push(buf)
+            }
+            fn control(&mut self, _msg: ControlMsg) -> Result<()> {
+                Err(crate::error::Error::Other("no controls here".into()))
+            }
+        }
+
+        let mut rig = rig();
+        rig.handle
+            .replace(vec![Box::new(Marker::new(
+                "first",
+                1,
+                rig.controls.clone(),
+            ))])
+            .expect("one filter");
+        rig.rack.consume(frame(0)).expect("install the line");
+
+        rig.handle
+            .replace(vec![Box::new(Deaf {
+                pp_log: element_pp_log(ElementType::Other, "deaf", None),
+                pad: SrcPad::new("deaf_src"),
+            })])
+            .expect("one filter");
+        rig.rack.consume(frame(0)).expect("install the new line");
+
+        let error = rig
+            .rack
+            .control(ControlMsg::Flush)
+            .expect_err("the element refuses controls");
+        assert_eq!(
+            &*error
+                .origin()
+                .expect("a refusal inside a rack is traced")
+                .name,
+            "deaf"
+        );
     }
 }

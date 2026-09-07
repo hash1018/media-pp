@@ -521,3 +521,66 @@ pub trait SourceElement: Source {
 pub trait Filter: Source + Sink {}
 
 impl<T: Source + Sink> Filter for T {}
+
+/// A boxed filter is a filter, so a container that holds elements as trait
+/// objects can wrap one in whatever a chain stage is wrapped in.
+///
+/// [`Rack`](crate::elements::Rack) is why this exists. Its contents arrive
+/// already boxed — that is what makes them exchangeable — and everything a
+/// chain gives an element it builds, from the pipeline id in its log to the
+/// tracer that stamps a failure with the name of whatever raised it, is
+/// written against a type that implements these three traits. Without this
+/// the elements inside a rack would be the one stretch of a running graph
+/// that no such wrapper could reach.
+///
+/// The delegation is exactly that. Nothing here decides anything; every
+/// method is the one on the element inside.
+impl Element for Box<dyn Filter> {
+    fn name(&self) -> Arc<str> {
+        (**self).name()
+    }
+
+    fn element_type(&self) -> ElementType {
+        (**self).element_type()
+    }
+
+    fn graph_id(&self) -> Option<ElementId> {
+        (**self).graph_id()
+    }
+
+    fn pp_log(&self) -> &PpLog {
+        (**self).pp_log()
+    }
+
+    fn pp_log_mut(&mut self) -> &mut PpLog {
+        (**self).pp_log_mut()
+    }
+
+    fn attach_context(&mut self, context: &Arc<Context>) {
+        (**self).attach_context(context);
+    }
+}
+
+impl Source for Box<dyn Filter> {
+    fn src_pads(&mut self) -> &mut [SrcPad] {
+        (**self).src_pads()
+    }
+}
+
+impl Sink for Box<dyn Filter> {
+    fn ready_consume(&mut self) -> bool {
+        (**self).ready_consume()
+    }
+
+    fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+        (**self).consume(buf)
+    }
+
+    fn input_contract(&self) -> InputContract {
+        (**self).input_contract()
+    }
+
+    fn control(&mut self, msg: ControlMsg) -> Result<()> {
+        (**self).control(msg)
+    }
+}

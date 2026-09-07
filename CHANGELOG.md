@@ -141,6 +141,15 @@ compile error with no explanation.
   both, and deriving would answer "unknown" across exactly the stretch most
   likely to be wired up wrong.
 
+  Being inside one changes nothing else about an element. On its way in it
+  is given what `ChainBuilder` gives a stage it builds: log records naming
+  the pipeline it is in, the `Context` if it needs one, and the same tracer,
+  so a failure it raises reaches a `Queue` naming *it* rather than naming
+  the rack that was holding it. `Box<dyn Filter>` implements `Element`,
+  `Source` and `Sink` for that last part — a rack's contents arrive already
+  boxed, and the wrapper is written against a type that implements the
+  three.
+
 - **`CudaChromaKey` keys a green screen on the GPU under CUDA.** Chroma
   keying existed for the CPU and for D3D11, which left Linux without one at
   all: the compositor there is CUDA, and this crate refuses to wire a branch

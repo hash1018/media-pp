@@ -13,7 +13,7 @@
 //! that work.
 
 mod builder;
-mod chain;
+pub(crate) mod chain;
 mod runtime;
 
 pub use builder::PipelineBuilder;

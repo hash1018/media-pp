@@ -76,8 +76,15 @@ trait StageBuilder: Send {
 struct DirectStage<T>(T);
 
 /// Adds uniform EOS/control boundary tracing to every direct filter without
-/// requiring each built-in or downstream custom element to duplicate it.
-struct FlowTracer<T> {
+/// requiring each built-in or downstream custom element to duplicate it, and
+/// stamps a failure with the identity of whatever raised it.
+///
+/// Visible to the crate rather than this module because a chain is no longer
+/// the only place elements are strung together: a
+/// [`Rack`](crate::elements::Rack) builds a line of its own and its contents
+/// must be given the same treatment, or they are the one stretch of a running
+/// graph whose failures arrive anonymous — see [`Self::trace_origin`].
+pub(crate) struct FlowTracer<T> {
     inner: T,
 }
 
@@ -160,6 +167,12 @@ impl<T: Filter> Sink for FlowTracer<T> {
 }
 
 impl<T: Element> FlowTracer<T> {
+    /// Wraps `inner`, which a caller has already linked to whatever follows
+    /// it.
+    pub(crate) fn new(inner: T) -> Self {
+        Self { inner }
+    }
+
     /// Stamps a failure with this stage's identity, unless something nearer
     /// the failure already did.
     ///
