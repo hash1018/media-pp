@@ -136,7 +136,7 @@ impl<T: Filter> Sink for FlowTracer<T> {
                 ),
             }
         }
-        result
+        self.trace_origin(result)
     }
 
     fn control(&mut self, msg: ControlMsg) -> Result<()> {
@@ -155,7 +155,21 @@ impl<T: Filter> Sink for FlowTracer<T> {
                 "event=control control={msg:?} phase=completed outcome=error error={error}"
             ),
         }
-        result
+        self.trace_origin(result)
+    }
+}
+
+impl<T: Element> FlowTracer<T> {
+    /// Stamps a failure with this stage's identity, unless something nearer
+    /// the failure already did.
+    ///
+    /// This is where an error stops being anonymous. A chain is a stack of
+    /// these, each wrapping the rest, so a failure five stages down is seen
+    /// first by the tracer around the element that raised it — and
+    /// [`Error::traced_at`] keeps the first answer. By the time it reaches
+    /// the `Queue` that has to report it, it knows where it came from.
+    fn trace_origin(&self, result: Result<()>) -> Result<()> {
+        result.map_err(|error| error.traced_at(self.inner.element_type(), self.inner.name()))
     }
 }
 
@@ -287,7 +301,9 @@ impl Sink for TerminalTracer {
                 ),
             }
         }
-        result
+        // The end of a branch is where a muxer sits, so this is the stamp
+        // that matters most — see `FlowTracer::trace_origin`.
+        result.map_err(|error| error.traced_at(self.inner.element_type(), self.inner.name()))
     }
 
     fn control(&mut self, msg: ControlMsg) -> Result<()> {
@@ -295,7 +311,10 @@ impl Sink for TerminalTracer {
             pp_log: self.inner.pp_log(),
             "event=control control={msg:?} phase=received"
         );
-        let result = self.inner.control(msg.clone());
+        let result = self
+            .inner
+            .control(msg.clone())
+            .map_err(|error| error.traced_at(self.inner.element_type(), self.inner.name()));
         if result.is_ok() {
             match &msg {
                 ControlMsg::Pause => {

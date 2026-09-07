@@ -3285,3 +3285,132 @@ fn detaching_a_branch_mid_seek_does_not_strand_its_preroll() {
         "the seek waited {elapsed:?} on a terminal that had left the graph"
     );
 }
+
+/// Passes buffers straight through, so a chain can have a stage between the
+/// `Queue` and the sink that fails.
+struct Passthrough {
+    pp_log: PpLog,
+    pad: SrcPad,
+}
+
+impl Element for Passthrough {
+    fn name(&self) -> Arc<str> {
+        "the-middle".into()
+    }
+
+    fn element_type(&self) -> ElementType {
+        ElementType::Other
+    }
+
+    fn pp_log(&self) -> &PpLog {
+        &self.pp_log
+    }
+
+    fn pp_log_mut(&mut self) -> &mut PpLog {
+        &mut self.pp_log
+    }
+}
+
+impl Source for Passthrough {
+    fn src_pads(&mut self) -> &mut [SrcPad] {
+        std::slice::from_mut(&mut self.pad)
+    }
+}
+
+impl Sink for Passthrough {
+    fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+        self.pad.push(buf)
+    }
+
+    fn control(&mut self, msg: ControlMsg) -> Result<()> {
+        self.pad.control(msg)
+    }
+}
+
+/// Refuses every buffer, the way a muxer whose connection has gone does.
+struct AlwaysFailingSink {
+    pp_log: PpLog,
+}
+
+impl Element for AlwaysFailingSink {
+    fn name(&self) -> Arc<str> {
+        "the-end".into()
+    }
+
+    fn element_type(&self) -> ElementType {
+        ElementType::FileMuxer
+    }
+
+    fn pp_log(&self) -> &PpLog {
+        &self.pp_log
+    }
+
+    fn pp_log_mut(&mut self) -> &mut PpLog {
+        &mut self.pp_log
+    }
+}
+
+impl Sink for AlwaysFailingSink {
+    fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+        if buf.is_eos() {
+            return Ok(());
+        }
+        Err(crate::Error::Other("the connection went away".into()))
+    }
+
+    fn control(&mut self, _msg: ControlMsg) -> Result<()> {
+        Ok(())
+    }
+}
+
+/// A failure at the end of a chain is reported as the element that raised
+/// it, not as whatever happened to be nearest the `Queue`.
+///
+/// This is what the whole tracing arrangement is for. The error travels up
+/// through every stage between the sink and the queue, one `?` at a time,
+/// and without an identity attached the only thing left to report it under
+/// is the stage the queue happens to hand buffers to — `the-middle` here,
+/// which did nothing wrong.
+#[test]
+fn a_failure_deep_in_a_chain_is_reported_under_the_element_that_raised_it() {
+    let pipeline = Pipeline::new(
+        "origin",
+        TestVideoSource::new("source", TestVideoOptions::default()),
+        |source, context| {
+            let branch = context
+                .branch()
+                .queue("the-queue", 8)
+                .pipe(Passthrough {
+                    pp_log: PpLog::new("Other", "the-middle", None),
+                    pad: SrcPad::new("the-middle_src"),
+                })
+                .to(Box::new(AlwaysFailingSink {
+                    pp_log: PpLog::new("FileMuxer", "the-end", None),
+                }))?;
+            context.attach(source, 0, branch)?;
+            Ok(())
+        },
+    )
+    .expect("build");
+    pipeline.run().expect("run");
+
+    // The first error to arrive is enough: every buffer fails the same way.
+    let reported = std::iter::from_fn(|| pipeline.bus().recv_message())
+        .find_map(|message| match message.event {
+            BusEvent::Error {
+                element_type, name, ..
+            } => Some((element_type, name)),
+            _ => None,
+        })
+        .expect("the failure reached the bus");
+    pipeline.stop();
+
+    assert_eq!(
+        reported.0,
+        ElementType::FileMuxer,
+        "reported as {:?}({}) rather than as the sink that failed",
+        reported.0,
+        reported.1
+    );
+    assert_eq!(&*reported.1, "the-end");
+}

@@ -672,19 +672,19 @@ fn apply_control(
 /// an encoder refusing a frame arrived indistinguishable, both labelled with
 /// the name of the queue in front of them.
 ///
-/// # What this can and cannot name
+/// # Where the identity comes from
 ///
-/// The element this queue hands buffers to, which is the head of everything
-/// after it — a chain is folded back to front, each stage wrapping the rest
-/// (see `ChainBuilder::to`). For `queue → gate → encoder → muxer` that is
-/// the gate, not the muxer, even when it is the muxer that failed: the error
-/// propagates up through `?` and only the value survives, not who raised it.
+/// From the error, when it has one. Every stage in a built chain is wrapped
+/// in a tracer that stamps a failure with its own identity on the way past,
+/// and the first stamp wins — so an error arriving here already names the
+/// element that raised it, however deep in the chain that was. See
+/// [`Error::traced_at`](crate::error::Error::traced_at).
 ///
-/// So this names the element the buffer was given to, which is true, and
-/// which is as far as the information goes. Naming the originating element
-/// would mean carrying its identity in the error itself, through every
-/// stage — a change to how errors are built rather than to how they are
-/// reported.
+/// From the element this queue feeds, when it has not. That happens where
+/// there is no chain to be traced through: a `Queue` built directly around a
+/// sink, which is what a test does and what an element assembling its own
+/// plumbing may do. Naming what the buffer was handed to is then both true
+/// and the best available.
 struct QueueErrorReporter<'a> {
     bus: &'a Bus,
     /// Taken once, before the worker loop: the element a queue feeds is
@@ -696,12 +696,15 @@ struct QueueErrorReporter<'a> {
 
 impl QueueErrorReporter<'_> {
     fn post(&self, error: crate::error::Error) {
-        let (element_type, name) = &self.downstream;
+        let (element_type, name) = match error.origin() {
+            Some(origin) => (origin.element_type, origin.name.clone()),
+            None => (self.downstream.0, self.downstream.1.clone()),
+        };
         self.bus.post(
             self.pp_log,
             BusEvent::Error {
-                element_type: *element_type,
-                name: name.clone(),
+                element_type,
+                name,
                 error,
             },
         );

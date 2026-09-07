@@ -9,8 +9,11 @@
 //! raise them, so this enum is exactly as wide as the build it belongs to.
 
 use std::io;
+use std::sync::Arc;
 
 use thiserror::Error;
+
+use crate::element::ElementType;
 
 #[cfg(all(target_os = "windows", feature = "dxgi-capture"))]
 use crate::elements::DxgiCaptureSourceError;
@@ -433,6 +436,85 @@ pub enum Error {
     /// An application-defined error message without a more specific category.
     #[error("{0}")]
     Other(String),
+
+    /// Any of the above, plus the element that raised it — see [`Traced`].
+    ///
+    /// Reads and behaves exactly like what it wraps: `Display` forwards, and
+    /// `source()` reaches the inner error, so nothing that only prints or
+    /// chains has to know this exists. What it adds is answerable through
+    /// [`Error::origin`].
+    #[error(transparent)]
+    Traced(#[from] Traced),
+}
+
+/// Which element an error came from.
+///
+/// The name as well as the type, because a graph holds several of most
+/// types: "a muxer failed" is not actionable where "the muxer named
+/// `stream-video` failed" is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Origin {
+    pub element_type: ElementType,
+    pub name: Arc<str>,
+}
+
+/// An error together with the element that raised it.
+///
+/// # Why an error has to carry this
+///
+/// A failure deep in a chain reaches whoever can act on it only after
+/// travelling up through every stage in front of it, one `?` at a time. The
+/// value survives that trip; the identity does not. So a `Queue` reporting a
+/// downstream failure could say *what* went wrong and never *where* — and
+/// "where" is what decides whether a broadcast has dropped or an encoder
+/// hiccupped.
+///
+/// The identity is attached by whichever tracer sees the error first, which
+/// is the one closest to the failure — see `FlowTracer` and `TerminalTracer`
+/// in `pipeline::chain`. Once attached it is never replaced, so what an
+/// observer reads is the element that raised it rather than the last one to
+/// pass it on.
+#[derive(Debug, Error)]
+// Reads as the error it wraps and nothing more: the origin is for whoever
+// asks [`Error::origin`], not for the message. A line that named the element
+// twice — once here and once in the report that carries it — would be worse
+// than one that names it where it is acted on.
+#[error("{source}")]
+pub struct Traced {
+    pub origin: Origin,
+    #[source]
+    pub source: Box<Error>,
+}
+
+impl Error {
+    /// Attaches `element_type`/`name` as this error's origin, unless it
+    /// already has one.
+    ///
+    /// Idempotent by design: every stage between the failure and whoever
+    /// reports it calls this, and the first one to — the innermost, nearest
+    /// the failure — is the one whose answer is kept.
+    #[must_use]
+    pub fn traced_at(self, element_type: ElementType, name: Arc<str>) -> Self {
+        if matches!(self, Self::Traced(_)) {
+            return self;
+        }
+        Self::Traced(Traced {
+            origin: Origin { element_type, name },
+            source: Box::new(self),
+        })
+    }
+
+    /// Which element raised this, where that is known.
+    ///
+    /// `None` for an error that never crossed a chain stage — one returned
+    /// straight to its caller, which already knows who it asked.
+    #[must_use]
+    pub fn origin(&self) -> Option<&Origin> {
+        match self {
+            Self::Traced(traced) => Some(&traced.origin),
+            _ => None,
+        }
+    }
 }
 
 /// The crate's `Result`, with [`enum@Error`] as the error type.
