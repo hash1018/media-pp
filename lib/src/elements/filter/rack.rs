@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex};
 
-use crate::pp_log::{PpLog, pp_debug, pp_info};
+use crate::pp_log::{PpLog, pp_info};
 use thiserror::Error as ThisError;
 
 use crate::{
@@ -204,7 +204,18 @@ impl Rack {
     /// is linked to the collector, the one before it to that, and so on, so
     /// only the first is left to hold.
     fn fill(&mut self, elements: Vec<Box<dyn Filter>>) {
-        let count = elements.len();
+        // Read before the fold, which takes ownership of every one of them,
+        // and at Info because a fill is a topology change of the same kind a
+        // dynamic `Tee` attach is: sparse, caller-driven, and invisible in
+        // the pipeline's own diagram, since what a rack holds are not graph
+        // elements. Without this line a log shows a rack and no way to know
+        // what is in it.
+        let line = elements
+            .iter()
+            .map(|element| format!("{:?}({})", element.element_type(), element.name()))
+            .collect::<Vec<_>>()
+            .join(" -> ");
+
         // Dropped before the new line is built rather than after, so two
         // sets of pools do not exist at once on a device that may be short
         // of them.
@@ -215,7 +226,7 @@ impl Rack {
             .clear();
 
         if elements.is_empty() {
-            pp_debug!(self, "filled: empty, buffers pass straight through");
+            pp_info!(self, "filled: empty, buffers pass straight through");
             return;
         }
         let collector: Box<dyn Sink> = Box::new(Collector {
@@ -236,7 +247,7 @@ impl Rack {
                 element
             });
         self.head = Some(head);
-        pp_debug!(self, "filled: {count} element(s)");
+        pp_info!(self, "filled: {line}");
     }
 }
 
