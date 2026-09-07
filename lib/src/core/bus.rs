@@ -135,6 +135,40 @@ impl Bus {
     /// — used (via `crate::pp_log`'s `pp_log:` macro form) instead of `event`'s
     /// own `name` so the element's full identity, pipeline id included, reaches
     /// the log record rather than just the name carried in the event.
+    /// Posts a failure that arrived from somewhere downstream, attributed
+    /// to whichever element raised it.
+    ///
+    /// `element_type`/`name` are the reporter's own and are used only when
+    /// the error carries no origin — which is when it never crossed a chain
+    /// stage, so there is nobody else to name.
+    ///
+    /// Every element that pushes into a pad and reports what comes back
+    /// should use this rather than [`Bus::post`] with its own identity. A
+    /// queue, a demuxer, a bridge and a WebRTC track are all only the place
+    /// a failure stopped being returnable; none of them is what failed, and
+    /// saying so loses the one thing an observer needs — see
+    /// [`Error::traced_at`](crate::error::Error::traced_at).
+    pub fn post_downstream_error(
+        &self,
+        pp_log: &PpLog,
+        element_type: ElementType,
+        name: Arc<str>,
+        error: Error,
+    ) {
+        let (element_type, name) = match error.origin() {
+            Some(origin) => (origin.element_type, origin.name.clone()),
+            None => (element_type, name),
+        };
+        self.post(
+            pp_log,
+            BusEvent::Error {
+                element_type,
+                name,
+                error,
+            },
+        );
+    }
+
     pub fn post(&self, pp_log: &PpLog, event: BusEvent) {
         // Each `pp_*` macro checks `crate::log::enabled` before evaluating its
         // arguments, so posting to a bus nobody is logging costs no `format!`

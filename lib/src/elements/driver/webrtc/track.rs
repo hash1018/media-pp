@@ -18,7 +18,7 @@ use str0m::{
 
 use crate::{
     buffer::MediaBuffer,
-    bus::{Bus, BusEvent},
+    bus::Bus,
     contract::{InputContract, OutputContract, PortContract},
     control::{
         ControlMsg, ControlReceiver, RequestKind, apply_finish, apply_one, drain_control,
@@ -1004,13 +1004,11 @@ impl SourceElement for WebRtcTrackSource {
                         }
                         Ok(buf) => {
                             if let Err(error) = self.pad.push(buf) {
-                                bus.post(
+                                bus.post_downstream_error(
                                     &self.pp_log,
-                                    BusEvent::Error {
-                                        element_type: ElementType::WebRtcPeer,
-                                        name: self.name.clone(),
-                                        error,
-                                    },
+                                    ElementType::WebRtcPeer,
+                                    self.name.clone(),
+                                    error,
                                 );
                             }
                         }

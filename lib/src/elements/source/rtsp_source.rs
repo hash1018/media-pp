@@ -6,7 +6,7 @@ use thiserror::Error as ThisError;
 
 use crate::{
     buffer::MediaBuffer,
-    bus::{Bus, BusEvent},
+    bus::Bus,
     contract::{MediaKind, OutputContract, PortContract},
     control::{ControlReceiver, drain_control},
     element::{Element, ElementType, Source, SourceElement, element_pp_log},
@@ -209,13 +209,11 @@ impl SourceElement for RtspSource {
                         // worker gives a failing `Sink` — rather than
                         // ending this whole source thread over it.
                         if let Err(error) = pad.push(MediaBuffer::Packet(Arc::new(packet))) {
-                            bus.post(
+                            bus.post_downstream_error(
                                 &self.pp_log,
-                                BusEvent::Error {
-                                    element_type: ElementType::RtspSource,
-                                    name: self.name.clone(),
-                                    error,
-                                },
+                                ElementType::RtspSource,
+                                self.name.clone(),
+                                error,
                             );
                         }
                     }

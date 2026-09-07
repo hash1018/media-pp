@@ -365,13 +365,11 @@ impl FileDemuxer {
 
     fn push_to_pad(&mut self, index: usize, packet: ffmpeg::Packet, bus: &Bus) {
         if let Err(error) = self.pads[index].push(MediaBuffer::Packet(Arc::new(packet))) {
-            bus.post(
+            bus.post_downstream_error(
                 &self.pp_log,
-                BusEvent::Error {
-                    element_type: ElementType::FileDemuxer,
-                    name: self.name.clone(),
-                    error,
-                },
+                ElementType::FileDemuxer,
+                self.name.clone(),
+                error,
             );
         }
     }

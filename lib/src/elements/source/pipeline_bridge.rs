@@ -550,13 +550,11 @@ impl SourceElement for PipelineBridge {
                 // One buffer's failure is not this bridge's end, the same way
                 // a `Queue` reports a failing downstream and keeps its worker.
                 if let Err(error) = self.pad.push(buffer) {
-                    bus.post(
+                    bus.post_downstream_error(
                         &self.pp_log,
-                        BusEvent::Error {
-                            element_type: self.element_type(),
-                            name: self.name.clone(),
-                            error,
-                        },
+                        self.element_type(),
+                        self.name.clone(),
+                        error,
                     );
                 }
             }
