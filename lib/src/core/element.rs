@@ -138,6 +138,8 @@ pub enum ElementType {
     D3d11ChromaKey,
     /// Dynamic one-to-many branch filter.
     Tee,
+    /// A stretch of chain whose contents are replaced while it runs.
+    Rack,
     /// Bounded asynchronous queue filter.
     Queue,
     /// Diagnostic decoded-frame counter sink.

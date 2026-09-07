@@ -27,6 +27,7 @@ mod encoder;
 mod frame_rate_limiter;
 mod pacer;
 mod pause_gate;
+mod rack;
 pub(crate) mod scaler;
 mod tee;
 mod timestamp_origin;
@@ -72,6 +73,7 @@ pub use encoder::{
 pub use frame_rate_limiter::FrameRateLimiter;
 pub use pacer::{Pacer, PacerError};
 pub use pause_gate::{PauseGate, PauseGateHandle};
+pub use rack::{Rack, RackError, RackHandle};
 #[cfg(feature = "cuda")]
 pub use scaler::{CudaScaler, CudaScalerError, CudaScalerInterp};
 #[cfg(all(target_os = "windows", feature = "d3d11"))]

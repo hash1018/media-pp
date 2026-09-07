@@ -110,6 +110,37 @@ compile error with no explanation.
 
 ### Added
 
+- **`Rack` holds a stretch of chain whose contents can be replaced while
+  frames are flowing.** Everything else in this crate settles its graph
+  before the pipeline runs, so changing one element in the middle means
+  building the branch again — which restarts whatever is at the top of it.
+  For a camera that is a visible stall; on Wayland it is a portal dialog.
+
+  ```rust
+  let (rack, rack_handle) = Rack::new(
+      "filters",
+      InputContract::Fixed(PortContract::frame(MediaKind::VideoFrame, MemoryDomain::D3d11)),
+      OutputContract::Fixed(PortContract::frame(MediaKind::VideoFrame, MemoryDomain::D3d11)),
+  );
+  // ...pipeline running...
+  rack_handle.replace(vec![Box::new(key)])?;   // takes effect on the next buffer
+  rack_handle.replace(Vec::new())?;            // and an empty rack is a wire
+  ```
+
+  What is in one is still a straight line, so an element with more than one
+  output is refused at `RackHandle::replace` rather than a frame later. A
+  replacement drops what the outgoing elements were holding, which makes a
+  rack right for elements whose output depends on the buffer in front of them
+  and nothing else — a scaler, a converter, a chroma key — and wrong for an
+  encoder or a muxer. Draining the old line would put its last frames after
+  the new line's first ones, and an element in the middle of a graph cannot
+  put that timeline back in order.
+
+  Its contracts are declared by the caller rather than derived from what it
+  holds, because the caller putting one between two fixed elements knows
+  both, and deriving would answer "unknown" across exactly the stretch most
+  likely to be wired up wrong.
+
 - **`CudaChromaKey` keys a green screen on the GPU under CUDA.** Chroma
   keying existed for the CPU and for D3D11, which left Linux without one at
   all: the compositor there is CUDA, and this crate refuses to wire a branch

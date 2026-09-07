@@ -131,6 +131,15 @@ The core types are deliberately small:
   while a preview keeps running is `finish_branch`; it returns without
   waiting for the drain, and the terminal's `BusEvent::Eos` says when the
   output is actually complete.
+- `Rack` is a stretch of chain whose contents are replaced while frames flow,
+  so a filter can be added or removed without rebuilding the branch around it
+  — which for a camera, or a Wayland capture whose reopening raises a portal
+  dialog, is what makes the change invisible. `RackHandle::replace` swaps the
+  whole line at once and takes effect on the next buffer; what the outgoing
+  elements were holding is dropped, which is why a rack is for elements whose
+  output depends on the buffer in front of them and nothing else. Its
+  contracts are declared by the caller, since only the caller knows the two
+  fixed ends.
 - Every video compositor and every screen capture emits at a rate that can be
   changed while it runs. The compositors take it on their existing handle
   (`set_frame_rate`, and `frame_rate` to read back what was actually kept); a
@@ -248,7 +257,9 @@ opt-in, and these elements declare one:
   `TimestampOrigin`, `PipelineBridge`. `AppSink` accepts anything.
 
 `AppSource` stays undeclared, since only the application knows what it will
-push. Anything else undeclared defaults to "unknown", which always links and
+push. A `Rack` states what its caller declared, since what is in one changes
+and deriving a contract from it could only ever answer "unknown" — across
+exactly the stretch a caller is most likely to wire up wrong. Anything else undeclared defaults to "unknown", which always links and
 leaves the runtime check in charge. A passthrough element carries its
 upstream contract forward, so a mismatch is still caught across a thread
 boundary and still names the element that actually produces the data.
@@ -268,7 +279,7 @@ buffers, codecs, and muxers; `Pipeline::stop` abandons buffered work immediately
 | Kind | Elements |
 |---|---|
 | Sources | `FileDemuxer`, `AppSource`, `RtspSource`, `TestVideoSource`, `TestAudioSource`, `DxgiCaptureSource`, `WgcCaptureSource`, `MfCaptureSource`, `V4l2CaptureSource`, `PipeWireScreenCaptureSource`, `PipeWireAudioCaptureSource`, `WasapiCaptureSource`, `AudioMixer`, `SwVideoCompositor`, `CudaVideoCompositor`, `D3d11VideoCompositor`, `WebRtcTrackSource` |
-| Filters | `SwDecoder`, `CudaDecoder`, `D3d11Decoder`, `D3d12Decoder`, `SwEncoder`, `CudaEncoder`, `D3d11VideoEncoder`, `SwAudioEncoder`, `AudioResampler`, `AudioVolume`, `SwScaler`, `SwChromaKey`, `CudaChromaKey`, `D3d11ChromaKey`, `Pacer`, `VideoSynchronizer`, `CudaScaler`, `D3d11Scaler`, `D3d12Scaler`, `CudaUpload`, `CudaDownload`, `CudaConverter`, `D3d11Upload`, `D3d11Download`, `D3d12Upload`, `D3d12Download`, `Tee`, `ChangeGate`, `TimestampOrigin` |
+| Filters | `SwDecoder`, `CudaDecoder`, `D3d11Decoder`, `D3d12Decoder`, `SwEncoder`, `CudaEncoder`, `D3d11VideoEncoder`, `SwAudioEncoder`, `AudioResampler`, `AudioVolume`, `SwScaler`, `SwChromaKey`, `CudaChromaKey`, `D3d11ChromaKey`, `Pacer`, `VideoSynchronizer`, `CudaScaler`, `D3d11Scaler`, `D3d12Scaler`, `CudaUpload`, `CudaDownload`, `CudaConverter`, `D3d11Upload`, `D3d11Download`, `D3d12Upload`, `D3d12Download`, `Tee`, `ChangeGate`, `TimestampOrigin`, `Rack` |
 | Sinks | `FrameCounter`, `PacketCounter`, `AppSink`, `FileMuxer`, `SegmentedFileMuxer`, `HlsMuxer`, `RtmpMuxer`, `RtspMuxer`, `CudaRenderer`, `D3d11Renderer`, `D3d12Renderer`, `PipeWireAudioRenderer`, `WasapiRenderer`, `OrtDetector`, `WebRtcTrackSink` |
 
 Backend-specific elements require their corresponding Cargo feature and are
