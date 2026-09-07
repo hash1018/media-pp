@@ -449,7 +449,7 @@ fn worker_loop(
     pp_info!(pp_log: &pp_log, "worker: starting");
     let error_reporter = QueueErrorReporter {
         bus: &bus,
-        name: &name,
+        downstream: (downstream.element_type(), downstream.name()),
         pp_log: &pp_log,
     };
     loop {
@@ -660,19 +660,48 @@ fn apply_control(
     }
 }
 
+/// Reports a downstream failure on the bus, as the *downstream element's*.
+///
+/// # Why not as the Queue's own
+///
+/// A `Queue` does not fail here — what failed is whatever it handed the
+/// buffer to, and the queue is only the place the failure could no longer be
+/// returned to a caller. Posting it under `ElementType::Queue` said "a queue
+/// broke", which is never true, and it erased the one thing an observer
+/// needs: *which* element stopped working. A muxer losing its connection and
+/// an encoder refusing a frame arrived indistinguishable, both labelled with
+/// the name of the queue in front of them.
+///
+/// # What this can and cannot name
+///
+/// The element this queue hands buffers to, which is the head of everything
+/// after it — a chain is folded back to front, each stage wrapping the rest
+/// (see `ChainBuilder::to`). For `queue → gate → encoder → muxer` that is
+/// the gate, not the muxer, even when it is the muxer that failed: the error
+/// propagates up through `?` and only the value survives, not who raised it.
+///
+/// So this names the element the buffer was given to, which is true, and
+/// which is as far as the information goes. Naming the originating element
+/// would mean carrying its identity in the error itself, through every
+/// stage — a change to how errors are built rather than to how they are
+/// reported.
 struct QueueErrorReporter<'a> {
     bus: &'a Bus,
-    name: &'a Arc<str>,
+    /// Taken once, before the worker loop: the element a queue feeds is
+    /// fixed for the life of the thread, and reading it at failure time
+    /// would need the borrow that the failing call is already holding.
+    downstream: (ElementType, Arc<str>),
     pp_log: &'a PpLog,
 }
 
 impl QueueErrorReporter<'_> {
     fn post(&self, error: crate::error::Error) {
+        let (element_type, name) = &self.downstream;
         self.bus.post(
             self.pp_log,
             BusEvent::Error {
-                element_type: ElementType::Queue,
-                name: self.name.clone(),
+                element_type: *element_type,
+                name: name.clone(),
                 error,
             },
         );
@@ -1240,6 +1269,57 @@ mod tests {
             errors, 1,
             "expected exactly one Error event, for the one buffer that failed"
         );
+    }
+
+    /// A downstream failure is reported as the downstream element's, not as
+    /// the `Queue`'s.
+    ///
+    /// A queue does not fail here — it is only where the failure could no
+    /// longer be returned to a caller. Reporting it as `ElementType::Queue`
+    /// under the queue's own name, which is what this did until now, said
+    /// that a queue had broken and threw away the one thing an observer
+    /// needs: which element stopped working. Two outputs whose queues were
+    /// named alike became indistinguishable at the exact moment one of them
+    /// failed.
+    #[test]
+    fn a_downstream_failure_is_reported_under_the_downstream_element() {
+        let sink = FailFirstThenCount {
+            count: Arc::new(AtomicUsize::new(0)),
+            failed_once: false,
+            pp_log: element_pp_log(ElementType::Other, "fail-first", None),
+        };
+        let (bus, bus_rx) = Bus::new();
+
+        let mut queue = Queue::spawn_with_policy(
+            "the-queue",
+            8,
+            Box::new(sink),
+            bus,
+            OverflowPolicy::default(),
+            None,
+        )
+        .unwrap();
+        queue.consume(packet()).unwrap();
+        queue.consume(MediaBuffer::Eos).unwrap();
+        drop(queue);
+
+        let reported: Vec<_> = bus_rx
+            .iter()
+            .filter_map(|event| match event {
+                BusEvent::Error {
+                    element_type, name, ..
+                } => Some((element_type, name)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(reported.len(), 1, "expected one Error, got {reported:?}");
+        let (element_type, name) = &reported[0];
+        assert_eq!(
+            *element_type,
+            ElementType::Other,
+            "reported as the queue rather than as what it feeds"
+        );
+        assert_eq!(&**name, "fail-first", "reported the queue's own name");
     }
 
     /// Control failures are asynchronous worker failures just like
