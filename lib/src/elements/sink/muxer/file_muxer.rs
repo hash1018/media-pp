@@ -1099,4 +1099,146 @@ mod tests {
         );
         std::fs::remove_file(&path).ok();
     }
+    /// Three tracks in one file, with the subtitles arriving after the
+    /// video and audio have already finished.
+    ///
+    /// This is the shape a transcriber forces. Inference lags the audio it
+    /// reads by seconds, so a subtitle for the fifth second is handed over
+    /// when the fortieth is being written — and here, to put the question
+    /// past doubt, every video and audio packet is written and ended before
+    /// the first line of text arrives at all.
+    ///
+    /// What makes that legal is that a packet's place in the file is its
+    /// timestamp and not its arrival: the muxer interleaves by `dts`, and
+    /// MP4's index is written at the end, so a sample landing late in
+    /// `mdat` is still indexed at the moment it belongs to. The assertion
+    /// is that the timestamps survive and the other two tracks are
+    /// undamaged by the wait.
+    #[test]
+    fn subtitles_arriving_after_everything_else_still_land_on_their_own_timestamps() {
+        let fixture = crate::test_support::synthesize("late-subtitles", 4.0, 44100);
+        let mut input = ffmpeg::format::input(&fixture.path).expect("open the fixture");
+        let video = input
+            .streams()
+            .best(ffmpeg::media::Type::Video)
+            .expect("the fixture has video");
+        let audio = input
+            .streams()
+            .best(ffmpeg::media::Type::Audio)
+            .expect("the fixture has audio");
+        let (video_index, video_params, video_tb) =
+            (video.index(), video.parameters(), video.time_base());
+        let (audio_index, audio_params, audio_tb) =
+            (audio.index(), audio.parameters(), audio.time_base());
+
+        let path = std::env::temp_dir().join(format!(
+            "file_muxer_subtitles_{}_{:?}.mp4",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_file(&path);
+
+        // Milliseconds for the text track, which is its own timeline and
+        // has no reason to share the video's or the audio's.
+        let text_tb = ffmpeg::Rational::new(1, 1000);
+        let mut muxer = FileMuxer::create(&path).expect("the muxer must open");
+        muxer
+            .add_stream("video", video_params, video_tb)
+            .expect("add_stream video");
+        muxer
+            .add_stream("audio", audio_params, audio_tb)
+            .expect("add_stream audio");
+        muxer
+            .add_stream("text", crate::subtitle::mov_text_parameters(), text_tb)
+            .expect("add_stream text");
+        let mut sinks = muxer.open().expect("open must write the header");
+        assert_eq!(sinks.len(), 3);
+        let mut text_sink = sinks.pop().unwrap();
+        let mut audio_sink = sinks.pop().unwrap();
+        let mut video_sink = sinks.pop().unwrap();
+
+        assert_eq!(
+            text_sink.input_contract(),
+            InputContract::Fixed(PortContract::packet(MediaKind::SubtitlePacket)),
+            "a subtitle track states what it takes, like every other track"
+        );
+
+        for (stream, packet) in input.packets() {
+            let buffer = MediaBuffer::Packet(Arc::new(packet));
+            if stream.index() == video_index {
+                video_sink.consume(buffer).expect("video packet");
+            } else if stream.index() == audio_index {
+                audio_sink.consume(buffer).expect("audio packet");
+            }
+        }
+        video_sink.consume(MediaBuffer::Eos).expect("video eos");
+        audio_sink.consume(MediaBuffer::Eos).expect("audio eos");
+
+        // Only now, with the rest of the file already written.
+        text_sink
+            .consume(crate::subtitle::packet("첫 번째 자막", 1_000, 1_000))
+            .expect("first line");
+        text_sink
+            .consume(crate::subtitle::packet("second line", 2_500, 1_500))
+            .expect("second line");
+        text_sink.consume(MediaBuffer::Eos).expect("text eos");
+
+        let written = ffmpeg::format::input(&path).expect("the file must be readable");
+        let kinds: Vec<_> = written
+            .streams()
+            .map(|stream| stream.parameters().medium())
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                ffmpeg::media::Type::Video,
+                ffmpeg::media::Type::Audio,
+                ffmpeg::media::Type::Subtitle
+            ],
+            "three tracks, in the order they were registered"
+        );
+
+        let text_stream = written
+            .streams()
+            .best(ffmpeg::media::Type::Subtitle)
+            .expect("a subtitle stream");
+        assert_eq!(text_stream.parameters().id(), ffmpeg::codec::Id::MOV_TEXT);
+        let text_index = text_stream.index();
+        let written_tb = text_stream.time_base();
+
+        // Read the lines back and check where they landed. The muxer fills
+        // the gaps between them with empty samples of its own, so this
+        // takes only the ones carrying text.
+        let mut written = written;
+        let mut lines: Vec<(i64, String)> = Vec::new();
+        for (stream, packet) in written.packets() {
+            if stream.index() != text_index {
+                continue;
+            }
+            let data = packet.data().expect("a sample has bytes");
+            let length = u16::from_be_bytes([data[0], data[1]]) as usize;
+            if length == 0 {
+                continue;
+            }
+            let text = std::str::from_utf8(&data[2..2 + length])
+                .expect("valid utf-8")
+                .to_owned();
+            let pts = packet.pts().expect("a sample carries its time");
+            // Back into milliseconds, whatever base the file chose.
+            let millis =
+                pts * 1000 * written_tb.numerator() as i64 / written_tb.denominator() as i64;
+            lines.push((millis, text));
+        }
+
+        assert_eq!(
+            lines,
+            vec![
+                (1_000, "첫 번째 자막".to_owned()),
+                (2_500, "second line".to_owned())
+            ],
+            "the text and its timing survived arriving last"
+        );
+
+        std::fs::remove_file(&path).ok();
+    }
 }

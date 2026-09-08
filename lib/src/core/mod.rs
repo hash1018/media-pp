@@ -33,4 +33,5 @@ pub mod queue;
 pub mod rate;
 pub mod repeat;
 pub mod schedule;
+pub mod subtitle;
 pub mod time;

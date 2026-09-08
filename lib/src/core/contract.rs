@@ -51,11 +51,18 @@ pub enum MediaKind {
     VideoFrame,
     /// Decoded [`MediaBuffer::Audio`](crate::buffer::MediaBuffer::Audio).
     AudioFrame,
+    /// Timed text, as [`MediaBuffer::Packet`](crate::buffer::MediaBuffer::Packet).
+    ///
+    /// There is no decoded counterpart and there is not meant to be. A
+    /// subtitle is already text by the time it is a packet, so nothing in
+    /// this crate decodes one into a different shape — see
+    /// [`crate::subtitle`], which builds the packets a muxer writes.
+    SubtitlePacket,
 }
 
 impl MediaKind {
     /// The encoded kind a stream of `medium` carries, or `None` for a
-    /// medium none of this crate's elements handle (subtitles, data). A
+    /// medium none of this crate's elements handle (data, attachments). A
     /// caller with no kind to state declares
     /// [`OutputContract::Unknown`]/[`InputContract::Unknown`] and leaves
     /// that pad to the runtime check, rather than guessing.
@@ -63,6 +70,7 @@ impl MediaKind {
         match medium {
             ffmpeg::media::Type::Video => Some(MediaKind::VideoPacket),
             ffmpeg::media::Type::Audio => Some(MediaKind::AudioPacket),
+            ffmpeg::media::Type::Subtitle => Some(MediaKind::SubtitlePacket),
             _ => None,
         }
     }
@@ -73,14 +81,16 @@ impl MediaKind {
             MediaKind::AudioPacket => 1 << 1,
             MediaKind::VideoFrame => 1 << 2,
             MediaKind::AudioFrame => 1 << 3,
+            MediaKind::SubtitlePacket => 1 << 4,
         }
     }
 
-    const ALL: [MediaKind; 4] = [
+    const ALL: [MediaKind; 5] = [
         MediaKind::VideoPacket,
         MediaKind::AudioPacket,
         MediaKind::VideoFrame,
         MediaKind::AudioFrame,
+        MediaKind::SubtitlePacket,
     ];
 }
 
@@ -91,6 +101,7 @@ impl fmt::Display for MediaKind {
             MediaKind::AudioPacket => "AudioPacket",
             MediaKind::VideoFrame => "VideoFrame",
             MediaKind::AudioFrame => "AudioFrame",
+            MediaKind::SubtitlePacket => "SubtitlePacket",
         };
         f.write_str(name)
     }
@@ -468,9 +479,13 @@ mod tests {
             MediaKind::packet_for(ffmpeg::media::Type::Audio),
             Some(MediaKind::AudioPacket)
         );
-        // Subtitles and data streams are not modelled, and a caller with
-        // no kind to state leaves that pad Unknown rather than guessing.
-        assert_eq!(MediaKind::packet_for(ffmpeg::media::Type::Subtitle), None);
+        assert_eq!(
+            MediaKind::packet_for(ffmpeg::media::Type::Subtitle),
+            Some(MediaKind::SubtitlePacket)
+        );
+        // Data streams and attachments still are not modelled, and a caller
+        // with no kind to state leaves that pad Unknown rather than guessing.
+        assert_eq!(MediaKind::packet_for(ffmpeg::media::Type::Data), None);
     }
 
     /// Domains are a set on both sides now, so "takes any backend" is a
