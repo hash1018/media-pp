@@ -18,13 +18,19 @@ categories = ["multimedia::video", "multimedia::audio", "multimedia::encoding"]
 # cross-documenting a Windows target produces invalid ABI layout assertions.
 # Full Windows API docs are built separately on a Windows GitHub Actions runner.
 #
-# `ort` and `webrtc` are the only optional features that build on Linux without
-# network access: `ort-sys`'s build script returns early when docs.rs sets
-# `DOCS_RS`, and `str0m`'s `rust-crypto` backend is pure Rust.
+# These are the optional features that build on Linux without network access:
+# `ort-sys`'s build script returns early when docs.rs sets `DOCS_RS`,
+# `str0m`'s `rust-crypto` backend is pure Rust, and `whisper-rs-sys` ships
+# whisper.cpp's sources inside its own package and compiles them with cmake,
+# which docs.rs has — its own crate documents there.
+#
+# `whisper` rather than `whisper-vulkan`: the Vulkan backend needs the SDK's
+# shader compiler at build time, which docs.rs has no reason to carry, and
+# the two present the same API either way.
 [package.metadata.docs.rs]
 default-target = "x86_64-unknown-linux-gnu"
 targets = []
-features = ["ort", "webrtc"]
+features = ["ort", "webrtc", "whisper"]
 rustdoc-args = ["--cfg", "docsrs", "-D", "warnings"]
 
 [dependencies]
@@ -41,6 +47,7 @@ time = { version = "0.3", features = ["local-offset"] }
 tracing-appender = "0.2"
 ort = { version = "2.0.0-rc.13", optional = true }
 ndarray = { version = "0.17", optional = true }
+whisper-rs = { version = "0.14", optional = true }
 str0m = { version = "0.21", optional = true, default-features = false, features = [
     "rust-crypto",
 ] }
@@ -180,6 +187,16 @@ wasapi-renderer = [
     "windows/Win32_UI_Shell_PropertiesSystem",
 ]
 ort = ["dep:ort", "dep:ndarray"]
+# Speech to text, through whisper.cpp. Its build is C++ and needs cmake,
+# which every CI runner already has; the model is a file the caller
+# supplies, since nothing that size belongs in a crate.
+whisper = ["dep:whisper-rs"]
+# The same, on the GPU. Vulkan rather than CUDA deliberately: the CUDA
+# backend needs the toolkit to build and only serves NVIDIA, while this
+# needs the Vulkan SDK's shader compiler at build time — the runtime ships
+# with every driver — and serves AMD and Intel too. Measured at ~13x real
+# time against ~0.4x on the CPU for the same model.
+whisper-vulkan = ["whisper", "whisper-rs/vulkan"]
 webrtc = ["dep:str0m"]
 
 [dev-dependencies]

@@ -20,6 +20,8 @@ mod muxer;
 mod ort_detector;
 mod packet_counter;
 mod renderer;
+#[cfg(feature = "whisper")]
+mod whisper_transcriber;
 
 pub use app_sink::AppSink;
 pub use frame_counter::FrameCounter;
@@ -47,3 +49,8 @@ pub use renderer::{
 };
 #[cfg(all(target_os = "windows", feature = "wasapi-renderer"))]
 pub use renderer::{WasapiRenderer, WasapiRendererError, WasapiRendererOptions};
+#[cfg(feature = "whisper")]
+pub use whisper_transcriber::{
+    ChunkPolicy, SAMPLE_RATE as WHISPER_SAMPLE_RATE, Segment, WhisperTranscriber,
+    WhisperTranscriberError,
+};

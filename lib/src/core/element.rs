@@ -163,6 +163,8 @@ pub enum ElementType {
     AppSink,
     /// ONNX Runtime object-detection sink.
     OrtDetector,
+    /// Speech-to-text sink, through whisper.cpp.
+    WhisperTranscriber,
     /// HTTP Live Streaming muxer sink.
     HlsMuxer,
     /// Container file muxer sink — the container is whichever one

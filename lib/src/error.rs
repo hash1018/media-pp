@@ -38,6 +38,8 @@ use crate::elements::WasapiRendererError;
 use crate::elements::WebRtcError;
 #[cfg(all(target_os = "windows", feature = "wgc-capture"))]
 use crate::elements::WgcCaptureSourceError;
+#[cfg(feature = "whisper")]
+use crate::elements::WhisperTranscriberError;
 #[cfg(feature = "cuda")]
 use crate::elements::{
     CudaChromaKeyError, CudaConverterError, CudaDecoderError, CudaDownloadError, CudaEncoderError,
@@ -423,6 +425,11 @@ pub enum Error {
     #[cfg(feature = "ort")]
     #[error(transparent)]
     OrtDetectorError(#[from] OrtDetectorError),
+
+    /// Loading a speech model, or transcribing with it, failed.
+    #[cfg(feature = "whisper")]
+    #[error(transparent)]
+    WhisperTranscriberError(#[from] WhisperTranscriberError),
 
     /// A WebRTC peer operation failed.
     #[cfg(feature = "webrtc")]

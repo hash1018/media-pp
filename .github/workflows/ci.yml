@@ -86,6 +86,12 @@ jobs:
         shell: pwsh
         run: cargo clippy -p media-pp --all-targets --features cuda -- -D warnings
 
+      # whisper.cpp is a C++ build, so this is the one feature whose lint
+      # also proves the runner's cmake and toolchain can produce it at all.
+      - name: Lint (Whisper)
+        shell: pwsh
+        run: cargo clippy -p media-pp --all-targets --features whisper -- -D warnings
+
       # `DOCS_RS` keeps `ort-sys` from downloading ONNX Runtime and linking its
       # dylibs into the target directory, which needs Developer Mode on a
       # runner to create symlinks. Checking never links, so the download buys
@@ -118,6 +124,12 @@ jobs:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc -p media-pp --no-deps --features cuda
 
+      - name: Check API documentation (Whisper)
+        shell: pwsh
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc -p media-pp --no-deps --features whisper
+
       # Hardware-dependent tests detect the missing device and skip with a
       # reason (`try_device()`), so these run the whole logic suite here and
       # the D3D11/NVENC/capture parts on a developer machine. The soak
@@ -129,6 +141,13 @@ jobs:
       - name: Test (Windows backends)
         shell: pwsh
         run: cargo test -p media-pp --features d3d11,d3d12,dxgi-capture,wgc-capture,mf-capture,wasapi-capture,wasapi-renderer
+
+      # The chunking these cover needs no model file, which is why they can
+      # run here at all — a model is gigabytes and belongs to whoever runs
+      # the transcriber, not to this repository.
+      - name: Test (Whisper)
+        shell: pwsh
+        run: cargo test -p media-pp --features whisper
 
   linux:
     runs-on: ubuntu-26.04
@@ -178,6 +197,11 @@ jobs:
       - name: Lint (CUDA)
         run: cargo clippy -p media-pp --all-targets --features cuda -- -D warnings
 
+      # See the same job on Windows: this one also proves the runner can
+      # build whisper.cpp, which is C++ and needs cmake.
+      - name: Lint (Whisper)
+        run: cargo clippy -p media-pp --all-targets --features whisper -- -D warnings
+
       - name: Check (ONNX Runtime and WebRTC)
         env:
           DOCS_RS: "1"
@@ -192,9 +216,16 @@ jobs:
           cargo doc -p media-pp --no-deps
           cargo doc -p media-pp --no-deps --features pipewire-audio-capture,pipewire-audio-renderer,pipewire-screen-capture,v4l2-capture
           cargo doc -p media-pp --no-deps --features cuda
+          cargo doc -p media-pp --no-deps --features whisper
 
       - name: Test (no features)
         run: cargo test -p media-pp
+
+      # The chunking these cover needs no model file, which is why they can
+      # run here at all — a model is gigabytes and belongs to whoever runs
+      # the transcriber, not to this repository.
+      - name: Test (Whisper)
+        run: cargo test -p media-pp --features whisper
 
       # PipeWire-session-dependent tests skip themselves with a reason
       # (`try_capture_source()`-style helper) when this headless runner has

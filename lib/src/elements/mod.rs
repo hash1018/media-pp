@@ -99,6 +99,10 @@ pub use sink::{
 };
 #[cfg(feature = "ort")]
 pub use sink::{COCO_CLASS_LABELS, Detection, OrtDetector, OrtDetectorError};
+#[cfg(feature = "whisper")]
+pub use sink::{
+    ChunkPolicy, Segment, WHISPER_SAMPLE_RATE, WhisperTranscriber, WhisperTranscriberError,
+};
 #[cfg(feature = "cuda")]
 pub use sink::{CudaFrameRenderer, CudaRenderer, CudaRendererError};
 #[cfg(all(target_os = "windows", feature = "d3d11"))]

@@ -244,12 +244,14 @@ opt-in, and these elements declare one:
 
 - Packet path: `FileDemuxer`, `SwDecoder`, `SwEncoder`, `SwAudioEncoder`,
   `FileMuxer`, `SegmentedFileMuxer`, `HlsMuxer`, `RtmpMuxer`, `RtspMuxer`,
-  `PacketCounter`.
+  `PacketCounter`. A muxer's subtitle track deals in `SubtitlePacket`, which
+  `crate::subtitle` builds — there is no decoded counterpart, since a
+  subtitle is already text by the time it is a packet.
 - Video: `SwScaler`, `SwChromaKey`, `SwVideoCompositor`, `OrtDetector`, and
   every backend's upload, download, scaler, converter, chroma key, decoder,
   encoder, renderer, and compositor (`D3d11*`, `D3d12*`, `Cuda*`).
-- Audio: `AudioResampler`, `AudioVolume`, `AudioMixer`, `WasapiRenderer`,
-  `PipeWireAudioRenderer`.
+- Audio: `AudioResampler`, `AudioVolume`, `AudioMixer`, `WhisperTranscriber`,
+  `WasapiRenderer`, `PipeWireAudioRenderer`.
 - Sources: `FileDemuxer`, `RtspSource`, `TestVideoSource`, `TestAudioSource`,
   the capture sources, and inbound WebRTC tracks.
 - Either decoded medium: `FrameCounter`.
@@ -280,7 +282,7 @@ buffers, codecs, and muxers; `Pipeline::stop` abandons buffered work immediately
 |---|---|
 | Sources | `FileDemuxer`, `AppSource`, `RtspSource`, `TestVideoSource`, `TestAudioSource`, `DxgiCaptureSource`, `WgcCaptureSource`, `MfCaptureSource`, `V4l2CaptureSource`, `PipeWireScreenCaptureSource`, `PipeWireAudioCaptureSource`, `WasapiCaptureSource`, `AudioMixer`, `SwVideoCompositor`, `CudaVideoCompositor`, `D3d11VideoCompositor`, `WebRtcTrackSource` |
 | Filters | `SwDecoder`, `CudaDecoder`, `D3d11Decoder`, `D3d12Decoder`, `SwEncoder`, `CudaEncoder`, `D3d11VideoEncoder`, `SwAudioEncoder`, `AudioResampler`, `AudioVolume`, `SwScaler`, `SwChromaKey`, `CudaChromaKey`, `D3d11ChromaKey`, `Pacer`, `VideoSynchronizer`, `CudaScaler`, `D3d11Scaler`, `D3d12Scaler`, `CudaUpload`, `CudaDownload`, `CudaConverter`, `D3d11Upload`, `D3d11Download`, `D3d12Upload`, `D3d12Download`, `Tee`, `ChangeGate`, `TimestampOrigin`, `Rack` |
-| Sinks | `FrameCounter`, `PacketCounter`, `AppSink`, `FileMuxer`, `SegmentedFileMuxer`, `HlsMuxer`, `RtmpMuxer`, `RtspMuxer`, `CudaRenderer`, `D3d11Renderer`, `D3d12Renderer`, `PipeWireAudioRenderer`, `WasapiRenderer`, `OrtDetector`, `WebRtcTrackSink` |
+| Sinks | `FrameCounter`, `PacketCounter`, `AppSink`, `FileMuxer`, `SegmentedFileMuxer`, `HlsMuxer`, `RtmpMuxer`, `RtspMuxer`, `CudaRenderer`, `D3d11Renderer`, `D3d12Renderer`, `PipeWireAudioRenderer`, `WasapiRenderer`, `OrtDetector`, `WhisperTranscriber`, `WebRtcTrackSink` |
 
 Backend-specific elements require their corresponding Cargo feature and are
 available only on that backend's platform. See each type's Rust documentation
@@ -362,6 +364,8 @@ The library has no default features.
 | `wasapi-capture` | System-audio and microphone capture | Windows |
 | `wasapi-renderer` | Shared-mode audio playback | Windows |
 | `ort` | ONNX Runtime object detection | All supported targets |
+| `whisper` | Speech to timed text, through whisper.cpp | All supported targets |
+| `whisper-vulkan` | The same, on any GPU Vulkan reaches | All supported targets |
 | `webrtc` | `str0m`-based WebRTC peer and track elements | All supported targets |
 
 Each attached WebRTC source and sink exposes the codec families retained by
