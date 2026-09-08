@@ -47,7 +47,7 @@ time = { version = "0.3", features = ["local-offset"] }
 tracing-appender = "0.2"
 ort = { version = "2.0.0-rc.13", optional = true }
 ndarray = { version = "0.17", optional = true }
-whisper-rs = { version = "0.14", optional = true }
+whisper-rs = { version = "0.16", optional = true }
 str0m = { version = "0.21", optional = true, default-features = false, features = [
     "rust-crypto",
 ] }
@@ -196,6 +196,23 @@ whisper = ["dep:whisper-rs"]
 # needs the Vulkan SDK's shader compiler at build time — the runtime ships
 # with every driver — and serves AMD and Intel too. Measured at ~13x real
 # time against ~0.4x on the CPU for the same model.
+#
+# Building this on Windows needs two things, and neither alone is enough.
+# ggml builds its shader generator as a CMake ExternalProject, whose nested
+# paths run past `MAX_PATH`:
+#
+#   1. Long paths on:
+#      `HKLM\SYSTEM\CurrentControlSet\Control\FileSystem\LongPathsEnabled=1`
+#      Without it MSBuild cannot create the directories at all.
+#   2. A short `CARGO_TARGET_DIR`, e.g. `C:\t`. MSBuild honours long paths
+#      once (1) is set, but `FileTracker` — the native tool it logs file
+#      access with — does not, and fails with FTK1011 from a target
+#      directory as ordinary as `D:\Project\media-pp\target`.
+#
+# Turning `FileTracker` off with `TrackFileAccess=false` clears FTK1011 and
+# breaks the ExternalProject's step ordering instead, so it is not a way
+# round (2). The CPU `whisper` feature needs none of this, and neither does
+# Linux.
 whisper-vulkan = ["whisper", "whisper-rs/vulkan"]
 webrtc = ["dep:str0m"]
 

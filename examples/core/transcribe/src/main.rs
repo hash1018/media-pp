@@ -143,6 +143,12 @@ mod example {
         let text_sink = Arc::new(Mutex::new(text_sink));
         let text_for_segments = Arc::clone(&text_sink);
 
+        // Said before rather than after, because on a GPU backend this is
+        // where the wait is: the first run on a machine has the driver
+        // compile whisper.cpp's shaders, which took over a minute here and
+        // under two seconds every run after — that cache outlives the
+        // process. Without a line first it looks like a hang.
+        println!("loading {model_path} ...");
         let transcriber = WhisperTranscriber::new(
             "transcribe",
             &model_path,

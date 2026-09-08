@@ -413,12 +413,15 @@ where
             .full(params, &inference.audio)
             .map_err(WhisperTranscriberError::Inference)?;
 
-        let count = self
-            .state
-            .full_n_segments()
-            .map_err(WhisperTranscriberError::Inference)?;
+        let count = self.state.full_n_segments();
         for index in 0..count {
-            let Ok(text) = self.state.full_get_segment_text(index) else {
+            let Some(segment) = self.state.get_segment(index) else {
+                continue;
+            };
+            // Lossy because a chunk boundary can cut a multi-byte character
+            // in half, and one mangled glyph is a better answer than
+            // dropping the sentence around it.
+            let Ok(text) = segment.to_str_lossy() else {
                 continue;
             };
             let text = text.trim().to_owned();
@@ -427,9 +430,8 @@ where
             }
             // whisper.cpp reports in hundredths of a second, from the start
             // of the audio it was handed — which began at `offset_ms`.
-            let start =
-                self.state.full_get_segment_t0(index).unwrap_or(0) * 10 + inference.offset_ms;
-            let end = self.state.full_get_segment_t1(index).unwrap_or(0) * 10 + inference.offset_ms;
+            let start = segment.start_timestamp() * 10 + inference.offset_ms;
+            let end = segment.end_timestamp() * 10 + inference.offset_ms;
             if start < inference.accept_from_ms || start >= inference.accept_until_ms {
                 pp_trace!(
                     self,

@@ -55,6 +55,32 @@ The first GPU run also pays for the driver to compile whisper.cpp's shaders,
 which took over a minute here and under two seconds every run after — that
 cache outlives the process.
 
+### Building the GPU feature on Windows
+
+ggml builds its Vulkan shader generator as a CMake ExternalProject, and the
+paths that produces run past Windows' 260-character limit. Two things are
+needed, and neither alone was enough here.
+
+Long paths on, from an elevated prompt — without this MSBuild cannot create
+the directories at all (MSB4018 / MSB6003):
+
+```text
+reg add "HKLM\SYSTEM\CurrentControlSet\Control\FileSystem" /v LongPathsEnabled /t REG_DWORD /d 1 /f
+```
+
+And a short target directory. MSBuild honours long paths once the setting is
+on, but `FileTracker` — the native tool it logs file access with — does not,
+and fails with FTK1011 from a target directory as ordinary as
+`D:\Project\media-pp\target`:
+
+```text
+set CARGO_TARGET_DIR=C:\t
+```
+
+Turning `FileTracker` off with `TrackFileAccess=false` clears FTK1011 and
+breaks the ExternalProject's step ordering instead, so it is not a way round
+the second. The CPU build needs neither, and nor does Linux.
+
 whisper.cpp falls back to the CPU without complaining when it finds no GPU, so
 a run that seems inexplicably slow is worth checking against its own log:
 
