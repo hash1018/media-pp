@@ -110,6 +110,57 @@ compile error with no explanation.
 
 ### Added
 
+- **Speech becomes subtitles: `WhisperTranscriber`, and `subtitle` to carry
+  what it says.** Two halves of one feature, kept apart on purpose.
+
+  `WhisperTranscriber` is a terminal sink, like `OrtDetector` and for the
+  same reason — what comes out is not media. It takes 16 kHz mono f32 (an
+  `AudioResampler` in front is how audio reaches that shape) and hands
+  `Segment { start_ms, end_ms, text }` to a callback.
+
+  ```rust
+  let transcriber = WhisperTranscriber::new(
+      "transcribe", model_path, ChunkPolicy::default(),
+      |segment| { println!("{}", segment.text); Ok(()) },
+  )?;
+  ```
+
+  Whisper's encoder takes exactly 30 seconds, so transcribing a stream is a
+  loop, and `ChunkPolicy` is what the loop is made of. `chunk_ms` (4000) is
+  how much to gather before each inference; `live_edge_ms` (1000) is how
+  much of the newest audio to distrust. The model's output nearest the edge
+  is unstable — a word half-heard is guessed at, and the guess changes when
+  the rest arrives — so that stretch is left for the next round instead of
+  being reported and corrected. **A line, once reported, never changes**,
+  which is what lets a caller write it straight to a file. Each inference
+  is also given the previous chunk as context, so a word across the seam is
+  heard whole; that costs a second pass over audio already transcribed.
+
+  The delay is the sum of the two, so text runs about five seconds behind
+  the speech. For a recording that is nothing, because a subtitle's place
+  in a file is its timestamp and not its arrival.
+
+  `crate::subtitle` is the other half: `mov_text_parameters()` describes an
+  MP4 subtitle track and `packet()` builds one line of it. MP4 takes 3GPP
+  Timed Text and nothing else — not SRT, not ASS — and this writes the
+  `tx3g` sample entry FFmpeg's own encoder writes, so a track says how its
+  lines should look rather than leaving it to the player. `MediaKind` gains
+  `SubtitlePacket` so such a track states its contract like any other.
+
+  Gaps need no packets: FFmpeg's muxer fills them with empty samples, so a
+  caller pushes a line when there is something to say and nothing when
+  there is not.
+
+  Features: `whisper` builds whisper.cpp for the CPU, `whisper-vulkan` for
+  any GPU Vulkan reaches. Vulkan rather than CUDA because CUDA needs a 3 GB
+  toolkit to build and serves only NVIDIA, while Vulkan's runtime ships
+  with every driver and only its shader compiler is a build requirement.
+  Measured on an RTX 3050: `large-v3-turbo` at 13x real time against ~0.4x
+  on the CPU.
+
+  See `examples/core/transcribe`, which writes a copy of a file carrying
+  video, audio and the transcription as three tracks.
+
 - **`Rack` holds a stretch of chain whose contents can be replaced while
   frames are flowing.** Everything else in this crate settles its graph
   before the pipeline runs, so changing one element in the middle means

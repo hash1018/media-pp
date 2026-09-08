@@ -1,0 +1,15 @@
+[package]
+name = "transcribe"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[features]
+# The GPU is not the default because the Vulkan SDK is a build requirement
+# and the CPU path needs nothing. On this hardware the difference was
+# ~0.4x real time against ~13x, so anyone transcribing more than a clip
+# wants it.
+gpu = ["media-pp/whisper-vulkan"]
+
+[dependencies]
+media-pp = { path = "../../../lib", features = ["whisper"] }
