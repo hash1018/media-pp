@@ -61,11 +61,18 @@ pub enum WhisperTranscriberError {
 
 /// One stretch of speech, and when it was said.
 ///
-/// The times are milliseconds from the first sample this transcriber was
-/// given, which is its own timeline and not the source's. A caller that
-/// needs the source's adds whatever offset it knows — for a file read from
-/// the beginning that offset is zero, which is why the example does not
-/// mention it.
+/// The times are milliseconds on the timeline of the audio itself, taken
+/// from the frames' own timestamps rather than counted from the first
+/// sample that arrived. That is what keeps a line where it belongs when
+/// audio is lost: a queue that drops buffers because this is behind leaves
+/// a hole rather than shifting everything after it earlier, for ever, by
+/// what was dropped.
+///
+/// So a caller muxing these into the file the audio came from needs no
+/// offset. One muxing them beside a *different* timeline — a recording
+/// whose tracks are rebased to start at zero, say — needs the same rebase
+/// applied here, and has to get it from wherever that timeline's own zero
+/// was decided.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Segment {
     /// When the speech starts, in milliseconds.
@@ -169,12 +176,18 @@ struct Chunker {
     policy: ChunkPolicy,
     /// New audio, not yet transcribed.
     pending: Vec<f32>,
-    /// The chunk before `pending`, kept to feed as context.
+    /// Where `pending` starts on the timeline of the audio itself.
+    pending_start: i64,
+    /// The chunk before `pending`, kept to feed as context. Empty when what
+    /// came before did not join onto this.
     context: Vec<f32>,
-    /// Where `context` starts, in samples from the first ever pushed.
-    context_start: u64,
-    /// Everything before this has been reported, in samples.
-    accepted_until: u64,
+    /// Where `context` starts on the same timeline.
+    context_start: i64,
+    /// Everything before this has been reported.
+    accepted_until: i64,
+    /// Where the next sample is expected to land, so one arriving anywhere
+    /// else is recognised as a gap. `None` before the first.
+    next_pts: Option<i64>,
 }
 
 impl Chunker {
@@ -182,23 +195,59 @@ impl Chunker {
         Self {
             policy,
             pending: Vec::new(),
+            pending_start: 0,
             context: Vec::new(),
             context_start: 0,
             accepted_until: 0,
+            next_pts: None,
         }
     }
 
-    fn samples_to_ms(samples: u64) -> i64 {
-        (samples as i64 * 1000) / SAMPLE_RATE as i64
+    fn samples_to_ms(samples: i64) -> i64 {
+        (samples * 1000) / SAMPLE_RATE as i64
     }
 
     /// Takes more audio, and answers the inference it now wants run.
     ///
-    /// `None` while there is not yet a full chunk. One call yields at most
-    /// one inference, so a caller handing over more than a chunk at a time
-    /// should keep calling until it answers `None`.
-    fn push(&mut self, samples: &[f32]) -> Option<Inference> {
+    /// `pts` places the samples on the timeline of the audio itself, in
+    /// that timeline's own units — which for the [`SAMPLE_RATE`] mono this
+    /// accepts is a sample index. `None` means "where the last frame
+    /// ended", which is what a source that stamps nothing amounts to.
+    ///
+    /// Answers `None` while there is not yet a full chunk. One call yields
+    /// at most one inference, so a caller handing over more than a chunk at
+    /// a time keeps calling [`Chunker::take_chunk`] until it answers `None`.
+    ///
+    /// # A gap throws away what was pending
+    ///
+    /// Audio that does not continue where the last left off — a queue that
+    /// dropped buffers because this is behind, a source that jumped —
+    /// leaves what is buffered unjoinable to what follows. Transcribing
+    /// across the seam would put one sentence over two moments that are not
+    /// adjacent, so the buffer goes and the timeline picks up where the new
+    /// audio actually is.
+    ///
+    /// The alternative, counting samples and letting positions slide, is
+    /// worse in the way that matters: every line after the loss would be
+    /// early by what was lost, and the error would accumulate instead of
+    /// staying where it happened.
+    fn push(&mut self, pts: Option<i64>, samples: &[f32]) -> Option<Inference> {
+        let pts = pts.or(self.next_pts).unwrap_or(0);
+        match self.next_pts {
+            None => {
+                self.pending_start = pts;
+                self.accepted_until = pts;
+            }
+            Some(expected) if pts != expected => {
+                self.pending.clear();
+                self.context.clear();
+                self.pending_start = pts;
+                self.accepted_until = self.accepted_until.max(pts);
+            }
+            Some(_) => {}
+        }
         self.pending.extend_from_slice(samples);
+        self.next_pts = Some(pts + samples.len() as i64);
         self.take_chunk()
     }
 
@@ -209,14 +258,15 @@ impl Chunker {
         }
         let rest = self.pending.split_off(chunk);
         let current = std::mem::replace(&mut self.pending, rest);
+        let current_start = self.pending_start;
+        self.pending_start = current_start + chunk as i64;
 
         // The edge is where the audio runs out, and the last stretch before
         // it is what the model is least sure of.
-        let current_start = self.context_start + self.context.len() as u64;
-        let current_end = current_start + current.len() as u64;
-        let accept_until = current_end.saturating_sub(self.policy.live_edge_samples() as u64);
+        let current_end = current_start + current.len() as i64;
+        let accept_until = current_end - self.policy.live_edge_samples() as i64;
 
-        let inference = self.inference(&current, accept_until);
+        let inference = self.inference(current_start, &current, accept_until);
 
         self.context_start = current_start;
         self.context = current;
@@ -232,12 +282,13 @@ impl Chunker {
     /// everything has already been reported.
     fn flush(&mut self) -> Option<Inference> {
         let current = std::mem::take(&mut self.pending);
-        let current_start = self.context_start + self.context.len() as u64;
-        let current_end = current_start + current.len() as u64;
+        let current_start = self.pending_start;
+        let current_end = current_start + current.len() as i64;
         if current_end <= self.accepted_until {
             return None;
         }
-        let inference = self.inference(&current, current_end);
+        let inference = self.inference(current_start, &current, current_end);
+        self.pending_start = current_end;
         self.context_start = current_start;
         self.context = current;
         self.accepted_until = current_end;
@@ -246,12 +297,19 @@ impl Chunker {
 
     /// Builds the request: context then the chunk, and the window of the
     /// answer that is neither already said nor too new to trust.
-    fn inference(&self, current: &[f32], accept_until: u64) -> Inference {
+    fn inference(&self, current_start: i64, current: &[f32], accept_until: i64) -> Inference {
+        // There is no context before the first chunk, nor after a gap, and
+        // then what the model is handed begins where this chunk does.
+        let audio_start = if self.context.is_empty() {
+            current_start
+        } else {
+            self.context_start
+        };
         let mut audio = Vec::with_capacity(self.context.len() + current.len());
         audio.extend_from_slice(&self.context);
         audio.extend_from_slice(current);
         Inference {
-            offset_ms: Self::samples_to_ms(self.context_start),
+            offset_ms: Self::samples_to_ms(audio_start),
             audio,
             accept_from_ms: Self::samples_to_ms(self.accepted_until),
             accept_until_ms: Self::samples_to_ms(accept_until),
@@ -283,6 +341,12 @@ impl Chunker {
 /// [`AudioResampler`](crate::elements::AudioResampler) in front is how
 /// audio gets into that shape; this refuses anything else rather than
 /// resampling badly on its own.
+///
+/// The frames' timestamps are read, and are expected in `1/SAMPLE_RATE` —
+/// a sample index — which is what that resampler emits and reports through
+/// its own `time_base`. They are what places a [`Segment`], so audio that
+/// arrives with a gap in it leaves a gap rather than pulling everything
+/// after it earlier.
 ///
 /// # Threading and pace
 ///
@@ -495,7 +559,7 @@ where
                 let samples = Self::samples_of(&frame)?;
                 // One push can complete more than one chunk, when whoever
                 // is upstream hands over a long frame.
-                let mut inference = self.chunker.push(samples);
+                let mut inference = self.chunker.push(frame.pts(), samples);
                 while let Some(next) = inference {
                     self.transcribe(next)?;
                     inference = self.chunker.take_chunk();
@@ -552,14 +616,24 @@ mod tests {
         vec![0.0; ms * SAMPLE_RATE as usize / 1000]
     }
 
+    fn at(ms: usize) -> i64 {
+        (ms * SAMPLE_RATE as usize / 1000) as i64
+    }
+
+    /// Pushes `ms` of audio continuing wherever the last push ended, which
+    /// is the ordinary case and what most of these tests want.
+    fn push_on(chunker: &mut Chunker, ms: usize) -> Option<Inference> {
+        chunker.push(None, &samples(ms))
+    }
+
     /// Nothing is transcribed until a whole chunk has arrived, because a
     /// shorter one is padded to thirty seconds and the model was not
     /// trained to hear the padding as silence at the end of a sentence.
     #[test]
     fn a_partial_chunk_is_not_transcribed() {
         let mut chunker = Chunker::new(POLICY);
-        assert_eq!(chunker.push(&samples(3_999)), None);
-        assert!(chunker.push(&samples(1)).is_some(), "and now it is full");
+        assert_eq!(push_on(&mut chunker, 3_999), None);
+        assert!(push_on(&mut chunker, 1).is_some(), "and now it is full");
     }
 
     /// The window that is believed starts where the last one stopped and
@@ -568,7 +642,7 @@ mod tests {
     fn the_believed_window_stops_short_of_the_edge_and_resumes_there() {
         let mut chunker = Chunker::new(POLICY);
 
-        let first = chunker.push(&samples(4_000)).expect("a full chunk");
+        let first = push_on(&mut chunker, 4_000).expect("a full chunk");
         assert_eq!(first.offset_ms, 0);
         assert_eq!(first.accept_from_ms, 0);
         assert_eq!(
@@ -576,7 +650,7 @@ mod tests {
             "the last second is not trusted"
         );
 
-        let second = chunker.push(&samples(4_000)).expect("another");
+        let second = push_on(&mut chunker, 4_000).expect("another");
         assert_eq!(
             second.accept_from_ms, 3_000,
             "the second held back before is picked up here"
@@ -590,14 +664,14 @@ mod tests {
     fn each_inference_carries_the_previous_chunk_as_context() {
         let mut chunker = Chunker::new(POLICY);
 
-        let first = chunker.push(&samples(4_000)).expect("a full chunk");
+        let first = push_on(&mut chunker, 4_000).expect("a full chunk");
         assert_eq!(
             first.audio.len(),
             samples(4_000).len(),
             "nothing precedes the first"
         );
 
-        let second = chunker.push(&samples(4_000)).expect("another");
+        let second = push_on(&mut chunker, 4_000).expect("another");
         assert_eq!(
             second.audio.len(),
             samples(8_000).len(),
@@ -611,7 +685,7 @@ mod tests {
     #[test]
     fn a_long_push_yields_one_inference_per_chunk() {
         let mut chunker = Chunker::new(POLICY);
-        assert!(chunker.push(&samples(12_000)).is_some());
+        assert!(push_on(&mut chunker, 12_000).is_some());
         assert!(chunker.take_chunk().is_some());
         assert!(chunker.take_chunk().is_some());
         assert_eq!(chunker.take_chunk(), None, "three chunks and no more");
@@ -622,8 +696,8 @@ mod tests {
     #[test]
     fn the_tail_is_transcribed_at_eos_without_holding_the_edge_back() {
         let mut chunker = Chunker::new(POLICY);
-        chunker.push(&samples(4_000)).expect("a full chunk");
-        chunker.push(&samples(500));
+        push_on(&mut chunker, 4_000).expect("a full chunk");
+        push_on(&mut chunker, 500);
 
         let last = chunker.flush().expect("the tail is worth hearing");
         assert_eq!(
@@ -643,8 +717,8 @@ mod tests {
     #[test]
     fn a_second_flush_has_nothing_left_to_say() {
         let mut chunker = Chunker::new(POLICY);
-        chunker.push(&samples(4_000));
-        chunker.push(&samples(500));
+        push_on(&mut chunker, 4_000);
+        push_on(&mut chunker, 500);
         assert!(chunker.flush().is_some());
         assert_eq!(chunker.flush(), None);
     }
@@ -654,10 +728,64 @@ mod tests {
     #[test]
     fn a_stream_ending_on_a_boundary_still_reports_its_held_back_edge() {
         let mut chunker = Chunker::new(POLICY);
-        chunker.push(&samples(4_000)).expect("a full chunk");
+        push_on(&mut chunker, 4_000).expect("a full chunk");
 
         let last = chunker.flush().expect("the held-back second is still owed");
         assert_eq!(last.accept_from_ms, 3_000);
         assert_eq!(last.accept_until_ms, 4_000);
+    }
+    /// The whole reason positions come from the timestamps: audio that
+    /// arrives late in its own timeline, because a queue dropped what was
+    /// between, must not drag everything after it earlier.
+    #[test]
+    fn a_gap_leaves_a_hole_rather_than_shifting_what_follows() {
+        let mut chunker = Chunker::new(POLICY);
+        push_on(&mut chunker, 4_000).expect("a full chunk");
+
+        // Ten seconds went missing. What arrives is stamped where it really
+        // is, not where counting would have put it.
+        let after = chunker
+            .push(Some(at(14_000)), &samples(4_000))
+            .expect("a full chunk again");
+        assert_eq!(
+            after.offset_ms, 14_000,
+            "the audio is placed where its timestamps say"
+        );
+        assert_eq!(
+            after.accept_from_ms, 14_000,
+            "and nothing before it is claimed"
+        );
+        assert_eq!(after.accept_until_ms, 17_000);
+    }
+
+    /// Across a gap the audio before it is not context for the audio after:
+    /// they are not adjacent, and feeding them together would let one
+    /// sentence run over a hole.
+    #[test]
+    fn audio_before_a_gap_is_not_context_for_what_follows() {
+        let mut chunker = Chunker::new(POLICY);
+        push_on(&mut chunker, 4_000).expect("a full chunk");
+
+        let after = chunker
+            .push(Some(at(14_000)), &samples(4_000))
+            .expect("a full chunk again");
+        assert_eq!(
+            after.audio.len(),
+            samples(4_000).len(),
+            "the new chunk alone, with nothing in front of it"
+        );
+    }
+
+    /// A source whose audio does not start at zero — a file seeked into, a
+    /// mixer that has been running — reports where it actually is.
+    #[test]
+    fn a_timeline_that_does_not_start_at_zero_is_reported_as_it_is() {
+        let mut chunker = Chunker::new(POLICY);
+        let first = chunker
+            .push(Some(at(60_000)), &samples(4_000))
+            .expect("a full chunk");
+        assert_eq!(first.offset_ms, 60_000);
+        assert_eq!(first.accept_from_ms, 60_000);
+        assert_eq!(first.accept_until_ms, 63_000);
     }
 }
