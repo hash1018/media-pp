@@ -1,8 +1,14 @@
-//! FileDemuxer -> FileMuxer: remuxes every video/audio stream in a file
-//! straight into a new `.mp4` container — no decode/re-encode, just
-//! repackaging. Packets pass through byte-for-byte; only their timestamps
-//! get rescaled to whatever time_base the output container actually
-//! assigns each stream (see `FileMuxer::open`'s own docs).
+//! FileDemuxer -> FileMuxer: remuxes every stream this crate has a kind
+//! for — video, audio and subtitles — straight into a new `.mp4`
+//! container, with no decode/re-encode, just repackaging. Packets pass
+//! through byte-for-byte; only their timestamps get rescaled to whatever
+//! time_base the output container actually assigns each stream (see
+//! `FileMuxer::open`'s own docs).
+//!
+//! Which streams those are is asked of `MediaKind::packet_for` rather than
+//! listed here, so this does not go stale as the crate learns to carry
+//! more: subtitles started travelling when `MediaKind::SubtitlePacket` was
+//! added, and this file needed no edit to start keeping them.
 //!
 //! `FileDemuxer` is a single source with one `src_pad` per container
 //! stream, so — unlike combining two independent *live* sources (see
@@ -18,7 +24,7 @@ fn main() -> impl std::process::Termination {
 }
 
 mod example {
-    use media_pp::ffmpeg::media;
+    use media_pp::contract::MediaKind;
     use media_pp::{
         bus::BusEvent,
         elements::{FileDemuxer, FileMuxer},
@@ -44,16 +50,22 @@ mod example {
 
         let (source, streams) = FileDemuxer::open("demux", &input_path)?;
 
-        // Only video/audio streams can be muxed into an MP4 this way (see
-        // `FileMuxer::add_stream`) — skip anything else (subtitles, data
-        // streams, ...) rather than failing the whole remux over one stream
-        // this can't carry.
+        // Whichever streams this crate has a kind for, which is what
+        // `MediaKind::packet_for` answers: video, audio and subtitles.
+        // Asking the library rather than listing the kinds here is what
+        // keeps this from going stale — subtitles only started travelling
+        // when `SubtitlePacket` was added, and this needed no edit to
+        // start carrying them.
+        //
+        // A stream with no kind — a data stream, an attachment — is
+        // skipped rather than failing the whole remux over one track
+        // nothing here can describe.
         let mut muxer = FileMuxer::create(&output_path)?;
         let mut kept_indices = Vec::new();
         for stream in &streams {
-            if !matches!(stream.kind, media::Type::Video | media::Type::Audio) {
+            if MediaKind::packet_for(stream.kind).is_none() {
                 println!(
-                    "skipping stream {} ({:?}) — not video/audio",
+                    "skipping stream {} ({:?}) — not a kind this can carry",
                     stream.index, stream.kind
                 );
                 continue;
