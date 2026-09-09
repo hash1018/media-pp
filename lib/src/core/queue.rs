@@ -1359,4 +1359,107 @@ mod tests {
             "Pause, Resume, and Stop failures must each be reported once"
         );
     }
+    /// A downstream that refuses `Eos` and accepts everything else.
+    ///
+    /// What a decoder or an encoder does when its own drain fails — those
+    /// propagate such a failure now rather than swallowing it, so `Eos`
+    /// reaching one through a `Queue` can arrive as an error.
+    struct RefuseEos {
+        pp_log: PpLog,
+        count: Arc<AtomicUsize>,
+    }
+
+    impl Element for RefuseEos {
+        fn name(&self) -> Arc<str> {
+            "refuse-eos".into()
+        }
+
+        fn element_type(&self) -> ElementType {
+            ElementType::Other
+        }
+
+        fn pp_log(&self) -> &PpLog {
+            &self.pp_log
+        }
+
+        fn pp_log_mut(&mut self) -> &mut PpLog {
+            &mut self.pp_log
+        }
+    }
+
+    impl Sink for RefuseEos {
+        fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+            if buf.is_eos() {
+                return Err(crate::error::Error::Other("simulated drain failure".into()));
+            }
+            self.count.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn control(&mut self, _msg: ControlMsg) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    /// An `Eos` the downstream refuses is reported like any other failure —
+    /// and the stream is then never declared finished.
+    ///
+    /// This pins a consequence rather than a mechanism, because the
+    /// consequence is what a caller meets. `Eos` is definitionally the last
+    /// buffer, so a worker that treats its failure the way it treats a
+    /// mid-stream one has nothing left to ever receive: it posts the error,
+    /// goes back to waiting, and never posts [`BusEvent::Eos`].
+    ///
+    /// A caller watching the bus for completion therefore waits until
+    /// something calls `Pipeline::stop`, which is this crate's stated
+    /// division of labour — the bus watcher decides what is fatal. It is
+    /// worth knowing rather than discovering: draining the bus is not on
+    /// its own a guarantee that a pipeline has finished, wherever a decode
+    /// or encode drain can fail.
+    #[test]
+    fn a_refused_eos_is_reported_and_the_stream_is_never_declared_finished() {
+        let count = Arc::new(AtomicUsize::new(0));
+        let sink = RefuseEos {
+            count: count.clone(),
+            pp_log: element_pp_log(ElementType::Other, "refuse-eos", None),
+        };
+        let (bus, bus_rx) = Bus::new();
+
+        let mut queue = Queue::spawn_with_policy(
+            "test",
+            8,
+            Box::new(sink),
+            bus,
+            OverflowPolicy::default(),
+            None,
+        )
+        .unwrap();
+        for _ in 0..3 {
+            queue.consume(packet()).unwrap();
+        }
+        queue.consume(MediaBuffer::Eos).unwrap();
+        // Dropping is what ends the worker here: it sets the stop flag and
+        // joins. Without it the thread would still be waiting.
+        drop(queue);
+
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            3,
+            "everything before the Eos went through"
+        );
+
+        let events: Vec<_> = bus_rx.iter().collect();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e, BusEvent::Error { .. }))
+                .count(),
+            1,
+            "the refused Eos is reported once, like any other failure"
+        );
+        assert!(
+            !events.iter().any(|e| matches!(e, BusEvent::Eos { .. })),
+            "and the stream is never declared finished, because it was not"
+        );
+    }
 }
