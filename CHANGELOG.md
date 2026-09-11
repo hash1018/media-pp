@@ -122,8 +122,20 @@ compile error with no explanation.
   let transcriber = WhisperTranscriber::new(
       "transcribe", model_path, ChunkPolicy::default(),
       |segment| { println!("{}", segment.text); Ok(()) },
-  )?;
+  )?
+  .with_language("ko")?;
   ```
+
+  The language is detected unless `with_language` names it, and naming it
+  is both faster — detection is run again for every chunk — and steadier,
+  since a chunk of music or two words can be heard as another language.
+  Detection rather than whisper.cpp's own default, which is English: handed
+  Korean under that, it does not fail but writes an English paraphrase.
+
+  Lines arrive in order and never overlap. A line ends no later than the
+  audio it was heard in, and one that overlaps the last starts where the
+  last stopped — an MP4 text track cannot hold overlapping samples, and its
+  muxer wrote negative durations for them.
 
   Whisper's encoder takes exactly 30 seconds, so transcribing a stream is a
   loop, and `ChunkPolicy` is what the loop is made of. `chunk_ms` (4000) is
@@ -155,8 +167,11 @@ compile error with no explanation.
   any GPU Vulkan reaches. Vulkan rather than CUDA because CUDA needs a 3 GB
   toolkit to build and serves only NVIDIA, while Vulkan's runtime ships
   with every driver and only its shader compiler is a build requirement.
-  Measured on an RTX 3050: `large-v3-turbo` at 13x real time against ~0.4x
-  on the CPU.
+  Measured on an RTX 3050 against a minute of dense Korean speech, in the
+  streaming loop above: `large-v3-turbo` at 6.5x real time and `small` at
+  9.7x, where `large-v3-turbo` on the CPU had not finished after fourteen
+  minutes. The loop costs more than transcribing a file in one pass — every
+  inference pays for a whole 30-second encoder window to hear eight seconds.
 
   See `examples/core/transcribe`, which writes a copy of a file carrying
   video, audio and the transcription as three tracks.

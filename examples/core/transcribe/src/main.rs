@@ -34,8 +34,11 @@
 //!
 //! ```text
 //! cargo run -p transcribe --release -- model.bin input.mp4 [output.mp4]
-//! cargo run -p transcribe --release --features gpu -- model.bin input.mp4
+//! cargo run -p transcribe --release --features gpu -- --language ko model.bin input.mp4
 //! ```
+//!
+//! The language is detected unless `--language` names it, which is slower
+//! and can be fooled by a stretch of music — see the README.
 //!
 //! The model is a whisper.cpp GGML file — `ggml-base.bin` and friends, from
 //! `huggingface.co/ggerganov/whisper.cpp`. Nothing that size belongs in a
@@ -81,13 +84,27 @@ mod example {
             7,
         )?;
 
+        // `--language` anywhere, and the rest by position.
+        let mut language = None;
+        let mut positional = Vec::new();
         let mut args = std::env::args().skip(1);
-        let (Some(model_path), Some(input_path)) = (args.next(), args.next()) else {
-            eprintln!("usage: transcribe <model.bin> <input.mp4> [output.mp4]");
+        while let Some(arg) = args.next() {
+            if arg == "--language" {
+                language = args.next();
+            } else {
+                positional.push(arg);
+            }
+        }
+        let mut positional = positional.into_iter();
+        let (Some(model_path), Some(input_path)) = (positional.next(), positional.next()) else {
+            eprintln!("usage: transcribe [--language <code>] <model.bin> <input.mp4> [output.mp4]");
             eprintln!("  the model is a whisper.cpp GGML file, e.g. ggml-base.bin");
+            eprintln!("  the language is detected unless given, e.g. --language ko");
             std::process::exit(1);
         };
-        let output_path = args.next().unwrap_or_else(|| "transcribed.mp4".into());
+        let output_path = positional
+            .next()
+            .unwrap_or_else(|| "transcribed.mp4".into());
 
         let (source, streams) = FileDemuxer::open("demux", &input_path)?;
         let video = streams
@@ -149,7 +166,7 @@ mod example {
         // under two seconds every run after — that cache outlives the
         // process. Without a line first it looks like a hang.
         println!("loading {model_path} ...");
-        let transcriber = WhisperTranscriber::new(
+        let mut transcriber = WhisperTranscriber::new(
             "transcribe",
             &model_path,
             ChunkPolicy::default(),
@@ -160,7 +177,14 @@ mod example {
                     segment.end_ms as f32 / 1000.0,
                     segment.text
                 );
-                let duration = (segment.end_ms - segment.start_ms).max(1);
+                // A line with no length would be on screen for no time at
+                // all, and stretching it to one millisecond would overlap
+                // whatever starts where it does — which a text track cannot
+                // hold. Printed, and left out of the file.
+                let duration = segment.end_ms - segment.start_ms;
+                if duration <= 0 {
+                    return Ok(());
+                }
                 let packet = subtitle::packet(&segment.text, segment.start_ms, duration);
                 text_for_segments
                     .lock()
@@ -168,6 +192,9 @@ mod example {
                     .consume(packet)
             },
         )?;
+        if let Some(language) = &language {
+            transcriber = transcriber.with_language(language)?;
+        }
 
         let decoder = SwDecoder::new("audio-decode", audio_params)?;
         let resampler = AudioResampler::new(

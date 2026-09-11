@@ -21,11 +21,16 @@ resampled into the one shape Whisper reads: 16 kHz mono f32.
 
 ```sh
 cargo run -p transcribe --release -- model.bin input.mp4 [output.mp4]
-cargo run -p transcribe --release --features gpu -- model.bin input.mp4
+cargo run -p transcribe --release --features gpu -- --language ko model.bin input.mp4
 ```
 
 `--release` matters more than usual here: a debug build of the inference is
 slower than real time even on a GPU.
+
+The language is detected unless `--language` names it. Name it where it is
+known: detection runs again for every few seconds of audio, which cost 60%
+more time on the measurement below, and a stretch of music can be heard as
+a different language from the speech around it.
 
 ## The model
 
@@ -33,7 +38,8 @@ A whisper.cpp GGML file, from
 [huggingface.co/ggerganov/whisper.cpp](https://huggingface.co/ggerganov/whisper.cpp).
 Nothing that size belongs in a repository, so this takes a path. `ggml-base.bin`
 (148 MB) is enough to see it work; `ggml-large-v3-turbo.bin` (1.6 GB) is what
-gets a language other than English right.
+gets a language other than English right. `ggml-small.bin` (488 MB) is faster
+and mishears more: on Korean it wrote 알프스 삼백 for 알프스 산맥.
 
 ## CPU or GPU
 
@@ -42,14 +48,20 @@ gets a language other than English right.
 not its runtime, which ships with every graphics driver. Vulkan rather than
 CUDA because CUDA needs a 3 GB toolkit to build and serves only NVIDIA.
 
-The difference is not small. Measured on an i5-12400F with an RTX 3050,
-against 209 seconds of audio:
+The difference is not small. Measured with this example on an i5-12400F with
+an RTX 3050, against a minute of dense Korean speech — nearly two words a
+second — with `--language ko`:
 
 | model | CPU | Vulkan |
 |---|---|---|
-| `base` | 4.6x real time | — |
-| `small` | 1.5x | 66x |
-| `large-v3-turbo` | ~0.4x | 13x |
+| `small` | — | 9.7x real time |
+| `large-v3-turbo` | slower than 0.07x — stopped after 14 minutes | 6.5x |
+
+Transcribing a whole file in one pass is several times faster than this, and
+the difference is the streaming loop rather than the model: every inference
+pays for a whole 30-second encoder window to hear eight seconds of audio,
+four of them context. That is the price of lines arriving while the audio is
+still coming in, and on a CPU it is not affordable at all.
 
 The first GPU run also pays for the driver to compile whisper.cpp's shaders,
 which took over a minute here and under two seconds every run after — that

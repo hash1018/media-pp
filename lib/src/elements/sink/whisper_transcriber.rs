@@ -57,6 +57,9 @@ pub enum WhisperTranscriberError {
     /// A buffer that is not audio reached this sink.
     #[error("WhisperTranscriber only accepts audio frames, got {0:?}")]
     UnsupportedBuffer(&'static str),
+    /// A language whisper.cpp does not know.
+    #[error("whisper does not know the language {0:?}; use a code such as \"en\" or \"ko\"")]
+    UnknownLanguage(String),
 }
 
 /// One stretch of speech, and when it was said.
@@ -156,6 +159,8 @@ struct Inference {
     /// Segments starting at or after this are too near the edge to trust;
     /// the next round will cover them.
     accept_until_ms: i64,
+    /// Where `audio` ends. Nothing the model says can have been said later.
+    audio_end_ms: i64,
 }
 
 /// Decides what to transcribe and what of the result to believe.
@@ -188,6 +193,9 @@ struct Chunker {
     /// Where the next sample is expected to land, so one arriving anywhere
     /// else is recognised as a gap. `None` before the first.
     next_pts: Option<i64>,
+    /// Where the last reported segment ended, in milliseconds — see
+    /// [`Chunker::place`].
+    reported_until_ms: i64,
 }
 
 impl Chunker {
@@ -200,6 +208,7 @@ impl Chunker {
             context_start: 0,
             accepted_until: 0,
             next_pts: None,
+            reported_until_ms: i64::MIN,
         }
     }
 
@@ -308,12 +317,46 @@ impl Chunker {
         let mut audio = Vec::with_capacity(self.context.len() + current.len());
         audio.extend_from_slice(&self.context);
         audio.extend_from_slice(current);
+        let audio_end = audio_start + audio.len() as i64;
         Inference {
             offset_ms: Self::samples_to_ms(audio_start),
             audio,
             accept_from_ms: Self::samples_to_ms(self.accepted_until),
             accept_until_ms: Self::samples_to_ms(accept_until),
+            audio_end_ms: Self::samples_to_ms(audio_end),
         }
+    }
+
+    /// Where a segment the model reported belongs on the timeline, or
+    /// `None` if it should not be reported at all.
+    ///
+    /// Choosing a segment by where it *starts* is not enough on its own, and
+    /// real speech showed why. A segment starting inside the believed window
+    /// can end anywhere, including past the end of the audio it came from —
+    /// eight seconds of audio produced a line from 32.8 to 40 — and the next
+    /// round, which really does hear 36 to 38, reports that too. The lines
+    /// overlapped, and an MP4's text track cannot hold that: its muxer fills
+    /// the gap before each sample with an empty one, and a gap that is
+    /// negative made negative durations and samples with no timestamp.
+    ///
+    /// So two rules on top of the window. An end is no later than the audio
+    /// the model was given. And a line never starts before the last one
+    /// ended: one that overlaps it starts where it stopped, and one wholly
+    /// inside it — the same words heard a second time — is not reported.
+    /// What reaches the caller is in order and never overlaps.
+    fn place(&mut self, inference: &Inference, start_ms: i64, end_ms: i64) -> Option<(i64, i64)> {
+        if start_ms < inference.accept_from_ms || start_ms >= inference.accept_until_ms {
+            return None;
+        }
+        let end = end_ms.min(inference.audio_end_ms);
+        let start = start_ms.max(self.reported_until_ms);
+        if start > start_ms && end <= start {
+            return None;
+        }
+        // A segment with no length keeps none rather than running backwards.
+        let end = end.max(start);
+        self.reported_until_ms = end;
+        Some((start, end))
     }
 
     /// Forgets everything, for a [`ControlMsg::Flush`] or a seek.
@@ -325,6 +368,20 @@ impl Chunker {
         self.pending.clear();
         self.context.clear();
     }
+}
+
+/// whisper.cpp's own code for a language given as a code or an English name,
+/// or why it has none.
+///
+/// Checked here because whisper.cpp would take an unknown one and fail every
+/// chunk with it, and whisper-rs panics outright on an interior NUL.
+fn language_code(language: &str) -> std::result::Result<&'static str, WhisperTranscriberError> {
+    let unknown = || WhisperTranscriberError::UnknownLanguage(language.to_owned());
+    if language.contains('\0') {
+        return Err(unknown());
+    }
+    let id = whisper_rs::get_lang_id(language).ok_or_else(unknown)?;
+    whisper_rs::get_lang_str(id).ok_or_else(unknown)
 }
 
 /// Turns speech into timed text, one stretch at a time.
@@ -377,6 +434,11 @@ pub struct WhisperTranscriber<F> {
     /// so the context it came from does not have to be kept beside it.
     state: WhisperState,
     chunker: Chunker,
+    /// whisper.cpp's own code for the language, or `None` to detect it —
+    /// see [`WhisperTranscriber::with_language`]. Its own `&'static str`
+    /// rather than the caller's string, which is what lets each chunk's
+    /// parameters borrow it without anything to keep alive.
+    language: Option<&'static str>,
     on_segment: F,
     /// Reported once, because it is the same answer every time and a line
     /// per chunk would bury the log.
@@ -436,9 +498,32 @@ where
             name,
             state,
             chunker: Chunker::new(policy),
+            language: None,
             on_segment,
             reported_zero_length: false,
         })
+    }
+
+    /// Says which language the speech is in, as whisper.cpp names it — a
+    /// code such as `"en"` or `"ko"`, or the English name, `"korean"`.
+    ///
+    /// Without this the language is detected, afresh for every chunk. That
+    /// is the right default and the reason there is one: whisper.cpp's own
+    /// is English, and handed Korean speech under that it does not fail —
+    /// it writes an English paraphrase of it, confidently and at full speed,
+    /// which is exactly what nobody asked for.
+    ///
+    /// Saying it is still better where it is known. Detecting takes the few
+    /// seconds of one chunk to go on, and a chunk of music, laughter or two
+    /// words can be heard as something else, which puts a line in the wrong
+    /// language in the middle of the right ones.
+    pub fn with_language(
+        mut self,
+        language: &str,
+    ) -> std::result::Result<Self, WhisperTranscriberError> {
+        self.language = Some(language_code(language)?);
+        pp_info!(self, "language: {}", self.language.unwrap_or("auto"));
+        Ok(self)
     }
 
     /// Reads one audio frame's samples, refusing anything not in the one
@@ -472,6 +557,9 @@ where
         params.set_print_special(false);
         params.set_print_realtime(false);
         params.set_print_timestamps(false);
+        // `None` is detection, which has to be asked for: left unset,
+        // whisper.cpp assumes English — see `with_language`.
+        params.set_language(self.language);
 
         self.state
             .full(params, &inference.audio)
@@ -496,13 +584,14 @@ where
             // of the audio it was handed — which began at `offset_ms`.
             let start = segment.start_timestamp() * 10 + inference.offset_ms;
             let end = segment.end_timestamp() * 10 + inference.offset_ms;
-            if start < inference.accept_from_ms || start >= inference.accept_until_ms {
+            let Some((start, end)) = self.chunker.place(&inference, start, end) else {
                 pp_trace!(
                     self,
-                    "event=segment phase=skipped start={start}ms outcome=outside-window"
+                    "event=segment phase=skipped start={start}ms end={end}ms \
+                     outcome=outside-window-or-already-reported"
                 );
                 continue;
-            }
+            };
             if end <= start && !self.reported_zero_length {
                 self.reported_zero_length = true;
                 pp_debug!(
@@ -787,5 +876,102 @@ mod tests {
         assert_eq!(first.offset_ms, 60_000);
         assert_eq!(first.accept_from_ms, 60_000);
         assert_eq!(first.accept_until_ms, 63_000);
+    }
+
+    /// The rounds that produced the overlapping lines, as a minute of Korean
+    /// speech had them: the chunk ending at 36 s, heard with the one before
+    /// it, and then the next.
+    fn rounds_to_36_and_40() -> (Chunker, Inference, Inference) {
+        let mut chunker = Chunker::new(POLICY);
+        push_on(&mut chunker, 32_000);
+        while chunker.take_chunk().is_some() {}
+        let to_36 = push_on(&mut chunker, 4_000).expect("the chunk ending at 36 s");
+        let to_40 = push_on(&mut chunker, 4_000).expect("and the one after");
+        (chunker, to_36, to_40)
+    }
+
+    /// A line cannot end after the audio it was heard in. The model said
+    /// 32.8 to 40 of audio that ended at 36.
+    #[test]
+    fn a_line_ending_past_its_audio_is_cut_where_the_audio_ends() {
+        let (mut chunker, to_36, _) = rounds_to_36_and_40();
+        assert_eq!(to_36.audio_end_ms, 36_000);
+        assert_eq!(
+            chunker.place(&to_36, 32_800, 40_000),
+            Some((32_800, 36_000))
+        );
+    }
+
+    /// The next round's line from 36 to 38 then lands after it rather than
+    /// inside it — which is the overlap that made the MP4 muxer write
+    /// negative durations.
+    #[test]
+    fn lines_from_consecutive_rounds_never_overlap() {
+        let (mut chunker, to_36, to_40) = rounds_to_36_and_40();
+        let first = chunker.place(&to_36, 32_800, 40_000).expect("reported");
+        let second = chunker.place(&to_40, 36_000, 38_000).expect("reported");
+        assert!(
+            second.0 >= first.1,
+            "{second:?} starts before {first:?} ends"
+        );
+    }
+
+    /// One overlapping the last starts where the last stopped; one wholly
+    /// inside it is the same words heard twice, and is not reported again.
+    #[test]
+    fn an_overlapping_line_is_trimmed_and_a_repeated_one_dropped() {
+        let (mut chunker, to_36, to_40) = rounds_to_36_and_40();
+        chunker.place(&to_36, 32_000, 36_000).expect("reported");
+
+        assert_eq!(
+            chunker.place(&to_40, 35_500, 37_000),
+            Some((36_000, 37_000)),
+            "starts where the last line ended"
+        );
+        assert_eq!(
+            chunker.place(&to_40, 36_200, 36_800),
+            None,
+            "wholly inside what was just reported"
+        );
+    }
+
+    /// The window still decides first: a line starting before it was
+    /// reported last round, and one at the edge is left for the next.
+    #[test]
+    fn a_line_outside_the_believed_window_is_still_skipped() {
+        let (mut chunker, _, to_40) = rounds_to_36_and_40();
+        assert_eq!(to_40.accept_from_ms, 35_000);
+        assert_eq!(to_40.accept_until_ms, 39_000);
+        assert_eq!(chunker.place(&to_40, 34_000, 36_000), None);
+        assert_eq!(chunker.place(&to_40, 39_000, 40_000), None);
+    }
+
+    /// A line the model gave no length keeps none, rather than being lost
+    /// or made to run backwards.
+    #[test]
+    fn a_line_with_no_length_is_kept_with_none() {
+        let (mut chunker, to_36, _) = rounds_to_36_and_40();
+        assert_eq!(
+            chunker.place(&to_36, 33_000, 33_000),
+            Some((33_000, 33_000))
+        );
+    }
+
+    /// Codes and names are both accepted and come back as whisper.cpp's own
+    /// code; anything else is refused before it can reach whisper.cpp, which
+    /// would otherwise fail every chunk — or, for an interior NUL, panic.
+    #[test]
+    fn a_language_is_checked_against_whisper_s_own_list() {
+        assert_eq!(language_code("ko").ok(), Some("ko"));
+        assert_eq!(language_code("korean").ok(), Some("ko"));
+        for refused in ["klingon", "", "ko\0"] {
+            assert!(
+                matches!(
+                    language_code(refused),
+                    Err(WhisperTranscriberError::UnknownLanguage(_))
+                ),
+                "{refused:?} must be refused"
+            );
+        }
     }
 }
