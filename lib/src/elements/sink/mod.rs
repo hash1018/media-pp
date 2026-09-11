@@ -51,6 +51,6 @@ pub use renderer::{
 pub use renderer::{WasapiRenderer, WasapiRendererError, WasapiRendererOptions};
 #[cfg(feature = "whisper")]
 pub use whisper_transcriber::{
-    ChunkPolicy, SAMPLE_RATE as WHISPER_SAMPLE_RATE, Segment, WhisperTranscriber,
+    ChunkPolicy, SAMPLE_RATE as WHISPER_SAMPLE_RATE, Segment, TokenTiming, WhisperTranscriber,
     WhisperTranscriberError,
 };

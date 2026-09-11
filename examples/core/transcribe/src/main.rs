@@ -56,7 +56,7 @@ mod example {
 
     use media_pp::elements::{
         AudioFormat, AudioResampler, ChunkPolicy, FileDemuxer, FileMuxer, SwDecoder, TeeBuilder,
-        WHISPER_SAMPLE_RATE, WhisperTranscriber,
+        TokenTiming, WHISPER_SAMPLE_RATE, WhisperTranscriber,
     };
     use media_pp::ffmpeg;
     use media_pp::{bus::BusEvent, ffmpeg::media, pipeline::Pipeline, subtitle};
@@ -84,22 +84,26 @@ mod example {
             7,
         )?;
 
-        // `--language` anywhere, and the rest by position.
+        // Options anywhere, and the rest by position.
         let mut language = None;
+        let mut token_timing = TokenTiming::Estimated;
         let mut positional = Vec::new();
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
-            if arg == "--language" {
-                language = args.next();
-            } else {
-                positional.push(arg);
+            match arg.as_str() {
+                "--language" => language = args.next(),
+                "--align" => token_timing = TokenTiming::Aligned,
+                _ => positional.push(arg),
             }
         }
         let mut positional = positional.into_iter();
         let (Some(model_path), Some(input_path)) = (positional.next(), positional.next()) else {
-            eprintln!("usage: transcribe [--language <code>] <model.bin> <input.mp4> [output.mp4]");
+            eprintln!(
+                "usage: transcribe [--language <code>] [--align] <model.bin> <input.mp4> [output.mp4]"
+            );
             eprintln!("  the model is a whisper.cpp GGML file, e.g. ggml-base.bin");
             eprintln!("  the language is detected unless given, e.g. --language ko");
+            eprintln!("  --align times each word against the audio, for cleaner seams");
             std::process::exit(1);
         };
         let output_path = positional
@@ -165,11 +169,14 @@ mod example {
         // compile whisper.cpp's shaders, which took over a minute here and
         // under two seconds every run after — that cache outlives the
         // process. Without a line first it looks like a hang.
-        println!("loading {model_path} ...");
+        println!("loading {model_path} ({token_timing:?} token times) ...");
         let mut transcriber = WhisperTranscriber::new(
             "transcribe",
             &model_path,
-            ChunkPolicy::default(),
+            ChunkPolicy {
+                token_timing,
+                ..ChunkPolicy::default()
+            },
             move |segment| {
                 println!(
                     "[{:>8.2} -> {:>8.2}] {}",

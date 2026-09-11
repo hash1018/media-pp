@@ -21,7 +21,7 @@ resampled into the one shape Whisper reads: 16 kHz mono f32.
 
 ```sh
 cargo run -p transcribe --release -- model.bin input.mp4 [output.mp4]
-cargo run -p transcribe --release --features gpu -- --language ko model.bin input.mp4
+cargo run -p transcribe --release --features gpu -- --language ko --align model.bin input.mp4
 ```
 
 `--release` matters more than usual here: a debug build of the inference is
@@ -31,6 +31,15 @@ The language is detected unless `--language` names it. Name it where it is
 known: detection runs again for every few seconds of audio, which cost 60%
 more time on the measurement below, and a stretch of music can be heard as
 a different language from the speech around it.
+
+`--align` times each word against the audio rather than taking whisper.cpp's
+estimate, which is what decides where a line is cut between one round and
+the next. Estimated times left pieces said twice at the seams — "13시간 /
+시간 정도" — where aligned ones left one in the whole minute, for about 5%
+more time. Which alignment heads to use is worked out from the model file;
+for a model with no known heads, such as a distilled one, it says so in the
+log and estimates instead. Whether it aligned shows in whisper.cpp's own
+output as `dtw = 1`.
 
 ## The model
 

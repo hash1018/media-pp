@@ -8,7 +8,7 @@ use whisper_rs::{
     FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperState,
 };
 
-use crate::pp_log::{PpLog, pp_debug, pp_info, pp_trace};
+use crate::pp_log::{PpLog, pp_debug, pp_info, pp_trace, pp_warn};
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, PortContract},
@@ -116,10 +116,14 @@ pub struct ChunkPolicy {
     /// a line, once reported, never changes — so a caller never has to
     /// withdraw text it has already written to a file or drawn on a screen.
     pub live_edge_ms: u32,
+    /// How each word's time is worked out — which is what decides where a
+    /// line is cut between one round and the next.
+    pub token_timing: TokenTiming,
 }
 
 impl Default for ChunkPolicy {
-    /// Four seconds of audio, holding back the last one.
+    /// Four seconds of audio, holding back the last one, with estimated
+    /// token times.
     ///
     /// The delay a caller sees is the sum of the two, so this is text about
     /// five seconds behind the speech — before whatever inference itself
@@ -130,8 +134,42 @@ impl Default for ChunkPolicy {
         Self {
             chunk_ms: 4_000,
             live_edge_ms: 1_000,
+            token_timing: TokenTiming::Estimated,
         }
     }
+}
+
+/// How the time of each token is worked out.
+///
+/// Every round hears the round before it again as context, and what it
+/// reports is cut from what it heard by those times: the words inside its
+/// window are its own, the ones before were said already. So the times
+/// decide whether a word at the seam is reported once, twice or not at all.
+/// Measured on a minute of dense Korean speech with `large-v3-turbo`:
+///
+/// | | real time | at the seams |
+/// |---|---|---|
+/// | [`Estimated`](Self::Estimated) | 6.4x | pieces said twice — "13시간 / 시간 정도" |
+/// | [`Aligned`](Self::Aligned) | 6.1x | one piece said twice in the minute |
+///
+/// The first aligned run on a GPU also compiles the alignment's own
+/// shaders, which took as long again as the inference here — a cost the
+/// driver's cache pays once per machine, not once per run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TokenTiming {
+    /// whisper.cpp's own estimate, from the timestamps it predicts beside
+    /// the text. Costs nothing, and is rough enough that the same word
+    /// heard in two rounds gets two different times.
+    Estimated,
+    /// Aligned against the audio by dynamic time warping over the model's
+    /// alignment heads. A few percent more inference time, and a line cut
+    /// where the speech actually is.
+    ///
+    /// Which heads to read depends on the model, and is worked out from the
+    /// model file's own dimensions. For a model this does not recognise it
+    /// falls back to [`Estimated`](Self::Estimated) and says so in the log,
+    /// rather than aligning against the wrong heads.
+    Aligned,
 }
 
 impl ChunkPolicy {
@@ -144,6 +182,24 @@ impl ChunkPolicy {
     }
 }
 
+/// One token of what the model said, and when, in stream milliseconds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Heard {
+    /// Its text, as bytes: a token need not end on a character boundary.
+    bytes: Vec<u8>,
+    start_ms: i64,
+    end_ms: i64,
+}
+
+/// Whether a token begins partway through a character — the rest of one
+/// the token before it started.
+fn starts_mid_character(token: &Heard) -> bool {
+    token
+        .bytes
+        .first()
+        .is_some_and(|byte| byte & 0b1100_0000 == 0b1000_0000)
+}
+
 /// What the [`Chunker`] wants run, and which of the answer to keep.
 #[derive(Debug, PartialEq)]
 struct Inference {
@@ -154,10 +210,10 @@ struct Inference {
     /// Everything to feed the model: the chunk to transcribe, with the one
     /// before it in front as context.
     audio: Vec<f32>,
-    /// Segments starting before this are already reported; ignore them.
+    /// What starts before this was reported by an earlier round.
     accept_from_ms: i64,
-    /// Segments starting at or after this are too near the edge to trust;
-    /// the next round will cover them.
+    /// What starts at or after this is too near the edge to trust; the next
+    /// round will cover it.
     accept_until_ms: i64,
     /// Where `audio` ends. Nothing the model says can have been said later.
     audio_end_ms: i64,
@@ -327,36 +383,62 @@ impl Chunker {
         }
     }
 
-    /// Where a segment the model reported belongs on the timeline, or
-    /// `None` if it should not be reported at all.
+    /// The part of one segment that belongs to this round, as the line to
+    /// report — or `None` when none of it does.
     ///
-    /// Choosing a segment by where it *starts* is not enough on its own, and
-    /// real speech showed why. A segment starting inside the believed window
-    /// can end anywhere, including past the end of the audio it came from —
-    /// eight seconds of audio produced a line from 32.8 to 40 — and the next
-    /// round, which really does hear 36 to 38, reports that too. The lines
-    /// overlapped, and an MP4's text track cannot hold that: its muxer fills
-    /// the gap before each sample with an empty one, and a gap that is
-    /// negative made negative durations and samples with no timestamp.
+    /// Cut by token, because cutting by segment lost speech and repeated it.
+    /// A segment is whatever stretch the model chose to call one, and it
+    /// often opens in the context — audio already reported — and runs on
+    /// into the new window. Kept by where it started, such a segment was
+    /// dropped every round, and a minute of Korean lost its last fifteen
+    /// seconds that way; kept whole, it would say again what the last round
+    /// said. So each token is judged by where *it* starts: the ones in the
+    /// window are this round's, the ones before it were reported, and the
+    /// ones at the edge are left for the next round, which hears them again
+    /// in its context.
     ///
-    /// So two rules on top of the window. An end is no later than the audio
-    /// the model was given. And a line never starts before the last one
-    /// ended: one that overlaps it starts where it stopped, and one wholly
-    /// inside it — the same words heard a second time — is not reported.
-    /// What reaches the caller is in order and never overlaps.
-    fn place(&mut self, inference: &Inference, start_ms: i64, end_ms: i64) -> Option<(i64, i64)> {
-        if start_ms < inference.accept_from_ms || start_ms >= inference.accept_until_ms {
+    /// The window starts at whichever is later of where this round's window
+    /// does and where the last line ended, so what reaches the caller is in
+    /// order and never overlaps — an MP4's text track cannot hold overlap,
+    /// and its muxer wrote negative durations for it. A line ends no later
+    /// than the audio it was heard in.
+    ///
+    /// A character can be split between tokens — a Korean syllable is three
+    /// bytes, and a token boundary can fall inside one — so a cut that lands
+    /// mid-character is moved to include the whole of it.
+    fn place(&mut self, inference: &Inference, tokens: &[Heard]) -> Option<Segment> {
+        let from = inference.accept_from_ms.max(self.reported_until_ms);
+        let until = inference.accept_until_ms;
+        let inside = |token: &Heard| token.start_ms >= from && token.start_ms < until;
+        let mut first = tokens.iter().position(inside)?;
+        let mut last = tokens.iter().rposition(inside)?;
+        while first > 0 && starts_mid_character(&tokens[first]) {
+            first -= 1;
+        }
+        while last + 1 < tokens.len() && starts_mid_character(&tokens[last + 1]) {
+            last += 1;
+        }
+
+        let kept = &tokens[first..=last];
+        let bytes: Vec<u8> = kept
+            .iter()
+            .flat_map(|token| token.bytes.iter().copied())
+            .collect();
+        let text = String::from_utf8_lossy(&bytes).trim().to_owned();
+        if text.is_empty() {
             return None;
         }
-        let end = end_ms.min(inference.audio_end_ms);
-        let start = start_ms.max(self.reported_until_ms);
-        if start > start_ms && end <= start {
-            return None;
-        }
-        // A segment with no length keeps none rather than running backwards.
-        let end = end.max(start);
+        let start = kept[0].start_ms.max(from);
+        let end = kept[kept.len() - 1]
+            .end_ms
+            .min(inference.audio_end_ms)
+            .max(start);
         self.reported_until_ms = end;
-        Some((start, end))
+        Some(Segment {
+            start_ms: start,
+            end_ms: end,
+            text,
+        })
     }
 
     /// Forgets everything, for a [`ControlMsg::Flush`] or a seek.
@@ -368,6 +450,77 @@ impl Chunker {
         self.pending.clear();
         self.context.clear();
     }
+}
+
+/// The dimensions a whisper.cpp model file states at its start.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ModelShape {
+    n_vocab: i32,
+    n_audio_state: i32,
+    n_audio_layer: i32,
+    n_text_layer: i32,
+    n_mels: i32,
+}
+
+/// Reads a model file's header: the `ggml` magic, then eleven
+/// little-endian `i32` hyperparameters, of which these are the ones that
+/// tell one model from another. `None` for anything else.
+fn model_shape(path: &std::path::Path) -> Option<ModelShape> {
+    use std::io::Read;
+
+    let mut header = [0u8; 4 * 12];
+    std::fs::File::open(path)
+        .ok()?
+        .read_exact(&mut header)
+        .ok()?;
+    let word = |index: usize| {
+        let bytes = header[index * 4..index * 4 + 4]
+            .try_into()
+            .expect("four bytes");
+        i32::from_le_bytes(bytes)
+    };
+    if word(0) as u32 != 0x6767_6d6c {
+        return None;
+    }
+    // n_vocab, n_audio_ctx, n_audio_state, n_audio_head, n_audio_layer,
+    // n_text_ctx, n_text_state, n_text_head, n_text_layer, n_mels, ftype.
+    Some(ModelShape {
+        n_vocab: word(1),
+        n_audio_state: word(3),
+        n_audio_layer: word(5),
+        n_text_layer: word(9),
+        n_mels: word(10),
+    })
+}
+
+/// Which of whisper.cpp's alignment-head presets fits a model of this
+/// shape, or `None` for one it has no preset for.
+///
+/// Told apart by width and depth, and English-only from multilingual by the
+/// vocabulary, which is one token shorter. `large-v3-turbo` is `large-v3`'s
+/// encoder with four decoder layers instead of thirty-two. `large-v1` and
+/// `large-v2` share every dimension, so both are read as `large-v2` — the
+/// one still in use.
+fn alignment_heads(shape: ModelShape) -> Option<whisper_rs::DtwModelPreset> {
+    use whisper_rs::DtwModelPreset as Preset;
+
+    let english = shape.n_vocab == 51_864;
+    Some(
+        match (shape.n_audio_state, shape.n_audio_layer, shape.n_text_layer) {
+            (384, 4, 4) if english => Preset::TinyEn,
+            (384, 4, 4) => Preset::Tiny,
+            (512, 6, 6) if english => Preset::BaseEn,
+            (512, 6, 6) => Preset::Base,
+            (768, 12, 12) if english => Preset::SmallEn,
+            (768, 12, 12) => Preset::Small,
+            (1024, 24, 24) if english => Preset::MediumEn,
+            (1024, 24, 24) => Preset::Medium,
+            (1280, 32, 4) if shape.n_mels == 128 => Preset::LargeV3Turbo,
+            (1280, 32, 32) if shape.n_mels == 128 => Preset::LargeV3,
+            (1280, 32, 32) => Preset::LargeV2,
+            _ => return None,
+        },
+    )
 }
 
 /// whisper.cpp's own code for a language given as a code or an English name,
@@ -439,6 +592,12 @@ pub struct WhisperTranscriber<F> {
     /// rather than the caller's string, which is what lets each chunk's
     /// parameters borrow it without anything to keep alive.
     language: Option<&'static str>,
+    /// The model's end-of-text token. Every token numbered below it is
+    /// text; everything from it up is a timestamp or a control token.
+    end_of_text: whisper_rs::WhisperTokenId,
+    /// Whether the context was loaded with alignment heads, so each token
+    /// carries an aligned time — see [`TokenTiming::Aligned`].
+    aligned: bool,
     on_segment: F,
     /// Reported once, because it is the same answer every time and a line
     /// per chunk would bury the log.
@@ -476,22 +635,52 @@ where
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::WhisperTranscriber, &name, None);
 
-        let context = WhisperContext::new_with_params(&path, WhisperContextParameters::default())
-            .map_err(|source| WhisperTranscriberError::ModelLoad {
-            path: path.clone(),
-            source,
+        // Settled before loading, because whisper.cpp builds the alignment
+        // into the context it loads rather than into each run.
+        let heads = match policy.token_timing {
+            TokenTiming::Estimated => None,
+            TokenTiming::Aligned => {
+                let heads = model_shape(model_path.as_ref()).and_then(alignment_heads);
+                if heads.is_none() {
+                    pp_warn!(
+                        pp_log: &pp_log,
+                        "no alignment heads are known for {path}; token times will be estimated"
+                    );
+                }
+                heads
+            }
+        };
+        let mut params = WhisperContextParameters::default();
+        if let Some(preset) = heads.clone() {
+            params.dtw_parameters(whisper_rs::DtwParameters {
+                mode: whisper_rs::DtwMode::ModelPreset {
+                    model_preset: preset,
+                },
+                ..Default::default()
+            });
+        }
+        let context = WhisperContext::new_with_params(&path, params).map_err(|source| {
+            WhisperTranscriberError::ModelLoad {
+                path: path.clone(),
+                source,
+            }
         })?;
 
         pp_info!(
             pp_log: &pp_log,
-            "model loaded: path={path}, chunk={}ms, live_edge={}ms",
+            "model loaded: path={path}, chunk={}ms, live_edge={}ms, token_timing={}",
             policy.chunk_ms,
-            policy.live_edge_ms
+            policy.live_edge_ms,
+            match &heads {
+                Some(preset) => format!("aligned({preset:?})"),
+                None => "estimated".to_owned(),
+            }
         );
 
         let state = context
             .create_state()
             .map_err(WhisperTranscriberError::State)?;
+        let end_of_text = context.token_eot();
 
         Ok(Self {
             pp_log,
@@ -499,6 +688,8 @@ where
             state,
             chunker: Chunker::new(policy),
             language: None,
+            aligned: heads.is_some(),
+            end_of_text,
             on_segment,
             reported_zero_length: false,
         })
@@ -560,6 +751,9 @@ where
         // `None` is detection, which has to be asked for: left unset,
         // whisper.cpp assumes English — see `with_language`.
         params.set_language(self.language);
+        // What lets a segment be cut where this round's window is rather
+        // than kept or dropped whole — see `Chunker::place`.
+        params.set_token_timestamps(true);
 
         self.state
             .full(params, &inference.audio)
@@ -570,43 +764,53 @@ where
             let Some(segment) = self.state.get_segment(index) else {
                 continue;
             };
-            // Lossy because a chunk boundary can cut a multi-byte character
-            // in half, and one mangled glyph is a better answer than
-            // dropping the sentence around it.
-            let Ok(text) = segment.to_str_lossy() else {
-                continue;
-            };
-            let text = text.trim().to_owned();
-            if text.is_empty() {
-                continue;
-            }
-            // whisper.cpp reports in hundredths of a second, from the start
-            // of the audio it was handed — which began at `offset_ms`.
-            let start = segment.start_timestamp() * 10 + inference.offset_ms;
-            let end = segment.end_timestamp() * 10 + inference.offset_ms;
-            let Some((start, end)) = self.chunker.place(&inference, start, end) else {
+            let tokens = self.heard(&segment, inference.offset_ms);
+            let Some(line) = self.chunker.place(&inference, &tokens) else {
                 pp_trace!(
                     self,
-                    "event=segment phase=skipped start={start}ms end={end}ms \
-                     outcome=outside-window-or-already-reported"
+                    "event=segment phase=skipped tokens={} \
+                     outcome=outside-window-or-already-reported",
+                    tokens.len()
                 );
                 continue;
             };
-            if end <= start && !self.reported_zero_length {
+            if line.end_ms <= line.start_ms && !self.reported_zero_length {
                 self.reported_zero_length = true;
                 pp_debug!(
                     self,
                     "a segment arrived with no duration; keeping it anyway"
                 );
             }
-            let segment = Segment {
-                start_ms: start,
-                end_ms: end,
-                text,
-            };
-            (self.on_segment)(&segment)?;
+            (self.on_segment)(&line)?;
         }
         Ok(())
+    }
+
+    /// The text tokens of one segment, placed on the stream's timeline.
+    ///
+    /// whisper.cpp reports in hundredths of a second from the start of the
+    /// audio it was handed — which began at `offset_ms`.
+    fn heard(&self, segment: &whisper_rs::WhisperSegment<'_>, offset_ms: i64) -> Vec<Heard> {
+        (0..segment.n_tokens())
+            .filter_map(|index| segment.get_token(index))
+            .filter(|token| token.token_id() < self.end_of_text)
+            .filter_map(|token| {
+                let data = token.token_data();
+                // An aligned time is one moment per token rather than a span,
+                // and is the one worth cutting by. whisper.cpp leaves it at
+                // -1 where it computed none.
+                let start = if self.aligned && data.t_dtw >= 0 {
+                    data.t_dtw
+                } else {
+                    data.t0
+                };
+                Some(Heard {
+                    bytes: token.to_bytes().ok()?.to_vec(),
+                    start_ms: start * 10 + offset_ms,
+                    end_ms: data.t1.max(start) * 10 + offset_ms,
+                })
+            })
+            .collect()
     }
 }
 
@@ -699,6 +903,7 @@ mod tests {
     const POLICY: ChunkPolicy = ChunkPolicy {
         chunk_ms: 4_000,
         live_edge_ms: 1_000,
+        token_timing: TokenTiming::Estimated,
     };
 
     fn samples(ms: usize) -> Vec<f32> {
@@ -890,60 +1095,167 @@ mod tests {
         (chunker, to_36, to_40)
     }
 
+    /// Tokens as the model hands them over: text, then start and end in
+    /// stream milliseconds.
+    fn tokens(spec: &[(&str, i64, i64)]) -> Vec<Heard> {
+        spec.iter()
+            .map(|&(text, start_ms, end_ms)| Heard {
+                bytes: text.as_bytes().to_vec(),
+                start_ms,
+                end_ms,
+            })
+            .collect()
+    }
+
+    /// The loss this exists to stop. A segment opening in the context and
+    /// running into the new window used to be dropped whole, every round,
+    /// because of where it started; the small model lost the last fifteen
+    /// seconds of a minute of Korean that way. Its words in the window are
+    /// this round's.
+    #[test]
+    fn a_segment_opening_in_the_context_keeps_what_falls_in_the_window() {
+        let (mut chunker, _, to_40) = rounds_to_36_and_40();
+        assert_eq!(
+            (to_40.accept_from_ms, to_40.accept_until_ms),
+            (35_000, 39_000)
+        );
+
+        let line = chunker
+            .place(
+                &to_40,
+                &tokens(&[
+                    (" 이번에는", 33_000, 34_000),
+                    (" 패키지", 34_000, 35_500),
+                    (" 여행으로", 35_500, 37_000),
+                    (" 다녀왔어요", 37_000, 38_500),
+                    (".", 39_000, 39_200),
+                ]),
+            )
+            .expect("the words inside the window are reported");
+        assert_eq!(line.text, "여행으로 다녀왔어요");
+        assert_eq!((line.start_ms, line.end_ms), (35_500, 38_500));
+    }
+
+    /// And the other half of cutting by segment: words said before the
+    /// window were reported last round and are not said again. A seam used
+    /// to read "한 5일에서 / 한 5일에서 열흘 정도".
+    #[test]
+    fn what_was_already_reported_is_not_said_again() {
+        let (mut chunker, to_36, to_40) = rounds_to_36_and_40();
+        let first = chunker
+            .place(
+                &to_36,
+                &tokens(&[(" 한", 33_000, 33_800), (" 5일에서", 33_800, 34_900)]),
+            )
+            .expect("reported");
+        assert_eq!(first.text, "한 5일에서");
+
+        let second = chunker
+            .place(
+                &to_40,
+                &tokens(&[
+                    (" 한", 33_000, 33_800),
+                    (" 5일에서", 33_800, 34_900),
+                    (" 열흘", 35_100, 35_800),
+                    (" 정도", 35_800, 36_400),
+                ]),
+            )
+            .expect("reported");
+        assert_eq!(second.text, "열흘 정도");
+    }
+
+    /// What starts at the edge is left alone — and the next round, which
+    /// hears it again as context, is the one that reports it.
+    #[test]
+    fn the_edge_is_left_for_the_next_round_and_reported_there() {
+        let (mut chunker, to_36, to_40) = rounds_to_36_and_40();
+        let at_the_edge = tokens(&[(" 사진이", 35_300, 36_000)]);
+        assert_eq!(chunker.place(&to_36, &at_the_edge), None);
+        assert_eq!(
+            chunker.place(&to_40, &at_the_edge).map(|line| line.text),
+            Some("사진이".to_owned())
+        );
+    }
+
     /// A line cannot end after the audio it was heard in. The model said
     /// 32.8 to 40 of audio that ended at 36.
     #[test]
     fn a_line_ending_past_its_audio_is_cut_where_the_audio_ends() {
         let (mut chunker, to_36, _) = rounds_to_36_and_40();
         assert_eq!(to_36.audio_end_ms, 36_000);
-        assert_eq!(
-            chunker.place(&to_36, 32_800, 40_000),
-            Some((32_800, 36_000))
-        );
+        let line = chunker
+            .place(&to_36, &tokens(&[(" 그런데", 32_800, 40_000)]))
+            .expect("reported");
+        assert_eq!(line.end_ms, 36_000);
     }
 
-    /// The next round's line from 36 to 38 then lands after it rather than
-    /// inside it — which is the overlap that made the MP4 muxer write
-    /// negative durations.
+    /// Consecutive lines are in order and never overlap — the overlap that
+    /// made the MP4 muxer write negative durations.
     #[test]
     fn lines_from_consecutive_rounds_never_overlap() {
         let (mut chunker, to_36, to_40) = rounds_to_36_and_40();
-        let first = chunker.place(&to_36, 32_800, 40_000).expect("reported");
-        let second = chunker.place(&to_40, 36_000, 38_000).expect("reported");
+        let first = chunker
+            .place(&to_36, &tokens(&[(" 그런데", 33_000, 36_500)]))
+            .expect("reported");
+        let second = chunker
+            .place(
+                &to_40,
+                &tokens(&[(" 강이나", 35_500, 36_200), (" 호수도", 36_200, 37_000)]),
+            )
+            .expect("reported");
         assert!(
-            second.0 >= first.1,
+            second.start_ms >= first.end_ms,
             "{second:?} starts before {first:?} ends"
         );
-    }
-
-    /// One overlapping the last starts where the last stopped; one wholly
-    /// inside it is the same words heard twice, and is not reported again.
-    #[test]
-    fn an_overlapping_line_is_trimmed_and_a_repeated_one_dropped() {
-        let (mut chunker, to_36, to_40) = rounds_to_36_and_40();
-        chunker.place(&to_36, 32_000, 36_000).expect("reported");
-
         assert_eq!(
-            chunker.place(&to_40, 35_500, 37_000),
-            Some((36_000, 37_000)),
-            "starts where the last line ended"
-        );
-        assert_eq!(
-            chunker.place(&to_40, 36_200, 36_800),
-            None,
-            "wholly inside what was just reported"
+            second.text, "호수도",
+            "and what starts inside the last line is its, not this one's"
         );
     }
 
-    /// The window still decides first: a line starting before it was
-    /// reported last round, and one at the edge is left for the next.
+    /// A syllable split between two tokens is kept whole rather than cut
+    /// through: 스 is three bytes, and here the token boundary falls after
+    /// the second of them.
     #[test]
-    fn a_line_outside_the_believed_window_is_still_skipped() {
+    fn a_character_split_between_tokens_is_kept_whole() {
         let (mut chunker, _, to_40) = rounds_to_36_and_40();
-        assert_eq!(to_40.accept_from_ms, 35_000);
-        assert_eq!(to_40.accept_until_ms, 39_000);
-        assert_eq!(chunker.place(&to_40, 34_000, 36_000), None);
-        assert_eq!(chunker.place(&to_40, 39_000, 40_000), None);
+        let syllable = "스".as_bytes();
+        assert_eq!(syllable.len(), 3);
+        let split = vec![
+            Heard {
+                bytes: [b" ".as_slice(), &syllable[..2]].concat(),
+                start_ms: 34_600,
+                end_ms: 35_100,
+            },
+            Heard {
+                bytes: [&syllable[2..], "위스는".as_bytes()].concat(),
+                start_ms: 35_100,
+                end_ms: 36_000,
+            },
+        ];
+        let line = chunker.place(&to_40, &split).expect("reported");
+        assert_eq!(line.text, "스위스는");
+        assert_eq!(
+            line.start_ms, 35_000,
+            "though it starts no earlier than the window"
+        );
+    }
+
+    /// Nothing in the window is nothing to report — and it leaves nothing
+    /// behind that would hold the next line back.
+    #[test]
+    fn a_segment_with_nothing_in_the_window_reports_nothing() {
+        let (mut chunker, _, to_40) = rounds_to_36_and_40();
+        assert_eq!(
+            chunker.place(&to_40, &tokens(&[(" 알프스", 33_000, 34_500)])),
+            None
+        );
+        assert_eq!(chunker.place(&to_40, &tokens(&[])), None);
+        assert!(
+            chunker
+                .place(&to_40, &tokens(&[(" 산맥이", 35_000, 36_000)]))
+                .is_some()
+        );
     }
 
     /// A line the model gave no length keeps none, rather than being lost
@@ -951,9 +1263,91 @@ mod tests {
     #[test]
     fn a_line_with_no_length_is_kept_with_none() {
         let (mut chunker, to_36, _) = rounds_to_36_and_40();
+        let line = chunker
+            .place(&to_36, &tokens(&[(" 네", 33_000, 33_000)]))
+            .expect("reported");
+        assert_eq!((line.start_ms, line.end_ms), (33_000, 33_000));
+    }
+
+    /// A model file's header, as whisper.cpp writes it.
+    fn header(hparams: [i32; 11]) -> Vec<u8> {
+        std::iter::once(0x6767_6d6c_u32 as i32)
+            .chain(hparams)
+            .flat_map(i32::to_le_bytes)
+            .collect()
+    }
+
+    /// The header of the turbo model this was measured with, exactly as
+    /// whisper.cpp printed it on loading, read back into the shape that
+    /// picks its heads.
+    #[test]
+    fn a_model_s_shape_is_read_from_its_header() {
+        let dir =
+            std::env::temp_dir().join(format!("media-pp-whisper-shape-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("ggml-large-v3-turbo.bin");
+        // n_vocab, n_audio_ctx, n_audio_state, n_audio_head, n_audio_layer,
+        // n_text_ctx, n_text_state, n_text_head, n_text_layer, n_mels, ftype
+        std::fs::write(
+            &path,
+            header([51_866, 1500, 1280, 20, 32, 448, 1280, 20, 4, 128, 1]),
+        )
+        .unwrap();
+
+        let shape = model_shape(&path).expect("a whisper.cpp header");
         assert_eq!(
-            chunker.place(&to_36, 33_000, 33_000),
-            Some((33_000, 33_000))
+            shape,
+            ModelShape {
+                n_vocab: 51_866,
+                n_audio_state: 1280,
+                n_audio_layer: 32,
+                n_text_layer: 4,
+                n_mels: 128,
+            }
+        );
+        assert!(matches!(
+            alignment_heads(shape),
+            Some(whisper_rs::DtwModelPreset::LargeV3Turbo)
+        ));
+
+        std::fs::write(&path, b"not a model at all, and long enough to read").unwrap();
+        assert_eq!(model_shape(&path), None, "no magic, no shape");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The models told apart by more than size: turbo from large-v3 by its
+    /// decoder, large-v3 from large-v2 by its mel bins, English-only from
+    /// multilingual by one vocabulary entry.
+    #[test]
+    fn alignment_heads_follow_the_model_s_shape() {
+        use whisper_rs::DtwModelPreset as Preset;
+
+        let shape = |n_vocab, n_audio_state, layers: (i32, i32), n_mels| ModelShape {
+            n_vocab,
+            n_audio_state,
+            n_audio_layer: layers.0,
+            n_text_layer: layers.1,
+            n_mels,
+        };
+        assert!(matches!(
+            alignment_heads(shape(51_865, 768, (12, 12), 80)),
+            Some(Preset::Small)
+        ));
+        assert!(matches!(
+            alignment_heads(shape(51_864, 768, (12, 12), 80)),
+            Some(Preset::SmallEn)
+        ));
+        assert!(matches!(
+            alignment_heads(shape(51_866, 1280, (32, 32), 128)),
+            Some(Preset::LargeV3)
+        ));
+        assert!(matches!(
+            alignment_heads(shape(51_865, 1280, (32, 32), 80)),
+            Some(Preset::LargeV2)
+        ));
+        assert!(
+            alignment_heads(shape(51_866, 1280, (32, 2), 128)).is_none(),
+            "a distilled model with a decoder of its own has no preset"
         );
     }
 

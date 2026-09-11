@@ -137,6 +137,18 @@ compile error with no explanation.
   last stopped — an MP4 text track cannot hold overlapping samples, and its
   muxer wrote negative durations for them.
 
+  What a round reports is cut from what it heard by token, not by segment:
+  the words starting inside its window are its own, the ones before were
+  reported already, the ones at the edge are left for the next round. A
+  segment the model opens in the context and runs into the new window is
+  therefore neither lost nor said twice. `ChunkPolicy::token_timing` says
+  how those times are found — `TokenTiming::Estimated`, whisper.cpp's own
+  estimate, or `TokenTiming::Aligned`, dynamic time warping over the
+  model's alignment heads, which are picked from the model file's own
+  dimensions. On the minute of Korean below, aligned times left one piece
+  said twice at the seams where estimated ones left several, for 6.1x real
+  time against 6.4x.
+
   Whisper's encoder takes exactly 30 seconds, so transcribing a stream is a
   loop, and `ChunkPolicy` is what the loop is made of. `chunk_ms` (4000) is
   how much to gather before each inference; `live_edge_ms` (1000) is how
