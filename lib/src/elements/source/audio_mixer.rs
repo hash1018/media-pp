@@ -1455,16 +1455,29 @@ mod tests {
         const WATCH: Duration = Duration::from_secs(3);
 
         /// How much of a mix carrying a continuous tone may be silence, in
-        /// parts per thousand.
+        /// parts per thousand, once its two longest holes are set aside.
         ///
         /// The tone never lands exactly on 0.0 for a run of samples, so what
         /// this counts is the mixer's own padding: what it puts in when an
-        /// input is short for a tick. A resampler handing back less than it
-        /// was given pads *every* tick — 80‰ at the ratio used here. What is
-        /// left when nothing is wrong is the occasional scheduling hiccup, a
-        /// sub-millisecond gap every few seconds, measured at well under one
-        /// part in a thousand.
+        /// input is short for a tick. The failure these tests are for is a
+        /// *rate* — a resampler handing back less than it was given — and a
+        /// rate is short everywhere: 76‰ of silence spread over fifteen
+        /// holes, measured with an 8% shortfall put back, or 85‰ over a
+        /// hundred and thirteen. What is left when nothing is wrong is the
+        /// occasional scheduling hiccup, under one part in a thousand here.
+        ///
+        /// The two longest holes are not counted because a thread that runs
+        /// late is a *moment*, and it can be a long one. A shared CI runner
+        /// once stalled for 47 ms in the middle of a watch: fifteen parts per
+        /// thousand of silence, nearly all of it that one hole, and a failure
+        /// for a mix that was filling every tick it was given the chance to.
+        /// Two such moments are forgiven in three seconds; a rate survives
+        /// having any two of its holes taken away, at 66‰ and 71‰.
         const SILENT_PER_MILLE: usize = 10;
+
+        /// How many of the longest holes are set aside as moments rather
+        /// than a rate — see [`SILENT_PER_MILLE`].
+        const FORGIVEN_HOLES: usize = 2;
 
         /// Runs shorter than this are a waveform touching zero rather than a
         /// gap in it.
@@ -1475,7 +1488,9 @@ mod tests {
             samples: usize,
             silent: usize,
             holes: usize,
-            longest_hole: usize,
+            /// The longest holes seen, longest first — see
+            /// [`FORGIVEN_HOLES`].
+            longest_holes: [usize; FORGIVEN_HOLES],
             current_run: usize,
         }
 
@@ -1493,13 +1508,22 @@ mod tests {
                     } else {
                         if self.current_run >= HOLE {
                             self.holes += 1;
-                            self.longest_hole = self.longest_hole.max(self.current_run);
+                            self.keep_if_among_the_longest(self.current_run);
                         }
                         self.current_run = 0;
                     }
                 }
             }
 
+            fn keep_if_among_the_longest(&mut self, hole: usize) {
+                if let Some(shorter) = self.longest_holes.iter().position(|&kept| hole > kept) {
+                    self.longest_holes
+                        .copy_within(shorter..FORGIVEN_HOLES - 1, shorter + 1);
+                    self.longest_holes[shorter] = hole;
+                }
+            }
+
+            /// Silence in parts per thousand, all of it.
             fn silent_per_mille(&self) -> usize {
                 if self.samples == 0 {
                     return 0;
@@ -1507,16 +1531,47 @@ mod tests {
                 self.silent * 1000 / self.samples
             }
 
+            /// Silence in parts per thousand, with the longest holes set
+            /// aside — what [`SILENT_PER_MILLE`] limits.
+            fn silent_per_mille_beyond_the_longest(&self) -> usize {
+                if self.samples == 0 {
+                    return 0;
+                }
+                let forgiven: usize = self.longest_holes.iter().sum();
+                self.silent.saturating_sub(forgiven) * 1000 / self.samples
+            }
+
             fn report(&self) -> String {
                 format!(
-                    "{} of {} samples silent ({}per mille), in {} hole(s), longest {}",
+                    "{}per mille silent beyond the {FORGIVEN_HOLES} longest holes \
+                     ({}per mille in all: {} of {} samples, in {} hole(s), longest {:?})",
+                    self.silent_per_mille_beyond_the_longest(),
+                    self.silent_per_mille(),
                     self.silent,
                     self.samples,
-                    self.silent_per_mille(),
                     self.holes,
-                    self.longest_hole
+                    self.longest_holes,
                 )
             }
+        }
+
+        /// A stall is set aside and a rate is not, whichever way round the
+        /// holes arrive.
+        #[test]
+        fn the_longest_holes_are_set_aside_and_the_rest_is_counted() {
+            let mut shape = MixShape {
+                samples: 10_000,
+                ..MixShape::default()
+            };
+            for hole in [5, 90, 10, 200, 7] {
+                shape.silent += hole;
+                shape.keep_if_among_the_longest(hole);
+            }
+            assert_eq!(shape.longest_holes, [200, 90]);
+            assert_eq!(
+                shape.silent_per_mille_beyond_the_longest(),
+                (5 + 10 + 7) * 1000 / 10_000
+            );
         }
 
         /// A mixer running on its own pipeline, with everything it emits
@@ -1652,7 +1707,7 @@ mod tests {
                 "the mix produced nothing to look at in {WATCH:?}"
             );
             assert!(
-                measured.silent_per_mille() <= SILENT_PER_MILLE,
+                measured.silent_per_mille_beyond_the_longest() <= SILENT_PER_MILLE,
                 "a {FILE_RATE}Hz file did not fill a {MIX_RATE}Hz mix: {}",
                 measured.report()
             );
@@ -1691,7 +1746,7 @@ mod tests {
             mix.stop();
 
             assert!(
-                measured.silent_per_mille() <= SILENT_PER_MILLE,
+                measured.silent_per_mille_beyond_the_longest() <= SILENT_PER_MILLE,
                 "a source at the mix's own rate did not fill it: {}",
                 measured.report()
             );
