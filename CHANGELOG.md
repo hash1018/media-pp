@@ -272,6 +272,42 @@ compile error with no explanation.
   New: `Error::RtmpMuxerError`, `ElementType::RtmpMuxer`, and the
   `rtmp_publish` example.
 
+- **`Pipeline::stats` says what every element is doing while it runs.** The
+  graph says what a pipeline looks like; this says whether anything moves
+  through it — a capture that stopped delivering, a queue that is full and
+  dropping, a branch still draining after it was finished. Each used to be
+  found in a log afterwards.
+
+  ```rust
+  for element in pipeline.stats().elements {
+      println!("#{} {} in={} busy={:?} idle={:?}",
+          element.id, element.name, element.buffers_in,
+          element.busy, element.idle_for);
+  }
+  ```
+
+  Per element: buffers taken, time spent inside `consume`, how long since it
+  last took or pushed a buffer, errors, and whether it has seen `Eos`; per
+  output pad, what went through it; for a `Queue`, how full it is, what it
+  dropped and how long its upstream waited on it. Running totals rather than
+  rates — two readings and the time between them give the rate, matched by
+  `ElementStats::id`. `busy` includes every stage after it on the same
+  thread, up to the next `Queue`, because a chain runs as nested calls.
+
+  Runtime `Tee` branches are covered as they come and go. An attached branch
+  is reported from the moment it joins; a detached one disappears at once;
+  one ended with `finish_branch` goes on appearing, as
+  `ElementState::Finishing`, while its `Eos` drains, and disappears once it
+  has been dropped. A re-attached branch is new elements with new ids.
+
+  Always on, and counted in the wrappers every stage and pad already has,
+  so an element written outside this crate is counted like one inside it.
+  The cost is about a tenth of a microsecond per buffer per stage, nearly
+  all of it reading the clock.
+
+  New: the `stats` module (`PipelineStats`, `ElementStats`, `ElementState`,
+  `PadStats`, `QueueStats`).
+
 ## 0.2.0
 
 Two renames, a camera source on both platforms, and a good deal of runtime

@@ -15,6 +15,7 @@ use crate::{
     },
     pad::SrcPad,
     queue::{OverflowPolicy, Queue},
+    stats::ElementCounters,
 };
 
 /// Builds one chain segment (a run of elements that all execute on the same
@@ -39,6 +40,9 @@ struct PlannedNode {
     output_port: Arc<str>,
     input: InputContract,
     output: OutputContract,
+    /// Held strongly by the stage once it is built; the plan hands the
+    /// registry a weak reference — see [`crate::stats`].
+    counters: Arc<ElementCounters>,
 }
 
 /// A fully constructed runtime chain whose graph nodes are still detached.
@@ -73,7 +77,7 @@ trait StageBuilder: Send {
     ) -> Result<Box<dyn Sink>>;
 }
 
-struct DirectStage<T>(T);
+struct DirectStage<T>(T, Arc<ElementCounters>);
 
 /// Adds uniform EOS/control boundary tracing to every direct filter without
 /// requiring each built-in or downstream custom element to duplicate it, and
@@ -86,6 +90,10 @@ struct DirectStage<T>(T);
 /// graph whose failures arrive anonymous — see [`Self::trace_origin`].
 pub(crate) struct FlowTracer<T> {
     inner: T,
+    /// Where this stage is counted — see [`crate::stats`]. `None` for one a
+    /// [`Rack`](crate::elements::Rack) holds, which is counted as part of
+    /// the rack: the graph has the rack as one node, not its contents.
+    counters: Option<Arc<ElementCounters>>,
 }
 
 impl<T: Element> Element for FlowTracer<T> {
@@ -130,7 +138,14 @@ impl<T: Filter> Sink for FlowTracer<T> {
         if is_eos {
             pp_trace!(pp_log: self.inner.pp_log(), "event=eos phase=received");
         }
+        let call = self
+            .counters
+            .as_deref()
+            .map(|counters| counters.begin(is_eos));
         let result = self.inner.consume(buf);
+        if let Some(call) = call {
+            call.end(result.is_ok());
+        }
         if is_eos {
             match &result {
                 Ok(()) => pp_trace!(
@@ -168,9 +183,13 @@ impl<T: Filter> Sink for FlowTracer<T> {
 
 impl<T: Element> FlowTracer<T> {
     /// Wraps `inner`, which a caller has already linked to whatever follows
-    /// it.
+    /// it. Uncounted: this is for a stage the graph does not have as a node
+    /// of its own.
     pub(crate) fn new(inner: T) -> Self {
-        Self { inner }
+        Self {
+            inner,
+            counters: None,
+        }
     }
 
     /// Stamps a failure with this stage's identity, unless something nearer
@@ -195,7 +214,7 @@ where
         downstream: Box<dyn Sink>,
         context: &Arc<Context>,
     ) -> Result<Box<dyn Sink>> {
-        let mut element = self.0;
+        let DirectStage(mut element, counters) = *self;
         *element.pp_log_mut() = element_pp_log(
             element.element_type(),
             &element.name(),
@@ -203,7 +222,11 @@ where
         );
         element.attach_context(context);
         element.src_pads()[0].link(downstream);
-        Ok(Box::new(FlowTracer { inner: element }))
+        counters.add_pads(element.src_pads().iter().map(SrcPad::counters));
+        Ok(Box::new(FlowTracer {
+            inner: element,
+            counters: Some(counters),
+        }))
     }
 }
 
@@ -212,6 +235,7 @@ struct QueueStage {
     name: String,
     capacity: usize,
     policy: OverflowPolicy,
+    counters: Arc<ElementCounters>,
 }
 
 /// Traces EOS/control at a terminal `Sink` and posts a `BusEvent::Eos` (under
@@ -228,6 +252,7 @@ struct TerminalTracer {
     inner: Box<dyn Sink>,
     paused: bool,
     preroll: Option<Arc<crate::control::PrerollContext>>,
+    counters: Arc<ElementCounters>,
 }
 
 impl Element for TerminalTracer {
@@ -280,7 +305,9 @@ impl Sink for TerminalTracer {
         if is_eos {
             pp_trace!(pp_log: self.inner.pp_log(), "event=eos phase=received");
         }
+        let call = self.counters.begin(is_eos);
         let result = self.inner.consume(buf);
+        call.end(result.is_ok());
         // `Sink::consume` defines successful terminal return as acceptance
         // into that sink's output path. This is the preroll completion point;
         // deliberately do not claim physical presentation has completed.
@@ -374,13 +401,14 @@ impl StageBuilder for QueueStage {
         // No `attach_context`: a `Queue` is built here rather than handed in,
         // so there is no chance of it having been given another pipeline's
         // anything.
-        Ok(Box::new(Queue::spawn_with_policy(
+        Ok(Box::new(Queue::spawn_counted(
             self.name,
             self.capacity,
             downstream,
             context.bus.for_element(self.id),
             self.policy,
             Some(&context.pipeline_id),
+            self.counters,
         )?))
     }
 }
@@ -416,6 +444,7 @@ impl ChainBuilder {
             .first()
             .map(|pad| (Arc::<str>::from(pad.name()), pad.contract()))
             .unwrap_or_else(|| ("src".into(), OutputContract::Unknown));
+        let counters = ElementCounters::new();
         self.planned.push(PlannedNode {
             info: NodeInfo {
                 id: self.context.graph.reserve_element_id(),
@@ -425,8 +454,9 @@ impl ChainBuilder {
             output_port,
             input: element.input_contract(),
             output,
+            counters: Arc::clone(&counters),
         });
-        self.elements.push(Box::new(DirectStage(element)));
+        self.elements.push(Box::new(DirectStage(element, counters)));
         self
     }
 
@@ -448,6 +478,7 @@ impl ChainBuilder {
     ) -> Self {
         let name: Arc<str> = name.into().into();
         let id = self.context.graph.reserve_element_id();
+        let counters = ElementCounters::for_queue(capacity);
         self.planned.push(PlannedNode {
             info: NodeInfo {
                 id,
@@ -461,12 +492,14 @@ impl ChainBuilder {
             // sink directly and so has no pad to carry it.
             input: InputContract::Any,
             output: OutputContract::Passthrough,
+            counters: Arc::clone(&counters),
         });
         self.elements.push(Box::new(QueueStage {
             id,
             name: name.to_string(),
             capacity,
             policy,
+            counters,
         }));
         self
     }
@@ -533,18 +566,27 @@ impl ChainBuilder {
             })
             .collect();
         let root_id = nodes.first().expect("terminal always supplies one node").id;
+        let terminal_counters = ElementCounters::new();
+        let mut counters: HashMap<_, _> = self
+            .planned
+            .iter()
+            .map(|node| (node.info.id, Arc::downgrade(&node.counters)))
+            .collect();
+        counters.insert(terminal_id, Arc::downgrade(&terminal_counters));
         let terminal: Box<dyn Sink> = Box::new(TerminalTracer {
             bus: self.context.bus.for_element(terminal_id),
             id: terminal_id,
             inner: terminal,
             paused: false,
             preroll: None,
+            counters: terminal_counters,
         });
         let plan = BranchPlan {
             nodes,
             edges,
             contracts,
             root: root_id,
+            counters,
         };
         // Nothing is flowing into a detached branch yet, so this only
         // catches links downstream of a stage that produces something of
@@ -619,6 +661,8 @@ impl ChainBuilder {
                     output: node.output,
                 },
             );
+            plan.counters
+                .insert(node.info.id, Arc::downgrade(&node.counters));
         }
         // A chain with no stages of its own is the branch itself, root
         // included — there is nothing in front of it to become the new one.
@@ -630,6 +674,7 @@ impl ChainBuilder {
             edges,
             contracts: plan.contracts,
             root: root_id,
+            counters: plan.counters,
         };
         // The same walk `to` runs, over the joined plan: a stage added in
         // front can be what makes a link below the branch's root impossible.
@@ -786,6 +831,7 @@ mod tests {
             }),
             paused: false,
             preroll: None,
+            counters: ElementCounters::new(),
         }
     }
 

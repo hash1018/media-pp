@@ -10,7 +10,9 @@ use crate::{
     element::{Context, SourceElement, element_pp_log, pipeline_pp_log},
     error::Result,
     graph::{ElementId, PipelineGraph},
+    pad::SrcPad,
     playback_clock::PlaybackClock,
+    stats::ElementCounters,
 };
 
 use super::{Pipeline, runtime::PrerollSlot};
@@ -47,6 +49,10 @@ pub struct PipelineBuilder {
     sources: Vec<SourceEntry>,
     control_pairs: Vec<(ControlSender, ControlReceiver)>,
     operation: Arc<Mutex<()>>,
+    /// Each source's counters. A source moves onto its own thread when the
+    /// pipeline runs and nothing wraps it the way a chain wraps a stage,
+    /// so the pipeline is what keeps them — see [`crate::stats`].
+    source_counters: Vec<Arc<ElementCounters>>,
 }
 
 impl PipelineBuilder {
@@ -68,6 +74,7 @@ impl PipelineBuilder {
             sources: Vec::new(),
             control_pairs: Vec::new(),
             operation: Arc::new(Mutex::new(())),
+            source_counters: Vec::new(),
         }
     }
 
@@ -94,6 +101,11 @@ impl PipelineBuilder {
         });
         source.attach_context(&context);
         wire(&mut source, &context)?;
+        // A source is counted by what leaves its pads; it takes nothing in.
+        let counters = ElementCounters::new();
+        counters.add_pads(source.src_pads().iter().map(SrcPad::counters));
+        self.graph.register_counters(source_id, &counters);
+        self.source_counters.push(counters);
         self.sources.push((source_id, Box::new(source)));
         self.control_pairs.push(control::channel());
         Ok(self)
@@ -127,6 +139,7 @@ impl PipelineBuilder {
             preroll_slot: PrerollSlot::default().into(),
             workers: Mutex::new(Vec::new()),
             graph: self.graph,
+            _source_counters: self.source_counters,
         })
     }
 }

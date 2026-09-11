@@ -15,6 +15,7 @@ use crate::{
     element::{ElementType, Sink},
     error::Result,
     pp_log::{PpLog, pp_trace},
+    stats::PadCounters,
 };
 
 /// An output port an [`Element`](crate::element::Element) owns. Data only
@@ -33,6 +34,9 @@ pub struct SrcPad {
     name: String,
     contract: OutputContract,
     peer: Option<Box<dyn Sink>>,
+    /// What has left through this pad — see [`crate::stats`]. Every pad has
+    /// one, so an element's outputs are counted without it doing anything.
+    counters: Arc<PadCounters>,
 }
 
 impl SrcPad {
@@ -44,8 +48,10 @@ impl SrcPad {
     /// constructor leaves the link check to defer to the runtime one, the
     /// same as before contracts existed.
     pub fn new(name: impl Into<String>) -> Self {
+        let name = name.into();
         Self {
-            name: name.into(),
+            counters: PadCounters::new(&name),
+            name,
             contract: OutputContract::Unknown,
             peer: None,
         }
@@ -93,14 +99,25 @@ impl SrcPad {
         self.peer = Some(sink);
     }
 
+    /// This pad's counters, for the element that owns it to be reported
+    /// with — see [`crate::stats`].
+    pub(crate) fn counters(&self) -> Arc<PadCounters> {
+        Arc::clone(&self.counters)
+    }
+
     /// Pushes a buffer to whatever this pad is linked to. Pushing into an
     /// unlinked pad silently drops the buffer (e.g. a demuxer stream
     /// nobody cared to link).
     pub fn push(&mut self, buf: MediaBuffer) -> Result<()> {
-        match &mut self.peer {
+        let is_eos = buf.is_eos();
+        let result = match &mut self.peer {
             Some(sink) => sink.consume(buf),
             None => Ok(()),
+        };
+        if !is_eos {
+            self.counters.pushed(result.is_ok());
         }
+        result
     }
 
     /// Returns whether the linked peer can currently accept its next buffer.

@@ -34,6 +34,7 @@ use crate::{
     control::{self, ControlMsg, ControlReceiver, ControlSender, RequestKind},
     element::{Element, ElementType, Sink, element_pp_log},
     error::{Result, ThreadSpawnError},
+    stats::ElementCounters,
 };
 
 /// Errors specific to `Queue`. Converts into the crate-wide `Error` via
@@ -172,6 +173,9 @@ pub struct Queue {
     /// See [`Queue::drop`] for why neither channel alone can play this
     /// role safely.
     stop: Arc<AtomicBool>,
+    /// Where this queue is counted, when a pipeline built it — see
+    /// [`crate::stats`]. `None` for one spawned by hand.
+    counters: Option<Arc<ElementCounters>>,
 }
 
 impl Queue {
@@ -224,10 +228,37 @@ impl Queue {
             bus,
             policy,
             pipeline_id,
+            None,
             |thread_name, task| thread::Builder::new().name(thread_name).spawn(task),
         )
     }
 
+    /// [`Self::spawn_with_policy`], counted — what a pipeline's chain
+    /// builds, so the queue is reported with the rest of the graph.
+    pub(crate) fn spawn_counted(
+        name: impl Into<String>,
+        capacity: usize,
+        downstream: Box<dyn Sink>,
+        bus: Bus,
+        policy: OverflowPolicy,
+        pipeline_id: Option<&str>,
+        counters: Arc<ElementCounters>,
+    ) -> Result<Queue> {
+        Self::spawn_with_policy_using(
+            name,
+            capacity,
+            downstream,
+            bus,
+            policy,
+            pipeline_id,
+            Some(counters),
+            |thread_name, task| thread::Builder::new().name(thread_name).spawn(task),
+        )
+    }
+
+    // One argument over clippy's count, and every one of them is what a
+    // queue is made of; a struct would be this signature with a name on it.
+    #[allow(clippy::too_many_arguments)]
     fn spawn_with_policy_using(
         name: impl Into<String>,
         capacity: usize,
@@ -235,6 +266,7 @@ impl Queue {
         bus: Bus,
         policy: OverflowPolicy,
         pipeline_id: Option<&str>,
+        counters: Option<Arc<ElementCounters>>,
         spawn: impl FnOnce(
             String,
             Box<dyn FnOnce() + Send + 'static>,
@@ -253,6 +285,10 @@ impl Queue {
         let worker_pp_log = pp_log.clone();
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = stop.clone();
+        if let Some(queue) = counters.as_deref().and_then(ElementCounters::queue) {
+            queue.watch(tx.clone());
+        }
+        let worker_counters = counters.clone();
 
         // `Builder::name` panics on interior NULs. Queue names are caller
         // input and remain unchanged for element/log identity; only the OS
@@ -269,6 +305,7 @@ impl Queue {
                     worker_name,
                     worker_pp_log,
                     worker_stop,
+                    worker_counters,
                 )
             }),
         )
@@ -284,6 +321,7 @@ impl Queue {
             handle: Some(handle),
             control: control_tx,
             stop,
+            counters,
         })
     }
 }
@@ -352,17 +390,36 @@ impl Sink for Queue {
             return result;
         }
 
-        match self.policy {
-            OverflowPolicy::Block(timeout) => match self.tx.send_timeout(buf, timeout) {
-                Ok(()) => Ok(()),
-                Err(SendTimeoutError::Timeout(_)) => {
-                    Err(QueueError::SendTimedOut { after: timeout }.into())
+        let counters = self.counters.as_deref();
+        if let Some(counters) = counters {
+            counters.arrived();
+        }
+        let result = match self.policy {
+            OverflowPolicy::Block(timeout) => {
+                // Timed only when it had to wait: a send into room is not
+                // backpressure, and timing every one would cost a clock
+                // reading for nothing.
+                let waited = self.tx.is_full().then(std::time::Instant::now);
+                let sent = self.tx.send_timeout(buf, timeout);
+                if let (Some(started), Some(queue)) =
+                    (waited, counters.and_then(ElementCounters::queue))
+                {
+                    queue.blocked(started.elapsed());
                 }
-                Err(SendTimeoutError::Disconnected(_)) => Err(QueueError::ChannelClosed.into()),
-            },
+                match sent {
+                    Ok(()) => Ok(()),
+                    Err(SendTimeoutError::Timeout(_)) => {
+                        Err(QueueError::SendTimedOut { after: timeout }.into())
+                    }
+                    Err(SendTimeoutError::Disconnected(_)) => Err(QueueError::ChannelClosed.into()),
+                }
+            }
             OverflowPolicy::DropNewest => match self.tx.try_send(buf) {
                 Ok(()) => Ok(()),
                 Err(TrySendError::Full(_)) => {
+                    if let Some(queue) = counters.and_then(ElementCounters::queue) {
+                        queue.dropped();
+                    }
                     self.bus.post(
                         &self.pp_log,
                         BusEvent::Dropped {
@@ -374,7 +431,13 @@ impl Sink for Queue {
                 }
                 Err(TrySendError::Disconnected(_)) => Err(QueueError::ChannelClosed.into()),
             },
+        };
+        if result.is_err()
+            && let Some(counters) = counters
+        {
+            counters.failed();
         }
+        result
     }
 
     fn control(&mut self, msg: ControlMsg) -> Result<()> {
@@ -433,6 +496,9 @@ impl Drop for Queue {
 /// `Pause` blocks this
 /// whole function (and therefore `downstream`) right here, without
 /// touching `data_rx` at all, until `Resume`/`Stop`.
+// Everything a worker is handed when it is spawned, one argument apiece;
+// `spawn_with_policy_using` carries the same list for the same reason.
+#[allow(clippy::too_many_arguments)]
 fn worker_loop(
     data_rx: Receiver<MediaBuffer>,
     control_rx: ControlReceiver,
@@ -445,6 +511,7 @@ fn worker_loop(
     // too.
     pp_log: PpLog,
     stop: Arc<AtomicBool>,
+    counters: Option<Arc<ElementCounters>>,
 ) {
     pp_info!(pp_log: &pp_log, "worker: starting");
     let error_reporter = QueueErrorReporter {
@@ -535,7 +602,14 @@ fn worker_loop(
                 match buf {
                     Ok(buf) => {
                         let is_eos = buf.is_eos();
-                        match downstream.consume(buf) {
+                        let call = counters
+                            .as_deref()
+                            .map(|counters| counters.begin_forwarding(is_eos));
+                        let result = downstream.consume(buf);
+                        if let Some(call) = call {
+                            call.end(result.is_ok());
+                        }
+                        match result {
                             Ok(()) => {
                                 if is_eos {
                                     pp_trace!(
@@ -861,6 +935,7 @@ mod tests {
             }),
             bus,
             OverflowPolicy::default(),
+            None,
             None,
             |_thread_name, _task| Err(std::io::Error::other("injected spawn failure")),
         );

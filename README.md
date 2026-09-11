@@ -114,7 +114,11 @@ The core types are deliberately small:
   foreign `PlaybackClock` claims a master slot nothing reads. Both fail
   silently, and neither is now expressible.
 - `Pipeline` owns source threads, control flow, the shared clock, bus, and
-  topology graph.
+  topology graph. `Pipeline::stats` reads what every element in that graph
+  is doing — buffers, time inside `consume`, how long it has been idle,
+  errors, and a `Queue`'s fill and drops — as running totals, so two
+  readings give a rate. A `Tee` branch ended with `finish_branch` stays in
+  it as `Finishing` until it has drained.
 - `PipelineBridge` carries buffers from one `Pipeline` into another, so a
   source that dies takes only its own pipeline with it. `AudioMixer` and the
   video compositors already join pipelines that meet at one of them; a bridge

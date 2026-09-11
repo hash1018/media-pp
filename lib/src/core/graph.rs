@@ -13,7 +13,7 @@
 use std::{
     collections::{HashMap, HashSet},
     fmt::{self, Write as _},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, Weak},
 };
 
 use thiserror::Error as ThisError;
@@ -23,6 +23,7 @@ use crate::{
     element::ElementType,
     log::{Level, enabled},
     pp_log::{PpLog, pp_info},
+    stats::{ElementCounters, Registered},
 };
 
 /// Stable identity of one element inside a pipeline graph. Names are only
@@ -430,6 +431,9 @@ pub(crate) struct BranchPlan {
     /// it means walking `edges` from `root` and carrying the flow along
     /// each one, not folding a linear list.
     pub contracts: HashMap<ElementId, PortContracts>,
+    /// Every node's counters, held weakly: the running elements hold them,
+    /// and an attach publishes them with the nodes — see [`crate::stats`].
+    pub counters: HashMap<ElementId, Weak<ElementCounters>>,
 }
 
 impl BranchPlan {
@@ -523,6 +527,22 @@ struct GraphState {
     /// the pipeline runs — which has no other way to know what is already
     /// flowing through it.
     outgoing: HashMap<ElementId, Option<ResolvedFlow>>,
+    /// Every element's counters, by identity, for as long as the element
+    /// exists — which can be longer than it is in `nodes`. See
+    /// [`crate::stats`] for why a removed element is still reported.
+    counters: HashMap<ElementId, Registered>,
+}
+
+impl GraphState {
+    /// Forgets the counters of elements that no longer exist.
+    ///
+    /// Done on every attach and detach as well as on every read: an
+    /// application that churns branches and never reads a snapshot would
+    /// otherwise keep an entry for every element it ever attached.
+    fn forget_dropped_counters(&mut self) {
+        self.counters
+            .retain(|_, entry| entry.counters.strong_count() > 0);
+    }
 }
 
 /// Live, transactionally-updated graph behind [`crate::pipeline::Pipeline`].
@@ -550,6 +570,37 @@ impl PipelineGraph {
     #[cfg(test)]
     pub(crate) fn resolved_output_count(&self) -> usize {
         self.0.lock().unwrap().outgoing.len()
+    }
+
+    /// Reports one already-attached element's counters — a source's, which
+    /// arrives by [`Self::add_source`] rather than with a branch.
+    pub(crate) fn register_counters(&self, id: ElementId, counters: &Arc<ElementCounters>) {
+        let mut state = self.0.lock().unwrap();
+        let Some(node) = state.nodes.iter().find(|node| node.id == id).cloned() else {
+            return;
+        };
+        state.counters.insert(
+            id,
+            Registered {
+                id,
+                element_type: node.element_type,
+                name: node.name,
+                branch: None,
+                counters: Arc::downgrade(counters),
+            },
+        );
+    }
+
+    /// Every registered element that still exists, the revision they were
+    /// read at, and which of them the graph still has — copied under the
+    /// lock for [`crate::stats::read`] to read outside it.
+    pub(crate) fn registered(&self) -> (u64, Vec<Registered>, HashSet<ElementId>) {
+        let mut state = self.0.lock().unwrap();
+        state.forget_dropped_counters();
+        let mut registered: Vec<Registered> = state.counters.values().cloned().collect();
+        registered.sort_by_key(|entry| entry.id);
+        let attached = state.nodes.iter().map(|node| node.id).collect();
+        (state.revision, registered, attached)
     }
 
     /// Returns the attached branch that owns `element`, if the element was
@@ -643,6 +694,23 @@ impl PipelineGraph {
 
         let owned_nodes = plan.nodes.iter().map(|node| node.id).collect();
         state.outgoing.extend(outgoing);
+        state.forget_dropped_counters();
+        // Published with the nodes, in the same revision: an element is
+        // reported from the moment the graph has it.
+        for node in &plan.nodes {
+            if let Some(counters) = plan.counters.get(&node.id) {
+                state.counters.insert(
+                    node.id,
+                    Registered {
+                        id: node.id,
+                        element_type: node.element_type,
+                        name: node.name.clone(),
+                        branch: Some(branch_id),
+                        counters: counters.clone(),
+                    },
+                );
+            }
+        }
         state.nodes.extend(plan.nodes);
         state.edges.extend(edges);
         state.branches.insert(
@@ -698,7 +766,16 @@ impl PipelineGraph {
         state
             .outgoing
             .retain(|element, _| !removed_nodes.contains(element));
+        // Not this branch's entries — its elements are still alive, handed
+        // back to the caller to drop outside this lock — but any earlier
+        // one's that have since gone.
+        state.forget_dropped_counters();
         state.revision += 1;
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn registered_count(&self) -> usize {
+        self.0.lock().unwrap().counters.len()
     }
 }

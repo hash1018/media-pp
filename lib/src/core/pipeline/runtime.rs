@@ -19,6 +19,7 @@ use crate::{
     error::{Result, ThreadSpawnError},
     graph::{GraphSnapshot, NodeInfo, PipelineGraph, log_topology},
     playback_clock::PlaybackClock,
+    stats::PipelineStats,
 };
 
 use super::{PipelineBuilder, builder::SourceEntry};
@@ -141,6 +142,9 @@ pub struct Pipeline {
     pub(super) workers: Mutex<Vec<JoinHandle<()>>>,
     /// Live node/edge graph backing snapshots and topology rendering.
     pub(super) graph: PipelineGraph,
+    /// Each source's counters, kept alive here — see
+    /// [`PipelineBuilder`]'s own field.
+    pub(super) _source_counters: Vec<Arc<crate::stats::ElementCounters>>,
 }
 
 impl Pipeline {
@@ -211,6 +215,29 @@ impl Pipeline {
     /// `Tee`) are joined by newlines.
     pub fn topology(&self) -> String {
         self.graph().topology()
+    }
+
+    /// What every element is doing, read now — see [`crate::stats`].
+    ///
+    /// Running totals rather than rates: take two readings and the rate is
+    /// their difference over the time between them, matched by
+    /// [`ElementStats::id`](crate::stats::ElementStats::id). Cheap enough to
+    /// call a few times a second — the graph's lock is held only to copy
+    /// the list of what is registered, and nothing on the path a buffer
+    /// travels is locked by it.
+    ///
+    /// A branch finished with
+    /// [`TeeHandle::finish_branch`](crate::elements::TeeHandle::finish_branch)
+    /// goes on appearing, as
+    /// [`ElementState::Finishing`](crate::stats::ElementState::Finishing),
+    /// until it has drained and been dropped.
+    pub fn stats(&self) -> PipelineStats {
+        let (revision, registered, attached) = self.graph.registered();
+        PipelineStats {
+            revision,
+            paused: self.paused.load(Ordering::Acquire),
+            elements: crate::stats::read(registered, |id| attached.contains(&id)),
+        }
     }
 
     /// The clock every `Pacer` in this pipeline paces against — see

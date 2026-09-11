@@ -282,6 +282,7 @@ impl TeeBuilder {
             // same walk — the fan-out edge above is what carries this
             // `Tee`'s incoming contract into each of them.
             tee_branch.plan.contracts.extend(plan.contracts);
+            tee_branch.plan.counters.extend(plan.counters);
 
             pad.link(root);
             runtime_branches.push(Arc::new(TeeBranch {
