@@ -22,6 +22,7 @@ resampled into the one shape Whisper reads: 16 kHz mono f32.
 ```sh
 cargo run -p transcribe --release -- model.bin input.mp4 [output.mp4]
 cargo run -p transcribe --release --features gpu -- --language ko --align model.bin input.mp4
+cargo run -p transcribe --release --features gpu -- --sidecar out.srt model.bin input.mp4
 ```
 
 `--release` matters more than usual here: a debug build of the inference is
@@ -123,8 +124,15 @@ timestamp and not its arrival, and the index is written at the end, so a
 sample landing late still lands where it belongs. The `Queue` before the
 transcriber is what keeps the waiting off the demuxer's thread.
 
+## A subtitle file beside it
+
+`--sidecar out.srt` or `--sidecar out.vtt` writes the same lines to a file of
+their own as well, in SubRip or WebVTT by the extension. It is a second
+`FileMuxer` with one text track, fed the same line in its own codec — see
+`subtitle::Codec` — and it is written as the lines arrive, where the MP4's
+track is indexed only when the copy is finished.
+
 ## What it does not do
 
-Only MP4, because `mov_text` is what MP4 takes and this writes `mov_text`.
-Matroska carries SRT and ASS as they are, so a caller wanting one of those
-would not need `subtitle` at all.
+The copy itself is only ever an MP4, because `mov_text` is what MP4 takes
+and this writes `mov_text` into it.

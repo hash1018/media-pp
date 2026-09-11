@@ -1149,7 +1149,11 @@ mod tests {
             .add_stream("audio", audio_params, audio_tb)
             .expect("add_stream audio");
         muxer
-            .add_stream("text", crate::subtitle::mov_text_parameters(), text_tb)
+            .add_stream(
+                "text",
+                crate::subtitle::Codec::MovText.parameters(),
+                text_tb,
+            )
             .expect("add_stream text");
         let mut sinks = muxer.open().expect("open must write the header");
         assert_eq!(sinks.len(), 3);
@@ -1176,10 +1180,10 @@ mod tests {
 
         // Only now, with the rest of the file already written.
         text_sink
-            .consume(crate::subtitle::packet("첫 번째 자막", 1_000, 1_000))
+            .consume(crate::subtitle::Codec::MovText.packet("첫 번째 자막", 1_000, 1_000))
             .expect("first line");
         text_sink
-            .consume(crate::subtitle::packet("second line", 2_500, 1_500))
+            .consume(crate::subtitle::Codec::MovText.packet("second line", 2_500, 1_500))
             .expect("second line");
         text_sink.consume(MediaBuffer::Eos).expect("text eos");
 

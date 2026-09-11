@@ -164,12 +164,17 @@ compile error with no explanation.
   the speech. For a recording that is nothing, because a subtitle's place
   in a file is its timestamp and not its arrival.
 
-  `crate::subtitle` is the other half: `mov_text_parameters()` describes an
-  MP4 subtitle track and `packet()` builds one line of it. MP4 takes 3GPP
-  Timed Text and nothing else — not SRT, not ASS — and this writes the
-  `tx3g` sample entry FFmpeg's own encoder writes, so a track says how its
-  lines should look rather than leaving it to the player. `MediaKind` gains
-  `SubtitlePacket` so such a track states its contract like any other.
+  `crate::subtitle` is the other half: `subtitle::Codec` describes a text
+  track (`parameters()`) and builds one line of it (`packet()`), in the
+  codec its destination takes. `MovText` is for MP4, which takes 3GPP Timed
+  Text and nothing else — not SRT, not ASS — and it writes the `tx3g`
+  sample entry FFmpeg's own encoder writes, so a track says how its lines
+  should look rather than leaving it to the player. `SubRip` and `WebVtt`
+  are for an `.srt` or `.vtt` file, or a Matroska track: a sidecar file is
+  a `FileMuxer` of its own, FFmpeg picking the writer from the extension,
+  and it is written as the lines arrive — a recording that dies halfway
+  leaves every line up to that moment. `MediaKind` gains `SubtitlePacket`
+  so such a track states its contract like any other.
 
   Gaps need no packets: FFmpeg's muxer fills them with empty samples, so a
   caller pushes a line when there is something to say and nothing when

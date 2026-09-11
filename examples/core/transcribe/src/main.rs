@@ -39,6 +39,8 @@
 //!
 //! The language is detected unless `--language` names it, which is slower
 //! and can be fooled by a stretch of music — see the README.
+//! `--sidecar out.srt` (or `.vtt`) also writes the lines to a subtitle file
+//! of their own, through a second `FileMuxer`.
 //!
 //! The model is a whisper.cpp GGML file — `ggml-base.bin` and friends, from
 //! `huggingface.co/ggerganov/whisper.cpp`. Nothing that size belongs in a
@@ -59,7 +61,10 @@ mod example {
         TokenTiming, WHISPER_SAMPLE_RATE, WhisperTranscriber,
     };
     use media_pp::ffmpeg;
-    use media_pp::{bus::BusEvent, ffmpeg::media, pipeline::Pipeline, subtitle};
+    use media_pp::{
+        buffer::MediaBuffer, bus::BusEvent, element::Sink, ffmpeg::media, pipeline::Pipeline,
+        subtitle,
+    };
 
     /// The text track's own time base, chosen rather than inherited:
     /// milliseconds are what `Segment` reports in, so this makes the
@@ -87,25 +92,45 @@ mod example {
         // Options anywhere, and the rest by position.
         let mut language = None;
         let mut token_timing = TokenTiming::Estimated;
+        let mut sidecar = None;
         let mut positional = Vec::new();
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
             match arg.as_str() {
                 "--language" => language = args.next(),
                 "--align" => token_timing = TokenTiming::Aligned,
+                "--sidecar" => sidecar = args.next(),
                 _ => positional.push(arg),
             }
         }
         let mut positional = positional.into_iter();
         let (Some(model_path), Some(input_path)) = (positional.next(), positional.next()) else {
             eprintln!(
-                "usage: transcribe [--language <code>] [--align] <model.bin> <input.mp4> [output.mp4]"
+                "usage: transcribe [--language <code>] [--align] [--sidecar <out.srt|out.vtt>] \
+                 <model.bin> <input.mp4> [output.mp4]"
             );
             eprintln!("  the model is a whisper.cpp GGML file, e.g. ggml-base.bin");
             eprintln!("  the language is detected unless given, e.g. --language ko");
             eprintln!("  --align times each word against the audio, for cleaner seams");
+            eprintln!("  --sidecar also writes the lines to a subtitle file of their own");
             std::process::exit(1);
         };
+        // Settled before anything is opened, so a wrong extension is said
+        // before a model has been loaded for nothing.
+        let sidecar = sidecar.map(|path| {
+            let codec = match std::path::Path::new(&path)
+                .extension()
+                .and_then(|extension| extension.to_str())
+            {
+                Some("srt") => subtitle::Codec::SubRip,
+                Some("vtt") => subtitle::Codec::WebVtt,
+                _ => {
+                    eprintln!("--sidecar writes .srt or .vtt, and {path} is neither");
+                    std::process::exit(1);
+                }
+            };
+            (path, codec)
+        });
         let output_path = positional
             .next()
             .unwrap_or_else(|| "transcribed.mp4".into());
@@ -149,20 +174,37 @@ mod example {
             None => None,
         };
         muxer.add_stream("audio", audio_params.clone(), audio_time_base)?;
-        muxer.add_stream("text", subtitle::mov_text_parameters(), TEXT_TIME_BASE)?;
+        muxer.add_stream(
+            "text",
+            subtitle::Codec::MovText.parameters(),
+            TEXT_TIME_BASE,
+        )?;
 
         let mut sinks = muxer.open()?;
-        let text_sink = sinks.pop().expect("the text track was registered last");
+        let track = sinks.pop().expect("the text track was registered last");
         let audio_sink = sinks.pop().expect("audio was registered before it");
         let video_sink = sinks.pop();
 
+        // A file of its own is a muxer of its own: FFmpeg picks the SubRip
+        // or WebVTT writer from the extension, and either takes exactly the
+        // one text track.
+        let sidecar = match sidecar {
+            Some((path, codec)) => {
+                let mut muxer = FileMuxer::create(&path)?;
+                muxer.add_stream("sidecar", codec.parameters(), TEXT_TIME_BASE)?;
+                let sink = muxer.open()?.pop().expect("its one track");
+                Some((codec, sink))
+            }
+            None => None,
+        };
+
         // Shared because two things end up writing to it from different
         // moments: the transcriber's callback, for as long as there is
-        // speech, and this thread once, to close the track. Nothing else
-        // can send that `Eos` — the transcriber is a terminal sink and the
-        // callback never learns the audio ran out.
-        let text_sink = Arc::new(Mutex::new(text_sink));
-        let text_for_segments = Arc::clone(&text_sink);
+        // speech, and this thread once, to close it. Nothing else can send
+        // that `Eos` — the transcriber is a terminal sink and the callback
+        // never learns the audio ran out.
+        let text = Arc::new(Mutex::new(TextOut { track, sidecar }));
+        let text_for_segments = Arc::clone(&text);
 
         // Said before rather than after, because on a GPU backend this is
         // where the wait is: the first run on a machine has the driver
@@ -192,11 +234,10 @@ mod example {
                 if duration <= 0 {
                     return Ok(());
                 }
-                let packet = subtitle::packet(&segment.text, segment.start_ms, duration);
                 text_for_segments
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .consume(packet)
+                    .line(&segment.text, segment.start_ms, duration)
             },
         )?;
         if let Some(language) = &language {
@@ -274,12 +315,42 @@ mod example {
         // is ever coming has been written. Closing the track is what lets
         // the muxer write its trailer, and without it the file has no index
         // and will not play.
-        text_sink
-            .lock()
+        text.lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .consume(media_pp::buffer::MediaBuffer::Eos)?;
+            .finish()?;
 
         println!("wrote {output_path}");
         Ok(())
+    }
+
+    /// Where each line of text is written: the copy's own text track, and a
+    /// subtitle file of its own when one was asked for.
+    struct TextOut {
+        track: Box<dyn Sink>,
+        sidecar: Option<(subtitle::Codec, Box<dyn Sink>)>,
+    }
+
+    impl TextOut {
+        /// One line, as a `mov_text` sample for the MP4 and in whichever
+        /// codec the sidecar was opened with.
+        fn line(&mut self, text: &str, start_ms: i64, duration: i64) -> media_pp::Result<()> {
+            self.track
+                .consume(subtitle::Codec::MovText.packet(text, start_ms, duration))?;
+            if let Some((codec, sink)) = &mut self.sidecar {
+                sink.consume(codec.packet(text, start_ms, duration))?;
+            }
+            Ok(())
+        }
+
+        /// Ends the track and the sidecar both. The MP4 needs it for its
+        /// index; the sidecar has been written line by line and only needs
+        /// closing.
+        fn finish(&mut self) -> media_pp::Result<()> {
+            self.track.consume(MediaBuffer::Eos)?;
+            if let Some((_, sink)) = &mut self.sidecar {
+                sink.consume(MediaBuffer::Eos)?;
+            }
+            Ok(())
+        }
     }
 }
