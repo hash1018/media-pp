@@ -24,11 +24,12 @@ use crate::{
     color::Color,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
     control::{ControlMsg, ControlReceiver, drain_control},
-    element::{Element, ElementType, Sink, Source, SourceElement, element_pp_log},
+    element::{Context, Element, ElementType, Sink, Source, SourceElement, element_pp_log},
     error::Result,
     pad::SrcPad,
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
     schedule::PeriodicSchedule,
+    stats::TickCounters,
 };
 
 const OUTPUT_POOL_SIZE: usize = 4;
@@ -595,6 +596,9 @@ pub struct SwVideoCompositor {
     /// still in flight.
     retired: Vec<Arc<UnboundObjectPoolRef<ffmpeg::frame::Video>>>,
     pad: SrcPad,
+    /// Where each tick is recorded, once the pipeline has handed it over
+    /// ??see [`crate::stats::TickStats`].
+    ticks: Option<Arc<TickCounters>>,
 }
 
 // SAFETY: `SwsContext` has no thread affinity and every scaling context is
@@ -652,6 +656,7 @@ impl SwVideoCompositor {
                         MemoryDomain::System,
                     )),
                 ),
+                ticks: None,
             },
             SwVideoCompositorHandle {
                 shared: Arc::downgrade(&shared),
@@ -821,7 +826,11 @@ impl SwVideoCompositor {
     }
 
     fn push_frame(&mut self, bus: &Bus) -> std::result::Result<(), SwVideoCompositorError> {
+        let composing = Instant::now();
         let output = self.compose_frame()?;
+        if let Some(ticks) = &self.ticks {
+            ticks.made(composing.elapsed());
+        }
         if let Err(error) = self.pad.push(MediaBuffer::Video(output)) {
             bus.post(
                 &self.pp_log,
@@ -851,6 +860,10 @@ impl Element for SwVideoCompositor {
 
     fn pp_log_mut(&mut self) -> &mut PpLog {
         &mut self.pp_log
+    }
+
+    fn attach_context(&mut self, context: &Arc<Context>) {
+        self.ticks = Some(context.source_ticks());
     }
 }
 
@@ -896,7 +909,10 @@ impl SourceElement for SwVideoCompositor {
             }
 
             self.push_frame(bus)?;
-            schedule.advance_after_tick(Instant::now());
+            let missed = schedule.advance_after_tick(Instant::now());
+            if let Some(ticks) = &self.ticks {
+                ticks.missed(missed);
+            }
         }
     }
 
@@ -1541,6 +1557,9 @@ mod tests {
     struct TimestampSink {
         pp_log: PpLog,
         tx: crossbeam_channel::Sender<Instant>,
+        /// How long each frame is held before it is taken — a downstream
+        /// that cannot keep up.
+        hold: Duration,
     }
 
     impl Element for TimestampSink {
@@ -1561,6 +1580,7 @@ mod tests {
     impl Sink for TimestampSink {
         fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
             if matches!(buf, MediaBuffer::Video(_)) {
+                thread::sleep(self.hold);
                 let _ = self.tx.send(Instant::now());
             }
             Ok(())
@@ -1590,6 +1610,7 @@ mod tests {
         let sink = TimestampSink {
             tx,
             pp_log: element_pp_log(ElementType::Other, "timestamp-recorder", None),
+            hold: Duration::ZERO,
         };
         let (compositor, _handle) = SwVideoCompositor::new(
             "compositor",
@@ -1632,6 +1653,76 @@ mod tests {
              interval after resume (phase preserved from before the \
              pause), not almost immediately (phase reset to the resume \
              instant): got {gap:?}"
+        );
+    }
+
+    /// A compositor's ticks are part of what its pipeline reports — how many
+    /// it drew, how many it missed, and how long drawing took — and the time
+    /// a slow downstream holds a frame is a missed tick, not drawing time.
+    ///
+    /// Ten frames a second is a tick every 100 ms, and a sink holding each
+    /// frame for 150 ms makes every tick overrun the next deadline. Each one
+    /// therefore misses at least one, while what it spent composing a 2x2
+    /// picture is nowhere near the hold. Counted from the whole tick, the
+    /// drawing time would be at least 150 ms a frame.
+    #[test]
+    fn a_compositor_reports_its_ticks_and_counts_a_held_push_as_missed() {
+        use crate::pipeline::Pipeline;
+
+        const HOLD: Duration = Duration::from_millis(150);
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let sink = TimestampSink {
+            tx,
+            pp_log: element_pp_log(ElementType::Other, "timestamp-recorder", None),
+            hold: HOLD,
+        };
+        let (compositor, _handle) = SwVideoCompositor::new(
+            "ticking",
+            VideoCompositorOptions {
+                frame_rate: ffmpeg::Rational::new(10, 1),
+                ..options(2, 2)
+            },
+        )
+        .unwrap();
+        let pipeline = Pipeline::new("ticks", compositor, |source, ctx| {
+            let branch = ctx.branch().to(Box::new(sink))?;
+            ctx.attach(source, 0, branch)?;
+            Ok(())
+        })
+        .expect("test pipeline wiring must succeed");
+
+        pipeline.run().unwrap();
+        for _ in 0..3 {
+            rx.recv_timeout(Duration::from_secs(2))
+                .expect("the compositor keeps drawing");
+        }
+        // Stopped before reading, so every tick that was drawn has also
+        // been advanced past and its misses recorded.
+        pipeline.stop();
+
+        let stats = pipeline.stats();
+        let ticks = stats
+            .elements
+            .iter()
+            .find(|element| &*element.name == "ticking")
+            .and_then(|element| element.ticks)
+            .expect("a compositor reports its ticks");
+        assert!(ticks.made >= 3, "{ticks:?}");
+        assert!(
+            ticks.missed >= ticks.made,
+            "every tick overran its deadline, so each missed one: {ticks:?}"
+        );
+        assert!(
+            ticks.work < HOLD / 2 * ticks.made as u32,
+            "the push is not drawing time: {ticks:?}"
+        );
+        assert!(
+            stats
+                .elements
+                .iter()
+                .filter(|element| &*element.name != "ticking")
+                .all(|element| element.ticks.is_none()),
+            "only an element that asked reports ticks"
         );
     }
 

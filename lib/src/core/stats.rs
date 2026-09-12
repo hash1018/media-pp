@@ -96,6 +96,8 @@ pub(crate) struct ElementCounters {
     /// This element's output ports, registered once when it is wired.
     pads: Mutex<Vec<Arc<PadCounters>>>,
     queue: Option<QueueCounters>,
+    /// Set only for an element that asked to report its ticks.
+    ticks: OnceLock<Arc<TickCounters>>,
 }
 
 impl ElementCounters {
@@ -161,6 +163,12 @@ impl ElementCounters {
         self.queue.as_ref()
     }
 
+    /// The counters this element's ticks are recorded in. Asking is what
+    /// makes it report them at all.
+    pub(crate) fn ticks(&self) -> Arc<TickCounters> {
+        Arc::clone(self.ticks.get_or_init(Arc::default))
+    }
+
     fn read(&self, now: u64) -> Reading {
         let pads: Vec<PadStats> = self
             .pads
@@ -184,6 +192,7 @@ impl ElementCounters {
             eos: self.eos.load(Ordering::Relaxed),
             pads,
             queue: self.queue.as_ref().map(QueueCounters::read),
+            ticks: self.ticks.get().map(|ticks| ticks.read()),
         }
     }
 }
@@ -223,6 +232,7 @@ impl Call<'_> {
 pub(crate) struct PadCounters {
     name: Arc<str>,
     buffers: AtomicU64,
+    bytes: AtomicU64,
     push_errors: AtomicU64,
     last_push_at: AtomicU64,
 }
@@ -232,14 +242,19 @@ impl PadCounters {
         Arc::new(Self {
             name: name.into(),
             buffers: AtomicU64::new(0),
+            bytes: AtomicU64::new(0),
             push_errors: AtomicU64::new(0),
             last_push_at: AtomicU64::new(0),
         })
     }
 
-    /// Records one buffer handed to whatever the pad is linked to.
-    pub(crate) fn pushed(&self, ok: bool) {
+    /// Records one buffer handed to whatever the pad is linked to, `bytes`
+    /// long if it was a packet.
+    pub(crate) fn pushed(&self, ok: bool, bytes: u64) {
         self.buffers.fetch_add(1, Ordering::Relaxed);
+        if bytes != 0 {
+            self.bytes.fetch_add(bytes, Ordering::Relaxed);
+        }
         self.last_push_at.store(now_ns(), Ordering::Relaxed);
         if !ok {
             self.push_errors.fetch_add(1, Ordering::Relaxed);
@@ -250,8 +265,47 @@ impl PadCounters {
         PadStats {
             name: self.name.clone(),
             buffers: self.buffers.load(Ordering::Relaxed),
+            bytes: self.bytes.load(Ordering::Relaxed),
             push_errors: self.push_errors.load(Ordering::Relaxed),
             idle_for: since(self.last_push_at.load(Ordering::Relaxed), now),
+        }
+    }
+}
+
+/// What an element producing on a schedule of its own adds: how many ticks
+/// it made, how many it missed, and how long making them took.
+///
+/// Opted into by the element — see
+/// [`Context::source_ticks`](crate::element::Context::source_ticks) — since
+/// only it knows which part of a tick is its own work and which is handing
+/// the result on.
+#[derive(Default)]
+pub(crate) struct TickCounters {
+    ticks: AtomicU64,
+    missed: AtomicU64,
+    work_ns: AtomicU64,
+}
+
+impl TickCounters {
+    /// One tick made, `work` of it spent making it.
+    pub(crate) fn made(&self, work: Duration) {
+        self.ticks.fetch_add(1, Ordering::Relaxed);
+        self.work_ns.fetch_add(nanos(work), Ordering::Relaxed);
+    }
+
+    /// Ticks whose deadline passed while an earlier one was still being
+    /// made, and which were skipped rather than made late.
+    pub(crate) fn missed(&self, ticks: u64) {
+        if ticks != 0 {
+            self.missed.fetch_add(ticks, Ordering::Relaxed);
+        }
+    }
+
+    fn read(&self) -> TickStats {
+        TickStats {
+            made: self.ticks.load(Ordering::Relaxed),
+            missed: self.missed.load(Ordering::Relaxed),
+            work: Duration::from_nanos(self.work_ns.load(Ordering::Relaxed)),
         }
     }
 }
@@ -311,6 +365,7 @@ struct Reading {
     eos: bool,
     pads: Vec<PadStats>,
     queue: Option<QueueStats>,
+    ticks: Option<TickStats>,
 }
 
 /// One element's entry in the registry: who it is, and its counters, held
@@ -352,6 +407,7 @@ pub(crate) fn read(
                 eos: reading.eos,
                 pads: reading.pads,
                 queue: reading.queue,
+                ticks: reading.ticks,
             })
         })
         .collect()
@@ -417,6 +473,9 @@ pub struct ElementStats {
     pub pads: Vec<PadStats>,
     /// Set for a [`Queue`](crate::queue::Queue), and only for one.
     pub queue: Option<QueueStats>,
+    /// Set for an element that produces on a schedule of its own and
+    /// reports it: the video compositors.
+    pub ticks: Option<TickStats>,
 }
 
 /// One output port's totals.
@@ -426,6 +485,11 @@ pub struct PadStats {
     pub name: Arc<str>,
     /// Buffers pushed through it, whether or not anything was linked.
     pub buffers: u64,
+    /// The size of the packets among them, in bytes — what an encoder or
+    /// a demuxer has put out, and so over time a bitrate. Decoded media is
+    /// not counted: a frame's size is its format's, not a rate anyone
+    /// sets.
+    pub bytes: u64,
     /// Pushes that failed downstream.
     pub push_errors: u64,
     /// How long since the last push, or `None` if there never was one.
@@ -445,4 +509,60 @@ pub struct QueueStats {
     /// Time its upstream spent waiting for room — under
     /// [`OverflowPolicy::Block`](crate::queue::OverflowPolicy::Block).
     pub blocked: Duration,
+}
+
+/// What an element producing on its own schedule has made of it.
+///
+/// A compositor draws once per tick of its frame rate. A tick whose work
+/// runs past the next deadline does not make that deadline's frame late:
+/// the deadlines it overran are skipped, and the schedule picks up again
+/// one interval on. `missed` counts those, so `missed / (made + missed)` is
+/// the share of the frame rate that was never drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TickStats {
+    /// Ticks made.
+    pub made: u64,
+    /// Ticks skipped because the one before them ran past their deadline —
+    /// whatever held it: drawing, or handing the frame to a downstream that
+    /// made it wait. Set beside `work`, that says which: missed ticks with
+    /// little work per tick are something downstream falling behind.
+    pub missed: u64,
+    /// Time spent making the ticks that were made — for a compositor,
+    /// composing the frame, not handing it downstream. So a slow encoder
+    /// holding up the push is not counted here, and `work / made` is the
+    /// time a frame takes to draw. On a GPU backend that is the time this
+    /// thread spends submitting the work and waiting on it, not the GPU's
+    /// own.
+    pub work: Duration,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pad::SrcPad;
+
+    /// A pad counts the bytes of the packets through it — what makes an
+    /// encoder's output a bitrate — and nothing for decoded media or `Eos`,
+    /// which are buffers of a size no one chose.
+    #[test]
+    fn a_pad_counts_the_bytes_of_the_packets_it_pushes_and_nothing_else() {
+        crate::init().expect("ffmpeg initializes");
+        let mut pad = SrcPad::new("out");
+        for size in [100, 250] {
+            pad.push(MediaBuffer::Packet(Arc::new(ffmpeg_next::Packet::new(
+                size,
+            ))))
+            .expect("an unlinked pad takes anything");
+        }
+        pad.push(MediaBuffer::Video(Arc::new(
+            crate::pool::UnboundObjectPool::new(1, ffmpeg_next::frame::Video::empty, |_| {}).get(),
+        )))
+        .expect("an unlinked pad takes anything");
+        pad.push(MediaBuffer::Eos)
+            .expect("an unlinked pad takes anything");
+
+        let read = pad.counters().read(now_ns());
+        assert_eq!(read.buffers, 3, "two packets and a frame; Eos is not one");
+        assert_eq!(read.bytes, 350);
+    }
 }

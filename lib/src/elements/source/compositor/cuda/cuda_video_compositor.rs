@@ -27,7 +27,7 @@ use crate::{
     color::Color,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
     control::{ControlMsg, ControlReceiver, drain_control},
-    element::{Element, ElementType, Sink, Source, SourceElement, element_pp_log},
+    element::{Context, Element, ElementType, Sink, Source, SourceElement, element_pp_log},
     elements::{CudaScalerInterp, filter::scaler::cuda::scale_graph::CudaScaleGraph},
     error::Result,
     pad::SrcPad,
@@ -42,6 +42,7 @@ use crate::{
     platform::ffmpeg::AvBufferRef,
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
     schedule::PeriodicSchedule,
+    stats::TickCounters,
 };
 
 const OUTPUT_POOL_SIZE: usize = 4;
@@ -725,6 +726,9 @@ pub struct CudaVideoCompositor {
     /// comes from `hw_frames_ctx`'s own pool.
     output_pool: UnboundObjectPool<ffmpeg::frame::Video>,
     pad: SrcPad,
+    /// Where each tick is recorded, once the pipeline has handed it over
+    /// ??see [`crate::stats::TickStats`].
+    ticks: Option<Arc<TickCounters>>,
 }
 
 // SAFETY: both buffers are heap-allocated FFmpeg buffers with no thread
@@ -822,6 +826,7 @@ impl CudaVideoCompositor {
                         MemoryDomain::Cuda,
                     )),
                 ),
+                ticks: None,
             },
             CudaVideoCompositorHandle {
                 shared: Arc::downgrade(&shared),
@@ -1189,7 +1194,11 @@ impl CudaVideoCompositor {
     }
 
     fn push_frame(&mut self, bus: &Bus) -> std::result::Result<(), CudaVideoCompositorError> {
+        let composing = Instant::now();
         let output = self.compose_frame()?;
+        if let Some(ticks) = &self.ticks {
+            ticks.made(composing.elapsed());
+        }
         if let Err(error) = self.pad.push(MediaBuffer::Video(Arc::new(output))) {
             bus.post(
                 &self.pp_log,
@@ -1219,6 +1228,10 @@ impl Element for CudaVideoCompositor {
 
     fn pp_log_mut(&mut self) -> &mut PpLog {
         &mut self.pp_log
+    }
+
+    fn attach_context(&mut self, context: &Arc<Context>) {
+        self.ticks = Some(context.source_ticks());
     }
 }
 
@@ -1264,7 +1277,10 @@ impl SourceElement for CudaVideoCompositor {
             }
 
             self.push_frame(bus)?;
-            schedule.advance_after_tick(Instant::now());
+            let missed = schedule.advance_after_tick(Instant::now());
+            if let Some(ticks) = &self.ticks {
+                ticks.missed(missed);
+            }
         }
     }
 

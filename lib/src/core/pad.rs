@@ -110,12 +110,16 @@ impl SrcPad {
     /// nobody cared to link).
     pub fn push(&mut self, buf: MediaBuffer) -> Result<()> {
         let is_eos = buf.is_eos();
+        let bytes = match &buf {
+            MediaBuffer::Packet(packet) => packet.size() as u64,
+            _ => 0,
+        };
         let result = match &mut self.peer {
             Some(sink) => sink.consume(buf),
             None => Ok(()),
         };
         if !is_eos {
-            self.counters.pushed(result.is_ok());
+            self.counters.pushed(result.is_ok(), bytes);
         }
         result
     }

@@ -80,9 +80,10 @@ FileDemuxer → SwDecoder → Queue → Pacer → FrameCounter
   constructor, so it cannot be handed another pipeline's.
 - `Pipeline::finish` ends with an ordered EOS that drains codecs and muxers;
   `Pipeline::stop` abandons buffered work.
-- `Pipeline::stats` reads what every element is doing — buffers, time inside
-  `consume`, how long it has been idle, errors, a `Queue`'s fill and drops —
-  as running totals, so two readings give a rate.
+- `Pipeline::stats` reads what every element is doing — buffers and packet
+  bytes, time inside `consume`, how long it has been idle, errors, a
+  `Queue`'s fill and drops, a compositor's frames drawn and missed — as
+  running totals, so two readings give a rate.
 
 ### Changing a running pipeline
 

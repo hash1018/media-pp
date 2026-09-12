@@ -51,7 +51,7 @@ use crate::{
     bus::{Bus, BusEvent},
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
     control::{ControlMsg, ControlReceiver, drain_control},
-    element::{Element, ElementType, Sink, Source, SourceElement, element_pp_log},
+    element::{Context, Element, ElementType, Sink, Source, SourceElement, element_pp_log},
     elements::VideoCompositorOptions,
     error::{D3d11FrameWrapError, D3d11SharedDeviceError, Result},
     pad::SrcPad,
@@ -61,6 +61,7 @@ use crate::{
     },
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
     schedule::PeriodicSchedule,
+    stats::TickCounters,
 };
 
 const OUTPUT_POOL_SIZE: usize = 4;
@@ -791,6 +792,9 @@ pub struct D3d11VideoCompositor {
     /// Immutable RTVs cached by the corresponding texture's COM pointer.
     output_views: HashMap<usize, ID3D11RenderTargetView>,
     pad: SrcPad,
+    /// Where each tick is recorded, once the pipeline has handed it over
+    /// ??see [`crate::stats::TickStats`].
+    ticks: Option<Arc<TickCounters>>,
 }
 
 // SAFETY: every field is either a `windows-rs` COM interface wrapper
@@ -887,6 +891,7 @@ impl D3d11VideoCompositor {
                         MemoryDomain::D3d11,
                     )),
                 ),
+                ticks: None,
             },
             D3d11VideoCompositorHandle {
                 shared: Arc::downgrade(&shared),
@@ -1255,7 +1260,11 @@ impl D3d11VideoCompositor {
     }
 
     fn push_frame(&mut self, bus: &Bus) -> std::result::Result<(), D3d11VideoCompositorError> {
+        let composing = Instant::now();
         let output = self.compose_frame(bus)?;
+        if let Some(ticks) = &self.ticks {
+            ticks.made(composing.elapsed());
+        }
         if let Err(error) = self.pad.push(MediaBuffer::Video(output)) {
             bus.post(
                 &self.pp_log,
@@ -1285,6 +1294,10 @@ impl Element for D3d11VideoCompositor {
 
     fn pp_log_mut(&mut self) -> &mut PpLog {
         &mut self.pp_log
+    }
+
+    fn attach_context(&mut self, context: &Arc<Context>) {
+        self.ticks = Some(context.source_ticks());
     }
 }
 
@@ -1330,7 +1343,10 @@ impl SourceElement for D3d11VideoCompositor {
             }
 
             self.push_frame(bus)?;
-            schedule.advance_after_tick(Instant::now());
+            let missed = schedule.advance_after_tick(Instant::now());
+            if let Some(ticks) = &self.ticks {
+                ticks.missed(missed);
+            }
         }
     }
 
@@ -2552,6 +2568,60 @@ mod tests {
              pause), not almost immediately (phase reset to the resume \
              instant): got {gap:?}"
         );
+    }
+
+    /// This compositor reports its ticks through its pipeline, as
+    /// `SwVideoCompositor` does — see that one's
+    /// `a_compositor_reports_its_ticks_and_counts_a_held_push_as_missed` for
+    /// what the numbers mean. This checks the wiring on this backend: the
+    /// frames a Preview sees drawn are the ticks it reports.
+    #[test]
+    fn its_ticks_are_reported_through_its_pipeline() {
+        use crate::pipeline::Pipeline;
+
+        let Some((device, context)) = try_device() else {
+            return;
+        };
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let sink = TimestampSink {
+            tx,
+            pp_log: element_pp_log(ElementType::Other, "timestamp-recorder", None),
+        };
+        let options = VideoCompositorOptions {
+            width: 2,
+            height: 2,
+            frame_rate: ffmpeg::Rational::new(30, 1),
+            background: Color::BLACK,
+        };
+        let (compositor, _handle) = D3d11VideoCompositor::new("ticking", &device, context, options)
+            .expect("D3d11VideoCompositor::new should succeed");
+        let pipeline = Pipeline::new("ticks", compositor, |source, ctx| {
+            let branch = ctx.branch().to(Box::new(sink))?;
+            ctx.attach(source, 0, branch)?;
+            Ok(())
+        })
+        .expect("test pipeline wiring must succeed");
+
+        pipeline.run().unwrap();
+        for _ in 0..3 {
+            rx.recv_timeout(Duration::from_millis(500))
+                .expect("the compositor keeps drawing");
+        }
+        pipeline.stop();
+
+        let stats = pipeline.stats();
+        let compositor = stats
+            .elements
+            .iter()
+            .find(|element| &*element.name == "ticking")
+            .expect("the compositor is reported");
+        let ticks = compositor.ticks.expect("a compositor reports its ticks");
+        assert_eq!(
+            ticks.made, compositor.pads[0].buffers,
+            "every tick drawn is a frame pushed"
+        );
+        assert!(ticks.made >= 3, "{ticks:?}");
+        assert!(ticks.work > Duration::ZERO, "{ticks:?}");
     }
 
     /// The whole point of the setter: the rate a running compositor emits at

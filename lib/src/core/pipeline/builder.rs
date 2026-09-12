@@ -90,6 +90,9 @@ impl PipelineBuilder {
         *source.pp_log_mut() =
             element_pp_log(source.element_type(), &source.name(), Some(&self.id));
         let source_id = self.graph.add_source(source.element_type(), source.name());
+        // Made before the context, which carries them to a source that
+        // records its own ticks.
+        let counters = ElementCounters::new();
         let context = Arc::new(Context {
             bus: self.bus.clone(),
             pipeline_id: self.id.clone(),
@@ -98,11 +101,11 @@ impl PipelineBuilder {
             playback_clock: self.playback_clock.clone(),
             operation: Arc::clone(&self.operation),
             source_id,
+            source_counters: Arc::clone(&counters),
         });
         source.attach_context(&context);
         wire(&mut source, &context)?;
         // A source is counted by what leaves its pads; it takes nothing in.
-        let counters = ElementCounters::new();
         counters.add_pads(source.src_pads().iter().map(SrcPad::counters));
         self.graph.register_counters(source_id, &counters);
         self.source_counters.push(counters);

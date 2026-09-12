@@ -80,9 +80,25 @@ impl PeriodicSchedule {
     /// stale deadline. This is a different cause of falling behind than
     /// [`PeriodicSchedule::resume_after_pause`]'s (real work taking too
     /// long vs. time frozen by `Pause`) but the same corrective action.
-    pub fn advance_after_tick(&mut self, now: Instant) {
+    ///
+    /// Returns how many deadlines were skipped that way, which is the count
+    /// of ticks this schedule never produced — zero whenever the tick
+    /// finished in time.
+    pub fn advance_after_tick(&mut self, now: Instant) -> u64 {
         self.next_due += self.interval;
+        let missed = self.ticks_behind(now);
         self.resync_if_behind(now);
+        missed
+    }
+
+    /// How many deadlines, the pending one included, have already passed.
+    fn ticks_behind(&self, now: Instant) -> u64 {
+        if self.next_due >= now {
+            return 0;
+        }
+        let late = now.duration_since(self.next_due).as_nanos();
+        let interval = self.interval.as_nanos().max(1);
+        u64::try_from(late / interval + 1).unwrap_or(u64::MAX)
     }
 
     /// Changes the cadence, taking effect at the next tick.
@@ -277,6 +293,38 @@ mod tests {
             INTERVAL,
             "expected a resync to one interval from now, not 14 missed \
              ticks all firing back-to-back"
+        );
+    }
+
+    /// What was dropped is answered, so a compositor can say how much of its
+    /// frame rate it never drew. The first tick is due at `t0` itself, so the
+    /// deadlines a tick finishing at `done` overran are `t0 + INTERVAL`
+    /// through `done` — the last included, since the schedule resyncs past
+    /// it rather than firing it.
+    #[test]
+    fn advance_after_tick_answers_how_many_ticks_it_dropped() {
+        let t0 = Instant::now();
+        let mut schedule = PeriodicSchedule::new(INTERVAL, t0);
+        assert_eq!(schedule.advance_after_tick(t0), 0, "on time");
+        assert_eq!(
+            schedule.advance_after_tick(t0 + INTERVAL),
+            0,
+            "done exactly at its own deadline is still on time"
+        );
+
+        let mut schedule = PeriodicSchedule::new(INTERVAL, t0);
+        assert_eq!(
+            schedule.advance_after_tick(t0 + INTERVAL * 3 / 2),
+            1,
+            "half an interval over skips the one deadline it ran past"
+        );
+
+        let mut schedule = PeriodicSchedule::new(INTERVAL, t0);
+        assert_eq!(schedule.advance_after_tick(t0 + INTERVAL * 15), 15);
+        assert_eq!(
+            schedule.advance_after_tick(t0 + INTERVAL * 16),
+            0,
+            "and after the resync the cadence is kept again"
         );
     }
 

@@ -288,8 +288,13 @@ compile error with no explanation.
 
   Per element: buffers taken, time spent inside `consume`, how long since it
   last took or pushed a buffer, errors, and whether it has seen `Eos`; per
-  output pad, what went through it; for a `Queue`, how full it is, what it
-  dropped and how long its upstream waited on it. Running totals rather than
+  output pad, what went through it, and the bytes of the packets among it —
+  an encoder's bitrate; for a `Queue`, how full it is, what it dropped and
+  how long its upstream waited on it; for a video compositor, the frames it
+  drew, the ticks of its frame rate it missed because the one before ran
+  late, and the time spent drawing — not handing the frame on, so a slow
+  encoder downstream shows up as missed ticks with little drawing time,
+  and is told apart from a compositor that is itself too slow. Running totals rather than
   rates — two readings and the time between them give the rate, matched by
   `ElementStats::id`. `busy` includes every stage after it on the same
   thread, up to the next `Queue`, because a chain runs as nested calls.
@@ -306,7 +311,7 @@ compile error with no explanation.
   all of it reading the clock.
 
   New: the `stats` module (`PipelineStats`, `ElementStats`, `ElementState`,
-  `PadStats`, `QueueStats`).
+  `PadStats`, `QueueStats`, `TickStats`).
 
 ## 0.2.0
 

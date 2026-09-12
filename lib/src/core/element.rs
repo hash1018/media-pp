@@ -26,6 +26,7 @@ use crate::{
     graph::{ElementId, PipelineGraph},
     pad::SrcPad,
     playback_clock::PlaybackClock,
+    stats::{ElementCounters, TickCounters},
 };
 
 /// Which kind of element posted a [`crate::bus::BusEvent`] — cheap to
@@ -321,6 +322,25 @@ pub struct Context {
     pub(crate) operation: Arc<Mutex<()>>,
     /// Graph identity of the source whose wiring closure owns this context.
     pub source_id: ElementId,
+    /// That source's counters — see [`crate::stats`]. Here because a
+    /// source runs on its own thread with nothing wrapping it, so this is
+    /// the one place it can be handed them.
+    pub(crate) source_counters: Arc<ElementCounters>,
+}
+
+impl Context {
+    /// Where the source this context belongs to records its ticks, for a
+    /// source that produces on a schedule of its own. Asking is what makes
+    /// its ticks part of what [`Pipeline::stats`] reports.
+    ///
+    /// For the source's own [`Element::attach_context`] and nothing else:
+    /// a filter wired with the same context would be recording into its
+    /// source's entry.
+    ///
+    /// [`Pipeline::stats`]: crate::pipeline::Pipeline::stats
+    pub(crate) fn source_ticks(&self) -> Arc<TickCounters> {
+        self.source_counters.ticks()
+    }
 }
 
 #[cfg(test)]
@@ -352,6 +372,7 @@ impl Context {
             clock,
             operation: Arc::new(Mutex::new(())),
             source_id,
+            source_counters: ElementCounters::new(),
         }
     }
 }
