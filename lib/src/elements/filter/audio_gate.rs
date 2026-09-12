@@ -1,16 +1,11 @@
-use std::{
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
-    },
-    time::Duration,
-};
+use std::{sync::Arc, time::Duration};
 
 use crate::pp_log::{PpLog, pp_info};
 use ffmpeg_next as ffmpeg;
 use thiserror::Error as ThisError;
 
-use super::audio_f32::{self, Unreadable};
+use super::audio_f32::{self, Unreadable, db_to_amplitude};
+use super::tuning::Tuning;
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
@@ -144,24 +139,6 @@ impl From<Unreadable> for AudioGateError {
     }
 }
 
-/// The settings, and a count of how often they were replaced — which is
-/// all the element reads per frame, so the lock is taken only when the
-/// count has moved.
-#[derive(Debug)]
-struct GateControl {
-    options: Mutex<AudioGateOptions>,
-    revision: AtomicU64,
-}
-
-impl GateControl {
-    fn options(&self) -> AudioGateOptions {
-        *self
-            .options
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-}
-
 /// Thread-safe runtime control for an [`AudioGate`].
 ///
 /// Cheap to clone. Retaining it keeps only the settings alive, not the
@@ -169,7 +146,7 @@ impl GateControl {
 /// gone does nothing and harms nothing.
 #[derive(Debug, Clone)]
 pub struct AudioGateHandle {
-    control: Arc<GateControl>,
+    control: Arc<Tuning<AudioGateOptions>>,
 }
 
 impl AudioGateHandle {
@@ -182,19 +159,13 @@ impl AudioGateHandle {
         &self,
         options: AudioGateOptions,
     ) -> std::result::Result<(), AudioGateError> {
-        let options = options.validate()?;
-        *self
-            .control
-            .options
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = options;
-        self.control.revision.fetch_add(1, Ordering::Release);
+        self.control.set(options.validate()?);
         Ok(())
     }
 
     /// The settings the gate is running with, or will from its next frame.
     pub fn options(&self) -> AudioGateOptions {
-        self.control.options()
+        self.control.get()
     }
 }
 
@@ -241,10 +212,6 @@ impl Rates {
     }
 }
 
-fn db_to_amplitude(db: f32) -> f32 {
-    10.0_f32.powf(db / 20.0)
-}
-
 /// A noise gate: passes sound at or above a level and silences what is
 /// below it, the way a streaming application's noise gate does.
 ///
@@ -281,7 +248,7 @@ fn db_to_amplitude(db: f32) -> f32 {
 pub struct AudioGate {
     pp_log: PpLog,
     name: Arc<str>,
-    control: Arc<GateControl>,
+    control: Arc<Tuning<AudioGateOptions>>,
     /// The settings revision `rates` was worked out from, and the rate.
     applied: Option<(u64, u32)>,
     rates: Rates,
@@ -306,10 +273,7 @@ impl AudioGate {
         let options = options.validate()?;
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::AudioGate, &name, None);
-        let control = Arc::new(GateControl {
-            options: Mutex::new(options),
-            revision: AtomicU64::new(0),
-        });
+        let control = Tuning::new(options);
         pp_info!(pp_log: &pp_log, "created: {options:?}");
         Ok((
             Self {
@@ -338,73 +302,47 @@ impl AudioGate {
     /// Works the settings out again when they, or the frame's rate, have
     /// changed since the last frame.
     fn follow_settings(&mut self, sample_rate: u32) {
-        let revision = self.control.revision.load(Ordering::Acquire);
-        if self.applied == Some((revision, sample_rate)) {
-            return;
+        if let Some(options) = self.control.fresh(&mut self.applied, sample_rate) {
+            self.rates = Rates::new(options, sample_rate);
         }
-        self.rates = Rates::new(self.control.options(), sample_rate);
-        self.applied = Some((revision, sample_rate));
     }
 
-    /// The gain for each sample, given the loudest channel's level at it.
-    fn gains(&mut self, peaks: impl Iterator<Item = f32>) -> Vec<f32> {
+    /// The gain for one sample, given the loudest channel's level at it.
+    fn gain(&mut self, peak: f32) -> f32 {
         let rates = self.rates;
-        peaks
-            .map(|peak| {
-                self.level = peak.max(self.level * rates.decay);
-                self.state = if self.level >= rates.open {
-                    State::Open
-                } else if self.level < rates.close {
-                    match self.state {
-                        State::Open => State::Holding(rates.hold),
-                        State::Holding(0) => State::Closed,
-                        State::Holding(left) => State::Holding(left - 1),
-                        State::Closed => State::Closed,
-                    }
-                } else {
-                    // Between the thresholds: an open gate stays open and a
-                    // closed one closed. A hold already running runs on.
-                    match self.state {
-                        State::Holding(0) => State::Closed,
-                        State::Holding(left) => State::Holding(left - 1),
-                        other => other,
-                    }
-                };
-                match self.state {
-                    State::Open => self.gain = (self.gain + rates.attack_step).min(1.0),
-                    State::Holding(_) => {}
-                    State::Closed => self.gain = (self.gain - rates.release_step).max(0.0),
-                }
-                self.gain
-            })
-            .collect()
+        self.level = peak.max(self.level * rates.decay);
+        self.state = if self.level >= rates.open {
+            State::Open
+        } else if self.level < rates.close {
+            match self.state {
+                State::Open => State::Holding(rates.hold),
+                State::Holding(0) => State::Closed,
+                State::Holding(left) => State::Holding(left - 1),
+                State::Closed => State::Closed,
+            }
+        } else {
+            // Between the thresholds: an open gate stays open and a closed
+            // one closed. A hold already running runs on.
+            match self.state {
+                State::Holding(0) => State::Closed,
+                State::Holding(left) => State::Holding(left - 1),
+                other => other,
+            }
+        };
+        match self.state {
+            State::Open => self.gain = (self.gain + rates.attack_step).min(1.0),
+            State::Holding(_) => {}
+            State::Closed => self.gain = (self.gain - rates.release_step).max(0.0),
+        }
+        self.gain
     }
 
     fn process(
         &mut self,
         frame: Arc<ffmpeg::frame::Audio>,
     ) -> std::result::Result<Arc<ffmpeg::frame::Audio>, AudioGateError> {
-        let mut channels = audio_f32::read(&frame)?;
         self.follow_settings(frame.rate());
-        let samples = frame.samples();
-        let gains = self.gains((0..samples).map(|index| {
-            channels
-                .iter()
-                .map(|channel| channel[index].abs())
-                .fold(0.0, f32::max)
-        }));
-        if gains.iter().all(|gain| *gain == 1.0) {
-            return Ok(frame);
-        }
-        for channel in &mut channels {
-            for (sample, gain) in channel.iter_mut().zip(&gains) {
-                *sample *= gain;
-            }
-        }
-        // Copied only when another branch still holds it — see `AudioVolume`.
-        let mut frame = Arc::try_unwrap(frame).unwrap_or_else(|shared| shared.as_ref().clone());
-        audio_f32::write(&mut frame, &channels);
-        Ok(Arc::new(frame))
+        Ok(audio_f32::scale_linked(frame, |peak| self.gain(peak))?)
     }
 
     fn close(&mut self) {
@@ -640,7 +578,7 @@ mod tests {
         gate.follow_settings(RATE);
 
         // 10 ms is 480 samples: halfway through, halfway open.
-        let opening = gate.gains(std::iter::repeat_n(0.5, 960));
+        let opening: Vec<f32> = (0..960).map(|_| gate.gain(0.5)).collect();
         assert!((opening[239] - 0.5).abs() < 0.01, "{}", opening[239]);
         assert_eq!(opening[490], 1.0, "fully open after it");
 
@@ -648,7 +586,7 @@ mod tests {
         // under -32 dBFS after 20 ms × ln(0.5 / 0.0251) ≈ 2871 samples.
         // With no hold the gate closes on the next, and 20 ms of release is
         // 960 samples from there to nothing.
-        let closing = gate.gains(std::iter::repeat_n(0.0, RATE as usize / 5));
+        let closing: Vec<f32> = (0..RATE / 5).map(|_| gate.gain(0.0)).collect();
         let closes = closing.iter().position(|gain| *gain < 1.0).unwrap();
         let closed = closing.iter().position(|gain| *gain == 0.0).unwrap();
         assert!((2865..=2880).contains(&closes), "began closing at {closes}");

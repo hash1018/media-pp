@@ -2,7 +2,8 @@
 //! [`Source`](crate::element::Source).
 //!
 //! Codecs, scalers, pixel-format conversion, GPU upload and download, audio
-//! resampling, gain, gating and noise suppression, chroma keying, and the
+//! resampling, gain, gating, compression, limiting and noise suppression,
+//! chroma keying, and the
 //! elements that change *when*
 //! rather than *what* — [`Pacer`], which holds a frame until its presentation
 //! time, [`VideoSynchronizer`], [`ChangeGate`], which forwards a picture only
@@ -17,8 +18,10 @@
 //! a runtime switch, because the buffers they accept genuinely differ: a GPU
 //! filter requires frames already resident on the device that created them.
 
+mod audio_compressor;
 mod audio_f32;
 mod audio_gate;
+mod audio_limiter;
 pub(crate) mod audio_resampler;
 mod audio_volume;
 mod change_gate;
@@ -36,10 +39,15 @@ mod rack;
 pub(crate) mod scaler;
 mod tee;
 mod timestamp_origin;
+mod tuning;
 pub(crate) mod upload;
 mod video_synchronizer;
 
+pub use audio_compressor::{
+    AudioCompressor, AudioCompressorError, AudioCompressorHandle, AudioCompressorOptions,
+};
 pub use audio_gate::{AudioGate, AudioGateError, AudioGateHandle, AudioGateOptions};
+pub use audio_limiter::{AudioLimiter, AudioLimiterError, AudioLimiterHandle, AudioLimiterOptions};
 pub use audio_resampler::{AudioResampler, AudioResamplerError};
 pub use audio_volume::{AudioVolume, AudioVolumeError, AudioVolumeHandle, AudioVolumeOptions};
 pub use change_gate::ChangeGate;

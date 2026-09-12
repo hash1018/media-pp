@@ -8,6 +8,8 @@
 //! of the one thing it does. An [`AudioResampler`](super::AudioResampler)
 //! in front converts anything else.
 
+use std::sync::Arc;
+
 use ffmpeg_next as ffmpeg;
 
 /// Why a frame's samples could not be read.
@@ -76,6 +78,56 @@ pub(crate) fn write(frame: &mut ffmpeg::frame::Audio, channels: &[Vec<f32>]) {
         }
         _ => unreachable!("only a frame `read` accepted is written back"),
     }
+}
+
+/// Scales every channel of an `f32` frame by one gain per sample, asked of
+/// `gain` with the loudest channel's level at that sample.
+///
+/// One gain for every channel is what the dynamics filters share — a gate, a
+/// compressor, a limiter — and why they are linked: a gain worked out per
+/// channel would pull a stereo image toward whichever side was quieter.
+///
+/// Answers the frame itself, uncopied, when every gain comes out exactly
+/// one; otherwise a copy only when another branch still holds it, as
+/// `AudioVolume` does.
+pub(crate) fn scale_linked(
+    frame: Arc<ffmpeg::frame::Audio>,
+    mut gain: impl FnMut(f32) -> f32,
+) -> Result<Arc<ffmpeg::frame::Audio>, Unreadable> {
+    let mut channels = read(&frame)?;
+    let gains: Vec<f32> = (0..frame.samples())
+        .map(|index| {
+            gain(
+                channels
+                    .iter()
+                    .map(|channel| channel[index].abs())
+                    .fold(0.0, f32::max),
+            )
+        })
+        .collect();
+    if gains.iter().all(|gain| *gain == 1.0) {
+        return Ok(frame);
+    }
+    for channel in &mut channels {
+        for (sample, gain) in channel.iter_mut().zip(&gains) {
+            *sample *= gain;
+        }
+    }
+    let mut frame = Arc::try_unwrap(frame).unwrap_or_else(|shared| shared.as_ref().clone());
+    write(&mut frame, &channels);
+    Ok(Arc::new(frame))
+}
+
+/// A level in dBFS as an amplitude, where full scale is one.
+pub(crate) fn db_to_amplitude(db: f32) -> f32 {
+    10.0_f32.powf(db / 20.0)
+}
+
+/// An amplitude as a level in dBFS; silence is far below anything a
+/// threshold is set to rather than negative infinity, so arithmetic on it
+/// stays finite.
+pub(crate) fn amplitude_to_db(amplitude: f32) -> f32 {
+    20.0 * amplitude.max(1e-10).log10()
 }
 
 /// The first `count` samples of a packed plane.

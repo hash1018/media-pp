@@ -60,10 +60,11 @@ use crate::elements::{
 use crate::{
     control::{PrerollError, SeekError},
     elements::{
-        AppSourceError, AudioGateError, AudioMixerError, AudioResamplerError, AudioVolumeError,
-        FileDemuxError, FileMuxerError, HlsMuxerError, PacerError, RtmpMuxerError, RtspSourceError,
-        SwAudioEncoderError, SwChromaKeyError, SwDecoderError, SwEncoderError, SwScalerError,
-        SwVideoCompositorError, TestAudioSourceError, TestVideoSourceError, VideoSynchronizerError,
+        AppSourceError, AudioCompressorError, AudioGateError, AudioLimiterError, AudioMixerError,
+        AudioResamplerError, AudioVolumeError, FileDemuxError, FileMuxerError, HlsMuxerError,
+        PacerError, RtmpMuxerError, RtspSourceError, SwAudioEncoderError, SwChromaKeyError,
+        SwDecoderError, SwEncoderError, SwScalerError, SwVideoCompositorError,
+        TestAudioSourceError, TestVideoSourceError, VideoSynchronizerError,
     },
     graph::GraphError,
     log::LogInitError,
@@ -263,6 +264,14 @@ pub enum Error {
     /// A noise gate was misconfigured or handed audio it cannot gate.
     #[error(transparent)]
     AudioGateError(#[from] AudioGateError),
+
+    /// A compressor was misconfigured or handed audio it cannot compress.
+    #[error(transparent)]
+    AudioCompressorError(#[from] AudioCompressorError),
+
+    /// A limiter was misconfigured or handed audio it cannot limit.
+    #[error(transparent)]
+    AudioLimiterError(#[from] AudioLimiterError),
 
     /// Noise suppression was handed audio it cannot take.
     #[cfg(feature = "rnnoise")]

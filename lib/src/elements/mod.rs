@@ -65,7 +65,9 @@ pub use driver::{
     WebRtcStreamInfo, WebRtcTrackSink, WebRtcTrackSource,
 };
 pub use filter::{
-    AudioCodec, AudioGate, AudioGateError, AudioGateHandle, AudioGateOptions, AudioResampler,
+    AudioCodec, AudioCompressor, AudioCompressorError, AudioCompressorHandle,
+    AudioCompressorOptions, AudioGate, AudioGateError, AudioGateHandle, AudioGateOptions,
+    AudioLimiter, AudioLimiterError, AudioLimiterHandle, AudioLimiterOptions, AudioResampler,
     AudioResamplerError, AudioVolume, AudioVolumeError, AudioVolumeHandle, AudioVolumeOptions,
     ChangeGate, ChromaKeyHandle, ChromaKeyMethod, ChromaKeyOptions, FrameRateLimiter, Pacer,
     PacerError, PauseGate, PauseGateHandle, Rack, RackError, RackHandle, SwAudioEncoder,

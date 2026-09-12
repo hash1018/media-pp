@@ -123,6 +123,10 @@ pub enum ElementType {
     AudioVolume,
     /// Noise gate.
     AudioGate,
+    /// Dynamic range compressor.
+    AudioCompressor,
+    /// Peak limiter.
+    AudioLimiter,
     /// RNNoise noise suppression filter.
     NoiseSuppressor,
     /// Timestamp-to-wall-clock pacing filter.

@@ -305,6 +305,32 @@ compile error with no explanation.
   `ElementType::AudioGate`, `ElementType::NoiseSuppressor`, and the
   `rnnoise` feature.
 
+- **`AudioCompressor` and `AudioLimiter` even a voice out.** The next two
+  after a gate, with its format, its linked gain and its handle.
+
+  `AudioCompressor` turns down what goes over a threshold by a ratio — at
+  4:1 a level 12 dB over comes out 3 dB over — with a streaming
+  application's five settings: threshold, ratio, attack, release and an
+  output gain to make back up what it took off. The level it reacts to is
+  followed per sample, rising over the attack and falling over the release,
+  so it neither pumps on each waveform peak nor lets a word start at full
+  volume.
+
+  `AudioLimiter` is the last thing on a channel: nothing comes out louder
+  than its threshold. It does not look ahead, so it reacts in the sample a
+  peak arrives, turning down to exactly what brings that sample to the
+  ceiling; that is what makes the threshold a guarantee rather than a
+  target. It lets go over its release.
+
+  ```rust
+  let (compressor, _) = AudioCompressor::new("mic-compressor");
+  let (limiter, handle) = AudioLimiter::new("mic-limiter");
+  handle.set_options(AudioLimiterOptions { threshold_db: -3.0, ..handle.options() })?;
+  ```
+
+  New: `Error::AudioCompressorError`, `Error::AudioLimiterError`,
+  `ElementType::AudioCompressor`, `ElementType::AudioLimiter`.
+
 - **`Pipeline::stats` says what every element is doing while it runs.** The
   graph says what a pipeline looks like; this says whether anything moves
   through it — a capture that stopped delivering, a queue that is full and

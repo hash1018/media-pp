@@ -2200,6 +2200,12 @@ fn the_signal_filters_refuse_video_frames_and_take_audio() {
         ("gate", || {
             Box::new(crate::elements::AudioGate::new("gate").0)
         }),
+        ("compressor", || {
+            Box::new(crate::elements::AudioCompressor::new("compressor").0)
+        }),
+        ("limiter", || {
+            Box::new(crate::elements::AudioLimiter::new("limiter").0)
+        }),
         #[cfg(feature = "rnnoise")]
         ("denoise", || {
             Box::new(crate::elements::NoiseSuppressor::new("denoise"))
