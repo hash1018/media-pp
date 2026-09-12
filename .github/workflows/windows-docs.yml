@@ -58,7 +58,7 @@ jobs:
         env:
           RUSTDOCFLAGS: --cfg docsrs -D warnings
           DOCS_RS: "1"
-        run: cargo doc -p media-pp --no-deps --features d3d11,d3d12,dxgi-capture,wgc-capture,mf-capture,wasapi-capture,wasapi-renderer,webrtc,ort,whisper
+        run: cargo doc -p media-pp --no-deps --features d3d11,d3d12,dxgi-capture,wgc-capture,mf-capture,wasapi-capture,wasapi-renderer,webrtc,ort,whisper,rnnoise
 
       # `target/doc` has no top-level page, and Pages will not serve the
       # `.lock` cargo leaves behind.

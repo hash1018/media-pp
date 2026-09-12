@@ -2,7 +2,8 @@
 //! [`Source`](crate::element::Source).
 //!
 //! Codecs, scalers, pixel-format conversion, GPU upload and download, audio
-//! resampling and gain, chroma keying, and the elements that change *when*
+//! resampling, gain, gating and noise suppression, chroma keying, and the
+//! elements that change *when*
 //! rather than *what* — [`Pacer`], which holds a frame until its presentation
 //! time, [`VideoSynchronizer`], [`ChangeGate`], which forwards a picture only
 //! when it is not the one it forwarded last, [`FrameRateLimiter`], which
@@ -16,6 +17,8 @@
 //! a runtime switch, because the buffers they accept genuinely differ: a GPU
 //! filter requires frames already resident on the device that created them.
 
+mod audio_f32;
+mod audio_gate;
 pub(crate) mod audio_resampler;
 mod audio_volume;
 mod change_gate;
@@ -25,6 +28,8 @@ pub(crate) mod decoder;
 mod download;
 mod encoder;
 mod frame_rate_limiter;
+#[cfg(feature = "rnnoise")]
+mod noise_suppressor;
 mod pacer;
 mod pause_gate;
 mod rack;
@@ -34,6 +39,7 @@ mod timestamp_origin;
 pub(crate) mod upload;
 mod video_synchronizer;
 
+pub use audio_gate::{AudioGate, AudioGateError, AudioGateHandle, AudioGateOptions};
 pub use audio_resampler::{AudioResampler, AudioResamplerError};
 pub use audio_volume::{AudioVolume, AudioVolumeError, AudioVolumeHandle, AudioVolumeOptions};
 pub use change_gate::ChangeGate;
@@ -71,6 +77,8 @@ pub use encoder::{
     D3d11VideoInputFormat,
 };
 pub use frame_rate_limiter::FrameRateLimiter;
+#[cfg(feature = "rnnoise")]
+pub use noise_suppressor::{NOISE_SUPPRESSOR_SAMPLE_RATE, NoiseSuppressor, NoiseSuppressorError};
 pub use pacer::{Pacer, PacerError};
 pub use pause_gate::{PauseGate, PauseGateHandle};
 pub use rack::{Rack, RackError, RackHandle};

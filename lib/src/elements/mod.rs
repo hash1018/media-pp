@@ -65,13 +65,13 @@ pub use driver::{
     WebRtcStreamInfo, WebRtcTrackSink, WebRtcTrackSource,
 };
 pub use filter::{
-    AudioCodec, AudioResampler, AudioResamplerError, AudioVolume, AudioVolumeError,
-    AudioVolumeHandle, AudioVolumeOptions, ChangeGate, ChromaKeyHandle, ChromaKeyMethod,
-    ChromaKeyOptions, FrameRateLimiter, Pacer, PacerError, PauseGate, PauseGateHandle, Rack,
-    RackError, RackHandle, SwAudioEncoder, SwAudioEncoderError, SwAudioEncoderOptions, SwChromaKey,
-    SwChromaKeyError, SwDecoder, SwDecoderError, SwEncoder, SwEncoderError, SwEncoderOptions,
-    SwScaler, SwScalerError, Tee, TeeBuilder, TeeHandle, TimestampOrigin, VideoCodec,
-    VideoSynchronizer, VideoSynchronizerError,
+    AudioCodec, AudioGate, AudioGateError, AudioGateHandle, AudioGateOptions, AudioResampler,
+    AudioResamplerError, AudioVolume, AudioVolumeError, AudioVolumeHandle, AudioVolumeOptions,
+    ChangeGate, ChromaKeyHandle, ChromaKeyMethod, ChromaKeyOptions, FrameRateLimiter, Pacer,
+    PacerError, PauseGate, PauseGateHandle, Rack, RackError, RackHandle, SwAudioEncoder,
+    SwAudioEncoderError, SwAudioEncoderOptions, SwChromaKey, SwChromaKeyError, SwDecoder,
+    SwDecoderError, SwEncoder, SwEncoderError, SwEncoderOptions, SwScaler, SwScalerError, Tee,
+    TeeBuilder, TeeHandle, TimestampOrigin, VideoCodec, VideoSynchronizer, VideoSynchronizerError,
 };
 #[cfg(feature = "cuda")]
 pub use filter::{
@@ -91,6 +91,8 @@ pub use filter::{
     D3d12Decoder, D3d12DecoderError, D3d12Download, D3d12DownloadError, D3d12Scaler,
     D3d12ScalerError, D3d12Upload, D3d12UploadError,
 };
+#[cfg(feature = "rnnoise")]
+pub use filter::{NOISE_SUPPRESSOR_SAMPLE_RATE, NoiseSuppressor, NoiseSuppressorError};
 pub use sink::{
     AppSink, FileMuxer, FileMuxerError, FileMuxerStreamSink, FrameCounter, HlsMode, HlsMuxer,
     HlsMuxerError, HlsMuxerStreamSink, HlsOptions, HlsSegmentFormat, PacketCounter, RtmpMuxer,

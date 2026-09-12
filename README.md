@@ -135,7 +135,7 @@ real buffer. An element that declares nothing always links. See the
 | Kind | Elements |
 |---|---|
 | Sources | `FileDemuxer`, `AppSource`, `RtspSource`, `TestVideoSource`, `TestAudioSource`, `DxgiCaptureSource`, `WgcCaptureSource`, `MfCaptureSource`, `V4l2CaptureSource`, `PipeWireScreenCaptureSource`, `PipeWireAudioCaptureSource`, `WasapiCaptureSource`, `AudioMixer`, `SwVideoCompositor`, `CudaVideoCompositor`, `D3d11VideoCompositor`, `WebRtcTrackSource` |
-| Filters | `SwDecoder`, `CudaDecoder`, `D3d11Decoder`, `D3d12Decoder`, `SwEncoder`, `CudaEncoder`, `D3d11VideoEncoder`, `SwAudioEncoder`, `AudioResampler`, `AudioVolume`, `SwScaler`, `SwChromaKey`, `CudaChromaKey`, `D3d11ChromaKey`, `Pacer`, `VideoSynchronizer`, `CudaScaler`, `D3d11Scaler`, `D3d12Scaler`, `CudaUpload`, `CudaDownload`, `CudaConverter`, `D3d11Upload`, `D3d11Download`, `D3d12Upload`, `D3d12Download`, `Tee`, `ChangeGate`, `TimestampOrigin`, `Rack` |
+| Filters | `SwDecoder`, `CudaDecoder`, `D3d11Decoder`, `D3d12Decoder`, `SwEncoder`, `CudaEncoder`, `D3d11VideoEncoder`, `SwAudioEncoder`, `AudioResampler`, `AudioVolume`, `AudioGate`, `NoiseSuppressor`, `SwScaler`, `SwChromaKey`, `CudaChromaKey`, `D3d11ChromaKey`, `Pacer`, `VideoSynchronizer`, `CudaScaler`, `D3d11Scaler`, `D3d12Scaler`, `CudaUpload`, `CudaDownload`, `CudaConverter`, `D3d11Upload`, `D3d11Download`, `D3d12Upload`, `D3d12Download`, `Tee`, `ChangeGate`, `TimestampOrigin`, `Rack` |
 | Sinks | `FrameCounter`, `PacketCounter`, `AppSink`, `FileMuxer`, `SegmentedFileMuxer`, `HlsMuxer`, `RtmpMuxer`, `RtspMuxer`, `CudaRenderer`, `D3d11Renderer`, `D3d12Renderer`, `PipeWireAudioRenderer`, `WasapiRenderer`, `OrtDetector`, `WhisperTranscriber`, `WebRtcTrackSink` |
 
 Backend-specific elements need their Cargo feature and exist only on that
@@ -187,6 +187,7 @@ The library has no default features.
 | `wasapi-capture` | System-audio and microphone capture | Windows |
 | `wasapi-renderer` | Shared-mode audio playback | Windows |
 | `ort` | ONNX Runtime object detection | All supported targets |
+| `rnnoise` | Noise suppression for speech, through RNNoise (pure Rust, no model file) | All supported targets |
 | `whisper` | Speech to timed text, through whisper.cpp | All supported targets |
 | `whisper-vulkan` | The same, on any GPU Vulkan reaches | All supported targets |
 | `webrtc` | `str0m`-based WebRTC peer and track elements | All supported targets |

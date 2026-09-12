@@ -92,6 +92,10 @@ jobs:
         shell: pwsh
         run: cargo clippy -p media-pp --all-targets --features whisper -- -D warnings
 
+      - name: Lint (RNNoise)
+        shell: pwsh
+        run: cargo clippy -p media-pp --all-targets --features rnnoise -- -D warnings
+
       # `DOCS_RS` keeps `ort-sys` from downloading ONNX Runtime and linking its
       # dylibs into the target directory, which needs Developer Mode on a
       # runner to create symlinks. Checking never links, so the download buys
@@ -130,6 +134,12 @@ jobs:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc -p media-pp --no-deps --features whisper
 
+      - name: Check API documentation (RNNoise)
+        shell: pwsh
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc -p media-pp --no-deps --features rnnoise
+
       # Hardware-dependent tests detect the missing device and skip with a
       # reason (`try_device()`), so these run the whole logic suite here and
       # the D3D11/NVENC/capture parts on a developer machine. The soak
@@ -148,6 +158,10 @@ jobs:
       - name: Test (Whisper)
         shell: pwsh
         run: cargo test -p media-pp --features whisper
+
+      - name: Test (RNNoise)
+        shell: pwsh
+        run: cargo test -p media-pp --features rnnoise
 
   linux:
     runs-on: ubuntu-26.04
@@ -202,6 +216,9 @@ jobs:
       - name: Lint (Whisper)
         run: cargo clippy -p media-pp --all-targets --features whisper -- -D warnings
 
+      - name: Lint (RNNoise)
+        run: cargo clippy -p media-pp --all-targets --features rnnoise -- -D warnings
+
       - name: Check (ONNX Runtime and WebRTC)
         env:
           DOCS_RS: "1"
@@ -217,6 +234,7 @@ jobs:
           cargo doc -p media-pp --no-deps --features pipewire-audio-capture,pipewire-audio-renderer,pipewire-screen-capture,v4l2-capture
           cargo doc -p media-pp --no-deps --features cuda
           cargo doc -p media-pp --no-deps --features whisper
+          cargo doc -p media-pp --no-deps --features rnnoise
 
       - name: Test (no features)
         run: cargo test -p media-pp
@@ -226,6 +244,9 @@ jobs:
       # the transcriber, not to this repository.
       - name: Test (Whisper)
         run: cargo test -p media-pp --features whisper
+
+      - name: Test (RNNoise)
+        run: cargo test -p media-pp --features rnnoise
 
       # PipeWire-session-dependent tests skip themselves with a reason
       # (`try_capture_source()`-style helper) when this headless runner has

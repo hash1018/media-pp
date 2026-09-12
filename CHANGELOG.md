@@ -272,6 +272,39 @@ compile error with no explanation.
   New: `Error::RtmpMuxerError`, `ElementType::RtmpMuxer`, and the
   `rtmp_publish` example.
 
+- **`AudioGate` and `NoiseSuppressor` clean up a microphone.** The two
+  audio filters a streaming application reaches for first, working on the
+  signal rather than its format: both take `f32` audio, packed or planar,
+  and pass it on with its timestamps and layout unchanged.
+
+  `AudioGate` silences what is below a level and passes what is above it,
+  with a streaming application's five settings — open and close thresholds
+  in dBFS, attack, hold and release — and their meaning. Two thresholds so a
+  level hovering at the line does not open and close the gate on every
+  syllable; a hold so a pause between words is not cut out. One gain for
+  every channel, taken from the loudest, so a stereo image never leans.
+  `AudioGateHandle::set_options` replaces all five at once from the next
+  frame. No delay.
+
+  ```rust
+  let (gate, handle) = AudioGate::new("mic-gate");
+  handle.set_options(AudioGateOptions { open_threshold_db: -30.0, ..handle.options() })?;
+  ```
+
+  `NoiseSuppressor`, behind the new `rnnoise` feature, takes steady
+  background noise — a fan, a room — out of speech with RNNoise, through
+  `nnnoiseless`: pure Rust, the weights compiled in, no model file to ship.
+  48 kHz only, as the network was trained; about 0.4% of one core per
+  channel. RNNoise gives each 10 ms block back one block late, and that
+  block is taken off the front rather than left to push the sound late
+  against its timestamps: frames come out one for one, a block after they
+  arrive, each carrying its own samples denoised. `Eos` drains the block it
+  holds.
+
+  New: `Error::AudioGateError`, `Error::NoiseSuppressorError`,
+  `ElementType::AudioGate`, `ElementType::NoiseSuppressor`, and the
+  `rnnoise` feature.
+
 - **`Pipeline::stats` says what every element is doing while it runs.** The
   graph says what a pipeline looks like; this says whether anything moves
   through it — a capture that stopped delivering, a queue that is full and

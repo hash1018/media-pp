@@ -121,6 +121,10 @@ pub enum ElementType {
     AudioResampler,
     /// Runtime-adjustable audio gain filter.
     AudioVolume,
+    /// Noise gate.
+    AudioGate,
+    /// RNNoise noise suppression filter.
+    NoiseSuppressor,
     /// Timestamp-to-wall-clock pacing filter.
     Pacer,
     /// Playback-master-aware video scheduling filter.

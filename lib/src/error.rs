@@ -19,6 +19,8 @@ use crate::element::ElementType;
 use crate::elements::DxgiCaptureSourceError;
 #[cfg(all(target_os = "windows", feature = "mf-capture"))]
 use crate::elements::MfCaptureSourceError;
+#[cfg(feature = "rnnoise")]
+use crate::elements::NoiseSuppressorError;
 #[cfg(feature = "ort")]
 use crate::elements::OrtDetectorError;
 #[cfg(all(target_os = "linux", feature = "pipewire-audio-capture"))]
@@ -58,8 +60,8 @@ use crate::elements::{
 use crate::{
     control::{PrerollError, SeekError},
     elements::{
-        AppSourceError, AudioMixerError, AudioResamplerError, AudioVolumeError, FileDemuxError,
-        FileMuxerError, HlsMuxerError, PacerError, RtmpMuxerError, RtspSourceError,
+        AppSourceError, AudioGateError, AudioMixerError, AudioResamplerError, AudioVolumeError,
+        FileDemuxError, FileMuxerError, HlsMuxerError, PacerError, RtmpMuxerError, RtspSourceError,
         SwAudioEncoderError, SwChromaKeyError, SwDecoderError, SwEncoderError, SwScalerError,
         SwVideoCompositorError, TestAudioSourceError, TestVideoSourceError, VideoSynchronizerError,
     },
@@ -257,6 +259,15 @@ pub enum Error {
     /// An audio gain operation failed.
     #[error(transparent)]
     AudioVolumeError(#[from] AudioVolumeError),
+
+    /// A noise gate was misconfigured or handed audio it cannot gate.
+    #[error(transparent)]
+    AudioGateError(#[from] AudioGateError),
+
+    /// Noise suppression was handed audio it cannot take.
+    #[cfg(feature = "rnnoise")]
+    #[error(transparent)]
+    NoiseSuppressorError(#[from] NoiseSuppressorError),
 
     /// A software scaling operation failed.
     #[error(transparent)]

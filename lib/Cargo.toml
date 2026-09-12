@@ -20,7 +20,7 @@ categories = ["multimedia::video", "multimedia::audio", "multimedia::encoding"]
 #
 # These are the optional features that build on Linux without network access:
 # `ort-sys`'s build script returns early when docs.rs sets `DOCS_RS`,
-# `str0m`'s `rust-crypto` backend is pure Rust, and `whisper-rs-sys` ships
+# `str0m`'s `rust-crypto` backend and `nnnoiseless` are pure Rust, and `whisper-rs-sys` ships
 # whisper.cpp's sources inside its own package and compiles them with cmake,
 # which docs.rs has — its own crate documents there.
 #
@@ -30,7 +30,7 @@ categories = ["multimedia::video", "multimedia::audio", "multimedia::encoding"]
 [package.metadata.docs.rs]
 default-target = "x86_64-unknown-linux-gnu"
 targets = []
-features = ["ort", "webrtc", "whisper"]
+features = ["ort", "rnnoise", "webrtc", "whisper"]
 rustdoc-args = ["--cfg", "docsrs", "-D", "warnings"]
 
 [dependencies]
@@ -54,6 +54,9 @@ str0m = { version = "0.21", optional = true, default-features = false, features 
 # Glyph rasterization for compositor text layers — needed by every backend
 # that draws one, so not Windows-only.
 ab_glyph = { version = "0.2", optional = true }
+# RNNoise, as pure Rust with its weights compiled in — see `NoiseSuppressor`.
+# Without its default features, which are the command-line tool's.
+nnnoiseless = { version = "0.5", optional = true, default-features = false }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", optional = true }
@@ -187,6 +190,9 @@ wasapi-renderer = [
     "windows/Win32_UI_Shell_PropertiesSystem",
 ]
 ort = ["dep:ort", "dep:ndarray"]
+# Noise suppression for speech, through RNNoise. Pure Rust and no model file:
+# the network's weights are part of the crate.
+rnnoise = ["dep:nnnoiseless"]
 # Speech to text, through whisper.cpp. Its build is C++ and needs cmake,
 # which every CI runner already has; the model is a file the caller
 # supplies, since nothing that size belongs in a crate.

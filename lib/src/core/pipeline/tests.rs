@@ -2188,6 +2188,55 @@ fn an_audio_filter_refuses_video_frames() {
         .expect("decoded audio through a gain filter is the intended chain");
 }
 
+/// The filters that work on the signal itself declare the same as the gain
+/// one: decoded audio in system memory, refused where it is video and taken
+/// where it is audio.
+#[test]
+fn the_signal_filters_refuse_video_frames_and_take_audio() {
+    use crate::element::Filter;
+
+    type Make = fn() -> Box<dyn Filter>;
+    let filters: Vec<(&str, Make)> = vec![
+        ("gate", || {
+            Box::new(crate::elements::AudioGate::new("gate").0)
+        }),
+        #[cfg(feature = "rnnoise")]
+        ("denoise", || {
+            Box::new(crate::elements::NoiseSuppressor::new("denoise"))
+        }),
+    ];
+    for (name, make) in filters {
+        let Err(error) = contract_context()
+            .branch()
+            .pipe(video_decoder("decoder"))
+            .pipe(make())
+            .to(DeclaringSink::boxed("sink", video_frames()))
+        else {
+            panic!("{name} took video frames");
+        };
+        assert!(
+            matches!(
+                error,
+                crate::Error::GraphError(GraphError::IncompatibleLink { .. })
+            ),
+            "{name}: got {error}"
+        );
+
+        contract_context()
+            .branch()
+            .pipe(audio_decoder("decoder"))
+            .pipe(make())
+            .to(DeclaringSink::boxed(
+                "sink",
+                InputContract::Fixed(PortContract::frame(
+                    MediaKind::AudioFrame,
+                    MemoryDomain::System,
+                )),
+            ))
+            .unwrap_or_else(|error| panic!("{name} refused decoded audio: {error}"));
+    }
+}
+
 /// Two GPU frames of different backends. Neither the buffer variant nor a
 /// single "is on a GPU" flag separates a D3D11 texture from a CUDA
 /// allocation — only naming the backend does, which is why the domain is
