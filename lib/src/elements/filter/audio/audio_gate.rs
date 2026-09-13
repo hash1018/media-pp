@@ -412,7 +412,7 @@ mod tests {
     use ffmpeg::format::sample::Type;
 
     use super::*;
-    use crate::elements::filter::audio_f32::tests::frame;
+    use crate::elements::filter::audio::audio_f32::tests::frame;
 
     const RATE: u32 = 48_000;
 

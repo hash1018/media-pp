@@ -19,7 +19,7 @@ use crate::{
     control::{ControlMsg, ControlReceiver, drain_control},
     element::{Element, ElementType, Sink, Source, SourceElement, element_pp_log},
     elements::AudioFormat,
-    elements::filter::audio_resampler::AudioFrameResampler,
+    elements::filter::audio::audio_resampler::AudioFrameResampler,
     error::Result,
     pad::SrcPad,
     schedule::ActiveTimeline,

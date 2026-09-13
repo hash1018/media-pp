@@ -18,12 +18,7 @@
 //! a runtime switch, because the buffers they accept genuinely differ: a GPU
 //! filter requires frames already resident on the device that created them.
 
-mod audio_compressor;
-mod audio_f32;
-mod audio_gate;
-mod audio_limiter;
-pub(crate) mod audio_resampler;
-mod audio_volume;
+pub(crate) mod audio;
 mod change_gate;
 pub(crate) mod chroma_key;
 pub(crate) mod convert;
@@ -31,25 +26,23 @@ pub(crate) mod decoder;
 mod download;
 mod encoder;
 mod frame_rate_limiter;
-#[cfg(feature = "rnnoise")]
-mod noise_suppressor;
 mod pacer;
 mod pause_gate;
 mod rack;
 pub(crate) mod scaler;
 mod tee;
 mod timestamp_origin;
-mod tuning;
 pub(crate) mod upload;
 mod video_synchronizer;
 
-pub use audio_compressor::{
+pub use audio::{
     AudioCompressor, AudioCompressorError, AudioCompressorHandle, AudioCompressorOptions,
+    AudioGate, AudioGateError, AudioGateHandle, AudioGateOptions, AudioLimiter, AudioLimiterError,
+    AudioLimiterHandle, AudioLimiterOptions, AudioResampler, AudioResamplerError, AudioVolume,
+    AudioVolumeError, AudioVolumeHandle, AudioVolumeOptions,
 };
-pub use audio_gate::{AudioGate, AudioGateError, AudioGateHandle, AudioGateOptions};
-pub use audio_limiter::{AudioLimiter, AudioLimiterError, AudioLimiterHandle, AudioLimiterOptions};
-pub use audio_resampler::{AudioResampler, AudioResamplerError};
-pub use audio_volume::{AudioVolume, AudioVolumeError, AudioVolumeHandle, AudioVolumeOptions};
+#[cfg(feature = "rnnoise")]
+pub use audio::{NOISE_SUPPRESSOR_SAMPLE_RATE, NoiseSuppressor, NoiseSuppressorError};
 pub use change_gate::ChangeGate;
 pub use chroma_key::{
     ChromaKeyHandle, ChromaKeyMethod, ChromaKeyOptions, SwChromaKey, SwChromaKeyError,
@@ -85,8 +78,6 @@ pub use encoder::{
     D3d11VideoInputFormat,
 };
 pub use frame_rate_limiter::FrameRateLimiter;
-#[cfg(feature = "rnnoise")]
-pub use noise_suppressor::{NOISE_SUPPRESSOR_SAMPLE_RATE, NoiseSuppressor, NoiseSuppressorError};
 pub use pacer::{Pacer, PacerError};
 pub use pause_gate::{PauseGate, PauseGateHandle};
 pub use rack::{Rack, RackError, RackHandle};
