@@ -107,9 +107,11 @@ mod test_support;
 // Flat re-export: `core/` only exists to group these files on disk (see
 // its module doc) — every external and internal caller keeps using
 // `crate::pipeline`/`media_pp::pipeline` etc., never `crate::core::...`.
+pub use core::diagnostics::{log, pp_log, stats};
+pub use core::timing::{clock, playback_clock, rate};
 pub use core::{
-    buffer, bus, clock, color, contract, control, driver, element, graph, log, pad, pipeline,
-    playback_clock, pool, pp_log, queue, rate, stats, subtitle,
+    buffer, bus, color, contract, control, driver, element, graph, pad, pipeline, pool, queue,
+    subtitle,
 };
 
 // Same flat-namespace reasoning as above, but crate-private: `schedule`/
@@ -119,7 +121,8 @@ pub use core::{
 // `MediaTimestamp`/`TimeBase` itself. `pub(crate) use` keeps the same
 // `crate::schedule`/`crate::time` paths working for every internal caller
 // without also making them part of this crate's external API surface.
-pub(crate) use core::{repeat, schedule, time};
+pub(crate) use core::repeat;
+pub(crate) use core::timing::{schedule, time};
 
 pub use error::{Error, Result};
 
