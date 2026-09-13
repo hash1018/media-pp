@@ -413,6 +413,7 @@ ALPHA_HALF_DONE:
     ld.global.u8    %rs1, [%rd4];
     ld.global.u8    %rs2, [%rd4+1];
     ld.global.u8    %rs3, [%rd4+2];
+    ld.global.u8    %rs5, [%rd4+3];
 
     cvt.u32.u16     %r16, %rs1;
     cvt.rn.f32.u32  %f6, %r16;
@@ -420,6 +421,8 @@ ALPHA_HALF_DONE:
     cvt.rn.f32.u32  %f7, %r17;
     cvt.u32.u16     %r18, %rs3;
     cvt.rn.f32.u32  %f8, %r18;
+    cvt.u32.u16     %r22, %rs5;
+    cvt.rn.f32.u32  %f28, %r22;
 
     div.rn.f32      %f9, %f6, 0f437F0000;
     sub.f32         %f10, %f9, %f1;
@@ -441,7 +444,7 @@ ALPHA_HALF_DONE:
     max.f32         %f24, %f23, 0f00000000;
     min.f32         %f25, %f24, 0f3F800000;
 
-    mul.f32         %f26, %f25, 0f437F0000;
+    mul.f32         %f26, %f25, %f28;
     add.f32         %f27, %f26, 0f3F000000;
     cvt.rzi.u32.f32 %r19, %f27;
     cvt.u16.u32     %rs4, %r19;

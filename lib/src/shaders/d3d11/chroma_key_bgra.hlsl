@@ -2,7 +2,9 @@
 // texture as a screen-covering triangle (the same vertex trick as
 // composite_bgra.hlsl, and for the same reason: a full-target draw needs
 // no vertex buffer) into an equally sized BGRA render target, passing RGB
-// through untouched and replacing alpha with the keyed value.
+// through untouched and multiplying alpha by the keyed value — so an opaque
+// input is keyed exactly as before, and one an earlier key already cut into
+// keeps those cuts.
 //
 // The band is handed over already resolved into `band_low`/
 // `inv_band_width` rather than as the `threshold`/`smoothing` the caller
@@ -56,5 +58,5 @@ float4 ps_chroma_key(VertexOutput input) : SV_Target
     // the same thing to both backends.
     float distance = length(color.rgb - key_color) / sqrt(3.0);
     float alpha = saturate((distance - band_low) * inv_band_width);
-    return float4(color.rgb, alpha);
+    return float4(color.rgb, color.a * alpha);
 }

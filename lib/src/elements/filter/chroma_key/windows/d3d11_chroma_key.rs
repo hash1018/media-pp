@@ -194,7 +194,8 @@ impl ChromaKeyConstants {
 /// [`crate::elements::D3d11Scaler`] with
 /// [`crate::elements::D3d11ScalerFormat::Bgra`], which converts on the same
 /// `VideoProcessorBlt` it would resize with. RGB is written through
-/// untouched; only alpha changes.
+/// untouched; only alpha changes, multiplied by the key as
+/// [`crate::elements::SwChromaKey`]'s is.
 ///
 /// Output is a fresh texture rather than a keyed-in-place input: the frame
 /// arriving here is `Arc`-shared and its upstream owner may still be
@@ -1119,6 +1120,25 @@ mod tests {
         );
     }
 
+    /// The key multiplies the alpha a pixel arrives with, as
+    /// `SwChromaKey`'s does, so a key after a luma key keeps its cuts.
+    #[test]
+    fn the_alpha_a_pixel_arrives_with_is_kept_under_the_key() {
+        let Some((device, context)) = try_device() else {
+            return;
+        };
+        let translucent_red = [0u8, 0, 255, 100];
+        assert_eq!(
+            keyed_pixel(&device, &context, default_options(), translucent_red),
+            translucent_red
+        );
+        let translucent_green = [0u8, 255, 0, 100];
+        assert_eq!(
+            keyed_pixel(&device, &context, default_options(), translucent_green)[3],
+            0
+        );
+    }
+
     /// The same off-green `SwChromaKey`'s own feather test uses: only the
     /// red channel differs, by 60/255, so the distance is
     /// `(60/255)/sqrt(3) ~= 0.136` — inside the 0.10..0.20 band around
@@ -1496,7 +1516,7 @@ mod tests {
         assert_eq!(feathered.key_color, [0.0, 1.0, 0.0]);
 
         // Negative smoothing means the same thing as none, exactly as
-        // `SwChromaKey::alpha_for` clamps it.
+        // `SwChromaKey::coverage_for` clamps it.
         for smoothing in [0.0, -1.0] {
             let hard = ChromaKeyConstants::new(Color::BLACK, 0.15, smoothing, [1.0, 1.0]);
             assert_eq!(hard.band_low, 0.15);

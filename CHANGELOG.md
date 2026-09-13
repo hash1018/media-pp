@@ -446,6 +446,14 @@ compile error with no explanation.
   New: the `stats` module (`PipelineStats`, `ElementStats`, `ElementState`,
   `PadStats`, `QueueStats`, `TickStats`).
 
+### Changed
+
+- **A chroma key multiplies the alpha it is given instead of replacing it.**
+  `SwChromaKey`, `D3d11ChromaKey` and `CudaChromaKey` used to write the key's
+  coverage straight into alpha, so a key placed after a luma key put back
+  everything that one had taken out. An opaque input — every capture and
+  decoder in this crate — keys exactly as before, byte for byte.
+
 ## 0.2.0
 
 Two renames, a camera source on both platforms, and a good deal of runtime

@@ -105,7 +105,8 @@ pub enum CudaChromaKeyError {
 /// placement is right after a [`CudaUpload`](crate::elements::CudaUpload)
 /// carrying BGRA, with the result going straight into a compositor layer.
 ///
-/// Only alpha is written; the colour passes through untouched, as do PTS,
+/// Only alpha is written, multiplied by the key as the other backends'
+/// is; the colour passes through untouched, as do PTS,
 /// duration, and the colour-space tags — this makes no new timeline and no
 /// new colour.
 ///
@@ -648,6 +649,40 @@ mod tests {
             &row[4..8],
             &[0, 0, 255, 255],
             "a clearly different colour keeps its alpha and its RGB"
+        );
+    }
+
+    /// The key multiplies the alpha a pixel arrives with, as the other
+    /// backends' does, so a key after a luma key keeps its cuts.
+    #[test]
+    fn the_alpha_a_pixel_arrives_with_is_kept_under_the_key() {
+        let Some((device, _cuda_lock)) = try_cuda_device() else {
+            return;
+        };
+        let Some(source) = cuda_bgra(&device, 2, 1, 0, |x, _| {
+            if x == 0 {
+                [0, 255, 0, 100]
+            } else {
+                [0, 0, 255, 100]
+            }
+        }) else {
+            return;
+        };
+        let Some((mut key, _handle)) = key_element(&device, 2, 1) else {
+            return;
+        };
+        let keyed = capture(&mut key);
+
+        key.consume(source).expect("key the frame");
+
+        let out = keyed.lock().unwrap().remove(0);
+        let downloaded = download_bgra(&device, out, 2, 1);
+        let row = downloaded.data(0);
+        assert_eq!(row[3], 0, "the key colour keys out all the same");
+        assert_eq!(
+            &row[4..8],
+            &[0, 0, 255, 100],
+            "the rest keeps its own alpha"
         );
     }
 

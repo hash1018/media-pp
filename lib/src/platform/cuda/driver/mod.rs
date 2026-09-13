@@ -496,8 +496,9 @@ impl CudaDriver {
     }
 
     /// Writes `destination`'s alpha from each pixel's distance to
-    /// `key_color`, copying BGR through unchanged — the GPU-resident half of
-    /// what [`crate::elements::SwChromaKey`] does per pixel on the CPU.
+    /// `key_color`, times the alpha `source` already had, copying BGR through
+    /// unchanged — the GPU-resident half of what
+    /// [`crate::elements::SwChromaKey`] does per pixel on the CPU.
     ///
     /// `band_low`/`inv_band_width` come from the chroma-key module's own
     /// `feather_band`, so this and the D3D11 shader evaluate one definition

@@ -59,7 +59,9 @@ pub enum SwChromaKeyError {
 /// `D3d11VideoCompositor` layers already use, so the
 /// typical placement is right between a `Scaler` (converting a decoder's
 /// YUV output to BGRA) and a compositor's `add_source`. RGB channels pass
-/// through unchanged; only alpha is written.
+/// through unchanged; only alpha is written, and it is the key's coverage
+/// times the alpha each pixel arrived with, so an opaque picture is keyed as
+/// it always was and one another key already cut into keeps those cuts.
 pub struct SwChromaKey {
     pp_log: PpLog,
     name: Arc<str>,
@@ -281,7 +283,9 @@ impl PerFrameTransform for SwChromaKey {
 }
 
 /// Writes `destination`'s alpha channel from `source`'s BGR distance to
-/// `key_color`, copying RGB through unchanged. Both frames must already be
+/// `key_color` — the key's coverage times the alpha the pixel already had,
+/// so a key after another one keeps what the first took out — copying RGB
+/// through unchanged. Both frames must already be
 /// `BGRA` at the same dimensions — the caller (`SwChromaKey::consume`)
 /// guarantees that via `ensure_pool`.
 fn key_bgra(
@@ -308,9 +312,9 @@ fn key_bgra(
             .iter()
             .zip(destination_row.as_chunks_mut::<4>().0)
         {
-            let [b, g, r, _a] = *src;
-            let distance = color_distance(b, g, r, key_color);
-            *dst = [b, g, r, alpha_for(distance, threshold, smoothing)];
+            let [b, g, r, a] = *src;
+            let coverage = coverage_for(color_distance(b, g, r, key_color), threshold, smoothing);
+            *dst = [b, g, r, (coverage * f32::from(a)).round() as u8];
         }
     }
 }
@@ -326,21 +330,20 @@ fn color_distance(b: u8, g: u8, r: u8, key: Color) -> f32 {
     (db * db + dg * dg + dr * dr).sqrt() / 3f32.sqrt()
 }
 
-/// Linear ramp from fully transparent (`distance <= threshold - smoothing
-/// / 2`) to fully opaque (`distance >= threshold + smoothing / 2`).
+/// Linear ramp from `0.0`, keyed out (`distance <= threshold - smoothing
+/// / 2`), to `1.0`, kept (`distance >= threshold + smoothing / 2`).
 /// `smoothing <= 0.0` collapses this to a hard step at `threshold`.
-fn alpha_for(distance: f32, threshold: f32, smoothing: f32) -> u8 {
+fn coverage_for(distance: f32, threshold: f32, smoothing: f32) -> f32 {
     let half = smoothing.max(0.0) / 2.0;
     let low = threshold - half;
     let high = threshold + half;
-    let t = if high > low {
+    if high > low {
         ((distance - low) / (high - low)).clamp(0.0, 1.0)
     } else if distance <= threshold {
         0.0
     } else {
         1.0
-    };
-    (t * 255.0).round() as u8
+    }
 }
 
 #[cfg(test)]
@@ -506,6 +509,35 @@ mod tests {
             panic!("expected a Video buffer");
         };
         assert_eq!(pixel(frame, 0, 0), [0, 0, 255, 255]);
+    }
+
+    /// A pixel another filter already made translucent stays so: the key
+    /// multiplies the alpha it is given rather than replacing it, so a key
+    /// after a luma key does not put back what that one took out.
+    #[test]
+    fn the_alpha_a_pixel_arrives_with_is_kept_under_the_key() {
+        let (mut key, _handle, received) = new_chroma_key(default_options());
+        let translucent_red = [0, 0, 255, 100];
+        let translucent_green = [0, 255, 0, 100];
+        key.consume(bgra_frame(2, 1, |x, _| {
+            if x == 0 {
+                translucent_red
+            } else {
+                translucent_green
+            }
+        }))
+        .expect("keying must succeed");
+
+        let received = received.lock().unwrap();
+        let MediaBuffer::Video(frame) = &received[0] else {
+            panic!("expected a Video buffer");
+        };
+        assert_eq!(
+            pixel(frame, 0, 0),
+            translucent_red,
+            "kept, at its own alpha"
+        );
+        assert_eq!(pixel(frame, 1, 0)[3], 0, "and keyed out all the same");
     }
 
     #[test]
