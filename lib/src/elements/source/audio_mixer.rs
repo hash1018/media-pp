@@ -1286,7 +1286,7 @@ mod tests {
     /// dropped — no `BusEvent::Error`, no way for a misconfigured pipeline
     /// to ever find out. Matches the typed-error pattern every other
     /// `Sink` in this codebase already uses for a wrong `MediaBuffer`
-    /// variant (e.g. `FileMuxerStreamSink`).
+    /// variant (e.g. a muxer's track sinks).
     #[test]
     fn rejects_buffers_that_are_neither_audio_nor_eos() {
         let (mixer, handle) = AudioMixer::new(

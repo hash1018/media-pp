@@ -3,22 +3,18 @@ use std::{
     ffi::CString,
     path::{Path, PathBuf},
     ptr,
-    sync::{Arc, Mutex},
     time::Duration,
 };
 
-use crate::pp_log::{PpLog, pp_error};
 use ffmpeg_next as ffmpeg;
 use thiserror::Error as ThisError;
 
+use super::track_sink::{Muxer, PendingStream, TrackOptions, open_tracks};
 use super::tracks::{MuxerId, MuxerSinks, MuxerTrack};
 
 use crate::{
-    buffer::MediaBuffer,
-    contract::{InputContract, MediaKind, PortContract},
-    control::{ControlMsg, SeekRejectReason},
-    element::{Element, ElementType, Sink, element_pp_log},
-    error::Result,
+    element::ElementType,
+    error::{Error, Result},
 };
 
 /// How the media playlist grows and which completed segments remain
@@ -310,15 +306,7 @@ pub enum HlsMuxerError {
     Ffmpeg(#[from] ffmpeg::Error),
 }
 
-struct PendingStream {
-    name: Arc<str>,
-    input_time_base: ffmpeg::Rational,
-    /// Taken from the parameters this track was registered with, so its
-    /// sink can refuse the other medium's packets at wiring time.
-    kind: Option<MediaKind>,
-}
-
-/// Builds one HLS media playlist and returns one [`Sink`] per registered
+/// Builds one HLS media playlist and returns one [`Sink`](crate::element::Sink) per registered
 /// track. FFmpeg owns segment boundary selection, fMP4/MPEG-TS creation,
 /// atomic playlist replacement, live-window trimming, and final
 /// `#EXT-X-ENDLIST` generation.
@@ -327,7 +315,7 @@ struct PendingStream {
 /// [`crate::elements::FileMuxer`]: call [`HlsMuxer::add_stream`] for every
 /// track before [`HlsMuxer::open`] writes the header. The returned sinks
 /// share one output lock and finalize the playlist only after every track
-/// reports `Eos` or [`ControlMsg::Stop`].
+/// reports `Eos` or [`ControlMsg::Stop`](crate::control::ControlMsg::Stop).
 pub struct HlsMuxer {
     id: MuxerId,
     output: ffmpeg::format::context::Output,
@@ -364,22 +352,18 @@ impl HlsMuxer {
             .output
             .add_stream(parameters.id())
             .map_err(HlsMuxerError::from)?;
-        let kind = MediaKind::packet_for(parameters.medium());
+        let pending = PendingStream::new(name, &parameters, time_base);
         stream.set_time_base(time_base);
         stream.set_parameters(parameters);
         let track = self.id.track(self.streams.len());
-        self.streams.push(PendingStream {
-            name: name.into().into(),
-            input_time_base: time_base,
-            kind,
-        });
+        self.streams.push(pending);
         Ok(track)
     }
 
     /// Writes the HLS header and returns one sink per stream, each taken
     /// out by the [`MuxerTrack`] its [`HlsMuxer::add_stream`] returned. The
     /// playlist is finalized only after every returned sink has received
-    /// `Eos` or [`ControlMsg::Stop`].
+    /// `Eos` or [`ControlMsg::Stop`](crate::control::ControlMsg::Stop).
     pub fn open(mut self) -> Result<MuxerSinks> {
         if self.streams.is_empty() {
             return Err(HlsMuxerError::NoStreams.into());
@@ -390,170 +374,40 @@ impl HlsMuxer {
             .write_header_with(options)
             .map_err(HlsMuxerError::from)?;
         drop(unused);
-        let total = self.streams.len();
-        let shared = Arc::new(HlsMuxerShared {
-            state: Mutex::new(MuxerState {
-                output: self.output,
-                done: 0,
-                finished: false,
-            }),
-            total,
-        });
-        Ok(self.id.sinks(
-            self.streams
-                .into_iter()
-                .enumerate()
-                .map(|(index, stream)| -> Box<dyn Sink> {
-                    Box::new(HlsMuxerStreamSink {
-                        pp_log: element_pp_log(ElementType::HlsMuxer, &stream.name, None),
-                        name: stream.name,
-                        shared: shared.clone(),
-                        stream_index: index,
-                        input_time_base: stream.input_time_base,
-                        kind: stream.kind,
-                        done: false,
-                    })
-                })
-                .collect(),
+        Ok(open_tracks::<Self>(
+            self.id,
+            self.output,
+            self.streams,
+            TrackOptions {
+                finish_on_stop: true,
+                destination: None,
+                timeline: None,
+            },
         ))
     }
 }
 
-struct MuxerState {
-    output: ffmpeg::format::context::Output,
-    done: usize,
-    finished: bool,
-}
+impl Muxer for HlsMuxer {
+    const ELEMENT_TYPE: ElementType = ElementType::HlsMuxer;
 
-struct HlsMuxerShared {
-    state: Mutex<MuxerState>,
-    total: usize,
-}
-
-impl HlsMuxerShared {
-    fn write_packet(
-        &self,
-        stream_index: usize,
-        input_time_base: ffmpeg::Rational,
-        packet: &ffmpeg::Packet,
-    ) -> Result<()> {
-        let mut state = self.state.lock().unwrap();
-        if state.finished {
-            return Ok(());
-        }
-        let mut packet = packet.clone();
-        let output_time_base = state
-            .output
-            .stream(stream_index)
-            .expect("stream was added in HlsMuxer::add_stream")
-            .time_base();
-        packet.rescale_ts(input_time_base, output_time_base);
-        packet.set_stream(stream_index);
-        packet.set_position(-1);
-        packet
-            .write_interleaved(&mut state.output)
-            .map_err(HlsMuxerError::from)?;
-        Ok(())
+    fn ffmpeg_error(error: ffmpeg::Error) -> Error {
+        HlsMuxerError::Ffmpeg(error).into()
     }
 
-    fn finish_track(&self) -> Result<()> {
-        let mut state = self.state.lock().unwrap();
-        state.done += 1;
-        if state.finished || state.done < self.total {
-            return Ok(());
-        }
-        state.finished = true;
-        state.output.write_trailer().map_err(HlsMuxerError::from)?;
-        Ok(())
-    }
-}
-
-/// One registered HLS track's sink. Instances returned by the same
-/// [`HlsMuxer::open`] share their muxer and finalization state.
-pub struct HlsMuxerStreamSink {
-    pp_log: PpLog,
-    name: Arc<str>,
-    shared: Arc<HlsMuxerShared>,
-    stream_index: usize,
-    input_time_base: ffmpeg::Rational,
-    /// The medium this track was registered for; `None` for one this
-    /// crate does not model, which then declares nothing.
-    kind: Option<MediaKind>,
-    done: bool,
-}
-
-impl HlsMuxerStreamSink {
-    fn finish(&mut self) -> Result<()> {
-        if self.done {
-            return Ok(());
-        }
-        self.done = true;
-        self.shared
-            .finish_track()
-            .inspect_err(|error| pp_error!(self, "write_trailer failed: {error}"))
-    }
-}
-
-impl Element for HlsMuxerStreamSink {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::HlsMuxer
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
-    }
-}
-
-impl Sink for HlsMuxerStreamSink {
-    /// A muxer interleaves already-encoded data, so a decoded frame has no route through it.
-    fn input_contract(&self) -> InputContract {
-        match self.kind {
-            Some(kind) => InputContract::Fixed(PortContract::packet(kind)),
-            None => InputContract::Unknown,
-        }
-    }
-
-    fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
-        match buf {
-            MediaBuffer::Packet(packet) => self
-                .shared
-                .write_packet(self.stream_index, self.input_time_base, &packet)
-                .inspect_err(|error| pp_error!(self, "write_interleaved failed: {error}")),
-            MediaBuffer::Eos => self.finish(),
-            other => Err(HlsMuxerError::UnsupportedBuffer(other.kind()).into()),
-        }
-    }
-
-    fn control(&mut self, msg: ControlMsg) -> Result<()> {
-        if let ControlMsg::CheckSeek(context) = &msg {
-            context.reject(
-                self.element_type(),
-                self.name(),
-                SeekRejectReason::ElementNotSeekable,
-            );
-        }
-        if msg == ControlMsg::Stop {
-            self.finish()?;
-        }
-        Ok(())
+    fn unsupported_buffer(kind: &'static str) -> Error {
+        HlsMuxerError::UnsupportedBuffer(kind).into()
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
     use crate::{
-        element::Source,
+        buffer::MediaBuffer,
+        element::{Sink, Source},
         elements::{AudioCodec, SwAudioEncoder, SwAudioEncoderOptions},
     };
 

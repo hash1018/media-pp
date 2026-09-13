@@ -47,6 +47,14 @@ compile error with no explanation.
   than a panic. `MuxerTrack` is `#[must_use]`: a track whose sink is never
   taken never reports itself finished, and the output is never finalized.
 
+- **`FileMuxerStreamSink`, `HlsMuxerStreamSink`, `RtmpMuxerStreamSink` and
+  `RtspMuxerStreamSink` are gone.** Nothing could reach one: every muxer's
+  sinks are handed out as `Box<dyn Sink>`, so the names were exports with
+  no way to hold a value of them — `redacted_url` on the two publishing
+  ones included, which `RtmpMuxer::redacted_url` and
+  `RtspMuxer::redacted_url` still answer before `open`. The four were one
+  implementation copied four times, and are now one type inside the crate.
+
 - **`CudaConverter` converts either way round, so its constructor is told
   which.** `CudaConverter::new(name, device, width, height)` becomes
   `CudaConverter::new(name, device, output, width, height)`; pass

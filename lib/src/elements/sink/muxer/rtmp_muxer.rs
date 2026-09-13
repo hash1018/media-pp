@@ -1,27 +1,21 @@
-use std::{
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::{sync::Arc, time::Duration};
 
-use crate::pp_log::{PpLog, pp_error, pp_info};
 use ffmpeg_next as ffmpeg;
 use thiserror::Error as ThisError;
 
+use super::track_sink::{Muxer, PendingStream, TrackOptions, open_tracks};
 use super::tracks::{MuxerId, MuxerSinks, MuxerTrack};
 
 use crate::{
-    buffer::MediaBuffer,
-    contract::{InputContract, MediaKind, PortContract},
-    control::{ControlMsg, SeekRejectReason},
-    element::{Element, ElementType, Sink, element_pp_log},
-    error::Result,
+    element::ElementType,
+    error::{Error, Result},
 };
 
 /// How long one network operation may block before FFmpeg abandons it.
 ///
 /// A publish has no equivalent of a file write that always returns: a server
 /// that stops reading leaves the socket writable-then-not, and an unbounded
-/// write parks the thread inside [`Sink::consume`] — which the
+/// write parks the thread inside [`Sink::consume`](crate::element::Sink::consume) — which the
 /// [`Queue`](crate::queue::Queue) in front of it cannot reclaim (see the
 /// module docs on [`crate::elements`]'s sink module).
 ///
@@ -66,21 +60,8 @@ pub enum RtmpMuxerError {
     NotAnRtmpUrl,
 }
 
-/// One track registered via [`RtmpMuxer::add_stream`], waiting for
-/// [`RtmpMuxer::open`] to turn it into a real [`RtmpMuxerStreamSink`] — its
-/// `name` becomes that sink's own [`Element::name`]/`pp_log` identity, and
-/// `input_time_base` is what every `Packet` it receives already carries
-/// `pts`/`dts` in (the same one its upstream encoder was opened with).
-struct PendingStream {
-    name: Arc<str>,
-    input_time_base: ffmpeg::Rational,
-    /// Taken from the parameters this track was registered with, so its
-    /// sink can refuse the other medium's packets at wiring time.
-    kind: Option<MediaKind>,
-}
-
 /// Publishes one FLV stream to an RTMP server — Twitch, YouTube, or a local
-/// [MediaMTX] — and hands out one [`Sink`] per track.
+/// [MediaMTX] — and hands out one [`Sink`](crate::element::Sink) per track.
 ///
 /// This is the publishing half only. It does not run a server and does not
 /// depend on a particular one: the address and the stream key come from
@@ -96,7 +77,7 @@ struct PendingStream {
 /// that way, including [`RtspMuxer`](crate::elements::RtspMuxer).
 ///
 /// It is a remuxer: incoming buffers are compressed
-/// [`MediaBuffer::Packet`] values, and nothing here encodes. FLV carries a
+/// [`MediaBuffer::Packet`](crate::buffer::MediaBuffer::Packet) values, and nothing here encodes. FLV carries a
 /// limited set of codecs — H.264 and AAC are the pair every service accepts
 /// — and one FFmpeg does not accept is refused by [`RtmpMuxer::open`] as an
 /// [`RtmpMuxerError::Ffmpeg`], since which codecs a given FFmpeg build will
@@ -217,7 +198,7 @@ impl RtmpMuxer {
     /// `time_base` describe it, typically
     /// [`crate::elements::SwEncoder::parameters`] and the same `time_base`
     /// its `SwEncoderOptions` was given. `name` becomes this track's own
-    /// [`Element::name`]/`pp_log` identity once [`RtmpMuxer::open`] turns it
+    /// [`Element::name`](crate::element::Element::name)/`pp_log` identity once [`RtmpMuxer::open`] turns it
     /// into a `Sink`.
     ///
     /// The returned [`MuxerTrack`] is how this track's sink is taken out of
@@ -232,21 +213,17 @@ impl RtmpMuxer {
             .output
             .add_stream(parameters.id())
             .map_err(RtmpMuxerError::from)?;
-        let kind = MediaKind::packet_for(parameters.medium());
+        let pending = PendingStream::new(name, &parameters, time_base);
         stream.set_time_base(time_base);
         stream.set_parameters(parameters);
         let track = self.id.track(self.streams.len());
-        self.streams.push(PendingStream {
-            name: name.into().into(),
-            input_time_base: time_base,
-            kind,
-        });
+        self.streams.push(pending);
         Ok(track)
     }
 
     /// Writes the FLV header — every [`RtmpMuxer::add_stream`] call this
     /// broadcast will get must already have happened — and returns one
-    /// [`Sink`] per track, each taken out by the [`MuxerTrack`] its
+    /// [`Sink`](crate::element::Sink) per track, each taken out by the [`MuxerTrack`] its
     /// [`RtmpMuxer::add_stream`] returned.
     ///
     /// This is where a codec FLV cannot carry is refused, and where a
@@ -258,41 +235,21 @@ impl RtmpMuxer {
     /// and neither `av_interleaved_write_frame` nor `av_write_trailer` is
     /// safe to call from two threads against one output at once. They also
     /// share one trailer, written once every track has reported itself done
-    /// — via `Eos` *or* [`ControlMsg::Stop`], either meaning "this track is
+    /// — via `Eos` *or* [`ControlMsg::Stop`](crate::control::ControlMsg::Stop), either meaning "this track is
     /// finished" rather than "abandon the broadcast" — so ending only the
     /// video pipeline while audio keeps running leaves the publish open
     /// until audio catches up too.
     pub fn open(mut self) -> Result<MuxerSinks> {
         self.output.write_header().map_err(RtmpMuxerError::from)?;
-        let total = self.streams.len();
-        let redacted_url = self.redacted_url;
-        let shared = Arc::new(RtmpMuxerShared {
-            state: Mutex::new(MuxerState {
-                output: self.output,
-                done: 0,
-                finished: false,
-            }),
-            total,
-            redacted_url: redacted_url.clone(),
-        });
-        Ok(self.id.sinks(
-            self.streams
-                .into_iter()
-                .enumerate()
-                .map(|(index, stream)| -> Box<dyn Sink> {
-                    let pp_log = element_pp_log(ElementType::RtmpMuxer, &stream.name, None);
-                    pp_info!(pp_log: &pp_log, "publishing: url={redacted_url}, tracks={total}");
-                    Box::new(RtmpMuxerStreamSink {
-                        pp_log,
-                        name: stream.name,
-                        shared: shared.clone(),
-                        stream_index: index,
-                        input_time_base: stream.input_time_base,
-                        kind: stream.kind,
-                        done: false,
-                    })
-                })
-                .collect(),
+        Ok(open_tracks::<Self>(
+            self.id,
+            self.output,
+            self.streams,
+            TrackOptions {
+                finish_on_stop: true,
+                destination: Some(self.redacted_url),
+                timeline: None,
+            },
         ))
     }
 
@@ -342,175 +299,15 @@ fn redact(url: &str) -> String {
     }
 }
 
-struct MuxerState {
-    output: ffmpeg::format::context::Output,
-    /// How many tracks have reported themselves finished (`Eos` or `Stop`)
-    /// — the trailer is written once this reaches
-    /// [`RtmpMuxerShared::total`], not on the first one (see
-    /// [`RtmpMuxer::open`]'s own docs for why).
-    done: usize,
-    /// Set once the trailer has been written. Each
-    /// [`RtmpMuxerStreamSink`]'s own `done` flag already prevents
-    /// double-counting *that* track; this additionally guards
-    /// [`RtmpMuxerShared::write_packet`] against writing into a connection
-    /// already closed by its trailer.
-    finished: bool,
-}
+impl Muxer for RtmpMuxer {
+    const ELEMENT_TYPE: ElementType = ElementType::RtmpMuxer;
 
-/// Shared between every [`RtmpMuxerStreamSink`] [`RtmpMuxer::open`] hands
-/// out for the same broadcast — one lock around the whole
-/// [`ffmpeg::format::context::Output`] so concurrent tracks never interleave
-/// two writes against it (see [`RtmpMuxer::open`]'s own docs).
-struct RtmpMuxerShared {
-    state: Mutex<MuxerState>,
-    total: usize,
-    redacted_url: Arc<str>,
-}
-
-impl RtmpMuxerShared {
-    fn write_packet(
-        &self,
-        stream_index: usize,
-        input_time_base: ffmpeg::Rational,
-        packet: &ffmpeg::Packet,
-    ) -> Result<()> {
-        let mut state = self.state.lock().unwrap();
-        if state.finished {
-            return Ok(());
-        }
-        // Cloned, not mutated in place — `Arc<Packet>` may be shared with
-        // another branch off the same `Tee`, which must not see this
-        // stream's `set_stream`/rescaled timestamps.
-        let mut packet = packet.clone();
-        let output_time_base = state
-            .output
-            .stream(stream_index)
-            .expect("stream was added in RtmpMuxer::add_stream")
-            .time_base();
-        packet.rescale_ts(input_time_base, output_time_base);
-        packet.set_stream(stream_index);
-        packet.set_position(-1);
-        packet
-            .write_interleaved(&mut state.output)
-            .map_err(RtmpMuxerError::from)?;
-        Ok(())
+    fn ffmpeg_error(error: ffmpeg::Error) -> Error {
+        RtmpMuxerError::Ffmpeg(error).into()
     }
 
-    /// One track reporting itself done (`Eos` or `Stop`) — writes the
-    /// trailer exactly once, only after every track has called this.
-    /// `true` when this call was the one that ended the broadcast.
-    fn finish_track(&self) -> Result<bool> {
-        let mut state = self.state.lock().unwrap();
-        state.done += 1;
-        if state.finished || state.done < self.total {
-            return Ok(false);
-        }
-        state.finished = true;
-        state.output.write_trailer().map_err(RtmpMuxerError::from)?;
-        Ok(true)
-    }
-}
-
-/// One track's own [`Sink`] — a lightweight handle sharing a
-/// `RtmpMuxerShared` with every other track [`RtmpMuxer::open`] returned
-/// alongside it. See [`RtmpMuxer::open`]'s own docs for the
-/// finalize-once-every-track-is-done contract this relies on.
-pub struct RtmpMuxerStreamSink {
-    pp_log: PpLog,
-    name: Arc<str>,
-    shared: Arc<RtmpMuxerShared>,
-    stream_index: usize,
-    input_time_base: ffmpeg::Rational,
-    /// The medium this track was registered for; `None` for one this crate
-    /// does not model, which then declares nothing.
-    kind: Option<MediaKind>,
-    /// Set once this sink has contributed to
-    /// [`RtmpMuxerShared::finish_track`] — guards against double-counting
-    /// if both a natural `Eos` and a later `Stop` arrive for the same track.
-    done: bool,
-}
-
-impl RtmpMuxerStreamSink {
-    /// The publish address with its stream key removed — safe to log or
-    /// show. See [`RtmpMuxer`]'s own docs.
-    pub fn redacted_url(&self) -> &str {
-        &self.shared.redacted_url
-    }
-
-    fn finish(&mut self) -> Result<()> {
-        if self.done {
-            return Ok(());
-        }
-        self.done = true;
-        let closed = self
-            .shared
-            .finish_track()
-            .inspect_err(|error| pp_error!(self, "write_trailer failed: {error}"))?;
-        if closed {
-            pp_info!(self, "publish closed: url={}", self.shared.redacted_url);
-        }
-        Ok(())
-    }
-}
-
-impl Element for RtmpMuxerStreamSink {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::RtmpMuxer
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
-    }
-}
-
-impl Sink for RtmpMuxerStreamSink {
-    /// A muxer interleaves already-encoded data; it has no encoder of its
-    /// own, so a decoded frame has no route through it. The medium is this
-    /// track's own, so a video encoder wired into the audio track is
-    /// refused rather than publishing something no player can follow.
-    fn input_contract(&self) -> InputContract {
-        match self.kind {
-            Some(kind) => InputContract::Fixed(PortContract::packet(kind)),
-            None => InputContract::Unknown,
-        }
-    }
-
-    fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
-        match buf {
-            MediaBuffer::Packet(packet) => self
-                .shared
-                .write_packet(self.stream_index, self.input_time_base, &packet)
-                .inspect_err(|error| pp_error!(self, "write_interleaved failed: {error}")),
-            MediaBuffer::Eos => self.finish(),
-            other => Err(RtmpMuxerError::UnsupportedBuffer(other.kind()).into()),
-        }
-    }
-
-    fn control(&mut self, msg: ControlMsg) -> Result<()> {
-        if let ControlMsg::CheckSeek(context) = &msg {
-            // A live publish has no timeline to move within: what the
-            // server already received cannot be taken back.
-            context.reject(
-                self.element_type(),
-                self.name(),
-                SeekRejectReason::ElementNotSeekable,
-            );
-        }
-        // Terminal, nothing to forward. `Stop` still contributes to this
-        // track's own "done" count — see `RtmpMuxer::open`'s own docs on
-        // why the trailer waits for every track.
-        if msg == ControlMsg::Stop {
-            self.finish()?;
-        }
-        Ok(())
+    fn unsupported_buffer(kind: &'static str) -> Error {
+        RtmpMuxerError::UnsupportedBuffer(kind).into()
     }
 }
 

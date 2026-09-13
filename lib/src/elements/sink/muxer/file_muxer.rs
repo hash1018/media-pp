@@ -1,20 +1,14 @@
-use std::{
-    path::Path,
-    sync::{Arc, Mutex},
-};
+use std::path::Path;
 
-use crate::pp_log::{PpLog, pp_error};
 use ffmpeg_next as ffmpeg;
 use thiserror::Error as ThisError;
 
+use super::track_sink::{Muxer, PendingStream, TrackOptions, open_tracks};
 use super::tracks::{MuxerId, MuxerSinks, MuxerTrack};
 
 use crate::{
-    buffer::MediaBuffer,
-    contract::{InputContract, MediaKind, PortContract},
-    control::{ControlMsg, SeekRejectReason},
-    element::{Element, ElementType, Sink, element_pp_log},
-    error::Result,
+    element::ElementType,
+    error::{Error, Result},
 };
 
 /// Errors specific to `FileMuxer`. Converts into the crate-wide `Error` via
@@ -30,21 +24,8 @@ pub enum FileMuxerError {
     Ffmpeg(#[from] ffmpeg::Error),
 }
 
-/// One track registered via [`FileMuxer::add_stream`], waiting for
-/// [`FileMuxer::open`] to turn it into a real [`FileMuxerStreamSink`] — its
-/// `name` becomes that sink's own [`Element::name`]/`pp_log` identity, and
-/// `input_time_base` is what every `Packet` it receives already carries
-/// `pts`/`dts` in (the same one its upstream encoder was opened with).
-struct PendingStream {
-    name: Arc<str>,
-    input_time_base: ffmpeg::Rational,
-    /// Taken from the parameters this track was registered with, so its
-    /// sink can refuse the other medium's packets at wiring time.
-    kind: Option<MediaKind>,
-}
-
 /// Builds one container file with one or more tracks, then opens it into
-/// one [`Sink`] per track.
+/// one [`Sink`](crate::element::Sink) per track.
 ///
 /// Which container is the path's own: `format::output` asks FFmpeg to guess
 /// a muxer from the file name, so `.mp4` gets MP4 and `.mkv` gets Matroska
@@ -117,7 +98,7 @@ impl FileMuxer {
     /// [`crate::elements::SwEncoder::parameters`]/the same `time_base`
     /// passed to its own `SwEncoderOptions` (or the
     /// [`crate::elements::SwAudioEncoder`] equivalents). `name` becomes
-    /// this track's own [`Element::name`]/`pp_log` identity once
+    /// this track's own [`Element::name`](crate::element::Element::name)/`pp_log` identity once
     /// [`FileMuxer::open`] turns it into a `Sink` — pick something that
     /// tells multiple tracks apart in logs/[`crate::bus::BusEvent`]s,
     /// e.g. `"video"`/`"audio"`.
@@ -134,21 +115,17 @@ impl FileMuxer {
             .output
             .add_stream(parameters.id())
             .map_err(FileMuxerError::from)?;
-        let kind = MediaKind::packet_for(parameters.medium());
+        let pending = PendingStream::new(name, &parameters, time_base);
         stream.set_time_base(time_base);
         stream.set_parameters(parameters);
         let track = self.id.track(self.streams.len());
-        self.streams.push(PendingStream {
-            name: name.into().into(),
-            input_time_base: time_base,
-            kind,
-        });
+        self.streams.push(pending);
         Ok(track)
     }
 
     /// Writes the container header — every [`FileMuxer::add_stream`] call
     /// this file will ever get must already have happened — and returns
-    /// one [`Sink`] per track, each taken out by the [`MuxerTrack`] its
+    /// one [`Sink`](crate::element::Sink) per track, each taken out by the [`MuxerTrack`] its
     /// [`FileMuxer::add_stream`] returned.
     ///
     /// All returned `Sink`s write into the same underlying file behind a
@@ -158,7 +135,7 @@ impl FileMuxer {
     /// `av_interleaved_write_frame` nor `av_write_trailer` is safe to call
     /// from multiple threads against the same file at once. They also
     /// share one trailer: it's written once every track has reported
-    /// itself done — via `Eos` *or* [`ControlMsg::Stop`], either meaning
+    /// itself done — via `Eos` *or* [`ControlMsg::Stop`](crate::control::ControlMsg::Stop), either meaning
     /// "this track is finished" rather than "abandon the whole file" —
     /// not on whichever track finishes first, which would silently
     /// truncate whatever the other track(s) still had left to write. A
@@ -176,200 +153,40 @@ impl FileMuxer {
     /// file un-finalized (and unplayable) until the rest catch up too.
     pub fn open(mut self) -> Result<MuxerSinks> {
         self.output.write_header().map_err(FileMuxerError::from)?;
-        let total = self.streams.len();
-        let shared = Arc::new(FileMuxerShared {
-            state: Mutex::new(MuxerState {
-                output: self.output,
-                done: 0,
-                finished: false,
-            }),
-            total,
-        });
-        Ok(self.id.sinks(
-            self.streams
-                .into_iter()
-                .enumerate()
-                .map(|(index, stream)| -> Box<dyn Sink> {
-                    Box::new(FileMuxerStreamSink {
-                        pp_log: element_pp_log(ElementType::FileMuxer, &stream.name, None),
-                        name: stream.name,
-                        shared: shared.clone(),
-                        stream_index: index,
-                        input_time_base: stream.input_time_base,
-                        kind: stream.kind,
-                        done: false,
-                    })
-                })
-                .collect(),
+        Ok(open_tracks::<Self>(
+            self.id,
+            self.output,
+            self.streams,
+            TrackOptions {
+                finish_on_stop: true,
+                destination: None,
+                timeline: None,
+            },
         ))
     }
 }
 
-struct MuxerState {
-    output: ffmpeg::format::context::Output,
-    /// How many tracks have reported themselves finished (`Eos` or
-    /// `Stop`) — the trailer is written once this reaches
-    /// [`FileMuxerShared::total`], not on the first one (see
-    /// [`FileMuxer::open`]'s own docs for why).
-    done: usize,
-    /// Set once the trailer has been written. Each
-    /// [`FileMuxerStreamSink`]'s own `done` flag already prevents
-    /// double-counting *that* track's contribution to `done`; this
-    /// additionally guards [`FileMuxerShared::write_packet`] against
-    /// writing into a file whose trailer has already closed it.
-    finished: bool,
-}
+impl Muxer for FileMuxer {
+    const ELEMENT_TYPE: ElementType = ElementType::FileMuxer;
 
-/// Shared between every [`FileMuxerStreamSink`] [`FileMuxer::open`] hands
-/// out for the same file — one lock around the whole
-/// [`ffmpeg::format::context::Output`] so concurrent tracks never
-/// interleave two writes against it (see [`FileMuxer::open`]'s own docs).
-struct FileMuxerShared {
-    state: Mutex<MuxerState>,
-    total: usize,
-}
-
-impl FileMuxerShared {
-    fn write_packet(
-        &self,
-        stream_index: usize,
-        input_time_base: ffmpeg::Rational,
-        packet: &ffmpeg::Packet,
-    ) -> Result<()> {
-        let mut state = self.state.lock().unwrap();
-        if state.finished {
-            return Ok(());
-        }
-        // Cloned, not mutated in place — `Arc<Packet>` may be shared with
-        // another branch (e.g. a `PacketCounter` off the same `Tee`),
-        // which must not see this stream's `set_stream`/rescaled
-        // timestamps.
-        let mut packet = packet.clone();
-        let output_time_base = state
-            .output
-            .stream(stream_index)
-            .expect("stream was added in FileMuxer::add_stream")
-            .time_base();
-        packet.rescale_ts(input_time_base, output_time_base);
-        packet.set_stream(stream_index);
-        packet.set_position(-1);
-        packet
-            .write_interleaved(&mut state.output)
-            .map_err(FileMuxerError::from)?;
-        Ok(())
+    fn ffmpeg_error(error: ffmpeg::Error) -> Error {
+        FileMuxerError::Ffmpeg(error).into()
     }
 
-    /// One track reporting itself done (`Eos` or `Stop`) — writes the
-    /// trailer exactly once, only once every track has called this.
-    fn finish_track(&self) -> Result<()> {
-        let mut state = self.state.lock().unwrap();
-        state.done += 1;
-        if state.finished || state.done < self.total {
-            return Ok(());
-        }
-        state.finished = true;
-        state.output.write_trailer().map_err(FileMuxerError::from)?;
-        Ok(())
-    }
-}
-
-/// One track's own [`Sink`] — a lightweight handle sharing a
-/// `FileMuxerShared` with every other track [`FileMuxer::open`] returned
-/// alongside it. See [`FileMuxer::open`]'s own docs for the
-/// finalize-once-every-track-is-done contract this relies on.
-pub struct FileMuxerStreamSink {
-    pp_log: PpLog,
-    name: Arc<str>,
-    shared: Arc<FileMuxerShared>,
-    stream_index: usize,
-    input_time_base: ffmpeg::Rational,
-    /// The medium this track was registered for; `None` for one this
-    /// crate does not model, which then declares nothing.
-    kind: Option<MediaKind>,
-    /// Set once this sink has contributed to
-    /// [`FileMuxerShared::finish_track`] — guards against double-counting
-    /// if both a natural `Eos` and a later `Stop` arrive for the same
-    /// track.
-    done: bool,
-}
-
-impl FileMuxerStreamSink {
-    fn finish(&mut self) -> Result<()> {
-        if self.done {
-            return Ok(());
-        }
-        self.done = true;
-        self.shared
-            .finish_track()
-            .inspect_err(|error| pp_error!(self, "write_trailer failed: {error}"))
-    }
-}
-
-impl Element for FileMuxerStreamSink {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::FileMuxer
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
-    }
-}
-
-impl Sink for FileMuxerStreamSink {
-    /// A muxer interleaves already-encoded data; it has no encoder of
-    /// its own, so a decoded frame has no route through it. The medium is
-    /// this track's own, so a video encoder wired into the audio track is
-    /// refused rather than writing a file no player can make sense of.
-    fn input_contract(&self) -> InputContract {
-        match self.kind {
-            Some(kind) => InputContract::Fixed(PortContract::packet(kind)),
-            None => InputContract::Unknown,
-        }
-    }
-
-    fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
-        match buf {
-            MediaBuffer::Packet(packet) => self
-                .shared
-                .write_packet(self.stream_index, self.input_time_base, &packet)
-                .inspect_err(|error| pp_error!(self, "write_interleaved failed: {error}")),
-            MediaBuffer::Eos => self.finish(),
-            other => Err(FileMuxerError::UnsupportedBuffer(other.kind()).into()),
-        }
-    }
-
-    fn control(&mut self, msg: ControlMsg) -> Result<()> {
-        if let ControlMsg::CheckSeek(context) = &msg {
-            context.reject(
-                self.element_type(),
-                self.name(),
-                SeekRejectReason::ElementNotSeekable,
-            );
-        }
-        // Terminal, nothing to forward. `Stop` still contributes to this
-        // track's own "done" count — see `FileMuxer::open`'s own docs on
-        // why the trailer waits for every track rather than finalizing on
-        // whichever stops first.
-        if msg == ControlMsg::Stop {
-            self.finish()?;
-        }
-        Ok(())
+    fn unsupported_buffer(kind: &'static str) -> Error {
+        FileMuxerError::UnsupportedBuffer(kind).into()
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
-    use crate::control::{SeekCheckContext, SeekRejectReason};
-    use crate::element::Source;
+    use crate::buffer::MediaBuffer;
+    use crate::contract::{InputContract, MediaKind, PortContract};
+    use crate::control::{ControlMsg, SeekCheckContext, SeekRejectReason};
+    use crate::element::{Sink, Source};
     use crate::elements::{AudioCodec, SwAudioEncoder, SwAudioEncoderOptions};
 
     fn open_aac_encoder(sample_rate: u32, channels: u16) -> SwAudioEncoder {

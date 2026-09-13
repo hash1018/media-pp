@@ -1,22 +1,15 @@
-use std::{
-    ffi::CString,
-    ptr,
-    sync::{Arc, Mutex},
-};
+use std::{ffi::CString, ptr, sync::Arc};
 
-use crate::pp_log::{PpLog, pp_error, pp_info};
 use ffmpeg_next::{self as ffmpeg, ffi};
 use thiserror::Error as ThisError;
 
+use super::track_sink::{Muxer, PendingStream, TrackOptions, TrackTimeline, open_tracks};
 use super::tracks::{MuxerId, MuxerSinks, MuxerTrack};
 
 use crate::{
-    buffer::MediaBuffer,
-    contract::{InputContract, MediaKind, PortContract},
-    control::ControlMsg,
-    element::{Element, ElementType, Sink, element_pp_log},
+    element::ElementType,
     elements::RtspTransport,
-    error::Result,
+    error::{Error, Result},
 };
 
 /// Errors produced while opening or writing an [`RtspMuxer`].
@@ -39,21 +32,8 @@ pub enum RtspMuxerError {
     InvalidUrl,
 }
 
-/// One track registered via [`RtspMuxer::add_stream`], waiting for
-/// [`RtspMuxer::open`] to turn it into a real [`RtspMuxerStreamSink`] — its
-/// `name` becomes that sink's own [`Element::name`]/`pp_log` identity, and
-/// `input_time_base` is what every `Packet` it receives already carries
-/// `pts`/`dts` in.
-struct PendingStream {
-    name: Arc<str>,
-    input_time_base: ffmpeg::Rational,
-    /// Taken from the parameters this track was registered with, so its
-    /// sink can refuse the other medium's packets at wiring time.
-    kind: Option<MediaKind>,
-}
-
 /// Publishes one or more compressed packet streams to an already-running
-/// RTSP server, and hands out one [`Sink`] per track.
+/// RTSP server, and hands out one [`Sink`](crate::element::Sink) per track.
 ///
 /// The server must already be listening at `url` and must permit publishing
 /// to that path. It can be [MediaMTX] or any other implementation that
@@ -61,7 +41,7 @@ struct PendingStream {
 /// depend on a particular server process.
 ///
 /// This is a remuxing muxer, not an encoder. Incoming buffers must be
-/// compressed [`MediaBuffer::Packet`] values whose codec parameters and time
+/// compressed [`MediaBuffer::Packet`](crate::buffer::MediaBuffer::Packet) values whose codec parameters and time
 /// base match what that track was registered with. Place a
 /// [`Pacer`](crate::elements::Pacer) upstream when publishing packets from a
 /// file, otherwise the file is sent faster than real time.
@@ -94,7 +74,7 @@ struct PendingStream {
 /// independently, so a seek can shift them relative to each other by however
 /// far apart their last outputs were.
 ///
-/// It also finalizes on `Eos` alone, not on [`ControlMsg::Stop`]. A live
+/// It also finalizes on `Eos` alone, not on [`ControlMsg::Stop`](crate::control::ControlMsg::Stop). A live
 /// publish that is abandoned has nothing that needs a valid trailer to be
 /// readable — unlike a file, which is why
 /// [`FileMuxer`](crate::elements::FileMuxer) treats `Stop` as a track
@@ -150,8 +130,8 @@ impl RtspMuxer {
 
     /// Registers one more track this session will publish. `parameters`/
     /// `time_base` must describe every packet subsequently passed to that
-    /// track's [`Sink::consume`]. `name` becomes the track's own
-    /// [`Element::name`]/`pp_log` identity — pick something that tells the
+    /// track's [`Sink::consume`](crate::element::Sink::consume). `name` becomes the track's own
+    /// [`Element::name`](crate::element::Element::name)/`pp_log` identity — pick something that tells the
     /// tracks apart in logs and [`crate::bus::BusEvent`]s, such as
     /// `"video"`/`"audio"`.
     ///
@@ -163,7 +143,7 @@ impl RtspMuxer {
         parameters: ffmpeg::codec::Parameters,
         time_base: ffmpeg::Rational,
     ) -> Result<MuxerTrack> {
-        let kind = MediaKind::packet_for(parameters.medium());
+        let pending = PendingStream::new(name, &parameters, time_base);
         let mut stream = self
             .output
             .add_stream(ffmpeg::encoder::find(ffmpeg::codec::Id::None))
@@ -180,18 +160,14 @@ impl RtspMuxer {
         stream.set_time_base(time_base);
 
         let track = self.id.track(self.streams.len());
-        self.streams.push(PendingStream {
-            name: name.into().into(),
-            input_time_base: time_base,
-            kind,
-        });
+        self.streams.push(pending);
         Ok(track)
     }
 
     /// Performs the `ANNOUNCE`/`SETUP`/`RECORD` handshake — every
     /// [`RtspMuxer::add_stream`] call this session will get must already
     /// have happened, since the SDP it announces describes them all — and
-    /// returns one [`Sink`] per track, each taken out by the [`MuxerTrack`]
+    /// returns one [`Sink`](crate::element::Sink) per track, each taken out by the [`MuxerTrack`]
     /// its [`RtspMuxer::add_stream`] returned.
     ///
     /// All returned `Sink`s write through the same session behind a shared
@@ -206,55 +182,20 @@ impl RtspMuxer {
         self.output
             .write_header_with(options)
             .map_err(RtspMuxerError::from)?;
-
-        // Read after the header, which is when the muxer has settled it —
-        // RTSP does not keep the time base a track was registered with, it
-        // announces its own in the SDP.
-        let output_time_bases: Vec<_> = (0..self.streams.len())
-            .map(|index| {
-                self.output
-                    .stream(index)
-                    .expect("stream was added in RtspMuxer::add_stream")
-                    .time_base()
-            })
-            .collect();
-
-        let total = self.streams.len();
-        let redacted_url = self.redacted_url;
-        let transport = self.transport;
-        let shared = Arc::new(RtspMuxerShared {
-            state: Mutex::new(MuxerState {
-                output: self.output,
-                done: 0,
-                finished: false,
-            }),
-            total,
-            redacted_url: redacted_url.clone(),
-        });
-        let sinks = self
-            .streams
-            .into_iter()
-            .enumerate()
-            .map(|(index, stream)| -> Box<dyn Sink> {
-                let pp_log = element_pp_log(ElementType::RtspMuxer, &stream.name, None);
-                pp_info!(
-                    pp_log: &pp_log,
-                    "publishing: url={redacted_url}, transport={transport:?}, tracks={total}"
-                );
-                Box::new(RtspMuxerStreamSink {
-                    pp_log,
-                    name: stream.name,
-                    shared: shared.clone(),
-                    stream_index: index,
-                    input_time_base: stream.input_time_base,
-                    output_time_base: output_time_bases[index],
-                    kind: stream.kind,
-                    timeline: Timeline::default(),
-                    done: false,
-                })
-            })
-            .collect();
-        Ok(self.id.sinks(sinks))
+        Ok(open_tracks::<Self>(
+            self.id,
+            self.output,
+            self.streams,
+            TrackOptions {
+                // Deliberately not finalizing on `Stop` — see this type's own
+                // docs on why a live publish differs from a file here.
+                finish_on_stop: false,
+                destination: Some(self.redacted_url),
+                // Each track rebases onto its own last output, not onto a
+                // shared one.
+                timeline: Some(|| Box::new(Timeline::default())),
+            },
+        ))
     }
 
     /// The publish address with any credentials removed — what to log, and
@@ -392,188 +333,25 @@ impl Timeline {
     }
 }
 
-struct MuxerState {
-    output: ffmpeg::format::context::Output,
-    /// How many tracks have reported `Eos` — the trailer is written once
-    /// this reaches [`RtspMuxerShared::total`], not on the first one (see
-    /// [`RtspMuxer::open`]'s own docs for why).
-    done: usize,
-    /// Set once the trailer has been written. Each
-    /// [`RtspMuxerStreamSink`]'s own `done` flag already prevents
-    /// double-counting *that* track; this additionally guards
-    /// [`RtspMuxerShared::write_packet`] against writing into a session
-    /// already torn down.
-    finished: bool,
-}
-
-/// Shared between every [`RtspMuxerStreamSink`] [`RtspMuxer::open`] hands out
-/// for the same session — one lock around the whole
-/// [`ffmpeg::format::context::Output`] so concurrent tracks never interleave
-/// two writes against it (see [`RtspMuxer::open`]'s own docs).
-struct RtspMuxerShared {
-    state: Mutex<MuxerState>,
-    total: usize,
-    redacted_url: Arc<str>,
-}
-
-impl RtspMuxerShared {
-    /// Writes a packet whose stream index and timestamps its caller has
-    /// already settled — the rebase is per track, so it happens in the sink
-    /// rather than here (see [`RtspMuxerStreamSink::stamp`]).
-    fn write_packet(&self, packet: &mut ffmpeg::Packet) -> Result<()> {
-        let mut state = self.state.lock().unwrap();
-        if state.finished {
-            return Ok(());
-        }
-        packet
-            .write_interleaved(&mut state.output)
-            .map_err(RtspMuxerError::from)?;
-        Ok(())
+impl TrackTimeline for Timeline {
+    fn stamp(&mut self, packet: &mut ffmpeg::Packet) {
+        Timeline::stamp(self, packet);
     }
 
-    /// One track reporting `Eos` — writes the trailer exactly once, only
-    /// after every track has called this. `true` when this call was the one
-    /// that ended the session.
-    fn finish_track(&self) -> Result<bool> {
-        let mut state = self.state.lock().unwrap();
-        state.done += 1;
-        if state.finished || state.done < self.total {
-            return Ok(false);
-        }
-        state.finished = true;
-        state.output.write_trailer().map_err(RtspMuxerError::from)?;
-        Ok(true)
+    fn seeked(&mut self) {
+        self.pending_seek = true;
     }
 }
 
-/// One track's own [`Sink`] — a lightweight handle sharing a
-/// `RtspMuxerShared` with every other track [`RtspMuxer::open`] returned
-/// alongside it, plus the timestamp state that makes *this* track's
-/// published timeline monotonic across an upstream seek.
-pub struct RtspMuxerStreamSink {
-    pp_log: PpLog,
-    name: Arc<str>,
-    shared: Arc<RtspMuxerShared>,
-    stream_index: usize,
-    input_time_base: ffmpeg::Rational,
-    /// What the muxer announced for this track, which is not necessarily
-    /// what it was registered with — captured in [`RtspMuxer::open`] once
-    /// the header had settled it.
-    output_time_base: ffmpeg::Rational,
-    /// The medium this track was registered for; `None` for one this crate
-    /// does not model, which then declares nothing.
-    kind: Option<MediaKind>,
-    /// This track's published timestamps. Per track on purpose: each
-    /// rebases onto its own last output, not onto a shared one.
-    timeline: Timeline,
-    /// Set once this sink has contributed to
-    /// [`RtspMuxerShared::finish_track`], so a second `Eos` cannot count
-    /// this track twice.
-    done: bool,
-}
+impl Muxer for RtspMuxer {
+    const ELEMENT_TYPE: ElementType = ElementType::RtspMuxer;
 
-impl RtspMuxerStreamSink {
-    /// The publish address with any credentials removed — safe to log or
-    /// show. See [`RtspMuxer`]'s own docs.
-    pub fn redacted_url(&self) -> &str {
-        &self.shared.redacted_url
+    fn ffmpeg_error(error: ffmpeg::Error) -> Error {
+        RtspMuxerError::Ffmpeg(error).into()
     }
 
-    fn finish(&mut self) -> Result<()> {
-        if self.done {
-            return Ok(());
-        }
-        self.done = true;
-        let closed = self
-            .shared
-            .finish_track()
-            .inspect_err(|error| pp_error!(self, "write_trailer failed: {error}"))?;
-        if closed {
-            pp_info!(self, "publish closed: url={}", self.shared.redacted_url);
-        }
-        Ok(())
-    }
-}
-
-impl Element for RtspMuxerStreamSink {
-    fn name(&self) -> Arc<str> {
-        self.name.clone()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::RtspMuxer
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
-    }
-}
-
-impl Sink for RtspMuxerStreamSink {
-    /// Republishes encoded data as-is; it has no encoder of its own. The
-    /// medium is this track's own, so a video packet pad wired into the
-    /// audio track is refused rather than announced as something it is not.
-    fn input_contract(&self) -> InputContract {
-        match self.kind {
-            Some(kind) => InputContract::Fixed(PortContract::packet(kind)),
-            None => InputContract::Unknown,
-        }
-    }
-
-    fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
-        match buf {
-            MediaBuffer::Packet(packet) => {
-                // Cloned, not mutated in place — `Arc<Packet>` may be shared
-                // with another branch off the same `Tee`, which must not see
-                // this track's rescaled timestamps or stream index.
-                let mut packet = (*packet).clone();
-                packet.rescale_ts(self.input_time_base, self.output_time_base);
-                self.timeline.stamp(&mut packet);
-                packet.set_stream(self.stream_index);
-                packet.set_position(-1);
-                self.shared
-                    .write_packet(&mut packet)
-                    .inspect_err(|error| pp_error!(self, "write_interleaved failed: {error}"))
-            }
-            MediaBuffer::Eos => self.finish(),
-            MediaBuffer::Video(_) => {
-                pp_error!(self, "unsupported buffer: Video");
-                Err(RtspMuxerError::UnsupportedBuffer("Video").into())
-            }
-            MediaBuffer::Audio(_) => {
-                pp_error!(self, "unsupported buffer: Audio");
-                Err(RtspMuxerError::UnsupportedBuffer("Audio").into())
-            }
-        }
-    }
-
-    fn control(&mut self, msg: ControlMsg) -> Result<()> {
-        match msg {
-            ControlMsg::Seek(_) => self.timeline.pending_seek = true,
-            // Deliberately not finalizing on `Stop` — see `RtspMuxer`'s own
-            // docs on why a live publish differs from a file here.
-            ControlMsg::Pause
-            | ControlMsg::Resume
-            | ControlMsg::Stop
-            | ControlMsg::Flush
-            | ControlMsg::CheckSeek(_)
-            | ControlMsg::Preroll(_) => {}
-        }
-        Ok(())
-    }
-}
-
-impl Drop for RtspMuxerStreamSink {
-    fn drop(&mut self) {
-        pp_info!(
-            self,
-            "dropped: releasing this track of the publisher session to {}",
-            self.shared.redacted_url
-        );
+    fn unsupported_buffer(kind: &'static str) -> Error {
+        RtspMuxerError::UnsupportedBuffer(kind).into()
     }
 }
 

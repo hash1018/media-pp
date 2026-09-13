@@ -462,7 +462,7 @@ impl Sink for SegmentedTrackSink {
             }
             MediaBuffer::Eos => self.group.finish_eos(self.track_index),
             // The `FileMuxer` each rotated segment wraps already rejects
-            // this — matching its own `FileMuxerStreamSink::consume` here
+            // this — matching its own track sinks' `consume` here
             // instead of silently no-op'ing keeps that protection visible
             // through the rotation wrapper instead of swallowing it.
             other => Err(FileMuxerError::UnsupportedBuffer(other.kind()).into()),

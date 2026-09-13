@@ -25,15 +25,11 @@ mod whisper_transcriber;
 
 pub use app_sink::AppSink;
 pub use frame_counter::FrameCounter;
-pub use muxer::{
-    FileMuxer, FileMuxerError, FileMuxerStreamSink, SegmentPolicy, SegmentedFileMuxer,
-};
-pub use muxer::{
-    HlsMode, HlsMuxer, HlsMuxerError, HlsMuxerStreamSink, HlsOptions, HlsSegmentFormat,
-};
+pub use muxer::{FileMuxer, FileMuxerError, SegmentPolicy, SegmentedFileMuxer};
+pub use muxer::{HlsMode, HlsMuxer, HlsMuxerError, HlsOptions, HlsSegmentFormat};
 pub use muxer::{MuxerSinks, MuxerTrack, MuxerTrackError};
-pub use muxer::{RtmpMuxer, RtmpMuxerError, RtmpMuxerStreamSink};
-pub use muxer::{RtspMuxer, RtspMuxerError, RtspMuxerStreamSink};
+pub use muxer::{RtmpMuxer, RtmpMuxerError};
+pub use muxer::{RtspMuxer, RtspMuxerError};
 #[cfg(feature = "ort")]
 pub use ort_detector::{COCO_CLASS_LABELS, Detection, OrtDetector, OrtDetectorError};
 pub use packet_counter::PacketCounter;
