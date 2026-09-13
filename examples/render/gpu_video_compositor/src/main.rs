@@ -199,8 +199,8 @@ mod windows_example {
             },
         )?;
         let mut muxer = FileMuxer::create(path)?;
-        muxer.add_stream("video", encoder.parameters(), time_base)?;
-        let muxer_sink = muxer.open()?.pop().expect("one video stream");
+        let track = muxer.add_stream("video", encoder.parameters(), time_base)?;
+        let muxer_sink = muxer.open()?.take(track)?;
 
         let output_pipeline = Pipeline::new("composited-output", compositor, |source, ctx| {
             let renderer = render_common::d3d11_window_renderer(
@@ -475,8 +475,8 @@ mod linux_example {
             },
         )?;
         let mut muxer = FileMuxer::create(path)?;
-        muxer.add_stream("video", encoder.parameters(), time_base)?;
-        let muxer_sink = muxer.open()?.pop().expect("one video stream");
+        let track = muxer.add_stream("video", encoder.parameters(), time_base)?;
+        let muxer_sink = muxer.open()?.take(track)?;
 
         let output_pipeline = Pipeline::new("composited-output", compositor, |source, ctx| {
             let renderer = render_common::cuda_window_renderer(

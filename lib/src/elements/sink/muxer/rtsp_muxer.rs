@@ -8,6 +8,8 @@ use crate::pp_log::{PpLog, pp_error, pp_info};
 use ffmpeg_next::{self as ffmpeg, ffi};
 use thiserror::Error as ThisError;
 
+use super::tracks::{MuxerId, MuxerSinks, MuxerTrack};
+
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, PortContract},
@@ -110,15 +112,16 @@ struct PendingStream {
 /// # let video_time_base = ffmpeg::Rational(1, 90_000);
 /// # let audio_time_base = ffmpeg::Rational(1, 48_000);
 /// let mut muxer = RtspMuxer::create("rtsp://127.0.0.1:8554/stream", RtspTransport::Tcp)?;
-/// muxer.add_stream("video", video_params, video_time_base)?;
-/// muxer.add_stream("audio", audio_params, audio_time_base)?;
+/// let video = muxer.add_stream("video", video_params, video_time_base)?;
+/// let audio = muxer.add_stream("audio", audio_params, audio_time_base)?;
 /// let mut sinks = muxer.open()?; // performs the RTSP handshake
-/// let audio_sink = sinks.pop().unwrap();
-/// let video_sink = sinks.pop().unwrap();
+/// let video_sink = sinks.take(video)?;
+/// let audio_sink = sinks.take(audio)?;
 /// # Ok(())
 /// # }
 /// ```
 pub struct RtspMuxer {
+    id: MuxerId,
     output: ffmpeg::format::context::Output,
     streams: Vec<PendingStream>,
     transport: RtspTransport,
@@ -137,6 +140,7 @@ impl RtspMuxer {
         let url = url.as_ref();
         let output = alloc_output(url)?;
         Ok(Self {
+            id: MuxerId::next(),
             output,
             streams: Vec::new(),
             transport,
@@ -151,15 +155,14 @@ impl RtspMuxer {
     /// tracks apart in logs and [`crate::bus::BusEvent`]s, such as
     /// `"video"`/`"audio"`.
     ///
-    /// Add streams in the same order the caller will read
-    /// [`RtspMuxer::open`]'s returned `Vec` — index 0 is whichever was
-    /// added first.
+    /// The returned [`MuxerTrack`] is how this track's sink is taken out of
+    /// what [`RtspMuxer::open`] returns.
     pub fn add_stream(
         &mut self,
         name: impl Into<String>,
         parameters: ffmpeg::codec::Parameters,
         time_base: ffmpeg::Rational,
-    ) -> Result<()> {
+    ) -> Result<MuxerTrack> {
         let kind = MediaKind::packet_for(parameters.medium());
         let mut stream = self
             .output
@@ -176,18 +179,20 @@ impl RtspMuxer {
         }
         stream.set_time_base(time_base);
 
+        let track = self.id.track(self.streams.len());
         self.streams.push(PendingStream {
             name: name.into().into(),
             input_time_base: time_base,
             kind,
         });
-        Ok(())
+        Ok(track)
     }
 
     /// Performs the `ANNOUNCE`/`SETUP`/`RECORD` handshake — every
     /// [`RtspMuxer::add_stream`] call this session will get must already
     /// have happened, since the SDP it announces describes them all — and
-    /// returns one [`Sink`] per track, in the order they were added.
+    /// returns one [`Sink`] per track, each taken out by the [`MuxerTrack`]
+    /// its [`RtspMuxer::add_stream`] returned.
     ///
     /// All returned `Sink`s write through the same session behind a shared
     /// lock: independently-threaded branches arrive concurrently, and
@@ -195,7 +200,7 @@ impl RtspMuxer {
     /// to call from two threads against one output at once. They also share
     /// one trailer, written once every track has reported `Eos` — not on
     /// whichever finishes first, which would cut the others off mid-stream.
-    pub fn open(mut self) -> Result<Vec<Box<dyn Sink>>> {
+    pub fn open(mut self) -> Result<MuxerSinks> {
         let mut options = ffmpeg::Dictionary::new();
         options.set("rtsp_transport", self.transport.as_ffmpeg_option());
         self.output
@@ -226,7 +231,7 @@ impl RtspMuxer {
             total,
             redacted_url: redacted_url.clone(),
         });
-        Ok(self
+        let sinks = self
             .streams
             .into_iter()
             .enumerate()
@@ -248,7 +253,8 @@ impl RtspMuxer {
                     done: false,
                 })
             })
-            .collect())
+            .collect();
+        Ok(self.id.sinks(sinks))
     }
 
     /// The publish address with any credentials removed — what to log, and
@@ -594,7 +600,7 @@ mod tests {
     fn creating_does_not_need_a_server() {
         let mut muxer = RtspMuxer::create("rtsp://127.0.0.1:1/stream", RtspTransport::Tcp)
             .expect("allocating an RTSP muxer must not connect");
-        muxer
+        let _video = muxer
             .add_stream(
                 "video",
                 ffmpeg::codec::Parameters::new(),

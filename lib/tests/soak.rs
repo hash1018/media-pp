@@ -197,14 +197,14 @@ fn record_once(path: &Path, teardown: Teardown) {
     let time_base = source.time_base();
     let encoder = encoder("encoder", time_base, 30);
     let mut muxer = FileMuxer::create(path).expect("create the recording");
-    muxer
+    let video = muxer
         .add_stream("video", encoder.parameters(), time_base)
         .expect("add the video track");
     let sink = muxer
         .open()
         .expect("open the recording")
-        .pop()
-        .expect("one track");
+        .take(video)
+        .expect("the muxer's own track");
 
     let pipeline = Pipeline::new("soak-record", source, |source, ctx| {
         let branch = ctx
@@ -613,12 +613,12 @@ fn segment_rotation_does_not_grow_process_memory_or_hold_files() {
         SegmentPolicy::Duration(Duration::from_secs(1)),
         move |index| segment_dir.join(format!("segment_{index:04}.mp4")),
     );
-    muxer.add_stream("video", encoder.parameters(), time_base);
+    let video = muxer.add_stream("video", encoder.parameters(), time_base);
     let sink = muxer
         .open()
         .expect("open the first segment")
-        .pop()
-        .expect("one track");
+        .take(video)
+        .expect("the muxer's own track");
 
     let pipeline = Pipeline::new("soak-segments", source, |source, ctx| {
         let branch = ctx

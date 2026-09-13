@@ -62,8 +62,8 @@ use crate::{
     elements::{
         AppSourceError, AudioCompressorError, AudioGateError, AudioLimiterError, AudioMixerError,
         AudioResamplerError, AudioVolumeError, FileDemuxError, FileMuxerError, HlsMuxerError,
-        PacerError, RtmpMuxerError, RtspSourceError, SwAudioEncoderError, SwChromaKeyError,
-        SwDecoderError, SwEncoderError, SwScalerError, SwVideoCompositorError,
+        MuxerTrackError, PacerError, RtmpMuxerError, RtspSourceError, SwAudioEncoderError,
+        SwChromaKeyError, SwDecoderError, SwEncoderError, SwScalerError, SwVideoCompositorError,
         TestAudioSourceError, TestVideoSourceError, VideoSynchronizerError,
     },
     graph::GraphError,
@@ -325,6 +325,10 @@ pub enum Error {
     /// Publishing to an RTMP server failed.
     #[error(transparent)]
     RtmpMuxerError(#[from] RtmpMuxerError),
+
+    /// A muxer's sinks were asked for a track that is not one of theirs.
+    #[error(transparent)]
+    MuxerTrackError(#[from] MuxerTrackError),
 
     /// A D3D12 renderer operation failed.
     #[cfg(all(target_os = "windows", feature = "d3d12"))]

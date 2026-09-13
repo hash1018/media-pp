@@ -205,8 +205,8 @@ mod windows_example {
             },
         )?;
         let mut muxer = FileMuxer::create(&path)?;
-        muxer.add_stream("video", encoder.parameters(), time_base)?;
-        let muxer_sink = muxer.open()?.pop().expect("exactly one stream was added");
+        let track = muxer.add_stream("video", encoder.parameters(), time_base)?;
+        let muxer_sink = muxer.open()?.take(track)?;
 
         let record_pipeline = Pipeline::new("record", compositor, |source, ctx| {
             let download = D3d11Download::new(

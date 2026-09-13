@@ -71,8 +71,8 @@ mod example {
             delete_old_segments: true,
         };
         let mut muxer = HlsMuxer::create(hls_options)?;
-        muxer.add_stream("video", encoder.parameters(), time_base)?;
-        let muxer_sink = muxer.open()?.pop().expect("one stream was registered");
+        let track = muxer.add_stream("video", encoder.parameters(), time_base)?;
+        let muxer_sink = muxer.open()?.take(track)?;
 
         let pipeline = Pipeline::new("hls", source, |source, context| {
             let branch = context.branch().pipe(encoder).to(muxer_sink)?;

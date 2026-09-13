@@ -11,6 +11,8 @@ use crate::pp_log::{PpLog, pp_error};
 use ffmpeg_next as ffmpeg;
 use thiserror::Error as ThisError;
 
+use super::tracks::{MuxerId, MuxerSinks, MuxerTrack};
+
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, PortContract},
@@ -327,6 +329,7 @@ struct PendingStream {
 /// share one output lock and finalize the playlist only after every track
 /// reports `Eos` or [`ControlMsg::Stop`].
 pub struct HlsMuxer {
+    id: MuxerId,
     output: ffmpeg::format::context::Output,
     streams: Vec<PendingStream>,
     options: HlsOptions,
@@ -339,6 +342,7 @@ impl HlsMuxer {
         options.validate()?;
         let output = allocate_output(&options)?;
         Ok(Self {
+            id: MuxerId::next(),
             output,
             streams: Vec::new(),
             options,
@@ -347,12 +351,15 @@ impl HlsMuxer {
 
     /// Registers one encoded packet stream. `time_base` must match the
     /// timestamps carried by packets arriving at the returned track sink.
+    ///
+    /// The returned [`MuxerTrack`] is how this track's sink is taken out of
+    /// what [`HlsMuxer::open`] returns.
     pub fn add_stream(
         &mut self,
         name: impl Into<String>,
         parameters: ffmpeg::codec::Parameters,
         time_base: ffmpeg::Rational,
-    ) -> Result<()> {
+    ) -> Result<MuxerTrack> {
         let mut stream = self
             .output
             .add_stream(parameters.id())
@@ -360,18 +367,20 @@ impl HlsMuxer {
         let kind = MediaKind::packet_for(parameters.medium());
         stream.set_time_base(time_base);
         stream.set_parameters(parameters);
+        let track = self.id.track(self.streams.len());
         self.streams.push(PendingStream {
             name: name.into().into(),
             input_time_base: time_base,
             kind,
         });
-        Ok(())
+        Ok(track)
     }
 
-    /// Writes the HLS header and returns one sink per stream, in registration
-    /// order. The playlist is finalized only after every returned sink has
-    /// received `Eos` or [`ControlMsg::Stop`].
-    pub fn open(mut self) -> Result<Vec<Box<dyn Sink>>> {
+    /// Writes the HLS header and returns one sink per stream, each taken
+    /// out by the [`MuxerTrack`] its [`HlsMuxer::add_stream`] returned. The
+    /// playlist is finalized only after every returned sink has received
+    /// `Eos` or [`ControlMsg::Stop`].
+    pub fn open(mut self) -> Result<MuxerSinks> {
         if self.streams.is_empty() {
             return Err(HlsMuxerError::NoStreams.into());
         }
@@ -390,22 +399,23 @@ impl HlsMuxer {
             }),
             total,
         });
-        Ok(self
-            .streams
-            .into_iter()
-            .enumerate()
-            .map(|(index, stream)| -> Box<dyn Sink> {
-                Box::new(HlsMuxerStreamSink {
-                    pp_log: element_pp_log(ElementType::HlsMuxer, &stream.name, None),
-                    name: stream.name,
-                    shared: shared.clone(),
-                    stream_index: index,
-                    input_time_base: stream.input_time_base,
-                    kind: stream.kind,
-                    done: false,
+        Ok(self.id.sinks(
+            self.streams
+                .into_iter()
+                .enumerate()
+                .map(|(index, stream)| -> Box<dyn Sink> {
+                    Box::new(HlsMuxerStreamSink {
+                        pp_log: element_pp_log(ElementType::HlsMuxer, &stream.name, None),
+                        name: stream.name,
+                        shared: shared.clone(),
+                        stream_index: index,
+                        input_time_base: stream.input_time_base,
+                        kind: stream.kind,
+                        done: false,
+                    })
                 })
-            })
-            .collect())
+                .collect(),
+        ))
     }
 }
 
@@ -589,7 +599,7 @@ mod tests {
     fn encode_silence(options: HlsOptions, ticks: i64) {
         let mut encoder = open_aac_encoder(48_000, 1);
         let mut muxer = HlsMuxer::create(options).expect("HLS muxer must open");
-        muxer
+        let audio = muxer
             .add_stream(
                 "audio",
                 encoder.parameters(),
@@ -597,7 +607,7 @@ mod tests {
             )
             .expect("add_stream must succeed");
         let mut sinks = muxer.open().expect("HLS header must be written");
-        encoder.src_pads()[0].link(sinks.pop().unwrap());
+        encoder.src_pads()[0].link(sinks.take(audio).expect("the muxer's own track"));
 
         for tick in 0..ticks {
             encoder
@@ -765,14 +775,14 @@ mod tests {
         let mut encoder_a = open_aac_encoder(48_000, 1);
         let mut encoder_b = open_aac_encoder(48_000, 1);
         let mut muxer = HlsMuxer::create(options).unwrap();
-        muxer
+        let a = muxer
             .add_stream(
                 "audio-a",
                 encoder_a.parameters(),
                 ffmpeg::Rational::new(1, 48_000),
             )
             .unwrap();
-        muxer
+        let b = muxer
             .add_stream(
                 "audio-b",
                 encoder_b.parameters(),
@@ -780,8 +790,8 @@ mod tests {
             )
             .unwrap();
         let mut sinks = muxer.open().unwrap();
-        let sink_b = sinks.pop().unwrap();
-        let sink_a = sinks.pop().unwrap();
+        let sink_b = sinks.take(b).unwrap();
+        let sink_a = sinks.take(a).unwrap();
         encoder_a.src_pads()[0].link(sink_a);
         encoder_b.src_pads()[0].link(sink_b);
 

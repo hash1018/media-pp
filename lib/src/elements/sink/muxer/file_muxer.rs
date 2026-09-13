@@ -7,6 +7,8 @@ use crate::pp_log::{PpLog, pp_error};
 use ffmpeg_next as ffmpeg;
 use thiserror::Error as ThisError;
 
+use super::tracks::{MuxerId, MuxerSinks, MuxerTrack};
+
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, PortContract},
@@ -84,15 +86,16 @@ struct PendingStream {
 /// #     bit_rate: 128_000,
 /// # })?;
 /// let mut muxer = FileMuxer::create("out.mp4")?;
-/// muxer.add_stream("video", video_encoder.parameters(), video_time_base)?;
-/// muxer.add_stream("audio", audio_encoder.parameters(), audio_time_base)?;
+/// let video = muxer.add_stream("video", video_encoder.parameters(), video_time_base)?;
+/// let audio = muxer.add_stream("audio", audio_encoder.parameters(), audio_time_base)?;
 /// let mut sinks = muxer.open()?; // writes the header
-/// let audio_sink = sinks.pop().unwrap();
-/// let video_sink = sinks.pop().unwrap();
+/// let video_sink = sinks.take(video)?;
+/// let audio_sink = sinks.take(audio)?;
 /// # Ok(())
 /// # }
 /// ```
 pub struct FileMuxer {
+    id: MuxerId,
     output: ffmpeg::format::context::Output,
     streams: Vec<PendingStream>,
 }
@@ -103,6 +106,7 @@ impl FileMuxer {
     pub fn create(path: impl AsRef<Path>) -> Result<Self> {
         let output = ffmpeg::format::output(&path).map_err(FileMuxerError::from)?;
         Ok(Self {
+            id: MuxerId::next(),
             output,
             streams: Vec::new(),
         })
@@ -118,15 +122,14 @@ impl FileMuxer {
     /// tells multiple tracks apart in logs/[`crate::bus::BusEvent`]s,
     /// e.g. `"video"`/`"audio"`.
     ///
-    /// Add streams in the same order the caller will treat
-    /// [`FileMuxer::open`]'s returned `Vec` — index 0 is whichever stream
-    /// was added first, and so on.
+    /// The returned [`MuxerTrack`] is how this track's sink is taken out of
+    /// what [`FileMuxer::open`] returns.
     pub fn add_stream(
         &mut self,
         name: impl Into<String>,
         parameters: ffmpeg::codec::Parameters,
         time_base: ffmpeg::Rational,
-    ) -> Result<()> {
+    ) -> Result<MuxerTrack> {
         let mut stream = self
             .output
             .add_stream(parameters.id())
@@ -134,18 +137,19 @@ impl FileMuxer {
         let kind = MediaKind::packet_for(parameters.medium());
         stream.set_time_base(time_base);
         stream.set_parameters(parameters);
+        let track = self.id.track(self.streams.len());
         self.streams.push(PendingStream {
             name: name.into().into(),
             input_time_base: time_base,
             kind,
         });
-        Ok(())
+        Ok(track)
     }
 
     /// Writes the container header — every [`FileMuxer::add_stream`] call
     /// this file will ever get must already have happened — and returns
-    /// one [`Sink`] per track, in the order [`FileMuxer::add_stream`] added
-    /// them.
+    /// one [`Sink`] per track, each taken out by the [`MuxerTrack`] its
+    /// [`FileMuxer::add_stream`] returned.
     ///
     /// All returned `Sink`s write into the same underlying file behind a
     /// shared lock: packets from independently-threaded branches (e.g. a
@@ -170,7 +174,7 @@ impl FileMuxer {
     /// gets written once every track has actually reported done, so
     /// stopping only one pipeline while another keeps running leaves the
     /// file un-finalized (and unplayable) until the rest catch up too.
-    pub fn open(mut self) -> Result<Vec<Box<dyn Sink>>> {
+    pub fn open(mut self) -> Result<MuxerSinks> {
         self.output.write_header().map_err(FileMuxerError::from)?;
         let total = self.streams.len();
         let shared = Arc::new(FileMuxerShared {
@@ -181,22 +185,23 @@ impl FileMuxer {
             }),
             total,
         });
-        Ok(self
-            .streams
-            .into_iter()
-            .enumerate()
-            .map(|(index, stream)| -> Box<dyn Sink> {
-                Box::new(FileMuxerStreamSink {
-                    pp_log: element_pp_log(ElementType::FileMuxer, &stream.name, None),
-                    name: stream.name,
-                    shared: shared.clone(),
-                    stream_index: index,
-                    input_time_base: stream.input_time_base,
-                    kind: stream.kind,
-                    done: false,
+        Ok(self.id.sinks(
+            self.streams
+                .into_iter()
+                .enumerate()
+                .map(|(index, stream)| -> Box<dyn Sink> {
+                    Box::new(FileMuxerStreamSink {
+                        pp_log: element_pp_log(ElementType::FileMuxer, &stream.name, None),
+                        name: stream.name,
+                        shared: shared.clone(),
+                        stream_index: index,
+                        input_time_base: stream.input_time_base,
+                        kind: stream.kind,
+                        done: false,
+                    })
                 })
-            })
-            .collect())
+                .collect(),
+        ))
     }
 }
 
@@ -425,14 +430,18 @@ mod tests {
             std::process::id()
         ));
         let mut muxer = FileMuxer::create(&path).expect("create muxer");
-        muxer
+        let audio = muxer
             .add_stream(
                 "audio",
                 encoder.parameters(),
                 ffmpeg::Rational::new(1, 48000),
             )
             .expect("add stream");
-        let mut sink = muxer.open().expect("open muxer").pop().unwrap();
+        let mut sink = muxer
+            .open()
+            .expect("open muxer")
+            .take(audio)
+            .expect("the muxer's own track");
         let context = Arc::new(SeekCheckContext::new());
 
         sink.control(ControlMsg::CheckSeek(Arc::clone(&context)))
@@ -459,7 +468,7 @@ mod tests {
         let path = dir.join(format!("file_muxer_single_test_{}.mp4", std::process::id()));
 
         let mut muxer = FileMuxer::create(&path).expect("the muxer must open");
-        muxer
+        let audio = muxer
             .add_stream(
                 "audio",
                 encoder.parameters(),
@@ -467,8 +476,7 @@ mod tests {
             )
             .expect("add_stream must succeed");
         let mut sinks = muxer.open().expect("open must write the header");
-        assert_eq!(sinks.len(), 1);
-        encoder.src_pads()[0].link(sinks.pop().unwrap());
+        encoder.src_pads()[0].link(sinks.take(audio).expect("the muxer's own track"));
 
         for tick in 0..20i64 {
             encoder
@@ -508,7 +516,8 @@ mod tests {
         let path = dir.join(format!("file_muxer_drop_test_{}.mp4", std::process::id()));
 
         let mut muxer = FileMuxer::create(&path).expect("the muxer must open");
-        muxer
+        // Never taken: its sink goes down with the rest, untouched.
+        let _audio = muxer
             .add_stream(
                 "audio",
                 encoder.parameters(),
@@ -542,16 +551,15 @@ mod tests {
         let path = dir.join(format!("file_muxer_multi_test_{}.mp4", std::process::id()));
 
         let mut muxer = FileMuxer::create(&path).expect("the muxer must open");
-        muxer
+        let a = muxer
             .add_stream("a", encoder_a.parameters(), ffmpeg::Rational::new(1, 48000))
             .expect("add_stream a");
-        muxer
+        let b = muxer
             .add_stream("b", encoder_b.parameters(), ffmpeg::Rational::new(1, 44100))
             .expect("add_stream b");
         let mut sinks = muxer.open().expect("open must write the header");
-        assert_eq!(sinks.len(), 2);
-        let sink_b = sinks.pop().unwrap();
-        let sink_a = sinks.pop().unwrap();
+        let sink_b = sinks.take(b).expect("the muxer's own track");
+        let sink_a = sinks.take(a).expect("the muxer's own track");
         encoder_a.src_pads()[0].link(sink_a);
         encoder_b.src_pads()[0].link(sink_b);
 
@@ -628,7 +636,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
 
         let mut muxer = FileMuxer::create(&path).expect("the muxer must open a .mkv path");
-        muxer
+        let audio = muxer
             .add_stream(
                 "audio",
                 encoder.parameters(),
@@ -636,7 +644,7 @@ mod tests {
             )
             .expect("add_stream must succeed");
         let mut sinks = muxer.open().expect("open must write the header");
-        encoder.src_pads()[0].link(sinks.pop().expect("exactly one stream was added"));
+        encoder.src_pads()[0].link(sinks.take(audio).expect("the muxer's own track"));
 
         for tick in 0..20i64 {
             encoder
@@ -705,7 +713,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
 
         let mut muxer = FileMuxer::create(&path).expect("the muxer must open");
-        muxer
+        let _video = muxer
             .add_stream("video", encoder.parameters(), time_base)
             .expect("add_stream must succeed");
         // `open` is the whole assertion: it is `avformat_write_header`, and
@@ -748,7 +756,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
 
         let mut muxer = FileMuxer::create(&path).expect("the muxer must open");
-        muxer
+        let audio = muxer
             .add_stream(
                 "audio",
                 encoder.parameters(),
@@ -758,7 +766,7 @@ mod tests {
         let mut sinks = muxer
             .open()
             .expect("Matroska must accept an Opus track's header");
-        encoder.src_pads()[0].link(sinks.pop().expect("exactly one stream was added"));
+        encoder.src_pads()[0].link(sinks.take(audio).expect("the muxer's own track"));
 
         for tick in 0..20i64 {
             encoder
@@ -835,14 +843,14 @@ mod tests {
         let time_base = demuxer.stream_time_base(video).expect("video time base");
 
         let mut muxer = FileMuxer::create(&path).expect("create the remux");
-        muxer
+        let track = muxer
             .add_stream("video", parameters, time_base)
             .expect("add the video stream");
         let sink = muxer
             .open()
             .expect("write the header")
-            .pop()
-            .expect("one stream was added");
+            .take(track)
+            .expect("the muxer's own track");
 
         let pipeline = Pipeline::new("remux", demuxer, move |source, context| {
             let branch = context.branch().to(sink)?;
@@ -1017,10 +1025,10 @@ mod tests {
         let audio_encoder = open_aac_encoder(48_000, 2);
 
         let mut muxer = FileMuxer::create(&path).expect("create the output");
-        muxer
+        let video_track = muxer
             .add_stream("video", video_encoder.parameters(), video_time_base)
             .expect("add the video stream");
-        muxer
+        let audio_track = muxer
             .add_stream(
                 "audio",
                 audio_encoder.parameters(),
@@ -1028,8 +1036,8 @@ mod tests {
             )
             .expect("add the audio stream");
         let mut sinks = muxer.open().expect("write the header");
-        let audio_sink = sinks.pop().expect("audio was added second");
-        let video_sink = sinks.pop().expect("video was added first");
+        let video_sink = sinks.take(video_track).expect("the muxer's own track");
+        let audio_sink = sinks.take(audio_track).expect("the muxer's own track");
 
         let scaler = crate::elements::SwScaler::new(
             "to-yuv",
@@ -1142,13 +1150,13 @@ mod tests {
         // has no reason to share the video's or the audio's.
         let text_tb = ffmpeg::Rational::new(1, 1000);
         let mut muxer = FileMuxer::create(&path).expect("the muxer must open");
-        muxer
+        let video_track = muxer
             .add_stream("video", video_params, video_tb)
             .expect("add_stream video");
-        muxer
+        let audio_track = muxer
             .add_stream("audio", audio_params, audio_tb)
             .expect("add_stream audio");
-        muxer
+        let text_track = muxer
             .add_stream(
                 "text",
                 crate::subtitle::Codec::MovText.parameters(),
@@ -1156,10 +1164,11 @@ mod tests {
             )
             .expect("add_stream text");
         let mut sinks = muxer.open().expect("open must write the header");
-        assert_eq!(sinks.len(), 3);
-        let mut text_sink = sinks.pop().unwrap();
-        let mut audio_sink = sinks.pop().unwrap();
-        let mut video_sink = sinks.pop().unwrap();
+        // Taken in neither the order they were added nor its reverse: which
+        // sink is which is the track's to say, not the position's.
+        let mut audio_sink = sinks.take(audio_track).expect("the muxer's own track");
+        let mut text_sink = sinks.take(text_track).expect("the muxer's own track");
+        let mut video_sink = sinks.take(video_track).expect("the muxer's own track");
 
         assert_eq!(
             text_sink.input_contract(),

@@ -12,6 +12,41 @@ compile error with no explanation.
 
 ### Breaking
 
+- **A muxer's sinks are taken by track, not by position.** Every muxer's
+  `add_stream` returns a `MuxerTrack`, and `open` returns `MuxerSinks`
+  instead of a `Vec<Box<dyn Sink>>`: each track's sink is taken out with the
+  track its `add_stream` returned. This applies to `FileMuxer`,
+  `SegmentedFileMuxer`, `HlsMuxer`, `RtmpMuxer` and `RtspMuxer` alike.
+
+  ```rust
+  // before
+  muxer.add_stream("video", video_params, video_time_base)?;
+  muxer.add_stream("audio", audio_params, audio_time_base)?;
+  let mut sinks = muxer.open()?;
+  let audio_sink = sinks.pop().expect("audio was added second");
+  let video_sink = sinks.pop().expect("video was added first");
+
+  // after
+  let video = muxer.add_stream("video", video_params, video_time_base)?;
+  let audio = muxer.add_stream("audio", audio_params, audio_time_base)?;
+  let mut sinks = muxer.open()?;
+  let video_sink = sinks.take(video)?;
+  let audio_sink = sinks.take(audio)?;
+  ```
+
+  The order of a `Vec` was the only thing saying which sink was which, so
+  every caller repeated the order it had added tracks in, and a track added
+  only sometimes — audio when the source has any — made that easy to get
+  wrong in a way that still compiled and sent one medium's packets to the
+  other's track. `SegmentedFileMuxer::add_stream` still cannot fail, and
+  returns the `MuxerTrack` directly.
+
+  `MuxerTrack` is neither `Clone` nor `Copy` and `take` consumes it, so a
+  sink cannot be taken twice. A track from a different muxer is refused with
+  `MuxerTrackError::ForeignTrack` (through `Error::MuxerTrackError`) rather
+  than a panic. `MuxerTrack` is `#[must_use]`: a track whose sink is never
+  taken never reports itself finished, and the output is never finalized.
+
 - **`CudaConverter` converts either way round, so its constructor is told
   which.** `CudaConverter::new(name, device, width, height)` becomes
   `CudaConverter::new(name, device, output, width, height)`; pass
@@ -89,9 +124,9 @@ compile error with no explanation.
 
   // after
   let mut muxer = RtspMuxer::create(url, RtspTransport::Tcp)?;
-  muxer.add_stream("video", params, time_base)?;   // and "audio", if there is one
-  let mut sinks = muxer.open()?;                   // the RTSP handshake happens here
-  let sink = sinks.pop().expect("one stream was registered");
+  let video = muxer.add_stream("video", params, time_base)?; // and "audio", if there is one
+  let mut sinks = muxer.open()?;                             // the RTSP handshake happens here
+  let sink = sinks.take(video)?;
   ```
 
   The element name moves from `open` to each `add_stream`, so the tracks are

@@ -362,15 +362,15 @@ fn build_fixture(
     )?;
 
     let mut muxer = FileMuxer::create(&path)?;
-    muxer.add_stream("video", video_encoder.parameters(), video_time_base)?;
-    muxer.add_stream(
+    let video_track = muxer.add_stream("video", video_encoder.parameters(), video_time_base)?;
+    let audio_track = muxer.add_stream(
         "audio",
         audio_encoder.parameters(),
         audio_encoder.time_base(),
     )?;
     let mut sinks = muxer.open()?;
-    let audio_sink = sinks.pop().expect("the audio stream was added second");
-    let video_sink = sinks.pop().expect("the video stream was added first");
+    let video_sink = sinks.take(video_track)?;
+    let audio_sink = sinks.take(audio_track)?;
 
     // The encoder takes YUV420P and the synthetic source does not produce it,
     // the same conversion `tee_recording` puts in front of its own encoder.

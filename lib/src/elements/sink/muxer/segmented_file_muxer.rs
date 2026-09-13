@@ -8,6 +8,7 @@ use crate::pp_log::{PpLog, pp_info};
 use ffmpeg_next as ffmpeg;
 
 use super::file_muxer::{FileMuxer, FileMuxerError};
+use super::tracks::{MuxerId, MuxerSinks, MuxerTrack};
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, PortContract},
@@ -95,13 +96,16 @@ struct StreamDef {
 ///     SegmentPolicy::Duration(Duration::from_secs(600)),
 ///     |index| PathBuf::from(format!("rec_{index:04}.mp4")),
 /// );
-/// muxer.add_stream("video", video_encoder.parameters(), video_time_base);
-/// muxer.add_stream("audio", audio_encoder.parameters(), audio_time_base);
+/// let video = muxer.add_stream("video", video_encoder.parameters(), video_time_base);
+/// let audio = muxer.add_stream("audio", audio_encoder.parameters(), audio_time_base);
 /// let mut sinks = muxer.open()?;
+/// let video_sink = sinks.take(video)?;
+/// let audio_sink = sinks.take(audio)?;
 /// # Ok(())
 /// # }
 /// ```
 pub struct SegmentedFileMuxer {
+    id: MuxerId,
     policy: SegmentPolicy,
     naming: Box<dyn FnMut(u64) -> PathBuf + Send>,
     streams: Vec<StreamDef>,
@@ -119,6 +123,7 @@ impl SegmentedFileMuxer {
         naming: impl FnMut(u64) -> PathBuf + Send + 'static,
     ) -> Self {
         Self {
+            id: MuxerId::next(),
             policy,
             naming: Box::new(naming),
             streams: Vec::new(),
@@ -126,9 +131,9 @@ impl SegmentedFileMuxer {
     }
 
     /// Registers one more track every segment file will hold — same
-    /// contract as [`FileMuxer::add_stream`] (same order rules, same
-    /// `name`/`parameters`/`time_base` meaning), except this can't fail:
-    /// nothing here touches ffmpeg yet, it's only recorded for
+    /// contract as [`FileMuxer::add_stream`] (same `name`/`parameters`/
+    /// `time_base` meaning, and the same [`MuxerTrack`] back), except this
+    /// can't fail: nothing here touches ffmpeg yet, it's only recorded for
     /// [`SegmentedFileMuxer::open`] (and every later rotation) to replay.
     ///
     /// Whichever stream's `parameters.medium()` is
@@ -140,19 +145,22 @@ impl SegmentedFileMuxer {
         name: impl Into<String>,
         parameters: ffmpeg::codec::Parameters,
         time_base: ffmpeg::Rational,
-    ) {
+    ) -> MuxerTrack {
         let is_video = parameters.medium() == ffmpeg::media::Type::Video;
+        let track = self.id.track(self.streams.len());
         self.streams.push(StreamDef {
             name: name.into().into(),
             parameters,
             time_base,
             is_video,
         });
+        track
     }
 
     /// Writes the first segment's header and returns one [`Sink`] per
-    /// track, in the order [`SegmentedFileMuxer::add_stream`] added them —
-    /// same shape as [`FileMuxer::open`]. All returned `Sink`s share one
+    /// track, each taken out by the [`MuxerTrack`]
+    /// [`SegmentedFileMuxer::add_stream`] returned — same shape as
+    /// [`FileMuxer::open`]. All returned `Sink`s share one
     /// rotation lock: a track's `consume` blocks while another track (on
     /// its own thread) is mid-rotation, same tradeoff [`FileMuxer`]'s own
     /// shared file lock already makes.
@@ -174,7 +182,7 @@ impl SegmentedFileMuxer {
     /// [`ControlMsg::Stop`] (see [`FileMuxer::open`]'s own docs) — a
     /// rotation mid-recording reuses that exact mechanism to close the
     /// outgoing segment before opening the next one.
-    pub fn open(mut self) -> Result<Vec<Box<dyn Sink>>> {
+    pub fn open(mut self) -> Result<MuxerSinks> {
         // Captured before `self.streams` moves into `GroupState` below —
         // the name and medium of each track, in order, for building every
         // `SegmentedTrackSink` afterward.
@@ -197,32 +205,40 @@ impl SegmentedFileMuxer {
                 segment_origin: None,
             }),
         });
-        Ok(tracks
-            .into_iter()
-            .enumerate()
-            .map(|(index, (name, kind))| -> Box<dyn Sink> {
-                Box::new(SegmentedTrackSink {
-                    pp_log: element_pp_log(ElementType::SegmentedFileMuxer, &name, None),
-                    name,
-                    track_index: index,
-                    kind,
-                    group: group.clone(),
+        Ok(self.id.sinks(
+            tracks
+                .into_iter()
+                .enumerate()
+                .map(|(index, (name, kind))| -> Box<dyn Sink> {
+                    Box::new(SegmentedTrackSink {
+                        pp_log: element_pp_log(ElementType::SegmentedFileMuxer, &name, None),
+                        name,
+                        track_index: index,
+                        kind,
+                        group: group.clone(),
+                    })
                 })
-            })
-            .collect())
+                .collect(),
+        ))
     }
 }
 
+/// One segment file, its sinks in the order of `streams` — which is the
+/// order [`SegmentedTrackSink::track_index`] indexes them by.
 fn open_segment(streams: &[StreamDef], path: PathBuf) -> Result<Vec<Box<dyn Sink>>> {
     let mut muxer = FileMuxer::create(&path)?;
-    for stream in streams {
-        muxer.add_stream(
-            stream.name.to_string(),
-            stream.parameters.clone(),
-            stream.time_base,
-        )?;
-    }
-    muxer.open()
+    let tracks = streams
+        .iter()
+        .map(|stream| {
+            muxer.add_stream(
+                stream.name.to_string(),
+                stream.parameters.clone(),
+                stream.time_base,
+            )
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let mut sinks = muxer.open()?;
+    tracks.into_iter().map(|track| sinks.take(track)).collect()
 }
 
 struct GroupState {
@@ -541,9 +557,12 @@ mod tests {
                 path
             },
         );
-        muxer.add_stream("video", encoder.parameters(), time_base);
-        let mut sinks = muxer.open().expect("open must succeed");
-        let sink = sinks.pop().expect("exactly one stream was added");
+        let video = muxer.add_stream("video", encoder.parameters(), time_base);
+        let sink = muxer
+            .open()
+            .expect("open must succeed")
+            .take(video)
+            .expect("the muxer's own track");
 
         let pipeline = Pipeline::new("segmented-test", video_source, |source, ctx| {
             let branch = ctx.branch().pipe(encoder).to(sink)?;
@@ -630,9 +649,12 @@ mod tests {
                 path
             },
         );
-        muxer.add_stream("video", encoder.parameters(), time_base);
-        let mut sinks = muxer.open().expect("open must succeed");
-        let sink = sinks.pop().expect("exactly one stream was added");
+        let video = muxer.add_stream("video", encoder.parameters(), time_base);
+        let sink = muxer
+            .open()
+            .expect("open must succeed")
+            .take(video)
+            .expect("the muxer's own track");
         let pipeline = Pipeline::new("segmented-rebase-test", video_source, |source, ctx| {
             let branch = ctx.branch().pipe(encoder).to(sink)?;
             ctx.attach(source, 0, branch)?;
@@ -711,9 +733,12 @@ mod tests {
             recorded_paths.lock().unwrap().push(path.clone());
             path
         });
-        muxer.add_stream("video", encoder.parameters(), time_base);
-        let mut sinks = muxer.open().expect("open must succeed");
-        let sink = sinks.pop().expect("exactly one stream was added");
+        let video = muxer.add_stream("video", encoder.parameters(), time_base);
+        let sink = muxer
+            .open()
+            .expect("open must succeed")
+            .take(video)
+            .expect("the muxer's own track");
 
         let pipeline = Pipeline::new("segmented-size-test", video_source, |source, ctx| {
             let branch = ctx.branch().pipe(encoder).to(sink)?;
@@ -790,9 +815,12 @@ mod tests {
             SegmentPolicy::Duration(Duration::from_secs(3600)),
             move |_index| recorded_path.clone(),
         );
-        muxer.add_stream("video", encoder.parameters(), time_base);
-        let mut sinks = muxer.open().expect("open must succeed");
-        let mut sink = sinks.pop().expect("exactly one stream was added");
+        let video = muxer.add_stream("video", encoder.parameters(), time_base);
+        let mut sink = muxer
+            .open()
+            .expect("open must succeed")
+            .take(video)
+            .expect("the muxer's own track");
 
         let error = sink
             .consume(MediaBuffer::Audio(Arc::new(ffmpeg::frame::Audio::empty())))
@@ -858,9 +886,12 @@ mod tests {
                 path
             },
         );
-        muxer.add_stream("video", encoder.parameters(), time_base);
-        let mut sinks = muxer.open().expect("open must succeed");
-        let sink = sinks.pop().expect("exactly one stream was added");
+        let video = muxer.add_stream("video", encoder.parameters(), time_base);
+        let sink = muxer
+            .open()
+            .expect("open must succeed")
+            .take(video)
+            .expect("the muxer's own track");
 
         let pipeline = Pipeline::new("segmented-release-test", video_source, |source, ctx| {
             let branch = ctx.branch().pipe(encoder).to(sink)?;

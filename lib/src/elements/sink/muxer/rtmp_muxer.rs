@@ -7,6 +7,8 @@ use crate::pp_log::{PpLog, pp_error, pp_info};
 use ffmpeg_next as ffmpeg;
 use thiserror::Error as ThisError;
 
+use super::tracks::{MuxerId, MuxerSinks, MuxerTrack};
+
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, PortContract},
@@ -158,15 +160,16 @@ struct PendingStream {
 /// #     bit_rate: 128_000,
 /// # })?;
 /// let mut muxer = RtmpMuxer::create("rtmp://127.0.0.1:1935/live/stream")?;
-/// muxer.add_stream("video", video_encoder.parameters(), video_time_base)?;
-/// muxer.add_stream("audio", audio_encoder.parameters(), audio_time_base)?;
+/// let video = muxer.add_stream("video", video_encoder.parameters(), video_time_base)?;
+/// let audio = muxer.add_stream("audio", audio_encoder.parameters(), audio_time_base)?;
 /// let mut sinks = muxer.open()?; // writes the FLV header
-/// let audio_sink = sinks.pop().unwrap();
-/// let video_sink = sinks.pop().unwrap();
+/// let video_sink = sinks.take(video)?;
+/// let audio_sink = sinks.take(audio)?;
 /// # Ok(())
 /// # }
 /// ```
 pub struct RtmpMuxer {
+    id: MuxerId,
     output: ffmpeg::format::context::Output,
     streams: Vec<PendingStream>,
     redacted_url: Arc<str>,
@@ -202,6 +205,7 @@ impl RtmpMuxer {
             ffmpeg::format::output_as_with(url, "flv", options).map_err(RtmpMuxerError::from)?;
 
         Ok(Self {
+            id: MuxerId::next(),
             output,
             streams: Vec::new(),
             redacted_url: redact(url).into(),
@@ -216,15 +220,14 @@ impl RtmpMuxer {
     /// [`Element::name`]/`pp_log` identity once [`RtmpMuxer::open`] turns it
     /// into a `Sink`.
     ///
-    /// Add streams in the same order the caller will read
-    /// [`RtmpMuxer::open`]'s returned `Vec` — index 0 is whichever was
-    /// added first.
+    /// The returned [`MuxerTrack`] is how this track's sink is taken out of
+    /// what [`RtmpMuxer::open`] returns.
     pub fn add_stream(
         &mut self,
         name: impl Into<String>,
         parameters: ffmpeg::codec::Parameters,
         time_base: ffmpeg::Rational,
-    ) -> Result<()> {
+    ) -> Result<MuxerTrack> {
         let mut stream = self
             .output
             .add_stream(parameters.id())
@@ -232,17 +235,19 @@ impl RtmpMuxer {
         let kind = MediaKind::packet_for(parameters.medium());
         stream.set_time_base(time_base);
         stream.set_parameters(parameters);
+        let track = self.id.track(self.streams.len());
         self.streams.push(PendingStream {
             name: name.into().into(),
             input_time_base: time_base,
             kind,
         });
-        Ok(())
+        Ok(track)
     }
 
     /// Writes the FLV header — every [`RtmpMuxer::add_stream`] call this
     /// broadcast will get must already have happened — and returns one
-    /// [`Sink`] per track, in the order they were added.
+    /// [`Sink`] per track, each taken out by the [`MuxerTrack`] its
+    /// [`RtmpMuxer::add_stream`] returned.
     ///
     /// This is where a codec FLV cannot carry is refused, and where a
     /// server that accepted the connection but rejects the stream says so.
@@ -257,7 +262,7 @@ impl RtmpMuxer {
     /// finished" rather than "abandon the broadcast" — so ending only the
     /// video pipeline while audio keeps running leaves the publish open
     /// until audio catches up too.
-    pub fn open(mut self) -> Result<Vec<Box<dyn Sink>>> {
+    pub fn open(mut self) -> Result<MuxerSinks> {
         self.output.write_header().map_err(RtmpMuxerError::from)?;
         let total = self.streams.len();
         let redacted_url = self.redacted_url;
@@ -270,24 +275,25 @@ impl RtmpMuxer {
             total,
             redacted_url: redacted_url.clone(),
         });
-        Ok(self
-            .streams
-            .into_iter()
-            .enumerate()
-            .map(|(index, stream)| -> Box<dyn Sink> {
-                let pp_log = element_pp_log(ElementType::RtmpMuxer, &stream.name, None);
-                pp_info!(pp_log: &pp_log, "publishing: url={redacted_url}, tracks={total}");
-                Box::new(RtmpMuxerStreamSink {
-                    pp_log,
-                    name: stream.name,
-                    shared: shared.clone(),
-                    stream_index: index,
-                    input_time_base: stream.input_time_base,
-                    kind: stream.kind,
-                    done: false,
+        Ok(self.id.sinks(
+            self.streams
+                .into_iter()
+                .enumerate()
+                .map(|(index, stream)| -> Box<dyn Sink> {
+                    let pp_log = element_pp_log(ElementType::RtmpMuxer, &stream.name, None);
+                    pp_info!(pp_log: &pp_log, "publishing: url={redacted_url}, tracks={total}");
+                    Box::new(RtmpMuxerStreamSink {
+                        pp_log,
+                        name: stream.name,
+                        shared: shared.clone(),
+                        stream_index: index,
+                        input_time_base: stream.input_time_base,
+                        kind: stream.kind,
+                        done: false,
+                    })
                 })
-            })
-            .collect())
+                .collect(),
+        ))
     }
 
     /// The publish address with its stream key removed — what to log, and

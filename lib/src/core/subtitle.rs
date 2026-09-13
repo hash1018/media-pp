@@ -385,13 +385,13 @@ mod tests {
         let _ = std::fs::remove_file(&path);
 
         let mut muxer = crate::elements::FileMuxer::create(&path).expect("the muxer must open");
-        muxer
+        let text = muxer
             .add_stream("text", codec.parameters(), ffmpeg::Rational::new(1, 1000))
             .expect("one text track");
         let mut sink = muxer
             .open()
             .expect("open must write the header")
-            .pop()
+            .take(text)
             .expect("its sink");
         sink.consume(codec.packet("첫 번째 자막", 1_000, 1_660))
             .expect("first line");
@@ -450,14 +450,14 @@ mod tests {
         ));
         let _ = std::fs::remove_file(&path);
         let mut muxer = crate::elements::FileMuxer::create(&path).expect("the muxer must open");
-        muxer
+        let text = muxer
             .add_stream(
                 "text",
                 Codec::SubRip.parameters(),
                 ffmpeg::Rational::new(1, 1000),
             )
             .expect("one text track");
-        let mut sink = muxer.open().expect("header").pop().expect("its sink");
+        let mut sink = muxer.open().expect("header").take(text).expect("its sink");
         sink.consume(Codec::SubRip.packet("첫 번째 자막", 1_000, 1_660))
             .expect("a line");
         sink.consume(MediaBuffer::Eos).expect("eos");

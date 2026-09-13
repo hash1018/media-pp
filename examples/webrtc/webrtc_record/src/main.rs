@@ -282,19 +282,19 @@ mod example {
         audio_info: media_pp::elements::WebRtcStreamInfo,
     ) -> media_pp::Result<Arc<Pipeline>> {
         let mut muxer = FileMuxer::create(output)?;
-        muxer.add_stream(
+        let video_track = muxer.add_stream(
             "received-video",
             video_info.codec_parameters()?,
             video_info.time_base()?,
         )?;
-        muxer.add_stream(
+        let audio_track = muxer.add_stream(
             "received-audio",
             audio_info.codec_parameters()?,
             audio_info.time_base()?,
         )?;
         let mut sinks = muxer.open()?;
-        let audio_sink = sinks.pop().expect("two streams were registered");
-        let video_sink = sinks.pop().expect("two streams were registered");
+        let video_sink = sinks.take(video_track)?;
+        let audio_sink = sinks.take(audio_track)?;
 
         Ok(PipelineBuilder::new("webrtc-receive-record")
             .add_source(video_source, |source, ctx| {

@@ -86,8 +86,8 @@ mod windows_example {
         .map_err(|e| media_pp::Error::Other(e.to_string()))?;
 
         let mut muxer = FileMuxer::create(&recording.path)?;
-        muxer.add_stream("video", encoder.parameters(), recording.time_base)?;
-        let muxer_sink = muxer.open()?.pop().expect("exactly one stream was added");
+        let track = muxer.add_stream("video", encoder.parameters(), recording.time_base)?;
+        let muxer_sink = muxer.open()?.take(track)?;
 
         let pipeline = Pipeline::new("nvenc-record", source, |source, ctx| {
             // AppSource emits YUV420P on the CPU, so this one SwScaler is the

@@ -61,7 +61,7 @@ mod example {
         // skipped rather than failing the whole remux over one track
         // nothing here can describe.
         let mut muxer = FileMuxer::create(&output_path)?;
-        let mut kept_indices = Vec::new();
+        let mut kept = Vec::new();
         for stream in &streams {
             if MediaKind::packet_for(stream.kind).is_none() {
                 println!(
@@ -76,14 +76,18 @@ mod example {
             let time_base = source
                 .stream_time_base(stream.index)
                 .expect("stream disappeared");
-            muxer.add_stream(format!("{:?}", stream.kind), parameters, time_base)?;
-            kept_indices.push(stream.index);
+            let track = muxer.add_stream(format!("{:?}", stream.kind), parameters, time_base)?;
+            kept.push((stream.index, track));
         }
-        let sinks = muxer.open()?;
-        let mut remaining = kept_indices.len();
+        let mut sinks = muxer.open()?;
+        let routes = kept
+            .into_iter()
+            .map(|(stream_index, track)| Ok((stream_index, sinks.take(track)?)))
+            .collect::<media_pp::Result<Vec<_>>>()?;
+        let mut remaining = routes.len();
 
         let pipeline = Pipeline::new("remux", source, |source, ctx| {
-            for (stream_index, sink) in kept_indices.into_iter().zip(sinks) {
+            for (stream_index, sink) in routes {
                 let branch = ctx.branch().to(sink)?;
                 ctx.attach(source, stream_index, branch)?;
             }

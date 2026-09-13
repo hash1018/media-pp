@@ -158,9 +158,9 @@ mod example {
         // why the text track is registered now and not when the first line
         // of it exists — see `FileMuxer::open`.
         let mut muxer = FileMuxer::create(&output_path)?;
-        let video_index = match video {
+        let video_track = match video {
             Some(video) => {
-                muxer.add_stream(
+                let track = muxer.add_stream(
                     "video",
                     source
                         .stream_parameters(video.index)
@@ -169,21 +169,24 @@ mod example {
                         .stream_time_base(video.index)
                         .expect("the stream was just listed"),
                 )?;
-                Some(video.index)
+                Some((video.index, track))
             }
             None => None,
         };
-        muxer.add_stream("audio", audio_params.clone(), audio_time_base)?;
-        muxer.add_stream(
+        let audio_track = muxer.add_stream("audio", audio_params.clone(), audio_time_base)?;
+        let text_track = muxer.add_stream(
             "text",
             subtitle::Codec::MovText.parameters(),
             TEXT_TIME_BASE,
         )?;
 
         let mut sinks = muxer.open()?;
-        let track = sinks.pop().expect("the text track was registered last");
-        let audio_sink = sinks.pop().expect("audio was registered before it");
-        let video_sink = sinks.pop();
+        let video_out = match video_track {
+            Some((index, track)) => Some((index, sinks.take(track)?)),
+            None => None,
+        };
+        let audio_sink = sinks.take(audio_track)?;
+        let track = sinks.take(text_track)?;
 
         // A file of its own is a muxer of its own: FFmpeg picks the SubRip
         // or WebVTT writer from the extension, and either takes exactly the
@@ -191,8 +194,8 @@ mod example {
         let sidecar = match sidecar {
             Some((path, codec)) => {
                 let mut muxer = FileMuxer::create(&path)?;
-                muxer.add_stream("sidecar", codec.parameters(), TEXT_TIME_BASE)?;
-                let sink = muxer.open()?.pop().expect("its one track");
+                let text_track = muxer.add_stream("sidecar", codec.parameters(), TEXT_TIME_BASE)?;
+                let sink = muxer.open()?.take(text_track)?;
                 Some((codec, sink))
             }
             None => None,
@@ -264,12 +267,12 @@ mod example {
         // The transcriber is in here for that reason: it is the only thing
         // that knows whether more lines are coming.
         let mut waiting: Vec<&str> = vec!["audio", "transcribe"];
-        if video_index.is_some() {
+        if video_out.is_some() {
             waiting.push("video");
         }
 
         let pipeline = Pipeline::new("transcribe", source, move |source, ctx| {
-            if let (Some(index), Some(sink)) = (video_index, video_sink) {
+            if let Some((index, sink)) = video_out {
                 let branch = ctx.branch().to(sink)?;
                 ctx.attach(source, index, branch)?;
             }

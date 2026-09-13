@@ -127,11 +127,11 @@ mod windows_example {
         // No container/demuxer in this loop to get these from — each encoder
         // exposes its own codec parameters for exactly this case.
         let mut muxer = FileMuxer::create(&path)?;
-        muxer.add_stream("video", video_encoder.parameters(), video_time_base)?;
-        muxer.add_stream("audio", audio_encoder.parameters(), audio_time_base)?;
+        let video_track = muxer.add_stream("video", video_encoder.parameters(), video_time_base)?;
+        let audio_track = muxer.add_stream("audio", audio_encoder.parameters(), audio_time_base)?;
         let mut sinks = muxer.open()?;
-        let audio_sink = sinks.pop().expect("two streams were added");
-        let video_sink = sinks.pop().expect("two streams were added");
+        let video_sink = sinks.take(video_track)?;
+        let audio_sink = sinks.take(audio_track)?;
 
         let pipeline = PipelineBuilder::new("screen-record-av")
             .add_source(video_source, |source, ctx| {
@@ -325,11 +325,11 @@ mod linux_example {
         .expect("failed to open audio encoder");
 
         let mut muxer = FileMuxer::create(&path)?;
-        muxer.add_stream("video", video_encoder.parameters(), video_time_base)?;
-        muxer.add_stream("audio", audio_encoder.parameters(), audio_time_base)?;
+        let video_track = muxer.add_stream("video", video_encoder.parameters(), video_time_base)?;
+        let audio_track = muxer.add_stream("audio", audio_encoder.parameters(), audio_time_base)?;
         let mut sinks = muxer.open()?;
-        let audio_sink = sinks.pop().expect("two streams were added");
-        let video_sink = sinks.pop().expect("two streams were added");
+        let video_sink = sinks.take(video_track)?;
+        let audio_sink = sinks.take(audio_track)?;
 
         let pipeline = PipelineBuilder::new("screen-record-av")
             .add_source(video_source, |source, ctx| {

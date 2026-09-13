@@ -97,8 +97,8 @@ mod windows_example {
         // exposes its own codec parameters for exactly this case (see
         // `transcode_render`'s own use of this, wiring a decoder instead).
         let mut muxer = FileMuxer::create(&path)?;
-        muxer.add_stream("video", encoder.parameters(), format.time_base)?;
-        let muxer_sink = muxer.open()?.pop().expect("exactly one stream was added");
+        let track = muxer.add_stream("video", encoder.parameters(), format.time_base)?;
+        let muxer_sink = muxer.open()?.take(track)?;
 
         let pipeline = Pipeline::new("screen-record-software", source, |source, ctx| {
             let scaler = SwScaler::new(
@@ -234,8 +234,8 @@ mod linux_example {
         )
         .expect("failed to open encoder");
         let mut muxer = FileMuxer::create(&path)?;
-        muxer.add_stream("video", encoder.parameters(), capture_format.time_base)?;
-        let muxer_sink = muxer.open()?.pop().expect("exactly one stream was added");
+        let track = muxer.add_stream("video", encoder.parameters(), capture_format.time_base)?;
+        let muxer_sink = muxer.open()?.take(track)?;
 
         let pipeline = Pipeline::new("screen-record-software", source, |source, ctx| {
             let scaler = SwScaler::new(

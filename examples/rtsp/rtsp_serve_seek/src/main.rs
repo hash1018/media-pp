@@ -79,17 +79,20 @@ mod example {
 
         let pipeline = Pipeline::new("rtsp-publish-seek", source, |source, ctx| {
             let mut muxer = RtspMuxer::create(&url, RtspTransport::Tcp)?;
-            muxer.add_stream("video", video_params, video_time_base)?;
+            let video = muxer.add_stream("video", video_params, video_time_base)?;
             let audio = match audio_track {
                 Some((index, params, time_base)) => {
-                    muxer.add_stream("audio", params, time_base)?;
-                    Some((index, time_base))
+                    let track = muxer.add_stream("audio", params, time_base)?;
+                    Some((index, time_base, track))
                 }
                 None => None,
             };
             let mut sinks = muxer.open()?;
-            let audio_sink = audio.map(|_| sinks.pop().expect("audio was registered second"));
-            let video_sink = sinks.pop().expect("video was registered first");
+            let video_sink = sinks.take(video)?;
+            let audio = match audio {
+                Some((index, time_base, track)) => Some((index, time_base, sinks.take(track)?)),
+                None => None,
+            };
 
             let branch = ctx
                 .branch()
@@ -98,7 +101,7 @@ mod example {
                 .to(video_sink)?;
             ctx.attach(source, video_index, branch)?;
 
-            if let (Some((index, time_base)), Some(audio_sink)) = (audio, audio_sink) {
+            if let Some((index, time_base, audio_sink)) = audio {
                 let branch = ctx
                     .branch()
                     .queue("audio-packets", 32)

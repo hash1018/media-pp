@@ -31,6 +31,7 @@ pub use muxer::{
 pub use muxer::{
     HlsMode, HlsMuxer, HlsMuxerError, HlsMuxerStreamSink, HlsOptions, HlsSegmentFormat,
 };
+pub use muxer::{MuxerSinks, MuxerTrack, MuxerTrackError};
 pub use muxer::{RtmpMuxer, RtmpMuxerError, RtmpMuxerStreamSink};
 pub use muxer::{RtspMuxer, RtspMuxerError, RtspMuxerStreamSink};
 #[cfg(feature = "ort")]

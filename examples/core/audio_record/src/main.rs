@@ -59,8 +59,8 @@ mod example {
         )
         .expect("failed to open aac encoder");
         let mut muxer = FileMuxer::create(&path)?;
-        muxer.add_stream("audio", encoder.parameters(), time_base)?;
-        let muxer_sink = muxer.open()?.pop().expect("exactly one stream was added");
+        let track = muxer.add_stream("audio", encoder.parameters(), time_base)?;
+        let muxer_sink = muxer.open()?.take(track)?;
 
         let pipeline = Pipeline::new("audio-record", source, |source, ctx| {
             let branch = ctx.branch().pipe(encoder).to(muxer_sink)?;
