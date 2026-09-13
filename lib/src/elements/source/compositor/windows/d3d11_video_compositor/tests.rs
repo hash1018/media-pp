@@ -204,6 +204,40 @@ fn invalid_text_layer_does_not_replace_an_existing_registration() {
     assert!(existing.layer().is_some());
 }
 
+/// The layer hands back the texture it will draw — the frame it was handed,
+/// by reference — and nothing once its registration is gone.
+#[test]
+fn a_layer_hands_back_the_frame_it_will_draw_until_it_is_removed() {
+    let Some((device, context)) = try_device() else {
+        return;
+    };
+    let options = VideoCompositorOptions {
+        width: 4,
+        height: 4,
+        frame_rate: ffmpeg::Rational::new(30, 1),
+        background: Color::BLACK,
+    };
+    let (_compositor, handle) =
+        D3d11VideoCompositor::new("compositor", &device, context, options).unwrap();
+    let D3d11VideoCompositorInput { mut sink, layer } = handle
+        .add_source("still", VideoLayer::new(VideoRect::new(0, 0, 4, 4)))
+        .unwrap()
+        .unwrap();
+    assert!(layer.latest_frame().is_none(), "nothing has arrived yet");
+
+    let texture = bgra_texture(&device, 4, 4, [0, 0, 255, 255]);
+    let MediaBuffer::Video(frame) = pooled_video(wrap_d3d11_texture(texture, 4, 4).unwrap()) else {
+        unreachable!("pooled_video wraps a Video buffer");
+    };
+    sink.consume(MediaBuffer::Video(frame.clone())).unwrap();
+    let latest = layer.latest_frame().expect("the frame handed over");
+    assert!(Arc::ptr_eq(&latest, &frame));
+    assert_eq!(texture_key(&latest), texture_key(&frame));
+
+    handle.remove_source("still");
+    assert!(layer.latest_frame().is_none());
+}
+
 #[test]
 fn composes_gpu_inputs_in_z_order_and_preserves_output_contract() {
     let Some((device, context)) = try_device() else {

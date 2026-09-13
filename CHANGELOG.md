@@ -153,6 +153,16 @@ compile error with no explanation.
 
 ### Added
 
+- **A compositor layer hands back the frame it will draw.**
+  `SwVideoLayerHandle::latest_frame`, `D3d11VideoLayerHandle::latest_frame`
+  and `CudaVideoLayerHandle::latest_frame` answer the last frame the input
+  was handed — the pooled reference itself — or `None` before the first
+  and once the input is removed. It is how a still picture of one input is
+  taken: the compositor keeps that frame however long ago it arrived, so it
+  is there for a producer that has paused or pushed a single picture,
+  where a branch on the producer's own pipeline would wait for a frame
+  that may never come.
+
 - **Colour correction and a luma key: `VideoEffect`, on every backend.**
   `SwVideoEffect`, `D3d11VideoEffect` and `CudaVideoEffect` take a BGRA
   frame and apply one `VideoEffect`:

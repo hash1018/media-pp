@@ -292,6 +292,23 @@ impl SwVideoLayerHandle {
             .map(|input| *input.layer.lock().unwrap())
     }
 
+    /// The frame this input will be drawn from next — the last one it was
+    /// handed — or `None` before its first, and once this registration is
+    /// removed.
+    ///
+    /// What a still picture of one input is taken from. The compositor keeps
+    /// exactly this frame per input, however long ago it arrived, so it is
+    /// there for an input whose producer has paused or pushed a single
+    /// picture — where a branch on the producer's own pipeline would wait
+    /// for a next frame that may not come.
+    ///
+    /// The pooled reference itself, not a copy: whoever holds it keeps the
+    /// frame's pool slot out of use until it is dropped, so take what is
+    /// needed and let go. A hardware decoder's pool is fixed-size.
+    pub fn latest_frame(&self) -> Option<Arc<UnboundObjectPoolRef<ffmpeg::frame::Video>>> {
+        self.input.upgrade()?.latest_frame.load_full()
+    }
+
     /// Atomically replaces every layer setting.
     ///
     /// Returns [`SwVideoCompositorError::SourceRemoved`] if this handle is stale.
@@ -1419,6 +1436,36 @@ mod tests {
 
         let frame = compositor.compose_frame().unwrap();
         assert_eq!(pixel(&frame, 0, 0), [0, 255, 0, 255]);
+    }
+
+    /// The layer hands back the very frame it will draw — the same
+    /// reference, not a copy — nothing before its first, and nothing once
+    /// its registration is gone.
+    #[test]
+    fn a_layer_hands_back_the_frame_it_will_draw_until_it_is_removed() {
+        let (_compositor, handle) = SwVideoCompositor::new("compositor", options(1, 1)).unwrap();
+        let (mut sink, layer) = input(
+            &handle,
+            "still",
+            VideoLayer::new(VideoRect::new(0, 0, 1, 1)),
+        );
+        assert!(layer.latest_frame().is_none(), "nothing has arrived yet");
+
+        let green = solid_frame(1, 1, Color::new(0, 255, 0));
+        sink.consume(MediaBuffer::Video(solid_frame(1, 1, Color::new(255, 0, 0))))
+            .unwrap();
+        sink.consume(MediaBuffer::Video(green.clone())).unwrap();
+        let latest = layer.latest_frame().expect("the last frame handed over");
+        assert!(
+            Arc::ptr_eq(&latest, &green),
+            "the frame itself, the newest one"
+        );
+
+        handle.remove_source("still");
+        assert!(
+            layer.latest_frame().is_none(),
+            "a removed input has nothing to show"
+        );
     }
 
     #[test]

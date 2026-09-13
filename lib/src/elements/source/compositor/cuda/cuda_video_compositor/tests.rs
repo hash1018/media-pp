@@ -525,6 +525,41 @@ fn an_unchanged_scene_is_composed_once() {
     );
 }
 
+/// The layer hands back the surface it will draw — the frame it was handed,
+/// by reference — and nothing once its registration is gone.
+#[test]
+fn a_layer_hands_back_the_frame_it_will_draw_until_it_is_removed() {
+    let Some((device, _cuda_lock)) = try_cuda_device() else {
+        return;
+    };
+    let Ok((_compositor, handle)) =
+        CudaVideoCompositor::new("compositor", &device, options(64, 64))
+    else {
+        eprintln!("skipping: this machine cannot open a CUDA compositor");
+        return;
+    };
+    let mut input = handle
+        .add_source("still", VideoLayer::new(VideoRect::new(0, 0, 64, 64)))
+        .expect("add source");
+    assert!(
+        input.layer.latest_frame().is_none(),
+        "nothing has arrived yet"
+    );
+
+    let Some(MediaBuffer::Video(frame)) = cuda_frame(&device, 32, 32, 100) else {
+        return;
+    };
+    input
+        .sink
+        .consume(MediaBuffer::Video(frame.clone()))
+        .expect("frame");
+    let latest = input.layer.latest_frame().expect("the frame handed over");
+    assert!(Arc::ptr_eq(&latest, &frame));
+
+    handle.remove_source("still");
+    assert!(input.layer.latest_frame().is_none());
+}
+
 /// Runtime control: moving and hiding a layer changes the next frame, and
 /// costs no rebuild of anything — the whole reason this backend places
 /// with a copy rather than a filter.

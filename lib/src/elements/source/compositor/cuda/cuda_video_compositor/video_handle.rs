@@ -3,6 +3,10 @@
 
 use std::sync::{Arc, Weak};
 
+use ffmpeg_next as ffmpeg;
+
+use crate::pool::UnboundObjectPoolRef;
+
 use super::super::super::video_layer::{
     self, VideoFit, VideoInputId, VideoLayer, VideoRect, VideoSourceRect,
 };
@@ -36,6 +40,17 @@ impl CudaVideoLayerHandle {
         self.input
             .upgrade()
             .map(|input| *input.layer.lock().unwrap())
+    }
+
+    /// The `Pixel::CUDA` frame this input will be drawn from next, or
+    /// `None` before its first and once the input is removed — see
+    /// [`crate::elements::SwVideoLayerHandle::latest_frame`], whose contract
+    /// this shares, pool slot included.
+    ///
+    /// Its surface is whichever of the two layouts this compositor draws —
+    /// NV12 or BGRA — as the input was handed it.
+    pub fn latest_frame(&self) -> Option<Arc<UnboundObjectPoolRef<ffmpeg::frame::Video>>> {
+        self.input.upgrade()?.latest_frame.load_full()
     }
 
     /// Atomically replaces every layer setting.

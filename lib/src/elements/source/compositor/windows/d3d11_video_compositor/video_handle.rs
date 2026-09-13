@@ -43,6 +43,17 @@ impl D3d11VideoLayerHandle {
             .map(|input| *input.layer.lock().unwrap())
     }
 
+    /// The `Pixel::D3D11` frame this input will be drawn from next, or
+    /// `None` before its first and once the input is removed — see
+    /// [`crate::elements::SwVideoLayerHandle::latest_frame`], whose contract
+    /// this shares, pool slot included.
+    ///
+    /// Its texture is whichever of the two formats this compositor draws —
+    /// BGRA or NV12 — as the input was handed it.
+    pub fn latest_frame(&self) -> Option<Arc<UnboundObjectPoolRef<ffmpeg::frame::Video>>> {
+        self.input.upgrade()?.latest_frame.load_full()
+    }
+
     /// Atomically replaces every layer setting.
     pub fn set_layer(
         &self,
