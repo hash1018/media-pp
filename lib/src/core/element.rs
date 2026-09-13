@@ -187,6 +187,8 @@ pub enum ElementType {
     FileMuxer,
     /// Rotating segmented container file muxer sink.
     SegmentedFileMuxer,
+    /// Rolling window of encoded packets, written to a file on request.
+    ReplayBuffer,
     /// RTMP publishing muxer sink, one FLV stream to an external server.
     RtmpMuxer,
     /// Anything outside this crate's own elements — a test double, or a

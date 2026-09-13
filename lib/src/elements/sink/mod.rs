@@ -1,8 +1,9 @@
 //! Elements that terminate a branch.
 //!
 //! Muxers write to files or streams ([`FileMuxer`], [`SegmentedFileMuxer`],
-//! [`HlsMuxer`], [`RtmpMuxer`], [`RtspMuxer`]), renderers present to a device
-//! or window, and
+//! [`HlsMuxer`], [`RtmpMuxer`], [`RtspMuxer`]) — or, in [`ReplayBuffer`]'s
+//! case, hold the last stretch of it until asked to write it — renderers
+//! present to a device or window, and
 //! [`AppSink`] hands buffers back to the application. [`FrameCounter`] and
 //! [`PacketCounter`] are the trivial terminals that make a graph runnable
 //! while something upstream is being tested.
@@ -28,6 +29,7 @@ pub use frame_counter::FrameCounter;
 pub use muxer::{FileMuxer, FileMuxerError, SegmentPolicy, SegmentedFileMuxer};
 pub use muxer::{HlsMode, HlsMuxer, HlsMuxerError, HlsOptions, HlsSegmentFormat};
 pub use muxer::{MuxerSinks, MuxerTrack, MuxerTrackError};
+pub use muxer::{ReplayBuffer, ReplayBufferError, ReplayBufferHandle};
 pub use muxer::{RtmpMuxer, RtmpMuxerError};
 pub use muxer::{RtspMuxer, RtspMuxerError};
 #[cfg(feature = "ort")]

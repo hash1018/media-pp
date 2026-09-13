@@ -63,9 +63,10 @@ use crate::{
     elements::{
         AppSourceError, AudioCompressorError, AudioGateError, AudioLimiterError, AudioMixerError,
         AudioResamplerError, AudioVolumeError, FileDemuxError, FileMuxerError, HlsMuxerError,
-        MuxerTrackError, PacerError, RtmpMuxerError, RtspSourceError, SwAudioEncoderError,
-        SwChromaKeyError, SwDecoderError, SwEncoderError, SwScalerError, SwVideoCompositorError,
-        SwVideoEffectError, TestAudioSourceError, TestVideoSourceError, VideoSynchronizerError,
+        MuxerTrackError, PacerError, ReplayBufferError, RtmpMuxerError, RtspSourceError,
+        SwAudioEncoderError, SwChromaKeyError, SwDecoderError, SwEncoderError, SwScalerError,
+        SwVideoCompositorError, SwVideoEffectError, TestAudioSourceError, TestVideoSourceError,
+        VideoSynchronizerError,
     },
     graph::GraphError,
     log::LogInitError,
@@ -339,6 +340,10 @@ pub enum Error {
     /// A muxer's sinks were asked for a track that is not one of theirs.
     #[error(transparent)]
     MuxerTrackError(#[from] MuxerTrackError),
+
+    /// A replay buffer was opened wrongly, or had nothing to save.
+    #[error(transparent)]
+    ReplayBufferError(#[from] ReplayBufferError),
 
     /// A D3D12 renderer operation failed.
     #[cfg(all(target_os = "windows", feature = "d3d12"))]

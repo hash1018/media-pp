@@ -153,6 +153,29 @@ compile error with no explanation.
 
 ### Added
 
+- **`ReplayBuffer`: the last stretch of an encode, saved on request.** A
+  muxer in shape — `add_stream` per track, `open` for one sink per track —
+  that keeps what its tracks are handed instead of writing it, letting go of
+  whatever has fallen out of its window:
+
+  ```rust
+  let mut replay = ReplayBuffer::create(Duration::from_secs(30));
+  let video = replay.add_stream("video", video_params, video_time_base);
+  let audio = replay.add_stream("audio", audio_params, audio_time_base);
+  let (mut sinks, handle) = replay.open()?;
+  // ...wire the sinks behind their encoders; later, from a hotkey:
+  let length = handle.save("replay.mp4")?;
+  ```
+
+  A saved clip opens on a keyframe of the video track and starts at zero,
+  every track moved by that one origin, so the window is let go of a GOP at
+  a time: it holds at most its length and at least that less one keyframe
+  interval. `ReplayBufferHandle` is cheap to clone and holds the window
+  weakly — once the sinks are dropped a save answers
+  `ReplayBufferError::Stopped` — and a save blocks for the write, holding
+  the tracks up only while it gathers references to what is held. New:
+  `Error::ReplayBufferError` and `ElementType::ReplayBuffer`.
+
 - **A compositor layer hands back the frame it will draw.**
   `SwVideoLayerHandle::latest_frame`, `D3d11VideoLayerHandle::latest_frame`
   and `CudaVideoLayerHandle::latest_frame` answer the last frame the input
