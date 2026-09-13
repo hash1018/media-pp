@@ -405,7 +405,7 @@ fn apply_gain(
         // elsewhere) — `linesize[1..]` stay `0`, so `data_mut` on any channel
         // but the first always reports a zero-length slice regardless of the
         // real buffer. Same footgun documented and worked around in
-        // `encoder/audio/encoder.rs`'s `absorb_resampled`; read the real
+        // `encoder/audio/sw_audio_encoder.rs`'s `absorb_resampled`; read the real
         // per-plane byte range directly from the frame instead.
         if plane >= frame.planes() {
             return Err(AudioVolumeError::InvalidPlaneSize {

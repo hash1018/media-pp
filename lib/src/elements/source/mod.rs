@@ -21,7 +21,7 @@ mod compositor;
 mod file_demuxer;
 mod pipeline_bridge;
 mod rtsp_source;
-mod test;
+mod synthetic;
 
 #[cfg(all(
     target_os = "linux",
@@ -85,7 +85,7 @@ pub use pipeline_bridge::{
     PipelineBridge, PipelineBridgeError, PipelineBridgeHandle, PipelineBridgeOptions,
 };
 pub use rtsp_source::{RtspOptions, RtspSource, RtspSourceError};
-pub use test::{
+pub use synthetic::{
     TestAudioOptions, TestAudioSource, TestAudioSourceError, TestVideoOptions, TestVideoSource,
     TestVideoSourceError,
 };

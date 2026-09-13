@@ -1,3 +1,5 @@
-mod encoder;
+mod sw_audio_encoder;
 
-pub use encoder::{AudioCodec, SwAudioEncoder, SwAudioEncoderError, SwAudioEncoderOptions};
+pub use sw_audio_encoder::{
+    AudioCodec, SwAudioEncoder, SwAudioEncoderError, SwAudioEncoderOptions,
+};
