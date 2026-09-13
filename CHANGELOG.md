@@ -479,6 +479,25 @@ compile error with no explanation.
   New: the `stats` module (`PipelineStats`, `ElementStats`, `ElementState`,
   `PadStats`, `QueueStats`, `TickStats`).
 
+- **Encoders can say what colour their stream holds.** `CudaEncoder` and
+  `SwEncoder` gain `with_color`, which is `new` plus a `ColorDescription` —
+  matrix, range, primaries, transfer — told to the encoder before it opens,
+  which is the only time it reads one. It ends up in the stream's headers
+  and the container's, where every player finds it; `new` still says
+  nothing. Nothing is converted: it names what the frames already are.
+
+  ```rust
+  let encoder = CudaEncoder::with_color(
+      "encode", &device, options, ColorDescription::BT709_LIMITED,
+  )?;
+  ```
+
+  Untagged, a player guesses, and FFmpeg guesses BT.601 at any size: a
+  BT.709 recording's (230, 20, 20) decoded as (211, 0, 22).
+  `ColorDescription::describe` says the same about a frame.
+
+  New: `color::ColorDescription`.
+
 ### Changed
 
 - **A chroma key multiplies the alpha it is given instead of replacing it.**
@@ -486,6 +505,19 @@ compile error with no explanation.
   coverage straight into alpha, so a key placed after a luma key put back
   everything that one had taken out. An opaque input — every capture and
   decoder in this crate — keys exactly as before, byte for byte.
+
+### Fixed
+
+- **The CUDA compositor says its canvas is BT.709, limited range** — which is
+  what every fill and blend into it converts with. It said nothing, so
+  whatever read it later picked its own answer; swscale's was BT.601. The
+  D3D11 compositor's BGRA canvas already said `RGB`, full range.
+- **`SwScaler` reads a YUV frame by what it says it is.** It used swscale's
+  default whatever the frame said, which is BT.601 limited, so a BT.709
+  picture scaled to RGB came out with its colours shifted — (230, 20, 20) as
+  (211, 0, 22). Going YUV to YUV it keeps the matrix and range it was given
+  rather than converting into the default, and every output says what it is.
+  A frame that says nothing is read exactly as before.
 
 ## 0.2.0
 

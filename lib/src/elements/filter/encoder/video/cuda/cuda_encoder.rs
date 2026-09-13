@@ -5,6 +5,7 @@ use thiserror::Error as ThisError;
 
 use crate::pp_log::{PpLog, pp_error, pp_info};
 
+use crate::color::ColorDescription;
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
@@ -220,6 +221,33 @@ impl CudaEncoder {
         device: &CudaDevice,
         options: CudaEncoderOptions,
     ) -> std::result::Result<Self, CudaEncoderError> {
+        Self::open(name, device, options, None)
+    }
+
+    /// As [`Self::new`], and the stream says `color` is what it holds.
+    ///
+    /// Told before it opens, because that is the only time an encoder reads
+    /// it: NVENC writes it into the stream's own headers, where every player
+    /// finds it, rather than leaving each to guess — see
+    /// [`ColorDescription`]. Nothing is converted: this names what the
+    /// frames already are. A canvas from
+    /// [`CudaVideoCompositor`](crate::elements::CudaVideoCompositor) is
+    /// [`ColorDescription::BT709_LIMITED`].
+    pub fn with_color(
+        name: impl Into<String>,
+        device: &CudaDevice,
+        options: CudaEncoderOptions,
+        color: ColorDescription,
+    ) -> std::result::Result<Self, CudaEncoderError> {
+        Self::open(name, device, options, Some(color))
+    }
+
+    fn open(
+        name: impl Into<String>,
+        device: &CudaDevice,
+        options: CudaEncoderOptions,
+        color: Option<ColorDescription>,
+    ) -> std::result::Result<Self, CudaEncoderError> {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::CudaEncoder, &name, None);
 
@@ -283,6 +311,9 @@ impl CudaEncoder {
                 // learn the surface layout it will be handed.
                 (*ptr).hw_device_ctx = codec_device_ctx.into_raw();
                 (*ptr).hw_frames_ctx = codec_frames_ctx.into_raw();
+                if let Some(color) = color {
+                    color.tell(ptr);
+                }
             }
             video.open_as(codec)
         })();
@@ -955,5 +986,40 @@ mod tests {
             .collect();
         assert!(!timestamps.is_empty(), "NVENC produced no packets");
         Some(timestamps)
+    }
+
+    /// The CUDA path's canvas is BT.709 limited; a recording of it says so
+    /// only if the encoder was told before it opened.
+    #[test]
+    fn a_stream_opened_with_a_colour_says_it() {
+        let Some((device, _cuda_lock)) = crate::test_support::try_cuda_device() else {
+            return;
+        };
+        let options = CudaEncoderOptions {
+            codec: CudaCodec::H264,
+            input_format: CudaFrameFormat::Nv12,
+            width: 256,
+            height: 144,
+            time_base: ffmpeg::Rational::new(1, 30),
+            frame_rate: ffmpeg::Rational::new(30, 1),
+            bit_rate: 1_000_000,
+            gop_size: 30,
+            max_b_frames: None,
+        };
+        let Ok(encoder) =
+            CudaEncoder::with_color("encoder", &device, options, ColorDescription::BT709_LIMITED)
+        else {
+            eprintln!("skipping: NVENC unavailable");
+            return;
+        };
+        let parameters = encoder.parameters();
+        // SAFETY: a live `AVCodecParameters` owned by `parameters`.
+        let raw = unsafe { &*parameters.as_ptr() };
+        assert_eq!(raw.color_space, ffmpeg::ffi::AVColorSpace::AVCOL_SPC_BT709);
+        assert_eq!(raw.color_range, ffmpeg::ffi::AVColorRange::AVCOL_RANGE_MPEG);
+        assert_eq!(
+            raw.color_trc,
+            ffmpeg::ffi::AVColorTransferCharacteristic::AVCOL_TRC_BT709
+        );
     }
 }

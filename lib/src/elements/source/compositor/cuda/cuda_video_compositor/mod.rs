@@ -868,6 +868,15 @@ impl CudaVideoCompositor {
                 return Err(CudaVideoCompositorError::HwFrameGet(code));
             }
         }
+        // What the canvas is: every fill and blend into it converts with
+        // BT.709 limited range — see `bt709_limited` in the CUDA driver — and
+        // a frame that says so is one a download, a scaler or an encoder
+        // downstream can read correctly. Untagged, swscale reads it as
+        // BT.601, which measured a composited (230, 20, 20) back as
+        // (211, 0, 22). Set after the allocation because the unref before it
+        // clears every one of these. The D3D11 compositor's canvas is BGRA
+        // and says `RGB`/full range for the same reason.
+        crate::color::ColorDescription::BT709_LIMITED.describe(&mut output);
         Ok(output)
     }
 

@@ -954,3 +954,65 @@ fn output_pts_are_contiguous_ticks_of_its_own_time_base() {
         assert_eq!(composed.pts(), Some(expected));
     }
 }
+
+/// The canvas says what it is — BT.709, limited range, which is what every
+/// fill and blend into it converts with — so what reads it downstream reads
+/// it right. Held end to end over the chain a screenshot takes: composed,
+/// downloaded, and scaled to RGB on the CPU. Untagged, that chain gave
+/// (230, 20, 20) back as (211, 0, 22), because swscale took the canvas for
+/// BT.601.
+#[test]
+fn the_canvas_says_it_is_bt709_and_reads_back_as_the_colour_it_was_filled_with() {
+    use crate::elements::SwScaler;
+
+    let Some((device, _cuda_lock)) = try_cuda_device() else {
+        return;
+    };
+    let (width, height) = (64u32, 64u32);
+    let Ok((mut compositor, _handle)) = CudaVideoCompositor::new(
+        "compositor",
+        &device,
+        VideoCompositorOptions {
+            background: Color::new(230, 20, 20),
+            ..options(width, height)
+        },
+    ) else {
+        eprintln!("skipping: this machine cannot open a CUDA compositor");
+        return;
+    };
+
+    let composed = compositor.compose_frame().expect("compose");
+    assert_eq!(composed.color_space(), ffmpeg::color::Space::BT709);
+    assert_eq!(composed.color_range(), ffmpeg::color::Range::MPEG);
+    assert_eq!(composed.color_primaries(), ffmpeg::color::Primaries::BT709);
+
+    let downloaded = download(&device, composed, width, height);
+    assert_eq!(
+        downloaded.color_space(),
+        ffmpeg::color::Space::BT709,
+        "the download carries the description across"
+    );
+
+    let mut scaler = SwScaler::new(
+        "to-rgb",
+        ffmpeg::format::Pixel::RGB24,
+        width,
+        height,
+        ffmpeg::software::scaling::Flags::BILINEAR,
+    );
+    let received = capture(&mut scaler);
+    scaler
+        .consume(MediaBuffer::Video(downloaded))
+        .expect("scale");
+    let MediaBuffer::Video(rgb) = received.lock().unwrap().remove(0) else {
+        panic!("expected a Video buffer");
+    };
+    let at = 32 * rgb.stride(0) + 32 * 3;
+    let got = [rgb.data(0)[at], rgb.data(0)[at + 1], rgb.data(0)[at + 2]];
+    assert!(
+        got.iter()
+            .zip([230u8, 20, 20])
+            .all(|(got, want)| got.abs_diff(want) <= 3),
+        "the canvas read back as {got:?}"
+    );
+}

@@ -5,6 +5,7 @@ use ffmpeg_next as ffmpeg;
 use ffmpeg_next::Rescale;
 use thiserror::Error as ThisError;
 
+use crate::color::ColorDescription;
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
@@ -226,6 +227,28 @@ fn nominal_packet_duration(time_base: ffmpeg::Rational, frame_rate: ffmpeg::Rati
 impl SwEncoder {
     /// Opens the requested software video encoder with the supplied output definition.
     pub fn new(name: impl Into<String>, options: SwEncoderOptions) -> Result<Self> {
+        Self::open(name, options, None)
+    }
+
+    /// As [`Self::new`], and the stream says `color` is what it holds —
+    /// see [`ColorDescription`] for why that matters, and `CudaEncoder`'s
+    /// `with_color` for the hardware twin. Nothing is converted: the frames must
+    /// already be what `color` says, as a
+    /// [`SwScaler`](crate::elements::SwScaler) keeps them when it changes
+    /// only their layout.
+    pub fn with_color(
+        name: impl Into<String>,
+        options: SwEncoderOptions,
+        color: ColorDescription,
+    ) -> Result<Self> {
+        Self::open(name, options, Some(color))
+    }
+
+    fn open(
+        name: impl Into<String>,
+        options: SwEncoderOptions,
+        color: Option<ColorDescription>,
+    ) -> Result<Self> {
         let encoder_name = options.codec.encoder_name();
         let codec = ffmpeg::encoder::find_by_name(encoder_name)
             .ok_or_else(|| SwEncoderError::CodecNotFound(encoder_name.into()))?;
@@ -251,6 +274,10 @@ impl SwEncoder {
         video.set_gop(options.gop_size);
         if let Some(frames) = options.max_b_frames {
             video.set_max_b_frames(frames as usize);
+        }
+        if let Some(color) = color {
+            // SAFETY: the encoder's own context, not yet opened.
+            unsafe { color.tell(video.as_mut_ptr()) };
         }
 
         let encoder = video.open_as(codec).map_err(SwEncoderError::from)?;
@@ -541,5 +568,53 @@ mod tests {
                  not FFmpeg's 0/1 unset sentinel"
             );
         }
+    }
+
+    /// What the muxer builds the stream from carries the colour the encoder
+    /// was told — and one told nothing says nothing, as before.
+    #[test]
+    fn a_stream_opened_with_a_colour_says_it_and_one_without_does_not() {
+        let options = SwEncoderOptions {
+            codec: VideoCodec::OpenH264,
+            width: 64,
+            height: 64,
+            time_base: ffmpeg::Rational::new(1, 30),
+            frame_rate: ffmpeg::Rational::new(30, 1),
+            bit_rate: 200_000,
+            gop_size: 30,
+            max_b_frames: None,
+        };
+        let Ok(told) = SwEncoder::with_color("told", options, ColorDescription::BT709_LIMITED)
+        else {
+            return; // openh264 unavailable on this build
+        };
+        let untold = SwEncoder::new("untold", options).expect("opened once already");
+
+        let described = |encoder: &SwEncoder| {
+            let parameters = encoder.parameters();
+            // SAFETY: a live `AVCodecParameters` owned by `parameters`.
+            unsafe {
+                let raw = &*parameters.as_ptr();
+                (
+                    raw.color_space,
+                    raw.color_range,
+                    raw.color_primaries,
+                    raw.color_trc,
+                )
+            }
+        };
+        assert_eq!(
+            described(&told),
+            (
+                ffmpeg::ffi::AVColorSpace::AVCOL_SPC_BT709,
+                ffmpeg::ffi::AVColorRange::AVCOL_RANGE_MPEG,
+                ffmpeg::ffi::AVColorPrimaries::AVCOL_PRI_BT709,
+                ffmpeg::ffi::AVColorTransferCharacteristic::AVCOL_TRC_BT709,
+            )
+        );
+        assert_eq!(
+            described(&untold).0,
+            ffmpeg::ffi::AVColorSpace::AVCOL_SPC_UNSPECIFIED
+        );
     }
 }
