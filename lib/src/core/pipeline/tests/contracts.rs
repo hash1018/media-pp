@@ -479,6 +479,44 @@ fn the_signal_filters_refuse_video_frames_and_take_audio() {
     }
 }
 
+/// A video effect declares decoded video in system memory — the mirror of
+/// the audio filters above: refused behind an audio decoder, taken behind a
+/// video one.
+#[test]
+fn a_video_effect_takes_video_frames_and_refuses_audio() {
+    use crate::elements::{ColorCorrection, SwVideoEffect, VideoEffect};
+
+    let effect = || {
+        SwVideoEffect::new(
+            "effect",
+            VideoEffect::ColorCorrection(ColorCorrection::default()),
+        )
+        .0
+    };
+    let Err(error) = contract_context()
+        .branch()
+        .pipe(audio_decoder("decoder"))
+        .pipe(effect())
+        .to(DeclaringSink::boxed("sink", video_frames()))
+    else {
+        panic!("a video effect has no pixels to change in an audio frame");
+    };
+    assert!(
+        matches!(
+            error,
+            crate::Error::GraphError(GraphError::IncompatibleLink { .. })
+        ),
+        "got {error}"
+    );
+
+    contract_context()
+        .branch()
+        .pipe(video_decoder("decoder"))
+        .pipe(effect())
+        .to(DeclaringSink::boxed("sink", video_frames()))
+        .expect("decoded video through a video effect is the intended chain");
+}
+
 /// Two GPU frames of different backends. Neither the buffer variant nor a
 /// single "is on a GPU" flag separates a D3D11 texture from a CUDA
 /// allocation — only naming the backend does, which is why the domain is

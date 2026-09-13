@@ -46,12 +46,13 @@ use crate::elements::WhisperTranscriberError;
 use crate::elements::{
     CudaChromaKeyError, CudaConverterError, CudaDecoderError, CudaDownloadError, CudaEncoderError,
     CudaRendererError, CudaScalerError, CudaUploadError, CudaVideoCompositorError,
+    CudaVideoEffectError,
 };
 #[cfg(all(target_os = "windows", feature = "d3d11"))]
 use crate::elements::{
     D3d11ChromaKeyError, D3d11DecoderError, D3d11DownloadError, D3d11RendererError,
     D3d11ScalerError, D3d11TextLayerError, D3d11UploadError, D3d11VideoCompositorError,
-    D3d11VideoEncoderError,
+    D3d11VideoEffectError, D3d11VideoEncoderError,
 };
 #[cfg(all(target_os = "windows", feature = "d3d12"))]
 use crate::elements::{
@@ -64,7 +65,7 @@ use crate::{
         AudioResamplerError, AudioVolumeError, FileDemuxError, FileMuxerError, HlsMuxerError,
         MuxerTrackError, PacerError, RtmpMuxerError, RtspSourceError, SwAudioEncoderError,
         SwChromaKeyError, SwDecoderError, SwEncoderError, SwScalerError, SwVideoCompositorError,
-        TestAudioSourceError, TestVideoSourceError, VideoSynchronizerError,
+        SwVideoEffectError, TestAudioSourceError, TestVideoSourceError, VideoSynchronizerError,
     },
     graph::GraphError,
     log::LogInitError,
@@ -227,6 +228,11 @@ pub enum Error {
     #[error(transparent)]
     CudaChromaKeyError(#[from] CudaChromaKeyError),
 
+    /// A video effect on a CUDA surface failed.
+    #[cfg(feature = "cuda")]
+    #[error(transparent)]
+    CudaVideoEffectError(#[from] CudaVideoEffectError),
+
     /// A CUDA compositor operation failed.
     #[cfg(feature = "cuda")]
     #[error(transparent)]
@@ -285,6 +291,10 @@ pub enum Error {
     /// A software chroma-key operation failed.
     #[error(transparent)]
     SwChromaKeyError(#[from] SwChromaKeyError),
+
+    /// A software video effect failed.
+    #[error(transparent)]
+    SwVideoEffectError(#[from] SwVideoEffectError),
 
     /// A queue worker or capacity policy failed.
     #[error(transparent)]
@@ -379,6 +389,11 @@ pub enum Error {
     #[cfg(all(target_os = "windows", feature = "d3d11"))]
     #[error(transparent)]
     D3d11ChromaKeyError(#[from] D3d11ChromaKeyError),
+
+    /// A video effect on a D3D11 texture failed.
+    #[cfg(all(target_os = "windows", feature = "d3d11"))]
+    #[error(transparent)]
+    D3d11VideoEffectError(#[from] D3d11VideoEffectError),
 
     /// A D3D11-backed NVENC operation failed.
     #[cfg(all(target_os = "windows", feature = "d3d11"))]

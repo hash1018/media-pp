@@ -3,7 +3,7 @@
 //!
 //! Codecs, scalers, pixel-format conversion, GPU upload and download, audio
 //! resampling, gain, gating, compression, limiting and noise suppression,
-//! chroma keying, and the
+//! chroma keying, colour correction and luma keying, and the
 //! elements that change *when*
 //! rather than *what* — [`Pacer`], which holds a frame until its presentation
 //! time, [`VideoSynchronizer`], [`ChangeGate`], which forwards a picture only
@@ -33,6 +33,7 @@ pub(crate) mod scaler;
 mod tee;
 mod timestamp_origin;
 pub(crate) mod upload;
+mod video_effect;
 mod video_synchronizer;
 
 pub use audio::{
@@ -97,6 +98,13 @@ pub use upload::{CudaUpload, CudaUploadError};
 pub use upload::{D3d11Upload, D3d11UploadError};
 #[cfg(all(target_os = "windows", feature = "d3d12"))]
 pub use upload::{D3d12Upload, D3d12UploadError};
+pub use video_effect::{
+    ColorCorrection, LumaKey, SwVideoEffect, SwVideoEffectError, VideoEffect, VideoEffectHandle,
+};
+#[cfg(feature = "cuda")]
+pub use video_effect::{CudaVideoEffect, CudaVideoEffectError};
+#[cfg(all(target_os = "windows", feature = "d3d11"))]
+pub use video_effect::{D3d11VideoEffect, D3d11VideoEffectError};
 pub use video_synchronizer::{VideoSynchronizer, VideoSynchronizerError};
 
 /// `avcodec_receive_frame`/`avcodec_receive_packet` use `EAGAIN` to mean

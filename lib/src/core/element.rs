@@ -145,6 +145,12 @@ pub enum ElementType {
     D3d11Scaler,
     /// D3D11 chroma-key filter.
     D3d11ChromaKey,
+    /// CPU colour-correction / luma-key filter.
+    SwVideoEffect,
+    /// CUDA colour-correction / luma-key filter.
+    CudaVideoEffect,
+    /// D3D11 colour-correction / luma-key filter.
+    D3d11VideoEffect,
     /// Dynamic one-to-many branch filter.
     Tee,
     /// A stretch of chain whose contents are replaced while it runs.

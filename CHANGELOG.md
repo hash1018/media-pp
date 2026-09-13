@@ -153,6 +153,37 @@ compile error with no explanation.
 
 ### Added
 
+- **Colour correction and a luma key: `VideoEffect`, on every backend.**
+  `SwVideoEffect`, `D3d11VideoEffect` and `CudaVideoEffect` take a BGRA
+  frame and apply one `VideoEffect`:
+
+  ```rust
+  let (effect, handle) = D3d11VideoEffect::new(
+      "look", &device, context,
+      VideoEffect::ColorCorrection(ColorCorrection {
+          contrast: 1.2, saturation: 1.1, ..ColorCorrection::default()
+      }),
+  )?;
+  // later, from a slider — or switch it to the other kind entirely
+  handle.set_effect(VideoEffect::LumaKey(LumaKey { min: 0.1, ..LumaKey::default() }));
+  ```
+
+  `ColorCorrection` is brightness, contrast, saturation, hue, gamma and
+  opacity; `LumaKey` cuts out what is darker than `min` or brighter than
+  `max`, fading over a smoothing distance past each, and multiplies the
+  alpha a pixel already has so it can follow a chroma key. Both defaults
+  change nothing, and an element whose effect changes nothing — or that is
+  turned off through `VideoEffectHandle::set_enabled` — hands each frame
+  straight through.
+
+  One element per backend rather than one per effect, because every effect
+  resolves to the same small set of numbers: a colour matrix, an exponent,
+  an opacity and a luma mask. One D3D11 shader, one CUDA kernel (PTX, so
+  still no toolkit) and one software loop evaluate that, and an effect is
+  added once. The GPU backends' tests compare their output with the
+  software element's pixel for pixel: exact where the effect is linear,
+  within one step where a gamma is set.
+
 - **Speech becomes subtitles: `WhisperTranscriber`, and `subtitle` to carry
   what it says.** Two halves of one feature, kept apart on purpose.
 

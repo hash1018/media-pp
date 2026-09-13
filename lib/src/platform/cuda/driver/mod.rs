@@ -207,6 +207,9 @@ pub(crate) struct CudaDriver {
     /// Turns an NV12 surface into a BGRA one, which is what a filter
     /// wanting BGRA needs in front of a camera.
     nv12_to_bgra: CUfunction,
+    /// Runs a colour matrix, an exponent, an opacity and a luma mask over a
+    /// BGRA surface — what [`crate::elements::CudaVideoEffect`] is.
+    effect_bgra: CUfunction,
 }
 
 // SAFETY: a `CUcontext` is not thread-affine — it is pushed onto whichever
@@ -261,6 +264,7 @@ impl CudaDriver {
                         "extract_alpha_half",
                         "key_bgra",
                         "nv12_to_bgra",
+                        "effect_bgra",
                     ],
                 ) {
                     Ok(convert) => Ok((blend, convert)),
@@ -285,6 +289,7 @@ impl CudaDriver {
                         extract_alpha_half,
                         key_bgra,
                         nv12_to_bgra,
+                        effect_bgra,
                     ],
                 ),
             ) = match loaded {
@@ -309,6 +314,7 @@ impl CudaDriver {
                 extract_alpha_half,
                 key_bgra,
                 nv12_to_bgra,
+                effect_bgra,
             })
         }
     }
@@ -557,6 +563,91 @@ impl CudaDriver {
                     "cuLaunchKernel",
                     cuLaunchKernel(
                         self.key_bgra,
+                        grid_x,
+                        grid_y,
+                        1,
+                        BLOCK,
+                        BLOCK,
+                        1,
+                        0,
+                        std::ptr::null_mut(),
+                        params.as_mut_ptr(),
+                        std::ptr::null_mut(),
+                    ),
+                )
+            }
+        })
+    }
+
+    /// Runs one video effect over a BGRA surface: every pixel through a
+    /// colour matrix, an exponent, an opacity and a luma mask, into
+    /// `destination`.
+    ///
+    /// The numbers arrive resolved — `rows` one per output channel red,
+    /// green, blue as `[from_red, from_green, from_blue, offset]`, `luma` as
+    /// `[low, low_inv, high, high_inv]` — and the kernel evaluates exactly the
+    /// definition the video-effect module's `EffectParams` documents, which
+    /// is also what the D3D11 shader and the software element evaluate.
+    ///
+    /// Both surfaces must be BGRA at `width` x `height`. Launches
+    /// asynchronously; [`CudaDriver::synchronize`] is what makes the result
+    /// visible outside this context's stream ordering.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn effect_bgra(
+        &self,
+        source: BgraSurface,
+        destination: BgraSurface,
+        width: u32,
+        height: u32,
+        rows: &[[f32; 4]; 3],
+        exponent: f32,
+        opacity: f32,
+        luma: [f32; 4],
+    ) -> Result<(), CudaDriverError> {
+        if width == 0 || height == 0 {
+            return Ok(());
+        }
+        const BLOCK: u32 = 16;
+        let (grid_x, grid_y) = (width.div_ceil(BLOCK), height.div_ceil(BLOCK));
+
+        let mut dst = destination.pixels;
+        let mut dst_pitch = destination.pitch as u32;
+        let mut src = source.pixels;
+        let mut src_pitch = source.pitch as u32;
+        let mut width = width;
+        let mut height = height;
+        let mut matrix: [f32; 12] = [
+            rows[0][0], rows[0][1], rows[0][2], rows[0][3], rows[1][0], rows[1][1], rows[1][2],
+            rows[1][3], rows[2][0], rows[2][1], rows[2][2], rows[2][3],
+        ];
+        let mut exponent = exponent;
+        let mut opacity = opacity;
+        let mut luma = luma;
+
+        self.with_context(|| {
+            let mut params: [*mut c_void; 24] = [std::ptr::null_mut(); 24];
+            params[0] = (&mut dst) as *mut _ as *mut c_void;
+            params[1] = (&mut dst_pitch) as *mut _ as *mut c_void;
+            params[2] = (&mut src) as *mut _ as *mut c_void;
+            params[3] = (&mut src_pitch) as *mut _ as *mut c_void;
+            params[4] = (&mut width) as *mut _ as *mut c_void;
+            params[5] = (&mut height) as *mut _ as *mut c_void;
+            for (slot, value) in params[6..18].iter_mut().zip(matrix.iter_mut()) {
+                *slot = value as *mut f32 as *mut c_void;
+            }
+            params[18] = (&mut exponent) as *mut _ as *mut c_void;
+            params[19] = (&mut opacity) as *mut _ as *mut c_void;
+            for (slot, value) in params[20..24].iter_mut().zip(luma.iter_mut()) {
+                *slot = value as *mut f32 as *mut c_void;
+            }
+            // SAFETY: one pointer per parameter `effect_bgra` declares, in
+            // that order, each at a live local that outlives the launch call;
+            // the context is current inside `with_context`.
+            unsafe {
+                check(
+                    "cuLaunchKernel",
+                    cuLaunchKernel(
+                        self.effect_bgra,
                         grid_x,
                         grid_y,
                         1,
