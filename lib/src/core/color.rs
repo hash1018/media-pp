@@ -35,7 +35,8 @@ impl Color {
 /// [`SwScaler`](crate::elements::SwScaler). A *stream* carries them only if
 /// its encoder was told them before it opened, which is what
 /// [`SwEncoder::with_color`](crate::elements::SwEncoder::with_color) and,
-/// with the `cuda` feature, `CudaEncoder::with_color` are for. Without
+/// with the `cuda` feature, `CudaEncoder::with_color` — and on Windows with
+/// `d3d11`, `D3d11VideoEncoder::with_color` — are for. Without
 /// them a player guesses, and the guesses differ: FFmpeg reads an untagged
 /// stream as BT.601 whatever its size, which turned a BT.709 recording's
 /// (230, 20, 20) into (211, 0, 22).

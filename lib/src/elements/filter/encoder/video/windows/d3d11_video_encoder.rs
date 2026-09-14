@@ -19,6 +19,7 @@ use crate::pp_log::{PpLog, pp_error, pp_info};
 
 use crate::{
     buffer::MediaBuffer,
+    color::ColorDescription,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
     control::ControlMsg,
     element::{Element, ElementType, Sink, Source, element_pp_log},
@@ -89,6 +90,15 @@ pub enum D3d11VideoEncoderError {
     /// The supplied immediate context belongs to another D3D11 device.
     #[error("the shared ID3D11DeviceContext belongs to a different ID3D11Device than the encoder")]
     ContextDeviceMismatch,
+
+    /// [`D3d11VideoEncoder::with_color`] was asked to describe BGRA input,
+    /// which the encoder converts by a matrix of its own choosing.
+    #[error(
+        "a colour description is only for NV12 input: given BGRA the encoder \
+         converts it itself and picks its own matrix — convert to NV12 with a \
+         D3d11Scaler first and describe that"
+    )]
+    DescribedBgraInput,
 
     /// The input texture belongs to another D3D11 device.
     #[error("a Pixel::D3D11 frame's texture lives on a different ID3D11Device than this encoder")]
@@ -451,6 +461,57 @@ impl D3d11VideoEncoder {
         context: Arc<Mutex<ID3D11DeviceContext>>,
         options: D3d11VideoEncoderOptions,
     ) -> std::result::Result<Self, D3d11VideoEncoderError> {
+        Self::open(name, device, context, options, None)
+    }
+
+    /// As [`Self::new`], and the stream says `color` is what it holds — see
+    /// [`ColorDescription`], and `SwEncoder`'s and `CudaEncoder`'s
+    /// `with_color` for the same on the other backends. Nothing is
+    /// converted: the frames must already be what `color` says, as a
+    /// [`D3d11Scaler`](crate::elements::D3d11Scaler) writing
+    /// [`D3d11ScalerFormat::Nv12`](crate::elements::D3d11ScalerFormat::Nv12)
+    /// makes them [`ColorDescription::BT709_LIMITED`].
+    ///
+    /// # Only for NV12 input
+    ///
+    /// Given [`D3d11VideoInputFormat::Bgra`] the encoder converts for
+    /// itself, so what the stream holds is the encoder's choice, and no
+    /// description a caller passes can be known to match it. Measured with
+    /// (230, 20, 20) on an NVIDIA GPU:
+    ///
+    /// - `h264_nvenc` converts with BT.601, limited range, and FFmpeg's
+    ///   wrapper writes that into the stream by itself — `new` is right for
+    ///   it as it stands.
+    /// - `h264_mf` writes nothing, and converts with BT.709 at 1920x1080
+    ///   and 960x540 but with BT.601 at 320x240. A fixed description would
+    ///   be wrong for some sizes, and Media Foundation picks whichever
+    ///   transform the driver registers, so another vendor's may draw the
+    ///   line elsewhere.
+    ///
+    /// So this refuses BGRA input with
+    /// [`D3d11VideoEncoderError::DescribedBgraInput`]. To say what an
+    /// `h264_mf` stream holds, convert to NV12 first — the scaler above does
+    /// it with a matrix it states — and describe that.
+    pub fn with_color(
+        name: impl Into<String>,
+        device: &ID3D11Device,
+        context: Arc<Mutex<ID3D11DeviceContext>>,
+        options: D3d11VideoEncoderOptions,
+        color: ColorDescription,
+    ) -> std::result::Result<Self, D3d11VideoEncoderError> {
+        if options.input_format == D3d11VideoInputFormat::Bgra {
+            return Err(D3d11VideoEncoderError::DescribedBgraInput);
+        }
+        Self::open(name, device, context, options, Some(color))
+    }
+
+    fn open(
+        name: impl Into<String>,
+        device: &ID3D11Device,
+        context: Arc<Mutex<ID3D11DeviceContext>>,
+        options: D3d11VideoEncoderOptions,
+        color: Option<ColorDescription>,
+    ) -> std::result::Result<Self, D3d11VideoEncoderError> {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::D3d11VideoEncoder, &name, None);
         // This element sits behind a `Queue` more often than not, so the
@@ -514,6 +575,9 @@ impl D3d11VideoEncoder {
                     .try_clone()
                     .ok_or(D3d11VideoEncoderError::HwFramesAlloc)?
                     .into_raw();
+                if let Some(color) = color {
+                    color.tell(ptr);
+                }
             }
             // Media Foundation picks a transform for itself, and left alone
             // it may pick a software one — a hardware encoder that quietly
@@ -1089,6 +1153,207 @@ mod tests {
                 }
                 Err(error) => panic!("{codec:?}/{input_format:?} failed to open: {error}"),
             }
+        }
+    }
+
+    /// A BGRA texture holding one colour throughout, wrapped the way every
+    /// producer here wraps one.
+    fn flat_bgra(
+        device: &ID3D11Device,
+        [b, g, r]: [u8; 3],
+        width: u32,
+        height: u32,
+    ) -> ffmpeg::frame::Video {
+        use windows::Win32::Graphics::{
+            Direct3D11::{D3D11_SUBRESOURCE_DATA, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT},
+            Dxgi::Common::DXGI_SAMPLE_DESC,
+        };
+        let pixels: Vec<u8> = [b, g, r, 255].repeat((width * height) as usize);
+        let description = D3D11_TEXTURE2D_DESC {
+            Width: width,
+            Height: height,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Usage: D3D11_USAGE_DEFAULT,
+            BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
+            CPUAccessFlags: 0,
+            MiscFlags: 0,
+        };
+        let initial = D3D11_SUBRESOURCE_DATA {
+            pSysMem: pixels.as_ptr().cast(),
+            SysMemPitch: width * 4,
+            SysMemSlicePitch: 0,
+        };
+        let mut texture = None;
+        // SAFETY: the descriptor is fully initialized, `initial` points at
+        // `width * height` BGRA pixels that outlive the call, and `texture`
+        // is a live out-parameter.
+        unsafe { device.CreateTexture2D(&description, Some(&initial), Some(&mut texture)) }
+            .expect("creating a filled D3D11 texture should succeed on a working device");
+        crate::platform::windows::d3d11va::wrap_d3d11_texture(
+            texture.expect("CreateTexture2D succeeded without producing a texture"),
+            width,
+            height,
+        )
+        .unwrap()
+    }
+
+    /// The defect this exists for, on this backend: `h264_mf` writes
+    /// nothing about the colour it holds, so a reader guesses, and FFmpeg's
+    /// guess of BT.601 turned a BT.709 (230, 20, 20) into (211, 0, 22).
+    /// Given NV12 the scaler made with BT.709 and told so, the file says
+    /// BT.709 limited — and what it holds really is that red as BT.709,
+    /// which BGRA handed to the transform was not at this size.
+    #[test]
+    fn a_media_foundation_stream_told_bt709_says_it_and_holds_it() {
+        use crate::elements::{D3d11Scaler, D3d11ScalerFormat, FileMuxer};
+
+        let _session = encoder_session();
+        let Some((device, context)) = try_device() else {
+            return;
+        };
+        if !supports_d3d11va(&device) {
+            return;
+        }
+        let codec = D3d11VideoCodec::H264MediaFoundation;
+        let options = options(codec, D3d11VideoInputFormat::Nv12);
+        let mut encoder = match D3d11VideoEncoder::with_color(
+            "test-mf-colour",
+            &device,
+            context.clone(),
+            options,
+            ColorDescription::BT709_LIMITED,
+        ) {
+            Ok(encoder) => encoder,
+            Err(error) if is_absent_hardware(&error) => {
+                eprintln!("skipping: no Media Foundation H.264 transform here: {error}");
+                return;
+            }
+            Err(error) => panic!("h264_mf failed to open: {error}"),
+        };
+
+        let path =
+            std::env::temp_dir().join(format!("d3d11_encoder_colour_{}.mp4", std::process::id()));
+        let mut muxer = FileMuxer::create(&path).expect("the file opens");
+        let track = muxer
+            .add_stream("video", encoder.parameters(), options.time_base)
+            .expect("the track is added");
+        let mut sinks = muxer.open().expect("the header is written");
+        encoder.src_pads()[0].link(sinks.take(track).expect("the muxer's own track"));
+
+        let (width, height) = (options.width, options.height);
+        let mut scaler = D3d11Scaler::new(
+            "test-to-nv12",
+            &device,
+            context,
+            D3d11ScalerFormat::Nv12,
+            width,
+            height,
+        )
+        .expect("the scaler opens");
+        scaler.src_pads()[0].link(Box::new(encoder));
+
+        let pool = crate::pool::UnboundObjectPool::new(
+            0,
+            {
+                let device = device.clone();
+                move || flat_bgra(&device, [20, 20, 230], width, height)
+            },
+            |_| {},
+        );
+        for index in 0..30i64 {
+            let mut frame = pool.get();
+            frame.set_pts(Some(index));
+            scaler
+                .consume(MediaBuffer::Video(Arc::new(frame)))
+                .expect("a frame is converted and encoded");
+        }
+        scaler
+            .consume(MediaBuffer::Eos)
+            .expect("the file is finished");
+        drop(scaler);
+
+        let mut input = ffmpeg::format::input(&path).expect("the file reads back");
+        let stream = input
+            .streams()
+            .best(ffmpeg::media::Type::Video)
+            .expect("it has its picture");
+        let index = stream.index();
+        let parameters = stream.parameters();
+        // SAFETY: a live `AVCodecParameters` owned by `parameters`.
+        let said = unsafe {
+            let raw = &*parameters.as_ptr();
+            (raw.color_space, raw.color_range)
+        };
+        assert_eq!(
+            said,
+            (
+                ffi::AVColorSpace::AVCOL_SPC_BT709,
+                ffi::AVColorRange::AVCOL_RANGE_MPEG
+            ),
+            "the file says what the encoder was told"
+        );
+
+        let mut decoder = ffmpeg::codec::context::Context::from_parameters(parameters)
+            .and_then(|context| context.decoder().video())
+            .expect("the decoder opens");
+        let mut picture = ffmpeg::frame::Video::empty();
+        for (stream, packet) in input.packets() {
+            if stream.index() != index {
+                continue;
+            }
+            decoder.send_packet(&packet).expect("a packet is taken");
+            if decoder.receive_frame(&mut picture).is_ok() {
+                break;
+            }
+        }
+        std::fs::remove_file(&path).ok();
+        assert_eq!(picture.format(), ffmpeg::format::Pixel::YUV420P);
+        let (x, y) = (width as usize / 2, height as usize / 2);
+        let held = (
+            picture.data(0)[y * picture.stride(0) + x],
+            picture.data(1)[y / 2 * picture.stride(1) + x / 2],
+            picture.data(2)[y / 2 * picture.stride(2) + x / 2],
+        );
+        // (230, 20, 20) as BT.709 limited. As BT.601 it would be (87, 97, 220).
+        let (want_y, want_u, want_v) = (72u8, 107u8, 220u8);
+        assert!(
+            held.0.abs_diff(want_y) <= 2
+                && held.1.abs_diff(want_u) <= 2
+                && held.2.abs_diff(want_v) <= 2,
+            "the stream holds {held:?}, not BT.709's ({want_y}, {want_u}, {want_v})"
+        );
+    }
+
+    /// BGRA is converted by the encoder, by a matrix it picks — `h264_mf`
+    /// picked BT.601 at 320x240 and BT.709 at 1080p — so a description of
+    /// it would be a guess, and is refused before anything is opened.
+    #[test]
+    fn a_colour_for_bgra_input_is_refused() {
+        let _session = encoder_session();
+        let Some((device, context)) = try_device() else {
+            return;
+        };
+        for codec in [
+            D3d11VideoCodec::H264Nvenc,
+            D3d11VideoCodec::H264MediaFoundation,
+        ] {
+            let refused = D3d11VideoEncoder::with_color(
+                "test-bgra-colour",
+                &device,
+                context.clone(),
+                options(codec, D3d11VideoInputFormat::Bgra),
+                ColorDescription::BT709_LIMITED,
+            );
+            assert!(
+                matches!(refused, Err(D3d11VideoEncoderError::DescribedBgraInput)),
+                "{codec:?}"
+            );
         }
     }
 

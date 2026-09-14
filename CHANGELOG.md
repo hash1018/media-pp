@@ -496,6 +496,14 @@ compile error with no explanation.
   BT.709 recording's (230, 20, 20) decoded as (211, 0, 22).
   `ColorDescription::describe` says the same about a frame.
 
+  `D3d11VideoEncoder` gains the same `with_color`, for NV12 input only:
+  given BGRA the encoder converts for itself, by a matrix of its own —
+  `h264_nvenc` BT.601, which it tags; `h264_mf` BT.601 at 320x240 and
+  BT.709 at 1080p, which it does not — so describing BGRA is refused with
+  `D3d11VideoEncoderError::DescribedBgraInput`. Convert with
+  `D3d11Scaler` to `D3d11ScalerFormat::Nv12`, which states BT.709 limited,
+  and describe that.
+
   New: `color::ColorDescription`.
 
 ### Changed
