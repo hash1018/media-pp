@@ -233,10 +233,11 @@ Running:
 - `D3d11VideoEncoder`'s NVENC codecs need an NVIDIA GPU and an FFmpeg built
   with NVENC; its Media Foundation codecs work on Intel, AMD and NVIDIA. A
   codec the machine lacks fails to open with a typed error.
-- `CudaDecoder` needs a decoder for the codec that FFmpeg can run on NVDEC.
-  `CudaDecoder::supports` answers that without a device; a codec with none
-  fails to open with a typed error, and `SwDecoder` into `CudaUpload` is
-  the way onto the GPU for it.
+- `CudaDecoder` needs a decoder for the codec that FFmpeg can run on NVDEC,
+  and `D3d11Decoder` and `D3d12Decoder` one it can run through D3D11VA or
+  D3D12VA. Each one's `supports` answers that without a device; a codec with
+  none fails to open with a typed error, and `SwDecoder` into an upload
+  element is the way onto the GPU for it.
 - Create one `CudaDevice` per process, before starting pipelines. It opens
   the device's primary context, and creating or dropping one while another
   thread decodes or encodes can crash the NVIDIA driver.

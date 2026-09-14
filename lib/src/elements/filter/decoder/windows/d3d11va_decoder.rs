@@ -20,6 +20,7 @@ use crate::{
     pool::UnboundObjectPool,
 };
 
+use super::super::hw_decoder::capable_decoder;
 use super::super::preroll_gate::{PrerollGate, hw_surface_budget};
 use crate::elements::filter::is_codec_drain_boundary;
 
@@ -30,6 +31,10 @@ pub enum D3d11DecoderError {
     /// The selected stream is not video.
     #[error("unsupported media type: {0:?} (D3D11VA decode is video-only)")]
     UnsupportedMediaType(ffmpeg::media::Type),
+    /// No decoder this FFmpeg build has for the codec can decode through
+    /// D3D11VA — see [`D3d11Decoder::supports`].
+    #[error("no decoder in this FFmpeg build decodes {0:?} through D3D11VA")]
+    UnsupportedCodec(ffmpeg::codec::Id),
     /// FFmpeg rejected decoder or packet/frame processing.
 
     #[error("ffmpeg error: {0}")]
@@ -110,6 +115,11 @@ impl D3d11Decoder {
     /// queue/buffer depth; the internal candidate must not be counted again.
     /// Too small a downstream budget reproduces exactly that failure under
     /// real playback, not just in theory.
+    ///
+    /// The decoder opened is the first one FFmpeg has for the codec that can
+    /// decode through D3D11VA, which need not be the one FFmpeg would pick by
+    /// default — see [`Self::supports`]. A codec with none fails here with
+    /// [`D3d11DecoderError::UnsupportedCodec`] rather than at the first frame.
     pub fn new(
         name: impl Into<String>,
         params: ffmpeg::codec::Parameters,
@@ -121,6 +131,16 @@ impl D3d11Decoder {
         let extra_hw_frames = hw_surface_budget(downstream_hw_frames).ok_or(
             D3d11DecoderError::InvalidSurfaceBudget(downstream_hw_frames),
         )?;
+
+        // What to open is settled before any device work, so a stream this
+        // cannot decode is refused before it touches the device.
+        let mut context = ffmpeg::codec::context::Context::from_parameters(params)?;
+        if context.medium() != ffmpeg::media::Type::Video {
+            return Err(D3d11DecoderError::UnsupportedMediaType(context.medium()));
+        }
+        let codec = d3d11va_capable_decoder(context.id())
+            .ok_or(D3d11DecoderError::UnsupportedCodec(context.id()))?;
+
         // FFmpeg reaches this device's immediate context for the video
         // context it decodes through, and decoded frames are consumed on
         // another thread past the next `Queue`.
@@ -131,10 +151,6 @@ impl D3d11Decoder {
         let hw_device_ctx =
             unsafe { create_hw_device_ctx(device) }.map_err(D3d11DecoderError::HwDeviceInit)?;
 
-        let mut context = ffmpeg::codec::context::Context::from_parameters(params)?;
-        if context.medium() != ffmpeg::media::Type::Video {
-            return Err(D3d11DecoderError::UnsupportedMediaType(context.medium()));
-        }
         let codec_device_ctx = hw_device_ctx
             .try_clone()
             .ok_or(D3d11DecoderError::HwDeviceRef)?;
@@ -148,7 +164,7 @@ impl D3d11Decoder {
             (*ctx_ptr).extra_hw_frames = extra_hw_frames;
         }
 
-        let decoder = context.decoder().video()?;
+        let decoder = context.decoder().open_as(codec)?.video()?;
 
         let pad = SrcPad::with_contract(
             format!("{name}_src"),
@@ -168,6 +184,23 @@ impl D3d11Decoder {
             pool,
             preroll_gate: PrerollGate::default(),
         })
+    }
+
+    /// Whether this FFmpeg build has a decoder for `codec` that can decode
+    /// through D3D11VA — whether [`Self::new`] gets past choosing one. Needs
+    /// no device, so a caller can route a stream elsewhere before building
+    /// anything.
+    ///
+    /// A question about the decoder, not the codec — see `CudaDecoder`'s
+    /// `supports`, which answers the same for NVDEC: with `libdav1d` built
+    /// in, FFmpeg's default for AV1 has no hardware path, while its own `av1`
+    /// decoder does.
+    ///
+    /// `true` does not promise the GPU takes every stream of the codec. A
+    /// profile the driver lacks, or a codec the card is older than, still
+    /// fails at the first frame with [`D3d11DecoderError::HwAccelUnavailable`].
+    pub fn supports(codec: ffmpeg::codec::Id) -> bool {
+        d3d11va_capable_decoder(codec).is_some()
     }
 
     fn drain(&mut self) -> crate::error::Result<()> {
@@ -278,6 +311,12 @@ impl Drop for D3d11Decoder {
     fn drop(&mut self) {
         pp_info!(self, "dropped: freeing hw_device_ctx");
     }
+}
+
+/// The first decoder for `id` that decodes through D3D11VA — see
+/// [`capable_decoder`].
+fn d3d11va_capable_decoder(id: ffmpeg::codec::Id) -> Option<ffmpeg::Codec> {
+    capable_decoder(id, ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_D3D11VA)
 }
 
 /// Builds and initializes `avctx->hw_frames_ctx` during D3D11VA format
@@ -417,5 +456,122 @@ mod tests {
         drop(decoder);
         drop(input);
         drop(device);
+    }
+
+    /// Video parameters for `codec` carrying nothing but its size, which is
+    /// all choosing a decoder asks of them.
+    fn video_parameters(codec: ffmpeg::codec::Id) -> ffmpeg::codec::Parameters {
+        let mut params = ffmpeg::codec::Parameters::new();
+        // SAFETY: `as_mut_ptr` on parameters this function just created and
+        // still owns exclusively; every field set is a plain one.
+        unsafe {
+            let raw = params.as_mut_ptr();
+            (*raw).codec_type = ffmpeg::media::Type::Video.into();
+            (*raw).codec_id = codec.into();
+            (*raw).width = 320;
+            (*raw).height = 240;
+        }
+        params
+    }
+
+    /// D3D11VA has no ProRes, and no FFmpeg decoder offers a path for it.
+    /// Answered from FFmpeg's own tables, so it holds on a machine with no GPU.
+    #[test]
+    fn supports_says_no_for_a_codec_d3d11va_lacks() {
+        crate::init().unwrap();
+        assert!(!D3d11Decoder::supports(ffmpeg::codec::Id::PRORES));
+    }
+
+    /// Refused while being built, as a typed error, and before the device is
+    /// touched. It used to open, as the software decoder FFmpeg handed it,
+    /// and fail only at the first frame.
+    #[test]
+    fn a_codec_with_no_d3d11va_decoder_is_refused_when_built() {
+        let Some((device, _context)) = try_d3d11_device() else {
+            return;
+        };
+        let codec = ffmpeg::codec::Id::PRORES;
+        let error = D3d11Decoder::new("test-decoder", video_parameters(codec), &device, 0)
+            .err()
+            .expect("a codec with no D3D11VA decoder must not open");
+        assert!(
+            matches!(error, D3d11DecoderError::UnsupportedCodec(id) if id == codec),
+            "expected UnsupportedCodec, got {error:?}"
+        );
+    }
+
+    /// The case that broke, run: AV1, whose default decoder in a build with
+    /// `libdav1d` has no D3D11VA path. What opens is FFmpeg's own `av1`,
+    /// and every frame of a real AV1 stream comes out on the GPU. Without
+    /// the choice, `libdav1d` opened and the first frame failed with
+    /// `HwAccelUnavailable`.
+    ///
+    /// A GPU without AV1 decode fails that same way for a different reason,
+    /// and is skipped — after the decoder chosen has been checked, which is
+    /// the part a machine without the hardware can still vouch for.
+    #[test]
+    fn av1_opens_a_d3d11va_decoder_and_decodes_on_the_gpu() {
+        use crate::elements::AppSink;
+
+        let Some((device, _context)) = try_d3d11_device() else {
+            return;
+        };
+        let Some((params, packets)) = crate::test_support::try_av1_packets() else {
+            return;
+        };
+        let mut decoder = match D3d11Decoder::new("test-av1", params, &device, 4) {
+            Ok(decoder) => decoder,
+            Err(D3d11DecoderError::HwDeviceInit(code)) => {
+                eprintln!("skipping: this device does not do video decoding (code {code})");
+                return;
+            }
+            Err(error) => panic!("AV1 did not open: {error}"),
+        };
+        let opened = decoder
+            .decoder
+            .codec()
+            .expect("an open decoder has a codec");
+        // SAFETY: the codec an open decoder reports is FFmpeg's static one.
+        let through_d3d11va = unsafe {
+            super::super::super::hw_decoder::decodes_on(
+                opened.as_ptr(),
+                ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_D3D11VA,
+            )
+        };
+        assert!(
+            through_d3d11va,
+            "AV1 opened {}, which has no D3D11VA path",
+            opened.name()
+        );
+
+        let on_gpu = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = Arc::clone(&on_gpu);
+        decoder.src_pads()[0].link(Box::new(AppSink::new("test-av1-frames", move |buffer| {
+            if let MediaBuffer::Video(frame) = buffer
+                && frame.format() == ffmpeg::format::Pixel::D3D11
+            {
+                counted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            Ok(())
+        })));
+        let sent = packets.len();
+        let decoded = (|| {
+            for packet in packets {
+                decoder.consume(MediaBuffer::Packet(Arc::new(packet)))?;
+            }
+            decoder.consume(MediaBuffer::Eos)
+        })();
+        if let Err(crate::error::Error::D3d11DecoderError(D3d11DecoderError::HwAccelUnavailable)) =
+            decoded
+        {
+            eprintln!("skipping the decode: this GPU does not decode AV1 through D3D11VA");
+            return;
+        }
+        decoded.expect("an AV1 stream decodes");
+        assert_eq!(
+            on_gpu.load(std::sync::atomic::Ordering::Relaxed),
+            sent,
+            "every AV1 frame comes out as a D3D11 texture"
+        );
     }
 }

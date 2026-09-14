@@ -15,6 +15,7 @@ use crate::{
     pool::UnboundObjectPool,
 };
 
+use super::super::hw_decoder::capable_decoder;
 use super::super::preroll_gate::PrerollGate;
 use crate::elements::filter::is_codec_drain_boundary;
 
@@ -25,6 +26,10 @@ pub enum D3d12DecoderError {
     /// The selected stream is not video.
     #[error("unsupported media type: {0:?} (D3D12VA decode is video-only)")]
     UnsupportedMediaType(ffmpeg::media::Type),
+    /// No decoder this FFmpeg build has for the codec can decode through
+    /// D3D12VA — see [`D3d12Decoder::supports`].
+    #[error("no decoder in this FFmpeg build decodes {0:?} through D3D12VA")]
+    UnsupportedCodec(ffmpeg::codec::Id),
     /// FFmpeg rejected decoder or packet/frame processing.
 
     #[error("ffmpeg error: {0}")]
@@ -92,6 +97,11 @@ impl D3d12Decoder {
     /// device the renderer reads from — required for the zero-copy path
     /// to be valid at all; checked at render time, not just documented,
     /// via `D3d12Renderer`'s own device-mismatch guard.
+    ///
+    /// The decoder opened is the first one FFmpeg has for the codec that can
+    /// decode through D3D12VA, which need not be the one FFmpeg would pick by
+    /// default — see [`Self::supports`]. A codec with none fails here with
+    /// [`D3d12DecoderError::UnsupportedCodec`] rather than at the first frame.
     pub fn new(
         name: impl Into<String>,
         params: ffmpeg::codec::Parameters,
@@ -100,15 +110,20 @@ impl D3d12Decoder {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::D3d12Decoder, &name, None);
 
+        // What to open is settled before any device work, so a stream this
+        // cannot decode is refused before it touches the device.
+        let mut context = ffmpeg::codec::context::Context::from_parameters(params)?;
+        if context.medium() != ffmpeg::media::Type::Video {
+            return Err(D3d12DecoderError::UnsupportedMediaType(context.medium()));
+        }
+        let codec = d3d12va_capable_decoder(context.id())
+            .ok_or(D3d12DecoderError::UnsupportedCodec(context.id()))?;
+
         // SAFETY: `device` is live and the helper clones its COM reference
         // into the returned FFmpeg hardware-device context.
         let hw_device_ctx =
             unsafe { create_hw_device_ctx(device) }.map_err(D3d12DecoderError::HwDeviceInit)?;
 
-        let mut context = ffmpeg::codec::context::Context::from_parameters(params)?;
-        if context.medium() != ffmpeg::media::Type::Video {
-            return Err(D3d12DecoderError::UnsupportedMediaType(context.medium()));
-        }
         let codec_device_ctx = hw_device_ctx
             .try_clone()
             .ok_or(D3d12DecoderError::HwDeviceRef)?;
@@ -121,7 +136,7 @@ impl D3d12Decoder {
             (*ctx_ptr).get_format = Some(get_format);
         }
 
-        let decoder = context.decoder().video()?;
+        let decoder = context.decoder().open_as(codec)?.video()?;
 
         let pad = SrcPad::with_contract(
             format!("{name}_src"),
@@ -141,6 +156,16 @@ impl D3d12Decoder {
             pool,
             preroll_gate: PrerollGate::default(),
         })
+    }
+
+    /// Whether this FFmpeg build has a decoder for `codec` that can decode
+    /// through D3D12VA — whether [`Self::new`] gets past choosing one. Needs
+    /// no device. The same question `D3d11Decoder::supports` answers for
+    /// D3D11VA, and with the same limit: `true` does not promise the GPU
+    /// takes every profile, and one it lacks still fails at the first frame
+    /// with [`D3d12DecoderError::HwAccelUnavailable`].
+    pub fn supports(codec: ffmpeg::codec::Id) -> bool {
+        d3d12va_capable_decoder(codec).is_some()
     }
 
     fn drain(&mut self) -> crate::error::Result<()> {
@@ -257,6 +282,12 @@ impl Drop for D3d12Decoder {
     }
 }
 
+/// The first decoder for `id` that decodes through D3D12VA — see
+/// [`capable_decoder`].
+fn d3d12va_capable_decoder(id: ffmpeg::codec::Id) -> Option<ffmpeg::Codec> {
+    capable_decoder(id, ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_D3D12VA)
+}
+
 unsafe extern "C" fn get_format(
     _ctx: *mut ffi::AVCodecContext,
     mut fmt: *const ffi::AVPixelFormat,
@@ -271,5 +302,123 @@ unsafe extern "C" fn get_format(
             fmt = fmt.add(1);
         }
         ffi::AVPixelFormat::AV_PIX_FMT_NONE
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::try_d3d12_device;
+
+    /// Video parameters for `codec` carrying nothing but its size, which is
+    /// all choosing a decoder asks of them.
+    fn video_parameters(codec: ffmpeg::codec::Id) -> ffmpeg::codec::Parameters {
+        let mut params = ffmpeg::codec::Parameters::new();
+        // SAFETY: `as_mut_ptr` on parameters this function just created and
+        // still owns exclusively; every field set is a plain one.
+        unsafe {
+            let raw = params.as_mut_ptr();
+            (*raw).codec_type = ffmpeg::media::Type::Video.into();
+            (*raw).codec_id = codec.into();
+            (*raw).width = 320;
+            (*raw).height = 240;
+        }
+        params
+    }
+
+    /// No FFmpeg decoder offers a D3D12VA path for ProRes. Answered from
+    /// FFmpeg's own tables, so it holds on a machine with no GPU.
+    #[test]
+    fn supports_says_no_for_a_codec_d3d12va_lacks() {
+        crate::init().unwrap();
+        assert!(!D3d12Decoder::supports(ffmpeg::codec::Id::PRORES));
+    }
+
+    /// Refused while being built, before the device is touched, rather than
+    /// opening as software and failing at the first frame.
+    #[test]
+    fn a_codec_with_no_d3d12va_decoder_is_refused_when_built() {
+        let Some(device) = try_d3d12_device() else {
+            return;
+        };
+        let codec = ffmpeg::codec::Id::PRORES;
+        let error = D3d12Decoder::new("test-decoder", video_parameters(codec), &device)
+            .err()
+            .expect("a codec with no D3D12VA decoder must not open");
+        assert!(
+            matches!(error, D3d12DecoderError::UnsupportedCodec(id) if id == codec),
+            "expected UnsupportedCodec, got {error:?}"
+        );
+    }
+
+    /// AV1, run: FFmpeg's default for it with `libdav1d` built in has no
+    /// D3D12VA path, so what opens has to be its own `av1`, and every frame
+    /// of a real AV1 stream comes out on the GPU. A GPU without AV1 decode is
+    /// skipped once the choice of decoder has been checked — see
+    /// `D3d11Decoder`'s test of the same.
+    #[test]
+    fn av1_opens_a_d3d12va_decoder_and_decodes_on_the_gpu() {
+        use crate::elements::AppSink;
+
+        let Some(device) = try_d3d12_device() else {
+            return;
+        };
+        let Some((params, packets)) = crate::test_support::try_av1_packets() else {
+            return;
+        };
+        let mut decoder = match D3d12Decoder::new("test-av1", params, &device) {
+            Ok(decoder) => decoder,
+            Err(D3d12DecoderError::HwDeviceInit(code)) => {
+                eprintln!("skipping: this device does not do video decoding (code {code})");
+                return;
+            }
+            Err(error) => panic!("AV1 did not open: {error}"),
+        };
+        let opened = decoder
+            .decoder
+            .codec()
+            .expect("an open decoder has a codec");
+        // SAFETY: the codec an open decoder reports is FFmpeg's static one.
+        let through_d3d12va = unsafe {
+            super::super::super::hw_decoder::decodes_on(
+                opened.as_ptr(),
+                ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_D3D12VA,
+            )
+        };
+        assert!(
+            through_d3d12va,
+            "AV1 opened {}, which has no D3D12VA path",
+            opened.name()
+        );
+
+        let on_gpu = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = Arc::clone(&on_gpu);
+        decoder.src_pads()[0].link(Box::new(AppSink::new("test-av1-frames", move |buffer| {
+            if let MediaBuffer::Video(frame) = buffer
+                && frame.format() == ffmpeg::format::Pixel::D3D12
+            {
+                counted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            Ok(())
+        })));
+        let sent = packets.len();
+        let decoded = (|| {
+            for packet in packets {
+                decoder.consume(MediaBuffer::Packet(Arc::new(packet)))?;
+            }
+            decoder.consume(MediaBuffer::Eos)
+        })();
+        if let Err(crate::error::Error::D3d12DecoderError(D3d12DecoderError::HwAccelUnavailable)) =
+            decoded
+        {
+            eprintln!("skipping the decode: this GPU does not decode AV1 through D3D12VA");
+            return;
+        }
+        decoded.expect("an AV1 stream decodes");
+        assert_eq!(
+            on_gpu.load(std::sync::atomic::Ordering::Relaxed),
+            sent,
+            "every AV1 frame comes out as a D3D12 resource"
+        );
     }
 }

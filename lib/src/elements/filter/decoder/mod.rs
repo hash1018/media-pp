@@ -5,6 +5,11 @@
 
 #[cfg(feature = "cuda")]
 mod cuda;
+#[cfg(any(
+    feature = "cuda",
+    all(target_os = "windows", any(feature = "d3d11", feature = "d3d12"))
+))]
+mod hw_decoder;
 mod preroll_gate;
 mod sw_decoder;
 #[cfg(all(target_os = "windows", any(feature = "d3d11", feature = "d3d12")))]

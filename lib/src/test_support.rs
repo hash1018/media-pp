@@ -269,6 +269,79 @@ pub(crate) fn synthesize_reordered(name: &str, seconds: f64) -> Fixture {
         .expect("synthesize a reordered fixture")
 }
 
+/// A second of AV1 — the parameters its encoder describes and every packet it
+/// wrote — for the hardware decoders, which have to be shown to decode AV1
+/// on their own device rather than in whichever decoder FFmpeg prefers.
+///
+/// Made in memory, from whichever AV1 encoder this build has. Neither is one
+/// this project treats as always present — see [`synthesize`] on which
+/// are — so this answers `None`, after saying why, where there is none.
+#[cfg(all(target_os = "windows", any(feature = "d3d11", feature = "d3d12")))]
+pub(crate) fn try_av1_packets() -> Option<(ffmpeg_next::codec::Parameters, Vec<ffmpeg_next::Packet>)>
+{
+    use std::sync::{Arc, Mutex};
+
+    use crate::buffer::MediaBuffer;
+    use crate::element::{Sink, Source};
+    use crate::elements::{AppSink, SwEncoder, SwEncoderOptions};
+    use ffmpeg_next as ffmpeg;
+
+    crate::init().ok()?;
+    let (width, height) = (FIXTURE_WIDTH, FIXTURE_HEIGHT);
+    let options = |codec| SwEncoderOptions {
+        codec,
+        width,
+        height,
+        time_base: ffmpeg::Rational::new(1, FIXTURE_FPS),
+        frame_rate: ffmpeg::Rational::new(FIXTURE_FPS, 1),
+        bit_rate: 500_000,
+        gop_size: FIXTURE_FPS as u32,
+        max_b_frames: None,
+    };
+    let Some(mut encoder) = [VideoCodec::Svtav1, VideoCodec::Av1]
+        .into_iter()
+        .find_map(|codec| SwEncoder::new("av1-fixture", options(codec)).ok())
+    else {
+        eprintln!("skipping: this FFmpeg build has no AV1 encoder to make a stream with");
+        return None;
+    };
+    let parameters = encoder.parameters();
+    let packets = Arc::new(Mutex::new(Vec::new()));
+    let written = Arc::clone(&packets);
+    encoder.src_pads()[0].link(Box::new(AppSink::new(
+        "av1-fixture-packets",
+        move |buffer| {
+            if let MediaBuffer::Packet(packet) = buffer {
+                written.lock().unwrap().push((*packet).clone());
+            }
+            Ok(())
+        },
+    )));
+
+    let pool = crate::pool::UnboundObjectPool::new(
+        0,
+        move || ffmpeg::frame::Video::new(ffmpeg::format::Pixel::YUV420P, width, height),
+        |_| {},
+    );
+    for index in 0..FIXTURE_FPS as i64 {
+        let mut frame = pool.get();
+        // A picture that changes every frame, so there is something to code.
+        frame.data_mut(0).fill((index * 8) as u8);
+        frame.data_mut(1).fill(128);
+        frame.data_mut(2).fill(128);
+        frame.set_pts(Some(index));
+        encoder
+            .consume(MediaBuffer::Video(Arc::new(frame)))
+            .expect("the AV1 encoder takes a frame");
+    }
+    encoder
+        .consume(MediaBuffer::Eos)
+        .expect("the AV1 encoder flushes");
+    drop(encoder);
+    let packets = std::mem::take(&mut *packets.lock().unwrap());
+    Some((parameters, packets))
+}
+
 /// A synthesized file, and the facts about it a test may hold it to.
 pub(crate) struct Fixture {
     pub(crate) path: std::path::PathBuf,

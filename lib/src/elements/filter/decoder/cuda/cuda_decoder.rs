@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use super::super::hw_decoder::capable_decoder;
 use super::super::preroll_gate::{PrerollGate, hw_surface_budget};
 use ffmpeg_next::{self as ffmpeg, ffi};
 use thiserror::Error as ThisError;
@@ -304,59 +305,10 @@ impl Drop for CudaDecoder {
     }
 }
 
-/// The first decoder for `id` that decodes on CUDA, walking FFmpeg's decoders
-/// in the order `avcodec_find_decoder` does, so among several that qualify
-/// the one FFmpeg prefers wins. Experimental decoders are passed over, as
-/// that function passes them over whenever anything else is registered.
+/// The first decoder for `id` that decodes on CUDA — see
+/// [`capable_decoder`].
 fn cuda_capable_decoder(id: ffmpeg::codec::Id) -> Option<ffmpeg::Codec> {
-    let id: ffi::AVCodecID = id.into();
-    let mut opaque = std::ptr::null_mut();
-    loop {
-        // SAFETY: `opaque` is the iteration state `av_codec_iterate` owns and
-        // began from null; what it returns is null at the end and otherwise a
-        // static descriptor that lives as long as the program.
-        let codec = unsafe { ffi::av_codec_iterate(&mut opaque) };
-        if codec.is_null() {
-            return None;
-        }
-        // SAFETY: `codec` is non-null and static, as above.
-        unsafe {
-            let experimental = (*codec).capabilities & ffi::AV_CODEC_CAP_EXPERIMENTAL as i32 != 0;
-            if (*codec).id == id
-                && ffi::av_codec_is_decoder(codec) != 0
-                && !experimental
-                && decodes_on_cuda(codec)
-            {
-                return Some(ffmpeg::Codec::wrap(codec));
-            }
-        }
-    }
-}
-
-/// Whether `codec` can be handed a CUDA device context to decode with, which
-/// is the only way this element sets NVDEC up.
-///
-/// # Safety
-///
-/// `codec` must be a valid, non-null `AVCodec`.
-unsafe fn decodes_on_cuda(codec: *const ffi::AVCodec) -> bool {
-    let mut index = 0;
-    loop {
-        // SAFETY: the caller's promise; past the last configuration this
-        // returns null rather than reading out of bounds.
-        let config = unsafe { ffi::avcodec_get_hw_config(codec, index) };
-        if config.is_null() {
-            return false;
-        }
-        // SAFETY: non-null, and static like the codec it belongs to.
-        let (methods, device_type) = unsafe { ((*config).methods, (*config).device_type) };
-        if methods & ffi::AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX as i32 != 0
-            && device_type == ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_CUDA
-        {
-            return true;
-        }
-        index += 1;
-    }
+    capable_decoder(id, ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_CUDA)
 }
 
 /// Picks `AV_PIX_FMT_CUDA` out of whatever libavcodec offers. Unlike the
@@ -591,7 +543,12 @@ mod tests {
                 .codec()
                 .expect("an open decoder has a codec");
             // SAFETY: the codec an open decoder reports is FFmpeg's static one.
-            let on_cuda = unsafe { decodes_on_cuda(opened.as_ptr()) };
+            let on_cuda = unsafe {
+                super::super::super::hw_decoder::decodes_on(
+                    opened.as_ptr(),
+                    ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_CUDA,
+                )
+            };
             assert!(
                 on_cuda,
                 "{codec:?} opened {}, which has no CUDA path",

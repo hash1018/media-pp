@@ -151,9 +151,10 @@ compile error with no explanation.
   timeline monotonic across an upstream seek (now per track), and still
   finalizes on `Eos` alone rather than on `Stop`.
 
-- **`CudaDecoderError::UnsupportedCodec`.** `CudaDecoder::new` refuses a
-  codec no decoder can decode on CUDA with it (see Fixed), so a `match` over
-  `CudaDecoderError` needs an arm for it.
+- **`CudaDecoderError::UnsupportedCodec`, and the same on `D3d11DecoderError`
+  and `D3d12DecoderError`.** Each hardware decoder's `new` refuses a codec no
+  decoder can decode on its device with it (see Fixed), so a `match` over
+  any of the three needs an arm for it.
 
 ### Added
 
@@ -162,7 +163,8 @@ compile error with no explanation.
   choosing one. It needs no device, so a stream can be sent to `SwDecoder`
   and `CudaUpload` before anything is built. It speaks for FFmpeg, not the
   GPU: a profile NVDEC lacks still fails at the first frame with
-  `HwAccelUnavailable`.
+  `HwAccelUnavailable`. `D3d11Decoder::supports` and
+  `D3d12Decoder::supports` answer the same for D3D11VA and D3D12VA.
 
 - **`ReplayBuffer`: the last stretch of an encode, saved on request.** A
   muxer in shape — `add_stream` per track, `open` for one sink per track —
@@ -543,7 +545,9 @@ compile error with no explanation.
   software, and failed at the first frame with `HwAccelUnavailable`. It now
   opens `av1` and decodes on the GPU. A codec with no such decoder at all,
   ProRes say, is refused by `new` instead of opening and failing the same
-  way later.
+  way later. `D3d11Decoder` and `D3d12Decoder` opened FFmpeg's default too
+  and failed on AV1 the same way; they now choose the same way, for D3D11VA
+  and D3D12VA, and every frame of an AV1 stream comes out on the GPU.
 
 ## 0.2.0
 
