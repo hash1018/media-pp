@@ -24,6 +24,10 @@ pub enum CudaDecoderError {
     /// The selected stream is not video.
     #[error("unsupported media type: {0:?} (NVDEC decode is video-only)")]
     UnsupportedMediaType(ffmpeg::media::Type),
+    /// No decoder this FFmpeg build has for the codec can decode on CUDA —
+    /// see [`CudaDecoder::supports`].
+    #[error("no decoder in this FFmpeg build decodes {0:?} on CUDA")]
+    UnsupportedCodec(ffmpeg::codec::Id),
     /// FFmpeg rejected decoder or packet/frame processing.
 
     #[error("ffmpeg error: {0}")]
@@ -108,6 +112,11 @@ impl CudaDecoder {
     /// "Using more than 32 (N) decode surfaces might cause nvdec to fail".
     /// So a downstream queue cannot simply be made as deep as convenient
     /// here; it has to fit the budget alongside the reference frames.
+    ///
+    /// The decoder opened is the first one FFmpeg has for the codec that can
+    /// decode on CUDA, which need not be the one FFmpeg would pick by default
+    /// — see [`Self::supports`]. A codec with none fails here with
+    /// [`CudaDecoderError::UnsupportedCodec`] rather than at the first frame.
     pub fn new(
         name: impl Into<String>,
         params: ffmpeg::codec::Parameters,
@@ -123,6 +132,8 @@ impl CudaDecoder {
         if context.medium() != ffmpeg::media::Type::Video {
             return Err(CudaDecoderError::UnsupportedMediaType(context.medium()));
         }
+        let codec = cuda_capable_decoder(context.id())
+            .ok_or(CudaDecoderError::UnsupportedCodec(context.id()))?;
 
         // Taken before anything can fail below, and released by `Drop` once
         // the decoder exists. Nothing between here and the `Ok` needs an
@@ -143,7 +154,7 @@ impl CudaDecoder {
             (*ctx_ptr).extra_hw_frames = extra_hw_frames;
         }
 
-        let decoder = context.decoder().video()?;
+        let decoder = context.decoder().open_as(codec)?.video()?;
 
         let pad = SrcPad::with_contract(
             format!("{name}_src"),
@@ -163,6 +174,24 @@ impl CudaDecoder {
             pool,
             preroll_gate: PrerollGate::default(),
         })
+    }
+
+    /// Whether this FFmpeg build has a decoder for `codec` that can decode on
+    /// CUDA — whether [`Self::new`] gets past choosing one. Needs no device,
+    /// so a caller can route a stream elsewhere before building anything.
+    ///
+    /// It is a question about the decoder, not the codec. FFmpeg may register
+    /// several decoders for one codec, and the one it picks by default can be
+    /// a software library with no hardware path: with `libdav1d` built in, AV1
+    /// goes to that ahead of FFmpeg's own `av1` decoder, the one NVDEC is
+    /// reached through. `new` passes over such a decoder, so this does too.
+    ///
+    /// `true` does not promise the GPU takes every stream of the codec. NVDEC
+    /// has profiles it lacks — 4:4:4 H.264, say, or a codec older than the
+    /// card — and those still fail at the first frame, with
+    /// [`CudaDecoderError::HwAccelUnavailable`].
+    pub fn supports(codec: ffmpeg::codec::Id) -> bool {
+        cuda_capable_decoder(codec).is_some()
     }
 
     fn drain(&mut self) -> crate::error::Result<()> {
@@ -272,6 +301,61 @@ impl Sink for CudaDecoder {
 impl Drop for CudaDecoder {
     fn drop(&mut self) {
         pp_info!(self, "dropped: releasing hw_device_ctx");
+    }
+}
+
+/// The first decoder for `id` that decodes on CUDA, walking FFmpeg's decoders
+/// in the order `avcodec_find_decoder` does, so among several that qualify
+/// the one FFmpeg prefers wins. Experimental decoders are passed over, as
+/// that function passes them over whenever anything else is registered.
+fn cuda_capable_decoder(id: ffmpeg::codec::Id) -> Option<ffmpeg::Codec> {
+    let id: ffi::AVCodecID = id.into();
+    let mut opaque = std::ptr::null_mut();
+    loop {
+        // SAFETY: `opaque` is the iteration state `av_codec_iterate` owns and
+        // began from null; what it returns is null at the end and otherwise a
+        // static descriptor that lives as long as the program.
+        let codec = unsafe { ffi::av_codec_iterate(&mut opaque) };
+        if codec.is_null() {
+            return None;
+        }
+        // SAFETY: `codec` is non-null and static, as above.
+        unsafe {
+            let experimental = (*codec).capabilities & ffi::AV_CODEC_CAP_EXPERIMENTAL as i32 != 0;
+            if (*codec).id == id
+                && ffi::av_codec_is_decoder(codec) != 0
+                && !experimental
+                && decodes_on_cuda(codec)
+            {
+                return Some(ffmpeg::Codec::wrap(codec));
+            }
+        }
+    }
+}
+
+/// Whether `codec` can be handed a CUDA device context to decode with, which
+/// is the only way this element sets NVDEC up.
+///
+/// # Safety
+///
+/// `codec` must be a valid, non-null `AVCodec`.
+unsafe fn decodes_on_cuda(codec: *const ffi::AVCodec) -> bool {
+    let mut index = 0;
+    loop {
+        // SAFETY: the caller's promise; past the last configuration this
+        // returns null rather than reading out of bounds.
+        let config = unsafe { ffi::avcodec_get_hw_config(codec, index) };
+        if config.is_null() {
+            return false;
+        }
+        // SAFETY: non-null, and static like the codec it belongs to.
+        let (methods, device_type) = unsafe { ((*config).methods, (*config).device_type) };
+        if methods & ffi::AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX as i32 != 0
+            && device_type == ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_CUDA
+        {
+            return true;
+        }
+        index += 1;
     }
 }
 
@@ -431,5 +515,88 @@ mod tests {
             ),
             "expected UnsupportedMediaType, got {error:?}"
         );
+    }
+
+    /// Video parameters for `codec` carrying nothing but its size, which is
+    /// all opening a decoder asks of them.
+    fn video_parameters(codec: ffmpeg::codec::Id) -> ffmpeg::codec::Parameters {
+        let mut params = ffmpeg::codec::Parameters::new();
+        // SAFETY: `as_mut_ptr` on parameters this function just created and
+        // still owns exclusively; every field set is a plain one.
+        unsafe {
+            let raw = params.as_mut_ptr();
+            (*raw).codec_type = ffmpeg::media::Type::Video.into();
+            (*raw).codec_id = codec.into();
+            (*raw).width = 320;
+            (*raw).height = 240;
+        }
+        params
+    }
+
+    /// NVDEC has no ProRes, and no FFmpeg decoder offers a CUDA path for it.
+    /// Answered from FFmpeg's own tables, so it holds on a machine with no GPU.
+    #[test]
+    fn supports_says_no_for_a_codec_nvdec_lacks() {
+        crate::init().unwrap();
+        assert!(!CudaDecoder::supports(ffmpeg::codec::Id::PRORES));
+    }
+
+    /// Refused while being built, as a typed error. It used to open, as the
+    /// software decoder FFmpeg handed it, and fail only at the first frame —
+    /// after a pipeline had been wired around it.
+    #[test]
+    fn a_codec_with_no_cuda_decoder_is_refused_when_built() {
+        let Some((device, _cuda_lock)) = try_cuda_device() else {
+            return;
+        };
+        let codec = ffmpeg::codec::Id::PRORES;
+
+        let error = CudaDecoder::new("cuda-decoder", video_parameters(codec), &device, 0)
+            .err()
+            .expect("a codec with no CUDA decoder must not open");
+        assert!(
+            matches!(error, CudaDecoderError::UnsupportedCodec(id) if id == codec),
+            "expected UnsupportedCodec, got {error:?}"
+        );
+    }
+
+    /// What opens is a decoder with a CUDA path, even where FFmpeg's default
+    /// for the codec has none. AV1 is the case that broke: with `libdav1d`
+    /// built in FFmpeg defaults to it, and it cannot decode on NVDEC while
+    /// FFmpeg's own `av1` decoder can. Checked for the fixture's codec too.
+    #[test]
+    fn opens_a_decoder_that_decodes_on_cuda_not_merely_the_default() {
+        let Some((device, _cuda_lock)) = try_cuda_device() else {
+            return;
+        };
+        let mut codecs = vec![ffmpeg::codec::Id::AV1];
+        if let Some(path) = try_test_video() {
+            let input = ffmpeg::format::input(&path).expect("failed to open the test video");
+            let stream = input
+                .streams()
+                .best(ffmpeg::media::Type::Video)
+                .expect("the test video has no video stream");
+            codecs.push(stream.parameters().id());
+        }
+
+        for codec in codecs {
+            if !CudaDecoder::supports(codec) {
+                eprintln!("skipping {codec:?}: no decoder in this FFmpeg build decodes it on CUDA");
+                continue;
+            }
+            let decoder = CudaDecoder::new("cuda-decoder", video_parameters(codec), &device, 0)
+                .unwrap_or_else(|error| panic!("{codec:?} is supported but did not open: {error}"));
+            let opened = decoder
+                .decoder
+                .codec()
+                .expect("an open decoder has a codec");
+            // SAFETY: the codec an open decoder reports is FFmpeg's static one.
+            let on_cuda = unsafe { decodes_on_cuda(opened.as_ptr()) };
+            assert!(
+                on_cuda,
+                "{codec:?} opened {}, which has no CUDA path",
+                opened.name()
+            );
+        }
     }
 }

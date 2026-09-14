@@ -151,7 +151,18 @@ compile error with no explanation.
   timeline monotonic across an upstream seek (now per track), and still
   finalizes on `Eos` alone rather than on `Stop`.
 
+- **`CudaDecoderError::UnsupportedCodec`.** `CudaDecoder::new` refuses a
+  codec no decoder can decode on CUDA with it (see Fixed), so a `match` over
+  `CudaDecoderError` needs an arm for it.
+
 ### Added
+
+- **`CudaDecoder::supports(codec)`**: whether this FFmpeg build has a decoder
+  for the codec that decodes on CUDA — whether `CudaDecoder::new` gets past
+  choosing one. It needs no device, so a stream can be sent to `SwDecoder`
+  and `CudaUpload` before anything is built. It speaks for FFmpeg, not the
+  GPU: a profile NVDEC lacks still fails at the first frame with
+  `HwAccelUnavailable`.
 
 - **`ReplayBuffer`: the last stretch of an encode, saved on request.** A
   muxer in shape — `add_stream` per track, `open` for one sink per track —
@@ -526,6 +537,13 @@ compile error with no explanation.
   (211, 0, 22). Going YUV to YUV it keeps the matrix and range it was given
   rather than converting into the default, and every output says what it is.
   A frame that says nothing is read exactly as before.
+- **`CudaDecoder` opens a decoder that decodes on CUDA, not FFmpeg's default
+  one.** With `libdav1d` built in, FFmpeg picks it for AV1 ahead of its own
+  `av1` decoder, and only the latter reaches NVDEC — so AV1 opened, as
+  software, and failed at the first frame with `HwAccelUnavailable`. It now
+  opens `av1` and decodes on the GPU. A codec with no such decoder at all,
+  ProRes say, is refused by `new` instead of opening and failing the same
+  way later.
 
 ## 0.2.0
 
