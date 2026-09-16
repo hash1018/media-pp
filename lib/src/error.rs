@@ -51,8 +51,8 @@ use crate::elements::{
 #[cfg(all(target_os = "windows", feature = "d3d11"))]
 use crate::elements::{
     D3d11ChromaKeyError, D3d11DecoderError, D3d11DownloadError, D3d11RendererError,
-    D3d11ScalerError, D3d11TextLayerError, D3d11UploadError, D3d11VideoCompositorError,
-    D3d11VideoEffectError, D3d11VideoEncoderError,
+    D3d11ScalerError, D3d11SharedTextureSourceError, D3d11TextLayerError, D3d11UploadError,
+    D3d11VideoCompositorError, D3d11VideoEffectError, D3d11VideoEncoderError,
 };
 #[cfg(all(target_os = "windows", feature = "d3d12"))]
 use crate::elements::{
@@ -379,6 +379,11 @@ pub enum Error {
     #[cfg(all(target_os = "windows", feature = "d3d11"))]
     #[error(transparent)]
     D3d11UploadError(#[from] D3d11UploadError),
+
+    /// Taking in a texture another D3D11 device shared failed.
+    #[cfg(all(target_os = "windows", feature = "d3d11"))]
+    #[error(transparent)]
+    D3d11SharedTextureSourceError(#[from] D3d11SharedTextureSourceError),
 
     /// Downloading a frame from D3D11 failed.
     #[cfg(all(target_os = "windows", feature = "d3d11"))]

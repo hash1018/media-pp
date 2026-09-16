@@ -7,6 +7,7 @@ use thiserror::Error as ThisError;
 use crate::{
     buffer::MediaBuffer,
     bus::{Bus, BusEvent},
+    contract::OutputContract,
     control::{
         ControlMsg, ControlReceiver, RequestKind, apply_finish, apply_one, drain_control,
         wait_out_pause,
@@ -50,6 +51,12 @@ pub enum AppSourceError {
 pub struct AppSource {
     pp_log: PpLog,
     name: Arc<str>,
+    /// Almost always [`ElementType::AppSource`]. An element built on this
+    /// one — [`crate::elements::D3d11SharedTextureSource`] is the case this
+    /// exists for — keeps its own identity in the log and on the bus
+    /// instead, since what a reader of either wants is the element the
+    /// caller actually constructed.
+    element_type: ElementType,
     pad: SrcPad,
     data_rx: Receiver<MediaBuffer>,
 }
@@ -68,15 +75,33 @@ impl AppSource {
     /// [`AppSourceHandle::push`] blocks — same trade-off as
     /// [`crate::queue::Queue`]'s own `capacity`.
     pub fn new(name: impl Into<String>, capacity: usize) -> (Self, AppSourceHandle) {
+        Self::typed(
+            name,
+            capacity,
+            ElementType::AppSource,
+            OutputContract::Unknown,
+        )
+    }
+
+    /// [`Self::new`] for an element built on this one: it supplies its own
+    /// [`ElementType`] and, since it knows what it pushes, the output
+    /// contract a general-purpose `AppSource` cannot declare.
+    pub(crate) fn typed(
+        name: impl Into<String>,
+        capacity: usize,
+        element_type: ElementType,
+        contract: OutputContract,
+    ) -> (Self, AppSourceHandle) {
         let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::AppSource, &name, None);
+        let pp_log = element_pp_log(element_type, &name, None);
         pp_info!(pp_log: &pp_log, "created: capacity={capacity}");
-        let pad = SrcPad::new(format!("{name}_src"));
+        let pad = SrcPad::with_contract(format!("{name}_src"), contract);
         let (data_tx, data_rx) = bounded(capacity);
         (
             Self {
                 name: name.clone(),
                 pp_log,
+                element_type,
                 pad,
                 data_rx,
             },
@@ -119,7 +144,7 @@ impl Element for AppSource {
     }
 
     fn element_type(&self) -> ElementType {
-        ElementType::AppSource
+        self.element_type
     }
 
     fn pp_log(&self) -> &PpLog {
@@ -201,7 +226,7 @@ impl SourceElement for AppSource {
                                 bus.post(
                                     &self.pp_log,
                                     BusEvent::Error {
-                                        element_type: ElementType::AppSource,
+                                        element_type: self.element_type,
                                         name: self.name.clone(),
                                         error,
                                     },

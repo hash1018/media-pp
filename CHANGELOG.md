@@ -158,6 +158,30 @@ compile error with no explanation.
 
 ### Added
 
+- **`D3d11SharedTextureSource`: another device's textures, as this
+  pipeline's own frames** (Windows, `d3d11`). Whoever produces the pictures
+  pushes a shared-texture handle per picture, and each one is opened on the
+  pipeline's device, copied into a texture of its own, and sent downstream
+  as a `Pixel::D3D11` frame:
+
+  ```rust
+  let (source, handle) =
+      D3d11SharedTextureSource::new("browser", &device, context.clone(), 1920, 1080, 2)?;
+  // ...from the producer's own callback, while its handle is still valid:
+  handle.push(shared_handle, None)?;
+  ```
+
+  It copies because the texture belongs to the producer and a producer
+  reuses its textures, while a pipeline — a compositor holding an input's
+  last frame, say — has to outlive the call. It only copies: a texture of
+  another size, or anything but `DXGI_FORMAT_B8G8R8A8_UNORM`, is refused
+  rather than adapted, and the handle is opened afresh each push rather than
+  cached by its value, which a producer is free to reuse for a different
+  texture. The producer owes a flush before it hands a picture over. New:
+  `D3d11SharedTextureHandle`, `D3d11SharedTextureSourceError`,
+  `Error::D3d11SharedTextureSourceError` and
+  `ElementType::D3d11SharedTextureSource`.
+
 - **`CudaDecoder::supports(codec)`**: whether this FFmpeg build has a decoder
   for the codec that decodes on CUDA — whether `CudaDecoder::new` gets past
   choosing one. It needs no device, so a stream can be sent to `SwDecoder`

@@ -21,6 +21,7 @@ mod compositor;
 mod file_demuxer;
 mod pipeline_bridge;
 mod rtsp_source;
+mod shared_texture;
 mod synthetic;
 
 #[cfg(all(
@@ -85,6 +86,10 @@ pub use pipeline_bridge::{
     PipelineBridge, PipelineBridgeError, PipelineBridgeHandle, PipelineBridgeOptions,
 };
 pub use rtsp_source::{RtspOptions, RtspSource, RtspSourceError};
+#[cfg(all(target_os = "windows", feature = "d3d11"))]
+pub use shared_texture::{
+    D3d11SharedTextureHandle, D3d11SharedTextureSource, D3d11SharedTextureSourceError,
+};
 pub use synthetic::{
     TestAudioOptions, TestAudioSource, TestAudioSourceError, TestVideoOptions, TestVideoSource,
     TestVideoSourceError,

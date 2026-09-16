@@ -149,6 +149,7 @@ pub use source::{
 };
 #[cfg(all(target_os = "windows", feature = "d3d11"))]
 pub use source::{
+    D3d11SharedTextureHandle, D3d11SharedTextureSource, D3d11SharedTextureSourceError,
     D3d11TextLayerError, D3d11TextLayerHandle, D3d11VideoCompositor, D3d11VideoCompositorError,
     D3d11VideoCompositorHandle, D3d11VideoCompositorInput, D3d11VideoCompositorInputSink,
     D3d11VideoLayerHandle,

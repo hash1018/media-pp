@@ -237,6 +237,11 @@ windows = { version = "0.62", features = [
     "Win32_Graphics_Direct3D11",
     "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common",
+    # `D3d11SharedTextureSource`'s tests play the producer, and windows-rs
+    # hides `IDXGIResource1::CreateSharedHandle` — the call that makes a
+    # texture shareable — without its SECURITY_ATTRIBUTES type. The element
+    # itself only ever opens such a handle, so this is a test-side need.
+    "Win32_Security",
     "Win32_System_ProcessStatus",
     "Win32_System_Threading",
 ] }

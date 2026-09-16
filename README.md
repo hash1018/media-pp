@@ -134,7 +134,7 @@ real buffer. An element that declares nothing always links. See the
 
 | Kind | Elements |
 |---|---|
-| Sources | `FileDemuxer`, `AppSource`, `RtspSource`, `TestVideoSource`, `TestAudioSource`, `DxgiCaptureSource`, `WgcCaptureSource`, `MfCaptureSource`, `V4l2CaptureSource`, `PipeWireScreenCaptureSource`, `PipeWireAudioCaptureSource`, `WasapiCaptureSource`, `AudioMixer`, `SwVideoCompositor`, `CudaVideoCompositor`, `D3d11VideoCompositor`, `WebRtcTrackSource` |
+| Sources | `FileDemuxer`, `AppSource`, `D3d11SharedTextureSource`, `RtspSource`, `TestVideoSource`, `TestAudioSource`, `DxgiCaptureSource`, `WgcCaptureSource`, `MfCaptureSource`, `V4l2CaptureSource`, `PipeWireScreenCaptureSource`, `PipeWireAudioCaptureSource`, `WasapiCaptureSource`, `AudioMixer`, `SwVideoCompositor`, `CudaVideoCompositor`, `D3d11VideoCompositor`, `WebRtcTrackSource` |
 | Filters | `SwDecoder`, `CudaDecoder`, `D3d11Decoder`, `D3d12Decoder`, `SwEncoder`, `CudaEncoder`, `D3d11VideoEncoder`, `SwAudioEncoder`, `AudioResampler`, `AudioVolume`, `AudioGate`, `AudioCompressor`, `AudioLimiter`, `NoiseSuppressor`, `SwScaler`, `SwChromaKey`, `CudaChromaKey`, `D3d11ChromaKey`, `SwVideoEffect`, `CudaVideoEffect`, `D3d11VideoEffect`, `Pacer`, `VideoSynchronizer`, `CudaScaler`, `D3d11Scaler`, `D3d12Scaler`, `CudaUpload`, `CudaDownload`, `CudaConverter`, `D3d11Upload`, `D3d11Download`, `D3d12Upload`, `D3d12Download`, `Tee`, `ChangeGate`, `TimestampOrigin`, `Rack` |
 | Sinks | `FrameCounter`, `PacketCounter`, `AppSink`, `FileMuxer`, `SegmentedFileMuxer`, `ReplayBuffer`, `HlsMuxer`, `RtmpMuxer`, `RtspMuxer`, `CudaRenderer`, `D3d11Renderer`, `D3d12Renderer`, `PipeWireAudioRenderer`, `WasapiRenderer`, `OrtDetector`, `WhisperTranscriber`, `WebRtcTrackSink` |
 
@@ -142,6 +142,9 @@ Backend-specific elements need their Cargo feature and exist only on that
 backend's platform. On Windows, `DxgiCaptureSource` captures a monitor and
 `WgcCaptureSource` one window by its `HWND`; both either create the D3D11
 device the rest of the pipeline uses or take one you already have.
+`D3d11SharedTextureSource` takes pictures from something that renders on its
+own device and shares them by handle — an embedded browser engine, another
+process — copying each one into the pipeline's device as it is pushed in.
 
 ## Examples
 
