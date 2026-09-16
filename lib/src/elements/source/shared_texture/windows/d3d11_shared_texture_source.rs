@@ -279,6 +279,32 @@ impl D3d11SharedTextureHandle {
             .map_err(|_| D3d11SharedTextureSourceError::Closed)
     }
 
+    /// [`Self::push`] for a producer that cannot wait — which a browser
+    /// engine's paint callback cannot: it is that engine's own thread, and
+    /// everything else it does happens there too.
+    ///
+    /// `Ok(false)` (not an error) means the source's queue was full and this
+    /// picture was dropped; `Err` means the source itself has ended. The
+    /// same trade-off [`AppSourceHandle::try_push`] offers, and the reason
+    /// it matters more here: a pipeline this source feeds can be *paused*,
+    /// and a paused pipeline consumes nothing at all. A blocking push then
+    /// stops the producer for as long as the pause lasts, which for a
+    /// browser engine means every one of its pages, not only this one.
+    ///
+    /// The copy still happens — whether there is room is only known once
+    /// there is something to put there — so a source nobody is draining
+    /// costs a copy per picture until the producer is told to stop drawing.
+    pub fn try_push(
+        &self,
+        handle: isize,
+        pts: Option<i64>,
+    ) -> std::result::Result<bool, D3d11SharedTextureSourceError> {
+        let frame = self.import.copy(handle, pts)?;
+        self.pusher
+            .try_push(frame)
+            .map_err(|_| D3d11SharedTextureSourceError::Closed)
+    }
+
     /// Ends the stream, the same as pushing `Eos` into an [`AppSource`] —
     /// or drop every clone of this, which does the same thing.
     pub fn finish(&self) -> std::result::Result<(), D3d11SharedTextureSourceError> {
@@ -596,6 +622,37 @@ mod tests {
             &downloaded.data(0)[0..4],
             [20, 30, 230, 255],
             "the imported frame must hold what the other device wrote"
+        );
+    }
+
+    /// A producer that cannot wait is told there was no room rather than
+    /// held until there is. Nothing drains this source — its pipeline is
+    /// never started — which is the state a paused one puts a live producer
+    /// in.
+    #[test]
+    fn a_full_queue_costs_a_picture_rather_than_the_producers_thread() {
+        let Some((producer, producer_context)) = try_d3d11_device() else {
+            return;
+        };
+        let Some((device, context)) = try_d3d11_device() else {
+            return;
+        };
+        let (_source, handle) = D3d11SharedTextureSource::new("shared", &device, context, 8, 8, 1)
+            .expect("D3d11SharedTextureSource::new should succeed");
+
+        let (_producer_texture, shared) =
+            shared_texture(&producer, &producer_context, 8, 8, [0, 0, 0, 255]);
+        assert!(
+            handle
+                .try_push(shared, None)
+                .expect("the source is running"),
+            "the first picture takes the one place there is"
+        );
+        assert!(
+            !handle
+                .try_push(shared, None)
+                .expect("the source is running"),
+            "the second finds it full and is dropped"
         );
     }
 

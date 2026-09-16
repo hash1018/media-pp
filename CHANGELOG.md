@@ -177,8 +177,15 @@ compile error with no explanation.
   another size, or anything but `DXGI_FORMAT_B8G8R8A8_UNORM`, is refused
   rather than adapted, and the handle is opened afresh each push rather than
   cached by its value, which a producer is free to reuse for a different
-  texture. The producer owes a flush before it hands a picture over. New:
-  `D3d11SharedTextureHandle`, `D3d11SharedTextureSourceError`,
+  texture. The producer owes a flush before it hands a picture over.
+
+  `push` blocks while the source's queue is full and `try_push` drops the
+  picture instead, which is what a producer whose own thread cannot stall
+  wants: a pipeline this feeds can be paused, and a paused one consumes
+  nothing at all — so a blocking push stops the producer for as long as the
+  pause lasts, and for a browser engine that means every one of its pages.
+
+  New: `D3d11SharedTextureHandle`, `D3d11SharedTextureSourceError`,
   `Error::D3d11SharedTextureSourceError` and
   `ElementType::D3d11SharedTextureSource`.
 
