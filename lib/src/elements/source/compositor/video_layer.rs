@@ -100,6 +100,25 @@ pub struct VideoLayer {
     pub visible: bool,
     /// Aspect-ratio policy used to map the input into [`Self::rect`].
     pub fit: VideoFit,
+    /// Whether this input's colour already has its alpha multiplied into it.
+    ///
+    /// Almost nothing here produces such a picture: a capture is opaque, and
+    /// the keys in this crate multiply an alpha channel while leaving the
+    /// colour alone, which is what the default `false` describes. A browser
+    /// engine is the case this exists for — Chromium composites its page that
+    /// way and hands over (colour × alpha) — and drawing one as though its
+    /// alpha had not been applied darkens it by that alpha a second time:
+    /// half-transparent red arrives as a quarter of the red it should be.
+    ///
+    /// It changes how the layer is blended, not its pixels. `opacity` still
+    /// means what it means either way.
+    ///
+    /// `D3d11VideoCompositor` is the one backend that acts on it so far,
+    /// because it is the one such a picture can reach today — a foreign
+    /// texture arrives through `D3d11SharedTextureSource`. The software and
+    /// CUDA compositors accept the field and draw such a layer as they
+    /// always have.
+    pub premultiplied_alpha: bool,
     /// The part of the input to draw, or `None` for all of it.
     ///
     /// Applied *before* [`Self::fit`]: what is drawn is this region, and the
@@ -119,6 +138,7 @@ impl VideoLayer {
             opacity: 1.0,
             visible: true,
             fit: VideoFit::Contain,
+            premultiplied_alpha: false,
             source: None,
         }
     }

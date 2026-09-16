@@ -17,7 +17,11 @@ cbuffer LayerBuffer : register(b0)
     float4 yuv_to_green;
     float4 yuv_to_blue;
     float opacity;
-    float3 _padding;
+    // Unused here — NV12 carries no alpha to have been multiplied in — and
+    // declared only so this buffer matches `composite_bgra.hlsl`, which both
+    // shaders are filled from.
+    float rgb_scale;
+    float2 _padding;
     // See composite_bgra.hlsl: the part of the texture this layer draws.
     float2 uv_scale;
     float2 uv_offset;

@@ -182,6 +182,16 @@ compile error with no explanation.
   `Error::D3d11SharedTextureSourceError` and
   `ElementType::D3d11SharedTextureSource`.
 
+- **`VideoLayer::premultiplied_alpha`**: whether an input's colour already
+  has its alpha multiplied into it. Default `false`, which is every source
+  that was here before; a browser engine's output is the case this exists
+  for, since it composites its page that way. `D3d11VideoCompositor` blends
+  such a layer by what it already holds rather than multiplying the alpha in
+  a second time — which is what turned a half-transparent picture dark —
+  and scales its colour by the layer's opacity alongside its alpha, so
+  opacity still works on it. The software and CUDA compositors take the
+  field and ignore it for now.
+
 - **`CudaDecoder::supports(codec)`**: whether this FFmpeg build has a decoder
   for the codec that decodes on CUDA — whether `CudaDecoder::new` gets past
   choosing one. It needs no device, so a stream can be sent to `SwDecoder`

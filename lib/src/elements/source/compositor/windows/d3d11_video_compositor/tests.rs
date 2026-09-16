@@ -294,6 +294,62 @@ fn composes_gpu_inputs_in_z_order_and_preserves_output_contract() {
     assert_eq!(pixel(&downloaded, 1, 1), [255, 0, 0, 255], "blue overlay");
 }
 
+/// A layer whose alpha is already in its colour is drawn as what it is.
+///
+/// The case this exists for is a browser engine: Chromium composites its
+/// page and hands over (colour × alpha), so half-transparent red arrives as
+/// (115, 10, 10) with alpha 128. Blended as though its colour were plain,
+/// that red is multiplied by the alpha a second time and lands at a quarter
+/// of where it belongs — which is what the second half of this asserts,
+/// against the same picture drawn the ordinary way.
+#[test]
+fn a_premultiplied_layer_is_blended_by_what_it_already_holds() {
+    let Some((device, context)) = try_device() else {
+        return;
+    };
+    let compose = |premultiplied: bool| {
+        let options = VideoCompositorOptions {
+            width: 2,
+            height: 2,
+            frame_rate: ffmpeg::Rational::new(30, 1),
+            // Black, so what lands is the layer's own contribution alone.
+            background: Color::BLACK,
+        };
+        let (mut compositor, handle) =
+            D3d11VideoCompositor::new("compositor", &device, context.clone(), options)
+                .expect("D3d11VideoCompositor::new should succeed");
+        let mut layer = VideoLayer::new(VideoRect::new(0, 0, 2, 2));
+        layer.fit = video_layer::VideoFit::Stretch;
+        layer.premultiplied_alpha = premultiplied;
+        let mut sink = handle.add_source("web", layer).unwrap().unwrap().sink;
+        // (230, 20, 20) at half alpha, with the alpha already multiplied in:
+        // BGRA byte order, so [10, 10, 115, 128].
+        let texture = bgra_texture(&device, 2, 2, [10, 10, 115, 128]);
+        sink.consume(pooled_video(wrap_d3d11_texture(texture, 2, 2).unwrap()))
+            .unwrap();
+        let composed = compositor
+            .compose_frame(&test_bus())
+            .expect("compose_frame failed");
+        let downloaded = download_frame(&device, context.clone(), composed);
+        pixel(&downloaded, 0, 0)
+    };
+
+    // Over black, `src + dst × (1 − a)` is the source as it stands.
+    let [blue, green, red, _] = compose(true);
+    assert!(
+        red.abs_diff(115) <= 1 && green.abs_diff(10) <= 1 && blue.abs_diff(10) <= 1,
+        "premultiplied layer landed as {:?}",
+        [blue, green, red]
+    );
+
+    // And the ordinary blend multiplies it by that alpha again: about 58.
+    let [_, _, red_again, _] = compose(false);
+    assert!(
+        red_again.abs_diff(58) <= 2,
+        "an ordinary blend of the same picture should darken it, got {red_again}"
+    );
+}
+
 /// The crop, per pixel, on the hardware that draws it.
 ///
 /// `the_sampled_window_covers_the_frame_or_the_region_inside_it` checks

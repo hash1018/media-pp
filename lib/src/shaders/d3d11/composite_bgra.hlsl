@@ -35,7 +35,14 @@ cbuffer LayerBuffer : register(b0)
     float4 yuv_to_green;
     float4 yuv_to_blue;
     float opacity;
-    float3 _padding;
+    // What the colour is scaled by, which is not what the alpha is scaled by
+    // whenever the two are not independent: a picture whose alpha is already
+    // multiplied into its colour has to have both scaled by `opacity`, while
+    // one whose colour is plain keeps its colour and scales only the alpha.
+    // So this is `opacity` for the first and one for the second — see
+    // `VideoLayer::premultiplied_alpha`.
+    float rgb_scale;
+    float2 _padding;
     // Together these map the quad's 0..1 into the part of the texture this
     // layer draws: the scale is that part's size and the offset its origin,
     // both as a fraction of the whole texture. Without a crop the offset is
@@ -52,5 +59,5 @@ SamplerState layer_sampler : register(s0);
 float4 ps_bgra(VertexOutput input) : SV_Target
 {
     float4 color = bgra_texture.Sample(layer_sampler, input.uv * uv_scale + uv_offset);
-    return float4(color.rgb, color.a * opacity);
+    return float4(color.rgb * rgb_scale, color.a * opacity);
 }

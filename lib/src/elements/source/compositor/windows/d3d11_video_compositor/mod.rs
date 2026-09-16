@@ -660,19 +660,23 @@ struct LayerConstants {
     green: [f32; 4],
     blue: [f32; 4],
     opacity: f32,
-    _padding: [f32; 3],
+    /// What the shader scales the colour by — see the shaders' own comment,
+    /// and [`video_layer::VideoLayer::premultiplied_alpha`].
+    rgb_scale: f32,
+    _padding: [f32; 2],
     uv_scale: [f32; 2],
     uv_offset: [f32; 2],
 }
 
 impl LayerConstants {
-    fn bgra(opacity: f32, uv: UvWindow) -> Self {
+    fn bgra(opacity: f32, premultiplied: bool, uv: UvWindow) -> Self {
         Self {
             red: [0.0; 4],
             green: [0.0; 4],
             blue: [0.0; 4],
             opacity,
-            _padding: [0.0; 3],
+            rgb_scale: if premultiplied { opacity } else { 1.0 },
+            _padding: [0.0; 2],
             uv_scale: uv.scale,
             uv_offset: uv.offset,
         }
@@ -686,7 +690,9 @@ impl LayerConstants {
             green,
             blue,
             opacity,
-            _padding: [0.0; 3],
+            // NV12 has no alpha to have been multiplied in.
+            rgb_scale: 1.0,
+            _padding: [0.0; 2],
             uv_scale: uv.scale,
             uv_offset: uv.offset,
         }
@@ -766,6 +772,9 @@ pub struct D3d11VideoCompositor {
     nv12_pixel_shader: ID3D11PixelShader,
     sampler: ID3D11SamplerState,
     blend_state: ID3D11BlendState,
+    /// The same, for a layer whose colour already has its alpha in it —
+    /// see `video_layer::VideoLayer::premultiplied_alpha`.
+    premultiplied_blend_state: ID3D11BlendState,
     rasterizer_state: ID3D11RasterizerState,
     layer_buffer: ID3D11Buffer,
     /// Checked-out frames remain unavailable until every downstream `Arc`
@@ -844,6 +853,7 @@ impl D3d11VideoCompositor {
             nv12_pixel_shader,
             sampler,
             blend_state,
+            premultiplied_blend_state,
             rasterizer_state,
             layer_buffer,
         ) = unsafe { build_pipeline_state(device)? };
@@ -869,6 +879,7 @@ impl D3d11VideoCompositor {
                 nv12_pixel_shader,
                 sampler,
                 blend_state,
+                premultiplied_blend_state,
                 rasterizer_state,
                 layer_buffer,
                 output_pool: UnboundObjectPool::new(
@@ -1040,7 +1051,8 @@ impl D3d11VideoCompositor {
                 ],
             );
             context.OMSetRenderTargets(Some(&[Some(output_view)]), None);
-            context.OMSetBlendState(&self.blend_state, None, 0xffff_ffff);
+            // The blend is chosen per layer — see `draw_layer` — since a
+            // layer whose alpha is already in its colour needs the other one.
             context.RSSetState(&self.rasterizer_state);
             context.IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
             context.VSSetShader(&self.vertex_shader, None);
@@ -1194,13 +1206,22 @@ impl D3d11VideoCompositor {
             return Ok(());
         };
 
+        // Only a picture with an alpha channel can have had it multiplied in,
+        // so NV12 is drawn the one way whatever the layer says.
+        let premultiplied = layer.premultiplied_alpha && desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM;
         let constants = match desc.Format {
-            DXGI_FORMAT_B8G8R8A8_UNORM => LayerConstants::bgra(layer.opacity, uv),
+            DXGI_FORMAT_B8G8R8A8_UNORM => LayerConstants::bgra(layer.opacity, premultiplied, uv),
             DXGI_FORMAT_NV12 => LayerConstants::nv12(frame, layer.opacity, uv),
             other => return Err(D3d11VideoCompositorError::UnsupportedTextureFormat(other)),
         };
+        let blend = if premultiplied {
+            &self.premultiplied_blend_state
+        } else {
+            &self.blend_state
+        };
         // SAFETY: `constants` is readable for the declared constant-buffer
-        // size, and the live context owns the destination buffer.
+        // size, and the live context owns the destination buffer and every
+        // state object set here.
         unsafe {
             context.UpdateSubresource(
                 &self.layer_buffer,
@@ -1210,6 +1231,7 @@ impl D3d11VideoCompositor {
                 0,
                 0,
             );
+            context.OMSetBlendState(blend, None, 0xffff_ffff);
             context.RSSetViewports(Some(&[viewport]));
             context.RSSetScissorRects(Some(&[scissor]));
         }
@@ -1486,6 +1508,7 @@ unsafe fn build_pipeline_state(
     ID3D11PixelShader,
     ID3D11SamplerState,
     ID3D11BlendState,
+    ID3D11BlendState,
     ID3D11RasterizerState,
     ID3D11Buffer,
 )> {
@@ -1580,6 +1603,15 @@ unsafe fn build_pipeline_state(
         device.CreateBlendState(&blend_desc, Some(&mut blend_state))?;
         let blend_state = blend_state.unwrap();
 
+        // The same "over", for a layer whose colour already has its alpha in
+        // it: the source contributes as it stands rather than being scaled by
+        // that alpha a second time. Destination alpha is left alone here too.
+        // See `video_layer::VideoLayer::premultiplied_alpha`.
+        blend_desc.RenderTarget[0].SrcBlend = D3D11_BLEND_ONE;
+        let mut premultiplied_blend_state = None;
+        device.CreateBlendState(&blend_desc, Some(&mut premultiplied_blend_state))?;
+        let premultiplied_blend_state = premultiplied_blend_state.unwrap();
+
         // `ScissorEnable = TRUE`: every layer draw needs its own scissor
         // rect to crop overflow (e.g. `VideoFit::Cover`) or an
         // off-canvas rect — see `clipped_viewport`'s own docs. Left bound
@@ -1615,6 +1647,7 @@ unsafe fn build_pipeline_state(
             nv12_pixel_shader,
             sampler,
             blend_state,
+            premultiplied_blend_state,
             rasterizer_state,
             layer_buffer,
         ))
