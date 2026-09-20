@@ -194,7 +194,7 @@ The library has no default features.
 | `pipewire-audio-renderer` | Audio playback through PipeWire | Linux |
 | `pipewire-screen-capture` | Desktop capture through xdg-desktop-portal and PipeWire | Linux |
 | `v4l2-capture` | Camera capture through Video4Linux2 | Linux |
-| `wasapi-capture` | System-audio and microphone capture | Windows |
+| `wasapi-capture` | System-audio, per-application and microphone capture | Windows |
 | `wasapi-renderer` | Shared-mode audio playback | Windows |
 | `ort` | ONNX Runtime object detection | All supported targets |
 | `rnnoise` | Noise suppression for speech, through RNNoise (pure Rust, no model file) | All supported targets |

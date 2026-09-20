@@ -33,6 +33,8 @@ pub use crate::platform::cuda::{CudaDevice, CudaDeviceError, CudaDriverError, Cu
 pub use crate::platform::linux::v4l2::{V4l2CaptureFormat, V4l2Device};
 #[cfg(all(target_os = "windows", feature = "mf-capture"))]
 pub use crate::platform::windows::mf::{MfCaptureFormat, MfDevice};
+#[cfg(all(target_os = "windows", feature = "wasapi-capture"))]
+pub use crate::platform::windows::wasapi::WasapiProcess;
 #[cfg(all(
     target_os = "windows",
     any(feature = "wasapi-capture", feature = "wasapi-renderer")

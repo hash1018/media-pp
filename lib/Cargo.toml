@@ -60,6 +60,11 @@ nnnoiseless = { version = "0.5", optional = true, default-features = false }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", optional = true }
+# The same crate `windows` re-exports as `windows::core`, named directly
+# because `windows::core::implement` expands to absolute `::windows_core`
+# paths — see `platform::windows::wasapi::process`, the one place this crate
+# implements a COM interface of its own rather than calling one.
+windows-core = { version = "0.62", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # `async-io` rather than the default `tokio` backend: `PipeWireScreenCaptureSource::open`
@@ -167,6 +172,7 @@ pipewire-screen-capture = [
 ]
 wasapi-capture = [
     "dep:windows",
+    "dep:windows-core",
     "windows/Win32_Foundation",
     "windows/Win32_Devices_FunctionDiscovery",
     "windows/Win32_Media_Audio",
@@ -174,6 +180,9 @@ wasapi-capture = [
     "windows/Win32_Media_Multimedia",
     "windows/Win32_System_Com",
     "windows/Win32_System_Com_StructuredStorage",
+    # `OpenProcess` and `QueryFullProcessImageNameW`, for putting a name to
+    # the processes a per-process capture can be pointed at.
+    "windows/Win32_System_Threading",
     "windows/Win32_System_Variant",
     "windows/Win32_UI_Shell_PropertiesSystem",
 ]

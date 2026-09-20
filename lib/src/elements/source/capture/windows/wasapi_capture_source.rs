@@ -10,9 +10,12 @@ use crate::pp_log::{PpLog, pp_error, pp_info};
 use ffmpeg_next as ffmpeg;
 use thiserror::Error as ThisError;
 use windows::Win32::{
-    Media::Audio::{
-        AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_E_DEVICE_INVALIDATED, AUDCLNT_SHAREMODE_SHARED,
-        AUDCLNT_STREAMFLAGS_LOOPBACK, IAudioCaptureClient, IAudioClient,
+    Media::{
+        Audio::{
+            AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_E_DEVICE_INVALIDATED, AUDCLNT_SHAREMODE_SHARED,
+            AUDCLNT_STREAMFLAGS_LOOPBACK, IAudioCaptureClient, IAudioClient, WAVEFORMATEX,
+        },
+        Multimedia::WAVE_FORMAT_IEEE_FLOAT,
     },
     System::Com::{CLSCTX_ALL, CoTaskMemFree},
 };
@@ -27,7 +30,8 @@ use crate::{
     error::Result,
     pad::SrcPad,
     platform::windows::wasapi::{
-        ComApartment, WasapiDevice, WasapiDeviceKind, list_devices as enumerate_wasapi_devices,
+        ComApartment, WasapiDevice, WasapiDeviceKind, WasapiProcess, activate_process_loopback,
+        list_devices as enumerate_wasapi_devices, list_processes as enumerate_wasapi_processes,
         open_device, resolve_mix_format,
     },
     schedule::ActiveTimeline,
@@ -50,6 +54,24 @@ const POLL_INTERVAL: Duration = Duration::from_millis(20);
 /// larger than `POLL_INTERVAL` so this element's own wakeup cadence, not
 /// the device's ring buffer, is what bounds latency.
 const BUFFER_DURATION_100NS: i64 = 200 * 10_000;
+
+/// What a process loopback capture asks Windows to hand it.
+///
+/// A device capture inherits its endpoint's mix format; there is no endpoint
+/// behind a process, so this is chosen instead and Windows converts whatever
+/// the process is playing into it. 48 kHz float stereo is what a Windows
+/// mixer works in, so in the ordinary case the conversion is nothing at all
+/// — and a caller that wants another rate has a resampler for it, as it does
+/// for every device whose endpoint disagrees with its project.
+const PROCESS_LOOPBACK_FORMAT: WAVEFORMATEX = WAVEFORMATEX {
+    wFormatTag: WAVE_FORMAT_IEEE_FLOAT as u16,
+    nChannels: 2,
+    nSamplesPerSec: 48_000,
+    nAvgBytesPerSec: 48_000 * 2 * 4,
+    nBlockAlign: 2 * 4,
+    wBitsPerSample: 32,
+    cbSize: 0,
+};
 
 /// Errors specific to `WasapiCaptureSource`. Converts into the crate-wide
 /// `Error` via `?` (see [`crate::error::Error`]).
@@ -238,28 +260,121 @@ impl WasapiCaptureSource {
                 audio_format.channels,
                 audio_format.sample_format
             );
-            let pad = SrcPad::with_contract(
-                format!("{name}_src"),
-                OutputContract::Fixed(PortContract::frame(
-                    MediaKind::AudioFrame,
-                    MemoryDomain::System,
-                )),
-            );
-
             Ok((
-                Self {
-                    name,
-                    pp_log,
-                    audio_client,
-                    capture_client,
-                    sample_rate: audio_format.sample_rate,
-                    format: audio_format.sample_format,
-                    channel_layout: audio_format.channel_layout(),
-                    samples_emitted: 0,
-                    pad,
-                },
+                Self::assemble(name, pp_log, audio_client, capture_client, audio_format),
                 audio_format,
             ))
+        }
+    }
+
+    /// Every process with an audio session of its own — the applications a
+    /// per-process capture can be pointed at, as [`WasapiProcess`] entries
+    /// whose `id` goes straight to [`WasapiCaptureSource::open_process`].
+    ///
+    /// What a picker shows. Not a process list: a text editor that has never
+    /// made a sound is not something to capture the audio of, and one that
+    /// played something an hour ago still has the session that says it can.
+    pub fn list_processes() -> std::result::Result<Vec<WasapiProcess>, WasapiCaptureSourceError> {
+        Ok(enumerate_wasapi_processes()?)
+    }
+
+    /// Opens a capture of what one process tree is playing, rather than of
+    /// an endpoint — Windows' own process loopback, which is what lets a
+    /// caller record a game without the chat program beside it.
+    ///
+    /// `process_id` is a live process; the capture covers it and everything
+    /// it started, since a game that plays through a child process and a
+    /// browser that gives each tab one would otherwise capture as silence.
+    /// It is bound to *that* process: when it exits, this goes quiet rather
+    /// than following the next instance of the same application, and it is
+    /// the caller — which is the half that knows what the user picked — that
+    /// looks the new one up and opens again.
+    ///
+    /// There is no endpoint here and so no mix format to inherit, which is
+    /// the one thing that differs from [`WasapiCaptureSource::open`]: the
+    /// format below is what this asks the virtual device to hand over, and
+    /// Windows converts whatever the process is actually playing into it.
+    ///
+    /// Needs Windows 10 2004 or newer, where process loopback was added. An
+    /// older build fails the activation, which arrives as
+    /// [`WasapiCaptureSourceError::Windows`] — this does not check a version
+    /// of its own.
+    pub fn open_process(
+        name: impl Into<String>,
+        process_id: u32,
+    ) -> std::result::Result<(Self, AudioFormat), WasapiCaptureSourceError> {
+        let name: Arc<str> = name.into().into();
+        let pp_log = element_pp_log(ElementType::WasapiCaptureSource, &name, None);
+        let _apartment = ComApartment::new()?;
+
+        let audio_client = activate_process_loopback(process_id)?;
+        let format = PROCESS_LOOPBACK_FORMAT;
+        // SAFETY: COM is initialized on this thread, the client was just
+        // activated, and `format` is a fully initialized `WAVEFORMATEX` that
+        // outlives the call reading it.
+        unsafe {
+            audio_client.Initialize(
+                AUDCLNT_SHAREMODE_SHARED,
+                // Loopback, as an endpoint's playback side is captured — a
+                // process loopback client is a capture of what is played and
+                // takes the same flag. Polled rather than event-driven, for
+                // the reason `POLL_INTERVAL` gives.
+                AUDCLNT_STREAMFLAGS_LOOPBACK,
+                BUFFER_DURATION_100NS,
+                0,
+                &raw const format,
+                None,
+            )?;
+        }
+        let audio_format = resolve_mix_format(&raw const format).map_err(|error| {
+            WasapiCaptureSourceError::UnsupportedMixFormat {
+                format_tag: error.format_tag,
+                bits: error.bits,
+            }
+        })?;
+        // SAFETY: the client is initialized, which is what makes its capture
+        // service available.
+        let capture_client: IAudioCaptureClient = unsafe { audio_client.GetService()? };
+
+        pp_info!(
+            pp_log: &pp_log,
+            "opened: process={}, {}Hz, {} channel(s), format={:?}",
+            process_id,
+            audio_format.sample_rate,
+            audio_format.channels,
+            audio_format.sample_format
+        );
+        Ok((
+            Self::assemble(name, pp_log, audio_client, capture_client, audio_format),
+            audio_format,
+        ))
+    }
+
+    /// The parts every open ends with, whichever kind of capture it was.
+    fn assemble(
+        name: Arc<str>,
+        pp_log: PpLog,
+        audio_client: IAudioClient,
+        capture_client: IAudioCaptureClient,
+        audio_format: AudioFormat,
+    ) -> Self {
+        let pad = SrcPad::with_contract(
+            format!("{name}_src"),
+            OutputContract::Fixed(PortContract::frame(
+                MediaKind::AudioFrame,
+                MemoryDomain::System,
+            )),
+        );
+        Self {
+            name,
+            pp_log,
+            audio_client,
+            capture_client,
+            sample_rate: audio_format.sample_rate,
+            format: audio_format.sample_format,
+            channel_layout: audio_format.channel_layout(),
+            samples_emitted: 0,
+            pad,
         }
     }
 
@@ -582,5 +697,125 @@ impl SourceElement for WasapiCaptureSource {
 
     fn seek(&mut self, _target: std::time::Duration) -> Result<std::time::Duration> {
         Err(WasapiCaptureSourceError::SeekUnsupported.into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The format a process loopback asks for has to be one this crate can
+    /// describe, since nothing else ever tells it what is arriving — a
+    /// device capture reads its endpoint's, and there is no endpoint here.
+    #[test]
+    fn the_process_loopback_format_is_one_the_crate_can_name() {
+        let asked = PROCESS_LOOPBACK_FORMAT;
+        let format = resolve_mix_format(&raw const asked)
+            .expect("the format this asks Windows for must be one this can read back");
+        assert_eq!(format.sample_rate, 48_000);
+        assert_eq!(format.channels, 2);
+        assert_eq!(
+            format.sample_format,
+            ffmpeg::format::Sample::F32(ffmpeg::format::sample::Type::Packed)
+        );
+        // What `build_frame` copies per frame, which the format has to agree
+        // with or every packet would be read short or long.
+        assert_eq!(
+            asked.nBlockAlign as usize,
+            format.channels as usize * format.sample_format.bytes()
+        );
+    }
+
+    /// What a process loopback hands over on a machine that has one to open:
+    /// frames in the format it asked for, and a timeline that keeps up with
+    /// the clock whether or not the process is making a noise — silence is
+    /// filled, exactly as it is for a device (see
+    /// [`WasapiCaptureSource::fill_silence_gap`]).
+    ///
+    /// Skips where there is nothing to capture, or where Windows refuses the
+    /// activation — a build older than 10 2004 has no process loopback at
+    /// all, and a runner with no audio stack has no session to point at.
+    #[test]
+    fn a_process_capture_keeps_a_timeline_of_its_own() {
+        use crate::elements::AppSink;
+        use std::sync::{Arc as StdArc, Mutex};
+
+        let Ok(processes) = WasapiCaptureSource::list_processes() else {
+            eprintln!("skipped: WASAPI would not enumerate sessions on this machine");
+            return;
+        };
+        let Some(process) = processes.first() else {
+            eprintln!("skipped: nothing on this machine holds an audio session");
+            return;
+        };
+        let opened = WasapiCaptureSource::open_process("test-process-audio", process.id);
+        let (source, format) = match opened {
+            Ok(opened) => opened,
+            Err(error) => {
+                eprintln!("skipped: this machine would not activate a process loopback: {error}");
+                return;
+            }
+        };
+        assert_eq!(format.sample_rate, 48_000, "the format it asked for");
+
+        let samples = StdArc::new(Mutex::new(0i64));
+        let sink = AppSink::new("test-process-audio-sink", {
+            let samples = StdArc::clone(&samples);
+            move |buffer| {
+                if let MediaBuffer::Audio(frame) = &buffer {
+                    *samples.lock().expect("sample count poisoned") += frame.samples() as i64;
+                }
+                Ok(())
+            }
+        });
+        let pipeline =
+            crate::pipeline::Pipeline::new("test-process-audio", source, |source, ctx| {
+                let branch = ctx.branch().to(Box::new(sink))?;
+                ctx.attach(source, 0, branch)?;
+                Ok(())
+            })
+            .expect("test pipeline wiring must succeed");
+
+        pipeline.run().expect("the capture must start");
+        let measured = Duration::from_millis(400);
+        thread::sleep(measured);
+        pipeline.stop();
+        pipeline.bus().log_events();
+
+        let samples = *samples.lock().expect("sample count poisoned");
+        let expected = (measured.as_secs_f64() * format.sample_rate as f64) as i64;
+        // Half, not all: the window includes starting the client and the
+        // last poll interval's worth is still in flight when this stops.
+        assert!(
+            samples > expected / 2,
+            "a capture of {} delivered {samples} samples where {expected} were due",
+            process.executable
+        );
+    }
+
+    /// Whatever this machine is running, a listed process is one a capture
+    /// could be opened against: a live id, and a name for the picker to show
+    /// where Windows would give one.
+    #[test]
+    fn every_listed_process_is_one_that_could_be_captured() {
+        let Ok(processes) = WasapiCaptureSource::list_processes() else {
+            eprintln!("skipped: WASAPI would not enumerate sessions on this machine");
+            return;
+        };
+        if processes.is_empty() {
+            eprintln!("skipped: nothing on this machine holds an audio session");
+            return;
+        }
+        for process in &processes {
+            assert_ne!(process.id, 0, "a session with no process is not listed");
+        }
+        let mut ids: Vec<u32> = processes.iter().map(|process| process.id).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(
+            ids.len(),
+            processes.len(),
+            "a process playing to two endpoints is one entry"
+        );
     }
 }
