@@ -142,6 +142,25 @@ fn download(
     }
 }
 
+/// The same for a BGRA composition — see
+/// [`CudaVideoCompositor::with_format`].
+fn download_bgra(
+    device: &CudaDevice,
+    frame: UnboundObjectPoolRef<ffmpeg::frame::Video>,
+    width: u32,
+    height: u32,
+) -> Arc<UnboundObjectPoolRef<ffmpeg::frame::Video>> {
+    let mut download = CudaDownload::new("download", device, CudaFrameFormat::Bgra, width, height);
+    let received = capture(&mut download);
+    download
+        .consume(MediaBuffer::Video(Arc::new(frame)))
+        .expect("download");
+    let buf = received.lock().unwrap().remove(0);
+    match buf {
+        MediaBuffer::Video(frame) => frame,
+        _ => panic!("expected a video frame"),
+    }
+}
 fn luma_at(frame: &ffmpeg::frame::Video, x: usize, y: usize) -> u8 {
     frame.data(0)[y * frame.stride(0) + x]
 }
@@ -1033,11 +1052,213 @@ fn a_translucent_background_is_refused() {
     };
 
     assert!(matches!(
-        validate_output_options(translucent),
+        validate_output_options(translucent, CudaFrameFormat::Nv12),
         Err(CudaVideoCompositorError::TranslucentBackground(128))
     ));
     assert!(
-        validate_output_options(opaque).is_ok(),
+        validate_output_options(opaque, CudaFrameFormat::Nv12).is_ok(),
         "an opaque one is what this backend composes"
+    );
+}
+
+/// A composition meant to be a layer of another compositor: BGRA, cleared to
+/// nothing, and keeping each layer's own alpha.
+///
+/// This is what a Scene shown inside another Scene needs. Three things have
+/// to hold at once, and the first two are what an NV12 canvas cannot do:
+/// nothing drawn leaves nothing behind, what a layer drew is as opaque as the
+/// layer was, and a translucent layer is mixed with what is under it rather
+/// than replacing it.
+#[test]
+fn a_bgra_canvas_keeps_what_no_layer_covered_transparent() {
+    let Some((device, _cuda_lock)) = try_cuda_device() else {
+        return;
+    };
+    let (width, height) = (64u32, 64u32);
+    let options = VideoCompositorOptions {
+        background_alpha: 0,
+        ..options(width, height)
+    };
+    let Ok((mut compositor, handle)) =
+        CudaVideoCompositor::with_format("compositor", &device, options, CudaFrameFormat::Bgra)
+    else {
+        eprintln!("skipping: this machine cannot open a CUDA compositor");
+        return;
+    };
+
+    // An opaque red square in one corner, and a half-transparent green one
+    // over it, so the blend has something to be read against.
+    let mut under = handle
+        .add_source(
+            "under",
+            VideoLayer {
+                fit: VideoFit::Stretch,
+                ..VideoLayer::new(VideoRect::new(0, 0, 32, 32))
+            },
+        )
+        .expect("a layer registers");
+    let mut over = handle
+        .add_source(
+            "over",
+            VideoLayer {
+                z_index: 1,
+                fit: VideoFit::Stretch,
+                ..VideoLayer::new(VideoRect::new(16, 16, 16, 16))
+            },
+        )
+        .expect("a second layer registers");
+    let Some(red) = cuda_bgra_frame(&device, 16, 16, |_, _| [0, 0, 255, 255]) else {
+        return;
+    };
+    let Some(green) = cuda_bgra_frame(&device, 16, 16, |_, _| [0, 255, 0, 128]) else {
+        return;
+    };
+    under.sink.consume(red).expect("frame");
+    over.sink.consume(green).expect("frame");
+
+    let composed = compositor.compose_frame().expect("compose");
+    let out = download_bgra(&device, composed, width, height);
+    let pixel = |x: usize, y: usize| {
+        let at = y * out.stride(0) + x * 4;
+        [
+            out.data(0)[at],
+            out.data(0)[at + 1],
+            out.data(0)[at + 2],
+            out.data(0)[at + 3],
+        ]
+    };
+
+    assert_eq!(
+        pixel(48, 48),
+        [0, 0, 0, 0],
+        "where no layer drew, nothing at all"
+    );
+    assert_eq!(
+        pixel(4, 4),
+        [0, 0, 255, 255],
+        "what an opaque layer drew is opaque"
+    );
+    // The green square at half alpha over the red one: 128/255 of green and
+    // the rest of what was under it, with the alpha staying full.
+    let alpha = 128u32;
+    let mixed = ((255 * (255 - alpha) + 127) / 255) as u8;
+    let green_part = ((255 * alpha + 127) / 255) as u8;
+    assert_eq!(
+        pixel(20, 20),
+        [0, green_part, mixed, 255],
+        "a translucent layer is mixed with what it covers"
+    );
+}
+
+/// An ordinary NV12 layer — a camera, a clip — on a BGRA canvas.
+///
+/// It has no alpha of its own, so it is opaque wherever it lands and the
+/// canvas is left transparent everywhere else. The conversion on the way in
+/// is BT.709 limited range, the same one that put the luma there, so this
+/// asserts the colour came back rather than only that something did.
+#[test]
+fn an_nv12_layer_lands_opaque_on_a_bgra_canvas() {
+    let Some((device, _cuda_lock)) = try_cuda_device() else {
+        return;
+    };
+    let (width, height) = (64u32, 64u32);
+    let options = VideoCompositorOptions {
+        background_alpha: 0,
+        ..options(width, height)
+    };
+    let Ok((mut compositor, handle)) =
+        CudaVideoCompositor::with_format("compositor", &device, options, CudaFrameFormat::Bgra)
+    else {
+        eprintln!("skipping: this machine cannot open a CUDA compositor");
+        return;
+    };
+    let mut input = handle
+        .add_source(
+            "camera",
+            VideoLayer {
+                fit: VideoFit::Stretch,
+                ..VideoLayer::new(VideoRect::new(0, 0, 32, 32))
+            },
+        )
+        .expect("a layer registers");
+    // Luma 235 with neutral chroma is white at the top of limited range.
+    let Some(frame) = cuda_frame(&device, 32, 32, 235) else {
+        return;
+    };
+    input.sink.consume(frame).expect("frame");
+
+    let composed = compositor.compose_frame().expect("compose");
+    let out = download_bgra(&device, composed, width, height);
+    let pixel = |x: usize, y: usize| {
+        let at = y * out.stride(0) + x * 4;
+        [
+            out.data(0)[at],
+            out.data(0)[at + 1],
+            out.data(0)[at + 2],
+            out.data(0)[at + 3],
+        ]
+    };
+
+    let [b, g, r, a] = pixel(8, 8);
+    assert_eq!(a, 255, "an NV12 layer has no transparency to bring");
+    for (channel, value) in [("blue", b), ("green", g), ("red", r)] {
+        assert!(
+            value >= 250,
+            "{channel} came back as {value}, not the white that was put in"
+        );
+    }
+    assert_eq!(
+        pixel(48, 48),
+        [0, 0, 0, 0],
+        "and the canvas is untouched where it did not land"
+    );
+}
+
+/// A text layer on a BGRA canvas: its glyphs in their own colour, the rest
+/// of the canvas still transparent.
+///
+/// The mask is the same one the NV12 canvas draws through; what differs is
+/// that only its full-resolution half is read, since there is no subsampled
+/// plane to cover.
+#[test]
+fn a_text_layer_draws_on_a_bgra_canvas() {
+    let Some((device, _cuda_lock)) = try_cuda_device() else {
+        return;
+    };
+    let (width, height) = (64u32, 64u32);
+    let options = VideoCompositorOptions {
+        background_alpha: 0,
+        ..options(width, height)
+    };
+    let Ok((mut compositor, handle)) =
+        CudaVideoCompositor::with_format("compositor", &device, options, CudaFrameFormat::Bgra)
+    else {
+        eprintln!("skipping: this machine cannot open a CUDA compositor");
+        return;
+    };
+    let Some(font) = try_font() else {
+        return;
+    };
+    let mut layer = TextLayer::new(font);
+    layer.font_size = 32.0;
+    layer.color = Color::WHITE;
+    layer.x = 4;
+    layer.y = 4;
+    let text = handle
+        .add_text_layer("caption", layer)
+        .expect("add a text layer");
+    text.set_text("Hi").expect("the text rasterizes");
+
+    let composed = compositor.compose_frame().expect("compose");
+    let out = download_bgra(&device, composed, width, height);
+    let drawn = (0..height as usize)
+        .flat_map(|y| (0..width as usize).map(move |x| (x, y)))
+        .filter(|(x, y)| out.data(0)[y * out.stride(0) + x * 4 + 3] != 0)
+        .count();
+    assert!(drawn > 0, "the glyphs left nothing behind");
+    assert!(
+        drawn < (width * height) as usize / 2,
+        "text covered {drawn} of {} pixels, which is not text",
+        width * height
     );
 }

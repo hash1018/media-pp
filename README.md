@@ -92,7 +92,9 @@ FileDemuxer → SwDecoder → Queue → Pacer → FrameCounter
   leaves the picture transparent where no layer drew, so one composition can
   be a layer of the next — an overlay over a canvas rather than a rectangle
   covering it. `SwVideoCompositor` and `D3d11VideoCompositor` compose in
-  BGRA and can; `CudaVideoCompositor` composes in NV12 and refuses.
+  BGRA and can; `CudaVideoCompositor` composes in NV12 by default and
+  refuses, and `CudaVideoCompositor::with_format` asks it for a BGRA canvas
+  instead, which can.
   `TeeHandle::attach` adds a branch, `finish_branch` ends one cleanly (so a
   recording finalizes while its preview keeps running), and `detach`
   abandons one.

@@ -95,6 +95,13 @@ unsafe extern "C" {
         width: usize,
         height: usize,
     ) -> CUresult;
+    fn cuMemsetD2D32_v2(
+        dst: CUdeviceptr,
+        dst_pitch: usize,
+        value: u32,
+        width: usize,
+        height: usize,
+    ) -> CUresult;
     fn cuGetErrorString(error: CUresult, str_: *mut *const c_char) -> CUresult;
     /// Takes PTX *text* as well as a compiled cubin: the driver carries its
     /// own JIT, which is what lets this crate ship a kernel as a string
@@ -179,6 +186,11 @@ pub(crate) struct CudaDriver {
     module: CUmodule,
     blend: CUfunction,
     blend_masked: CUfunction,
+    /// One BGRA layer over a BGRA canvas, and a text layer's mask over one
+    /// — what a composition drawn into another compositor needs, where the
+    /// NV12 pair above is what the Canvas itself needs.
+    blend_bgra: CUfunction,
+    blend_mask_bgra: CUfunction,
     /// A layer blended with a per-pixel alpha *and* per-pixel colour, which
     /// is what an overlay carrying its own transparency needs. Loaded but not
     /// yet called: the surfaces it reads from have no owner until the
@@ -252,7 +264,13 @@ impl CudaDriver {
             check("cuCtxPushCurrent", cuCtxPushCurrent_v2(ctx))?;
             let loaded = load_module(
                 BLEND_PTX,
-                ["blend_plane", "blend_masked", "blend_plane_masked"],
+                [
+                    "blend_plane",
+                    "blend_masked",
+                    "blend_plane_masked",
+                    "blend_bgra",
+                    "blend_mask_bgra",
+                ],
             )
             .and_then(|blend| {
                 match load_module(
@@ -279,7 +297,16 @@ impl CudaDriver {
             let mut popped: CUcontext = std::ptr::null_mut();
             check("cuCtxPopCurrent", cuCtxPopCurrent_v2(&mut popped))?;
             let (
-                (module, [blend, blend_masked, blend_plane_masked]),
+                (
+                    module,
+                    [
+                        blend,
+                        blend_masked,
+                        blend_plane_masked,
+                        blend_bgra,
+                        blend_mask_bgra,
+                    ],
+                ),
                 (
                     convert_module,
                     [
@@ -307,6 +334,8 @@ impl CudaDriver {
                 blend,
                 blend_masked,
                 blend_plane_masked,
+                blend_bgra,
+                blend_mask_bgra,
                 convert_module,
                 bgra_to_luma,
                 bgra_to_chroma,
@@ -377,6 +406,126 @@ impl CudaDriver {
                     (width / 2) as usize,
                     (height / 2) as usize,
                 ),
+            )
+        })
+    }
+
+    /// Fills a BGRA surface with one colour, alpha included.
+    ///
+    /// What [`Self::fill_nv12`] is for a Canvas, for a composition that will
+    /// be drawn into another compositor: an alpha of zero leaves the picture
+    /// transparent where no layer draws, so it can be laid over something
+    /// else. One `cuMemsetD2D32` rather than a kernel, since a BGRA pixel is
+    /// exactly a 32-bit pattern.
+    pub(crate) fn fill_bgra(
+        &self,
+        surface: BgraSurface,
+        width: u32,
+        height: u32,
+        color: Color,
+        alpha: u8,
+    ) -> Result<(), CudaDriverError> {
+        // Little-endian: the low byte lands at the lower address, which in a
+        // BGRA pixel is blue.
+        let value = u32::from(color.blue)
+            | (u32::from(color.green) << 8)
+            | (u32::from(color.red) << 16)
+            | (u32::from(alpha) << 24);
+        // SAFETY: `with_context` has this driver's context current; the
+        // pointer and pitch come from a frame the caller has validated, and
+        // `width` x `height` is the caller's to keep within them —
+        // `cuMemsetD2D32` writes exactly that rectangle at the given pitch.
+        self.with_context(|| unsafe {
+            check(
+                "cuMemsetD2D32",
+                cuMemsetD2D32_v2(
+                    surface.pixels,
+                    surface.pitch,
+                    value,
+                    width as usize,
+                    height as usize,
+                ),
+            )
+        })
+    }
+
+    /// Draws one BGRA layer over a BGRA canvas, source over destination.
+    ///
+    /// The layer's own alpha scaled by `opacity` decides each pixel, and the
+    /// canvas keeps the alpha that leaves behind — `src + dst · (1 - src)` —
+    /// so a composition laid over another picture is transparent exactly
+    /// where nothing drew.
+    pub(crate) fn blend_bgra(
+        &self,
+        destination: BgraSurface,
+        source: BgraSurface,
+        region: BgraRegion,
+        opacity: u8,
+    ) -> Result<(), CudaDriverError> {
+        let BgraRegion {
+            source_x,
+            source_y,
+            destination_x,
+            destination_y,
+            width,
+            height,
+        } = region;
+        if width == 0 || height == 0 {
+            return Ok(());
+        }
+        let source_pixels =
+            source.pixels + u64::from(source_y) * source.pitch as u64 + u64::from(source_x) * 4;
+        let destination_pixels = destination.pixels
+            + u64::from(destination_y) * destination.pitch as u64
+            + u64::from(destination_x) * 4;
+        self.with_context(|| {
+            self.launch_bgra(
+                self.blend_bgra,
+                destination_pixels,
+                destination.pitch as u32,
+                source_pixels,
+                source.pitch as u32,
+                width,
+                height,
+                opacity,
+            )
+        })
+    }
+
+    /// Draws one colour through a coverage mask over a BGRA canvas, which is
+    /// what a text layer is — see [`Self::blend_mask_nv12`], the Canvas's own
+    /// half of this.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn blend_mask_bgra(
+        &self,
+        destination: BgraSurface,
+        destination_x: u32,
+        destination_y: u32,
+        mask: CUdeviceptr,
+        mask_pitch: u32,
+        width: u32,
+        height: u32,
+        color: Color,
+        opacity: u8,
+    ) -> Result<(), CudaDriverError> {
+        if width == 0 || height == 0 {
+            return Ok(());
+        }
+        let packed =
+            u32::from(color.blue) | (u32::from(color.green) << 8) | (u32::from(color.red) << 16);
+        let destination_pixels = destination.pixels
+            + u64::from(destination_y) * destination.pitch as u64
+            + u64::from(destination_x) * 4;
+        self.with_context(|| {
+            self.launch_bgra_mask(
+                destination_pixels,
+                destination.pitch as u32,
+                mask,
+                mask_pitch,
+                width,
+                height,
+                packed,
+                opacity,
             )
         })
     }
@@ -973,6 +1122,16 @@ pub(crate) struct CudaMask {
     pub(crate) height: u32,
 }
 
+impl CudaMask {
+    /// The full-resolution coverage plane, offset to `(x, y)`.
+    ///
+    /// What a BGRA canvas draws a text layer through: one byte per pixel,
+    /// and no half-resolution plane to go with it — see
+    /// [`CudaDriver::blend_mask_bgra`].
+    pub(crate) fn full_at(&self, x: u32, y: u32) -> CUdeviceptr {
+        self.full + u64::from(y) * u64::from(self.width) + u64::from(x)
+    }
+}
 // SAFETY: the pointers are plain device allocations with no thread affinity,
 // and `Drop` pushes the context it captured before freeing them, so a mask
 // released on another thread is still released in the context it was
@@ -1006,6 +1165,43 @@ pub(crate) struct CudaOverlayScratch {
     pub(crate) height: u32,
 }
 
+/// A scratch BGRA buffer — see [`CudaDriver::bgra_scratch`]. Tightly packed,
+/// so its pitch is its width in bytes.
+pub(crate) struct CudaBgraScratch {
+    ctx: CUcontext,
+    pixels: CUdeviceptr,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+}
+
+impl CudaBgraScratch {
+    /// The surface a kernel draws into or reads from.
+    pub(crate) fn surface(&self) -> BgraSurface {
+        BgraSurface {
+            pixels: self.pixels,
+            pitch: (self.width as usize) * 4,
+        }
+    }
+}
+
+// SAFETY: a plain device allocation with no thread affinity, and `Drop`
+// pushes the context it captured before freeing it — the contract
+// `CudaOverlayScratch` documents above.
+unsafe impl Send for CudaBgraScratch {}
+
+impl Drop for CudaBgraScratch {
+    fn drop(&mut self) {
+        // SAFETY: the context this was allocated in is still retained by the
+        // driver that made it, and the pointer is freed exactly once.
+        unsafe {
+            if cuCtxPushCurrent_v2(self.ctx) == 0 {
+                cuMemFree_v2(self.pixels);
+                let mut popped: CUcontext = std::ptr::null_mut();
+                cuCtxPopCurrent_v2(&mut popped);
+            }
+        }
+    }
+}
 // SAFETY: plain device allocations with no thread affinity, and `Drop` pushes
 // the context it captured before freeing them — the same contract `CudaMask`
 // documents just below.
@@ -1107,6 +1303,34 @@ impl CudaDriver {
         })
     }
 
+    /// A BGRA buffer to convert an NV12 layer into before it is drawn on a
+    /// BGRA canvas.
+    ///
+    /// The mirror of [`Self::overlay_scratch`], which converts the other way
+    /// for an NV12 canvas. One plane rather than four, and no 2x2 block to
+    /// stay aligned to.
+    pub(crate) fn bgra_scratch(
+        &self,
+        width: u32,
+        height: u32,
+    ) -> Result<CudaBgraScratch, CudaDriverError> {
+        if width == 0 || height == 0 {
+            return Err(CudaDriverError::EmptyMask);
+        }
+        let bytes = (width as usize) * (height as usize) * 4;
+        // SAFETY: `with_context` has the context current and the out-param is
+        // a live local; a failure allocates nothing to leak.
+        self.with_context(|| unsafe {
+            let mut pixels = 0;
+            check("cuMemAlloc", cuMemAlloc_v2(&mut pixels, bytes))?;
+            Ok(CudaBgraScratch {
+                ctx: self.ctx,
+                pixels,
+                width,
+                height,
+            })
+        })
+    }
     pub(crate) fn upload_mask(
         &self,
         coverage: &[u8],
@@ -1352,6 +1576,103 @@ impl CudaDriver {
         })
     }
 
+    /// One 7-parameter launch: `(dst, dst_pitch, src, src_pitch, width,
+    /// height, opacity)`, a thread per BGRA pixel rather than per byte.
+    #[allow(clippy::too_many_arguments)]
+    fn launch_bgra(
+        &self,
+        entry: CUfunction,
+        mut dst: CUdeviceptr,
+        mut dst_pitch: u32,
+        mut src: CUdeviceptr,
+        mut src_pitch: u32,
+        mut width: u32,
+        mut height: u32,
+        opacity: u8,
+    ) -> Result<(), CudaDriverError> {
+        const BLOCK: u32 = 16;
+        let (grid_x, grid_y) = (width.div_ceil(BLOCK), height.div_ceil(BLOCK));
+        let mut opacity = u32::from(opacity);
+        let mut params: [*mut c_void; 7] = [
+            (&mut dst) as *mut _ as *mut c_void,
+            (&mut dst_pitch) as *mut _ as *mut c_void,
+            (&mut src) as *mut _ as *mut c_void,
+            (&mut src_pitch) as *mut _ as *mut c_void,
+            (&mut width) as *mut _ as *mut c_void,
+            (&mut height) as *mut _ as *mut c_void,
+            (&mut opacity) as *mut _ as *mut c_void,
+        ];
+        // SAFETY: one pointer per parameter `blend_bgra` declares, in that
+        // order, at a live local; the context is current because every caller
+        // reaches this inside `with_context`.
+        unsafe {
+            check(
+                "cuLaunchKernel",
+                cuLaunchKernel(
+                    entry,
+                    grid_x,
+                    grid_y,
+                    1,
+                    BLOCK,
+                    BLOCK,
+                    1,
+                    0,
+                    std::ptr::null_mut(),
+                    params.as_mut_ptr(),
+                    std::ptr::null_mut(),
+                ),
+            )
+        }
+    }
+
+    /// The same for `blend_mask_bgra`, whose source is a coverage mask and a
+    /// colour rather than a surface.
+    #[allow(clippy::too_many_arguments)]
+    fn launch_bgra_mask(
+        &self,
+        mut dst: CUdeviceptr,
+        mut dst_pitch: u32,
+        mut mask: CUdeviceptr,
+        mut mask_pitch: u32,
+        mut width: u32,
+        mut height: u32,
+        mut color: u32,
+        opacity: u8,
+    ) -> Result<(), CudaDriverError> {
+        const BLOCK: u32 = 16;
+        let (grid_x, grid_y) = (width.div_ceil(BLOCK), height.div_ceil(BLOCK));
+        let mut opacity = u32::from(opacity);
+        let mut params: [*mut c_void; 8] = [
+            (&mut dst) as *mut _ as *mut c_void,
+            (&mut dst_pitch) as *mut _ as *mut c_void,
+            (&mut mask) as *mut _ as *mut c_void,
+            (&mut mask_pitch) as *mut _ as *mut c_void,
+            (&mut width) as *mut _ as *mut c_void,
+            (&mut height) as *mut _ as *mut c_void,
+            (&mut color) as *mut _ as *mut c_void,
+            (&mut opacity) as *mut _ as *mut c_void,
+        ];
+        // SAFETY: as `launch_bgra` — one pointer per parameter
+        // `blend_mask_bgra` declares, in that order, at a live local.
+        unsafe {
+            check(
+                "cuLaunchKernel",
+                cuLaunchKernel(
+                    self.blend_mask_bgra,
+                    grid_x,
+                    grid_y,
+                    1,
+                    BLOCK,
+                    BLOCK,
+                    1,
+                    0,
+                    std::ptr::null_mut(),
+                    params.as_mut_ptr(),
+                    std::ptr::null_mut(),
+                ),
+            )
+        }
+    }
     /// One 6-parameter convert-shaped launch: `(dst, dst_pitch, src,
     /// src_pitch, width, height)`, which is the shape both alpha extractions
     /// and both colour conversions share.
@@ -1567,6 +1888,18 @@ impl Drop for CudaDriver {
 /// [`crate::elements::CudaVideoCompositor`]'s own notes.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Nv12Region {
+    pub(crate) source_x: u32,
+    pub(crate) source_y: u32,
+    pub(crate) destination_x: u32,
+    pub(crate) destination_y: u32,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+}
+
+/// The same for a BGRA canvas, where there is one plane and no 2x2 block to
+/// stay aligned to — see [`Nv12Region`].
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct BgraRegion {
     pub(crate) source_x: u32,
     pub(crate) source_y: u32,
     pub(crate) destination_x: u32,

@@ -1004,4 +1004,197 @@ PMDONE:
     ret;
 }
 
+
+
+.visible .entry blend_bgra(
+    .param .u64 dst,
+    .param .u32 dst_pitch,
+    .param .u64 src,
+    .param .u32 src_pitch,
+    .param .u32 width,
+    .param .u32 height,
+    .param .u32 opacity
+)
+{
+    .reg .pred  %p<4>;
+    .reg .b16   %rs<8>;
+    .reg .b32   %r<48>;
+    .reg .b64   %rd<16>;
+
+    ld.param.u64    %rd1, [dst];
+    ld.param.u32    %r1, [dst_pitch];
+    ld.param.u64    %rd2, [src];
+    ld.param.u32    %r2, [src_pitch];
+    ld.param.u32    %r3, [width];
+    ld.param.u32    %r4, [height];
+    ld.param.u32    %r5, [opacity];
+
+    mov.u32         %r6, %ctaid.x;
+    mov.u32         %r7, %ntid.x;
+    mov.u32         %r8, %tid.x;
+    mad.lo.s32      %r9, %r6, %r7, %r8;
+    mov.u32         %r10, %ctaid.y;
+    mov.u32         %r11, %ntid.y;
+    mov.u32         %r12, %tid.y;
+    mad.lo.s32      %r13, %r10, %r11, %r12;
+
+    setp.ge.u32     %p1, %r9, %r3;
+    @%p1 bra        BBDONE;
+    setp.ge.u32     %p2, %r13, %r4;
+    @%p2 bra        BBDONE;
+
+    mul.lo.s32      %r14, %r9, 4;
+    mad.lo.s32      %r15, %r13, %r1, %r14;
+    cvt.u64.u32     %rd3, %r15;
+    add.s64         %rd4, %rd1, %rd3;
+    mad.lo.s32      %r16, %r13, %r2, %r14;
+    cvt.u64.u32     %rd5, %r16;
+    add.s64         %rd6, %rd2, %rd5;
+
+    // The source's own alpha, scaled by the layer's opacity.
+    ld.global.u8    %r17, [%rd6+3];
+    mul.lo.s32      %r18, %r17, %r5;
+    add.s32         %r19, %r18, 127;
+    div.u32         %r20, %r19, 255;
+    sub.s32         %r21, 255, %r20;
+
+    // Blue, green and red: source over destination.
+    ld.global.u8    %r22, [%rd6];
+    ld.global.u8    %r23, [%rd4];
+    mul.lo.s32      %r24, %r22, %r20;
+    mul.lo.s32      %r25, %r23, %r21;
+    add.s32         %r26, %r24, %r25;
+    add.s32         %r27, %r26, 127;
+    div.u32         %r28, %r27, 255;
+    cvt.u16.u32     %rs1, %r28;
+    st.global.u8    [%rd4], %rs1;
+
+    ld.global.u8    %r29, [%rd6+1];
+    ld.global.u8    %r30, [%rd4+1];
+    mul.lo.s32      %r31, %r29, %r20;
+    mul.lo.s32      %r32, %r30, %r21;
+    add.s32         %r33, %r31, %r32;
+    add.s32         %r34, %r33, 127;
+    div.u32         %r35, %r34, 255;
+    cvt.u16.u32     %rs2, %r35;
+    st.global.u8    [%rd4+1], %rs2;
+
+    ld.global.u8    %r36, [%rd6+2];
+    ld.global.u8    %r37, [%rd4+2];
+    mul.lo.s32      %r38, %r36, %r20;
+    mul.lo.s32      %r39, %r37, %r21;
+    add.s32         %r40, %r38, %r39;
+    add.s32         %r41, %r40, 127;
+    div.u32         %r42, %r41, 255;
+    cvt.u16.u32     %rs3, %r42;
+    st.global.u8    [%rd4+2], %rs3;
+
+    // And the alpha it leaves behind: src + dst * (1 - src).
+    ld.global.u8    %r43, [%rd4+3];
+    mul.lo.s32      %r44, %r43, %r21;
+    add.s32         %r45, %r44, 127;
+    div.u32         %r46, %r45, 255;
+    add.s32         %r47, %r46, %r20;
+    cvt.u16.u32     %rs4, %r47;
+    st.global.u8    [%rd4+3], %rs4;
+BBDONE:
+    ret;
+}
+
+.visible .entry blend_mask_bgra(
+    .param .u64 dst,
+    .param .u32 dst_pitch,
+    .param .u64 mask,
+    .param .u32 mask_pitch,
+    .param .u32 width,
+    .param .u32 height,
+    .param .u32 color,
+    .param .u32 opacity
+)
+{
+    .reg .pred  %p<4>;
+    .reg .b16   %rs<8>;
+    .reg .b32   %r<52>;
+    .reg .b64   %rd<16>;
+
+    ld.param.u64    %rd1, [dst];
+    ld.param.u32    %r1, [dst_pitch];
+    ld.param.u64    %rd2, [mask];
+    ld.param.u32    %r2, [mask_pitch];
+    ld.param.u32    %r3, [width];
+    ld.param.u32    %r4, [height];
+    ld.param.u32    %r5, [color];
+    ld.param.u32    %r6, [opacity];
+
+    mov.u32         %r7, %ctaid.x;
+    mov.u32         %r8, %ntid.x;
+    mov.u32         %r9, %tid.x;
+    mad.lo.s32      %r10, %r7, %r8, %r9;
+    mov.u32         %r11, %ctaid.y;
+    mov.u32         %r12, %ntid.y;
+    mov.u32         %r13, %tid.y;
+    mad.lo.s32      %r14, %r11, %r12, %r13;
+
+    setp.ge.u32     %p1, %r10, %r3;
+    @%p1 bra        BMDONE;
+    setp.ge.u32     %p2, %r14, %r4;
+    @%p2 bra        BMDONE;
+
+    mul.lo.s32      %r15, %r10, 4;
+    mad.lo.s32      %r16, %r14, %r1, %r15;
+    cvt.u64.u32     %rd3, %r16;
+    add.s64         %rd4, %rd1, %rd3;
+    mad.lo.s32      %r17, %r14, %r2, %r10;
+    cvt.u64.u32     %rd5, %r17;
+    add.s64         %rd6, %rd2, %rd5;
+
+    // The glyph's coverage here, scaled by the layer's opacity.
+    ld.global.u8    %r18, [%rd6];
+    mul.lo.s32      %r19, %r18, %r6;
+    add.s32         %r20, %r19, 127;
+    div.u32         %r21, %r20, 255;
+    sub.s32         %r22, 255, %r21;
+
+    // One colour for every covered pixel, so its bytes come from the
+    // parameter rather than from a surface.
+    and.b32         %r23, %r5, 255;
+    ld.global.u8    %r24, [%rd4];
+    mul.lo.s32      %r25, %r23, %r21;
+    mul.lo.s32      %r26, %r24, %r22;
+    add.s32         %r27, %r25, %r26;
+    add.s32         %r28, %r27, 127;
+    div.u32         %r29, %r28, 255;
+    cvt.u16.u32     %rs1, %r29;
+    st.global.u8    [%rd4], %rs1;
+
+    bfe.u32         %r30, %r5, 8, 8;
+    ld.global.u8    %r31, [%rd4+1];
+    mul.lo.s32      %r32, %r30, %r21;
+    mul.lo.s32      %r33, %r31, %r22;
+    add.s32         %r34, %r32, %r33;
+    add.s32         %r35, %r34, 127;
+    div.u32         %r36, %r35, 255;
+    cvt.u16.u32     %rs2, %r36;
+    st.global.u8    [%rd4+1], %rs2;
+
+    bfe.u32         %r37, %r5, 16, 8;
+    ld.global.u8    %r38, [%rd4+2];
+    mul.lo.s32      %r39, %r37, %r21;
+    mul.lo.s32      %r40, %r38, %r22;
+    add.s32         %r41, %r39, %r40;
+    add.s32         %r42, %r41, 127;
+    div.u32         %r43, %r42, 255;
+    cvt.u16.u32     %rs3, %r43;
+    st.global.u8    [%rd4+2], %rs3;
+
+    ld.global.u8    %r44, [%rd4+3];
+    mul.lo.s32      %r45, %r44, %r22;
+    add.s32         %r46, %r45, 127;
+    div.u32         %r47, %r46, 255;
+    add.s32         %r48, %r47, %r21;
+    cvt.u16.u32     %rs4, %r48;
+    st.global.u8    [%rd4+3], %rs4;
+BMDONE:
+    ret;
+}
 "#;

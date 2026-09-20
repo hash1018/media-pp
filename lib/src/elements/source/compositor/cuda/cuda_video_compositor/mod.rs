@@ -33,8 +33,8 @@ use crate::{
     platform::cuda::{
         CudaDevice, CudaFrameFormat,
         driver::{
-            BgraSurface, CudaDriver, CudaDriverError, CudaMask, CudaOverlayScratch, Nv12Region,
-            Nv12Surface,
+            BgraRegion, BgraSurface, CudaBgraScratch, CudaDriver, CudaDriverError, CudaMask,
+            CudaOverlayScratch, Nv12Region, Nv12Surface,
         },
         frame::create_hw_frames_ctx,
     },
@@ -653,6 +653,12 @@ pub struct CudaVideoCompositor {
     /// Where each tick is recorded, once the pipeline has handed it over
     /// ??see [`crate::stats::TickStats`].
     ticks: Option<Arc<TickCounters>>,
+    /// What this composes in — see [`CudaVideoCompositor::with_format`].
+    format: CudaFrameFormat,
+    /// One BGRA buffer per input whose layer has to be converted before it
+    /// can be drawn on a BGRA canvas, kept between frames for the reason the
+    /// overlay scratches are.
+    canvas_scratch: HashMap<VideoInputId, CudaBgraScratch>,
 }
 
 // SAFETY: both buffers are heap-allocated FFmpeg buffers with no thread
@@ -673,7 +679,26 @@ impl CudaVideoCompositor {
         device: &CudaDevice,
         options: VideoCompositorOptions,
     ) -> std::result::Result<(Self, CudaVideoCompositorHandle), CudaVideoCompositorError> {
-        validate_output_options(options)?;
+        Self::with_format(name, device, options, CudaFrameFormat::Nv12)
+    }
+
+    /// The same, composing in `format` rather than in NV12.
+    ///
+    /// NV12 is what a Canvas wants: it is what an encoder takes, and half
+    /// the bytes of anything else. [`CudaFrameFormat::Bgra`] is for a
+    /// composition that is itself a layer of another compositor — it keeps
+    /// an alpha channel, so the picture can be transparent where no layer
+    /// drew and be laid over what holds it. It is also the only format that
+    /// accepts a
+    /// [`background_alpha`](VideoCompositorOptions::background_alpha) other
+    /// than 255.
+    pub fn with_format(
+        name: impl Into<String>,
+        device: &CudaDevice,
+        options: VideoCompositorOptions,
+        format: CudaFrameFormat,
+    ) -> std::result::Result<(Self, CudaVideoCompositorHandle), CudaVideoCompositorError> {
+        validate_output_options(options, format)?;
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::CudaVideoCompositor, &name, None);
 
@@ -682,12 +707,7 @@ impl CudaVideoCompositor {
         // SAFETY: `create_hw_frames_ctx`'s contract is a live device context, which
         // is what the owned `AvBufferRef` beside it is.
         let hw_frames_ctx = match unsafe {
-            create_hw_frames_ctx(
-                &hw_device_ctx,
-                CudaFrameFormat::Nv12,
-                options.width,
-                options.height,
-            )
+            create_hw_frames_ctx(&hw_device_ctx, format, options.width, options.height)
         } {
             Ok(ctx) => ctx,
             Err(error) => {
@@ -727,8 +747,10 @@ impl CudaVideoCompositor {
                 driver,
                 hw_device_ctx,
                 hw_frames_ctx,
+                format,
                 scalers: HashMap::new(),
                 overlays: HashMap::new(),
+                canvas_scratch: HashMap::new(),
                 crops: HashMap::new(),
                 composed: None,
                 output_pool: UnboundObjectPool::new(
@@ -996,17 +1018,92 @@ impl CudaVideoCompositor {
         }
 
         let mut output = self.output_frame()?;
-        let canvas =
-            Nv12Surface::from_frame(&output).ok_or(CudaVideoCompositorError::MissingPlane)?;
-        self.driver.fill_nv12(
-            canvas,
-            self.options.width,
-            self.options.height,
-            self.options.background,
-        )?;
+        // The canvas this composes on: NV12 for a picture that is the whole
+        // of what is seen, BGRA for one that will be a layer of another
+        // compositor — see [`CudaVideoCompositor::with_format`].
+        let canvas = match self.format {
+            CudaFrameFormat::Bgra => Canvas::Bgra(
+                BgraSurface::from_frame(&output).ok_or(CudaVideoCompositorError::MissingPlane)?,
+            ),
+            _ => Canvas::Nv12(
+                Nv12Surface::from_frame(&output).ok_or(CudaVideoCompositorError::MissingPlane)?,
+            ),
+        };
+        match canvas {
+            Canvas::Nv12(canvas) => self.driver.fill_nv12(
+                canvas,
+                self.options.width,
+                self.options.height,
+                self.options.background,
+            )?,
+            Canvas::Bgra(canvas) => self.driver.fill_bgra(
+                canvas,
+                self.options.width,
+                self.options.height,
+                self.options.background,
+                self.options.background_alpha,
+            )?,
+        }
 
         for (scaled, placement, opacity, format, id) in &layers {
             let alpha = (opacity * 255.0).round().clamp(0.0, 255.0) as u8;
+            // A BGRA canvas takes every layer through one kernel: a BGRA one
+            // as it stands, an NV12 one converted into a scratch first. The
+            // NV12 canvas below is the other way round, and is what the
+            // Canvas itself uses.
+            if let Canvas::Bgra(canvas) = canvas {
+                let region = BgraRegion {
+                    source_x: placement.region.source_x,
+                    source_y: placement.region.source_y,
+                    destination_x: placement.region.destination_x,
+                    destination_y: placement.region.destination_y,
+                    width: placement.region.width,
+                    height: placement.region.height,
+                };
+                let layer_surface = match format {
+                    LayerFormat::Bgra => BgraSurface::from_frame(scaled)
+                        .ok_or(CudaVideoCompositorError::MissingPlane)?,
+                    LayerFormat::Nv12 => {
+                        let source = Nv12Surface::from_frame(scaled)
+                            .ok_or(CudaVideoCompositorError::MissingPlane)?;
+                        let scratch = match self.canvas_scratch.entry(*id) {
+                            std::collections::hash_map::Entry::Occupied(slot)
+                                if slot.get().width >= placement.image_width
+                                    && slot.get().height >= placement.image_height =>
+                            {
+                                slot.into_mut()
+                            }
+                            slot => {
+                                let scratch = self
+                                    .driver
+                                    .bgra_scratch(placement.image_width, placement.image_height)?;
+                                match slot {
+                                    std::collections::hash_map::Entry::Occupied(mut slot) => {
+                                        slot.insert(scratch);
+                                        slot.into_mut()
+                                    }
+                                    std::collections::hash_map::Entry::Vacant(slot) => {
+                                        slot.insert(scratch)
+                                    }
+                                }
+                            }
+                        };
+                        self.driver.nv12_to_bgra(
+                            source,
+                            scratch.surface(),
+                            placement.image_width,
+                            placement.image_height,
+                        )?;
+                        scratch.surface()
+                    }
+                };
+                self.driver
+                    .blend_bgra(canvas, layer_surface, region, alpha)?;
+                continue;
+            }
+            let Canvas::Nv12(canvas) = canvas else {
+                unreachable!("the BGRA canvas is handled above");
+            };
             match format {
                 // A layer bringing its own transparency, which is the only
                 // reason a layer would be BGRA here at all — see
@@ -1085,18 +1182,35 @@ impl CudaVideoCompositor {
             ) else {
                 continue;
             };
-            self.driver.blend_mask_nv12(
-                canvas,
-                placement.destination_x,
-                placement.destination_y,
-                mask,
-                placement.mask_x,
-                placement.mask_y,
-                placement.width,
-                placement.height,
-                text.color,
-                (opacity * 255.0).round().clamp(0.0, 255.0) as u8,
-            )?;
+            let alpha = (opacity * 255.0).round().clamp(0.0, 255.0) as u8;
+            match canvas {
+                Canvas::Nv12(canvas) => self.driver.blend_mask_nv12(
+                    canvas,
+                    placement.destination_x,
+                    placement.destination_y,
+                    mask,
+                    placement.mask_x,
+                    placement.mask_y,
+                    placement.width,
+                    placement.height,
+                    text.color,
+                    alpha,
+                )?,
+                // The full-resolution half of the mask alone: a BGRA canvas
+                // has no subsampled plane to cover, so the half-resolution
+                // one the NV12 path needs is not read.
+                Canvas::Bgra(canvas) => self.driver.blend_mask_bgra(
+                    canvas,
+                    placement.destination_x,
+                    placement.destination_y,
+                    mask.full_at(placement.mask_x, placement.mask_y),
+                    mask.width,
+                    placement.width,
+                    placement.height,
+                    text.color,
+                    alpha,
+                )?,
+            }
         }
 
         // Unconditional: what is handed downstream is read on FFmpeg's own
@@ -1353,6 +1467,17 @@ impl LayerFormat {
     }
 }
 
+/// The surface one composite draws into, which is whichever format this
+/// compositor was built for — see [`CudaVideoCompositor::with_format`].
+#[derive(Debug, Clone, Copy)]
+enum Canvas {
+    /// What a Canvas is: half the bytes, and what an encoder takes.
+    Nv12(Nv12Surface),
+    /// What a composition that is a layer of another compositor is: it keeps
+    /// an alpha channel, so it can be laid over what holds it.
+    Bgra(BgraSurface),
+}
+
 /// The surface a cropped layer is copied into before it is scaled.
 ///
 /// # Why a copy at all
@@ -1583,6 +1708,7 @@ fn validate_input_frame(
 
 fn validate_output_options(
     options: VideoCompositorOptions,
+    format: CudaFrameFormat,
 ) -> std::result::Result<(), CudaVideoCompositorError> {
     if options.width < 2
         || options.height < 2
@@ -1603,8 +1729,9 @@ fn validate_output_options(
     }
     // NV12 has nowhere to keep it. Refused rather than quietly made opaque:
     // a caller asking for a background to lay over something else would
-    // otherwise get one that covers it, and find out by looking.
-    if options.background_alpha != 255 {
+    // otherwise get one that covers it, and find out by looking. A BGRA
+    // composition has the channel and takes any alpha there is.
+    if options.background_alpha != 255 && format != CudaFrameFormat::Bgra {
         return Err(CudaVideoCompositorError::TranslucentBackground(
             options.background_alpha,
         ));
