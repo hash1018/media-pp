@@ -2,6 +2,8 @@
 
 mod device;
 
-pub use device::{PipeWireAudioDevice, PipeWireAudioDeviceKind, PipeWireDeviceError};
+pub use device::{
+    PipeWireAudioApplication, PipeWireAudioDevice, PipeWireAudioDeviceKind, PipeWireDeviceError,
+};
 
-pub(crate) use device::list_devices;
+pub(crate) use device::{list_applications, list_devices};

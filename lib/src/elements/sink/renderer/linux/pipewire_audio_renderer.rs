@@ -993,16 +993,30 @@ fn run_pipewire(
     let context = pw::context::ContextRc::new(&mainloop, None).map_err(pw_err)?;
     let core = context.connect_rc(None).map_err(pw_err)?;
 
-    let stream = pw::stream::StreamRc::new(
-        core.clone(),
-        "media-pp-audio-playback",
-        properties! {
-            *pw::keys::MEDIA_TYPE => "Audio",
-            *pw::keys::MEDIA_CATEGORY => "Playback",
-            *pw::keys::MEDIA_ROLE => "Production",
-        },
-    )
-    .map_err(pw_err)?;
+    let mut props = properties! {
+        *pw::keys::MEDIA_TYPE => "Audio",
+        *pw::keys::MEDIA_CATEGORY => "Playback",
+        *pw::keys::MEDIA_ROLE => "Production",
+    };
+    // Who is playing, said plainly. A playback stream is an application to
+    // everything else on the graph — `PipeWireAudioCaptureSource` lists one
+    // as something to capture — and a client that says nothing about itself
+    // is one an application cannot tell its own playback from. libpipewire
+    // fills these in for the client object; the node carries what the stream
+    // was given.
+    let process = std::process::id().to_string();
+    props.insert(*pw::keys::APP_PROCESS_ID, process.as_str());
+    if let Some(binary) = std::env::current_exe()
+        .ok()
+        .as_deref()
+        .and_then(std::path::Path::file_name)
+        .and_then(std::ffi::OsStr::to_str)
+    {
+        props.insert(*pw::keys::APP_PROCESS_BINARY, binary);
+    }
+
+    let stream = pw::stream::StreamRc::new(core.clone(), "media-pp-audio-playback", props)
+        .map_err(pw_err)?;
 
     // Whatever is left of the frame the previous callback did not fully
     // consume. Only ever touched from this thread's own loop.

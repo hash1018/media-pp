@@ -59,7 +59,7 @@ pub use crate::platform::linux::dmabuf_cuda::DmaBufCudaError;
     )
 ))]
 pub use crate::platform::linux::pipewire::{
-    PipeWireAudioDevice, PipeWireAudioDeviceKind, PipeWireDeviceError,
+    PipeWireAudioApplication, PipeWireAudioDevice, PipeWireAudioDeviceKind, PipeWireDeviceError,
 };
 #[cfg(feature = "webrtc")]
 pub use driver::{

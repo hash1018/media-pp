@@ -15,7 +15,7 @@ use std::{
 use pipewire as pw;
 use thiserror::Error as ThisError;
 
-/// How long [`list_devices`] waits for the registry round trip.
+/// How long an enumeration waits for the registry round trip.
 const ENUMERATION_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Gives a loop woken by the timeout a bounded chance to release its
@@ -81,6 +81,44 @@ pub struct PipeWireAudioDevice {
     pub is_default: bool,
 }
 
+/// One application playing audio, as the graph publishes it: a
+/// `Stream/Output/Audio` node, which is what a program's playback looks like
+/// from outside.
+///
+/// The PipeWire counterpart of `WasapiProcess`, and listed for the same
+/// reason — to be shown in a picker and handed to
+/// `PipeWireAudioCaptureSource::open_application`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PipeWireAudioApplication {
+    /// The stream's node id, which is what a capture is linked to.
+    ///
+    /// One run of one program: a node is published when the program starts
+    /// playing and withdrawn when it stops, so a choice meant to outlive
+    /// either belongs to [`Self::executable`].
+    pub node: u32,
+    /// What names the program well enough to find it again tomorrow:
+    /// `application.process.binary` — `firefox`, `mpv` — falling back to
+    /// `application.name` and then to the node's own name.
+    ///
+    /// A program playing through PulseAudio's bridge, which is most of them,
+    /// publishes its binary. One speaking PipeWire directly need not: this
+    /// crate's own renderer publishes neither a binary nor a pid, and is
+    /// still something a caller can capture — so what it does publish is
+    /// what stands in, rather than the node being left out of the list.
+    pub executable: String,
+    /// `application.name`, falling back to the node's own name — what the
+    /// program calls itself, for a picker to show.
+    pub description: String,
+    /// `application.process.id`, where the program published one.
+    pub pid: Option<u32>,
+}
+
+/// What one registry round trip found.
+struct Published {
+    devices: Vec<PipeWireAudioDevice>,
+    applications: Vec<PipeWireAudioApplication>,
+}
+
 #[derive(Default)]
 struct DefaultNames {
     sink: Option<String>,
@@ -94,6 +132,21 @@ struct DefaultNames {
 /// loop and registry are not `Send`, so the whole round trip happens on a
 /// thread of its own and only the plain results cross back.
 pub(crate) fn list_devices() -> std::result::Result<Vec<PipeWireAudioDevice>, PipeWireDeviceError> {
+    Ok(enumerate()?.devices)
+}
+
+/// Every application currently playing audio, as the picker of a per-program
+/// capture shows them.
+///
+/// The same round trip [`list_devices`] makes, reading the other half of what
+/// it already walks past: a program's playback is a node like any other, and
+/// the registry hands both over together.
+pub(crate) fn list_applications()
+-> std::result::Result<Vec<PipeWireAudioApplication>, PipeWireDeviceError> {
+    Ok(enumerate()?.applications)
+}
+
+fn enumerate() -> std::result::Result<Published, PipeWireDeviceError> {
     let (tx, rx) = mpsc::channel();
     let (exit_tx, exit_rx) = mpsc::channel();
     let (quit_tx, quit_rx) = pw::channel::channel::<Quit>();
@@ -122,14 +175,14 @@ pub(crate) fn list_devices() -> std::result::Result<Vec<PipeWireAudioDevice>, Pi
 /// The thread is joined once it has something to report. On timeout the loop
 /// is first asked to stop, then given a short cleanup deadline; a genuinely
 /// wedged PipeWire call still cannot hold the caller indefinitely.
-fn await_enumeration(
-    rx: mpsc::Receiver<std::result::Result<Vec<PipeWireAudioDevice>, PipeWireDeviceError>>,
+fn await_enumeration<T>(
+    rx: mpsc::Receiver<std::result::Result<T, PipeWireDeviceError>>,
     exit: mpsc::Receiver<()>,
     worker: std::thread::JoinHandle<()>,
     timeout: Duration,
     shutdown_timeout: Duration,
     stop: impl FnOnce(),
-) -> std::result::Result<Vec<PipeWireAudioDevice>, PipeWireDeviceError> {
+) -> std::result::Result<T, PipeWireDeviceError> {
     match rx.recv_timeout(timeout) {
         Ok(devices) => {
             let _ = worker.join();
@@ -160,9 +213,9 @@ pub(crate) struct Quit;
 /// `quit` ends the loop early: [`list_devices`] sends it when its timeout has
 /// passed, so a wedged daemon leaves this thread finishing on its own rather
 /// than holding a connection open for the life of the process.
-pub(crate) fn enumerate_nodes(
+fn enumerate_nodes(
     quit: pw::channel::Receiver<Quit>,
-) -> std::result::Result<Vec<PipeWireAudioDevice>, PipeWireDeviceError> {
+) -> std::result::Result<Published, PipeWireDeviceError> {
     fn pw_err(error: impl std::fmt::Display) -> PipeWireDeviceError {
         PipeWireDeviceError::PipeWire(error.to_string())
     }
@@ -177,6 +230,7 @@ pub(crate) fn enumerate_nodes(
     let _quit = quit.attach(mainloop.loop_(), move |_| quit_loop.quit());
 
     let nodes = Rc::new(RefCell::new(Vec::new()));
+    let applications = Rc::new(RefCell::new(Vec::new()));
     let defaults = Rc::new(RefCell::new(DefaultNames::default()));
     // A metadata listener must not outlive its proxy. Keeping both here also
     // keeps the daemon's replay of the `default` metadata active through the
@@ -185,8 +239,15 @@ pub(crate) fn enumerate_nodes(
         pw::metadata::MetadataListener,
         pw::metadata::Metadata,
     )>::new()));
+    // Bound application nodes, kept alive through the sync barrier for the
+    // same reason the metadata below is.
+    let nodes_bound = Rc::new(RefCell::new(
+        Vec::<(pw::node::NodeListener, pw::node::Node)>::new(),
+    ));
     let _reg_listener = {
         let nodes = nodes.clone();
+        let applications = applications.clone();
+        let nodes_bound = nodes_bound.clone();
         let defaults = defaults.clone();
         let metadata = metadata.clone();
         let registry_for_bind = registry.clone();
@@ -199,6 +260,47 @@ pub(crate) fn enumerate_nodes(
                         let kind = match props.get("media.class").unwrap_or_default() {
                             "Audio/Sink" => PipeWireAudioDeviceKind::Sink,
                             "Audio/Source" => PipeWireAudioDeviceKind::Source,
+                            // A program's own playback, which is the other
+                            // thing worth capturing and not a device at all.
+                            //
+                            // Bound rather than read where it is: a registry
+                            // global carries a handful of properties and
+                            // `application.process.binary` is not among them,
+                            // so what names the program is only in the node's
+                            // own info — the same detour the metadata below
+                            // makes, and covered by the same second sync.
+                            "Stream/Output/Audio" => {
+                                let Ok(proxy) = registry_for_bind.bind::<pw::node::Node, _>(global)
+                                else {
+                                    return;
+                                };
+                                let listener = proxy
+                                    .add_listener_local()
+                                    .info({
+                                        let applications = applications.clone();
+                                        let id = global.id;
+                                        move |info| {
+                                            let Some(props) = info.props() else { return };
+                                            let Some(application) = read_application(id, props)
+                                            else {
+                                                return;
+                                            };
+                                            let mut applications = applications.borrow_mut();
+                                            // Info is replayed, and a node
+                                            // that changes something sends it
+                                            // again.
+                                            applications.retain(
+                                                |other: &PipeWireAudioApplication| other.node != id,
+                                            );
+                                            applications.push(application);
+                                        }
+                                    })
+                                    .register();
+                                // Tuple fields drop in order, so the listener
+                                // goes before the proxy it belongs to.
+                                nodes_bound.borrow_mut().push((listener, proxy));
+                                return;
+                            }
                             _ => return,
                         };
                         let name = props.get("node.name").unwrap_or_default().to_owned();
@@ -299,7 +401,40 @@ pub(crate) fn enumerate_nodes(
         .unwrap_or_else(|shared| shared.borrow().clone());
     mark_defaults(&mut nodes, &defaults.borrow());
     nodes.sort_by_key(|node| (node.kind == PipeWireAudioDeviceKind::Sink, node.id));
-    Ok(nodes)
+    let mut applications = Rc::try_unwrap(applications)
+        .map(RefCell::into_inner)
+        .unwrap_or_else(|shared| shared.borrow().clone());
+    // Oldest first, which is the order a caller picking "the one that has
+    // the sound" out of a program running as several wants.
+    applications.sort_by_key(|application| application.node);
+    Ok(Published {
+        devices: nodes,
+        applications,
+    })
+}
+
+/// One application node's own properties, as a list entry — or `None` where
+/// it names nothing at all, which is a node no caller could tell from
+/// another.
+fn read_application(
+    node: u32,
+    props: &pw::spa::utils::dict::DictRef,
+) -> Option<PipeWireAudioApplication> {
+    let named = |key| props.get(key).filter(|value: &&str| !value.is_empty());
+    let executable = named("application.process.binary")
+        .or_else(|| named("application.name"))
+        .or_else(|| named("node.name"))?;
+    let description = named("application.name")
+        .or_else(|| named("node.name"))
+        .unwrap_or(executable);
+    Some(PipeWireAudioApplication {
+        node,
+        executable: executable.to_owned(),
+        description: description.to_owned(),
+        pid: props
+            .get("application.process.id")
+            .and_then(|pid| pid.parse().ok()),
+    })
 }
 
 /// Flags whichever nodes the session currently treats as default.
@@ -348,7 +483,7 @@ mod tests {
         });
 
         let started = Instant::now();
-        let result = await_enumeration(
+        let result = await_enumeration::<Published>(
             rx,
             exit_rx,
             worker,
@@ -392,7 +527,7 @@ mod tests {
         });
         let started = Instant::now();
 
-        let result = await_enumeration(
+        let result = await_enumeration::<Published>(
             result_rx,
             exit_rx,
             worker,

@@ -190,7 +190,7 @@ The library has no default features.
 | `dxgi-capture` | Desktop capture; also enables `d3d11` | Windows |
 | `wgc-capture` | Individual-window capture through Windows Graphics Capture; also enables `d3d11` | Windows |
 | `mf-capture` | Camera capture through Media Foundation | Windows |
-| `pipewire-audio-capture` | System-audio and microphone capture through PipeWire | Linux |
+| `pipewire-audio-capture` | System-audio, per-application and microphone capture through PipeWire | Linux |
 | `pipewire-audio-renderer` | Audio playback through PipeWire | Linux |
 | `pipewire-screen-capture` | Desktop capture through xdg-desktop-portal and PipeWire | Linux |
 | `v4l2-capture` | Camera capture through Video4Linux2 | Linux |

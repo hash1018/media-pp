@@ -1,5 +1,5 @@
 use std::{
-    cell::Cell,
+    cell::{Cell, RefCell},
     rc::Rc,
     sync::{
         Arc,
@@ -29,7 +29,7 @@ use crate::{
     error::Result,
     pad::SrcPad,
     platform::linux::pipewire::{
-        PipeWireAudioDevice, PipeWireAudioDeviceKind, PipeWireDeviceError,
+        PipeWireAudioApplication, PipeWireAudioDevice, PipeWireAudioDeviceKind, PipeWireDeviceError,
     },
 };
 
@@ -95,6 +95,27 @@ pub struct PipeWireAudioCaptureOptions {
     /// monitor ports or the node directly; there is no separate mode to keep
     /// consistent with it.
     pub device: PipeWireAudioDevice,
+}
+
+/// What one application's capture asks the graph for.
+///
+/// Fixed, unlike a device capture, which takes the graph's own values: an
+/// application's stream is linked to port by port, and ports exist only once
+/// a format says how many there are. The same reasoning as
+/// `WasapiCaptureSource`'s process loopback, which asks Windows for one
+/// format and lets it convert.
+const APPLICATION_RATE: u32 = 48_000;
+const APPLICATION_CHANNELS: u32 = 2;
+
+/// What a capture is pointed at.
+#[derive(Debug, Clone)]
+enum Target {
+    /// A device node: a sink captured through its monitor, or a source
+    /// captured directly. The session manager makes the links.
+    Device(PipeWireAudioDevice),
+    /// One application's playback stream, by node id. Nothing links a
+    /// capture to one of these on its own — see `link_application`.
+    Application(u32),
 }
 
 /// One captured packet handed from the PipeWire thread to `run`.
@@ -258,7 +279,63 @@ impl PipeWireAudioCaptureSource {
         name: impl Into<String>,
         options: PipeWireAudioCaptureOptions,
     ) -> std::result::Result<(Self, AudioFormat), PipeWireAudioCaptureSourceError> {
-        let name = name.into();
+        let described = format!(
+            "device={:?} ({:?}, node {})",
+            options.device.description, options.device.kind, options.device.id
+        );
+        Self::open_target(name.into(), Target::Device(options.device), described)
+    }
+
+    /// Every application the graph currently publishes a playback stream for
+    /// — what a per-application picker shows, and where the node id
+    /// [`Self::open_application`] takes comes from.
+    ///
+    /// Not a process list: a program that has never played anything has no
+    /// stream, the same distinction `WasapiCaptureSource::list_processes`
+    /// draws between a process and an audio session.
+    pub fn list_applications()
+    -> std::result::Result<Vec<PipeWireAudioApplication>, PipeWireAudioCaptureSourceError> {
+        Ok(crate::platform::linux::pipewire::list_applications()?)
+    }
+
+    /// Opens a capture of what one application is playing, rather than of a
+    /// device — the PipeWire counterpart of
+    /// `WasapiCaptureSource::open_process`.
+    ///
+    /// `node` is one run of one program, from [`Self::list_applications`]:
+    /// the stream is linked to that node's output ports directly, because
+    /// nothing else will. A session manager links a capture stream to a
+    /// microphone or a monitor, which is what it means by "an input", and
+    /// asking one for an application's own stream gets the default
+    /// microphone instead — measured, and the reason this connects with no
+    /// autoconnect and makes the links itself.
+    ///
+    /// What it captures is that node and nothing else: a program playing
+    /// through several streams publishes several nodes, and a program that
+    /// stops playing withdraws its own. When the node goes, the links go
+    /// with it and this captures silence rather than ending — the caller
+    /// decides what a program that has gone quiet means, by asking
+    /// [`Self::list_applications`] again.
+    ///
+    /// The format is fixed at 48 kHz stereo `f32`: ports have to exist
+    /// before anything can be linked to them, and a stream with no format
+    /// yet has none.
+    pub fn open_application(
+        name: impl Into<String>,
+        node: u32,
+    ) -> std::result::Result<(Self, AudioFormat), PipeWireAudioCaptureSourceError> {
+        Self::open_target(
+            name.into(),
+            Target::Application(node),
+            format!("application=node {node}"),
+        )
+    }
+
+    fn open_target(
+        name: String,
+        target: Target,
+        described: String,
+    ) -> std::result::Result<(Self, AudioFormat), PipeWireAudioCaptureSourceError> {
         let pp_log = element_pp_log(ElementType::PipeWireAudioCaptureSource, &name, None);
 
         let (packet_tx, packet_rx) = crossbeam_channel::bounded(PACKET_QUEUE_CAPACITY);
@@ -266,7 +343,7 @@ impl PipeWireAudioCaptureSource {
         let (startup_tx, startup_rx) = mpsc::channel::<Startup>();
         let (command_tx, command_rx) = pw::channel::channel::<Command>();
 
-        let device = options.device.clone();
+        let opened = target.clone();
         let worker = std::thread::Builder::new()
             .name(format!("{name}-pipewire-audio"))
             .spawn({
@@ -274,7 +351,7 @@ impl PipeWireAudioCaptureSource {
                 let dropped_frames = dropped_frames.clone();
                 move || {
                     if let Err(error) =
-                        run_pipewire(device, packet_tx, dropped_frames, &startup_tx, command_rx)
+                        run_pipewire(opened, packet_tx, dropped_frames, &startup_tx, command_rx)
                     {
                         let _ = startup_tx.send(Startup::Failed(error));
                     }
@@ -309,10 +386,7 @@ impl PipeWireAudioCaptureSource {
 
         pp_info!(
             pp_log: &pp_log,
-            "opened: device={:?} ({:?}, node {}), {}Hz, {} channel(s), format={:?}",
-            options.device.description,
-            options.device.kind,
-            options.device.id,
+            "opened: {described}, {}Hz, {} channel(s), format={:?}",
             format.sample_rate,
             format.channels,
             format.sample_format
@@ -627,7 +701,7 @@ fn ffmpeg_sample_format(format: spa::param::audio::AudioFormat) -> Option<ffmpeg
 /// none of which are `Send`, and so all of which must be created and dropped
 /// here rather than handed across from `open`.
 fn run_pipewire(
-    device: PipeWireAudioDevice,
+    target: Target,
     packets: Sender<Packet>,
     dropped_frames: Arc<AtomicU64>,
     startup: &mpsc::Sender<Startup>,
@@ -647,7 +721,7 @@ fn run_pipewire(
         *pw::keys::MEDIA_CATEGORY => "Capture",
         *pw::keys::MEDIA_ROLE => "Production",
     };
-    if device.kind == PipeWireAudioDeviceKind::Sink {
+    if matches!(&target, Target::Device(device) if device.kind == PipeWireAudioDeviceKind::Sink) {
         // Turns "connect to this sink" into "capture what this sink is
         // playing" by binding to its monitor ports instead of its inputs.
         props.insert(*pw::keys::STREAM_CAPTURE_SINK, "true");
@@ -775,6 +849,17 @@ fn run_pipewire(
     // layouts `ffmpeg_sample_format` can describe.
     let mut audio_info = spa::param::audio::AudioInfoRaw::new();
     audio_info.set_format(spa::param::audio::AudioFormat::F32LE);
+    if matches!(target, Target::Application(_)) {
+        // An application's stream is linked to port by port, and a stream
+        // whose format is still open has no ports to link — so this one says
+        // what it wants and lets the graph convert.
+        audio_info.set_rate(APPLICATION_RATE);
+        audio_info.set_channels(APPLICATION_CHANNELS);
+        let mut position = [0; spa::param::audio::MAX_CHANNELS];
+        position[0] = spa::sys::SPA_AUDIO_CHANNEL_FL;
+        position[1] = spa::sys::SPA_AUDIO_CHANNEL_FR;
+        audio_info.set_position(position);
+    }
     let obj = spa::pod::Object {
         type_: spa::utils::SpaTypes::ObjectParamFormat.as_raw(),
         id: spa::param::ParamType::EnumFormat.as_raw(),
@@ -791,17 +876,203 @@ fn run_pipewire(
         PipeWireAudioCaptureSourceError::PipeWire("failed to build format pod".into())
     })?];
 
-    stream
-        .connect(
-            spa::utils::Direction::Input,
+    let (connect_to, flags) = match &target {
+        // A device is the session manager's business: it knows what "capture
+        // this" means for a microphone and for a monitor.
+        Target::Device(device) => (
             Some(device.id),
             pw::stream::StreamFlags::AUTOCONNECT | pw::stream::StreamFlags::MAP_BUFFERS,
-            &mut params,
-        )
+        ),
+        // An application's is not. Asking for one with `AUTOCONNECT` gets the
+        // default microphone instead — measured on WirePlumber, which reads
+        // "an input" as a device — so this connects to nothing and links
+        // itself below.
+        Target::Application(_) => (None, pw::stream::StreamFlags::MAP_BUFFERS),
+    };
+    stream
+        .connect(spa::utils::Direction::Input, connect_to, flags, &mut params)
         .map_err(pw_err)?;
+
+    // Kept for the life of the loop: dropping a link proxy takes the link
+    // with it, and dropping the listener stops the ports that arrive later
+    // from being linked at all.
+    let _links = match target {
+        Target::Application(node) => Some(link_application(&core, &stream, node)?),
+        Target::Device(_) => None,
+    };
 
     mainloop.run();
     Ok(())
+}
+
+/// One port of a node, as the registry describes it.
+struct Port {
+    id: u32,
+    /// `audio.channel` — `FL`, `FR`, `MONO`. A port that names its channel
+    /// can be paired with the one carrying the same sound rather than with
+    /// whichever arrived in the same order.
+    channel: Option<String>,
+}
+
+/// Everything an application capture needs kept alive: the registry it
+/// watches for ports, the listener that does the watching, and the links it
+/// has made.
+struct ApplicationLinks {
+    links: Rc<RefCell<Vec<pw::link::Link>>>,
+    listener: Option<pw::registry::Listener>,
+    registry: pw::registry::RegistryRc,
+}
+
+impl Drop for ApplicationLinks {
+    fn drop(&mut self) {
+        // Listener first: it borrows nothing, but a callback firing while the
+        // links are being dropped would be making links to a stream that is
+        // going away.
+        self.listener.take();
+        self.links.borrow_mut().clear();
+        let _ = &self.registry;
+    }
+}
+
+/// Links one application's playback to this capture, and keeps doing it as
+/// ports appear.
+///
+/// Ports on both sides arrive through the registry, in no fixed order and
+/// not necessarily before this returns: the application's are already there,
+/// this stream's appear as it negotiates. So every port is collected as it
+/// comes and the pairing is redone each time, which also covers an
+/// application that grows a channel while it plays.
+fn link_application(
+    core: &pw::core::CoreRc,
+    stream: &pw::stream::StreamRc,
+    node: u32,
+) -> std::result::Result<ApplicationLinks, PipeWireAudioCaptureSourceError> {
+    let registry = core
+        .get_registry_rc()
+        .map_err(|error| PipeWireAudioCaptureSourceError::PipeWire(error.to_string()))?;
+    let links = Rc::new(RefCell::new(Vec::new()));
+    let outputs = Rc::new(RefCell::new(Vec::<Port>::new()));
+    let inputs = Rc::new(RefCell::new(Vec::<Port>::new()));
+    let made = Rc::new(RefCell::new(Vec::<(u32, u32)>::new()));
+
+    let listener = registry
+        .add_listener_local()
+        .global({
+            let core = core.clone();
+            let stream = stream.clone();
+            let links = links.clone();
+            let outputs = outputs.clone();
+            let inputs = inputs.clone();
+            let made = made.clone();
+            move |global| {
+                if global.type_ != pw::types::ObjectType::Port {
+                    return;
+                }
+                let Some(props) = global.props else { return };
+                let Some(owner) = props.get("node.id").and_then(|id| id.parse::<u32>().ok()) else {
+                    return;
+                };
+                let port = Port {
+                    id: global.id,
+                    channel: props.get("audio.channel").map(str::to_owned),
+                };
+                // The stream's node id is only known once the daemon has
+                // given it one, which is why this is read here rather than
+                // when the listener was made.
+                let own = stream.node_id();
+                match props.get("port.direction") {
+                    Some("out") if owner == node => outputs.borrow_mut().push(port),
+                    Some("in") if owner == own => inputs.borrow_mut().push(port),
+                    _ => return,
+                }
+                let (outputs, inputs) = (outputs.borrow(), inputs.borrow());
+                let mut made = made.borrow_mut();
+                for (output, input) in pair_ports(&outputs, &inputs) {
+                    if made.contains(&(output, input)) {
+                        continue;
+                    }
+                    match make_link(&core, node, output, own, input) {
+                        Ok(link) => {
+                            made.push((output, input));
+                            links.borrow_mut().push(link);
+                        }
+                        // Reported and carried on: one port pair that would
+                        // not link leaves a capture missing a channel, which
+                        // is worth saying and is not worth ending a capture
+                        // that has the others.
+                        Err(error) => {
+                            pp_warn!(
+                                pp_log: &element_pp_log(
+                                    ElementType::PipeWireAudioCaptureSource,
+                                    "pipewire-audio-capture",
+                                    None,
+                                ),
+                                "could not link port {output} of node {node} to this capture: \
+                                 {error}"
+                            );
+                        }
+                    }
+                }
+            }
+        })
+        .register();
+
+    Ok(ApplicationLinks {
+        links,
+        listener: Some(listener),
+        registry,
+    })
+}
+
+/// Which of the application's ports feeds which of this capture's.
+///
+/// By channel where both sides say which they are, so a stereo application
+/// reaches a stereo capture the right way round. Otherwise by position, and
+/// with the shorter side repeated: an application playing in stereo into a
+/// mono capture should be captured, not half-captured.
+fn pair_ports(outputs: &[Port], inputs: &[Port]) -> Vec<(u32, u32)> {
+    if outputs.is_empty() || inputs.is_empty() {
+        return Vec::new();
+    }
+    let mut pairs = Vec::new();
+    for index in 0..outputs.len().max(inputs.len()) {
+        let output = &outputs[index % outputs.len()];
+        let input = output
+            .channel
+            .as_deref()
+            .and_then(|channel| {
+                inputs
+                    .iter()
+                    .find(|input| input.channel.as_deref() == Some(channel))
+            })
+            .unwrap_or(&inputs[index % inputs.len()]);
+        let pair = (output.id, input.id);
+        if !pairs.contains(&pair) {
+            pairs.push(pair);
+        }
+    }
+    pairs
+}
+
+fn make_link(
+    core: &pw::core::CoreRc,
+    output_node: u32,
+    output_port: u32,
+    input_node: u32,
+    input_port: u32,
+) -> std::result::Result<pw::link::Link, pw::Error> {
+    core.create_object::<pw::link::Link>(
+        "link-factory",
+        &properties! {
+            *pw::keys::LINK_OUTPUT_NODE => output_node.to_string(),
+            *pw::keys::LINK_OUTPUT_PORT => output_port.to_string(),
+            *pw::keys::LINK_INPUT_NODE => input_node.to_string(),
+            *pw::keys::LINK_INPUT_PORT => input_port.to_string(),
+            // The link belongs to this capture: it goes when the stream does,
+            // rather than outliving the element that made it.
+            *pw::keys::OBJECT_LINGER => "false",
+        },
+    )
 }
 
 #[cfg(test)]
@@ -867,6 +1138,139 @@ mod tests {
                 None
             }
         }
+    }
+
+    /// One application's capture, against an application of this test's own:
+    /// this crate's renderer, whose playback stream is a node like any
+    /// program's.
+    ///
+    /// What it proves is the linking. A capture connected with no autoconnect
+    /// and nothing linked to it is never scheduled, so it produces no packets
+    /// at all — packets arriving are the graph driving a link this element
+    /// made itself. Silence would do: the samples are here so a link to the
+    /// wrong node reads as one.
+    #[cfg(feature = "pipewire-audio-renderer")]
+    #[test]
+    fn an_application_capture_takes_what_that_application_plays() {
+        use crate::element::Sink;
+        use crate::elements::{PipeWireAudioRenderer, PipeWireAudioRendererOptions};
+
+        let Some(sink) = (match PipeWireAudioRenderer::list_devices() {
+            Ok(devices) => devices
+                .into_iter()
+                .find(|device| device.kind == PipeWireAudioDeviceKind::Sink),
+            Err(error) => {
+                eprintln!("skipping: no usable PipeWire session ({error})");
+                return;
+            }
+        }) else {
+            eprintln!("skipping: this machine publishes no playback device");
+            return;
+        };
+        // What is playing already, so the renderer's own stream can be told
+        // from it: a native PipeWire client publishes neither a binary nor a
+        // pid to recognize it by, and this crate's renderer is one.
+        let before: Vec<u32> = PipeWireAudioCaptureSource::list_applications()
+            .map(|applications| applications.iter().map(|one| one.node).collect())
+            .unwrap_or_default();
+        let (mut renderer, played) = match PipeWireAudioRenderer::open(
+            "application-capture-test-playback",
+            PipeWireAudioRendererOptions { device: sink },
+        ) {
+            Ok(opened) => opened,
+            Err(error) => {
+                eprintln!("skipping: the playback device could not be opened ({error})");
+                return;
+            }
+        };
+
+        // A tone quiet enough not to startle whoever is running the tests,
+        // and loud enough to tell from the silence a capture linked to the
+        // wrong thing returns.
+        let mut phase = 0.0f32;
+        let mut play = |frames: usize| {
+            for _ in 0..frames {
+                let samples = played.sample_rate as usize / 100;
+                let mut frame = ffmpeg::frame::Audio::new(
+                    played.sample_format,
+                    samples,
+                    played.channel_layout(),
+                );
+                frame.set_rate(played.sample_rate);
+                let channels = played.channels as usize;
+                // Written as bytes: interleaved `f32` is one plane whose
+                // samples ffmpeg counts per channel, and this writes them all.
+                let data = frame.data_mut(0);
+                for sample in 0..samples {
+                    phase += 440.0 * std::f32::consts::TAU / played.sample_rate as f32;
+                    let value = (phase.sin() * 0.02).to_le_bytes();
+                    for channel in 0..channels {
+                        let at = (sample * channels + channel) * 4;
+                        data[at..at + 4].copy_from_slice(&value);
+                    }
+                }
+                renderer
+                    .consume(MediaBuffer::Audio(Arc::new(frame)))
+                    .expect("the renderer takes what it is given");
+            }
+        };
+
+        // Playing is what publishes the node: a renderer with nothing to play
+        // has no stream for anything to find.
+        play(20);
+
+        // The stream the renderer added, which is the node that was not
+        // there a moment ago.
+        let application = (0..30).find_map(|_| {
+            let found = PipeWireAudioCaptureSource::list_applications()
+                .ok()?
+                .into_iter()
+                .find(|application| !before.contains(&application.node));
+            if found.is_none() {
+                play(10);
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            found
+        });
+        let Some(application) = application else {
+            eprintln!("skipping: this session does not publish a playing application as a node");
+            return;
+        };
+
+        // Not a skip: the node is there and playing, so anything but an open
+        // capture is this element failing to link itself — a stream with
+        // nothing linked to it never negotiates a format, and that is what
+        // an open times out on.
+        let (capture, format) = PipeWireAudioCaptureSource::open_application(
+            "application-capture-test",
+            application.node,
+        )
+        .expect("an application that is playing can be captured");
+
+        play(60);
+        std::thread::sleep(Duration::from_millis(500));
+
+        let mut captured = Vec::new();
+        while let Ok(packet) = capture.packets.try_recv() {
+            captured.extend_from_slice(&packet.bytes);
+        }
+        assert!(
+            !captured.is_empty(),
+            "an application capture that linked to nothing is never scheduled, \
+             so no packets at all means no link was made"
+        );
+        let loudest = captured
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|sample| f32::from_le_bytes(*sample).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            loudest > 0.001,
+            "the capture was linked to something other than the application: \
+             it heard {loudest} where the application was playing a tone"
+        );
+        assert_eq!(format.sample_rate, APPLICATION_RATE);
     }
 
     /// A paused source must stop the capture itself, not just stop reading it.
