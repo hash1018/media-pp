@@ -914,11 +914,26 @@ struct Port {
     channel: Option<String>,
 }
 
+/// One link this capture made, with the two ports it joins.
+///
+/// Kept together rather than in a list of links beside a list of pairs: a
+/// port that goes has to take its own link with it, and two vectors that
+/// have to stay in step are two vectors that can stop being in step.
+struct Made {
+    output: u32,
+    input: u32,
+    /// Held for what dropping it does, which is why nothing reads it: a link
+    /// proxy let go of takes its link with it, since it was made with
+    /// `OBJECT_LINGER` false.
+    #[allow(dead_code)]
+    link: pw::link::Link,
+}
+
 /// Everything an application capture needs kept alive: the registry it
 /// watches for ports, the listener that does the watching, and the links it
 /// has made.
 struct ApplicationLinks {
-    links: Rc<RefCell<Vec<pw::link::Link>>>,
+    made: Rc<RefCell<Vec<Made>>>,
     listener: Option<pw::registry::Listener>,
     registry: pw::registry::RegistryRc,
 }
@@ -929,7 +944,7 @@ impl Drop for ApplicationLinks {
         // links are being dropped would be making links to a stream that is
         // going away.
         self.listener.take();
-        self.links.borrow_mut().clear();
+        self.made.borrow_mut().clear();
         let _ = &self.registry;
     }
 }
@@ -942,6 +957,12 @@ impl Drop for ApplicationLinks {
 /// this stream's appear as it negotiates. So every port is collected as it
 /// comes and the pairing is redone each time, which also covers an
 /// application that grows a channel while it plays.
+///
+/// And as ports go. A program that stops playing withdraws its node, and a
+/// stream that renegotiates replaces its own ports; a port left in these
+/// lists after it has gone is one the pairing keeps offering, which is a
+/// link that cannot be made and — where ports do not name their channels,
+/// so the pairing is by position — one that lands on the wrong port.
 fn link_application(
     core: &pw::core::CoreRc,
     stream: &pw::stream::StreamRc,
@@ -950,17 +971,15 @@ fn link_application(
     let registry = core
         .get_registry_rc()
         .map_err(|error| PipeWireAudioCaptureSourceError::PipeWire(error.to_string()))?;
-    let links = Rc::new(RefCell::new(Vec::new()));
+    let made = Rc::new(RefCell::new(Vec::<Made>::new()));
     let outputs = Rc::new(RefCell::new(Vec::<Port>::new()));
     let inputs = Rc::new(RefCell::new(Vec::<Port>::new()));
-    let made = Rc::new(RefCell::new(Vec::<(u32, u32)>::new()));
 
     let listener = registry
         .add_listener_local()
         .global({
             let core = core.clone();
             let stream = stream.clone();
-            let links = links.clone();
             let outputs = outputs.clone();
             let inputs = inputs.clone();
             let made = made.clone();
@@ -988,14 +1007,18 @@ fn link_application(
                 let (outputs, inputs) = (outputs.borrow(), inputs.borrow());
                 let mut made = made.borrow_mut();
                 for (output, input) in pair_ports(&outputs, &inputs) {
-                    if made.contains(&(output, input)) {
+                    if made
+                        .iter()
+                        .any(|link| link.output == output && link.input == input)
+                    {
                         continue;
                     }
                     match make_link(&core, node, output, own, input) {
-                        Ok(link) => {
-                            made.push((output, input));
-                            links.borrow_mut().push(link);
-                        }
+                        Ok(link) => made.push(Made {
+                            output,
+                            input,
+                            link,
+                        }),
                         // Reported and carried on: one port pair that would
                         // not link leaves a capture missing a channel, which
                         // is worth saying and is not worth ending a capture
@@ -1015,10 +1038,27 @@ fn link_application(
                 }
             }
         })
+        .global_remove({
+            let outputs = outputs.clone();
+            let inputs = inputs.clone();
+            let made = made.clone();
+            // Whatever went: an id that belonged to neither side's ports
+            // matches nothing here, and one that did leaves with the link it
+            // was carrying. Dropping that link proxy is what lets the same
+            // pair be linked again if the port comes back — a program that
+            // starts playing again publishes new ports, and the pairing
+            // above is then free to reach them.
+            move |id| {
+                outputs.borrow_mut().retain(|port| port.id != id);
+                inputs.borrow_mut().retain(|port| port.id != id);
+                made.borrow_mut()
+                    .retain(|link| link.output != id && link.input != id);
+            }
+        })
         .register();
 
     Ok(ApplicationLinks {
-        links,
+        made,
         listener: Some(listener),
         registry,
     })

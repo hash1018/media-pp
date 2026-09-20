@@ -101,10 +101,11 @@ pub struct PipeWireAudioApplication {
     /// `application.name` and then to the node's own name.
     ///
     /// A program playing through PulseAudio's bridge, which is most of them,
-    /// publishes its binary. One speaking PipeWire directly need not: this
-    /// crate's own renderer publishes neither a binary nor a pid, and is
-    /// still something a caller can capture — so what it does publish is
-    /// what stands in, rather than the node being left out of the list.
+    /// publishes its binary. One speaking PipeWire directly need not — this
+    /// crate's own renderer says who it is only because it was told to, and
+    /// a client that says nothing is still something a caller can capture. So
+    /// what it does publish is what stands in, rather than the node being
+    /// left out of the list.
     pub executable: String,
     /// `application.name`, falling back to the node's own name — what the
     /// program calls itself, for a picker to show.
