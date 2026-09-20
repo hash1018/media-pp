@@ -279,6 +279,7 @@ fn a_capture_sharing_the_device_does_not_slow_the_compositor() {
             height: format.height,
             frame_rate: ffmpeg_next::Rational::new(FPS as i32, 1),
             background: Color::BLACK,
+            background_alpha: 255,
         },
     )
     .expect("create the compositor");

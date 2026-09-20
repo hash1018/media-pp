@@ -91,6 +91,7 @@ mod example {
                 height: output_height,
                 frame_rate,
                 background: Color::new(24, 24, 24),
+                background_alpha: 255,
             },
         )
         .map_err(|e| media_pp::Error::Other(e.to_string()))?;

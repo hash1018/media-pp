@@ -63,6 +63,7 @@ mod example {
                 height: output_height,
                 frame_rate,
                 background: Color::new(24, 24, 24),
+                background_alpha: 255,
             },
         )?;
         let time_base = compositor.time_base();

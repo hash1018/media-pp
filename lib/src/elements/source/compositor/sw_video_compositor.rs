@@ -36,7 +36,8 @@ const OUTPUT_POOL_SIZE: usize = 4;
 const CONTROL_POLL_INTERVAL: Duration = Duration::from_millis(5);
 
 /// The compositor's fixed output definition. Every emitted frame is an
-/// opaque [`ffmpeg::format::Pixel::BGRA`] frame at `width` x `height`.
+/// [`ffmpeg::format::Pixel::BGRA`] frame at `width` x `height`, opaque unless
+/// [`background_alpha`](Self::background_alpha) says otherwise.
 #[derive(Debug, Clone, Copy)]
 pub struct VideoCompositorOptions {
     /// Width of the composed output frame in pixels.
@@ -47,6 +48,18 @@ pub struct VideoCompositorOptions {
     pub frame_rate: ffmpeg::Rational,
     /// Color used for output pixels not covered by an opaque layer.
     pub background: Color,
+    /// How opaque those uncovered pixels are: 255 for a picture that is the
+    /// whole of what is seen, 0 for one that is laid over something else.
+    ///
+    /// A composition drawn into another compositor is the case for the
+    /// second: an overlay whose background was opaque would black out
+    /// whatever it was placed on. The layers themselves are unaffected —
+    /// this is what is left where no layer drew.
+    ///
+    /// Only the backends that compose in BGRA can answer anything but 255.
+    /// `CudaVideoCompositor` composes in NV12, which has no alpha at all, and
+    /// refuses a translucent background rather than quietly making it opaque.
+    pub background_alpha: u8,
 }
 
 impl Default for VideoCompositorOptions {
@@ -56,6 +69,7 @@ impl Default for VideoCompositorOptions {
             height: 1080,
             frame_rate: ffmpeg::Rational::new(30, 1),
             background: Color::BLACK,
+            background_alpha: 255,
         }
     }
 }
@@ -768,7 +782,11 @@ impl SwVideoCompositor {
             .retain(|picture| picture_is_referenced(picture));
 
         let mut output = self.output_pool.get();
-        fill_background(&mut output, self.options.background);
+        fill_background(
+            &mut output,
+            self.options.background,
+            self.options.background_alpha,
+        );
         for snapshot in snapshots {
             if !snapshot.layer.visible || snapshot.layer.opacity == 0.0 {
                 continue;
@@ -1049,7 +1067,7 @@ fn layer_geometry(
     video_layer::layer_geometry(source_width, source_height, rect, fit).map_err(map_layer_error)
 }
 
-fn fill_background(frame: &mut ffmpeg::frame::Video, color: Color) {
+fn fill_background(frame: &mut ffmpeg::frame::Video, color: Color, alpha: u8) {
     let width = frame.width() as usize;
     let height = frame.height() as usize;
     let stride = frame.stride(0);
@@ -1059,7 +1077,7 @@ fn fill_background(frame: &mut ffmpeg::frame::Video, color: Color) {
             .as_chunks_mut::<4>()
             .0
         {
-            *pixel = [color.blue, color.green, color.red, 255];
+            *pixel = [color.blue, color.green, color.red, alpha];
         }
     }
 }
@@ -1166,6 +1184,7 @@ mod tests {
             height,
             frame_rate: ffmpeg::Rational::new(30, 1),
             background: Color::BLACK,
+            background_alpha: 255,
         }
     }
 
@@ -1180,7 +1199,7 @@ mod tests {
             |_| {},
         );
         let mut frame = pool.get();
-        fill_background(&mut frame, color);
+        fill_background(&mut frame, color, 255);
         Arc::new(frame)
     }
 
@@ -1784,6 +1803,7 @@ mod tests {
                 height: 64,
                 frame_rate: ffmpeg::Rational::new(60, 1),
                 background: Color::BLACK,
+                background_alpha: 255,
             },
         )
         .expect("compositor");
@@ -1805,5 +1825,30 @@ mod tests {
         drop(compositor);
         assert!(!handle.set_frame_rate(ffmpeg::Rational::new(30, 1)));
         assert_eq!(handle.frame_rate(), None);
+    }
+    /// The background's alpha is written with its colour, so a composition
+    /// meant to be laid over another picture is transparent where nothing
+    /// drew — and the layers themselves are untouched by it.
+    #[test]
+    fn a_transparent_background_is_filled_as_one() {
+        let pool = UnboundObjectPool::new(
+            0,
+            || ffmpeg::frame::Video::new(ffmpeg::format::Pixel::BGRA, 2, 2),
+            |_| {},
+        );
+        let mut frame = pool.get();
+        fill_background(&mut frame, Color::BLACK, 0);
+        let stride = frame.stride(0);
+        let pixels = frame.data(0);
+        assert_eq!(&pixels[0..4], &[0, 0, 0, 0], "cleared to nothing");
+        assert_eq!(&pixels[stride..stride + 4], &[0, 0, 0, 0], "every row");
+
+        fill_background(&mut frame, Color::WHITE, 255);
+        let pixels = frame.data(0);
+        assert_eq!(
+            &pixels[0..4],
+            &[255, 255, 255, 255],
+            "and opaque when it is asked for"
+        );
     }
 }

@@ -1041,13 +1041,16 @@ impl D3d11VideoCompositor {
         // all bindings are cleared before resources can be released.
         unsafe {
             let background = &self.options.background;
+            // The alpha with it: a composition meant to be laid over another
+            // picture is cleared to nothing rather than to black — see
+            // `VideoCompositorOptions::background_alpha`.
             context.ClearRenderTargetView(
                 &output_view,
                 &[
                     f32::from(background.red) / 255.0,
                     f32::from(background.green) / 255.0,
                     f32::from(background.blue) / 255.0,
-                    1.0,
+                    f32::from(self.options.background_alpha) / 255.0,
                 ],
             );
             context.OMSetRenderTargets(Some(&[Some(output_view)]), None);
@@ -1581,21 +1584,26 @@ unsafe fn build_pipeline_state(
         device.CreateSamplerState(&sampler_desc, Some(&mut sampler))?;
         let sampler = sampler.unwrap();
 
-        // Standard "over" alpha compositing for RGB. Destination alpha is
-        // deliberately left untouched by every draw (`SrcBlendAlpha =
-        // ZERO`, `DestBlendAlpha = ONE`) so it stays at whatever the
-        // initial `ClearRenderTargetView` set (1.0) — same "output is
-        // always opaque" contract the CPU `SwVideoCompositor`'s
-        // `blend_bgra` enforces by always writing 255 to the destination
-        // alpha byte.
+        // Standard "over" alpha compositing, for the alpha channel as well
+        // as for RGB: what a layer covers takes the layer's alpha, and what
+        // it half covers takes `src + dst · (1 - src)`.
+        //
+        // Alpha used to be left alone (`SrcBlendAlpha = ZERO`,
+        // `DestBlendAlpha = ONE`), since output was always opaque and the
+        // clear had already put 1.0 there. A composition drawn into another
+        // compositor is cleared to nothing instead — see
+        // `VideoCompositorOptions::background_alpha` — and leaving alpha
+        // alone there would hand over a picture that is fully transparent
+        // wherever its layers drew. An opaque background is unaffected: a
+        // destination already at 1.0 stays there whatever is drawn over it.
         let mut blend_desc = D3D11_BLEND_DESC::default();
         blend_desc.RenderTarget[0] = D3D11_RENDER_TARGET_BLEND_DESC {
             BlendEnable: true.into(),
             SrcBlend: D3D11_BLEND_SRC_ALPHA,
             DestBlend: D3D11_BLEND_INV_SRC_ALPHA,
             BlendOp: D3D11_BLEND_OP_ADD,
-            SrcBlendAlpha: D3D11_BLEND_ZERO,
-            DestBlendAlpha: D3D11_BLEND_ONE,
+            SrcBlendAlpha: D3D11_BLEND_ONE,
+            DestBlendAlpha: D3D11_BLEND_INV_SRC_ALPHA,
             BlendOpAlpha: D3D11_BLEND_OP_ADD,
             RenderTargetWriteMask: D3D11_COLOR_WRITE_ENABLE_ALL.0 as u8,
         };
@@ -1605,7 +1613,8 @@ unsafe fn build_pipeline_state(
 
         // The same "over", for a layer whose colour already has its alpha in
         // it: the source contributes as it stands rather than being scaled by
-        // that alpha a second time. Destination alpha is left alone here too.
+        // that alpha a second time. Its alpha channel is not premultiplied
+        // into anything, so that half of the blend is the same.
         // See `video_layer::VideoLayer::premultiplied_alpha`.
         blend_desc.RenderTarget[0].SrcBlend = D3D11_BLEND_ONE;
         let mut premultiplied_blend_state = None;

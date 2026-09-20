@@ -189,6 +189,7 @@ fn invalid_text_layer_does_not_replace_an_existing_registration() {
         height: 4,
         frame_rate: ffmpeg::Rational::new(30, 1),
         background: Color::BLACK,
+        background_alpha: 255,
     };
     let (_compositor, handle) =
         D3d11VideoCompositor::new("compositor", &device, context, options).unwrap();
@@ -216,6 +217,7 @@ fn a_layer_hands_back_the_frame_it_will_draw_until_it_is_removed() {
         height: 4,
         frame_rate: ffmpeg::Rational::new(30, 1),
         background: Color::BLACK,
+        background_alpha: 255,
     };
     let (_compositor, handle) =
         D3d11VideoCompositor::new("compositor", &device, context, options).unwrap();
@@ -248,6 +250,7 @@ fn composes_gpu_inputs_in_z_order_and_preserves_output_contract() {
         height: 4,
         frame_rate: ffmpeg::Rational::new(30, 1),
         background: Color::BLACK,
+        background_alpha: 255,
     };
     let (mut compositor, handle) =
         D3d11VideoCompositor::new("compositor", &device, context.clone(), options)
@@ -314,6 +317,7 @@ fn a_premultiplied_layer_is_blended_by_what_it_already_holds() {
             frame_rate: ffmpeg::Rational::new(30, 1),
             // Black, so what lands is the layer's own contribution alone.
             background: Color::BLACK,
+            background_alpha: 255,
         };
         let (mut compositor, handle) =
             D3d11VideoCompositor::new("compositor", &device, context.clone(), options)
@@ -384,6 +388,7 @@ fn a_layer_draws_only_its_source_region() {
         height: REGION,
         frame_rate: ffmpeg::Rational::new(30, 1),
         background: Color::BLACK,
+        background_alpha: 255,
     };
     let (mut compositor, handle) =
         D3d11VideoCompositor::new("compositor", &device, context.clone(), options)
@@ -430,6 +435,7 @@ fn ignores_rows_outside_the_frame_visible_dimensions() {
         height: 3,
         frame_rate: ffmpeg::Rational::new(30, 1),
         background: Color::BLACK,
+        background_alpha: 255,
     };
     let (mut compositor, handle) =
         D3d11VideoCompositor::new("compositor", &device, context.clone(), options)
@@ -528,6 +534,7 @@ fn live_output_frames_keep_distinct_textures_until_the_last_arc_drops() {
         height: 1,
         frame_rate: ffmpeg::Rational::new(30, 1),
         background: Color::BLACK,
+        background_alpha: 255,
     };
     let (mut compositor, handle) =
         D3d11VideoCompositor::new("compositor", &device, context.clone(), options)
@@ -588,6 +595,7 @@ fn nv12_conversion_uses_frame_color_space_and_range() {
         height: 2,
         frame_rate: ffmpeg::Rational::new(30, 1),
         background: Color::BLACK,
+        background_alpha: 255,
     };
     let (mut compositor, handle) =
         D3d11VideoCompositor::new("compositor", &device, context.clone(), options)
@@ -664,6 +672,7 @@ fn an_unchanged_scene_is_composed_once() {
         height: 2,
         frame_rate: ffmpeg::Rational::new(30, 1),
         background: Color::BLACK,
+        background_alpha: 255,
     };
     let (mut compositor, handle) =
         D3d11VideoCompositor::new("compositor", &device, context.clone(), options)
@@ -734,6 +743,7 @@ fn a_repeat_still_in_flight_is_never_composed_over() {
         height: 2,
         frame_rate: ffmpeg::Rational::new(30, 1),
         background: Color::BLACK,
+        background_alpha: 255,
     };
     let (mut compositor, handle) =
         D3d11VideoCompositor::new("compositor", &device, context.clone(), options)
@@ -794,6 +804,7 @@ fn layer_handle_moves_blends_and_hides_a_live_source() {
         height: 1,
         frame_rate: ffmpeg::Rational::new(30, 1),
         background: Color::BLACK,
+        background_alpha: 255,
     };
     let (mut compositor, handle) =
         D3d11VideoCompositor::new("compositor", &device, context.clone(), options)
@@ -857,6 +868,7 @@ fn skips_a_mismatched_device_texture_and_reports_it_on_the_bus() {
         height: 1,
         frame_rate: ffmpeg::Rational::new(30, 1),
         background: Color::BLACK,
+        background_alpha: 255,
     };
     let (mut compositor, handle) =
         D3d11VideoCompositor::new("compositor", &device_a, context_a.clone(), options)
@@ -951,6 +963,7 @@ fn resuming_after_a_pause_preserves_output_phase() {
         height: 2,
         frame_rate: ffmpeg::Rational::new(10, 1),
         background: Color::BLACK,
+        background_alpha: 255,
     };
     let (compositor, _handle) = D3d11VideoCompositor::new("compositor", &device, context, options)
         .expect("D3d11VideoCompositor::new should succeed");
@@ -1010,6 +1023,7 @@ fn its_ticks_are_reported_through_its_pipeline() {
         height: 2,
         frame_rate: ffmpeg::Rational::new(30, 1),
         background: Color::BLACK,
+        background_alpha: 255,
     };
     let (compositor, _handle) = D3d11VideoCompositor::new("ticking", &device, context, options)
         .expect("D3d11VideoCompositor::new should succeed");
@@ -1058,6 +1072,7 @@ fn the_frame_rate_can_be_changed_while_it_is_running() {
             height: 64,
             frame_rate: ffmpeg::Rational::new(60, 1),
             background: Color::BLACK,
+            background_alpha: 255,
         },
     )
     .expect("compositor");
@@ -1089,6 +1104,7 @@ fn an_impossible_frame_rate_is_refused_and_changes_nothing() {
             height: 64,
             frame_rate: ffmpeg::Rational::new(60, 1),
             background: Color::BLACK,
+            background_alpha: 255,
         },
     )
     .expect("compositor");
@@ -1119,6 +1135,7 @@ fn the_setter_reports_a_compositor_that_is_gone() {
             height: 64,
             frame_rate: ffmpeg::Rational::new(60, 1),
             background: Color::BLACK,
+            background_alpha: 255,
         },
     )
     .expect("compositor");
@@ -1126,4 +1143,52 @@ fn the_setter_reports_a_compositor_that_is_gone() {
 
     assert!(!handle.set_frame_rate(ffmpeg::Rational::new(30, 1)));
     assert_eq!(handle.frame_rate(), None);
+}
+
+/// A composition meant to be laid over another picture keeps its alpha where
+/// nothing drew.
+///
+/// What a Scene inside a Scene needs: composed on its own, then drawn as one
+/// layer of the picture that holds it. Cleared to opaque black instead, it
+/// would black out everything under it — so this asserts both halves, the
+/// nothing and the something, since a background alpha that reached the
+/// layers as well would be just as wrong.
+#[test]
+fn a_transparent_background_leaves_alpha_where_nothing_drew() {
+    let Some((device, context)) = try_device() else {
+        return;
+    };
+    let options = VideoCompositorOptions {
+        width: 4,
+        height: 4,
+        frame_rate: ffmpeg::Rational::new(30, 1),
+        background: Color::BLACK,
+        background_alpha: 0,
+    };
+    let (mut compositor, handle) =
+        D3d11VideoCompositor::new("compositor", &device, context.clone(), options)
+            .expect("D3d11VideoCompositor::new should succeed");
+
+    // One opaque pixel's worth, in the corner: everything else is background.
+    let mut layer = VideoLayer::new(VideoRect::new(0, 0, 1, 1));
+    layer.fit = video_layer::VideoFit::Stretch;
+    let mut sink = handle.add_source("corner", layer).unwrap().unwrap().sink;
+    let texture = bgra_texture(&device, 1, 1, [0, 0, 255, 255]);
+    sink.consume(pooled_video(wrap_d3d11_texture(texture, 1, 1).unwrap()))
+        .unwrap();
+
+    let composed = compositor
+        .compose_frame(&test_bus())
+        .expect("compose_frame failed");
+    let downloaded = download_frame(&device, context, composed);
+    assert_eq!(
+        pixel(&downloaded, 3, 3),
+        [0, 0, 0, 0],
+        "where no layer drew, nothing at all"
+    );
+    assert_eq!(
+        pixel(&downloaded, 0, 0),
+        [0, 0, 255, 255],
+        "what a layer drew is still opaque"
+    );
 }

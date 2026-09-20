@@ -69,6 +69,13 @@ pub enum CudaVideoCompositorError {
     #[error("failed to scale a layer: {0}")]
     Scale(#[from] crate::elements::CudaScalerError),
 
+    /// A background that is not opaque, which this backend cannot compose:
+    /// it works in NV12.
+    #[error(
+        "background_alpha {0} is not supported: CudaVideoCompositor composes in NV12, which has no alpha"
+    )]
+    TranslucentBackground(u8),
+
     /// Output dimensions are odd, too small, or above the safety limit.
     #[error(
         "invalid output dimensions {width}x{height}; each dimension must be even and 2..={MAX_DIMENSION}"
@@ -1592,6 +1599,14 @@ fn validate_output_options(
     if options.frame_rate.numerator() <= 0 || options.frame_rate.denominator() <= 0 {
         return Err(CudaVideoCompositorError::InvalidFrameRate(
             options.frame_rate,
+        ));
+    }
+    // NV12 has nowhere to keep it. Refused rather than quietly made opaque:
+    // a caller asking for a background to lay over something else would
+    // otherwise get one that covers it, and find out by looking.
+    if options.background_alpha != 255 {
+        return Err(CudaVideoCompositorError::TranslucentBackground(
+            options.background_alpha,
         ));
     }
     Ok(())

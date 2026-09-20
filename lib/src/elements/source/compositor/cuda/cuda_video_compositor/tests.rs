@@ -53,6 +53,7 @@ fn options(width: u32, height: u32) -> VideoCompositorOptions {
         width,
         height,
         frame_rate: ffmpeg::Rational::new(30, 1),
+        background_alpha: 255,
         background: Color::BLACK,
     }
 }
@@ -1014,5 +1015,29 @@ fn the_canvas_says_it_is_bt709_and_reads_back_as_the_colour_it_was_filled_with()
             .zip([230u8, 20, 20])
             .all(|(got, want)| got.abs_diff(want) <= 3),
         "the canvas read back as {got:?}"
+    );
+}
+
+/// NV12 has no alpha, so a background that is not opaque is refused rather
+/// than quietly composed as opaque — a caller building an overlay would
+/// otherwise get one that covers what it was laid on.
+///
+/// No device: this is the check `CudaVideoCompositor::new` makes before it
+/// touches one.
+#[test]
+fn a_translucent_background_is_refused() {
+    let opaque = options(64, 64);
+    let translucent = VideoCompositorOptions {
+        background_alpha: 128,
+        ..opaque
+    };
+
+    assert!(matches!(
+        validate_output_options(translucent),
+        Err(CudaVideoCompositorError::TranslucentBackground(128))
+    ));
+    assert!(
+        validate_output_options(opaque).is_ok(),
+        "an opaque one is what this backend composes"
     );
 }

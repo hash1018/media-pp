@@ -129,6 +129,7 @@ mod linux_example {
                 frame_rate,
                 // Only visible if the capture ever fails to fill the frame.
                 background: Color::new(16, 16, 16),
+                background_alpha: 255,
             },
         )
         .map_err(|e| media_pp::Error::Other(e.to_string()))?;

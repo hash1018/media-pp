@@ -87,7 +87,12 @@ FileDemuxer → SwDecoder → Queue → Pacer → FrameCounter
 
 ### Changing a running pipeline
 
-- `Tee` fans out; `AudioMixer` and the video compositors fan in.
+- `Tee` fans out; `AudioMixer` and the video compositors fan in. A
+  compositor can feed another: `VideoCompositorOptions::background_alpha`
+  leaves the picture transparent where no layer drew, so one composition can
+  be a layer of the next — an overlay over a canvas rather than a rectangle
+  covering it. `SwVideoCompositor` and `D3d11VideoCompositor` compose in
+  BGRA and can; `CudaVideoCompositor` composes in NV12 and refuses.
   `TeeHandle::attach` adds a branch, `finish_branch` ends one cleanly (so a
   recording finalizes while its preview keeps running), and `detach`
   abandons one.
