@@ -655,7 +655,10 @@ fn create_output_texture(
 
 #[cfg(test)]
 mod tests {
-    use windows::Win32::Graphics::Direct3D11::D3D11_SUBRESOURCE_DATA;
+    use windows::Win32::Graphics::Direct3D11::{
+        D3D11_CREATE_DEVICE_DEBUG, D3D11_RLDO_DETAIL, D3D11_SDK_VERSION, D3D11_SUBRESOURCE_DATA,
+        D3D11CreateDevice, ID3D11Debug, ID3D11InfoQueue,
+    };
 
     use super::*;
     use crate::elements::D3d11Download;
@@ -808,6 +811,121 @@ mod tests {
                 ))
             ),
             "{error}"
+        );
+    }
+
+    /// A debug device and the two interfaces that count what it still owns,
+    /// or `None` without the D3D11 SDK debug layer — `D3d11VideoEffect`'s
+    /// own test's helper.
+    fn try_debug_device() -> Option<(
+        ID3D11Device,
+        Arc<Mutex<ID3D11DeviceContext>>,
+        ID3D11Debug,
+        ID3D11InfoQueue,
+    )> {
+        use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
+
+        let mut device = None;
+        let mut context = None;
+        // SAFETY: null adapter/software pointers select the hardware driver,
+        // feature-level defaults are requested, and `device`/`context` are
+        // live correctly typed out-parameters.
+        let result = unsafe {
+            D3D11CreateDevice(
+                None,
+                D3D_DRIVER_TYPE_HARDWARE,
+                Default::default(),
+                D3D11_CREATE_DEVICE_DEBUG,
+                None,
+                D3D11_SDK_VERSION,
+                Some(&mut device),
+                None,
+                Some(&mut context),
+            )
+        };
+        if result.is_err() {
+            eprintln!("skipping: no D3D11 debug device on this machine: {result:?}");
+            return None;
+        }
+        let device = device?;
+        let context = context?;
+        let debug = device.cast::<ID3D11Debug>().ok()?;
+        let info = device.cast::<ID3D11InfoQueue>().ok()?;
+        // SAFETY: `info` is the live debug info queue for this device.
+        unsafe { info.SetMessageCountLimit(u64::MAX) }.ok()?;
+        Some((device, Arc::new(Mutex::new(context)), debug, info))
+    }
+
+    fn live_objects(debug: &ID3D11Debug, info: &ID3D11InfoQueue) -> u64 {
+        // SAFETY: both interfaces belong to the same live debug device; the
+        // report appends its messages before they are counted.
+        unsafe {
+            info.ClearStoredMessages();
+            debug
+                .ReportLiveDeviceObjects(D3D11_RLDO_DETAIL)
+                .expect("ReportLiveDeviceObjects");
+            info.GetNumStoredMessages()
+        }
+    }
+
+    /// Each draw creates an output texture, its render target view and two
+    /// plane views, which the device destroys only once the context is
+    /// flushed — `D3d11ChromaKey` leaked three objects a frame before it
+    /// flushed. Two textures in turn, so every frame is drawn rather than
+    /// answered as a repeat, and a flat count across a hundred frames.
+    #[test]
+    fn drawing_frames_does_not_accumulate_d3d11_objects() {
+        let Some((device, context, debug, info)) = try_debug_device() else {
+            return;
+        };
+        let textures = [
+            p010_texture(&device, 500, 512, 512),
+            p010_texture(&device, 600, 450, 650),
+        ];
+        let mut element = D3d11ToneMap::new("tone-map", &device, context).expect("new");
+        let drawn = Arc::new(Mutex::new(0usize));
+        let counted = drawn.clone();
+        element.src_pads()[0].link(Box::new(crate::elements::AppSink::new(
+            "out",
+            move |buffer| {
+                if matches!(buffer, MediaBuffer::Video(_)) {
+                    *counted.lock().unwrap() += 1;
+                }
+                Ok(())
+            },
+        )));
+        let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
+        let mut push = |pts: i64| {
+            let mut frame =
+                wrap_d3d11_texture(textures[pts as usize % 2].clone(), 32, 32).expect("wrap");
+            frame.set_pts(Some(pts));
+            frame.set_color_space(ffmpeg::color::Space::BT2020NCL);
+            frame.set_color_range(ffmpeg::color::Range::MPEG);
+            frame.set_color_transfer_characteristic(
+                ffmpeg::color::TransferCharacteristic::SMPTE2084,
+            );
+            let mut slot = pool.get();
+            *slot = frame;
+            element
+                .consume(MediaBuffer::Video(Arc::new(slot)))
+                .expect("draw");
+        };
+
+        for pts in 0..20 {
+            push(pts);
+        }
+        let baseline = live_objects(&debug, &info);
+        for pts in 20..120 {
+            push(pts);
+        }
+        let after = live_objects(&debug, &info);
+
+        assert_eq!(*drawn.lock().unwrap(), 120, "every frame came out");
+        assert_eq!(
+            after,
+            baseline,
+            "100 more frames left {} extra D3D11 objects on the device",
+            after as i64 - baseline as i64
         );
     }
 }
