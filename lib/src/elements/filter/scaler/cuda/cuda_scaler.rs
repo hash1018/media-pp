@@ -57,6 +57,14 @@ pub enum CudaScalerError {
     #[error("CudaScaler cannot scale {0:?} surfaces")]
     UnsupportedSurfaceFormat(ffmpeg::format::Pixel),
 
+    /// The scaler was built to put out a layout `scale_cuda` cannot convert
+    /// this surface's to — see [`CudaScaler::with_format`].
+    #[error("CudaScaler cannot convert {from:?} surfaces to {to:?}")]
+    UnsupportedConversion {
+        from: ffmpeg::format::Pixel,
+        to: CudaFrameFormat,
+    },
+
     /// FFmpeg could not allocate the filter graph's buffer source.
     #[error("failed to allocate the buffer source filter")]
     BufferSrcAlloc,
@@ -111,9 +119,9 @@ impl CudaScalerInterp {
     }
 }
 
-/// Resizes GPU-resident `Pixel::CUDA` NV12 `Video` frames without ever
-/// touching the CPU, through libavfilter's `scale_cuda`. A `Filter`:
-/// receives via `Sink`, pushes the scaled frame into its own single src pad.
+/// Resizes GPU-resident `Pixel::CUDA` `Video` frames without ever touching
+/// the CPU, through libavfilter's `scale_cuda`. A `Filter`: receives via
+/// `Sink`, pushes the scaled frame into its own single src pad.
 ///
 /// This is what makes a hardware transcode at a different resolution
 /// possible at all — `CudaDecoder -> CudaScaler -> CudaEncoder` stays on the
@@ -122,14 +130,21 @@ impl CudaScalerInterp {
 /// [`crate::elements::CudaUpload`], i.e. two PCIe crossings and a
 /// `libswscale` pass per frame.
 ///
-/// # Resize only
+/// # Resize, and 10 bits down to 8
 ///
-/// The output surface holds whatever the input did — every
-/// [`CudaFrameFormat`] goes through, and none of them turns into another.
+/// Built with [`Self::new`], the output surface holds whatever the input did
+/// — every [`CudaFrameFormat`] goes through, and so does the P010 NVDEC
+/// decodes a 10-bit stream to. The one conversion there is, is that P010
+/// down to [`CudaFrameFormat::Nv12`], through [`Self::with_format`]: the same
+/// layout at 8 bits, which is what everything reading a CUDA surface here
+/// reads. Its colour description is carried as it is — a BT.2020 picture is
+/// still tagged BT.2020, and nothing here maps HDR to SDR.
+///
 /// `scale_cuda` cannot convert between RGB and YUV in either direction: its
 /// PTX module carries no kernel for those pairs, so such a conversion fails
 /// as `Unsupported conversion: bgr0 -> nv12` rather than falling back to
-/// anything.
+/// anything, and this refuses it first as
+/// [`CudaScalerError::UnsupportedConversion`].
 ///
 /// That is a narrower limit than it sounds, because nothing downstream
 /// needs the conversion. NVENC ingests `Bgra` as directly as `Nv12`,
@@ -159,6 +174,8 @@ pub struct CudaScaler {
     device_ctx: *const ffi::AVHWDeviceContext,
     width: u32,
     height: u32,
+    /// What every output surface holds — `None` for whatever came in.
+    format: Option<CudaFrameFormat>,
     /// Built from the first frame and rebuilt when the input changes — see
     /// this type's own docs.
     graph: CudaScaleGraph,
@@ -190,6 +207,32 @@ impl CudaScaler {
         height: u32,
         interp: CudaScalerInterp,
     ) -> Self {
+        Self::build(name, device, width, height, interp, None)
+    }
+
+    /// The same, putting out `format` whatever comes in: a surface already
+    /// in it, or P010 where `format` is [`CudaFrameFormat::Nv12`] — see this
+    /// type's own docs. Anything else is refused frame by frame with
+    /// [`CudaScalerError::UnsupportedConversion`].
+    pub fn with_format(
+        name: impl Into<String>,
+        device: &CudaDevice,
+        width: u32,
+        height: u32,
+        interp: CudaScalerInterp,
+        format: CudaFrameFormat,
+    ) -> Self {
+        Self::build(name, device, width, height, interp, Some(format))
+    }
+
+    fn build(
+        name: impl Into<String>,
+        device: &CudaDevice,
+        width: u32,
+        height: u32,
+        interp: CudaScalerInterp,
+        format: Option<CudaFrameFormat>,
+    ) -> Self {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::CudaScaler, &name, None);
 
@@ -208,7 +251,10 @@ impl CudaScaler {
                 MemoryDomain::Cuda,
             )),
         );
-        pp_info!(pp_log: &pp_log, "created: dst={width}x{height}, interp={interp:?}");
+        pp_info!(
+            pp_log: &pp_log,
+            "created: dst={width}x{height}, interp={interp:?}, format={format:?}"
+        );
         Self {
             name,
             pp_log,
@@ -216,15 +262,16 @@ impl CudaScaler {
             device_ctx,
             width,
             height,
-            graph: CudaScaleGraph::new(interp),
+            format,
+            graph: CudaScaleGraph::converting(interp, format),
             pad,
         }
     }
 
-    /// Rejects anything that is not a CUDA NV12 frame from this element's own
-    /// device, so a bad frame fails here rather than as an opaque libavfilter
-    /// error code — or, worse, as device pointers read against the wrong
-    /// context. Returns the frame's own frames context, which is what the
+    /// Rejects anything that is not a CUDA frame from this element's own
+    /// device in a layout it can put out, so a bad frame fails here rather
+    /// than as an opaque libavfilter error code — or, worse, as device
+    /// pointers read against the wrong context. Returns the frame's own frames context, which is what the
     /// graph has to be configured against.
     pub(crate) fn validate(
         &self,
@@ -248,10 +295,21 @@ impl CudaScaler {
                 return Err(CudaScalerError::ForeignContext);
             }
             let sw_format = (*frames_ctx).sw_format;
-            if CudaFrameFormat::from_sw_format(sw_format).is_none() {
+            let p010 = sw_format == ffi::AVPixelFormat::AV_PIX_FMT_P010LE;
+            let input = CudaFrameFormat::from_sw_format(sw_format);
+            if input.is_none() && !p010 {
                 return Err(CudaScalerError::UnsupportedSurfaceFormat(
                     ffmpeg::format::Pixel::from(sw_format),
                 ));
+            }
+            if let Some(to) = self.format
+                && input != Some(to)
+                && !(p010 && to == CudaFrameFormat::Nv12)
+            {
+                return Err(CudaScalerError::UnsupportedConversion {
+                    from: ffmpeg::format::Pixel::from(sw_format),
+                    to,
+                });
             }
             Ok(frames_ref)
         }
@@ -757,6 +815,125 @@ mod tests {
             ffmpeg::format::Pixel::BGRA,
             "the scaler changed the surface layout"
         );
+    }
+
+    /// NVDEC decodes 10-bit HEVC to P010, which nothing reading a CUDA
+    /// surface here takes; a scaler built for NV12 brings it down to that on
+    /// the GPU, keeping the pixels, the pts and the colour description.
+    #[test]
+    fn a_p010_surface_comes_down_to_nv12() {
+        let Some((device, _cuda_lock)) = try_cuda_device() else {
+            return;
+        };
+        // Every sample of every plane is 90 at 8 bits once shifted down.
+        let Some((params, packets)) = crate::test_support::try_encoded_packets(
+            "hevc_nvenc",
+            ffmpeg::format::Pixel::P010LE,
+            (256, 144),
+            90,
+        ) else {
+            return;
+        };
+        let mut decoder = CudaDecoder::new("decoder", params, &device, 4).expect("NVDEC opens");
+        let mut scaler = CudaScaler::with_format(
+            "scaler",
+            &device,
+            256,
+            144,
+            CudaScalerInterp::Bilinear,
+            CudaFrameFormat::Nv12,
+        );
+        let mut download = CudaDownload::new("download", &device, CudaFrameFormat::Nv12, 256, 144);
+        let received = capture(&mut download);
+        scaler.src_pads()[0].link(Box::new(download));
+        let decoded = capture(&mut decoder);
+        for packet in packets {
+            decoder
+                .consume(MediaBuffer::Packet(Arc::new(packet)))
+                .expect("decode");
+        }
+        decoder.consume(MediaBuffer::Eos).expect("drain");
+        let decoded = std::mem::take(&mut *decoded.lock().unwrap());
+        let mut sent = Vec::new();
+        for buffer in decoded {
+            if let MediaBuffer::Video(frame) = &buffer {
+                // SAFETY: a decoded CUDA frame carries its frames context.
+                let sw_format = unsafe {
+                    let frames_ctx =
+                        (*(*frame.as_ptr()).hw_frames_ctx).data as *const ffi::AVHWFramesContext;
+                    (*frames_ctx).sw_format
+                };
+                assert_eq!(sw_format, ffi::AVPixelFormat::AV_PIX_FMT_P010LE);
+                sent.push((frame.pts(), frame.color_space()));
+            }
+            scaler.consume(buffer).expect("P010 converts to NV12");
+        }
+        assert!(!sent.is_empty(), "NVDEC decoded nothing");
+
+        let received = received.lock().unwrap();
+        let frames: Vec<_> = received
+            .iter()
+            .filter_map(|buffer| match buffer {
+                MediaBuffer::Video(frame) => Some(frame),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(frames.len(), sent.len());
+        for (frame, (pts, space)) in frames.into_iter().zip(sent) {
+            assert_eq!(frame.format(), ffmpeg::format::Pixel::NV12);
+            assert_eq!(frame.pts(), pts);
+            assert_eq!(frame.color_space(), space, "the colour description is kept");
+            let luma = frame.data(0)[frame.stride(0) * 72 + 128];
+            assert!(luma.abs_diff(90) <= 2, "luma {luma}, not 90");
+            let chroma = frame.data(1)[frame.stride(1) * 36 + 128];
+            assert!(chroma.abs_diff(90) <= 2, "chroma {chroma}, not 90");
+        }
+    }
+
+    /// `scale_cuda` has no kernel from RGB to YUV, so a scaler built for
+    /// NV12 refuses a BGRA surface itself rather than leave it to fail as
+    /// libavfilter's error code.
+    #[test]
+    fn a_conversion_scale_cuda_cannot_make_is_refused() {
+        let Some((device, _cuda_lock)) = try_cuda_device() else {
+            return;
+        };
+        let Ok(mut upload) = CudaUpload::new("upload", &device, CudaFrameFormat::Bgra, 64, 64)
+        else {
+            eprintln!("skipping: this machine has no usable CUDA frames context");
+            return;
+        };
+        let uploaded = capture(&mut upload);
+        upload
+            .consume(pooled(ffmpeg::frame::Video::new(
+                ffmpeg::format::Pixel::BGRA,
+                64,
+                64,
+            )))
+            .expect("upload");
+        let frame = uploaded.lock().unwrap().remove(0);
+
+        let mut scaler = CudaScaler::with_format(
+            "scaler",
+            &device,
+            64,
+            64,
+            CudaScalerInterp::Bilinear,
+            CudaFrameFormat::Nv12,
+        );
+        let received = capture(&mut scaler);
+        let error = scaler.consume(frame).expect_err("BGRA has no way to NV12");
+        assert!(
+            matches!(
+                error,
+                crate::error::Error::CudaScalerError(CudaScalerError::UnsupportedConversion {
+                    from: ffmpeg::format::Pixel::BGRA,
+                    to: CudaFrameFormat::Nv12,
+                })
+            ),
+            "{error}"
+        );
+        assert!(received.lock().unwrap().is_empty(), "nothing was put out");
     }
 
     /// A mid-stream input change must rebuild the graph rather than fail or

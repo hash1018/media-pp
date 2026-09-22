@@ -18,7 +18,9 @@ use windows::{
     core::Interface,
 };
 
-use super::d3d11_video_processor::{BltColorSpaces, InputShape, ScaleProcessor, color_space};
+use super::d3d11_video_processor::{
+    BltColorSpaces, InputShape, ScaleProcessor, color_space, is_yuv420,
+};
 
 use crate::{
     buffer::MediaBuffer,
@@ -65,7 +67,8 @@ pub enum D3d11ScalerError {
 
     /// The input texture uses a DXGI format this scaler cannot process.
     #[error(
-        "D3d11Scaler only scales DXGI_FORMAT_NV12 or DXGI_FORMAT_B8G8R8A8_UNORM textures, got {0:?}"
+        "D3d11Scaler only scales DXGI_FORMAT_NV12, DXGI_FORMAT_P010 or \
+         DXGI_FORMAT_B8G8R8A8_UNORM textures, got {0:?}"
     )]
     UnsupportedTextureFormat(DXGI_FORMAT),
 
@@ -209,12 +212,18 @@ impl D3d11ScalerFormat {
 /// less often: [`crate::elements::D3d11VideoEncoder`] ingests either format
 /// and [`crate::elements::D3d11Renderer`] draws either.
 ///
+/// A 10-bit decode arrives as P010, the same 4:2:0 layout at ten bits a
+/// sample, and is taken as input too. [`D3d11ScalerFormat::Nv12`] brings it
+/// down to eight bits — which is what everything else here reads — without
+/// the picture leaving the GPU.
+///
 /// A converted frame is retagged for what it now holds rather than
 /// inheriting the source's tags — an encoder reads those to describe its
 /// stream. RGB is tagged full-range; Y'CbCr is tagged BT.709 limited, the
 /// same definition [`crate::elements::D3d11VideoCompositor`] and
 /// `CudaConverter` use, so converted frames and
-/// composited ones agree.
+/// composited ones agree. P010 to NV12 is the exception: only the depth of
+/// each sample changes, so a BT.2020 picture stays tagged BT.2020.
 ///
 /// Shader-resource-only textures from [`crate::elements::D3d11Upload`] and
 /// DXGI GPU capture cannot be used directly as D3D11 video-processor input
@@ -305,10 +314,13 @@ fn converted_colorimetry(
     output_format: DXGI_FORMAT,
     input_format: DXGI_FORMAT,
 ) -> (ffmpeg::color::Space, ffmpeg::color::Range) {
-    if output_format == input_format {
+    // Y'CbCr to Y'CbCr — P010 to NV12 — changes the depth of each sample,
+    // not what it means: the processor reads and writes both sides under the
+    // one matrix and range, so the tags are still true.
+    if output_format == input_format || (is_yuv420(output_format) && is_yuv420(input_format)) {
         return (frame.color_space(), frame.color_range());
     }
-    if output_format == DXGI_FORMAT_NV12 {
+    if is_yuv420(output_format) {
         (ffmpeg::color::Space::BT709, ffmpeg::color::Range::MPEG)
     } else {
         (ffmpeg::color::Space::RGB, ffmpeg::color::Range::JPEG)
@@ -320,7 +332,7 @@ fn validate_output_size(
     width: u32,
     height: u32,
 ) -> std::result::Result<(), D3d11ScalerError> {
-    if format == DXGI_FORMAT_NV12 && (!width.is_multiple_of(2) || !height.is_multiple_of(2)) {
+    if is_yuv420(format) && (!width.is_multiple_of(2) || !height.is_multiple_of(2)) {
         return Err(D3d11ScalerError::OddNv12Output { width, height });
     }
     Ok(())
@@ -474,7 +486,7 @@ impl D3d11Scaler {
         // SAFETY: `desc` is a live, correctly typed out-parameter and `texture`
         // remains alive for the call.
         unsafe { texture.GetDesc(&mut desc) };
-        if desc.Format != DXGI_FORMAT_NV12 && desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM {
+        if !is_yuv420(desc.Format) && desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM {
             return Err(D3d11ScalerError::UnsupportedTextureFormat(desc.Format));
         }
         if desc.Width < frame.width() || desc.Height < frame.height() {
@@ -775,7 +787,7 @@ mod tests {
             D3D11_CPU_ACCESS_READ, D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE,
             D3D11_SUBRESOURCE_DATA, D3D11_USAGE_STAGING,
         },
-        Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM,
+        Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_P010},
     };
 
     use super::*;
@@ -1654,5 +1666,110 @@ mod tests {
             ),
             "unexpected error: {error}"
         );
+    }
+
+    /// A P010 texture, as a 10-bit decode hands one over: every luma sample
+    /// `luma` and every chroma sample `chroma`, ten-bit values stored in the
+    /// high bits of sixteen as P010 stores them.
+    fn p010_texture(
+        device: &ID3D11Device,
+        width: u32,
+        height: u32,
+        luma: u16,
+        chroma: u16,
+    ) -> ID3D11Texture2D {
+        let (luma, chroma) = (luma << 6, chroma << 6);
+        // One pitch for both planes: luma rows, then half as many rows of
+        // interleaved Cb/Cr, which is as wide in bytes.
+        let samples: Vec<u16> = std::iter::repeat_n(luma, (width * height) as usize)
+            .chain(std::iter::repeat_n(chroma, (width * height / 2) as usize))
+            .collect();
+        let initial = D3D11_SUBRESOURCE_DATA {
+            pSysMem: samples.as_ptr().cast::<c_void>(),
+            SysMemPitch: width * 2,
+            SysMemSlicePitch: 0,
+        };
+        let desc = D3D11_TEXTURE2D_DESC {
+            Width: width,
+            Height: height,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: DXGI_FORMAT_P010,
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Usage: D3D11_USAGE_DEFAULT,
+            BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
+            CPUAccessFlags: 0,
+            MiscFlags: 0,
+        };
+        let mut texture = None;
+        // SAFETY: `initial` points at `samples`, which holds both planes at
+        // the declared pitch and outlives the call; `texture` is a live
+        // out-parameter.
+        unsafe {
+            device
+                .CreateTexture2D(&desc, Some(&initial), Some(&mut texture))
+                .expect("CreateTexture2D(P010) failed");
+        }
+        texture.expect("CreateTexture2D succeeded without producing a texture")
+    }
+
+    /// What a 10-bit decode becomes: P010 in, NV12 out, still on the GPU,
+    /// each sample brought from ten bits to eight — 800 is 200, and the
+    /// neutral 512 is 128 — and a BT.2020 picture still tagged BT.2020,
+    /// since only the depth changed.
+    #[test]
+    fn a_p010_frame_comes_down_to_nv12_and_keeps_its_colour_tags() {
+        let Some((device, context)) = try_video_device() else {
+            return;
+        };
+        let mut source = frame(p010_texture(&device, 32, 32, 800, 512), 32, 32, 9);
+        let MediaBuffer::Video(source_frame) = &mut source else {
+            unreachable!("frame always returns a Video buffer");
+        };
+        let source_frame = Arc::get_mut(source_frame).expect("the frame is not shared yet");
+        source_frame.set_color_space(ffmpeg::color::Space::BT2020NCL);
+        source_frame.set_color_range(ffmpeg::color::Range::MPEG);
+
+        let mut scaler = D3d11Scaler::new(
+            "scaler",
+            &device,
+            context.clone(),
+            D3d11ScalerFormat::Nv12,
+            32,
+            32,
+        )
+        .expect("D3d11Scaler::new should succeed");
+        let received = capture(&mut scaler);
+        scaler.consume(source).expect("a P010 frame scales");
+
+        let received = received.lock().unwrap();
+        let MediaBuffer::Video(scaled) = &received[0] else {
+            panic!("expected a Video buffer, got {}", received[0].kind());
+        };
+        assert_eq!(scaled.pts(), Some(9));
+        assert_eq!(scaled.color_space(), ffmpeg::color::Space::BT2020NCL);
+        assert_eq!(scaled.color_range(), ffmpeg::color::Range::MPEG);
+        let (texture_raw, _) = d3d11va_texture(scaled).expect("the output carries a texture");
+        // SAFETY: `texture_raw` is borrowed from the still-live frame; cloning
+        // the borrowed wrapper takes an independent COM reference.
+        let texture = unsafe {
+            ID3D11Texture2D::from_raw_borrowed(&texture_raw)
+                .expect("the output texture must not be null")
+                .clone()
+        };
+        let mut desc = D3D11_TEXTURE2D_DESC::default();
+        // SAFETY: a live texture and a live out-parameter.
+        unsafe { texture.GetDesc(&mut desc) };
+        assert_eq!(desc.Format, DXGI_FORMAT_NV12);
+        let (luma, chroma) = read_nv12(&device, &context, &texture, 32, 32);
+        for &sample in &luma {
+            assert_close(sample, 200, "luma");
+        }
+        for &sample in &chroma {
+            assert_close(sample, 128, "chroma");
+        }
     }
 }

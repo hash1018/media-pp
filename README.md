@@ -13,7 +13,7 @@ boundaries are explicit bounded queues.
   composite, key and encode without copying pictures back to the CPU.
 - **Streams the GPU does not take still reach it.** `VideoDecodeBin` decodes
   on the hardware where it can, and in software onto the same device where it
-  cannot — alpha, 10-bit, codecs without a hardware decoder — switching over
+  cannot — alpha, 4:4:4, codecs without a hardware decoder — switching over
   by itself if the GPU refuses a stream at a frame.
 - **Capture** of screens, windows, cameras and system or per-application audio
   on Windows and Linux; **output** to files, HLS, RTMP, RTSP and WebRTC.

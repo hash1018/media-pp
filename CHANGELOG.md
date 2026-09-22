@@ -192,8 +192,15 @@ compile error with no explanation.
   stream and a `DecodeTarget` — `D3d11`, `D3d12` or `Cuda`, owning its device, or
   `System` — and is one element holding the line for it: the target's
   own hardware decoder where it has one for the codec and the pictures are
-  8-bit 4:2:0, and otherwise `SwDecoder` → `SwScaler` → the target's upload,
-  so the stream reaches the same device either way. Pictures with alpha
+  4:2:0, and otherwise `SwDecoder` → `SwScaler` → the target's upload,
+  so the stream reaches the same device either way. A 10-bit stream is
+  decoded by the hardware to P010 and brought down to NV12 on the GPU after
+  it — by a `D3d11Scaler` on `D3d11`, whose target carries the pipeline's
+  shared immediate context for it, and a `CudaScaler` on `Cuda`; `D3d12`
+  decodes it in software. At 4K, HEVC 10-bit decoded this way on CUDA ran
+  at 277 frames a second with next to no CPU, against 104 on four
+  software threads. Its BT.2020 description is kept; nothing maps HDR to
+  SDR. Pictures with alpha
   take the software path and arrive as BGRA with their alpha intact, since
   no hardware decoder keeps it. Should the hardware open for a stream
   and then refuse it at a frame — a profile the GPU lacks — the bin puts the
@@ -205,6 +212,15 @@ compile error with no explanation.
   `HardwareRefused`, `SystemMemory`). `System` is `SwDecoder` alone, so the
   same code builds a decoder in a build without any GPU backend; on `D3d12`,
   whose frames here are NV12 only, alpha is not kept.
+
+- **10-bit surfaces come down to 8 bits on the GPU.** `D3d11Scaler` takes
+  a P010 texture as input — what D3D11VA decodes 10-bit HEVC to — and
+  `D3d11ScalerFormat::Nv12` brings it down to NV12, keeping its colour
+  tags. `CudaScaler::with_format(name, device, width, height, interp,
+  format)` puts out `format` whatever comes in, and takes NVDEC's P010 for
+  `CudaFrameFormat::Nv12`; a conversion `scale_cuda` has no kernel for is
+  refused as `CudaScalerError::UnsupportedConversion`. `CudaScaler::new`
+  still keeps the input's layout, and now lets P010 through as well.
 
 - **`CudaDevice` is `Clone`.** It was one reference-counted FFmpeg device
   context already; a clone is another reference to the same device.

@@ -12,7 +12,8 @@
 use ffmpeg_next::{self as ffmpeg, ffi};
 
 use crate::{
-    buffer::release_picture, elements::filter::is_codec_drain_boundary, pool::UnboundObjectPool,
+    buffer::release_picture, elements::filter::is_codec_drain_boundary,
+    platform::cuda::CudaFrameFormat, pool::UnboundObjectPool,
 };
 
 use super::cuda_scaler::{CudaScalerError, CudaScalerInterp};
@@ -132,6 +133,9 @@ fn pool_of(frames_ctx: *mut ffi::AVBufferRef) -> *const ffi::AVHWFramesContext {
 /// requested output stops matching what it was configured for.
 pub(crate) struct CudaScaleGraph {
     interp: CudaScalerInterp,
+    /// The layout `scale_cuda` is asked to put out — `None` for whatever
+    /// came in.
+    format: Option<CudaFrameFormat>,
     state: Option<GraphState>,
     /// Reuses only the small CPU-side `AVFrame` wrapper; the scaled surface
     /// itself comes from `scale_cuda`'s own output pool. Same split as
@@ -152,8 +156,15 @@ pub(crate) type ScaledFrames = Vec<crate::pool::UnboundObjectPoolRef<ffmpeg::fra
 
 impl CudaScaleGraph {
     pub(crate) fn new(interp: CudaScalerInterp) -> Self {
+        Self::converting(interp, None)
+    }
+
+    /// The same, putting out `format` where one is given. The caller answers
+    /// for `scale_cuda` having a kernel from what comes in to that.
+    pub(crate) fn converting(interp: CudaScalerInterp, format: Option<CudaFrameFormat>) -> Self {
         Self {
             interp,
+            format,
             state: None,
             // `release_picture` rather than a no-op: a wrapper that held its
             // reference while sitting in the pool would keep a surface out of
@@ -331,6 +342,13 @@ impl CudaScaleGraph {
 
         let mut sink = graph.add(&buffersink, "out", "")?;
         let algo = self.interp.algo();
+        // Only the last `scale_cuda` changes the layout, so a detour resizes
+        // in what came in.
+        let convert = match self.format {
+            None => "",
+            Some(CudaFrameFormat::Nv12) => ":format=nv12",
+            Some(CudaFrameFormat::Bgra) => ":format=bgra",
+        };
 
         // One `scale_cuda`, unless this is the size that filter gets wrong —
         // see [`detour`], which is where the whole explanation lives.
@@ -339,7 +357,7 @@ impl CudaScaleGraph {
                 let mut only = graph.add(
                     &scale,
                     "scale",
-                    &format!("w={width}:h={height}:interp_algo={algo}"),
+                    &format!("w={width}:h={height}:interp_algo={algo}{convert}"),
                 )?;
                 source.link(0, &mut only, 0);
                 only
@@ -353,7 +371,7 @@ impl CudaScaleGraph {
                 let mut second = graph.add(
                     &scale,
                     "scale",
-                    &format!("w={width}:h={height}:interp_algo={algo}"),
+                    &format!("w={width}:h={height}:interp_algo={algo}{convert}"),
                 )?;
                 source.link(0, &mut first, 0);
                 first.link(0, &mut second, 0);

@@ -4,12 +4,13 @@
 //! A hardware decoder is the cheap way to put a stream on a device, and the
 //! only one worth having for the streams it takes. It does not take them all:
 //! a codec the GPU has no decoder for (ProRes, DNxHD, Motion JPEG through
-//! D3D11VA), a picture it cannot hand on (anything but 8-bit 4:2:0, which is
-//! the one layout every consumer of a decoded surface here reads), alpha,
-//! which no hardware decoder keeps, and a profile the GPU turns out not to
-//! have, which nothing says until it is asked to decode one. FFmpeg decodes
-//! every one of those in software, and an upload puts the result on the same
-//! device, so the stream reaches the same place either way.
+//! D3D11VA), a picture it cannot hand on (4:2:2 and 4:4:4, where every
+//! consumer of a decoded surface here reads 4:2:0), alpha, which no hardware
+//! decoder keeps, and a profile the GPU turns out not to have, which nothing
+//! says until it is asked to decode one. FFmpeg decodes every one of those in
+//! software, and an upload puts the result on the same device, so the stream
+//! reaches the same place either way. 10-bit 4:2:0 the hardware decodes, and
+//! the GPU brings down to 8 bits after it where the target can.
 //!
 //! [`VideoDecodeBin`] is one element holding whichever of those lines the
 //! stream needs. It chooses when it is opened, from what the stream says
@@ -24,7 +25,7 @@ use ffmpeg_next as ffmpeg;
 use thiserror::Error as ThisError;
 
 #[cfg(all(target_os = "windows", feature = "d3d11"))]
-use windows::Win32::Graphics::Direct3D11::ID3D11Device;
+use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11DeviceContext};
 #[cfg(all(target_os = "windows", feature = "d3d12"))]
 use windows::Win32::Graphics::Direct3D12::ID3D12Device;
 
@@ -78,17 +79,23 @@ pub enum DecodeTarget {
     System,
     /// D3D11 textures on `device`, as [`crate::elements::D3d11Decoder`] and
     /// [`crate::elements::D3d11Upload`] make them — NV12, or BGRA where the
-    /// stream has alpha or an odd side.
+    /// stream has alpha or an odd side. A 10-bit stream is brought down to
+    /// NV12 by a [`crate::elements::D3d11Scaler`], which draws through
+    /// `context`: the immediate context every D3D11 element in the pipeline
+    /// shares, as that element's own docs require.
     #[cfg(all(target_os = "windows", feature = "d3d11"))]
     D3d11 {
         device: ID3D11Device,
+        context: Arc<Mutex<ID3D11DeviceContext>>,
         downstream_hw_frames: i32,
     },
     /// D3D12 resources on `device`, as [`crate::elements::D3d12Decoder`] and
     /// [`crate::elements::D3d12Upload`] make them — always NV12, the one
     /// layout either of them has and the one everything reading D3D12 frames
     /// here reads. So alpha is not kept on this target, and is no reason to
-    /// decode in software; and a software-decoded stream with an odd side
+    /// decode in software; a 10-bit stream is decoded in software, there
+    /// being nothing on D3D12 here to bring it down to 8 bits after the
+    /// hardware; and a software-decoded stream with an odd side
     /// has no layout to go in and is refused with
     /// [`VideoDecodeBinError::OddSize`]. `D3d12Decoder`'s pool grows, so
     /// there is no surface budget to give.
@@ -96,7 +103,8 @@ pub enum DecodeTarget {
     D3d12 { device: ID3D12Device },
     /// CUDA frames on `device`, as [`crate::elements::CudaDecoder`] and
     /// [`crate::elements::CudaUpload`] make them — NV12, or BGRA where the
-    /// stream has alpha or an odd side.
+    /// stream has alpha or an odd side. A 10-bit stream is brought down to
+    /// NV12 by a [`crate::elements::CudaScaler`].
     #[cfg(feature = "cuda")]
     Cuda {
         device: CudaDevice,
@@ -126,9 +134,10 @@ pub enum SoftwareReason {
     /// This FFmpeg build has no decoder for the codec that decodes on the
     /// target's hardware.
     NoHardwareDecoder(ffmpeg::codec::Id),
-    /// The pictures are not 8-bit 4:2:0 — 10-bit, 4:2:2, 4:4:4. A hardware
-    /// decoder that takes them at all hands on a surface (P010, Y210, ...)
-    /// that nothing reading decoded surfaces here takes.
+    /// The pictures are not 4:2:0 — 4:2:2, 4:4:4 — or are 10-bit 4:2:0 on a
+    /// target with nothing to bring them down to 8 bits after the hardware.
+    /// A hardware decoder that takes them at all hands on a surface (Y210,
+    /// P010, ...) that nothing reading decoded surfaces here takes.
     PixelFormat(ffmpeg::format::Pixel),
     /// The hardware was chosen, and refused the stream once asked to decode
     /// it — a profile or a size the GPU does not have, which a stream's
@@ -143,7 +152,9 @@ pub enum SoftwareReason {
 /// # What it holds
 ///
 /// On the hardware path, the target's decoder (`D3d11Decoder`,
-/// `D3d12Decoder`, `CudaDecoder`). On the software path, `SwDecoder` →
+/// `D3d12Decoder`, `CudaDecoder`), and for a 10-bit stream its scaler
+/// (`D3d11Scaler`, `CudaScaler`) after it, bringing each picture down to
+/// NV12 at the same size. On the software path, `SwDecoder` →
 /// `SwScaler` → the target's upload, or `SwDecoder` alone for
 /// [`DecodeTarget::System`]. They are ordinary elements, run the way a
 /// [`Rack`](crate::elements::Rack) runs what it holds: each in the pipeline,
@@ -156,7 +167,8 @@ pub enum SoftwareReason {
 ///
 /// When it is opened, from the stream's parameters: alpha where the target
 /// can keep it, a codec without a hardware decoder, or a layout that is not
-/// 8-bit 4:2:0 take the software path, and anything else the hardware.
+/// 4:2:0 take the software path, and so does 10-bit on
+/// `DecodeTarget::D3d12`; anything else the hardware.
 /// [`Self::path`] and [`Self::output_format`] answer before the pipeline
 /// runs, so what is built after this can depend on them.
 ///
@@ -246,7 +258,8 @@ impl VideoDecodeBin {
     ///
     /// `name` names the bin; what it holds is called `{name}-decoder`, and
     /// on the software path onto a device also `{name}-convert` and
-    /// `{name}-upload`.
+    /// `{name}-upload` — or, for a 10-bit stream on the hardware path,
+    /// `{name}-convert` alone.
     ///
     /// Fails with [`VideoDecodeBinError`] for a stream that is not video, or
     /// one whose pictures the target cannot be given — a size unknown or odd
@@ -273,7 +286,12 @@ impl VideoDecodeBin {
 
         let (elements, output_format, fallback) = match path {
             DecodePath::Hardware => {
-                let decoder = target.hardware_decoder(format!("{name}-decoder"), params.clone())?;
+                let mut elements =
+                    vec![target.hardware_decoder(format!("{name}-decoder"), params.clone())?];
+                if stream.format.is_some_and(is_10bit_420) {
+                    let (width, height) = stream.size.ok_or(VideoDecodeBinError::UnknownSize)?;
+                    elements.extend(target.to_8bit(format!("{name}-convert"), width, height)?);
+                }
                 let fallback = Fallback {
                     target: target.clone(),
                     threading,
@@ -282,11 +300,7 @@ impl VideoDecodeBin {
                     since_keyframe: Vec::new(),
                     preroll: None,
                 };
-                (
-                    vec![decoder],
-                    Some(ffmpeg::format::Pixel::NV12),
-                    Some(fallback),
-                )
+                (elements, Some(ffmpeg::format::Pixel::NV12), Some(fallback))
             }
             DecodePath::Software(reason) => {
                 let format = target.software_format(reason, stream.size)?;
@@ -594,6 +608,54 @@ impl DecodeTarget {
         }
     }
 
+    /// Whether the target has a scaler that brings a 10-bit 4:2:0 surface
+    /// its hardware decoder makes down to NV12.
+    fn converts_10bit(&self) -> bool {
+        match self {
+            Self::System => false,
+            #[cfg(all(target_os = "windows", feature = "d3d11"))]
+            Self::D3d11 { .. } => true,
+            #[cfg(all(target_os = "windows", feature = "d3d12"))]
+            Self::D3d12 { .. } => false,
+            #[cfg(feature = "cuda")]
+            Self::Cuda { .. } => true,
+        }
+    }
+
+    /// That scaler, putting out NV12 at `width`x`height` — the size the
+    /// stream was opened with, so a stream that changes size is scaled back
+    /// to it, as on the software path. Only asked for where
+    /// [`Self::converts_10bit`]; `None` on a target without one.
+    #[cfg_attr(
+        not(any(feature = "cuda", all(target_os = "windows", feature = "d3d11"))),
+        allow(unused_variables)
+    )]
+    fn to_8bit(&self, name: String, width: u32, height: u32) -> Result<Option<Box<dyn Filter>>> {
+        Ok(match self {
+            #[cfg(all(target_os = "windows", feature = "d3d11"))]
+            Self::D3d11 {
+                device, context, ..
+            } => Some(Box::new(crate::elements::D3d11Scaler::new(
+                name,
+                device,
+                Arc::clone(context),
+                crate::elements::D3d11ScalerFormat::Nv12,
+                width,
+                height,
+            )?)),
+            #[cfg(feature = "cuda")]
+            Self::Cuda { device, .. } => Some(Box::new(crate::elements::CudaScaler::with_format(
+                name,
+                device,
+                width,
+                height,
+                crate::elements::CudaScalerInterp::Bilinear,
+                CudaFrameFormat::Nv12,
+            ))),
+            _ => None,
+        })
+    }
+
     /// The layout the software path uploads in, for a stream of `size`
     /// decoded in software because of `reason` — `None` where nothing is
     /// uploaded.
@@ -632,6 +694,7 @@ impl DecodeTarget {
             Self::D3d11 {
                 device,
                 downstream_hw_frames,
+                ..
             } => Box::new(crate::elements::D3d11Decoder::new(
                 name,
                 params,
@@ -724,14 +787,25 @@ impl Stream {
 /// The choice made at `open` — see [`decide`], which is this with the
 /// target's answers already read.
 fn choose(stream: &Stream, target: &DecodeTarget) -> DecodePath {
-    decide(stream, target.decodes(stream.codec), target.keeps_alpha())
+    decide(
+        stream,
+        target.decodes(stream.codec),
+        target.keeps_alpha(),
+        target.converts_10bit(),
+    )
 }
 
 /// The choice itself, apart from any device: no hardware at all first; then
 /// alpha where the target can keep it, since it decides the output layout as
 /// well as the path; then whether the hardware has a decoder; then whether
-/// what it would decode to is a layout anything downstream reads.
-fn decide(stream: &Stream, hardware_decodes: Option<bool>, keeps_alpha: bool) -> DecodePath {
+/// what it would decode to is a layout anything downstream reads, or one the
+/// target can bring down to that after it.
+fn decide(
+    stream: &Stream,
+    hardware_decodes: Option<bool>,
+    keeps_alpha: bool,
+    converts_10bit: bool,
+) -> DecodePath {
     let Some(hardware_decodes) = hardware_decodes else {
         return DecodePath::Software(SoftwareReason::SystemMemory);
     };
@@ -745,7 +819,7 @@ fn decide(stream: &Stream, hardware_decodes: Option<bool>, keeps_alpha: bool) ->
         // A stream that does not say is left to the hardware, which is what
         // decoding it straight onto the device always did — and if the
         // hardware refuses it, the bin replaces it then.
-        Some(format) if !is_8bit_420(format) => {
+        Some(format) if !is_8bit_420(format) && !(converts_10bit && is_10bit_420(format)) => {
             DecodePath::Software(SoftwareReason::PixelFormat(format))
         }
         _ => DecodePath::Hardware,
@@ -756,6 +830,16 @@ fn decide(stream: &Stream, hardware_decodes: Option<bool>, keeps_alpha: bool) ->
 fn is_8bit_420(format: ffmpeg::format::Pixel) -> bool {
     use ffmpeg::format::Pixel;
     matches!(format, Pixel::YUV420P | Pixel::YUVJ420P | Pixel::NV12)
+}
+
+/// The layouts a hardware decoder turns into a P010 surface: NV12's own
+/// layout at 16 bits a sample, 10 of them used.
+fn is_10bit_420(format: ffmpeg::format::Pixel) -> bool {
+    use ffmpeg::format::Pixel;
+    matches!(
+        format,
+        Pixel::YUV420P10LE | Pixel::YUV420P10BE | Pixel::P010LE | Pixel::P010BE
+    )
 }
 
 /// Whether `format` has an alpha channel.
@@ -787,8 +871,9 @@ mod tests {
     /// The choice alone, in the order it is made: no hardware first; alpha
     /// wins where the target keeps it, even where the hardware has a
     /// decoder, and is no reason where it does not; a missing decoder comes
-    /// before the layout; and a stream that does not say its layout is left
-    /// to the hardware.
+    /// before the layout; 10-bit 4:2:0 goes to the hardware only where the
+    /// target can bring it down to 8 bits after it, and 4:2:2 never; and a
+    /// stream that does not say its layout is left to the hardware.
     #[test]
     fn the_path_follows_the_target_then_alpha_then_the_decoder_then_the_layout() {
         use ffmpeg::codec::Id;
@@ -796,40 +881,66 @@ mod tests {
 
         let prores = stream(Id::PRORES, Some(Pixel::YUVA444P10LE));
         assert_eq!(
-            decide(&prores, None, true),
+            decide(&prores, None, true, true),
             DecodePath::Software(SoftwareReason::SystemMemory)
         );
         assert_eq!(
-            decide(&prores, Some(true), true),
+            decide(&prores, Some(true), true, true),
             DecodePath::Software(SoftwareReason::Alpha)
         );
         assert_eq!(
-            decide(&prores, Some(false), false),
+            decide(&prores, Some(false), false, true),
             DecodePath::Software(SoftwareReason::NoHardwareDecoder(Id::PRORES)),
             "alpha a target cannot keep is no reason of its own"
         );
         assert_eq!(
-            decide(&stream(Id::MJPEG, Some(Pixel::YUVJ420P)), Some(false), true),
-            DecodePath::Software(SoftwareReason::NoHardwareDecoder(Id::MJPEG))
-        );
-        assert_eq!(
             decide(
-                &stream(Id::HEVC, Some(Pixel::YUV420P10LE)),
-                Some(true),
+                &stream(Id::MJPEG, Some(Pixel::YUVJ420P)),
+                Some(false),
+                true,
                 true
             ),
-            DecodePath::Software(SoftwareReason::PixelFormat(Pixel::YUV420P10LE))
+            DecodePath::Software(SoftwareReason::NoHardwareDecoder(Id::MJPEG))
         );
+        let hevc10 = stream(Id::HEVC, Some(Pixel::YUV420P10LE));
         assert_eq!(
-            decide(&stream(Id::H264, Some(Pixel::YUV422P)), Some(true), true),
-            DecodePath::Software(SoftwareReason::PixelFormat(Pixel::YUV422P))
-        );
-        assert_eq!(
-            decide(&stream(Id::H264, Some(Pixel::YUV420P)), Some(true), true),
+            decide(&hevc10, Some(true), true, true),
             DecodePath::Hardware
         );
         assert_eq!(
-            decide(&stream(Id::H264, None), Some(true), true),
+            decide(&hevc10, Some(true), false, false),
+            DecodePath::Software(SoftwareReason::PixelFormat(Pixel::YUV420P10LE)),
+            "nothing to bring it down to 8 bits"
+        );
+        assert_eq!(
+            decide(
+                &stream(Id::H264, Some(Pixel::YUV422P)),
+                Some(true),
+                true,
+                true
+            ),
+            DecodePath::Software(SoftwareReason::PixelFormat(Pixel::YUV422P))
+        );
+        assert_eq!(
+            decide(
+                &stream(Id::HEVC, Some(Pixel::YUV422P10LE)),
+                Some(true),
+                true,
+                true
+            ),
+            DecodePath::Software(SoftwareReason::PixelFormat(Pixel::YUV422P10LE))
+        );
+        assert_eq!(
+            decide(
+                &stream(Id::H264, Some(Pixel::YUV420P)),
+                Some(true),
+                true,
+                false
+            ),
+            DecodePath::Hardware
+        );
+        assert_eq!(
+            decide(&stream(Id::H264, None), Some(true), true, false),
             DecodePath::Hardware
         );
     }
@@ -1037,6 +1148,18 @@ mod tests {
         Some((without_layout(params), packets))
     }
 
+    /// 10-bit HEVC, every sample 90 at 8 bits, from NVENC — the one 10-bit
+    /// HEVC encoder an FFmpeg build here is likely to have.
+    #[cfg(any(feature = "cuda", all(target_os = "windows", feature = "d3d11")))]
+    fn ten_bit_hevc() -> Option<(ffmpeg::codec::Parameters, Vec<ffmpeg::Packet>)> {
+        crate::test_support::try_encoded_packets(
+            "hevc_nvenc",
+            ffmpeg::format::Pixel::P010LE,
+            (256, 144),
+            90,
+        )
+    }
+
     #[cfg(all(target_os = "windows", feature = "d3d11"))]
     mod d3d11 {
         use std::time::Duration;
@@ -1046,9 +1169,13 @@ mod tests {
             control::PrerollContext, elements::D3d11Download, test_support::try_encoded_packets,
         };
 
-        fn target(device: &ID3D11Device) -> DecodeTarget {
+        fn target(
+            device: &ID3D11Device,
+            context: &Arc<Mutex<ID3D11DeviceContext>>,
+        ) -> DecodeTarget {
             DecodeTarget::D3d11 {
                 device: device.clone(),
+                context: Arc::clone(context),
                 downstream_hw_frames: 4,
             }
         }
@@ -1057,12 +1184,12 @@ mod tests {
         /// `D3d11Decoder` on its own would.
         #[test]
         fn h264_decodes_on_the_gpu() {
-            let Some((device, _context)) = crate::test_support::try_d3d11_device() else {
+            let Some((device, context)) = crate::test_support::try_d3d11_device() else {
                 return;
             };
             let (params, packets) = h264();
             let sent = packets.len();
-            let Some(bin) = open_or_skip("h264", params, target(&device)) else {
+            let Some(bin) = open_or_skip("h264", params, target(&device, &context)) else {
                 return;
             };
             assert_eq!(bin.path(), DecodePath::Hardware);
@@ -1083,7 +1210,7 @@ mod tests {
         /// and still reaches the device, as NV12.
         #[test]
         fn a_codec_without_a_hardware_decoder_still_reaches_the_gpu() {
-            let Some((device, _context)) = crate::test_support::try_d3d11_device() else {
+            let Some((device, context)) = crate::test_support::try_d3d11_device() else {
                 return;
             };
             let Some((params, packets)) =
@@ -1092,7 +1219,7 @@ mod tests {
                 return;
             };
             let sent = packets.len();
-            let Some(bin) = open_or_skip("mjpeg", params, target(&device)) else {
+            let Some(bin) = open_or_skip("mjpeg", params, target(&device, &context)) else {
                 return;
             };
             assert_eq!(
@@ -1113,7 +1240,7 @@ mod tests {
         /// at the upload.
         #[test]
         fn an_odd_size_is_uploaded_as_bgra() {
-            let Some((device, _context)) = crate::test_support::try_d3d11_device() else {
+            let Some((device, context)) = crate::test_support::try_d3d11_device() else {
                 return;
             };
             let Some((params, packets)) =
@@ -1122,7 +1249,7 @@ mod tests {
                 return;
             };
             let sent = packets.len();
-            let Some(bin) = open_or_skip("odd", params, target(&device)) else {
+            let Some(bin) = open_or_skip("odd", params, target(&device, &context)) else {
                 return;
             };
             assert_eq!(bin.output_format(), Some(ffmpeg::format::Pixel::BGRA));
@@ -1153,7 +1280,7 @@ mod tests {
             ) else {
                 return;
             };
-            let Some(bin) = open_or_skip("prores", params, target(&device)) else {
+            let Some(bin) = open_or_skip("prores", params, target(&device, &context)) else {
                 return;
             };
             assert_eq!(bin.path(), DecodePath::Software(SoftwareReason::Alpha));
@@ -1170,20 +1297,65 @@ mod tests {
             );
         }
 
+        /// 10-bit HEVC is decoded by D3D11VA, which hands on P010, and
+        /// brought down to NV12 on the GPU after it: every picture comes
+        /// out as an NV12 texture of the stream's own size.
+        #[test]
+        fn ten_bit_hevc_decodes_on_the_gpu_and_comes_out_as_nv12() {
+            use windows::{
+                Win32::Graphics::{
+                    Direct3D11::{D3D11_TEXTURE2D_DESC, ID3D11Texture2D},
+                    Dxgi::Common::DXGI_FORMAT_NV12,
+                },
+                core::Interface,
+            };
+
+            let Some((device, context)) = crate::test_support::try_d3d11_device() else {
+                return;
+            };
+            let Some((params, packets)) = ten_bit_hevc() else {
+                return;
+            };
+            let sent = packets.len();
+            let Some(bin) = open_or_skip("hevc10", params, target(&device, &context)) else {
+                return;
+            };
+            assert_eq!(bin.path(), DecodePath::Hardware);
+            assert_eq!(bin.output_format(), Some(ffmpeg::format::Pixel::NV12));
+            let handle = bin.handle();
+
+            let frames = run(bin, None, packets).expect("HEVC decodes");
+            assert_eq!(handle.path(), DecodePath::Hardware, "and it stayed there");
+            assert_eq!(frames.len(), sent, "every picture comes out");
+            for frame in &frames {
+                let (texture, _) = crate::platform::windows::d3d11va::d3d11va_texture(frame)
+                    .expect("a D3D11 frame");
+                // SAFETY: the frame is alive for the whole borrow and holds a
+                // reference to its texture; nothing here keeps the borrow.
+                let texture =
+                    unsafe { ID3D11Texture2D::from_raw_borrowed(&texture) }.expect("a texture");
+                let mut desc = D3D11_TEXTURE2D_DESC::default();
+                // SAFETY: `desc` is a live out-parameter.
+                unsafe { texture.GetDesc(&mut desc) };
+                assert_eq!(desc.Format, DXGI_FORMAT_NV12);
+                assert_eq!((frame.width(), frame.height()), (256, 144));
+            }
+        }
+
         /// With the layout hidden, the bin opens the hardware for VP9
         /// profile 1; the hardware refuses at the first picture; and every
         /// picture still comes out, on the GPU, in the layout promised, with
         /// the refusal readable from the handle.
         #[test]
         fn a_stream_the_hardware_refuses_is_decoded_in_software_instead() {
-            let Some((device, _context)) = crate::test_support::try_d3d11_device() else {
+            let Some((device, context)) = crate::test_support::try_d3d11_device() else {
                 return;
             };
             let Some((params, packets)) = refused_by_hardware() else {
                 return;
             };
             let sent = packets.len();
-            let Some(bin) = open_or_skip("vp9", params, target(&device)) else {
+            let Some(bin) = open_or_skip("vp9", params, target(&device, &context)) else {
                 return;
             };
             assert_eq!(bin.path(), DecodePath::Hardware, "nothing said otherwise");
@@ -1207,13 +1379,13 @@ mod tests {
         /// for comes out, rather than every one decoded to reach it.
         #[test]
         fn a_replacement_keeps_the_preroll_it_replaced() {
-            let Some((device, _context)) = crate::test_support::try_d3d11_device() else {
+            let Some((device, context)) = crate::test_support::try_d3d11_device() else {
                 return;
             };
             let Some((params, packets)) = refused_by_hardware() else {
                 return;
             };
-            let Some(mut bin) = open_or_skip("vp9", params, target(&device)) else {
+            let Some(mut bin) = open_or_skip("vp9", params, target(&device, &context)) else {
                 return;
             };
             let frames = collect(&mut bin, None);
@@ -1395,6 +1567,35 @@ mod tests {
                 (120..=136).contains(&alpha),
                 "alpha {alpha} is not the half it was encoded with"
             );
+        }
+
+        /// The same on CUDA: NVDEC hands on P010, and a `CudaScaler` brings
+        /// it down to NV12.
+        #[test]
+        fn ten_bit_hevc_decodes_on_nvdec_and_comes_out_as_nv12() {
+            let Some((device, _cuda_lock)) = crate::test_support::try_cuda_device() else {
+                return;
+            };
+            let Some((params, packets)) = ten_bit_hevc() else {
+                return;
+            };
+            let sent = packets.len();
+            let Some(bin) = open_or_skip("hevc10", params, target(&device)) else {
+                return;
+            };
+            assert_eq!(bin.path(), DecodePath::Hardware);
+            assert_eq!(bin.output_format(), Some(ffmpeg::format::Pixel::NV12));
+            let handle = bin.handle();
+
+            let download = CudaDownload::new("read-back", &device, CudaFrameFormat::Nv12, 256, 144);
+            let frames = run(bin, Some(Box::new(download)), packets).expect("HEVC decodes");
+            assert_eq!(handle.path(), DecodePath::Hardware, "and it stayed there");
+            assert_eq!(frames.len(), sent, "every picture comes out");
+            for frame in &frames {
+                assert_eq!(frame.format(), ffmpeg::format::Pixel::NV12);
+                let luma = frame.data(0)[frame.stride(0) * 72 + 128];
+                assert!(luma.abs_diff(90) <= 2, "luma {luma}, not 90");
+            }
         }
 
         /// NVDEC has no VP9 4:4:4 either: refused, replaced, and every

@@ -20,7 +20,7 @@ use windows::Win32::{
             D3D11_VPOV_DIMENSION_TEXTURE2D, ID3D11Texture2D, ID3D11VideoContext, ID3D11VideoDevice,
             ID3D11VideoProcessor, ID3D11VideoProcessorEnumerator,
         },
-        Dxgi::Common::{DXGI_FORMAT, DXGI_FORMAT_NV12, DXGI_RATIONAL},
+        Dxgi::Common::{DXGI_FORMAT, DXGI_FORMAT_NV12, DXGI_FORMAT_P010, DXGI_RATIONAL},
     },
 };
 
@@ -89,7 +89,7 @@ impl ScaleProcessor {
         // size the caller actually chose. This follows the *output*
         // format: converting an odd BGRA input into NV12 is just as
         // impossible as resizing NV12 to an odd size.
-        if output_format == DXGI_FORMAT_NV12
+        if is_yuv420(output_format)
             && (!output_width.is_multiple_of(2) || !output_height.is_multiple_of(2))
         {
             return Err(D3d11ScalerError::OddNv12Output {
@@ -344,7 +344,7 @@ pub(super) fn color_space(
     // process the video faithfully, which is what an element in the middle
     // of a pipeline owes whatever comes next.
     let mut bits = USAGE_VIDEO_PROCESSING;
-    if format == DXGI_FORMAT_NV12 {
+    if is_yuv420(format) {
         let bt709 = match space {
             ffmpeg::color::Space::BT709 => true,
             ffmpeg::color::Space::Unspecified => height > 576,
@@ -362,4 +362,12 @@ pub(super) fn color_space(
         bits |= RGB_RANGE_LIMITED;
     }
     D3D11_VIDEO_PROCESSOR_COLOR_SPACE { _bitfield: bits }
+}
+
+/// Whether `format` is 4:2:0 Y'CbCr — NV12, or P010, the same layout at ten
+/// bits a sample that a 10-bit stream decodes to. Half-resolution chroma,
+/// so neither can have an odd side, and both are described by a matrix and
+/// a range rather than as RGB.
+pub(super) fn is_yuv420(format: DXGI_FORMAT) -> bool {
+    format == DXGI_FORMAT_NV12 || format == DXGI_FORMAT_P010
 }

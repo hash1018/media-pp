@@ -49,9 +49,10 @@ impl CudaFrameFormat {
         }
     }
 
-    /// Which kind an existing surface holds, or `None` for a layout no
-    /// element in this crate is wired up for (P010 from a 10-bit stream,
-    /// say). Callers report the raw format in their own error, so this
+    /// Which kind an existing surface holds, or `None` for any other layout
+    /// — P010 from a 10-bit stream, say, which only
+    /// [`crate::elements::CudaScaler`] takes, to bring it down to `Nv12`.
+    /// Callers report the raw format in their own error, so this
     /// deliberately loses nothing a caller still needs.
     pub(crate) fn from_sw_format(format: ffi::AVPixelFormat) -> Option<Self> {
         match format {
