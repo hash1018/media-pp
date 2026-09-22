@@ -150,6 +150,47 @@ pub enum CudaDriverError {
     EmptyMask,
 }
 
+/// Where `value` is, as `cuLaunchKernel` reads each of a kernel's
+/// parameters: one untyped pointer apiece, to a value of that parameter's
+/// type.
+fn arg<T>(value: &mut T) -> *mut c_void {
+    (value as *mut T).cast()
+}
+
+/// Launches `function` on a `grid` of `block`x`block` thread blocks, on the
+/// context's default stream, with no shared memory — the one shape every
+/// kernel here is launched in.
+///
+/// # Safety
+///
+/// `params` holds one [`arg`] per parameter `function` declares, in that
+/// order, each at a live value of that parameter's type — `cuLaunchKernel`
+/// reads them before it returns — and this driver's context is current.
+unsafe fn launch(
+    function: CUfunction,
+    (grid_x, grid_y): (u32, u32),
+    block: u32,
+    params: &mut [*mut c_void],
+) -> Result<(), CudaDriverError> {
+    // SAFETY: the caller's promise, which is everything `cuLaunchKernel`
+    // reads; the two null pointers are the default stream and no `extra`.
+    check("cuLaunchKernel", unsafe {
+        cuLaunchKernel(
+            function,
+            grid_x,
+            grid_y,
+            1,
+            block,
+            block,
+            1,
+            0,
+            std::ptr::null_mut(),
+            params.as_mut_ptr(),
+            std::ptr::null_mut(),
+        )
+    })
+}
+
 fn check(call: &'static str, result: CUresult) -> Result<(), CudaDriverError> {
     if result == CUDA_SUCCESS {
         return Ok(());
@@ -699,39 +740,22 @@ impl CudaDriver {
 
         self.with_context(|| {
             let mut params: [*mut c_void; 11] = [
-                (&mut dst) as *mut _ as *mut c_void,
-                (&mut dst_pitch) as *mut _ as *mut c_void,
-                (&mut src) as *mut _ as *mut c_void,
-                (&mut src_pitch) as *mut _ as *mut c_void,
-                (&mut width) as *mut _ as *mut c_void,
-                (&mut height) as *mut _ as *mut c_void,
-                (&mut key_b) as *mut _ as *mut c_void,
-                (&mut key_g) as *mut _ as *mut c_void,
-                (&mut key_r) as *mut _ as *mut c_void,
-                (&mut band_low) as *mut _ as *mut c_void,
-                (&mut inv_band_width) as *mut _ as *mut c_void,
+                arg(&mut dst),
+                arg(&mut dst_pitch),
+                arg(&mut src),
+                arg(&mut src_pitch),
+                arg(&mut width),
+                arg(&mut height),
+                arg(&mut key_b),
+                arg(&mut key_g),
+                arg(&mut key_r),
+                arg(&mut band_low),
+                arg(&mut inv_band_width),
             ];
             // SAFETY: one pointer per parameter `key_bgra` declares, in that
             // order, at a live local; the context is current inside
             // `with_context`.
-            unsafe {
-                check(
-                    "cuLaunchKernel",
-                    cuLaunchKernel(
-                        self.key_bgra,
-                        grid_x,
-                        grid_y,
-                        1,
-                        BLOCK,
-                        BLOCK,
-                        1,
-                        0,
-                        std::ptr::null_mut(),
-                        params.as_mut_ptr(),
-                        std::ptr::null_mut(),
-                    ),
-                )
-            }
+            unsafe { launch(self.key_bgra, (grid_x, grid_y), BLOCK, &mut params) }
         })
     }
 
@@ -782,41 +806,24 @@ impl CudaDriver {
 
         self.with_context(|| {
             let mut params: [*mut c_void; 24] = [std::ptr::null_mut(); 24];
-            params[0] = (&mut dst) as *mut _ as *mut c_void;
-            params[1] = (&mut dst_pitch) as *mut _ as *mut c_void;
-            params[2] = (&mut src) as *mut _ as *mut c_void;
-            params[3] = (&mut src_pitch) as *mut _ as *mut c_void;
-            params[4] = (&mut width) as *mut _ as *mut c_void;
-            params[5] = (&mut height) as *mut _ as *mut c_void;
+            params[0] = arg(&mut dst);
+            params[1] = arg(&mut dst_pitch);
+            params[2] = arg(&mut src);
+            params[3] = arg(&mut src_pitch);
+            params[4] = arg(&mut width);
+            params[5] = arg(&mut height);
             for (slot, value) in params[6..18].iter_mut().zip(matrix.iter_mut()) {
-                *slot = value as *mut f32 as *mut c_void;
+                *slot = arg(value);
             }
-            params[18] = (&mut exponent) as *mut _ as *mut c_void;
-            params[19] = (&mut opacity) as *mut _ as *mut c_void;
+            params[18] = arg(&mut exponent);
+            params[19] = arg(&mut opacity);
             for (slot, value) in params[20..24].iter_mut().zip(luma.iter_mut()) {
-                *slot = value as *mut f32 as *mut c_void;
+                *slot = arg(value);
             }
             // SAFETY: one pointer per parameter `effect_bgra` declares, in
             // that order, each at a live local that outlives the launch call;
             // the context is current inside `with_context`.
-            unsafe {
-                check(
-                    "cuLaunchKernel",
-                    cuLaunchKernel(
-                        self.effect_bgra,
-                        grid_x,
-                        grid_y,
-                        1,
-                        BLOCK,
-                        BLOCK,
-                        1,
-                        0,
-                        std::ptr::null_mut(),
-                        params.as_mut_ptr(),
-                        std::ptr::null_mut(),
-                    ),
-                )
-            }
+            unsafe { launch(self.effect_bgra, (grid_x, grid_y), BLOCK, &mut params) }
         })
     }
 
@@ -857,56 +864,30 @@ impl CudaDriver {
 
         self.with_context(|| {
             let mut params: Vec<*mut c_void> = vec![
-                (&mut dst) as *mut _ as *mut c_void,
-                (&mut dst_pitch) as *mut _ as *mut c_void,
-                (&mut luma) as *mut _ as *mut c_void,
-                (&mut luma_pitch) as *mut _ as *mut c_void,
-                (&mut chroma) as *mut _ as *mut c_void,
-                (&mut chroma_pitch) as *mut _ as *mut c_void,
-                (&mut width) as *mut _ as *mut c_void,
-                (&mut height) as *mut _ as *mut c_void,
-                (&mut wide) as *mut _ as *mut c_void,
+                arg(&mut dst),
+                arg(&mut dst_pitch),
+                arg(&mut luma),
+                arg(&mut luma_pitch),
+                arg(&mut chroma),
+                arg(&mut chroma_pitch),
+                arg(&mut width),
+                arg(&mut height),
+                arg(&mut wide),
             ];
-            params.extend(
-                rows.iter_mut()
-                    .flatten()
-                    .map(|value| value as *mut f32 as *mut c_void),
-            );
+            params.extend(rows.iter_mut().flatten().map(arg));
             params.extend([
-                (&mut transfer) as *mut _ as *mut c_void,
-                (&mut source_peak_pq) as *mut _ as *mut c_void,
-                (&mut target_peak) as *mut _ as *mut c_void,
-                (&mut knee) as *mut _ as *mut c_void,
+                arg(&mut transfer),
+                arg(&mut source_peak_pq),
+                arg(&mut target_peak),
+                arg(&mut knee),
             ]);
-            params.extend(
-                gamut
-                    .iter_mut()
-                    .flatten()
-                    .map(|value| value as *mut f32 as *mut c_void),
-            );
+            params.extend(gamut.iter_mut().flatten().map(arg));
             // SAFETY: one pointer per parameter `hdr_to_bgra` declares, in
             // that order — nine surface, size and width values, twelve row
             // coefficients, the transfer and the EETF's three constants,
             // nine gamut coefficients — each at a live local; the context is
             // current inside `with_context`.
-            unsafe {
-                check(
-                    "cuLaunchKernel",
-                    cuLaunchKernel(
-                        self.hdr_to_bgra,
-                        grid_x,
-                        grid_y,
-                        1,
-                        BLOCK,
-                        BLOCK,
-                        1,
-                        0,
-                        std::ptr::null_mut(),
-                        params.as_mut_ptr(),
-                        std::ptr::null_mut(),
-                    ),
-                )
-            }
+            unsafe { launch(self.hdr_to_bgra, (grid_x, grid_y), BLOCK, &mut params) }
         })
     }
 
@@ -949,49 +930,23 @@ impl CudaDriver {
 
         self.with_context(|| {
             let mut params: Vec<*mut c_void> = vec![
-                (&mut dst) as *mut _ as *mut c_void,
-                (&mut dst_pitch) as *mut _ as *mut c_void,
-                (&mut luma) as *mut _ as *mut c_void,
-                (&mut luma_pitch) as *mut _ as *mut c_void,
-                (&mut chroma) as *mut _ as *mut c_void,
-                (&mut chroma_pitch) as *mut _ as *mut c_void,
-                (&mut width) as *mut _ as *mut c_void,
-                (&mut height) as *mut _ as *mut c_void,
+                arg(&mut dst),
+                arg(&mut dst_pitch),
+                arg(&mut luma),
+                arg(&mut luma_pitch),
+                arg(&mut chroma),
+                arg(&mut chroma_pitch),
+                arg(&mut width),
+                arg(&mut height),
             ];
-            params.extend(
-                rows.iter_mut()
-                    .flatten()
-                    .map(|value| value as *mut f32 as *mut c_void),
-            );
-            params.push((&mut gamut) as *mut _ as *mut c_void);
-            params.extend(
-                gamut_matrix
-                    .iter_mut()
-                    .flatten()
-                    .map(|value| value as *mut f32 as *mut c_void),
-            );
+            params.extend(rows.iter_mut().flatten().map(arg));
+            params.push(arg(&mut gamut));
+            params.extend(gamut_matrix.iter_mut().flatten().map(arg));
             // SAFETY: one pointer per parameter `nv12_to_bgra` declares, in
             // that order — eight surface and size values, twelve row
             // coefficients, the gamut flag, nine gamut coefficients — each at
             // a live local; the context is current inside `with_context`.
-            unsafe {
-                check(
-                    "cuLaunchKernel",
-                    cuLaunchKernel(
-                        self.nv12_to_bgra,
-                        grid_x,
-                        grid_y,
-                        1,
-                        BLOCK,
-                        BLOCK,
-                        1,
-                        0,
-                        std::ptr::null_mut(),
-                        params.as_mut_ptr(),
-                        std::ptr::null_mut(),
-                    ),
-                )
-            }
+            unsafe { launch(self.nv12_to_bgra, (grid_x, grid_y), BLOCK, &mut params) }
         })
     }
 
@@ -1088,34 +1043,24 @@ impl CudaDriver {
         let mut height = height;
         let mut alpha = u32::from(alpha);
         let mut params: [*mut c_void; 7] = [
-            (&mut dst) as *mut _ as *mut c_void,
-            (&mut dst_pitch) as *mut _ as *mut c_void,
-            (&mut src) as *mut _ as *mut c_void,
-            (&mut src_pitch) as *mut _ as *mut c_void,
-            (&mut width) as *mut _ as *mut c_void,
-            (&mut height) as *mut _ as *mut c_void,
-            (&mut alpha) as *mut _ as *mut c_void,
+            arg(&mut dst),
+            arg(&mut dst_pitch),
+            arg(&mut src),
+            arg(&mut src_pitch),
+            arg(&mut width),
+            arg(&mut height),
+            arg(&mut alpha),
         ];
         // SAFETY: `params` holds one pointer per parameter `blend_plane` declares,
         // in that order, each pointing at a live local that outlives the launch —
         // `cuLaunchKernel` reads the argument values before it returns. The context
         // is current: every caller reaches this inside `with_context`.
         unsafe {
-            check(
-                "cuLaunchKernel",
-                cuLaunchKernel(
-                    self.blend,
-                    width.div_ceil(BLOCK),
-                    height.div_ceil(BLOCK),
-                    1,
-                    BLOCK,
-                    BLOCK,
-                    1,
-                    0,
-                    std::ptr::null_mut(),
-                    params.as_mut_ptr(),
-                    std::ptr::null_mut(),
-                ),
+            launch(
+                self.blend,
+                (width.div_ceil(BLOCK), height.div_ceil(BLOCK)),
+                BLOCK,
+                &mut params,
             )
         }
     }
@@ -1154,28 +1099,18 @@ impl CudaDriver {
             let mut width = width;
             let mut height = height;
             let mut luma_params: [*mut c_void; 6] = [
-                (&mut luma) as *mut _ as *mut c_void,
-                (&mut luma_pitch) as *mut _ as *mut c_void,
-                (&mut pixels) as *mut _ as *mut c_void,
-                (&mut source_pitch) as *mut _ as *mut c_void,
-                (&mut width) as *mut _ as *mut c_void,
-                (&mut height) as *mut _ as *mut c_void,
+                arg(&mut luma),
+                arg(&mut luma_pitch),
+                arg(&mut pixels),
+                arg(&mut source_pitch),
+                arg(&mut width),
+                arg(&mut height),
             ];
-            check(
-                "cuLaunchKernel",
-                cuLaunchKernel(
-                    self.bgra_to_luma,
-                    width.div_ceil(BLOCK),
-                    height.div_ceil(BLOCK),
-                    1,
-                    BLOCK,
-                    BLOCK,
-                    1,
-                    0,
-                    std::ptr::null_mut(),
-                    luma_params.as_mut_ptr(),
-                    std::ptr::null_mut(),
-                ),
+            launch(
+                self.bgra_to_luma,
+                (width.div_ceil(BLOCK), height.div_ceil(BLOCK)),
+                BLOCK,
+                &mut luma_params,
             )?;
 
             let mut chroma = destination.chroma;
@@ -1183,28 +1118,18 @@ impl CudaDriver {
             let mut half_width = width / 2;
             let mut half_height = height / 2;
             let mut chroma_params: [*mut c_void; 6] = [
-                (&mut chroma) as *mut _ as *mut c_void,
-                (&mut chroma_pitch) as *mut _ as *mut c_void,
-                (&mut pixels) as *mut _ as *mut c_void,
-                (&mut source_pitch) as *mut _ as *mut c_void,
-                (&mut half_width) as *mut _ as *mut c_void,
-                (&mut half_height) as *mut _ as *mut c_void,
+                arg(&mut chroma),
+                arg(&mut chroma_pitch),
+                arg(&mut pixels),
+                arg(&mut source_pitch),
+                arg(&mut half_width),
+                arg(&mut half_height),
             ];
-            check(
-                "cuLaunchKernel",
-                cuLaunchKernel(
-                    self.bgra_to_chroma,
-                    half_width.div_ceil(BLOCK),
-                    half_height.div_ceil(BLOCK),
-                    1,
-                    BLOCK,
-                    BLOCK,
-                    1,
-                    0,
-                    std::ptr::null_mut(),
-                    chroma_params.as_mut_ptr(),
-                    std::ptr::null_mut(),
-                ),
+            launch(
+                self.bgra_to_chroma,
+                (half_width.div_ceil(BLOCK), half_height.div_ceil(BLOCK)),
+                BLOCK,
+                &mut chroma_params,
             )
         })
     }
@@ -1704,35 +1629,18 @@ impl CudaDriver {
         let (grid_x, grid_y) = (width.div_ceil(BLOCK), height.div_ceil(BLOCK));
         let mut opacity = u32::from(opacity);
         let mut params: [*mut c_void; 7] = [
-            (&mut dst) as *mut _ as *mut c_void,
-            (&mut dst_pitch) as *mut _ as *mut c_void,
-            (&mut src) as *mut _ as *mut c_void,
-            (&mut src_pitch) as *mut _ as *mut c_void,
-            (&mut width) as *mut _ as *mut c_void,
-            (&mut height) as *mut _ as *mut c_void,
-            (&mut opacity) as *mut _ as *mut c_void,
+            arg(&mut dst),
+            arg(&mut dst_pitch),
+            arg(&mut src),
+            arg(&mut src_pitch),
+            arg(&mut width),
+            arg(&mut height),
+            arg(&mut opacity),
         ];
         // SAFETY: one pointer per parameter `blend_bgra` declares, in that
         // order, at a live local; the context is current because every caller
         // reaches this inside `with_context`.
-        unsafe {
-            check(
-                "cuLaunchKernel",
-                cuLaunchKernel(
-                    entry,
-                    grid_x,
-                    grid_y,
-                    1,
-                    BLOCK,
-                    BLOCK,
-                    1,
-                    0,
-                    std::ptr::null_mut(),
-                    params.as_mut_ptr(),
-                    std::ptr::null_mut(),
-                ),
-            )
-        }
+        unsafe { launch(entry, (grid_x, grid_y), BLOCK, &mut params) }
     }
 
     /// The same for `blend_mask_bgra`, whose source is a coverage mask and a
@@ -1753,35 +1661,18 @@ impl CudaDriver {
         let (grid_x, grid_y) = (width.div_ceil(BLOCK), height.div_ceil(BLOCK));
         let mut opacity = u32::from(opacity);
         let mut params: [*mut c_void; 8] = [
-            (&mut dst) as *mut _ as *mut c_void,
-            (&mut dst_pitch) as *mut _ as *mut c_void,
-            (&mut mask) as *mut _ as *mut c_void,
-            (&mut mask_pitch) as *mut _ as *mut c_void,
-            (&mut width) as *mut _ as *mut c_void,
-            (&mut height) as *mut _ as *mut c_void,
-            (&mut color) as *mut _ as *mut c_void,
-            (&mut opacity) as *mut _ as *mut c_void,
+            arg(&mut dst),
+            arg(&mut dst_pitch),
+            arg(&mut mask),
+            arg(&mut mask_pitch),
+            arg(&mut width),
+            arg(&mut height),
+            arg(&mut color),
+            arg(&mut opacity),
         ];
         // SAFETY: as `launch_bgra` — one pointer per parameter
         // `blend_mask_bgra` declares, in that order, at a live local.
-        unsafe {
-            check(
-                "cuLaunchKernel",
-                cuLaunchKernel(
-                    self.blend_mask_bgra,
-                    grid_x,
-                    grid_y,
-                    1,
-                    BLOCK,
-                    BLOCK,
-                    1,
-                    0,
-                    std::ptr::null_mut(),
-                    params.as_mut_ptr(),
-                    std::ptr::null_mut(),
-                ),
-            )
-        }
+        unsafe { launch(self.blend_mask_bgra, (grid_x, grid_y), BLOCK, &mut params) }
     }
     /// One 6-parameter convert-shaped launch: `(dst, dst_pitch, src,
     /// src_pitch, width, height)`, which is the shape both alpha extractions
@@ -1800,34 +1691,17 @@ impl CudaDriver {
         const BLOCK: u32 = 16;
         let (grid_x, grid_y) = (width.div_ceil(BLOCK), height.div_ceil(BLOCK));
         let mut params: [*mut c_void; 6] = [
-            (&mut dst) as *mut _ as *mut c_void,
-            (&mut dst_pitch) as *mut _ as *mut c_void,
-            (&mut src) as *mut _ as *mut c_void,
-            (&mut src_pitch) as *mut _ as *mut c_void,
-            (&mut width) as *mut _ as *mut c_void,
-            (&mut height) as *mut _ as *mut c_void,
+            arg(&mut dst),
+            arg(&mut dst_pitch),
+            arg(&mut src),
+            arg(&mut src_pitch),
+            arg(&mut width),
+            arg(&mut height),
         ];
         // SAFETY: one pointer per parameter each of these kernels declares, in
         // that order, at a live local; the context is current because every
         // caller reaches this inside `with_context`.
-        unsafe {
-            check(
-                "cuLaunchKernel",
-                cuLaunchKernel(
-                    entry,
-                    grid_x,
-                    grid_y,
-                    1,
-                    BLOCK,
-                    BLOCK,
-                    1,
-                    0,
-                    std::ptr::null_mut(),
-                    params.as_mut_ptr(),
-                    std::ptr::null_mut(),
-                ),
-            )
-        }
+        unsafe { launch(entry, (grid_x, grid_y), BLOCK, &mut params) }
     }
 
     /// `blend_plane_masked`: the mix `launch_masked` does, with the colour
@@ -1850,35 +1724,25 @@ impl CudaDriver {
         let (grid_x, grid_y) = (width.div_ceil(BLOCK), height.div_ceil(BLOCK));
         let mut opacity = u32::from(opacity);
         let mut params: [*mut c_void; 10] = [
-            (&mut dst) as *mut _ as *mut c_void,
-            (&mut dst_pitch) as *mut _ as *mut c_void,
-            (&mut src) as *mut _ as *mut c_void,
-            (&mut src_pitch) as *mut _ as *mut c_void,
-            (&mut mask) as *mut _ as *mut c_void,
-            (&mut mask_pitch) as *mut _ as *mut c_void,
-            (&mut width) as *mut _ as *mut c_void,
-            (&mut height) as *mut _ as *mut c_void,
-            (&mut opacity) as *mut _ as *mut c_void,
-            (&mut shift) as *mut _ as *mut c_void,
+            arg(&mut dst),
+            arg(&mut dst_pitch),
+            arg(&mut src),
+            arg(&mut src_pitch),
+            arg(&mut mask),
+            arg(&mut mask_pitch),
+            arg(&mut width),
+            arg(&mut height),
+            arg(&mut opacity),
+            arg(&mut shift),
         ];
         // SAFETY: as `launch_masked`, with the one extra pair its own kernel
         // declares.
         unsafe {
-            check(
-                "cuLaunchKernel",
-                cuLaunchKernel(
-                    self.blend_plane_masked,
-                    grid_x,
-                    grid_y,
-                    1,
-                    BLOCK,
-                    BLOCK,
-                    1,
-                    0,
-                    std::ptr::null_mut(),
-                    params.as_mut_ptr(),
-                    std::ptr::null_mut(),
-                ),
+            launch(
+                self.blend_plane_masked,
+                (grid_x, grid_y),
+                BLOCK,
+                &mut params,
             )
         }
     }
@@ -1903,36 +1767,26 @@ impl CudaDriver {
         let mut opacity = u32::from(opacity);
         let mut shift = shift;
         let mut params: [*mut c_void; 10] = [
-            (&mut dst) as *mut _ as *mut c_void,
-            (&mut dst_pitch) as *mut _ as *mut c_void,
-            (&mut mask) as *mut _ as *mut c_void,
-            (&mut mask_pitch) as *mut _ as *mut c_void,
-            (&mut width) as *mut _ as *mut c_void,
-            (&mut height) as *mut _ as *mut c_void,
-            (&mut value_even) as *mut _ as *mut c_void,
-            (&mut value_odd) as *mut _ as *mut c_void,
-            (&mut opacity) as *mut _ as *mut c_void,
-            (&mut shift) as *mut _ as *mut c_void,
+            arg(&mut dst),
+            arg(&mut dst_pitch),
+            arg(&mut mask),
+            arg(&mut mask_pitch),
+            arg(&mut width),
+            arg(&mut height),
+            arg(&mut value_even),
+            arg(&mut value_odd),
+            arg(&mut opacity),
+            arg(&mut shift),
         ];
         // SAFETY: as `launch_blend` — one pointer per parameter `blend_masked`
         // declares, in that order, each at a live local, and the context is current
         // because every caller reaches this inside `with_context`.
         unsafe {
-            check(
-                "cuLaunchKernel",
-                cuLaunchKernel(
-                    self.blend_masked,
-                    width.div_ceil(BLOCK),
-                    height.div_ceil(BLOCK),
-                    1,
-                    BLOCK,
-                    BLOCK,
-                    1,
-                    0,
-                    std::ptr::null_mut(),
-                    params.as_mut_ptr(),
-                    std::ptr::null_mut(),
-                ),
+            launch(
+                self.blend_masked,
+                (width.div_ceil(BLOCK), height.div_ceil(BLOCK)),
+                BLOCK,
+                &mut params,
             )
         }
     }
