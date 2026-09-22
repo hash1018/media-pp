@@ -32,6 +32,7 @@ use crate::elements::PipeWireScreenCaptureSourceError;
 use crate::elements::RtspMuxerError;
 #[cfg(all(target_os = "linux", feature = "v4l2-capture"))]
 use crate::elements::V4l2CaptureSourceError;
+use crate::elements::VideoDecodeBinError;
 #[cfg(all(target_os = "windows", feature = "wasapi-capture"))]
 use crate::elements::WasapiCaptureSourceError;
 #[cfg(all(target_os = "windows", feature = "wasapi-renderer"))]
@@ -284,6 +285,10 @@ pub enum Error {
     #[cfg(feature = "rnnoise")]
     #[error(transparent)]
     NoiseSuppressorError(#[from] NoiseSuppressorError),
+
+    /// A video stream could not be given a decode path.
+    #[error(transparent)]
+    VideoDecodeBinError(#[from] VideoDecodeBinError),
 
     /// A software scaling operation failed.
     #[error(transparent)]

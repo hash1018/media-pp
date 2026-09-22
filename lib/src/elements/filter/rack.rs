@@ -105,20 +105,8 @@ pub struct Rack {
     pp_log: PpLog,
     name: Arc<str>,
     input: InputContract,
-    /// The head of what is in the rack, and `None` for an empty one.
-    ///
-    /// Only the head is kept: filling a rack folds the elements back to
-    /// front, each one linked into the next, so everything after the first
-    /// is owned by the pad in front of it. It is the same fold
-    /// `ChainBuilder::to` does, for the same reason — a link takes ownership.
-    head: Option<Box<dyn Sink>>,
-    /// Where the last element in the rack puts what it made, for this
-    /// element to push onward. Empty between buffers.
-    ///
-    /// A `Vec` because one buffer in is not one buffer out: a scaler that
-    /// answers a frame with none, or several, is a scaler this has to carry
-    /// unchanged.
-    made: Arc<Mutex<Vec<MediaBuffer>>>,
+    /// What is in the rack — empty for an empty one.
+    line: Line,
     control: Arc<RackControl>,
     /// The pipeline this rack was wired into, kept so that what is put in it
     /// afterwards can be given the same start a chain stage gets.
@@ -210,30 +198,85 @@ impl Rack {
         pp_info!(pp_log: &pp_log, "created: empty");
         let rack = Self {
             pad: SrcPad::with_contract(format!("{name}_src"), output),
+            line: Line::new(ElementType::Rack, &name),
             pp_log,
             name,
             input,
-            head: None,
-            made: Arc::new(Mutex::new(Vec::new())),
             control: control.clone(),
             context: None,
         };
         (rack, RackHandle { control })
     }
 
-    /// Wires `elements` into a line and keeps its head, dropping whatever was
-    /// in the rack before.
-    ///
-    /// Folded back to front because a link takes ownership: the last element
-    /// is linked to the collector, the one before it to that, and so on, so
-    /// only the first is left to hold.
+    /// Replaces what is in the rack with `elements`.
     fn fill(&mut self, elements: Vec<Box<dyn Filter>>) {
-        // Read before the fold, which takes ownership of every one of them,
-        // and at Info because a fill is a topology change of the same kind a
+        // At Info because a fill is a topology change of the same kind a
         // dynamic `Tee` attach is: sparse, caller-driven, and invisible in
         // the pipeline's own diagram, since what a rack holds are not graph
         // elements. Without this line a log shows a rack and no way to know
         // what is in it.
+        match self.line.fill(elements, self.context.as_ref()) {
+            Some(line) => pp_info!(self, "filled: {line}"),
+            None => pp_info!(self, "filled: empty, buffers pass straight through"),
+        }
+    }
+}
+
+/// A straight line of elements run inside another element, which pushes on
+/// what comes out of its end — what a [`Rack`] holds, and what a
+/// [`VideoDecodeBin`](crate::elements::VideoDecodeBin) holds.
+///
+/// Its elements are stages of the pipeline the owner is in, given what
+/// [`ChainBuilder`](crate::pipeline::ChainBuilder) gives one, but not graph
+/// nodes: the owner is the node, and is counted for them.
+pub(crate) struct Line {
+    /// Whose line this is, for the collector's own records.
+    owner: ElementType,
+    name: Arc<str>,
+    /// The head of what is in the line, and `None` for an empty one.
+    ///
+    /// Only the head is kept: filling folds the elements back to front,
+    /// each one linked into the next, so everything after the first is
+    /// owned by the pad in front of it. It is the same fold
+    /// `ChainBuilder::to` does, for the same reason — a link takes ownership.
+    head: Option<Box<dyn Sink>>,
+    /// Where the last element in the line puts what it made, for the owner
+    /// to push onward. Empty between buffers.
+    ///
+    /// A `Vec` because one buffer in is not one buffer out: a scaler that
+    /// answers a frame with none, or several, is a scaler this has to carry
+    /// unchanged.
+    made: Arc<Mutex<Vec<MediaBuffer>>>,
+}
+
+impl Line {
+    pub(crate) fn new(owner: ElementType, name: &Arc<str>) -> Self {
+        Self {
+            owner,
+            name: name.clone(),
+            head: None,
+            made: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    /// Whether nothing is in the line.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.head.is_none()
+    }
+
+    /// Wires `elements` into the line, dropping whatever was in it before,
+    /// and answers what went in as one readable line — `None` where nothing
+    /// did — for the owner to log.
+    ///
+    /// Folded back to front because a link takes ownership: the last element
+    /// is linked to the collector, the one before it to that, and so on, so
+    /// only the first is left to hold.
+    pub(crate) fn fill(
+        &mut self,
+        elements: Vec<Box<dyn Filter>>,
+        context: Option<&Arc<Context>>,
+    ) -> Option<String> {
+        // Read before the fold, which takes ownership of every one of them.
         let line = elements
             .iter()
             .map(|element| format!("{:?}({})", element.element_type(), element.name()))
@@ -250,26 +293,24 @@ impl Rack {
             .clear();
 
         if elements.is_empty() {
-            pp_info!(self, "filled: empty, buffers pass straight through");
-            return;
+            return None;
         }
         let collector: Box<dyn Sink> = Box::new(Collector {
-            pp_log: element_pp_log(ElementType::Rack, &self.name, None),
+            pp_log: element_pp_log(self.owner, &self.name, None),
+            owner: self.owner,
             made: self.made.clone(),
         });
-        // Cloned out of `self` so the fold below borrows nothing of it.
-        let context = self.context.clone();
         let head = elements
             .into_iter()
             .rev()
             .fold(collector, |downstream, mut element| {
                 // The same three things `ChainBuilder` does to a stage it
-                // builds, because an element in a rack is a stage: it is in
+                // builds, because an element in a line is a stage: it is in
                 // a pipeline, so its records say which one; it may need the
                 // context to pace itself or claim a clock; and a failure it
-                // raises has to arrive naming it rather than naming the rack
-                // that happened to be holding it.
-                if let Some(context) = &context {
+                // raises has to arrive naming it rather than naming the
+                // element that happened to be holding it.
+                if let Some(context) = context {
                     *element.pp_log_mut() = element_pp_log(
                         element.element_type(),
                         &element.name(),
@@ -277,34 +318,62 @@ impl Rack {
                     );
                     element.attach_context(context);
                 }
-                // One output apiece is `RackHandle::replace`'s contract, and
-                // it checked. An element that changed its own pad count
-                // since then would lose what came after it, so this leaves
-                // the line short rather than pretending.
+                // One output apiece is the filler's contract to check. An
+                // element that changed its own pad count since then would
+                // lose what came after it, so this leaves the line short
+                // rather than pretending.
                 if let Some(pad) = element.src_pads().first_mut() {
                     pad.link(downstream);
                 }
                 Box::new(FlowTracer::new(element)) as Box<dyn Sink>
             });
         self.head = Some(head);
-        pp_info!(self, "filled: {line}");
+        Some(line)
+    }
+
+    /// Runs `buf` down a line that is not empty, and answers what came out
+    /// of its end, for the owner to push on.
+    ///
+    /// Taken out rather than pushed from inside: what is downstream may be
+    /// a Queue, a compositor, or anything else that blocks, and none of it
+    /// should be waiting on the line's own slot. On an error, what did come
+    /// out stays for the next call to answer, still in order.
+    pub(crate) fn consume(&mut self, buf: MediaBuffer) -> Result<Vec<MediaBuffer>> {
+        if let Some(head) = &mut self.head {
+            head.consume(buf)?;
+        }
+        let mut made = self
+            .made
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        Ok(std::mem::take(&mut *made))
+    }
+
+    /// Sends `msg` down the line, which stops at its end — what is past the
+    /// owner is the owner's own pad to tell.
+    pub(crate) fn control(&mut self, msg: ControlMsg) -> Result<()> {
+        match &mut self.head {
+            Some(head) => head.control(msg),
+            None => Ok(()),
+        }
     }
 }
 
-/// The terminal of the line inside a rack, which is not a terminal at all:
-/// what it receives is what the rack pushes onward.
+/// The terminal of a [`Line`], which is not a terminal at all: what it
+/// receives is what the line's owner pushes onward.
 struct Collector {
     pp_log: PpLog,
+    owner: ElementType,
     made: Arc<Mutex<Vec<MediaBuffer>>>,
 }
 
 impl Element for Collector {
     fn name(&self) -> Arc<str> {
-        "rack-collector".into()
+        "line-collector".into()
     }
 
     fn element_type(&self) -> ElementType {
-        ElementType::Rack
+        self.owner
     }
 
     fn pp_log(&self) -> &PpLog {
@@ -325,9 +394,9 @@ impl Sink for Collector {
         Ok(())
     }
 
-    /// The end of the line inside the rack. Control has already reached
-    /// every element on the way here, and what is past the rack is the
-    /// rack's own pad to tell.
+    /// The end of the line. Control has already reached every element on
+    /// the way here, and what is past the owner is the owner's own pad to
+    /// tell.
     fn control(&mut self, _msg: ControlMsg) -> Result<()> {
         Ok(())
     }
@@ -378,25 +447,13 @@ impl Sink for Rack {
             self.fill(elements);
         }
 
-        let Some(head) = &mut self.head else {
+        if self.line.is_empty() {
             // An empty rack is a wire. Not a copy of the buffer: the same
             // one, which for a pooled picture is what keeps a rack from
             // costing a slot to hold nothing.
             return self.pad.push(buf);
-        };
-        head.consume(buf)?;
-
-        // Taken before pushing rather than pushed under the lock: what is
-        // downstream may be a Queue, a compositor, or anything else that
-        // blocks, and none of it should be waiting on a rack's own slot.
-        let made = {
-            let mut made = self
-                .made
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            std::mem::take(&mut *made)
-        };
-        for buf in made {
+        }
+        for buf in self.line.consume(buf)? {
             self.pad.push(buf)?;
         }
         Ok(())
@@ -408,9 +465,7 @@ impl Sink for Rack {
         // Into the rack first, so an element inside sees a Flush before the
         // element after the rack does, exactly as it would if the two were
         // linked directly.
-        if let Some(head) = &mut self.head {
-            head.control(msg.clone())?;
-        }
+        self.line.control(msg.clone())?;
         self.pad.control(msg)
     }
 }

@@ -281,10 +281,6 @@ pub(crate) fn synthesize_reordered(name: &str, seconds: f64) -> Fixture {
 ///
 /// Every byte of every plane is `fill`, which for a 10-bit plane makes each
 /// sample `fill * 257`. Timestamps count frames at 30 a second.
-#[cfg(any(
-    feature = "cuda",
-    all(target_os = "windows", any(feature = "d3d11", feature = "d3d12"))
-))]
 pub(crate) fn try_encoded_packets(
     encoder: &str,
     format: ffmpeg_next::format::Pixel,

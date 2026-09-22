@@ -153,6 +153,15 @@ device the rest of the pipeline uses or take one you already have.
 own device and shares them by handle — an embedded browser engine, another
 process — copying each one into the pipeline's device as it is pushed in.
 
+To put a video stream on a GPU without knowing in advance whether its
+hardware decoder takes it, use `VideoDecodeBin`: one element that decodes
+on the target's hardware (D3D11, D3D12 or CUDA) where it takes the stream,
+and otherwise in software and uploads — which is also the path that keeps
+alpha, as BGRA. It chooses when it is opened, and once more if the hardware
+then refuses the stream at a frame, replacing its decoder without anything
+downstream noticing. `DecodeTarget::System` makes it the software decoder
+alone, for code that has to build a decoder whichever backends a build has.
+
 ## Examples
 
 - `examples/core`: decoding, queues, fan-out, dynamic tees, app sources and

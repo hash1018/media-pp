@@ -62,6 +62,11 @@ pub enum CudaDeviceError {
 /// context, an interop implementation calls `cuDevicePrimaryCtxRetain` and
 /// provably gets the same `CUcontext` these frames were decoded on, with no
 /// struct layout guessed anywhere.
+///
+/// Cloning is cheap and shares the one context: every clone is another
+/// reference to the same device, which stays open until the last of them —
+/// and every frame decoded or uploaded on it — is gone.
+#[derive(Clone)]
 pub struct CudaDevice {
     ctx: Arc<AvBufferRef>,
 }

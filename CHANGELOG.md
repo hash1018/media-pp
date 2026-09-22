@@ -158,6 +158,28 @@ compile error with no explanation.
 
 ### Added
 
+- **`VideoDecodeBin`: a video stream decoded onto a GPU by whichever path
+  can take it.** `VideoDecodeBin::open(name, params, target)` takes a stream
+  and a `DecodeTarget` — `D3d11`, `D3d12` or `Cuda`, owning its device, or
+  `System` — and is one element holding the line for it: the target's
+  own hardware decoder where it has one for the codec and the pictures are
+  8-bit 4:2:0, and otherwise `SwDecoder` → `SwScaler` → the target's upload,
+  so the stream reaches the same device either way. Pictures with alpha
+  take the software path and arrive as BGRA with their alpha intact, since
+  no hardware decoder keeps it. Should the hardware open for a stream
+  and then refuse it at a frame — a profile the GPU lacks — the bin puts the
+  software line in its place, re-arms any preroll in progress and feeds it
+  again from the last keyframe; downstream sees the same device and layout
+  throughout. `path()` and `output_format()` answer at open, and
+  `VideoDecodeBinHandle::path` later, with the reason software was chosen
+  (`SoftwareReason::Alpha`, `NoHardwareDecoder`, `PixelFormat`,
+  `HardwareRefused`, `SystemMemory`). `System` is `SwDecoder` alone, so the
+  same code builds a decoder in a build without any GPU backend; on `D3d12`,
+  whose frames here are NV12 only, alpha is not kept.
+
+- **`CudaDevice` is `Clone`.** It was one reference-counted FFmpeg device
+  context already; a clone is another reference to the same device.
+
 - **`D3d11SharedTextureSource`: another device's textures, as this
   pipeline's own frames** (Windows, `d3d11`). Whoever produces the pictures
   pushes a shared-texture handle per picture, and each one is opened on the

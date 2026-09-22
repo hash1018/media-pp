@@ -12,11 +12,16 @@ mod cuda;
 mod hw_decoder;
 mod preroll_gate;
 mod sw_decoder;
+mod video_decode_bin;
 #[cfg(all(target_os = "windows", any(feature = "d3d11", feature = "d3d12")))]
 mod windows;
 
 #[cfg(feature = "cuda")]
 pub use cuda::{CudaDecoder, CudaDecoderError};
 pub use sw_decoder::{SwDecoder, SwDecoderError};
+pub use video_decode_bin::{
+    DecodePath, DecodeTarget, SoftwareReason, VideoDecodeBin, VideoDecodeBinError,
+    VideoDecodeBinHandle,
+};
 #[cfg(all(target_os = "windows", any(feature = "d3d11", feature = "d3d12")))]
 pub use windows::*;

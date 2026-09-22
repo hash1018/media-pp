@@ -99,6 +99,10 @@ pub use filter::{
     D3d12Decoder, D3d12DecoderError, D3d12Download, D3d12DownloadError, D3d12Scaler,
     D3d12ScalerError, D3d12Upload, D3d12UploadError,
 };
+pub use filter::{
+    DecodePath, DecodeTarget, SoftwareReason, VideoDecodeBin, VideoDecodeBinError,
+    VideoDecodeBinHandle,
+};
 #[cfg(feature = "rnnoise")]
 pub use filter::{NOISE_SUPPRESSOR_SAMPLE_RATE, NoiseSuppressor, NoiseSuppressorError};
 pub use sink::{

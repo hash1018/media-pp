@@ -157,6 +157,8 @@ pub enum ElementType {
     Tee,
     /// A stretch of chain whose contents are replaced while it runs.
     Rack,
+    /// One video stream decoded onto a device, by whichever path takes it.
+    VideoDecodeBin,
     /// Bounded asynchronous queue filter.
     Queue,
     /// Diagnostic decoded-frame counter sink.
