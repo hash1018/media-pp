@@ -259,6 +259,19 @@ impl FileDemuxer {
         self.stream(index).map(|s| s.time_base())
     }
 
+    /// The index of the stream of `kind` FFmpeg judges the one to play, or
+    /// `None` where the file has none — what to attach and decode, rather
+    /// than the first stream of that kind.
+    ///
+    /// The first is not always it. A file can carry a still picture as a
+    /// video stream — cover art, a thumbnail — ahead of its moving picture,
+    /// and taking the first video stream plays the still. FFmpeg's own choice
+    /// (`av_find_best_stream`) passes over a stream marked as an attached
+    /// picture and prefers one with more than a single frame.
+    pub fn best_stream(&self, kind: ffmpeg::media::Type) -> Option<usize> {
+        self.input.streams().best(kind).map(|stream| stream.index())
+    }
+
     fn stream(&self, index: usize) -> Option<ffmpeg::format::stream::Stream<'_>> {
         self.input.streams().find(|s| s.index() == index)
     }
@@ -1390,5 +1403,70 @@ mod tests {
             "the backlog must not outlive the preroll that justified it"
         );
         assert_eq!(seen.load(Ordering::SeqCst), 2);
+    }
+
+    /// Writes a Matroska file whose first stream is one still picture and
+    /// whose second is five moving ones — a cover image ahead of the video,
+    /// in the shape a first-of-its-kind search trips over.
+    fn still_ahead_of_video(path: &std::path::Path) -> Option<()> {
+        let encode = |fill| {
+            crate::test_support::try_encoded_packets(
+                "mjpeg",
+                ffmpeg::format::Pixel::YUVJ420P,
+                (64, 48),
+                fill,
+            )
+        };
+        let (still_params, still_packets) = encode(40)?;
+        let (video_params, video_packets) = encode(200)?;
+        let mut output = ffmpeg::format::output(&path).ok()?;
+        for params in [still_params, video_params] {
+            let mut stream = output.add_stream(ffmpeg::encoder::find(params.id())).ok()?;
+            stream.set_parameters(params);
+            // SAFETY: a stream of an output this test owns, before its
+            // header is written.
+            unsafe {
+                (*(*stream.as_mut_ptr()).codecpar).codec_tag = 0;
+            }
+        }
+        output.write_header().ok()?;
+        let source = ffmpeg::Rational::new(1, 30);
+        let packets = still_packets
+            .into_iter()
+            .take(1)
+            .map(|packet| (0, packet))
+            .chain(video_packets.into_iter().map(|packet| (1, packet)));
+        for (index, mut packet) in packets {
+            let target = output.stream(index)?.time_base();
+            packet.rescale_ts(source, target);
+            packet.set_stream(index);
+            packet.write_interleaved(&mut output).ok()?;
+        }
+        output.write_trailer().ok()?;
+        Some(())
+    }
+
+    /// The first video stream is the still; the one to play is the video,
+    /// and that is the one `best_stream` answers.
+    #[test]
+    fn best_stream_passes_over_a_still_ahead_of_the_video() {
+        crate::init().unwrap();
+        let path = std::env::temp_dir().join("media-pp-still-ahead-of-video.mkv");
+        if still_ahead_of_video(&path).is_none() {
+            eprintln!("skipping: could not write a file with a still ahead of its video");
+            return;
+        }
+        let (demuxer, streams) = FileDemuxer::open("still-ahead", &path).unwrap();
+        let first_video = streams
+            .iter()
+            .find(|stream| stream.kind == ffmpeg::media::Type::Video)
+            .map(|stream| stream.index);
+        assert_eq!(first_video, Some(0), "the still comes first");
+        assert_eq!(
+            demuxer.best_stream(ffmpeg::media::Type::Video),
+            Some(1),
+            "and the video is the one to play"
+        );
+        assert_eq!(demuxer.best_stream(ffmpeg::media::Type::Audio), None);
     }
 }

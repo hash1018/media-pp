@@ -158,6 +158,12 @@ compile error with no explanation.
 
 ### Added
 
+- **`FileDemuxer::best_stream` and `RtspSource::best_stream`**: the stream of a
+  kind FFmpeg judges the one to play (`av_find_best_stream`). The first
+  video stream is not always it — cover art or a thumbnail can come first as
+  a still picture — and this passes over a stream marked as an attached
+  picture and prefers one with more than a single frame.
+
 - **`DecodeThreading`: how many threads a software video decoder has, and
   how they share the work.** `SwDecoder::with_threading` takes one, and
   `VideoDecodeBin::open` an `Option` of one for its software path;

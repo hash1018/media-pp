@@ -153,6 +153,14 @@ impl RtspSource {
         self.stream(index).map(|s| s.time_base())
     }
 
+    /// The index of the stream of `kind` FFmpeg judges the one to play, or
+    /// `None` where the session has none — see
+    /// [`FileDemuxer::best_stream`](crate::elements::FileDemuxer::best_stream),
+    /// which this is for a network stream.
+    pub fn best_stream(&self, kind: ffmpeg::media::Type) -> Option<usize> {
+        self.input.streams().best(kind).map(|stream| stream.index())
+    }
+
     fn stream(&self, index: usize) -> Option<ffmpeg::format::stream::Stream<'_>> {
         self.input.streams().find(|s| s.index() == index)
     }
