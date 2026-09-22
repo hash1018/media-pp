@@ -61,11 +61,11 @@ pub use decoder::{CudaDecoder, CudaDecoderError};
 pub use decoder::{D3d11Decoder, D3d11DecoderError};
 #[cfg(all(target_os = "windows", feature = "d3d12"))]
 pub use decoder::{D3d12Decoder, D3d12DecoderError};
-pub use decoder::{DecodeLatency, DecodeThreading, SwDecoder, SwDecoderError};
 pub use decoder::{
     DecodePath, DecodeTarget, SoftwareReason, VideoDecodeBin, VideoDecodeBinError,
     VideoDecodeBinHandle,
 };
+pub use decoder::{DecodeThreadKind, DecodeThreading, SwDecoder, SwDecoderError};
 #[cfg(feature = "cuda")]
 pub use download::{CudaDownload, CudaDownloadError};
 #[cfg(all(target_os = "windows", feature = "d3d11"))]

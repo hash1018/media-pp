@@ -100,7 +100,7 @@ pub use filter::{
     D3d12ScalerError, D3d12Upload, D3d12UploadError,
 };
 pub use filter::{
-    DecodeLatency, DecodePath, DecodeTarget, DecodeThreading, SoftwareReason, VideoDecodeBin,
+    DecodePath, DecodeTarget, DecodeThreadKind, DecodeThreading, SoftwareReason, VideoDecodeBin,
     VideoDecodeBinError, VideoDecodeBinHandle,
 };
 #[cfg(feature = "rnnoise")]

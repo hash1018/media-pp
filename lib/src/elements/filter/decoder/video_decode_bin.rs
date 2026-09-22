@@ -211,7 +211,7 @@ unsafe impl Send for VideoDecodeBin {}
 /// What the software path is built from, should the hardware refuse.
 struct Fallback {
     target: DecodeTarget,
-    threading: DecodeThreading,
+    threading: Option<DecodeThreading>,
     params: ffmpeg::codec::Parameters,
     size: Option<(u32, u32)>,
     /// Every packet from the last keyframe on, the one that failed included.
@@ -253,9 +253,10 @@ impl VideoDecodeBin {
     /// where the software path needs one it can make a surface of — and
     /// otherwise with whatever the chosen element's constructor fails with:
     /// `threading` is how many threads a software decode may have and what
-    /// it may spend them on — see [`DecodeThreading`]. It is the software
-    /// path's, including one put in when the hardware refuses; the hardware
-    /// decoders have no such choice to make.
+    /// it may spend them on — see [`DecodeThreading`] — and `None` leaves it
+    /// as [`SwDecoder::new`] does. It is the software path's, including one
+    /// put in when the hardware refuses; the hardware decoders have no such
+    /// choice to make.
     ///
     /// a codec FFmpeg cannot decode at all is `SwDecoder`'s error. Nothing is
     /// left behind by a failure.
@@ -263,7 +264,7 @@ impl VideoDecodeBin {
         name: impl Into<String>,
         params: ffmpeg::codec::Parameters,
         target: DecodeTarget,
-        threading: DecodeThreading,
+        threading: Option<DecodeThreading>,
     ) -> Result<Self> {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::VideoDecodeBin, &name, None);
@@ -525,13 +526,14 @@ fn software(
     size: Option<(u32, u32)>,
     format: Option<ffmpeg::format::Pixel>,
     target: &DecodeTarget,
-    threading: DecodeThreading,
+    threading: Option<DecodeThreading>,
 ) -> Result<Vec<Box<dyn Filter>>> {
-    let mut line: Vec<Box<dyn Filter>> = vec![Box::new(SwDecoder::with_threading(
-        format!("{name}-decoder"),
-        params,
-        threading,
-    )?)];
+    let decoder = format!("{name}-decoder");
+    let decoder = match threading {
+        Some(threading) => SwDecoder::with_threading(decoder, params, threading)?,
+        None => SwDecoder::new(decoder, params)?,
+    };
+    let mut line: Vec<Box<dyn Filter>> = vec![Box::new(decoder)];
     if let Some(format) = format {
         let (width, height) = size.ok_or(VideoDecodeBinError::UnknownSize)?;
         // The size the stream was opened with: a change of layout, and of
@@ -893,14 +895,9 @@ mod tests {
             (*raw).codec_type = ffmpeg::ffi::AVMediaType::AVMEDIA_TYPE_AUDIO;
             (*raw).codec_id = ffmpeg::ffi::AVCodecID::AV_CODEC_ID_AAC;
         }
-        let error = VideoDecodeBin::open(
-            "audio",
-            params,
-            DecodeTarget::System,
-            DecodeThreading::default(),
-        )
-        .err()
-        .expect("an audio stream has no video decode path");
+        let error = VideoDecodeBin::open("audio", params, DecodeTarget::System, None)
+            .err()
+            .expect("an audio stream has no video decode path");
         assert!(
             matches!(
                 error,
@@ -919,13 +916,7 @@ mod tests {
     fn system_memory_is_the_software_decoder_alone() {
         let (params, packets) = h264();
         let sent = packets.len();
-        let bin = VideoDecodeBin::open(
-            "h264",
-            params,
-            DecodeTarget::System,
-            DecodeThreading::default(),
-        )
-        .unwrap();
+        let bin = VideoDecodeBin::open("h264", params, DecodeTarget::System, None).unwrap();
         assert_eq!(
             bin.path(),
             DecodePath::Software(SoftwareReason::SystemMemory)
@@ -938,6 +929,40 @@ mod tests {
             frames
                 .iter()
                 .all(|frame| frame.format() == ffmpeg::format::Pixel::YUV420P)
+        );
+    }
+
+    /// What the bin is given for threading reaches the software decoder it
+    /// builds: on four threads for throughput it holds pictures back until
+    /// the end, where with nothing given it decodes on one and holds none.
+    #[test]
+    fn threading_reaches_the_software_decoder() {
+        let held_back = |threading| {
+            let (params, packets) = h264();
+            let sent = packets.len();
+            let mut bin =
+                VideoDecodeBin::open("h264", params, DecodeTarget::System, threading).unwrap();
+            let frames = collect(&mut bin, None);
+            for packet in packets {
+                bin.consume(MediaBuffer::Packet(Arc::new(packet))).unwrap();
+            }
+            let before = frames.lock().unwrap().len();
+            bin.consume(MediaBuffer::Eos).unwrap();
+            assert_eq!(
+                frames.lock().unwrap().len(),
+                sent,
+                "every picture comes out"
+            );
+            sent - before
+        };
+        assert_eq!(held_back(None), 0, "one thread holds nothing back");
+        let threading = DecodeThreading {
+            threads: std::num::NonZeroU32::new(4),
+            kind: crate::elements::DecodeThreadKind::Frame,
+        };
+        assert!(
+            held_back(Some(threading)) > 0,
+            "four for several pictures at once do"
         );
     }
 
@@ -986,7 +1011,7 @@ mod tests {
                 _ => false,
             }
         }
-        match VideoDecodeBin::open(name, params, target, DecodeThreading::default()) {
+        match VideoDecodeBin::open(name, params, target, None) {
             Ok(bin) => Some(bin),
             Err(error) if no_video_device(&error) => {
                 eprintln!("skipping: this device does not do video decoding ({error})");
@@ -1291,10 +1316,9 @@ mod tests {
             else {
                 return;
             };
-            let error =
-                VideoDecodeBin::open("odd", params, target(&device), DecodeThreading::default())
-                    .err()
-                    .expect("NV12 has no odd side");
+            let error = VideoDecodeBin::open("odd", params, target(&device), None)
+                .err()
+                .expect("NV12 has no odd side");
             assert!(
                 matches!(
                     error,

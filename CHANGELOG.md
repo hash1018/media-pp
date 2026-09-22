@@ -159,14 +159,19 @@ compile error with no explanation.
 ### Added
 
 - **`DecodeThreading`: how many threads a software video decoder has, and
-  what it spends them on.** `SwDecoder::with_threading` and
-  `VideoDecodeBin::open` take one: `threads` (`None` for as many as the
-  machine has) and a `DecodeLatency`. `Throughput` decodes several pictures
-  at once — at 1080p on twelve threads, H.264 about five times one thread
-  and HEVC about four — and hands each out a picture per thread later; `Low`
-  works within one picture only, holds nothing back, and is for a live
-  source: ProRes and VP9, which split a picture into slices or tiles, still
-  gain about six and two times.
+  how they share the work.** `SwDecoder::with_threading` takes one, and
+  `VideoDecodeBin::open` an `Option` of one for its software path;
+  `SwDecoder::new`, and `None`, set nothing and decode on one thread, as
+  before. It holds `threads` (`None` for as many as the machine has) and a
+  `DecodeThreadKind`. `Frame` decodes several pictures at once — at 1080p on
+  twelve threads, H.264 about five times one thread and HEVC about four —
+  and hands each out a picture per thread later. `Slice` works within one
+  picture, holds nothing back, and is for a live source: ProRes and VP9,
+  which split a picture into slices or tiles, still gain about six and two
+  times. `Auto`, the default, is `Slice` for a codec whose every picture
+  stands alone and splits into slices — ProRes, DNxHD, where several
+  pictures at once is no faster and at 1080p ProRes took 335 MB against 93 —
+  and `Frame` for anything else.
 
 - **`VideoDecodeBin`: a video stream decoded onto a GPU by whichever path
   can take it.** `VideoDecodeBin::open(name, params, target, threading)` takes a
@@ -593,13 +598,6 @@ compile error with no explanation.
   New: `color::ColorDescription`.
 
 ### Changed
-
-- **`SwDecoder` decodes video on every thread the machine has.** It used
-  FFmpeg's default of one. `SwDecoder::new` now means
-  `DecodeThreading::default()`, which is `DecodeLatency::Throughput`: faster
-  for a file by the figures above, and a picture per thread later, which a
-  live source should avoid with `SwDecoder::with_threading` and
-  `DecodeLatency::Low`. Audio decoders are opened as before.
 
 - **A chroma key multiplies the alpha it is given instead of replacing it.**
   `SwChromaKey`, `D3d11ChromaKey` and `CudaChromaKey` used to write the key's
