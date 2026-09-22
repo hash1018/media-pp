@@ -40,13 +40,11 @@ mod example {
         };
 
         let (source, streams) = FileDemuxer::open("demux", &path)?;
-        let video = streams
-            .iter()
-            .find(|s| s.kind == media::Type::Video)
+        let video = source
+            .best_stream(media::Type::Video)
+            .and_then(|index| streams.get(index))
             .ok_or_else(|| Error::Other("no video stream in file".into()))?;
-        let params = source
-            .stream_parameters(video.index)
-            .ok_or_else(|| Error::Other("stream disappeared".into()))?;
+        let params = video.parameters.clone();
 
         let count = Arc::new(AtomicUsize::new(0));
         let sink = {

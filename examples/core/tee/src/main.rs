@@ -43,13 +43,11 @@ mod example {
             println!("  [{}] {:?}", s.index, s.kind);
         }
 
-        let video = streams
-            .iter()
-            .find(|s| s.kind == media::Type::Video)
+        let video = source
+            .best_stream(media::Type::Video)
+            .and_then(|index| streams.get(index))
             .ok_or_else(|| Error::Other("no video stream in file".into()))?;
-        let params = source
-            .stream_parameters(video.index)
-            .ok_or_else(|| Error::Other("stream disappeared".into()))?;
+        let params = video.parameters.clone();
 
         let (frame_counter, frame_count) = FrameCounter::new("frame-counter");
         let (packet_counter, packet_count) = PacketCounter::new("packet-counter");

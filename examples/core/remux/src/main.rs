@@ -70,12 +70,8 @@ mod example {
                 );
                 continue;
             }
-            let parameters = source
-                .stream_parameters(stream.index)
-                .expect("stream disappeared");
-            let time_base = source
-                .stream_time_base(stream.index)
-                .expect("stream disappeared");
+            let parameters = stream.parameters.clone();
+            let time_base = stream.time_base;
             let track = muxer.add_stream(format!("{:?}", stream.kind), parameters, time_base)?;
             kept.push((stream.index, track));
         }

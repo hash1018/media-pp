@@ -82,22 +82,21 @@ mod common {
 
     pub fn open(path: &str) -> media_pp::Result<(FileDemuxer, Streams)> {
         let (source, streams) = FileDemuxer::open("demux", path)?;
-        let video = streams
-            .iter()
-            .find(|stream| stream.kind == media::Type::Video)
+        let video = source
+            .best_stream(media::Type::Video)
+            .and_then(|index| streams.get(index))
             .ok_or_else(|| Error::Other("no video stream in file".into()))?;
-        let audio = streams
-            .iter()
-            .find(|stream| stream.kind == media::Type::Audio)
+        let audio = source
+            .best_stream(media::Type::Audio)
+            .and_then(|index| streams.get(index))
             .ok_or_else(|| Error::Other("no audio stream in file".into()))?;
-        let gone = || Error::Other("stream disappeared".into());
         let streams = Streams {
             video_index: video.index,
-            video_params: source.stream_parameters(video.index).ok_or_else(gone)?,
-            video_time_base: source.stream_time_base(video.index).ok_or_else(gone)?,
+            video_params: video.parameters.clone(),
+            video_time_base: video.time_base,
             audio_index: audio.index,
-            audio_params: source.stream_parameters(audio.index).ok_or_else(gone)?,
-            audio_time_base: source.stream_time_base(audio.index).ok_or_else(gone)?,
+            audio_params: audio.parameters.clone(),
+            audio_time_base: audio.time_base,
         };
         Ok((source, streams))
     }

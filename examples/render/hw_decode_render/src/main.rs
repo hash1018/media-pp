@@ -76,16 +76,12 @@ mod windows_example {
         )?;
 
         let (source, streams) = FileDemuxer::open("demux", path)?;
-        let video = streams
-            .iter()
-            .find(|s| s.kind == media::Type::Video)
+        let video = source
+            .best_stream(media::Type::Video)
+            .and_then(|index| streams.get(index))
             .ok_or_else(|| Error::Other("no video stream in file".into()))?;
-        let params = source
-            .stream_parameters(video.index)
-            .ok_or_else(|| Error::Other("stream disappeared".into()))?;
-        let time_base = source
-            .stream_time_base(video.index)
-            .ok_or_else(|| Error::Other("stream disappeared".into()))?;
+        let params = video.parameters.clone();
+        let time_base = video.time_base;
 
         let gpu = D3d12GpuContext::new().map_err(|e| Error::Other(format!("{e:?}")))?;
 
@@ -184,16 +180,12 @@ mod linux_example {
         )?;
 
         let (source, streams) = FileDemuxer::open("demux", path)?;
-        let video = streams
-            .iter()
-            .find(|stream| stream.kind == media::Type::Video)
+        let video = source
+            .best_stream(media::Type::Video)
+            .and_then(|index| streams.get(index))
             .ok_or_else(|| Error::Other("no video stream in file".into()))?;
-        let params = source
-            .stream_parameters(video.index)
-            .ok_or_else(|| Error::Other("stream disappeared".into()))?;
-        let time_base = source
-            .stream_time_base(video.index)
-            .ok_or_else(|| Error::Other("stream disappeared".into()))?;
+        let params = video.parameters.clone();
+        let time_base = video.time_base;
 
         let cuda = CudaDevice::new().map_err(|error| Error::Other(error.to_string()))?;
         let gpu = VulkanGpuContext::new(target.display).map_err(Error::Other)?;

@@ -485,19 +485,15 @@ mod common {
             let (demuxer, streams) = FileDemuxer::open("demux", path).map_err(|error| {
                 media_pp::Error::Other(format!("cannot read `{path}` as a media file: {error}"))
             })?;
-            let video = streams
-                .iter()
-                .find(|s| s.kind == ffmpeg::media::Type::Video)
+            let video = demuxer
+                .best_stream(ffmpeg::media::Type::Video)
+                .and_then(|index| streams.get(index))
                 .ok_or_else(|| {
                     media_pp::Error::Other(format!("`{path}` has no video stream to send"))
                 })?;
             let index = video.index;
-            let params = demuxer
-                .stream_parameters(index)
-                .expect("the stream just found still exists");
-            let time_base = demuxer
-                .stream_time_base(index)
-                .expect("the stream just found still exists");
+            let params = video.parameters.clone();
+            let time_base = video.time_base;
             Ok(Self {
                 demuxer,
                 index,

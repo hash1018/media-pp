@@ -136,23 +136,19 @@ mod example {
             .unwrap_or_else(|| "transcribed.mp4".into());
 
         let (source, streams) = FileDemuxer::open("demux", &input_path)?;
-        let video = streams
-            .iter()
-            .find(|stream| stream.kind == media::Type::Video);
-        let Some(audio) = streams
-            .iter()
-            .find(|stream| stream.kind == media::Type::Audio)
+        let video = source
+            .best_stream(media::Type::Video)
+            .and_then(|index| streams.get(index));
+        let Some(audio) = source
+            .best_stream(media::Type::Audio)
+            .and_then(|index| streams.get(index))
         else {
             eprintln!("{input_path} has no audio stream, so there is nothing to transcribe");
             std::process::exit(1);
         };
         let audio_index = audio.index;
-        let audio_params = source
-            .stream_parameters(audio_index)
-            .expect("the stream was just listed");
-        let audio_time_base = source
-            .stream_time_base(audio_index)
-            .expect("the stream was just listed");
+        let audio_params = audio.parameters.clone();
+        let audio_time_base = audio.time_base;
 
         // Every track is described before the header is written, which is
         // why the text track is registered now and not when the first line
@@ -160,15 +156,7 @@ mod example {
         let mut muxer = FileMuxer::create(&output_path)?;
         let video_track = match video {
             Some(video) => {
-                let track = muxer.add_stream(
-                    "video",
-                    source
-                        .stream_parameters(video.index)
-                        .expect("the stream was just listed"),
-                    source
-                        .stream_time_base(video.index)
-                        .expect("the stream was just listed"),
-                )?;
+                let track = muxer.add_stream("video", video.parameters.clone(), video.time_base)?;
                 Some((video.index, track))
             }
             None => None,

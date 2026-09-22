@@ -41,29 +41,24 @@ mod example {
             .unwrap_or_else(|| "rtsp://127.0.0.1:8554/stream".into());
 
         let (source, streams) = FileDemuxer::open("demux", &path)?;
-        let video = streams
-            .iter()
-            .find(|s| s.kind == media::Type::Video)
+        let video = source
+            .best_stream(media::Type::Video)
+            .and_then(|index| streams.get(index))
             .ok_or_else(|| Error::Other("no video stream in file".into()))?;
         let video_index = video.index;
-        let video_params = source
-            .stream_parameters(video_index)
-            .ok_or_else(|| Error::Other("stream disappeared".into()))?;
-        let video_time_base = source
-            .stream_time_base(video_index)
-            .ok_or_else(|| Error::Other("stream disappeared".into()))?;
+        let video_params = video.parameters.clone();
+        let video_time_base = video.time_base;
 
         // Optional on purpose: this example took video only before
         // `RtspMuxer` could carry two tracks, and a file with no audio must
         // still work exactly as it did.
-        let audio_track = match streams.iter().find(|s| s.kind == media::Type::Audio) {
+        let audio_track = match source
+            .best_stream(media::Type::Audio)
+            .and_then(|index| streams.get(index))
+        {
             Some(audio) => {
-                let params = source
-                    .stream_parameters(audio.index)
-                    .ok_or_else(|| Error::Other("stream disappeared".into()))?;
-                let time_base = source
-                    .stream_time_base(audio.index)
-                    .ok_or_else(|| Error::Other("stream disappeared".into()))?;
+                let params = audio.parameters.clone();
+                let time_base = audio.time_base;
                 Some((audio.index, params, time_base))
             }
             None => None,

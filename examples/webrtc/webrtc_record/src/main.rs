@@ -153,22 +153,17 @@ mod example {
             let (source, streams) = FileDemuxer::open("input", path).map_err(|error| {
                 media_pp::Error::Other(format!("cannot read `{path}` as media: {error}"))
             })?;
-            let video_index = streams
-                .iter()
-                .find(|stream| stream.kind == ffmpeg::media::Type::Video)
-                .map(|stream| stream.index)
+            let video = source
+                .best_stream(ffmpeg::media::Type::Video)
+                .and_then(|index| streams.get(index))
                 .ok_or_else(|| media_pp::Error::Other(format!("`{path}` has no video stream")))?;
-            let audio_index = streams
-                .iter()
-                .find(|stream| stream.kind == ffmpeg::media::Type::Audio)
-                .map(|stream| stream.index)
+            let audio = source
+                .best_stream(ffmpeg::media::Type::Audio)
+                .and_then(|index| streams.get(index))
                 .ok_or_else(|| media_pp::Error::Other(format!("`{path}` has no audio stream")))?;
-            let video_parameters = source
-                .stream_parameters(video_index)
-                .expect("selected video stream still exists");
-            let audio_parameters = source
-                .stream_parameters(audio_index)
-                .expect("selected audio stream still exists");
+            let (video_index, audio_index) = (video.index, audio.index);
+            let video_parameters = video.parameters.clone();
+            let audio_parameters = audio.parameters.clone();
             // SAFETY: read-only access to parameters owned by this function.
             let (width, height) = unsafe {
                 (
@@ -186,12 +181,8 @@ mod example {
             let width = (width as u32) & !1;
             let height = (height as u32) & !1;
             Ok(Self {
-                video_time_base: source
-                    .stream_time_base(video_index)
-                    .expect("selected video stream still exists"),
-                audio_time_base: source
-                    .stream_time_base(audio_index)
-                    .expect("selected audio stream still exists"),
+                video_time_base: video.time_base,
+                audio_time_base: audio.time_base,
                 source,
                 video_index,
                 video_parameters,

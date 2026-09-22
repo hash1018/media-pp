@@ -42,9 +42,9 @@ mod example {
             println!("  [{}] {:?}", s.index, s.kind);
         }
 
-        let video = streams
-            .iter()
-            .find(|s| s.kind == media::Type::Video)
+        let video = source
+            .best_stream(media::Type::Video)
+            .and_then(|index| streams.get(index))
             .ok_or_else(|| Error::Other("no video stream advertised".into()))?;
         let index = video.index;
 
