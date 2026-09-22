@@ -219,6 +219,9 @@ pub(crate) struct CudaDriver {
     /// Turns an NV12 surface into a BGRA one, which is what a filter
     /// wanting BGRA needs in front of a camera.
     nv12_to_bgra: CUfunction,
+    /// HDR — PQ or HLG, P010 or NV12 — to SDR BGRA: `core/tone_map.rs`'s
+    /// definition.
+    hdr_to_bgra: CUfunction,
     /// Runs a colour matrix, an exponent, an opacity and a luma mask over a
     /// BGRA surface — what [`crate::elements::CudaVideoEffect`] is.
     effect_bgra: CUfunction,
@@ -283,6 +286,7 @@ impl CudaDriver {
                         "key_bgra",
                         "nv12_to_bgra",
                         "effect_bgra",
+                        "hdr_to_bgra",
                     ],
                 ) {
                     Ok(convert) => Ok((blend, convert)),
@@ -317,6 +321,7 @@ impl CudaDriver {
                         key_bgra,
                         nv12_to_bgra,
                         effect_bgra,
+                        hdr_to_bgra,
                     ],
                 ),
             ) = match loaded {
@@ -344,6 +349,7 @@ impl CudaDriver {
                 key_bgra,
                 nv12_to_bgra,
                 effect_bgra,
+                hdr_to_bgra,
             })
         }
     }
@@ -798,6 +804,96 @@ impl CudaDriver {
                     "cuLaunchKernel",
                     cuLaunchKernel(
                         self.effect_bgra,
+                        grid_x,
+                        grid_y,
+                        1,
+                        BLOCK,
+                        BLOCK,
+                        1,
+                        0,
+                        std::ptr::null_mut(),
+                        params.as_mut_ptr(),
+                        std::ptr::null_mut(),
+                    ),
+                )
+            }
+        })
+    }
+
+    /// Brings an HDR surface — P010 where `wide`, else NV12 — into SDR
+    /// BGRA, as `tone_map` says: `core/tone_map.rs`'s definition.
+    ///
+    /// Launches asynchronously, as [`CudaDriver::nv12_to_bgra`] does.
+    pub(crate) fn hdr_to_bgra(
+        &self,
+        source: Nv12Surface,
+        wide: bool,
+        destination: BgraSurface,
+        width: u32,
+        height: u32,
+        tone_map: &crate::tone_map::ToneMap,
+    ) -> Result<(), CudaDriverError> {
+        if width == 0 || height == 0 {
+            return Ok(());
+        }
+        const BLOCK: u32 = 16;
+        let (grid_x, grid_y) = (width.div_ceil(BLOCK), height.div_ceil(BLOCK));
+
+        let mut dst = destination.pixels;
+        let mut dst_pitch = destination.pitch as u32;
+        let mut luma = source.luma;
+        let mut luma_pitch = source.luma_pitch as u32;
+        let mut chroma = source.chroma;
+        let mut chroma_pitch = source.chroma_pitch as u32;
+        let mut width = width;
+        let mut height = height;
+        let mut wide = u32::from(wide);
+        let mut rows = tone_map.rows;
+        let mut transfer = tone_map.transfer;
+        let mut source_peak_pq = tone_map.source_peak_pq;
+        let mut target_peak = tone_map.target_peak;
+        let mut knee = tone_map.knee;
+        let mut gamut = tone_map.gamut.map(|[r, g, b, _]| [r, g, b]);
+
+        self.with_context(|| {
+            let mut params: Vec<*mut c_void> = vec![
+                (&mut dst) as *mut _ as *mut c_void,
+                (&mut dst_pitch) as *mut _ as *mut c_void,
+                (&mut luma) as *mut _ as *mut c_void,
+                (&mut luma_pitch) as *mut _ as *mut c_void,
+                (&mut chroma) as *mut _ as *mut c_void,
+                (&mut chroma_pitch) as *mut _ as *mut c_void,
+                (&mut width) as *mut _ as *mut c_void,
+                (&mut height) as *mut _ as *mut c_void,
+                (&mut wide) as *mut _ as *mut c_void,
+            ];
+            params.extend(
+                rows.iter_mut()
+                    .flatten()
+                    .map(|value| value as *mut f32 as *mut c_void),
+            );
+            params.extend([
+                (&mut transfer) as *mut _ as *mut c_void,
+                (&mut source_peak_pq) as *mut _ as *mut c_void,
+                (&mut target_peak) as *mut _ as *mut c_void,
+                (&mut knee) as *mut _ as *mut c_void,
+            ]);
+            params.extend(
+                gamut
+                    .iter_mut()
+                    .flatten()
+                    .map(|value| value as *mut f32 as *mut c_void),
+            );
+            // SAFETY: one pointer per parameter `hdr_to_bgra` declares, in
+            // that order — nine surface, size and width values, twelve row
+            // coefficients, the transfer and the EETF's three constants,
+            // nine gamut coefficients — each at a live local; the context is
+            // current inside `with_context`.
+            unsafe {
+                check(
+                    "cuLaunchKernel",
+                    cuLaunchKernel(
+                        self.hdr_to_bgra,
                         grid_x,
                         grid_y,
                         1,

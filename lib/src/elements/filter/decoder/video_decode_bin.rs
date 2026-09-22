@@ -214,8 +214,17 @@ pub enum SoftwareReason {
 /// D3D11 read the matrix and leave the primaries, which comes out a little
 /// less saturated. A BT.2020 stream found 10-bit only when it is decoded is
 /// brought to NV12 rather than BGRA, [`Self::output_format`] having said
-/// NV12, and keeps its BT.2020 tags for what reads it after. Nothing here maps HDR to SDR: a PQ or HLG stream is read
-/// as if it were gamma 2.2.
+/// NV12, and keeps its BT.2020 tags for what reads it after.
+///
+/// A PQ or HLG stream is brought to SDR BT.709 BGRA the same way, as soon as
+/// it is decoded: by `D3d11ToneMap` on D3D11 and
+/// `CudaConverter` on CUDA, both evaluating one definition — BT.2390's EETF
+/// from 1000 nits to 203, see `D3d11ToneMap`. `D3d11ToneMap` draws each
+/// picture at the size it is decoded at, so a stream that changes size mid
+/// way is not scaled back to the one it was opened with there. The software
+/// path does not tone map: a PQ or HLG stream decoded in software, or one
+/// the GPU refused, is read as if it were gamma 2.2, and comes out washed
+/// out.
 ///
 /// # Errors
 ///
@@ -325,7 +334,7 @@ impl VideoDecodeBin {
                 if output != ffmpeg::format::Pixel::NV12 || stream.format.is_some_and(is_10bit_420)
                 {
                     let (width, height) = stream.size.ok_or(VideoDecodeBinError::UnknownSize)?;
-                    elements.extend(target.convert(&name, width, height, output)?);
+                    elements.extend(target.convert(&name, width, height, output, stream.hdr)?);
                 }
                 let fallback = Fallback {
                     target: target.clone(),
@@ -441,10 +450,13 @@ impl VideoDecodeBin {
             return Ok(());
         };
         let (width, height) = fallback.size.unwrap_or((width, height));
-        let elements =
-            fallback
-                .target
-                .convert(&self.name, width, height, ffmpeg::format::Pixel::NV12)?;
+        let elements = fallback.target.convert(
+            &self.name,
+            width,
+            height,
+            ffmpeg::format::Pixel::NV12,
+            false,
+        )?;
         pp_info!(
             self,
             "the decoder hands on P010, which the stream did not say it would; bringing it \
@@ -714,7 +726,7 @@ impl DecodeTarget {
     /// BT.2020 stream where the target has BGRA — see [`VideoDecodeBin`] on
     /// why BT.2020 is made BT.709 RGB as soon as it is decoded.
     fn hardware_format(&self, stream: &Stream) -> ffmpeg::format::Pixel {
-        if stream.bt2020 && self.keeps_alpha() {
+        if (stream.bt2020 || stream.hdr) && self.keeps_alpha() {
             ffmpeg::format::Pixel::BGRA
         } else {
             ffmpeg::format::Pixel::NV12
@@ -738,9 +750,20 @@ impl DecodeTarget {
         width: u32,
         height: u32,
         output: ffmpeg::format::Pixel,
+        hdr: bool,
     ) -> Result<Vec<Box<dyn Filter>>> {
         let bgra = output == ffmpeg::format::Pixel::BGRA;
         Ok(match self {
+            // PQ or HLG, which no video processor here brings to SDR — see
+            // `D3d11ToneMap`. Drawn at the size it is decoded at.
+            #[cfg(all(target_os = "windows", feature = "d3d11"))]
+            Self::D3d11 {
+                device, context, ..
+            } if hdr => vec![Box::new(crate::elements::D3d11ToneMap::new(
+                format!("{name}-tone-map"),
+                device,
+                Arc::clone(context),
+            )?)],
             // One video processor pass: a BT.2020 P010 surface goes straight
             // to BGRA, which is the one conversion in which the processor
             // brings BT.2020's primaries into BT.709's — from NV12 it
@@ -762,6 +785,25 @@ impl DecodeTarget {
             )?)],
             // `scale_cuda` has no way to RGB, so NV12 first — the size and
             // the depth — and this crate's own kernel from there.
+            // PQ or HLG is resized in the depth it came in, and brought to
+            // SDR BGRA by `CudaConverter`'s own kernel.
+            #[cfg(feature = "cuda")]
+            Self::Cuda { device, .. } if hdr => vec![
+                Box::new(crate::elements::CudaScaler::new(
+                    format!("{name}-convert"),
+                    device,
+                    width,
+                    height,
+                    crate::elements::CudaScalerInterp::Bilinear,
+                )),
+                Box::new(crate::elements::CudaConverter::new(
+                    format!("{name}-rgb"),
+                    device,
+                    CudaFrameFormat::Bgra,
+                    width,
+                    height,
+                )?),
+            ],
             #[cfg(feature = "cuda")]
             Self::Cuda { device, .. } => {
                 let mut line: Vec<Box<dyn Filter>> =
@@ -804,7 +846,7 @@ impl DecodeTarget {
         // BT.2020 stream is put out as on the hardware path, which a
         // replacement has to match.
         let odd = width % 2 != 0 || height % 2 != 0;
-        if reason == SoftwareReason::Alpha || odd || stream.bt2020 {
+        if reason == SoftwareReason::Alpha || odd || stream.bt2020 || stream.hdr {
             if self.keeps_alpha() {
                 return Ok(Some(ffmpeg::format::Pixel::BGRA));
             }
@@ -899,6 +941,8 @@ struct Stream {
     /// Whether its matrix is BT.2020, and so, as this crate reads it, its
     /// primaries — see [`crate::color::is_bt2020`].
     bt2020: bool,
+    /// Whether it is PQ or HLG — HDR, brought to SDR as it is decoded.
+    hdr: bool,
 }
 
 impl Stream {
@@ -917,6 +961,11 @@ impl Stream {
             format,
             size,
             bt2020: crate::color::is_bt2020(video.color_space()),
+            hdr: matches!(
+                video.color_transfer_characteristic(),
+                ffmpeg::color::TransferCharacteristic::SMPTE2084
+                    | ffmpeg::color::TransferCharacteristic::ARIB_STD_B67
+            ),
         })
     }
 }
@@ -1016,6 +1065,7 @@ mod tests {
             codec,
             format,
             bt2020: false,
+            hdr: false,
             size: Some((64, 64)),
         }
     }
@@ -1322,6 +1372,7 @@ mod tests {
             (256, 144),
             90,
             ffmpeg::color::Space::BT2020NCL,
+            ffmpeg::color::TransferCharacteristic::BT709,
         )
     }
 
@@ -1331,6 +1382,49 @@ mod tests {
     fn bt2020_hevc_colour() -> [u8; 3] {
         let sample = f32::from(0x5A5Au16 >> 6) / 4.0;
         crate::test_support::bt2020_as_bt709(sample, sample, sample)
+    }
+
+    /// 10-bit HEVC in BT.2020 and `transfer`, PQ or HLG, every sample 90 at
+    /// 8 bits.
+    #[cfg(any(feature = "cuda", all(target_os = "windows", feature = "d3d11")))]
+    fn hdr_hevc(
+        transfer: ffmpeg::color::TransferCharacteristic,
+    ) -> Option<(ffmpeg::codec::Parameters, Vec<ffmpeg::Packet>)> {
+        crate::test_support::try_tagged_packets(
+            "hevc_nvenc",
+            ffmpeg::format::Pixel::P010LE,
+            (256, 144),
+            90,
+            ffmpeg::color::Space::BT2020NCL,
+            transfer,
+        )
+    }
+
+    /// What `hdr_hevc`'s samples are in SDR BT.709, by `core/tone_map.rs`:
+    /// the 10-bit code `0x5A5A >> 6` in every plane, as a 16-bit sample.
+    #[cfg(any(feature = "cuda", all(target_os = "windows", feature = "d3d11")))]
+    fn hdr_hevc_colour(transfer: crate::tone_map::HdrTransfer) -> [u8; 3] {
+        let sample = f32::from((0x5A5Au16 >> 6) << 6) / 65535.0;
+        crate::tone_map::ToneMap::new(transfer, ffmpeg::color::Range::MPEG, None)
+            .apply(sample, sample, sample)
+    }
+
+    /// Whether `frames`, read back as BGRA, all hold `want` in the middle.
+    #[cfg(any(feature = "cuda", all(target_os = "windows", feature = "d3d11")))]
+    fn all_near(frames: &Frames, want: [u8; 3], within: u8) {
+        for frame in frames {
+            let [b, g, r, _] = frame.data(0)[frame.stride(0) * 72 + 128 * 4..][..4] else {
+                unreachable!("four bytes were sliced");
+            };
+            assert!(
+                [r, g, b]
+                    .iter()
+                    .zip(want)
+                    .all(|(got, want)| got.abs_diff(want) <= within),
+                "got {:?}, want {want:?}",
+                [r, g, b]
+            );
+        }
     }
 
     #[cfg(all(target_os = "windows", feature = "d3d11"))]
@@ -1560,6 +1654,35 @@ mod tests {
                 unsafe { texture.GetDesc(&mut desc) };
                 assert_eq!(desc.Format, DXGI_FORMAT_NV12, "not P010 handed on");
             }
+        }
+
+        /// PQ HEVC is decoded on the GPU and brought to SDR BT.709 BGRA by
+        /// `D3d11ToneMap`, as `core/tone_map.rs` says it comes out.
+        #[test]
+        fn pq_comes_out_as_sdr_rgb() {
+            let Some((device, context)) = crate::test_support::try_d3d11_device() else {
+                return;
+            };
+            let Some((params, packets)) =
+                hdr_hevc(ffmpeg::color::TransferCharacteristic::SMPTE2084)
+            else {
+                return;
+            };
+            let sent = packets.len();
+            let Some(bin) = open_or_skip("pq", params, target(&device, &context)) else {
+                return;
+            };
+            assert_eq!(bin.path(), DecodePath::Hardware);
+            assert_eq!(bin.output_format(), Some(ffmpeg::format::Pixel::BGRA));
+
+            let download = D3d11Download::new("read-back", &device, context, 256, 144).unwrap();
+            let frames = run(bin, Some(Box::new(download)), packets).expect("HEVC decodes");
+            assert_eq!(frames.len(), sent, "every picture comes out");
+            all_near(
+                &frames,
+                hdr_hevc_colour(crate::tone_map::HdrTransfer::Pq),
+                4,
+            );
         }
 
         /// BT.2020 10-bit HEVC is decoded on the GPU and put out as BT.709
@@ -1882,6 +2005,38 @@ mod tests {
             for frame in &frames {
                 let luma = frame.data(0)[frame.stride(0) * 72 + 128];
                 assert!(luma.abs_diff(90) <= 2, "luma {luma}, not 90");
+            }
+        }
+
+        /// PQ and HLG HEVC on CUDA: NVDEC's P010, resized as it is, and
+        /// `CudaConverter`'s kernel to SDR BGRA, as `core/tone_map.rs` says.
+        #[test]
+        fn hdr_comes_out_as_sdr_rgb_on_cuda() {
+            use crate::tone_map::HdrTransfer;
+            use ffmpeg::color::TransferCharacteristic::{ARIB_STD_B67, SMPTE2084};
+
+            let Some((device, _cuda_lock)) = crate::test_support::try_cuda_device() else {
+                return;
+            };
+            for (tag, transfer) in [
+                (SMPTE2084, HdrTransfer::Pq),
+                (ARIB_STD_B67, HdrTransfer::Hlg),
+            ] {
+                let Some((params, packets)) = hdr_hevc(tag) else {
+                    return;
+                };
+                let sent = packets.len();
+                let Some(bin) = open_or_skip("hdr", params, target(&device)) else {
+                    return;
+                };
+                assert_eq!(bin.path(), DecodePath::Hardware);
+                assert_eq!(bin.output_format(), Some(ffmpeg::format::Pixel::BGRA));
+
+                let download =
+                    CudaDownload::new("read-back", &device, CudaFrameFormat::Bgra, 256, 144);
+                let frames = run(bin, Some(Box::new(download)), packets).expect("HEVC decodes");
+                assert_eq!(frames.len(), sent, "{tag:?}: every picture comes out");
+                all_near(&frames, hdr_hevc_colour(transfer), 3);
             }
         }
 

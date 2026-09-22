@@ -33,6 +33,8 @@ mod rack;
 pub(crate) mod scaler;
 mod tee;
 mod timestamp_origin;
+#[cfg(all(target_os = "windows", feature = "d3d11"))]
+mod tone_map;
 pub(crate) mod upload;
 mod video_effect;
 mod video_synchronizer;
@@ -97,6 +99,8 @@ pub use scaler::{SwScaler, SwScalerError};
 pub use tee::{Tee, TeeBuilder, TeeHandle};
 pub use timestamp_origin::TimestampOrigin;
 
+#[cfg(all(target_os = "windows", feature = "d3d11"))]
+pub use tone_map::{D3d11ToneMap, D3d11ToneMapError};
 #[cfg(feature = "cuda")]
 pub use upload::{CudaUpload, CudaUploadError};
 #[cfg(all(target_os = "windows", feature = "d3d11"))]

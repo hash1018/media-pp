@@ -846,6 +846,358 @@ EFFECT_LINEAR:
 EFFECT_DONE:
     ret;
 }
+// `core/tone_map.rs`'s definition, one step to a block: see `ToneMap` there
+// for why each is what it is. Powers are `ex2(y * lg2(x))`, which is zero
+// for a zero `x`, as every power here wants.
+.func (.reg .f32 nits) pq_to_nits (.reg .f32 signal)
+{
+    .reg .f32   %a<10>;
+
+    max.f32         %a1, signal, 0f00000000;
+    lg2.approx.f32  %a2, %a1;
+    mul.f32         %a2, %a2, 0f3C4FCDAC;
+    ex2.approx.f32  %a3, %a2;
+    sub.f32         %a4, %a3, 0f3F560000;
+    max.f32         %a4, %a4, 0f00000000;
+    mul.f32         %a5, %a3, 0f41958000;
+    mov.f32         %a6, 0f4196D000;
+    sub.f32         %a5, %a6, %a5;
+    div.rn.f32      %a7, %a4, %a5;
+    lg2.approx.f32  %a8, %a7;
+    mul.f32         %a8, %a8, 0f40C8E06B;
+    ex2.approx.f32  %a9, %a8;
+    mul.f32         nits, %a9, 0f461C4000;
+    ret;
+}
+
+.func (.reg .f32 signal) nits_to_pq (.reg .f32 nits)
+{
+    .reg .f32   %b<10>;
+
+    mul.f32         %b1, nits, 0f38D1B717;
+    max.f32         %b1, %b1, 0f00000000;
+    lg2.approx.f32  %b2, %b1;
+    mul.f32         %b2, %b2, 0f3E232000;
+    ex2.approx.f32  %b3, %b2;
+    mul.f32         %b4, %b3, 0f4196D000;
+    add.f32         %b4, %b4, 0f3F560000;
+    mul.f32         %b5, %b3, 0f41958000;
+    add.f32         %b5, %b5, 0f3F800000;
+    div.rn.f32      %b6, %b4, %b5;
+    lg2.approx.f32  %b7, %b6;
+    mul.f32         %b7, %b7, 0f429DB000;
+    ex2.approx.f32  signal, %b7;
+    ret;
+}
+
+.func (.reg .f32 scene) hlg_to_scene (.reg .f32 signal)
+{
+    .reg .pred  %q;
+    .reg .f32   %c<6>;
+
+    setp.le.f32     %q, signal, 0f3F000000;
+    @%q bra         HLG_LOW;
+    sub.f32         %c1, signal, 0f3F0F564F;
+    mul.f32         %c1, %c1, 0f40B2F029;
+    mul.f32         %c1, %c1, 0f3FB8AA3B;
+    ex2.approx.f32  %c2, %c1;
+    add.f32         %c2, %c2, 0f3E91C020;
+    mul.f32         scene, %c2, 0f3DAAAAAB;
+    ret;
+HLG_LOW:
+    mul.f32         %c3, signal, signal;
+    mul.f32         scene, %c3, 0f3EAAAAAB;
+    ret;
+}
+
+.func (.reg .f32 brought) eetf (.reg .f32 x, .reg .f32 knee, .reg .f32 target)
+{
+    .reg .pred  %q;
+    .reg .f32   %d<12>;
+
+    setp.lt.f32     %q, x, knee;
+    @%q bra         EETF_PASS;
+    mov.f32         %d0, 0f3F800000;
+    sub.f32         %d1, %d0, knee;
+    sub.f32         %d2, x, knee;
+    div.rn.f32      %d3, %d2, %d1;
+    mul.f32         %d4, %d3, %d3;
+    mul.f32         %d5, %d4, %d3;
+    // 2t^3 - 3t^2 + 1, t^3 - 2t^2 + t, -2t^3 + 3t^2
+    mul.f32         %d6, %d5, 0f40000000;
+    mul.f32         %d7, %d4, 0f40400000;
+    sub.f32         %d6, %d6, %d7;
+    add.f32         %d6, %d6, 0f3F800000;
+    mul.f32         %d8, %d4, 0f40000000;
+    sub.f32         %d8, %d5, %d8;
+    add.f32         %d8, %d8, %d3;
+    mul.f32         %d9, %d5, 0f40000000;
+    sub.f32         %d9, %d7, %d9;
+    mul.f32         %d10, %d6, knee;
+    fma.rn.f32      %d10, %d8, %d1, %d10;
+    fma.rn.f32      brought, %d9, target, %d10;
+    ret;
+EETF_PASS:
+    mov.f32         brought, x;
+    ret;
+}
+
+.visible .entry hdr_to_bgra(
+    .param .u64 dst,
+    .param .u32 dst_pitch,
+    .param .u64 luma,
+    .param .u32 luma_pitch,
+    .param .u64 chroma,
+    .param .u32 chroma_pitch,
+    .param .u32 width,
+    .param .u32 height,
+    .param .u32 wide,
+    .param .f32 red_y,
+    .param .f32 red_cb,
+    .param .f32 red_cr,
+    .param .f32 red_offset,
+    .param .f32 green_y,
+    .param .f32 green_cb,
+    .param .f32 green_cr,
+    .param .f32 green_offset,
+    .param .f32 blue_y,
+    .param .f32 blue_cb,
+    .param .f32 blue_cr,
+    .param .f32 blue_offset,
+    .param .u32 transfer,
+    .param .f32 source_peak_pq,
+    .param .f32 target_peak,
+    .param .f32 knee,
+    .param .f32 gamut_rr,
+    .param .f32 gamut_rg,
+    .param .f32 gamut_rb,
+    .param .f32 gamut_gr,
+    .param .f32 gamut_gg,
+    .param .f32 gamut_gb,
+    .param .f32 gamut_br,
+    .param .f32 gamut_bg,
+    .param .f32 gamut_bb
+)
+{
+    .reg .pred  %p<8>;
+    .reg .b16   %rs<12>;
+    .reg .b32   %r<48>;
+    .reg .f32   %f<96>;
+    .reg .b64   %rd<24>;
+
+    ld.param.u64    %rd1, [dst];
+    ld.param.u32    %r1, [dst_pitch];
+    ld.param.u64    %rd2, [luma];
+    ld.param.u32    %r2, [luma_pitch];
+    ld.param.u64    %rd3, [chroma];
+    ld.param.u32    %r3, [chroma_pitch];
+    ld.param.u32    %r4, [width];
+    ld.param.u32    %r5, [height];
+    ld.param.u32    %r6, [wide];
+
+    mov.u32         %r7, %ctaid.x;
+    mov.u32         %r8, %ntid.x;
+    mov.u32         %r10, %tid.x;
+    mad.lo.s32      %r9, %r7, %r8, %r10;
+    mov.u32         %r11, %ctaid.y;
+    mov.u32         %r12, %ntid.y;
+    mov.u32         %r14, %tid.y;
+    mad.lo.s32      %r13, %r11, %r12, %r14;
+
+    setp.ge.u32     %p1, %r9, %r4;
+    @%p1 bra        HDR_DONE;
+    setp.ge.u32     %p2, %r13, %r5;
+    @%p2 bra        HDR_DONE;
+
+    // A sample is `1 << wide` bytes: 2 for P010, 1 for NV12. Chroma is the
+    // pair for the 2x2 block this pixel is in.
+    shl.b32         %r15, %r9, %r6;
+    mad.lo.s32      %r16, %r13, %r2, %r15;
+    cvt.u64.u32     %rd4, %r16;
+    add.s64         %rd5, %rd2, %rd4;
+    shr.u32         %r17, %r13, 1;
+    shr.u32         %r18, %r9, 1;
+    add.u32         %r19, %r6, 1;
+    shl.b32         %r20, %r18, %r19;
+    mad.lo.s32      %r21, %r17, %r3, %r20;
+    cvt.u64.u32     %rd6, %r21;
+    add.s64         %rd7, %rd3, %rd6;
+
+    setp.ne.u32     %p3, %r6, 0;
+    @%p3 bra        HDR_WIDE;
+    ld.global.u8    %rs1, [%rd5];
+    ld.global.u8    %rs2, [%rd7];
+    ld.global.u8    %rs3, [%rd7+1];
+    cvt.u32.u16     %r22, %rs1;
+    cvt.u32.u16     %r23, %rs2;
+    cvt.u32.u16     %r24, %rs3;
+    cvt.rn.f32.u32  %f1, %r22;
+    cvt.rn.f32.u32  %f2, %r23;
+    cvt.rn.f32.u32  %f3, %r24;
+    mul.f32         %f1, %f1, 0f3B808081;
+    mul.f32         %f2, %f2, 0f3B808081;
+    mul.f32         %f3, %f3, 0f3B808081;
+    bra             HDR_LOADED;
+HDR_WIDE:
+    ld.global.u16   %rs1, [%rd5];
+    ld.global.u16   %rs2, [%rd7];
+    ld.global.u16   %rs3, [%rd7+2];
+    cvt.u32.u16     %r22, %rs1;
+    cvt.u32.u16     %r23, %rs2;
+    cvt.u32.u16     %r24, %rs3;
+    cvt.rn.f32.u32  %f1, %r22;
+    cvt.rn.f32.u32  %f2, %r23;
+    cvt.rn.f32.u32  %f3, %r24;
+    mul.f32         %f1, %f1, 0f37800080;
+    mul.f32         %f2, %f2, 0f37800080;
+    mul.f32         %f3, %f3, 0f37800080;
+HDR_LOADED:
+
+    ld.param.f32    %f40, [red_y];
+    ld.param.f32    %f41, [red_cb];
+    ld.param.f32    %f42, [red_cr];
+    ld.param.f32    %f43, [red_offset];
+    ld.param.f32    %f44, [green_y];
+    ld.param.f32    %f45, [green_cb];
+    ld.param.f32    %f46, [green_cr];
+    ld.param.f32    %f47, [green_offset];
+    ld.param.f32    %f48, [blue_y];
+    ld.param.f32    %f49, [blue_cb];
+    ld.param.f32    %f50, [blue_cr];
+    ld.param.f32    %f51, [blue_offset];
+
+    // 1. R'G'B', clipped to 0..1.
+    fma.rn.f32      %f4, %f40, %f1, %f43;
+    fma.rn.f32      %f4, %f41, %f2, %f4;
+    fma.rn.f32      %f4, %f42, %f3, %f4;
+    fma.rn.f32      %f5, %f44, %f1, %f47;
+    fma.rn.f32      %f5, %f45, %f2, %f5;
+    fma.rn.f32      %f5, %f46, %f3, %f5;
+    fma.rn.f32      %f6, %f48, %f1, %f51;
+    fma.rn.f32      %f6, %f49, %f2, %f6;
+    fma.rn.f32      %f6, %f50, %f3, %f6;
+    add.sat.f32     %f4, %f4, 0f00000000;
+    add.sat.f32     %f5, %f5, 0f00000000;
+    add.sat.f32     %f6, %f6, 0f00000000;
+
+    // 2. Light, in nits.
+    ld.param.u32    %r30, [transfer];
+    setp.eq.u32     %p4, %r30, 1;
+    @!%p4 bra       HDR_HLG;
+    call            (%f7), pq_to_nits, (%f4);
+    call            (%f8), pq_to_nits, (%f5);
+    call            (%f9), pq_to_nits, (%f6);
+    bra             HDR_NITS;
+HDR_HLG:
+    call            (%f10), hlg_to_scene, (%f4);
+    call            (%f11), hlg_to_scene, (%f5);
+    call            (%f12), hlg_to_scene, (%f6);
+    mul.f32         %f13, %f10, 0f3E86809D;
+    mul.f32         %f14, %f11, 0f3F2D9168;
+    add.f32         %f13, %f13, %f14;
+    mul.f32         %f15, %f12, 0f3D72E48F;
+    add.f32         %f13, %f13, %f15;
+    max.f32         %f13, %f13, 0f358637BD;
+    lg2.approx.f32  %f16, %f13;
+    mul.f32         %f16, %f16, 0f3E4CCCCD;
+    ex2.approx.f32  %f17, %f16;
+    mul.f32         %f17, %f17, 0f447A0000;
+    mul.f32         %f7, %f10, %f17;
+    mul.f32         %f8, %f11, %f17;
+    mul.f32         %f9, %f12, %f17;
+HDR_NITS:
+
+    // 3. BT.2020's primaries into BT.709's, negatives clipped.
+    ld.param.f32    %f52, [gamut_rr];
+    ld.param.f32    %f53, [gamut_rg];
+    ld.param.f32    %f54, [gamut_rb];
+    ld.param.f32    %f55, [gamut_gr];
+    ld.param.f32    %f56, [gamut_gg];
+    ld.param.f32    %f57, [gamut_gb];
+    ld.param.f32    %f58, [gamut_br];
+    ld.param.f32    %f59, [gamut_bg];
+    ld.param.f32    %f60, [gamut_bb];
+    mul.f32         %f18, %f52, %f7;
+    fma.rn.f32      %f18, %f53, %f8, %f18;
+    fma.rn.f32      %f18, %f54, %f9, %f18;
+    max.f32         %f18, %f18, 0f00000000;
+    mul.f32         %f19, %f55, %f7;
+    fma.rn.f32      %f19, %f56, %f8, %f19;
+    fma.rn.f32      %f19, %f57, %f9, %f19;
+    max.f32         %f19, %f19, 0f00000000;
+    mul.f32         %f20, %f58, %f7;
+    fma.rn.f32      %f20, %f59, %f8, %f20;
+    fma.rn.f32      %f20, %f60, %f9, %f20;
+    max.f32         %f20, %f20, 0f00000000;
+
+    // 4. The EETF on the largest channel, the three scaled by it.
+    max.f32         %f21, %f18, %f19;
+    max.f32         %f21, %f21, %f20;
+    mov.f32         %f22, 0f3F800000;
+    ld.param.f32    %f61, [source_peak_pq];
+    ld.param.f32    %f62, [target_peak];
+    ld.param.f32    %f63, [knee];
+    setp.le.f32     %p5, %f21, 0f00000000;
+    @%p5 bra        HDR_SCALED;
+    setp.ge.f32     %p6, %f63, 0f3F800000;
+    @%p6 bra        HDR_SCALED;
+    call            (%f23), nits_to_pq, (%f21);
+    div.rn.f32      %f24, %f23, %f61;
+    min.f32         %f24, %f24, 0f3F800000;
+    call            (%f25), eetf, (%f24, %f63, %f62);
+    mul.f32         %f26, %f25, %f61;
+    call            (%f27), pq_to_nits, (%f26);
+    div.rn.f32      %f22, %f27, %f21;
+HDR_SCALED:
+
+    // 5. 203 nits is 1.0, clipped, gamma 2.2, to bytes.
+    mul.f32         %f28, %f18, %f22;
+    mul.f32         %f29, %f19, %f22;
+    mul.f32         %f30, %f20, %f22;
+    mul.f32         %f28, %f28, 0f3BA16B31;
+    mul.f32         %f29, %f29, 0f3BA16B31;
+    mul.f32         %f30, %f30, 0f3BA16B31;
+    add.sat.f32     %f28, %f28, 0f00000000;
+    add.sat.f32     %f29, %f29, 0f00000000;
+    add.sat.f32     %f30, %f30, 0f00000000;
+    lg2.approx.f32  %f31, %f28;
+    mul.f32         %f31, %f31, 0f3EE8BA2E;
+    ex2.approx.f32  %f28, %f31;
+    lg2.approx.f32  %f31, %f29;
+    mul.f32         %f31, %f31, 0f3EE8BA2E;
+    ex2.approx.f32  %f29, %f31;
+    lg2.approx.f32  %f31, %f30;
+    mul.f32         %f31, %f31, 0f3EE8BA2E;
+    ex2.approx.f32  %f30, %f31;
+    mul.f32         %f28, %f28, 0f437F0000;
+    mul.f32         %f29, %f29, 0f437F0000;
+    mul.f32         %f30, %f30, 0f437F0000;
+    add.f32         %f28, %f28, 0f3F000000;
+    add.f32         %f29, %f29, 0f3F000000;
+    add.f32         %f30, %f30, 0f3F000000;
+    cvt.rzi.u32.f32 %r31, %f28;
+    cvt.rzi.u32.f32 %r32, %f29;
+    cvt.rzi.u32.f32 %r33, %f30;
+    min.u32         %r31, %r31, 255;
+    min.u32         %r32, %r32, 255;
+    min.u32         %r33, %r33, 255;
+    cvt.u16.u32     %rs4, %r31;
+    cvt.u16.u32     %rs5, %r32;
+    cvt.u16.u32     %rs6, %r33;
+    mov.u16         %rs7, 255;
+
+    shl.b32         %r34, %r9, 2;
+    mad.lo.s32      %r35, %r13, %r1, %r34;
+    cvt.u64.u32     %rd8, %r35;
+    add.s64         %rd9, %rd1, %rd8;
+    st.global.u8    [%rd9], %rs6;
+    st.global.u8    [%rd9+1], %rs5;
+    st.global.u8    [%rd9+2], %rs4;
+    st.global.u8    [%rd9+3], %rs7;
+
+HDR_DONE:
+    ret;
+}
 "#;
 
 /// The one kernel this crate runs, as PTX the driver JIT-compiles at load.

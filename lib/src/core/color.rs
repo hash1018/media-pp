@@ -148,7 +148,7 @@ pub(crate) fn is_bt2020(space: ffmpeg_next::color::Space) -> bool {
 /// of primaries and their shared D65 white point (ITU-R BT.2087). A
 /// saturated BT.2020 colour has no BT.709 equivalent and comes out of range,
 /// to be clipped.
-#[cfg(any(feature = "cuda", all(test, target_os = "windows", feature = "d3d11")))]
+#[cfg(any(feature = "cuda", all(target_os = "windows", feature = "d3d11")))]
 pub(crate) const BT2020_TO_BT709: [[f32; 3]; 3] = [
     [1.6605, -0.5876, -0.0728],
     [-0.1246, 1.1329, -0.0083],

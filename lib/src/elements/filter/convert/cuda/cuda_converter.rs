@@ -129,7 +129,13 @@ pub enum CudaConverterError {
 /// BT.601, BT.709 or BT.2020, limited or full, and untagged BT.601 through
 /// 576 lines and BT.709 above. BT.2020's primaries are brought into
 /// BT.709's on the way, through gamma 2.2 as a D3D11 video processor does,
-/// and the frame tagged BT.709 for it; nothing maps HDR.
+/// and the frame tagged BT.709 for it.
+///
+/// A frame tagged PQ or HLG is brought to SDR on the way to BGRA instead —
+/// `core/tone_map.rs`'s definition, the one `D3d11ToneMap` draws with — and
+/// that is also the one case in which this takes P010 as well as NV12: the
+/// 10 bits HDR is decoded to. SDR P010 is refused;
+/// [`crate::elements::CudaScaler::with_format`] brings it to NV12 first.
 ///
 /// Chroma is the conversion of each 2x2 block's average colour, which
 /// is why the dimensions must be even whichever way this runs: an odd extent
@@ -240,7 +246,7 @@ impl CudaConverter {
     fn validate(
         &self,
         frame: &ffmpeg::frame::Video,
-    ) -> std::result::Result<(), CudaConverterError> {
+    ) -> std::result::Result<bool, CudaConverterError> {
         if frame.format() != ffmpeg::format::Pixel::CUDA {
             return Err(CudaConverterError::UnsupportedFormat(frame.format()));
         }
@@ -267,21 +273,38 @@ impl CudaConverter {
                 return Err(CudaConverterError::ForeignContext);
             }
             let sw_format = (*frames_ctx).sw_format;
-            if CudaFrameFormat::from_sw_format(sw_format) != Some(input_of(self.output)) {
+            // P010 only on the way to BGRA, and only as HDR — see `convert`.
+            let wide = sw_format == ffi::AVPixelFormat::AV_PIX_FMT_P010LE;
+            let accepted = CudaFrameFormat::from_sw_format(sw_format)
+                == Some(input_of(self.output))
+                || (wide && self.output == CudaFrameFormat::Bgra);
+            if !accepted {
                 return Err(CudaConverterError::UnsupportedSurfaceFormat(
                     ffmpeg::format::Pixel::from(sw_format),
                 ));
             }
+            Ok(wide)
         }
-        Ok(())
     }
 
     fn convert(
         &mut self,
         source: &ffmpeg::frame::Video,
     ) -> Result<UnboundObjectPoolRef<ffmpeg::frame::Video>> {
-        self.validate(source)
+        let wide = self
+            .validate(source)
             .inspect_err(|error| pp_error!(self, "{error}"))?;
+        let tone_map = if self.output == CudaFrameFormat::Bgra {
+            crate::tone_map::ToneMap::of_frame(source)
+        } else {
+            None
+        };
+        if wide && tone_map.is_none() {
+            // SDR P010 is `CudaScaler`'s to bring to NV12 first.
+            let error = CudaConverterError::UnsupportedSurfaceFormat(ffmpeg::format::Pixel::P010LE);
+            pp_error!(self, "{error}");
+            return Err(error.into());
+        }
 
         let mut destination = self.pool.get();
         // SAFETY: `ptr` is the pooled wrapper's own `AVFrame`, and the unref before
@@ -309,14 +332,29 @@ impl CudaConverter {
                     self.width,
                     self.height,
                 )?,
-                CudaFrameFormat::Bgra => self.driver.nv12_to_bgra(
-                    Nv12Surface::from_frame(source).ok_or(CudaConverterError::MissingSurface)?,
-                    BgraSurface::from_frame(&destination)
-                        .ok_or(CudaConverterError::MissingSurface)?,
-                    self.width,
-                    self.height,
-                    &YuvToBgra::of_frame(source),
-                )?,
+                CudaFrameFormat::Bgra => {
+                    let source_surface = Nv12Surface::from_frame(source)
+                        .ok_or(CudaConverterError::MissingSurface)?;
+                    let destination_surface = BgraSurface::from_frame(&destination)
+                        .ok_or(CudaConverterError::MissingSurface)?;
+                    match &tone_map {
+                        Some(tone_map) => self.driver.hdr_to_bgra(
+                            source_surface,
+                            wide,
+                            destination_surface,
+                            self.width,
+                            self.height,
+                            tone_map,
+                        )?,
+                        None => self.driver.nv12_to_bgra(
+                            source_surface,
+                            destination_surface,
+                            self.width,
+                            self.height,
+                            &YuvToBgra::of_frame(source),
+                        )?,
+                    }
+                }
             }
             // The kernels are issued on this driver's own context, while
             // whatever reads the result next — an encoder, a download —
@@ -350,9 +388,15 @@ impl CudaConverter {
         };
         destination.set_color_space(space);
         destination.set_color_range(range);
-        // BT.2020 was brought into BT.709's primaries on the way to RGB.
+        // BT.2020 was brought into BT.709's primaries on the way to RGB, and
+        // HDR into SDR.
         if self.output == CudaFrameFormat::Bgra && crate::color::is_bt2020(source.color_space()) {
             destination.set_color_primaries(ffmpeg::color::Primaries::BT709);
+        }
+        if tone_map.is_some() {
+            destination.set_color_primaries(ffmpeg::color::Primaries::BT709);
+            destination
+                .set_color_transfer_characteristic(ffmpeg::color::TransferCharacteristic::BT709);
         }
         Ok(destination)
     }

@@ -153,6 +153,8 @@ pub enum ElementType {
     CudaVideoEffect,
     /// D3D11 colour-correction / luma-key filter.
     D3d11VideoEffect,
+    /// D3D11 HDR-to-SDR filter.
+    D3d11ToneMap,
     /// Dynamic one-to-many branch filter.
     Tee,
     /// A stretch of chain whose contents are replaced while it runs.

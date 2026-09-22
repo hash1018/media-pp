@@ -76,6 +76,7 @@ Video, by backend:
 | Decode | `SwDecoder` | `D3d11Decoder` | `D3d12Decoder` | `CudaDecoder` |
 | Encode | `SwEncoder` | `D3d11VideoEncoder` | | `CudaEncoder` |
 | Scale, convert | `SwScaler` | `D3d11Scaler` | `D3d12Scaler` | `CudaScaler`, `CudaConverter` |
+| HDR to SDR | | `D3d11ToneMap` | | `CudaConverter` |
 | Composite | `SwVideoCompositor` | `D3d11VideoCompositor` | | `CudaVideoCompositor` |
 | Key, colour | `SwChromaKey`, `SwVideoEffect` | `D3d11ChromaKey`, `D3d11VideoEffect` | | `CudaChromaKey`, `CudaVideoEffect` |
 | Upload, download | | `D3d11Upload`, `D3d11Download` | `D3d12Upload`, `D3d12Download` | `CudaUpload`, `CudaDownload` |

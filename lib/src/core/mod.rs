@@ -35,3 +35,5 @@ pub mod queue;
 pub mod repeat;
 pub mod subtitle;
 pub mod timing;
+#[cfg(any(feature = "cuda", all(target_os = "windows", feature = "d3d11")))]
+pub(crate) mod tone_map;

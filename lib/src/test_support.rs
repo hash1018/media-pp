@@ -293,11 +293,12 @@ pub(crate) fn try_encoded_packets(
         size,
         fill,
         ffmpeg_next::color::Space::Unspecified,
+        ffmpeg_next::color::TransferCharacteristic::Unspecified,
     )
 }
 
-/// The same, with the stream tagged as made with the `space` matrix and in
-/// limited range — in its headers, where a decoder reads it back onto every
+/// The same, with the stream tagged as made with the `space` matrix, in
+/// `transfer`, and in limited range — in its headers, where a decoder reads it back onto every
 /// frame, as well as in its parameters.
 pub(crate) fn try_tagged_packets(
     encoder: &str,
@@ -305,6 +306,7 @@ pub(crate) fn try_tagged_packets(
     (width, height): (u32, u32),
     fill: u8,
     space: ffmpeg_next::color::Space,
+    transfer: ffmpeg_next::color::TransferCharacteristic,
 ) -> Option<(ffmpeg_next::codec::Parameters, Vec<ffmpeg_next::Packet>)> {
     use ffmpeg_next as ffmpeg;
 
@@ -326,6 +328,13 @@ pub(crate) fn try_tagged_packets(
     if space != ffmpeg::color::Space::Unspecified {
         context.set_colorspace(space);
         context.set_color_range(ffmpeg::color::Range::MPEG);
+    }
+    if transfer != ffmpeg::color::TransferCharacteristic::Unspecified {
+        // SAFETY: `context` owns a live `AVCodecContext` not yet opened, which
+        // is when this field is read.
+        unsafe {
+            (*context.as_mut_ptr()).color_trc = transfer.into();
+        }
     }
     let mut encoder = match context.open_as(codec) {
         Ok(opened) => opened,

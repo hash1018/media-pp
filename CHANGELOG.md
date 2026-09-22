@@ -166,6 +166,19 @@ compile error with no explanation.
 
 ### Added
 
+- **HDR video is brought to SDR on the GPU.** A PQ or HLG stream came out
+  washed out: nothing read its transfer. `VideoDecodeBin` now brings one to
+  SDR BT.709 BGRA as soon as it is decoded, on `D3d11` and `Cuda` — by the
+  new `D3d11ToneMap`, a pixel shader over P010 or NV12, and by
+  `CudaConverter`, which now takes P010 for this. Both evaluate one
+  definition: BT.2020's matrix, ST 2084's EOTF or HLG's with a 1000-nit
+  OOTF, BT.2020 primaries into BT.709's, BT.2390's EETF on the largest
+  channel from 1000 nits down to 203, and gamma 2.2. A D3D11 video processor
+  would have been the place, and the RTX 3050's offers no conversion from
+  PQ or HLG to SDR. A 4K PQ stream decoded this way ran at 463 frames a
+  second on D3D11 and 289 on CUDA. The stream's own MaxCLL and mastering
+  metadata are not read, and the software path does not tone map.
+
 - **`FileDemuxer::best_stream` and `RtspSource::best_stream`**: the stream of a
   kind FFmpeg judges the one to play (`av_find_best_stream`). The first
   video stream is not always it — cover art or a thumbnail can come first as

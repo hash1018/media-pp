@@ -185,6 +185,8 @@ pub use core::{
 // without also making them part of this crate's external API surface.
 pub(crate) use core::repeat;
 pub(crate) use core::timing::{schedule, time};
+#[cfg(any(feature = "cuda", all(target_os = "windows", feature = "d3d11")))]
+pub(crate) use core::tone_map;
 
 pub use error::{Error, Result};
 
