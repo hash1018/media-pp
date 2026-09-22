@@ -249,6 +249,18 @@ impl fmt::Display for MemoryDomain {
 pub struct MemoryDomainSet(u8);
 
 impl MemoryDomainSet {
+    /// The one domain in this set, where it holds exactly one.
+    const fn only(self) -> Option<MemoryDomain> {
+        let mut index = 0;
+        while index < MemoryDomain::ALL.len() {
+            if self.0 == MemoryDomain::ALL[index].bit() {
+                return Some(MemoryDomain::ALL[index]);
+            }
+            index += 1;
+        }
+        None
+    }
+
     /// Every backend — for an element that passes frames through without
     /// reading them.
     pub const ALL: Self = Self::from_slice(&MemoryDomain::ALL);
@@ -658,6 +670,115 @@ impl fmt::Display for OutputContract {
     }
 }
 
+/// What to put between a producer and a consumer that cannot be linked, as
+/// one sentence naming the elements — or `None` where nothing in this crate
+/// bridges the two, such as audio into a video filter.
+///
+/// Read off where the frames are and where they need to be: memory first,
+/// since no element changes a layout across backends in one step, then the
+/// layout within one backend. Every element named is one that exists for
+/// exactly that crossing; where it takes only some layouts, the sentence
+/// says what to put before it.
+pub fn remedy(produced: &PortContract, accepted: &PortContract) -> Option<&'static str> {
+    use MemoryDomain::{Cuda, D3d11, D3d12, System};
+    use PixelLayout::{Bgra, Nv12, P010};
+
+    let (
+        produced_kinds,
+        produced_memory,
+        produced_layouts,
+        accepted_kinds,
+        accepted_memory,
+        accepted_layouts,
+    ) = match (produced, accepted) {
+        (PortContract::Packets(kinds), PortContract::Frames(..)) => {
+            return if kinds.contains(MediaKind::VideoPacket) {
+                Some(
+                    "decode it first: a SwDecoder, or a VideoDecodeBin onto the device the consumer reads",
+                )
+            } else {
+                Some("decode it first: a SwDecoder")
+            };
+        }
+        (PortContract::Frames(..), PortContract::Packets(_)) => {
+            return Some("encode it first: an encoder turns frames into packets");
+        }
+        (PortContract::Packets(_), PortContract::Packets(_)) => return None,
+        (
+            PortContract::Frames(produced_kinds, produced_memory, produced_layouts),
+            PortContract::Frames(accepted_kinds, accepted_memory, accepted_layouts),
+        ) => (
+            *produced_kinds,
+            *produced_memory,
+            *produced_layouts,
+            *accepted_kinds,
+            *accepted_memory,
+            *accepted_layouts,
+        ),
+    };
+    if !produced_kinds.is_subset_of(accepted_kinds) {
+        return None;
+    }
+
+    if !produced_memory.is_subset_of(accepted_memory) {
+        let from = produced_memory.only()?;
+        let to = accepted_memory.only()?;
+        return match (from, to) {
+            (System, D3d11) => Some(
+                "upload it: a D3d11Upload, which takes NV12 or BGRA — a SwScaler to one of those first where the frames are in another layout",
+            ),
+            (System, D3d12) => Some(
+                "upload it: a D3d12Upload, which takes NV12 — a SwScaler to NV12 first where the frames are in another layout",
+            ),
+            (System, Cuda) => Some(
+                "upload it: a CudaUpload built for NV12 or BGRA — a SwScaler to that layout first where the frames are in another",
+            ),
+            (D3d11, System) => Some(
+                "download it: a D3d11Download, which reads BGRA — a D3d11Scaler with D3d11ScalerFormat::Bgra first where the frames are in another layout",
+            ),
+            (D3d12, System) => Some("download it: a D3d12Download, which reads NV12"),
+            (Cuda, System) => Some("download it: a CudaDownload built for NV12 or BGRA"),
+            _ => Some(
+                "no element here moves frames between two GPU backends directly: download them to system memory and upload them again",
+            ),
+        };
+    }
+
+    // The same memory; the layout is what differs.
+    let to_nv12 = accepted_layouts.contains(Nv12);
+    let to_bgra = accepted_layouts.contains(Bgra);
+    let from_p010 = produced_layouts.contains(P010);
+    let from_bgra = produced_layouts.contains(Bgra);
+    match accepted_memory.only()? {
+        System => Some("convert it: a SwScaler to a layout the consumer takes"),
+        D3d11 if to_nv12 => Some("convert it: a D3d11Scaler with D3d11ScalerFormat::Nv12"),
+        D3d11 if to_bgra => Some(
+            "convert it: a D3d11Scaler with D3d11ScalerFormat::Bgra — or a D3d11ToneMap, for PQ or HLG video",
+        ),
+        D3d11 => None,
+        D3d12 => Some("nothing here converts a D3D12 frame's layout: decode or upload it as NV12"),
+        Cuda if to_nv12 && from_bgra => {
+            Some("convert it: a CudaConverter built for CudaFrameFormat::Nv12")
+        }
+        Cuda if to_nv12 && from_p010 => {
+            Some("bring it to 8 bits: a CudaScaler built with_format CudaFrameFormat::Nv12")
+        }
+        Cuda if to_bgra && from_p010 => Some(
+            "convert it: a CudaScaler with_format CudaFrameFormat::Nv12, then a CudaConverter built for CudaFrameFormat::Bgra — or the CudaConverter alone, for PQ or HLG video",
+        ),
+        Cuda if to_bgra => Some("convert it: a CudaConverter built for CudaFrameFormat::Bgra"),
+        Cuda => None,
+    }
+}
+
+/// `remedy`'s answer as the tail of an error sentence — `"; convert it: …"` —
+/// or nothing where it has none.
+pub(crate) fn remedy_suffix(produced: &PortContract, accepted: &PortContract) -> String {
+    remedy(produced, accepted)
+        .map(|remedy| format!("; {remedy}"))
+        .unwrap_or_default()
+}
+
 /// What [`check_link`] makes of a pad feeding a sink.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LinkCheck {
@@ -680,6 +801,15 @@ pub enum LinkCheck {
 }
 
 impl LinkCheck {
+    /// What to put between the two, where this is [`Self::Refused`] and
+    /// something in this crate bridges them — see [`remedy`].
+    pub fn remedy(&self) -> Option<&'static str> {
+        match self {
+            Self::Refused { produced, accepted } => remedy(produced, accepted),
+            _ => None,
+        }
+    }
+
     /// Whether this is [`Self::Refused`].
     pub fn is_refused(&self) -> bool {
         matches!(self, Self::Refused { .. })
@@ -691,10 +821,35 @@ impl fmt::Display for LinkCheck {
         match self {
             LinkCheck::Fits => f.write_str("fits"),
             LinkCheck::Refused { produced, accepted } => {
-                write!(f, "produces {produced}, which takes only {accepted}")
+                write!(f, "produces {produced}, which takes only {accepted}")?;
+                f.write_str(&remedy_suffix(produced, accepted))
             }
             LinkCheck::Unknown => f.write_str("cannot be told before it runs"),
         }
+    }
+}
+
+/// Whether `producer` can feed `consumer` — [`check_link`] asked of the two
+/// elements themselves, with no pad or trait to reach for:
+///
+/// ```ignore
+/// let fits = check_elements(&mut decoder, &renderer);
+/// if fits.is_refused() {
+///     println!("{fits}"); // what does not fit, and what goes between
+/// }
+/// ```
+///
+/// It asks about the producer's first output, which for every element
+/// with one is the only one. A source with several — a demuxer, a `Tee` —
+/// is asked about through [`check_link`] and the pad in question, and one
+/// with none answers [`LinkCheck::Unknown`].
+pub fn check_elements(
+    producer: &mut (impl crate::element::Source + ?Sized),
+    consumer: &(impl crate::element::Sink + ?Sized),
+) -> LinkCheck {
+    match producer.src_pads().first() {
+        Some(pad) => check_link(&pad.contract(), &consumer.input_contract()),
+        None => LinkCheck::Unknown,
     }
 }
 
@@ -912,7 +1067,8 @@ mod tests {
         assert!(refused.is_refused());
         assert_eq!(
             refused.to_string(),
-            "produces VideoFrame (CUDA, BGRA), which takes only VideoFrame (CUDA, NV12)"
+            "produces VideoFrame (CUDA, BGRA), which takes only VideoFrame (CUDA, NV12); \
+             convert it: a CudaConverter built for CudaFrameFormat::Nv12"
         );
         assert!(
             check_link(&OutputContract::Fixed(d3d11), &nv12_renderer).is_refused(),
@@ -943,5 +1099,48 @@ mod tests {
             LinkCheck::Fits
         );
         assert!(check_link(&OutputContract::SameLayout(d3d11), &nv12_renderer).is_refused());
+    }
+
+    /// A refusal says what goes between, naming the element that makes that
+    /// one crossing — and says nothing where no element here makes it.
+    #[test]
+    fn a_refusal_names_what_goes_between() {
+        let frame = |memory, layout: PixelLayout| {
+            PortContract::frame(MediaKind::VideoFrame, memory)
+                .with_layouts(PixelLayoutSet::of(layout))
+        };
+        let says = |produced, accepted, element: &str| {
+            let remedy = remedy(&produced, &accepted).unwrap_or("");
+            assert!(
+                remedy.contains(element),
+                "{produced} into {accepted}: {remedy:?} names no {element}"
+            );
+        };
+        use MemoryDomain::{Cuda, D3d11, System};
+        use PixelLayout::{Bgra, Nv12, P010};
+
+        says(frame(System, Nv12), frame(D3d11, Nv12), "D3d11Upload");
+        says(frame(System, Bgra), frame(Cuda, Bgra), "CudaUpload");
+        says(frame(D3d11, Bgra), frame(System, Bgra), "D3d11Download");
+        says(frame(Cuda, Bgra), frame(Cuda, Nv12), "CudaConverter");
+        says(frame(Cuda, P010), frame(Cuda, Nv12), "CudaScaler");
+        says(frame(Cuda, Nv12), frame(Cuda, Bgra), "CudaConverter");
+        says(frame(D3d11, Nv12), frame(D3d11, Bgra), "D3d11Scaler");
+        says(frame(D3d11, P010), frame(D3d11, Nv12), "D3d11Scaler");
+        says(frame(System, Nv12), frame(System, Bgra), "SwScaler");
+        says(frame(D3d11, Nv12), frame(Cuda, Nv12), "system memory");
+        says(
+            PortContract::packet(MediaKind::VideoPacket),
+            frame(System, Nv12),
+            "decode",
+        );
+        assert_eq!(
+            remedy(
+                &PortContract::frame(MediaKind::AudioFrame, System),
+                &frame(System, Nv12)
+            ),
+            None,
+            "nothing turns audio into video"
+        );
     }
 }

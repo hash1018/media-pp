@@ -363,7 +363,10 @@ pub enum GraphError {
     /// never reach the other — see [`crate::contract`]. Reported when the
     /// branch is built or attached, before anything runs, because no
     /// buffer could have made this link work.
-    #[error("{producer} produces {produced}, which {consumer} cannot accept (it takes {accepted})")]
+    #[error(
+        "{producer} produces {produced}, which {consumer} cannot accept (it takes {accepted}){}",
+        crate::contract::remedy_suffix(produced, accepted)
+    )]
     IncompatibleLink {
         /// Name of the element or pad on the producing side.
         producer: Arc<str>,

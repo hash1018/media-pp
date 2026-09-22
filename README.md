@@ -62,8 +62,11 @@ fn main() -> media_pp::Result<()> {
 ```
 
 How a pipeline runs — buffers, threads, EOS, seeking, changing a running
-graph, link checks — is the crate documentation's first page; each type's own
-page states what it accepts, what it owns and how it fails. Both are on
+graph — is the crate documentation's first page, and so is connecting
+elements: what a branch refuses before it runs and why, how to ask whether
+two elements fit before linking them (`contract::check_elements`), and which
+element goes between two that do not. Each type's own page states what it
+accepts, what it owns and how it fails. Both are on
 [docs.rs] for the backend-independent API, and in the
 [Windows API documentation] for everything.
 

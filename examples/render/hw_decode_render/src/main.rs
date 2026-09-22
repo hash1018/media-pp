@@ -3,12 +3,12 @@
 //! presents the frames at real playback speed. Windows decodes onto D3D12
 //! (D3D12VA, or `SwDecoder` and an upload); Linux onto CUDA (NVDEC, or
 //! `SwDecoder` and an upload) with Vulkan presentation, and puts a
-//! `CudaConverter` before the renderer where `contract::check_link` says the
-//! bin's output does not fit the renderer's input — the bin hands on BGRA
-//! for a stream with alpha, an odd side, BT.2020 or HDR colour, and that
-//! renderer presents NV12. The check is asked of the two before they are
-//! linked, rather than the example knowing what each one takes. Compare against `sw_decode_render`, which always decodes on
-//! the CPU.
+//! `CudaConverter` before the renderer where `contract::check_elements`
+//! says the bin's output does not fit the renderer's input — the bin hands
+//! on BGRA for a stream with alpha, an odd side, BT.2020 or HDR colour, and
+//! that renderer presents NV12. The check is asked of the two before they
+//! are linked, rather than the example knowing what each one takes.
+//! Compare against `sw_decode_render`, which always decodes on the CPU.
 //!
 //! Which way the bin decodes, and why where it is software, is printed when
 //! it is opened; if the GPU refuses the stream part way, the bin goes on in
@@ -143,8 +143,7 @@ mod linux_example {
     use media_pp::ffmpeg::media;
     use media_pp::{
         Error,
-        contract::check_link,
-        element::{Sink, Source},
+        contract::check_elements,
         elements::{
             CudaConverter, CudaDevice, CudaFrameFormat, DecodeTarget, FileDemuxer, Pacer,
             VideoDecodeBin,
@@ -213,10 +212,7 @@ mod linux_example {
         // NV12, and the bin hands on BGRA for alpha, an odd side or BT.2020
         // or HDR colour. Where the two do not fit, this crate's own kernel
         // brings BGRA back to NV12 — which needs even sides, as NV12 does.
-        let fits = check_link(
-            &decoder.src_pads()[0].contract(),
-            &renderer.input_contract(),
-        );
+        let fits = check_elements(&mut decoder, &renderer);
         let to_nv12 = if fits.is_refused() {
             println!("decoder and renderer: {fits}; converting to NV12");
             let context = media_pp::ffmpeg::codec::context::Context::from_parameters(

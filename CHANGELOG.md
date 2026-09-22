@@ -186,6 +186,18 @@ compile error with no explanation.
 
 ### Added
 
+- **A refused link says what goes between, and elements can be asked
+  directly.** A pipeline's refusal and `LinkCheck` both end with the
+  element that makes the crossing where one does — `; convert it: a
+  CudaConverter built for CudaFrameFormat::Nv12`, `; upload it: a
+  D3d11Upload, which takes NV12 or BGRA — a SwScaler to one of those first…`
+  — through `contract::remedy`. `contract::check_elements(&mut producer,
+  &consumer)` asks about two elements with no pad index or trait import. The
+  crate documentation's first page has a section on connecting elements:
+  what is caught before a pipeline runs and what only a frame shows, asking
+  before linking, and a table of what goes between which backends and
+  layouts.
+
 - **`contract::check_link` answers whether two elements fit before they are
   linked.** It takes a pad's `SrcPad::contract()` and a sink's
   `Sink::input_contract()` and returns a `LinkCheck` — `Fits`,

@@ -111,30 +111,89 @@
 //! [`SeekMode::Keyframe`](pipeline::SeekMode::Keyframe) shows the keyframe the
 //! demuxer landed on.
 //!
-//! # Link contracts
+//! # Connecting elements
 //!
-//! Building a branch refuses a connection that could never carry data —
-//! encoded packets into something that takes frames, an audio stream into a
-//! video decoder, a D3D11 texture into a CPU or CUDA filter, BGRA into a
-//! renderer that presents NV12 — before anything runs:
+//! A branch is built in the order buffers flow and attached to a source's
+//! output, as the example above does:
+//!
+//! ```text
+//! ctx.branch()                 start a branch
+//!    .pipe(decoder)            a filter: consumes, and pushes on
+//!    .queue("frames", 8)       a thread boundary with a bounded buffer
+//!    .pipe(pacer)
+//!    .to(renderer)?            the sink it ends in — checked here
+//! ctx.attach(source, index, branch)?   onto the source's stream — checked again
+//! ```
+//!
+//! ## What is caught before anything runs
+//!
+//! Building or attaching a branch refuses a link that could never carry
+//! data, naming both sides and, where one element makes that crossing, what
+//! to put between them:
 //!
 //! ```text
 //! decoder produces VideoFrame (System), which rec cannot accept
-//! (it takes VideoPacket|AudioPacket)
+//! (it takes VideoPacket|AudioPacket); encode it first: an encoder turns
+//! frames into packets
 //! ```
 //!
-//! It compares only what an element knows when it is constructed: the media
-//! kind, and for a decoded frame the memory domain and, where construction
-//! settles it, the pixel layout (NV12, P010, BGRA or other). It is not caps
-//! negotiation — nothing is converted or renegotiated — and size, format
-//! details and device are still checked against each real buffer. An
-//! element that declares nothing always links. See [`contract`].
+//! That is what each element knows when it is constructed: packets or
+//! frames and of which medium, which memory a frame lives in, and — where
+//! construction settles it — its pixel layout, NV12, P010, BGRA or another.
+//! Everything that only a frame can say is checked against each frame by
+//! the element that reads it, and reported as an error on that frame: the
+//! size and whether it is odd, a colour or HDR tag, which device a texture
+//! belongs to, a format's finer points. An element that declares nothing
+//! links to anything. None of it is caps negotiation: nothing is converted
+//! or inserted for you. See [`contract`].
 //!
-//! The same rules answer before anything is linked: [`contract::check_link`]
-//! takes a pad's [`pad::SrcPad::contract`] and a sink's
-//! [`element::Sink::input_contract`] and says whether they fit, do not, or
-//! cannot be told until frames arrive — for deciding whether a
-//! converter goes between two elements while they are still in hand.
+//! ## Asking before linking
+//!
+//! The same rules answer while the elements are still in hand, so a caller
+//! can decide whether something goes between them — which trying the link
+//! cannot, since a refused branch drops what it was given:
+//!
+//! ```ignore
+//! use media_pp::contract::check_elements;
+//!
+//! let fits = check_elements(&mut decoder, &renderer);
+//! if fits.is_refused() {
+//!     println!("{fits}"); // what does not fit, and what goes between
+//!     // put the converter it names between them
+//! }
+//! ```
+//!
+//! [`contract::check_elements`] asks about a producer's first output;
+//! [`contract::check_link`] takes a pad's [`pad::SrcPad::contract`] and a
+//! sink's [`element::Sink::input_contract`] for a source with several. Both
+//! answer [`LinkCheck::Fits`](contract::LinkCheck::Fits),
+//! [`Refused`](contract::LinkCheck::Refused), or
+//! [`Unknown`](contract::LinkCheck::Unknown) where one side says too little
+//! to tell. They judge one link: past a `Queue` or a `Pacer`, which pass
+//! frames on unchanged, ask the element before it.
+//!
+//! ## What goes between
+//!
+//! ```text
+//! from                          to                      put between
+//! encoded packets               frames                  SwDecoder, VideoDecodeBin, a hardware decoder
+//! frames                        encoded packets         an encoder
+//! system memory                 D3D11 / D3D12 / CUDA    D3d11Upload / D3d12Upload / CudaUpload
+//! D3D11 / D3D12 / CUDA          system memory           D3d11Download / D3d12Download / CudaDownload
+//! D3D11                         CUDA, or back           system memory: download, then upload
+//! any layout, system memory     another                 SwScaler
+//! NV12, P010 or BGRA, D3D11     NV12 or BGRA            D3d11Scaler with a D3d11ScalerFormat
+//! PQ or HLG, D3D11              SDR BGRA                D3d11ToneMap
+//! NV12, CUDA                    BGRA                    CudaConverter built for Bgra
+//! BGRA, CUDA                    NV12                    CudaConverter built for Nv12
+//! P010, CUDA                    NV12                    CudaScaler::with_format(.., Nv12)
+//! ```
+//!
+//! An upload takes only some layouts — `D3d11Upload` NV12 or BGRA,
+//! `D3d12Upload` NV12 — so a software decoder's planar YUV goes through a
+//! `SwScaler` first. [`elements::VideoDecodeBin`] makes the decode-side
+//! choices itself: it decodes onto the device on whichever path can, and
+//! says what it will put out through [`output_format`](elements::VideoDecodeBin::output_format).
 //!
 //! # Watching it run
 //!

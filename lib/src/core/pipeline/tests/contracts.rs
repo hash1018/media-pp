@@ -810,7 +810,8 @@ fn an_incompatible_link_reads_the_way_the_readme_shows_it() {
     assert_eq!(
         error.to_string(),
         "decoder produces VideoFrame (System), which rec cannot accept \
-         (it takes VideoPacket|AudioPacket)"
+         (it takes VideoPacket|AudioPacket); encode it first: an encoder turns \
+         frames into packets"
     );
 }
 
@@ -1310,4 +1311,42 @@ fn a_same_layout_stage_with_nothing_known_upstream_refuses_nothing() {
             InputContract::Fixed(cuda_in(PixelLayout::Nv12)),
         ))
         .expect("an unknown layout is left to the frames themselves");
+}
+
+/// Asked of the elements themselves before linking, the answer is the one
+/// building the branch would give — refused where it would refuse, with
+/// what goes between, and fitting where it would link.
+#[test]
+fn check_elements_answers_before_linking_as_building_would() {
+    use crate::contract::{LinkCheck, check_elements};
+
+    let mut decoder =
+        DeclaringFilter::new("decoder", OutputContract::Fixed(cuda_in(PixelLayout::Bgra)));
+    let renderer =
+        DeclaringSink::boxed("renderer", InputContract::Fixed(cuda_in(PixelLayout::Nv12)));
+    let fits = check_elements(&mut decoder, &*renderer);
+    assert!(fits.is_refused());
+    assert!(
+        fits.remedy()
+            .is_some_and(|remedy| remedy.contains("CudaConverter")),
+        "{fits}"
+    );
+    let built = contract_context().branch().pipe(decoder).to(renderer);
+    assert!(built.is_err(), "building refuses what the check refused");
+
+    let mut decoder =
+        DeclaringFilter::new("decoder", OutputContract::Fixed(cuda_in(PixelLayout::Nv12)));
+    let renderer =
+        DeclaringSink::boxed("renderer", InputContract::Fixed(cuda_in(PixelLayout::Nv12)));
+    assert_eq!(check_elements(&mut decoder, &*renderer), LinkCheck::Fits);
+    contract_context()
+        .branch()
+        .pipe(decoder)
+        .to(renderer)
+        .expect("building links what the check said fits");
+
+    let mut software = video_decoder("decoder");
+    let (counter, _count) = crate::elements::PacketCounter::new("rec");
+    let refused = check_elements(&mut software, &counter);
+    assert!(refused.to_string().contains("encode it first"), "{refused}");
 }
