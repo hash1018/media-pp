@@ -726,7 +726,7 @@ impl DecodeTarget {
     /// BT.2020 stream where the target has BGRA — see [`VideoDecodeBin`] on
     /// why BT.2020 is made BT.709 RGB as soon as it is decoded.
     fn hardware_format(&self, stream: &Stream) -> ffmpeg::format::Pixel {
-        if (stream.bt2020 || stream.hdr) && self.keeps_alpha() {
+        if stream.made_rgb() && self.keeps_alpha() {
             ffmpeg::format::Pixel::BGRA
         } else {
             ffmpeg::format::Pixel::NV12
@@ -846,7 +846,7 @@ impl DecodeTarget {
         // BT.2020 stream is put out as on the hardware path, which a
         // replacement has to match.
         let odd = width % 2 != 0 || height % 2 != 0;
-        if reason == SoftwareReason::Alpha || odd || stream.bt2020 || stream.hdr {
+        if reason == SoftwareReason::Alpha || odd || stream.made_rgb() {
             if self.keeps_alpha() {
                 return Ok(Some(ffmpeg::format::Pixel::BGRA));
             }
@@ -946,6 +946,13 @@ struct Stream {
 }
 
 impl Stream {
+    /// Whether its colour is one this bin makes BT.709 RGB as it is
+    /// decoded, where the target has BGRA — BT.2020, or HDR. See
+    /// [`VideoDecodeBin`]'s colour section.
+    fn made_rgb(&self) -> bool {
+        self.bt2020 || self.hdr
+    }
+
     fn of(params: &ffmpeg::codec::Parameters) -> Result<Self> {
         let context = ffmpeg::codec::context::Context::from_parameters(params.clone())?;
         let medium = context.medium();
@@ -975,10 +982,25 @@ impl Stream {
 fn choose(stream: &Stream, target: &DecodeTarget) -> DecodePath {
     decide(
         stream,
-        target.decodes(stream.codec),
-        target.keeps_alpha(),
-        target.converts_10bit(),
+        Abilities {
+            hardware_decodes: target.decodes(stream.codec),
+            keeps_alpha: target.keeps_alpha(),
+            converts_10bit: target.converts_10bit(),
+        },
     )
+}
+
+/// What a target can do with a stream, as [`decide`] asks it.
+#[derive(Debug, Clone, Copy)]
+struct Abilities {
+    /// Whether its hardware has a decoder for the codec — `None` for a
+    /// target with no hardware at all.
+    hardware_decodes: Option<bool>,
+    /// Whether it has a layout that keeps alpha — BGRA.
+    keeps_alpha: bool,
+    /// Whether it can bring a 10-bit 4:2:0 surface down to NV12 after its
+    /// hardware decoder.
+    converts_10bit: bool,
 }
 
 /// The choice itself, apart from any device: no hardware at all first; then
@@ -986,16 +1008,11 @@ fn choose(stream: &Stream, target: &DecodeTarget) -> DecodePath {
 /// well as the path; then whether the hardware has a decoder; then whether
 /// what it would decode to is a layout anything downstream reads, or one the
 /// target can bring down to that after it.
-fn decide(
-    stream: &Stream,
-    hardware_decodes: Option<bool>,
-    keeps_alpha: bool,
-    converts_10bit: bool,
-) -> DecodePath {
-    let Some(hardware_decodes) = hardware_decodes else {
+fn decide(stream: &Stream, target: Abilities) -> DecodePath {
+    let Some(hardware_decodes) = target.hardware_decodes else {
         return DecodePath::Software(SoftwareReason::SystemMemory);
     };
-    if keeps_alpha && stream.format.is_some_and(has_alpha) {
+    if target.keeps_alpha && stream.format.is_some_and(has_alpha) {
         return DecodePath::Software(SoftwareReason::Alpha);
     }
     if !hardware_decodes {
@@ -1005,7 +1022,9 @@ fn decide(
         // A stream that does not say is left to the hardware, which is what
         // decoding it straight onto the device always did — and if the
         // hardware refuses it, the bin replaces it then.
-        Some(format) if !is_8bit_420(format) && !(converts_10bit && is_10bit_420(format)) => {
+        Some(format)
+            if !is_8bit_420(format) && !(target.converts_10bit && is_10bit_420(format)) =>
+        {
             DecodePath::Software(SoftwareReason::PixelFormat(format))
         }
         _ => DecodePath::Hardware,
@@ -1081,68 +1100,73 @@ mod tests {
         use ffmpeg::codec::Id;
         use ffmpeg::format::Pixel;
 
+        // A target that can do everything, and each case what it lacks.
+        let full = Abilities {
+            hardware_decodes: Some(true),
+            keeps_alpha: true,
+            converts_10bit: true,
+        };
+        let software = |reason| DecodePath::Software(reason);
+
         let prores = stream(Id::PRORES, Some(Pixel::YUVA444P10LE));
+        let no_hardware = Abilities {
+            hardware_decodes: None,
+            ..full
+        };
         assert_eq!(
-            decide(&prores, None, true, true),
-            DecodePath::Software(SoftwareReason::SystemMemory)
+            decide(&prores, no_hardware),
+            software(SoftwareReason::SystemMemory)
         );
+        assert_eq!(decide(&prores, full), software(SoftwareReason::Alpha));
+        let no_decoder_no_alpha = Abilities {
+            hardware_decodes: Some(false),
+            keeps_alpha: false,
+            ..full
+        };
         assert_eq!(
-            decide(&prores, Some(true), true, true),
-            DecodePath::Software(SoftwareReason::Alpha)
-        );
-        assert_eq!(
-            decide(&prores, Some(false), false, true),
-            DecodePath::Software(SoftwareReason::NoHardwareDecoder(Id::PRORES)),
+            decide(&prores, no_decoder_no_alpha),
+            software(SoftwareReason::NoHardwareDecoder(Id::PRORES)),
             "alpha a target cannot keep is no reason of its own"
         );
+        let no_decoder = Abilities {
+            hardware_decodes: Some(false),
+            ..full
+        };
         assert_eq!(
-            decide(
-                &stream(Id::MJPEG, Some(Pixel::YUVJ420P)),
-                Some(false),
-                true,
-                true
-            ),
-            DecodePath::Software(SoftwareReason::NoHardwareDecoder(Id::MJPEG))
+            decide(&stream(Id::MJPEG, Some(Pixel::YUVJ420P)), no_decoder),
+            software(SoftwareReason::NoHardwareDecoder(Id::MJPEG))
         );
+
         let hevc10 = stream(Id::HEVC, Some(Pixel::YUV420P10LE));
+        assert_eq!(decide(&hevc10, full), DecodePath::Hardware);
+        let no_10bit = Abilities {
+            keeps_alpha: false,
+            converts_10bit: false,
+            ..full
+        };
         assert_eq!(
-            decide(&hevc10, Some(true), true, true),
-            DecodePath::Hardware
-        );
-        assert_eq!(
-            decide(&hevc10, Some(true), false, false),
-            DecodePath::Software(SoftwareReason::PixelFormat(Pixel::YUV420P10LE)),
+            decide(&hevc10, no_10bit),
+            software(SoftwareReason::PixelFormat(Pixel::YUV420P10LE)),
             "nothing to bring it down to 8 bits"
         );
         assert_eq!(
-            decide(
-                &stream(Id::H264, Some(Pixel::YUV422P)),
-                Some(true),
-                true,
-                true
-            ),
-            DecodePath::Software(SoftwareReason::PixelFormat(Pixel::YUV422P))
+            decide(&stream(Id::H264, Some(Pixel::YUV422P)), full),
+            software(SoftwareReason::PixelFormat(Pixel::YUV422P))
         );
         assert_eq!(
-            decide(
-                &stream(Id::HEVC, Some(Pixel::YUV422P10LE)),
-                Some(true),
-                true,
-                true
-            ),
-            DecodePath::Software(SoftwareReason::PixelFormat(Pixel::YUV422P10LE))
+            decide(&stream(Id::HEVC, Some(Pixel::YUV422P10LE)), full),
+            software(SoftwareReason::PixelFormat(Pixel::YUV422P10LE))
         );
+        let eight_bit_only = Abilities {
+            converts_10bit: false,
+            ..full
+        };
         assert_eq!(
-            decide(
-                &stream(Id::H264, Some(Pixel::YUV420P)),
-                Some(true),
-                true,
-                false
-            ),
+            decide(&stream(Id::H264, Some(Pixel::YUV420P)), eight_bit_only),
             DecodePath::Hardware
         );
         assert_eq!(
-            decide(&stream(Id::H264, None), Some(true), true, false),
+            decide(&stream(Id::H264, None), eight_bit_only),
             DecodePath::Hardware
         );
     }
