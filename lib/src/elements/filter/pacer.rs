@@ -770,7 +770,7 @@ mod tests {
             let branch = context
                 .branch()
                 .pipe(Pacer::new("pacer", time_base)?)
-                .to(Box::new(counter))?;
+                .to(counter)?;
             context.attach(source, video, branch)?;
             Ok(())
         })

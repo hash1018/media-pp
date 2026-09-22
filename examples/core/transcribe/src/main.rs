@@ -285,7 +285,7 @@ mod example {
                 .pipe(decoder)
                 .pipe(resampler)
                 .queue("speech", AUDIO_QUEUE_DEPTH)
-                .to(Box::new(transcriber))?;
+                .to(transcriber)?;
             let tee = TeeBuilder::new("audio-tee", ctx.clone())
                 .branch(copy_branch)
                 .branch(listen_branch)

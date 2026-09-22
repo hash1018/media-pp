@@ -505,10 +505,14 @@ impl ChainBuilder {
     }
 
     /// Terminates the chain with a `Sink` (muxer, file sink, ...) and
-    /// assembles everything into a single `Box<dyn Sink>` ready to be
-    /// linked into a source's src pad. The terminal's own `Element::name()`
-    /// is what shows up on the bus when it reports EOS.
-    pub fn to(self, mut terminal: Box<dyn Sink>) -> Result<DetachedBranch> {
+    /// assembles everything into one branch ready to be linked into a
+    /// source's src pad. The terminal's own `Element::name()` is what shows
+    /// up on the bus when it reports EOS.
+    ///
+    /// Any sink, as it is — `.to(counter)` — or already boxed, the way a
+    /// muxer hands its sinks over: a boxed sink is a sink.
+    pub fn to(self, terminal: impl Sink + 'static) -> Result<DetachedBranch> {
+        let mut terminal: Box<dyn Sink> = Box::new(terminal);
         if let Some(error) = self.error {
             return Err(error.into());
         }
@@ -692,7 +696,7 @@ impl ChainBuilder {
 
     /// Alias of [`Self::to`] retained for callers that prefer builder-style
     /// terminology when supplying the terminal sink.
-    pub fn build(self, terminal: Box<dyn Sink>) -> Result<DetachedBranch> {
+    pub fn build(self, terminal: impl Sink + 'static) -> Result<DetachedBranch> {
         self.to(terminal)
     }
 }

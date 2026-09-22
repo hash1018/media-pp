@@ -825,7 +825,7 @@ mod tests {
                 .pipe(decoder)
                 .queue("frames", 8)
                 .pipe(encoder)
-                .to(Box::new(counter))?;
+                .to(counter)?;
             ctx.attach(source, index, branch)?;
             Ok(())
         })

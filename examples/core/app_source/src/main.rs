@@ -59,7 +59,7 @@ mod example {
             let branch = ctx
                 .branch()
                 .pipe(decoder) // same thread as `AppSource::run` — cheap enough not to need a queue
-                .to(Box::new(frame_counter))?;
+                .to(frame_counter)?;
             ctx.attach(source, 0, branch)?;
             Ok(())
         })?;

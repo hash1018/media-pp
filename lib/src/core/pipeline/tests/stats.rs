@@ -90,15 +90,15 @@ fn every_stage_counts_every_buffer_it_was_handed() {
             buffers: BUFFERS,
         },
         |source, ctx| {
-            let branch = ctx
-                .branch()
-                .pipe(PassThrough::new())
-                .queue("hop", 8)
-                .to(Box::new(CountingSink {
-                    pp_log: element_pp_log(ElementType::Other, "end", None),
-                    name: "end".into(),
-                    count: count.clone(),
-                }))?;
+            let branch =
+                ctx.branch()
+                    .pipe(PassThrough::new())
+                    .queue("hop", 8)
+                    .to(CountingSink {
+                        pp_log: element_pp_log(ElementType::Other, "end", None),
+                        name: "end".into(),
+                        count: count.clone(),
+                    })?;
             ctx.attach(source, 0, branch)?;
             Ok(())
         },
@@ -148,11 +148,11 @@ fn a_source_that_stopped_delivering_is_seen_to_have() {
             buffers: 3,
         },
         |source, ctx| {
-            let branch = ctx.branch().to(Box::new(CountingSink {
+            let branch = ctx.branch().to(CountingSink {
                 pp_log: element_pp_log(ElementType::Other, "end", None),
                 name: "end".into(),
                 count: count.clone(),
-            }))?;
+            })?;
             ctx.attach(source, 0, branch)?;
             Ok(())
         },
@@ -199,11 +199,11 @@ fn a_queue_that_drops_says_how_much() {
             let branch = ctx
                 .branch()
                 .queue_with_policy("narrow", 2, crate::queue::OverflowPolicy::DropNewest)
-                .to(Box::new(SlowEosSink {
+                .to(SlowEosSink {
                     pp_log: element_pp_log(ElementType::Other, "slow", None),
                     count: count.clone(),
                     saw_eos: Arc::new(AtomicBool::new(false)),
-                }))?;
+                })?;
             ctx.attach(source, 0, branch)?;
             Ok(())
         },
@@ -290,11 +290,11 @@ fn a_runtime_branch_is_reported_while_it_exists_and_no_longer() {
         "stats-tee",
         TestVideoSource::new("video", TestVideoOptions::default()),
         |source, ctx| {
-            let first = ctx.branch().to(Box::new(CountingSink {
+            let first = ctx.branch().to(CountingSink {
                 pp_log: element_pp_log(ElementType::Other, "initial", None),
                 name: "initial".into(),
                 count: initial.clone(),
-            }))?;
+            })?;
             let (tee, handle) = TeeBuilder::new("tee", ctx.clone())
                 .branch(first)
                 .build_dynamic()?;
@@ -313,11 +313,11 @@ fn a_runtime_branch_is_reported_while_it_exists_and_no_longer() {
     let branch = handle
         .branch()
         .expect("tee alive")
-        .to(Box::new(CountingSink {
+        .to(CountingSink {
             pp_log: element_pp_log(ElementType::Other, "dynamic", None),
             name: "dynamic".into(),
             count: counted.clone(),
-        }))
+        })
         .unwrap();
     let dynamic_id = branch.root_id();
     let branch_id = handle.attach(branch).unwrap();
@@ -346,10 +346,10 @@ fn a_runtime_branch_is_reported_while_it_exists_and_no_longer() {
         .branch()
         .expect("tee alive")
         .queue("drain", 4)
-        .to(Box::new(LingeringEosSink {
+        .to(LingeringEosSink {
             pp_log: element_pp_log(ElementType::Other, "lingering", None),
             linger: Duration::from_millis(300),
-        }))
+        })
         .unwrap();
     let finishing_id = branch.root_id();
     let branch_id = handle.attach(branch).unwrap();
@@ -379,11 +379,11 @@ fn a_runtime_branch_is_reported_while_it_exists_and_no_longer() {
     let again = handle
         .branch()
         .expect("tee alive")
-        .to(Box::new(CountingSink {
+        .to(CountingSink {
             pp_log: element_pp_log(ElementType::Other, "dynamic", None),
             name: "dynamic".into(),
             count: Arc::new(AtomicUsize::new(0)),
-        }))
+        })
         .unwrap();
     let again_id = again.root_id();
     handle.attach(again).unwrap();
@@ -428,10 +428,10 @@ fn attaching_and_detaching_without_reading_keeps_the_registry_bounded() {
             .branch()
             .expect("tee alive")
             .pipe(PassThrough::new())
-            .to(Box::new(NoOpSink {
+            .to(NoOpSink {
                 name: "churn".into(),
                 pp_log: element_pp_log(ElementType::Other, "churn", None),
-            }))
+            })
             .unwrap();
         let id = handle.attach(branch).unwrap();
         handle.detach(id).unwrap();

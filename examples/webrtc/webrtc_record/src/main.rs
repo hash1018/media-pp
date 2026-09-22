@@ -259,7 +259,7 @@ mod example {
                 .pipe(video_pacer)
                 .pipe(scaler)
                 .pipe(video_encoder)
-                .to(Box::new(video_sink))?;
+                .to(video_sink)?;
             ctx.attach(source, input.video_index, video)?;
 
             let audio = ctx
@@ -268,7 +268,7 @@ mod example {
                 .queue("audio-frames", 16)
                 .pipe(audio_pacer)
                 .pipe(audio_encoder)
-                .to(Box::new(audio_sink))?;
+                .to(audio_sink)?;
             ctx.attach(source, input.audio_index, audio)?;
             Ok(())
         })

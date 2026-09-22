@@ -1584,11 +1584,7 @@ mod tests {
         .expect("create scaler");
         let (counter, frames) = FrameCounter::new("frames");
         let pipeline = Pipeline::new("wgc-d3d11-queue", source, |source, ctx| {
-            let branch = ctx
-                .branch()
-                .queue("captured", 4)
-                .pipe(scaler)
-                .to(Box::new(counter))?;
+            let branch = ctx.branch().queue("captured", 4).pipe(scaler).to(counter)?;
             ctx.attach(source, 0, branch)?;
             Ok(())
         })
@@ -1668,7 +1664,7 @@ mod tests {
             Ok(())
         });
         let pipeline = Pipeline::new("wgc-recovery", source, |source, ctx| {
-            let branch = ctx.branch().to(Box::new(sink))?;
+            let branch = ctx.branch().to(sink)?;
             ctx.attach(source, 0, branch)?;
             Ok(())
         })
@@ -1795,9 +1791,7 @@ mod tests {
             }
         };
         let pipeline = Pipeline::new("wgc-owner-killed", source, |source, ctx| {
-            let branch = ctx
-                .branch()
-                .to(Box::new(AppSink::new("sink", |_| Ok(()))))?;
+            let branch = ctx.branch().to(AppSink::new("sink", |_| Ok(())))?;
             ctx.attach(source, 0, branch)?;
             Ok(())
         })
@@ -1857,9 +1851,7 @@ mod tests {
             }
         };
         let pipeline = Pipeline::new("wgc-target-closed", source, |source, ctx| {
-            let branch = ctx
-                .branch()
-                .to(Box::new(AppSink::new("sink", |_| Ok(()))))?;
+            let branch = ctx.branch().to(AppSink::new("sink", |_| Ok(())))?;
             ctx.attach(source, 0, branch)?;
             Ok(())
         })

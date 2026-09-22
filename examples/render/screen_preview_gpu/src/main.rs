@@ -328,7 +328,7 @@ mod windows_example {
             let branch = ctx
                 .branch()
                 .queue("captured", 4) // thread boundary so rendering doesn't block capture
-                .to(Box::new(renderer))?;
+                .to(renderer)?;
             ctx.attach(source, 0, branch)?;
             Ok(())
         })?;
@@ -478,7 +478,7 @@ mod linux_example {
                 // capture; the compositor keeps producing at its own rate.
                 .queue("captured", 4)
                 .pipe(converter)
-                .to(Box::new(renderer))?;
+                .to(renderer)?;
             ctx.attach(source, 0, branch)?;
             Ok(())
         })?;

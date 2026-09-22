@@ -16,7 +16,7 @@ fn chain_builder_stamps_pipeline_id_into_terminal_pp_log() {
     let graph = PipelineGraph::new();
     let source_id = graph.add_source(ElementType::Other, "source".into());
     let context = Arc::new(Context::for_test(bus, "my-pipeline", graph, source_id));
-    let built = context.branch().to(Box::new(sink)).unwrap();
+    let built = context.branch().to(sink).unwrap();
     assert_eq!(built.root.pp_log().pipeline_id(), Some("my-pipeline"));
     assert_eq!(built.root.pp_log().element(), "Other");
     assert_eq!(built.root.pp_log().name(), "noop");
@@ -37,10 +37,10 @@ fn pipeline_id_is_whatever_new_was_given() {
     let index = video.index;
 
     let pipeline = Pipeline::new("my-pipeline", source, |source, ctx| {
-        let branch = ctx.branch().to(Box::new(NoOpSink {
+        let branch = ctx.branch().to(NoOpSink {
             name: "noop".into(),
             pp_log: element_pp_log(ElementType::Other, "noop", None),
-        }))?;
+        })?;
         ctx.attach(source, index, branch)?;
         Ok(())
     })
@@ -66,14 +66,10 @@ fn topology_lists_source_through_terminal_per_branch() {
 
     let pipeline = Pipeline::new("test", source, |source, ctx| {
         let pacer = Pacer::new("pacer", time_base)?;
-        let branch = ctx
-            .branch()
-            .queue("q", 4)
-            .pipe(pacer)
-            .to(Box::new(NoOpSink {
-                name: "noop".into(),
-                pp_log: element_pp_log(ElementType::Other, "noop", None),
-            }))?;
+        let branch = ctx.branch().queue("q", 4).pipe(pacer).to(NoOpSink {
+            name: "noop".into(),
+            pp_log: element_pp_log(ElementType::Other, "noop", None),
+        })?;
         ctx.attach(source, index, branch)?;
         Ok(())
     })
@@ -114,14 +110,14 @@ fn topology_attributes_tee_branches_to_the_tee_not_the_source() {
     let index = video.index;
 
     let pipeline = Pipeline::new("test", source, |source, ctx| {
-        let branch_a = ctx.branch().to(Box::new(NoOpSink {
+        let branch_a = ctx.branch().to(NoOpSink {
             name: "sink-a".into(),
             pp_log: element_pp_log(ElementType::Other, "sink-a", None),
-        }))?;
-        let branch_b = ctx.branch().to(Box::new(NoOpSink {
+        })?;
+        let branch_b = ctx.branch().to(NoOpSink {
             name: "sink-b".into(),
             pp_log: element_pp_log(ElementType::Other, "sink-b", None),
-        }))?;
+        })?;
 
         let tee_branch = TeeBuilder::new("tee", ctx.clone())
             .branch(branch_a)
@@ -189,14 +185,14 @@ fn topology_attributes_a_fan_out_to_the_stage_that_feeds_it() {
     let time_base = source.stream_time_base(index).expect("stream disappeared");
 
     let pipeline = Pipeline::new("test", source, |source, ctx| {
-        let branch_a = ctx.branch().to(Box::new(NoOpSink {
+        let branch_a = ctx.branch().to(NoOpSink {
             name: "sink-a".into(),
             pp_log: element_pp_log(ElementType::Other, "sink-a", None),
-        }))?;
-        let branch_b = ctx.branch().to(Box::new(NoOpSink {
+        })?;
+        let branch_b = ctx.branch().to(NoOpSink {
             name: "sink-b".into(),
             pp_log: element_pp_log(ElementType::Other, "sink-b", None),
-        }))?;
+        })?;
         let tee_branch = TeeBuilder::new("tee", ctx.clone())
             .branch(branch_a)
             .branch(branch_b)
@@ -269,18 +265,18 @@ fn topology_forgets_a_branch_once_it_is_removed_from_the_tee() {
     let branch_a = tee_handle
         .branch()
         .expect("tee is alive")
-        .to(Box::new(NoOpSink {
+        .to(NoOpSink {
             name: "sink-a".into(),
             pp_log: element_pp_log(ElementType::Other, "sink-a", None),
-        }))
+        })
         .unwrap();
     let branch_b = tee_handle
         .branch()
         .expect("tee is alive")
-        .to(Box::new(NoOpSink {
+        .to(NoOpSink {
             name: "sink-b".into(),
             pp_log: element_pp_log(ElementType::Other, "sink-b", None),
-        }))
+        })
         .unwrap();
     let branch_a_id = tee_handle.attach(branch_a).unwrap();
     tee_handle.attach(branch_b).unwrap();
@@ -322,18 +318,18 @@ fn remove_branch_containing_resolves_through_a_queue_to_the_tee_attached_root() 
         .branch()
         .expect("tee is alive")
         .queue("q-a", 4)
-        .to(Box::new(NoOpSink {
+        .to(NoOpSink {
             name: "sink-a".into(),
             pp_log: element_pp_log(ElementType::Other, "sink-a", None),
-        }))
+        })
         .unwrap();
     let branch_b = tee_handle
         .branch()
         .expect("tee is alive")
-        .to(Box::new(NoOpSink {
+        .to(NoOpSink {
             name: "sink-b".into(),
             pp_log: element_pp_log(ElementType::Other, "sink-b", None),
-        }))
+        })
         .unwrap();
     tee_handle.attach(branch_a).unwrap();
     tee_handle.attach(branch_b).unwrap();
@@ -385,10 +381,10 @@ fn topology_stays_correct_with_dozens_of_branches_added_and_then_removed() {
         let branch = tee_handle
             .branch()
             .expect("tee is alive")
-            .to(Box::new(NoOpSink {
+            .to(NoOpSink {
                 name: name.clone(),
                 pp_log: element_pp_log(ElementType::Other, &name, None),
-            }))
+            })
             .unwrap();
         branch_ids.push(tee_handle.attach(branch).unwrap());
     }
@@ -423,10 +419,10 @@ fn detached_branch_never_appears_in_topology() {
     let (source, _) = FileDemuxer::open("demux", &path).expect("open test video");
 
     let pipeline = Pipeline::new("test", source, |_source, ctx| {
-        let detached = ctx.branch().to(Box::new(NoOpSink {
+        let detached = ctx.branch().to(NoOpSink {
             name: "never-attached".into(),
             pp_log: element_pp_log(ElementType::Other, "never-attached", None),
-        }))?;
+        })?;
         assert_eq!(ctx.graph.snapshot().nodes.len(), 1);
         drop(detached);
         Ok(())
@@ -459,10 +455,10 @@ fn duplicate_names_are_independent_when_detaching_by_branch_id() {
         handle
             .branch()
             .expect("tee is alive")
-            .to(Box::new(NoOpSink {
+            .to(NoOpSink {
                 name: "same-name".into(),
                 pp_log: element_pp_log(ElementType::Other, "same-name", None),
-            }))
+            })
             .unwrap()
     };
     let first = handle.attach(make_branch()).unwrap();
@@ -497,10 +493,10 @@ fn dynamic_attach_and_detach_each_publish_one_graph_revision() {
     let detached = handle
         .branch()
         .expect("tee is alive")
-        .to(Box::new(NoOpSink {
+        .to(NoOpSink {
             name: "dynamic".into(),
             pp_log: element_pp_log(ElementType::Other, "dynamic", None),
-        }))
+        })
         .unwrap();
 
     assert_eq!(pipeline.graph().revision, before);
@@ -520,10 +516,10 @@ fn dynamic_attach_and_detach_each_publish_one_graph_revision() {
     let replacement = handle
         .branch()
         .expect("tee is alive")
-        .to(Box::new(NoOpSink {
+        .to(NoOpSink {
             name: "replacement".into(),
             pp_log: element_pp_log(ElementType::Other, "replacement", None),
-        }))
+        })
         .unwrap();
     let replacement_id = handle.attach(replacement).unwrap();
     assert_eq!(pipeline.graph().revision, before + 3);
@@ -560,10 +556,10 @@ fn dynamic_attach_is_rejected_during_a_timeline_operation() {
     let branch = handle
         .branch()
         .expect("tee alive")
-        .to(Box::new(NoOpSink {
+        .to(NoOpSink {
             name: "late".into(),
             pp_log: element_pp_log(ElementType::Other, "late", None),
-        }))
+        })
         .expect("late branch");
 
     let operation = pipeline
@@ -587,11 +583,11 @@ fn tee_handle_changes_branches_after_the_pipeline_starts() {
     let dynamic_count = Arc::new(AtomicUsize::new(0));
     let mut handle_slot = None;
     let pipeline = Pipeline::new("runtime-tee-test", source, |source, ctx| {
-        let initial_branch = ctx.branch().to(Box::new(CountingSink {
+        let initial_branch = ctx.branch().to(CountingSink {
             name: "initial".into(),
             count: initial_count.clone(),
             pp_log: element_pp_log(ElementType::Other, "initial", None),
-        }))?;
+        })?;
         let (tee_branch, handle) = TeeBuilder::new("tee", ctx.clone())
             .branch(initial_branch)
             .build_dynamic()?;
@@ -607,11 +603,11 @@ fn tee_handle_changes_branches_after_the_pipeline_starts() {
     let dynamic_branch = handle
         .branch()
         .expect("tee is alive")
-        .to(Box::new(CountingSink {
+        .to(CountingSink {
             name: "dynamic".into(),
             count: dynamic_count.clone(),
             pp_log: element_pp_log(ElementType::Other, "dynamic", None),
-        }))
+        })
         .unwrap();
     let branch_id = handle.attach(dynamic_branch).unwrap();
     thread::sleep(Duration::from_millis(100));
@@ -646,10 +642,10 @@ fn bus_messages_carry_the_posting_elements_stable_graph_id() {
         .expect("test video has a video stream")
         .index;
     let pipeline = Pipeline::new("test", source, |source, ctx| {
-        let branch = ctx.branch().to(Box::new(NoOpSink {
+        let branch = ctx.branch().to(NoOpSink {
             name: "stable-id-sink".into(),
             pp_log: element_pp_log(ElementType::Other, "stable-id-sink", None),
-        }))?;
+        })?;
         ctx.attach(source, index, branch)?;
         Ok(())
     })
@@ -771,9 +767,9 @@ fn a_failure_deep_in_a_chain_is_reported_under_the_element_that_raised_it() {
                     pp_log: PpLog::new("Other", "the-middle", None),
                     pad: SrcPad::new("the-middle_src"),
                 })
-                .to(Box::new(AlwaysFailingSink {
+                .to(AlwaysFailingSink {
                     pp_log: PpLog::new("FileMuxer", "the-end", None),
-                }))?;
+                })?;
             context.attach(source, 0, branch)?;
             Ok(())
         },

@@ -35,7 +35,7 @@
 //! let (counter, frames) = FrameCounter::new("counter");
 //!
 //! let pipeline = Pipeline::new("demo", source, |source, ctx| {
-//!     let branch = ctx.branch().to(Box::new(counter))?;
+//!     let branch = ctx.branch().to(counter)?;
 //!     ctx.attach(source, 0, branch)?;
 //!     Ok(())
 //! })?;

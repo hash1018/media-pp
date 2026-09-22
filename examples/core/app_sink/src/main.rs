@@ -64,7 +64,7 @@ mod example {
             let branch = ctx
                 .branch()
                 .pipe(decoder) // same thread as the demux — cheap enough not to need a queue
-                .to(Box::new(sink))?;
+                .to(sink)?;
             ctx.attach(source, video.index, branch)?;
             Ok(())
         })?;

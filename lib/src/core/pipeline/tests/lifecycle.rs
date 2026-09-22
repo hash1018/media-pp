@@ -44,10 +44,10 @@ fn is_running_spans_exactly_the_time_a_source_is_on_its_thread() {
         "running",
         TestVideoSource::new("gen", TestVideoOptions::default()),
         |source, ctx| {
-            let branch = ctx.branch().to(Box::new(NoOpSink {
+            let branch = ctx.branch().to(NoOpSink {
                 name: "noop".into(),
                 pp_log: element_pp_log(ElementType::Other, "noop", None),
-            }))?;
+            })?;
             ctx.attach(source, 0, branch)?;
             Ok(())
         },
@@ -86,10 +86,10 @@ fn pause_then_stop_returns_promptly() {
     let index = video.index;
 
     let pipeline = Pipeline::new("test", source, |source, ctx| {
-        let branch = ctx.branch().queue("q", 4).to(Box::new(NoOpSink {
+        let branch = ctx.branch().queue("q", 4).to(NoOpSink {
             name: "noop".into(),
             pp_log: element_pp_log(ElementType::Other, "noop", None),
-        }))?;
+        })?;
         ctx.attach(source, index, branch)?;
         Ok(())
     })
@@ -216,14 +216,11 @@ fn finish_drains_queued_data_and_eos_even_while_paused() {
         buffers: BUFFERS,
     };
     let pipeline = Pipeline::new("finish-test", source, |source, ctx| {
-        let branch = ctx
-            .branch()
-            .queue("backlog", BUFFERS)
-            .to(Box::new(SlowEosSink {
-                pp_log: element_pp_log(ElementType::Other, "slow-eos", None),
-                count: count.clone(),
-                saw_eos: saw_eos.clone(),
-            }))?;
+        let branch = ctx.branch().queue("backlog", BUFFERS).to(SlowEosSink {
+            pp_log: element_pp_log(ElementType::Other, "slow-eos", None),
+            count: count.clone(),
+            saw_eos: saw_eos.clone(),
+        })?;
         ctx.attach(source, 0, branch)?;
         Ok(())
     })
@@ -272,11 +269,11 @@ fn multi_source_pipeline_stops_every_source_from_one_stop_call() {
         .add_source(video, {
             let count = video_count.clone();
             move |source, ctx| {
-                let branch = ctx.branch().to(Box::new(CountingSink {
+                let branch = ctx.branch().to(CountingSink {
                     name: "video-sink".into(),
                     count,
                     pp_log: element_pp_log(ElementType::Other, "video-sink", None),
-                }))?;
+                })?;
                 ctx.attach(source, 0, branch)?;
                 Ok(())
             }
@@ -285,11 +282,11 @@ fn multi_source_pipeline_stops_every_source_from_one_stop_call() {
         .add_source(audio, {
             let count = audio_count.clone();
             move |source, ctx| {
-                let branch = ctx.branch().to(Box::new(CountingSink {
+                let branch = ctx.branch().to(CountingSink {
                     name: "audio-sink".into(),
                     count,
                     pp_log: element_pp_log(ElementType::Other, "audio-sink", None),
-                }))?;
+                })?;
                 ctx.attach(source, 0, branch)?;
                 Ok(())
             }
@@ -337,10 +334,10 @@ fn pipeline_clock_includes_a_slow_pause_cascade_in_its_frozen_time() {
     let pause_delay = Duration::from_millis(80);
     let source = TestVideoSource::new("video", TestVideoOptions::default());
     let pipeline = Pipeline::new("slow-pause-clock-test", source, |source, ctx| {
-        let branch = ctx.branch().to(Box::new(SlowPauseSink {
+        let branch = ctx.branch().to(SlowPauseSink {
             pause_delay,
             pp_log: element_pp_log(ElementType::Other, "slow-pause", None),
-        }))?;
+        })?;
         ctx.attach(source, 0, branch)?;
         Ok(())
     })
@@ -413,10 +410,10 @@ fn tee_handle_retained_across_a_multi_source_pipeline_does_not_leak() {
     let mut tee_handle_slot = None;
     let pipeline = PipelineBuilder::new("multi-source-tee-test")
         .add_source(video, |source, ctx| {
-            let branch = ctx.branch().to(Box::new(NoOpSink {
+            let branch = ctx.branch().to(NoOpSink {
                 name: "video-sink".into(),
                 pp_log: element_pp_log(ElementType::Other, "video-sink", None),
-            }))?;
+            })?;
             let (tee_branch, handle) = TeeBuilder::new("tee", ctx.clone())
                 .branch(branch)
                 .build_dynamic()?;
@@ -426,10 +423,10 @@ fn tee_handle_retained_across_a_multi_source_pipeline_does_not_leak() {
         })
         .expect("video wiring must succeed")
         .add_source(audio, |source, ctx| {
-            let branch = ctx.branch().to(Box::new(NoOpSink {
+            let branch = ctx.branch().to(NoOpSink {
                 name: "audio-sink".into(),
                 pp_log: element_pp_log(ElementType::Other, "audio-sink", None),
-            }))?;
+            })?;
             ctx.attach(source, 0, branch)?;
             Ok(())
         })
@@ -506,7 +503,7 @@ fn a_source_that_fails_still_stops_its_own_branch() {
         pad: SrcPad::new("failing_src"),
     };
     let pipeline = Pipeline::new("failing-source", source, |source, ctx| {
-        let branch = ctx.branch().to(Box::new(sink))?;
+        let branch = ctx.branch().to(sink)?;
         ctx.attach(source, 0, branch)?;
         Ok(())
     })

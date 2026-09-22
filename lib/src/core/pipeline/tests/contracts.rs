@@ -174,10 +174,10 @@ fn an_undeclared_contract_still_links_to_anything() {
     contract_context()
         .branch()
         .pipe(video_decoder("decoder"))
-        .to(Box::new(NoOpSink {
+        .to(NoOpSink {
             name: "undeclared".into(),
             pp_log: element_pp_log(ElementType::Other, "undeclared", None),
-        }))
+        })
         .expect("an Unknown contract is missing information, not a refusal");
 }
 
@@ -354,7 +354,7 @@ fn a_frame_counter_takes_either_decoded_medium() {
         contract_context()
             .branch()
             .pipe(decoder)
-            .to(Box::new(counter))
+            .to(counter)
             .expect("a decoded-buffer counter accepts both video and audio");
     }
 }
@@ -369,7 +369,7 @@ fn a_decoded_frame_cannot_feed_a_packet_only_sink() {
     let Err(error) = contract_context()
         .branch()
         .pipe(video_decoder("decoder"))
-        .to(Box::new(counter))
+        .to(counter)
     else {
         panic!("decoded frames are not packets");
     };
@@ -623,10 +623,10 @@ fn a_d3d12_renderer_takes_device_resources_only() {
     let Err(error) = contract_context()
         .branch()
         .pipe(video_decoder("decoder"))
-        .to(Box::new(D3d12Renderer::new(
+        .to(D3d12Renderer::new(
             "renderer",
             Box::new(StubRenderer(device.clone())),
-        )))
+        ))
     else {
         panic!("a software decoder's frames have no path to the swap chain");
     };
@@ -645,10 +645,10 @@ fn a_d3d12_renderer_takes_device_resources_only() {
         .branch()
         .pipe(video_decoder("decoder"))
         .pipe(upload)
-        .to(Box::new(D3d12Renderer::new(
+        .to(D3d12Renderer::new(
             "renderer",
             Box::new(StubRenderer(device)),
-        )))
+        ))
         .expect("a D3D12 resource is exactly what this renderer accepts");
 }
 
@@ -669,7 +669,7 @@ fn a_video_synchronizer_carries_the_contract_past_itself() {
         .branch()
         .pipe(video_decoder("decoder"))
         .pipe(sync)
-        .to(Box::new(counter))
+        .to(counter)
     else {
         panic!("scheduling frames does not turn them into packets");
     };
@@ -803,7 +803,7 @@ fn an_incompatible_link_reads_the_way_the_readme_shows_it() {
     let Err(error) = contract_context()
         .branch()
         .pipe(video_decoder("decoder"))
-        .to(Box::new(counter))
+        .to(counter)
     else {
         panic!("decoded frames are not packets");
     };
@@ -882,7 +882,7 @@ fn a_passthrough_at_the_head_of_a_branch_still_carries_the_downstream_requiremen
             VideoSynchronizer::new("sync", ffmpeg::Rational::new(1, 90_000))
                 .expect("a valid time base opens the synchronizer"),
         )
-        .to(Box::new(renderer))
+        .to(renderer)
         .expect("nothing is flowing yet, so the branch alone is consistent");
     let before = context.graph.snapshot();
 
@@ -936,7 +936,7 @@ fn a_passthrough_at_the_head_of_a_branch_accepts_a_matching_source() {
                 .expect("a valid time base opens the synchronizer"),
         )
         .pipe(D3d11Upload::new("upload", &device, 64, 64))
-        .to(Box::new(renderer))
+        .to(renderer)
         .expect("the branch itself is consistent");
 
     let mut source = TestVideoSource::new("video", TestVideoOptions::default());

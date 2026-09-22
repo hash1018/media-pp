@@ -30,7 +30,7 @@ fn pipeline_logs_topology_eos_and_control_at_each_boundary() {
         let branch = context
             .branch()
             .queue("queue", 4)
-            .to(Box::new(AppSink::new("sink", |_buf| Ok(()))))?;
+            .to(AppSink::new("sink", |_buf| Ok(())))?;
         context.attach(source, 0, branch)?;
         Ok(())
     })

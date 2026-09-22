@@ -51,7 +51,7 @@ mod example {
         let (counter, count) = PacketCounter::new("counter");
 
         let pipeline = Pipeline::new("rtsp-source", source, |source, ctx| {
-            let branch = ctx.branch().queue("q", 32).to(Box::new(counter))?;
+            let branch = ctx.branch().queue("q", 32).to(counter)?;
             ctx.attach(source, index, branch)?;
             Ok(())
         })?;

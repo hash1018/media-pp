@@ -52,7 +52,7 @@ fn finishing_a_recording_branch_leaves_a_playable_file_and_a_running_preview() {
 
     let mut tee_handle = None;
     let pipeline = Pipeline::new("tee-recording", source, |source, ctx| {
-        let preview_branch = ctx.branch().to(Box::new(preview))?;
+        let preview_branch = ctx.branch().to(preview)?;
         let (tee_branch, handle) = TeeBuilder::new("tee", ctx.clone())
             .branch(preview_branch)
             .build_dynamic()?;
@@ -177,7 +177,7 @@ fn finishing_a_recording_branch_loses_no_frame_that_reached_it() {
 
     let mut tee_handle = None;
     let pipeline = Pipeline::new("tee-frame-count", source, |source, ctx| {
-        let preview_branch = ctx.branch().to(Box::new(preview))?;
+        let preview_branch = ctx.branch().to(preview)?;
         let (tee_branch, handle) = TeeBuilder::new("tee", ctx.clone())
             .branch(preview_branch)
             .build_dynamic()?;

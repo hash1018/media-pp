@@ -123,7 +123,7 @@ mod windows_example {
                 .pipe(scaler)
                 .queue("frames", 8) // thread boundary so rendering doesn't block scaling
                 .pipe(upload)
-                .to(Box::new(renderer))?;
+                .to(renderer)?;
             ctx.attach(source, 0, branch)?;
             Ok(())
         })?;
@@ -260,7 +260,7 @@ mod linux_example {
                 .pipe(scaler)
                 .queue("frames", 8)
                 .pipe(upload)
-                .to(Box::new(renderer))?;
+                .to(renderer)?;
             ctx.attach(source, 0, branch)?;
             Ok(())
         })?;

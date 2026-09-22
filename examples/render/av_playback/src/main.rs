@@ -170,16 +170,14 @@ mod windows_example {
                     D3d12Upload::new("video-upload", gpu.device(), target.width, target.height)
                         .map_err(|error| Error::Other(error.to_string()))?,
                 )
-                .to(Box::new(
-                    render_common::d3d12_window_renderer(
-                        "video-renderer",
-                        &gpu,
-                        hwnd,
-                        target.width,
-                        target.height,
-                    )
-                    .map_err(|error| Error::Other(format!("{error:?}")))?,
-                ))?;
+                .to(render_common::d3d12_window_renderer(
+                    "video-renderer",
+                    &gpu,
+                    hwnd,
+                    target.width,
+                    target.height,
+                )
+                .map_err(|error| Error::Other(format!("{error:?}")))?)?;
             context.attach(source, streams.video_index, video_branch)?;
 
             // Keep a stable insertion point on the demuxer's audio pad. With
@@ -241,7 +239,7 @@ mod windows_example {
                 audio_time_base,
             )?)
             .queue("audio-output", 8)
-            .to(Box::new(audio_renderer))?;
+            .to(audio_renderer)?;
         let branch_id = audio_tee.attach(branch)?;
         println!("audio on: {device_name}; video is synchronized to played audio");
         Ok(branch_id)
@@ -313,18 +311,16 @@ mod linux_example {
                     "video-sync",
                     streams.video_time_base,
                 )?)
-                .to(Box::new(
-                    render_common::cuda_window_renderer(
-                        "video-renderer",
-                        &gpu,
-                        &cuda,
-                        target.display,
-                        target.window,
-                        target.width,
-                        target.height,
-                    )
-                    .map_err(Error::Other)?,
-                ))?;
+                .to(render_common::cuda_window_renderer(
+                    "video-renderer",
+                    &gpu,
+                    &cuda,
+                    target.display,
+                    target.window,
+                    target.width,
+                    target.height,
+                )
+                .map_err(Error::Other)?)?;
             context.attach(source, streams.video_index, video_branch)?;
 
             let (audio_tee, handle) =
@@ -384,7 +380,7 @@ mod linux_example {
                 audio_time_base,
             )?)
             .queue("audio-output", 8)
-            .to(Box::new(audio_renderer))?;
+            .to(audio_renderer)?;
         let branch_id = audio_tee.attach(branch)?;
         println!("audio on: {device_name}; video is synchronized to played audio");
         Ok(branch_id)

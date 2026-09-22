@@ -2416,7 +2416,7 @@ mod tests {
             });
 
             let pipeline = Pipeline::new("capture-color", source, |source, ctx| {
-                let branch = ctx.branch().to(Box::new(sink))?;
+                let branch = ctx.branch().to(sink)?;
                 ctx.attach(source, 0, branch)?;
                 Ok(())
             })

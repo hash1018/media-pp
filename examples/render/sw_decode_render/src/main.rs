@@ -113,7 +113,7 @@ mod windows_example {
                 .pipe(pacer)
                 .pipe(scaler)
                 .pipe(upload)
-                .to(Box::new(renderer))?;
+                .to(renderer)?;
             ctx.attach(source, video.index, branch)?;
             Ok(())
         })?;
@@ -233,7 +233,7 @@ mod linux_example {
                 .pipe(pacer)
                 .pipe(scaler)
                 .pipe(upload)
-                .to(Box::new(renderer))?;
+                .to(renderer)?;
             ctx.attach(source, video.index, branch)?;
             Ok(())
         })?;

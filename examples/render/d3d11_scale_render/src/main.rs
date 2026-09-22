@@ -120,7 +120,7 @@ mod windows_example {
                 .pipe(scaler)
                 .queue("scaled-frames", 8)
                 .pipe(pacer)
-                .to(Box::new(renderer))?;
+                .to(renderer)?;
             ctx.attach(source, video.index, branch)?;
             Ok(())
         })?;

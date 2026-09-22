@@ -185,7 +185,7 @@ fn four_d3d11_elements_share_one_device_across_queue_boundaries() {
             .pipe(chroma_key)
             .queue("to-download", 4)
             .pipe(download)
-            .to(Box::new(sink))?;
+            .to(sink)?;
         ctx.attach(source, 0, branch)?;
         Ok(())
     })
@@ -313,7 +313,7 @@ fn a_capture_sharing_the_device_does_not_slow_the_compositor() {
     // Counted synchronously: a queue here would report its own worker's pace
     // rather than the compositor's, which is the number under test.
     let composite_pipeline = Pipeline::new("composite", compositor, |source, ctx| {
-        let branch = ctx.branch().to(Box::new(sink))?;
+        let branch = ctx.branch().to(sink)?;
         ctx.attach(source, 0, branch)?;
         Ok(())
     })

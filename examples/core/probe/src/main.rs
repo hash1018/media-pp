@@ -55,7 +55,7 @@ mod example {
             let branch = ctx
                 .branch()
                 .queue("q1", 32) // thread boundary: demux thread -> counter thread
-                .to(Box::new(counter))?;
+                .to(counter)?;
             ctx.attach(source, video.index, branch)?;
             Ok(())
         })?;

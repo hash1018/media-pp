@@ -212,7 +212,7 @@ mod windows_example {
                 output_height,
             )
             .expect("failed to create renderer");
-            let render_branch = ctx.branch().queue("render", 4).to(Box::new(renderer))?;
+            let render_branch = ctx.branch().queue("render", 4).to(renderer)?;
 
             let download = D3d11Download::new(
                 "download",
@@ -491,7 +491,7 @@ mod linux_example {
                 output_height,
             )
             .expect("failed to create renderer");
-            let render_branch = ctx.branch().queue("render", 4).to(Box::new(renderer))?;
+            let render_branch = ctx.branch().queue("render", 4).to(renderer)?;
 
             let download = CudaDownload::new(
                 "download",

@@ -267,7 +267,7 @@ fn pause_resume_storm_does_not_grow_process_memory() {
     media_pp::init().expect("ffmpeg init");
     let (counter, frames) = FrameCounter::new("counter");
     let pipeline = Pipeline::new("soak-control", test_source("video"), |source, ctx| {
-        let branch = ctx.branch().queue("frames", 8).to(Box::new(counter))?;
+        let branch = ctx.branch().queue("frames", 8).to(counter)?;
         ctx.attach(source, 0, branch)?;
         Ok(())
     })
@@ -318,11 +318,7 @@ fn seek_storm_does_not_grow_process_memory() {
     let (counter, frames) = FrameCounter::new("counter");
     let pipeline = Pipeline::new("soak-seek", source, |source, ctx| {
         let decoder = SwDecoder::new("decoder", parameters)?;
-        let branch = ctx
-            .branch()
-            .pipe(decoder)
-            .queue("frames", 8)
-            .to(Box::new(counter))?;
+        let branch = ctx.branch().pipe(decoder).queue("frames", 8).to(counter)?;
         ctx.attach(source, index, branch)?;
         Ok(())
     })
@@ -375,7 +371,7 @@ fn tee_branch_churn_does_not_grow_process_memory() {
     let (fixed_counter, fixed_frames) = FrameCounter::new("fixed-counter");
     let mut tee_handle = None;
     let pipeline = Pipeline::new("soak-tee", test_source("video"), |source, ctx| {
-        let fixed = ctx.branch().to(Box::new(fixed_counter))?;
+        let fixed = ctx.branch().to(fixed_counter)?;
         let (tee_branch, handle) = TeeBuilder::new("tee", ctx.clone())
             .branch(fixed)
             .build_dynamic()?;
@@ -396,7 +392,7 @@ fn tee_branch_churn_does_not_grow_process_memory() {
         let branch = tee_handle
             .branch()
             .expect("the tee is alive while its pipeline runs")
-            .to(Box::new(counter))
+            .to(counter)
             .expect("build the runtime branch");
         let id = tee_handle
             .attach(branch)
@@ -448,7 +444,7 @@ fn compositor_input_churn_does_not_grow_process_memory() {
 
     let (counter, frames) = FrameCounter::new("counter");
     let output = Pipeline::new("soak-compositor", compositor, |source, ctx| {
-        let branch = ctx.branch().queue("composited", 4).to(Box::new(counter))?;
+        let branch = ctx.branch().queue("composited", 4).to(counter)?;
         ctx.attach(source, 0, branch)?;
         Ok(())
     })
@@ -549,7 +545,7 @@ fn a_running_compositor_does_not_grow_while_it_answers_frames() {
         // A queue, so composited frames are still referenced when the next
         // composite replaces them — with a synchronous sink nothing is ever
         // held and the release has nothing to prove.
-        let branch = ctx.branch().queue("composited", 4).to(Box::new(counter))?;
+        let branch = ctx.branch().queue("composited", 4).to(counter)?;
         ctx.attach(source, 0, branch)?;
         Ok(())
     })
@@ -747,7 +743,7 @@ mod d3d11 {
                 .pipe(upload)
                 .pipe(scaler)
                 .queue("gpu-frames", 4)
-                .to(Box::new(counter))?;
+                .to(counter)?;
             ctx.attach(source, 0, branch)?;
             Ok(())
         })
@@ -834,7 +830,7 @@ mod d3d11 {
                 .branch()
                 .pipe(key)
                 .queue("keyed-frames", 4)
-                .to(Box::new(counter))?;
+                .to(counter)?;
             ctx.attach(source, 0, branch)?;
             Ok(())
         })
@@ -872,7 +868,7 @@ mod d3d11 {
                 .branch()
                 .pipe(decoder)
                 .queue("decoded-frames", DECODE_QUEUE_DEPTH)
-                .to(Box::new(counter))?;
+                .to(counter)?;
             ctx.attach(source, index, branch)?;
             Ok(())
         })
@@ -940,7 +936,7 @@ mod d3d11 {
                 .pipe(upload)
                 .queue("gpu-frames", 4)
                 .pipe(encoder)
-                .to(Box::new(counter))?;
+                .to(counter)?;
             ctx.attach(source, 0, branch)?;
             Ok(())
         })
@@ -1208,7 +1204,7 @@ mod d3d11 {
         let output = Pipeline::new("soak-running-d3d11", compositor, |source, ctx| {
             // As in the software scenario: without a queue nothing is ever
             // still referenced when the next composite replaces it.
-            let branch = ctx.branch().queue("composited", 4).to(Box::new(counter))?;
+            let branch = ctx.branch().queue("composited", 4).to(counter)?;
             ctx.attach(source, 0, branch)?;
             Ok(())
         })
@@ -1381,7 +1377,7 @@ mod d3d11 {
         );
 
         let pipeline = Pipeline::new("soak-dxgi-capture", source, |source, ctx| {
-            let branch = ctx.branch().queue("captured", 4).to(Box::new(counter))?;
+            let branch = ctx.branch().queue("captured", 4).to(counter)?;
             ctx.attach(source, 0, branch)?;
             Ok(())
         })
@@ -1645,7 +1641,7 @@ mod d3d11 {
         )
         .expect("open WGC source");
         let pipeline = Pipeline::new("soak-wgc-capture", source, |source, ctx| {
-            let branch = ctx.branch().queue("captured", 4).to(Box::new(counter))?;
+            let branch = ctx.branch().queue("captured", 4).to(counter)?;
             ctx.attach(source, 0, branch)?;
             Ok(())
         })
@@ -1774,7 +1770,7 @@ mod d3d12 {
                 .pipe(scaler)
                 .queue("gpu-frames", 4)
                 .pipe(download)
-                .to(Box::new(counter))?;
+                .to(counter)?;
             ctx.attach(source, 0, branch)?;
             Ok(())
         })
@@ -1892,7 +1888,7 @@ mod cuda {
                 .pipe(scaler)
                 .queue("gpu-frames", 4)
                 .pipe(download)
-                .to(Box::new(counter))?;
+                .to(counter)?;
             ctx.attach(source, 0, branch)?;
             Ok(())
         })
@@ -1935,7 +1931,7 @@ mod cuda {
                 .branch()
                 .pipe(decoder)
                 .queue("decoded-frames", DECODE_QUEUE_DEPTH)
-                .to(Box::new(counter))?;
+                .to(counter)?;
             ctx.attach(source, index, branch)?;
             Ok(())
         })
@@ -1989,7 +1985,7 @@ mod cuda {
                 .pipe(upload)
                 .queue("gpu-frames", 4)
                 .pipe(encoder)
-                .to(Box::new(counter))?;
+                .to(counter)?;
             ctx.attach(source, 0, branch)?;
             Ok(())
         })
@@ -2240,7 +2236,7 @@ mod cuda {
         let output = Pipeline::new("soak-running-cuda", compositor, |source, ctx| {
             // As in the software and D3D11 scenarios: without a queue nothing
             // is ever still referenced when the next composite replaces it.
-            let branch = ctx.branch().queue("composited", 4).to(Box::new(counter))?;
+            let branch = ctx.branch().queue("composited", 4).to(counter)?;
             ctx.attach(source, 0, branch)?;
             Ok(())
         })
@@ -2487,7 +2483,7 @@ mod pipewire {
             );
 
         let pipeline = Pipeline::new("soak-pipewire-capture", source, |source, ctx| {
-            let branch = ctx.branch().queue("captured", 4).to(Box::new(counter))?;
+            let branch = ctx.branch().queue("captured", 4).to(counter)?;
             ctx.attach(source, 0, branch)?;
             Ok(())
         })
@@ -2520,7 +2516,7 @@ mod pipewire {
                 );
 
         let pipeline = Pipeline::new("soak-pipewire-capture-gpu", source, |source, ctx| {
-            let branch = ctx.branch().queue("captured", 4).to(Box::new(counter))?;
+            let branch = ctx.branch().queue("captured", 4).to(counter)?;
             ctx.attach(source, 0, branch)?;
             Ok(())
         })

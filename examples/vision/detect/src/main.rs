@@ -214,7 +214,7 @@ mod example {
                 .pipe(decoder) // same thread as the demux — cheap enough not to need a queue
                 .queue("frames", 8) // scaler/detector run on their own thread
                 .pipe(scaler)
-                .to(Box::new(detector))?;
+                .to(detector)?;
             ctx.attach(source, video.index, branch)?;
             Ok(())
         })?;

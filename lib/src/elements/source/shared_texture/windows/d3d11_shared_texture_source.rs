@@ -726,7 +726,7 @@ mod tests {
         let frames = Arc::new(AtomicUsize::new(0));
         let counted = frames.clone();
         let pipeline = Pipeline::new("shared-texture", source, move |source, ctx| {
-            let branch = ctx.branch().to(Box::new(crate::elements::AppSink::new(
+            let branch = ctx.branch().to(crate::elements::AppSink::new(
                 "count",
                 move |buf: MediaBuffer| {
                     if !buf.is_eos() {
@@ -734,7 +734,7 @@ mod tests {
                     }
                     Ok(())
                 },
-            )))?;
+            ))?;
             ctx.attach(source, 0, branch)?;
             Ok(())
         })

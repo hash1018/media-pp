@@ -969,7 +969,7 @@ fn resuming_after_a_pause_preserves_output_phase() {
         .expect("D3d11VideoCompositor::new should succeed");
 
     let pipeline = Pipeline::new("phase-test", compositor, |source, ctx| {
-        let branch = ctx.branch().to(Box::new(sink))?;
+        let branch = ctx.branch().to(sink)?;
         ctx.attach(source, 0, branch)?;
         Ok(())
     })
@@ -1028,7 +1028,7 @@ fn its_ticks_are_reported_through_its_pipeline() {
     let (compositor, _handle) = D3d11VideoCompositor::new("ticking", &device, context, options)
         .expect("D3d11VideoCompositor::new should succeed");
     let pipeline = Pipeline::new("ticks", compositor, |source, ctx| {
-        let branch = ctx.branch().to(Box::new(sink))?;
+        let branch = ctx.branch().to(sink)?;
         ctx.attach(source, 0, branch)?;
         Ok(())
     })

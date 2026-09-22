@@ -565,20 +565,22 @@ pub trait Filter: Source + Sink {}
 
 impl<T: Source + Sink> Filter for T {}
 
-/// A boxed filter is a filter, so a container that holds elements as trait
-/// objects can wrap one in whatever a chain stage is wrapped in.
+/// A boxed element is the element it holds — a boxed sink a sink, a boxed
+/// filter a filter — so anything that takes one takes it boxed or not.
 ///
-/// [`Rack`](crate::elements::Rack) is why this exists. Its contents arrive
-/// already boxed — that is what makes them exchangeable — and everything a
-/// chain gives an element it builds, from the pipeline id in its log to the
-/// tracer that stamps a failure with the name of whatever raised it, is
-/// written against a type that implements these three traits. Without this
-/// the elements inside a rack would be the one stretch of a running graph
-/// that no such wrapper could reach.
+/// Two things need that. [`ChainBuilder::to`](crate::pipeline::ChainBuilder::to)
+/// takes any sink, and one a muxer handed over already boxed is still one.
+/// And [`Rack`](crate::elements::Rack) holds its contents boxed — that is
+/// what makes them exchangeable — and everything a chain gives an element
+/// it builds, from the pipeline id in its log to the tracer that stamps a
+/// failure with the name of whatever raised it, is written against a type
+/// that implements these three traits. Without this the elements inside a
+/// rack would be the one stretch of a running graph no such wrapper could
+/// reach.
 ///
 /// The delegation is exactly that. Nothing here decides anything; every
 /// method is the one on the element inside.
-impl Element for Box<dyn Filter> {
+impl<E: Element + ?Sized> Element for Box<E> {
     fn name(&self) -> Arc<str> {
         (**self).name()
     }
@@ -604,13 +606,13 @@ impl Element for Box<dyn Filter> {
     }
 }
 
-impl Source for Box<dyn Filter> {
+impl<S: Source + ?Sized> Source for Box<S> {
     fn src_pads(&mut self) -> &mut [SrcPad] {
         (**self).src_pads()
     }
 }
 
-impl Sink for Box<dyn Filter> {
+impl<S: Sink + ?Sized> Sink for Box<S> {
     fn ready_consume(&mut self) -> bool {
         (**self).ready_consume()
     }
@@ -625,5 +627,88 @@ impl Sink for Box<dyn Filter> {
 
     fn control(&mut self, msg: ControlMsg) -> Result<()> {
         (**self).control(msg)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::contract::{MediaKind, PortContract};
+
+    /// A sink whose every answer differs from the trait's default, so a
+    /// boxed one that fell back to a default would be caught saying it.
+    struct Opinionated {
+        pp_log: PpLog,
+        consumed: usize,
+    }
+
+    impl Element for Opinionated {
+        fn name(&self) -> Arc<str> {
+            "opinionated".into()
+        }
+
+        fn element_type(&self) -> ElementType {
+            ElementType::Other
+        }
+
+        fn pp_log(&self) -> &PpLog {
+            &self.pp_log
+        }
+
+        fn pp_log_mut(&mut self) -> &mut PpLog {
+            &mut self.pp_log
+        }
+    }
+
+    impl Sink for Opinionated {
+        fn ready_consume(&mut self) -> bool {
+            false
+        }
+
+        fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
+            self.consumed += 1;
+            Ok(())
+        }
+
+        fn input_contract(&self) -> InputContract {
+            InputContract::Fixed(PortContract::packet(MediaKind::AudioPacket))
+        }
+
+        fn control(&mut self, _msg: ControlMsg) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    fn opinionated() -> Opinionated {
+        Opinionated {
+            pp_log: element_pp_log(ElementType::Other, "opinionated", None),
+            consumed: 0,
+        }
+    }
+
+    /// A boxed sink answers what the sink inside answers — including where
+    /// the trait has a default the box could have fallen back to — whether
+    /// it is boxed as itself or as `dyn Sink`, which is what lets
+    /// `ChainBuilder::to` take either.
+    #[test]
+    fn a_boxed_sink_is_the_sink_inside_it() {
+        fn check(mut sink: impl Sink) {
+            assert_eq!(&*sink.name(), "opinionated");
+            assert!(!sink.ready_consume(), "not the default of true");
+            assert_eq!(
+                sink.input_contract(),
+                InputContract::Fixed(PortContract::packet(MediaKind::AudioPacket)),
+                "not the default of Unknown"
+            );
+            sink.consume(MediaBuffer::Eos).unwrap();
+        }
+        check(Box::new(opinionated()));
+        check(Box::new(opinionated()) as Box<dyn Sink>);
+        check(Box::new(Box::new(opinionated()) as Box<dyn Sink>));
+
+        let mut boxed: Box<dyn Sink> = Box::new(opinionated());
+        boxed.consume(MediaBuffer::Eos).unwrap();
+        let mut twice = Box::new(boxed);
+        twice.consume(MediaBuffer::Eos).unwrap();
     }
 }

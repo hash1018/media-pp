@@ -97,7 +97,7 @@ mod windows_example {
                 .pipe(resampler)
                 .pipe(volume)
                 .queue("audio-output", 8)
-                .to(Box::new(renderer))?;
+                .to(renderer)?;
             context.attach(source, 0, branch)?;
             Ok(())
         })?;
@@ -205,7 +205,7 @@ mod linux_example {
                 .pipe(resampler)
                 .pipe(volume)
                 .queue("audio-output", 8)
-                .to(Box::new(renderer))?;
+                .to(renderer)?;
             context.attach(source, 0, branch)?;
             Ok(())
         })?;

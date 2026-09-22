@@ -124,7 +124,7 @@ mod windows_example {
                     D3d12Upload::new("upload", gpu.device(), width, height)
                         .expect("failed to create the D3D12 upload"),
                 )
-                .to(Box::new(renderer))?;
+                .to(renderer)?;
             ctx.attach(source, 0, branch)?;
             Ok(())
         })?;
@@ -253,7 +253,7 @@ mod linux_example {
                 .pipe(pacer)
                 .pipe(scaler)
                 .pipe(upload)
-                .to(Box::new(renderer))?;
+                .to(renderer)?;
             ctx.attach(source, 0, branch)?;
             Ok(())
         })?;

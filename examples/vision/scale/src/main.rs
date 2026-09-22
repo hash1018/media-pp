@@ -70,7 +70,7 @@ mod example {
                 .pipe(decoder) // same thread as the demux — cheap enough not to need a queue
                 .queue("frames", 8) // scaler/sink run on their own thread
                 .pipe(scaler)
-                .to(Box::new(sink))?;
+                .to(sink)?;
             ctx.attach(source, video.index, branch)?;
             Ok(())
         })?;

@@ -599,6 +599,12 @@ compile error with no explanation.
 
 ### Changed
 
+- **`ChainBuilder::to` takes any sink, boxed or not.** `.to(counter)` rather
+  than `.to(Box::new(counter))`, and the same for `build`. A boxed element is
+  now the element it holds — `Box<T>` is an `Element`, `Sink` and `Source`
+  wherever `T` is — so a sink already boxed, as a muxer hands its sinks
+  over, is still one, and `.to(Box::new(x))` compiles as it did.
+
 - **A chroma key multiplies the alpha it is given instead of replacing it.**
   `SwChromaKey`, `D3d11ChromaKey` and `CudaChromaKey` used to write the key's
   coverage straight into alpha, so a key placed after a luma key put back

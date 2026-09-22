@@ -957,7 +957,7 @@ mod tests {
         };
 
         let pipeline = Pipeline::new("mixer-stereo-test", mixer, |source, ctx| {
-            let branch = ctx.branch().to(Box::new(sink))?;
+            let branch = ctx.branch().to(sink)?;
             ctx.attach(source, 0, branch)?;
             Ok(())
         })
@@ -1026,7 +1026,7 @@ mod tests {
         };
 
         let pipeline = Pipeline::new("mixer-test", mixer, |source, ctx| {
-            let branch = ctx.branch().to(Box::new(sink))?;
+            let branch = ctx.branch().to(sink)?;
             ctx.attach(source, 0, branch)?;
             Ok(())
         })
@@ -1090,7 +1090,7 @@ mod tests {
             pp_log: element_pp_log(ElementType::Other, "recorder", None),
         };
         let pipeline = Pipeline::new("mixer-test-2", mixer, |source, ctx| {
-            let branch = ctx.branch().to(Box::new(sink))?;
+            let branch = ctx.branch().to(sink)?;
             ctx.attach(source, 0, branch)?;
             Ok(())
         })
@@ -1145,7 +1145,7 @@ mod tests {
             pp_log: element_pp_log(ElementType::Other, "recorder", None),
         };
         let pipeline = Pipeline::new("mixer-test-idle", mixer, |source, ctx| {
-            let branch = ctx.branch().to(Box::new(sink))?;
+            let branch = ctx.branch().to(sink)?;
             ctx.attach(source, 0, branch)?;
             Ok(())
         })
@@ -1191,7 +1191,7 @@ mod tests {
             pp_log: element_pp_log(ElementType::Other, "recorder", None),
         };
         let pipeline = Pipeline::new("mixer-test-3", mixer, |source, ctx| {
-            let branch = ctx.branch().to(Box::new(sink))?;
+            let branch = ctx.branch().to(sink)?;
             ctx.attach(source, 0, branch)?;
             Ok(())
         })
@@ -1335,7 +1335,7 @@ mod tests {
             pp_log: element_pp_log(ElementType::Other, "shapes", None),
         };
         let pipeline = Pipeline::new("mixer-test-rate", mixer, |source, ctx| {
-            let branch = ctx.branch().to(Box::new(sink))?;
+            let branch = ctx.branch().to(sink)?;
             ctx.attach(source, 0, branch)?;
             Ok(())
         })
@@ -1595,7 +1595,7 @@ mod tests {
                 },
             );
             let pipeline = Pipeline::new("mix", mixer, move |source, context| {
-                let branch = context.branch().to(Box::new(listener))?;
+                let branch = context.branch().to(listener)?;
                 context.attach(source, 0, branch)?;
                 Ok(())
             })

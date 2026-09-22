@@ -84,7 +84,7 @@ mod windows_example {
                 .queue("scaled", 4) // thread boundary so uploading doesn't block scaling
                 .pipe(upload)
                 .queue("frames", 8) // thread boundary so rendering doesn't block uploading
-                .to(Box::new(renderer))?;
+                .to(renderer)?;
             ctx.attach(source, 0, branch)?;
             Ok(())
         })?;

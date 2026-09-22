@@ -56,8 +56,8 @@ mod example {
 
         let pipeline = Pipeline::new("tee", source, |source, ctx| {
             let decoder = SwDecoder::new("decoder", params).expect("failed to open decoder");
-            let decode_branch = ctx.branch().pipe(decoder).to(Box::new(frame_counter))?;
-            let packet_branch = ctx.branch().to(Box::new(packet_counter))?;
+            let decode_branch = ctx.branch().pipe(decoder).to(frame_counter)?;
+            let packet_branch = ctx.branch().to(packet_counter)?;
 
             let tee_branch = TeeBuilder::new("tee", ctx.clone())
                 .branch(decode_branch)

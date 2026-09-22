@@ -770,7 +770,7 @@ mod tests {
         });
         let pipeline =
             crate::pipeline::Pipeline::new("test-process-audio", source, |source, ctx| {
-                let branch = ctx.branch().to(Box::new(sink))?;
+                let branch = ctx.branch().to(sink)?;
                 ctx.attach(source, 0, branch)?;
                 Ok(())
             })

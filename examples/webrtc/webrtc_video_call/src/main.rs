@@ -103,7 +103,7 @@ mod windows_example {
                 .pipe(decoder)
                 .pipe(scaler)
                 .pipe(upload)
-                .to(Box::new(renderer))?;
+                .to(renderer)?;
             ctx.attach(source, 0, branch)?;
             Ok(())
         })
@@ -199,7 +199,7 @@ mod linux_example {
                 .pipe(decoder)
                 .pipe(scaler)
                 .pipe(upload)
-                .to(Box::new(renderer))?;
+                .to(renderer)?;
             ctx.attach(source, 0, branch)?;
             Ok(())
         })
@@ -460,11 +460,7 @@ mod common {
         sink.set_source_parameters(&encoder.parameters())?;
 
         let pipeline = Pipeline::new("peer-a-send", source, move |source, ctx| {
-            let branch = ctx
-                .branch()
-                .queue("to-encode", 8)
-                .pipe(encoder)
-                .to(Box::new(sink))?;
+            let branch = ctx.branch().queue("to-encode", 8).pipe(encoder).to(sink)?;
             ctx.attach(source, 0, branch)?;
             Ok(())
         })?;
@@ -554,7 +550,7 @@ mod common {
                 .pipe(scaler)
                 .queue("to-encode", 8)
                 .pipe(encoder)
-                .to(Box::new(sink))?;
+                .to(sink)?;
             ctx.attach(source, index, branch)?;
             Ok(())
         })?;

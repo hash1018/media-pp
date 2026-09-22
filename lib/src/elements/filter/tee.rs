@@ -247,7 +247,7 @@ impl TeeBuilder {
         let tee_name = tee.name.clone();
         let shared = tee.shared.clone();
         let context = shared.context.clone();
-        let mut tee_branch = context.branch().to(Box::new(tee))?;
+        let mut tee_branch = context.branch().to(tee)?;
         // `ChainBuilder` ends a chain at a terminal `Sink`, which by
         // definition emits nothing, so it recorded this `Tee` as producing
         // `Unknown`. A `Tee` is the one terminal that does have outputs —
@@ -894,25 +894,25 @@ mod tests {
         let after_count = Arc::new(AtomicUsize::new(0));
         let before = context
             .branch()
-            .to(Box::new(CountingSink {
+            .to(CountingSink {
                 name: "before",
                 count: before_count.clone(),
                 pp_log: element_pp_log(ElementType::Other, "before", None),
-            }))
+            })
             .unwrap();
         let failing = context
             .branch()
-            .to(Box::new(AlwaysFailSink {
+            .to(AlwaysFailSink {
                 pp_log: element_pp_log(ElementType::Other, "always-fail", None),
-            }))
+            })
             .unwrap();
         let after = context
             .branch()
-            .to(Box::new(CountingSink {
+            .to(CountingSink {
                 name: "after",
                 count: after_count.clone(),
                 pp_log: element_pp_log(ElementType::Other, "after", None),
-            }))
+            })
             .unwrap();
         let tee_branch = TeeBuilder::new("tee", context.clone())
             .branch(before)
@@ -964,21 +964,21 @@ mod tests {
         let healthy_count = Arc::new(AtomicUsize::new(0));
         let failing = context
             .branch()
-            .to(Box::new(ControlObservingSink {
+            .to(ControlObservingSink {
                 name: "control-fail",
                 count: failing_count.clone(),
                 fail: true,
                 pp_log: element_pp_log(ElementType::Other, "control-fail", None),
-            }))
+            })
             .unwrap();
         let healthy = context
             .branch()
-            .to(Box::new(ControlObservingSink {
+            .to(ControlObservingSink {
                 name: "control-ok",
                 count: healthy_count.clone(),
                 fail: false,
                 pp_log: element_pp_log(ElementType::Other, "control-ok", None),
-            }))
+            })
             .unwrap();
         let tee_branch = TeeBuilder::new("tee", context.clone())
             .branch(failing)
@@ -1013,11 +1013,11 @@ mod tests {
         let successful = Arc::new(AtomicUsize::new(0));
         let panic_once = context
             .branch()
-            .to(Box::new(PanicOnceSink {
+            .to(PanicOnceSink {
                 panicked: false,
                 successful: successful.clone(),
                 pp_log: element_pp_log(ElementType::Other, "panic-once", None),
-            }))
+            })
             .unwrap();
         let tee_branch = TeeBuilder::new("tee", context.clone())
             .branch(panic_once)
@@ -1088,11 +1088,11 @@ mod tests {
         let kept = Arc::new(Mutex::new(Vec::new()));
         let keep_branch = context
             .branch()
-            .to(Box::new(RecordingSink {
+            .to(RecordingSink {
                 name: "preview",
                 seen: kept.clone(),
                 pp_log: element_pp_log(ElementType::Other, "preview", None),
-            }))
+            })
             .unwrap();
         let (tee_branch, handle) = TeeBuilder::new("tee", context.clone())
             .branch(keep_branch)
@@ -1105,11 +1105,11 @@ mod tests {
         let recording = handle
             .branch()
             .unwrap()
-            .to(Box::new(RecordingSink {
+            .to(RecordingSink {
                 name: "recording",
                 seen: recorded.clone(),
                 pp_log: element_pp_log(ElementType::Other, "recording", None),
-            }))
+            })
             .unwrap();
         let branch_id = handle.attach(recording).unwrap();
 
@@ -1164,11 +1164,11 @@ mod tests {
             .branch()
             .unwrap()
             .queue("recording", 8)
-            .to(Box::new(SlowRecordingSink {
+            .to(SlowRecordingSink {
                 name: "recorder",
                 seen: seen.clone(),
                 pp_log: element_pp_log(ElementType::Other, "recorder", None),
-            }))
+            })
             .unwrap();
         let branch_id = handle.attach(recording).unwrap();
 
@@ -1204,11 +1204,11 @@ mod tests {
         let survivor_count = Arc::new(AtomicUsize::new(0));
         let survivor = context
             .branch()
-            .to(Box::new(CountingSink {
+            .to(CountingSink {
                 name: "survivor",
                 count: survivor_count.clone(),
                 pp_log: element_pp_log(ElementType::Other, "survivor", None),
-            }))
+            })
             .unwrap();
         let (tee_branch, handle) = TeeBuilder::new("tee", context.clone())
             .branch(survivor)
@@ -1220,9 +1220,9 @@ mod tests {
         let branch = handle
             .branch()
             .unwrap()
-            .to(Box::new(PanicOnDropSink {
+            .to(PanicOnDropSink {
                 pp_log: element_pp_log(ElementType::Other, "panics-on-drop", None),
-            }))
+            })
             .unwrap();
         let branch_id = handle.attach(branch).unwrap();
         handle.finish_branch(branch_id).unwrap();
@@ -1340,11 +1340,11 @@ mod tests {
         let branch = handle
             .branch()
             .unwrap()
-            .to(Box::new(CountingSink {
+            .to(CountingSink {
                 name: "after-poison",
                 count: Arc::new(AtomicUsize::new(0)),
                 pp_log: element_pp_log(ElementType::Other, "after-poison", None),
-            }))
+            })
             .unwrap();
         let branch_id = handle.attach(branch).unwrap();
         assert_eq!(handle.sink_count(), 1);
@@ -1369,11 +1369,11 @@ mod tests {
         let blocking = handle
             .branch()
             .unwrap()
-            .to(Box::new(BlockingSink {
+            .to(BlockingSink {
                 entered: Some(entered_tx),
                 release: release_rx,
                 pp_log: element_pp_log(ElementType::Other, "blocking", None),
-            }))
+            })
             .unwrap();
         let blocking_id = handle.attach(blocking).unwrap();
 
@@ -1385,11 +1385,11 @@ mod tests {
         let new_branch = handle
             .branch()
             .unwrap()
-            .to(Box::new(CountingSink {
+            .to(CountingSink {
                 name: "new",
                 count: Arc::new(AtomicUsize::new(0)),
                 pp_log: element_pp_log(ElementType::Other, "new", None),
-            }))
+            })
             .unwrap();
         let (attach_tx, attach_rx) = mpsc::channel();
         let attach_handle = handle.clone();
@@ -1441,11 +1441,11 @@ mod tests {
         let initial_count = Arc::new(AtomicUsize::new(0));
         let initial = context
             .branch()
-            .to(Box::new(CountingSink {
+            .to(CountingSink {
                 name: "initial",
                 count: initial_count.clone(),
                 pp_log: element_pp_log(ElementType::Other, "initial", None),
-            }))
+            })
             .unwrap();
         let (tee_branch, handle) = TeeBuilder::new("tee", context.clone())
             .branch(initial)
@@ -1487,11 +1487,11 @@ mod tests {
                     let branch = mutation_handle
                         .branch()
                         .ok_or_else(|| "Tee disappeared during stress test".to_owned())?
-                        .to(Box::new(CountingSink {
+                        .to(CountingSink {
                             name: "dynamic",
                             count: Arc::new(AtomicUsize::new(0)),
                             pp_log: element_pp_log(ElementType::Other, "dynamic", None),
-                        }))
+                        })
                         .map_err(|error| error.to_string())?;
                     let branch_id = mutation_handle
                         .attach(branch)
@@ -1544,11 +1544,11 @@ mod tests {
         let branch = handle
             .branch()
             .unwrap()
-            .to(Box::new(GraphInspectingDropSink {
+            .to(GraphInspectingDropSink {
                 graph,
                 dropped: Some(dropped_tx),
                 pp_log: element_pp_log(ElementType::Other, "graph-inspecting-drop", None),
-            }))
+            })
             .unwrap();
         let branch_id = handle.attach(branch).unwrap();
         let (done_tx, done_rx) = mpsc::channel();

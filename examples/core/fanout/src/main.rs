@@ -50,14 +50,11 @@ mod example {
                 let branch = ctx
                     .branch()
                     .queue("video-q", 32) // its own thread, separate from audio
-                    .to(Box::new(video_counter))?;
+                    .to(video_counter)?;
                 ctx.attach(source, v.index, branch)?;
             }
             if let Some(a) = audio {
-                let branch = ctx
-                    .branch()
-                    .queue("audio-q", 32)
-                    .to(Box::new(audio_counter))?;
+                let branch = ctx.branch().queue("audio-q", 32).to(audio_counter)?;
                 ctx.attach(source, a.index, branch)?;
             }
             // Any other stream's pad is simply left unlinked.

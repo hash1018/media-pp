@@ -7,10 +7,10 @@ use super::*;
 fn seek_check_rejects_a_live_source_before_flushing() {
     let source = TestVideoSource::new("live", TestVideoOptions::default());
     let pipeline = Pipeline::new("seek-check", source, |source, ctx| {
-        let branch = ctx.branch().to(Box::new(NoOpSink {
+        let branch = ctx.branch().to(NoOpSink {
             name: "noop".into(),
             pp_log: element_pp_log(ElementType::Other, "noop", None),
-        }))?;
+        })?;
         ctx.attach(source, 0, branch)?;
         Ok(())
     })
@@ -151,12 +151,12 @@ fn paused_seek_prerolls_one_timeline_and_restores_pause() {
         seeks: Arc::clone(&seeks),
     };
     let pipeline = Pipeline::new("paused-seek-preroll", source, |source, ctx| {
-        let branch = ctx.branch().to(Box::new(ControlRecordingSink {
+        let branch = ctx.branch().to(ControlRecordingSink {
             pp_log: element_pp_log(ElementType::Other, "control-recorder", None),
             count: Arc::clone(&count),
             controls: Arc::clone(&controls),
             preroll_targets: Arc::clone(&preroll_targets),
-        }))?;
+        })?;
         ctx.attach(source, 0, branch)?;
         Ok(())
     })
@@ -219,12 +219,12 @@ fn playing_seek_uses_an_internal_pause_then_resumes() {
         seeks: Arc::clone(&seeks),
     };
     let pipeline = Pipeline::new("playing-seek-preroll", source, |source, ctx| {
-        let branch = ctx.branch().to(Box::new(ControlRecordingSink {
+        let branch = ctx.branch().to(ControlRecordingSink {
             pp_log: element_pp_log(ElementType::Other, "control-recorder", None),
             count: Arc::clone(&count),
             controls: Arc::clone(&controls),
             preroll_targets,
-        }))?;
+        })?;
         ctx.attach(source, 0, branch)?;
         Ok(())
     })
@@ -281,7 +281,7 @@ fn seek_repositions_and_playback_continues() {
     // for how this was found).
     let pipeline = Pipeline::new("test", source, |source, ctx| {
         let pacer = Pacer::new("pacer", time_base)?;
-        let branch = ctx.branch().queue("q", 4).pipe(pacer).to(Box::new(sink))?;
+        let branch = ctx.branch().queue("q", 4).pipe(pacer).to(sink)?;
         ctx.attach(source, index, branch)?;
         Ok(())
     })
@@ -339,14 +339,10 @@ fn seek_reports_where_it_actually_landed_when_target_is_not_a_keyframe() {
     // — otherwise the file finishes before `seek()` is even called.
     let pipeline = Pipeline::new("test", source, |source, ctx| {
         let pacer = Pacer::new("pacer", time_base)?;
-        let branch = ctx
-            .branch()
-            .queue("q", 4)
-            .pipe(pacer)
-            .to(Box::new(NoOpSink {
-                name: "noop".into(),
-                pp_log: element_pp_log(ElementType::Other, "noop", None),
-            }))?;
+        let branch = ctx.branch().queue("q", 4).pipe(pacer).to(NoOpSink {
+            name: "noop".into(),
+            pp_log: element_pp_log(ElementType::Other, "noop", None),
+        })?;
         ctx.attach(source, index, branch)?;
         Ok(())
     })
@@ -472,23 +468,23 @@ fn a_paused_seek_leaves_every_branch_holding_one_sample_at_the_target() {
             .pipe(SwDecoder::new("video-decoder", video_params)?)
             .pipe(Pacer::new("video-pacer", video_tb)?)
             .queue("video-frames", 8)
-            .to(Box::new(PrerollProbe {
+            .to(PrerollProbe {
                 label: "video",
                 time_base: video_tb,
                 samples: Arc::clone(&video_samples),
                 pp_log: element_pp_log(ElementType::Other, "video", None),
-            }))?;
+            })?;
         ctx.attach(source, video.index, video_branch)?;
         let audio_branch = ctx
             .branch()
             .queue("audio-packets", 8)
             .pipe(SwDecoder::new("audio-decoder", audio_params)?)
-            .to(Box::new(PrerollProbe {
+            .to(PrerollProbe {
                 label: "audio",
                 time_base: audio_tb,
                 samples: Arc::clone(&audio_samples),
                 pp_log: element_pp_log(ElementType::Other, "audio", None),
-            }))?;
+            })?;
         ctx.attach(source, audio.index, audio_branch)?;
         Ok(())
     })
@@ -540,20 +536,20 @@ fn a_completed_tee_branch_does_not_starve_a_sibling_preroll() {
     let frames = Arc::new(Mutex::new(Vec::new()));
 
     let pipeline = Pipeline::new("tee-preroll", source, |source, ctx| {
-        let packet_branch = ctx.branch().to(Box::new(CountingSink {
+        let packet_branch = ctx.branch().to(CountingSink {
             name: "packet-terminal".into(),
             count: Arc::clone(&packets),
             pp_log: element_pp_log(ElementType::Other, "packet-terminal", None),
-        }))?;
-        let decoded_branch = ctx
-            .branch()
-            .pipe(SwDecoder::new("decoder", params)?)
-            .to(Box::new(PrerollProbe {
-                label: "video-terminal",
-                time_base,
-                samples: Arc::clone(&frames),
-                pp_log: element_pp_log(ElementType::Other, "video-terminal", None),
-            }))?;
+        })?;
+        let decoded_branch =
+            ctx.branch()
+                .pipe(SwDecoder::new("decoder", params)?)
+                .to(PrerollProbe {
+                    label: "video-terminal",
+                    time_base,
+                    samples: Arc::clone(&frames),
+                    pp_log: element_pp_log(ElementType::Other, "video-terminal", None),
+                })?;
         let tee = TeeBuilder::new("tee", ctx.clone())
             .branch(packet_branch)
             .branch(decoded_branch)
@@ -616,12 +612,12 @@ fn accurate_seek_at_known_eof_selects_the_last_presentable_frame() {
             .branch()
             .pipe(SwDecoder::new("decoder", params)?)
             .pipe(Pacer::new("pacer", time_base)?)
-            .to(Box::new(PrerollProbe {
+            .to(PrerollProbe {
                 label: "video-terminal",
                 time_base,
                 samples: Arc::clone(&samples),
                 pp_log: element_pp_log(ElementType::Other, "video-terminal", None),
-            }))?;
+            })?;
         ctx.attach(source, video.index, branch)?;
         Ok(())
     })
@@ -718,11 +714,11 @@ fn stopping_during_a_seek_does_not_wait_out_the_preroll_timeout() {
         sought: Arc::clone(&sought),
     };
     let pipeline = Pipeline::new("stop-during-seek", source, |source, ctx| {
-        let branch = ctx.branch().to(Box::new(CountingSink {
+        let branch = ctx.branch().to(CountingSink {
             name: "sink".into(),
             count: Arc::clone(&seen),
             pp_log: element_pp_log(ElementType::Other, "sink", None),
-        }))?;
+        })?;
         ctx.attach(source, 0, branch)?;
         Ok(())
     })
@@ -809,11 +805,11 @@ fn detaching_a_branch_mid_seek_does_not_strand_its_preroll() {
     let handle = Arc::new(Mutex::new(None));
     let stash = Arc::clone(&handle);
     let pipeline = Pipeline::new("detach-mid-seek", source, move |source, ctx| {
-        let live = ctx.branch().to(Box::new(CountingSink {
+        let live = ctx.branch().to(CountingSink {
             name: "live".into(),
             count: Arc::clone(&seen),
             pp_log: element_pp_log(ElementType::Other, "live", None),
-        }))?;
+        })?;
         let (tee, tee_handle) = TeeBuilder::new("tee", ctx.clone())
             .branch(live)
             .build_dynamic()?;
@@ -830,9 +826,9 @@ fn detaching_a_branch_mid_seek_does_not_strand_its_preroll() {
         .branch()
         .expect("dynamic tee")
         .queue("stuck-queue", 4)
-        .to(Box::new(NeverReadySink {
+        .to(NeverReadySink {
             pp_log: element_pp_log(ElementType::Other, "never-ready", None),
-        }))
+        })
         .expect("stuck branch");
     let stuck_id = tee.attach(stuck).expect("attach stuck branch");
 

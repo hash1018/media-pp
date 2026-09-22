@@ -30,7 +30,7 @@ mod example {
         let mut tee_handle = None;
 
         let pipeline = Pipeline::new("dynamic-tee", source, |source, ctx| {
-            let initial_branch = ctx.branch().to(Box::new(initial_counter))?;
+            let initial_branch = ctx.branch().to(initial_counter)?;
             let (tee_branch, handle) = TeeBuilder::new("tee", ctx.clone())
                 .branch(initial_branch)
                 .build_dynamic()?;
@@ -47,7 +47,7 @@ mod example {
         let dynamic_branch = tee_handle
             .branch()
             .ok_or_else(|| Error::Other("tee is no longer alive".into()))?
-            .to(Box::new(dynamic_counter))?;
+            .to(dynamic_counter)?;
         let branch_id = tee_handle.attach(dynamic_branch)?;
         println!("attached runtime branch {branch_id}");
 

@@ -110,7 +110,7 @@ mod windows_example {
                 .pipe(decoder) // same thread as the demux — cheap enough not to need a queue
                 .queue("frames", 32) // pacer sleeps on its own thread; let decode run ahead into this
                 .pipe(pacer)
-                .to(Box::new(renderer))?;
+                .to(renderer)?;
             ctx.attach(source, video.index, branch)?;
             Ok(())
         })?;

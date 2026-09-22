@@ -242,7 +242,7 @@ mod example {
                     .branch()
                     .queue("encode-video", 4)
                     .pipe(video_encoder)
-                    .to(Box::new(video_sink_a))?;
+                    .to(video_sink_a)?;
                 ctx.attach(source, 0, branch)?;
                 Ok(())
             })
@@ -252,7 +252,7 @@ mod example {
                     .branch()
                     .queue("encode-audio", 4)
                     .pipe(audio_encoder)
-                    .to(Box::new(audio_sink_a))?;
+                    .to(audio_sink_a)?;
                 ctx.attach(source, 0, branch)?;
                 Ok(())
             })
@@ -266,11 +266,11 @@ mod example {
             .add_source(video_source_b, {
                 let count = video_count.clone();
                 move |source, ctx| {
-                    let branch = ctx.branch().to(Box::new(CountingSink {
+                    let branch = ctx.branch().to(CountingSink {
                         name: "video-counter".into(),
                         count,
                         pp_log: element_pp_log(ElementType::Other, "video-counter", None),
-                    }))?;
+                    })?;
                     ctx.attach(source, 0, branch)?;
                     Ok(())
                 }
@@ -279,11 +279,11 @@ mod example {
             .add_source(audio_source_b, {
                 let count = audio_count.clone();
                 move |source, ctx| {
-                    let branch = ctx.branch().to(Box::new(CountingSink {
+                    let branch = ctx.branch().to(CountingSink {
                         name: "audio-counter".into(),
                         count,
                         pp_log: element_pp_log(ElementType::Other, "audio-counter", None),
-                    }))?;
+                    })?;
                     ctx.attach(source, 0, branch)?;
                     Ok(())
                 }

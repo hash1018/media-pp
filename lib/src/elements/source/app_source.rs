@@ -311,7 +311,7 @@ mod tests {
             pp_log: element_pp_log(ElementType::Other, "counter", None),
         };
         Pipeline::new("test", source, |source, ctx| {
-            let branch = ctx.branch().to(Box::new(sink))?;
+            let branch = ctx.branch().to(sink)?;
             ctx.attach(source, 0, branch)?;
             Ok(())
         })
