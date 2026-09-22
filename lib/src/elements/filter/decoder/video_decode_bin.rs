@@ -35,7 +35,7 @@ use crate::{
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
     control::ControlMsg,
     element::{Context, Element, ElementType, Filter, Sink, Source, element_pp_log},
-    elements::{SwDecoder, filter::rack::Line},
+    elements::{SwDecoder, filter::line::Line},
     error::{Error, Result},
     pad::SrcPad,
     pp_log::{PpLog, pp_info, pp_warn},

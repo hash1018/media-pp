@@ -26,6 +26,7 @@ pub(crate) mod decoder;
 mod download;
 mod encoder;
 mod frame_rate_limiter;
+mod line;
 mod pacer;
 mod pause_gate;
 mod rack;
