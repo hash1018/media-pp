@@ -504,9 +504,7 @@ mod tests {
         luma: u8,
         pts: i64,
     ) -> Option<MediaBuffer> {
-        let Ok(mut upload) =
-            CudaUpload::new("upload", device, CudaFrameFormat::Nv12, width, height)
-        else {
+        let Ok(mut upload) = CudaUpload::new("upload", device, CudaFrameFormat::Nv12) else {
             eprintln!("skipping: this machine has no usable CUDA frames context");
             return None;
         };
@@ -553,13 +551,7 @@ mod tests {
             scaler.consume(frame).expect("scale");
             let buffer = scaled.lock().unwrap().remove(0);
 
-            let mut download = CudaDownload::new(
-                "download",
-                &device,
-                CudaFrameFormat::Nv12,
-                out_width,
-                out_height,
-            );
+            let mut download = CudaDownload::new("download", &device, CudaFrameFormat::Nv12);
             let got = capture(&mut download);
             download.consume(buffer).expect("download");
             let MediaBuffer::Video(cpu) = got.lock().unwrap().remove(0) else {
@@ -707,7 +699,7 @@ mod tests {
         };
 
         let mut scaler = CudaScaler::new("scaler", &device, 64, 64, CudaScalerInterp::Bilinear);
-        let mut download = CudaDownload::new("download", &device, CudaFrameFormat::Nv12, 64, 64);
+        let mut download = CudaDownload::new("download", &device, CudaFrameFormat::Nv12);
         let received = capture(&mut download);
         scaler.src_pads()[0].link(Box::new(download));
 
@@ -791,8 +783,7 @@ mod tests {
         let Some((device, _cuda_lock)) = try_cuda_device() else {
             return;
         };
-        let Ok(mut upload) = CudaUpload::new("upload", &device, CudaFrameFormat::Bgra, 128, 64)
-        else {
+        let Ok(mut upload) = CudaUpload::new("upload", &device, CudaFrameFormat::Bgra) else {
             eprintln!("skipping: this machine has no usable CUDA frames context");
             return;
         };
@@ -853,7 +844,7 @@ mod tests {
             CudaScalerInterp::Bilinear,
             CudaFrameFormat::Nv12,
         );
-        let mut download = CudaDownload::new("download", &device, CudaFrameFormat::Nv12, 256, 144);
+        let mut download = CudaDownload::new("download", &device, CudaFrameFormat::Nv12);
         let received = capture(&mut download);
         scaler.src_pads()[0].link(Box::new(download));
         let decoded = capture(&mut decoder);
@@ -908,8 +899,7 @@ mod tests {
         let Some((device, _cuda_lock)) = try_cuda_device() else {
             return;
         };
-        let Ok(mut upload) = CudaUpload::new("upload", &device, CudaFrameFormat::Bgra, 64, 64)
-        else {
+        let Ok(mut upload) = CudaUpload::new("upload", &device, CudaFrameFormat::Bgra) else {
             eprintln!("skipping: this machine has no usable CUDA frames context");
             return;
         };

@@ -10,6 +10,7 @@ use crate::{
     control::ControlMsg,
     element::{Element, ElementType, Sink, Source, element_pp_log},
     error::Result,
+    frame_size::ForSize,
     pad::SrcPad,
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
     repeat::{PerFrameTransform, RepeatedOutput},
@@ -30,22 +31,6 @@ pub enum D3d12DownloadError {
 
     #[error("D3d12Download only accepts Video and Eos buffers, got a {0}")]
     UnsupportedBuffer(&'static str),
-    /// Input dimensions differ from the fixed download dimensions.
-
-    #[error(
-        "frame is {actual_width}x{actual_height}, but D3d12Download was opened for \
-         {expected_width}x{expected_height}"
-    )]
-    DimensionMismatch {
-        /// Input frame width in pixels.
-        actual_width: u32,
-        /// Input frame height in pixels.
-        actual_height: u32,
-        /// Width configured for this downloader.
-        expected_width: u32,
-        /// Height configured for this downloader.
-        expected_height: u32,
-    },
     /// The frame does not retain the D3D12 hardware frames context that owns it.
 
     #[error("D3D12 frame has no valid hardware frames context")]
@@ -81,14 +66,15 @@ pub enum D3d12DownloadError {
 /// Only NV12-backed D3D12 frames are accepted, matching
 /// [`crate::elements::D3d12Decoder`] and [`crate::elements::D3d12Upload`].
 /// PTS, duration, and color metadata are copied without creating a new
-/// timeline. `width` and `height` are fixed for this element's lifetime.
+/// timeline. The size of the frames comes from the frames themselves.
 pub struct D3d12Download {
     pp_log: PpLog,
     name: Arc<str>,
-    width: u32,
-    height: u32,
     pad: SrcPad,
-    pool: UnboundObjectPool<ffmpeg::frame::Video>,
+    /// CPU NV12 frames the transfer writes into, made for the size of the
+    /// frames actually arriving and made again when that changes — see
+    /// `ForSize`.
+    pool: ForSize<UnboundObjectPool<ffmpeg::frame::Video>>,
     /// The last download and the texture it came from, so a producer that
     /// re-emits an unchanged picture is answered with the bytes already in
     /// system memory — see [`RepeatedOutput`].
@@ -96,8 +82,8 @@ pub struct D3d12Download {
 }
 
 impl D3d12Download {
-    /// Creates a downloader for fixed-size NV12 D3D12 frames.
-    pub fn new(name: impl Into<String>, width: u32, height: u32) -> Self {
+    /// Creates a downloader for NV12 D3D12 frames.
+    pub fn new(name: impl Into<String>) -> Self {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::D3d12Download, &name, None);
         let pad = SrcPad::with_contract(
@@ -107,19 +93,12 @@ impl D3d12Download {
                     .with_layouts(crate::contract::PixelLayoutSet::NV12),
             ),
         );
-        let pool = UnboundObjectPool::new(
-            0,
-            move || ffmpeg::frame::Video::new(ffmpeg::format::Pixel::NV12, width, height),
-            |_| {},
-        );
-        pp_info!(pp_log: &pp_log, "opened: {width}x{height} D3D12 -> NV12");
+        pp_info!(pp_log: &pp_log, "opened: D3D12 -> NV12");
         Self {
             pp_log,
             name,
-            width,
-            height,
             pad,
-            pool,
+            pool: ForSize::new(),
             repeated: RepeatedOutput::new(),
         }
     }
@@ -132,17 +111,6 @@ impl D3d12Download {
             pp_error!(self, "unsupported pixel format: {:?}", source.format());
             return Err(D3d12DownloadError::UnsupportedFormat(source.format()).into());
         }
-        if source.width() != self.width || source.height() != self.height {
-            let error = D3d12DownloadError::DimensionMismatch {
-                actual_width: source.width(),
-                actual_height: source.height(),
-                expected_width: self.width,
-                expected_height: self.height,
-            };
-            pp_error!(self, "{error}");
-            return Err(error.into());
-        }
-
         // SAFETY: `source` is a live D3D12 hardware frame. Its hardware-frame
         // reference is null-checked before dereferencing, and only the device
         // context identity is read while the frame keeps both contexts alive.
@@ -161,7 +129,18 @@ impl D3d12Download {
             }
         }
 
-        let mut destination = self.pool.get();
+        let pp_log = &self.pp_log;
+        let mut destination = self
+            .pool
+            .get(source.width(), source.height(), |width, height| {
+                pp_info!(pp_log: pp_log, "reading back {width}x{height}");
+                UnboundObjectPool::new(
+                    0,
+                    move || ffmpeg::frame::Video::new(ffmpeg::format::Pixel::NV12, width, height),
+                    |_| {},
+                )
+            })
+            .get();
         // SAFETY: `destination` is this element's writable pooled frame and
         // `source` is the validated live hardware frame. FFmpeg initializes
         // the destination pixels, after which copying properties is valid.
@@ -309,11 +288,11 @@ mod tests {
             return;
         };
         let (width, height) = (16u32, 16u32);
-        let Ok(mut upload) = D3d12Upload::new("upload", &device, width, height) else {
+        let Ok(mut upload) = D3d12Upload::new("upload", &device) else {
             eprintln!("skipping: FFmpeg could not create a D3D12VA frames context");
             return;
         };
-        let mut download = D3d12Download::new("download", width, height);
+        let mut download = D3d12Download::new("download");
         let received = Arc::new(Mutex::new(Vec::new()));
         download.src_pads()[0].link(Box::new(CapturingSink {
             pp_log: element_pp_log(ElementType::Other, "capture", None),
@@ -381,9 +360,55 @@ mod tests {
         }
     }
 
+    /// A source that changes resolution mid-stream was a per-frame error on
+    /// both sides of this round trip while the frames context and the CPU
+    /// frames were allocated before any frame arrived.
+    #[test]
+    fn a_source_that_changes_resolution_is_followed() {
+        let Some(device) = try_device() else {
+            return;
+        };
+        let Ok(mut upload) = D3d12Upload::new("upload", &device) else {
+            eprintln!("skipping: FFmpeg could not create a D3D12VA frames context");
+            return;
+        };
+        let mut download = D3d12Download::new("download");
+        let received = Arc::new(Mutex::new(Vec::new()));
+        download.src_pads()[0].link(Box::new(CapturingSink {
+            pp_log: element_pp_log(ElementType::Other, "capture", None),
+            received: received.clone(),
+        }));
+        upload.src_pads()[0].link(Box::new(download));
+
+        let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
+        for (width, height) in [(16u32, 16u32), (8, 8)] {
+            let mut source = pool.get();
+            *source = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::NV12, width, height);
+            upload
+                .consume(MediaBuffer::Video(Arc::new(source)))
+                .expect("a D3D12 round trip at this size");
+        }
+
+        let received = received.lock().unwrap();
+        let sizes: Vec<(u32, u32)> = received
+            .iter()
+            .map(|buffer| {
+                let MediaBuffer::Video(frame) = buffer else {
+                    panic!("expected a Video buffer");
+                };
+                (frame.width(), frame.height())
+            })
+            .collect();
+        assert_eq!(
+            sizes,
+            [(16, 16), (8, 8)],
+            "each frame crosses at its own size"
+        );
+    }
+
     #[test]
     fn rejects_cpu_frames_and_non_video_buffers() {
-        let mut download = D3d12Download::new("download", 16, 16);
+        let mut download = D3d12Download::new("download");
         let pool = UnboundObjectPool::new(
             0,
             || ffmpeg::frame::Video::new(ffmpeg::format::Pixel::NV12, 16, 16),

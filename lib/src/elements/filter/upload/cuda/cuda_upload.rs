@@ -11,6 +11,7 @@ use crate::{
     control::ControlMsg,
     element::{Element, ElementType, Sink, Source, element_pp_log},
     error::Result,
+    frame_size::ForSize,
     pad::SrcPad,
     platform::cuda::{
         CudaDevice, CudaFrameFormat,
@@ -42,22 +43,6 @@ pub enum CudaUploadError {
 
     #[error("CudaUpload only accepts Video buffers, got a {0}")]
     UnsupportedBuffer(&'static str),
-    /// Input dimensions differ from the fixed upload dimensions.
-
-    #[error(
-        "frame is {actual_width}x{actual_height}, but this CudaUpload was built for \
-         {expected_width}x{expected_height}"
-    )]
-    DimensionMismatch {
-        /// Input frame width in pixels.
-        actual_width: u32,
-        /// Input frame height in pixels.
-        actual_height: u32,
-        /// Width configured for this uploader.
-        expected_width: u32,
-        /// Height configured for this uploader.
-        expected_height: u32,
-    },
     /// FFmpeg could not allocate the CUDA hardware frames context.
 
     #[error("failed to allocate the CUDA frames context")]
@@ -122,12 +107,13 @@ pub struct CudaUpload {
     pp_log: PpLog,
     name: Arc<str>,
     /// This element's own reference to the shared context, released in `Drop`.
-    _hw_device_ctx: Arc<AvBufferRef>,
-    /// The pool uploaded frames are allocated from.
-    hw_frames_ctx: AvBufferRef,
+    hw_device_ctx: Arc<AvBufferRef>,
+    /// The pool uploaded frames are allocated from. A frames context's
+    /// dimensions are fixed at `av_hwframe_ctx_init`, so it is made for the
+    /// first frame's size and made again if a source changes resolution
+    /// mid-stream — see `ForSize`.
+    hw_frames_ctx: ForSize<AvBufferRef>,
     format: CudaFrameFormat,
-    width: u32,
-    height: u32,
     pad: SrcPad,
     /// Reuses only the small CPU-side `AVFrame` wrapper; the CUDA surface
     /// itself comes from `hw_frames_ctx`'s own pool. Same split as
@@ -153,17 +139,11 @@ impl CudaUpload {
         name: impl Into<String>,
         device: &CudaDevice,
         format: CudaFrameFormat,
-        width: u32,
-        height: u32,
     ) -> std::result::Result<Self, CudaUploadError> {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::CudaUpload, &name, None);
 
         let hw_device_ctx = device.retain();
-        // SAFETY: `create_hw_frames_ctx`'s contract is a live device context, which
-        // is what the owned `AvBufferRef` beside it is.
-        let hw_frames_ctx = unsafe { create_hw_frames_ctx(&hw_device_ctx, format, width, height) }
-            .map_err(CudaUploadError::from)?;
 
         let pad = SrcPad::with_contract(
             format!("{name}_src"),
@@ -173,19 +153,13 @@ impl CudaUpload {
             ),
         );
         let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
-        pp_info!(
-            pp_log: &pp_log,
-            "opened: {width}x{height} {:?} -> CUDA",
-            format.pixel()
-        );
+        pp_info!(pp_log: &pp_log, "opened: {:?} -> CUDA", format.pixel());
         Ok(Self {
             name,
             pp_log,
-            _hw_device_ctx: hw_device_ctx,
-            hw_frames_ctx,
+            hw_device_ctx,
+            hw_frames_ctx: ForSize::new(),
             format,
-            width,
-            height,
             pad,
             pool,
             repeated: RepeatedOutput::new(),
@@ -204,16 +178,18 @@ impl CudaUpload {
             }
             .into());
         }
-        if source.width() != self.width || source.height() != self.height {
-            let error = CudaUploadError::DimensionMismatch {
-                actual_width: source.width(),
-                actual_height: source.height(),
-                expected_width: self.width,
-                expected_height: self.height,
-            };
-            pp_error!(self, "{error}");
-            return Err(error.into());
-        }
+        let (device, format, pp_log) = (&self.hw_device_ctx, self.format, &self.pp_log);
+        let frames_ctx = self
+            .hw_frames_ctx
+            .try_get(source.width(), source.height(), |width, height| {
+                pp_info!(pp_log: pp_log, "allocating a {width}x{height} pool");
+                // SAFETY: `create_hw_frames_ctx`'s contract is a live device
+                // context, which is what the owned `AvBufferRef` is.
+                unsafe { create_hw_frames_ctx(device, format, width, height) }
+                    .map_err(CudaUploadError::from)
+            })
+            .inspect_err(|error| pp_error!(self, "{error}"))?
+            .as_ptr();
 
         let mut destination = self.pool.get();
         // SAFETY: `ptr` is the pooled wrapper's own `AVFrame`, and the unref before
@@ -226,7 +202,7 @@ impl CudaUpload {
             // frames pool rather than leaking it for the element's lifetime.
             ffi::av_frame_unref(dst);
 
-            let code = ffi::av_hwframe_get_buffer(self.hw_frames_ctx.as_ptr(), dst, 0);
+            let code = ffi::av_hwframe_get_buffer(frames_ctx, dst, 0);
             if code < 0 {
                 pp_error!(self, "av_hwframe_get_buffer failed: {code}");
                 return Err(CudaUploadError::HwFrameGet(code).into());
@@ -382,10 +358,9 @@ mod tests {
     /// Carries the CUDA lock out with the element: dropping it here would
     /// unlock before the test has even started running (see
     /// [`try_cuda_device`]).
-    fn new_upload(width: u32, height: u32) -> Option<UploadFixture> {
+    fn new_upload() -> Option<UploadFixture> {
         let (device, cuda_lock) = try_cuda_device()?;
-        let mut upload =
-            CudaUpload::new("upload", &device, CudaFrameFormat::Nv12, width, height).ok()?;
+        let mut upload = CudaUpload::new("upload", &device, CudaFrameFormat::Nv12).ok()?;
         let received = Arc::new(Mutex::new(Vec::new()));
         upload.src_pads()[0].link(Box::new(CapturingSink {
             received: received.clone(),
@@ -416,7 +391,7 @@ mod tests {
     /// repeat carries its own timestamp; only the surface is shared.
     #[test]
     fn a_repeated_input_is_uploaded_once() {
-        let Some((mut upload, received, _cuda_lock)) = new_upload(64, 64) else {
+        let Some((mut upload, received, _cuda_lock)) = new_upload() else {
             return;
         };
         let source = nv12_frame(64, 64, 100);
@@ -446,7 +421,7 @@ mod tests {
     /// The contract: what comes out is GPU-resident and keeps its timestamp.
     #[test]
     fn uploads_nv12_into_cuda_frames_and_preserves_pts() {
-        let Some((mut upload, received, _cuda_lock)) = new_upload(64, 64) else {
+        let Some((mut upload, received, _cuda_lock)) = new_upload() else {
             return;
         };
         upload.consume(nv12_frame(64, 64, 1234)).expect("upload");
@@ -473,9 +448,7 @@ mod tests {
             return;
         };
         let (width, height) = (64u32, 64u32);
-        let Ok(mut upload) =
-            CudaUpload::new("upload", &device, CudaFrameFormat::Bgra, width, height)
-        else {
+        let Ok(mut upload) = CudaUpload::new("upload", &device, CudaFrameFormat::Bgra) else {
             eprintln!("skipping: this machine has no usable CUDA frames context");
             return;
         };
@@ -514,21 +487,45 @@ mod tests {
         );
     }
 
-    /// A mismatched frame must be refused rather than uploaded into a
-    /// differently-sized surface.
+    /// A source that changes resolution mid-stream was a per-frame error
+    /// here while the surface pool was allocated before any frame arrived.
     #[test]
-    fn wrong_size_and_format_are_typed_errors() {
-        let Some((mut upload, _received, _cuda_lock)) = new_upload(64, 64) else {
+    fn a_source_that_changes_resolution_is_followed() {
+        let Some((mut upload, received, _cuda_lock)) = new_upload() else {
             return;
         };
-        let error = upload
-            .consume(nv12_frame(32, 32, 0))
-            .expect_err("a differently-sized frame must not upload");
-        assert!(
-            error.to_string().contains("32x32"),
-            "expected DimensionMismatch, got {error}"
-        );
 
+        upload
+            .consume(nv12_frame(64, 64, 0))
+            .expect("the first size");
+        upload
+            .consume(nv12_frame(32, 32, 1))
+            .expect("and the next one");
+
+        let received = received.lock().unwrap();
+        let sizes: Vec<(u32, u32)> = received
+            .iter()
+            .map(|buffer| {
+                let MediaBuffer::Video(frame) = buffer else {
+                    panic!("expected a Video buffer");
+                };
+                (frame.width(), frame.height())
+            })
+            .collect();
+        assert_eq!(
+            sizes,
+            [(64, 64), (32, 32)],
+            "each surface is made for the frame it holds"
+        );
+    }
+
+    /// A frame in a layout this uploader was not built for must be refused
+    /// rather than reinterpreted.
+    #[test]
+    fn a_wrong_format_is_a_typed_error() {
+        let Some((mut upload, _received, _cuda_lock)) = new_upload() else {
+            return;
+        };
         let mut rgb = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::RGB24, 64, 64);
         rgb.set_pts(Some(0));
         let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});

@@ -147,7 +147,7 @@ mod windows_example {
                     output_height,
                     ffmpeg::software::scaling::Flags::BILINEAR,
                 );
-                let upload = D3d11Upload::new("upload", gpu.device(), output_width, output_height);
+                let upload = D3d11Upload::new("upload", gpu.device());
                 let branch = ctx.branch().pipe(scaler).pipe(upload).to(background_sink)?;
                 ctx.attach(source, 0, branch)?;
                 Ok(())
@@ -171,14 +171,8 @@ mod windows_example {
         let muxer_sink = muxer.open()?.take(track)?;
 
         let output_pipeline = Pipeline::new("composited-output", compositor, |source, ctx| {
-            let download = D3d11Download::new(
-                "download",
-                gpu.device(),
-                gpu.context(),
-                output_width,
-                output_height,
-            )
-            .map_err(|e| media_pp::Error::Other(e.to_string()))?;
+            let download = D3d11Download::new("download", gpu.device(), gpu.context())
+                .map_err(|e| media_pp::Error::Other(e.to_string()))?;
             let to_yuv = SwScaler::new(
                 "to-yuv",
                 ffmpeg::format::Pixel::YUV420P,

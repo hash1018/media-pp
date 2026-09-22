@@ -665,7 +665,7 @@ fn software(
             height,
             ffmpeg::software::scaling::Flags::BILINEAR,
         )));
-        line.extend(target.upload(format!("{name}-upload"), format, width, height)?);
+        line.extend(target.upload(format!("{name}-upload"), format)?);
     }
     Ok(line)
 }
@@ -806,8 +806,6 @@ impl DecodeTarget {
                     format!("{name}-rgb"),
                     device,
                     CudaFrameFormat::Bgra,
-                    width,
-                    height,
                 )?),
             ],
             #[cfg(feature = "cuda")]
@@ -826,8 +824,6 @@ impl DecodeTarget {
                         format!("{name}-rgb"),
                         device,
                         CudaFrameFormat::Bgra,
-                        width,
-                        height,
                     )?));
                 }
                 line
@@ -909,19 +905,17 @@ impl DecodeTarget {
         &self,
         name: String,
         format: ffmpeg::format::Pixel,
-        width: u32,
-        height: u32,
     ) -> Result<Option<Box<dyn Filter>>> {
         Ok(match self {
             Self::System => None,
             #[cfg(all(target_os = "windows", feature = "d3d11"))]
-            Self::D3d11 { device, .. } => Some(Box::new(crate::elements::D3d11Upload::new(
-                name, device, width, height,
-            ))),
+            Self::D3d11 { device, .. } => {
+                Some(Box::new(crate::elements::D3d11Upload::new(name, device)))
+            }
             #[cfg(all(target_os = "windows", feature = "d3d12"))]
-            Self::D3d12 { device } => Some(Box::new(crate::elements::D3d12Upload::new(
-                name, device, width, height,
-            )?)),
+            Self::D3d12 { device } => {
+                Some(Box::new(crate::elements::D3d12Upload::new(name, device)?))
+            }
             #[cfg(feature = "cuda")]
             Self::Cuda { device, .. } => {
                 let format = if format == ffmpeg::format::Pixel::BGRA {
@@ -930,7 +924,7 @@ impl DecodeTarget {
                     CudaFrameFormat::Nv12
                 };
                 Some(Box::new(crate::elements::CudaUpload::new(
-                    name, device, format, width, height,
+                    name, device, format,
                 )?))
             }
         })
@@ -1600,7 +1594,7 @@ mod tests {
             assert_eq!(bin.path(), DecodePath::Software(SoftwareReason::Alpha));
             assert_eq!(bin.output_format(), Some(ffmpeg::format::Pixel::BGRA));
 
-            let download = D3d11Download::new("read-back", &device, context, 64, 48).unwrap();
+            let download = D3d11Download::new("read-back", &device, context).unwrap();
             let frames = run(bin, Some(Box::new(download)), packets).expect("ProRes decodes");
             let frame = frames.last().expect("a picture came out");
             assert_eq!(frame.format(), ffmpeg::format::Pixel::BGRA);
@@ -1767,7 +1761,7 @@ mod tests {
             assert_eq!(bin.path(), DecodePath::Hardware);
             assert_eq!(bin.output_format(), Some(ffmpeg::format::Pixel::BGRA));
 
-            let download = D3d11Download::new("read-back", &device, context, 256, 144).unwrap();
+            let download = D3d11Download::new("read-back", &device, context).unwrap();
             let frames = run(bin, Some(Box::new(download)), packets).expect("HEVC decodes");
             assert_eq!(frames.len(), sent, "every picture comes out");
             all_near(
@@ -1796,7 +1790,7 @@ mod tests {
             assert_eq!(bin.output_format(), Some(ffmpeg::format::Pixel::BGRA));
             let handle = bin.handle();
 
-            let download = D3d11Download::new("read-back", &device, context, 256, 144).unwrap();
+            let download = D3d11Download::new("read-back", &device, context).unwrap();
             let frames = run(bin, Some(Box::new(download)), packets).expect("HEVC decodes");
             assert_eq!(handle.path(), DecodePath::Hardware, "and it stayed there");
             assert_eq!(frames.len(), sent, "every picture comes out");
@@ -2027,7 +2021,7 @@ mod tests {
             };
             assert_eq!(bin.path(), DecodePath::Software(SoftwareReason::Alpha));
 
-            let download = CudaDownload::new("read-back", &device, CudaFrameFormat::Bgra, 64, 48);
+            let download = CudaDownload::new("read-back", &device, CudaFrameFormat::Bgra);
             let frames = run(bin, Some(Box::new(download)), packets).expect("ProRes decodes");
             let frame = frames.last().expect("a picture came out");
             let alpha = frame.data(0)[3];
@@ -2055,7 +2049,7 @@ mod tests {
             assert_eq!(bin.output_format(), Some(ffmpeg::format::Pixel::NV12));
             let handle = bin.handle();
 
-            let download = CudaDownload::new("read-back", &device, CudaFrameFormat::Nv12, 256, 144);
+            let download = CudaDownload::new("read-back", &device, CudaFrameFormat::Nv12);
             let frames = run(bin, Some(Box::new(download)), packets).expect("HEVC decodes");
             assert_eq!(handle.path(), DecodePath::Hardware, "and it stayed there");
             assert_eq!(frames.len(), sent, "every picture comes out");
@@ -2084,7 +2078,7 @@ mod tests {
             assert_eq!(bin.path(), DecodePath::Hardware);
             assert_eq!(bin.output_format(), Some(ffmpeg::format::Pixel::NV12));
 
-            let download = CudaDownload::new("read-back", &device, CudaFrameFormat::Nv12, 256, 144);
+            let download = CudaDownload::new("read-back", &device, CudaFrameFormat::Nv12);
             let frames = run(bin, Some(Box::new(download)), packets).expect("HEVC decodes");
             assert_eq!(frames.len(), sent, "every picture comes out");
             for frame in &frames {
@@ -2117,8 +2111,7 @@ mod tests {
                 assert_eq!(bin.path(), DecodePath::Hardware);
                 assert_eq!(bin.output_format(), Some(ffmpeg::format::Pixel::BGRA));
 
-                let download =
-                    CudaDownload::new("read-back", &device, CudaFrameFormat::Bgra, 256, 144);
+                let download = CudaDownload::new("read-back", &device, CudaFrameFormat::Bgra);
                 let frames = run(bin, Some(Box::new(download)), packets).expect("HEVC decodes");
                 assert_eq!(frames.len(), sent, "{tag:?}: every picture comes out");
                 all_near(&frames, hdr_hevc_colour(transfer), 3);
@@ -2142,7 +2135,7 @@ mod tests {
             assert_eq!(bin.path(), DecodePath::Hardware);
             assert_eq!(bin.output_format(), Some(ffmpeg::format::Pixel::BGRA));
 
-            let download = CudaDownload::new("read-back", &device, CudaFrameFormat::Bgra, 256, 144);
+            let download = CudaDownload::new("read-back", &device, CudaFrameFormat::Bgra);
             let frames = run(bin, Some(Box::new(download)), packets).expect("HEVC decodes");
             assert_eq!(frames.len(), sent, "every picture comes out");
             let want = bt2020_hevc_colour();

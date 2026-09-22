@@ -166,7 +166,7 @@ mod windows_example {
                     ffmpeg::software::scaling::Flags::BILINEAR,
                 ))
                 .pipe(
-                    D3d12Upload::new("video-upload", gpu.device(), target.width, target.height)
+                    D3d12Upload::new("video-upload", gpu.device())
                         .map_err(|error| Error::Other(error.to_string()))?,
                 )
                 .to(render_common::d3d12_window_renderer(

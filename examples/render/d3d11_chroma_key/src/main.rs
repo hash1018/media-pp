@@ -141,7 +141,7 @@ mod windows_example {
         // the key and the compositor both work in BGRA from there.
         let (green_screen, green_screen_handle) = AppSource::new("green-screen", 8);
         let keyed_pipeline = Pipeline::new("keyed-foreground", green_screen, |source, ctx| {
-            let upload = D3d11Upload::new("upload", gpu.device(), SHOT_WIDTH, SHOT_HEIGHT);
+            let upload = D3d11Upload::new("upload", gpu.device());
             // The handle is what retunes the key while it runs, without
             // rebuilding the branch — this example sets the threshold once
             // and keeps it, so it has no use for one.
@@ -185,7 +185,7 @@ mod windows_example {
                     CANVAS_HEIGHT,
                     ffmpeg::software::scaling::Flags::BILINEAR,
                 );
-                let upload = D3d11Upload::new("upload", gpu.device(), CANVAS_WIDTH, CANVAS_HEIGHT);
+                let upload = D3d11Upload::new("upload", gpu.device());
                 let branch = ctx.branch().pipe(scaler).pipe(upload).to(background_sink)?;
                 ctx.attach(source, 0, branch)?;
                 Ok(())
@@ -210,14 +210,8 @@ mod windows_example {
         let muxer_sink = muxer.open()?.take(track)?;
 
         let record_pipeline = Pipeline::new("record", compositor, |source, ctx| {
-            let download = D3d11Download::new(
-                "download",
-                gpu.device(),
-                gpu.context(),
-                CANVAS_WIDTH,
-                CANVAS_HEIGHT,
-            )
-            .map_err(|e| media_pp::Error::Other(e.to_string()))?;
+            let download = D3d11Download::new("download", gpu.device(), gpu.context())
+                .map_err(|e| media_pp::Error::Other(e.to_string()))?;
             let to_yuv = SwScaler::new(
                 "to-yuv",
                 ffmpeg::format::Pixel::YUV420P,

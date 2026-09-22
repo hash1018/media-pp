@@ -82,7 +82,7 @@ mod windows_example {
             HEIGHT,
             ffmpeg::software::scaling::Flags::BILINEAR,
         );
-        let upload = D3d12Upload::new(format!("{name}-upload"), render.gpu.device(), WIDTH, HEIGHT)
+        let upload = D3d12Upload::new(format!("{name}-upload"), render.gpu.device())
             .map_err(|error| media_pp::Error::Other(error.to_string()))?;
         let RawWindowHandle::Win32(handle) = target.window else {
             panic!("webrtc_video_call Windows branch received a non-Win32 window");
@@ -177,8 +177,6 @@ mod linux_example {
             format!("{name}-upload"),
             &render.cuda,
             CudaFrameFormat::Nv12,
-            WIDTH,
-            HEIGHT,
         )
         .map_err(|error| media_pp::Error::Other(error.to_string()))?;
         let renderer = render_common::cuda_window_renderer(

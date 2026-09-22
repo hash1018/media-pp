@@ -69,7 +69,7 @@ mod windows_example {
             );
             // Same device the renderer draws with — required for the
             // zero-copy path to be valid at all (see D3d11Upload::new).
-            let upload = D3d11Upload::new("upload", gpu.device(), width, height);
+            let upload = D3d11Upload::new("upload", gpu.device());
             let renderer =
                 render_common::d3d11_window_renderer("renderer", &gpu, hwnd, width, height)
                     .expect("failed to create renderer");

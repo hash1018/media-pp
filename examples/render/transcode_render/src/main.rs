@@ -121,7 +121,7 @@ mod windows_example {
                     ffmpeg::software::scaling::Flags::BILINEAR,
                 ))
                 .pipe(
-                    D3d12Upload::new("upload", gpu.device(), width, height)
+                    D3d12Upload::new("upload", gpu.device())
                         .expect("failed to create the D3D12 upload"),
                 )
                 .to(renderer)?;
@@ -224,14 +224,8 @@ mod linux_example {
                 target.height,
                 ffmpeg::software::scaling::Flags::BILINEAR,
             );
-            let upload = CudaUpload::new(
-                "upload",
-                &cuda,
-                CudaFrameFormat::Nv12,
-                target.width,
-                target.height,
-            )
-            .map_err(|error| media_pp::Error::Other(error.to_string()))?;
+            let upload = CudaUpload::new("upload", &cuda, CudaFrameFormat::Nv12)
+                .map_err(|error| media_pp::Error::Other(error.to_string()))?;
             let renderer = render_common::cuda_window_renderer(
                 "renderer",
                 &gpu,

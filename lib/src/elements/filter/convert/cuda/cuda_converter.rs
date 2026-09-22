@@ -12,6 +12,7 @@ use crate::{
     element::{Element, ElementType, Sink, Source, element_pp_log},
     elements::{CudaDriverError, CudaUploadError},
     error::Result,
+    frame_size::ForSize,
     pad::SrcPad,
     platform::cuda::{
         CudaDevice, CudaFrameFormat,
@@ -51,23 +52,7 @@ pub enum CudaConverterError {
 
     #[error("CudaConverter converts BGRA surfaces, got {0:?}")]
     UnsupportedSurfaceFormat(ffmpeg::format::Pixel),
-    /// Input dimensions differ from the converter's fixed dimensions.
-
-    #[error(
-        "frame is {actual_width}x{actual_height}, but this CudaConverter was built for \
-         {expected_width}x{expected_height}"
-    )]
-    DimensionMismatch {
-        /// Input frame width in pixels.
-        actual_width: u32,
-        /// Input frame height in pixels.
-        actual_height: u32,
-        /// Width configured for the converter.
-        expected_width: u32,
-        /// Height configured for the converter.
-        expected_height: u32,
-    },
-    /// NV12 output was requested with odd dimensions.
+    /// A frame arrived with odd dimensions, which NV12 cannot hold.
 
     #[error("NV12 needs even dimensions, got {width}x{height}")]
     OddDimensions {
@@ -150,13 +135,15 @@ pub struct CudaConverter {
     pp_log: PpLog,
     name: Arc<str>,
     /// This element's own reference to the shared context, released in `Drop`.
-    _hw_device_ctx: Arc<AvBufferRef>,
+    hw_device_ctx: Arc<AvBufferRef>,
     /// The last conversion and the surface it was made from, so a producer
     /// that re-emits an unchanged picture is answered with it instead of
     /// another kernel over every pixel — see [`RepeatedOutput`].
     repeated: RepeatedOutput,
-    /// The pool converted frames are allocated from.
-    hw_frames_ctx: AvBufferRef,
+    /// The pool converted frames are allocated from, made for the size of
+    /// the frames actually arriving and made again when that changes — see
+    /// `ForSize`.
+    hw_frames_ctx: ForSize<AvBufferRef>,
     /// Which way round this one converts, named by what it produces. The
     /// other format is the input, there being two.
     output: CudaFrameFormat,
@@ -165,8 +152,6 @@ pub struct CudaConverter {
     /// wrong context.
     device_ctx: *mut ffi::AVHWDeviceContext,
     driver: CudaDriver,
-    width: u32,
-    height: u32,
     pad: SrcPad,
     /// Reuses only the small CPU-side `AVFrame` wrapper; the CUDA surface
     /// itself comes from `hw_frames_ctx`'s own pool. Same split as
@@ -188,22 +173,12 @@ impl CudaConverter {
         name: impl Into<String>,
         device: &CudaDevice,
         output: CudaFrameFormat,
-        width: u32,
-        height: u32,
     ) -> std::result::Result<Self, CudaConverterError> {
-        if !width.is_multiple_of(2) || !height.is_multiple_of(2) {
-            return Err(CudaConverterError::OddDimensions { width, height });
-        }
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::CudaConverter, &name, None);
 
         let driver = CudaDriver::retain_primary()?;
         let hw_device_ctx = device.retain();
-        let hw_frames_ctx =
-            // SAFETY: `create_hw_frames_ctx`'s contract is a live device context, which
-            // is what the owned `AvBufferRef` beside it is.
-            unsafe { create_hw_frames_ctx(&hw_device_ctx, output, width, height) }
-                .map_err(CudaUploadError::from)?;
         // SAFETY: `hw_device_ctx` owns a live `AVBufferRef` for a CUDA device
         // context, whose `data` is that `AVHWDeviceContext` by FFmpeg's own
         // definition. Only the pointer's identity is kept, to compare against an
@@ -221,19 +196,17 @@ impl CudaConverter {
         let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
         pp_info!(
             pp_log: &pp_log,
-            "opened: {width}x{height} {:?} -> {output:?}",
+            "opened: {:?} -> {output:?}",
             input_of(output)
         );
         Ok(Self {
             name,
             pp_log,
-            _hw_device_ctx: hw_device_ctx,
-            hw_frames_ctx,
+            hw_device_ctx,
+            hw_frames_ctx: ForSize::new(),
             output,
             device_ctx,
             driver,
-            width,
-            height,
             pad,
             repeated: RepeatedOutput::new(),
             pool,
@@ -250,12 +223,12 @@ impl CudaConverter {
         if frame.format() != ffmpeg::format::Pixel::CUDA {
             return Err(CudaConverterError::UnsupportedFormat(frame.format()));
         }
-        if frame.width() != self.width || frame.height() != self.height {
-            return Err(CudaConverterError::DimensionMismatch {
-                actual_width: frame.width(),
-                actual_height: frame.height(),
-                expected_width: self.width,
-                expected_height: self.height,
+        // Chroma is 2x2 subsampled whichever way this runs, so an odd
+        // extent has no whole chroma sample to write or to read.
+        if !frame.width().is_multiple_of(2) || !frame.height().is_multiple_of(2) {
+            return Err(CudaConverterError::OddDimensions {
+                width: frame.width(),
+                height: frame.height(),
             });
         }
         // SAFETY: `frame` is a live `frame::Video` already confirmed to be
@@ -306,6 +279,21 @@ impl CudaConverter {
             return Err(error.into());
         }
 
+        let (width, height) = (source.width(), source.height());
+        let (device, output, pp_log) = (&self.hw_device_ctx, self.output, &self.pp_log);
+        let frames_ctx = self
+            .hw_frames_ctx
+            .try_get(width, height, |width, height| {
+                pp_info!(pp_log: pp_log, "allocating a {width}x{height} pool");
+                // SAFETY: `create_hw_frames_ctx`'s contract is a live device
+                // context, which is what the owned `AvBufferRef` is.
+                unsafe { create_hw_frames_ctx(device, output, width, height) }
+                    .map_err(CudaUploadError::from)
+                    .map_err(CudaConverterError::Frames)
+            })
+            .inspect_err(|error| pp_error!(self, "{error}"))?
+            .as_ptr();
+
         let mut destination = self.pool.get();
         // SAFETY: `ptr` is the pooled wrapper's own `AVFrame`, and the unref before
         // the allocation is what hands its previous surface back — see the comment
@@ -316,7 +304,7 @@ impl CudaConverter {
             // surface; releasing it here is what returns that surface to the
             // frames pool rather than leaking it for the element's lifetime.
             ffi::av_frame_unref(dst);
-            let code = ffi::av_hwframe_get_buffer(self.hw_frames_ctx.as_ptr(), dst, 0);
+            let code = ffi::av_hwframe_get_buffer(frames_ctx, dst, 0);
             if code < 0 {
                 pp_error!(self, "av_hwframe_get_buffer failed: {code}");
                 return Err(CudaConverterError::Frames(CudaUploadError::HwFrameGet(code)).into());
@@ -329,8 +317,8 @@ impl CudaConverter {
                     BgraSurface::from_frame(source).ok_or(CudaConverterError::MissingSurface)?,
                     Nv12Surface::from_frame(&destination)
                         .ok_or(CudaConverterError::MissingSurface)?,
-                    self.width,
-                    self.height,
+                    width,
+                    height,
                 )?,
                 CudaFrameFormat::Bgra => {
                     let source_surface = Nv12Surface::from_frame(source)
@@ -342,15 +330,15 @@ impl CudaConverter {
                             source_surface,
                             wide,
                             destination_surface,
-                            self.width,
-                            self.height,
+                            width,
+                            height,
                             tone_map,
                         )?,
                         None => self.driver.nv12_to_bgra(
                             source_surface,
                             destination_surface,
-                            self.width,
-                            self.height,
+                            width,
+                            height,
                             &YuvToBgra::of_frame(source),
                         )?,
                     }
@@ -554,7 +542,7 @@ mod tests {
         height: u32,
         pts: i64,
     ) -> Option<MediaBuffer> {
-        let Ok(mut upload) = CudaUpload::new("upload", device, format, width, height) else {
+        let Ok(mut upload) = CudaUpload::new("upload", device, format) else {
             eprintln!("skipping: this machine has no usable CUDA frames context");
             return None;
         };
@@ -579,8 +567,8 @@ mod tests {
         }
     }
 
-    fn converter(device: &CudaDevice, width: u32, height: u32) -> Option<CudaConverter> {
-        match CudaConverter::new("convert", device, CudaFrameFormat::Nv12, width, height) {
+    fn converter(device: &CudaDevice) -> Option<CudaConverter> {
+        match CudaConverter::new("convert", device, CudaFrameFormat::Nv12) {
             Ok(converter) => Some(converter),
             Err(error) => {
                 eprintln!("skipping: no usable CUDA conversion here ({error})");
@@ -627,8 +615,7 @@ mod tests {
         let Some((device, _cuda_lock)) = try_cuda_device() else {
             return;
         };
-        let Ok(mut converter) =
-            CudaConverter::new("convert", &device, CudaFrameFormat::Bgra, 64, 32)
+        let Ok(mut converter) = CudaConverter::new("convert", &device, CudaFrameFormat::Bgra)
         else {
             eprintln!("skipping: no usable CUDA conversion here");
             return;
@@ -676,8 +663,7 @@ mod tests {
         // One Y'CbCr value away from neutral on both chroma axes, so every
         // matrix makes something different of it.
         let (luma, cb, cr) = (90u8, 110u8, 170u8);
-        let Ok(mut upload) = CudaUpload::new("upload", &device, CudaFrameFormat::Nv12, 64, 32)
-        else {
+        let Ok(mut upload) = CudaUpload::new("upload", &device, CudaFrameFormat::Nv12) else {
             eprintln!("skipping: this machine has no usable CUDA frames context");
             return;
         };
@@ -696,8 +682,7 @@ mod tests {
         let source = uploaded.lock().unwrap().remove(0);
 
         let read_as = |space: ffmpeg::color::Space| {
-            let Ok(mut converter) =
-                CudaConverter::new("convert", &device, CudaFrameFormat::Bgra, 64, 32)
+            let Ok(mut converter) = CudaConverter::new("convert", &device, CudaFrameFormat::Bgra)
             else {
                 panic!("a converter was built above");
             };
@@ -718,13 +703,8 @@ mod tests {
                 panic!("a Video buffer");
             };
             let primaries = frame.color_primaries();
-            let mut download = crate::elements::CudaDownload::new(
-                "download",
-                &device,
-                CudaFrameFormat::Bgra,
-                64,
-                32,
-            );
+            let mut download =
+                crate::elements::CudaDownload::new("download", &device, CudaFrameFormat::Bgra);
             let read = capture(&mut download);
             download
                 .consume(MediaBuffer::Video(frame))
@@ -784,8 +764,7 @@ mod tests {
         let Some((device, _cuda_lock)) = try_cuda_device() else {
             return;
         };
-        let Ok(mut converter) =
-            CudaConverter::new("convert", &device, CudaFrameFormat::Bgra, 64, 32)
+        let Ok(mut converter) = CudaConverter::new("convert", &device, CudaFrameFormat::Bgra)
         else {
             eprintln!("skipping: no usable CUDA conversion here");
             return;
@@ -812,7 +791,7 @@ mod tests {
         let Some((device, _cuda_lock)) = try_cuda_device() else {
             return;
         };
-        let Some(mut converter) = converter(&device, 64, 32) else {
+        let Some(mut converter) = converter(&device) else {
             return;
         };
         let Some(first) = cuda_frame(&device, CudaFrameFormat::Bgra, 64, 32, 1) else {
@@ -845,7 +824,7 @@ mod tests {
         let Some((device, _cuda_lock)) = try_cuda_device() else {
             return;
         };
-        let Some(mut converter) = converter(&device, 64, 32) else {
+        let Some(mut converter) = converter(&device) else {
             return;
         };
         let Some(first) = cuda_frame(&device, CudaFrameFormat::Bgra, 64, 32, 1) else {
@@ -872,7 +851,7 @@ mod tests {
         let Some((device, _cuda_lock)) = try_cuda_device() else {
             return;
         };
-        let Some(mut converter) = converter(&device, 64, 32) else {
+        let Some(mut converter) = converter(&device) else {
             return;
         };
         let Some(source) = cuda_frame(&device, CudaFrameFormat::Bgra, 64, 32, 7) else {
@@ -910,7 +889,7 @@ mod tests {
         let Some((device, _cuda_lock)) = try_cuda_device() else {
             return;
         };
-        let Some(mut converter) = converter(&device, 64, 32) else {
+        let Some(mut converter) = converter(&device) else {
             return;
         };
         // What a capture hands over: full-range RGB.
@@ -952,7 +931,7 @@ mod tests {
         let Some((device, _cuda_lock)) = try_cuda_device() else {
             return;
         };
-        let Some(mut converter) = converter(&device, 64, 32) else {
+        let Some(mut converter) = converter(&device) else {
             return;
         };
         let Some(source) = cuda_frame(&device, CudaFrameFormat::Nv12, 64, 32, 0) else {
@@ -974,7 +953,7 @@ mod tests {
         let Some((device, _cuda_lock)) = try_cuda_device() else {
             return;
         };
-        let Some(mut converter) = converter(&device, 64, 32) else {
+        let Some(mut converter) = converter(&device) else {
             return;
         };
         let frame = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::BGRA, 64, 32);
@@ -994,47 +973,68 @@ mod tests {
         );
     }
 
+    /// A source that changes resolution mid-stream was a per-frame error
+    /// here while the output pool was allocated before any frame arrived.
     #[test]
-    fn a_differently_sized_frame_is_refused() {
+    fn a_source_that_changes_resolution_is_followed() {
         let Some((device, _cuda_lock)) = try_cuda_device() else {
             return;
         };
-        let Some(mut converter) = converter(&device, 64, 32) else {
+        let Some(mut converter) = converter(&device) else {
             return;
         };
-        let Some(source) = cuda_frame(&device, CudaFrameFormat::Bgra, 32, 32, 0) else {
+        let Some(first) = cuda_frame(&device, CudaFrameFormat::Bgra, 64, 32, 0) else {
             return;
         };
+        let Some(second) = cuda_frame(&device, CudaFrameFormat::Bgra, 32, 32, 1) else {
+            return;
+        };
+        let converted = capture(&mut converter);
 
-        let error = converter
-            .consume(source)
-            .expect_err("a mismatch is refused");
+        converter.consume(first).expect("the first size");
+        converter.consume(second).expect("and the next one");
 
-        assert!(error.to_string().contains("32x32"), "got {error}");
+        let received = converted.lock().unwrap();
+        let sizes: Vec<(u32, u32)> = received
+            .iter()
+            .map(|buffer| {
+                let frame = video(buffer);
+                (frame.width(), frame.height())
+            })
+            .collect();
+        assert_eq!(
+            sizes,
+            [(64, 32), (32, 32)],
+            "each conversion is made for the frame it was given"
+        );
     }
 
     /// NV12 chroma is 2x2 subsampled, so an odd extent has no whole chroma
-    /// sample to write. Refused where the size is chosen rather than per
-    /// frame.
+    /// sample to write.
     #[test]
-    fn odd_dimensions_are_refused_at_construction() {
+    fn odd_dimensions_are_refused() {
         let Some((device, _cuda_lock)) = try_cuda_device() else {
             return;
         };
-        let error = CudaConverter::new("convert", &device, CudaFrameFormat::Nv12, 65, 32)
-            .err()
-            .expect("odd width is refused");
-        assert!(matches!(
-            error,
-            CudaConverterError::OddDimensions {
-                width: 65,
-                height: 32
-            }
-        ));
-        assert!(matches!(
-            CudaConverter::new("convert", &device, CudaFrameFormat::Nv12, 64, 33).err(),
-            Some(CudaConverterError::OddDimensions { .. })
-        ));
+        let Some(mut converter) = converter(&device) else {
+            return;
+        };
+        let Some(source) = cuda_frame(&device, CudaFrameFormat::Bgra, 63, 32, 0) else {
+            return;
+        };
+
+        let error = converter.consume(source).expect_err("an odd width");
+
+        assert!(
+            matches!(
+                error,
+                crate::error::Error::CudaConverterError(CudaConverterError::OddDimensions {
+                    width: 63,
+                    height: 32
+                })
+            ),
+            "got {error}"
+        );
     }
 
     /// The reason this element exists: a BGRA capture cannot reach an NV12
@@ -1051,7 +1051,7 @@ mod tests {
         let Some((device, _cuda_lock)) = try_cuda_device() else {
             return;
         };
-        let Some(mut converter) = converter(&device, 64, 64) else {
+        let Some(mut converter) = converter(&device) else {
             return;
         };
         let Ok((_compositor, handle)) = CudaVideoCompositor::new(
@@ -1106,7 +1106,7 @@ mod tests {
         let Some((device, _cuda_lock)) = try_cuda_device() else {
             return;
         };
-        let Some(mut converter) = converter(&device, 64, 32) else {
+        let Some(mut converter) = converter(&device) else {
             return;
         };
         let received = capture(&mut converter);

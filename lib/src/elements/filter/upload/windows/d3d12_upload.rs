@@ -11,6 +11,7 @@ use crate::{
     control::ControlMsg,
     element::{Element, ElementType, Sink, Source, element_pp_log},
     error::Result,
+    frame_size::ForSize,
     pad::SrcPad,
     platform::{
         ffmpeg::AvBufferRef,
@@ -67,22 +68,6 @@ pub enum D3d12UploadError {
          front of it), got {0:?}"
     )]
     UnsupportedFormat(ffmpeg::format::Pixel),
-    /// Input dimensions differ from the fixed upload dimensions.
-
-    #[error(
-        "frame is {actual_width}x{actual_height}, but D3d12Upload was \
-         opened for {expected_width}x{expected_height}"
-    )]
-    DimensionMismatch {
-        /// Input frame width in pixels.
-        actual_width: u32,
-        /// Input frame height in pixels.
-        actual_height: u32,
-        /// Width configured for this uploader.
-        expected_width: u32,
-        /// Height configured for this uploader.
-        expected_height: u32,
-    },
     /// The sink received a buffer other than decoded video or end-of-stream.
 
     #[error("D3d12Upload only handles Video frames, got a {0}")]
@@ -108,18 +93,17 @@ pub enum D3d12UploadError {
 /// this if the source produces something else (e.g.
 /// [`crate::elements::TestVideoSource`]'s `Pixel::YUV420P`).
 ///
-/// `width`/`height` are fixed for this element's lifetime, set once in
-/// [`D3d12Upload::new`] — the underlying `AVHWFramesContext`'s allocated
-/// dimensions can't be changed after `av_hwframe_ctx_init`, so every frame
-/// `consume` receives must match exactly (a resolution change means
-/// tearing this element down and building a fresh one).
+/// An `AVHWFramesContext`'s allocated dimensions cannot be changed after
+/// `av_hwframe_ctx_init`, so the pool is made for the first frame's size
+/// and made again if a source changes resolution mid-stream — see
+/// `ForSize`.
 pub struct D3d12Upload {
     pp_log: PpLog,
     name: Arc<str>,
-    _hw_device_ctx: AvBufferRef,
-    hw_frames_ctx: AvBufferRef,
-    width: u32,
-    height: u32,
+    hw_device_ctx: AvBufferRef,
+    /// The pool uploaded textures come from, made for the size of the
+    /// frames actually arriving.
+    hw_frames_ctx: ForSize<AvBufferRef>,
     pad: SrcPad,
     /// Reused across every uploaded frame — see [`UnboundObjectPool`]'s
     /// docs. Only the small CPU-side `AVFrame` wrapper is actually reused
@@ -152,8 +136,6 @@ impl D3d12Upload {
     pub fn new(
         name: impl Into<String>,
         device: &ID3D12Device,
-        width: u32,
-        height: u32,
     ) -> std::result::Result<Self, D3d12UploadError> {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::D3d12Upload, &name, None);
@@ -163,12 +145,6 @@ impl D3d12Upload {
         let hw_device_ctx =
             unsafe { create_hw_device_ctx(device) }.map_err(D3d12UploadError::HwDeviceInit)?;
 
-        // SAFETY: `hw_device_ctx` is live and initialized; dimensions were
-        // validated above and `POOL_SIZE` is a positive fixed allocation size.
-        let hw_frames_ctx =
-            unsafe { create_hw_frames_ctx(&hw_device_ctx, width, height, POOL_SIZE) }
-                .map_err(D3d12UploadError::HwFramesInit)?;
-
         let pad = SrcPad::with_contract(
             format!("{name}_src"),
             OutputContract::Fixed(
@@ -177,14 +153,12 @@ impl D3d12Upload {
             ),
         );
         let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
-        pp_info!(pp_log: &pp_log, "opened: {width}x{height}");
+        pp_info!(pp_log: &pp_log, "opened");
         Ok(Self {
             name,
             pp_log,
-            _hw_device_ctx: hw_device_ctx,
-            hw_frames_ctx,
-            width,
-            height,
+            hw_device_ctx,
+            hw_frames_ctx: ForSize::new(),
             pad,
             pool,
             repeated: RepeatedOutput::new(),
@@ -270,65 +244,61 @@ impl PerFrameTransform for D3d12Upload {
         &mut self,
         frame: &Arc<UnboundObjectPoolRef<ffmpeg::frame::Video>>,
     ) -> Result<UnboundObjectPoolRef<ffmpeg::frame::Video>> {
-        {
-            {
-                if frame.format() != ffmpeg::format::Pixel::NV12 {
-                    pp_error!(self, "unsupported pixel format: {:?}", frame.format());
-                    return Err(D3d12UploadError::UnsupportedFormat(frame.format()).into());
-                }
-                if frame.width() != self.width || frame.height() != self.height {
-                    let error = D3d12UploadError::DimensionMismatch {
-                        actual_width: frame.width(),
-                        actual_height: frame.height(),
-                        expected_width: self.width,
-                        expected_height: self.height,
-                    };
-                    pp_error!(self, "{error}");
-                    return Err(error.into());
-                }
+        if frame.format() != ffmpeg::format::Pixel::NV12 {
+            pp_error!(self, "unsupported pixel format: {:?}", frame.format());
+            return Err(D3d12UploadError::UnsupportedFormat(frame.format()).into());
+        }
 
-                let mut gpu_frame = self.pool.get();
-                // SAFETY: the pooled destination is exclusively owned and
-                // unreffed before reuse. Its frames context remains live, and
-                // the validated CPU source is readable for the transfer.
-                unsafe {
-                    // `av_hwframe_get_buffer` requires an "empty (freshly
-                    // allocated or unreffed)" frame — a reused pool item
-                    // may still hold a reference to the GPU texture it was
-                    // last uploaded into, so drop that first.
-                    ffi::av_frame_unref(gpu_frame.as_mut_ptr());
-                    let ret = ffi::av_hwframe_get_buffer(
-                        self.hw_frames_ctx.as_ptr(),
-                        gpu_frame.as_mut_ptr(),
-                        0,
-                    );
-                    if ret < 0 {
-                        pp_error!(self, "av_hwframe_get_buffer failed: {ret}");
-                        return Err(D3d12UploadError::GetBuffer(ret).into());
-                    }
-                    let ret =
-                        ffi::av_hwframe_transfer_data(gpu_frame.as_mut_ptr(), frame.as_ptr(), 0);
-                    if ret < 0 {
-                        pp_error!(self, "av_hwframe_transfer_data failed: {ret}");
-                        return Err(D3d12UploadError::TransferData(ret).into());
-                    }
-                }
-                // SAFETY: both frames remain live, the destination is uniquely
-                // owned, and `av_frame_copy_props` copies metadata only.
-                unsafe {
-                    // The transfer copies pixels only. Keep the source
-                    // timeline and color description on the GPU frame so a
-                    // later D3d12Download can restore the complete contract.
-                    let ret = ffi::av_frame_copy_props(gpu_frame.as_mut_ptr(), frame.as_ptr());
-                    if ret < 0 {
-                        pp_error!(self, "av_frame_copy_props failed: {ret}");
-                        return Err(D3d12UploadError::CopyProperties(ret).into());
-                    }
-                }
+        let device = &self.hw_device_ctx;
+        let pp_log = &self.pp_log;
+        let frames_ctx = self
+            .hw_frames_ctx
+            .try_get(frame.width(), frame.height(), |width, height| {
+                pp_info!(pp_log: pp_log, "allocating a {width}x{height} pool");
+                // SAFETY: `hw_device_ctx` is live and initialized, and
+                // `POOL_SIZE` is a positive fixed allocation size.
+                unsafe { create_hw_frames_ctx(device, width, height, POOL_SIZE) }
+                    .map_err(D3d12UploadError::HwFramesInit)
+            })
+            .inspect_err(|error| pp_error!(self, "{error}"))?
+            .as_ptr();
 
-                Ok(gpu_frame)
+        let mut gpu_frame = self.pool.get();
+        // SAFETY: the pooled destination is exclusively owned and
+        // unreffed before reuse. Its frames context remains live — this
+        // element holds it and nothing replaces it within this call — and
+        // the validated CPU source is readable for the transfer.
+        unsafe {
+            // `av_hwframe_get_buffer` requires an "empty (freshly
+            // allocated or unreffed)" frame — a reused pool item
+            // may still hold a reference to the GPU texture it was
+            // last uploaded into, so drop that first.
+            ffi::av_frame_unref(gpu_frame.as_mut_ptr());
+            let ret = ffi::av_hwframe_get_buffer(frames_ctx, gpu_frame.as_mut_ptr(), 0);
+            if ret < 0 {
+                pp_error!(self, "av_hwframe_get_buffer failed: {ret}");
+                return Err(D3d12UploadError::GetBuffer(ret).into());
+            }
+            let ret = ffi::av_hwframe_transfer_data(gpu_frame.as_mut_ptr(), frame.as_ptr(), 0);
+            if ret < 0 {
+                pp_error!(self, "av_hwframe_transfer_data failed: {ret}");
+                return Err(D3d12UploadError::TransferData(ret).into());
             }
         }
+        // SAFETY: both frames remain live, the destination is uniquely
+        // owned, and `av_frame_copy_props` copies metadata only.
+        unsafe {
+            // The transfer copies pixels only. Keep the source
+            // timeline and color description on the GPU frame so a
+            // later D3d12Download can restore the complete contract.
+            let ret = ffi::av_frame_copy_props(gpu_frame.as_mut_ptr(), frame.as_ptr());
+            if ret < 0 {
+                pp_error!(self, "av_frame_copy_props failed: {ret}");
+                return Err(D3d12UploadError::CopyProperties(ret).into());
+            }
+        }
+
+        Ok(gpu_frame)
     }
 }
 

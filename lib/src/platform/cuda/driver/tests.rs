@@ -60,8 +60,7 @@ fn cuda_surface(
     height: u32,
     luma: u8,
 ) -> Option<MediaBuffer> {
-    let Ok(mut upload) = CudaUpload::new("upload", device, CudaFrameFormat::Nv12, width, height)
-    else {
+    let Ok(mut upload) = CudaUpload::new("upload", device, CudaFrameFormat::Nv12) else {
         eprintln!("skipping: this machine has no usable CUDA frames context");
         return None;
     };
@@ -83,10 +82,8 @@ fn cuda_surface(
 fn download(
     device: &crate::elements::CudaDevice,
     frame: MediaBuffer,
-    width: u32,
-    height: u32,
 ) -> Arc<crate::pool::UnboundObjectPoolRef<ffmpeg::frame::Video>> {
-    let mut download = CudaDownload::new("download", device, CudaFrameFormat::Nv12, width, height);
+    let mut download = CudaDownload::new("download", device, CudaFrameFormat::Nv12);
     let received = capture(&mut download);
     download.consume(frame).expect("download");
     let buf = received.lock().unwrap().remove(0);
@@ -100,10 +97,8 @@ fn download(
 fn download_bgra(
     device: &crate::elements::CudaDevice,
     frame: MediaBuffer,
-    width: u32,
-    height: u32,
 ) -> Arc<crate::pool::UnboundObjectPoolRef<ffmpeg::frame::Video>> {
-    let mut download = CudaDownload::new("download", device, CudaFrameFormat::Bgra, width, height);
+    let mut download = CudaDownload::new("download", device, CudaFrameFormat::Bgra);
     let received = capture(&mut download);
     download.consume(frame).expect("download");
     let buf = received.lock().unwrap().remove(0);
@@ -197,7 +192,7 @@ fn nv12_to_bgra_undoes_the_conversion_that_made_it() {
         .expect("the conversion kernel must launch");
     driver.synchronize().expect("synchronize");
 
-    let out = download_bgra(&device, back.clone(), width, height);
+    let out = download_bgra(&device, back.clone());
     let row = out.data(0);
     for x in 0..width {
         let [b, g, r] = block_of(x);
@@ -281,7 +276,7 @@ fn key_bgra_writes_alpha_from_distance_to_the_key() {
         .expect("the keying kernel must launch");
     driver.synchronize().expect("synchronize");
 
-    let out = download_bgra(&device, destination.clone(), width, height);
+    let out = download_bgra(&device, destination.clone());
     let pixel = |x: usize| {
         let row = out.data(0);
         let at = x * 4;
@@ -355,7 +350,7 @@ fn fill_then_blit_writes_the_expected_rectangles() {
         )
         .expect("blit");
 
-    let out = download(&device, canvas.clone(), width, height);
+    let out = download(&device, canvas.clone());
     let stride = out.stride(0);
     let at = |x: usize, y: usize| out.data(0)[y * stride + x];
     assert_eq!(at(0, 0), 235, "the fill did not cover the top-left corner");
@@ -386,8 +381,7 @@ fn cuda_bgra_surface(
     height: u32,
     pixel: impl Fn(u32, u32) -> [u8; 4],
 ) -> Option<MediaBuffer> {
-    let Ok(mut upload) = CudaUpload::new("upload", device, CudaFrameFormat::Bgra, width, height)
-    else {
+    let Ok(mut upload) = CudaUpload::new("upload", device, CudaFrameFormat::Bgra) else {
         eprintln!("skipping: this machine has no usable CUDA frames context");
         return None;
     };
@@ -471,7 +465,7 @@ fn a_bgra_layer_blends_under_its_own_alpha_rather_than_covering() {
         .expect("blend");
     driver.synchronize().expect("synchronize");
 
-    let blended = download(&device, canvas, WIDTH, HEIGHT);
+    let blended = download(&device, canvas);
     let stride = blended.stride(0);
     let luma = blended.data(0);
     let (expected_red, _, _) = bt709_limited(255.0, 0.0, 0.0);
@@ -540,7 +534,7 @@ fn bgra_converts_to_nv12_exactly_as_the_shared_definition_says() {
         .expect("convert");
     driver.synchronize().expect("synchronize");
 
-    let converted = download(&device, destination, WIDTH, HEIGHT);
+    let converted = download(&device, destination);
     let luma_stride = converted.stride(0);
     let chroma_stride = converted.stride(1);
     for y in 0..HEIGHT {
@@ -582,8 +576,7 @@ fn cuda_surface_with(
     luma: impl Fn(u32, u32) -> u8,
     chroma: u8,
 ) -> Option<MediaBuffer> {
-    let Ok(mut upload) = CudaUpload::new("upload", device, CudaFrameFormat::Nv12, width, height)
-    else {
+    let Ok(mut upload) = CudaUpload::new("upload", device, CudaFrameFormat::Nv12) else {
         eprintln!("skipping: this machine has no usable CUDA frames context");
         return None;
     };
@@ -656,7 +649,7 @@ fn the_blend_kernel_matches_a_cpu_reference_byte_for_byte() {
         .expect("blend");
     driver.synchronize().expect("synchronize");
 
-    let out = download(&device, destination.clone(), width, height);
+    let out = download(&device, destination.clone());
     let stride = out.stride(0);
     let blend = |dst: u32, src: u32| {
         ((src * u32::from(alpha) + dst * (255 - u32::from(alpha)) + 127) / 255) as u8
@@ -726,7 +719,7 @@ fn alpha_endpoints_replace_and_preserve_exactly() {
             .expect("blend");
         driver.synchronize().expect("synchronize");
 
-        let out = download(&device, destination.clone(), width, height);
+        let out = download(&device, destination.clone());
         assert_eq!(
             out.data(0)[out.stride(0) * 5 + 5],
             expected,

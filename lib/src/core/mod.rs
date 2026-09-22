@@ -27,6 +27,11 @@ pub mod control;
 pub mod diagnostics;
 pub mod driver;
 pub mod element;
+#[cfg(any(
+    feature = "cuda",
+    all(target_os = "windows", any(feature = "d3d11", feature = "d3d12"))
+))]
+pub(crate) mod frame_size;
 pub mod graph;
 pub mod pad;
 pub mod pipeline;

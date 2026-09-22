@@ -12,6 +12,46 @@ compile error with no explanation.
 
 ### Breaking
 
+- **An upload, a download and a converter take the size from the frames.**
+  `CudaUpload::new`, `D3d11Upload::new`, `D3d12Upload::new`,
+  `CudaDownload::new`, `D3d11Download::new`, `D3d12Download::new` and
+  `CudaConverter::new` no longer take `width` and `height`: drop the last
+  two arguments. None of these elements changes a frame's size, so the
+  size they were told had to agree with whatever the upstream element
+  produced, and a caller that got it wrong learned so one frame later
+  through a `DimensionMismatch` error. That error variant is gone from all
+  seven.
+
+  ```rust
+  // before
+  let converter = CudaConverter::new("to-nv12", &cuda, CudaFrameFormat::Nv12, width, height)?;
+
+  // after
+  let converter = CudaConverter::new("to-nv12", &cuda, CudaFrameFormat::Nv12)?;
+  ```
+
+  This is what the element a refused link names now costs to build: the
+  remedy in the error message is the whole of it, with no stream
+  parameters to open for a size — `hw_decode_render` opened a codec
+  context solely for that and no longer does. The texture, staging buffer
+  or `AVHWFramesContext` each element needs is made for the first frame's
+  size and made again when that changes, so **a source that changes
+  resolution mid-stream is now followed rather than refused** — an RTSP
+  camera switching profile, a window capture being resized. A failed
+  allocation for a new size leaves the element serving the size it already
+  had. `CudaConverter`'s even-dimension requirement is now checked per
+  frame, so `CudaConverterError::OddDimensions` comes back from `consume`
+  rather than from `new`.
+
+  `CudaChromaKey::new` and `CudaVideoEffect::new` lose the same two
+  arguments, for the same reason and with the same consequences — keying and
+  colour correction are per-pixel, and their D3D11 siblings never took a
+  size. `CudaChromaKeyError::DimensionMismatch` and
+  `CudaVideoEffectError::DimensionMismatch` are gone with them.
+
+  A scaler, a compositor and an encoder still take a size: it is what they
+  are for, not something they have to be told twice.
+
 - **A frame's link contract states its pixel layout.**
   `PortContract::Frames` has a third field, a `PixelLayoutSet` — NV12, P010,
   BGRA or other — and `OutputContract` a new variant, `SameLayout`, for a

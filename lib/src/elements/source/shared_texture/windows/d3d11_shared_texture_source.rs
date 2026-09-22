@@ -608,7 +608,7 @@ mod tests {
         assert_eq!((video.width(), video.height()), (8, 8));
         assert_eq!(video.pts(), Some(7), "the pushed timestamp is kept");
 
-        let mut download = D3d11Download::new("download", &device, context, 8, 8)
+        let mut download = D3d11Download::new("download", &device, context)
             .expect("D3d11Download::new should succeed");
         let received = capture(&mut download);
         download

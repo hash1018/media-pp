@@ -111,14 +111,8 @@ fn four_d3d11_elements_share_one_device_across_queue_boundaries() {
         },
     )
     .expect("create the chroma key");
-    let download = D3d11Download::new(
-        "d3d11-download",
-        &device,
-        context.clone(),
-        SCALED_WIDTH,
-        SCALED_HEIGHT,
-    )
-    .expect("create the download");
+    let download = D3d11Download::new("d3d11-download", &device, context.clone())
+        .expect("create the download");
 
     // The device arrived here unprotected — nothing above asked for it — so
     // this is the elements' doing, and it is what the rest of the test relies
@@ -178,7 +172,7 @@ fn four_d3d11_elements_share_one_device_across_queue_boundaries() {
                 HEIGHT,
                 ffmpeg_next::software::scaling::Flags::BILINEAR,
             ))
-            .pipe(D3d11Upload::new("d3d11-upload", &device, WIDTH, HEIGHT))
+            .pipe(D3d11Upload::new("d3d11-upload", &device))
             .queue("to-scale", 4)
             .pipe(scaler)
             .queue("to-key", 4)

@@ -14,6 +14,7 @@ use crate::{
     element::{Element, ElementType, Sink, Source, element_pp_log},
     elements::{CudaDriverError, CudaUploadError},
     error::Result,
+    frame_size::ForSize,
     pad::SrcPad,
     platform::cuda::{
         CudaDevice, CudaFrameFormat,
@@ -54,22 +55,6 @@ pub enum CudaChromaKeyError {
     /// The surface is CUDA-resident but not in the layout this keys.
     #[error("CudaChromaKey keys BGRA surfaces, got {0:?}")]
     UnsupportedSurfaceFormat(ffmpeg::format::Pixel),
-
-    /// The frame is not the size this element allocated its pool for.
-    #[error(
-        "CudaChromaKey was built for {expected_width}x{expected_height}, \
-         got {actual_width}x{actual_height}"
-    )]
-    DimensionMismatch {
-        /// Width the frame actually carries.
-        actual_width: u32,
-        /// Height the frame actually carries.
-        actual_height: u32,
-        /// Width this element was constructed for.
-        expected_width: u32,
-        /// Height this element was constructed for.
-        expected_height: u32,
-    },
 
     /// A surface arrived with no device pointer to read.
     #[error("a surface arrived with no device pointer")]
@@ -128,7 +113,7 @@ pub struct CudaChromaKey {
     name: Arc<str>,
     /// This element's own reference to the shared context, released in
     /// `Drop`.
-    _hw_device_ctx: Arc<AvBufferRef>,
+    hw_device_ctx: Arc<AvBufferRef>,
     /// The last keyed frame and the surface it was made from, so a producer
     /// that re-emits an unchanged picture is answered with it instead of
     /// another kernel over every pixel — see [`RepeatedOutput`].
@@ -138,15 +123,15 @@ pub struct CudaChromaKey {
     /// green is not an answer to the same surface once the key turned blue.
     /// `refresh_options` forgets what is held here when that happens.
     repeated: RepeatedOutput,
-    /// The pool keyed frames are allocated from.
-    hw_frames_ctx: AvBufferRef,
+    /// The pool keyed frames are allocated from, made for the size of the
+    /// frames actually arriving and made again when that changes — see
+    /// `ForSize`.
+    hw_frames_ctx: ForSize<AvBufferRef>,
     /// The device context incoming frames must belong to, compared by
     /// pointer — a surface from another device would be read against the
     /// wrong context.
     device_ctx: *mut ffi::AVHWDeviceContext,
     driver: CudaDriver,
-    width: u32,
-    height: u32,
     /// What this element is keying by right now, refreshed from `control`
     /// once per frame. Kept alongside it so a change can be recognized —
     /// see `refresh_options`.
@@ -181,8 +166,6 @@ impl CudaChromaKey {
     pub fn new(
         name: impl Into<String>,
         device: &CudaDevice,
-        width: u32,
-        height: u32,
         options: ChromaKeyOptions,
     ) -> std::result::Result<(Self, ChromaKeyHandle), CudaChromaKeyError> {
         let name: Arc<str> = name.into().into();
@@ -190,11 +173,6 @@ impl CudaChromaKey {
 
         let driver = CudaDriver::retain_primary()?;
         let hw_device_ctx = device.retain();
-        let hw_frames_ctx =
-            // SAFETY: `create_hw_frames_ctx`'s contract is a live device context, which
-            // is what the owned `AvBufferRef` beside it is.
-            unsafe { create_hw_frames_ctx(&hw_device_ctx, CudaFrameFormat::Bgra, width, height) }
-                .map_err(CudaUploadError::from)?;
         // SAFETY: `hw_device_ctx` owns a live `AVBufferRef` for a CUDA device
         // context, whose `data` is that `AVHWDeviceContext` by FFmpeg's own
         // definition. Only the pointer's identity is kept, to compare against an
@@ -213,7 +191,7 @@ impl CudaChromaKey {
         let key_color = options.method.key_color();
         pp_info!(
             pp_log: &pp_log,
-            "opened: {width}x{height} BGRA, key_color={key_color:?}, threshold={}, smoothing={}",
+            "opened: BGRA, key_color={key_color:?}, threshold={}, smoothing={}",
             options.threshold,
             options.smoothing
         );
@@ -223,12 +201,10 @@ impl CudaChromaKey {
         let element = Self {
             name,
             pp_log,
-            _hw_device_ctx: hw_device_ctx,
-            hw_frames_ctx,
+            hw_device_ctx,
+            hw_frames_ctx: ForSize::new(),
             device_ctx,
             driver,
-            width,
-            height,
             options,
             control,
             enabled: true,
@@ -281,14 +257,6 @@ impl CudaChromaKey {
         if frame.format() != ffmpeg::format::Pixel::CUDA {
             return Err(CudaChromaKeyError::UnsupportedFormat(frame.format()));
         }
-        if frame.width() != self.width || frame.height() != self.height {
-            return Err(CudaChromaKeyError::DimensionMismatch {
-                actual_width: frame.width(),
-                actual_height: frame.height(),
-                expected_width: self.width,
-                expected_height: self.height,
-            });
-        }
         // SAFETY: `frame` is a live `frame::Video` already confirmed to be
         // `Pixel::CUDA`, so `as_ptr` yields an initialized `AVFrame` and a hardware
         // frame's `hw_frames_ctx` is either null — rejected here — or an
@@ -320,6 +288,21 @@ impl CudaChromaKey {
         self.validate(source)
             .inspect_err(|error| pp_error!(self, "{error}"))?;
 
+        let (width, height) = (source.width(), source.height());
+        let (device, pp_log) = (&self.hw_device_ctx, &self.pp_log);
+        let frames_ctx = self
+            .hw_frames_ctx
+            .try_get(width, height, |width, height| {
+                pp_info!(pp_log: pp_log, "keying {width}x{height}");
+                // SAFETY: `create_hw_frames_ctx`'s contract is a live device
+                // context, which is what the owned `AvBufferRef` is.
+                unsafe { create_hw_frames_ctx(device, CudaFrameFormat::Bgra, width, height) }
+                    .map_err(CudaUploadError::from)
+                    .map_err(CudaChromaKeyError::Frames)
+            })
+            .inspect_err(|error| pp_error!(self, "{error}"))?
+            .as_ptr();
+
         let mut destination = self.pool.get();
         // SAFETY: `ptr` is the pooled wrapper's own `AVFrame`, and the unref before
         // the allocation is what hands its previous surface back — see the comment
@@ -330,7 +313,7 @@ impl CudaChromaKey {
             // surface; releasing it here is what returns that surface to the
             // frames pool rather than leaking it for the element's lifetime.
             ffi::av_frame_unref(dst);
-            let code = ffi::av_hwframe_get_buffer(self.hw_frames_ctx.as_ptr(), dst, 0);
+            let code = ffi::av_hwframe_get_buffer(frames_ctx, dst, 0);
             if code < 0 {
                 pp_error!(self, "av_hwframe_get_buffer failed: {code}");
                 return Err(CudaChromaKeyError::Frames(CudaUploadError::HwFrameGet(code)).into());
@@ -347,8 +330,8 @@ impl CudaChromaKey {
             self.driver.key_bgra(
                 source_surface,
                 destination_surface,
-                self.width,
-                self.height,
+                width,
+                height,
                 self.options.method.key_color(),
                 band_low,
                 inv_band_width,
@@ -535,9 +518,7 @@ mod tests {
         pts: i64,
         pixel: impl Fn(u32, u32) -> [u8; 4],
     ) -> Option<MediaBuffer> {
-        let Ok(mut upload) =
-            CudaUpload::new("upload", device, CudaFrameFormat::Bgra, width, height)
-        else {
+        let Ok(mut upload) = CudaUpload::new("upload", device, CudaFrameFormat::Bgra) else {
             eprintln!("skipping: this machine has no usable CUDA frames context");
             return None;
         };
@@ -563,11 +544,8 @@ mod tests {
     fn download_bgra(
         device: &CudaDevice,
         buffer: MediaBuffer,
-        width: u32,
-        height: u32,
     ) -> Arc<UnboundObjectPoolRef<ffmpeg::frame::Video>> {
-        let mut download =
-            CudaDownload::new("download", device, CudaFrameFormat::Bgra, width, height);
+        let mut download = CudaDownload::new("download", device, CudaFrameFormat::Bgra);
         let received = capture(&mut download);
         download.consume(buffer).expect("download");
         match received.lock().unwrap().remove(0) {
@@ -576,12 +554,8 @@ mod tests {
         }
     }
 
-    fn key_element(
-        device: &CudaDevice,
-        width: u32,
-        height: u32,
-    ) -> Option<(CudaChromaKey, ChromaKeyHandle)> {
-        match CudaChromaKey::new("key", device, width, height, default_options()) {
+    fn key_element(device: &CudaDevice) -> Option<(CudaChromaKey, ChromaKeyHandle)> {
+        match CudaChromaKey::new("key", device, default_options()) {
             Ok(pair) => Some(pair),
             Err(error) => {
                 eprintln!("skipping: no usable CUDA keying here ({error})");
@@ -625,7 +599,7 @@ mod tests {
         }) else {
             return;
         };
-        let Some((mut key, _handle)) = key_element(&device, 2, 1) else {
+        let Some((mut key, _handle)) = key_element(&device) else {
             return;
         };
         let keyed = capture(&mut key);
@@ -642,7 +616,7 @@ mod tests {
             "the timestamp is part of the contract"
         );
 
-        let downloaded = download_bgra(&device, out.clone(), 2, 1);
+        let downloaded = download_bgra(&device, out.clone());
         let row = downloaded.data(0);
         assert_eq!(row[3], 0, "the key colour must key out completely");
         assert_eq!(
@@ -668,7 +642,7 @@ mod tests {
         }) else {
             return;
         };
-        let Some((mut key, _handle)) = key_element(&device, 2, 1) else {
+        let Some((mut key, _handle)) = key_element(&device) else {
             return;
         };
         let keyed = capture(&mut key);
@@ -676,7 +650,7 @@ mod tests {
         key.consume(source).expect("key the frame");
 
         let out = keyed.lock().unwrap().remove(0);
-        let downloaded = download_bgra(&device, out, 2, 1);
+        let downloaded = download_bgra(&device, out);
         let row = downloaded.data(0);
         assert_eq!(row[3], 0, "the key colour keys out all the same");
         assert_eq!(
@@ -698,7 +672,7 @@ mod tests {
             return;
         };
         let repeat = repeat_of(&source, 200);
-        let Some((mut key, _handle)) = key_element(&device, 4, 2) else {
+        let Some((mut key, _handle)) = key_element(&device) else {
             return;
         };
         let keyed = capture(&mut key);
@@ -737,7 +711,7 @@ mod tests {
             return;
         };
         let repeat = repeat_of(&source, 200);
-        let Some((mut key, handle)) = key_element(&device, 4, 2) else {
+        let Some((mut key, handle)) = key_element(&device) else {
             return;
         };
         let keyed = capture(&mut key);
@@ -765,7 +739,7 @@ mod tests {
             (received[0].clone(), received[1].clone())
         };
 
-        let alpha_of = |buffer: MediaBuffer| download_bgra(&device, buffer, 4, 2).data(0)[3];
+        let alpha_of = |buffer: MediaBuffer| download_bgra(&device, buffer).data(0)[3];
         assert_eq!(alpha_of(first), 0, "green keys out against green");
         assert_eq!(
             alpha_of(second),
@@ -779,7 +753,7 @@ mod tests {
         let Some((device, _cuda_lock)) = try_cuda_device() else {
             return;
         };
-        let Some((mut key, _handle)) = key_element(&device, 4, 2) else {
+        let Some((mut key, _handle)) = key_element(&device) else {
             return;
         };
         let pool = UnboundObjectPool::new(

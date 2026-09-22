@@ -106,7 +106,7 @@ mod windows_example {
             );
             // `D3d12Renderer` draws from a device resource only, so this is
             // where the captured pixels cross to the GPU.
-            let upload = D3d12Upload::new("upload", gpu.device(), window_width, window_height)
+            let upload = D3d12Upload::new("upload", gpu.device())
                 .expect("failed to create the D3D12 upload");
             let renderer = render_common::d3d12_window_renderer(
                 "renderer",
@@ -235,14 +235,8 @@ mod linux_example {
                 target.height,
                 ffmpeg::software::scaling::Flags::BILINEAR,
             );
-            let upload = CudaUpload::new(
-                "upload",
-                &cuda,
-                CudaFrameFormat::Nv12,
-                target.width,
-                target.height,
-            )
-            .map_err(|error| media_pp::Error::Other(error.to_string()))?;
+            let upload = CudaUpload::new("upload", &cuda, CudaFrameFormat::Nv12)
+                .map_err(|error| media_pp::Error::Other(error.to_string()))?;
             let renderer = render_common::cuda_window_renderer(
                 "renderer",
                 &gpu,

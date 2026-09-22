@@ -528,7 +528,7 @@ mod tests {
         *slot = frame;
 
         let mut tone_map = D3d11ToneMap::new("tone-map", &device, context.clone()).expect("new");
-        let download = D3d11Download::new("download", &device, context, 32, 32).expect("download");
+        let download = D3d11Download::new("download", &device, context).expect("download");
         let received = Arc::new(Mutex::new(Vec::new()));
         let collected = received.clone();
         let mut download = download;

@@ -189,6 +189,14 @@
 //! P010, CUDA                    NV12                    CudaScaler::with_format(.., Nv12)
 //! ```
 //!
+//! None of these is told a size: an upload, a download and a converter are
+//! built for a device and a layout, and take the size from the frames
+//! themselves, so the element a refusal names can be put between the two
+//! without first finding out how large the pictures are. A source that
+//! changes resolution mid-stream is followed rather than refused. A scaler,
+//! a compositor and an encoder are the other case — the size is what they
+//! are for, so they are still told it.
+//!
 //! An upload takes only some layouts — `D3d11Upload` NV12 or BGRA,
 //! `D3d12Upload` NV12 — so a software decoder's planar YUV goes through a
 //! `SwScaler` first. [`elements::VideoDecodeBin`] makes the decode-side
@@ -249,6 +257,11 @@ pub use core::{
 // `MediaTimestamp`/`TimeBase` itself. `pub(crate) use` keeps the same
 // `crate::schedule`/`crate::time` paths working for every internal caller
 // without also making them part of this crate's external API surface.
+#[cfg(any(
+    feature = "cuda",
+    all(target_os = "windows", any(feature = "d3d11", feature = "d3d12"))
+))]
+pub(crate) use core::frame_size;
 pub(crate) use core::repeat;
 pub(crate) use core::timing::{schedule, time};
 #[cfg(any(feature = "cuda", all(target_os = "windows", feature = "d3d11")))]

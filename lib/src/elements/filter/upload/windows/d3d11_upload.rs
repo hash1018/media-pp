@@ -56,22 +56,6 @@ pub enum D3d11UploadError {
         /// Number of rows that must be uploaded.
         height: u32,
     },
-    /// Input dimensions differ from the fixed texture dimensions.
-
-    #[error(
-        "frame is {actual_width}x{actual_height}, but D3d11Upload was \
-         opened for {expected_width}x{expected_height}"
-    )]
-    DimensionMismatch {
-        /// Input frame width in pixels.
-        actual_width: u32,
-        /// Input frame height in pixels.
-        actual_height: u32,
-        /// Width configured for this uploader.
-        expected_width: u32,
-        /// Height configured for this uploader.
-        expected_height: u32,
-    },
     /// The sink received a buffer other than decoded video or end-of-stream.
 
     #[error("D3d11Upload only handles Video frames, got a {0}")]
@@ -118,15 +102,14 @@ pub enum D3d11UploadError {
 /// way `D3d12Upload`'s GPU textures are, since there's no
 /// `av_hwframe_ctx`-managed pool here to reuse from).
 ///
-/// `width`/`height` are fixed for this element's lifetime, set once in
-/// [`D3d11Upload::new`] — every frame `consume` receives must match
-/// exactly.
+/// Each texture is made for the frame it holds, so a source that changes
+/// resolution mid-stream simply produces differently sized textures from
+/// then on — there is nothing here allocated ahead of a frame to disagree
+/// with it.
 pub struct D3d11Upload {
     pp_log: PpLog,
     name: Arc<str>,
     device: ID3D11Device,
-    width: u32,
-    height: u32,
     pad: SrcPad,
     /// Reused across every uploaded frame — see [`UnboundObjectPool`]'s
     /// docs. Only the small CPU-side `AVFrame` wrapper is actually reused
@@ -151,7 +134,7 @@ impl D3d11Upload {
     /// it produces that's still alive downstream), and must be the same
     /// `ID3D11Device` every other D3D11 element in this pipeline shares —
     /// see [`crate::elements::D3d11Renderer`]'s own docs on why.
-    pub fn new(name: impl Into<String>, device: &ID3D11Device, width: u32, height: u32) -> Self {
+    pub fn new(name: impl Into<String>, device: &ID3D11Device) -> Self {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::D3d11Upload, &name, None);
         let pad = SrcPad::with_contract(
@@ -162,13 +145,11 @@ impl D3d11Upload {
             ),
         );
         let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
-        pp_info!(pp_log: &pp_log, "opened: {width}x{height}");
+        pp_info!(pp_log: &pp_log, "opened");
         Self {
             name,
             pp_log,
             device: device.clone(),
-            width,
-            height,
             pad,
             pool,
             repeated: RepeatedOutput::new(),
@@ -181,10 +162,10 @@ impl D3d11Upload {
     /// half-height interleaved-chroma rows, all sharing one row pitch —
     /// whereas `frame`'s two planes are separately allocated and
     /// independently strided.
-    fn pack_nv12(&self, frame: &ffmpeg::frame::Video) -> Vec<u8> {
-        let row_bytes = self.width as usize;
-        let luma_rows = self.height as usize;
-        let chroma_rows = self.height.div_ceil(2) as usize;
+    fn pack_nv12(frame: &ffmpeg::frame::Video) -> Vec<u8> {
+        let row_bytes = frame.width() as usize;
+        let luma_rows = frame.height() as usize;
+        let chroma_rows = frame.height().div_ceil(2) as usize;
         let mut packed = vec![0u8; row_bytes * (luma_rows + chroma_rows)];
         let (luma_stride, chroma_stride) = (frame.stride(0), frame.stride(1));
         let (luma_src, chroma_src) = (frame.data(0), frame.data(1));
@@ -214,9 +195,10 @@ impl D3d11Upload {
         frame: &ffmpeg::frame::Video,
         format: DXGI_FORMAT,
     ) -> std::result::Result<ID3D11Texture2D, D3d11UploadError> {
-        let packed = (format == DXGI_FORMAT_NV12).then(|| self.pack_nv12(frame));
+        let (width, height) = (frame.width(), frame.height());
+        let packed = (format == DXGI_FORMAT_NV12).then(|| Self::pack_nv12(frame));
         let (pixels, pitch) = match &packed {
-            Some(packed) => (packed.as_slice(), self.width as usize),
+            Some(packed) => (packed.as_slice(), width as usize),
             None => (frame.data(0), frame.stride(0)),
         };
         // D3D11 reads `pitch` bytes for each of the texture's rows straight
@@ -225,8 +207,8 @@ impl D3d11Upload {
         // is checked rather than assumed — a short buffer would be an
         // out-of-bounds read inside the driver, not a Rust panic.
         let rows = match &packed {
-            Some(_) => self.height as usize + self.height.div_ceil(2) as usize,
-            None => self.height as usize,
+            Some(_) => height as usize + height.div_ceil(2) as usize,
+            None => height as usize,
         };
         if pixels.len() < pitch * rows {
             return Err(D3d11UploadError::PlaneTooSmall {
@@ -237,8 +219,8 @@ impl D3d11Upload {
         }
 
         let desc = D3D11_TEXTURE2D_DESC {
-            Width: self.width,
-            Height: self.height,
+            Width: width,
+            Height: height,
             MipLevels: 1,
             ArraySize: 1,
             Format: format,
@@ -362,17 +344,6 @@ impl PerFrameTransform for D3d11Upload {
             pp_error!(self, "unsupported pixel format: {:?}", frame.format());
             return Err(D3d11UploadError::UnsupportedFormat(frame.format()).into());
         };
-        if frame.width() != self.width || frame.height() != self.height {
-            let error = D3d11UploadError::DimensionMismatch {
-                actual_width: frame.width(),
-                actual_height: frame.height(),
-                expected_width: self.width,
-                expected_height: self.height,
-            };
-            pp_error!(self, "{error}");
-            return Err(error.into());
-        }
-
         let texture = self
             .upload(frame, format)
             .inspect_err(|error| pp_error!(self, "GPU upload failed: {error}"))?;
@@ -381,7 +352,7 @@ impl PerFrameTransform for D3d11Upload {
         // `ffmpeg::frame::Video`'s own `Drop` runs on whatever was there
         // before, releasing that frame's GPU texture (via
         // `release_d3d11_texture`) right here.
-        *gpu_frame = wrap_d3d11_texture(texture, self.width, self.height)?;
+        *gpu_frame = wrap_d3d11_texture(texture, frame.width(), frame.height())?;
         gpu_frame.set_pts(frame.pts());
         gpu_frame.set_color_space(frame.color_space());
         gpu_frame.set_color_range(frame.color_range());
@@ -494,7 +465,7 @@ mod tests {
         let Some((device, _context)) = try_d3d11_device() else {
             return;
         };
-        let mut upload = D3d11Upload::new("upload", &device, 4, 4);
+        let mut upload = D3d11Upload::new("upload", &device);
         let received = capture(&mut upload);
         let source = cpu_frame(4, 4, 100);
         let repeat = repeat_of(&source, 200);
@@ -585,7 +556,7 @@ mod tests {
             return;
         };
         let (width, height) = (16u32, 16u32);
-        let mut upload = D3d11Upload::new("test-upload", &device, width, height);
+        let mut upload = D3d11Upload::new("test-upload", &device);
         let received = capture(&mut upload);
 
         let color = [10u8, 200, 30, 255]; // BGRA
@@ -659,7 +630,7 @@ mod tests {
             return;
         };
         let (width, height) = (16u32, 16u32);
-        let mut upload = D3d11Upload::new("test-upload", &device, width, height);
+        let mut upload = D3d11Upload::new("test-upload", &device);
         let received = capture(&mut upload);
 
         let pool = UnboundObjectPool::new(
@@ -693,13 +664,59 @@ mod tests {
         assert_eq!(desc.Format, DXGI_FORMAT_NV12);
     }
 
+    /// A source that changes resolution mid-stream — an RTSP camera, a
+    /// window capture being resized — was a per-frame error here while the
+    /// texture size was settled before any frame had arrived.
+    #[test]
+    fn a_source_that_changes_resolution_is_followed() {
+        let Some((device, _context)) = try_d3d11_device() else {
+            return;
+        };
+        let mut upload = D3d11Upload::new("test-upload", &device);
+        let received = capture(&mut upload);
+
+        upload
+            .consume(cpu_frame(16, 16, 1))
+            .expect("the first size");
+        upload
+            .consume(cpu_frame(8, 8, 2))
+            .expect("and the next one");
+
+        let received = received.lock().unwrap();
+        let sizes: Vec<(u32, u32)> = received
+            .iter()
+            .map(|buffer| {
+                let MediaBuffer::Video(frame) = buffer else {
+                    panic!("expected a Video buffer");
+                };
+                let (texture_raw, _) = d3d11va_texture(frame).expect("a D3D11 frame");
+                // SAFETY: the live frame owns `texture_raw`; cloning the
+                // borrowed COM wrapper acquires an independent reference,
+                // and `desc` is a live out-parameter for it.
+                unsafe {
+                    let texture = ID3D11Texture2D::from_raw_borrowed(&texture_raw)
+                        .expect("the texture pointer must not be null")
+                        .clone();
+                    let mut desc = D3D11_TEXTURE2D_DESC::default();
+                    texture.GetDesc(&mut desc);
+                    (desc.Width, desc.Height)
+                }
+            })
+            .collect();
+        assert_eq!(
+            sizes,
+            [(16, 16), (8, 8)],
+            "each texture is made for the frame it holds"
+        );
+    }
+
     #[test]
     fn a_format_neither_path_handles_is_a_typed_error_not_a_panic() {
         let Some((device, _context)) = try_d3d11_device() else {
             return;
         };
         let (width, height) = (16u32, 16u32);
-        let mut upload = D3d11Upload::new("test-upload", &device, width, height);
+        let mut upload = D3d11Upload::new("test-upload", &device);
 
         let pool = UnboundObjectPool::new(
             0,

@@ -847,7 +847,7 @@ mod tests {
     ) -> [u8; 4] {
         let (mut key, _) = D3d11ChromaKey::new("key", device, context.clone(), options)
             .expect("D3d11ChromaKey::new should succeed");
-        let mut download = D3d11Download::new("download", device, context.clone(), 8, 8)
+        let mut download = D3d11Download::new("download", device, context.clone())
             .expect("D3d11Download::new should succeed");
         let received = capture(&mut download);
         key.src_pads()[0].link(Box::new(download));
@@ -1024,7 +1024,7 @@ mod tests {
 
         let (mut key, _) = D3d11ChromaKey::new("key", &device, context.clone(), default_options())
             .expect("D3d11ChromaKey::new should succeed");
-        let mut download = D3d11Download::new("download", &device, context, 8, 8)
+        let mut download = D3d11Download::new("download", &device, context)
             .expect("D3d11Download::new should succeed");
         let received = capture(&mut download);
         key.src_pads()[0].link(Box::new(download));
@@ -1065,7 +1065,7 @@ mod tests {
 
         let (mut key, _) = D3d11ChromaKey::new("key", &device, context.clone(), default_options())
             .expect("D3d11ChromaKey::new should succeed");
-        let mut download = D3d11Download::new("download", &device, context, 8, 8)
+        let mut download = D3d11Download::new("download", &device, context)
             .expect("D3d11Download::new should succeed");
         let received = capture(&mut download);
         key.src_pads()[0].link(Box::new(download));

@@ -576,7 +576,7 @@ mod tests {
         };
         let (input_width, input_height) = (128, 128);
         let (output_width, output_height) = (64, 64);
-        let Ok(mut upload) = D3d12Upload::new("upload", &device, input_width, input_height) else {
+        let Ok(mut upload) = D3d12Upload::new("upload", &device) else {
             eprintln!("skipping: FFmpeg could not create D3D12VA frames");
             return;
         };
@@ -585,7 +585,7 @@ mod tests {
             eprintln!("skipping: D3D12 video processing is unavailable");
             return;
         };
-        let mut download = D3d12Download::new("download", output_width, output_height);
+        let mut download = D3d12Download::new("download");
         let received = Arc::new(Mutex::new(Vec::new()));
         download.src_pads()[0].link(Box::new(CapturingSink {
             pp_log: element_pp_log(ElementType::Other, "capture", None),
@@ -652,7 +652,7 @@ mod tests {
         };
         let (input_width, input_height) = (128, 128);
         let (output_width, output_height) = (64, 64);
-        let Ok(mut upload) = D3d12Upload::new("upload", &device, input_width, input_height) else {
+        let Ok(mut upload) = D3d12Upload::new("upload", &device) else {
             eprintln!("skipping: FFmpeg could not create D3D12VA frames");
             return;
         };
@@ -661,7 +661,7 @@ mod tests {
             eprintln!("skipping: D3D12 video processing is unavailable");
             return;
         };
-        let mut download = D3d12Download::new("download", output_width, output_height);
+        let mut download = D3d12Download::new("download");
         let received = Arc::new(Mutex::new(Vec::new()));
         download.src_pads()[0].link(Box::new(CapturingSink {
             pp_log: element_pp_log(ElementType::Other, "capture", None),
@@ -797,7 +797,7 @@ mod tests {
             eprintln!("skipping: D3D12CreateDevice returned the same device object twice");
             return;
         }
-        let Ok(mut upload) = D3d12Upload::new("upload", &second, 128, 128) else {
+        let Ok(mut upload) = D3d12Upload::new("upload", &second) else {
             eprintln!("skipping: FFmpeg could not create D3D12VA frames");
             return;
         };

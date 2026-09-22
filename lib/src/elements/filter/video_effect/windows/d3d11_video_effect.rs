@@ -653,8 +653,8 @@ mod tests {
     ) -> [u8; 4] {
         let (mut element, _) = D3d11VideoEffect::new("effect", device, context.clone(), effect)
             .expect("D3d11VideoEffect::new");
-        let mut download = D3d11Download::new("download", device, context.clone(), 8, 8)
-            .expect("D3d11Download::new");
+        let mut download =
+            D3d11Download::new("download", device, context.clone()).expect("D3d11Download::new");
         let received = capture(&mut download);
         element.src_pads()[0].link(Box::new(download));
 
@@ -805,7 +805,7 @@ mod tests {
         let (mut element, _) = D3d11VideoEffect::new("effect", &device, context.clone(), darker)
             .expect("D3d11VideoEffect::new");
         let mut download =
-            D3d11Download::new("download", &device, context, 8, 8).expect("D3d11Download::new");
+            D3d11Download::new("download", &device, context).expect("D3d11Download::new");
         let received = capture(&mut download);
         element.src_pads()[0].link(Box::new(download));
 

@@ -71,8 +71,7 @@ fn cuda_bgra_frame(
     height: u32,
     pixel: impl Fn(u32, u32) -> [u8; 4],
 ) -> Option<MediaBuffer> {
-    let Ok(mut upload) = CudaUpload::new("upload", device, CudaFrameFormat::Bgra, width, height)
-    else {
+    let Ok(mut upload) = CudaUpload::new("upload", device, CudaFrameFormat::Bgra) else {
         eprintln!("skipping: this machine has no usable CUDA frames context");
         return None;
     };
@@ -102,8 +101,7 @@ fn cuda_frame_with_pts(
     luma: u8,
     pts: i64,
 ) -> Option<MediaBuffer> {
-    let Ok(mut upload) = CudaUpload::new("upload", device, CudaFrameFormat::Nv12, width, height)
-    else {
+    let Ok(mut upload) = CudaUpload::new("upload", device, CudaFrameFormat::Nv12) else {
         eprintln!("skipping: this machine has no usable CUDA frames context");
         return None;
     };
@@ -127,10 +125,8 @@ fn cuda_frame_with_pts(
 fn download(
     device: &CudaDevice,
     frame: UnboundObjectPoolRef<ffmpeg::frame::Video>,
-    width: u32,
-    height: u32,
 ) -> Arc<UnboundObjectPoolRef<ffmpeg::frame::Video>> {
-    let mut download = CudaDownload::new("download", device, CudaFrameFormat::Nv12, width, height);
+    let mut download = CudaDownload::new("download", device, CudaFrameFormat::Nv12);
     let received = capture(&mut download);
     download
         .consume(MediaBuffer::Video(Arc::new(frame)))
@@ -147,10 +143,8 @@ fn download(
 fn download_bgra(
     device: &CudaDevice,
     frame: UnboundObjectPoolRef<ffmpeg::frame::Video>,
-    width: u32,
-    height: u32,
 ) -> Arc<UnboundObjectPoolRef<ffmpeg::frame::Video>> {
-    let mut download = CudaDownload::new("download", device, CudaFrameFormat::Bgra, width, height);
+    let mut download = CudaDownload::new("download", device, CudaFrameFormat::Bgra);
     let received = capture(&mut download);
     download
         .consume(MediaBuffer::Video(Arc::new(frame)))
@@ -168,8 +162,7 @@ fn luma_at(frame: &ffmpeg::frame::Video, x: usize, y: usize) -> u8 {
 /// A CUDA-resident NV12 frame whose luma says which quadrant a pixel is
 /// in, so what was drawn is readable from the output alone.
 fn cuda_quadrant_frame(device: &CudaDevice, width: u32, height: u32) -> Option<MediaBuffer> {
-    let Ok(mut upload) = CudaUpload::new("upload", device, CudaFrameFormat::Nv12, width, height)
-    else {
+    let Ok(mut upload) = CudaUpload::new("upload", device, CudaFrameFormat::Nv12) else {
         eprintln!("skipping: this machine has no usable CUDA frames context");
         return None;
     };
@@ -235,7 +228,7 @@ fn a_layer_draws_only_its_source_region() {
     input.sink.consume(frame).expect("frame");
 
     let composed = compositor.compose_frame().expect("compose");
-    let out = download(&device, composed, width, height);
+    let out = download(&device, composed);
 
     for (x, y) in [(4, 4), (64, 64), (123, 123)] {
         let luma = luma_at(&out, x, y);
@@ -289,7 +282,7 @@ fn a_region_that_changes_every_frame_keeps_composing() {
             .expect("set source");
 
         let composed = compositor.compose_frame().expect("compose");
-        let out = download(&device, composed, width, height);
+        let out = download(&device, composed);
         let luma = luma_at(&out, 128, 128);
         assert!(
             luma.abs_diff(200) <= 2,
@@ -336,7 +329,7 @@ fn a_layer_scaled_along_one_axis_is_not_blank() {
     input.sink.consume(frame).expect("frame");
 
     let composed = compositor.compose_frame().expect("compose");
-    let out = download(&device, composed, width, height);
+    let out = download(&device, composed);
 
     // Inside the layer: the source's own value, within the one level a
     // second resampling pass can round away.
@@ -405,7 +398,7 @@ fn composes_layers_in_z_order_at_their_rectangles() {
     let composed = compositor.compose_frame().expect("compose");
     assert_eq!(composed.format(), ffmpeg::format::Pixel::CUDA);
     assert_eq!(composed.pts(), Some(0));
-    let out = download(&device, composed, width, height);
+    let out = download(&device, composed);
 
     assert_eq!(luma_at(&out, 10, 10), 100, "the back layer is missing");
     assert_eq!(luma_at(&out, 80, 80), 200, "the front layer is missing");
@@ -480,7 +473,7 @@ fn a_bgra_overlay_leaves_the_layer_under_it_showing() {
         .expect("the compositor takes a BGRA overlay");
 
     let composed = compositor.compose_frame().expect("compose");
-    let out = download(&device, composed, width, height);
+    let out = download(&device, composed);
 
     assert_eq!(
         luma_at(&out, 100, 64),
@@ -610,7 +603,7 @@ fn layer_handle_moves_and_hides_a_live_source() {
     input.sink.consume(frame).expect("frame");
 
     let first = compositor.compose_frame().expect("compose");
-    let out = download(&device, first, width, height);
+    let out = download(&device, first);
     assert_eq!(luma_at(&out, 10, 10), 180);
     assert_eq!(luma_at(&out, 74, 74), 16);
 
@@ -619,13 +612,13 @@ fn layer_handle_moves_and_hides_a_live_source() {
         .set_rect(VideoRect::new(64, 64, 32, 32))
         .expect("move");
     let moved = compositor.compose_frame().expect("compose");
-    let out = download(&device, moved, width, height);
+    let out = download(&device, moved);
     assert_eq!(luma_at(&out, 10, 10), 16, "the layer did not leave");
     assert_eq!(luma_at(&out, 74, 74), 180, "the layer did not arrive");
 
     input.layer.set_visible(false).expect("hide");
     let hidden = compositor.compose_frame().expect("compose");
-    let out = download(&device, hidden, width, height);
+    let out = download(&device, hidden);
     assert_eq!(luma_at(&out, 74, 74), 16, "a hidden layer was still drawn");
 }
 
@@ -657,7 +650,7 @@ fn cover_fills_its_rectangle_where_contain_letterboxes() {
         let frame = cuda_frame(&device, 64, 16, 200).expect("frame");
         input.sink.consume(frame).expect("frame");
         let composed = compositor.compose_frame().expect("compose");
-        download(&device, composed, width, height)
+        download(&device, composed)
     };
 
     let contain = composed_with(VideoFit::Contain);
@@ -721,7 +714,7 @@ fn a_translucent_layer_is_blended_with_the_background() {
     input.sink.consume(frame).expect("frame");
 
     let composed = compositor.compose_frame().expect("compose");
-    let out = download(&device, composed, width, height);
+    let out = download(&device, composed);
 
     // Background is `Color::BLACK`, which is luma 16 in limited range.
     let alpha = (0.5f32 * 255.0).round() as u32;
@@ -741,12 +734,12 @@ fn a_translucent_layer_is_blended_with_the_background() {
     // fully transparent draws nothing.
     input.layer.set_opacity(1.0).expect("opaque");
     let composed = compositor.compose_frame().expect("compose");
-    let out = download(&device, composed, width, height);
+    let out = download(&device, composed);
     assert_eq!(luma_at(&out, 10, 10), 200);
 
     input.layer.set_opacity(0.0).expect("transparent");
     let composed = compositor.compose_frame().expect("compose");
-    let out = download(&device, composed, width, height);
+    let out = download(&device, composed);
     assert_eq!(luma_at(&out, 10, 10), 16);
 }
 
@@ -796,13 +789,13 @@ fn a_text_layer_draws_after_set_text_and_clears_when_emptied() {
 
     // Nothing rasterized yet: the canvas is pure background.
     let composed = compositor.compose_frame().expect("compose");
-    let out = download(&device, composed, width, height);
+    let out = download(&device, composed);
     let background = luma_at(&out, 10, 10);
     assert_eq!(background, 16, "an empty text layer drew something");
 
     text.set_text("HELLO").expect("set_text");
     let composed = compositor.compose_frame().expect("compose");
-    let out = download(&device, composed, width, height);
+    let out = download(&device, composed);
     let lit = (0..64u32)
         .flat_map(|y| (0..200u32).map(move |x| (x, y)))
         .filter(|(x, y)| luma_at(&out, *x as usize, *y as usize) > background + 40)
@@ -815,7 +808,7 @@ fn a_text_layer_draws_after_set_text_and_clears_when_emptied() {
     // Text with no drawable glyphs clears the layer rather than erroring.
     text.set_text("   ").expect("blank set_text");
     let composed = compositor.compose_frame().expect("compose");
-    let out = download(&device, composed, width, height);
+    let out = download(&device, composed);
     for y in 0..64usize {
         for x in 0..200usize {
             assert_eq!(
@@ -861,7 +854,7 @@ fn text_position_visibility_and_opacity_take_effect() {
     };
 
     let composed = compositor.compose_frame().expect("compose");
-    let out = download(&device, composed, width, height);
+    let out = download(&device, composed);
     assert!(brightest(&out, 0, 100) > 100, "text is not at the origin");
     assert_eq!(
         brightest(&out, 150, 250),
@@ -871,7 +864,7 @@ fn text_position_visibility_and_opacity_take_effect() {
 
     text.set_position(150, 0);
     let composed = compositor.compose_frame().expect("compose");
-    let out = download(&device, composed, width, height);
+    let out = download(&device, composed);
     assert_eq!(brightest(&out, 0, 100), 16, "the text did not leave");
     assert!(brightest(&out, 150, 250) > 100, "the text did not arrive");
 
@@ -879,7 +872,7 @@ fn text_position_visibility_and_opacity_take_effect() {
     // rather than at either end.
     text.set_opacity(0.5).expect("half opacity");
     let composed = compositor.compose_frame().expect("compose");
-    let out = download(&device, composed, width, height);
+    let out = download(&device, composed);
     let half = brightest(&out, 150, 250);
     assert!(
         (100..=170).contains(&half),
@@ -888,7 +881,7 @@ fn text_position_visibility_and_opacity_take_effect() {
 
     text.set_visible(false);
     let composed = compositor.compose_frame().expect("compose");
-    let out = download(&device, composed, width, height);
+    let out = download(&device, composed);
     assert_eq!(brightest(&out, 150, 250), 16, "a hidden text layer drew");
 }
 
@@ -1006,7 +999,7 @@ fn the_canvas_says_it_is_bt709_and_reads_back_as_the_colour_it_was_filled_with()
     assert_eq!(composed.color_range(), ffmpeg::color::Range::MPEG);
     assert_eq!(composed.color_primaries(), ffmpeg::color::Primaries::BT709);
 
-    let downloaded = download(&device, composed, width, height);
+    let downloaded = download(&device, composed);
     assert_eq!(
         downloaded.color_space(),
         ffmpeg::color::Space::BT709,
@@ -1112,7 +1105,7 @@ fn a_bgra_canvas_keeps_what_no_layer_covered_transparent() {
     over.sink.consume(green).expect("frame");
 
     let composed = compositor.compose_frame().expect("compose");
-    let out = download_bgra(&device, composed, width, height);
+    let out = download_bgra(&device, composed);
     let pixel = |x: usize, y: usize| {
         let at = y * out.stride(0) + x * 4;
         [
@@ -1183,7 +1176,7 @@ fn an_nv12_layer_lands_opaque_on_a_bgra_canvas() {
     input.sink.consume(frame).expect("frame");
 
     let composed = compositor.compose_frame().expect("compose");
-    let out = download_bgra(&device, composed, width, height);
+    let out = download_bgra(&device, composed);
     let pixel = |x: usize, y: usize| {
         let at = y * out.stride(0) + x * 4;
         [
@@ -1245,7 +1238,7 @@ fn a_text_layer_draws_on_a_bgra_canvas() {
     text.set_text("Hi").expect("the text rasterizes");
 
     let composed = compositor.compose_frame().expect("compose");
-    let out = download_bgra(&device, composed, width, height);
+    let out = download_bgra(&device, composed);
     let drawn = (0..height as usize)
         .flat_map(|y| (0..width as usize).map(move |x| (x, y)))
         .filter(|(x, y)| out.data(0)[y * out.stride(0) + x * 4 + 3] != 0)
@@ -1284,8 +1277,7 @@ fn an_nv12_layer_is_composed_by_its_own_colour() {
                 },
             )
             .expect("add a layer");
-        let Ok(mut upload) = CudaUpload::new("upload", &device, CudaFrameFormat::Nv12, 64, 64)
-        else {
+        let Ok(mut upload) = CudaUpload::new("upload", &device, CudaFrameFormat::Nv12) else {
             eprintln!("skipping: this machine has no usable CUDA frames context");
             return None;
         };
@@ -1307,12 +1299,7 @@ fn an_nv12_layer_is_composed_by_its_own_colour() {
         let layer_frame = uploaded.lock().unwrap().remove(0);
         layer.sink.consume(layer_frame).expect("layer frame");
 
-        let out = download(
-            &device,
-            compositor.compose_frame().expect("compose"),
-            64,
-            64,
-        );
+        let out = download(&device, compositor.compose_frame().expect("compose"));
         let chroma = &out.data(1)[out.stride(1) * 16 + 32..];
         Some([luma_at(&out, 32, 32), chroma[0], chroma[1]])
     };

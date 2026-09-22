@@ -215,19 +215,9 @@ mod linux_example {
         let fits = check_elements(&mut decoder, &renderer);
         let to_nv12 = if fits.is_refused() {
             println!("decoder and renderer: {fits}; converting to NV12");
-            let context = media_pp::ffmpeg::codec::context::Context::from_parameters(
-                video.parameters.clone(),
-            )?;
-            let size = context.decoder().video()?;
             Some(
-                CudaConverter::new(
-                    "to-nv12",
-                    &cuda,
-                    CudaFrameFormat::Nv12,
-                    size.width(),
-                    size.height(),
-                )
-                .map_err(|error| Error::Other(error.to_string()))?,
+                CudaConverter::new("to-nv12", &cuda, CudaFrameFormat::Nv12)
+                    .map_err(|error| Error::Other(error.to_string()))?,
             )
         } else {
             None

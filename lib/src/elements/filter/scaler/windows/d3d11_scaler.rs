@@ -1044,7 +1044,7 @@ mod tests {
         luma: u8,
         pts: i64,
     ) -> MediaBuffer {
-        let mut upload = D3d11Upload::new("upload", device, width, height);
+        let mut upload = D3d11Upload::new("upload", device);
         let uploaded = capture(&mut upload);
         let mut cpu = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::NV12, width, height);
         cpu.set_pts(Some(pts));
@@ -1152,7 +1152,7 @@ mod tests {
             8,
         )
         .expect("D3d11Scaler::new should succeed");
-        let mut download = D3d11Download::new("download", &device, context, 8, 8)
+        let mut download = D3d11Download::new("download", &device, context)
             .expect("D3d11Download::new should succeed");
         let received = capture(&mut download);
         scaler.src_pads()[0].link(Box::new(download));
@@ -1277,7 +1277,7 @@ mod tests {
             8,
         )
         .expect("D3d11Scaler::new should succeed");
-        let mut download = D3d11Download::new("download", &device, context, 8, 8)
+        let mut download = D3d11Download::new("download", &device, context)
             .expect("D3d11Download::new should succeed");
         let received = capture(&mut download);
         scaler.src_pads()[0].link(Box::new(download));
@@ -1498,7 +1498,7 @@ mod tests {
             16,
         )
         .expect("D3d11Scaler::new should succeed");
-        let mut download = D3d11Download::new("download", &device, context, 16, 16)
+        let mut download = D3d11Download::new("download", &device, context)
             .expect("D3d11Download::new should succeed");
         let received = capture(&mut download);
         scaler.src_pads()[0].link(Box::new(download));
@@ -1811,7 +1811,7 @@ mod tests {
             32,
         )
         .expect("D3d11Scaler::new should succeed");
-        let mut download = D3d11Download::new("download", &device, context, 32, 32)
+        let mut download = D3d11Download::new("download", &device, context)
             .expect("D3d11Download::new should succeed");
         let received = capture(&mut download);
         scaler.src_pads()[0].link(Box::new(download));

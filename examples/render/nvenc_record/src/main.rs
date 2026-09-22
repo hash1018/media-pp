@@ -100,7 +100,7 @@ mod windows_example {
                 height,
                 ffmpeg::software::scaling::Flags::BILINEAR,
             );
-            let upload = D3d11Upload::new("upload", gpu.device(), width, height);
+            let upload = D3d11Upload::new("upload", gpu.device());
             let branch = ctx
                 .branch()
                 .pipe(scaler)

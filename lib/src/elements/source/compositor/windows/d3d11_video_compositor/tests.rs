@@ -156,9 +156,8 @@ fn download_frame(
     context: Arc<Mutex<ID3D11DeviceContext>>,
     composed: Arc<UnboundObjectPoolRef<ffmpeg::frame::Video>>,
 ) -> Arc<UnboundObjectPoolRef<ffmpeg::frame::Video>> {
-    let (width, height) = (composed.width(), composed.height());
-    let mut download = D3d11Download::new("download", device, context, width, height)
-        .expect("D3d11Download::new should succeed");
+    let mut download =
+        D3d11Download::new("download", device, context).expect("D3d11Download::new should succeed");
     let received = Arc::new(Mutex::new(Vec::new()));
     download.src_pads()[0].link(Box::new(CapturingSink {
         received: received.clone(),

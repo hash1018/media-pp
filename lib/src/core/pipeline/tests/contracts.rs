@@ -299,7 +299,7 @@ fn a_system_memory_frame_cannot_feed_a_d3d11_filter() {
     contract_context()
         .branch()
         .pipe(video_decoder("decoder"))
-        .pipe(D3d11Upload::new("upload", &device, 64, 64))
+        .pipe(D3d11Upload::new("upload", &device))
         .pipe(scaler("scaler"))
         .to(DeclaringSink::boxed("renderer", gpu_frames))
         .expect("a D3d11Upload is exactly what makes this chain valid");
@@ -320,7 +320,7 @@ fn a_d3d11_frame_cannot_feed_a_cpu_filter() {
     let Err(error) = contract_context()
         .branch()
         .pipe(video_decoder("decoder"))
-        .pipe(D3d11Upload::new("upload", &device, 64, 64))
+        .pipe(D3d11Upload::new("upload", &device))
         .pipe(SwScaler::new(
             "scaler",
             ffmpeg::format::Pixel::YUV420P,
@@ -537,7 +537,7 @@ fn a_d3d11_texture_cannot_feed_a_cuda_filter() {
     let Err(error) = contract_context()
         .branch()
         .pipe(video_decoder("decoder"))
-        .pipe(D3d11Upload::new("upload", &device, 64, 64))
+        .pipe(D3d11Upload::new("upload", &device))
         .pipe(CudaScaler::new(
             "scaler",
             &cuda,
@@ -612,7 +612,7 @@ fn a_d3d12_renderer_takes_device_resources_only() {
     // The second half of this test needs a working D3D12VA hw frames
     // context, which a device alone does not guarantee. Probe for it up
     // front so a machine without one skips rather than failing halfway.
-    let upload = match D3d12Upload::new("upload", &device, 64, 64) {
+    let upload = match D3d12Upload::new("upload", &device) {
         Ok(upload) => upload,
         Err(error) => {
             eprintln!("skipped: this D3D12 device cannot open a frames context ({error})");
@@ -948,7 +948,7 @@ fn a_passthrough_at_the_head_of_a_branch_accepts_a_matching_source() {
             64,
             ffmpeg::software::scaling::Flags::BILINEAR,
         ))
-        .pipe(D3d11Upload::new("upload", &device, 64, 64))
+        .pipe(D3d11Upload::new("upload", &device))
         .to(renderer)
         .expect("the branch itself is consistent");
 

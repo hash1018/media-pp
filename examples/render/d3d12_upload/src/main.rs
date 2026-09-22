@@ -71,8 +71,8 @@ mod windows_example {
             );
             // Same device the renderer draws with — required for the
             // zero-copy path to be valid at all (see D3d12Upload::new).
-            let upload = D3d12Upload::new("upload", gpu.device(), width, height)
-                .expect("failed to open D3D12Upload");
+            let upload =
+                D3d12Upload::new("upload", gpu.device()).expect("failed to open D3D12Upload");
             let renderer =
                 render_common::d3d12_window_renderer("renderer", &gpu, hwnd, width, height)
                     .expect("failed to create renderer");

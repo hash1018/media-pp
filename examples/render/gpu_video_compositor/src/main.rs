@@ -153,7 +153,7 @@ mod windows_example {
                     output_height,
                     ffmpeg::software::scaling::Flags::BILINEAR,
                 );
-                let upload = D3d11Upload::new("upload", gpu.device(), output_width, output_height);
+                let upload = D3d11Upload::new("upload", gpu.device());
                 let branch = ctx.branch().pipe(scaler).pipe(upload).to(background_sink)?;
                 ctx.attach(source, 0, branch)?;
                 Ok(())
@@ -180,7 +180,7 @@ mod windows_example {
                     240,
                     ffmpeg::software::scaling::Flags::BILINEAR,
                 );
-                let upload = D3d11Upload::new("upload", gpu.device(), 320, 240);
+                let upload = D3d11Upload::new("upload", gpu.device());
                 let branch = ctx.branch().pipe(scaler).pipe(upload).to(foreground_sink)?;
                 ctx.attach(source, 0, branch)?;
                 Ok(())
@@ -214,14 +214,8 @@ mod windows_example {
             .expect("failed to create renderer");
             let render_branch = ctx.branch().queue("render", 4).to(renderer)?;
 
-            let download = D3d11Download::new(
-                "download",
-                gpu.device(),
-                gpu.context(),
-                output_width,
-                output_height,
-            )
-            .map_err(|e| media_pp::Error::Other(e.to_string()))?;
+            let download = D3d11Download::new("download", gpu.device(), gpu.context())
+                .map_err(|e| media_pp::Error::Other(e.to_string()))?;
             let to_yuv = SwScaler::new(
                 "to-yuv",
                 ffmpeg::format::Pixel::YUV420P,
@@ -422,14 +416,8 @@ mod linux_example {
                     output_height,
                     ffmpeg::software::scaling::Flags::BILINEAR,
                 );
-                let upload = CudaUpload::new(
-                    "upload",
-                    &cuda,
-                    CudaFrameFormat::Nv12,
-                    output_width,
-                    output_height,
-                )
-                .map_err(|e| media_pp::Error::Other(e.to_string()))?;
+                let upload = CudaUpload::new("upload", &cuda, CudaFrameFormat::Nv12)
+                    .map_err(|e| media_pp::Error::Other(e.to_string()))?;
                 let branch = ctx.branch().pipe(scaler).pipe(upload).to(background_sink)?;
                 ctx.attach(source, 0, branch)?;
                 Ok(())
@@ -456,7 +444,7 @@ mod linux_example {
                     240,
                     ffmpeg::software::scaling::Flags::BILINEAR,
                 );
-                let upload = CudaUpload::new("upload", &cuda, CudaFrameFormat::Nv12, 320, 240)
+                let upload = CudaUpload::new("upload", &cuda, CudaFrameFormat::Nv12)
                     .map_err(|e| media_pp::Error::Other(e.to_string()))?;
                 let branch = ctx.branch().pipe(scaler).pipe(upload).to(foreground_sink)?;
                 ctx.attach(source, 0, branch)?;
@@ -493,13 +481,7 @@ mod linux_example {
             .expect("failed to create renderer");
             let render_branch = ctx.branch().queue("render", 4).to(renderer)?;
 
-            let download = CudaDownload::new(
-                "download",
-                &cuda,
-                CudaFrameFormat::Nv12,
-                output_width,
-                output_height,
-            );
+            let download = CudaDownload::new("download", &cuda, CudaFrameFormat::Nv12);
             let to_yuv = SwScaler::new(
                 "to-yuv",
                 ffmpeg::format::Pixel::YUV420P,

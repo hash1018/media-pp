@@ -21,6 +21,7 @@ use crate::{
     control::ControlMsg,
     element::{Element, ElementType, Sink, Source, element_pp_log},
     error::{D3d11SharedDeviceError, Result},
+    frame_size::ForSize,
     pad::SrcPad,
     platform::windows::{d3d11::protect_shared_device, d3d11va::d3d11va_texture},
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
@@ -67,22 +68,6 @@ pub enum D3d11DownloadError {
          one pipeline must share exactly one device for zero-copy to be valid"
     )]
     DeviceMismatch,
-    /// Input dimensions differ from the fixed download dimensions.
-
-    #[error(
-        "frame is {actual_width}x{actual_height}, but D3d11Download was \
-         opened for {expected_width}x{expected_height}"
-    )]
-    DimensionMismatch {
-        /// Input frame width in pixels.
-        actual_width: u32,
-        /// Input frame height in pixels.
-        actual_height: u32,
-        /// Width configured for this downloader.
-        expected_width: u32,
-        /// Height configured for this downloader.
-        expected_height: u32,
-    },
     /// The backing texture is smaller than the visible frame.
 
     #[error(
@@ -136,14 +121,12 @@ pub struct D3d11Download {
     name: Arc<str>,
     device: ID3D11Device,
     context: Arc<Mutex<ID3D11DeviceContext>>,
-    width: u32,
-    height: u32,
-    /// Built once at construction (fixed `width`/`height` for this
-    /// element's lifetime, same convention as `D3d11Upload`) and reused
-    /// across every `consume` call rather than recreated per frame.
-    staging: ID3D11Texture2D,
+    /// The staging texture and the CPU frames read out of it, made for the
+    /// size of the frames actually arriving rather than recreated per frame
+    /// — and made again if a source changes resolution mid-stream, see
+    /// `ForSize`.
+    readback: ForSize<Readback>,
     pad: SrcPad,
-    pool: UnboundObjectPool<ffmpeg::frame::Video>,
     /// The last download and the texture it came from, so a producer that
     /// re-emits an unchanged picture is answered with the bytes already in
     /// system memory — see [`RepeatedOutput`]. This is the most expensive
@@ -163,15 +146,12 @@ unsafe impl Send for D3d11Download {}
 impl D3d11Download {
     /// `device` must be the same `ID3D11Device`, and `context` the same
     /// shared context, every other D3D11 element in this pipeline uses —
-    /// see this type's own docs on why. `width`/`height` are fixed for
-    /// this element's lifetime; every frame `consume` receives must match
-    /// exactly.
+    /// see this type's own docs on why. The size of the frames comes from
+    /// the frames themselves.
     pub fn new(
         name: impl Into<String>,
         device: &ID3D11Device,
         context: Arc<Mutex<ID3D11DeviceContext>>,
-        width: u32,
-        height: u32,
     ) -> std::result::Result<Self, D3d11DownloadError> {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::D3d11Download, &name, None);
@@ -179,7 +159,6 @@ impl D3d11Download {
         // device has to be usable from a thread other than the one that
         // created it before any command is issued.
         protect_shared_device(device)?;
-        let staging = create_staging_texture(device, width, height)?;
         let pad = SrcPad::with_contract(
             format!("{name}_src"),
             OutputContract::Fixed(
@@ -187,32 +166,53 @@ impl D3d11Download {
                     .with_layouts(crate::contract::PixelLayoutSet::BGRA),
             ),
         );
-        let pool = UnboundObjectPool::new(
-            0,
-            move || ffmpeg::frame::Video::new(ffmpeg::format::Pixel::BGRA, width, height),
-            |_| {},
-        );
-        pp_info!(pp_log: &pp_log, "opened: {width}x{height}");
+        pp_info!(pp_log: &pp_log, "opened");
         Ok(Self {
             name,
             pp_log,
             device: device.clone(),
             context,
+            readback: ForSize::new(),
+            pad,
+            repeated: RepeatedOutput::new(),
+        })
+    }
+}
+
+/// What reading one frame size back to the CPU takes: the staging texture
+/// the GPU copies into, and the CPU frames its rows are copied out into.
+struct Readback {
+    width: u32,
+    height: u32,
+    staging: ID3D11Texture2D,
+    pool: UnboundObjectPool<ffmpeg::frame::Video>,
+}
+
+impl Readback {
+    fn new(
+        device: &ID3D11Device,
+        width: u32,
+        height: u32,
+    ) -> std::result::Result<Self, D3d11DownloadError> {
+        Ok(Self {
             width,
             height,
-            staging,
-            pad,
-            pool,
-            repeated: RepeatedOutput::new(),
+            staging: create_staging_texture(device, width, height)?,
+            pool: UnboundObjectPool::new(
+                0,
+                move || ffmpeg::frame::Video::new(ffmpeg::format::Pixel::BGRA, width, height),
+                |_| {},
+            ),
         })
     }
 
     /// Copies one texture-array subresource into the cached staging texture,
     /// `Map`s it, and copies every row into a pooled CPU frame — under `context`'s
     /// lock for the whole sequence, since both calls touch the shared
-    /// immediate context (see this type's own docs).
+    /// immediate context (see [`D3d11Download`]'s own docs).
     fn download(
         &self,
+        context: &Mutex<ID3D11DeviceContext>,
         texture: &ID3D11Texture2D,
         source_subresource: u32,
     ) -> std::result::Result<
@@ -220,8 +220,7 @@ impl D3d11Download {
         windows::core::Error,
     > {
         let mut output = self.pool.get();
-        let context = self
-            .context
+        let context = context
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         // SAFETY: validation established the source slice bounds and format;
@@ -352,17 +351,6 @@ impl PerFrameTransform for D3d11Download {
             pp_error!(self, "unsupported pixel format: {format:?}");
             return Err(D3d11DownloadError::UnsupportedFormat(format).into());
         }
-        if frame.width() != self.width || frame.height() != self.height {
-            let error = D3d11DownloadError::DimensionMismatch {
-                actual_width: frame.width(),
-                actual_height: frame.height(),
-                expected_width: self.width,
-                expected_height: self.height,
-            };
-            pp_error!(self, "{error}");
-            return Err(error.into());
-        }
-
         let (texture_raw, index) =
             d3d11va_texture(frame).ok_or(D3d11DownloadError::InvalidD3d11Frame)?;
         // SAFETY: `texture_raw` is a borrowed raw `ID3D11Texture2D*`
@@ -390,12 +378,12 @@ impl PerFrameTransform for D3d11Download {
             pp_error!(self, "unsupported texture format: {:?}", desc.Format);
             return Err(D3d11DownloadError::UnsupportedTextureFormat(desc.Format).into());
         }
-        if desc.Width < self.width || desc.Height < self.height {
+        if desc.Width < frame.width() || desc.Height < frame.height() {
             let error = D3d11DownloadError::TextureTooSmall {
                 actual_width: desc.Width,
                 actual_height: desc.Height,
-                expected_width: self.width,
-                expected_height: self.height,
+                expected_width: frame.width(),
+                expected_height: frame.height(),
             };
             pp_error!(self, "{error}");
             return Err(error.into());
@@ -410,9 +398,17 @@ impl PerFrameTransform for D3d11Download {
         }
         let source_subresource = (index as u32) * desc.MipLevels;
 
-        let mut cpu_frame = self
-            .download(&texture, source_subresource)
-            .inspect_err(|error| pp_error!(self, "GPU download failed: {error}"))
+        let (device, context, pp_log) = (&self.device, &self.context, &self.pp_log);
+        let readback = self
+            .readback
+            .try_get(frame.width(), frame.height(), |width, height| {
+                pp_info!(pp_log: pp_log, "reading back {width}x{height}");
+                Readback::new(device, width, height)
+            })
+            .inspect_err(|error| pp_error!(self, "{error}"))?;
+        let mut cpu_frame = readback
+            .download(context, &texture, source_subresource)
+            .inspect_err(|error| pp_error!(pp_log: pp_log, "GPU download failed: {error}"))
             .map_err(D3d11DownloadError::from)?;
         cpu_frame.set_pts(frame.pts());
         cpu_frame.set_color_space(frame.color_space());
@@ -519,7 +515,7 @@ mod tests {
         }
         repeat.set_pts(Some(200));
 
-        let mut download = D3d11Download::new("download", &device, context, width, height)
+        let mut download = D3d11Download::new("download", &device, context)
             .expect("D3d11Download::new should succeed");
         let received = Arc::new(std::sync::Mutex::new(Vec::new()));
         download.src_pads()[0].link(Box::new(CapturingSink {
@@ -599,7 +595,7 @@ mod tests {
         };
         let source_frame = wrap_d3d11_texture(source_texture, width, height).unwrap();
 
-        let mut download = D3d11Download::new("test-download", &device, context, width, height)
+        let mut download = D3d11Download::new("test-download", &device, context)
             .expect("D3d11Download::new should succeed");
 
         let received = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -629,6 +625,83 @@ mod tests {
             let expected = &pixels[row * width as usize * 4..(row + 1) * width as usize * 4];
             assert_eq!(row_bytes, expected, "row {row} mismatch");
         }
+    }
+
+    /// A source that changes resolution mid-stream — a window capture being
+    /// resized — was a per-frame error here while the staging texture was
+    /// made before any frame arrived.
+    #[test]
+    fn a_source_that_changes_resolution_is_followed() {
+        let Some((device, context)) = try_d3d11_device() else {
+            return;
+        };
+        let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
+        let bgra_frame = |width: u32, height: u32| {
+            let pixels = vec![0x40u8; (width * height * 4) as usize];
+            // SAFETY: the initial-data pointer addresses the live `pixels`
+            // buffer with the exact row pitch and extent in the texture
+            // description; the returned interface is captured in a live
+            // out-parameter.
+            let texture = unsafe {
+                let desc = D3D11_TEXTURE2D_DESC {
+                    Width: width,
+                    Height: height,
+                    MipLevels: 1,
+                    ArraySize: 1,
+                    Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                    SampleDesc: DXGI_SAMPLE_DESC {
+                        Count: 1,
+                        Quality: 0,
+                    },
+                    Usage: D3D11_USAGE_DEFAULT,
+                    BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
+                    CPUAccessFlags: 0,
+                    MiscFlags: 0,
+                };
+                let initial = D3D11_SUBRESOURCE_DATA {
+                    pSysMem: pixels.as_ptr() as *const c_void,
+                    SysMemPitch: width * 4,
+                    SysMemSlicePitch: 0,
+                };
+                let mut texture = None;
+                device
+                    .CreateTexture2D(&desc, Some(&initial), Some(&mut texture))
+                    .expect("CreateTexture2D failed");
+                texture.expect("CreateTexture2D succeeded without producing a texture")
+            };
+            let mut frame = pool.get();
+            *frame = wrap_d3d11_texture(texture, width, height).unwrap();
+            MediaBuffer::Video(Arc::new(frame))
+        };
+
+        let mut download = D3d11Download::new("test-download", &device, context)
+            .expect("D3d11Download::new should succeed");
+        let received = Arc::new(std::sync::Mutex::new(Vec::new()));
+        download.src_pads()[0].link(Box::new(CapturingSink {
+            received: received.clone(),
+            pp_log: element_pp_log(ElementType::Other, "capture", None),
+        }));
+
+        download.consume(bgra_frame(8, 8)).expect("the first size");
+        download
+            .consume(bgra_frame(4, 4))
+            .expect("and the next one");
+
+        let received = received.lock().unwrap();
+        let sizes: Vec<(u32, u32)> = received
+            .iter()
+            .map(|buffer| {
+                let MediaBuffer::Video(frame) = buffer else {
+                    panic!("expected a Video buffer");
+                };
+                (frame.width(), frame.height())
+            })
+            .collect();
+        assert_eq!(
+            sizes,
+            [(8, 8), (4, 4)],
+            "each frame is read back at its own size"
+        );
     }
 
     #[test]
@@ -683,7 +756,7 @@ mod tests {
             (*source_frame.as_mut_ptr()).data[1] = std::ptr::dangling_mut::<u8>();
         }
 
-        let mut download = D3d11Download::new("test-download", &device, context, width, height)
+        let mut download = D3d11Download::new("test-download", &device, context)
             .expect("D3d11Download::new should succeed");
         let received = Arc::new(Mutex::new(Vec::new()));
         download.src_pads()[0].link(Box::new(CapturingSink {

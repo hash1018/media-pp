@@ -14,6 +14,7 @@ use crate::{
     element::{Element, ElementType, Sink, Source, element_pp_log},
     elements::{CudaDriverError, CudaUploadError},
     error::Result,
+    frame_size::ForSize,
     pad::SrcPad,
     platform::cuda::{
         CudaDevice, CudaFrameFormat,
@@ -54,22 +55,6 @@ pub enum CudaVideoEffectError {
     #[error("CudaVideoEffect takes BGRA surfaces, got {0:?}")]
     UnsupportedSurfaceFormat(ffmpeg::format::Pixel),
 
-    /// The frame is not the size this element allocated its pool for.
-    #[error(
-        "CudaVideoEffect was built for {expected_width}x{expected_height}, \
-         got {actual_width}x{actual_height}"
-    )]
-    DimensionMismatch {
-        /// Width the frame actually carries.
-        actual_width: u32,
-        /// Height the frame actually carries.
-        actual_height: u32,
-        /// Width this element was constructed for.
-        expected_width: u32,
-        /// Height this element was constructed for.
-        expected_height: u32,
-    },
-
     /// A surface arrived with no device pointer to read.
     #[error("a surface arrived with no device pointer")]
     MissingSurface,
@@ -89,9 +74,9 @@ pub enum CudaVideoEffectError {
 /// The CUDA member of the family whose software member is
 /// [`SwVideoEffect`](crate::elements::SwVideoEffect); all of them evaluate
 /// one resolved set of numbers per pixel. The rest is `CudaChromaKey`'s,
-/// for its reasons: BGRA in and out, a surface of the size this was built
-/// for, from the same [`CudaDevice`] every other CUDA element in the
-/// pipeline uses, and PTS, duration and colour tags carried through.
+/// for its reasons: BGRA in and out, at whatever size the frames arrive in,
+/// from the same [`CudaDevice`] every other CUDA element in the pipeline
+/// uses, and PTS, duration and colour tags carried through.
 ///
 /// An effect that changes nothing, and an element that is turned off, hand
 /// each frame straight through — the same surface, not a copy of it.
@@ -108,18 +93,17 @@ pub struct CudaVideoEffect {
     name: Arc<str>,
     /// This element's own reference to the shared context, released in
     /// `Drop`.
-    _hw_device_ctx: Arc<AvBufferRef>,
+    hw_device_ctx: Arc<AvBufferRef>,
     /// The last output and the surface it was made from — see
     /// [`RepeatedOutput`]. Cleared when the effect changes.
     repeated: RepeatedOutput,
-    /// The pool outputs are allocated from.
-    hw_frames_ctx: AvBufferRef,
+    /// The pool outputs are allocated from, made for the size of the frames
+    /// actually arriving and made again when that changes — see `ForSize`.
+    hw_frames_ctx: ForSize<AvBufferRef>,
     /// The device context incoming frames must belong to, compared by
     /// pointer.
     device_ctx: *mut ffi::AVHWDeviceContext,
     driver: CudaDriver,
-    width: u32,
-    height: u32,
     /// The effect in force and what it resolves to, refreshed from `control`
     /// once per frame.
     effect: VideoEffect,
@@ -149,8 +133,6 @@ impl CudaVideoEffect {
     pub fn new(
         name: impl Into<String>,
         device: &CudaDevice,
-        width: u32,
-        height: u32,
         effect: VideoEffect,
     ) -> std::result::Result<(Self, VideoEffectHandle), CudaVideoEffectError> {
         let name: Arc<str> = name.into().into();
@@ -158,11 +140,6 @@ impl CudaVideoEffect {
 
         let driver = CudaDriver::retain_primary()?;
         let hw_device_ctx = device.retain();
-        let hw_frames_ctx =
-            // SAFETY: `create_hw_frames_ctx`'s contract is a live device context,
-            // which is what the owned `AvBufferRef` beside it is.
-            unsafe { create_hw_frames_ctx(&hw_device_ctx, CudaFrameFormat::Bgra, width, height) }
-                .map_err(CudaUploadError::from)?;
         // SAFETY: `hw_device_ctx` owns a live `AVBufferRef` for a CUDA device
         // context, whose `data` is that `AVHWDeviceContext`. Only the pointer's
         // identity is kept; the reference beside it keeps the identity from being
@@ -177,23 +154,17 @@ impl CudaVideoEffect {
             ),
         );
         let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
-        pp_info!(
-            pp_log: &pp_log,
-            "opened: {width}x{height} BGRA, {} {effect:?}",
-            effect.name()
-        );
+        pp_info!(pp_log: &pp_log, "opened: BGRA, {} {effect:?}", effect.name());
 
         let control = Arc::new(VideoEffectControl::new(effect));
         let handle = VideoEffectHandle::new(control.clone());
         let element = Self {
             name,
             pp_log,
-            _hw_device_ctx: hw_device_ctx,
-            hw_frames_ctx,
+            hw_device_ctx,
+            hw_frames_ctx: ForSize::new(),
             device_ctx,
             driver,
-            width,
-            height,
             effect,
             params: effect.params(),
             control,
@@ -231,14 +202,6 @@ impl CudaVideoEffect {
         if frame.format() != ffmpeg::format::Pixel::CUDA {
             return Err(CudaVideoEffectError::UnsupportedFormat(frame.format()));
         }
-        if frame.width() != self.width || frame.height() != self.height {
-            return Err(CudaVideoEffectError::DimensionMismatch {
-                actual_width: frame.width(),
-                actual_height: frame.height(),
-                expected_width: self.width,
-                expected_height: self.height,
-            });
-        }
         // SAFETY: `frame` is a live `Pixel::CUDA` frame, so its `hw_frames_ctx` is
         // either null — refused here — or an `AVBufferRef` whose `data` is an
         // `AVHWFramesContext`. Only pointer identity is compared.
@@ -268,6 +231,21 @@ impl CudaVideoEffect {
         self.validate(source)
             .inspect_err(|error| pp_error!(self, "{error}"))?;
 
+        let (width, height) = (source.width(), source.height());
+        let (device, pp_log) = (&self.hw_device_ctx, &self.pp_log);
+        let frames_ctx = self
+            .hw_frames_ctx
+            .try_get(width, height, |width, height| {
+                pp_info!(pp_log: pp_log, "drawing {width}x{height}");
+                // SAFETY: `create_hw_frames_ctx`'s contract is a live device
+                // context, which is what the owned `AvBufferRef` is.
+                unsafe { create_hw_frames_ctx(device, CudaFrameFormat::Bgra, width, height) }
+                    .map_err(CudaUploadError::from)
+                    .map_err(CudaVideoEffectError::Frames)
+            })
+            .inspect_err(|error| pp_error!(self, "{error}"))?
+            .as_ptr();
+
         let mut destination = self.pool.get();
         // SAFETY: `dst` is the pooled wrapper's own `AVFrame`; unreferencing it
         // first hands its previous surface back to the frames pool. The frames
@@ -275,7 +253,7 @@ impl CudaVideoEffect {
         unsafe {
             let dst = destination.as_mut_ptr();
             ffi::av_frame_unref(dst);
-            let code = ffi::av_hwframe_get_buffer(self.hw_frames_ctx.as_ptr(), dst, 0);
+            let code = ffi::av_hwframe_get_buffer(frames_ctx, dst, 0);
             if code < 0 {
                 pp_error!(self, "av_hwframe_get_buffer failed: {code}");
                 return Err(CudaVideoEffectError::Frames(CudaUploadError::HwFrameGet(code)).into());
@@ -291,8 +269,8 @@ impl CudaVideoEffect {
             self.driver.effect_bgra(
                 source_surface,
                 destination_surface,
-                self.width,
-                self.height,
+                width,
+                height,
                 &params.rows,
                 params.exponent,
                 params.opacity,
@@ -460,8 +438,7 @@ mod tests {
     /// them, so one kernel launch covers every sample a test asks about.
     fn cuda_row(device: &CudaDevice, pixels: &[[u8; 4]]) -> Option<MediaBuffer> {
         let width = pixels.len() as u32;
-        let Ok(mut upload) = CudaUpload::new("upload", device, CudaFrameFormat::Bgra, width, 1)
-        else {
+        let Ok(mut upload) = CudaUpload::new("upload", device, CudaFrameFormat::Bgra) else {
             eprintln!("skipping: this machine has no usable CUDA frames context");
             return None;
         };
@@ -481,7 +458,7 @@ mod tests {
     }
 
     fn download_row(device: &CudaDevice, buffer: MediaBuffer, width: u32) -> Vec<[u8; 4]> {
-        let mut download = CudaDownload::new("download", device, CudaFrameFormat::Bgra, width, 1);
+        let mut download = CudaDownload::new("download", device, CudaFrameFormat::Bgra);
         let received = capture(&mut download);
         download.consume(buffer).expect("download");
         let MediaBuffer::Video(frame) = received.lock().unwrap().remove(0) else {
@@ -534,8 +511,7 @@ mod tests {
         };
         let width = PIXELS.len() as u32;
         for effect in effects() {
-            let Ok((mut element, _)) = CudaVideoEffect::new("effect", &device, width, 1, effect)
-            else {
+            let Ok((mut element, _)) = CudaVideoEffect::new("effect", &device, effect) else {
                 eprintln!("skipping: no usable CUDA video effect here");
                 return;
             };
@@ -571,7 +547,7 @@ mod tests {
             opacity: 0.5,
             ..ColorCorrection::default()
         });
-        let Ok((mut element, _)) = CudaVideoEffect::new("effect", &device, width, 1, effect) else {
+        let Ok((mut element, _)) = CudaVideoEffect::new("effect", &device, effect) else {
             return;
         };
         let received = capture(&mut element);
@@ -589,19 +565,15 @@ mod tests {
     }
 
     /// A neutral effect hands on the surface that arrived; a retune reaches
-    /// the next frame, and a surface of the wrong size is refused by name.
+    /// the next frame, and a surface of another size is drawn at that size.
     #[test]
     fn neutral_passes_through_and_retuning_and_refusals_behave() {
         let Some((device, _serial)) = try_cuda_device() else {
             return;
         };
-        let Ok((mut element, handle)) = CudaVideoEffect::new(
-            "effect",
-            &device,
-            2,
-            1,
-            VideoEffect::LumaKey(LumaKey::default()),
-        ) else {
+        let Ok((mut element, handle)) =
+            CudaVideoEffect::new("effect", &device, VideoEffect::LumaKey(LumaKey::default()))
+        else {
             return;
         };
         let received = capture(&mut element);
@@ -620,30 +592,29 @@ mod tests {
         }));
         element.consume(source).expect("keyed");
 
-        let mut received = received.lock().unwrap();
-        let MediaBuffer::Video(passed) = &received[0] else {
-            panic!("expected a Video buffer");
-        };
-        assert_eq!(crate::buffer::picture_id(passed), input_id);
-        let keyed = received.remove(1);
-        assert_eq!(
-            download_row(&device, keyed, 2)[0][3],
-            0,
-            "mid grey is above 0.4"
-        );
-        drop(received);
+        {
+            let mut buffers = received.lock().unwrap();
+            let MediaBuffer::Video(passed) = &buffers[0] else {
+                panic!("expected a Video buffer");
+            };
+            assert_eq!(crate::buffer::picture_id(passed), input_id);
+            let keyed = buffers.remove(1);
+            assert_eq!(
+                download_row(&device, keyed, 2)[0][3],
+                0,
+                "mid grey is above 0.4"
+            );
+        }
 
-        let Some(wrong) = cuda_row(&device, &[[0, 0, 0, 255]; 3]) else {
+        // A row of another width is drawn rather than refused: the pool is
+        // made for the frames that arrive, not before them.
+        let Some(wider) = cuda_row(&device, &[[0, 0, 0, 255]; 3]) else {
             return;
         };
-        assert!(matches!(
-            element.consume(wrong),
-            Err(crate::error::Error::CudaVideoEffectError(
-                CudaVideoEffectError::DimensionMismatch {
-                    actual_width: 3,
-                    ..
-                }
-            ))
-        ));
+        element.consume(wider).expect("a row of another width");
+        let MediaBuffer::Video(drawn) = received.lock().unwrap().remove(1) else {
+            panic!("expected a Video buffer");
+        };
+        assert_eq!(drawn.width(), 3, "drawn at the size it arrived in");
     }
 }

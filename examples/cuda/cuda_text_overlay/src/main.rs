@@ -145,14 +145,8 @@ mod example {
                     output_height,
                     ffmpeg::software::scaling::Flags::BILINEAR,
                 );
-                let upload = CudaUpload::new(
-                    "upload",
-                    &cuda,
-                    CudaFrameFormat::Nv12,
-                    output_width,
-                    output_height,
-                )
-                .map_err(|e| media_pp::Error::Other(e.to_string()))?;
+                let upload = CudaUpload::new("upload", &cuda, CudaFrameFormat::Nv12)
+                    .map_err(|e| media_pp::Error::Other(e.to_string()))?;
                 let branch = ctx.branch().pipe(scaler).pipe(upload).to(background_sink)?;
                 ctx.attach(source, 0, branch)?;
                 Ok(())
@@ -176,13 +170,7 @@ mod example {
         let muxer_sink = muxer.open()?.take(track)?;
 
         let output_pipeline = Pipeline::new("composited-output", compositor, |source, ctx| {
-            let download = CudaDownload::new(
-                "download",
-                &cuda,
-                CudaFrameFormat::Nv12,
-                output_width,
-                output_height,
-            );
+            let download = CudaDownload::new("download", &cuda, CudaFrameFormat::Nv12);
             let to_yuv = SwScaler::new(
                 "to-yuv",
                 ffmpeg::format::Pixel::YUV420P,

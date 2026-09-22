@@ -570,14 +570,13 @@ mod tests {
             return;
         };
         let (width, height) = (320u32, 240u32);
-        let mut upload =
-            match CudaUpload::new("upload", &device, CudaFrameFormat::Nv12, width, height) {
-                Ok(upload) => upload,
-                Err(error) => {
-                    eprintln!("skipping: CUDA upload unavailable ({error})");
-                    return;
-                }
-            };
+        let mut upload = match CudaUpload::new("upload", &device, CudaFrameFormat::Nv12) {
+            Ok(upload) => upload,
+            Err(error) => {
+                eprintln!("skipping: CUDA upload unavailable ({error})");
+                return;
+            }
+        };
         let mut encoder = match CudaEncoder::new("encoder", &device, options(width, height)) {
             Ok(encoder) => encoder,
             Err(error) => {
@@ -649,9 +648,7 @@ mod tests {
             return;
         };
         let (width, height) = (320u32, 240u32);
-        let Ok(mut upload) =
-            CudaUpload::new("upload", &device, CudaFrameFormat::Bgra, width, height)
-        else {
+        let Ok(mut upload) = CudaUpload::new("upload", &device, CudaFrameFormat::Bgra) else {
             eprintln!("skipping: this machine has no usable CUDA frames context");
             return;
         };
@@ -729,8 +726,7 @@ mod tests {
         let Some((device, _cuda_lock)) = try_cuda_device() else {
             return;
         };
-        let Ok(mut upload) = CudaUpload::new("upload", &device, CudaFrameFormat::Bgra, 320, 240)
-        else {
+        let Ok(mut upload) = CudaUpload::new("upload", &device, CudaFrameFormat::Bgra) else {
             eprintln!("skipping: this machine has no usable CUDA frames context");
             return;
         };
@@ -930,14 +926,13 @@ mod tests {
         height: u32,
         max_b_frames: Option<u32>,
     ) -> Option<Vec<(i64, i64)>> {
-        let mut upload =
-            match CudaUpload::new("upload", device, CudaFrameFormat::Nv12, width, height) {
-                Ok(upload) => upload,
-                Err(error) => {
-                    eprintln!("skipping: CUDA upload unavailable ({error})");
-                    return None;
-                }
-            };
+        let mut upload = match CudaUpload::new("upload", device, CudaFrameFormat::Nv12) {
+            Ok(upload) => upload,
+            Err(error) => {
+                eprintln!("skipping: CUDA upload unavailable ({error})");
+                return None;
+            }
+        };
         let mut encoder = match CudaEncoder::new(
             "encoder",
             device,
