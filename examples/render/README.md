@@ -29,7 +29,7 @@ restore token can be passed as the last argument on later runs.
 | Example | Purpose | Platform | Main path | Ends by | Required arguments |
 |---|---|---|---|---|---|
 | [`av_playback`](av_playback/) | Play synchronized audio/video | Windows / Linux | Software audio + platform GPU video | EOS / close window | `<video>` |
-| [`hw_decode_render`](hw_decode_render/) | Hardware-decode and render | Windows / Linux | D3D12VA / NVDEC zero-copy | EOS / close window | `<video>` |
+| [`hw_decode_render`](hw_decode_render/) | Decode on the GPU where it can, in software where not, and render | Windows / Linux | `VideoDecodeBin` onto D3D12 / CUDA | EOS / close window | `<video>` |
 | [`seek_render`](seek_render/) | Interactive seek/pause/resume | Windows / Linux | CPU decode -> platform GPU upload | `q`, EOS, or close | `<video>` |
 | [`sw_decode_render`](sw_decode_render/) | Software-decode and render | Windows / Linux | CPU decode -> platform GPU upload | EOS / close window | `<video>` |
 | [`test_video`](test_video/) | Render a synthetic source | Windows / Linux | CPU frame -> platform GPU upload | Close window | None |

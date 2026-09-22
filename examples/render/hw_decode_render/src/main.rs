@@ -1,7 +1,16 @@
-//! Demux -> hardware decoder -> Queue -> Pacer -> Renderer: decodes on the GPU
-//! and presents the frames at real playback speed without copying them back to
-//! system memory. Windows uses D3D12VA/D3D12; Linux uses NVDEC/CUDA/Vulkan.
-//! Compare against `sw_decode_render`, which decodes on the CPU and uploads.
+//! Demux -> VideoDecodeBin -> Queue -> Pacer -> Renderer: decodes on the GPU
+//! where it can, and in software onto the same device where it cannot, and
+//! presents the frames at real playback speed. Windows decodes onto D3D12
+//! (D3D12VA, or `SwDecoder` and an upload); Linux onto CUDA (NVDEC, or
+//! `SwDecoder` and an upload) with Vulkan presentation, and puts a
+//! `CudaConverter` before the renderer where the bin hands on BGRA — for a
+//! stream with alpha, an odd side or BT.2020 colour — since that renderer
+//! takes NV12. Compare against `sw_decode_render`, which always decodes on
+//! the CPU.
+//!
+//! Which way the bin decodes, and why where it is software, is printed when
+//! it is opened; if the GPU refuses the stream part way, the bin goes on in
+//! software and the example prints that too.
 //!
 //!     cargo run -p hw_decode_render -- path/to/video.mp4
 
@@ -28,8 +37,7 @@ mod windows_example {
     use media_pp::ffmpeg::media;
     use media_pp::{
         Error,
-        bus::BusEvent,
-        elements::{D3d12Decoder, FileDemuxer, Pacer},
+        elements::{DecodeTarget, FileDemuxer, Pacer, VideoDecodeBin},
         pipeline::Pipeline,
     };
     use render_common::{D3d12GpuContext, Shutdown};
@@ -80,16 +88,26 @@ mod windows_example {
             .best_stream(media::Type::Video)
             .and_then(|index| streams.get(index))
             .ok_or_else(|| Error::Other("no video stream in file".into()))?;
-        let params = video.parameters.clone();
         let time_base = video.time_base;
 
         let gpu = D3d12GpuContext::new().map_err(|e| Error::Other(format!("{e:?}")))?;
 
+        // Opened out here rather than in the builder: a stream this build
+        // cannot decode at all is an error to report, and which way it
+        // decodes is known before anything runs. The same device the
+        // renderer draws with — required for the zero-copy path.
+        let decoder = VideoDecodeBin::open(
+            "decoder",
+            video.parameters.clone(),
+            DecodeTarget::D3d12 {
+                device: gpu.device().clone(),
+            },
+            None,
+        )?;
+        println!("decoding: {:?}", decoder.path());
+        let decoding = decoder.handle();
+
         let pipeline = Pipeline::new("hw-decode-render", source, |source, ctx| {
-            // Same device the renderer draws with — required for the
-            // zero-copy path to be valid at all (see D3d12Decoder::new).
-            let decoder = D3d12Decoder::new("decoder", params, gpu.device())
-                .expect("failed to open D3D12VA decoder");
             let pacer = Pacer::new("pacer", time_base)?;
             let renderer =
                 render_common::d3d12_window_renderer("renderer", &gpu, hwnd, width, height)
@@ -112,44 +130,21 @@ mod windows_example {
         }
 
         pipeline.run()?;
-
-        // Errors no longer end the pipeline on their own (see `BusEvent`'s
-        // docs) — watch for one here and `stop()`, or this window would just
-        // sit open (showing a frozen last frame) instead of closing after a
-        // renderer failure. Single video stream, so `Eos` calling `stop()` is
-        // a harmless no-op too.
-        for event in pipeline.bus().iter() {
-            match &event {
-                BusEvent::Eos { name, .. } => println!("[{name}] eos"),
-                BusEvent::Error { name, error, .. } => eprintln!("[{name}] error: {error}"),
-                BusEvent::Dropped { name, .. } => {
-                    eprintln!("[{name}] dropped a buffer (queue full)")
-                }
-                BusEvent::Seeked {
-                    name,
-                    requested,
-                    landed,
-                    ..
-                } => println!("[{name}] seeked: requested {requested:.2?}, landed {landed:.2?}"),
-                // `BusEvent` is `#[non_exhaustive]`; this example only acts
-                // on the events above.
-                _ => {}
-            }
-            if matches!(event, BusEvent::Eos { .. } | BusEvent::Error { .. }) {
-                pipeline.stop();
-            }
-        }
+        super::drain_bus(&pipeline);
+        println!("decoded: {:?}", decoding.path());
         Ok(())
     }
 }
 
 #[cfg(target_os = "linux")]
 mod linux_example {
-    use media_pp::ffmpeg::media;
+    use media_pp::ffmpeg::{format::Pixel, media};
     use media_pp::{
         Error,
-        bus::BusEvent,
-        elements::{CudaDecoder, CudaDevice, FileDemuxer, Pacer},
+        elements::{
+            CudaConverter, CudaDevice, CudaFrameFormat, DecodeTarget, FileDemuxer, Pacer,
+            VideoDecodeBin,
+        },
         pipeline::Pipeline,
     };
     use render_common::{Shutdown, VulkanGpuContext, WindowTarget};
@@ -184,15 +179,45 @@ mod linux_example {
             .best_stream(media::Type::Video)
             .and_then(|index| streams.get(index))
             .ok_or_else(|| Error::Other("no video stream in file".into()))?;
-        let params = video.parameters.clone();
         let time_base = video.time_base;
 
         let cuda = CudaDevice::new().map_err(|error| Error::Other(error.to_string()))?;
         let gpu = VulkanGpuContext::new(target.display).map_err(Error::Other)?;
 
+        let decoder = VideoDecodeBin::open(
+            "decoder",
+            video.parameters.clone(),
+            DecodeTarget::Cuda {
+                device: cuda.clone(),
+                downstream_hw_frames: VIDEO_QUEUE_DEPTH as i32,
+            },
+            None,
+        )?;
+        println!("decoding: {:?}", decoder.path());
+        let decoding = decoder.handle();
+        // The renderer takes NV12; BGRA is what the bin hands on for alpha,
+        // an odd side or BT.2020 colour, and converting it back is this
+        // crate's own kernel — which needs even sides, as NV12 itself does.
+        let to_nv12 = if decoder.output_format() == Some(Pixel::BGRA) {
+            let context = media_pp::ffmpeg::codec::context::Context::from_parameters(
+                video.parameters.clone(),
+            )?;
+            let size = context.decoder().video()?;
+            Some(
+                CudaConverter::new(
+                    "to-nv12",
+                    &cuda,
+                    CudaFrameFormat::Nv12,
+                    size.width(),
+                    size.height(),
+                )
+                .map_err(|error| Error::Other(error.to_string()))?,
+            )
+        } else {
+            None
+        };
+
         let pipeline = Pipeline::new("hw-decode-render", source, |source, ctx| {
-            let decoder = CudaDecoder::new("decoder", params, &cuda, VIDEO_QUEUE_DEPTH as i32)
-                .map_err(|error| Error::Other(error.to_string()))?;
             let pacer = Pacer::new("pacer", time_base)?;
             let renderer = render_common::cuda_window_renderer(
                 "renderer",
@@ -204,9 +229,11 @@ mod linux_example {
                 target.height,
             )
             .map_err(Error::Other)?;
-            let branch = ctx
-                .branch()
-                .pipe(decoder)
+            let mut chain = ctx.branch().pipe(decoder);
+            if let Some(to_nv12) = to_nv12 {
+                chain = chain.pipe(to_nv12);
+            }
+            let branch = chain
                 .queue("frames", VIDEO_QUEUE_DEPTH)
                 .pipe(pacer)
                 .to(renderer)?;
@@ -218,29 +245,41 @@ mod linux_example {
             return Ok(());
         }
         pipeline.run()?;
-        drain_bus(&pipeline);
+        super::drain_bus(&pipeline);
+        println!("decoded: {:?}", decoding.path());
         Ok(())
     }
+}
 
-    fn drain_bus(pipeline: &Pipeline) {
-        for event in pipeline.bus().iter() {
-            match &event {
-                BusEvent::Eos { name, .. } => println!("[{name}] eos"),
-                BusEvent::Error { name, error, .. } => eprintln!("[{name}] error: {error}"),
-                BusEvent::Dropped { name, .. } => {
-                    eprintln!("[{name}] dropped a buffer (queue full)")
-                }
-                BusEvent::Seeked {
-                    name,
-                    requested,
-                    landed,
-                    ..
-                } => println!("[{name}] seeked: requested {requested:.2?}, landed {landed:.2?}"),
-                _ => {}
+/// Prints what the bus says until the stream ends or fails, then stops.
+///
+/// Errors no longer end the pipeline on their own (see `BusEvent`'s docs) —
+/// this watches for one and `stop()`s, or the window would sit open on a
+/// frozen last frame after a renderer failure. Single video stream, so
+/// `Eos` calling `stop()` is a harmless no-op too.
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+fn drain_bus(pipeline: &media_pp::pipeline::Pipeline) {
+    use media_pp::bus::BusEvent;
+
+    for event in pipeline.bus().iter() {
+        match &event {
+            BusEvent::Eos { name, .. } => println!("[{name}] eos"),
+            BusEvent::Error { name, error, .. } => eprintln!("[{name}] error: {error}"),
+            BusEvent::Dropped { name, .. } => {
+                eprintln!("[{name}] dropped a buffer (queue full)")
             }
-            if matches!(event, BusEvent::Eos { .. } | BusEvent::Error { .. }) {
-                pipeline.stop();
-            }
+            BusEvent::Seeked {
+                name,
+                requested,
+                landed,
+                ..
+            } => println!("[{name}] seeked: requested {requested:.2?}, landed {landed:.2?}"),
+            // `BusEvent` is `#[non_exhaustive]`; this example only acts on
+            // the events above.
+            _ => {}
+        }
+        if matches!(event, BusEvent::Eos { .. } | BusEvent::Error { .. }) {
+            pipeline.stop();
         }
     }
 }
