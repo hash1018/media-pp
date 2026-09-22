@@ -35,7 +35,7 @@ use crate::{
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
     control::ControlMsg,
     element::{Context, Element, ElementType, Filter, Sink, Source, element_pp_log},
-    elements::{SwDecoder, filter::line::Line},
+    elements::{DecodeThreading, SwDecoder, filter::line::Line},
     error::{Error, Result},
     pad::SrcPad,
     pp_log::{PpLog, pp_info, pp_warn},
@@ -211,6 +211,7 @@ unsafe impl Send for VideoDecodeBin {}
 /// What the software path is built from, should the hardware refuse.
 struct Fallback {
     target: DecodeTarget,
+    threading: DecodeThreading,
     params: ffmpeg::codec::Parameters,
     size: Option<(u32, u32)>,
     /// Every packet from the last keyframe on, the one that failed included.
@@ -251,12 +252,18 @@ impl VideoDecodeBin {
     /// one whose pictures the target cannot be given — a size unknown or odd
     /// where the software path needs one it can make a surface of — and
     /// otherwise with whatever the chosen element's constructor fails with:
+    /// `threading` is how many threads a software decode may have and what
+    /// it may spend them on — see [`DecodeThreading`]. It is the software
+    /// path's, including one put in when the hardware refuses; the hardware
+    /// decoders have no such choice to make.
+    ///
     /// a codec FFmpeg cannot decode at all is `SwDecoder`'s error. Nothing is
     /// left behind by a failure.
     pub fn open(
         name: impl Into<String>,
         params: ffmpeg::codec::Parameters,
         target: DecodeTarget,
+        threading: DecodeThreading,
     ) -> Result<Self> {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::VideoDecodeBin, &name, None);
@@ -268,6 +275,7 @@ impl VideoDecodeBin {
                 let decoder = target.hardware_decoder(format!("{name}-decoder"), params.clone())?;
                 let fallback = Fallback {
                     target: target.clone(),
+                    threading,
                     params,
                     size: stream.size,
                     since_keyframe: Vec::new(),
@@ -281,7 +289,7 @@ impl VideoDecodeBin {
             }
             DecodePath::Software(reason) => {
                 let format = target.software_format(reason, stream.size)?;
-                let elements = software(&name, params, stream.size, format, &target)?;
+                let elements = software(&name, params, stream.size, format, &target, threading)?;
                 // Where there is no upload, what comes out is what the
                 // stream decodes to.
                 (elements, format.or(stream.format), None)
@@ -361,6 +369,7 @@ impl VideoDecodeBin {
             fallback.size,
             self.output_format,
             &fallback.target,
+            fallback.threading,
         ) {
             Ok(elements) => elements,
             Err(replacement) => {
@@ -516,9 +525,13 @@ fn software(
     size: Option<(u32, u32)>,
     format: Option<ffmpeg::format::Pixel>,
     target: &DecodeTarget,
+    threading: DecodeThreading,
 ) -> Result<Vec<Box<dyn Filter>>> {
-    let mut line: Vec<Box<dyn Filter>> =
-        vec![Box::new(SwDecoder::new(format!("{name}-decoder"), params)?)];
+    let mut line: Vec<Box<dyn Filter>> = vec![Box::new(SwDecoder::with_threading(
+        format!("{name}-decoder"),
+        params,
+        threading,
+    )?)];
     if let Some(format) = format {
         let (width, height) = size.ok_or(VideoDecodeBinError::UnknownSize)?;
         // The size the stream was opened with: a change of layout, and of
@@ -880,9 +893,14 @@ mod tests {
             (*raw).codec_type = ffmpeg::ffi::AVMediaType::AVMEDIA_TYPE_AUDIO;
             (*raw).codec_id = ffmpeg::ffi::AVCodecID::AV_CODEC_ID_AAC;
         }
-        let error = VideoDecodeBin::open("audio", params, DecodeTarget::System)
-            .err()
-            .expect("an audio stream has no video decode path");
+        let error = VideoDecodeBin::open(
+            "audio",
+            params,
+            DecodeTarget::System,
+            DecodeThreading::default(),
+        )
+        .err()
+        .expect("an audio stream has no video decode path");
         assert!(
             matches!(
                 error,
@@ -901,7 +919,13 @@ mod tests {
     fn system_memory_is_the_software_decoder_alone() {
         let (params, packets) = h264();
         let sent = packets.len();
-        let bin = VideoDecodeBin::open("h264", params, DecodeTarget::System).unwrap();
+        let bin = VideoDecodeBin::open(
+            "h264",
+            params,
+            DecodeTarget::System,
+            DecodeThreading::default(),
+        )
+        .unwrap();
         assert_eq!(
             bin.path(),
             DecodePath::Software(SoftwareReason::SystemMemory)
@@ -962,7 +986,7 @@ mod tests {
                 _ => false,
             }
         }
-        match VideoDecodeBin::open(name, params, target) {
+        match VideoDecodeBin::open(name, params, target, DecodeThreading::default()) {
             Ok(bin) => Some(bin),
             Err(error) if no_video_device(&error) => {
                 eprintln!("skipping: this device does not do video decoding ({error})");
@@ -1267,9 +1291,10 @@ mod tests {
             else {
                 return;
             };
-            let error = VideoDecodeBin::open("odd", params, target(&device))
-                .err()
-                .expect("NV12 has no odd side");
+            let error =
+                VideoDecodeBin::open("odd", params, target(&device), DecodeThreading::default())
+                    .err()
+                    .expect("NV12 has no odd side");
             assert!(
                 matches!(
                     error,

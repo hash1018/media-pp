@@ -158,9 +158,19 @@ compile error with no explanation.
 
 ### Added
 
+- **`DecodeThreading`: how many threads a software video decoder has, and
+  what it spends them on.** `SwDecoder::with_threading` and
+  `VideoDecodeBin::open` take one: `threads` (`None` for as many as the
+  machine has) and a `DecodeLatency`. `Throughput` decodes several pictures
+  at once — at 1080p on twelve threads, H.264 about five times one thread
+  and HEVC about four — and hands each out a picture per thread later; `Low`
+  works within one picture only, holds nothing back, and is for a live
+  source: ProRes and VP9, which split a picture into slices or tiles, still
+  gain about six and two times.
+
 - **`VideoDecodeBin`: a video stream decoded onto a GPU by whichever path
-  can take it.** `VideoDecodeBin::open(name, params, target)` takes a stream
-  and a `DecodeTarget` — `D3d11`, `D3d12` or `Cuda`, owning its device, or
+  can take it.** `VideoDecodeBin::open(name, params, target, threading)` takes a
+  stream and a `DecodeTarget` — `D3d11`, `D3d12` or `Cuda`, owning its device, or
   `System` — and is one element holding the line for it: the target's
   own hardware decoder where it has one for the codec and the pictures are
   8-bit 4:2:0, and otherwise `SwDecoder` → `SwScaler` → the target's upload,
@@ -583,6 +593,13 @@ compile error with no explanation.
   New: `color::ColorDescription`.
 
 ### Changed
+
+- **`SwDecoder` decodes video on every thread the machine has.** It used
+  FFmpeg's default of one. `SwDecoder::new` now means
+  `DecodeThreading::default()`, which is `DecodeLatency::Throughput`: faster
+  for a file by the figures above, and a picture per thread later, which a
+  live source should avoid with `SwDecoder::with_threading` and
+  `DecodeLatency::Low`. Audio decoders are opened as before.
 
 - **A chroma key multiplies the alpha it is given instead of replacing it.**
   `SwChromaKey`, `D3d11ChromaKey` and `CudaChromaKey` used to write the key's

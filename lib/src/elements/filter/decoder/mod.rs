@@ -18,7 +18,7 @@ mod windows;
 
 #[cfg(feature = "cuda")]
 pub use cuda::{CudaDecoder, CudaDecoderError};
-pub use sw_decoder::{SwDecoder, SwDecoderError};
+pub use sw_decoder::{DecodeLatency, DecodeThreading, SwDecoder, SwDecoderError};
 pub use video_decode_bin::{
     DecodePath, DecodeTarget, SoftwareReason, VideoDecodeBin, VideoDecodeBinError,
     VideoDecodeBinHandle,

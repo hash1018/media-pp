@@ -34,6 +34,50 @@ enum Kind {
     Audio(ffmpeg::decoder::Audio),
 }
 
+/// What a software video decoder spends its threads on — and so whether it
+/// may hold pictures back to go faster.
+///
+/// Every thread the machine has goes to decoding either way. What differs is
+/// whether they may work on several pictures at once, which is how H.264 and
+/// HEVC get most of theirs — about five and four times one thread, measured
+/// at 1080p on twelve — and which hands each picture out as many pictures
+/// later as there are threads: some four hundred milliseconds at 30 a second
+/// on twelve. A file has no deadline and does not notice; something live
+/// does. Codecs that split one picture into independent pieces — ProRes's
+/// slices, VP9's tiles — gain most of it without that, about six and two
+/// times, and so does [`DecodeLatency::Low`].
+///
+/// Audio decoders are left as FFmpeg opens them: none gains anything here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DecodeLatency {
+    /// Several pictures at once, one per thread, and within one picture
+    /// where the codec can — as fast as the machine goes, a picture per
+    /// thread later. For a file.
+    #[default]
+    Throughput,
+    /// Within one picture only, so nothing is held back that a single
+    /// thread would not hold. For a live source, whose picture is wanted
+    /// now.
+    Low,
+}
+
+/// How many threads a software video decoder has, and what it spends them
+/// on.
+///
+/// The default is every thread the machine has, spent on
+/// [`DecodeLatency::Throughput`] — right for one file. Where several decode
+/// at once, or share the machine with an encoder or a compositor, a count
+/// keeps them from each taking all of it; picture-at-once decoding also keeps
+/// a copy of the decoder's state per thread, so the count bounds memory too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DecodeThreading {
+    /// How many threads; `None` for as many as the machine has, which is
+    /// FFmpeg's own choice and capped by it.
+    pub threads: Option<std::num::NonZeroU32>,
+    /// What they are spent on — see [`DecodeLatency`].
+    pub latency: DecodeLatency,
+}
+
 /// Decodes one stream's `Packet`s into `Frame`s in software (plain
 /// libavcodec, no hardware acceleration). A `Filter`: receives via `Sink`,
 /// pushes what it produces into its own (single) src pad.
@@ -63,13 +107,45 @@ pub struct SwDecoder {
 impl SwDecoder {
     /// `params` should come from the stream you want to decode — see
     /// [`crate::elements::FileDemuxer::stream_parameters`].
+    ///
+    /// Video decodes with [`DecodeThreading::default`] — every thread the
+    /// machine has, for throughput, which is right for one file; a live
+    /// source, or one of several, wants [`Self::with_threading`].
     pub fn new(
         name: impl Into<String>,
         params: ffmpeg::codec::Parameters,
     ) -> Result<Self, SwDecoderError> {
+        Self::with_threading(name, params, DecodeThreading::default())
+    }
+
+    /// The same, with as many threads as `threading` says, spent as it says
+    /// — see [`DecodeThreading`]. Ignored for audio.
+    pub fn with_threading(
+        name: impl Into<String>,
+        params: ffmpeg::codec::Parameters,
+        threading: DecodeThreading,
+    ) -> Result<Self, SwDecoderError> {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::SwDecoder, &name, None);
-        let context = ffmpeg::codec::context::Context::from_parameters(params)?;
+        let mut context = ffmpeg::codec::context::Context::from_parameters(params)?;
+        if context.medium() == ffmpeg::media::Type::Video {
+            use ffmpeg::ffi::{FF_THREAD_FRAME, FF_THREAD_SLICE};
+            let kinds = match threading.latency {
+                DecodeLatency::Throughput => FF_THREAD_FRAME | FF_THREAD_SLICE,
+                DecodeLatency::Low => FF_THREAD_SLICE,
+            };
+            // Zero is FFmpeg's own "as many as the machine has".
+            let count = threading.threads.map_or(0, |threads| {
+                i32::try_from(threads.get()).unwrap_or(i32::MAX)
+            });
+            // SAFETY: `context` is exclusively owned and not opened yet,
+            // which is the only time these two may be set.
+            unsafe {
+                let ctx = context.as_mut_ptr();
+                (*ctx).thread_count = count;
+                (*ctx).thread_type = kinds;
+            }
+        }
 
         let kind = match context.medium() {
             ffmpeg::media::Type::Video => Kind::Video(context.decoder().video()?),
@@ -94,7 +170,14 @@ impl SwDecoder {
             pp_log: &pp_log,
             "opened: {}",
             match &kind {
-                Kind::Video(d) => format!("video, codec={:?}", d.id()),
+                Kind::Video(d) => {
+                    let (threads, frames) = threads_in_use(d);
+                    format!(
+                        "video, codec={:?}, threads={threads}{}",
+                        d.id(),
+                        if frames { " (several pictures at once)" } else { "" }
+                    )
+                }
                 Kind::Audio(d) => format!("audio, codec={:?}", d.id()),
             }
         );
@@ -106,6 +189,20 @@ impl SwDecoder {
             pool,
             preroll_gate: PrerollGate::default(),
         })
+    }
+}
+
+/// How many threads an opened decoder has, and whether they work on several
+/// pictures at once — what FFmpeg settled on, which for a codec that cannot
+/// do what was asked is less.
+fn threads_in_use(decoder: &ffmpeg::decoder::Video) -> (i32, bool) {
+    // SAFETY: reads two plain fields of the live context `decoder` owns.
+    unsafe {
+        let ctx = decoder.as_ptr();
+        (
+            (*ctx).thread_count,
+            (*ctx).active_thread_type & ffmpeg::ffi::FF_THREAD_FRAME != 0,
+        )
     }
 }
 
@@ -474,5 +571,96 @@ mod tests {
             };
             assert!(frame.pts().is_some(), "a decoded frame lost its pts");
         }
+    }
+
+    fn h264() -> (ffmpeg::codec::Parameters, Vec<ffmpeg::Packet>) {
+        crate::test_support::try_encoded_packets(
+            "libopenh264",
+            ffmpeg::format::Pixel::YUV420P,
+            (64, 64),
+            90,
+        )
+        .expect("OpenH264 is always present")
+    }
+
+    fn threaded(latency: DecodeLatency, threads: Option<u32>) -> SwDecoder {
+        let threading = DecodeThreading {
+            threads: threads.and_then(std::num::NonZeroU32::new),
+            latency,
+        };
+        SwDecoder::with_threading("threaded", h264().0, threading).expect("H.264 opens")
+    }
+
+    fn threads(decoder: &SwDecoder) -> (i32, bool) {
+        let Kind::Video(video) = &decoder.kind else {
+            panic!("an H.264 decoder decodes video");
+        };
+        threads_in_use(video)
+    }
+
+    /// Throughput may work on several pictures at once, and Low may not —
+    /// what FFmpeg settled on, not only what was asked of it.
+    #[test]
+    fn throughput_decodes_several_pictures_at_once_and_low_does_not() {
+        let (count, frames) = threads(&threaded(DecodeLatency::Throughput, Some(4)));
+        assert_eq!(count, 4);
+        assert!(frames, "H.264 decodes a picture per thread for throughput");
+
+        let (count, frames) = threads(&threaded(DecodeLatency::Low, Some(4)));
+        assert_eq!(count, 4, "Low keeps its threads");
+        assert!(!frames, "and does not spend them on several pictures");
+    }
+
+    /// No count is FFmpeg's own, which is more than one on any machine that
+    /// has more than one core.
+    #[test]
+    fn no_count_is_as_many_as_the_machine_has() {
+        let cores = std::thread::available_parallelism().map_or(1, usize::from);
+        let (count, _) = threads(&threaded(DecodeLatency::Throughput, None));
+        if cores > 1 {
+            assert!(count > 1, "{count} threads on {cores} cores");
+        }
+    }
+
+    /// What Low is for: every picture a packet completes comes out with that
+    /// packet, where Throughput holds some back until the stream ends — and
+    /// then hands every one of them over.
+    #[test]
+    fn low_hands_each_picture_over_at_once_and_throughput_catches_up_at_the_end() {
+        let decoded_before_eos = |latency| {
+            let (params, packets) = h264();
+            let sent = packets.len();
+            let threading = DecodeThreading {
+                threads: std::num::NonZeroU32::new(4),
+                latency,
+            };
+            let mut decoder =
+                SwDecoder::with_threading("latency", params, threading).expect("H.264 opens");
+            let received = link_capture(&mut decoder);
+            for packet in packets {
+                decoder
+                    .consume(MediaBuffer::Packet(Arc::new(packet)))
+                    .expect("decodes");
+            }
+            let before = received.lock().unwrap().buffers.len();
+            decoder.consume(MediaBuffer::Eos).expect("drains");
+            let pictures = received
+                .lock()
+                .unwrap()
+                .buffers
+                .iter()
+                .filter(|buf| matches!(buf, MediaBuffer::Video(_)))
+                .count();
+            assert_eq!(pictures, sent, "{latency:?} decodes every picture");
+            (before, sent)
+        };
+
+        let (before, sent) = decoded_before_eos(DecodeLatency::Low);
+        assert_eq!(before, sent, "Low holds nothing back");
+        let (before, sent) = decoded_before_eos(DecodeLatency::Throughput);
+        assert!(
+            before < sent,
+            "Throughput on four threads holds pictures back ({before} of {sent})"
+        );
     }
 }
