@@ -89,3 +89,68 @@ impl ColorDescription {
         }
     }
 }
+
+/// Builds three affine rows that turn normalized `(Y, Cb, Cr, 1)` samples
+/// into RGB. Unspecified color metadata follows the common SD/HD fallback:
+/// BT.601 through 576 lines and BT.709 above it; unspecified range is
+/// treated as MPEG/limited, matching ordinary decoded NV12 video.
+#[cfg(any(feature = "cuda", all(target_os = "windows", feature = "d3d11")))]
+pub(crate) fn yuv_to_rgb_rows(
+    space: ffmpeg_next::color::Space,
+    range: ffmpeg_next::color::Range,
+    height: u32,
+) -> [[f32; 4]; 3] {
+    let (kr, kb) = match space {
+        ffmpeg_next::color::Space::BT709 => (0.2126f32, 0.0722f32),
+        ffmpeg_next::color::Space::BT2020NCL | ffmpeg_next::color::Space::BT2020CL => {
+            (0.2627f32, 0.0593f32)
+        }
+        ffmpeg_next::color::Space::FCC => (0.30f32, 0.11f32),
+        ffmpeg_next::color::Space::SMPTE240M => (0.212f32, 0.087f32),
+        ffmpeg_next::color::Space::Unspecified if height > 576 => (0.2126f32, 0.0722f32),
+        _ => (0.299f32, 0.114f32),
+    };
+    let kg = 1.0 - kr - kb;
+    let (y_offset, y_scale, chroma_scale) = match range {
+        ffmpeg_next::color::Range::JPEG => (0.0, 1.0, 1.0),
+        ffmpeg_next::color::Range::MPEG | ffmpeg_next::color::Range::Unspecified => {
+            (16.0 / 255.0, 255.0 / 219.0, 255.0 / 224.0)
+        }
+    };
+    let chroma_offset = 128.0 / 255.0;
+    let red_cr = 2.0 * (1.0 - kr) * chroma_scale;
+    let blue_cb = 2.0 * (1.0 - kb) * chroma_scale;
+    let green_cb = -2.0 * kb * (1.0 - kb) / kg * chroma_scale;
+    let green_cr = -2.0 * kr * (1.0 - kr) / kg * chroma_scale;
+    let offset = |cb: f32, cr: f32| -y_scale * y_offset - cb * chroma_offset - cr * chroma_offset;
+
+    [
+        [y_scale, 0.0, red_cr, offset(0.0, red_cr)],
+        [y_scale, green_cb, green_cr, offset(green_cb, green_cr)],
+        [y_scale, blue_cb, 0.0, offset(blue_cb, 0.0)],
+    ]
+}
+
+/// Whether `space` is a BT.2020 matrix — and so, as this crate reads it,
+/// BT.2020 primaries too.
+///
+/// A frame's primaries tag is often missing where its matrix is not, and a
+/// BT.2020 matrix is not paired with anything else in practice; a D3D11
+/// video processor, told only `DXGI_COLOR_SPACE_*_P2020`, assumes the same.
+pub(crate) fn is_bt2020(space: ffmpeg_next::color::Space) -> bool {
+    matches!(
+        space,
+        ffmpeg_next::color::Space::BT2020NCL | ffmpeg_next::color::Space::BT2020CL
+    )
+}
+
+/// Linear-light BT.2020 RGB to linear-light BT.709 RGB, from the two sets
+/// of primaries and their shared D65 white point (ITU-R BT.2087). A
+/// saturated BT.2020 colour has no BT.709 equivalent and comes out of range,
+/// to be clipped.
+#[cfg(any(feature = "cuda", all(test, target_os = "windows", feature = "d3d11")))]
+pub(crate) const BT2020_TO_BT709: [[f32; 3]; 3] = [
+    [1.6605, -0.5876, -0.0728],
+    [-0.1246, 1.1329, -0.0083],
+    [-0.0182, -0.1006, 1.1187],
+];

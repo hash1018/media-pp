@@ -113,18 +113,23 @@ fn download_bgra(
     }
 }
 
-/// The exact inverse of [`bt709_limited`], as the kernel computes it, so
-/// a test can say what a colour should come back as instead of allowing
-/// a tolerance and hoping.
-fn bt709_limited_inverse(luma: u8, u: u8, v: u8) -> (u8, u8, u8) {
-    let y = (f32::from(luma) - 16.0) * (255.0 / 219.0);
-    let u = (f32::from(u) - 128.0) * (255.0 / 224.0);
-    let v = (f32::from(v) - 128.0) * (255.0 / 224.0);
-    let b = y + 1.8556 * u;
-    let r = y + 1.5748 * v;
-    let g = (y - 0.2126 * r - 0.0722 * b) / 0.7152;
-    let byte = |value: f32| (value.clamp(0.0, 255.0) + 0.5) as u8;
-    (byte(r), byte(g), byte(b))
+/// What [`CudaDriver::nv12_to_bgra`] makes of one sample read as `colour`,
+/// in the kernel's own operation order, so a test can say what a colour
+/// should come back as instead of allowing a tolerance and hoping. Without
+/// a gamut step — that one runs through approximate `lg2`/`ex2`.
+fn nv12_to_bgra_reference(colour: &YuvToBgra, luma: u8, u: u8, v: u8) -> (u8, u8, u8) {
+    let unit = 1.0f32 / 255.0;
+    let (y, u, v) = (
+        f32::from(luma) * unit,
+        f32::from(u) * unit,
+        f32::from(v) * unit,
+    );
+    let rows = colour.rows();
+    let row = |[from_y, from_cb, from_cr, offset]: [f32; 4]| {
+        from_cr.mul_add(v, from_cb.mul_add(u, from_y.mul_add(y, offset)))
+    };
+    let byte = |value: f32| ((value * 255.0).clamp(0.0, 255.0) + 0.5) as u8;
+    (byte(row(rows[0])), byte(row(rows[1])), byte(row(rows[2])))
 }
 
 /// The conversion `CudaScaler` refuses, at the driver layer.
@@ -187,6 +192,7 @@ fn nv12_to_bgra_undoes_the_conversion_that_made_it() {
             BgraSurface::from_frame(back_frame).expect("a BGRA destination"),
             width,
             height,
+            &YuvToBgra::bt709_limited(),
         )
         .expect("the conversion kernel must launch");
     driver.synchronize().expect("synchronize");
@@ -197,7 +203,12 @@ fn nv12_to_bgra_undoes_the_conversion_that_made_it() {
         let [b, g, r] = block_of(x);
         let (expected_y, expected_u, expected_v) =
             bt709_limited(f32::from(r), f32::from(g), f32::from(b));
-        let (want_r, want_g, want_b) = bt709_limited_inverse(expected_y, expected_u, expected_v);
+        let (want_r, want_g, want_b) = nv12_to_bgra_reference(
+            &YuvToBgra::bt709_limited(),
+            expected_y,
+            expected_u,
+            expected_v,
+        );
         let at = x as usize * 4;
         let got = [row[at], row[at + 1], row[at + 2], row[at + 3]];
         assert_eq!(

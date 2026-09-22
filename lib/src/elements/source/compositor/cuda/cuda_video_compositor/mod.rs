@@ -34,7 +34,7 @@ use crate::{
         CudaDevice, CudaFrameFormat,
         driver::{
             BgraRegion, BgraSurface, CudaBgraScratch, CudaDriver, CudaDriverError, CudaMask,
-            CudaOverlayScratch, Nv12Region, Nv12Surface,
+            CudaOverlayScratch, Nv12Region, Nv12Surface, YuvToBgra,
         },
         frame::create_hw_frames_ctx,
     },
@@ -655,9 +655,9 @@ pub struct CudaVideoCompositor {
     ticks: Option<Arc<TickCounters>>,
     /// What this composes in — see [`CudaVideoCompositor::with_format`].
     format: CudaFrameFormat,
-    /// One BGRA buffer per input whose layer has to be converted before it
-    /// can be drawn on a BGRA canvas, kept between frames for the reason the
-    /// overlay scratches are.
+    /// One BGRA buffer per input whose NV12 layer has to be converted before
+    /// it is drawn — on a BGRA canvas, or in a colour not the NV12 canvas's
+    /// own — kept between frames for the reason the overlay scratches are.
     canvas_scratch: HashMap<VideoInputId, CudaBgraScratch>,
 }
 
@@ -948,6 +948,10 @@ impl CudaVideoCompositor {
                 continue;
             };
             let (frames_ctx, format) = validate_input_frame(&frame, self.shared.device_ctx)?;
+            // Read off the frame as it arrived, before a crop or a scale
+            // makes another: its own height is what an untagged one is
+            // judged by.
+            let colour = YuvToBgra::of_frame(&frame);
             let Some(source) = source_region(snapshot.layer, frame.width(), frame.height(), format)
             else {
                 // A crop the frame is too small for, or one that shrank to
@@ -1008,6 +1012,7 @@ impl CudaVideoCompositor {
                 snapshot.layer.opacity,
                 format,
                 snapshot.id,
+                colour,
             ));
         }
 
@@ -1045,120 +1050,91 @@ impl CudaVideoCompositor {
             )?,
         }
 
-        for (scaled, placement, opacity, format, id) in &layers {
+        for (scaled, placement, opacity, format, id, colour) in &layers {
             let alpha = (opacity * 255.0).round().clamp(0.0, 255.0) as u8;
-            // A BGRA canvas takes every layer through one kernel: a BGRA one
-            // as it stands, an NV12 one converted into a scratch first. The
-            // NV12 canvas below is the other way round, and is what the
-            // Canvas itself uses.
-            if let Canvas::Bgra(canvas) = canvas {
-                let region = BgraRegion {
-                    source_x: placement.region.source_x,
-                    source_y: placement.region.source_y,
-                    destination_x: placement.region.destination_x,
-                    destination_y: placement.region.destination_y,
-                    width: placement.region.width,
-                    height: placement.region.height,
-                };
-                let layer_surface = match format {
+            let as_bgra =
+                |canvas_scratch: &mut HashMap<VideoInputId, CudaBgraScratch>| match format {
                     LayerFormat::Bgra => BgraSurface::from_frame(scaled)
-                        .ok_or(CudaVideoCompositorError::MissingPlane)?,
-                    LayerFormat::Nv12 => {
-                        let source = Nv12Surface::from_frame(scaled)
-                            .ok_or(CudaVideoCompositorError::MissingPlane)?;
-                        let scratch = match self.canvas_scratch.entry(*id) {
-                            std::collections::hash_map::Entry::Occupied(slot)
-                                if slot.get().width >= placement.image_width
-                                    && slot.get().height >= placement.image_height =>
-                            {
-                                slot.into_mut()
-                            }
-                            slot => {
-                                let scratch = self
-                                    .driver
-                                    .bgra_scratch(placement.image_width, placement.image_height)?;
-                                match slot {
-                                    std::collections::hash_map::Entry::Occupied(mut slot) => {
-                                        slot.insert(scratch);
-                                        slot.into_mut()
-                                    }
-                                    std::collections::hash_map::Entry::Vacant(slot) => {
-                                        slot.insert(scratch)
-                                    }
-                                }
-                            }
-                        };
-                        self.driver.nv12_to_bgra(
-                            source,
-                            scratch.surface(),
-                            placement.image_width,
-                            placement.image_height,
-                        )?;
-                        scratch.surface()
-                    }
+                        .ok_or(CudaVideoCompositorError::MissingPlane),
+                    LayerFormat::Nv12 => nv12_into_scratch(
+                        &self.driver,
+                        canvas_scratch,
+                        *id,
+                        Nv12Surface::from_frame(scaled)
+                            .ok_or(CudaVideoCompositorError::MissingPlane)?,
+                        placement.image_width,
+                        placement.image_height,
+                        colour,
+                    ),
                 };
-                self.driver
-                    .blend_bgra(canvas, layer_surface, region, alpha)?;
-                continue;
-            }
-            let Canvas::Nv12(canvas) = canvas else {
-                unreachable!("the BGRA canvas is handled above");
-            };
-            match format {
-                // A layer bringing its own transparency, which is the only
-                // reason a layer would be BGRA here at all — see
-                // [`LayerFormat`]. The scratch is kept per input and rebuilt
-                // only when the size it was made for changes, because it is a
-                // few megabytes and the size is stable between frames.
-                LayerFormat::Bgra => {
-                    let layer_surface = BgraSurface::from_frame(scaled)
-                        .ok_or(CudaVideoCompositorError::MissingPlane)?;
-                    let scratch = match self.overlays.entry(*id) {
-                        std::collections::hash_map::Entry::Occupied(slot)
-                            if slot.get().width >= placement.region.width
-                                && slot.get().height >= placement.region.height =>
-                        {
-                            slot.into_mut()
-                        }
-                        slot => {
-                            let scratch = self
-                                .driver
-                                .overlay_scratch(placement.image_width, placement.image_height)?;
-                            match slot {
-                                std::collections::hash_map::Entry::Occupied(mut slot) => {
-                                    slot.insert(scratch);
-                                    slot.into_mut()
-                                }
-                                std::collections::hash_map::Entry::Vacant(slot) => {
-                                    slot.insert(scratch)
-                                }
-                            }
-                        }
+            let canvas = match canvas {
+                // A BGRA canvas takes every layer through one kernel: a BGRA
+                // one as it stands, an NV12 one converted into a scratch
+                // first, by its own colour. The NV12 canvas below is the
+                // other way round, and is what the Canvas itself uses.
+                Canvas::Bgra(canvas) => {
+                    let layer_surface = as_bgra(&mut self.canvas_scratch)?;
+                    let region = BgraRegion {
+                        source_x: placement.region.source_x,
+                        source_y: placement.region.source_y,
+                        destination_x: placement.region.destination_x,
+                        destination_y: placement.region.destination_y,
+                        width: placement.region.width,
+                        height: placement.region.height,
                     };
-                    self.driver.blend_bgra_nv12(
-                        layer_surface,
-                        scratch,
-                        canvas,
-                        placement.region,
-                        alpha,
-                    )?;
+                    self.driver
+                        .blend_bgra(canvas, layer_surface, region, alpha)?;
+                    continue;
                 }
-                LayerFormat::Nv12 if *opacity >= 1.0 => {
-                    let layer_surface = Nv12Surface::from_frame(scaled)
-                        .ok_or(CudaVideoCompositorError::MissingPlane)?;
-                    // A copy moves whole rows at the memory system's own rate,
-                    // where the kernel reads, mixes, and writes every byte.
-                    // Worth keeping apart, since opaque is the common case.
+                Canvas::Nv12(canvas) => canvas,
+            };
+            // An NV12 layer in the canvas's own colour — BT.709 limited, what
+            // a decoder mostly hands over — is copied or mixed in as it
+            // stands. Any other, BT.601 or BT.2020, would be misread that
+            // way, and goes as a BGRA layer does, converted by its own tags.
+            if *format == LayerFormat::Nv12 && *colour == YuvToBgra::bt709_limited() {
+                let layer_surface = Nv12Surface::from_frame(scaled)
+                    .ok_or(CudaVideoCompositorError::MissingPlane)?;
+                if *opacity >= 1.0 {
+                    // A copy moves whole rows at the memory system's own
+                    // rate, where the kernel reads, mixes, and writes every
+                    // byte. Worth keeping apart, since opaque is the common
+                    // case.
                     self.driver
                         .blit_nv12(layer_surface, canvas, placement.region)?;
-                }
-                LayerFormat::Nv12 => {
-                    let layer_surface = Nv12Surface::from_frame(scaled)
-                        .ok_or(CudaVideoCompositorError::MissingPlane)?;
+                } else {
                     self.driver
                         .blend_nv12(layer_surface, canvas, placement.region, alpha)?;
                 }
+                continue;
             }
+            // A layer bringing its own transparency, or one converted above.
+            // The scratch is kept per input and rebuilt only when the size it
+            // was made for changes, because it is a few megabytes and the
+            // size is stable between frames.
+            let layer_surface = as_bgra(&mut self.canvas_scratch)?;
+            let scratch = match self.overlays.entry(*id) {
+                std::collections::hash_map::Entry::Occupied(slot)
+                    if slot.get().width >= placement.region.width
+                        && slot.get().height >= placement.region.height =>
+                {
+                    slot.into_mut()
+                }
+                slot => {
+                    let scratch = self
+                        .driver
+                        .overlay_scratch(placement.image_width, placement.image_height)?;
+                    match slot {
+                        std::collections::hash_map::Entry::Occupied(mut slot) => {
+                            slot.insert(scratch);
+                            slot.into_mut()
+                        }
+                        std::collections::hash_map::Entry::Vacant(slot) => slot.insert(scratch),
+                    }
+                }
+            };
+            self.driver
+                .blend_bgra_nv12(layer_surface, scratch, canvas, placement.region, alpha)?;
         }
 
         for text in &texts {
@@ -1664,6 +1640,38 @@ fn source_region(
     let width = align_down(region.width + (region.x - x));
     let height = align_down(region.height + (region.y - y));
     (width >= 2 && height >= 2).then_some(VideoSourceRect::new(x, y, width, height))
+}
+
+/// `layer` read as `colour` into input `id`'s BGRA scratch, made or grown to
+/// `width`x`height` first, and that scratch's surface.
+fn nv12_into_scratch(
+    driver: &CudaDriver,
+    scratches: &mut HashMap<VideoInputId, CudaBgraScratch>,
+    id: VideoInputId,
+    layer: Nv12Surface,
+    width: u32,
+    height: u32,
+    colour: &YuvToBgra,
+) -> std::result::Result<BgraSurface, CudaVideoCompositorError> {
+    let scratch = match scratches.entry(id) {
+        std::collections::hash_map::Entry::Occupied(slot)
+            if slot.get().width >= width && slot.get().height >= height =>
+        {
+            slot.into_mut()
+        }
+        slot => {
+            let scratch = driver.bgra_scratch(width, height)?;
+            match slot {
+                std::collections::hash_map::Entry::Occupied(mut slot) => {
+                    slot.insert(scratch);
+                    slot.into_mut()
+                }
+                std::collections::hash_map::Entry::Vacant(slot) => slot.insert(scratch),
+            }
+        }
+    };
+    driver.nv12_to_bgra(layer, scratch.surface(), width, height, colour)?;
+    Ok(scratch.surface())
 }
 
 fn validate_input_frame(

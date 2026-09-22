@@ -199,8 +199,8 @@ compile error with no explanation.
   shared immediate context for it, and a `CudaScaler` on `Cuda`; `D3d12`
   decodes it in software. At 4K, HEVC 10-bit decoded this way on CUDA ran
   at 277 frames a second with next to no CPU, against 104 on four
-  software threads. Its BT.2020 description is kept; nothing maps HDR to
-  SDR. Pictures with alpha
+  software threads. A BT.2020 stream is put out as BT.709 BGRA instead —
+  see the fix below. Nothing maps HDR to SDR. Pictures with alpha
   take the software path and arrive as BGRA with their alpha intact, since
   no hardware decoder keeps it. Should the hardware open for a stream
   and then refuse it at a frame — a profile the GPU lacks — the bin puts the
@@ -642,6 +642,21 @@ compile error with no explanation.
   decoder in this crate — keys exactly as before, byte for byte.
 
 ### Fixed
+
+- **BT.2020 video comes out in the right colours.** `D3d11Scaler` described
+  colour to the video processor with a bitfield whose one matrix bit says
+  BT.601 or BT.709, and read BT.2020 as BT.601; `CudaConverter` and
+  `CudaVideoCompositor` read every NV12 frame as BT.709, BT.601 included. A
+  red (200, 40, 40) encoded with BT.2020's matrix came out (190, 32, 40)
+  and (204, 48, 38). `D3d11Scaler` now hands the processor a
+  `DXGI_COLOR_SPACE_TYPE`, and the CUDA kernel takes the matrix and range of
+  the frame it reads, as `D3d11VideoCompositor` already did; a CUDA NV12
+  layer not in the canvas's own BT.709 is converted on its way in rather
+  than copied. BT.2020's primaries are brought into BT.709's too, which
+  a D3D11 video processor does only from P010 to RGB and writes no BT.2020
+  Y'CbCr at all — so `VideoDecodeBin` puts a BT.2020 stream out as BT.709
+  BGRA on `D3d11` and `Cuda`, straight from the decoder, and every element
+  after it reads it right. `output_format` says so at open.
 
 - **A GPU refusing a stream is reported as that.** `D3d11Decoder`,
   `D3d12Decoder` and `CudaDecoder` returned FFmpeg's `EPERM` and then

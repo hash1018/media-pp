@@ -15,7 +15,7 @@ use crate::{
     pad::SrcPad,
     platform::cuda::{
         CudaDevice, CudaFrameFormat,
-        driver::{BgraSurface, CudaDriver, Nv12Surface},
+        driver::{BgraSurface, CudaDriver, Nv12Surface, YuvToBgra},
         frame::create_hw_frames_ctx,
     },
     platform::ffmpeg::AvBufferRef,
@@ -121,10 +121,17 @@ pub enum CudaConverterError {
 ///
 /// # Colour
 ///
-/// One side is full-range RGB and the other BT.709 limited-range Y'CbCr —
-/// the same definition [`crate::elements::CudaVideoCompositor`] fills
-/// backgrounds with, so a converted capture and a composited background
-/// agree. Chroma is the conversion of each 2x2 block's average colour, which
+/// One side is full-range RGB. Going to NV12 the other is BT.709
+/// limited-range Y'CbCr — the same definition
+/// [`crate::elements::CudaVideoCompositor`] fills backgrounds with, so a
+/// converted capture and a composited background agree. Coming back, the
+/// NV12 is read by its own tags, as `D3d11VideoCompositor` reads a layer:
+/// BT.601, BT.709 or BT.2020, limited or full, and untagged BT.601 through
+/// 576 lines and BT.709 above. BT.2020's primaries are brought into
+/// BT.709's on the way, through gamma 2.2 as a D3D11 video processor does,
+/// and the frame tagged BT.709 for it; nothing maps HDR.
+///
+/// Chroma is the conversion of each 2x2 block's average colour, which
 /// is why the dimensions must be even whichever way this runs: an odd extent
 /// has no whole chroma sample to write or to read.
 ///
@@ -308,6 +315,7 @@ impl CudaConverter {
                         .ok_or(CudaConverterError::MissingSurface)?,
                     self.width,
                     self.height,
+                    &YuvToBgra::of_frame(source),
                 )?,
             }
             // The kernels are issued on this driver's own context, while
@@ -342,6 +350,10 @@ impl CudaConverter {
         };
         destination.set_color_space(space);
         destination.set_color_range(range);
+        // BT.2020 was brought into BT.709's primaries on the way to RGB.
+        if self.output == CudaFrameFormat::Bgra && crate::color::is_bt2020(source.color_space()) {
+            destination.set_color_primaries(ffmpeg::color::Primaries::BT709);
+        }
         Ok(destination)
     }
 }
@@ -601,6 +613,118 @@ mod tests {
             CudaFrameFormat::from_sw_format(sw_format),
             Some(CudaFrameFormat::Bgra),
             "the surface itself has to be BGRA, not just described as it"
+        );
+    }
+
+    /// NV12 is read by its own tags: a BT.601 frame by BT.601's matrix, a
+    /// BT.709 one by BT.709's, and a BT.2020 one by BT.2020's and with its
+    /// primaries brought into BT.709's. Every one used to be read as BT.709,
+    /// which made a BT.2020 red (200, 40, 40) come out (204, 48, 38).
+    #[test]
+    fn nv12_is_read_by_its_own_colour_tags() {
+        let Some((device, _cuda_lock)) = try_cuda_device() else {
+            return;
+        };
+        // One Y'CbCr value away from neutral on both chroma axes, so every
+        // matrix makes something different of it.
+        let (luma, cb, cr) = (90u8, 110u8, 170u8);
+        let Ok(mut upload) = CudaUpload::new("upload", &device, CudaFrameFormat::Nv12, 64, 32)
+        else {
+            eprintln!("skipping: this machine has no usable CUDA frames context");
+            return;
+        };
+        let uploaded = capture(&mut upload);
+        let mut frame = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::NV12, 64, 32);
+        frame.data_mut(0).fill(luma);
+        for pair in frame.data_mut(1).as_chunks_mut::<2>().0 {
+            pair.copy_from_slice(&[cb, cr]);
+        }
+        let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
+        let mut slot = pool.get();
+        *slot = frame;
+        upload
+            .consume(MediaBuffer::Video(Arc::new(slot)))
+            .expect("upload");
+        let source = uploaded.lock().unwrap().remove(0);
+
+        let read_as = |space: ffmpeg::color::Space| {
+            let Ok(mut converter) =
+                CudaConverter::new("convert", &device, CudaFrameFormat::Bgra, 64, 32)
+            else {
+                panic!("a converter was built above");
+            };
+            let received = capture(&mut converter);
+            let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
+            let mut slot = pool.get();
+            // SAFETY: both are live `AVFrame`s and distinct — the slot is the
+            // empty one just taken from the pool.
+            unsafe {
+                assert!(ffi::av_frame_ref(slot.as_mut_ptr(), video(&source).as_ptr()) >= 0);
+            }
+            slot.set_color_space(space);
+            converter
+                .consume(MediaBuffer::Video(Arc::new(slot)))
+                .expect("convert");
+            let out = received.lock().unwrap().remove(0);
+            let MediaBuffer::Video(frame) = out else {
+                panic!("a Video buffer");
+            };
+            let primaries = frame.color_primaries();
+            let mut download = crate::elements::CudaDownload::new(
+                "download",
+                &device,
+                CudaFrameFormat::Bgra,
+                64,
+                32,
+            );
+            let read = capture(&mut download);
+            download
+                .consume(MediaBuffer::Video(frame))
+                .expect("download");
+            let back = read.lock().unwrap().remove(0);
+            let [b, g, r, _] = video(&back).data(0)[..4] else {
+                unreachable!("four bytes were sliced");
+            };
+            ([r, g, b], primaries)
+        };
+        let by_matrix = |space| {
+            let rows = crate::color::yuv_to_rgb_rows(space, ffmpeg::color::Range::MPEG, 1080);
+            rows.map(|[y, u, v, offset]| {
+                let value = y * f32::from(luma) / 255.0
+                    + u * f32::from(cb) / 255.0
+                    + v * f32::from(cr) / 255.0
+                    + offset;
+                (value.clamp(0.0, 1.0) * 255.0 + 0.5) as u8
+            })
+        };
+        let near = |got: [u8; 3], want: [u8; 3], within: u8, what: &str| {
+            assert!(
+                got.iter()
+                    .zip(want)
+                    .all(|(got, want)| got.abs_diff(want) <= within),
+                "{what}: got {got:?}, want {want:?}"
+            );
+        };
+
+        let (bt601, _) = read_as(ffmpeg::color::Space::BT470BG);
+        near(bt601, by_matrix(ffmpeg::color::Space::BT470BG), 1, "BT.601");
+        let (bt709, _) = read_as(ffmpeg::color::Space::BT709);
+        near(bt709, by_matrix(ffmpeg::color::Space::BT709), 1, "BT.709");
+        assert_ne!(
+            bt601, bt709,
+            "the two matrices make different colours of this"
+        );
+        let (bt2020, primaries) = read_as(ffmpeg::color::Space::BT2020NCL);
+        near(
+            bt2020,
+            crate::test_support::bt2020_as_bt709(f32::from(luma), f32::from(cb), f32::from(cr)),
+            2,
+            "BT.2020",
+        );
+        assert_eq!(
+            primaries,
+            ffmpeg::color::Primaries::BT709,
+            "the primaries it was brought into"
         );
     }
 

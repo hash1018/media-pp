@@ -5,6 +5,7 @@
 //! sibling ([`text_handle::D3d11TextLayerHandle`]) each split into their
 //! own file since neither is small enough to justify inlining here.
 
+use crate::color::yuv_to_rgb_rows;
 use crate::rate::FrameRate;
 use std::{
     collections::HashMap,
@@ -1399,44 +1400,6 @@ fn validate_output_options(
         ));
     }
     Ok(())
-}
-
-/// Builds three affine rows that turn normalized `(Y, Cb, Cr, 1)` samples
-/// into RGB. Unspecified color metadata follows the common SD/HD fallback:
-/// BT.601 through 576 lines and BT.709 above it; unspecified range is
-/// treated as MPEG/limited, matching ordinary decoded NV12 video.
-fn yuv_to_rgb_rows(
-    space: ffmpeg::color::Space,
-    range: ffmpeg::color::Range,
-    height: u32,
-) -> [[f32; 4]; 3] {
-    let (kr, kb) = match space {
-        ffmpeg::color::Space::BT709 => (0.2126f32, 0.0722f32),
-        ffmpeg::color::Space::BT2020NCL | ffmpeg::color::Space::BT2020CL => (0.2627f32, 0.0593f32),
-        ffmpeg::color::Space::FCC => (0.30f32, 0.11f32),
-        ffmpeg::color::Space::SMPTE240M => (0.212f32, 0.087f32),
-        ffmpeg::color::Space::Unspecified if height > 576 => (0.2126f32, 0.0722f32),
-        _ => (0.299f32, 0.114f32),
-    };
-    let kg = 1.0 - kr - kb;
-    let (y_offset, y_scale, chroma_scale) = match range {
-        ffmpeg::color::Range::JPEG => (0.0, 1.0, 1.0),
-        ffmpeg::color::Range::MPEG | ffmpeg::color::Range::Unspecified => {
-            (16.0 / 255.0, 255.0 / 219.0, 255.0 / 224.0)
-        }
-    };
-    let chroma_offset = 128.0 / 255.0;
-    let red_cr = 2.0 * (1.0 - kr) * chroma_scale;
-    let blue_cb = 2.0 * (1.0 - kb) * chroma_scale;
-    let green_cb = -2.0 * kb * (1.0 - kb) / kg * chroma_scale;
-    let green_cr = -2.0 * kr * (1.0 - kr) / kg * chroma_scale;
-    let offset = |cb: f32, cr: f32| -y_scale * y_offset - cb * chroma_offset - cr * chroma_offset;
-
-    [
-        [y_scale, 0.0, red_cr, offset(0.0, red_cr)],
-        [y_scale, green_cb, green_cr, offset(green_cb, green_cr)],
-        [y_scale, blue_cb, 0.0, offset(blue_cb, 0.0)],
-    ]
 }
 
 /// Turns pixel-space [`LayerGeometry`] into a D3D11 viewport (where the

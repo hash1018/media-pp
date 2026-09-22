@@ -814,16 +814,13 @@ impl CudaDriver {
         })
     }
 
-    /// Converts an NV12 surface into a BGRA one, on the GPU.
+    /// Converts an NV12 surface into a BGRA one, on the GPU, as `colour`
+    /// says the NV12 is to be read.
     ///
     /// The direction `scale_cuda` refuses and
     /// [`CudaScaler`](crate::elements::CudaScaler) documents as impossible:
     /// its module carries no kernel for a YUV/RGB pair either way, so this
     /// one does.
-    ///
-    /// The colour maths is the exact inverse of [`bt709_limited`], written
-    /// in the order that undoes it, so a round trip through both is off by
-    /// rounding and by chroma subsampling and by nothing else.
     ///
     /// Launches asynchronously. [`CudaDriver::synchronize`] is what makes
     /// the result visible to anything outside this context's stream
@@ -834,6 +831,7 @@ impl CudaDriver {
         destination: BgraSurface,
         width: u32,
         height: u32,
+        colour: &YuvToBgra,
     ) -> Result<(), CudaDriverError> {
         if width == 0 || height == 0 {
             return Ok(());
@@ -849,9 +847,12 @@ impl CudaDriver {
         let mut chroma_pitch = source.chroma_pitch as u32;
         let mut width = width;
         let mut height = height;
+        let mut rows = colour.rows;
+        let mut gamut = u32::from(colour.gamut.is_some());
+        let mut gamut_matrix = colour.gamut.unwrap_or([[0.0; 3]; 3]);
 
         self.with_context(|| {
-            let mut params: [*mut c_void; 8] = [
+            let mut params: Vec<*mut c_void> = vec![
                 (&mut dst) as *mut _ as *mut c_void,
                 (&mut dst_pitch) as *mut _ as *mut c_void,
                 (&mut luma) as *mut _ as *mut c_void,
@@ -861,9 +862,22 @@ impl CudaDriver {
                 (&mut width) as *mut _ as *mut c_void,
                 (&mut height) as *mut _ as *mut c_void,
             ];
+            params.extend(
+                rows.iter_mut()
+                    .flatten()
+                    .map(|value| value as *mut f32 as *mut c_void),
+            );
+            params.push((&mut gamut) as *mut _ as *mut c_void);
+            params.extend(
+                gamut_matrix
+                    .iter_mut()
+                    .flatten()
+                    .map(|value| value as *mut f32 as *mut c_void),
+            );
             // SAFETY: one pointer per parameter `nv12_to_bgra` declares, in
-            // that order, at a live local; the context is current inside
-            // `with_context`.
+            // that order — eight surface and size values, twelve row
+            // coefficients, the gamut flag, nine gamut coefficients — each at
+            // a live local; the context is current inside `with_context`.
             unsafe {
                 check(
                     "cuLaunchKernel",
@@ -1906,6 +1920,56 @@ pub(crate) struct BgraRegion {
     pub(crate) destination_y: u32,
     pub(crate) width: u32,
     pub(crate) height: u32,
+}
+
+/// How [`CudaDriver::nv12_to_bgra`] reads an NV12 surface: the matrix and
+/// range its Y'CbCr was made with, and whether its RGB is BT.2020's, to be
+/// brought into BT.709's.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct YuvToBgra {
+    /// R', G' and B' from normalised `(Y', Cb, Cr, 1)` — see
+    /// [`crate::color::yuv_to_rgb_rows`].
+    rows: [[f32; 4]; 3],
+    /// Linear-light primaries conversion, applied between a gamma 2.2
+    /// decode and re-encode, the transfer a D3D11 video processor assumes
+    /// for the same conversion; `None` where the primaries are already
+    /// BT.709's.
+    gamut: Option<[[f32; 3]; 3]>,
+}
+
+impl YuvToBgra {
+    /// For a frame tagged `space`/`range`, `height` lines tall — the height
+    /// deciding, as everywhere in this crate, what an untagged frame is.
+    pub(crate) fn of(
+        space: ffmpeg_next::color::Space,
+        range: ffmpeg_next::color::Range,
+        height: u32,
+    ) -> Self {
+        Self {
+            rows: crate::color::yuv_to_rgb_rows(space, range, height),
+            gamut: crate::color::is_bt2020(space).then_some(crate::color::BT2020_TO_BT709),
+        }
+    }
+
+    /// For `frame`, by its own tags.
+    pub(crate) fn of_frame(frame: &ffmpeg_next::frame::Video) -> Self {
+        Self::of(frame.color_space(), frame.color_range(), frame.height())
+    }
+
+    /// What this crate's CUDA path writes: BT.709 limited range — see
+    /// [`bt709_limited`].
+    pub(crate) fn bt709_limited() -> Self {
+        Self::of(
+            ffmpeg_next::color::Space::BT709,
+            ffmpeg_next::color::Range::MPEG,
+            0,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn rows(&self) -> [[f32; 4]; 3] {
+        self.rows
+    }
 }
 
 /// The device pointers and pitches of one NV12 CUDA surface — what an

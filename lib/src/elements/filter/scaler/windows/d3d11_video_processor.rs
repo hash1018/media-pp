@@ -6,22 +6,34 @@
 use std::mem::ManuallyDrop;
 
 use ffmpeg_next as ffmpeg;
-use windows::Win32::{
-    Foundation::RECT,
-    Graphics::{
-        Direct3D11::{
-            D3D11_TEX2D_VPIV, D3D11_TEX2D_VPOV, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
-            D3D11_VIDEO_PROCESSOR_COLOR_SPACE, D3D11_VIDEO_PROCESSOR_CONTENT_DESC,
-            D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_INPUT,
-            D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_OUTPUT, D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC,
-            D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0, D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC,
-            D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0, D3D11_VIDEO_PROCESSOR_STREAM,
-            D3D11_VIDEO_USAGE_PLAYBACK_NORMAL, D3D11_VPIV_DIMENSION_TEXTURE2D,
-            D3D11_VPOV_DIMENSION_TEXTURE2D, ID3D11Texture2D, ID3D11VideoContext, ID3D11VideoDevice,
-            ID3D11VideoProcessor, ID3D11VideoProcessorEnumerator,
+use windows::{
+    Win32::{
+        Foundation::RECT,
+        Graphics::{
+            Direct3D11::{
+                D3D11_TEX2D_VPIV, D3D11_TEX2D_VPOV, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
+                D3D11_VIDEO_PROCESSOR_CONTENT_DESC, D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_INPUT,
+                D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_OUTPUT, D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC,
+                D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0, D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC,
+                D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0, D3D11_VIDEO_PROCESSOR_STREAM,
+                D3D11_VIDEO_USAGE_PLAYBACK_NORMAL, D3D11_VPIV_DIMENSION_TEXTURE2D,
+                D3D11_VPOV_DIMENSION_TEXTURE2D, ID3D11Texture2D, ID3D11VideoContext,
+                ID3D11VideoContext1, ID3D11VideoDevice, ID3D11VideoProcessor,
+                ID3D11VideoProcessorEnumerator,
+            },
+            Dxgi::Common::{
+                DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709, DXGI_COLOR_SPACE_RGB_STUDIO_G22_NONE_P709,
+                DXGI_COLOR_SPACE_TYPE, DXGI_COLOR_SPACE_YCBCR_FULL_G22_LEFT_P601,
+                DXGI_COLOR_SPACE_YCBCR_FULL_G22_LEFT_P709,
+                DXGI_COLOR_SPACE_YCBCR_FULL_G22_LEFT_P2020,
+                DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P601,
+                DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P709,
+                DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P2020, DXGI_FORMAT, DXGI_FORMAT_NV12,
+                DXGI_FORMAT_P010, DXGI_RATIONAL,
+            },
         },
-        Dxgi::Common::{DXGI_FORMAT, DXGI_FORMAT_NV12, DXGI_FORMAT_P010, DXGI_RATIONAL},
     },
+    core::Interface,
 };
 
 use super::d3d11_scaler::D3d11ScalerError;
@@ -67,8 +79,36 @@ pub(super) struct ScaleProcessor {
 /// share colorimetry is exactly what would suppress the conversion.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct BltColorSpaces {
-    pub(super) input: D3D11_VIDEO_PROCESSOR_COLOR_SPACE,
-    pub(super) output: D3D11_VIDEO_PROCESSOR_COLOR_SPACE,
+    pub(super) input: DXGI_COLOR_SPACE_TYPE,
+    pub(super) output: DXGI_COLOR_SPACE_TYPE,
+}
+
+impl BltColorSpaces {
+    /// `input` to `output`, told to the processor in a way it can carry out.
+    ///
+    /// A processor reads BT.2020 Y'CbCr but need not write it: the RTX
+    /// 3050's reports BT.2020 to BT.2020 unsupported through
+    /// `CheckVideoProcessorFormatConversion`, and asked anyway wrote
+    /// (0, 89, 0) for red. Where the two sides are the same there is no
+    /// colour to change — a resize, or P010 down to NV12 — so both are
+    /// described as BT.709 instead, which every processor writes; what
+    /// matters is only that they are equal.
+    pub(super) fn new(input: DXGI_COLOR_SPACE_TYPE, output: DXGI_COLOR_SPACE_TYPE) -> Self {
+        if input != output {
+            return Self { input, output };
+        }
+        let same = match input {
+            DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P2020 => {
+                DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P709
+            }
+            DXGI_COLOR_SPACE_YCBCR_FULL_G22_LEFT_P2020 => DXGI_COLOR_SPACE_YCBCR_FULL_G22_LEFT_P709,
+            other => other,
+        };
+        Self {
+            input: same,
+            output: same,
+        }
+    }
 }
 
 impl ScaleProcessor {
@@ -225,17 +265,20 @@ impl ScaleProcessor {
         color_space: BltColorSpaces,
     ) -> Result<(), D3d11ScalerError> {
         if self.color_space != Some(color_space) {
+            // Windows 8.1 and later; see `color_space` for why the older
+            // setters will not do.
+            let video_context: ID3D11VideoContext1 = video_context.cast()?;
             // SAFETY: the processor and video context are live, stream 0 was
-            // configured at construction, and both color-space values are
-            // fully initialized D3D11 descriptors.
+            // configured at construction, and both values are DXGI enum
+            // values.
             unsafe {
-                video_context.VideoProcessorSetStreamColorSpace(
+                video_context.VideoProcessorSetStreamColorSpace1(
                     &self.processor,
                     0,
-                    &color_space.input,
+                    color_space.input,
                 );
                 video_context
-                    .VideoProcessorSetOutputColorSpace(&self.processor, &color_space.output);
+                    .VideoProcessorSetOutputColorSpace1(&self.processor, color_space.output);
             }
             self.color_space = Some(color_space);
         }
@@ -317,51 +360,54 @@ impl ScaleProcessor {
 /// answer, which is what tells the processor there is no color change to
 /// make; a conversion describes each side for what it actually holds.
 ///
-/// D3D11's description of color here is coarse — the bitfield below has one
-/// bit for the YCbCr matrix (601 or 709) and no way to say anything else —
-/// so what matters is that a frame's own tags map to one consistent answer
-/// rather than that they round-trip. Unspecified metadata follows the same
-/// fallback `D3d11VideoCompositor` uses — BT.601 through 576 lines and
-/// BT.709 above it, limited range — so the two elements describe one frame
-/// the same way.
+/// A `DXGI_COLOR_SPACE_TYPE`, set through `ID3D11VideoContext1`, rather
+/// than the older `D3D11_VIDEO_PROCESSOR_COLOR_SPACE`, whose one matrix bit
+/// says 601 or 709 and nothing else: a BT.2020 frame described that way was
+/// converted as BT.601, which measured an encoded (200, 40, 40) back as
+/// (190, 32, 40). Unspecified metadata follows the same fallback
+/// `D3d11VideoCompositor` uses — BT.601 through 576 lines and BT.709 above
+/// it, limited range — so the two elements describe one frame the same way.
+///
+/// Every answer here is gamma 2.2 and BT.709 primaries apart from BT.2020's
+/// own, which is what each matrix is normally paired with; a frame's
+/// primaries and transfer tags are not read, and nothing here maps HDR.
 pub(super) fn color_space(
     space: ffmpeg::color::Space,
     range: ffmpeg::color::Range,
     height: u32,
     format: DXGI_FORMAT,
-) -> D3D11_VIDEO_PROCESSOR_COLOR_SPACE {
-    // `D3D11_VIDEO_PROCESSOR_COLOR_SPACE`'s bitfield, in declaration
-    // order: Usage:1, RGB_Range:1, YCbCr_Matrix:1, YCbCr_xvYCC:1,
-    // Nominal_Range:2. windows-rs exposes it as one `u32`.
-    const USAGE_VIDEO_PROCESSING: u32 = 1;
-    const RGB_RANGE_LIMITED: u32 = 1 << 1;
-    const YCBCR_MATRIX_BT709: u32 = 1 << 2;
-    const NOMINAL_RANGE_16_235: u32 = 1 << 4;
-    const NOMINAL_RANGE_0_255: u32 = 2 << 4;
+) -> DXGI_COLOR_SPACE_TYPE {
+    use ffmpeg::color::Space;
 
     let full_range = range == ffmpeg::color::Range::JPEG;
-    // Usage 0 asks the driver for playback-tuned output; 1 asks it to
-    // process the video faithfully, which is what an element in the middle
-    // of a pipeline owes whatever comes next.
-    let mut bits = USAGE_VIDEO_PROCESSING;
-    if is_yuv420(format) {
-        let bt709 = match space {
-            ffmpeg::color::Space::BT709 => true,
-            ffmpeg::color::Space::Unspecified => height > 576,
-            _ => false,
-        };
-        if bt709 {
-            bits |= YCBCR_MATRIX_BT709;
-        }
-        bits |= if full_range {
-            NOMINAL_RANGE_0_255
+    if !is_yuv420(format) {
+        // Unspecified RGB is full range, as everything that makes it here
+        // does.
+        return if full_range || range == ffmpeg::color::Range::Unspecified {
+            DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709
         } else {
-            NOMINAL_RANGE_16_235
+            DXGI_COLOR_SPACE_RGB_STUDIO_G22_NONE_P709
         };
-    } else if !full_range && range != ffmpeg::color::Range::Unspecified {
-        bits |= RGB_RANGE_LIMITED;
     }
-    D3D11_VIDEO_PROCESSOR_COLOR_SPACE { _bitfield: bits }
+    enum Matrix {
+        Bt601,
+        Bt709,
+        Bt2020,
+    }
+    let matrix = match space {
+        Space::BT709 => Matrix::Bt709,
+        Space::BT2020NCL | Space::BT2020CL => Matrix::Bt2020,
+        Space::Unspecified if height > 576 => Matrix::Bt709,
+        _ => Matrix::Bt601,
+    };
+    match (matrix, full_range) {
+        (Matrix::Bt601, false) => DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P601,
+        (Matrix::Bt601, true) => DXGI_COLOR_SPACE_YCBCR_FULL_G22_LEFT_P601,
+        (Matrix::Bt709, false) => DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P709,
+        (Matrix::Bt709, true) => DXGI_COLOR_SPACE_YCBCR_FULL_G22_LEFT_P709,
+        (Matrix::Bt2020, false) => DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P2020,
+        (Matrix::Bt2020, true) => DXGI_COLOR_SPACE_YCBCR_FULL_G22_LEFT_P2020,
+    }
 }
 
 /// Whether `format` is 4:2:0 Y'CbCr — NV12, or P010, the same layout at ten

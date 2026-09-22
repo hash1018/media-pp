@@ -25,7 +25,9 @@
 /// range, deliberately the same definition [`rgb_to_bt709_limited`](super::rgb_to_bt709_limited) uses for
 /// compositor backgrounds so a converted capture and a filled background
 /// agree, and written in the same operation order so a test can compare every
-/// byte against that expression instead of a tolerance.
+/// byte against that expression instead of a tolerance. `nv12_to_bgra` goes
+/// the other way by whatever matrix and range it is handed — see
+/// `YuvToBgra` — and brings BT.2020 primaries into BT.709's where told to.
 pub(super) const CONVERT_PTX: &str = r#"
 .version 6.0
 .target sm_50
@@ -470,13 +472,35 @@ KEY_DONE:
     .param .u64 chroma,
     .param .u32 chroma_pitch,
     .param .u32 width,
-    .param .u32 height
+    .param .u32 height,
+    .param .f32 red_y,
+    .param .f32 red_cb,
+    .param .f32 red_cr,
+    .param .f32 red_offset,
+    .param .f32 green_y,
+    .param .f32 green_cb,
+    .param .f32 green_cr,
+    .param .f32 green_offset,
+    .param .f32 blue_y,
+    .param .f32 blue_cb,
+    .param .f32 blue_cr,
+    .param .f32 blue_offset,
+    .param .u32 gamut,
+    .param .f32 gamut_rr,
+    .param .f32 gamut_rg,
+    .param .f32 gamut_rb,
+    .param .f32 gamut_gr,
+    .param .f32 gamut_gg,
+    .param .f32 gamut_gb,
+    .param .f32 gamut_br,
+    .param .f32 gamut_bg,
+    .param .f32 gamut_bb
 )
 {
     .reg .pred  %p<4>;
     .reg .b16   %rs<12>;
     .reg .b32   %r<40>;
-    .reg .f32   %f<40>;
+    .reg .f32   %f<80>;
     .reg .b64   %rd<20>;
 
     ld.param.u64    %rd1, [dst];
@@ -502,6 +526,20 @@ KEY_DONE:
     setp.ge.u32     %p2, %r13, %r5;
     @%p2 bra        NV12_BGRA_DONE;
 
+    ld.param.f32    %f40, [red_y];
+    ld.param.f32    %f41, [red_cb];
+    ld.param.f32    %f42, [red_cr];
+    ld.param.f32    %f43, [red_offset];
+    ld.param.f32    %f44, [green_y];
+    ld.param.f32    %f45, [green_cb];
+    ld.param.f32    %f46, [green_cr];
+    ld.param.f32    %f47, [green_offset];
+    ld.param.f32    %f48, [blue_y];
+    ld.param.f32    %f49, [blue_cb];
+    ld.param.f32    %f50, [blue_cr];
+    ld.param.f32    %f51, [blue_offset];
+    ld.param.u32    %r30, [gamut];
+
     mad.lo.s32      %r14, %r13, %r2, %r9;
     cvt.u64.u32     %rd4, %r14;
     add.s64         %rd5, %rd2, %rd4;
@@ -516,30 +554,83 @@ KEY_DONE:
     ld.global.u8    %rs2, [%rd7];
     ld.global.u8    %rs3, [%rd7+1];
 
+    // Y', Cb and Cr as 0..1, then each of R', G' and B' as one row of
+    // `yuv_to_rgb_rows`, in the order a test repeats with `mul_add`.
     cvt.u32.u16     %r19, %rs1;
     cvt.rn.f32.u32  %f1, %r19;
+    mul.f32         %f1, %f1, 0f3B808081;
     cvt.u32.u16     %r20, %rs2;
     cvt.rn.f32.u32  %f2, %r20;
+    mul.f32         %f2, %f2, 0f3B808081;
     cvt.u32.u16     %r21, %rs3;
     cvt.rn.f32.u32  %f3, %r21;
+    mul.f32         %f3, %f3, 0f3B808081;
 
-    sub.f32         %f4, %f1, 0f41800000;
-    mul.f32         %f5, %f4, 0f3F950A85;
-    sub.f32         %f6, %f2, 0f43000000;
-    mul.f32         %f7, %f6, 0f3F91B6DB;
-    sub.f32         %f8, %f3, 0f43000000;
-    mul.f32         %f9, %f8, 0f3F91B6DB;
+    fma.rn.f32      %f4, %f40, %f1, %f43;
+    fma.rn.f32      %f4, %f41, %f2, %f4;
+    fma.rn.f32      %f4, %f42, %f3, %f4;
+    fma.rn.f32      %f5, %f44, %f1, %f47;
+    fma.rn.f32      %f5, %f45, %f2, %f5;
+    fma.rn.f32      %f5, %f46, %f3, %f5;
+    fma.rn.f32      %f6, %f48, %f1, %f51;
+    fma.rn.f32      %f6, %f49, %f2, %f6;
+    fma.rn.f32      %f6, %f50, %f3, %f6;
 
-    mul.f32         %f10, %f7, 0f3FED844D;
-    add.f32         %f11, %f5, %f10;
-    mul.f32         %f12, %f9, 0f3FC9930C;
-    add.f32         %f13, %f5, %f12;
+    setp.eq.u32     %p3, %r30, 0;
+    @%p3 bra        NV12_BGRA_GAMMA_DONE;
 
-    mul.f32         %f14, %f13, 0f3E59B3D0;
-    sub.f32         %f15, %f5, %f14;
-    mul.f32         %f16, %f11, 0f3D93DD98;
-    sub.f32         %f17, %f15, %f16;
-    mul.f32         %f18, %f17, 0f3FB2F88E;
+    // BT.2020 primaries into BT.709's: decode gamma 2.2, mix in linear
+    // light, clip what BT.709 cannot hold, and encode again.
+    ld.param.f32    %f52, [gamut_rr];
+    ld.param.f32    %f53, [gamut_rg];
+    ld.param.f32    %f54, [gamut_rb];
+    ld.param.f32    %f55, [gamut_gr];
+    ld.param.f32    %f56, [gamut_gg];
+    ld.param.f32    %f57, [gamut_gb];
+    ld.param.f32    %f58, [gamut_br];
+    ld.param.f32    %f59, [gamut_bg];
+    ld.param.f32    %f60, [gamut_bb];
+
+    add.sat.f32     %f4, %f4, 0f00000000;
+    add.sat.f32     %f5, %f5, 0f00000000;
+    add.sat.f32     %f6, %f6, 0f00000000;
+    lg2.approx.f32  %f7, %f4;
+    mul.f32         %f7, %f7, 0f400CCCCD;
+    ex2.approx.f32  %f4, %f7;
+    lg2.approx.f32  %f7, %f5;
+    mul.f32         %f7, %f7, 0f400CCCCD;
+    ex2.approx.f32  %f5, %f7;
+    lg2.approx.f32  %f7, %f6;
+    mul.f32         %f7, %f7, 0f400CCCCD;
+    ex2.approx.f32  %f6, %f7;
+
+    mul.f32         %f7, %f52, %f4;
+    fma.rn.f32      %f7, %f53, %f5, %f7;
+    fma.rn.f32      %f7, %f54, %f6, %f7;
+    mul.f32         %f8, %f55, %f4;
+    fma.rn.f32      %f8, %f56, %f5, %f8;
+    fma.rn.f32      %f8, %f57, %f6, %f8;
+    mul.f32         %f9, %f58, %f4;
+    fma.rn.f32      %f9, %f59, %f5, %f9;
+    fma.rn.f32      %f9, %f60, %f6, %f9;
+
+    add.sat.f32     %f7, %f7, 0f00000000;
+    add.sat.f32     %f8, %f8, 0f00000000;
+    add.sat.f32     %f9, %f9, 0f00000000;
+    lg2.approx.f32  %f10, %f7;
+    mul.f32         %f10, %f10, 0f3EE8BA2F;
+    ex2.approx.f32  %f4, %f10;
+    lg2.approx.f32  %f10, %f8;
+    mul.f32         %f10, %f10, 0f3EE8BA2F;
+    ex2.approx.f32  %f5, %f10;
+    lg2.approx.f32  %f10, %f9;
+    mul.f32         %f10, %f10, 0f3EE8BA2F;
+    ex2.approx.f32  %f6, %f10;
+
+NV12_BGRA_GAMMA_DONE:
+    mul.f32         %f13, %f4, 0f437F0000;
+    mul.f32         %f18, %f5, 0f437F0000;
+    mul.f32         %f11, %f6, 0f437F0000;
 
     max.f32         %f19, %f11, 0f00000000;
     min.f32         %f20, %f19, 0f437F0000;

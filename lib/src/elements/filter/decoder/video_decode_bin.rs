@@ -79,9 +79,9 @@ pub enum DecodeTarget {
     System,
     /// D3D11 textures on `device`, as [`crate::elements::D3d11Decoder`] and
     /// [`crate::elements::D3d11Upload`] make them — NV12, or BGRA where the
-    /// stream has alpha or an odd side. A 10-bit stream is brought down to
-    /// NV12 by a [`crate::elements::D3d11Scaler`], which draws through
-    /// `context`: the immediate context every D3D11 element in the pipeline
+    /// stream has alpha, an odd side or BT.2020 colour. A 10-bit stream, and
+    /// a BT.2020 one on its way to BGRA, goes through a
+    /// [`crate::elements::D3d11Scaler`], which draws through `context`: the immediate context every D3D11 element in the pipeline
     /// shares, as that element's own docs require.
     #[cfg(all(target_os = "windows", feature = "d3d11"))]
     D3d11 {
@@ -103,8 +103,9 @@ pub enum DecodeTarget {
     D3d12 { device: ID3D12Device },
     /// CUDA frames on `device`, as [`crate::elements::CudaDecoder`] and
     /// [`crate::elements::CudaUpload`] make them — NV12, or BGRA where the
-    /// stream has alpha or an odd side. A 10-bit stream is brought down to
-    /// NV12 by a [`crate::elements::CudaScaler`].
+    /// stream has alpha, an odd side or BT.2020 colour. A 10-bit stream is
+    /// brought down to NV12 by a [`crate::elements::CudaScaler`], and a
+    /// BT.2020 one on to BGRA by a [`crate::elements::CudaConverter`].
     #[cfg(feature = "cuda")]
     Cuda {
         device: CudaDevice,
@@ -154,7 +155,8 @@ pub enum SoftwareReason {
 /// On the hardware path, the target's decoder (`D3d11Decoder`,
 /// `D3d12Decoder`, `CudaDecoder`), and for a 10-bit stream its scaler
 /// (`D3d11Scaler`, `CudaScaler`) after it, bringing each picture down to
-/// NV12 at the same size. On the software path, `SwDecoder` →
+/// NV12 at the same size — or, for a BT.2020 one, on to BGRA; see the
+/// colour section below. On the software path, `SwDecoder` →
 /// `SwScaler` → the target's upload, or `SwDecoder` alone for
 /// [`DecodeTarget::System`]. They are ordinary elements, run the way a
 /// [`Rack`](crate::elements::Rack) runs what it holds: each in the pipeline,
@@ -191,6 +193,20 @@ pub enum SoftwareReason {
 /// packets, until the next keyframe replaces it; a stream with keyframes
 /// far apart keeps more. Nothing is kept on the software path, which has
 /// nothing to fall back to.
+///
+/// # Colour
+///
+/// A BT.2020 stream is made BT.709 RGB as soon as it is decoded, where the
+/// target has BGRA: its matrix read, and its primaries brought into BT.709's
+/// through gamma 2.2. Every picture downstream is then one each element
+/// already reads right, rather than BT.2020 colour each would have to — and
+/// some cannot: a D3D11 video processor reads BT.2020 Y'CbCr, but writes
+/// none, and brings its primaries into BT.709's only from P010 and only to
+/// RGB. On D3D11 that is one video processor pass, on CUDA `CudaScaler` and
+/// `CudaConverter`'s own kernel. The software path and an 8-bit stream on
+/// D3D11 read the matrix and leave the primaries, which comes out a little
+/// less saturated. Nothing here maps HDR to SDR: a PQ or HLG stream is read
+/// as if it were gamma 2.2.
 ///
 /// # Errors
 ///
@@ -258,8 +274,8 @@ impl VideoDecodeBin {
     ///
     /// `name` names the bin; what it holds is called `{name}-decoder`, and
     /// on the software path onto a device also `{name}-convert` and
-    /// `{name}-upload` — or, for a 10-bit stream on the hardware path,
-    /// `{name}-convert` alone.
+    /// `{name}-upload` — or, for a 10-bit or BT.2020 stream on the hardware
+    /// path, `{name}-convert`, and on CUDA for BT.2020 `{name}-rgb`.
     ///
     /// Fails with [`VideoDecodeBinError`] for a stream that is not video, or
     /// one whose pictures the target cannot be given — a size unknown or odd
@@ -288,9 +304,11 @@ impl VideoDecodeBin {
             DecodePath::Hardware => {
                 let mut elements =
                     vec![target.hardware_decoder(format!("{name}-decoder"), params.clone())?];
-                if stream.format.is_some_and(is_10bit_420) {
+                let output = target.hardware_format(&stream);
+                if output != ffmpeg::format::Pixel::NV12 || stream.format.is_some_and(is_10bit_420)
+                {
                     let (width, height) = stream.size.ok_or(VideoDecodeBinError::UnknownSize)?;
-                    elements.extend(target.to_8bit(format!("{name}-convert"), width, height)?);
+                    elements.extend(target.convert(&name, width, height, output)?);
                 }
                 let fallback = Fallback {
                     target: target.clone(),
@@ -300,10 +318,10 @@ impl VideoDecodeBin {
                     since_keyframe: Vec::new(),
                     preroll: None,
                 };
-                (elements, Some(ffmpeg::format::Pixel::NV12), Some(fallback))
+                (elements, Some(output), Some(fallback))
             }
             DecodePath::Software(reason) => {
-                let format = target.software_format(reason, stream.size)?;
+                let format = target.software_format(reason, &stream)?;
                 let elements = software(&name, params, stream.size, format, &target, threading)?;
                 // Where there is no upload, what comes out is what the
                 // stream decodes to.
@@ -334,8 +352,8 @@ impl VideoDecodeBin {
     }
 
     /// The layout of the frames this puts out. On a device, `NV12`, or
-    /// `BGRA` where the stream has alpha or a side NV12 cannot have and the
-    /// target has BGRA. On [`DecodeTarget::System`], whatever the stream
+    /// `BGRA` where the stream has alpha, a side NV12 cannot have or BT.2020
+    /// colour and the target has BGRA. On [`DecodeTarget::System`], whatever the stream
     /// decodes to — `None` where the stream does not say.
     ///
     /// Never changes, not even when the hardware refuses.
@@ -622,56 +640,101 @@ impl DecodeTarget {
         }
     }
 
-    /// That scaler, putting out NV12 at `width`x`height` — the size the
-    /// stream was opened with, so a stream that changes size is scaled back
-    /// to it, as on the software path. Only asked for where
-    /// [`Self::converts_10bit`]; `None` on a target without one.
+    /// What the hardware path puts out for `stream`: NV12, or BGRA for a
+    /// BT.2020 stream where the target has BGRA — see [`VideoDecodeBin`] on
+    /// why BT.2020 is made BT.709 RGB as soon as it is decoded.
+    fn hardware_format(&self, stream: &Stream) -> ffmpeg::format::Pixel {
+        if stream.bt2020 && self.keeps_alpha() {
+            ffmpeg::format::Pixel::BGRA
+        } else {
+            ffmpeg::format::Pixel::NV12
+        }
+    }
+
+    /// What goes after the hardware decoder to put out `output` at
+    /// `width`x`height` — the size the stream was opened with, so a stream
+    /// that changes size is scaled back to it, as on the software path.
+    /// Asked for where the decoder's own surfaces are not that: P010 from a
+    /// 10-bit stream, or anything bound for BGRA. Empty on a target with
+    /// nothing to do it with, which `choose` and `hardware_format` never
+    /// ask of one.
     #[cfg_attr(
         not(any(feature = "cuda", all(target_os = "windows", feature = "d3d11"))),
         allow(unused_variables)
     )]
-    fn to_8bit(&self, name: String, width: u32, height: u32) -> Result<Option<Box<dyn Filter>>> {
+    fn convert(
+        &self,
+        name: &str,
+        width: u32,
+        height: u32,
+        output: ffmpeg::format::Pixel,
+    ) -> Result<Vec<Box<dyn Filter>>> {
+        let bgra = output == ffmpeg::format::Pixel::BGRA;
         Ok(match self {
+            // One video processor pass: a BT.2020 P010 surface goes straight
+            // to BGRA, which is the one conversion in which the processor
+            // brings BT.2020's primaries into BT.709's — from NV12 it
+            // converts the matrix and leaves the primaries.
             #[cfg(all(target_os = "windows", feature = "d3d11"))]
             Self::D3d11 {
                 device, context, ..
-            } => Some(Box::new(crate::elements::D3d11Scaler::new(
-                name,
+            } => vec![Box::new(crate::elements::D3d11Scaler::new(
+                format!("{name}-convert"),
                 device,
                 Arc::clone(context),
-                crate::elements::D3d11ScalerFormat::Nv12,
+                if bgra {
+                    crate::elements::D3d11ScalerFormat::Bgra
+                } else {
+                    crate::elements::D3d11ScalerFormat::Nv12
+                },
                 width,
                 height,
-            )?)),
+            )?)],
+            // `scale_cuda` has no way to RGB, so NV12 first — the size and
+            // the depth — and this crate's own kernel from there.
             #[cfg(feature = "cuda")]
-            Self::Cuda { device, .. } => Some(Box::new(crate::elements::CudaScaler::with_format(
-                name,
-                device,
-                width,
-                height,
-                crate::elements::CudaScalerInterp::Bilinear,
-                CudaFrameFormat::Nv12,
-            ))),
-            _ => None,
+            Self::Cuda { device, .. } => {
+                let mut line: Vec<Box<dyn Filter>> =
+                    vec![Box::new(crate::elements::CudaScaler::with_format(
+                        format!("{name}-convert"),
+                        device,
+                        width,
+                        height,
+                        crate::elements::CudaScalerInterp::Bilinear,
+                        CudaFrameFormat::Nv12,
+                    ))];
+                if bgra {
+                    line.push(Box::new(crate::elements::CudaConverter::new(
+                        format!("{name}-rgb"),
+                        device,
+                        CudaFrameFormat::Bgra,
+                        width,
+                        height,
+                    )?));
+                }
+                line
+            }
+            _ => Vec::new(),
         })
     }
 
-    /// The layout the software path uploads in, for a stream of `size`
-    /// decoded in software because of `reason` — `None` where nothing is
-    /// uploaded.
+    /// The layout the software path uploads in, for `stream` decoded in
+    /// software because of `reason` — `None` where nothing is uploaded.
     fn software_format(
         &self,
         reason: SoftwareReason,
-        size: Option<(u32, u32)>,
+        stream: &Stream,
     ) -> Result<Option<ffmpeg::format::Pixel>> {
         if matches!(self, Self::System) {
             return Ok(None);
         }
-        let (width, height) = size.ok_or(VideoDecodeBinError::UnknownSize)?;
+        let (width, height) = stream.size.ok_or(VideoDecodeBinError::UnknownSize)?;
         // NV12 is half-resolution chroma, so a surface of it cannot have an
-        // odd side; BGRA can, and is also what keeps alpha.
+        // odd side; BGRA can, and is also what keeps alpha, and what a
+        // BT.2020 stream is put out as on the hardware path, which a
+        // replacement has to match.
         let odd = width % 2 != 0 || height % 2 != 0;
-        if reason == SoftwareReason::Alpha || odd {
+        if reason == SoftwareReason::Alpha || odd || stream.bt2020 {
             if self.keeps_alpha() {
                 return Ok(Some(ffmpeg::format::Pixel::BGRA));
             }
@@ -763,6 +826,9 @@ struct Stream {
     /// its session, before a frame of it has been decoded.
     format: Option<ffmpeg::format::Pixel>,
     size: Option<(u32, u32)>,
+    /// Whether its matrix is BT.2020, and so, as this crate reads it, its
+    /// primaries — see [`crate::color::is_bt2020`].
+    bt2020: bool,
 }
 
 impl Stream {
@@ -780,6 +846,7 @@ impl Stream {
             codec,
             format,
             size,
+            bt2020: crate::color::is_bt2020(video.color_space()),
         })
     }
 }
@@ -864,6 +931,7 @@ mod tests {
         Stream {
             codec,
             format,
+            bt2020: false,
             size: Some((64, 64)),
         }
     }
@@ -1160,6 +1228,27 @@ mod tests {
         )
     }
 
+    /// The same, tagged BT.2020 — and so read with BT.2020's matrix and
+    /// primaries, which make this sample a colour the other matrices do not.
+    #[cfg(any(feature = "cuda", all(target_os = "windows", feature = "d3d11")))]
+    fn bt2020_hevc() -> Option<(ffmpeg::codec::Parameters, Vec<ffmpeg::Packet>)> {
+        crate::test_support::try_tagged_packets(
+            "hevc_nvenc",
+            ffmpeg::format::Pixel::P010LE,
+            (256, 144),
+            90,
+            ffmpeg::color::Space::BT2020NCL,
+        )
+    }
+
+    /// What `bt2020_hevc`'s samples are in BT.709 RGB: 90 in every plane,
+    /// ten bits of it `0x5A5A >> 6`.
+    #[cfg(any(feature = "cuda", all(target_os = "windows", feature = "d3d11")))]
+    fn bt2020_hevc_colour() -> [u8; 3] {
+        let sample = f32::from(0x5A5Au16 >> 6) / 4.0;
+        crate::test_support::bt2020_as_bt709(sample, sample, sample)
+    }
+
     #[cfg(all(target_os = "windows", feature = "d3d11"))]
     mod d3d11 {
         use std::time::Duration;
@@ -1339,6 +1428,46 @@ mod tests {
                 unsafe { texture.GetDesc(&mut desc) };
                 assert_eq!(desc.Format, DXGI_FORMAT_NV12);
                 assert_eq!((frame.width(), frame.height()), (256, 144));
+            }
+        }
+
+        /// BT.2020 10-bit HEVC is decoded on the GPU and put out as BT.709
+        /// BGRA in one video processor pass, its primaries brought into
+        /// BT.709's — the colour every element downstream reads right.
+        #[test]
+        fn bt2020_comes_out_as_bt709_rgb() {
+            let Some((device, context)) = crate::test_support::try_d3d11_device() else {
+                return;
+            };
+            let Some((params, packets)) = bt2020_hevc() else {
+                return;
+            };
+            let sent = packets.len();
+            let Some(bin) = open_or_skip("hevc2020", params, target(&device, &context)) else {
+                return;
+            };
+            assert_eq!(bin.path(), DecodePath::Hardware);
+            assert_eq!(bin.output_format(), Some(ffmpeg::format::Pixel::BGRA));
+            let handle = bin.handle();
+
+            let download = D3d11Download::new("read-back", &device, context, 256, 144).unwrap();
+            let frames = run(bin, Some(Box::new(download)), packets).expect("HEVC decodes");
+            assert_eq!(handle.path(), DecodePath::Hardware, "and it stayed there");
+            assert_eq!(frames.len(), sent, "every picture comes out");
+            let want = bt2020_hevc_colour();
+            for frame in &frames {
+                assert_eq!(frame.format(), ffmpeg::format::Pixel::BGRA);
+                let [b, g, r, _] = frame.data(0)[frame.stride(0) * 72 + 128 * 4..][..4] else {
+                    unreachable!("four bytes were sliced");
+                };
+                assert!(
+                    [r, g, b]
+                        .iter()
+                        .zip(want)
+                        .all(|(got, want)| got.abs_diff(want) <= 6),
+                    "got {:?}, want {want:?}",
+                    [r, g, b]
+                );
             }
         }
 
@@ -1595,6 +1724,42 @@ mod tests {
                 assert_eq!(frame.format(), ffmpeg::format::Pixel::NV12);
                 let luma = frame.data(0)[frame.stride(0) * 72 + 128];
                 assert!(luma.abs_diff(90) <= 2, "luma {luma}, not 90");
+            }
+        }
+
+        /// The same on CUDA: NVDEC, `CudaScaler` down to NV12, and
+        /// `CudaConverter` on to BT.709 BGRA.
+        #[test]
+        fn bt2020_comes_out_as_bt709_rgb_on_cuda() {
+            let Some((device, _cuda_lock)) = crate::test_support::try_cuda_device() else {
+                return;
+            };
+            let Some((params, packets)) = bt2020_hevc() else {
+                return;
+            };
+            let sent = packets.len();
+            let Some(bin) = open_or_skip("hevc2020", params, target(&device)) else {
+                return;
+            };
+            assert_eq!(bin.path(), DecodePath::Hardware);
+            assert_eq!(bin.output_format(), Some(ffmpeg::format::Pixel::BGRA));
+
+            let download = CudaDownload::new("read-back", &device, CudaFrameFormat::Bgra, 256, 144);
+            let frames = run(bin, Some(Box::new(download)), packets).expect("HEVC decodes");
+            assert_eq!(frames.len(), sent, "every picture comes out");
+            let want = bt2020_hevc_colour();
+            for frame in &frames {
+                let [b, g, r, _] = frame.data(0)[frame.stride(0) * 72 + 128 * 4..][..4] else {
+                    unreachable!("four bytes were sliced");
+                };
+                assert!(
+                    [r, g, b]
+                        .iter()
+                        .zip(want)
+                        .all(|(got, want)| got.abs_diff(want) <= 3),
+                    "got {:?}, want {want:?}",
+                    [r, g, b]
+                );
             }
         }
 

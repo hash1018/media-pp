@@ -284,8 +284,27 @@ pub(crate) fn synthesize_reordered(name: &str, seconds: f64) -> Fixture {
 pub(crate) fn try_encoded_packets(
     encoder: &str,
     format: ffmpeg_next::format::Pixel,
+    size: (u32, u32),
+    fill: u8,
+) -> Option<(ffmpeg_next::codec::Parameters, Vec<ffmpeg_next::Packet>)> {
+    try_tagged_packets(
+        encoder,
+        format,
+        size,
+        fill,
+        ffmpeg_next::color::Space::Unspecified,
+    )
+}
+
+/// The same, with the stream tagged as made with the `space` matrix and in
+/// limited range — in its headers, where a decoder reads it back onto every
+/// frame, as well as in its parameters.
+pub(crate) fn try_tagged_packets(
+    encoder: &str,
+    format: ffmpeg_next::format::Pixel,
     (width, height): (u32, u32),
     fill: u8,
+    space: ffmpeg_next::color::Space,
 ) -> Option<(ffmpeg_next::codec::Parameters, Vec<ffmpeg_next::Packet>)> {
     use ffmpeg_next as ffmpeg;
 
@@ -304,6 +323,10 @@ pub(crate) fn try_encoded_packets(
     context.set_format(format);
     context.set_time_base(time_base);
     context.set_frame_rate(Some(ffmpeg::Rational::new(30, 1)));
+    if space != ffmpeg::color::Space::Unspecified {
+        context.set_colorspace(space);
+        context.set_color_range(ffmpeg::color::Range::MPEG);
+    }
     let mut encoder = match context.open_as(codec) {
         Ok(opened) => opened,
         Err(error) => {
@@ -546,5 +569,29 @@ fn build_fixture(
         path,
         audio_rate,
         channels,
+    })
+}
+
+/// What a BT.2020 limited-range sample, as 8-bit `y`, `cb` and `cr` that
+/// may be fractional, is in BT.709 RGB: its matrix read, then its primaries
+/// brought into BT.709's through gamma 2.2 — what `VideoDecodeBin` and
+/// `CudaConverter` are to make of one — so a test can state the colour it
+/// expects.
+#[cfg(any(feature = "cuda", all(target_os = "windows", feature = "d3d11")))]
+pub(crate) fn bt2020_as_bt709(y: f32, cb: f32, cr: f32) -> [u8; 3] {
+    let rows = crate::color::yuv_to_rgb_rows(
+        ffmpeg_next::color::Space::BT2020NCL,
+        ffmpeg_next::color::Range::MPEG,
+        1080,
+    );
+    let (y, cb, cr) = (y / 255.0, cb / 255.0, cr / 255.0);
+    let linear = rows.map(|[from_y, from_cb, from_cr, offset]| {
+        (from_y * y + from_cb * cb + from_cr * cr + offset)
+            .clamp(0.0, 1.0)
+            .powf(2.2)
+    });
+    crate::color::BT2020_TO_BT709.map(|row| {
+        let value = row[0] * linear[0] + row[1] * linear[1] + row[2] * linear[2];
+        (value.clamp(0.0, 1.0).powf(1.0 / 2.2) * 255.0 + 0.5) as u8
     })
 }

@@ -566,15 +566,15 @@ impl D3d11Scaler {
         // and the frame's own metadata describe the same pixels.
         let (output_space, output_range) =
             converted_colorimetry(frame, output_format, input.format);
-        let color_spaces = BltColorSpaces {
-            input: color_space(
+        let color_spaces = BltColorSpaces::new(
+            color_space(
                 frame.color_space(),
                 frame.color_range(),
                 input.height,
                 input.format,
             ),
-            output: color_space(output_space, output_range, self.height, output_format),
-        };
+            color_space(output_space, output_range, self.height, output_format),
+        );
 
         {
             let context = self
@@ -1771,5 +1771,58 @@ mod tests {
         for &sample in &chroma {
             assert_close(sample, 128, "chroma");
         }
+    }
+
+    /// A BT.2020 frame going to BGRA is read by BT.2020's matrix, and its
+    /// primaries brought into BT.709's. The description this used to give a
+    /// video processor had one matrix bit, 601 or 709, and read BT.2020 as
+    /// BT.601: an encoded red (200, 40, 40) came out (190, 32, 40).
+    #[test]
+    fn a_bt2020_frame_is_read_as_bt2020() {
+        let Some((device, context)) = try_video_device() else {
+            return;
+        };
+        // 361 of 1023 in every plane — away from neutral, so every matrix
+        // makes something different of it.
+        let mut source = frame(p010_texture(&device, 32, 32, 361, 361), 32, 32, 1);
+        let MediaBuffer::Video(source_frame) = &mut source else {
+            unreachable!("frame always returns a Video buffer");
+        };
+        let source_frame = Arc::get_mut(source_frame).expect("the frame is not shared yet");
+        source_frame.set_color_space(ffmpeg::color::Space::BT2020NCL);
+        source_frame.set_color_range(ffmpeg::color::Range::MPEG);
+
+        let mut scaler = D3d11Scaler::new(
+            "scaler",
+            &device,
+            context.clone(),
+            D3d11ScalerFormat::Bgra,
+            32,
+            32,
+        )
+        .expect("D3d11Scaler::new should succeed");
+        let mut download = D3d11Download::new("download", &device, context, 32, 32)
+            .expect("D3d11Download::new should succeed");
+        let received = capture(&mut download);
+        scaler.src_pads()[0].link(Box::new(download));
+        scaler.consume(source).expect("a BT.2020 frame converts");
+
+        let received = received.lock().unwrap();
+        let MediaBuffer::Video(converted) = &received[0] else {
+            panic!("expected a Video buffer, got {}", received[0].kind());
+        };
+        let [b, g, r, _] = converted.data(0)[converted.stride(0) * 16 + 16 * 4..][..4] else {
+            unreachable!("four bytes were sliced");
+        };
+        let sample = 361.0 / 4.0;
+        let want = crate::test_support::bt2020_as_bt709(sample, sample, sample);
+        assert!(
+            [r, g, b]
+                .iter()
+                .zip(want)
+                .all(|(got, want)| got.abs_diff(want) <= 6),
+            "got {:?}, want {want:?}",
+            [r, g, b]
+        );
     }
 }

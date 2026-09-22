@@ -1262,3 +1262,98 @@ fn a_text_layer_draws_on_a_bgra_canvas() {
         width * height
     );
 }
+
+/// An NV12 layer is read by its own colour tags. One in the canvas's own —
+/// BT.709 limited — is copied in as it stands; a BT.601 one is converted,
+/// so the canvas holds the colour it stood for rather than its numbers
+/// read as BT.709.
+#[test]
+fn an_nv12_layer_is_composed_by_its_own_colour() {
+    let Some((device, _cuda_lock)) = try_cuda_device() else {
+        return;
+    };
+    let (luma, cb, cr) = (90u8, 110u8, 170u8);
+    let composed = |space: ffmpeg::color::Space| -> Option<[u8; 3]> {
+        let Ok((mut compositor, handle)) =
+            CudaVideoCompositor::new("compositor", &device, options(64, 64))
+        else {
+            eprintln!("skipping: this machine cannot open a CUDA compositor");
+            return None;
+        };
+        let mut layer = handle
+            .add_source(
+                "layer",
+                VideoLayer {
+                    fit: VideoFit::Stretch,
+                    ..VideoLayer::new(VideoRect::new(0, 0, 64, 64))
+                },
+            )
+            .expect("add a layer");
+        let Ok(mut upload) = CudaUpload::new("upload", &device, CudaFrameFormat::Nv12, 64, 64)
+        else {
+            eprintln!("skipping: this machine has no usable CUDA frames context");
+            return None;
+        };
+        let uploaded = capture(&mut upload);
+        let mut frame = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::NV12, 64, 64);
+        frame.data_mut(0).fill(luma);
+        for pair in frame.data_mut(1).as_chunks_mut::<2>().0 {
+            pair.copy_from_slice(&[cb, cr]);
+        }
+        frame.set_pts(Some(0));
+        frame.set_color_space(space);
+        frame.set_color_range(ffmpeg::color::Range::MPEG);
+        let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
+        let mut slot = pool.get();
+        *slot = frame;
+        upload
+            .consume(MediaBuffer::Video(Arc::new(slot)))
+            .expect("upload");
+        let layer_frame = uploaded.lock().unwrap().remove(0);
+        layer.sink.consume(layer_frame).expect("layer frame");
+
+        let out = download(
+            &device,
+            compositor.compose_frame().expect("compose"),
+            64,
+            64,
+        );
+        let chroma = &out.data(1)[out.stride(1) * 16 + 32..];
+        Some([luma_at(&out, 32, 32), chroma[0], chroma[1]])
+    };
+
+    let Some(bt709) = composed(ffmpeg::color::Space::BT709) else {
+        return;
+    };
+    assert_eq!(
+        bt709,
+        [luma, cb, cr],
+        "the canvas's own colour is copied as it stands"
+    );
+
+    let Some(bt601) = composed(ffmpeg::color::Space::BT470BG) else {
+        return;
+    };
+    let [red, green, blue] = crate::color::yuv_to_rgb_rows(
+        ffmpeg::color::Space::BT470BG,
+        ffmpeg::color::Range::MPEG,
+        64,
+    )
+    .map(|[from_y, from_cb, from_cr, offset]| {
+        ((from_y * f32::from(luma) + from_cb * f32::from(cb) + from_cr * f32::from(cr)) / 255.0
+            + offset)
+            .clamp(0.0, 1.0)
+            * 255.0
+    });
+    let (want_y, want_cb, want_cr) = crate::platform::cuda::driver::bt709_limited(red, green, blue);
+    for (got, want, what) in [
+        (bt601[0], want_y, "luma"),
+        (bt601[1], want_cb, "Cb"),
+        (bt601[2], want_cr, "Cr"),
+    ] {
+        assert!(
+            got.abs_diff(want) <= 2,
+            "{what}: got {got}, want {want} — BT.601 read as BT.709 would be {bt709:?}"
+        );
+    }
+}
