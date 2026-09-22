@@ -189,6 +189,13 @@ pub enum SoftwareReason {
 /// description carried through. The pictures in flight when the hardware
 /// refused are decoded again, so a few may arrive twice.
 ///
+/// A stream that did not say it was 10-bit — one described only by its
+/// session, say — goes to the hardware with nothing after the decoder. Should
+/// the decoder hand on P010 after all, the bin puts the target's converter to
+/// NV12 after it at that frame, and logs so at `Info`; the path stays
+/// [`DecodePath::Hardware`]. On `DecodeTarget::D3d12`, which has none, P010
+/// goes on as it is.
+///
 /// What is kept for a replacement is one keyframe interval of compressed
 /// packets, until the next keyframe replaces it; a stream with keyframes
 /// far apart keeps more. Nothing is kept on the software path, which has
@@ -205,7 +212,9 @@ pub enum SoftwareReason {
 /// RGB. On D3D11 that is one video processor pass, on CUDA `CudaScaler` and
 /// `CudaConverter`'s own kernel. The software path and an 8-bit stream on
 /// D3D11 read the matrix and leave the primaries, which comes out a little
-/// less saturated. Nothing here maps HDR to SDR: a PQ or HLG stream is read
+/// less saturated. A BT.2020 stream found 10-bit only when it is decoded is
+/// brought to NV12 rather than BGRA, [`Self::output_format`] having said
+/// NV12, and keeps its BT.2020 tags for what reads it after. Nothing here maps HDR to SDR: a PQ or HLG stream is read
 /// as if it were gamma 2.2.
 ///
 /// # Errors
@@ -227,6 +236,14 @@ pub struct VideoDecodeBin {
     /// Present while the hardware is decoding: what a replacement is built
     /// from, and what it has to be given.
     fallback: Option<Fallback>,
+    /// After `line`: what brings P010 down to NV12 where the decoder turns out
+    /// to hand it on for a stream that did not say it was 10-bit. Empty until
+    /// then, and for good once the software line is in place.
+    tail: Line,
+    /// Whether a P010 frame out of `line` would be one nothing after the
+    /// decoder brings down: the hardware line, on a target that can, built
+    /// for a stream that did not say it was 10-bit.
+    watch_for_p010: bool,
 }
 
 // SAFETY: what is not `Send` by its own type is the device a target holds —
@@ -328,6 +345,11 @@ impl VideoDecodeBin {
                 (elements, format.or(stream.format), None)
             }
         };
+        // A hardware line that is its decoder alone was built for 8 bits, or for
+        // a stream that did not say; it gets its converter when a P010 frame
+        // says otherwise — see `push`.
+        let watch_for_p010 =
+            path == DecodePath::Hardware && target.converts_10bit() && elements.len() == 1;
         let pad = SrcPad::with_contract(
             format!("{name}_src"),
             OutputContract::Fixed(PortContract::frame(MediaKind::VideoFrame, target.domain())),
@@ -336,6 +358,8 @@ impl VideoDecodeBin {
         Ok(Self {
             pp_log,
             line: Line::new(ElementType::VideoDecodeBin, &name),
+            tail: Line::new(ElementType::VideoDecodeBin, &name),
+            watch_for_p010,
             name,
             pending: Some(elements),
             context: None,
@@ -383,9 +407,51 @@ impl VideoDecodeBin {
         }
     }
 
+    /// Pushes what the line made, through `tail` where it holds anything —
+    /// and puts something in it first if this is the frame that shows the
+    /// decoder handing on P010 with nothing after it to bring that down.
     fn push(&mut self, made: Vec<MediaBuffer>) -> Result<()> {
         for buf in made {
-            self.pad.push(buf)?;
+            if self.watch_for_p010
+                && let MediaBuffer::Video(frame) = &buf
+                && holds_p010(frame)
+            {
+                self.watch_for_p010 = false;
+                self.add_tail(frame.width(), frame.height())?;
+            }
+            if self.tail.is_empty() {
+                self.pad.push(buf)?;
+            } else {
+                for converted in self.tail.consume(buf)? {
+                    self.pad.push(converted)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Puts the target's converter to NV12 after the decoder — at the size
+    /// the stream was opened with, or where it did not say one, the size of
+    /// the frame that asked for it. NV12 whatever the stream's colour: that
+    /// is what [`Self::output_format`] already said, so a BT.2020 stream
+    /// found this way keeps its tags rather than becoming the BGRA one said
+    /// so at open would have — see this type's colour section.
+    fn add_tail(&mut self, width: u32, height: u32) -> Result<()> {
+        let Some(fallback) = &self.fallback else {
+            return Ok(());
+        };
+        let (width, height) = fallback.size.unwrap_or((width, height));
+        let elements =
+            fallback
+                .target
+                .convert(&self.name, width, height, ffmpeg::format::Pixel::NV12)?;
+        pp_info!(
+            self,
+            "the decoder hands on P010, which the stream did not say it would; bringing it \
+             down to NV12 from here"
+        );
+        if let Some(line) = self.tail.fill(elements, self.context.as_ref()) {
+            pp_info!(self, "filled after the decoder: {line}");
         }
         Ok(())
     }
@@ -422,6 +488,9 @@ impl VideoDecodeBin {
             fallback.since_keyframe.len()
         );
         self.fill(elements);
+        // The software line puts out what it promised by itself.
+        self.tail.fill(Vec::new(), None);
+        self.watch_for_p010 = false;
         *self
             .path
             .lock()
@@ -525,6 +594,7 @@ impl Sink for VideoDecodeBin {
             }
         }
         self.line.control(msg.clone())?;
+        self.tail.control(msg.clone())?;
         self.pad.control(msg)
     }
 }
@@ -907,6 +977,20 @@ fn is_10bit_420(format: ffmpeg::format::Pixel) -> bool {
         format,
         Pixel::YUV420P10LE | Pixel::YUV420P10BE | Pixel::P010LE | Pixel::P010BE
     )
+}
+
+/// Whether `frame` is a hardware surface holding P010 — what a decoder
+/// hands on for 10-bit 4:2:0, whatever the stream said at open.
+fn holds_p010(frame: &ffmpeg::frame::Video) -> bool {
+    // SAFETY: `frame` is live, so `as_ptr` is an initialized `AVFrame`; a
+    // non-null `hw_frames_ctx` is an `AVBufferRef` whose `data` is its
+    // `AVHWFramesContext`, by FFmpeg's own definition. Only a field is read.
+    unsafe {
+        let frames_ref = (*frame.as_ptr()).hw_frames_ctx;
+        !frames_ref.is_null()
+            && (*((*frames_ref).data as *const ffmpeg::ffi::AVHWFramesContext)).sw_format
+                == ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_P010LE
+    }
 }
 
 /// Whether `format` has an alpha channel.
@@ -1431,6 +1515,53 @@ mod tests {
             }
         }
 
+        /// A 10-bit stream that did not say so goes to the hardware with
+        /// nothing after the decoder; the first P010 frame puts the
+        /// converter there, and every picture still comes out NV12, as
+        /// `output_format` said at open.
+        #[test]
+        fn a_stream_found_10bit_when_decoded_still_comes_out_as_nv12() {
+            use windows::{
+                Win32::Graphics::{
+                    Direct3D11::{D3D11_TEXTURE2D_DESC, ID3D11Texture2D},
+                    Dxgi::Common::DXGI_FORMAT_NV12,
+                },
+                core::Interface,
+            };
+
+            let Some((device, context)) = crate::test_support::try_d3d11_device() else {
+                return;
+            };
+            let Some((params, packets)) = ten_bit_hevc() else {
+                return;
+            };
+            let sent = packets.len();
+            let Some(bin) =
+                open_or_skip("hevc10", without_layout(params), target(&device, &context))
+            else {
+                return;
+            };
+            assert_eq!(bin.path(), DecodePath::Hardware);
+            assert_eq!(bin.output_format(), Some(ffmpeg::format::Pixel::NV12));
+            let handle = bin.handle();
+
+            let frames = run(bin, None, packets).expect("HEVC decodes");
+            assert_eq!(handle.path(), DecodePath::Hardware, "and it stayed there");
+            assert_eq!(frames.len(), sent, "every picture comes out");
+            for frame in &frames {
+                let (texture, _) = crate::platform::windows::d3d11va::d3d11va_texture(frame)
+                    .expect("a D3D11 frame");
+                // SAFETY: the frame is alive for the whole borrow and holds a
+                // reference to its texture; nothing here keeps the borrow.
+                let texture =
+                    unsafe { ID3D11Texture2D::from_raw_borrowed(&texture) }.expect("a texture");
+                let mut desc = D3D11_TEXTURE2D_DESC::default();
+                // SAFETY: `desc` is a live out-parameter.
+                unsafe { texture.GetDesc(&mut desc) };
+                assert_eq!(desc.Format, DXGI_FORMAT_NV12, "not P010 handed on");
+            }
+        }
+
         /// BT.2020 10-bit HEVC is decoded on the GPU and put out as BT.709
         /// BGRA in one video processor pass, its primaries brought into
         /// BT.709's — the colour every element downstream reads right.
@@ -1722,6 +1853,33 @@ mod tests {
             assert_eq!(frames.len(), sent, "every picture comes out");
             for frame in &frames {
                 assert_eq!(frame.format(), ffmpeg::format::Pixel::NV12);
+                let luma = frame.data(0)[frame.stride(0) * 72 + 128];
+                assert!(luma.abs_diff(90) <= 2, "luma {luma}, not 90");
+            }
+        }
+
+        /// The same as on D3D11: a 10-bit stream that did not say so gets
+        /// its `CudaScaler` at the first P010 frame, and every picture comes
+        /// out NV12 with the value it was encoded with.
+        #[test]
+        fn a_stream_found_10bit_when_decoded_still_comes_out_as_nv12_on_cuda() {
+            let Some((device, _cuda_lock)) = crate::test_support::try_cuda_device() else {
+                return;
+            };
+            let Some((params, packets)) = ten_bit_hevc() else {
+                return;
+            };
+            let sent = packets.len();
+            let Some(bin) = open_or_skip("hevc10", without_layout(params), target(&device)) else {
+                return;
+            };
+            assert_eq!(bin.path(), DecodePath::Hardware);
+            assert_eq!(bin.output_format(), Some(ffmpeg::format::Pixel::NV12));
+
+            let download = CudaDownload::new("read-back", &device, CudaFrameFormat::Nv12, 256, 144);
+            let frames = run(bin, Some(Box::new(download)), packets).expect("HEVC decodes");
+            assert_eq!(frames.len(), sent, "every picture comes out");
+            for frame in &frames {
                 let luma = frame.data(0)[frame.stride(0) * 72 + 128];
                 assert!(luma.abs_diff(90) <= 2, "luma {luma}, not 90");
             }

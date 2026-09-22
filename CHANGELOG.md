@@ -643,6 +643,14 @@ compile error with no explanation.
 
 ### Fixed
 
+- **A 10-bit stream that did not say so no longer leaks P010.** A stream
+  described only by its session has no layout in its parameters, so
+  `VideoDecodeBin` sent it to the hardware as if it were 8-bit, and a 10-bit
+  one reached whatever was downstream as P010, which nothing there reads.
+  The first P010 frame now puts the target's converter to NV12 after the
+  decoder, on `D3d11` and `Cuda`, and the frames come out NV12 as
+  `output_format` said at open.
+
 - **BT.2020 video comes out in the right colours.** `D3d11Scaler` described
   colour to the video processor with a bitfield whose one matrix bit says
   BT.601 or BT.709, and read BT.2020 as BT.601; `CudaConverter` and
