@@ -74,6 +74,68 @@
 //! ordered EOS from the source and drains everything behind it, while
 //! [`Pipeline::stop`](pipeline::Pipeline::stop) abandons buffered work.
 //!
+//! # Changing a running pipeline
+//!
+//! A branch keeps the shape it was built with, and a few elements are where a
+//! running graph changes anyway:
+//!
+//! - [`Tee`](elements::Tee) fans out, and its
+//!   [`TeeHandle`](elements::TeeHandle) adds a branch while buffers flow,
+//!   finishes one cleanly — a recording finalized while its preview keeps
+//!   running — or abandons one.
+//! - [`AudioMixer`](elements::AudioMixer) and the video compositors fan in,
+//!   taking inputs and layers while they run. With
+//!   [`VideoCompositorOptions::background_alpha`](elements::VideoCompositorOptions::background_alpha)
+//!   one composition can be a layer of the next: an overlay, rather than a
+//!   rectangle covering what is under it.
+//! - [`Rack`](elements::Rack) replaces the filters in a stretch of chain
+//!   between two buffers, so one can be added or removed without reopening
+//!   the source.
+//! - [`PipelineBridge`](elements::PipelineBridge) carries buffers from one
+//!   pipeline into another, so a source that dies takes only its own pipeline
+//!   with it.
+//! - Compositor and capture frame rates, and the mixer's format, change while
+//!   running. Both re-mean the timestamps that follow, so they are for a
+//!   preview, not the middle of a recording.
+//! - [`FileDemuxerHandle`](elements::FileDemuxerHandle) makes a file loop,
+//!   carrying its timeline across each lap so pacing and muxing continue.
+//!
+//! # Seeking
+//!
+//! A source says whether it is live and whether it is seekable.
+//! [`Pipeline::seek`](pipeline::Pipeline::seek) first asks every branch
+//! whether it can follow — a recording muxer cannot — and changes nothing if
+//! one refuses; then it runs Pause, Flush, Seek and Preroll, and restores the
+//! state the caller had. [`SeekMode::Accurate`](pipeline::SeekMode::Accurate)
+//! decodes forward to the exact target, and
+//! [`SeekMode::Keyframe`](pipeline::SeekMode::Keyframe) shows the keyframe the
+//! demuxer landed on.
+//!
+//! # Link contracts
+//!
+//! Building a branch refuses a connection that could never carry data —
+//! encoded packets into something that takes frames, an audio stream into a
+//! video decoder, a D3D11 texture into a CPU or CUDA filter — before anything
+//! runs:
+//!
+//! ```text
+//! decoder produces VideoFrame (System), which rec cannot accept
+//! (it takes VideoPacket|AudioPacket)
+//! ```
+//!
+//! It compares only what an element knows when it is constructed: the media
+//! kind, and for a decoded frame the memory domain. It is not caps
+//! negotiation — nothing is converted or renegotiated — and pixel format, size
+//! and device are still checked against each real buffer. An element that
+//! declares nothing always links. See [`contract`].
+//!
+//! # Watching it run
+//!
+//! [`Pipeline::stats`](pipeline::Pipeline::stats) reads what every element is
+//! doing — buffers and packet bytes, time inside `consume`, how long it has
+//! been idle, errors, a queue's fill and drops, a compositor's frames drawn
+//! and missed — as running totals, so two readings give a rate.
+//!
 //! # Features and platforms
 //!
 //! The crate has no default features. Hardware backends (`d3d11`, `d3d12`,

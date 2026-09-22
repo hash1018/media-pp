@@ -1,9 +1,10 @@
 # AGENTS.md
 
 Repository guidance for AI-assisted and human development. Read `README.md`
-first for the architecture, element inventory, feature flags, examples, and
-build requirements. Treat the code and tests as the final source of truth when
-documentation and implementation differ.
+first for the element inventory, feature flags, examples, and build
+requirements, the crate documentation in `lib/src/lib.rs` for how a pipeline
+runs, and `CONTRIBUTING.md` for how to test. Treat the code and tests as the
+final source of truth when documentation and implementation differ.
 
 ## Communication
 

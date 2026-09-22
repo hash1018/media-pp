@@ -4,30 +4,36 @@
 built on [`ffmpeg-next`]. Stages are synchronous calls by default, and thread
 boundaries are explicit bounded queues.
 
-The library crate lives in `lib/`. Each directory below `examples/` is an
-independent example crate, so platform-specific dependencies do not leak into
-the core library. This README is the overview; each type's own Rust
-documentation carries its buffer requirements, ownership, error behavior and
-runtime-control semantics — on [docs.rs] for the backend-independent API, and
-in the [Windows API documentation] for everything.
+- **Errors come back as `Result`.** A stage's failure returns straight up the
+  call stack; only past a `Queue` does it become a bus event.
+- **Running pipelines change shape.** Branches are added and finished while
+  buffers flow — a recording finalized while its preview keeps running — and
+  filters are swapped without reopening the source.
+- **GPU-resident end to end** on D3D11, D3D12 or CUDA: decode, scale,
+  composite, key and encode without copying pictures back to the CPU.
+- **Streams the GPU does not take still reach it.** `VideoDecodeBin` decodes
+  on the hardware where it can, and in software onto the same device where it
+  cannot — alpha, 10-bit, codecs without a hardware decoder — switching over
+  by itself if the GPU refuses a stream at a frame.
+- **Capture** of screens, windows, cameras and system or per-application audio
+  on Windows and Linux; **output** to files, HLS, RTMP, RTSP and WebRTC.
+- **Observable**: per-element statistics while it runs, and a private
+  structured log with the topology of every pipeline it starts.
+
+The library crate lives in `lib/`; each directory below `examples/` is its
+own crate, so platform-specific dependencies stay out of the library.
 
 ## Quick start
-
-FFmpeg 8.0 or newer development libraries must be installed and discoverable
-by `ffmpeg-sys-next` (see [Requirements](#requirements)).
 
 ```toml
 [dependencies]
 media-pp = "0.2"
 ```
 
-0.2.0 renames two elements and takes a pair of binding methods away; see
-[`CHANGELOG.md`] for what to write instead.
-
-`ffmpeg-next` is part of this crate's API — `MediaBuffer` carries its frames
-and packets — so it is re-exported as `media_pp::ffmpeg`. Use that rather
-than a separate `ffmpeg-next` dependency: if the two resolve to different
-versions, every shared type stops matching and the compiler does not say why.
+FFmpeg 8.0 or newer development libraries must be installed (see
+[Requirements](#requirements)). `ffmpeg-next` is re-exported as
+`media_pp::ffmpeg`; use that rather than depending on it separately. What
+changed between versions, and what to write instead, is in [`CHANGELOG.md`].
 
 This pipeline generates video for one second and counts the frames:
 
@@ -55,112 +61,72 @@ fn main() -> media_pp::Result<()> {
 }
 ```
 
-## How pipelines work
+How a pipeline runs — buffers, threads, EOS, seeking, changing a running
+graph, link checks — is the crate documentation's first page; each type's own
+page states what it accepts, what it owns and how it fails. Both are on
+[docs.rs] for the backend-independent API, and in the
+[Windows API documentation] for everything.
 
-A pipeline connects a source to filters and a terminal sink:
+## What is in it
 
-```text
-FileDemuxer → SwDecoder → Queue → Pacer → FrameCounter
-```
+Video, by backend:
 
-- `MediaBuffer` carries packets, video, audio, and EOS. Payloads are shared,
-  so fan-out clones references, not media. PTS, duration, time bases and
-  color information survive every stage that does not deliberately start a
-  new timeline.
-- `Sink::consume` is a synchronous call and may return an error;
-  `Sink::ready_consume` carries downstream readiness back up, so
-  backpressure does not consume or drop the next buffer.
-- `SrcPad` connects one output to one downstream sink.
-- `Queue` is the thread boundary. Past it an error can no longer be returned
-  to the caller, so it is reported on the pipeline's `Bus` and the worker
-  continues.
-- `Pipeline` owns the source threads, control flow, clock, bus and topology
-  graph. An element is given the clock, playback clock and bus when it is
-  wired (`Element::attach_context`) rather than taking them in its
-  constructor, so it cannot be handed another pipeline's.
-- `Pipeline::finish` ends with an ordered EOS that drains codecs and muxers;
-  `Pipeline::stop` abandons buffered work.
-- `Pipeline::stats` reads what every element is doing — buffers and packet
-  bytes, time inside `consume`, how long it has been idle, errors, a
-  `Queue`'s fill and drops, a compositor's frames drawn and missed — as
-  running totals, so two readings give a rate.
+| | Software | D3D11 | D3D12 | CUDA |
+|---|---|---|---|---|
+| Decode | `SwDecoder` | `D3d11Decoder` | `D3d12Decoder` | `CudaDecoder` |
+| Encode | `SwEncoder` | `D3d11VideoEncoder` | | `CudaEncoder` |
+| Scale, convert | `SwScaler` | `D3d11Scaler` | `D3d12Scaler` | `CudaScaler`, `CudaConverter` |
+| Composite | `SwVideoCompositor` | `D3d11VideoCompositor` | | `CudaVideoCompositor` |
+| Key, colour | `SwChromaKey`, `SwVideoEffect` | `D3d11ChromaKey`, `D3d11VideoEffect` | | `CudaChromaKey`, `CudaVideoEffect` |
+| Upload, download | | `D3d11Upload`, `D3d11Download` | `D3d12Upload`, `D3d12Download` | `CudaUpload`, `CudaDownload` |
+| Render | | `D3d11Renderer` | `D3d12Renderer` | `CudaRenderer` |
 
-### Changing a running pipeline
+`VideoDecodeBin` chooses among the decode row and the uploads for a stream.
 
-- `Tee` fans out; `AudioMixer` and the video compositors fan in. A
-  compositor can feed another: `VideoCompositorOptions::background_alpha`
-  leaves the picture transparent where no layer drew, so one composition can
-  be a layer of the next — an overlay over a canvas rather than a rectangle
-  covering it. `SwVideoCompositor` and `D3d11VideoCompositor` compose in
-  BGRA and can; `CudaVideoCompositor` composes in NV12 by default and
-  refuses, and `CudaVideoCompositor::with_format` asks it for a BGRA canvas
-  instead, which can.
-  `TeeHandle::attach` adds a branch, `finish_branch` ends one cleanly (so a
-  recording finalizes while its preview keeps running), and `detach`
-  abandons one.
-- `Rack` is a stretch of chain whose contents are replaced between two
-  buffers, so a filter can be added or removed without reopening the source.
-- `PipelineBridge` carries buffers from one pipeline into another, so a
-  source that dies takes only its own pipeline with it.
-- Compositor and capture frame rates (`set_frame_rate`, `FrameRateHandle`)
-  and the `AudioMixer`'s format (`set_mix_format`) change while running.
-  Both re-mean the timestamps that follow, so they are for a preview, not
-  the middle of a recording.
-- `FileDemuxerHandle` makes a file loop, carrying the timeline across each
-  lap so pacing and muxing continue.
+Everything else:
 
-### Seeking
+- **Inputs**: `FileDemuxer`, `RtspSource`, `WebRtcTrackSource`, `AppSource`,
+  `TestVideoSource`, `TestAudioSource`.
+- **Capture**: Windows — `DxgiCaptureSource` (screen), `WgcCaptureSource`
+  (window), `MfCaptureSource` (camera), `WasapiCaptureSource` (system,
+  application or microphone audio), `D3d11SharedTextureSource` (another
+  device's textures). Linux — `PipeWireScreenCaptureSource`,
+  `PipeWireAudioCaptureSource`, `V4l2CaptureSource`.
+- **Audio**: `AudioMixer`, `AudioResampler`, `AudioVolume`, `AudioGate`,
+  `AudioCompressor`, `AudioLimiter`, `NoiseSuppressor`, `SwAudioEncoder`;
+  playback through `WasapiRenderer` and `PipeWireAudioRenderer`.
+- **Outputs**: `FileMuxer`, `SegmentedFileMuxer`, `ReplayBuffer`, `HlsMuxer`,
+  `RtmpMuxer`, `RtspMuxer`, `WebRtcTrackSink`, `AppSink`.
+- **Flow and timing**: `Queue`, `Tee`, `Rack`, `PipelineBridge`, `Pacer`,
+  `VideoSynchronizer`, `ChangeGate`, `FrameRateLimiter`, `PauseGate`,
+  `TimestampOrigin`.
+- **Analysis**: `OrtDetector`, `WhisperTranscriber`, `FrameCounter`,
+  `PacketCounter`.
 
-A source says whether it is live and whether it is seekable. `Pipeline::seek`
-first asks every branch whether it can follow (a recording muxer cannot), and
-changes nothing if one refuses; then it runs `Pause → Flush → Seek →
-Preroll` and restores the state the caller had. `SeekMode::Accurate` decodes
-forward to the exact target; `SeekMode::Keyframe` shows the keyframe the
-demuxer landed on.
+## Feature flags
 
-### Link contracts
+The library has no default features. Backend-specific types carry their
+backend's prefix and exist only where their feature is enabled.
 
-Building a branch refuses a connection that could never carry data — encoded
-packets into an encoder that takes frames, a container's audio stream into a
-video decoder, a D3D11 texture into a CPU or CUDA filter — before anything
-runs:
-
-```text
-decoder produces VideoFrame (System), which rec cannot accept
-(it takes VideoPacket|AudioPacket)
-```
-
-It compares only what elements know when they are constructed: the media
-kind, and for decoded frames the memory domain (`System`, `Cuda`, `D3d11`,
-`D3d12`). It is not caps negotiation — nothing is converted or renegotiated —
-and pixel format, size and device identity are still checked against the
-real buffer. An element that declares nothing always links. See the
-`contract` module.
-
-## Element inventory
-
-| Kind | Elements |
-|---|---|
-| Sources | `FileDemuxer`, `AppSource`, `D3d11SharedTextureSource`, `RtspSource`, `TestVideoSource`, `TestAudioSource`, `DxgiCaptureSource`, `WgcCaptureSource`, `MfCaptureSource`, `V4l2CaptureSource`, `PipeWireScreenCaptureSource`, `PipeWireAudioCaptureSource`, `WasapiCaptureSource`, `AudioMixer`, `SwVideoCompositor`, `CudaVideoCompositor`, `D3d11VideoCompositor`, `WebRtcTrackSource` |
-| Filters | `SwDecoder`, `CudaDecoder`, `D3d11Decoder`, `D3d12Decoder`, `SwEncoder`, `CudaEncoder`, `D3d11VideoEncoder`, `SwAudioEncoder`, `AudioResampler`, `AudioVolume`, `AudioGate`, `AudioCompressor`, `AudioLimiter`, `NoiseSuppressor`, `SwScaler`, `SwChromaKey`, `CudaChromaKey`, `D3d11ChromaKey`, `SwVideoEffect`, `CudaVideoEffect`, `D3d11VideoEffect`, `Pacer`, `VideoSynchronizer`, `CudaScaler`, `D3d11Scaler`, `D3d12Scaler`, `CudaUpload`, `CudaDownload`, `CudaConverter`, `D3d11Upload`, `D3d11Download`, `D3d12Upload`, `D3d12Download`, `Tee`, `ChangeGate`, `TimestampOrigin`, `Rack` |
-| Sinks | `FrameCounter`, `PacketCounter`, `AppSink`, `FileMuxer`, `SegmentedFileMuxer`, `ReplayBuffer`, `HlsMuxer`, `RtmpMuxer`, `RtspMuxer`, `CudaRenderer`, `D3d11Renderer`, `D3d12Renderer`, `PipeWireAudioRenderer`, `WasapiRenderer`, `OrtDetector`, `WhisperTranscriber`, `WebRtcTrackSink` |
-
-Backend-specific elements need their Cargo feature and exist only on that
-backend's platform. On Windows, `DxgiCaptureSource` captures a monitor and
-`WgcCaptureSource` one window by its `HWND`; both either create the D3D11
-device the rest of the pipeline uses or take one you already have.
-`D3d11SharedTextureSource` takes pictures from something that renders on its
-own device and shares them by handle — an embedded browser engine, another
-process — copying each one into the pipeline's device as it is pushed in.
-
-To put a video stream on a GPU without knowing in advance whether its
-hardware decoder takes it, use `VideoDecodeBin`: one element that decodes
-on the target's hardware (D3D11, D3D12 or CUDA) where it takes the stream,
-and otherwise in software and uploads — which is also the path that keeps
-alpha, as BGRA. It chooses when it is opened, and once more if the hardware
-then refuses the stream at a frame, replacing its decoder without anything
-downstream noticing. `DecodeTarget::System` makes it the software decoder
-alone, for code that has to build a decoder whichever backends a build has.
+| Feature | Adds | Platform |
+|---|---|---|
+| `cuda` | NVDEC decode, NVENC encode, scaling, compositing, upload/download, and rendering, all on CUDA-resident frames | Linux, Windows |
+| `d3d11` | D3D11 decode, scaling, upload/download, rendering, GPU compositing, and hardware encoding | Windows |
+| `d3d12` | D3D12VA decode, scaling, upload/download, and rendering | Windows |
+| `dxgi-capture` | Desktop capture; also enables `d3d11` | Windows |
+| `wgc-capture` | Individual-window capture through Windows Graphics Capture; also enables `d3d11` | Windows |
+| `mf-capture` | Camera capture through Media Foundation | Windows |
+| `pipewire-audio-capture` | System-audio, per-application and microphone capture through PipeWire | Linux |
+| `pipewire-audio-renderer` | Audio playback through PipeWire | Linux |
+| `pipewire-screen-capture` | Desktop capture through xdg-desktop-portal and PipeWire | Linux |
+| `v4l2-capture` | Camera capture through Video4Linux2 | Linux |
+| `wasapi-capture` | System-audio, per-application and microphone capture | Windows |
+| `wasapi-renderer` | Shared-mode audio playback | Windows |
+| `ort` | ONNX Runtime object detection | All supported targets |
+| `rnnoise` | Noise suppression for speech, through RNNoise (pure Rust, no model file) | All supported targets |
+| `whisper` | Speech to timed text, through whisper.cpp | All supported targets |
+| `whisper-vulkan` | The same, on any GPU Vulkan reaches | All supported targets |
+| `webrtc` | `str0m`-based WebRTC peer and track elements | All supported targets |
 
 ## Examples
 
@@ -183,109 +149,26 @@ cargo run -p fanout -- path/to/video.mp4
 cargo run -p d3d11_scale_render -- path/to/video.mp4
 ```
 
-File-based examples take a media path; none is checked in. Each example
-enables the library features it needs, and prints its usage when run without
-arguments.
-
-## Feature flags
-
-The library has no default features.
-
-| Feature | Adds | Platform |
-|---|---|---|
-| `cuda` | NVDEC decode, NVENC encode, scaling, compositing, upload/download, and rendering, all on CUDA-resident frames | Linux, Windows |
-| `d3d11` | D3D11 decode, scaling, upload/download, rendering, GPU compositing, and hardware encoding | Windows |
-| `d3d12` | D3D12VA decode, scaling, upload/download, and rendering | Windows |
-| `dxgi-capture` | Desktop capture; also enables `d3d11` | Windows |
-| `wgc-capture` | Individual-window capture through Windows Graphics Capture; also enables `d3d11` | Windows |
-| `mf-capture` | Camera capture through Media Foundation | Windows |
-| `pipewire-audio-capture` | System-audio, per-application and microphone capture through PipeWire | Linux |
-| `pipewire-audio-renderer` | Audio playback through PipeWire | Linux |
-| `pipewire-screen-capture` | Desktop capture through xdg-desktop-portal and PipeWire | Linux |
-| `v4l2-capture` | Camera capture through Video4Linux2 | Linux |
-| `wasapi-capture` | System-audio, per-application and microphone capture | Windows |
-| `wasapi-renderer` | Shared-mode audio playback | Windows |
-| `ort` | ONNX Runtime object detection | All supported targets |
-| `rnnoise` | Noise suppression for speech, through RNNoise (pure Rust, no model file) | All supported targets |
-| `whisper` | Speech to timed text, through whisper.cpp | All supported targets |
-| `whisper-vulkan` | The same, on any GPU Vulkan reaches | All supported targets |
-| `webrtc` | `str0m`-based WebRTC peer and track elements | All supported targets |
-
-[docs.rs] builds for Linux and so omits the Windows-only API. To build the
-complete documentation locally, labelled by feature:
-
-```powershell
-$env:RUSTDOCFLAGS = "--cfg docsrs"
-cargo +nightly doc -p media-pp --open --features d3d11,d3d12,dxgi-capture,wgc-capture,mf-capture,wasapi-capture,wasapi-renderer,webrtc
-```
-
-## Logging
-
-Diagnostics go to a private, opt-in logger; nothing installs a global `log`
-logger or `tracing` subscriber:
-
-```rust
-let _log_guard = media_pp::log::init("media-pp", "./logs", media_pp::log::Level::Info, 7)?;
-```
-
-Keep the guard alive for as long as logs should be written. Pipeline starts
-and `Tee` changes log a topology diagram with stable element ids; EOS and
-control propagation are logged at `Trace`. Media buffers are never logged one
-record per buffer.
+File-based examples take a media path; none is checked in. Each prints its
+usage when run without arguments, and Windows-only ones compile as stubs
+elsewhere.
 
 ## Requirements
 
-Building:
-
-- FFmpeg 8.0 or newer development headers and libraries. The build script
-  fails with a clear message on anything older.
+- FFmpeg 8.0 or newer development headers and libraries; the build script
+  fails with a clear message on anything older. Hardware decoding also needs
+  an FFmpeg build, driver and GPU that support it (`ffmpeg -hwaccels`).
 - Rust 1.88 or newer.
 - `pipewire-*` features: PipeWire 0.3.50 or newer development files.
 - `cuda`: only the NVIDIA driver. The kernels ship as PTX the driver
   compiles, so no CUDA toolkit is needed.
 
-Running:
+What an element needs at run time — one shared D3D11 device, one
+`CudaDevice` per process, a portal for screen capture on Linux, a server to
+publish RTSP to — is on that element's documentation page.
 
-- D3D11VA/D3D12VA need an FFmpeg build, driver and GPU that support them
-  (`ffmpeg -hwaccels` lists what yours has).
-- Every D3D11 element in a pipeline must share one `ID3D11Device`.
-- `D3d11VideoEncoder`'s NVENC codecs need an NVIDIA GPU and an FFmpeg built
-  with NVENC; its Media Foundation codecs work on Intel, AMD and NVIDIA. A
-  codec the machine lacks fails to open with a typed error.
-- `CudaDecoder` needs a decoder for the codec that FFmpeg can run on NVDEC,
-  and `D3d11Decoder` and `D3d12Decoder` one it can run through D3D11VA or
-  D3D12VA. Each one's `supports` answers that without a device; a codec with
-  none fails to open with a typed error, and `SwDecoder` into an upload
-  element is the way onto the GPU for it.
-- Create one `CudaDevice` per process, before starting pipelines. It opens
-  the device's primary context, and creating or dropping one while another
-  thread decodes or encodes can crash the NVIDIA driver.
-- `PipeWireScreenCaptureSource` needs a running PipeWire session and an
-  `xdg-desktop-portal` backend with ScreenCast. Its documentation covers the
-  portal dialog and restore tokens.
-- RTSP publishing needs a server that accepts publishers, such as MediaMTX.
-- Windows-only examples compile as stubs on other targets.
-
-## Testing
-
-```sh
-cargo test -p media-pp
-```
-
-Tests need no media: they synthesize their fixture from the crate's own
-sources and encoders, so every machine tests the same file.
-
-Stress and leak scenarios in `lib/tests/soak.rs` run for tens of seconds and
-are `#[ignore]`d. They read a real recording from `MEDIA_PP_TEST_VIDEO`:
-
-```sh
-cargo test -p media-pp --features d3d11,d3d12,cuda --test soak -- --ignored --nocapture
-```
-
-On Linux, `pipewire-screen-capture` takes the place of `d3d11`, and the
-capture scenarios also need `MEDIA_PP_SOAK_RESTORE_TOKEN`, since the portal
-would otherwise show its picker; any run of `screen_record_software` prints
-a token to reuse.
+Building, testing and the stress scenarios are in
+[`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## License
 
