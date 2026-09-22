@@ -628,12 +628,7 @@ mod tests {
     use windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC;
 
     use windows::Win32::Graphics::{
-        Direct3D::D3D_DRIVER_TYPE_HARDWARE,
-        Direct3D11::{
-            D3D11_CREATE_DEVICE_DEBUG, D3D11_RLDO_DETAIL, D3D11_SDK_VERSION,
-            D3D11_SUBRESOURCE_DATA, D3D11CreateDevice, ID3D11Debug, ID3D11InfoQueue,
-        },
-        Dxgi::Common::DXGI_FORMAT_NV12,
+        Direct3D11::D3D11_SUBRESOURCE_DATA, Dxgi::Common::DXGI_FORMAT_NV12,
     };
 
     use super::{super::super::options::ChromaKeyMethod, *};
@@ -1304,65 +1299,6 @@ mod tests {
         }
     }
 
-    /// A debug device plus the two interfaces that can count what it still
-    /// owns, or `None` on a machine without the D3D11 SDK debug layer —
-    /// which is most machines that are not set up for graphics development,
-    /// so this skips rather than fails there.
-    fn try_debug_device() -> Option<(
-        ID3D11Device,
-        Arc<Mutex<ID3D11DeviceContext>>,
-        ID3D11Debug,
-        ID3D11InfoQueue,
-    )> {
-        let mut device = None;
-        let mut context = None;
-        // SAFETY: adapter/software pointers are intentionally null for the
-        // hardware driver path, feature-level defaults are requested, and
-        // `device`/`context` are live correctly typed out-parameters.
-        let result = unsafe {
-            D3D11CreateDevice(
-                None,
-                D3D_DRIVER_TYPE_HARDWARE,
-                Default::default(),
-                D3D11_CREATE_DEVICE_DEBUG,
-                None,
-                D3D11_SDK_VERSION,
-                Some(&mut device),
-                None,
-                Some(&mut context),
-            )
-        };
-        if result.is_err() {
-            eprintln!("skipping: no D3D11 debug device on this machine: {result:?}");
-            return None;
-        }
-        let device = device.expect("D3D11CreateDevice succeeded without producing a device");
-        let context = context.expect("D3D11CreateDevice succeeded without producing a context");
-        let debug = device.cast::<ID3D11Debug>().ok()?;
-        let info = device.cast::<ID3D11InfoQueue>().ok()?;
-        // The report is one message per live object and can exceed the
-        // queue's default limit on its own.
-        // SAFETY: `info` is the live debug info queue for this device and the
-        // count is an unrestricted scalar limit.
-        unsafe { info.SetMessageCountLimit(u64::MAX) }.ok()?;
-        Some((device, Arc::new(Mutex::new(context)), debug, info))
-    }
-
-    /// How many objects the device still owns. Only the trend across
-    /// identical work means anything — the device, its context, and this
-    /// element's own construction-time state are always counted.
-    fn live_objects(debug: &ID3D11Debug, info: &ID3D11InfoQueue) -> u64 {
-        // SAFETY: both interfaces belong to the same live debug device; the
-        // report synchronously appends messages before their count is read.
-        unsafe {
-            info.ClearStoredMessages();
-            debug
-                .ReportLiveDeviceObjects(D3D11_RLDO_DETAIL)
-                .expect("ReportLiveDeviceObjects");
-            info.GetNumStoredMessages()
-        }
-    }
-
     /// Regression test. Dropping the last reference to a D3D11 object only
     /// queues it for destruction; the device keeps it until the context is
     /// flushed. This element builds three objects per frame — an output
@@ -1376,7 +1312,7 @@ mod tests {
     /// would hide.
     #[test]
     fn keying_frames_does_not_accumulate_d3d11_objects() {
-        let Some((device, context, debug, info)) = try_debug_device() else {
+        let Some((device, context, live)) = crate::test_support::try_d3d11_debug_device() else {
             return;
         };
         let texture = bgra_texture(&device, 64, 64, [0, 255, 0, 255], 1);
@@ -1398,12 +1334,12 @@ mod tests {
         for index in 0..20 {
             push(index);
         }
-        let baseline = live_objects(&debug, &info);
+        let baseline = live.count();
 
         for index in 20..120 {
             push(index);
         }
-        let after = live_objects(&debug, &info);
+        let after = live.count();
 
         assert_eq!(
             after,

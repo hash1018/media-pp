@@ -1029,12 +1029,7 @@ fn the_canvas_says_it_is_bt709_and_reads_back_as_the_colour_it_was_filled_with()
     };
     let at = 32 * rgb.stride(0) + 32 * 3;
     let got = [rgb.data(0)[at], rgb.data(0)[at + 1], rgb.data(0)[at + 2]];
-    assert!(
-        got.iter()
-            .zip([230u8, 20, 20])
-            .all(|(got, want)| got.abs_diff(want) <= 3),
-        "the canvas read back as {got:?}"
-    );
+    crate::test_support::assert_rgb_near(got, [230, 20, 20], 3, "the canvas read back");
 }
 
 /// NV12 has no alpha, so a background that is not opaque is refused rather

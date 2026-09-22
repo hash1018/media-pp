@@ -604,3 +604,103 @@ pub(crate) fn bt2020_as_bt709(y: f32, cb: f32, cr: f32) -> [u8; 3] {
         (value.clamp(0.0, 1.0).powf(1.0 / 2.2) * 255.0 + 0.5) as u8
     })
 }
+
+/// Asserts each of `got`'s channels is within `within` of `want`'s, naming
+/// `what` and both colours when one is not — for a colour a GPU path is to
+/// produce, which rounding, or a transfer function's approximate powers,
+/// may leave a level or two off an exact reference.
+#[cfg(any(feature = "cuda", all(target_os = "windows", feature = "d3d11")))]
+pub(crate) fn assert_rgb_near(got: [u8; 3], want: [u8; 3], within: u8, what: &str) {
+    assert!(
+        got.iter()
+            .zip(want)
+            .all(|(got, want)| got.abs_diff(want) <= within),
+        "{what}: got {got:?}, want {want:?} within {within}"
+    );
+}
+
+/// What a debug D3D11 device can count of the objects it still owns — see
+/// [`try_d3d11_debug_device`].
+#[cfg(all(target_os = "windows", feature = "d3d11"))]
+pub(crate) struct D3d11LiveObjects {
+    debug: windows::Win32::Graphics::Direct3D11::ID3D11Debug,
+    info: windows::Win32::Graphics::Direct3D11::ID3D11InfoQueue,
+}
+
+#[cfg(all(target_os = "windows", feature = "d3d11"))]
+impl D3d11LiveObjects {
+    /// How many objects the device still owns. Only the trend across
+    /// identical work means anything — the device, its context and whatever
+    /// an element builds once are always counted.
+    pub(crate) fn count(&self) -> u64 {
+        use windows::Win32::Graphics::Direct3D11::D3D11_RLDO_DETAIL;
+        // SAFETY: both interfaces belong to the same live debug device; the
+        // report synchronously appends messages before their count is read.
+        unsafe {
+            self.info.ClearStoredMessages();
+            self.debug
+                .ReportLiveDeviceObjects(D3D11_RLDO_DETAIL)
+                .expect("ReportLiveDeviceObjects");
+            self.info.GetNumStoredMessages()
+        }
+    }
+}
+
+/// A debug D3D11 device, its context behind the lock elements share, and
+/// what counts its live objects — or `None`, after saying so, on a machine
+/// without the D3D11 SDK debug layer, which is most machines not set up for
+/// graphics development.
+#[cfg(all(target_os = "windows", feature = "d3d11"))]
+pub(crate) fn try_d3d11_debug_device() -> Option<(
+    windows::Win32::Graphics::Direct3D11::ID3D11Device,
+    std::sync::Arc<std::sync::Mutex<windows::Win32::Graphics::Direct3D11::ID3D11DeviceContext>>,
+    D3d11LiveObjects,
+)> {
+    use windows::{
+        Win32::Graphics::{
+            Direct3D::D3D_DRIVER_TYPE_HARDWARE,
+            Direct3D11::{
+                D3D11_CREATE_DEVICE_DEBUG, D3D11_SDK_VERSION, D3D11CreateDevice, ID3D11Debug,
+                ID3D11InfoQueue,
+            },
+        },
+        core::Interface,
+    };
+
+    let mut device = None;
+    let mut context = None;
+    // SAFETY: adapter/software pointers are intentionally null for the
+    // hardware driver path, feature-level defaults are requested, and
+    // `device`/`context` are live correctly typed out-parameters.
+    let result = unsafe {
+        D3D11CreateDevice(
+            None,
+            D3D_DRIVER_TYPE_HARDWARE,
+            Default::default(),
+            D3D11_CREATE_DEVICE_DEBUG,
+            None,
+            D3D11_SDK_VERSION,
+            Some(&mut device),
+            None,
+            Some(&mut context),
+        )
+    };
+    if result.is_err() {
+        eprintln!("skipping: no D3D11 debug device on this machine: {result:?}");
+        return None;
+    }
+    let device = device.expect("D3D11CreateDevice succeeded without producing a device");
+    let context = context.expect("D3D11CreateDevice succeeded without producing a context");
+    let debug = device.cast::<ID3D11Debug>().ok()?;
+    let info = device.cast::<ID3D11InfoQueue>().ok()?;
+    // The report is one message per live object and can exceed the queue's
+    // default limit on its own.
+    // SAFETY: `info` is the live debug info queue for this device and the
+    // count is an unrestricted scalar limit.
+    unsafe { info.SetMessageCountLimit(u64::MAX) }.ok()?;
+    Some((
+        device,
+        std::sync::Arc::new(std::sync::Mutex::new(context)),
+        D3d11LiveObjects { debug, info },
+    ))
+}

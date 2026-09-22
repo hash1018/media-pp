@@ -1816,13 +1816,6 @@ mod tests {
         };
         let sample = 361.0 / 4.0;
         let want = crate::test_support::bt2020_as_bt709(sample, sample, sample);
-        assert!(
-            [r, g, b]
-                .iter()
-                .zip(want)
-                .all(|(got, want)| got.abs_diff(want) <= 6),
-            "got {:?}, want {want:?}",
-            [r, g, b]
-        );
+        crate::test_support::assert_rgb_near([r, g, b], want, 6, "the pixel");
     }
 }

@@ -529,13 +529,7 @@ mod tests {
     use std::ffi::c_void;
     use windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC;
 
-    use windows::Win32::Graphics::{
-        Direct3D11::{
-            D3D11_CREATE_DEVICE_DEBUG, D3D11_RLDO_DETAIL, D3D11_SDK_VERSION, D3D11CreateDevice,
-            ID3D11Debug, ID3D11InfoQueue,
-        },
-        Dxgi::Common::DXGI_FORMAT_NV12,
-    };
+    use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_NV12;
 
     use super::super::super::options::apply;
     use super::*;
@@ -826,66 +820,13 @@ mod tests {
         assert_eq!(drawn.data(0)[0..4], [153, 153, 153, 255]);
     }
 
-    /// A debug device and the two interfaces that count what it still owns,
-    /// or `None` without the D3D11 SDK debug layer.
-    fn try_debug_device() -> Option<(
-        ID3D11Device,
-        Arc<Mutex<ID3D11DeviceContext>>,
-        ID3D11Debug,
-        ID3D11InfoQueue,
-    )> {
-        use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
-
-        let mut device = None;
-        let mut context = None;
-        // SAFETY: null adapter/software pointers select the hardware driver,
-        // feature-level defaults are requested, and `device`/`context` are
-        // live correctly typed out-parameters.
-        let result = unsafe {
-            D3D11CreateDevice(
-                None,
-                D3D_DRIVER_TYPE_HARDWARE,
-                Default::default(),
-                D3D11_CREATE_DEVICE_DEBUG,
-                None,
-                D3D11_SDK_VERSION,
-                Some(&mut device),
-                None,
-                Some(&mut context),
-            )
-        };
-        if result.is_err() {
-            eprintln!("skipping: no D3D11 debug device on this machine: {result:?}");
-            return None;
-        }
-        let device = device?;
-        let context = context?;
-        let debug = device.cast::<ID3D11Debug>().ok()?;
-        let info = device.cast::<ID3D11InfoQueue>().ok()?;
-        // SAFETY: `info` is the live debug info queue for this device.
-        unsafe { info.SetMessageCountLimit(u64::MAX) }.ok()?;
-        Some((device, Arc::new(Mutex::new(context)), debug, info))
-    }
-
-    fn live_objects(debug: &ID3D11Debug, info: &ID3D11InfoQueue) -> u64 {
-        // SAFETY: both interfaces belong to the same live debug device; the
-        // report appends its messages before they are counted.
-        unsafe {
-            info.ClearStoredMessages();
-            debug
-                .ReportLiveDeviceObjects(D3D11_RLDO_DETAIL)
-                .expect("ReportLiveDeviceObjects");
-            info.GetNumStoredMessages()
-        }
-    }
-
     /// Each draw creates an output texture and two views, which the device
     /// destroys only once the context is flushed — `D3d11ChromaKey` leaked
     /// three objects a frame before it flushed. A flat count across a
     /// hundred frames is what shows this one does not.
     #[test]
     fn drawing_frames_does_not_accumulate_d3d11_objects() {
-        let Some((device, context, debug, info)) = try_debug_device() else {
+        let Some((device, context, live)) = crate::test_support::try_d3d11_debug_device() else {
             return;
         };
         let texture = bgra_texture(&device, 64, 64, [30, 140, 220, 255], 1);
@@ -910,11 +851,11 @@ mod tests {
         for pts in 0..20 {
             push(pts);
         }
-        let baseline = live_objects(&debug, &info);
+        let baseline = live.count();
         for pts in 20..120 {
             push(pts);
         }
-        let after = live_objects(&debug, &info);
+        let after = live.count();
 
         assert_eq!(
             after,

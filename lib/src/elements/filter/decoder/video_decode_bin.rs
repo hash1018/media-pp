@@ -1416,14 +1416,7 @@ mod tests {
             let [b, g, r, _] = frame.data(0)[frame.stride(0) * 72 + 128 * 4..][..4] else {
                 unreachable!("four bytes were sliced");
             };
-            assert!(
-                [r, g, b]
-                    .iter()
-                    .zip(want)
-                    .all(|(got, want)| got.abs_diff(want) <= within),
-                "got {:?}, want {want:?}",
-                [r, g, b]
-            );
+            crate::test_support::assert_rgb_near([r, g, b], want, within, "the pixel");
         }
     }
 
@@ -1714,14 +1707,7 @@ mod tests {
                 let [b, g, r, _] = frame.data(0)[frame.stride(0) * 72 + 128 * 4..][..4] else {
                     unreachable!("four bytes were sliced");
                 };
-                assert!(
-                    [r, g, b]
-                        .iter()
-                        .zip(want)
-                        .all(|(got, want)| got.abs_diff(want) <= 6),
-                    "got {:?}, want {want:?}",
-                    [r, g, b]
-                );
+                crate::test_support::assert_rgb_near([r, g, b], want, 6, "the pixel");
             }
         }
 
@@ -2065,14 +2051,7 @@ mod tests {
                 let [b, g, r, _] = frame.data(0)[frame.stride(0) * 72 + 128 * 4..][..4] else {
                     unreachable!("four bytes were sliced");
                 };
-                assert!(
-                    [r, g, b]
-                        .iter()
-                        .zip(want)
-                        .all(|(got, want)| got.abs_diff(want) <= 3),
-                    "got {:?}, want {want:?}",
-                    [r, g, b]
-                );
+                crate::test_support::assert_rgb_near([r, g, b], want, 3, "the pixel");
             }
         }
 

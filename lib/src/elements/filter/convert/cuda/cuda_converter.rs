@@ -741,25 +741,27 @@ mod tests {
                 (value.clamp(0.0, 1.0) * 255.0 + 0.5) as u8
             })
         };
-        let near = |got: [u8; 3], want: [u8; 3], within: u8, what: &str| {
-            assert!(
-                got.iter()
-                    .zip(want)
-                    .all(|(got, want)| got.abs_diff(want) <= within),
-                "{what}: got {got:?}, want {want:?}"
-            );
-        };
 
         let (bt601, _) = read_as(ffmpeg::color::Space::BT470BG);
-        near(bt601, by_matrix(ffmpeg::color::Space::BT470BG), 1, "BT.601");
+        crate::test_support::assert_rgb_near(
+            bt601,
+            by_matrix(ffmpeg::color::Space::BT470BG),
+            1,
+            "BT.601",
+        );
         let (bt709, _) = read_as(ffmpeg::color::Space::BT709);
-        near(bt709, by_matrix(ffmpeg::color::Space::BT709), 1, "BT.709");
+        crate::test_support::assert_rgb_near(
+            bt709,
+            by_matrix(ffmpeg::color::Space::BT709),
+            1,
+            "BT.709",
+        );
         assert_ne!(
             bt601, bt709,
             "the two matrices make different colours of this"
         );
         let (bt2020, primaries) = read_as(ffmpeg::color::Space::BT2020NCL);
-        near(
+        crate::test_support::assert_rgb_near(
             bt2020,
             crate::test_support::bt2020_as_bt709(f32::from(luma), f32::from(cb), f32::from(cr)),
             2,
