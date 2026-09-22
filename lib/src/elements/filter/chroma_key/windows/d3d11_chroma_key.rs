@@ -1,16 +1,13 @@
-use std::{
-    ffi::c_void,
-    sync::{Arc, Mutex},
-};
+use std::sync::{Arc, Mutex};
 
 use crate::pp_log::{PpLog, pp_debug, pp_error, pp_info};
 use ffmpeg_next as ffmpeg;
 use thiserror::Error as ThisError;
 use windows::{
     Win32::Graphics::{
-        Direct3D::{D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, D3D_SRV_DIMENSION_TEXTURE2DARRAY},
+        Direct3D::D3D_SRV_DIMENSION_TEXTURE2DARRAY,
         Direct3D11::*,
-        Dxgi::Common::{DXGI_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC},
+        Dxgi::Common::{DXGI_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM},
     },
     core::{Interface, s},
 };
@@ -25,7 +22,8 @@ use crate::{
     element::{Element, ElementType, Sink, Source, element_pp_log},
     error::{D3d11SharedDeviceError, Result},
     pad::SrcPad,
-    platform::windows::d3d11::{compile_shader, protect_shared_device},
+    platform::windows::d3d11::protect_shared_device,
+    platform::windows::d3d11_full_frame::{FullFramePass, create_bgra_target},
     platform::windows::d3d11va::{d3d11va_texture, wrap_d3d11_texture},
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
     repeat::{PerFrameTransform, RepeatedOutput},
@@ -235,12 +233,7 @@ pub struct D3d11ChromaKey {
     /// `options`. A disabled one hands every frame straight through.
     enabled: bool,
 
-    vertex_shader: ID3D11VertexShader,
-    pixel_shader: ID3D11PixelShader,
-    sampler: ID3D11SamplerState,
-    blend_state: ID3D11BlendState,
-    rasterizer_state: ID3D11RasterizerState,
-    constant_buffer: ID3D11Buffer,
+    pass: FullFramePass<ChromaKeyConstants>,
     pad: SrcPad,
     /// Reused across every keyed frame — see [`UnboundObjectPool`]'s docs.
     /// Only the small CPU-side `AVFrame` wrapper is actually reused; the
@@ -312,11 +305,12 @@ impl D3d11ChromaKey {
             }
         }
 
-        // SAFETY: `device` is live; the helper creates state only from static
-        // shader bytes and fully initialized descriptors, returning owned COM
-        // references without retaining borrowed pointers.
-        let (vertex_shader, pixel_shader, sampler, blend_state, rasterizer_state, constant_buffer) =
-            unsafe { build_pipeline_state(device) }?;
+        let pass = FullFramePass::new(
+            device,
+            SHADER_SOURCE,
+            s!("chroma_key_bgra.hlsl"),
+            s!("ps_chroma_key"),
+        )?;
 
         let key_color = options.method.key_color();
         let pad = SrcPad::with_contract(
@@ -343,12 +337,7 @@ impl D3d11ChromaKey {
             options,
             control,
             enabled: true,
-            vertex_shader,
-            pixel_shader,
-            sampler,
-            blend_state,
-            rasterizer_state,
-            constant_buffer,
+            pass,
             pad,
             pool,
             repeated: RepeatedOutput::new(),
@@ -483,19 +472,9 @@ impl D3d11ChromaKey {
             .validate(frame)
             .inspect_err(|error| pp_error!(self, "{error}"))?;
 
-        let output = create_output_texture(&self.device, input.width, input.height)
-            .inspect_err(|error| pp_error!(self, "failed to allocate the output texture: {error}"))
+        let (output, output_view) = create_bgra_target(&self.device, input.width, input.height)
+            .inspect_err(|error| pp_error!(self, "failed to allocate the output: {error}"))
             .map_err(D3d11ChromaKeyError::from)?;
-        let mut output_view = None;
-        // SAFETY: `output` is a live render-target-capable texture and
-        // `output_view` is the correctly typed live out-parameter.
-        unsafe {
-            self.device
-                .CreateRenderTargetView(&output, None, Some(&mut output_view))
-                .inspect_err(|error| pp_error!(self, "failed to create the output RTV: {error}"))
-                .map_err(D3d11ChromaKeyError::from)?;
-        }
-        let output_view = output_view.expect("CreateRenderTargetView succeeded without a view");
 
         let srv_desc = D3D11_SHADER_RESOURCE_VIEW_DESC {
             Format: DXGI_FORMAT_B8G8R8A8_UNORM,
@@ -526,76 +505,22 @@ impl D3d11ChromaKey {
             self.options.smoothing,
             input.uv_scale,
         );
-        let viewport = D3D11_VIEWPORT {
-            TopLeftX: 0.0,
-            TopLeftY: 0.0,
-            Width: input.width as f32,
-            Height: input.height as f32,
-            MinDepth: 0.0,
-            MaxDepth: 1.0,
-        };
-
         {
             let context = self
                 .context
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            // SAFETY: all state objects and views are live and belong to the
-            // context's device; the constants pointer is readable for the
-            // buffer's declared size. Bindings are cleared before references
-            // drop, and the immediate context is serialized by its mutex.
+            // SAFETY: `context` is the immediate context of the device the pass
+            // and every view were made on, held by its lock for the call.
             unsafe {
-                context.UpdateSubresource(
-                    &self.constant_buffer,
-                    0,
-                    None,
-                    (&raw const constants).cast::<c_void>(),
-                    0,
-                    0,
+                self.pass.draw(
+                    &context,
+                    &constants,
+                    &output_view,
+                    &[srv],
+                    input.width,
+                    input.height,
                 );
-                // Every piece of state is re-selected rather than assumed:
-                // this context is shared with every other D3D11 element in
-                // the pipeline, and whatever drew last left its own bound.
-                context.OMSetRenderTargets(Some(&[Some(output_view)]), None);
-                context.OMSetBlendState(&self.blend_state, None, 0xffff_ffff);
-                context.RSSetState(&self.rasterizer_state);
-                context.RSSetViewports(Some(&[viewport]));
-                context.IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-                context.IASetInputLayout(None);
-                context.VSSetShader(&self.vertex_shader, None);
-                context.PSSetShader(&self.pixel_shader, None);
-                context.PSSetSamplers(0, Some(&[Some(self.sampler.clone())]));
-                context.PSSetConstantBuffers(0, Some(&[Some(self.constant_buffer.clone())]));
-                context.PSSetShaderResources(0, Some(&[srv]));
-                context.Draw(3, 0);
-
-                // Released on the way out, always: leaving this frame's
-                // input SRV and output RTV bound would keep them alive
-                // inside the shared context's state until something else
-                // happened to overwrite the same slots.
-                context.PSSetShaderResources(0, Some(&[None]));
-                context.OMSetRenderTargets(None, None);
-                // Dropping the last reference to a D3D11 object does not
-                // destroy it: destruction is deferred until the context is
-                // flushed. This element creates three objects per frame —
-                // the output texture, its render-target view, and the
-                // input's shader-resource view — so without this the device
-                // accumulates them for as long as the pipeline runs.
-                // Measured directly: 500 frames through one element grew
-                // the debug layer's live-object count by exactly 3 per
-                // frame, and stayed flat at its starting value with this
-                // call in place.
-                //
-                // The two views cannot be cached instead. The output's RTV
-                // could be, by pooling output textures the way
-                // `D3d11VideoCompositor` pools its own, but the input's SRV
-                // could not: it is built over a texture this element does
-                // not own, so a cache keyed by that texture's pointer goes
-                // stale the moment upstream frees it and reuses the
-                // address. Flushing is what D3D11 offers for this, and the
-                // cost is the batching given up by submitting once per
-                // frame on the shared context.
-                context.Flush();
             }
         }
 
@@ -697,161 +622,10 @@ impl Sink for D3d11ChromaKey {
     }
 }
 
-/// Every piece of D3D11 state this element re-selects per draw, built once.
-#[allow(clippy::type_complexity)]
-unsafe fn build_pipeline_state(
-    device: &ID3D11Device,
-) -> windows::core::Result<(
-    ID3D11VertexShader,
-    ID3D11PixelShader,
-    ID3D11SamplerState,
-    ID3D11BlendState,
-    ID3D11RasterizerState,
-    ID3D11Buffer,
-)> {
-    // SAFETY: the device is live; compiler blobs retain their bytecode while
-    // shader creation reads it, every descriptor is fully initialized, and
-    // each optional interface slot is a live out-parameter. No call retains a
-    // borrowed Rust pointer after returning.
-    unsafe {
-        let vertex_bytecode = compile_shader(
-            SHADER_SOURCE,
-            s!("chroma_key_bgra.hlsl"),
-            s!("vs_main"),
-            s!("vs_5_0"),
-        )?;
-        let pixel_bytecode = compile_shader(
-            SHADER_SOURCE,
-            s!("chroma_key_bgra.hlsl"),
-            s!("ps_chroma_key"),
-            s!("ps_5_0"),
-        )?;
-
-        let mut vertex_shader = None;
-        device.CreateVertexShader(
-            std::slice::from_raw_parts(
-                vertex_bytecode.GetBufferPointer().cast::<u8>(),
-                vertex_bytecode.GetBufferSize(),
-            ),
-            None,
-            Some(&mut vertex_shader),
-        )?;
-        let vertex_shader = vertex_shader.expect("CreateVertexShader succeeded without a shader");
-
-        let mut pixel_shader = None;
-        device.CreatePixelShader(
-            std::slice::from_raw_parts(
-                pixel_bytecode.GetBufferPointer().cast::<u8>(),
-                pixel_bytecode.GetBufferSize(),
-            ),
-            None,
-            Some(&mut pixel_shader),
-        )?;
-        let pixel_shader = pixel_shader.expect("CreatePixelShader succeeded without a shader");
-
-        // Point sampling, not linear: input and output are the same size,
-        // so every output pixel maps to exactly one input texel. Filtering
-        // would only blend neighbours across the key edge, softening it in
-        // a way `smoothing` is supposed to control explicitly.
-        let sampler_desc = D3D11_SAMPLER_DESC {
-            Filter: D3D11_FILTER_MIN_MAG_MIP_POINT,
-            AddressU: D3D11_TEXTURE_ADDRESS_CLAMP,
-            AddressV: D3D11_TEXTURE_ADDRESS_CLAMP,
-            AddressW: D3D11_TEXTURE_ADDRESS_CLAMP,
-            ComparisonFunc: D3D11_COMPARISON_NEVER,
-            MaxLOD: f32::MAX,
-            ..Default::default()
-        };
-        let mut sampler = None;
-        device.CreateSamplerState(&sampler_desc, Some(&mut sampler))?;
-        let sampler = sampler.expect("CreateSamplerState succeeded without a state");
-
-        // Blending is explicitly *off*. The alpha this shader computes is
-        // the element's whole output; letting it blend against the render
-        // target would consume it instead of storing it.
-        let mut blend_desc = D3D11_BLEND_DESC::default();
-        blend_desc.RenderTarget[0] = D3D11_RENDER_TARGET_BLEND_DESC {
-            BlendEnable: false.into(),
-            RenderTargetWriteMask: D3D11_COLOR_WRITE_ENABLE_ALL.0 as u8,
-            ..Default::default()
-        };
-        let mut blend_state = None;
-        device.CreateBlendState(&blend_desc, Some(&mut blend_state))?;
-        let blend_state = blend_state.expect("CreateBlendState succeeded without a state");
-
-        // Scissoring off, unlike the compositor's: this draw covers the
-        // whole render target by construction, and the shared context may
-        // arrive carrying someone else's scissor rect.
-        let rasterizer_desc = D3D11_RASTERIZER_DESC {
-            FillMode: D3D11_FILL_SOLID,
-            CullMode: D3D11_CULL_NONE,
-            ScissorEnable: false.into(),
-            DepthClipEnable: true.into(),
-            ..Default::default()
-        };
-        let mut rasterizer_state = None;
-        device.CreateRasterizerState(&rasterizer_desc, Some(&mut rasterizer_state))?;
-        let rasterizer_state =
-            rasterizer_state.expect("CreateRasterizerState succeeded without a state");
-
-        let buffer_desc = D3D11_BUFFER_DESC {
-            ByteWidth: std::mem::size_of::<ChromaKeyConstants>() as u32,
-            Usage: D3D11_USAGE_DEFAULT,
-            BindFlags: D3D11_BIND_CONSTANT_BUFFER.0 as u32,
-            CPUAccessFlags: 0,
-            MiscFlags: 0,
-            StructureByteStride: 0,
-        };
-        let mut constant_buffer = None;
-        device.CreateBuffer(&buffer_desc, None, Some(&mut constant_buffer))?;
-        let constant_buffer = constant_buffer.expect("CreateBuffer succeeded without a buffer");
-
-        Ok((
-            vertex_shader,
-            pixel_shader,
-            sampler,
-            blend_state,
-            rasterizer_state,
-            constant_buffer,
-        ))
-    }
-}
-
-/// `SHADER_RESOURCE` alongside `RENDER_TARGET` because the keyed frame is
-/// drawn into here and then sampled by whatever comes next — a compositor
-/// layer, a renderer, or another shader-based filter.
-fn create_output_texture(
-    device: &ID3D11Device,
-    width: u32,
-    height: u32,
-) -> std::result::Result<ID3D11Texture2D, windows::core::Error> {
-    let desc = D3D11_TEXTURE2D_DESC {
-        Width: width,
-        Height: height,
-        MipLevels: 1,
-        ArraySize: 1,
-        Format: DXGI_FORMAT_B8G8R8A8_UNORM,
-        SampleDesc: DXGI_SAMPLE_DESC {
-            Count: 1,
-            Quality: 0,
-        },
-        Usage: D3D11_USAGE_DEFAULT,
-        BindFlags: (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32,
-        CPUAccessFlags: 0,
-        MiscFlags: 0,
-    };
-    let mut texture = None;
-    // SAFETY: `desc` fully describes a render-target texture, no initial data
-    // is supplied, and `texture` is a live out-parameter.
-    unsafe {
-        device.CreateTexture2D(&desc, None, Some(&mut texture))?;
-    }
-    Ok(texture.expect("CreateTexture2D succeeded without producing a texture"))
-}
-
 #[cfg(test)]
 mod tests {
     use std::ffi::c_void;
+    use windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC;
 
     use windows::Win32::Graphics::{
         Direct3D::D3D_DRIVER_TYPE_HARDWARE,
