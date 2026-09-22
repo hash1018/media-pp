@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use super::super::hw_decoder::capable_decoder;
+use super::super::hw_decoder::{NegotiationRefusal, capable_decoder};
 use super::super::preroll_gate::{PrerollGate, hw_surface_budget};
 use ffmpeg_next::{self as ffmpeg, ffi};
 use thiserror::Error as ThisError;
@@ -79,6 +79,10 @@ pub struct CudaDecoder {
     pool: UnboundObjectPool<ffmpeg::frame::Video>,
     /// Suppresses decoded samples before a seek target during preroll.
     preroll_gate: PrerollGate,
+    /// Set by `get_format` when the GPU refuses the stream — see
+    /// [`NegotiationRefusal`]. After `decoder`, so it outlives the codec
+    /// context that points at it.
+    refused: NegotiationRefusal,
 }
 
 // SAFETY: `hw_device_ctx` is a heap-allocated FFmpeg buffer with no thread
@@ -144,12 +148,16 @@ impl CudaDecoder {
         let codec_device_ctx = hw_device_ctx
             .try_clone()
             .ok_or(CudaDecoderError::HwDeviceRef)?;
+        let refused = NegotiationRefusal::new();
         // SAFETY: `ctx_ptr` is the codec context this owns and has not opened yet,
         // which is the only point at which these fields may be set. The device
         // reference is transferred with `into_raw`, so the codec frees it and this
         // no longer does.
+        // `opaque` points at `refused`, which the decoder keeps for as long
+        // as the codec context — see that field.
         unsafe {
             let ctx_ptr = context.as_mut_ptr();
+            (*ctx_ptr).opaque = refused.opaque();
             (*ctx_ptr).hw_device_ctx = codec_device_ctx.into_raw();
             (*ctx_ptr).get_format = Some(get_format);
             (*ctx_ptr).extra_hw_frames = extra_hw_frames;
@@ -174,6 +182,7 @@ impl CudaDecoder {
             pad,
             pool,
             preroll_gate: PrerollGate::default(),
+            refused,
         })
     }
 
@@ -195,6 +204,17 @@ impl CudaDecoder {
         cuda_capable_decoder(codec).is_some()
     }
 
+    /// `error` as this decoder's own: the GPU refusing the stream where
+    /// `get_format` said so, which FFmpeg's own error does not — see
+    /// [`NegotiationRefusal`].
+    fn decode_error(&self, error: ffmpeg::Error) -> CudaDecoderError {
+        if self.refused.happened() {
+            CudaDecoderError::HwAccelUnavailable
+        } else {
+            error.into()
+        }
+    }
+
     fn drain(&mut self) -> crate::error::Result<()> {
         let mut frame = self.pool.get();
         loop {
@@ -214,7 +234,7 @@ impl CudaDecoder {
                     frame = self.pool.get();
                 }
                 Err(error) if is_codec_drain_boundary(&error) => break,
-                Err(error) => return Err(CudaDecoderError::from(error).into()),
+                Err(error) => return Err(self.decode_error(error).into()),
             }
         }
         Ok(())
@@ -259,14 +279,14 @@ impl Sink for CudaDecoder {
                 self.decoder
                     .send_packet(&*packet)
                     .inspect_err(|error| pp_error!(self, "send_packet failed: {error}"))
-                    .map_err(CudaDecoderError::from)?;
+                    .map_err(|error| self.decode_error(error))?;
                 self.drain()
             }
             MediaBuffer::Eos => {
                 self.decoder
                     .send_eof()
                     .inspect_err(|error| pp_error!(self, "send_eof failed: {error}"))
-                    .map_err(CudaDecoderError::from)?;
+                    .map_err(|error| self.decode_error(error))?;
                 self.drain()?;
                 self.preroll_gate
                     .push_eos_candidate(|candidate| self.pad.push(candidate))?;
@@ -316,7 +336,7 @@ fn cuda_capable_decoder(id: ffmpeg::codec::Id) -> Option<ffmpeg::Codec> {
 /// this crate never customizes NVDEC's surface allocation, so libavcodec
 /// sets the whole thing up itself.
 unsafe extern "C" fn get_format(
-    _ctx: *mut ffi::AVCodecContext,
+    ctx: *mut ffi::AVCodecContext,
     mut fmt: *const ffi::AVPixelFormat,
 ) -> ffi::AVPixelFormat {
     // SAFETY: `fmt` is FFmpeg's own `AV_PIX_FMT_NONE`-terminated list, which is
@@ -328,6 +348,9 @@ unsafe extern "C" fn get_format(
             }
             fmt = fmt.add(1);
         }
+        // Nothing here is hardware, which is the refusal `new` pointed
+        // `opaque` at `refused` to hear about.
+        NegotiationRefusal::mark(ctx);
         ffi::AVPixelFormat::AV_PIX_FMT_NONE
     }
 }
@@ -553,6 +576,43 @@ mod tests {
                 on_cuda,
                 "{codec:?} opened {}, which has no CUDA path",
                 opened.name()
+            );
+        }
+    }
+
+    /// A GPU that lacks the stream's profile says so as
+    /// [`CudaDecoderError::HwAccelUnavailable`], not as the `EPERM` and
+    /// `AVERROR_INVALIDDATA` FFmpeg answers with, which a damaged stream
+    /// also answers with — see `NegotiationRefusal`. VP9 profile 1, 8-bit
+    /// 4:4:4, is one no hardware decoder here has.
+    #[test]
+    fn a_profile_the_gpu_lacks_is_reported_as_refused() {
+        let Some((device, _cuda_lock)) = try_cuda_device() else {
+            return;
+        };
+        let Some((params, packets)) = crate::test_support::try_encoded_packets(
+            "libvpx-vp9",
+            ffmpeg::format::Pixel::YUV444P,
+            (64, 64),
+            90,
+        ) else {
+            return;
+        };
+        let mut decoder = CudaDecoder::new("refused", params, &device, 4).unwrap();
+        decoder.src_pads()[0].link(Box::new(crate::elements::AppSink::new(
+            "refused-frames",
+            |_| Ok(()),
+        )));
+        for packet in packets {
+            let error = decoder
+                .consume(MediaBuffer::Packet(Arc::new(packet)))
+                .expect_err("the GPU has no VP9 profile 1");
+            assert!(
+                matches!(
+                    error,
+                    crate::error::Error::CudaDecoderError(CudaDecoderError::HwAccelUnavailable)
+                ),
+                "every packet after the refusal says why: {error}"
             );
         }
     }

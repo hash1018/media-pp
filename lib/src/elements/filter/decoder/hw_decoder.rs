@@ -70,3 +70,52 @@ pub(super) unsafe fn decodes_on(codec: *const ffi::AVCodec, device: ffi::AVHWDev
         index += 1;
     }
 }
+
+/// Whether a hardware decoder's `get_format` was left with no hardware
+/// format it could use — the GPU refusing the stream.
+///
+/// Nothing else says so. A GPU without the stream's profile fails FFmpeg's
+/// hwaccel setup inside format negotiation; FFmpeg then asks `get_format`
+/// again without the hardware format, the callback has nothing to answer
+/// but `AV_PIX_FMT_NONE`, and what reaches the caller is `EPERM` and then
+/// `AVERROR_INVALIDDATA` — measured with VP9 profile 1 against D3D11VA —
+/// which is also what a damaged stream says. The callback is the one place
+/// that knows, so it leaves its answer here, found through
+/// `AVCodecContext::opaque`.
+///
+/// Boxed so its address survives the decoder that owns it being moved.
+pub(super) struct NegotiationRefusal(Box<std::sync::atomic::AtomicBool>);
+
+impl NegotiationRefusal {
+    pub(super) fn new() -> Self {
+        Self(Box::default())
+    }
+
+    /// What to store in `AVCodecContext::opaque` before the codec opens.
+    /// Valid for as long as `self` is, which the decoder owning both makes
+    /// at least as long as the codec context.
+    pub(super) fn opaque(&self) -> *mut std::ffi::c_void {
+        std::ptr::from_ref(&*self.0).cast_mut().cast()
+    }
+
+    /// Records the refusal from inside `get_format`.
+    ///
+    /// # Safety
+    ///
+    /// `ctx` must be a live codec context whose `opaque` is null or was set
+    /// from [`Self::opaque`] of a refusal that is still alive.
+    pub(super) unsafe fn mark(ctx: *const ffi::AVCodecContext) {
+        // SAFETY: the caller's promise about `ctx` and what `opaque` holds.
+        unsafe {
+            let flag = (*ctx).opaque as *const std::sync::atomic::AtomicBool;
+            if !flag.is_null() {
+                (*flag).store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// Whether `get_format` has refused since the codec opened.
+    pub(super) fn happened(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}

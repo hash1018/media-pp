@@ -269,6 +269,76 @@ pub(crate) fn synthesize_reordered(name: &str, seconds: f64) -> Fixture {
         .expect("synthesize a reordered fixture")
 }
 
+/// Five pictures from the FFmpeg encoder called `encoder`, as the parameters
+/// it describes them by and every packet it wrote — or `None`, after saying
+/// why, from a build without that encoder or one that will not take
+/// `format`.
+///
+/// For a stream whose codec or layout is the point: Motion JPEG, which no
+/// D3D11VA decoder takes; ProRes 4444, which carries alpha; VP9 profile 1,
+/// which a GPU refuses. None of these encoders is one this project treats as
+/// always present — see [`synthesize`] on which are.
+///
+/// Every byte of every plane is `fill`, which for a 10-bit plane makes each
+/// sample `fill * 257`. Timestamps count frames at 30 a second.
+#[cfg(any(
+    feature = "cuda",
+    all(target_os = "windows", any(feature = "d3d11", feature = "d3d12"))
+))]
+pub(crate) fn try_encoded_packets(
+    encoder: &str,
+    format: ffmpeg_next::format::Pixel,
+    (width, height): (u32, u32),
+    fill: u8,
+) -> Option<(ffmpeg_next::codec::Parameters, Vec<ffmpeg_next::Packet>)> {
+    use ffmpeg_next as ffmpeg;
+
+    crate::init().ok()?;
+    let Some(codec) = ffmpeg::encoder::find_by_name(encoder) else {
+        eprintln!("skipping: this FFmpeg build has no {encoder} encoder");
+        return None;
+    };
+    let time_base = ffmpeg::Rational::new(1, 30);
+    let mut context = ffmpeg::codec::context::Context::new_with_codec(codec)
+        .encoder()
+        .video()
+        .ok()?;
+    context.set_width(width);
+    context.set_height(height);
+    context.set_format(format);
+    context.set_time_base(time_base);
+    context.set_frame_rate(Some(ffmpeg::Rational::new(30, 1)));
+    let mut encoder = match context.open_as(codec) {
+        Ok(opened) => opened,
+        Err(error) => {
+            eprintln!("skipping: {encoder} does not open for {format:?}: {error}");
+            return None;
+        }
+    };
+    let parameters = ffmpeg::codec::Parameters::from(&encoder);
+
+    let mut packets = Vec::new();
+    let mut drain = |encoder: &mut ffmpeg::encoder::Video| {
+        let mut packet = ffmpeg::Packet::empty();
+        while encoder.receive_packet(&mut packet).is_ok() {
+            packet.set_time_base(time_base);
+            packets.push(std::mem::replace(&mut packet, ffmpeg::Packet::empty()));
+        }
+    };
+    for index in 0..5 {
+        let mut frame = ffmpeg::frame::Video::new(format, width, height);
+        for plane in 0..frame.planes() {
+            frame.data_mut(plane).fill(fill);
+        }
+        frame.set_pts(Some(index));
+        encoder.send_frame(&frame).ok()?;
+        drain(&mut encoder);
+    }
+    encoder.send_eof().ok()?;
+    drain(&mut encoder);
+    Some((parameters, packets))
+}
+
 /// A second of AV1 — the parameters its encoder describes and every packet it
 /// wrote — for the hardware decoders, which have to be shown to decode AV1
 /// on their own device rather than in whichever decoder FFmpeg prefers.

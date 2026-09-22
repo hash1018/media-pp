@@ -15,7 +15,7 @@ use crate::{
     pool::UnboundObjectPool,
 };
 
-use super::super::hw_decoder::capable_decoder;
+use super::super::hw_decoder::{NegotiationRefusal, capable_decoder};
 use super::super::preroll_gate::PrerollGate;
 use crate::elements::filter::is_codec_drain_boundary;
 
@@ -79,6 +79,10 @@ pub struct D3d12Decoder {
     pool: UnboundObjectPool<ffmpeg::frame::Video>,
     /// Suppresses decoded samples before a seek target during preroll.
     preroll_gate: PrerollGate,
+    /// Set by `get_format` when the GPU refuses the stream — see
+    /// [`NegotiationRefusal`]. After `decoder`, so it outlives the codec
+    /// context that points at it.
+    refused: NegotiationRefusal,
 }
 
 // SAFETY: `hw_device_ctx` is a heap-allocated FFmpeg buffer with no
@@ -127,11 +131,15 @@ impl D3d12Decoder {
         let codec_device_ctx = hw_device_ctx
             .try_clone()
             .ok_or(D3d12DecoderError::HwDeviceRef)?;
+        let refused = NegotiationRefusal::new();
         // SAFETY: `context` is exclusively owned and unopened. Ownership of
         // `codec_device_ctx` is transferred to FFmpeg and the callback is set
         // before decoder construction can inspect either field.
+        // `opaque` points at `refused`, which the decoder keeps for as long
+        // as the codec context — see that field.
         unsafe {
             let ctx_ptr = context.as_mut_ptr();
+            (*ctx_ptr).opaque = refused.opaque();
             (*ctx_ptr).hw_device_ctx = codec_device_ctx.into_raw();
             (*ctx_ptr).get_format = Some(get_format);
         }
@@ -155,6 +163,7 @@ impl D3d12Decoder {
             pad,
             pool,
             preroll_gate: PrerollGate::default(),
+            refused,
         })
     }
 
@@ -166,6 +175,17 @@ impl D3d12Decoder {
     /// with [`D3d12DecoderError::HwAccelUnavailable`].
     pub fn supports(codec: ffmpeg::codec::Id) -> bool {
         d3d12va_capable_decoder(codec).is_some()
+    }
+
+    /// `error` as this decoder's own: the GPU refusing the stream where
+    /// `get_format` said so, which FFmpeg's own error does not — see
+    /// [`NegotiationRefusal`].
+    fn decode_error(&self, error: ffmpeg::Error) -> D3d12DecoderError {
+        if self.refused.happened() {
+            D3d12DecoderError::HwAccelUnavailable
+        } else {
+            error.into()
+        }
     }
 
     fn drain(&mut self) -> crate::error::Result<()> {
@@ -187,7 +207,7 @@ impl D3d12Decoder {
                     frame = self.pool.get();
                 }
                 Err(error) if is_codec_drain_boundary(&error) => break,
-                Err(error) => return Err(D3d12DecoderError::from(error).into()),
+                Err(error) => return Err(self.decode_error(error).into()),
             }
         }
         Ok(())
@@ -232,14 +252,14 @@ impl Sink for D3d12Decoder {
                 self.decoder
                     .send_packet(&*packet)
                     .inspect_err(|error| pp_error!(self, "send_packet failed: {error}"))
-                    .map_err(D3d12DecoderError::from)?;
+                    .map_err(|error| self.decode_error(error))?;
                 self.drain()
             }
             MediaBuffer::Eos => {
                 self.decoder
                     .send_eof()
                     .inspect_err(|error| pp_error!(self, "send_eof failed: {error}"))
-                    .map_err(D3d12DecoderError::from)?;
+                    .map_err(|error| self.decode_error(error))?;
                 self.drain()?;
                 self.preroll_gate
                     .push_eos_candidate(|candidate| self.pad.push(candidate))?;
@@ -289,7 +309,7 @@ fn d3d12va_capable_decoder(id: ffmpeg::codec::Id) -> Option<ffmpeg::Codec> {
 }
 
 unsafe extern "C" fn get_format(
-    _ctx: *mut ffi::AVCodecContext,
+    ctx: *mut ffi::AVCodecContext,
     mut fmt: *const ffi::AVPixelFormat,
 ) -> ffi::AVPixelFormat {
     // SAFETY: FFmpeg supplies a readable `AV_PIX_FMT_NONE`-terminated array
@@ -301,6 +321,9 @@ unsafe extern "C" fn get_format(
             }
             fmt = fmt.add(1);
         }
+        // Nothing here is hardware, which is the refusal `new` pointed
+        // `opaque` at `refused` to hear about.
+        NegotiationRefusal::mark(ctx);
         ffi::AVPixelFormat::AV_PIX_FMT_NONE
     }
 }
@@ -420,5 +443,42 @@ mod tests {
             sent,
             "every AV1 frame comes out as a D3D12 resource"
         );
+    }
+
+    /// A GPU that lacks the stream's profile says so as
+    /// [`D3d12DecoderError::HwAccelUnavailable`], not as the `EPERM` and
+    /// `AVERROR_INVALIDDATA` FFmpeg answers with, which a damaged stream
+    /// also answers with — see `NegotiationRefusal`. VP9 profile 1, 8-bit
+    /// 4:4:4, is one no hardware decoder here has.
+    #[test]
+    fn a_profile_the_gpu_lacks_is_reported_as_refused() {
+        let Some(device) = try_d3d12_device() else {
+            return;
+        };
+        let Some((params, packets)) = crate::test_support::try_encoded_packets(
+            "libvpx-vp9",
+            ffmpeg::format::Pixel::YUV444P,
+            (64, 64),
+            90,
+        ) else {
+            return;
+        };
+        let mut decoder = D3d12Decoder::new("refused", params, &device).unwrap();
+        decoder.src_pads()[0].link(Box::new(crate::elements::AppSink::new(
+            "refused-frames",
+            |_| Ok(()),
+        )));
+        for packet in packets {
+            let error = decoder
+                .consume(MediaBuffer::Packet(Arc::new(packet)))
+                .expect_err("the GPU has no VP9 profile 1");
+            assert!(
+                matches!(
+                    error,
+                    crate::error::Error::D3d12DecoderError(D3d12DecoderError::HwAccelUnavailable)
+                ),
+                "every packet after the refusal says why: {error}"
+            );
+        }
     }
 }

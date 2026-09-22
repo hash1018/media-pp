@@ -570,6 +570,12 @@ compile error with no explanation.
 
 ### Fixed
 
+- **A GPU refusing a stream is reported as that.** `D3d11Decoder`,
+  `D3d12Decoder` and `CudaDecoder` returned FFmpeg's `EPERM` and then
+  `AVERROR_INVALIDDATA` for a stream whose profile the GPU lacks — the same
+  errors a damaged stream gives. They now return `HwAccelUnavailable` for
+  every packet after the hardware turned the stream down.
+
 - **The CUDA compositor says its canvas is BT.709, limited range** — which is
   what every fill and blend into it converts with. It said nothing, so
   whatever read it later picked its own answer; swscale's was BT.601. The
