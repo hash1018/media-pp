@@ -12,6 +12,14 @@ compile error with no explanation.
 
 ### Breaking
 
+- **`StreamInfo` carries each stream's parameters and time base, and is no
+  longer `Copy`.** `FileDemuxer::open` and `RtspSource::open` report
+  `parameters` and `time_base` beside `index` and `kind`, so a branch is
+  built from what `open` returned without asking again by index. Holding
+  FFmpeg's parameters makes it `Clone` only; where a `StreamInfo` was
+  copied, clone it or take a reference. `stream_parameters` and
+  `stream_time_base` still answer the same.
+
 - **A muxer's sinks are taken by track, not by position.** Every muxer's
   `add_stream` returns a `MuxerTrack`, and `open` returns `MuxerSinks`
   instead of a `Vec<Box<dyn Sink>>`: each track's sink is taken out with the

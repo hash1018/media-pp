@@ -94,13 +94,7 @@ impl RtspSource {
 
         let input = ffmpeg::format::input_with_dictionary(url.as_ref(), dict)?;
 
-        let streams: Vec<StreamInfo> = input
-            .streams()
-            .map(|s| StreamInfo {
-                index: s.index(),
-                kind: s.parameters().medium(),
-            })
-            .collect();
+        let streams: Vec<StreamInfo> = input.streams().map(|s| StreamInfo::of(&s)).collect();
 
         let pads = streams
             .iter()

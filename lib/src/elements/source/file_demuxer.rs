@@ -31,13 +31,46 @@ pub enum FileDemuxError {
 }
 
 /// Metadata about one stream in an opened container, reported up front so
-/// callers can decide what to build downstream before the pipeline runs.
-#[derive(Debug, Clone, Copy)]
+/// callers can decide what to build downstream before the pipeline runs —
+/// everything a branch for it is built from, without asking again by index.
+#[derive(Clone)]
 pub struct StreamInfo {
     /// Zero-based stream index used by the matching source pad.
     pub index: usize,
     /// Media kind reported by the container, such as audio or video.
     pub kind: ffmpeg::media::Type,
+    /// What a decoder for it is built from — [`crate::elements::SwDecoder`],
+    /// [`crate::elements::VideoDecodeBin`], and the rest.
+    pub parameters: ffmpeg::codec::Parameters,
+    /// The unit its packets' timestamps are in — what a
+    /// [`crate::elements::Pacer`] for it is built with.
+    pub time_base: ffmpeg::Rational,
+}
+
+impl StreamInfo {
+    /// What one of a container's streams says about itself.
+    pub(crate) fn of(stream: &ffmpeg::format::stream::Stream<'_>) -> Self {
+        let parameters = stream.parameters();
+        Self {
+            index: stream.index(),
+            kind: parameters.medium(),
+            parameters,
+            time_base: stream.time_base(),
+        }
+    }
+}
+
+/// By hand, since FFmpeg's parameters have no `Debug` of their own: the
+/// codec stands in for them.
+impl std::fmt::Debug for StreamInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StreamInfo")
+            .field("index", &self.index)
+            .field("kind", &self.kind)
+            .field("codec", &self.parameters.id())
+            .field("time_base", &self.time_base)
+            .finish()
+    }
 }
 
 /// Runtime control for a [`FileDemuxer`], taken with
@@ -182,13 +215,7 @@ impl FileDemuxer {
     ) -> Result<(Self, Vec<StreamInfo>), FileDemuxError> {
         let input = ffmpeg::format::input(&path)?;
 
-        let streams: Vec<StreamInfo> = input
-            .streams()
-            .map(|s| StreamInfo {
-                index: s.index(),
-                kind: s.parameters().medium(),
-            })
-            .collect();
+        let streams: Vec<StreamInfo> = input.streams().map(|s| StreamInfo::of(&s)).collect();
 
         let pads: Vec<SrcPad> = streams
             .iter()
@@ -1468,5 +1495,27 @@ mod tests {
             "and the video is the one to play"
         );
         assert_eq!(demuxer.best_stream(ffmpeg::media::Type::Audio), None);
+    }
+
+    /// What `open` reports for a stream is what asking by its index answers:
+    /// the same codec, the same parameters, the same time base.
+    #[test]
+    fn stream_info_carries_what_the_stream_would_answer() {
+        crate::init().unwrap();
+        let Some(path) = try_test_video() else {
+            return;
+        };
+        let (demuxer, streams) = FileDemuxer::open("info", &path).unwrap();
+        assert!(!streams.is_empty());
+        for info in &streams {
+            let asked = demuxer.stream_parameters(info.index).unwrap();
+            assert_eq!(info.parameters.id(), asked.id());
+            assert_eq!(info.parameters.medium(), info.kind);
+            assert_eq!(Some(info.time_base), demuxer.stream_time_base(info.index));
+            assert!(
+                format!("{info:?}").contains(&format!("{:?}", asked.id())),
+                "its Debug names the codec"
+            );
+        }
     }
 }
