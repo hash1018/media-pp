@@ -44,21 +44,16 @@ enum Kind {
 /// milliseconds at 30 a second on twelve. A file has no deadline and does not
 /// notice; something live does. Codecs that split one picture into
 /// independent pieces — ProRes's slices, VP9's tiles — gain most of it within
-/// one picture, about six and two times, and hold nothing back.
+/// one picture, about six and two times, and hold nothing back — and for one
+/// whose every picture stands alone, several at once gains nothing: at 1080p
+/// ProRes decoded no faster that way, and took 335 MB against 93.
+///
+/// Which suits a stream depends on its codec, its size and what it is for,
+/// so it is the caller's to say; nothing here chooses.
 ///
 /// Audio decoders are left as FFmpeg opens them: none gains anything here.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DecodeThreadKind {
-    /// Chosen by codec: [`Self::Slice`] for one whose every picture stands
-    /// alone and splits into slices — ProRes, DNxHD — and [`Self::Frame`]
-    /// for anything else. For a file.
-    ///
-    /// Several pictures at once decodes such a codec no faster, and keeps a
-    /// copy of the decoder per thread: at 1080p, ProRes took 335 MB that way
-    /// and 93 MB within one picture. A stream split into only a few slices is
-    /// the exception the choice cannot see; [`Self::Frame`] is there for it.
-    #[default]
-    Auto,
     /// Within one picture only, so nothing is held back that a single
     /// thread would not hold. For a live source, whose picture is wanted
     /// now. A codec that cannot split a picture decodes on one thread.
@@ -72,15 +67,14 @@ pub enum DecodeThreadKind {
 /// How many threads a software video decoder has, and how they share the
 /// work.
 ///
-/// The default is every thread the machine has, as [`DecodeThreadKind::Auto`]
-/// chooses — right for one file. Where several decode at once, or share the
-/// machine with an encoder or a compositor, a count keeps them from each
-/// taking all of it; several pictures at once also keeps a copy of the
-/// decoder's state per thread, so the count bounds memory too.
+/// Where several decode at once, or share the machine with an encoder or a
+/// compositor, a count keeps them from each taking all of it; several
+/// pictures at once also keeps a copy of the decoder's state per thread, so
+/// the count bounds memory too.
 ///
 /// Given to [`SwDecoder::with_threading`]. [`SwDecoder::new`] sets none of
 /// this, and decodes on the one thread FFmpeg opens a decoder with.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DecodeThreading {
     /// How many threads; `None` for as many as the machine has, which is
     /// FFmpeg's own choice and capped by it.
@@ -153,15 +147,9 @@ impl SwDecoder {
             use ffmpeg::ffi::{FF_THREAD_FRAME, FF_THREAD_SLICE};
             // Both bits for Frame: FFmpeg takes frame threading where the
             // codec has it and falls back to slices where it does not.
-            let slices = match threading.kind {
-                DecodeThreadKind::Auto => slices_are_enough(context.id()),
-                DecodeThreadKind::Slice => true,
-                DecodeThreadKind::Frame => false,
-            };
-            let kinds = if slices {
-                FF_THREAD_SLICE
-            } else {
-                FF_THREAD_FRAME | FF_THREAD_SLICE
+            let kinds = match threading.kind {
+                DecodeThreadKind::Slice => FF_THREAD_SLICE,
+                DecodeThreadKind::Frame => FF_THREAD_FRAME | FF_THREAD_SLICE,
             };
             // Zero is FFmpeg's own "as many as the machine has".
             let count = threading.threads.map_or(0, |threads| {
@@ -218,34 +206,6 @@ impl SwDecoder {
             pool,
             preroll_gate: PrerollGate::default(),
         })
-    }
-}
-
-/// Whether decoding within one picture already takes every thread `codec`
-/// can use, so that several pictures at once would add nothing but memory.
-///
-/// True of a codec whose every picture stands alone and whose decoder splits
-/// one into independent slices: ProRes, DNxHD. Measured with ProRes 4444 at
-/// 1080p on twelve threads, several pictures at once decoded no faster and
-/// took 335 MB where one picture at a time took 93 — a copy of the decoder
-/// per thread, for nothing. An intra-only codec whose decoder cannot split a
-/// picture, PNG among them, gains only from several at once and keeps it.
-fn slices_are_enough(codec: ffmpeg::codec::Id) -> bool {
-    use ffmpeg::ffi::{
-        AV_CODEC_CAP_SLICE_THREADS, AV_CODEC_PROP_INTRA_ONLY, avcodec_descriptor_get,
-        avcodec_find_decoder,
-    };
-    let id = codec.into();
-    // SAFETY: both are lookups in libavcodec's static tables, which answer
-    // null for a codec they do not have, and what they answer lives as long
-    // as the program.
-    unsafe {
-        let descriptor = avcodec_descriptor_get(id);
-        let decoder = avcodec_find_decoder(id);
-        !descriptor.is_null()
-            && !decoder.is_null()
-            && (*descriptor).props & AV_CODEC_PROP_INTRA_ONLY != 0
-            && (*decoder).capabilities & AV_CODEC_CAP_SLICE_THREADS as i32 != 0
     }
 }
 
@@ -673,7 +633,7 @@ mod tests {
     #[test]
     fn no_count_is_as_many_as_the_machine_has() {
         let cores = std::thread::available_parallelism().map_or(1, usize::from);
-        let (count, _) = threads(&threaded(DecodeThreadKind::Auto, None));
+        let (count, _) = threads(&threaded(DecodeThreadKind::Frame, None));
         if cores > 1 {
             assert!(count > 1, "{count} threads on {cores} cores");
         }
@@ -719,57 +679,6 @@ mod tests {
             before < sent,
             "Frame on four threads holds pictures back ({before} of {sent})"
         );
-    }
-
-    /// ProRes stands alone picture by picture and splits into slices, so
-    /// Auto decodes it within one picture — as fast, and without a copy of
-    /// the decoder per thread; H.264, which does neither, gets several
-    /// pictures at once. Frame still says otherwise for ProRes, for the
-    /// stream Auto cannot see through.
-    #[test]
-    fn auto_decodes_a_codec_whose_pictures_stand_alone_within_one() {
-        let Some((params, packets)) = crate::test_support::try_encoded_packets(
-            "prores_ks",
-            ffmpeg::format::Pixel::YUV422P10LE,
-            (64, 48),
-            2,
-        ) else {
-            return;
-        };
-        let sent = packets.len();
-        let threading = DecodeThreading {
-            threads: std::num::NonZeroU32::new(4),
-            kind: DecodeThreadKind::Auto,
-        };
-        let mut decoder =
-            SwDecoder::with_threading("prores", params.clone(), threading).expect("ProRes opens");
-        let (count, frames) = threads(&decoder);
-        assert_eq!(count, 4, "every thread it was given");
-        assert!(!frames, "spent within one picture");
-
-        let received = link_capture(&mut decoder);
-        for packet in packets {
-            decoder
-                .consume(MediaBuffer::Packet(Arc::new(packet)))
-                .expect("decodes");
-        }
-        assert_eq!(
-            received.lock().unwrap().buffers.len(),
-            sent,
-            "and nothing is held back, as nothing would make it faster"
-        );
-
-        assert!(
-            threads(&threaded(DecodeThreadKind::Auto, Some(4))).1,
-            "H.264 does"
-        );
-
-        let frame = DecodeThreading {
-            kind: DecodeThreadKind::Frame,
-            ..threading
-        };
-        let forced = SwDecoder::with_threading("prores-frame", params, frame).expect("opens");
-        assert!(threads(&forced).1, "and Frame is taken at its word");
     }
 
     /// `new` sets no threading at all: the decoder is what FFmpeg opens,

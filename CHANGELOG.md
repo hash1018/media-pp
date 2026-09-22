@@ -168,10 +168,10 @@ compile error with no explanation.
   and hands each out a picture per thread later. `Slice` works within one
   picture, holds nothing back, and is for a live source: ProRes and VP9,
   which split a picture into slices or tiles, still gain about six and two
-  times. `Auto`, the default, is `Slice` for a codec whose every picture
-  stands alone and splits into slices — ProRes, DNxHD, where several
-  pictures at once is no faster and at 1080p ProRes took 335 MB against 93 —
-  and `Frame` for anything else.
+  times — and a codec whose every picture stands alone gains nothing from
+  `Frame`: at 1080p ProRes decoded no faster and took 335 MB against 93.
+  Which suits a stream depends on its codec and size, so the caller says;
+  nothing chooses for it.
 
 - **`VideoDecodeBin`: a video stream decoded onto a GPU by whichever path
   can take it.** `VideoDecodeBin::open(name, params, target, threading)` takes a
