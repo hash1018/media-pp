@@ -338,10 +338,10 @@ impl Element for D3d11Renderer {
 impl Sink for D3d11Renderer {
     /// Presents a device texture; nothing else has a path to the swap chain.
     fn input_contract(&self) -> InputContract {
-        InputContract::Fixed(PortContract::frame(
-            MediaKind::VideoFrame,
-            MemoryDomain::D3d11,
-        ))
+        InputContract::Fixed(
+            PortContract::frame(MediaKind::VideoFrame, MemoryDomain::D3d11)
+                .with_layouts(crate::contract::PixelLayoutSet::NV12_OR_BGRA),
+        )
     }
 
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {

@@ -7,7 +7,7 @@ use crate::pp_log::{PpLog, pp_info};
 
 use crate::{
     buffer::MediaBuffer,
-    contract::{InputContract, MediaKindSet, MemoryDomainSet, PortContract},
+    contract::{InputContract, MediaKindSet, MemoryDomainSet, PixelLayoutSet, PortContract},
     control::ControlMsg,
     element::{Element, ElementType, Sink, element_pp_log},
     error::Result,
@@ -67,6 +67,7 @@ impl Sink for FrameCounter {
         InputContract::Fixed(PortContract::Frames(
             MediaKindSet::FRAMES,
             MemoryDomainSet::ALL,
+            PixelLayoutSet::ALL,
         ))
     }
 

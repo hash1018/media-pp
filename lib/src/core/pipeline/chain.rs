@@ -776,7 +776,11 @@ pub(crate) fn incoming_from(pad: &SrcPad) -> Option<ResolvedFlow> {
             producer: pad.name().into(),
             contract,
         }),
-        OutputContract::Passthrough | OutputContract::Unknown => None,
+        // A `SameLayout` pad, seen alone, says nothing of the layout it
+        // will put out, for the reason `BranchPlan::resolve` gives.
+        OutputContract::SameLayout(_) | OutputContract::Passthrough | OutputContract::Unknown => {
+            None
+        }
     }
 }
 

@@ -255,10 +255,10 @@ impl D3d11VideoEffect {
 
         let pad = SrcPad::with_contract(
             format!("{name}_src"),
-            OutputContract::Fixed(PortContract::frame(
-                MediaKind::VideoFrame,
-                MemoryDomain::D3d11,
-            )),
+            OutputContract::Fixed(
+                PortContract::frame(MediaKind::VideoFrame, MemoryDomain::D3d11)
+                    .with_layouts(crate::contract::PixelLayoutSet::BGRA),
+            ),
         );
         let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
         pp_info!(pp_log: &pp_log, "created: {} {effect:?}", effect.name());
@@ -488,10 +488,10 @@ impl Source for D3d11VideoEffect {
 impl Sink for D3d11VideoEffect {
     /// Drawn on the GPU; a system-memory frame belongs in SwVideoEffect.
     fn input_contract(&self) -> InputContract {
-        InputContract::Fixed(PortContract::frame(
-            MediaKind::VideoFrame,
-            MemoryDomain::D3d11,
-        ))
+        InputContract::Fixed(
+            PortContract::frame(MediaKind::VideoFrame, MemoryDomain::D3d11)
+                .with_layouts(crate::contract::PixelLayoutSet::BGRA),
+        )
     }
 
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {

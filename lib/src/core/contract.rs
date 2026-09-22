@@ -7,13 +7,24 @@
 //!
 //! What it does *not* do, on purpose: it never picks a codec, never
 //! inserts a converter, never renegotiates mid-stream, and never
-//! reallocates a pool. Pixel format, resolution, stride, color space, and
-//! device identity stay where they already are — validated against the
-//! real buffer when it arrives, by the element that is about to use it.
+//! reallocates a pool. Resolution, stride, color space, device identity and
+//! a format's finer points stay where they already are — validated against
+//! the real buffer when it arrives, by the element that is about to use it.
 //! A contract only rules out wiring that could never have worked at all,
 //! such as feeding encoded packets into an encoder that only accepts
 //! decoded video, wiring a container's audio stream into a video decoder,
-//! or handing a D3D11 texture to a CUDA filter.
+//! handing a D3D11 texture to a CUDA filter, or presenting BGRA through a
+//! renderer that only draws NV12.
+//!
+//! That last one is a frame's [`PixelLayout`], and it is stated only where
+//! construction already settles it — a scaler built to put out NV12, a
+//! renderer that presents NV12 — never guessed. A layout that depends on
+//! the stream is stated as every one it may turn out to be, and one that
+//! follows the input as [`OutputContract::SameLayout`]. Claiming a
+//! narrower set than an element really handles would refuse a pipeline
+//! that works, which is worse than the runtime error the check exists to
+//! bring forward; so where in doubt, an element says
+//! [`PixelLayoutSet::ALL`], which [`PortContract::frame`] starts from.
 //!
 //! Declaring a contract is opt-in: both sides default to
 //! [`InputContract::Unknown`] / [`OutputContract::Unknown`], which always
@@ -294,6 +305,171 @@ impl fmt::Display for MemoryDomainSet {
     }
 }
 
+/// How a decoded video frame's pixels are laid out — the part of its format
+/// an element that reads them is built for.
+///
+/// Only the layouts this crate's GPU paths deal in are told apart: NV12,
+/// what hardware decoders and encoders trade in; P010, the same at 10 bits;
+/// and BGRA, what captures produce and shaders write. Every other format —
+/// planar YUV from a software decoder, a camera's YUY2, audio — is
+/// [`Self::Other`], which is as much as a link check needs to know about it:
+/// that it is none of these.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PixelLayout {
+    /// 8-bit 4:2:0, a luma plane and an interleaved chroma plane.
+    Nv12,
+    /// NV12's layout at 16 bits a sample, 10 of them used.
+    P010,
+    /// 8-bit packed BGRA.
+    Bgra,
+    /// Any other format.
+    Other,
+}
+
+impl PixelLayout {
+    const fn bit(self) -> u8 {
+        match self {
+            PixelLayout::Nv12 => 1 << 0,
+            PixelLayout::P010 => 1 << 1,
+            PixelLayout::Bgra => 1 << 2,
+            PixelLayout::Other => 1 << 3,
+        }
+    }
+
+    const ALL: [PixelLayout; 4] = [
+        PixelLayout::Nv12,
+        PixelLayout::P010,
+        PixelLayout::Bgra,
+        PixelLayout::Other,
+    ];
+
+    /// The layout a frame in `format` has — for a system-memory frame, or
+    /// the `sw_format` of a hardware one.
+    pub fn of(format: ffmpeg::format::Pixel) -> Self {
+        match format {
+            ffmpeg::format::Pixel::NV12 => PixelLayout::Nv12,
+            ffmpeg::format::Pixel::P010LE => PixelLayout::P010,
+            ffmpeg::format::Pixel::BGRA => PixelLayout::Bgra,
+            _ => PixelLayout::Other,
+        }
+    }
+}
+
+impl fmt::Display for PixelLayout {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let name = match self {
+            PixelLayout::Nv12 => "NV12",
+            PixelLayout::P010 => "P010",
+            PixelLayout::Bgra => "BGRA",
+            PixelLayout::Other => "other layouts",
+        };
+        f.write_str(name)
+    }
+}
+
+/// A set of [`PixelLayout`]s — every layout a port's frames may be in.
+///
+/// Compared as the other two sets are: what a producer may emit has to be
+/// a subset of what a consumer can take. [`Self::ALL`] is what an element
+/// says when it does not read pixels, or reads whatever it is given, and is
+/// what [`PortContract::frame`] starts from — so an element that states
+/// nothing about layout links as it always has.
+///
+/// A layout belongs here only where construction already settles it: a
+/// scaler built to put out NV12, an encoder configured for BGRA, a renderer
+/// that presents NV12. Where it depends on the stream — a decoder handing on
+/// NV12 or P010 as the stream turns out — the set holds every one it may
+/// be, and where it follows the input frame by frame, the port says
+/// [`OutputContract::SameLayout`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PixelLayoutSet(u8);
+
+impl PixelLayoutSet {
+    /// Every layout.
+    pub const ALL: Self = Self::from_slice(&PixelLayout::ALL);
+    /// NV12 alone.
+    pub const NV12: Self = Self::of(PixelLayout::Nv12);
+    /// BGRA alone.
+    pub const BGRA: Self = Self::of(PixelLayout::Bgra);
+    /// Any other format alone.
+    pub const OTHER: Self = Self::of(PixelLayout::Other);
+    /// 4:2:0 at 8 or 10 bits — what a hardware video processor or scaler
+    /// reads as Y'CbCr.
+    pub const YUV420: Self = Self::from_slice(&[PixelLayout::Nv12, PixelLayout::P010]);
+    /// NV12 or BGRA — what most of this crate's GPU elements take.
+    pub const NV12_OR_BGRA: Self = Self::from_slice(&[PixelLayout::Nv12, PixelLayout::Bgra]);
+    /// Every layout a GPU scaler here reads.
+    pub const GPU_SCALABLE: Self =
+        Self::from_slice(&[PixelLayout::Nv12, PixelLayout::P010, PixelLayout::Bgra]);
+    /// What a hardware decoder opened for a stream of `format` hands on: NV12
+    /// for 8-bit 4:2:0, P010 for 10-bit, a surface in some other layout for
+    /// anything else — and, where the stream does not say, nothing stated.
+    /// Settled at construction by the parameters it was opened with; a stream
+    /// that changes layout part way is left to the runtime checks, like a
+    /// stream that changes size.
+    pub fn decoded_from(format: ffmpeg::format::Pixel) -> Self {
+        use ffmpeg::format::Pixel;
+        match format {
+            Pixel::None => Self::ALL,
+            Pixel::YUV420P | Pixel::YUVJ420P | Pixel::NV12 => Self::NV12,
+            Pixel::YUV420P10LE | Pixel::YUV420P10BE | Pixel::P010LE | Pixel::P010BE => {
+                Self::of(PixelLayout::P010)
+            }
+            _ => Self::OTHER,
+        }
+    }
+
+    /// A set holding exactly `layout`.
+    pub const fn of(layout: PixelLayout) -> Self {
+        Self(layout.bit())
+    }
+
+    /// A set holding every layout in `layouts`. Duplicates are harmless.
+    pub const fn from_slice(layouts: &[PixelLayout]) -> Self {
+        let mut bits = 0;
+        let mut index = 0;
+        while index < layouts.len() {
+            bits |= layouts[index].bit();
+            index += 1;
+        }
+        Self(bits)
+    }
+
+    /// Returns whether `layout` is in this set.
+    pub const fn contains(self, layout: PixelLayout) -> bool {
+        self.0 & layout.bit() != 0
+    }
+
+    /// Returns whether every layout in this set is also in `other`.
+    pub const fn is_subset_of(self, other: Self) -> bool {
+        self.0 & !other.0 == 0
+    }
+}
+
+impl fmt::Display for PixelLayoutSet {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if *self == Self::ALL {
+            return f.write_str("any layout");
+        }
+        let mut first = true;
+        for layout in PixelLayout::ALL {
+            if !self.contains(layout) {
+                continue;
+            }
+            if !first {
+                f.write_str("|")?;
+            }
+            write!(f, "{layout}")?;
+            first = false;
+        }
+        if first {
+            f.write_str("nothing")
+        } else {
+            Ok(())
+        }
+    }
+}
+
 /// What one port deals in.
 ///
 /// Split by encoding rather than carrying an optional domain, because the
@@ -302,7 +478,8 @@ impl fmt::Display for MemoryDomainSet {
 /// forget one. Decoded frames always live somewhere specific, so
 /// [`Self::Frames`] always states it — an element that genuinely takes any
 /// backend says [`MemoryDomainSet::ALL`], which reads as the deliberate
-/// claim it is rather than as an omission.
+/// claim it is rather than as an omission. The layouts ride along with the
+/// domain, [`PixelLayoutSet::ALL`] unless an element says otherwise.
 ///
 /// The two never link to each other. That falls out of the shape, and it
 /// matches [`MediaKind`]: no packet kind is a frame kind.
@@ -311,8 +488,9 @@ pub enum PortContract {
     /// Encoded media — [`MediaKind::VideoPacket`]/[`MediaKind::AudioPacket`].
     Packets(MediaKindSet),
     /// Decoded frames — [`MediaKind::VideoFrame`]/[`MediaKind::AudioFrame`]
-    /// — together with the backends their memory may live in.
-    Frames(MediaKindSet, MemoryDomainSet),
+    /// — together with the backends their memory may live in and the
+    /// layouts their pixels may be in.
+    Frames(MediaKindSet, MemoryDomainSet, PixelLayoutSet),
 }
 
 impl PortContract {
@@ -321,22 +499,51 @@ impl PortContract {
         Self::Packets(MediaKindSet::of(kind))
     }
 
-    /// One decoded kind in one backend's memory.
+    /// One decoded kind in one backend's memory, in any layout — see
+    /// [`Self::with_layouts`] for saying which.
     pub const fn frame(kind: MediaKind, memory: MemoryDomain) -> Self {
-        Self::Frames(MediaKindSet::of(kind), MemoryDomainSet::of(memory))
+        Self::Frames(
+            MediaKindSet::of(kind),
+            MemoryDomainSet::of(memory),
+            PixelLayoutSet::ALL,
+        )
     }
 
     /// One decoded kind, wherever it lives — for an element that forwards
     /// or counts frames without reading them.
     pub const fn any_frame(kind: MediaKind) -> Self {
-        Self::Frames(MediaKindSet::of(kind), MemoryDomainSet::ALL)
+        Self::Frames(
+            MediaKindSet::of(kind),
+            MemoryDomainSet::ALL,
+            PixelLayoutSet::ALL,
+        )
+    }
+
+    /// The same, its frames only ever in `layouts`. Encoded media has no
+    /// layout, and is returned as it is.
+    pub const fn with_layouts(self, layouts: PixelLayoutSet) -> Self {
+        match self {
+            Self::Frames(kinds, memory, _) => Self::Frames(kinds, memory, layouts),
+            packets => packets,
+        }
+    }
+
+    /// The layouts its frames may be in — every one, for encoded media,
+    /// which has none to rule out.
+    pub const fn layouts(&self) -> PixelLayoutSet {
+        match self {
+            Self::Frames(_, _, layouts) => *layouts,
+            Self::Packets(_) => PixelLayoutSet::ALL,
+        }
     }
 
     /// Returns whether a producer emitting `produced` can feed a consumer
     /// accepting `self`.
     ///
     /// Every kind the producer may emit has to be accepted, and so does
-    /// every domain its frames may live in. Encoded media and decoded
+    /// every domain its frames may live in. So does every layout they may be
+    /// in, where the producer states any: [`PixelLayoutSet::ALL`] from a
+    /// producer is its saying nothing, and is not checked. Encoded media and decoded
     /// frames never satisfy each other.
     pub fn accepts(&self, produced: &PortContract) -> bool {
         match (self, produced) {
@@ -344,9 +551,16 @@ impl PortContract {
                 produced.is_subset_of(*accepted)
             }
             (
-                PortContract::Frames(accepted, accepted_memory),
-                PortContract::Frames(produced, produced_memory),
-            ) => produced.is_subset_of(*accepted) && produced_memory.is_subset_of(*accepted_memory),
+                PortContract::Frames(accepted, accepted_memory, accepted_layouts),
+                PortContract::Frames(produced, produced_memory, produced_layouts),
+            ) => {
+                // A producer that states no layout is not held to one: it is
+                // a claim it did not make, not every layout at once.
+                produced.is_subset_of(*accepted)
+                    && produced_memory.is_subset_of(*accepted_memory)
+                    && (*produced_layouts == PixelLayoutSet::ALL
+                        || produced_layouts.is_subset_of(*accepted_layouts))
+            }
             _ => false,
         }
     }
@@ -356,7 +570,12 @@ impl fmt::Display for PortContract {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             PortContract::Packets(kinds) => write!(f, "{kinds}"),
-            PortContract::Frames(kinds, memory) => write!(f, "{kinds} ({memory})"),
+            PortContract::Frames(kinds, memory, layouts) if *layouts == PixelLayoutSet::ALL => {
+                write!(f, "{kinds} ({memory})")
+            }
+            PortContract::Frames(kinds, memory, layouts) => {
+                write!(f, "{kinds} ({memory}, {layouts})")
+            }
         }
     }
 }
@@ -406,6 +625,14 @@ pub enum OutputContract {
     /// This pad emits exactly this and nothing else.
     Fixed(PortContract),
 
+    /// This, in the layout that arrived — for an element that changes what a
+    /// frame is or where it lives but not how its pixels are laid out: a
+    /// resize-only scaler. The contract's own layouts are every one it can
+    /// be given. Where nothing upstream says what it will be given, nothing
+    /// downstream is checked against it — assuming every layout would refuse
+    /// a consumer that takes only the one it will turn out to pass on.
+    SameLayout(PortContract),
+
     /// Whatever arrived on the input leaves here unchanged — a
     /// [`Queue`](crate::queue::Queue), a [`Tee`](crate::elements::Tee), a
     /// [`Pacer`](crate::elements::Pacer). This is what keeps a check alive
@@ -422,6 +649,9 @@ impl fmt::Display for OutputContract {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             OutputContract::Fixed(contract) => write!(f, "{contract}"),
+            OutputContract::SameLayout(contract) => {
+                write!(f, "{contract}, in the layout it receives")
+            }
             OutputContract::Passthrough => f.write_str("whatever it receives"),
             OutputContract::Unknown => f.write_str("unknown"),
         }
@@ -435,7 +665,11 @@ mod tests {
     #[test]
     fn a_producers_kinds_must_all_be_accepted() {
         let video_only = PortContract::any_frame(MediaKind::VideoFrame);
-        let both = PortContract::Frames(MediaKindSet::FRAMES, MemoryDomainSet::ALL);
+        let both = PortContract::Frames(
+            MediaKindSet::FRAMES,
+            MemoryDomainSet::ALL,
+            PixelLayoutSet::ALL,
+        );
 
         assert!(video_only.accepts(&video_only));
         assert!(both.accepts(&video_only));
@@ -463,7 +697,11 @@ mod tests {
     #[test]
     fn packets_and_frames_never_link() {
         let packets = PortContract::Packets(MediaKindSet::PACKETS);
-        let frames = PortContract::Frames(MediaKindSet::FRAMES, MemoryDomainSet::ALL);
+        let frames = PortContract::Frames(
+            MediaKindSet::FRAMES,
+            MemoryDomainSet::ALL,
+            PixelLayoutSet::ALL,
+        );
 
         assert!(!packets.accepts(&frames));
         assert!(!frames.accepts(&packets));
@@ -519,5 +757,60 @@ mod tests {
             "VideoFrame (any memory)"
         );
         assert_eq!(MediaKindSet::PACKETS.to_string(), "VideoPacket|AudioPacket");
+    }
+
+    /// The case layouts exist for: a CUDA decoder line that may put out
+    /// BGRA cannot feed a renderer that presents NV12, though both are CUDA
+    /// video frames — while one that puts out NV12 can, and a port that
+    /// states no layout takes either.
+    #[test]
+    fn every_layout_a_producer_may_emit_must_be_accepted() {
+        let cuda = PortContract::frame(MediaKind::VideoFrame, MemoryDomain::Cuda);
+        let renderer = cuda.with_layouts(PixelLayoutSet::of(PixelLayout::Nv12));
+        let nv12 = cuda.with_layouts(PixelLayoutSet::of(PixelLayout::Nv12));
+        let bgra = cuda.with_layouts(PixelLayoutSet::of(PixelLayout::Bgra));
+        let either = cuda.with_layouts(PixelLayoutSet::from_slice(&[
+            PixelLayout::Nv12,
+            PixelLayout::P010,
+        ]));
+
+        assert!(renderer.accepts(&nv12));
+        assert!(!renderer.accepts(&bgra));
+        assert!(!renderer.accepts(&either), "P010 has nowhere to go");
+        assert!(cuda.accepts(&bgra), "no layout stated takes any");
+        assert!(
+            renderer.accepts(&cuda),
+            "a producer stating no layout is not held to one"
+        );
+    }
+
+    #[test]
+    fn layouts_render_for_diagnostics_only_when_narrowed() {
+        let d3d11 = PortContract::frame(MediaKind::VideoFrame, MemoryDomain::D3d11);
+        assert_eq!(d3d11.to_string(), "VideoFrame (D3D11)");
+        assert_eq!(
+            d3d11
+                .with_layouts(PixelLayoutSet::from_slice(&[
+                    PixelLayout::Nv12,
+                    PixelLayout::Bgra
+                ]))
+                .to_string(),
+            "VideoFrame (D3D11, NV12|BGRA)"
+        );
+        assert_eq!(
+            PortContract::packet(MediaKind::VideoPacket)
+                .with_layouts(PixelLayoutSet::of(PixelLayout::Nv12)),
+            PortContract::packet(MediaKind::VideoPacket),
+            "encoded media has no layout to narrow"
+        );
+    }
+
+    #[test]
+    fn a_format_maps_to_its_layout() {
+        use ffmpeg::format::Pixel;
+        assert_eq!(PixelLayout::of(Pixel::NV12), PixelLayout::Nv12);
+        assert_eq!(PixelLayout::of(Pixel::P010LE), PixelLayout::P010);
+        assert_eq!(PixelLayout::of(Pixel::BGRA), PixelLayout::Bgra);
+        assert_eq!(PixelLayout::of(Pixel::YUV420P), PixelLayout::Other);
     }
 }

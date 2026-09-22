@@ -913,11 +913,16 @@ fn a_passthrough_at_the_head_of_a_branch_still_carries_the_downstream_requiremen
 }
 
 /// The same shape with the upload that was missing, to prove the walk is
-/// not simply refusing every branch that starts with a passthrough stage.
+/// not simply refusing every branch that starts with a passthrough stage —
+/// and the scaler to NV12 the upload takes, the test source putting out
+/// YUV420P, which the layout check now refuses as the upload would have
+/// frame by frame.
 #[cfg(all(target_os = "windows", feature = "d3d11"))]
 #[test]
 fn a_passthrough_at_the_head_of_a_branch_accepts_a_matching_source() {
-    use crate::elements::{D3d11Upload, TestVideoOptions, TestVideoSource, VideoSynchronizer};
+    use crate::elements::{
+        D3d11Upload, SwScaler, TestVideoOptions, TestVideoSource, VideoSynchronizer,
+    };
 
     let Some((device, _d3d_context)) = crate::test_support::try_d3d11_device() else {
         eprintln!("skipped: no D3D11 hardware device available");
@@ -935,6 +940,13 @@ fn a_passthrough_at_the_head_of_a_branch_accepts_a_matching_source() {
             VideoSynchronizer::new("sync", ffmpeg::Rational::new(1, 90_000))
                 .expect("a valid time base opens the synchronizer"),
         )
+        .pipe(SwScaler::new(
+            "nv12",
+            ffmpeg::format::Pixel::NV12,
+            64,
+            64,
+            ffmpeg::software::scaling::Flags::BILINEAR,
+        ))
         .pipe(D3d11Upload::new("upload", &device, 64, 64))
         .to(renderer)
         .expect("the branch itself is consistent");
@@ -1132,4 +1144,170 @@ fn detaching_a_dynamic_tee_branch_releases_its_resolved_contracts() {
         baseline,
         "detaching must release every resolved contract owned by the branch"
     );
+}
+
+// ---------------------------------------------------------------------
+// Pixel layouts: a mismatch refused before anything runs, and a
+// `SameLayout` stage carrying on what it was given.
+// ---------------------------------------------------------------------
+
+/// A filter declaring whatever a layout test needs: it takes CUDA video in
+/// any layout and puts out `output`.
+struct DeclaringFilter {
+    name: Arc<str>,
+    pp_log: PpLog,
+    pad: SrcPad,
+}
+
+impl DeclaringFilter {
+    fn new(name: &'static str, output: OutputContract) -> Self {
+        Self {
+            name: name.into(),
+            pp_log: element_pp_log(ElementType::Other, name, None),
+            pad: SrcPad::with_contract(format!("{name}_src"), output),
+        }
+    }
+}
+
+impl Element for DeclaringFilter {
+    fn name(&self) -> Arc<str> {
+        self.name.clone()
+    }
+
+    fn element_type(&self) -> ElementType {
+        ElementType::Other
+    }
+
+    fn pp_log(&self) -> &PpLog {
+        &self.pp_log
+    }
+
+    fn pp_log_mut(&mut self) -> &mut PpLog {
+        &mut self.pp_log
+    }
+}
+
+impl Source for DeclaringFilter {
+    fn src_pads(&mut self) -> &mut [SrcPad] {
+        std::slice::from_mut(&mut self.pad)
+    }
+}
+
+impl Sink for DeclaringFilter {
+    fn input_contract(&self) -> InputContract {
+        InputContract::Fixed(cuda_video())
+    }
+
+    fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+        self.pad.push(buf)
+    }
+
+    fn control(&mut self, msg: ControlMsg) -> Result<()> {
+        self.pad.control(msg)
+    }
+}
+
+fn cuda_video() -> PortContract {
+    PortContract::frame(MediaKind::VideoFrame, MemoryDomain::Cuda)
+}
+
+fn cuda_in(layout: PixelLayout) -> PortContract {
+    cuda_video().with_layouts(PixelLayoutSet::of(layout))
+}
+
+/// The `hw_decode_render` case: a CUDA stage putting out BGRA cannot feed
+/// a renderer that presents NV12, and the refusal comes before anything
+/// runs, naming both.
+#[test]
+fn a_layout_the_consumer_cannot_take_is_refused_before_anything_runs() {
+    let Err(error) = contract_context()
+        .branch()
+        .pipe(DeclaringFilter::new(
+            "decoder",
+            OutputContract::Fixed(cuda_in(PixelLayout::Bgra)),
+        ))
+        .queue("q", 4)
+        .to(DeclaringSink::boxed(
+            "renderer",
+            InputContract::Fixed(cuda_in(PixelLayout::Nv12)),
+        ))
+    else {
+        panic!("BGRA cannot be presented by an NV12 renderer");
+    };
+    let crate::Error::GraphError(GraphError::IncompatibleLink {
+        producer, consumer, ..
+    }) = &error
+    else {
+        panic!("expected an IncompatibleLink, got {error}");
+    };
+    assert_eq!((&**producer, &**consumer), ("decoder", "renderer"));
+    assert!(error.to_string().contains("BGRA"), "{error}");
+
+    contract_context()
+        .branch()
+        .pipe(DeclaringFilter::new(
+            "decoder",
+            OutputContract::Fixed(cuda_in(PixelLayout::Nv12)),
+        ))
+        .queue("q", 4)
+        .to(DeclaringSink::boxed(
+            "renderer",
+            InputContract::Fixed(cuda_in(PixelLayout::Nv12)),
+        ))
+        .expect("NV12 into an NV12 renderer links");
+}
+
+/// A resize-only stage passes on the layout it was given: NV12 through it
+/// reaches an NV12 renderer, and BGRA through it is refused — named as
+/// coming from the stage, which is what puts it on the wire.
+#[test]
+fn a_same_layout_stage_carries_on_the_layout_it_was_given() {
+    let scaler =
+        || {
+            DeclaringFilter::new(
+                "scaler",
+                OutputContract::SameLayout(cuda_video().with_layouts(PixelLayoutSet::from_slice(
+                    &[PixelLayout::Nv12, PixelLayout::P010, PixelLayout::Bgra],
+                ))),
+            )
+        };
+    let through = |layout| {
+        contract_context()
+            .branch()
+            .pipe(DeclaringFilter::new(
+                "decoder",
+                OutputContract::Fixed(cuda_in(layout)),
+            ))
+            .pipe(scaler())
+            .queue("q", 4)
+            .to(DeclaringSink::boxed(
+                "renderer",
+                InputContract::Fixed(cuda_in(PixelLayout::Nv12)),
+            ))
+    };
+    through(PixelLayout::Nv12).expect("NV12 stays NV12 through a resize");
+    let Err(crate::Error::GraphError(GraphError::IncompatibleLink { producer, .. })) =
+        through(PixelLayout::Bgra)
+    else {
+        panic!("BGRA stays BGRA through a resize, which the renderer cannot take");
+    };
+    assert_eq!(&*producer, "scaler");
+}
+
+/// With nothing upstream saying what a `SameLayout` stage will be given,
+/// nothing is refused on its account — every layout it could put out would
+/// refuse a renderer that takes the one it will turn out to pass on.
+#[test]
+fn a_same_layout_stage_with_nothing_known_upstream_refuses_nothing() {
+    contract_context()
+        .branch()
+        .pipe(DeclaringFilter::new(
+            "scaler",
+            OutputContract::SameLayout(cuda_video()),
+        ))
+        .to(DeclaringSink::boxed(
+            "renderer",
+            InputContract::Fixed(cuda_in(PixelLayout::Nv12)),
+        ))
+        .expect("an unknown layout is left to the frames themselves");
 }

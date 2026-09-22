@@ -223,10 +223,10 @@ impl D3d11ToneMap {
 
         let pad = SrcPad::with_contract(
             format!("{name}_src"),
-            OutputContract::Fixed(PortContract::frame(
-                MediaKind::VideoFrame,
-                MemoryDomain::D3d11,
-            )),
+            OutputContract::Fixed(
+                PortContract::frame(MediaKind::VideoFrame, MemoryDomain::D3d11)
+                    .with_layouts(crate::contract::PixelLayoutSet::BGRA),
+            ),
         );
         pp_info!(pp_log: &pp_log, "created");
         Ok(Self {
@@ -430,10 +430,10 @@ impl Source for D3d11ToneMap {
 impl Sink for D3d11ToneMap {
     /// Drawn on the GPU from a D3D11 texture.
     fn input_contract(&self) -> InputContract {
-        InputContract::Fixed(PortContract::frame(
-            MediaKind::VideoFrame,
-            MemoryDomain::D3d11,
-        ))
+        InputContract::Fixed(
+            PortContract::frame(MediaKind::VideoFrame, MemoryDomain::D3d11)
+                .with_layouts(crate::contract::PixelLayoutSet::YUV420),
+        )
     }
 
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {

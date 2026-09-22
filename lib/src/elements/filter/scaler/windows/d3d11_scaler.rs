@@ -422,12 +422,22 @@ impl D3d11Scaler {
             context.cast()?
         };
         let video_device: ID3D11VideoDevice = device.cast()?;
+        // Built for a layout, it puts out that one; `Preserve` keeps the
+        // input's, whichever that is.
+        let d3d11_video = PortContract::frame(MediaKind::VideoFrame, MemoryDomain::D3d11);
         let pad = SrcPad::with_contract(
             format!("{name}_src"),
-            OutputContract::Fixed(PortContract::frame(
-                MediaKind::VideoFrame,
-                MemoryDomain::D3d11,
-            )),
+            match format {
+                D3d11ScalerFormat::Nv12 => OutputContract::Fixed(
+                    d3d11_video.with_layouts(crate::contract::PixelLayoutSet::NV12),
+                ),
+                D3d11ScalerFormat::Bgra => OutputContract::Fixed(
+                    d3d11_video.with_layouts(crate::contract::PixelLayoutSet::BGRA),
+                ),
+                D3d11ScalerFormat::Preserve => OutputContract::SameLayout(
+                    d3d11_video.with_layouts(crate::contract::PixelLayoutSet::GPU_SCALABLE),
+                ),
+            },
         );
         let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
         pp_info!(pp_log: &pp_log, "opened: dst={width}x{height} {format:?}");
@@ -706,10 +716,10 @@ impl Source for D3d11Scaler {
 impl Sink for D3d11Scaler {
     /// Scaling happens on the GPU; a system-memory frame belongs in SwScaler.
     fn input_contract(&self) -> InputContract {
-        InputContract::Fixed(PortContract::frame(
-            MediaKind::VideoFrame,
-            MemoryDomain::D3d11,
-        ))
+        InputContract::Fixed(
+            PortContract::frame(MediaKind::VideoFrame, MemoryDomain::D3d11)
+                .with_layouts(crate::contract::PixelLayoutSet::GPU_SCALABLE),
+        )
     }
 
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {

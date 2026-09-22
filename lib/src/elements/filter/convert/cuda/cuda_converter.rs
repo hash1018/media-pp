@@ -213,10 +213,10 @@ impl CudaConverter {
 
         let pad = SrcPad::with_contract(
             format!("{name}_src"),
-            OutputContract::Fixed(PortContract::frame(
-                MediaKind::VideoFrame,
-                MemoryDomain::Cuda,
-            )),
+            OutputContract::Fixed(
+                PortContract::frame(MediaKind::VideoFrame, MemoryDomain::Cuda)
+                    .with_layouts(output.layouts()),
+            ),
         );
         let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
         pp_info!(
@@ -456,10 +456,14 @@ impl Source for CudaConverter {
 impl Sink for CudaConverter {
     /// Converts pixel layout on the device; the layout itself is a runtime value, not part of this.
     fn input_contract(&self) -> InputContract {
-        InputContract::Fixed(PortContract::frame(
-            MediaKind::VideoFrame,
-            MemoryDomain::Cuda,
-        ))
+        InputContract::Fixed(
+            PortContract::frame(MediaKind::VideoFrame, MemoryDomain::Cuda).with_layouts(match self
+                .output
+            {
+                CudaFrameFormat::Nv12 => crate::contract::PixelLayoutSet::BGRA,
+                CudaFrameFormat::Bgra => crate::contract::PixelLayoutSet::YUV420,
+            }),
+        )
     }
 
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {

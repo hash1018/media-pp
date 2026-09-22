@@ -121,10 +121,10 @@ impl TestVideoSource {
         let pp_log = element_pp_log(ElementType::TestVideoSource, &name, None);
         let pad = SrcPad::with_contract(
             format!("{name}_src"),
-            OutputContract::Fixed(PortContract::frame(
-                MediaKind::VideoFrame,
-                MemoryDomain::System,
-            )),
+            OutputContract::Fixed(
+                PortContract::frame(MediaKind::VideoFrame, MemoryDomain::System)
+                    .with_layouts(crate::contract::PixelLayoutSet::OTHER),
+            ),
         );
         pp_info!(
             pp_log: &pp_log,

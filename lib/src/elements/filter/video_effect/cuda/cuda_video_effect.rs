@@ -171,10 +171,10 @@ impl CudaVideoEffect {
 
         let pad = SrcPad::with_contract(
             format!("{name}_src"),
-            OutputContract::Fixed(PortContract::frame(
-                MediaKind::VideoFrame,
-                MemoryDomain::Cuda,
-            )),
+            OutputContract::Fixed(
+                PortContract::frame(MediaKind::VideoFrame, MemoryDomain::Cuda)
+                    .with_layouts(crate::contract::PixelLayoutSet::BGRA),
+            ),
         );
         let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
         pp_info!(
@@ -366,10 +366,10 @@ impl Sink for CudaVideoEffect {
     /// Device-resident frames; the surface layout it needs is a runtime
     /// value, not part of this.
     fn input_contract(&self) -> InputContract {
-        InputContract::Fixed(PortContract::frame(
-            MediaKind::VideoFrame,
-            MemoryDomain::Cuda,
-        ))
+        InputContract::Fixed(
+            PortContract::frame(MediaKind::VideoFrame, MemoryDomain::Cuda)
+                .with_layouts(crate::contract::PixelLayoutSet::BGRA),
+        )
     }
 
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {

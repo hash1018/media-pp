@@ -118,10 +118,13 @@ impl SwScaler {
         );
         let pad = SrcPad::with_contract(
             format!("{name}_src"),
-            OutputContract::Fixed(PortContract::frame(
-                MediaKind::VideoFrame,
-                MemoryDomain::System,
-            )),
+            OutputContract::Fixed(
+                PortContract::frame(MediaKind::VideoFrame, MemoryDomain::System).with_layouts(
+                    crate::contract::PixelLayoutSet::of(crate::contract::PixelLayout::of(
+                        dst_format,
+                    )),
+                ),
+            ),
         );
         let pool = UnboundObjectPool::new(
             POOL_SIZE,

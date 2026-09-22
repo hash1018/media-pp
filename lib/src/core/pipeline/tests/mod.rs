@@ -11,7 +11,10 @@ use std::{
 use super::*;
 use ffmpeg_next::{self as ffmpeg, Rescale};
 
-use crate::contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract};
+use crate::contract::{
+    InputContract, MediaKind, MemoryDomain, OutputContract, PixelLayout, PixelLayoutSet,
+    PortContract,
+};
 use crate::elements::{
     FileDemuxer, Pacer, SwDecoder, TeeBuilder, TestAudioOptions, TestAudioSource, TestVideoOptions,
     TestVideoSource,

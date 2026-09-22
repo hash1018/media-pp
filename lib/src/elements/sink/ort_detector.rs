@@ -266,10 +266,10 @@ where
 {
     /// Reads the pixels on the CPU to build its input tensor.
     fn input_contract(&self) -> InputContract {
-        InputContract::Fixed(PortContract::frame(
-            MediaKind::VideoFrame,
-            MemoryDomain::System,
-        ))
+        InputContract::Fixed(
+            PortContract::frame(MediaKind::VideoFrame, MemoryDomain::System)
+                .with_layouts(crate::contract::PixelLayoutSet::OTHER),
+        )
     }
 
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {

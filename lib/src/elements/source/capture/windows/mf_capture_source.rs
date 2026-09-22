@@ -359,10 +359,10 @@ impl MfCaptureSource {
 
         let pad = SrcPad::with_contract(
             format!("{name}_src"),
-            OutputContract::Fixed(PortContract::frame(
-                MediaKind::VideoFrame,
-                MemoryDomain::System,
-            )),
+            OutputContract::Fixed(
+                PortContract::frame(MediaKind::VideoFrame, MemoryDomain::System)
+                    .with_layouts(crate::contract::PixelLayoutSet::NV12),
+            ),
         );
 
         Ok((

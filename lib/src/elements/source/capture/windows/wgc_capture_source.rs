@@ -644,10 +644,10 @@ fn validate_options(options: &WgcCaptureOptions) -> std::result::Result<(), WgcC
 }
 
 fn output_contract() -> OutputContract {
-    OutputContract::Fixed(PortContract::frame(
-        MediaKind::VideoFrame,
-        MemoryDomain::D3d11,
-    ))
+    OutputContract::Fixed(
+        PortContract::frame(MediaKind::VideoFrame, MemoryDomain::D3d11)
+            .with_layouts(crate::contract::PixelLayoutSet::BGRA),
+    )
 }
 
 struct ProcessHandle(HANDLE);

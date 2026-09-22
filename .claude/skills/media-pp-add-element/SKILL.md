@@ -25,10 +25,14 @@ name.
   `Unknown`, so a new element that skips this silently opts out of the check
   and the wiring mistake it would have caught surfaces per buffer at runtime
   instead. State only what construction already settles — the `MediaKind`s the
-  port deals in, and the `MemoryDomain` for a decoded frame. Pixel format,
-  resolution, stride, color space, and device identity stay in the runtime
-  validation below; a contract that claims more than the element can promise
-  refuses a pipeline that works, which is worse than declaring nothing.
+  port deals in, and for a decoded frame its `MemoryDomain` and, where fixed,
+  its `PixelLayout`s: every layout the runtime validation lets through, never
+  fewer, `OutputContract::SameLayout` for an output that follows the input's
+  layout, and `PixelLayoutSet::ALL` where it depends on something only a
+  frame says. Resolution, stride, color space, device identity and a format's
+  finer points stay in the runtime validation below; a contract that claims
+  more than the element can promise refuses a pipeline that works, which is
+  worse than declaring nothing.
 - Use `Any` only for an element that genuinely handles every kind, and pair it
   with `OutputContract::Passthrough` when it forwards what it received — that
   combination is what keeps a contract propagating to the elements downstream.

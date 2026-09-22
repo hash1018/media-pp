@@ -244,12 +244,17 @@ impl CudaScaler {
         // identity from being reused by a different context.
         let device_ctx = unsafe { (*hw_device_ctx.as_ptr()).data as *const ffi::AVHWDeviceContext };
 
+        // Built for a layout, it puts out that one; built to keep the
+        // input's, whichever that is.
+        let cuda_video = PortContract::frame(MediaKind::VideoFrame, MemoryDomain::Cuda);
         let pad = SrcPad::with_contract(
             format!("{name}_src"),
-            OutputContract::Fixed(PortContract::frame(
-                MediaKind::VideoFrame,
-                MemoryDomain::Cuda,
-            )),
+            match format {
+                Some(format) => OutputContract::Fixed(cuda_video.with_layouts(format.layouts())),
+                None => OutputContract::SameLayout(
+                    cuda_video.with_layouts(crate::contract::PixelLayoutSet::GPU_SCALABLE),
+                ),
+            },
         );
         pp_info!(
             pp_log: &pp_log,
@@ -373,10 +378,15 @@ impl Source for CudaScaler {
 impl Sink for CudaScaler {
     /// Resizes on the device; a system-memory frame belongs in SwScaler.
     fn input_contract(&self) -> InputContract {
-        InputContract::Fixed(PortContract::frame(
-            MediaKind::VideoFrame,
-            MemoryDomain::Cuda,
-        ))
+        InputContract::Fixed(
+            PortContract::frame(MediaKind::VideoFrame, MemoryDomain::Cuda).with_layouts(match self
+                .format
+            {
+                None => crate::contract::PixelLayoutSet::GPU_SCALABLE,
+                Some(CudaFrameFormat::Nv12) => crate::contract::PixelLayoutSet::YUV420,
+                Some(CudaFrameFormat::Bgra) => crate::contract::PixelLayoutSet::BGRA,
+            }),
+        )
     }
 
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {

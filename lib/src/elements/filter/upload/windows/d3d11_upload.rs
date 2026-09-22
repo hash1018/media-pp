@@ -156,10 +156,10 @@ impl D3d11Upload {
         let pp_log = element_pp_log(ElementType::D3d11Upload, &name, None);
         let pad = SrcPad::with_contract(
             format!("{name}_src"),
-            OutputContract::Fixed(PortContract::frame(
-                MediaKind::VideoFrame,
-                MemoryDomain::D3d11,
-            )),
+            OutputContract::SameLayout(
+                PortContract::frame(MediaKind::VideoFrame, MemoryDomain::D3d11)
+                    .with_layouts(crate::contract::PixelLayoutSet::NV12_OR_BGRA),
+            ),
         );
         let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
         pp_info!(pp_log: &pp_log, "opened: {width}x{height}");
@@ -305,10 +305,10 @@ impl Source for D3d11Upload {
 impl Sink for D3d11Upload {
     /// CPU-readable planes specifically: uploading is what this element does, so a frame already on the device has no work here.
     fn input_contract(&self) -> InputContract {
-        InputContract::Fixed(PortContract::frame(
-            MediaKind::VideoFrame,
-            MemoryDomain::System,
-        ))
+        InputContract::Fixed(
+            PortContract::frame(MediaKind::VideoFrame, MemoryDomain::System)
+                .with_layouts(crate::contract::PixelLayoutSet::NV12_OR_BGRA),
+        )
     }
 
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {

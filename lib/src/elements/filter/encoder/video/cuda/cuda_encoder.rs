@@ -456,10 +456,10 @@ impl Source for CudaEncoder {
 impl Sink for CudaEncoder {
     /// NVENC reads device memory directly; a system-memory frame needs a CudaUpload first.
     fn input_contract(&self) -> InputContract {
-        InputContract::Fixed(PortContract::frame(
-            MediaKind::VideoFrame,
-            MemoryDomain::Cuda,
-        ))
+        InputContract::Fixed(
+            PortContract::frame(MediaKind::VideoFrame, MemoryDomain::Cuda)
+                .with_layouts(self.input_format.layouts()),
+        )
     }
 
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {

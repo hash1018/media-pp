@@ -245,6 +245,15 @@ pub enum D3d11VideoInputFormat {
 }
 
 impl D3d11VideoInputFormat {
+    /// The one layout a texture in this format is in, as a link contract
+    /// states it.
+    const fn layouts(self) -> crate::contract::PixelLayoutSet {
+        match self {
+            Self::Nv12 => crate::contract::PixelLayoutSet::NV12,
+            Self::Bgra => crate::contract::PixelLayoutSet::BGRA,
+        }
+    }
+
     fn sw_format(self) -> ffi::AVPixelFormat {
         match self {
             Self::Nv12 => ffi::AVPixelFormat::AV_PIX_FMT_NV12,
@@ -847,10 +856,10 @@ impl Source for D3d11VideoEncoder {
 impl Sink for D3d11VideoEncoder {
     /// The encoder reads the texture directly; a system-memory frame needs a D3d11Upload first.
     fn input_contract(&self) -> InputContract {
-        InputContract::Fixed(PortContract::frame(
-            MediaKind::VideoFrame,
-            MemoryDomain::D3d11,
-        ))
+        InputContract::Fixed(
+            PortContract::frame(MediaKind::VideoFrame, MemoryDomain::D3d11)
+                .with_layouts(self.input_format.layouts()),
+        )
     }
 
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {

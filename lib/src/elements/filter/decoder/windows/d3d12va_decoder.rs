@@ -148,10 +148,11 @@ impl D3d12Decoder {
 
         let pad = SrcPad::with_contract(
             format!("{name}_src"),
-            OutputContract::Fixed(PortContract::frame(
-                MediaKind::VideoFrame,
-                MemoryDomain::D3d12,
-            )),
+            OutputContract::Fixed(
+                PortContract::frame(MediaKind::VideoFrame, MemoryDomain::D3d12).with_layouts(
+                    crate::contract::PixelLayoutSet::decoded_from(decoder.format()),
+                ),
+            ),
         );
         let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
         pp_info!(pp_log: &pp_log, "opened: codec={:?}", decoder.id());

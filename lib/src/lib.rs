@@ -115,8 +115,8 @@
 //!
 //! Building a branch refuses a connection that could never carry data —
 //! encoded packets into something that takes frames, an audio stream into a
-//! video decoder, a D3D11 texture into a CPU or CUDA filter — before anything
-//! runs:
+//! video decoder, a D3D11 texture into a CPU or CUDA filter, BGRA into a
+//! renderer that presents NV12 — before anything runs:
 //!
 //! ```text
 //! decoder produces VideoFrame (System), which rec cannot accept
@@ -124,9 +124,10 @@
 //! ```
 //!
 //! It compares only what an element knows when it is constructed: the media
-//! kind, and for a decoded frame the memory domain. It is not caps
-//! negotiation — nothing is converted or renegotiated — and pixel format, size
-//! and device are still checked against each real buffer. An element that
+//! kind, and for a decoded frame the memory domain and, where construction
+//! settles it, the pixel layout (NV12, P010, BGRA or other). It is not caps
+//! negotiation — nothing is converted or renegotiated — and size, format
+//! details and device are still checked against each real buffer. An element that
 //! declares nothing always links. See [`contract`].
 //!
 //! # Watching it run

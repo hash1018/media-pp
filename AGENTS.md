@@ -99,10 +99,16 @@ final source of truth when documentation and implementation differ.
 - Declare a new element's link contract through `Sink::input_contract` and
   `SrcPad::with_contract`, limited to what construction already settles: the
   `MediaKind`s a port deals in, and for a decoded one the `MemoryDomain`s its
-  frames may live in. `PortContract::Packets` has no domain field at all,
-  since encoded media is always host memory; `PortContract::Frames` always
-  states one, and an element that takes any backend says `MemoryDomainSet::ALL`
-  rather than leaving a blank. This never replaces the runtime validation above
+  frames may live in and the `PixelLayout`s (NV12, P010, BGRA, other) they may
+  be in. `PortContract::Packets` has no domain or layout at all, since encoded
+  media is always host memory; `PortContract::Frames` always states both, and
+  an element that takes any backend says `MemoryDomainSet::ALL` rather than
+  leaving a blank. State a layout set only where construction settles it — a
+  scaler built for NV12 output, a renderer that presents NV12 — as every layout
+  the runtime check lets through, never fewer; a layout that depends on the
+  stream is every one it may be, one that follows the input is
+  `OutputContract::SameLayout`, and in doubt it is `PixelLayoutSet::ALL`,
+  which `PortContract::frame` starts from. This never replaces the runtime validation above
   — it only refuses wiring no buffer could have made work, before the pipeline
   starts. Both sides default to `Unknown`,
   which always links, so an element with a genuinely runtime-dependent contract

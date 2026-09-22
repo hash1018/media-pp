@@ -12,6 +12,26 @@ compile error with no explanation.
 
 ### Breaking
 
+- **A frame's link contract states its pixel layout.**
+  `PortContract::Frames` has a third field, a `PixelLayoutSet` — NV12, P010,
+  BGRA or other — and `OutputContract` a new variant, `SameLayout`, for a
+  port that passes on the layout it was given. Where a `Frames` value was
+  built by hand, add `PixelLayoutSet::ALL`, which is what
+  `PortContract::frame` and `any_frame` still start from; where
+  `OutputContract` was matched, add an arm for `SameLayout`.
+
+  This crate's elements state their layouts where construction settles
+  them, so a branch that could only fail frame by frame is refused when it
+  is built: a `VideoDecodeBin` that will put out BGRA wired straight into a
+  `CudaRenderer`, which presents NV12, now fails at `Pipeline::new` naming
+  both rather than erroring on every frame. A producer that states no
+  layout is not checked against one, and a resize-only scaler
+  (`D3d11Scaler` with `Preserve`, `CudaScaler::new`) or `D3d11Upload`
+  passes on the layout of what reaches it. Every example and obs-rs's
+  own pipelines link as before; one test did not — `TestVideoSource`'s
+  YUV420P wired into a `D3d11Upload`, which only takes NV12 or BGRA and
+  would have refused every frame.
+
 - **`StreamInfo` carries each stream's parameters and time base, and is no
   longer `Copy`.** `FileDemuxer::open` and `RtspSource::open` report
   `parameters` and `time_base` beside `index` and `kind`, so a branch is

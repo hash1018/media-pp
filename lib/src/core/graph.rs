@@ -490,6 +490,15 @@ impl BranchPlan {
                     producer: name_of(id),
                     contract,
                 }),
+                // The layout of what arrived. Where nothing is known to
+                // have, neither is what leaves: every layout the element can
+                // put out would refuse a consumer that takes only the one
+                // upstream will turn out to send, and attaching runs this
+                // again with what upstream does send.
+                OutputContract::SameLayout(contract) => flow.as_ref().map(|flow| ResolvedFlow {
+                    producer: name_of(id),
+                    contract: contract.with_layouts(flow.contract.layouts()),
+                }),
                 OutputContract::Passthrough => flow,
                 OutputContract::Unknown => None,
             };

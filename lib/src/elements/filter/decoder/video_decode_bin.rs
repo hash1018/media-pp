@@ -33,7 +33,10 @@ use windows::Win32::Graphics::Direct3D12::ID3D12Device;
 use crate::elements::{CudaDevice, CudaFrameFormat};
 use crate::{
     buffer::MediaBuffer,
-    contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
+    contract::{
+        InputContract, MediaKind, MemoryDomain, OutputContract, PixelLayout, PixelLayoutSet,
+        PortContract,
+    },
     control::ControlMsg,
     element::{Context, Element, ElementType, Filter, Sink, Source, element_pp_log},
     elements::{DecodeThreading, SwDecoder, filter::line::Line},
@@ -361,7 +364,10 @@ impl VideoDecodeBin {
             path == DecodePath::Hardware && target.converts_10bit() && elements.len() == 1;
         let pad = SrcPad::with_contract(
             format!("{name}_src"),
-            OutputContract::Fixed(PortContract::frame(MediaKind::VideoFrame, target.domain())),
+            OutputContract::Fixed(
+                PortContract::frame(MediaKind::VideoFrame, target.domain())
+                    .with_layouts(output_layouts(&target, output_format, &stream)),
+            ),
         );
         pp_info!(pp_log: &pp_log, "opened: {path:?}, putting out {output_format:?}");
         Ok(Self {
@@ -974,6 +980,30 @@ impl Stream {
                     | ffmpeg::color::TransferCharacteristic::ARIB_STD_B67
             ),
         })
+    }
+}
+
+/// Every layout the bin may put out on `target`, having promised
+/// `output_format`: that one, where the stream said what it decodes to. Where
+/// it did not, the hardware may hand on what nothing after it converts — a
+/// surface in another layout anywhere, and P010 on a target with no scaler
+/// to 8 bits — so those are in it too. On system memory it is whatever the
+/// stream decodes to, which is not the bin's to promise.
+fn output_layouts(
+    target: &DecodeTarget,
+    output_format: Option<ffmpeg::format::Pixel>,
+    stream: &Stream,
+) -> PixelLayoutSet {
+    let Some(format) = output_format.filter(|_| !matches!(target, DecodeTarget::System)) else {
+        return PixelLayoutSet::ALL;
+    };
+    let promised = PixelLayout::of(format);
+    if stream.format.is_some() {
+        PixelLayoutSet::of(promised)
+    } else if target.converts_10bit() {
+        PixelLayoutSet::from_slice(&[promised, PixelLayout::Other])
+    } else {
+        PixelLayoutSet::from_slice(&[promised, PixelLayout::P010, PixelLayout::Other])
     }
 }
 
@@ -1671,6 +1701,51 @@ mod tests {
                 unsafe { texture.GetDesc(&mut desc) };
                 assert_eq!(desc.Format, DXGI_FORMAT_NV12, "not P010 handed on");
             }
+        }
+
+        /// What the bin promises downstream is the layout it chose at open —
+        /// NV12 for 8-bit, BGRA for BT.2020 — so a consumer that cannot take
+        /// it is refused before anything runs; and where the stream did not
+        /// say what it decodes to, what the hardware may hand on unconverted
+        /// is in the promise too.
+        #[test]
+        fn the_output_contract_is_the_layout_chosen_at_open() {
+            use crate::contract::{PixelLayout, PixelLayoutSet};
+
+            let Some((device, context)) = crate::test_support::try_d3d11_device() else {
+                return;
+            };
+            let promised = |bin: &mut VideoDecodeBin| match bin.src_pads()[0].contract() {
+                OutputContract::Fixed(contract) => contract.layouts(),
+                other => panic!("the bin states a fixed contract, not {other:?}"),
+            };
+
+            let (params, _) = h264();
+            let Some(mut bin) = open_or_skip("h264", params.clone(), target(&device, &context))
+            else {
+                return;
+            };
+            assert_eq!(promised(&mut bin), PixelLayoutSet::NV12);
+
+            let Some(mut undeclared) = open_or_skip(
+                "undeclared",
+                without_layout(params),
+                target(&device, &context),
+            ) else {
+                return;
+            };
+            assert_eq!(
+                promised(&mut undeclared),
+                PixelLayoutSet::from_slice(&[PixelLayout::Nv12, PixelLayout::Other])
+            );
+
+            let Some((params, _)) = bt2020_hevc() else {
+                return;
+            };
+            let Some(mut bin) = open_or_skip("bt2020", params, target(&device, &context)) else {
+                return;
+            };
+            assert_eq!(promised(&mut bin), PixelLayoutSet::BGRA);
         }
 
         /// PQ HEVC is decoded on the GPU and brought to SDR BT.709 BGRA by

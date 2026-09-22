@@ -172,10 +172,10 @@ impl CudaDownload {
 
         let pad = SrcPad::with_contract(
             format!("{name}_src"),
-            OutputContract::Fixed(PortContract::frame(
-                MediaKind::VideoFrame,
-                MemoryDomain::System,
-            )),
+            OutputContract::Fixed(
+                PortContract::frame(MediaKind::VideoFrame, MemoryDomain::System)
+                    .with_layouts(format.layouts()),
+            ),
         );
         let pixel = format.pixel();
         let pool = UnboundObjectPool::new(
@@ -311,10 +311,10 @@ impl Source for CudaDownload {
 impl Sink for CudaDownload {
     /// The mirror of CudaUpload: only device memory has anything to bring back.
     fn input_contract(&self) -> InputContract {
-        InputContract::Fixed(PortContract::frame(
-            MediaKind::VideoFrame,
-            MemoryDomain::Cuda,
-        ))
+        InputContract::Fixed(
+            PortContract::frame(MediaKind::VideoFrame, MemoryDomain::Cuda)
+                .with_layouts(self.format.layouts()),
+        )
     }
 
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {

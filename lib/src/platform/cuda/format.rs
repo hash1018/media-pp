@@ -49,6 +49,15 @@ impl CudaFrameFormat {
         }
     }
 
+    /// The one [`crate::contract::PixelLayout`] a surface of this kind is
+    /// in, as a link contract states it.
+    pub(crate) const fn layouts(self) -> crate::contract::PixelLayoutSet {
+        match self {
+            Self::Nv12 => crate::contract::PixelLayoutSet::NV12,
+            Self::Bgra => crate::contract::PixelLayoutSet::BGRA,
+        }
+    }
+
     /// Which kind an existing surface holds, or `None` for any other layout
     /// — P010 from a 10-bit stream, say, which only
     /// [`crate::elements::CudaScaler`] takes, to bring it down to `Nv12`.
