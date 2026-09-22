@@ -39,9 +39,8 @@ impl<T> ForSize<T> {
     /// The resource for a `width`x`height` frame, calling `make` only when
     /// there is none yet or the one held was made for another size.
     ///
-    /// Only the downloads allocate something that cannot fail — a pool of
-    /// CPU frames — so this exists for the backends that have one.
-    #[cfg(any(feature = "cuda", all(target_os = "windows", feature = "d3d12")))]
+    /// For what cannot fail to allocate — a pool of CPU frames. A device
+    /// allocation goes through [`ForSize::try_get`].
     pub(crate) fn get(
         &mut self,
         width: u32,
@@ -58,9 +57,14 @@ impl<T> ForSize<T> {
         self.held()
     }
 
-    /// [`ForSize::get`] where making the resource can fail. The previous
-    /// one is kept on failure rather than dropped: an element that cannot
-    /// allocate for a new size is still the element it was.
+    /// [`ForSize::get`] where making the resource can fail — a device
+    /// allocation, so this exists for the backends that have one. The
+    /// previous one is kept on failure rather than dropped: an element that
+    /// cannot allocate for a new size is still the element it was.
+    #[cfg(any(
+        feature = "cuda",
+        all(target_os = "windows", any(feature = "d3d11", feature = "d3d12"))
+    ))]
     pub(crate) fn try_get<E>(
         &mut self,
         width: u32,
@@ -97,8 +101,7 @@ impl<T> ForSize<T> {
 mod tests {
     use super::*;
 
-    /// Makes a `String` for each size, which cannot fail — the `Err` half
-    /// is the test below.
+    /// Makes a `String` for each size and records that it did.
     fn named(
         resource: &mut ForSize<String>,
         width: u32,
@@ -106,11 +109,10 @@ mod tests {
         made: &mut Vec<(u32, u32)>,
     ) -> String {
         resource
-            .try_get(width, height, |width, height| {
+            .get(width, height, |width, height| {
                 made.push((width, height));
-                Ok::<_, &str>(format!("{width}x{height}"))
+                format!("{width}x{height}")
             })
-            .expect("making a name cannot fail")
             .clone()
     }
 
@@ -133,6 +135,10 @@ mod tests {
 
     /// An element that cannot allocate for a new size is still the element
     /// it was, serving the size it already had.
+    #[cfg(any(
+        feature = "cuda",
+        all(target_os = "windows", any(feature = "d3d11", feature = "d3d12"))
+    ))]
     #[test]
     fn a_failed_allocation_leaves_the_previous_one_in_place() {
         let mut made = Vec::new();

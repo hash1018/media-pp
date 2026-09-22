@@ -62,11 +62,9 @@ mod windows_example {
         let pipeline = Pipeline::new("d3d12-upload", source, |source, ctx| {
             // `Pixel::NV12` — the only layout `D3d12Upload`/`D3d12Renderer`'s
             // zero-copy path accepts.
-            let scaler = SwScaler::new(
+            let scaler = SwScaler::to_format(
                 "to-nv12",
                 ffmpeg::format::Pixel::NV12,
-                width,
-                height,
                 ffmpeg::software::scaling::Flags::BILINEAR,
             );
             // Same device the renderer draws with — required for the

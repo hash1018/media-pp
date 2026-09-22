@@ -60,11 +60,9 @@ mod windows_example {
 
         let pipeline = Pipeline::new("d3d11-upload", source, |source, ctx| {
             // `Pixel::NV12` — the only layout `D3d11Upload` accepts.
-            let scaler = SwScaler::new(
+            let scaler = SwScaler::to_format(
                 "to-nv12",
                 ffmpeg::format::Pixel::NV12,
-                width,
-                height,
                 ffmpeg::software::scaling::Flags::BILINEAR,
             );
             // Same device the renderer draws with — required for the

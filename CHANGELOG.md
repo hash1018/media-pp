@@ -125,8 +125,8 @@ compile error with no explanation.
 
 - **`CudaConverter` converts either way round, so its constructor is told
   which.** `CudaConverter::new(name, device, width, height)` becomes
-  `CudaConverter::new(name, device, output, width, height)`; pass
-  `CudaFrameFormat::Nv12` for what it used to do.
+  `CudaConverter::new(name, device, output)` — the size going the way of the
+  entry above; pass `CudaFrameFormat::Nv12` for what it used to do.
 
   The new direction exists because a camera hands over NV12 and a chroma key
   takes BGRA, so a green screen had nowhere to be keyed on this backend.
@@ -226,11 +226,32 @@ compile error with no explanation.
 
 ### Added
 
+- **`SwScaler::to_format` changes a frame's layout and leaves its size
+  alone.** The layout is what a refused link asks for — "a SwScaler to NV12
+  first" in front of an upload that takes NV12 — and the size the frames
+  happen to be is no part of that answer, so it is no longer asked for.
+
+  ```rust
+  // before: a size fetched from somewhere just to say "the same"
+  SwScaler::new("to-nv12", Pixel::NV12, width, height, Flags::BILINEAR)
+
+  // after
+  SwScaler::to_format("to-nv12", Pixel::NV12, Flags::BILINEAR)
+  ```
+
+  It also changes what a mid-stream resolution change does. `SwScaler::new`
+  absorbs one by stretching the picture back to the size it was given,
+  which is what keeps a fixed-geometry encoder downstream working and a
+  broken aspect ratio anywhere else; `to_format` passes the new size on, so
+  what is downstream has to be able to take one. `new` is unchanged and
+  still the right constructor in front of an encoder or a model.
+
 - **A refused link says what goes between, and elements can be asked
   directly.** A pipeline's refusal and `LinkCheck` both end with the
   element that makes the crossing where one does — `; convert it: a
   CudaConverter built for CudaFrameFormat::Nv12`, `; upload it: a
-  D3d11Upload, which takes NV12 or BGRA — a SwScaler to one of those first…`
+  D3d11Upload, which takes NV12 or BGRA — a SwScaler::to_format to one of
+  those first…`
   — through `contract::remedy`. `contract::check_elements(&mut producer,
   &consumer)` asks about two elements with no pad index or trait import. The
   crate documentation's first page has a section on connecting elements:

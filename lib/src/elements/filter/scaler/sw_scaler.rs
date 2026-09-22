@@ -10,20 +10,21 @@ use crate::{
     control::ControlMsg,
     element::{Element, ElementType, Sink, Source, element_pp_log},
     error::Result,
+    frame_size::ForSize,
     pad::SrcPad,
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
     repeat::{PerFrameTransform, RepeatedOutput},
 };
 
-/// How many output frames [`SwScaler`] pre-allocates up front. Unlike
+/// How many output frames [`SwScaler`] pre-allocates as soon as it knows
+/// what one looks like. Unlike
 /// [`crate::elements::SwDecoder`]/[`crate::elements::D3d12Decoder`],
-/// this doesn't have to start empty and grow — `dst_format`/`dst_width`/
-/// `dst_height` are known at construction time, so the pool can be
-/// correctly sized from the very first frame instead of paying for a
-/// handful of allocations up front, amortized. Not exposed as a
-/// constructor parameter (yet): this is a reasonable default for "a
-/// `Queue` or two downstream," not a hard limit — the pool still grows
-/// past this if more frames end up in flight at once.
+/// this doesn't have to start empty and grow — the first frame settles the
+/// whole output shape, so the pool is filled once there and not a handful
+/// of allocations at a time. Not exposed as a constructor parameter (yet):
+/// this is a reasonable default for "a `Queue` or two downstream," not a
+/// hard limit — the pool still grows past this if more frames end up in
+/// flight at once.
 const POOL_SIZE: usize = 4;
 
 /// Errors specific to `SwScaler`. Converts into the crate-wide `Error` via
@@ -56,12 +57,26 @@ pub enum SwScalerError {
 /// Typical placement: right before something with a fixed input
 /// contract, e.g. an ONNX object-detection model — not a general-purpose
 /// pipeline stage, so most chains won't need one at all.
+///
+/// # Which of the two constructors
+///
+/// [`SwScaler::new`] is told a size, and every frame comes out that size
+/// whatever arrives: what a fixed-geometry consumer needs, an encoder
+/// opened for one resolution or a model with one input. A source that
+/// changes resolution mid-stream is absorbed by stretching it back, which
+/// is the point there and a broken aspect ratio anywhere else.
+///
+/// [`SwScaler::to_format`] changes only the layout, at whatever size the
+/// frames arrive in — an upload that takes NV12 fed from a decoder that
+/// produces planar YUV, which is the case a refused link names most often.
+/// A resolution change is then passed on rather than hidden, so what is
+/// downstream has to be able to take one.
 pub struct SwScaler {
     pp_log: PpLog,
     name: Arc<str>,
     dst_format: ffmpeg::format::Pixel,
-    dst_width: u32,
-    dst_height: u32,
+    /// What size each output frame is — see the two constructors.
+    size: OutputSize,
     flags: ffmpeg::software::scaling::Flags,
     /// Built lazily from the *first* frame's own format/dimensions
     /// (rather than requiring the caller to pass them up front) and
@@ -76,11 +91,11 @@ pub struct SwScaler {
     /// (re)built, since building it forgets.
     colour: Option<Colour>,
     /// Reused across every scaled frame instead of allocating a fresh one
-    /// each time — see [`UnboundObjectPool`]'s docs. Pre-filled to
-    /// `dst_format`/`dst_width`/`dst_height` in `new` (unlike a decoder's
-    /// pool, the output shape here is known up front, not learned from
-    /// the first frame).
-    pool: UnboundObjectPool<ffmpeg::frame::Video>,
+    /// each time — see [`UnboundObjectPool`]'s docs. Made for the output
+    /// size once the first frame settles it, and made again when that size
+    /// changes, which for [`SwScaler::to_format`] is whenever the source's
+    /// does.
+    pool: ForSize<UnboundObjectPool<ffmpeg::frame::Video>>,
     /// The last scale and the picture it was made from, so a producer that
     /// re-emits an unchanged frame is answered with it instead of another
     /// pass over every pixel — see [`RepeatedOutput`].
@@ -97,12 +112,32 @@ pub struct SwScaler {
 // access from multiple threads.
 unsafe impl Send for SwScaler {}
 
+/// What size a [`SwScaler`]'s output frames are.
+#[derive(Debug, Clone, Copy)]
+enum OutputSize {
+    /// [`SwScaler::new`]: this size, whatever arrives.
+    Fixed { width: u32, height: u32 },
+    /// [`SwScaler::to_format`]: the size of the frame that arrived.
+    OfTheInput,
+}
+
+impl OutputSize {
+    fn of(self, frame: &ffmpeg::frame::Video) -> (u32, u32) {
+        match self {
+            Self::Fixed { width, height } => (width, height),
+            Self::OfTheInput => (frame.width(), frame.height()),
+        }
+    }
+}
+
 impl SwScaler {
     /// `dst_format`/`dst_width`/`dst_height` describe what every output
     /// frame will be; the source side is learned automatically from
     /// whatever frames actually arrive (see `context`'s docs), so this
     /// doesn't need decoder parameters up front the way
     /// [`crate::elements::SwDecoder::new`] does.
+    ///
+    /// Use [`SwScaler::to_format`] where only the layout is to change.
     pub fn new(
         name: impl Into<String>,
         dst_format: ffmpeg::format::Pixel,
@@ -110,12 +145,53 @@ impl SwScaler {
         dst_height: u32,
         flags: ffmpeg::software::scaling::Flags,
     ) -> Self {
+        Self::with_output(
+            name,
+            dst_format,
+            OutputSize::Fixed {
+                width: dst_width,
+                height: dst_height,
+            },
+            flags,
+        )
+    }
+
+    /// Changes a frame's layout and nothing else: each output frame is the
+    /// size the input was.
+    ///
+    /// This is what a refused link usually asks for — "a SwScaler to NV12
+    /// first" in front of an upload that takes NV12 — and the size the
+    /// frames happen to be is no part of that answer, so it is not asked
+    /// for. A source that changes resolution mid-stream comes out at the
+    /// new size rather than being stretched back to the old one; put
+    /// [`SwScaler::new`] in front of something that cannot take that, an
+    /// encoder opened for one resolution being the usual one.
+    pub fn to_format(
+        name: impl Into<String>,
+        dst_format: ffmpeg::format::Pixel,
+        flags: ffmpeg::software::scaling::Flags,
+    ) -> Self {
+        Self::with_output(name, dst_format, OutputSize::OfTheInput, flags)
+    }
+
+    fn with_output(
+        name: impl Into<String>,
+        dst_format: ffmpeg::format::Pixel,
+        size: OutputSize,
+        flags: ffmpeg::software::scaling::Flags,
+    ) -> Self {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::SwScaler, &name, None);
-        pp_info!(
-            pp_log: &pp_log,
-            "created: dst_format={dst_format:?}, dst={dst_width}x{dst_height}"
-        );
+        match size {
+            OutputSize::Fixed { width, height } => pp_info!(
+                pp_log: &pp_log,
+                "created: dst_format={dst_format:?}, dst={width}x{height}"
+            ),
+            OutputSize::OfTheInput => pp_info!(
+                pp_log: &pp_log,
+                "created: dst_format={dst_format:?}, dst=the input's own size"
+            ),
+        }
         let pad = SrcPad::with_contract(
             format!("{name}_src"),
             OutputContract::Fixed(
@@ -126,21 +202,15 @@ impl SwScaler {
                 ),
             ),
         );
-        let pool = UnboundObjectPool::new(
-            POOL_SIZE,
-            move || ffmpeg::frame::Video::new(dst_format, dst_width, dst_height),
-            |_| {},
-        );
         Self {
             name,
             pp_log,
             dst_format,
-            dst_width,
-            dst_height,
+            size,
             flags,
             context: None,
             colour: None,
-            pool,
+            pool: ForSize::new(),
             repeated: RepeatedOutput::new(),
             pad,
         }
@@ -243,6 +313,7 @@ impl PerFrameTransform for SwScaler {
         &mut self,
         frame: &Arc<UnboundObjectPoolRef<ffmpeg::frame::Video>>,
     ) -> Result<UnboundObjectPoolRef<ffmpeg::frame::Video>> {
+        let (dst_width, dst_height) = self.size.of(frame);
         if !self.context_matches(frame) {
             match &mut self.context {
                 Some(context) => {
@@ -268,8 +339,8 @@ impl PerFrameTransform for SwScaler {
                         frame.width(),
                         frame.height(),
                         self.dst_format,
-                        self.dst_width,
-                        self.dst_height,
+                        dst_width,
+                        dst_height,
                         self.flags,
                     );
                     self.colour = None;
@@ -288,8 +359,8 @@ impl PerFrameTransform for SwScaler {
                             frame.width(),
                             frame.height(),
                             self.dst_format,
-                            self.dst_width,
-                            self.dst_height,
+                            dst_width,
+                            dst_height,
                             self.flags,
                         )
                         .inspect_err(|error| {
@@ -307,10 +378,20 @@ impl PerFrameTransform for SwScaler {
             self.colour = Some(colour);
         }
 
-        // Already allocated to `dst_format`/`dst_width`/
-        // `dst_height` (see `pool`'s docs), so `run` skips its own
-        // allocation and scales straight into this buffer.
-        let mut output = self.pool.get();
+        // Already allocated to the output's own format and size (see
+        // `pool`'s docs), so `run` skips its own allocation and scales
+        // straight into this buffer.
+        let dst_format = self.dst_format;
+        let mut output = self
+            .pool
+            .get(dst_width, dst_height, |width, height| {
+                UnboundObjectPool::new(
+                    POOL_SIZE,
+                    move || ffmpeg::frame::Video::new(dst_format, width, height),
+                    |_| {},
+                )
+            })
+            .get();
         self.context
             .as_mut()
             .expect("built or confirmed matching above")
@@ -515,6 +596,23 @@ mod tests {
         (scaler, received)
     }
 
+    /// The same, for a scaler that only changes the layout.
+    fn format_scaler(
+        dst_format: ffmpeg::format::Pixel,
+    ) -> (SwScaler, Arc<Mutex<Vec<MediaBuffer>>>) {
+        let mut scaler = SwScaler::to_format(
+            "scaler",
+            dst_format,
+            ffmpeg::software::scaling::Flags::BILINEAR,
+        );
+        let received = Arc::new(Mutex::new(Vec::new()));
+        scaler.src_pads()[0].link(Box::new(CapturingSink {
+            received: received.clone(),
+            pp_log: element_pp_log(ElementType::Other, "capture", None),
+        }));
+        (scaler, received)
+    }
+
     /// Another `AVFrame` over the same picture, with its own timestamp —
     /// what a capture with nothing new to show hands over on every tick.
     fn repeat_of(buffer: &MediaBuffer, pts: i64) -> MediaBuffer {
@@ -707,6 +805,41 @@ mod tests {
         assert_eq!(frame.width(), 80);
         assert_eq!(frame.height(), 60);
         assert_eq!(frame.pts(), Some(4242));
+    }
+
+    /// What the other constructor is for: the layout is changed and the
+    /// size is not, so a source that changes resolution mid-stream comes
+    /// out at its new size instead of being stretched back to the first
+    /// frame's — which is what the test below asserts a fixed scaler still
+    /// does.
+    #[test]
+    fn a_layout_only_scaler_keeps_each_frames_own_size() {
+        let (mut scaler, received) = format_scaler(ffmpeg::format::Pixel::NV12);
+        scaler
+            .consume(video_frame(ffmpeg::format::Pixel::YUV420P, 160, 120, 7))
+            .expect("the first size");
+        scaler
+            .consume(video_frame(ffmpeg::format::Pixel::YUV420P, 320, 240, 8))
+            .expect("and the next one");
+
+        let received = received.lock().unwrap();
+        let frames: Vec<_> = received
+            .iter()
+            .map(|buffer| {
+                let MediaBuffer::Video(frame) = buffer else {
+                    panic!("expected a Video buffer");
+                };
+                (frame.format(), frame.width(), frame.height(), frame.pts())
+            })
+            .collect();
+        assert_eq!(
+            frames,
+            [
+                (ffmpeg::format::Pixel::NV12, 160, 120, Some(7)),
+                (ffmpeg::format::Pixel::NV12, 320, 240, Some(8)),
+            ],
+            "the layout is this element's to change, and the size is not"
+        );
     }
 
     /// `context_matches` has to catch a mid-stream resolution change and

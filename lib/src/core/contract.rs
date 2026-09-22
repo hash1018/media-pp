@@ -725,13 +725,13 @@ pub fn remedy(produced: &PortContract, accepted: &PortContract) -> Option<&'stat
         let to = accepted_memory.only()?;
         return match (from, to) {
             (System, D3d11) => Some(
-                "upload it: a D3d11Upload, which takes NV12 or BGRA — a SwScaler to one of those first where the frames are in another layout",
+                "upload it: a D3d11Upload, which takes NV12 or BGRA — a SwScaler::to_format to one of those first where the frames are in another layout",
             ),
             (System, D3d12) => Some(
-                "upload it: a D3d12Upload, which takes NV12 — a SwScaler to NV12 first where the frames are in another layout",
+                "upload it: a D3d12Upload, which takes NV12 — a SwScaler::to_format to NV12 first where the frames are in another layout",
             ),
             (System, Cuda) => Some(
-                "upload it: a CudaUpload built for NV12 or BGRA — a SwScaler to that layout first where the frames are in another",
+                "upload it: a CudaUpload built for NV12 or BGRA — a SwScaler::to_format to that layout first where the frames are in another",
             ),
             (D3d11, System) => Some(
                 "download it: a D3d11Download, which reads BGRA — a D3d11Scaler with D3d11ScalerFormat::Bgra first where the frames are in another layout",
@@ -750,7 +750,7 @@ pub fn remedy(produced: &PortContract, accepted: &PortContract) -> Option<&'stat
     let from_p010 = produced_layouts.contains(P010);
     let from_bgra = produced_layouts.contains(Bgra);
     match accepted_memory.only()? {
-        System => Some("convert it: a SwScaler to a layout the consumer takes"),
+        System => Some("convert it: a SwScaler::to_format to a layout the consumer takes"),
         D3d11 if to_nv12 => Some("convert it: a D3d11Scaler with D3d11ScalerFormat::Nv12"),
         D3d11 if to_bgra => Some(
             "convert it: a D3d11Scaler with D3d11ScalerFormat::Bgra — or a D3d11ToneMap, for PQ or HLG video",
