@@ -186,6 +186,16 @@ compile error with no explanation.
 
 ### Added
 
+- **`contract::check_link` answers whether two elements fit before they are
+  linked.** It takes a pad's `SrcPad::contract()` and a sink's
+  `Sink::input_contract()` and returns a `LinkCheck` — `Fits`,
+  `Refused { produced, accepted }`, or `Unknown` where one side says too
+  little — by the same rules a pipeline refuses a link with, which now asks
+  it too. Trying the link to find out cost the elements: a refused branch
+  drops what it was given. `hw_decode_render` asks it to decide whether a
+  `CudaConverter` goes between the decode bin and the renderer, where it
+  used to compare `output_format()` against what it knew the renderer took.
+
 - **HDR video is brought to SDR on the GPU.** A PQ or HLG stream came out
   washed out: nothing read its transfer. `VideoDecodeBin` now brings one to
   SDR BT.709 BGRA as soon as it is decoded, on `D3d11` and `Cuda` — by the

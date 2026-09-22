@@ -658,6 +658,82 @@ impl fmt::Display for OutputContract {
     }
 }
 
+/// What [`check_link`] makes of a pad feeding a sink.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkCheck {
+    /// Every buffer the pad may put out, the sink takes.
+    Fits,
+    /// The sink cannot take what the pad puts out — the link a pipeline
+    /// refuses before anything runs.
+    Refused {
+        /// What the pad puts out, as far as it says.
+        produced: PortContract,
+        /// What the sink takes.
+        accepted: PortContract,
+    },
+    /// One side says too little to tell. A pipeline links it, and leaves it
+    /// to the frames themselves: a pad that passes on what it is given, or
+    /// one that states nothing, or a sink that states nothing, or a pad
+    /// passing on a layout it is not yet known to be given into a sink that
+    /// takes only some.
+    Unknown,
+}
+
+impl LinkCheck {
+    /// Whether this is [`Self::Refused`].
+    pub fn is_refused(&self) -> bool {
+        matches!(self, Self::Refused { .. })
+    }
+}
+
+impl fmt::Display for LinkCheck {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            LinkCheck::Fits => f.write_str("fits"),
+            LinkCheck::Refused { produced, accepted } => {
+                write!(f, "produces {produced}, which takes only {accepted}")
+            }
+            LinkCheck::Unknown => f.write_str("cannot be told before it runs"),
+        }
+    }
+}
+
+/// Whether a pad declaring `produced` can feed a sink declaring
+/// `accepted` — asked of the two before they are linked, and by the same
+/// rules a pipeline applies when they are:
+///
+/// ```ignore
+/// let produced = decoder.src_pads()[0].contract();
+/// if check_link(&produced, &renderer.input_contract()).is_refused() {
+///     // put the converter the renderer needs between them
+/// }
+/// ```
+///
+/// This is one link. Where something that passes buffers through — a
+/// `Queue`, a `Pacer` — sits between two elements, ask about the element
+/// that produces what it passes on, since it passes that on unchanged; the
+/// pipeline's own check follows the whole branch.
+pub fn check_link(produced: &OutputContract, accepted: &InputContract) -> LinkCheck {
+    let accepted = match accepted {
+        InputContract::Fixed(accepted) => *accepted,
+        InputContract::Any => return LinkCheck::Fits,
+        InputContract::Unknown => return LinkCheck::Unknown,
+    };
+    let (produced, layout_known) = match produced {
+        OutputContract::Fixed(produced) => (*produced, true),
+        // Its kind and memory are settled; its layout is whatever reaches it.
+        OutputContract::SameLayout(produced) => (produced.with_layouts(PixelLayoutSet::ALL), false),
+        OutputContract::Passthrough | OutputContract::Unknown => return LinkCheck::Unknown,
+    };
+    if !accepted.accepts(&produced) {
+        return LinkCheck::Refused { produced, accepted };
+    }
+    if !layout_known && accepted.layouts() != PixelLayoutSet::ALL {
+        return LinkCheck::Unknown;
+    }
+    LinkCheck::Fits
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -812,5 +888,60 @@ mod tests {
         assert_eq!(PixelLayout::of(Pixel::P010LE), PixelLayout::P010);
         assert_eq!(PixelLayout::of(Pixel::BGRA), PixelLayout::Bgra);
         assert_eq!(PixelLayout::of(Pixel::YUV420P), PixelLayout::Other);
+    }
+
+    /// The answer a caller gets before linking is the one the pipeline would
+    /// give, for each shape a pad and a sink can declare.
+    #[test]
+    fn check_link_answers_as_a_pipeline_would() {
+        let cuda = PortContract::frame(MediaKind::VideoFrame, MemoryDomain::Cuda);
+        let d3d11 = PortContract::frame(MediaKind::VideoFrame, MemoryDomain::D3d11);
+        let nv12_renderer = InputContract::Fixed(cuda.with_layouts(PixelLayoutSet::NV12));
+        let bgra = OutputContract::Fixed(cuda.with_layouts(PixelLayoutSet::BGRA));
+        let nv12 = OutputContract::Fixed(cuda.with_layouts(PixelLayoutSet::NV12));
+
+        assert_eq!(check_link(&nv12, &nv12_renderer), LinkCheck::Fits);
+        let refused = check_link(&bgra, &nv12_renderer);
+        assert_eq!(
+            refused,
+            LinkCheck::Refused {
+                produced: cuda.with_layouts(PixelLayoutSet::BGRA),
+                accepted: cuda.with_layouts(PixelLayoutSet::NV12),
+            }
+        );
+        assert!(refused.is_refused());
+        assert_eq!(
+            refused.to_string(),
+            "produces VideoFrame (CUDA, BGRA), which takes only VideoFrame (CUDA, NV12)"
+        );
+        assert!(
+            check_link(&OutputContract::Fixed(d3d11), &nv12_renderer).is_refused(),
+            "the wrong memory is refused whatever the layout"
+        );
+
+        // A sink that takes anything, and ones that say nothing.
+        assert_eq!(check_link(&bgra, &InputContract::Any), LinkCheck::Fits);
+        assert_eq!(
+            check_link(&bgra, &InputContract::Unknown),
+            LinkCheck::Unknown
+        );
+        assert_eq!(
+            check_link(&OutputContract::Passthrough, &nv12_renderer),
+            LinkCheck::Unknown
+        );
+        assert_eq!(
+            check_link(&OutputContract::Unknown, &nv12_renderer),
+            LinkCheck::Unknown
+        );
+
+        // A pad passing on the layout it is given: its memory is checked,
+        // its layout cannot be told where the sink takes only some.
+        let resize = OutputContract::SameLayout(cuda.with_layouts(PixelLayoutSet::GPU_SCALABLE));
+        assert_eq!(check_link(&resize, &nv12_renderer), LinkCheck::Unknown);
+        assert_eq!(
+            check_link(&resize, &InputContract::Fixed(cuda)),
+            LinkCheck::Fits
+        );
+        assert!(check_link(&OutputContract::SameLayout(d3d11), &nv12_renderer).is_refused());
     }
 }

@@ -3,9 +3,11 @@
 //! presents the frames at real playback speed. Windows decodes onto D3D12
 //! (D3D12VA, or `SwDecoder` and an upload); Linux onto CUDA (NVDEC, or
 //! `SwDecoder` and an upload) with Vulkan presentation, and puts a
-//! `CudaConverter` before the renderer where the bin hands on BGRA — for a
-//! stream with alpha, an odd side or BT.2020 colour — since that renderer
-//! takes NV12. Compare against `sw_decode_render`, which always decodes on
+//! `CudaConverter` before the renderer where `contract::check_link` says the
+//! bin's output does not fit the renderer's input — the bin hands on BGRA
+//! for a stream with alpha, an odd side, BT.2020 or HDR colour, and that
+//! renderer presents NV12. The check is asked of the two before they are
+//! linked, rather than the example knowing what each one takes. Compare against `sw_decode_render`, which always decodes on
 //! the CPU.
 //!
 //! Which way the bin decodes, and why where it is software, is printed when
@@ -138,9 +140,11 @@ mod windows_example {
 
 #[cfg(target_os = "linux")]
 mod linux_example {
-    use media_pp::ffmpeg::{format::Pixel, media};
+    use media_pp::ffmpeg::media;
     use media_pp::{
         Error,
+        contract::check_link,
+        element::{Sink, Source},
         elements::{
             CudaConverter, CudaDevice, CudaFrameFormat, DecodeTarget, FileDemuxer, Pacer,
             VideoDecodeBin,
@@ -184,7 +188,7 @@ mod linux_example {
         let cuda = CudaDevice::new().map_err(|error| Error::Other(error.to_string()))?;
         let gpu = VulkanGpuContext::new(target.display).map_err(Error::Other)?;
 
-        let decoder = VideoDecodeBin::open(
+        let mut decoder = VideoDecodeBin::open(
             "decoder",
             video.parameters.clone(),
             DecodeTarget::Cuda {
@@ -195,10 +199,26 @@ mod linux_example {
         )?;
         println!("decoding: {:?}", decoder.path());
         let decoding = decoder.handle();
-        // The renderer takes NV12; BGRA is what the bin hands on for alpha,
-        // an odd side or BT.2020 colour, and converting it back is this
-        // crate's own kernel — which needs even sides, as NV12 itself does.
-        let to_nv12 = if decoder.output_format() == Some(Pixel::BGRA) {
+        let renderer = render_common::cuda_window_renderer(
+            "renderer",
+            &gpu,
+            &cuda,
+            target.display,
+            target.window,
+            target.width,
+            target.height,
+        )
+        .map_err(Error::Other)?;
+        // Asked before linking rather than known: the renderer presents
+        // NV12, and the bin hands on BGRA for alpha, an odd side or BT.2020
+        // or HDR colour. Where the two do not fit, this crate's own kernel
+        // brings BGRA back to NV12 — which needs even sides, as NV12 does.
+        let fits = check_link(
+            &decoder.src_pads()[0].contract(),
+            &renderer.input_contract(),
+        );
+        let to_nv12 = if fits.is_refused() {
+            println!("decoder and renderer: {fits}; converting to NV12");
             let context = media_pp::ffmpeg::codec::context::Context::from_parameters(
                 video.parameters.clone(),
             )?;
@@ -219,16 +239,6 @@ mod linux_example {
 
         let pipeline = Pipeline::new("hw-decode-render", source, |source, ctx| {
             let pacer = Pacer::new("pacer", time_base)?;
-            let renderer = render_common::cuda_window_renderer(
-                "renderer",
-                &gpu,
-                &cuda,
-                target.display,
-                target.window,
-                target.width,
-                target.height,
-            )
-            .map_err(Error::Other)?;
             let mut chain = ctx.branch().pipe(decoder);
             if let Some(to_nv12) = to_nv12 {
                 chain = chain.pipe(to_nv12);

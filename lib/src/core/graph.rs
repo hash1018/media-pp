@@ -19,7 +19,7 @@ use std::{
 use thiserror::Error as ThisError;
 
 use crate::{
-    contract::{InputContract, OutputContract, PortContract},
+    contract::{InputContract, LinkCheck, OutputContract, PortContract, check_link},
     element::ElementType,
     log::{Level, enabled},
     pp_log::{PpLog, pp_info},
@@ -474,12 +474,15 @@ impl BranchPlan {
                 continue;
             };
 
-            if let (Some(flow), InputContract::Fixed(accepted)) = (&flow, contracts.input)
-                && !accepted.accepts(&flow.contract)
+            // The same rules a caller asks about before linking — see
+            // `check_link` — applied to what is resolved to be flowing.
+            if let Some(flow) = &flow
+                && let LinkCheck::Refused { produced, accepted } =
+                    check_link(&OutputContract::Fixed(flow.contract), &contracts.input)
             {
                 return Err(GraphError::IncompatibleLink {
                     producer: flow.producer.clone(),
-                    produced: flow.contract,
+                    produced,
                     consumer: name_of(id),
                     accepted,
                 });

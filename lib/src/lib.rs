@@ -127,8 +127,14 @@
 //! kind, and for a decoded frame the memory domain and, where construction
 //! settles it, the pixel layout (NV12, P010, BGRA or other). It is not caps
 //! negotiation — nothing is converted or renegotiated — and size, format
-//! details and device are still checked against each real buffer. An element that
-//! declares nothing always links. See [`contract`].
+//! details and device are still checked against each real buffer. An
+//! element that declares nothing always links. See [`contract`].
+//!
+//! The same rules answer before anything is linked: [`contract::check_link`]
+//! takes a pad's [`pad::SrcPad::contract`] and a sink's
+//! [`element::Sink::input_contract`] and says whether they fit, do not, or
+//! cannot be told until frames arrive — for deciding whether a
+//! converter goes between two elements while they are still in hand.
 //!
 //! # Watching it run
 //!

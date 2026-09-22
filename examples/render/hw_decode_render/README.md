@@ -6,9 +6,10 @@ presents the frames in a native window at real playback speed.
 
 - Windows decodes onto D3D12: D3D12VA, or `SwDecoder` and an upload.
 - Linux decodes onto CUDA — NVDEC, or `SwDecoder` and an upload — with
-  Vulkan presentation. Where the bin hands on BGRA (a stream with alpha, an
-  odd side or BT.2020 colour), a `CudaConverter` brings it back to the NV12
-  the renderer takes:
+  Vulkan presentation. Before linking, `contract::check_link` asks whether
+  the bin's output fits the renderer's input; where it does not — the bin
+  hands on BGRA for alpha, an odd side, BT.2020 or HDR colour, and the
+  renderer presents NV12 — a `CudaConverter` goes between them:
   `Demux -> VideoDecodeBin -> CudaConverter -> Queue -> Pacer -> Renderer`.
 
 Which way the bin decodes, and why where it is software, is printed when it
