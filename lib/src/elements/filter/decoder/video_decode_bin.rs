@@ -933,6 +933,45 @@ mod tests {
         params
     }
 
+    /// Opens the bin, or answers `None` after saying why on a machine whose
+    /// adapter makes a device and does no video decoding — a hosted CI
+    /// runner's software adapter, which the decoders' and uploads' own tests
+    /// skip on too. Anything else is the failure it looks like.
+    #[cfg(any(
+        feature = "cuda",
+        all(target_os = "windows", any(feature = "d3d11", feature = "d3d12"))
+    ))]
+    fn open_or_skip(
+        name: &str,
+        params: ffmpeg::codec::Parameters,
+        target: DecodeTarget,
+    ) -> Option<VideoDecodeBin> {
+        fn no_video_device(error: &Error) -> bool {
+            match error {
+                Error::Traced(traced) => no_video_device(&traced.source),
+                #[cfg(all(target_os = "windows", feature = "d3d11"))]
+                Error::D3d11DecoderError(crate::elements::D3d11DecoderError::HwDeviceInit(_)) => {
+                    true
+                }
+                #[cfg(all(target_os = "windows", feature = "d3d12"))]
+                Error::D3d12DecoderError(crate::elements::D3d12DecoderError::HwDeviceInit(_)) => {
+                    true
+                }
+                #[cfg(all(target_os = "windows", feature = "d3d12"))]
+                Error::D3d12UploadError(crate::elements::D3d12UploadError::HwDeviceInit(_)) => true,
+                _ => false,
+            }
+        }
+        match VideoDecodeBin::open(name, params, target) {
+            Ok(bin) => Some(bin),
+            Err(error) if no_video_device(&error) => {
+                eprintln!("skipping: this device does not do video decoding ({error})");
+                None
+            }
+            Err(error) => panic!("{name} did not open: {error}"),
+        }
+    }
+
     /// VP9 profile 1 — 8-bit 4:4:4 — which no hardware decoder here has a
     /// profile for, with its layout hidden so the bin tries the hardware.
     #[cfg(any(
@@ -974,7 +1013,9 @@ mod tests {
             };
             let (params, packets) = h264();
             let sent = packets.len();
-            let bin = VideoDecodeBin::open("h264", params, target(&device)).unwrap();
+            let Some(bin) = open_or_skip("h264", params, target(&device)) else {
+                return;
+            };
             assert_eq!(bin.path(), DecodePath::Hardware);
             assert_eq!(bin.output_format(), Some(ffmpeg::format::Pixel::NV12));
             let handle = bin.handle();
@@ -1002,7 +1043,9 @@ mod tests {
                 return;
             };
             let sent = packets.len();
-            let bin = VideoDecodeBin::open("mjpeg", params, target(&device)).unwrap();
+            let Some(bin) = open_or_skip("mjpeg", params, target(&device)) else {
+                return;
+            };
             assert_eq!(
                 bin.path(),
                 DecodePath::Software(SoftwareReason::NoHardwareDecoder(ffmpeg::codec::Id::MJPEG))
@@ -1030,7 +1073,9 @@ mod tests {
                 return;
             };
             let sent = packets.len();
-            let bin = VideoDecodeBin::open("odd", params, target(&device)).unwrap();
+            let Some(bin) = open_or_skip("odd", params, target(&device)) else {
+                return;
+            };
             assert_eq!(bin.output_format(), Some(ffmpeg::format::Pixel::BGRA));
             let frames = run(bin, None, packets).expect("an odd-sized stream decodes");
             assert_eq!(frames.len(), sent);
@@ -1059,7 +1104,9 @@ mod tests {
             ) else {
                 return;
             };
-            let bin = VideoDecodeBin::open("prores", params, target(&device)).unwrap();
+            let Some(bin) = open_or_skip("prores", params, target(&device)) else {
+                return;
+            };
             assert_eq!(bin.path(), DecodePath::Software(SoftwareReason::Alpha));
             assert_eq!(bin.output_format(), Some(ffmpeg::format::Pixel::BGRA));
 
@@ -1087,7 +1134,9 @@ mod tests {
                 return;
             };
             let sent = packets.len();
-            let bin = VideoDecodeBin::open("vp9", params, target(&device)).unwrap();
+            let Some(bin) = open_or_skip("vp9", params, target(&device)) else {
+                return;
+            };
             assert_eq!(bin.path(), DecodePath::Hardware, "nothing said otherwise");
             let handle = bin.handle();
 
@@ -1115,7 +1164,9 @@ mod tests {
             let Some((params, packets)) = refused_by_hardware() else {
                 return;
             };
-            let mut bin = VideoDecodeBin::open("vp9", params, target(&device)).unwrap();
+            let Some(mut bin) = open_or_skip("vp9", params, target(&device)) else {
+                return;
+            };
             let frames = collect(&mut bin, None);
 
             // Frame 3 of five at 30 a second.
@@ -1157,7 +1208,9 @@ mod tests {
             };
             let (params, packets) = h264();
             let sent = packets.len();
-            let bin = VideoDecodeBin::open("h264", params, target(&device)).unwrap();
+            let Some(bin) = open_or_skip("h264", params, target(&device)) else {
+                return;
+            };
             assert_eq!(bin.path(), DecodePath::Hardware);
             let frames = run(bin, None, packets).expect("an H.264 stream decodes");
             assert_eq!(frames.len(), sent);
@@ -1185,7 +1238,9 @@ mod tests {
                 return;
             };
             let sent = packets.len();
-            let bin = VideoDecodeBin::open("prores", params, target(&device)).unwrap();
+            let Some(bin) = open_or_skip("prores", params, target(&device)) else {
+                return;
+            };
             assert_eq!(
                 bin.path(),
                 DecodePath::Software(SoftwareReason::NoHardwareDecoder(ffmpeg::codec::Id::PRORES))
@@ -1233,7 +1288,9 @@ mod tests {
                 return;
             };
             let sent = packets.len();
-            let bin = VideoDecodeBin::open("vp9", params, target(&device)).unwrap();
+            let Some(bin) = open_or_skip("vp9", params, target(&device)) else {
+                return;
+            };
             let handle = bin.handle();
             let frames = run(bin, None, packets).expect("the stream decodes after all");
             assert_eq!(
@@ -1276,7 +1333,9 @@ mod tests {
             ) else {
                 return;
             };
-            let bin = VideoDecodeBin::open("prores", params, target(&device)).unwrap();
+            let Some(bin) = open_or_skip("prores", params, target(&device)) else {
+                return;
+            };
             assert_eq!(bin.path(), DecodePath::Software(SoftwareReason::Alpha));
 
             let download = CudaDownload::new("read-back", &device, CudaFrameFormat::Bgra, 64, 48);
@@ -1300,7 +1359,9 @@ mod tests {
                 return;
             };
             let sent = packets.len();
-            let bin = VideoDecodeBin::open("vp9", params, target(&device)).unwrap();
+            let Some(bin) = open_or_skip("vp9", params, target(&device)) else {
+                return;
+            };
             let handle = bin.handle();
             let frames = run(bin, None, packets).expect("the stream decodes after all");
             assert_eq!(
