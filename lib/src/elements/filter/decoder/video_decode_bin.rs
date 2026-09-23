@@ -88,8 +88,19 @@ pub enum DecodeTarget {
     /// shares, as that element's own docs require.
     #[cfg(all(target_os = "windows", feature = "d3d11"))]
     D3d11 {
+        /// The one device every D3D11 element in the pipeline shares.
         device: ID3D11Device,
+        /// That device's immediate context, wrapped once and shared by
+        /// every element that draws or copies through it — see
+        /// [`crate::elements::D3d11Scaler`].
         context: Arc<Mutex<ID3D11DeviceContext>>,
+        /// How many decoded frames downstream may hold at once — every
+        /// queue and buffer after the decoder, counted together. The
+        /// hardware decoder's surface pool is fixed at this plus the
+        /// codec's own references, and at most 64 in all; frames held past
+        /// it fail with
+        /// [`D3d11DecoderError::SurfacePoolExhausted`](crate::elements::D3d11DecoderError::SurfacePoolExhausted).
+        /// See [`crate::elements::D3d11Decoder::new`].
         downstream_hw_frames: i32,
     },
     /// D3D12 resources on `device`, as [`crate::elements::D3d12Decoder`] and
@@ -103,7 +114,10 @@ pub enum DecodeTarget {
     /// [`VideoDecodeBinError::OddSize`]. `D3d12Decoder`'s pool grows, so
     /// there is no surface budget to give.
     #[cfg(all(target_os = "windows", feature = "d3d12"))]
-    D3d12 { device: ID3D12Device },
+    D3d12 {
+        /// The one device every D3D12 element in the pipeline shares.
+        device: ID3D12Device,
+    },
     /// CUDA frames on `device`, as [`crate::elements::CudaDecoder`] and
     /// [`crate::elements::CudaUpload`] make them — NV12, or BGRA where the
     /// stream has alpha, an odd side or BT.2020 colour. A 10-bit stream is
@@ -111,7 +125,11 @@ pub enum DecodeTarget {
     /// BT.2020 one on to BGRA by a [`crate::elements::CudaConverter`].
     #[cfg(feature = "cuda")]
     Cuda {
+        /// The CUDA context every CUDA element in the pipeline shares.
         device: CudaDevice,
+        /// How many decoded frames downstream may hold at once — see
+        /// [`crate::elements::CudaDecoder::new`] for the budget NVDEC's
+        /// fixed, capped pool has to fit.
         downstream_hw_frames: i32,
     },
 }

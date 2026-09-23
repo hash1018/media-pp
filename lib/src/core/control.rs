@@ -13,7 +13,7 @@
 //! look like a burst of catch-up work owed all at once.
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     sync::{Arc, Condvar, Mutex},
     time::{Duration, Instant},
 };
@@ -27,7 +27,7 @@ use crate::{
     bus::{Bus, BusEvent},
     element::{ElementType, SourceElement},
     error::Result,
-    graph::ElementId,
+    graph::{ElementId, NodeInfo},
 };
 
 /// A command that can be sent down a running [`crate::pipeline::Pipeline`]
@@ -181,6 +181,9 @@ struct PrerollState {
 #[derive(Debug)]
 pub struct PrerollContext {
     expected: HashSet<ElementId>,
+    /// What each expected terminal is called, for a timeout to name — given
+    /// by [`crate::pipeline::Pipeline::seek`] from its graph.
+    labels: HashMap<ElementId, NodeInfo>,
     target: Option<Duration>,
     state: Mutex<PrerollState>,
     changed: Condvar,
@@ -192,6 +195,7 @@ impl PrerollContext {
     pub fn new(terminals: impl IntoIterator<Item = ElementId>) -> Self {
         Self {
             expected: terminals.into_iter().collect(),
+            labels: HashMap::new(),
             target: None,
             state: Mutex::new(PrerollState::default()),
             changed: Condvar::new(),
@@ -204,10 +208,18 @@ impl PrerollContext {
     pub fn for_seek(terminals: impl IntoIterator<Item = ElementId>, target: Duration) -> Self {
         Self {
             expected: terminals.into_iter().collect(),
+            labels: HashMap::new(),
             target: Some(target),
             state: Mutex::new(PrerollState::default()),
             changed: Condvar::new(),
         }
+    }
+
+    /// Names the expected terminals, so a timeout says which ones it waited
+    /// on rather than only their ids.
+    pub(crate) fn labelled(mut self, nodes: impl IntoIterator<Item = NodeInfo>) -> Self {
+        self.labels = nodes.into_iter().map(|node| (node.id, node)).collect();
+        self
     }
 
     /// Exact requested position for seek preroll, or `None` for ordinary
@@ -309,6 +321,16 @@ impl PrerollContext {
             }
             let now = Instant::now();
             if now >= deadline {
+                let pending = pending
+                    .into_iter()
+                    .map(|id| {
+                        self.labels.get(&id).cloned().unwrap_or_else(|| NodeInfo {
+                            id,
+                            element_type: crate::element::ElementType::Other,
+                            name: format!("#{id}").into(),
+                        })
+                    })
+                    .collect();
                 return Err(PrerollError::TimedOut { pending });
             }
             let remaining = deadline.saturating_duration_since(now);
@@ -327,9 +349,22 @@ pub enum PrerollError {
     /// Stop or recovery cancelled the in-flight preroll.
     #[error("preroll was cancelled")]
     Cancelled,
-    /// At least one terminal did not receive a first sample in time.
-    #[error("preroll timed out with pending terminals {pending:?}")]
-    TimedOut { pending: Vec<ElementId> },
+    /// At least one terminal did not receive a first sample in time — each
+    /// named, with its type and graph id, as the pipeline's graph has it.
+    #[error("preroll timed out waiting on {}", name_terminals(pending))]
+    TimedOut {
+        /// The terminals that had not taken their first sample.
+        pending: Vec<NodeInfo>,
+    },
+}
+
+/// `video-terminal (Other #4), speakers (WasapiRenderer #9)`.
+fn name_terminals(pending: &[NodeInfo]) -> String {
+    pending
+        .iter()
+        .map(|node| format!("{} ({:?} #{})", node.name, node.element_type, node.id))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// A request carried by a control channel. Ordinary controls cascade through
@@ -870,22 +905,45 @@ mod tests {
         );
     }
 
+    /// A timeout names what it waited on: the terminals still owed a sample,
+    /// as the pipeline's graph calls them — a seek that failed on
+    /// `ElementId(8)` left the caller to work out which branch that was.
     #[test]
-    fn preroll_waits_for_every_terminal_and_reports_pending_ids() {
+    fn preroll_waits_for_every_terminal_and_names_the_ones_pending() {
         let first = ElementId::for_test(1);
         let second = ElementId::for_test(2);
-        let context = PrerollContext::new([first, second]);
+        let speakers = NodeInfo {
+            id: second,
+            element_type: ElementType::Other,
+            name: "speakers".into(),
+        };
+        let context = PrerollContext::new([first, second]).labelled([speakers.clone()]);
 
         context.mark_ready(first);
+        let timeout = context.wait(Duration::ZERO);
         assert_eq!(
-            context.wait(Duration::ZERO),
+            timeout,
             Err(PrerollError::TimedOut {
-                pending: vec![second]
+                pending: vec![speakers]
             })
+        );
+        assert_eq!(
+            timeout.unwrap_err().to_string(),
+            "preroll timed out waiting on speakers (Other #2)"
         );
 
         context.mark_eos(second);
         assert_eq!(context.wait(Duration::ZERO), Ok(()));
+    }
+
+    /// A context built without names still says which ids it waited on.
+    #[test]
+    fn an_unnamed_pending_terminal_is_given_by_its_id() {
+        let context = PrerollContext::new([ElementId::for_test(7)]);
+        assert_eq!(
+            context.wait(Duration::ZERO).unwrap_err().to_string(),
+            "preroll timed out waiting on #7 (Other #7)"
+        );
     }
 
     #[test]

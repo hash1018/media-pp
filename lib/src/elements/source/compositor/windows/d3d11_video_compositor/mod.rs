@@ -827,8 +827,10 @@ impl D3d11VideoCompositor {
     /// `device` must be the same `ID3D11Device` every producer feeding this
     /// compositor's inputs uses. `context` must be the exact same shared
     /// `Arc<Mutex<ID3D11DeviceContext>>` every other context-touching D3D11
-    /// consumer in this pipeline uses (e.g.
-    /// `render_common::D3d11GpuContext::context()`) — reading a texture via
+    /// consumer in this pipeline uses — the pipeline device's one immediate context, wrapped once in an
+    /// `Arc<Mutex<_>>` and cloned to every element; the examples'
+    /// `render_common::D3d11GpuContext` builds the device and that wrapper, and
+    /// is there to copy, not to depend on. Reading a texture via
     /// `CopySubresourceRegion`/`Map` ([`crate::elements::D3d11Download`]) or drawing
     /// with it (a window renderer) are both context-level operations, and
     /// only funneling every one of them through one shared, mutex-guarded

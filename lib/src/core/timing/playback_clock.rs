@@ -124,7 +124,8 @@ impl PlaybackClock {
         }
     }
 
-    #[cfg(test)]
+    /// The media time the master has reached, in nanoseconds — see
+    /// [`crate::pipeline::Pipeline::position`].
     pub(crate) fn position_ns(&self) -> Option<i64> {
         let state = self.state.lock().unwrap();
         position_at(*state, self.wall_clock.elapsed())

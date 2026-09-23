@@ -288,6 +288,23 @@ impl Pipeline {
         &self.playback_clock
     }
 
+    /// Where playback is: the media time the pipeline's playback master has
+    /// reached — the audio renderer's played samples when there is one, else
+    /// the wall clock a [`crate::elements::Pacer`] or
+    /// [`crate::elements::VideoSynchronizer`] keeps. What a progress bar
+    /// shows, read from the clock rather than from whichever frame last went
+    /// past, so it moves with the sound and holds still while paused.
+    ///
+    /// `None` while nothing paces this pipeline — a transcode runs as fast as
+    /// it can and has no "now" — and from a [`Pipeline::seek`] until the
+    /// first sample of the new position anchors the clock again. A position
+    /// before the start of the media reads as zero.
+    pub fn position(&self) -> Option<Duration> {
+        self.playback_clock
+            .position_ns()
+            .map(|ns| Duration::from_nanos(ns.max(0) as u64))
+    }
+
     /// Whether any source of this pipeline is still on a thread of its own.
     ///
     /// `false` before [`Pipeline::run`], and `true` from then until every
@@ -658,8 +675,8 @@ impl Pipeline {
                     let live = self.graph().terminal_ids();
                     for terminal in pending
                         .iter()
+                        .map(|node| node.id)
                         .filter(|terminal| !live.contains(terminal))
-                        .copied()
                     {
                         pp_trace!(
                             pp_log: &self.pp_log,
@@ -832,11 +849,19 @@ impl Pipeline {
             control_tx.enqueue(ControlMsg::Flush)
         });
         self.broadcast(Wake::Leave, |control_tx| control_tx.enqueue(msg.clone()));
-        let terminals = self.graph().terminal_ids();
-        let preroll = Arc::new(match mode {
-            SeekMode::Keyframe => PrerollContext::new(terminals),
-            SeekMode::Accurate => PrerollContext::for_seek(terminals, target),
-        });
+        let graph = self.graph();
+        let terminals = graph.terminal_ids();
+        let labels: Vec<_> = terminals
+            .iter()
+            .filter_map(|&id| graph.node(id).cloned())
+            .collect();
+        let preroll = Arc::new(
+            match mode {
+                SeekMode::Keyframe => PrerollContext::new(terminals),
+                SeekMode::Accurate => PrerollContext::for_seek(terminals, target),
+            }
+            .labelled(labels),
+        );
         // Publish before waiting, so `stop` can end this wait rather than
         // queue behind it. Cleared on every exit below, including the error
         // one, so no later `stop` cancels a preroll that already finished.

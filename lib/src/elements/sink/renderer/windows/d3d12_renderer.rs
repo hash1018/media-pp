@@ -30,7 +30,9 @@ use crate::{
 /// any other concrete rendering crate. A caller wanting to actually
 /// render implements this for its own window/rendering stack; this
 /// repository's examples use `examples/render/render_common` for that
-/// implementation, outside the `media-pp` crate itself.
+/// implementation, outside the `media-pp` crate itself — unpublished, so
+/// a program of its own copies what it needs from there rather than
+/// depending on it.
 ///
 /// A successful submit must install the frame as the current presentation
 /// content or enqueue its swap-chain presentation before returning. Pipeline

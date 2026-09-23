@@ -86,6 +86,14 @@ Video, by backend:
 
 `VideoDecodeBin` chooses among the decode row and the uploads for a stream.
 
+The renderers hand each frame to a presenter the program supplies — an
+implementation of `D3d11FrameRenderer`, `D3d12FrameRenderer` or
+`CudaFrameRenderer` for its own window or UI. The examples' unpublished
+`render_common` crate implements them for a winit window, and is there to
+copy. The GPU elements of one backend share one device the program creates —
+for D3D11, one `ID3D11Device` and its immediate context wrapped once in an
+`Arc<Mutex<_>>` — which `render_common` shows how to build too.
+
 Everything else:
 
 - **Inputs**: `FileDemuxer`, `RtspSource`, `WebRtcTrackSource`, `AppSource`,

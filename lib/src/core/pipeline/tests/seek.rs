@@ -1238,3 +1238,79 @@ fn two_paced_sources_on_one_file_survive_consecutive_seeks() {
         .expect("the second seek");
     pipeline.stop();
 }
+
+/// `position` is where playback is, read from the playback clock: nothing
+/// before the run, about as far as the wall clock has gone while it plays,
+/// still while paused, and on from where a seek put it — which a player
+/// used to have to rebuild from the timestamps of the frames going past.
+#[test]
+fn position_follows_playback_through_pause_and_seek() {
+    let Some(path) = try_test_video() else { return };
+    let input = ffmpeg::format::input(&path).expect("open fixture duration");
+    let duration = input.duration();
+    drop(input);
+    if duration <= 0 {
+        eprintln!("skipping: fixture has no known container duration");
+        return;
+    }
+    let target = Duration::from_micros(duration as u64 / 2);
+
+    let (source, streams) = FileDemuxer::open("demux", &path).expect("open test video");
+    let video = streams
+        .iter()
+        .find(|stream| stream.kind == ffmpeg::media::Type::Video)
+        .expect("a video stream")
+        .clone();
+    let count = Arc::new(AtomicUsize::new(0));
+    let (pipeline, ()) = Pipeline::new("position", source, |source, ctx| {
+        let branch = ctx
+            .branch()
+            .pipe(SwDecoder::new("decoder", video.parameters.clone())?)
+            .pipe(Pacer::new("pacer"))
+            .to(CountingSink {
+                pp_log: element_pp_log(ElementType::Other, "screen", None),
+                name: "screen".into(),
+                count: Arc::clone(&count),
+            })?;
+        ctx.attach(source, video.index, branch)?;
+        Ok(())
+    })
+    .expect("pipeline wiring");
+
+    assert_eq!(
+        pipeline.position(),
+        None,
+        "nothing has played before the run"
+    );
+    pipeline.run().expect("run");
+    thread::sleep(Duration::from_millis(500));
+    let playing = pipeline
+        .position()
+        .expect("a paced pipeline has a position");
+    assert!(
+        playing > Duration::from_millis(250) && playing < Duration::from_millis(900),
+        "half a second in, the position is {playing:?}"
+    );
+
+    pipeline.pause();
+    let paused = pipeline.position().expect("paused, still somewhere");
+    thread::sleep(Duration::from_millis(300));
+    let later = pipeline.position().expect("still somewhere");
+    assert!(
+        later.saturating_sub(paused) < Duration::from_millis(40),
+        "paused at {paused:?}, then {later:?}"
+    );
+
+    pipeline
+        .seek(target, SeekMode::Accurate)
+        .expect("seek while paused");
+    pipeline.resume();
+    thread::sleep(Duration::from_millis(300));
+    let after = pipeline.position().expect("playing again");
+    assert!(
+        after >= target.saturating_sub(Duration::from_millis(40))
+            && after < target + Duration::from_millis(900),
+        "sought to {target:?}, then at {after:?}"
+    );
+    pipeline.stop();
+}

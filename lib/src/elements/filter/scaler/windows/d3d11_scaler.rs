@@ -252,8 +252,10 @@ impl D3d11ScalerFormat {
 /// calls on `ID3D11VideoContext`, which is the shared immediate context
 /// under another interface — not a separate one. So `context` must be the
 /// exact same `Arc<Mutex<ID3D11DeviceContext>>` every other context-touching
-/// D3D11 element in this pipeline shares (e.g.
-/// `render_common::D3d11GpuContext::context()`), and this element holds that
+/// D3D11 element in this pipeline shares — the pipeline device's one immediate context, wrapped once in an
+/// `Arc<Mutex<_>>` and cloned to every element; the examples'
+/// `render_common::D3d11GpuContext` builds the device and that wrapper, and
+/// is there to copy, not to depend on — and this element holds that
 /// lock for a whole configure-and-`Blt` sequence, for the same reason
 /// [`crate::elements::D3d11Download`] holds it across its own copy and map.
 pub struct D3d11Scaler {

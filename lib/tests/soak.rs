@@ -655,7 +655,7 @@ fn segment_rotation_does_not_grow_process_memory_or_hold_files() {
 #[cfg(all(windows, feature = "d3d11"))]
 mod d3d11 {
     use std::{
-        sync::{Arc, Mutex, atomic::Ordering},
+        sync::{Arc, Mutex},
         thread,
         time::{Duration, Instant},
     };
@@ -1619,7 +1619,7 @@ mod d3d11 {
         // test window is allowed to produce no new notification, so resize by
         // one pixel after every session starts. This also exercises the frame-
         // pool recreation path instead of relying on a cosmetic repaint.
-        let cycle = CYCLE.fetch_add(1, Ordering::Relaxed);
+        let cycle = CYCLE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let width = if cycle.is_multiple_of(2) { 320 } else { 321 };
         // SAFETY: `hwnd` is the live window owned by `WgcTestWindow`, which
         // outlives this call, and `SWP_NOMOVE`/`SWP_NOZORDER` make the ignored

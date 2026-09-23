@@ -12,6 +12,13 @@ compile error with no explanation.
 
 ### Breaking
 
+- **A preroll timeout names what it waited on.** `PrerollError::TimedOut`
+  carried `pending: Vec<ElementId>`, so a failed seek said
+  `pending terminals [ElementId(8)]` and left the caller to work out which
+  branch that was. It carries `Vec<NodeInfo>` — each terminal's id, type
+  and name, from the pipeline's graph — and reads `preroll timed out
+  waiting on audio (Other #8)`.
+
 - **`SwEncoder` is opened for one pixel format, and refuses any other.**
   It encoded whatever frame it was handed as if it were `YUV420P`: a BGRA
   screen capture wired straight in linked, ran without an error, and wrote
@@ -525,6 +532,21 @@ compile error with no explanation.
   writes its packets at the right times.
 
 ### Added
+
+- **`Pipeline::position`.** Where playback is — the media time the
+  playback master has reached, from the audio renderer's played samples or
+  the wall clock a `Pacer` or `VideoSynchronizer` keeps — for a progress
+  bar. It holds still while paused, moves on from where a seek put it, and
+  is `None` when nothing paces the pipeline. A player used to rebuild it
+  from the timestamps of frames going past.
+
+- **`D3d11DecoderError::SurfacePoolExhausted`.** Frames held downstream past
+  what the fixed D3D11VA surface pool can spare failed decoding with
+  FFmpeg's `Invalid data found when processing input`, the pool's own
+  complaint reaching only FFmpeg's log. That failure now says how many
+  decoded frames were held and how big the pool is, and what to change.
+  `D3d11Decoder::new` and `DecodeTarget::D3d11` document that FFmpeg caps
+  the pool at 64 surfaces in all, references included.
 
 - **`log::init` records FFmpeg's own messages.** An encoder's closing
   statistics and a codec library's warnings (`[aac @ 0x…] Qavg: …`,

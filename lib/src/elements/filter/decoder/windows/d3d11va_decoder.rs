@@ -1,4 +1,7 @@
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 
 use crate::pp_log::{PpLog, pp_error, pp_info};
 use ffmpeg_next::{self as ffmpeg, ffi};
@@ -62,7 +65,35 @@ pub enum D3d11DecoderError {
     /// The device cannot be shared across a pipeline's threads.
     #[error(transparent)]
     SharedDevice(#[from] D3d11SharedDeviceError),
+
+    /// Decoding failed with the fixed D3D11VA surface pool all but used up
+    /// by frames still held downstream — in queues, by a slow renderer.
+    /// FFmpeg reports it only as the error it happened to hit (usually
+    /// `Invalid data found when processing input`) and says why only in its
+    /// log (`Static surface pool size exceeded`). Hold fewer decoded frames
+    /// downstream, or pass a larger `downstream_hw_frames` to
+    /// [`D3d11Decoder::new`] — within the 64 surfaces FFmpeg allows in all.
+    #[error(
+        "decoding failed with {held} decoded frames still held downstream of a \
+         {pool}-surface D3D11VA pool, which does not grow: hold fewer (shorter \
+         queues), or raise downstream_hw_frames — FFmpeg allows 64 surfaces in all \
+         ({source})"
+    )]
+    SurfacePoolExhausted {
+        /// Decoded frames this decoder had handed on that were still alive.
+        held: usize,
+        /// Surfaces in the pool, as FFmpeg actually sized it.
+        pool: i32,
+        /// What FFmpeg returned.
+        #[source]
+        source: ffmpeg::Error,
+    },
 }
+
+/// How many surfaces a codec may hold for its own reference frames — the
+/// most H.264 and HEVC ever keep. What the pool has beyond them is what
+/// downstream can hold.
+const CODEC_REFERENCE_SURFACES: usize = 16;
 
 /// Decodes one video stream's `Packet`s into GPU-resident `Video` frames
 /// via D3D11VA hardware acceleration — the D3D11 sibling of
@@ -82,6 +113,10 @@ pub struct D3d11Decoder {
     /// GPU texture itself is already pooled by ffmpeg's own hw frames
     /// context, this only reuses the small CPU-side `AVFrame` wrapper).
     pool: UnboundObjectPool<ffmpeg::frame::Video>,
+    /// How many of `pool`'s wrappers are alive — each decoded frame handed
+    /// on and still held downstream, plus the one being filled. What
+    /// [`D3d11DecoderError::SurfacePoolExhausted`] is judged by.
+    held: Arc<AtomicUsize>,
     /// Suppresses decoded samples before a seek target during preroll.
     preroll_gate: PrerollGate,
     /// Set by `get_format` when the GPU refuses the stream — see
@@ -118,7 +153,14 @@ impl D3d11Decoder {
     /// the log) instead of just blocking. Pass the deepest downstream
     /// queue/buffer depth; the internal candidate must not be counted again.
     /// Too small a downstream budget reproduces exactly that failure under
-    /// real playback, not just in theory.
+    /// real playback, not just in theory, and it arrives as
+    /// [`D3d11DecoderError::SurfacePoolExhausted`].
+    ///
+    /// The pool is capped, too: FFmpeg sizes it as the codec's own reference
+    /// surfaces plus this budget, but never past 64 surfaces in all. A budget
+    /// past what fits is not an error here — FFmpeg shrinks the pool to the
+    /// cap — so for H.264, which may keep up to 16 references, a downstream
+    /// deeper than about 40 frames cannot be relied on.
     ///
     /// The decoder opened is the first one FFmpeg has for the codec that can
     /// decode through D3D11VA, which need not be the one FFmpeg would pick by
@@ -183,7 +225,11 @@ impl D3d11Decoder {
                 ),
             ),
         );
-        let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
+        let held = Arc::new(AtomicUsize::new(0));
+        let released = Arc::clone(&held);
+        let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, move |_| {
+            released.fetch_sub(1, Ordering::Relaxed);
+        });
         pp_info!(pp_log: &pp_log, "opened: codec={:?}", decoder.id());
         Ok(Self {
             name,
@@ -192,6 +238,7 @@ impl D3d11Decoder {
             _hw_device_ctx: hw_device_ctx,
             pad,
             pool,
+            held,
             preroll_gate: PrerollGate::default(),
             refused,
         })
@@ -219,14 +266,45 @@ impl D3d11Decoder {
     /// [`NegotiationRefusal`].
     fn decode_error(&self, error: ffmpeg::Error) -> D3d11DecoderError {
         if self.refused.happened() {
-            D3d11DecoderError::HwAccelUnavailable
-        } else {
-            error.into()
+            return D3d11DecoderError::HwAccelUnavailable;
+        }
+        let held = self.held.load(Ordering::Relaxed);
+        if let Some(pool) = self.pool_size()
+            && held.saturating_add(CODEC_REFERENCE_SURFACES) >= pool.max(0) as usize
+        {
+            return D3d11DecoderError::SurfacePoolExhausted {
+                held,
+                pool,
+                source: error,
+            };
+        }
+        error.into()
+    }
+
+    /// How many surfaces FFmpeg gave the pool — capped, so not necessarily
+    /// what was asked for — once the first frame has sized it.
+    fn pool_size(&self) -> Option<i32> {
+        // SAFETY: reads the codec context's `hw_frames_ctx`, which FFmpeg
+        // sets when hardware decoding starts and keeps while the context
+        // lives; `AVHWFramesContext` is FFmpeg's public, generated struct,
+        // not a hand-mirrored one.
+        unsafe {
+            let frames = (*self.decoder.as_ptr()).hw_frames_ctx;
+            if frames.is_null() || (*frames).data.is_null() {
+                return None;
+            }
+            Some((*(*frames).data.cast::<ffmpeg::ffi::AVHWFramesContext>()).initial_pool_size)
         }
     }
 
+    /// A wrapper to decode into, counted in `held` until it is dropped.
+    fn wrapper(&self) -> crate::pool::UnboundObjectPoolRef<ffmpeg::frame::Video> {
+        self.held.fetch_add(1, Ordering::Relaxed);
+        self.pool.get()
+    }
+
     fn drain(&mut self) -> crate::error::Result<()> {
-        let mut frame = self.pool.get();
+        let mut frame = self.wrapper();
         loop {
             match self.decoder.receive_frame(&mut frame) {
                 Ok(()) => {
@@ -241,7 +319,7 @@ impl D3d11Decoder {
                         .push_admitted(MediaBuffer::Video(Arc::new(frame)), |frame| {
                             self.pad.push(frame)
                         })?;
-                    frame = self.pool.get();
+                    frame = self.wrapper();
                 }
                 Err(error) if is_codec_drain_boundary(&error) => break,
                 Err(error) => return Err(self.decode_error(error).into()),
@@ -634,5 +712,134 @@ mod tests {
                 "every packet after the refusal says why: {error}"
             );
         }
+    }
+
+    /// Holds every buffer it is given, as a deep queue or a stalled renderer
+    /// holds decoded frames, until told to let go.
+    struct Hoarder {
+        held: Arc<std::sync::Mutex<Vec<MediaBuffer>>>,
+        pp_log: PpLog,
+    }
+
+    impl Element for Hoarder {
+        fn name(&self) -> Arc<str> {
+            "hoarder".into()
+        }
+        fn element_type(&self) -> ElementType {
+            ElementType::Other
+        }
+        fn pp_log(&self) -> &PpLog {
+            &self.pp_log
+        }
+        fn pp_log_mut(&mut self) -> &mut PpLog {
+            &mut self.pp_log
+        }
+    }
+
+    impl Sink for Hoarder {
+        fn consume(&mut self, buf: MediaBuffer) -> crate::error::Result<()> {
+            self.held.lock().unwrap().push(buf);
+            Ok(())
+        }
+        fn control(&mut self, _msg: crate::control::ControlMsg) -> crate::error::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Frames held downstream past what the fixed surface pool can spare used
+    /// to fail decoding with FFmpeg's `Invalid data found when processing
+    /// input`, the pool's own complaint reaching only FFmpeg's log. It fails
+    /// with `SurfacePoolExhausted`, saying how many frames were held and how
+    /// big the pool is; letting them go lets decoding carry on from the next keyframe.
+    #[test]
+    fn frames_held_past_the_surface_pool_say_so() {
+        let Some((device, _context)) = try_d3d11_device() else {
+            return;
+        };
+        let Some(path) = crate::test_support::try_test_video() else {
+            return;
+        };
+        let mut input = ffmpeg::format::input(&path).expect("open the test video");
+        let stream = input
+            .streams()
+            .best(ffmpeg::media::Type::Video)
+            .expect("a video stream");
+        let (index, params) = (stream.index(), stream.parameters());
+        // No room downstream at all: the pool is the codec's own references
+        // and the decoder's one candidate.
+        let mut decoder = match D3d11Decoder::new("decoder", params, &device, 0) {
+            Ok(decoder) => decoder,
+            Err(D3d11DecoderError::HwDeviceInit(code)) => {
+                eprintln!("skipping: this D3D11 device does not decode video ({code})");
+                return;
+            }
+            Err(error) => panic!("open the D3D11VA decoder: {error}"),
+        };
+        let held = Arc::new(std::sync::Mutex::new(Vec::new()));
+        decoder.src_pads()[0].link(Box::new(Hoarder {
+            held: Arc::clone(&held),
+            pp_log: element_pp_log(ElementType::Other, "hoarder", None),
+        }));
+
+        let packets: Vec<_> = input
+            .packets()
+            .filter(|(stream, _)| stream.index() == index)
+            .map(|(_, packet)| Arc::new(packet))
+            .collect();
+        let mut remaining = packets.iter();
+        let refused = remaining
+            .by_ref()
+            .find_map(|packet| {
+                decoder
+                    .consume(MediaBuffer::Packet(Arc::clone(packet)))
+                    .err()
+            })
+            .expect("a pool with no room left for held frames runs out");
+        match refused {
+            crate::Error::D3d11DecoderError(D3d11DecoderError::SurfacePoolExhausted {
+                held: count,
+                pool,
+                ..
+            }) => {
+                assert!(
+                    count > 0 && pool > 0,
+                    "held {count} of a {pool}-surface pool"
+                );
+                assert!(
+                    refused_message_names_the_pool(count, pool),
+                    "the message says how many and how big"
+                );
+            }
+            other => panic!("expected SurfacePoolExhausted, got {other}"),
+        }
+
+        // The failed decode cost the codec a reference picture, so what
+        // follows it cannot decode until the next keyframe; a flush and the
+        // stream from its start is the recovery a seek makes.
+        held.lock().unwrap().clear();
+        drop(remaining);
+        decoder
+            .control(crate::control::ControlMsg::Flush)
+            .expect("flush");
+        for packet in packets.iter().take(5) {
+            decoder
+                .consume(MediaBuffer::Packet(Arc::clone(packet)))
+                .expect("with the frames let go, decoding carries on");
+        }
+        assert!(
+            !held.lock().unwrap().is_empty(),
+            "and frames come out again"
+        );
+    }
+
+    fn refused_message_names_the_pool(held: usize, pool: i32) -> bool {
+        let message = D3d11DecoderError::SurfacePoolExhausted {
+            held,
+            pool,
+            source: ffmpeg::Error::InvalidData,
+        }
+        .to_string();
+        message.contains(&format!("{held} decoded frames"))
+            && message.contains(&format!("{pool}-surface"))
     }
 }
