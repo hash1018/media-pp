@@ -80,7 +80,7 @@ mod example {
                 height,
                 ffmpeg::software::scaling::Flags::BILINEAR,
             );
-            let upload = CudaUpload::new("upload", &cuda, CudaFrameFormat::Nv12)?;
+            let upload = CudaUpload::new("upload", &cuda, CudaFrameFormat::Nv12);
             let branch = ctx
                 .branch()
                 .pipe(scaler)

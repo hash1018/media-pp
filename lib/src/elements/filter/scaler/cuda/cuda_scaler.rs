@@ -470,10 +470,7 @@ mod tests {
         luma: u8,
         pts: i64,
     ) -> Option<MediaBuffer> {
-        let Ok(mut upload) = CudaUpload::new("upload", device, CudaFrameFormat::Nv12) else {
-            eprintln!("skipping: this machine has no usable CUDA frames context");
-            return None;
-        };
+        let mut upload = CudaUpload::new("upload", device, CudaFrameFormat::Nv12);
         let uploaded = capture(&mut upload);
         upload
             .consume(MediaBuffer::video(nv12_flat(width, height, luma, pts)))
@@ -749,10 +746,7 @@ mod tests {
         let Some((device, _cuda_lock)) = try_cuda_device() else {
             return;
         };
-        let Ok(mut upload) = CudaUpload::new("upload", &device, CudaFrameFormat::Bgra) else {
-            eprintln!("skipping: this machine has no usable CUDA frames context");
-            return;
-        };
+        let mut upload = CudaUpload::new("upload", &device, CudaFrameFormat::Bgra);
         let uploaded = capture(&mut upload);
         let mut bgra = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::BGRA, 128, 64);
         bgra.set_pts(Some(3));
@@ -870,10 +864,7 @@ mod tests {
         let Some((device, _cuda_lock)) = try_cuda_device() else {
             return;
         };
-        let Ok(mut upload) = CudaUpload::new("upload", &device, CudaFrameFormat::Bgra) else {
-            eprintln!("skipping: this machine has no usable CUDA frames context");
-            return;
-        };
+        let mut upload = CudaUpload::new("upload", &device, CudaFrameFormat::Bgra);
         let uploaded = capture(&mut upload);
         upload
             .consume(MediaBuffer::video(ffmpeg::frame::Video::new(

@@ -136,7 +136,7 @@ mod example {
                     output_height,
                     ffmpeg::software::scaling::Flags::BILINEAR,
                 );
-                let upload = CudaUpload::new("upload", &cuda, CudaFrameFormat::Nv12)?;
+                let upload = CudaUpload::new("upload", &cuda, CudaFrameFormat::Nv12);
                 let branch = ctx.branch().pipe(scaler).pipe(upload).to(background_sink)?;
                 ctx.attach(source, 0, branch)?;
                 Ok(())

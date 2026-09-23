@@ -174,7 +174,7 @@ mod linux_example {
             format!("{name}-upload"),
             &render.cuda,
             CudaFrameFormat::Nv12,
-        )?;
+        );
         let renderer = render_common::cuda_window_renderer(
             format!("{name}-render"),
             &render.gpu,

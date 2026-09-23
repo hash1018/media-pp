@@ -12,6 +12,16 @@ compile error with no explanation.
 
 ### Breaking
 
+- **`CudaUpload::new` no longer returns a `Result`.** Drop the `?`:
+  `CudaUpload::new(name, &device, format)?` is
+  `CudaUpload::new(name, &device, format)`. It never had a failure to
+  report — it takes a reference to the device and builds its pads, and the
+  surfaces it uploads into are allocated when the first frame says what
+  size they are, which is where a CUDA error has always come from. The two
+  other uploads are unchanged: `D3d11Upload::new` does not fail either and
+  never said it did, and `D3d12Upload::new` does, when it allocates up
+  front.
+
 - **A muxer's `add_stream` takes the encoder or stream it describes.**
   `add_stream(name, parameters, time_base)` on `FileMuxer`,
   `SegmentedFileMuxer`, `HlsMuxer`, `RtmpMuxer`, `RtspMuxer` and

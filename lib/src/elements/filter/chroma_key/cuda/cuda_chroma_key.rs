@@ -444,10 +444,7 @@ mod tests {
         pts: i64,
         pixel: impl Fn(u32, u32) -> [u8; 4],
     ) -> Option<MediaBuffer> {
-        let Ok(mut upload) = CudaUpload::new("upload", device, CudaFrameFormat::Bgra) else {
-            eprintln!("skipping: this machine has no usable CUDA frames context");
-            return None;
-        };
+        let mut upload = CudaUpload::new("upload", device, CudaFrameFormat::Bgra);
         let uploaded = capture(&mut upload);
         let mut frame = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::BGRA, width, height);
         frame.set_pts(Some(pts));

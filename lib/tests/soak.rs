@@ -1831,7 +1831,7 @@ mod cuda {
                     HEIGHT,
                     ffmpeg::software::scaling::Flags::BILINEAR,
                 );
-                let upload = CudaUpload::new("upload", device, CudaFrameFormat::Nv12)?;
+                let upload = CudaUpload::new("upload", device, CudaFrameFormat::Nv12);
                 let scaler = CudaScaler::new(
                     "scaler",
                     device,
@@ -1934,7 +1934,7 @@ mod cuda {
                 HEIGHT,
                 ffmpeg::software::scaling::Flags::BILINEAR,
             );
-            let upload = CudaUpload::new("upload", device, CudaFrameFormat::Nv12)?;
+            let upload = CudaUpload::new("upload", device, CudaFrameFormat::Nv12);
             let encoder = CudaEncoder::new("encoder", device, nvenc_options())?;
             let branch = ctx
                 .branch()
@@ -2175,7 +2175,7 @@ mod cuda {
                     HEIGHT,
                     ffmpeg::software::scaling::Flags::BILINEAR,
                 );
-                let upload = CudaUpload::new("upload", input_device, CudaFrameFormat::Nv12)?;
+                let upload = CudaUpload::new("upload", input_device, CudaFrameFormat::Nv12);
                 let branch = ctx.branch().pipe(to_nv12).pipe(upload).to(layer_sink)?;
                 ctx.attach(source, 0, branch)?;
                 Ok(())

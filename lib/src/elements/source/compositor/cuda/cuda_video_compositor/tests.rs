@@ -32,10 +32,7 @@ fn cuda_bgra_frame(
     height: u32,
     pixel: impl Fn(u32, u32) -> [u8; 4],
 ) -> Option<MediaBuffer> {
-    let Ok(mut upload) = CudaUpload::new("upload", device, CudaFrameFormat::Bgra) else {
-        eprintln!("skipping: this machine has no usable CUDA frames context");
-        return None;
-    };
+    let mut upload = CudaUpload::new("upload", device, CudaFrameFormat::Bgra);
     let uploaded = capture(&mut upload);
     let mut frame = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::BGRA, width, height);
     frame.set_pts(Some(0));
@@ -57,10 +54,7 @@ fn cuda_frame_with_pts(
     luma: u8,
     pts: i64,
 ) -> Option<MediaBuffer> {
-    let Ok(mut upload) = CudaUpload::new("upload", device, CudaFrameFormat::Nv12) else {
-        eprintln!("skipping: this machine has no usable CUDA frames context");
-        return None;
-    };
+    let mut upload = CudaUpload::new("upload", device, CudaFrameFormat::Nv12);
     let uploaded = capture(&mut upload);
     let mut frame = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::NV12, width, height);
     frame.set_pts(Some(pts));
@@ -113,10 +107,7 @@ fn luma_at(frame: &ffmpeg::frame::Video, x: usize, y: usize) -> u8 {
 /// A CUDA-resident NV12 frame whose luma says which quadrant a pixel is
 /// in, so what was drawn is readable from the output alone.
 fn cuda_quadrant_frame(device: &CudaDevice, width: u32, height: u32) -> Option<MediaBuffer> {
-    let Ok(mut upload) = CudaUpload::new("upload", device, CudaFrameFormat::Nv12) else {
-        eprintln!("skipping: this machine has no usable CUDA frames context");
-        return None;
-    };
+    let mut upload = CudaUpload::new("upload", device, CudaFrameFormat::Nv12);
     let uploaded = capture(&mut upload);
     let mut frame = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::NV12, width, height);
     frame.set_pts(Some(0));
@@ -1226,10 +1217,7 @@ fn an_nv12_layer_is_composed_by_its_own_colour() {
                 },
             )
             .expect("add a layer");
-        let Ok(mut upload) = CudaUpload::new("upload", &device, CudaFrameFormat::Nv12) else {
-            eprintln!("skipping: this machine has no usable CUDA frames context");
-            return None;
-        };
+        let mut upload = CudaUpload::new("upload", &device, CudaFrameFormat::Nv12);
         let uploaded = capture(&mut upload);
         let mut frame = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::NV12, 64, 64);
         frame.data_mut(0).fill(luma);

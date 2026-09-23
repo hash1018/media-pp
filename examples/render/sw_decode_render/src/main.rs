@@ -171,7 +171,7 @@ mod linux_example {
                 target.height,
                 ffmpeg::software::scaling::Flags::BILINEAR,
             );
-            let upload = CudaUpload::new("upload", &cuda, CudaFrameFormat::Nv12)?;
+            let upload = CudaUpload::new("upload", &cuda, CudaFrameFormat::Nv12);
             let renderer = render_common::cuda_window_renderer(
                 "renderer",
                 &gpu,

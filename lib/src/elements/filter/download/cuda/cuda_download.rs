@@ -325,10 +325,7 @@ mod tests {
             return;
         };
         let (width, height) = (64u32, 64u32);
-        let Ok(mut upload) = CudaUpload::new("upload", &device, CudaFrameFormat::Nv12) else {
-            eprintln!("skipping: this machine has no usable CUDA frames context");
-            return;
-        };
+        let mut upload = CudaUpload::new("upload", &device, CudaFrameFormat::Nv12);
         // One surface, then a second `AVFrame` over it — what a producer with
         // nothing new to show hands over.
         let uploaded = capture(&mut upload);
@@ -381,10 +378,7 @@ mod tests {
             return;
         };
         let (width, height) = (64u32, 64u32);
-        let Ok(mut upload) = CudaUpload::new("upload", &device, CudaFrameFormat::Nv12) else {
-            eprintln!("skipping: this machine has no usable CUDA frames context");
-            return;
-        };
+        let mut upload = CudaUpload::new("upload", &device, CudaFrameFormat::Nv12);
         let mut download = CudaDownload::new("download", &device, CudaFrameFormat::Nv12);
         let received = capture(&mut download);
         upload.src_pads()[0].link(Box::new(download));
@@ -431,10 +425,7 @@ mod tests {
             return;
         };
         let (width, height) = (32u32, 32u32);
-        let Ok(mut upload) = CudaUpload::new("upload", &device, CudaFrameFormat::Bgra) else {
-            eprintln!("skipping: this machine has no usable CUDA frames context");
-            return;
-        };
+        let mut upload = CudaUpload::new("upload", &device, CudaFrameFormat::Bgra);
         let mut download = CudaDownload::new("download", &device, CudaFrameFormat::Bgra);
         let received = capture(&mut download);
         upload.src_pads()[0].link(Box::new(download));
@@ -483,10 +474,7 @@ mod tests {
         let Some((device, _cuda_lock)) = try_cuda_device() else {
             return;
         };
-        let Ok(mut upload) = CudaUpload::new("upload", &device, CudaFrameFormat::Bgra) else {
-            eprintln!("skipping: this machine has no usable CUDA frames context");
-            return;
-        };
+        let mut upload = CudaUpload::new("upload", &device, CudaFrameFormat::Bgra);
         let uploaded = capture(&mut upload);
         let bgra = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::BGRA, 32, 32);
         upload.consume(MediaBuffer::video(bgra)).expect("upload");
@@ -583,10 +571,7 @@ mod tests {
         // Directly, not `try_cuda_device` again: the lock it returns is
         // already held for this test and does not nest.
         let other_device = CudaDevice::new().expect("a second CUDA device");
-        let Ok(mut upload) = CudaUpload::new("upload", &other_device, CudaFrameFormat::Nv12) else {
-            eprintln!("skipping: this machine has no usable CUDA frames context");
-            return;
-        };
+        let mut upload = CudaUpload::new("upload", &other_device, CudaFrameFormat::Nv12);
         let uploaded = capture(&mut upload);
         upload
             .consume(MediaBuffer::video(nv12_pattern(64, 64, 0)))
@@ -608,10 +593,7 @@ mod tests {
         let Some((device, _cuda_lock)) = try_cuda_device() else {
             return;
         };
-        let Ok(mut upload) = CudaUpload::new("upload", &device, CudaFrameFormat::Nv12) else {
-            eprintln!("skipping: this machine has no usable CUDA frames context");
-            return;
-        };
+        let mut upload = CudaUpload::new("upload", &device, CudaFrameFormat::Nv12);
         let uploaded = capture(&mut upload);
         upload
             .consume(MediaBuffer::video(nv12_pattern(64, 64, 0)))

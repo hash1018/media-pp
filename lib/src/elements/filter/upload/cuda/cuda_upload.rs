@@ -135,11 +135,7 @@ impl CudaUpload {
     /// `device` must be the same [`CudaDevice`] every other CUDA element in
     /// this pipeline was built from. This element takes its own FFmpeg
     /// reference, so `device` itself need not outlive the call.
-    pub fn new(
-        name: impl Into<String>,
-        device: &CudaDevice,
-        format: CudaFrameFormat,
-    ) -> std::result::Result<Self, CudaUploadError> {
+    pub fn new(name: impl Into<String>, device: &CudaDevice, format: CudaFrameFormat) -> Self {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::CudaUpload, &name, None);
 
@@ -154,7 +150,7 @@ impl CudaUpload {
         );
         let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
         pp_info!(pp_log: &pp_log, "opened: {:?} -> CUDA", format.pixel());
-        Ok(Self {
+        Self {
             name,
             pp_log,
             hw_device_ctx,
@@ -163,7 +159,7 @@ impl CudaUpload {
             pad,
             pool,
             repeated: RepeatedOutput::new(),
-        })
+        }
     }
 
     fn upload(
@@ -328,7 +324,7 @@ mod tests {
     /// [`try_cuda_device`]).
     fn new_upload() -> Option<UploadFixture> {
         let (device, cuda_lock) = try_cuda_device()?;
-        let mut upload = CudaUpload::new("upload", &device, CudaFrameFormat::Nv12).ok()?;
+        let mut upload = CudaUpload::new("upload", &device, CudaFrameFormat::Nv12);
         let received = Arc::new(Mutex::new(Vec::new()));
         upload.src_pads()[0].link(Box::new(CapturingSink {
             received: received.clone(),
@@ -416,10 +412,7 @@ mod tests {
             return;
         };
         let (width, height) = (64u32, 64u32);
-        let Ok(mut upload) = CudaUpload::new("upload", &device, CudaFrameFormat::Bgra) else {
-            eprintln!("skipping: this machine has no usable CUDA frames context");
-            return;
-        };
+        let mut upload = CudaUpload::new("upload", &device, CudaFrameFormat::Bgra);
         let received = Arc::new(Mutex::new(Vec::new()));
         upload.src_pads()[0].link(Box::new(CapturingSink {
             received: received.clone(),

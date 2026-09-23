@@ -371,10 +371,7 @@ mod tests {
     /// them, so one kernel launch covers every sample a test asks about.
     fn cuda_row(device: &CudaDevice, pixels: &[[u8; 4]]) -> Option<MediaBuffer> {
         let width = pixels.len() as u32;
-        let Ok(mut upload) = CudaUpload::new("upload", device, CudaFrameFormat::Bgra) else {
-            eprintln!("skipping: this machine has no usable CUDA frames context");
-            return None;
-        };
+        let mut upload = CudaUpload::new("upload", device, CudaFrameFormat::Bgra);
         let uploaded = capture(&mut upload);
         let mut frame = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::BGRA, width, 1);
         frame.set_pts(Some(7));

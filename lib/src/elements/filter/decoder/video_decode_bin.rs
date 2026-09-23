@@ -925,7 +925,7 @@ impl DecodeTarget {
                 };
                 Some(Box::new(crate::elements::CudaUpload::new(
                     name, device, format,
-                )?))
+                )))
             }
         })
     }

@@ -19,10 +19,7 @@ fn cuda_surface(
     height: u32,
     luma: u8,
 ) -> Option<MediaBuffer> {
-    let Ok(mut upload) = CudaUpload::new("upload", device, CudaFrameFormat::Nv12) else {
-        eprintln!("skipping: this machine has no usable CUDA frames context");
-        return None;
-    };
+    let mut upload = CudaUpload::new("upload", device, CudaFrameFormat::Nv12);
     let uploaded = capture(&mut upload);
     let mut frame = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::NV12, width, height);
     let y_stride = frame.stride(0);
@@ -335,10 +332,7 @@ fn cuda_bgra_surface(
     height: u32,
     pixel: impl Fn(u32, u32) -> [u8; 4],
 ) -> Option<MediaBuffer> {
-    let Ok(mut upload) = CudaUpload::new("upload", device, CudaFrameFormat::Bgra) else {
-        eprintln!("skipping: this machine has no usable CUDA frames context");
-        return None;
-    };
+    let mut upload = CudaUpload::new("upload", device, CudaFrameFormat::Bgra);
     let uploaded = capture(&mut upload);
     let mut frame = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::BGRA, width, height);
     let stride = frame.stride(0);
@@ -525,10 +519,7 @@ fn cuda_surface_with(
     luma: impl Fn(u32, u32) -> u8,
     chroma: u8,
 ) -> Option<MediaBuffer> {
-    let Ok(mut upload) = CudaUpload::new("upload", device, CudaFrameFormat::Nv12) else {
-        eprintln!("skipping: this machine has no usable CUDA frames context");
-        return None;
-    };
+    let mut upload = CudaUpload::new("upload", device, CudaFrameFormat::Nv12);
     let uploaded = capture(&mut upload);
     let mut frame = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::NV12, width, height);
     let y_stride = frame.stride(0);
