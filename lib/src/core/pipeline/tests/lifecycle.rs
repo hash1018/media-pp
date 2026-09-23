@@ -529,3 +529,78 @@ fn a_source_that_fails_still_stops_its_own_branch() {
          or anything holding state downstream can never finalize it"
     );
 }
+
+fn idle_pipeline(id: &str) -> Arc<Pipeline> {
+    let (pipeline, ()) = Pipeline::new(
+        id,
+        TestVideoSource::new("gen", TestVideoOptions::default()),
+        |source, ctx| {
+            let branch = ctx.branch().to(NoOpSink {
+                name: "noop".into(),
+                pp_log: element_pp_log(ElementType::Other, "noop", None),
+            })?;
+            ctx.attach(source, 0, branch)?;
+            Ok(())
+        },
+    )
+    .expect("test pipeline wiring must succeed");
+    pipeline
+}
+
+/// A pipeline runs once. Asking it to run again used to return `Ok` and do
+/// nothing, so a caller trying to play something a second time saw no error
+/// and no playback; now it is told why, and the first run is left alone.
+#[test]
+fn running_a_pipeline_again_is_refused_and_leaves_the_first_run_alone() {
+    let pipeline = idle_pipeline("run-twice");
+    pipeline.run().expect("the first run starts");
+
+    let again = pipeline.run().expect_err("a second run is refused");
+    assert!(matches!(
+        again,
+        crate::Error::PipelineError(crate::pipeline::PipelineError::AlreadyStarted)
+    ));
+    thread::sleep(Duration::from_millis(50));
+    assert!(pipeline.is_running(), "the first run carries on");
+
+    pipeline.stop();
+    let _: Vec<_> = pipeline.bus().iter().collect();
+    assert!(matches!(
+        pipeline.run(),
+        Err(crate::Error::PipelineError(
+            crate::pipeline::PipelineError::AlreadyStarted
+        ))
+    ));
+    assert!(!pipeline.is_running(), "an ended pipeline stays ended");
+}
+
+/// A seek with nothing running used to return `Ok` without having moved
+/// anything. Before `run` it is refused and consumes nothing — the pipeline
+/// still starts — and after `stop` it is refused again.
+#[test]
+fn seeking_a_pipeline_that_is_not_running_is_refused() {
+    let pipeline = idle_pipeline("seek-idle");
+    let not_running = |result: Result<()>| {
+        matches!(
+            result,
+            Err(crate::Error::PipelineError(
+                crate::pipeline::PipelineError::NotRunning
+            ))
+        )
+    };
+
+    assert!(not_running(
+        pipeline.seek(Duration::ZERO, SeekMode::Keyframe)
+    ));
+    pipeline
+        .run()
+        .expect("a refused seek leaves the pipeline able to run");
+    thread::sleep(Duration::from_millis(50));
+    assert!(pipeline.is_running());
+
+    pipeline.stop();
+    let _: Vec<_> = pipeline.bus().iter().collect();
+    assert!(not_running(
+        pipeline.seek(Duration::ZERO, SeekMode::Keyframe)
+    ));
+}

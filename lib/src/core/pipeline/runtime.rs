@@ -7,6 +7,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+use thiserror::Error as ThisError;
+
 use crate::pp_log::{PpLog, pp_info, pp_trace, pp_warn};
 
 use crate::{
@@ -23,6 +25,25 @@ use crate::{
 };
 
 use super::{PipelineBuilder, builder::SourceEntry};
+
+/// A [`Pipeline`] asked for something its lifecycle no longer, or not yet,
+/// allows. Converts into the crate-wide `Error` via `?` (see
+/// [`crate::error::Error`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ThisError)]
+#[non_exhaustive]
+pub enum PipelineError {
+    /// [`Pipeline::run`] was called on a pipeline that had already been run.
+    /// A pipeline runs once: build a new one for another play-through.
+    #[error("this pipeline has already been run; build a new one to run again")]
+    AlreadyStarted,
+
+    /// [`Pipeline::seek`] was called before [`Pipeline::run`], or after every
+    /// source had stopped — by [`Pipeline::stop`], [`Pipeline::finish`], or
+    /// an error it could not continue past. A source parked at the end of its
+    /// stream is still running, and can be sought back into.
+    #[error("this pipeline is not running, so there is nothing to seek")]
+    NotRunning,
+}
 
 /// How [`Pipeline::seek`] chooses the sample shown at the requested position.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -289,9 +310,10 @@ impl Pipeline {
 
     /// Starts driving the source on a background thread and returns
     /// immediately — see the type-level docs for how to learn when it's
-    /// actually done. A no-op if this `Pipeline` is already running or
-    /// has already finished a previous run — this type has no "reset"
-    /// path; build a fresh `Pipeline` for another play-through.
+    /// actually done. A pipeline runs once: calling this again, whether it
+    /// is still running or has ended, fails with
+    /// [`PipelineError::AlreadyStarted`] and changes nothing — this type has
+    /// no "reset" path; build a fresh `Pipeline` for another play-through.
     /// If a source worker cannot be created, any source workers already
     /// started by this call are stopped and joined before the error returns.
     /// The one-shot pipeline is not reusable after that failure.
@@ -308,17 +330,17 @@ impl Pipeline {
             Box<dyn FnOnce() + Send + 'static>,
         ) -> std::io::Result<JoinHandle<()>>,
     ) -> Result<()> {
-        let Some(sources) = self.sources.lock().unwrap().take() else {
-            return Ok(());
+        let Some(sources) = lock(&self.sources).take() else {
+            return Err(PipelineError::AlreadyStarted.into());
         };
         // Always `Some` in lockstep with `sources` above — all three taken
         // exactly once, on whichever `run()` call actually wins the
         // `sources` guard.
-        let Some(bus) = self.bus.lock().unwrap().take() else {
-            return Ok(());
+        let Some(bus) = lock(&self.bus).take() else {
+            return Err(PipelineError::AlreadyStarted.into());
         };
-        let Some(control_rxs) = self.control_rxs.lock().unwrap().take() else {
-            return Ok(());
+        let Some(control_rxs) = lock(&self.control_rxs).take() else {
+            return Err(PipelineError::AlreadyStarted.into());
         };
 
         if crate::log::enabled(crate::log::Level::Info) {
@@ -387,7 +409,7 @@ impl Pipeline {
                 }),
             );
             match spawn_result {
-                Ok(handle) => self.workers.lock().unwrap().push(handle),
+                Ok(handle) => lock(&self.workers).push(handle),
                 Err(source) => {
                     // This pipeline is one-shot, so sources already started
                     // cannot be reconstructed for a retry. Stop and join them,
@@ -677,7 +699,9 @@ impl Pipeline {
     /// reacts before preroll begins. Once every terminal in the starting
     /// topology snapshot has
     /// accepted a first sample (or EOS), a paused pipeline remains paused and
-    /// a playing pipeline resumes. No-op if `run()` isn't currently active.
+    /// a playing pipeline resumes. Fails with [`PipelineError::NotRunning`]
+    /// before [`Pipeline::run`] or once every source has stopped; a source
+    /// parked at the end of its stream still counts as running.
     ///
     /// Signals the clock's interrupt epoch before starting the synchronous
     /// cascade so a `Pacer` in a long wait can return its worker promptly.
@@ -706,7 +730,7 @@ impl Pipeline {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if self.running.load(Ordering::Acquire) == 0 {
-            return Ok(());
+            return Err(PipelineError::NotRunning.into());
         }
         let check = Arc::new(SeekCheckContext::new());
         for control_tx in &self.control_txs {
@@ -795,4 +819,13 @@ impl Drop for Pipeline {
 pub(super) struct PrerollSlot {
     active: Option<Arc<PrerollContext>>,
     abandoned: bool,
+}
+
+/// Locks `mutex`, taking over a poisoned one: what these guard — the run
+/// state taken once, and the list of workers to join — is never left
+/// half-written by a panic elsewhere.
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }

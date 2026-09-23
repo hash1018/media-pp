@@ -12,6 +12,18 @@ compile error with no explanation.
 
 ### Breaking
 
+- **A `Pipeline` says when `run` or `seek` did nothing.** Calling `run`
+  on a pipeline that had already been run returned `Ok` and did nothing,
+  so a second play-through showed neither an error nor any playback; it
+  fails with the new `PipelineError::AlreadyStarted` and leaves the first
+  run alone. `seek` before `run`, or once every source has stopped,
+  returned `Ok` without moving anything; it fails with
+  `PipelineError::NotRunning`. A source parked at the end of its stream
+  still counts as running, so seeking back into a finished file works as
+  it did. `PipelineError` is in `media_pp::pipeline` and converts into the
+  crate's `Error`. `pause`, `resume` and `stop` stay quiet no-ops outside a
+  run, since asking for a state a pipeline is already in is harmless.
+
 - **`log::init` takes its directory as a path.** `log_path` was a `&str`,
   the one file location in the crate that was, so a caller holding a
   `PathBuf` had to convert it with `to_string_lossy` — which turns a name

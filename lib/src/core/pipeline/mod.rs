@@ -19,7 +19,7 @@ mod runtime;
 
 pub use builder::PipelineBuilder;
 pub use chain::{ChainBuilder, DetachedBranch};
-pub use runtime::{Pipeline, SeekMode};
+pub use runtime::{Pipeline, PipelineError, SeekMode};
 
 #[cfg(test)]
 use crate::pp_log::PpLog;

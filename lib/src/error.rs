@@ -85,6 +85,7 @@ use crate::{
     },
     graph::GraphError,
     log::LogInitError,
+    pipeline::PipelineError,
     playback_clock::PlaybackClockError,
     queue::QueueError,
     rate::FrameRateError,
@@ -181,6 +182,10 @@ pub enum Error {
     /// One or more elements rejected a pipeline-wide seek check.
     #[error(transparent)]
     SeekError(#[from] SeekError),
+
+    /// A pipeline was asked for something its lifecycle does not allow.
+    #[error(transparent)]
+    PipelineError(#[from] PipelineError),
 
     /// A pipeline, queue, or driver worker thread could not be created.
     #[error(transparent)]
