@@ -14,7 +14,10 @@ use crate::{
     frame_size::ForSize,
     pad::SrcPad,
     platform::{
-        cuda::{CudaDevice, CudaFrameFormat},
+        cuda::{
+            CudaDevice, CudaFrameFormat,
+            frame::{self, CudaFrameError, CudaSurfaces},
+        },
         ffmpeg::AvBufferRef,
     },
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
@@ -30,31 +33,14 @@ pub enum CudaDownloadError {
     #[error("failed to reference the previous download (code {0})")]
     FrameRef(i32),
 
-    /// The input frame is not backed by CUDA hardware surfaces.
-    #[error("CudaDownload only downloads CUDA frames, got {0:?}")]
-    UnsupportedFormat(ffmpeg::format::Pixel),
     /// The sink received a buffer other than decoded video or end-of-stream.
 
     #[error("CudaDownload only accepts Video and Eos buffers, got a {0}")]
     UnsupportedBuffer(&'static str),
-    /// The frame carries no hardware frames context, so it did not come from
-    /// a CUDA producer at all.
-    #[error("CUDA frame has no hardware frames context")]
-    MissingFramesContext,
-
-    /// The frame was allocated against a different CUDA context than this
-    /// element's. Its device pointers mean nothing here.
-    #[error("CUDA frame belongs to a different CUDA context than this CudaDownload")]
-    ForeignContext,
-
-    /// The CUDA surface layout differs from the expected CPU output format.
-    #[error("this CudaDownload was built for {expected:?} surfaces, got {actual:?}")]
-    UnsupportedSurfaceFormat {
-        /// Surface format expected by this downloader.
-        expected: ffmpeg::format::Pixel,
-        /// Surface format carried by the input frame.
-        actual: ffmpeg::format::Pixel,
-    },
+    /// The frame is not a surface of the layout this was built for, on this
+    /// element's own device.
+    #[error(transparent)]
+    Frame(#[from] CudaFrameError),
     /// FFmpeg failed to transfer CUDA pixels into a CPU frame.
 
     #[error("CUDA to CPU transfer failed (code {0})")]
@@ -169,36 +155,14 @@ impl CudaDownload {
         &mut self,
         source: &ffmpeg::frame::Video,
     ) -> Result<UnboundObjectPoolRef<ffmpeg::frame::Video>> {
-        if source.format() != ffmpeg::format::Pixel::CUDA {
-            pp_error!(self, "unsupported pixel format: {:?}", source.format());
-            return Err(CudaDownloadError::UnsupportedFormat(source.format()).into());
-        }
-        // SAFETY: `frame` is a live `frame::Video` already confirmed to be
-        // `Pixel::CUDA`, so `as_ptr` yields an initialized `AVFrame` and a hardware
-        // frame's `hw_frames_ctx` is either null — rejected here — or an
-        // `AVBufferRef` whose `data` is an `AVHWFramesContext`. Only pointer
-        // identity is compared, never dereferenced past that.
-        unsafe {
-            let frames_ref = (*source.as_ptr()).hw_frames_ctx;
-            if frames_ref.is_null() {
-                pp_error!(self, "frame has no hardware frames context");
-                return Err(CudaDownloadError::MissingFramesContext.into());
-            }
-            let frames_ctx = (*frames_ref).data as *const ffi::AVHWFramesContext;
-            if !std::ptr::eq((*frames_ctx).device_ctx, self.device_ctx) {
-                pp_error!(self, "frame belongs to a different CUDA context");
-                return Err(CudaDownloadError::ForeignContext.into());
-            }
-            let sw_format = ffmpeg::format::Pixel::from((*frames_ctx).sw_format);
-            if sw_format != self.format.pixel() {
-                let error = CudaDownloadError::UnsupportedSurfaceFormat {
-                    expected: self.format.pixel(),
-                    actual: sw_format,
-                };
-                pp_error!(self, "{error}");
-                return Err(error.into());
-            }
-        }
+        frame::validate(
+            source,
+            ElementType::CudaDownload,
+            self.device_ctx,
+            CudaSurfaces::of(self.format),
+        )
+        .map_err(CudaDownloadError::from)
+        .inspect_err(|error| pp_error!(self, "{error}"))?;
 
         let pixel = self.format.pixel();
         let pp_log = &self.pp_log;
@@ -319,52 +283,14 @@ impl Drop for CudaDownload {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
+    use crate::test_support::capture;
+    use std::sync::Arc;
 
     use super::*;
     use crate::{
         elements::{CudaDecoder, CudaUpload},
         test_support::{try_cuda_device, try_test_video},
     };
-
-    struct CapturingSink {
-        pp_log: PpLog,
-        received: Arc<Mutex<Vec<MediaBuffer>>>,
-    }
-
-    impl Element for CapturingSink {
-        fn name(&self) -> Arc<str> {
-            "capture".into()
-        }
-        fn element_type(&self) -> ElementType {
-            ElementType::Other
-        }
-        fn pp_log(&self) -> &PpLog {
-            &self.pp_log
-        }
-        fn pp_log_mut(&mut self) -> &mut PpLog {
-            &mut self.pp_log
-        }
-    }
-
-    impl Sink for CapturingSink {
-        fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
-            self.received.lock().unwrap().push(buf);
-            Ok(())
-        }
-        fn control(&mut self, _msg: ControlMsg) -> Result<()> {
-            Ok(())
-        }
-    }
-
-    fn capture(element: &mut dyn Source) -> Arc<Mutex<Vec<MediaBuffer>>> {
-        let received = Arc::new(Mutex::new(Vec::new()));
-        element.src_pads()[0].link(Box::new(CapturingSink {
-            received: received.clone(),
-            pp_log: element_pp_log(ElementType::Other, "capture", None),
-        }));
-        received
-    }
 
     fn pooled(frame: ffmpeg::frame::Video) -> MediaBuffer {
         let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
@@ -579,8 +505,10 @@ mod tests {
             .consume(frame)
             .expect_err("a BGRA surface must not download as NV12");
         assert!(
-            error.to_string().contains("built for NV12"),
-            "expected UnsupportedSurfaceFormat, got {error}"
+            error
+                .to_string()
+                .contains("CudaDownload reads NV12 surfaces, got BGRA"),
+            "expected CudaFrameError::UnsupportedSurfaceFormat, got {error}"
         );
     }
 
@@ -655,8 +583,8 @@ mod tests {
             .consume(pooled(nv12_pattern(64, 64, 0)))
             .expect_err("a CPU frame must not be downloaded");
         assert!(
-            error.to_string().contains("only downloads CUDA frames"),
-            "expected UnsupportedFormat, got {error}"
+            error.to_string().contains("CudaDownload takes CUDA frames"),
+            "expected CudaFrameError::NotCuda, got {error}"
         );
 
         // Directly, not `try_cuda_device` again: the lock it returns is
@@ -675,8 +603,8 @@ mod tests {
             .consume(foreign)
             .expect_err("a frame from a foreign CUDA context must not be downloaded");
         assert!(
-            error.to_string().contains("different CUDA context"),
-            "expected ForeignContext, got {error}"
+            error.to_string().contains("from a different CUDA device"),
+            "expected CudaFrameError::ForeignContext, got {error}"
         );
     }
 

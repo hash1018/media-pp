@@ -11,7 +11,13 @@ use crate::{
     control::ControlMsg,
     element::{Element, ElementType, Sink, element_pp_log},
     elements::sink::renderer::SubmitError,
-    platform::{cuda::CudaDevice, ffmpeg::AvBufferRef},
+    platform::{
+        cuda::{
+            CudaDevice,
+            frame::{self, CudaFrameError, CudaSurfaces},
+        },
+        ffmpeg::AvBufferRef,
+    },
 };
 
 /// What [`CudaRenderer`] needs from an actual windowing/graphics
@@ -67,26 +73,12 @@ pub trait CudaFrameRenderer: Send {
 /// via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum CudaRendererError {
-    /// The input frame is not backed by CUDA hardware surfaces.
-    #[error("CudaRenderer only accepts CUDA frames, got {0:?}")]
-    UnsupportedFormat(ffmpeg::format::Pixel),
-
-    /// The frame carries no hardware frames context, so there is nothing to
-    /// check its CUDA context against — it did not come from a hardware
-    /// decoder at all.
-    #[error("CUDA frame has no hardware frames context")]
-    MissingFramesContext,
-
-    /// The frame was allocated against a different CUDA context than this
-    /// renderer imported its target image into. Its device pointers are
-    /// meaningless here, so this is caught up front rather than left to
-    /// fail somewhere inside the driver.
-    #[error("CUDA frame belongs to a different CUDA context than this renderer")]
-    ForeignContext,
-
-    /// The CUDA surface is not NV12.
-    #[error("CudaRenderer only presents NV12 CUDA frames, got {0:?}")]
-    UnsupportedSoftwareFormat(ffmpeg::format::Pixel),
+    /// The frame is not an NV12 surface from the context this renderer
+    /// imported its target image into. Its device pointers would be
+    /// meaningless here, so this is caught up front rather than left to fail
+    /// somewhere inside the driver.
+    #[error(transparent)]
+    Frame(#[from] CudaFrameError),
 
     /// The CUDA frame contains no usable device-memory plane.
     #[error("frame has no CUDA device pointer")]
@@ -176,32 +168,20 @@ impl CudaRenderer {
     }
 
     fn submit(&self, frame: &ffmpeg::frame::Video) -> Result<(), CudaRendererError> {
-        // SAFETY: `frame` is a live `frame::Video` already confirmed to be
-        // `Pixel::CUDA`, so `as_ptr` yields an initialized `AVFrame` and a hardware
-        // frame's `hw_frames_ctx` is either null — rejected here — or an
-        // `AVBufferRef` whose `data` is an `AVHWFramesContext`. Only pointer
-        // identity is compared, never dereferenced past that.
+        // The layout *inside* the CUDA surface. NVDEC produces NV12 for 8-bit
+        // streams and P010 for 10-bit; only the former is wired up here, so a
+        // 10-bit stream is rejected rather than presented as garbage.
+        frame::validate(
+            frame,
+            ElementType::CudaRenderer,
+            self.device_ctx,
+            CudaSurfaces::NV12,
+        )?;
+        // SAFETY: `validate` has established a live CUDA frame from this
+        // renderer's own context, so `as_ptr` yields an initialized `AVFrame`
+        // whose planes, if present, are device pointers in that context.
         let (y, y_pitch, uv, uv_pitch, width, height) = unsafe {
             let ptr = frame.as_ptr();
-
-            let frames_ref = (*ptr).hw_frames_ctx;
-            if frames_ref.is_null() {
-                return Err(CudaRendererError::MissingFramesContext);
-            }
-            let frames_ctx = (*frames_ref).data as *const ffi::AVHWFramesContext;
-            if !std::ptr::eq((*frames_ctx).device_ctx, self.device_ctx) {
-                return Err(CudaRendererError::ForeignContext);
-            }
-
-            // The layout *inside* the CUDA surface. NVDEC produces NV12 for
-            // 8-bit streams and P010 for 10-bit; only the former is wired up
-            // here, so a 10-bit stream is rejected rather than presented as
-            // garbage.
-            let sw_format = ffmpeg::format::Pixel::from((*frames_ctx).sw_format);
-            if sw_format != ffmpeg::format::Pixel::NV12 {
-                return Err(CudaRendererError::UnsupportedSoftwareFormat(sw_format));
-            }
-
             let y = (*ptr).data[0];
             let uv = (*ptr).data[1];
             if y.is_null() || uv.is_null() {
@@ -259,11 +239,6 @@ impl Sink for CudaRenderer {
             return Ok(());
         };
 
-        if frame.format() != ffmpeg::format::Pixel::CUDA {
-            let format = frame.format();
-            pp_error!(self, "unsupported pixel format: {format:?}");
-            return Err(CudaRendererError::UnsupportedFormat(format).into());
-        }
         self.submit(&frame)
             .inspect_err(|error| pp_error!(self, "submit failed: {error}"))?;
         Ok(())
@@ -348,8 +323,8 @@ mod tests {
             .consume(MediaBuffer::Video(Arc::new(pooled)))
             .expect_err("a CPU frame must not be presented");
         assert!(
-            error.to_string().contains("only accepts CUDA frames"),
-            "expected UnsupportedFormat, got {error}"
+            error.to_string().contains("CudaRenderer takes CUDA frames"),
+            "expected CudaFrameError::NotCuda, got {error}"
         );
     }
 
@@ -383,8 +358,8 @@ mod tests {
             .consume(frame)
             .expect_err("a frame from a foreign CUDA context must not be presented");
         assert!(
-            error.to_string().contains("different CUDA context"),
-            "expected ForeignContext, got {error}"
+            error.to_string().contains("from a different CUDA device"),
+            "expected CudaFrameError::ForeignContext, got {error}"
         );
     }
 

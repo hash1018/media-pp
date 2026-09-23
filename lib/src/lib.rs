@@ -182,11 +182,11 @@
 //! D3D11 / D3D12 / CUDA          system memory           D3d11Download / D3d12Download / CudaDownload
 //! D3D11                         CUDA, or back           system memory: download, then upload
 //! any layout, system memory     another                 SwScaler::to_format
-//! NV12, P010 or BGRA, D3D11     NV12 or BGRA            D3d11Scaler with a D3d11ScalerFormat
+//! NV12, P010 or BGRA, D3D11     NV12 or BGRA            D3d11Scaler::to_format with a D3d11ScalerFormat
 //! PQ or HLG, D3D11              SDR BGRA                D3d11ToneMap
 //! NV12, CUDA                    BGRA                    CudaConverter built for Bgra
 //! BGRA, CUDA                    NV12                    CudaConverter built for Nv12
-//! P010, CUDA                    NV12                    CudaScaler::with_format(.., Nv12)
+//! P010, CUDA                    NV12                    CudaScaler::to_format(.., Nv12)
 //! ```
 //!
 //! None of these is told a size: an upload, a download, a converter and

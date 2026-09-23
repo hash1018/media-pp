@@ -322,45 +322,12 @@ impl Sink for AudioResampler {
 
 #[cfg(test)]
 mod tests {
+    use crate::test_support::CapturingSink;
     use std::sync::Mutex;
 
     use ffmpeg::format::sample::Type;
 
     use super::*;
-
-    struct CapturingSink {
-        pp_log: PpLog,
-        received: Arc<Mutex<Vec<MediaBuffer>>>,
-    }
-
-    impl Element for CapturingSink {
-        fn name(&self) -> Arc<str> {
-            "capture".into()
-        }
-
-        fn element_type(&self) -> ElementType {
-            ElementType::Other
-        }
-
-        fn pp_log(&self) -> &PpLog {
-            &self.pp_log
-        }
-
-        fn pp_log_mut(&mut self) -> &mut PpLog {
-            &mut self.pp_log
-        }
-    }
-
-    impl Sink for CapturingSink {
-        fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
-            self.received.lock().unwrap().push(buf);
-            Ok(())
-        }
-
-        fn control(&mut self, _msg: ControlMsg) -> Result<()> {
-            Ok(())
-        }
-    }
 
     fn f32_packed_frame(rate: u32, channels: u16, samples: usize, pts: i64) -> MediaBuffer {
         let format = ffmpeg::format::Sample::F32(Type::Packed);

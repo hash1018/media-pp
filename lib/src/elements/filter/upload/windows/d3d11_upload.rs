@@ -362,7 +362,7 @@ impl PerFrameTransform for D3d11Upload {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
+    use crate::test_support::capture;
 
     use windows::{
         Win32::Graphics::Direct3D11::{
@@ -374,50 +374,9 @@ mod tests {
 
     use super::*;
     use crate::{
-        element::{Element, ElementType, Sink, Source, element_pp_log},
-        platform::windows::d3d11va::d3d11va_texture,
-        pool::UnboundObjectPool,
+        element::Sink, platform::windows::d3d11va::d3d11va_texture, pool::UnboundObjectPool,
         test_support::try_d3d11_device,
     };
-
-    struct CapturingSink {
-        pp_log: PpLog,
-        received: Arc<Mutex<Vec<MediaBuffer>>>,
-    }
-
-    impl Element for CapturingSink {
-        fn name(&self) -> Arc<str> {
-            "capture".into()
-        }
-        fn element_type(&self) -> ElementType {
-            ElementType::Other
-        }
-        fn pp_log(&self) -> &PpLog {
-            &self.pp_log
-        }
-        fn pp_log_mut(&mut self) -> &mut PpLog {
-            &mut self.pp_log
-        }
-    }
-
-    impl Sink for CapturingSink {
-        fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
-            self.received.lock().unwrap().push(buf);
-            Ok(())
-        }
-        fn control(&mut self, _msg: ControlMsg) -> Result<()> {
-            Ok(())
-        }
-    }
-
-    fn capture(element: &mut dyn Source) -> Arc<Mutex<Vec<MediaBuffer>>> {
-        let received = Arc::new(Mutex::new(Vec::new()));
-        element.src_pads()[0].link(Box::new(CapturingSink {
-            received: received.clone(),
-            pp_log: element_pp_log(ElementType::Other, "capture", None),
-        }));
-        received
-    }
 
     /// One pooled CPU frame, as an upstream element hands one over.
     fn cpu_frame(width: u32, height: u32, pts: i64) -> MediaBuffer {

@@ -1,4 +1,4 @@
-use std::sync::Mutex as StdMutex;
+use crate::test_support::capture;
 
 use super::super::super::text_layer::TextLayer;
 use super::super::super::video_layer::VideoFit;
@@ -8,45 +8,6 @@ use crate::{
     elements::{CudaDownload, CudaUpload},
     test_support::try_cuda_device,
 };
-
-struct CapturingSink {
-    pp_log: PpLog,
-    received: Arc<StdMutex<Vec<MediaBuffer>>>,
-}
-
-impl Element for CapturingSink {
-    fn name(&self) -> Arc<str> {
-        "capture".into()
-    }
-    fn element_type(&self) -> ElementType {
-        ElementType::Other
-    }
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
-    }
-}
-
-impl Sink for CapturingSink {
-    fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
-        self.received.lock().unwrap().push(buf);
-        Ok(())
-    }
-    fn control(&mut self, _msg: ControlMsg) -> Result<()> {
-        Ok(())
-    }
-}
-
-fn capture(element: &mut dyn Source) -> Arc<StdMutex<Vec<MediaBuffer>>> {
-    let received = Arc::new(StdMutex::new(Vec::new()));
-    element.src_pads()[0].link(Box::new(CapturingSink {
-        received: received.clone(),
-        pp_log: element_pp_log(ElementType::Other, "capture", None),
-    }));
-    received
-}
 
 fn options(width: u32, height: u32) -> VideoCompositorOptions {
     VideoCompositorOptions {
@@ -910,8 +871,10 @@ fn a_cpu_frame_and_a_foreign_context_frame_are_typed_errors() {
         .consume(MediaBuffer::Video(Arc::new(slot)))
         .expect_err("a CPU frame must not be composited");
     assert!(
-        error.to_string().contains("only composites CUDA frames"),
-        "expected UnsupportedFormat, got {error}"
+        error
+            .to_string()
+            .contains("CudaVideoCompositor takes CUDA frames"),
+        "expected CudaFrameError::NotCuda, got {error}"
     );
 
     // Directly, not `try_cuda_device` again: the lock it returns is
@@ -925,8 +888,8 @@ fn a_cpu_frame_and_a_foreign_context_frame_are_typed_errors() {
         .consume(foreign)
         .expect_err("a frame from a foreign CUDA context must not be composited");
     assert!(
-        error.to_string().contains("different CUDA context"),
-        "expected ForeignContext, got {error}"
+        error.to_string().contains("from a different CUDA device"),
+        "expected CudaFrameError::ForeignContext, got {error}"
     );
 }
 

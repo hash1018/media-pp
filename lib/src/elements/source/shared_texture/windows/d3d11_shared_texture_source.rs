@@ -466,6 +466,7 @@ impl SourceElement for D3d11SharedTextureSource {
 
 #[cfg(test)]
 mod tests {
+    use crate::test_support::capture;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use windows::Win32::Graphics::{
@@ -477,56 +478,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        control::ControlMsg,
-        element::{Sink, element_pp_log},
-        elements::D3d11Download,
-        error::Result,
-        pipeline::Pipeline,
-        test_support::try_d3d11_device,
+        element::Sink, elements::D3d11Download, pipeline::Pipeline, test_support::try_d3d11_device,
     };
-
-    struct CapturingSink {
-        pp_log: PpLog,
-        received: Arc<Mutex<Vec<MediaBuffer>>>,
-    }
-
-    impl Element for CapturingSink {
-        fn name(&self) -> Arc<str> {
-            "capture".into()
-        }
-
-        fn element_type(&self) -> ElementType {
-            ElementType::Other
-        }
-
-        fn pp_log(&self) -> &PpLog {
-            &self.pp_log
-        }
-
-        fn pp_log_mut(&mut self) -> &mut PpLog {
-            &mut self.pp_log
-        }
-    }
-
-    impl Sink for CapturingSink {
-        fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
-            self.received.lock().unwrap().push(buf);
-            Ok(())
-        }
-
-        fn control(&mut self, _msg: ControlMsg) -> Result<()> {
-            Ok(())
-        }
-    }
-
-    fn capture(element: &mut dyn Source) -> Arc<Mutex<Vec<MediaBuffer>>> {
-        let received = Arc::new(Mutex::new(Vec::new()));
-        element.src_pads()[0].link(Box::new(CapturingSink {
-            received: received.clone(),
-            pp_log: element_pp_log(ElementType::Other, "capture", None),
-        }));
-        received
-    }
 
     /// A texture as another device would hand it over: shared through an NT
     /// handle, every texel `color`. Both it and its handle stay open for

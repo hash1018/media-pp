@@ -1,3 +1,4 @@
+use crate::test_support::CapturingSink;
 use std::collections::HashSet;
 
 use super::*;
@@ -6,40 +7,6 @@ use crate::{
     color::Color,
     elements::{D3d11Download, VideoRect},
 };
-
-struct CapturingSink {
-    pp_log: PpLog,
-    received: Arc<Mutex<Vec<MediaBuffer>>>,
-}
-
-impl Element for CapturingSink {
-    fn name(&self) -> Arc<str> {
-        "capture".into()
-    }
-
-    fn element_type(&self) -> ElementType {
-        ElementType::Other
-    }
-
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
-    }
-}
-
-impl Sink for CapturingSink {
-    fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
-        self.received.lock().unwrap().push(buf);
-        Ok(())
-    }
-
-    fn control(&mut self, _msg: ControlMsg) -> Result<()> {
-        Ok(())
-    }
-}
 
 fn bgra_texture(device: &ID3D11Device, width: u32, height: u32, bgra: [u8; 4]) -> ID3D11Texture2D {
     let pixels: Vec<u8> = (0..width * height).flat_map(|_| bgra).collect();

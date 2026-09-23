@@ -19,7 +19,7 @@ use crate::{
     platform::cuda::{
         CudaDevice, CudaFrameFormat,
         driver::{BgraSurface, CudaDriver},
-        frame::create_hw_frames_ctx,
+        frame::{self, CudaFrameError, CudaSurfaces, create_hw_frames_ctx},
     },
     platform::ffmpeg::AvBufferRef,
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
@@ -35,26 +35,13 @@ pub enum CudaChromaKeyError {
     #[error("failed to reference the previous keyed frame (code {0})")]
     FrameRef(i32),
 
-    /// The frame is not a CUDA surface at all.
-    #[error("CudaChromaKey keys CUDA frames, got {0:?}")]
-    UnsupportedFormat(ffmpeg::format::Pixel),
-
     /// The sink received something other than a decoded video frame.
     #[error("CudaChromaKey only accepts Video buffers, got a {0}")]
     UnsupportedBuffer(&'static str),
 
-    /// A CUDA frame arrived without the frames context that describes it.
-    #[error("the frame carries no CUDA frames context")]
-    MissingFramesContext,
-
-    /// The surface belongs to another device, so this element's context
-    /// cannot read it.
-    #[error("the frame belongs to a different CUDA device than this CudaChromaKey")]
-    ForeignContext,
-
-    /// The surface is CUDA-resident but not in the layout this keys.
-    #[error("CudaChromaKey keys BGRA surfaces, got {0:?}")]
-    UnsupportedSurfaceFormat(ffmpeg::format::Pixel),
+    /// The frame is not a BGRA surface from this element's own device.
+    #[error(transparent)]
+    Frame(#[from] CudaFrameError),
 
     /// A surface arrived with no device pointer to read.
     #[error("a surface arrived with no device pointer")]
@@ -254,30 +241,12 @@ impl CudaChromaKey {
         &self,
         frame: &ffmpeg::frame::Video,
     ) -> std::result::Result<(), CudaChromaKeyError> {
-        if frame.format() != ffmpeg::format::Pixel::CUDA {
-            return Err(CudaChromaKeyError::UnsupportedFormat(frame.format()));
-        }
-        // SAFETY: `frame` is a live `frame::Video` already confirmed to be
-        // `Pixel::CUDA`, so `as_ptr` yields an initialized `AVFrame` and a hardware
-        // frame's `hw_frames_ctx` is either null — rejected here — or an
-        // `AVBufferRef` whose `data` is an `AVHWFramesContext`. Only pointer
-        // identity is compared, never dereferenced past that.
-        unsafe {
-            let frames_ref = (*frame.as_ptr()).hw_frames_ctx;
-            if frames_ref.is_null() {
-                return Err(CudaChromaKeyError::MissingFramesContext);
-            }
-            let frames_ctx = (*frames_ref).data as *const ffi::AVHWFramesContext;
-            if !std::ptr::eq((*frames_ctx).device_ctx, self.device_ctx) {
-                return Err(CudaChromaKeyError::ForeignContext);
-            }
-            let sw_format = (*frames_ctx).sw_format;
-            if CudaFrameFormat::from_sw_format(sw_format) != Some(CudaFrameFormat::Bgra) {
-                return Err(CudaChromaKeyError::UnsupportedSurfaceFormat(
-                    ffmpeg::format::Pixel::from(sw_format),
-                ));
-            }
-        }
+        frame::validate(
+            frame,
+            ElementType::CudaChromaKey,
+            self.device_ctx,
+            CudaSurfaces::BGRA,
+        )?;
         Ok(())
     }
 
@@ -449,7 +418,7 @@ impl Drop for CudaChromaKey {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
+    use crate::test_support::capture;
 
     use super::super::super::options::ChromaKeyMethod;
     use super::*;
@@ -457,49 +426,6 @@ mod tests {
         elements::{CudaDownload, CudaUpload},
         test_support::try_cuda_device,
     };
-
-    struct CapturingSink {
-        pp_log: PpLog,
-        received: Arc<Mutex<Vec<MediaBuffer>>>,
-    }
-
-    impl Element for CapturingSink {
-        fn name(&self) -> Arc<str> {
-            "capture".into()
-        }
-
-        fn element_type(&self) -> ElementType {
-            ElementType::Other
-        }
-
-        fn pp_log(&self) -> &PpLog {
-            &self.pp_log
-        }
-
-        fn pp_log_mut(&mut self) -> &mut PpLog {
-            &mut self.pp_log
-        }
-    }
-
-    impl Sink for CapturingSink {
-        fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
-            self.received.lock().unwrap().push(buf);
-            Ok(())
-        }
-
-        fn control(&mut self, _msg: ControlMsg) -> Result<()> {
-            Ok(())
-        }
-    }
-
-    fn capture(element: &mut dyn Source) -> Arc<Mutex<Vec<MediaBuffer>>> {
-        let received = Arc::new(Mutex::new(Vec::new()));
-        element.src_pads()[0].link(Box::new(CapturingSink {
-            received: received.clone(),
-            pp_log: element_pp_log(ElementType::Other, "capture", None),
-        }));
-        received
-    }
 
     fn default_options() -> ChromaKeyOptions {
         ChromaKeyOptions {
@@ -768,9 +694,18 @@ mod tests {
             .expect_err("a CPU frame must be rejected");
         assert!(matches!(
             error,
-            crate::error::Error::CudaChromaKeyError(CudaChromaKeyError::UnsupportedFormat(
-                ffmpeg::format::Pixel::BGRA
+            crate::error::Error::CudaChromaKeyError(CudaChromaKeyError::Frame(
+                CudaFrameError::NotCuda {
+                    element: ElementType::CudaChromaKey,
+                    actual: ffmpeg::format::Pixel::BGRA,
+                }
             ))
         ));
+        assert!(
+            error
+                .to_string()
+                .contains("CudaChromaKey takes CUDA frames, got BGRA"),
+            "the message still names the element: {error}"
+        );
     }
 }

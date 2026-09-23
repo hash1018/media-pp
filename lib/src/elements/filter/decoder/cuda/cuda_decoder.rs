@@ -358,47 +358,11 @@ unsafe extern "C" fn get_format(
 
 #[cfg(test)]
 mod tests {
+    use crate::test_support::CapturingSink;
     use std::sync::{Arc, Mutex};
 
     use super::*;
-    use crate::{
-        error::Result,
-        test_support::{try_cuda_device, try_test_video},
-    };
-
-    struct CapturingSink {
-        pp_log: PpLog,
-        received: Arc<Mutex<Vec<MediaBuffer>>>,
-    }
-
-    impl Element for CapturingSink {
-        fn name(&self) -> Arc<str> {
-            "capture".into()
-        }
-
-        fn element_type(&self) -> ElementType {
-            ElementType::Other
-        }
-
-        fn pp_log(&self) -> &PpLog {
-            &self.pp_log
-        }
-
-        fn pp_log_mut(&mut self) -> &mut PpLog {
-            &mut self.pp_log
-        }
-    }
-
-    impl Sink for CapturingSink {
-        fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
-            self.received.lock().unwrap().push(buf);
-            Ok(())
-        }
-
-        fn control(&mut self, _msg: ControlMsg) -> Result<()> {
-            Ok(())
-        }
-    }
+    use crate::test_support::{try_cuda_device, try_test_video};
 
     /// The whole point of this element: frames come out GPU-resident, and
     /// the timeline survives. Asserted against whatever fixture is

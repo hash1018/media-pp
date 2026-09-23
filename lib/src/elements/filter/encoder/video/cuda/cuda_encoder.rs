@@ -14,7 +14,10 @@ use crate::{
     elements::filter::is_codec_drain_boundary,
     error::Result,
     pad::SrcPad,
-    platform::cuda::{CudaDevice, CudaFrameFormat, frame::create_hw_frames_ctx},
+    platform::cuda::{
+        CudaDevice, CudaFrameFormat,
+        frame::{self, CudaFrameError, CudaSurfaces, create_hw_frames_ctx},
+    },
     platform::ffmpeg::AvBufferRef,
 };
 
@@ -96,18 +99,10 @@ pub enum CudaEncoderError {
     #[error("ffmpeg error: {0}")]
     Ffmpeg(#[from] ffmpeg::Error),
 
-    /// The input frame is not backed by CUDA hardware surfaces.
-    #[error("CudaEncoder only encodes CUDA frames, got {0:?}")]
-    UnsupportedFormat(ffmpeg::format::Pixel),
-
-    /// The CUDA surface layout differs from the format fixed at encoder creation.
-    #[error("this CudaEncoder was opened for {expected:?} surfaces, got {actual:?}")]
-    UnsupportedSurfaceFormat {
-        /// Surface format configured for the encoder.
-        expected: ffmpeg::format::Pixel,
-        /// Surface format carried by the input frame.
-        actual: ffmpeg::format::Pixel,
-    },
+    /// The frame is not a surface of the layout this encoder was opened
+    /// for, on its own device.
+    #[error(transparent)]
+    Frame(#[from] CudaFrameError),
 
     /// The sink received a buffer other than decoded video or end-of-stream.
     #[error("CudaEncoder only accepts Video and Eos buffers, got a {0}")]
@@ -128,16 +123,6 @@ pub enum CudaEncoderError {
         /// Height configured for the encoder.
         expected_height: u32,
     },
-
-    /// The frame carries no hardware frames context, so it did not come from
-    /// a CUDA producer at all.
-    #[error("CUDA frame has no hardware frames context")]
-    MissingFramesContext,
-
-    /// The frame was allocated against a different CUDA context than this
-    /// encoder's. Its device pointers mean nothing here.
-    #[error("CUDA frame belongs to a different CUDA context than this encoder")]
-    ForeignContext,
 
     /// Creating the CUDA hardware frames context failed.
     #[error("failed to build the CUDA frames context: {0}")]
@@ -358,10 +343,17 @@ impl CudaEncoder {
     }
 
     fn encode(&mut self, frame: &ffmpeg::frame::Video) -> Result<()> {
-        if frame.format() != ffmpeg::format::Pixel::CUDA {
-            pp_error!(self, "unsupported pixel format: {:?}", frame.format());
-            return Err(CudaEncoderError::UnsupportedFormat(frame.format()).into());
-        }
+        // NVENC was configured for one surface layout at `open`. A frame
+        // in another one would be read through the wrong plane layout
+        // rather than rejected by the driver.
+        frame::validate(
+            frame,
+            ElementType::CudaEncoder,
+            self.device_ctx,
+            CudaSurfaces::of(self.input_format),
+        )
+        .map_err(CudaEncoderError::from)
+        .inspect_err(|error| pp_error!(self, "{error}"))?;
         if frame.width() != self.width || frame.height() != self.height {
             let error = CudaEncoderError::DimensionMismatch {
                 actual_width: frame.width(),
@@ -372,36 +364,6 @@ impl CudaEncoder {
             pp_error!(self, "{error}");
             return Err(error.into());
         }
-        // SAFETY: `frame` is a live `frame::Video` already confirmed to be
-        // `Pixel::CUDA`, so `as_ptr` yields an initialized `AVFrame` and a hardware
-        // frame's `hw_frames_ctx` is either null — rejected here — or an
-        // `AVBufferRef` whose `data` is an `AVHWFramesContext`. Only pointer
-        // identity is compared, never dereferenced past that.
-        unsafe {
-            let frames_ref = (*frame.as_ptr()).hw_frames_ctx;
-            if frames_ref.is_null() {
-                pp_error!(self, "frame has no hardware frames context");
-                return Err(CudaEncoderError::MissingFramesContext.into());
-            }
-            let frames_ctx = (*frames_ref).data as *const ffi::AVHWFramesContext;
-            if !std::ptr::eq((*frames_ctx).device_ctx, self.device_ctx) {
-                pp_error!(self, "frame belongs to a different CUDA context");
-                return Err(CudaEncoderError::ForeignContext.into());
-            }
-            // NVENC was configured for one surface layout at `open`. A frame
-            // in another one would be read through the wrong plane layout
-            // rather than rejected by the driver.
-            let sw_format = ffmpeg::format::Pixel::from((*frames_ctx).sw_format);
-            if sw_format != self.input_format.pixel() {
-                let error = CudaEncoderError::UnsupportedSurfaceFormat {
-                    expected: self.input_format.pixel(),
-                    actual: sw_format,
-                };
-                pp_error!(self, "{error}");
-                return Err(error.into());
-            }
-        }
-
         self.encoder
             .send_frame(frame)
             .inspect_err(|error| pp_error!(self, "send_frame failed: {error}"))
@@ -494,6 +456,7 @@ impl Drop for CudaEncoder {
 
 #[cfg(test)]
 mod tests {
+    use crate::test_support::CapturingSink;
     use std::sync::{Arc, Mutex};
 
     use super::*;
@@ -503,36 +466,6 @@ mod tests {
         pool::UnboundObjectPool,
         test_support::{try_cuda_device, try_test_video},
     };
-
-    struct CapturingSink {
-        pp_log: PpLog,
-        received: Arc<Mutex<Vec<MediaBuffer>>>,
-    }
-
-    impl Element for CapturingSink {
-        fn name(&self) -> Arc<str> {
-            "capture".into()
-        }
-        fn element_type(&self) -> ElementType {
-            ElementType::Other
-        }
-        fn pp_log(&self) -> &PpLog {
-            &self.pp_log
-        }
-        fn pp_log_mut(&mut self) -> &mut PpLog {
-            &mut self.pp_log
-        }
-    }
-
-    impl Sink for CapturingSink {
-        fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
-            self.received.lock().unwrap().push(buf);
-            Ok(())
-        }
-        fn control(&mut self, _msg: ControlMsg) -> Result<()> {
-            Ok(())
-        }
-    }
 
     fn options(width: u32, height: u32) -> CudaEncoderOptions {
         CudaEncoderOptions {
@@ -754,8 +687,10 @@ mod tests {
             .consume(frame)
             .expect_err("a BGRA surface must not encode as NV12");
         assert!(
-            error.to_string().contains("opened for NV12"),
-            "expected UnsupportedSurfaceFormat, got {error}"
+            error
+                .to_string()
+                .contains("CudaEncoder reads NV12 surfaces, got BGRA"),
+            "expected CudaFrameError::UnsupportedSurfaceFormat, got {error}"
         );
     }
 
@@ -764,7 +699,7 @@ mod tests {
     /// the decoder allocates from its own frames pool. What makes that work
     /// is the shared CUDA *context* — NVENC registers the decoder's surfaces
     /// rather than demanding frames from the encoder's own pool. If that ever
-    /// stops holding, this fails with `ForeignContext` or a send error rather
+    /// stops holding, this fails with `CudaFrameError::ForeignContext` or a send error rather
     /// than silently falling back to a copy.
     #[test]
     fn decoded_frames_encode_without_an_upload_step() {
@@ -869,8 +804,8 @@ mod tests {
             .consume(MediaBuffer::Video(Arc::new(pooled)))
             .expect_err("a CPU frame must not be encoded");
         assert!(
-            error.to_string().contains("only encodes CUDA frames"),
-            "expected UnsupportedFormat, got {error}"
+            error.to_string().contains("CudaEncoder takes CUDA frames"),
+            "expected CudaFrameError::NotCuda, got {error}"
         );
     }
 

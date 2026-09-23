@@ -17,7 +17,7 @@ use crate::{
     platform::cuda::{
         CudaDevice, CudaFrameFormat,
         driver::{BgraSurface, CudaDriver, Nv12Surface, YuvToBgra},
-        frame::create_hw_frames_ctx,
+        frame::{self, CudaFrameError, CudaSurfaces, create_hw_frames_ctx},
     },
     platform::ffmpeg::AvBufferRef,
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
@@ -33,25 +33,14 @@ pub enum CudaConverterError {
     #[error("failed to reference the previous conversion (code {0})")]
     FrameRef(i32),
 
-    /// The input frame is not backed by CUDA hardware surfaces.
-    #[error("CudaConverter converts CUDA frames, got {0:?}")]
-    UnsupportedFormat(ffmpeg::format::Pixel),
     /// The sink received a buffer other than decoded video.
 
     #[error("CudaConverter only accepts Video buffers, got a {0}")]
     UnsupportedBuffer(&'static str),
-    /// The frame does not retain the CUDA hardware frames context that owns it.
-
-    #[error("the frame carries no CUDA frames context")]
-    MissingFramesContext,
-    /// The input frame belongs to another CUDA context.
-
-    #[error("the frame belongs to a different CUDA device than this CudaConverter")]
-    ForeignContext,
-    /// The CUDA surface is not BGRA.
-
-    #[error("CudaConverter converts BGRA surfaces, got {0:?}")]
-    UnsupportedSurfaceFormat(ffmpeg::format::Pixel),
+    /// The frame is not a surface of the layout this converts from, on
+    /// this element's own device.
+    #[error(transparent)]
+    Frame(#[from] CudaFrameError),
     /// A frame arrived with odd dimensions, which NV12 cannot hold.
 
     #[error("NV12 needs even dimensions, got {width}x{height}")]
@@ -220,9 +209,12 @@ impl CudaConverter {
         &self,
         frame: &ffmpeg::frame::Video,
     ) -> std::result::Result<bool, CudaConverterError> {
-        if frame.format() != ffmpeg::format::Pixel::CUDA {
-            return Err(CudaConverterError::UnsupportedFormat(frame.format()));
-        }
+        // P010 only on the way to BGRA, and only as HDR — see `convert`.
+        let accepts = match self.output {
+            CudaFrameFormat::Nv12 => CudaSurfaces::BGRA,
+            CudaFrameFormat::Bgra => CudaSurfaces::NV12_OR_P010,
+        };
+        let surface = frame::validate(frame, ElementType::CudaConverter, self.device_ctx, accepts)?;
         // Chroma is 2x2 subsampled whichever way this runs, so an odd
         // extent has no whole chroma sample to write or to read.
         if !frame.width().is_multiple_of(2) || !frame.height().is_multiple_of(2) {
@@ -231,33 +223,7 @@ impl CudaConverter {
                 height: frame.height(),
             });
         }
-        // SAFETY: `frame` is a live `frame::Video` already confirmed to be
-        // `Pixel::CUDA`, so `as_ptr` yields an initialized `AVFrame` and a hardware
-        // frame's `hw_frames_ctx` is either null — rejected here — or an
-        // `AVBufferRef` whose `data` is an `AVHWFramesContext`. Only pointer
-        // identity is compared, never dereferenced past that.
-        unsafe {
-            let frames_ref = (*frame.as_ptr()).hw_frames_ctx;
-            if frames_ref.is_null() {
-                return Err(CudaConverterError::MissingFramesContext);
-            }
-            let frames_ctx = (*frames_ref).data as *const ffi::AVHWFramesContext;
-            if !std::ptr::eq((*frames_ctx).device_ctx, self.device_ctx) {
-                return Err(CudaConverterError::ForeignContext);
-            }
-            let sw_format = (*frames_ctx).sw_format;
-            // P010 only on the way to BGRA, and only as HDR — see `convert`.
-            let wide = sw_format == ffi::AVPixelFormat::AV_PIX_FMT_P010LE;
-            let accepted = CudaFrameFormat::from_sw_format(sw_format)
-                == Some(input_of(self.output))
-                || (wide && self.output == CudaFrameFormat::Bgra);
-            if !accepted {
-                return Err(CudaConverterError::UnsupportedSurfaceFormat(
-                    ffmpeg::format::Pixel::from(sw_format),
-                ));
-            }
-            Ok(wide)
-        }
+        Ok(surface.layout == ffmpeg::format::Pixel::P010LE)
     }
 
     fn convert(
@@ -274,7 +240,11 @@ impl CudaConverter {
         };
         if wide && tone_map.is_none() {
             // SDR P010 is `CudaScaler`'s to bring to NV12 first.
-            let error = CudaConverterError::UnsupportedSurfaceFormat(ffmpeg::format::Pixel::P010LE);
+            let error = CudaConverterError::Frame(CudaFrameError::UnsupportedSurfaceFormat {
+                element: ElementType::CudaConverter,
+                accepts: CudaSurfaces::NV12,
+                actual: ffmpeg::format::Pixel::P010LE,
+            });
             pp_error!(self, "{error}");
             return Err(error.into());
         }
@@ -486,51 +456,12 @@ impl Drop for CudaConverter {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
+    use crate::test_support::capture;
 
     use super::*;
     use crate::buffer::picture_id;
     use crate::elements::CudaUpload;
     use crate::test_support::try_cuda_device;
-
-    struct CapturingSink {
-        pp_log: PpLog,
-        received: Arc<Mutex<Vec<MediaBuffer>>>,
-    }
-
-    impl Element for CapturingSink {
-        fn name(&self) -> Arc<str> {
-            "capture".into()
-        }
-        fn element_type(&self) -> ElementType {
-            ElementType::Other
-        }
-        fn pp_log(&self) -> &PpLog {
-            &self.pp_log
-        }
-        fn pp_log_mut(&mut self) -> &mut PpLog {
-            &mut self.pp_log
-        }
-    }
-
-    impl Sink for CapturingSink {
-        fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
-            self.received.lock().unwrap().push(buf);
-            Ok(())
-        }
-        fn control(&mut self, _msg: ControlMsg) -> Result<()> {
-            Ok(())
-        }
-    }
-
-    fn capture(element: &mut dyn Source) -> Arc<Mutex<Vec<MediaBuffer>>> {
-        let received = Arc::new(Mutex::new(Vec::new()));
-        element.src_pads()[0].link(Box::new(CapturingSink {
-            received: received.clone(),
-            pp_log: element_pp_log(ElementType::Other, "capture", None),
-        }));
-        received
-    }
 
     /// One CUDA-resident frame of `format`, by way of the upload element that
     /// allocates the same kind of frames context this converter validates
@@ -778,8 +709,11 @@ mod tests {
             .expect_err("a BGRA input has nothing to convert into BGRA");
         assert!(matches!(
             error,
-            crate::error::Error::CudaConverterError(CudaConverterError::UnsupportedSurfaceFormat(
-                ffmpeg::format::Pixel::BGRA
+            crate::error::Error::CudaConverterError(CudaConverterError::Frame(
+                CudaFrameError::UnsupportedSurfaceFormat {
+                    actual: ffmpeg::format::Pixel::BGRA,
+                    ..
+                }
             ))
         ));
     }
@@ -943,7 +877,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("CudaConverter converts BGRA surfaces"),
+                .contains("CudaConverter reads BGRA surfaces, got NV12"),
             "got {error}"
         );
     }
@@ -968,7 +902,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("CudaConverter converts CUDA frames"),
+                .contains("CudaConverter takes CUDA frames"),
             "got {error}"
         );
     }

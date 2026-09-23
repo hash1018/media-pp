@@ -704,3 +704,54 @@ pub(crate) fn try_d3d11_debug_device() -> Option<(
         D3d11LiveObjects { debug, info },
     ))
 }
+
+/// A sink that keeps every buffer it is handed, for a test to read back.
+///
+/// The fields are open so a test can build one around a `received` it
+/// already holds; [`capture`] is the usual way to get one.
+pub(crate) struct CapturingSink {
+    pub(crate) pp_log: crate::pp_log::PpLog,
+    pub(crate) received: std::sync::Arc<std::sync::Mutex<Vec<crate::buffer::MediaBuffer>>>,
+}
+
+impl crate::element::Element for CapturingSink {
+    fn name(&self) -> std::sync::Arc<str> {
+        "capture".into()
+    }
+
+    fn element_type(&self) -> crate::element::ElementType {
+        crate::element::ElementType::Other
+    }
+
+    fn pp_log(&self) -> &crate::pp_log::PpLog {
+        &self.pp_log
+    }
+
+    fn pp_log_mut(&mut self) -> &mut crate::pp_log::PpLog {
+        &mut self.pp_log
+    }
+}
+
+impl crate::element::Sink for CapturingSink {
+    fn consume(&mut self, buf: crate::buffer::MediaBuffer) -> crate::error::Result<()> {
+        self.received.lock().unwrap().push(buf);
+        Ok(())
+    }
+
+    fn control(&mut self, _msg: crate::control::ControlMsg) -> crate::error::Result<()> {
+        Ok(())
+    }
+}
+
+/// Links a [`CapturingSink`] to `element`'s first src pad, and returns
+/// what it will have received.
+pub(crate) fn capture(
+    element: &mut dyn crate::element::Source,
+) -> std::sync::Arc<std::sync::Mutex<Vec<crate::buffer::MediaBuffer>>> {
+    let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    element.src_pads()[0].link(Box::new(CapturingSink {
+        pp_log: crate::element::element_pp_log(crate::element::ElementType::Other, "capture", None),
+        received: received.clone(),
+    }));
+    received
+}

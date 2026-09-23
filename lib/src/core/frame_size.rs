@@ -19,6 +19,38 @@
 //! Those are the element's own configuration and stay constructor
 //! arguments.
 
+/// What size an element's output frames are: a size it was given, or the
+/// size of whatever arrived.
+///
+/// The elements that resize are the ones told a size, and each of them can
+/// also be asked to change only a layout — `SwScaler::to_format`,
+/// `D3d11Scaler::to_format`, `CudaScaler::to_format` — which is where the
+/// second case comes from. Where the size is given, a source that changes
+/// resolution mid-stream is absorbed by scaling it back to it; where it is
+/// the input's, that change is passed on.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum OutputSize {
+    /// This size, whatever arrives.
+    Fixed {
+        /// Output width in pixels.
+        width: u32,
+        /// Output height in pixels.
+        height: u32,
+    },
+    /// The size of the frame that arrived.
+    OfTheInput,
+}
+
+impl OutputSize {
+    /// The size `frame` is to come out as.
+    pub(crate) fn of(self, frame: &ffmpeg_next::frame::Video) -> (u32, u32) {
+        match self {
+            Self::Fixed { width, height } => (width, height),
+            Self::OfTheInput => (frame.width(), frame.height()),
+        }
+    }
+}
+
 /// A resource made for one frame size — see the module docs.
 pub(crate) struct ForSize<T> {
     made: Option<Made<T>>,

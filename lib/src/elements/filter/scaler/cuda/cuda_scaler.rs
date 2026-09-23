@@ -13,9 +13,13 @@ use crate::{
     control::ControlMsg,
     element::{Element, ElementType, Sink, Source, element_pp_log},
     error::Result,
+    frame_size::OutputSize,
     pad::SrcPad,
     platform::{
-        cuda::{CudaDevice, CudaFrameFormat},
+        cuda::{
+            CudaDevice, CudaFrameFormat,
+            frame::{self, CudaFrameError, CudaSurfaces},
+        },
         ffmpeg::AvBufferRef,
     },
 };
@@ -35,27 +39,14 @@ pub enum CudaScalerError {
     )]
     FilterNotFound(&'static str),
 
-    /// The input frame is not backed by CUDA hardware surfaces.
-    #[error("CudaScaler only scales CUDA frames, got {0:?}")]
-    UnsupportedFormat(ffmpeg::format::Pixel),
-
     /// The sink received a buffer other than decoded video or end-of-stream.
     #[error("CudaScaler only accepts Video and Eos buffers, got a {0}")]
     UnsupportedBuffer(&'static str),
 
-    /// The frame carries no hardware frames context, so it did not come from
-    /// a CUDA producer at all.
-    #[error("CUDA frame has no hardware frames context")]
-    MissingFramesContext,
-
-    /// The frame was allocated against a different CUDA context than this
-    /// element's. Its device pointers mean nothing here.
-    #[error("CUDA frame belongs to a different CUDA context than this CudaScaler")]
-    ForeignContext,
-
-    /// The CUDA surface layout cannot be processed by `scale_cuda`.
-    #[error("CudaScaler cannot scale {0:?} surfaces")]
-    UnsupportedSurfaceFormat(ffmpeg::format::Pixel),
+    /// The frame is not a surface `scale_cuda` resizes, on this element's
+    /// own device.
+    #[error(transparent)]
+    Frame(#[from] CudaFrameError),
 
     /// The scaler was built to put out a layout `scale_cuda` cannot convert
     /// this surface's to — see [`CudaScaler::with_format`].
@@ -160,7 +151,9 @@ impl CudaScalerInterp {
 /// whichever element upstream allocated the frame. So the graph is built
 /// lazily from the first frame that arrives and rebuilt if a later frame's
 /// dimensions or pool change, exactly as [`crate::elements::SwScaler`] rebuilds
-/// its `libswscale` context. The output size is fixed at construction.
+/// its `libswscale` context. The output size is whatever the constructor
+/// settled: one it was given, or the input's own through
+/// [`CudaScaler::to_format`].
 pub struct CudaScaler {
     pp_log: PpLog,
     name: Arc<str>,
@@ -172,8 +165,8 @@ pub struct CudaScaler {
     /// this element's own CUDA context. Only ever compared, same as
     /// [`crate::elements::CudaEncoder`]'s.
     device_ctx: *const ffi::AVHWDeviceContext,
-    width: u32,
-    height: u32,
+    /// What size each output surface is — see the constructors.
+    size: OutputSize,
     /// What every output surface holds — `None` for whatever came in.
     format: Option<CudaFrameFormat>,
     /// Built from the first frame and rebuilt when the input changes — see
@@ -207,7 +200,13 @@ impl CudaScaler {
         height: u32,
         interp: CudaScalerInterp,
     ) -> Self {
-        Self::build(name, device, width, height, interp, None)
+        Self::build(
+            name,
+            device,
+            OutputSize::Fixed { width, height },
+            interp,
+            None,
+        )
     }
 
     /// The same, putting out `format` whatever comes in: a surface already
@@ -222,14 +221,40 @@ impl CudaScaler {
         interp: CudaScalerInterp,
         format: CudaFrameFormat,
     ) -> Self {
-        Self::build(name, device, width, height, interp, Some(format))
+        Self::build(
+            name,
+            device,
+            OutputSize::Fixed { width, height },
+            interp,
+            Some(format),
+        )
+    }
+
+    /// Brings a surface to `format` and leaves its size alone: each output
+    /// frame is the size the input was.
+    ///
+    /// This is what a refused link asks for on this backend — "a CudaScaler
+    /// with_format CudaFrameFormat::Nv12" to bring a 10-bit P010 decode
+    /// down to the eight bits everything else here reads — and the size the
+    /// frames happen to be is no part of that answer, so it is not asked
+    /// for. A source that changes resolution mid-stream comes out at the
+    /// new size rather than being scaled back to the old one; use
+    /// [`CudaScaler::with_format`] in front of something that cannot take
+    /// that. Interpolation is still chosen, since a depth conversion of an
+    /// odd-sized surface can still resample chroma.
+    pub fn to_format(
+        name: impl Into<String>,
+        device: &CudaDevice,
+        interp: CudaScalerInterp,
+        format: CudaFrameFormat,
+    ) -> Self {
+        Self::build(name, device, OutputSize::OfTheInput, interp, Some(format))
     }
 
     fn build(
         name: impl Into<String>,
         device: &CudaDevice,
-        width: u32,
-        height: u32,
+        size: OutputSize,
         interp: CudaScalerInterp,
         format: Option<CudaFrameFormat>,
     ) -> Self {
@@ -256,17 +281,22 @@ impl CudaScaler {
                 ),
             },
         );
-        pp_info!(
-            pp_log: &pp_log,
-            "created: dst={width}x{height}, interp={interp:?}, format={format:?}"
-        );
+        match size {
+            OutputSize::Fixed { width, height } => pp_info!(
+                pp_log: &pp_log,
+                "created: dst={width}x{height}, interp={interp:?}, format={format:?}"
+            ),
+            OutputSize::OfTheInput => pp_info!(
+                pp_log: &pp_log,
+                "created: dst=the input's own size, interp={interp:?}, format={format:?}"
+            ),
+        }
         Self {
             name,
             pp_log,
             _hw_device_ctx: hw_device_ctx,
             device_ctx,
-            width,
-            height,
+            size,
             format,
             graph: CudaScaleGraph::converting(interp, format),
             pad,
@@ -282,53 +312,33 @@ impl CudaScaler {
         &self,
         frame: &ffmpeg::frame::Video,
     ) -> std::result::Result<*mut ffi::AVBufferRef, CudaScalerError> {
-        if frame.format() != ffmpeg::format::Pixel::CUDA {
-            return Err(CudaScalerError::UnsupportedFormat(frame.format()));
+        let surface = frame::validate(
+            frame,
+            ElementType::CudaScaler,
+            self.device_ctx,
+            CudaSurfaces::SCALABLE,
+        )?;
+        let p010 = surface.layout == ffmpeg::format::Pixel::P010LE;
+        let input = CudaFrameFormat::from_sw_format(surface.layout.into());
+        if let Some(to) = self.format
+            && input != Some(to)
+            && !(p010 && to == CudaFrameFormat::Nv12)
+        {
+            return Err(CudaScalerError::UnsupportedConversion {
+                from: surface.layout,
+                to,
+            });
         }
-        // SAFETY: `frame` is a live `frame::Video` already confirmed to be
-        // `Pixel::CUDA`, so `as_ptr` yields an initialized `AVFrame` and a hardware
-        // frame's `hw_frames_ctx` is either null — rejected here — or an
-        // `AVBufferRef` whose `data` is an `AVHWFramesContext`. Only pointer
-        // identity is compared, never dereferenced past that.
-        unsafe {
-            let frames_ref = (*frame.as_ptr()).hw_frames_ctx;
-            if frames_ref.is_null() {
-                return Err(CudaScalerError::MissingFramesContext);
-            }
-            let frames_ctx = (*frames_ref).data as *const ffi::AVHWFramesContext;
-            if !std::ptr::eq((*frames_ctx).device_ctx, self.device_ctx) {
-                return Err(CudaScalerError::ForeignContext);
-            }
-            let sw_format = (*frames_ctx).sw_format;
-            let p010 = sw_format == ffi::AVPixelFormat::AV_PIX_FMT_P010LE;
-            let input = CudaFrameFormat::from_sw_format(sw_format);
-            if input.is_none() && !p010 {
-                return Err(CudaScalerError::UnsupportedSurfaceFormat(
-                    ffmpeg::format::Pixel::from(sw_format),
-                ));
-            }
-            if let Some(to) = self.format
-                && input != Some(to)
-                && !(p010 && to == CudaFrameFormat::Nv12)
-            {
-                return Err(CudaScalerError::UnsupportedConversion {
-                    from: ffmpeg::format::Pixel::from(sw_format),
-                    to,
-                });
-            }
-            Ok(frames_ref)
-        }
+        Ok(surface.frames_ctx)
     }
 
     fn scale(&mut self, frame: &ffmpeg::frame::Video) -> Result<()> {
+        let (width, height) = self.size.of(frame);
         let frames_ctx = self
             .validate(frame)
             .inspect_err(|error| pp_error!(self, "{error}"))?;
 
-        if !self
-            .graph
-            .matches(frame, frames_ctx, self.width, self.height)
-        {
+        if !self.graph.matches(frame, frames_ctx, width, height) {
             // A live source can renegotiate mid-stream, and a decoder rebuilt
             // after a seek hands out a new pool — same reason `SwScaler`
             // rebuilds its own context, and worth seeing in a log when output
@@ -342,7 +352,7 @@ impl CudaScaler {
         }
         let scaled = self
             .graph
-            .scale(frame, frames_ctx, self.width, self.height)
+            .scale(frame, frames_ctx, width, height)
             .inspect_err(|error| pp_error!(self, "scale failed: {error}"))?;
         for output in scaled {
             self.pad.push(MediaBuffer::Video(Arc::new(output)))?;
@@ -421,7 +431,8 @@ impl Drop for CudaScaler {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
+    use crate::test_support::capture;
+    use std::sync::Arc;
 
     use super::*;
     use crate::{
@@ -429,45 +440,6 @@ mod tests {
         pool::UnboundObjectPool,
         test_support::{try_cuda_device, try_test_video},
     };
-
-    struct CapturingSink {
-        pp_log: PpLog,
-        received: Arc<Mutex<Vec<MediaBuffer>>>,
-    }
-
-    impl Element for CapturingSink {
-        fn name(&self) -> Arc<str> {
-            "capture".into()
-        }
-        fn element_type(&self) -> ElementType {
-            ElementType::Other
-        }
-        fn pp_log(&self) -> &PpLog {
-            &self.pp_log
-        }
-        fn pp_log_mut(&mut self) -> &mut PpLog {
-            &mut self.pp_log
-        }
-    }
-
-    impl Sink for CapturingSink {
-        fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
-            self.received.lock().unwrap().push(buf);
-            Ok(())
-        }
-        fn control(&mut self, _msg: ControlMsg) -> Result<()> {
-            Ok(())
-        }
-    }
-
-    fn capture(element: &mut dyn Source) -> Arc<Mutex<Vec<MediaBuffer>>> {
-        let received = Arc::new(Mutex::new(Vec::new()));
-        element.src_pads()[0].link(Box::new(CapturingSink {
-            received: received.clone(),
-            pp_log: element_pp_log(ElementType::Other, "capture", None),
-        }));
-        received
-    }
 
     fn pooled(frame: ffmpeg::frame::Video) -> MediaBuffer {
         let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
@@ -969,6 +941,50 @@ mod tests {
         }
     }
 
+    /// What `to_format` is for: the layout is brought to NV12 and the size
+    /// is not touched, so a source that changes resolution mid-stream comes
+    /// out at its new size instead of being scaled back to the first
+    /// frame's — which is what the test above asserts a scaler given a size
+    /// still does.
+    #[test]
+    fn a_layout_only_scaler_keeps_each_frames_own_size() {
+        let Some((device, _cuda_lock)) = try_cuda_device() else {
+            return;
+        };
+        let Some(first) = cuda_frame(&device, 128, 128, 100, 0) else {
+            return;
+        };
+        let Some(second) = cuda_frame(&device, 256, 64, 100, 1) else {
+            return;
+        };
+
+        let mut scaler = CudaScaler::to_format(
+            "scaler",
+            &device,
+            CudaScalerInterp::Bilinear,
+            CudaFrameFormat::Nv12,
+        );
+        let received = capture(&mut scaler);
+        scaler.consume(first).expect("the first size");
+        scaler.consume(second).expect("and the next one");
+
+        let received = received.lock().unwrap();
+        let shapes: Vec<_> = received
+            .iter()
+            .map(|buf| {
+                let MediaBuffer::Video(frame) = buf else {
+                    panic!("expected a Video buffer, got {}", buf.kind());
+                };
+                (frame.width(), frame.height())
+            })
+            .collect();
+        assert_eq!(
+            shapes,
+            [(128, 128), (256, 64)],
+            "the layout is this element's to change, and the size is not"
+        );
+    }
+
     /// A CPU frame has no device pointers, and one from another context has
     /// pointers that mean nothing here — both must be refused before
     /// libavfilter ever sees them.
@@ -984,8 +1000,8 @@ mod tests {
             .consume(pooled(nv12_flat(128, 128, 100, 0)))
             .expect_err("a CPU frame must not be scaled");
         assert!(
-            error.to_string().contains("only scales CUDA frames"),
-            "expected UnsupportedFormat, got {error}"
+            error.to_string().contains("CudaScaler takes CUDA frames"),
+            "expected CudaFrameError::NotCuda, got {error}"
         );
 
         // Directly, not `try_cuda_device` again: the lock it returns is
@@ -998,8 +1014,8 @@ mod tests {
             .consume(foreign)
             .expect_err("a frame from a foreign CUDA context must not be scaled");
         assert!(
-            error.to_string().contains("different CUDA context"),
-            "expected ForeignContext, got {error}"
+            error.to_string().contains("from a different CUDA device"),
+            "expected CudaFrameError::ForeignContext, got {error}"
         );
     }
 

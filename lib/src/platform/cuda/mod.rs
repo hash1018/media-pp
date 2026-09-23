@@ -11,3 +11,4 @@ pub(crate) mod frame;
 pub use device::{CudaDevice, CudaDeviceError};
 pub use driver::CudaDriverError;
 pub use format::CudaFrameFormat;
+pub use frame::{CudaFrameError, CudaSurfaces};

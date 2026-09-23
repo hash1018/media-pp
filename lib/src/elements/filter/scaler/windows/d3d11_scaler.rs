@@ -28,6 +28,7 @@ use crate::{
     control::ControlMsg,
     element::{Element, ElementType, Sink, Source, element_pp_log},
     error::{D3d11SharedDeviceError, Result},
+    frame_size::OutputSize,
     pad::SrcPad,
     platform::windows::{
         d3d11::protect_shared_device,
@@ -240,8 +241,9 @@ impl D3d11ScalerFormat {
 /// from the first frame and rebuilt if a later frame's size or format
 /// changes — a live source can renegotiate mid-stream, and a decoder
 /// rebuilt after a seek can hand out differently shaped surfaces. The
-/// output size is fixed at construction. This is the same lazy-rebuild
-/// contract `CudaScaler` and
+/// output size is whatever the constructor settled: one it was given, or
+/// the input's own through [`D3d11Scaler::to_format`]. This is the same
+/// lazy-rebuild contract `CudaScaler` and
 /// [`crate::elements::SwScaler`] have for their own scaling state.
 ///
 /// # Device and context
@@ -264,8 +266,8 @@ pub struct D3d11Scaler {
     /// as shareable — and exactly as much in need of `context`'s lock.
     video_device: ID3D11VideoDevice,
     video_context: ID3D11VideoContext,
-    width: u32,
-    height: u32,
+    /// What size each output texture is — see the two constructors.
+    size: OutputSize,
     /// What to write. Resolved against each frame's own format, since
     /// [`D3d11ScalerFormat::Preserve`] has no answer until one arrives.
     format: D3d11ScalerFormat,
@@ -395,11 +397,51 @@ impl D3d11Scaler {
         width: u32,
         height: u32,
     ) -> std::result::Result<Self, D3d11ScalerError> {
-        let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::D3d11Scaler, &name, None);
         if width == 0 || height == 0 {
             return Err(D3d11ScalerError::InvalidOutputDimensions { width, height });
         }
+        Self::with_output(
+            name,
+            device,
+            context,
+            format,
+            OutputSize::Fixed { width, height },
+        )
+    }
+
+    /// Converts a frame's layout on the video processor and leaves its size
+    /// alone: each output texture is the size the input was.
+    ///
+    /// This is what a refused link asks for on this backend — "a
+    /// D3d11Scaler with D3d11ScalerFormat::Bgra first" in front of a
+    /// [`crate::elements::D3d11Download`] or a
+    /// [`crate::elements::D3d11ChromaKey`], which read BGRA — and the size
+    /// the frames happen to be is no part of that answer, so it is not
+    /// asked for. A source that changes resolution mid-stream comes out at
+    /// the new size rather than being scaled back to the old one; use
+    /// [`D3d11Scaler::new`] in front of something that cannot take that.
+    ///
+    /// [`D3d11ScalerFormat::Preserve`] is accepted and makes this element a
+    /// no-op that still costs a `Blt`; it is [`D3d11Scaler::new`]'s answer
+    /// for a pure resize, not this one's.
+    pub fn to_format(
+        name: impl Into<String>,
+        device: &ID3D11Device,
+        context: Arc<Mutex<ID3D11DeviceContext>>,
+        format: D3d11ScalerFormat,
+    ) -> std::result::Result<Self, D3d11ScalerError> {
+        Self::with_output(name, device, context, format, OutputSize::OfTheInput)
+    }
+
+    fn with_output(
+        name: impl Into<String>,
+        device: &ID3D11Device,
+        context: Arc<Mutex<ID3D11DeviceContext>>,
+        format: D3d11ScalerFormat,
+        size: OutputSize,
+    ) -> std::result::Result<Self, D3d11ScalerError> {
+        let name: Arc<str> = name.into().into();
+        let pp_log = element_pp_log(ElementType::D3d11Scaler, &name, None);
         // This element sits behind a `Queue` more often than not, so the
         // device has to be usable from a thread other than the one that
         // created it before any command is issued.
@@ -440,7 +482,14 @@ impl D3d11Scaler {
             },
         );
         let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
-        pp_info!(pp_log: &pp_log, "opened: dst={width}x{height} {format:?}");
+        match size {
+            OutputSize::Fixed { width, height } => {
+                pp_info!(pp_log: &pp_log, "opened: dst={width}x{height} {format:?}")
+            }
+            OutputSize::OfTheInput => {
+                pp_info!(pp_log: &pp_log, "opened: dst=the input's own size {format:?}")
+            }
+        }
         Ok(Self {
             name,
             pp_log,
@@ -448,8 +497,7 @@ impl D3d11Scaler {
             context,
             video_device,
             video_context,
-            width,
-            height,
+            size,
             format,
             processor: None,
             pad,
@@ -541,8 +589,9 @@ impl D3d11Scaler {
             .inspect_err(|error| pp_error!(self, "{error}"))?;
         let input = validated.shape;
         let output_format = self.format.resolve(input.format);
+        let (width, height) = self.size.of(frame);
 
-        validate_output_size(output_format, self.width, self.height)
+        validate_output_size(output_format, width, height)
             .inspect_err(|error| pp_error!(self, "{error}"))?;
 
         // `D3d11Upload` and DXGI GPU capture produce shader-resource-only
@@ -566,7 +615,7 @@ impl D3d11Scaler {
             )
         };
 
-        let output = create_output_texture(&self.device, output_format, self.width, self.height)
+        let output = create_output_texture(&self.device, output_format, width, height)
             .inspect_err(|error| pp_error!(self, "failed to allocate the output texture: {error}"))
             .map_err(D3d11ScalerError::from)?;
         // What each side holds. The two are identical whenever the format
@@ -583,7 +632,7 @@ impl D3d11Scaler {
                 input.height,
                 input.format,
             ),
-            color_space(output_space, output_range, self.height, output_format),
+            color_space(output_space, output_range, height, output_format),
         );
 
         {
@@ -613,9 +662,11 @@ impl D3d11Scaler {
                 }
                 None => (&validated.texture, validated.array_slice),
             };
-            if !self.processor.as_ref().is_some_and(|processor| {
-                processor.matches(input, self.width, self.height, output_format)
-            }) {
+            if !self
+                .processor
+                .as_ref()
+                .is_some_and(|processor| processor.matches(input, width, height, output_format))
+            {
                 pp_debug!(
                     self,
                     "input is {}x{} {:?}, output {:?}, building the video processor",
@@ -632,8 +683,8 @@ impl D3d11Scaler {
                         &self.video_device,
                         &self.video_context,
                         input,
-                        self.width,
-                        self.height,
+                        width,
+                        height,
                         output_format,
                     )
                     .inspect_err(|error| {
@@ -659,7 +710,7 @@ impl D3d11Scaler {
         // Overwrites the pooled slot's previous contents in place —
         // `ffmpeg::frame::Video`'s own `Drop` runs on whatever was there
         // before, releasing that frame's GPU texture right here.
-        *scaled = wrap_d3d11_texture(output, self.width, self.height)?;
+        *scaled = wrap_d3d11_texture(output, width, height)?;
         scaled.set_pts(frame.pts());
         // A pure resize carries the source's tags through unchanged; a
         // conversion replaces them, because the pixels are no longer what
@@ -790,6 +841,7 @@ fn create_output_texture(
 
 #[cfg(test)]
 mod tests {
+    use crate::test_support::capture;
     use std::ffi::c_void;
 
     use windows::Win32::Graphics::{
@@ -803,36 +855,6 @@ mod tests {
     use super::*;
     use crate::elements::{D3d11Download, D3d11Upload};
     use crate::test_support::try_d3d11_device as try_device;
-
-    struct CapturingSink {
-        pp_log: PpLog,
-        received: Arc<Mutex<Vec<MediaBuffer>>>,
-    }
-
-    impl Element for CapturingSink {
-        fn name(&self) -> Arc<str> {
-            "capture".into()
-        }
-        fn element_type(&self) -> ElementType {
-            ElementType::Other
-        }
-        fn pp_log(&self) -> &PpLog {
-            &self.pp_log
-        }
-        fn pp_log_mut(&mut self) -> &mut PpLog {
-            &mut self.pp_log
-        }
-    }
-
-    impl Sink for CapturingSink {
-        fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
-            self.received.lock().unwrap().push(buf);
-            Ok(())
-        }
-        fn control(&mut self, _msg: ControlMsg) -> Result<()> {
-            Ok(())
-        }
-    }
 
     /// A filter is the classic far side of a `Queue`, so a device that
     /// promised single-threaded use has to be refused where it is handed
@@ -858,15 +880,6 @@ mod tests {
                 D3d11SharedDeviceError::SingleThreaded
             ))
         ));
-    }
-
-    fn capture(element: &mut dyn Source) -> Arc<Mutex<Vec<MediaBuffer>>> {
-        let received = Arc::new(Mutex::new(Vec::new()));
-        element.src_pads()[0].link(Box::new(CapturingSink {
-            received: received.clone(),
-            pp_log: element_pp_log(ElementType::Other, "capture", None),
-        }));
-        received
     }
 
     /// The same device, but only when it can actually run a video
@@ -1334,6 +1347,42 @@ mod tests {
             assert_eq!(scaled.width(), 8);
             assert_eq!(scaled.height(), 8);
         }
+    }
+
+    /// What `to_format` is for: the layout is converted and the size is
+    /// not, so a source that changes resolution mid-stream comes out at its
+    /// new size instead of being scaled back to the first frame's — which
+    /// is what the test above asserts a scaler given a size still does.
+    #[test]
+    fn a_layout_only_scaler_keeps_each_frames_own_size() {
+        let Some((device, context)) = try_video_device() else {
+            return;
+        };
+        let first = nv12_frame(&device, 16, 16, 180, 0);
+        let second = nv12_frame(&device, 32, 16, 180, 1);
+
+        let mut scaler =
+            D3d11Scaler::to_format("scaler", &device, context, D3d11ScalerFormat::Bgra)
+                .expect("D3d11Scaler::to_format should succeed");
+        let received = capture(&mut scaler);
+        scaler.consume(first).expect("the first size");
+        scaler.consume(second).expect("and the next one");
+
+        let received = received.lock().unwrap();
+        let shapes: Vec<_> = received
+            .iter()
+            .map(|buf| {
+                let MediaBuffer::Video(scaled) = buf else {
+                    panic!("expected a Video buffer, got {}", buf.kind());
+                };
+                (scaled.width(), scaled.height())
+            })
+            .collect();
+        assert_eq!(
+            shapes,
+            [(16, 16), (32, 16)],
+            "the layout is this element's to change, and the size is not"
+        );
     }
 
     /// A CPU frame has no texture at all, and one from another device has a

@@ -10,7 +10,7 @@ use crate::{
     control::ControlMsg,
     element::{Element, ElementType, Sink, Source, element_pp_log},
     error::Result,
-    frame_size::ForSize,
+    frame_size::{ForSize, OutputSize},
     pad::SrcPad,
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
     repeat::{PerFrameTransform, RepeatedOutput},
@@ -111,24 +111,6 @@ pub struct SwScaler {
 // `hw_device_ctx` for the same reasoning) already rules out concurrent
 // access from multiple threads.
 unsafe impl Send for SwScaler {}
-
-/// What size a [`SwScaler`]'s output frames are.
-#[derive(Debug, Clone, Copy)]
-enum OutputSize {
-    /// [`SwScaler::new`]: this size, whatever arrives.
-    Fixed { width: u32, height: u32 },
-    /// [`SwScaler::to_format`]: the size of the frame that arrived.
-    OfTheInput,
-}
-
-impl OutputSize {
-    fn of(self, frame: &ffmpeg::frame::Video) -> (u32, u32) {
-        match self {
-            Self::Fixed { width, height } => (width, height),
-            Self::OfTheInput => (frame.width(), frame.height()),
-        }
-    }
-}
 
 impl SwScaler {
     /// `dst_format`/`dst_width`/`dst_height` describe what every output
@@ -522,43 +504,10 @@ fn is_rgb(pixel: ffmpeg::format::Pixel) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use crate::test_support::CapturingSink;
     use std::sync::Mutex;
 
     use super::*;
-
-    struct CapturingSink {
-        pp_log: PpLog,
-        received: Arc<Mutex<Vec<MediaBuffer>>>,
-    }
-
-    impl Element for CapturingSink {
-        fn name(&self) -> Arc<str> {
-            "capture".into()
-        }
-
-        fn element_type(&self) -> ElementType {
-            ElementType::Other
-        }
-
-        fn pp_log(&self) -> &PpLog {
-            &self.pp_log
-        }
-
-        fn pp_log_mut(&mut self) -> &mut PpLog {
-            &mut self.pp_log
-        }
-    }
-
-    impl Sink for CapturingSink {
-        fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
-            self.received.lock().unwrap().push(buf);
-            Ok(())
-        }
-
-        fn control(&mut self, _msg: ControlMsg) -> Result<()> {
-            Ok(())
-        }
-    }
 
     fn video_frame(
         format: ffmpeg::format::Pixel,

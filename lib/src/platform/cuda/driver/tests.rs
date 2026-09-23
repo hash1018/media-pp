@@ -1,56 +1,16 @@
-use std::sync::{Arc, Mutex};
+use crate::test_support::capture;
+use std::sync::Arc;
 
 use ffmpeg_next::{self as ffmpeg};
 
 use super::*;
 use crate::{
     buffer::MediaBuffer,
-    control::ControlMsg,
-    element::{Element, ElementType, Sink, Source, element_pp_log},
+    element::Sink,
     elements::{CudaDownload, CudaFrameFormat, CudaUpload},
     pool::UnboundObjectPool,
-    pp_log::PpLog,
     test_support::try_cuda_device,
 };
-
-struct CapturingSink {
-    pp_log: PpLog,
-    received: Arc<Mutex<Vec<MediaBuffer>>>,
-}
-
-impl Element for CapturingSink {
-    fn name(&self) -> Arc<str> {
-        "capture".into()
-    }
-    fn element_type(&self) -> ElementType {
-        ElementType::Other
-    }
-    fn pp_log(&self) -> &PpLog {
-        &self.pp_log
-    }
-    fn pp_log_mut(&mut self) -> &mut PpLog {
-        &mut self.pp_log
-    }
-}
-
-impl Sink for CapturingSink {
-    fn consume(&mut self, buf: MediaBuffer) -> crate::error::Result<()> {
-        self.received.lock().unwrap().push(buf);
-        Ok(())
-    }
-    fn control(&mut self, _msg: ControlMsg) -> crate::error::Result<()> {
-        Ok(())
-    }
-}
-
-fn capture(element: &mut dyn Source) -> Arc<Mutex<Vec<MediaBuffer>>> {
-    let received = Arc::new(Mutex::new(Vec::new()));
-    element.src_pads()[0].link(Box::new(CapturingSink {
-        received: received.clone(),
-        pp_log: element_pp_log(ElementType::Other, "capture", None),
-    }));
-    received
-}
 
 /// Uploads one NV12 frame whose luma is `luma` everywhere and hands back
 /// the CUDA-resident result, so a test has a real surface to operate on.

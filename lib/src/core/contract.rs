@@ -734,7 +734,7 @@ pub fn remedy(produced: &PortContract, accepted: &PortContract) -> Option<&'stat
                 "upload it: a CudaUpload built for NV12 or BGRA — a SwScaler::to_format to that layout first where the frames are in another",
             ),
             (D3d11, System) => Some(
-                "download it: a D3d11Download, which reads BGRA — a D3d11Scaler with D3d11ScalerFormat::Bgra first where the frames are in another layout",
+                "download it: a D3d11Download, which reads BGRA — a D3d11Scaler::to_format with D3d11ScalerFormat::Bgra first where the frames are in another layout",
             ),
             (D3d12, System) => Some("download it: a D3d12Download, which reads NV12"),
             (Cuda, System) => Some("download it: a CudaDownload built for NV12 or BGRA"),
@@ -751,9 +751,11 @@ pub fn remedy(produced: &PortContract, accepted: &PortContract) -> Option<&'stat
     let from_bgra = produced_layouts.contains(Bgra);
     match accepted_memory.only()? {
         System => Some("convert it: a SwScaler::to_format to a layout the consumer takes"),
-        D3d11 if to_nv12 => Some("convert it: a D3d11Scaler with D3d11ScalerFormat::Nv12"),
+        D3d11 if to_nv12 => {
+            Some("convert it: a D3d11Scaler::to_format with D3d11ScalerFormat::Nv12")
+        }
         D3d11 if to_bgra => Some(
-            "convert it: a D3d11Scaler with D3d11ScalerFormat::Bgra — or a D3d11ToneMap, for PQ or HLG video",
+            "convert it: a D3d11Scaler::to_format with D3d11ScalerFormat::Bgra — or a D3d11ToneMap, for PQ or HLG video",
         ),
         D3d11 => None,
         D3d12 => Some("nothing here converts a D3D12 frame's layout: decode or upload it as NV12"),
@@ -761,10 +763,10 @@ pub fn remedy(produced: &PortContract, accepted: &PortContract) -> Option<&'stat
             Some("convert it: a CudaConverter built for CudaFrameFormat::Nv12")
         }
         Cuda if to_nv12 && from_p010 => {
-            Some("bring it to 8 bits: a CudaScaler built with_format CudaFrameFormat::Nv12")
+            Some("bring it to 8 bits: a CudaScaler::to_format for CudaFrameFormat::Nv12")
         }
         Cuda if to_bgra && from_p010 => Some(
-            "convert it: a CudaScaler with_format CudaFrameFormat::Nv12, then a CudaConverter built for CudaFrameFormat::Bgra — or the CudaConverter alone, for PQ or HLG video",
+            "convert it: a CudaScaler::to_format for CudaFrameFormat::Nv12, then a CudaConverter built for CudaFrameFormat::Bgra — or the CudaConverter alone, for PQ or HLG video",
         ),
         Cuda if to_bgra => Some("convert it: a CudaConverter built for CudaFrameFormat::Bgra"),
         Cuda => None,

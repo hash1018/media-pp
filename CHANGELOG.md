@@ -52,6 +52,31 @@ compile error with no explanation.
   A scaler, a compositor and an encoder still take a size: it is what they
   are for, not something they have to be told twice.
 
+- **A CUDA element refuses a frame through one error, `CudaFrameError`.**
+  `CudaConverter`, `CudaChromaKey`, `CudaVideoEffect`, `CudaDownload`,
+  `CudaEncoder`, `CudaRenderer`, `CudaScaler` and `CudaVideoCompositor`
+  each carried their own copy of the same four checks — a CUDA frame, with a
+  frames context, from this element's device, in a layout it reads — as
+  their own four error variants, and their own copy of the unsafe code
+  asking them. Those variants (`UnsupportedFormat`, `MissingFramesContext`,
+  `ForeignContext`, `UnsupportedSurfaceFormat`, and the renderer's
+  `UnsupportedSoftwareFormat`) are replaced in every one of them by
+  `Frame(CudaFrameError)`, and the checks by one function.
+
+  ```rust
+  // before
+  Err(Error::CudaDownloadError(CudaDownloadError::ForeignContext)) => …
+
+  // after
+  Err(Error::CudaDownloadError(CudaDownloadError::Frame(
+      CudaFrameError::ForeignContext { .. },
+  ))) => …
+  ```
+
+  The messages still name the element — `CudaDownload reads NV12 surfaces,
+  got BGRA` — and a refused layout now says what would have been taken,
+  through `CudaSurfaces`, the same value that made the decision.
+
 - **A frame's link contract states its pixel layout.**
   `PortContract::Frames` has a third field, a `PixelLayoutSet` — NV12, P010,
   BGRA or other — and `OutputContract` a new variant, `SameLayout`, for a
@@ -226,25 +251,33 @@ compile error with no explanation.
 
 ### Added
 
-- **`SwScaler::to_format` changes a frame's layout and leaves its size
-  alone.** The layout is what a refused link asks for — "a SwScaler to NV12
-  first" in front of an upload that takes NV12 — and the size the frames
-  happen to be is no part of that answer, so it is no longer asked for.
+- **Every scaler can be asked for a layout instead of a size:
+  `SwScaler::to_format`, `D3d11Scaler::to_format`,
+  `CudaScaler::to_format`.** The layout is what a refused link asks for —
+  "a SwScaler to NV12 first" in front of an upload that takes NV12, "a
+  D3d11Scaler with D3d11ScalerFormat::Bgra first" in front of a download —
+  and the size the frames happen to be is no part of that answer, so it is
+  no longer asked for. The remedies name these constructors.
 
   ```rust
   // before: a size fetched from somewhere just to say "the same"
   SwScaler::new("to-nv12", Pixel::NV12, width, height, Flags::BILINEAR)
+  D3d11Scaler::new("to-bgra", &device, ctx, D3d11ScalerFormat::Bgra, width, height)?
+  CudaScaler::with_format("to-nv12", &cuda, width, height, interp, CudaFrameFormat::Nv12)
 
   // after
   SwScaler::to_format("to-nv12", Pixel::NV12, Flags::BILINEAR)
+  D3d11Scaler::to_format("to-bgra", &device, ctx, D3d11ScalerFormat::Bgra)?
+  CudaScaler::to_format("to-nv12", &cuda, interp, CudaFrameFormat::Nv12)
   ```
 
-  It also changes what a mid-stream resolution change does. `SwScaler::new`
-  absorbs one by stretching the picture back to the size it was given,
-  which is what keeps a fixed-geometry encoder downstream working and a
-  broken aspect ratio anywhere else; `to_format` passes the new size on, so
-  what is downstream has to be able to take one. `new` is unchanged and
-  still the right constructor in front of an encoder or a model.
+  It also changes what a mid-stream resolution change does. A scaler given
+  a size absorbs one by scaling the picture back to it, which is what keeps
+  a fixed-geometry encoder downstream working and a broken aspect ratio
+  anywhere else; `to_format` passes the new size on, so what is downstream
+  has to be able to take one. The size-taking constructors are unchanged
+  and still the right ones in front of an encoder, a muxer's stream or a
+  model.
 
 - **A refused link says what goes between, and elements can be asked
   directly.** A pipeline's refusal and `LinkCheck` both end with the

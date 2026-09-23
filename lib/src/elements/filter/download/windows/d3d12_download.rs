@@ -242,45 +242,12 @@ impl Sink for D3d12Download {
 
 #[cfg(test)]
 mod tests {
+    use crate::test_support::CapturingSink;
     use std::sync::Mutex;
 
     use super::*;
     use crate::elements::D3d12Upload;
     use crate::test_support::try_d3d12_device as try_device;
-
-    struct CapturingSink {
-        pp_log: PpLog,
-        received: Arc<Mutex<Vec<MediaBuffer>>>,
-    }
-
-    impl Element for CapturingSink {
-        fn name(&self) -> Arc<str> {
-            "capture".into()
-        }
-
-        fn element_type(&self) -> ElementType {
-            ElementType::Other
-        }
-
-        fn pp_log(&self) -> &PpLog {
-            &self.pp_log
-        }
-
-        fn pp_log_mut(&mut self) -> &mut PpLog {
-            &mut self.pp_log
-        }
-    }
-
-    impl Sink for CapturingSink {
-        fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
-            self.received.lock().unwrap().push(buf);
-            Ok(())
-        }
-
-        fn control(&mut self, _msg: ControlMsg) -> Result<()> {
-            Ok(())
-        }
-    }
 
     #[test]
     fn upload_download_round_trip_preserves_pixels_and_metadata() {

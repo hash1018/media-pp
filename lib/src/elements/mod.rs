@@ -28,7 +28,9 @@ pub use rtsp::RtspTransport;
 pub use video_format::VideoFormat;
 
 #[cfg(feature = "cuda")]
-pub use crate::platform::cuda::{CudaDevice, CudaDeviceError, CudaDriverError, CudaFrameFormat};
+pub use crate::platform::cuda::{
+    CudaDevice, CudaDeviceError, CudaDriverError, CudaFrameError, CudaFrameFormat, CudaSurfaces,
+};
 #[cfg(all(target_os = "linux", feature = "v4l2-capture"))]
 pub use crate::platform::linux::v4l2::{V4l2CaptureFormat, V4l2Device};
 #[cfg(all(target_os = "windows", feature = "mf-capture"))]

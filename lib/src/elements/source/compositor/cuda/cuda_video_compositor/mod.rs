@@ -36,7 +36,7 @@ use crate::{
             BgraRegion, BgraSurface, CudaBgraScratch, CudaDriver, CudaDriverError, CudaMask,
             CudaOverlayScratch, Nv12Region, Nv12Surface, YuvToBgra,
         },
-        frame::create_hw_frames_ctx,
+        frame::{self, CudaFrameError, CudaSurfaces, create_hw_frames_ctx},
     },
     platform::ffmpeg::AvBufferRef,
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
@@ -142,21 +142,10 @@ pub enum CudaVideoCompositorError {
     #[error("the compositor input has been removed")]
     SourceRemoved,
 
-    /// The input frame is not backed by CUDA hardware surfaces.
-    #[error("CudaVideoCompositorInputSink only composites CUDA frames, got {0:?}")]
-    UnsupportedFormat(ffmpeg::format::Pixel),
-
-    /// The CUDA surface is not in the NV12 format required by the compositor kernel.
-    #[error("CudaVideoCompositor only composites NV12 surfaces, got {0:?}")]
-    UnsupportedSurfaceFormat(ffmpeg::format::Pixel),
-
-    /// A CUDA frame does not retain the hardware frames context that owns it.
-    #[error("CUDA frame has no hardware frames context")]
-    MissingFramesContext,
-
-    /// An input frame belongs to a different CUDA context.
-    #[error("CUDA frame belongs to a different CUDA context than this compositor")]
-    ForeignContext,
+    /// An input frame is not an NV12 or BGRA surface from this compositor's
+    /// own device.
+    #[error(transparent)]
+    Frame(#[from] CudaFrameError),
 
     /// A CUDA frame contains no usable device-memory plane.
     #[error("CUDA frame carries no device pointers")]
@@ -1678,40 +1667,27 @@ fn validate_input_frame(
     frame: &ffmpeg::frame::Video,
     device_ctx: *const ffi::AVHWDeviceContext,
 ) -> std::result::Result<(*mut ffi::AVBufferRef, LayerFormat), CudaVideoCompositorError> {
-    if frame.format() != ffmpeg::format::Pixel::CUDA {
-        return Err(CudaVideoCompositorError::UnsupportedFormat(frame.format()));
-    }
+    // What every capture and every converter on this path produces, and
+    // what the canvas itself is; or an overlay, which is here precisely
+    // because it has an alpha channel to keep — see `LayerFormat`.
+    let surface = frame::validate(
+        frame,
+        ElementType::CudaVideoCompositor,
+        device_ctx,
+        CudaSurfaces::NV12_OR_BGRA,
+    )?;
     if frame.width() == 0 || frame.height() == 0 {
         return Err(CudaVideoCompositorError::InvalidInputDimensions {
             width: frame.width(),
             height: frame.height(),
         });
     }
-    // SAFETY: `frame` is a live `frame::Video` already confirmed to be
-    // `Pixel::CUDA`, so `as_ptr` yields an initialized `AVFrame` and a hardware
-    // frame's `hw_frames_ctx` is either null — rejected here — or an
-    // `AVBufferRef` whose `data` is an `AVHWFramesContext`. Only pointer
-    // identity is compared, never dereferenced past that.
-    unsafe {
-        let frames_ref = (*frame.as_ptr()).hw_frames_ctx;
-        if frames_ref.is_null() {
-            return Err(CudaVideoCompositorError::MissingFramesContext);
-        }
-        let frames_ctx = (*frames_ref).data as *const ffi::AVHWFramesContext;
-        if !std::ptr::eq((*frames_ctx).device_ctx, device_ctx) {
-            return Err(CudaVideoCompositorError::ForeignContext);
-        }
-        let sw_format = ffmpeg::format::Pixel::from((*frames_ctx).sw_format);
-        match sw_format {
-            // What every capture and every converter on this path produces,
-            // and what the canvas itself is.
-            ffmpeg::format::Pixel::NV12 => Ok((frames_ref, LayerFormat::Nv12)),
-            // An overlay, which is here precisely because it has an alpha
-            // channel to keep — see `LayerFormat`.
-            ffmpeg::format::Pixel::BGRA => Ok((frames_ref, LayerFormat::Bgra)),
-            other => Err(CudaVideoCompositorError::UnsupportedSurfaceFormat(other)),
-        }
-    }
+    let layer = if surface.layout == ffmpeg::format::Pixel::BGRA {
+        LayerFormat::Bgra
+    } else {
+        LayerFormat::Nv12
+    };
+    Ok((surface.frames_ctx, layer))
 }
 
 fn validate_output_options(
