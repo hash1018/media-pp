@@ -526,6 +526,17 @@ compile error with no explanation.
 
 ### Added
 
+- **`log::init` records FFmpeg's own messages.** An encoder's closing
+  statistics and a codec library's warnings (`[aac @ 0x…] Qavg: …`,
+  libopenh264's) went to stderr, with no time, no thread, and nothing
+  tying them to the pipeline. While the logger runs they are recorded in
+  its file instead, as element `FFmpeg` named after the codec or format
+  that said them, at the matching level. FFmpeg's own threshold (`INFO`
+  unless changed) still decides what it reports. This sets FFmpeg's
+  process-wide log callback, and dropping the `LogGuard` restores FFmpeg's
+  own; an application with its own callback should install it after
+  `init`. A program that never calls `init` is unaffected.
+
 - **A pipeline can start paused, and so take one frame from anywhere.**
   `pause` before `run` was ignored, and the run started playing. It now
   makes the run start paused: every source stops before producing

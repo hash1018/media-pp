@@ -140,6 +140,8 @@ impl LogGuard {
 impl Drop for LogGuard {
     fn drop(&mut self) {
         self.active.store(false, Ordering::Release);
+        // Before the writer goes: FFmpeg prints for itself again from here.
+        super::ffmpeg_log::uninstall();
         // Release this process-wide writer *before* running the worker
         // guard. That guard gets 100ms to enqueue its shutdown message on
         // the same bounded channel the records use; a stalled file writer
@@ -176,6 +178,15 @@ struct PrivateLogger {
 ///
 /// This does not install a global `log` logger or `tracing` subscriber. It can
 /// coexist with any logger installed by the embedding application.
+///
+/// It does take FFmpeg's own messages — an encoder's closing statistics, a
+/// codec library's warnings — which FFmpeg otherwise prints to stderr: they
+/// are recorded here instead, as element `FFmpeg` named after the codec or
+/// format they came from (`aac`, `libopenh264`), at the matching level. That
+/// is FFmpeg's process-wide log callback, set here and put back to FFmpeg's
+/// own when the [`LogGuard`] is dropped; an application with a callback of its
+/// own should install it after this. FFmpeg's own threshold (`INFO` unless
+/// changed with `av_log_set_level`) still decides what it reports at all.
 ///
 /// The returned [`LogGuard`] must be retained for as long as logging is needed.
 /// Dropping it permanently stops this one-shot logger and makes a bounded
@@ -230,6 +241,7 @@ pub fn init(
     if LOGGER.set(logger).is_err() {
         return Err(LogInitError::AlreadyInitialized);
     }
+    super::ffmpeg_log::install();
 
     Ok(LogGuard {
         active,
@@ -244,6 +256,13 @@ pub fn enabled(level: Level) -> bool {
     LOGGER
         .get()
         .is_some_and(|logger| logger.active.load(Ordering::Acquire) && level <= logger.level)
+}
+
+/// Whether the logger is running — initialized, and its guard not dropped.
+pub(crate) fn is_active() -> bool {
+    LOGGER
+        .get()
+        .is_some_and(|logger| logger.active.load(Ordering::Acquire))
 }
 
 #[doc(hidden)]

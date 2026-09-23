@@ -6,6 +6,7 @@
 //! `crate::log`, `crate::pp_log`, `crate::stats` — exactly as it was before
 //! the group existed; nothing refers to `crate::core::diagnostics`.
 
+mod ffmpeg_log;
 pub mod log;
 pub mod pp_log;
 pub mod stats;
