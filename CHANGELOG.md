@@ -1181,6 +1181,18 @@ compile error with no explanation.
 
 ### Fixed
 
+- **A file whose picture is muxed ahead of its sound plays with any video
+  queue.** `FileDemuxer` waited on a pad whose branch was full, which
+  stopped its one read cursor. When the full branch was the picture —
+  frames the audio had not reached yet — the audio packets that would let
+  it reach them lay further on in the file, so the audio clock stopped and
+  the picture waited on it for good: an 8-frame video queue froze a file
+  whose picture leads its sound by a second at 0.667 s, with no error. A
+  full pad's packets are now held back while another branch is still
+  waiting on the cursor, for up to 5 s of file time, and go out in order
+  once it has room; past that, or with nothing else waiting, the full pad
+  is waited on as before.
+
 - **A pipeline with several sources no longer loses one to a pause, seek
   or finish.** Control went to one source at a time, after the clock had
   been interrupted. A source waiting its turn behind another's cascade was

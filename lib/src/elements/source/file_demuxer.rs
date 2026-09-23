@@ -176,8 +176,15 @@ pub struct FileDemuxer {
     /// How many parked packets each pad owes, so a freshly read one never
     /// overtakes them.
     parked_per_pad: Vec<usize>,
-    /// Whether a preroll is running. Parking is only correct then: outside
-    /// one, a blocked pad is ordinary backpressure this source must wait on.
+    /// When the oldest packet each pad owes is due, in nanoseconds of file
+    /// time — how far behind the read cursor that pad has been left. See
+    /// [`MAX_INTERLEAVE`].
+    parked_since_ns: Vec<Option<i64>>,
+    /// When the packet last read is due, in nanoseconds of file time.
+    read_ns: Option<i64>,
+    /// Whether a preroll is running. Any blocked pad is parked for then;
+    /// outside one, only while another branch is waiting on the read cursor
+    /// — see [`FileDemuxer::may_park`].
     prerolling: bool,
     /// Set through [`FileDemuxerHandle::set_looping`], read only where the
     /// container runs out.
@@ -208,6 +215,25 @@ pub struct FileDemuxer {
     /// instead would drop the next lap on top of timestamps a muxer has
     /// already written.
     lap_end: i64,
+}
+
+/// How far the read cursor may run ahead of what a blocked pad still owes,
+/// in file time, to keep another branch fed — see
+/// [`FileDemuxer::may_park`]. Covers how far apart a container's streams are
+/// muxed in practice, typically a second or less, with room to spare; past
+/// it, the blocked pad is waited on.
+const MAX_INTERLEAVE: Duration = Duration::from_secs(5);
+
+/// When `packet` is due, in nanoseconds of file time — its decode time, which
+/// only moves forward in file order, else its presentation time.
+fn packet_ns(packet: &ffmpeg::Packet, time_base: ffmpeg::Rational) -> Option<i64> {
+    let ts = packet.dts().or(packet.pts())?;
+    (time_base.denominator() > 0)
+        .then(|| ts.rescale(time_base, ffmpeg::Rational::new(1, 1_000_000_000)))
+}
+
+fn duration_ns(duration: Duration) -> i64 {
+    duration.as_nanos().min(i64::MAX as u128) as i64
 }
 
 impl FileDemuxer {
@@ -256,6 +282,8 @@ impl FileDemuxer {
                 pp_log,
                 input,
                 parked_per_pad: vec![0; pads.len()],
+                parked_since_ns: vec![None; pads.len()],
+                read_ns: None,
                 prerolling: false,
                 pads,
                 pending: VecDeque::new(),
@@ -392,20 +420,76 @@ impl FileDemuxer {
         // first. Overtaking it would hand a decoder its stream out of decode
         // order.
         let blocked = self.parked_per_pad[index] > 0 || !self.pads[index].ready_consume();
-        if blocked && self.prerolling {
+        if blocked && self.may_park(index) {
             self.park((index, time_base, packet));
             return Ok(());
         }
-        // Outside a preroll, a blocked pad is ordinary backpressure and the
-        // right answer is to wait on it: the push below blocks until the
+        // Otherwise a blocked pad is ordinary backpressure and the right
+        // answer is to wait on it: the push below blocks until the
         // downstream `Queue` has room, which paces this whole source to the
-        // branch that is furthest behind. Holding the packet and reading on
-        // instead would let the source run away from playback and buffer the
-        // file here — measured at 67 MB parked within 1.5 s of paced playback,
-        // after which the backlog ceiling stopped the read cursor for *every*
-        // pad and starved the branches that were still keeping up.
+        // branch that is furthest behind. What it already owes goes first —
+        // parking is no longer justified, but those were read before this.
+        if self.parked_per_pad[index] > 0 {
+            self.deliver_parked(index, bus);
+        }
         self.push_to_pad(index, packet, bus);
         Ok(())
+    }
+
+    /// Delivers every packet pad `index` owes, oldest first, waiting on the
+    /// pad as any push does.
+    fn deliver_parked(&mut self, index: usize, bus: &Bus) {
+        let mut rest = VecDeque::with_capacity(self.pending.len());
+        while let Some((owner, time_base, packet)) = self.pending.pop_front() {
+            if owner != index {
+                rest.push_back((owner, time_base, packet));
+                continue;
+            }
+            self.pending_bytes = self.pending_bytes.saturating_sub(packet.size());
+            self.parked_per_pad[index] -= 1;
+            self.push_to_pad(index, packet, bus);
+        }
+        self.pending = rest;
+        self.parked_since_ns[index] = None;
+    }
+
+    /// Whether a packet for blocked pad `index` may be held back so the read
+    /// cursor can move on, rather than waited on.
+    ///
+    /// Always during a preroll, which needs every branch's first sample.
+    /// Otherwise only while another branch is waiting for the cursor, and
+    /// only within [`MAX_INTERLEAVE`] of what `index` already owes.
+    ///
+    /// That second case is a file whose picture is muxed ahead of its sound.
+    /// The video queue fills with frames the audio has not reached; waiting
+    /// on it stops this thread before the audio packets that would let the
+    /// audio reach them, and the video waits on the audio for good. Holding
+    /// the video packets for as long as the audio is taking its own keeps
+    /// both fed. Holding without that condition or that bound let the source
+    /// run away from playback and buffer the file here — 67 MB within 1.5 s
+    /// of paced playback, when parking was not yet scoped at all.
+    fn may_park(&mut self, index: usize) -> bool {
+        if self.prerolling {
+            return true;
+        }
+        let another_waiting = self
+            .pads
+            .iter_mut()
+            .enumerate()
+            .any(|(other, pad)| other != index && pad.is_linked() && pad.ready_consume());
+        another_waiting && !self.interleave_exceeded()
+    }
+
+    /// Whether the read cursor has got [`MAX_INTERLEAVE`] ahead of the oldest
+    /// packet any pad still owes.
+    fn interleave_exceeded(&self) -> bool {
+        let Some(read_ns) = self.read_ns else {
+            return false;
+        };
+        self.parked_since_ns
+            .iter()
+            .flatten()
+            .any(|&since| read_ns.saturating_sub(since) > duration_ns(MAX_INTERLEAVE))
     }
 
     fn push_to_pad(&mut self, index: usize, packet: ffmpeg::Packet, bus: &Bus) {
@@ -427,6 +511,9 @@ impl FileDemuxer {
         let (index, time_base, mut packet) = item;
         packet.set_time_base(time_base);
         self.pending_bytes = self.pending_bytes.saturating_add(packet.size());
+        if self.parked_per_pad[index] == 0 {
+            self.parked_since_ns[index] = packet_ns(&packet, time_base).or(self.read_ns);
+        }
         self.parked_per_pad[index] += 1;
         self.pending.push_back((index, time_base, packet));
     }
@@ -443,18 +530,19 @@ impl FileDemuxer {
     /// `co located POCs unavailable`. Other pads are unaffected: keeping the
     /// read cursor moving for them is the whole reason parking exists.
     fn drain_pending(&mut self, bus: &Bus) -> crate::error::Result<()> {
-        // The ordinary case, now that holding back is scoped to preroll: this
-        // runs once per packet read, so it must not allocate to find nothing.
+        // The ordinary case — nothing is held back: this runs once per
+        // packet read, so it must not allocate to find nothing.
         if self.pending.is_empty() {
             return Ok(());
         }
         let mut deferred = VecDeque::with_capacity(self.pending.len());
         let mut blocked = vec![false; self.pads.len()];
         while let Some((index, time_base, packet)) = self.pending.pop_front() {
-            // Once the preroll that justified holding these is over, waiting
-            // on the pad is what empties the backlog; deferring again would
-            // leave it parked for as long as playback keeps that pad busy.
-            let hold = self.prerolling && (blocked[index] || !self.pads[index].ready_consume());
+            // Still held while its pad cannot take it: pushing would block
+            // this thread on that pad, which is what parking is there to
+            // avoid. When reading has to stop instead, `pending_blocked` says
+            // so, and this delivers as the pad frees up.
+            let hold = blocked[index] || !self.pads[index].ready_consume();
             if hold {
                 blocked[index] = true;
                 deferred.push_back((index, time_base, packet));
@@ -462,7 +550,14 @@ impl FileDemuxer {
             }
             self.pending_bytes = self.pending_bytes.saturating_sub(packet.size());
             self.parked_per_pad[index] -= 1;
+            // The next it owes, if any, is the one that bounds it now.
+            self.parked_since_ns[index] = None;
             self.push_to_pad(index, packet, bus);
+        }
+        for (index, time_base, packet) in &deferred {
+            if self.parked_since_ns[*index].is_none() {
+                self.parked_since_ns[*index] = packet_ns(packet, *time_base).or(self.read_ns);
+            }
         }
         self.pending = deferred;
         Ok(())
@@ -477,17 +572,23 @@ impl FileDemuxer {
     /// are needed — a few large keyframes reach the byte limit at a packet
     /// count that would never trip on its own.
     fn pending_blocked(&mut self) -> bool {
-        if !self.prerolling {
-            // Nothing is parked outside a preroll, and a blocked pad is
-            // waited on rather than skipped.
+        if self.pending.is_empty() {
             return false;
+        }
+        // Outside a preroll, a pad held back past the interleave bound is
+        // waited on: reading on would only park more for it.
+        if !self.prerolling && self.interleave_exceeded() {
+            return true;
         }
         const MAX_PENDING_PACKETS: usize = 4_096;
         const MAX_PENDING_BYTES: usize = 64 * 1024 * 1024;
 
         self.pending.len() >= MAX_PENDING_PACKETS
             || self.pending_bytes >= MAX_PENDING_BYTES
-            || !self.pads.iter_mut().any(SrcPad::ready_consume)
+            || !self
+                .pads
+                .iter_mut()
+                .any(|pad| pad.is_linked() && pad.ready_consume())
     }
 }
 
@@ -590,6 +691,9 @@ impl SourceElement for FileDemuxer {
                 break;
             };
             self.stamp_lap(index, time_base, &mut packet);
+            if let Some(ns) = packet_ns(&packet, time_base) {
+                self.read_ns = Some(ns);
+            }
             // `deliver_or_park` stamps the stream time base; every packet
             // leaves this source through it, parked or not.
             self.deliver_or_park((index, time_base, packet), bus)?;
@@ -613,6 +717,8 @@ impl SourceElement for FileDemuxer {
                 self.pending.clear();
                 self.pending_bytes = 0;
                 self.parked_per_pad.fill(0);
+                self.parked_since_ns.fill(None);
+                self.read_ns = None;
             }
             // Holding a blocked pad's packets is only correct while a preroll
             // is running; see `deliver_or_park`.
@@ -1320,16 +1426,31 @@ mod tests {
         );
     }
 
-    /// Never has room, but accepts what is pushed — a pad reporting
-    /// backpressure without a `Queue`'s blocking behind it.
-    struct NeverReadyRecorder {
+    /// Has room only while its gate is open, but accepts whatever is pushed —
+    /// a pad reporting backpressure without a `Queue`'s blocking behind it,
+    /// so a test sees what the source would have waited on.
+    struct GatedRecorder {
         seen: Arc<AtomicUsize>,
+        open: Arc<AtomicBool>,
         pp_log: PpLog,
     }
 
-    impl Element for NeverReadyRecorder {
+    impl GatedRecorder {
+        fn link(pad: &mut SrcPad, name: &str, open: bool) -> (Arc<AtomicUsize>, Arc<AtomicBool>) {
+            let seen = Arc::new(AtomicUsize::new(0));
+            let gate = Arc::new(AtomicBool::new(open));
+            pad.link(Box::new(GatedRecorder {
+                seen: Arc::clone(&seen),
+                open: Arc::clone(&gate),
+                pp_log: element_pp_log(ElementType::Other, name, None),
+            }));
+            (seen, gate)
+        }
+    }
+
+    impl Element for GatedRecorder {
         fn name(&self) -> Arc<str> {
-            "never-ready".into()
+            "gated".into()
         }
         fn element_type(&self) -> ElementType {
             ElementType::Other
@@ -1342,9 +1463,9 @@ mod tests {
         }
     }
 
-    impl crate::element::Sink for NeverReadyRecorder {
+    impl crate::element::Sink for GatedRecorder {
         fn ready_consume(&mut self) -> bool {
-            false
+            self.open.load(Ordering::SeqCst)
         }
         fn consume(&mut self, _buf: MediaBuffer) -> crate::error::Result<()> {
             self.seen.fetch_add(1, Ordering::SeqCst);
@@ -1355,39 +1476,30 @@ mod tests {
         }
     }
 
-    /// Holding a blocked pad's packets is a preroll measure, not a playback
-    /// one.
-    ///
-    /// Preroll needs it: a terminal closes after its one sample, and refusing
-    /// to read while that pad is shut would starve the branches still owed
-    /// theirs. Playback must not have it — a blocked pad there is ordinary
-    /// backpressure, and waiting on it is what paces this source to the
-    /// slowest branch. Holding instead let the source run away from playback
-    /// and buffer the file: 67 MB parked within 1.5 s, after which the backlog
-    /// ceiling stopped the read cursor for *every* pad. Attaching an audio
-    /// branch then never received a packet, so it never primed the playback
-    /// clock, and the picture froze.
+    /// A packet for `index` due at `ms`, in milliseconds.
+    fn packet_at(index: usize, ms: i64) -> (usize, ffmpeg::Rational, ffmpeg::Packet) {
+        let mut packet = ffmpeg::Packet::empty();
+        packet.set_pts(Some(ms));
+        packet.set_dts(Some(ms));
+        (index, ffmpeg::Rational::new(1, 1000), packet)
+    }
+
+    /// With nothing else waiting on the read cursor, a blocked pad is
+    /// ordinary backpressure: playback waits on it rather than buffering
+    /// behind it. A preroll holds its packet back regardless, so its
+    /// siblings keep flowing. And once the preroll is over, what it held
+    /// waits for its pad, in order, rather than being pushed into a pad that
+    /// cannot take it — reading stops meanwhile, since nothing else needs it.
     #[test]
-    fn packets_are_only_held_back_while_a_preroll_is_running() {
+    fn a_lone_blocked_pad_is_waited_on_outside_a_preroll() {
         let Some(path) = try_test_video() else { return };
         let (mut demuxer, streams) = FileDemuxer::open("demux", &path).expect("open");
-        let first = streams.first().expect("at least one stream");
-        let (index, time_base) = (first.index, first.time_base);
-        let seen = Arc::new(AtomicUsize::new(0));
-        demuxer.pads[index].link(Box::new(NeverReadyRecorder {
-            seen: Arc::clone(&seen),
-            pp_log: element_pp_log(ElementType::Other, "never-ready", None),
-        }));
-
+        let index = streams.first().expect("at least one stream").index;
+        let (seen, gate) = GatedRecorder::link(&mut demuxer.pads[index], "blocked", false);
         let (bus, _bus_rx) = Bus::new();
-        let packet = || {
-            let mut packet = ffmpeg::Packet::empty();
-            packet.set_pts(Some(0));
-            (index, time_base, packet)
-        };
 
         demuxer
-            .deliver_or_park(packet(), &bus)
+            .deliver_or_park(packet_at(index, 0), &bus)
             .expect("playback delivery");
         assert!(
             demuxer.pending.is_empty(),
@@ -1399,22 +1511,98 @@ mod tests {
             crate::control::PrerollContext::new([]),
         )));
         demuxer
-            .deliver_or_park(packet(), &bus)
+            .deliver_or_park(packet_at(index, 40), &bus)
             .expect("preroll delivery");
         assert_eq!(
             demuxer.pending.len(),
             1,
             "preroll must hold a blocked pad's packet so its siblings keep flowing"
         );
-        assert_eq!(seen.load(Ordering::SeqCst), 1);
 
         demuxer.on_control(&crate::control::ControlMsg::Resume);
-        demuxer.drain_pending(&bus).expect("drain after preroll");
-        assert!(
-            demuxer.pending.is_empty(),
-            "the backlog must not outlive the preroll that justified it"
-        );
+        demuxer.drain_pending(&bus).expect("drain while blocked");
+        assert_eq!(demuxer.pending.len(), 1, "still owed to a pad that is full");
+        assert_eq!(seen.load(Ordering::SeqCst), 1, "nothing pushed into it");
+        assert!(demuxer.pending_blocked(), "and reading waits for it");
+
+        gate.store(true, Ordering::SeqCst);
+        demuxer.drain_pending(&bus).expect("drain once it has room");
+        assert!(demuxer.pending.is_empty());
         assert_eq!(seen.load(Ordering::SeqCst), 2);
+        assert!(!demuxer.pending_blocked());
+    }
+
+    /// A file whose picture is muxed ahead of its sound: the video pad's queue
+    /// is full of frames the audio has not reached, and the audio packets
+    /// that would let it reach them lie further on in the file. Waiting on
+    /// the video there stopped this thread before them, and the video waited
+    /// on the audio for good. The video packets are held back instead while
+    /// the audio is taking its own — up to `MAX_INTERLEAVE` of file time,
+    /// past which the video is waited on after all — and go out in order
+    /// once it has room.
+    #[test]
+    fn a_blocked_pad_is_held_back_while_another_branch_waits_on_the_cursor() {
+        let Some(path) = try_test_video() else { return };
+        let (mut demuxer, streams) = FileDemuxer::open("demux", &path).expect("open");
+        let find = |kind| {
+            streams
+                .iter()
+                .find(|stream| stream.kind == kind)
+                .map(|stream| stream.index)
+        };
+        let (Some(video), Some(audio)) = (
+            find(ffmpeg::media::Type::Video),
+            find(ffmpeg::media::Type::Audio),
+        ) else {
+            eprintln!("skipping: the fixture has no audio stream");
+            return;
+        };
+        let (video_seen, video_gate) =
+            GatedRecorder::link(&mut demuxer.pads[video], "video", false);
+        let (audio_seen, _) = GatedRecorder::link(&mut demuxer.pads[audio], "audio", true);
+        let (bus, _bus_rx) = Bus::new();
+        let read = |demuxer: &mut FileDemuxer, index: usize, ms: i64| {
+            demuxer.read_ns = Some(ms * 1_000_000);
+            demuxer
+                .deliver_or_park(packet_at(index, ms), &bus)
+                .expect("delivery");
+        };
+
+        // The picture a second ahead: video at 1 s, then audio from 0 on.
+        read(&mut demuxer, video, 1_000);
+        for ms in (0..=4_000).step_by(100) {
+            read(&mut demuxer, audio, ms);
+        }
+        assert_eq!(
+            video_seen.load(Ordering::SeqCst),
+            0,
+            "the full pad is not pushed into"
+        );
+        assert_eq!(demuxer.pending.len(), 1, "its packet is held back instead");
+        assert_eq!(
+            audio_seen.load(Ordering::SeqCst),
+            41,
+            "while the sound keeps flowing"
+        );
+        assert!(
+            !demuxer.pending_blocked(),
+            "within the interleave bound, reading goes on"
+        );
+
+        // More picture than any file interleaves: past the bound, the video
+        // is waited on rather than held back without end.
+        read(&mut demuxer, video, 1_040);
+        demuxer.read_ns = Some(7_000 * 1_000_000);
+        assert!(
+            demuxer.pending_blocked(),
+            "past the bound, reading waits for it"
+        );
+
+        video_gate.store(true, Ordering::SeqCst);
+        demuxer.drain_pending(&bus).expect("drain once it has room");
+        assert!(demuxer.pending.is_empty());
+        assert_eq!(video_seen.load(Ordering::SeqCst), 2, "both, in order");
+        assert!(!demuxer.pending_blocked());
     }
 
     /// Writes a Matroska file whose first stream is one still picture and
