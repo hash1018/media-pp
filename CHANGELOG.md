@@ -792,6 +792,18 @@ compile error with no explanation.
 
 ### Fixed
 
+- **`D3d11SharedTextureSource` says what a producer really owes it.** Its
+  docs said a flush was enough before a push; it is not. A flush submits
+  the producer's drawing without waiting for it, and this element copies on
+  its own device's queue, which cannot wait on another device's — so under
+  a loaded GPU a flushed picture was copied before it existed, as an empty
+  frame, in about one push in forty. A producer either guards the texture
+  with a keyed mutex released with key 0, which this element already takes
+  around its copy, or waits for its drawing to complete before pushing.
+  Nothing in the element changed; its own test had the same mistake and
+  failed intermittently for it, and now waits, and the keyed-mutex path
+  has a test of its own.
+
 - **A 10-bit stream that did not say so no longer leaks P010.** A stream
   described only by its session has no layout in its parameters, so
   `VideoDecodeBin` sent it to the hardware as if it were 8-bit, and a 10-bit

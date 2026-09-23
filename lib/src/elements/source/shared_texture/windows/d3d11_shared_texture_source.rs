@@ -257,13 +257,24 @@ impl D3d11SharedTextureHandle {
     /// producer holding one hands over. It is opened, copied from, and done
     /// with before this returns; nothing keeps it afterwards.
     ///
-    /// What the producer owes in return is a flush: drawing it has queued
-    /// but not submitted is not guaranteed to be in the texture when
-    /// another device opens it. A producer that hands pictures over through
-    /// a callback — a browser engine's accelerated paint — has already
-    /// flushed by the time it calls; one that draws and pushes itself has
-    /// to. Nothing here can check it, so a missing flush shows up as a
-    /// stale or empty picture rather than an error.
+    /// What the producer owes in return is a picture that is *finished*, not
+    /// merely submitted. This element copies on its own device's queue and
+    /// cannot wait on another device's, so there are two ways to owe it:
+    ///
+    /// - Guard the texture with a keyed mutex and release it with key 0
+    ///   once drawn. This element takes key 0 around its copy, which waits
+    ///   for the drawing on the producer's behalf — the robust way.
+    /// - Without one, wait for the drawing to complete before pushing — an
+    ///   event query or a fence on the producer's own context. A flush is
+    ///   not enough: it submits the drawing without waiting for it, and
+    ///   under a loaded GPU a flushed picture was copied before it existed
+    ///   in about one push in forty.
+    ///
+    /// A producer that hands pictures over through a callback — a browser
+    /// engine's accelerated paint — owes this through that callback's own
+    /// contract, which is what makes the picture ready to read when it is
+    /// called. Nothing here can check any of it, so an unfinished picture
+    /// shows up as a stale or empty one rather than as an error.
     ///
     /// Blocks while the source's queue is full, as
     /// [`AppSourceHandle::push`] does. See this type's own docs on where
@@ -471,15 +482,51 @@ mod tests {
 
     use windows::Win32::Graphics::{
         Direct3D11::{
-            D3D11_RESOURCE_MISC_SHARED, D3D11_RESOURCE_MISC_SHARED_NTHANDLE, D3D11_SUBRESOURCE_DATA,
+            D3D11_BIND_RENDER_TARGET, D3D11_QUERY_DESC, D3D11_QUERY_EVENT,
+            D3D11_RESOURCE_MISC_SHARED, D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX,
+            D3D11_RESOURCE_MISC_SHARED_NTHANDLE,
         },
         Dxgi::{DXGI_SHARED_RESOURCE_READ, IDXGIResource1},
     };
+    use windows::core::BOOL;
 
     use super::*;
     use crate::{
         element::Sink, elements::D3d11Download, pipeline::Pipeline, test_support::try_d3d11_device,
     };
+
+    /// Submits everything queued on `context` and waits until the GPU has
+    /// done it — what an event query answers, and what a flush does not.
+    fn finish_gpu_work(device: &ID3D11Device, context: &Arc<Mutex<ID3D11DeviceContext>>) {
+        let description = D3D11_QUERY_DESC {
+            Query: D3D11_QUERY_EVENT,
+            MiscFlags: 0,
+        };
+        let mut query = None;
+        // SAFETY: `description` names an event query and `query` is a live
+        // out-parameter.
+        unsafe { device.CreateQuery(&description, Some(&mut query)) }
+            .expect("CreateQuery(EVENT) failed");
+        let query = query.expect("CreateQuery succeeded without producing a query");
+        let context = context.lock().unwrap();
+        // SAFETY: the query and the context belong to `device`, and the
+        // context is held exclusively here. An event query's data is one
+        // `BOOL`, written only once everything before `End` has completed.
+        unsafe {
+            context.End(&query);
+            context.Flush();
+            let mut done = BOOL(0);
+            while !done.as_bool() {
+                let _ = context.GetData(
+                    &query,
+                    Some((&mut done as *mut BOOL).cast()),
+                    std::mem::size_of::<BOOL>() as u32,
+                    0,
+                );
+                std::thread::yield_now();
+            }
+        }
+    }
 
     /// A texture as another device would hand it over: shared through an NT
     /// handle, every texel `color`. Both it and its handle stay open for
@@ -491,7 +538,6 @@ mod tests {
         height: u32,
         color: [u8; 4],
     ) -> (ID3D11Texture2D, isize) {
-        let pixels = color.repeat((width * height) as usize);
         let description = D3D11_TEXTURE2D_DESC {
             Width: width,
             Height: height,
@@ -503,26 +549,42 @@ mod tests {
                 Quality: 0,
             },
             Usage: D3D11_USAGE_DEFAULT,
-            BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
+            BindFlags: (D3D11_BIND_SHADER_RESOURCE.0 | D3D11_BIND_RENDER_TARGET.0) as u32,
             CPUAccessFlags: 0,
             MiscFlags: (D3D11_RESOURCE_MISC_SHARED_NTHANDLE.0 | D3D11_RESOURCE_MISC_SHARED.0)
                 as u32,
         };
-        let initial = D3D11_SUBRESOURCE_DATA {
-            pSysMem: pixels.as_ptr().cast::<c_void>(),
-            SysMemPitch: width * 4,
-            SysMemSlicePitch: 0,
-        };
         let mut texture = None;
-        // SAFETY: `initial` addresses a live, correctly pitched plane of
-        // exactly the declared dimensions through the call.
-        unsafe { device.CreateTexture2D(&description, Some(&initial), Some(&mut texture)) }
+        // SAFETY: `description` is a valid shared render target and `texture`
+        // a live out-parameter.
+        unsafe { device.CreateTexture2D(&description, None, Some(&mut texture)) }
             .expect("CreateTexture2D(shared BGRA) failed");
         let texture = texture.expect("CreateTexture2D succeeded without producing a texture");
-        // What a producer owes the other device: nothing it has not flushed is
-        // guaranteed to be there when the other one opens the handle.
-        // SAFETY: the context belongs to `device` and is held exclusively here.
-        unsafe { context.lock().unwrap().Flush() };
+        // Drawn, not created with initial data: a producer paints on its own
+        // context, which is what the wait below covers. Initial data is
+        // uploaded however the driver likes, and an event query on the
+        // context does not wait for that — `[0, 0, 0, 0]` still came back
+        // under a loaded GPU with the wait in place.
+        let mut target = None;
+        // SAFETY: `texture` is a render target of this device and `target` a
+        // live out-parameter.
+        unsafe { device.CreateRenderTargetView(&texture, None, Some(&mut target)) }
+            .expect("CreateRenderTargetView failed");
+        let target = target.expect("CreateRenderTargetView succeeded without producing a view");
+        let [b, g, r, a] = color.map(|channel| f32::from(channel) / 255.0);
+        // SAFETY: the view belongs to this device and the context is held
+        // exclusively for the call.
+        unsafe {
+            context
+                .lock()
+                .unwrap()
+                .ClearRenderTargetView(&target, &[r, g, b, a])
+        };
+        // What a producer with no keyed mutex owes the other device: its
+        // drawing *finished*, not just submitted. A flush alone let the
+        // import copy a texture still being drawn — `[0, 0, 0, 0]` read back
+        // in about one import in forty under a loaded GPU — see `push`.
+        finish_gpu_work(device, context);
         let resource: IDXGIResource1 = texture.cast().expect("a D3D11 texture is a DXGI resource");
         // SAFETY: the texture was created with the NT-handle share flags the
         // call requires; the returned handle is owned by this test.
@@ -530,6 +592,90 @@ mod tests {
             unsafe { resource.CreateSharedHandle(None, DXGI_SHARED_RESOURCE_READ.0, None) }
                 .expect("CreateSharedHandle failed");
         (texture, handle.0 as isize)
+    }
+
+    /// The synchronized way to hand a texture over: a keyed mutex the
+    /// producer releases with key 0 once it has drawn, which this element
+    /// takes around its copy — so nothing about the producer's queue has to
+    /// be waited for by hand, as [`finish_gpu_work`] has to for one without.
+    #[test]
+    fn a_keyed_mutex_producer_is_read_once_it_has_released() {
+        let Some((producer, producer_context)) = try_d3d11_device() else {
+            return;
+        };
+        let Some((device, context)) = try_d3d11_device() else {
+            return;
+        };
+        let (_source, handle) =
+            D3d11SharedTextureSource::new("shared", &device, context.clone(), 8, 8, 4)
+                .expect("D3d11SharedTextureSource::new should succeed");
+
+        let description = D3D11_TEXTURE2D_DESC {
+            Width: 8,
+            Height: 8,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: SHARED_FORMAT,
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Usage: D3D11_USAGE_DEFAULT,
+            BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
+            CPUAccessFlags: 0,
+            MiscFlags: (D3D11_RESOURCE_MISC_SHARED_NTHANDLE.0
+                | D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX.0) as u32,
+        };
+        let mut texture = None;
+        // SAFETY: `description` is a valid shared keyed-mutex texture and
+        // `texture` a live out-parameter; no initial data is supplied.
+        unsafe { producer.CreateTexture2D(&description, None, Some(&mut texture)) }
+            .expect("CreateTexture2D(keyed mutex) failed");
+        let texture = texture.expect("CreateTexture2D succeeded without producing a texture");
+        let keyed: IDXGIKeyedMutex = texture.cast().expect("the texture has a keyed mutex");
+        let pixels = [40u8, 180, 60, 255].repeat(64);
+        // SAFETY: the producer holds the mutex for exactly its own write, as
+        // the protocol has it; `pixels` is a live, correctly pitched 8x8
+        // plane through the call, and the context is held exclusively.
+        unsafe {
+            keyed
+                .AcquireSync(0, 1_000)
+                .expect("AcquireSync(0) on the producer");
+            producer_context.lock().unwrap().UpdateSubresource(
+                &texture,
+                0,
+                None,
+                pixels.as_ptr().cast::<c_void>(),
+                8 * 4,
+                0,
+            );
+            keyed
+                .ReleaseSync(0)
+                .expect("ReleaseSync(0) on the producer");
+        }
+        let resource: IDXGIResource1 = texture.cast().expect("a D3D11 texture is a DXGI resource");
+        // SAFETY: created with the NT-handle share flag; owned by this test.
+        let shared =
+            unsafe { resource.CreateSharedHandle(None, DXGI_SHARED_RESOURCE_READ.0, None) }
+                .expect("CreateSharedHandle failed");
+
+        let frame = handle
+            .import
+            .copy(shared.0 as isize, None)
+            .expect("importing a released keyed-mutex texture must succeed");
+        let mut download = D3d11Download::new("download", &device, context)
+            .expect("D3d11Download::new should succeed");
+        let received = capture(&mut download);
+        download.consume(frame).expect("download");
+        let received = received.lock().unwrap();
+        let MediaBuffer::Video(downloaded) = &received[0] else {
+            panic!("expected a Video buffer, got {}", received[0].kind());
+        };
+        assert_eq!(
+            &downloaded.data(0)[0..4],
+            [40, 180, 60, 255],
+            "what the producer released is what was copied"
+        );
     }
 
     /// The point of the element: what one device wrote is what a frame on
