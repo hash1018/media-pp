@@ -24,7 +24,7 @@ use crate::{
 /// Errors specific to `FileDemuxer`. Converts into the crate-wide `Error`
 /// via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
-pub enum FileDemuxError {
+pub enum FileDemuxerError {
     /// FFmpeg rejected opening, reading, or seeking the input container.
     #[error("ffmpeg error: {0}")]
     Ffmpeg(#[from] ffmpeg::Error),
@@ -217,7 +217,7 @@ impl FileDemuxer {
     pub fn open(
         name: impl Into<String>,
         path: impl AsRef<Path>,
-    ) -> Result<(Self, Vec<StreamInfo>), FileDemuxError> {
+    ) -> Result<(Self, Vec<StreamInfo>), FileDemuxerError> {
         crate::ensure_ffmpeg();
         let input = ffmpeg::format::input(&path)?;
 
@@ -280,7 +280,7 @@ impl FileDemuxer {
     }
 
     /// The stream of `kind` FFmpeg judges the one to play, as everything a
-    /// branch for it is built from — or a [`FileDemuxError::NoStream`] naming
+    /// branch for it is built from — or a [`FileDemuxerError::NoStream`] naming
     /// the kind the file lacks, so finding the video to play is one `?`:
     ///
     /// ```ignore
@@ -294,12 +294,12 @@ impl FileDemuxer {
     /// moving picture, and taking the first video stream plays the still.
     /// FFmpeg's own choice (`av_find_best_stream`) passes over a stream marked
     /// as an attached picture and prefers one with more than a single frame.
-    pub fn best(&self, kind: ffmpeg::media::Type) -> Result<StreamInfo, FileDemuxError> {
+    pub fn best(&self, kind: ffmpeg::media::Type) -> Result<StreamInfo, FileDemuxerError> {
         self.input
             .streams()
             .best(kind)
             .map(|stream| StreamInfo::of(&stream))
-            .ok_or(FileDemuxError::NoStream(kind))
+            .ok_or(FileDemuxerError::NoStream(kind))
     }
 
     #[cfg(test)]
@@ -1486,7 +1486,7 @@ mod tests {
             .expect_err("the file has no audio");
         assert!(matches!(
             missing,
-            FileDemuxError::NoStream(ffmpeg::media::Type::Audio)
+            FileDemuxerError::NoStream(ffmpeg::media::Type::Audio)
         ));
         assert_eq!(missing.to_string(), "the file has no Audio stream");
     }

@@ -52,8 +52,8 @@ pub struct MuxerTrack {
 /// unchanged. [`TrackFormat::new`] is for a stream described by hand.
 #[derive(Clone)]
 pub struct TrackFormat {
-    pub(super) parameters: ffmpeg::codec::Parameters,
-    pub(super) time_base: ffmpeg::Rational,
+    pub(crate) parameters: ffmpeg::codec::Parameters,
+    pub(crate) time_base: ffmpeg::Rational,
 }
 
 impl TrackFormat {

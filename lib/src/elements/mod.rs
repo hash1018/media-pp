@@ -134,7 +134,7 @@ pub use sink::{PipeWireAudioRenderer, PipeWireAudioRendererError, PipeWireAudioR
 pub use sink::{WasapiRenderer, WasapiRendererError, WasapiRendererOptions};
 pub use source::{
     AppSource, AppSourceError, AppSourceHandle, AudioMixer, AudioMixerError, AudioMixerOptions,
-    FileDemuxError, FileDemuxer, FileDemuxerHandle, MixFormat, MixerHandle, MixerInputSink,
+    FileDemuxer, FileDemuxerError, FileDemuxerHandle, MixFormat, MixerHandle, MixerInputSink,
     PipelineBridge, PipelineBridgeError, PipelineBridgeHandle, PipelineBridgeOptions, RtspOptions,
     RtspSource, RtspSourceError, StreamInfo, SwVideoCompositor, SwVideoCompositorError,
     SwVideoCompositorHandle, SwVideoCompositorInput, SwVideoCompositorInputSink,

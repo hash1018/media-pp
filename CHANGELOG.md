@@ -12,6 +12,11 @@ compile error with no explanation.
 
 ### Breaking
 
+- **`FileDemuxError` is `FileDemuxerError`.** Every other element's error
+  is named after the element — `FileMuxerError`, `SwDecoderError` — and a
+  search for `FileDemuxerError` found nothing. The crate `Error` variant is
+  renamed with it.
+
 - **Screen captures take a `frame_rate`, not `fps`.** `DxgiCaptureOptions`,
   `WgcCaptureOptions` and `PipeWireScreenCaptureOptions` took `fps: u32`,
   while their own runtime `FrameRateHandle::set`, every encoder, the
@@ -507,6 +512,11 @@ compile error with no explanation.
   writes its packets at the right times.
 
 ### Added
+
+- **`WebRtcStreamInfo::track_format`.** A received WebRTC track records
+  with `muxer.add_stream(name, info.track_format()?)`, instead of
+  assembling `TrackFormat::new(info.codec_parameters()?, info.time_base()?)`
+  by hand.
 
 - **`MediaBuffer::video` wraps a hand-made frame.** A `Video` buffer carries
   a pooled frame, so a frame made by hand — a still picture, a caption, a

@@ -81,7 +81,7 @@ pub use compositor::{
     SwVideoCompositorInputSink, SwVideoLayerHandle, TextLayer, VideoCompositorOptions, VideoFit,
     VideoInputId, VideoLayer, VideoRect, VideoSourceRect,
 };
-pub use file_demuxer::{FileDemuxError, FileDemuxer, FileDemuxerHandle, StreamInfo};
+pub use file_demuxer::{FileDemuxer, FileDemuxerError, FileDemuxerHandle, StreamInfo};
 pub use pipeline_bridge::{
     PipelineBridge, PipelineBridgeError, PipelineBridgeHandle, PipelineBridgeOptions,
 };

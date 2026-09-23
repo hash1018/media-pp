@@ -77,7 +77,7 @@ use crate::{
     control::{PrerollError, SeekError},
     elements::{
         AppSourceError, AudioCompressorError, AudioGateError, AudioLimiterError, AudioMixerError,
-        AudioResamplerError, AudioVolumeError, FileDemuxError, FileMuxerError,
+        AudioResamplerError, AudioVolumeError, FileDemuxerError, FileMuxerError,
         FrameRateLimiterError, HlsMuxerError, MuxerTrackError, PacerError, RackError,
         ReplayBufferError, RtmpMuxerError, RtspSourceError, SubmitError, SwAudioEncoderError,
         SwChromaKeyError, SwDecoderError, SwEncoderError, SwScalerError, SwVideoCompositorError,
@@ -156,7 +156,7 @@ pub enum D3d11SharedDeviceError {
 }
 
 /// Crate-wide error. Each element defines its own `{Element}Error` (see
-/// [`FileDemuxError`], [`SwDecoderError`], [`QueueError`]) for its own
+/// [`FileDemuxerError`], [`SwDecoderError`], [`QueueError`]) for its own
 /// domain-specific failures; this enum just aggregates them so trait
 /// methods (`Sink::consume`, `SourceElement::run`, ...) — which have to
 /// return one common error type to stay object-safe across arbitrary
@@ -203,7 +203,7 @@ pub enum Error {
 
     /// A file demuxer operation failed.
     #[error(transparent)]
-    FileDemuxError(#[from] FileDemuxError),
+    FileDemuxerError(#[from] FileDemuxerError),
 
     /// An application source channel is closed.
     #[error(transparent)]

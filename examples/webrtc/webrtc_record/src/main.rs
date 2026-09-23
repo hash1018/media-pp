@@ -39,8 +39,8 @@ mod example {
         driver::DriverRunner,
         elements::{
             AudioCodec, FileDemuxer, FileMuxer, Pacer, SwAudioEncoder, SwAudioEncoderOptions,
-            SwDecoder, SwEncoder, SwEncoderOptions, SwScaler, TrackEndpoints, TrackFormat,
-            VideoCodec, WebRtcHandle, WebRtcPeer, WebRtcTrackSink, WebRtcTrackSource,
+            SwDecoder, SwEncoder, SwEncoderOptions, SwScaler, TrackEndpoints, VideoCodec,
+            WebRtcHandle, WebRtcPeer, WebRtcTrackSink, WebRtcTrackSource,
         },
         pipeline::{Pipeline, PipelineBuilder},
     };
@@ -257,14 +257,8 @@ mod example {
         audio_info: media_pp::elements::WebRtcStreamInfo,
     ) -> media_pp::Result<Arc<Pipeline>> {
         let mut muxer = FileMuxer::create(output)?;
-        let video_track = muxer.add_stream(
-            "received-video",
-            TrackFormat::new(video_info.codec_parameters()?, video_info.time_base()?),
-        )?;
-        let audio_track = muxer.add_stream(
-            "received-audio",
-            TrackFormat::new(audio_info.codec_parameters()?, audio_info.time_base()?),
-        )?;
+        let video_track = muxer.add_stream("received-video", video_info.track_format()?)?;
+        let audio_track = muxer.add_stream("received-audio", audio_info.track_format()?)?;
         let mut sinks = muxer.open()?;
         let video_sink = sinks.take(video_track)?;
         let audio_sink = sinks.take(audio_track)?;

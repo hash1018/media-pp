@@ -90,6 +90,16 @@ impl WebRtcStreamInfo {
         Ok(parameters)
     }
 
+    /// What a muxer's `add_stream` is to be told to record this stream: its
+    /// [`Self::codec_parameters`], timed in its [`Self::time_base`]. Fails
+    /// where either of those would.
+    pub fn track_format(&self) -> Result<crate::elements::TrackFormat> {
+        Ok(crate::elements::TrackFormat::new(
+            self.codec_parameters()?,
+            self.time_base()?,
+        ))
+    }
+
     fn codec_parameters_ready(&self) -> bool {
         match self.codec_spec.codec {
             Codec::H264 => self.h264.is_some(),
@@ -614,6 +624,28 @@ mod tests {
 
         assert_eq!(parameters.id(), ffmpeg::codec::Id::VP8);
         assert_eq!(info.time_base().unwrap(), ffmpeg::Rational::new(1, 90_000));
+    }
+
+    /// A received track records as what it is: its own parameters, timed in
+    /// its own RTP clock — here Opus at 48 kHz, not some default.
+    #[test]
+    fn a_track_format_is_the_streams_own_parameters_and_clock() {
+        let info = WebRtcStreamInfo::from(spec(Codec::Opus, Frequency::FORTY_EIGHT_KHZ, Some(2)));
+        let format = info.track_format().expect("Opus track format");
+        assert_eq!(format.parameters.id(), ffmpeg::codec::Id::OPUS);
+        assert_eq!(format.time_base, info.time_base().unwrap());
+        assert_eq!(format.time_base, ffmpeg::Rational::new(1, 48_000));
+    }
+
+    /// And fails the way its parameters would, rather than recording a
+    /// track described by nothing.
+    #[test]
+    fn a_stream_without_codec_parameters_has_no_track_format() {
+        let info = WebRtcStreamInfo::from(spec(Codec::Rtx, Frequency::NINETY_KHZ, None));
+        assert!(matches!(
+            info.track_format().expect_err("RTX track-format rejection"),
+            crate::Error::WebRtcError(WebRtcError::UnsupportedCodecParameters(Codec::Rtx))
+        ));
     }
 
     #[test]
