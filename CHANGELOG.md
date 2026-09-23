@@ -12,6 +12,15 @@ compile error with no explanation.
 
 ### Breaking
 
+- **`framerate` is `frame_rate` everywhere.** `TestVideoOptions::framerate`,
+  `MfCaptureFormat::framerate`, `V4l2CaptureFormat::framerate` and the
+  `framerate` field of `MfCaptureSourceError::FormatNotOffered` are renamed to
+  `frame_rate`, the name the encoder and compositor options already used —
+  so a test source's rate is handed to an encoder as `frame_rate:
+  options.frame_rate` rather than across two spellings. The screen
+  captures' `fps: u32` stays as it is: it is a cap in whole frames, not a
+  rate.
+
 - **`Pipeline::new` hands back what its wiring returns.** It returns
   `(Arc<Pipeline>, T)`, where `T` is whatever the `wire` closure returned —
   so something only the wiring can make, a `TeeHandle` from

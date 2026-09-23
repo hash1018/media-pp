@@ -78,7 +78,7 @@ pub struct MfCaptureFormat {
     pub height: u32,
     /// Frames per second, as the camera states it. `30000/1001` is a real
     /// answer and is not the same mode as `30/1`.
-    pub framerate: ffmpeg::Rational,
+    pub frame_rate: ffmpeg::Rational,
 }
 
 /// Reads a `CoTaskMemAlloc`-ed string attribute, freeing it either way.
@@ -233,7 +233,7 @@ pub(crate) fn list_formats(
         let format = MfCaptureFormat {
             width,
             height,
-            framerate,
+            frame_rate: framerate,
         };
         if !formats.contains(&format) {
             formats.push(format);

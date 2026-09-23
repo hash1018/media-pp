@@ -157,7 +157,7 @@ pub struct SwEncoderOptions {
     /// writes into the bitstream — *not* required to match the real
     /// interval between `send_frame` calls. For a source with its own
     /// genuinely fixed rate (e.g. [`crate::elements::TestVideoSource`]),
-    /// that's `TestVideoOptions::framerate` itself. For an irregular/VFR
+    /// that's `TestVideoOptions::frame_rate` itself. For an irregular/VFR
     /// source (e.g. `DxgiCaptureSource`, whose frames
     /// arrive only on real desktop changes, capped but not paced to a
     /// fixed cadence), use its configured cap

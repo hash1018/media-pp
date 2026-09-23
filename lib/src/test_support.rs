@@ -487,7 +487,7 @@ fn build_fixture(
         TestVideoOptions {
             width: FIXTURE_WIDTH,
             height: FIXTURE_HEIGHT,
-            framerate: ffmpeg::Rational::new(FIXTURE_FPS, 1),
+            frame_rate: ffmpeg::Rational::new(FIXTURE_FPS, 1),
         },
     );
     let audio = TestAudioSource::new(

@@ -157,7 +157,7 @@ fn four_d3d11_elements_share_one_device_across_queue_boundaries() {
         TestVideoOptions {
             width: WIDTH,
             height: HEIGHT,
-            framerate: ffmpeg_next::Rational::new(60, 1),
+            frame_rate: ffmpeg_next::Rational::new(60, 1),
         },
     );
     let (pipeline, ()) = Pipeline::new("d3d11-shared-device", source, |source, ctx| {

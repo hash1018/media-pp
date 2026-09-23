@@ -41,7 +41,14 @@ impl VulkanGpuContext {
     /// `display` comes from the windowing library (winit's
     /// `HasDisplayHandle`), and only decides which surface extension is
     /// enabled — Wayland or X11.
-    pub fn new(display: RawDisplayHandle) -> Result<Self, String> {
+    ///
+    /// Fails as a `media_pp::Error`, like everything else an example calls,
+    /// so it passes through `?` with the rest.
+    pub fn new(display: RawDisplayHandle) -> media_pp::Result<Self> {
+        Self::create(display).map_err(media_pp::Error::Other)
+    }
+
+    fn create(display: RawDisplayHandle) -> Result<Self, String> {
         let (cuda_device, cuda_ctx, cuda_uuid) = init_cuda()?;
 
         let entry = unsafe { ash::Entry::load() }

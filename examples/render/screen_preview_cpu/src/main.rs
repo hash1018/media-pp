@@ -91,7 +91,7 @@ mod windows_example {
         };
         let (source, _format, _device) = DxgiCaptureSource::open("screen", capture_options)?;
 
-        let gpu = D3d12GpuContext::new().map_err(|e| media_pp::Error::Other(format!("{e:?}")))?;
+        let gpu = D3d12GpuContext::new()?;
 
         let (pipeline, ()) = Pipeline::new("screen-preview-cpu", source, |source, ctx| {
             // Converts the captured `Pixel::BGRA` desktop frames down to the
@@ -214,7 +214,7 @@ mod linux_example {
         )?;
 
         let cuda = CudaDevice::new()?;
-        let gpu = VulkanGpuContext::new(target.display).map_err(media_pp::Error::Other)?;
+        let gpu = VulkanGpuContext::new(target.display)?;
 
         let (pipeline, ()) = Pipeline::new("screen-preview-cpu", source, |source, ctx| {
             let scaler = SwScaler::new(

@@ -162,7 +162,7 @@ mod example {
         let video_options = TestVideoOptions {
             width: 320,
             height: 240,
-            framerate: ffmpeg::Rational::new(15, 1),
+            frame_rate: ffmpeg::Rational::new(15, 1),
         };
         let video_source = TestVideoSource::new("video", video_options);
         let video_encoder = SwEncoder::new(
@@ -171,7 +171,7 @@ mod example {
                 codec: VideoCodec::OpenH264,
                 width: video_options.width,
                 height: video_options.height,
-                frame_rate: video_options.framerate,
+                frame_rate: video_options.frame_rate,
                 bit_rate: 500_000,
                 gop_size: 30, // ~2s @ 15fps
                 max_b_frames: None,

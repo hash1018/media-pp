@@ -75,8 +75,7 @@ mod windows_example {
         };
         let (source, format, device) = DxgiCaptureSource::open("screen", capture_options)?;
         let device = device.expect("CaptureMode::Gpu always returns a device");
-        let gpu = D3d11GpuContext::new(Some(device))
-            .map_err(|e| media_pp::Error::Other(format!("{e:?}")))?;
+        let gpu = D3d11GpuContext::new(Some(device))?;
 
         let encoder = D3d11VideoEncoder::new(
             "encoder",

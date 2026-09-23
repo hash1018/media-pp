@@ -49,7 +49,7 @@ pub struct V4l2CaptureFormat {
     /// Frames per second, as the fraction the device reports rather than a
     /// rounded number: 30000/1001 is not 30, and a camera that offers both
     /// has two modes rather than one.
-    pub framerate: ffmpeg::Rational,
+    pub frame_rate: ffmpeg::Rational,
 }
 
 /// Everything that answers to a video capture node, in node order.
@@ -97,7 +97,7 @@ pub fn format_name_for(
     device: &str,
     width: u32,
     height: u32,
-    framerate: ffmpeg::Rational,
+    frame_rate: ffmpeg::Rational,
 ) -> Option<&'static str> {
     let file = std::fs::File::open(device).ok()?;
     let mut compressed = None;
@@ -108,7 +108,7 @@ pub fn format_name_for(
                 .any(|(offered_width, offered_height)| {
                     offered_width == width && offered_height == height
                 })
-                && frame_rates(&file, pixel_format, width, height).contains(&framerate);
+                && frame_rates(&file, pixel_format, width, height).contains(&frame_rate);
         if !offered {
             continue;
         }
@@ -163,7 +163,7 @@ pub fn list_formats(device: &str) -> std::io::Result<Vec<V4l2CaptureFormat>> {
                 let mode = V4l2CaptureFormat {
                     width,
                     height,
-                    framerate,
+                    frame_rate: framerate,
                 };
                 // Two pixel formats commonly offer the same shape — a raw one
                 // and a compressed one — and which of them carries it is the
@@ -177,7 +177,7 @@ pub fn list_formats(device: &str) -> std::io::Result<Vec<V4l2CaptureFormat>> {
     formats.sort_by(|left, right| {
         let area = |mode: &V4l2CaptureFormat| u64::from(mode.width) * u64::from(mode.height);
         let fps = |mode: &V4l2CaptureFormat| {
-            f64::from(mode.framerate.numerator()) / f64::from(mode.framerate.denominator().max(1))
+            f64::from(mode.frame_rate.numerator()) / f64::from(mode.frame_rate.denominator().max(1))
         };
         area(right)
             .cmp(&area(left))
@@ -428,7 +428,7 @@ mod tests {
         };
         for mode in list_formats(&first.id).expect("a camera that is there") {
             assert!(mode.width > 0 && mode.height > 0, "{mode:?}");
-            assert!(mode.framerate.numerator() > 0, "{mode:?}");
+            assert!(mode.frame_rate.numerator() > 0, "{mode:?}");
         }
     }
 }

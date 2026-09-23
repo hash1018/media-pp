@@ -43,7 +43,7 @@ pub struct TestVideoOptions {
     /// [`TestVideoSource::time_base`] turns out not to be needed purely
     /// for smooth `D3d12Renderer` output (confirmed in
     /// `examples/render/test_video`).
-    pub framerate: ffmpeg::Rational,
+    pub frame_rate: ffmpeg::Rational,
 }
 
 impl Default for TestVideoOptions {
@@ -51,7 +51,7 @@ impl Default for TestVideoOptions {
         Self {
             width: 640,
             height: 480,
-            framerate: ffmpeg::Rational::new(30, 1),
+            frame_rate: ffmpeg::Rational::new(30, 1),
         }
     }
 }
@@ -66,14 +66,14 @@ impl Default for TestVideoOptions {
 /// CPU-upload path, so this can feed a renderer directly, no decoder
 /// needed.
 ///
-/// Self-paces to `options.framerate` on a drift-free absolute schedule
+/// Self-paces to `options.frame_rate` on a drift-free absolute schedule
 /// (`next_due += frame_interval` each tick in `run`, not "sleep
 /// `frame_interval` since the last push" — the latter accumulates drift,
 /// since generation itself always takes some nonzero time) — unlike
 /// `FileDemuxer`/`RtspSource` (which push as fast as they can and leave
 /// real-time pacing entirely to a downstream `Pacer`), this element's
 /// "real time" isn't defined by anything external; it's whatever
-/// `framerate` says it should be, so there's no reason not to generate at
+/// `frame_rate` says it should be, so there's no reason not to generate at
 /// exactly that rate itself.
 ///
 /// Confirmed (`examples/render/test_video`, with and without a
@@ -101,9 +101,9 @@ pub struct TestVideoSource {
     options: TestVideoOptions,
     pad: SrcPad,
     frame_index: i64,
-    /// `1 / options.framerate`, precomputed once — how long to wait
+    /// `1 / options.frame_rate`, precomputed once — how long to wait
     /// between generated frames. `Duration::ZERO` (never sleeps, same as
-    /// this element's old unpaced behavior) if `framerate`'s numerator is
+    /// this element's old unpaced behavior) if `frame_rate`'s numerator is
     /// `0`, which would otherwise make this an infinite/undefined
     /// duration.
     frame_interval: Duration,
@@ -128,10 +128,10 @@ impl TestVideoSource {
         );
         pp_info!(
             pp_log: &pp_log,
-            "created: {}x{}, framerate={}",
+            "created: {}x{}, frame_rate={}",
             options.width,
             options.height,
-            options.framerate
+            options.frame_rate
         );
         let (width, height) = (options.width, options.height);
         let pool = UnboundObjectPool::new(
@@ -140,9 +140,9 @@ impl TestVideoSource {
             |_| {},
         );
         // See `frame_interval`'s own docs on the `numerator() > 0` guard.
-        let frame_interval = if options.framerate.numerator() > 0 {
+        let frame_interval = if options.frame_rate.numerator() > 0 {
             Duration::from_secs_f64(
-                options.framerate.denominator() as f64 / options.framerate.numerator() as f64,
+                options.frame_rate.denominator() as f64 / options.frame_rate.numerator() as f64,
             )
         } else {
             Duration::ZERO
@@ -162,8 +162,8 @@ impl TestVideoSource {
     /// need to construct a matching [`crate::elements::Pacer`].
     pub fn time_base(&self) -> ffmpeg::Rational {
         ffmpeg::Rational::new(
-            self.options.framerate.denominator(),
-            self.options.framerate.numerator(),
+            self.options.frame_rate.denominator(),
+            self.options.frame_rate.numerator(),
         )
     }
 
@@ -338,7 +338,7 @@ mod tests {
             TestVideoOptions {
                 width: 16,
                 height: 16,
-                framerate: ffmpeg::Rational::new(30, 1),
+                frame_rate: ffmpeg::Rational::new(30, 1),
             },
         );
 
@@ -350,7 +350,7 @@ mod tests {
         .expect("test pipeline wiring must succeed");
 
         pipeline.run().unwrap();
-        // Long enough to observe several ticks at the 30fps `framerate`
+        // Long enough to observe several ticks at the 30fps `frame_rate`
         // above (self-paced since `TestVideoSource` now generates at that
         // rate itself — see its own docs), not just one or two.
         thread::sleep(Duration::from_millis(200));
@@ -437,7 +437,7 @@ mod tests {
             TestVideoOptions {
                 width: 16,
                 height: 16,
-                framerate: ffmpeg::Rational::new(50, 1), // 20ms/frame
+                frame_rate: ffmpeg::Rational::new(50, 1), // 20ms/frame
             },
         );
 
@@ -545,7 +545,7 @@ mod tests {
             TestVideoOptions {
                 width: 16,
                 height: 16,
-                framerate: ffmpeg::Rational::new(20, 1), // 50ms/frame
+                frame_rate: ffmpeg::Rational::new(20, 1), // 50ms/frame
             },
         );
 

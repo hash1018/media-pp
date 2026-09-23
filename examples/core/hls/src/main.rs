@@ -43,7 +43,7 @@ mod example {
         let video_options = TestVideoOptions {
             width: 640,
             height: 360,
-            framerate: ffmpeg::Rational::new(30, 1),
+            frame_rate: ffmpeg::Rational::new(30, 1),
         };
         let source = TestVideoSource::new("video", video_options);
         let encoder = SwEncoder::new(
@@ -52,7 +52,7 @@ mod example {
                 codec: VideoCodec::OpenH264,
                 width: video_options.width,
                 height: video_options.height,
-                frame_rate: video_options.framerate,
+                frame_rate: video_options.frame_rate,
                 bit_rate: 1_500_000,
                 // Match the two-second HLS target so each requested boundary
                 // has a keyframe available at 30 fps.

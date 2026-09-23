@@ -48,14 +48,14 @@ pub enum MfCaptureSourceError {
     DeviceNotFound(String),
 
     /// [`MfCaptureOptions::format`] names a mode this camera does not offer.
-    #[error("this camera offers no {width}x{height} mode at {framerate} fps")]
+    #[error("this camera offers no {width}x{height} mode at {frame_rate} fps")]
     FormatNotOffered {
         /// Requested frame width in pixels.
         width: u32,
         /// Requested frame height in pixels.
         height: u32,
         /// Requested frames per second.
-        framerate: ffmpeg::Rational,
+        frame_rate: ffmpeg::Rational,
     },
 
     /// The camera negotiated a frame size NV12 cannot describe. Its chroma
@@ -422,14 +422,14 @@ impl MfCaptureSource {
             else {
                 continue;
             };
-            if width == wanted.width && height == wanted.height && framerate == wanted.framerate {
+            if width == wanted.width && height == wanted.height && framerate == wanted.frame_rate {
                 return Ok(media_type);
             }
         }
         Err(MfCaptureSourceError::FormatNotOffered {
             width: wanted.width,
             height: wanted.height,
-            framerate: wanted.framerate,
+            frame_rate: wanted.frame_rate,
         })
     }
 
@@ -938,7 +938,7 @@ mod tests {
             format: Some(MfCaptureFormat {
                 width: 12,
                 height: 8,
-                framerate: ffmpeg::Rational::new(1, 1),
+                frame_rate: ffmpeg::Rational::new(1, 1),
             }),
         };
         match MfCaptureSource::open("impossible-mode", options) {

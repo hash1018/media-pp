@@ -65,7 +65,7 @@ mod windows_example {
         };
         let source = TestVideoSource::new("test-video", options);
 
-        let gpu = D3d12GpuContext::new().map_err(|e| media_pp::Error::Other(format!("{e:?}")))?;
+        let gpu = D3d12GpuContext::new()?;
 
         let (pipeline, ()) = Pipeline::new("test-video", source, |source, ctx| {
             let renderer =
@@ -146,7 +146,7 @@ mod linux_example {
         };
         let source = TestVideoSource::new("test-video", options);
         let cuda = CudaDevice::new()?;
-        let gpu = VulkanGpuContext::new(target.display).map_err(media_pp::Error::Other)?;
+        let gpu = VulkanGpuContext::new(target.display)?;
 
         let (pipeline, ()) = Pipeline::new("test-video", source, |source, ctx| {
             let scaler = SwScaler::new(

@@ -87,7 +87,16 @@ impl D3d11GpuContext {
     /// whole stack skip a device-mismatch check entirely — there's only
     /// ever one device in play, not two independently resolved ones that
     /// could disagree.
-    pub fn new(device: Option<ID3D11Device>) -> Result<Self> {
+    ///
+    /// Fails as a `media_pp::Error`, like everything else an example calls,
+    /// so it passes through `?` with the rest.
+    pub fn new(device: Option<ID3D11Device>) -> media_pp::Result<Self> {
+        Self::create(device).map_err(|error| {
+            media_pp::Error::Other(format!("could not set up Direct3D 11: {error}"))
+        })
+    }
+
+    fn create(device: Option<ID3D11Device>) -> Result<Self> {
         unsafe {
             let factory: IDXGIFactory2 = CreateDXGIFactory1()?;
 

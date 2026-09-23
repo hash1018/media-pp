@@ -94,8 +94,7 @@ mod windows_example {
         // One device and one shared immediate context for every D3D11 stage —
         // both uploads, the key, the compositor, and the download. Each of
         // them rejects a texture that came from a different device.
-        let gpu =
-            D3d11GpuContext::new(None).map_err(|e| media_pp::Error::Other(format!("{e:?}")))?;
+        let gpu = D3d11GpuContext::new(None)?;
         let frame_rate = ffmpeg::Rational::new(30, 1);
 
         let (compositor, compositor_handle) = D3d11VideoCompositor::new(
@@ -167,7 +166,7 @@ mod windows_example {
                 TestVideoOptions {
                     width: CANVAS_WIDTH,
                     height: CANVAS_HEIGHT,
-                    framerate: ffmpeg::Rational::new(15, 1),
+                    frame_rate: ffmpeg::Rational::new(15, 1),
                 },
             ),
             |source, ctx| {

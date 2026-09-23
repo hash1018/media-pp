@@ -51,7 +51,16 @@ impl D3d12GpuContext {
     /// order. One `D3d12GpuContext` per process is enough — every window's
     /// renderer clones (COM ref-count bump, not a deep copy) what it
     /// needs from this.
-    pub fn new() -> Result<Self> {
+    ///
+    /// Fails as a `media_pp::Error`, like everything else an example calls,
+    /// so it passes through `?` with the rest.
+    pub fn new() -> media_pp::Result<Self> {
+        Self::create().map_err(|error| {
+            media_pp::Error::Other(format!("could not set up Direct3D 12: {error}"))
+        })
+    }
+
+    fn create() -> Result<Self> {
         unsafe {
             #[cfg(debug_assertions)]
             {

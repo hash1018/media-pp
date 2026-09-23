@@ -259,8 +259,7 @@ mod windows_example {
         // Renderer first, then capture: both `open_with_device` paths use
         // this exact device. WGC requires its BGRA creation flag; DXGI proves
         // the selected output belongs to the same adapter.
-        let gpu =
-            D3d11GpuContext::new(None).map_err(|e| media_pp::Error::Other(format!("{e:?}")))?;
+        let gpu = D3d11GpuContext::new(None)?;
 
         match selection {
             CaptureSelection::Dxgi => {
@@ -435,7 +434,7 @@ mod linux_example {
             },
             &cuda,
         )?;
-        let gpu = VulkanGpuContext::new(target.display).map_err(media_pp::Error::Other)?;
+        let gpu = VulkanGpuContext::new(target.display)?;
 
         let (width, height) = (format.width, format.height);
         let (pipeline, ()) = Pipeline::new("screen-preview-gpu", source, |source, ctx| {

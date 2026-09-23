@@ -44,7 +44,7 @@ fn finishing_a_recording_branch_leaves_a_playable_file_and_a_running_preview() {
         TestVideoOptions {
             width: WIDTH,
             height: HEIGHT,
-            framerate: ffmpeg_next::Rational::new(30, 1),
+            frame_rate: ffmpeg_next::Rational::new(30, 1),
         },
     );
     let (preview, preview_frames) = FrameCounter::new("preview");

@@ -30,7 +30,6 @@ fn main() -> impl std::process::Termination {
 mod windows_example {
     use media_pp::ffmpeg::media;
     use media_pp::{
-        Error,
         bus::BusEvent,
         elements::{D3d11Decoder, FileDemuxer, Pacer},
         pipeline::Pipeline,
@@ -82,7 +81,7 @@ mod windows_example {
         let video = source.best(media::Type::Video)?;
         let params = video.parameters.clone();
 
-        let gpu = D3d11GpuContext::new(None).map_err(|e| Error::Other(format!("{e:?}")))?;
+        let gpu = D3d11GpuContext::new(None)?;
 
         let (pipeline, ()) = Pipeline::new("d3d11-decode-render", source, |source, ctx| {
             // Same device the renderer draws with — required for the

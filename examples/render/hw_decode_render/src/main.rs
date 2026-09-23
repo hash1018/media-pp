@@ -38,7 +38,6 @@ fn main() -> impl std::process::Termination {
 mod windows_example {
     use media_pp::ffmpeg::media;
     use media_pp::{
-        Error,
         elements::{DecodeTarget, FileDemuxer, Pacer, VideoDecodeBin},
         pipeline::Pipeline,
     };
@@ -88,7 +87,7 @@ mod windows_example {
         let (source, _) = FileDemuxer::open("demux", path)?;
         let video = source.best(media::Type::Video)?;
 
-        let gpu = D3d12GpuContext::new().map_err(|e| Error::Other(format!("{e:?}")))?;
+        let gpu = D3d12GpuContext::new()?;
 
         // Opened out here rather than in the builder: a stream this build
         // cannot decode at all is an error to report, and which way it
@@ -137,7 +136,6 @@ mod windows_example {
 mod linux_example {
     use media_pp::ffmpeg::media;
     use media_pp::{
-        Error,
         contract::check_elements,
         elements::{
             CudaConverter, CudaDevice, CudaFrameFormat, DecodeTarget, FileDemuxer, Pacer,
@@ -176,7 +174,7 @@ mod linux_example {
         let video = source.best(media::Type::Video)?;
 
         let cuda = CudaDevice::new()?;
-        let gpu = VulkanGpuContext::new(target.display).map_err(Error::Other)?;
+        let gpu = VulkanGpuContext::new(target.display)?;
 
         let mut decoder = VideoDecodeBin::open(
             "decoder",

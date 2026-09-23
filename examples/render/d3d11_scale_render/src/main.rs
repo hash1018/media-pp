@@ -26,7 +26,6 @@ fn main() -> impl std::process::Termination {
 mod windows_example {
     use media_pp::ffmpeg::media;
     use media_pp::{
-        Error,
         bus::BusEvent,
         elements::{D3d11Decoder, D3d11Scaler, D3d11ScalerFormat, FileDemuxer, Pacer},
         pipeline::Pipeline,
@@ -81,7 +80,7 @@ mod windows_example {
         let video = source.best(media::Type::Video)?;
         let params = video.parameters.clone();
 
-        let gpu = D3d11GpuContext::new(None).map_err(|error| Error::Other(format!("{error:?}")))?;
+        let gpu = D3d11GpuContext::new(None)?;
 
         let (pipeline, ()) = Pipeline::new("d3d11-scale-render", source, |source, ctx| {
             // The scaler consumes each decoder surface synchronously before

@@ -63,7 +63,7 @@ mod example {
         let video_options = TestVideoOptions {
             width: 640,
             height: 360,
-            framerate: ffmpeg::Rational::new(30, 1),
+            frame_rate: ffmpeg::Rational::new(30, 1),
         };
         let video_source = TestVideoSource::new("video", video_options);
         let video_encoder = SwEncoder::new(
@@ -72,7 +72,7 @@ mod example {
                 codec: VideoCodec::OpenH264,
                 width: video_options.width,
                 height: video_options.height,
-                frame_rate: video_options.framerate,
+                frame_rate: video_options.frame_rate,
                 bit_rate: 1_500_000,
                 gop_size: GOP_SIZE,
                 // FLV carries no reordered timestamps well, and a live

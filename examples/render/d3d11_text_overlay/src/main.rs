@@ -81,8 +81,7 @@ mod windows_example {
             .and_then(|value| value.parse().ok())
             .unwrap_or(5);
 
-        let gpu =
-            D3d11GpuContext::new(None).map_err(|e| media_pp::Error::Other(format!("{e:?}")))?;
+        let gpu = D3d11GpuContext::new(None)?;
 
         let output_width = 640;
         let output_height = 360;
@@ -125,7 +124,7 @@ mod windows_example {
             TestVideoOptions {
                 width: output_width,
                 height: output_height,
-                framerate: frame_rate,
+                frame_rate,
             },
         );
         let (background_pipeline, ()) =

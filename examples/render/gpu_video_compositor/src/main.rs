@@ -85,8 +85,7 @@ mod windows_example {
             7,
         )?;
 
-        let gpu =
-            D3d11GpuContext::new(None).map_err(|e| media_pp::Error::Other(format!("{e:?}")))?;
+        let gpu = D3d11GpuContext::new(None)?;
 
         let output_width = 640;
         let output_height = 360;
@@ -133,7 +132,7 @@ mod windows_example {
             TestVideoOptions {
                 width: output_width,
                 height: output_height,
-                framerate: frame_rate,
+                frame_rate,
             },
         );
         let (background_pipeline, ()) =
@@ -160,7 +159,7 @@ mod windows_example {
             TestVideoOptions {
                 width: 320,
                 height: 240,
-                framerate: ffmpeg::Rational::new(15, 1),
+                frame_rate: ffmpeg::Rational::new(15, 1),
             },
         );
         let (foreground_pipeline, ()) =
@@ -340,7 +339,7 @@ mod linux_example {
         // the compositor draws on it, and the renderer imports its Vulkan
         // memory into it. Each element rejects a frame from a different one.
         let cuda = CudaDevice::new()?;
-        let gpu = VulkanGpuContext::new(target.display).map_err(media_pp::Error::Other)?;
+        let gpu = VulkanGpuContext::new(target.display)?;
 
         let output_width = 640;
         let output_height = 360;
@@ -387,7 +386,7 @@ mod linux_example {
             TestVideoOptions {
                 width: output_width,
                 height: output_height,
-                framerate: frame_rate,
+                frame_rate,
             },
         );
         let (background_pipeline, ()) =
@@ -414,7 +413,7 @@ mod linux_example {
             TestVideoOptions {
                 width: 320,
                 height: 240,
-                framerate: ffmpeg::Rational::new(15, 1),
+                frame_rate: ffmpeg::Rational::new(15, 1),
             },
         );
         let (foreground_pipeline, ()) =

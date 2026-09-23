@@ -181,8 +181,8 @@ impl V4l2CaptureSource {
                 "framerate",
                 &format!(
                     "{}/{}",
-                    format.framerate.numerator(),
-                    format.framerate.denominator()
+                    format.frame_rate.numerator(),
+                    format.frame_rate.denominator()
                 ),
             );
             // And which of the camera's formats carries that mode: one
@@ -194,7 +194,7 @@ impl V4l2CaptureSource {
                 &options.device.id,
                 format.width,
                 format.height,
-                format.framerate,
+                format.frame_rate,
             ) {
                 settings.set("input_format", name);
             }

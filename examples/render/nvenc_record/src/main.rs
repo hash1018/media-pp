@@ -59,8 +59,7 @@ mod windows_example {
 
         // One device and one shared immediate context for both D3D11 stages —
         // the invariant every D3D11 element in this crate is built around.
-        let gpu =
-            D3d11GpuContext::new(None).map_err(|e| media_pp::Error::Other(format!("{e:?}")))?;
+        let gpu = D3d11GpuContext::new(None)?;
         let (source, source_handle) = AppSource::new("source", 8);
 
         let encoder = D3d11VideoEncoder::new(

@@ -125,7 +125,7 @@ mod example {
             TestVideoOptions {
                 width: output_width,
                 height: output_height,
-                framerate: frame_rate,
+                frame_rate,
             },
         );
         let (background_pipeline, ()) =

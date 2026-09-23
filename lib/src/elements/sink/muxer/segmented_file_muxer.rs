@@ -516,7 +516,7 @@ mod tests {
         let video_options = TestVideoOptions {
             width: 160,
             height: 120,
-            framerate: ffmpeg::Rational::new(15, 1),
+            frame_rate: ffmpeg::Rational::new(15, 1),
         };
         let video_source = TestVideoSource::new("video", video_options);
         let Some(encoder) = open_h264_encoder(
@@ -525,7 +525,7 @@ mod tests {
                 codec: VideoCodec::OpenH264,
                 width: video_options.width,
                 height: video_options.height,
-                frame_rate: video_options.framerate,
+                frame_rate: video_options.frame_rate,
                 bit_rate: 200_000,
                 // Short on purpose (~0.5s @ 15fps) — this test needs
                 // several real keyframes to show up quickly, not the
@@ -610,7 +610,7 @@ mod tests {
         let video_options = TestVideoOptions {
             width: 160,
             height: 120,
-            framerate: ffmpeg::Rational::new(15, 1),
+            frame_rate: ffmpeg::Rational::new(15, 1),
         };
         let video_source = TestVideoSource::new("video", video_options);
         let Some(encoder) = open_h264_encoder(
@@ -619,7 +619,7 @@ mod tests {
                 codec: VideoCodec::OpenH264,
                 width: video_options.width,
                 height: video_options.height,
-                frame_rate: video_options.framerate,
+                frame_rate: video_options.frame_rate,
                 bit_rate: 200_000,
                 gop_size: 8,
                 max_b_frames: None,
@@ -694,7 +694,7 @@ mod tests {
         let video_options = TestVideoOptions {
             width: 160,
             height: 120,
-            framerate: ffmpeg::Rational::new(15, 1),
+            frame_rate: ffmpeg::Rational::new(15, 1),
         };
         let video_source = TestVideoSource::new("video", video_options);
         let Some(encoder) = open_h264_encoder(
@@ -703,7 +703,7 @@ mod tests {
                 codec: VideoCodec::OpenH264,
                 width: video_options.width,
                 height: video_options.height,
-                frame_rate: video_options.framerate,
+                frame_rate: video_options.frame_rate,
                 bit_rate: 200_000,
                 gop_size: 8,
                 max_b_frames: None,
@@ -775,7 +775,7 @@ mod tests {
         let video_options = TestVideoOptions {
             width: 160,
             height: 120,
-            framerate: ffmpeg::Rational::new(15, 1),
+            frame_rate: ffmpeg::Rational::new(15, 1),
         };
         let Some(encoder) = open_h264_encoder(
             "encoder",
@@ -783,7 +783,7 @@ mod tests {
                 codec: VideoCodec::OpenH264,
                 width: video_options.width,
                 height: video_options.height,
-                frame_rate: video_options.framerate,
+                frame_rate: video_options.frame_rate,
                 bit_rate: 200_000,
                 gop_size: 8,
                 max_b_frames: None,
@@ -839,7 +839,7 @@ mod tests {
         let video_options = TestVideoOptions {
             width: 160,
             height: 120,
-            framerate: ffmpeg::Rational::new(15, 1),
+            frame_rate: ffmpeg::Rational::new(15, 1),
         };
         let video_source = TestVideoSource::new("video", video_options);
         let Some(encoder) = open_h264_encoder(
@@ -848,7 +848,7 @@ mod tests {
                 codec: VideoCodec::OpenH264,
                 width: video_options.width,
                 height: video_options.height,
-                frame_rate: video_options.framerate,
+                frame_rate: video_options.frame_rate,
                 bit_rate: 200_000,
                 gop_size: 8, // ~0.5s @ 15fps — see the other test's own note
                 max_b_frames: None,

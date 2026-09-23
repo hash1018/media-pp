@@ -54,9 +54,7 @@ mod windows_example {
 
     impl RenderContext {
         pub(super) fn new(_target: &WindowTarget) -> media_pp::Result<Self> {
-            let gpu = D3d12GpuContext::new().map_err(|error| {
-                media_pp::Error::Other(format!("failed to create the D3D12 context: {error:?}"))
-            })?;
+            let gpu = D3d12GpuContext::new()?;
             Ok(Self { gpu })
         }
     }
@@ -149,7 +147,7 @@ mod linux_example {
     impl RenderContext {
         pub(super) fn new(target: &WindowTarget) -> media_pp::Result<Self> {
             let cuda = CudaDevice::new()?;
-            let gpu = VulkanGpuContext::new(target.display).map_err(media_pp::Error::Other)?;
+            let gpu = VulkanGpuContext::new(target.display)?;
             Ok(Self { cuda, gpu })
         }
     }
@@ -421,7 +419,7 @@ mod common {
         let options = TestVideoOptions {
             width: WIDTH,
             height: HEIGHT,
-            framerate: ffmpeg::Rational::new(FPS, 1),
+            frame_rate: ffmpeg::Rational::new(FPS, 1),
         };
         let source = TestVideoSource::new("test-video", options);
         let encoder = SwEncoder::new("encode-a", encoder_options())?;

@@ -129,7 +129,7 @@ mod windows_example {
             return Err(Error::Other("not a Win32 window".into()));
         };
         let hwnd = handle.hwnd.get();
-        let gpu = D3d12GpuContext::new().map_err(|error| Error::Other(format!("{error:?}")))?;
+        let gpu = D3d12GpuContext::new()?;
 
         let (pipeline, audio_tee_handle) =
             Pipeline::new("av-playback", source, |source, context| {
@@ -263,7 +263,7 @@ mod linux_example {
         // on it and the renderer imports its Vulkan memory into it. The
         // renderer element rejects any frame from a different one.
         let cuda = CudaDevice::new()?;
-        let gpu = VulkanGpuContext::new(target.display).map_err(Error::Other)?;
+        let gpu = VulkanGpuContext::new(target.display)?;
 
         let (pipeline, audio_tee_handle) =
             Pipeline::new("av-playback", source, |source, context| {

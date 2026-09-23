@@ -266,7 +266,7 @@ pub struct DxgiCaptureOptions {
     pub area: CaptureArea,
     /// The constant rate frames are emitted at — see [`DxgiCaptureSource`]'s
     /// own docs on why this is a fixed output rate (like
-    /// [`crate::elements::TestVideoSource::new`]'s `framerate`), not a cap
+    /// [`crate::elements::TestVideoSource::new`]'s `frame_rate`), not a cap
     /// on an otherwise irregular one. `30` by default, matching
     /// `TestVideoSource`'s own default.
     pub fps: u32,

@@ -23,7 +23,6 @@ fn main() -> impl std::process::Termination {
 mod windows_example {
     use media_pp::ffmpeg::media;
     use media_pp::{
-        Error,
         bus::BusEvent,
         elements::{D3d12Upload, FileDemuxer, Pacer, SwDecoder, SwScaler},
         ffmpeg,
@@ -76,7 +75,7 @@ mod windows_example {
         let video = source.best(media::Type::Video)?;
         let params = video.parameters.clone();
 
-        let gpu = D3d12GpuContext::new().map_err(|e| Error::Other(format!("{e:?}")))?;
+        let gpu = D3d12GpuContext::new()?;
 
         let (pipeline, ()) = Pipeline::new("sw-decode-render", source, |source, ctx| {
             let decoder = SwDecoder::new("decoder", params)?;
@@ -128,7 +127,6 @@ mod windows_example {
 mod linux_example {
     use media_pp::ffmpeg::media;
     use media_pp::{
-        Error,
         bus::BusEvent,
         elements::{
             CudaDevice, CudaFrameFormat, CudaUpload, FileDemuxer, Pacer, SwDecoder, SwScaler,
@@ -163,7 +161,7 @@ mod linux_example {
         let video = source.best(media::Type::Video)?;
         let params = video.parameters.clone();
         let cuda = CudaDevice::new()?;
-        let gpu = VulkanGpuContext::new(target.display).map_err(Error::Other)?;
+        let gpu = VulkanGpuContext::new(target.display)?;
 
         let (pipeline, ()) = Pipeline::new("sw-decode-render", source, |source, ctx| {
             let decoder = SwDecoder::new("decoder", params)?;

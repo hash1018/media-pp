@@ -57,7 +57,7 @@ mod windows_example {
         };
         let source = TestVideoSource::new("test-video", options);
 
-        let gpu = D3d12GpuContext::new().map_err(|e| media_pp::Error::Other(format!("{e:?}")))?;
+        let gpu = D3d12GpuContext::new()?;
 
         let (pipeline, ()) = Pipeline::new("d3d12-upload", source, |source, ctx| {
             // `Pixel::NV12` — the only layout `D3d12Upload`/`D3d12Renderer`'s

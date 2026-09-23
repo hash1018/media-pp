@@ -108,7 +108,7 @@ fn test_source(name: &str) -> TestVideoSource {
         TestVideoOptions {
             width: WIDTH,
             height: HEIGHT,
-            framerate: frame_rate(),
+            frame_rate: frame_rate(),
         },
     )
 }

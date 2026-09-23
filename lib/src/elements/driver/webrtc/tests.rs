@@ -1147,7 +1147,7 @@ fn one_h264_sendrecv_track_carries_data_both_ways_with_the_declared_payload_type
     let video_options = TestVideoOptions {
         width: 160,
         height: 120,
-        framerate: ffmpeg::Rational::new(15, 1),
+        frame_rate: ffmpeg::Rational::new(15, 1),
     };
     let video_source = TestVideoSource::new("peer-b-video", video_options);
     let encoder = SwEncoder::new(
@@ -1156,7 +1156,7 @@ fn one_h264_sendrecv_track_carries_data_both_ways_with_the_declared_payload_type
             codec: VideoCodec::OpenH264,
             width: video_options.width,
             height: video_options.height,
-            frame_rate: video_options.framerate,
+            frame_rate: video_options.frame_rate,
             bit_rate: 250_000,
             gop_size: 15,
             max_b_frames: None,

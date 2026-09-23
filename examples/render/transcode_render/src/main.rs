@@ -75,7 +75,7 @@ mod windows_example {
         };
         let source = TestVideoSource::new("test-video", options);
 
-        let gpu = D3d12GpuContext::new().map_err(|e| media_pp::Error::Other(format!("{e:?}")))?;
+        let gpu = D3d12GpuContext::new()?;
 
         let (pipeline, ()) = Pipeline::new("transcode-render", source, |source, ctx| {
             let encoder = SwEncoder::new(
@@ -84,7 +84,7 @@ mod windows_example {
                     codec: VideoCodec::OpenH264,
                     width,
                     height,
-                    frame_rate: options.framerate,
+                    frame_rate: options.frame_rate,
                     bit_rate: 2_000_000,
                     gop_size: 60, // ~2s @ 30fps (TestVideoOptions::default's own framerate)
                     max_b_frames: None,
@@ -183,7 +183,7 @@ mod linux_example {
         let source = TestVideoSource::new("test-video", options);
         let time_base = source.time_base();
         let cuda = CudaDevice::new()?;
-        let gpu = VulkanGpuContext::new(target.display).map_err(media_pp::Error::Other)?;
+        let gpu = VulkanGpuContext::new(target.display)?;
 
         let (pipeline, ()) = Pipeline::new("transcode-render", source, |source, ctx| {
             let encoder = SwEncoder::new(
@@ -193,7 +193,7 @@ mod linux_example {
                     width: target.width,
                     height: target.height,
                     time_base,
-                    frame_rate: options.framerate,
+                    frame_rate: options.frame_rate,
                     bit_rate: 2_000_000,
                     gop_size: 60,
                     max_b_frames: None,
