@@ -11,7 +11,7 @@ use crate::{
     element::{Element, ElementType, Sink, Source, element_pp_log},
     pad::SrcPad,
     playback_clock::{PlaybackClock, PlaybackMaster},
-    time::{InvalidTimeBase, MediaTimestamp, TimeBase},
+    time::{MediaTimestamp, TimeBase},
 };
 
 const INTERRUPT_POLL_INTERVAL: Duration = Duration::from_millis(10);
@@ -24,19 +24,21 @@ fn nanoseconds() -> TimeBase {
 #[derive(Debug, ThisError)]
 /// Input this element cannot schedule.
 ///
-/// Scheduling needs a decoded video frame with a PTS and a usable time base;
-/// anything else is rejected rather than passed through unscheduled.
+/// Scheduling needs a decoded video frame with a PTS and the time base it is
+/// in; anything else is rejected rather than passed through unscheduled.
 pub enum VideoSynchronizerError {
-    /// The supplied input timestamp unit has a non-positive component.
+    /// A frame arrived with a `pts` but no unit to read it in.
+    ///
+    /// Every element in this crate that makes a frame says what unit its
+    /// `pts` is in — see [`crate::buffer::time_base`] — so this is a frame
+    /// made elsewhere. Stamp it with [`crate::buffer::set_time_base`].
+    /// Refused rather than guessed at: a guessed unit plays at the wrong
+    /// speed, or against the audio at the wrong offset, with no other sign.
     #[error(
-        "invalid time base {numerator}/{denominator}: both numerator and denominator must be positive"
+        "a Video frame arrived with a pts but no time base to read it in; the element \
+         that made it has to set one (media_pp::buffer::set_time_base)"
     )]
-    InvalidTimeBase {
-        /// Invalid rational numerator.
-        numerator: i32,
-        /// Invalid rational denominator.
-        denominator: i32,
-    },
+    NoTimeBase,
 
     /// The sink received a buffer other than decoded video or end-of-stream.
     #[error("VideoSynchronizer only schedules decoded Video frames, got a {0}")]
@@ -69,79 +71,74 @@ enum Decision {
 pub struct VideoSynchronizer {
     pp_log: PpLog,
     name: Arc<str>,
-    time_base: TimeBase,
     /// The pipeline's, given by `Element::attach_context` — see there for
     /// why this is not something the caller supplies.
     playback_clock: Option<Arc<PlaybackClock>>,
     interrupt_epoch: u64,
     /// Preroll forwards frames without waiting on the paused playback clock.
     prerolling: bool,
-    last_pts: Option<i64>,
+    /// The last frame's presentation time, in nanoseconds — kept in one
+    /// unit rather than the frame's own, so a stream whose unit changes
+    /// still measures its frame spacing correctly.
+    last_ns: Option<i64>,
     frame_duration: Duration,
     pending: VecDeque<MediaBuffer>,
     pad: SrcPad,
 }
 
 impl VideoSynchronizer {
-    /// Creates a video scheduler using `time_base` for incoming frame PTS values.
-    pub fn new(
-        name: impl Into<String>,
-        time_base: ffmpeg::Rational,
-    ) -> Result<Self, VideoSynchronizerError> {
+    /// Creates a video scheduler. Each frame says what unit its own `pts` is
+    /// in — see [`crate::buffer::time_base`] — so there is nothing here to
+    /// be told, and nothing to be told wrong.
+    pub fn new(name: impl Into<String>) -> Self {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::VideoSynchronizer, &name, None);
-        let time_base = TimeBase::try_new(time_base).map_err(
-            |InvalidTimeBase {
-                 numerator,
-                 denominator,
-             }| VideoSynchronizerError::InvalidTimeBase {
-                numerator,
-                denominator,
-            },
-        )?;
-
-        pp_info!(pp_log: &pp_log, "created: time_base={time_base:?}");
-        Ok(Self {
+        pp_info!(pp_log: &pp_log, "created");
+        Self {
             name: name.clone(),
             pp_log,
-            time_base,
             playback_clock: None,
             interrupt_epoch: 0,
             prerolling: false,
-            last_pts: None,
+            last_ns: None,
             frame_duration: FALLBACK_FRAME_DURATION,
             pending: VecDeque::new(),
             pad: SrcPad::with_contract(format!("{name}_src"), OutputContract::Passthrough),
-        })
+        }
     }
 
-    fn timestamp_ns(&self, pts: i64) -> i64 {
-        MediaTimestamp::new_unchecked(pts, self.time_base).rescale(nanoseconds())
+    /// When a frame is due, in nanoseconds of media time, read in the unit
+    /// the frame itself carries.
+    fn frame_ns(frame: &ffmpeg::frame::Video) -> Result<i64, VideoSynchronizerError> {
+        let pts = frame.pts().ok_or(VideoSynchronizerError::MissingPts)?;
+        let time_base =
+            crate::buffer::time_base(frame).ok_or(VideoSynchronizerError::NoTimeBase)?;
+        Ok(
+            MediaTimestamp::new_unchecked(pts, TimeBase::new_unchecked(time_base))
+                .rescale(nanoseconds()),
+        )
     }
 
-    fn observe_frame_duration(&mut self, pts: i64) {
-        if let Some(delta) = self.last_pts.and_then(|last| pts.checked_sub(last))
+    fn observe_frame_duration(&mut self, frame_ns: i64) {
+        if let Some(delta) = self.last_ns.and_then(|last| frame_ns.checked_sub(last))
             && delta > 0
         {
-            let duration = Duration::from_nanos(self.timestamp_ns(delta).max(0) as u64);
-            if !duration.is_zero() {
-                self.frame_duration = duration;
-            }
+            self.frame_duration = ns_duration(delta);
         }
-        self.last_pts = Some(pts);
+        self.last_ns = Some(frame_ns);
     }
 
     #[cfg(test)]
-    fn decision(&mut self, pts: i64) -> Decision {
-        self.observe_frame_duration(pts);
-        self.decision_without_observing(pts)
+    fn decision(&mut self, frame_ns: i64) -> Decision {
+        self.observe_frame_duration(frame_ns);
+        self.decision_without_observing(frame_ns)
     }
 
-    fn wait_for(&mut self, pts: i64) -> WaitOutcome {
+    fn wait_for(&mut self, frame_ns: i64) -> WaitOutcome {
         if self.prerolling {
             return WaitOutcome::Render;
         }
-        self.observe_frame_duration(pts);
+        self.observe_frame_duration(frame_ns);
         // Unwired: nothing has given this one a pipeline, so there is no
         // position to schedule against and nothing to interrupt it either.
         // Rendering is the only answer that does not stall a branch that
@@ -154,7 +151,7 @@ impl VideoSynchronizer {
             if playback_clock.interrupt_epoch() != self.interrupt_epoch {
                 return WaitOutcome::Interrupted;
             }
-            match self.decision_without_observing(pts) {
+            match self.decision_without_observing(frame_ns) {
                 Decision::Render => return WaitOutcome::Render,
                 Decision::Drop => return WaitOutcome::Drop,
                 Decision::Wait(wait) => thread::sleep(wait.min(INTERRUPT_POLL_INTERVAL)),
@@ -163,8 +160,7 @@ impl VideoSynchronizer {
         }
     }
 
-    fn decision_without_observing(&self, pts: i64) -> Decision {
-        let frame_ns = self.timestamp_ns(pts);
+    fn decision_without_observing(&self, frame_ns: i64) -> Decision {
         let Some(playback_clock) = &self.playback_clock else {
             return Decision::Render;
         };
@@ -248,8 +244,8 @@ impl Sink for VideoSynchronizer {
         while let Some(buf) = self.pending.pop_front() {
             let outcome = match &buf {
                 MediaBuffer::Video(frame) => {
-                    let pts = frame.pts().ok_or(VideoSynchronizerError::MissingPts)?;
-                    self.wait_for(pts)
+                    let frame_ns = Self::frame_ns(frame)?;
+                    self.wait_for(frame_ns)
                 }
                 MediaBuffer::Eos => WaitOutcome::Render,
                 _ => unreachable!("buffer kind validated before queueing"),
@@ -273,7 +269,7 @@ impl Sink for VideoSynchronizer {
         match msg {
             ControlMsg::Flush | ControlMsg::Stop => {
                 self.pending.clear();
-                self.last_pts = None;
+                self.last_ns = None;
                 self.frame_duration = FALLBACK_FRAME_DURATION;
             }
             ControlMsg::Preroll(_) => {
@@ -318,7 +314,7 @@ mod tests {
             crate::graph::ElementId::for_test(1),
             Arc::new(Clock::new()),
         ));
-        let mut sync = VideoSynchronizer::new("sync", ffmpeg::Rational::new(1, 1_000)).unwrap();
+        let mut sync = VideoSynchronizer::new("sync");
         sync.attach_context(&context);
         (sync, Arc::clone(&context.playback_clock))
     }
@@ -326,7 +322,7 @@ mod tests {
     #[test]
     fn first_video_timestamp_establishes_wall_origin() {
         let (mut sync, playback) = synchronizer();
-        assert!(matches!(sync.decision(5_000), Decision::Render));
+        assert!(matches!(sync.decision(ms(5_000)), Decision::Render));
         assert_eq!(playback.master(), PlaybackMaster::Wall);
         assert!(playback.position_ns().unwrap() >= 5_000_000_000);
     }
@@ -335,19 +331,43 @@ mod tests {
     fn audio_priming_holds_video_and_audio_master_drops_late_frames() {
         let (mut sync, playback) = synchronizer();
         let audio = playback.register_audio_master().unwrap();
-        assert!(matches!(sync.decision(1_000), Decision::Hold));
+        assert!(matches!(sync.decision(ms(1_000)), Decision::Hold));
 
         audio.publish(2_000_000_000, 3_000_000_000, false).unwrap();
-        assert!(matches!(sync.decision(1_000), Decision::Drop));
-        assert!(matches!(sync.decision(2_010), Decision::Wait(_)));
+        assert!(matches!(sync.decision(ms(1_000)), Decision::Drop));
+        assert!(matches!(sync.decision(ms(2_010)), Decision::Wait(_)));
+    }
+
+    /// `ms` milliseconds of media time, as the decisions below take it.
+    fn ms(ms: i64) -> i64 {
+        ms * 1_000_000
+    }
+
+    /// A frame due `pts` in `unit`, saying so.
+    fn frame(pts: i64, unit: ffmpeg::Rational) -> MediaBuffer {
+        let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
+        let mut frame = pool.get();
+        frame.set_pts(Some(pts));
+        crate::buffer::set_time_base(&mut frame, unit);
+        MediaBuffer::Video(Arc::new(frame))
+    }
+
+    /// Each frame is read in its own unit: the same count in milliseconds
+    /// and in seconds is two very different times.
+    #[test]
+    fn a_frame_is_read_in_the_unit_it_carries() {
+        let in_ms = frame(1_500, ffmpeg::Rational::new(1, 1_000));
+        let in_s = frame(1_500, ffmpeg::Rational::new(1, 1));
+        let ns = |buffer: &MediaBuffer| match buffer {
+            MediaBuffer::Video(frame) => VideoSynchronizer::frame_ns(frame).unwrap(),
+            _ => unreachable!(),
+        };
+        assert_eq!(ns(&in_ms), 1_500_000_000);
+        assert_eq!(ns(&in_s), 1_500_000_000_000);
     }
 
     #[test]
-    fn invalid_time_base_and_non_video_input_are_typed_errors() {
-        assert!(matches!(
-            VideoSynchronizer::new("sync", ffmpeg::Rational::new(0, 1)),
-            Err(VideoSynchronizerError::InvalidTimeBase { .. })
-        ));
+    fn unschedulable_input_is_a_typed_error() {
         let (mut sync, _playback) = synchronizer();
         assert!(matches!(
             sync.consume(MediaBuffer::Packet(Arc::new(ffmpeg::Packet::empty()))),
@@ -361,6 +381,19 @@ mod tests {
                 VideoSynchronizerError::MissingPts
             ))
         ));
+
+        // A pts with no unit is refused rather than guessed at, and leaves
+        // nothing behind: the frame spacing is still unmeasured.
+        let mut unitless = pool.get();
+        unitless.set_pts(Some(10));
+        assert!(matches!(
+            sync.consume(MediaBuffer::Video(Arc::new(unitless))),
+            Err(crate::error::Error::VideoSynchronizerError(
+                VideoSynchronizerError::NoTimeBase
+            ))
+        ));
+        assert!(sync.last_ns.is_none());
+        assert!(sync.pending.is_empty());
     }
 
     /// Preroll has to outrun the clock this element schedules against —
@@ -376,12 +409,12 @@ mod tests {
         let context = Arc::new(PrerollContext::for_seek([], Duration::from_secs(2)));
 
         // Audio has primed nothing, so ordinary scheduling would hold here.
-        assert!(matches!(sync.decision(2_000), Decision::Hold));
+        assert!(matches!(sync.decision(ms(2_000)), Decision::Hold));
 
         sync.control(ControlMsg::Preroll(context)).expect("preroll");
-        assert!(matches!(sync.wait_for(2_000), WaitOutcome::Render));
+        assert!(matches!(sync.wait_for(ms(2_000)), WaitOutcome::Render));
 
         sync.control(ControlMsg::Resume).expect("resume");
-        assert!(matches!(sync.decision(2_000), Decision::Hold));
+        assert!(matches!(sync.decision(ms(2_000)), Decision::Hold));
     }
 }

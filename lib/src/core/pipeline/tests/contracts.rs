@@ -661,8 +661,7 @@ fn a_video_synchronizer_carries_the_contract_past_itself() {
     use crate::elements::{PacketCounter, VideoSynchronizer};
 
     let context = contract_context();
-    let sync = VideoSynchronizer::new("sync", ffmpeg::Rational::new(1, 90_000))
-        .expect("a valid time base opens the synchronizer");
+    let sync = VideoSynchronizer::new("sync");
 
     let (counter, _count) = PacketCounter::new("counter");
     let Err(error) = context
@@ -879,10 +878,7 @@ fn a_passthrough_at_the_head_of_a_branch_still_carries_the_downstream_requiremen
 
     let branch = context
         .branch()
-        .pipe(
-            VideoSynchronizer::new("sync", ffmpeg::Rational::new(1, 90_000))
-                .expect("a valid time base opens the synchronizer"),
-        )
+        .pipe(VideoSynchronizer::new("sync"))
         .to(renderer)
         .expect("nothing is flowing yet, so the branch alone is consistent");
     let before = context.graph.snapshot();
@@ -937,10 +933,7 @@ fn a_passthrough_at_the_head_of_a_branch_accepts_a_matching_source() {
 
     let branch = context
         .branch()
-        .pipe(
-            VideoSynchronizer::new("sync", ffmpeg::Rational::new(1, 90_000))
-                .expect("a valid time base opens the synchronizer"),
-        )
+        .pipe(VideoSynchronizer::new("sync"))
         .pipe(SwScaler::new(
             "nv12",
             ffmpeg::format::Pixel::NV12,

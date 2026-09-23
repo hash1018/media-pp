@@ -283,15 +283,20 @@ compile error with no explanation.
   by an element of your own — rather than guessing. Stamp such a frame with
   `buffer::set_time_base`.
 
-- **`AudioResampler` and `FrameRateLimiter` read it off the frame too.**
-  `AudioResampler::new(name, target, input_time_base)?` is
-  `AudioResampler::new(name, target)`, which can no longer fail; and
+- **`AudioResampler`, `FrameRateLimiter` and `VideoSynchronizer` read it
+  off the frame too.** `AudioResampler::new(name, target, input_time_base)?`
+  is `AudioResampler::new(name, target)`,
+  `VideoSynchronizer::new(name, time_base)?` is `VideoSynchronizer::new(name)`
+  — neither can fail any more — and
   `FrameRateLimiter::new(name, input_time_base, rate)` is
   `FrameRateLimiter::new(name, rate)`. Each was the same value that had to
-  agree with the stream. `AudioResamplerError::InvalidTimeBase` gives way to
-  `AudioResamplerError::NoTimeBase`, and the new `FrameRateLimiterError`
-  has the one variant `NoTimeBase` — both refuse a timed frame that does
-  not say its unit, as `Pacer` does.
+  agree with the stream. `AudioResamplerError::InvalidTimeBase` and
+  `VideoSynchronizerError::InvalidTimeBase` give way to a `NoTimeBase`
+  variant on each, and the new `FrameRateLimiterError` has the one variant
+  `NoTimeBase` — all refuse a timed frame that does not say its unit, as
+  `Pacer` does. No element takes a stream's time base any more except a
+  muxer's `add_stream`, which writes it into a header before the first
+  packet arrives.
 
 ### Added
 

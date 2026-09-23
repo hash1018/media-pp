@@ -69,12 +69,11 @@ mod shell;
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 mod common {
     use media_pp::elements::FileDemuxer;
-    use media_pp::ffmpeg::{Rational, codec::Parameters, media};
+    use media_pp::ffmpeg::{codec::Parameters, media};
 
     pub struct Streams {
         pub video_index: usize,
         pub video_params: Parameters,
-        pub video_time_base: Rational,
         pub audio_index: usize,
         pub audio_params: Parameters,
     }
@@ -86,7 +85,6 @@ mod common {
         let streams = Streams {
             video_index: video.index,
             video_params: video.parameters.clone(),
-            video_time_base: video.time_base,
             audio_index: audio.index,
             audio_params: audio.parameters.clone(),
         };
@@ -142,10 +140,7 @@ mod windows_example {
                     streams.video_params.clone(),
                 )?)
                 .queue("video-frames", 32)
-                .pipe(VideoSynchronizer::new(
-                    "video-sync",
-                    streams.video_time_base,
-                )?)
+                .pipe(VideoSynchronizer::new("video-sync"))
                 // After the synchronizer, not before: a frame it drops for
                 // being late never pays for the conversion or the upload.
                 // `D3d12Renderer` draws from a device resource only, so this
@@ -285,10 +280,7 @@ mod linux_example {
                     VIDEO_QUEUE_DEPTH as i32,
                 )?)
                 .queue("video-frames", VIDEO_QUEUE_DEPTH)
-                .pipe(VideoSynchronizer::new(
-                    "video-sync",
-                    streams.video_time_base,
-                )?)
+                .pipe(VideoSynchronizer::new("video-sync"))
                 .to(render_common::cuda_window_renderer(
                     "video-renderer",
                     &gpu,
