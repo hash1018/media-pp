@@ -54,7 +54,7 @@ use crate::{
 /// How often [`DxgiCaptureSource::run`]'s poll loop re-checks
 /// `drain_control`/whether it's time to emit, even mid-wait for the next
 /// real desktop change — bounds `Stop` latency at very low configured
-/// [`DxgiCaptureOptions::fps`] values, where "wait until the next tick" on
+/// [`DxgiCaptureOptions::frame_rate`] values, where "wait until the next tick" on
 /// its own could otherwise be a long, unresponsive block. Same idea as
 /// [`crate::queue::Queue`]'s own `STOP_POLL_INTERVAL`.
 const POLL_GRANULARITY: Duration = Duration::from_millis(100);
@@ -117,6 +117,11 @@ pub enum DxgiCaptureSourceError {
     /// Seeking was requested on a live desktop capture.
     #[error("DxgiCaptureSource doesn't support seeking a live capture")]
     SeekUnsupported,
+
+    /// [`DxgiCaptureOptions::frame_rate`]'s numerator or denominator is not
+    /// positive. Refused before any device or duplication is created.
+    #[error("invalid frame rate {0}; numerator and denominator must both be positive")]
+    InvalidFrameRate(ffmpeg::Rational),
 
     /// The requested region does not intersect an attached output.
     #[error("CaptureArea::Region {0:?} doesn't overlap any display output")]
@@ -267,9 +272,12 @@ pub struct DxgiCaptureOptions {
     /// The constant rate frames are emitted at — see [`DxgiCaptureSource`]'s
     /// own docs on why this is a fixed output rate (like
     /// [`crate::elements::TestVideoSource::new`]'s `frame_rate`), not a cap
-    /// on an otherwise irregular one. `30` by default, matching
-    /// `TestVideoSource`'s own default.
-    pub fps: u32,
+    /// on an otherwise irregular one. A fraction, so a rate such as
+    /// `30000/1001` is expressible, and the same value an encoder downstream
+    /// is given. `30/1` by default, matching `TestVideoSource`'s own default;
+    /// one that is not positive is refused by [`DxgiCaptureSource::open`]
+    /// with [`DxgiCaptureSourceError::InvalidFrameRate`].
+    pub frame_rate: ffmpeg::Rational,
     /// CPU (the original behavior) or GPU (zero-copy) capture — see
     /// [`CaptureMode`]. `CaptureMode::Cpu { include_cursor: false }` by
     /// default, so existing callers building `DxgiCaptureOptions { ..
@@ -281,7 +289,7 @@ impl Default for DxgiCaptureOptions {
     fn default() -> Self {
         Self {
             area: CaptureArea::Output { output_index: 0 },
-            fps: 30,
+            frame_rate: ffmpeg::Rational::new(30, 1),
             capture_mode: CaptureMode::Cpu {
                 include_cursor: false,
             },
@@ -363,7 +371,7 @@ struct CaptureUnit {
 /// something needs YUV420P, e.g. `D3d12Renderer`'s
 /// CPU-upload path or [`crate::elements::SwEncoder`]).
 ///
-/// Emits at a **constant** rate — [`DxgiCaptureOptions::fps`] — not one
+/// Emits at a **constant** rate — [`DxgiCaptureOptions::frame_rate`] — not one
 /// push per real desktop change. An earlier version of this pushed
 /// variable-rate (VFR): a real wall-clock pts per actual change, nothing
 /// in between. That turned out to cause real problems, both for muxing
@@ -380,11 +388,11 @@ struct CaptureUnit {
 /// So instead: this element always keeps the most recently captured
 /// desktop image on hand, and [`SourceElement::run`]'s own loop emits it
 /// — the same one again if nothing changed since the last tick — at a
-/// steady `1 / fps` cadence, entirely on the one thread `run()` already
+/// steady one-frame cadence, entirely on the one thread `run()` already
 /// has (no extra threads spawned; see this crate's own "elements never
 /// spawn their own threads" rule). Same shape as
 /// [`crate::elements::TestVideoSource`]: [`DxgiCaptureSource::time_base`]
-/// is `1 / fps` and `pts` is a plain incrementing tick counter, one per
+/// is the reciprocal of the frame rate and `pts` is a plain incrementing tick counter, one per
 /// *emitted* frame, not per real capture.
 ///
 /// Confirmed (`examples/render/screen_preview_cpu`, with and without a
@@ -457,7 +465,7 @@ pub struct DxgiCaptureSource {
     /// composites straight from each unit's own `staging_texture` at
     /// emit time instead (see [`DxgiCaptureSource::emit_frame_gpu`]).
     staging: Option<ffmpeg::frame::Video>,
-    /// See [`DxgiCaptureOptions::fps`]. Shared rather than a plain field so
+    /// See [`DxgiCaptureOptions::frame_rate`]. Shared rather than a plain field so
     /// [`DxgiCaptureSource::frame_rate`] can hand out a handle that changes
     /// it while this is running.
     frame_rate: Arc<FrameRate>,
@@ -582,6 +590,10 @@ impl DxgiCaptureSource {
         supplied_device: Option<&ID3D11Device>,
     ) -> std::result::Result<(Self, VideoFormat, Option<ID3D11Device>), DxgiCaptureSourceError>
     {
+        let frame_rate = options.frame_rate;
+        if frame_rate.numerator() <= 0 || frame_rate.denominator() <= 0 {
+            return Err(DxgiCaptureSourceError::InvalidFrameRate(frame_rate));
+        }
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::DxgiCaptureSource, &name, None);
 
@@ -766,19 +778,18 @@ impl DxgiCaptureSource {
         let staging = (!gpu_mode)
             .then(|| ffmpeg::frame::Video::new(ffmpeg::format::Pixel::BGRA, width, height));
 
-        let fps = options.fps.max(1); // a `0` fps is nonsensical; treat it as 1 rather than dividing by zero
-        // Same `1 / fps` convention as `DxgiCaptureSource::time_base` — computed
-        // here too since `Self` is moved into the tuple below before that method
-        // could be called on it.
-        let time_base = ffmpeg::Rational::new(1, fps as i32);
+        // The reciprocal of the rate, as `DxgiCaptureSource::time_base` has it —
+        // computed here too since `Self` is moved into the tuple below before
+        // that method could be called on it.
+        let time_base = frame_rate.invert();
         pp_info!(
             pp_log: &pp_log,
-            "opened: {}x{} composite from {} output(s), include_cursor={}, fps={}, gpu_mode={}",
+            "opened: {}x{} composite from {} output(s), include_cursor={}, frame_rate={}, gpu_mode={}",
             width,
             height,
             units.len(),
             include_cursor,
-            fps,
+            frame_rate,
             gpu_mode
         );
 
@@ -797,7 +808,7 @@ impl DxgiCaptureSource {
                 cursor_position: POINT::default(),
                 cursor_visible: false,
                 staging,
-                frame_rate: FrameRate::new(ffmpeg::Rational::new(fps as i32, 1)),
+                frame_rate: FrameRate::new(frame_rate),
                 frame_index: 0,
                 pad,
                 pool,
@@ -1707,7 +1718,7 @@ impl SourceElement for DxgiCaptureSource {
             // nothing, rather than inside `AcquireNextFrame` — see
             // `ACQUIRE_TIMEOUT_MS` on why that call is never given time to
             // wait in. Bounded by `POLL_GRANULARITY` so `Stop` stays
-            // responsive at a low configured `fps`.
+            // responsive at a low configured `frame_rate`.
             let remaining = schedule.remaining(Instant::now());
             if !remaining.is_zero() {
                 thread::sleep(remaining.min(POLL_GRANULARITY));
@@ -2085,6 +2096,46 @@ mod tests {
     use super::*;
     use crate::{buffer::picture_id, platform::windows::d3d11va::d3d11va_texture};
 
+    /// Refused before any device or duplication is created, so this needs
+    /// neither a GPU nor a display. It used to be taken as 1 fps instead.
+    #[test]
+    fn a_rate_that_is_not_positive_is_refused_before_anything_is_opened() {
+        for rate in [ffmpeg::Rational::new(0, 1), ffmpeg::Rational::new(30, 0)] {
+            let result = DxgiCaptureSource::open(
+                "capture",
+                DxgiCaptureOptions {
+                    frame_rate: rate,
+                    ..DxgiCaptureOptions::default()
+                },
+            );
+            assert!(matches!(
+                result,
+                Err(DxgiCaptureSourceError::InvalidFrameRate(refused)) if refused == rate
+            ));
+        }
+    }
+
+    /// A fractional rate is carried as it is: the time base is its exact
+    /// reciprocal, not a rounded whole number of frames a second.
+    #[test]
+    fn a_fractional_rate_sets_an_exact_time_base() {
+        let Ok((source, _format, _device)) = DxgiCaptureSource::open(
+            "capture",
+            DxgiCaptureOptions {
+                frame_rate: ffmpeg::Rational::new(30_000, 1_001),
+                ..DxgiCaptureOptions::default()
+            },
+        ) else {
+            eprintln!("skipping: desktop duplication is unavailable here");
+            return;
+        };
+        assert_eq!(source.time_base(), ffmpeg::Rational::new(1_001, 30_000));
+        assert_eq!(
+            source.frame_rate().get(),
+            Some(ffmpeg::Rational::new(30_000, 1_001))
+        );
+    }
+
     /// [`CaptureMode::Cpu`]'s half of the same contract: a tick that
     /// captured nothing points another wrapper at the picture already
     /// copied, and one that captured something copies into a frame the
@@ -2102,7 +2153,7 @@ mod tests {
             "reuse-cpu",
             DxgiCaptureOptions {
                 area: CaptureArea::Output { output_index: 0 },
-                fps: 60,
+                frame_rate: ffmpeg::Rational::new(60, 1),
                 capture_mode: CaptureMode::Cpu {
                     include_cursor: false,
                 },
@@ -2166,7 +2217,7 @@ mod tests {
             "reuse",
             DxgiCaptureOptions {
                 area: CaptureArea::Output { output_index: 0 },
-                fps: 60,
+                frame_rate: ffmpeg::Rational::new(60, 1),
                 capture_mode: CaptureMode::Gpu,
             },
         ) {
@@ -2396,7 +2447,7 @@ mod tests {
             CaptureMode::Gpu,
         ] {
             let options = DxgiCaptureOptions {
-                fps: 30,
+                frame_rate: ffmpeg::Rational::new(30, 1),
                 capture_mode: capture_mode.clone(),
                 ..DxgiCaptureOptions::default()
             };
@@ -2475,7 +2526,7 @@ mod tests {
     #[test]
     fn the_capture_rate_can_be_changed_after_opening() {
         let options = DxgiCaptureOptions {
-            fps: 60,
+            frame_rate: ffmpeg::Rational::new(60, 1),
             ..DxgiCaptureOptions::default()
         };
         let Ok((source, _format, _device)) = DxgiCaptureSource::open("rate", options) else {

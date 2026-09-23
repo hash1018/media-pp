@@ -39,7 +39,7 @@ mod windows_example {
 
     /// DxgiCaptureSource -> SwScaler -> D3d12Upload -> Renderer: captures the
     /// desktop live via DXGI Desktop Duplication (cursor included) at a
-    /// constant frame rate (`DxgiCaptureOptions::fps`), converts/resizes it to
+    /// constant frame rate (`DxgiCaptureOptions::frame_rate`), converts/resizes it to
     /// the window's own size as `Pixel::NV12` in one pass, and uploads that to
     /// the GPU — no `SwEncoder`/`SwDecoder` round trip.
     ///
@@ -82,7 +82,7 @@ mod windows_example {
         )?;
 
         let capture_options = DxgiCaptureOptions {
-            fps: 60,
+            frame_rate: ffmpeg::Rational::new(60, 1),
             capture_mode: CaptureMode::Cpu {
                 include_cursor: true,
             },
@@ -204,7 +204,7 @@ mod linux_example {
         let (source, capture_format, restore_token) = PipeWireScreenCaptureSource::open(
             "screen",
             PipeWireScreenCaptureOptions {
-                fps: 60,
+                frame_rate: ffmpeg::Rational::new(60, 1),
                 source_kind,
                 include_cursor: true,
                 restore_token,

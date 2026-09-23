@@ -250,7 +250,7 @@ fn a_capture_sharing_the_device_does_not_slow_the_compositor() {
         "capture",
         DxgiCaptureOptions {
             area: CaptureArea::Output { output_index: 0 },
-            fps: FPS,
+            frame_rate: ffmpeg_next::Rational::new(FPS as i32, 1),
             capture_mode: CaptureMode::Gpu,
         },
         &device,

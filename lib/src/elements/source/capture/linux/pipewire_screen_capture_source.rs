@@ -50,7 +50,7 @@ use crate::{
 /// compositor that never answers into an error instead of a permanent hang.
 const NEGOTIATION_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Bounds `Stop` latency at very low configured [`PipeWireScreenCaptureOptions::fps`]
+/// Bounds `Stop` latency at very low configured [`PipeWireScreenCaptureOptions::frame_rate`]
 /// values, where "wait until the next tick" on its own could otherwise be a
 /// long, unresponsive block. Same idea as `DxgiCaptureSource`'s own constant.
 const POLL_GRANULARITY: Duration = Duration::from_millis(100);
@@ -114,6 +114,12 @@ pub enum PipeWireScreenCaptureSourceError {
     #[error("PipeWireScreenCaptureSource doesn't support seeking a live capture")]
     SeekUnsupported,
 
+    /// [`PipeWireScreenCaptureOptions::frame_rate`]'s numerator or
+    /// denominator is not positive. Refused before the portal is asked for
+    /// anything, so no dialog is shown for a capture that could not run.
+    #[error("invalid frame rate {0}; numerator and denominator must both be positive")]
+    InvalidFrameRate(ffmpeg::Rational),
+
     /// GPU capture could not be set up, or a captured buffer could not be
     /// imported. Terminal: every following buffer would fail the same way,
     /// and this mode deliberately has no CPU fallback to drop back to — see
@@ -170,11 +176,14 @@ pub enum CaptureSourceKind {
 #[derive(Debug, Clone)]
 pub struct PipeWireScreenCaptureOptions {
     /// The constant rate frames are emitted at. Like
-    /// `DxgiCaptureOptions::fps`, this is a fixed *output* rate, not a cap on
-    /// an otherwise irregular one — see [`PipeWireScreenCaptureSource`]'s docs on
-    /// why the capture side's own rate is both variable and unrelated.
-    /// `30` by default, matching every other source in this crate.
-    pub fps: u32,
+    /// `DxgiCaptureOptions::frame_rate`, this is a fixed *output* rate, not a
+    /// cap on an otherwise irregular one — see [`PipeWireScreenCaptureSource`]'s
+    /// docs on why the capture side's own rate is both variable and unrelated.
+    /// A fraction, so `30000/1001` is expressible; `30/1` by default, matching
+    /// every other source in this crate. One that is not positive is refused
+    /// with [`PipeWireScreenCaptureSourceError::InvalidFrameRate`] before the
+    /// portal is asked for anything.
+    pub frame_rate: ffmpeg::Rational,
     /// What the portal's picker offers — see [`CaptureSourceKind`].
     /// [`CaptureSourceKind::Monitor`] by default.
     pub source_kind: CaptureSourceKind,
@@ -201,7 +210,7 @@ pub struct PipeWireScreenCaptureOptions {
 impl Default for PipeWireScreenCaptureOptions {
     fn default() -> Self {
         Self {
-            fps: 30,
+            frame_rate: ffmpeg::Rational::new(30, 1),
             source_kind: CaptureSourceKind::Monitor,
             include_cursor: false,
             restore_token: None,
@@ -402,13 +411,13 @@ struct Terminate;
 ///
 /// # Frame rate
 ///
-/// [`PipeWireScreenCaptureOptions::fps`] is a fixed *output* rate. The compositor
+/// [`PipeWireScreenCaptureOptions::frame_rate`] is a fixed *output* rate. The compositor
 /// produces frames on damage — the negotiated PipeWire framerate is variable
 /// (`0/1`) with only a maximum — so an idle desktop may deliver a handful of
 /// frames per second while a busy one approaches the monitor's refresh rate.
 /// `run` decouples the two by re-emitting the latest captured image on its own
 /// schedule, exactly as `DxgiCaptureSource` does, so downstream sees a steady
-/// rate either way. Raising `fps` above the chosen monitor's refresh rate only
+/// rate either way. Raising `frame_rate` above the chosen monitor's refresh rate only
 /// repeats frames; it does not capture more.
 ///
 /// # A fullscreen client can stall a monitor capture — capture the window instead
@@ -634,6 +643,12 @@ impl PipeWireScreenCaptureSource {
         target: CaptureTarget,
     ) -> std::result::Result<(Self, VideoFormat, Option<String>), PipeWireScreenCaptureSourceError>
     {
+        let frame_rate = options.frame_rate;
+        if frame_rate.numerator() <= 0 || frame_rate.denominator() <= 0 {
+            return Err(PipeWireScreenCaptureSourceError::InvalidFrameRate(
+                frame_rate,
+            ));
+        }
         let name = name.into();
         let pp_log = element_pp_log(ElementType::PipeWireScreenCaptureSource, &name, None);
 
@@ -678,7 +693,13 @@ impl PipeWireScreenCaptureSource {
 
         let worker = {
             let latest = latest.clone();
-            let fps = options.fps.max(1);
+            // What the stream is asked to deliver: whole frames a second,
+            // rounded up so a fractional rate is never starved. Only a
+            // preference to the compositor — the output cadence is
+            // `frame_rate` itself, paced by this element's own loop.
+            let numerator = frame_rate.numerator() as u32;
+            let denominator = frame_rate.denominator() as u32;
+            let fps = numerator.div_ceil(denominator).max(1);
             std::thread::Builder::new()
                 .name(format!("{name}-pipewire"))
                 .spawn(move || {
@@ -729,19 +750,18 @@ impl PipeWireScreenCaptureSource {
         let session_watcher =
             watch_session_closed(session.clone(), captured, latest.clone(), watching.clone());
 
-        let fps = options.fps.max(1); // a `0` fps is nonsensical; treat it as 1 rather than dividing by zero
-        // Same `1 / fps` convention as `PipeWireScreenCaptureSource::time_base`
-        // — computed here too since `Self` is moved into the tuple below before
-        // that method could be called on it.
-        let time_base = ffmpeg::Rational::new(1, fps as i32);
+        // The reciprocal of the rate, as `PipeWireScreenCaptureSource::time_base`
+        // has it — computed here too since `Self` is moved into the tuple below
+        // before that method could be called on it.
+        let time_base = frame_rate.invert();
         pp_info!(
             pp_log: &pp_log,
-            "opened: {}x{} via xdg-desktop-portal, source_kind={:?}, include_cursor={}, fps={}, restored={}",
+            "opened: {}x{} via xdg-desktop-portal, source_kind={:?}, include_cursor={}, frame_rate={}, restored={}",
             width,
             height,
             options.source_kind,
             options.include_cursor,
-            fps,
+            frame_rate,
             options.restore_token.is_some()
         );
 
@@ -758,7 +778,7 @@ impl PipeWireScreenCaptureSource {
                 pp_log,
                 width,
                 height,
-                frame_rate: FrameRate::new(ffmpeg::Rational::new(fps as i32, 1)),
+                frame_rate: FrameRate::new(frame_rate),
                 frame_index: 0,
                 // GPU mode pools only the small `AVFrame` wrapper: the
                 // surface it references comes from the CUDA frames context
@@ -814,7 +834,8 @@ impl PipeWireScreenCaptureSource {
 
     /// The unit each emitted frame's `pts` is expressed in.
     ///
-    /// Frames are stamped with a plain frame counter, so this is `1/fps` — the
+    /// Frames are stamped with a plain frame counter, so this is the
+    /// reciprocal of [`PipeWireScreenCaptureOptions::frame_rate`] — the
     /// configured output rate, not the compositor's irregular capture rate.
     /// Same contract as `DxgiCaptureSource::time_base`.
     pub fn time_base(&self) -> ffmpeg::Rational {
@@ -1202,7 +1223,7 @@ impl SourceElement for PipeWireScreenCaptureSource {
 
             // Nothing to poll: the PipeWire thread fills `latest` on its own.
             // Sleeping in `POLL_GRANULARITY` slices keeps `Stop` responsive at
-            // low `fps` without busy-waiting.
+            // low `frame_rate` without busy-waiting.
             let remaining = schedule.remaining(Instant::now());
             if !remaining.is_zero() {
                 std::thread::sleep(remaining.min(POLL_GRANULARITY));
@@ -2549,10 +2570,30 @@ mod tests {
         assert!(dst.iter().all(|&b| b == 0));
     }
 
+    /// Refused before the portal is asked for anything: a rate the capture
+    /// could not run at must not first put a screen-share dialog in front of
+    /// the user. Needs no portal, since nothing gets that far.
+    #[test]
+    fn a_rate_that_is_not_positive_is_refused_before_the_portal_is_asked() {
+        for rate in [ffmpeg::Rational::new(0, 1), ffmpeg::Rational::new(30, 0)] {
+            let result = PipeWireScreenCaptureSource::open(
+                "capture",
+                PipeWireScreenCaptureOptions {
+                    frame_rate: rate,
+                    ..PipeWireScreenCaptureOptions::default()
+                },
+            );
+            assert!(matches!(
+                result,
+                Err(PipeWireScreenCaptureSourceError::InvalidFrameRate(refused)) if refused == rate
+            ));
+        }
+    }
+
     #[test]
     fn default_options_match_the_documented_defaults() {
         let options = PipeWireScreenCaptureOptions::default();
-        assert_eq!(options.fps, 30);
+        assert_eq!(options.frame_rate, ffmpeg::Rational::new(30, 1));
         assert_eq!(options.source_kind, CaptureSourceKind::Monitor);
         assert!(!options.include_cursor);
         assert!(options.restore_token.is_none());

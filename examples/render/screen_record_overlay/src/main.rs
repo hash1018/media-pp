@@ -106,7 +106,7 @@ mod linux_example {
         let (source, format, restore_token) = PipeWireScreenCaptureSource::open_gpu(
             "screen",
             PipeWireScreenCaptureOptions {
-                fps: 30,
+                frame_rate,
                 source_kind,
                 include_cursor: true,
                 restore_token,

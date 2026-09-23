@@ -12,6 +12,20 @@ compile error with no explanation.
 
 ### Breaking
 
+- **Screen captures take a `frame_rate`, not `fps`.** `DxgiCaptureOptions`,
+  `WgcCaptureOptions` and `PipeWireScreenCaptureOptions` took `fps: u32`,
+  while their own runtime `FrameRateHandle::set`, every encoder, the
+  compositors, the test sources and the webcam all take an
+  `ffmpeg::Rational`. A recording wrote the same rate twice in two shapes,
+  and `30000/1001` could not be asked for at all. Each now has
+  `frame_rate: ffmpeg::Rational` (`30/1` by default), so one value goes to
+  the capture and the encoder alike. A rate that is not positive is refused
+  by `open` with the new `InvalidFrameRate` on `DxgiCaptureSourceError` and
+  `PipeWireScreenCaptureSourceError` — DXGI and PipeWire used to run a `0`
+  at 1 fps — and `WgcCaptureSourceError::InvalidFps` becomes
+  `InvalidFrameRate` carrying the rate. PipeWire refuses it before the
+  portal shows a dialog.
+
 - **A `Pipeline` says when `run` or `seek` did nothing.** Calling `run`
   on a pipeline that had already been run returned `Ok` and did nothing,
   so a second play-through showed neither an error nor any playback; it

@@ -74,8 +74,9 @@ mod windows_example {
             .nth(1)
             .unwrap_or_else(|| "screen_record_av.mp4".into());
 
+        let frame_rate = ffmpeg::Rational::new(30, 1);
         let capture_options = DxgiCaptureOptions {
-            fps: 30,
+            frame_rate,
             capture_mode: CaptureMode::Cpu {
                 include_cursor: true,
             },
@@ -99,7 +100,7 @@ mod windows_example {
                 codec: VideoCodec::OpenH264,
                 width: video_format.width,
                 height: video_format.height,
-                frame_rate: ffmpeg::Rational::new(30, 1),
+                frame_rate,
                 bit_rate: 4_000_000,
                 gop_size: 60, // ~2s @ 30fps
                 max_b_frames: None,
@@ -246,10 +247,11 @@ mod linux_example {
         if restore_token.is_none() {
             eprintln!("opening the portal — approve the screen-share dialog to continue...");
         }
+        let frame_rate = ffmpeg::Rational::new(30, 1);
         let (video_source, video_format, restore_token) = PipeWireScreenCaptureSource::open(
             "screen",
             PipeWireScreenCaptureOptions {
-                fps: 30,
+                frame_rate,
                 source_kind,
                 include_cursor: true,
                 restore_token,
@@ -287,7 +289,7 @@ mod linux_example {
                 width,
                 height,
                 time_base: video_time_base,
-                frame_rate: ffmpeg::Rational::new(30, 1),
+                frame_rate,
                 bit_rate: 4_000_000,
                 gop_size: 60, // ~2s @ 30fps
                 max_b_frames: None,

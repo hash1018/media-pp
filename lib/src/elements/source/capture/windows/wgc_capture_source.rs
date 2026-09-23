@@ -99,9 +99,10 @@ pub enum WgcCaptureSourceError {
     /// capture sources.
     #[error("the captured window is gone")]
     TargetGone,
-    /// A fixed output cadence cannot be constructed from zero frames per second.
-    #[error("WgcCaptureOptions::fps must be greater than zero")]
-    InvalidFps,
+    /// [`WgcCaptureOptions::frame_rate`]'s numerator or denominator is not
+    /// positive. Refused before the window or a device is touched.
+    #[error("invalid frame rate {0}; numerator and denominator must both be positive")]
+    InvalidFrameRate(ffmpeg::Rational),
     /// Windows Graphics Capture is unavailable in this Windows session.
     #[error("Windows Graphics Capture isn't supported in this Windows session")]
     Unsupported,
@@ -144,8 +145,10 @@ pub enum WgcCaptureSourceError {
 /// Construction options for [`WgcCaptureSource::open`].
 #[derive(Debug, Clone)]
 pub struct WgcCaptureOptions {
-    /// Constant rate at which the latest captured window image is emitted.
-    pub fps: u32,
+    /// Constant rate at which the latest captured window image is emitted —
+    /// a fraction, like every other rate in this crate, so `30000/1001` is
+    /// expressible. `30/1` by default.
+    pub frame_rate: ffmpeg::Rational,
     /// Whether Windows should include the mouse cursor in captured frames.
     pub include_cursor: bool,
 }
@@ -153,7 +156,7 @@ pub struct WgcCaptureOptions {
 impl Default for WgcCaptureOptions {
     fn default() -> Self {
         Self {
-            fps: 30,
+            frame_rate: ffmpeg::Rational::new(30, 1),
             include_cursor: true,
         }
     }
@@ -189,7 +192,7 @@ impl Default for WgcCaptureOptions {
 /// carrying independent PTS values.
 ///
 /// WGC itself is change-driven, but this source emits the most recent image at
-/// a constant [`WgcCaptureOptions::fps`] cadence. PTS values are consecutive
+/// a constant [`WgcCaptureOptions::frame_rate`] cadence. PTS values are consecutive
 /// ticks in [`Self::time_base`]. Window resizing is handled in place: the WGC
 /// frame pool and this source's latest-image texture are recreated, and later
 /// frames carry the new visible dimensions. BGRA frames are tagged RGB/full
@@ -317,7 +320,6 @@ impl WgcCaptureSource {
     ) -> Self {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::WgcCaptureSource, &name, None);
-        let fps = options.fps as i32;
         let pad = SrcPad::with_contract(format!("{name}_src"), output_contract());
         if let Some(error) = target.owner_process_error {
             pp_warn!(
@@ -339,7 +341,7 @@ impl WgcCaptureSource {
             device,
             context,
             include_cursor: options.include_cursor,
-            frame_rate: FrameRate::new(ffmpeg::Rational::new(fps, 1)),
+            frame_rate: FrameRate::new(options.frame_rate),
             frame_index: 0,
             pad,
             frame_pool: UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {}),
@@ -551,7 +553,7 @@ impl SourceElement for WgcCaptureSource {
         .inspect_err(|error| pp_error!(self, "capture start failed: {error}"))?;
         pp_info!(
             self,
-            "started: window={:?}, fps={}, include_cursor={}",
+            "started: window={:?}, frame_rate={}, include_cursor={}",
             hwnd,
             self.frame_rate.get(),
             self.include_cursor
@@ -638,8 +640,9 @@ impl SourceElement for WgcCaptureSource {
 }
 
 fn validate_options(options: &WgcCaptureOptions) -> std::result::Result<(), WgcCaptureSourceError> {
-    if options.fps == 0 {
-        return Err(WgcCaptureSourceError::InvalidFps);
+    let rate = options.frame_rate;
+    if rate.numerator() <= 0 || rate.denominator() <= 0 {
+        return Err(WgcCaptureSourceError::InvalidFrameRate(rate));
     }
     Ok(())
 }
@@ -1336,16 +1339,21 @@ mod tests {
     }
 
     #[test]
-    fn rejects_zero_fps_before_touching_the_window_or_device() {
-        let result = WgcCaptureSource::open(
-            "capture",
-            HWND::default(),
-            WgcCaptureOptions {
-                fps: 0,
-                ..WgcCaptureOptions::default()
-            },
-        );
-        assert!(matches!(result, Err(WgcCaptureSourceError::InvalidFps)));
+    fn rejects_a_rate_that_is_not_positive_before_touching_the_window_or_device() {
+        for rate in [ffmpeg::Rational::new(0, 1), ffmpeg::Rational::new(30, 0)] {
+            let result = WgcCaptureSource::open(
+                "capture",
+                HWND::default(),
+                WgcCaptureOptions {
+                    frame_rate: rate,
+                    ..WgcCaptureOptions::default()
+                },
+            );
+            assert!(matches!(
+                result,
+                Err(WgcCaptureSourceError::InvalidFrameRate(refused)) if refused == rate
+            ));
+        }
     }
 
     #[test]
@@ -1558,7 +1566,7 @@ mod tests {
             "capture",
             window.0,
             WgcCaptureOptions {
-                fps: 60,
+                frame_rate: ffmpeg::Rational::new(60, 1),
                 include_cursor: false,
             },
         ) {
@@ -1610,7 +1618,7 @@ mod tests {
             "capture",
             window.0,
             WgcCaptureOptions {
-                fps: 30,
+                frame_rate: ffmpeg::Rational::new(30, 1),
                 include_cursor: false,
             },
         ) {
@@ -1625,7 +1633,7 @@ mod tests {
             "capture",
             window.0,
             WgcCaptureOptions {
-                fps: 30,
+                frame_rate: ffmpeg::Rational::new(30, 1),
                 include_cursor: false,
             },
             &device,
@@ -1775,7 +1783,7 @@ mod tests {
             "capture",
             hwnd,
             WgcCaptureOptions {
-                fps: 30,
+                frame_rate: ffmpeg::Rational::new(30, 1),
                 include_cursor: false,
             },
         ) {
@@ -1834,7 +1842,7 @@ mod tests {
             "capture",
             window.0,
             WgcCaptureOptions {
-                fps: 30,
+                frame_rate: ffmpeg::Rational::new(30, 1),
                 include_cursor: false,
             },
         ) {

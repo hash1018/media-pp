@@ -63,12 +63,13 @@ mod windows_example {
         )?;
         let recording = common::parse_args("")?;
 
+        let frame_rate = ffmpeg::Rational::new(30, 1);
         // Opened first: `CaptureMode::Gpu` resolves the capture adapter, builds
         // its own device and hands it back. The encoder has to be built from
         // that same device — a texture from one `ID3D11Device` is not valid on
         // another, which is the invariant this whole D3D11 stack rests on.
         let capture_options = DxgiCaptureOptions {
-            fps: 30,
+            frame_rate,
             capture_mode: CaptureMode::Gpu,
             ..DxgiCaptureOptions::default()
         };
@@ -87,7 +88,7 @@ mod windows_example {
                 input_format: D3d11VideoInputFormat::Bgra,
                 width: format.width,
                 height: format.height,
-                frame_rate: ffmpeg::Rational::new(30, 1),
+                frame_rate,
                 bit_rate: 8_000_000,
                 gop_size: 60, // ~2s @ 30fps
                 max_b_frames: None,
@@ -173,10 +174,11 @@ mod linux_example {
         // capture because `open_gpu` allocates its surfaces from it.
         let cuda = CudaDevice::new()?;
 
+        let frame_rate = ffmpeg::Rational::new(30, 1);
         let (source, format, restore_token) = PipeWireScreenCaptureSource::open_gpu(
             "screen",
             PipeWireScreenCaptureOptions {
-                fps: 30,
+                frame_rate,
                 source_kind,
                 include_cursor: true,
                 restore_token,
@@ -200,7 +202,7 @@ mod linux_example {
                 width: format.width,
                 height: format.height,
                 time_base: format.time_base,
-                frame_rate: ffmpeg::Rational::new(30, 1),
+                frame_rate,
                 bit_rate: 8_000_000,
                 gop_size: 60, // ~2s @ 30fps
                 max_b_frames: None,

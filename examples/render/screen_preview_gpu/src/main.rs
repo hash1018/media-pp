@@ -48,6 +48,7 @@ mod windows_example {
         elements::{
             CaptureMode, DxgiCaptureOptions, DxgiCaptureSource, WgcCaptureOptions, WgcCaptureSource,
         },
+        ffmpeg,
         pipeline::Pipeline,
     };
     use render_common::{D3d11GpuContext, Shutdown};
@@ -265,7 +266,7 @@ mod windows_example {
                 let (source, _format) = DxgiCaptureSource::open_with_device(
                     "screen",
                     DxgiCaptureOptions {
-                        fps: 60,
+                        frame_rate: ffmpeg::Rational::new(60, 1),
                         capture_mode: CaptureMode::Gpu,
                         ..DxgiCaptureOptions::default()
                     },
@@ -286,7 +287,7 @@ mod windows_example {
                     "window",
                     HWND(target as *mut c_void),
                     WgcCaptureOptions {
-                        fps: 60,
+                        frame_rate: ffmpeg::Rational::new(60, 1),
                         include_cursor: true,
                     },
                     gpu.device(),
@@ -385,6 +386,7 @@ mod linux_example {
             CaptureSourceKind, CudaConverter, CudaDevice, PipeWireScreenCaptureOptions,
             PipeWireScreenCaptureSource,
         },
+        ffmpeg,
         pipeline::Pipeline,
     };
     use render_common::{Shutdown, VulkanGpuContext, WindowTarget};
@@ -425,7 +427,7 @@ mod linux_example {
         let (source, format, restore_token) = PipeWireScreenCaptureSource::open_gpu(
             "screen",
             PipeWireScreenCaptureOptions {
-                fps: 60,
+                frame_rate: ffmpeg::Rational::new(60, 1),
                 source_kind,
                 include_cursor: true,
                 restore_token,

@@ -1601,7 +1601,7 @@ mod d3d11 {
             "window-capture",
             hwnd,
             WgcCaptureOptions {
-                fps: 30,
+                frame_rate: ffmpeg::Rational::new(30, 1),
                 include_cursor: false,
             },
         )
@@ -2262,6 +2262,7 @@ mod cuda {
 mod pipewire {
     use std::{thread, time::Duration};
 
+    use ffmpeg_next as ffmpeg;
     use media_pp::{
         elements::{
             CaptureSourceKind, FrameCounter, PipeWireScreenCaptureOptions,
@@ -2409,7 +2410,7 @@ mod pipewire {
     /// is the one kind that is certain to still exist on a later run.
     fn options(restore_token: &str) -> PipeWireScreenCaptureOptions {
         PipeWireScreenCaptureOptions {
-            fps: 30,
+            frame_rate: ffmpeg::Rational::new(30, 1),
             source_kind: CaptureSourceKind::Monitor,
             include_cursor: false,
             restore_token: Some(restore_token.to_owned()),
