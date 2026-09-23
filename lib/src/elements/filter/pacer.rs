@@ -11,30 +11,33 @@ use crate::{
     element::{Element, ElementType, Sink, Source, element_pp_log},
     pad::SrcPad,
     playback_clock::PlaybackClock,
-    time::{InvalidTimeBase, MediaTimestamp, TimeBase},
+    time::{MediaTimestamp, TimeBase},
 };
 
 /// Errors specific to [`Pacer`].
 #[derive(Debug, ThisError)]
 pub enum PacerError {
-    /// `time_base` came from
-    /// [`crate::elements::FileDemuxer::stream_time_base`]/an encoder's own
-    /// time base — i.e. from a demuxed file or an otherwise externally
-    /// supplied stream, not a value this crate controls. A malformed or
-    /// unusual stream can legitimately have an invalid one.
+    /// A buffer with a timestamp arrived without the unit it is in, so there
+    /// is nothing to turn its `pts` into a time with.
+    ///
+    /// Every element in this crate that makes a frame says what unit its
+    /// `pts` is in — see [`crate::buffer::time_base`] — so this is a frame
+    /// made elsewhere: pushed through an [`crate::elements::AppSource`], or
+    /// out of an element of the caller's own. Stamp it with
+    /// [`crate::buffer::set_time_base`]. Refused rather than guessed at,
+    /// because a guessed unit plays at the wrong speed with no other sign.
     #[error(
-        "invalid time base {numerator}/{denominator}: both numerator and denominator must be positive"
+        "a {kind} arrived with a pts but no time base to read it in; the element \
+         that made it has to set one (media_pp::buffer::set_time_base)"
     )]
-    InvalidTimeBase {
-        /// Invalid rational numerator.
-        numerator: i32,
-        /// Invalid rational denominator.
-        denominator: i32,
+    NoTimeBase {
+        /// Which kind of buffer — `Video`, `Audio` or `Packet`.
+        kind: &'static str,
     },
 
-    /// `pts` is external input too (see [`PacerError::InvalidTimeBase`]) —
-    /// an adversarial or corrupt value that cannot be turned into a wait at
-    /// all: it does not fit in nanoseconds at this stream's time base.
+    /// `pts` is external input — an adversarial or corrupt value that cannot
+    /// be turned into a wait at all: it does not fit in nanoseconds at its
+    /// own buffer's time base.
     ///
     /// Reported rather than swallowed because the alternative is the buffer
     /// going through *unpaced*, which is a whole stream arriving at once.
@@ -95,7 +98,6 @@ const INTERRUPT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 pub struct Pacer {
     pp_log: PpLog,
     name: Arc<str>,
-    time_base: TimeBase,
     /// The pipeline's, given by [`Element::attach_context`] — see there for
     /// why this is not something the caller supplies.
     ///
@@ -129,36 +131,30 @@ pub struct Pacer {
 }
 
 impl Pacer {
-    /// Creates a pacer using `time_base` to convert input PTS values to wall
-    /// time.
+    /// Creates a pacer. Each buffer says what unit its own `pts` is in — a
+    /// packet its time base, a frame the one the element that made it set —
+    /// so there is nothing here to be told, and nothing to be told wrong:
+    /// the unit of one stream handed to a pacer on another played it at the
+    /// wrong speed without a word. See [`PacerError::NoTimeBase`] for a
+    /// frame that does not say.
     ///
     /// The clock it paces against is the pipeline's and arrives when this is
     /// wired into one — see [`Element::attach_context`].
-    pub fn new(name: impl Into<String>, time_base: ffmpeg::Rational) -> Result<Self, PacerError> {
+    pub fn new(name: impl Into<String>) -> Self {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::Pacer, &name, None);
-        pp_info!(pp_log: &pp_log, "created: time_base={time_base}");
+        pp_info!(pp_log: &pp_log, "created");
         let pad = SrcPad::with_contract(format!("{name}_src"), OutputContract::Passthrough);
-        let time_base = TimeBase::try_new(time_base).map_err(
-            |InvalidTimeBase {
-                 numerator,
-                 denominator,
-             }| PacerError::InvalidTimeBase {
-                numerator,
-                denominator,
-            },
-        )?;
-        Ok(Self {
+        Self {
             name,
             pp_log,
-            time_base,
             playback_clock: None,
             discontinuity_limit: None,
             interrupt_epoch: 0,
             prerolling: false,
             pending: VecDeque::new(),
             pad,
-        })
+        }
     }
 
     /// The same, for a stream whose timeline can restart under it.
@@ -182,15 +178,11 @@ impl Pacer {
     /// problem, not a pause. Shorter than the spacing between its own
     /// frames and every ordinary wait reads as a jump, which is this pacer
     /// no longer pacing at all.
-    pub fn with_discontinuity_limit(
-        name: impl Into<String>,
-        time_base: ffmpeg::Rational,
-        limit: Duration,
-    ) -> Result<Self, PacerError> {
-        let mut pacer = Self::new(name, time_base)?;
+    pub fn with_discontinuity_limit(name: impl Into<String>, limit: Duration) -> Self {
+        let mut pacer = Self::new(name);
         pp_info!(pp_log: &pacer.pp_log, "timeline jumps beyond {limit:?} re-anchor it");
         pacer.discontinuity_limit = Some(limit);
-        Ok(pacer)
+        pacer
     }
 
     /// Blocks until `pts` is due against the pipeline's playback clock.
@@ -207,7 +199,7 @@ impl Pacer {
     /// arithmetic; under an audio one they are not, because the position
     /// advances at the device's rate and a deadline named up front would be
     /// wrong by however far that rate differs.
-    fn wait_for(&mut self, pts: Option<i64>) -> Result<bool, PacerError> {
+    fn wait_for(&mut self, timing: Timing) -> Result<bool, PacerError> {
         let playback = self.playback_clock.clone().ok_or(PacerError::NotAttached)?;
         if playback.interrupt_epoch() != self.interrupt_epoch {
             return Ok(false);
@@ -215,7 +207,11 @@ impl Pacer {
         if self.prerolling {
             return Ok(true);
         }
-        let Some(pts) = pts else { return Ok(true) };
+        let (pts, time_base) = match timing {
+            Timing::Untimed => return Ok(true),
+            Timing::Unitless(kind) => return Err(PacerError::NoTimeBase { kind }),
+            Timing::At(pts, time_base) => (pts, time_base),
+        };
         // Rescaled before anything is compared, because the origin this is
         // measured against is shared with streams in other units — a
         // container's audio and video rarely count in the same ticks.
@@ -223,7 +219,7 @@ impl Pacer {
         // the latter loses precision (and the numerator, if computed by
         // naive division) over a long-running stream; see `MediaTimestamp`'s
         // own docs.
-        let pts_ns = MediaTimestamp::new_unchecked(pts, self.time_base).rescale(nanoseconds());
+        let pts_ns = MediaTimestamp::new_unchecked(pts, time_base).rescale(nanoseconds());
         // `av_rescale_q_rnd` answers a value it cannot represent with
         // `INT64_MIN`, which is also FFmpeg's "no timestamp". Checked before
         // the clock is asked, so a pathological first buffer cannot become
@@ -254,6 +250,35 @@ impl Pacer {
             }
             thread::sleep(remaining.min(INTERRUPT_POLL_INTERVAL));
         }
+    }
+}
+
+/// What a buffer says about when it is due: nothing (no `pts`), a count
+/// with no unit to read it in, or a count and its unit.
+enum Timing {
+    Untimed,
+    Unitless(&'static str),
+    At(i64, TimeBase),
+}
+
+impl Timing {
+    /// `None` for `Eos`, which is never waited for.
+    fn of(buffer: &MediaBuffer) -> Option<Self> {
+        let (pts, time_base) = match buffer {
+            MediaBuffer::Packet(packet) => (packet.pts(), Some(packet.time_base())),
+            MediaBuffer::Video(frame) => (frame.pts(), crate::buffer::time_base(frame)),
+            MediaBuffer::Audio(frame) => (frame.pts(), crate::buffer::time_base(frame)),
+            MediaBuffer::Eos => return None,
+        };
+        let Some(pts) = pts else {
+            return Some(Self::Untimed);
+        };
+        Some(
+            match time_base.and_then(|unit| TimeBase::try_new(unit).ok()) {
+                Some(unit) => Self::At(pts, unit),
+                None => Self::Unitless(buffer.kind()),
+            },
+        )
     }
 }
 
@@ -296,11 +321,9 @@ impl Sink for Pacer {
     fn consume(&mut self, buf: MediaBuffer) -> crate::error::Result<()> {
         self.pending.push_back(buf);
         while let Some(buf) = self.pending.pop_front() {
-            let ready = match &buf {
-                MediaBuffer::Packet(packet) => self.wait_for(packet.pts())?,
-                MediaBuffer::Video(frame) => self.wait_for(frame.pts())?,
-                MediaBuffer::Audio(frame) => self.wait_for(frame.pts())?,
-                MediaBuffer::Eos => true,
+            let ready = match Timing::of(&buf) {
+                Some(timing) => self.wait_for(timing)?,
+                None => true,
             };
             if !ready {
                 self.pending.push_front(buf);
@@ -378,27 +401,27 @@ mod tests {
     }
 
     /// A pacer wired the way a pipeline wires one.
-    fn paced(
-        name: &str,
-        time_base: ffmpeg::Rational,
-        context: &Arc<crate::element::Context>,
-    ) -> Pacer {
-        let mut pacer = Pacer::new(name, time_base).expect("valid time base");
+    fn paced(name: &str, context: &Arc<crate::element::Context>) -> Pacer {
+        let mut pacer = Pacer::new(name);
         pacer.attach_context(context);
         pacer
     }
 
     /// The same, with a limit on how long one buffer may hold it.
-    fn paced_live(
-        name: &str,
-        time_base: ffmpeg::Rational,
-        context: &Arc<crate::element::Context>,
-        limit: Duration,
-    ) -> Pacer {
-        let mut pacer =
-            Pacer::with_discontinuity_limit(name, time_base, limit).expect("valid time base");
+    fn paced_live(name: &str, context: &Arc<crate::element::Context>, limit: Duration) -> Pacer {
+        let mut pacer = Pacer::with_discontinuity_limit(name, limit);
         pacer.attach_context(context);
         pacer
+    }
+
+    /// A buffer due `pts` milliseconds in, as a wait sees it.
+    fn ms(pts: i64) -> Timing {
+        Timing::At(pts, TimeBase::new_unchecked(ffmpeg::Rational::new(1, 1000)))
+    }
+
+    /// The same, in seconds.
+    fn secs(pts: i64) -> Timing {
+        Timing::At(pts, TimeBase::new_unchecked(ffmpeg::Rational::new(1, 1)))
     }
 
     /// A camera that reboots hands over a timestamp with no relation to the
@@ -413,17 +436,12 @@ mod tests {
         // frames below — a limit shorter than that would read the ordinary
         // wait for the next frame as a jump, which is what it is for the
         // caller to pick against its own stream.
-        let mut pacer = paced_live(
-            "pacer",
-            ffmpeg::Rational::new(1, 1000),
-            &context,
-            Duration::from_millis(300),
-        );
-        assert!(pacer.wait_for(Some(0)).unwrap(), "the first pts anchors");
+        let mut pacer = paced_live("pacer", &context, Duration::from_millis(300));
+        assert!(pacer.wait_for(ms(0)).unwrap(), "the first pts anchors");
 
         let started = Instant::now();
         assert!(
-            pacer.wait_for(Some(3_600_000)).unwrap(),
+            pacer.wait_for(ms(3_600_000)).unwrap(),
             "a jumped timestamp is released, not refused"
         );
         assert!(
@@ -435,7 +453,7 @@ mod tests {
         // And the new timeline is the one it paces against from here: 200ms
         // after the jump is 200ms of waiting, not another hour.
         let after = Instant::now();
-        assert!(pacer.wait_for(Some(3_600_200)).unwrap(), "the next frame");
+        assert!(pacer.wait_for(ms(3_600_200)).unwrap(), "the next frame");
         let waited = after.elapsed();
         assert!(
             waited >= Duration::from_millis(150) && waited < Duration::from_secs(2),
@@ -449,11 +467,11 @@ mod tests {
     fn a_pacer_without_a_limit_still_waits_out_a_distant_timestamp() {
         let clock = Arc::new(Clock::new());
         let context = context(&clock);
-        let mut pacer = paced("pacer", ffmpeg::Rational::new(1, 1000), &context);
-        assert!(pacer.wait_for(Some(0)).unwrap(), "the first pts anchors");
+        let mut pacer = paced("pacer", &context);
+        assert!(pacer.wait_for(ms(0)).unwrap(), "the first pts anchors");
 
         let started = Instant::now();
-        assert!(pacer.wait_for(Some(300)).unwrap(), "300ms into the stream");
+        assert!(pacer.wait_for(ms(300)).unwrap(), "300ms into the stream");
         assert!(
             started.elapsed() >= Duration::from_millis(250),
             "the gap is the stream's own and has to be waited out: took {:?}",
@@ -461,9 +479,11 @@ mod tests {
         );
     }
 
+    /// A packet `pts` seconds in, saying so, as every packet here does.
     fn packet(pts: i64) -> MediaBuffer {
         let mut packet = ffmpeg::Packet::empty();
         packet.set_pts(Some(pts));
+        packet.set_time_base(ffmpeg::Rational::new(1, 1));
         MediaBuffer::Packet(Arc::new(packet))
     }
 
@@ -471,16 +491,16 @@ mod tests {
     fn long_wait_returns_promptly_when_control_interrupts_it() {
         let clock = Arc::new(Clock::new());
         let context = context(&clock);
-        let mut pacer = paced("pacer", ffmpeg::Rational::new(1, 1), &context);
+        let mut pacer = paced("pacer", &context);
         assert!(
-            pacer.wait_for(Some(0)).unwrap(),
+            pacer.wait_for(secs(0)).unwrap(),
             "first pts should establish the anchor"
         );
 
         let (started_tx, started_rx) = mpsc::channel();
         let worker = thread::spawn(move || {
             started_tx.send(()).expect("test receiver alive");
-            pacer.wait_for(Some(60))
+            pacer.wait_for(secs(60))
         });
 
         started_rx.recv().expect("paced wait should start");
@@ -500,7 +520,7 @@ mod tests {
     fn pause_retains_interrupted_buffer_but_flush_and_stop_discard_it() {
         let clock = Arc::new(Clock::new());
         let context = context(&clock);
-        let mut pacer = paced("pacer", ffmpeg::Rational::new(1, 1), &context);
+        let mut pacer = paced("pacer", &context);
 
         clock.interrupt();
         pacer.consume(packet(0)).expect("interrupted consume");
@@ -523,22 +543,68 @@ mod tests {
         assert!(pacer.pending.is_empty(), "stop must abandon pending data");
     }
 
+    /// Each buffer is paced in its own unit — which is the whole point of
+    /// the pacer not being told one. Two frames with the same count, one in
+    /// milliseconds and one in tenths of a second, are due at very different
+    /// times.
     #[test]
-    fn new_rejects_an_invalid_time_base() {
-        for rational in [
-            ffmpeg::Rational::new(0, 1),
-            ffmpeg::Rational::new(1, 0),
-            ffmpeg::Rational::new(-1, 1),
-            ffmpeg::Rational::new(1, -1),
-        ] {
-            assert!(
-                matches!(
-                    Pacer::new("pacer", rational),
-                    Err(PacerError::InvalidTimeBase { .. })
-                ),
-                "expected {rational} to be rejected"
-            );
-        }
+    fn a_frame_is_paced_in_the_unit_it_carries() {
+        let clock = Arc::new(Clock::new());
+        let context = context(&clock);
+        let mut pacer = paced("pacer", &context);
+        let frame = |pts: i64, unit: ffmpeg::Rational| {
+            let mut frame = ffmpeg::frame::Audio::empty();
+            frame.set_pts(Some(pts));
+            crate::buffer::set_time_base(&mut frame, unit);
+            MediaBuffer::Audio(Arc::new(frame))
+        };
+
+        pacer
+            .consume(frame(0, ffmpeg::Rational::new(1, 1000)))
+            .expect("the first anchors");
+        let started = Instant::now();
+        pacer
+            .consume(frame(2, ffmpeg::Rational::new(1, 1000)))
+            .expect("2ms in");
+        assert!(
+            started.elapsed() < Duration::from_millis(100),
+            "2 in milliseconds is almost now: took {:?}",
+            started.elapsed()
+        );
+        pacer
+            .consume(frame(2, ffmpeg::Rational::new(1, 10)))
+            .expect("200ms in");
+        assert!(
+            started.elapsed() >= Duration::from_millis(150),
+            "the same 2 in tenths of a second is 200ms: took {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// A frame that does not say what unit its `pts` is in is refused by
+    /// name, not guessed at: a guess plays at the wrong speed and nothing
+    /// else says so. A frame with no `pts` at all has nothing to wait for
+    /// and goes straight through.
+    #[test]
+    fn a_frame_with_no_time_base_is_refused_rather_than_guessed_at() {
+        let clock = Arc::new(Clock::new());
+        let context = context(&clock);
+        let mut pacer = paced("pacer", &context);
+
+        let mut unitless = ffmpeg::frame::Audio::empty();
+        unitless.set_pts(Some(10));
+        let error = pacer
+            .consume(MediaBuffer::Audio(Arc::new(unitless)))
+            .expect_err("no unit to read the pts in");
+        assert!(matches!(
+            error,
+            crate::Error::PacerError(PacerError::NoTimeBase { kind: "Audio" })
+        ));
+        assert!(pacer.pending.is_empty(), "and it is not left in `pending`");
+
+        pacer
+            .consume(MediaBuffer::Audio(Arc::new(ffmpeg::frame::Audio::empty())))
+            .expect("an untimed frame has nothing to wait for");
     }
 
     /// Preroll has to outrun the paused clock — that is the whole reason a
@@ -554,7 +620,7 @@ mod tests {
     fn preroll_forwards_without_waiting_out_the_presentation_time() {
         let clock = Arc::new(Clock::new());
         let context = context(&clock);
-        let mut pacer = paced("pacer", ffmpeg::Rational::new(1, 1), &context);
+        let mut pacer = paced("pacer", &context);
         let context = Arc::new(PrerollContext::for_seek([], Duration::from_secs(2)));
         pacer
             .control(ControlMsg::Preroll(context))
@@ -580,7 +646,7 @@ mod tests {
     /// debug_assert nobody runs.
     #[test]
     fn an_unwired_pacer_refuses_rather_than_passing_a_buffer_through() {
-        let mut pacer = Pacer::new("pacer", ffmpeg::Rational::new(1, 1)).unwrap();
+        let mut pacer = Pacer::new("pacer");
         assert!(matches!(
             pacer.consume(packet(0)),
             Err(crate::error::Error::PacerError(PacerError::NotAttached))
@@ -600,14 +666,12 @@ mod tests {
     fn streams_that_start_apart_stay_apart() {
         let clock = Arc::new(Clock::new());
         let context = context(&clock);
-        // Milliseconds, so the numbers below read as what they are.
-        let unit = ffmpeg::Rational::new(1, 1000);
-        let mut audio = paced("audio", unit, &context);
-        let mut video = paced("video", unit, &context);
+        let mut audio = paced("audio", &context);
+        let mut video = paced("video", &context);
 
         let started = Instant::now();
         assert!(
-            audio.wait_for(Some(0)).unwrap(),
+            audio.wait_for(ms(0)).unwrap(),
             "the first stream sets the origin and has nothing to wait for"
         );
         assert!(
@@ -615,7 +679,7 @@ mod tests {
             "it must not wait for itself"
         );
 
-        assert!(video.wait_for(Some(80)).unwrap(), "paced, not refused");
+        assert!(video.wait_for(ms(80)).unwrap(), "paced, not refused");
         assert!(
             started.elapsed() >= Duration::from_millis(70),
             "a stream starting 80ms into the file must be held back by it, \
@@ -636,7 +700,7 @@ mod tests {
     fn a_pacer_measures_against_the_audio_master_not_its_own_first_buffer() {
         let clock = Arc::new(Clock::new());
         let context = context(&clock);
-        let mut pacer = paced("pacer", ffmpeg::Rational::new(1, 1000), &context);
+        let mut pacer = paced("pacer", &context);
 
         let audio = context
             .playback_clock
@@ -648,8 +712,8 @@ mod tests {
             .expect("the registration is live");
 
         let started = Instant::now();
-        assert!(pacer.wait_for(Some(100)).unwrap(), "100ms is already past");
-        assert!(pacer.wait_for(Some(300)).unwrap(), "so is 300ms");
+        assert!(pacer.wait_for(ms(100)).unwrap(), "100ms is already past");
+        assert!(pacer.wait_for(ms(300)).unwrap(), "so is 300ms");
         assert!(
             started.elapsed() < Duration::from_millis(100),
             "both are behind a position already at 1s and neither has \
@@ -670,7 +734,7 @@ mod tests {
     fn priming_does_not_hold_a_pacer() {
         let clock = Arc::new(Clock::new());
         let context = context(&clock);
-        let mut pacer = paced("pacer", ffmpeg::Rational::new(1, 1000), &context);
+        let mut pacer = paced("pacer", &context);
 
         let _audio = context
             .playback_clock
@@ -683,7 +747,7 @@ mod tests {
 
         let started = Instant::now();
         assert!(
-            pacer.wait_for(Some(10_000)).unwrap(),
+            pacer.wait_for(ms(10_000)).unwrap(),
             "ten seconds ahead, and released anyway"
         );
         assert!(
@@ -705,7 +769,7 @@ mod tests {
     fn a_pathological_pts_jump_is_a_typed_error_not_silent_passthrough() {
         let clock = Arc::new(Clock::new());
         let context = context(&clock);
-        let mut pacer = paced("pacer", ffmpeg::Rational::new(1, 1), &context);
+        let mut pacer = paced("pacer", &context);
 
         assert!(pacer.consume(packet(-1)).is_ok(), "establishes the origin");
 
@@ -724,7 +788,7 @@ mod tests {
         // The pacer itself must still be usable afterward: a `Some` result
         // (not a further error) for an ordinary pts relative to the same
         // origin.
-        assert!(pacer.wait_for(Some(0)).is_ok());
+        assert!(pacer.wait_for(secs(0)).is_ok());
     }
 
     /// Packets whose `pts` goes backwards are still paced to their own
@@ -754,7 +818,6 @@ mod tests {
             .find(|stream| stream.kind == ffmpeg::media::Type::Video)
             .expect("the fixture has video")
             .index;
-        let time_base = demuxer.stream_time_base(video).expect("video time base");
 
         let seen = Arc::new(AtomicUsize::new(0));
         let counter = crate::elements::AppSink::new("paced", {
@@ -767,10 +830,7 @@ mod tests {
 
         let started = Instant::now();
         let pipeline = Pipeline::new("paced-reorder", demuxer, move |source, context| {
-            let branch = context
-                .branch()
-                .pipe(Pacer::new("pacer", time_base)?)
-                .to(counter)?;
+            let branch = context.branch().pipe(Pacer::new("pacer")).to(counter)?;
             context.attach(source, video, branch)?;
             Ok(())
         })

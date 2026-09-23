@@ -277,7 +277,7 @@ impl PerFrameTransform for SwChromaKey {
             self.options.threshold,
             self.options.smoothing,
         );
-        output.set_pts(frame.pts());
+        crate::buffer::carry_timing(&mut output, frame);
         Ok(output)
     }
 }

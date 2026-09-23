@@ -250,7 +250,9 @@ impl D3d11SharedTextureHandle {
     /// downstream as one frame, stamped `pts` (in the caller's own time
     /// base — `None` leaves it unstamped, which is what a
     /// [`crate::elements::VideoCompositorOptions`]-driven graph wants,
-    /// since the compositor sets its own).
+    /// since the compositor sets its own). The frame says no unit for it, so
+    /// a [`crate::elements::Pacer`] refuses a stamped one: a picture pushed
+    /// as it is drawn is already arriving at its own rate.
     ///
     /// `handle` is a shared-texture handle belonging to another device —
     /// what `IDXGIResource1::CreateSharedHandle` produces, and what a

@@ -529,7 +529,7 @@ impl D3d11ChromaKey {
         // `ffmpeg::frame::Video`'s own `Drop` runs on whatever was there
         // before, releasing that frame's GPU texture right here.
         *keyed = wrap_d3d11_texture(output, input.width, input.height)?;
-        keyed.set_pts(frame.pts());
+        crate::buffer::carry_timing(&mut keyed, frame);
         keyed.set_color_space(frame.color_space());
         keyed.set_color_range(frame.color_range());
         Ok(keyed)

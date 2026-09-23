@@ -934,6 +934,7 @@ impl PipeWireScreenCaptureSource {
         // whatever the wrapper carried: the timestamp is this tick's, the
         // colour description the picture's.
         wrapper.set_pts(Some(self.frame_index));
+        crate::buffer::set_time_base(&mut wrapper, self.time_base());
         self.frame_index += 1;
         Some(wrapper)
     }
@@ -1029,6 +1030,7 @@ impl PipeWireScreenCaptureSource {
             self.height = src_height;
         }
         frame.set_pts(Some(self.frame_index));
+        crate::buffer::set_time_base(&mut frame, self.time_base());
         self.frame_index += 1;
         Some(frame)
     }

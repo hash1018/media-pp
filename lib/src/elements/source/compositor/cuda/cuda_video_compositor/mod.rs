@@ -861,6 +861,7 @@ impl CudaVideoCompositor {
             }
         }
         output.set_pts(Some(self.frame_index));
+        crate::buffer::set_time_base(&mut output, self.time_base());
         self.frame_index += 1;
         Ok(output)
     }
@@ -1201,6 +1202,7 @@ impl CudaVideoCompositor {
         });
 
         output.set_pts(Some(self.frame_index));
+        crate::buffer::set_time_base(&mut output, self.time_base());
         self.frame_index += 1;
         Ok(output)
     }

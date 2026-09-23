@@ -168,6 +168,7 @@ impl TestAudioSource {
         // `bytes.len()`.
         frame.data_mut(0)[..bytes.len()].copy_from_slice(bytes);
         frame.set_pts(Some(self.samples_emitted));
+        crate::buffer::set_time_base(&mut frame, self.time_base());
         self.samples_emitted += needed as i64;
         frame
     }

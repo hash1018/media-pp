@@ -722,6 +722,7 @@ impl SourceElement for MfCaptureSource {
                 unsafe { sample.GetSampleTime() }.map_err(|error| self.classify_error(error))?;
             let mut frame = self.build_frame(&sample)?;
             frame.set_pts(Some(self.stamp(sample_time)));
+            crate::buffer::set_time_base(&mut frame, self.time_base());
             self.push_frame(frame, bus);
         }
     }

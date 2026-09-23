@@ -87,7 +87,6 @@ mod windows_example {
 
         let (source, _) = FileDemuxer::open("demux", path)?;
         let video = source.best(media::Type::Video)?;
-        let time_base = video.time_base;
 
         let gpu = D3d12GpuContext::new().map_err(|e| Error::Other(format!("{e:?}")))?;
 
@@ -107,7 +106,7 @@ mod windows_example {
         let decoding = decoder.handle();
 
         let pipeline = Pipeline::new("hw-decode-render", source, |source, ctx| {
-            let pacer = Pacer::new("pacer", time_base)?;
+            let pacer = Pacer::new("pacer");
             let renderer =
                 render_common::d3d12_window_renderer("renderer", &gpu, hwnd, width, height)
                     .expect("failed to create renderer");
@@ -176,7 +175,6 @@ mod linux_example {
 
         let (source, _) = FileDemuxer::open("demux", path)?;
         let video = source.best(media::Type::Video)?;
-        let time_base = video.time_base;
 
         let cuda = CudaDevice::new()?;
         let gpu = VulkanGpuContext::new(target.display).map_err(Error::Other)?;
@@ -215,7 +213,7 @@ mod linux_example {
         };
 
         let pipeline = Pipeline::new("hw-decode-render", source, |source, ctx| {
-            let pacer = Pacer::new("pacer", time_base)?;
+            let pacer = Pacer::new("pacer");
             let mut chain = ctx.branch().pipe(decoder);
             if let Some(to_nv12) = to_nv12 {
                 chain = chain.pipe(to_nv12);

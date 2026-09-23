@@ -1099,6 +1099,7 @@ impl D3d11VideoCompositor {
         drop(context);
 
         output_frame.set_pts(Some(self.frame_index));
+        crate::buffer::set_time_base(&mut output_frame, self.time_base());
         output_frame.set_color_space(ffmpeg::color::Space::RGB);
         output_frame.set_color_range(ffmpeg::color::Range::JPEG);
         self.frame_index += 1;
@@ -1145,6 +1146,7 @@ impl D3d11VideoCompositor {
             }
         }
         output.set_pts(Some(self.frame_index));
+        crate::buffer::set_time_base(&mut output, self.time_base());
         self.frame_index += 1;
         Ok(Arc::new(output))
     }

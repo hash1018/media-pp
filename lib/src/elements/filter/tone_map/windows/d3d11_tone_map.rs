@@ -377,7 +377,7 @@ impl D3d11ToneMap {
 
         let mut drawn = self.pool.get();
         *drawn = wrap_d3d11_texture(output, input.width, input.height)?;
-        drawn.set_pts(frame.pts());
+        crate::buffer::carry_timing(&mut drawn, frame);
         drawn.set_color_space(ffmpeg::color::Space::RGB);
         drawn.set_color_range(ffmpeg::color::Range::JPEG);
         drawn.set_color_primaries(ffmpeg::color::Primaries::BT709);

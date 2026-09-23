@@ -436,7 +436,7 @@ impl D3d11VideoEffect {
 
         let mut drawn = self.pool.get();
         *drawn = wrap_d3d11_texture(output, input.width, input.height)?;
-        drawn.set_pts(frame.pts());
+        crate::buffer::carry_timing(&mut drawn, frame);
         drawn.set_color_space(frame.color_space());
         drawn.set_color_range(frame.color_range());
         Ok(drawn)

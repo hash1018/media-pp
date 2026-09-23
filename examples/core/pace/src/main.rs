@@ -42,13 +42,12 @@ mod example {
 
         let video = source.best(media::Type::Video)?;
         let params = video.parameters.clone();
-        let time_base = video.time_base;
 
         let (counter, frame_count) = FrameCounter::new("counter");
 
         let pipeline = Pipeline::new("pace", source, |source, ctx| {
             let decoder = SwDecoder::new("decoder", params).expect("failed to open decoder");
-            let pacer = Pacer::new("pacer", time_base)?;
+            let pacer = Pacer::new("pacer");
             let branch = ctx
                 .branch()
                 .pipe(decoder) // same thread as the demux — cheap enough not to need a queue

@@ -62,10 +62,9 @@ fn topology_lists_source_through_terminal_per_branch() {
         .find(|s| s.kind == ffmpeg_next::media::Type::Video)
         .expect("test video has a video stream");
     let index = video.index;
-    let time_base = source.stream_time_base(index).expect("stream disappeared");
 
     let pipeline = Pipeline::new("test", source, |source, ctx| {
-        let pacer = Pacer::new("pacer", time_base)?;
+        let pacer = Pacer::new("pacer");
         let branch = ctx.branch().queue("q", 4).pipe(pacer).to(NoOpSink {
             name: "noop".into(),
             pp_log: element_pp_log(ElementType::Other, "noop", None),
@@ -182,7 +181,6 @@ fn topology_attributes_a_fan_out_to_the_stage_that_feeds_it() {
         .find(|s| s.kind == ffmpeg_next::media::Type::Video)
         .expect("test video has a video stream");
     let index = video.index;
-    let time_base = source.stream_time_base(index).expect("stream disappeared");
 
     let pipeline = Pipeline::new("test", source, |source, ctx| {
         let branch_a = ctx.branch().to(NoOpSink {
@@ -198,7 +196,7 @@ fn topology_attributes_a_fan_out_to_the_stage_that_feeds_it() {
             .branch(branch_b)
             .build()?;
 
-        let pacer = Pacer::new("pacer", time_base)?;
+        let pacer = Pacer::new("pacer");
         let branch = ctx.branch().pipe(pacer).to_branch(tee_branch)?;
         ctx.attach(source, index, branch)?;
         Ok(())

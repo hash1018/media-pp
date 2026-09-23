@@ -81,7 +81,6 @@ mod windows_example {
         let (source, _) = FileDemuxer::open("demux", path)?;
         let video = source.best(media::Type::Video)?;
         let params = video.parameters.clone();
-        let time_base = video.time_base;
 
         let gpu = D3d11GpuContext::new(None).map_err(|e| Error::Other(format!("{e:?}")))?;
 
@@ -94,7 +93,7 @@ mod windows_example {
             // included in this value.
             let decoder = D3d11Decoder::new("decoder", params, gpu.device(), 32)
                 .expect("failed to open D3D11VA decoder");
-            let pacer = Pacer::new("pacer", time_base)?;
+            let pacer = Pacer::new("pacer");
             let renderer =
                 render_common::d3d11_window_renderer("renderer", &gpu, hwnd, width, height)
                     .expect("failed to create renderer");

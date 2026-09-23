@@ -12,7 +12,7 @@ use crate::{
     elements::AudioFormat,
     error::Result,
     pad::SrcPad,
-    time::{InvalidTimeBase, MediaTimestamp, TimeBase},
+    time::{MediaTimestamp, TimeBase},
 };
 
 /// The reusable `libswresample` state shared by [`AudioResampler`] and
@@ -135,16 +135,19 @@ pub enum AudioResamplerError {
     )]
     UnsupportedBuffer(&'static str),
 
-    /// The supplied input timestamp unit has a non-positive component.
+    /// The first frame arrived with a `pts` but no unit to read it in, so
+    /// there is nothing to anchor the output timeline to.
+    ///
+    /// Every element in this crate that makes a frame says what unit its
+    /// `pts` is in — see [`crate::buffer::time_base`] — so this is a frame
+    /// made elsewhere. Stamp it with [`crate::buffer::set_time_base`].
+    /// Refused rather than guessed at: a guessed unit starts the output at
+    /// the wrong time with no other sign.
     #[error(
-        "invalid input time base {numerator}/{denominator}: both numerator and denominator must be positive"
+        "an Audio frame arrived with a pts but no time base to read it in; the element \
+         that made it has to set one (media_pp::buffer::set_time_base)"
     )]
-    InvalidTimeBase {
-        /// Invalid rational numerator.
-        numerator: i32,
-        /// Invalid rational denominator.
-        denominator: i32,
-    },
+    NoTimeBase,
 }
 
 /// Converts decoded audio to one fixed [`AudioFormat`] via
@@ -153,26 +156,21 @@ pub enum AudioResamplerError {
 ///
 /// Output timestamps use `1 / target.sample_rate` units and remain
 /// contiguous across resampler buffering. The first output is anchored to
-/// the first input frame's PTS, rescaled from the explicitly supplied
-/// input time base. A decoded frame does not carry that unit itself, so
-/// callers must pass the originating stream/source time base.
+/// the first input frame's PTS, rescaled from the time base that frame
+/// carries — see [`crate::buffer::time_base`].
 pub struct AudioResampler {
     pp_log: PpLog,
     name: Arc<str>,
     target: AudioFormat,
-    input_time_base: TimeBase,
     resampler: AudioFrameResampler,
     next_pts: Option<i64>,
     pad: SrcPad,
 }
 
 impl AudioResampler {
-    /// Creates a resampler with fixed output format and explicit input timestamp units.
-    pub fn new(
-        name: impl Into<String>,
-        target: AudioFormat,
-        input_time_base: ffmpeg::Rational,
-    ) -> std::result::Result<Self, AudioResamplerError> {
+    /// Creates a resampler to a fixed output format. The input's own format
+    /// and the unit of its timestamps are read off each frame.
+    pub fn new(name: impl Into<String>, target: AudioFormat) -> Self {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::AudioResampler, &name, None);
         let pad = SrcPad::with_contract(
@@ -189,24 +187,14 @@ impl AudioResampler {
             target.channels(),
             target.sample_format
         );
-        let input_time_base = TimeBase::try_new(input_time_base).map_err(
-            |InvalidTimeBase {
-                 numerator,
-                 denominator,
-             }| AudioResamplerError::InvalidTimeBase {
-                numerator,
-                denominator,
-            },
-        )?;
-        Ok(Self {
+        Self {
             name,
             pp_log,
             target,
-            input_time_base,
             resampler: AudioFrameResampler::new(target),
             next_pts: None,
             pad,
-        })
+        }
     }
 
     /// Returns the fixed output audio format.
@@ -219,29 +207,37 @@ impl AudioResampler {
         ffmpeg::Rational::new(1, self.target.sample_rate as i32)
     }
 
-    fn anchor_pts(&mut self, input: &ffmpeg::frame::Audio) {
+    /// Leaves the timeline unanchored when the frame cannot anchor it, so the
+    /// next frame that says its unit still can.
+    fn anchor_pts(
+        &mut self,
+        input: &ffmpeg::frame::Audio,
+    ) -> std::result::Result<(), AudioResamplerError> {
         if self.next_pts.is_some() {
-            return;
+            return Ok(());
         }
-        let pts = input
-            .pts()
-            .map(|pts| {
-                MediaTimestamp::new_unchecked(pts, self.input_time_base).rescale(
-                    TimeBase::new_unchecked(ffmpeg::Rational::new(
-                        1,
-                        self.target.sample_rate as i32,
-                    )),
-                )
-            })
-            .unwrap_or(0);
+        let pts = match input.pts() {
+            Some(pts) => {
+                let time_base = crate::buffer::time_base(input)
+                    .map(TimeBase::new_unchecked)
+                    .ok_or(AudioResamplerError::NoTimeBase)?;
+                MediaTimestamp::new_unchecked(pts, time_base).rescale(TimeBase::new_unchecked(
+                    ffmpeg::Rational::new(1, self.target.sample_rate as i32),
+                ))
+            }
+            None => 0,
+        };
         self.next_pts = Some(pts);
+        Ok(())
     }
 
     fn push_frames(&mut self, frames: Vec<ffmpeg::frame::Audio>) -> Result<()> {
+        let time_base = self.time_base();
         for mut frame in frames {
             let pts = self.next_pts.get_or_insert(0);
             frame.set_rate(self.target.sample_rate);
             frame.set_pts(Some(*pts));
+            crate::buffer::set_time_base(&mut frame, time_base);
             *pts += frame.samples() as i64;
             self.pad.push(MediaBuffer::Audio(Arc::new(frame)))?;
         }
@@ -290,7 +286,7 @@ impl Sink for AudioResampler {
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         match buf {
             MediaBuffer::Audio(frame) => {
-                self.anchor_pts(&frame);
+                self.anchor_pts(&frame)?;
                 let frames = self
                     .resampler
                     .run(&frame)
@@ -335,13 +331,13 @@ mod tests {
         let mut frame = ffmpeg::frame::Audio::new(format, samples, layout);
         frame.set_rate(rate);
         frame.set_pts(Some(pts));
+        crate::buffer::set_time_base(&mut frame, ffmpeg::Rational::new(1, rate as i32));
         frame.data_mut(0).fill(0);
         MediaBuffer::Audio(Arc::new(frame))
     }
 
     fn new_resampler(target: AudioFormat) -> (AudioResampler, Arc<Mutex<Vec<MediaBuffer>>>) {
-        let mut resampler =
-            AudioResampler::new("resampler", target, ffmpeg::Rational::new(1, 48_000)).unwrap();
+        let mut resampler = AudioResampler::new("resampler", target);
         let received = Arc::new(Mutex::new(Vec::new()));
         resampler.src_pads()[0].link(Box::new(CapturingSink {
             received: received.clone(),
@@ -400,6 +396,78 @@ mod tests {
         assert!(received.lock().unwrap().iter().any(|buffer| {
             matches!(buffer, MediaBuffer::Audio(frame) if frame.rate() == 48_000 && frame.channels() == 2)
         }));
+    }
+
+    /// Takes the frame out of a buffer `f32_packed_frame` made, to restamp.
+    fn unwrapped(buffer: MediaBuffer) -> ffmpeg::frame::Audio {
+        match buffer {
+            MediaBuffer::Audio(frame) => Arc::try_unwrap(frame).expect("not shared"),
+            _ => unreachable!("f32_packed_frame makes audio"),
+        }
+    }
+
+    /// The first frame's unit is what the output starts from: one second in
+    /// comes out one second in, whatever unit it was counted in.
+    #[test]
+    fn the_output_starts_where_the_first_frame_says_in_its_own_unit() {
+        let target = AudioFormat::new(ffmpeg::format::Sample::F32(Type::Packed), 48_000, 2);
+        let (mut resampler, received) = new_resampler(target);
+        let mut frame = unwrapped(f32_packed_frame(48_000, 2, 960, 1_000));
+        crate::buffer::set_time_base(&mut frame, ffmpeg::Rational::new(1, 1_000));
+        resampler
+            .consume(MediaBuffer::Audio(Arc::new(frame)))
+            .unwrap();
+        resampler.consume(MediaBuffer::Eos).unwrap();
+
+        let received = received.lock().unwrap();
+        let first = received
+            .iter()
+            .find_map(|buffer| match buffer {
+                MediaBuffer::Audio(frame) => Some(frame),
+                _ => None,
+            })
+            .expect("audio out");
+        assert_eq!(first.pts(), Some(48_000));
+        assert_eq!(
+            crate::buffer::time_base(first),
+            Some(ffmpeg::Rational::new(1, 48_000))
+        );
+    }
+
+    /// A first frame that does not say what unit its `pts` is in is refused
+    /// by name, and leaves the output unanchored: the next frame that does
+    /// say still starts it where it says.
+    #[test]
+    fn a_frame_with_no_time_base_is_refused_rather_than_guessed_at() {
+        let target = AudioFormat::new(ffmpeg::format::Sample::F32(Type::Packed), 48_000, 2);
+        let (mut resampler, received) = new_resampler(target);
+        let mut unitless = unwrapped(f32_packed_frame(48_000, 2, 480, 4_800));
+        // SAFETY: the frame is this test's own and nothing else refers to it.
+        unsafe { (*unitless.as_mut_ptr()).time_base = ffmpeg::ffi::AVRational { num: 0, den: 1 } };
+
+        let error = resampler
+            .consume(MediaBuffer::Audio(Arc::new(unitless)))
+            .expect_err("no unit to read the pts in");
+        assert!(matches!(
+            error,
+            crate::Error::AudioResamplerError(AudioResamplerError::NoTimeBase)
+        ));
+        assert!(received.lock().unwrap().is_empty());
+        assert!(resampler.next_pts.is_none(), "the output is not anchored");
+
+        resampler
+            .consume(f32_packed_frame(48_000, 2, 960, 9_600))
+            .unwrap();
+        resampler.consume(MediaBuffer::Eos).unwrap();
+        let first = received
+            .lock()
+            .unwrap()
+            .iter()
+            .find_map(|buffer| match buffer {
+                MediaBuffer::Audio(frame) => frame.pts(),
+                _ => None,
+            });
+        assert_eq!(first, Some(9_600));
     }
 
     #[test]

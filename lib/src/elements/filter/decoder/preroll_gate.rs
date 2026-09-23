@@ -25,14 +25,15 @@ pub(super) fn hw_surface_budget(downstream_frames: i32) -> Option<i32> {
 /// # Why this lives in the decoder
 ///
 /// Deciding "is this sample before the target" needs a PTS *and* the time base
-/// to read it in. A decoder is the only stage that has both on every decoded
-/// branch: `MediaBuffer::Video`/`Audio` carry a raw `pts` with no time base
-/// attached, so a downstream stage can only interpret it if it was separately
-/// constructed with one. [`Pacer`](crate::elements::Pacer) and
-/// [`VideoSynchronizer`](crate::elements::VideoSynchronizer) were, which is
-/// why the gate first lived there — but an audio branch has neither (an audio
-/// renderer paces itself against its own device clock), so that branch went
-/// ungated and delivered its whole pre-target span.
+/// to read it in, and every decoded branch has a decoder while not every one
+/// has anything after it that paces. The gate first lived in
+/// [`Pacer`](crate::elements::Pacer) and
+/// [`VideoSynchronizer`](crate::elements::VideoSynchronizer), but an audio
+/// branch has neither (an audio renderer paces itself against its own device
+/// clock), so that branch went ungated and delivered its whole pre-target
+/// span. The decoder is also where a decoded frame first gets its time base
+/// at all — see `describe` — which is what lets everything downstream read
+/// one off the frame instead of being told it.
 ///
 /// # What this deliberately does not do
 ///
@@ -57,8 +58,9 @@ pub(super) struct PrerollGate {
     /// drain, before downstream readiness can be checked again, so the gate
     /// itself must suppress the rest until Pause or Resume ends the preroll.
     delivered: bool,
-    /// Learned from the packets being fed in; decoded frames carry a `pts`
-    /// in this unit but not the unit itself.
+    /// Learned from the packets being fed in. FFmpeg's decoders give a
+    /// decoded frame a `pts` in this unit but not the unit itself, so the
+    /// gate stamps it on every frame it lets through.
     time_base: Option<ffmpeg::Rational>,
     /// Last decoded sample before the target. Video needs one-sample
     /// lookahead to select the frame that actually covers the requested
@@ -187,14 +189,43 @@ impl PrerollGate {
     /// open so the next decoded sample can satisfy the preroll instead.
     pub(super) fn push_admitted<E>(
         &mut self,
-        buffer: MediaBuffer,
+        mut buffer: MediaBuffer,
         push: impl FnOnce(MediaBuffer) -> Result<(), E>,
     ) -> Result<(), E> {
+        self.describe(&mut buffer);
         if let Some(buffer) = self.admit(buffer) {
             push(buffer)?;
             self.commit_delivery();
         }
         Ok(())
+    }
+
+    /// Says on a decoded frame what unit its `pts` is in — the packets' own,
+    /// which FFmpeg's decoders do not copy onto what they produce. Every
+    /// decoder here sends its output through this gate, so this is the one
+    /// place each decoded frame is described; see [`crate::buffer::time_base`]
+    /// for what reads it.
+    ///
+    /// The frame arrives freshly wrapped, so its `Arc` is still unshared and
+    /// can be written through; one that is not is left as it is rather than
+    /// copied.
+    fn describe(&self, buffer: &mut MediaBuffer) {
+        let Some(time_base) = self.time_base else {
+            return;
+        };
+        match buffer {
+            MediaBuffer::Video(frame) => {
+                if let Some(frame) = std::sync::Arc::get_mut(frame) {
+                    crate::buffer::set_time_base(frame, time_base);
+                }
+            }
+            MediaBuffer::Audio(frame) => {
+                if let Some(frame) = std::sync::Arc::get_mut(frame) {
+                    crate::buffer::set_time_base(frame, time_base);
+                }
+            }
+            MediaBuffer::Packet(_) | MediaBuffer::Eos => {}
+        }
     }
 
     /// Keeps the active preroll closed after its selected sample was accepted.

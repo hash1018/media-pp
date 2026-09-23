@@ -75,13 +75,12 @@ mod windows_example {
         let (source, _) = FileDemuxer::open("demux", path)?;
         let video = source.best(media::Type::Video)?;
         let params = video.parameters.clone();
-        let time_base = video.time_base;
 
         let gpu = D3d12GpuContext::new().map_err(|e| Error::Other(format!("{e:?}")))?;
 
         let pipeline = Pipeline::new("sw-decode-render", source, |source, ctx| {
             let decoder = SwDecoder::new("decoder", params).expect("failed to open decoder");
-            let pacer = Pacer::new("pacer", time_base)?;
+            let pacer = Pacer::new("pacer");
             let renderer =
                 render_common::d3d12_window_renderer("renderer", &gpu, hwnd, width, height)
                     .expect("failed to create renderer");
@@ -180,13 +179,12 @@ mod linux_example {
         let (source, _) = FileDemuxer::open("demux", path)?;
         let video = source.best(media::Type::Video)?;
         let params = video.parameters.clone();
-        let time_base = video.time_base;
         let cuda = CudaDevice::new()?;
         let gpu = VulkanGpuContext::new(target.display).map_err(Error::Other)?;
 
         let pipeline = Pipeline::new("sw-decode-render", source, |source, ctx| {
             let decoder = SwDecoder::new("decoder", params)?;
-            let pacer = Pacer::new("pacer", time_base)?;
+            let pacer = Pacer::new("pacer");
             let scaler = SwScaler::new(
                 "to-nv12",
                 ffmpeg::format::Pixel::NV12,

@@ -237,7 +237,7 @@ impl PerFrameTransform for SwVideoEffect {
             .expect("built above for this exact size")
             .get();
         apply_to_frame(&self.params, frame, &mut output);
-        output.set_pts(frame.pts());
+        crate::buffer::carry_timing(&mut output, frame);
         output.set_color_space(frame.color_space());
         output.set_color_range(frame.color_range());
         Ok(output)

@@ -223,6 +223,14 @@ impl SourceElement for RtspSource {
             match packet.read(&mut self.input) {
                 Ok(()) => {
                     let index = packet.stream();
+                    // FFmpeg does not guarantee a demuxer fills
+                    // `AVPacket::time_base`, and the packet contract is that
+                    // one carries it — what a decoder downstream hands on to
+                    // its frames, and a `Pacer` paces by. Same as
+                    // `FileDemuxer::deliver_or_park`.
+                    if let Some(time_base) = self.stream(index).map(|stream| stream.time_base()) {
+                        packet.set_time_base(time_base);
+                    }
                     if let Some(pad) = self.pads.get_mut(index) {
                         // A downstream failure drops just this one packet
                         // — same "report, don't die" contract `Queue`'s

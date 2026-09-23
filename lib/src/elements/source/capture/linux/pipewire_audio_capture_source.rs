@@ -563,6 +563,11 @@ fn build_frame(format: &AudioFormat, packet: &Packet) -> ffmpeg::frame::Audio {
     let tight_bytes = packet.bytes.len().min(frame.data_mut(0).len());
     frame.data_mut(0)[..tight_bytes].copy_from_slice(&packet.bytes[..tight_bytes]);
     frame.set_pts(Some(packet.position as i64));
+    // In samples, as `PipeWireAudioCaptureSource::time_base` says.
+    crate::buffer::set_time_base(
+        &mut frame,
+        ffmpeg::Rational::new(1, format.sample_rate as i32),
+    );
     frame
 }
 

@@ -492,6 +492,7 @@ impl WgcCaptureSource {
         let mut frame = self.frame_pool.get();
         *frame = wrap_d3d11_texture(latest.clone(), width, height)?;
         frame.set_pts(Some(self.frame_index));
+        crate::buffer::set_time_base(&mut frame, self.time_base());
         frame.set_color_space(ffmpeg::color::Space::RGB);
         frame.set_color_range(ffmpeg::color::Range::JPEG);
         self.frame_index += 1;

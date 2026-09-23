@@ -77,7 +77,6 @@ mod common {
         pub video_time_base: Rational,
         pub audio_index: usize,
         pub audio_params: Parameters,
-        pub audio_time_base: Rational,
     }
 
     pub fn open(path: &str) -> media_pp::Result<(FileDemuxer, Streams)> {
@@ -90,7 +89,6 @@ mod common {
             video_time_base: video.time_base,
             audio_index: audio.index,
             audio_params: audio.parameters.clone(),
-            audio_time_base: audio.time_base,
         };
         Ok((source, streams))
     }
@@ -192,11 +190,10 @@ mod windows_example {
             let pipeline = pipeline.clone();
             let tee = audio_tee_handle.clone();
             let params = streams.audio_params.clone();
-            let time_base = streams.audio_time_base;
             std::thread::spawn(move || {
                 let attach_tee = tee.clone();
                 crate::shell::read_commands(pipeline.clone(), tee, "WASAPI", move || {
-                    attach_audio(&attach_tee, &params, time_base)
+                    attach_audio(&attach_tee, &params)
                 });
             });
         }
@@ -208,7 +205,6 @@ mod windows_example {
     fn attach_audio(
         audio_tee: &media_pp::elements::TeeHandle,
         audio_params: &media_pp::ffmpeg::codec::Parameters,
-        audio_time_base: media_pp::ffmpeg::Rational,
     ) -> media_pp::Result<media_pp::graph::BranchId> {
         let device = WasapiRenderer::list_devices()?
             .into_iter()
@@ -222,11 +218,7 @@ mod windows_example {
             .branch()
             .ok_or_else(|| Error::Other("audio Tee is no longer available".into()))?
             .pipe(SwDecoder::new("audio-decoder", audio_params.clone())?)
-            .pipe(AudioResampler::new(
-                "audio-resampler",
-                output_format,
-                audio_time_base,
-            )?)
+            .pipe(AudioResampler::new("audio-resampler", output_format))
             .queue("audio-output", 8)
             .to(audio_renderer)?;
         let branch_id = audio_tee.attach(branch)?;
@@ -328,11 +320,10 @@ mod linux_example {
             let pipeline = pipeline.clone();
             let tee = audio_tee_handle.clone();
             let params = streams.audio_params.clone();
-            let time_base = streams.audio_time_base;
             std::thread::spawn(move || {
                 let attach_tee = tee.clone();
                 crate::shell::read_commands(pipeline.clone(), tee, "PipeWire", move || {
-                    attach_audio(&attach_tee, &params, time_base)
+                    attach_audio(&attach_tee, &params)
                 });
             });
         }
@@ -344,7 +335,6 @@ mod linux_example {
     fn attach_audio(
         audio_tee: &TeeHandle,
         audio_params: &media_pp::ffmpeg::codec::Parameters,
-        audio_time_base: media_pp::ffmpeg::Rational,
     ) -> media_pp::Result<media_pp::graph::BranchId> {
         let device = PipeWireAudioRenderer::list_devices()?
             .into_iter()
@@ -358,11 +348,7 @@ mod linux_example {
             .branch()
             .ok_or_else(|| Error::Other("audio Tee is no longer available".into()))?
             .pipe(SwDecoder::new("audio-decoder", audio_params.clone())?)
-            .pipe(AudioResampler::new(
-                "audio-resampler",
-                output_format,
-                audio_time_base,
-            )?)
+            .pipe(AudioResampler::new("audio-resampler", output_format))
             .queue("audio-output", 8)
             .to(audio_renderer)?;
         let branch_id = audio_tee.attach(branch)?;

@@ -77,11 +77,11 @@ use crate::{
     control::{PrerollError, SeekError},
     elements::{
         AppSourceError, AudioCompressorError, AudioGateError, AudioLimiterError, AudioMixerError,
-        AudioResamplerError, AudioVolumeError, FileDemuxError, FileMuxerError, HlsMuxerError,
-        MuxerTrackError, PacerError, RackError, ReplayBufferError, RtmpMuxerError, RtspSourceError,
-        SwAudioEncoderError, SwChromaKeyError, SwDecoderError, SwEncoderError, SwScalerError,
-        SwVideoCompositorError, SwVideoEffectError, TestAudioSourceError, TestVideoSourceError,
-        VideoSynchronizerError,
+        AudioResamplerError, AudioVolumeError, FileDemuxError, FileMuxerError,
+        FrameRateLimiterError, HlsMuxerError, MuxerTrackError, PacerError, RackError,
+        ReplayBufferError, RtmpMuxerError, RtspSourceError, SwAudioEncoderError, SwChromaKeyError,
+        SwDecoderError, SwEncoderError, SwScalerError, SwVideoCompositorError, SwVideoEffectError,
+        TestAudioSourceError, TestVideoSourceError, VideoSynchronizerError,
     },
     graph::GraphError,
     log::LogInitError,
@@ -291,6 +291,10 @@ pub enum Error {
     /// A pacer could not schedule an input timestamp.
     #[error(transparent)]
     PacerError(#[from] PacerError),
+
+    /// A frame rate limiter could not place a frame on its output timeline.
+    #[error(transparent)]
+    FrameRateLimiterError(#[from] FrameRateLimiterError),
 
     /// A rack could not take the filters it was given.
     #[error(transparent)]

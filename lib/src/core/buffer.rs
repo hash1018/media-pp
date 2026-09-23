@@ -41,15 +41,16 @@ pub enum MediaBuffer {
     /// [`crate::pool::UnboundObjectPool`] after the last `Arc` clone drops.
     ///
     /// Treat the published frame as immutable. A transforming element creates
-    /// a replacement frame and preserves PTS, duration, and color metadata
-    /// unless it intentionally establishes a new timeline.
+    /// a replacement frame and preserves PTS, its [time base](time_base),
+    /// duration, and color metadata unless it intentionally establishes a new
+    /// timeline — in which case it sets the time base of that timeline.
     Video(Arc<UnboundObjectPoolRef<ffmpeg::frame::Video>>),
 
     /// Decoded audio frame shared immutably between downstream branches.
     ///
-    /// Sample format, sample rate, channel layout, PTS, and duration describe
-    /// the audio contract a transforming element must either preserve or
-    /// deliberately replace.
+    /// Sample format, sample rate, channel layout, PTS, its
+    /// [time base](time_base), and duration describe the audio contract a
+    /// transforming element must either preserve or deliberately replace.
     Audio(Arc<ffmpeg::frame::Audio>),
 
     /// Ordered end-of-stream marker.
@@ -77,6 +78,46 @@ impl MediaBuffer {
             MediaBuffer::Eos => "Eos",
         }
     }
+}
+
+/// The unit a decoded frame's timestamps are in, or `None` where nothing has
+/// said.
+///
+/// A frame's PTS is a count, and a count means nothing without its unit. A
+/// packet carries its own; FFmpeg's decoders do not yet copy it onto the
+/// frames they produce, so every element in this crate that makes a frame
+/// sets it with [`set_time_base`], and every one that passes a frame's
+/// timestamps on passes this with them. That is what lets a
+/// [`crate::elements::Pacer`] read the unit off the frame instead of being
+/// told it — told separately, it could be told the wrong stream's, and
+/// playback would run at the wrong speed without a word.
+///
+/// Takes a video or an audio frame alike, through `Deref`.
+pub fn time_base(frame: &ffmpeg::Frame) -> Option<ffmpeg::Rational> {
+    // SAFETY: `frame` is a live `AVFrame`; `time_base` is a plain field.
+    let time_base = unsafe { (*frame.as_ptr()).time_base };
+    (time_base.num > 0 && time_base.den > 0).then(|| time_base.into())
+}
+
+/// Says what unit `frame`'s timestamps are in — see [`time_base`]. An
+/// element that makes a frame of its own, or a caller pushing one through
+/// an [`crate::elements::AppSource`], sets this beside the PTS.
+pub fn set_time_base(frame: &mut ffmpeg::Frame, time_base: ffmpeg::Rational) {
+    // SAFETY: `frame` is a live `AVFrame` borrowed mutably; `time_base` is
+    // a plain field no other part of the frame depends on.
+    unsafe { (*frame.as_mut_ptr()).time_base = time_base.into() };
+}
+
+/// Hands `source`'s timing to `destination`: its PTS, and the unit it is in.
+///
+/// For an element that makes its output frame itself rather than with
+/// `av_frame_copy_props` — which already carries both, and every other
+/// property besides.
+pub(crate) fn carry_timing(destination: &mut ffmpeg::Frame, source: &ffmpeg::Frame) {
+    destination.set_pts(source.pts());
+    // SAFETY: both are live `AVFrame`s and distinct, `destination` borrowed
+    // mutably; `time_base` is a plain field.
+    unsafe { (*destination.as_mut_ptr()).time_base = (*source.as_ptr()).time_base };
 }
 
 /// Which buffer a video frame's pixels live in.
@@ -164,5 +205,40 @@ mod tests {
             "Audio"
         );
         assert_eq!(MediaBuffer::Eos.kind(), "Eos");
+    }
+
+    /// A frame no one has described says nothing, rather than a unit of
+    /// zero ticks that would read as one.
+    #[test]
+    fn a_new_frame_has_no_time_base_until_one_is_set() {
+        let mut frame = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::NV12, 16, 16);
+        assert_eq!(time_base(&frame), None);
+        set_time_base(&mut frame, ffmpeg::Rational::new(1, 90_000));
+        assert_eq!(time_base(&frame), Some(ffmpeg::Rational::new(1, 90_000)));
+    }
+
+    /// The two ways a frame's timing reaches another frame here both carry
+    /// the unit with the count: FFmpeg's own property copy, which the
+    /// elements that use it rely on, and `carry_timing` for the rest.
+    #[test]
+    fn copying_a_frames_timing_carries_its_time_base() {
+        let mut source = ffmpeg::frame::Audio::new(
+            ffmpeg::format::Sample::F32(ffmpeg::format::sample::Type::Packed),
+            32,
+            ffmpeg::ChannelLayout::STEREO,
+        );
+        source.set_pts(Some(441));
+        set_time_base(&mut source, ffmpeg::Rational::new(1, 44_100));
+
+        let mut copied = ffmpeg::frame::Audio::empty();
+        // SAFETY: both are live and distinct.
+        unsafe { ffi::av_frame_copy_props(copied.as_mut_ptr(), source.as_ptr()) };
+        assert_eq!(copied.pts(), Some(441));
+        assert_eq!(time_base(&copied), Some(ffmpeg::Rational::new(1, 44_100)));
+
+        let mut carried = ffmpeg::frame::Audio::empty();
+        carry_timing(&mut carried, &source);
+        assert_eq!(carried.pts(), Some(441));
+        assert_eq!(time_base(&carried), Some(ffmpeg::Rational::new(1, 44_100)));
     }
 }

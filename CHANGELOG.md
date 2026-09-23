@@ -270,7 +270,37 @@ compile error with no explanation.
   decoder can decode on its device with it (see Fixed), so a `match` over
   any of the three needs an arm for it.
 
+- **`Pacer` reads the time base off each buffer instead of being told it.**
+  `Pacer::new(name, time_base)?` is `Pacer::new(name)`, and
+  `Pacer::with_discontinuity_limit(name, time_base, limit)?` is
+  `Pacer::with_discontinuity_limit(name, limit)`; neither can fail any more,
+  so drop the `?`. Told separately, a pacer could be told another stream's
+  unit — the video's handed to the audio branch — and play at the wrong
+  speed with nothing to say so; a packet carries its own, and now every
+  frame this crate makes does too (see Added). `PacerError::InvalidTimeBase`
+  is gone, and `PacerError::NoTimeBase` refuses a timed frame that does not
+  say what unit its `pts` is in — one pushed through an `AppSource` or made
+  by an element of your own — rather than guessing. Stamp such a frame with
+  `buffer::set_time_base`.
+
+- **`AudioResampler` and `FrameRateLimiter` read it off the frame too.**
+  `AudioResampler::new(name, target, input_time_base)?` is
+  `AudioResampler::new(name, target)`, which can no longer fail; and
+  `FrameRateLimiter::new(name, input_time_base, rate)` is
+  `FrameRateLimiter::new(name, rate)`. Each was the same value that had to
+  agree with the stream. `AudioResamplerError::InvalidTimeBase` gives way to
+  `AudioResamplerError::NoTimeBase`, and the new `FrameRateLimiterError`
+  has the one variant `NoTimeBase` — both refuse a timed frame that does
+  not say its unit, as `Pacer` does.
+
 ### Added
+
+- **A decoded frame says what unit its timestamps are in.**
+  `buffer::time_base` reads it and `buffer::set_time_base` sets it. FFmpeg's
+  decoders leave `AVFrame::time_base` unset, so every element in this crate
+  that makes a frame — decoders, captures, synthetic sources, mixers,
+  compositors, the resampler and the rate limiter — sets it, and every one
+  that transforms a frame carries it over with the `pts`.
 
 - **`FileDemuxer::best` and `RtspSource::best` find the stream to play in
   one `?`.** Each returns the `StreamInfo` of FFmpeg's own choice for a
@@ -832,6 +862,11 @@ compile error with no explanation.
   decoder in this crate — keys exactly as before, byte for byte.
 
 ### Fixed
+
+- **`RtspSource`'s packets carry their stream's time base.** FFmpeg does not
+  promise to fill a demuxed packet's, and `FileDemuxer` already stamped it;
+  `RtspSource` did not, so a packet-level element downstream could read a
+  `pts` in no unit at all.
 
 - **`D3d11SharedTextureSource` says what a producer really owes it.** Its
   docs said a flush was enough before a push; it is not. A flush submits

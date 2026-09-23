@@ -420,6 +420,7 @@ impl WasapiCaptureSource {
             }
         }
         frame.set_pts(Some(self.samples_emitted));
+        crate::buffer::set_time_base(&mut frame, self.time_base());
         self.samples_emitted += frames as i64;
         frame
     }
@@ -471,6 +472,7 @@ impl WasapiCaptureSource {
         frame.set_rate(self.sample_rate);
         frame.data_mut(0).fill(0);
         frame.set_pts(Some(self.samples_emitted));
+        crate::buffer::set_time_base(&mut frame, self.time_base());
         self.samples_emitted += deficit;
         self.push_frame(frame, bus);
     }

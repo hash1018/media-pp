@@ -145,7 +145,6 @@ mod example {
         height: u32,
         audio_index: usize,
         audio_parameters: ffmpeg::codec::Parameters,
-        audio_time_base: ffmpeg::Rational,
     }
 
     impl FileInput {
@@ -176,7 +175,6 @@ mod example {
             let height = (height as u32) & !1;
             Ok(Self {
                 video_time_base: video.time_base,
-                audio_time_base: audio.time_base,
                 source,
                 video_index,
                 video_parameters,
@@ -194,7 +192,7 @@ mod example {
         mut audio_sink: WebRtcTrackSink,
     ) -> media_pp::Result<Arc<Pipeline>> {
         let video_decoder = SwDecoder::new("decode-video", input.video_parameters)?;
-        let video_pacer = Pacer::new("pace-video", input.video_time_base)?;
+        let video_pacer = Pacer::new("pace-video");
         let scaler = SwScaler::new(
             "to-yuv420p",
             ffmpeg::format::Pixel::YUV420P,
@@ -223,7 +221,7 @@ mod example {
         // nothing of the kind, and its declaration is only the codec.
         video_sink.set_source_parameters(&video_encoder.parameters())?;
         let audio_decoder = SwDecoder::new("decode-audio", input.audio_parameters)?;
-        let audio_pacer = Pacer::new("pace-audio", input.audio_time_base)?;
+        let audio_pacer = Pacer::new("pace-audio");
         let audio_encoder = SwAudioEncoder::new(
             "encode-opus",
             SwAudioEncoderOptions {

@@ -192,6 +192,7 @@ impl TestVideoSource {
         }
 
         frame.set_pts(Some(self.frame_index));
+        crate::buffer::set_time_base(&mut frame, self.time_base());
         self.frame_index += 1;
         frame
     }

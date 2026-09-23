@@ -141,6 +141,11 @@ pub(crate) struct CudaScaleGraph {
     /// itself comes from `scale_cuda`'s own output pool. Same split as
     /// [`crate::elements::CudaUpload`].
     pool: UnboundObjectPool<ffmpeg::frame::Video>,
+    /// The unit the frames going in count their `pts` in. The graph runs at
+    /// a nominal 1/1 and carries each `pts` through numerically unchanged,
+    /// so what comes out is in this unit, whatever libavfilter says on it —
+    /// see `drain`.
+    time_base: Option<ffmpeg::Rational>,
 }
 
 // SAFETY: a filter graph and its contexts have no thread affinity of their
@@ -170,6 +175,7 @@ impl CudaScaleGraph {
             // reference while sitting in the pool would keep a surface out of
             // `scale_cuda`'s own output pool for as long as it sat unused.
             pool: UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, release_picture),
+            time_base: None,
         }
     }
 
@@ -232,6 +238,7 @@ impl CudaScaleGraph {
         if code < 0 {
             return Err(CudaScalerError::BufferSrcPush(code));
         }
+        self.time_base = crate::buffer::time_base(frame);
         self.drain()
     }
 
@@ -428,6 +435,9 @@ impl CudaScaleGraph {
                     return Ok(scaled);
                 }
                 return Err(CudaScalerError::BufferSinkPull(code));
+            }
+            if let Some(time_base) = self.time_base {
+                crate::buffer::set_time_base(&mut output, time_base);
             }
             scaled.push(output);
         }

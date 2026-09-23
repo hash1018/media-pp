@@ -238,8 +238,7 @@ mod example {
                 WHISPER_SAMPLE_RATE,
                 1,
             ),
-            audio_time_base,
-        )?;
+        );
 
         // Which terminals have to finish before the text track can be
         // closed. By name rather than by counting, because a `Tee` reports

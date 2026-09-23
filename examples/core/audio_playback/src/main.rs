@@ -87,7 +87,7 @@ mod windows_example {
         // configured to 44.1kHz or mono, proving AudioResampler owns the format
         // conversion rather than WasapiRenderer doing it implicitly.
         let source = TestAudioSource::new("tone", TestAudioOptions::default());
-        let resampler = AudioResampler::new("resampler", output_format, source.time_base())?;
+        let resampler = AudioResampler::new("resampler", output_format);
         let (volume, volume_handle) = AudioVolume::new("volume");
         let pipeline = Pipeline::new("audio-playback", source, |source, context| {
             let branch = context
@@ -193,7 +193,7 @@ mod linux_example {
         // configured to 44.1kHz or mono, proving AudioResampler owns the format
         // conversion rather than the renderer doing it implicitly.
         let source = TestAudioSource::new("tone", TestAudioOptions::default());
-        let resampler = AudioResampler::new("resampler", output_format, source.time_base())?;
+        let resampler = AudioResampler::new("resampler", output_format);
         let (volume, volume_handle) = AudioVolume::new("volume");
         let pipeline = Pipeline::new("audio-playback", source, |source, context| {
             let branch = context

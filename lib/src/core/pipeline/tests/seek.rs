@@ -263,7 +263,6 @@ fn seek_repositions_and_playback_continues() {
         .find(|s| s.kind == ffmpeg_next::media::Type::Video)
         .expect("test video has a video stream");
     let index = video.index;
-    let time_base = source.stream_time_base(index).expect("stream disappeared");
 
     let count = Arc::new(AtomicUsize::new(0));
     let sink = CountingSink {
@@ -280,7 +279,7 @@ fn seek_repositions_and_playback_continues() {
     // `seek_reports_where_it_actually_landed_when_target_is_not_a_keyframe`
     // for how this was found).
     let pipeline = Pipeline::new("test", source, |source, ctx| {
-        let pacer = Pacer::new("pacer", time_base)?;
+        let pacer = Pacer::new("pacer");
         let branch = ctx.branch().queue("q", 4).pipe(pacer).to(sink)?;
         ctx.attach(source, index, branch)?;
         Ok(())
@@ -333,12 +332,11 @@ fn seek_reports_where_it_actually_landed_when_target_is_not_a_keyframe() {
         .find(|s| s.kind == ffmpeg_next::media::Type::Video)
         .expect("test video has a video stream");
     let index = video.index;
-    let time_base = source.stream_time_base(index).expect("stream disappeared");
 
     // Paced for the same reason as `seek_repositions_and_playback_continues`
     // — otherwise the file finishes before `seek()` is even called.
     let pipeline = Pipeline::new("test", source, |source, ctx| {
-        let pacer = Pacer::new("pacer", time_base)?;
+        let pacer = Pacer::new("pacer");
         let branch = ctx.branch().queue("q", 4).pipe(pacer).to(NoOpSink {
             name: "noop".into(),
             pp_log: element_pp_log(ElementType::Other, "noop", None),
@@ -466,7 +464,7 @@ fn a_paused_seek_leaves_every_branch_holding_one_sample_at_the_target() {
         let video_branch = ctx
             .branch()
             .pipe(SwDecoder::new("video-decoder", video_params)?)
-            .pipe(Pacer::new("video-pacer", video_tb)?)
+            .pipe(Pacer::new("video-pacer"))
             .queue("video-frames", 8)
             .to(PrerollProbe {
                 label: "video",
@@ -611,7 +609,7 @@ fn accurate_seek_at_known_eof_selects_the_last_presentable_frame() {
         let branch = ctx
             .branch()
             .pipe(SwDecoder::new("decoder", params)?)
-            .pipe(Pacer::new("pacer", time_base)?)
+            .pipe(Pacer::new("pacer"))
             .to(PrerollProbe {
                 label: "video-terminal",
                 time_base,

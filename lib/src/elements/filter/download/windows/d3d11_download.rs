@@ -410,7 +410,7 @@ impl PerFrameTransform for D3d11Download {
             .download(context, &texture, source_subresource)
             .inspect_err(|error| pp_error!(pp_log: pp_log, "GPU download failed: {error}"))
             .map_err(D3d11DownloadError::from)?;
-        cpu_frame.set_pts(frame.pts());
+        crate::buffer::carry_timing(&mut cpu_frame, frame);
         cpu_frame.set_color_space(frame.color_space());
         cpu_frame.set_color_range(frame.color_range());
 

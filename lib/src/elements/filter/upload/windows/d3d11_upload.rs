@@ -353,7 +353,7 @@ impl PerFrameTransform for D3d11Upload {
         // before, releasing that frame's GPU texture (via
         // `release_d3d11_texture`) right here.
         *gpu_frame = wrap_d3d11_texture(texture, frame.width(), frame.height())?;
-        gpu_frame.set_pts(frame.pts());
+        crate::buffer::carry_timing(&mut gpu_frame, frame);
         gpu_frame.set_color_space(frame.color_space());
         gpu_frame.set_color_range(frame.color_range());
         Ok(gpu_frame)

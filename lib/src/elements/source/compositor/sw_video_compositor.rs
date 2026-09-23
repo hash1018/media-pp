@@ -818,6 +818,7 @@ impl SwVideoCompositor {
             blend_bgra(&mut output, scaled, geometry, snapshot.layer.opacity);
         }
         output.set_pts(Some(self.frame_index));
+        crate::buffer::set_time_base(&mut output, self.time_base());
         self.frame_index += 1;
         let output = Arc::new(output);
         // Held so the next tick can tell whether it has anything to draw, and
@@ -856,6 +857,7 @@ impl SwVideoCompositor {
             }
         }
         output.set_pts(Some(self.frame_index));
+        crate::buffer::set_time_base(&mut output, self.time_base());
         self.frame_index += 1;
         Ok(Arc::new(output))
     }

@@ -659,6 +659,7 @@ impl AudioMixer {
         // identical fix).
         frame.data_mut(0)[..bytes.len()].copy_from_slice(bytes);
         frame.set_pts(Some(self.samples_emitted));
+        crate::buffer::set_time_base(&mut frame, self.time_base());
         self.samples_emitted += needed as i64;
 
         if let Err(error) = self.pad.push(MediaBuffer::Audio(Arc::new(frame))) {
@@ -1625,9 +1626,6 @@ mod tests {
             let parameters = demuxer
                 .stream_parameters(audio)
                 .expect("the audio stream describes itself");
-            let time_base = demuxer
-                .stream_time_base(audio)
-                .expect("the audio stream has a unit");
             let decoder = SwDecoder::new("fixture-decoder", parameters).expect("open the decoder");
             let sink = mixer
                 .add_source("fixture".to_owned())
@@ -1638,7 +1636,7 @@ mod tests {
                     .branch()
                     .pipe(decoder)
                     .queue("audio", 32)
-                    .pipe(Pacer::new("fixture-pacer", time_base)?)
+                    .pipe(Pacer::new("fixture-pacer"))
                     .to(sink)?;
                 context.attach(source, audio, branch)?;
                 Ok(())

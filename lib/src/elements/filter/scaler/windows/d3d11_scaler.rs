@@ -711,7 +711,7 @@ impl D3d11Scaler {
         // `ffmpeg::frame::Video`'s own `Drop` runs on whatever was there
         // before, releasing that frame's GPU texture right here.
         *scaled = wrap_d3d11_texture(output, width, height)?;
-        scaled.set_pts(frame.pts());
+        crate::buffer::carry_timing(&mut scaled, frame);
         // A pure resize carries the source's tags through unchanged; a
         // conversion replaces them, because the pixels are no longer what
         // they described. `converted_colorimetry` is what decides which of

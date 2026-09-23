@@ -69,31 +69,31 @@ mod example {
             let audio = match audio_track {
                 Some((index, params, time_base)) => {
                     let track = muxer.add_stream("audio", params, time_base)?;
-                    Some((index, time_base, track))
+                    Some((index, track))
                 }
                 None => None,
             };
             let mut sinks = muxer.open()?;
             let video_sink = sinks.take(video)?;
             let audio = match audio {
-                Some((index, time_base, track)) => Some((index, time_base, sinks.take(track)?)),
+                Some((index, track)) => Some((index, sinks.take(track)?)),
                 None => None,
             };
 
             let branch = ctx
                 .branch()
                 .queue("video-packets", 32) // pacer sleeps on its own thread; let demux run ahead into this
-                .pipe(Pacer::new("video-pacer", video_time_base)?)
+                .pipe(Pacer::new("video-pacer"))
                 .to(video_sink)?;
             ctx.attach(source, video_index, branch)?;
 
-            // Its own Pacer: the two tracks carry different time bases, and
-            // each paces its own packets against the wall clock.
-            if let Some((index, time_base, audio_sink)) = audio {
+            // Its own Pacer: each paces its own packets, in the unit they
+            // carry, against the same clock as the video.
+            if let Some((index, audio_sink)) = audio {
                 let branch = ctx
                     .branch()
                     .queue("audio-packets", 32)
-                    .pipe(Pacer::new("audio-pacer", time_base)?)
+                    .pipe(Pacer::new("audio-pacer"))
                     .to(audio_sink)?;
                 ctx.attach(source, index, branch)?;
             }

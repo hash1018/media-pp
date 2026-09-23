@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use ffmpeg_next as ffmpeg;
+use thiserror::Error as ThisError;
 
 use crate::pp_log::{PpLog, pp_info};
 
@@ -13,6 +14,24 @@ use crate::{
     pad::SrcPad,
     pool::UnboundObjectPool,
 };
+
+/// Errors specific to [`FrameRateLimiter`].
+#[derive(Debug, ThisError)]
+pub enum FrameRateLimiterError {
+    /// A frame arrived with a `pts` but no unit to read it in, so there is
+    /// no telling which output tick it falls in.
+    ///
+    /// Every element in this crate that makes a frame says what unit its
+    /// `pts` is in — see [`crate::buffer::time_base`] — so this is a frame
+    /// made elsewhere. Stamp it with [`crate::buffer::set_time_base`].
+    /// Refused rather than guessed at: a guessed unit keeps the wrong frames
+    /// with no other sign.
+    #[error(
+        "a Video frame arrived with a pts but no time base to read it in; the element \
+         that made it has to set one (media_pp::buffer::set_time_base)"
+    )]
+    NoTimeBase,
+}
 
 /// Forwards video frames at a fixed rate lower than the one they arrive at,
 /// stamping what it forwards as a constant-rate stream of its own.
@@ -64,8 +83,6 @@ use crate::{
 pub struct FrameRateLimiter {
     pp_log: PpLog,
     name: Arc<str>,
-    /// The unit incoming `pts` are counted in.
-    input_time_base: ffmpeg::Rational,
     /// Frames per second out.
     rate: ffmpeg::Rational,
     /// The next output tick that has not been filled, in `1/rate`. `None`
@@ -86,22 +103,19 @@ pub struct FrameRateLimiter {
 }
 
 impl FrameRateLimiter {
-    /// `input_time_base` is the unit the incoming frames' `pts` are in — the
-    /// producer's own, such as `CudaVideoCompositor::time_base`. `rate` is
-    /// frames per second out, and must be the rate whatever follows this is
-    /// configured for: the timestamps this writes mean nothing else.
-    pub fn new(
-        name: impl Into<String>,
-        input_time_base: ffmpeg::Rational,
-        rate: ffmpeg::Rational,
-    ) -> Self {
+    /// `rate` is frames per second out, and must be the rate whatever follows
+    /// this is configured for: the timestamps this writes mean nothing else.
+    ///
+    /// The unit incoming `pts` are in is read off each frame, where the
+    /// element that made it put it — see [`crate::buffer::time_base`] — so
+    /// there is no second value here to disagree with the stream.
+    pub fn new(name: impl Into<String>, rate: ffmpeg::Rational) -> Self {
         let name: Arc<str> = name.into().into();
         let pad = SrcPad::with_contract(format!("{name}_src"), OutputContract::Passthrough);
         let pp_log = element_pp_log(ElementType::FrameRateLimiter, &name, None);
         Self {
             pp_log,
             name,
-            input_time_base,
             rate,
             next_tick: None,
             forwarded: 0,
@@ -122,12 +136,10 @@ impl FrameRateLimiter {
     /// rate by a time base, and at a fine input unit — microseconds, or a
     /// codec's own 1/90000 — that leaves `i64` well within reach of a
     /// recording that runs for hours.
-    fn tick_of(&self, pts: i64) -> i64 {
-        let numerator = i128::from(pts)
-            * i128::from(self.input_time_base.numerator())
-            * i128::from(self.rate.numerator());
-        let denominator =
-            i128::from(self.input_time_base.denominator()) * i128::from(self.rate.denominator());
+    fn tick_of(&self, pts: i64, time_base: ffmpeg::Rational) -> i64 {
+        let numerator =
+            i128::from(pts) * i128::from(time_base.numerator()) * i128::from(self.rate.numerator());
+        let denominator = i128::from(time_base.denominator()) * i128::from(self.rate.denominator());
         // Floor division, not truncation: a negative timestamp belongs to the
         // tick before zero rather than to zero itself, and rounding it the
         // wrong way would let two frames share a tick.
@@ -179,14 +191,15 @@ impl Sink for FrameRateLimiter {
         let Some(pts) = frame.pts() else {
             return Ok(());
         };
-        let tick = self.tick_of(pts);
+        let time_base = crate::buffer::time_base(frame).ok_or(FrameRateLimiterError::NoTimeBase)?;
+        let tick = self.tick_of(pts, time_base);
         let next = *self.next_tick.get_or_insert_with(|| {
             pp_info!(
                 self,
                 "limiting to {}/{} fps from {}",
                 self.rate.numerator(),
                 self.rate.denominator(),
-                self.input_time_base
+                time_base
             );
             tick
         });
@@ -221,6 +234,7 @@ impl Sink for FrameRateLimiter {
         // After the reference, which copies the source's properties over
         // whatever the wrapper carried.
         stamped.set_pts(Some(self.forwarded));
+        crate::buffer::set_time_base(&mut stamped, self.time_base());
         self.forwarded += 1;
         self.pad.push(MediaBuffer::Video(Arc::new(stamped)))
     }
@@ -268,6 +282,7 @@ mod tests {
     fn frame(pts: Option<i64>) -> MediaBuffer {
         let mut video = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::GRAY8, 2, 2);
         video.set_pts(pts);
+        crate::buffer::set_time_base(&mut video, ffmpeg::Rational::new(1, 60));
         if let Some(pts) = pts {
             let stride = video.stride(0);
             video.data_mut(0)[..stride].fill(pts as u8);
@@ -305,11 +320,7 @@ mod tests {
     }
 
     fn sixty_into(rate: i32) -> FrameRateLimiter {
-        FrameRateLimiter::new(
-            "limit",
-            ffmpeg::Rational::new(1, 60),
-            ffmpeg::Rational::new(rate, 1),
-        )
+        FrameRateLimiter::new("limit", ffmpeg::Rational::new(rate, 1))
     }
 
     /// The whole point: half the frames out, and the ones kept are evenly
@@ -395,6 +406,64 @@ mod tests {
         limiter.consume(frame(None)).unwrap();
 
         assert!(stamps(&received).is_empty());
+    }
+
+    /// Each frame is placed in the unit it carries, not one the limiter was
+    /// told: the same count in a coarser unit is a later tick.
+    #[test]
+    fn a_frame_is_placed_in_the_unit_it_carries() {
+        let mut limiter = sixty_into(30);
+        let received = capture(&mut limiter);
+        let at = |pts: i64, unit: ffmpeg::Rational| {
+            let mut video = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::GRAY8, 2, 2);
+            video.set_pts(Some(pts));
+            crate::buffer::set_time_base(&mut video, unit);
+            let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
+            let mut pooled = pool.get();
+            *pooled = video;
+            MediaBuffer::Video(Arc::new(pooled))
+        };
+
+        // Tick 0, then 1/60 s — still tick 0 at 30 fps, dropped — then the
+        // same count 1 in tenths of a second, which is tick 3 and kept.
+        limiter
+            .consume(at(0, ffmpeg::Rational::new(1, 60)))
+            .unwrap();
+        limiter
+            .consume(at(1, ffmpeg::Rational::new(1, 60)))
+            .unwrap();
+        limiter
+            .consume(at(1, ffmpeg::Rational::new(1, 10)))
+            .unwrap();
+
+        assert_eq!(stamps(&received), vec![0, 1]);
+    }
+
+    /// A frame that does not say what unit its `pts` is in is refused by
+    /// name, and leaves the limiter where it was: the next frame that does
+    /// say still starts the timeline.
+    #[test]
+    fn a_frame_with_no_time_base_is_refused_rather_than_guessed_at() {
+        let mut limiter = sixty_into(30);
+        let received = capture(&mut limiter);
+        let mut unitless = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::GRAY8, 2, 2);
+        unitless.set_pts(Some(10));
+        let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
+        let mut pooled = pool.get();
+        *pooled = unitless;
+
+        let error = limiter
+            .consume(MediaBuffer::Video(Arc::new(pooled)))
+            .expect_err("no unit to read the pts in");
+        assert!(matches!(
+            error,
+            crate::Error::FrameRateLimiterError(FrameRateLimiterError::NoTimeBase)
+        ));
+        assert!(stamps(&received).is_empty());
+        assert!(limiter.next_tick.is_none(), "the timeline has not started");
+
+        limiter.consume(frame(Some(20))).unwrap();
+        assert_eq!(stamps(&received), vec![0]);
     }
 
     /// A muxer finalizes on it, so it must arrive whatever the rate is doing.

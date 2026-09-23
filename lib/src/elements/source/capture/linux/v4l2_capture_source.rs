@@ -363,6 +363,7 @@ impl V4l2CaptureSource {
         // rather than a nominal frame grid: exposure lengthens an interval,
         // and a mode nominally at 30 fps is not delivered on a 1/30 one.
         converted.set_pts(decoded.pts().or_else(|| decoded.timestamp()));
+        crate::buffer::set_time_base(converted, self.format.time_base);
         Ok(())
     }
 }

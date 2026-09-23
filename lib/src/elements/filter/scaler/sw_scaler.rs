@@ -383,7 +383,7 @@ impl PerFrameTransform for SwScaler {
         // `run` only copies pixel data, not metadata — carry the
         // pts through by hand so downstream pacing/muxing still
         // sees the original timestamp.
-        output.set_pts(frame.pts());
+        crate::buffer::carry_timing(&mut output, frame);
         self.describe(frame, &mut output);
         Ok(output)
     }

@@ -515,7 +515,7 @@ mod common {
         } = file;
 
         let decoder = SwDecoder::new("decode-file", params)?;
-        let pacer = Pacer::new("pace-file", time_base)?;
+        let pacer = Pacer::new("pace-file");
         let scaler = SwScaler::new(
             "scale-file",
             ffmpeg::format::Pixel::YUV420P,
