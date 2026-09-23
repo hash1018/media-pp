@@ -9,7 +9,7 @@ use std::{
     fmt::{self, Write as _},
     fs,
     io::Write as _,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         Arc, Mutex, OnceLock,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -189,10 +189,11 @@ struct PrivateLogger {
 /// process.
 pub fn init(
     log_prefix: &str,
-    log_path: &str,
+    log_path: impl AsRef<Path>,
     level: Level,
     max_log_files: usize,
 ) -> Result<LogGuard, LogInitError> {
+    let log_path = log_path.as_ref();
     let _init_guard = INIT_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);

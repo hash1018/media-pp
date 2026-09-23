@@ -21,9 +21,8 @@ fn pipeline_logs_topology_eos_and_control_at_each_boundary() {
         std::process::id(),
         unique
     ));
-    let log_path = log_dir.to_string_lossy();
     let guard =
-        log::init("flow", &log_path, Level::Trace, 1).expect("private file logger must initialize");
+        log::init("flow", &log_dir, Level::Trace, 1).expect("private file logger must initialize");
 
     let (source, handle) = AppSource::new("source", 4);
     let (pipeline, ()) = Pipeline::new("flow-test", source, |source, context| {

@@ -12,6 +12,15 @@ compile error with no explanation.
 
 ### Breaking
 
+- **`log::init` takes its directory as a path.** `log_path` was a `&str`,
+  the one file location in the crate that was, so a caller holding a
+  `PathBuf` had to convert it with `to_string_lossy` — which turns a name
+  that is not UTF-8 into a different one, and logged somewhere other than
+  where it was asked to. It is `impl AsRef<Path>` now: a `&str` or
+  `&String` still works as it did, and a `Path` or `PathBuf` goes in
+  directly. What no longer compiles is what relied on coercing to `&str`,
+  such as `&path.to_string_lossy()`; pass `&path` itself.
+
 - **`CudaUpload::new` no longer returns a `Result`.** Drop the `?`:
   `CudaUpload::new(name, &device, format)?` is
   `CudaUpload::new(name, &device, format)`. It never had a failure to

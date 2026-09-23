@@ -43,8 +43,7 @@ fn private_file_logger_filters_and_flushes_on_guard_drop() {
         std::process::id(),
         unique
     ));
-    let log_path = log_dir.to_string_lossy();
-    let guard = log::init("isolated", &log_path, Level::Info, 2)
+    let guard = log::init("isolated", &log_dir, Level::Info, 2)
         .expect("private file logger must initialize");
     let pp_log = PpLog::new("TestElement", "test-name", Some("test-pipeline"));
     let debug_argument_evaluated = AtomicBool::new(false);
@@ -66,7 +65,7 @@ fn private_file_logger_filters_and_flushes_on_guard_drop() {
     pp_info!(pp_log: &pp_log, "after-guard-marker");
 
     assert!(matches!(
-        log::init("isolated", &log_path, Level::Info, 2),
+        log::init("isolated", &log_dir, Level::Info, 2),
         Err(LogInitError::AlreadyInitialized)
     ));
 
