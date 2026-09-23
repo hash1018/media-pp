@@ -46,14 +46,12 @@ mod example {
             framerate: ffmpeg::Rational::new(30, 1),
         };
         let source = TestVideoSource::new("video", video_options);
-        let time_base = source.time_base();
         let encoder = SwEncoder::new(
             "encoder",
             SwEncoderOptions {
                 codec: VideoCodec::OpenH264,
                 width: video_options.width,
                 height: video_options.height,
-                time_base,
                 frame_rate: video_options.framerate,
                 bit_rate: 1_500_000,
                 // Match the two-second HLS target so each requested boundary
@@ -71,7 +69,7 @@ mod example {
             delete_old_segments: true,
         };
         let mut muxer = HlsMuxer::create(hls_options)?;
-        let track = muxer.add_stream("video", encoder.parameters(), time_base)?;
+        let track = muxer.add_stream("video", encoder.parameters(), encoder.time_base())?;
         let muxer_sink = muxer.open()?.take(track)?;
 
         let pipeline = Pipeline::new("hls", source, |source, context| {

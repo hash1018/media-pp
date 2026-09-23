@@ -47,13 +47,10 @@ pub enum FileMuxerError {
 /// #     SwEncoderOptions, VideoCodec,
 /// # };
 /// # fn main() -> media_pp::Result<()> {
-/// # let video_time_base = ffmpeg::Rational(1, 30);
-/// # let audio_time_base = ffmpeg::Rational(1, 48_000);
 /// # let video_encoder = SwEncoder::new("video", SwEncoderOptions {
 /// #     codec: VideoCodec::H264,
 /// #     width: 640,
 /// #     height: 360,
-/// #     time_base: video_time_base,
 /// #     frame_rate: ffmpeg::Rational(30, 1),
 /// #     bit_rate: 2_000_000,
 /// #     gop_size: 30,
@@ -63,12 +60,11 @@ pub enum FileMuxerError {
 /// #     codec: AudioCodec::Aac,
 /// #     sample_rate: 48_000,
 /// #     channels: 2,
-/// #     time_base: audio_time_base,
 /// #     bit_rate: 128_000,
 /// # })?;
 /// let mut muxer = FileMuxer::create("out.mp4")?;
-/// let video = muxer.add_stream("video", video_encoder.parameters(), video_time_base)?;
-/// let audio = muxer.add_stream("audio", audio_encoder.parameters(), audio_time_base)?;
+/// let video = muxer.add_stream("video", video_encoder.parameters(), video_encoder.time_base())?;
+/// let audio = muxer.add_stream("audio", audio_encoder.parameters(), audio_encoder.time_base())?;
 /// let mut sinks = muxer.open()?; // writes the header
 /// let video_sink = sinks.take(video)?;
 /// let audio_sink = sinks.take(audio)?;
@@ -95,8 +91,8 @@ impl FileMuxer {
 
     /// Registers one more track this file will hold. `parameters`/
     /// `time_base` describe it — typically
-    /// [`crate::elements::SwEncoder::parameters`]/the same `time_base`
-    /// passed to its own `SwEncoderOptions` (or the
+    /// [`crate::elements::SwEncoder::parameters`] and
+    /// [`crate::elements::SwEncoder::time_base`] (or the
     /// [`crate::elements::SwAudioEncoder`] equivalents). `name` becomes
     /// this track's own [`Element::name`](crate::element::Element::name)/`pp_log` identity once
     /// [`FileMuxer::open`] turns it into a `Sink` — pick something that
@@ -196,7 +192,6 @@ mod tests {
                 codec: AudioCodec::Aac,
                 sample_rate,
                 channels,
-                time_base: ffmpeg::Rational::new(1, sample_rate as i32),
                 bit_rate: 64_000,
             },
         )
@@ -212,7 +207,6 @@ mod tests {
                 codec: AudioCodec::Opus,
                 sample_rate,
                 channels,
-                time_base: ffmpeg::Rational::new(1, sample_rate as i32),
                 bit_rate: 64_000,
             },
         )
@@ -504,12 +498,10 @@ mod tests {
     fn a_video_track_carries_its_extradata_into_a_matroska_header() {
         use crate::elements::{SwEncoder, SwEncoderOptions, VideoCodec};
 
-        let time_base = ffmpeg::Rational::new(1, 30);
         let options = |codec| SwEncoderOptions {
             codec,
             width: 320,
             height: 180,
-            time_base,
             frame_rate: ffmpeg::Rational::new(30, 1),
             bit_rate: 400_000,
             gop_size: 30,
@@ -531,7 +523,7 @@ mod tests {
 
         let mut muxer = FileMuxer::create(&path).expect("the muxer must open");
         let _video = muxer
-            .add_stream("video", encoder.parameters(), time_base)
+            .add_stream("video", encoder.parameters(), encoder.time_base())
             .expect("add_stream must succeed");
         // `open` is the whole assertion: it is `avformat_write_header`, and
         // that is what refuses a video track it has no `CodecPrivate` for.
@@ -819,14 +811,12 @@ mod tests {
         // encoder told a different unit writes those same numbers meaning
         // something else. Which is not hypothetical — the first version of
         // this test said `1/30` and produced 121 frames across 34 minutes.
-        let video_time_base = demuxer.stream_time_base(video).expect("video time base");
         let video_encoder = SwEncoder::new(
             "video-encoder",
             SwEncoderOptions {
                 codec: VideoCodec::OpenH264,
                 width,
                 height,
-                time_base: video_time_base,
                 frame_rate: ffmpeg::Rational::new(30, 1),
                 bit_rate: 800_000,
                 gop_size: 30,
@@ -843,7 +833,11 @@ mod tests {
 
         let mut muxer = FileMuxer::create(&path).expect("create the output");
         let video_track = muxer
-            .add_stream("video", video_encoder.parameters(), video_time_base)
+            .add_stream(
+                "video",
+                video_encoder.parameters(),
+                video_encoder.time_base(),
+            )
             .expect("add the video stream");
         let audio_track = muxer
             .add_stream(

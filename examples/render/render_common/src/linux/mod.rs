@@ -22,7 +22,8 @@ pub fn cuda_window_renderer(
     window: RawWindowHandle,
     width: u32,
     height: u32,
-) -> Result<CudaRenderer, String> {
-    let renderer = CudaWindowRenderer::new(gpu, display, window, width, height)?;
+) -> media_pp::Result<CudaRenderer> {
+    let renderer = CudaWindowRenderer::new(gpu, display, window, width, height)
+        .map_err(media_pp::Error::Other)?;
     Ok(CudaRenderer::new(name, device, Box::new(renderer)))
 }

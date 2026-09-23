@@ -91,11 +91,10 @@ mod windows_example {
         let gpu = D3d12GpuContext::new().map_err(|e| Error::Other(format!("{e:?}")))?;
 
         let pipeline = Pipeline::new("seek-render", source, |source, ctx| {
-            let decoder = SwDecoder::new("decoder", params).expect("failed to open decoder");
+            let decoder = SwDecoder::new("decoder", params)?;
             let pacer = Pacer::new("pacer");
             let renderer =
-                render_common::d3d12_window_renderer("renderer", &gpu, hwnd, width, height)
-                    .expect("failed to create renderer");
+                render_common::d3d12_window_renderer("renderer", &gpu, hwnd, width, height)?;
             let branch = ctx
                 .branch()
                 .pipe(decoder) // same thread as the demux — cheap enough not to need a queue
@@ -111,10 +110,7 @@ mod windows_example {
                     height,
                     ffmpeg::software::scaling::Flags::BILINEAR,
                 ))
-                .pipe(
-                    D3d12Upload::new("upload", gpu.device())
-                        .expect("failed to create the D3D12 upload"),
-                )
+                .pipe(D3d12Upload::new("upload", gpu.device())?)
                 .to(renderer)?;
             ctx.attach(source, video.index, branch)?;
             Ok(())
@@ -146,22 +142,7 @@ mod windows_example {
         // `Eos`: every element that ends posts one, so the first `Eos` is
         // only the first thing to end.
         for event in pipeline.bus().iter() {
-            match &event {
-                BusEvent::Eos { name, .. } => println!("[{name}] eos"),
-                BusEvent::Error { name, error, .. } => eprintln!("[{name}] error: {error}"),
-                BusEvent::Dropped { name, .. } => {
-                    eprintln!("[{name}] dropped a buffer (queue full)")
-                }
-                BusEvent::Seeked {
-                    name,
-                    requested,
-                    landed,
-                    ..
-                } => println!("[{name}] seeked: requested {requested:.2?}, landed {landed:.2?}"),
-                // `BusEvent` is `#[non_exhaustive]`; this example only acts
-                // on the events above.
-                _ => {}
-            }
+            println!("{event}");
             if matches!(event, BusEvent::Finished | BusEvent::Error { .. }) {
                 pipeline.stop();
             }
@@ -299,8 +280,7 @@ mod linux_example {
                 target.window,
                 target.width,
                 target.height,
-            )
-            .map_err(Error::Other)?;
+            )?;
             let branch = ctx
                 .branch()
                 .pipe(decoder)
@@ -327,20 +307,7 @@ mod linux_example {
 
     fn drain_bus(pipeline: &Pipeline) {
         for event in pipeline.bus().iter() {
-            match &event {
-                BusEvent::Eos { name, .. } => println!("[{name}] eos"),
-                BusEvent::Error { name, error, .. } => eprintln!("[{name}] error: {error}"),
-                BusEvent::Dropped { name, .. } => {
-                    eprintln!("[{name}] dropped a buffer (queue full)")
-                }
-                BusEvent::Seeked {
-                    name,
-                    requested,
-                    landed,
-                    ..
-                } => println!("[{name}] seeked: requested {requested:.2?}, landed {landed:.2?}"),
-                _ => {}
-            }
+            println!("{event}");
             if matches!(event, BusEvent::Finished | BusEvent::Error { .. }) {
                 pipeline.stop();
             }

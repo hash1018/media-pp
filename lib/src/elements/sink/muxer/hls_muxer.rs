@@ -418,7 +418,6 @@ mod tests {
                 codec: AudioCodec::Aac,
                 sample_rate,
                 channels,
-                time_base: ffmpeg::Rational::new(1, sample_rate as i32),
                 bit_rate: 64_000,
             },
         )

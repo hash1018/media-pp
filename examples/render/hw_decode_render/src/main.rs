@@ -108,8 +108,7 @@ mod windows_example {
         let pipeline = Pipeline::new("hw-decode-render", source, |source, ctx| {
             let pacer = Pacer::new("pacer");
             let renderer =
-                render_common::d3d12_window_renderer("renderer", &gpu, hwnd, width, height)
-                    .expect("failed to create renderer");
+                render_common::d3d12_window_renderer("renderer", &gpu, hwnd, width, height)?;
             let branch = ctx
                 .branch()
                 .pipe(decoder) // same thread as the demux — cheap enough not to need a queue
@@ -198,8 +197,7 @@ mod linux_example {
             target.window,
             target.width,
             target.height,
-        )
-        .map_err(Error::Other)?;
+        )?;
         // Asked before linking rather than known: the renderer presents
         // NV12, and the bin hands on BGRA for alpha, an odd side or BT.2020
         // or HDR colour. Where the two do not fit, this crate's own kernel
@@ -248,22 +246,7 @@ fn drain_bus(pipeline: &media_pp::pipeline::Pipeline) {
     use media_pp::bus::BusEvent;
 
     for event in pipeline.bus().iter() {
-        match &event {
-            BusEvent::Eos { name, .. } => println!("[{name}] eos"),
-            BusEvent::Error { name, error, .. } => eprintln!("[{name}] error: {error}"),
-            BusEvent::Dropped { name, .. } => {
-                eprintln!("[{name}] dropped a buffer (queue full)")
-            }
-            BusEvent::Seeked {
-                name,
-                requested,
-                landed,
-                ..
-            } => println!("[{name}] seeked: requested {requested:.2?}, landed {landed:.2?}"),
-            // `BusEvent` is `#[non_exhaustive]`; this example only acts on
-            // the events above.
-            _ => {}
-        }
+        println!("{event}");
         if matches!(event, BusEvent::Finished | BusEvent::Error { .. }) {
             pipeline.stop();
         }

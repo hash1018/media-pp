@@ -32,7 +32,6 @@ mod windows_example {
 
     use media_pp::ffmpeg;
     use media_pp::{
-        bus::BusEvent,
         elements::{
             CaptureMode, DxgiCaptureOptions, DxgiCaptureSource, FileMuxer, SwEncoder,
             SwEncoderOptions, SwScaler, VideoCodec,
@@ -85,19 +84,17 @@ mod windows_example {
                 codec: VideoCodec::OpenH264,
                 width: format.width,
                 height: format.height,
-                time_base: format.time_base,
                 frame_rate: ffmpeg::Rational::new(30, 1),
                 bit_rate: 4_000_000,
                 gop_size: 60, // ~2s @ 30fps
                 max_b_frames: None,
             },
-        )
-        .expect("failed to open encoder");
+        )?;
         // No container/demuxer in this loop to get these from — SwEncoder
         // exposes its own codec parameters for exactly this case (see
         // `transcode_render`'s own use of this, wiring a decoder instead).
         let mut muxer = FileMuxer::create(&path)?;
-        let track = muxer.add_stream("video", encoder.parameters(), format.time_base)?;
+        let track = muxer.add_stream("video", encoder.parameters(), encoder.time_base())?;
         let muxer_sink = muxer.open()?.take(track)?;
 
         let pipeline = Pipeline::new("screen-record-software", source, |source, ctx| {
@@ -126,13 +123,7 @@ mod windows_example {
         pipeline.stop();
 
         for event in pipeline.bus().iter() {
-            match &event {
-                BusEvent::Error { name, error, .. } => eprintln!("[{name}] error: {error}"),
-                BusEvent::Dropped { name, .. } => {
-                    eprintln!("[{name}] dropped a buffer (queue full)")
-                }
-                _ => {}
-            }
+            println!("{event}");
         }
 
         println!("wrote {path}");
@@ -155,7 +146,6 @@ mod linux_example {
 
     use media_pp::ffmpeg;
     use media_pp::{
-        bus::BusEvent,
         elements::{
             CaptureSourceKind, FileMuxer, PipeWireScreenCaptureOptions,
             PipeWireScreenCaptureSource, SwEncoder, SwEncoderOptions, SwScaler, VideoCodec,
@@ -231,10 +221,9 @@ mod linux_example {
                 gop_size: 60, // ~2s @ 30fps
                 max_b_frames: None,
             },
-        )
-        .expect("failed to open encoder");
+        )?;
         let mut muxer = FileMuxer::create(&path)?;
-        let track = muxer.add_stream("video", encoder.parameters(), capture_format.time_base)?;
+        let track = muxer.add_stream("video", encoder.parameters(), encoder.time_base())?;
         let muxer_sink = muxer.open()?.take(track)?;
 
         let pipeline = Pipeline::new("screen-record-software", source, |source, ctx| {
@@ -263,13 +252,7 @@ mod linux_example {
         pipeline.stop();
 
         for event in pipeline.bus().iter() {
-            match &event {
-                BusEvent::Error { name, error, .. } => eprintln!("[{name}] error: {error}"),
-                BusEvent::Dropped { name, .. } => {
-                    eprintln!("[{name}] dropped a buffer (queue full)")
-                }
-                _ => {}
-            }
+            println!("{event}");
         }
 
         println!("wrote {path}");

@@ -97,13 +97,10 @@ pub enum ReplayBufferError {
 /// #     SwEncoderOptions, VideoCodec,
 /// # };
 /// # fn main() -> media_pp::Result<()> {
-/// # let video_time_base = ffmpeg::Rational(1, 30);
-/// # let audio_time_base = ffmpeg::Rational(1, 48_000);
 /// # let video_encoder = SwEncoder::new("video", SwEncoderOptions {
 /// #     codec: VideoCodec::H264,
 /// #     width: 640,
 /// #     height: 360,
-/// #     time_base: video_time_base,
 /// #     frame_rate: ffmpeg::Rational(30, 1),
 /// #     bit_rate: 2_000_000,
 /// #     gop_size: 60,
@@ -113,12 +110,11 @@ pub enum ReplayBufferError {
 /// #     codec: AudioCodec::Aac,
 /// #     sample_rate: 48_000,
 /// #     channels: 2,
-/// #     time_base: audio_time_base,
 /// #     bit_rate: 128_000,
 /// # })?;
 /// let mut replay = ReplayBuffer::create(Duration::from_secs(30));
-/// let video = replay.add_stream("video", video_encoder.parameters(), video_time_base);
-/// let audio = replay.add_stream("audio", audio_encoder.parameters(), audio_time_base);
+/// let video = replay.add_stream("video", video_encoder.parameters(), video_encoder.time_base());
+/// let audio = replay.add_stream("audio", audio_encoder.parameters(), audio_encoder.time_base());
 /// let (mut sinks, handle) = replay.open()?;
 /// let video_sink = sinks.take(video)?;
 /// let audio_sink = sinks.take(audio)?;

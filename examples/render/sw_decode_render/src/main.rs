@@ -79,11 +79,10 @@ mod windows_example {
         let gpu = D3d12GpuContext::new().map_err(|e| Error::Other(format!("{e:?}")))?;
 
         let pipeline = Pipeline::new("sw-decode-render", source, |source, ctx| {
-            let decoder = SwDecoder::new("decoder", params).expect("failed to open decoder");
+            let decoder = SwDecoder::new("decoder", params)?;
             let pacer = Pacer::new("pacer");
             let renderer =
-                render_common::d3d12_window_renderer("renderer", &gpu, hwnd, width, height)
-                    .expect("failed to create renderer");
+                render_common::d3d12_window_renderer("renderer", &gpu, hwnd, width, height)?;
             // `D3d12Renderer` draws from a device resource only, so the
             // decoder's system-memory frames are converted to the NV12
             // layout `D3d12Upload` writes and uploaded here. Without this
@@ -96,8 +95,7 @@ mod windows_example {
                 height,
                 ffmpeg::software::scaling::Flags::BILINEAR,
             );
-            let upload = D3d12Upload::new("upload", gpu.device())
-                .expect("failed to create the D3D12 upload");
+            let upload = D3d12Upload::new("upload", gpu.device())?;
             let branch = ctx
                 .branch()
                 .pipe(decoder)
@@ -117,22 +115,7 @@ mod windows_example {
         pipeline.run()?;
 
         for event in pipeline.bus().iter() {
-            match &event {
-                BusEvent::Eos { name, .. } => println!("[{name}] eos"),
-                BusEvent::Error { name, error, .. } => eprintln!("[{name}] error: {error}"),
-                BusEvent::Dropped { name, .. } => {
-                    eprintln!("[{name}] dropped a buffer (queue full)")
-                }
-                BusEvent::Seeked {
-                    name,
-                    requested,
-                    landed,
-                    ..
-                } => println!("[{name}] seeked: requested {requested:.2?}, landed {landed:.2?}"),
-                // `BusEvent` is `#[non_exhaustive]`; this example only acts
-                // on the events above.
-                _ => {}
-            }
+            println!("{event}");
             if matches!(event, BusEvent::Finished | BusEvent::Error { .. }) {
                 pipeline.stop();
             }
@@ -201,8 +184,7 @@ mod linux_example {
                 target.window,
                 target.width,
                 target.height,
-            )
-            .map_err(Error::Other)?;
+            )?;
             let branch = ctx
                 .branch()
                 .pipe(decoder)
@@ -225,22 +207,7 @@ mod linux_example {
 
     fn drain_bus(pipeline: &Pipeline) {
         for event in pipeline.bus().iter() {
-            match &event {
-                BusEvent::Eos { name, .. } => println!("[{name}] eos"),
-                BusEvent::Error { name, error, .. } => eprintln!("[{name}] error: {error}"),
-                BusEvent::Dropped { name, .. } => {
-                    eprintln!("[{name}] dropped a buffer (queue full)")
-                }
-                BusEvent::Seeked {
-                    name,
-                    requested,
-                    landed,
-                    ..
-                } => {
-                    println!("[{name}] seeked: requested {requested:.2?}, landed {landed:.2?}")
-                }
-                _ => {}
-            }
+            println!("{event}");
             if matches!(event, BusEvent::Finished | BusEvent::Error { .. }) {
                 pipeline.stop();
             }

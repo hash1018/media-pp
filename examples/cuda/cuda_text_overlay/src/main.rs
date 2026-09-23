@@ -94,7 +94,6 @@ mod example {
                 background_alpha: 255,
             },
         )?;
-        let time_base = compositor.time_base();
 
         let mut background_layer =
             VideoLayer::new(VideoRect::new(0, 0, output_width, output_height));
@@ -150,7 +149,6 @@ mod example {
                 codec: VideoCodec::OpenH264,
                 width: output_width,
                 height: output_height,
-                time_base,
                 frame_rate,
                 bit_rate: 2_000_000,
                 gop_size: 60,
@@ -158,7 +156,7 @@ mod example {
             },
         )?;
         let mut muxer = FileMuxer::create(&path)?;
-        let track = muxer.add_stream("video", encoder.parameters(), time_base)?;
+        let track = muxer.add_stream("video", encoder.parameters(), encoder.time_base())?;
         let muxer_sink = muxer.open()?.take(track)?;
 
         let output_pipeline = Pipeline::new("composited-output", compositor, |source, ctx| {

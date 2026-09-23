@@ -51,28 +51,25 @@ mod example {
             7,
         )?;
 
-        let socket_a = UdpSocket::bind("127.0.0.1:0").expect("bind a");
-        let socket_b = UdpSocket::bind("127.0.0.1:0").expect("bind b");
-        let addr_a = socket_a.local_addr().expect("addr a");
-        let addr_b = socket_b.local_addr().expect("addr b");
+        let socket_a = UdpSocket::bind("127.0.0.1:0")?;
+        let socket_b = UdpSocket::bind("127.0.0.1:0")?;
+        let addr_a = socket_a.local_addr()?;
+        let addr_b = socket_b.local_addr()?;
 
         let mut rtc_a = Rtc::builder().build(Instant::now());
         rtc_a
-            .add_local_candidate(Candidate::host(addr_a, "udp").expect("candidate a"))
+            .add_local_candidate(Candidate::host(addr_a, "udp")?)
             .expect("add candidate a");
         let mut rtc_b = Rtc::builder().build(Instant::now());
         rtc_b
-            .add_local_candidate(Candidate::host(addr_b, "udp").expect("candidate b"))
+            .add_local_candidate(Candidate::host(addr_b, "udp")?)
             .expect("add candidate b");
 
         let mut changes = rtc_a.sdp_api();
         changes.add_channel("bootstrap".to_string());
         let (offer, pending) = changes.apply().expect("adding a channel always offers");
-        let answer = rtc_b.sdp_api().accept_offer(offer).expect("b accepts");
-        rtc_a
-            .sdp_api()
-            .accept_answer(pending, answer)
-            .expect("a accepts answer");
+        let answer = rtc_b.sdp_api().accept_offer(offer)?;
+        rtc_a.sdp_api().accept_answer(pending, answer)?;
         println!("initial connection negotiated (bootstrap data channel only, no media yet)");
 
         let (offer_tx, offer_rx) = std::sync::mpsc::channel::<SdpOffer>();
@@ -100,31 +97,21 @@ mod example {
         thread::sleep(Duration::from_millis(200));
         println!("ICE/DTLS-SRTP established over loopback UDP");
 
-        let _track_id = handle_a
-            .add_track(MediaKind::Video, Direction::SendRecv, Codec::Vp8)
-            .expect("running peer should accept AddTrack");
+        let _track_id = handle_a.add_track(MediaKind::Video, Direction::SendRecv, Codec::Vp8)?;
         // `next_track()` returns for peer-a's own track the moment `add_track`'s
         // negotiation mints a Mid — before the offer even leaves this process.
-        let attached_a = handle_a
-            .next_track()
-            .expect("peer-a's own track should attach");
+        let attached_a = handle_a.next_track()?;
         let kind = attached_a.kind;
         let (mut sink_a, source_a) = send_recv(attached_a);
         println!("peer-a: track attached ({kind:?}) — got a WebRtcTrackSink to reply on");
 
-        let offer = offer_rx
-            .recv_timeout(Duration::from_secs(2))
-            .expect("peer-a should generate a renegotiation offer");
-        let answer = handle_b
-            .accept_remote_offer(offer)
-            .expect("peer-b should accept the offer");
+        let offer = offer_rx.recv_timeout(Duration::from_secs(2))?;
+        let answer = handle_b.accept_remote_offer(offer)?;
         println!("peer-b: accepted the offer, answer relayed back to peer-a");
         handle_a.set_answer(answer);
         // peer-b's track attaches as part of accepting the offer, independent
         // of the answer round-trip.
-        let attached_b = handle_b
-            .next_track()
-            .expect("peer-b's remote track should attach");
+        let attached_b = handle_b.next_track()?;
         let kind = attached_b.kind;
         let (mut sink_b, source_b) = send_recv(attached_b);
         println!(
@@ -134,9 +121,7 @@ mod example {
         );
         // This endpoint belongs to a track peer-a added, so peer-b selects
         // its outbound codec from the negotiated capability list.
-        sink_b
-            .set_codec(Codec::Vp8)
-            .expect("VP8 should be negotiated for peer-b's outbound half");
+        sink_b.set_codec(Codec::Vp8)?;
         println!("peer-b: track attached ({kind:?}) — got a WebRtcTrackSink to reply on");
 
         let received_by_a = Arc::new(AtomicUsize::new(0));

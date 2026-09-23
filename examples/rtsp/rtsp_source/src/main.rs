@@ -64,16 +64,7 @@ mod example {
         let start = Instant::now();
         loop {
             if let Some(event) = pipeline.bus().try_recv() {
-                match &event {
-                    BusEvent::Eos { name, .. } => println!("[{name}] eos"),
-                    BusEvent::Error { name, error, .. } => eprintln!("[{name}] error: {error}"),
-                    BusEvent::Dropped { name, .. } => {
-                        eprintln!("[{name}] dropped a buffer (queue full)")
-                    }
-                    // `BusEvent` is `#[non_exhaustive]`; this example only acts
-                    // on the events above.
-                    _ => {}
-                }
+                println!("{event}");
                 if matches!(event, BusEvent::Finished | BusEvent::Error { .. }) {
                     break;
                 }

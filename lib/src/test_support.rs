@@ -390,7 +390,6 @@ pub(crate) fn try_av1_packets() -> Option<(ffmpeg_next::codec::Parameters, Vec<f
         codec,
         width,
         height,
-        time_base: ffmpeg::Rational::new(1, FIXTURE_FPS),
         frame_rate: ffmpeg::Rational::new(FIXTURE_FPS, 1),
         bit_rate: 500_000,
         gop_size: FIXTURE_FPS as u32,
@@ -428,6 +427,7 @@ pub(crate) fn try_av1_packets() -> Option<(ffmpeg_next::codec::Parameters, Vec<f
         frame.data_mut(1).fill(128);
         frame.data_mut(2).fill(128);
         frame.set_pts(Some(index));
+        crate::buffer::set_time_base(&mut frame, ffmpeg::Rational::new(1, FIXTURE_FPS));
         encoder
             .consume(MediaBuffer::Video(Arc::new(frame)))
             .expect("the AV1 encoder takes a frame");
@@ -498,8 +498,6 @@ fn build_fixture(
             frequency: 440.0,
         },
     );
-    let audio_time_base = audio.time_base();
-    let video_time_base = ffmpeg::Rational::new(1, FIXTURE_FPS);
 
     let video_encoder = SwEncoder::new(
         format!("{name}-video-encoder"),
@@ -507,7 +505,6 @@ fn build_fixture(
             codec,
             width: FIXTURE_WIDTH,
             height: FIXTURE_HEIGHT,
-            time_base: video_time_base,
             frame_rate: ffmpeg::Rational::new(FIXTURE_FPS, 1),
             bit_rate: 1_000_000,
             // Deliberately not a whole number of seconds. Seek tests pick
@@ -527,13 +524,16 @@ fn build_fixture(
             codec: AudioCodec::Aac,
             sample_rate: audio_rate,
             channels,
-            time_base: audio_time_base,
             bit_rate: 128_000,
         },
     )?;
 
     let mut muxer = FileMuxer::create(&path)?;
-    let video_track = muxer.add_stream("video", video_encoder.parameters(), video_time_base)?;
+    let video_track = muxer.add_stream(
+        "video",
+        video_encoder.parameters(),
+        video_encoder.time_base(),
+    )?;
     let audio_track = muxer.add_stream(
         "audio",
         audio_encoder.parameters(),

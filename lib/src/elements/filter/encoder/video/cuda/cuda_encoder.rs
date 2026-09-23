@@ -21,6 +21,9 @@ use crate::{
     platform::ffmpeg::AvBufferRef,
 };
 
+// The video-encoder helpers every backend shares, a module up from this one.
+use super::super as shared;
+
 /// Which NVENC codec [`CudaEncoder`] drives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CudaCodec {
@@ -62,8 +65,6 @@ pub struct CudaEncoderOptions {
     pub width: u32,
     /// Encoded frame height in pixels.
     pub height: u32,
-    /// Must match the `pts` unit of whatever frames this receives.
-    pub time_base: ffmpeg::Rational,
     /// The nominal rate NVENC uses for rate control and writes into the
     /// bitstream — not required to match the real interval between `consume`
     /// calls. See [`crate::elements::SwEncoderOptions::frame_rate`].
@@ -107,6 +108,14 @@ pub enum CudaEncoderError {
     /// The sink received a buffer other than decoded video or end-of-stream.
     #[error("CudaEncoder only accepts Video and Eos buffers, got a {0}")]
     UnsupportedBuffer(&'static str),
+
+    /// A frame arrived with a `pts` but no unit to read it in — see
+    /// [`crate::elements::SwEncoderError::NoTimeBase`].
+    #[error(
+        "a Video frame arrived with a pts but no time base to read it in; the element \
+         that made it has to set one (media_pp::buffer::set_time_base)"
+    )]
+    NoTimeBase,
 
     /// Input dimensions differ from the fixed encoder dimensions.
     #[error(
@@ -173,7 +182,6 @@ pub struct CudaEncoder {
     /// `AVPacket::duration` at zero; muxers such as
     /// [`crate::elements::HlsMuxer`] need it for precise segment durations.
     packet_duration: i64,
-    time_base: ffmpeg::Rational,
     pad: SrcPad,
 }
 
@@ -278,7 +286,7 @@ impl CudaEncoder {
             video.set_width(options.width);
             video.set_height(options.height);
             video.set_format(ffmpeg::format::Pixel::CUDA);
-            video.set_time_base(options.time_base);
+            video.set_time_base(shared::TIME_BASE);
             video.set_frame_rate(Some(options.frame_rate));
             video.set_bit_rate(options.bit_rate);
             video.set_gop(options.gop_size);
@@ -329,8 +337,7 @@ impl CudaEncoder {
             input_format: options.input_format,
             width: options.width,
             height: options.height,
-            packet_duration: nominal_packet_duration(options.time_base, options.frame_rate),
-            time_base: options.time_base,
+            packet_duration: nominal_packet_duration(shared::TIME_BASE, options.frame_rate),
             pad,
         })
     }
@@ -340,6 +347,14 @@ impl CudaEncoder {
     /// `SwEncoder`/`D3d11VideoEncoder` expose for the same reason.
     pub fn parameters(&self) -> ffmpeg::codec::Parameters {
         ffmpeg::codec::Parameters::from(&self.encoder)
+    }
+
+    /// The unit each packet's `pts`, `dts` and duration are counted in —
+    /// what a muxer's `add_stream` is to be told. The encoder's own, and not
+    /// the unit of the frames it is fed: those it reads off each frame and
+    /// converts, as [`crate::elements::SwEncoder::time_base`] does.
+    pub fn time_base(&self) -> ffmpeg::Rational {
+        shared::TIME_BASE
     }
 
     fn encode(&mut self, frame: &ffmpeg::frame::Video) -> Result<()> {
@@ -364,8 +379,12 @@ impl CudaEncoder {
             pp_error!(self, "{error}");
             return Err(error.into());
         }
+        let pts = shared::pts_in(frame, shared::TIME_BASE)
+            .map_err(|shared::NoTimeBase| CudaEncoderError::NoTimeBase)?;
+        let frame =
+            shared::restamped(frame, pts, shared::TIME_BASE).map_err(CudaEncoderError::from)?;
         self.encoder
-            .send_frame(frame)
+            .send_frame(&frame)
             .inspect_err(|error| pp_error!(self, "send_frame failed: {error}"))
             .map_err(CudaEncoderError::from)?;
         self.drain()
@@ -376,7 +395,7 @@ impl CudaEncoder {
         loop {
             match self.encoder.receive_packet(&mut packet) {
                 Ok(()) => {
-                    packet.set_time_base(self.time_base);
+                    packet.set_time_base(shared::TIME_BASE);
                     if packet.duration() == 0 && self.packet_duration > 0 {
                         packet.set_duration(self.packet_duration);
                     }
@@ -473,7 +492,6 @@ mod tests {
             input_format: CudaFrameFormat::Nv12,
             width,
             height,
-            time_base: ffmpeg::Rational::new(1, 30),
             frame_rate: ffmpeg::Rational::new(30, 1),
             bit_rate: 2_000_000,
             gop_size: 30,
@@ -493,6 +511,7 @@ mod tests {
             }
         }
         frame.set_pts(Some(index));
+        crate::buffer::set_time_base(&mut frame, ffmpeg::Rational::new(1, 30));
         frame
     }
 
@@ -560,7 +579,7 @@ mod tests {
         for packet in &packets {
             assert_eq!(
                 packet.time_base(),
-                ffmpeg::Rational::new(1, 30),
+                encoder.time_base(),
                 "packet lost its time base"
             );
             assert!(packet.duration() > 0, "packet has no duration");
@@ -568,6 +587,60 @@ mod tests {
         assert!(
             received.last().is_some_and(MediaBuffer::is_eos),
             "Eos was not forwarded after draining"
+        );
+    }
+
+    /// A CUDA frame that does not say what unit its `pts` is in is refused
+    /// by name — the hardware twin of `SwEncoder`'s own test — and nothing
+    /// is encoded from it.
+    #[test]
+    fn a_frame_with_no_time_base_is_refused_rather_than_guessed_at() {
+        let Some((device, _cuda_lock)) = try_cuda_device() else {
+            return;
+        };
+        let (width, height) = (320u32, 240u32);
+        let (Ok(mut upload), Ok(mut encoder)) = (
+            CudaUpload::new("upload", &device, CudaFrameFormat::Nv12),
+            CudaEncoder::new("encoder", &device, options(width, height)),
+        ) else {
+            eprintln!("skipping: CUDA upload or NVENC unavailable on this machine");
+            return;
+        };
+        let received = Arc::new(Mutex::new(Vec::new()));
+        encoder.src_pads()[0].link(Box::new(CapturingSink {
+            received: received.clone(),
+            pp_log: element_pp_log(ElementType::Other, "capture", None),
+        }));
+        let uploaded = Arc::new(Mutex::new(Vec::new()));
+        upload.src_pads()[0].link(Box::new(CapturingSink {
+            received: uploaded.clone(),
+            pp_log: element_pp_log(ElementType::Other, "uploaded", None),
+        }));
+
+        let mut unitless = nv12_frame(width, height, 0);
+        // SAFETY: the frame is this test's own and nothing else refers to it.
+        unsafe { (*unitless.as_mut_ptr()).time_base = ffi::AVRational { num: 0, den: 1 } };
+        let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
+        let mut pooled = pool.get();
+        *pooled = unitless;
+        upload
+            .consume(MediaBuffer::Video(Arc::new(pooled)))
+            .expect("upload failed");
+        let frame = uploaded.lock().unwrap().pop().expect("nothing uploaded");
+
+        let error = encoder.consume(frame).unwrap_err();
+        assert!(matches!(
+            error,
+            crate::Error::CudaEncoderError(CudaEncoderError::NoTimeBase)
+        ));
+        encoder.consume(MediaBuffer::Eos).expect("eos failed");
+        assert!(
+            !received
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|buf| matches!(buf, MediaBuffer::Packet(_))),
+            "nothing was encoded"
         );
     }
 
@@ -626,6 +699,7 @@ mod tests {
                 }
             }
             frame.set_pts(Some(index));
+            crate::buffer::set_time_base(&mut frame, ffmpeg::Rational::new(1, 30));
             let mut pooled = pool.get();
             *pooled = frame;
             upload
@@ -717,7 +791,6 @@ mod tests {
             .expect("the test video has no video stream");
         let index = video.index;
         let params = source.stream_parameters(index).expect("video stream gone");
-        let time_base = source.stream_time_base(index).expect("video stream gone");
         // SAFETY: `params` is a live `codec::Parameters` from the demuxer, whose
         // `width`/`height` are plain fields of `AVCodecParameters`.
         let (width, height) = unsafe {
@@ -731,7 +804,6 @@ mod tests {
             CudaEncoderOptions {
                 width,
                 height,
-                time_base,
                 ..options(width, height)
             },
         ) {
@@ -930,7 +1002,6 @@ mod tests {
             input_format: CudaFrameFormat::Nv12,
             width: 256,
             height: 144,
-            time_base: ffmpeg::Rational::new(1, 30),
             frame_rate: ffmpeg::Rational::new(30, 1),
             bit_rate: 1_000_000,
             gop_size: 30,

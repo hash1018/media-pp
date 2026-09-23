@@ -184,8 +184,7 @@ mod linux_example {
             target.window,
             target.width,
             target.height,
-        )
-        .map_err(media_pp::Error::Other)?;
+        )?;
 
         Pipeline::new(name, source, move |source, ctx| {
             let branch = ctx
@@ -295,26 +294,14 @@ mod common {
 
         // One SendRecv track, so each side gets both halves back and the
         // call needs no second `add_track` for the return direction.
-        handle_a
-            .add_track(MediaKind::Video, Direction::SendRecv, Codec::H264)
-            .expect("running peer should accept AddTrack");
-        let (sink_a, source_a) = send_recv(
-            handle_a
-                .next_track()
-                .expect("peer-a's own track should attach"),
-        );
+        handle_a.add_track(MediaKind::Video, Direction::SendRecv, Codec::H264)?;
+        let (sink_a, source_a) = send_recv(handle_a.next_track()?);
         let offer = offer_rx
             .recv_timeout(Duration::from_secs(2))
             .expect("peer-a should generate a renegotiation offer");
-        let answer = handle_b
-            .accept_remote_offer(offer)
-            .expect("peer-b should accept the offer");
+        let answer = handle_b.accept_remote_offer(offer)?;
         handle_a.set_answer(answer);
-        let (sink_b, source_b) = send_recv(
-            handle_b
-                .next_track()
-                .expect("peer-b's remote track should attach"),
-        );
+        let (sink_b, source_b) = send_recv(handle_b.next_track()?);
         println!(
             "peer-b negotiated inbound codecs: {:?}",
             source_b.negotiated_codecs()
@@ -387,16 +374,7 @@ mod common {
         // The terminal sink's EOS is the one that means everything this side
         // had to send has actually been handed to the peer.
         for event in send_b.bus().iter() {
-            match &event {
-                BusEvent::Eos { name, .. } => println!("[{name}] eos"),
-                BusEvent::Error { name, error, .. } => eprintln!("[{name}] error: {error}"),
-                BusEvent::Dropped { name, .. } => {
-                    eprintln!("[{name}] dropped a buffer (queue full)")
-                }
-                // `BusEvent` is `#[non_exhaustive]`; this example only acts
-                // on the events above.
-                _ => {}
-            }
+            println!("{event}");
             let sent_everything =
                 matches!(&event, BusEvent::Eos { name, .. } if *name == track_sink_name);
             if sent_everything || matches!(event, BusEvent::Error { .. }) {
@@ -420,7 +398,7 @@ mod common {
         (sink, source)
     }
 
-    fn encoder_options(time_base: ffmpeg::Rational) -> SwEncoderOptions {
+    fn encoder_options() -> SwEncoderOptions {
         SwEncoderOptions {
             // Cisco's BSD-licensed H.264 encoder, so this needs no
             // `--enable-gpl` ffmpeg build — and H.264 is what the track
@@ -428,7 +406,6 @@ mod common {
             codec: VideoCodec::OpenH264,
             width: WIDTH,
             height: HEIGHT,
-            time_base,
             frame_rate: ffmpeg::Rational::new(FPS, 1),
             bit_rate: 1_500_000,
             gop_size: 30,
@@ -445,8 +422,7 @@ mod common {
             framerate: ffmpeg::Rational::new(FPS, 1),
         };
         let source = TestVideoSource::new("test-video", options);
-        let time_base = source.time_base();
-        let encoder = SwEncoder::new("encode-a", encoder_options(time_base))?;
+        let encoder = SwEncoder::new("encode-a", encoder_options())?;
         // Declares the whole outbound half from one value: the payload type,
         // and the SPS/PPS the encoder keeps in `parameters()` rather than in
         // the bitstream. RTP has no container to carry those, so without this
@@ -469,7 +445,6 @@ mod common {
         demuxer: FileDemuxer,
         index: usize,
         params: ffmpeg::codec::Parameters,
-        time_base: ffmpeg::Rational,
     }
 
     impl FileSource {
@@ -485,12 +460,10 @@ mod common {
                 .map_err(|error| media_pp::Error::Other(format!("`{path}`: {error}")))?;
             let index = video.index;
             let params = video.parameters.clone();
-            let time_base = video.time_base;
             Ok(Self {
                 demuxer,
                 index,
                 params,
-                time_base,
             })
         }
     }
@@ -511,7 +484,6 @@ mod common {
             demuxer: source,
             index,
             params,
-            time_base,
         } = file;
 
         let decoder = SwDecoder::new("decode-file", params)?;
@@ -523,7 +495,7 @@ mod common {
             HEIGHT,
             ffmpeg::software::scaling::Flags::BILINEAR,
         );
-        let encoder = SwEncoder::new("encode-b", encoder_options(time_base))?;
+        let encoder = SwEncoder::new("encode-b", encoder_options())?;
         // As above, and this is also where peer-b's outbound codec is
         // settled — the track was added by the remote peer, so nothing chose
         // it for this sink until now.

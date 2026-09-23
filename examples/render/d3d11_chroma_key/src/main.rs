@@ -110,7 +110,6 @@ mod windows_example {
                 background_alpha: 255,
             },
         )?;
-        let time_base = compositor.time_base();
 
         let mut background_layer =
             VideoLayer::new(VideoRect::new(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT));
@@ -194,7 +193,6 @@ mod windows_example {
                 codec: VideoCodec::OpenH264,
                 width: CANVAS_WIDTH,
                 height: CANVAS_HEIGHT,
-                time_base,
                 frame_rate,
                 bit_rate: 2_000_000,
                 gop_size: 60,
@@ -202,7 +200,7 @@ mod windows_example {
             },
         )?;
         let mut muxer = FileMuxer::create(&path)?;
-        let track = muxer.add_stream("video", encoder.parameters(), time_base)?;
+        let track = muxer.add_stream("video", encoder.parameters(), encoder.time_base())?;
         let muxer_sink = muxer.open()?.take(track)?;
 
         let record_pipeline = Pipeline::new("record", compositor, |source, ctx| {
@@ -341,6 +339,7 @@ mod windows_example {
                 let mut frame = pool.get();
                 fill_green_screen_frame(&mut frame);
                 frame.set_pts(Some(index));
+                media_pp::buffer::set_time_base(&mut frame, ffmpeg::Rational::new(1, 30));
                 handle.push(MediaBuffer::Video(Arc::new(frame)))?;
 
                 index += 1;

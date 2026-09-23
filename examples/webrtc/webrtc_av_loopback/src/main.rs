@@ -56,28 +56,25 @@ mod example {
             7,
         )?;
 
-        let socket_a = UdpSocket::bind("127.0.0.1:0").expect("bind a");
-        let socket_b = UdpSocket::bind("127.0.0.1:0").expect("bind b");
-        let addr_a = socket_a.local_addr().expect("addr a");
-        let addr_b = socket_b.local_addr().expect("addr b");
+        let socket_a = UdpSocket::bind("127.0.0.1:0")?;
+        let socket_b = UdpSocket::bind("127.0.0.1:0")?;
+        let addr_a = socket_a.local_addr()?;
+        let addr_b = socket_b.local_addr()?;
 
         let mut rtc_a = Rtc::builder().build(Instant::now());
         rtc_a
-            .add_local_candidate(Candidate::host(addr_a, "udp").expect("candidate a"))
+            .add_local_candidate(Candidate::host(addr_a, "udp")?)
             .expect("add candidate a");
         let mut rtc_b = Rtc::builder().build(Instant::now());
         rtc_b
-            .add_local_candidate(Candidate::host(addr_b, "udp").expect("candidate b"))
+            .add_local_candidate(Candidate::host(addr_b, "udp")?)
             .expect("add candidate b");
 
         let mut changes = rtc_a.sdp_api();
         changes.add_channel("bootstrap".to_string());
         let (offer, pending) = changes.apply().expect("adding a channel always offers");
-        let answer = rtc_b.sdp_api().accept_offer(offer).expect("b accepts");
-        rtc_a
-            .sdp_api()
-            .accept_answer(pending, answer)
-            .expect("a accepts answer");
+        let answer = rtc_b.sdp_api().accept_offer(offer)?;
+        rtc_a.sdp_api().accept_answer(pending, answer)?;
         println!("initial connection negotiated (bootstrap data channel only, no media yet)");
 
         let (offer_tx, offer_rx) = std::sync::mpsc::channel::<SdpOffer>();
@@ -104,18 +101,14 @@ mod example {
         // -- Track 1: video. One full renegotiation round before starting the
         // second track — str0m only allows one SDP exchange in flight at a
         // time.
-        let video_id = handle_a
-            .add_track(MediaKind::Video, Direction::SendOnly, Codec::H264)
-            .expect("running peer should accept AddTrack");
+        let video_id = handle_a.add_track(MediaKind::Video, Direction::SendOnly, Codec::H264)?;
         // `next_track` yields whichever track attaches next — including one
         // the *remote* peer added — so the `TrackId` it returns has to be
         // matched against the one `add_track` handed back. Nothing else adds
         // a track here, but pushing an encoder onto the wrong track's sink
         // fails silently (see `WebRtcHandle::add_track`), so the check is
         // what makes that impossible rather than merely unlikely.
-        let attached = handle_a
-            .next_track()
-            .expect("peer-a's video track should attach");
+        let attached = handle_a.next_track()?;
         assert_eq!(
             attached.id, video_id,
             "peer-a attached a track it did not add"
@@ -123,33 +116,23 @@ mod example {
         let kind = attached.kind;
         let mut video_sink_a = send_only(attached);
         println!("peer-a: track attached ({kind:?})");
-        let offer = offer_rx
-            .recv_timeout(Duration::from_secs(2))
-            .expect("peer-a should generate a renegotiation offer for the video track");
-        let answer = handle_b
-            .accept_remote_offer(offer)
-            .expect("peer-b should accept the video offer");
+        let offer = offer_rx.recv_timeout(Duration::from_secs(2))?;
+        let answer = handle_b.accept_remote_offer(offer)?;
         handle_a.set_answer(answer);
         // Nothing to match on this side: peer-b never calls `add_track`, so
         // every track it sees is one the remote peer added and there is no
         // locally-issued `TrackId` to compare against. peer-a asked for
         // `SendOnly`, so what peer-b gets is the inverse — a track with no
         // sink at all, rather than one it could push into to no effect.
-        let attached = handle_b
-            .next_track()
-            .expect("peer-b's video track should attach");
+        let attached = handle_b.next_track()?;
         let kind = attached.kind;
         let video_source_b = recv_only(attached);
         println!("peer-b: track attached ({kind:?})");
         thread::sleep(Duration::from_millis(100)); // let the answer actually apply
 
         // -- Track 2: audio, on the *same* connection.
-        let audio_id = handle_a
-            .add_track(MediaKind::Audio, Direction::SendOnly, Codec::Opus)
-            .expect("running peer should accept a second AddTrack");
-        let attached = handle_a
-            .next_track()
-            .expect("peer-a's audio track should attach");
+        let audio_id = handle_a.add_track(MediaKind::Audio, Direction::SendOnly, Codec::Opus)?;
+        let attached = handle_a.next_track()?;
         assert_eq!(
             attached.id, audio_id,
             "peer-a attached a track it did not add"
@@ -161,16 +144,10 @@ mod example {
         let kind = attached.kind;
         let mut audio_sink_a = send_only(attached);
         println!("peer-a: track attached ({kind:?})");
-        let offer = offer_rx
-            .recv_timeout(Duration::from_secs(2))
-            .expect("peer-a should generate a renegotiation offer for the audio track");
-        let answer = handle_b
-            .accept_remote_offer(offer)
-            .expect("peer-b should accept the audio offer");
+        let offer = offer_rx.recv_timeout(Duration::from_secs(2))?;
+        let answer = handle_b.accept_remote_offer(offer)?;
         handle_a.set_answer(answer);
-        let attached = handle_b
-            .next_track()
-            .expect("peer-b's audio track should attach");
+        let attached = handle_b.next_track()?;
         let kind = attached.kind;
         let audio_source_b = recv_only(attached);
         println!("peer-b: track attached ({kind:?})");
@@ -188,34 +165,28 @@ mod example {
             framerate: ffmpeg::Rational::new(15, 1),
         };
         let video_source = TestVideoSource::new("video", video_options);
-        let video_time_base = video_source.time_base();
         let video_encoder = SwEncoder::new(
             "video-encoder",
             SwEncoderOptions {
                 codec: VideoCodec::OpenH264,
                 width: video_options.width,
                 height: video_options.height,
-                time_base: video_time_base,
                 frame_rate: video_options.framerate,
                 bit_rate: 500_000,
                 gop_size: 30, // ~2s @ 15fps
                 max_b_frames: None,
             },
-        )
-        .expect("failed to open video encoder");
+        )?;
         // Declares what feeds the sink: the payload type, and H.264's SPS/PPS,
         // which live in `parameters()` rather than in the bitstream while RTP
         // has no container to carry them — so the sender puts them in front of
         // every keyframe itself. Opus needs nothing of the kind, and its
         // `OpusHead` is not something to prepend to packets, so the audio
         // declaration below settles only the codec.
-        video_sink_a
-            .set_source_parameters(&video_encoder.parameters())
-            .expect("H.264 is negotiated for peer-a's video track");
+        video_sink_a.set_source_parameters(&video_encoder.parameters())?;
 
         let audio_options = TestAudioOptions::default();
         let audio_source = TestAudioSource::new("audio", audio_options);
-        let audio_time_base = audio_source.time_base();
         let audio_encoder = SwAudioEncoder::new(
             "audio-encoder",
             SwAudioEncoderOptions {
@@ -227,14 +198,10 @@ mod example {
                 codec: AudioCodec::Opus,
                 sample_rate: audio_options.sample_rate,
                 channels: audio_options.channels,
-                time_base: audio_time_base,
                 bit_rate: 64_000,
             },
-        )
-        .expect("failed to open audio encoder");
-        audio_sink_a
-            .set_source_parameters(&audio_encoder.parameters())
-            .expect("Opus is negotiated for peer-a's audio track");
+        )?;
+        audio_sink_a.set_source_parameters(&audio_encoder.parameters())?;
 
         let send_pipeline = PipelineBuilder::new("peer-a-send")
             .add_source(video_source, |source, ctx| {
@@ -245,8 +212,7 @@ mod example {
                     .to(video_sink_a)?;
                 ctx.attach(source, 0, branch)?;
                 Ok(())
-            })
-            .expect("video send pipeline wiring must succeed")
+            })?
             .add_source(audio_source, |source, ctx| {
                 let branch = ctx
                     .branch()
@@ -255,8 +221,7 @@ mod example {
                     .to(audio_sink_a)?;
                 ctx.attach(source, 0, branch)?;
                 Ok(())
-            })
-            .expect("audio send pipeline wiring must succeed")
+            })?
             .build();
 
         // -- Receive side: count packets on each track independently.
@@ -274,8 +239,7 @@ mod example {
                     ctx.attach(source, 0, branch)?;
                     Ok(())
                 }
-            })
-            .expect("video receive pipeline wiring must succeed")
+            })?
             .add_source(audio_source_b, {
                 let count = audio_count.clone();
                 move |source, ctx| {
@@ -287,8 +251,7 @@ mod example {
                     ctx.attach(source, 0, branch)?;
                     Ok(())
                 }
-            })
-            .expect("audio receive pipeline wiring must succeed")
+            })?
             .build();
 
         send_pipeline.run()?;

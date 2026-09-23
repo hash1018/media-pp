@@ -48,7 +48,6 @@ mod linux_example {
 
     use media_pp::ffmpeg;
     use media_pp::{
-        bus::BusEvent,
         color::Color,
         elements::{
             CaptureSourceKind, CudaCodec, CudaConverter, CudaDevice, CudaEncoder,
@@ -194,7 +193,7 @@ mod linux_example {
             },
         )?;
         let mut muxer = FileMuxer::create(&path)?;
-        let track = muxer.add_stream("video", encoder.parameters(), time_base)?;
+        let track = muxer.add_stream("video", encoder.parameters(), encoder.time_base())?;
         let muxer_sink = muxer.open()?.take(track)?;
 
         let record_pipeline = Pipeline::new("overlay-record", compositor, |source, ctx| {
@@ -234,13 +233,7 @@ mod linux_example {
 
         for pipeline in [&capture_pipeline, &record_pipeline] {
             for event in pipeline.bus().iter() {
-                match event {
-                    BusEvent::Error { name, error, .. } => eprintln!("[{name}] error: {error}"),
-                    BusEvent::Dropped { name, .. } => {
-                        eprintln!("[{name}] dropped a buffer (queue full)")
-                    }
-                    _ => {}
-                }
+                println!("{event}");
             }
         }
 

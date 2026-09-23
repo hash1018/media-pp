@@ -20,7 +20,6 @@ pub struct Recording {
     pub width: u32,
     pub height: u32,
     pub frame_rate: ffmpeg::Rational,
-    pub time_base: ffmpeg::Rational,
     pub frame_count: i64,
 }
 
@@ -41,7 +40,6 @@ pub fn parse_args() -> media_pp::Result<Recording> {
         width: 1280,
         height: 720,
         frame_rate: ffmpeg::Rational::new(30, 1),
-        time_base: ffmpeg::Rational::new(1, 30),
         frame_count,
     })
 }
@@ -59,6 +57,9 @@ fn fill_test_frame(frame: &mut ffmpeg::frame::Video, index: i64, width: u32) {
         frame.data_mut(plane).fill(128);
     }
     frame.set_pts(Some(index));
+    // Counted in frames at the 30 fps `spawn_feeder` paces them at, and saying
+    // so: the encoder reads the unit off each frame.
+    media_pp::buffer::set_time_base(frame, ffmpeg::Rational::new(1, 30));
 }
 
 /// Pushes a moving gradient at the nominal frame rate, then `Eos`. Paced in

@@ -62,22 +62,7 @@ mod example {
         // end the pipeline on their own, so this is what makes the loop
         // below actually finish instead of running forever after a failure.
         for event in pipeline.bus().iter() {
-            match &event {
-                BusEvent::Eos { name, .. } => println!("[{name}] eos"),
-                BusEvent::Error { name, error, .. } => eprintln!("[{name}] error: {error}"),
-                BusEvent::Dropped { name, .. } => {
-                    eprintln!("[{name}] dropped a buffer (queue full)")
-                }
-                BusEvent::Seeked {
-                    name,
-                    requested,
-                    landed,
-                    ..
-                } => println!("[{name}] seeked: requested {requested:.2?}, landed {landed:.2?}"),
-                // `BusEvent` is `#[non_exhaustive]`; this example only acts
-                // on the events above.
-                _ => {}
-            }
+            println!("{event}");
             if matches!(event, BusEvent::Finished | BusEvent::Error { .. }) {
                 pipeline.stop();
             }

@@ -76,7 +76,6 @@ mod windows_example {
                 input_format: D3d11VideoInputFormat::Nv12,
                 width,
                 height,
-                time_base: recording.time_base,
                 frame_rate: recording.frame_rate,
                 bit_rate: 4_000_000,
                 gop_size: 60,
@@ -85,7 +84,7 @@ mod windows_example {
         )?;
 
         let mut muxer = FileMuxer::create(&recording.path)?;
-        let track = muxer.add_stream("video", encoder.parameters(), recording.time_base)?;
+        let track = muxer.add_stream("video", encoder.parameters(), encoder.time_base())?;
         let muxer_sink = muxer.open()?.take(track)?;
 
         let pipeline = Pipeline::new("nvenc-record", source, |source, ctx| {

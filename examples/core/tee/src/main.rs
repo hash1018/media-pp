@@ -49,7 +49,7 @@ mod example {
         let (packet_counter, packet_count) = PacketCounter::new("packet-counter");
 
         let pipeline = Pipeline::new("tee", source, |source, ctx| {
-            let decoder = SwDecoder::new("decoder", params).expect("failed to open decoder");
+            let decoder = SwDecoder::new("decoder", params)?;
             let decode_branch = ctx.branch().pipe(decoder).to(frame_counter)?;
             let packet_branch = ctx.branch().to(packet_counter)?;
 

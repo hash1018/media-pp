@@ -33,8 +33,11 @@ use crate::{
 /// One track registered with a muxer's `add_stream`, waiting for its `open`.
 ///
 /// `name` becomes the track's sink's own [`Element::name`]/`pp_log`
-/// identity; `input_time_base` is what every packet it receives already
-/// carries `pts`/`dts` in — the one its upstream encoder was opened with.
+/// identity; `input_time_base` is the unit the track is registered with —
+/// what the header is written from, and what a packet that does not say its
+/// own unit is read in. A packet that does say is read in its own: every
+/// packet this crate makes carries one, and a registered unit that disagrees
+/// with it would otherwise play the track at the wrong speed without a word.
 pub(super) struct PendingStream {
     pub(super) name: Arc<str>,
     pub(super) input_time_base: ffmpeg::Rational,
@@ -276,7 +279,13 @@ impl<M: Muxer> Sink for TrackSink<M> {
                 // shared with another branch off the same `Tee`, which must
                 // not see this track's timestamps or stream index.
                 let mut packet = (*packet).clone();
-                packet.rescale_ts(self.input_time_base, self.output_time_base);
+                let unit = packet.time_base();
+                let from = if unit.numerator() > 0 && unit.denominator() > 0 {
+                    unit
+                } else {
+                    self.input_time_base
+                };
+                packet.rescale_ts(from, self.output_time_base);
                 if let Some(timeline) = &mut self.timeline {
                     timeline.stamp(&mut packet);
                 }
@@ -372,7 +381,6 @@ mod tests {
                 codec: AudioCodec::Aac,
                 sample_rate: 48_000,
                 channels: 1,
-                time_base,
                 bit_rate: 64_000,
             },
         )
@@ -420,6 +428,86 @@ mod tests {
         sink.control(ControlMsg::Stop).expect("stop");
         assert!(finalized(&path), "Stop must write the trailer");
         drop(sink);
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// A packet is written at the time it says in the unit it carries, not
+    /// in the one its track was registered with. The track here is told
+    /// 1/48000 and handed AAC packets restated in 1/96000: read in the
+    /// registered unit, every one would land at twice its time.
+    #[test]
+    fn a_packet_is_read_in_the_unit_it_carries_not_the_one_registered() {
+        use crate::test_support::CapturingSink;
+        use std::sync::Mutex;
+
+        let path = path("unit");
+        let mut sink = one_track(
+            &path,
+            TrackOptions {
+                finish_on_stop: true,
+                destination: None,
+                timeline: None,
+            },
+        );
+
+        let mut encoder = SwAudioEncoder::new(
+            "encoder",
+            SwAudioEncoderOptions {
+                codec: AudioCodec::Aac,
+                sample_rate: 48_000,
+                channels: 1,
+                bit_rate: 64_000,
+            },
+        )
+        .expect("AAC is built into FFmpeg");
+        let encoded = Arc::new(Mutex::new(Vec::new()));
+        crate::element::Source::src_pads(&mut encoder)[0].link(Box::new(CapturingSink {
+            received: encoded.clone(),
+            pp_log: element_pp_log(ElementType::Other, "encoded", None),
+        }));
+        for index in 0..10 {
+            let mut frame = ffmpeg::frame::Audio::new(
+                ffmpeg::format::Sample::F32(ffmpeg::format::sample::Type::Packed),
+                1024,
+                ffmpeg::ChannelLayout::MONO,
+            );
+            frame.set_rate(48_000);
+            frame.set_pts(Some(index * 1024));
+            crate::buffer::set_time_base(&mut frame, ffmpeg::Rational::new(1, 48_000));
+            frame.data_mut(0).fill(0);
+            encoder
+                .consume(MediaBuffer::Audio(Arc::new(frame)))
+                .unwrap();
+        }
+        encoder.consume(MediaBuffer::Eos).unwrap();
+
+        let finer = ffmpeg::Rational::new(1, 96_000);
+        let mut expected = Vec::new();
+        for buffer in encoded.lock().unwrap().iter() {
+            let MediaBuffer::Packet(packet) = buffer else {
+                continue;
+            };
+            let mut restated = (**packet).clone();
+            restated.rescale_ts(packet.time_base(), finer);
+            restated.set_time_base(finer);
+            expected.push((packet.pts(), packet.time_base()));
+            sink.consume(MediaBuffer::Packet(Arc::new(restated)))
+                .unwrap();
+        }
+        assert!(!expected.is_empty(), "the encoder produced packets");
+        sink.consume(MediaBuffer::Eos).unwrap();
+        drop(sink);
+
+        let mut input = ffmpeg::format::input(&path).expect("the file reads back");
+        let stream_time_base = input.stream(0).expect("one track").time_base();
+        let written: Vec<_> = input.packets().map(|(_, packet)| packet.pts()).collect();
+        let expected: Vec<_> = expected
+            .into_iter()
+            .map(|(pts, unit)| {
+                pts.map(|pts| ffmpeg::Rescale::rescale(&pts, unit, stream_time_base))
+            })
+            .collect();
+        assert_eq!(written, expected);
         std::fs::remove_file(&path).ok();
     }
 

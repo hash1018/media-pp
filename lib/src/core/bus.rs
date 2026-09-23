@@ -10,7 +10,7 @@
 //! identity of the element that posted it, so a report can be attributed to
 //! one branch even when several elements share a name.
 
-use std::{sync::Arc, time::Duration};
+use std::{fmt, sync::Arc, time::Duration};
 
 use crate::pp_log::{PpLog, pp_error, pp_info, pp_warn};
 use crossbeam_channel::{Receiver, Sender, unbounded};
@@ -90,6 +90,31 @@ pub enum BusEvent {
     /// than ended. Posted by the pipeline, not an element, so its
     /// [`BusMessage::element_id`] is `None`.
     Finished,
+}
+
+/// One line saying what happened and to which element: `[name] eos`,
+/// `[name] error: ...`, `[name] dropped a buffer (queue full)`,
+/// `[name] seeked: requested ..., landed ...`, and `finished` for the
+/// pipeline itself. What a program that only reports its bus prints —
+/// `println!("{event}")` — and what [`BusReceiver::log_events`] prints.
+impl fmt::Display for BusEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            BusEvent::Eos { name, .. } => write!(f, "[{name}] eos"),
+            BusEvent::Error { name, error, .. } => write!(f, "[{name}] error: {error}"),
+            BusEvent::Dropped { name, .. } => write!(f, "[{name}] dropped a buffer (queue full)"),
+            BusEvent::Seeked {
+                name,
+                requested,
+                landed,
+                ..
+            } => write!(
+                f,
+                "[{name}] seeked: requested {requested:.2?}, landed {landed:.2?}"
+            ),
+            BusEvent::Finished => write!(f, "finished"),
+        }
+    }
 }
 
 /// Cross-thread event channel. Once a buffer crosses a `Queue` boundary,
@@ -276,10 +301,9 @@ impl BusReceiver {
         self.rx.iter()
     }
 
-    /// Blocks and prints events in a common default format (`[name] eos`,
-    /// `[name] error: ...`, `[name] dropped a buffer (queue full)`,
-    /// `[name] seeked: requested ... landed ...`, `finished`) until every corresponding
-    /// [`Bus`] sender has been dropped. This consumes both events already
+    /// Blocks and prints each event as its [`Display`](fmt::Display) says —
+    /// errors and dropped buffers to stderr, the rest to stdout — until every
+    /// corresponding [`Bus`] sender has been dropped. This consumes both events already
     /// queued and events posted while the call is waiting; use
     /// [`BusReceiver::try_recv`] to drain only what is currently available.
     ///
@@ -292,19 +316,61 @@ impl BusReceiver {
     pub fn log_events(&self) {
         for event in self.iter() {
             match event {
-                BusEvent::Error { name, error, .. } => eprintln!("[{name}] error: {error}"),
-                BusEvent::Eos { name, .. } => println!("[{name}] eos"),
-                BusEvent::Dropped { name, .. } => {
-                    eprintln!("[{name}] dropped a buffer (queue full)")
+                BusEvent::Error { .. } | BusEvent::Dropped { .. } => eprintln!("{event}"),
+                BusEvent::Eos { .. } | BusEvent::Seeked { .. } | BusEvent::Finished => {
+                    println!("{event}")
                 }
-                BusEvent::Seeked {
-                    name,
-                    requested,
-                    landed,
-                    ..
-                } => println!("[{name}] seeked: requested {requested:.2?}, landed {landed:.2?}"),
-                BusEvent::Finished => println!("finished"),
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The line an example prints for each event is the one `log_events`
+    /// always printed, so switching to `println!("{event}")` changes nothing
+    /// anyone reads.
+    #[test]
+    fn each_event_displays_as_one_line_naming_its_element() {
+        let name: Arc<str> = "muxer".into();
+        let cases = [
+            (
+                BusEvent::Eos {
+                    element_type: ElementType::FileMuxer,
+                    name: name.clone(),
+                },
+                "[muxer] eos",
+            ),
+            (
+                BusEvent::Error {
+                    element_type: ElementType::FileMuxer,
+                    name: name.clone(),
+                    error: Error::Other("disk full".into()),
+                },
+                "[muxer] error: disk full",
+            ),
+            (
+                BusEvent::Dropped {
+                    element_type: ElementType::Queue,
+                    name: name.clone(),
+                },
+                "[muxer] dropped a buffer (queue full)",
+            ),
+            (
+                BusEvent::Seeked {
+                    element_type: ElementType::FileDemuxer,
+                    name,
+                    requested: Duration::from_millis(1500),
+                    landed: Duration::from_millis(1000),
+                },
+                "[muxer] seeked: requested 1.50s, landed 1.00s",
+            ),
+            (BusEvent::Finished, "finished"),
+        ];
+        for (event, line) in cases {
+            assert_eq!(event.to_string(), line);
         }
     }
 }

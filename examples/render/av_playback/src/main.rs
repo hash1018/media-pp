@@ -289,8 +289,7 @@ mod linux_example {
                     target.window,
                     target.width,
                     target.height,
-                )
-                .map_err(Error::Other)?)?;
+                )?)?;
             context.attach(source, streams.video_index, video_branch)?;
 
             let (audio_tee, handle) =

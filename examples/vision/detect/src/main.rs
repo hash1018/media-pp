@@ -178,7 +178,7 @@ mod example {
         let params = video.parameters.clone();
 
         let pipeline = Pipeline::new("detect", source, |source, ctx| {
-            let decoder = SwDecoder::new("decoder", params).expect("failed to open decoder");
+            let decoder = SwDecoder::new("decoder", params)?;
             let scaler =
                 SwScaler::new("scaler", DST_FORMAT, DST_WIDTH, DST_HEIGHT, Flags::BILINEAR);
             let render_proxy = proxy.clone();
@@ -201,8 +201,7 @@ mod example {
                         render_proxy.send_event(AppEvent::Frame(render_frame(frame, detections)));
                     Ok(())
                 },
-            )
-            .expect("failed to load model");
+            )?;
 
             let branch = ctx
                 .branch()
@@ -217,16 +216,7 @@ mod example {
         pipeline.run()?;
 
         for event in pipeline.bus().iter() {
-            match &event {
-                BusEvent::Eos { name, .. } => println!("[{name}] eos"),
-                BusEvent::Error { name, error, .. } => eprintln!("[{name}] error: {error}"),
-                BusEvent::Dropped { name, .. } => {
-                    eprintln!("[{name}] dropped a buffer (queue full)")
-                }
-                // `BusEvent` is `#[non_exhaustive]`; this example only acts
-                // on the events above.
-                _ => {}
-            }
+            println!("{event}");
             if matches!(event, BusEvent::Finished | BusEvent::Error { .. }) {
                 pipeline.stop();
             }

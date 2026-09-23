@@ -38,7 +38,6 @@ fn finishing_a_recording_branch_leaves_a_playable_file_and_a_running_preview() {
     media_pp::init().expect("initialize FFmpeg");
     let path = temp_path("recording.mp4");
     let path_str = path.to_string_lossy().to_string();
-    let time_base = ffmpeg_next::Rational::new(1, 30);
 
     let source = TestVideoSource::new(
         "test-video",
@@ -73,7 +72,6 @@ fn finishing_a_recording_branch_leaves_a_playable_file_and_a_running_preview() {
             codec: VideoCodec::OpenH264,
             width: WIDTH,
             height: HEIGHT,
-            time_base,
             frame_rate: ffmpeg_next::Rational::new(30, 1),
             bit_rate: 1_000_000,
             gop_size: 30,
@@ -83,7 +81,7 @@ fn finishing_a_recording_branch_leaves_a_playable_file_and_a_running_preview() {
     .expect("open the encoder");
     let mut muxer = FileMuxer::create(&path_str).expect("create the MP4");
     let video = muxer
-        .add_stream("video", encoder.parameters(), time_base)
+        .add_stream("video", encoder.parameters(), encoder.time_base())
         .expect("add the video stream");
     let muxer_sink = muxer
         .open()
@@ -170,7 +168,6 @@ fn finishing_a_recording_branch_loses_no_frame_that_reached_it() {
     media_pp::init().expect("initialize FFmpeg");
     let path = temp_path("frame-count.mp4");
     let path_str = path.to_string_lossy().to_string();
-    let time_base = ffmpeg_next::Rational::new(1, 30);
 
     let (source, feed) = AppSource::new("app-source", 4);
     let (preview, preview_frames) = FrameCounter::new("preview");
@@ -195,7 +192,6 @@ fn finishing_a_recording_branch_loses_no_frame_that_reached_it() {
             codec: VideoCodec::OpenH264,
             width: WIDTH,
             height: HEIGHT,
-            time_base,
             frame_rate: ffmpeg_next::Rational::new(30, 1),
             bit_rate: 1_000_000,
             gop_size: 30,
@@ -205,7 +201,7 @@ fn finishing_a_recording_branch_loses_no_frame_that_reached_it() {
     .expect("open the encoder");
     let mut muxer = FileMuxer::create(&path_str).expect("create the MP4");
     let video = muxer
-        .add_stream("video", encoder.parameters(), time_base)
+        .add_stream("video", encoder.parameters(), encoder.time_base())
         .expect("add the video stream");
     let muxer_sink = muxer
         .open()
@@ -227,6 +223,7 @@ fn finishing_a_recording_branch_loses_no_frame_that_reached_it() {
         let mut frame =
             ffmpeg_next::frame::Video::new(ffmpeg_next::format::Pixel::YUV420P, WIDTH, HEIGHT);
         frame.set_pts(Some(index as i64));
+        media_pp::buffer::set_time_base(&mut frame, ffmpeg_next::Rational::new(1, 30));
         // Varying content, so the encoder cannot collapse the stream into
         // something whose packet count says nothing.
         frame.data_mut(0).fill((index * 8) as u8);

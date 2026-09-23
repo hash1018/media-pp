@@ -45,7 +45,7 @@ mod example {
         let (counter, frame_count) = FrameCounter::new("counter");
 
         let pipeline = Pipeline::new("decode", source, |source, ctx| {
-            let decoder = SwDecoder::new("decoder", params).expect("failed to open decoder");
+            let decoder = SwDecoder::new("decoder", params)?;
             let branch = ctx
                 .branch()
                 .pipe(decoder) // same thread as the demux — cheap enough not to need a queue
@@ -63,22 +63,7 @@ mod example {
         // rather than `Eos`: every element that ends posts an `Eos`, and
         // `Finished` is the pipeline saying they all have.
         for event in pipeline.bus().iter() {
-            match &event {
-                BusEvent::Eos { name, .. } => println!("[{name}] eos"),
-                BusEvent::Error { name, error, .. } => eprintln!("[{name}] error: {error}"),
-                BusEvent::Dropped { name, .. } => {
-                    eprintln!("[{name}] dropped a buffer (queue full)")
-                }
-                BusEvent::Seeked {
-                    name,
-                    requested,
-                    landed,
-                    ..
-                } => println!("[{name}] seeked: requested {requested:.2?}, landed {landed:.2?}"),
-                // `BusEvent` is `#[non_exhaustive]`; this example only acts
-                // on the events above.
-                _ => {}
-            }
+            println!("{event}");
             if matches!(event, BusEvent::Finished | BusEvent::Error { .. }) {
                 pipeline.stop();
             }

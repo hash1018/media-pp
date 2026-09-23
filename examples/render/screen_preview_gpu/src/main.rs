@@ -322,8 +322,7 @@ mod windows_example {
                 hwnd,
                 window_width,
                 window_height,
-            )
-            .expect("failed to create renderer");
+            )?;
 
             let branch = ctx
                 .branch()
@@ -347,16 +346,7 @@ mod windows_example {
         pipeline.run()?;
 
         for event in pipeline.bus().iter() {
-            match &event {
-                BusEvent::Eos { name, .. } => println!("[{name}] eos"),
-                BusEvent::Error { name, error, .. } => eprintln!("[{name}] error: {error}"),
-                BusEvent::Dropped { name, .. } => {
-                    eprintln!("[{name}] dropped a buffer (queue full)")
-                }
-                // `BusEvent` is `#[non_exhaustive]`; this example only acts
-                // on the events above.
-                _ => {}
-            }
+            println!("{event}");
             // Only stop once the pipeline finished or the selected source
             // itself failed; an occasional dropped/backpressured frame
             // elsewhere is not a reason to end the demo.
@@ -463,8 +453,7 @@ mod linux_example {
                 target.window,
                 target.width,
                 target.height,
-            )
-            .map_err(media_pp::Error::Other)?;
+            )?;
 
             let branch = ctx
                 .branch()
@@ -493,16 +482,7 @@ mod linux_example {
         pipeline.run()?;
 
         for event in pipeline.bus().iter() {
-            match &event {
-                BusEvent::Eos { name, .. } => println!("[{name}] eos"),
-                BusEvent::Error { name, error, .. } => eprintln!("[{name}] error: {error}"),
-                BusEvent::Dropped { name, .. } => {
-                    eprintln!("[{name}] dropped a buffer (queue full)")
-                }
-                // `BusEvent` is `#[non_exhaustive]`; this example only acts on
-                // the events above.
-                _ => {}
-            }
+            println!("{event}");
             // Same reasoning as the Windows branch: only stop for `Eos`, or an
             // `Error` that means the capture's own `run()` thread ended — one
             // dropped frame elsewhere is not a reason to end the demo.

@@ -33,6 +33,9 @@ use crate::{
     },
 };
 
+// The video-encoder helpers every backend shares, a module up from this one.
+use super::super as shared;
+
 /// Errors specific to `D3d11VideoEncoder`. Converts into the crate-wide
 /// `Error` via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
@@ -148,6 +151,14 @@ pub enum D3d11VideoEncoderError {
     /// The sink received a buffer other than decoded video or end-of-stream.
     #[error("D3d11VideoEncoder only accepts Video or Eos buffers, got {0}")]
     UnsupportedBuffer(&'static str),
+
+    /// A frame arrived with a `pts` but no unit to read it in — see
+    /// [`crate::elements::SwEncoderError::NoTimeBase`].
+    #[error(
+        "a Video frame arrived with a pts but no time base to read it in; the element \
+         that made it has to set one (media_pp::buffer::set_time_base)"
+    )]
+    NoTimeBase,
 
     /// A Direct3D resource or copy operation failed.
     #[error("windows error: {0}")]
@@ -271,9 +282,9 @@ impl D3d11VideoInputFormat {
 
 /// Everything `avcodec_open2` needs before this encoder can be opened at
 /// all — same convention, and the same reasoning, as
-/// [`crate::elements::SwEncoderOptions`], which documents at length why
-/// `time_base` and `frame_rate` are separate values rather than one
-/// derived from the other.
+/// [`crate::elements::SwEncoderOptions`]. The unit of the frames'
+/// timestamps is not among it: each frame carries its own, and the encoder
+/// converts it into [`D3d11VideoEncoder::time_base`].
 #[derive(Debug, Clone, Copy)]
 pub struct D3d11VideoEncoderOptions {
     /// Which encoder to open, and so which hardware encodes.
@@ -285,8 +296,6 @@ pub struct D3d11VideoEncoderOptions {
     pub width: u32,
     /// Encoded frame height in pixels.
     pub height: u32,
-    /// Must match the `pts` unit of whatever frames this receives.
-    pub time_base: ffmpeg::Rational,
     /// The nominal rate the encoder uses for rate control and writes into the
     /// bitstream — not required to match the real interval between
     /// `consume` calls. See [`crate::elements::SwEncoderOptions::frame_rate`].
@@ -377,10 +386,6 @@ pub struct D3d11VideoEncoder {
     /// `AVPacket::duration` at zero; muxers such as
     /// [`crate::elements::HlsMuxer`] need it for precise segment durations.
     packet_duration: i64,
-    /// Stamped onto every produced packet, since `avcodec_receive_packet`
-    /// never sets `AVPacket.time_base` itself — see
-    /// [`crate::elements::SwEncoder`]'s own field of the same name.
-    time_base: ffmpeg::Rational,
     pad: SrcPad,
 }
 
@@ -560,7 +565,7 @@ impl D3d11VideoEncoder {
             // Codec headers into `extradata` for the container to write, not only
             // in-band — see `SwEncoder::new`, which says why in full.
             ctx.set_flags(ffmpeg::codec::Flags::GLOBAL_HEADER);
-            ctx.set_time_base(options.time_base);
+            ctx.set_time_base(shared::TIME_BASE);
 
             let mut video = ctx.encoder().video()?;
             video.set_width(options.width);
@@ -568,7 +573,7 @@ impl D3d11VideoEncoder {
             // The *frame* format is the hardware one; `sw_format` on the
             // frames context above is what says what those textures hold.
             video.set_format(ffmpeg::format::Pixel::D3D11);
-            video.set_time_base(options.time_base);
+            video.set_time_base(shared::TIME_BASE);
             video.set_frame_rate(Some(options.frame_rate));
             video.set_bit_rate(options.bit_rate);
             video.set_gop(options.gop_size);
@@ -627,8 +632,7 @@ impl D3d11VideoEncoder {
             width: options.width,
             height: options.height,
             input_format: options.input_format,
-            packet_duration: nominal_packet_duration(options.time_base, options.frame_rate),
-            time_base: options.time_base,
+            packet_duration: nominal_packet_duration(shared::TIME_BASE, options.frame_rate),
             pad,
         })
     }
@@ -639,6 +643,14 @@ impl D3d11VideoEncoder {
     /// [`crate::elements::SwEncoder::parameters`].
     pub fn parameters(&self) -> ffmpeg::codec::Parameters {
         ffmpeg::codec::Parameters::from(&self.encoder)
+    }
+
+    /// The unit each packet's `pts`, `dts` and duration are counted in —
+    /// what a muxer's `add_stream` is to be told. The encoder's own, and not
+    /// the unit of the frames it is fed: those it reads off each frame and
+    /// converts, as [`crate::elements::SwEncoder::time_base`] does.
+    pub fn time_base(&self) -> ffmpeg::Rational {
+        shared::TIME_BASE
     }
 
     /// Takes one texture from the encoder's own pool and copies `texture`'s
@@ -715,7 +727,7 @@ impl D3d11VideoEncoder {
         loop {
             match self.encoder.receive_packet(&mut packet) {
                 Ok(()) => {
-                    packet.set_time_base(self.time_base);
+                    packet.set_time_base(shared::TIME_BASE);
                     if packet.duration() == 0 && self.packet_duration > 0 {
                         packet.set_duration(self.packet_duration);
                     }
@@ -730,6 +742,11 @@ impl D3d11VideoEncoder {
     }
 
     fn encode(&mut self, frame: &ffmpeg::frame::Video) -> Result<()> {
+        // Before any GPU work: a frame that cannot be placed on the timeline
+        // is not worth staging.
+        let pts = shared::pts_in(frame, shared::TIME_BASE)
+            .map_err(|shared::NoTimeBase| D3d11VideoEncoderError::NoTimeBase)
+            .inspect_err(|error| pp_error!(self, "{error}"))?;
         if frame.format() != ffmpeg::format::Pixel::D3D11 {
             pp_error!(self, "unsupported pixel format: {:?}", frame.format());
             return Err(D3d11VideoEncoderError::UnsupportedFormat(frame.format()).into());
@@ -811,7 +828,8 @@ impl D3d11VideoEncoder {
             .inspect_err(|error| pp_error!(self, "staging the input texture failed: {error}"))?;
         // Metadata is part of the buffer contract, not decoration — the
         // staged frame is a different AVFrame than the one that arrived.
-        staged.set_pts(frame.pts());
+        staged.set_pts(pts);
+        crate::buffer::set_time_base(&mut staged, shared::TIME_BASE);
         staged.set_color_space(frame.color_space());
         staged.set_color_range(frame.color_range());
 
@@ -900,7 +918,6 @@ mod tests {
             input_format,
             width: 320,
             height: 240,
-            time_base: ffmpeg::Rational::new(1, 30),
             frame_rate: ffmpeg::Rational::new(30, 1),
             bit_rate: 1_000_000,
             gop_size: 30,
@@ -1065,6 +1082,7 @@ mod tests {
             for index in 0..30i64 {
                 let mut frame = pool.get();
                 frame.set_pts(Some(index));
+                crate::buffer::set_time_base(&mut frame, ffmpeg::Rational::new(1, 30));
                 encoder
                     .consume(MediaBuffer::Video(Arc::new(frame)))
                     .unwrap_or_else(|error| {
@@ -1250,7 +1268,7 @@ mod tests {
             std::env::temp_dir().join(format!("d3d11_encoder_colour_{}.mp4", std::process::id()));
         let mut muxer = FileMuxer::create(&path).expect("the file opens");
         let track = muxer
-            .add_stream("video", encoder.parameters(), options.time_base)
+            .add_stream("video", encoder.parameters(), encoder.time_base())
             .expect("the track is added");
         let mut sinks = muxer.open().expect("the header is written");
         encoder.src_pads()[0].link(sinks.take(track).expect("the muxer's own track"));
@@ -1278,6 +1296,7 @@ mod tests {
         for index in 0..30i64 {
             let mut frame = pool.get();
             frame.set_pts(Some(index));
+            crate::buffer::set_time_base(&mut frame, ffmpeg::Rational::new(1, 30));
             scaler
                 .consume(MediaBuffer::Video(Arc::new(frame)))
                 .expect("a frame is converted and encoded");
@@ -1496,6 +1515,7 @@ mod tests {
         );
         let mut padded = padded_pool.get();
         padded.set_pts(Some(0));
+        crate::buffer::set_time_base(&mut padded, ffmpeg::Rational::new(1, 30));
         encoder
             .consume(MediaBuffer::Video(Arc::new(padded)))
             .expect("a padded texture containing the visible frame must encode");
@@ -1509,6 +1529,7 @@ mod tests {
         for index in 1..30i64 {
             let mut frame = valid_pool.get();
             frame.set_pts(Some(index));
+            crate::buffer::set_time_base(&mut frame, ffmpeg::Rational::new(1, 30));
             encoder
                 .consume(MediaBuffer::Video(Arc::new(frame)))
                 .unwrap_or_else(|error| panic!("valid frame {index}: {error}"));
@@ -1625,6 +1646,7 @@ mod tests {
             for index in 0..30i64 {
                 let mut frame = pool.get();
                 frame.set_pts(Some(index));
+                crate::buffer::set_time_base(&mut frame, ffmpeg::Rational::new(1, 30));
                 encoder
                     .consume(MediaBuffer::Video(Arc::new(frame)))
                     .unwrap_or_else(|error| panic!("frame {index}: {error}"));

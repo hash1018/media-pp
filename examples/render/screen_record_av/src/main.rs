@@ -84,7 +84,6 @@ mod windows_example {
         };
         let (video_source, video_format, _device) =
             DxgiCaptureSource::open("screen", capture_options)?;
-        let video_time_base = video_format.time_base;
 
         let devices = WasapiCaptureSource::list_devices()?;
         let device = devices
@@ -94,7 +93,6 @@ mod windows_example {
         println!("capturing system audio from: {}", device.name);
         let (audio_source, audio_format) =
             WasapiCaptureSource::open("system-audio", WasapiCaptureOptions { device })?;
-        let audio_time_base = audio_source.time_base();
 
         let video_encoder = SwEncoder::new(
             "video-encoder",
@@ -102,31 +100,35 @@ mod windows_example {
                 codec: VideoCodec::OpenH264,
                 width: video_format.width,
                 height: video_format.height,
-                time_base: video_time_base,
                 frame_rate: ffmpeg::Rational::new(30, 1),
                 bit_rate: 4_000_000,
                 gop_size: 60, // ~2s @ 30fps
                 max_b_frames: None,
             },
-        )
-        .expect("failed to open video encoder");
+        )?;
         let audio_encoder = SwAudioEncoder::new(
             "audio-encoder",
             SwAudioEncoderOptions {
                 codec: AudioCodec::Aac,
                 sample_rate: audio_format.sample_rate,
                 channels: audio_format.channels,
-                time_base: audio_time_base,
                 bit_rate: 128_000,
             },
-        )
-        .expect("failed to open audio encoder");
+        )?;
 
         // No container/demuxer in this loop to get these from — each encoder
         // exposes its own codec parameters for exactly this case.
         let mut muxer = FileMuxer::create(&path)?;
-        let video_track = muxer.add_stream("video", video_encoder.parameters(), video_time_base)?;
-        let audio_track = muxer.add_stream("audio", audio_encoder.parameters(), audio_time_base)?;
+        let video_track = muxer.add_stream(
+            "video",
+            video_encoder.parameters(),
+            video_encoder.time_base(),
+        )?;
+        let audio_track = muxer.add_stream(
+            "audio",
+            audio_encoder.parameters(),
+            audio_encoder.time_base(),
+        )?;
         let mut sinks = muxer.open()?;
         let video_sink = sinks.take(video_track)?;
         let audio_sink = sinks.take(audio_track)?;
@@ -174,13 +176,7 @@ mod windows_example {
         }
 
         for event in pipeline.bus().iter() {
-            match &event {
-                BusEvent::Error { name, error, .. } => eprintln!("[{name}] error: {error}"),
-                BusEvent::Dropped { name, .. } => {
-                    eprintln!("[{name}] dropped a buffer (queue full)")
-                }
-                _ => {}
-            }
+            println!("{event}");
             // A capture that failed will not come back, and recording audio
             // against a frozen video track is not worth continuing — stop so
             // the muxer finalizes what it has.
@@ -306,8 +302,7 @@ mod linux_example {
                 gop_size: 60, // ~2s @ 30fps
                 max_b_frames: None,
             },
-        )
-        .expect("failed to open video encoder");
+        )?;
         let audio_encoder = SwAudioEncoder::new(
             "audio-encoder",
             SwAudioEncoderOptions {
@@ -317,12 +312,19 @@ mod linux_example {
                 time_base: audio_time_base,
                 bit_rate: 128_000,
             },
-        )
-        .expect("failed to open audio encoder");
+        )?;
 
         let mut muxer = FileMuxer::create(&path)?;
-        let video_track = muxer.add_stream("video", video_encoder.parameters(), video_time_base)?;
-        let audio_track = muxer.add_stream("audio", audio_encoder.parameters(), audio_time_base)?;
+        let video_track = muxer.add_stream(
+            "video",
+            video_encoder.parameters(),
+            video_encoder.time_base(),
+        )?;
+        let audio_track = muxer.add_stream(
+            "audio",
+            audio_encoder.parameters(),
+            audio_encoder.time_base(),
+        )?;
         let mut sinks = muxer.open()?;
         let video_sink = sinks.take(video_track)?;
         let audio_sink = sinks.take(audio_track)?;
@@ -370,13 +372,7 @@ mod linux_example {
         }
 
         for event in pipeline.bus().iter() {
-            match &event {
-                BusEvent::Error { name, error, .. } => eprintln!("[{name}] error: {error}"),
-                BusEvent::Dropped { name, .. } => {
-                    eprintln!("[{name}] dropped a buffer (queue full)")
-                }
-                _ => {}
-            }
+            println!("{event}");
             // A capture that failed will not come back, and recording audio
             // against a frozen video track is not worth continuing — stop so
             // the muxer finalizes what it has.

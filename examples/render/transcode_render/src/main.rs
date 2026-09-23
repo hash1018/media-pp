@@ -74,7 +74,6 @@ mod windows_example {
             ..TestVideoOptions::default()
         };
         let source = TestVideoSource::new("test-video", options);
-        let time_base = source.time_base();
 
         let gpu = D3d12GpuContext::new().map_err(|e| media_pp::Error::Other(format!("{e:?}")))?;
 
@@ -85,22 +84,19 @@ mod windows_example {
                     codec: VideoCodec::OpenH264,
                     width,
                     height,
-                    time_base,
                     frame_rate: options.framerate,
                     bit_rate: 2_000_000,
                     gop_size: 60, // ~2s @ 30fps (TestVideoOptions::default's own framerate)
                     max_b_frames: None,
                 },
-            )
-            .expect("failed to open encoder");
+            )?;
             // No container/demuxer in this loop to get these from — SwEncoder
             // exposes its own codec parameters for exactly this case.
             let params = encoder.parameters();
-            let decoder = SwDecoder::new("decoder", params).expect("failed to open decoder");
+            let decoder = SwDecoder::new("decoder", params)?;
             let pacer = Pacer::new("pacer");
             let renderer =
-                render_common::d3d12_window_renderer("renderer", &gpu, hwnd, width, height)
-                    .expect("failed to create renderer");
+                render_common::d3d12_window_renderer("renderer", &gpu, hwnd, width, height)?;
 
             let branch = ctx
                 .branch()
@@ -120,21 +116,18 @@ mod windows_example {
                     height,
                     ffmpeg::software::scaling::Flags::BILINEAR,
                 ))
-                .pipe(
-                    D3d12Upload::new("upload", gpu.device())
-                        .expect("failed to create the D3D12 upload"),
-                )
+                .pipe(D3d12Upload::new("upload", gpu.device())?)
                 .to(renderer)?;
             ctx.attach(source, 0, branch)?;
             Ok(())
         })?;
 
         // `run()` starts playback on a background thread and returns right
-        // away — any failure (encoder/decoder open already happened above and
-        // would have panicked synchronously; a runtime failure like a bad
-        // pixel format from `Renderer`) shows up as a `BusEvent::Error` here
-        // instead of through a returned `Result`. `TestVideoSource` never
-        // reaches `Eos` on its own — closing the window is what ends this.
+        // away. Opening the encoder and decoder already happened above, and a
+        // failure there came back through `?`; a runtime failure — a bad pixel
+        // format from `Renderer` — shows up as a `BusEvent::Error` here instead.
+        // `TestVideoSource` never reaches `Eos` on its own — closing the window
+        // is what ends this.
         if shutdown.publish(std::slice::from_ref(&pipeline)) {
             return Ok(());
         }
@@ -142,16 +135,7 @@ mod windows_example {
         pipeline.run()?;
 
         for event in pipeline.bus().iter() {
-            match &event {
-                BusEvent::Eos { name, .. } => println!("[{name}] eos"),
-                BusEvent::Error { name, error, .. } => eprintln!("[{name}] error: {error}"),
-                BusEvent::Dropped { name, .. } => {
-                    eprintln!("[{name}] dropped a buffer (queue full)")
-                }
-                // `BusEvent` is `#[non_exhaustive]`; this example only acts
-                // on the events above.
-                _ => {}
-            }
+            println!("{event}");
             if matches!(event, BusEvent::Finished | BusEvent::Error { .. }) {
                 pipeline.stop();
             }
@@ -233,8 +217,7 @@ mod linux_example {
                 target.window,
                 target.width,
                 target.height,
-            )
-            .map_err(media_pp::Error::Other)?;
+            )?;
 
             let branch = ctx
                 .branch()
@@ -261,14 +244,7 @@ mod linux_example {
 
     fn drain_bus(pipeline: &Pipeline) {
         for event in pipeline.bus().iter() {
-            match &event {
-                BusEvent::Eos { name, .. } => println!("[{name}] eos"),
-                BusEvent::Error { name, error, .. } => eprintln!("[{name}] error: {error}"),
-                BusEvent::Dropped { name, .. } => {
-                    eprintln!("[{name}] dropped a buffer (queue full)")
-                }
-                _ => {}
-            }
+            println!("{event}");
             if matches!(event, BusEvent::Finished | BusEvent::Error { .. }) {
                 pipeline.stop();
             }

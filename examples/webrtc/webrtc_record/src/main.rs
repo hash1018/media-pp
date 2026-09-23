@@ -136,7 +136,6 @@ mod example {
         source: FileDemuxer,
         video_index: usize,
         video_parameters: ffmpeg::codec::Parameters,
-        video_time_base: ffmpeg::Rational,
         width: u32,
         height: u32,
         audio_index: usize,
@@ -170,7 +169,6 @@ mod example {
             let width = (width as u32) & !1;
             let height = (height as u32) & !1;
             Ok(Self {
-                video_time_base: video.time_base,
                 source,
                 video_index,
                 video_parameters,
@@ -202,7 +200,6 @@ mod example {
                 codec: VideoCodec::OpenH264,
                 width: input.width,
                 height: input.height,
-                time_base: input.video_time_base,
                 frame_rate: ffmpeg::Rational::new(30, 1),
                 bit_rate: 2_000_000,
                 gop_size: 60,
@@ -224,7 +221,6 @@ mod example {
                 codec: AudioCodec::Opus,
                 sample_rate: AUDIO_RATE,
                 channels: AUDIO_CHANNELS,
-                time_base: ffmpeg::Rational::new(1, AUDIO_RATE as i32),
                 bit_rate: 96_000,
             },
         )?;
@@ -310,11 +306,11 @@ mod example {
 
         let mut rtc_a = Rtc::builder().build(Instant::now());
         rtc_a
-            .add_local_candidate(Candidate::host(addr_a, "udp").expect("valid UDP candidate"))
+            .add_local_candidate(Candidate::host(addr_a, "udp")?)
             .expect("add candidate a");
         let mut rtc_b = Rtc::builder().build(Instant::now());
         rtc_b
-            .add_local_candidate(Candidate::host(addr_b, "udp").expect("valid UDP candidate"))
+            .add_local_candidate(Candidate::host(addr_b, "udp")?)
             .expect("add candidate b");
 
         let mut changes = rtc_a.sdp_api();

@@ -33,6 +33,18 @@ pub enum SwEncoderError {
     #[error("SwEncoder only accepts Video or Eos buffers, got {0}")]
     UnsupportedBuffer(&'static str),
 
+    /// A frame arrived with a `pts` but no unit to read it in, so there is
+    /// no telling where on the encoder's own timeline it belongs.
+    ///
+    /// Every element in this crate that makes a frame says what unit its
+    /// `pts` is in — see [`crate::buffer::time_base`] — so this is a frame
+    /// made elsewhere. Stamp it with [`crate::buffer::set_time_base`].
+    #[error(
+        "a Video frame arrived with a pts but no time base to read it in; the element \
+         that made it has to set one (media_pp::buffer::set_time_base)"
+    )]
+    NoTimeBase,
+
     /// FFmpeg rejected encoder creation or frame/packet processing.
     #[error("ffmpeg error: {0}")]
     Ffmpeg(#[from] ffmpeg::Error),
@@ -99,6 +111,18 @@ pub enum VideoCodec {
 }
 
 impl VideoCodec {
+    /// The unit this codec's packets are counted in — see
+    /// [`SwEncoder::time_base`].
+    fn time_base(self) -> ffmpeg::Rational {
+        match self {
+            // The MPEG-4 Part 2 bitstream stores the time base's denominator
+            // in 16 bits, and FFmpeg refuses anything past 65535 rather than
+            // truncate it. 60000 still counts 59.94 fps in whole ticks.
+            VideoCodec::Mpeg4 => ffmpeg::Rational(1, 60_000),
+            _ => super::TIME_BASE,
+        }
+    }
+
     fn encoder_name(self) -> &'static str {
         match self {
             VideoCodec::H264 => "libx264",
@@ -114,11 +138,12 @@ impl VideoCodec {
     }
 }
 
-/// Construction-time options for [`SwEncoder::new`]. `width`/`height`/
-/// `time_base` must already be known — same convention as
-/// [`crate::elements::SwScaler`]/[`crate::elements::Pacer`] — rather than
-/// inferred from the first frame, since `avcodec_open2` needs them set
-/// before this can be opened at all.
+/// Construction-time options for [`SwEncoder::new`]. `width`/`height` must
+/// already be known rather than inferred from the first frame, since
+/// `avcodec_open2` needs them set before this can be opened at all — and a
+/// muxer needs the parameters that come out of it before the first frame.
+/// The unit of the frames' timestamps is not asked for: each frame carries
+/// its own, and the encoder converts it into [`SwEncoder::time_base`].
 #[derive(Debug, Clone, Copy)]
 pub struct SwEncoderOptions {
     /// Compressed video codec to open.
@@ -127,15 +152,6 @@ pub struct SwEncoderOptions {
     pub width: u32,
     /// Encoded frame height in pixels.
     pub height: u32,
-    /// Must match the `pts` unit of whatever frames this receives — e.g.
-    /// [`crate::elements::TestVideoSource::time_base`] or a demuxed
-    /// stream's own `time_base` if this is a transcode pipeline.
-    /// Deliberately *not* used to derive [`SwEncoderOptions::frame_rate`]
-    /// (an earlier version of this did exactly that) — the two aren't the
-    /// same thing. A pts tick unit fine enough for accurate timestamps
-    /// (say, microseconds) doesn't mean a million frames actually happen
-    /// per second, which `1 / time_base` would wrongly claim.
-    pub time_base: ffmpeg::Rational,
     /// The nominal rate the encoder uses for internal rate-control
     /// (targeting `bit_rate` per frame) and the frame-rate metadata it
     /// writes into the bitstream — *not* required to match the real
@@ -200,8 +216,8 @@ pub struct SwEncoder {
     /// (notably `libopenh264`) leave `AVPacket::duration` at zero; muxers
     /// such as HLS need it for precise segment durations.
     packet_duration: i64,
-    /// The unit each produced packet's `pts` is expressed in — same value
-    /// `SwEncoderOptions::time_base` was constructed with. Stamped onto
+    /// The unit each produced packet's `pts` is expressed in — the codec's
+    /// own, see [`SwEncoder::time_base`]. Stamped onto
     /// every packet in `drain` since `avcodec_receive_packet` itself never
     /// sets `AVPacket.time_base` (only the encoder context's own time base,
     /// via `set_time_base` below); without it, a packet's own
@@ -262,13 +278,14 @@ impl SwEncoder {
         // describe the stream in its SDP. Muxers that want the headers
         // in-band as well — MPEG-TS — reinsert them from here themselves.
         context.set_flags(ffmpeg::codec::Flags::GLOBAL_HEADER);
-        context.set_time_base(options.time_base);
+        let time_base = options.codec.time_base();
+        context.set_time_base(time_base);
 
         let mut video = context.encoder().video().map_err(SwEncoderError::from)?;
         video.set_width(options.width);
         video.set_height(options.height);
         video.set_format(ffmpeg::format::Pixel::YUV420P);
-        video.set_time_base(options.time_base);
+        video.set_time_base(time_base);
         video.set_frame_rate(Some(options.frame_rate));
         video.set_bit_rate(options.bit_rate);
         video.set_gop(options.gop_size);
@@ -281,7 +298,7 @@ impl SwEncoder {
         }
 
         let encoder = video.open_as(codec).map_err(SwEncoderError::from)?;
-        let packet_duration = nominal_packet_duration(options.time_base, options.frame_rate);
+        let packet_duration = nominal_packet_duration(time_base, options.frame_rate);
 
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::SwEncoder, &name, None);
@@ -301,7 +318,7 @@ impl SwEncoder {
             pp_log,
             encoder,
             packet_duration,
-            time_base: options.time_base,
+            time_base,
             pad,
         })
     }
@@ -315,6 +332,14 @@ impl SwEncoder {
     /// sink, or decoding straight back out for a round-trip smoke test).
     pub fn parameters(&self) -> ffmpeg::codec::Parameters {
         ffmpeg::codec::Parameters::from(&self.encoder)
+    }
+
+    /// The unit each packet's `pts`, `dts` and duration are counted in —
+    /// what a muxer's `add_stream` is to be told. The encoder's own, chosen
+    /// for its codec, and not the unit of the frames it is fed: those it
+    /// reads off each frame and converts.
+    pub fn time_base(&self) -> ffmpeg::Rational {
+        self.time_base
     }
 
     fn drain(&mut self) -> Result<()> {
@@ -375,6 +400,10 @@ impl Sink for SwEncoder {
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         match buf {
             MediaBuffer::Video(frame) => {
+                let pts = super::pts_in(&frame, self.time_base)
+                    .map_err(|super::NoTimeBase| SwEncoderError::NoTimeBase)?;
+                let frame =
+                    super::restamped(&frame, pts, self.time_base).map_err(SwEncoderError::from)?;
                 self.encoder
                     .send_frame(&frame)
                     .inspect_err(|error| pp_error!(self, "send_frame failed: {error}"))
@@ -455,7 +484,6 @@ mod tests {
                     codec,
                     width: 640,
                     height: 480,
-                    time_base: ffmpeg::Rational::new(1, 30),
                     frame_rate: ffmpeg::Rational::new(30, 1),
                     bit_rate: 1_000_000,
                     gop_size: 60, // ~2s @ 30fps
@@ -530,12 +558,11 @@ mod tests {
     /// validation, so every packet was dropped) — see
     /// `webrtc_av_loopback`'s own regression run.
     #[test]
-    fn produced_packets_carry_the_configured_time_base() {
+    fn produced_packets_carry_the_encoders_time_base() {
         let options = SwEncoderOptions {
             codec: VideoCodec::OpenH264,
             width: 64,
             height: 64,
-            time_base: ffmpeg::Rational::new(1, 30),
             frame_rate: ffmpeg::Rational::new(30, 1),
             bit_rate: 200_000,
             gop_size: 30,
@@ -552,6 +579,7 @@ mod tests {
 
         let mut frame = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::YUV420P, 64, 64);
         frame.set_pts(Some(0));
+        crate::buffer::set_time_base(&mut frame, ffmpeg::Rational::new(1, 30));
         for plane in 0..frame.planes() {
             frame.data_mut(plane).fill(128);
         }
@@ -563,11 +591,107 @@ mod tests {
         for packet in packets.iter() {
             assert_eq!(
                 packet.time_base(),
-                ffmpeg::Rational::new(1, 30),
-                "packet time_base must match the encoder's configured time_base, \
+                encoder.time_base(),
+                "packet time_base must be the encoder's own, \
                  not FFmpeg's 0/1 unset sentinel"
             );
         }
+    }
+
+    /// What reaches an encoder's pad.
+    type Captured = Arc<StdMutex<Vec<Arc<ffmpeg::Packet>>>>;
+
+    /// An OpenH264 encoder and what reaches its pad, or `None` where this
+    /// FFmpeg has no OpenH264.
+    fn open_h264() -> Option<(SwEncoder, Captured)> {
+        let options = SwEncoderOptions {
+            codec: VideoCodec::OpenH264,
+            width: 64,
+            height: 64,
+            frame_rate: ffmpeg::Rational::new(30, 1),
+            bit_rate: 200_000,
+            gop_size: 30,
+            max_b_frames: None,
+        };
+        let mut encoder = SwEncoder::new("encoder", options).ok()?;
+        let packets = Arc::new(StdMutex::new(Vec::new()));
+        encoder.src_pads()[0].link(Box::new(CapturingSink {
+            packets: packets.clone(),
+            pp_log: element_pp_log(ElementType::Other, "capture", None),
+        }));
+        Some((encoder, packets))
+    }
+
+    /// A grey frame due `pts` in `unit`, or with no unit at all.
+    fn grey(pts: i64, unit: Option<ffmpeg::Rational>) -> MediaBuffer {
+        let mut frame = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::YUV420P, 64, 64);
+        frame.set_pts(Some(pts));
+        if let Some(unit) = unit {
+            crate::buffer::set_time_base(&mut frame, unit);
+        }
+        for plane in 0..frame.planes() {
+            frame.data_mut(plane).fill(128);
+        }
+        pooled_video(frame)
+    }
+
+    /// The frames are not asked to be in the encoder's unit: each is read in
+    /// its own and placed on the encoder's timeline. A tenth of a second in
+    /// thirtieths and in milliseconds is the same place.
+    #[test]
+    fn a_frame_is_placed_in_the_unit_it_carries() {
+        let Some((mut encoder, packets)) = open_h264() else {
+            return;
+        };
+        encoder
+            .consume(grey(3, Some(ffmpeg::Rational::new(1, 30))))
+            .unwrap();
+        encoder
+            .consume(grey(200, Some(ffmpeg::Rational::new(1, 1000))))
+            .unwrap();
+        encoder.consume(MediaBuffer::Eos).unwrap();
+
+        let tick = |seconds: f64| (seconds * f64::from(encoder.time_base().denominator())) as i64;
+        let pts: Vec<_> = packets.lock().unwrap().iter().map(|p| p.pts()).collect();
+        assert_eq!(pts, vec![Some(tick(0.1)), Some(tick(0.2))]);
+    }
+
+    /// A frame that does not say what unit its `pts` is in is refused by
+    /// name rather than encoded at a guessed time, and nothing comes out.
+    #[test]
+    fn a_frame_with_no_time_base_is_refused_rather_than_guessed_at() {
+        let Some((mut encoder, packets)) = open_h264() else {
+            return;
+        };
+        let error = encoder.consume(grey(0, None)).unwrap_err();
+        assert!(matches!(
+            error,
+            crate::Error::SwEncoderError(SwEncoderError::NoTimeBase)
+        ));
+        encoder.consume(MediaBuffer::Eos).unwrap();
+        assert!(packets.lock().unwrap().is_empty());
+    }
+
+    /// MPEG-4 Part 2 cannot count in 90 kHz — its bitstream has 16 bits for
+    /// the denominator — so it gets a unit it can, rather than failing to
+    /// open.
+    #[test]
+    fn mpeg4_opens_with_a_unit_its_bitstream_can_hold() {
+        let options = SwEncoderOptions {
+            codec: VideoCodec::Mpeg4,
+            width: 64,
+            height: 64,
+            frame_rate: ffmpeg::Rational::new(30, 1),
+            bit_rate: 200_000,
+            gop_size: 30,
+            max_b_frames: None,
+        };
+        let encoder = match SwEncoder::new("encoder", options) {
+            Ok(encoder) => encoder,
+            Err(crate::Error::SwEncoderError(SwEncoderError::CodecNotFound(_))) => return,
+            Err(error) => panic!("mpeg4 failed to open: {error}"),
+        };
+        assert!(encoder.time_base().denominator() <= 65_535);
     }
 
     /// What the muxer builds the stream from carries the colour the encoder
@@ -578,7 +702,6 @@ mod tests {
             codec: VideoCodec::OpenH264,
             width: 64,
             height: 64,
-            time_base: ffmpeg::Rational::new(1, 30),
             frame_rate: ffmpeg::Rational::new(30, 1),
             bit_rate: 200_000,
             gop_size: 30,

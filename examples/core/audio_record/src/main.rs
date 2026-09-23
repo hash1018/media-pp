@@ -14,7 +14,6 @@ mod example {
     use std::{thread, time::Duration};
 
     use media_pp::{
-        bus::BusEvent,
         elements::{
             AudioCodec, FileMuxer, SwAudioEncoder, SwAudioEncoderOptions, TestAudioOptions,
             TestAudioSource,
@@ -45,7 +44,6 @@ mod example {
             frequency: 440.0,
         };
         let source = TestAudioSource::new("audio", audio_options);
-        let time_base = source.time_base();
 
         let encoder = SwAudioEncoder::new(
             "encoder",
@@ -53,13 +51,11 @@ mod example {
                 codec: AudioCodec::Aac,
                 sample_rate: audio_options.sample_rate,
                 channels: audio_options.channels,
-                time_base,
                 bit_rate: 128_000,
             },
-        )
-        .expect("failed to open aac encoder");
+        )?;
         let mut muxer = FileMuxer::create(&path)?;
-        let track = muxer.add_stream("audio", encoder.parameters(), time_base)?;
+        let track = muxer.add_stream("audio", encoder.parameters(), encoder.time_base())?;
         let muxer_sink = muxer.open()?.take(track)?;
 
         let pipeline = Pipeline::new("audio-record", source, |source, ctx| {
@@ -78,13 +74,7 @@ mod example {
         pipeline.stop();
 
         for event in pipeline.bus().iter() {
-            match &event {
-                BusEvent::Error { name, error, .. } => eprintln!("[{name}] error: {error}"),
-                BusEvent::Dropped { name, .. } => {
-                    eprintln!("[{name}] dropped a buffer (queue full)")
-                }
-                _ => {}
-            }
+            println!("{event}");
         }
 
         println!("wrote {path}");

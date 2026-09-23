@@ -298,7 +298,50 @@ compile error with no explanation.
   muxer's `add_stream`, which writes it into a header before the first
   packet arrives.
 
+- **The encoders count in a unit of their own and read the frames'.**
+  `time_base` is gone from `SwEncoderOptions`, `SwAudioEncoderOptions`,
+  `CudaEncoderOptions` and `D3d11VideoEncoderOptions`: drop the field. It
+  had to match the unit of the frames' timestamps, and a wrong one
+  encoded a file that played at the wrong speed. A video encoder now
+  counts in 1/90000 (1/60000 for `VideoCodec::Mpeg4`, whose bitstream
+  holds no more) and converts each frame's `pts` from the unit the frame
+  carries; the audio encoder counts samples at its output rate, as it
+  already did whatever its option said. Each says its unit through
+  `time_base()` — new on the three video encoders — which is what to
+  hand a muxer's `add_stream`:
+
+  ```rust
+  // before
+  let encoder = SwEncoder::new("encode", SwEncoderOptions { time_base, .. })?;
+  let track = muxer.add_stream("video", encoder.parameters(), time_base)?;
+
+  // after
+  let encoder = SwEncoder::new("encode", SwEncoderOptions { .. })?;
+  let track = muxer.add_stream("video", encoder.parameters(), encoder.time_base())?;
+  ```
+
+  A timed frame with no unit is refused with a new `NoTimeBase` variant
+  on `SwEncoderError`, `CudaEncoderError` and `D3d11VideoEncoderError`.
+  And a muxer track now reads each packet in the unit the packet carries,
+  falling back on the one `add_stream` was given only for a packet that
+  carries none — so a track registered with the old frame unit still
+  writes its packets at the right times.
+
 ### Added
+
+- **A `BusEvent` prints as one line.** `BusEvent` implements `Display`
+  as `[name] eos`, `[name] error: ...`, `[name] dropped a buffer (queue
+  full)`, `[name] seeked: requested ..., landed ...` and `finished` — the
+  lines `BusReceiver::log_events` always printed — so a loop that only
+  reports its bus is `println!("{event}")` rather than a `match` with an
+  arm per variant. The examples' 34 such `match`es are one line each now.
+
+- **`SubmitError` converts into `Error`.** The one public error left that
+  had no conversion, so a renderer that could not be created had to be
+  unwrapped or turned into a string. With it, the examples' constructors
+  pass their errors through `?` rather than `.expect()` — 86 of the 146
+  `.expect()`s are gone; the rest are on an `Option`, a lock, a joined
+  thread or another library's error, where `?` has nothing to convert.
 
 - **`BusEvent::Finished`: the pipeline says when it has ended.** Every
   element that completes end-of-stream posts an `Eos` — a `Queue` as well

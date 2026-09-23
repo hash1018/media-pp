@@ -88,8 +88,7 @@ mod windows_example {
             // the queue. At most that one in-flight frame can be retained if
             // the output queue is full, so one extra D3D11VA surface covers
             // the deepest downstream buffering of decoder-owned frames.
-            let decoder = D3d11Decoder::new("decoder", params, gpu.device(), 1)
-                .expect("failed to open D3D11VA decoder");
+            let decoder = D3d11Decoder::new("decoder", params, gpu.device(), 1)?;
             let scaler = D3d11Scaler::new(
                 "scaler",
                 gpu.device(),
@@ -102,8 +101,7 @@ mod windows_example {
             )?;
             let pacer = Pacer::new("pacer");
             let renderer =
-                render_common::d3d11_window_renderer("renderer", &gpu, hwnd, width, height)
-                    .expect("failed to create renderer");
+                render_common::d3d11_window_renderer("renderer", &gpu, hwnd, width, height)?;
             let branch = ctx
                 .branch()
                 .pipe(decoder)
@@ -124,20 +122,7 @@ mod windows_example {
         pipeline.run()?;
 
         for event in pipeline.bus().iter() {
-            match &event {
-                BusEvent::Eos { name, .. } => println!("[{name}] eos"),
-                BusEvent::Error { name, error, .. } => eprintln!("[{name}] error: {error}"),
-                BusEvent::Dropped { name, .. } => {
-                    eprintln!("[{name}] dropped a buffer (queue full)")
-                }
-                BusEvent::Seeked {
-                    name,
-                    requested,
-                    landed,
-                    ..
-                } => println!("[{name}] seeked: requested {requested:.2?}, landed {landed:.2?}"),
-                _ => {}
-            }
+            println!("{event}");
             if matches!(event, BusEvent::Finished | BusEvent::Error { .. }) {
                 pipeline.stop();
             }

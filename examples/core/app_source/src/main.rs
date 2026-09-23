@@ -55,7 +55,7 @@ mod example {
         let (frame_counter, count) = FrameCounter::new("frame-counter");
 
         let pipeline = Pipeline::new("app-source", app_source, |source, ctx| {
-            let decoder = SwDecoder::new("decoder", params).expect("failed to open decoder");
+            let decoder = SwDecoder::new("decoder", params)?;
             let branch = ctx
                 .branch()
                 .pipe(decoder) // same thread as `AppSource::run` — cheap enough not to need a queue
@@ -78,16 +78,7 @@ mod example {
         });
 
         for event in pipeline.bus().iter() {
-            match &event {
-                BusEvent::Eos { name, .. } => println!("[{name}] eos"),
-                BusEvent::Error { name, error, .. } => eprintln!("[{name}] error: {error}"),
-                BusEvent::Dropped { name, .. } => {
-                    eprintln!("[{name}] dropped a buffer (queue full)")
-                }
-                // `BusEvent` is `#[non_exhaustive]`; this example only acts
-                // on the events above.
-                _ => {}
-            }
+            println!("{event}");
             if matches!(event, BusEvent::Finished | BusEvent::Error { .. }) {
                 pipeline.stop();
             }

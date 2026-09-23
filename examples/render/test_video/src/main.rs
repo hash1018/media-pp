@@ -69,8 +69,7 @@ mod windows_example {
 
         let pipeline = Pipeline::new("test-video", source, |source, ctx| {
             let renderer =
-                render_common::d3d12_window_renderer("renderer", &gpu, hwnd, width, height)
-                    .expect("failed to create renderer");
+                render_common::d3d12_window_renderer("renderer", &gpu, hwnd, width, height)?;
             let branch = ctx
                 .branch()
                 .queue("frames", 8) // thread boundary so rendering doesn't block generation
@@ -84,10 +83,7 @@ mod windows_example {
                     height,
                     ffmpeg::software::scaling::Flags::BILINEAR,
                 ))
-                .pipe(
-                    D3d12Upload::new("upload", gpu.device())
-                        .expect("failed to create the D3D12 upload"),
-                )
+                .pipe(D3d12Upload::new("upload", gpu.device())?)
                 .to(renderer)?;
             ctx.attach(source, 0, branch)?;
             Ok(())
@@ -107,16 +103,7 @@ mod windows_example {
         pipeline.run()?;
 
         for event in pipeline.bus().iter() {
-            match &event {
-                BusEvent::Eos { name, .. } => println!("[{name}] eos"),
-                BusEvent::Error { name, error, .. } => eprintln!("[{name}] error: {error}"),
-                BusEvent::Dropped { name, .. } => {
-                    eprintln!("[{name}] dropped a buffer (queue full)")
-                }
-                // `BusEvent` is `#[non_exhaustive]`; this example only acts
-                // on the events above.
-                _ => {}
-            }
+            println!("{event}");
             if matches!(event, BusEvent::Finished | BusEvent::Error { .. }) {
                 pipeline.stop();
             }
@@ -178,8 +165,7 @@ mod linux_example {
                 target.window,
                 target.width,
                 target.height,
-            )
-            .map_err(media_pp::Error::Other)?;
+            )?;
             let branch = ctx
                 .branch()
                 .queue("frames", 8)
@@ -200,14 +186,7 @@ mod linux_example {
 
     fn drain_bus(pipeline: &Pipeline) {
         for event in pipeline.bus().iter() {
-            match &event {
-                BusEvent::Eos { name, .. } => println!("[{name}] eos"),
-                BusEvent::Error { name, error, .. } => eprintln!("[{name}] error: {error}"),
-                BusEvent::Dropped { name, .. } => {
-                    eprintln!("[{name}] dropped a buffer (queue full)")
-                }
-                _ => {}
-            }
+            println!("{event}");
             if matches!(event, BusEvent::Finished | BusEvent::Error { .. }) {
                 pipeline.stop();
             }

@@ -66,14 +66,12 @@ mod example {
             framerate: ffmpeg::Rational::new(30, 1),
         };
         let video_source = TestVideoSource::new("video", video_options);
-        let video_time_base = video_source.time_base();
         let video_encoder = SwEncoder::new(
             "video-encoder",
             SwEncoderOptions {
                 codec: VideoCodec::OpenH264,
                 width: video_options.width,
                 height: video_options.height,
-                time_base: video_time_base,
                 frame_rate: video_options.framerate,
                 bit_rate: 1_500_000,
                 gop_size: GOP_SIZE,
@@ -89,7 +87,6 @@ mod example {
             frequency: 440.0,
         };
         let audio_source = TestAudioSource::new("audio", audio_options);
-        let audio_time_base = audio_source.time_base();
         let audio_encoder = SwAudioEncoder::new(
             "audio-encoder",
             SwAudioEncoderOptions {
@@ -97,7 +94,6 @@ mod example {
                 codec: AudioCodec::Aac,
                 sample_rate: audio_options.sample_rate,
                 channels: audio_options.channels,
-                time_base: audio_time_base,
                 bit_rate: 128_000,
             },
         )?;
@@ -105,8 +101,16 @@ mod example {
         // Connects here: an unreachable server or a rejected stream key
         // fails before a single frame has been encoded.
         let mut muxer = RtmpMuxer::create(&url)?;
-        let video_track = muxer.add_stream("video", video_encoder.parameters(), video_time_base)?;
-        let audio_track = muxer.add_stream("audio", audio_encoder.parameters(), audio_time_base)?;
+        let video_track = muxer.add_stream(
+            "video",
+            video_encoder.parameters(),
+            video_encoder.time_base(),
+        )?;
+        let audio_track = muxer.add_stream(
+            "audio",
+            audio_encoder.parameters(),
+            audio_encoder.time_base(),
+        )?;
         // Held before `open` consumes the muxer — the URL itself is not
         // printed, since a real one ends in a credential.
         let shown_url = muxer.redacted_url().to_string();
@@ -148,13 +152,7 @@ mod example {
         }
 
         for event in pipeline.bus().iter() {
-            match &event {
-                BusEvent::Error { name, error, .. } => eprintln!("[{name}] error: {error}"),
-                BusEvent::Dropped { name, .. } => {
-                    eprintln!("[{name}] dropped a buffer (queue full)")
-                }
-                _ => {}
-            }
+            println!("{event}");
             // A lost connection does not come back on its own — this type
             // does not reconnect — so publishing audio into a broken socket
             // is not worth continuing.

@@ -79,9 +79,9 @@ use crate::{
         AppSourceError, AudioCompressorError, AudioGateError, AudioLimiterError, AudioMixerError,
         AudioResamplerError, AudioVolumeError, FileDemuxError, FileMuxerError,
         FrameRateLimiterError, HlsMuxerError, MuxerTrackError, PacerError, RackError,
-        ReplayBufferError, RtmpMuxerError, RtspSourceError, SwAudioEncoderError, SwChromaKeyError,
-        SwDecoderError, SwEncoderError, SwScalerError, SwVideoCompositorError, SwVideoEffectError,
-        TestAudioSourceError, TestVideoSourceError, VideoSynchronizerError,
+        ReplayBufferError, RtmpMuxerError, RtspSourceError, SubmitError, SwAudioEncoderError,
+        SwChromaKeyError, SwDecoderError, SwEncoderError, SwScalerError, SwVideoCompositorError,
+        SwVideoEffectError, TestAudioSourceError, TestVideoSourceError, VideoSynchronizerError,
     },
     graph::GraphError,
     log::LogInitError,
@@ -299,6 +299,10 @@ pub enum Error {
     /// A rack could not take the filters it was given.
     #[error(transparent)]
     RackError(#[from] RackError),
+
+    /// A renderer implementation could not be created or refused a frame.
+    #[error(transparent)]
+    SubmitError(#[from] SubmitError),
 
     /// An audio renderer could not take or keep the playback clock.
     #[error(transparent)]

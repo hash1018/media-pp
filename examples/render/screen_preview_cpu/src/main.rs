@@ -106,16 +106,14 @@ mod windows_example {
             );
             // `D3d12Renderer` draws from a device resource only, so this is
             // where the captured pixels cross to the GPU.
-            let upload = D3d12Upload::new("upload", gpu.device())
-                .expect("failed to create the D3D12 upload");
+            let upload = D3d12Upload::new("upload", gpu.device())?;
             let renderer = render_common::d3d12_window_renderer(
                 "renderer",
                 &gpu,
                 hwnd,
                 window_width,
                 window_height,
-            )
-            .expect("failed to create renderer");
+            )?;
 
             let branch = ctx
                 .branch()
@@ -139,16 +137,7 @@ mod windows_example {
         pipeline.run()?;
 
         for event in pipeline.bus().iter() {
-            match &event {
-                BusEvent::Eos { name, .. } => println!("[{name}] eos"),
-                BusEvent::Error { name, error, .. } => eprintln!("[{name}] error: {error}"),
-                BusEvent::Dropped { name, .. } => {
-                    eprintln!("[{name}] dropped a buffer (queue full)")
-                }
-                // `BusEvent` is `#[non_exhaustive]`; this example only acts
-                // on the events above.
-                _ => {}
-            }
+            println!("{event}");
             // Unlike the other render examples (a steady, self-paced
             // synthetic/file source that essentially never overruns the
             // renderer's 2-slot upload ring), live desktop capture can
@@ -244,8 +233,7 @@ mod linux_example {
                 target.window,
                 target.width,
                 target.height,
-            )
-            .map_err(media_pp::Error::Other)?;
+            )?;
 
             let branch = ctx
                 .branch()
@@ -268,14 +256,7 @@ mod linux_example {
         pipeline.run()?;
 
         for event in pipeline.bus().iter() {
-            match &event {
-                BusEvent::Eos { name, .. } => println!("[{name}] eos"),
-                BusEvent::Error { name, error, .. } => eprintln!("[{name}] error: {error}"),
-                BusEvent::Dropped { name, .. } => {
-                    eprintln!("[{name}] dropped a buffer (queue full)")
-                }
-                _ => {}
-            }
+            println!("{event}");
             let source_died = matches!(
                 &event,
                 BusEvent::Error { element_type, .. }

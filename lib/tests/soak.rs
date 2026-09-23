@@ -156,14 +156,13 @@ fn assert_no_errors(events: &[BusEvent]) {
     assert!(errors.is_empty(), "unexpected error event(s): {errors:?}");
 }
 
-fn encoder(name: &str, time_base: ffmpeg::Rational, gop_size: u32) -> SwEncoder {
+fn encoder(name: &str, gop_size: u32) -> SwEncoder {
     SwEncoder::new(
         name,
         SwEncoderOptions {
             codec: VideoCodec::OpenH264,
             width: WIDTH,
             height: HEIGHT,
-            time_base,
             frame_rate: frame_rate(),
             bit_rate: 1_000_000,
             gop_size,
@@ -194,11 +193,10 @@ fn open_fixture(path: &str) -> (FileDemuxer, usize, ffmpeg::codec::Parameters) {
 /// several clips in one process.
 fn record_once(path: &Path, teardown: Teardown) {
     let source = test_source("video");
-    let time_base = source.time_base();
-    let encoder = encoder("encoder", time_base, 30);
+    let encoder = encoder("encoder", 30);
     let mut muxer = FileMuxer::create(path).expect("create the recording");
     let video = muxer
-        .add_stream("video", encoder.parameters(), time_base)
+        .add_stream("video", encoder.parameters(), encoder.time_base())
         .expect("add the video track");
     let sink = muxer
         .open()
@@ -601,17 +599,16 @@ fn segment_rotation_does_not_grow_process_memory_or_hold_files() {
     media_pp::init().expect("ffmpeg init");
     let dir = TempDir::new("segments");
     let source = test_source("video");
-    let time_base = source.time_base();
     // A keyframe every half second, so a one-second policy actually cuts
     // rather than waiting on a sparse GOP.
-    let encoder = encoder("encoder", time_base, 15);
+    let encoder = encoder("encoder", 15);
 
     let segment_dir = dir.path().to_path_buf();
     let mut muxer = SegmentedFileMuxer::create(
         SegmentPolicy::Duration(Duration::from_secs(1)),
         move |index| segment_dir.join(format!("segment_{index:04}.mp4")),
     );
-    let video = muxer.add_stream("video", encoder.parameters(), time_base);
+    let video = muxer.add_stream("video", encoder.parameters(), encoder.time_base());
     let sink = muxer
         .open()
         .expect("open the first segment")
@@ -887,13 +884,12 @@ mod d3d11 {
     /// the support probe has to open an encoder with exactly the options a
     /// cycle will use — a codec or input format the driver refuses is a
     /// skip, not a leak.
-    fn nvenc_options(time_base: ffmpeg::Rational) -> D3d11VideoEncoderOptions {
+    fn nvenc_options() -> D3d11VideoEncoderOptions {
         D3d11VideoEncoderOptions {
             codec: D3d11VideoCodec::H264Nvenc,
             input_format: D3d11VideoInputFormat::Nv12,
             width: WIDTH,
             height: HEIGHT,
-            time_base,
             frame_rate: frame_rate(),
             bit_rate: 1_000_000,
             gop_size: 30,
@@ -912,7 +908,6 @@ mod d3d11 {
     ) -> usize {
         let (counter, packets) = PacketCounter::new("counter");
         let source = test_source("video");
-        let time_base = source.time_base();
         let device = device.clone();
         let context = context.clone();
         let pipeline = Pipeline::new("soak-d3d11-nvenc", source, move |source, ctx| {
@@ -924,12 +919,8 @@ mod d3d11 {
                 ffmpeg::software::scaling::Flags::BILINEAR,
             );
             let upload = D3d11Upload::new("upload", &device);
-            let encoder = D3d11VideoEncoder::new(
-                "encoder",
-                &device,
-                context.clone(),
-                nvenc_options(time_base),
-            )?;
+            let encoder =
+                D3d11VideoEncoder::new("encoder", &device, context.clone(), nvenc_options())?;
             let branch = ctx
                 .branch()
                 .pipe(to_nv12)
@@ -953,8 +944,7 @@ mod d3d11 {
 
     /// Whether this GPU and FFmpeg build have NVENC at all.
     fn nvenc_supported(device: &ID3D11Device, context: &Arc<Mutex<ID3D11DeviceContext>>) -> bool {
-        let time_base = test_source("probe").time_base();
-        match D3d11VideoEncoder::new("probe", device, context.clone(), nvenc_options(time_base)) {
+        match D3d11VideoEncoder::new("probe", device, context.clone(), nvenc_options()) {
             Ok(_) => true,
             Err(error) => {
                 eprintln!("skipping: no D3D11 NVENC encoder on this machine ({error})");
@@ -1942,13 +1932,12 @@ mod cuda {
 
     /// What every NVENC cycle below encodes with — same reasoning as the
     /// D3D11 module's own options helper.
-    fn nvenc_options(time_base: ffmpeg::Rational) -> CudaEncoderOptions {
+    fn nvenc_options() -> CudaEncoderOptions {
         CudaEncoderOptions {
             codec: CudaCodec::H264,
             input_format: CudaFrameFormat::Nv12,
             width: WIDTH,
             height: HEIGHT,
-            time_base,
             frame_rate: frame_rate(),
             bit_rate: 1_000_000,
             gop_size: 30,
@@ -1962,7 +1951,6 @@ mod cuda {
     fn encode_cycle(device: &CudaDevice, teardown: Teardown) -> usize {
         let (counter, packets) = PacketCounter::new("counter");
         let source = test_source("video");
-        let time_base = source.time_base();
         let pipeline = Pipeline::new("soak-cuda-nvenc", source, move |source, ctx| {
             let to_nv12 = SwScaler::new(
                 "to-nv12",
@@ -1972,7 +1960,7 @@ mod cuda {
                 ffmpeg::software::scaling::Flags::BILINEAR,
             );
             let upload = CudaUpload::new("upload", device, CudaFrameFormat::Nv12)?;
-            let encoder = CudaEncoder::new("encoder", device, nvenc_options(time_base))?;
+            let encoder = CudaEncoder::new("encoder", device, nvenc_options())?;
             let branch = ctx
                 .branch()
                 .pipe(to_nv12)
@@ -1996,8 +1984,7 @@ mod cuda {
 
     /// Whether this GPU and FFmpeg build have NVENC at all.
     fn nvenc_supported(device: &CudaDevice) -> bool {
-        let time_base = test_source("probe").time_base();
-        match CudaEncoder::new("probe", device, nvenc_options(time_base)) {
+        match CudaEncoder::new("probe", device, nvenc_options()) {
             Ok(_) => true,
             Err(error) => {
                 eprintln!("skipping: no CUDA NVENC encoder on this machine ({error})");

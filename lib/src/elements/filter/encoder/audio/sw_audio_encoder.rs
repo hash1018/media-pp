@@ -87,10 +87,10 @@ impl AudioCodec {
 }
 
 /// Construction-time options for [`SwAudioEncoder::new`]. `sample_rate`/
-/// `channels`/`time_base` must already be known — same convention as
-/// [`crate::elements::SwEncoder`]'s own `width`/`height`/`time_base` —
-/// rather than inferred from the first frame, since `avcodec_open2` needs
-/// them set before this can be opened at all. What's actually *fed* to
+/// `channels` must already be known — same convention as
+/// [`crate::elements::SwEncoder`]'s own `width`/`height` — rather than
+/// inferred from the first frame, since `avcodec_open2` needs them set
+/// before this can be opened at all. What's actually *fed* to
 /// this element doesn't have to match `sample_rate`/`channels` exactly —
 /// see [`SwAudioEncoder`]'s own docs on why.
 #[derive(Debug, Clone, Copy)]
@@ -105,10 +105,6 @@ pub struct SwAudioEncoderOptions {
     pub sample_rate: u32,
     /// Encoder output channel count.
     pub channels: u16,
-    /// Must match the `pts` unit of whatever frames this receives — e.g.
-    /// [`crate::elements::TestAudioSource::time_base`]/
-    /// [`crate::elements::AudioMixer::time_base`].
-    pub time_base: ffmpeg::Rational,
     /// Target encoded bit rate, in bits per second.
     pub bit_rate: usize,
 }
@@ -239,7 +235,9 @@ impl SwAudioEncoder {
         // Codec headers into `extradata` for the container to write, not only
         // in-band — see `SwEncoder::new`, which says why in full.
         context.set_flags(ffmpeg::codec::Flags::GLOBAL_HEADER);
-        context.set_time_base(options.time_base);
+        // The unit `drain_pending` counts samples in — see `time_base`.
+        let time_base = ffmpeg::Rational::new(1, options.sample_rate as i32);
+        context.set_time_base(time_base);
 
         let mut audio = context
             .encoder()
@@ -248,7 +246,7 @@ impl SwAudioEncoder {
         audio.set_rate(options.sample_rate as i32);
         audio.set_channel_layout(target_layout);
         audio.set_format(target_format);
-        audio.set_time_base(options.time_base);
+        audio.set_time_base(time_base);
         audio.set_bit_rate(options.bit_rate);
 
         let encoder = audio.open_as(codec).map_err(SwAudioEncoderError::from)?;
@@ -295,7 +293,10 @@ impl SwAudioEncoder {
         ffmpeg::codec::Parameters::from(&self.encoder)
     }
 
-    /// The unit each produced packet's `pts` is expressed in.
+    /// The unit each produced packet's `pts` is expressed in: one sample at
+    /// the output rate. The input's own timestamps are not carried over —
+    /// the encoder counts the samples it has encoded — so nothing here has
+    /// to be told what unit they were in.
     pub fn time_base(&self) -> ffmpeg::Rational {
         ffmpeg::Rational::new(1, self.sample_rate as i32)
     }
@@ -573,7 +574,6 @@ mod tests {
                 codec: AudioCodec::Aac,
                 sample_rate: 48000,
                 channels: 2,
-                time_base: ffmpeg::Rational::new(1, 48000),
                 bit_rate: 128_000,
             },
         );
@@ -662,7 +662,6 @@ mod tests {
                 codec: AudioCodec::Aac,
                 sample_rate: 48000,
                 channels: 2,
-                time_base: ffmpeg::Rational::new(1, 48000),
                 bit_rate: 128_000,
             },
         ) else {
@@ -748,7 +747,6 @@ mod tests {
                 codec: AudioCodec::Aac,
                 sample_rate: 48000,
                 channels: 2,
-                time_base: ffmpeg::Rational::new(1, 48000),
                 bit_rate: 128_000,
             },
         ) else {
@@ -790,7 +788,6 @@ mod tests {
             codec: AudioCodec::Opus,
             sample_rate,
             channels: 2,
-            time_base: ffmpeg::Rational::new(1, sample_rate as i32),
             bit_rate: 96_000,
         }
     }
@@ -878,7 +875,6 @@ mod tests {
                 codec: AudioCodec::Aac,
                 sample_rate: 44100,
                 channels: 2,
-                time_base: ffmpeg::Rational::new(1, 44100),
                 bit_rate: 128_000,
             },
         );

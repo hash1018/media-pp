@@ -91,12 +91,10 @@ mod windows_example {
             // queue depth below (see D3d11Decoder::new's docs). Its accurate-
             // seek candidate surface is reserved internally, so it is not
             // included in this value.
-            let decoder = D3d11Decoder::new("decoder", params, gpu.device(), 32)
-                .expect("failed to open D3D11VA decoder");
+            let decoder = D3d11Decoder::new("decoder", params, gpu.device(), 32)?;
             let pacer = Pacer::new("pacer");
             let renderer =
-                render_common::d3d11_window_renderer("renderer", &gpu, hwnd, width, height)
-                    .expect("failed to create renderer");
+                render_common::d3d11_window_renderer("renderer", &gpu, hwnd, width, height)?;
             let branch = ctx
                 .branch()
                 .pipe(decoder) // same thread as the demux — cheap enough not to need a queue
@@ -122,22 +120,7 @@ mod windows_example {
         // renderer failure. The end of the stream is `Finished`, which the
         // pipeline posts once every terminal has ended.
         for event in pipeline.bus().iter() {
-            match &event {
-                BusEvent::Eos { name, .. } => println!("[{name}] eos"),
-                BusEvent::Error { name, error, .. } => eprintln!("[{name}] error: {error}"),
-                BusEvent::Dropped { name, .. } => {
-                    eprintln!("[{name}] dropped a buffer (queue full)")
-                }
-                BusEvent::Seeked {
-                    name,
-                    requested,
-                    landed,
-                    ..
-                } => println!("[{name}] seeked: requested {requested:.2?}, landed {landed:.2?}"),
-                // `BusEvent` is `#[non_exhaustive]`; this example only acts
-                // on the events above.
-                _ => {}
-            }
+            println!("{event}");
             if matches!(event, BusEvent::Finished | BusEvent::Error { .. }) {
                 pipeline.stop();
             }

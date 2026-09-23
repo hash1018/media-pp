@@ -89,7 +89,6 @@ mod windows_example {
                 input_format: D3d11VideoInputFormat::Bgra,
                 width: format.width,
                 height: format.height,
-                time_base: format.time_base,
                 frame_rate: ffmpeg::Rational::new(30, 1),
                 bit_rate: 8_000_000,
                 gop_size: 60, // ~2s @ 30fps
@@ -98,7 +97,7 @@ mod windows_example {
         )?;
 
         let mut muxer = FileMuxer::create(&recording.path)?;
-        let track = muxer.add_stream("video", encoder.parameters(), format.time_base)?;
+        let track = muxer.add_stream("video", encoder.parameters(), encoder.time_base())?;
         let muxer_sink = muxer.open()?.take(track)?;
 
         let pipeline = Pipeline::new("screen-record-nvenc", source, |source, ctx| {
@@ -212,7 +211,7 @@ mod linux_example {
         )?;
 
         let mut muxer = FileMuxer::create(&recording.path)?;
-        let track = muxer.add_stream("video", encoder.parameters(), format.time_base)?;
+        let track = muxer.add_stream("video", encoder.parameters(), encoder.time_base())?;
         let muxer_sink = muxer.open()?.take(track)?;
 
         let (width, height) = (format.width, format.height);
