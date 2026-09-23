@@ -393,12 +393,6 @@ impl ControlSender {
         self.send_request(RequestKind::Control(msg));
     }
 
-    /// Requests source-originated EOS without exposing `Finish` as a
-    /// downstream [`ControlMsg`]. Used only by [`crate::pipeline::Pipeline`].
-    pub(crate) fn finish(&self) {
-        self.send_request(RequestKind::Finish);
-    }
-
     /// Queues `msg` without waiting for it to be handled, and returns what
     /// its acknowledgement will arrive on — `None` if nothing is on the other
     /// end. For a message that has to be first in line before the receiver's
@@ -408,6 +402,20 @@ impl ControlSender {
         self.tx
             .send(Request {
                 kind: RequestKind::Control(msg),
+                ack: ack_tx,
+            })
+            .ok()?;
+        Some(ack_rx)
+    }
+
+    /// [`Self::enqueue`] for source-originated EOS, without exposing `Finish`
+    /// as a downstream [`ControlMsg`]. Used only by
+    /// [`crate::pipeline::Pipeline::finish`].
+    pub(crate) fn enqueue_finish(&self) -> Option<Receiver<()>> {
+        let (ack_tx, ack_rx) = crossbeam_channel::bounded(0);
+        self.tx
+            .send(Request {
+                kind: RequestKind::Finish,
                 ack: ack_tx,
             })
             .ok()?;

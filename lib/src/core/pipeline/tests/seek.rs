@@ -1157,3 +1157,84 @@ fn a_seek_while_video_waits_on_a_stalled_audio_clock_returns() {
     outcome.expect("the seek completes");
     pipeline.stop();
 }
+
+/// Two sources, each its own paced branch — one demuxer for the picture and
+/// one for the sound of the same file, which is how a newcomer's player
+/// ended up wired — sought twice, half a second apart.
+///
+/// Control went to one source at a time, after the clock had been
+/// interrupted. A source waiting its turn behind the other's cascade was
+/// interrupted with nothing to take, so it read on, its interrupted `Pacer`
+/// handing each buffer straight back, and reached the end of the file in
+/// milliseconds. Its thread had ended by the time its own `Seek` was sent,
+/// and the seek failed with its terminal's preroll timed out — on three
+/// runs in four here. The sound now stays where the seek put it.
+#[test]
+fn two_paced_sources_on_one_file_survive_consecutive_seeks() {
+    let Some(path) = try_test_video() else { return };
+    let (video_source, streams) = FileDemuxer::open("video-demux", &path).expect("open");
+    let video = streams
+        .iter()
+        .find(|stream| stream.kind == ffmpeg::media::Type::Video)
+        .expect("a video stream")
+        .clone();
+    let (audio_source, streams) = FileDemuxer::open("audio-demux", &path).expect("open");
+    let audio = streams
+        .iter()
+        .find(|stream| stream.kind == ffmpeg::media::Type::Audio)
+        .expect("an audio stream")
+        .clone();
+    let video_samples = Arc::new(Mutex::new(Vec::new()));
+    let audio_samples = Arc::new(Mutex::new(Vec::new()));
+
+    let (builder, ()) = PipelineBuilder::new("two-demuxers")
+        .add_source(video_source, |source, ctx| {
+            let branch = ctx
+                .branch()
+                .pipe(SwDecoder::new("video-decoder", video.parameters.clone())?)
+                .pipe(Pacer::new("video-pacer"))
+                .to(PrerollProbe {
+                    label: "video",
+                    time_base: video.time_base,
+                    samples: Arc::clone(&video_samples),
+                    pp_log: element_pp_log(ElementType::Other, "video", None),
+                })?;
+            ctx.attach(source, video.index, branch)?;
+            Ok(())
+        })
+        .expect("wire the picture");
+    let (builder, ()) = builder
+        .add_source(audio_source, |source, ctx| {
+            let branch = ctx
+                .branch()
+                .pipe(SwDecoder::new("audio-decoder", audio.parameters.clone())?)
+                .pipe(Pacer::new("audio-pacer"))
+                .to(PrerollProbe {
+                    label: "audio",
+                    time_base: audio.time_base,
+                    samples: Arc::clone(&audio_samples),
+                    pp_log: element_pp_log(ElementType::Other, "audio", None),
+                })?;
+            ctx.attach(source, audio.index, branch)?;
+            Ok(())
+        })
+        .expect("wire the sound");
+    let pipeline = builder.build();
+
+    pipeline.run().expect("run");
+    thread::sleep(Duration::from_millis(300));
+    pipeline
+        .seek(Duration::from_secs(1), SeekMode::Accurate)
+        .expect("the first seek");
+    thread::sleep(Duration::from_millis(500));
+    let last_audio_ns = *audio_samples.lock().unwrap().last().expect("audio played");
+    assert!(
+        last_audio_ns < 2_500_000_000,
+        "half a second after seeking to 1 s, the sound is at {last_audio_ns} ns: \
+         it ran ahead unpaced"
+    );
+    pipeline
+        .seek(Duration::from_millis(500), SeekMode::Accurate)
+        .expect("the second seek");
+    pipeline.stop();
+}

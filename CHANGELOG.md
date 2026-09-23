@@ -1181,6 +1181,17 @@ compile error with no explanation.
 
 ### Fixed
 
+- **A pipeline with several sources no longer loses one to a pause, seek
+  or finish.** Control went to one source at a time, after the clock had
+  been interrupted. A source waiting its turn behind another's cascade was
+  woken with nothing to take: its interrupted `Pacer` handed each buffer
+  straight back, so it read on unpaced — to the end of its file within
+  milliseconds, where its thread ended. Two demuxers on one file, one for
+  the picture and one for the sound, failed their seek's preroll on three
+  runs in four. Every request is now queued on every source before
+  anything is woken, and the sources handle it together rather than in
+  turn.
+
 - **`seek` no longer hangs a player that seeks while the video waits on
   the sound.** `seek` first asks every branch whether it can seek, and it
   interrupted the clock only after that. A `VideoSynchronizer` holding a

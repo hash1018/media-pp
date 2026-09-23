@@ -113,11 +113,9 @@ pub struct Pipeline {
     pub(super) bus: Mutex<Option<Bus>>,
     /// One [`ControlSender`] per source, in the same order
     /// [`PipelineBuilder::add_source`] was called — [`Pipeline::finish`]/
-    /// `stop`/`pause`/`resume`/`seek` send to every one of these in turn (each
-    /// `send` is its own synchronous rendezvous with that source's own
-    /// control cascade — see [`crate::control::ControlSender::send`] — so
-    /// this serializes across sources rather than fanning out in
-    /// parallel; fine for the handful of sources this is meant for).
+    /// `stop`/`pause`/`resume`/`seek` queue a request on every one of these
+    /// before waking anything, and then wait for all of them together — see
+    /// `Pipeline::broadcast` for why both halves of that matter.
     pub(super) control_txs: Vec<ControlSender>,
     /// Taken (leaving `None` behind) the moment `run()` starts, and moved
     /// one per thread — same reasoning as `bus` above. If `Pipeline` kept
@@ -504,17 +502,43 @@ impl Pipeline {
         lock(&self.sources).is_some()
     }
 
+    /// Puts a request on every source's control channel, wakes whatever is
+    /// waiting on the clock if `wake` says to, and then waits until every
+    /// source has handled its request.
+    ///
+    /// In that order, and for every source at once. A `Pacer` or
+    /// `VideoSynchronizer` interrupted mid-wait keeps its buffer and returns,
+    /// so its source can take the request that interrupted it — which has to
+    /// be there already. Sent one source at a time, as this used to be, a
+    /// source waiting its turn behind another's cascade was interrupted with
+    /// nothing to take: it read on, each buffer handed straight back by the
+    /// still-interrupted pacer, and reached the end of its file in
+    /// milliseconds. Waiting for them together also keeps one slow cascade
+    /// from holding up the rest.
+    fn broadcast(
+        &self,
+        wake: Wake,
+        enqueue: impl Fn(&ControlSender) -> Option<crossbeam_channel::Receiver<()>>,
+    ) {
+        let acks: Vec<_> = self.control_txs.iter().filter_map(enqueue).collect();
+        if wake == Wake::Interrupt {
+            self.clock.interrupt();
+        }
+        for ack in acks {
+            let _ = ack.recv();
+        }
+    }
+
     fn pause_runtime(&self) {
         let msg = ControlMsg::Pause;
         pp_trace!(
             pp_log: &self.pp_log,
             "event=control control={msg:?} phase=requested"
         );
-        self.clock.interrupt();
         self.clock.pause();
-        for control_tx in &self.control_txs {
-            control_tx.send(msg.clone());
-        }
+        self.broadcast(Wake::Interrupt, |control_tx| {
+            control_tx.enqueue(msg.clone())
+        });
         pp_trace!(
             pp_log: &self.pp_log,
             "event=control control={msg:?} phase=completed outcome=ok"
@@ -547,9 +571,7 @@ impl Pipeline {
             "event=control control={msg:?} phase=requested"
         );
         self.clock.resume();
-        for control_tx in &self.control_txs {
-            control_tx.send(msg.clone());
-        }
+        self.broadcast(Wake::Leave, |control_tx| control_tx.enqueue(msg.clone()));
         pp_trace!(
             pp_log: &self.pp_log,
             "event=control control={msg:?} phase=completed outcome=ok"
@@ -558,10 +580,8 @@ impl Pipeline {
 
     /// Performs an early, full stop — abandons buffered work rather than
     /// draining to a natural `Eos`. This call is synchronous: it sends
-    /// [`ControlMsg::Stop`] to every source in turn and waits for each
-    /// one's own cascade to finish before moving to the next — sequential,
-    /// not parallel, across sources (fine for the handful of sources this
-    /// is meant for). It therefore cannot preempt an arbitrary
+    /// [`ControlMsg::Stop`] to every source at once and waits until each
+    /// one's own cascade has finished. It therefore cannot preempt an arbitrary
     /// source read or `Sink::consume` call already blocked inside user or
     /// external-library code; the call returns only after that work gives
     /// the control cascade a turn. After it returns, watch [`Pipeline::bus`]
@@ -684,10 +704,9 @@ impl Pipeline {
             pp_log: &self.pp_log,
             "event=control control={msg:?} phase=requested"
         );
-        self.clock.interrupt();
-        for control_tx in &self.control_txs {
-            control_tx.send(msg.clone());
-        }
+        self.broadcast(Wake::Interrupt, |control_tx| {
+            control_tx.enqueue(msg.clone())
+        });
         pp_trace!(
             pp_log: &self.pp_log,
             "event=control control={msg:?} phase=completed outcome=ok"
@@ -722,14 +741,11 @@ impl Pipeline {
             pp_log: &self.pp_log,
             "event=finish phase=requested"
         );
-        self.clock.interrupt();
         if self.paused.load(Ordering::Acquire) {
             self.paused.store(false, Ordering::Release);
             self.resume_runtime();
         }
-        for control_tx in &self.control_txs {
-            control_tx.finish();
-        }
+        self.broadcast(Wake::Interrupt, ControlSender::enqueue_finish);
         self.join_workers();
         pp_trace!(
             pp_log: &self.pp_log,
@@ -790,17 +806,16 @@ impl Pipeline {
         if self.running.load(Ordering::Acquire) == 0 {
             return Err(PipelineError::NotRunning.into());
         }
-        // Before the question, not after: an element waiting on the clock —
+        // Interrupting, not just asking: an element waiting on the clock —
         // a `VideoSynchronizer` holding a frame the audio has not reached —
         // is inside a `Queue` worker's `consume`, and that worker takes
         // control only between buffers. The audio it waits for comes from a
         // source that is about to stop and wait for this very question to
         // be answered, so without the interrupt neither ever moves.
-        self.clock.interrupt();
         let check = Arc::new(SeekCheckContext::new());
-        for control_tx in &self.control_txs {
-            control_tx.send(ControlMsg::CheckSeek(Arc::clone(&check)));
-        }
+        self.broadcast(Wake::Interrupt, |control_tx| {
+            control_tx.enqueue(ControlMsg::CheckSeek(Arc::clone(&check)))
+        });
         check.result()?;
         let restore_paused = self.paused.load(Ordering::Acquire);
         if !restore_paused {
@@ -813,12 +828,10 @@ impl Pipeline {
         );
         self.clock.interrupt();
         self.playback_clock.reset_for_seek();
-        for control_tx in &self.control_txs {
-            control_tx.send(ControlMsg::Flush);
-        }
-        for control_tx in &self.control_txs {
-            control_tx.send(msg.clone());
-        }
+        self.broadcast(Wake::Leave, |control_tx| {
+            control_tx.enqueue(ControlMsg::Flush)
+        });
+        self.broadcast(Wake::Leave, |control_tx| control_tx.enqueue(msg.clone()));
         let terminals = self.graph().terminal_ids();
         let preroll = Arc::new(match mode {
             SeekMode::Keyframe => PrerollContext::new(terminals),
@@ -828,9 +841,9 @@ impl Pipeline {
         // queue behind it. Cleared on every exit below, including the error
         // one, so no later `stop` cancels a preroll that already finished.
         self.publish_preroll(&preroll);
-        for control_tx in &self.control_txs {
-            control_tx.send(ControlMsg::Preroll(Arc::clone(&preroll)));
-        }
+        self.broadcast(Wake::Leave, |control_tx| {
+            control_tx.enqueue(ControlMsg::Preroll(Arc::clone(&preroll)))
+        });
         let preroll_result = self.await_preroll(&preroll, PREROLL_TIMEOUT);
         self.retire_preroll();
         if restore_paused {
@@ -893,4 +906,15 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Whether [`Pipeline::broadcast`] interrupts the clock once its requests are
+/// queued.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Wake {
+    /// For a request that has to reach elements waiting on the clock: pause,
+    /// stop, finish, and the question that opens a seek.
+    Interrupt,
+    /// For one sent while everything is already paused, or that resumes it.
+    Leave,
 }
