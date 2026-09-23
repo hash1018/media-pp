@@ -278,41 +278,21 @@ impl FileDemuxer {
         }
     }
 
-    /// Codec parameters for one of this file's streams — what you need to
-    /// construct a matching [`crate::elements::SwDecoder`] for it.
-    pub fn stream_parameters(&self, index: usize) -> Option<ffmpeg::codec::Parameters> {
-        self.stream(index).map(|s| s.parameters())
-    }
-
-    /// The unit decoded frame timestamps for this stream are expressed in —
-    /// what you need to construct a matching [`crate::elements::Pacer`] for
-    /// it.
-    pub fn stream_time_base(&self, index: usize) -> Option<ffmpeg::Rational> {
-        self.stream(index).map(|s| s.time_base())
-    }
-
-    /// The index of the stream of `kind` FFmpeg judges the one to play, or
-    /// `None` where the file has none — what to attach and decode, rather
-    /// than the first stream of that kind.
-    ///
-    /// The first is not always it. A file can carry a still picture as a
-    /// video stream — cover art, a thumbnail — ahead of its moving picture,
-    /// and taking the first video stream plays the still. FFmpeg's own choice
-    /// (`av_find_best_stream`) passes over a stream marked as an attached
-    /// picture and prefers one with more than a single frame.
-    pub fn best_stream(&self, kind: ffmpeg::media::Type) -> Option<usize> {
-        self.input.streams().best(kind).map(|stream| stream.index())
-    }
-
-    /// The same choice, as everything a branch for it is built from — or a
-    /// [`FileDemuxError::NoStream`] naming the kind the file lacks, so
-    /// finding the video to play is one `?`:
+    /// The stream of `kind` FFmpeg judges the one to play, as everything a
+    /// branch for it is built from — or a [`FileDemuxError::NoStream`] naming
+    /// the kind the file lacks, so finding the video to play is one `?`:
     ///
     /// ```ignore
     /// let (source, _streams) = FileDemuxer::open("demux", path)?;
     /// let video = source.best(media::Type::Video)?;
     /// let decoder = SwDecoder::new("decoder", video.parameters.clone())?;
     /// ```
+    ///
+    /// The first stream of a kind is not always it. A file can carry a still
+    /// picture as a video stream — cover art, a thumbnail — ahead of its
+    /// moving picture, and taking the first video stream plays the still.
+    /// FFmpeg's own choice (`av_find_best_stream`) passes over a stream marked
+    /// as an attached picture and prefers one with more than a single frame.
     pub fn best(&self, kind: ffmpeg::media::Type) -> Result<StreamInfo, FileDemuxError> {
         self.input
             .streams()
@@ -321,6 +301,7 @@ impl FileDemuxer {
             .ok_or(FileDemuxError::NoStream(kind))
     }
 
+    #[cfg(test)]
     fn stream(&self, index: usize) -> Option<ffmpeg::format::stream::Stream<'_>> {
         self.input.streams().find(|s| s.index() == index)
     }
@@ -758,24 +739,18 @@ mod tests {
         }
     }
 
+    /// `open` lists every stream, each at its own index — which is also its
+    /// pad's — so a caller can attach by the `index` it was handed.
     #[test]
-    fn open_reports_stream_parameters_for_a_valid_index_and_none_out_of_range() {
+    fn open_lists_every_stream_at_its_own_index() {
         let Some(path) = try_test_video() else { return };
         let (demuxer, streams) = FileDemuxer::open("demux", &path).expect("open test video");
-        let video = streams
-            .iter()
-            .find(|s| s.kind == ffmpeg::media::Type::Video)
-            .expect("test video has a video stream");
 
-        assert!(demuxer.stream_parameters(video.index).is_some());
-        assert!(demuxer.stream_time_base(video.index).is_some());
-
-        let out_of_range = streams.len() + 1;
-        assert!(
-            demuxer.stream_parameters(out_of_range).is_none(),
-            "an out-of-range stream index must report nothing, not panic"
-        );
-        assert!(demuxer.stream_time_base(out_of_range).is_none());
+        assert_eq!(streams.len(), demuxer.pads.len());
+        for (position, stream) in streams.iter().enumerate() {
+            assert_eq!(stream.index, position);
+            assert!(stream.time_base.numerator() > 0 && stream.time_base.denominator() > 0);
+        }
     }
 
     /// Follows the output timeline across a loop's join, and switches the
@@ -841,24 +816,19 @@ mod tests {
 
     /// The index of this file's video stream, and the time base its packets
     /// carry.
-    fn video_stream(demuxer: &FileDemuxer, streams: &[StreamInfo]) -> (usize, ffmpeg::Rational) {
-        let index = streams
-            .iter()
-            .find(|s| s.kind == ffmpeg::media::Type::Video)
-            .expect("test video has a video stream")
-            .index;
-        let time_base = demuxer
-            .stream_time_base(index)
-            .expect("video stream has a time base");
-        (index, time_base)
+    fn video_stream(demuxer: &FileDemuxer) -> (usize, ffmpeg::Rational) {
+        let video = demuxer
+            .best(ffmpeg::media::Type::Video)
+            .expect("test video has a video stream");
+        (video.index, video.time_base)
     }
 
     /// How many packets one pass of this file's video stream delivers, so a
     /// test can tell a second lap has begun without assuming anything about
     /// the fixture.
     fn packets_in_one_pass(path: impl AsRef<Path>) -> usize {
-        let (mut demuxer, streams) = FileDemuxer::open("demux", path).expect("open test video");
-        let (index, expected_time_base) = video_stream(&demuxer, &streams);
+        let (mut demuxer, _) = FileDemuxer::open("demux", path).expect("open test video");
+        let (index, expected_time_base) = video_stream(&demuxer);
         let count = Arc::new(AtomicUsize::new(0));
         demuxer.src_pads()[index].link(Box::new(CountingSink {
             count: count.clone(),
@@ -892,8 +862,8 @@ mod tests {
         let lap = packets_in_one_pass(&path);
         assert!(lap > 0, "the fixture must deliver something to loop");
 
-        let (mut demuxer, streams) = FileDemuxer::open("demux", &path).expect("open test video");
-        let (index, _) = video_stream(&demuxer, &streams);
+        let (mut demuxer, _) = FileDemuxer::open("demux", &path).expect("open test video");
+        let (index, _) = video_stream(&demuxer);
         let handle = demuxer.looping_handle();
         assert!(
             !handle.is_looping(),
@@ -959,13 +929,8 @@ mod tests {
         // Every pad linked, because only a linked pad's stream counts
         // towards the lap — and `seek` parks whichever stream's packet it
         // happens to read first.
-        let time_bases: Vec<ffmpeg::Rational> = (0..streams.len())
-            .map(|index| {
-                demuxer
-                    .stream_time_base(index)
-                    .expect("every stream has a time base")
-            })
-            .collect();
+        let time_bases: Vec<ffmpeg::Rational> =
+            streams.iter().map(|stream| stream.time_base).collect();
         for (index, expected_time_base) in time_bases.into_iter().enumerate() {
             demuxer.src_pads()[index].link(Box::new(CountingSink {
                 count: Arc::new(AtomicUsize::new(0)),
@@ -1021,9 +986,7 @@ mod tests {
         let count = Arc::new(AtomicUsize::new(0));
         let saw_eos = Arc::new(AtomicBool::new(false));
         let time_base_matches = Arc::new(AtomicBool::new(true));
-        let expected_time_base = demuxer
-            .stream_time_base(video.index)
-            .expect("video stream has a time base");
+        let expected_time_base = video.time_base;
         demuxer.src_pads()[video.index].link(Box::new(CountingSink {
             count: count.clone(),
             saw_eos: saw_eos.clone(),
@@ -1112,9 +1075,7 @@ mod tests {
             .iter()
             .find(|stream| stream.kind == ffmpeg::media::Type::Video)
             .expect("test video has a video stream");
-        let time_base = demuxer
-            .stream_time_base(video.index)
-            .expect("video stream disappeared");
+        let time_base = video.time_base;
 
         // Read a little of the start into the parked queue by hand, the way `run`
         // does when a pad cannot accept a packet yet.
@@ -1226,7 +1187,7 @@ mod tests {
             .iter()
             .find(|stream| stream.kind == ffmpeg::media::Type::Video)
             .expect("video stream");
-        let time_base = demuxer.stream_time_base(video.index).expect("time base");
+        let time_base = video.time_base;
 
         // Refuse once: the first packet of the drain is held back, and every
         // later one finds the pad ready again.
@@ -1316,7 +1277,7 @@ mod tests {
             .iter()
             .find(|stream| stream.kind == ffmpeg::media::Type::Video)
             .expect("video stream");
-        let time_base = demuxer.stream_time_base(video.index).expect("time base");
+        let time_base = video.time_base;
 
         // Room for one buffer only, so the pad blocks partway through the
         // drain and the rest have to be parked again.
@@ -1408,8 +1369,8 @@ mod tests {
     fn packets_are_only_held_back_while_a_preroll_is_running() {
         let Some(path) = try_test_video() else { return };
         let (mut demuxer, streams) = FileDemuxer::open("demux", &path).expect("open");
-        let index = streams.first().expect("at least one stream").index;
-        let time_base = demuxer.stream_time_base(index).expect("time base");
+        let first = streams.first().expect("at least one stream");
+        let (index, time_base) = (first.index, first.time_base);
         let seen = Arc::new(AtomicUsize::new(0));
         demuxer.pads[index].link(Box::new(NeverReadyRecorder {
             seen: Arc::clone(&seen),
@@ -1496,9 +1457,9 @@ mod tests {
     }
 
     /// The first video stream is the still; the one to play is the video,
-    /// and that is the one `best_stream` answers.
+    /// and that is the one `best` answers.
     #[test]
-    fn best_stream_passes_over_a_still_ahead_of_the_video() {
+    fn best_passes_over_a_still_ahead_of_the_video() {
         crate::init().unwrap();
         let path = std::env::temp_dir().join("media-pp-still-ahead-of-video.mkv");
         if still_ahead_of_video(&path).is_none() {
@@ -1511,19 +1472,13 @@ mod tests {
             .find(|stream| stream.kind == ffmpeg::media::Type::Video)
             .map(|stream| stream.index);
         assert_eq!(first_video, Some(0), "the still comes first");
-        assert_eq!(
-            demuxer.best_stream(ffmpeg::media::Type::Video),
-            Some(1),
-            "and the video is the one to play"
-        );
-        assert_eq!(demuxer.best_stream(ffmpeg::media::Type::Audio), None);
 
-        // `best` makes the same choice, as the stream's whole description,
-        // and says which kind is missing rather than answering nothing.
+        // `best` passes over it, as the stream's whole description, and says
+        // which kind is missing rather than answering nothing.
         let video = demuxer
             .best(ffmpeg::media::Type::Video)
             .expect("the file has a video stream");
-        assert_eq!(video.index, 1, "the same choice as best_stream");
+        assert_eq!(video.index, 1, "the video is the one to play");
         assert_eq!(video.time_base, streams[1].time_base);
         assert_eq!(video.parameters.id(), streams[1].parameters.id());
         let missing = demuxer
@@ -1547,10 +1502,11 @@ mod tests {
         let (demuxer, streams) = FileDemuxer::open("info", &path).unwrap();
         assert!(!streams.is_empty());
         for info in &streams {
-            let asked = demuxer.stream_parameters(info.index).unwrap();
+            let stream = demuxer.stream(info.index).expect("a listed stream");
+            let asked = stream.parameters();
             assert_eq!(info.parameters.id(), asked.id());
             assert_eq!(info.parameters.medium(), info.kind);
-            assert_eq!(Some(info.time_base), demuxer.stream_time_base(info.index));
+            assert_eq!(info.time_base, stream.time_base());
             assert!(
                 format!("{info:?}").contains(&format!("{:?}", asked.id())),
                 "its Debug names the codec"

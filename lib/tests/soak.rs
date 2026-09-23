@@ -176,16 +176,11 @@ fn encoder(name: &str, gop_size: u32) -> SwEncoder {
 /// codec parameters — what every scenario that decodes a real file needs,
 /// and nothing a particular file has to provide beyond one video track.
 fn open_fixture(path: &str) -> (FileDemuxer, usize, ffmpeg::codec::Parameters) {
-    let (source, streams) = FileDemuxer::open("demux", path).expect("open the fixture");
-    let index = streams
-        .iter()
-        .find(|stream| stream.kind == ffmpeg::media::Type::Video)
-        .expect("the fixture has a video stream")
-        .index;
-    let parameters = source
-        .stream_parameters(index)
-        .expect("the stream the demuxer just listed");
-    (source, index, parameters)
+    let (source, _) = FileDemuxer::open("demux", path).expect("open the fixture");
+    let video = source
+        .best(ffmpeg::media::Type::Video)
+        .expect("the fixture has a video stream");
+    (source, video.index, video.parameters)
 }
 
 /// One complete recording: build the whole graph, run it, tear it down, and

@@ -2487,19 +2487,19 @@ mod tests {
         assert_eq!(rate.get(), Some(ffmpeg::Rational::new(60, 1)));
         assert_eq!(source.time_base(), ffmpeg::Rational::new(1, 60));
 
-        assert!(rate.set(ffmpeg::Rational::new(24, 1)));
+        assert!(rate.set(ffmpeg::Rational::new(24, 1)).is_ok());
         assert_eq!(rate.get(), Some(ffmpeg::Rational::new(24, 1)));
         // The element and the handle read one value, not two.
         assert_eq!(source.time_base(), ffmpeg::Rational::new(1, 24));
 
         // Refused, and refusing leaves the running rate alone rather than a
         // capture pacing on a nonsense interval.
-        assert!(!rate.set(ffmpeg::Rational::new(0, 1)));
+        assert!(rate.set(ffmpeg::Rational::new(0, 1)).is_err());
         assert_eq!(source.time_base(), ffmpeg::Rational::new(1, 24));
 
         // And the handle stops taking effect once the capture is gone.
         drop(source);
-        assert!(!rate.set(ffmpeg::Rational::new(30, 1)));
+        assert!(rate.set(ffmpeg::Rational::new(30, 1)).is_err());
         assert_eq!(rate.get(), None);
     }
 }

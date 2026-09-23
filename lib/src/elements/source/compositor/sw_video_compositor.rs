@@ -256,17 +256,24 @@ impl SwVideoCompositorHandle {
     /// Returns zero after the compositor has been dropped.
     /// Changes the rate this compositor emits at, from the next tick.
     ///
-    /// Returns `false` for a rate that is not positive, and for a compositor
-    /// that has already been dropped. The same contract as the GPU
+    /// Fails with [`SwVideoCompositorError::InvalidFrameRate`] for a rate that is not
+    /// positive, and [`SwVideoCompositorError::Stopped`] for a compositor that has already
+    /// been dropped; either way the running rate is left alone. The same contract as the GPU
     /// compositors' setters, and with the same caveat: [`
     /// SwVideoCompositor::time_base`] is the reciprocal of this and the output
     /// `pts` is a tick counter in those units, so a change re-means every
     /// timestamp after it while the ones already downstream were stamped under
     /// the old rate — see [`crate::rate`].
-    pub fn set_frame_rate(&self, frame_rate: ffmpeg::Rational) -> bool {
+    pub fn set_frame_rate(
+        &self,
+        frame_rate: ffmpeg::Rational,
+    ) -> std::result::Result<(), SwVideoCompositorError> {
         self.shared
             .upgrade()
-            .is_some_and(|shared| shared.frame_rate.set(frame_rate))
+            .ok_or(SwVideoCompositorError::Stopped)?
+            .frame_rate
+            .set(frame_rate)
+            .map_err(|_| SwVideoCompositorError::InvalidFrameRate(frame_rate))
     }
 
     /// The rate this compositor is emitting at, or `None` once it is gone.
@@ -1800,19 +1807,25 @@ mod tests {
         assert_eq!(compositor.frame_rate(), ffmpeg::Rational::new(60, 1));
         assert_eq!(compositor.time_base(), ffmpeg::Rational::new(1, 60));
 
-        assert!(handle.set_frame_rate(ffmpeg::Rational::new(24, 1)));
+        assert!(handle.set_frame_rate(ffmpeg::Rational::new(24, 1)).is_ok());
         assert_eq!(handle.frame_rate(), Some(ffmpeg::Rational::new(24, 1)));
         // The element and the handle read one value, not two.
         assert_eq!(compositor.frame_rate(), ffmpeg::Rational::new(24, 1));
         assert_eq!(compositor.time_base(), ffmpeg::Rational::new(1, 24));
 
         // Refused, leaving the running rate alone.
-        assert!(!handle.set_frame_rate(ffmpeg::Rational::new(0, 1)));
+        assert!(matches!(
+            handle.set_frame_rate(ffmpeg::Rational::new(0, 1)),
+            Err(SwVideoCompositorError::InvalidFrameRate(_))
+        ));
         assert_eq!(compositor.frame_rate(), ffmpeg::Rational::new(24, 1));
 
         // And answered rather than applied once the compositor is gone.
         drop(compositor);
-        assert!(!handle.set_frame_rate(ffmpeg::Rational::new(30, 1)));
+        assert!(matches!(
+            handle.set_frame_rate(ffmpeg::Rational::new(30, 1)),
+            Err(SwVideoCompositorError::Stopped)
+        ));
         assert_eq!(handle.frame_rate(), None);
     }
     /// The background's alpha is written with its colour, so a composition

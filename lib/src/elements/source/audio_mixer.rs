@@ -47,6 +47,16 @@ pub enum AudioMixerError {
     #[error("AudioMixer inputs only accept Audio or Eos buffers, got {0}")]
     UnsupportedBuffer(&'static str),
 
+    /// [`MixerHandle::set_mix_format`] was given a format nothing can be
+    /// resampled to. The running one is left alone.
+    #[error("invalid mix format: {sample_rate} Hz, {channels} channel(s); both must be non-zero")]
+    InvalidMixFormat {
+        /// The sample rate asked for.
+        sample_rate: u32,
+        /// The channel count asked for.
+        channels: u16,
+    },
+
     /// The mixer this handle belongs to has stopped, so there is nothing
     /// left to add to. Returned by the handle's `add_*` methods in place of
     /// an input nothing would ever read.
@@ -313,8 +323,10 @@ impl MixerHandle {
 
     /// Changes it, from the next tick.
     ///
-    /// Returns `false` for a format nothing could be resampled to, and for a
-    /// mixer that has already been dropped.
+    /// Fails with [`AudioMixerError::InvalidMixFormat`] for a format nothing
+    /// could be resampled to, and [`AudioMixerError::Stopped`] for a mixer
+    /// that has already been dropped; either way the running one is left
+    /// alone.
     ///
     /// # What moves with it
     ///
@@ -336,10 +348,16 @@ impl MixerHandle {
     /// itself keeps running either way, which is the point: its `pts` stays
     /// continuous, and a rate change is not a reason to restart the one
     /// element every audio source in the application is registered with.
-    pub fn set_mix_format(&self, format: MixFormat) -> bool {
-        self.shared
-            .upgrade()
-            .is_some_and(|shared| shared.format.set(format))
+    pub fn set_mix_format(&self, format: MixFormat) -> std::result::Result<(), AudioMixerError> {
+        let shared = self.shared.upgrade().ok_or(AudioMixerError::Stopped)?;
+        if shared.format.set(format) {
+            Ok(())
+        } else {
+            Err(AudioMixerError::InvalidMixFormat {
+                sample_rate: format.sample_rate,
+                channels: format.channels,
+            })
+        }
     }
 
     /// Drops `name`'s input immediately, discarding whatever it had
@@ -1255,6 +1273,13 @@ mod tests {
             handle.add_source("late"),
             Err(AudioMixerError::Stopped)
         ));
+        assert!(matches!(
+            handle.set_mix_format(MixFormat {
+                sample_rate: 48000,
+                channels: 2,
+            }),
+            Err(AudioMixerError::Stopped)
+        ));
         assert_eq!(handle.source_count(), 0);
     }
 
@@ -1384,10 +1409,14 @@ mod tests {
         );
         // Down, which is the direction that stalls without the anchor, and
         // to mono so the frame's own shape has to move as well.
-        assert!(handle.set_mix_format(MixFormat {
-            sample_rate: 16000,
-            channels: 1,
-        }));
+        assert!(
+            handle
+                .set_mix_format(MixFormat {
+                    sample_rate: 16000,
+                    channels: 1,
+                })
+                .is_ok()
+        );
         let before = seen.lock().unwrap().len();
         std::thread::sleep(Duration::from_millis(250));
         pipeline.stop();
@@ -1427,7 +1456,13 @@ mod tests {
                 channels: 0,
             },
         ] {
-            assert!(!handle.set_mix_format(refused), "{refused:?} was accepted");
+            assert!(
+                matches!(
+                    handle.set_mix_format(refused),
+                    Err(AudioMixerError::InvalidMixFormat { .. })
+                ),
+                "{refused:?} was accepted"
+            );
             assert_eq!(
                 handle.mix_format(),
                 Some(MixFormat {
@@ -1451,10 +1486,14 @@ mod tests {
         );
         drop(mixer);
 
-        assert!(!handle.set_mix_format(MixFormat {
-            sample_rate: 16000,
-            channels: 1,
-        }));
+        assert!(
+            handle
+                .set_mix_format(MixFormat {
+                    sample_rate: 16000,
+                    channels: 1,
+                })
+                .is_err()
+        );
         assert_eq!(handle.mix_format(), None);
     }
 
@@ -1648,15 +1687,12 @@ mod tests {
         /// has to finish with silence — which is the whole of what this
         /// measures.
         fn play_into(path: &str, mixer: &MixerHandle) -> Arc<Pipeline> {
-            let (demuxer, streams) = FileDemuxer::open("fixture", path).expect("open the fixture");
-            let audio = streams
-                .iter()
-                .find(|stream| stream.kind == ffmpeg::media::Type::Audio)
-                .expect("the fixture has sound")
-                .index;
-            let parameters = demuxer
-                .stream_parameters(audio)
-                .expect("the audio stream describes itself");
+            let (demuxer, _) = FileDemuxer::open("fixture", path).expect("open the fixture");
+            let audio = demuxer
+                .best(ffmpeg::media::Type::Audio)
+                .expect("the fixture has sound");
+            let parameters = audio.parameters.clone();
+            let audio = audio.index;
             let decoder = SwDecoder::new("fixture-decoder", parameters).expect("open the decoder");
             let sink = mixer
                 .add_source("fixture".to_owned())

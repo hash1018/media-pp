@@ -12,6 +12,39 @@ compile error with no explanation.
 
 ### Breaking
 
+- **A setter that refuses says why.** `set_frame_rate` on the three
+  compositor handles, `MixerHandle::set_mix_format` and
+  `rate::FrameRateHandle::set` (the captures' rate handles) returned
+  `false` both for a value they could not take and for an element that had
+  already stopped, so a caller could not tell which. Each returns a
+  `Result`: `InvalidFrameRate` or `Stopped` from the compositor's own
+  error, the new `AudioMixerError::InvalidMixFormat` or `Stopped` from the
+  mixer, and the new `rate::FrameRateError` (`Invalid` or `Stopped`) from a
+  capture. The running value is left alone either way, as before.
+
+- **`PipelineBridgeHandle::connect` returns a `Result`.** It returned
+  `None` once the bridge's pipeline had finished; it returns
+  `PipelineBridgeError::Disconnected`, the bridge's own word for that, as
+  the other handles now answer with an error of their own.
+
+- **The demuxers' per-stream lookups are gone; `best` and `open`'s list
+  carry the same.** `FileDemuxer` and `RtspSource` lose `best_stream`,
+  `stream_parameters` and `stream_time_base`. `best(kind)` returns the
+  `StreamInfo` of the stream to play — its `index`, `parameters` and
+  `time_base` together — and `open` already returns one for every stream,
+  each at its own index:
+
+  ```rust
+  // before
+  let index = source.best_stream(media::Type::Video).ok_or(..)?;
+  let parameters = source.stream_parameters(index).ok_or(..)?;
+  let time_base = source.stream_time_base(index).ok_or(..)?;
+
+  // after
+  let video = source.best(media::Type::Video)?;
+  // video.index, video.parameters, video.time_base
+  ```
+
 - **`TeeHandle::branch` returns a `Result`, like the rest of the handle.**
   It returned `None` once its `Tee` was gone, so every caller wrote its own
   `.ok_or("the Tee is gone")?`, while `attach` and `detach` on the same

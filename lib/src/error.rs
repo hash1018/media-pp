@@ -87,6 +87,7 @@ use crate::{
     log::LogInitError,
     playback_clock::PlaybackClockError,
     queue::QueueError,
+    rate::FrameRateError,
 };
 
 /// Failure to create one of the background threads owned by this crate.
@@ -295,6 +296,10 @@ pub enum Error {
     /// A frame rate limiter could not place a frame on its output timeline.
     #[error(transparent)]
     FrameRateLimiterError(#[from] FrameRateLimiterError),
+
+    /// A running element's frame rate could not be changed.
+    #[error(transparent)]
+    FrameRateError(#[from] FrameRateError),
 
     /// A rack could not take the filters it was given.
     #[error(transparent)]

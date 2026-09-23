@@ -642,14 +642,13 @@ mod tests {
 
         let path = std::env::temp_dir().join("media-pp-reordered-remux.mp4");
         let _ = std::fs::remove_file(&path);
-        let (demuxer, streams) = FileDemuxer::open("demuxer", &source).expect("open the fixture");
-        let video = streams
-            .iter()
-            .find(|stream| stream.kind == ffmpeg::media::Type::Video)
-            .expect("the fixture has video")
-            .index;
-        let parameters = demuxer.stream_parameters(video).expect("video parameters");
-        let time_base = demuxer.stream_time_base(video).expect("video time base");
+        let (demuxer, _) = FileDemuxer::open("demuxer", &source).expect("open the fixture");
+        let video = demuxer
+            .best(ffmpeg::media::Type::Video)
+            .expect("the fixture has video");
+        let parameters = video.parameters.clone();
+        let time_base = video.time_base;
+        let video = video.index;
 
         let mut muxer = FileMuxer::create(&path).expect("create the remux");
         let track = muxer
@@ -781,26 +780,21 @@ mod tests {
         let path = std::env::temp_dir().join("media-pp-transcode-shape.mp4");
         let _ = std::fs::remove_file(&path);
 
-        let (demuxer, streams) = FileDemuxer::open("demuxer", &source_path).expect("open");
-        let index = |medium| {
-            streams
-                .iter()
-                .find(|stream| stream.kind == medium)
-                .unwrap_or_else(|| panic!("the fixture carries no {medium:?}"))
-                .index
+        let (demuxer, _) = FileDemuxer::open("demuxer", &source_path).expect("open");
+        let stream = |medium| {
+            demuxer
+                .best(medium)
+                .unwrap_or_else(|_| panic!("the fixture carries no {medium:?}"))
         };
-        let video = index(ffmpeg::media::Type::Video);
-        let audio = index(ffmpeg::media::Type::Audio);
-        let video_decoder = SwDecoder::new(
-            "video-decoder",
-            demuxer.stream_parameters(video).expect("video parameters"),
-        )
-        .expect("open the video decoder");
-        let audio_decoder = SwDecoder::new(
-            "audio-decoder",
-            demuxer.stream_parameters(audio).expect("audio parameters"),
-        )
-        .expect("open the audio decoder");
+        let (video, audio) = (
+            stream(ffmpeg::media::Type::Video),
+            stream(ffmpeg::media::Type::Audio),
+        );
+        let video_decoder = SwDecoder::new("video-decoder", video.parameters.clone())
+            .expect("open the video decoder");
+        let audio_decoder = SwDecoder::new("audio-decoder", audio.parameters.clone())
+            .expect("open the audio decoder");
+        let (video, audio) = (video.index, audio.index);
 
         // Re-encoded at the same rates it arrived with, so a difference in
         // the result is this crate's doing rather than a conversion's.

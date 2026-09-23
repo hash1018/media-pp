@@ -835,9 +835,7 @@ fn a_demuxers_own_packets_reach_a_peer_and_decode() {
         .find(|stream| stream.kind == ffmpeg::media::Type::Video)
         .expect("test video has a video stream");
     let index = video.index;
-    let parameters = demuxer
-        .stream_parameters(index)
-        .expect("a demuxed stream describes itself");
+    let parameters = video.parameters.clone();
     // The whole declaration, from the container rather than an encoder: the
     // payload type, the parameter sets the record holds, and the fact that
     // the packets behind it are length-prefixed.

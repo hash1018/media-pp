@@ -315,8 +315,9 @@ impl CudaVideoCompositorHandle {
     /// Returns the number of inputs currently registered, or zero after shutdown.
     /// Changes the rate this compositor emits at, from the next tick.
     ///
-    /// Returns `false` for a rate that is not positive, and for a compositor
-    /// that has already been dropped. The same contract as
+    /// Fails with [`CudaVideoCompositorError::InvalidFrameRate`] for a rate that is not
+    /// positive, and [`CudaVideoCompositorError::Stopped`] for a compositor that has already
+    /// been dropped; either way the running rate is left alone. The same contract as
     /// `D3d11VideoCompositorHandle::set_frame_rate`, and with the same
     /// caveat: [`CudaVideoCompositor::time_base`] is the reciprocal of this
     /// and the output `pts` is a tick counter in those units, so a change
@@ -327,10 +328,16 @@ impl CudaVideoCompositorHandle {
     /// Preview, a frame counter — which is the caller's to know. A branch
     /// attached after the change is consistent, because it takes its
     /// `time_base` when it is built.
-    pub fn set_frame_rate(&self, frame_rate: ffmpeg::Rational) -> bool {
+    pub fn set_frame_rate(
+        &self,
+        frame_rate: ffmpeg::Rational,
+    ) -> std::result::Result<(), CudaVideoCompositorError> {
         self.shared
             .upgrade()
-            .is_some_and(|shared| shared.frame_rate.set(frame_rate))
+            .ok_or(CudaVideoCompositorError::Stopped)?
+            .frame_rate
+            .set(frame_rate)
+            .map_err(|_| CudaVideoCompositorError::InvalidFrameRate(frame_rate))
     }
 
     /// The rate this compositor is emitting at, or `None` once it is gone.

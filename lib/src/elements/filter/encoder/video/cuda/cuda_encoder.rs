@@ -788,7 +788,7 @@ mod tests {
             .find(|stream| stream.kind == ffmpeg::media::Type::Video)
             .expect("the test video has no video stream");
         let index = video.index;
-        let params = source.stream_parameters(index).expect("video stream gone");
+        let params = video.parameters.clone();
         // SAFETY: `params` is a live `codec::Parameters` from the demuxer, whose
         // `width`/`height` are plain fields of `AVCodecParameters`.
         let (width, height) = unsafe {

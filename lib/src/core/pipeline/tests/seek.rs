@@ -449,10 +449,10 @@ fn a_paused_seek_leaves_every_branch_holding_one_sample_at_the_target() {
         eprintln!("skipping: fixture has no audio stream");
         return;
     };
-    let video_params = source.stream_parameters(video.index).expect("video params");
-    let audio_params = source.stream_parameters(audio.index).expect("audio params");
-    let video_tb = source.stream_time_base(video.index).expect("video tb");
-    let audio_tb = source.stream_time_base(audio.index).expect("audio tb");
+    let video_params = video.parameters.clone();
+    let audio_params = audio.parameters.clone();
+    let video_tb = video.time_base;
+    let audio_tb = audio.time_base;
 
     let target = Duration::from_secs(3);
     let video_samples = Arc::new(Mutex::new(Vec::new()));
@@ -528,8 +528,8 @@ fn a_completed_tee_branch_does_not_starve_a_sibling_preroll() {
         .iter()
         .find(|stream| stream.kind == ffmpeg::media::Type::Video)
         .expect("test video has a video stream");
-    let params = source.stream_parameters(video.index).expect("video params");
-    let time_base = source.stream_time_base(video.index).expect("video tb");
+    let params = video.parameters.clone();
+    let time_base = video.time_base;
     let packets = Arc::new(AtomicUsize::new(0));
     let frames = Arc::new(Mutex::new(Vec::new()));
 
@@ -601,8 +601,8 @@ fn accurate_seek_at_known_eof_selects_the_last_presentable_frame() {
         .iter()
         .find(|stream| stream.kind == ffmpeg::media::Type::Video)
         .expect("test video has a video stream");
-    let params = source.stream_parameters(video.index).expect("video params");
-    let time_base = source.stream_time_base(video.index).expect("video tb");
+    let params = video.parameters.clone();
+    let time_base = video.time_base;
     let samples = Arc::new(Mutex::new(Vec::new()));
 
     let (pipeline, ()) = Pipeline::new("eof-preview", source, |source, ctx| {

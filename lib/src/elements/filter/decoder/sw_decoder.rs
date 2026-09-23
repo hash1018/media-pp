@@ -111,7 +111,7 @@ pub struct SwDecoder {
 
 impl SwDecoder {
     /// `params` should come from the stream you want to decode — see
-    /// [`crate::elements::FileDemuxer::stream_parameters`].
+    /// [`crate::elements::FileDemuxer::best`], whose `parameters` these are.
     ///
     /// Threading is left as FFmpeg opens a decoder, which is one thread;
     /// [`Self::with_threading`] is how to give it more.

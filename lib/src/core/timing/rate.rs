@@ -59,14 +59,14 @@ impl FrameRate {
     }
 
     /// Changes the rate, taking effect at the next tick of whatever loop
-    /// reads this. `false` for a rate that is not positive, which leaves the
-    /// running one alone rather than pacing on a nonsense interval.
-    pub fn set(&self, rate: ffmpeg::Rational) -> bool {
+    /// reads this. A rate that is not positive is refused and leaves the
+    /// running one alone, rather than pacing on a nonsense interval.
+    pub fn set(&self, rate: ffmpeg::Rational) -> Result<(), FrameRateError> {
         if rate.numerator() <= 0 || rate.denominator() <= 0 {
-            return false;
+            return Err(FrameRateError::Invalid(rate));
         }
         self.0.store(pack(rate), Ordering::Relaxed);
-        true
+        Ok(())
     }
 
     /// A handle another thread can change this through.
@@ -76,6 +76,18 @@ impl FrameRate {
     pub fn handle(self: &Arc<Self>) -> FrameRateHandle {
         FrameRateHandle(Arc::downgrade(self))
     }
+}
+
+/// Why a rate was not changed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum FrameRateError {
+    /// The rate is not positive. The running one is left alone.
+    #[error("invalid frame rate {0}; numerator and denominator must both be positive")]
+    Invalid(ffmpeg::Rational),
+
+    /// The element this rate belongs to has stopped.
+    #[error("the element this frame rate belongs to has stopped")]
+    Stopped,
 }
 
 /// Runtime control for one element's output rate.
@@ -89,11 +101,13 @@ pub struct FrameRateHandle(Weak<FrameRate>);
 impl FrameRateHandle {
     /// Changes the rate, taking effect at the element's next tick.
     ///
-    /// Returns `false` for a rate that is not positive, and for an element
-    /// that has already been dropped. See this module's own docs for what a
-    /// change means to anything reading the element's timestamps.
-    pub fn set(&self, rate: ffmpeg::Rational) -> bool {
-        self.0.upgrade().is_some_and(|shared| shared.set(rate))
+    /// Fails with [`FrameRateError::Invalid`] for a rate that is not
+    /// positive, and [`FrameRateError::Stopped`] for an element that has
+    /// already been dropped; either way the running rate is left alone. See
+    /// this module's own docs for what a change means to anything reading
+    /// the element's timestamps.
+    pub fn set(&self, rate: ffmpeg::Rational) -> Result<(), FrameRateError> {
+        self.0.upgrade().ok_or(FrameRateError::Stopped)?.set(rate)
     }
 
     /// The rate the element is actually emitting at, or `None` once it is
@@ -138,7 +152,7 @@ mod tests {
         let shared = FrameRate::new(ffmpeg::Rational::new(50, 1));
         assert_eq!(shared.interval(), Duration::from_millis(20));
 
-        assert!(shared.handle().set(ffmpeg::Rational::new(25, 1)));
+        assert!(shared.handle().set(ffmpeg::Rational::new(25, 1)).is_ok());
         assert_eq!(shared.interval(), Duration::from_millis(40));
     }
 
@@ -154,7 +168,11 @@ mod tests {
             ffmpeg::Rational::new(-30, 1),
             ffmpeg::Rational::new(30, 0),
         ] {
-            assert!(!handle.set(refused), "{refused} was accepted");
+            assert_eq!(
+                handle.set(refused),
+                Err(FrameRateError::Invalid(refused)),
+                "{refused} was accepted"
+            );
             assert_eq!(shared.get(), ffmpeg::Rational::new(60, 1));
         }
     }
@@ -167,7 +185,11 @@ mod tests {
         let handle = shared.handle();
         drop(shared);
 
-        assert!(!handle.set(ffmpeg::Rational::new(30, 1)));
+        assert_eq!(
+            handle.set(ffmpeg::Rational::new(30, 1)),
+            Err(FrameRateError::Stopped),
+            "a gone element says so rather than which rate was wrong"
+        );
         assert_eq!(handle.get(), None);
     }
 }

@@ -272,7 +272,7 @@ impl PipelineBridge {
 /// Holds only a [`Weak`] reference, for the same reason
 /// [`crate::elements::MixerHandle`] does: keeping one after the bridge's own
 /// pipeline has finished must not keep its buffers alive forever, and every
-/// operation becomes a harmless `None` once it is gone.
+/// operation answers rather than taking effect once it is gone.
 #[derive(Clone)]
 pub struct PipelineBridgeHandle {
     shared: Weak<BridgeShared>,
@@ -283,9 +283,13 @@ impl PipelineBridgeHandle {
     /// A [`Sink`] for the feeding pipeline to terminate at, replacing
     /// whatever was connected before.
     ///
-    /// `None` once the bridge's own pipeline has finished.
-    pub fn connect(&self) -> Option<Box<dyn Sink>> {
-        let shared = self.shared.upgrade()?;
+    /// Fails with [`PipelineBridgeError::Disconnected`] once the bridge's own
+    /// pipeline has finished.
+    pub fn connect(&self) -> std::result::Result<Box<dyn Sink>, PipelineBridgeError> {
+        let shared = self
+            .shared
+            .upgrade()
+            .ok_or(PipelineBridgeError::Disconnected)?;
         let id = shared.next_connection.fetch_add(1, Ordering::Relaxed);
         {
             let mut state = shared.state.lock().unwrap();
@@ -305,7 +309,7 @@ impl PipelineBridgeHandle {
             state.input_ended = false;
         }
         shared.changed.notify_all();
-        Some(Box::new(PipelineBridgeSink {
+        Ok(Box::new(PipelineBridgeSink {
             pp_log: element_pp_log(ElementType::Other, &self.name, None),
             name: self.name.clone(),
             id,
@@ -659,6 +663,20 @@ mod tests {
         while !ready() && std::time::Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+
+    /// A handle outliving its bridge says so by name, as a compositor's or a
+    /// mixer's does, rather than with a `None` the feeding side has to
+    /// invent an error for.
+    #[test]
+    fn connecting_to_a_finished_bridge_is_refused_by_name() {
+        let (bridge, handle) = PipelineBridge::new("bridge", PipelineBridgeOptions::default());
+        drop(bridge);
+
+        assert!(matches!(
+            handle.connect(),
+            Err(PipelineBridgeError::Disconnected)
+        ));
     }
 
     /// The whole point, in one line: what goes in one pipeline comes out of

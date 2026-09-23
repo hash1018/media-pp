@@ -752,9 +752,7 @@ fn a_containers_audio_stream_cannot_feed_a_video_decoder() {
         .iter()
         .find(|s| s.kind == ffmpeg::media::Type::Video)
         .expect("the fixture must have a video stream");
-    let video_params = demuxer
-        .stream_parameters(video.index)
-        .expect("the video stream must expose parameters");
+    let video_params = video.parameters.clone();
 
     let context = contract_context();
     let branch = context
@@ -780,13 +778,8 @@ fn a_containers_audio_stream_cannot_feed_a_video_decoder() {
     let branch = context
         .branch()
         .pipe(
-            SwDecoder::new(
-                "video-decoder",
-                demuxer
-                    .stream_parameters(video.index)
-                    .expect("the video stream must expose parameters"),
-            )
-            .expect("the decoder must open"),
+            SwDecoder::new("video-decoder", video.parameters.clone())
+                .expect("the decoder must open"),
         )
         .to(DeclaringSink::boxed("renderer", video_frames()))
         .expect("the branch itself is consistent");

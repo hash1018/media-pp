@@ -369,8 +369,9 @@ impl D3d11VideoCompositorHandle {
     /// Returns the number of inputs currently registered, or zero after shutdown.
     /// Changes the rate this compositor emits at, from the next tick.
     ///
-    /// Returns `false` for a rate that is not positive, and for a compositor
-    /// that has already been dropped.
+    /// Fails with [`D3d11VideoCompositorError::InvalidFrameRate`] for a rate that is not
+    /// positive, and [`D3d11VideoCompositorError::Stopped`] for a compositor that has already
+    /// been dropped; either way the running rate is left alone.
     ///
     /// # What moves with it
     ///
@@ -391,10 +392,16 @@ impl D3d11VideoCompositorHandle {
     /// The alternative would have been to refuse the change while any branch
     /// is attached, which this cannot tell apart from a Preview, and which
     /// would make the setting useless exactly when it is worth having.
-    pub fn set_frame_rate(&self, frame_rate: ffmpeg::Rational) -> bool {
+    pub fn set_frame_rate(
+        &self,
+        frame_rate: ffmpeg::Rational,
+    ) -> std::result::Result<(), D3d11VideoCompositorError> {
         self.shared
             .upgrade()
-            .is_some_and(|shared| shared.frame_rate.set(frame_rate))
+            .ok_or(D3d11VideoCompositorError::Stopped)?
+            .frame_rate
+            .set(frame_rate)
+            .map_err(|_| D3d11VideoCompositorError::InvalidFrameRate(frame_rate))
     }
 
     /// The rate this compositor is emitting at, or `None` once it is gone.

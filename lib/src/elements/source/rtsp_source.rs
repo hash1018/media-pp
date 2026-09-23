@@ -138,29 +138,9 @@ impl RtspSource {
         ))
     }
 
-    /// Codec parameters for one of this stream's streams — what you need
-    /// to construct a matching [`crate::elements::SwDecoder`] for it.
-    pub fn stream_parameters(&self, index: usize) -> Option<ffmpeg::codec::Parameters> {
-        self.stream(index).map(|s| s.parameters())
-    }
-
-    /// The unit decoded frame timestamps for this stream are expressed in
-    /// — what you need to construct a matching [`crate::elements::Pacer`]
-    /// for it.
-    pub fn stream_time_base(&self, index: usize) -> Option<ffmpeg::Rational> {
-        self.stream(index).map(|s| s.time_base())
-    }
-
-    /// The index of the stream of `kind` FFmpeg judges the one to play, or
-    /// `None` where the session has none — see
-    /// [`FileDemuxer::best_stream`](crate::elements::FileDemuxer::best_stream),
-    /// which this is for a network stream.
-    pub fn best_stream(&self, kind: ffmpeg::media::Type) -> Option<usize> {
-        self.input.streams().best(kind).map(|stream| stream.index())
-    }
-
-    /// The same choice, as everything a branch for it is built from — or a
-    /// [`RtspSourceError::NoStream`] naming the kind the session lacks. See
+    /// The stream of `kind` FFmpeg judges the one to play, as everything a
+    /// branch for it is built from — or a [`RtspSourceError::NoStream`]
+    /// naming the kind the session lacks. See
     /// [`FileDemuxer::best`](crate::elements::FileDemuxer::best).
     pub fn best(
         &self,

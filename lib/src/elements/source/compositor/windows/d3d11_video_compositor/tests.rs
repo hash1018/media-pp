@@ -1035,7 +1035,7 @@ fn the_frame_rate_can_be_changed_while_it_is_running() {
     assert_eq!(compositor.frame_rate(), ffmpeg::Rational::new(60, 1));
     assert_eq!(compositor.time_base(), ffmpeg::Rational::new(1, 60));
 
-    assert!(handle.set_frame_rate(ffmpeg::Rational::new(30, 1)));
+    assert!(handle.set_frame_rate(ffmpeg::Rational::new(30, 1)).is_ok());
     assert_eq!(handle.frame_rate(), Some(ffmpeg::Rational::new(30, 1)));
     // The element and the handle are reading one value, not two.
     assert_eq!(compositor.frame_rate(), ffmpeg::Rational::new(30, 1));
@@ -1069,7 +1069,13 @@ fn an_impossible_frame_rate_is_refused_and_changes_nothing() {
         ffmpeg::Rational::new(-30, 1),
         ffmpeg::Rational::new(30, 0),
     ] {
-        assert!(!handle.set_frame_rate(refused), "{refused} was accepted");
+        assert!(
+            matches!(
+                handle.set_frame_rate(refused),
+                Err(D3d11VideoCompositorError::InvalidFrameRate(_))
+            ),
+            "{refused} was accepted"
+        );
         assert_eq!(compositor.frame_rate(), ffmpeg::Rational::new(60, 1));
     }
 }
@@ -1096,7 +1102,10 @@ fn the_setter_reports_a_compositor_that_is_gone() {
     .expect("compositor");
     drop(compositor);
 
-    assert!(!handle.set_frame_rate(ffmpeg::Rational::new(30, 1)));
+    assert!(matches!(
+        handle.set_frame_rate(ffmpeg::Rational::new(30, 1)),
+        Err(D3d11VideoCompositorError::Stopped)
+    ));
     assert_eq!(handle.frame_rate(), None);
 }
 
