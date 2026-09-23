@@ -113,6 +113,45 @@ fn detour(input_width: u32, input_height: u32, width: u32, height: u32) -> Optio
     Some((step(width, input_width), step(height, input_height)))
 }
 
+/// Which kernel a pass that converts the layout has to use.
+///
+/// The same defect [`detour`] is about, in the one place that function calls
+/// safe: a `scale_cuda` whose output size matches its input takes the
+/// filter's own passthrough, and a passthrough that was also asked to change
+/// the layout puts out a zero surface instead. Measured against FFmpeg
+/// n8.1.2 on this machine, on a 640x360 P010 frame from NVDEC:
+///
+/// ```text
+/// -> 640x360 nv12, bilinear   every byte zero    (the size is unchanged)
+/// -> 640x360 nv12, nearest    correct
+/// -> 320x180 nv12, bilinear   correct            (it resizes, so it converts)
+/// -> 640x360 p010, bilinear   correct            (no layout to change)
+/// ```
+///
+/// Reproduces with no media-pp in the picture, through
+/// `ffmpeg -hwaccel cuda -i ten-bit.mp4 -vf scale_cuda=w=640:h=360:format=nv12`,
+/// and is what a 10-bit stream decoded at its own size ran into: the picture
+/// came out of NVDEC as P010 and reached the compositor as a black — or, read
+/// as NV12 by whatever came next, green — frame.
+///
+/// Nearest rather than a detour: a pass whose size does not change resamples
+/// nothing, so which kernel it interpolates with cannot alter a single pixel
+/// — it is only the one that also converts. Where the size does change, the
+/// caller's own kernel is what runs, and this never applies.
+fn converting_algo(
+    interp: CudaScalerInterp,
+    converting: bool,
+    input_width: u32,
+    input_height: u32,
+    width: u32,
+    height: u32,
+) -> u32 {
+    if converting && width == input_width && height == input_height {
+        return CudaScalerInterp::Nearest.algo();
+    }
+    interp.algo()
+}
+
 /// The pool an `AVBufferRef` refers to, rather than the reference itself.
 ///
 /// Returns null for a null reference, which no live pool ever is, so a graph
@@ -361,6 +400,17 @@ impl CudaScaleGraph {
         // see [`detour`], which is where the whole explanation lives.
         let mut last = match detour(frame.width(), frame.height(), width, height) {
             None => {
+                // One pass, which both resizes and converts — and where
+                // there is nothing to resize, has to be the kernel that
+                // converts. See [`converting_algo`].
+                let algo = converting_algo(
+                    self.interp,
+                    self.format.is_some(),
+                    frame.width(),
+                    frame.height(),
+                    width,
+                    height,
+                );
                 let mut only = graph.add(
                     &scale,
                     "scale",

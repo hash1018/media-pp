@@ -787,6 +787,11 @@ mod tests {
     /// NVDEC decodes 10-bit HEVC to P010, which nothing reading a CUDA
     /// surface here takes; a scaler built for NV12 brings it down to that on
     /// the GPU, keeping the pixels, the pts and the colour description.
+    ///
+    /// At the size it came in, which is the case a 10-bit stream decoded at
+    /// its own size is: `scale_cuda` converts nothing there unless it is
+    /// asked with the kernel that does, and the picture comes out black —
+    /// see `scale_graph::converting_algo`, which this is the test for.
     #[test]
     fn a_p010_surface_comes_down_to_nv12() {
         let Some((device, _cuda_lock)) = try_cuda_device() else {
