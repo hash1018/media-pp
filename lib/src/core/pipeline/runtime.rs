@@ -790,6 +790,13 @@ impl Pipeline {
         if self.running.load(Ordering::Acquire) == 0 {
             return Err(PipelineError::NotRunning.into());
         }
+        // Before the question, not after: an element waiting on the clock —
+        // a `VideoSynchronizer` holding a frame the audio has not reached —
+        // is inside a `Queue` worker's `consume`, and that worker takes
+        // control only between buffers. The audio it waits for comes from a
+        // source that is about to stop and wait for this very question to
+        // be answered, so without the interrupt neither ever moves.
+        self.clock.interrupt();
         let check = Arc::new(SeekCheckContext::new());
         for control_tx in &self.control_txs {
             control_tx.send(ControlMsg::CheckSeek(Arc::clone(&check)));

@@ -1091,3 +1091,69 @@ fn a_seek_from_a_paused_start_delivers_just_the_frame_asked_for() {
     );
     pipeline.stop();
 }
+
+/// A seek while the video is waiting on an audio clock that has stopped
+/// moving — the moment a player seeks just after resuming, with the picture
+/// demuxed a second ahead of the sound.
+///
+/// `seek` asked every branch whether it could seek before it interrupted the
+/// clock. The `VideoSynchronizer` behind the queue was waiting for the audio
+/// to reach its frame; the audio could not, because the demuxer had stopped
+/// to put that question to the queue; and the queue could not take the
+/// question until the synchroniser returned. Nothing timed out, so `seek`
+/// never returned. Here the audio clock is held still outright, which is
+/// that deadlock every time rather than now and then.
+#[test]
+fn a_seek_while_video_waits_on_a_stalled_audio_clock_returns() {
+    let Some(path) = try_test_video() else { return };
+    let (source, streams) = FileDemuxer::open("demux", &path).expect("open test video");
+    let video = streams
+        .iter()
+        .find(|stream| stream.kind == ffmpeg::media::Type::Video)
+        .expect("test video has a video stream");
+    let params = video.parameters.clone();
+    let time_base = video.time_base;
+    let samples = Arc::new(Mutex::new(Vec::new()));
+
+    let (pipeline, ()) = Pipeline::new("stalled-audio-seek", source, |source, ctx| {
+        let branch = ctx
+            .branch()
+            .pipe(SwDecoder::new("decoder", params)?)
+            .queue("video-frames", 4)
+            .pipe(VideoSynchronizer::new("video-sync"))
+            .to(PrerollProbe {
+                label: "video-terminal",
+                time_base,
+                samples: Arc::clone(&samples),
+                pp_log: element_pp_log(ElementType::Other, "video-terminal", None),
+            })?;
+        ctx.attach(source, video.index, branch)?;
+        Ok(())
+    })
+    .expect("pipeline wiring");
+
+    // An audio renderer that has played nothing and is not playing: the
+    // video can never come due.
+    let audio = pipeline
+        .playback_clock()
+        .register_audio_master()
+        .expect("the one audio master");
+    audio
+        .publish(0, 0, false)
+        .expect("publish a stalled position");
+
+    pipeline.run().expect("run");
+    // Long enough for the queue to fill and the demuxer to block on it.
+    thread::sleep(Duration::from_millis(300));
+
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let seeking = Arc::clone(&pipeline);
+    thread::spawn(move || {
+        let _ = done_tx.send(seeking.seek(Duration::from_secs(1), SeekMode::Accurate));
+    });
+    let outcome = done_rx
+        .recv_timeout(Duration::from_secs(15))
+        .expect("seek never returned: the branch is deadlocked on the audio clock");
+    outcome.expect("the seek completes");
+    pipeline.stop();
+}

@@ -17,7 +17,7 @@ use crate::contract::{
 };
 use crate::elements::{
     FileDemuxer, Pacer, SwDecoder, TestAudioOptions, TestAudioSource, TestVideoOptions,
-    TestVideoSource,
+    TestVideoSource, VideoSynchronizer,
 };
 use crate::graph::GraphError;
 use crate::test_support::try_test_video;

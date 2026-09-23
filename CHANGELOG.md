@@ -1181,6 +1181,17 @@ compile error with no explanation.
 
 ### Fixed
 
+- **`seek` no longer hangs a player that seeks while the video waits on
+  the sound.** `seek` first asks every branch whether it can seek, and it
+  interrupted the clock only after that. A `VideoSynchronizer` holding a
+  frame the audio had not reached yet — the usual state of a file whose
+  picture is muxed ahead of its sound — sat inside a `Queue` worker that
+  takes control only between buffers; the audio it waited for came from
+  the demuxer, which had stopped to ask that very question. None of them
+  moved again, with no error and no timeout. A newcomer's player hung this
+  way on four seeks in six right after resuming. The clock is interrupted
+  before the question now.
+
 - **The recording examples end with `finish`.** `audio_record`, `hls`,
   `rtmp_publish`, `screen_record_software`, `screen_record_av` and the
   compositor examples ended with `stop`, which finalizes a playable file
