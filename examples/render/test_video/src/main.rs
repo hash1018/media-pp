@@ -158,7 +158,7 @@ mod linux_example {
             ..TestVideoOptions::default()
         };
         let source = TestVideoSource::new("test-video", options);
-        let cuda = CudaDevice::new().map_err(|error| media_pp::Error::Other(error.to_string()))?;
+        let cuda = CudaDevice::new()?;
         let gpu = VulkanGpuContext::new(target.display).map_err(media_pp::Error::Other)?;
 
         let pipeline = Pipeline::new("test-video", source, |source, ctx| {
@@ -169,8 +169,7 @@ mod linux_example {
                 target.height,
                 ffmpeg::software::scaling::Flags::BILINEAR,
             );
-            let upload = CudaUpload::new("upload", &cuda, CudaFrameFormat::Nv12)
-                .map_err(|error| media_pp::Error::Other(error.to_string()))?;
+            let upload = CudaUpload::new("upload", &cuda, CudaFrameFormat::Nv12)?;
             let renderer = render_common::cuda_window_renderer(
                 "renderer",
                 &gpu,

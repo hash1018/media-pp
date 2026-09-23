@@ -12,6 +12,27 @@ compile error with no explanation.
 
 ### Breaking
 
+- **`Error` is `#[non_exhaustive]`, and every public error converts into
+  it.** A `match` on `media_pp::Error` needs a `_` arm; in return, an
+  element added later — and each one adds a variant — no longer breaks
+  it. `CudaDeviceError`, `CudaDriverError`, `CudaFrameError`, `RackError`,
+  `PlaybackClockError`, `PipeWireDeviceError` and `DmaBufCudaError` gain
+  variants of their own, so each passes through `?` where it used to have
+  to be turned into a string first:
+
+  ```rust
+  // before
+  let cuda = CudaDevice::new().map_err(|e| Error::Other(e.to_string()))?;
+
+  // after
+  let cuda = CudaDevice::new()?;
+  ```
+
+  A string keeps nothing to match on, and the examples taught it: 83 of
+  them did it, most to errors that already converted. They no longer do.
+  `SubmitError`, which a renderer implementation returns, is now a
+  `std::error::Error` with messages of its own.
+
 - **An upload, a download and a converter take the size from the frames.**
   `CudaUpload::new`, `D3d11Upload::new`, `D3d12Upload::new`,
   `CudaDownload::new`, `D3d11Download::new`, `D3d12Download::new` and
@@ -250,6 +271,26 @@ compile error with no explanation.
   any of the three needs an arm for it.
 
 ### Added
+
+- **`FileDemuxer::best` and `RtspSource::best` find the stream to play in
+  one `?`.** Each returns the `StreamInfo` of FFmpeg's own choice for a
+  kind — the same one `best_stream` names by index — or `NoStream(kind)`
+  where there is none, so the three lines every example opened with are
+  one:
+
+  ```rust
+  // before
+  let video = source
+      .best_stream(media::Type::Video)
+      .and_then(|index| streams.get(index))
+      .ok_or_else(|| Error::Other("no video stream in file".into()))?;
+
+  // after
+  let video = source.best(media::Type::Video)?;
+  ```
+
+  A stream that may be absent is `source.best(media::Type::Audio).ok()`.
+  `best_stream` is unchanged.
 
 - **Every scaler can be asked for a layout instead of a size:
   `SwScaler::to_format`, `D3d11Scaler::to_format`,

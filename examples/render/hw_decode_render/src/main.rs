@@ -85,11 +85,8 @@ mod windows_example {
             7,
         )?;
 
-        let (source, streams) = FileDemuxer::open("demux", path)?;
-        let video = source
-            .best_stream(media::Type::Video)
-            .and_then(|index| streams.get(index))
-            .ok_or_else(|| Error::Other("no video stream in file".into()))?;
+        let (source, _) = FileDemuxer::open("demux", path)?;
+        let video = source.best(media::Type::Video)?;
         let time_base = video.time_base;
 
         let gpu = D3d12GpuContext::new().map_err(|e| Error::Other(format!("{e:?}")))?;
@@ -177,14 +174,11 @@ mod linux_example {
             7,
         )?;
 
-        let (source, streams) = FileDemuxer::open("demux", path)?;
-        let video = source
-            .best_stream(media::Type::Video)
-            .and_then(|index| streams.get(index))
-            .ok_or_else(|| Error::Other("no video stream in file".into()))?;
+        let (source, _) = FileDemuxer::open("demux", path)?;
+        let video = source.best(media::Type::Video)?;
         let time_base = video.time_base;
 
-        let cuda = CudaDevice::new().map_err(|error| Error::Other(error.to_string()))?;
+        let cuda = CudaDevice::new()?;
         let gpu = VulkanGpuContext::new(target.display).map_err(Error::Other)?;
 
         let mut decoder = VideoDecodeBin::open(
@@ -215,10 +209,7 @@ mod linux_example {
         let fits = check_elements(&mut decoder, &renderer);
         let to_nv12 = if fits.is_refused() {
             println!("decoder and renderer: {fits}; converting to NV12");
-            Some(
-                CudaConverter::new("to-nv12", &cuda, CudaFrameFormat::Nv12)
-                    .map_err(|error| Error::Other(error.to_string()))?,
-            )
+            Some(CudaConverter::new("to-nv12", &cuda, CudaFrameFormat::Nv12)?)
         } else {
             None
         };

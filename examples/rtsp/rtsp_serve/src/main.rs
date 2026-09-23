@@ -16,7 +16,6 @@ fn main() -> impl std::process::Termination {
 mod example {
     use media_pp::ffmpeg::media;
     use media_pp::{
-        Error,
         bus::BusEvent,
         element::ElementType,
         elements::{FileDemuxer, Pacer, RtspMuxer, RtspTransport},
@@ -40,11 +39,8 @@ mod example {
             .nth(2)
             .unwrap_or_else(|| "rtsp://127.0.0.1:8554/stream".into());
 
-        let (source, streams) = FileDemuxer::open("demux", &path)?;
-        let video = source
-            .best_stream(media::Type::Video)
-            .and_then(|index| streams.get(index))
-            .ok_or_else(|| Error::Other("no video stream in file".into()))?;
+        let (source, _) = FileDemuxer::open("demux", &path)?;
+        let video = source.best(media::Type::Video)?;
         let video_index = video.index;
         let video_params = video.parameters.clone();
         let video_time_base = video.time_base;
@@ -52,10 +48,7 @@ mod example {
         // Optional on purpose: this example took video only before
         // `RtspMuxer` could carry two tracks, and a file with no audio must
         // still work exactly as it did.
-        let audio_track = match source
-            .best_stream(media::Type::Audio)
-            .and_then(|index| streams.get(index))
-        {
+        let audio_track = match source.best(media::Type::Audio).ok() {
             Some(audio) => {
                 let params = audio.parameters.clone();
                 let time_base = audio.time_base;

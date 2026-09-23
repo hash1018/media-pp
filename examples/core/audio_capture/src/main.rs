@@ -55,8 +55,7 @@ mod windows_example {
             7,
         )?;
 
-        let devices = WasapiCaptureSource::list_devices()
-            .map_err(|e| media_pp::Error::Other(e.to_string()))?;
+        let devices = WasapiCaptureSource::list_devices()?;
 
         let arg = std::env::args().nth(1);
         if arg.as_deref() == Some("list") {
@@ -89,8 +88,7 @@ mod windows_example {
         println!("selected: {:?} {}", device.kind, device.name);
 
         let (source, format) =
-            WasapiCaptureSource::open("audio-capture", WasapiCaptureOptions { device })
-                .map_err(|e| media_pp::Error::Other(e.to_string()))?;
+            WasapiCaptureSource::open("audio-capture", WasapiCaptureOptions { device })?;
         println!(
             "opened: {}Hz, {} channel(s)",
             format.sample_rate, format.channels
@@ -159,8 +157,7 @@ mod linux_example {
             7,
         )?;
 
-        let devices = PipeWireAudioCaptureSource::list_devices()
-            .map_err(|e| media_pp::Error::Other(e.to_string()))?;
+        let devices = PipeWireAudioCaptureSource::list_devices()?;
 
         let arg = std::env::args().nth(1);
         if arg.as_deref() == Some("list") {
@@ -205,8 +202,7 @@ mod linux_example {
         let (source, format) = PipeWireAudioCaptureSource::open(
             "audio-capture",
             PipeWireAudioCaptureOptions { device },
-        )
-        .map_err(|e| media_pp::Error::Other(e.to_string()))?;
+        )?;
         println!(
             "opened: {}Hz, {} channel(s)",
             format.sample_rate, format.channels

@@ -95,8 +95,7 @@ mod windows_example {
                 gop_size: 60, // ~2s @ 30fps
                 max_b_frames: None,
             },
-        )
-        .map_err(|e| media_pp::Error::Other(e.to_string()))?;
+        )?;
 
         let mut muxer = FileMuxer::create(&recording.path)?;
         let track = muxer.add_stream("video", encoder.parameters(), format.time_base)?;
@@ -176,7 +175,7 @@ mod linux_example {
         // every CUDA element in this crate is built around, and what the
         // encoder validates every incoming frame against. Built before the
         // capture because `open_gpu` allocates its surfaces from it.
-        let cuda = CudaDevice::new().map_err(|e| media_pp::Error::Other(e.to_string()))?;
+        let cuda = CudaDevice::new()?;
 
         let (source, format, restore_token) = PipeWireScreenCaptureSource::open_gpu(
             "screen",
@@ -210,8 +209,7 @@ mod linux_example {
                 gop_size: 60, // ~2s @ 30fps
                 max_b_frames: None,
             },
-        )
-        .map_err(|e| media_pp::Error::Other(e.to_string()))?;
+        )?;
 
         let mut muxer = FileMuxer::create(&recording.path)?;
         let track = muxer.add_stream("video", encoder.parameters(), format.time_base)?;

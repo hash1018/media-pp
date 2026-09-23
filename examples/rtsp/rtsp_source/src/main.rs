@@ -42,10 +42,7 @@ mod example {
             println!("  [{}] {:?}", s.index, s.kind);
         }
 
-        let video = source
-            .best_stream(media::Type::Video)
-            .and_then(|index| streams.get(index))
-            .ok_or_else(|| Error::Other("no video stream advertised".into()))?;
+        let video = source.best(media::Type::Video)?;
         let index = video.index;
 
         let (counter, count) = PacketCounter::new("counter");

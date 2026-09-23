@@ -27,6 +27,10 @@ pub enum RtspSourceError {
     /// Seeking was requested on a live RTSP stream.
     #[error("RtspSource doesn't support seeking a live stream")]
     SeekUnsupported,
+    /// The session has no stream of the kind asked for — see
+    /// [`RtspSource::best`].
+    #[error("the RTSP session has no {0:?} stream")]
+    NoStream(ffmpeg::media::Type),
 }
 
 /// Construction-time options for [`RtspSource::open`].
@@ -153,6 +157,20 @@ impl RtspSource {
     /// which this is for a network stream.
     pub fn best_stream(&self, kind: ffmpeg::media::Type) -> Option<usize> {
         self.input.streams().best(kind).map(|stream| stream.index())
+    }
+
+    /// The same choice, as everything a branch for it is built from — or a
+    /// [`RtspSourceError::NoStream`] naming the kind the session lacks. See
+    /// [`FileDemuxer::best`](crate::elements::FileDemuxer::best).
+    pub fn best(
+        &self,
+        kind: ffmpeg::media::Type,
+    ) -> std::result::Result<StreamInfo, RtspSourceError> {
+        self.input
+            .streams()
+            .best(kind)
+            .map(|stream| StreamInfo::of(&stream))
+            .ok_or(RtspSourceError::NoStream(kind))
     }
 
     fn stream(&self, index: usize) -> Option<ffmpeg::format::stream::Stream<'_>> {

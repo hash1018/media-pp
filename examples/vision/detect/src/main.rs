@@ -18,7 +18,7 @@ mod example {
 
     use media_pp::ffmpeg::{format::Pixel, frame::Video, media, software::scaling::Flags};
     use media_pp::{
-        Error, Result,
+        Result,
         bus::BusEvent,
         elements::{COCO_CLASS_LABELS, Detection, FileDemuxer, OrtDetector, SwDecoder, SwScaler},
         pipeline::Pipeline,
@@ -173,11 +173,8 @@ mod example {
             7,
         )?;
 
-        let (source, streams) = FileDemuxer::open("demux", video_path)?;
-        let video = source
-            .best_stream(media::Type::Video)
-            .and_then(|index| streams.get(index))
-            .ok_or_else(|| Error::Other("no video stream in file".into()))?;
+        let (source, _) = FileDemuxer::open("demux", video_path)?;
+        let video = source.best(media::Type::Video)?;
         let params = video.parameters.clone();
 
         let pipeline = Pipeline::new("detect", source, |source, ctx| {

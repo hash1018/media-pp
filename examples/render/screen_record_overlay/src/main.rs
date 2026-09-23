@@ -103,7 +103,7 @@ mod linux_example {
         // One CUDA context for the whole stack: the capture imports its
         // DMA-BUFs onto it, the converter and compositor draw on it, and
         // NVENC encodes from it. Every element rejects a frame from another.
-        let cuda = CudaDevice::new().map_err(|e| media_pp::Error::Other(e.to_string()))?;
+        let cuda = CudaDevice::new()?;
         let frame_rate = ffmpeg::Rational::new(30, 1);
         let (source, format, restore_token) = PipeWireScreenCaptureSource::open_gpu(
             "screen",
@@ -131,19 +131,16 @@ mod linux_example {
                 background: Color::new(16, 16, 16),
                 background_alpha: 255,
             },
-        )
-        .map_err(|e| media_pp::Error::Other(e.to_string()))?;
+        )?;
         let time_base = compositor.time_base();
 
-        let capture_input = handle
-            .add_source(
-                "desktop",
-                VideoLayer {
-                    fit: VideoFit::Stretch,
-                    ..VideoLayer::new(VideoRect::new(0, 0, width, height))
-                },
-            )
-            .map_err(|e| media_pp::Error::Other(e.to_string()))?;
+        let capture_input = handle.add_source(
+            "desktop",
+            VideoLayer {
+                fit: VideoFit::Stretch,
+                ..VideoLayer::new(VideoRect::new(0, 0, width, height))
+            },
+        )?;
         let capture_sink = capture_input.sink;
 
         // The text layer receives no frames — no `Sink` to wire up, just a
@@ -162,17 +159,12 @@ mod linux_example {
         text_layer.x = 40;
         text_layer.y = 40;
         text_layer.color = Color::new(255, 220, 0);
-        let clock = handle
-            .add_text_layer("clock", text_layer)
-            .map_err(|e| media_pp::Error::Other(e.to_string()))?;
-        clock
-            .set_text("rec 0s")
-            .map_err(|e| media_pp::Error::Other(e.to_string()))?;
+        let clock = handle.add_text_layer("clock", text_layer)?;
+        clock.set_text("rec 0s")?;
 
         let capture_pipeline = Pipeline::new("desktop-capture", source, |source, ctx| {
             let converter =
-                CudaConverter::new("convert", &cuda, media_pp::elements::CudaFrameFormat::Nv12)
-                    .map_err(|e| media_pp::Error::Other(e.to_string()))?;
+                CudaConverter::new("convert", &cuda, media_pp::elements::CudaFrameFormat::Nv12)?;
             let branch = ctx
                 .branch()
                 // Thread boundary so conversion and compositing cannot stall
@@ -200,8 +192,7 @@ mod linux_example {
                 gop_size: 60, // ~2s @ 30fps
                 max_b_frames: None,
             },
-        )
-        .map_err(|e| media_pp::Error::Other(e.to_string()))?;
+        )?;
         let mut muxer = FileMuxer::create(&path)?;
         let track = muxer.add_stream("video", encoder.parameters(), time_base)?;
         let muxer_sink = muxer.open()?.take(track)?;
@@ -232,9 +223,7 @@ mod linux_example {
                 // Redrawn every second, so a recording that shows the same
                 // caption throughout is a broken overlay rather than a still
                 // desktop.
-                clock
-                    .set_text(&format!("rec {elapsed}s"))
-                    .map_err(|e| media_pp::Error::Other(e.to_string()))?;
+                clock.set_text(&format!("rec {elapsed}s"))?;
             }
         }
 

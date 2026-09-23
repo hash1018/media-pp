@@ -102,16 +102,14 @@ mod windows_example {
                 background: Color::new(24, 24, 24),
                 background_alpha: 255,
             },
-        )
-        .map_err(|e| media_pp::Error::Other(e.to_string()))?;
+        )?;
         let time_base = compositor.time_base();
 
         let mut background_layer =
             VideoLayer::new(VideoRect::new(0, 0, output_width, output_height));
         background_layer.fit = VideoFit::Cover;
         let background_input = compositor_handle
-            .add_source("background", background_layer)
-            .map_err(|e| media_pp::Error::Other(e.to_string()))?
+            .add_source("background", background_layer)?
             .expect("compositor is alive");
         let background_sink = background_input.sink;
 
@@ -127,8 +125,7 @@ mod windows_example {
         foreground_layer.opacity = 0.85;
         foreground_layer.fit = VideoFit::Cover;
         let foreground_input = compositor_handle
-            .add_source("foreground", foreground_layer)
-            .map_err(|e| media_pp::Error::Other(e.to_string()))?
+            .add_source("foreground", foreground_layer)?
             .expect("compositor is alive");
         let foreground_sink = foreground_input.sink;
         let foreground_handle = foreground_input.layer;
@@ -214,8 +211,7 @@ mod windows_example {
             .expect("failed to create renderer");
             let render_branch = ctx.branch().queue("render", 4).to(renderer)?;
 
-            let download = D3d11Download::new("download", gpu.device(), gpu.context())
-                .map_err(|e| media_pp::Error::Other(e.to_string()))?;
+            let download = D3d11Download::new("download", gpu.device(), gpu.context())?;
             let to_yuv = SwScaler::new(
                 "to-yuv",
                 ffmpeg::format::Pixel::YUV420P,
@@ -268,14 +264,12 @@ mod windows_example {
             } else {
                 (u64::from(travel) * step / (steps - 1)) as i32
             };
-            foreground_handle
-                .set_rect(VideoRect::new(
-                    x,
-                    output_height as i32 - foreground_height as i32,
-                    foreground_width,
-                    foreground_height,
-                ))
-                .map_err(|e| media_pp::Error::Other(e.to_string()))?;
+            foreground_handle.set_rect(VideoRect::new(
+                x,
+                output_height as i32 - foreground_height as i32,
+                foreground_width,
+                foreground_height,
+            ))?;
             thread::sleep(Duration::from_millis(33));
         }
 
@@ -351,7 +345,7 @@ mod linux_example {
         // One CUDA context for the whole stack: every input uploads onto it,
         // the compositor draws on it, and the renderer imports its Vulkan
         // memory into it. Each element rejects a frame from a different one.
-        let cuda = CudaDevice::new().map_err(|e| media_pp::Error::Other(e.to_string()))?;
+        let cuda = CudaDevice::new()?;
         let gpu = VulkanGpuContext::new(target.display).map_err(media_pp::Error::Other)?;
 
         let output_width = 640;
@@ -367,16 +361,13 @@ mod linux_example {
                 background: Color::new(24, 24, 24),
                 background_alpha: 255,
             },
-        )
-        .map_err(|e| media_pp::Error::Other(e.to_string()))?;
+        )?;
         let time_base = compositor.time_base();
 
         let mut background_layer =
             VideoLayer::new(VideoRect::new(0, 0, output_width, output_height));
         background_layer.fit = VideoFit::Cover;
-        let background_input = compositor_handle
-            .add_source("background", background_layer)
-            .map_err(|e| media_pp::Error::Other(e.to_string()))?;
+        let background_input = compositor_handle.add_source("background", background_layer)?;
         let background_sink = background_input.sink;
 
         let foreground_width = 192;
@@ -390,9 +381,7 @@ mod linux_example {
         foreground_layer.z_index = 1;
         foreground_layer.opacity = 0.85;
         foreground_layer.fit = VideoFit::Cover;
-        let foreground_input = compositor_handle
-            .add_source("foreground", foreground_layer)
-            .map_err(|e| media_pp::Error::Other(e.to_string()))?;
+        let foreground_input = compositor_handle.add_source("foreground", foreground_layer)?;
         let foreground_sink = foreground_input.sink;
         let foreground_handle = foreground_input.layer;
 
@@ -416,8 +405,7 @@ mod linux_example {
                     output_height,
                     ffmpeg::software::scaling::Flags::BILINEAR,
                 );
-                let upload = CudaUpload::new("upload", &cuda, CudaFrameFormat::Nv12)
-                    .map_err(|e| media_pp::Error::Other(e.to_string()))?;
+                let upload = CudaUpload::new("upload", &cuda, CudaFrameFormat::Nv12)?;
                 let branch = ctx.branch().pipe(scaler).pipe(upload).to(background_sink)?;
                 ctx.attach(source, 0, branch)?;
                 Ok(())
@@ -444,8 +432,7 @@ mod linux_example {
                     240,
                     ffmpeg::software::scaling::Flags::BILINEAR,
                 );
-                let upload = CudaUpload::new("upload", &cuda, CudaFrameFormat::Nv12)
-                    .map_err(|e| media_pp::Error::Other(e.to_string()))?;
+                let upload = CudaUpload::new("upload", &cuda, CudaFrameFormat::Nv12)?;
                 let branch = ctx.branch().pipe(scaler).pipe(upload).to(foreground_sink)?;
                 ctx.attach(source, 0, branch)?;
                 Ok(())
@@ -534,14 +521,12 @@ mod linux_example {
             } else {
                 (u64::from(travel) * step / (steps - 1)) as i32
             };
-            foreground_handle
-                .set_rect(VideoRect::new(
-                    x,
-                    output_height as i32 - foreground_height as i32,
-                    foreground_width,
-                    foreground_height,
-                ))
-                .map_err(|e| media_pp::Error::Other(e.to_string()))?;
+            foreground_handle.set_rect(VideoRect::new(
+                x,
+                output_height as i32 - foreground_height as i32,
+                foreground_width,
+                foreground_height,
+            ))?;
             thread::sleep(Duration::from_millis(33));
         }
 

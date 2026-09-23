@@ -68,8 +68,8 @@ mod shell;
 /// and locating the two streams it needs.
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 mod common {
+    use media_pp::elements::FileDemuxer;
     use media_pp::ffmpeg::{Rational, codec::Parameters, media};
-    use media_pp::{Error, elements::FileDemuxer};
 
     pub struct Streams {
         pub video_index: usize,
@@ -81,15 +81,9 @@ mod common {
     }
 
     pub fn open(path: &str) -> media_pp::Result<(FileDemuxer, Streams)> {
-        let (source, streams) = FileDemuxer::open("demux", path)?;
-        let video = source
-            .best_stream(media::Type::Video)
-            .and_then(|index| streams.get(index))
-            .ok_or_else(|| Error::Other("no video stream in file".into()))?;
-        let audio = source
-            .best_stream(media::Type::Audio)
-            .and_then(|index| streams.get(index))
-            .ok_or_else(|| Error::Other("no audio stream in file".into()))?;
+        let (source, _) = FileDemuxer::open("demux", path)?;
+        let video = source.best(media::Type::Video)?;
+        let audio = source.best(media::Type::Audio)?;
         let streams = Streams {
             video_index: video.index,
             video_params: video.parameters.clone(),
@@ -165,10 +159,7 @@ mod windows_example {
                     target.height,
                     ffmpeg::software::scaling::Flags::BILINEAR,
                 ))
-                .pipe(
-                    D3d12Upload::new("video-upload", gpu.device())
-                        .map_err(|error| Error::Other(error.to_string()))?,
-                )
+                .pipe(D3d12Upload::new("video-upload", gpu.device())?)
                 .to(render_common::d3d12_window_renderer(
                     "video-renderer",
                     &gpu,
@@ -219,8 +210,7 @@ mod windows_example {
         audio_params: &media_pp::ffmpeg::codec::Parameters,
         audio_time_base: media_pp::ffmpeg::Rational,
     ) -> media_pp::Result<media_pp::graph::BranchId> {
-        let device = WasapiRenderer::list_devices()
-            .map_err(|error| Error::Other(error.to_string()))?
+        let device = WasapiRenderer::list_devices()?
             .into_iter()
             .find(|device| device.is_default)
             .ok_or_else(|| Error::Other("no default WASAPI render endpoint".into()))?;
@@ -289,22 +279,19 @@ mod linux_example {
         // One CUDA context for the whole stack: the decoder allocates frames
         // on it and the renderer imports its Vulkan memory into it. The
         // renderer element rejects any frame from a different one.
-        let cuda = CudaDevice::new().map_err(|error| Error::Other(error.to_string()))?;
+        let cuda = CudaDevice::new()?;
         let gpu = VulkanGpuContext::new(target.display).map_err(Error::Other)?;
 
         let mut audio_tee_handle = None;
         let pipeline = Pipeline::new("av-playback", source, |source, context| {
             let video_branch = context
                 .branch()
-                .pipe(
-                    CudaDecoder::new(
-                        "video-decoder",
-                        streams.video_params.clone(),
-                        &cuda,
-                        VIDEO_QUEUE_DEPTH as i32,
-                    )
-                    .map_err(|error| Error::Other(error.to_string()))?,
-                )
+                .pipe(CudaDecoder::new(
+                    "video-decoder",
+                    streams.video_params.clone(),
+                    &cuda,
+                    VIDEO_QUEUE_DEPTH as i32,
+                )?)
                 .queue("video-frames", VIDEO_QUEUE_DEPTH)
                 .pipe(VideoSynchronizer::new(
                     "video-sync",
@@ -359,15 +346,13 @@ mod linux_example {
         audio_params: &media_pp::ffmpeg::codec::Parameters,
         audio_time_base: media_pp::ffmpeg::Rational,
     ) -> media_pp::Result<media_pp::graph::BranchId> {
-        let device = PipeWireAudioRenderer::list_devices()
-            .map_err(|error| Error::Other(error.to_string()))?
+        let device = PipeWireAudioRenderer::list_devices()?
             .into_iter()
             .find(|device| device.is_default)
             .ok_or_else(|| Error::Other("no default PipeWire playback device".into()))?;
         let device_name = device.name.clone();
         let (audio_renderer, output_format) =
-            PipeWireAudioRenderer::open("speakers", PipeWireAudioRendererOptions { device })
-                .map_err(|error| Error::Other(error.to_string()))?;
+            PipeWireAudioRenderer::open("speakers", PipeWireAudioRendererOptions { device })?;
 
         let branch = audio_tee
             .branch()

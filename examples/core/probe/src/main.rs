@@ -14,7 +14,6 @@ mod example {
 
     use media_pp::ffmpeg::media;
     use media_pp::{
-        Error,
         bus::BusEvent,
         elements::{FileDemuxer, PacketCounter},
         pipeline::Pipeline,
@@ -44,10 +43,7 @@ mod example {
         // Now that we know what's in the file, decide what to demux by
         // linking the matching src pad — nothing else gets pulled off the
         // wire (unlinked pads just drop their packets).
-        let video = source
-            .best_stream(media::Type::Video)
-            .and_then(|index| streams.get(index))
-            .ok_or_else(|| Error::Other("no video stream in file".into()))?;
+        let video = source.best(media::Type::Video)?;
 
         let (counter, count) = PacketCounter::new("counter");
 

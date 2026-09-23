@@ -84,11 +84,8 @@ mod windows_example {
             7,
         )?;
 
-        let (source, streams) = FileDemuxer::open("demux", path)?;
-        let video = source
-            .best_stream(media::Type::Video)
-            .and_then(|index| streams.get(index))
-            .ok_or_else(|| Error::Other("no video stream in file".into()))?;
+        let (source, _) = FileDemuxer::open("demux", path)?;
+        let video = source.best(media::Type::Video)?;
         let params = video.parameters.clone();
         let time_base = video.time_base;
 
@@ -280,14 +277,11 @@ mod linux_example {
             7,
         )?;
 
-        let (source, streams) = FileDemuxer::open("demux", path)?;
-        let video = source
-            .best_stream(media::Type::Video)
-            .and_then(|index| streams.get(index))
-            .ok_or_else(|| Error::Other("no video stream in file".into()))?;
+        let (source, _) = FileDemuxer::open("demux", path)?;
+        let video = source.best(media::Type::Video)?;
         let params = video.parameters.clone();
         let time_base = video.time_base;
-        let cuda = CudaDevice::new().map_err(|error| Error::Other(error.to_string()))?;
+        let cuda = CudaDevice::new()?;
         let gpu = VulkanGpuContext::new(target.display).map_err(Error::Other)?;
 
         let pipeline = Pipeline::new("seek-render", source, |source, ctx| {
@@ -300,8 +294,7 @@ mod linux_example {
                 target.height,
                 ffmpeg::software::scaling::Flags::BILINEAR,
             );
-            let upload = CudaUpload::new("upload", &cuda, CudaFrameFormat::Nv12)
-                .map_err(|error| Error::Other(error.to_string()))?;
+            let upload = CudaUpload::new("upload", &cuda, CudaFrameFormat::Nv12)?;
             let renderer = render_common::cuda_window_renderer(
                 "renderer",
                 &gpu,

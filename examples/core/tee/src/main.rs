@@ -17,7 +17,6 @@ mod example {
 
     use media_pp::ffmpeg::media;
     use media_pp::{
-        Error,
         elements::{FileDemuxer, FrameCounter, PacketCounter, SwDecoder, TeeBuilder},
         pipeline::Pipeline,
     };
@@ -43,10 +42,7 @@ mod example {
             println!("  [{}] {:?}", s.index, s.kind);
         }
 
-        let video = source
-            .best_stream(media::Type::Video)
-            .and_then(|index| streams.get(index))
-            .ok_or_else(|| Error::Other("no video stream in file".into()))?;
+        let video = source.best(media::Type::Video)?;
         let params = video.parameters.clone();
 
         let (frame_counter, frame_count) = FrameCounter::new("frame-counter");

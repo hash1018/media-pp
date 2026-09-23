@@ -109,16 +109,14 @@ mod windows_example {
                 background: Color::new(24, 24, 24),
                 background_alpha: 255,
             },
-        )
-        .map_err(|e| media_pp::Error::Other(e.to_string()))?;
+        )?;
         let time_base = compositor.time_base();
 
         let mut background_layer =
             VideoLayer::new(VideoRect::new(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT));
         background_layer.fit = VideoFit::Cover;
         let background_sink = compositor_handle
-            .add_source("background", background_layer)
-            .map_err(|e| media_pp::Error::Other(e.to_string()))?
+            .add_source("background", background_layer)?
             .expect("the compositor is alive")
             .sink;
 
@@ -130,8 +128,7 @@ mod windows_example {
         ));
         keyed_layer.z_index = 1;
         let keyed_input = compositor_handle
-            .add_source("keyed", keyed_layer)
-            .map_err(|e| media_pp::Error::Other(e.to_string()))?
+            .add_source("keyed", keyed_layer)?
             .expect("the compositor is alive");
         let keyed_sink = keyed_input.sink;
         let keyed_handle = keyed_input.layer;
@@ -157,8 +154,7 @@ mod windows_example {
                     threshold: 0.15,
                     smoothing: 0.1,
                 },
-            )
-            .map_err(|e| media_pp::Error::Other(e.to_string()))?;
+            )?;
             let branch = ctx.branch().pipe(upload).pipe(key).to(keyed_sink)?;
             ctx.attach(source, 0, branch)?;
             Ok(())
@@ -210,8 +206,7 @@ mod windows_example {
         let muxer_sink = muxer.open()?.take(track)?;
 
         let record_pipeline = Pipeline::new("record", compositor, |source, ctx| {
-            let download = D3d11Download::new("download", gpu.device(), gpu.context())
-                .map_err(|e| media_pp::Error::Other(e.to_string()))?;
+            let download = D3d11Download::new("download", gpu.device(), gpu.context())?;
             let to_yuv = SwScaler::new(
                 "to-yuv",
                 ffmpeg::format::Pixel::YUV420P,
@@ -252,9 +247,7 @@ mod windows_example {
             } else {
                 (u64::from(travel) * step / (steps - 1)) as i32
             };
-            keyed_handle
-                .set_rect(VideoRect::new(x, top, SHOT_WIDTH, SHOT_HEIGHT))
-                .map_err(|e| media_pp::Error::Other(e.to_string()))?;
+            keyed_handle.set_rect(VideoRect::new(x, top, SHOT_WIDTH, SHOT_HEIGHT))?;
             thread::sleep(Duration::from_millis(33));
         }
 

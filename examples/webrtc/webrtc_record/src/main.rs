@@ -150,17 +150,11 @@ mod example {
 
     impl FileInput {
         fn open(path: &str) -> media_pp::Result<Self> {
-            let (source, streams) = FileDemuxer::open("input", path).map_err(|error| {
+            let (source, _) = FileDemuxer::open("input", path).map_err(|error| {
                 media_pp::Error::Other(format!("cannot read `{path}` as media: {error}"))
             })?;
-            let video = source
-                .best_stream(ffmpeg::media::Type::Video)
-                .and_then(|index| streams.get(index))
-                .ok_or_else(|| media_pp::Error::Other(format!("`{path}` has no video stream")))?;
-            let audio = source
-                .best_stream(ffmpeg::media::Type::Audio)
-                .and_then(|index| streams.get(index))
-                .ok_or_else(|| media_pp::Error::Other(format!("`{path}` has no audio stream")))?;
+            let video = source.best(ffmpeg::media::Type::Video)?;
+            let audio = source.best(ffmpeg::media::Type::Audio)?;
             let (video_index, audio_index) = (video.index, audio.index);
             let video_parameters = video.parameters.clone();
             let audio_parameters = audio.parameters.clone();

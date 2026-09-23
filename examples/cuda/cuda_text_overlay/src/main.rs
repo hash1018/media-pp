@@ -78,7 +78,7 @@ mod example {
 
         // One CUDA context for the whole stack: the upload allocates on it, the
         // compositor draws on it, and the download reads from it.
-        let cuda = CudaDevice::new().map_err(|e| media_pp::Error::Other(e.to_string()))?;
+        let cuda = CudaDevice::new()?;
 
         let output_width = 640;
         let output_height = 360;
@@ -93,16 +93,13 @@ mod example {
                 background: Color::new(24, 24, 24),
                 background_alpha: 255,
             },
-        )
-        .map_err(|e| media_pp::Error::Other(e.to_string()))?;
+        )?;
         let time_base = compositor.time_base();
 
         let mut background_layer =
             VideoLayer::new(VideoRect::new(0, 0, output_width, output_height));
         background_layer.fit = VideoFit::Cover;
-        let background_input = compositor_handle
-            .add_source("background", background_layer)
-            .map_err(|e| media_pp::Error::Other(e.to_string()))?;
+        let background_input = compositor_handle.add_source("background", background_layer)?;
         let background_sink = background_input.sink;
 
         // The text layer never receives `Pipeline` frames — no `Sink` to wire up,
@@ -121,12 +118,8 @@ mod example {
         text_layer.font_size = 48.0;
         text_layer.x = 20;
         text_layer.y = 20;
-        let overlay = compositor_handle
-            .add_text_layer("clock", text_layer)
-            .map_err(|e| media_pp::Error::Other(e.to_string()))?;
-        overlay
-            .set_text("t=0s")
-            .map_err(|e| media_pp::Error::Other(e.to_string()))?;
+        let overlay = compositor_handle.add_text_layer("clock", text_layer)?;
+        overlay.set_text("t=0s")?;
 
         let background_source = TestVideoSource::new(
             "background-source",
@@ -145,8 +138,7 @@ mod example {
                     output_height,
                     ffmpeg::software::scaling::Flags::BILINEAR,
                 );
-                let upload = CudaUpload::new("upload", &cuda, CudaFrameFormat::Nv12)
-                    .map_err(|e| media_pp::Error::Other(e.to_string()))?;
+                let upload = CudaUpload::new("upload", &cuda, CudaFrameFormat::Nv12)?;
                 let branch = ctx.branch().pipe(scaler).pipe(upload).to(background_sink)?;
                 ctx.attach(source, 0, branch)?;
                 Ok(())
@@ -224,9 +216,7 @@ mod example {
                 Err(RecvTimeoutError::Timeout) => {
                     let elapsed_seconds = started.elapsed().as_secs().min(seconds);
                     if elapsed_seconds > 0 && started.elapsed() >= next_text_update {
-                        overlay
-                            .set_text(&format!("t={elapsed_seconds}s"))
-                            .map_err(|e| media_pp::Error::Other(e.to_string()))?;
+                        overlay.set_text(&format!("t={elapsed_seconds}s"))?;
                         next_text_update = Duration::from_secs(elapsed_seconds.saturating_add(1));
                     }
                 }

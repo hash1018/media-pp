@@ -135,14 +135,9 @@ mod example {
             .next()
             .unwrap_or_else(|| "transcribed.mp4".into());
 
-        let (source, streams) = FileDemuxer::open("demux", &input_path)?;
-        let video = source
-            .best_stream(media::Type::Video)
-            .and_then(|index| streams.get(index));
-        let Some(audio) = source
-            .best_stream(media::Type::Audio)
-            .and_then(|index| streams.get(index))
-        else {
+        let (source, _) = FileDemuxer::open("demux", &input_path)?;
+        let video = source.best(media::Type::Video).ok();
+        let Some(audio) = source.best(media::Type::Audio).ok() else {
             eprintln!("{input_path} has no audio stream, so there is nothing to transcribe");
             std::process::exit(1);
         };

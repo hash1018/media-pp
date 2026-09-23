@@ -14,7 +14,6 @@ mod example {
 
     use media_pp::ffmpeg::media;
     use media_pp::{
-        Error,
         bus::BusEvent,
         elements::{FileDemuxer, FrameCounter, Pacer, SwDecoder},
         pipeline::Pipeline,
@@ -41,10 +40,7 @@ mod example {
             println!("  [{}] {:?}", s.index, s.kind);
         }
 
-        let video = source
-            .best_stream(media::Type::Video)
-            .and_then(|index| streams.get(index))
-            .ok_or_else(|| Error::Other("no video stream in file".into()))?;
+        let video = source.best(media::Type::Video)?;
         let params = video.parameters.clone();
         let time_base = video.time_base;
 

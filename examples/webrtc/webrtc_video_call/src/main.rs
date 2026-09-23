@@ -82,8 +82,7 @@ mod windows_example {
             HEIGHT,
             ffmpeg::software::scaling::Flags::BILINEAR,
         );
-        let upload = D3d12Upload::new(format!("{name}-upload"), render.gpu.device())
-            .map_err(|error| media_pp::Error::Other(error.to_string()))?;
+        let upload = D3d12Upload::new(format!("{name}-upload"), render.gpu.device())?;
         let RawWindowHandle::Win32(handle) = target.window else {
             panic!("webrtc_video_call Windows branch received a non-Win32 window");
         };
@@ -148,8 +147,7 @@ mod linux_example {
 
     impl RenderContext {
         pub(super) fn new(target: &WindowTarget) -> media_pp::Result<Self> {
-            let cuda =
-                CudaDevice::new().map_err(|error| media_pp::Error::Other(error.to_string()))?;
+            let cuda = CudaDevice::new()?;
             let gpu = VulkanGpuContext::new(target.display).map_err(media_pp::Error::Other)?;
             Ok(Self { cuda, gpu })
         }
@@ -177,8 +175,7 @@ mod linux_example {
             format!("{name}-upload"),
             &render.cuda,
             CudaFrameFormat::Nv12,
-        )
-        .map_err(|error| media_pp::Error::Other(error.to_string()))?;
+        )?;
         let renderer = render_common::cuda_window_renderer(
             format!("{name}-render"),
             &render.gpu,
@@ -480,15 +477,12 @@ mod common {
         /// non-media file as a bare "Invalid data found when processing
         /// input", which says nothing about which argument was wrong.
         fn open(path: &str) -> media_pp::Result<Self> {
-            let (demuxer, streams) = FileDemuxer::open("demux", path).map_err(|error| {
+            let (demuxer, _) = FileDemuxer::open("demux", path).map_err(|error| {
                 media_pp::Error::Other(format!("cannot read `{path}` as a media file: {error}"))
             })?;
             let video = demuxer
-                .best_stream(ffmpeg::media::Type::Video)
-                .and_then(|index| streams.get(index))
-                .ok_or_else(|| {
-                    media_pp::Error::Other(format!("`{path}` has no video stream to send"))
-                })?;
+                .best(ffmpeg::media::Type::Video)
+                .map_err(|error| media_pp::Error::Other(format!("`{path}`: {error}")))?;
             let index = video.index;
             let params = video.parameters.clone();
             let time_base = video.time_base;

@@ -19,7 +19,7 @@ mod example {
     use media_pp::ffmpeg::{format::Pixel, media, software::scaling::Flags};
     use media_pp::pp_log::PpLog;
     use media_pp::{
-        Error, Result,
+        Result,
         buffer::MediaBuffer,
         bus::BusEvent,
         control::ControlMsg,
@@ -46,11 +46,8 @@ mod example {
             std::process::exit(1);
         };
 
-        let (source, streams) = FileDemuxer::open("demux", &path)?;
-        let video = source
-            .best_stream(media::Type::Video)
-            .and_then(|index| streams.get(index))
-            .ok_or_else(|| Error::Other("no video stream in file".into()))?;
+        let (source, _) = FileDemuxer::open("demux", &path)?;
+        let video = source.best(media::Type::Video)?;
         let params = video.parameters.clone();
 
         let count = Arc::new(AtomicUsize::new(0));

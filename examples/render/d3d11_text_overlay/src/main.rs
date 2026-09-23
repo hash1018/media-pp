@@ -98,16 +98,14 @@ mod windows_example {
                 background: Color::new(24, 24, 24),
                 background_alpha: 255,
             },
-        )
-        .map_err(|e| media_pp::Error::Other(e.to_string()))?;
+        )?;
         let time_base = compositor.time_base();
 
         let mut background_layer =
             VideoLayer::new(VideoRect::new(0, 0, output_width, output_height));
         background_layer.fit = VideoFit::Cover;
         let background_input = compositor_handle
-            .add_source("background", background_layer)
-            .map_err(|e| media_pp::Error::Other(e.to_string()))?
+            .add_source("background", background_layer)?
             .expect("compositor is alive");
         let background_sink = background_input.sink;
 
@@ -123,12 +121,9 @@ mod windows_example {
         text_layer.x = 20;
         text_layer.y = 20;
         let overlay = compositor_handle
-            .add_text_layer("clock", text_layer)
-            .map_err(|e| media_pp::Error::Other(e.to_string()))?
+            .add_text_layer("clock", text_layer)?
             .expect("compositor is alive");
-        overlay
-            .set_text("t=0s")
-            .map_err(|e| media_pp::Error::Other(e.to_string()))?;
+        overlay.set_text("t=0s")?;
 
         let background_source = TestVideoSource::new(
             "background-source",
@@ -171,8 +166,7 @@ mod windows_example {
         let muxer_sink = muxer.open()?.take(track)?;
 
         let output_pipeline = Pipeline::new("composited-output", compositor, |source, ctx| {
-            let download = D3d11Download::new("download", gpu.device(), gpu.context())
-                .map_err(|e| media_pp::Error::Other(e.to_string()))?;
+            let download = D3d11Download::new("download", gpu.device(), gpu.context())?;
             let to_yuv = SwScaler::new(
                 "to-yuv",
                 ffmpeg::format::Pixel::YUV420P,
@@ -220,18 +214,14 @@ mod windows_example {
                 Ok(TerminalCommand::Move { dx, dy }) => {
                     text_x = (text_x + dx).clamp(0, output_width as i32);
                     text_y = (text_y + dy).clamp(0, output_height as i32);
-                    overlay
-                        .set_position(text_x, text_y)
-                        .map_err(|e| media_pp::Error::Other(e.to_string()))?;
+                    overlay.set_position(text_x, text_y)?;
                     println!("text position: ({text_x}, {text_y})");
                 }
                 Ok(TerminalCommand::Quit) => break,
                 Err(RecvTimeoutError::Timeout) => {
                     let elapsed_seconds = started.elapsed().as_secs().min(seconds);
                     if elapsed_seconds > 0 && started.elapsed() >= next_text_update {
-                        overlay
-                            .set_text(&format!("t={elapsed_seconds}s"))
-                            .map_err(|e| media_pp::Error::Other(e.to_string()))?;
+                        overlay.set_text(&format!("t={elapsed_seconds}s"))?;
                         next_text_update = Duration::from_secs(elapsed_seconds.saturating_add(1));
                     }
                 }

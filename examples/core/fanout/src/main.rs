@@ -39,12 +39,8 @@ mod example {
             println!("  [{}] {:?}", s.index, s.kind);
         }
 
-        let video = source
-            .best_stream(media::Type::Video)
-            .and_then(|index| streams.get(index));
-        let audio = source
-            .best_stream(media::Type::Audio)
-            .and_then(|index| streams.get(index));
+        let video = source.best(media::Type::Video).ok();
+        let audio = source.best(media::Type::Audio).ok();
 
         let (video_counter, video_count) = PacketCounter::new("video-counter");
         let (audio_counter, audio_count) = PacketCounter::new("audio-counter");

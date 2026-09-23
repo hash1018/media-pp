@@ -15,6 +15,12 @@ use thiserror::Error;
 
 use crate::element::ElementType;
 
+#[cfg(all(
+    target_os = "linux",
+    feature = "pipewire-screen-capture",
+    feature = "cuda"
+))]
+use crate::elements::DmaBufCudaError;
 #[cfg(all(target_os = "windows", feature = "dxgi-capture"))]
 use crate::elements::DxgiCaptureSourceError;
 #[cfg(all(target_os = "windows", feature = "mf-capture"))]
@@ -27,6 +33,14 @@ use crate::elements::OrtDetectorError;
 use crate::elements::PipeWireAudioCaptureSourceError;
 #[cfg(all(target_os = "linux", feature = "pipewire-audio-renderer"))]
 use crate::elements::PipeWireAudioRendererError;
+#[cfg(all(
+    target_os = "linux",
+    any(
+        feature = "pipewire-audio-capture",
+        feature = "pipewire-audio-renderer"
+    )
+))]
+use crate::elements::PipeWireDeviceError;
 #[cfg(all(target_os = "linux", feature = "pipewire-screen-capture"))]
 use crate::elements::PipeWireScreenCaptureSourceError;
 use crate::elements::RtspMuxerError;
@@ -45,9 +59,9 @@ use crate::elements::WgcCaptureSourceError;
 use crate::elements::WhisperTranscriberError;
 #[cfg(feature = "cuda")]
 use crate::elements::{
-    CudaChromaKeyError, CudaConverterError, CudaDecoderError, CudaDownloadError, CudaEncoderError,
-    CudaRendererError, CudaScalerError, CudaUploadError, CudaVideoCompositorError,
-    CudaVideoEffectError,
+    CudaChromaKeyError, CudaConverterError, CudaDecoderError, CudaDeviceError, CudaDownloadError,
+    CudaDriverError, CudaEncoderError, CudaFrameError, CudaRendererError, CudaScalerError,
+    CudaUploadError, CudaVideoCompositorError, CudaVideoEffectError,
 };
 #[cfg(all(target_os = "windows", feature = "d3d11"))]
 use crate::elements::{
@@ -64,13 +78,14 @@ use crate::{
     elements::{
         AppSourceError, AudioCompressorError, AudioGateError, AudioLimiterError, AudioMixerError,
         AudioResamplerError, AudioVolumeError, FileDemuxError, FileMuxerError, HlsMuxerError,
-        MuxerTrackError, PacerError, ReplayBufferError, RtmpMuxerError, RtspSourceError,
+        MuxerTrackError, PacerError, RackError, ReplayBufferError, RtmpMuxerError, RtspSourceError,
         SwAudioEncoderError, SwChromaKeyError, SwDecoderError, SwEncoderError, SwScalerError,
         SwVideoCompositorError, SwVideoEffectError, TestAudioSourceError, TestVideoSourceError,
         VideoSynchronizerError,
     },
     graph::GraphError,
     log::LogInitError,
+    playback_clock::PlaybackClockError,
     queue::QueueError,
 };
 
@@ -147,7 +162,16 @@ pub enum D3d11SharedDeviceError {
 /// automatically: an element's own function returns its own error type,
 /// and the moment that gets used with `?` inside a function returning
 /// this top-level `Result`, it's converted here via `#[from]`.
+///
+/// Every public error type in this crate converts, so a caller never has to
+/// turn one into a string to get it past `?` — which would throw away what
+/// the type says and leave nothing to match on.
+///
+/// Non-exhaustive, because every new element adds a variant: a caller's
+/// `match` needs a `_` arm, and in return adding an element is not a
+/// breaking change.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum Error {
     /// Waiting for a pipeline-wide preroll failed.
     #[error(transparent)]
@@ -205,6 +229,21 @@ pub enum Error {
     #[error(transparent)]
     CudaRendererError(#[from] CudaRendererError),
 
+    /// The CUDA device could not be opened.
+    #[cfg(feature = "cuda")]
+    #[error(transparent)]
+    CudaDeviceError(#[from] CudaDeviceError),
+
+    /// The CUDA driver refused a call this crate makes to it directly.
+    #[cfg(feature = "cuda")]
+    #[error(transparent)]
+    CudaDriverError(#[from] CudaDriverError),
+
+    /// A frame handed to a CUDA element was not one it can read.
+    #[cfg(feature = "cuda")]
+    #[error(transparent)]
+    CudaFrameError(#[from] CudaFrameError),
+
     /// Uploading a frame to CUDA failed.
     #[cfg(feature = "cuda")]
     #[error(transparent)]
@@ -252,6 +291,34 @@ pub enum Error {
     /// A pacer could not schedule an input timestamp.
     #[error(transparent)]
     PacerError(#[from] PacerError),
+
+    /// A rack could not take the filters it was given.
+    #[error(transparent)]
+    RackError(#[from] RackError),
+
+    /// An audio renderer could not take or keep the playback clock.
+    #[error(transparent)]
+    PlaybackClockError(#[from] PlaybackClockError),
+
+    /// A PipeWire audio device could not be listed or opened.
+    #[cfg(all(
+        target_os = "linux",
+        any(
+            feature = "pipewire-audio-capture",
+            feature = "pipewire-audio-renderer"
+        )
+    ))]
+    #[error(transparent)]
+    PipeWireDeviceError(#[from] PipeWireDeviceError),
+
+    /// A PipeWire DMA-BUF could not be brought into CUDA.
+    #[cfg(all(
+        target_os = "linux",
+        feature = "pipewire-screen-capture",
+        feature = "cuda"
+    ))]
+    #[error(transparent)]
+    DmaBufCudaError(#[from] DmaBufCudaError),
 
     /// A video synchronizer could not schedule an input frame.
     #[error(transparent)]

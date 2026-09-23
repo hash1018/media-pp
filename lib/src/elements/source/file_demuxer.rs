@@ -28,6 +28,11 @@ pub enum FileDemuxError {
     /// FFmpeg rejected opening, reading, or seeking the input container.
     #[error("ffmpeg error: {0}")]
     Ffmpeg(#[from] ffmpeg::Error),
+
+    /// The file has no stream of the kind asked for — see
+    /// [`FileDemuxer::best`].
+    #[error("the file has no {0:?} stream")]
+    NoStream(ffmpeg::media::Type),
 }
 
 /// Metadata about one stream in an opened container, reported up front so
@@ -297,6 +302,23 @@ impl FileDemuxer {
     /// picture and prefers one with more than a single frame.
     pub fn best_stream(&self, kind: ffmpeg::media::Type) -> Option<usize> {
         self.input.streams().best(kind).map(|stream| stream.index())
+    }
+
+    /// The same choice, as everything a branch for it is built from — or a
+    /// [`FileDemuxError::NoStream`] naming the kind the file lacks, so
+    /// finding the video to play is one `?`:
+    ///
+    /// ```ignore
+    /// let (source, _streams) = FileDemuxer::open("demux", path)?;
+    /// let video = source.best(media::Type::Video)?;
+    /// let decoder = SwDecoder::new("decoder", video.parameters.clone())?;
+    /// ```
+    pub fn best(&self, kind: ffmpeg::media::Type) -> Result<StreamInfo, FileDemuxError> {
+        self.input
+            .streams()
+            .best(kind)
+            .map(|stream| StreamInfo::of(&stream))
+            .ok_or(FileDemuxError::NoStream(kind))
     }
 
     fn stream(&self, index: usize) -> Option<ffmpeg::format::stream::Stream<'_>> {
@@ -1495,6 +1517,23 @@ mod tests {
             "and the video is the one to play"
         );
         assert_eq!(demuxer.best_stream(ffmpeg::media::Type::Audio), None);
+
+        // `best` makes the same choice, as the stream's whole description,
+        // and says which kind is missing rather than answering nothing.
+        let video = demuxer
+            .best(ffmpeg::media::Type::Video)
+            .expect("the file has a video stream");
+        assert_eq!(video.index, 1, "the same choice as best_stream");
+        assert_eq!(video.time_base, streams[1].time_base);
+        assert_eq!(video.parameters.id(), streams[1].parameters.id());
+        let missing = demuxer
+            .best(ffmpeg::media::Type::Audio)
+            .expect_err("the file has no audio");
+        assert!(matches!(
+            missing,
+            FileDemuxError::NoStream(ffmpeg::media::Type::Audio)
+        ));
+        assert_eq!(missing.to_string(), "the file has no Audio stream");
     }
 
     /// What `open` reports for a stream is what asking by its index answers:

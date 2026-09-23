@@ -48,7 +48,7 @@ mod example {
         // One CUDA context for both stages — the invariant every CUDA element in
         // this crate is built around, and what the encoder validates every
         // incoming frame against.
-        let cuda = CudaDevice::new().map_err(|e| media_pp::Error::Other(e.to_string()))?;
+        let cuda = CudaDevice::new()?;
         let (source, source_handle) = AppSource::new("source", 8);
 
         let encoder = CudaEncoder::new(
@@ -65,8 +65,7 @@ mod example {
                 gop_size: 60,
                 max_b_frames: None,
             },
-        )
-        .map_err(|e| media_pp::Error::Other(e.to_string()))?;
+        )?;
 
         let mut muxer = FileMuxer::create(&recording.path)?;
         let track = muxer.add_stream("video", encoder.parameters(), recording.time_base)?;
@@ -83,8 +82,7 @@ mod example {
                 height,
                 ffmpeg::software::scaling::Flags::BILINEAR,
             );
-            let upload = CudaUpload::new("upload", &cuda, CudaFrameFormat::Nv12)
-                .map_err(|e| media_pp::Error::Other(e.to_string()))?;
+            let upload = CudaUpload::new("upload", &cuda, CudaFrameFormat::Nv12)?;
             let branch = ctx
                 .branch()
                 .pipe(scaler)

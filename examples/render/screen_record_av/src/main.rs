@@ -86,16 +86,14 @@ mod windows_example {
             DxgiCaptureSource::open("screen", capture_options)?;
         let video_time_base = video_format.time_base;
 
-        let devices = WasapiCaptureSource::list_devices()
-            .map_err(|e| media_pp::Error::Other(e.to_string()))?;
+        let devices = WasapiCaptureSource::list_devices()?;
         let device = devices
             .into_iter()
             .find(|d| d.kind == WasapiDeviceKind::Render && d.is_default)
             .ok_or_else(|| media_pp::Error::Other("no default playback device found".into()))?;
         println!("capturing system audio from: {}", device.name);
         let (audio_source, audio_format) =
-            WasapiCaptureSource::open("system-audio", WasapiCaptureOptions { device })
-                .map_err(|e| media_pp::Error::Other(e.to_string()))?;
+            WasapiCaptureSource::open("system-audio", WasapiCaptureOptions { device })?;
         let audio_time_base = audio_source.time_base();
 
         let video_encoder = SwEncoder::new(
@@ -276,8 +274,7 @@ mod linux_example {
         // window of any size at all.
         let (width, height) = (video_format.width & !1, video_format.height & !1);
 
-        let devices = PipeWireAudioCaptureSource::list_devices()
-            .map_err(|e| media_pp::Error::Other(e.to_string()))?;
+        let devices = PipeWireAudioCaptureSource::list_devices()?;
         let device = devices
             .iter()
             .find(|d| d.kind == PipeWireAudioDeviceKind::Sink && d.is_default)
@@ -294,8 +291,7 @@ mod linux_example {
         let (audio_source, audio_format) = PipeWireAudioCaptureSource::open(
             "system-audio",
             PipeWireAudioCaptureOptions { device },
-        )
-        .map_err(|e| media_pp::Error::Other(e.to_string()))?;
+        )?;
         let audio_time_base = audio_source.time_base();
 
         let video_encoder = SwEncoder::new(

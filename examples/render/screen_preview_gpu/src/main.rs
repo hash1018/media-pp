@@ -434,7 +434,7 @@ mod linux_example {
         // surfaces on it, the converter allocates from it, and the renderer
         // imports its Vulkan memory into it. Each element rejects a frame
         // from a different one.
-        let cuda = CudaDevice::new().map_err(|error| media_pp::Error::Other(error.to_string()))?;
+        let cuda = CudaDevice::new()?;
         let (source, format, restore_token) = PipeWireScreenCaptureSource::open_gpu(
             "screen",
             PipeWireScreenCaptureOptions {
@@ -454,8 +454,7 @@ mod linux_example {
             // capture is refused here rather than at the first frame — see
             // `CudaConverter`, whose chroma has no half sample to write.
             let converter =
-                CudaConverter::new("convert", &cuda, media_pp::elements::CudaFrameFormat::Nv12)
-                    .map_err(|error| media_pp::Error::Other(error.to_string()))?;
+                CudaConverter::new("convert", &cuda, media_pp::elements::CudaFrameFormat::Nv12)?;
             let renderer = render_common::cuda_window_renderer(
                 "renderer",
                 &gpu,

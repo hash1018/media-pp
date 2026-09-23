@@ -54,8 +54,7 @@ mod windows_example {
             7,
         )?;
 
-        let devices = WasapiRenderer::list_devices()
-            .map_err(|error| media_pp::Error::Other(error.to_string()))?;
+        let devices = WasapiRenderer::list_devices()?;
         let argument = std::env::args().nth(1);
         if argument.as_deref() == Some("list") {
             for device in &devices {
@@ -78,8 +77,7 @@ mod windows_example {
         println!("selected: {}", device.name);
 
         let (renderer, output_format) =
-            WasapiRenderer::open("speakers", WasapiRendererOptions { device })
-                .map_err(|error| media_pp::Error::Other(error.to_string()))?;
+            WasapiRenderer::open("speakers", WasapiRendererOptions { device })?;
         println!(
             "output: {}Hz, {} channel(s), {:?}",
             output_format.sample_rate, output_format.channels, output_format.sample_format
@@ -158,8 +156,7 @@ mod linux_example {
             7,
         )?;
 
-        let devices = PipeWireAudioRenderer::list_devices()
-            .map_err(|error| media_pp::Error::Other(error.to_string()))?;
+        let devices = PipeWireAudioRenderer::list_devices()?;
         let argument = std::env::args().nth(1);
         if argument.as_deref() == Some("list") {
             for device in &devices {
@@ -186,8 +183,7 @@ mod linux_example {
         println!("selected: {}", device.name);
 
         let (renderer, output_format) =
-            PipeWireAudioRenderer::open("speakers", PipeWireAudioRendererOptions { device })
-                .map_err(|error| media_pp::Error::Other(error.to_string()))?;
+            PipeWireAudioRenderer::open("speakers", PipeWireAudioRendererOptions { device })?;
         println!(
             "output: {}Hz, {} channel(s), {:?}",
             output_format.sample_rate, output_format.channels, output_format.sample_format

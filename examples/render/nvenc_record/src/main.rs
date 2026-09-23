@@ -82,8 +82,7 @@ mod windows_example {
                 gop_size: 60,
                 max_b_frames: None,
             },
-        )
-        .map_err(|e| media_pp::Error::Other(e.to_string()))?;
+        )?;
 
         let mut muxer = FileMuxer::create(&recording.path)?;
         let track = muxer.add_stream("video", encoder.parameters(), recording.time_base)?;
