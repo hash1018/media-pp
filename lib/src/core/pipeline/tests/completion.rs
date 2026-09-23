@@ -283,13 +283,10 @@ fn detaching_the_branch_that_failed_to_end_finishes_the_rest() {
 /// A seek sends a new stream through terminals that already ended the old
 /// one, so the pipeline is not finished again until they end that one too
 /// — and then it is, and says so a second time.
-///
-/// No `Queue` in this branch: a queue's worker ends with the `Eos` it
-/// forwards, so a queued branch cannot yet be sought once it has ended.
 #[test]
 fn a_seek_after_the_end_finishes_again_at_the_new_end() {
     let pipeline = Pipeline::new("finished-seek", EndingSource::new(3), |source, ctx| {
-        let branch = ctx.branch().to(EndingSink::new("sink"))?;
+        let branch = ctx.branch().queue("queue", 8).to(EndingSink::new("sink"))?;
         ctx.attach(source, 0, branch)?;
         Ok(())
     })
