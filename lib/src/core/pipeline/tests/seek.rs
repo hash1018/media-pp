@@ -853,3 +853,131 @@ fn detaching_a_branch_mid_seek_does_not_strand_its_preroll() {
         "the seek waited {elapsed:?} on a terminal that had left the graph"
     );
 }
+
+/// Pushes `buffers` packets and then `Eos`, and does both again after every
+/// seek — a file played to its end and parked there, then played to it
+/// again from wherever it was sent back to.
+struct EndingSource {
+    pp_log: PpLog,
+    pad: SrcPad,
+    buffers: usize,
+    /// Whether the stream from the last start or seek still has to be sent.
+    owed: bool,
+}
+
+impl Element for EndingSource {
+    fn name(&self) -> Arc<str> {
+        "ending".into()
+    }
+
+    fn element_type(&self) -> ElementType {
+        ElementType::Other
+    }
+
+    fn pp_log(&self) -> &PpLog {
+        &self.pp_log
+    }
+
+    fn pp_log_mut(&mut self) -> &mut PpLog {
+        &mut self.pp_log
+    }
+}
+
+impl Source for EndingSource {
+    fn src_pads(&mut self) -> &mut [SrcPad] {
+        std::slice::from_mut(&mut self.pad)
+    }
+}
+
+impl SourceElement for EndingSource {
+    fn is_live(&self) -> bool {
+        false
+    }
+
+    fn is_seekable(&self) -> bool {
+        true
+    }
+
+    fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
+        loop {
+            if drain_control(control, self, bus)?.stopped {
+                return Ok(());
+            }
+            if self.owed {
+                self.owed = false;
+                for _ in 0..self.buffers {
+                    self.pad
+                        .push(MediaBuffer::Packet(Arc::new(ffmpeg::Packet::empty())))?;
+                }
+                self.pad.push(MediaBuffer::Eos)?;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    fn seek(&mut self, target: Duration) -> Result<Duration> {
+        self.owed = true;
+        Ok(target)
+    }
+}
+
+/// Reads the bus until `name` posts `Eos`, failing rather than hanging if it
+/// never does.
+fn wait_for_eos_from(pipeline: &Pipeline, name: &str) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        match pipeline.bus().try_recv() {
+            Some(BusEvent::Eos { name: from, .. }) if &*from == name => return,
+            Some(_) => {}
+            None => thread::sleep(Duration::from_millis(1)),
+        }
+    }
+    panic!("{name} never reached the end of its stream");
+}
+
+/// A pipeline played to its end can be sought back into, through a `Queue`.
+///
+/// A queue's worker used to end with the `Eos` it forwarded. The source,
+/// parked at its end, took the seek and sent its stream again — which then
+/// stopped at the queue, so the terminal behind it never reported a preroll
+/// sample and the seek failed with `PrerollError::TimedOut` five seconds
+/// later. The same pipeline without the queue always worked.
+#[test]
+fn a_queued_branch_can_be_sought_after_it_has_played_to_its_end() {
+    let seen = Arc::new(AtomicUsize::new(0));
+    let source = EndingSource {
+        pp_log: element_pp_log(ElementType::Other, "ending", None),
+        pad: SrcPad::new("ending_src"),
+        buffers: 3,
+        owed: true,
+    };
+    let pipeline = Pipeline::new("seek-after-end", source, |source, ctx| {
+        let branch = ctx.branch().queue("queue", 8).to(CountingSink {
+            name: "sink".into(),
+            count: Arc::clone(&seen),
+            pp_log: element_pp_log(ElementType::Other, "sink", None),
+        })?;
+        ctx.attach(source, 0, branch)?;
+        Ok(())
+    })
+    .expect("pipeline wiring");
+
+    pipeline.run().expect("run");
+    wait_for_eos_from(&pipeline, "sink");
+    assert_eq!(seen.load(Ordering::SeqCst), 3);
+
+    let started = Instant::now();
+    let outcome = pipeline.seek(Duration::ZERO, SeekMode::Keyframe);
+    let elapsed = started.elapsed();
+    assert!(
+        outcome.is_ok(),
+        "seeking back into an ended stream failed after {elapsed:?}: {outcome:?}"
+    );
+    wait_for_eos_from(&pipeline, "sink");
+    pipeline.stop();
+    assert_eq!(
+        seen.load(Ordering::SeqCst),
+        6,
+        "the whole second stream crossed the queue"
+    );
+}

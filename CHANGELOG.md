@@ -896,6 +896,18 @@ compile error with no explanation.
 
 ### Fixed
 
+- **A pipeline played to its end can be sought through a `Queue`.** A
+  queue's worker ended with the `Eos` it forwarded, so once a `FileDemuxer`
+  had reached the end of its file, a seek repositioned it and its new
+  stream stopped at the first `Queue`: the terminal behind it never saw a
+  sample and `Pipeline::seek` failed with `PrerollError::TimedOut` five
+  seconds later. The worker now goes back to waiting after `Eos`, and only
+  `Stop` or dropping the `Queue` ends it, as before. What changes to see is
+  that elements behind a queue now receive the `Stop` that ends a pipeline
+  after their `Eos`, as those in a branch without one always did, and are
+  released at that `Stop` or when their source is dropped, rather than at
+  `Eos`.
+
 - **`RtspSource`'s packets carry their stream's time base.** FFmpeg does not
   promise to fill a demuxed packet's, and `FileDemuxer` already stamped it;
   `RtspSource` did not, so a packet-level element downstream could read a

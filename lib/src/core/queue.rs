@@ -157,6 +157,16 @@ impl Default for OverflowPolicy {
 /// behalf; watch [`crate::pipeline::Pipeline::bus`] and call
 /// [`crate::pipeline::Pipeline::stop`] yourself if a particular error
 /// means the whole pipeline should end.
+///
+/// Nor does `MediaBuffer::Eos`. The worker forwards it behind everything
+/// queued before it, posts [`BusEvent::Eos`] once downstream has accepted
+/// it, and goes back to waiting: the end of a stream is not the end of the
+/// pipeline. A source that parks at its end — [`crate::elements::FileDemuxer`]
+/// played to the last packet — can still be sought, and that seek's
+/// `Flush`, `Seek`, and `Preroll`, and then the new stream, reach
+/// downstream through this same worker. Only `ControlMsg::Stop` or dropping
+/// the `Queue` ends it, and both still join it: dropping one idle after
+/// `Eos` returns within one short internal poll interval.
 pub struct Queue {
     pp_log: PpLog,
     name: Arc<str>,
@@ -368,9 +378,9 @@ impl Sink for Queue {
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         // EOS must never be dropped, regardless of policy: unlike an
         // explicit Stop or Queue::drop's private stop flag, this is the
-        // natural-completion signal that tells the worker to finish only
-        // after everything queued before it has reached downstream. The
-        // policy timeout intentionally does not apply to this send.
+        // natural-completion signal, and it reaches downstream only after
+        // everything queued before it has. The policy timeout intentionally
+        // does not apply to this send.
         if buf.is_eos() {
             pp_trace!(pp_log: &self.pp_log, "event=eos phase=received");
             let result = self
@@ -623,7 +633,12 @@ fn worker_loop(
                                             name: name.clone(),
                                         },
                                     );
-                                    return;
+                                    // Not a return: `Eos` ends a stream, not
+                                    // this queue. A source that parks at its
+                                    // end can still be sought, and the
+                                    // `Flush`/`Seek`/`Preroll` that follow
+                                    // need a worker here to carry them and
+                                    // the new stream — see the type docs.
                                 }
                             }
                             Err(error) => {
@@ -1481,9 +1496,10 @@ mod tests {
     ///
     /// This pins a consequence rather than a mechanism, because the
     /// consequence is what a caller meets. `Eos` is definitionally the last
-    /// buffer, so a worker that treats its failure the way it treats a
-    /// mid-stream one has nothing left to ever receive: it posts the error,
-    /// goes back to waiting, and never posts [`BusEvent::Eos`].
+    /// buffer of its stream, so a worker that treats its failure the way it
+    /// treats a mid-stream one has nothing left to receive until a seek
+    /// starts another: it posts the error, goes back to waiting — as it
+    /// does after an accepted `Eos` too — and never posts [`BusEvent::Eos`].
     ///
     /// A caller watching the bus for completion therefore waits until
     /// something calls `Pipeline::stop`, which is this crate's stated
@@ -1535,6 +1551,131 @@ mod tests {
         assert!(
             !events.iter().any(|e| matches!(e, BusEvent::Eos { .. })),
             "and the stream is never declared finished, because it was not"
+        );
+    }
+
+    /// Records what reached it, in order: each buffer's kind and each
+    /// control message's name.
+    struct Recorder {
+        pp_log: PpLog,
+        seen: Arc<std::sync::Mutex<Vec<&'static str>>>,
+    }
+
+    impl Element for Recorder {
+        fn name(&self) -> Arc<str> {
+            "recorder".into()
+        }
+
+        fn element_type(&self) -> ElementType {
+            ElementType::Other
+        }
+
+        fn pp_log(&self) -> &PpLog {
+            &self.pp_log
+        }
+
+        fn pp_log_mut(&mut self) -> &mut PpLog {
+            &mut self.pp_log
+        }
+    }
+
+    impl Sink for Recorder {
+        fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+            let label = if buf.is_eos() { "eos" } else { "packet" };
+            self.seen.lock().unwrap().push(label);
+            Ok(())
+        }
+
+        fn control(&mut self, msg: ControlMsg) -> Result<()> {
+            let label = match msg {
+                ControlMsg::Flush => "flush",
+                ControlMsg::Seek(_) => "seek",
+                ControlMsg::Stop => "stop",
+                _ => "other-control",
+            };
+            self.seen.lock().unwrap().push(label);
+            Ok(())
+        }
+    }
+
+    /// Waits for the queue's next `BusEvent::Eos`, failing rather than
+    /// hanging if it never comes.
+    fn expect_eos(bus_rx: &crate::bus::BusReceiver) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            match bus_rx.try_recv() {
+                Some(BusEvent::Eos { .. }) => return,
+                Some(_) => {}
+                None => thread::sleep(Duration::from_millis(1)),
+            }
+        }
+        panic!("the queue never declared the stream finished");
+    }
+
+    /// `Eos` ends a stream, not the queue: what a seek sends after the end
+    /// of a file — `Flush`, `Seek`, and then a new stream with its own
+    /// `Eos` — still reaches downstream, and `Stop` still reaches it after
+    /// that.
+    ///
+    /// The worker used to return as soon as it had forwarded `Eos`. A
+    /// pipeline whose source parks at its end waiting for a seek could then
+    /// never be sought once it got there if a branch had a `Queue` in it:
+    /// the new stream stopped at the queue, the terminal behind it never
+    /// saw a sample, and the seek's preroll timed out.
+    #[test]
+    fn a_new_stream_after_eos_and_a_flush_still_reaches_downstream() {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = Recorder {
+            pp_log: element_pp_log(ElementType::Other, "recorder", None),
+            seen: Arc::clone(&seen),
+        };
+        let (bus, bus_rx) = Bus::new();
+        let mut queue = Queue::spawn("test", 8, Box::new(sink), bus, None).unwrap();
+
+        queue.consume(packet()).unwrap();
+        queue.consume(MediaBuffer::Eos).unwrap();
+        expect_eos(&bus_rx);
+
+        queue.control(ControlMsg::Flush).unwrap();
+        queue.control(ControlMsg::Seek(Duration::ZERO)).unwrap();
+        queue.consume(packet()).unwrap();
+        queue.consume(MediaBuffer::Eos).unwrap();
+        expect_eos(&bus_rx);
+
+        queue.control(ControlMsg::Stop).unwrap();
+        assert_eq!(
+            *seen.lock().unwrap(),
+            ["packet", "eos", "flush", "seek", "packet", "eos", "stop"]
+        );
+        drop(queue);
+    }
+
+    /// A worker left waiting after `Eos` is still ended promptly by dropping
+    /// its `Queue` — the path a pipeline's teardown takes once a source has
+    /// played to its end and returned.
+    #[test]
+    fn dropping_after_eos_joins_the_worker_promptly() {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let sink = DropAwareSink {
+            dropped: Arc::clone(&dropped),
+            pp_log: element_pp_log(ElementType::Other, "drop-aware", None),
+        };
+        let (bus, bus_rx) = Bus::new();
+        let mut queue = Queue::spawn("test", 8, Box::new(sink), bus, None).unwrap();
+        queue.consume(packet()).unwrap();
+        queue.consume(MediaBuffer::Eos).unwrap();
+        expect_eos(&bus_rx);
+
+        let started = std::time::Instant::now();
+        drop(queue);
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "joining an idle worker took {:?}",
+            started.elapsed()
+        );
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "the join released everything downstream"
         );
     }
 }
