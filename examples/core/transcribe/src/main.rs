@@ -57,8 +57,8 @@ mod example {
     use std::sync::{Arc, Mutex};
 
     use media_pp::elements::{
-        AudioFormat, AudioResampler, ChunkPolicy, FileDemuxer, FileMuxer, SwDecoder, TeeBuilder,
-        TokenTiming, WHISPER_SAMPLE_RATE, WhisperTranscriber,
+        AudioFormat, AudioResampler, ChunkPolicy, FileDemuxer, FileMuxer, SwDecoder, TokenTiming,
+        WHISPER_SAMPLE_RATE, WhisperTranscriber,
     };
     use media_pp::ffmpeg;
     use media_pp::{
@@ -267,7 +267,8 @@ mod example {
                 .pipe(resampler)
                 .queue("speech", AUDIO_QUEUE_DEPTH)
                 .to(transcriber)?;
-            let tee = TeeBuilder::new("audio-tee", ctx.clone())
+            let tee = ctx
+                .tee("audio-tee")
                 .branch(copy_branch)
                 .branch(listen_branch)
                 .build()?;

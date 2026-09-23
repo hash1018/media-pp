@@ -172,7 +172,7 @@ impl Pipeline {
     /// ```ignore
     /// let (pipeline, ()) = Pipeline::new("play", source, |source, ctx| { /* ... */ Ok(()) })?;
     /// let (pipeline, tee) = Pipeline::new("fan", source, |source, ctx| {
-    ///     let (branch, tee) = TeeBuilder::new("tee", ctx.clone()).build_dynamic()?;
+    ///     let (branch, tee) = ctx.tee("tee").build_dynamic()?;
     ///     ctx.attach(source, 0, branch)?;
     ///     Ok(tee)
     /// })?;

@@ -9,7 +9,6 @@ fn main() -> impl std::process::Termination {
 }
 
 mod example {
-    use std::sync::atomic::Ordering;
 
     use media_pp::ffmpeg::media;
     use media_pp::{
@@ -68,7 +67,7 @@ mod example {
             }
         }
 
-        println!("decoded frames: {}", frame_count.load(Ordering::Relaxed));
+        println!("decoded frames: {}", frame_count.get());
         Ok(())
     }
 }

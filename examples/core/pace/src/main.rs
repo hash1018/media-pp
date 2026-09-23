@@ -10,7 +10,7 @@ fn main() -> impl std::process::Termination {
 }
 
 mod example {
-    use std::{sync::atomic::Ordering, time::Instant};
+    use std::time::Instant;
 
     use media_pp::ffmpeg::media;
     use media_pp::{
@@ -70,7 +70,7 @@ mod example {
             }
         }
 
-        println!("decoded frames: {}", frame_count.load(Ordering::Relaxed));
+        println!("decoded frames: {}", frame_count.get());
         println!("wall time: {:.2}s", start.elapsed().as_secs_f64());
         Ok(())
     }

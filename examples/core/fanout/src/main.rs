@@ -10,7 +10,6 @@ fn main() -> impl std::process::Termination {
 }
 
 mod example {
-    use std::sync::atomic::Ordering;
 
     use media_pp::ffmpeg::media;
     use media_pp::{
@@ -65,8 +64,8 @@ mod example {
         // drained and joined (i.e. every `Bus` handle in the pipeline dropped).
         pipeline.bus().log_events();
 
-        println!("video packets: {}", video_count.load(Ordering::Relaxed));
-        println!("audio packets: {}", audio_count.load(Ordering::Relaxed));
+        println!("video packets: {}", video_count.get());
+        println!("audio packets: {}", audio_count.get());
         Ok(())
     }
 }

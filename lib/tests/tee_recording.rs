@@ -8,14 +8,13 @@
 //! on EOS, and an MP4 without one has no `moov` atom at all.
 
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use media_pp::{
     buffer::MediaBuffer,
     bus::BusEvent,
     elements::{
-        AppSource, FileMuxer, FrameCounter, SwEncoder, SwEncoderOptions, SwScaler, TeeBuilder,
+        AppSource, FileMuxer, FrameCounter, SwEncoder, SwEncoderOptions, SwScaler,
         TestVideoOptions, TestVideoSource, VideoCodec,
     },
     pipeline::Pipeline,
@@ -51,9 +50,7 @@ fn finishing_a_recording_branch_leaves_a_playable_file_and_a_running_preview() {
     let mut tee_handle = None;
     let (pipeline, ()) = Pipeline::new("tee-recording", source, |source, ctx| {
         let preview_branch = ctx.branch().to(preview)?;
-        let (tee_branch, handle) = TeeBuilder::new("tee", ctx.clone())
-            .branch(preview_branch)
-            .build_dynamic()?;
+        let (tee_branch, handle) = ctx.tee("tee").branch(preview_branch).build_dynamic()?;
         ctx.attach(source, 0, tee_branch)?;
         tee_handle = Some(handle);
         Ok(())
@@ -62,7 +59,7 @@ fn finishing_a_recording_branch_leaves_a_playable_file_and_a_running_preview() {
     let tee = tee_handle.expect("the wire closure provides the TeeHandle");
 
     pipeline.run().expect("start the preview pipeline");
-    wait_until(|| preview_frames.load(Ordering::Relaxed) > 0);
+    wait_until(|| preview_frames.get() > 0);
 
     // --- the record button ---
     let encoder = SwEncoder::new(
@@ -105,8 +102,8 @@ fn finishing_a_recording_branch_leaves_a_playable_file_and_a_running_preview() {
         .expect("build the recording branch");
     let recording_id = tee.attach(recording).expect("attach the recording branch");
 
-    let frames_at_start = preview_frames.load(Ordering::Relaxed);
-    wait_until(|| preview_frames.load(Ordering::Relaxed) >= frames_at_start + 20);
+    let frames_at_start = preview_frames.get();
+    wait_until(|| preview_frames.get() >= frames_at_start + 20);
 
     // --- the stop button ---
     // Returns immediately; the drain runs on a thread the Tee owns.
@@ -120,8 +117,8 @@ fn finishing_a_recording_branch_leaves_a_playable_file_and_a_running_preview() {
 
     // The preview is unaffected — that is the whole reason this is a Tee
     // branch and not the pipeline's own EOS.
-    let frames_after_stop = preview_frames.load(Ordering::Relaxed);
-    wait_until(|| preview_frames.load(Ordering::Relaxed) > frames_after_stop);
+    let frames_after_stop = preview_frames.get();
+    wait_until(|| preview_frames.get() > frames_after_stop);
 
     // The file is complete once the terminal reports its EOS, not when
     // `finish_branch` returns.
@@ -173,9 +170,7 @@ fn finishing_a_recording_branch_loses_no_frame_that_reached_it() {
     let mut tee_handle = None;
     let (pipeline, ()) = Pipeline::new("tee-frame-count", source, |source, ctx| {
         let preview_branch = ctx.branch().to(preview)?;
-        let (tee_branch, handle) = TeeBuilder::new("tee", ctx.clone())
-            .branch(preview_branch)
-            .build_dynamic()?;
+        let (tee_branch, handle) = ctx.tee("tee").branch(preview_branch).build_dynamic()?;
         ctx.attach(source, 0, tee_branch)?;
         tee_handle = Some(handle);
         Ok(())
@@ -235,7 +230,7 @@ fn finishing_a_recording_branch_loses_no_frame_that_reached_it() {
 
     // The preview counter is the proof that the Tee has actually handed all
     // of them to its branches: `push` only reaches the source's channel.
-    wait_until(|| preview_frames.load(Ordering::Relaxed) >= FRAMES);
+    wait_until(|| preview_frames.get() >= FRAMES);
 
     tee.finish_branch(recording_id)
         .expect("finish the recording branch");

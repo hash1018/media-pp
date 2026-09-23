@@ -850,7 +850,7 @@ mod tests {
             .collect();
         assert!(errors.is_empty(), "transcode reported errors: {errors:?}");
         assert!(
-            encoded.load(std::sync::atomic::Ordering::Relaxed) > 0,
+            encoded.get() > 0,
             "no packets came out of the decode-to-encode chain"
         );
     }

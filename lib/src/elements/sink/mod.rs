@@ -6,7 +6,8 @@
 //! present to a device or window, and
 //! [`AppSink`] hands buffers back to the application. [`FrameCounter`] and
 //! [`PacketCounter`] are the trivial terminals that make a graph runnable
-//! while something upstream is being tested.
+//! while something upstream is being tested; each hands back a
+//! [`CounterHandle`] to read what it counted.
 //!
 //! A sink is where [`Eos`](crate::buffer::MediaBuffer::Eos) stops travelling
 //! and has to be acted on: anything holding delayed data flushes and finalizes
@@ -15,6 +16,7 @@
 //! cannot reclaim a worker parked inside one.
 
 mod app_sink;
+mod counter;
 mod frame_counter;
 mod muxer;
 #[cfg(feature = "ort")]
@@ -25,6 +27,7 @@ mod renderer;
 mod whisper_transcriber;
 
 pub use app_sink::AppSink;
+pub use counter::CounterHandle;
 pub use frame_counter::FrameCounter;
 pub use muxer::{FileMuxer, FileMuxerError, SegmentPolicy, SegmentedFileMuxer};
 pub use muxer::{HlsMode, HlsMuxer, HlsMuxerError, HlsOptions, HlsSegmentFormat};

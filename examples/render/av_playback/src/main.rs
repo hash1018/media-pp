@@ -100,8 +100,8 @@ mod windows_example {
         Error,
         bus::BusEvent,
         elements::{
-            AudioResampler, D3d12Upload, SwDecoder, SwScaler, TeeBuilder, VideoSynchronizer,
-            WasapiRenderer, WasapiRendererOptions,
+            AudioResampler, D3d12Upload, SwDecoder, SwScaler, VideoSynchronizer, WasapiRenderer,
+            WasapiRendererOptions,
         },
         ffmpeg,
         pipeline::Pipeline,
@@ -164,8 +164,7 @@ mod windows_example {
                 // Keep a stable insertion point on the demuxer's audio pad. With
                 // no branches attached the Tee cheaply drops packets, so playback
                 // starts video-only without decoding audio.
-                let (audio_tee, handle) =
-                    TeeBuilder::new("audio-tee", context.clone()).build_dynamic()?;
+                let (audio_tee, handle) = context.tee("audio-tee").build_dynamic()?;
                 context.attach(source, streams.audio_index, audio_tee)?;
                 Ok(handle)
             })?;
@@ -227,7 +226,7 @@ mod linux_example {
         Error,
         elements::{
             AudioResampler, CudaDecoder, CudaDevice, PipeWireAudioRenderer,
-            PipeWireAudioRendererOptions, SwDecoder, TeeBuilder, TeeHandle, VideoSynchronizer,
+            PipeWireAudioRendererOptions, SwDecoder, TeeHandle, VideoSynchronizer,
         },
         pipeline::Pipeline,
     };
@@ -285,8 +284,7 @@ mod linux_example {
                     )?)?;
                 context.attach(source, streams.video_index, video_branch)?;
 
-                let (audio_tee, handle) =
-                    TeeBuilder::new("audio-tee", context.clone()).build_dynamic()?;
+                let (audio_tee, handle) = context.tee("audio-tee").build_dynamic()?;
                 context.attach(source, streams.audio_index, audio_tee)?;
                 Ok(handle)
             })?;

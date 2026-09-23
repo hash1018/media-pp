@@ -29,7 +29,7 @@ fn main() -> impl std::process::Termination {
 
 #[cfg(target_os = "windows")]
 mod windows_example {
-    use std::{sync::atomic::Ordering, thread, time::Duration};
+    use std::{thread, time::Duration};
 
     use media_pp::{
         Result,
@@ -110,7 +110,7 @@ mod windows_example {
             }
         }
 
-        println!("buffers captured: {}", count.load(Ordering::Relaxed));
+        println!("buffers captured: {}", count.get());
         Ok(())
     }
 }
@@ -127,7 +127,7 @@ mod windows_example {
 /// platforms genuinely diverge — see `PipeWireScreenCaptureSource`'s docs.
 #[cfg(target_os = "linux")]
 mod linux_example {
-    use std::{sync::atomic::Ordering, thread, time::Duration};
+    use std::{thread, time::Duration};
 
     use media_pp::{
         Result,
@@ -223,7 +223,7 @@ mod linux_example {
             }
         }
 
-        println!("buffers captured: {}", count.load(Ordering::Relaxed));
+        println!("buffers captured: {}", count.get());
         Ok(())
     }
 }

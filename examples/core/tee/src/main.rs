@@ -13,11 +13,10 @@ fn main() -> impl std::process::Termination {
 }
 
 mod example {
-    use std::sync::atomic::Ordering;
 
     use media_pp::ffmpeg::media;
     use media_pp::{
-        elements::{FileDemuxer, FrameCounter, PacketCounter, SwDecoder, TeeBuilder},
+        elements::{FileDemuxer, FrameCounter, PacketCounter, SwDecoder},
         pipeline::Pipeline,
     };
 
@@ -52,7 +51,8 @@ mod example {
             let decode_branch = ctx.branch().pipe(decoder).to(frame_counter)?;
             let packet_branch = ctx.branch().to(packet_counter)?;
 
-            let tee_branch = TeeBuilder::new("tee", ctx.clone())
+            let tee_branch = ctx
+                .tee("tee")
                 .branch(decode_branch)
                 .branch(packet_branch)
                 .build()?;
@@ -63,8 +63,8 @@ mod example {
         pipeline.run()?;
         pipeline.bus().log_events();
 
-        println!("decoded frames: {}", frame_count.load(Ordering::Relaxed));
-        println!("raw packets: {}", packet_count.load(Ordering::Relaxed));
+        println!("decoded frames: {}", frame_count.get());
+        println!("raw packets: {}", packet_count.get());
         Ok(())
     }
 }

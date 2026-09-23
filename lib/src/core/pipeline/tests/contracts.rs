@@ -975,7 +975,8 @@ fn an_initial_tee_branch_is_checked_against_what_the_tee_receives() {
         .branch()
         .to(audio_sink("speakers"))
         .expect("the branch itself is consistent");
-    let tee = TeeBuilder::new("tee", context.clone())
+    let tee = context
+        .tee("tee")
         .branch(audio_branch)
         .build()
         .expect("building the fan-out does not check it against a source");
@@ -1020,7 +1021,8 @@ fn every_valid_initial_tee_branch_attaches() {
         .queue("q", 4)
         .to(DeclaringSink::boxed("second", video_frames()))
         .expect("consistent");
-    let tee = TeeBuilder::new("tee", context.clone())
+    let tee = context
+        .tee("tee")
         .branch(one)
         .branch(two)
         .build()
@@ -1044,7 +1046,8 @@ fn a_dynamic_tee_branch_is_checked_and_a_refusal_changes_nothing() {
         .branch()
         .to(DeclaringSink::boxed("renderer", video_frames()))
         .expect("consistent");
-    let (tee, handle) = TeeBuilder::new("tee", context.clone())
+    let (tee, handle) = context
+        .tee("tee")
         .branch(initial)
         .build_dynamic()
         .expect("consistent");
@@ -1103,7 +1106,8 @@ fn detaching_a_dynamic_tee_branch_releases_its_resolved_contracts() {
         .branch()
         .to(DeclaringSink::boxed("fixed", video_frames()))
         .expect("consistent");
-    let (tee, handle) = TeeBuilder::new("tee", context.clone())
+    let (tee, handle) = context
+        .tee("tee")
         .branch(fixed)
         .build_dynamic()
         .expect("consistent");

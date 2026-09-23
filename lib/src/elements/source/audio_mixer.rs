@@ -559,7 +559,7 @@ impl AudioMixer {
     /// [`crate::pipeline::Pipeline`] (`Pipeline::new` registers it as that
     /// pipeline's own source automatically, same as any other
     /// [`SourceElement`] — no [`crate::element::Context`] needed here,
-    /// unlike [`crate::elements::TeeBuilder::new`], since `AudioMixer` has no
+    /// unlike [`crate::element::Context::tee`], since `AudioMixer` has no
     /// chains of its own for a handle to build).
     pub fn new(name: impl Into<String>, options: AudioMixerOptions) -> (Self, MixerHandle) {
         crate::ensure_ffmpeg();

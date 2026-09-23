@@ -118,10 +118,7 @@ fn topology_attributes_tee_branches_to_the_tee_not_the_source() {
             pp_log: element_pp_log(ElementType::Other, "sink-b", None),
         })?;
 
-        let tee_branch = TeeBuilder::new("tee", ctx.clone())
-            .branch(branch_a)
-            .branch(branch_b)
-            .build()?;
+        let tee_branch = ctx.tee("tee").branch(branch_a).branch(branch_b).build()?;
         ctx.attach(source, index, tee_branch)?;
         Ok(())
     })
@@ -191,10 +188,7 @@ fn topology_attributes_a_fan_out_to_the_stage_that_feeds_it() {
             name: "sink-b".into(),
             pp_log: element_pp_log(ElementType::Other, "sink-b", None),
         })?;
-        let tee_branch = TeeBuilder::new("tee", ctx.clone())
-            .branch(branch_a)
-            .branch(branch_b)
-            .build()?;
+        let tee_branch = ctx.tee("tee").branch(branch_a).branch(branch_b).build()?;
 
         let pacer = Pacer::new("pacer");
         let branch = ctx.branch().pipe(pacer).to_branch(tee_branch)?;
@@ -251,7 +245,7 @@ fn topology_forgets_a_branch_once_it_is_removed_from_the_tee() {
     let index = video.index;
 
     let (pipeline, tee_handle) = Pipeline::new("test", source, |source, ctx| {
-        let (tee_branch, tee_handle) = TeeBuilder::new("tee", ctx.clone()).build_dynamic()?;
+        let (tee_branch, tee_handle) = ctx.tee("tee").build_dynamic()?;
         ctx.attach(source, index, tee_branch)?;
         Ok(tee_handle)
     })
@@ -300,7 +294,7 @@ fn remove_branch_containing_resolves_through_a_queue_to_the_tee_attached_root() 
     let index = video.index;
 
     let (pipeline, tee_handle) = Pipeline::new("test", source, |source, ctx| {
-        let (tee_branch, tee_handle) = TeeBuilder::new("tee", ctx.clone()).build_dynamic()?;
+        let (tee_branch, tee_handle) = ctx.tee("tee").build_dynamic()?;
         ctx.attach(source, index, tee_branch)?;
         Ok(tee_handle)
     })
@@ -358,7 +352,7 @@ fn topology_stays_correct_with_dozens_of_branches_added_and_then_removed() {
 
     const N: usize = 30;
     let (pipeline, tee_handle) = Pipeline::new("test", source, |source, ctx| {
-        let (tee_branch, tee_handle) = TeeBuilder::new("tee", ctx.clone()).build_dynamic()?;
+        let (tee_branch, tee_handle) = ctx.tee("tee").build_dynamic()?;
         ctx.attach(source, index, tee_branch)?;
         Ok(tee_handle)
     })
@@ -431,7 +425,7 @@ fn duplicate_names_are_independent_when_detaching_by_branch_id() {
         .expect("test video has a video stream")
         .index;
     let (pipeline, handle) = Pipeline::new("test", source, |source, ctx| {
-        let (tee_branch, handle) = TeeBuilder::new("tee", ctx.clone()).build_dynamic()?;
+        let (tee_branch, handle) = ctx.tee("tee").build_dynamic()?;
         ctx.attach(source, index, tee_branch)?;
         Ok(handle)
     })
@@ -467,7 +461,7 @@ fn dynamic_attach_and_detach_each_publish_one_graph_revision() {
         .expect("test video has a video stream")
         .index;
     let (pipeline, handle) = Pipeline::new("test", source, |source, ctx| {
-        let (tee_branch, handle) = TeeBuilder::new("tee", ctx.clone()).build_dynamic()?;
+        let (tee_branch, handle) = ctx.tee("tee").build_dynamic()?;
         ctx.attach(source, index, tee_branch)?;
         Ok(handle)
     })
@@ -528,7 +522,7 @@ fn dynamic_attach_is_rejected_during_a_timeline_operation() {
         .expect("test video has a video stream")
         .index;
     let (pipeline, handle) = Pipeline::new("attach-during-seek", source, |source, ctx| {
-        let (tee, tee_handle) = TeeBuilder::new("tee", ctx.clone()).build_dynamic()?;
+        let (tee, tee_handle) = ctx.tee("tee").build_dynamic()?;
         ctx.attach(source, index, tee)?;
         Ok(tee_handle)
     })
@@ -567,9 +561,7 @@ fn tee_handle_changes_branches_after_the_pipeline_starts() {
             count: initial_count.clone(),
             pp_log: element_pp_log(ElementType::Other, "initial", None),
         })?;
-        let (tee_branch, handle) = TeeBuilder::new("tee", ctx.clone())
-            .branch(initial_branch)
-            .build_dynamic()?;
+        let (tee_branch, handle) = ctx.tee("tee").branch(initial_branch).build_dynamic()?;
         ctx.attach(source, 0, tee_branch)?;
         Ok(handle)
     })

@@ -8,10 +8,10 @@ fn main() -> impl std::process::Termination {
 }
 
 mod example {
-    use std::{sync::atomic::Ordering, thread, time::Duration};
+    use std::{thread, time::Duration};
 
     use media_pp::{
-        elements::{FrameCounter, TeeBuilder, TestVideoOptions, TestVideoSource},
+        elements::{FrameCounter, TestVideoOptions, TestVideoSource},
         pipeline::Pipeline,
     };
 
@@ -28,9 +28,7 @@ mod example {
 
         let (pipeline, tee_handle) = Pipeline::new("dynamic-tee", source, |source, ctx| {
             let initial_branch = ctx.branch().to(initial_counter)?;
-            let (tee_branch, handle) = TeeBuilder::new("tee", ctx.clone())
-                .branch(initial_branch)
-                .build_dynamic()?;
+            let (tee_branch, handle) = ctx.tee("tee").branch(initial_branch).build_dynamic()?;
             ctx.attach(source, 0, tee_branch)?;
             Ok(handle)
         })?;
@@ -53,8 +51,8 @@ mod example {
 
         println!(
             "frames: initial={}, dynamic={}",
-            initial_count.load(Ordering::Relaxed),
-            dynamic_count.load(Ordering::Relaxed)
+            initial_count.get(),
+            dynamic_count.get()
         );
         Ok(())
     }

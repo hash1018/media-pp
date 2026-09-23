@@ -84,10 +84,7 @@ mod example {
         }
 
         feeder.join().expect("feeder thread panicked")?;
-        println!(
-            "decoded frames: {}",
-            count.load(std::sync::atomic::Ordering::Relaxed)
-        );
+        println!("decoded frames: {}", count.get());
         Ok(())
     }
 }

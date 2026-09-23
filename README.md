@@ -38,7 +38,7 @@ changed between versions, and what to write instead, is in [`CHANGELOG.md`].
 This pipeline generates video for one second and counts the frames:
 
 ```rust
-use std::{sync::atomic::Ordering, time::Duration};
+use std::time::Duration;
 use media_pp::{
     elements::{FrameCounter, TestVideoOptions, TestVideoSource},
     pipeline::Pipeline,
@@ -55,7 +55,7 @@ fn main() -> media_pp::Result<()> {
     pipeline.run()?;
     std::thread::sleep(Duration::from_secs(1));
     pipeline.stop();
-    println!("frames: {}", frames.load(Ordering::Relaxed));
+    println!("frames: {}", frames.get());
     Ok(())
 }
 ```

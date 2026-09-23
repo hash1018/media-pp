@@ -548,7 +548,8 @@ fn a_completed_tee_branch_does_not_starve_a_sibling_preroll() {
                     samples: Arc::clone(&frames),
                     pp_log: element_pp_log(ElementType::Other, "video-terminal", None),
                 })?;
-        let tee = TeeBuilder::new("tee", ctx.clone())
+        let tee = ctx
+            .tee("tee")
             .branch(packet_branch)
             .branch(decoded_branch)
             .build()?;
@@ -806,9 +807,7 @@ fn detaching_a_branch_mid_seek_does_not_strand_its_preroll() {
             count: Arc::clone(&seen),
             pp_log: element_pp_log(ElementType::Other, "live", None),
         })?;
-        let (tee, tee_handle) = TeeBuilder::new("tee", ctx.clone())
-            .branch(live)
-            .build_dynamic()?;
+        let (tee, tee_handle) = ctx.tee("tee").branch(live).build_dynamic()?;
         ctx.attach(source, 0, tee)?;
         Ok(tee_handle)
     })

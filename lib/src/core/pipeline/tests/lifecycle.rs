@@ -418,9 +418,7 @@ fn tee_handle_retained_across_a_multi_source_pipeline_does_not_leak() {
                 name: "video-sink".into(),
                 pp_log: element_pp_log(ElementType::Other, "video-sink", None),
             })?;
-            let (tee_branch, handle) = TeeBuilder::new("tee", ctx.clone())
-                .branch(branch)
-                .build_dynamic()?;
+            let (tee_branch, handle) = ctx.tee("tee").branch(branch).build_dynamic()?;
             ctx.attach(source, 0, tee_branch)?;
             Ok(handle)
         })

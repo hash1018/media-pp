@@ -36,7 +36,7 @@ mod windows_example {
         color::Color,
         elements::{
             D3d11Download, D3d11Upload, D3d11VideoCompositor, FileMuxer, SwEncoder,
-            SwEncoderOptions, SwScaler, TeeBuilder, TestVideoOptions, TestVideoSource, VideoCodec,
+            SwEncoderOptions, SwScaler, TestVideoOptions, TestVideoSource, VideoCodec,
             VideoCompositorOptions, VideoFit, VideoLayer, VideoRect,
         },
         pipeline::Pipeline,
@@ -220,7 +220,8 @@ mod windows_example {
                     .pipe(encoder)
                     .to(muxer_sink)?;
 
-                let tee_branch = TeeBuilder::new("tee", ctx.clone())
+                let tee_branch = ctx
+                    .tee("tee")
                     .branch(render_branch)
                     .branch(record_branch)
                     .build()?;
@@ -296,8 +297,8 @@ mod linux_example {
         color::Color,
         elements::{
             CudaDevice, CudaDownload, CudaFrameFormat, CudaUpload, CudaVideoCompositor, FileMuxer,
-            SwEncoder, SwEncoderOptions, SwScaler, TeeBuilder, TestVideoOptions, TestVideoSource,
-            VideoCodec, VideoCompositorOptions, VideoFit, VideoLayer, VideoRect,
+            SwEncoder, SwEncoderOptions, SwScaler, TestVideoOptions, TestVideoSource, VideoCodec,
+            VideoCompositorOptions, VideoFit, VideoLayer, VideoRect,
         },
         pipeline::Pipeline,
     };
@@ -476,7 +477,8 @@ mod linux_example {
                     .pipe(encoder)
                     .to(muxer_sink)?;
 
-                let tee_branch = TeeBuilder::new("tee", ctx.clone())
+                let tee_branch = ctx
+                    .tee("tee")
                     .branch(render_branch)
                     .branch(record_branch)
                     .build()?;

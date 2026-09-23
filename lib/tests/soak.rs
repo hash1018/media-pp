@@ -48,7 +48,6 @@ mod common;
 
 use std::{
     path::Path,
-    sync::atomic::Ordering,
     thread,
     time::{Duration, Instant},
 };
@@ -60,8 +59,8 @@ use media_pp::{
     color::Color,
     elements::{
         FileDemuxer, FileMuxer, FrameCounter, SegmentPolicy, SegmentedFileMuxer, SwDecoder,
-        SwEncoder, SwEncoderOptions, SwVideoCompositor, TeeBuilder, TestVideoOptions,
-        TestVideoSource, VideoCodec, VideoCompositorOptions, VideoFit, VideoLayer, VideoRect,
+        SwEncoder, SwEncoderOptions, SwVideoCompositor, TestVideoOptions, TestVideoSource,
+        VideoCodec, VideoCompositorOptions, VideoFit, VideoLayer, VideoRect,
     },
     pipeline::{Pipeline, SeekMode},
 };
@@ -282,7 +281,7 @@ fn pause_resume_storm_does_not_grow_process_memory() {
         }
     }
 
-    let before_teardown = frames.load(Ordering::Relaxed);
+    let before_teardown = frames.get();
     pipeline.finish();
     assert!(
         before_teardown > 0,
@@ -338,7 +337,7 @@ fn seek_storm_does_not_grow_process_memory() {
     }
 
     assert!(
-        frames.load(Ordering::Relaxed) > 0,
+        frames.get() > 0,
         "the storm seeked so hard nothing ever decoded"
     );
     pipeline.stop();
@@ -361,9 +360,7 @@ fn tee_branch_churn_does_not_grow_process_memory() {
     let mut tee_handle = None;
     let (pipeline, ()) = Pipeline::new("soak-tee", test_source("video"), |source, ctx| {
         let fixed = ctx.branch().to(fixed_counter)?;
-        let (tee_branch, handle) = TeeBuilder::new("tee", ctx.clone())
-            .branch(fixed)
-            .build_dynamic()?;
+        let (tee_branch, handle) = ctx.tee("tee").branch(fixed).build_dynamic()?;
         ctx.attach(source, 0, tee_branch)?;
         tee_handle = Some(handle);
         Ok(())
@@ -402,7 +399,7 @@ fn tee_branch_churn_does_not_grow_process_memory() {
         "every churned branch must be gone, leaving only the fixed one"
     );
     assert!(
-        fixed_frames.load(Ordering::Relaxed) > 0,
+        fixed_frames.get() > 0,
         "the fixed branch must keep receiving frames throughout the churn"
     );
     pipeline.finish();
@@ -478,7 +475,7 @@ fn compositor_input_churn_does_not_grow_process_memory() {
     }
 
     assert!(
-        frames.load(Ordering::Relaxed) > 0,
+        frames.get() > 0,
         "the compositor must keep emitting while its inputs churn"
     );
     output.finish();
@@ -555,12 +552,12 @@ fn a_running_compositor_does_not_grow_while_it_answers_frames() {
     // state, which is the only part a trend can be read from.
     thread::sleep(sample_interval);
     settle();
-    let started = frames.load(Ordering::Relaxed);
+    let started = frames.get();
     while Instant::now() < deadline {
         thread::sleep(sample_interval);
         memory.sample();
     }
-    let composited = frames.load(Ordering::Relaxed) - started;
+    let composited = frames.get() - started;
     feeder.finish();
     output.finish();
 
@@ -736,7 +733,7 @@ mod d3d11 {
         pipeline.run().unwrap();
         thread::sleep(Duration::from_millis(250));
         teardown.apply(&pipeline);
-        frames.load(Ordering::Relaxed)
+        frames.get()
     }
 
     /// Key a compositor's own BGRA output on the GPU. What this adds over
@@ -828,7 +825,7 @@ mod d3d11 {
         // pushing into a sink that is already gone.
         teardown.apply(&input_pipeline);
         teardown.apply(&output_pipeline);
-        frames.load(Ordering::Relaxed)
+        frames.get()
     }
 
     /// How deep the decode scenario's queue is, and therefore how many
@@ -864,7 +861,7 @@ mod d3d11 {
         pipeline.run().unwrap();
         thread::sleep(Duration::from_millis(250));
         teardown.apply(&pipeline);
-        frames.load(Ordering::Relaxed)
+        frames.get()
     }
 
     /// What every NVENC cycle below encodes with. Kept in one place because
@@ -926,7 +923,7 @@ mod d3d11 {
         pipeline.run().unwrap();
         thread::sleep(Duration::from_millis(250));
         teardown.apply(&pipeline);
-        packets.load(Ordering::Relaxed)
+        packets.get()
     }
 
     /// Whether this GPU and FFmpeg build have NVENC at all.
@@ -1211,7 +1208,7 @@ mod d3d11 {
         // the capture scenarios.
         thread::sleep(WARMUP_SECS);
         settle();
-        let started = frames.load(Ordering::Relaxed);
+        let started = frames.get();
         let deadline = Instant::now() + duration;
         while Instant::now() < deadline {
             thread::sleep(sample_interval);
@@ -1221,7 +1218,7 @@ mod d3d11 {
                 objects.sample();
             }
         }
-        let composited = frames.load(Ordering::Relaxed) - started;
+        let composited = frames.get() - started;
         feeder.finish();
         output.finish();
 
@@ -1360,7 +1357,7 @@ mod d3d11 {
         // frames really flowed.
         thread::sleep(Duration::from_millis(400));
         teardown.apply(&pipeline);
-        frames.load(Ordering::Relaxed)
+        frames.get()
     }
 
     /// Whether desktop duplication is available at all — it is not, for
@@ -1640,7 +1637,7 @@ mod d3d11 {
         .expect("resize WGC target window");
         thread::sleep(Duration::from_millis(750));
         teardown.apply(&pipeline);
-        frames.load(Ordering::Relaxed)
+        frames.get()
     }
 
     #[test]
@@ -1686,7 +1683,7 @@ mod d3d11 {
 /// element ownership rather than adapter initialization.
 #[cfg(all(windows, feature = "d3d12"))]
 mod d3d12 {
-    use std::{sync::atomic::Ordering, thread, time::Duration};
+    use std::{thread, time::Duration};
 
     use ffmpeg_next as ffmpeg;
     use media_pp::{
@@ -1750,7 +1747,7 @@ mod d3d12 {
         pipeline.run().unwrap();
         thread::sleep(Duration::from_millis(250));
         teardown.apply(&pipeline);
-        frames.load(Ordering::Relaxed)
+        frames.get()
     }
 
     #[test]
@@ -1795,7 +1792,7 @@ mod d3d12 {
 /// driver directly when it can.
 #[cfg(feature = "cuda")]
 mod cuda {
-    use std::{sync::atomic::Ordering, thread, time::Duration};
+    use std::{thread, time::Duration};
 
     use ffmpeg_next as ffmpeg;
     use media_pp::{
@@ -1859,7 +1856,7 @@ mod cuda {
         pipeline.run().unwrap();
         thread::sleep(Duration::from_millis(250));
         teardown.apply(&pipeline);
-        frames.load(Ordering::Relaxed)
+        frames.get()
     }
 
     /// NVDEC's surface pool is fixed-size *and* capped at 32 surfaces
@@ -1905,7 +1902,7 @@ mod cuda {
         pipeline.run().unwrap();
         thread::sleep(Duration::from_millis(250));
         teardown.apply(&pipeline);
-        frames.load(Ordering::Relaxed)
+        frames.get()
     }
 
     /// What every NVENC cycle below encodes with — same reasoning as the
@@ -1957,7 +1954,7 @@ mod cuda {
         pipeline.run().unwrap();
         thread::sleep(Duration::from_millis(250));
         teardown.apply(&pipeline);
-        packets.load(Ordering::Relaxed)
+        packets.get()
     }
 
     /// Whether this GPU and FFmpeg build have NVENC at all.
@@ -2221,7 +2218,7 @@ mod cuda {
         // is the only part a trend can be read from.
         thread::sleep(sample_interval);
         settle();
-        let started = frames.load(Ordering::Relaxed);
+        let started = frames.get();
         let deadline = std::time::Instant::now() + duration;
         while std::time::Instant::now() < deadline {
             thread::sleep(sample_interval);
@@ -2230,7 +2227,7 @@ mod cuda {
                 gpu.sample();
             }
         }
-        let composited = frames.load(Ordering::Relaxed) - started;
+        let composited = frames.get() - started;
         feeder.finish();
         output.finish();
 
@@ -2263,7 +2260,7 @@ mod cuda {
 /// for why that cannot be defaulted or detected.
 #[cfg(all(target_os = "linux", feature = "pipewire-screen-capture"))]
 mod pipewire {
-    use std::{sync::atomic::Ordering, thread, time::Duration};
+    use std::{thread, time::Duration};
 
     use media_pp::{
         elements::{
@@ -2445,7 +2442,7 @@ mod pipewire {
         pipeline.run().unwrap();
         thread::sleep(Duration::from_millis(CAPTURE_MILLIS));
         teardown.apply(&pipeline);
-        frames.load(Ordering::Relaxed)
+        frames.get()
     }
 
     /// The same session in GPU mode: `open_gpu` negotiates DMA-BUF only and
@@ -2478,7 +2475,7 @@ mod pipewire {
         pipeline.run().unwrap();
         thread::sleep(Duration::from_millis(CAPTURE_MILLIS));
         teardown.apply(&pipeline);
-        frames.load(Ordering::Relaxed)
+        frames.get()
     }
 
     /// Whether this desktop will hand out a capture at all with the token

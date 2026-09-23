@@ -10,7 +10,6 @@ fn main() -> impl std::process::Termination {
 }
 
 mod example {
-    use std::sync::atomic::Ordering;
 
     use media_pp::ffmpeg::media;
     use media_pp::{
@@ -67,7 +66,7 @@ mod example {
             }
         }
 
-        println!("packet count: {}", count.load(Ordering::Relaxed));
+        println!("packet count: {}", count.get());
         Ok(())
     }
 }

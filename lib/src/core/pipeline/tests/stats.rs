@@ -294,9 +294,7 @@ fn a_runtime_branch_is_reported_while_it_exists_and_no_longer() {
                 name: "initial".into(),
                 count: initial.clone(),
             })?;
-            let (tee, handle) = TeeBuilder::new("tee", ctx.clone())
-                .branch(first)
-                .build_dynamic()?;
+            let (tee, handle) = ctx.tee("tee").branch(first).build_dynamic()?;
             ctx.attach(source, 0, tee)?;
             Ok(handle)
         },
@@ -408,7 +406,7 @@ fn attaching_and_detaching_without_reading_keeps_the_registry_bounded() {
         "stats-churn",
         TestVideoSource::new("video", TestVideoOptions::default()),
         |source, ctx| {
-            let (tee, handle) = TeeBuilder::new("tee", ctx.clone()).build_dynamic()?;
+            let (tee, handle) = ctx.tee("tee").build_dynamic()?;
             ctx.attach(source, 0, tee)?;
             Ok(handle)
         },

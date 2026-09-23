@@ -1,7 +1,4 @@
-use std::sync::{
-    Arc,
-    atomic::{AtomicUsize, Ordering},
-};
+use std::sync::Arc;
 
 use crate::pp_log::{PpLog, pp_info};
 
@@ -10,22 +7,24 @@ use crate::{
     contract::{InputContract, MediaKindSet, PortContract},
     control::ControlMsg,
     element::{Element, ElementType, Sink, element_pp_log},
+    elements::CounterHandle,
     error::Result,
 };
 
-/// Terminal sink that just counts packets. Backed by an `Arc<AtomicUsize>`
-/// so the count can be read from outside the pipeline even when this sink
-/// ends up running on a `Queue` worker thread.
+/// Terminal sink that counts packets. The [`CounterHandle`] it comes
+/// with reads the count from outside the pipeline, even while this sink runs
+/// on a `Queue` worker thread.
 pub struct PacketCounter {
     pp_log: PpLog,
     name: Arc<str>,
-    count: Arc<AtomicUsize>,
+    count: CounterHandle,
 }
 
 impl PacketCounter {
-    /// Creates a sink and a shared counter that increments for each packet.
-    pub fn new(name: impl Into<String>) -> (Self, Arc<AtomicUsize>) {
-        let count = Arc::new(AtomicUsize::new(0));
+    /// Creates the sink and the handle that reads how many packets it has
+    /// counted.
+    pub fn new(name: impl Into<String>) -> (Self, CounterHandle) {
+        let count = CounterHandle::new();
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::PacketCounter, &name, None);
         pp_info!(pp_log: &pp_log, "created");
@@ -66,7 +65,7 @@ impl Sink for PacketCounter {
 
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         if let MediaBuffer::Packet(_) = buf {
-            self.count.fetch_add(1, Ordering::Relaxed);
+            self.count.increment();
         }
         Ok(())
     }

@@ -16,7 +16,7 @@ use crate::contract::{
     PortContract,
 };
 use crate::elements::{
-    FileDemuxer, Pacer, SwDecoder, TeeBuilder, TestAudioOptions, TestAudioSource, TestVideoOptions,
+    FileDemuxer, Pacer, SwDecoder, TestAudioOptions, TestAudioSource, TestVideoOptions,
     TestVideoSource,
 };
 use crate::graph::GraphError;

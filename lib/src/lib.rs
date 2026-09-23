@@ -21,7 +21,7 @@
 //! [`BusEvent::Error`](bus::BusEvent::Error) and the worker keeps going.
 //!
 //! ```no_run
-//! use std::{sync::atomic::Ordering, time::Duration};
+//! use std::time::Duration;
 //!
 //! use media_pp::{
 //!     elements::{FrameCounter, TestVideoOptions, TestVideoSource},
@@ -42,7 +42,7 @@
 //! std::thread::sleep(Duration::from_millis(200));
 //! pipeline.stop();
 //!
-//! println!("frames: {}", frames.load(Ordering::Relaxed));
+//! println!("frames: {}", frames.get());
 //! # Ok(())
 //! # }
 //! ```

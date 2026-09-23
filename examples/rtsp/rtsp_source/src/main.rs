@@ -10,7 +10,7 @@ fn main() -> impl std::process::Termination {
 }
 
 mod example {
-    use std::{sync::atomic::Ordering, thread, time::Duration, time::Instant};
+    use std::{thread, time::Duration, time::Instant};
 
     use media_pp::ffmpeg::media;
     use media_pp::{
@@ -79,7 +79,7 @@ mod example {
         // blocks until every `Bus` handle has dropped.
         pipeline.bus().log_events();
 
-        println!("video packets received: {}", count.load(Ordering::Relaxed));
+        println!("video packets received: {}", count.get());
         Ok(())
     }
 }

@@ -1593,10 +1593,7 @@ mod tests {
         pipeline.run().expect("start WGC pipeline");
         thread::sleep(Duration::from_secs(2));
         pipeline.stop();
-        assert!(
-            frames.load(Ordering::Relaxed) > 0,
-            "scaled frames must flow"
-        );
+        assert!(frames.get() > 0, "scaled frames must flow");
         let errors: Vec<_> = pipeline
             .bus()
             .iter()

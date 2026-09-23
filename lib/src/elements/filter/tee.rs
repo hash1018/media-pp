@@ -113,7 +113,8 @@ fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     }
 }
 
-/// Build-time configuration for a [`Tee`]. Initial branches are merged
+/// Build-time configuration for a [`Tee`], begun with [`Context::tee`].
+/// Initial branches are merged
 /// with the Tee into one detached subgraph and committed by a single
 /// [`Context::attach`] call. Use [`TeeBuilder::build`] for a fixed fan-out,
 /// or [`TeeBuilder::build_dynamic`] when runtime changes need a
@@ -209,9 +210,20 @@ impl TeeShared {
     }
 }
 
+impl Context {
+    /// Starts a Tee that fans one source pad out to several branches, in
+    /// this pipeline — the only one its branches can belong to, which is
+    /// why a Tee is begun here rather than handed a context.
+    ///
+    /// Add its initial branches with [`TeeBuilder::branch`], then attach the
+    /// result through [`Context::attach`] like any other branch.
+    pub fn tee(self: &Arc<Self>, name: impl Into<String>) -> TeeBuilder {
+        TeeBuilder::new(name, self.clone())
+    }
+}
+
 impl TeeBuilder {
-    /// Starts an initially empty Tee in the supplied pipeline context.
-    pub fn new(name: impl Into<String>, context: Arc<Context>) -> Self {
+    fn new(name: impl Into<String>, context: Arc<Context>) -> Self {
         let (tee, handle) = Tee::new(name, context);
         Self {
             tee,
@@ -934,7 +946,8 @@ mod tests {
                 pp_log: element_pp_log(ElementType::Other, "after", None),
             })
             .unwrap();
-        let tee_branch = TeeBuilder::new("tee", context.clone())
+        let tee_branch = context
+            .tee("tee")
             .branch(before)
             .branch(failing)
             .branch(after)
@@ -1000,7 +1013,8 @@ mod tests {
                 pp_log: element_pp_log(ElementType::Other, "control-ok", None),
             })
             .unwrap();
-        let tee_branch = TeeBuilder::new("tee", context.clone())
+        let tee_branch = context
+            .tee("tee")
             .branch(failing)
             .branch(healthy)
             .build()
@@ -1039,10 +1053,7 @@ mod tests {
                 pp_log: element_pp_log(ElementType::Other, "panic-once", None),
             })
             .unwrap();
-        let tee_branch = TeeBuilder::new("tee", context.clone())
-            .branch(panic_once)
-            .build()
-            .unwrap();
+        let tee_branch = context.tee("tee").branch(panic_once).build().unwrap();
         let mut upstream = SrcPad::new("source_src");
         context.attach_pad(&mut upstream, tee_branch).unwrap();
 
@@ -1114,7 +1125,8 @@ mod tests {
                 pp_log: element_pp_log(ElementType::Other, "preview", None),
             })
             .unwrap();
-        let (tee_branch, handle) = TeeBuilder::new("tee", context.clone())
+        let (tee_branch, handle) = context
+            .tee("tee")
             .branch(keep_branch)
             .build_dynamic()
             .unwrap();
@@ -1173,9 +1185,7 @@ mod tests {
         let graph = PipelineGraph::new();
         let source_id = graph.add_source(ElementType::Other, "source".into());
         let context = Arc::new(Context::for_test(bus, "test", graph, source_id));
-        let (tee_branch, handle) = TeeBuilder::new("tee", context.clone())
-            .build_dynamic()
-            .unwrap();
+        let (tee_branch, handle) = context.tee("tee").build_dynamic().unwrap();
         let mut upstream = SrcPad::new("source_src");
         context.attach_pad(&mut upstream, tee_branch).unwrap();
 
@@ -1230,10 +1240,7 @@ mod tests {
                 pp_log: element_pp_log(ElementType::Other, "survivor", None),
             })
             .unwrap();
-        let (tee_branch, handle) = TeeBuilder::new("tee", context.clone())
-            .branch(survivor)
-            .build_dynamic()
-            .unwrap();
+        let (tee_branch, handle) = context.tee("tee").branch(survivor).build_dynamic().unwrap();
         let mut upstream = SrcPad::new("source_src");
         context.attach_pad(&mut upstream, tee_branch).unwrap();
 
@@ -1343,9 +1350,7 @@ mod tests {
         let graph = PipelineGraph::new();
         let source_id = graph.add_source(ElementType::Other, "source".into());
         let context = Arc::new(Context::for_test(bus, "test", graph, source_id));
-        let (tee_branch, handle) = TeeBuilder::new("tee", context.clone())
-            .build_dynamic()
-            .unwrap();
+        let (tee_branch, handle) = context.tee("tee").build_dynamic().unwrap();
         let mut upstream = SrcPad::new("source_src");
         context.attach_pad(&mut upstream, tee_branch).unwrap();
         let shared = handle.shared.upgrade().unwrap();
@@ -1378,9 +1383,7 @@ mod tests {
         let graph = PipelineGraph::new();
         let source_id = graph.add_source(ElementType::Other, "source".into());
         let context = Arc::new(Context::for_test(bus, "test", graph, source_id));
-        let (tee_branch, handle) = TeeBuilder::new("tee", context.clone())
-            .build_dynamic()
-            .unwrap();
+        let (tee_branch, handle) = context.tee("tee").build_dynamic().unwrap();
         let mut upstream = SrcPad::new("source_src");
         context.attach_pad(&mut upstream, tee_branch).unwrap();
 
@@ -1467,10 +1470,7 @@ mod tests {
                 pp_log: element_pp_log(ElementType::Other, "initial", None),
             })
             .unwrap();
-        let (tee_branch, handle) = TeeBuilder::new("tee", context.clone())
-            .branch(initial)
-            .build_dynamic()
-            .unwrap();
+        let (tee_branch, handle) = context.tee("tee").branch(initial).build_dynamic().unwrap();
         let mut upstream = SrcPad::new("source_src");
         context.attach_pad(&mut upstream, tee_branch).unwrap();
 
@@ -1554,9 +1554,7 @@ mod tests {
         let graph = PipelineGraph::new();
         let source_id = graph.add_source(ElementType::Other, "source".into());
         let context = Arc::new(Context::for_test(bus, "test", graph.clone(), source_id));
-        let (tee_branch, handle) = TeeBuilder::new("tee", context.clone())
-            .build_dynamic()
-            .unwrap();
+        let (tee_branch, handle) = context.tee("tee").build_dynamic().unwrap();
         let mut upstream = SrcPad::new("source_src");
         context.attach_pad(&mut upstream, tee_branch).unwrap();
 
@@ -1593,9 +1591,7 @@ mod tests {
         let graph = PipelineGraph::new();
         let source_id = graph.add_source(ElementType::Other, "source".into());
         let context = Arc::new(Context::for_test(bus, "test", graph, source_id));
-        let (tee_branch, handle) = TeeBuilder::new("tee", context.clone())
-            .build_dynamic()
-            .unwrap();
+        let (tee_branch, handle) = context.tee("tee").build_dynamic().unwrap();
 
         drop(context);
         drop(tee_branch);

@@ -180,10 +180,7 @@ fn finished_waits_for_every_terminal_of_a_fan_out() {
             eos_delay: Duration::from_millis(150),
             ..EndingSink::new("slow")
         })?;
-        let tee = TeeBuilder::new("tee", ctx.clone())
-            .branch(fast)
-            .branch(slow)
-            .build()?;
+        let tee = ctx.tee("tee").branch(fast).branch(slow).build()?;
         ctx.attach(source, 0, tee)?;
         Ok(())
     })
@@ -223,7 +220,7 @@ fn finished_waits_for_every_terminal_of_a_fan_out() {
 fn detaching_the_branch_that_failed_to_end_finishes_the_rest() {
     let (pipeline, (tee, broken)) =
         Pipeline::new("finished-detach", EndingSource::new(2), |source, ctx| {
-            let (tee, tee_handle) = TeeBuilder::new("tee", ctx.clone()).build_dynamic()?;
+            let (tee, tee_handle) = ctx.tee("tee").build_dynamic()?;
             ctx.attach(source, 0, tee)?;
             tee_handle.attach(ctx.branch().to(EndingSink::new("fine"))?)?;
             let broken =

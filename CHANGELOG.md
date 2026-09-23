@@ -12,6 +12,20 @@ compile error with no explanation.
 
 ### Breaking
 
+- **A Tee starts from the pipeline's context: `ctx.tee(name)`.**
+  `TeeBuilder::new(name, ctx.clone())` is now `ctx.tee(name)`, beside
+  `ctx.branch()`; the rest of the builder (`branch`, `build`,
+  `build_dynamic`) is unchanged. A Tee's branches can only belong to the
+  pipeline it is wired in, so there was never another context to hand it,
+  and `TeeBuilder::new` is no longer public.
+
+- **`FrameCounter` and `PacketCounter` hand back a `CounterHandle`.** Their
+  `new` returned the `Arc<AtomicUsize>` they counted into, so reading it
+  took an `Ordering` import and `.load(Ordering::Relaxed)`, and a caller
+  could overwrite the count. `count.get()` reads it now; the handle is
+  read-only, cheap to clone, and keeps reading the final number after its
+  sink is dropped.
+
 - **`media_pp::init` is gone; the library readies FFmpeg itself.** Delete
   the `media_pp::init()?;` line. It registered FFmpeg's error descriptions
   and its input devices, and forgetting it was silent: every FFmpeg error

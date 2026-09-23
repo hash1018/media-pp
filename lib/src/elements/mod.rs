@@ -110,10 +110,10 @@ pub use filter::{
 #[cfg(feature = "rnnoise")]
 pub use filter::{NOISE_SUPPRESSOR_SAMPLE_RATE, NoiseSuppressor, NoiseSuppressorError};
 pub use sink::{
-    AppSink, FileMuxer, FileMuxerError, FrameCounter, HlsMode, HlsMuxer, HlsMuxerError, HlsOptions,
-    HlsSegmentFormat, MuxerSinks, MuxerTrack, MuxerTrackError, PacketCounter, ReplayBuffer,
-    ReplayBufferError, ReplayBufferHandle, RtmpMuxer, RtmpMuxerError, RtspMuxer, RtspMuxerError,
-    SegmentPolicy, SegmentedFileMuxer, SubmitError,
+    AppSink, CounterHandle, FileMuxer, FileMuxerError, FrameCounter, HlsMode, HlsMuxer,
+    HlsMuxerError, HlsOptions, HlsSegmentFormat, MuxerSinks, MuxerTrack, MuxerTrackError,
+    PacketCounter, ReplayBuffer, ReplayBufferError, ReplayBufferHandle, RtmpMuxer, RtmpMuxerError,
+    RtspMuxer, RtspMuxerError, SegmentPolicy, SegmentedFileMuxer, SubmitError,
 };
 #[cfg(feature = "ort")]
 pub use sink::{COCO_CLASS_LABELS, Detection, OrtDetector, OrtDetectorError};

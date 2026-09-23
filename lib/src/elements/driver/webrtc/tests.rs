@@ -32,8 +32,8 @@ use crate::{
     driver::DriverRunner,
     element::{Element, ElementType, Sink, element_pp_log},
     elements::{
-        FileDemuxer, FrameCounter, SwDecoder, SwEncoder, SwEncoderOptions, TestVideoOptions,
-        TestVideoSource, VideoCodec,
+        CounterHandle, FileDemuxer, FrameCounter, SwDecoder, SwEncoder, SwEncoderOptions,
+        TestVideoOptions, TestVideoSource, VideoCodec,
     },
     error::Result,
     pipeline::Pipeline,
@@ -1028,10 +1028,10 @@ fn push_packets(sink: &mut WebRtcTrackSink) {
     }
 }
 
-fn wait_for_frames(frames: &AtomicUsize) {
+fn wait_for_frames(frames: &CounterHandle) {
     let deadline = Instant::now() + Duration::from_secs(2);
     while Instant::now() < deadline {
-        if frames.load(Ordering::SeqCst) > 0 {
+        if frames.get() > 0 {
             return;
         }
         thread::sleep(Duration::from_millis(10));
@@ -1218,7 +1218,7 @@ fn one_h264_sendrecv_track_carries_data_both_ways_with_the_declared_payload_type
         "peer-b should receive everything peer-a pushed"
     );
     assert!(
-        decoded_by_a.load(Ordering::SeqCst) > 0,
+        decoded_by_a.get() > 0,
         "peer-a should decode peer-b's reverse H.264 stream"
     );
 
