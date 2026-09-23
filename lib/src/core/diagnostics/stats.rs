@@ -546,7 +546,6 @@ mod tests {
     /// which are buffers of a size no one chose.
     #[test]
     fn a_pad_counts_the_bytes_of_the_packets_it_pushes_and_nothing_else() {
-        crate::init().expect("ffmpeg initializes");
         let mut pad = SrcPad::new("out");
         for size in [100, 250] {
             pad.push(MediaBuffer::Packet(Arc::new(ffmpeg_next::Packet::new(

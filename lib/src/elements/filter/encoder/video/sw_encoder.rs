@@ -243,6 +243,7 @@ fn nominal_packet_duration(time_base: ffmpeg::Rational, frame_rate: ffmpeg::Rati
 impl SwEncoder {
     /// Opens the requested software video encoder with the supplied output definition.
     pub fn new(name: impl Into<String>, options: SwEncoderOptions) -> Result<Self> {
+        crate::ensure_ffmpeg();
         Self::open(name, options, None)
     }
 
@@ -257,6 +258,7 @@ impl SwEncoder {
         options: SwEncoderOptions,
         color: ColorDescription,
     ) -> Result<Self> {
+        crate::ensure_ffmpeg();
         Self::open(name, options, Some(color))
     }
 

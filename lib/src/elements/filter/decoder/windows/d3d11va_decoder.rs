@@ -130,6 +130,7 @@ impl D3d11Decoder {
         device: &ID3D11Device,
         downstream_hw_frames: i32,
     ) -> Result<Self, D3d11DecoderError> {
+        crate::ensure_ffmpeg();
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::D3d11Decoder, &name, None);
         let extra_hw_frames = hw_surface_budget(downstream_hw_frames).ok_or(
@@ -502,7 +503,6 @@ mod tests {
     /// Answered from FFmpeg's own tables, so it holds on a machine with no GPU.
     #[test]
     fn supports_says_no_for_a_codec_d3d11va_lacks() {
-        crate::init().unwrap();
         assert!(!D3d11Decoder::supports(ffmpeg::codec::Id::PRORES));
     }
 

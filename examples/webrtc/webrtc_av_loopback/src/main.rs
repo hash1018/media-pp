@@ -48,7 +48,6 @@ mod example {
     };
 
     pub(super) fn run() -> std::result::Result<(), Box<dyn std::error::Error>> {
-        media_pp::init()?;
         let _log_guard = media_pp::log::init(
             env!("CARGO_PKG_NAME"),
             "logs",

@@ -92,6 +92,7 @@ impl RtspSource {
         url: impl AsRef<str>,
         options: RtspOptions,
     ) -> std::result::Result<(Self, Vec<StreamInfo>), RtspSourceError> {
+        crate::ensure_ffmpeg();
         let mut dict = ffmpeg::Dictionary::new();
         dict.set("rtsp_transport", options.transport.as_ffmpeg_option());
         dict.set("timeout", &options.timeout.as_micros().to_string());

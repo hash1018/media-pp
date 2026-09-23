@@ -81,6 +81,7 @@ impl FileMuxer {
     /// Allocates the output file. No header is written yet — nothing is on
     /// disk in a readable shape until [`FileMuxer::open`] runs.
     pub fn create(path: impl AsRef<Path>) -> Result<Self> {
+        crate::ensure_ffmpeg();
         let output = ffmpeg::format::output(&path).map_err(FileMuxerError::from)?;
         Ok(Self {
             id: MuxerId::next(),
@@ -148,6 +149,7 @@ impl FileMuxer {
     /// stopping only one pipeline while another keeps running leaves the
     /// file un-finalized (and unplayable) until the rest catch up too.
     pub fn open(mut self) -> Result<MuxerSinks> {
+        crate::ensure_ffmpeg();
         self.output.write_header().map_err(FileMuxerError::from)?;
         Ok(open_tracks::<Self>(
             self.id,

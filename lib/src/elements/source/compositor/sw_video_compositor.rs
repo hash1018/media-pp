@@ -656,6 +656,7 @@ impl SwVideoCompositor {
         name: impl Into<String>,
         options: VideoCompositorOptions,
     ) -> std::result::Result<(Self, SwVideoCompositorHandle), SwVideoCompositorError> {
+        crate::ensure_ffmpeg();
         validate_output_options(options)?;
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::SwVideoCompositor, &name, None);

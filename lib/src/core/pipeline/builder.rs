@@ -61,6 +61,7 @@ impl PipelineBuilder {
     ///
     /// Add at least one source before calling [`Self::build`].
     pub fn new(id: impl Into<String>) -> Self {
+        crate::ensure_ffmpeg();
         let id: Arc<str> = id.into().into();
         let (bus, bus_rx) = Bus::new();
         let clock = Arc::new(Clock::new());

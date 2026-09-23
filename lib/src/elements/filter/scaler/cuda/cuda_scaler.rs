@@ -200,6 +200,7 @@ impl CudaScaler {
         height: u32,
         interp: CudaScalerInterp,
     ) -> Self {
+        crate::ensure_ffmpeg();
         Self::build(
             name,
             device,
@@ -221,6 +222,7 @@ impl CudaScaler {
         interp: CudaScalerInterp,
         format: CudaFrameFormat,
     ) -> Self {
+        crate::ensure_ffmpeg();
         Self::build(
             name,
             device,

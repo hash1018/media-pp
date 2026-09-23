@@ -29,8 +29,6 @@
 //! };
 //!
 //! # fn main() -> media_pp::Result<()> {
-//! media_pp::init()?;
-//!
 //! let source = TestVideoSource::new("source", TestVideoOptions::default());
 //! let (counter, frames) = FrameCounter::new("counter");
 //!
@@ -287,8 +285,22 @@ pub use error::{Error, Result};
 /// pointing at the version as the cause.
 pub use ffmpeg_next as ffmpeg;
 
-/// Must be called once before using any element that touches ffmpeg.
-pub fn init() -> Result<()> {
-    ffmpeg_next::init()?;
-    Ok(())
+/// Readies FFmpeg for this process, once, before anything here uses it.
+///
+/// What it does is register FFmpeg's error descriptions — without them an
+/// `ffmpeg::Error` displays as an empty string, and a failure reads as
+/// `ffmpeg error: ` with nothing after it — and its input devices, which an
+/// element opening a camera through FFmpeg needs to find one. It used to be
+/// the caller's to remember as `media_pp::init()`; forgetting it was silent,
+/// so every element that reaches FFmpeg calls this on its way in instead —
+/// through [`element::element_pp_log`], which every element builds its
+/// identity with, and at the top of each constructor whose first FFmpeg call
+/// comes before that.
+pub(crate) fn ensure_ffmpeg() {
+    static READY: std::sync::Once = std::sync::Once::new();
+    READY.call_once(|| {
+        // Registration only: nothing in it can fail on a supported FFmpeg,
+        // and there is no caller here to hand an error to.
+        let _ = ffmpeg_next::init();
+    });
 }

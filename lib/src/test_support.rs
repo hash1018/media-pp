@@ -310,7 +310,6 @@ pub(crate) fn try_tagged_packets(
 ) -> Option<(ffmpeg_next::codec::Parameters, Vec<ffmpeg_next::Packet>)> {
     use ffmpeg_next as ffmpeg;
 
-    crate::init().ok()?;
     let Some(codec) = ffmpeg::encoder::find_by_name(encoder) else {
         eprintln!("skipping: this FFmpeg build has no {encoder} encoder");
         return None;
@@ -384,7 +383,6 @@ pub(crate) fn try_av1_packets() -> Option<(ffmpeg_next::codec::Parameters, Vec<f
     use crate::elements::{AppSink, SwEncoder, SwEncoderOptions};
     use ffmpeg_next as ffmpeg;
 
-    crate::init().ok()?;
     let (width, height) = (FIXTURE_WIDTH, FIXTURE_HEIGHT);
     let options = |codec| SwEncoderOptions {
         codec,
@@ -475,7 +473,6 @@ fn build_fixture(
     use crate::pipeline::PipelineBuilder;
     use ffmpeg_next as ffmpeg;
 
-    crate::init()?;
     let directory = std::env::temp_dir().join("media-pp-fixtures");
     std::fs::create_dir_all(&directory)?;
     let path = directory.join(format!("{name}.mp4"));

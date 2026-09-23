@@ -295,6 +295,9 @@ pub trait Element: Send {
 /// implemented outside this crate (see [`ElementType::Other`]) can build
 /// its own `pp_log` field the same way.
 pub fn element_pp_log(element_type: ElementType, name: &str, pipeline_id: Option<&str>) -> PpLog {
+    // Every element comes through here as it is made, which makes this the
+    // one place FFmpeg is readied before any of them reaches it.
+    crate::ensure_ffmpeg();
     PpLog::new(&format!("{element_type:?}"), name, pipeline_id)
 }
 

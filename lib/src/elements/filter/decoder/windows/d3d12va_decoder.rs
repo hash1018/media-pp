@@ -111,6 +111,7 @@ impl D3d12Decoder {
         params: ffmpeg::codec::Parameters,
         device: &ID3D12Device,
     ) -> Result<Self, D3d12DecoderError> {
+        crate::ensure_ffmpeg();
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::D3d12Decoder, &name, None);
 
@@ -354,7 +355,6 @@ mod tests {
     /// FFmpeg's own tables, so it holds on a machine with no GPU.
     #[test]
     fn supports_says_no_for_a_codec_d3d12va_lacks() {
-        crate::init().unwrap();
         assert!(!D3d12Decoder::supports(ffmpeg::codec::Id::PRORES));
     }
 

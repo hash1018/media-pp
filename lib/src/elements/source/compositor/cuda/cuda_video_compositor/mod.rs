@@ -681,6 +681,7 @@ impl CudaVideoCompositor {
         device: &CudaDevice,
         options: VideoCompositorOptions,
     ) -> std::result::Result<(Self, CudaVideoCompositorHandle), CudaVideoCompositorError> {
+        crate::ensure_ffmpeg();
         Self::with_format(name, device, options, CudaFrameFormat::Nv12)
     }
 
@@ -700,6 +701,7 @@ impl CudaVideoCompositor {
         options: VideoCompositorOptions,
         format: CudaFrameFormat,
     ) -> std::result::Result<(Self, CudaVideoCompositorHandle), CudaVideoCompositorError> {
+        crate::ensure_ffmpeg();
         validate_output_options(options, format)?;
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::CudaVideoCompositor, &name, None);

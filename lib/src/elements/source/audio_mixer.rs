@@ -562,6 +562,7 @@ impl AudioMixer {
     /// unlike [`crate::elements::TeeBuilder::new`], since `AudioMixer` has no
     /// chains of its own for a handle to build).
     pub fn new(name: impl Into<String>, options: AudioMixerOptions) -> (Self, MixerHandle) {
+        crate::ensure_ffmpeg();
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::AudioMixer, &name, None);
         pp_info!(

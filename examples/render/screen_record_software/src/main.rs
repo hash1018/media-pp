@@ -53,7 +53,6 @@ mod windows_example {
     ///
     ///     cargo run -p screen_record_software -- [output.mp4] [seconds]
     pub(super) fn run() -> media_pp::Result<()> {
-        media_pp::init()?;
         let _log_guard = media_pp::log::init(
             env!("CARGO_PKG_NAME"),
             "logs",
@@ -164,7 +163,6 @@ mod linux_example {
     ///
     ///     cargo run -p screen_record_software -- [output.mp4] [seconds] [monitor|window] [restore-token]
     pub(super) fn run() -> media_pp::Result<()> {
-        media_pp::init()?;
         let _log_guard = media_pp::log::init(
             env!("CARGO_PKG_NAME"),
             "logs",

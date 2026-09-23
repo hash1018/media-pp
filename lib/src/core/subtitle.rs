@@ -406,7 +406,6 @@ mod tests {
 
     #[test]
     fn an_srt_file_is_written_through_a_file_muxer() {
-        crate::init().expect("ffmpeg");
         let written = write_sidecar("srt", Codec::SubRip);
         for expected in [
             "1\n00:00:01,000 --> 00:00:02,660\n첫 번째 자막\n",
@@ -421,7 +420,6 @@ mod tests {
 
     #[test]
     fn a_vtt_file_is_written_through_a_file_muxer() {
-        crate::init().expect("ffmpeg");
         let written = write_sidecar("vtt", Codec::WebVtt);
         assert!(
             written.starts_with("WEBVTT"),
@@ -442,7 +440,6 @@ mod tests {
     /// module's table makes — so it is read back rather than taken on trust.
     #[test]
     fn matroska_carries_a_subrip_track() {
-        crate::init().expect("ffmpeg");
         let path = std::env::temp_dir().join(format!(
             "media_pp_subtitle_{}_{:?}.mkv",
             std::process::id(),

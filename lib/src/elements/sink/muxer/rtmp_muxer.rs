@@ -161,6 +161,7 @@ impl RtmpMuxer {
     /// timeout this puts on every network operation the publish makes,
     /// since an unbounded one would park a pipeline thread.
     pub fn create(url: impl AsRef<str>) -> Result<Self> {
+        crate::ensure_ffmpeg();
         let url = url.as_ref();
         if url.contains('\0') {
             return Err(RtmpMuxerError::InvalidUrl.into());
@@ -236,6 +237,7 @@ impl RtmpMuxer {
     /// video pipeline while audio keeps running leaves the publish open
     /// until audio catches up too.
     pub fn open(mut self) -> Result<MuxerSinks> {
+        crate::ensure_ffmpeg();
         self.output.write_header().map_err(RtmpMuxerError::from)?;
         Ok(open_tracks::<Self>(
             self.id,

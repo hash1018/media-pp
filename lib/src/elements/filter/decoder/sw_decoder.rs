@@ -119,6 +119,7 @@ impl SwDecoder {
         name: impl Into<String>,
         params: ffmpeg::codec::Parameters,
     ) -> Result<Self, SwDecoderError> {
+        crate::ensure_ffmpeg();
         Self::open(name, params, None)
     }
 
@@ -129,6 +130,7 @@ impl SwDecoder {
         params: ffmpeg::codec::Parameters,
         threading: DecodeThreading,
     ) -> Result<Self, SwDecoderError> {
+        crate::ensure_ffmpeg();
         Self::open(name, params, Some(threading))
     }
 

@@ -171,6 +171,7 @@ impl AudioResampler {
     /// Creates a resampler to a fixed output format. The input's own format
     /// and the unit of its timestamps are read off each frame.
     pub fn new(name: impl Into<String>, target: AudioFormat) -> Self {
+        crate::ensure_ffmpeg();
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::AudioResampler, &name, None);
         let pad = SrcPad::with_contract(

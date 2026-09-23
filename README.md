@@ -45,7 +45,6 @@ use media_pp::{
 };
 
 fn main() -> media_pp::Result<()> {
-    media_pp::init()?;
     let source = TestVideoSource::new("source", TestVideoOptions::default());
     let (counter, frames) = FrameCounter::new("counter");
     let (pipeline, ()) = Pipeline::new("demo", source, |source, ctx| {

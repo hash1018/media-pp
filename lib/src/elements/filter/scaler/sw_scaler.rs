@@ -127,6 +127,7 @@ impl SwScaler {
         dst_height: u32,
         flags: ffmpeg::software::scaling::Flags,
     ) -> Self {
+        crate::ensure_ffmpeg();
         Self::with_output(
             name,
             dst_format,

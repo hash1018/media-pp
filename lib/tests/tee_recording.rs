@@ -35,7 +35,6 @@ fn temp_path(name: &str) -> std::path::PathBuf {
 
 #[test]
 fn finishing_a_recording_branch_leaves_a_playable_file_and_a_running_preview() {
-    media_pp::init().expect("initialize FFmpeg");
     let path = temp_path("recording.mp4");
     let path_str = path.to_string_lossy().to_string();
 
@@ -165,7 +164,6 @@ fn finishing_a_recording_branch_leaves_a_playable_file_and_a_running_preview() {
 fn finishing_a_recording_branch_loses_no_frame_that_reached_it() {
     const FRAMES: usize = 24;
 
-    media_pp::init().expect("initialize FFmpeg");
     let path = temp_path("frame-count.mp4");
     let path_str = path.to_string_lossy().to_string();
 

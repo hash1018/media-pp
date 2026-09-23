@@ -475,6 +475,7 @@ impl D3d11VideoEncoder {
         context: Arc<Mutex<ID3D11DeviceContext>>,
         options: D3d11VideoEncoderOptions,
     ) -> std::result::Result<Self, D3d11VideoEncoderError> {
+        crate::ensure_ffmpeg();
         Self::open(name, device, context, options, None)
     }
 
@@ -513,6 +514,7 @@ impl D3d11VideoEncoder {
         options: D3d11VideoEncoderOptions,
         color: ColorDescription,
     ) -> std::result::Result<Self, D3d11VideoEncoderError> {
+        crate::ensure_ffmpeg();
         if options.input_format == D3d11VideoInputFormat::Bgra {
             return Err(D3d11VideoEncoderError::DescribedBgraInput);
         }

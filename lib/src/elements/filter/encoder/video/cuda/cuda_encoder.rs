@@ -214,6 +214,7 @@ impl CudaEncoder {
         device: &CudaDevice,
         options: CudaEncoderOptions,
     ) -> std::result::Result<Self, CudaEncoderError> {
+        crate::ensure_ffmpeg();
         Self::open(name, device, options, None)
     }
 
@@ -232,6 +233,7 @@ impl CudaEncoder {
         options: CudaEncoderOptions,
         color: ColorDescription,
     ) -> std::result::Result<Self, CudaEncoderError> {
+        crate::ensure_ffmpeg();
         Self::open(name, device, options, Some(color))
     }
 

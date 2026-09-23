@@ -12,6 +12,13 @@ compile error with no explanation.
 
 ### Breaking
 
+- **`media_pp::init` is gone; the library readies FFmpeg itself.** Delete
+  the `media_pp::init()?;` line. It registered FFmpeg's error descriptions
+  and its input devices, and forgetting it was silent: every FFmpeg error
+  displayed as `ffmpeg error: ` with nothing after it, and a camera opened
+  through FFmpeg was not found. Every element that reaches FFmpeg now does
+  this once, on its way in, so there is nothing to remember.
+
 - **A setter that refuses says why.** `set_frame_rate` on the three
   compositor handles, `MixerHandle::set_mix_format` and
   `rate::FrameRateHandle::set` (the captures' rate handles) returned

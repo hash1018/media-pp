@@ -1553,7 +1553,6 @@ mod tests {
     #[test]
     #[ignore = "requires an interactive Windows Graphics Capture session"]
     fn queue_and_d3d11_scaler_share_the_capture_context_safely() {
-        crate::init().expect("initialize FFmpeg");
         let window = TestWindow::create().expect("create capture target window");
         let (source, device) = match WgcCaptureSource::open(
             "capture",
@@ -1609,7 +1608,6 @@ mod tests {
     #[test]
     #[ignore = "requires an interactive Windows Graphics Capture session"]
     fn captures_after_one_downstream_frame_failure() {
-        crate::init().expect("initialize FFmpeg");
         let window = TestWindow::create().expect("create capture target window");
         let (created, device) = match WgcCaptureSource::open(
             "capture",
@@ -1766,7 +1764,6 @@ mod tests {
     #[test]
     #[ignore = "requires an interactive Windows Graphics Capture session"]
     fn killing_the_target_windows_owner_ends_the_source() {
-        crate::init().expect("initialize FFmpeg");
         let title = format!("media-pp wgc owner test {}", std::process::id());
         let Some(mut host) = WindowHostProcess::start(&title) else {
             eprintln!("skipping: cannot start the window host process");
@@ -1835,7 +1832,6 @@ mod tests {
     #[test]
     #[ignore = "requires an interactive Windows Graphics Capture session"]
     fn destroying_the_target_window_ends_the_source() {
-        crate::init().expect("initialize FFmpeg");
         let window = TestWindow::create().expect("create capture target window");
         let (source, _device) = match WgcCaptureSource::open(
             "capture",

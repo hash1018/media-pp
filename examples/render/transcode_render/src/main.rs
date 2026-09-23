@@ -60,7 +60,6 @@ mod windows_example {
     }
 
     fn play(hwnd: isize, width: u32, height: u32, shutdown: &Shutdown) -> media_pp::Result<()> {
-        media_pp::init()?;
         let _log_guard = media_pp::log::init(
             env!("CARGO_PKG_NAME"),
             "logs",
@@ -167,7 +166,6 @@ mod linux_example {
     }
 
     fn play(target: WindowTarget, shutdown: &Shutdown) -> media_pp::Result<()> {
-        media_pp::init()?;
         let _log_guard = media_pp::log::init(
             env!("CARGO_PKG_NAME"),
             "logs",

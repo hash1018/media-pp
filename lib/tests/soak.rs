@@ -224,7 +224,6 @@ fn record_once(path: &Path, teardown: Teardown) {
 fn repeated_record_cycles_do_not_grow_process_memory() {
     isolate!();
     let _exclusive = common::exclusive();
-    media_pp::init().expect("ffmpeg init");
     let dir = TempDir::new("record-cycles");
     let iterations = iterations(20);
     let mut memory = Trend::private_bytes("record cycle private bytes");
@@ -257,7 +256,6 @@ fn repeated_record_cycles_do_not_grow_process_memory() {
 fn pause_resume_storm_does_not_grow_process_memory() {
     isolate!();
     let _exclusive = common::exclusive();
-    media_pp::init().expect("ffmpeg init");
     let (counter, frames) = FrameCounter::new("counter");
     let (pipeline, ()) = Pipeline::new("soak-control", test_source("video"), |source, ctx| {
         let branch = ctx.branch().queue("frames", 8).to(counter)?;
@@ -304,7 +302,6 @@ fn pause_resume_storm_does_not_grow_process_memory() {
 fn seek_storm_does_not_grow_process_memory() {
     isolate!();
     let _exclusive = common::exclusive();
-    media_pp::init().expect("ffmpeg init");
     let Some(path) = try_test_video() else { return };
     let (source, index, parameters) = open_fixture(&path);
 
@@ -360,7 +357,6 @@ fn seek_storm_does_not_grow_process_memory() {
 fn tee_branch_churn_does_not_grow_process_memory() {
     isolate!();
     let _exclusive = common::exclusive();
-    media_pp::init().expect("ffmpeg init");
     let (fixed_counter, fixed_frames) = FrameCounter::new("fixed-counter");
     let mut tee_handle = None;
     let (pipeline, ()) = Pipeline::new("soak-tee", test_source("video"), |source, ctx| {
@@ -422,7 +418,6 @@ fn tee_branch_churn_does_not_grow_process_memory() {
 fn compositor_input_churn_does_not_grow_process_memory() {
     isolate!();
     let _exclusive = common::exclusive();
-    media_pp::init().expect("ffmpeg init");
     let (compositor, handle) = SwVideoCompositor::new(
         "compositor",
         VideoCompositorOptions {
@@ -512,7 +507,6 @@ fn compositor_input_churn_does_not_grow_process_memory() {
 fn a_running_compositor_does_not_grow_while_it_answers_frames() {
     isolate!();
     let _exclusive = common::exclusive();
-    media_pp::init().expect("ffmpeg init");
     let (compositor, handle) = SwVideoCompositor::new(
         "compositor",
         VideoCompositorOptions {
@@ -589,7 +583,6 @@ fn a_running_compositor_does_not_grow_while_it_answers_frames() {
 fn segment_rotation_does_not_grow_process_memory_or_hold_files() {
     isolate!();
     let _exclusive = common::exclusive();
-    media_pp::init().expect("ffmpeg init");
     let dir = TempDir::new("segments");
     let source = test_source("video");
     // A keyframe every half second, so a one-second policy actually cuts
@@ -1067,7 +1060,6 @@ mod d3d11 {
     fn upload_and_scale_cycles_do_not_grow_gpu_memory() {
         isolate!();
         let _exclusive = exclusive();
-        media_pp::init().expect("ffmpeg init");
         let Some((device, context, live)) = try_d3d11_device() else {
             return;
         };
@@ -1093,7 +1085,6 @@ mod d3d11 {
     fn chroma_key_cycles_do_not_grow_gpu_memory() {
         isolate!();
         let _exclusive = exclusive();
-        media_pp::init().expect("ffmpeg init");
         let Some((device, context, live)) = try_d3d11_device() else {
             return;
         };
@@ -1139,7 +1130,6 @@ mod d3d11 {
     fn a_running_d3d11_compositor_does_not_grow_gpu_memory() {
         isolate!();
         let _exclusive = exclusive();
-        media_pp::init().expect("ffmpeg init");
         let Some((device, context, live)) = try_d3d11_device() else {
             return;
         };
@@ -1261,7 +1251,6 @@ mod d3d11 {
     fn decode_cycles_do_not_grow_gpu_memory() {
         isolate!();
         let _exclusive = exclusive();
-        media_pp::init().expect("ffmpeg init");
         let Some(path) = try_test_video() else { return };
         let Some((device, _context, live)) = try_d3d11_device() else {
             return;
@@ -1291,7 +1280,6 @@ mod d3d11 {
     fn nvenc_encode_cycles_do_not_grow_gpu_memory() {
         isolate!();
         let _exclusive = exclusive();
-        media_pp::init().expect("ffmpeg init");
         let Some((device, context, live)) = try_d3d11_device() else {
             return;
         };
@@ -1417,7 +1405,6 @@ mod d3d11 {
 
         isolate!();
         let _exclusive = exclusive();
-        media_pp::init().expect("ffmpeg init");
         // `CaptureMode` is not `Copy`, so each use builds its own value.
         let cpu_mode = || CaptureMode::Cpu {
             include_cursor: false,
@@ -1455,7 +1442,6 @@ mod d3d11 {
 
         isolate!();
         let _exclusive = exclusive();
-        media_pp::init().expect("ffmpeg init");
         if !capture_supported(CaptureMode::Gpu) {
             return;
         }
@@ -1663,7 +1649,6 @@ mod d3d11 {
     fn window_capture_cycles_do_not_grow_gpu_memory() {
         isolate!();
         let _exclusive = exclusive();
-        media_pp::init().expect("ffmpeg init");
         let window = match WgcTestWindow::create() {
             Ok(window) => window,
             Err(error) => {
@@ -1773,7 +1758,6 @@ mod d3d12 {
     fn upload_scale_and_download_cycles_do_not_grow_gpu_memory() {
         isolate!();
         let _exclusive = exclusive();
-        media_pp::init().expect("ffmpeg init");
         let Some(device) = try_device() else { return };
 
         let mut memory = Trend::private_bytes("d3d12 scale cycle private bytes");
@@ -2079,7 +2063,6 @@ mod cuda {
     fn upload_scale_and_download_cycles_do_not_grow_gpu_memory() {
         isolate!();
         let _exclusive = exclusive();
-        media_pp::init().expect("ffmpeg init");
         let Some(device) = try_device() else { return };
 
         // More cycles than the D3D11 scenario on purpose: the CUDA
@@ -2105,7 +2088,6 @@ mod cuda {
     fn decode_cycles_do_not_grow_gpu_memory() {
         isolate!();
         let _exclusive = exclusive();
-        media_pp::init().expect("ffmpeg init");
         let Some(path) = try_test_video() else { return };
         let Some(device) = try_device() else { return };
         if !decode_supported(&device, &path) {
@@ -2126,7 +2108,6 @@ mod cuda {
     fn nvenc_encode_cycles_do_not_grow_gpu_memory() {
         isolate!();
         let _exclusive = exclusive();
-        media_pp::init().expect("ffmpeg init");
         let Some(device) = try_device() else { return };
         if !nvenc_supported(&device) {
             return;
@@ -2162,7 +2143,6 @@ mod cuda {
     fn a_running_cuda_compositor_does_not_grow_gpu_memory() {
         isolate!();
         let _exclusive = exclusive();
-        media_pp::init().expect("ffmpeg init");
         let Some(device) = try_device() else { return };
 
         let (compositor, handle) = CudaVideoCompositor::new(
@@ -2394,7 +2374,6 @@ mod pipewire {
     fn dropping_a_capture_closes_its_portal_session() {
         isolate!();
         let _exclusive = exclusive();
-        media_pp::init().expect("ffmpeg init");
         let Some(restore_token) = try_restore_token() else {
             return;
         };
@@ -2600,7 +2579,6 @@ mod pipewire {
     fn cpu_desktop_capture_cycles_do_not_grow_process_memory() {
         isolate!();
         let _exclusive = exclusive();
-        media_pp::init().expect("ffmpeg init");
         let Some(token) = try_restore_token() else {
             return;
         };
@@ -2632,7 +2610,6 @@ mod pipewire {
     fn gpu_desktop_capture_cycles_do_not_grow_gpu_memory() {
         isolate!();
         let _exclusive = exclusive();
-        media_pp::init().expect("ffmpeg init");
         let Some(token) = try_restore_token() else {
             return;
         };

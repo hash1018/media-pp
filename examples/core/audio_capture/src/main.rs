@@ -47,7 +47,6 @@ mod windows_example {
     ///     cargo run -p audio_capture -- list       # just print every device and exit
     ///     cargo run -p audio_capture -- <name>     # first device whose name contains <name>
     pub(super) fn run() -> Result<()> {
-        media_pp::init()?;
         let _log_guard = media_pp::log::init(
             env!("CARGO_PKG_NAME"),
             "logs",
@@ -149,7 +148,6 @@ mod linux_example {
     ///     cargo run -p audio_capture -- list       # just print every node and exit
     ///     cargo run -p audio_capture -- <name>     # first node whose name contains <name>
     pub(super) fn run() -> Result<()> {
-        media_pp::init()?;
         let _log_guard = media_pp::log::init(
             env!("CARGO_PKG_NAME"),
             "logs",

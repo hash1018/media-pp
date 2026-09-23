@@ -117,6 +117,7 @@ impl RtspMuxer {
     /// useful when the network path and server permit the negotiated
     /// RTP/RTCP ports.
     pub fn create(url: impl AsRef<str>, transport: RtspTransport) -> Result<Self> {
+        crate::ensure_ffmpeg();
         let url = url.as_ref();
         let output = alloc_output(url)?;
         Ok(Self {
@@ -177,6 +178,7 @@ impl RtspMuxer {
     /// one trailer, written once every track has reported `Eos` — not on
     /// whichever finishes first, which would cut the others off mid-stream.
     pub fn open(mut self) -> Result<MuxerSinks> {
+        crate::ensure_ffmpeg();
         let mut options = ffmpeg::Dictionary::new();
         options.set("rtsp_transport", self.transport.as_ffmpeg_option());
         self.output

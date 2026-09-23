@@ -81,7 +81,6 @@ fn try_shared_device() -> Option<(ID3D11Device, Arc<Mutex<ID3D11DeviceContext>>)
 /// and on an empty bus, not merely on construction succeeding.
 #[test]
 fn four_d3d11_elements_share_one_device_across_queue_boundaries() {
-    media_pp::init().expect("initialize FFmpeg");
     let Some((device, context)) = try_shared_device() else {
         return;
     };
@@ -238,7 +237,6 @@ fn a_capture_sharing_the_device_does_not_slow_the_compositor() {
     /// canvas below is small.
     const MINIMUM: f64 = 0.85;
 
-    media_pp::init().expect("initialize FFmpeg");
     let Some((device, context)) = try_shared_device() else {
         return;
     };

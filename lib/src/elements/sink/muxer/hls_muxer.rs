@@ -75,6 +75,7 @@ impl HlsOptions {
     /// Creates a live fMP4 configuration with two-second segments, a
     /// six-segment sliding window, and automatic deletion of old segments.
     pub fn new(playlist_path: impl Into<PathBuf>, segment_pattern: impl Into<PathBuf>) -> Self {
+        crate::ensure_ffmpeg();
         Self {
             playlist_path: playlist_path.into(),
             segment_pattern: segment_pattern.into(),
@@ -327,6 +328,7 @@ impl HlsMuxer {
     /// Allocates FFmpeg's HLS output context. Parent directories for the
     /// playlist, segment pattern, and fMP4 init file must already exist.
     pub fn create(options: HlsOptions) -> Result<Self> {
+        crate::ensure_ffmpeg();
         options.validate()?;
         let output = allocate_output(&options)?;
         Ok(Self {
@@ -365,6 +367,7 @@ impl HlsMuxer {
     /// playlist is finalized only after every returned sink has received
     /// `Eos` or [`ControlMsg::Stop`](crate::control::ControlMsg::Stop).
     pub fn open(mut self) -> Result<MuxerSinks> {
+        crate::ensure_ffmpeg();
         if self.streams.is_empty() {
             return Err(HlsMuxerError::NoStreams.into());
         }

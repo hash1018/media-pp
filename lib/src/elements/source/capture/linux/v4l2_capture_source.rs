@@ -142,6 +142,7 @@ impl V4l2CaptureSource {
         name: impl Into<String>,
         options: V4l2CaptureOptions,
     ) -> std::result::Result<(Self, VideoFormat), V4l2CaptureSourceError> {
+        crate::ensure_ffmpeg();
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::V4l2CaptureSource, &name, None);
 

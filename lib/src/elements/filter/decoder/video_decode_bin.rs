@@ -1248,7 +1248,6 @@ mod tests {
 
     #[test]
     fn a_stream_that_is_not_video_is_refused() {
-        crate::init().unwrap();
         let mut params = ffmpeg::codec::Parameters::new();
         // SAFETY: `params` owns a live, freshly allocated AVCodecParameters.
         unsafe {

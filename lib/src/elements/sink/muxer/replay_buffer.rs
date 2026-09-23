@@ -676,7 +676,6 @@ mod tests {
     }
 
     fn fixture() -> Option<Recorded> {
-        crate::init().ok()?;
         let path = crate::test_support::try_test_video()?;
         Some(read(std::path::Path::new(&path)))
     }
@@ -902,7 +901,6 @@ mod tests {
     /// — `read_back` refuses a negative `dts` for every packet.
     #[test]
     fn reordered_frames_are_saved_in_order_from_zero() {
-        crate::init().expect("ffmpeg initializes");
         let fixture = crate::test_support::synthesize_reordered("replay-reordered", 4.0);
         let recorded = read(&fixture.path);
         let (mut sinks, handle) = buffer_over(&recorded, Duration::from_secs(2));

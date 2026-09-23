@@ -218,6 +218,7 @@ impl FileDemuxer {
         name: impl Into<String>,
         path: impl AsRef<Path>,
     ) -> Result<(Self, Vec<StreamInfo>), FileDemuxError> {
+        crate::ensure_ffmpeg();
         let input = ffmpeg::format::input(&path)?;
 
         let streams: Vec<StreamInfo> = input.streams().map(|s| StreamInfo::of(&s)).collect();
@@ -1460,7 +1461,6 @@ mod tests {
     /// and that is the one `best` answers.
     #[test]
     fn best_passes_over_a_still_ahead_of_the_video() {
-        crate::init().unwrap();
         let path = std::env::temp_dir().join("media-pp-still-ahead-of-video.mkv");
         if still_ahead_of_video(&path).is_none() {
             eprintln!("skipping: could not write a file with a still ahead of its video");
@@ -1495,7 +1495,6 @@ mod tests {
     /// the same codec, the same parameters, the same time base.
     #[test]
     fn stream_info_carries_what_the_stream_would_answer() {
-        crate::init().unwrap();
         let Some(path) = try_test_video() else {
             return;
         };

@@ -165,7 +165,6 @@ mod example {
     }
 
     fn play(model_path: &str, video_path: &str, proxy: EventLoopProxy<AppEvent>) -> Result<()> {
-        media_pp::init()?;
         let _log_guard = media_pp::log::init(
             env!("CARGO_PKG_NAME"),
             "logs",
