@@ -1154,6 +1154,7 @@ fn one_h264_sendrecv_track_carries_data_both_ways_with_the_declared_payload_type
             codec: VideoCodec::OpenH264,
             width: video_options.width,
             height: video_options.height,
+            pixel_format: ffmpeg::format::Pixel::YUV420P,
             frame_rate: video_options.frame_rate,
             bit_rate: 250_000,
             gop_size: 15,

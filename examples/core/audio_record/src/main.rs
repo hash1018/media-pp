@@ -70,7 +70,7 @@ mod example {
         pipeline.run()?;
 
         thread::sleep(Duration::from_secs(seconds));
-        pipeline.stop();
+        pipeline.finish();
 
         for event in pipeline.bus().iter() {
             println!("{event}");

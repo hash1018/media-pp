@@ -8,7 +8,10 @@ use thiserror::Error as ThisError;
 use crate::color::ColorDescription;
 use crate::{
     buffer::MediaBuffer,
-    contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
+    contract::{
+        InputContract, MediaKind, MemoryDomain, OutputContract, PixelLayout, PixelLayoutSet,
+        PortContract,
+    },
     control::ControlMsg,
     element::{Element, ElementType, Sink, Source, element_pp_log},
     error::Result,
@@ -44,6 +47,37 @@ pub enum SwEncoderError {
          that made it has to set one (media_pp::buffer::set_time_base)"
     )]
     NoTimeBase,
+
+    /// The codec publishes the pixel formats it encodes and
+    /// [`SwEncoderOptions::pixel_format`] is not one of them — `libopenh264`
+    /// takes only `YUV420P`, for example. Caught here because
+    /// `avcodec_open2` would otherwise report it as a bare `Invalid argument`.
+    #[error("{0:?} cannot encode {1:?} frames — only {2:?}")]
+    UnsupportedPixelFormat(String, ffmpeg::format::Pixel, Vec<ffmpeg::format::Pixel>),
+
+    /// A frame is not in the format or size this encoder was opened for.
+    /// The encoder reads every frame as what it was opened with, so one in
+    /// another layout — a BGRA capture, an NV12 frame into a `YUV420P`
+    /// encoder — would be encoded as garbage rather than fail. Convert it
+    /// first, with a [`SwScaler`](crate::elements::SwScaler).
+    #[error(
+        "SwEncoder was opened for {expected_width}x{expected_height} {expected_format:?} frames, \
+         got {width}x{height} {format:?}; convert it first (e.g. with a SwScaler)"
+    )]
+    FrameMismatch {
+        /// The pixel format the encoder was opened for.
+        expected_format: ffmpeg::format::Pixel,
+        /// The width the encoder was opened for.
+        expected_width: u32,
+        /// The height the encoder was opened for.
+        expected_height: u32,
+        /// The frame's pixel format.
+        format: ffmpeg::format::Pixel,
+        /// The frame's width.
+        width: u32,
+        /// The frame's height.
+        height: u32,
+    },
 
     /// FFmpeg rejected encoder creation or frame/packet processing.
     #[error("ffmpeg error: {0}")]
@@ -152,19 +186,27 @@ pub struct SwEncoderOptions {
     pub width: u32,
     /// Encoded frame height in pixels.
     pub height: u32,
+    /// The pixel format every frame given to the encoder is in, and the one
+    /// it is opened for. `YUV420P` is what every codec here encodes; others
+    /// — `NV12`, 10-bit `YUV420P10LE`, 4:4:4 — are taken by the codecs that
+    /// publish them, which [`SwEncoder::new`] checks, failing with
+    /// [`SwEncoderError::UnsupportedPixelFormat`] for one the codec lacks.
+    ///
+    /// Frames are not converted: one in another format or size is refused
+    /// with [`SwEncoderError::FrameMismatch`], since the encoder would
+    /// otherwise read its planes as this layout and encode garbage. Put a
+    /// [`SwScaler`](crate::elements::SwScaler) to this format in front.
+    pub pixel_format: ffmpeg::format::Pixel,
     /// The nominal rate the encoder uses for internal rate-control
     /// (targeting `bit_rate` per frame) and the frame-rate metadata it
     /// writes into the bitstream — *not* required to match the real
     /// interval between `send_frame` calls. For a source with its own
     /// genuinely fixed rate (e.g. [`crate::elements::TestVideoSource`]),
-    /// that's `TestVideoOptions::frame_rate` itself. For an irregular/VFR
-    /// source (e.g. `DxgiCaptureSource`, whose frames
-    /// arrive only on real desktop changes, capped but not paced to a
-    /// fixed cadence), use its configured cap
-    /// (`DxgiCaptureOptions::max_fps`) as the closest meaningful nominal
-    /// rate — actual encoded packets still carry each frame's real `pts`
-    /// either way, so muxing stays correct regardless of how well this
-    /// nominal rate matches the true one.
+    /// that's `TestVideoOptions::frame_rate` itself, and for a screen
+    /// capture its own `frame_rate` (`DxgiCaptureOptions::frame_rate` and
+    /// the like), since a capture emits at that fixed rate. Encoded packets
+    /// carry each frame's own `pts` either way, so muxing stays correct even
+    /// where this nominal rate and the true one differ.
     pub frame_rate: ffmpeg::Rational,
     /// Target encoded bit rate, in bits per second.
     pub bit_rate: usize,
@@ -198,8 +240,8 @@ pub struct SwEncoderOptions {
     pub max_b_frames: Option<u32>,
 }
 
-/// Encodes `Pixel::YUV420P` `Video` frames into `Packet`s via a software
-/// encoder (see [`VideoCodec`]) — the mirror image of
+/// Encodes `Video` frames in [`SwEncoderOptions::pixel_format`] (`YUV420P`
+/// for most) into `Packet`s via a software encoder (see [`VideoCodec`]) — the mirror image of
 /// [`crate::elements::SwDecoder`]'s decode direction. A `Filter`: receives
 /// via `Sink`, pushes what it produces into its own (single) src pad.
 ///
@@ -226,7 +268,26 @@ pub struct SwEncoder {
     /// real time from a packet's own declared time_base rather than
     /// external knowledge of what this encoder was built with.
     time_base: ffmpeg::Rational,
+    /// What every frame must be: the format and size the codec was opened
+    /// for. See [`SwEncoderError::FrameMismatch`].
+    pixel_format: ffmpeg::format::Pixel,
+    width: u32,
+    height: u32,
     pad: SrcPad,
+}
+
+/// `YUVJ*` is the deprecated full-range spelling of the same planes; a frame
+/// in one is laid out exactly as the other, so either fits an encoder opened
+/// for the pair. Range travels separately, in the frame's colour metadata.
+fn same_layout(a: ffmpeg::format::Pixel, b: ffmpeg::format::Pixel) -> bool {
+    use ffmpeg::format::Pixel;
+    let plain = |pixel| match pixel {
+        Pixel::YUVJ420P => Pixel::YUV420P,
+        Pixel::YUVJ422P => Pixel::YUV422P,
+        Pixel::YUVJ444P => Pixel::YUV444P,
+        other => other,
+    };
+    plain(a) == plain(b)
 }
 
 fn nominal_packet_duration(time_base: ffmpeg::Rational, frame_rate: ffmpeg::Rational) -> i64 {
@@ -271,6 +332,27 @@ impl SwEncoder {
         let codec = ffmpeg::encoder::find_by_name(encoder_name)
             .ok_or_else(|| SwEncoderError::CodecNotFound(encoder_name.into()))?;
 
+        // Asked of the codec rather than hardcoded per `VideoCodec`, as
+        // `SwAudioEncoder` asks for sample rates. A codec that publishes no
+        // list is left alone.
+        {
+            let capabilities = codec.video().map_err(SwEncoderError::from)?;
+            if let Some(formats) = capabilities.formats() {
+                let supported: Vec<ffmpeg::format::Pixel> = formats.collect();
+                if !supported
+                    .iter()
+                    .any(|&format| same_layout(format, options.pixel_format))
+                {
+                    return Err(SwEncoderError::UnsupportedPixelFormat(
+                        encoder_name.into(),
+                        options.pixel_format,
+                        supported,
+                    )
+                    .into());
+                }
+            }
+        }
+
         let mut context = ffmpeg::codec::context::Context::new_with_codec(codec);
         // The codec's own headers — SPS/PPS and the like — go into
         // `extradata` for the container to write, rather than only in-band.
@@ -286,7 +368,7 @@ impl SwEncoder {
         let mut video = context.encoder().video().map_err(SwEncoderError::from)?;
         video.set_width(options.width);
         video.set_height(options.height);
-        video.set_format(ffmpeg::format::Pixel::YUV420P);
+        video.set_format(options.pixel_format);
         video.set_time_base(time_base);
         video.set_frame_rate(Some(options.frame_rate));
         video.set_bit_rate(options.bit_rate);
@@ -321,6 +403,9 @@ impl SwEncoder {
             encoder,
             packet_duration,
             time_base,
+            pixel_format: options.pixel_format,
+            width: options.width,
+            height: options.height,
             pad,
         })
     }
@@ -401,15 +486,32 @@ impl Sink for SwEncoder {
     /// on the CPU, so a D3D11 or CUDA frame is not merely the wrong
     /// format here, it is unreachable memory.
     fn input_contract(&self) -> InputContract {
-        InputContract::Fixed(PortContract::frame(
-            MediaKind::VideoFrame,
-            MemoryDomain::System,
-        ))
+        // The one layout it was opened for: a wiring that can only deliver
+        // another — a BGRA capture straight in — is refused before the
+        // pipeline starts, rather than encoded as garbage.
+        InputContract::Fixed(
+            PortContract::frame(MediaKind::VideoFrame, MemoryDomain::System)
+                .with_layouts(PixelLayoutSet::of(PixelLayout::of(self.pixel_format))),
+        )
     }
 
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         match buf {
             MediaBuffer::Video(frame) => {
+                if !same_layout(frame.format(), self.pixel_format)
+                    || frame.width() != self.width
+                    || frame.height() != self.height
+                {
+                    return Err(SwEncoderError::FrameMismatch {
+                        expected_format: self.pixel_format,
+                        expected_width: self.width,
+                        expected_height: self.height,
+                        format: frame.format(),
+                        width: frame.width(),
+                        height: frame.height(),
+                    }
+                    .into());
+                }
                 let pts = super::pts_in(&frame, self.time_base)
                     .map_err(|super::NoTimeBase| SwEncoderError::NoTimeBase)?;
                 let frame =
@@ -493,6 +595,7 @@ mod tests {
                     codec,
                     width: 640,
                     height: 480,
+                    pixel_format: ffmpeg::format::Pixel::YUV420P,
                     frame_rate: ffmpeg::Rational::new(30, 1),
                     bit_rate: 1_000_000,
                     gop_size: 60, // ~2s @ 30fps
@@ -565,6 +668,7 @@ mod tests {
             codec: VideoCodec::OpenH264,
             width: 64,
             height: 64,
+            pixel_format: ffmpeg::format::Pixel::YUV420P,
             frame_rate: ffmpeg::Rational::new(30, 1),
             bit_rate: 200_000,
             gop_size: 30,
@@ -610,6 +714,7 @@ mod tests {
             codec: VideoCodec::OpenH264,
             width: 64,
             height: 64,
+            pixel_format: ffmpeg::format::Pixel::YUV420P,
             frame_rate: ffmpeg::Rational::new(30, 1),
             bit_rate: 200_000,
             gop_size: 30,
@@ -683,6 +788,7 @@ mod tests {
             codec: VideoCodec::Mpeg4,
             width: 64,
             height: 64,
+            pixel_format: ffmpeg::format::Pixel::YUV420P,
             frame_rate: ffmpeg::Rational::new(30, 1),
             bit_rate: 200_000,
             gop_size: 30,
@@ -704,6 +810,7 @@ mod tests {
             codec: VideoCodec::OpenH264,
             width: 64,
             height: 64,
+            pixel_format: ffmpeg::format::Pixel::YUV420P,
             frame_rate: ffmpeg::Rational::new(30, 1),
             bit_rate: 200_000,
             gop_size: 30,
@@ -741,5 +848,155 @@ mod tests {
             described(&untold).0,
             ffmpeg::ffi::AVColorSpace::AVCOL_SPC_UNSPECIFIED
         );
+    }
+
+    /// A frame of `format` and size, due at 0 in thirtieths.
+    fn picture(format: ffmpeg::format::Pixel, width: u32, height: u32) -> MediaBuffer {
+        let mut frame = ffmpeg::frame::Video::new(format, width, height);
+        frame.set_pts(Some(0));
+        crate::buffer::set_time_base(&mut frame, ffmpeg::Rational::new(1, 30));
+        for plane in 0..frame.planes() {
+            frame.data_mut(plane).fill(128);
+        }
+        MediaBuffer::video(frame)
+    }
+
+    /// A frame the encoder was not opened for — a BGRA capture straight in,
+    /// NV12, the wrong size — used to be read as if it were, and encoded as
+    /// a green picture with no error anywhere. It is refused, naming what
+    /// it is, and the encoder goes on taking the frames it was opened for.
+    #[test]
+    fn a_frame_in_another_format_or_size_is_refused_and_the_encoder_goes_on() {
+        use ffmpeg::format::Pixel;
+        let Some((mut encoder, packets)) = open_h264() else {
+            return;
+        };
+        for (format, width, height) in [
+            (Pixel::BGRA, 64, 64),
+            (Pixel::NV12, 64, 64),
+            (Pixel::YUV420P, 32, 64),
+        ] {
+            let error = encoder
+                .consume(picture(format, width, height))
+                .expect_err("a frame the encoder was not opened for is refused");
+            assert!(
+                matches!(
+                    error,
+                    crate::Error::SwEncoderError(SwEncoderError::FrameMismatch {
+                        expected_format: Pixel::YUV420P,
+                        expected_width: 64,
+                        expected_height: 64,
+                        format: refused,
+                        width: refused_width,
+                        ..
+                    }) if refused == format && refused_width == width
+                ),
+                "{error}"
+            );
+        }
+        assert!(packets.lock().unwrap().is_empty(), "nothing was encoded");
+
+        // `YUVJ420P` is the same planes, spelled for full range.
+        for format in [Pixel::YUV420P, Pixel::YUVJ420P] {
+            encoder
+                .consume(picture(format, 64, 64))
+                .expect("a frame in the opened layout encodes");
+        }
+        encoder.consume(MediaBuffer::Eos).unwrap();
+        assert!(!packets.lock().unwrap().is_empty());
+    }
+
+    /// The same, before the pipeline starts: a wiring that can only deliver
+    /// another layout does not link, and one that says nothing about layout
+    /// still does, leaving it to the check above.
+    #[test]
+    fn only_the_layout_it_was_opened_for_links() {
+        let Some((encoder, _)) = open_h264() else {
+            return;
+        };
+        let InputContract::Fixed(accepted) = encoder.input_contract() else {
+            panic!("an encoder states what it takes");
+        };
+        let frames = || PortContract::frame(MediaKind::VideoFrame, MemoryDomain::System);
+        let yuv420p = PixelLayoutSet::of(PixelLayout::of(ffmpeg::format::Pixel::YUV420P));
+        assert!(!accepted.accepts(&frames().with_layouts(PixelLayoutSet::BGRA)));
+        assert!(!accepted.accepts(&frames().with_layouts(PixelLayoutSet::NV12)));
+        assert!(accepted.accepts(&frames().with_layouts(yuv420p)));
+        assert!(accepted.accepts(&frames()));
+    }
+
+    /// A codec that publishes the formats it encodes refuses one it lacks
+    /// when it is built, naming the ones it takes — rather than failing
+    /// inside `avcodec_open2` with a bare `Invalid argument`.
+    #[test]
+    fn a_pixel_format_the_codec_lacks_is_refused_when_it_is_built() {
+        let result = SwEncoder::new(
+            "encoder",
+            SwEncoderOptions {
+                codec: VideoCodec::OpenH264,
+                width: 64,
+                height: 64,
+                pixel_format: ffmpeg::format::Pixel::BGRA,
+                frame_rate: ffmpeg::Rational::new(30, 1),
+                bit_rate: 200_000,
+                gop_size: 30,
+                max_b_frames: None,
+            },
+        );
+        match result {
+            Err(crate::Error::SwEncoderError(SwEncoderError::CodecNotFound(_))) => {}
+            Err(crate::Error::SwEncoderError(SwEncoderError::UnsupportedPixelFormat(
+                _,
+                ffmpeg::format::Pixel::BGRA,
+                supported,
+            ))) => assert!(
+                supported.contains(&ffmpeg::format::Pixel::YUV420P),
+                "the alternatives name YUV420P: {supported:?}"
+            ),
+            Err(other) => panic!("expected UnsupportedPixelFormat, got {other}"),
+            Ok(_) => panic!("libopenh264 does not encode BGRA"),
+        }
+    }
+
+    /// A codec that takes NV12 is opened for it and encodes it as it is,
+    /// with no conversion in front — where this FFmpeg has one.
+    #[test]
+    fn a_codec_that_takes_nv12_encodes_it_directly() {
+        use ffmpeg::format::Pixel;
+        let Some(codec) = [VideoCodec::H264, VideoCodec::H265]
+            .into_iter()
+            .find(|codec| {
+                ffmpeg::encoder::find_by_name(codec.encoder_name())
+                    .and_then(|found| found.video().ok()?.formats())
+                    .is_some_and(|mut formats| formats.any(|format| format == Pixel::NV12))
+            })
+        else {
+            eprintln!("skipping: no encoder here takes NV12");
+            return;
+        };
+        let mut encoder = SwEncoder::new(
+            "encoder",
+            SwEncoderOptions {
+                codec,
+                width: 64,
+                height: 64,
+                pixel_format: Pixel::NV12,
+                frame_rate: ffmpeg::Rational::new(30, 1),
+                bit_rate: 200_000,
+                gop_size: 30,
+                max_b_frames: None,
+            },
+        )
+        .expect("an encoder that lists NV12 opens for it");
+        let packets = Arc::new(StdMutex::new(Vec::new()));
+        encoder.src_pads()[0].link(Box::new(CapturingSink {
+            packets: packets.clone(),
+            pp_log: element_pp_log(ElementType::Other, "capture", None),
+        }));
+        encoder
+            .consume(picture(Pixel::NV12, 64, 64))
+            .expect("NV12 encodes");
+        encoder.consume(MediaBuffer::Eos).unwrap();
+        assert!(!packets.lock().unwrap().is_empty());
     }
 }

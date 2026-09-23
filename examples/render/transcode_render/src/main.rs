@@ -83,6 +83,7 @@ mod windows_example {
                     codec: VideoCodec::OpenH264,
                     width,
                     height,
+                    pixel_format: ffmpeg::format::Pixel::YUV420P,
                     frame_rate: options.frame_rate,
                     bit_rate: 2_000_000,
                     gop_size: 60, // ~2s @ 30fps (TestVideoOptions::default's own framerate)
@@ -190,6 +191,7 @@ mod linux_example {
                     codec: VideoCodec::OpenH264,
                     width: target.width,
                     height: target.height,
+                    pixel_format: ffmpeg::format::Pixel::YUV420P,
                     time_base,
                     frame_rate: options.frame_rate,
                     bit_rate: 2_000_000,

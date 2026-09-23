@@ -12,6 +12,19 @@ compile error with no explanation.
 
 ### Breaking
 
+- **`SwEncoder` is opened for one pixel format, and refuses any other.**
+  It encoded whatever frame it was handed as if it were `YUV420P`: a BGRA
+  screen capture wired straight in linked, ran without an error, and wrote
+  a file that played as solid green. `SwEncoderOptions` has a new required
+  `pixel_format` — `YUV420P` for what every example here does — which the
+  encoder is opened for after checking that the codec takes it
+  (`SwEncoderError::UnsupportedPixelFormat` names the ones it does), so a
+  codec such as `libx264` can take NV12 or 10-bit frames with no conversion
+  in front. A frame in another format or size is refused with
+  `SwEncoderError::FrameMismatch`, and a wiring that can only deliver
+  another layout no longer links. `YUVJ420P` fits a `YUV420P` encoder, being
+  the same planes.
+
 - **`FileDemuxError` is `FileDemuxerError`.** Every other element's error
   is named after the element — `FileMuxerError`, `SwDecoderError` — and a
   search for `FileDemuxerError` found nothing. The crate `Error` variant is
@@ -512,6 +525,11 @@ compile error with no explanation.
   writes its packets at the right times.
 
 ### Added
+
+- **`BusReceiver::recv_timeout`.** Waits a bounded time for the next event,
+  for a loop with something else to watch too, and says whether it came
+  back empty because nothing was posted in time or because the bus has
+  ended — which `try_recv` cannot tell apart.
 
 - **`WebRtcStreamInfo::track_format`.** A received WebRTC track records
   with `muxer.add_stream(name, info.track_format()?)`, instead of
@@ -1134,6 +1152,14 @@ compile error with no explanation.
   decoder in this crate — keys exactly as before, byte for byte.
 
 ### Fixed
+
+- **The recording examples end with `finish`.** `audio_record`, `hls`,
+  `rtmp_publish`, `screen_record_software`, `screen_record_av` and the
+  compositor examples ended with `stop`, which finalizes a playable file
+  but abandons what the encoders still hold — the last frame of video, two
+  frames of AAC. The Linux halves of `screen_record_av`, `_software` and
+  `_nvenc` also passed encoders a `time_base` they no longer take, and did
+  not compile.
 
 - **A pipeline played to its end can be sought through a `Queue`.** A
   queue's worker ended with the `Eos` it forwarded, so once a `FileDemuxer`

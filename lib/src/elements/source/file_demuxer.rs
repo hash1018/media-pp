@@ -213,7 +213,8 @@ pub struct FileDemuxer {
 impl FileDemuxer {
     /// Opens the file and returns it alongside every stream it contains,
     /// so the caller can inspect them (count, media type, ...) before
-    /// deciding which of `src_pads()` to link.
+    /// deciding which to use — each at its own `index`, which is the pad
+    /// [`Context::attach`](crate::element::Context::attach) takes.
     pub fn open(
         name: impl Into<String>,
         path: impl AsRef<Path>,

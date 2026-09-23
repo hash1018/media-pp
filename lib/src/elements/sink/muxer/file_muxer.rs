@@ -51,6 +51,7 @@ pub enum FileMuxerError {
 /// #     codec: VideoCodec::H264,
 /// #     width: 640,
 /// #     height: 360,
+/// #     pixel_format: ffmpeg::format::Pixel::YUV420P,
 /// #     frame_rate: ffmpeg::Rational(30, 1),
 /// #     bit_rate: 2_000_000,
 /// #     gop_size: 30,
@@ -142,14 +143,14 @@ impl FileMuxer {
     /// to finalizing on that one track's own `Eos`/`Stop`, same as before
     /// this type supported more than one.
     ///
-    /// A caller driving multiple tracks from independent
-    /// [`crate::pipeline::Pipeline`]s (today's architecture: one
-    /// `SourceElement` per pipeline, so a live video capture and a live
-    /// audio capture are necessarily two separate pipelines) is
-    /// responsible for stopping all of them — the file's trailer only
-    /// gets written once every track has actually reported done, so
-    /// stopping only one pipeline while another keeps running leaves the
-    /// file un-finalized (and unplayable) until the rest catch up too.
+    /// Tracks fed by several sources belong in one pipeline, through
+    /// [`crate::pipeline::PipelineBuilder::add_source`] — a live video
+    /// capture and a live audio capture together — so that one
+    /// [`crate::pipeline::Pipeline::finish`] ends them all. A caller feeding
+    /// tracks from separate pipelines instead has to end every one of them:
+    /// the trailer is written only once every track has reported done, so
+    /// ending one pipeline while another keeps running leaves the file
+    /// un-finalized (and unplayable) until the rest catch up too.
     pub fn open(mut self) -> Result<MuxerSinks> {
         crate::ensure_ffmpeg();
         self.output.write_header().map_err(FileMuxerError::from)?;
@@ -508,6 +509,7 @@ mod tests {
             codec,
             width: 320,
             height: 180,
+            pixel_format: ffmpeg::format::Pixel::YUV420P,
             frame_rate: ffmpeg::Rational::new(30, 1),
             bit_rate: 400_000,
             gop_size: 30,
@@ -816,6 +818,7 @@ mod tests {
                 codec: VideoCodec::OpenH264,
                 width,
                 height,
+                pixel_format: ffmpeg::format::Pixel::YUV420P,
                 frame_rate: ffmpeg::Rational::new(30, 1),
                 bit_rate: 800_000,
                 gop_size: 30,

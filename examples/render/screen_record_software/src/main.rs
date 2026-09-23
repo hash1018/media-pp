@@ -46,10 +46,11 @@ mod windows_example {
     /// instead of encoding).
     ///
     /// `DxgiCaptureSource` never reaches `Eos` on its own (see its own docs);
-    /// this just captures for a fixed duration and then `pipeline.stop()`s,
-    /// which is also what finalizes the MP4's trailer — `FileMuxer` writes it on
-    /// `Stop` as well as `Eos`, unlike `RtspMuxer`, since an MP4 file needs a
-    /// valid trailer to be playable at all (see `FileMuxer`'s own docs).
+    /// this just captures for a fixed duration and then `pipeline.finish()`es:
+    /// the capture places an `Eos` behind its last frame, the encoder flushes
+    /// what it still holds, and the muxer writes the MP4's trailer after it.
+    /// `stop()` would finalize a playable file too, but abandon those last
+    /// frames.
     ///
     ///     cargo run -p screen_record_software -- [output.mp4] [seconds]
     pub(super) fn run() -> media_pp::Result<()> {
@@ -84,6 +85,7 @@ mod windows_example {
                 codec: VideoCodec::OpenH264,
                 width: format.width,
                 height: format.height,
+                pixel_format: ffmpeg::format::Pixel::YUV420P,
                 frame_rate,
                 bit_rate: 4_000_000,
                 gop_size: 60, // ~2s @ 30fps
@@ -120,7 +122,7 @@ mod windows_example {
         pipeline.run()?;
 
         thread::sleep(Duration::from_secs(seconds));
-        pipeline.stop();
+        pipeline.finish();
 
         for event in pipeline.bus().iter() {
             println!("{event}");
@@ -160,7 +162,7 @@ mod linux_example {
     ///
     /// `PipeWireScreenCaptureSource` never reaches `Eos` on its own; like the
     /// Windows path this captures for a fixed duration and then
-    /// `pipeline.stop()`s, which is also what finalizes the MP4's trailer.
+    /// `pipeline.finish()`es, draining the encoder into the MP4's trailer.
     ///
     ///     cargo run -p screen_record_software -- [output.mp4] [seconds] [monitor|window] [restore-token]
     pub(super) fn run() -> media_pp::Result<()> {
@@ -215,7 +217,7 @@ mod linux_example {
                 codec: VideoCodec::OpenH264,
                 width,
                 height,
-                time_base: capture_format.time_base,
+                pixel_format: ffmpeg::format::Pixel::YUV420P,
                 frame_rate,
                 bit_rate: 4_000_000,
                 gop_size: 60, // ~2s @ 30fps
@@ -249,7 +251,7 @@ mod linux_example {
         pipeline.run()?;
 
         thread::sleep(Duration::from_secs(seconds));
-        pipeline.stop();
+        pipeline.finish();
 
         for event in pipeline.bus().iter() {
             println!("{event}");

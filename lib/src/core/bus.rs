@@ -10,7 +10,11 @@
 //! identity of the element that posted it, so a report can be attributed to
 //! one branch even when several elements share a name.
 
-use std::{fmt, sync::Arc, time::Duration};
+use std::{
+    fmt,
+    sync::{Arc, mpsc::RecvTimeoutError},
+    time::Duration,
+};
 
 use crate::pp_log::{PpLog, pp_error, pp_info, pp_warn};
 use crossbeam_channel::{Receiver, Sender, unbounded};
@@ -57,7 +61,7 @@ pub enum BusEvent {
         name: Arc<str>,
     },
     /// Posted by [`crate::control::drain_control`] once
-    /// [`crate::element::SourceElement::seek`] returns — `requested` is`1`
+    /// [`crate::element::SourceElement::seek`] returns — `requested` is
     /// whatever [`crate::pipeline::Pipeline::seek`] was called with;
     /// `landed` is where the source actually ended up, which the source
     /// itself has to resolve (e.g. `FileDemuxer` can only reposition to a
@@ -268,6 +272,25 @@ impl BusReceiver {
         self.try_recv_message().map(|message| message.event)
     }
 
+    /// Waits up to `timeout` for the next event.
+    ///
+    /// For a loop that has something else to watch as well — a channel of
+    /// its own, a deadline — and so can neither block in [`Self::recv`] nor
+    /// spin on [`Self::try_recv`]. Unlike those two, it says why it came back
+    /// empty: [`RecvTimeoutError::Timeout`] when nothing was posted in time,
+    /// [`RecvTimeoutError::Disconnected`] once every sender has dropped and
+    /// everything already posted has been received — the pipeline is over
+    /// and nothing more will come.
+    pub fn recv_timeout(&self, timeout: Duration) -> Result<BusEvent, RecvTimeoutError> {
+        self.rx
+            .recv_timeout(timeout)
+            .map(|message| message.event)
+            .map_err(|error| match error {
+                crossbeam_channel::RecvTimeoutError::Timeout => RecvTimeoutError::Timeout,
+                crossbeam_channel::RecvTimeoutError::Disconnected => RecvTimeoutError::Disconnected,
+            })
+    }
+
     /// Iterates over events until every corresponding [`Bus`] sender drops.
     ///
     /// The iterator blocks while the channel is still connected but empty.
@@ -372,5 +395,25 @@ mod tests {
         for (event, line) in cases {
             assert_eq!(event.to_string(), line);
         }
+    }
+
+    /// `recv_timeout` tells the three outcomes apart: an event, nothing yet,
+    /// and nothing ever again — the last only once what was already posted
+    /// has been received.
+    #[test]
+    fn recv_timeout_says_whether_it_timed_out_or_the_bus_ended() {
+        let (bus, rx) = Bus::new();
+        let pp_log = PpLog::new("Test", "test", None);
+        let wait = Duration::from_millis(20);
+
+        assert_eq!(rx.recv_timeout(wait).err(), Some(RecvTimeoutError::Timeout));
+
+        bus.post(&pp_log, BusEvent::Finished);
+        drop(bus);
+        assert!(matches!(rx.recv_timeout(wait), Ok(BusEvent::Finished)));
+        assert_eq!(
+            rx.recv_timeout(wait).err(),
+            Some(RecvTimeoutError::Disconnected)
+        );
     }
 }

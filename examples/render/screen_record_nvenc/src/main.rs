@@ -201,7 +201,6 @@ mod linux_example {
                 input_format: CudaFrameFormat::Bgra,
                 width: format.width,
                 height: format.height,
-                time_base: format.time_base,
                 frame_rate,
                 bit_rate: 8_000_000,
                 gop_size: 60, // ~2s @ 30fps

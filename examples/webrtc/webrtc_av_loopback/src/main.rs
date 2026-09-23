@@ -170,6 +170,7 @@ mod example {
                 codec: VideoCodec::OpenH264,
                 width: video_options.width,
                 height: video_options.height,
+                pixel_format: ffmpeg::format::Pixel::YUV420P,
                 frame_rate: video_options.frame_rate,
                 bit_rate: 500_000,
                 gop_size: 30, // ~2s @ 15fps

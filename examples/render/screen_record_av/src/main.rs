@@ -50,15 +50,17 @@ mod windows_example {
     /// FileMuxer: records the desktop and its system audio together into a
     /// single playable `.mp4`. Two independent live sources sharing one
     /// `Pipeline` via `PipelineBuilder` (see its own docs) — each on its own
-    /// thread, but one `pipeline.stop()` reaches both.
+    /// thread, but one `pipeline.finish()` reaches both.
     ///
     /// Neither capture source ever reaches a natural `Eos` (same as
     /// `screen_record_software`'s own docs) — this runs until `q` + Enter in the same
-    /// terminal, which is also what finalizes the MP4's trailer (`FileMuxer`
-    /// writes it once *every* track — video and audio both — reports done via
-    /// `Eos` *or* `Stop`, not on whichever finishes first; see `FileMuxer::open`'s
-    /// own docs, and `PipelineBuilder`'s for why one `stop()` call is enough to
-    /// reach both tracks even though they're two independent sources).
+    /// terminal, which `finish()`es the pipeline: each source places an `Eos`
+    /// behind its last buffer, both encoders flush what they still hold, and
+    /// `FileMuxer` writes the MP4's trailer once *every* track — video and
+    /// audio both — has ended, not on whichever ends first (see
+    /// `FileMuxer::open`'s own docs, and `PipelineBuilder`'s for why one
+    /// `finish()` call is enough to reach both tracks even though they're two
+    /// independent sources).
     ///
     ///     cargo run -p screen_record_av -- [output.mp4]
     ///     (then in the same terminal: `q` + Enter to stop and finalize)
@@ -100,6 +102,7 @@ mod windows_example {
                 codec: VideoCodec::OpenH264,
                 width: video_format.width,
                 height: video_format.height,
+                pixel_format: ffmpeg::format::Pixel::YUV420P,
                 frame_rate,
                 bit_rate: 4_000_000,
                 gop_size: 60, // ~2s @ 30fps
@@ -160,7 +163,7 @@ mod windows_example {
                 for line in io::stdin().lock().lines() {
                     let Ok(line) = line else { break };
                     if line.trim().eq_ignore_ascii_case("q") {
-                        pipeline.stop();
+                        pipeline.finish();
                         break;
                     }
                 }
@@ -185,7 +188,7 @@ mod windows_example {
 /// The Linux half of the same example. Deliberately the same shape as
 /// `windows_example`: two independent live capture sources sharing one
 /// `PipelineBuilder`, one `FileMuxer` with a video and an audio track, and one
-/// `stop()` reaching both.
+/// `finish()` reaching both.
 ///
 /// The one CLI difference is forced by the platform — Wayland cannot name a
 /// monitor, so the compositor prompts for the screen on the first run and
@@ -257,7 +260,6 @@ mod linux_example {
                 restore_token,
             },
         )?;
-        let video_time_base = video_format.time_base;
         // H.264 needs even dimensions; the portal's picker can hand back a
         // window of any size at all.
         let (width, height) = (video_format.width & !1, video_format.height & !1);
@@ -280,7 +282,6 @@ mod linux_example {
             "system-audio",
             PipeWireAudioCaptureOptions { device },
         )?;
-        let audio_time_base = audio_source.time_base();
 
         let video_encoder = SwEncoder::new(
             "video-encoder",
@@ -288,7 +289,7 @@ mod linux_example {
                 codec: VideoCodec::OpenH264,
                 width,
                 height,
-                time_base: video_time_base,
+                pixel_format: ffmpeg::format::Pixel::YUV420P,
                 frame_rate,
                 bit_rate: 4_000_000,
                 gop_size: 60, // ~2s @ 30fps
@@ -301,7 +302,6 @@ mod linux_example {
                 codec: AudioCodec::Aac,
                 sample_rate: audio_format.sample_rate,
                 channels: audio_format.channels,
-                time_base: audio_time_base,
                 bit_rate: 128_000,
             },
         )?;
@@ -348,7 +348,7 @@ mod linux_example {
                 for line in io::stdin().lock().lines() {
                     let Ok(line) = line else { break };
                     if line.trim().eq_ignore_ascii_case("q") {
-                        pipeline.stop();
+                        pipeline.finish();
                         break;
                     }
                 }

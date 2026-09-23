@@ -51,6 +51,7 @@ mod example {
                 codec: VideoCodec::OpenH264,
                 width: video_options.width,
                 height: video_options.height,
+                pixel_format: ffmpeg::format::Pixel::YUV420P,
                 frame_rate: video_options.frame_rate,
                 bit_rate: 1_500_000,
                 // Match the two-second HLS target so each requested boundary
@@ -83,7 +84,7 @@ mod example {
         );
         pipeline.run()?;
         thread::sleep(Duration::from_secs(seconds));
-        pipeline.stop();
+        pipeline.finish();
 
         for event in pipeline.bus().iter() {
             match event {

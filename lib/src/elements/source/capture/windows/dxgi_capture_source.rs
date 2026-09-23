@@ -280,8 +280,7 @@ pub struct DxgiCaptureOptions {
     pub frame_rate: ffmpeg::Rational,
     /// CPU (the original behavior) or GPU (zero-copy) capture — see
     /// [`CaptureMode`]. `CaptureMode::Cpu { include_cursor: false }` by
-    /// default, so existing callers building `DxgiCaptureOptions { ..
-    /// ..Default::default() }` keep today's behavior unchanged.
+    /// default: the pointer is not drawn into a recording unless asked for.
     pub capture_mode: CaptureMode,
 }
 

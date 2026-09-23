@@ -162,6 +162,7 @@ fn encoder(name: &str, gop_size: u32) -> SwEncoder {
             codec: VideoCodec::OpenH264,
             width: WIDTH,
             height: HEIGHT,
+            pixel_format: ffmpeg::format::Pixel::YUV420P,
             frame_rate: frame_rate(),
             bit_rate: 1_000_000,
             gop_size,

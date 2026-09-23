@@ -189,6 +189,7 @@ mod windows_example {
                 codec: VideoCodec::OpenH264,
                 width: CANVAS_WIDTH,
                 height: CANVAS_HEIGHT,
+                pixel_format: ffmpeg::format::Pixel::YUV420P,
                 frame_rate,
                 bit_rate: 2_000_000,
                 gop_size: 60,

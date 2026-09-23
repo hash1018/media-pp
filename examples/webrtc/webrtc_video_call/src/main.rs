@@ -405,6 +405,7 @@ mod common {
             codec: VideoCodec::OpenH264,
             width: WIDTH,
             height: HEIGHT,
+            pixel_format: ffmpeg::format::Pixel::YUV420P,
             frame_rate: ffmpeg::Rational::new(FPS, 1),
             bit_rate: 1_500_000,
             gop_size: 30,

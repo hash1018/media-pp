@@ -125,6 +125,7 @@ pub enum RtmpMuxerError {
 /// #     codec: VideoCodec::H264,
 /// #     width: 640,
 /// #     height: 360,
+/// #     pixel_format: ffmpeg::format::Pixel::YUV420P,
 /// #     frame_rate: ffmpeg::Rational(30, 1),
 /// #     bit_rate: 2_000_000,
 /// #     gop_size: 30,

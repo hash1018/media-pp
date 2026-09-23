@@ -388,6 +388,7 @@ pub(crate) fn try_av1_packets() -> Option<(ffmpeg_next::codec::Parameters, Vec<f
         codec,
         width,
         height,
+        pixel_format: ffmpeg::format::Pixel::YUV420P,
         frame_rate: ffmpeg::Rational::new(FIXTURE_FPS, 1),
         bit_rate: 500_000,
         gop_size: FIXTURE_FPS as u32,
@@ -502,6 +503,7 @@ fn build_fixture(
             codec,
             width: FIXTURE_WIDTH,
             height: FIXTURE_HEIGHT,
+            pixel_format: ffmpeg::format::Pixel::YUV420P,
             frame_rate: ffmpeg::Rational::new(FIXTURE_FPS, 1),
             bit_rate: 1_000_000,
             // Deliberately not a whole number of seconds. Seek tests pick

@@ -147,6 +147,7 @@ mod windows_example {
                 codec: VideoCodec::OpenH264,
                 width: output_width,
                 height: output_height,
+                pixel_format: ffmpeg::format::Pixel::YUV420P,
                 frame_rate,
                 bit_rate: 2_000_000,
                 gop_size: 60,
@@ -223,7 +224,7 @@ mod windows_example {
         }
 
         background_pipeline.stop();
-        output_pipeline.stop();
+        output_pipeline.finish();
 
         for pipeline in [&background_pipeline, &output_pipeline] {
             for event in pipeline.bus().iter() {
