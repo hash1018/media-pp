@@ -526,6 +526,23 @@ compile error with no explanation.
 
 ### Added
 
+- **A pipeline can start paused, and so take one frame from anywhere.**
+  `pause` before `run` was ignored, and the run started playing. It now
+  makes the run start paused: every source stops before producing
+  anything, and `run` returns once they all have. A `seek` from there puts
+  exactly one sample through every terminal — with `SeekMode::Accurate`,
+  the one covering the requested position — and returns once it has
+  arrived:
+
+  ```rust
+  pipeline.pause();
+  pipeline.run()?;
+  pipeline.seek(Duration::from_secs(600), SeekMode::Accurate)?; // the sink has the frame at 10:00
+  ```
+
+  which is a thumbnail from part way into a file without decoding
+  everything before it. `resume` before `run` undoes it.
+
 - **`BusReceiver::recv_timeout`.** Waits a bounded time for the next event,
   for a loop with something else to watch too, and says whether it came
   back empty because nothing was posted in time or because the bus has

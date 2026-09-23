@@ -399,6 +399,21 @@ impl ControlSender {
         self.send_request(RequestKind::Finish);
     }
 
+    /// Queues `msg` without waiting for it to be handled, and returns what
+    /// its acknowledgement will arrive on — `None` if nothing is on the other
+    /// end. For a message that has to be first in line before the receiver's
+    /// thread exists: [`crate::pipeline::Pipeline::run`] starting paused.
+    pub(crate) fn enqueue(&self, msg: ControlMsg) -> Option<Receiver<()>> {
+        let (ack_tx, ack_rx) = crossbeam_channel::bounded(0);
+        self.tx
+            .send(Request {
+                kind: RequestKind::Control(msg),
+                ack: ack_tx,
+            })
+            .ok()?;
+        Some(ack_rx)
+    }
+
     fn send_request(&self, kind: RequestKind) {
         let (ack_tx, ack_rx) = crossbeam_channel::bounded(0);
         if self.tx.send(Request { kind, ack: ack_tx }).is_ok() {

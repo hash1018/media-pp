@@ -976,3 +976,118 @@ fn a_queued_branch_can_be_sought_after_it_has_played_to_its_end() {
         "the whole second stream crossed the queue"
     );
 }
+
+/// Paused before it runs, a pipeline starts with every source stopped ahead
+/// of its first buffer: nothing reaches the terminal until it is resumed.
+/// A `pause` before `run` used to be ignored, and the run started playing.
+#[test]
+fn a_pipeline_paused_before_it_runs_produces_nothing_until_resumed() {
+    let count = Arc::new(AtomicUsize::new(0));
+    let (pipeline, ()) = Pipeline::new(
+        "start-paused",
+        TestVideoSource::new("gen", TestVideoOptions::default()),
+        |source, ctx| {
+            let branch = ctx.branch().queue("queue", 4).to(CountingSink {
+                pp_log: element_pp_log(ElementType::Other, "sink", None),
+                name: "sink".into(),
+                count: Arc::clone(&count),
+            })?;
+            ctx.attach(source, 0, branch)?;
+            Ok(())
+        },
+    )
+    .expect("pipeline wiring");
+
+    pipeline.pause();
+    pipeline.run().expect("run");
+    assert!(pipeline.is_running(), "it runs, paused");
+    thread::sleep(Duration::from_millis(150));
+    assert_eq!(
+        count.load(Ordering::SeqCst),
+        0,
+        "nothing is produced while paused"
+    );
+
+    pipeline.resume();
+    thread::sleep(Duration::from_millis(150));
+    assert!(count.load(Ordering::SeqCst) > 0, "resuming starts it");
+    pipeline.stop();
+}
+
+/// Paused before it runs and then sought, a pipeline puts exactly one frame
+/// through its terminal — the one covering the position asked for — and
+/// nothing from before it: a single frame from half way into a file without
+/// decoding the first half, which used to need polling and discarding.
+#[test]
+fn a_seek_from_a_paused_start_delivers_just_the_frame_asked_for() {
+    let Some(path) = try_test_video() else { return };
+    let input = ffmpeg::format::input(&path).expect("open fixture duration");
+    let duration = input.duration();
+    let rate = input
+        .streams()
+        .best(ffmpeg::media::Type::Video)
+        .map(|stream| stream.avg_frame_rate())
+        .filter(|rate| rate.numerator() > 0 && rate.denominator() > 0);
+    drop(input);
+    let (true, Some(rate)) = (duration > 0, rate) else {
+        eprintln!("skipping: fixture has no known duration or frame rate");
+        return;
+    };
+    let target = Duration::from_micros(duration as u64 / 2);
+    let frame_ns = 1_000_000_000i64 * i64::from(rate.denominator()) / i64::from(rate.numerator());
+
+    let (source, streams) = FileDemuxer::open("demux", &path).expect("open test video");
+    let video = streams
+        .iter()
+        .find(|stream| stream.kind == ffmpeg::media::Type::Video)
+        .expect("test video has a video stream");
+    let params = video.parameters.clone();
+    let time_base = video.time_base;
+    let samples = Arc::new(Mutex::new(Vec::new()));
+
+    let (pipeline, ()) = Pipeline::new("paused-seek", source, |source, ctx| {
+        let branch = ctx
+            .branch()
+            .pipe(SwDecoder::new("decoder", params)?)
+            .to(PrerollProbe {
+                label: "video-terminal",
+                time_base,
+                samples: Arc::clone(&samples),
+                pp_log: element_pp_log(ElementType::Other, "video-terminal", None),
+            })?;
+        ctx.attach(source, video.index, branch)?;
+        Ok(())
+    })
+    .expect("pipeline wiring");
+
+    pipeline.pause();
+    pipeline.run().expect("run");
+    assert!(
+        samples.lock().unwrap().is_empty(),
+        "nothing before the seek"
+    );
+
+    pipeline
+        .seek(target, SeekMode::Accurate)
+        .expect("seek from a paused start");
+    let got = samples.lock().unwrap().clone();
+    let target_ns = target.as_nanos() as i64;
+    assert_eq!(
+        got.len(),
+        1,
+        "exactly one frame reached the terminal: {got:?}"
+    );
+    assert!(
+        got[0] <= target_ns && target_ns < got[0] + frame_ns,
+        "the frame at {} ns does not cover {target_ns} ns",
+        got[0]
+    );
+
+    thread::sleep(Duration::from_millis(100));
+    assert_eq!(
+        samples.lock().unwrap().len(),
+        1,
+        "and it stays paused after"
+    );
+    pipeline.stop();
+}

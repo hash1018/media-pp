@@ -314,6 +314,14 @@ impl Pipeline {
     /// is still running or has ended, fails with
     /// [`PipelineError::AlreadyStarted`] and changes nothing — this type has
     /// no "reset" path; build a fresh `Pipeline` for another play-through.
+    ///
+    /// A pipeline [`Pipeline::pause`]d before this starts paused: every
+    /// source stops before producing anything, and this returns once they
+    /// all have. A [`Pipeline::seek`] then puts exactly one sample through
+    /// every terminal — the one at the requested position — and returns
+    /// once it has arrived, which is how to take a single frame from part
+    /// way into a file without decoding everything before it.
+    ///
     /// If a source worker cannot be created, any source workers already
     /// started by this call are stopped and joined before the error returns.
     /// The one-shot pipeline is not reusable after that failure.
@@ -330,6 +338,10 @@ impl Pipeline {
             Box<dyn FnOnce() + Send + 'static>,
         ) -> std::io::Result<JoinHandle<()>>,
     ) -> Result<()> {
+        // Held throughout, so a `pause` racing this either lands before the
+        // sources are taken — and this starts paused — or after, as the
+        // ordinary cascade.
+        let _operation = lock(&self.operation);
         let Some(sources) = lock(&self.sources).take() else {
             return Err(PipelineError::AlreadyStarted.into());
         };
@@ -345,6 +357,24 @@ impl Pipeline {
 
         if crate::log::enabled(crate::log::Level::Info) {
             log_topology(&self.pp_log, "run", &self.graph());
+        }
+        // Paused before it ran: `Pause` goes into every source's control
+        // channel ahead of anything else, before its thread exists, so each
+        // one's first look at its control stops it before it produces. Its
+        // acknowledgements are collected once the threads are running.
+        let start_paused = self.paused.load(Ordering::Acquire);
+        let mut pause_acks = Vec::new();
+        if start_paused {
+            pp_trace!(
+                pp_log: &self.pp_log,
+                "event=control control=Pause phase=requested reason=start_paused"
+            );
+            self.clock.pause();
+            pause_acks = self
+                .control_txs
+                .iter()
+                .filter_map(|control_tx| control_tx.enqueue(ControlMsg::Pause))
+                .collect();
         }
         let source_count = sources.len();
         self.running.store(source_count, Ordering::Release);
@@ -418,6 +448,10 @@ impl Pipeline {
                     // this error returns.
                     self.running
                         .fetch_sub(source_count - index, Ordering::AcqRel);
+                    // A started source waiting to hand back its `Pause`
+                    // acknowledgement is let go first, so it can take the
+                    // `Stop` below.
+                    drop(std::mem::take(&mut pause_acks));
                     self.clock.interrupt();
                     for control_tx in self.control_txs.iter().take(index) {
                         control_tx.send(ControlMsg::Stop);
@@ -426,6 +460,15 @@ impl Pipeline {
                     return Err(ThreadSpawnError::new(thread_name, source).into());
                 }
             }
+        }
+        if start_paused {
+            for ack in pause_acks {
+                let _ = ack.recv();
+            }
+            pp_trace!(
+                pp_log: &self.pp_log,
+                "event=control control=Pause phase=completed outcome=ok reason=start_paused"
+            );
         }
         Ok(())
     }
@@ -436,18 +479,29 @@ impl Pipeline {
     /// pauses this pipeline's `Clock` before that synchronous cascade
     /// starts, so time spent waiting for a busy downstream element to
     /// acknowledge `Pause` is frozen too and a `Pacer` doesn't see a jump
-    /// once resumed. No-op if `run()` isn't currently in progress on
-    /// another thread.
+    /// once resumed.
+    ///
+    /// Before [`Pipeline::run`], this makes the run start paused — see its
+    /// docs. Once every source has stopped, there is nothing to pause and
+    /// this does nothing.
     pub fn pause(&self) {
         let _operation = self
             .operation
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if self.running.load(Ordering::Acquire) == 0 {
+            if self.not_yet_run() {
+                self.paused.store(true, Ordering::Release);
+            }
             return;
         }
         self.paused.store(true, Ordering::Release);
         self.pause_runtime();
+    }
+
+    /// Whether [`Pipeline::run`] has yet to take the sources.
+    fn not_yet_run(&self) -> bool {
+        lock(&self.sources).is_some()
     }
 
     fn pause_runtime(&self) {
@@ -469,13 +523,17 @@ impl Pipeline {
 
     /// Undoes [`Pipeline::pause`]. Resumes the `Clock` first, so it's
     /// already shifted forward by the time `Pacer`s start receiving
-    /// frames again.
+    /// frames again. Before [`Pipeline::run`], this undoes a `pause` made then, so
+    /// the run starts playing.
     pub fn resume(&self) {
         let _operation = self
             .operation
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if self.running.load(Ordering::Acquire) == 0 {
+            if self.not_yet_run() {
+                self.paused.store(false, Ordering::Release);
+            }
             return;
         }
         self.paused.store(false, Ordering::Release);
