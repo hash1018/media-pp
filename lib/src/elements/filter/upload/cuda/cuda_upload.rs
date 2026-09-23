@@ -314,10 +314,7 @@ mod tests {
     fn nv12_frame(width: u32, height: u32, pts: i64) -> MediaBuffer {
         let mut frame = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::NV12, width, height);
         frame.set_pts(Some(pts));
-        let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
-        let mut pooled = pool.get();
-        *pooled = frame;
-        MediaBuffer::Video(Arc::new(pooled))
+        MediaBuffer::video(frame)
     }
 
     type UploadFixture = (
@@ -431,11 +428,8 @@ mod tests {
 
         let mut bgra = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::BGRA, width, height);
         bgra.set_pts(Some(7));
-        let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
-        let mut pooled = pool.get();
-        *pooled = bgra;
         upload
-            .consume(MediaBuffer::Video(Arc::new(pooled)))
+            .consume(MediaBuffer::video(bgra))
             .expect("bgra upload");
 
         let received = received.lock().unwrap();
@@ -499,11 +493,8 @@ mod tests {
         };
         let mut rgb = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::RGB24, 64, 64);
         rgb.set_pts(Some(0));
-        let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
-        let mut pooled = pool.get();
-        *pooled = rgb;
         let error = upload
-            .consume(MediaBuffer::Video(Arc::new(pooled)))
+            .consume(MediaBuffer::video(rgb))
             .expect_err("a frame in another layout must not upload");
         assert!(
             error.to_string().contains("uploads NV12 frames, got RGB24"),

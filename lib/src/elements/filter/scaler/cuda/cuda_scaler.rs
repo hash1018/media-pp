@@ -437,16 +437,8 @@ mod tests {
     use super::*;
     use crate::{
         elements::{CudaDecoder, CudaDownload, CudaUpload},
-        pool::UnboundObjectPool,
         test_support::{try_cuda_device, try_test_video},
     };
-
-    fn pooled(frame: ffmpeg::frame::Video) -> MediaBuffer {
-        let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
-        let mut slot = pool.get();
-        *slot = frame;
-        MediaBuffer::Video(Arc::new(slot))
-    }
 
     /// A flat mid-grey NV12 frame: after any interpolation every output pixel
     /// must still be that same value, so a scaled result can be checked
@@ -482,7 +474,7 @@ mod tests {
         };
         let uploaded = capture(&mut upload);
         upload
-            .consume(pooled(nv12_flat(width, height, luma, pts)))
+            .consume(MediaBuffer::video(nv12_flat(width, height, luma, pts)))
             .expect("upload");
         let frame = uploaded.lock().unwrap().remove(0);
         Some(frame)
@@ -762,7 +754,7 @@ mod tests {
         let uploaded = capture(&mut upload);
         let mut bgra = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::BGRA, 128, 64);
         bgra.set_pts(Some(3));
-        upload.consume(pooled(bgra)).expect("upload");
+        upload.consume(MediaBuffer::video(bgra)).expect("upload");
         let frame = uploaded.lock().unwrap().remove(0);
 
         let mut scaler = CudaScaler::new("scaler", &device, 64, 32, CudaScalerInterp::Bilinear);
@@ -877,7 +869,7 @@ mod tests {
         };
         let uploaded = capture(&mut upload);
         upload
-            .consume(pooled(ffmpeg::frame::Video::new(
+            .consume(MediaBuffer::video(ffmpeg::frame::Video::new(
                 ffmpeg::format::Pixel::BGRA,
                 64,
                 64,
@@ -997,7 +989,7 @@ mod tests {
         let _received = capture(&mut scaler);
 
         let error = scaler
-            .consume(pooled(nv12_flat(128, 128, 100, 0)))
+            .consume(MediaBuffer::video(nv12_flat(128, 128, 100, 0)))
             .expect_err("a CPU frame must not be scaled");
         assert!(
             error.to_string().contains("CudaScaler takes CUDA frames"),

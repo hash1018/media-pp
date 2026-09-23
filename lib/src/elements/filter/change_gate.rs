@@ -210,10 +210,7 @@ mod tests {
     fn picture(pts: i64) -> MediaBuffer {
         let mut frame = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::NV12, 16, 16);
         frame.set_pts(Some(pts));
-        let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
-        let mut slot = pool.get();
-        *slot = frame;
-        MediaBuffer::Video(Arc::new(slot))
+        MediaBuffer::video(frame)
     }
 
     /// Another `AVFrame` over the same picture — what a source with nothing

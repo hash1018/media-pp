@@ -372,10 +372,7 @@ mod tests {
             let stride = video.stride(0);
             video.data_mut(0)[..stride].fill(pts as u8);
         }
-        let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
-        let mut pooled = pool.get();
-        *pooled = video;
-        MediaBuffer::Video(Arc::new(pooled))
+        MediaBuffer::video(video)
     }
 
     fn stamps(received: &Arc<Mutex<Vec<MediaBuffer>>>) -> Vec<i64> {

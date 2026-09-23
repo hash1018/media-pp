@@ -383,10 +383,7 @@ mod tests {
         let mut frame = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::BGRA, width, height);
         frame.set_pts(Some(pts));
         frame.data_mut(0).fill(0x40);
-        let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
-        let mut slot = pool.get();
-        *slot = frame;
-        MediaBuffer::Video(Arc::new(slot))
+        MediaBuffer::video(frame)
     }
 
     /// Another `AVFrame` over the same picture, with its own timestamp —

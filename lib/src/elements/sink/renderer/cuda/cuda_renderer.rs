@@ -268,7 +268,6 @@ mod tests {
     use crate::{
         element::Source,
         elements::CudaDecoder,
-        pool::UnboundObjectPool,
         test_support::{try_cuda_device, try_test_video},
     };
 
@@ -316,11 +315,8 @@ mod tests {
         );
 
         let frame = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::NV12, 64, 64);
-        let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
-        let mut pooled = pool.get();
-        *pooled = frame;
         let error = renderer
-            .consume(MediaBuffer::Video(Arc::new(pooled)))
+            .consume(MediaBuffer::video(frame))
             .expect_err("a CPU frame must not be presented");
         assert!(
             error.to_string().contains("CudaRenderer takes CUDA frames"),

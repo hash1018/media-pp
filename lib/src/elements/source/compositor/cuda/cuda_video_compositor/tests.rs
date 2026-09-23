@@ -46,12 +46,7 @@ fn cuda_bgra_frame(
             row[x as usize * 4..x as usize * 4 + 4].copy_from_slice(&pixel(x, y));
         }
     }
-    let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
-    let mut slot = pool.get();
-    *slot = frame;
-    upload
-        .consume(MediaBuffer::Video(Arc::new(slot)))
-        .expect("upload");
+    upload.consume(MediaBuffer::video(frame)).expect("upload");
     Some(uploaded.lock().unwrap().remove(0))
 }
 
@@ -73,12 +68,7 @@ fn cuda_frame_with_pts(
     frame.data_mut(0)[..y_stride * height as usize].fill(luma);
     let uv_stride = frame.stride(1);
     frame.data_mut(1)[..uv_stride * (height / 2) as usize].fill(128);
-    let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
-    let mut slot = pool.get();
-    *slot = frame;
-    upload
-        .consume(MediaBuffer::Video(Arc::new(slot)))
-        .expect("upload");
+    upload.consume(MediaBuffer::video(frame)).expect("upload");
     Some(uploaded.lock().unwrap().remove(0))
 }
 
@@ -144,12 +134,7 @@ fn cuda_quadrant_frame(device: &CudaDevice, width: u32, height: u32) -> Option<M
     }
     let uv_stride = frame.stride(1);
     frame.data_mut(1)[..uv_stride * (height / 2) as usize].fill(128);
-    let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
-    let mut slot = pool.get();
-    *slot = frame;
-    upload
-        .consume(MediaBuffer::Video(Arc::new(slot)))
-        .expect("upload");
+    upload.consume(MediaBuffer::video(frame)).expect("upload");
     Some(uploaded.lock().unwrap().remove(0))
 }
 
@@ -863,12 +848,13 @@ fn a_cpu_frame_and_a_foreign_context_frame_are_typed_errors() {
         .add_source("layer", VideoLayer::new(VideoRect::new(0, 0, 32, 32)))
         .expect("add");
 
-    let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
-    let mut slot = pool.get();
-    *slot = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::NV12, 32, 32);
     let error = input
         .sink
-        .consume(MediaBuffer::Video(Arc::new(slot)))
+        .consume(MediaBuffer::video(ffmpeg::frame::Video::new(
+            ffmpeg::format::Pixel::NV12,
+            32,
+            32,
+        )))
         .expect_err("a CPU frame must not be composited");
     assert!(
         error
@@ -1253,12 +1239,7 @@ fn an_nv12_layer_is_composed_by_its_own_colour() {
         frame.set_pts(Some(0));
         frame.set_color_space(space);
         frame.set_color_range(ffmpeg::color::Range::MPEG);
-        let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
-        let mut slot = pool.get();
-        *slot = frame;
-        upload
-            .consume(MediaBuffer::Video(Arc::new(slot)))
-            .expect("upload");
+        upload.consume(MediaBuffer::video(frame)).expect("upload");
         let layer_frame = uploaded.lock().unwrap().remove(0);
         layer.sink.consume(layer_frame).expect("layer frame");
 

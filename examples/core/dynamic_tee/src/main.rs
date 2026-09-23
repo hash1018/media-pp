@@ -11,7 +11,6 @@ mod example {
     use std::{sync::atomic::Ordering, thread, time::Duration};
 
     use media_pp::{
-        Error,
         elements::{FrameCounter, TeeBuilder, TestVideoOptions, TestVideoSource},
         pipeline::Pipeline,
     };
@@ -41,10 +40,7 @@ mod example {
         thread::sleep(Duration::from_millis(500));
 
         let (dynamic_counter, dynamic_count) = FrameCounter::new("dynamic-counter");
-        let dynamic_branch = tee_handle
-            .branch()
-            .ok_or_else(|| Error::Other("tee is no longer alive".into()))?
-            .to(dynamic_counter)?;
+        let dynamic_branch = tee_handle.branch()?.to(dynamic_counter)?;
         let branch_id = tee_handle.attach(dynamic_branch)?;
         println!("attached runtime branch {branch_id}");
 

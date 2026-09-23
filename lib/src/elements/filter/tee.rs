@@ -304,10 +304,14 @@ impl TeeHandle {
     /// chains, ending in `.to(...)`) at any point after the pipeline
     /// started running, then hand the result to [`TeeHandle::attach`],
     /// without needing to retain the pipeline context separately
-    /// around separately. Returns `None` once the `Tee` has been dropped.
-    pub fn branch(&self) -> Option<ChainBuilder> {
-        let shared = self.shared.upgrade()?;
-        Some(shared.context.branch())
+    /// around separately. Fails with [`GraphError::ParentNotAttached`] once
+    /// the `Tee` has been dropped, as [`TeeHandle::attach`] does.
+    pub fn branch(&self) -> Result<ChainBuilder> {
+        let shared = self
+            .shared
+            .upgrade()
+            .ok_or(GraphError::ParentNotAttached(self.id))?;
+        Ok(shared.context.branch())
     }
 
     /// Attaches a runtime branch, returning the stable ID used to remove it.
@@ -1502,7 +1506,7 @@ mod tests {
                 for _ in 0..MUTATIONS {
                     let branch = mutation_handle
                         .branch()
-                        .ok_or_else(|| "Tee disappeared during stress test".to_owned())?
+                        .map_err(|error| error.to_string())?
                         .to(CountingSink {
                             name: "dynamic",
                             count: Arc::new(AtomicUsize::new(0)),
@@ -1596,7 +1600,13 @@ mod tests {
         drop(context);
         drop(tee_branch);
 
-        assert!(handle.branch().is_none());
+        assert!(
+            matches!(
+                handle.branch(),
+                Err(crate::Error::GraphError(GraphError::ParentNotAttached(_)))
+            ),
+            "a dropped Tee is named as the element no longer attached"
+        );
         assert_eq!(handle.sink_count(), 0);
         assert!(
             bus_rx.iter().next().is_none(),

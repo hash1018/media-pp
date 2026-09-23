@@ -449,7 +449,7 @@ fn tee_handle_retained_across_a_multi_source_pipeline_does_not_leak() {
 
     drop(pipeline);
     assert!(
-        tee_handle.branch().is_none(),
+        tee_handle.branch().is_err(),
         "Tee's shared state should be gone once its owning Pipeline is fully torn down"
     );
     assert_eq!(tee_handle.sink_count(), 0);

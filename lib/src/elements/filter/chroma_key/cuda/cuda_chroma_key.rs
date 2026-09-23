@@ -458,12 +458,7 @@ mod tests {
                 row[x as usize * 4..x as usize * 4 + 4].copy_from_slice(&pixel(x, y));
             }
         }
-        let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
-        let mut slot = pool.get();
-        *slot = frame;
-        upload
-            .consume(MediaBuffer::Video(Arc::new(slot)))
-            .expect("upload");
+        upload.consume(MediaBuffer::video(frame)).expect("upload");
         Some(uploaded.lock().unwrap().remove(0))
     }
 

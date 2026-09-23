@@ -12,6 +12,12 @@ compile error with no explanation.
 
 ### Breaking
 
+- **`TeeHandle::branch` returns a `Result`, like the rest of the handle.**
+  It returned `None` once its `Tee` was gone, so every caller wrote its own
+  `.ok_or("the Tee is gone")?`, while `attach` and `detach` on the same
+  handle already returned `GraphError::ParentNotAttached`. It returns that
+  error too now: `tee.branch()?` is the whole call.
+
 - **`framerate` is `frame_rate` everywhere.** `TestVideoOptions::framerate`,
   `MfCaptureFormat::framerate`, `V4l2CaptureFormat::framerate` and the
   `framerate` field of `MfCaptureSourceError::FormatNotOffered` are renamed to
@@ -391,6 +397,13 @@ compile error with no explanation.
   writes its packets at the right times.
 
 ### Added
+
+- **`MediaBuffer::video` wraps a hand-made frame.** A `Video` buffer carries
+  a pooled frame, so a frame made by hand — a still picture, a caption, a
+  test pattern — had to go through a pool of zero first, four lines every
+  caller copied along with a comment explaining the trick.
+  `MediaBuffer::video(frame)` does it. Nothing recycles such a frame; what
+  makes frames over and over keeps its own `UnboundObjectPool` as before.
 
 - **A `BusEvent` prints as one line.** `BusEvent` implements `Display`
   as `[name] eos`, `[name] error: ...`, `[name] dropped a buffer (queue

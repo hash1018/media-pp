@@ -206,8 +206,7 @@ mod windows_example {
             WasapiRenderer::open("speakers", WasapiRendererOptions { device })?;
 
         let branch = audio_tee
-            .branch()
-            .ok_or_else(|| Error::Other("audio Tee is no longer available".into()))?
+            .branch()?
             .pipe(SwDecoder::new("audio-decoder", audio_params.clone())?)
             .pipe(AudioResampler::new("audio-resampler", output_format))
             .queue("audio-output", 8)
@@ -329,8 +328,7 @@ mod linux_example {
             PipeWireAudioRenderer::open("speakers", PipeWireAudioRendererOptions { device })?;
 
         let branch = audio_tee
-            .branch()
-            .ok_or_else(|| Error::Other("audio Tee is no longer available".into()))?
+            .branch()?
             .pipe(SwDecoder::new("audio-decoder", audio_params.clone())?)
             .pipe(AudioResampler::new("audio-resampler", output_format))
             .queue("audio-output", 8)

@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use ffmpeg_next::{self as ffmpeg, ffi};
 
-use crate::pool::UnboundObjectPoolRef;
+use crate::pool::{UnboundObjectPool, UnboundObjectPoolRef};
 
 /// The unit of data that flows between elements.
 ///
@@ -63,6 +63,24 @@ pub enum MediaBuffer {
 }
 
 impl MediaBuffer {
+    /// A video frame made by hand — a still picture, a rendered caption, a
+    /// test pattern — as a [`MediaBuffer::Video`], without the caller
+    /// having to know that one carries a pooled frame.
+    ///
+    /// Nothing recycles it: its buffers are freed once the last clone
+    /// downstream is dropped. Something that makes frames over and over
+    /// keeps an [`UnboundObjectPool`] of its own and sends
+    /// `MediaBuffer::Video(Arc::new(pool.get()))`, so each frame goes back
+    /// to be drawn into again.
+    pub fn video(frame: ffmpeg::frame::Video) -> Self {
+        // A pool of zero keeps nothing: the one frame taken from it is
+        // dropped, not returned, when its last reference goes.
+        let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
+        let mut slot = pool.get();
+        *slot = frame;
+        MediaBuffer::Video(Arc::new(slot))
+    }
+
     /// Returns whether this buffer is the ordered [`MediaBuffer::Eos`] marker.
     pub fn is_eos(&self) -> bool {
         matches!(self, MediaBuffer::Eos)
@@ -193,6 +211,24 @@ pub(crate) fn picture_is_referenced(frame: &ffmpeg::frame::Video) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A hand-made frame goes in as it is: the same picture and timing, as
+    /// a `Video` buffer, with no pool of the caller's own behind it.
+    #[test]
+    fn a_hand_made_frame_is_carried_as_it_is() {
+        let mut frame = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::GRAY8, 4, 2);
+        frame.data_mut(0).fill(7);
+        frame.set_pts(Some(42));
+        set_time_base(&mut frame, ffmpeg::Rational::new(1, 30));
+
+        let MediaBuffer::Video(carried) = MediaBuffer::video(frame) else {
+            panic!("a Video buffer");
+        };
+        assert_eq!((carried.width(), carried.height()), (4, 2));
+        assert_eq!(carried.pts(), Some(42));
+        assert_eq!(time_base(&carried), Some(ffmpeg::Rational::new(1, 30)));
+        assert!(carried.data(0)[..4].iter().all(|&byte| byte == 7));
+    }
 
     #[test]
     fn kind_reports_each_variant() {

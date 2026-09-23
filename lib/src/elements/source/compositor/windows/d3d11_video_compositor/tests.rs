@@ -104,13 +104,6 @@ fn apply_color_rows(rows: [[f32; 4]; 3], y: f32, cb: f32, cr: f32) -> [f32; 3] {
     rows.map(|row| row[0] * y + row[1] * cb + row[2] * cr + row[3])
 }
 
-fn pooled_video(frame: ffmpeg::frame::Video) -> MediaBuffer {
-    let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
-    let mut pooled = pool.get();
-    *pooled = frame;
-    MediaBuffer::Video(Arc::new(pooled))
-}
-
 /// A `Bus` with its receiver immediately dropped, for tests that don't
 /// care about per-layer error reporting — `Bus::post` no-ops once the
 /// receiving end is gone.
@@ -192,7 +185,8 @@ fn a_layer_hands_back_the_frame_it_will_draw_until_it_is_removed() {
     assert!(layer.latest_frame().is_none(), "nothing has arrived yet");
 
     let texture = bgra_texture(&device, 4, 4, [0, 0, 255, 255]);
-    let MediaBuffer::Video(frame) = pooled_video(wrap_d3d11_texture(texture, 4, 4).unwrap()) else {
+    let MediaBuffer::Video(frame) = MediaBuffer::video(wrap_d3d11_texture(texture, 4, 4).unwrap())
+    else {
         unreachable!("pooled_video wraps a Video buffer");
     };
     sink.consume(MediaBuffer::Video(frame.clone())).unwrap();
@@ -233,10 +227,12 @@ fn composes_gpu_inputs_in_z_order_and_preserves_output_contract() {
     let red_texture = bgra_texture(&device, 4, 4, [0, 0, 255, 255]);
     let blue_texture = bgra_texture(&device, 2, 2, [255, 0, 0, 255]);
     red_sink
-        .consume(pooled_video(wrap_d3d11_texture(red_texture, 4, 4).unwrap()))
+        .consume(MediaBuffer::video(
+            wrap_d3d11_texture(red_texture, 4, 4).unwrap(),
+        ))
         .unwrap();
     blue_sink
-        .consume(pooled_video(
+        .consume(MediaBuffer::video(
             wrap_d3d11_texture(blue_texture, 2, 2).unwrap(),
         ))
         .unwrap();
@@ -285,8 +281,10 @@ fn a_premultiplied_layer_is_blended_by_what_it_already_holds() {
         // (230, 20, 20) at half alpha, with the alpha already multiplied in:
         // BGRA byte order, so [10, 10, 115, 128].
         let texture = bgra_texture(&device, 2, 2, [10, 10, 115, 128]);
-        sink.consume(pooled_video(wrap_d3d11_texture(texture, 2, 2).unwrap()))
-            .unwrap();
+        sink.consume(MediaBuffer::video(
+            wrap_d3d11_texture(texture, 2, 2).unwrap(),
+        ))
+        .unwrap();
         let composed = compositor
             .compose_frame(&test_bus())
             .expect("compose_frame failed");
@@ -358,7 +356,7 @@ fn a_layer_draws_only_its_source_region() {
     let mut sink = handle.add_source("input", layer).unwrap().sink;
 
     let texture = bgra_texture_from_pixels(&device, SOURCE, SOURCE, &pixels);
-    sink.consume(pooled_video(
+    sink.consume(MediaBuffer::video(
         wrap_d3d11_texture(texture, SOURCE, SOURCE).unwrap(),
     ))
     .unwrap();
@@ -413,8 +411,10 @@ fn ignores_rows_outside_the_frame_visible_dimensions() {
         pixels.extend((0..4).flat_map(|_| color));
     }
     let texture = bgra_texture_from_pixels(&device, 4, 4, &pixels);
-    sink.consume(pooled_video(wrap_d3d11_texture(texture, 4, 3).unwrap()))
-        .unwrap();
+    sink.consume(MediaBuffer::video(
+        wrap_d3d11_texture(texture, 4, 3).unwrap(),
+    ))
+    .unwrap();
 
     let composed = compositor
         .compose_frame(&test_bus())
@@ -499,7 +499,7 @@ fn live_output_frames_keep_distinct_textures_until_the_last_arc_drops() {
     layer.fit = video_layer::VideoFit::Stretch;
     let mut sink = handle.add_source("input", layer).unwrap().sink;
 
-    sink.consume(pooled_video(
+    sink.consume(MediaBuffer::video(
         wrap_d3d11_texture(bgra_texture(&device, 1, 1, [0, 0, 255, 255]), 1, 1).unwrap(),
     ))
     .unwrap();
@@ -513,7 +513,7 @@ fn live_output_frames_keep_distinct_textures_until_the_last_arc_drops() {
     // `an_unchanged_scene_is_composed_once`).
     let mut later = Vec::new();
     for _ in 0..OUTPUT_POOL_SIZE {
-        sink.consume(pooled_video(
+        sink.consume(MediaBuffer::video(
             wrap_d3d11_texture(bgra_texture(&device, 1, 1, [255, 0, 0, 255]), 1, 1).unwrap(),
         ))
         .unwrap();
@@ -564,7 +564,7 @@ fn nv12_conversion_uses_frame_color_space_and_range() {
     let mut bt601 = wrap_d3d11_texture(texture.clone(), 2, 2).unwrap();
     bt601.set_color_space(ffmpeg::color::Space::SMPTE170M);
     bt601.set_color_range(ffmpeg::color::Range::MPEG);
-    sink.consume(pooled_video(bt601)).unwrap();
+    sink.consume(MediaBuffer::video(bt601)).unwrap();
     let bt601 = compositor
         .compose_frame(&test_bus())
         .expect("BT.601 compose failed");
@@ -573,7 +573,7 @@ fn nv12_conversion_uses_frame_color_space_and_range() {
     let mut bt709 = wrap_d3d11_texture(texture, 2, 2).unwrap();
     bt709.set_color_space(ffmpeg::color::Space::BT709);
     bt709.set_color_range(ffmpeg::color::Range::MPEG);
-    sink.consume(pooled_video(bt709)).unwrap();
+    sink.consume(MediaBuffer::video(bt709)).unwrap();
     let bt709 = compositor
         .compose_frame(&test_bus())
         .expect("BT.709 compose failed");
@@ -638,7 +638,7 @@ fn an_unchanged_scene_is_composed_once() {
     let input = handle.add_source("input", layer).unwrap();
     let mut sink = input.sink;
     let layer_handle = input.layer;
-    sink.consume(pooled_video(
+    sink.consume(MediaBuffer::video(
         wrap_d3d11_texture(bgra_texture(&device, 2, 2, [0, 0, 255, 255]), 2, 2).unwrap(),
     ))
     .unwrap();
@@ -708,7 +708,7 @@ fn a_repeat_still_in_flight_is_never_composed_over() {
     layer.fit = video_layer::VideoFit::Stretch;
     let mut sink = handle.add_source("input", layer).unwrap().sink;
     let blue = |device: &ID3D11Device| {
-        pooled_video(
+        MediaBuffer::video(
             wrap_d3d11_texture(bgra_texture(device, 2, 2, [255, 0, 0, 255]), 2, 2).unwrap(),
         )
     };
@@ -772,7 +772,7 @@ fn layer_handle_moves_blends_and_hides_a_live_source() {
     let layer_handle = input.layer;
 
     let white_texture = bgra_texture(&device, 1, 1, [255, 255, 255, 255]);
-    sink.consume(pooled_video(
+    sink.consume(MediaBuffer::video(
         wrap_d3d11_texture(white_texture, 1, 1).unwrap(),
     ))
     .unwrap();
@@ -835,7 +835,7 @@ fn skips_a_mismatched_device_texture_and_reports_it_on_the_bus() {
         .sink;
 
     let foreign_texture = bgra_texture(&device_b, 1, 1, [255, 255, 255, 255]);
-    sink.consume(pooled_video(
+    sink.consume(MediaBuffer::video(
         wrap_d3d11_texture(foreign_texture, 1, 1).unwrap(),
     ))
     .unwrap();
@@ -1129,8 +1129,10 @@ fn a_transparent_background_leaves_alpha_where_nothing_drew() {
     layer.fit = video_layer::VideoFit::Stretch;
     let mut sink = handle.add_source("corner", layer).unwrap().sink;
     let texture = bgra_texture(&device, 1, 1, [0, 0, 255, 255]);
-    sink.consume(pooled_video(wrap_d3d11_texture(texture, 1, 1).unwrap()))
-        .unwrap();
+    sink.consume(MediaBuffer::video(
+        wrap_d3d11_texture(texture, 1, 1).unwrap(),
+    ))
+    .unwrap();
 
     let composed = compositor
         .compose_frame(&test_bus())

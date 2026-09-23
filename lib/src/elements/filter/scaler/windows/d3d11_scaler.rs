@@ -1063,12 +1063,7 @@ mod tests {
         cpu.set_pts(Some(pts));
         cpu.data_mut(0).fill(luma);
         cpu.data_mut(1).fill(128);
-        let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
-        let mut slot = pool.get();
-        *slot = cpu;
-        upload
-            .consume(MediaBuffer::Video(Arc::new(slot)))
-            .expect("upload");
+        upload.consume(MediaBuffer::video(cpu)).expect("upload");
         uploaded.lock().unwrap().remove(0)
     }
 
@@ -1408,11 +1403,12 @@ mod tests {
         .expect("D3d11Scaler::new should succeed");
         let _received = capture(&mut scaler);
 
-        let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
-        let mut cpu = pool.get();
-        *cpu = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::BGRA, 16, 16);
         let error = scaler
-            .consume(MediaBuffer::Video(Arc::new(cpu)))
+            .consume(MediaBuffer::video(ffmpeg::frame::Video::new(
+                ffmpeg::format::Pixel::BGRA,
+                16,
+                16,
+            )))
             .expect_err("a CPU frame must not be scaled");
         assert!(
             error

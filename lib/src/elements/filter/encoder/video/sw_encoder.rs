@@ -439,7 +439,6 @@ mod tests {
     use std::sync::Mutex as StdMutex;
 
     use super::*;
-    use crate::pool::UnboundObjectPool;
 
     #[test]
     fn nominal_frame_duration_is_expressed_in_encoder_time_base_ticks() {
@@ -542,13 +541,6 @@ mod tests {
         }
     }
 
-    fn pooled_video(frame: ffmpeg::frame::Video) -> MediaBuffer {
-        let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
-        let mut pooled = pool.get();
-        *pooled = frame;
-        MediaBuffer::Video(Arc::new(pooled))
-    }
-
     /// Regression test: `avcodec_receive_packet` never sets a packet's own
     /// `AVPacket.time_base` — only `drain` stamping it explicitly (added
     /// alongside this test) keeps `Packet::time_base()` from reading back
@@ -583,7 +575,7 @@ mod tests {
         for plane in 0..frame.planes() {
             frame.data_mut(plane).fill(128);
         }
-        encoder.consume(pooled_video(frame)).unwrap();
+        encoder.consume(MediaBuffer::video(frame)).unwrap();
         encoder.consume(MediaBuffer::Eos).unwrap();
 
         let packets = packets.lock().unwrap();
@@ -632,7 +624,7 @@ mod tests {
         for plane in 0..frame.planes() {
             frame.data_mut(plane).fill(128);
         }
-        pooled_video(frame)
+        MediaBuffer::video(frame)
     }
 
     /// The frames are not asked to be in the encoder's unit: each is read in

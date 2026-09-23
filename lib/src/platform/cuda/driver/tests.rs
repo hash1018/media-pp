@@ -8,7 +8,6 @@ use crate::{
     buffer::MediaBuffer,
     element::Sink,
     elements::{CudaDownload, CudaFrameFormat, CudaUpload},
-    pool::UnboundObjectPool,
     test_support::try_cuda_device,
 };
 
@@ -30,12 +29,7 @@ fn cuda_surface(
     frame.data_mut(0)[..y_stride * height as usize].fill(luma);
     let uv_stride = frame.stride(1);
     frame.data_mut(1)[..uv_stride * (height / 2) as usize].fill(128);
-    let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
-    let mut slot = pool.get();
-    *slot = frame;
-    upload
-        .consume(MediaBuffer::Video(Arc::new(slot)))
-        .expect("upload");
+    upload.consume(MediaBuffer::video(frame)).expect("upload");
     Some(uploaded.lock().unwrap().remove(0))
 }
 
@@ -354,12 +348,7 @@ fn cuda_bgra_surface(
             row[x as usize * 4..x as usize * 4 + 4].copy_from_slice(&pixel(x, y));
         }
     }
-    let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
-    let mut slot = pool.get();
-    *slot = frame;
-    upload
-        .consume(MediaBuffer::Video(Arc::new(slot)))
-        .expect("upload");
+    upload.consume(MediaBuffer::video(frame)).expect("upload");
     Some(uploaded.lock().unwrap().remove(0))
 }
 
@@ -551,12 +540,7 @@ fn cuda_surface_with(
     }
     let uv_stride = frame.stride(1);
     frame.data_mut(1)[..uv_stride * (height / 2) as usize].fill(chroma);
-    let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
-    let mut slot = pool.get();
-    *slot = frame;
-    upload
-        .consume(MediaBuffer::Video(Arc::new(slot)))
-        .expect("upload");
+    upload.consume(MediaBuffer::video(frame)).expect("upload");
     Some(uploaded.lock().unwrap().remove(0))
 }
 

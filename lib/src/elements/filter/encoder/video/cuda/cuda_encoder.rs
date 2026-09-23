@@ -620,11 +620,8 @@ mod tests {
         let mut unitless = nv12_frame(width, height, 0);
         // SAFETY: the frame is this test's own and nothing else refers to it.
         unsafe { (*unitless.as_mut_ptr()).time_base = ffi::AVRational { num: 0, den: 1 } };
-        let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
-        let mut pooled = pool.get();
-        *pooled = unitless;
         upload
-            .consume(MediaBuffer::Video(Arc::new(pooled)))
+            .consume(MediaBuffer::video(unitless))
             .expect("upload failed");
         let frame = uploaded.lock().unwrap().pop().expect("nothing uploaded");
 
@@ -749,11 +746,12 @@ mod tests {
             received: uploaded.clone(),
             pp_log: element_pp_log(ElementType::Other, "uploaded", None),
         }));
-        let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
-        let mut pooled = pool.get();
-        *pooled = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::BGRA, 320, 240);
         upload
-            .consume(MediaBuffer::Video(Arc::new(pooled)))
+            .consume(MediaBuffer::video(ffmpeg::frame::Video::new(
+                ffmpeg::format::Pixel::BGRA,
+                320,
+                240,
+            )))
             .expect("upload failed");
         let frame = uploaded.lock().unwrap().pop().expect("nothing uploaded");
 
@@ -869,11 +867,8 @@ mod tests {
                 return;
             }
         };
-        let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
-        let mut pooled = pool.get();
-        *pooled = nv12_frame(320, 240, 0);
         let error = encoder
-            .consume(MediaBuffer::Video(Arc::new(pooled)))
+            .consume(MediaBuffer::video(nv12_frame(320, 240, 0)))
             .expect_err("a CPU frame must not be encoded");
         assert!(
             error.to_string().contains("CudaEncoder takes CUDA frames"),

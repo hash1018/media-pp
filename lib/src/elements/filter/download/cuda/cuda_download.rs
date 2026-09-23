@@ -292,13 +292,6 @@ mod tests {
         test_support::{try_cuda_device, try_test_video},
     };
 
-    fn pooled(frame: ffmpeg::frame::Video) -> MediaBuffer {
-        let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
-        let mut slot = pool.get();
-        *slot = frame;
-        MediaBuffer::Video(Arc::new(slot))
-    }
-
     /// A recognizable NV12 frame: a horizontal luma ramp with a fixed chroma
     /// plane, so a round trip that silently transferred the wrong plane or
     /// the wrong rows shows up as a mismatch rather than as plausible noise.
@@ -340,7 +333,7 @@ mod tests {
         // nothing new to show hands over.
         let uploaded = capture(&mut upload);
         upload
-            .consume(pooled(nv12_pattern(width, height, 100)))
+            .consume(MediaBuffer::video(nv12_pattern(width, height, 100)))
             .expect("upload");
         let source = uploaded.lock().unwrap().remove(0);
         let MediaBuffer::Video(surface) = &source else {
@@ -358,7 +351,7 @@ mod tests {
         let received = capture(&mut download);
         download.consume(source).expect("download the first frame");
         download
-            .consume(pooled(repeat))
+            .consume(MediaBuffer::video(repeat))
             .expect("download the repeat");
 
         let received = received.lock().unwrap();
@@ -399,7 +392,7 @@ mod tests {
         // Deterministic, so the same call reproduces exactly what was sent.
         let source = nv12_pattern(width, height, 4321);
         upload
-            .consume(pooled(nv12_pattern(width, height, 4321)))
+            .consume(MediaBuffer::video(nv12_pattern(width, height, 4321)))
             .expect("upload then download");
         upload.consume(MediaBuffer::Eos).expect("eos");
 
@@ -465,7 +458,7 @@ mod tests {
             })
             .collect();
         upload
-            .consume(pooled(source))
+            .consume(MediaBuffer::video(source))
             .expect("upload then download");
 
         let received = received.lock().unwrap();
@@ -496,7 +489,7 @@ mod tests {
         };
         let uploaded = capture(&mut upload);
         let bgra = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::BGRA, 32, 32);
-        upload.consume(pooled(bgra)).expect("upload");
+        upload.consume(MediaBuffer::video(bgra)).expect("upload");
         let frame = uploaded.lock().unwrap().remove(0);
 
         let mut download = CudaDownload::new("download", &device, CudaFrameFormat::Nv12);
@@ -580,7 +573,7 @@ mod tests {
         let _received = capture(&mut download);
 
         let error = download
-            .consume(pooled(nv12_pattern(64, 64, 0)))
+            .consume(MediaBuffer::video(nv12_pattern(64, 64, 0)))
             .expect_err("a CPU frame must not be downloaded");
         assert!(
             error.to_string().contains("CudaDownload takes CUDA frames"),
@@ -596,7 +589,7 @@ mod tests {
         };
         let uploaded = capture(&mut upload);
         upload
-            .consume(pooled(nv12_pattern(64, 64, 0)))
+            .consume(MediaBuffer::video(nv12_pattern(64, 64, 0)))
             .expect("upload");
         let foreign = uploaded.lock().unwrap().remove(0);
         let error = download
@@ -621,10 +614,10 @@ mod tests {
         };
         let uploaded = capture(&mut upload);
         upload
-            .consume(pooled(nv12_pattern(64, 64, 0)))
+            .consume(MediaBuffer::video(nv12_pattern(64, 64, 0)))
             .expect("upload");
         upload
-            .consume(pooled(nv12_pattern(32, 32, 1)))
+            .consume(MediaBuffer::video(nv12_pattern(32, 32, 1)))
             .expect("upload the next size");
         let surfaces: Vec<MediaBuffer> = uploaded.lock().unwrap().drain(..).collect();
 

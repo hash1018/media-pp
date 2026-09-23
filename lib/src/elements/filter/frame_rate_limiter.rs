@@ -266,7 +266,6 @@ mod tests {
     use std::sync::Mutex;
 
     use super::*;
-    use crate::pool::UnboundObjectPool;
 
     fn capture(element: &mut FrameRateLimiter) -> Arc<Mutex<Vec<MediaBuffer>>> {
         let received = Arc::new(Mutex::new(Vec::new()));
@@ -287,10 +286,7 @@ mod tests {
             let stride = video.stride(0);
             video.data_mut(0)[..stride].fill(pts as u8);
         }
-        let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
-        let mut pooled = pool.get();
-        *pooled = video;
-        MediaBuffer::Video(Arc::new(pooled))
+        MediaBuffer::video(video)
     }
 
     /// The output `pts` of everything that reached the sink.
@@ -418,10 +414,7 @@ mod tests {
             let mut video = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::GRAY8, 2, 2);
             video.set_pts(Some(pts));
             crate::buffer::set_time_base(&mut video, unit);
-            let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
-            let mut pooled = pool.get();
-            *pooled = video;
-            MediaBuffer::Video(Arc::new(pooled))
+            MediaBuffer::video(video)
         };
 
         // Tick 0, then 1/60 s — still tick 0 at 30 fps, dropped — then the
@@ -448,12 +441,9 @@ mod tests {
         let received = capture(&mut limiter);
         let mut unitless = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::GRAY8, 2, 2);
         unitless.set_pts(Some(10));
-        let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
-        let mut pooled = pool.get();
-        *pooled = unitless;
 
         let error = limiter
-            .consume(MediaBuffer::Video(Arc::new(pooled)))
+            .consume(MediaBuffer::video(unitless))
             .expect_err("no unit to read the pts in");
         assert!(matches!(
             error,

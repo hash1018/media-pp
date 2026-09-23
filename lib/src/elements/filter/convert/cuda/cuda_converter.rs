@@ -480,12 +480,7 @@ mod tests {
         let uploaded = capture(&mut upload);
         let mut frame = ffmpeg::frame::Video::new(format.pixel(), width, height);
         frame.set_pts(Some(pts));
-        let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
-        let mut slot = pool.get();
-        *slot = frame;
-        upload
-            .consume(MediaBuffer::Video(Arc::new(slot)))
-            .expect("upload");
+        upload.consume(MediaBuffer::video(frame)).expect("upload");
         Some(uploaded.lock().unwrap().remove(0))
     }
 
@@ -604,12 +599,7 @@ mod tests {
         for pair in frame.data_mut(1).as_chunks_mut::<2>().0 {
             pair.copy_from_slice(&[cb, cr]);
         }
-        let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
-        let mut slot = pool.get();
-        *slot = frame;
-        upload
-            .consume(MediaBuffer::Video(Arc::new(slot)))
-            .expect("upload");
+        upload.consume(MediaBuffer::video(frame)).expect("upload");
         let source = uploaded.lock().unwrap().remove(0);
 
         let read_as = |space: ffmpeg::color::Space| {
@@ -891,12 +881,9 @@ mod tests {
             return;
         };
         let frame = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::BGRA, 64, 32);
-        let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
-        let mut slot = pool.get();
-        *slot = frame;
 
         let error = converter
-            .consume(MediaBuffer::Video(Arc::new(slot)))
+            .consume(MediaBuffer::video(frame))
             .expect_err("a CPU frame is refused");
 
         assert!(

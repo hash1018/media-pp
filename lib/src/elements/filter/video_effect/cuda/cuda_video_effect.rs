@@ -381,12 +381,7 @@ mod tests {
         for (x, pixel) in pixels.iter().enumerate() {
             frame.data_mut(0)[x * 4..x * 4 + 4].copy_from_slice(pixel);
         }
-        let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
-        let mut slot = pool.get();
-        *slot = frame;
-        upload
-            .consume(MediaBuffer::Video(Arc::new(slot)))
-            .expect("upload");
+        upload.consume(MediaBuffer::video(frame)).expect("upload");
         Some(uploaded.lock().unwrap().remove(0))
     }
 
