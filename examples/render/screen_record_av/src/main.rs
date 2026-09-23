@@ -133,31 +133,31 @@ mod windows_example {
         let video_sink = sinks.take(video_track)?;
         let audio_sink = sinks.take(audio_track)?;
 
-        let pipeline = PipelineBuilder::new("screen-record-av")
-            .add_source(video_source, |source, ctx| {
-                let scaler = SwScaler::new(
-                    "to-yuv",
-                    ffmpeg::format::Pixel::YUV420P,
-                    video_format.width,
-                    video_format.height,
-                    ffmpeg::software::scaling::Flags::BILINEAR,
-                );
-                let branch = ctx
-                    .branch()
-                    .queue("captured", 4) // thread boundary so scaling doesn't block capture
-                    .pipe(scaler)
-                    .queue("frames", 8) // thread boundary so encoding doesn't block scaling
-                    .pipe(video_encoder)
-                    .to(video_sink)?;
-                ctx.attach(source, 0, branch)?;
-                Ok(())
-            })?
-            .add_source(audio_source, |source, ctx| {
-                let branch = ctx.branch().pipe(audio_encoder).to(audio_sink)?;
-                ctx.attach(source, 0, branch)?;
-                Ok(())
-            })?
-            .build();
+        let builder = PipelineBuilder::new("screen-record-av");
+        let (builder, ()) = builder.add_source(video_source, |source, ctx| {
+            let scaler = SwScaler::new(
+                "to-yuv",
+                ffmpeg::format::Pixel::YUV420P,
+                video_format.width,
+                video_format.height,
+                ffmpeg::software::scaling::Flags::BILINEAR,
+            );
+            let branch = ctx
+                .branch()
+                .queue("captured", 4) // thread boundary so scaling doesn't block capture
+                .pipe(scaler)
+                .queue("frames", 8) // thread boundary so encoding doesn't block scaling
+                .pipe(video_encoder)
+                .to(video_sink)?;
+            ctx.attach(source, 0, branch)?;
+            Ok(())
+        })?;
+        let (builder, ()) = builder.add_source(audio_source, |source, ctx| {
+            let branch = ctx.branch().pipe(audio_encoder).to(audio_sink)?;
+            ctx.attach(source, 0, branch)?;
+            Ok(())
+        })?;
+        let pipeline = builder.build();
 
         println!("recording desktop + system audio to {path} — type `q` + Enter to stop");
         pipeline.run()?;
@@ -329,31 +329,31 @@ mod linux_example {
         let video_sink = sinks.take(video_track)?;
         let audio_sink = sinks.take(audio_track)?;
 
-        let pipeline = PipelineBuilder::new("screen-record-av")
-            .add_source(video_source, |source, ctx| {
-                let scaler = SwScaler::new(
-                    "to-yuv",
-                    ffmpeg::format::Pixel::YUV420P,
-                    width,
-                    height,
-                    ffmpeg::software::scaling::Flags::BILINEAR,
-                );
-                let branch = ctx
-                    .branch()
-                    .queue("captured", 4) // thread boundary so scaling doesn't block capture
-                    .pipe(scaler)
-                    .queue("frames", 8) // thread boundary so encoding doesn't block scaling
-                    .pipe(video_encoder)
-                    .to(video_sink)?;
-                ctx.attach(source, 0, branch)?;
-                Ok(())
-            })?
-            .add_source(audio_source, |source, ctx| {
-                let branch = ctx.branch().pipe(audio_encoder).to(audio_sink)?;
-                ctx.attach(source, 0, branch)?;
-                Ok(())
-            })?
-            .build();
+        let builder = PipelineBuilder::new("screen-record-av");
+        let (builder, ()) = builder.add_source(video_source, |source, ctx| {
+            let scaler = SwScaler::new(
+                "to-yuv",
+                ffmpeg::format::Pixel::YUV420P,
+                width,
+                height,
+                ffmpeg::software::scaling::Flags::BILINEAR,
+            );
+            let branch = ctx
+                .branch()
+                .queue("captured", 4) // thread boundary so scaling doesn't block capture
+                .pipe(scaler)
+                .queue("frames", 8) // thread boundary so encoding doesn't block scaling
+                .pipe(video_encoder)
+                .to(video_sink)?;
+            ctx.attach(source, 0, branch)?;
+            Ok(())
+        })?;
+        let (builder, ()) = builder.add_source(audio_source, |source, ctx| {
+            let branch = ctx.branch().pipe(audio_encoder).to(audio_sink)?;
+            ctx.attach(source, 0, branch)?;
+            Ok(())
+        })?;
+        let pipeline = builder.build();
 
         println!("recording desktop + system audio to {path} — type `q` + Enter to stop");
         pipeline.run()?;

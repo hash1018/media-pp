@@ -272,18 +272,18 @@ mod example {
         let video_sink = sinks.take(video_track)?;
         let audio_sink = sinks.take(audio_track)?;
 
-        Ok(PipelineBuilder::new("webrtc-receive-record")
-            .add_source(video_source, |source, ctx| {
-                let branch = ctx.branch().to(video_sink)?;
-                ctx.attach(source, 0, branch)?;
-                Ok(())
-            })?
-            .add_source(audio_source, |source, ctx| {
-                let branch = ctx.branch().to(audio_sink)?;
-                ctx.attach(source, 0, branch)?;
-                Ok(())
-            })?
-            .build())
+        let builder = PipelineBuilder::new("webrtc-receive-record");
+        let (builder, ()) = builder.add_source(video_source, |source, ctx| {
+            let branch = ctx.branch().to(video_sink)?;
+            ctx.attach(source, 0, branch)?;
+            Ok(())
+        })?;
+        let (builder, ()) = builder.add_source(audio_source, |source, ctx| {
+            let branch = ctx.branch().to(audio_sink)?;
+            ctx.attach(source, 0, branch)?;
+            Ok(())
+        })?;
+        Ok(builder.build())
     }
 
     // Naming this tuple would only move the same five types somewhere else:

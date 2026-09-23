@@ -5,18 +5,20 @@ use super::*;
 
 #[test]
 fn partial_thread_spawn_failure_stops_and_joins_started_sources() {
-    let pipeline = PipelineBuilder::new("spawn-failure")
+    let builder = PipelineBuilder::new("spawn-failure");
+    let (builder, ()) = builder
         .add_source(
             TestVideoSource::new("first", TestVideoOptions::default()),
             |_source, _ctx| Ok(()),
         )
-        .unwrap()
+        .unwrap();
+    let (builder, ()) = builder
         .add_source(
             TestVideoSource::new("second", TestVideoOptions::default()),
             |_source, _ctx| Ok(()),
         )
-        .unwrap()
-        .build();
+        .unwrap();
+    let pipeline = builder.build();
 
     let mut spawn_count = 0;
     let error = pipeline
@@ -265,7 +267,8 @@ fn multi_source_pipeline_stops_every_source_from_one_stop_call() {
     let video_count = Arc::new(AtomicUsize::new(0));
     let audio_count = Arc::new(AtomicUsize::new(0));
 
-    let pipeline = PipelineBuilder::new("multi-source-test")
+    let builder = PipelineBuilder::new("multi-source-test");
+    let (builder, ()) = builder
         .add_source(video, {
             let count = video_count.clone();
             move |source, ctx| {
@@ -278,7 +281,8 @@ fn multi_source_pipeline_stops_every_source_from_one_stop_call() {
                 Ok(())
             }
         })
-        .expect("video wiring must succeed")
+        .expect("video wiring must succeed");
+    let (builder, ()) = builder
         .add_source(audio, {
             let count = audio_count.clone();
             move |source, ctx| {
@@ -291,8 +295,8 @@ fn multi_source_pipeline_stops_every_source_from_one_stop_call() {
                 Ok(())
             }
         })
-        .expect("audio wiring must succeed")
-        .build();
+        .expect("audio wiring must succeed");
+    let pipeline = builder.build();
 
     let topology = pipeline.topology();
     let mut branches: Vec<&str> = topology.split('\n').collect();
@@ -407,8 +411,8 @@ fn tee_handle_retained_across_a_multi_source_pipeline_does_not_leak() {
     let video = TestVideoSource::new("video", TestVideoOptions::default());
     let audio = TestAudioSource::new("audio", TestAudioOptions::default());
 
-    let mut tee_handle_slot = None;
-    let pipeline = PipelineBuilder::new("multi-source-tee-test")
+    let builder = PipelineBuilder::new("multi-source-tee-test");
+    let (builder, tee_handle) = builder
         .add_source(video, |source, ctx| {
             let branch = ctx.branch().to(NoOpSink {
                 name: "video-sink".into(),
@@ -418,10 +422,10 @@ fn tee_handle_retained_across_a_multi_source_pipeline_does_not_leak() {
                 .branch(branch)
                 .build_dynamic()?;
             ctx.attach(source, 0, tee_branch)?;
-            tee_handle_slot = Some(handle);
-            Ok(())
+            Ok(handle)
         })
-        .expect("video wiring must succeed")
+        .expect("video wiring must succeed");
+    let (builder, ()) = builder
         .add_source(audio, |source, ctx| {
             let branch = ctx.branch().to(NoOpSink {
                 name: "audio-sink".into(),
@@ -430,9 +434,8 @@ fn tee_handle_retained_across_a_multi_source_pipeline_does_not_leak() {
             ctx.attach(source, 0, branch)?;
             Ok(())
         })
-        .expect("audio wiring must succeed")
-        .build();
-    let tee_handle = tee_handle_slot.expect("wire ran");
+        .expect("audio wiring must succeed");
+    let pipeline = builder.build();
 
     pipeline.run().unwrap();
     thread::sleep(Duration::from_millis(100));

@@ -203,56 +203,56 @@ mod example {
         )?;
         audio_sink_a.set_source_parameters(&audio_encoder.parameters())?;
 
-        let send_pipeline = PipelineBuilder::new("peer-a-send")
-            .add_source(video_source, |source, ctx| {
-                let branch = ctx
-                    .branch()
-                    .queue("encode-video", 4)
-                    .pipe(video_encoder)
-                    .to(video_sink_a)?;
-                ctx.attach(source, 0, branch)?;
-                Ok(())
-            })?
-            .add_source(audio_source, |source, ctx| {
-                let branch = ctx
-                    .branch()
-                    .queue("encode-audio", 4)
-                    .pipe(audio_encoder)
-                    .to(audio_sink_a)?;
-                ctx.attach(source, 0, branch)?;
-                Ok(())
-            })?
-            .build();
+        let builder = PipelineBuilder::new("peer-a-send");
+        let (builder, ()) = builder.add_source(video_source, |source, ctx| {
+            let branch = ctx
+                .branch()
+                .queue("encode-video", 4)
+                .pipe(video_encoder)
+                .to(video_sink_a)?;
+            ctx.attach(source, 0, branch)?;
+            Ok(())
+        })?;
+        let (builder, ()) = builder.add_source(audio_source, |source, ctx| {
+            let branch = ctx
+                .branch()
+                .queue("encode-audio", 4)
+                .pipe(audio_encoder)
+                .to(audio_sink_a)?;
+            ctx.attach(source, 0, branch)?;
+            Ok(())
+        })?;
+        let send_pipeline = builder.build();
 
         // -- Receive side: count packets on each track independently.
         let video_count = Arc::new(AtomicUsize::new(0));
         let audio_count = Arc::new(AtomicUsize::new(0));
-        let recv_pipeline = PipelineBuilder::new("peer-b-recv")
-            .add_source(video_source_b, {
-                let count = video_count.clone();
-                move |source, ctx| {
-                    let branch = ctx.branch().to(CountingSink {
-                        name: "video-counter".into(),
-                        count,
-                        pp_log: element_pp_log(ElementType::Other, "video-counter", None),
-                    })?;
-                    ctx.attach(source, 0, branch)?;
-                    Ok(())
-                }
-            })?
-            .add_source(audio_source_b, {
-                let count = audio_count.clone();
-                move |source, ctx| {
-                    let branch = ctx.branch().to(CountingSink {
-                        name: "audio-counter".into(),
-                        count,
-                        pp_log: element_pp_log(ElementType::Other, "audio-counter", None),
-                    })?;
-                    ctx.attach(source, 0, branch)?;
-                    Ok(())
-                }
-            })?
-            .build();
+        let builder = PipelineBuilder::new("peer-b-recv");
+        let (builder, ()) = builder.add_source(video_source_b, {
+            let count = video_count.clone();
+            move |source, ctx| {
+                let branch = ctx.branch().to(CountingSink {
+                    name: "video-counter".into(),
+                    count,
+                    pp_log: element_pp_log(ElementType::Other, "video-counter", None),
+                })?;
+                ctx.attach(source, 0, branch)?;
+                Ok(())
+            }
+        })?;
+        let (builder, ()) = builder.add_source(audio_source_b, {
+            let count = audio_count.clone();
+            move |source, ctx| {
+                let branch = ctx.branch().to(CountingSink {
+                    name: "audio-counter".into(),
+                    count,
+                    pp_log: element_pp_log(ElementType::Other, "audio-counter", None),
+                })?;
+                ctx.attach(source, 0, branch)?;
+                Ok(())
+            }
+        })?;
+        let recv_pipeline = builder.build();
 
         send_pipeline.run()?;
         recv_pipeline.run()?;

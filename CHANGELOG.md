@@ -42,7 +42,16 @@ compile error with no explanation.
   let (pipeline, ()) = Pipeline::new("play", source, |source, ctx| { /* ... */ Ok(()) })?;
   ```
 
-  `PipelineBuilder::add_source` is unchanged.
+  `PipelineBuilder::add_source` does the same: it returns `(builder, T)`,
+  so a multi-source pipeline is built a statement at a time rather than as
+  one chain:
+
+  ```rust
+  let builder = PipelineBuilder::new("record");
+  let (builder, ()) = builder.add_source(video, |source, ctx| { /* ... */ Ok(()) })?;
+  let (builder, routing) = builder.add_source(audio, |source, ctx| { /* ... */ Ok(routing) })?;
+  let pipeline = builder.build();
+  ```
 
 - **Adding an input to a stopped compositor or mixer is an error, the same
   on every backend.** `D3d11VideoCompositorHandle::add_source`,

@@ -31,8 +31,7 @@ pub(super) type SourceEntry = (ElementId, Box<dyn SourceElement>);
 /// own branches together).
 ///
 /// [`Pipeline::new`] is exactly `PipelineBuilder::new(id).add_source(source,
-/// wire).build()` — the ergonomic single-source special case, kept as its
-/// own entry point so existing single-source callers don't need to change.
+/// wire)` and then `build()` — the single-source special case.
 /// Reach for `PipelineBuilder` directly once there's more than one live
 /// source to combine into one file/output — e.g. a video capture and an
 /// audio capture both feeding the same [`crate::elements::FileMuxer`]: two
@@ -84,19 +83,26 @@ impl PipelineBuilder {
     /// Registers one more source. `wire` receives a source-scoped
     /// [`Context`]; build detached branches with [`Context::branch`] and
     /// commit them with [`Context::attach`]. A wiring error aborts the
-    /// builder without publishing a partially built pipeline.
-    pub fn add_source<S: SourceElement + 'static>(
-        self,
-        source: S,
-        wire: impl FnOnce(&mut S, &Arc<Context>) -> Result<()>,
-    ) -> Result<Self> {
-        self.add_source_returning(source, wire)
-            .map(|(builder, ())| builder)
-    }
-
-    /// [`Self::add_source`], handing back whatever `wire` returned — what
-    /// [`Pipeline::new`] passes on to its caller.
-    pub(super) fn add_source_returning<S: SourceElement + 'static, T>(
+    /// builder without publishing a partially built pipeline — the builder
+    /// is consumed, so there is no half-registered source left to go on
+    /// with.
+    ///
+    /// Hands the builder back beside whatever `wire` returned, as
+    /// [`Pipeline::new`] does: `()` where there is nothing, a handle the
+    /// wiring made where there is.
+    ///
+    /// ```ignore
+    /// let (builder, ()) = PipelineBuilder::new("record").add_source(video, |source, ctx| {
+    ///     /* ... */
+    ///     Ok(())
+    /// })?;
+    /// let (builder, routing) = builder.add_source(audio, |source, ctx| {
+    ///     /* ... */
+    ///     Ok(routing)
+    /// })?;
+    /// let pipeline = builder.build();
+    /// ```
+    pub fn add_source<S: SourceElement + 'static, T>(
         mut self,
         mut source: S,
         wire: impl FnOnce(&mut S, &Arc<Context>) -> Result<T>,

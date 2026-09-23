@@ -121,24 +121,24 @@ mod example {
         // One pipeline, two live sources — neither can be the other's
         // upstream, and one `stop()` ends both so the muxer sees every
         // track finish (see `RtmpMuxer::open`'s own docs).
-        let pipeline = PipelineBuilder::new("rtmp-publish")
-            .add_source(video_source, |source, ctx| {
-                let branch = ctx
-                    .branch()
-                    // Thread boundary: encoding must not stall the source's
-                    // wall clock, or the broadcast falls behind real time.
-                    .queue("frames", 8)
-                    .pipe(video_encoder)
-                    .to(video_sink)?;
-                ctx.attach(source, 0, branch)?;
-                Ok(())
-            })?
-            .add_source(audio_source, |source, ctx| {
-                let branch = ctx.branch().pipe(audio_encoder).to(audio_sink)?;
-                ctx.attach(source, 0, branch)?;
-                Ok(())
-            })?
-            .build();
+        let builder = PipelineBuilder::new("rtmp-publish");
+        let (builder, ()) = builder.add_source(video_source, |source, ctx| {
+            let branch = ctx
+                .branch()
+                // Thread boundary: encoding must not stall the source's
+                // wall clock, or the broadcast falls behind real time.
+                .queue("frames", 8)
+                .pipe(video_encoder)
+                .to(video_sink)?;
+            ctx.attach(source, 0, branch)?;
+            Ok(())
+        })?;
+        let (builder, ()) = builder.add_source(audio_source, |source, ctx| {
+            let branch = ctx.branch().pipe(audio_encoder).to(audio_sink)?;
+            ctx.attach(source, 0, branch)?;
+            Ok(())
+        })?;
+        let pipeline = builder.build();
 
         println!("publishing to {shown_url} for {seconds}s");
         pipeline.run()?;

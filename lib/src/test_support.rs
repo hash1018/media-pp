@@ -553,22 +553,22 @@ fn build_fixture(
         ffmpeg::software::scaling::Flags::BILINEAR,
     );
 
-    let pipeline = PipelineBuilder::new(format!("{name}-fixture"))
-        .add_source(video, move |source, context| {
-            let branch = context
-                .branch()
-                .pipe(scaler)
-                .pipe(video_encoder)
-                .to(video_sink)?;
-            context.attach(source, 0, branch)?;
-            Ok(())
-        })?
-        .add_source(audio, move |source, context| {
-            let branch = context.branch().pipe(audio_encoder).to(audio_sink)?;
-            context.attach(source, 0, branch)?;
-            Ok(())
-        })?
-        .build();
+    let builder = PipelineBuilder::new(format!("{name}-fixture"));
+    let (builder, ()) = builder.add_source(video, move |source, context| {
+        let branch = context
+            .branch()
+            .pipe(scaler)
+            .pipe(video_encoder)
+            .to(video_sink)?;
+        context.attach(source, 0, branch)?;
+        Ok(())
+    })?;
+    let (builder, ()) = builder.add_source(audio, move |source, context| {
+        let branch = context.branch().pipe(audio_encoder).to(audio_sink)?;
+        context.attach(source, 0, branch)?;
+        Ok(())
+    })?;
+    let pipeline = builder.build();
 
     pipeline.run()?;
     std::thread::sleep(std::time::Duration::from_secs_f64(seconds));

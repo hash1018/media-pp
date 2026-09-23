@@ -186,7 +186,7 @@ impl Pipeline {
         source: S,
         wire: impl FnOnce(&mut S, &Arc<Context>) -> Result<T>,
     ) -> Result<(Arc<Self>, T)> {
-        let (builder, wired) = PipelineBuilder::new(id).add_source_returning(source, wire)?;
+        let (builder, wired) = PipelineBuilder::new(id).add_source(source, wire)?;
         Ok((builder.build(), wired))
     }
 
