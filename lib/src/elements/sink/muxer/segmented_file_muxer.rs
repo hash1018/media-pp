@@ -8,7 +8,7 @@ use crate::pp_log::{PpLog, pp_info};
 use ffmpeg_next as ffmpeg;
 
 use super::file_muxer::{FileMuxer, FileMuxerError};
-use super::tracks::{MuxerId, MuxerSinks, MuxerTrack};
+use super::tracks::{MuxerId, MuxerSinks, MuxerTrack, TrackFormat};
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, PortContract},
@@ -92,8 +92,8 @@ struct StreamDef {
 ///     SegmentPolicy::Duration(Duration::from_secs(600)),
 ///     |index| PathBuf::from(format!("rec_{index:04}.mp4")),
 /// );
-/// let video = muxer.add_stream("video", video_encoder.parameters(), video_encoder.time_base());
-/// let audio = muxer.add_stream("audio", audio_encoder.parameters(), audio_encoder.time_base());
+/// let video = muxer.add_stream("video", &video_encoder);
+/// let audio = muxer.add_stream("audio", &audio_encoder);
 /// let mut sinks = muxer.open()?;
 /// let video_sink = sinks.take(video)?;
 /// let audio_sink = sinks.take(audio)?;
@@ -127,21 +127,24 @@ impl SegmentedFileMuxer {
     }
 
     /// Registers one more track every segment file will hold — same
-    /// contract as [`FileMuxer::add_stream`] (same `name`/`parameters`/
-    /// `time_base` meaning, and the same [`MuxerTrack`] back), except this
+    /// contract as [`FileMuxer::add_stream`] (same `name`/`format` meaning,
+    /// and the same [`MuxerTrack`] back), except this
     /// can't fail: nothing here touches ffmpeg yet, it's only recorded for
     /// [`SegmentedFileMuxer::open`] (and every later rotation) to replay.
     ///
-    /// Whichever stream's `parameters.medium()` is
-    /// [`ffmpeg::media::Type::Video`] (at most one is expected) becomes
+    /// Whichever track's format is [`ffmpeg::media::Type::Video`] (at most
+    /// one is expected) becomes
     /// the keyframe-gating track described in [`SegmentedFileMuxer::open`]'s
     /// own docs — no separate flag to pass.
     pub fn add_stream(
         &mut self,
         name: impl Into<String>,
-        parameters: ffmpeg::codec::Parameters,
-        time_base: ffmpeg::Rational,
+        format: impl Into<TrackFormat>,
     ) -> MuxerTrack {
+        let TrackFormat {
+            parameters,
+            time_base,
+        } = format.into();
         let is_video = parameters.medium() == ffmpeg::media::Type::Video;
         let track = self.id.track(self.streams.len());
         self.streams.push(StreamDef {
@@ -228,8 +231,7 @@ fn open_segment(streams: &[StreamDef], path: PathBuf) -> Result<Vec<Box<dyn Sink
         .map(|stream| {
             muxer.add_stream(
                 stream.name.to_string(),
-                stream.parameters.clone(),
-                stream.time_base,
+                TrackFormat::new(stream.parameters.clone(), stream.time_base),
             )
         })
         .collect::<Result<Vec<_>>>()?;
@@ -551,7 +553,7 @@ mod tests {
                 path
             },
         );
-        let video = muxer.add_stream("video", encoder.parameters(), encoder.time_base());
+        let video = muxer.add_stream("video", &encoder);
         let sink = muxer
             .open()
             .expect("open must succeed")
@@ -641,7 +643,7 @@ mod tests {
                 path
             },
         );
-        let video = muxer.add_stream("video", encoder.parameters(), encoder.time_base());
+        let video = muxer.add_stream("video", &encoder);
         let sink = muxer
             .open()
             .expect("open must succeed")
@@ -723,7 +725,7 @@ mod tests {
             recorded_paths.lock().unwrap().push(path.clone());
             path
         });
-        let video = muxer.add_stream("video", encoder.parameters(), encoder.time_base());
+        let video = muxer.add_stream("video", &encoder);
         let sink = muxer
             .open()
             .expect("open must succeed")
@@ -802,7 +804,7 @@ mod tests {
             SegmentPolicy::Duration(Duration::from_secs(3600)),
             move |_index| recorded_path.clone(),
         );
-        let video = muxer.add_stream("video", encoder.parameters(), encoder.time_base());
+        let video = muxer.add_stream("video", &encoder);
         let mut sink = muxer
             .open()
             .expect("open must succeed")
@@ -871,7 +873,7 @@ mod tests {
                 path
             },
         );
-        let video = muxer.add_stream("video", encoder.parameters(), encoder.time_base());
+        let video = muxer.add_stream("video", &encoder);
         let sink = muxer
             .open()
             .expect("open must succeed")

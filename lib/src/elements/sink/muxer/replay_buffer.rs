@@ -44,7 +44,7 @@ use ffmpeg_next::{self as ffmpeg, Rescale};
 use thiserror::Error as ThisError;
 
 use super::file_muxer::FileMuxer;
-use super::tracks::{MuxerId, MuxerSinks, MuxerTrack};
+use super::tracks::{MuxerId, MuxerSinks, MuxerTrack, TrackFormat};
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, PortContract},
@@ -113,8 +113,8 @@ pub enum ReplayBufferError {
 /// #     bit_rate: 128_000,
 /// # })?;
 /// let mut replay = ReplayBuffer::create(Duration::from_secs(30));
-/// let video = replay.add_stream("video", video_encoder.parameters(), video_encoder.time_base());
-/// let audio = replay.add_stream("audio", audio_encoder.parameters(), audio_encoder.time_base());
+/// let video = replay.add_stream("video", &video_encoder);
+/// let audio = replay.add_stream("audio", &audio_encoder);
 /// let (mut sinks, handle) = replay.open()?;
 /// let video_sink = sinks.take(video)?;
 /// let audio_sink = sinks.take(audio)?;
@@ -148,7 +148,8 @@ impl ReplayBuffer {
     }
 
     /// Registers one more track, on the terms [`FileMuxer::add_stream`]
-    /// takes one: `time_base` is what its packets are stamped in, and
+    /// takes one: `format` is what its packets are and the unit they are
+    /// stamped in, and
     /// `name` is its sink's identity in logs and bus events.
     ///
     /// Cannot fail — nothing is opened until a clip is saved, and each save
@@ -156,9 +157,12 @@ impl ReplayBuffer {
     pub fn add_stream(
         &mut self,
         name: impl Into<String>,
-        parameters: ffmpeg::codec::Parameters,
-        time_base: ffmpeg::Rational,
+        format: impl Into<TrackFormat>,
     ) -> MuxerTrack {
+        let TrackFormat {
+            parameters,
+            time_base,
+        } = format.into();
         let track = self.id.track(self.streams.len());
         self.streams.push(StreamDef {
             name: name.into().into(),
@@ -430,8 +434,7 @@ impl Clip {
             .map(|stream| {
                 muxer.add_stream(
                     stream.name.to_string(),
-                    stream.parameters.clone(),
-                    stream.time_base,
+                    TrackFormat::new(stream.parameters.clone(), stream.time_base),
                 )
             })
             .collect::<Result<Vec<_>>>()?;
@@ -653,7 +656,10 @@ mod tests {
             .iter()
             .enumerate()
             .map(|(index, (parameters, time_base))| {
-                replay.add_stream(format!("track-{index}"), parameters.clone(), *time_base)
+                replay.add_stream(
+                    format!("track-{index}"),
+                    TrackFormat::new(parameters.clone(), *time_base),
+                )
             })
             .collect();
         let (mut sinks, handle) = replay.open().expect("the buffer opens");
@@ -1011,7 +1017,7 @@ mod tests {
         let Some(recorded) = fixture() else { return };
         let mut replay = ReplayBuffer::create(Duration::ZERO);
         let (parameters, time_base) = recorded.streams[0].clone();
-        let _track = replay.add_stream("video", parameters, time_base);
+        let _track = replay.add_stream("video", TrackFormat::new(parameters, time_base));
         assert!(matches!(
             replay.open(),
             Err(Error::ReplayBufferError(ReplayBufferError::ZeroLength))

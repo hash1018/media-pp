@@ -4,7 +4,7 @@ use ffmpeg_next as ffmpeg;
 use thiserror::Error as ThisError;
 
 use super::track_sink::{Muxer, PendingStream, TrackOptions, open_tracks};
-use super::tracks::{MuxerId, MuxerSinks, MuxerTrack};
+use super::tracks::{MuxerId, MuxerSinks, MuxerTrack, TrackFormat};
 
 use crate::{
     element::ElementType,
@@ -137,8 +137,8 @@ pub enum RtmpMuxerError {
 /// #     bit_rate: 128_000,
 /// # })?;
 /// let mut muxer = RtmpMuxer::create("rtmp://127.0.0.1:1935/live/stream")?;
-/// let video = muxer.add_stream("video", video_encoder.parameters(), video_encoder.time_base())?;
-/// let audio = muxer.add_stream("audio", audio_encoder.parameters(), audio_encoder.time_base())?;
+/// let video = muxer.add_stream("video", &video_encoder)?;
+/// let audio = muxer.add_stream("audio", &audio_encoder)?;
 /// let mut sinks = muxer.open()?; // writes the FLV header
 /// let video_sink = sinks.take(video)?;
 /// let audio_sink = sinks.take(audio)?;
@@ -191,10 +191,9 @@ impl RtmpMuxer {
     }
 
     /// Registers one more track this broadcast will carry — in practice one
-    /// video and one audio, which is what FLV holds. `parameters`/
-    /// `time_base` describe it, typically
-    /// [`crate::elements::SwEncoder::parameters`] and
-    /// [`crate::elements::SwEncoder::time_base`]. `name` becomes this track's own
+    /// video and one audio, which is what FLV holds. `format` describes it,
+    /// typically `&encoder` for the encoder that feeds it (see
+    /// [`TrackFormat`]). `name` becomes this track's own
     /// [`Element::name`](crate::element::Element::name)/`pp_log` identity once [`RtmpMuxer::open`] turns it
     /// into a `Sink`.
     ///
@@ -203,9 +202,12 @@ impl RtmpMuxer {
     pub fn add_stream(
         &mut self,
         name: impl Into<String>,
-        parameters: ffmpeg::codec::Parameters,
-        time_base: ffmpeg::Rational,
+        format: impl Into<TrackFormat>,
     ) -> Result<MuxerTrack> {
+        let TrackFormat {
+            parameters,
+            time_base,
+        } = format.into();
         let mut stream = self
             .output
             .add_stream(parameters.id())

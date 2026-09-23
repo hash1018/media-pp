@@ -113,7 +113,7 @@ pub use sink::{
     AppSink, CounterHandle, FileMuxer, FileMuxerError, FrameCounter, HlsMode, HlsMuxer,
     HlsMuxerError, HlsOptions, HlsSegmentFormat, MuxerSinks, MuxerTrack, MuxerTrackError,
     PacketCounter, ReplayBuffer, ReplayBufferError, ReplayBufferHandle, RtmpMuxer, RtmpMuxerError,
-    RtspMuxer, RtspMuxerError, SegmentPolicy, SegmentedFileMuxer, SubmitError,
+    RtspMuxer, RtspMuxerError, SegmentPolicy, SegmentedFileMuxer, SubmitError, TrackFormat,
 };
 #[cfg(feature = "ort")]
 pub use sink::{COCO_CLASS_LABELS, Detection, OrtDetector, OrtDetectorError};

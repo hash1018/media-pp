@@ -58,7 +58,7 @@ mod example {
 
     use media_pp::elements::{
         AudioFormat, AudioResampler, ChunkPolicy, FileDemuxer, FileMuxer, SwDecoder, TokenTiming,
-        WHISPER_SAMPLE_RATE, WhisperTranscriber,
+        TrackFormat, WHISPER_SAMPLE_RATE, WhisperTranscriber,
     };
     use media_pp::ffmpeg;
     use media_pp::{
@@ -142,7 +142,6 @@ mod example {
         };
         let audio_index = audio.index;
         let audio_params = audio.parameters.clone();
-        let audio_time_base = audio.time_base;
 
         // Every track is described before the header is written, which is
         // why the text track is registered now and not when the first line
@@ -150,16 +149,15 @@ mod example {
         let mut muxer = FileMuxer::create(&output_path)?;
         let video_track = match video {
             Some(video) => {
-                let track = muxer.add_stream("video", video.parameters.clone(), video.time_base)?;
+                let track = muxer.add_stream("video", &video)?;
                 Some((video.index, track))
             }
             None => None,
         };
-        let audio_track = muxer.add_stream("audio", audio_params.clone(), audio_time_base)?;
+        let audio_track = muxer.add_stream("audio", &audio)?;
         let text_track = muxer.add_stream(
             "text",
-            subtitle::Codec::MovText.parameters(),
-            TEXT_TIME_BASE,
+            TrackFormat::new(subtitle::Codec::MovText.parameters(), TEXT_TIME_BASE),
         )?;
 
         let mut sinks = muxer.open()?;
@@ -176,7 +174,10 @@ mod example {
         let sidecar = match sidecar {
             Some((path, codec)) => {
                 let mut muxer = FileMuxer::create(&path)?;
-                let text_track = muxer.add_stream("sidecar", codec.parameters(), TEXT_TIME_BASE)?;
+                let text_track = muxer.add_stream(
+                    "sidecar",
+                    TrackFormat::new(codec.parameters(), TEXT_TIME_BASE),
+                )?;
                 let sink = muxer.open()?.take(text_track)?;
                 Some((codec, sink))
             }

@@ -10,6 +10,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use ffmpeg_next as ffmpeg;
 use thiserror::Error as ThisError;
 
 use crate::{element::Sink, error::Result};
@@ -37,6 +38,48 @@ pub enum MuxerTrackError {
 pub struct MuxerTrack {
     muxer: MuxerId,
     index: usize,
+}
+
+/// What one track holds, as a muxer's `add_stream` takes it: the codec
+/// parameters its packets were encoded with and the unit their timestamps
+/// are in.
+///
+/// The two describe one stream and have to come from the same place, so
+/// the usual way to get one is from what produces that stream — an
+/// encoder, such as `&encoder` for a [`crate::elements::SwEncoder`] or
+/// [`crate::elements::SwAudioEncoder`], or a demuxed
+/// [`&StreamInfo`](crate::elements::StreamInfo) for packets copied through
+/// unchanged. [`TrackFormat::new`] is for a stream described by hand.
+#[derive(Clone)]
+pub struct TrackFormat {
+    pub(super) parameters: ffmpeg::codec::Parameters,
+    pub(super) time_base: ffmpeg::Rational,
+}
+
+impl TrackFormat {
+    /// A track whose packets carry `parameters` and are timed in
+    /// `time_base`.
+    pub fn new(parameters: ffmpeg::codec::Parameters, time_base: ffmpeg::Rational) -> Self {
+        Self {
+            parameters,
+            time_base,
+        }
+    }
+}
+
+impl std::fmt::Debug for TrackFormat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TrackFormat")
+            .field("codec", &self.parameters.id())
+            .field("time_base", &self.time_base)
+            .finish()
+    }
+}
+
+impl From<&crate::elements::StreamInfo> for TrackFormat {
+    fn from(stream: &crate::elements::StreamInfo) -> Self {
+        Self::new(stream.parameters.clone(), stream.time_base)
+    }
 }
 
 /// What a muxer's `open` returns: one sink per track, each taken out by the
@@ -130,5 +173,38 @@ mod tests {
             }))
         ));
         assert_eq!(&*sinks.take(ours.track(0)).unwrap().name(), "ours");
+    }
+
+    /// What an encoder or a demuxed stream converts into is its own
+    /// parameters and time base, not some default: a muxer told a different
+    /// time base than its packets are stamped in writes them at the wrong
+    /// times.
+    #[test]
+    fn a_track_format_is_what_its_encoder_or_stream_says() {
+        use crate::elements::{AudioCodec, FileDemuxer, SwAudioEncoder, SwAudioEncoderOptions};
+
+        let encoder = SwAudioEncoder::new(
+            "encoder",
+            SwAudioEncoderOptions {
+                codec: AudioCodec::Aac,
+                sample_rate: 44_100,
+                channels: 2,
+                bit_rate: 128_000,
+            },
+        )
+        .expect("AAC is built into FFmpeg");
+        let format = TrackFormat::from(&encoder);
+        assert_eq!(format.time_base, encoder.time_base());
+        assert_eq!(format.parameters.id(), encoder.parameters().id());
+
+        let Some(path) = crate::test_support::try_test_video() else {
+            return;
+        };
+        let (_source, streams) = FileDemuxer::open("demux", &path).expect("open the fixture");
+        for stream in &streams {
+            let format = TrackFormat::from(stream);
+            assert_eq!(format.time_base, stream.time_base);
+            assert_eq!(format.parameters.id(), stream.parameters.id());
+        }
     }
 }

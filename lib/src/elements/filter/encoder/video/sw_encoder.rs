@@ -364,6 +364,14 @@ impl SwEncoder {
     }
 }
 
+/// The track this encoder's packets make: its [`SwEncoder::parameters`], timed
+/// in its [`SwEncoder::time_base`].
+impl From<&SwEncoder> for crate::elements::TrackFormat {
+    fn from(encoder: &SwEncoder) -> Self {
+        Self::new(encoder.parameters(), encoder.time_base())
+    }
+}
+
 impl Element for SwEncoder {
     fn name(&self) -> Arc<str> {
         self.name.clone()

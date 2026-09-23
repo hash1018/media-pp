@@ -93,7 +93,7 @@ mod windows_example {
         // exposes its own codec parameters for exactly this case (see
         // `transcode_render`'s own use of this, wiring a decoder instead).
         let mut muxer = FileMuxer::create(&path)?;
-        let track = muxer.add_stream("video", encoder.parameters(), encoder.time_base())?;
+        let track = muxer.add_stream("video", &encoder)?;
         let muxer_sink = muxer.open()?.take(track)?;
 
         let (pipeline, ()) = Pipeline::new("screen-record-software", source, |source, ctx| {
@@ -221,7 +221,7 @@ mod linux_example {
             },
         )?;
         let mut muxer = FileMuxer::create(&path)?;
-        let track = muxer.add_stream("video", encoder.parameters(), encoder.time_base())?;
+        let track = muxer.add_stream("video", &encoder)?;
         let muxer_sink = muxer.open()?.take(track)?;
 
         let (pipeline, ()) = Pipeline::new("screen-record-software", source, |source, ctx| {

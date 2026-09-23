@@ -17,7 +17,7 @@ mod example {
     use media_pp::ffmpeg::media;
     use media_pp::{
         bus::BusEvent,
-        elements::{FileDemuxer, Pacer, RtspMuxer, RtspTransport},
+        elements::{FileDemuxer, Pacer, RtspMuxer, RtspTransport, TrackFormat},
         pipeline::Pipeline,
     };
 
@@ -40,18 +40,13 @@ mod example {
         let (source, _) = FileDemuxer::open("demux", &path)?;
         let video = source.best(media::Type::Video)?;
         let video_index = video.index;
-        let video_params = video.parameters.clone();
-        let video_time_base = video.time_base;
+        let video_format = TrackFormat::from(&video);
 
         // Optional on purpose: this example took video only before
         // `RtspMuxer` could carry two tracks, and a file with no audio must
         // still work exactly as it did.
         let audio_track = match source.best(media::Type::Audio).ok() {
-            Some(audio) => {
-                let params = audio.parameters.clone();
-                let time_base = audio.time_base;
-                Some((audio.index, params, time_base))
-            }
+            Some(audio) => Some((audio.index, TrackFormat::from(&audio))),
             None => None,
         };
         // How many tracks go out, said when publishing starts and when it ends.
@@ -63,10 +58,10 @@ mod example {
             // Every track must be registered before `open`, which is what
             // announces them all in one SDP.
             let mut muxer = RtspMuxer::create(&url, RtspTransport::Tcp)?;
-            let video = muxer.add_stream("video", video_params, video_time_base)?;
+            let video = muxer.add_stream("video", video_format)?;
             let audio = match audio_track {
-                Some((index, params, time_base)) => {
-                    let track = muxer.add_stream("audio", params, time_base)?;
+                Some((index, format)) => {
+                    let track = muxer.add_stream("audio", format)?;
                     Some((index, track))
                 }
                 None => None,

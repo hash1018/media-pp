@@ -154,7 +154,7 @@ mod windows_example {
             },
         )?;
         let mut muxer = FileMuxer::create(&path)?;
-        let track = muxer.add_stream("video", encoder.parameters(), encoder.time_base())?;
+        let track = muxer.add_stream("video", &encoder)?;
         let muxer_sink = muxer.open()?.take(track)?;
 
         let (output_pipeline, ()) =

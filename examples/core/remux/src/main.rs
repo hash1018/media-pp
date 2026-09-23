@@ -69,9 +69,7 @@ mod example {
                 );
                 continue;
             }
-            let parameters = stream.parameters.clone();
-            let time_base = stream.time_base;
-            let track = muxer.add_stream(format!("{:?}", stream.kind), parameters, time_base)?;
+            let track = muxer.add_stream(format!("{:?}", stream.kind), stream)?;
             kept.push((stream.index, track));
         }
         let mut sinks = muxer.open()?;

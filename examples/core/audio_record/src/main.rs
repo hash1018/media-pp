@@ -54,7 +54,7 @@ mod example {
             },
         )?;
         let mut muxer = FileMuxer::create(&path)?;
-        let track = muxer.add_stream("audio", encoder.parameters(), encoder.time_base())?;
+        let track = muxer.add_stream("audio", &encoder)?;
         let muxer_sink = muxer.open()?.take(track)?;
 
         let (pipeline, ()) = Pipeline::new("audio-record", source, |source, ctx| {

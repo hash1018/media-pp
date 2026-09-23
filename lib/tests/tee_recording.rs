@@ -77,7 +77,7 @@ fn finishing_a_recording_branch_leaves_a_playable_file_and_a_running_preview() {
     .expect("open the encoder");
     let mut muxer = FileMuxer::create(&path_str).expect("create the MP4");
     let video = muxer
-        .add_stream("video", encoder.parameters(), encoder.time_base())
+        .add_stream("video", &encoder)
         .expect("add the video stream");
     let muxer_sink = muxer
         .open()
@@ -194,7 +194,7 @@ fn finishing_a_recording_branch_loses_no_frame_that_reached_it() {
     .expect("open the encoder");
     let mut muxer = FileMuxer::create(&path_str).expect("create the MP4");
     let video = muxer
-        .add_stream("video", encoder.parameters(), encoder.time_base())
+        .add_stream("video", &encoder)
         .expect("add the video stream");
     let muxer_sink = muxer
         .open()

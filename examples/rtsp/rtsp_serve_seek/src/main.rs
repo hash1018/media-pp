@@ -22,7 +22,7 @@ mod example {
     use media_pp::ffmpeg::media;
     use media_pp::{
         bus::BusEvent,
-        elements::{FileDemuxer, Pacer, RtspMuxer, RtspTransport},
+        elements::{FileDemuxer, Pacer, RtspMuxer, RtspTransport, TrackFormat},
         pipeline::{Pipeline, SeekMode},
     };
 
@@ -45,18 +45,13 @@ mod example {
         let (source, _) = FileDemuxer::open("demux", &path)?;
         let video = source.best(media::Type::Video)?;
         let video_index = video.index;
-        let video_params = video.parameters.clone();
-        let video_time_base = video.time_base;
+        let video_format = TrackFormat::from(&video);
 
         // Optional, as in `rtsp_serve`. Two tracks are also what makes the
         // seek below worth watching here: each rebases its own published
         // timestamps onto its own last ones.
         let audio_track = match source.best(media::Type::Audio).ok() {
-            Some(audio) => {
-                let params = audio.parameters.clone();
-                let time_base = audio.time_base;
-                Some((audio.index, params, time_base))
-            }
+            Some(audio) => Some((audio.index, TrackFormat::from(&audio))),
             None => None,
         };
         let tracks = 1 + usize::from(audio_track.is_some());
@@ -65,10 +60,10 @@ mod example {
 
         let (pipeline, ()) = Pipeline::new("rtsp-publish-seek", source, |source, ctx| {
             let mut muxer = RtspMuxer::create(&url, RtspTransport::Tcp)?;
-            let video = muxer.add_stream("video", video_params, video_time_base)?;
+            let video = muxer.add_stream("video", video_format)?;
             let audio = match audio_track {
-                Some((index, params, time_base)) => {
-                    let track = muxer.add_stream("audio", params, time_base)?;
+                Some((index, format)) => {
+                    let track = muxer.add_stream("audio", format)?;
                     Some((index, track))
                 }
                 None => None,

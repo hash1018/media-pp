@@ -12,6 +12,17 @@ compile error with no explanation.
 
 ### Breaking
 
+- **A muxer's `add_stream` takes the encoder or stream it describes.**
+  `add_stream(name, parameters, time_base)` on `FileMuxer`,
+  `SegmentedFileMuxer`, `HlsMuxer`, `RtmpMuxer`, `RtspMuxer` and
+  `ReplayBuffer` is now `add_stream(name, format)`, where `format` is
+  anything that converts into the new `TrackFormat`: `&encoder` for any of
+  the four encoders, or a demuxed `&StreamInfo`. The two values described
+  one stream and were passed separately, so one encoder's time base could
+  go in beside another's parameters; now they come from the same place.
+  `TrackFormat::new(parameters, time_base)` is left for a stream described
+  by hand.
+
 - **A Tee starts from the pipeline's context: `ctx.tee(name)`.**
   `TeeBuilder::new(name, ctx.clone())` is now `ctx.tee(name)`, beside
   `ctx.branch()`; the rest of the builder (`branch`, `build`,

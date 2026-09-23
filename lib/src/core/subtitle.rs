@@ -386,7 +386,13 @@ mod tests {
 
         let mut muxer = crate::elements::FileMuxer::create(&path).expect("the muxer must open");
         let text = muxer
-            .add_stream("text", codec.parameters(), ffmpeg::Rational::new(1, 1000))
+            .add_stream(
+                "text",
+                crate::elements::TrackFormat::new(
+                    codec.parameters(),
+                    ffmpeg::Rational::new(1, 1000),
+                ),
+            )
             .expect("one text track");
         let mut sink = muxer
             .open()
@@ -450,8 +456,10 @@ mod tests {
         let text = muxer
             .add_stream(
                 "text",
-                Codec::SubRip.parameters(),
-                ffmpeg::Rational::new(1, 1000),
+                crate::elements::TrackFormat::new(
+                    Codec::SubRip.parameters(),
+                    ffmpeg::Rational::new(1, 1000),
+                ),
             )
             .expect("one text track");
         let mut sink = muxer.open().expect("header").take(text).expect("its sink");

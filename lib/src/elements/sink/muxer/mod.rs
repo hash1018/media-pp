@@ -13,4 +13,4 @@ pub use replay_buffer::{ReplayBuffer, ReplayBufferError, ReplayBufferHandle};
 pub use rtmp_muxer::{RtmpMuxer, RtmpMuxerError};
 pub use rtsp_muxer::{RtspMuxer, RtspMuxerError};
 pub use segmented_file_muxer::{SegmentPolicy, SegmentedFileMuxer};
-pub use tracks::{MuxerSinks, MuxerTrack, MuxerTrackError};
+pub use tracks::{MuxerSinks, MuxerTrack, MuxerTrackError, TrackFormat};

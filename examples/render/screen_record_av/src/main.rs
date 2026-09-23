@@ -118,16 +118,8 @@ mod windows_example {
         // No container/demuxer in this loop to get these from — each encoder
         // exposes its own codec parameters for exactly this case.
         let mut muxer = FileMuxer::create(&path)?;
-        let video_track = muxer.add_stream(
-            "video",
-            video_encoder.parameters(),
-            video_encoder.time_base(),
-        )?;
-        let audio_track = muxer.add_stream(
-            "audio",
-            audio_encoder.parameters(),
-            audio_encoder.time_base(),
-        )?;
+        let video_track = muxer.add_stream("video", &video_encoder)?;
+        let audio_track = muxer.add_stream("audio", &audio_encoder)?;
         let mut sinks = muxer.open()?;
         let video_sink = sinks.take(video_track)?;
         let audio_sink = sinks.take(audio_track)?;
@@ -313,16 +305,8 @@ mod linux_example {
         )?;
 
         let mut muxer = FileMuxer::create(&path)?;
-        let video_track = muxer.add_stream(
-            "video",
-            video_encoder.parameters(),
-            video_encoder.time_base(),
-        )?;
-        let audio_track = muxer.add_stream(
-            "audio",
-            audio_encoder.parameters(),
-            audio_encoder.time_base(),
-        )?;
+        let video_track = muxer.add_stream("video", &video_encoder)?;
+        let audio_track = muxer.add_stream("audio", &audio_encoder)?;
         let mut sinks = muxer.open()?;
         let video_sink = sinks.take(video_track)?;
         let audio_sink = sinks.take(audio_track)?;

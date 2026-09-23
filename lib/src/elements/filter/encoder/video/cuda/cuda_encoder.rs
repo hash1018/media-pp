@@ -412,6 +412,14 @@ impl CudaEncoder {
     }
 }
 
+/// The track this encoder's packets make: its [`CudaEncoder::parameters`], timed
+/// in its [`CudaEncoder::time_base`].
+impl From<&CudaEncoder> for crate::elements::TrackFormat {
+    fn from(encoder: &CudaEncoder) -> Self {
+        Self::new(encoder.parameters(), encoder.time_base())
+    }
+}
+
 impl Element for CudaEncoder {
     fn name(&self) -> Arc<str> {
         self.name.clone()

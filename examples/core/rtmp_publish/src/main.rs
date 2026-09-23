@@ -100,16 +100,8 @@ mod example {
         // Connects here: an unreachable server or a rejected stream key
         // fails before a single frame has been encoded.
         let mut muxer = RtmpMuxer::create(&url)?;
-        let video_track = muxer.add_stream(
-            "video",
-            video_encoder.parameters(),
-            video_encoder.time_base(),
-        )?;
-        let audio_track = muxer.add_stream(
-            "audio",
-            audio_encoder.parameters(),
-            audio_encoder.time_base(),
-        )?;
+        let video_track = muxer.add_stream("video", &video_encoder)?;
+        let audio_track = muxer.add_stream("audio", &audio_encoder)?;
         // Held before `open` consumes the muxer — the URL itself is not
         // printed, since a real one ends in a credential.
         let shown_url = muxer.redacted_url().to_string();

@@ -190,7 +190,7 @@ fn record_once(path: &Path, teardown: Teardown) {
     let encoder = encoder("encoder", 30);
     let mut muxer = FileMuxer::create(path).expect("create the recording");
     let video = muxer
-        .add_stream("video", encoder.parameters(), encoder.time_base())
+        .add_stream("video", &encoder)
         .expect("add the video track");
     let sink = muxer
         .open()
@@ -591,7 +591,7 @@ fn segment_rotation_does_not_grow_process_memory_or_hold_files() {
         SegmentPolicy::Duration(Duration::from_secs(1)),
         move |index| segment_dir.join(format!("segment_{index:04}.mp4")),
     );
-    let video = muxer.add_stream("video", encoder.parameters(), encoder.time_base());
+    let video = muxer.add_stream("video", &encoder);
     let sink = muxer
         .open()
         .expect("open the first segment")

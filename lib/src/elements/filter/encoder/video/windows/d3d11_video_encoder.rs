@@ -843,6 +843,14 @@ impl D3d11VideoEncoder {
     }
 }
 
+/// The track this encoder's packets make: its [`D3d11VideoEncoder::parameters`], timed
+/// in its [`D3d11VideoEncoder::time_base`].
+impl From<&D3d11VideoEncoder> for crate::elements::TrackFormat {
+    fn from(encoder: &D3d11VideoEncoder) -> Self {
+        Self::new(encoder.parameters(), encoder.time_base())
+    }
+}
+
 impl Drop for D3d11VideoEncoder {
     fn drop(&mut self) {
         pp_info!(self, "dropped: freeing hw_frames_ctx and hw_device_ctx");
@@ -1270,7 +1278,7 @@ mod tests {
             std::env::temp_dir().join(format!("d3d11_encoder_colour_{}.mp4", std::process::id()));
         let mut muxer = FileMuxer::create(&path).expect("the file opens");
         let track = muxer
-            .add_stream("video", encoder.parameters(), encoder.time_base())
+            .add_stream("video", &encoder)
             .expect("the track is added");
         let mut sinks = muxer.open().expect("the header is written");
         encoder.src_pads()[0].link(sinks.take(track).expect("the muxer's own track"));
