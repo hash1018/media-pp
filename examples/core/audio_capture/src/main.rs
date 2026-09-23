@@ -95,7 +95,7 @@ mod windows_example {
         );
 
         let (counter, count) = FrameCounter::new("frame-counter");
-        let pipeline = Pipeline::new("audio-capture", source, |source, ctx| {
+        let (pipeline, ()) = Pipeline::new("audio-capture", source, |source, ctx| {
             let branch = ctx.branch().to(counter)?;
             ctx.attach(source, 0, branch)?;
             Ok(())
@@ -209,7 +209,7 @@ mod linux_example {
         );
 
         let (counter, count) = FrameCounter::new("frame-counter");
-        let pipeline = Pipeline::new("audio-capture", source, |source, ctx| {
+        let (pipeline, ()) = Pipeline::new("audio-capture", source, |source, ctx| {
             let branch = ctx.branch().to(counter)?;
             ctx.attach(source, 0, branch)?;
             Ok(())

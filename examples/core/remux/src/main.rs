@@ -81,7 +81,7 @@ mod example {
             .map(|(stream_index, track)| Ok((stream_index, sinks.take(track)?)))
             .collect::<media_pp::Result<Vec<_>>>()?;
 
-        let pipeline = Pipeline::new("remux", source, |source, ctx| {
+        let (pipeline, ()) = Pipeline::new("remux", source, |source, ctx| {
             for (stream_index, sink) in routes {
                 let branch = ctx.branch().to(sink)?;
                 ctx.attach(source, stream_index, branch)?;

@@ -40,7 +40,7 @@ fn partial_thread_spawn_failure_stops_and_joins_started_sources() {
 /// after `stop` there is nothing again, however the source got there.
 #[test]
 fn is_running_spans_exactly_the_time_a_source_is_on_its_thread() {
-    let pipeline = Pipeline::new(
+    let (pipeline, ()) = Pipeline::new(
         "running",
         TestVideoSource::new("gen", TestVideoOptions::default()),
         |source, ctx| {
@@ -85,7 +85,7 @@ fn pause_then_stop_returns_promptly() {
         .expect("test video has a video stream");
     let index = video.index;
 
-    let pipeline = Pipeline::new("test", source, |source, ctx| {
+    let (pipeline, ()) = Pipeline::new("test", source, |source, ctx| {
         let branch = ctx.branch().queue("q", 4).to(NoOpSink {
             name: "noop".into(),
             pp_log: element_pp_log(ElementType::Other, "noop", None),
@@ -215,7 +215,7 @@ fn finish_drains_queued_data_and_eos_even_while_paused() {
         ready: ready.clone(),
         buffers: BUFFERS,
     };
-    let pipeline = Pipeline::new("finish-test", source, |source, ctx| {
+    let (pipeline, ()) = Pipeline::new("finish-test", source, |source, ctx| {
         let branch = ctx.branch().queue("backlog", BUFFERS).to(SlowEosSink {
             pp_log: element_pp_log(ElementType::Other, "slow-eos", None),
             count: count.clone(),
@@ -333,7 +333,7 @@ fn multi_source_pipeline_stops_every_source_from_one_stop_call() {
 fn pipeline_clock_includes_a_slow_pause_cascade_in_its_frozen_time() {
     let pause_delay = Duration::from_millis(80);
     let source = TestVideoSource::new("video", TestVideoOptions::default());
-    let pipeline = Pipeline::new("slow-pause-clock-test", source, |source, ctx| {
+    let (pipeline, ()) = Pipeline::new("slow-pause-clock-test", source, |source, ctx| {
         let branch = ctx.branch().to(SlowPauseSink {
             pause_delay,
             pp_log: element_pp_log(ElementType::Other, "slow-pause", None),
@@ -366,7 +366,7 @@ fn pipeline_clock_includes_a_slow_pause_cascade_in_its_frozen_time() {
 #[test]
 fn dropping_a_running_pipeline_stops_and_releases_it() {
     let source = TestVideoSource::new("video", TestVideoOptions::default());
-    let pipeline = Pipeline::new("drop-running-test", source, |_source, _ctx| Ok(()))
+    let (pipeline, ()) = Pipeline::new("drop-running-test", source, |_source, _ctx| Ok(()))
         .expect("test pipeline wiring must succeed");
     let weak = Arc::downgrade(&pipeline);
 
@@ -502,7 +502,7 @@ fn a_source_that_fails_still_stops_its_own_branch() {
         pp_log: PpLog::new("Other", "failing", None),
         pad: SrcPad::new("failing_src"),
     };
-    let pipeline = Pipeline::new("failing-source", source, |source, ctx| {
+    let (pipeline, ()) = Pipeline::new("failing-source", source, |source, ctx| {
         let branch = ctx.branch().to(sink)?;
         ctx.attach(source, 0, branch)?;
         Ok(())

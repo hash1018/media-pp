@@ -6,7 +6,7 @@ use super::*;
 #[test]
 fn seek_check_rejects_a_live_source_before_flushing() {
     let source = TestVideoSource::new("live", TestVideoOptions::default());
-    let pipeline = Pipeline::new("seek-check", source, |source, ctx| {
+    let (pipeline, ()) = Pipeline::new("seek-check", source, |source, ctx| {
         let branch = ctx.branch().to(NoOpSink {
             name: "noop".into(),
             pp_log: element_pp_log(ElementType::Other, "noop", None),
@@ -150,7 +150,7 @@ fn paused_seek_prerolls_one_timeline_and_restores_pause() {
         pad: SrcPad::new("src"),
         seeks: Arc::clone(&seeks),
     };
-    let pipeline = Pipeline::new("paused-seek-preroll", source, |source, ctx| {
+    let (pipeline, ()) = Pipeline::new("paused-seek-preroll", source, |source, ctx| {
         let branch = ctx.branch().to(ControlRecordingSink {
             pp_log: element_pp_log(ElementType::Other, "control-recorder", None),
             count: Arc::clone(&count),
@@ -218,7 +218,7 @@ fn playing_seek_uses_an_internal_pause_then_resumes() {
         pad: SrcPad::new("src"),
         seeks: Arc::clone(&seeks),
     };
-    let pipeline = Pipeline::new("playing-seek-preroll", source, |source, ctx| {
+    let (pipeline, ()) = Pipeline::new("playing-seek-preroll", source, |source, ctx| {
         let branch = ctx.branch().to(ControlRecordingSink {
             pp_log: element_pp_log(ElementType::Other, "control-recorder", None),
             count: Arc::clone(&count),
@@ -278,7 +278,7 @@ fn seek_repositions_and_playback_continues() {
     // of thing a weak `count > 0` assertion wouldn't have caught (see
     // `seek_reports_where_it_actually_landed_when_target_is_not_a_keyframe`
     // for how this was found).
-    let pipeline = Pipeline::new("test", source, |source, ctx| {
+    let (pipeline, ()) = Pipeline::new("test", source, |source, ctx| {
         let pacer = Pacer::new("pacer");
         let branch = ctx.branch().queue("q", 4).pipe(pacer).to(sink)?;
         ctx.attach(source, index, branch)?;
@@ -335,7 +335,7 @@ fn seek_reports_where_it_actually_landed_when_target_is_not_a_keyframe() {
 
     // Paced for the same reason as `seek_repositions_and_playback_continues`
     // — otherwise the file finishes before `seek()` is even called.
-    let pipeline = Pipeline::new("test", source, |source, ctx| {
+    let (pipeline, ()) = Pipeline::new("test", source, |source, ctx| {
         let pacer = Pacer::new("pacer");
         let branch = ctx.branch().queue("q", 4).pipe(pacer).to(NoOpSink {
             name: "noop".into(),
@@ -458,7 +458,7 @@ fn a_paused_seek_leaves_every_branch_holding_one_sample_at_the_target() {
     let video_samples = Arc::new(Mutex::new(Vec::new()));
     let audio_samples = Arc::new(Mutex::new(Vec::new()));
 
-    let pipeline = Pipeline::new("paused-av-seek", source, |source, ctx| {
+    let (pipeline, ()) = Pipeline::new("paused-av-seek", source, |source, ctx| {
         // Only the video branch is paced, which is the ordinary shape: an
         // audio renderer schedules itself against its own device clock.
         let video_branch = ctx
@@ -533,7 +533,7 @@ fn a_completed_tee_branch_does_not_starve_a_sibling_preroll() {
     let packets = Arc::new(AtomicUsize::new(0));
     let frames = Arc::new(Mutex::new(Vec::new()));
 
-    let pipeline = Pipeline::new("tee-preroll", source, |source, ctx| {
+    let (pipeline, ()) = Pipeline::new("tee-preroll", source, |source, ctx| {
         let packet_branch = ctx.branch().to(CountingSink {
             name: "packet-terminal".into(),
             count: Arc::clone(&packets),
@@ -605,7 +605,7 @@ fn accurate_seek_at_known_eof_selects_the_last_presentable_frame() {
     let time_base = source.stream_time_base(video.index).expect("video tb");
     let samples = Arc::new(Mutex::new(Vec::new()));
 
-    let pipeline = Pipeline::new("eof-preview", source, |source, ctx| {
+    let (pipeline, ()) = Pipeline::new("eof-preview", source, |source, ctx| {
         let branch = ctx
             .branch()
             .pipe(SwDecoder::new("decoder", params)?)
@@ -711,7 +711,7 @@ fn stopping_during_a_seek_does_not_wait_out_the_preroll_timeout() {
         pad: SrcPad::new("src"),
         sought: Arc::clone(&sought),
     };
-    let pipeline = Pipeline::new("stop-during-seek", source, |source, ctx| {
+    let (pipeline, ()) = Pipeline::new("stop-during-seek", source, |source, ctx| {
         let branch = ctx.branch().to(CountingSink {
             name: "sink".into(),
             count: Arc::clone(&seen),
@@ -800,9 +800,7 @@ fn detaching_a_branch_mid_seek_does_not_strand_its_preroll() {
         seeks: Arc::new(AtomicUsize::new(0)),
     };
 
-    let handle = Arc::new(Mutex::new(None));
-    let stash = Arc::clone(&handle);
-    let pipeline = Pipeline::new("detach-mid-seek", source, move |source, ctx| {
+    let (pipeline, tee) = Pipeline::new("detach-mid-seek", source, move |source, ctx| {
         let live = ctx.branch().to(CountingSink {
             name: "live".into(),
             count: Arc::clone(&seen),
@@ -812,11 +810,9 @@ fn detaching_a_branch_mid_seek_does_not_strand_its_preroll() {
             .branch(live)
             .build_dynamic()?;
         ctx.attach(source, 0, tee)?;
-        *stash.lock().unwrap() = Some(tee_handle);
-        Ok(())
+        Ok(tee_handle)
     })
     .expect("pipeline wiring");
-    let tee = handle.lock().unwrap().take().expect("tee handle");
 
     // A branch that can never take a preroll sample: the queue in front of it
     // parks because its terminal is never ready.
@@ -951,7 +947,7 @@ fn a_queued_branch_can_be_sought_after_it_has_played_to_its_end() {
         buffers: 3,
         owed: true,
     };
-    let pipeline = Pipeline::new("seek-after-end", source, |source, ctx| {
+    let (pipeline, ()) = Pipeline::new("seek-after-end", source, |source, ctx| {
         let branch = ctx.branch().queue("queue", 8).to(CountingSink {
             name: "sink".into(),
             count: Arc::clone(&seen),

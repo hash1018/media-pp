@@ -59,7 +59,7 @@ mod windows_example {
 
         let gpu = D3d12GpuContext::new().map_err(|e| media_pp::Error::Other(format!("{e:?}")))?;
 
-        let pipeline = Pipeline::new("d3d12-upload", source, |source, ctx| {
+        let (pipeline, ()) = Pipeline::new("d3d12-upload", source, |source, ctx| {
             // `Pixel::NV12` — the only layout `D3d12Upload`/`D3d12Renderer`'s
             // zero-copy path accepts.
             let scaler = SwScaler::to_format(

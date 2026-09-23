@@ -83,7 +83,7 @@ mod windows_example {
 
         let gpu = D3d11GpuContext::new(None).map_err(|error| Error::Other(format!("{error:?}")))?;
 
-        let pipeline = Pipeline::new("d3d11-scale-render", source, |source, ctx| {
+        let (pipeline, ()) = Pipeline::new("d3d11-scale-render", source, |source, ctx| {
             // The scaler consumes each decoder surface synchronously before
             // the queue. At most that one in-flight frame can be retained if
             // the output queue is full, so one extra D3D11VA surface covers

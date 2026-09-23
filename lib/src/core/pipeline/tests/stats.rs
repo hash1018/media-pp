@@ -81,7 +81,7 @@ fn element<'a>(
 fn every_stage_counts_every_buffer_it_was_handed() {
     const BUFFERS: usize = 40;
     let count = Arc::new(AtomicUsize::new(0));
-    let pipeline = Pipeline::new(
+    let (pipeline, ()) = Pipeline::new(
         "stats",
         BurstSource {
             pp_log: element_pp_log(ElementType::Other, "burst", None),
@@ -139,7 +139,7 @@ fn every_stage_counts_every_buffer_it_was_handed() {
 #[test]
 fn a_source_that_stopped_delivering_is_seen_to_have() {
     let count = Arc::new(AtomicUsize::new(0));
-    let pipeline = Pipeline::new(
+    let (pipeline, ()) = Pipeline::new(
         "stats-idle",
         BurstSource {
             pp_log: element_pp_log(ElementType::Other, "burst", None),
@@ -187,7 +187,7 @@ fn a_source_that_stopped_delivering_is_seen_to_have() {
 fn a_queue_that_drops_says_how_much() {
     const BUFFERS: usize = 60;
     let count = Arc::new(AtomicUsize::new(0));
-    let pipeline = Pipeline::new(
+    let (pipeline, ()) = Pipeline::new(
         "stats-drop",
         BurstSource {
             pp_log: element_pp_log(ElementType::Other, "burst", None),
@@ -285,8 +285,7 @@ fn a_runtime_branch_is_reported_while_it_exists_and_no_longer() {
     use crate::stats::ElementState;
 
     let initial = Arc::new(AtomicUsize::new(0));
-    let mut handle_slot = None;
-    let pipeline = Pipeline::new(
+    let (pipeline, handle) = Pipeline::new(
         "stats-tee",
         TestVideoSource::new("video", TestVideoOptions::default()),
         |source, ctx| {
@@ -299,12 +298,10 @@ fn a_runtime_branch_is_reported_while_it_exists_and_no_longer() {
                 .branch(first)
                 .build_dynamic()?;
             ctx.attach(source, 0, tee)?;
-            handle_slot = Some(handle);
-            Ok(())
+            Ok(handle)
         },
     )
     .unwrap();
-    let handle = handle_slot.expect("wire ran");
     pipeline.run().unwrap();
     wait_for(|| initial.load(Ordering::SeqCst) > 0);
 
@@ -407,19 +404,16 @@ fn a_runtime_branch_is_reported_while_it_exists_and_no_longer() {
 /// when read.
 #[test]
 fn attaching_and_detaching_without_reading_keeps_the_registry_bounded() {
-    let mut handle_slot = None;
-    let pipeline = Pipeline::new(
+    let (pipeline, handle) = Pipeline::new(
         "stats-churn",
         TestVideoSource::new("video", TestVideoOptions::default()),
         |source, ctx| {
             let (tee, handle) = TeeBuilder::new("tee", ctx.clone()).build_dynamic()?;
             ctx.attach(source, 0, tee)?;
-            handle_slot = Some(handle);
-            Ok(())
+            Ok(handle)
         },
     )
     .unwrap();
-    let handle = handle_slot.expect("wire ran");
     pipeline.run().unwrap();
 
     let baseline = pipeline.graph.registered_count();

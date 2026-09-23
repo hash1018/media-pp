@@ -847,7 +847,7 @@ fn a_demuxers_own_packets_reach_a_peer_and_decode() {
     // Unpaced deliberately: this sends as fast as the file reads and is
     // stopped as soon as the far side has decoded something, so the test
     // does not run for the length of whatever fixture it was given.
-    let send = Pipeline::new("demux-send", demuxer, move |source, ctx| {
+    let (send, ()) = Pipeline::new("demux-send", demuxer, move |source, ctx| {
         let branch = ctx.branch().queue("packets", 32).to(sink)?;
         ctx.attach(source, index, branch)?;
         Ok(())
@@ -867,7 +867,7 @@ fn a_demuxers_own_packets_reach_a_peer_and_decode() {
     )
     .expect("H.264 decoder should open");
     let (counter, decoded) = FrameCounter::new("decoded");
-    let receive = Pipeline::new("demux-recv", source, |source, ctx| {
+    let (receive, ()) = Pipeline::new("demux-recv", source, |source, ctx| {
         let branch = ctx.branch().pipe(decoder).to(counter)?;
         ctx.attach(source, 0, branch)?;
         Ok(())
@@ -1050,12 +1050,13 @@ fn wire_counting(source: WebRtcTrackSource, count: Arc<AtomicUsize>) -> Arc<Pipe
         count,
         pp_log: element_pp_log(ElementType::Other, "counter", None),
     };
-    Pipeline::new("test", source, |source, ctx| {
+    let (pipeline, ()) = Pipeline::new("test", source, |source, ctx| {
         let branch = ctx.branch().to(sink)?;
         ctx.attach(source, 0, branch)?;
         Ok(())
     })
-    .expect("test pipeline wiring must succeed")
+    .expect("test pipeline wiring must succeed");
+    pipeline
 }
 
 /// One H.264 `Direction::SendRecv` track, opened by `WebRtcHandle::add_track`
@@ -1170,7 +1171,7 @@ fn one_h264_sendrecv_track_carries_data_both_ways_with_the_declared_payload_type
     sink_b
         .set_source_parameters(&encoder.parameters())
         .expect("H.264 should be negotiated for peer-b's outbound half");
-    let send_b = Pipeline::new("peer-b-h264-send", video_source, |source, ctx| {
+    let (send_b, ()) = Pipeline::new("peer-b-h264-send", video_source, |source, ctx| {
         let branch = ctx.branch().pipe(encoder).to(sink_b)?;
         ctx.attach(source, 0, branch)?;
         Ok(())
@@ -1202,7 +1203,7 @@ fn one_h264_sendrecv_track_carries_data_both_ways_with_the_declared_payload_type
     )
     .expect("peer-a H.264 decoder should open");
     let (counter, decoded_by_a) = FrameCounter::new("decoded-by-a");
-    let track_pipeline_a = Pipeline::new("peer-a-h264-recv", source_a, |source, ctx| {
+    let (track_pipeline_a, ()) = Pipeline::new("peer-a-h264-recv", source_a, |source, ctx| {
         let branch = ctx.branch().pipe(decoder).to(counter)?;
         ctx.attach(source, 0, branch)?;
         Ok(())

@@ -174,7 +174,7 @@ fn finished_count(messages: &[BusMessage]) -> usize {
 /// the pipeline's rather than any element's.
 #[test]
 fn finished_waits_for_every_terminal_of_a_fan_out() {
-    let pipeline = Pipeline::new("finished-fan-out", EndingSource::new(4), |source, ctx| {
+    let (pipeline, ()) = Pipeline::new("finished-fan-out", EndingSource::new(4), |source, ctx| {
         let fast = ctx.branch().to(EndingSink::new("fast"))?;
         let slow = ctx.branch().queue("slow-queue", 8).to(EndingSink {
             eos_delay: Duration::from_millis(150),
@@ -221,12 +221,8 @@ fn finished_waits_for_every_terminal_of_a_fan_out() {
 /// not count as one that ended.
 #[test]
 fn detaching_the_branch_that_failed_to_end_finishes_the_rest() {
-    let handle = Arc::new(Mutex::new(None));
-    let failing = Arc::new(Mutex::new(None));
-    let pipeline = Pipeline::new("finished-detach", EndingSource::new(2), {
-        let handle = Arc::clone(&handle);
-        let failing = Arc::clone(&failing);
-        move |source, ctx| {
+    let (pipeline, (tee, broken)) =
+        Pipeline::new("finished-detach", EndingSource::new(2), |source, ctx| {
             let (tee, tee_handle) = TeeBuilder::new("tee", ctx.clone()).build_dynamic()?;
             ctx.attach(source, 0, tee)?;
             tee_handle.attach(ctx.branch().to(EndingSink::new("fine"))?)?;
@@ -235,12 +231,9 @@ fn detaching_the_branch_that_failed_to_end_finishes_the_rest() {
                     fail_eos: true,
                     ..EndingSink::new("broken")
                 })?)?;
-            *failing.lock().unwrap() = Some(broken);
-            *handle.lock().unwrap() = Some(tee_handle);
-            Ok(())
-        }
-    })
-    .expect("wiring");
+            Ok((tee_handle, broken))
+        })
+        .expect("wiring");
 
     pipeline.run().unwrap();
     // The broken branch reports its failure; nothing reports Finished.
@@ -268,8 +261,6 @@ fn detaching_the_branch_that_failed_to_end_finishes_the_rest() {
         "a terminal that failed its Eos has not ended: {before:?}"
     );
 
-    let tee = handle.lock().unwrap().take().expect("tee handle");
-    let broken = failing.lock().unwrap().take().expect("branch id");
     tee.detach(broken).expect("detach the broken branch");
     let after = read_until_finished(&pipeline, Duration::from_secs(5));
     pipeline.stop();
@@ -285,7 +276,7 @@ fn detaching_the_branch_that_failed_to_end_finishes_the_rest() {
 /// — and then it is, and says so a second time.
 #[test]
 fn a_seek_after_the_end_finishes_again_at_the_new_end() {
-    let pipeline = Pipeline::new("finished-seek", EndingSource::new(3), |source, ctx| {
+    let (pipeline, ()) = Pipeline::new("finished-seek", EndingSource::new(3), |source, ctx| {
         let branch = ctx.branch().queue("queue", 8).to(EndingSink::new("sink"))?;
         ctx.attach(source, 0, branch)?;
         Ok(())

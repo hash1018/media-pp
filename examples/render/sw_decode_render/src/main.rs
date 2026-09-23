@@ -78,7 +78,7 @@ mod windows_example {
 
         let gpu = D3d12GpuContext::new().map_err(|e| Error::Other(format!("{e:?}")))?;
 
-        let pipeline = Pipeline::new("sw-decode-render", source, |source, ctx| {
+        let (pipeline, ()) = Pipeline::new("sw-decode-render", source, |source, ctx| {
             let decoder = SwDecoder::new("decoder", params)?;
             let pacer = Pacer::new("pacer");
             let renderer =
@@ -165,7 +165,7 @@ mod linux_example {
         let cuda = CudaDevice::new()?;
         let gpu = VulkanGpuContext::new(target.display).map_err(Error::Other)?;
 
-        let pipeline = Pipeline::new("sw-decode-render", source, |source, ctx| {
+        let (pipeline, ()) = Pipeline::new("sw-decode-render", source, |source, ctx| {
             let decoder = SwDecoder::new("decoder", params)?;
             let pacer = Pacer::new("pacer");
             let scaler = SwScaler::new(

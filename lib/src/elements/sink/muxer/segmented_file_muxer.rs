@@ -558,7 +558,7 @@ mod tests {
             .take(video)
             .expect("the muxer's own track");
 
-        let pipeline = Pipeline::new("segmented-test", video_source, |source, ctx| {
+        let (pipeline, ()) = Pipeline::new("segmented-test", video_source, |source, ctx| {
             let branch = ctx.branch().pipe(encoder).to(sink)?;
             ctx.attach(source, 0, branch)?;
             Ok(())
@@ -647,7 +647,7 @@ mod tests {
             .expect("open must succeed")
             .take(video)
             .expect("the muxer's own track");
-        let pipeline = Pipeline::new("segmented-rebase-test", video_source, |source, ctx| {
+        let (pipeline, ()) = Pipeline::new("segmented-rebase-test", video_source, |source, ctx| {
             let branch = ctx.branch().pipe(encoder).to(sink)?;
             ctx.attach(source, 0, branch)?;
             Ok(())
@@ -730,7 +730,7 @@ mod tests {
             .take(video)
             .expect("the muxer's own track");
 
-        let pipeline = Pipeline::new("segmented-size-test", video_source, |source, ctx| {
+        let (pipeline, ()) = Pipeline::new("segmented-size-test", video_source, |source, ctx| {
             let branch = ctx.branch().pipe(encoder).to(sink)?;
             ctx.attach(source, 0, branch)?;
             Ok(())
@@ -878,12 +878,13 @@ mod tests {
             .take(video)
             .expect("the muxer's own track");
 
-        let pipeline = Pipeline::new("segmented-release-test", video_source, |source, ctx| {
-            let branch = ctx.branch().pipe(encoder).to(sink)?;
-            ctx.attach(source, 0, branch)?;
-            Ok(())
-        })
-        .expect("test pipeline wiring must succeed");
+        let (pipeline, ()) =
+            Pipeline::new("segmented-release-test", video_source, |source, ctx| {
+                let branch = ctx.branch().pipe(encoder).to(sink)?;
+                ctx.attach(source, 0, branch)?;
+                Ok(())
+            })
+            .expect("test pipeline wiring must succeed");
         pipeline.run().unwrap();
 
         // Wait (bounded) for at least one rotation — the pipeline is

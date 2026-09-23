@@ -315,7 +315,7 @@ mod windows_example {
         window_height: u32,
         shutdown: &Shutdown,
     ) -> media_pp::Result<()> {
-        let pipeline = Pipeline::new("screen-preview-gpu", source, |source, ctx| {
+        let (pipeline, ()) = Pipeline::new("screen-preview-gpu", source, |source, ctx| {
             let renderer = render_common::d3d11_window_renderer(
                 "renderer",
                 gpu,
@@ -438,7 +438,7 @@ mod linux_example {
         let gpu = VulkanGpuContext::new(target.display).map_err(media_pp::Error::Other)?;
 
         let (width, height) = (format.width, format.height);
-        let pipeline = Pipeline::new("screen-preview-gpu", source, |source, ctx| {
+        let (pipeline, ()) = Pipeline::new("screen-preview-gpu", source, |source, ctx| {
             // The capture's own size, not a rounded one: the converter is
             // fixed-size, so anything else would reject every frame. An odd
             // capture is refused here rather than at the first frame — see

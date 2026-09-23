@@ -60,7 +60,7 @@ mod example {
 
         println!("publishing to {url} (the RTSP server must already be running) ...");
 
-        let pipeline = Pipeline::new("rtsp-publish", source, |source, ctx| {
+        let (pipeline, ()) = Pipeline::new("rtsp-publish", source, |source, ctx| {
             // Every track must be registered before `open`, which is what
             // announces them all in one SDP.
             let mut muxer = RtspMuxer::create(&url, RtspTransport::Tcp)?;

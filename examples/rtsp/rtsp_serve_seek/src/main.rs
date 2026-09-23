@@ -64,7 +64,7 @@ mod example {
 
         println!("publishing to {url} (the RTSP server must already be running) ...");
 
-        let pipeline = Pipeline::new("rtsp-publish-seek", source, |source, ctx| {
+        let (pipeline, ()) = Pipeline::new("rtsp-publish-seek", source, |source, ctx| {
             let mut muxer = RtspMuxer::create(&url, RtspTransport::Tcp)?;
             let video = muxer.add_stream("video", video_params, video_time_base)?;
             let audio = match audio_track {

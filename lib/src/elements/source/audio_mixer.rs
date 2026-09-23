@@ -46,6 +46,12 @@ pub enum AudioMixerError {
     /// An input sink received a buffer other than decoded audio or end-of-stream.
     #[error("AudioMixer inputs only accept Audio or Eos buffers, got {0}")]
     UnsupportedBuffer(&'static str),
+
+    /// The mixer this handle belongs to has stopped, so there is nothing
+    /// left to add to. Returned by the handle's `add_*` methods in place of
+    /// an input nothing would ever read.
+    #[error("the mixer has stopped")]
+    Stopped,
 }
 
 /// Construction-time options for [`AudioMixer::new`] — the mixer's fixed
@@ -263,7 +269,8 @@ impl MixerHandle {
     /// a detached branch terminal. Build and attach it inside that source's
     /// own `Pipeline::new` wiring closure — a
     /// *different* pipeline/thread than this mixer's own, which is exactly
-    /// the point). `None` once the mixer itself is gone. Calling this
+    /// the point). [`AudioMixerError::Stopped`] once the mixer itself is
+    /// gone. Calling this
     /// again with a name already in use replaces that input outright
     /// (whatever it had buffered is dropped) rather than erroring — same
     /// "just do what was asked" spirit as `HashMap::insert`. A sink from
@@ -273,8 +280,11 @@ impl MixerHandle {
     /// The input endpoint appears in the upstream source pipeline's graph
     /// when attached through [`crate::element::Context::attach`]. The graph
     /// intentionally does not invent a cross-pipeline edge to the mixer.
-    pub fn add_source(&self, name: impl Into<String>) -> Option<Box<dyn Sink>> {
-        let shared = self.shared.upgrade()?;
+    pub fn add_source(
+        &self,
+        name: impl Into<String>,
+    ) -> std::result::Result<Box<dyn Sink>, AudioMixerError> {
+        let shared = self.shared.upgrade().ok_or(AudioMixerError::Stopped)?;
         let name: Arc<str> = name.into().into();
         let id = shared.next_input_id.fetch_add(1, Ordering::Relaxed);
         shared.inputs.lock().unwrap().insert(
@@ -286,7 +296,7 @@ impl MixerHandle {
                 eos: false,
             },
         );
-        Some(Box::new(MixerInputSink {
+        Ok(Box::new(MixerInputSink {
             name: name.clone(),
             id,
             pp_log: element_pp_log(ElementType::AudioMixerInput, &name, None),
@@ -957,7 +967,7 @@ mod tests {
             pp_log: element_pp_log(ElementType::Other, "stereo-recorder", None),
         };
 
-        let pipeline = Pipeline::new("mixer-stereo-test", mixer, |source, ctx| {
+        let (pipeline, ()) = Pipeline::new("mixer-stereo-test", mixer, |source, ctx| {
             let branch = ctx.branch().to(sink)?;
             ctx.attach(source, 0, branch)?;
             Ok(())
@@ -1026,7 +1036,7 @@ mod tests {
             pp_log: element_pp_log(ElementType::Other, "recorder", None),
         };
 
-        let pipeline = Pipeline::new("mixer-test", mixer, |source, ctx| {
+        let (pipeline, ()) = Pipeline::new("mixer-test", mixer, |source, ctx| {
             let branch = ctx.branch().to(sink)?;
             ctx.attach(source, 0, branch)?;
             Ok(())
@@ -1090,7 +1100,7 @@ mod tests {
             seen: seen.clone(),
             pp_log: element_pp_log(ElementType::Other, "recorder", None),
         };
-        let pipeline = Pipeline::new("mixer-test-2", mixer, |source, ctx| {
+        let (pipeline, ()) = Pipeline::new("mixer-test-2", mixer, |source, ctx| {
             let branch = ctx.branch().to(sink)?;
             ctx.attach(source, 0, branch)?;
             Ok(())
@@ -1145,7 +1155,7 @@ mod tests {
             seen: seen.clone(),
             pp_log: element_pp_log(ElementType::Other, "recorder", None),
         };
-        let pipeline = Pipeline::new("mixer-test-idle", mixer, |source, ctx| {
+        let (pipeline, ()) = Pipeline::new("mixer-test-idle", mixer, |source, ctx| {
             let branch = ctx.branch().to(sink)?;
             ctx.attach(source, 0, branch)?;
             Ok(())
@@ -1191,7 +1201,7 @@ mod tests {
             seen: seen.clone(),
             pp_log: element_pp_log(ElementType::Other, "recorder", None),
         };
-        let pipeline = Pipeline::new("mixer-test-3", mixer, |source, ctx| {
+        let (pipeline, ()) = Pipeline::new("mixer-test-3", mixer, |source, ctx| {
             let branch = ctx.branch().to(sink)?;
             ctx.attach(source, 0, branch)?;
             Ok(())
@@ -1227,6 +1237,27 @@ mod tests {
     /// operation through that stale sink must be inert rather than being
     /// redirected to (or deleting) the replacement merely because the map
     /// key is the same.
+    /// A handle that outlives its mixer says so by name, as a
+    /// compositor's does, rather than with a `None` the caller has to
+    /// invent an error for.
+    #[test]
+    fn adding_a_source_to_a_stopped_mixer_is_refused_by_name() {
+        let (mixer, handle) = AudioMixer::new(
+            "mixer",
+            AudioMixerOptions {
+                sample_rate: 48000,
+                channels: 1,
+            },
+        );
+        drop(mixer);
+
+        assert!(matches!(
+            handle.add_source("late"),
+            Err(AudioMixerError::Stopped)
+        ));
+        assert_eq!(handle.source_count(), 0);
+    }
+
     #[test]
     fn replacing_an_input_by_name_invalidates_the_stale_sink() {
         let (_mixer, handle) = AudioMixer::new(
@@ -1335,7 +1366,7 @@ mod tests {
             seen: seen.clone(),
             pp_log: element_pp_log(ElementType::Other, "shapes", None),
         };
-        let pipeline = Pipeline::new("mixer-test-rate", mixer, |source, ctx| {
+        let (pipeline, ()) = Pipeline::new("mixer-test-rate", mixer, |source, ctx| {
             let branch = ctx.branch().to(sink)?;
             ctx.attach(source, 0, branch)?;
             Ok(())
@@ -1595,7 +1626,7 @@ mod tests {
                     channels: 2,
                 },
             );
-            let pipeline = Pipeline::new("mix", mixer, move |source, context| {
+            let (pipeline, ()) = Pipeline::new("mix", mixer, move |source, context| {
                 let branch = context.branch().to(listener)?;
                 context.attach(source, 0, branch)?;
                 Ok(())
@@ -1631,7 +1662,7 @@ mod tests {
                 .add_source("fixture".to_owned())
                 .expect("the mixer is running");
 
-            let pipeline = Pipeline::new("playback", demuxer, move |source, context| {
+            let (pipeline, ()) = Pipeline::new("playback", demuxer, move |source, context| {
                 let branch = context
                     .branch()
                     .pipe(decoder)
@@ -1728,7 +1759,7 @@ mod tests {
             let sink = handle
                 .add_source("tone".to_owned())
                 .expect("the mixer is running");
-            let source = Pipeline::new("tone", tone, move |source, context| {
+            let (source, ()) = Pipeline::new("tone", tone, move |source, context| {
                 let branch = context.branch().to(sink)?;
                 context.attach(source, 0, branch)?;
                 Ok(())

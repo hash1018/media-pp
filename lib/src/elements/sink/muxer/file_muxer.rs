@@ -661,7 +661,7 @@ mod tests {
             .take(track)
             .expect("the muxer's own track");
 
-        let pipeline = Pipeline::new("remux", demuxer, move |source, context| {
+        let (pipeline, ()) = Pipeline::new("remux", demuxer, move |source, context| {
             let branch = context.branch().to(sink)?;
             context.attach(source, video, branch)?;
             Ok(())
@@ -858,7 +858,7 @@ mod tests {
             ffmpeg::software::scaling::Flags::BILINEAR,
         );
 
-        let pipeline = Pipeline::new("transcode", demuxer, move |source, context| {
+        let (pipeline, ()) = Pipeline::new("transcode", demuxer, move |source, context| {
             let picture = context
                 .branch()
                 .pipe(video_decoder)

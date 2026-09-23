@@ -54,7 +54,7 @@ mod example {
         let (app_source, handle) = AppSource::new("app-source", 8);
         let (frame_counter, count) = FrameCounter::new("frame-counter");
 
-        let pipeline = Pipeline::new("app-source", app_source, |source, ctx| {
+        let (pipeline, ()) = Pipeline::new("app-source", app_source, |source, ctx| {
             let decoder = SwDecoder::new("decoder", params)?;
             let branch = ctx
                 .branch()

@@ -45,7 +45,7 @@ mod example {
 
         let (counter, frame_count) = FrameCounter::new("counter");
 
-        let pipeline = Pipeline::new("pace", source, |source, ctx| {
+        let (pipeline, ()) = Pipeline::new("pace", source, |source, ctx| {
             let decoder = SwDecoder::new("decoder", params)?;
             let pacer = Pacer::new("pacer");
             let branch = ctx

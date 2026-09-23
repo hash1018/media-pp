@@ -26,7 +26,7 @@ fn pipeline_logs_topology_eos_and_control_at_each_boundary() {
         log::init("flow", &log_path, Level::Trace, 1).expect("private file logger must initialize");
 
     let (source, handle) = AppSource::new("source", 4);
-    let pipeline = Pipeline::new("flow-test", source, |source, context| {
+    let (pipeline, ()) = Pipeline::new("flow-test", source, |source, context| {
         let branch = context
             .branch()
             .queue("queue", 4)

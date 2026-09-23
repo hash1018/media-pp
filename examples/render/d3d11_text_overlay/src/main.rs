@@ -103,9 +103,7 @@ mod windows_example {
         let mut background_layer =
             VideoLayer::new(VideoRect::new(0, 0, output_width, output_height));
         background_layer.fit = VideoFit::Cover;
-        let background_input = compositor_handle
-            .add_source("background", background_layer)?
-            .expect("compositor is alive");
+        let background_input = compositor_handle.add_source("background", background_layer)?;
         let background_sink = background_input.sink;
 
         // `D3d11TextLayerHandle` never receives `Pipeline` frames — no `Sink` to wire up,
@@ -119,9 +117,7 @@ mod windows_example {
         text_layer.font_size = 48.0;
         text_layer.x = 20;
         text_layer.y = 20;
-        let overlay = compositor_handle
-            .add_text_layer("clock", text_layer)?
-            .expect("compositor is alive");
+        let overlay = compositor_handle.add_text_layer("clock", text_layer)?;
         overlay.set_text("t=0s")?;
 
         let background_source = TestVideoSource::new(
@@ -132,7 +128,7 @@ mod windows_example {
                 framerate: frame_rate,
             },
         );
-        let background_pipeline =
+        let (background_pipeline, ()) =
             Pipeline::new("background-input", background_source, |source, ctx| {
                 let scaler = SwScaler::new(
                     "to-nv12",
@@ -163,26 +159,27 @@ mod windows_example {
         let track = muxer.add_stream("video", encoder.parameters(), encoder.time_base())?;
         let muxer_sink = muxer.open()?.take(track)?;
 
-        let output_pipeline = Pipeline::new("composited-output", compositor, |source, ctx| {
-            let download = D3d11Download::new("download", gpu.device(), gpu.context())?;
-            let to_yuv = SwScaler::new(
-                "to-yuv",
-                ffmpeg::format::Pixel::YUV420P,
-                output_width,
-                output_height,
-                ffmpeg::software::scaling::Flags::BILINEAR,
-            );
-            let branch = ctx
-                .branch()
-                .queue("record", 4)
-                .pipe(download)
-                .pipe(to_yuv)
-                .queue("encode-frames", 8)
-                .pipe(encoder)
-                .to(muxer_sink)?;
-            ctx.attach(source, 0, branch)?;
-            Ok(())
-        })?;
+        let (output_pipeline, ()) =
+            Pipeline::new("composited-output", compositor, |source, ctx| {
+                let download = D3d11Download::new("download", gpu.device(), gpu.context())?;
+                let to_yuv = SwScaler::new(
+                    "to-yuv",
+                    ffmpeg::format::Pixel::YUV420P,
+                    output_width,
+                    output_height,
+                    ffmpeg::software::scaling::Flags::BILINEAR,
+                );
+                let branch = ctx
+                    .branch()
+                    .queue("record", 4)
+                    .pipe(download)
+                    .pipe(to_yuv)
+                    .queue("encode-frames", 8)
+                    .pipe(encoder)
+                    .to(muxer_sink)?;
+                ctx.attach(source, 0, branch)?;
+                Ok(())
+            })?;
 
         output_pipeline.run()?;
         background_pipeline.run()?;

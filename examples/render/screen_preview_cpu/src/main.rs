@@ -93,7 +93,7 @@ mod windows_example {
 
         let gpu = D3d12GpuContext::new().map_err(|e| media_pp::Error::Other(format!("{e:?}")))?;
 
-        let pipeline = Pipeline::new("screen-preview-cpu", source, |source, ctx| {
+        let (pipeline, ()) = Pipeline::new("screen-preview-cpu", source, |source, ctx| {
             // Converts the captured `Pixel::BGRA` desktop frames down to the
             // window's own size as `Pixel::NV12` in one pass — the layout
             // `D3d12Upload` writes, and the only one it accepts.
@@ -216,7 +216,7 @@ mod linux_example {
         let cuda = CudaDevice::new()?;
         let gpu = VulkanGpuContext::new(target.display).map_err(media_pp::Error::Other)?;
 
-        let pipeline = Pipeline::new("screen-preview-cpu", source, |source, ctx| {
+        let (pipeline, ()) = Pipeline::new("screen-preview-cpu", source, |source, ctx| {
             let scaler = SwScaler::new(
                 "to-nv12",
                 ffmpeg::format::Pixel::NV12,

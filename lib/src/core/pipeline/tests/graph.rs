@@ -36,7 +36,7 @@ fn pipeline_id_is_whatever_new_was_given() {
         .expect("test video has a video stream");
     let index = video.index;
 
-    let pipeline = Pipeline::new("my-pipeline", source, |source, ctx| {
+    let (pipeline, ()) = Pipeline::new("my-pipeline", source, |source, ctx| {
         let branch = ctx.branch().to(NoOpSink {
             name: "noop".into(),
             pp_log: element_pp_log(ElementType::Other, "noop", None),
@@ -63,7 +63,7 @@ fn topology_lists_source_through_terminal_per_branch() {
         .expect("test video has a video stream");
     let index = video.index;
 
-    let pipeline = Pipeline::new("test", source, |source, ctx| {
+    let (pipeline, ()) = Pipeline::new("test", source, |source, ctx| {
         let pacer = Pacer::new("pacer");
         let branch = ctx.branch().queue("q", 4).pipe(pacer).to(NoOpSink {
             name: "noop".into(),
@@ -108,7 +108,7 @@ fn topology_attributes_tee_branches_to_the_tee_not_the_source() {
         .expect("test video has a video stream");
     let index = video.index;
 
-    let pipeline = Pipeline::new("test", source, |source, ctx| {
+    let (pipeline, ()) = Pipeline::new("test", source, |source, ctx| {
         let branch_a = ctx.branch().to(NoOpSink {
             name: "sink-a".into(),
             pp_log: element_pp_log(ElementType::Other, "sink-a", None),
@@ -182,7 +182,7 @@ fn topology_attributes_a_fan_out_to_the_stage_that_feeds_it() {
         .expect("test video has a video stream");
     let index = video.index;
 
-    let pipeline = Pipeline::new("test", source, |source, ctx| {
+    let (pipeline, ()) = Pipeline::new("test", source, |source, ctx| {
         let branch_a = ctx.branch().to(NoOpSink {
             name: "sink-a".into(),
             pp_log: element_pp_log(ElementType::Other, "sink-a", None),
@@ -250,16 +250,13 @@ fn topology_forgets_a_branch_once_it_is_removed_from_the_tee() {
         .expect("test video has a video stream");
     let index = video.index;
 
-    let mut tee_handle_slot = None;
-    let pipeline = Pipeline::new("test", source, |source, ctx| {
+    let (pipeline, tee_handle) = Pipeline::new("test", source, |source, ctx| {
         let (tee_branch, tee_handle) = TeeBuilder::new("tee", ctx.clone()).build_dynamic()?;
         ctx.attach(source, index, tee_branch)?;
-        tee_handle_slot = Some(tee_handle);
-        Ok(())
+        Ok(tee_handle)
     })
     .expect("test pipeline wiring must succeed");
 
-    let tee_handle = tee_handle_slot.expect("wire ran");
     let branch_a = tee_handle
         .branch()
         .expect("tee is alive")
@@ -302,16 +299,13 @@ fn remove_branch_containing_resolves_through_a_queue_to_the_tee_attached_root() 
         .expect("test video has a video stream");
     let index = video.index;
 
-    let mut tee_handle_slot = None;
-    let pipeline = Pipeline::new("test", source, |source, ctx| {
+    let (pipeline, tee_handle) = Pipeline::new("test", source, |source, ctx| {
         let (tee_branch, tee_handle) = TeeBuilder::new("tee", ctx.clone()).build_dynamic()?;
         ctx.attach(source, index, tee_branch)?;
-        tee_handle_slot = Some(tee_handle);
-        Ok(())
+        Ok(tee_handle)
     })
     .expect("test pipeline wiring must succeed");
 
-    let tee_handle = tee_handle_slot.expect("wire ran");
     let branch_a = tee_handle
         .branch()
         .expect("tee is alive")
@@ -363,16 +357,13 @@ fn topology_stays_correct_with_dozens_of_branches_added_and_then_removed() {
     let index = video.index;
 
     const N: usize = 30;
-    let mut tee_handle_slot = None;
-    let pipeline = Pipeline::new("test", source, |source, ctx| {
+    let (pipeline, tee_handle) = Pipeline::new("test", source, |source, ctx| {
         let (tee_branch, tee_handle) = TeeBuilder::new("tee", ctx.clone()).build_dynamic()?;
         ctx.attach(source, index, tee_branch)?;
-        tee_handle_slot = Some(tee_handle);
-        Ok(())
+        Ok(tee_handle)
     })
     .expect("test pipeline wiring must succeed");
 
-    let tee_handle = tee_handle_slot.expect("wire ran");
     let mut branch_ids = Vec::new();
     for i in 0..N {
         let name: Arc<str> = format!("sink-{i}").into();
@@ -416,7 +407,7 @@ fn detached_branch_never_appears_in_topology() {
     let Some(path) = try_test_video() else { return };
     let (source, _) = FileDemuxer::open("demux", &path).expect("open test video");
 
-    let pipeline = Pipeline::new("test", source, |_source, ctx| {
+    let (pipeline, ()) = Pipeline::new("test", source, |_source, ctx| {
         let detached = ctx.branch().to(NoOpSink {
             name: "never-attached".into(),
             pp_log: element_pp_log(ElementType::Other, "never-attached", None),
@@ -439,15 +430,12 @@ fn duplicate_names_are_independent_when_detaching_by_branch_id() {
         .find(|stream| stream.kind == ffmpeg_next::media::Type::Video)
         .expect("test video has a video stream")
         .index;
-    let mut handle_slot = None;
-    let pipeline = Pipeline::new("test", source, |source, ctx| {
+    let (pipeline, handle) = Pipeline::new("test", source, |source, ctx| {
         let (tee_branch, handle) = TeeBuilder::new("tee", ctx.clone()).build_dynamic()?;
         ctx.attach(source, index, tee_branch)?;
-        handle_slot = Some(handle);
-        Ok(())
+        Ok(handle)
     })
     .expect("test pipeline wiring must succeed");
-    let handle = handle_slot.expect("wire ran");
 
     let make_branch = || {
         handle
@@ -478,15 +466,12 @@ fn dynamic_attach_and_detach_each_publish_one_graph_revision() {
         .find(|stream| stream.kind == ffmpeg_next::media::Type::Video)
         .expect("test video has a video stream")
         .index;
-    let mut handle_slot = None;
-    let pipeline = Pipeline::new("test", source, |source, ctx| {
+    let (pipeline, handle) = Pipeline::new("test", source, |source, ctx| {
         let (tee_branch, handle) = TeeBuilder::new("tee", ctx.clone()).build_dynamic()?;
         ctx.attach(source, index, tee_branch)?;
-        handle_slot = Some(handle);
-        Ok(())
+        Ok(handle)
     })
     .expect("test pipeline wiring must succeed");
-    let handle = handle_slot.expect("wire ran");
     let before = pipeline.graph().revision;
     let detached = handle
         .branch()
@@ -542,15 +527,12 @@ fn dynamic_attach_is_rejected_during_a_timeline_operation() {
         .find(|stream| stream.kind == ffmpeg::media::Type::Video)
         .expect("test video has a video stream")
         .index;
-    let mut handle = None;
-    let pipeline = Pipeline::new("attach-during-seek", source, |source, ctx| {
+    let (pipeline, handle) = Pipeline::new("attach-during-seek", source, |source, ctx| {
         let (tee, tee_handle) = TeeBuilder::new("tee", ctx.clone()).build_dynamic()?;
         ctx.attach(source, index, tee)?;
-        handle = Some(tee_handle);
-        Ok(())
+        Ok(tee_handle)
     })
     .expect("pipeline wiring");
-    let handle = handle.expect("tee handle");
     let branch = handle
         .branch()
         .expect("tee alive")
@@ -579,8 +561,7 @@ fn tee_handle_changes_branches_after_the_pipeline_starts() {
     let source = TestVideoSource::new("video", TestVideoOptions::default());
     let initial_count = Arc::new(AtomicUsize::new(0));
     let dynamic_count = Arc::new(AtomicUsize::new(0));
-    let mut handle_slot = None;
-    let pipeline = Pipeline::new("runtime-tee-test", source, |source, ctx| {
+    let (pipeline, handle) = Pipeline::new("runtime-tee-test", source, |source, ctx| {
         let initial_branch = ctx.branch().to(CountingSink {
             name: "initial".into(),
             count: initial_count.clone(),
@@ -590,11 +571,9 @@ fn tee_handle_changes_branches_after_the_pipeline_starts() {
             .branch(initial_branch)
             .build_dynamic()?;
         ctx.attach(source, 0, tee_branch)?;
-        handle_slot = Some(handle);
-        Ok(())
+        Ok(handle)
     })
     .expect("test pipeline wiring must succeed");
-    let handle = handle_slot.expect("wire ran");
 
     pipeline.run().unwrap();
     thread::sleep(Duration::from_millis(75));
@@ -639,7 +618,7 @@ fn bus_messages_carry_the_posting_elements_stable_graph_id() {
         .find(|stream| stream.kind == ffmpeg_next::media::Type::Video)
         .expect("test video has a video stream")
         .index;
-    let pipeline = Pipeline::new("test", source, |source, ctx| {
+    let (pipeline, ()) = Pipeline::new("test", source, |source, ctx| {
         let branch = ctx.branch().to(NoOpSink {
             name: "stable-id-sink".into(),
             pp_log: element_pp_log(ElementType::Other, "stable-id-sink", None),
@@ -754,7 +733,7 @@ impl Sink for AlwaysFailingSink {
 /// which did nothing wrong.
 #[test]
 fn a_failure_deep_in_a_chain_is_reported_under_the_element_that_raised_it() {
-    let pipeline = Pipeline::new(
+    let (pipeline, ()) = Pipeline::new(
         "origin",
         TestVideoSource::new("source", TestVideoOptions::default()),
         |source, context| {

@@ -87,7 +87,7 @@ mod windows_example {
         let track = muxer.add_stream("video", encoder.parameters(), encoder.time_base())?;
         let muxer_sink = muxer.open()?.take(track)?;
 
-        let pipeline = Pipeline::new("nvenc-record", source, |source, ctx| {
+        let (pipeline, ()) = Pipeline::new("nvenc-record", source, |source, ctx| {
             // AppSource emits YUV420P on the CPU, so this one SwScaler is the
             // only format conversion in the graph; the upload requires NV12
             // and everything downstream of it is GPU-resident.

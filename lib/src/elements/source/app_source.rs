@@ -310,12 +310,13 @@ mod tests {
             count,
             pp_log: element_pp_log(ElementType::Other, "counter", None),
         };
-        Pipeline::new("test", source, |source, ctx| {
+        let (pipeline, ()) = Pipeline::new("test", source, |source, ctx| {
             let branch = ctx.branch().to(sink)?;
             ctx.attach(source, 0, branch)?;
             Ok(())
         })
-        .expect("test pipeline wiring must succeed")
+        .expect("test pipeline wiring must succeed");
+        pipeline
     }
 
     #[test]

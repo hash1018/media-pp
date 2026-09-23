@@ -177,7 +177,7 @@ mod example {
         let video = source.best(media::Type::Video)?;
         let params = video.parameters.clone();
 
-        let pipeline = Pipeline::new("detect", source, |source, ctx| {
+        let (pipeline, ()) = Pipeline::new("detect", source, |source, ctx| {
             let decoder = SwDecoder::new("decoder", params)?;
             let scaler =
                 SwScaler::new("scaler", DST_FORMAT, DST_WIDTH, DST_HEIGHT, Flags::BILINEAR);

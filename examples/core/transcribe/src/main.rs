@@ -253,7 +253,7 @@ mod example {
             waiting.push("video");
         }
 
-        let pipeline = Pipeline::new("transcribe", source, move |source, ctx| {
+        let (pipeline, ()) = Pipeline::new("transcribe", source, move |source, ctx| {
             if let Some((index, sink)) = video_out {
                 let branch = ctx.branch().to(sink)?;
                 ctx.attach(source, index, branch)?;

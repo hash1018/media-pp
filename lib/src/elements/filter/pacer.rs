@@ -829,7 +829,7 @@ mod tests {
         });
 
         let started = Instant::now();
-        let pipeline = Pipeline::new("paced-reorder", demuxer, move |source, context| {
+        let (pipeline, ()) = Pipeline::new("paced-reorder", demuxer, move |source, context| {
             let branch = context.branch().pipe(Pacer::new("pacer")).to(counter)?;
             context.attach(source, video, branch)?;
             Ok(())

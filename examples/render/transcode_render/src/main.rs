@@ -77,7 +77,7 @@ mod windows_example {
 
         let gpu = D3d12GpuContext::new().map_err(|e| media_pp::Error::Other(format!("{e:?}")))?;
 
-        let pipeline = Pipeline::new("transcode-render", source, |source, ctx| {
+        let (pipeline, ()) = Pipeline::new("transcode-render", source, |source, ctx| {
             let encoder = SwEncoder::new(
                 "encoder",
                 SwEncoderOptions {
@@ -185,7 +185,7 @@ mod linux_example {
         let cuda = CudaDevice::new()?;
         let gpu = VulkanGpuContext::new(target.display).map_err(media_pp::Error::Other)?;
 
-        let pipeline = Pipeline::new("transcode-render", source, |source, ctx| {
+        let (pipeline, ()) = Pipeline::new("transcode-render", source, |source, ctx| {
             let encoder = SwEncoder::new(
                 "encoder",
                 SwEncoderOptions {

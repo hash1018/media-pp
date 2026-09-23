@@ -48,7 +48,7 @@ fn main() -> media_pp::Result<()> {
     media_pp::init()?;
     let source = TestVideoSource::new("source", TestVideoOptions::default());
     let (counter, frames) = FrameCounter::new("counter");
-    let pipeline = Pipeline::new("demo", source, |source, ctx| {
+    let (pipeline, ()) = Pipeline::new("demo", source, |source, ctx| {
         let branch = ctx.branch().to(counter)?;
         ctx.attach(source, 0, branch)?;
         Ok(())

@@ -72,7 +72,7 @@ mod example {
         let track = muxer.add_stream("video", encoder.parameters(), encoder.time_base())?;
         let muxer_sink = muxer.open()?.take(track)?;
 
-        let pipeline = Pipeline::new("hls", source, |source, context| {
+        let (pipeline, ()) = Pipeline::new("hls", source, |source, context| {
             let branch = context.branch().pipe(encoder).to(muxer_sink)?;
             context.attach(source, 0, branch)?;
             Ok(())

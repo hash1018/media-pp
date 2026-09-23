@@ -84,7 +84,7 @@ mod windows_example {
 
         let gpu = D3d11GpuContext::new(None).map_err(|e| Error::Other(format!("{e:?}")))?;
 
-        let pipeline = Pipeline::new("d3d11-decode-render", source, |source, ctx| {
+        let (pipeline, ()) = Pipeline::new("d3d11-decode-render", source, |source, ctx| {
             // Same device the renderer draws with — required for the
             // zero-copy path to be valid at all (see D3d11Decoder::new).
             // The decoder's downstream-frame budget must cover the `"frames"`

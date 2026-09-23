@@ -95,7 +95,7 @@ mod windows_example {
         )
         .map_err(|error| media_pp::Error::Other(format!("failed to open a renderer: {error:?}")))?;
 
-        Pipeline::new(name, source, move |source, ctx| {
+        let (pipeline, ()) = Pipeline::new(name, source, move |source, ctx| {
             let branch = ctx
                 .branch()
                 .queue("packets", 16)
@@ -105,7 +105,8 @@ mod windows_example {
                 .to(renderer)?;
             ctx.attach(source, 0, branch)?;
             Ok(())
-        })
+        })?;
+        Ok(pipeline)
     }
 
     fn validate_h264(name: &str, stream_info: &WebRtcStreamInfo) -> media_pp::Result<()> {
@@ -186,7 +187,7 @@ mod linux_example {
             target.height,
         )?;
 
-        Pipeline::new(name, source, move |source, ctx| {
+        let (pipeline, ()) = Pipeline::new(name, source, move |source, ctx| {
             let branch = ctx
                 .branch()
                 .queue("packets", 16)
@@ -196,7 +197,8 @@ mod linux_example {
                 .to(renderer)?;
             ctx.attach(source, 0, branch)?;
             Ok(())
-        })
+        })?;
+        Ok(pipeline)
     }
 
     fn validate_h264(name: &str, stream_info: &WebRtcStreamInfo) -> media_pp::Result<()> {
@@ -430,7 +432,7 @@ mod common {
         // never arrive.
         sink.set_source_parameters(&encoder.parameters())?;
 
-        let pipeline = Pipeline::new("peer-a-send", source, move |source, ctx| {
+        let (pipeline, ()) = Pipeline::new("peer-a-send", source, move |source, ctx| {
             let branch = ctx.branch().queue("to-encode", 8).pipe(encoder).to(sink)?;
             ctx.attach(source, 0, branch)?;
             Ok(())
@@ -501,7 +503,7 @@ mod common {
         // it for this sink until now.
         sink.set_source_parameters(&encoder.parameters())?;
 
-        let pipeline = Pipeline::new("peer-b-send", source, move |source, ctx| {
+        let (pipeline, ()) = Pipeline::new("peer-b-send", source, move |source, ctx| {
             let branch = ctx
                 .branch()
                 .pipe(decoder)

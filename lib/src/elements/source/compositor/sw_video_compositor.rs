@@ -157,6 +157,12 @@ pub enum SwVideoCompositorError {
     /// Seeking was requested on a live compositor with no stored timeline.
     #[error("SwVideoCompositor doesn't support seeking a live composition")]
     SeekUnsupported,
+
+    /// The compositor this handle belongs to has stopped, so there is nothing
+    /// left to add to. Returned by the handle's `add_*` methods in place of
+    /// an input nothing would ever read.
+    #[error("the compositor has stopped")]
+    Stopped,
 }
 
 struct VideoInput {
@@ -204,10 +210,10 @@ impl SwVideoCompositorHandle {
         &self,
         name: impl Into<String>,
         layer: VideoLayer,
-    ) -> std::result::Result<Option<SwVideoCompositorInput>, SwVideoCompositorError> {
+    ) -> std::result::Result<SwVideoCompositorInput, SwVideoCompositorError> {
         validate_layer(layer)?;
         let Some(shared) = self.shared.upgrade() else {
-            return Ok(None);
+            return Err(SwVideoCompositorError::Stopped);
         };
         let name: Arc<str> = name.into().into();
         let id = VideoInputId(shared.next_input_id.fetch_add(1, Ordering::Relaxed));
@@ -222,7 +228,7 @@ impl SwVideoCompositorHandle {
             .unwrap()
             .insert(name.clone(), input.clone());
 
-        Ok(Some(SwVideoCompositorInput {
+        Ok(SwVideoCompositorInput {
             sink: Box::new(SwVideoCompositorInputSink {
                 name: name.clone(),
                 pp_log: element_pp_log(ElementType::SwVideoCompositor, &name, None),
@@ -234,7 +240,7 @@ impl SwVideoCompositorHandle {
                 name,
                 input: Arc::downgrade(&input),
             },
-        }))
+        })
     }
 
     /// Removes `name` immediately. Existing input sinks and layer handles
@@ -1182,7 +1188,7 @@ mod tests {
         name: &str,
         layer: VideoLayer,
     ) -> (Box<dyn Sink>, SwVideoLayerHandle) {
-        let input = handle.add_source(name, layer).unwrap().unwrap();
+        let input = handle.add_source(name, layer).unwrap();
         (input.sink, input.layer)
     }
 
@@ -1255,6 +1261,20 @@ mod tests {
             [0, 0, 0, 255],
             "the background is what a layer with nothing to draw leaves"
         );
+    }
+
+    /// A handle that outlives its compositor says so by name, rather than
+    /// handing back an input nothing will ever read — and the same way
+    /// every backend's handle does.
+    #[test]
+    fn adding_a_source_to_a_stopped_compositor_is_refused_by_name() {
+        let (compositor, handle) = SwVideoCompositor::new("compositor", options(4, 4)).unwrap();
+        drop(compositor);
+
+        let refused = handle.add_source("late", VideoLayer::new(VideoRect::new(0, 0, 4, 4)));
+
+        assert!(matches!(refused, Err(SwVideoCompositorError::Stopped)));
+        assert_eq!(handle.source_count(), 0);
     }
 
     /// Hiding a layer is `visible`. An empty region is a mistake, and one
@@ -1656,7 +1676,7 @@ mod tests {
         )
         .unwrap();
 
-        let pipeline = Pipeline::new("phase-test", compositor, |source, ctx| {
+        let (pipeline, ()) = Pipeline::new("phase-test", compositor, |source, ctx| {
             let branch = ctx.branch().to(sink)?;
             ctx.attach(source, 0, branch)?;
             Ok(())
@@ -1719,7 +1739,7 @@ mod tests {
             },
         )
         .unwrap();
-        let pipeline = Pipeline::new("ticks", compositor, |source, ctx| {
+        let (pipeline, ()) = Pipeline::new("ticks", compositor, |source, ctx| {
             let branch = ctx.branch().to(sink)?;
             ctx.attach(source, 0, branch)?;
             Ok(())

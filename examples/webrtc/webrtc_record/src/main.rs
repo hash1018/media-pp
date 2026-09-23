@@ -226,7 +226,7 @@ mod example {
         )?;
         audio_sink.set_source_parameters(&audio_encoder.parameters())?;
 
-        Pipeline::new("webrtc-send", input.source, move |source, ctx| {
+        let (pipeline, ()) = Pipeline::new("webrtc-send", input.source, move |source, ctx| {
             let video = ctx
                 .branch()
                 .pipe(video_decoder)
@@ -246,7 +246,8 @@ mod example {
                 .to(audio_sink)?;
             ctx.attach(source, input.audio_index, audio)?;
             Ok(())
-        })
+        })?;
+        Ok(pipeline)
     }
 
     fn receive_pipeline(

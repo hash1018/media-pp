@@ -70,9 +70,7 @@ mod example {
         let mut background_layer =
             VideoLayer::new(VideoRect::new(0, 0, output_width, output_height));
         background_layer.fit = VideoFit::Cover;
-        let background_input = compositor_handle
-            .add_source("background", background_layer)?
-            .expect("compositor is alive");
+        let background_input = compositor_handle.add_source("background", background_layer)?;
         let background_sink = background_input.sink;
 
         let foreground_width = 192;
@@ -86,9 +84,7 @@ mod example {
         foreground_layer.z_index = 1;
         foreground_layer.opacity = 0.85;
         foreground_layer.fit = VideoFit::Cover;
-        let foreground_input = compositor_handle
-            .add_source("foreground", foreground_layer)?
-            .expect("compositor is alive");
+        let foreground_input = compositor_handle.add_source("foreground", foreground_layer)?;
         let foreground_sink = foreground_input.sink;
         let foreground_handle = foreground_input.layer;
 
@@ -100,7 +96,7 @@ mod example {
                 framerate: frame_rate,
             },
         );
-        let background_pipeline =
+        let (background_pipeline, ()) =
             Pipeline::new("background-input", background_source, |source, ctx| {
                 let branch = ctx.branch().to(background_sink)?;
                 ctx.attach(source, 0, branch)?;
@@ -114,7 +110,7 @@ mod example {
         let foreground_source_width = 320;
         let foreground_source_height = 240;
         let (foreground_source, foreground_app_handle) = AppSource::new("foreground-source", 4);
-        let foreground_pipeline =
+        let (foreground_pipeline, ()) =
             Pipeline::new("foreground-input", foreground_source, |source, ctx| {
                 let (chroma_key, _key_handle) = SwChromaKey::new(
                     "green-screen",
@@ -151,23 +147,24 @@ mod example {
         let mut muxer = FileMuxer::create(&path)?;
         let track = muxer.add_stream("video", encoder.parameters(), encoder.time_base())?;
         let muxer_sink = muxer.open()?.take(track)?;
-        let output_pipeline = Pipeline::new("composited-output", compositor, |source, ctx| {
-            let scaler = SwScaler::new(
-                "to-yuv",
-                ffmpeg::format::Pixel::YUV420P,
-                output_width,
-                output_height,
-                ffmpeg::software::scaling::Flags::BILINEAR,
-            );
-            let branch = ctx
-                .branch()
-                .pipe(scaler)
-                .queue("encode-frames", 8)
-                .pipe(encoder)
-                .to(muxer_sink)?;
-            ctx.attach(source, 0, branch)?;
-            Ok(())
-        })?;
+        let (output_pipeline, ()) =
+            Pipeline::new("composited-output", compositor, |source, ctx| {
+                let scaler = SwScaler::new(
+                    "to-yuv",
+                    ffmpeg::format::Pixel::YUV420P,
+                    output_width,
+                    output_height,
+                    ffmpeg::software::scaling::Flags::BILINEAR,
+                );
+                let branch = ctx
+                    .branch()
+                    .pipe(scaler)
+                    .queue("encode-frames", 8)
+                    .pipe(encoder)
+                    .to(muxer_sink)?;
+                ctx.attach(source, 0, branch)?;
+                Ok(())
+            })?;
 
         output_pipeline.run()?;
         background_pipeline.run()?;

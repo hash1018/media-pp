@@ -58,7 +58,7 @@ mod windows_example {
         let gpu =
             D3d11GpuContext::new(None).map_err(|e| media_pp::Error::Other(format!("{e:?}")))?;
 
-        let pipeline = Pipeline::new("d3d11-upload", source, |source, ctx| {
+        let (pipeline, ()) = Pipeline::new("d3d11-upload", source, |source, ctx| {
             // `Pixel::NV12` — the only layout `D3d11Upload` accepts.
             let scaler = SwScaler::to_format(
                 "to-nv12",

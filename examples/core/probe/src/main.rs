@@ -47,7 +47,7 @@ mod example {
 
         let (counter, count) = PacketCounter::new("counter");
 
-        let pipeline = Pipeline::new("probe", source, |source, ctx| {
+        let (pipeline, ()) = Pipeline::new("probe", source, |source, ctx| {
             let branch = ctx
                 .branch()
                 .queue("q1", 32) // thread boundary: demux thread -> counter thread

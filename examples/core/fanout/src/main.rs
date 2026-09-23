@@ -45,7 +45,7 @@ mod example {
         let (video_counter, video_count) = PacketCounter::new("video-counter");
         let (audio_counter, audio_count) = PacketCounter::new("audio-counter");
 
-        let pipeline = Pipeline::new("fanout", source, |source, ctx| {
+        let (pipeline, ()) = Pipeline::new("fanout", source, |source, ctx| {
             if let Some(v) = video {
                 let branch = ctx
                     .branch()

@@ -100,7 +100,7 @@ mod windows_example {
         let track = muxer.add_stream("video", encoder.parameters(), encoder.time_base())?;
         let muxer_sink = muxer.open()?.take(track)?;
 
-        let pipeline = Pipeline::new("screen-record-nvenc", source, |source, ctx| {
+        let (pipeline, ()) = Pipeline::new("screen-record-nvenc", source, |source, ctx| {
             let branch = ctx
                 .branch()
                 // Thread boundary so a slow encode cannot stall capture; the
@@ -215,7 +215,7 @@ mod linux_example {
         let muxer_sink = muxer.open()?.take(track)?;
 
         let (width, height) = (format.width, format.height);
-        let pipeline = Pipeline::new("screen-record-nvenc", source, |source, ctx| {
+        let (pipeline, ()) = Pipeline::new("screen-record-nvenc", source, |source, ctx| {
             let branch = ctx
                 .branch()
                 // Thread boundary so the encode cannot stall capture; the

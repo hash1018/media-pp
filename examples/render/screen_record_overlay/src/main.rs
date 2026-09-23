@@ -161,7 +161,7 @@ mod linux_example {
         let clock = handle.add_text_layer("clock", text_layer)?;
         clock.set_text("rec 0s")?;
 
-        let capture_pipeline = Pipeline::new("desktop-capture", source, |source, ctx| {
+        let (capture_pipeline, ()) = Pipeline::new("desktop-capture", source, |source, ctx| {
             let converter =
                 CudaConverter::new("convert", &cuda, media_pp::elements::CudaFrameFormat::Nv12)?;
             let branch = ctx
@@ -196,7 +196,7 @@ mod linux_example {
         let track = muxer.add_stream("video", encoder.parameters(), encoder.time_base())?;
         let muxer_sink = muxer.open()?.take(track)?;
 
-        let record_pipeline = Pipeline::new("overlay-record", compositor, |source, ctx| {
+        let (record_pipeline, ()) = Pipeline::new("overlay-record", compositor, |source, ctx| {
             let branch = ctx
                 .branch()
                 // Thread boundary so a slow encode cannot stall compositing.

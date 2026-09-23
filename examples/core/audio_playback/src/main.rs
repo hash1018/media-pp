@@ -89,7 +89,7 @@ mod windows_example {
         let source = TestAudioSource::new("tone", TestAudioOptions::default());
         let resampler = AudioResampler::new("resampler", output_format);
         let (volume, volume_handle) = AudioVolume::new("volume");
-        let pipeline = Pipeline::new("audio-playback", source, |source, context| {
+        let (pipeline, ()) = Pipeline::new("audio-playback", source, |source, context| {
             let branch = context
                 .branch()
                 .pipe(resampler)
@@ -195,7 +195,7 @@ mod linux_example {
         let source = TestAudioSource::new("tone", TestAudioOptions::default());
         let resampler = AudioResampler::new("resampler", output_format);
         let (volume, volume_handle) = AudioVolume::new("volume");
-        let pipeline = Pipeline::new("audio-playback", source, |source, context| {
+        let (pipeline, ()) = Pipeline::new("audio-playback", source, |source, context| {
             let branch = context
                 .branch()
                 .pipe(resampler)

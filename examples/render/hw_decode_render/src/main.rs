@@ -105,7 +105,7 @@ mod windows_example {
         println!("decoding: {:?}", decoder.path());
         let decoding = decoder.handle();
 
-        let pipeline = Pipeline::new("hw-decode-render", source, |source, ctx| {
+        let (pipeline, ()) = Pipeline::new("hw-decode-render", source, |source, ctx| {
             let pacer = Pacer::new("pacer");
             let renderer =
                 render_common::d3d12_window_renderer("renderer", &gpu, hwnd, width, height)?;
@@ -210,7 +210,7 @@ mod linux_example {
             None
         };
 
-        let pipeline = Pipeline::new("hw-decode-render", source, |source, ctx| {
+        let (pipeline, ()) = Pipeline::new("hw-decode-render", source, |source, ctx| {
             let pacer = Pacer::new("pacer");
             let mut chain = ctx.branch().pipe(decoder);
             if let Some(to_nv12) = to_nv12 {

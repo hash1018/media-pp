@@ -197,6 +197,12 @@ pub enum CudaVideoCompositorError {
     /// Seeking was requested on a live compositor with no stored timeline.
     #[error("CudaVideoCompositor doesn't support seeking a live composition")]
     SeekUnsupported,
+
+    /// The compositor this handle belongs to has stopped, so there is nothing
+    /// left to add to. Returned by the handle's `add_*` methods in place of
+    /// an input nothing would ever read.
+    #[error("the compositor has stopped")]
+    Stopped,
 }
 
 struct VideoInput {
@@ -268,7 +274,7 @@ impl CudaVideoCompositorHandle {
     ) -> std::result::Result<CudaVideoCompositorInput, CudaVideoCompositorError> {
         validate_layer(layer)?;
         let Some(shared) = self.shared.upgrade() else {
-            return Err(CudaVideoCompositorError::SourceRemoved);
+            return Err(CudaVideoCompositorError::Stopped);
         };
         let name: Arc<str> = name.into().into();
         let id = VideoInputId(shared.next_input_id.fetch_add(1, Ordering::Relaxed));
@@ -405,7 +411,7 @@ impl Sink for CudaVideoCompositorInputSink {
         match buf {
             MediaBuffer::Video(frame) => {
                 let Some(shared) = self.shared.upgrade() else {
-                    return Err(CudaVideoCompositorError::SourceRemoved.into());
+                    return Err(CudaVideoCompositorError::Stopped.into());
                 };
                 // Validated here rather than at compose time so a
                 // misconfigured input names *itself* in the error, and so a

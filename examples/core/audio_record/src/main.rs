@@ -58,7 +58,7 @@ mod example {
         let track = muxer.add_stream("audio", encoder.parameters(), encoder.time_base())?;
         let muxer_sink = muxer.open()?.take(track)?;
 
-        let pipeline = Pipeline::new("audio-record", source, |source, ctx| {
+        let (pipeline, ()) = Pipeline::new("audio-record", source, |source, ctx| {
             let branch = ctx.branch().pipe(encoder).to(muxer_sink)?;
             ctx.attach(source, 0, branch)?;
             Ok(())

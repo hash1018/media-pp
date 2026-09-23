@@ -56,7 +56,7 @@ mod example {
             pp_log: element_pp_log(ElementType::Other, "verify", None),
         };
 
-        let pipeline = Pipeline::new("scale", source, |source, ctx| {
+        let (pipeline, ()) = Pipeline::new("scale", source, |source, ctx| {
             let decoder = SwDecoder::new("decoder", params)?;
             let scaler =
                 SwScaler::new("scaler", DST_FORMAT, DST_WIDTH, DST_HEIGHT, Flags::BILINEAR);

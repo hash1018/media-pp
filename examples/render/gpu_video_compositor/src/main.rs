@@ -107,9 +107,7 @@ mod windows_example {
         let mut background_layer =
             VideoLayer::new(VideoRect::new(0, 0, output_width, output_height));
         background_layer.fit = VideoFit::Cover;
-        let background_input = compositor_handle
-            .add_source("background", background_layer)?
-            .expect("compositor is alive");
+        let background_input = compositor_handle.add_source("background", background_layer)?;
         let background_sink = background_input.sink;
 
         let foreground_width = 192;
@@ -123,9 +121,7 @@ mod windows_example {
         foreground_layer.z_index = 1;
         foreground_layer.opacity = 0.85;
         foreground_layer.fit = VideoFit::Cover;
-        let foreground_input = compositor_handle
-            .add_source("foreground", foreground_layer)?
-            .expect("compositor is alive");
+        let foreground_input = compositor_handle.add_source("foreground", foreground_layer)?;
         let foreground_sink = foreground_input.sink;
         let foreground_handle = foreground_input.layer;
 
@@ -140,7 +136,7 @@ mod windows_example {
                 framerate: frame_rate,
             },
         );
-        let background_pipeline =
+        let (background_pipeline, ()) =
             Pipeline::new("background-input", background_source, |source, ctx| {
                 let scaler = SwScaler::new(
                     "to-nv12",
@@ -167,7 +163,7 @@ mod windows_example {
                 framerate: ffmpeg::Rational::new(15, 1),
             },
         );
-        let foreground_pipeline =
+        let (foreground_pipeline, ()) =
             Pipeline::new("foreground-input", foreground_source, |source, ctx| {
                 let scaler = SwScaler::new(
                     "to-nv12",
@@ -198,40 +194,41 @@ mod windows_example {
         let track = muxer.add_stream("video", encoder.parameters(), encoder.time_base())?;
         let muxer_sink = muxer.open()?.take(track)?;
 
-        let output_pipeline = Pipeline::new("composited-output", compositor, |source, ctx| {
-            let renderer = render_common::d3d11_window_renderer(
-                "renderer",
-                &gpu,
-                hwnd,
-                output_width,
-                output_height,
-            )?;
-            let render_branch = ctx.branch().queue("render", 4).to(renderer)?;
+        let (output_pipeline, ()) =
+            Pipeline::new("composited-output", compositor, |source, ctx| {
+                let renderer = render_common::d3d11_window_renderer(
+                    "renderer",
+                    &gpu,
+                    hwnd,
+                    output_width,
+                    output_height,
+                )?;
+                let render_branch = ctx.branch().queue("render", 4).to(renderer)?;
 
-            let download = D3d11Download::new("download", gpu.device(), gpu.context())?;
-            let to_yuv = SwScaler::new(
-                "to-yuv",
-                ffmpeg::format::Pixel::YUV420P,
-                output_width,
-                output_height,
-                ffmpeg::software::scaling::Flags::BILINEAR,
-            );
-            let record_branch = ctx
-                .branch()
-                .queue("record", 4)
-                .pipe(download)
-                .pipe(to_yuv)
-                .queue("encode-frames", 8)
-                .pipe(encoder)
-                .to(muxer_sink)?;
+                let download = D3d11Download::new("download", gpu.device(), gpu.context())?;
+                let to_yuv = SwScaler::new(
+                    "to-yuv",
+                    ffmpeg::format::Pixel::YUV420P,
+                    output_width,
+                    output_height,
+                    ffmpeg::software::scaling::Flags::BILINEAR,
+                );
+                let record_branch = ctx
+                    .branch()
+                    .queue("record", 4)
+                    .pipe(download)
+                    .pipe(to_yuv)
+                    .queue("encode-frames", 8)
+                    .pipe(encoder)
+                    .to(muxer_sink)?;
 
-            let tee_branch = TeeBuilder::new("tee", ctx.clone())
-                .branch(render_branch)
-                .branch(record_branch)
-                .build()?;
-            ctx.attach(source, 0, tee_branch)?;
-            Ok(())
-        })?;
+                let tee_branch = TeeBuilder::new("tee", ctx.clone())
+                    .branch(render_branch)
+                    .branch(record_branch)
+                    .build()?;
+                ctx.attach(source, 0, tee_branch)?;
+                Ok(())
+            })?;
 
         // Published before `run`, so a close that arrives from here on finds
         // the pipelines to stop. `true` means one already did, and nothing
@@ -393,7 +390,7 @@ mod linux_example {
                 framerate: frame_rate,
             },
         );
-        let background_pipeline =
+        let (background_pipeline, ()) =
             Pipeline::new("background-input", background_source, |source, ctx| {
                 let scaler = SwScaler::new(
                     "to-nv12",
@@ -420,7 +417,7 @@ mod linux_example {
                 framerate: ffmpeg::Rational::new(15, 1),
             },
         );
-        let foreground_pipeline =
+        let (foreground_pipeline, ()) =
             Pipeline::new("foreground-input", foreground_source, |source, ctx| {
                 let scaler = SwScaler::new(
                     "to-nv12",
@@ -452,42 +449,43 @@ mod linux_example {
         let track = muxer.add_stream("video", encoder.parameters(), encoder.time_base())?;
         let muxer_sink = muxer.open()?.take(track)?;
 
-        let output_pipeline = Pipeline::new("composited-output", compositor, |source, ctx| {
-            let renderer = render_common::cuda_window_renderer(
-                "renderer",
-                &gpu,
-                &cuda,
-                target.display,
-                target.window,
-                output_width,
-                output_height,
-            )?;
-            let render_branch = ctx.branch().queue("render", 4).to(renderer)?;
+        let (output_pipeline, ()) =
+            Pipeline::new("composited-output", compositor, |source, ctx| {
+                let renderer = render_common::cuda_window_renderer(
+                    "renderer",
+                    &gpu,
+                    &cuda,
+                    target.display,
+                    target.window,
+                    output_width,
+                    output_height,
+                )?;
+                let render_branch = ctx.branch().queue("render", 4).to(renderer)?;
 
-            let download = CudaDownload::new("download", &cuda, CudaFrameFormat::Nv12);
-            let to_yuv = SwScaler::new(
-                "to-yuv",
-                ffmpeg::format::Pixel::YUV420P,
-                output_width,
-                output_height,
-                ffmpeg::software::scaling::Flags::BILINEAR,
-            );
-            let record_branch = ctx
-                .branch()
-                .queue("record", 4)
-                .pipe(download)
-                .pipe(to_yuv)
-                .queue("encode-frames", 8)
-                .pipe(encoder)
-                .to(muxer_sink)?;
+                let download = CudaDownload::new("download", &cuda, CudaFrameFormat::Nv12);
+                let to_yuv = SwScaler::new(
+                    "to-yuv",
+                    ffmpeg::format::Pixel::YUV420P,
+                    output_width,
+                    output_height,
+                    ffmpeg::software::scaling::Flags::BILINEAR,
+                );
+                let record_branch = ctx
+                    .branch()
+                    .queue("record", 4)
+                    .pipe(download)
+                    .pipe(to_yuv)
+                    .queue("encode-frames", 8)
+                    .pipe(encoder)
+                    .to(muxer_sink)?;
 
-            let tee_branch = TeeBuilder::new("tee", ctx.clone())
-                .branch(render_branch)
-                .branch(record_branch)
-                .build()?;
-            ctx.attach(source, 0, tee_branch)?;
-            Ok(())
-        })?;
+                let tee_branch = TeeBuilder::new("tee", ctx.clone())
+                    .branch(render_branch)
+                    .branch(record_branch)
+                    .build()?;
+                ctx.attach(source, 0, tee_branch)?;
+                Ok(())
+            })?;
 
         // Published before `run`, so a close that arrives from here on finds
         // the pipelines to stop. `true` means one already did, and nothing

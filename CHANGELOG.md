@@ -12,6 +12,51 @@ compile error with no explanation.
 
 ### Breaking
 
+- **`Pipeline::new` hands back what its wiring returns.** It returns
+  `(Arc<Pipeline>, T)`, where `T` is whatever the `wire` closure returned —
+  so something only the wiring can make, a `TeeHandle` from
+  `build_dynamic` or a routing to keep, comes back out as a value rather
+  than through a variable the closure fills in and the caller then has to
+  `expect`. Several at once are a tuple. A closure with nothing to hand
+  back returns `Ok(())` as before, and the call binds `()`:
+
+  ```rust
+  // before
+  let mut tee = None;
+  let pipeline = Pipeline::new("fan", source, |source, ctx| {
+      let (branch, handle) = TeeBuilder::new("tee", ctx.clone()).build_dynamic()?;
+      ctx.attach(source, 0, branch)?;
+      tee = Some(handle);
+      Ok(())
+  })?;
+  let tee = tee.expect("wire ran");
+
+  // after
+  let (pipeline, tee) = Pipeline::new("fan", source, |source, ctx| {
+      let (branch, handle) = TeeBuilder::new("tee", ctx.clone()).build_dynamic()?;
+      ctx.attach(source, 0, branch)?;
+      Ok(handle)
+  })?;
+
+  // and where the closure returns nothing
+  let (pipeline, ()) = Pipeline::new("play", source, |source, ctx| { /* ... */ Ok(()) })?;
+  ```
+
+  `PipelineBuilder::add_source` is unchanged.
+
+- **Adding an input to a stopped compositor or mixer is an error, the same
+  on every backend.** `D3d11VideoCompositorHandle::add_source`,
+  `add_layer` and `add_text_layer` and `SwVideoCompositorHandle::add_source`
+  returned `Ok(None)` once their compositor was gone, and
+  `MixerHandle::add_source` returned `None`, so every caller wrote its own
+  `.ok_or("the compositor is gone")?` — while the CUDA compositor already
+  returned an error. Each now returns its input directly, or a new
+  `Stopped` variant of its own error (`D3d11VideoCompositorError`,
+  `SwVideoCompositorError`, `CudaVideoCompositorError`, `AudioMixerError`):
+  drop the `Option` handling, `handle.add_source(name, layer)?` is the whole
+  call. The CUDA compositor reports `Stopped` there too, where it used to
+  borrow `SourceRemoved`, whose message is about a removed input.
+
 - **`Error` is `#[non_exhaustive]`, and every public error converts into
   it.** A `match` on `media_pp::Error` needs a `_` arm; in return, an
   element added later — and each one adds a variant — no longer breaks

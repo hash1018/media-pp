@@ -822,7 +822,7 @@ mod tests {
         };
 
         let (counter, encoded) = PacketCounter::new("count");
-        let pipeline = Pipeline::new("cuda-transcode", source, |source, ctx| {
+        let (pipeline, ()) = Pipeline::new("cuda-transcode", source, |source, ctx| {
             let branch = ctx
                 .branch()
                 .pipe(decoder)

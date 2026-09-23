@@ -993,7 +993,7 @@ mod tests {
             Ok(())
         });
 
-        let pipeline = Pipeline::new("camera-capture", source, |source, ctx| {
+        let (pipeline, ()) = Pipeline::new("camera-capture", source, |source, ctx| {
             let branch = ctx.branch().to(sink)?;
             ctx.attach(source, 0, branch)?;
             Ok(())
@@ -1059,7 +1059,7 @@ mod tests {
             Ok(())
         });
 
-        let pipeline = Pipeline::new("camera-pause", source, |source, ctx| {
+        let (pipeline, ()) = Pipeline::new("camera-pause", source, |source, ctx| {
             let branch = ctx.branch().to(sink)?;
             ctx.attach(source, 0, branch)?;
             Ok(())

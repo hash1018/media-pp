@@ -128,7 +128,7 @@ mod example {
                 framerate: frame_rate,
             },
         );
-        let background_pipeline =
+        let (background_pipeline, ()) =
             Pipeline::new("background-input", background_source, |source, ctx| {
                 let scaler = SwScaler::new(
                     "to-nv12",
@@ -159,26 +159,27 @@ mod example {
         let track = muxer.add_stream("video", encoder.parameters(), encoder.time_base())?;
         let muxer_sink = muxer.open()?.take(track)?;
 
-        let output_pipeline = Pipeline::new("composited-output", compositor, |source, ctx| {
-            let download = CudaDownload::new("download", &cuda, CudaFrameFormat::Nv12);
-            let to_yuv = SwScaler::new(
-                "to-yuv",
-                ffmpeg::format::Pixel::YUV420P,
-                output_width,
-                output_height,
-                ffmpeg::software::scaling::Flags::BILINEAR,
-            );
-            let branch = ctx
-                .branch()
-                .queue("record", 4)
-                .pipe(download)
-                .pipe(to_yuv)
-                .queue("encode-frames", 8)
-                .pipe(encoder)
-                .to(muxer_sink)?;
-            ctx.attach(source, 0, branch)?;
-            Ok(())
-        })?;
+        let (output_pipeline, ()) =
+            Pipeline::new("composited-output", compositor, |source, ctx| {
+                let download = CudaDownload::new("download", &cuda, CudaFrameFormat::Nv12);
+                let to_yuv = SwScaler::new(
+                    "to-yuv",
+                    ffmpeg::format::Pixel::YUV420P,
+                    output_width,
+                    output_height,
+                    ffmpeg::software::scaling::Flags::BILINEAR,
+                );
+                let branch = ctx
+                    .branch()
+                    .queue("record", 4)
+                    .pipe(download)
+                    .pipe(to_yuv)
+                    .queue("encode-frames", 8)
+                    .pipe(encoder)
+                    .to(muxer_sink)?;
+                ctx.attach(source, 0, branch)?;
+                Ok(())
+            })?;
 
         output_pipeline.run()?;
         background_pipeline.run()?;

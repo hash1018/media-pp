@@ -27,18 +27,15 @@ mod example {
 
         let source = TestVideoSource::new("video", TestVideoOptions::default());
         let (initial_counter, initial_count) = FrameCounter::new("initial-counter");
-        let mut tee_handle = None;
 
-        let pipeline = Pipeline::new("dynamic-tee", source, |source, ctx| {
+        let (pipeline, tee_handle) = Pipeline::new("dynamic-tee", source, |source, ctx| {
             let initial_branch = ctx.branch().to(initial_counter)?;
             let (tee_branch, handle) = TeeBuilder::new("tee", ctx.clone())
                 .branch(initial_branch)
                 .build_dynamic()?;
             ctx.attach(source, 0, tee_branch)?;
-            tee_handle = Some(handle);
-            Ok(())
+            Ok(handle)
         })?;
-        let tee_handle = tee_handle.expect("wire closure must provide the TeeHandle");
 
         pipeline.run()?;
         thread::sleep(Duration::from_millis(500));

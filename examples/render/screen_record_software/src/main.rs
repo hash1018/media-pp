@@ -97,7 +97,7 @@ mod windows_example {
         let track = muxer.add_stream("video", encoder.parameters(), encoder.time_base())?;
         let muxer_sink = muxer.open()?.take(track)?;
 
-        let pipeline = Pipeline::new("screen-record-software", source, |source, ctx| {
+        let (pipeline, ()) = Pipeline::new("screen-record-software", source, |source, ctx| {
             let scaler = SwScaler::new(
                 "to-yuv",
                 ffmpeg::format::Pixel::YUV420P,
@@ -226,7 +226,7 @@ mod linux_example {
         let track = muxer.add_stream("video", encoder.parameters(), encoder.time_base())?;
         let muxer_sink = muxer.open()?.take(track)?;
 
-        let pipeline = Pipeline::new("screen-record-software", source, |source, ctx| {
+        let (pipeline, ()) = Pipeline::new("screen-record-software", source, |source, ctx| {
             let scaler = SwScaler::new(
                 "to-yuv",
                 ffmpeg::format::Pixel::YUV420P,

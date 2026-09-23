@@ -53,7 +53,7 @@ mod example {
             })
         };
 
-        let pipeline = Pipeline::new("app-sink", source, |source, ctx| {
+        let (pipeline, ()) = Pipeline::new("app-sink", source, |source, ctx| {
             let decoder = SwDecoder::new("decoder", params)?;
             let branch = ctx
                 .branch()

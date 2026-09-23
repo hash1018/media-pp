@@ -342,7 +342,7 @@ mod tests {
             },
         );
 
-        let pipeline = Pipeline::new("test", source, |source, ctx| {
+        let (pipeline, ()) = Pipeline::new("test", source, |source, ctx| {
             let branch = ctx.branch().to(sink)?;
             ctx.attach(source, 0, branch)?;
             Ok(())
@@ -441,7 +441,7 @@ mod tests {
             },
         );
 
-        let pipeline = Pipeline::new("pause-resume-test", source, |source, ctx| {
+        let (pipeline, ()) = Pipeline::new("pause-resume-test", source, |source, ctx| {
             let branch = ctx.branch().to(sink)?;
             ctx.attach(source, 0, branch)?;
             Ok(())
@@ -549,7 +549,7 @@ mod tests {
             },
         );
 
-        let pipeline = Pipeline::new("slow-sink-test", source, |source, ctx| {
+        let (pipeline, ()) = Pipeline::new("slow-sink-test", source, |source, ctx| {
             let branch = ctx.branch().to(sink)?;
             ctx.attach(source, 0, branch)?;
             Ok(())

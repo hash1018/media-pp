@@ -162,15 +162,32 @@ impl Pipeline {
     /// separate arguments. `wire` creates detached chains and attaches
     /// them through [`Context::attach`]. Pads left unattached drop data.
     ///
+    /// Whatever `wire` returns comes back beside the pipeline: something
+    /// only the wiring can make — a [`crate::elements::TeeHandle`] from
+    /// [`crate::elements::TeeBuilder::build_dynamic`], a routing to keep —
+    /// is returned from it, several at once as a tuple, rather than
+    /// smuggled out through a variable the closure fills in. `()` where
+    /// there is nothing to hand back:
+    ///
+    /// ```ignore
+    /// let (pipeline, ()) = Pipeline::new("play", source, |source, ctx| { /* ... */ Ok(()) })?;
+    /// let (pipeline, tee) = Pipeline::new("fan", source, |source, ctx| {
+    ///     let (branch, tee) = TeeBuilder::new("tee", ctx.clone()).build_dynamic()?;
+    ///     ctx.attach(source, 0, branch)?;
+    ///     Ok(tee)
+    /// })?;
+    /// ```
+    ///
     /// The single-source special case of [`PipelineBuilder`] — see its own
     /// docs for combining more than one live source (e.g. a video capture
     /// and an audio capture) into one `Pipeline`.
-    pub fn new<S: SourceElement + 'static>(
+    pub fn new<S: SourceElement + 'static, T>(
         id: impl Into<String>,
         source: S,
-        wire: impl FnOnce(&mut S, &Arc<Context>) -> Result<()>,
-    ) -> Result<Arc<Self>> {
-        Ok(PipelineBuilder::new(id).add_source(source, wire)?.build())
+        wire: impl FnOnce(&mut S, &Arc<Context>) -> Result<T>,
+    ) -> Result<(Arc<Self>, T)> {
+        let (builder, wired) = PipelineBuilder::new(id).add_source_returning(source, wire)?;
+        Ok((builder.build(), wired))
     }
 
     /// This pipeline's own id, as passed to [`Pipeline::new`].

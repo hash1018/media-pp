@@ -644,7 +644,7 @@ mod tests {
 
     /// The downstream pipeline, running, with the bridge as its source.
     fn downstream(bridge: PipelineBridge, sink: Box<dyn Sink>) -> std::sync::Arc<Pipeline> {
-        let pipeline = Pipeline::new("down", bridge, move |source, context| {
+        let (pipeline, ()) = Pipeline::new("down", bridge, move |source, context| {
             let branch = context.branch().to(sink)?;
             context.attach(source, 0, branch)?;
             Ok(())

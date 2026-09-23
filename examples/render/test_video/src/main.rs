@@ -67,7 +67,7 @@ mod windows_example {
 
         let gpu = D3d12GpuContext::new().map_err(|e| media_pp::Error::Other(format!("{e:?}")))?;
 
-        let pipeline = Pipeline::new("test-video", source, |source, ctx| {
+        let (pipeline, ()) = Pipeline::new("test-video", source, |source, ctx| {
             let renderer =
                 render_common::d3d12_window_renderer("renderer", &gpu, hwnd, width, height)?;
             let branch = ctx
@@ -148,7 +148,7 @@ mod linux_example {
         let cuda = CudaDevice::new()?;
         let gpu = VulkanGpuContext::new(target.display).map_err(media_pp::Error::Other)?;
 
-        let pipeline = Pipeline::new("test-video", source, |source, ctx| {
+        let (pipeline, ()) = Pipeline::new("test-video", source, |source, ctx| {
             let scaler = SwScaler::new(
                 "to-nv12",
                 ffmpeg::format::Pixel::NV12,

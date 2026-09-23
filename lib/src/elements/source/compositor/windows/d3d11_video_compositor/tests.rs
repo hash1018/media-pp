@@ -161,7 +161,6 @@ fn invalid_text_layer_does_not_replace_an_existing_registration() {
         D3d11VideoCompositor::new("compositor", &device, context, options).unwrap();
     let existing = handle
         .add_layer("overlay", VideoLayer::new(VideoRect::new(0, 0, 1, 1)))
-        .unwrap()
         .unwrap();
 
     let result = handle.add_text_layer("overlay", TextLayer::new(vec![0, 1, 2, 3]));
@@ -189,7 +188,6 @@ fn a_layer_hands_back_the_frame_it_will_draw_until_it_is_removed() {
         D3d11VideoCompositor::new("compositor", &device, context, options).unwrap();
     let D3d11VideoCompositorInput { mut sink, layer } = handle
         .add_source("still", VideoLayer::new(VideoRect::new(0, 0, 4, 4)))
-        .unwrap()
         .unwrap();
     assert!(layer.latest_frame().is_none(), "nothing has arrived yet");
 
@@ -224,20 +222,12 @@ fn composes_gpu_inputs_in_z_order_and_preserves_output_contract() {
 
     let mut background_layer = VideoLayer::new(VideoRect::new(0, 0, 4, 4));
     background_layer.fit = video_layer::VideoFit::Stretch;
-    let mut red_sink = handle
-        .add_source("red", background_layer)
-        .unwrap()
-        .unwrap()
-        .sink;
+    let mut red_sink = handle.add_source("red", background_layer).unwrap().sink;
 
     let mut overlay_layer = VideoLayer::new(VideoRect::new(1, 1, 2, 2));
     overlay_layer.z_index = 1;
     overlay_layer.fit = video_layer::VideoFit::Stretch;
-    let mut blue_sink = handle
-        .add_source("blue", overlay_layer)
-        .unwrap()
-        .unwrap()
-        .sink;
+    let mut blue_sink = handle.add_source("blue", overlay_layer).unwrap().sink;
 
     // BGRA byte order: [blue, green, red, alpha].
     let red_texture = bgra_texture(&device, 4, 4, [0, 0, 255, 255]);
@@ -291,7 +281,7 @@ fn a_premultiplied_layer_is_blended_by_what_it_already_holds() {
         let mut layer = VideoLayer::new(VideoRect::new(0, 0, 2, 2));
         layer.fit = video_layer::VideoFit::Stretch;
         layer.premultiplied_alpha = premultiplied;
-        let mut sink = handle.add_source("web", layer).unwrap().unwrap().sink;
+        let mut sink = handle.add_source("web", layer).unwrap().sink;
         // (230, 20, 20) at half alpha, with the alpha already multiplied in:
         // BGRA byte order, so [10, 10, 115, 128].
         let texture = bgra_texture(&device, 2, 2, [10, 10, 115, 128]);
@@ -365,7 +355,7 @@ fn a_layer_draws_only_its_source_region() {
     layer.source = Some(video_layer::VideoSourceRect::new(
         AT_X, AT_Y, REGION, REGION,
     ));
-    let mut sink = handle.add_source("input", layer).unwrap().unwrap().sink;
+    let mut sink = handle.add_source("input", layer).unwrap().sink;
 
     let texture = bgra_texture_from_pixels(&device, SOURCE, SOURCE, &pixels);
     sink.consume(pooled_video(
@@ -408,7 +398,7 @@ fn ignores_rows_outside_the_frame_visible_dimensions() {
             .expect("D3d11VideoCompositor::new should succeed");
     let mut layer = VideoLayer::new(VideoRect::new(0, 0, 4, 3));
     layer.fit = video_layer::VideoFit::Stretch;
-    let mut sink = handle.add_source("input", layer).unwrap().unwrap().sink;
+    let mut sink = handle.add_source("input", layer).unwrap().sink;
 
     // The frame exposes only the top three red rows of a four-row
     // texture. Sampling the full texture would blend the blue padding
@@ -507,7 +497,7 @@ fn live_output_frames_keep_distinct_textures_until_the_last_arc_drops() {
             .expect("D3d11VideoCompositor::new should succeed");
     let mut layer = VideoLayer::new(VideoRect::new(0, 0, 1, 1));
     layer.fit = video_layer::VideoFit::Stretch;
-    let mut sink = handle.add_source("input", layer).unwrap().unwrap().sink;
+    let mut sink = handle.add_source("input", layer).unwrap().sink;
 
     sink.consume(pooled_video(
         wrap_d3d11_texture(bgra_texture(&device, 1, 1, [0, 0, 255, 255]), 1, 1).unwrap(),
@@ -568,7 +558,7 @@ fn nv12_conversion_uses_frame_color_space_and_range() {
             .expect("D3d11VideoCompositor::new should succeed");
     let mut layer = VideoLayer::new(VideoRect::new(0, 0, 2, 2));
     layer.fit = video_layer::VideoFit::Stretch;
-    let mut sink = handle.add_source("input", layer).unwrap().unwrap().sink;
+    let mut sink = handle.add_source("input", layer).unwrap().sink;
     let texture = nv12_texture(&device, 2, 2, 81, 90, 240);
 
     let mut bt601 = wrap_d3d11_texture(texture.clone(), 2, 2).unwrap();
@@ -645,7 +635,7 @@ fn an_unchanged_scene_is_composed_once() {
             .expect("D3d11VideoCompositor::new should succeed");
     let mut layer = VideoLayer::new(VideoRect::new(0, 0, 2, 2));
     layer.fit = video_layer::VideoFit::Stretch;
-    let input = handle.add_source("input", layer).unwrap().unwrap();
+    let input = handle.add_source("input", layer).unwrap();
     let mut sink = input.sink;
     let layer_handle = input.layer;
     sink.consume(pooled_video(
@@ -716,7 +706,7 @@ fn a_repeat_still_in_flight_is_never_composed_over() {
             .expect("D3d11VideoCompositor::new should succeed");
     let mut layer = VideoLayer::new(VideoRect::new(0, 0, 2, 2));
     layer.fit = video_layer::VideoFit::Stretch;
-    let mut sink = handle.add_source("input", layer).unwrap().unwrap().sink;
+    let mut sink = handle.add_source("input", layer).unwrap().sink;
     let blue = |device: &ID3D11Device| {
         pooled_video(
             wrap_d3d11_texture(bgra_texture(device, 2, 2, [255, 0, 0, 255]), 2, 2).unwrap(),
@@ -777,7 +767,7 @@ fn layer_handle_moves_blends_and_hides_a_live_source() {
             .expect("D3d11VideoCompositor::new should succeed");
 
     let layer = VideoLayer::new(VideoRect::new(0, 0, 1, 1));
-    let input = handle.add_source("white", layer).unwrap().unwrap();
+    let input = handle.add_source("white", layer).unwrap();
     let mut sink = input.sink;
     let layer_handle = input.layer;
 
@@ -841,7 +831,6 @@ fn skips_a_mismatched_device_texture_and_reports_it_on_the_bus() {
             .expect("D3d11VideoCompositor::new should succeed");
     let mut sink = handle
         .add_source("mismatched", VideoLayer::new(VideoRect::new(0, 0, 1, 1)))
-        .unwrap()
         .unwrap()
         .sink;
 
@@ -934,7 +923,7 @@ fn resuming_after_a_pause_preserves_output_phase() {
     let (compositor, _handle) = D3d11VideoCompositor::new("compositor", &device, context, options)
         .expect("D3d11VideoCompositor::new should succeed");
 
-    let pipeline = Pipeline::new("phase-test", compositor, |source, ctx| {
+    let (pipeline, ()) = Pipeline::new("phase-test", compositor, |source, ctx| {
         let branch = ctx.branch().to(sink)?;
         ctx.attach(source, 0, branch)?;
         Ok(())
@@ -993,7 +982,7 @@ fn its_ticks_are_reported_through_its_pipeline() {
     };
     let (compositor, _handle) = D3d11VideoCompositor::new("ticking", &device, context, options)
         .expect("D3d11VideoCompositor::new should succeed");
-    let pipeline = Pipeline::new("ticks", compositor, |source, ctx| {
+    let (pipeline, ()) = Pipeline::new("ticks", compositor, |source, ctx| {
         let branch = ctx.branch().to(sink)?;
         ctx.attach(source, 0, branch)?;
         Ok(())
@@ -1138,7 +1127,7 @@ fn a_transparent_background_leaves_alpha_where_nothing_drew() {
     // One opaque pixel's worth, in the corner: everything else is background.
     let mut layer = VideoLayer::new(VideoRect::new(0, 0, 1, 1));
     layer.fit = video_layer::VideoFit::Stretch;
-    let mut sink = handle.add_source("corner", layer).unwrap().unwrap().sink;
+    let mut sink = handle.add_source("corner", layer).unwrap().sink;
     let texture = bgra_texture(&device, 1, 1, [0, 0, 255, 255]);
     sink.consume(pooled_video(wrap_d3d11_texture(texture, 1, 1).unwrap()))
         .unwrap();

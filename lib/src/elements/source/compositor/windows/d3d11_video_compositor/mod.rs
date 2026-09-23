@@ -219,6 +219,12 @@ pub enum D3d11VideoCompositorError {
     /// Seeking was requested on a live compositor with no stored timeline.
     #[error("D3d11VideoCompositor doesn't support seeking a live composition")]
     SeekUnsupported,
+
+    /// The compositor this handle belongs to has stopped, so there is nothing
+    /// left to add to. Returned by the handle's `add_*` methods in place of
+    /// an input nothing would ever read.
+    #[error("the compositor has stopped")]
+    Stopped,
 }
 
 fn map_layer_error(error: VideoLayerError) -> D3d11VideoCompositorError {
@@ -293,10 +299,10 @@ impl D3d11VideoCompositorHandle {
         &self,
         name: impl Into<String>,
         layer: VideoLayer,
-    ) -> std::result::Result<Option<D3d11VideoLayerHandle>, D3d11VideoCompositorError> {
+    ) -> std::result::Result<D3d11VideoLayerHandle, D3d11VideoCompositorError> {
         video_layer::validate_layer(layer).map_err(map_layer_error)?;
         let Some(shared) = self.shared.upgrade() else {
-            return Ok(None);
+            return Err(D3d11VideoCompositorError::Stopped);
         };
         let name: Arc<str> = name.into().into();
         let id = video_layer::VideoInputId(shared.next_input_id.fetch_add(1, Ordering::Relaxed));
@@ -311,11 +317,11 @@ impl D3d11VideoCompositorHandle {
             .unwrap()
             .insert(name.clone(), input.clone());
 
-        Ok(Some(D3d11VideoLayerHandle {
+        Ok(D3d11VideoLayerHandle {
             id,
             name,
             input: Arc::downgrade(&input),
-        }))
+        })
     }
 
     /// Registers an input and returns its terminal Sink plus independent
@@ -327,11 +333,9 @@ impl D3d11VideoCompositorHandle {
         &self,
         name: impl Into<String>,
         layer: VideoLayer,
-    ) -> std::result::Result<Option<D3d11VideoCompositorInput>, D3d11VideoCompositorError> {
-        let Some(layer_handle) = self.register_input(name, layer)? else {
-            return Ok(None);
-        };
-        Ok(Some(D3d11VideoCompositorInput {
+    ) -> std::result::Result<D3d11VideoCompositorInput, D3d11VideoCompositorError> {
+        let layer_handle = self.register_input(name, layer)?;
+        Ok(D3d11VideoCompositorInput {
             sink: Box::new(D3d11VideoCompositorInputSink {
                 name: layer_handle.name.clone(),
                 pp_log: element_pp_log(ElementType::D3d11VideoCompositor, &layer_handle.name, None),
@@ -339,7 +343,7 @@ impl D3d11VideoCompositorHandle {
                 input: layer_handle.input.clone(),
             }),
             layer: layer_handle,
-        }))
+        })
     }
 
     /// Registers an input and returns *only* its layer handle — no `Sink`
@@ -351,7 +355,7 @@ impl D3d11VideoCompositorHandle {
         &self,
         name: impl Into<String>,
         layer: VideoLayer,
-    ) -> std::result::Result<Option<D3d11VideoLayerHandle>, D3d11VideoCompositorError> {
+    ) -> std::result::Result<D3d11VideoLayerHandle, D3d11VideoCompositorError> {
         self.register_input(name, layer)
     }
 
@@ -419,16 +423,16 @@ impl D3d11VideoCompositorHandle {
     /// internally, so unlike a hand-assembled `add_layer` +
     /// separately-supplied device there's no way to accidentally construct
     /// a `D3d11TextLayerHandle` against the wrong device — the one class
-    /// of bug a caller-supplied device would allow. Returns `None` if the
-    /// compositor has already been dropped, matching [`Self::add_layer`]'s
-    /// own contract.
+    /// of bug a caller-supplied device would allow. Fails with
+    /// [`D3d11VideoCompositorError::Stopped`] once the compositor is gone,
+    /// as [`Self::add_layer`] does.
     pub fn add_text_layer(
         &self,
         name: impl Into<String>,
         text_layer: TextLayer,
-    ) -> std::result::Result<Option<D3d11TextLayerHandle>, D3d11TextLayerError> {
+    ) -> std::result::Result<D3d11TextLayerHandle, D3d11TextLayerError> {
         let Some(device) = self.shared.upgrade().map(|shared| shared.device.clone()) else {
-            return Ok(None);
+            return Err(D3d11VideoCompositorError::Stopped.into());
         };
         // Validate everything that can fail before replacing an existing
         // registration with the same name.
@@ -442,16 +446,14 @@ impl D3d11VideoCompositorHandle {
             1,
             1,
         ));
-        let Some(layer) = self.add_layer(name, placeholder)? else {
-            return Ok(None);
-        };
-        Ok(Some(D3d11TextLayerHandle::new(
+        let layer = self.add_layer(name, placeholder)?;
+        Ok(D3d11TextLayerHandle::new(
             layer,
             &device,
             font,
             text_layer.font_size,
             text_layer.color,
-        )))
+        ))
     }
 }
 

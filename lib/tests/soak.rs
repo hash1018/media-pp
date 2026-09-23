@@ -204,7 +204,7 @@ fn record_once(path: &Path, teardown: Teardown) {
         .take(video)
         .expect("the muxer's own track");
 
-    let pipeline = Pipeline::new("soak-record", source, |source, ctx| {
+    let (pipeline, ()) = Pipeline::new("soak-record", source, |source, ctx| {
         let branch = ctx
             .branch()
             .queue("encode-frames", 8)
@@ -264,7 +264,7 @@ fn pause_resume_storm_does_not_grow_process_memory() {
     let _exclusive = common::exclusive();
     media_pp::init().expect("ffmpeg init");
     let (counter, frames) = FrameCounter::new("counter");
-    let pipeline = Pipeline::new("soak-control", test_source("video"), |source, ctx| {
+    let (pipeline, ()) = Pipeline::new("soak-control", test_source("video"), |source, ctx| {
         let branch = ctx.branch().queue("frames", 8).to(counter)?;
         ctx.attach(source, 0, branch)?;
         Ok(())
@@ -314,7 +314,7 @@ fn seek_storm_does_not_grow_process_memory() {
     let (source, index, parameters) = open_fixture(&path);
 
     let (counter, frames) = FrameCounter::new("counter");
-    let pipeline = Pipeline::new("soak-seek", source, |source, ctx| {
+    let (pipeline, ()) = Pipeline::new("soak-seek", source, |source, ctx| {
         let decoder = SwDecoder::new("decoder", parameters)?;
         let branch = ctx.branch().pipe(decoder).queue("frames", 8).to(counter)?;
         ctx.attach(source, index, branch)?;
@@ -368,7 +368,7 @@ fn tee_branch_churn_does_not_grow_process_memory() {
     media_pp::init().expect("ffmpeg init");
     let (fixed_counter, fixed_frames) = FrameCounter::new("fixed-counter");
     let mut tee_handle = None;
-    let pipeline = Pipeline::new("soak-tee", test_source("video"), |source, ctx| {
+    let (pipeline, ()) = Pipeline::new("soak-tee", test_source("video"), |source, ctx| {
         let fixed = ctx.branch().to(fixed_counter)?;
         let (tee_branch, handle) = TeeBuilder::new("tee", ctx.clone())
             .branch(fixed)
@@ -441,7 +441,7 @@ fn compositor_input_churn_does_not_grow_process_memory() {
     .expect("create the compositor");
 
     let (counter, frames) = FrameCounter::new("counter");
-    let output = Pipeline::new("soak-compositor", compositor, |source, ctx| {
+    let (output, ()) = Pipeline::new("soak-compositor", compositor, |source, ctx| {
         let branch = ctx.branch().queue("composited", 4).to(counter)?;
         ctx.attach(source, 0, branch)?;
         Ok(())
@@ -456,10 +456,9 @@ fn compositor_input_churn_does_not_grow_process_memory() {
         layer.fit = VideoFit::Cover;
         let input = handle
             .add_source("churned", layer)
-            .expect("add a compositor input")
-            .expect("the compositor is alive while its pipeline runs");
+            .expect("add a compositor input");
 
-        let feeder = Pipeline::new("soak-compositor-input", test_source("input"), {
+        let (feeder, ()) = Pipeline::new("soak-compositor-input", test_source("input"), {
             let sink = input.sink;
             move |source, ctx| {
                 let branch = ctx.branch().to(sink)?;
@@ -535,11 +534,10 @@ fn a_running_compositor_does_not_grow_while_it_answers_frames() {
     layer.fit = VideoFit::Cover;
     let input = handle
         .add_source("moving", layer)
-        .expect("add a compositor input")
-        .expect("the compositor is alive");
+        .expect("add a compositor input");
 
     let (counter, frames) = FrameCounter::new("counter");
-    let output = Pipeline::new("soak-running-compositor", compositor, |source, ctx| {
+    let (output, ()) = Pipeline::new("soak-running-compositor", compositor, |source, ctx| {
         // A queue, so composited frames are still referenced when the next
         // composite replaces them — with a synchronous sink nothing is ever
         // held and the release has nothing to prove.
@@ -548,7 +546,7 @@ fn a_running_compositor_does_not_grow_while_it_answers_frames() {
         Ok(())
     })
     .expect("wire the compositor output pipeline");
-    let feeder = Pipeline::new("soak-running-input", test_source("input"), {
+    let (feeder, ()) = Pipeline::new("soak-running-input", test_source("input"), {
         let sink = input.sink;
         move |source, ctx| {
             let branch = ctx.branch().to(sink)?;
@@ -615,7 +613,7 @@ fn segment_rotation_does_not_grow_process_memory_or_hold_files() {
         .take(video)
         .expect("the muxer's own track");
 
-    let pipeline = Pipeline::new("soak-segments", source, |source, ctx| {
+    let (pipeline, ()) = Pipeline::new("soak-segments", source, |source, ctx| {
         let branch = ctx
             .branch()
             .queue("encode-frames", 8)
@@ -717,34 +715,35 @@ mod d3d11 {
         let (counter, frames) = FrameCounter::new("counter");
         let device = device.clone();
         let context = context.clone();
-        let pipeline = Pipeline::new("soak-d3d11", test_source("video"), move |source, ctx| {
-            let to_nv12 = SwScaler::new(
-                "to-nv12",
-                ffmpeg::format::Pixel::NV12,
-                WIDTH,
-                HEIGHT,
-                ffmpeg::software::scaling::Flags::BILINEAR,
-            );
-            let upload = D3d11Upload::new("upload", &device);
-            let scaler = D3d11Scaler::new(
-                "scaler",
-                &device,
-                context.clone(),
-                D3d11ScalerFormat::Preserve,
-                SCALED_WIDTH,
-                SCALED_HEIGHT,
-            )?;
-            let branch = ctx
-                .branch()
-                .pipe(to_nv12)
-                .pipe(upload)
-                .pipe(scaler)
-                .queue("gpu-frames", 4)
-                .to(counter)?;
-            ctx.attach(source, 0, branch)?;
-            Ok(())
-        })
-        .expect("wire the D3D11 pipeline");
+        let (pipeline, ()) =
+            Pipeline::new("soak-d3d11", test_source("video"), move |source, ctx| {
+                let to_nv12 = SwScaler::new(
+                    "to-nv12",
+                    ffmpeg::format::Pixel::NV12,
+                    WIDTH,
+                    HEIGHT,
+                    ffmpeg::software::scaling::Flags::BILINEAR,
+                );
+                let upload = D3d11Upload::new("upload", &device);
+                let scaler = D3d11Scaler::new(
+                    "scaler",
+                    &device,
+                    context.clone(),
+                    D3d11ScalerFormat::Preserve,
+                    SCALED_WIDTH,
+                    SCALED_HEIGHT,
+                )?;
+                let branch = ctx
+                    .branch()
+                    .pipe(to_nv12)
+                    .pipe(upload)
+                    .pipe(scaler)
+                    .queue("gpu-frames", 4)
+                    .to(counter)?;
+                ctx.attach(source, 0, branch)?;
+                Ok(())
+            })
+            .expect("wire the D3D11 pipeline");
 
         pipeline.run().unwrap();
         thread::sleep(Duration::from_millis(250));
@@ -788,11 +787,10 @@ mod d3d11 {
                 VideoLayer::new(VideoRect::new(0, 0, WIDTH, HEIGHT)),
             )
             .expect("register the compositor input")
-            .expect("the compositor is alive")
             .sink;
 
         let input_device = device.clone();
-        let input_pipeline = Pipeline::new("soak-d3d11-key-input", test_source("video"), {
+        let (input_pipeline, ()) = Pipeline::new("soak-d3d11-key-input", test_source("video"), {
             move |source, ctx| {
                 let to_nv12 = SwScaler::new(
                     "to-nv12",
@@ -812,26 +810,27 @@ mod d3d11 {
         let (counter, frames) = FrameCounter::new("counter");
         let key_device = device.clone();
         let key_context = context.clone();
-        let output_pipeline = Pipeline::new("soak-d3d11-key", compositor, move |source, ctx| {
-            let (key, _key_handle) = D3d11ChromaKey::new(
-                "key",
-                &key_device,
-                key_context,
-                ChromaKeyOptions {
-                    method: ChromaKeyMethod::Green,
-                    threshold: 0.15,
-                    smoothing: 0.1,
-                },
-            )?;
-            let branch = ctx
-                .branch()
-                .pipe(key)
-                .queue("keyed-frames", 4)
-                .to(counter)?;
-            ctx.attach(source, 0, branch)?;
-            Ok(())
-        })
-        .expect("wire the chroma-key pipeline");
+        let (output_pipeline, ()) =
+            Pipeline::new("soak-d3d11-key", compositor, move |source, ctx| {
+                let (key, _key_handle) = D3d11ChromaKey::new(
+                    "key",
+                    &key_device,
+                    key_context,
+                    ChromaKeyOptions {
+                        method: ChromaKeyMethod::Green,
+                        threshold: 0.15,
+                        smoothing: 0.1,
+                    },
+                )?;
+                let branch = ctx
+                    .branch()
+                    .pipe(key)
+                    .queue("keyed-frames", 4)
+                    .to(counter)?;
+                ctx.attach(source, 0, branch)?;
+                Ok(())
+            })
+            .expect("wire the chroma-key pipeline");
 
         output_pipeline.run().unwrap();
         input_pipeline.run().unwrap();
@@ -858,7 +857,7 @@ mod d3d11 {
         let (source, index, parameters) = crate::open_fixture(path);
         let (counter, frames) = FrameCounter::new("counter");
         let device = device.clone();
-        let pipeline = Pipeline::new("soak-d3d11-decode", source, move |source, ctx| {
+        let (pipeline, ()) = Pipeline::new("soak-d3d11-decode", source, move |source, ctx| {
             let decoder =
                 D3d11Decoder::new("decoder", parameters, &device, DECODE_QUEUE_DEPTH as i32)?;
             let branch = ctx
@@ -910,7 +909,7 @@ mod d3d11 {
         let source = test_source("video");
         let device = device.clone();
         let context = context.clone();
-        let pipeline = Pipeline::new("soak-d3d11-nvenc", source, move |source, ctx| {
+        let (pipeline, ()) = Pipeline::new("soak-d3d11-nvenc", source, move |source, ctx| {
             let to_nv12 = SwScaler::new(
                 "to-nv12",
                 ffmpeg::format::Pixel::NV12,
@@ -1169,11 +1168,10 @@ mod d3d11 {
                 VideoLayer::new(VideoRect::new(0, 0, WIDTH, HEIGHT)),
             )
             .expect("register the compositor input")
-            .expect("the compositor is alive")
             .sink;
 
         let input_device = device.clone();
-        let feeder = Pipeline::new("soak-running-d3d11-input", test_source("video"), {
+        let (feeder, ()) = Pipeline::new("soak-running-d3d11-input", test_source("video"), {
             move |source, ctx| {
                 let to_nv12 = SwScaler::new(
                     "to-nv12",
@@ -1191,7 +1189,7 @@ mod d3d11 {
         .expect("wire the compositor input pipeline");
 
         let (counter, frames) = FrameCounter::new("counter");
-        let output = Pipeline::new("soak-running-d3d11", compositor, |source, ctx| {
+        let (output, ()) = Pipeline::new("soak-running-d3d11", compositor, |source, ctx| {
             // As in the software scenario: without a queue nothing is ever
             // still referenced when the next composite replaces it.
             let branch = ctx.branch().queue("composited", 4).to(counter)?;
@@ -1366,7 +1364,7 @@ mod d3d11 {
              capture source never released its output duplication",
         );
 
-        let pipeline = Pipeline::new("soak-dxgi-capture", source, |source, ctx| {
+        let (pipeline, ()) = Pipeline::new("soak-dxgi-capture", source, |source, ctx| {
             let branch = ctx.branch().queue("captured", 4).to(counter)?;
             ctx.attach(source, 0, branch)?;
             Ok(())
@@ -1630,7 +1628,7 @@ mod d3d11 {
             },
         )
         .expect("open WGC source");
-        let pipeline = Pipeline::new("soak-wgc-capture", source, |source, ctx| {
+        let (pipeline, ()) = Pipeline::new("soak-wgc-capture", source, |source, ctx| {
             let branch = ctx.branch().queue("captured", 4).to(counter)?;
             ctx.attach(source, 0, branch)?;
             Ok(())
@@ -1742,7 +1740,7 @@ mod d3d12 {
     fn cycle(device: &ID3D12Device, teardown: Teardown) -> usize {
         let (counter, frames) = FrameCounter::new("counter");
         let device = device.clone();
-        let pipeline = Pipeline::new("soak-d3d12", test_source("video"), move |source, ctx| {
+        let (pipeline, ()) = Pipeline::new("soak-d3d12", test_source("video"), move |source, ctx| {
             let to_nv12 = SwScaler::new(
                 "to-nv12",
                 ffmpeg::format::Pixel::NV12,
@@ -1848,35 +1846,36 @@ mod cuda {
     /// which is the ownership this scenario is actually measuring.
     fn cycle(device: &CudaDevice, teardown: Teardown) -> usize {
         let (counter, frames) = FrameCounter::new("counter");
-        let pipeline = Pipeline::new("soak-cuda", test_source("video"), move |source, ctx| {
-            let to_nv12 = SwScaler::new(
-                "to-nv12",
-                ffmpeg::format::Pixel::NV12,
-                WIDTH,
-                HEIGHT,
-                ffmpeg::software::scaling::Flags::BILINEAR,
-            );
-            let upload = CudaUpload::new("upload", device, CudaFrameFormat::Nv12)?;
-            let scaler = CudaScaler::new(
-                "scaler",
-                device,
-                SCALED_WIDTH,
-                SCALED_HEIGHT,
-                CudaScalerInterp::Bilinear,
-            );
-            let download = CudaDownload::new("download", device, CudaFrameFormat::Nv12);
-            let branch = ctx
-                .branch()
-                .pipe(to_nv12)
-                .pipe(upload)
-                .pipe(scaler)
-                .queue("gpu-frames", 4)
-                .pipe(download)
-                .to(counter)?;
-            ctx.attach(source, 0, branch)?;
-            Ok(())
-        })
-        .expect("wire the CUDA pipeline");
+        let (pipeline, ()) =
+            Pipeline::new("soak-cuda", test_source("video"), move |source, ctx| {
+                let to_nv12 = SwScaler::new(
+                    "to-nv12",
+                    ffmpeg::format::Pixel::NV12,
+                    WIDTH,
+                    HEIGHT,
+                    ffmpeg::software::scaling::Flags::BILINEAR,
+                );
+                let upload = CudaUpload::new("upload", device, CudaFrameFormat::Nv12)?;
+                let scaler = CudaScaler::new(
+                    "scaler",
+                    device,
+                    SCALED_WIDTH,
+                    SCALED_HEIGHT,
+                    CudaScalerInterp::Bilinear,
+                );
+                let download = CudaDownload::new("download", device, CudaFrameFormat::Nv12);
+                let branch = ctx
+                    .branch()
+                    .pipe(to_nv12)
+                    .pipe(upload)
+                    .pipe(scaler)
+                    .queue("gpu-frames", 4)
+                    .pipe(download)
+                    .to(counter)?;
+                ctx.attach(source, 0, branch)?;
+                Ok(())
+            })
+            .expect("wire the CUDA pipeline");
 
         pipeline.run().unwrap();
         thread::sleep(Duration::from_millis(250));
@@ -1908,7 +1907,7 @@ mod cuda {
     fn decode_cycle(device: &CudaDevice, path: &str, teardown: Teardown) -> usize {
         let (source, index, parameters) = crate::open_fixture(path);
         let (counter, frames) = FrameCounter::new("counter");
-        let pipeline = Pipeline::new("soak-cuda-decode", source, move |source, ctx| {
+        let (pipeline, ()) = Pipeline::new("soak-cuda-decode", source, move |source, ctx| {
             let decoder =
                 CudaDecoder::new("decoder", parameters, device, DECODE_QUEUE_DEPTH as i32)?;
             let branch = ctx
@@ -1951,7 +1950,7 @@ mod cuda {
     fn encode_cycle(device: &CudaDevice, teardown: Teardown) -> usize {
         let (counter, packets) = PacketCounter::new("counter");
         let source = test_source("video");
-        let pipeline = Pipeline::new("soak-cuda-nvenc", source, move |source, ctx| {
+        let (pipeline, ()) = Pipeline::new("soak-cuda-nvenc", source, move |source, ctx| {
             let to_nv12 = SwScaler::new(
                 "to-nv12",
                 ffmpeg::format::Pixel::NV12,
@@ -2195,7 +2194,7 @@ mod cuda {
         // `CudaDevice` is not cloneable, and retaining the primary context a
         // second time is what its own docs warn against next to in-flight work.
         let input_device = &device;
-        let feeder = Pipeline::new("soak-running-cuda-input", test_source("video"), {
+        let (feeder, ()) = Pipeline::new("soak-running-cuda-input", test_source("video"), {
             move |source, ctx| {
                 let to_nv12 = SwScaler::new(
                     "to-nv12",
@@ -2213,7 +2212,7 @@ mod cuda {
         .expect("wire the compositor input pipeline");
 
         let (counter, frames) = FrameCounter::new("counter");
-        let output = Pipeline::new("soak-running-cuda", compositor, |source, ctx| {
+        let (output, ()) = Pipeline::new("soak-running-cuda", compositor, |source, ctx| {
             // As in the software and D3D11 scenarios: without a queue nothing
             // is ever still referenced when the next composite replaces it.
             let branch = ctx.branch().queue("composited", 4).to(counter)?;
@@ -2462,7 +2461,7 @@ mod pipewire {
                  earlier source never closed its portal session or PipeWire stream",
             );
 
-        let pipeline = Pipeline::new("soak-pipewire-capture", source, |source, ctx| {
+        let (pipeline, ()) = Pipeline::new("soak-pipewire-capture", source, |source, ctx| {
             let branch = ctx.branch().queue("captured", 4).to(counter)?;
             ctx.attach(source, 0, branch)?;
             Ok(())
@@ -2495,7 +2494,7 @@ mod pipewire {
                      surfaces",
                 );
 
-        let pipeline = Pipeline::new("soak-pipewire-capture-gpu", source, |source, ctx| {
+        let (pipeline, ()) = Pipeline::new("soak-pipewire-capture-gpu", source, |source, ctx| {
             let branch = ctx.branch().queue("captured", 4).to(counter)?;
             ctx.attach(source, 0, branch)?;
             Ok(())

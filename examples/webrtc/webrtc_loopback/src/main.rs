@@ -189,12 +189,13 @@ mod example {
             count,
             pp_log: element_pp_log(ElementType::Other, "counter", None),
         };
-        Pipeline::new("webrtc-loopback", source, |source, ctx| {
+        let (pipeline, ()) = Pipeline::new("webrtc-loopback", source, |source, ctx| {
             let branch = ctx.branch().to(sink)?;
             ctx.attach(source, 0, branch)?;
             Ok(())
         })
-        .expect("WebRTC track pipeline wiring must succeed")
+        .expect("WebRTC track pipeline wiring must succeed");
+        pipeline
     }
 
     fn push_packets(sink: &mut WebRtcTrackSink) {

@@ -131,49 +131,45 @@ mod windows_example {
         let hwnd = handle.hwnd.get();
         let gpu = D3d12GpuContext::new().map_err(|error| Error::Other(format!("{error:?}")))?;
 
-        let mut audio_tee_handle = None;
-        let pipeline = Pipeline::new("av-playback", source, |source, context| {
-            let video_branch = context
-                .branch()
-                .pipe(SwDecoder::new(
-                    "video-decoder",
-                    streams.video_params.clone(),
-                )?)
-                .queue("video-frames", 32)
-                .pipe(VideoSynchronizer::new("video-sync"))
-                // After the synchronizer, not before: a frame it drops for
-                // being late never pays for the conversion or the upload.
-                // `D3d12Renderer` draws from a device resource only, so this
-                // pair is what carries CPU-decoded frames to the GPU.
-                .pipe(SwScaler::new(
-                    "to-nv12",
-                    ffmpeg::format::Pixel::NV12,
-                    target.width,
-                    target.height,
-                    ffmpeg::software::scaling::Flags::BILINEAR,
-                ))
-                .pipe(D3d12Upload::new("video-upload", gpu.device())?)
-                .to(render_common::d3d12_window_renderer(
-                    "video-renderer",
-                    &gpu,
-                    hwnd,
-                    target.width,
-                    target.height,
-                )
-                .map_err(|error| Error::Other(format!("{error:?}")))?)?;
-            context.attach(source, streams.video_index, video_branch)?;
+        let (pipeline, audio_tee_handle) =
+            Pipeline::new("av-playback", source, |source, context| {
+                let video_branch = context
+                    .branch()
+                    .pipe(SwDecoder::new(
+                        "video-decoder",
+                        streams.video_params.clone(),
+                    )?)
+                    .queue("video-frames", 32)
+                    .pipe(VideoSynchronizer::new("video-sync"))
+                    // After the synchronizer, not before: a frame it drops for
+                    // being late never pays for the conversion or the upload.
+                    // `D3d12Renderer` draws from a device resource only, so this
+                    // pair is what carries CPU-decoded frames to the GPU.
+                    .pipe(SwScaler::new(
+                        "to-nv12",
+                        ffmpeg::format::Pixel::NV12,
+                        target.width,
+                        target.height,
+                        ffmpeg::software::scaling::Flags::BILINEAR,
+                    ))
+                    .pipe(D3d12Upload::new("video-upload", gpu.device())?)
+                    .to(render_common::d3d12_window_renderer(
+                        "video-renderer",
+                        &gpu,
+                        hwnd,
+                        target.width,
+                        target.height,
+                    )?)?;
+                context.attach(source, streams.video_index, video_branch)?;
 
-            // Keep a stable insertion point on the demuxer's audio pad. With
-            // no branches attached the Tee cheaply drops packets, so playback
-            // starts video-only without decoding audio.
-            let (audio_tee, handle) =
-                TeeBuilder::new("audio-tee", context.clone()).build_dynamic()?;
-            context.attach(source, streams.audio_index, audio_tee)?;
-            audio_tee_handle = Some(handle);
-            Ok(())
-        })?;
-        let audio_tee_handle =
-            audio_tee_handle.ok_or_else(|| Error::Other("audio Tee was not initialized".into()))?;
+                // Keep a stable insertion point on the demuxer's audio pad. With
+                // no branches attached the Tee cheaply drops packets, so playback
+                // starts video-only without decoding audio.
+                let (audio_tee, handle) =
+                    TeeBuilder::new("audio-tee", context.clone()).build_dynamic()?;
+                context.attach(source, streams.audio_index, audio_tee)?;
+                Ok(handle)
+            })?;
 
         // Published before `run`, so a close that arrives from here on finds
         // the pipeline to stop. `true` means one already did.
@@ -269,37 +265,34 @@ mod linux_example {
         let cuda = CudaDevice::new()?;
         let gpu = VulkanGpuContext::new(target.display).map_err(Error::Other)?;
 
-        let mut audio_tee_handle = None;
-        let pipeline = Pipeline::new("av-playback", source, |source, context| {
-            let video_branch = context
-                .branch()
-                .pipe(CudaDecoder::new(
-                    "video-decoder",
-                    streams.video_params.clone(),
-                    &cuda,
-                    VIDEO_QUEUE_DEPTH as i32,
-                )?)
-                .queue("video-frames", VIDEO_QUEUE_DEPTH)
-                .pipe(VideoSynchronizer::new("video-sync"))
-                .to(render_common::cuda_window_renderer(
-                    "video-renderer",
-                    &gpu,
-                    &cuda,
-                    target.display,
-                    target.window,
-                    target.width,
-                    target.height,
-                )?)?;
-            context.attach(source, streams.video_index, video_branch)?;
+        let (pipeline, audio_tee_handle) =
+            Pipeline::new("av-playback", source, |source, context| {
+                let video_branch = context
+                    .branch()
+                    .pipe(CudaDecoder::new(
+                        "video-decoder",
+                        streams.video_params.clone(),
+                        &cuda,
+                        VIDEO_QUEUE_DEPTH as i32,
+                    )?)
+                    .queue("video-frames", VIDEO_QUEUE_DEPTH)
+                    .pipe(VideoSynchronizer::new("video-sync"))
+                    .to(render_common::cuda_window_renderer(
+                        "video-renderer",
+                        &gpu,
+                        &cuda,
+                        target.display,
+                        target.window,
+                        target.width,
+                        target.height,
+                    )?)?;
+                context.attach(source, streams.video_index, video_branch)?;
 
-            let (audio_tee, handle) =
-                TeeBuilder::new("audio-tee", context.clone()).build_dynamic()?;
-            context.attach(source, streams.audio_index, audio_tee)?;
-            audio_tee_handle = Some(handle);
-            Ok(())
-        })?;
-        let audio_tee_handle =
-            audio_tee_handle.ok_or_else(|| Error::Other("audio Tee was not initialized".into()))?;
+                let (audio_tee, handle) =
+                    TeeBuilder::new("audio-tee", context.clone()).build_dynamic()?;
+                context.attach(source, streams.audio_index, audio_tee)?;
+                Ok(handle)
+            })?;
 
         // Published before `run`, so a close that arrives from here on finds
         // the pipeline to stop. `true` means one already did.

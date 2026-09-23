@@ -86,10 +86,21 @@ impl PipelineBuilder {
     /// commit them with [`Context::attach`]. A wiring error aborts the
     /// builder without publishing a partially built pipeline.
     pub fn add_source<S: SourceElement + 'static>(
-        mut self,
-        mut source: S,
+        self,
+        source: S,
         wire: impl FnOnce(&mut S, &Arc<Context>) -> Result<()>,
     ) -> Result<Self> {
+        self.add_source_returning(source, wire)
+            .map(|(builder, ())| builder)
+    }
+
+    /// [`Self::add_source`], handing back whatever `wire` returned — what
+    /// [`Pipeline::new`] passes on to its caller.
+    pub(super) fn add_source_returning<S: SourceElement + 'static, T>(
+        mut self,
+        mut source: S,
+        wire: impl FnOnce(&mut S, &Arc<Context>) -> Result<T>,
+    ) -> Result<(Self, T)> {
         *source.pp_log_mut() =
             element_pp_log(source.element_type(), &source.name(), Some(&self.id));
         let source_id = self.graph.add_source(source.element_type(), source.name());
@@ -108,14 +119,14 @@ impl PipelineBuilder {
             completion: Arc::clone(&self.completion),
         });
         source.attach_context(&context);
-        wire(&mut source, &context)?;
+        let wired = wire(&mut source, &context)?;
         // A source is counted by what leaves its pads; it takes nothing in.
         counters.add_pads(source.src_pads().iter().map(SrcPad::counters));
         self.graph.register_counters(source_id, &counters);
         self.source_counters.push(counters);
         self.sources.push((source_id, Box::new(source)));
         self.control_pairs.push(control::channel());
-        Ok(self)
+        Ok((self, wired))
     }
 
     /// Finishes construction. At least one [`PipelineBuilder::add_source`]

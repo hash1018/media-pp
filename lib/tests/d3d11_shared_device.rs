@@ -160,7 +160,7 @@ fn four_d3d11_elements_share_one_device_across_queue_boundaries() {
             framerate: ffmpeg_next::Rational::new(60, 1),
         },
     );
-    let pipeline = Pipeline::new("d3d11-shared-device", source, |source, ctx| {
+    let (pipeline, ()) = Pipeline::new("d3d11-shared-device", source, |source, ctx| {
         let branch = ctx
             .branch()
             // Every `queue` here puts the element after it on its own thread.
@@ -286,8 +286,7 @@ fn a_capture_sharing_the_device_does_not_slow_the_compositor() {
                 ..VideoLayer::new(VideoRect::new(0, 0, format.width, format.height))
             },
         )
-        .expect("register the capture's layer")
-        .expect("the compositor is still running");
+        .expect("register the capture's layer");
 
     let composited = Arc::new(AtomicUsize::new(0));
     let counted = composited.clone();
@@ -298,7 +297,7 @@ fn a_capture_sharing_the_device_does_not_slow_the_compositor() {
         Ok(())
     });
 
-    let capture_pipeline = Pipeline::new("capture", capture, |source, ctx| {
+    let (capture_pipeline, ()) = Pipeline::new("capture", capture, |source, ctx| {
         let branch = ctx.branch().queue("captured", 4).to(input.sink)?;
         ctx.attach(source, 0, branch)?;
         Ok(())
@@ -306,7 +305,7 @@ fn a_capture_sharing_the_device_does_not_slow_the_compositor() {
     .expect("wire the capture pipeline");
     // Counted synchronously: a queue here would report its own worker's pace
     // rather than the compositor's, which is the number under test.
-    let composite_pipeline = Pipeline::new("composite", compositor, |source, ctx| {
+    let (composite_pipeline, ()) = Pipeline::new("composite", compositor, |source, ctx| {
         let branch = ctx.branch().to(sink)?;
         ctx.attach(source, 0, branch)?;
         Ok(())

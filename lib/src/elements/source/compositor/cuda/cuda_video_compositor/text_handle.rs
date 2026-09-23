@@ -112,7 +112,7 @@ impl CudaVideoCompositorHandle {
             ));
         }
         let Some(shared) = self.shared.upgrade() else {
-            return Err(CudaVideoCompositorError::SourceRemoved);
+            return Err(CudaVideoCompositorError::Stopped);
         };
         let font = ab_glyph::FontArc::try_from_vec(text_layer.font_data)
             .map_err(|error| CudaVideoCompositorError::InvalidFont(error.to_string()))?;

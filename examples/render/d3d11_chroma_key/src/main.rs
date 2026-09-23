@@ -116,7 +116,6 @@ mod windows_example {
         background_layer.fit = VideoFit::Cover;
         let background_sink = compositor_handle
             .add_source("background", background_layer)?
-            .expect("the compositor is alive")
             .sink;
 
         let mut keyed_layer = VideoLayer::new(VideoRect::new(
@@ -126,9 +125,7 @@ mod windows_example {
             SHOT_HEIGHT,
         ));
         keyed_layer.z_index = 1;
-        let keyed_input = compositor_handle
-            .add_source("keyed", keyed_layer)?
-            .expect("the compositor is alive");
+        let keyed_input = compositor_handle.add_source("keyed", keyed_layer)?;
         let keyed_sink = keyed_input.sink;
         let keyed_handle = keyed_input.layer;
 
@@ -136,33 +133,34 @@ mod windows_example {
         // AppSource hands over BGRA, D3d11Upload puts BGRA on the GPU, and
         // the key and the compositor both work in BGRA from there.
         let (green_screen, green_screen_handle) = AppSource::new("green-screen", 8);
-        let keyed_pipeline = Pipeline::new("keyed-foreground", green_screen, |source, ctx| {
-            let upload = D3d11Upload::new("upload", gpu.device());
-            // The handle is what retunes the key while it runs, without
-            // rebuilding the branch — this example sets the threshold once
-            // and keeps it, so it has no use for one.
-            let (key, _key_handle) = D3d11ChromaKey::new(
-                "key",
-                gpu.device(),
-                gpu.context(),
-                ChromaKeyOptions {
-                    method: ChromaKeyMethod::Green,
-                    // The backdrop is exactly the key color here, so the
-                    // threshold only has to cover the feathered edge the
-                    // smoothing band creates around the figure.
-                    threshold: 0.15,
-                    smoothing: 0.1,
-                },
-            )?;
-            let branch = ctx.branch().pipe(upload).pipe(key).to(keyed_sink)?;
-            ctx.attach(source, 0, branch)?;
-            Ok(())
-        })?;
+        let (keyed_pipeline, ()) =
+            Pipeline::new("keyed-foreground", green_screen, |source, ctx| {
+                let upload = D3d11Upload::new("upload", gpu.device());
+                // The handle is what retunes the key while it runs, without
+                // rebuilding the branch — this example sets the threshold once
+                // and keeps it, so it has no use for one.
+                let (key, _key_handle) = D3d11ChromaKey::new(
+                    "key",
+                    gpu.device(),
+                    gpu.context(),
+                    ChromaKeyOptions {
+                        method: ChromaKeyMethod::Green,
+                        // The backdrop is exactly the key color here, so the
+                        // threshold only has to cover the feathered edge the
+                        // smoothing band creates around the figure.
+                        threshold: 0.15,
+                        smoothing: 0.1,
+                    },
+                )?;
+                let branch = ctx.branch().pipe(upload).pipe(key).to(keyed_sink)?;
+                ctx.attach(source, 0, branch)?;
+                Ok(())
+            })?;
 
         // What the keyed figure is composited over. A compositor input has
         // to be GPU-resident, and this one comes from a decoder-shaped
         // source, so it takes the NV12 route through the same element.
-        let background_pipeline = Pipeline::new(
+        let (background_pipeline, ()) = Pipeline::new(
             "background-feed",
             TestVideoSource::new(
                 "background-source",
@@ -203,7 +201,7 @@ mod windows_example {
         let track = muxer.add_stream("video", encoder.parameters(), encoder.time_base())?;
         let muxer_sink = muxer.open()?.take(track)?;
 
-        let record_pipeline = Pipeline::new("record", compositor, |source, ctx| {
+        let (record_pipeline, ()) = Pipeline::new("record", compositor, |source, ctx| {
             let download = D3d11Download::new("download", gpu.device(), gpu.context())?;
             let to_yuv = SwScaler::new(
                 "to-yuv",
