@@ -58,7 +58,7 @@ mod example {
 
         pipeline.run()?;
 
-        // Watch for `Eos`/`Error` and `stop()` on either — errors no longer
+        // Watch for `Finished`/`Error` and `stop()` on either — errors no longer
         // end the pipeline on their own, so this is what makes the loop
         // below actually finish instead of running forever after a failure.
         for event in pipeline.bus().iter() {
@@ -78,7 +78,7 @@ mod example {
                 // on the events above.
                 _ => {}
             }
-            if matches!(event, BusEvent::Eos { .. } | BusEvent::Error { .. }) {
+            if matches!(event, BusEvent::Finished | BusEvent::Error { .. }) {
                 pipeline.stop();
             }
         }

@@ -57,12 +57,11 @@ mod example {
         pipeline.run()?;
 
         // Same output `log_events()` would print, but also calls `stop()` on
-        // `Eos`/`Error` — errors no longer end the pipeline on their own (see
+        // `Finished`/`Error` — errors no longer end the pipeline on their own (see
         // `BusEvent`'s docs), so watching for one here is what makes this
-        // still exit instead of running forever after a failure. Single
-        // stream, so `Eos` calling `stop()` is a harmless no-op (everything's
-        // already finished by then) — a multi-stream pipeline would need to
-        // wait for every branch's `Eos` before stopping.
+        // still exit instead of running forever after a failure. `Finished`
+        // rather than `Eos`: every element that ends posts an `Eos`, and
+        // `Finished` is the pipeline saying they all have.
         for event in pipeline.bus().iter() {
             match &event {
                 BusEvent::Eos { name, .. } => println!("[{name}] eos"),
@@ -80,7 +79,7 @@ mod example {
                 // on the events above.
                 _ => {}
             }
-            if matches!(event, BusEvent::Eos { .. } | BusEvent::Error { .. }) {
+            if matches!(event, BusEvent::Finished | BusEvent::Error { .. }) {
                 pipeline.stop();
             }
         }

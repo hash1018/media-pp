@@ -133,7 +133,7 @@ mod windows_example {
                 // on the events above.
                 _ => {}
             }
-            if matches!(event, BusEvent::Eos { .. } | BusEvent::Error { .. }) {
+            if matches!(event, BusEvent::Finished | BusEvent::Error { .. }) {
                 pipeline.stop();
             }
         }
@@ -241,7 +241,7 @@ mod linux_example {
                 }
                 _ => {}
             }
-            if matches!(event, BusEvent::Eos { .. } | BusEvent::Error { .. }) {
+            if matches!(event, BusEvent::Finished | BusEvent::Error { .. }) {
                 pipeline.stop();
             }
         }

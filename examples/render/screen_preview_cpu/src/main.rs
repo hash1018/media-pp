@@ -158,7 +158,7 @@ mod windows_example {
             // frame is expected backpressure, not a reason to end the whole
             // demo — the `Queue` in front of the renderer already drops just
             // that one buffer and keeps going (see `Queue`'s own "report,
-            // don't die" contract). Only stop for `Eos`, or an `Error` from
+            // don't die" contract). Only stop for `Finished`, or an `Error` from
             // `DxgiCaptureSource` itself (its `run()` thread actually ended —
             // e.g. `DXGI_ERROR_ACCESS_LOST` from a lock screen — so nothing
             // more will ever arrive).
@@ -166,7 +166,7 @@ mod windows_example {
                 &event,
                 BusEvent::Error { element_type, .. } if *element_type == ElementType::DxgiCaptureSource
             );
-            if matches!(event, BusEvent::Eos { .. }) || source_died {
+            if matches!(event, BusEvent::Finished) || source_died {
                 pipeline.stop();
             }
         }
@@ -281,7 +281,7 @@ mod linux_example {
                 BusEvent::Error { element_type, .. }
                     if *element_type == ElementType::PipeWireScreenCaptureSource
             );
-            if matches!(event, BusEvent::Eos { .. }) || source_died {
+            if matches!(event, BusEvent::Finished) || source_died {
                 pipeline.stop();
             }
         }

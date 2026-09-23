@@ -14,6 +14,7 @@
 
 mod builder;
 pub(crate) mod chain;
+pub(crate) mod completion;
 mod runtime;
 
 pub use builder::PipelineBuilder;

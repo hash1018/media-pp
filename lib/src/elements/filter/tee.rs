@@ -381,6 +381,12 @@ impl TeeHandle {
         if let Some(snapshot) = snapshot {
             log_topology(&self.pp_log, "detach", &snapshot);
         }
+        // Its terminal will never end now, and was the last one the rest of
+        // the pipeline was waiting on if everything else already has.
+        shared
+            .context
+            .completion
+            .branch_removed(&shared.context.bus);
         Ok(())
     }
 
@@ -438,6 +444,16 @@ impl TeeHandle {
         let (removed, snapshot) = self.remove_branch(&shared, branch_id)?;
         if let Some(snapshot) = snapshot {
             log_topology(&self.pp_log, "detach", &snapshot);
+        }
+        // A branch whose `Eos` went out is counted when its terminal reports
+        // it, which is after the trailer is written — not here, which is
+        // before. One whose `Eos` failed will never report, so the rest of
+        // the pipeline is judged without it now.
+        if eos.is_err() {
+            shared
+                .context
+                .completion
+                .branch_removed(&shared.context.bus);
         }
 
         if let Some(removed) = removed {

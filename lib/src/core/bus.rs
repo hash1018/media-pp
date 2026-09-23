@@ -27,6 +27,10 @@ use crate::{element::ElementType, error::Error, graph::ElementId};
 #[non_exhaustive]
 pub enum BusEvent {
     /// An element completed ordered end-of-stream processing.
+    ///
+    /// Every element that does says so — a `Queue` as well as the muxer
+    /// after it — so one of these is not the pipeline ending. Watch
+    /// [`BusEvent::Finished`] for that.
     Eos {
         /// Built-in kind of the element that completed.
         element_type: ElementType,
@@ -70,6 +74,22 @@ pub enum BusEvent {
         /// Absolute media position at which the source actually resumed.
         landed: Duration,
     },
+
+    /// Every terminal sink in the pipeline has accepted end-of-stream: the
+    /// muxers have written their trailers, the renderers have taken their
+    /// last frame. Posted once per stream, after the last terminal's own
+    /// [`BusEvent::Eos`], and posted again only after a seek has sent a new
+    /// stream through — so this, not the first `Eos`, is when a pipeline
+    /// played to its end can be stopped.
+    ///
+    /// Terminals are counted as the graph stands when each one ends: a
+    /// branch a `Tee` detaches no longer has to, and one it finishes counts
+    /// once its own `Eos` arrives. It is not posted for a terminal that
+    /// failed its `Eos` — that failure is a [`BusEvent::Error`] — nor for a
+    /// source that stopped on an error, whose branches are stopped rather
+    /// than ended. Posted by the pipeline, not an element, so its
+    /// [`BusMessage::element_id`] is `None`.
+    Finished,
 }
 
 /// Cross-thread event channel. Once a buffer crosses a `Queue` boundary,
@@ -117,6 +137,15 @@ impl Bus {
             },
             BusReceiver { rx },
         )
+    }
+
+    /// The same channel, posting as the pipeline rather than as any one
+    /// element of it.
+    pub(crate) fn for_pipeline(&self) -> Bus {
+        Bus {
+            tx: self.tx.clone(),
+            element_id: None,
+        }
     }
 
     pub(crate) fn for_element(&self, element_id: ElementId) -> Bus {
@@ -184,6 +213,7 @@ impl Bus {
             BusEvent::Seeked {
                 requested, landed, ..
             } => pp_info!(pp_log: pp_log, "seeked: requested {requested:.2?}, landed {landed:.2?}"),
+            BusEvent::Finished => pp_info!(pp_log: pp_log, "event=finished"),
         }
         // Nothing to do if the receiving end is gone (pipeline dropped).
         let _ = self.tx.send(BusMessage {
@@ -248,7 +278,7 @@ impl BusReceiver {
 
     /// Blocks and prints events in a common default format (`[name] eos`,
     /// `[name] error: ...`, `[name] dropped a buffer (queue full)`,
-    /// `[name] seeked: requested ... landed ...`) until every corresponding
+    /// `[name] seeked: requested ... landed ...`, `finished`) until every corresponding
     /// [`Bus`] sender has been dropped. This consumes both events already
     /// queued and events posted while the call is waiting; use
     /// [`BusReceiver::try_recv`] to drain only what is currently available.
@@ -273,6 +303,7 @@ impl BusReceiver {
                     landed,
                     ..
                 } => println!("[{name}] seeked: requested {requested:.2?}, landed {landed:.2?}"),
+                BusEvent::Finished => println!("finished"),
             }
         }
     }

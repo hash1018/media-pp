@@ -73,6 +73,11 @@
 //! pipeline ends — [`Pipeline::finish`](pipeline::Pipeline::finish) sends
 //! ordered EOS from the source and drains everything behind it, while
 //! [`Pipeline::stop`](pipeline::Pipeline::stop) abandons buffered work.
+//! Every element that completes EOS posts a
+//! [`BusEvent::Eos`](bus::BusEvent::Eos), so the first one on the bus is only
+//! the first thing to end; the pipeline posts
+//! [`BusEvent::Finished`](bus::BusEvent::Finished) once every terminal sink
+//! has, and that is when a stream played to its end can be stopped.
 //!
 //! # Changing a running pipeline
 //!

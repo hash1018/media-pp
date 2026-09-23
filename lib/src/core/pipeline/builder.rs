@@ -15,7 +15,7 @@ use crate::{
     stats::ElementCounters,
 };
 
-use super::{Pipeline, runtime::PrerollSlot};
+use super::{Pipeline, completion::Completion, runtime::PrerollSlot};
 
 pub(super) type SourceEntry = (ElementId, Box<dyn SourceElement>);
 
@@ -53,6 +53,7 @@ pub struct PipelineBuilder {
     /// pipeline runs and nothing wraps it the way a chain wraps a stage,
     /// so the pipeline is what keeps them — see [`crate::stats`].
     source_counters: Vec<Arc<ElementCounters>>,
+    completion: Arc<Completion>,
 }
 
 impl PipelineBuilder {
@@ -64,13 +65,15 @@ impl PipelineBuilder {
         let id: Arc<str> = id.into().into();
         let (bus, bus_rx) = Bus::new();
         let clock = Arc::new(Clock::new());
+        let graph = PipelineGraph::new();
         Self {
+            completion: Completion::new(graph.clone(), pipeline_pp_log(&id)),
             id,
             bus,
             bus_rx,
             playback_clock: Arc::new(PlaybackClock::new(clock.clone())),
             clock,
-            graph: PipelineGraph::new(),
+            graph,
             sources: Vec::new(),
             control_pairs: Vec::new(),
             operation: Arc::new(Mutex::new(())),
@@ -102,6 +105,7 @@ impl PipelineBuilder {
             operation: Arc::clone(&self.operation),
             source_id,
             source_counters: Arc::clone(&counters),
+            completion: Arc::clone(&self.completion),
         });
         source.attach_context(&context);
         wire(&mut source, &context)?;

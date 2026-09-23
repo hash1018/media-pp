@@ -27,6 +27,7 @@ use crate::{
     pad::SrcPad,
 };
 
+mod completion;
 mod contracts;
 mod graph;
 mod lifecycle;

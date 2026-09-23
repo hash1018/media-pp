@@ -139,14 +139,12 @@ mod windows_example {
         }
 
         // Same output `log_events()` would print, but also calls `stop()` on
-        // `Eos`/`Error` — errors no longer end the pipeline on their own (see
+        // `Finished`/`Error` — errors no longer end the pipeline on their own (see
         // `BusEvent`'s docs), so without this an error here (e.g. the
         // renderer's GPU upload ring running out of slots) would just get
-        // printed forever instead of ending playback. `Eos` calling `stop()`
-        // too is a harmless no-op in this example (single video stream, one
-        // `Eos` means everything's already finished) — a multi-stream
-        // pipeline would need to wait for every branch's `Eos`, not stop on
-        // the first one.
+        // printed forever instead of ending playback. `Finished` rather than
+        // `Eos`: every element that ends posts one, so the first `Eos` is
+        // only the first thing to end.
         for event in pipeline.bus().iter() {
             match &event {
                 BusEvent::Eos { name, .. } => println!("[{name}] eos"),
@@ -164,7 +162,7 @@ mod windows_example {
                 // on the events above.
                 _ => {}
             }
-            if matches!(event, BusEvent::Eos { .. } | BusEvent::Error { .. }) {
+            if matches!(event, BusEvent::Finished | BusEvent::Error { .. }) {
                 pipeline.stop();
             }
         }
@@ -343,7 +341,7 @@ mod linux_example {
                 } => println!("[{name}] seeked: requested {requested:.2?}, landed {landed:.2?}"),
                 _ => {}
             }
-            if matches!(event, BusEvent::Eos { .. } | BusEvent::Error { .. }) {
+            if matches!(event, BusEvent::Finished | BusEvent::Error { .. }) {
                 pipeline.stop();
             }
         }

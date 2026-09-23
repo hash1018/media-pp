@@ -17,7 +17,6 @@ mod example {
     use media_pp::ffmpeg::media;
     use media_pp::{
         bus::BusEvent,
-        element::ElementType,
         elements::{FileDemuxer, Pacer, RtspMuxer, RtspTransport},
         pipeline::Pipeline,
     };
@@ -56,7 +55,7 @@ mod example {
             }
             None => None,
         };
-        // How many `Eos` events to wait for below — one per published track.
+        // How many tracks go out, said when publishing starts and when it ends.
         let tracks = 1 + usize::from(audio_track.is_some());
 
         println!("publishing to {url} (the RTSP server must already be running) ...");
@@ -113,17 +112,12 @@ mod example {
         //
         // Natural completion waits for *every* track, not the first: the
         // session's trailer is only written once all of them report `Eos`,
-        // so stopping on whichever finishes first would cut the other off.
-        let mut finished = 0;
+        // so this stops on `Finished`, which the pipeline posts once every
+        // terminal has ended, rather than on whichever track ends first.
         for event in pipeline.bus().iter() {
             match &event {
-                BusEvent::Eos {
-                    name,
-                    element_type: ElementType::RtspMuxer,
-                } => {
-                    finished += 1;
-                    println!("[{name}] eos ({finished}/{tracks})");
-                }
+                BusEvent::Eos { name, .. } => println!("[{name}] eos"),
+                BusEvent::Finished => println!("all {tracks} track(s) published"),
                 BusEvent::Error { name, error, .. } => eprintln!("[{name}] error: {error}"),
                 BusEvent::Dropped { name, .. } => {
                     eprintln!("[{name}] dropped a buffer (queue full)")
@@ -138,7 +132,7 @@ mod example {
                 // on the events above.
                 _ => {}
             }
-            if finished == tracks || matches!(event, BusEvent::Error { .. }) {
+            if matches!(event, BusEvent::Finished | BusEvent::Error { .. }) {
                 pipeline.stop();
             }
         }

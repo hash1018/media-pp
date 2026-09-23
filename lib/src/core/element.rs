@@ -348,6 +348,9 @@ pub struct Context {
     /// source runs on its own thread with nothing wrapping it, so this is
     /// the one place it can be handed them.
     pub(crate) source_counters: Arc<ElementCounters>,
+    /// Which of the pipeline's terminals have ended, shared by every
+    /// source's context — see [`crate::bus::BusEvent::Finished`].
+    pub(crate) completion: Arc<crate::pipeline::completion::Completion>,
 }
 
 impl Context {
@@ -386,9 +389,14 @@ impl Context {
         source_id: ElementId,
         clock: Arc<Clock>,
     ) -> Self {
+        let pipeline_id: Arc<str> = pipeline_id.into();
         Self {
             bus,
-            pipeline_id: pipeline_id.into(),
+            completion: crate::pipeline::completion::Completion::new(
+                graph.clone(),
+                pipeline_pp_log(&pipeline_id),
+            ),
+            pipeline_id,
             graph,
             playback_clock: Arc::new(PlaybackClock::new(clock.clone())),
             clock,

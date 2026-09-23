@@ -119,8 +119,8 @@ mod windows_example {
         // Errors no longer end the pipeline on their own (see `BusEvent`'s
         // docs) — watch for one here and `stop()`, or this window would just
         // sit open (showing a frozen last frame) instead of closing after a
-        // renderer failure. Single video stream, so `Eos` calling `stop()` is
-        // a harmless no-op too.
+        // renderer failure. The end of the stream is `Finished`, which the
+        // pipeline posts once every terminal has ended.
         for event in pipeline.bus().iter() {
             match &event {
                 BusEvent::Eos { name, .. } => println!("[{name}] eos"),
@@ -138,7 +138,7 @@ mod windows_example {
                 // on the events above.
                 _ => {}
             }
-            if matches!(event, BusEvent::Eos { .. } | BusEvent::Error { .. }) {
+            if matches!(event, BusEvent::Finished | BusEvent::Error { .. }) {
                 pipeline.stop();
             }
         }

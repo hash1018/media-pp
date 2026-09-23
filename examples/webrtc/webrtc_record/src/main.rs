@@ -27,7 +27,6 @@ fn main() -> impl std::process::Termination {
 
 mod example {
     use std::{
-        collections::HashSet,
         net::UdpSocket,
         sync::{Arc, mpsc::Receiver},
         thread,
@@ -38,7 +37,6 @@ mod example {
     use media_pp::{
         bus::{BusEvent, BusReceiver},
         driver::DriverRunner,
-        element::Element,
         elements::{
             AudioCodec, FileDemuxer, FileMuxer, Pacer, SwAudioEncoder, SwAudioEncoderOptions,
             SwDecoder, SwEncoder, SwEncoderOptions, SwScaler, TrackEndpoints, VideoCodec,
@@ -90,8 +88,6 @@ mod example {
         )?;
         println!("one WebRTC connection negotiated video (H.264) and audio (Opus) tracks");
 
-        let video_sink_name = video_sink.name();
-        let audio_sink_name = audio_sink.name();
         let send = send_pipeline(input, video_sink, audio_sink)?;
         send.run()?;
 
@@ -120,13 +116,13 @@ mod example {
         recv.run()?;
         println!("recording received tracks to {output_path}");
 
-        wait_for_eos("sender", send.bus(), [&*video_sink_name, &*audio_sink_name])?;
+        wait_for_finished("sender", send.bus())?;
         // Closing the sender peer emits DTLS close_notify. The receiver peer then
         // closes both track channels; each source forwards EOS and the shared MP4
         // muxer writes its trailer only after both tracks are done.
         driver_a.stop();
         drain_driver("peer-a", &driver_a)?;
-        wait_for_eos(recv.id(), recv.bus(), ["received-video", "received-audio"])?;
+        wait_for_finished(recv.id(), recv.bus())?;
 
         send.stop();
         recv.stop();
@@ -390,19 +386,12 @@ mod example {
         Ok((sink, source))
     }
 
-    fn wait_for_eos<'a>(
-        owner: &str,
-        bus: &BusReceiver,
-        names: impl IntoIterator<Item = &'a str>,
-    ) -> media_pp::Result<()> {
-        let mut pending: HashSet<String> = names.into_iter().map(str::to_owned).collect();
+    /// Waits until every terminal of `owner`'s pipeline has ended.
+    fn wait_for_finished(owner: &str, bus: &BusReceiver) -> media_pp::Result<()> {
         for event in bus.iter() {
             match &event {
-                BusEvent::Eos { name, .. } => {
-                    if pending.remove(name.as_ref()) {
-                        println!("[{owner}/{name}] eos");
-                    }
-                }
+                BusEvent::Eos { name, .. } => println!("[{owner}/{name}] eos"),
+                BusEvent::Finished => return Ok(()),
                 BusEvent::Error { name, error, .. } => {
                     return Err(media_pp::Error::Other(format!(
                         "[{owner}/{name}] pipeline error: {error}"
@@ -413,12 +402,9 @@ mod example {
                 }
                 _ => {}
             }
-            if pending.is_empty() {
-                return Ok(());
-            }
         }
         Err(media_pp::Error::Other(format!(
-            "{owner} ended before EOS from {pending:?}"
+            "{owner} ended before every branch did"
         )))
     }
 

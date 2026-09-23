@@ -253,6 +253,10 @@ struct TerminalTracer {
     paused: bool,
     preroll: Option<Arc<crate::control::PrerollContext>>,
     counters: Arc<ElementCounters>,
+    /// Told when this terminal ends, and when a seek flushes it, so the
+    /// pipeline can say when every terminal has — see
+    /// [`BusEvent::Finished`].
+    completion: Arc<crate::pipeline::completion::Completion>,
 }
 
 impl Element for TerminalTracer {
@@ -334,6 +338,7 @@ impl Sink for TerminalTracer {
                             name: self.inner.name(),
                         },
                     );
+                    self.completion.terminal_ended(self.id, &self.bus);
                 }
                 Err(error) => pp_trace!(
                     pp_log: self.inner.pp_log(),
@@ -355,6 +360,12 @@ impl Sink for TerminalTracer {
             .inner
             .control(msg.clone())
             .map_err(|error| error.traced_at(self.inner.element_type(), self.inner.name()));
+        // Whether or not the sink managed its own flush: a seek is under way
+        // either way, and what this terminal ended belongs to the stream
+        // before it.
+        if matches!(msg, ControlMsg::Flush) {
+            self.completion.terminal_flushed(self.id);
+        }
         if result.is_ok() {
             match &msg {
                 ControlMsg::Pause => {
@@ -584,6 +595,7 @@ impl ChainBuilder {
             paused: false,
             preroll: None,
             counters: terminal_counters,
+            completion: Arc::clone(&self.context.completion),
         });
         let plan = BranchPlan {
             nodes,
@@ -840,6 +852,10 @@ mod tests {
             paused: false,
             preroll: None,
             counters: ElementCounters::new(),
+            completion: crate::pipeline::completion::Completion::new(
+                crate::graph::PipelineGraph::new(),
+                element_pp_log(ElementType::Other, "pipeline", None),
+            ),
         }
     }
 

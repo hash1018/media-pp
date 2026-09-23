@@ -240,8 +240,9 @@ mod linux_example {
 ///
 /// Errors no longer end the pipeline on their own (see `BusEvent`'s docs) —
 /// this watches for one and `stop()`s, or the window would sit open on a
-/// frozen last frame after a renderer failure. Single video stream, so
-/// `Eos` calling `stop()` is a harmless no-op too.
+/// frozen last frame after a renderer failure. It stops on `Finished`, which
+/// the pipeline posts once every terminal has ended, rather than on the
+/// first `Eos` any element posts.
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 fn drain_bus(pipeline: &media_pp::pipeline::Pipeline) {
     use media_pp::bus::BusEvent;
@@ -263,7 +264,7 @@ fn drain_bus(pipeline: &media_pp::pipeline::Pipeline) {
             // the events above.
             _ => {}
         }
-        if matches!(event, BusEvent::Eos { .. } | BusEvent::Error { .. }) {
+        if matches!(event, BusEvent::Finished | BusEvent::Error { .. }) {
             pipeline.stop();
         }
     }

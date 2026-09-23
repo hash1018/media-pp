@@ -80,7 +80,6 @@ mod example {
             .into_iter()
             .map(|(stream_index, track)| Ok((stream_index, sinks.take(track)?)))
             .collect::<media_pp::Result<Vec<_>>>()?;
-        let mut remaining = routes.len();
 
         let pipeline = Pipeline::new("remux", source, |source, ctx| {
             for (stream_index, sink) in routes {
@@ -94,22 +93,20 @@ mod example {
         pipeline.run()?;
 
         // Multiple tracks means multiple `BusEvent::Eos` (one per stream's own
-        // `FileMuxer` sink) — only `stop()` once every kept stream has reported
-        // its own `Eos`, not the first one (see `FileMuxer::open`'s own docs on
-        // why finalizing early would truncate whichever track is still going).
+        // `FileMuxer` sink), so this stops on `Finished` — every kept stream
+        // has ended — rather than the first `Eos` (see `FileMuxer::open`'s own
+        // docs on why finalizing early would truncate whichever track is still
+        // going).
         for event in pipeline.bus().iter() {
             match &event {
-                BusEvent::Eos { name, .. } => {
-                    println!("[{name}] eos");
-                    remaining = remaining.saturating_sub(1);
-                }
+                BusEvent::Eos { name, .. } => println!("[{name}] eos"),
                 BusEvent::Error { name, error, .. } => eprintln!("[{name}] error: {error}"),
                 BusEvent::Dropped { name, .. } => {
                     eprintln!("[{name}] dropped a buffer (queue full)")
                 }
                 _ => {}
             }
-            if remaining == 0 || matches!(event, BusEvent::Error { .. }) {
+            if matches!(event, BusEvent::Finished | BusEvent::Error { .. }) {
                 pipeline.stop();
             }
         }

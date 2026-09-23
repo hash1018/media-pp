@@ -300,6 +300,34 @@ compile error with no explanation.
 
 ### Added
 
+- **`BusEvent::Finished`: the pipeline says when it has ended.** Every
+  element that completes end-of-stream posts an `Eos` — a `Queue` as well
+  as the muxer after it — so the first `Eos` on the bus is only the first
+  thing to end, and a pipeline stopped on it cuts off whatever was still
+  draining: the second track of a file, the other side of a `Tee`.
+  `Finished` is posted once every terminal sink has accepted `Eos`, after
+  the last one's own, and again only after a seek sends a new stream
+  through. A branch a `Tee` detaches is no longer waited for; one it
+  finishes is counted when its trailer is written. A terminal that fails
+  its `Eos` does not count as ended — that failure is the `Error` to act
+  on. Stop on it instead of counting `Eos` events:
+
+  ```rust
+  // before
+  if matches!(event, BusEvent::Eos { .. } | BusEvent::Error { .. }) {
+      pipeline.stop();
+  }
+
+  // after
+  if matches!(event, BusEvent::Finished | BusEvent::Error { .. }) {
+      pipeline.stop();
+  }
+  ```
+
+  `BusEvent` is `#[non_exhaustive]`, so a `match` with a `_` arm keeps
+  compiling. The examples that stopped on the first `Eos`, or counted them,
+  now stop on `Finished`.
+
 - **A decoded frame says what unit its timestamps are in.**
   `buffer::time_base` reads it and `buffer::set_time_base` sets it. FFmpeg's
   decoders leave `AVFrame::time_base` unset, so every element in this crate

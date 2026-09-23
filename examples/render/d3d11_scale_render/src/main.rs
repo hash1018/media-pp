@@ -138,7 +138,7 @@ mod windows_example {
                 } => println!("[{name}] seeked: requested {requested:.2?}, landed {landed:.2?}"),
                 _ => {}
             }
-            if matches!(event, BusEvent::Eos { .. } | BusEvent::Error { .. }) {
+            if matches!(event, BusEvent::Finished | BusEvent::Error { .. }) {
                 pipeline.stop();
             }
         }

@@ -357,14 +357,14 @@ mod windows_example {
                 // on the events above.
                 _ => {}
             }
-            // Only stop for EOS or an error from the selected source itself;
-            // an occasional dropped/backpressured frame elsewhere is not a
-            // reason to end the demo.
+            // Only stop once the pipeline finished or the selected source
+            // itself failed; an occasional dropped/backpressured frame
+            // elsewhere is not a reason to end the demo.
             let source_died = matches!(
                 &event,
                 BusEvent::Error { element_type, .. } if *element_type == source_type
             );
-            if matches!(event, BusEvent::Eos { .. }) || source_died {
+            if matches!(event, BusEvent::Finished) || source_died {
                 pipeline.stop();
             }
         }
@@ -511,7 +511,7 @@ mod linux_example {
                 BusEvent::Error { element_type, .. }
                     if *element_type == ElementType::PipeWireScreenCaptureSource
             );
-            if matches!(event, BusEvent::Eos { .. }) || source_died {
+            if matches!(event, BusEvent::Finished) || source_died {
                 pipeline.stop();
             }
         }

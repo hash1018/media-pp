@@ -84,6 +84,8 @@ fn pipeline_logs_topology_eos_and_control_at_each_boundary() {
     ));
     assert!(contents.contains("[element=Queue] [name=queue] event=eos phase=completed outcome=ok"));
     assert!(contents.contains("[element=AppSink] [name=sink] event=eos phase=received"));
+    // Under the pipeline's own identity, once its one terminal has ended.
+    assert!(contents.contains("[element=Pipeline] [name=flow-test] event=finished"));
 
     // EOS crosses a `Queue`, so the record the source emits sending it and
     // the record the sink emits receiving it must name different threads —
