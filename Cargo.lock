@@ -4081,6 +4081,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "transcode"
+version = "0.1.0"
+dependencies = [
+ "media-pp",
+]
+
+[[package]]
 name = "transcode_render"
 version = "0.1.0"
 dependencies = [

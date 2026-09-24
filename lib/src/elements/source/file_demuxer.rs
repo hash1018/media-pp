@@ -25,7 +25,26 @@ use crate::{
 /// via `?` (see [`crate::error::Error`]).
 #[derive(Debug, ThisError)]
 pub enum FileDemuxerError {
-    /// FFmpeg rejected opening, reading, or seeking the input container.
+    /// The file could not be opened as a media file: it is not there, not
+    /// readable, or not a container FFmpeg knows.
+    #[error("could not open {}: {source}", path.display())]
+    Open {
+        /// The file asked for.
+        path: std::path::PathBuf,
+        /// What FFmpeg said.
+        #[source]
+        source: ffmpeg::Error,
+    },
+
+    /// The file opened and holds no streams at all — a recording that was
+    /// finished before anything was written into it, say.
+    #[error("{} has no streams to play", path.display())]
+    NoStreams {
+        /// The file asked for.
+        path: std::path::PathBuf,
+    },
+
+    /// FFmpeg rejected reading or seeking the input container.
     #[error("ffmpeg error: {0}")]
     Ffmpeg(#[from] ffmpeg::Error),
 
@@ -50,18 +69,58 @@ pub struct StreamInfo {
     /// The unit its packets' timestamps are in — what a
     /// [`crate::elements::Pacer`] for it is built with.
     pub time_base: ffmpeg::Rational,
+    /// How many pictures a second a video stream has on average, as the
+    /// container says — what an encoder re-encoding it is opened at. `None`
+    /// for sound, and for a video stream that does not say.
+    pub frame_rate: Option<ffmpeg::Rational>,
 }
 
 impl StreamInfo {
     /// What one of a container's streams says about itself.
     pub(crate) fn of(stream: &ffmpeg::format::stream::Stream<'_>) -> Self {
         let parameters = stream.parameters();
+        let kind = parameters.medium();
+        let rate = stream.avg_frame_rate();
         Self {
             index: stream.index(),
-            kind: parameters.medium(),
+            kind,
+            frame_rate: (kind == ffmpeg::media::Type::Video
+                && rate.numerator() > 0
+                && rate.denominator() > 0)
+                .then_some(rate),
             parameters,
             time_base: stream.time_base(),
         }
+    }
+
+    /// What a video stream says its Y'CbCr is — matrix, range, primaries
+    /// and transfer — for an encoder re-encoding its decoded pictures to
+    /// write into its own stream. `None` for sound, and for a video stream
+    /// that names no matrix.
+    pub fn color(&self) -> Option<crate::color::ColorDescription> {
+        // SAFETY: plain fields of parameters this value owns.
+        let raw = unsafe { &*self.parameters.as_ptr() };
+        let space = ffmpeg::color::Space::from(raw.color_space);
+        (self.kind == ffmpeg::media::Type::Video && space != ffmpeg::color::Space::Unspecified)
+            .then(|| crate::color::ColorDescription {
+                space,
+                range: raw.color_range.into(),
+                primaries: raw.color_primaries.into(),
+                transfer: raw.color_trc.into(),
+            })
+    }
+
+    /// A video stream's picture size, width then height, as its parameters
+    /// say — what an encoder re-encoding it is opened at. `None` for sound,
+    /// and for a video stream that does not say.
+    pub fn size(&self) -> Option<(u32, u32)> {
+        // SAFETY: plain fields of parameters this value owns.
+        let (width, height) = unsafe {
+            let raw = self.parameters.as_ptr();
+            ((*raw).width, (*raw).height)
+        };
+        (self.kind == ffmpeg::media::Type::Video && width > 0 && height > 0)
+            .then_some((width as u32, height as u32))
     }
 }
 
@@ -74,6 +133,8 @@ impl std::fmt::Debug for StreamInfo {
             .field("kind", &self.kind)
             .field("codec", &self.parameters.id())
             .field("time_base", &self.time_base)
+            .field("frame_rate", &self.frame_rate)
+            .field("size", &self.size())
             .finish()
     }
 }
@@ -259,9 +320,17 @@ impl FileDemuxer {
         path: impl AsRef<Path>,
     ) -> Result<(Self, Vec<StreamInfo>), FileDemuxerError> {
         crate::ensure_ffmpeg();
-        let input = ffmpeg::format::input(&path)?;
+        let input = ffmpeg::format::input(&path).map_err(|source| FileDemuxerError::Open {
+            path: path.as_ref().to_path_buf(),
+            source,
+        })?;
 
         let streams: Vec<StreamInfo> = input.streams().map(|s| StreamInfo::of(&s)).collect();
+        if streams.is_empty() {
+            return Err(FileDemuxerError::NoStreams {
+                path: path.as_ref().to_path_buf(),
+            });
+        }
 
         let pads: Vec<SrcPad> = streams
             .iter()
@@ -853,6 +922,82 @@ fn ts_to_duration(ts: i64, time_base: ffmpeg::Rational) -> Duration {
 mod tests {
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    /// A video stream says its size and rate, what re-encoding it needs; a
+    /// sound stream says neither.
+    #[test]
+    fn a_video_stream_says_its_size_and_rate() {
+        let Some(path) = try_test_video() else { return };
+        let (_, streams) = FileDemuxer::open("demux", &path).unwrap();
+        let video = streams
+            .iter()
+            .find(|stream| stream.kind == ffmpeg::media::Type::Video)
+            .unwrap();
+        assert_eq!(video.size(), Some((320, 240)));
+        assert_eq!(video.frame_rate, Some(ffmpeg::Rational::new(30, 1)));
+        let sound = streams
+            .iter()
+            .find(|stream| stream.kind == ffmpeg::media::Type::Audio)
+            .unwrap();
+        assert_eq!((sound.size(), sound.frame_rate), (None, None));
+    }
+
+    /// A file that cannot be opened says which file it was.
+    #[test]
+    fn a_file_that_cannot_be_opened_says_which() {
+        let path = std::env::temp_dir().join("media-pp-no-such-file.mp4");
+        let Err(error) = FileDemuxer::open("demux", &path) else {
+            panic!("a file that is not there opens");
+        };
+        assert!(matches!(error, FileDemuxerError::Open { .. }), "{error:?}");
+        assert!(
+            error.to_string().contains("media-pp-no-such-file.mp4"),
+            "{error}"
+        );
+    }
+
+    /// A recording finished before anything was written into it is a valid
+    /// file with nothing in it, and is refused as one rather than opened
+    /// with no stream for a caller to index into.
+    #[test]
+    fn a_file_with_no_streams_is_refused() {
+        use crate::element::Sink;
+        use crate::elements::{FileMuxer, SwEncoder, SwEncoderOptions, VideoCodec};
+
+        let path = std::env::temp_dir().join(format!(
+            "media-pp-empty-recording-{}.mp4",
+            std::process::id()
+        ));
+        let encoder = SwEncoder::new(
+            "encoder",
+            SwEncoderOptions {
+                codec: VideoCodec::OpenH264,
+                width: 320,
+                height: 240,
+                pixel_format: ffmpeg::format::Pixel::YUV420P,
+                frame_rate: ffmpeg::Rational::new(30, 1),
+                bit_rate: 1_000_000,
+                gop_size: 30,
+                max_b_frames: None,
+            },
+        )
+        .expect("the always-present encoder opens");
+        let mut muxer = FileMuxer::create(&path).unwrap();
+        let track = muxer.add_stream("video", &encoder).unwrap();
+        let mut sinks = muxer.open().unwrap();
+        let mut sink = sinks.take(track).unwrap();
+        sink.consume(MediaBuffer::Eos).unwrap();
+        drop(sink);
+        drop(sinks);
+
+        let opened = FileDemuxer::open("demux", &path);
+        let _ = std::fs::remove_file(&path);
+        assert!(
+            matches!(opened, Err(FileDemuxerError::NoStreams { .. })),
+            "{:?}",
+            opened.map(|(_, streams)| streams.len())
+        );
+    }
 
     use super::*;
     use crate::control;

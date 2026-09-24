@@ -62,6 +62,39 @@ fn main() -> media_pp::Result<()> {
 }
 ```
 
+A file has an end, and a pipeline reading one says when everything read
+has arrived — `BusEvent::Finished` — and waits there, where a seek could
+still take it back, until it is stopped. So a file's pipeline is watched to
+`Finished` and stopped then:
+
+```rust,no_run
+use media_pp::{
+    bus::BusEvent,
+    elements::{FileDemuxer, PacketCounter},
+    ffmpeg,
+    pipeline::Pipeline,
+};
+
+fn main() -> media_pp::Result<()> {
+    let (source, _) = FileDemuxer::open("file", "video.mp4")?;
+    let video = source.best(ffmpeg::media::Type::Video)?;
+    let (counter, packets) = PacketCounter::new("counter");
+    let (pipeline, ()) = Pipeline::new("count", source, |source, ctx| {
+        ctx.attach(source, video.index, ctx.branch().to(counter)?)?;
+        Ok(())
+    })?;
+    pipeline.run()?;
+    for event in pipeline.bus().iter() {
+        // An error does not end a pipeline by itself either.
+        if matches!(event, BusEvent::Finished | BusEvent::Error { .. }) {
+            pipeline.stop();
+        }
+    }
+    println!("packets: {}", packets.get());
+    Ok(())
+}
+```
+
 To play a file with its sound, `Player` builds the whole pipeline — the
 decode, on the window's GPU where it can be, the synchronization, a window
 and the default audio output — and
@@ -188,8 +221,9 @@ backend's prefix and exist only where their feature is enabled.
 ## Examples
 
 - `examples/core`: decoding, queues, fan-out, dynamic tees, app sources and
-  sinks, audio, remuxing, HLS, RTMP publishing, speech-to-subtitle
-  transcription, and CPU compositing.
+  sinks, audio, remuxing, transcoding on the GPU through the decode and
+  encode bins, HLS, RTMP publishing, speech-to-subtitle transcription, and
+  CPU compositing.
 - `examples/cuda`: headless CUDA recording and GPU text compositing, on
   Windows and Linux.
 - `examples/render`: a whole player through `Player`, D3D11/D3D12 and Vulkan

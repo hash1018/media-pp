@@ -22,5 +22,5 @@ pub use video::{
 };
 pub use video::{
     EncodeInput, EncodePath, SwEncoder, SwEncoderError, SwEncoderOptions, VideoCodec,
-    VideoEncodeBin, VideoEncodeOptions,
+    VideoEncodeBin, VideoEncodeBinError, VideoEncodeOptions,
 };

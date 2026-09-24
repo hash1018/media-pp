@@ -75,9 +75,10 @@
 //! [`BusEvent::Eos`](bus::BusEvent::Eos), so the first one on the bus is only
 //! the first thing to end; the pipeline posts
 //! [`BusEvent::Finished`](bus::BusEvent::Finished) once every terminal sink
-//! has, and that is when a stream played to its end can be stopped — and
-//! has to be, where the source can be sought back: a file's waits at its
-//! end, a seek away from playing it again, until it is stopped.
+//! has, and that is when a stream played to its end can be stopped. For a
+//! file it has to be: a file's source does not end at the end of the file
+//! but waits there, since a seek could still take it back, so the bus stays
+//! open and the pipeline running until it is stopped.
 //!
 //! # Changing a running pipeline
 //!

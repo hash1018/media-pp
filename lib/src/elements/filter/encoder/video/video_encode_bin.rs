@@ -48,6 +48,22 @@ const SWSCALE_FROM_RGB: ColorDescription = ColorDescription {
     transfer: ffmpeg::color::TransferCharacteristic::BT709,
 };
 
+/// Why a [`VideoEncodeBin`] refused a frame.
+#[derive(Debug, thiserror::Error)]
+pub enum VideoEncodeBinError {
+    /// A frame in system memory is not in the layout
+    /// [`EncodeInput::System`] said every frame would be — which decides how
+    /// its colour is converted and described, so it is refused rather than
+    /// encoded under the wrong description.
+    #[error("the bin was opened for {declared:?} frames, got {got:?}")]
+    FormatMismatch {
+        /// What `EncodeInput::System` said.
+        declared: ffmpeg::format::Pixel,
+        /// What the frame is in.
+        got: ffmpeg::format::Pixel,
+    },
+}
+
 /// Where the frames a [`VideoEncodeBin`] is given come from — which decides
 /// the encoders it can choose between.
 ///
@@ -59,7 +75,9 @@ pub enum EncodeInput {
     /// CPU capture or an application's own frames are in. Encoded in
     /// software: there is nothing on a device to hand a hardware encoder.
     System {
-        /// The layout every frame arrives in.
+        /// The layout every frame arrives in. It decides how the colour is
+        /// converted and what the stream says of it, so a frame in another
+        /// is refused with [`VideoEncodeBinError::FormatMismatch`].
         format: ffmpeg::format::Pixel,
     },
     /// D3D11 textures on `gpu`, NV12 or BGRA.
@@ -79,6 +97,50 @@ pub enum EncodeInput {
         /// What every surface holds.
         format: CudaFrameFormat,
     },
+}
+
+impl EncodeInput {
+    /// Where a [`VideoDecodeBin`](crate::elements::VideoDecodeBin) opened
+    /// onto `target` puts its frames, in `format` — its
+    /// [`output_format`](crate::elements::VideoDecodeBin::output_format) —
+    /// as an encode bin after it takes them: the same device and layout,
+    /// nothing to convert between the two.
+    ///
+    /// `None` where no encode bin takes them: D3D12 frames, a device layout
+    /// other than NV12 or BGRA, or system memory in a layout the decoder did
+    /// not say.
+    pub fn for_decoded(
+        target: &crate::elements::DecodeTarget,
+        format: Option<ffmpeg::format::Pixel>,
+    ) -> Option<Self> {
+        use crate::elements::DecodeTarget;
+        #[cfg(any(feature = "cuda", all(target_os = "windows", feature = "d3d11")))]
+        use ffmpeg::format::Pixel;
+
+        match target {
+            DecodeTarget::System => format.map(|format| Self::System { format }),
+            #[cfg(all(target_os = "windows", feature = "d3d11"))]
+            DecodeTarget::D3d11 { gpu, .. } => Some(Self::D3d11 {
+                gpu: gpu.clone(),
+                format: match format? {
+                    Pixel::NV12 => D3d11VideoInputFormat::Nv12,
+                    Pixel::BGRA => D3d11VideoInputFormat::Bgra,
+                    _ => return None,
+                },
+            }),
+            #[cfg(all(target_os = "windows", feature = "d3d12"))]
+            DecodeTarget::D3d12 { .. } => None,
+            #[cfg(feature = "cuda")]
+            DecodeTarget::Cuda { device, .. } => Some(Self::Cuda {
+                device: device.clone(),
+                format: match format? {
+                    Pixel::NV12 => CudaFrameFormat::Nv12,
+                    Pixel::BGRA => CudaFrameFormat::Bgra,
+                    _ => return None,
+                },
+            }),
+        }
+    }
 }
 
 /// What a [`VideoEncodeBin`] encodes to. H.264 always: the one codec every
@@ -183,6 +245,9 @@ pub struct VideoEncodeBin {
     pad: SrcPad,
     path: EncodePath,
     input: InputContract,
+    /// What `EncodeInput::System` said every frame is in, for `consume` to
+    /// hold each one to; `None` on a device, whose encoder checks its own.
+    system_format: Option<ffmpeg::format::Pixel>,
     parameters: ffmpeg::codec::Parameters,
     time_base: ffmpeg::Rational,
 }
@@ -289,6 +354,11 @@ impl VideoEncodeBin {
             pad,
             path: chosen.path,
             input: InputContract::Fixed(input_contract),
+            system_format: match input {
+                EncodeInput::System { format } => Some(format),
+                #[allow(unreachable_patterns)]
+                _ => None,
+            },
             parameters: chosen.parameters,
             time_base: chosen.time_base,
         })
@@ -532,6 +602,19 @@ fn cuda(
     )
 }
 
+/// Whether a frame in `got` is one a bin told `declared` should take —
+/// the same layout, the full-range J variants being their plain ones.
+fn same_layout(declared: ffmpeg::format::Pixel, got: ffmpeg::format::Pixel) -> bool {
+    use ffmpeg::format::Pixel;
+    let plain = |pixel| match pixel {
+        Pixel::YUVJ420P => Pixel::YUV420P,
+        Pixel::YUVJ422P => Pixel::YUV422P,
+        Pixel::YUVJ444P => Pixel::YUV444P,
+        other => other,
+    };
+    plain(declared) == plain(got)
+}
+
 fn is_rgb(format: ffmpeg::format::Pixel) -> bool {
     use ffmpeg::format::Pixel;
     matches!(
@@ -588,6 +671,15 @@ impl Sink for VideoEncodeBin {
 
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         self.install();
+        if let (Some(declared), MediaBuffer::Video(frame)) = (self.system_format, &buf)
+            && !same_layout(declared, frame.format())
+        {
+            return Err(VideoEncodeBinError::FormatMismatch {
+                declared,
+                got: frame.format(),
+            }
+            .into());
+        }
         for made in self.line.consume(buf)? {
             self.pad.push(made)?;
         }
@@ -787,6 +879,59 @@ mod tests {
         assert!(!path.is_hardware(), "{path:?}");
     }
 
+    /// What a decode bin puts out, as an encode bin takes it: the layout it
+    /// said, and nothing where no encode bin takes that.
+    #[test]
+    fn a_decode_bins_output_is_an_encode_bins_input() {
+        use crate::elements::DecodeTarget;
+        use ffmpeg::format::Pixel;
+
+        assert!(matches!(
+            EncodeInput::for_decoded(&DecodeTarget::System, Some(Pixel::YUV420P)),
+            Some(EncodeInput::System {
+                format: Pixel::YUV420P
+            })
+        ));
+        assert!(EncodeInput::for_decoded(&DecodeTarget::System, None).is_none());
+        #[cfg(all(target_os = "windows", feature = "d3d11"))]
+        if let Some(gpu) = crate::test_support::try_d3d11_gpu() {
+            let target = DecodeTarget::D3d11 {
+                gpu,
+                downstream_hw_frames: 4,
+            };
+            assert!(matches!(
+                EncodeInput::for_decoded(&target, Some(Pixel::BGRA)),
+                Some(EncodeInput::D3d11 {
+                    format: D3d11VideoInputFormat::Bgra,
+                    ..
+                })
+            ));
+            assert!(EncodeInput::for_decoded(&target, Some(Pixel::P010LE)).is_none());
+        }
+    }
+
+    /// A frame in another layout than the one `EncodeInput::System` said is
+    /// refused, not encoded under the wrong colour description.
+    #[test]
+    fn a_frame_in_another_layout_is_refused() {
+        let mut bin = VideoEncodeBin::open(
+            "encode",
+            EncodeInput::System {
+                format: ffmpeg::format::Pixel::NV12,
+            },
+            options(None),
+        )
+        .unwrap();
+        let received = capture(&mut bin);
+        assert!(matches!(
+            bin.consume(yuv420p(0)),
+            Err(crate::Error::VideoEncodeBinError(
+                VideoEncodeBinError::FormatMismatch { .. }
+            ))
+        ));
+        assert!(received.lock().unwrap().is_empty(), "nothing was encoded");
+    }
+
     /// What the bin takes is what it was opened for: frames in system
     /// memory in the layout it was told, and nothing on a device.
     #[test]
@@ -814,7 +959,10 @@ mod tests {
     /// What the bin says of its stream is what a muxer writes the file
     /// from: a recording through it opens again as H.264 of the size and
     /// length it was made at, every frame of it there.
-    fn records(bin: VideoEncodeBin, frames: impl Iterator<Item = MediaBuffer>) {
+    fn records(
+        bin: VideoEncodeBin,
+        frames: impl Iterator<Item = MediaBuffer>,
+    ) -> Option<ColorDescription> {
         use crate::elements::{FileDemuxer, FileMuxer};
 
         let path = bin.path();
@@ -849,6 +997,7 @@ mod tests {
                 < std::time::Duration::from_millis(100),
             "{path:?}: {length:?} long"
         );
+        video.color()
     }
 
     #[test]
@@ -861,7 +1010,10 @@ mod tests {
             options(Some(ColorDescription::BT709_LIMITED)),
         )
         .unwrap();
-        records(bin, (0..FRAMES).map(yuv420p));
+        let color = records(bin, (0..FRAMES).map(yuv420p));
+        // What the stream was told, read back off the file — what a
+        // transcode of it hands its own encoder.
+        assert_eq!(color, Some(ColorDescription::BT709_LIMITED));
     }
 
     #[cfg(all(target_os = "windows", feature = "d3d11"))]

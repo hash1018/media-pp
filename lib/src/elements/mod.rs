@@ -113,7 +113,9 @@ pub use filter::{
     DecodePath, DecodeTarget, DecodeThreadKind, DecodeThreading, SoftwareReason, VideoDecodeBin,
     VideoDecodeBinError, VideoDecodeBinHandle,
 };
-pub use filter::{EncodeInput, EncodePath, VideoEncodeBin, VideoEncodeOptions};
+pub use filter::{
+    EncodeInput, EncodePath, VideoEncodeBin, VideoEncodeBinError, VideoEncodeOptions,
+};
 #[cfg(feature = "rnnoise")]
 pub use filter::{NOISE_SUPPRESSOR_SAMPLE_RATE, NoiseSuppressor, NoiseSuppressorError};
 pub use sink::{

@@ -1,0 +1,16 @@
+[package]
+name = "transcode"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# The same program on both platforms; what differs is only which GPU the
+# picture is decoded onto and encoded from.
+[target.'cfg(target_os = "windows")'.dependencies]
+media-pp = { path = "../../../lib", features = ["d3d11"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+media-pp = { path = "../../../lib", features = ["cuda"] }
+
+[target.'cfg(not(any(target_os = "windows", target_os = "linux")))'.dependencies]
+media-pp = { path = "../../../lib" }

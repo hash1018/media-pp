@@ -78,7 +78,7 @@ pub use download::{D3d12Download, D3d12DownloadError};
 pub use encoder::{
     AudioCodec, EncodeInput, EncodePath, SwAudioEncoder, SwAudioEncoderError,
     SwAudioEncoderOptions, SwEncoder, SwEncoderError, SwEncoderOptions, VideoCodec, VideoEncodeBin,
-    VideoEncodeOptions,
+    VideoEncodeBinError, VideoEncodeOptions,
 };
 #[cfg(feature = "cuda")]
 pub use encoder::{CudaCodec, CudaEncoder, CudaEncoderError, CudaEncoderOptions};

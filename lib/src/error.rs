@@ -433,6 +433,10 @@ pub enum Error {
     #[error(transparent)]
     VideoDecodeBinError(#[from] VideoDecodeBinError),
 
+    /// A frame an encode bin was given is not what it was opened for.
+    #[error(transparent)]
+    VideoEncodeBinError(#[from] crate::elements::VideoEncodeBinError),
+
     /// A software scaling operation failed.
     #[error(transparent)]
     SwScalerError(#[from] SwScalerError),

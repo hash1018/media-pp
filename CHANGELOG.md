@@ -12,6 +12,19 @@ compile error with no explanation.
 
 ### Breaking
 
+- **`FileDemuxer::open` names the file it could not open, and refuses one
+  with nothing in it.** A missing or unreadable file was
+  `FileDemuxerError::Ffmpeg("No such file or directory")`, with no word of
+  which; it is now `FileDemuxerError::Open { path, source }`, which says. A
+  file that opens with no streams at all — a recording finished before
+  anything was written into it — was opened with an empty stream list for a
+  caller to index into; it is now `FileDemuxerError::NoStreams { path }`.
+  Code matching `FileDemuxerError::Ffmpeg` for an open failure matches
+  `Open` instead.
+
+- **`StreamInfo` has a `frame_rate` field**, so a literal of one needs it
+  — see Added.
+
 - **A file's source waits at its end instead of ending.** `FileDemuxer`
   sent `Eos` at the end of the file and ended its thread, and with it the
   queues it owns, a second or more of the file still in them. A `Pause` from
@@ -617,6 +630,16 @@ compile error with no explanation.
   writes its packets at the right times.
 
 ### Added
+
+- **Re-encoding a file needs nothing outside the crate.** `StreamInfo`
+  says a video stream's `frame_rate` and, through `size` and `color`, its
+  picture size and colour description — what an encoder re-encoding it is
+  opened with, which took reaching into FFmpeg before.
+  `EncodeInput::for_decoded` turns a decode bin's target and output format
+  into the input an encode bin takes, and the new `transcode` example puts
+  them together: `FileDemuxer -> VideoDecodeBin -> VideoEncodeBin ->
+  FileMuxer`, decoded onto and encoded from the GPU, the sound copied as it
+  is. The README shows a file pipeline watched to `Finished` and stopped.
 
 - **`Player` plays sound on its own, and has a volume, a loop and a choice
   of track.** A file with no picture was refused as one with nothing to
@@ -1470,6 +1493,20 @@ compile error with no explanation.
   decoder in this crate — keys exactly as before, byte for byte.
 
 ### Fixed
+
+- **`Player` stays at the end once it gets there.** Its `position` went on
+  counting past the file's length after `Ended`, a second a second; it now
+  reads the file's length there. `play` once `Ended` has been reported
+  starts the file again from the start, as a player's play button does.
+
+- **`VideoEncodeBin` refuses a frame in another layout than
+  `EncodeInput::System` said** — `VideoEncodeBinError::FormatMismatch` —
+  rather than encoding it under a colour description made for the layout
+  it was told.
+
+- **The `fanout` and `tee` examples end at the end of their file.** They
+  waited for the bus to close, which a file's pipeline no longer does by
+  itself; they stop on `Finished` now.
 
 - **The D3D11 and D3D12 window renderers draw a frame in its own colours.**
   Their NV12 shaders had BT.601 limited range written into them, carried

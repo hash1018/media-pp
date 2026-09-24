@@ -11,7 +11,9 @@ pub use cuda::{CudaCodec, CudaEncoder, CudaEncoderError, CudaEncoderOptions};
 mod windows;
 
 pub use sw_encoder::{SwEncoder, SwEncoderError, SwEncoderOptions, VideoCodec};
-pub use video_encode_bin::{EncodeInput, EncodePath, VideoEncodeBin, VideoEncodeOptions};
+pub use video_encode_bin::{
+    EncodeInput, EncodePath, VideoEncodeBin, VideoEncodeBinError, VideoEncodeOptions,
+};
 #[cfg(all(target_os = "windows", feature = "d3d11"))]
 pub use windows::*;
 
