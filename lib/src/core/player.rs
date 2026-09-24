@@ -34,10 +34,10 @@ use crate::{
     },
     element::Sink,
     elements::{
-        AudioFormat, AudioResampler, DecodePath, DecodeTarget, FileDemuxer, FileDemuxerError, Key,
-        MouseButton, SoftwareReason, SwDecoder, SwScaler, VideoDecodeBin, VideoDecodeBinHandle,
-        VideoSynchronizer, VideoWindow, VideoWindowError, WindowControl, WindowEvent, WindowEvents,
-        WindowOptions,
+        AudioFormat, AudioResampler, DecodePath, DecodeTarget, DecodeThreadKind, DecodeThreading,
+        FileDemuxer, FileDemuxerError, Key, MouseButton, SoftwareReason, SwDecoder, SwScaler,
+        VideoDecodeBin, VideoDecodeBinHandle, VideoSynchronizer, VideoWindow, VideoWindowError,
+        WindowControl, WindowEvent, WindowEvents, WindowOptions,
     },
     ffmpeg,
     pipeline::{Pipeline, SeekMode},
@@ -202,7 +202,17 @@ impl Player {
         let (screen, events, target) =
             VideoWindow::open_for_decoding("screen", options.window, budget)?;
         let window = screen.window_control();
-        let decode = |target| VideoDecodeBin::open("video", video.parameters.clone(), target, None);
+        // A file has no deadline, so a software decode takes every thread,
+        // several pictures at once: one thread holds 4K60 HEVC well short of
+        // its rate, and once the picture falls behind the demuxer can read no
+        // further and the sound runs dry with it.
+        let threading = DecodeThreading {
+            threads: None,
+            kind: DecodeThreadKind::Frame,
+        };
+        let decode = |target| {
+            VideoDecodeBin::open("video", video.parameters.clone(), target, Some(threading))
+        };
         let decoder = match decode(target) {
             Ok(decoder) => decoder,
             // A GPU the window draws with but that cannot decode or take an

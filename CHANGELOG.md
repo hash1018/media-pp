@@ -610,6 +610,11 @@ compile error with no explanation.
   software and uploaded where the GPU does not take the stream, and in
   software into system memory where there is no GPU to decode onto.
   `Player::decoding` says which. Nothing to change in a program using it.
+  Where it decodes in software, it does so on every thread, several
+  pictures at once: on the one thread FFmpeg opens a decoder with, 4K60
+  HEVC fell behind its rate, and with the picture behind, the demuxer could
+  read no further and the sound broke up — a hundred gaps in twelve seconds,
+  none now.
 - **The software compositor draws text.** A text overlay was on the D3D11
   and CUDA compositors only, so a program that followed the README to
   `VideoWindow` and the software path had none. `SwVideoCompositorHandle`
