@@ -93,6 +93,13 @@ pub enum BusEvent {
     /// source that stopped on an error, whose branches are stopped rather
     /// than ended. Posted by the pipeline, not an element, so its
     /// [`BusMessage::element_id`] is `None`.
+    ///
+    /// It follows the terminals' own `Eos`, not every element's: a `Queue`
+    /// says it has ended once the terminal behind it has taken its `Eos`,
+    /// which is also when this is posted, so a queue's `Eos` often arrives
+    /// just after it. Stopping on this, as a pipeline played to its end
+    /// should be, means those later `Eos` may never be read — which is why
+    /// what has ended is this, and not a count of `Eos`.
     Finished,
 }
 

@@ -96,7 +96,11 @@ pub enum DecodeTarget {
         /// queue and buffer after the decoder, counted together: each
         /// `Queue`'s capacity, one for a `Pacer` or `VideoSynchronizer`
         /// waiting on a frame's time, one for a compositor input's latest
-        /// frame, and one for the picture on screen. The hardware decoder's
+        /// frame, and one for the picture on screen. An encoder after it
+        /// holds none — `D3d11VideoEncoder` copies each picture into its own
+        /// surface — and a `D3d11Download` one, the last it read, to know a
+        /// repeat of it; see `VideoEncodeBin` for what each of its paths
+        /// holds. The hardware decoder's
         /// surface pool is fixed at this plus the codec's own references,
         /// and at most 64 in all; frames held past it fail with
         /// [`D3d11DecoderError::SurfacePoolExhausted`](crate::elements::D3d11DecoderError::SurfacePoolExhausted).
@@ -129,7 +133,11 @@ pub enum DecodeTarget {
         device: CudaDevice,
         /// How many decoded frames downstream may hold at once, counted as
         /// for `D3d11` — each `Queue`'s capacity, one for a pacer waiting on
-        /// a frame, one for a compositor input, one on screen. See
+        /// a frame, one for a compositor input, one on screen — and, unlike
+        /// `D3d11`, whatever an encoder after it holds: `CudaEncoder` encodes
+        /// the decoder's own surfaces rather than a copy, and keeps each until
+        /// its packet is out, so B-frames it may insert are pictures it
+        /// holds. See
         /// [`crate::elements::CudaDecoder::new`] for the budget NVDEC's
         /// fixed, capped pool has to fit.
         downstream_hw_frames: i32,

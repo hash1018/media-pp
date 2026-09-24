@@ -134,8 +134,9 @@ mod example {
     }
 
     /// What the decoder's pool has to cover after it: the queue, and a
-    /// couple more for the encoder copying one in and the one being handed
-    /// over.
+    /// couple more for the encoder — nothing on D3D11, where it copies each
+    /// picture in, but on CUDA the pictures it is still encoding, which it
+    /// encodes in place. See `VideoEncodeBin`'s docs.
     const SURFACES: i32 = QUEUED as i32 + 2;
 
     /// Where the pictures are decoded to: D3D11 on Windows.

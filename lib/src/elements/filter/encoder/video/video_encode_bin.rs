@@ -225,6 +225,18 @@ impl EncodePath {
 /// a failure it raises arriving with its own identity — and the bin is the
 /// one node in the graph.
 ///
+/// Of a hardware decoder's pictures in front of it — which that decoder's
+/// fixed pool has to have room for — it holds: on D3D11, none, NVENC and
+/// Media Foundation each copying a picture into a surface of their own as
+/// it arrives; on CUDA NVENC, the pictures still being encoded, since it
+/// encodes the decoder's surfaces as they are, as many as its delay —
+/// more with `max_b_frames`; on the software path, the one picture its
+/// download read last, kept to know a repeat of it. With this crate's own
+/// fixture — one reference picture, no B-frames — a decode bin given no
+/// room downstream at all still fed NVENC to the end, on D3D11 and on CUDA;
+/// a stream with more reference pictures or with B-frames is what the
+/// count is for.
+///
 /// # Colour
 ///
 /// Every path says in the stream what its YUV is. From RGB, each converts
