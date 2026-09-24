@@ -265,8 +265,13 @@ impl CudaVideoCompositorHandle {
     /// Registers an input and returns its terminal Sink plus independent
     /// runtime layer control. Reusing `name` replaces the old registration;
     /// the replaced sink and layer handle can no longer affect this
-    /// compositor, exactly as
-    /// [`crate::elements::SwVideoCompositorHandle::add_source`] documents.
+    /// compositor.
+    ///
+    /// Each input keeps only its latest frame, which the compositor draws at
+    /// every tick of its own rate. A live source keeps its own time; a file
+    /// does not, and without a [`crate::elements::Pacer`] in front of this
+    /// sink it is read as fast as it decodes, and all but the last frame of
+    /// each tick are passed over.
     pub fn add_source(
         &self,
         name: impl Into<String>,
@@ -312,7 +317,6 @@ impl CudaVideoCompositorHandle {
         }
     }
 
-    /// Returns the number of inputs currently registered, or zero after shutdown.
     /// Changes the rate this compositor emits at, from the next tick.
     ///
     /// Fails with [`CudaVideoCompositorError::InvalidFrameRate`] for a rate that is not
@@ -351,6 +355,8 @@ impl CudaVideoCompositorHandle {
         Some(shared.frame_rate.get())
     }
 
+    /// How many inputs are registered — video and text layers alike — or
+    /// zero once the compositor is gone.
     pub fn source_count(&self) -> usize {
         self.shared
             .upgrade()

@@ -324,11 +324,17 @@ impl D3d11VideoCompositorHandle {
         })
     }
 
-    /// Registers an input and returns its terminal Sink plus independent
-    /// runtime layer control — see
-    /// [`crate::elements::SwVideoCompositorHandle::add_source`]'s own docs
-    /// (identical contract: reusing `name` replaces the old registration,
-    /// old sinks/layer handles become harmlessly stale).
+    /// Registers an input and returns its terminal `Sink` — the end of the
+    /// branch that feeds it — and its [`D3d11VideoLayerHandle`], which moves,
+    /// shows, hides and restacks it while it runs. Reusing `name` replaces the
+    /// old registration; the replaced sink and handle can no longer affect
+    /// this compositor.
+    ///
+    /// Each input keeps only its latest frame, which the compositor draws at
+    /// every tick of its own rate. A live source keeps its own time; a file
+    /// does not, and without a [`crate::elements::Pacer`] in front of this
+    /// sink it is read as fast as it decodes, and all but the last frame of
+    /// each tick are passed over.
     pub fn add_source(
         &self,
         name: impl Into<String>,
@@ -366,7 +372,6 @@ impl D3d11VideoCompositorHandle {
         }
     }
 
-    /// Returns the number of inputs currently registered, or zero after shutdown.
     /// Changes the rate this compositor emits at, from the next tick.
     ///
     /// Fails with [`D3d11VideoCompositorError::InvalidFrameRate`] for a rate that is not
@@ -415,6 +420,8 @@ impl D3d11VideoCompositorHandle {
         Some(shared.frame_rate.get())
     }
 
+    /// How many inputs are registered — video and text layers alike — or
+    /// zero once the compositor is gone.
     pub fn source_count(&self) -> usize {
         self.shared
             .upgrade()

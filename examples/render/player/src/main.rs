@@ -65,7 +65,7 @@ mod example {
                         break;
                     }
                 }
-                Some(PlayerEvent::Ended) => break,
+                Some(PlayerEvent::Ended | PlayerEvent::Stopped) => break,
                 Some(PlayerEvent::Error { name, error }) => eprintln!("[{name}] {error}"),
                 _ => {}
             }

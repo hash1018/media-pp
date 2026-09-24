@@ -100,6 +100,11 @@ pub enum PlayerEvent {
     /// The file has played to its end: every stream has. The last picture
     /// stays in the window until the player is stopped or dropped.
     Ended,
+    /// Playback is over for good: [`Player::stop`] was called, or the window
+    /// and the playback are gone. Only [`Player::next_event_timeout`]
+    /// returns it — every call from then on — where [`Player::next_event`]
+    /// returns `None`.
+    Stopped,
     /// An element failed. Playback goes on where it can — an error does not
     /// end a pipeline — and whether this one means stopping is the
     /// application's to decide.
@@ -111,12 +116,20 @@ pub enum PlayerEvent {
     },
 }
 
+/// What a wait for the next event came to.
+enum Wait {
+    Event(PlayerEvent),
+    Timeout,
+    Gone,
+}
+
 /// A file played in a window of its own, with its sound — open, play, and
 /// wait for [`PlayerEvent`]s:
 ///
 /// ```no_run
 /// use media_pp::player::{Player, PlayerEvent, PlayerOptions};
 ///
+/// # fn main() -> media_pp::Result<()> {
 /// let player = Player::open("video.mp4", PlayerOptions::default())?;
 /// player.play()?;
 /// while let Some(event) = player.next_event() {
@@ -127,7 +140,8 @@ pub enum PlayerEvent {
 ///         _ => {}
 ///     }
 /// }
-/// # Ok::<(), media_pp::player::PlayerError>(())
+/// # Ok(())
+/// # }
 /// ```
 ///
 /// The picture is decoded in software and drawn by a [`VideoWindow`]; the
@@ -278,25 +292,36 @@ impl Player {
 
     /// Waits for the next thing to report, from the window or the playback.
     /// `None` once [`Self::stop`] has been called, or the window and the
-    /// playback are both gone.
+    /// playback are both gone — so `while let Some(event) = player.next_event()`
+    /// ends when there is nothing left to report.
     pub fn next_event(&self) -> Option<PlayerEvent> {
-        self.next_event_before(None)
+        match self.wait(None) {
+            Wait::Event(event) => Some(event),
+            Wait::Timeout | Wait::Gone => None,
+        }
     }
 
     /// [`Self::next_event`], waiting at most `timeout` — for a loop that has
-    /// something of its own to do, such as showing where playback is. `None`
-    /// when the time is up, as well.
+    /// something of its own to do, such as showing where playback is.
+    /// `None` means only that the time is up; once [`Self::stop`] has been
+    /// called or the player's window and playback are gone, every call
+    /// returns [`PlayerEvent::Stopped`] at once, so the loop can tell the two
+    /// apart rather than spinning.
     pub fn next_event_timeout(&self, timeout: Duration) -> Option<PlayerEvent> {
-        self.next_event_before(Some(timeout))
+        match self.wait(Some(timeout)) {
+            Wait::Event(event) => Some(event),
+            Wait::Timeout => None,
+            Wait::Gone => Some(PlayerEvent::Stopped),
+        }
     }
 
-    fn next_event_before(&self, timeout: Option<Duration>) -> Option<PlayerEvent> {
+    fn wait(&self, timeout: Option<Duration>) -> Wait {
         let window = &self.events.events;
         let bus = self.pipeline.bus().receiver();
         let deadline = timeout.and_then(|timeout| std::time::Instant::now().checked_add(timeout));
         loop {
             if self.stopped.load(Ordering::Acquire) {
-                return None;
+                return Wait::Gone;
             }
             let wait = deadline
                 .map(|deadline| deadline.saturating_duration_since(std::time::Instant::now()));
@@ -304,7 +329,7 @@ impl Player {
                 Some(wait) => select! {
                     recv(window) -> event => (Some(event), None),
                     recv(bus) -> message => (None, Some(message)),
-                    default(wait) => return None,
+                    default(wait) => return Wait::Timeout,
                 },
                 None => select! {
                     recv(window) -> event => (Some(event), None),
@@ -312,19 +337,30 @@ impl Player {
                 },
             };
             let message = match (event, message) {
-                (Some(Ok(event)), _) => return Some(PlayerEvent::Window(event)),
+                (Some(Ok(event)), _) => return Wait::Event(PlayerEvent::Window(event)),
                 // The window is gone: only the playback is left to wait on.
                 (Some(Err(_)), _) => match wait {
-                    Some(wait) => bus.recv_timeout(wait).ok()?,
-                    None => bus.recv().ok()?,
+                    Some(wait) => match bus.recv_timeout(wait) {
+                        Ok(message) => message,
+                        Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                            return Wait::Timeout;
+                        }
+                        Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                            return Wait::Gone;
+                        }
+                    },
+                    None => match bus.recv() {
+                        Ok(message) => message,
+                        Err(_) => return Wait::Gone,
+                    },
                 },
-                (None, Some(message)) => message.ok()?,
-                (None, None) => return None,
+                (None, Some(Ok(message))) => message,
+                (None, Some(Err(_))) | (None, None) => return Wait::Gone,
             };
             match message.event {
-                BusEvent::Finished => return Some(PlayerEvent::Ended),
+                BusEvent::Finished => return Wait::Event(PlayerEvent::Ended),
                 BusEvent::Error { name, error, .. } => {
-                    return Some(PlayerEvent::Error { name, error });
+                    return Wait::Event(PlayerEvent::Error { name, error });
                 }
                 // Everything else is the pipeline's own bookkeeping.
                 _ => {}
@@ -481,6 +517,13 @@ mod tests {
         }
         player.stop();
         assert!(player.next_event().is_none(), "nothing after stopping");
+        assert!(
+            matches!(
+                player.next_event_timeout(Duration::from_secs(5)),
+                Some(PlayerEvent::Stopped)
+            ),
+            "a timed wait says it is over, at once, rather than timing out"
+        );
     }
 
     /// The usual keys do what a player's do, and a close asks to stop.

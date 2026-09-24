@@ -206,6 +206,12 @@ impl SwVideoCompositorHandle {
     /// Registers an input and returns its terminal Sink plus independent
     /// runtime layer control. Reusing `name` replaces the old registration;
     /// old sinks and layer handles become harmlessly stale.
+    ///
+    /// Each input keeps only its latest frame, which the compositor draws at
+    /// every tick of its own rate. A live source keeps its own time; a file
+    /// does not, and without a [`crate::elements::Pacer`] in front of this
+    /// sink it is read as fast as it decodes, and all but the last frame of
+    /// each tick are passed over.
     pub fn add_source(
         &self,
         name: impl Into<String>,

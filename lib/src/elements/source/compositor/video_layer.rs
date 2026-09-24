@@ -92,7 +92,10 @@ pub enum VideoFit {
 pub struct VideoLayer {
     /// Output-space destination and clipping rectangle.
     pub rect: VideoRect,
-    /// Stacking order; larger values are drawn over smaller values.
+    /// Stacking order; larger values are drawn over smaller values, and
+    /// among equal values the input or layer added later is drawn over the
+    /// one added earlier — so a label added after the picture it labels is
+    /// on top without a `z_index` of its own.
     pub z_index: i32,
     /// Layer alpha in the inclusive range `0.0..=1.0`.
     pub opacity: f32,

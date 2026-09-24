@@ -95,10 +95,12 @@ pub enum DecodeTarget {
         /// [`crate::elements::D3d11Scaler`].
         context: Arc<Mutex<ID3D11DeviceContext>>,
         /// How many decoded frames downstream may hold at once — every
-        /// queue and buffer after the decoder, counted together. The
-        /// hardware decoder's surface pool is fixed at this plus the
-        /// codec's own references, and at most 64 in all; frames held past
-        /// it fail with
+        /// queue and buffer after the decoder, counted together: each
+        /// `Queue`'s capacity, one for a `Pacer` or `VideoSynchronizer`
+        /// waiting on a frame's time, one for a compositor input's latest
+        /// frame, and one for the picture on screen. The hardware decoder's
+        /// surface pool is fixed at this plus the codec's own references,
+        /// and at most 64 in all; frames held past it fail with
         /// [`D3d11DecoderError::SurfacePoolExhausted`](crate::elements::D3d11DecoderError::SurfacePoolExhausted).
         /// See [`crate::elements::D3d11Decoder::new`].
         downstream_hw_frames: i32,
@@ -127,7 +129,9 @@ pub enum DecodeTarget {
     Cuda {
         /// The CUDA context every CUDA element in the pipeline shares.
         device: CudaDevice,
-        /// How many decoded frames downstream may hold at once — see
+        /// How many decoded frames downstream may hold at once, counted as
+        /// for `D3d11` — each `Queue`'s capacity, one for a pacer waiting on
+        /// a frame, one for a compositor input, one on screen. See
         /// [`crate::elements::CudaDecoder::new`] for the budget NVDEC's
         /// fixed, capped pool has to fit.
         downstream_hw_frames: i32,
@@ -324,17 +328,17 @@ impl VideoDecodeBin {
     /// `{name}-upload` — or, for a 10-bit or BT.2020 stream on the hardware
     /// path, `{name}-convert`, and on CUDA for BT.2020 `{name}-rgb`.
     ///
+    /// `threading` is how many threads a software decode may have and what it
+    /// may spend them on — see [`DecodeThreading`] — and `None` leaves it as
+    /// [`SwDecoder::new`] does. It is the software path's, including one put
+    /// in when the hardware refuses; the hardware decoders have no such
+    /// choice to make.
+    ///
     /// Fails with [`VideoDecodeBinError`] for a stream that is not video, or
     /// one whose pictures the target cannot be given — a size unknown or odd
     /// where the software path needs one it can make a surface of — and
-    /// otherwise with whatever the chosen element's constructor fails with:
-    /// `threading` is how many threads a software decode may have and what
-    /// it may spend them on — see [`DecodeThreading`] — and `None` leaves it
-    /// as [`SwDecoder::new`] does. It is the software path's, including one
-    /// put in when the hardware refuses; the hardware decoders have no such
-    /// choice to make.
-    ///
-    /// a codec FFmpeg cannot decode at all is `SwDecoder`'s error. Nothing is
+    /// otherwise with whatever the chosen element's constructor fails with: a
+    /// codec FFmpeg cannot decode at all is `SwDecoder`'s error. Nothing is
     /// left behind by a failure.
     pub fn open(
         name: impl Into<String>,

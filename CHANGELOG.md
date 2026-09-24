@@ -596,7 +596,8 @@ compile error with no explanation.
   (`WasapiRenderer`, `PipeWireAudioRenderer`), the picture following the
   samples played. `play`, `pause`, `seek`, `position`, `duration` and
   `window_control` drive it, `next_event` reports the window, the end and
-  an element's failure as `PlayerEvent`s, and `respond_to` does what a
+  an element's failure as `PlayerEvent`s — `next_event_timeout` returns
+  `None` only when its time is up, and `Stopped` once playback is over — and `respond_to` does what a
   player usually does with a window event — Space, the arrows, F or a double
   click, and `false` for Escape or a close. After a seek, `position` says
   where it went until playback moves on from there. `FileDemuxer::duration`

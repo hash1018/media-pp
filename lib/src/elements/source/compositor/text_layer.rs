@@ -136,6 +136,11 @@ pub(crate) fn rasterize_coverage(
 /// caller must supply (`rect`) and defaults the rest — [`Self::new`] takes
 /// only `font_data` and defaults `font_size`/`color`/`x`/`y`, all freely
 /// reassignable before the call to `add_text_layer`.
+///
+/// A text layer is stacked like a video input, at `z_index` 0 until its
+/// handle's `set_z_index` says otherwise — and among equal `z_index` values
+/// the one added later is drawn over the one added earlier, so a label added
+/// after the video it labels is on top of it as it is.
 #[derive(Debug, Clone)]
 pub struct TextLayer {
     /// Raw TrueType or OpenType font bytes owned by the layer.
