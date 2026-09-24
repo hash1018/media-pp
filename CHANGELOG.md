@@ -12,6 +12,25 @@ compile error with no explanation.
 
 ### Breaking
 
+- **`RtspMuxer::open` gives up on a server that does not answer.** It
+  waited without limit: publishing to an address with nothing listening,
+  or to a server that took the connection and never replied, never
+  returned. `RtspMuxer::create` takes the `RtspOptions` `RtspSource::open`
+  already did — transport and a timeout, 5 seconds by default — and the
+  timeout bounds the handshake and every write after it. Write
+  `RtspMuxer::create(url, RtspOptions::default())`, or
+  `RtspOptions { transport, ..Default::default() }` for a transport of your
+  own. `RtspOptions` is still `media_pp::elements::RtspOptions`; the
+  duplicate path through `elements::source` is gone.
+
+- **`FileMuxer::create` names the file it could not create.** A name with
+  no container in it — `out`, `out.unknownext` — was
+  `FileMuxerError::Ffmpeg(Invalid argument)`, and a directory that is not
+  there `No such file or directory`, neither saying which file. They are
+  now `FileMuxerError::UnknownContainer { path }` and
+  `FileMuxerError::Create { path, source }`. A match on `FileMuxerError`
+  needs the two arms.
+
 - **A presenter of your own is told what colour an NV12 frame is.**
   `D3d11FrameRenderer::submit_nv12_texture`,
   `D3d12FrameRenderer::submit_nv12_texture` and
@@ -643,6 +662,13 @@ compile error with no explanation.
   writes its packets at the right times.
 
 ### Added
+
+- **`DxgiCaptureSource::outputs`** lists what `CaptureArea::Output` can
+  name, by the index that names it, with each monitor's name, place on the
+  desktop, and which one is primary — output 0 need not be.
+  **`MfCaptureSource::frame_rate`** says the rate a camera was opened at,
+  which an encoder after it needs and `open` with no format chosen did not
+  say.
 
 - **Re-encoding a file needs nothing outside the crate.** `StreamInfo`
   says a video stream's `frame_rate` and, through `size` and `color`, its
@@ -1506,6 +1532,44 @@ compile error with no explanation.
   decoder in this crate — keys exactly as before, byte for byte.
 
 ### Fixed
+
+- **The streams `FileDemuxer::open` and `RtspSource::open` describe no
+  longer hold the source open.** Each `StreamInfo`'s parameters shared the
+  ownership of the whole input with the source, so a file stayed open —
+  and on Windows could not be deleted or replaced — for as long as the
+  caller kept the stream list, even after the pipeline had ended; an RTSP
+  session stayed connected the same way. That sharing is counted by a
+  non-atomic `Rc`, and with the source on its own thread and the list on
+  the caller's, the two could drop it at once. They are copies of their
+  own now.
+
+- **`SegmentedFileMuxer` cuts the sound where it cuts the picture.** A
+  picture reaches a muxer later than its sound — through a queue, and an
+  encoder holding frames back — and the cut happened when the keyframe
+  arrived, so the sound already there for the next segment ended the one
+  before: 0.4 s of it at every cut behind NVENC, playing on past that
+  file's last picture and missing from the start of its own. Another track's
+  packets now wait for the picture to pass them, and at a cut, what comes
+  before the keyframe's time ends the outgoing file and the rest opens the
+  next. Sound that arrives before the first picture no longer makes a
+  segment of its own either.
+
+- **A `ReplayBuffer` clip ends with its picture.** For the same reason its
+  sound ran on 0.46 s past the last frame; what the other tracks hold past
+  the picture's end stays out of a clip.
+
+- **`RtspSource` no longer logs the password in a camera's address.** It
+  logged the URL it opened as given; it now logs it with the credentials
+  removed, as `RtspMuxer` already did.
+
+- **The docs match what the examples do.** `screen_record_software` and
+  `screen_record_av` end with `finish()`, which keeps the last frames the
+  encoder holds, and their READMEs said `stop()`, which drops them; the
+  `rtsp_source` example took a developer's camera address when given
+  none, and asks for one now; the README says RTSP output goes to a server
+  such as MediaMTX, which this crate does not provide; and the muxers' doc
+  examples use `VideoCodec::OpenH264`, which every build has, not
+  `VideoCodec::H264`, which many do not.
 
 - **`D3d11Upload` keeps a frame's primaries and transfer.** It passed on
   the matrix and range and dropped the other two, so an uploaded BT.2020

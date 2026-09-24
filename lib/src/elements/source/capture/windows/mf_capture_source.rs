@@ -184,6 +184,9 @@ pub struct MfCaptureSource {
     /// unset makes it guess instead of using what this source produces.
     color_space: ffmpeg::color::Space,
     color_range: ffmpeg::color::Range,
+    /// The rate the camera's mode was negotiated at — see
+    /// [`MfCaptureSource::frame_rate`].
+    frame_rate: ffmpeg::Rational,
     /// One nominal frame in [`TIME_BASE_DENOMINATOR`] ticks — what a Pause
     /// costs the timeline instead of its real duration.
     frame_interval: i64,
@@ -376,6 +379,7 @@ impl MfCaptureSource {
                 height,
                 color_space,
                 color_range,
+                frame_rate: framerate,
                 frame_interval,
                 origin: None,
                 last_sample_time: None,
@@ -445,6 +449,14 @@ impl MfCaptureSource {
     /// than rounding it onto a grid the camera never promised.
     pub fn time_base(&self) -> ffmpeg::Rational {
         ffmpeg::Rational::new(1, TIME_BASE_DENOMINATOR)
+    }
+
+    /// The rate the camera's mode was negotiated at — what an encoder after
+    /// it is opened with, and what [`MfCaptureOptions::format`] left as
+    /// `None` does not otherwise say. Nominal: frames are stamped as the
+    /// camera delivers them, which [`MfCaptureSource::time_base`] explains.
+    pub fn frame_rate(&self) -> ffmpeg::Rational {
+        self.frame_rate
     }
 
     fn classify_error(&self, error: windows::core::Error) -> MfCaptureSourceError {
@@ -975,6 +987,11 @@ mod tests {
                 return;
             }
         };
+        let rate = source.frame_rate();
+        assert!(
+            rate.numerator() > 0 && rate.denominator() > 0,
+            "the negotiated rate is said: {rate}"
+        );
 
         let seen: Arc<Mutex<Vec<Delivered>>> = Arc::new(Mutex::new(Vec::new()));
         let recorded = seen.clone();

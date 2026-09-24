@@ -994,22 +994,29 @@ mod tests {
         drop(sinks);
 
         let (demuxer, streams) = FileDemuxer::open("check", &file).expect("the file opens again");
+        let length = demuxer.duration();
         let video = &streams[0];
-        let _ = std::fs::remove_file(&file);
-        assert_eq!(video.parameters.id(), ffmpeg::codec::Id::H264, "{path:?}");
+        let codec = video.parameters.id();
         // SAFETY: plain fields of parameters this test owns.
         let size = unsafe {
             let raw = video.parameters.as_ptr();
             ((*raw).width as u32, (*raw).height as u32)
         };
+        let color = video.color();
+        // Closed before it is deleted, which Windows refuses while anything
+        // has it open.
+        drop(streams);
+        drop(demuxer);
+        let _ = std::fs::remove_file(&file);
+        assert_eq!(codec, ffmpeg::codec::Id::H264, "{path:?}");
         assert_eq!(size, (WIDTH, HEIGHT), "{path:?}");
-        let length = demuxer.duration().expect("the file says how long it is");
+        let length = length.expect("the file says how long it is");
         assert!(
             length.abs_diff(std::time::Duration::from_secs(1))
                 < std::time::Duration::from_millis(100),
             "{path:?}: {length:?} long"
         );
-        video.color()
+        color
     }
 
     #[test]

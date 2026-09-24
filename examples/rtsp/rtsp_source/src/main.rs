@@ -28,9 +28,10 @@ mod example {
             7,
         )?;
 
-        let url = std::env::args()
-            .nth(1)
-            .unwrap_or_else(|| "rtsp://192.168.0.180:8554/v11_00?4".into());
+        let Some(url) = std::env::args().nth(1) else {
+            eprintln!("usage: rtsp_source <rtsp://host:port/path>");
+            std::process::exit(1);
+        };
 
         println!("connecting to {url} ...");
         let (source, streams) = RtspSource::open("rtsp-src", &url, RtspOptions::default())

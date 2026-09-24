@@ -17,7 +17,7 @@ mod example {
     use media_pp::ffmpeg::media;
     use media_pp::{
         bus::BusEvent,
-        elements::{FileDemuxer, Pacer, RtspMuxer, RtspTransport, TrackFormat},
+        elements::{FileDemuxer, Pacer, RtspMuxer, RtspOptions, TrackFormat},
         pipeline::Pipeline,
     };
 
@@ -57,7 +57,7 @@ mod example {
         let (pipeline, ()) = Pipeline::new("rtsp-publish", source, |source, ctx| {
             // Every track must be registered before `open`, which is what
             // announces them all in one SDP.
-            let mut muxer = RtspMuxer::create(&url, RtspTransport::Tcp)?;
+            let mut muxer = RtspMuxer::create(&url, RtspOptions::default())?;
             let video = muxer.add_stream("video", video_format)?;
             let audio = match audio_track {
                 Some((index, format)) => {

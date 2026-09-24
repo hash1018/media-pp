@@ -10,7 +10,7 @@ use crate::{
     contract::{MediaKind, OutputContract, PortContract},
     control::{ControlReceiver, drain_control},
     element::{Element, ElementType, Source, SourceElement, element_pp_log},
-    elements::RtspTransport,
+    elements::{RtspOptions, rtsp::redact},
     error::Result,
     pad::SrcPad,
 };
@@ -31,28 +31,6 @@ pub enum RtspSourceError {
     /// [`RtspSource::best`].
     #[error("the RTSP session has no {0:?} stream")]
     NoStream(ffmpeg::media::Type),
-}
-
-/// Construction-time options for [`RtspSource::open`].
-#[derive(Debug, Clone, Copy)]
-pub struct RtspOptions {
-    /// Transport used for RTSP media delivery.
-    pub transport: RtspTransport,
-    /// Socket I/O timeout — ffmpeg's own `timeout` RTSP demuxer option,
-    /// which covers the initial connect/handshake reads too, not just
-    /// steady-state ones. Without this, ffmpeg's own default is *no
-    /// timeout at all*, meaning [`RtspSource::open`] can hang forever
-    /// against an unreachable or dead server.
-    pub timeout: Duration,
-}
-
-impl Default for RtspOptions {
-    fn default() -> Self {
-        Self {
-            transport: RtspTransport::Tcp,
-            timeout: Duration::from_secs(5),
-        }
-    }
 }
 
 /// Demuxes a live RTSP stream — the client/receive counterpart to
@@ -93,11 +71,7 @@ impl RtspSource {
         options: RtspOptions,
     ) -> std::result::Result<(Self, Vec<StreamInfo>), RtspSourceError> {
         crate::ensure_ffmpeg();
-        let mut dict = ffmpeg::Dictionary::new();
-        dict.set("rtsp_transport", options.transport.as_ffmpeg_option());
-        dict.set("timeout", &options.timeout.as_micros().to_string());
-
-        let input = ffmpeg::format::input_with_dictionary(url.as_ref(), dict)?;
+        let input = ffmpeg::format::input_with_dictionary(url.as_ref(), options.to_dictionary())?;
 
         let streams: Vec<StreamInfo> = input.streams().map(|s| StreamInfo::of(&s)).collect();
 
@@ -124,7 +98,8 @@ impl RtspSource {
         pp_info!(
             pp_log: &pp_log,
             "opened: url={}, transport={:?}, {} stream(s)",
-            url.as_ref(),
+            // A camera's address often carries its password.
+            redact(url.as_ref()),
             options.transport,
             streams.len()
         );
@@ -299,7 +274,7 @@ mod tests {
     fn the_default_options_still_bound_the_connection() {
         let options = RtspOptions::default();
 
-        assert_eq!(options.transport, RtspTransport::Tcp);
+        assert_eq!(options.transport, crate::elements::RtspTransport::Tcp);
         assert!(
             options.timeout > Duration::ZERO,
             "the default timeout must not be ffmpeg's unbounded one"

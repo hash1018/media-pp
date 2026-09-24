@@ -209,7 +209,7 @@ pub enum CaptureMode {
 /// (`GetSystemMetrics(SM_XVIRTUALSCREEN)`, `MONITORINFOEX::rcMonitor`,
 /// `DXGI_OUTPUT_DESC::DesktopCoordinates`), not local to any one monitor.
 /// See [`CaptureArea::Region`].
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CaptureRect {
     /// Absolute virtual-desktop x coordinate of the left edge.
     pub x: i32,
@@ -230,7 +230,8 @@ pub enum CaptureArea {
     /// (adapter 0's outputs, then adapter 1's, ...) — "monitor 0",
     /// "monitor 1", regardless of which GPU each is attached to. `0` is
     /// whatever Windows considers the first output of the first adapter,
-    /// not necessarily the primary monitor.
+    /// not necessarily the primary monitor — [`DxgiCaptureSource::outputs`]
+    /// lists them by this index, and says which one is.
     ///
     /// The simple case: exactly one `IDXGIOutputDuplication`, no
     /// cropping, no compositing.
@@ -268,6 +269,22 @@ pub enum CaptureArea {
     /// stitched composite; handling that correctly isn't done, simplest
     /// to reject rather than silently draw it wrong.
     Region(CaptureRect),
+}
+
+/// One output [`CaptureArea::Output`] can name — see
+/// [`DxgiCaptureSource::outputs`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DxgiOutput {
+    /// What [`CaptureArea::Output`]'s `output_index` names it by.
+    pub index: u32,
+    /// Windows' own name for it, such as `\\.\DISPLAY1`.
+    pub name: String,
+    /// Where it is on the virtual desktop, in the coordinates
+    /// [`CaptureArea::Region`] is measured in.
+    pub rect: CaptureRect,
+    /// Whether it is the primary monitor — the one whose top-left corner
+    /// is the virtual desktop's origin, as Windows places it.
+    pub primary: bool,
 }
 
 /// Construction-time options for [`DxgiCaptureSource::open`].
@@ -547,6 +564,48 @@ pub struct DxgiCaptureSource {
 unsafe impl Send for DxgiCaptureSource {}
 
 impl DxgiCaptureSource {
+    /// Every output [`CaptureArea::Output`] can name, in the order its index
+    /// counts them — to find the primary monitor, or to offer a list to pick
+    /// from. Asked of Windows each time, so a monitor plugged in since is
+    /// there; an index is only good until the next such change.
+    pub fn outputs() -> std::result::Result<Vec<DxgiOutput>, DxgiCaptureSourceError> {
+        // SAFETY: plain factory creation; the result is an owned COM object.
+        let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }?;
+        let mut found = Vec::new();
+        let mut adapter_index = 0u32;
+        // SAFETY: adapters and then each adapter's outputs are enumerated
+        // monotonically on live objects until DXGI reports exhaustion — the
+        // order `pick_output` counts in.
+        while let Ok(adapter) = unsafe { factory.EnumAdapters1(adapter_index) } {
+            let mut output_index = 0u32;
+            // SAFETY: as above, on this live adapter.
+            while let Ok(output) = unsafe { adapter.EnumOutputs(output_index) } {
+                // SAFETY: `output` is live; `GetDesc` returns a plain value.
+                let desc = unsafe { output.GetDesc() }?;
+                let rect = desc.DesktopCoordinates;
+                let name_end = desc
+                    .DeviceName
+                    .iter()
+                    .position(|&unit| unit == 0)
+                    .unwrap_or(desc.DeviceName.len());
+                found.push(DxgiOutput {
+                    index: u32::try_from(found.len()).unwrap_or(u32::MAX),
+                    name: String::from_utf16_lossy(&desc.DeviceName[..name_end]),
+                    rect: CaptureRect {
+                        x: rect.left,
+                        y: rect.top,
+                        width: rect.right.abs_diff(rect.left),
+                        height: rect.bottom.abs_diff(rect.top),
+                    },
+                    primary: rect.left == 0 && rect.top == 0,
+                });
+                output_index += 1;
+            }
+            adapter_index += 1;
+        }
+        Ok(found)
+    }
+
     /// Opens whichever output(s) [`DxgiCaptureOptions::area`] resolves to
     /// and starts duplicating them. Returns the element alongside the
     /// captured composite's actual [`VideoFormat`] — what the caller
@@ -2118,6 +2177,29 @@ mod tests {
                 result,
                 Err(DxgiCaptureSourceError::InvalidFrameRate(refused)) if refused == rate
             ));
+        }
+    }
+
+    /// The list is counted as `CaptureArea::Output` counts: each entry's
+    /// index opens that very output, and at most one of them is primary.
+    #[test]
+    fn outputs_are_listed_by_the_index_that_opens_them() {
+        let outputs = DxgiCaptureSource::outputs().expect("DXGI lists its outputs");
+        if outputs.is_empty() {
+            eprintln!("skipping: this machine has no desktop outputs");
+            return;
+        }
+        assert!(outputs.iter().filter(|output| output.primary).count() <= 1);
+        // SAFETY: plain factory creation; the result is an owned COM object.
+        let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }.expect("a factory");
+        for (position, output) in outputs.iter().enumerate() {
+            assert_eq!(output.index as usize, position);
+            let (_, picked) = pick_output(&factory, output.index).expect("its index opens it");
+            // SAFETY: `picked` is live; `GetDesc` returns a plain value.
+            let rect = unsafe { picked.GetDesc() }
+                .expect("a description")
+                .DesktopCoordinates;
+            assert_eq!((rect.left, rect.top), (output.rect.x, output.rect.y));
         }
     }
 

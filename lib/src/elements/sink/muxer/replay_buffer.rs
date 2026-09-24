@@ -33,6 +33,10 @@
 //! segments by, and for its reason: zeroing each track on its own first
 //! packet would pull them apart by however far they were interleaved.
 //!
+//! They end where it does, too. A picture reaches a muxer later than the
+//! sound beside it, so what they hold past the last picture held is sound
+//! for pictures not here yet, and a clip leaves it out.
+//!
 //! [`SegmentedFileMuxer`]: super::SegmentedFileMuxer
 
 use std::collections::VecDeque;
@@ -98,7 +102,7 @@ pub enum ReplayBufferError {
 /// # };
 /// # fn main() -> media_pp::Result<()> {
 /// # let video_encoder = SwEncoder::new("video", SwEncoderOptions {
-/// #     codec: VideoCodec::H264,
+/// #     codec: VideoCodec::OpenH264,
 /// #     width: 640,
 /// #     height: 360,
 /// #     pixel_format: ffmpeg::format::Pixel::YUV420P,
@@ -380,13 +384,37 @@ impl Window {
             .or(first.packet.pts())
             .expect("only a stamped packet is ever held");
         let anchor_base = self.streams[self.anchor].time_base;
+        // Where the picture ends: the latest any held frame is shown until.
+        // A picture reaches a muxer later than the sound beside it — it has
+        // further to come, through a queue and an encoder holding frames
+        // back — so what the other tracks hold past this is sound for
+        // pictures not here yet, and a clip ending on it would run on
+        // silent-screened for a fraction of a second.
+        let end = anchor
+            .iter()
+            .filter_map(|held| {
+                let shown = held.packet.pts()?.rescale(anchor_base, MICROSECONDS);
+                Some(
+                    shown
+                        + held
+                            .packet
+                            .duration()
+                            .rescale(anchor_base, MICROSECONDS)
+                            .max(0),
+                )
+            })
+            .max()
+            .unwrap_or(i64::MAX);
+        let anchor_track = self.anchor;
         let mut packets: Vec<(i64, usize, Arc<ffmpeg::Packet>)> = self
             .held
             .iter()
             .enumerate()
             .flat_map(|(track, held)| {
                 held.iter()
-                    .filter(move |packet| packet.at >= first.at)
+                    .filter(move |packet| {
+                        packet.at >= first.at && (track == anchor_track || packet.at < end)
+                    })
                     .map(move |packet| (packet.at, track, Arc::clone(&packet.packet)))
             })
             .collect();
@@ -827,6 +855,62 @@ mod tests {
             first_picture_decodes(&path),
             "a player can show the clip's first frame on its own"
         );
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// The sound beside a picture arrives ahead of it — the picture has a
+    /// queue and an encoder holding frames back to come through — and a
+    /// clip took all of it, so it ran on past its last picture by however
+    /// far the sound was ahead: 0.46 s behind a hardware encoder. It ends
+    /// with the picture instead.
+    #[test]
+    fn a_clip_ends_with_its_picture_though_the_sound_came_ahead() {
+        let Some(mut recorded) = fixture() else {
+            return;
+        };
+        let video = recorded
+            .streams
+            .iter()
+            .position(|(parameters, _)| parameters.medium() == ffmpeg::media::Type::Video)
+            .expect("the fixture has a picture");
+        let seconds = |streams: &[(ffmpeg::codec::Parameters, ffmpeg::Rational)],
+                       track: usize,
+                       packet: &ffmpeg::Packet| {
+            let base = streams[track].1;
+            packet.dts().or(packet.pts()).unwrap_or(0) as f64 * f64::from(base.numerator())
+                / f64::from(base.denominator())
+        };
+        let mut arriving: Vec<(f64, usize, ffmpeg::Packet)> = std::mem::take(&mut recorded.packets)
+            .into_iter()
+            .map(|(track, packet)| {
+                let at = seconds(&recorded.streams, track, &packet);
+                // The sound half a second ahead of the picture.
+                (if track == video { at } else { at - 0.5 }, track, packet)
+            })
+            .collect();
+        arriving.sort_by(|a, b| a.0.total_cmp(&b.0));
+        // Stopped part of the way in, as a save is — the sound half a
+        // second further on than the picture.
+        arriving.truncate(arriving.len() * 2 / 3);
+        recorded.packets = arriving
+            .into_iter()
+            .map(|(_, track, packet)| (track, packet))
+            .collect();
+        let (mut sinks, handle) = buffer_over(&recorded, Duration::from_secs(3));
+        feed(&mut sinks, &recorded.packets);
+
+        let path = clip_path("sound_ahead");
+        handle.save(&path).expect("the clip saves");
+        let clip = read_back(&path);
+        let picture_last = clip.span[clip.video].1;
+        for (track, (_, last)) in clip.span.iter().enumerate() {
+            // One frame, and one packet of sound, either side.
+            assert!(
+                *last <= picture_last + 0.1,
+                "track {track} runs on to {last:.3}s, past its picture's last at \
+                 {picture_last:.3}s"
+            );
+        }
         std::fs::remove_file(&path).ok();
     }
 

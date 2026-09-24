@@ -1,4 +1,5 @@
 use std::{
+    collections::VecDeque,
     path::PathBuf,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
@@ -52,7 +53,7 @@ struct StreamDef {
     name: Arc<str>,
     parameters: ffmpeg::codec::Parameters,
     time_base: ffmpeg::Rational,
-    /// Whether this is the track [`SegmentGroup::maybe_rotate`] waits for
+    /// Whether this is the track [`SegmentGroup::consume_packet`] waits for
     /// a keyframe on before actually cutting — see
     /// [`SegmentedFileMuxer::open`]'s own docs.
     is_video: bool,
@@ -74,7 +75,7 @@ struct StreamDef {
 /// # };
 /// # fn main() -> media_pp::Result<()> {
 /// # let video_encoder = SwEncoder::new("video", SwEncoderOptions {
-/// #     codec: VideoCodec::H264,
+/// #     codec: VideoCodec::OpenH264,
 /// #     width: 640,
 /// #     height: 360,
 /// #     pixel_format: ffmpeg::format::Pixel::YUV420P,
@@ -177,6 +178,16 @@ impl SegmentedFileMuxer {
     /// an equally valid cut point, so rotation happens as soon as the
     /// policy is due.
     ///
+    /// The other tracks are cut at that keyframe's *time*, not at the moment
+    /// it arrives: what they carry from before it ends the outgoing file,
+    /// and what from after it opens the next. A picture reaches a muxer
+    /// later than the sound beside it — it has further to come, through a
+    /// queue and an encoder that holds frames back — so the sound of the
+    /// next segment is already here when its keyframe is. A packet of
+    /// another track ahead of the picture therefore waits here for the
+    /// picture to catch up, and is written once it has; that is a fraction
+    /// of a second of packets, bounded should the picture stop coming.
+    ///
     /// The final segment is finalized the same way a plain [`FileMuxer`]
     /// finalizes its one file: once every track has reported `Eos` *or*
     /// [`ControlMsg::Stop`] (see [`FileMuxer::open`]'s own docs) — a
@@ -195,6 +206,7 @@ impl SegmentedFileMuxer {
         let current_sinks = open_segment(&self.streams, path)?;
         let group = Arc::new(SegmentGroup {
             policy: self.policy,
+            video: self.streams.iter().position(|s| s.is_video),
             naming: Mutex::new(self.naming),
             state: Mutex::new(GroupState {
                 streams: self.streams,
@@ -203,6 +215,9 @@ impl SegmentedFileMuxer {
                 segment_started: Instant::now(),
                 segment_bytes: 0,
                 segment_origin: None,
+                waiting: VecDeque::new(),
+                video_reached: None,
+                video_ended: false,
             }),
         });
         Ok(self.id.sinks(
@@ -263,6 +278,80 @@ struct GroupState {
     /// Where this segment's timeline starts, as `(track, timestamp)` in that
     /// track's own time base — see [`SegmentGroup::rebase`].
     segment_origin: Option<(usize, i64)>,
+    /// Packets of the other tracks that are ahead of the picture, in the
+    /// order they arrived, waiting for it to pass them — see
+    /// [`SegmentGroup::consume_packet`].
+    waiting: VecDeque<(usize, Arc<ffmpeg::Packet>)>,
+    /// How far the video track has written, as its last packet's
+    /// timestamp in its own time base.
+    video_reached: Option<i64>,
+    /// The video track has ended, so nothing waits for it any more.
+    video_ended: bool,
+}
+
+/// The most packets of the other tracks that wait for the picture. A
+/// picture trails its sound by a fraction of a second — a few dozen audio
+/// packets; this many is well over ten seconds of AAC. Past it the picture
+/// has stopped coming rather than fallen behind, and what waits longest is
+/// written where it would have gone without waiting.
+const MAX_WAITING: usize = 1024;
+
+/// A packet's place on its track's timeline.
+fn stamp(packet: &ffmpeg::Packet) -> Option<i64> {
+    packet.pts().or(packet.dts())
+}
+
+impl GroupState {
+    /// Whether `packet` of `track` comes before `reached` of `video`.
+    fn before(&self, track: usize, packet: &ffmpeg::Packet, video: usize, reached: i64) -> bool {
+        let Some(at) = stamp(packet) else {
+            // Nowhere on the timeline to wait for.
+            return true;
+        };
+        // SAFETY: plain arithmetic on two timestamps and their rationals; it
+        // reads nothing through a pointer.
+        unsafe {
+            ffmpeg::ffi::av_compare_ts(
+                at,
+                self.streams[track].time_base.into(),
+                reached,
+                self.streams[video].time_base.into(),
+            ) < 0
+        }
+    }
+
+    /// Writes one packet into the current segment, on its timeline.
+    fn write(&mut self, track: usize, packet: Arc<ffmpeg::Packet>) -> Result<()> {
+        if self.segment_origin.is_none()
+            && let Some(dts) = packet.dts()
+        {
+            self.segment_origin = Some((track, dts));
+        }
+        let packet = SegmentGroup::rebase(self, track, packet);
+        self.current_sinks[track].consume(MediaBuffer::Packet(packet))
+    }
+
+    /// Writes, in the order they arrived, the waiting packets `release`
+    /// picks, and leaves the rest waiting. One that fails does not keep
+    /// the others back; the first failure is what this returns.
+    fn release(
+        &mut self,
+        mut release: impl FnMut(&Self, usize, &ffmpeg::Packet) -> bool,
+    ) -> Result<()> {
+        let waiting = std::mem::take(&mut self.waiting);
+        let mut result = Ok(());
+        for (track, packet) in waiting {
+            if release(self, track, &packet) {
+                let written = self.write(track, packet);
+                if result.is_ok() {
+                    result = written;
+                }
+            } else {
+                self.waiting.push_back((track, packet));
+            }
+        }
+        result
+    }
 }
 
 /// Shared between every [`SegmentedTrackSink`] [`SegmentedFileMuxer::open`]
@@ -273,15 +362,22 @@ struct GroupState {
 /// never a mix).
 struct SegmentGroup {
     policy: SegmentPolicy,
+    /// The track a cut waits for a keyframe on, if there is one.
+    video: Option<usize>,
     naming: Mutex<Box<dyn FnMut(u64) -> PathBuf + Send>>,
     state: Mutex<GroupState>,
 }
 
 impl SegmentGroup {
-    /// Called for every `Packet` on every track, before it's written.
-    /// Rotates first if this is the packet that should trigger it (see
-    /// [`SegmentedFileMuxer::open`]'s own docs), then writes into whichever
-    /// segment is current by the time this returns.
+    /// Called for every `Packet` on every track. Rotates first if this is
+    /// the packet that should trigger it (see [`SegmentedFileMuxer::open`]'s
+    /// own docs), then writes into whichever segment is current by the time
+    /// this returns — or, for a packet of another track ahead of the
+    /// picture, leaves it waiting for the picture to pass it.
+    ///
+    /// A waiting packet is written by a later call, perhaps on another
+    /// track's thread, and a failure to write it is that call's result: the
+    /// segment file it went into is the one that failed either way.
     fn consume_packet(
         &self,
         track_index: usize,
@@ -292,44 +388,70 @@ impl SegmentGroup {
         // Counted before the check, so a segment that is already over its
         // size cuts at this keyframe rather than one packet later.
         state.segment_bytes += packet.size() as u64;
-        if state.segment_origin.is_none()
-            && let Some(dts) = packet.dts()
-        {
-            state.segment_origin = Some((track_index, dts));
-        }
         let due = match self.policy {
             SegmentPolicy::Duration(after) => state.segment_started.elapsed() >= after,
             SegmentPolicy::Size(bytes) => state.segment_bytes >= bytes,
         };
+        let mut result = Ok(());
         let mut rotated_to = None;
-        if due {
-            let has_video = state.streams.iter().any(|s| s.is_video);
-            let this_is_video = state.streams[track_index].is_video;
-            let should_cut = if has_video {
-                this_is_video && packet.is_key()
-            } else {
-                true
-            };
-            if should_cut {
-                for sink in state.current_sinks.iter_mut() {
-                    sink.control(ControlMsg::Stop)?;
+        match self.video {
+            // Another track beside a picture: written once the picture is
+            // past it, so a cut can still put it on the right side.
+            Some(video) if track_index != video && !state.video_ended => {
+                let passed = state
+                    .video_reached
+                    .is_some_and(|reached| state.before(track_index, &packet, video, reached));
+                if passed {
+                    result = state.write(track_index, packet);
+                } else {
+                    state.waiting.push_back((track_index, packet));
+                    if state.waiting.len() > MAX_WAITING
+                        && let Some((track, oldest)) = state.waiting.pop_front()
+                    {
+                        result = state.write(track, oldest);
+                    }
                 }
-                let index = state.segment_index + 1;
-                let path = (self.naming.lock().unwrap())(index);
-                state.current_sinks = open_segment(&state.streams, path)?;
-                state.segment_index = index;
-                state.segment_started = Instant::now();
-                // This packet is the first of the new segment, so what was
-                // counted for it above belongs to that one.
-                state.segment_bytes = packet.size() as u64;
-                // This packet opens the new segment, so its timeline starts
-                // here — see [`SegmentGroup::rebase`].
-                state.segment_origin = packet.dts().map(|dts| (track_index, dts));
-                rotated_to = Some(index);
+            }
+            Some(video) if track_index == video => {
+                // What comes before this picture goes in first, as a file
+                // interleaves by time.
+                if let Some(dts) = packet.dts() {
+                    result = state
+                        .release(|state, track, waiting| state.before(track, waiting, video, dts));
+                }
+                // Not before the first picture: sound that came ahead of it
+                // is not a segment of its own.
+                if due && packet.is_key() && state.video_reached.is_some() {
+                    // What comes before the keyframe's own time ends the
+                    // outgoing segment; the rest opens the next.
+                    if let Some(at) = stamp(&packet) {
+                        let released = state.release(|state, track, waiting| {
+                            state.before(track, waiting, video, at)
+                        });
+                        if result.is_ok() {
+                            result = released;
+                        }
+                    }
+                    rotated_to = Some(self.rotate(&mut state, track_index, &packet)?);
+                }
+                let reached = packet.dts().or(packet.pts());
+                let written = state.write(track_index, packet);
+                if result.is_ok() {
+                    result = written;
+                }
+                if reached.is_some() {
+                    state.video_reached = reached;
+                }
+            }
+            // No picture to wait for — an audio-only recording, or one whose
+            // picture has ended: any packet is a cut point.
+            _ => {
+                if due && self.video.is_none() {
+                    rotated_to = Some(self.rotate(&mut state, track_index, &packet)?);
+                }
+                result = state.write(track_index, packet);
             }
         }
-        let packet = Self::rebase(&state, track_index, packet);
-        let result = state.current_sinks[track_index].consume(MediaBuffer::Packet(packet));
         // Formatting and emitting happen off the group lock: every track's
         // `consume_packet` contends for it, so nothing that isn't required
         // to be serialized with the rotation belongs inside it.
@@ -338,6 +460,43 @@ impl SegmentGroup {
             pp_info!(pp_log: pp_log, "rotated segment_index={index}");
         }
         result
+    }
+
+    /// Finalizes the current segment and opens the next, which `packet`
+    /// — about to be written — opens.
+    fn rotate(
+        &self,
+        state: &mut GroupState,
+        track_index: usize,
+        packet: &ffmpeg::Packet,
+    ) -> Result<u64> {
+        for sink in state.current_sinks.iter_mut() {
+            sink.control(ControlMsg::Stop)?;
+        }
+        let index = state.segment_index + 1;
+        let path = (self.naming.lock().unwrap())(index);
+        state.current_sinks = open_segment(&state.streams, path)?;
+        state.segment_index = index;
+        state.segment_started = Instant::now();
+        // This packet is the first of the new segment, so what was counted
+        // for it belongs to that one.
+        state.segment_bytes = packet.size() as u64;
+        // This packet opens the new segment, so its timeline starts here —
+        // see [`SegmentGroup::rebase`].
+        state.segment_origin = packet.dts().map(|dts| (track_index, dts));
+        Ok(index)
+    }
+
+    /// What a track that is ending still has waiting is written before it
+    /// ends: all of it for the picture, whose end is what the rest waits
+    /// for, and a track's own for any other.
+    fn release_ending(&self, state: &mut GroupState, track_index: usize) -> Result<()> {
+        if Some(track_index) == self.video {
+            state.video_ended = true;
+            state.release(|_, _, _| true)
+        } else {
+            state.release(|_, track, _| track == track_index)
+        }
     }
 
     /// Moves a packet onto its segment's own timeline, so each file starts
@@ -400,7 +559,9 @@ impl SegmentGroup {
     /// rotation check (ending is ending, not a cut point).
     fn finish_eos(&self, track_index: usize) -> Result<()> {
         let mut state = self.state.lock().unwrap();
-        state.current_sinks[track_index].consume(MediaBuffer::Eos)
+        let released = self.release_ending(&mut state, track_index);
+        let ended = state.current_sinks[track_index].consume(MediaBuffer::Eos);
+        released.and(ended)
     }
 
     /// One track's own [`ControlMsg::Stop`] — same as
@@ -409,7 +570,9 @@ impl SegmentGroup {
     /// container even though it otherwise means "abandon, don't drain").
     fn finish_stop(&self, track_index: usize) -> Result<()> {
         let mut state = self.state.lock().unwrap();
-        state.current_sinks[track_index].control(ControlMsg::Stop)
+        let released = self.release_ending(&mut state, track_index);
+        let stopped = state.current_sinks[track_index].control(ControlMsg::Stop);
+        released.and(stopped)
     }
 }
 
@@ -767,6 +930,154 @@ mod tests {
             );
         }
 
+        for path in &paths {
+            std::fs::remove_file(path).ok();
+        }
+    }
+
+    /// The sound beside a picture is cut where the picture is, though it
+    /// arrives ahead of it. A picture reaches a muxer later than its sound —
+    /// through a queue and an encoder holding frames back — and cutting on
+    /// the keyframe's arrival put everything the sound had got to by then,
+    /// some 0.4 s of it behind a hardware encoder, at the end of the file
+    /// before. Here the sound arrives half a second early, and at every cut
+    /// it has to end where the outgoing file's picture does and start where
+    /// the next one's does.
+    #[test]
+    fn sound_arriving_ahead_of_the_picture_is_cut_where_the_picture_is() {
+        let Some(path) = crate::test_support::try_test_video() else {
+            return;
+        };
+        let mut input = ffmpeg::format::input(&path).expect("the fixture opens");
+        let streams: Vec<_> = input
+            .streams()
+            .map(|stream| (stream.parameters(), stream.time_base()))
+            .collect();
+        let seconds = |track: usize, value: i64| {
+            let base = streams[track].1;
+            value as f64 * f64::from(base.numerator()) / f64::from(base.denominator())
+        };
+        let video = streams
+            .iter()
+            .position(|(parameters, _)| parameters.medium() == ffmpeg::media::Type::Video)
+            .expect("the fixture has a picture");
+        let mut packets: Vec<(f64, usize, ffmpeg::Packet)> = input
+            .packets()
+            .map(|(stream, packet)| {
+                let track = stream.index();
+                let at = seconds(track, packet.dts().or(packet.pts()).unwrap_or(0));
+                // The sound half a second ahead of the picture.
+                let arrives = if track == video { at } else { at - 0.5 };
+                (arrives, track, packet)
+            })
+            .collect();
+        packets.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let keyframes = packets
+            .iter()
+            .filter(|(_, track, packet)| *track == video && packet.is_key())
+            .count();
+        if keyframes < 3 {
+            eprintln!("skipping: the fixture has {keyframes} keyframes, and this needs cuts");
+            return;
+        }
+
+        let dir = std::env::temp_dir();
+        let prefix = format!(
+            "segmented_av_cut_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        );
+        let paths: Arc<Mutex<Vec<PathBuf>>> = Arc::new(Mutex::new(Vec::new()));
+        let recorded_paths = paths.clone();
+        // Any size at all is due at once, so every keyframe cuts.
+        let mut muxer = SegmentedFileMuxer::create(SegmentPolicy::Size(1), move |index| {
+            let path = dir.join(format!("{prefix}_{index:03}.mp4"));
+            recorded_paths.lock().unwrap().push(path.clone());
+            path
+        });
+        let tracks: Vec<_> = streams
+            .iter()
+            .enumerate()
+            .map(|(index, (parameters, time_base))| {
+                muxer.add_stream(
+                    format!("track-{index}"),
+                    TrackFormat::new(parameters.clone(), *time_base),
+                )
+            })
+            .collect();
+        let mut opened = muxer.open().expect("open must succeed");
+        let mut sinks: Vec<_> = tracks
+            .into_iter()
+            .map(|track| opened.take(track).expect("the muxer's own track"))
+            .collect();
+        for (_, track, packet) in packets {
+            sinks[track]
+                .consume(MediaBuffer::Packet(Arc::new(packet)))
+                .expect("a packet is written");
+        }
+        for sink in &mut sinks {
+            sink.consume(MediaBuffer::Eos).expect("a track ends");
+        }
+        drop(sinks);
+
+        let paths = paths.lock().unwrap().clone();
+        assert!(paths.len() >= 3, "expected several segments, got {paths:?}");
+        // One audio packet's worth, and a little: where a cut falls between
+        // two packets of sound, one of them is on either side.
+        let within = 0.05;
+        // Each segment's tracks, as when each starts and ends, in seconds.
+        let segments: Vec<Vec<(f64, f64)>> = paths
+            .iter()
+            .map(|path| {
+                let mut input = ffmpeg::format::input(path)
+                    .unwrap_or_else(|error| panic!("segment {path:?} must be readable: {error}"));
+                let bases: Vec<_> = input.streams().map(|stream| stream.time_base()).collect();
+                let mut spans = vec![(f64::MAX, f64::MIN); bases.len()];
+                for (stream, packet) in input.packets() {
+                    let track = stream.index();
+                    let base = bases[track];
+                    let at = |value: i64| {
+                        value as f64 * f64::from(base.numerator()) / f64::from(base.denominator())
+                    };
+                    let start = at(packet.pts().expect("a written packet has a pts"));
+                    let end = start + at(packet.duration());
+                    spans[track].0 = spans[track].0.min(start);
+                    spans[track].1 = spans[track].1.max(end);
+                }
+                spans
+            })
+            .collect();
+        eprintln!("segments, each track's (start, end): {segments:?}");
+        // A file leaves out a track with nothing in it.
+        let has = |spans: &Vec<(f64, f64)>, track: usize| {
+            spans.get(track).is_some_and(|span| span.0 != f64::MAX)
+        };
+        for (index, spans) in segments.iter().enumerate() {
+            assert!(has(spans, video), "segment {index} has no picture");
+        }
+        // At every cut the sound carries on across: the fixture's own sound
+        // may end before its picture does, and where it has, there is no
+        // cut in it to check.
+        for (index, pair) in segments.windows(2).enumerate() {
+            let (outgoing, next) = (&pair[0], &pair[1]);
+            for track in (0..outgoing.len()).filter(|&track| track != video) {
+                if !has(outgoing, track) || !has(next, track) {
+                    continue;
+                }
+                let (end, picture_end) = (outgoing[track].1, outgoing[video].1);
+                assert!(
+                    (end - picture_end).abs() <= within,
+                    "segment {index}'s sound ends at {end:.3}s, its picture at {picture_end:.3}s"
+                );
+                let (start, picture_start) = (next[track].0, next[video].0);
+                assert!(
+                    (start - picture_start).abs() <= within,
+                    "segment {}'s sound starts at {start:.3}s, its picture at \
+                     {picture_start:.3}s",
+                    index + 1
+                );
+            }
+        }
         for path in &paths {
             std::fs::remove_file(path).ok();
         }

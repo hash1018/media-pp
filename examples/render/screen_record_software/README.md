@@ -6,9 +6,12 @@ just a headless recording (compare `screen_preview_cpu`, which renders the
 same CPU-frame path instead of encoding it on Windows and Linux).
 
 The capture source never reaches `Eos` on its own; this just captures for a
-fixed duration and then `pipeline.stop()`s, which is also what finalizes the
-MP4's trailer — `FileMuxer` writes it on `Stop` as well as `Eos`, since an MP4
-file needs a valid trailer to be playable at all.
+fixed duration and then `pipeline.finish()`es: the capture places an `Eos`
+behind its last frame, the encoder flushes what it still holds, and the muxer
+writes the MP4's trailer after it. `stop()` would finalize a playable file
+too — `FileMuxer` writes the trailer on `Stop` as well — but abandon the
+frames still in the queue and the encoder, a few hundred milliseconds of the
+end.
 
 Both platforms run the same graph, codec, and terminus. On Windows,
 `DxgiCaptureSource` captures the whole desktop via DXGI Desktop Duplication.

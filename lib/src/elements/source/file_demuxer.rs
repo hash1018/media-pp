@@ -78,7 +78,12 @@ pub struct StreamInfo {
 impl StreamInfo {
     /// What one of a container's streams says about itself.
     pub(crate) fn of(stream: &ffmpeg::format::stream::Stream<'_>) -> Self {
-        let parameters = stream.parameters();
+        // A copy of its own. What a stream hands out shares the whole
+        // input's ownership through an `Rc` — so it kept the file (or the
+        // RTSP connection) open for as long as the caller held this, and,
+        // this going to one thread and the source to another, counted that
+        // `Rc` from two threads at once.
+        let parameters = stream.parameters().clone();
         let kind = parameters.medium();
         let rate = stream.avg_frame_rate();
         Self {
@@ -940,6 +945,33 @@ mod tests {
             .find(|stream| stream.kind == ffmpeg::media::Type::Audio)
             .unwrap();
         assert_eq!((sound.size(), sound.frame_rate), (None, None));
+    }
+
+    /// What `open` says of the streams is the caller's own: it does not
+    /// keep the file open behind the source. It did — the parameters shared
+    /// the input's ownership — so a file could not be deleted, on Windows,
+    /// while anything held the stream list, even with the source gone.
+    #[test]
+    fn the_streams_open_describes_do_not_hold_the_file() {
+        let Some(fixture) = crate::test_support::try_test_video() else {
+            return;
+        };
+        let path = std::env::temp_dir().join(format!(
+            "media-pp-streams-hold-{}-{:?}.mp4",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::copy(&fixture, &path).expect("copy the fixture");
+        let (demuxer, streams) = FileDemuxer::open("demux", &path).expect("it opens");
+        drop(demuxer);
+        let removed = std::fs::remove_file(&path);
+        assert!(removed.is_ok(), "the file is still held: {removed:?}");
+        assert!(
+            streams
+                .iter()
+                .any(|stream| stream.parameters.id() != ffmpeg::codec::Id::None),
+            "and what was said of it is still there to read"
+        );
     }
 
     /// A file that cannot be opened says which file it was.

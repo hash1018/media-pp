@@ -18,7 +18,8 @@ boundaries are explicit bounded queues.
   same for H.264 the other way: NVENC or Media Foundation where one opens,
   software otherwise, with each path saying in the stream what its colour is.
 - **Capture** of screens, windows, cameras and system or per-application audio
-  on Windows and Linux; **output** to files, HLS, RTMP, RTSP and WebRTC.
+  on Windows and Linux; **output** to files, HLS, RTMP and RTSP servers, and
+  WebRTC.
 - **Observable**: per-element statistics while it runs, and a private
   structured log with the topology of every pipeline it starts.
 
@@ -230,7 +231,9 @@ backend's prefix and exist only where their feature is enabled.
 - `examples/render`: a whole player through `Player`, D3D11/D3D12 and Vulkan
   playback, desktop and window capture, synchronization, GPU scaling and compositing, chroma keying, hardware
   encoding and recording. Start with its [index](examples/render/README.md).
-- `examples/rtsp`: publishing, seeking, and receiving RTSP streams.
+- `examples/rtsp`: publishing to an RTSP server such as MediaMTX, seeking
+  what is published, and receiving from a server or camera — this crate does
+  not serve RTSP itself.
 - `examples/vision`: scaling and ONNX object detection.
 - `examples/webrtc`: loopback pipelines, a two-way video call, and recording
   received tracks to MP4.

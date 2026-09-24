@@ -122,7 +122,7 @@ pub enum RtmpMuxerError {
 /// # };
 /// # fn main() -> media_pp::Result<()> {
 /// # let video_encoder = SwEncoder::new("video", SwEncoderOptions {
-/// #     codec: VideoCodec::H264,
+/// #     codec: VideoCodec::OpenH264,
 /// #     width: 640,
 /// #     height: 360,
 /// #     pixel_format: ffmpeg::format::Pixel::YUV420P,

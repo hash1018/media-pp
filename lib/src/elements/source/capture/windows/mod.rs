@@ -10,7 +10,7 @@ mod wgc_capture_source;
 #[cfg(feature = "dxgi-capture")]
 pub use dxgi_capture_source::{
     CaptureArea, CaptureMode, CaptureRect, DxgiCaptureOptions, DxgiCaptureSource,
-    DxgiCaptureSourceError,
+    DxgiCaptureSourceError, DxgiOutput,
 };
 #[cfg(feature = "mf-capture")]
 pub use mf_capture_source::{MfCaptureOptions, MfCaptureSource, MfCaptureSourceError};

@@ -7,5 +7,8 @@ demuxes real packets from a live camera, not just that it compiles.
 
 ```sh
 cargo run -p rtsp_source -- rtsp://host:port/path
-cargo run -p rtsp_source                            # falls back to a hardcoded test URL in the source
 ```
+
+Any RTSP server or camera will do — `rtsp_serve` publishing a file to a
+local [MediaMTX](https://github.com/bluenviron/mediamtx) gives it one at
+`rtsp://127.0.0.1:8554/stream`.

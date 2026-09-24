@@ -1306,6 +1306,10 @@ mod tests {
                 break;
             }
         }
+        // Closed before it is deleted, which Windows refuses while anything
+        // has it open.
+        drop(decoder);
+        drop(input);
         std::fs::remove_file(&path).ok();
         assert_eq!(picture.format(), ffmpeg::format::Pixel::YUV420P);
         let (x, y) = (width as usize / 2, height as usize / 2);

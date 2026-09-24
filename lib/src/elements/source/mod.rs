@@ -46,7 +46,7 @@ pub use audio_mixer::{
 #[cfg(all(target_os = "windows", feature = "dxgi-capture"))]
 pub use capture::{
     CaptureArea, CaptureMode, CaptureRect, DxgiCaptureOptions, DxgiCaptureSource,
-    DxgiCaptureSourceError,
+    DxgiCaptureSourceError, DxgiOutput,
 };
 #[cfg(all(target_os = "linux", feature = "pipewire-screen-capture"))]
 pub use capture::{
@@ -86,7 +86,7 @@ pub use file_demuxer::{FileDemuxer, FileDemuxerError, FileDemuxerHandle, StreamI
 pub use pipeline_bridge::{
     PipelineBridge, PipelineBridgeError, PipelineBridgeHandle, PipelineBridgeOptions,
 };
-pub use rtsp_source::{RtspOptions, RtspSource, RtspSourceError};
+pub use rtsp_source::{RtspSource, RtspSourceError};
 #[cfg(all(target_os = "windows", feature = "d3d11"))]
 pub use shared_texture::{
     D3d11SharedTextureHandle, D3d11SharedTextureSource, D3d11SharedTextureSourceError,

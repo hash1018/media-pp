@@ -1,4 +1,8 @@
-use std::path::Path;
+use std::{
+    ffi::CString,
+    path::{Path, PathBuf},
+    ptr,
+};
 
 use ffmpeg_next as ffmpeg;
 use thiserror::Error as ThisError;
@@ -19,9 +23,33 @@ pub enum FileMuxerError {
     #[error("FileMuxer stream sinks only accept Packet or Eos buffers, got {0}")]
     UnsupportedBuffer(&'static str),
 
-    /// FFmpeg rejected muxer creation, packet writing, or finalization.
+    /// FFmpeg rejected packet writing or finalization.
     #[error("ffmpeg error: {0}")]
     Ffmpeg(#[from] ffmpeg::Error),
+
+    /// The path's name picks no container FFmpeg knows. Its extension is
+    /// what picks one — `.mp4`, `.mkv`, `.mov`, `.ts` — so a name with none,
+    /// or one FFmpeg has no muxer for, is refused before anything is
+    /// created.
+    #[error(
+        "no container is named by {}: its extension picks one, such as .mp4 or .mkv",
+        path.display()
+    )]
+    UnknownContainer {
+        /// The file asked for.
+        path: PathBuf,
+    },
+
+    /// The file could not be created: its directory is not there, or not
+    /// writable.
+    #[error("could not create {}: {source}", path.display())]
+    Create {
+        /// The file asked for.
+        path: PathBuf,
+        /// What FFmpeg said.
+        #[source]
+        source: ffmpeg::Error,
+    },
 }
 
 /// Builds one container file with one or more tracks, then opens it into
@@ -48,7 +76,7 @@ pub enum FileMuxerError {
 /// # };
 /// # fn main() -> media_pp::Result<()> {
 /// # let video_encoder = SwEncoder::new("video", SwEncoderOptions {
-/// #     codec: VideoCodec::H264,
+/// #     codec: VideoCodec::OpenH264,
 /// #     width: 640,
 /// #     height: 360,
 /// #     pixel_format: ffmpeg::format::Pixel::YUV420P,
@@ -83,7 +111,29 @@ impl FileMuxer {
     /// disk in a readable shape until [`FileMuxer::open`] runs.
     pub fn create(path: impl AsRef<Path>) -> Result<Self> {
         crate::ensure_ffmpeg();
-        let output = ffmpeg::format::output(&path).map_err(FileMuxerError::from)?;
+        let path = path.as_ref();
+        // Asked first, as FFmpeg's own guess would be, so a name with no
+        // container in it says so rather than FFmpeg's `Invalid argument`.
+        let named = path
+            .to_str()
+            .and_then(|name| CString::new(name).ok())
+            .map(|name| {
+                // SAFETY: `name` is a live NUL-terminated string; the other
+                // two arguments may be null, and the result is only compared.
+                unsafe {
+                    !ffmpeg::ffi::av_guess_format(ptr::null(), name.as_ptr(), ptr::null()).is_null()
+                }
+            });
+        if named == Some(false) {
+            return Err(FileMuxerError::UnknownContainer {
+                path: path.to_path_buf(),
+            }
+            .into());
+        }
+        let output = ffmpeg::format::output(&path).map_err(|source| FileMuxerError::Create {
+            path: path.to_path_buf(),
+            source,
+        })?;
         Ok(Self {
             id: MuxerId::next(),
             output,
@@ -189,6 +239,45 @@ mod tests {
     use crate::control::{ControlMsg, SeekCheckContext, SeekRejectReason};
     use crate::element::{Sink, Source};
     use crate::elements::{AudioCodec, SwAudioEncoder, SwAudioEncoderOptions};
+
+    /// A name that picks no container is refused as that, naming the file
+    /// — not as FFmpeg's bare `Invalid argument`.
+    #[test]
+    fn a_name_that_picks_no_container_is_refused_as_one() {
+        let path = std::env::temp_dir().join("media-pp-muxer-test.unknownext");
+        let Err(error) = FileMuxer::create(&path) else {
+            panic!("a name with no container in it was taken");
+        };
+        assert!(
+            matches!(
+                error,
+                Error::FileMuxerError(FileMuxerError::UnknownContainer { .. })
+            ),
+            "{error:?}"
+        );
+        assert!(
+            error.to_string().contains("media-pp-muxer-test.unknownext"),
+            "{error}"
+        );
+        assert!(!path.exists(), "nothing is created for it");
+    }
+
+    /// A file that cannot be created says which — a directory that is not
+    /// there reads as only `No such file or directory` otherwise.
+    #[test]
+    fn a_file_that_cannot_be_created_says_which() {
+        let path = std::env::temp_dir()
+            .join("media-pp-no-such-directory")
+            .join("out.mp4");
+        let Err(error) = FileMuxer::create(&path) else {
+            panic!("a file in a directory that is not there was created");
+        };
+        assert!(
+            matches!(error, Error::FileMuxerError(FileMuxerError::Create { .. })),
+            "{error:?}"
+        );
+        assert!(error.to_string().contains("out.mp4"), "{error}");
+    }
 
     fn open_aac_encoder(sample_rate: u32, channels: u16) -> SwAudioEncoder {
         SwAudioEncoder::new(

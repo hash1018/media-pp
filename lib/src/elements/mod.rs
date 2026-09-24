@@ -18,13 +18,13 @@
 mod audio_format;
 pub mod driver;
 pub mod filter;
-mod rtsp;
+pub(crate) mod rtsp;
 pub mod sink;
 pub mod source;
 mod video_format;
 
 pub use audio_format::AudioFormat;
-pub use rtsp::RtspTransport;
+pub use rtsp::{RtspOptions, RtspTransport};
 pub use video_format::VideoFormat;
 
 #[cfg(feature = "cuda")]
@@ -162,9 +162,9 @@ pub use sink::{WasapiRenderer, WasapiRendererError, WasapiRendererOptions};
 pub use source::{
     AppSource, AppSourceError, AppSourceHandle, AudioMixer, AudioMixerError, AudioMixerOptions,
     FileDemuxer, FileDemuxerError, FileDemuxerHandle, MixFormat, MixerHandle, MixerInputSink,
-    PipelineBridge, PipelineBridgeError, PipelineBridgeHandle, PipelineBridgeOptions, RtspOptions,
-    RtspSource, RtspSourceError, StreamInfo, SwTextLayerError, SwTextLayerHandle,
-    SwVideoCompositor, SwVideoCompositorError, SwVideoCompositorHandle, SwVideoCompositorInput,
+    PipelineBridge, PipelineBridgeError, PipelineBridgeHandle, PipelineBridgeOptions, RtspSource,
+    RtspSourceError, StreamInfo, SwTextLayerError, SwTextLayerHandle, SwVideoCompositor,
+    SwVideoCompositorError, SwVideoCompositorHandle, SwVideoCompositorInput,
     SwVideoCompositorInputSink, SwVideoLayerHandle, TestAudioOptions, TestAudioSource,
     TestAudioSourceError, TestVideoOptions, TestVideoSource, TestVideoSourceError, TextLayer,
     VideoCompositorOptions, VideoFit, VideoInputId, VideoLayer, VideoRect, VideoSourceRect,
@@ -172,7 +172,7 @@ pub use source::{
 #[cfg(all(target_os = "windows", feature = "dxgi-capture"))]
 pub use source::{
     CaptureArea, CaptureMode, CaptureRect, DxgiCaptureOptions, DxgiCaptureSource,
-    DxgiCaptureSourceError,
+    DxgiCaptureSourceError, DxgiOutput,
 };
 #[cfg(all(target_os = "linux", feature = "pipewire-screen-capture"))]
 pub use source::{

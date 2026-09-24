@@ -8,7 +8,7 @@ use super::tracks::{MuxerId, MuxerSinks, MuxerTrack, TrackFormat};
 
 use crate::{
     element::ElementType,
-    elements::RtspTransport,
+    elements::{RtspOptions, rtsp::redact},
     error::{Error, Result},
 };
 
@@ -85,12 +85,12 @@ pub enum RtspMuxerError {
 ///
 /// ```no_run
 /// # use media_pp::ffmpeg;
-/// # use media_pp::elements::{RtspMuxer, RtspTransport, TrackFormat};
+/// # use media_pp::elements::{RtspMuxer, RtspOptions, TrackFormat};
 /// # fn main() -> media_pp::Result<()> {
 /// # // Usually `&encoder`, for the encoder feeding each track.
 /// # let video_format = TrackFormat::new(ffmpeg::codec::Parameters::new(), ffmpeg::Rational(1, 90_000));
 /// # let audio_format = TrackFormat::new(ffmpeg::codec::Parameters::new(), ffmpeg::Rational(1, 48_000));
-/// let mut muxer = RtspMuxer::create("rtsp://127.0.0.1:8554/stream", RtspTransport::Tcp)?;
+/// let mut muxer = RtspMuxer::create("rtsp://127.0.0.1:8554/stream", RtspOptions::default())?;
 /// let video = muxer.add_stream("video", video_format)?;
 /// let audio = muxer.add_stream("audio", audio_format)?;
 /// let mut sinks = muxer.open()?; // performs the RTSP handshake
@@ -103,7 +103,7 @@ pub struct RtspMuxer {
     id: MuxerId,
     output: ffmpeg::format::context::Output,
     streams: Vec<PendingStream>,
-    transport: RtspTransport,
+    options: RtspOptions,
     redacted_url: Arc<str>,
 }
 
@@ -114,8 +114,10 @@ impl RtspMuxer {
     ///
     /// TCP is the most reliable transport for general networks; UDP is
     /// useful when the network path and server permit the negotiated
-    /// RTP/RTCP ports.
-    pub fn create(url: impl AsRef<str>, transport: RtspTransport) -> Result<Self> {
+    /// RTP/RTCP ports. The timeout bounds `open`'s handshake and every
+    /// write after it, so a server that stops answering fails a write rather
+    /// than holding the branch behind it.
+    pub fn create(url: impl AsRef<str>, options: RtspOptions) -> Result<Self> {
         crate::ensure_ffmpeg();
         let url = url.as_ref();
         let output = alloc_output(url)?;
@@ -123,7 +125,7 @@ impl RtspMuxer {
             id: MuxerId::next(),
             output,
             streams: Vec::new(),
-            transport,
+            options,
             redacted_url: redact(url).into(),
         })
     }
@@ -181,10 +183,8 @@ impl RtspMuxer {
     /// whichever finishes first, which would cut the others off mid-stream.
     pub fn open(mut self) -> Result<MuxerSinks> {
         crate::ensure_ffmpeg();
-        let mut options = ffmpeg::Dictionary::new();
-        options.set("rtsp_transport", self.transport.as_ffmpeg_option());
         self.output
-            .write_header_with(options)
+            .write_header_with(self.options.to_dictionary())
             .map_err(RtspMuxerError::from)?;
         Ok(open_tracks::<Self>(
             self.id,
@@ -235,23 +235,6 @@ fn alloc_output(url: &str) -> Result<ffmpeg::format::context::Output> {
         }
 
         Ok(ffmpeg::format::context::Output::wrap(context))
-    }
-}
-
-/// Removes credentials from a publish URL, leaving enough to recognize where
-/// a stream was going.
-///
-/// Only the authority can carry userinfo, so a `@` later in the path is part
-/// of the path and stays. Unlike RTMP, the path itself is not a secret here.
-fn redact(url: &str) -> String {
-    let Some((scheme, rest)) = url.split_once("://") else {
-        // Not a shape this understands, so nothing about it is quotable.
-        return "<url>".to_string();
-    };
-    let authority_end = rest.find('/').unwrap_or(rest.len());
-    match rest[..authority_end].rfind('@') {
-        Some(at) => format!("{scheme}://<credentials>@{}", &rest[at + 1..]),
-        None => url.to_string(),
     }
 }
 
@@ -363,12 +346,15 @@ impl Muxer for RtspMuxer {
 mod tests {
     use ffmpeg_next as ffmpeg;
 
-    use super::{RtspMuxer, RtspMuxerError, TrackFormat, redact};
-    use crate::{elements::RtspTransport, error::Error};
+    use super::{RtspMuxer, RtspMuxerError, TrackFormat};
+    use crate::{elements::RtspOptions, error::Error};
 
     #[test]
     fn rejects_a_url_containing_a_nul_byte_before_connecting() {
-        let result = RtspMuxer::create("rtsp://127.0.0.1:8554/stream\0invalid", RtspTransport::Tcp);
+        let result = RtspMuxer::create(
+            "rtsp://127.0.0.1:8554/stream\0invalid",
+            RtspOptions::default(),
+        );
 
         assert!(matches!(
             result,
@@ -380,7 +366,7 @@ mod tests {
     /// nothing listening — the handshake is `open`'s to fail at.
     #[test]
     fn creating_does_not_need_a_server() {
-        let mut muxer = RtspMuxer::create("rtsp://127.0.0.1:1/stream", RtspTransport::Tcp)
+        let mut muxer = RtspMuxer::create("rtsp://127.0.0.1:1/stream", RtspOptions::default())
             .expect("allocating an RTSP muxer must not connect");
         let _video = muxer
             .add_stream(
@@ -393,34 +379,56 @@ mod tests {
             .expect("registering a track must not connect either");
     }
 
-    /// Cameras and some servers are addressed with the password in the URL,
-    /// and this is the only thing between it and a log file.
+    /// A server that takes the connection and never answers — or none at
+    /// all where the OS lets a connect wait unanswered — held `open` for
+    /// good: nothing bounded the handshake. It gives up after the
+    /// configured timeout instead.
     #[test]
-    fn redacts_credentials_from_the_authority() {
-        let cases = [
-            (
-                "rtsp://admin:hunter2@192.168.0.10:554/stream1",
-                "rtsp://<credentials>@192.168.0.10:554/stream1",
-            ),
-            ("rtsp://user@host/path", "rtsp://<credentials>@host/path"),
-            // Nothing to remove: an RTSP path is not itself a secret, which
-            // is where this differs from `RtmpMuxer`.
-            (
-                "rtsp://127.0.0.1:8554/stream",
-                "rtsp://127.0.0.1:8554/stream",
-            ),
-            // A `@` in the path is part of the path, not userinfo.
-            ("rtsp://127.0.0.1:8554/a@b", "rtsp://127.0.0.1:8554/a@b"),
-        ];
-
-        for (url, expected) in cases {
-            assert_eq!(redact(url), expected, "redacting {url}");
-        }
-    }
-
-    #[test]
-    fn redacting_something_that_is_not_a_url_quotes_none_of_it() {
-        assert_eq!(redact("admin:hunter2"), "<url>");
+    fn open_gives_up_on_a_server_that_never_answers() {
+        // Held for the whole test: the OS completes the TCP handshake from
+        // its backlog, and nothing ever reads the request or replies.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a port");
+        let port = listener.local_addr().expect("its port").port();
+        let (done, finished) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let options = RtspOptions {
+                timeout: std::time::Duration::from_millis(500),
+                ..Default::default()
+            };
+            let mut muxer = RtspMuxer::create(format!("rtsp://127.0.0.1:{port}/stream"), options)
+                .expect("allocate");
+            let mut parameters = ffmpeg::codec::Parameters::new();
+            // SAFETY: parameters this test owns; a video stream the SDP can
+            // describe, so the handshake is what `open` reaches.
+            unsafe {
+                let raw = parameters.as_mut_ptr();
+                (*raw).codec_type = ffmpeg::ffi::AVMediaType::AVMEDIA_TYPE_VIDEO;
+                (*raw).codec_id = ffmpeg::ffi::AVCodecID::AV_CODEC_ID_H264;
+                (*raw).width = 64;
+                (*raw).height = 64;
+            }
+            let _video = muxer
+                .add_stream(
+                    "video",
+                    TrackFormat::new(parameters, ffmpeg::Rational(1, 90_000)),
+                )
+                .expect("register a track");
+            let started = std::time::Instant::now();
+            let opened = muxer.open().map(drop);
+            let _ = done.send((opened, started.elapsed()));
+        });
+        let (opened, took) = finished
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("open is still waiting on a server that will never answer");
+        assert!(
+            opened.is_err(),
+            "a server that never answers is not a session"
+        );
+        assert!(
+            took < std::time::Duration::from_secs(15),
+            "open took {took:?}"
+        );
+        drop(listener);
     }
 
     /// Feeds `timeline` packets stamped `pts == dts == t` and reports what
