@@ -27,7 +27,7 @@ use crate::{
     },
     control::ControlMsg,
     element::{Element, ElementType, Sink, element_pp_log},
-    elements::{VulkanGpu, WindowEvents, WindowOptions},
+    elements::{VulkanGpu, WindowControl, WindowEvents, WindowOptions},
     error::Result,
     platform::linux::{vulkan::VulkanShared, x11_window::OwnedWindow},
     pp_log::{PpLog, pp_error, pp_info},
@@ -195,6 +195,8 @@ pub struct VulkanWindowRenderer {
     /// What the last frame was and what it was drawn into, for a log line
     /// whenever either changes rather than one per frame.
     drawing: Option<Drawing>,
+    /// `Some` for a window it opened itself.
+    control: Option<WindowControl>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -235,7 +237,11 @@ impl VulkanWindowRenderer {
         let window =
             OwnedWindow::open(&options, events_tx).map_err(VulkanWindowRendererError::Window)?;
         let (display, handle) = window.handles();
-        let renderer = Self::around(name, gpu, display, handle, Arc::new(window))?;
+        let control = WindowControl {
+            control: window.control(),
+        };
+        let mut renderer = Self::around(name, gpu, display, handle, Arc::new(window))?;
+        renderer.control = Some(control);
         Ok((renderer, WindowEvents { events }))
     }
 
@@ -293,7 +299,16 @@ impl VulkanWindowRenderer {
             size,
             domains,
             drawing: None,
+            control: None,
         })
+    }
+
+    /// What changes the window it opened — its title, whether it fills the
+    /// screen — while it is drawn into; taken before the renderer goes into
+    /// a pipeline. `None` for a window it was given, which is the
+    /// application's to change. See [`WindowControl`].
+    pub fn window_control(&self) -> Option<WindowControl> {
+        self.control.clone()
     }
 
     /// Where to tell it the window's size, for a Wayland window — see

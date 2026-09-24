@@ -142,7 +142,9 @@ pub use sink::{D3d12WindowRenderer, D3d12WindowRendererError};
     all(target_os = "windows", any(feature = "d3d11", feature = "d3d12")),
     all(target_os = "linux", feature = "vulkan")
 ))]
-pub use sink::{Key, WindowEvent, WindowEvents, WindowOptions};
+pub use sink::{
+    Key, MouseButton, WindowControl, WindowEvent, WindowEvents, WindowGone, WindowOptions,
+};
 #[cfg(all(target_os = "linux", feature = "pipewire-audio-renderer"))]
 pub use sink::{PipeWireAudioRenderer, PipeWireAudioRendererError, PipeWireAudioRendererOptions};
 #[cfg(all(target_os = "linux", feature = "vulkan"))]

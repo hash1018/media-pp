@@ -589,6 +589,19 @@ compile error with no explanation.
   application's event loop. `d3d11_decode_render` uses both and no longer
   needs `render_common` or `winit`.
 
+- **A window renderer's own window can be changed, and reports clicks.**
+  `D3d11WindowRenderer`, `D3d12WindowRenderer` and `VulkanWindowRenderer`
+  have `window_control()`, taken before the renderer goes into a pipeline:
+  a `WindowControl` that sets the window's title and fills the screen with
+  it or puts it back — the saved style and placement on Windows, EWMH's
+  `_NET_WM_STATE_FULLSCREEN` on X11 — and says `WindowGone` once the window
+  is. It is `None` for a window the application gave the renderer, which is
+  the application's to change. `WindowEvent` gains `MouseDown` and
+  `DoubleClick`, each with its `MouseButton` and where in the picture area
+  it was; a double click is the desktop's own on Windows, and two presses
+  within half a second on X11, which has none. `d3d11_decode_render` shows
+  where playback is in its title, and F or a double click fills the screen.
+
 - **The D3D window renderers take frames in system memory.**
   `D3d11WindowRenderer` and `D3d12WindowRenderer` draw NV12, YUV420P (and
   YUVJ420P) and BGRA from system memory as well as their backend's own

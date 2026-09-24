@@ -55,7 +55,9 @@ use crate::{
     },
     control::ControlMsg,
     element::{Element, ElementType, Sink, element_pp_log},
-    elements::{D3d12Gpu, D3d12RendererError, SubmitError, WindowEvents, WindowOptions},
+    elements::{
+        D3d12Gpu, D3d12RendererError, SubmitError, WindowControl, WindowEvents, WindowOptions,
+    },
     error::Result,
     platform::windows::{hlsl::compile_shader, window::OwnedWindow},
     pool::UnboundObjectPoolRef,
@@ -131,6 +133,8 @@ pub struct D3d12WindowRenderer {
     name: Arc<str>,
     pp_log: PpLog,
     presenter: WindowPresenter,
+    /// `Some` for a window it opened itself.
+    control: Option<WindowControl>,
 }
 
 impl D3d12WindowRenderer {
@@ -157,8 +161,14 @@ impl D3d12WindowRenderer {
         let window =
             OwnedWindow::open(&options, events_tx).map_err(D3d12WindowRendererError::Window)?;
         let hwnd = window.hwnd();
+        let control = WindowControl {
+            control: window.control(),
+        };
         let presenter = WindowPresenter::new(gpu, hwnd, Keep::Owned(window))?;
-        Ok((Self::around(name, presenter), WindowEvents { events }))
+        Ok((
+            Self::around(name, presenter, Some(control)),
+            WindowEvents { events },
+        ))
     }
 
     /// Draws into `window`, which the application owns and runs the event
@@ -179,10 +189,22 @@ impl D3d12WindowRenderer {
             _ => return Err(D3d12WindowRendererError::NotAWin32Window),
         };
         let presenter = WindowPresenter::new(gpu, hwnd, Keep::Given(window))?;
-        Ok(Self::around(name, presenter))
+        Ok(Self::around(name, presenter, None))
     }
 
-    fn around(name: impl Into<String>, presenter: WindowPresenter) -> Self {
+    /// What changes the window it opened — its title, whether it fills the
+    /// screen — while it is drawn into; taken before the renderer goes into
+    /// a pipeline. `None` for a window it was given, which is the
+    /// application's to change. See [`WindowControl`].
+    pub fn window_control(&self) -> Option<WindowControl> {
+        self.control.clone()
+    }
+
+    fn around(
+        name: impl Into<String>,
+        presenter: WindowPresenter,
+        control: Option<WindowControl>,
+    ) -> Self {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::D3d12WindowRenderer, &name, None);
         pp_info!(pp_log: &pp_log, "created");
@@ -190,6 +212,7 @@ impl D3d12WindowRenderer {
             name,
             pp_log,
             presenter,
+            control,
         }
     }
 
@@ -1464,6 +1487,12 @@ mod tests {
                 return;
             }
         };
+        let control = renderer
+            .window_control()
+            .expect("a window of its own is its to change");
+        control
+            .set_title("media-pp window renderer test, renamed")
+            .expect("the window is there");
         let (shown, errors) = show(upload, renderer);
         assert!(errors.is_empty(), "{errors:?}");
         assert!(shown >= 5, "only {shown} frames reached the window");
@@ -1514,6 +1543,10 @@ mod tests {
             Arc::strong_count(&window),
             2,
             "the renderer holds the window"
+        );
+        assert!(
+            renderer.window_control().is_none(),
+            "a window it was given is the application's"
         );
         let (shown, errors) = show(upload, renderer);
         assert!(errors.is_empty(), "{errors:?}");

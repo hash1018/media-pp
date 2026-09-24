@@ -14,7 +14,10 @@ use std::{
     ffi::c_void,
     num::NonZeroU32,
     ptr::NonNull,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     thread::{self, JoinHandle},
 };
 
@@ -25,15 +28,15 @@ use x11rb::{
     protocol::{
         Event,
         xproto::{
-            AtomEnum, ConfigureNotifyEvent, ConnectionExt as _, CreateWindowAux, EventMask,
-            PropMode, WindowClass,
+            AtomEnum, ButtonPressEvent, ClientMessageEvent, ConfigureNotifyEvent,
+            ConnectionExt as _, CreateWindowAux, EventMask, PropMode, WindowClass,
         },
     },
     wrapper::ConnectionExt as _,
     xcb_ffi::XCBConnection,
 };
 
-use crate::elements::{Key, WindowEvent, WindowOptions};
+use crate::elements::{Key, MouseButton, WindowEvent, WindowGone, WindowOptions};
 
 /// A window on its own connection and thread, destroyed and joined when
 /// this drops.
@@ -41,6 +44,7 @@ pub(crate) struct OwnedWindow {
     connection: Arc<XCBConnection>,
     screen: usize,
     window: u32,
+    control: Control,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -55,8 +59,18 @@ impl OwnedWindow {
         let (connection, screen) =
             XCBConnection::connect(None).map_err(|error| format!("no X display: {error}"))?;
         let connection = Arc::new(connection);
-        let (window, wm_delete_window) =
+        let (window, atoms) =
             create(&connection, screen, options).map_err(|error| error.to_string())?;
+        let control = Control {
+            shared: Arc::new(ControlShared {
+                connection: Arc::clone(&connection),
+                window,
+                root: connection.setup().roots[screen].root,
+                atoms,
+                fullscreen: AtomicBool::new(false),
+                gone: AtomicBool::new(false),
+            }),
+        };
         let keymap = Keymap::read(&connection).map_err(|error| error.to_string())?;
 
         // The thread only reads events; nothing about the window's creation
@@ -65,8 +79,9 @@ impl OwnedWindow {
             let connection = Arc::clone(&connection);
             let window = Watched {
                 window,
-                wm_delete_window,
+                wm_delete_window: atoms.wm_delete_window,
                 size: [options.width, options.height],
+                last_press: None,
             };
             thread::Builder::new()
                 .name(format!("window:{}", options.title))
@@ -77,8 +92,15 @@ impl OwnedWindow {
             connection,
             screen,
             window,
+            control,
             thread: Some(thread),
         })
+    }
+
+    /// What changes the window's title and fullscreen state from another
+    /// thread.
+    pub(crate) fn control(&self) -> Control {
+        self.control.clone()
     }
 
     /// The window's X11 id, for a test to send it what a window manager
@@ -101,6 +123,9 @@ impl OwnedWindow {
 
 impl Drop for OwnedWindow {
     fn drop(&mut self) {
+        // Before the window goes, so no control reaches an id the server may
+        // since have given another window.
+        self.control.shared.gone.store(true, Ordering::Release);
         // The thread ends on the `DestroyNotify` this brings, or on the
         // connection failing; either way there is nothing to wait for but it.
         let _ = self.connection.destroy_window(self.window);
@@ -111,6 +136,113 @@ impl Drop for OwnedWindow {
     }
 }
 
+/// Changes an [`OwnedWindow`] from any thread — see
+/// [`crate::elements::WindowControl`]. Requests go out on the window's own
+/// connection, which is safe to share across threads.
+#[derive(Debug, Clone)]
+pub(crate) struct Control {
+    shared: Arc<ControlShared>,
+}
+
+#[derive(Debug)]
+struct ControlShared {
+    connection: Arc<XCBConnection>,
+    window: u32,
+    root: u32,
+    atoms: Atoms,
+    /// Whether it was last asked to fill the screen.
+    fullscreen: AtomicBool,
+    /// Set before the window is destroyed.
+    gone: AtomicBool,
+}
+
+impl Control {
+    fn live(&self) -> Result<&ControlShared, WindowGone> {
+        if self.shared.gone.load(Ordering::Acquire) {
+            return Err(WindowGone);
+        }
+        Ok(&self.shared)
+    }
+
+    pub(crate) fn set_title(&self, title: &str) -> Result<(), WindowGone> {
+        let shared = self.live()?;
+        set_title(&shared.connection, shared.window, &shared.atoms, title).map_err(|_| WindowGone)
+    }
+
+    /// Asks the window manager, as EWMH has an application do: a
+    /// `_NET_WM_STATE` message to the root window, adding or removing
+    /// `_NET_WM_STATE_FULLSCREEN`.
+    pub(crate) fn set_fullscreen(&self, fullscreen: bool) -> Result<(), WindowGone> {
+        let shared = self.live()?;
+        if shared.fullscreen.swap(fullscreen, Ordering::AcqRel) == fullscreen {
+            return Ok(());
+        }
+        // Action (1 add, 0 remove), the property, no second one, and the
+        // source: 1, an ordinary application.
+        let message = ClientMessageEvent::new(
+            32,
+            shared.window,
+            shared.atoms.net_wm_state,
+            [
+                u32::from(fullscreen),
+                shared.atoms.net_wm_state_fullscreen,
+                0,
+                1,
+                0,
+            ],
+        );
+        let sent = shared.connection.send_event(
+            false,
+            shared.root,
+            EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY,
+            message,
+        );
+        sent.and_then(|_| shared.connection.flush())
+            .map_err(|_| WindowGone)
+    }
+
+    pub(crate) fn is_fullscreen(&self) -> bool {
+        self.shared.fullscreen.load(Ordering::Acquire)
+    }
+}
+
+/// The atoms a window's requests and events name, interned once.
+#[derive(Debug, Clone, Copy)]
+struct Atoms {
+    /// What a close button's request carries.
+    wm_delete_window: u32,
+    net_wm_name: u32,
+    utf8_string: u32,
+    net_wm_state: u32,
+    net_wm_state_fullscreen: u32,
+}
+
+/// Both titles a window has: the old `WM_NAME` and EWMH's UTF-8
+/// `_NET_WM_NAME`, which a modern window manager shows.
+fn set_title(
+    connection: &XCBConnection,
+    window: u32,
+    atoms: &Atoms,
+    title: &str,
+) -> Result<(), x11rb::errors::ConnectionError> {
+    let title = title.as_bytes();
+    connection.change_property8(
+        PropMode::REPLACE,
+        window,
+        AtomEnum::WM_NAME,
+        AtomEnum::STRING,
+        title,
+    )?;
+    connection.change_property8(
+        PropMode::REPLACE,
+        window,
+        atoms.net_wm_name,
+        atoms.utf8_string,
+        title,
+    )?;
+    connection.flush()
+}
+
 /// What the window thread watches for.
 struct Watched {
     window: u32,
@@ -118,15 +250,54 @@ struct Watched {
     wm_delete_window: u32,
     /// The size last reported, so a move is not reported as a resize.
     size: [u32; 2],
+    /// The last press not yet part of a double click: its button, time and
+    /// place.
+    last_press: Option<(u8, u32, i32, i32)>,
 }
 
-/// Creates and maps the window, and says which atom a request to close it
-/// will carry.
+/// How long and how far apart two presses of one button may be and still be
+/// a double click. X11 has no double click of its own; half a second and a
+/// few pixels is what most toolkits settle on.
+const DOUBLE_CLICK_MS: u32 = 500;
+const DOUBLE_CLICK_DISTANCE: i32 = 4;
+
+impl Watched {
+    /// A press as the event it is: the second of a quick pair is a double
+    /// click, and ends the pair.
+    fn press(&mut self, press: &ButtonPressEvent) -> Option<WindowEvent> {
+        let button = match press.detail {
+            1 => MouseButton::Left,
+            2 => MouseButton::Middle,
+            3 => MouseButton::Right,
+            // The wheel, and buttons past it.
+            _ => return None,
+        };
+        let (x, y) = (i32::from(press.event_x), i32::from(press.event_y));
+        let double = self
+            .last_press
+            .is_some_and(|(detail, time, last_x, last_y)| {
+                detail == press.detail
+                    && press.time.wrapping_sub(time) <= DOUBLE_CLICK_MS
+                    && (x - last_x).abs() <= DOUBLE_CLICK_DISTANCE
+                    && (y - last_y).abs() <= DOUBLE_CLICK_DISTANCE
+            });
+        if double {
+            self.last_press = None;
+            Some(WindowEvent::DoubleClick { button, x, y })
+        } else {
+            self.last_press = Some((press.detail, press.time, x, y));
+            Some(WindowEvent::MouseDown { button, x, y })
+        }
+    }
+}
+
+/// Creates and maps the window, and interns the atoms its requests and
+/// events name.
 fn create(
     connection: &XCBConnection,
     screen: usize,
     options: &WindowOptions,
-) -> Result<(u32, u32), Box<dyn std::error::Error>> {
+) -> Result<(u32, Atoms), Box<dyn std::error::Error>> {
     let root = &connection.setup().roots[screen];
     let window = connection.generate_id()?;
     connection.create_window(
@@ -143,9 +314,17 @@ fn create(
         &CreateWindowAux::new()
             // Black until the first frame, and in the bars around it.
             .background_pixel(root.black_pixel)
-            .event_mask(EventMask::KEY_PRESS | EventMask::STRUCTURE_NOTIFY),
+            .event_mask(
+                EventMask::KEY_PRESS | EventMask::BUTTON_PRESS | EventMask::STRUCTURE_NOTIFY,
+            ),
     )?;
-    let wm_delete_window = intern(connection, b"WM_DELETE_WINDOW")?;
+    let atoms = Atoms {
+        wm_delete_window: intern(connection, b"WM_DELETE_WINDOW")?,
+        net_wm_name: intern(connection, b"_NET_WM_NAME")?,
+        utf8_string: intern(connection, b"UTF8_STRING")?,
+        net_wm_state: intern(connection, b"_NET_WM_STATE")?,
+        net_wm_state_fullscreen: intern(connection, b"_NET_WM_STATE_FULLSCREEN")?,
+    };
     // A close button asks rather than kills: without this the window
     // manager would disconnect the whole client, the renderer's presenting
     // connection with it.
@@ -154,7 +333,7 @@ fn create(
         window,
         intern(connection, b"WM_PROTOCOLS")?,
         AtomEnum::ATOM,
-        &[wm_delete_window],
+        &[atoms.wm_delete_window],
     )?;
     // Instance and class, each NUL-terminated: what a desktop groups the
     // window under.
@@ -165,24 +344,10 @@ fn create(
         AtomEnum::STRING,
         b"media-pp\0media-pp\0",
     )?;
-    let title = options.title.as_bytes();
-    connection.change_property8(
-        PropMode::REPLACE,
-        window,
-        AtomEnum::WM_NAME,
-        AtomEnum::STRING,
-        title,
-    )?;
-    connection.change_property8(
-        PropMode::REPLACE,
-        window,
-        intern(connection, b"_NET_WM_NAME")?,
-        intern(connection, b"UTF8_STRING")?,
-        title,
-    )?;
+    set_title(connection, window, &atoms, &options.title)?;
     connection.map_window(window)?;
     connection.flush()?;
-    Ok((window, wm_delete_window))
+    Ok((window, atoms))
 }
 
 fn intern(connection: &XCBConnection, name: &[u8]) -> Result<u32, Box<dyn std::error::Error>> {
@@ -201,6 +366,11 @@ fn run(
         match event {
             Event::KeyPress(press) => {
                 let _ = events.send(WindowEvent::Key(keymap.key(press.detail)));
+            }
+            Event::ButtonPress(press) if press.event == window => {
+                if let Some(event) = watched.press(&press) {
+                    let _ = events.send(event);
+                }
             }
             // Moves as well as resizes; only a new size is news.
             Event::ConfigureNotify(ConfigureNotifyEvent { width, height, .. }) => {
@@ -273,6 +443,61 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+
+    fn press(detail: u8, time: u32, x: i16, y: i16) -> ButtonPressEvent {
+        ButtonPressEvent {
+            response_type: 4,
+            detail,
+            sequence: 0,
+            time,
+            root: 0,
+            event: 1,
+            child: 0,
+            root_x: x,
+            root_y: y,
+            event_x: x,
+            event_y: y,
+            state: 0u16.into(),
+            same_screen: true,
+        }
+    }
+
+    /// A quick second press of the same button, near the first, is a
+    /// double click and ends the pair; a slow one, another button's, or the
+    /// wheel's is not.
+    #[test]
+    fn a_quick_second_press_is_a_double_click() {
+        let mut watched = Watched {
+            window: 1,
+            wm_delete_window: 0,
+            size: [0, 0],
+            last_press: None,
+        };
+        let down = |button, x, y| Some(WindowEvent::MouseDown { button, x, y });
+        let double = |button, x, y| Some(WindowEvent::DoubleClick { button, x, y });
+        assert_eq!(
+            watched.press(&press(1, 1000, 10, 10)),
+            down(MouseButton::Left, 10, 10)
+        );
+        assert_eq!(
+            watched.press(&press(1, 1300, 12, 11)),
+            double(MouseButton::Left, 12, 11)
+        );
+        // The pair is spent: a third press starts over.
+        assert_eq!(
+            watched.press(&press(1, 1400, 12, 11)),
+            down(MouseButton::Left, 12, 11)
+        );
+        assert_eq!(
+            watched.press(&press(1, 2000, 12, 11)),
+            down(MouseButton::Left, 12, 11)
+        );
+        assert_eq!(
+            watched.press(&press(3, 2100, 12, 11)),
+            down(MouseButton::Right, 12, 11)
+        );
+        assert_eq!(watched.press(&press(4, 2150, 12, 11)), None, "the wheel");
+    }
 
     /// A window opens with the size asked for, is mapped, and goes when
     /// dropped: its thread ends, and the event channel with it.

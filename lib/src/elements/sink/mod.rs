@@ -53,7 +53,9 @@ pub use renderer::{D3d12WindowRenderer, D3d12WindowRendererError};
     all(target_os = "windows", any(feature = "d3d11", feature = "d3d12")),
     all(target_os = "linux", feature = "vulkan")
 ))]
-pub use renderer::{Key, WindowEvent, WindowEvents, WindowOptions};
+pub use renderer::{
+    Key, MouseButton, WindowControl, WindowEvent, WindowEvents, WindowGone, WindowOptions,
+};
 #[cfg(all(target_os = "linux", feature = "pipewire-audio-renderer"))]
 pub use renderer::{
     PipeWireAudioRenderer, PipeWireAudioRendererError, PipeWireAudioRendererOptions,

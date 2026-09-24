@@ -7,8 +7,10 @@
 //!
 //! The window is the renderer's own: `D3d11WindowRenderer::open` opens it on
 //! a thread of its own, the way a GStreamer video sink does, and reports what
-//! happens to it — Space pauses and resumes, Escape or closing the window
-//! stops. The one device every element shares is a `D3d11Gpu`.
+//! happens to it — Space pauses and resumes, F or a double click fills the
+//! screen and puts it back, Escape or closing the window stops — and its
+//! `WindowControl` changes it: the title shows where playback is. The one
+//! device every element shares is a `D3d11Gpu`.
 //!
 //! `D3d11Decoder` never touches FFmpeg's `hw_frames_ctx`/
 //! `AVD3D11VAFramesContext` itself — only `hw_device_ctx` and `get_format`
@@ -39,11 +41,13 @@ mod windows_example {
     use media_pp::{
         bus::BusEvent,
         elements::{
-            D3d11Decoder, D3d11Gpu, D3d11WindowRenderer, FileDemuxer, Key, Pacer, WindowEvent,
-            WindowOptions,
+            D3d11Decoder, D3d11Gpu, D3d11WindowRenderer, FileDemuxer, Key, MouseButton, Pacer,
+            WindowEvent, WindowOptions,
         },
         pipeline::Pipeline,
     };
+
+    const TITLE: &str = "media-pp d3d11_decode_render";
 
     /// Decoded frames queued ahead of the pacer.
     const FRAMES: usize = 12;
@@ -70,10 +74,14 @@ mod windows_example {
             "screen",
             &gpu,
             WindowOptions {
-                title: "media-pp d3d11_decode_render".into(),
+                title: TITLE.into(),
                 ..WindowOptions::default()
             },
         )?;
+        // Taken before the renderer goes into the pipeline.
+        let control = screen
+            .window_control()
+            .expect("a window the renderer opened is its own to change");
 
         let (pipeline, ()) = Pipeline::new("d3d11-decode-render", source, |source, ctx| {
             // On the renderer's device — required for the zero-copy path to
@@ -100,7 +108,20 @@ mod windows_example {
         // `Finished`, and an error does not end a pipeline on its own — and
         // the window, whose keys and closing are this program's to act on.
         let mut paused = false;
+        let mut shown = None;
         loop {
+            // The title follows playback, once a second is enough to see.
+            let seconds = pipeline.position().map(|position| position.as_secs());
+            if seconds != shown {
+                shown = seconds;
+                if let Some(seconds) = seconds {
+                    let _ = control.set_title(&format!(
+                        "{TITLE} — {}:{:02}",
+                        seconds / 60,
+                        seconds % 60
+                    ));
+                }
+            }
             match pipeline.bus().recv_timeout(Duration::from_millis(20)) {
                 Ok(event) => {
                     println!("{event}");
@@ -120,6 +141,15 @@ mod windows_example {
                     } else {
                         pipeline.resume();
                     }
+                }
+                Some(
+                    WindowEvent::Key(Key::Char('f'))
+                    | WindowEvent::DoubleClick {
+                        button: MouseButton::Left,
+                        ..
+                    },
+                ) => {
+                    let _ = control.set_fullscreen(!control.is_fullscreen());
                 }
                 _ => {}
             }

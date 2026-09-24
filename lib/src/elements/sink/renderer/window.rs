@@ -5,6 +5,12 @@
 use std::time::Duration;
 
 use crossbeam_channel::Receiver;
+use thiserror::Error as ThisError;
+
+#[cfg(target_os = "linux")]
+use crate::platform::linux::x11_window::Control;
+#[cfg(target_os = "windows")]
+use crate::platform::windows::window::Control;
 
 /// How a window renderer's own window is opened.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,6 +56,40 @@ pub enum WindowEvent {
     /// the renderer keeps presenting into it until it is dropped — so a
     /// pipeline goes on until the application stops it.
     Closed,
+    /// A mouse button went down, at `x`, `y` in the picture area — pixels
+    /// from its top left, the black bars included.
+    MouseDown {
+        /// Which button.
+        button: MouseButton,
+        /// Pixels from the left of the picture area.
+        x: i32,
+        /// Pixels from the top of the picture area.
+        y: i32,
+    },
+    /// A second press of the same button in quick succession — in place of
+    /// the second [`Self::MouseDown`], so a double click is one
+    /// `MouseDown` and one `DoubleClick`. What counts as quick is the
+    /// desktop's own setting on Windows, and half a second on Linux.
+    DoubleClick {
+        /// Which button.
+        button: MouseButton,
+        /// Pixels from the left of the picture area.
+        x: i32,
+        /// Pixels from the top of the picture area.
+        y: i32,
+    },
+}
+
+/// A mouse button, as a window renderer reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum MouseButton {
+    /// The primary button.
+    Left,
+    /// The secondary button.
+    Right,
+    /// The wheel's button.
+    Middle,
 }
 
 /// A key, as a window renderer reports it.
@@ -139,6 +179,49 @@ impl WindowEvents {
     /// window is gone; [`Self::recv`] tells the second apart.
     pub fn recv_timeout(&self, timeout: Duration) -> Option<WindowEvent> {
         self.events.recv_timeout(timeout).ok()
+    }
+}
+
+/// What an application can change about a window renderer's own window
+/// while it is drawn into: its title, and whether it fills the screen.
+///
+/// Taken from the renderer — its `window_control` — before the renderer goes
+/// into a pipeline, and only from one that opened its window itself: a
+/// window the application gave it is the application's to change. Cloning is
+/// cheap, and a clone controls the same window. It keeps nothing alive: once
+/// the renderer and its window are gone, every call returns [`WindowGone`].
+///
+/// Each call asks the window's own thread or the display server and returns
+/// without waiting for the window to have changed; the renderer follows the
+/// new size on its own, as it follows any other resize.
+#[derive(Debug, Clone)]
+pub struct WindowControl {
+    pub(crate) control: Control,
+}
+
+/// The window a [`WindowControl`] was for is gone: its renderer was
+/// dropped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ThisError)]
+#[error("the window is gone")]
+pub struct WindowGone;
+
+impl WindowControl {
+    /// Changes the window's title.
+    pub fn set_title(&self, title: &str) -> Result<(), WindowGone> {
+        self.control.set_title(title)
+    }
+
+    /// Fills the screen the window is on with it, without a frame, or puts
+    /// it back where and how big it was. Asking for what it already is does
+    /// nothing.
+    pub fn set_fullscreen(&self, fullscreen: bool) -> Result<(), WindowGone> {
+        self.control.set_fullscreen(fullscreen)
+    }
+
+    /// Whether it was last asked to fill the screen — through this control
+    /// or a clone of it.
+    pub fn is_fullscreen(&self) -> bool {
+        self.control.is_fullscreen()
     }
 }
 

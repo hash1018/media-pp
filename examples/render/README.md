@@ -38,7 +38,7 @@ restore token can be passed as the last argument on later runs.
 | [`gpu_video_compositor`](gpu_video_compositor/) | Composite GPU frames | Windows / Linux | D3D11 / CUDA compositor | Escape or close window | None |
 | [`cuda_decode_render`](cuda_decode_render/) | NVDEC decode/render in the renderer's own window | Linux | CUDA, `VulkanWindowRenderer::open` | EOS, Escape or close window; Space pauses | `<video>` |
 | [`vulkan_window_render`](vulkan_window_render/) | Render into a `winit` window with the library's Vulkan renderer | Linux | CPU NV12, YUV420P or BGRA (`--format`), or CUDA with `--cuda`, `VulkanWindowRenderer` | Close window, or after `--seconds N` | None; `--file <video>` plays a file |
-| [`d3d11_decode_render`](d3d11_decode_render/) | D3D11VA decode/render in the renderer's own window | Windows | D3D11 zero-copy, `D3d11WindowRenderer` | EOS, Escape or close window; Space pauses | `<video>` |
+| [`d3d11_decode_render`](d3d11_decode_render/) | D3D11VA decode/render in the renderer's own window | Windows | D3D11 zero-copy, `D3d11WindowRenderer` | EOS, Escape or close window; Space pauses, F or a double click fills the screen | `<video>` |
 | [`d3d11_scale_render`](d3d11_scale_render/) | D3D11 scale/render | Windows | D3D11 GPU path | EOS, Escape or close window | `<video>` |
 | [`d3d11_upload`](d3d11_upload/) | Demonstrate D3D11 upload | Windows | CPU -> D3D11 | Escape or close window | None |
 | [`d3d12_upload`](d3d12_upload/) | Demonstrate D3D12 upload into the renderer's own window | Windows | CPU -> D3D12, `D3d12WindowRenderer` | Escape or close window; Space pauses | None |

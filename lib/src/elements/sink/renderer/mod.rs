@@ -34,7 +34,9 @@ pub use vulkan::*;
     all(target_os = "windows", any(feature = "d3d11", feature = "d3d12")),
     all(target_os = "linux", feature = "vulkan")
 ))]
-pub use window::{Key, WindowEvent, WindowEvents, WindowOptions};
+pub use window::{
+    Key, MouseButton, WindowControl, WindowEvent, WindowEvents, WindowGone, WindowOptions,
+};
 #[cfg(all(
     target_os = "windows",
     any(feature = "d3d11", feature = "d3d12", feature = "wasapi-renderer")
