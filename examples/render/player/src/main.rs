@@ -1,7 +1,9 @@
 //! A video file played in a window with its sound, through `Player` — the
-//! whole of a player in one type: `FileDemuxer`, a software decode of each
-//! stream, the picture synchronized to the sound played, a `VideoWindow`
-//! and the platform's audio output, built by `Player::open`.
+//! whole of a player in one type: `FileDemuxer`, the picture decoded on the
+//! window's GPU where it can be and the sound in software, the picture
+//! synchronized to the sound played, a `VideoWindow` and the platform's
+//! audio output, built by `Player::open`. Where the picture is decoded is
+//! printed when it starts.
 //!
 //! Space pauses and plays, the arrows move five seconds, F or a double click
 //! fills the screen, Escape or closing the window stops; the title shows
@@ -53,6 +55,7 @@ mod example {
             },
         )?;
         let window = player.window_control();
+        println!("decoding: {:?}", player.decoding());
         player.play()?;
 
         let mut shown = None;

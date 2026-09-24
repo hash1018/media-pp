@@ -3,9 +3,9 @@
 //!
 //! Everything here is built from the crate's own elements, and a program
 //! that outgrows it builds the same graph itself: `FileDemuxer`, a
-//! `SwDecoder` per stream, a `VideoSynchronizer` in front of a
-//! [`VideoWindow`], and an `AudioResampler` in front of the platform's
-//! audio renderer. What it saves is the wiring, the choice of devices, and
+//! `VideoDecodeBin` onto the window's GPU, a `VideoSynchronizer` in front of
+//! a [`VideoWindow`], and a `SwDecoder` and an `AudioResampler` in front of
+//! the platform's audio renderer. What it saves is the wiring, the choice of devices, and
 //! the event loop every player writes.
 
 use std::{
@@ -34,9 +34,10 @@ use crate::{
     },
     element::Sink,
     elements::{
-        AudioFormat, AudioResampler, FileDemuxer, FileDemuxerError, Key, MouseButton, SwDecoder,
-        SwScaler, VideoSynchronizer, VideoWindow, VideoWindowError, WindowControl, WindowEvent,
-        WindowEvents, WindowOptions,
+        AudioFormat, AudioResampler, DecodePath, DecodeTarget, FileDemuxer, FileDemuxerError, Key,
+        MouseButton, SoftwareReason, SwDecoder, SwScaler, VideoDecodeBin, VideoDecodeBinHandle,
+        VideoSynchronizer, VideoWindow, VideoWindowError, WindowControl, WindowEvent, WindowEvents,
+        WindowOptions,
     },
     ffmpeg,
     pipeline::{Pipeline, SeekMode},
@@ -44,6 +45,14 @@ use crate::{
 
 /// How far [`Player::respond_to`] moves on an arrow key.
 const ARROW_STEP: Duration = Duration::from_secs(5);
+
+/// How many decoded pictures wait between the decoder and the synchronizer
+/// when they are on the GPU: enough to ride out a slow packet, few enough
+/// that a hardware decoder's fixed surface pool — NVDEC's is capped at 32 —
+/// holds them with its own references.
+const GPU_FRAMES_QUEUED: usize = 8;
+/// The same, for pictures in system memory, whose pool grows.
+const SYSTEM_FRAMES_QUEUED: usize = 32;
 
 /// How a [`Player`] opens its window and its sound.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -144,7 +153,12 @@ enum Wait {
 /// # }
 /// ```
 ///
-/// The picture is decoded in software and drawn by a [`VideoWindow`]; the
+/// The picture is decoded on the GPU the [`VideoWindow`] draws with, and
+/// stays there: D3D11VA on Windows (D3D12 in a build with only `d3d12`),
+/// NVDEC on Linux where the build has `cuda` and the machine an NVIDIA GPU —
+/// in software and uploaded where that GPU does not take the stream, and in
+/// software straight into the window where there is no such GPU at all.
+/// [`Self::decoding`] says which. The
 /// sound, decoded and resampled to the output's format, plays on the
 /// default output device — `WasapiRenderer` on Windows,
 /// `PipeWireAudioRenderer` on Linux — and the picture follows it: the
@@ -155,6 +169,7 @@ enum Wait {
 /// stops playback, and closes the window.
 pub struct Player {
     pipeline: Arc<Pipeline>,
+    decoder: VideoDecodeBinHandle,
     window: WindowControl,
     events: WindowEvents,
     duration: Option<Duration>,
@@ -180,15 +195,39 @@ impl Player {
             None
         };
         let output = audio.as_ref().map(|_| open_output()).transpose()?;
-        let (screen, events) = VideoWindow::open("screen", options.window)?;
+        // What a hardware decoder's pool has to cover after the queue: the
+        // picture the synchronizer waits on, the one on screen, and one the
+        // queue may park while a pause or seek goes by.
+        let budget = GPU_FRAMES_QUEUED as i32 + 3;
+        let (screen, events, target) =
+            VideoWindow::open_for_decoding("screen", options.window, budget)?;
         let window = screen.window_control();
-        let to_drawable = to_drawable(&video.parameters, &screen)?;
+        let decode = |target| VideoDecodeBin::open("video", video.parameters.clone(), target, None);
+        let decoder = match decode(target) {
+            Ok(decoder) => decoder,
+            // A GPU the window draws with but that cannot decode or take an
+            // upload — a software adapter's — still draws what is decoded
+            // in software.
+            Err(_) => decode(DecodeTarget::System)?,
+        };
+        let on_gpu = decoder.path() != DecodePath::Software(SoftwareReason::SystemMemory);
+        let queued = if on_gpu {
+            GPU_FRAMES_QUEUED
+        } else {
+            SYSTEM_FRAMES_QUEUED
+        };
+        let to_drawable = if on_gpu {
+            None
+        } else {
+            to_drawable(&video.parameters, &screen)?
+        };
+        let handle = decoder.handle();
 
         let (pipeline, ()) = Pipeline::new("player", source, |source, ctx| {
             let mut picture = ctx
                 .branch()
-                .pipe(SwDecoder::new("video-decoder", video.parameters.clone())?)
-                .queue("video-frames", 32)
+                .pipe(decoder)
+                .queue("video-frames", queued)
                 .pipe(VideoSynchronizer::new("video-sync"));
             // After the synchronizer: a frame it drops for being late never
             // pays for the conversion.
@@ -209,6 +248,7 @@ impl Player {
         })?;
         Ok(Self {
             pipeline,
+            decoder: handle,
             window,
             events,
             duration,
@@ -271,6 +311,13 @@ impl Player {
             }
             None => *sought,
         }
+    }
+
+    /// Where the picture is decoded: on the window's GPU, by its hardware
+    /// or in software and uploaded, or in software into system memory — and
+    /// why, where it is software.
+    pub fn decoding(&self) -> DecodePath {
+        self.decoder.path()
     }
 
     /// How long the file plays, where it says.
@@ -529,6 +576,37 @@ mod tests {
                 Some(PlayerEvent::Stopped)
             ),
             "a timed wait says it is over, at once, rather than timing out"
+        );
+    }
+
+    /// Where the window's GPU takes the stream, the picture is decoded onto
+    /// it rather than into system memory.
+    #[cfg(feature = "d3d11")]
+    #[test]
+    fn the_picture_is_decoded_on_the_windows_gpu_where_it_can_be() {
+        let Some(gpu) = crate::test_support::try_d3d11_gpu() else {
+            return;
+        };
+        let Some(path) = try_test_video() else { return };
+        let (source, _) = FileDemuxer::open("file", &path).unwrap();
+        let video = source.best(ffmpeg::media::Type::Video).unwrap();
+        let target = DecodeTarget::D3d11 {
+            gpu,
+            downstream_hw_frames: GPU_FRAMES_QUEUED as i32 + 3,
+        };
+        if let Err(error) = VideoDecodeBin::open("probe", video.parameters, target, None) {
+            eprintln!("skipping: this GPU does not take the stream ({error})");
+            return;
+        }
+        let Some(player) = open(false) else { return };
+        assert_ne!(
+            player.decoding(),
+            DecodePath::Software(SoftwareReason::SystemMemory)
+        );
+        player.play().unwrap();
+        assert!(
+            wait_until(|| player.position() > Some(Duration::from_millis(300))),
+            "playback moves"
         );
     }
 

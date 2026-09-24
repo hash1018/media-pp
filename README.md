@@ -61,7 +61,8 @@ fn main() -> media_pp::Result<()> {
 ```
 
 To play a file with its sound, `Player` builds the whole pipeline — the
-decode, the synchronization, a window and the default audio output — and
+decode, on the window's GPU where it can be, the synchronization, a window
+and the default audio output — and
 reports what happens to it (features `d3d11` and `wasapi-renderer` on
 Windows, `vulkan` and `pipewire-audio-renderer` on Linux):
 

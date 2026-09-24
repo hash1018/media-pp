@@ -603,6 +603,13 @@ compile error with no explanation.
 
 ### Added
 
+- **`Player` decodes on the GPU.** It decoded every file in software, which
+  is what a 4K file cannot afford. Its picture now goes through a
+  `VideoDecodeBin` onto the window's own GPU — D3D11VA on Windows, NVDEC on
+  Linux with `cuda` and an NVIDIA GPU — and stays there to be drawn, in
+  software and uploaded where the GPU does not take the stream, and in
+  software into system memory where there is no GPU to decode onto.
+  `Player::decoding` says which. Nothing to change in a program using it.
 - **The software compositor draws text.** A text overlay was on the D3D11
   and CUDA compositors only, so a program that followed the README to
   `VideoWindow` and the software path had none. `SwVideoCompositorHandle`

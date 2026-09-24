@@ -84,7 +84,79 @@ impl VideoWindow {
             });
         }
         let gpu = Gpu::new().map_err(|error| VideoWindowError::Gpu(Box::new(error)))?;
-        let (renderer, events) = Backend::open(name, &gpu, options)
+        Self::open_on(name, &gpu, options)
+    }
+
+    /// [`Self::open`], on a GPU a decoder can put its pictures on too — and
+    /// the [`DecodeTarget`](crate::elements::DecodeTarget) that puts them there, `downstream_hw_frames` being
+    /// its surface budget. That is D3D11 on Windows (D3D12 in a build with
+    /// only `d3d12`), and CUDA on Linux where the build has `cuda` and the
+    /// machine an NVIDIA GPU; on Linux otherwise, system memory.
+    #[cfg(any(
+        all(target_os = "windows", feature = "wasapi-renderer"),
+        all(target_os = "linux", feature = "pipewire-audio-renderer")
+    ))]
+    pub(crate) fn open_for_decoding(
+        name: impl Into<String>,
+        options: WindowOptions,
+        downstream_hw_frames: i32,
+    ) -> std::result::Result<(Self, WindowEvents, crate::elements::DecodeTarget), VideoWindowError>
+    {
+        if options.width == 0 || options.height == 0 {
+            return Err(VideoWindowError::EmptyWindow {
+                width: options.width,
+                height: options.height,
+            });
+        }
+        use crate::elements::DecodeTarget;
+
+        let gpu_error = |error| VideoWindowError::Gpu(Box::new(error));
+        #[cfg(all(target_os = "windows", feature = "d3d11"))]
+        let (gpu, target) = {
+            let gpu = Gpu::new().map_err(gpu_error)?;
+            let target = DecodeTarget::D3d11 {
+                gpu: gpu.clone(),
+                downstream_hw_frames,
+            };
+            (gpu, target)
+        };
+        #[cfg(all(target_os = "windows", feature = "d3d12", not(feature = "d3d11")))]
+        let (gpu, target) = {
+            let _ = downstream_hw_frames;
+            let gpu = Gpu::new().map_err(gpu_error)?;
+            (gpu.clone(), DecodeTarget::D3d12 { gpu })
+        };
+        #[cfg(all(target_os = "linux", feature = "vulkan", feature = "cuda"))]
+        let (gpu, target) = match crate::elements::CudaDevice::new()
+            .ok()
+            .and_then(|device| Some((Gpu::for_cuda(&device).ok()?, device)))
+        {
+            Some((gpu, device)) => (
+                gpu,
+                DecodeTarget::Cuda {
+                    device,
+                    downstream_hw_frames,
+                },
+            ),
+            // No NVIDIA GPU, or no Vulkan device on it: pictures are
+            // decoded in software, and drawn on whatever GPU draws.
+            None => (Gpu::new().map_err(gpu_error)?, DecodeTarget::System),
+        };
+        #[cfg(all(target_os = "linux", feature = "vulkan", not(feature = "cuda")))]
+        let (gpu, target) = {
+            let _ = downstream_hw_frames;
+            (Gpu::new().map_err(gpu_error)?, DecodeTarget::System)
+        };
+        let (window, events) = Self::open_on(name, &gpu, options)?;
+        Ok((window, events, target))
+    }
+
+    fn open_on(
+        name: impl Into<String>,
+        gpu: &Gpu,
+        options: WindowOptions,
+    ) -> std::result::Result<(Self, WindowEvents), VideoWindowError> {
+        let (renderer, events) = Backend::open(name, gpu, options)
             .map_err(|error| VideoWindowError::Window(Box::new(error)))?;
         let control = renderer.window_control().ok_or_else(|| {
             VideoWindowError::Window("the renderer opened no window of its own".into())
