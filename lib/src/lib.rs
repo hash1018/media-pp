@@ -250,6 +250,19 @@ mod test_support;
 // its module doc) — every external and internal caller keeps using
 // `crate::pipeline`/`media_pp::pipeline` etc., never `crate::core::...`.
 pub use core::diagnostics::{log, pp_log, stats};
+#[cfg(any(
+    all(
+        target_os = "windows",
+        any(feature = "d3d11", feature = "d3d12"),
+        feature = "wasapi-renderer"
+    ),
+    all(
+        target_os = "linux",
+        feature = "vulkan",
+        feature = "pipewire-audio-renderer"
+    )
+))]
+pub use core::player;
 pub use core::timing::{clock, playback_clock, rate};
 pub use core::{
     buffer, bus, color, contract, control, driver, element, graph, pad, pipeline, pool, queue,

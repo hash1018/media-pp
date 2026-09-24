@@ -253,6 +253,24 @@ impl Bus {
 }
 
 impl BusReceiver {
+    /// The channel itself, for a caller inside this crate that waits on it
+    /// beside another.
+    #[cfg(any(
+        all(
+            target_os = "windows",
+            any(feature = "d3d11", feature = "d3d12"),
+            feature = "wasapi-renderer"
+        ),
+        all(
+            target_os = "linux",
+            feature = "vulkan",
+            feature = "pipewire-audio-renderer"
+        )
+    ))]
+    pub(crate) fn receiver(&self) -> &Receiver<BusMessage> {
+        &self.rx
+    }
+
     /// Blocks until the next event arrives.
     ///
     /// Returns `None` only after every corresponding [`Bus`] sender has been

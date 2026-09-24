@@ -331,6 +331,13 @@ impl FileDemuxer {
             .ok_or(FileDemuxerError::NoStream(kind))
     }
 
+    /// How long the file plays, as its container says — `None` where it
+    /// says nothing, as a live capture or a truncated recording may not.
+    pub fn duration(&self) -> Option<Duration> {
+        let micros = self.input.duration();
+        (micros > 0).then(|| Duration::from_micros(micros as u64))
+    }
+
     #[cfg(test)]
     fn stream(&self, index: usize) -> Option<ffmpeg::format::stream::Stream<'_>> {
         self.input.streams().find(|s| s.index() == index)

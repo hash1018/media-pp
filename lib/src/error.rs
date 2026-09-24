@@ -215,6 +215,22 @@ pub enum Error {
     #[error(transparent)]
     D3d11GpuError(#[from] D3d11GpuError),
 
+    /// A player could not open a file or do what it was asked.
+    #[cfg(any(
+        all(
+            target_os = "windows",
+            any(feature = "d3d11", feature = "d3d12"),
+            feature = "wasapi-renderer"
+        ),
+        all(
+            target_os = "linux",
+            feature = "vulkan",
+            feature = "pipewire-audio-renderer"
+        )
+    ))]
+    #[error(transparent)]
+    PlayerError(#[from] crate::player::PlayerError),
+
     /// A video window could not be opened.
     #[cfg(any(
         all(target_os = "windows", any(feature = "d3d11", feature = "d3d12")),

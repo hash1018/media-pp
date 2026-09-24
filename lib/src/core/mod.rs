@@ -31,6 +31,19 @@ pub(crate) mod frame_size;
 pub mod graph;
 pub mod pad;
 pub mod pipeline;
+#[cfg(any(
+    all(
+        target_os = "windows",
+        any(feature = "d3d11", feature = "d3d12"),
+        feature = "wasapi-renderer"
+    ),
+    all(
+        target_os = "linux",
+        feature = "vulkan",
+        feature = "pipewire-audio-renderer"
+    )
+))]
+pub mod player;
 pub mod pool;
 pub mod queue;
 pub mod repeat;

@@ -589,6 +589,20 @@ compile error with no explanation.
   application's event loop. `d3d11_decode_render` uses both and no longer
   needs `render_common` or `winit`.
 
+- **`Player`: a file played in a window with its sound.** The `playbin` of
+  this crate: `Player::open(path, options)` builds `FileDemuxer`, a software
+  decode of each stream, a `VideoSynchronizer` in front of a `VideoWindow`,
+  and an `AudioResampler` in front of the default output
+  (`WasapiRenderer`, `PipeWireAudioRenderer`), the picture following the
+  samples played. `play`, `pause`, `seek`, `position`, `duration` and
+  `window_control` drive it, `next_event` reports the window, the end and
+  an element's failure as `PlayerEvent`s, and `respond_to` does what a
+  player usually does with a window event — Space, the arrows, F or a double
+  click, and `false` for Escape or a close. After a seek, `position` says
+  where it went until playback moves on from there. `FileDemuxer::duration`
+  is new with it. The `player` example is a whole player in one screen of
+  code, for both platforms.
+
 - **`VideoWindow`: a video window on either platform, no `#[cfg]`.** The
   `autovideosink` of this crate: `VideoWindow::open(name, options)` opens
   whichever window renderer the platform has — `D3d11WindowRenderer` on

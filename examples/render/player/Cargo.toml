@@ -1,0 +1,13 @@
+[package]
+name = "player"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# `Player` needs a window renderer and an audio renderer: D3D11 and WASAPI on
+# Windows, Vulkan and PipeWire on Linux.
+[target.'cfg(windows)'.dependencies]
+media-pp = { path = "../../../lib", features = ["d3d11", "wasapi-renderer"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+media-pp = { path = "../../../lib", features = ["vulkan", "pipewire-audio-renderer"] }

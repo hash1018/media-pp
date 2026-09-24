@@ -60,6 +60,29 @@ fn main() -> media_pp::Result<()> {
 }
 ```
 
+To play a file with its sound, `Player` builds the whole pipeline — the
+decode, the synchronization, a window and the default audio output — and
+reports what happens to it (features `d3d11` and `wasapi-renderer` on
+Windows, `vulkan` and `pipewire-audio-renderer` on Linux):
+
+```rust,no_run
+use media_pp::player::{Player, PlayerEvent, PlayerOptions};
+
+fn main() -> media_pp::Result<()> {
+    let player = Player::open("video.mp4", PlayerOptions::default())?;
+    player.play()?;
+    while let Some(event) = player.next_event() {
+        match event {
+            // Space, arrows, F, a double click; `false` for Escape or a close.
+            PlayerEvent::Window(event) if !player.respond_to(&event) => break,
+            PlayerEvent::Ended => break,
+            _ => {}
+        }
+    }
+    Ok(())
+}
+```
+
 How a pipeline runs — buffers, threads, EOS, seeking, changing a running
 graph — is the crate documentation's first page, and so is connecting
 elements: what a branch refuses before it runs and why, how to ask whether
@@ -159,8 +182,8 @@ backend's prefix and exist only where their feature is enabled.
   transcription, and CPU compositing.
 - `examples/cuda`: headless CUDA recording and GPU text compositing, on
   Windows and Linux.
-- `examples/render`: D3D11/D3D12 playback, desktop and window capture,
-  synchronization, GPU scaling and compositing, chroma keying, hardware
+- `examples/render`: a whole player through `Player`, D3D11/D3D12 and Vulkan
+  playback, desktop and window capture, synchronization, GPU scaling and compositing, chroma keying, hardware
   encoding and recording. Start with its [index](examples/render/README.md).
 - `examples/rtsp`: publishing, seeking, and receiving RTSP streams.
 - `examples/vision`: scaling and ONNX object detection.
@@ -168,6 +191,7 @@ backend's prefix and exist only where their feature is enabled.
   received tracks to MP4.
 
 ```sh
+cargo run -p player -- path/to/video.mp4
 cargo run -p probe -- path/to/video.mp4
 cargo run -p fanout -- path/to/video.mp4
 cargo run -p d3d11_scale_render -- path/to/video.mp4
