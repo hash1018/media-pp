@@ -1533,6 +1533,18 @@ compile error with no explanation.
 
 ### Fixed
 
+- **A seek the moment a file has ended no longer hangs or plays nothing.**
+  A `FileDemuxer` waiting at the end of its file passed a `Pause` on
+  without pausing itself, and a pipeline pauses around every seek — so a
+  seek from the end read the file on at once, into the paused queue
+  behind. Once that queue was full the source was stuck handing it a
+  packet and never took the `Preroll` the seek waited on: `Pipeline::seek`
+  did not return. Behind a queue that drops on a timeout, as `Player`'s
+  do, it returned instead with the start of the file dropped, and nothing
+  played — `Player::play` after `Ended` stayed at zero. It showed only
+  where the queue filled before the seek's next step, as on a slow CI
+  runner. Paused at the end, it now waits like anywhere else.
+
 - **The streams `FileDemuxer::open` and `RtspSource::open` describe no
   longer hold the source open.** Each `StreamInfo`'s parameters shared the
   ownership of the whole input with the source, so a file stayed open —

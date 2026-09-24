@@ -16,7 +16,7 @@ use crate::{
     buffer::MediaBuffer,
     bus::{Bus, BusEvent},
     contract::{MediaKind, OutputContract, PortContract},
-    control::{ControlReceiver, RequestKind, apply_one, drain_control},
+    control::{ControlMsg, ControlReceiver, RequestKind, apply_one, drain_control, wait_out_pause},
     element::{Element, ElementType, Source, SourceElement, element_pp_log},
     pad::SrcPad,
 };
@@ -673,7 +673,18 @@ impl FileDemuxer {
                 let _ = ack.send(());
                 return Ok(false);
             };
+            let pausing = msg == ControlMsg::Pause;
             if apply_one(self, bus, &msg, &ack)? {
+                return Ok(false);
+            }
+            // Paused here as it is anywhere: nothing is read until a `Resume`,
+            // or a seek's `Preroll` asking for its picture, whatever seeks
+            // come first. A seek from the end is one — a pipeline pauses
+            // around every seek — and reading on from it at once filled the
+            // paused queue after this, left this thread waiting to hand that
+            // queue a packet, and so never took the `Preroll` the seek then
+            // waited on.
+            if pausing && wait_out_pause(control, self, bus)? {
                 return Ok(false);
             }
             if self.sought {
@@ -1163,6 +1174,67 @@ mod tests {
             .best(ffmpeg::media::Type::Video)
             .expect("test video has a video stream");
         (video.index, video.time_base)
+    }
+
+    /// A seek made while paused at the end of the file waits, as any paused
+    /// seek does, for playback to go on — it does not read on at once.
+    ///
+    /// It did: the wait at the end passed a `Pause` on without pausing
+    /// itself, so a seek arriving after it sent the file straight into the
+    /// paused queue behind — which, once full, held this source handing it a
+    /// packet while the seek waited on a `Preroll` the source could no longer
+    /// take. A player seeking the moment it heard the file had ended hung,
+    /// on a machine slow enough for the queue to fill first.
+    #[test]
+    fn a_seek_while_paused_at_the_end_reads_nothing_until_resumed() {
+        let Some(path) = try_test_video() else { return };
+        let (mut demuxer, _) = FileDemuxer::open("demux", &path).expect("open test video");
+        let (index, expected_time_base) = video_stream(&demuxer);
+        let count = Arc::new(AtomicUsize::new(0));
+        let saw_eos = Arc::new(AtomicBool::new(false));
+        demuxer.src_pads()[index].link(Box::new(CountingSink {
+            count: count.clone(),
+            saw_eos: saw_eos.clone(),
+            expected_time_base,
+            time_base_matches: Arc::new(AtomicBool::new(true)),
+            pp_log: element_pp_log(ElementType::Other, "counting-sink", None),
+        }));
+        let (bus, _bus_rx) = Bus::new();
+        let (tx, rx) = control::channel();
+        let runner = std::thread::spawn(move || demuxer.run(&rx, &bus));
+        let waited = std::time::Instant::now();
+        while !saw_eos.load(Ordering::SeqCst) {
+            assert!(
+                waited.elapsed() < Duration::from_secs(10),
+                "the file never ended"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        let at_the_end = count.load(Ordering::SeqCst);
+        tx.send(crate::control::ControlMsg::Pause);
+        tx.send(crate::control::ControlMsg::Seek(Duration::ZERO));
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            at_the_end,
+            "paused, it read the file on from where the seek put it"
+        );
+
+        tx.send(crate::control::ControlMsg::Resume);
+        let waited = std::time::Instant::now();
+        while count.load(Ordering::SeqCst) == at_the_end {
+            assert!(
+                waited.elapsed() < Duration::from_secs(10),
+                "resumed, it never read on"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        tx.send(crate::control::ControlMsg::Stop);
+        runner
+            .join()
+            .expect("the source thread")
+            .expect("it stops cleanly");
     }
 
     /// How many packets one pass of this file's video stream delivers, so a
