@@ -2,7 +2,7 @@ use crate::test_support::CapturingSink;
 use std::collections::HashSet;
 
 use super::*;
-use crate::test_support::try_d3d11_device as try_device;
+use crate::test_support::try_d3d11_gpu as try_device;
 use crate::{
     color::Color,
     elements::{D3d11Download, VideoRect},
@@ -112,12 +112,11 @@ fn test_bus() -> Bus {
 }
 
 fn download_frame(
-    device: &ID3D11Device,
-    context: Arc<Mutex<ID3D11DeviceContext>>,
+    gpu: &D3d11Gpu,
     composed: Arc<UnboundObjectPoolRef<ffmpeg::frame::Video>>,
 ) -> Arc<UnboundObjectPoolRef<ffmpeg::frame::Video>> {
     let mut download =
-        D3d11Download::new("download", device, context).expect("D3d11Download::new should succeed");
+        D3d11Download::new("download", gpu).expect("D3d11Download::new should succeed");
     let received = Arc::new(Mutex::new(Vec::new()));
     download.src_pads()[0].link(Box::new(CapturingSink {
         received: received.clone(),
@@ -140,7 +139,7 @@ fn pixel(frame: &ffmpeg::frame::Video, x: usize, y: usize) -> [u8; 4] {
 
 #[test]
 fn invalid_text_layer_does_not_replace_an_existing_registration() {
-    let Some((device, context)) = try_device() else {
+    let Some(gpu) = try_device() else {
         return;
     };
     let options = VideoCompositorOptions {
@@ -150,8 +149,7 @@ fn invalid_text_layer_does_not_replace_an_existing_registration() {
         background: Color::BLACK,
         background_alpha: 255,
     };
-    let (_compositor, handle) =
-        D3d11VideoCompositor::new("compositor", &device, context, options).unwrap();
+    let (_compositor, handle) = D3d11VideoCompositor::new("compositor", &gpu, options).unwrap();
     let existing = handle
         .add_layer("overlay", VideoLayer::new(VideoRect::new(0, 0, 1, 1)))
         .unwrap();
@@ -167,7 +165,7 @@ fn invalid_text_layer_does_not_replace_an_existing_registration() {
 /// by reference — and nothing once its registration is gone.
 #[test]
 fn a_layer_hands_back_the_frame_it_will_draw_until_it_is_removed() {
-    let Some((device, context)) = try_device() else {
+    let Some(gpu) = try_device() else {
         return;
     };
     let options = VideoCompositorOptions {
@@ -177,14 +175,13 @@ fn a_layer_hands_back_the_frame_it_will_draw_until_it_is_removed() {
         background: Color::BLACK,
         background_alpha: 255,
     };
-    let (_compositor, handle) =
-        D3d11VideoCompositor::new("compositor", &device, context, options).unwrap();
+    let (_compositor, handle) = D3d11VideoCompositor::new("compositor", &gpu, options).unwrap();
     let D3d11VideoCompositorInput { mut sink, layer } = handle
         .add_source("still", VideoLayer::new(VideoRect::new(0, 0, 4, 4)))
         .unwrap();
     assert!(layer.latest_frame().is_none(), "nothing has arrived yet");
 
-    let texture = bgra_texture(&device, 4, 4, [0, 0, 255, 255]);
+    let texture = bgra_texture(gpu.device(), 4, 4, [0, 0, 255, 255]);
     let MediaBuffer::Video(frame) = MediaBuffer::video(wrap_d3d11_texture(texture, 4, 4).unwrap())
     else {
         unreachable!("pooled_video wraps a Video buffer");
@@ -200,7 +197,7 @@ fn a_layer_hands_back_the_frame_it_will_draw_until_it_is_removed() {
 
 #[test]
 fn composes_gpu_inputs_in_z_order_and_preserves_output_contract() {
-    let Some((device, context)) = try_device() else {
+    let Some(gpu) = try_device() else {
         return;
     };
     let options = VideoCompositorOptions {
@@ -210,9 +207,8 @@ fn composes_gpu_inputs_in_z_order_and_preserves_output_contract() {
         background: Color::BLACK,
         background_alpha: 255,
     };
-    let (mut compositor, handle) =
-        D3d11VideoCompositor::new("compositor", &device, context.clone(), options)
-            .expect("D3d11VideoCompositor::new should succeed");
+    let (mut compositor, handle) = D3d11VideoCompositor::new("compositor", &gpu, options)
+        .expect("D3d11VideoCompositor::new should succeed");
 
     let mut background_layer = VideoLayer::new(VideoRect::new(0, 0, 4, 4));
     background_layer.fit = video_layer::VideoFit::Stretch;
@@ -224,8 +220,8 @@ fn composes_gpu_inputs_in_z_order_and_preserves_output_contract() {
     let mut blue_sink = handle.add_source("blue", overlay_layer).unwrap().sink;
 
     // BGRA byte order: [blue, green, red, alpha].
-    let red_texture = bgra_texture(&device, 4, 4, [0, 0, 255, 255]);
-    let blue_texture = bgra_texture(&device, 2, 2, [255, 0, 0, 255]);
+    let red_texture = bgra_texture(gpu.device(), 4, 4, [0, 0, 255, 255]);
+    let blue_texture = bgra_texture(gpu.device(), 2, 2, [255, 0, 0, 255]);
     red_sink
         .consume(MediaBuffer::video(
             wrap_d3d11_texture(red_texture, 4, 4).unwrap(),
@@ -244,7 +240,7 @@ fn composes_gpu_inputs_in_z_order_and_preserves_output_contract() {
     assert_eq!((composed.width(), composed.height()), (4, 4));
     assert_eq!(composed.pts(), Some(0));
 
-    let downloaded = download_frame(&device, context, composed);
+    let downloaded = download_frame(&gpu, composed);
     assert_eq!(pixel(&downloaded, 0, 0), [0, 0, 255, 255], "red background");
     assert_eq!(pixel(&downloaded, 1, 1), [255, 0, 0, 255], "blue overlay");
 }
@@ -259,7 +255,7 @@ fn composes_gpu_inputs_in_z_order_and_preserves_output_contract() {
 /// against the same picture drawn the ordinary way.
 #[test]
 fn a_premultiplied_layer_is_blended_by_what_it_already_holds() {
-    let Some((device, context)) = try_device() else {
+    let Some(gpu) = try_device() else {
         return;
     };
     let compose = |premultiplied: bool| {
@@ -271,16 +267,15 @@ fn a_premultiplied_layer_is_blended_by_what_it_already_holds() {
             background: Color::BLACK,
             background_alpha: 255,
         };
-        let (mut compositor, handle) =
-            D3d11VideoCompositor::new("compositor", &device, context.clone(), options)
-                .expect("D3d11VideoCompositor::new should succeed");
+        let (mut compositor, handle) = D3d11VideoCompositor::new("compositor", &gpu, options)
+            .expect("D3d11VideoCompositor::new should succeed");
         let mut layer = VideoLayer::new(VideoRect::new(0, 0, 2, 2));
         layer.fit = video_layer::VideoFit::Stretch;
         layer.premultiplied_alpha = premultiplied;
         let mut sink = handle.add_source("web", layer).unwrap().sink;
         // (230, 20, 20) at half alpha, with the alpha already multiplied in:
         // BGRA byte order, so [10, 10, 115, 128].
-        let texture = bgra_texture(&device, 2, 2, [10, 10, 115, 128]);
+        let texture = bgra_texture(gpu.device(), 2, 2, [10, 10, 115, 128]);
         sink.consume(MediaBuffer::video(
             wrap_d3d11_texture(texture, 2, 2).unwrap(),
         ))
@@ -288,7 +283,7 @@ fn a_premultiplied_layer_is_blended_by_what_it_already_holds() {
         let composed = compositor
             .compose_frame(&test_bus())
             .expect("compose_frame failed");
-        let downloaded = download_frame(&device, context.clone(), composed);
+        let downloaded = download_frame(&gpu, composed);
         pixel(&downloaded, 0, 0)
     };
 
@@ -323,7 +318,7 @@ fn a_premultiplied_layer_is_blended_by_what_it_already_holds() {
 /// from the wrong corner all move at least one of them.
 #[test]
 fn a_layer_draws_only_its_source_region() {
-    let Some((device, context)) = try_device() else {
+    let Some(gpu) = try_device() else {
         return;
     };
     const SOURCE: u32 = 8;
@@ -344,9 +339,8 @@ fn a_layer_draws_only_its_source_region() {
         background: Color::BLACK,
         background_alpha: 255,
     };
-    let (mut compositor, handle) =
-        D3d11VideoCompositor::new("compositor", &device, context.clone(), options)
-            .expect("D3d11VideoCompositor::new should succeed");
+    let (mut compositor, handle) = D3d11VideoCompositor::new("compositor", &gpu, options)
+        .expect("D3d11VideoCompositor::new should succeed");
 
     let mut layer = VideoLayer::new(VideoRect::new(0, 0, REGION, REGION));
     layer.fit = video_layer::VideoFit::Stretch;
@@ -355,7 +349,7 @@ fn a_layer_draws_only_its_source_region() {
     ));
     let mut sink = handle.add_source("input", layer).unwrap().sink;
 
-    let texture = bgra_texture_from_pixels(&device, SOURCE, SOURCE, &pixels);
+    let texture = bgra_texture_from_pixels(gpu.device(), SOURCE, SOURCE, &pixels);
     sink.consume(MediaBuffer::video(
         wrap_d3d11_texture(texture, SOURCE, SOURCE).unwrap(),
     ))
@@ -364,7 +358,7 @@ fn a_layer_draws_only_its_source_region() {
     let composed = compositor
         .compose_frame(&test_bus())
         .expect("compose_frame failed");
-    let downloaded = download_frame(&device, context, composed);
+    let downloaded = download_frame(&gpu, composed);
 
     for y in 0..REGION {
         for x in 0..REGION {
@@ -381,7 +375,7 @@ fn a_layer_draws_only_its_source_region() {
 
 #[test]
 fn ignores_rows_outside_the_frame_visible_dimensions() {
-    let Some((device, context)) = try_device() else {
+    let Some(gpu) = try_device() else {
         return;
     };
     let options = VideoCompositorOptions {
@@ -391,9 +385,8 @@ fn ignores_rows_outside_the_frame_visible_dimensions() {
         background: Color::BLACK,
         background_alpha: 255,
     };
-    let (mut compositor, handle) =
-        D3d11VideoCompositor::new("compositor", &device, context.clone(), options)
-            .expect("D3d11VideoCompositor::new should succeed");
+    let (mut compositor, handle) = D3d11VideoCompositor::new("compositor", &gpu, options)
+        .expect("D3d11VideoCompositor::new should succeed");
     let mut layer = VideoLayer::new(VideoRect::new(0, 0, 4, 3));
     layer.fit = video_layer::VideoFit::Stretch;
     let mut sink = handle.add_source("input", layer).unwrap().sink;
@@ -410,7 +403,7 @@ fn ignores_rows_outside_the_frame_visible_dimensions() {
         };
         pixels.extend((0..4).flat_map(|_| color));
     }
-    let texture = bgra_texture_from_pixels(&device, 4, 4, &pixels);
+    let texture = bgra_texture_from_pixels(gpu.device(), 4, 4, &pixels);
     sink.consume(MediaBuffer::video(
         wrap_d3d11_texture(texture, 4, 3).unwrap(),
     ))
@@ -419,7 +412,7 @@ fn ignores_rows_outside_the_frame_visible_dimensions() {
     let composed = compositor
         .compose_frame(&test_bus())
         .expect("compose_frame failed");
-    let downloaded = download_frame(&device, context, composed);
+    let downloaded = download_frame(&gpu, composed);
     for y in 0..3 {
         for x in 0..4 {
             assert_eq!(pixel(&downloaded, x, y), [0, 0, 255, 255]);
@@ -482,7 +475,7 @@ fn rejects_frame_dimensions_larger_than_the_backing_texture() {
 
 #[test]
 fn live_output_frames_keep_distinct_textures_until_the_last_arc_drops() {
-    let Some((device, context)) = try_device() else {
+    let Some(gpu) = try_device() else {
         return;
     };
     let options = VideoCompositorOptions {
@@ -492,15 +485,14 @@ fn live_output_frames_keep_distinct_textures_until_the_last_arc_drops() {
         background: Color::BLACK,
         background_alpha: 255,
     };
-    let (mut compositor, handle) =
-        D3d11VideoCompositor::new("compositor", &device, context.clone(), options)
-            .expect("D3d11VideoCompositor::new should succeed");
+    let (mut compositor, handle) = D3d11VideoCompositor::new("compositor", &gpu, options)
+        .expect("D3d11VideoCompositor::new should succeed");
     let mut layer = VideoLayer::new(VideoRect::new(0, 0, 1, 1));
     layer.fit = video_layer::VideoFit::Stretch;
     let mut sink = handle.add_source("input", layer).unwrap().sink;
 
     sink.consume(MediaBuffer::video(
-        wrap_d3d11_texture(bgra_texture(&device, 1, 1, [0, 0, 255, 255]), 1, 1).unwrap(),
+        wrap_d3d11_texture(bgra_texture(gpu.device(), 1, 1, [0, 0, 255, 255]), 1, 1).unwrap(),
     ))
     .unwrap();
     let first = compositor
@@ -514,7 +506,7 @@ fn live_output_frames_keep_distinct_textures_until_the_last_arc_drops() {
     let mut later = Vec::new();
     for _ in 0..OUTPUT_POOL_SIZE {
         sink.consume(MediaBuffer::video(
-            wrap_d3d11_texture(bgra_texture(&device, 1, 1, [255, 0, 0, 255]), 1, 1).unwrap(),
+            wrap_d3d11_texture(bgra_texture(gpu.device(), 1, 1, [255, 0, 0, 255]), 1, 1).unwrap(),
         ))
         .unwrap();
         later.push(
@@ -533,7 +525,7 @@ fn live_output_frames_keep_distinct_textures_until_the_last_arc_drops() {
         "simultaneously-live output frames must never alias one texture"
     );
 
-    let downloaded = download_frame(&device, context, first);
+    let downloaded = download_frame(&gpu, first);
     assert_eq!(
         pixel(&downloaded, 0, 0),
         [0, 0, 255, 255],
@@ -543,7 +535,7 @@ fn live_output_frames_keep_distinct_textures_until_the_last_arc_drops() {
 
 #[test]
 fn nv12_conversion_uses_frame_color_space_and_range() {
-    let Some((device, context)) = try_device() else {
+    let Some(gpu) = try_device() else {
         return;
     };
     let options = VideoCompositorOptions {
@@ -553,13 +545,12 @@ fn nv12_conversion_uses_frame_color_space_and_range() {
         background: Color::BLACK,
         background_alpha: 255,
     };
-    let (mut compositor, handle) =
-        D3d11VideoCompositor::new("compositor", &device, context.clone(), options)
-            .expect("D3d11VideoCompositor::new should succeed");
+    let (mut compositor, handle) = D3d11VideoCompositor::new("compositor", &gpu, options)
+        .expect("D3d11VideoCompositor::new should succeed");
     let mut layer = VideoLayer::new(VideoRect::new(0, 0, 2, 2));
     layer.fit = video_layer::VideoFit::Stretch;
     let mut sink = handle.add_source("input", layer).unwrap().sink;
-    let texture = nv12_texture(&device, 2, 2, 81, 90, 240);
+    let texture = nv12_texture(gpu.device(), 2, 2, 81, 90, 240);
 
     let mut bt601 = wrap_d3d11_texture(texture.clone(), 2, 2).unwrap();
     bt601.set_color_space(ffmpeg::color::Space::SMPTE170M);
@@ -568,7 +559,7 @@ fn nv12_conversion_uses_frame_color_space_and_range() {
     let bt601 = compositor
         .compose_frame(&test_bus())
         .expect("BT.601 compose failed");
-    let bt601 = download_frame(&device, context.clone(), bt601);
+    let bt601 = download_frame(&gpu, bt601);
 
     let mut bt709 = wrap_d3d11_texture(texture, 2, 2).unwrap();
     bt709.set_color_space(ffmpeg::color::Space::BT709);
@@ -577,7 +568,7 @@ fn nv12_conversion_uses_frame_color_space_and_range() {
     let bt709 = compositor
         .compose_frame(&test_bus())
         .expect("BT.709 compose failed");
-    let bt709 = download_frame(&device, context, bt709);
+    let bt709 = download_frame(&gpu, bt709);
 
     let pixel_601 = pixel(&bt601, 0, 0);
     let pixel_709 = pixel(&bt709, 0, 0);
@@ -620,7 +611,7 @@ fn nv12_conversion_distinguishes_limited_and_full_range() {
 /// puts it straight back to work.
 #[test]
 fn an_unchanged_scene_is_composed_once() {
-    let Some((device, context)) = try_device() else {
+    let Some(gpu) = try_device() else {
         return;
     };
     let options = VideoCompositorOptions {
@@ -630,16 +621,15 @@ fn an_unchanged_scene_is_composed_once() {
         background: Color::BLACK,
         background_alpha: 255,
     };
-    let (mut compositor, handle) =
-        D3d11VideoCompositor::new("compositor", &device, context.clone(), options)
-            .expect("D3d11VideoCompositor::new should succeed");
+    let (mut compositor, handle) = D3d11VideoCompositor::new("compositor", &gpu, options)
+        .expect("D3d11VideoCompositor::new should succeed");
     let mut layer = VideoLayer::new(VideoRect::new(0, 0, 2, 2));
     layer.fit = video_layer::VideoFit::Stretch;
     let input = handle.add_source("input", layer).unwrap();
     let mut sink = input.sink;
     let layer_handle = input.layer;
     sink.consume(MediaBuffer::video(
-        wrap_d3d11_texture(bgra_texture(&device, 2, 2, [0, 0, 255, 255]), 2, 2).unwrap(),
+        wrap_d3d11_texture(bgra_texture(gpu.device(), 2, 2, [0, 0, 255, 255]), 2, 2).unwrap(),
     ))
     .unwrap();
 
@@ -662,7 +652,7 @@ fn an_unchanged_scene_is_composed_once() {
         Some(1),
         "a repeat carries this tick's timestamp, not the one it points at"
     );
-    let downloaded = download_frame(&device, context.clone(), repeated);
+    let downloaded = download_frame(&gpu, repeated);
     assert_eq!(
         pixel(&downloaded, 0, 0),
         [0, 0, 255, 255],
@@ -678,7 +668,7 @@ fn an_unchanged_scene_is_composed_once() {
         picture,
         "a moved layer is a different picture and must be composed"
     );
-    let downloaded = download_frame(&device, context, composed);
+    let downloaded = download_frame(&gpu, composed);
     assert_eq!(
         pixel(&downloaded, 0, 0),
         [0, 0, 255, 255],
@@ -691,7 +681,7 @@ fn an_unchanged_scene_is_composed_once() {
 /// otherwise a later composite draws into the texture it is showing.
 #[test]
 fn a_repeat_still_in_flight_is_never_composed_over() {
-    let Some((device, context)) = try_device() else {
+    let Some(gpu) = try_device() else {
         return;
     };
     let options = VideoCompositorOptions {
@@ -701,9 +691,8 @@ fn a_repeat_still_in_flight_is_never_composed_over() {
         background: Color::BLACK,
         background_alpha: 255,
     };
-    let (mut compositor, handle) =
-        D3d11VideoCompositor::new("compositor", &device, context.clone(), options)
-            .expect("D3d11VideoCompositor::new should succeed");
+    let (mut compositor, handle) = D3d11VideoCompositor::new("compositor", &gpu, options)
+        .expect("D3d11VideoCompositor::new should succeed");
     let mut layer = VideoLayer::new(VideoRect::new(0, 0, 2, 2));
     layer.fit = video_layer::VideoFit::Stretch;
     let mut sink = handle.add_source("input", layer).unwrap().sink;
@@ -713,7 +702,7 @@ fn a_repeat_still_in_flight_is_never_composed_over() {
         )
     };
 
-    sink.consume(blue(&device)).unwrap();
+    sink.consume(blue(gpu.device())).unwrap();
     // Composed, pushed, and consumed downstream: only the repeat below
     // still refers to this picture.
     drop(
@@ -731,7 +720,7 @@ fn a_repeat_still_in_flight_is_never_composed_over() {
     // as it can, which is exactly the case that would reuse the picture
     // the repeat above is still showing.
     for _ in 0..(OUTPUT_POOL_SIZE * 2 + 2) {
-        sink.consume(blue(&device)).unwrap();
+        sink.consume(blue(gpu.device())).unwrap();
         let composed = compositor
             .compose_frame(&test_bus())
             .expect("later compose failed");
@@ -742,7 +731,7 @@ fn a_repeat_still_in_flight_is_never_composed_over() {
         );
     }
 
-    let downloaded = download_frame(&device, context, in_flight);
+    let downloaded = download_frame(&gpu, in_flight);
     assert_eq!(
         pixel(&downloaded, 0, 0),
         [255, 0, 0, 255],
@@ -752,7 +741,7 @@ fn a_repeat_still_in_flight_is_never_composed_over() {
 
 #[test]
 fn layer_handle_moves_blends_and_hides_a_live_source() {
-    let Some((device, context)) = try_device() else {
+    let Some(gpu) = try_device() else {
         return;
     };
     let options = VideoCompositorOptions {
@@ -762,16 +751,15 @@ fn layer_handle_moves_blends_and_hides_a_live_source() {
         background: Color::BLACK,
         background_alpha: 255,
     };
-    let (mut compositor, handle) =
-        D3d11VideoCompositor::new("compositor", &device, context.clone(), options)
-            .expect("D3d11VideoCompositor::new should succeed");
+    let (mut compositor, handle) = D3d11VideoCompositor::new("compositor", &gpu, options)
+        .expect("D3d11VideoCompositor::new should succeed");
 
     let layer = VideoLayer::new(VideoRect::new(0, 0, 1, 1));
     let input = handle.add_source("white", layer).unwrap();
     let mut sink = input.sink;
     let layer_handle = input.layer;
 
-    let white_texture = bgra_texture(&device, 1, 1, [255, 255, 255, 255]);
+    let white_texture = bgra_texture(gpu.device(), 1, 1, [255, 255, 255, 255]);
     sink.consume(MediaBuffer::video(
         wrap_d3d11_texture(white_texture, 1, 1).unwrap(),
     ))
@@ -782,7 +770,7 @@ fn layer_handle_moves_blends_and_hides_a_live_source() {
     let blended = compositor
         .compose_frame(&test_bus())
         .expect("compose_frame failed");
-    let downloaded = download_frame(&device, context.clone(), blended);
+    let downloaded = download_frame(&gpu, blended);
     assert_eq!(pixel(&downloaded, 0, 0), [0, 0, 0, 255], "background only");
     // 255 * 0.5 = 127.5 — the CPU SwVideoCompositor's software blend
     // rounds this to 128 (`f32::round`), but D3D11's fixed-function
@@ -807,16 +795,16 @@ fn layer_handle_moves_blends_and_hides_a_live_source() {
         .compose_frame(&test_bus())
         .expect("compose_frame failed");
     assert_eq!(hidden.pts(), Some(1));
-    let downloaded = download_frame(&device, context, hidden);
+    let downloaded = download_frame(&gpu, hidden);
     assert_eq!(pixel(&downloaded, 1, 0), [0, 0, 0, 255], "hidden layer");
 }
 
 #[test]
 fn skips_a_mismatched_device_texture_and_reports_it_on_the_bus() {
-    let Some((device_a, context_a)) = try_device() else {
+    let Some(gpu) = try_device() else {
         return;
     };
-    let Some((device_b, _context_b)) = try_device() else {
+    let Some(other) = try_device() else {
         return;
     };
     let options = VideoCompositorOptions {
@@ -826,15 +814,14 @@ fn skips_a_mismatched_device_texture_and_reports_it_on_the_bus() {
         background: Color::BLACK,
         background_alpha: 255,
     };
-    let (mut compositor, handle) =
-        D3d11VideoCompositor::new("compositor", &device_a, context_a.clone(), options)
-            .expect("D3d11VideoCompositor::new should succeed");
+    let (mut compositor, handle) = D3d11VideoCompositor::new("compositor", &gpu, options)
+        .expect("D3d11VideoCompositor::new should succeed");
     let mut sink = handle
         .add_source("mismatched", VideoLayer::new(VideoRect::new(0, 0, 1, 1)))
         .unwrap()
         .sink;
 
-    let foreign_texture = bgra_texture(&device_b, 1, 1, [255, 255, 255, 255]);
+    let foreign_texture = bgra_texture(other.device(), 1, 1, [255, 255, 255, 255]);
     sink.consume(MediaBuffer::video(
         wrap_d3d11_texture(foreign_texture, 1, 1).unwrap(),
     ))
@@ -857,7 +844,7 @@ fn skips_a_mismatched_device_texture_and_reports_it_on_the_bus() {
         crate::error::Error::D3d11VideoCompositorError(D3d11VideoCompositorError::DeviceMismatch)
     ));
 
-    let downloaded = download_frame(&device_a, context_a, composed);
+    let downloaded = download_frame(&gpu, composed);
     assert_eq!(
         pixel(&downloaded, 0, 0),
         [0, 0, 0, 255],
@@ -905,7 +892,7 @@ impl Sink for TimestampSink {
 fn resuming_after_a_pause_preserves_output_phase() {
     use crate::pipeline::Pipeline;
 
-    let Some((device, context)) = try_device() else {
+    let Some(gpu) = try_device() else {
         return;
     };
     let (tx, rx) = crossbeam_channel::unbounded();
@@ -920,7 +907,7 @@ fn resuming_after_a_pause_preserves_output_phase() {
         background: Color::BLACK,
         background_alpha: 255,
     };
-    let (compositor, _handle) = D3d11VideoCompositor::new("compositor", &device, context, options)
+    let (compositor, _handle) = D3d11VideoCompositor::new("compositor", &gpu, options)
         .expect("D3d11VideoCompositor::new should succeed");
 
     let (pipeline, ()) = Pipeline::new("phase-test", compositor, |source, ctx| {
@@ -965,7 +952,7 @@ fn resuming_after_a_pause_preserves_output_phase() {
 fn its_ticks_are_reported_through_its_pipeline() {
     use crate::pipeline::Pipeline;
 
-    let Some((device, context)) = try_device() else {
+    let Some(gpu) = try_device() else {
         return;
     };
     let (tx, rx) = crossbeam_channel::unbounded();
@@ -980,7 +967,7 @@ fn its_ticks_are_reported_through_its_pipeline() {
         background: Color::BLACK,
         background_alpha: 255,
     };
-    let (compositor, _handle) = D3d11VideoCompositor::new("ticking", &device, context, options)
+    let (compositor, _handle) = D3d11VideoCompositor::new("ticking", &gpu, options)
         .expect("D3d11VideoCompositor::new should succeed");
     let (pipeline, ()) = Pipeline::new("ticks", compositor, |source, ctx| {
         let branch = ctx.branch().to(sink)?;
@@ -1015,13 +1002,12 @@ fn its_ticks_are_reported_through_its_pipeline() {
 /// can be changed, and reading it back says so.
 #[test]
 fn the_frame_rate_can_be_changed_while_it_is_running() {
-    let Some((device, context)) = try_device() else {
+    let Some(gpu) = try_device() else {
         return;
     };
     let (compositor, handle) = D3d11VideoCompositor::new(
         "rate",
-        &device,
-        context,
+        &gpu,
         VideoCompositorOptions {
             width: 64,
             height: 64,
@@ -1047,13 +1033,12 @@ fn the_frame_rate_can_be_changed_while_it_is_running() {
 /// running rather than a compositor ticking on a nonsense interval.
 #[test]
 fn an_impossible_frame_rate_is_refused_and_changes_nothing() {
-    let Some((device, context)) = try_device() else {
+    let Some(gpu) = try_device() else {
         return;
     };
     let (compositor, handle) = D3d11VideoCompositor::new(
         "rate-refused",
-        &device,
-        context,
+        &gpu,
         VideoCompositorOptions {
             width: 64,
             height: 64,
@@ -1084,13 +1069,12 @@ fn an_impossible_frame_rate_is_refused_and_changes_nothing() {
 /// the same way every other method on it does.
 #[test]
 fn the_setter_reports_a_compositor_that_is_gone() {
-    let Some((device, context)) = try_device() else {
+    let Some(gpu) = try_device() else {
         return;
     };
     let (compositor, handle) = D3d11VideoCompositor::new(
         "rate-dropped",
-        &device,
-        context,
+        &gpu,
         VideoCompositorOptions {
             width: 64,
             height: 64,
@@ -1119,7 +1103,7 @@ fn the_setter_reports_a_compositor_that_is_gone() {
 /// layers as well would be just as wrong.
 #[test]
 fn a_transparent_background_leaves_alpha_where_nothing_drew() {
-    let Some((device, context)) = try_device() else {
+    let Some(gpu) = try_device() else {
         return;
     };
     let options = VideoCompositorOptions {
@@ -1129,15 +1113,14 @@ fn a_transparent_background_leaves_alpha_where_nothing_drew() {
         background: Color::BLACK,
         background_alpha: 0,
     };
-    let (mut compositor, handle) =
-        D3d11VideoCompositor::new("compositor", &device, context.clone(), options)
-            .expect("D3d11VideoCompositor::new should succeed");
+    let (mut compositor, handle) = D3d11VideoCompositor::new("compositor", &gpu, options)
+        .expect("D3d11VideoCompositor::new should succeed");
 
     // One opaque pixel's worth, in the corner: everything else is background.
     let mut layer = VideoLayer::new(VideoRect::new(0, 0, 1, 1));
     layer.fit = video_layer::VideoFit::Stretch;
     let mut sink = handle.add_source("corner", layer).unwrap().sink;
-    let texture = bgra_texture(&device, 1, 1, [0, 0, 255, 255]);
+    let texture = bgra_texture(gpu.device(), 1, 1, [0, 0, 255, 255]);
     sink.consume(MediaBuffer::video(
         wrap_d3d11_texture(texture, 1, 1).unwrap(),
     ))
@@ -1146,7 +1129,7 @@ fn a_transparent_background_leaves_alpha_where_nothing_drew() {
     let composed = compositor
         .compose_frame(&test_bus())
         .expect("compose_frame failed");
-    let downloaded = download_frame(&device, context, composed);
+    let downloaded = download_frame(&gpu, composed);
     assert_eq!(
         pixel(&downloaded, 3, 3),
         [0, 0, 0, 0],

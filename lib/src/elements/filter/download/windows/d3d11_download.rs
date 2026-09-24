@@ -23,7 +23,9 @@ use crate::{
     error::{D3d11SharedDeviceError, Result},
     frame_size::ForSize,
     pad::SrcPad,
-    platform::windows::{d3d11::protect_shared_device, d3d11va::d3d11va_texture},
+    platform::windows::{
+        d3d11::protect_shared_device, d3d11_gpu::D3d11Gpu, d3d11va::d3d11va_texture,
+    },
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
     repeat::{PerFrameTransform, RepeatedOutput},
 };
@@ -108,15 +110,13 @@ pub enum D3d11DownloadError {
 ///
 /// Unlike `D3d11Upload` (a plain `ID3D11Device::CreateTexture2D` call, safe
 /// to issue from any thread), reading a texture back to the CPU needs
-/// `ID3D11DeviceContext::CopySubresourceRegion`/`Map`/`Unmap` — context-level calls,
-/// not device-level ones. `context` must be the exact same
-/// `Arc<Mutex<ID3D11DeviceContext>>` every other context-touching D3D11
-/// consumer in this pipeline shares — [`D3d11Gpu::context`](crate::elements::D3d11Gpu::context),
-/// which is the pipeline device's one immediate context behind the one
-/// lock every element shares. See [`D3d11Gpu`](crate::elements::D3d11Gpu)
-/// on why a lone per-element context handle isn't enough to prevent two
-/// unrelated bind/draw/copy sequences from interleaving on the one
-/// underlying immediate context.
+/// `ID3D11DeviceContext::CopySubresourceRegion`/`Map`/`Unmap` — context-level
+/// calls, not device-level ones. Its GPU must be the [`D3d11Gpu`] every other
+/// D3D11 element in this pipeline shares, whose [`D3d11Gpu::context`] is the
+/// device's one immediate context behind the one lock every element shares.
+/// See [`D3d11Gpu`] on why a lone per-element context handle isn't enough to
+/// prevent two unrelated bind/draw/copy sequences from interleaving on the
+/// one underlying immediate context.
 pub struct D3d11Download {
     pp_log: PpLog,
     name: Arc<str>,
@@ -145,15 +145,14 @@ pub struct D3d11Download {
 unsafe impl Send for D3d11Download {}
 
 impl D3d11Download {
-    /// `device` must be the same `ID3D11Device`, and `context` the same
-    /// shared context, every other D3D11 element in this pipeline uses —
-    /// see this type's own docs on why. The size of the frames comes from
+    /// `gpu` must be the [`D3d11Gpu`] every other D3D11 element in this
+    /// pipeline shares — see this type's own docs on why. The size of the frames comes from
     /// the frames themselves.
     pub fn new(
         name: impl Into<String>,
-        device: &ID3D11Device,
-        context: Arc<Mutex<ID3D11DeviceContext>>,
+        gpu: &D3d11Gpu,
     ) -> std::result::Result<Self, D3d11DownloadError> {
+        let (device, context) = (gpu.device(), gpu.context());
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::D3d11Download, &name, None);
         // This element sits behind a `Queue` more often than not, so the
@@ -458,7 +457,7 @@ mod tests {
 
     use super::*;
     use crate::platform::windows::d3d11va::wrap_d3d11_texture;
-    use crate::test_support::try_d3d11_device;
+    use crate::test_support::try_d3d11_gpu;
 
     /// A compositor with nothing to recompose hands out the picture it
     /// already composed, and reading it back again would produce the bytes
@@ -467,9 +466,10 @@ mod tests {
     /// pixels are shared.
     #[test]
     fn a_repeated_input_is_downloaded_once() {
-        let Some((device, context)) = try_d3d11_device() else {
+        let Some(gpu) = try_d3d11_gpu() else {
             return;
         };
+        let device = gpu.device().clone();
         let (width, height) = (4u32, 4u32);
         let pixels = vec![0x40u8; (width * height * 4) as usize];
         // SAFETY: the initial-data pointer addresses the live `pixels` buffer
@@ -516,8 +516,8 @@ mod tests {
         }
         repeat.set_pts(Some(200));
 
-        let mut download = D3d11Download::new("download", &device, context)
-            .expect("D3d11Download::new should succeed");
+        let mut download =
+            D3d11Download::new("download", &gpu).expect("D3d11Download::new should succeed");
         let received = Arc::new(std::sync::Mutex::new(Vec::new()));
         download.src_pads()[0].link(Box::new(CapturingSink {
             received: received.clone(),
@@ -556,9 +556,10 @@ mod tests {
     /// match what was uploaded.
     #[test]
     fn gpu_bgra_texture_round_trips_to_a_cpu_bgra_frame() {
-        let Some((device, context)) = try_d3d11_device() else {
+        let Some(gpu) = try_d3d11_gpu() else {
             return;
         };
+        let device = gpu.device().clone();
 
         let (width, height) = (4u32, 4u32);
         let pixels: Vec<u8> = (0..width * height)
@@ -596,8 +597,8 @@ mod tests {
         };
         let source_frame = wrap_d3d11_texture(source_texture, width, height).unwrap();
 
-        let mut download = D3d11Download::new("test-download", &device, context)
-            .expect("D3d11Download::new should succeed");
+        let mut download =
+            D3d11Download::new("test-download", &gpu).expect("D3d11Download::new should succeed");
 
         let received = Arc::new(std::sync::Mutex::new(Vec::new()));
         let received_clone = received.clone();
@@ -633,9 +634,10 @@ mod tests {
     /// made before any frame arrived.
     #[test]
     fn a_source_that_changes_resolution_is_followed() {
-        let Some((device, context)) = try_d3d11_device() else {
+        let Some(gpu) = try_d3d11_gpu() else {
             return;
         };
+        let device = gpu.device().clone();
         let pool = UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {});
         let bgra_frame = |width: u32, height: u32| {
             let pixels = vec![0x40u8; (width * height * 4) as usize];
@@ -675,8 +677,8 @@ mod tests {
             MediaBuffer::Video(Arc::new(frame))
         };
 
-        let mut download = D3d11Download::new("test-download", &device, context)
-            .expect("D3d11Download::new should succeed");
+        let mut download =
+            D3d11Download::new("test-download", &gpu).expect("D3d11Download::new should succeed");
         let received = Arc::new(std::sync::Mutex::new(Vec::new()));
         download.src_pads()[0].link(Box::new(CapturingSink {
             received: received.clone(),
@@ -707,9 +709,10 @@ mod tests {
 
     #[test]
     fn downloads_only_the_selected_bgra_texture_array_slice() {
-        let Some((device, context)) = try_d3d11_device() else {
+        let Some(gpu) = try_d3d11_gpu() else {
             return;
         };
+        let device = gpu.device().clone();
 
         let (width, height) = (2u32, 2u32);
         let red = [0u8, 0, 255, 255].repeat((width * height) as usize);
@@ -757,8 +760,8 @@ mod tests {
             (*source_frame.as_mut_ptr()).data[1] = std::ptr::dangling_mut::<u8>();
         }
 
-        let mut download = D3d11Download::new("test-download", &device, context)
-            .expect("D3d11Download::new should succeed");
+        let mut download =
+            D3d11Download::new("test-download", &gpu).expect("D3d11Download::new should succeed");
         let received = Arc::new(Mutex::new(Vec::new()));
         download.src_pads()[0].link(Box::new(CapturingSink {
             received: received.clone(),

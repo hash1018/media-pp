@@ -97,8 +97,7 @@ mod windows_example {
 
         let (compositor, compositor_handle) = D3d11VideoCompositor::new(
             "compositor",
-            gpu.device(),
-            gpu.context(),
+            &gpu,
             VideoCompositorOptions {
                 width: CANVAS_WIDTH,
                 height: CANVAS_HEIGHT,
@@ -132,14 +131,13 @@ mod windows_example {
         let (green_screen, green_screen_handle) = AppSource::new("green-screen", 8);
         let (keyed_pipeline, ()) =
             Pipeline::new("keyed-foreground", green_screen, |source, ctx| {
-                let upload = D3d11Upload::new("upload", gpu.device());
+                let upload = D3d11Upload::new("upload", &gpu);
                 // The handle is what retunes the key while it runs, without
                 // rebuilding the branch — this example sets the threshold once
                 // and keeps it, so it has no use for one.
                 let (key, _key_handle) = D3d11ChromaKey::new(
                     "key",
-                    gpu.device(),
-                    gpu.context(),
+                    &gpu,
                     ChromaKeyOptions {
                         method: ChromaKeyMethod::Green,
                         // The backdrop is exactly the key color here, so the
@@ -175,7 +173,7 @@ mod windows_example {
                     CANVAS_HEIGHT,
                     ffmpeg::software::scaling::Flags::BILINEAR,
                 );
-                let upload = D3d11Upload::new("upload", gpu.device());
+                let upload = D3d11Upload::new("upload", &gpu);
                 let branch = ctx.branch().pipe(scaler).pipe(upload).to(background_sink)?;
                 ctx.attach(source, 0, branch)?;
                 Ok(())
@@ -200,7 +198,7 @@ mod windows_example {
         let muxer_sink = muxer.open()?.take(track)?;
 
         let (record_pipeline, ()) = Pipeline::new("record", compositor, |source, ctx| {
-            let download = D3d11Download::new("download", gpu.device(), gpu.context())?;
+            let download = D3d11Download::new("download", &gpu)?;
             let to_yuv = SwScaler::new(
                 "to-yuv",
                 ffmpeg::format::Pixel::YUV420P,

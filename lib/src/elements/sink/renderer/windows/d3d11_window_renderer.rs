@@ -982,7 +982,6 @@ mod tests {
                 frame_rate: ffmpeg_next::Rational::new(30, 1),
             },
         );
-        let device = gpu.device().clone();
         let (pipeline, ()) = Pipeline::new("window-renderer", source, |source, ctx| {
             let branch = ctx
                 .branch()
@@ -991,7 +990,7 @@ mod tests {
                     ffmpeg_next::format::Pixel::NV12,
                     ffmpeg_next::software::scaling::Flags::BILINEAR,
                 ))
-                .pipe(D3d11Upload::new("upload", &device))
+                .pipe(D3d11Upload::new("upload", gpu))
                 .queue("to-screen", 4)
                 .to(renderer)?;
             ctx.attach(source, 0, branch)?;
@@ -1187,11 +1186,10 @@ mod tests {
         };
         let probe = renderer.probe();
         let (source, handle) = AppSource::new("frames", 4);
-        let device = gpu.device().clone();
         let (pipeline, ()) = Pipeline::new("window-colour", source, |source, ctx| {
             let branch = if upload {
                 ctx.branch()
-                    .pipe(D3d11Upload::new("upload", &device))
+                    .pipe(D3d11Upload::new("upload", gpu))
                     .to(renderer)?
             } else {
                 ctx.branch().to(renderer)?

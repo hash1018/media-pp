@@ -29,6 +29,7 @@ use crate::{
     platform::{
         ffmpeg::AvBufferRef,
         windows::d3d11::protect_shared_device,
+        windows::d3d11_gpu::D3d11Gpu,
         windows::d3d11va::{create_hw_device_ctx, d3d11va_texture, or_frames_bind_flags},
     },
 };
@@ -89,10 +90,6 @@ pub enum D3d11VideoEncoderError {
         /// Height configured for the encoder.
         expected_height: u32,
     },
-
-    /// The supplied immediate context belongs to another D3D11 device.
-    #[error("the shared ID3D11DeviceContext belongs to a different ID3D11Device than the encoder")]
-    ContextDeviceMismatch,
 
     /// [`D3d11VideoEncoder::with_color`] was asked to describe BGRA input,
     /// which the encoder converts by a matrix of its own choosing.
@@ -461,9 +458,8 @@ unsafe fn create_hw_frames_ctx(
 }
 
 impl D3d11VideoEncoder {
-    /// `device` must be the same `ID3D11Device`, and `context` the same
-    /// shared immediate context, every other D3D11 element in this pipeline
-    /// uses — see this type's own docs on why.
+    /// `gpu` must be the [`D3d11Gpu`] every other D3D11 element in this
+    /// pipeline shares — see this type's own docs on why.
     ///
     /// Opens the encoder eagerly, so an encoder this ffmpeg build lacks, a
     /// driver too old for the API version it was built against, or a
@@ -471,12 +467,11 @@ impl D3d11VideoEncoder {
     /// typed error rather than at the first frame.
     pub fn new(
         name: impl Into<String>,
-        device: &ID3D11Device,
-        context: Arc<Mutex<ID3D11DeviceContext>>,
+        gpu: &D3d11Gpu,
         options: D3d11VideoEncoderOptions,
     ) -> std::result::Result<Self, D3d11VideoEncoderError> {
         crate::ensure_ffmpeg();
-        Self::open(name, device, context, options, None)
+        Self::open(name, gpu, options, None)
     }
 
     /// As [`Self::new`], and the stream says `color` is what it holds — see
@@ -509,8 +504,7 @@ impl D3d11VideoEncoder {
     /// it with a matrix it states — and describe that.
     pub fn with_color(
         name: impl Into<String>,
-        device: &ID3D11Device,
-        context: Arc<Mutex<ID3D11DeviceContext>>,
+        gpu: &D3d11Gpu,
         options: D3d11VideoEncoderOptions,
         color: ColorDescription,
     ) -> std::result::Result<Self, D3d11VideoEncoderError> {
@@ -518,34 +512,22 @@ impl D3d11VideoEncoder {
         if options.input_format == D3d11VideoInputFormat::Bgra {
             return Err(D3d11VideoEncoderError::DescribedBgraInput);
         }
-        Self::open(name, device, context, options, Some(color))
+        Self::open(name, gpu, options, Some(color))
     }
 
     fn open(
         name: impl Into<String>,
-        device: &ID3D11Device,
-        context: Arc<Mutex<ID3D11DeviceContext>>,
+        gpu: &D3d11Gpu,
         options: D3d11VideoEncoderOptions,
         color: Option<ColorDescription>,
     ) -> std::result::Result<Self, D3d11VideoEncoderError> {
+        let (device, context) = (gpu.device(), gpu.context());
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::D3d11VideoEncoder, &name, None);
         // This element sits behind a `Queue` more often than not, so the
         // device has to be usable from a thread other than the one that
         // created it before any command is issued.
         protect_shared_device(device)?;
-
-        let context_device = {
-            let context = context
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            // SAFETY: `context` is a live immediate context and `GetDevice`
-            // returns an owned reference to its creating device.
-            unsafe { context.GetDevice() }?
-        };
-        if context_device.as_raw() != device.as_raw() {
-            return Err(D3d11VideoEncoderError::ContextDeviceMismatch);
-        }
 
         let options_codec = options.codec;
         let encoder_name = options_codec.encoder_name();
@@ -917,7 +899,7 @@ impl Sink for D3d11VideoEncoder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::try_d3d11_device as try_device;
+    use crate::test_support::try_d3d11_gpu as try_device;
 
     fn options(
         codec: D3d11VideoCodec,
@@ -1044,9 +1026,10 @@ mod tests {
     #[test]
     fn encodes_gpu_textures_into_packets() {
         let _session = encoder_session();
-        let Some((device, context)) = try_device() else {
+        let Some(gpu) = try_device() else {
             return;
         };
+        let device = gpu.device().clone();
         if !supports_d3d11va(&device) {
             return;
         }
@@ -1055,8 +1038,7 @@ mod tests {
         for (codec, input_format) in CODEC_MATRIX {
             let mut encoder = match D3d11VideoEncoder::new(
                 format!("test-encode-{codec:?}-{input_format:?}"),
-                &device,
-                context.clone(),
+                &gpu,
                 options(codec, input_format),
             ) {
                 Ok(encoder) => encoder,
@@ -1169,17 +1151,17 @@ mod tests {
     #[test]
     fn opens_for_every_codec_and_input_format_on_real_hardware() {
         let _session = encoder_session();
-        let Some((device, context)) = try_device() else {
+        let Some(gpu) = try_device() else {
             return;
         };
+        let device = gpu.device().clone();
         if !supports_d3d11va(&device) {
             return;
         }
         for (codec, input_format) in CODEC_MATRIX {
             match D3d11VideoEncoder::new(
                 format!("test-open-{codec:?}-{input_format:?}"),
-                &device,
-                context.clone(),
+                &gpu,
                 options(codec, input_format),
             ) {
                 Ok(encoder) => {
@@ -1251,9 +1233,10 @@ mod tests {
         use crate::elements::{D3d11Scaler, D3d11ScalerFormat, FileMuxer};
 
         let _session = encoder_session();
-        let Some((device, context)) = try_device() else {
+        let Some(gpu) = try_device() else {
             return;
         };
+        let device = gpu.device().clone();
         if !supports_d3d11va(&device) {
             return;
         }
@@ -1261,8 +1244,7 @@ mod tests {
         let options = options(codec, D3d11VideoInputFormat::Nv12);
         let mut encoder = match D3d11VideoEncoder::with_color(
             "test-mf-colour",
-            &device,
-            context.clone(),
+            &gpu,
             options,
             ColorDescription::BT709_LIMITED,
         ) {
@@ -1284,15 +1266,9 @@ mod tests {
         encoder.src_pads()[0].link(sinks.take(track).expect("the muxer's own track"));
 
         let (width, height) = (options.width, options.height);
-        let mut scaler = D3d11Scaler::new(
-            "test-to-nv12",
-            &device,
-            context,
-            D3d11ScalerFormat::Nv12,
-            width,
-            height,
-        )
-        .expect("the scaler opens");
+        let mut scaler =
+            D3d11Scaler::new("test-to-nv12", &gpu, D3d11ScalerFormat::Nv12, width, height)
+                .expect("the scaler opens");
         scaler.src_pads()[0].link(Box::new(encoder));
 
         let pool = crate::pool::UnboundObjectPool::new(
@@ -1374,7 +1350,7 @@ mod tests {
     #[test]
     fn a_colour_for_bgra_input_is_refused() {
         let _session = encoder_session();
-        let Some((device, context)) = try_device() else {
+        let Some(gpu) = try_device() else {
             return;
         };
         for codec in [
@@ -1383,8 +1359,7 @@ mod tests {
         ] {
             let refused = D3d11VideoEncoder::with_color(
                 "test-bgra-colour",
-                &device,
-                context.clone(),
+                &gpu,
                 options(codec, D3d11VideoInputFormat::Bgra),
                 ColorDescription::BT709_LIMITED,
             );
@@ -1395,47 +1370,23 @@ mod tests {
         }
     }
 
-    #[test]
-    fn rejects_a_context_from_a_different_device() {
-        let _session = encoder_session();
-        let Some((device, _)) = try_device() else {
-            return;
-        };
-        let Some((_other_device, other_context)) = try_device() else {
-            return;
-        };
-
-        let error = match D3d11VideoEncoder::new(
-            "test-nvenc-context-mismatch",
-            &device,
-            other_context,
-            options(D3d11VideoCodec::H264Nvenc, D3d11VideoInputFormat::Nv12),
-        ) {
-            Ok(_) => panic!("a context from another device must be rejected"),
-            Err(error) => error,
-        };
-        assert!(matches!(
-            error,
-            D3d11VideoEncoderError::ContextDeviceMismatch
-        ));
-    }
-
     /// Every external texture property is checked before the void-returning
     /// D3D11 copy call. Each rejection is followed by valid input to prove a
     /// bad frame does not poison the encoder's subsequent state.
     #[test]
     fn rejects_invalid_textures_then_continues_encoding() {
         let _session = encoder_session();
-        let Some((device, context)) = try_device() else {
+        let Some(gpu) = try_device() else {
             return;
         };
-        let Some((foreign_device, _)) = try_device() else {
+        let device = gpu.device().clone();
+        let Some(foreign) = try_device() else {
             return;
         };
+        let foreign_device = foreign.device().clone();
         let mut encoder = match D3d11VideoEncoder::new(
             "test-nvenc-texture-validation",
-            &device,
-            context,
+            &gpu,
             options(D3d11VideoCodec::H264Nvenc, D3d11VideoInputFormat::Nv12),
         ) {
             Ok(encoder) => encoder,
@@ -1557,13 +1508,12 @@ mod tests {
     #[test]
     fn rejects_a_non_d3d11_frame() {
         let _session = encoder_session();
-        let Some((device, context)) = try_device() else {
+        let Some(gpu) = try_device() else {
             return;
         };
         let mut encoder = match D3d11VideoEncoder::new(
             "test-nvenc-reject",
-            &device,
-            context,
+            &gpu,
             options(D3d11VideoCodec::H264Nvenc, D3d11VideoInputFormat::Nv12),
         ) {
             Ok(encoder) => encoder,
@@ -1604,9 +1554,10 @@ mod tests {
     #[test]
     fn the_b_frame_count_is_honoured_in_both_directions() {
         let _session = encoder_session();
-        let Some((device, context)) = try_device() else {
+        let Some(gpu) = try_device() else {
             return;
         };
+        let device = gpu.device().clone();
         if !supports_d3d11va(&device) {
             return;
         }
@@ -1617,8 +1568,7 @@ mod tests {
         let encode = |max_b_frames: Option<u32>| -> Option<Vec<(i64, i64)>> {
             let mut encoder = match D3d11VideoEncoder::new(
                 "test-b-frames",
-                &device,
-                context.clone(),
+                &gpu,
                 D3d11VideoEncoderOptions {
                     max_b_frames,
                     ..options(codec, input_format)

@@ -23,6 +23,7 @@ use crate::{
     pad::SrcPad,
     platform::windows::d3d11::protect_shared_device,
     platform::windows::d3d11_full_frame::{FullFramePass, create_bgra_target},
+    platform::windows::d3d11_gpu::D3d11Gpu,
     platform::windows::d3d11va::{d3d11va_texture, wrap_d3d11_texture},
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
     repeat::{PerFrameTransform, RepeatedOutput},
@@ -72,13 +73,6 @@ pub enum D3d11VideoEffectError {
          pipeline must share exactly one device for zero-copy to be valid"
     )]
     DeviceMismatch,
-
-    /// The supplied immediate context belongs to another D3D11 device.
-    #[error(
-        "the supplied ID3D11DeviceContext belongs to a different ID3D11Device than this \
-         D3d11VideoEffect"
-    )]
-    ContextDeviceMismatch,
 
     /// The backing texture is smaller than the visible input frame.
     #[error(
@@ -171,10 +165,9 @@ impl EffectConstants {
 /// [`crate::elements::D3d11Scaler`] with
 /// [`crate::elements::D3d11ScalerFormat::Bgra`]); a fresh output texture the
 /// visible size of the input, since a published frame is never changed in
-/// place; `device` and `context` the ones every other D3D11 element in the
-/// pipeline shares; state re-selected on every draw; and a `Flush` after
-/// each, which is what keeps the three objects a frame creates from piling
-/// up on the device.
+/// place; the [`D3d11Gpu`] every other D3D11 element in the pipeline shares;
+/// state re-selected on every draw; and a `Flush` after each, which is what
+/// keeps the three objects a frame creates from piling up on the device.
 ///
 /// An effect that changes nothing, and an element that is turned off, hand
 /// each frame straight through — the same texture, not a copy of it.
@@ -217,34 +210,22 @@ struct ValidatedInput {
 }
 
 impl D3d11VideoEffect {
-    /// `device` must be the same `ID3D11Device`, and `context` the same
-    /// shared immediate context, every other D3D11 element in this pipeline
-    /// uses.
+    /// `gpu` must be the [`D3d11Gpu`] every other D3D11 element in this
+    /// pipeline shares.
     ///
     /// Output dimensions are not a parameter: an effect is per pixel, so
     /// every frame comes out the size it went in.
     pub fn new(
         name: impl Into<String>,
-        device: &ID3D11Device,
-        context: Arc<Mutex<ID3D11DeviceContext>>,
+        gpu: &D3d11Gpu,
         effect: VideoEffect,
     ) -> std::result::Result<(Self, VideoEffectHandle), D3d11VideoEffectError> {
+        let (device, context) = (gpu.device(), gpu.context());
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::D3d11VideoEffect, &name, None);
         // Usually behind a `Queue`, so the device has to be usable from
         // another thread before any command is issued.
         protect_shared_device(device)?;
-        {
-            let context = context
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            // SAFETY: `context` is a live immediate-context interface;
-            // `GetDevice` returns an owned reference to its creating device.
-            let context_device = unsafe { context.GetDevice() }?;
-            if context_device.as_raw() != device.as_raw() {
-                return Err(D3d11VideoEffectError::ContextDeviceMismatch);
-            }
-        }
 
         let pass = FullFramePass::new(
             device,
@@ -535,7 +516,7 @@ mod tests {
     use super::super::super::options::apply;
     use super::*;
     use crate::elements::{ColorCorrection, D3d11Download, LumaKey};
-    use crate::test_support::try_d3d11_device as try_device;
+    use crate::test_support::try_d3d11_gpu as try_device;
 
     /// A BGRA texture whose every texel of the last slice is `pixel`, and of
     /// any earlier slice opaque white.
@@ -607,21 +588,15 @@ mod tests {
 
     /// Draws one flat frame and hands back the downloaded result's first
     /// pixel, so a test asserts on pixels rather than on a `Draw` returning.
-    fn drawn_pixel(
-        device: &ID3D11Device,
-        context: &Arc<Mutex<ID3D11DeviceContext>>,
-        effect: VideoEffect,
-        pixel: [u8; 4],
-    ) -> [u8; 4] {
-        let (mut element, _) = D3d11VideoEffect::new("effect", device, context.clone(), effect)
-            .expect("D3d11VideoEffect::new");
-        let mut download =
-            D3d11Download::new("download", device, context.clone()).expect("D3d11Download::new");
+    fn drawn_pixel(gpu: &D3d11Gpu, effect: VideoEffect, pixel: [u8; 4]) -> [u8; 4] {
+        let (mut element, _) =
+            D3d11VideoEffect::new("effect", gpu, effect).expect("D3d11VideoEffect::new");
+        let mut download = D3d11Download::new("download", gpu).expect("D3d11Download::new");
         let received = capture(&mut download);
         element.src_pads()[0].link(Box::new(download));
 
         element
-            .consume(frame(bgra_texture(device, 8, 8, pixel, 1), 8, 8, 7))
+            .consume(frame(bgra_texture(gpu.device(), 8, 8, pixel, 1), 8, 8, 7))
             .expect("draw");
 
         let received = received.lock().unwrap();
@@ -659,7 +634,7 @@ mod tests {
     /// difference a GPU's own `pow` and rounding are allowed.
     #[test]
     fn every_effect_draws_what_the_shared_definition_says() {
-        let Some((device, context)) = try_device() else {
+        let Some(gpu) = try_device() else {
             return;
         };
         for effect in effects() {
@@ -671,7 +646,7 @@ mod tests {
                 [100, 110, 120, 255],
             ] {
                 let expected = apply(&effect.params(), pixel);
-                let drawn = drawn_pixel(&device, &context, effect, pixel);
+                let drawn = drawn_pixel(&gpu, effect, pixel);
                 for channel in 0..4 {
                     assert!(
                         drawn[channel].abs_diff(expected[channel]) <= 1,
@@ -685,18 +660,19 @@ mod tests {
     /// An effect that changes nothing hands on the texture that arrived.
     #[test]
     fn a_neutral_effect_hands_the_same_texture_through() {
-        let Some((device, context)) = try_device() else {
+        let Some(gpu) = try_device() else {
             return;
         };
-        let source = frame(bgra_texture(&device, 4, 4, [10, 20, 30, 255], 1), 4, 4, 1);
+        let source = frame(
+            bgra_texture(gpu.device(), 4, 4, [10, 20, 30, 255], 1),
+            4,
+            4,
+            1,
+        );
         let input = texture_of(&source);
-        let (mut element, _) = D3d11VideoEffect::new(
-            "effect",
-            &device,
-            context,
-            VideoEffect::LumaKey(LumaKey::default()),
-        )
-        .expect("D3d11VideoEffect::new");
+        let (mut element, _) =
+            D3d11VideoEffect::new("effect", &gpu, VideoEffect::LumaKey(LumaKey::default()))
+                .expect("D3d11VideoEffect::new");
         let received = capture(&mut element);
 
         element.consume(source).expect("pass through");
@@ -708,14 +684,13 @@ mod tests {
     /// in hand — until the effect changes, when it is drawn again.
     #[test]
     fn a_repeat_is_drawn_once_and_again_after_a_retune() {
-        let Some((device, context)) = try_device() else {
+        let Some(gpu) = try_device() else {
             return;
         };
-        let texture = bgra_texture(&device, 4, 4, [128, 128, 128, 255], 1);
+        let texture = bgra_texture(gpu.device(), 4, 4, [128, 128, 128, 255], 1);
         let (mut element, handle) = D3d11VideoEffect::new(
             "effect",
-            &device,
-            context,
+            &gpu,
             VideoEffect::ColorCorrection(ColorCorrection {
                 brightness: 0.2,
                 ..ColorCorrection::default()
@@ -754,20 +729,19 @@ mod tests {
     /// the frame names.
     #[test]
     fn the_visible_region_of_the_named_slice_is_what_is_drawn() {
-        let Some((device, context)) = try_device() else {
+        let Some(gpu) = try_device() else {
             return;
         };
         // A 16x16 two-slice array: slice 0 white, slice 1 black; the frame
         // names slice 0 and an 8x8 picture.
-        let array = bgra_texture(&device, 16, 16, [0, 0, 0, 255], 2);
+        let array = bgra_texture(gpu.device(), 16, 16, [0, 0, 0, 255], 2);
         let darker = VideoEffect::ColorCorrection(ColorCorrection {
             brightness: -0.4,
             ..ColorCorrection::default()
         });
-        let (mut element, _) = D3d11VideoEffect::new("effect", &device, context.clone(), darker)
-            .expect("D3d11VideoEffect::new");
-        let mut download =
-            D3d11Download::new("download", &device, context).expect("D3d11Download::new");
+        let (mut element, _) =
+            D3d11VideoEffect::new("effect", &gpu, darker).expect("D3d11VideoEffect::new");
+        let mut download = D3d11Download::new("download", &gpu).expect("D3d11Download::new");
         let received = capture(&mut download);
         element.src_pads()[0].link(Box::new(download));
 
@@ -788,14 +762,13 @@ mod tests {
     /// hundred frames is what shows this one does not.
     #[test]
     fn drawing_frames_does_not_accumulate_d3d11_objects() {
-        let Some((device, context, live)) = crate::test_support::try_d3d11_debug_device() else {
+        let Some((gpu, live)) = crate::test_support::try_d3d11_debug_device() else {
             return;
         };
-        let texture = bgra_texture(&device, 64, 64, [30, 140, 220, 255], 1);
+        let texture = bgra_texture(gpu.device(), 64, 64, [30, 140, 220, 255], 1);
         let (mut element, _) = D3d11VideoEffect::new(
             "effect",
-            &device,
-            context,
+            &gpu,
             VideoEffect::ColorCorrection(ColorCorrection {
                 saturation: 0.3,
                 ..ColorCorrection::default()
@@ -829,15 +802,15 @@ mod tests {
 
     #[test]
     fn what_cannot_be_drawn_is_refused_by_name() {
-        let Some((device, context)) = try_device() else {
+        let Some(gpu) = try_device() else {
             return;
         };
         let effect = VideoEffect::ColorCorrection(ColorCorrection {
             brightness: 0.1,
             ..ColorCorrection::default()
         });
-        let (mut element, _) = D3d11VideoEffect::new("effect", &device, context.clone(), effect)
-            .expect("D3d11VideoEffect::new");
+        let (mut element, _) =
+            D3d11VideoEffect::new("effect", &gpu, effect).expect("D3d11VideoEffect::new");
 
         let cpu = UnboundObjectPool::new(
             0,
@@ -870,7 +843,7 @@ mod tests {
         // SAFETY: `desc` is fully initialized, no initial pixels are
         // supplied, and `nv12` is a live out-parameter.
         unsafe {
-            device
+            gpu.device()
                 .CreateTexture2D(&desc, None, Some(&mut nv12))
                 .expect("CreateTexture2D(NV12)");
         }
@@ -881,17 +854,13 @@ mod tests {
             ))
         ));
 
-        if let Some((other, other_context)) = try_device() {
-            let foreign = bgra_texture(&other, 8, 8, [0, 0, 0, 255], 1);
+        if let Some(other) = try_device() {
+            let foreign = bgra_texture(other.device(), 8, 8, [0, 0, 0, 255], 1);
             assert!(matches!(
                 element.consume(frame(foreign, 8, 8, 1)),
                 Err(crate::error::Error::D3d11VideoEffectError(
                     D3d11VideoEffectError::DeviceMismatch
                 ))
-            ));
-            assert!(matches!(
-                D3d11VideoEffect::new("effect", &device, other_context, effect),
-                Err(D3d11VideoEffectError::ContextDeviceMismatch)
             ));
         }
 

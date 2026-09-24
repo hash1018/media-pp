@@ -84,7 +84,7 @@ mod windows_example {
             },
             ..DxgiCaptureOptions::default()
         };
-        let (video_source, video_format, _device) =
+        let (video_source, video_format, _gpu) =
             DxgiCaptureSource::open("screen", capture_options)?;
 
         let devices = WasapiCaptureSource::list_devices()?;

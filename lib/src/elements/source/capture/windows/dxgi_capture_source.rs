@@ -45,6 +45,7 @@ use crate::{
     pad::SrcPad,
     platform::windows::{
         d3d11::protect_shared_device,
+        d3d11_gpu::{D3d11Gpu, D3d11GpuError},
         d3d11va::{d3d11va_texture, wrap_d3d11_texture},
     },
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
@@ -143,6 +144,11 @@ pub enum DxgiCaptureSourceError {
     #[error(transparent)]
     SharedDevice(#[from] D3d11SharedDeviceError),
 
+    /// The device made for the captured adapter could not be set up as the
+    /// [`D3d11Gpu`] [`DxgiCaptureSource::open`] returns.
+    #[error(transparent)]
+    Gpu(#[from] D3d11GpuError),
+
     /// Cursor composition was requested for a multi-output region.
     #[error("include_cursor isn't supported when CaptureArea::Region spans more than one output")]
     CursorUnsupportedForRegion,
@@ -188,11 +194,11 @@ pub enum CaptureMode {
     /// texture per call rather than reusing one).
     ///
     /// [`DxgiCaptureSource::open`] creates a device on the resolved adapter
-    /// and returns it for downstream reuse. Alternatively,
-    /// [`DxgiCaptureSource::open_with_device`] accepts an existing shared
-    /// device and validates its adapter LUID before opening duplication.
-    /// Either path establishes one exact `ID3D11Device` for every D3D11
-    /// element sharing this capture.
+    /// and returns it as a [`D3d11Gpu`] for downstream reuse. Alternatively,
+    /// [`DxgiCaptureSource::open_with_device`] accepts an existing
+    /// [`D3d11Gpu`] and validates its adapter LUID before opening duplication.
+    /// Either path establishes one exact device for every D3D11 element
+    /// sharing this capture.
     ///
     /// No cursor option — see [`CaptureMode::Cpu`]'s own docs on why.
     Gpu,
@@ -547,24 +553,24 @@ impl DxgiCaptureSource {
     /// needs to build a matching downstream
     /// [`crate::elements::SwScaler`]/[`crate::elements::Pacer`], same
     /// pattern as [`crate::elements::RtspSource::open`] returning stream
-    /// info — plus, under [`CaptureMode::Gpu`], the `ID3D11Device` this
+    /// info — plus, under [`CaptureMode::Gpu`], the [`D3d11Gpu`] this
     /// capture was opened on (`None` under [`CaptureMode::Cpu`], where
     /// nothing downstream needs to share it). This is always built from
     /// whichever adapter `area` actually resolves to — see
     /// [`CaptureMode::Gpu`]'s own docs on why callers should build every
-    /// other D3D11 element sharing this capture from the returned device
+    /// other D3D11 element sharing this capture from the returned GPU
     /// rather than a separately-created one.
     pub fn open(
         name: impl Into<String>,
         options: DxgiCaptureOptions,
-    ) -> std::result::Result<(Self, VideoFormat, Option<ID3D11Device>), DxgiCaptureSourceError>
-    {
+    ) -> std::result::Result<(Self, VideoFormat, Option<D3d11Gpu>), DxgiCaptureSourceError> {
         Self::open_impl(name, options, None)
     }
 
-    /// Opens the capture on a caller-owned D3D11 device.
+    /// Opens the capture on the [`D3d11Gpu`] every other D3D11 element in
+    /// this pipeline shares.
     ///
-    /// The device must belong to the same DXGI adapter as every output touched
+    /// Its device must belong to the same DXGI adapter as every output touched
     /// by [`DxgiCaptureOptions::area`]; a mismatch is rejected before desktop
     /// duplication or textures are created. Under [`CaptureMode::Gpu`], this
     /// lets capture, filters, compositors, encoders, and renderers share one
@@ -572,14 +578,12 @@ impl DxgiCaptureSource {
     /// remove the existing GPU copies: duplication surfaces first refresh the
     /// internal latest-image textures, then each emission gets an independent
     /// composite texture that downstream may retain after `ReleaseFrame`.
-    /// A `D3D11_CREATE_DEVICE_SINGLETHREADED` device is rejected; otherwise
-    /// this enables its immediate context's runtime multithread protection.
     pub fn open_with_device(
         name: impl Into<String>,
         options: DxgiCaptureOptions,
-        device: &ID3D11Device,
+        gpu: &D3d11Gpu,
     ) -> std::result::Result<(Self, VideoFormat), DxgiCaptureSourceError> {
-        let (source, format, _returned_device) = Self::open_impl(name, options, Some(device))?;
+        let (source, format, _returned_gpu) = Self::open_impl(name, options, Some(gpu.device()))?;
         Ok((source, format))
     }
 
@@ -587,8 +591,7 @@ impl DxgiCaptureSource {
         name: impl Into<String>,
         options: DxgiCaptureOptions,
         supplied_device: Option<&ID3D11Device>,
-    ) -> std::result::Result<(Self, VideoFormat, Option<ID3D11Device>), DxgiCaptureSourceError>
-    {
+    ) -> std::result::Result<(Self, VideoFormat, Option<D3d11Gpu>), DxgiCaptureSourceError> {
         let frame_rate = options.frame_rate;
         if frame_rate.numerator() <= 0 || frame_rate.denominator() <= 0 {
             return Err(DxgiCaptureSourceError::InvalidFrameRate(frame_rate));
@@ -643,10 +646,14 @@ impl DxgiCaptureSource {
             device.expect("D3D11CreateDevice succeeded without producing a device")
         };
         let context = protect_shared_device(&device)?;
-        // Cloned before `device` moves into `Self` below — the only copy
-        // handed back to the caller (a COM ref-count bump, not a deep
-        // copy).
-        let returned_device = gpu_mode.then(|| device.clone());
+        // Only a device made here is handed back — a supplied one is the
+        // caller's own already — and it is cloned before `device` moves into
+        // `Self` below (a COM ref-count bump, not a deep copy).
+        let returned_gpu = if gpu_mode && supplied_device.is_none() {
+            Some(D3d11Gpu::from_device(device.clone())?)
+        } else {
+            None
+        };
         let dxgi_device: IDXGIDevice = device.cast()?;
 
         // One output under [`CaptureMode::Gpu`] is the case where an acquired
@@ -831,7 +838,7 @@ impl DxgiCaptureSource {
                 height,
                 time_base,
             },
-            returned_device,
+            returned_gpu,
         ))
     }
 
@@ -2118,7 +2125,7 @@ mod tests {
     /// reciprocal, not a rounded whole number of frames a second.
     #[test]
     fn a_fractional_rate_sets_an_exact_time_base() {
-        let Ok((source, _format, _device)) = DxgiCaptureSource::open(
+        let Ok((source, _format, _gpu)) = DxgiCaptureSource::open(
             "capture",
             DxgiCaptureOptions {
                 frame_rate: ffmpeg::Rational::new(30_000, 1_001),
@@ -2148,7 +2155,7 @@ mod tests {
     /// Hardware test: skips when the machine has no desktop duplication.
     #[test]
     fn an_unchanged_tick_reuses_the_picture_it_already_copied() {
-        let (mut source, _format, _device) = match DxgiCaptureSource::open(
+        let (mut source, _format, _gpu) = match DxgiCaptureSource::open(
             "reuse-cpu",
             DxgiCaptureOptions {
                 area: CaptureArea::Output { output_index: 0 },
@@ -2212,7 +2219,7 @@ mod tests {
     /// Hardware test: skips when the machine has no desktop duplication.
     #[test]
     fn an_unchanged_tick_reuses_the_composite_it_already_built() {
-        let (mut source, _format, _device) = match DxgiCaptureSource::open(
+        let (mut source, _format, _gpu) = match DxgiCaptureSource::open(
             "reuse",
             DxgiCaptureOptions {
                 area: CaptureArea::Output { output_index: 0 },
@@ -2450,7 +2457,7 @@ mod tests {
                 capture_mode: capture_mode.clone(),
                 ..DxgiCaptureOptions::default()
             };
-            let Ok((source, _format, _device)) = DxgiCaptureSource::open("test-capture", options)
+            let Ok((source, _format, _gpu)) = DxgiCaptureSource::open("test-capture", options)
             else {
                 eprintln!("skipping {capture_mode:?}: no duplicable desktop on this machine");
                 continue;
@@ -2506,7 +2513,7 @@ mod tests {
             capture_mode: CaptureMode::Gpu,
             ..DxgiCaptureOptions::default()
         };
-        let Ok((source, _format, Some(device))) =
+        let Ok((source, _format, Some(gpu))) =
             DxgiCaptureSource::open("device-provider", options.clone())
         else {
             eprintln!("skipping: no duplicable desktop on this machine");
@@ -2515,9 +2522,9 @@ mod tests {
         drop(source);
 
         let (source, _format) =
-            DxgiCaptureSource::open_with_device("device-consumer", options, &device)
+            DxgiCaptureSource::open_with_device("device-consumer", options, &gpu)
                 .expect("the device created for this output must pass adapter validation");
-        assert_eq!(source.device.as_raw(), device.as_raw());
+        assert_eq!(source.device.as_raw(), gpu.device().as_raw());
     }
 
     /// The rate a capture was opened at can be changed afterwards, and
@@ -2528,7 +2535,7 @@ mod tests {
             frame_rate: ffmpeg::Rational::new(60, 1),
             ..DxgiCaptureOptions::default()
         };
-        let Ok((source, _format, _device)) = DxgiCaptureSource::open("rate", options) else {
+        let Ok((source, _format, _gpu)) = DxgiCaptureSource::open("rate", options) else {
             eprintln!("skipping: no duplicable desktop on this machine");
             return;
         };

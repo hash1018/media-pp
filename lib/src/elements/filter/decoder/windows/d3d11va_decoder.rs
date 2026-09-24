@@ -6,7 +6,7 @@ use std::sync::{
 use crate::pp_log::{PpLog, pp_error, pp_info};
 use ffmpeg_next::{self as ffmpeg, ffi};
 use thiserror::Error as ThisError;
-use windows::Win32::Graphics::Direct3D11::{D3D11_BIND_SHADER_RESOURCE, ID3D11Device};
+use windows::Win32::Graphics::Direct3D11::D3D11_BIND_SHADER_RESOURCE;
 
 use crate::{
     buffer::MediaBuffer,
@@ -18,6 +18,7 @@ use crate::{
     platform::{
         ffmpeg::AvBufferRef,
         windows::d3d11::protect_shared_device,
+        windows::d3d11_gpu::D3d11Gpu,
         windows::d3d11va::{create_hw_device_ctx, or_frames_bind_flags},
     },
     pool::UnboundObjectPool,
@@ -132,12 +133,11 @@ pub struct D3d11Decoder {
 unsafe impl Send for D3d11Decoder {}
 
 impl D3d11Decoder {
-    /// `device` must outlive this decoder (and, transitively, every frame
-    /// it produces that's still alive downstream), and must be the same
-    /// `ID3D11Device` every other D3D11 element in this pipeline shares —
-    /// see [`crate::elements::D3d11Renderer`]'s own docs on why this whole
-    /// stack requires exactly one shared device/context, not just a
-    /// same-adapter one.
+    /// `gpu` must be the [`D3d11Gpu`] every other D3D11 element in this
+    /// pipeline shares — see its own docs on why this whole stack requires
+    /// exactly one shared device and context, not just a same-adapter one.
+    /// The decoder keeps its device alive for as long as it, and every frame
+    /// it produced that is still alive downstream, needs it.
     ///
     /// `downstream_hw_frames` is the deepest number of decoded frames that
     /// downstream queues and sinks may retain. The decoder adds its own one-
@@ -169,9 +169,10 @@ impl D3d11Decoder {
     pub fn new(
         name: impl Into<String>,
         params: ffmpeg::codec::Parameters,
-        device: &ID3D11Device,
+        gpu: &D3d11Gpu,
         downstream_hw_frames: i32,
     ) -> Result<Self, D3d11DecoderError> {
+        let device = gpu.device();
         crate::ensure_ffmpeg();
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::D3d11Decoder, &name, None);
@@ -489,7 +490,7 @@ unsafe extern "C" fn get_format(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::try_d3d11_device;
+    use crate::test_support::try_d3d11_gpu;
 
     /// Regression test for a real crash (`STATUS_ACCESS_VIOLATION`/
     /// `STATUS_BREAKPOINT`, depending on the run) found via
@@ -500,7 +501,7 @@ mod tests {
     /// D3D12 sibling (which never releases the caller-provided device).
     /// That one extra `Release()` didn't crash immediately — only later,
     /// once every *other* reference (including this test's own final
-    /// `device` drop) had also released and the COM object was already
+    /// `gpu` drop) had also released and the COM object was already
     /// gone. A real pipeline run masked exactly how late "later" was
     /// (looked like a clean exit until the process teardown itself);
     /// decoding a full file end-to-end and then dropping everything, with
@@ -508,7 +509,7 @@ mod tests {
     /// it deterministically.
     #[test]
     fn decodes_a_full_file_and_tears_down_cleanly() {
-        let Some((device, _context)) = try_d3d11_device() else {
+        let Some(gpu) = try_d3d11_gpu() else {
             return;
         };
 
@@ -524,13 +525,13 @@ mod tests {
         let params = video_stream.parameters();
 
         // A D3D11 device is not the same thing as a D3D11 *video* device.
-        // `try_d3d11_device` gets one on any machine that can render at all,
+        // `try_d3d11_gpu` gets one on any machine that can render at all,
         // including the Basic Render Driver a CI runner falls back to, and
         // wrapping that as a D3D11VA hardware device is what fails there —
         // `AVERROR_UNKNOWN`, arriving as `HwDeviceInit(-1313558101)`. That is
         // the absence of hardware rather than a regression, and this skips
         // for it the way every other hardware test skips for its own.
-        let mut decoder = match D3d11Decoder::new("test-decoder", params, &device, 32) {
+        let mut decoder = match D3d11Decoder::new("test-decoder", params, &gpu, 32) {
             Ok(decoder) => decoder,
             Err(D3d11DecoderError::HwDeviceInit(code)) => {
                 eprintln!(
@@ -558,7 +559,7 @@ mod tests {
         // on this final drop — see this test's own docs.
         drop(decoder);
         drop(input);
-        drop(device);
+        drop(gpu);
     }
 
     /// Video parameters for `codec` carrying nothing but its size, which is
@@ -589,11 +590,11 @@ mod tests {
     /// and fail only at the first frame.
     #[test]
     fn a_codec_with_no_d3d11va_decoder_is_refused_when_built() {
-        let Some((device, _context)) = try_d3d11_device() else {
+        let Some(gpu) = try_d3d11_gpu() else {
             return;
         };
         let codec = ffmpeg::codec::Id::PRORES;
-        let error = D3d11Decoder::new("test-decoder", video_parameters(codec), &device, 0)
+        let error = D3d11Decoder::new("test-decoder", video_parameters(codec), &gpu, 0)
             .err()
             .expect("a codec with no D3D11VA decoder must not open");
         assert!(
@@ -615,13 +616,13 @@ mod tests {
     fn av1_opens_a_d3d11va_decoder_and_decodes_on_the_gpu() {
         use crate::elements::AppSink;
 
-        let Some((device, _context)) = try_d3d11_device() else {
+        let Some(gpu) = try_d3d11_gpu() else {
             return;
         };
         let Some((params, packets)) = crate::test_support::try_av1_packets() else {
             return;
         };
-        let mut decoder = match D3d11Decoder::new("test-av1", params, &device, 4) {
+        let mut decoder = match D3d11Decoder::new("test-av1", params, &gpu, 4) {
             Ok(decoder) => decoder,
             Err(D3d11DecoderError::HwDeviceInit(code)) => {
                 eprintln!("skipping: this device does not do video decoding (code {code})");
@@ -684,7 +685,7 @@ mod tests {
     /// 4:4:4, is one no hardware decoder here has.
     #[test]
     fn a_profile_the_gpu_lacks_is_reported_as_refused() {
-        let Some((device, _context)) = try_d3d11_device() else {
+        let Some(gpu) = try_d3d11_gpu() else {
             return;
         };
         let Some((params, packets)) = crate::test_support::try_encoded_packets(
@@ -695,7 +696,7 @@ mod tests {
         ) else {
             return;
         };
-        let mut decoder = D3d11Decoder::new("refused", params, &device, 4).unwrap();
+        let mut decoder = D3d11Decoder::new("refused", params, &gpu, 4).unwrap();
         decoder.src_pads()[0].link(Box::new(crate::elements::AppSink::new(
             "refused-frames",
             |_| Ok(()),
@@ -753,7 +754,7 @@ mod tests {
     /// big the pool is; letting them go lets decoding carry on from the next keyframe.
     #[test]
     fn frames_held_past_the_surface_pool_say_so() {
-        let Some((device, _context)) = try_d3d11_device() else {
+        let Some(gpu) = try_d3d11_gpu() else {
             return;
         };
         let Some(path) = crate::test_support::try_test_video() else {
@@ -767,7 +768,7 @@ mod tests {
         let (index, params) = (stream.index(), stream.parameters());
         // No room downstream at all: the pool is the codec's own references
         // and the decoder's one candidate.
-        let mut decoder = match D3d11Decoder::new("decoder", params, &device, 0) {
+        let mut decoder = match D3d11Decoder::new("decoder", params, &gpu, 0) {
             Ok(decoder) => decoder,
             Err(D3d11DecoderError::HwDeviceInit(code)) => {
                 eprintln!("skipping: this D3D11 device does not decode video ({code})");

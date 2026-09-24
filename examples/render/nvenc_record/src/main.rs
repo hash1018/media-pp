@@ -62,8 +62,7 @@ mod windows_example {
 
         let encoder = D3d11VideoEncoder::new(
             "encoder",
-            gpu.device(),
-            gpu.context(),
+            &gpu,
             D3d11VideoEncoderOptions {
                 codec: D3d11VideoCodec::H264Nvenc,
                 // D3d11Upload produces NV12 textures. Feeding this element a
@@ -95,7 +94,7 @@ mod windows_example {
                 height,
                 ffmpeg::software::scaling::Flags::BILINEAR,
             );
-            let upload = D3d11Upload::new("upload", gpu.device());
+            let upload = D3d11Upload::new("upload", &gpu);
             let branch = ctx
                 .branch()
                 .pipe(scaler)

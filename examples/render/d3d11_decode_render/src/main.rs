@@ -91,7 +91,7 @@ mod windows_example {
             // since the D3D11VA pool does not grow. Its accurate-seek
             // candidate surface is reserved internally, so it is not
             // included in this value.
-            let decoder = D3d11Decoder::new("decoder", params, gpu.device(), (FRAMES + 8) as i32)?;
+            let decoder = D3d11Decoder::new("decoder", params, &gpu, (FRAMES + 8) as i32)?;
             let branch = ctx
                 .branch()
                 .pipe(decoder) // same thread as the demux — cheap enough not to need a queue

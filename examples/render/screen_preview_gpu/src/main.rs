@@ -256,7 +256,7 @@ mod windows_example {
                         capture_mode: CaptureMode::Gpu,
                         ..DxgiCaptureOptions::default()
                     },
-                    gpu.device(),
+                    &gpu,
                 )?;
                 present(source, ElementType::DxgiCaptureSource, renderer, &shutdown)
             }
@@ -268,7 +268,7 @@ mod windows_example {
                         frame_rate: ffmpeg::Rational::new(60, 1),
                         include_cursor: true,
                     },
-                    gpu.device(),
+                    &gpu,
                 )?;
                 present(source, ElementType::WgcCaptureSource, renderer, &shutdown)
             }

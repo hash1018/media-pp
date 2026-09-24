@@ -25,9 +25,9 @@ use ffmpeg_next as ffmpeg;
 use thiserror::Error as ThisError;
 
 #[cfg(all(target_os = "windows", feature = "d3d11"))]
-use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11DeviceContext};
+use crate::elements::D3d11Gpu;
 #[cfg(all(target_os = "windows", feature = "d3d12"))]
-use windows::Win32::Graphics::Direct3D12::ID3D12Device;
+use crate::elements::D3d12Gpu;
 
 #[cfg(feature = "cuda")]
 use crate::elements::{CudaDevice, CudaFrameFormat};
@@ -80,20 +80,18 @@ pub enum DecodeTarget {
     /// here so one piece of code can build a decoder whichever backends a
     /// build has.
     System,
-    /// D3D11 textures on `device`, as [`crate::elements::D3d11Decoder`] and
+    /// D3D11 textures on `gpu`, as [`crate::elements::D3d11Decoder`] and
     /// [`crate::elements::D3d11Upload`] make them — NV12, or BGRA where the
     /// stream has alpha, an odd side or BT.2020 colour. A 10-bit stream, and
     /// a BT.2020 one on its way to BGRA, goes through a
-    /// [`crate::elements::D3d11Scaler`], which draws through `context`: the immediate context every D3D11 element in the pipeline
-    /// shares, as that element's own docs require.
+    /// [`crate::elements::D3d11Scaler`], which draws through `gpu`'s immediate
+    /// context under the one lock every D3D11 element in the pipeline shares,
+    /// as that element's own docs require.
     #[cfg(all(target_os = "windows", feature = "d3d11"))]
     D3d11 {
-        /// The one device every D3D11 element in the pipeline shares.
-        device: ID3D11Device,
-        /// That device's immediate context, wrapped once and shared by
-        /// every element that draws or copies through it — see
-        /// [`crate::elements::D3d11Scaler`].
-        context: Arc<Mutex<ID3D11DeviceContext>>,
+        /// The one device, and its one shared immediate context, every D3D11
+        /// element in the pipeline shares.
+        gpu: D3d11Gpu,
         /// How many decoded frames downstream may hold at once — every
         /// queue and buffer after the decoder, counted together: each
         /// `Queue`'s capacity, one for a `Pacer` or `VideoSynchronizer`
@@ -105,7 +103,7 @@ pub enum DecodeTarget {
         /// See [`crate::elements::D3d11Decoder::new`].
         downstream_hw_frames: i32,
     },
-    /// D3D12 resources on `device`, as [`crate::elements::D3d12Decoder`] and
+    /// D3D12 resources on `gpu`, as [`crate::elements::D3d12Decoder`] and
     /// [`crate::elements::D3d12Upload`] make them — always NV12, the one
     /// layout either of them has and the one everything reading D3D12 frames
     /// here reads. So alpha is not kept on this target, and is no reason to
@@ -118,7 +116,7 @@ pub enum DecodeTarget {
     #[cfg(all(target_os = "windows", feature = "d3d12"))]
     D3d12 {
         /// The one device every D3D12 element in the pipeline shares.
-        device: ID3D12Device,
+        gpu: D3d12Gpu,
     },
     /// CUDA frames on `device`, as [`crate::elements::CudaDecoder`] and
     /// [`crate::elements::CudaUpload`] make them — NV12, or BGRA where the
@@ -785,24 +783,18 @@ impl DecodeTarget {
             // PQ or HLG, which no video processor here brings to SDR — see
             // `D3d11ToneMap`. Drawn at the size it is decoded at.
             #[cfg(all(target_os = "windows", feature = "d3d11"))]
-            Self::D3d11 {
-                device, context, ..
-            } if hdr => vec![Box::new(crate::elements::D3d11ToneMap::new(
+            Self::D3d11 { gpu, .. } if hdr => vec![Box::new(crate::elements::D3d11ToneMap::new(
                 format!("{name}-tone-map"),
-                device,
-                Arc::clone(context),
+                gpu,
             )?)],
             // One video processor pass: a BT.2020 P010 surface goes straight
             // to BGRA, which is the one conversion in which the processor
             // brings BT.2020's primaries into BT.709's — from NV12 it
             // converts the matrix and leaves the primaries.
             #[cfg(all(target_os = "windows", feature = "d3d11"))]
-            Self::D3d11 {
-                device, context, ..
-            } => vec![Box::new(crate::elements::D3d11Scaler::new(
+            Self::D3d11 { gpu, .. } => vec![Box::new(crate::elements::D3d11Scaler::new(
                 format!("{name}-convert"),
-                device,
-                Arc::clone(context),
+                gpu,
                 if bgra {
                     crate::elements::D3d11ScalerFormat::Bgra
                 } else {
@@ -891,19 +883,16 @@ impl DecodeTarget {
             Self::System => Box::new(SwDecoder::new(name, params)?),
             #[cfg(all(target_os = "windows", feature = "d3d11"))]
             Self::D3d11 {
-                device,
+                gpu,
                 downstream_hw_frames,
-                ..
             } => Box::new(crate::elements::D3d11Decoder::new(
                 name,
                 params,
-                device,
+                gpu,
                 *downstream_hw_frames,
             )?),
             #[cfg(all(target_os = "windows", feature = "d3d12"))]
-            Self::D3d12 { device } => {
-                Box::new(crate::elements::D3d12Decoder::new(name, params, device)?)
-            }
+            Self::D3d12 { gpu } => Box::new(crate::elements::D3d12Decoder::new(name, params, gpu)?),
             #[cfg(feature = "cuda")]
             Self::Cuda {
                 device,
@@ -931,13 +920,9 @@ impl DecodeTarget {
         Ok(match self {
             Self::System => None,
             #[cfg(all(target_os = "windows", feature = "d3d11"))]
-            Self::D3d11 { device, .. } => {
-                Some(Box::new(crate::elements::D3d11Upload::new(name, device)))
-            }
+            Self::D3d11 { gpu, .. } => Some(Box::new(crate::elements::D3d11Upload::new(name, gpu))),
             #[cfg(all(target_os = "windows", feature = "d3d12"))]
-            Self::D3d12 { device } => {
-                Some(Box::new(crate::elements::D3d12Upload::new(name, device)?))
-            }
+            Self::D3d12 { gpu } => Some(Box::new(crate::elements::D3d12Upload::new(name, gpu)?)),
             #[cfg(feature = "cuda")]
             Self::Cuda { device, .. } => {
                 let format = if format == ffmpeg::format::Pixel::BGRA {
@@ -1498,13 +1483,9 @@ mod tests {
             control::PrerollContext, elements::D3d11Download, test_support::try_encoded_packets,
         };
 
-        fn target(
-            device: &ID3D11Device,
-            context: &Arc<Mutex<ID3D11DeviceContext>>,
-        ) -> DecodeTarget {
+        fn target(gpu: &D3d11Gpu) -> DecodeTarget {
             DecodeTarget::D3d11 {
-                device: device.clone(),
-                context: Arc::clone(context),
+                gpu: gpu.clone(),
                 downstream_hw_frames: 4,
             }
         }
@@ -1513,12 +1494,12 @@ mod tests {
         /// `D3d11Decoder` on its own would.
         #[test]
         fn h264_decodes_on_the_gpu() {
-            let Some((device, context)) = crate::test_support::try_d3d11_device() else {
+            let Some(gpu) = crate::test_support::try_d3d11_gpu() else {
                 return;
             };
             let (params, packets) = h264();
             let sent = packets.len();
-            let Some(bin) = open_or_skip("h264", params, target(&device, &context)) else {
+            let Some(bin) = open_or_skip("h264", params, target(&gpu)) else {
                 return;
             };
             assert_eq!(bin.path(), DecodePath::Hardware);
@@ -1539,7 +1520,7 @@ mod tests {
         /// and still reaches the device, as NV12.
         #[test]
         fn a_codec_without_a_hardware_decoder_still_reaches_the_gpu() {
-            let Some((device, context)) = crate::test_support::try_d3d11_device() else {
+            let Some(gpu) = crate::test_support::try_d3d11_gpu() else {
                 return;
             };
             let Some((params, packets)) =
@@ -1548,7 +1529,7 @@ mod tests {
                 return;
             };
             let sent = packets.len();
-            let Some(bin) = open_or_skip("mjpeg", params, target(&device, &context)) else {
+            let Some(bin) = open_or_skip("mjpeg", params, target(&gpu)) else {
                 return;
             };
             assert_eq!(
@@ -1569,7 +1550,7 @@ mod tests {
         /// at the upload.
         #[test]
         fn an_odd_size_is_uploaded_as_bgra() {
-            let Some((device, context)) = crate::test_support::try_d3d11_device() else {
+            let Some(gpu) = crate::test_support::try_d3d11_gpu() else {
                 return;
             };
             let Some((params, packets)) =
@@ -1578,7 +1559,7 @@ mod tests {
                 return;
             };
             let sent = packets.len();
-            let Some(bin) = open_or_skip("odd", params, target(&device, &context)) else {
+            let Some(bin) = open_or_skip("odd", params, target(&gpu)) else {
                 return;
             };
             assert_eq!(bin.output_format(), Some(ffmpeg::format::Pixel::BGRA));
@@ -1596,7 +1577,7 @@ mod tests {
         /// back off the GPU.
         #[test]
         fn alpha_survives_onto_the_gpu() {
-            let Some((device, context)) = crate::test_support::try_d3d11_device() else {
+            let Some(gpu) = crate::test_support::try_d3d11_gpu() else {
                 return;
             };
             // Every 10-bit sample is 0x0202 = 514 of 1023: mid grey, neutral
@@ -1609,13 +1590,13 @@ mod tests {
             ) else {
                 return;
             };
-            let Some(bin) = open_or_skip("prores", params, target(&device, &context)) else {
+            let Some(bin) = open_or_skip("prores", params, target(&gpu)) else {
                 return;
             };
             assert_eq!(bin.path(), DecodePath::Software(SoftwareReason::Alpha));
             assert_eq!(bin.output_format(), Some(ffmpeg::format::Pixel::BGRA));
 
-            let download = D3d11Download::new("read-back", &device, context).unwrap();
+            let download = D3d11Download::new("read-back", &gpu).unwrap();
             let frames = run(bin, Some(Box::new(download)), packets).expect("ProRes decodes");
             let frame = frames.last().expect("a picture came out");
             assert_eq!(frame.format(), ffmpeg::format::Pixel::BGRA);
@@ -1639,14 +1620,14 @@ mod tests {
                 core::Interface,
             };
 
-            let Some((device, context)) = crate::test_support::try_d3d11_device() else {
+            let Some(gpu) = crate::test_support::try_d3d11_gpu() else {
                 return;
             };
             let Some((params, packets)) = ten_bit_hevc() else {
                 return;
             };
             let sent = packets.len();
-            let Some(bin) = open_or_skip("hevc10", params, target(&device, &context)) else {
+            let Some(bin) = open_or_skip("hevc10", params, target(&gpu)) else {
                 return;
             };
             assert_eq!(bin.path(), DecodePath::Hardware);
@@ -1685,16 +1666,14 @@ mod tests {
                 core::Interface,
             };
 
-            let Some((device, context)) = crate::test_support::try_d3d11_device() else {
+            let Some(gpu) = crate::test_support::try_d3d11_gpu() else {
                 return;
             };
             let Some((params, packets)) = ten_bit_hevc() else {
                 return;
             };
             let sent = packets.len();
-            let Some(bin) =
-                open_or_skip("hevc10", without_layout(params), target(&device, &context))
-            else {
+            let Some(bin) = open_or_skip("hevc10", without_layout(params), target(&gpu)) else {
                 return;
             };
             assert_eq!(bin.path(), DecodePath::Hardware);
@@ -1727,7 +1706,7 @@ mod tests {
         fn the_output_contract_is_the_layout_chosen_at_open() {
             use crate::contract::{PixelLayout, PixelLayoutSet};
 
-            let Some((device, context)) = crate::test_support::try_d3d11_device() else {
+            let Some(gpu) = crate::test_support::try_d3d11_gpu() else {
                 return;
             };
             let promised = |bin: &mut VideoDecodeBin| match bin.src_pads()[0].contract() {
@@ -1736,17 +1715,14 @@ mod tests {
             };
 
             let (params, _) = h264();
-            let Some(mut bin) = open_or_skip("h264", params.clone(), target(&device, &context))
-            else {
+            let Some(mut bin) = open_or_skip("h264", params.clone(), target(&gpu)) else {
                 return;
             };
             assert_eq!(promised(&mut bin), PixelLayoutSet::NV12);
 
-            let Some(mut undeclared) = open_or_skip(
-                "undeclared",
-                without_layout(params),
-                target(&device, &context),
-            ) else {
+            let Some(mut undeclared) =
+                open_or_skip("undeclared", without_layout(params), target(&gpu))
+            else {
                 return;
             };
             assert_eq!(
@@ -1757,7 +1733,7 @@ mod tests {
             let Some((params, _)) = bt2020_hevc() else {
                 return;
             };
-            let Some(mut bin) = open_or_skip("bt2020", params, target(&device, &context)) else {
+            let Some(mut bin) = open_or_skip("bt2020", params, target(&gpu)) else {
                 return;
             };
             assert_eq!(promised(&mut bin), PixelLayoutSet::BGRA);
@@ -1767,7 +1743,7 @@ mod tests {
         /// `D3d11ToneMap`, as `core/tone_map.rs` says it comes out.
         #[test]
         fn pq_comes_out_as_sdr_rgb() {
-            let Some((device, context)) = crate::test_support::try_d3d11_device() else {
+            let Some(gpu) = crate::test_support::try_d3d11_gpu() else {
                 return;
             };
             let Some((params, packets)) =
@@ -1776,13 +1752,13 @@ mod tests {
                 return;
             };
             let sent = packets.len();
-            let Some(bin) = open_or_skip("pq", params, target(&device, &context)) else {
+            let Some(bin) = open_or_skip("pq", params, target(&gpu)) else {
                 return;
             };
             assert_eq!(bin.path(), DecodePath::Hardware);
             assert_eq!(bin.output_format(), Some(ffmpeg::format::Pixel::BGRA));
 
-            let download = D3d11Download::new("read-back", &device, context).unwrap();
+            let download = D3d11Download::new("read-back", &gpu).unwrap();
             let frames = run(bin, Some(Box::new(download)), packets).expect("HEVC decodes");
             assert_eq!(frames.len(), sent, "every picture comes out");
             all_near(
@@ -1797,21 +1773,21 @@ mod tests {
         /// BT.709's — the colour every element downstream reads right.
         #[test]
         fn bt2020_comes_out_as_bt709_rgb() {
-            let Some((device, context)) = crate::test_support::try_d3d11_device() else {
+            let Some(gpu) = crate::test_support::try_d3d11_gpu() else {
                 return;
             };
             let Some((params, packets)) = bt2020_hevc() else {
                 return;
             };
             let sent = packets.len();
-            let Some(bin) = open_or_skip("hevc2020", params, target(&device, &context)) else {
+            let Some(bin) = open_or_skip("hevc2020", params, target(&gpu)) else {
                 return;
             };
             assert_eq!(bin.path(), DecodePath::Hardware);
             assert_eq!(bin.output_format(), Some(ffmpeg::format::Pixel::BGRA));
             let handle = bin.handle();
 
-            let download = D3d11Download::new("read-back", &device, context).unwrap();
+            let download = D3d11Download::new("read-back", &gpu).unwrap();
             let frames = run(bin, Some(Box::new(download)), packets).expect("HEVC decodes");
             assert_eq!(handle.path(), DecodePath::Hardware, "and it stayed there");
             assert_eq!(frames.len(), sent, "every picture comes out");
@@ -1831,14 +1807,14 @@ mod tests {
         /// the refusal readable from the handle.
         #[test]
         fn a_stream_the_hardware_refuses_is_decoded_in_software_instead() {
-            let Some((device, context)) = crate::test_support::try_d3d11_device() else {
+            let Some(gpu) = crate::test_support::try_d3d11_gpu() else {
                 return;
             };
             let Some((params, packets)) = refused_by_hardware() else {
                 return;
             };
             let sent = packets.len();
-            let Some(bin) = open_or_skip("vp9", params, target(&device, &context)) else {
+            let Some(bin) = open_or_skip("vp9", params, target(&gpu)) else {
                 return;
             };
             assert_eq!(bin.path(), DecodePath::Hardware, "nothing said otherwise");
@@ -1862,13 +1838,13 @@ mod tests {
         /// for comes out, rather than every one decoded to reach it.
         #[test]
         fn a_replacement_keeps_the_preroll_it_replaced() {
-            let Some((device, context)) = crate::test_support::try_d3d11_device() else {
+            let Some(gpu) = crate::test_support::try_d3d11_gpu() else {
                 return;
             };
             let Some((params, packets)) = refused_by_hardware() else {
                 return;
             };
-            let Some(mut bin) = open_or_skip("vp9", params, target(&device, &context)) else {
+            let Some(mut bin) = open_or_skip("vp9", params, target(&gpu)) else {
                 return;
             };
             let frames = collect(&mut bin, None);
@@ -1899,20 +1875,18 @@ mod tests {
         use super::*;
         use crate::test_support::try_encoded_packets;
 
-        fn target(device: &ID3D12Device) -> DecodeTarget {
-            DecodeTarget::D3d12 {
-                device: device.clone(),
-            }
+        fn target(gpu: &D3d12Gpu) -> DecodeTarget {
+            DecodeTarget::D3d12 { gpu: gpu.clone() }
         }
 
         #[test]
         fn h264_decodes_on_the_gpu() {
-            let Some(device) = crate::test_support::try_d3d12_device() else {
+            let Some(gpu) = crate::test_support::try_d3d12_gpu() else {
                 return;
             };
             let (params, packets) = h264();
             let sent = packets.len();
-            let Some(bin) = open_or_skip("h264", params, target(&device)) else {
+            let Some(bin) = open_or_skip("h264", params, target(&gpu)) else {
                 return;
             };
             assert_eq!(bin.path(), DecodePath::Hardware);
@@ -1930,7 +1904,7 @@ mod tests {
         /// which this target has nowhere to keep — and arrives as NV12.
         #[test]
         fn alpha_is_not_kept_and_is_no_reason_of_its_own() {
-            let Some(device) = crate::test_support::try_d3d12_device() else {
+            let Some(gpu) = crate::test_support::try_d3d12_gpu() else {
                 return;
             };
             let Some((params, packets)) = try_encoded_packets(
@@ -1942,7 +1916,7 @@ mod tests {
                 return;
             };
             let sent = packets.len();
-            let Some(bin) = open_or_skip("prores", params, target(&device)) else {
+            let Some(bin) = open_or_skip("prores", params, target(&gpu)) else {
                 return;
             };
             assert_eq!(
@@ -1963,7 +1937,7 @@ mod tests {
         /// refused when the bin is opened rather than at the upload.
         #[test]
         fn an_odd_size_in_software_is_refused() {
-            let Some(device) = crate::test_support::try_d3d12_device() else {
+            let Some(gpu) = crate::test_support::try_d3d12_gpu() else {
                 return;
             };
             let Some((params, _)) =
@@ -1971,7 +1945,7 @@ mod tests {
             else {
                 return;
             };
-            let error = VideoDecodeBin::open("odd", params, target(&device), None)
+            let error = VideoDecodeBin::open("odd", params, target(&gpu), None)
                 .err()
                 .expect("NV12 has no odd side");
             assert!(
@@ -1985,14 +1959,14 @@ mod tests {
 
         #[test]
         fn a_stream_the_hardware_refuses_is_decoded_in_software_instead() {
-            let Some(device) = crate::test_support::try_d3d12_device() else {
+            let Some(gpu) = crate::test_support::try_d3d12_gpu() else {
                 return;
             };
             let Some((params, packets)) = refused_by_hardware() else {
                 return;
             };
             let sent = packets.len();
-            let Some(bin) = open_or_skip("vp9", params, target(&device)) else {
+            let Some(bin) = open_or_skip("vp9", params, target(&gpu)) else {
                 return;
             };
             let handle = bin.handle();

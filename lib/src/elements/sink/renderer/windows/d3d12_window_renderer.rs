@@ -1412,7 +1412,7 @@ mod tests {
     /// video has: FFmpeg's D3D12 device context wants one, and a software
     /// adapter such as WARP, all a CI runner has, is not.
     fn upload(gpu: &D3d12Gpu) -> Option<D3d12Upload> {
-        match D3d12Upload::new("upload", gpu.device()) {
+        match D3d12Upload::new("upload", gpu) {
             Ok(upload) => Some(upload),
             Err(D3d12UploadError::HwDeviceInit(code)) => {
                 eprintln!("skipping: this device does not do video (code {code})");

@@ -32,7 +32,9 @@ use crate::{
     elements::{AppSource, AppSourceHandle},
     error::{D3d11FrameWrapError, D3d11SharedDeviceError, Result},
     pad::SrcPad,
-    platform::windows::{d3d11::protect_shared_device, d3d11va::wrap_d3d11_texture},
+    platform::windows::{
+        d3d11::protect_shared_device, d3d11_gpu::D3d11Gpu, d3d11va::wrap_d3d11_texture,
+    },
     pool::UnboundObjectPool,
     pp_log::{PpLog, pp_info},
 };
@@ -198,10 +200,9 @@ unsafe impl Send for Import {}
 unsafe impl Sync for Import {}
 
 impl D3d11SharedTextureSource {
-    /// `device` must be the same `ID3D11Device`, and `context` the same
-    /// shared immediate context, every other D3D11 element in this pipeline
-    /// uses — the frames this produces are that device's, and the copy is a
-    /// context-level call.
+    /// `gpu` must be the [`D3d11Gpu`] every other D3D11 element in this
+    /// pipeline shares — the frames this produces are its device's, and the
+    /// copy is a context-level call under its lock.
     ///
     /// `width`/`height` are what every pushed texture must be and what the
     /// frames coming out are. `capacity` bounds how many frames may sit
@@ -209,12 +210,12 @@ impl D3d11SharedTextureSource {
     /// as [`AppSource::new`]'s own does.
     pub fn new(
         name: impl Into<String>,
-        device: &ID3D11Device,
-        context: Arc<Mutex<ID3D11DeviceContext>>,
+        gpu: &D3d11Gpu,
         width: u32,
         height: u32,
         capacity: usize,
     ) -> std::result::Result<(Self, D3d11SharedTextureHandle), D3d11SharedTextureSourceError> {
+        let (device, context) = (gpu.device(), gpu.context());
         // Pushed from the producer's thread and drained on the source's own,
         // so the device has to be usable from more than the thread that made
         // it before any command is issued.
@@ -494,7 +495,10 @@ mod tests {
 
     use super::*;
     use crate::{
-        element::Sink, elements::D3d11Download, pipeline::Pipeline, test_support::try_d3d11_device,
+        element::Sink,
+        elements::D3d11Download,
+        pipeline::Pipeline,
+        test_support::{try_d3d11_device, try_d3d11_gpu},
     };
 
     /// Submits everything queued on `context` and waits until the GPU has
@@ -605,12 +609,11 @@ mod tests {
         let Some((producer, producer_context)) = try_d3d11_device() else {
             return;
         };
-        let Some((device, context)) = try_d3d11_device() else {
+        let Some(gpu) = try_d3d11_gpu() else {
             return;
         };
-        let (_source, handle) =
-            D3d11SharedTextureSource::new("shared", &device, context.clone(), 8, 8, 4)
-                .expect("D3d11SharedTextureSource::new should succeed");
+        let (_source, handle) = D3d11SharedTextureSource::new("shared", &gpu, 8, 8, 4)
+            .expect("D3d11SharedTextureSource::new should succeed");
 
         let description = D3D11_TEXTURE2D_DESC {
             Width: 8,
@@ -665,8 +668,8 @@ mod tests {
             .import
             .copy(shared.0 as isize, None)
             .expect("importing a released keyed-mutex texture must succeed");
-        let mut download = D3d11Download::new("download", &device, context)
-            .expect("D3d11Download::new should succeed");
+        let mut download =
+            D3d11Download::new("download", &gpu).expect("D3d11Download::new should succeed");
         let received = capture(&mut download);
         download.consume(frame).expect("download");
         let received = received.lock().unwrap();
@@ -687,12 +690,11 @@ mod tests {
         let Some((producer, producer_context)) = try_d3d11_device() else {
             return;
         };
-        let Some((device, context)) = try_d3d11_device() else {
+        let Some(gpu) = try_d3d11_gpu() else {
             return;
         };
-        let (_source, handle) =
-            D3d11SharedTextureSource::new("shared", &device, context.clone(), 8, 8, 4)
-                .expect("D3d11SharedTextureSource::new should succeed");
+        let (_source, handle) = D3d11SharedTextureSource::new("shared", &gpu, 8, 8, 4)
+            .expect("D3d11SharedTextureSource::new should succeed");
 
         // BGRA byte order, so this is a strong red at full alpha.
         let (_producer_texture, shared) =
@@ -709,8 +711,8 @@ mod tests {
         assert_eq!((video.width(), video.height()), (8, 8));
         assert_eq!(video.pts(), Some(7), "the pushed timestamp is kept");
 
-        let mut download = D3d11Download::new("download", &device, context)
-            .expect("D3d11Download::new should succeed");
+        let mut download =
+            D3d11Download::new("download", &gpu).expect("D3d11Download::new should succeed");
         let received = capture(&mut download);
         download
             .consume(frame)
@@ -735,10 +737,10 @@ mod tests {
         let Some((producer, producer_context)) = try_d3d11_device() else {
             return;
         };
-        let Some((device, context)) = try_d3d11_device() else {
+        let Some(gpu) = try_d3d11_gpu() else {
             return;
         };
-        let (_source, handle) = D3d11SharedTextureSource::new("shared", &device, context, 8, 8, 1)
+        let (_source, handle) = D3d11SharedTextureSource::new("shared", &gpu, 8, 8, 1)
             .expect("D3d11SharedTextureSource::new should succeed");
 
         let (_producer_texture, shared) =
@@ -764,10 +766,10 @@ mod tests {
         let Some((producer, producer_context)) = try_d3d11_device() else {
             return;
         };
-        let Some((device, context)) = try_d3d11_device() else {
+        let Some(gpu) = try_d3d11_gpu() else {
             return;
         };
-        let (_source, handle) = D3d11SharedTextureSource::new("shared", &device, context, 8, 8, 4)
+        let (_source, handle) = D3d11SharedTextureSource::new("shared", &gpu, 8, 8, 4)
             .expect("D3d11SharedTextureSource::new should succeed");
 
         let (_producer_texture, shared) =
@@ -793,10 +795,10 @@ mod tests {
     /// nothing must come back as an error rather than a panic.
     #[test]
     fn a_handle_that_names_no_shared_texture_is_refused() {
-        let Some((device, context)) = try_d3d11_device() else {
+        let Some(gpu) = try_d3d11_gpu() else {
             return;
         };
-        let (_source, handle) = D3d11SharedTextureSource::new("shared", &device, context, 8, 8, 4)
+        let (_source, handle) = D3d11SharedTextureSource::new("shared", &gpu, 8, 8, 4)
             .expect("D3d11SharedTextureSource::new should succeed");
 
         let error = handle
@@ -818,10 +820,10 @@ mod tests {
         let Some((producer, producer_context)) = try_d3d11_device() else {
             return;
         };
-        let Some((device, context)) = try_d3d11_device() else {
+        let Some(gpu) = try_d3d11_gpu() else {
             return;
         };
-        let (source, handle) = D3d11SharedTextureSource::new("shared", &device, context, 8, 8, 4)
+        let (source, handle) = D3d11SharedTextureSource::new("shared", &gpu, 8, 8, 4)
             .expect("D3d11SharedTextureSource::new should succeed");
 
         let frames = Arc::new(AtomicUsize::new(0));

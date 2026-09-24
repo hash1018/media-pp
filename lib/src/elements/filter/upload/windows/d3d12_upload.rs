@@ -3,7 +3,6 @@ use std::sync::Arc;
 use crate::pp_log::{PpLog, pp_error, pp_info};
 use ffmpeg_next::{self as ffmpeg, ffi};
 use thiserror::Error as ThisError;
-use windows::Win32::Graphics::Direct3D12::ID3D12Device;
 
 use crate::{
     buffer::MediaBuffer,
@@ -15,6 +14,7 @@ use crate::{
     pad::SrcPad,
     platform::{
         ffmpeg::AvBufferRef,
+        windows::d3d12_gpu::D3d12Gpu,
         windows::d3d12va::{create_hw_device_ctx, create_hw_frames_ctx},
     },
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
@@ -125,18 +125,18 @@ pub struct D3d12Upload {
 unsafe impl Send for D3d12Upload {}
 
 impl D3d12Upload {
-    /// The D3D12VA hardware context owns an independent COM reference to
-    /// `device`, so the caller does not need to keep its handle alive. It
-    /// must be the same underlying `ID3D12Device` your
-    /// [`crate::elements::D3d12Renderer`] was created
-    /// with — same requirement [`crate::elements::D3d12Decoder::new`]
-    /// documents, for the same reason: frames landing on a different
-    /// device than the one the renderer submits to would make the
-    /// zero-copy path invalid.
+    /// `gpu` must be the [`D3d12Gpu`] every other D3D12 element in this
+    /// pipeline shares, its renderer included; the D3D12VA hardware context
+    /// owns an independent COM reference to its device, so the caller does
+    /// not need to keep `gpu` alive. Same requirement
+    /// [`crate::elements::D3d12Decoder::new`] documents, for the same reason:
+    /// frames landing on a different device than the one the renderer
+    /// submits to would make the zero-copy path invalid.
     pub fn new(
         name: impl Into<String>,
-        device: &ID3D12Device,
+        gpu: &D3d12Gpu,
     ) -> std::result::Result<Self, D3d12UploadError> {
+        let device = gpu.device();
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::D3d12Upload, &name, None);
 

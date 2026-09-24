@@ -32,6 +32,7 @@ use crate::{
     pad::SrcPad,
     platform::windows::{
         d3d11::protect_shared_device,
+        d3d11_gpu::D3d11Gpu,
         d3d11va::{d3d11va_texture, wrap_d3d11_texture},
     },
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
@@ -80,13 +81,6 @@ pub enum D3d11ScalerError {
          pipeline must share exactly one device for zero-copy to be valid"
     )]
     DeviceMismatch,
-
-    /// The supplied immediate context belongs to another D3D11 device.
-    #[error(
-        "the supplied ID3D11DeviceContext belongs to a different ID3D11Device than this \
-         D3d11Scaler"
-    )]
-    ContextDeviceMismatch,
 
     /// Output dimensions are zero.
     #[error("D3d11Scaler output dimensions must be non-zero, got {width}x{height}")]
@@ -250,12 +244,11 @@ impl D3d11ScalerFormat {
 ///
 /// `VideoProcessorBlt` and the processor's own setters are context-level
 /// calls on `ID3D11VideoContext`, which is the shared immediate context
-/// under another interface — not a separate one. So `context` must be the
-/// exact same `Arc<Mutex<ID3D11DeviceContext>>` every other context-touching
-/// D3D11 element in this pipeline shares — [`D3d11Gpu::context`](crate::elements::D3d11Gpu::context),
-/// which is the pipeline device's one immediate context behind the one
-/// lock every element shares — and this element holds that
-/// lock for a whole configure-and-`Blt` sequence, for the same reason
+/// under another interface — not a separate one. So its GPU must be the
+/// [`D3d11Gpu`] every other D3D11 element in this pipeline shares, whose
+/// [`D3d11Gpu::context`] is the device's one immediate context behind the
+/// one lock every element shares — and this element holds that lock for a
+/// whole configure-and-`Blt` sequence, for the same reason
 /// [`crate::elements::D3d11Download`] holds it across its own copy and map.
 pub struct D3d11Scaler {
     pp_log: PpLog,
@@ -380,9 +373,8 @@ fn create_processor_input_texture(
 }
 
 impl D3d11Scaler {
-    /// `device` must be the same `ID3D11Device`, and `context` the same
-    /// shared immediate context, every other D3D11 element in this pipeline
-    /// uses — see this type's own docs on why.
+    /// `gpu` must be the [`D3d11Gpu`] every other D3D11 element in this
+    /// pipeline shares — see this type's own docs on why.
     ///
     /// `format`, `width`, and `height` are what every output frame will be;
     /// the input side is learned from whatever frames actually arrive, so
@@ -392,8 +384,7 @@ impl D3d11Scaler {
     /// `dst_format` that way.
     pub fn new(
         name: impl Into<String>,
-        device: &ID3D11Device,
-        context: Arc<Mutex<ID3D11DeviceContext>>,
+        gpu: &D3d11Gpu,
         format: D3d11ScalerFormat,
         width: u32,
         height: u32,
@@ -401,13 +392,7 @@ impl D3d11Scaler {
         if width == 0 || height == 0 {
             return Err(D3d11ScalerError::InvalidOutputDimensions { width, height });
         }
-        Self::with_output(
-            name,
-            device,
-            context,
-            format,
-            OutputSize::Fixed { width, height },
-        )
+        Self::with_output(name, gpu, format, OutputSize::Fixed { width, height })
     }
 
     /// Converts a frame's layout on the video processor and leaves its size
@@ -427,43 +412,29 @@ impl D3d11Scaler {
     /// for a pure resize, not this one's.
     pub fn to_format(
         name: impl Into<String>,
-        device: &ID3D11Device,
-        context: Arc<Mutex<ID3D11DeviceContext>>,
+        gpu: &D3d11Gpu,
         format: D3d11ScalerFormat,
     ) -> std::result::Result<Self, D3d11ScalerError> {
-        Self::with_output(name, device, context, format, OutputSize::OfTheInput)
+        Self::with_output(name, gpu, format, OutputSize::OfTheInput)
     }
 
     fn with_output(
         name: impl Into<String>,
-        device: &ID3D11Device,
-        context: Arc<Mutex<ID3D11DeviceContext>>,
+        gpu: &D3d11Gpu,
         format: D3d11ScalerFormat,
         size: OutputSize,
     ) -> std::result::Result<Self, D3d11ScalerError> {
+        let (device, context) = (gpu.device(), gpu.context());
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::D3d11Scaler, &name, None);
         // This element sits behind a `Queue` more often than not, so the
         // device has to be usable from a thread other than the one that
         // created it before any command is issued.
         protect_shared_device(device)?;
-        // The caller's own mistake is diagnosed before the adapter's
-        // capabilities are: a context belonging to another device is
-        // reported as `ContextDeviceMismatch` even on hardware with no
-        // video processor, where casting the device first would mask it as
-        // a bare `E_NOINTERFACE`.
-        let video_context: ID3D11VideoContext = {
-            let context = context
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            // SAFETY: `context` is a live immediate-context COM interface;
-            // `GetDevice` returns an owned reference to its creating device.
-            let context_device = unsafe { context.GetDevice() }?;
-            if context_device.as_raw() != device.as_raw() {
-                return Err(D3d11ScalerError::ContextDeviceMismatch);
-            }
-            context.cast()?
-        };
+        let video_context: ID3D11VideoContext = context
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .cast()?;
         let video_device: ID3D11VideoDevice = device.cast()?;
         // Built for a layout, it puts out that one; `Preserve` keeps the
         // input's, whichever that is.
@@ -855,33 +826,7 @@ mod tests {
 
     use super::*;
     use crate::elements::{D3d11Download, D3d11Upload};
-    use crate::test_support::try_d3d11_device as try_device;
-
-    /// A filter is the classic far side of a `Queue`, so a device that
-    /// promised single-threaded use has to be refused where it is handed
-    /// over, not where the race would show up.
-    #[test]
-    fn rejects_a_single_threaded_device() {
-        let Some(device) = crate::test_support::try_single_threaded_d3d11_device() else {
-            return;
-        };
-        // SAFETY: returns the one immediate context owned by this live device.
-        let context = unsafe { device.GetImmediateContext() }.expect("immediate context");
-        let result = D3d11Scaler::new(
-            "scale",
-            &device,
-            Arc::new(Mutex::new(context)),
-            D3d11ScalerFormat::Preserve,
-            160,
-            120,
-        );
-        assert!(matches!(
-            result,
-            Err(D3d11ScalerError::SharedDevice(
-                D3d11SharedDeviceError::SingleThreaded
-            ))
-        ));
-    }
+    use crate::test_support::try_d3d11_gpu as try_device;
 
     /// The same device, but only when it can actually run a video
     /// processor. `D3d11Scaler` scales through
@@ -890,13 +835,14 @@ mod tests {
     /// perfectly usable `ID3D11Device` whose cast to those interfaces fails
     /// with `E_NOINTERFACE`. That belongs in the skip check rather than in
     /// each test's `D3d11Scaler::new(..).expect(..)`.
-    fn try_video_device() -> Option<(ID3D11Device, Arc<Mutex<ID3D11DeviceContext>>)> {
-        let (device, context) = try_device()?;
-        if let Err(error) = device.cast::<ID3D11VideoDevice>() {
+    fn try_video_device() -> Option<D3d11Gpu> {
+        let gpu = try_device()?;
+        if let Err(error) = gpu.device().cast::<ID3D11VideoDevice>() {
             eprintln!("skipping: this device has no ID3D11VideoDevice: {error}");
             return None;
         }
         let supported = {
+            let context = gpu.context();
             let context = context.lock().unwrap();
             context.cast::<ID3D11VideoContext>()
         };
@@ -904,7 +850,7 @@ mod tests {
             eprintln!("skipping: this context has no ID3D11VideoContext: {error}");
             return None;
         }
-        Some((device, context))
+        Some(gpu)
     }
 
     /// A flat BGRA texture: after any interpolation every output pixel must
@@ -1001,9 +947,10 @@ mod tests {
     /// timestamp and the tags this element stamps.
     #[test]
     fn a_repeated_input_is_scaled_once() {
-        let Some((device, context)) = try_video_device() else {
+        let Some(gpu) = try_video_device() else {
             return;
         };
+        let device = gpu.device().clone();
         let source = frame(
             bgra_texture(&device, 16, 16, [20, 40, 60, 255], 1),
             16,
@@ -1011,15 +958,8 @@ mod tests {
             100,
         );
         let repeat = repeat_of(&source, 200);
-        let mut scaler = D3d11Scaler::new(
-            "scaler",
-            &device,
-            context,
-            D3d11ScalerFormat::Preserve,
-            8,
-            8,
-        )
-        .expect("D3d11Scaler::new should succeed");
+        let mut scaler = D3d11Scaler::new("scaler", &gpu, D3d11ScalerFormat::Preserve, 8, 8)
+            .expect("D3d11Scaler::new should succeed");
         let received = capture(&mut scaler);
 
         scaler.consume(source).expect("scale the first frame");
@@ -1051,14 +991,8 @@ mod tests {
 
     /// One flat NV12 GPU frame, built through `D3d11Upload` so the input is
     /// a texture this crate really produces rather than a hand-made one.
-    fn nv12_frame(
-        device: &ID3D11Device,
-        width: u32,
-        height: u32,
-        luma: u8,
-        pts: i64,
-    ) -> MediaBuffer {
-        let mut upload = D3d11Upload::new("upload", device);
+    fn nv12_frame(gpu: &D3d11Gpu, width: u32, height: u32, luma: u8, pts: i64) -> MediaBuffer {
+        let mut upload = D3d11Upload::new("upload", gpu);
         let uploaded = capture(&mut upload);
         let mut cpu = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::NV12, width, height);
         cpu.set_pts(Some(pts));
@@ -1072,8 +1006,7 @@ mod tests {
     /// only reads BGRA, and the point of the NV12 test is that the surface
     /// never became BGRA.
     fn read_nv12(
-        device: &ID3D11Device,
-        context: &Arc<Mutex<ID3D11DeviceContext>>,
+        gpu: &D3d11Gpu,
         texture: &ID3D11Texture2D,
         width: u32,
         height: u32,
@@ -1097,12 +1030,13 @@ mod tests {
         // SAFETY: `desc` describes a valid CPU-readable staging texture and
         // `staging` is a live out-parameter; no initial data is supplied.
         unsafe {
-            device
+            gpu.device()
                 .CreateTexture2D(&desc, None, Some(&mut staging))
                 .expect("CreateTexture2D(NV12 staging) failed");
         }
         let staging = staging.expect("CreateTexture2D succeeded without producing a texture");
 
+        let context = gpu.context();
         let context = context.lock().unwrap();
         let (mut luma, mut chroma) = (Vec::new(), Vec::new());
         // SAFETY: source and staging textures share dimensions/format/device.
@@ -1140,9 +1074,10 @@ mod tests {
     /// part checkable at all.
     #[test]
     fn a_bgra_frame_is_resized_on_the_gpu_and_keeps_its_pts() {
-        let Some((device, context)) = try_video_device() else {
+        let Some(gpu) = try_video_device() else {
             return;
         };
+        let device = gpu.device().clone();
         let color = [20u8, 40, 60, 255];
         let mut source = frame(bgra_texture(&device, 16, 16, color, 1), 16, 16, 777);
         let MediaBuffer::Video(source_frame) = &mut source else {
@@ -1152,17 +1087,10 @@ mod tests {
         source_frame.set_color_space(ffmpeg::color::Space::BT709);
         source_frame.set_color_range(ffmpeg::color::Range::MPEG);
 
-        let mut scaler = D3d11Scaler::new(
-            "scaler",
-            &device,
-            context.clone(),
-            D3d11ScalerFormat::Preserve,
-            8,
-            8,
-        )
-        .expect("D3d11Scaler::new should succeed");
-        let mut download = D3d11Download::new("download", &device, context)
-            .expect("D3d11Download::new should succeed");
+        let mut scaler = D3d11Scaler::new("scaler", &gpu, D3d11ScalerFormat::Preserve, 8, 8)
+            .expect("D3d11Scaler::new should succeed");
+        let mut download =
+            D3d11Download::new("download", &gpu).expect("D3d11Download::new should succeed");
         let received = capture(&mut download);
         scaler.src_pads()[0].link(Box::new(download));
 
@@ -1200,20 +1128,13 @@ mod tests {
     /// silent conversion would cost a color round trip per frame.
     #[test]
     fn an_nv12_frame_is_resized_and_stays_nv12() {
-        let Some((device, context)) = try_video_device() else {
+        let Some(gpu) = try_video_device() else {
             return;
         };
-        let source = nv12_frame(&device, 32, 32, 200, 5);
+        let source = nv12_frame(&gpu, 32, 32, 200, 5);
 
-        let mut scaler = D3d11Scaler::new(
-            "scaler",
-            &device,
-            context.clone(),
-            D3d11ScalerFormat::Preserve,
-            16,
-            16,
-        )
-        .expect("D3d11Scaler::new should succeed");
+        let mut scaler = D3d11Scaler::new("scaler", &gpu, D3d11ScalerFormat::Preserve, 16, 16)
+            .expect("D3d11Scaler::new should succeed");
         let received = capture(&mut scaler);
         scaler.consume(source).expect("scale");
 
@@ -1241,7 +1162,7 @@ mod tests {
             "the scaler changed the surface format"
         );
 
-        let (luma, chroma) = read_nv12(&device, &context, &texture, 16, 16);
+        let (luma, chroma) = read_nv12(&gpu, &texture, 16, 16);
         assert!(
             luma.iter().all(|&sample| sample == 200),
             "a flat luma plane must stay flat through the resize"
@@ -1256,9 +1177,10 @@ mod tests {
     /// to resize the slice the frame actually names — not slice zero.
     #[test]
     fn scales_only_the_selected_texture_array_slice() {
-        let Some((device, context)) = try_video_device() else {
+        let Some(gpu) = try_video_device() else {
             return;
         };
+        let device = gpu.device().clone();
         let color = [20u8, 40, 60, 255];
         let mut source = frame(bgra_texture(&device, 16, 16, color, 2), 16, 16, 0);
         let MediaBuffer::Video(video) = &mut source else {
@@ -1277,17 +1199,10 @@ mod tests {
             .data[1] = std::ptr::dangling_mut::<u8>();
         }
 
-        let mut scaler = D3d11Scaler::new(
-            "scaler",
-            &device,
-            context.clone(),
-            D3d11ScalerFormat::Preserve,
-            8,
-            8,
-        )
-        .expect("D3d11Scaler::new should succeed");
-        let mut download = D3d11Download::new("download", &device, context)
-            .expect("D3d11Download::new should succeed");
+        let mut scaler = D3d11Scaler::new("scaler", &gpu, D3d11ScalerFormat::Preserve, 8, 8)
+            .expect("D3d11Scaler::new should succeed");
+        let mut download =
+            D3d11Download::new("download", &gpu).expect("D3d11Download::new should succeed");
         let received = capture(&mut download);
         scaler.src_pads()[0].link(Box::new(download));
         scaler.consume(source).expect("scale");
@@ -1308,26 +1223,20 @@ mod tests {
     /// and `SwScaler` have for their own scaling state.
     #[test]
     fn rebuilds_its_processor_when_the_input_changes_mid_stream() {
-        let Some((device, context)) = try_video_device() else {
+        let Some(gpu) = try_video_device() else {
             return;
         };
+        let device = gpu.device().clone();
         let first = frame(
             bgra_texture(&device, 16, 16, [10, 20, 30, 255], 1),
             16,
             16,
             0,
         );
-        let second = nv12_frame(&device, 32, 16, 180, 1);
+        let second = nv12_frame(&gpu, 32, 16, 180, 1);
 
-        let mut scaler = D3d11Scaler::new(
-            "scaler",
-            &device,
-            context,
-            D3d11ScalerFormat::Preserve,
-            8,
-            8,
-        )
-        .expect("D3d11Scaler::new should succeed");
+        let mut scaler = D3d11Scaler::new("scaler", &gpu, D3d11ScalerFormat::Preserve, 8, 8)
+            .expect("D3d11Scaler::new should succeed");
         let received = capture(&mut scaler);
         scaler.consume(first).expect("the first frame must scale");
         scaler
@@ -1351,15 +1260,14 @@ mod tests {
     /// is what the test above asserts a scaler given a size still does.
     #[test]
     fn a_layout_only_scaler_keeps_each_frames_own_size() {
-        let Some((device, context)) = try_video_device() else {
+        let Some(gpu) = try_video_device() else {
             return;
         };
-        let first = nv12_frame(&device, 16, 16, 180, 0);
-        let second = nv12_frame(&device, 32, 16, 180, 1);
+        let first = nv12_frame(&gpu, 16, 16, 180, 0);
+        let second = nv12_frame(&gpu, 32, 16, 180, 1);
 
-        let mut scaler =
-            D3d11Scaler::to_format("scaler", &device, context, D3d11ScalerFormat::Bgra)
-                .expect("D3d11Scaler::to_format should succeed");
+        let mut scaler = D3d11Scaler::to_format("scaler", &gpu, D3d11ScalerFormat::Bgra)
+            .expect("D3d11Scaler::to_format should succeed");
         let received = capture(&mut scaler);
         scaler.consume(first).expect("the first size");
         scaler.consume(second).expect("and the next one");
@@ -1386,22 +1294,16 @@ mod tests {
     /// before the video processor ever sees them.
     #[test]
     fn a_cpu_frame_and_a_foreign_device_frame_are_typed_errors() {
-        let Some((device, context)) = try_video_device() else {
+        let Some(gpu) = try_video_device() else {
             return;
         };
-        let Some((other_device, _other_context)) = try_video_device() else {
+        let Some(other) = try_video_device() else {
             return;
         };
+        let other_device = other.device().clone();
 
-        let mut scaler = D3d11Scaler::new(
-            "scaler",
-            &device,
-            context,
-            D3d11ScalerFormat::Preserve,
-            8,
-            8,
-        )
-        .expect("D3d11Scaler::new should succeed");
+        let mut scaler = D3d11Scaler::new("scaler", &gpu, D3d11ScalerFormat::Preserve, 8, 8)
+            .expect("D3d11Scaler::new should succeed");
         let _received = capture(&mut scaler);
 
         let error = scaler
@@ -1438,20 +1340,13 @@ mod tests {
     /// an `E_INVALIDARG` from somewhere inside the D3D11 call sequence.
     #[test]
     fn an_odd_nv12_output_size_is_a_typed_error() {
-        let Some((device, context)) = try_video_device() else {
+        let Some(gpu) = try_video_device() else {
             return;
         };
-        let source = nv12_frame(&device, 32, 32, 200, 0);
+        let source = nv12_frame(&gpu, 32, 32, 200, 0);
 
-        let mut scaler = D3d11Scaler::new(
-            "scaler",
-            &device,
-            context,
-            D3d11ScalerFormat::Preserve,
-            15,
-            15,
-        )
-        .expect("D3d11Scaler::new should succeed");
+        let mut scaler = D3d11Scaler::new("scaler", &gpu, D3d11ScalerFormat::Preserve, 15, 15)
+            .expect("D3d11Scaler::new should succeed");
         let _received = capture(&mut scaler);
         let error = scaler
             .consume(source)
@@ -1462,49 +1357,21 @@ mod tests {
         );
     }
 
-    /// Both of these reject their arguments before `D3d11Scaler::new` casts
-    /// to the video interfaces, so they take a plain `try_device` and hold
+    /// This rejects its arguments before `D3d11Scaler::new` casts to the
+    /// video interfaces, so it takes a plain `try_device` and holds
     /// on an adapter with no video processor too — which is exactly where a
     /// check placed after the cast would report `E_NOINTERFACE` instead.
     #[test]
     fn rejects_zero_output_dimensions_before_allocating_a_texture() {
-        let Some((device, context)) = try_device() else {
+        let Some(gpu) = try_device() else {
             return;
         };
         assert!(matches!(
-            D3d11Scaler::new(
-                "scaler",
-                &device,
-                context,
-                D3d11ScalerFormat::Preserve,
-                0,
-                8
-            ),
+            D3d11Scaler::new("scaler", &gpu, D3d11ScalerFormat::Preserve, 0, 8),
             Err(D3d11ScalerError::InvalidOutputDimensions {
                 width: 0,
                 height: 8
             })
-        ));
-    }
-
-    #[test]
-    fn rejects_a_context_from_another_device_at_construction() {
-        let Some((device, _context)) = try_device() else {
-            return;
-        };
-        let Some((_other_device, other_context)) = try_device() else {
-            return;
-        };
-        assert!(matches!(
-            D3d11Scaler::new(
-                "scaler",
-                &device,
-                other_context,
-                D3d11ScalerFormat::Preserve,
-                8,
-                8
-            ),
-            Err(D3d11ScalerError::ContextDeviceMismatch)
         ));
     }
 
@@ -1529,23 +1396,16 @@ mod tests {
     /// instead, and a wrong matrix would tint it.
     #[test]
     fn an_nv12_frame_converts_to_bgra_on_the_way_through() {
-        let Some((device, context)) = try_video_device() else {
+        let Some(gpu) = try_video_device() else {
             return;
         };
         // 235 / neutral chroma: limited-range white.
-        let source = nv12_frame(&device, 32, 32, 235, 9);
+        let source = nv12_frame(&gpu, 32, 32, 235, 9);
 
-        let mut scaler = D3d11Scaler::new(
-            "scaler",
-            &device,
-            context.clone(),
-            D3d11ScalerFormat::Bgra,
-            16,
-            16,
-        )
-        .expect("D3d11Scaler::new should succeed");
-        let mut download = D3d11Download::new("download", &device, context)
-            .expect("D3d11Download::new should succeed");
+        let mut scaler = D3d11Scaler::new("scaler", &gpu, D3d11ScalerFormat::Bgra, 16, 16)
+            .expect("D3d11Scaler::new should succeed");
+        let mut download =
+            D3d11Download::new("download", &gpu).expect("D3d11Download::new should succeed");
         let received = capture(&mut download);
         scaler.src_pads()[0].link(Box::new(download));
 
@@ -1580,21 +1440,15 @@ mod tests {
     /// 235 out.
     #[test]
     fn a_bgra_frame_converts_to_nv12_on_the_way_through() {
-        let Some((device, context)) = try_video_device() else {
+        let Some(gpu) = try_video_device() else {
             return;
         };
+        let device = gpu.device().clone();
         let white = [255u8, 255, 255, 255];
         let source = frame(bgra_texture(&device, 16, 16, white, 1), 16, 16, 3);
 
-        let mut scaler = D3d11Scaler::new(
-            "scaler",
-            &device,
-            context.clone(),
-            D3d11ScalerFormat::Nv12,
-            8,
-            8,
-        )
-        .expect("D3d11Scaler::new should succeed");
+        let mut scaler = D3d11Scaler::new("scaler", &gpu, D3d11ScalerFormat::Nv12, 8, 8)
+            .expect("D3d11Scaler::new should succeed");
         let received = capture(&mut scaler);
         scaler.consume(source).expect("convert");
 
@@ -1618,7 +1472,7 @@ mod tests {
             "asking for Nv12 must produce an NV12 surface"
         );
 
-        let (luma, chroma) = read_nv12(&device, &context, &texture, 8, 8);
+        let (luma, chroma) = read_nv12(&gpu, &texture, 8, 8);
         for (index, sample) in luma.iter().enumerate() {
             assert_close(*sample, 235, &format!("luma sample {index}"));
         }
@@ -1632,13 +1486,13 @@ mod tests {
     /// description from exactly these.
     #[test]
     fn a_converted_frame_is_retagged_and_a_resized_one_is_not() {
-        let Some((device, context)) = try_video_device() else {
+        let Some(gpu) = try_video_device() else {
             return;
         };
 
         // Converted: the source's BT.709/limited tags describe Y'CbCr, and
         // the output is RGB, so they are replaced rather than carried.
-        let mut source = nv12_frame(&device, 32, 32, 128, 0);
+        let mut source = nv12_frame(&gpu, 32, 32, 128, 0);
         let MediaBuffer::Video(source_frame) = &mut source else {
             unreachable!("nv12_frame always returns a Video buffer");
         };
@@ -1646,15 +1500,8 @@ mod tests {
         source_frame.set_color_space(ffmpeg::color::Space::BT709);
         source_frame.set_color_range(ffmpeg::color::Range::MPEG);
 
-        let mut converting = D3d11Scaler::new(
-            "converting",
-            &device,
-            context.clone(),
-            D3d11ScalerFormat::Bgra,
-            16,
-            16,
-        )
-        .expect("D3d11Scaler::new should succeed");
+        let mut converting = D3d11Scaler::new("converting", &gpu, D3d11ScalerFormat::Bgra, 16, 16)
+            .expect("D3d11Scaler::new should succeed");
         let converted = capture(&mut converting);
         converting.consume(source).expect("convert");
         {
@@ -1668,7 +1515,7 @@ mod tests {
 
         // Resized only: the same tags cross untouched, because the pixels
         // still are what they said they were.
-        let mut source = nv12_frame(&device, 32, 32, 128, 0);
+        let mut source = nv12_frame(&gpu, 32, 32, 128, 0);
         let MediaBuffer::Video(source_frame) = &mut source else {
             unreachable!("nv12_frame always returns a Video buffer");
         };
@@ -1676,15 +1523,8 @@ mod tests {
         source_frame.set_color_space(ffmpeg::color::Space::BT709);
         source_frame.set_color_range(ffmpeg::color::Range::MPEG);
 
-        let mut resizing = D3d11Scaler::new(
-            "resizing",
-            &device,
-            context,
-            D3d11ScalerFormat::Preserve,
-            16,
-            16,
-        )
-        .expect("D3d11Scaler::new should succeed");
+        let mut resizing = D3d11Scaler::new("resizing", &gpu, D3d11ScalerFormat::Preserve, 16, 16)
+            .expect("D3d11Scaler::new should succeed");
         let resized = capture(&mut resizing);
         resizing.consume(source).expect("resize");
         let resized = resized.lock().unwrap();
@@ -1700,14 +1540,14 @@ mod tests {
     /// still has no half-sample to write.
     #[test]
     fn an_odd_size_is_rejected_when_the_output_is_nv12_even_from_a_bgra_input() {
-        let Some((device, context)) = try_video_device() else {
+        let Some(gpu) = try_video_device() else {
             return;
         };
+        let device = gpu.device().clone();
         let source = frame(bgra_texture(&device, 16, 16, [0, 0, 0, 255], 1), 16, 16, 0);
 
-        let mut scaler =
-            D3d11Scaler::new("scaler", &device, context, D3d11ScalerFormat::Nv12, 15, 15)
-                .expect("D3d11Scaler::new should succeed");
+        let mut scaler = D3d11Scaler::new("scaler", &gpu, D3d11ScalerFormat::Nv12, 15, 15)
+            .expect("D3d11Scaler::new should succeed");
         let _received = capture(&mut scaler);
         let error = scaler
             .consume(source)
@@ -1778,9 +1618,10 @@ mod tests {
     /// since only the depth changed.
     #[test]
     fn a_p010_frame_comes_down_to_nv12_and_keeps_its_colour_tags() {
-        let Some((device, context)) = try_video_device() else {
+        let Some(gpu) = try_video_device() else {
             return;
         };
+        let device = gpu.device().clone();
         let mut source = frame(p010_texture(&device, 32, 32, 800, 512), 32, 32, 9);
         let MediaBuffer::Video(source_frame) = &mut source else {
             unreachable!("frame always returns a Video buffer");
@@ -1789,15 +1630,8 @@ mod tests {
         source_frame.set_color_space(ffmpeg::color::Space::BT2020NCL);
         source_frame.set_color_range(ffmpeg::color::Range::MPEG);
 
-        let mut scaler = D3d11Scaler::new(
-            "scaler",
-            &device,
-            context.clone(),
-            D3d11ScalerFormat::Nv12,
-            32,
-            32,
-        )
-        .expect("D3d11Scaler::new should succeed");
+        let mut scaler = D3d11Scaler::new("scaler", &gpu, D3d11ScalerFormat::Nv12, 32, 32)
+            .expect("D3d11Scaler::new should succeed");
         let received = capture(&mut scaler);
         scaler.consume(source).expect("a P010 frame scales");
 
@@ -1820,7 +1654,7 @@ mod tests {
         // SAFETY: a live texture and a live out-parameter.
         unsafe { texture.GetDesc(&mut desc) };
         assert_eq!(desc.Format, DXGI_FORMAT_NV12);
-        let (luma, chroma) = read_nv12(&device, &context, &texture, 32, 32);
+        let (luma, chroma) = read_nv12(&gpu, &texture, 32, 32);
         for &sample in &luma {
             assert_close(sample, 200, "luma");
         }
@@ -1835,9 +1669,10 @@ mod tests {
     /// BT.601: an encoded red (200, 40, 40) came out (190, 32, 40).
     #[test]
     fn a_bt2020_frame_is_read_as_bt2020() {
-        let Some((device, context)) = try_video_device() else {
+        let Some(gpu) = try_video_device() else {
             return;
         };
+        let device = gpu.device().clone();
         // 361 of 1023 in every plane — away from neutral, so every matrix
         // makes something different of it.
         let mut source = frame(p010_texture(&device, 32, 32, 361, 361), 32, 32, 1);
@@ -1848,17 +1683,10 @@ mod tests {
         source_frame.set_color_space(ffmpeg::color::Space::BT2020NCL);
         source_frame.set_color_range(ffmpeg::color::Range::MPEG);
 
-        let mut scaler = D3d11Scaler::new(
-            "scaler",
-            &device,
-            context.clone(),
-            D3d11ScalerFormat::Bgra,
-            32,
-            32,
-        )
-        .expect("D3d11Scaler::new should succeed");
-        let mut download = D3d11Download::new("download", &device, context)
-            .expect("D3d11Download::new should succeed");
+        let mut scaler = D3d11Scaler::new("scaler", &gpu, D3d11ScalerFormat::Bgra, 32, 32)
+            .expect("D3d11Scaler::new should succeed");
+        let mut download =
+            D3d11Download::new("download", &gpu).expect("D3d11Download::new should succeed");
         let received = capture(&mut download);
         scaler.src_pads()[0].link(Box::new(download));
         scaler.consume(source).expect("a BT.2020 frame converts");

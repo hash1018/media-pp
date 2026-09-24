@@ -70,11 +70,10 @@ mod windows_example {
             // the queue. At most that one in-flight frame can be retained if
             // the output queue is full, so one extra D3D11VA surface covers
             // the deepest downstream buffering of decoder-owned frames.
-            let decoder = D3d11Decoder::new("decoder", params, gpu.device(), 1)?;
+            let decoder = D3d11Decoder::new("decoder", params, &gpu, 1)?;
             let scaler = D3d11Scaler::new(
                 "scaler",
-                gpu.device(),
-                gpu.context(),
+                &gpu,
                 // A pure resize: the decoder's NV12 surfaces stay NV12 all the
                 // way to the renderer, which draws either format.
                 D3d11ScalerFormat::Preserve,

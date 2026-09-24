@@ -45,7 +45,7 @@ mod windows_example {
     use media_pp::ffmpeg;
     use media_pp::{
         elements::{
-            CaptureMode, D3d11Gpu, D3d11VideoCodec, D3d11VideoEncoder, D3d11VideoEncoderOptions,
+            CaptureMode, D3d11VideoCodec, D3d11VideoEncoder, D3d11VideoEncoderOptions,
             D3d11VideoInputFormat, DxgiCaptureOptions, DxgiCaptureSource, FileMuxer,
         },
         pipeline::Pipeline,
@@ -64,22 +64,21 @@ mod windows_example {
 
         let frame_rate = ffmpeg::Rational::new(30, 1);
         // Opened first: `CaptureMode::Gpu` resolves the capture adapter, builds
-        // its own device and hands it back. The encoder has to be built from
-        // that same device — a texture from one `ID3D11Device` is not valid on
-        // another, which is the invariant this whole D3D11 stack rests on.
+        // its own device and hands it back as a `D3d11Gpu`. The encoder has to
+        // be built from that same GPU — a texture from one `ID3D11Device` is
+        // not valid on another, which is the invariant this whole D3D11 stack
+        // rests on.
         let capture_options = DxgiCaptureOptions {
             frame_rate,
             capture_mode: CaptureMode::Gpu,
             ..DxgiCaptureOptions::default()
         };
-        let (source, format, device) = DxgiCaptureSource::open("screen", capture_options)?;
-        let device = device.expect("CaptureMode::Gpu always returns a device");
-        let gpu = D3d11Gpu::from_device(device)?;
+        let (source, format, gpu) = DxgiCaptureSource::open("screen", capture_options)?;
+        let gpu = gpu.expect("CaptureMode::Gpu always returns a GPU");
 
         let encoder = D3d11VideoEncoder::new(
             "encoder",
-            gpu.device(),
-            gpu.context(),
+            &gpu,
             D3d11VideoEncoderOptions {
                 codec: D3d11VideoCodec::H264Nvenc,
                 // What removes the conversion step: DXGI desktop duplication

@@ -12,6 +12,61 @@ compile error with no explanation.
 
 ### Breaking
 
+- **D3D elements take their `D3d11Gpu` or `D3d12Gpu`.** Every D3D11
+  element took an `&ID3D11Device` and, where it draws or copies, a separate
+  `Arc<Mutex<ID3D11DeviceContext>>` — two values that had to belong to the
+  same device, read out of a `D3d11Gpu` one at a time, next to a
+  `D3d11WindowRenderer::open(&gpu)` that already took the GPU whole. Each
+  now takes `gpu: &D3d11Gpu` where the device went, and the context
+  argument is gone: the element reads both from the one GPU, so a context
+  from another device can no longer be handed over. The D3D12 elements take
+  `&D3d12Gpu` the same way. That is `D3d11ChromaKey::new`,
+  `D3d11Decoder::new`, `D3d11Download::new`, `D3d11Scaler::new` and
+  `to_format`, `D3d11ToneMap::new`, `D3d11Upload::new`,
+  `D3d11VideoCompositor::new`, `D3d11VideoEffect::new`,
+  `D3d11VideoEncoder::new` and `with_color`,
+  `D3d11SharedTextureSource::new`, `DxgiCaptureSource::open_with_device`,
+  `WgcCaptureSource::open_with_device`, `D3d12Decoder::new`,
+  `D3d12Scaler::new` and `D3d12Upload::new`; and `DecodeTarget::D3d11`
+  holds `gpu` in place of `device` and `context`, `DecodeTarget::D3d12`
+  `gpu` in place of `device`.
+
+  A capture that makes its own device hands it back ready to share:
+  `DxgiCaptureSource::open` returns an `Option<D3d11Gpu>` where it returned
+  an `Option<ID3D11Device>`, and `WgcCaptureSource::open` a `D3d11Gpu`
+  where it returned an `ID3D11Device`, each with a new `Gpu` variant on its
+  error for the one way that can fail. The `ContextDeviceMismatch` variants
+  of `D3d11ChromaKeyError`, `D3d11ScalerError`, `D3d11ToneMapError`,
+  `D3d11VideoEffectError` and `D3d11VideoEncoderError` are gone, there
+  being no context left to mismatch; a single-threaded device is refused by
+  `D3d11Gpu::from_device`, before any element has it.
+
+  ```rust
+  // before
+  let upload = D3d11Upload::new("upload", gpu.device());
+  let scaler = D3d11Scaler::new("scale", gpu.device(), gpu.context(), format, 1280, 720)?;
+  let decoder = D3d11Decoder::new("decoder", params, gpu.device(), 8)?;
+  let (capture, _format) = DxgiCaptureSource::open_with_device("screen", options, gpu.device())?;
+  let target = DecodeTarget::D3d11 {
+      device: gpu.device().clone(),
+      context: gpu.context(),
+      downstream_hw_frames: 8,
+  };
+  let (source, format, device) = DxgiCaptureSource::open("screen", options)?;
+  let gpu = D3d11Gpu::from_device(device.expect("GPU mode returns a device"))?;
+  let upload = D3d12Upload::new("upload", d3d12.device())?;
+
+  // after
+  let upload = D3d11Upload::new("upload", &gpu);
+  let scaler = D3d11Scaler::new("scale", &gpu, format, 1280, 720)?;
+  let decoder = D3d11Decoder::new("decoder", params, &gpu, 8)?;
+  let (capture, _format) = DxgiCaptureSource::open_with_device("screen", options, &gpu)?;
+  let target = DecodeTarget::D3d11 { gpu: gpu.clone(), downstream_hw_frames: 8 };
+  let (source, format, gpu) = DxgiCaptureSource::open("screen", options)?;
+  let gpu = gpu.expect("GPU mode returns a GPU");
+  let upload = D3d12Upload::new("upload", &d3d12)?;
+  ```
+
 - **`PixelLayout::Yuv420p` and `Rgb24`: a link check tells them from other
   layouts.** YUV420P was `PixelLayout::Other`, so a consumer that draws it
   had to accept every other layout too, and a pipeline feeding it RGB24 or

@@ -61,6 +61,26 @@ pub(crate) fn try_test_video() -> Option<String> {
         .clone()
 }
 
+/// The [`D3d11Gpu`](crate::elements::D3d11Gpu) a D3D11 element's unit test
+/// builds on. Prints the platform error and returns `None` when the machine
+/// cannot create one, so callers can use the repository's normal
+/// hardware-test skip path.
+#[cfg(all(target_os = "windows", feature = "d3d11"))]
+pub(crate) fn try_d3d11_gpu() -> Option<crate::elements::D3d11Gpu> {
+    crate::elements::D3d11Gpu::new()
+        .inspect_err(|error| eprintln!("skipping: no Direct3D 11 device on this machine: {error}"))
+        .ok()
+}
+
+/// The [`D3d12Gpu`](crate::elements::D3d12Gpu) a D3D12 element's unit test
+/// builds on, skipping the same way as [`try_d3d11_gpu`].
+#[cfg(all(target_os = "windows", feature = "d3d12"))]
+pub(crate) fn try_d3d12_gpu() -> Option<crate::elements::D3d12Gpu> {
+    crate::elements::D3d12Gpu::new()
+        .inspect_err(|error| eprintln!("skipping: no Direct3D 12 device on this machine: {error}"))
+        .ok()
+}
+
 /// A hardware D3D11 device and its shared immediate context for unit tests.
 /// Prints the platform error and returns `None` when the machine cannot create
 /// one, so callers can use the repository's normal hardware-test skip path.
@@ -143,25 +163,6 @@ pub(crate) fn try_single_threaded_d3d11_device()
     };
     if let Err(error) = result {
         eprintln!("skipping: D3D11CreateDevice failed on this machine: {error}");
-        return None;
-    }
-    device
-}
-
-/// A hardware D3D12 device for unit tests, with the same graceful skip
-/// behavior as the D3D11 test-device helper.
-#[cfg(all(target_os = "windows", feature = "d3d12"))]
-pub(crate) fn try_d3d12_device() -> Option<windows::Win32::Graphics::Direct3D12::ID3D12Device> {
-    use windows::Win32::Graphics::{
-        Direct3D::D3D_FEATURE_LEVEL_11_0, Direct3D12::D3D12CreateDevice,
-    };
-
-    let mut device = None;
-    // SAFETY: a null adapter requests the default hardware adapter and
-    // `device` is the correctly typed live out-parameter for the requested
-    // minimum feature level.
-    if let Err(error) = unsafe { D3D12CreateDevice(None, D3D_FEATURE_LEVEL_11_0, &mut device) } {
-        eprintln!("skipping: D3D12CreateDevice failed on this machine: {error}");
         return None;
     }
     device
@@ -637,16 +638,12 @@ impl D3d11LiveObjects {
     }
 }
 
-/// A debug D3D11 device, its context behind the lock elements share, and
-/// what counts its live objects — or `None`, after saying so, on a machine
+/// A [`D3d11Gpu`](crate::elements::D3d11Gpu) on a debug device, and what
+/// counts its live objects — or `None`, after saying so, on a machine
 /// without the D3D11 SDK debug layer, which is most machines not set up for
 /// graphics development.
 #[cfg(all(target_os = "windows", feature = "d3d11"))]
-pub(crate) fn try_d3d11_debug_device() -> Option<(
-    windows::Win32::Graphics::Direct3D11::ID3D11Device,
-    std::sync::Arc<std::sync::Mutex<windows::Win32::Graphics::Direct3D11::ID3D11DeviceContext>>,
-    D3d11LiveObjects,
-)> {
+pub(crate) fn try_d3d11_debug_device() -> Option<(crate::elements::D3d11Gpu, D3d11LiveObjects)> {
     use windows::{
         Win32::Graphics::{
             Direct3D::D3D_DRIVER_TYPE_HARDWARE,
@@ -659,10 +656,9 @@ pub(crate) fn try_d3d11_debug_device() -> Option<(
     };
 
     let mut device = None;
-    let mut context = None;
     // SAFETY: adapter/software pointers are intentionally null for the
     // hardware driver path, feature-level defaults are requested, and
-    // `device`/`context` are live correctly typed out-parameters.
+    // `device` is a live correctly typed out-parameter.
     let result = unsafe {
         D3D11CreateDevice(
             None,
@@ -673,7 +669,7 @@ pub(crate) fn try_d3d11_debug_device() -> Option<(
             D3D11_SDK_VERSION,
             Some(&mut device),
             None,
-            Some(&mut context),
+            None,
         )
     };
     if result.is_err() {
@@ -681,7 +677,6 @@ pub(crate) fn try_d3d11_debug_device() -> Option<(
         return None;
     }
     let device = device.expect("D3D11CreateDevice succeeded without producing a device");
-    let context = context.expect("D3D11CreateDevice succeeded without producing a context");
     let debug = device.cast::<ID3D11Debug>().ok()?;
     let info = device.cast::<ID3D11InfoQueue>().ok()?;
     // The report is one message per live object and can exceed the queue's
@@ -689,11 +684,8 @@ pub(crate) fn try_d3d11_debug_device() -> Option<(
     // SAFETY: `info` is the live debug info queue for this device and the
     // count is an unrestricted scalar limit.
     unsafe { info.SetMessageCountLimit(u64::MAX) }.ok()?;
-    Some((
-        device,
-        std::sync::Arc::new(std::sync::Mutex::new(context)),
-        D3d11LiveObjects { debug, info },
-    ))
+    let gpu = crate::elements::D3d11Gpu::from_device(device).ok()?;
+    Some((gpu, D3d11LiveObjects { debug, info }))
 }
 
 /// A sink that keeps every buffer it is handed, for a test to read back.

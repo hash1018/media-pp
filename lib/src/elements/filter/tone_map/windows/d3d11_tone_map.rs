@@ -24,6 +24,7 @@ use crate::{
     pad::SrcPad,
     platform::windows::d3d11::protect_shared_device,
     platform::windows::d3d11_full_frame::{FullFramePass, create_bgra_target},
+    platform::windows::d3d11_gpu::D3d11Gpu,
     platform::windows::d3d11va::{d3d11va_texture, wrap_d3d11_texture},
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
     repeat::{PerFrameTransform, RepeatedOutput},
@@ -73,13 +74,6 @@ pub enum D3d11ToneMapError {
          exactly one device"
     )]
     DeviceMismatch,
-
-    /// The supplied immediate context belongs to another D3D11 device.
-    #[error(
-        "the supplied ID3D11DeviceContext belongs to a different ID3D11Device than this \
-         D3d11ToneMap"
-    )]
-    ContextDeviceMismatch,
 
     /// The backing texture is smaller than the visible input frame.
     #[error(
@@ -151,11 +145,11 @@ struct ToneMapConstants {
 /// A frame is read by its own transfer tag, and one that says neither PQ nor
 /// HLG is refused with [`D3d11ToneMapError::NotHdr`] rather than guessed at.
 /// The output is the visible size of the input, tagged full-range RGB with
-/// BT.709 primaries, with the input's PTS. `device` and `context` are the
-/// ones every other D3D11 element in the pipeline shares; state is
-/// re-selected on every draw and the context flushed after it, for
-/// `D3d11VideoEffect`'s reasons. A repeated input texture is answered with
-/// the output already made from it.
+/// BT.709 primaries, with the input's PTS. Its GPU is the [`D3d11Gpu`]
+/// every other D3D11 element in the pipeline shares; state is re-selected on
+/// every draw and the context flushed after it, for `D3d11VideoEffect`'s
+/// reasons. A repeated input texture is answered with the output already
+/// made from it.
 pub struct D3d11ToneMap {
     pp_log: PpLog,
     name: Arc<str>,
@@ -191,28 +185,16 @@ struct ValidatedInput {
 }
 
 impl D3d11ToneMap {
-    /// `device` must be the same `ID3D11Device`, and `context` the same
-    /// shared immediate context, every other D3D11 element in this pipeline
-    /// uses. Every frame comes out the size it went in.
+    /// `gpu` must be the [`D3d11Gpu`] every other D3D11 element in this
+    /// pipeline shares. Every frame comes out the size it went in.
     pub fn new(
         name: impl Into<String>,
-        device: &ID3D11Device,
-        context: Arc<Mutex<ID3D11DeviceContext>>,
+        gpu: &D3d11Gpu,
     ) -> std::result::Result<Self, D3d11ToneMapError> {
+        let (device, context) = (gpu.device(), gpu.context());
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::D3d11ToneMap, &name, None);
         protect_shared_device(device)?;
-        {
-            let context = context
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            // SAFETY: `context` is a live immediate-context interface;
-            // `GetDevice` returns an owned reference to its creating device.
-            let context_device = unsafe { context.GetDevice() }?;
-            if context_device.as_raw() != device.as_raw() {
-                return Err(D3d11ToneMapError::ContextDeviceMismatch);
-            }
-        }
 
         let pass = FullFramePass::new(
             device,
@@ -470,7 +452,7 @@ mod tests {
 
     use super::*;
     use crate::elements::D3d11Download;
-    use crate::test_support::try_d3d11_device as try_device;
+    use crate::test_support::try_d3d11_gpu as try_device;
     use crate::tone_map::HdrTransfer;
 
     /// A flat P010 texture: every luma sample `luma` and every chroma pair
@@ -517,9 +499,9 @@ mod tests {
         transfer: ffmpeg::color::TransferCharacteristic,
         (luma, cb, cr): (u16, u16, u16),
     ) -> Option<std::result::Result<[u8; 3], crate::error::Error>> {
-        let (device, context) = try_device()?;
+        let gpu = try_device()?;
         let mut frame =
-            wrap_d3d11_texture(p010_texture(&device, luma, cb, cr), 32, 32).expect("wrap");
+            wrap_d3d11_texture(p010_texture(gpu.device(), luma, cb, cr), 32, 32).expect("wrap");
         frame.set_color_space(ffmpeg::color::Space::BT2020NCL);
         frame.set_color_range(ffmpeg::color::Range::MPEG);
         frame.set_color_transfer_characteristic(transfer);
@@ -527,8 +509,8 @@ mod tests {
         let mut slot = pool.get();
         *slot = frame;
 
-        let mut tone_map = D3d11ToneMap::new("tone-map", &device, context.clone()).expect("new");
-        let download = D3d11Download::new("download", &device, context).expect("download");
+        let mut tone_map = D3d11ToneMap::new("tone-map", &gpu).expect("new");
+        let download = D3d11Download::new("download", &gpu).expect("download");
         let received = Arc::new(Mutex::new(Vec::new()));
         let collected = received.clone();
         let mut download = download;
@@ -625,14 +607,14 @@ mod tests {
     /// answered as a repeat, and a flat count across a hundred frames.
     #[test]
     fn drawing_frames_does_not_accumulate_d3d11_objects() {
-        let Some((device, context, live)) = crate::test_support::try_d3d11_debug_device() else {
+        let Some((gpu, live)) = crate::test_support::try_d3d11_debug_device() else {
             return;
         };
         let textures = [
-            p010_texture(&device, 500, 512, 512),
-            p010_texture(&device, 600, 450, 650),
+            p010_texture(gpu.device(), 500, 512, 512),
+            p010_texture(gpu.device(), 600, 450, 650),
         ];
-        let mut element = D3d11ToneMap::new("tone-map", &device, context).expect("new");
+        let mut element = D3d11ToneMap::new("tone-map", &gpu).expect("new");
         let drawn = Arc::new(Mutex::new(0usize));
         let counted = drawn.clone();
         element.src_pads()[0].link(Box::new(crate::elements::AppSink::new(

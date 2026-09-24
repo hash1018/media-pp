@@ -129,8 +129,9 @@ program supplies — an implementation of `D3d11FrameRenderer`,
 `D3d12FrameRenderer` or `CudaFrameRenderer` for its own window or UI — with
 no colour description; they are for drawing into something other than a
 window of the renderer's own. The D3D11 elements of a pipeline share one
-`D3d11Gpu`: one device and its immediate context behind one lock; the D3D12
-elements share one `D3d12Gpu`.
+`D3d11Gpu` — one device and its immediate context behind one lock — and each
+is constructed from it, `D3d11Upload::new("upload", &gpu)`; the D3D12 elements
+share one `D3d12Gpu` the same way.
 
 Everything else:
 
@@ -214,7 +215,7 @@ elsewhere.
 - `cuda`: only the NVIDIA driver. The kernels ship as PTX the driver
   compiles, so no CUDA toolkit is needed.
 
-What an element needs at run time — one shared D3D11 device, one
+What an element needs at run time — one shared `D3d11Gpu`, one
 `CudaDevice` per process, a portal for screen capture on Linux, a server to
 publish RTSP to — is on that element's documentation page.
 

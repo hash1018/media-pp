@@ -247,15 +247,15 @@ mod tests {
 
     use super::*;
     use crate::elements::D3d12Upload;
-    use crate::test_support::try_d3d12_device as try_device;
+    use crate::test_support::try_d3d12_gpu as try_device;
 
     #[test]
     fn upload_download_round_trip_preserves_pixels_and_metadata() {
-        let Some(device) = try_device() else {
+        let Some(gpu) = try_device() else {
             return;
         };
         let (width, height) = (16u32, 16u32);
-        let Ok(mut upload) = D3d12Upload::new("upload", &device) else {
+        let Ok(mut upload) = D3d12Upload::new("upload", &gpu) else {
             eprintln!("skipping: FFmpeg could not create a D3D12VA frames context");
             return;
         };
@@ -332,10 +332,10 @@ mod tests {
     /// frames were allocated before any frame arrived.
     #[test]
     fn a_source_that_changes_resolution_is_followed() {
-        let Some(device) = try_device() else {
+        let Some(gpu) = try_device() else {
             return;
         };
-        let Ok(mut upload) = D3d12Upload::new("upload", &device) else {
+        let Ok(mut upload) = D3d12Upload::new("upload", &gpu) else {
             eprintln!("skipping: FFmpeg could not create a D3D12VA frames context");
             return;
         };

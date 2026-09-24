@@ -13,7 +13,7 @@
 #![cfg(all(target_os = "windows", feature = "d3d11"))]
 
 use std::sync::{
-    Arc, Mutex,
+    Arc,
     atomic::{AtomicUsize, Ordering},
 };
 use std::time::Duration;
@@ -22,53 +22,23 @@ use media_pp::{
     buffer::MediaBuffer,
     bus::BusEvent,
     elements::{
-        AppSink, ChromaKeyMethod, ChromaKeyOptions, D3d11ChromaKey, D3d11Download, D3d11Scaler,
-        D3d11ScalerFormat, D3d11Upload, SwScaler, TestVideoOptions, TestVideoSource,
+        AppSink, ChromaKeyMethod, ChromaKeyOptions, D3d11ChromaKey, D3d11Download, D3d11Gpu,
+        D3d11Scaler, D3d11ScalerFormat, D3d11Upload, SwScaler, TestVideoOptions, TestVideoSource,
     },
     pipeline::Pipeline,
 };
-use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11DeviceContext};
 
 const WIDTH: u32 = 320;
 const HEIGHT: u32 = 240;
 const SCALED_WIDTH: u32 = 160;
 const SCALED_HEIGHT: u32 = 120;
 
-/// A hardware device and the one shared immediate context every element below
-/// is given, exactly as an application would build them.
-fn try_shared_device() -> Option<(ID3D11Device, Arc<Mutex<ID3D11DeviceContext>>)> {
-    use windows::Win32::Graphics::{
-        Direct3D::D3D_DRIVER_TYPE_HARDWARE,
-        Direct3D11::{D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION, D3D11CreateDevice},
-    };
-
-    let mut device = None;
-    let mut context = None;
-    // SAFETY: a null adapter selects the default hardware driver, feature
-    // levels use the D3D defaults, and both slots are live out-parameters.
-    let result = unsafe {
-        D3D11CreateDevice(
-            None,
-            D3D_DRIVER_TYPE_HARDWARE,
-            Default::default(),
-            D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-            None,
-            D3D11_SDK_VERSION,
-            Some(&mut device),
-            None,
-            Some(&mut context),
-        )
-    };
-    if let Err(error) = result {
-        eprintln!("skipping: D3D11CreateDevice failed on this machine: {error}");
-        return None;
-    }
-    Some((
-        device.expect("D3D11CreateDevice succeeded without producing a device"),
-        Arc::new(Mutex::new(context.expect(
-            "D3D11CreateDevice succeeded without producing a context",
-        ))),
-    ))
+/// The one device and shared immediate context every element below is given,
+/// exactly as an application would build them.
+fn try_shared_device() -> Option<D3d11Gpu> {
+    D3d11Gpu::new()
+        .inspect_err(|error| eprintln!("skipping: no Direct3D 11 device on this machine: {error}"))
+        .ok()
 }
 
 /// Upload, scale, key, and download the same frames on four different threads
@@ -81,14 +51,13 @@ fn try_shared_device() -> Option<(ID3D11Device, Arc<Mutex<ID3D11DeviceContext>>)
 /// and on an empty bus, not merely on construction succeeding.
 #[test]
 fn four_d3d11_elements_share_one_device_across_queue_boundaries() {
-    let Some((device, context)) = try_shared_device() else {
+    let Some(gpu) = try_shared_device() else {
         return;
     };
 
     let scaler = match D3d11Scaler::new(
         "d3d11-scale",
-        &device,
-        context.clone(),
+        &gpu,
         D3d11ScalerFormat::Preserve,
         SCALED_WIDTH,
         SCALED_HEIGHT,
@@ -101,8 +70,7 @@ fn four_d3d11_elements_share_one_device_across_queue_boundaries() {
     };
     let (chroma_key, _key_handle) = D3d11ChromaKey::new(
         "d3d11-key",
-        &device,
-        context.clone(),
+        &gpu,
         ChromaKeyOptions {
             method: ChromaKeyMethod::Green,
             threshold: 0.2,
@@ -110,17 +78,16 @@ fn four_d3d11_elements_share_one_device_across_queue_boundaries() {
         },
     )
     .expect("create the chroma key");
-    let download = D3d11Download::new("d3d11-download", &device, context.clone())
-        .expect("create the download");
+    let download = D3d11Download::new("d3d11-download", &gpu).expect("create the download");
 
-    // The device arrived here unprotected — nothing above asked for it — so
-    // this is the elements' doing, and it is what the rest of the test relies
-    // on. A race is not something a passing run can prove the absence of; this
+    // `D3d11Gpu` protected the device when it made it, and every element above
+    // relies on that; it is what the rest of the test relies on too. A race is not something a passing run can prove the absence of; this
     // assertion is the deterministic half.
     {
         use windows::Win32::Graphics::Direct3D11::ID3D11Multithread;
         use windows::core::Interface;
 
+        let context = gpu.context();
         let context = context.lock().expect("shared context");
         let multithread: ID3D11Multithread =
             context.cast().expect("the immediate context exposes it");
@@ -128,7 +95,7 @@ fn four_d3d11_elements_share_one_device_across_queue_boundaries() {
         let protected = unsafe { multithread.GetMultithreadProtected() };
         assert!(
             protected.as_bool(),
-            "constructing D3D11 elements must have protected the shared context"
+            "a D3d11Gpu must have protected the shared context"
         );
     }
 
@@ -171,7 +138,7 @@ fn four_d3d11_elements_share_one_device_across_queue_boundaries() {
                 HEIGHT,
                 ffmpeg_next::software::scaling::Flags::BILINEAR,
             ))
-            .pipe(D3d11Upload::new("d3d11-upload", &device))
+            .pipe(D3d11Upload::new("d3d11-upload", &gpu))
             .queue("to-scale", 4)
             .pipe(scaler)
             .queue("to-key", 4)
@@ -237,7 +204,7 @@ fn a_capture_sharing_the_device_does_not_slow_the_compositor() {
     /// canvas below is small.
     const MINIMUM: f64 = 0.85;
 
-    let Some((device, context)) = try_shared_device() else {
+    let Some(gpu) = try_shared_device() else {
         return;
     };
 
@@ -253,7 +220,7 @@ fn a_capture_sharing_the_device_does_not_slow_the_compositor() {
             frame_rate: ffmpeg_next::Rational::new(FPS as i32, 1),
             capture_mode: CaptureMode::Gpu,
         },
-        &device,
+        &gpu,
     ) {
         Ok(opened) => opened,
         Err(error) => {
@@ -264,8 +231,7 @@ fn a_capture_sharing_the_device_does_not_slow_the_compositor() {
 
     let (compositor, handle) = D3d11VideoCompositor::new(
         "compositor",
-        &device,
-        context.clone(),
+        &gpu,
         VideoCompositorOptions {
             width: format.width,
             height: format.height,

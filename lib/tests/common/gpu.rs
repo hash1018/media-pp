@@ -48,14 +48,14 @@ pub use windows_gpu::*;
 
 #[cfg(windows)]
 mod windows_gpu {
-    use std::sync::{Arc, Mutex};
-
+    #[cfg(feature = "d3d11")]
+    use media_pp::elements::D3d11Gpu;
     use windows::{
         Win32::Graphics::{
             Direct3D::D3D_DRIVER_TYPE_HARDWARE,
             Direct3D11::{
                 D3D11_CREATE_DEVICE_DEBUG, D3D11_MESSAGE, D3D11_RLDO_DETAIL, D3D11_SDK_VERSION,
-                D3D11CreateDevice, ID3D11Debug, ID3D11Device, ID3D11DeviceContext, ID3D11InfoQueue,
+                D3D11CreateDevice, ID3D11Debug, ID3D11Device, ID3D11InfoQueue,
             },
             Dxgi::{
                 DXGI_MEMORY_SEGMENT_GROUP_LOCAL, DXGI_QUERY_VIDEO_MEMORY_INFO, IDXGIAdapter3,
@@ -71,28 +71,25 @@ mod windows_gpu {
         Dxgi::{CreateDXGIFactory1, IDXGIFactory4},
     };
 
-    /// A D3D11 device, its shared immediate context, and — when the SDK
-    /// debug layer is installed — the debug interfaces that can enumerate
-    /// live objects. `None`, after printing why, on a machine without a
+    /// A [`D3d11Gpu`] — one device and its shared immediate context — and,
+    /// when the SDK debug layer is installed, the debug interfaces that can
+    /// enumerate live objects. `None`, after printing why, on a machine without a
     /// usable device, the same way every other hardware test here skips.
     ///
     /// The debug layer is requested first and dropped if unavailable, since
     /// only it can answer "did this cycle leave an object behind"; a
     /// machine without it still runs the VRAM half of the scenario.
-    pub fn try_d3d11_device() -> Option<(
-        ID3D11Device,
-        Arc<Mutex<ID3D11DeviceContext>>,
-        Option<D3d11LiveObjects>,
-    )> {
+    #[cfg(feature = "d3d11")]
+    pub fn try_d3d11_gpu() -> Option<(D3d11Gpu, Option<D3d11LiveObjects>)> {
         if let Some(created) = create_device(true) {
-            let debug = D3d11LiveObjects::new(&created.0);
+            let debug = D3d11LiveObjects::new(created.device());
             if debug.is_none() {
                 eprintln!(
                     "note: D3D11 debug layer created but exposes no ID3D11Debug/ID3D11InfoQueue; \
                      measuring VRAM only"
                 );
             }
-            return Some((created.0, created.1, debug));
+            return Some((created, debug));
         }
         eprintln!(
             "note: no D3D11 debug layer on this machine (install the Graphics Tools optional \
@@ -102,20 +99,20 @@ mod windows_gpu {
             eprintln!("skipping: D3D11CreateDevice failed on this machine");
             None
         })?;
-        Some((created.0, created.1, None))
+        Some((created, None))
     }
 
-    fn create_device(debug: bool) -> Option<(ID3D11Device, Arc<Mutex<ID3D11DeviceContext>>)> {
+    #[cfg(feature = "d3d11")]
+    fn create_device(debug: bool) -> Option<D3d11Gpu> {
         let flags = if debug {
             D3D11_CREATE_DEVICE_DEBUG
         } else {
             Default::default()
         };
         let mut device = None;
-        let mut context = None;
         // SAFETY: null adapter/software pointers select the hardware path,
-        // optional feature levels use D3D defaults, and both interface slots
-        // are live correctly typed out-parameters.
+        // optional feature levels use D3D defaults, and the device slot is a
+        // live correctly typed out-parameter.
         let result = unsafe {
             D3D11CreateDevice(
                 None,
@@ -126,18 +123,16 @@ mod windows_gpu {
                 D3D11_SDK_VERSION,
                 Some(&mut device),
                 None,
-                Some(&mut context),
+                None,
             )
         };
         if result.is_err() {
             return None;
         }
-        Some((
+        D3d11Gpu::from_device(
             device.expect("D3D11CreateDevice succeeded without producing a device"),
-            Arc::new(Mutex::new(context.expect(
-                "D3D11CreateDevice succeeded without producing a context",
-            ))),
-        ))
+        )
+        .ok()
     }
 
     /// This process's current usage of the adapter's own video memory, in

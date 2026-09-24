@@ -24,6 +24,7 @@ use crate::{
     pad::SrcPad,
     platform::windows::d3d11::protect_shared_device,
     platform::windows::d3d11_full_frame::{FullFramePass, create_bgra_target},
+    platform::windows::d3d11_gpu::D3d11Gpu,
     platform::windows::d3d11va::{d3d11va_texture, wrap_d3d11_texture},
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
     repeat::{PerFrameTransform, RepeatedOutput},
@@ -73,13 +74,6 @@ pub enum D3d11ChromaKeyError {
          pipeline must share exactly one device for zero-copy to be valid"
     )]
     DeviceMismatch,
-    /// The supplied immediate context belongs to another D3D11 device.
-
-    #[error(
-        "the supplied ID3D11DeviceContext belongs to a different ID3D11Device than this \
-         D3d11ChromaKey"
-    )]
-    ContextDeviceMismatch,
     /// The backing texture is smaller than the visible input frame.
 
     #[error(
@@ -204,13 +198,12 @@ impl ChromaKeyConstants {
 ///
 /// # Device and context
 ///
-/// `device` must be the same `ID3D11Device`, and `context` the same shared
-/// immediate context, every other D3D11 element in the pipeline uses; the
-/// context lock is held for one configure-and-`Draw` sequence per frame,
-/// for the same reason [`crate::elements::D3d11Scaler`] holds it across its
-/// `Blt`. The shader/sampler/blend/rasterizer state is built once at
-/// construction and re-selected on every draw, because the context is
-/// shared: whatever drew last left its own state bound.
+/// Its GPU must be the [`D3d11Gpu`] every other D3D11 element in the
+/// pipeline shares; the context lock is held for one configure-and-`Draw`
+/// sequence per frame, for the same reason [`crate::elements::D3d11Scaler`]
+/// holds it across its `Blt`. The shader/sampler/blend/rasterizer state is
+/// built once at construction and re-selected on every draw, because the
+/// context is shared: whatever drew last left its own state bound.
 ///
 /// Each draw ends with a `Flush`. D3D11 defers destroying an object until
 /// the context is flushed, and this element creates three per frame — the
@@ -272,38 +265,23 @@ struct ValidatedInput {
 }
 
 impl D3d11ChromaKey {
-    /// `device` must be the same `ID3D11Device`, and `context` the same
-    /// shared immediate context, every other D3D11 element in this pipeline
-    /// uses — see this type's own docs on why.
+    /// `gpu` must be the [`D3d11Gpu`] every other D3D11 element in this
+    /// pipeline shares — see this type's own docs on why.
     ///
     /// Output dimensions are not a parameter: keying is a per-pixel
     /// transform, so every frame comes out the size it went in.
     pub fn new(
         name: impl Into<String>,
-        device: &ID3D11Device,
-        context: Arc<Mutex<ID3D11DeviceContext>>,
+        gpu: &D3d11Gpu,
         options: ChromaKeyOptions,
     ) -> std::result::Result<(Self, ChromaKeyHandle), D3d11ChromaKeyError> {
+        let (device, context) = (gpu.device(), gpu.context());
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::D3d11ChromaKey, &name, None);
         // This element sits behind a `Queue` more often than not, so the
         // device has to be usable from a thread other than the one that
         // created it before any command is issued.
         protect_shared_device(device)?;
-        // The caller's own mistake is diagnosed before any GPU resource is
-        // built: a context belonging to another device would otherwise only
-        // surface later, as a `Draw` quietly reading nothing.
-        {
-            let context = context
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            // SAFETY: `context` is a live immediate-context interface;
-            // `GetDevice` returns an owned reference to its creating device.
-            let context_device = unsafe { context.GetDevice() }?;
-            if context_device.as_raw() != device.as_raw() {
-                return Err(D3d11ChromaKeyError::ContextDeviceMismatch);
-            }
-        }
 
         let pass = FullFramePass::new(
             device,
@@ -634,7 +612,7 @@ mod tests {
 
     use super::{super::super::options::ChromaKeyMethod, *};
     use crate::elements::D3d11Download;
-    use crate::test_support::try_d3d11_device as try_device;
+    use crate::test_support::try_d3d11_gpu as try_device;
 
     fn default_options() -> ChromaKeyOptions {
         ChromaKeyOptions {
@@ -736,12 +714,17 @@ mod tests {
     /// repeat carries its own timestamp; only the pixels are shared.
     #[test]
     fn a_repeated_input_is_keyed_once() {
-        let Some((device, context)) = try_device() else {
+        let Some(gpu) = try_device() else {
             return;
         };
-        let source = frame(bgra_texture(&device, 4, 4, [0, 255, 0, 255], 1), 4, 4, 100);
+        let source = frame(
+            bgra_texture(gpu.device(), 4, 4, [0, 255, 0, 255], 1),
+            4,
+            4,
+            100,
+        );
         let repeat = repeat_of(&source, 200);
-        let (mut key, _) = D3d11ChromaKey::new("key", &device, context, default_options())
+        let (mut key, _) = D3d11ChromaKey::new("key", &gpu, default_options())
             .expect("D3d11ChromaKey::new should succeed");
         let received = capture(&mut key);
 
@@ -772,12 +755,17 @@ mod tests {
     /// frozen at the old settings with nothing to ever dislodge it.
     #[test]
     fn a_repeat_is_keyed_again_after_a_retune() {
-        let Some((device, context)) = try_device() else {
+        let Some(gpu) = try_device() else {
             return;
         };
-        let source = frame(bgra_texture(&device, 4, 4, [0, 255, 0, 255], 1), 4, 4, 100);
+        let source = frame(
+            bgra_texture(gpu.device(), 4, 4, [0, 255, 0, 255], 1),
+            4,
+            4,
+            100,
+        );
         let repeat = repeat_of(&source, 200);
-        let (mut key, handle) = D3d11ChromaKey::new("key", &device, context, default_options())
+        let (mut key, handle) = D3d11ChromaKey::new("key", &gpu, default_options())
             .expect("D3d11ChromaKey::new should succeed");
         let received = capture(&mut key);
 
@@ -801,20 +789,15 @@ mod tests {
     /// Keys one flat `color` frame and hands back the downloaded BGRA
     /// result, so a test can assert on actual pixels rather than on the
     /// fact that a `Draw` returned without complaint.
-    fn keyed_pixel(
-        device: &ID3D11Device,
-        context: &Arc<Mutex<ID3D11DeviceContext>>,
-        options: ChromaKeyOptions,
-        color: [u8; 4],
-    ) -> [u8; 4] {
-        let (mut key, _) = D3d11ChromaKey::new("key", device, context.clone(), options)
-            .expect("D3d11ChromaKey::new should succeed");
-        let mut download = D3d11Download::new("download", device, context.clone())
-            .expect("D3d11Download::new should succeed");
+    fn keyed_pixel(gpu: &D3d11Gpu, options: ChromaKeyOptions, color: [u8; 4]) -> [u8; 4] {
+        let (mut key, _) =
+            D3d11ChromaKey::new("key", gpu, options).expect("D3d11ChromaKey::new should succeed");
+        let mut download =
+            D3d11Download::new("download", gpu).expect("D3d11Download::new should succeed");
         let received = capture(&mut download);
         key.src_pads()[0].link(Box::new(download));
 
-        key.consume(frame(bgra_texture(device, 8, 8, color, 1), 8, 8, 7))
+        key.consume(frame(bgra_texture(gpu.device(), 8, 8, color, 1), 8, 8, 7))
             .expect("keying must succeed");
 
         let received = received.lock().unwrap();
@@ -828,12 +811,12 @@ mod tests {
 
     #[test]
     fn a_pixel_matching_the_key_color_becomes_fully_transparent() {
-        let Some((device, context)) = try_device() else {
+        let Some(gpu) = try_device() else {
             return;
         };
         let green = [0u8, 255, 0, 255]; // BGRA: pure green
         assert_eq!(
-            keyed_pixel(&device, &context, default_options(), green),
+            keyed_pixel(&gpu, default_options(), green),
             [0, 255, 0, 0],
             "the key color must come out with alpha 0 and its RGB untouched"
         );
@@ -841,31 +824,28 @@ mod tests {
 
     #[test]
     fn a_clearly_different_pixel_stays_fully_opaque_and_unchanged() {
-        let Some((device, context)) = try_device() else {
+        let Some(gpu) = try_device() else {
             return;
         };
         let red = [0u8, 0, 255, 255]; // BGRA: pure red, far from the green key
-        assert_eq!(
-            keyed_pixel(&device, &context, default_options(), red),
-            [0, 0, 255, 255]
-        );
+        assert_eq!(keyed_pixel(&gpu, default_options(), red), [0, 0, 255, 255]);
     }
 
     /// The key multiplies the alpha a pixel arrives with, as
     /// `SwChromaKey`'s does, so a key after a luma key keeps its cuts.
     #[test]
     fn the_alpha_a_pixel_arrives_with_is_kept_under_the_key() {
-        let Some((device, context)) = try_device() else {
+        let Some(gpu) = try_device() else {
             return;
         };
         let translucent_red = [0u8, 0, 255, 100];
         assert_eq!(
-            keyed_pixel(&device, &context, default_options(), translucent_red),
+            keyed_pixel(&gpu, default_options(), translucent_red),
             translucent_red
         );
         let translucent_green = [0u8, 255, 0, 100];
         assert_eq!(
-            keyed_pixel(&device, &context, default_options(), translucent_green)[3],
+            keyed_pixel(&gpu, default_options(), translucent_green)[3],
             0
         );
     }
@@ -876,11 +856,11 @@ mod tests {
     /// threshold 0.15.
     #[test]
     fn a_pixel_inside_the_smoothing_band_gets_a_partial_alpha() {
-        let Some((device, context)) = try_device() else {
+        let Some(gpu) = try_device() else {
             return;
         };
         let almost_green = [0u8, 255, 60, 255];
-        let alpha = keyed_pixel(&device, &context, default_options(), almost_green)[3];
+        let alpha = keyed_pixel(&gpu, default_options(), almost_green)[3];
         assert!(
             alpha > 0 && alpha < 255,
             "expected a feathered mid-range alpha, got {alpha}"
@@ -889,7 +869,7 @@ mod tests {
 
     #[test]
     fn a_custom_key_color_replaces_the_green_default() {
-        let Some((device, context)) = try_device() else {
+        let Some(gpu) = try_device() else {
             return;
         };
         let options = ChromaKeyOptions {
@@ -898,7 +878,7 @@ mod tests {
             smoothing: 0.0,
         };
         // BGRA, so this is exactly Color::new(10, 20, 30).
-        let alpha = keyed_pixel(&device, &context, options, [30, 20, 10, 255])[3];
+        let alpha = keyed_pixel(&gpu, options, [30, 20, 10, 255])[3];
         assert_eq!(alpha, 0);
     }
 
@@ -907,7 +887,7 @@ mod tests {
     /// still background, past it foreground. See `ChromaKeyConstants::new`.
     #[test]
     fn a_zero_smoothing_key_is_a_hard_step_with_no_partial_alpha() {
-        let Some((device, context)) = try_device() else {
+        let Some(gpu) = try_device() else {
             return;
         };
         let options = ChromaKeyOptions {
@@ -916,15 +896,9 @@ mod tests {
             smoothing: 0.0,
         };
         // Distance ~0.136 — below the threshold, so fully keyed out.
-        assert_eq!(
-            keyed_pixel(&device, &context, options, [0, 255, 60, 255])[3],
-            0
-        );
+        assert_eq!(keyed_pixel(&gpu, options, [0, 255, 60, 255])[3], 0);
         // Distance (100/255)/sqrt(3) ~= 0.226 — above it, so fully opaque.
-        assert_eq!(
-            keyed_pixel(&device, &context, options, [0, 255, 100, 255])[3],
-            255
-        );
+        assert_eq!(keyed_pixel(&gpu, options, [0, 255, 100, 255])[3], 255);
     }
 
     /// The whole point of doing this on the GPU: the result stays a
@@ -932,10 +906,10 @@ mod tests {
     /// timestamp and colorimetry.
     #[test]
     fn the_output_stays_on_the_gpu_and_keeps_its_pts_and_colorimetry() {
-        let Some((device, context)) = try_device() else {
+        let Some(gpu) = try_device() else {
             return;
         };
-        let texture = bgra_texture(&device, 16, 16, [0, 255, 0, 255], 1);
+        let texture = bgra_texture(gpu.device(), 16, 16, [0, 255, 0, 255], 1);
         let mut source = frame(texture, 16, 16, 777);
         let MediaBuffer::Video(source_frame) = &mut source else {
             unreachable!("frame always returns a Video buffer");
@@ -944,7 +918,7 @@ mod tests {
         source_frame.set_color_space(ffmpeg::color::Space::RGB);
         source_frame.set_color_range(ffmpeg::color::Range::JPEG);
 
-        let (mut key, _) = D3d11ChromaKey::new("key", &device, context, default_options())
+        let (mut key, _) = D3d11ChromaKey::new("key", &gpu, default_options())
             .expect("D3d11ChromaKey::new should succeed");
         let received = capture(&mut key);
         key.consume(source).expect("keying must succeed");
@@ -975,19 +949,19 @@ mod tests {
     /// sample comes from inside it.
     #[test]
     fn only_the_visible_region_of_a_padded_texture_is_keyed() {
-        let Some((device, context)) = try_device() else {
+        let Some(gpu) = try_device() else {
             return;
         };
         // A 16x16 texture carrying an 8x8 visible picture, every texel the
         // key color: sampling past the visible region would clamp to the
         // same color, so what this pins down is the output's size and that
         // the uv_scale did not shrink the picture into a corner.
-        let padded = bgra_texture(&device, 16, 16, [0, 255, 0, 255], 1);
+        let padded = bgra_texture(gpu.device(), 16, 16, [0, 255, 0, 255], 1);
 
-        let (mut key, _) = D3d11ChromaKey::new("key", &device, context.clone(), default_options())
+        let (mut key, _) = D3d11ChromaKey::new("key", &gpu, default_options())
             .expect("D3d11ChromaKey::new should succeed");
-        let mut download = D3d11Download::new("download", &device, context)
-            .expect("D3d11Download::new should succeed");
+        let mut download =
+            D3d11Download::new("download", &gpu).expect("D3d11Download::new should succeed");
         let received = capture(&mut download);
         key.src_pads()[0].link(Box::new(download));
 
@@ -1017,18 +991,18 @@ mod tests {
     /// regardless would silently key the wrong picture.
     #[test]
     fn the_frames_own_array_slice_is_the_one_keyed() {
-        let Some((device, context)) = try_device() else {
+        let Some(gpu) = try_device() else {
             return;
         };
         // Slice 1 holds the key color, slice 0 opaque white. `frame`
         // stores array index 0, so the result must come out white and
         // fully opaque rather than keyed.
-        let array = bgra_texture(&device, 8, 8, [0, 255, 0, 255], 2);
+        let array = bgra_texture(gpu.device(), 8, 8, [0, 255, 0, 255], 2);
 
-        let (mut key, _) = D3d11ChromaKey::new("key", &device, context.clone(), default_options())
+        let (mut key, _) = D3d11ChromaKey::new("key", &gpu, default_options())
             .expect("D3d11ChromaKey::new should succeed");
-        let mut download = D3d11Download::new("download", &device, context)
-            .expect("D3d11Download::new should succeed");
+        let mut download =
+            D3d11Download::new("download", &gpu).expect("D3d11Download::new should succeed");
         let received = capture(&mut download);
         key.src_pads()[0].link(Box::new(download));
 
@@ -1047,10 +1021,10 @@ mod tests {
 
     #[test]
     fn a_cpu_frame_is_a_typed_error_not_a_panic() {
-        let Some((device, context)) = try_device() else {
+        let Some(gpu) = try_device() else {
             return;
         };
-        let (mut key, _) = D3d11ChromaKey::new("key", &device, context, default_options())
+        let (mut key, _) = D3d11ChromaKey::new("key", &gpu, default_options())
             .expect("D3d11ChromaKey::new should succeed");
         let pool = UnboundObjectPool::new(
             0,
@@ -1077,7 +1051,7 @@ mod tests {
     /// says why, not drawn into a garbage result.
     #[test]
     fn an_nv12_texture_is_rejected_with_the_format_named() {
-        let Some((device, context)) = try_device() else {
+        let Some(gpu) = try_device() else {
             return;
         };
         let desc = D3D11_TEXTURE2D_DESC {
@@ -1099,13 +1073,13 @@ mod tests {
         // SAFETY: `desc` is fully initialized, no initial pixels are supplied,
         // and `texture` is a live out-parameter.
         unsafe {
-            device
+            gpu.device()
                 .CreateTexture2D(&desc, None, Some(&mut texture))
                 .expect("CreateTexture2D(NV12) failed");
         }
         let texture = texture.expect("CreateTexture2D succeeded without producing a texture");
 
-        let (mut key, _) = D3d11ChromaKey::new("key", &device, context, default_options())
+        let (mut key, _) = D3d11ChromaKey::new("key", &gpu, default_options())
             .expect("D3d11ChromaKey::new should succeed");
         let error = key
             .consume(frame(texture, 16, 16, 1))
@@ -1126,7 +1100,7 @@ mod tests {
     /// failure.
     #[test]
     fn a_texture_without_the_shader_resource_bind_is_rejected() {
-        let Some((device, context)) = try_device() else {
+        let Some(gpu) = try_device() else {
             return;
         };
         let desc = D3D11_TEXTURE2D_DESC {
@@ -1148,13 +1122,13 @@ mod tests {
         // SAFETY: `desc` is fully initialized for a render target, no initial
         // pixels are supplied, and `texture` is a live out-parameter.
         unsafe {
-            device
+            gpu.device()
                 .CreateTexture2D(&desc, None, Some(&mut texture))
                 .expect("CreateTexture2D(BGRA render target) failed");
         }
         let texture = texture.expect("CreateTexture2D succeeded without producing a texture");
 
-        let (mut key, _) = D3d11ChromaKey::new("key", &device, context, default_options())
+        let (mut key, _) = D3d11ChromaKey::new("key", &gpu, default_options())
             .expect("D3d11ChromaKey::new should succeed");
         let error = key
             .consume(frame(texture, 8, 8, 1))
@@ -1174,15 +1148,15 @@ mod tests {
     /// named as such rather than drawn from.
     #[test]
     fn a_texture_from_another_device_is_rejected() {
-        let Some((device, context)) = try_device() else {
+        let Some(gpu) = try_device() else {
             return;
         };
-        let Some((other_device, _other_context)) = try_device() else {
+        let Some(other) = try_device() else {
             return;
         };
-        let foreign = bgra_texture(&other_device, 8, 8, [0, 255, 0, 255], 1);
+        let foreign = bgra_texture(other.device(), 8, 8, [0, 255, 0, 255], 1);
 
-        let (mut key, _) = D3d11ChromaKey::new("key", &device, context, default_options())
+        let (mut key, _) = D3d11ChromaKey::new("key", &gpu, default_options())
             .expect("D3d11ChromaKey::new should succeed");
         let error = key
             .consume(frame(foreign, 8, 8, 1))
@@ -1196,29 +1170,12 @@ mod tests {
         );
     }
 
-    /// Caught at construction, where the caller can still act on it —
-    /// not once per frame.
-    #[test]
-    fn a_context_from_another_device_is_rejected_at_construction() {
-        let Some((device, _context)) = try_device() else {
-            return;
-        };
-        let Some((_other_device, other_context)) = try_device() else {
-            return;
-        };
-
-        assert!(matches!(
-            D3d11ChromaKey::new("key", &device, other_context, default_options()),
-            Err(D3d11ChromaKeyError::ContextDeviceMismatch)
-        ));
-    }
-
     #[test]
     fn audio_buffers_are_rejected_not_silently_dropped() {
-        let Some((device, context)) = try_device() else {
+        let Some(gpu) = try_device() else {
             return;
         };
-        let (mut key, _) = D3d11ChromaKey::new("key", &device, context, default_options())
+        let (mut key, _) = D3d11ChromaKey::new("key", &gpu, default_options())
             .expect("D3d11ChromaKey::new should succeed");
 
         let error = key
@@ -1274,11 +1231,11 @@ mod tests {
     /// would hide.
     #[test]
     fn keying_frames_does_not_accumulate_d3d11_objects() {
-        let Some((device, context, live)) = crate::test_support::try_d3d11_debug_device() else {
+        let Some((gpu, live)) = crate::test_support::try_d3d11_debug_device() else {
             return;
         };
-        let texture = bgra_texture(&device, 64, 64, [0, 255, 0, 255], 1);
-        let (mut key, _) = D3d11ChromaKey::new("key", &device, context, default_options())
+        let texture = bgra_texture(gpu.device(), 64, 64, [0, 255, 0, 255], 1);
+        let (mut key, _) = D3d11ChromaKey::new("key", &gpu, default_options())
             .expect("D3d11ChromaKey::new should succeed");
         let received = capture(&mut key);
 

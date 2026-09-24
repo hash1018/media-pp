@@ -18,7 +18,7 @@ use crate::{
     element::{Element, ElementType, Sink, Source, element_pp_log},
     error::Result,
     pad::SrcPad,
-    platform::windows::d3d11va::wrap_d3d11_texture,
+    platform::windows::{d3d11_gpu::D3d11Gpu, d3d11va::wrap_d3d11_texture},
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
     repeat::{PerFrameTransform, RepeatedOutput},
 };
@@ -130,11 +130,12 @@ pub struct D3d11Upload {
 }
 
 impl D3d11Upload {
-    /// `device` must outlive this element (and, transitively, every frame
-    /// it produces that's still alive downstream), and must be the same
-    /// `ID3D11Device` every other D3D11 element in this pipeline shares —
-    /// see [`crate::elements::D3d11Renderer`]'s own docs on why.
-    pub fn new(name: impl Into<String>, device: &ID3D11Device) -> Self {
+    /// `gpu` must be the [`D3d11Gpu`] every other D3D11 element in this
+    /// pipeline shares — see its own docs on why. The element keeps the
+    /// device alive for as long as it, and every frame it produced that is
+    /// still alive downstream, needs it.
+    pub fn new(name: impl Into<String>, gpu: &D3d11Gpu) -> Self {
+        let device = gpu.device();
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::D3d11Upload, &name, None);
         let pad = SrcPad::with_contract(
@@ -375,7 +376,7 @@ mod tests {
     use super::*;
     use crate::{
         element::Sink, platform::windows::d3d11va::d3d11va_texture, pool::UnboundObjectPool,
-        test_support::try_d3d11_device,
+        test_support::try_d3d11_gpu,
     };
 
     /// One pooled CPU frame, as an upstream element hands one over.
@@ -418,10 +419,10 @@ mod tests {
     /// repeat carries its own timestamp; only the texture is shared.
     #[test]
     fn a_repeated_input_is_uploaded_once() {
-        let Some((device, _context)) = try_d3d11_device() else {
+        let Some(gpu) = try_d3d11_gpu() else {
             return;
         };
-        let mut upload = D3d11Upload::new("upload", &device);
+        let mut upload = D3d11Upload::new("upload", &gpu);
         let received = capture(&mut upload);
         let source = cpu_frame(4, 4, 100);
         let repeat = repeat_of(&source, 200);
@@ -508,11 +509,13 @@ mod tests {
     /// color round trip on anything headed for one of them.
     #[test]
     fn a_cpu_bgra_frame_uploads_to_a_bgra_texture_with_its_pixels_intact() {
-        let Some((device, context)) = try_d3d11_device() else {
+        let Some(gpu) = try_d3d11_gpu() else {
             return;
         };
+        let device = gpu.device().clone();
+        let context = gpu.context();
         let (width, height) = (16u32, 16u32);
-        let mut upload = D3d11Upload::new("test-upload", &device);
+        let mut upload = D3d11Upload::new("test-upload", &gpu);
         let received = capture(&mut upload);
 
         let color = [10u8, 200, 30, 255]; // BGRA
@@ -582,11 +585,11 @@ mod tests {
     /// inputs must land in different DXGI formats through the same element.
     #[test]
     fn an_nv12_frame_uploads_to_an_nv12_texture() {
-        let Some((device, _context)) = try_d3d11_device() else {
+        let Some(gpu) = try_d3d11_gpu() else {
             return;
         };
         let (width, height) = (16u32, 16u32);
-        let mut upload = D3d11Upload::new("test-upload", &device);
+        let mut upload = D3d11Upload::new("test-upload", &gpu);
         let received = capture(&mut upload);
 
         let pool = UnboundObjectPool::new(
@@ -625,10 +628,10 @@ mod tests {
     /// texture size was settled before any frame had arrived.
     #[test]
     fn a_source_that_changes_resolution_is_followed() {
-        let Some((device, _context)) = try_d3d11_device() else {
+        let Some(gpu) = try_d3d11_gpu() else {
             return;
         };
-        let mut upload = D3d11Upload::new("test-upload", &device);
+        let mut upload = D3d11Upload::new("test-upload", &gpu);
         let received = capture(&mut upload);
 
         upload
@@ -668,11 +671,11 @@ mod tests {
 
     #[test]
     fn a_format_neither_path_handles_is_a_typed_error_not_a_panic() {
-        let Some((device, _context)) = try_d3d11_device() else {
+        let Some(gpu) = try_d3d11_gpu() else {
             return;
         };
         let (width, height) = (16u32, 16u32);
-        let mut upload = D3d11Upload::new("test-upload", &device);
+        let mut upload = D3d11Upload::new("test-upload", &gpu);
 
         let pool = UnboundObjectPool::new(
             0,

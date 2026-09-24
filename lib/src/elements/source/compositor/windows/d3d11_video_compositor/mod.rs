@@ -58,6 +58,7 @@ use crate::{
     pad::SrcPad,
     platform::windows::{
         d3d11::{compile_shader, protect_shared_device},
+        d3d11_gpu::D3d11Gpu,
         d3d11va::{d3d11va_texture, wrap_d3d11_texture},
     },
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
@@ -831,25 +832,23 @@ pub struct D3d11VideoCompositor {
 unsafe impl Send for D3d11VideoCompositor {}
 
 impl D3d11VideoCompositor {
-    /// `device` must be the same `ID3D11Device` every producer feeding this
-    /// compositor's inputs uses. `context` must be the exact same shared
-    /// `Arc<Mutex<ID3D11DeviceContext>>` every other context-touching D3D11
-    /// consumer in this pipeline uses — [`D3d11Gpu::context`](crate::elements::D3d11Gpu::context),
-    /// which is the pipeline device's one immediate context behind the one
-    /// lock every element shares. Reading a texture via
-    /// `CopySubresourceRegion`/`Map` ([`crate::elements::D3d11Download`]) or drawing
-    /// with it (a window renderer) are both context-level operations, and
-    /// only funneling every one of them through one shared, mutex-guarded
-    /// context is what lets this whole stack skip explicit GPU fences once
-    /// a consumer has submitted its read. Output texture reuse is governed
-    /// separately by the output frame's downstream `Arc` lifetime, because
-    /// a frame waiting inside a `Queue` has not submitted that read yet.
+    /// `gpu` must be the [`D3d11Gpu`] every producer feeding this
+    /// compositor's inputs, and every other D3D11 element in this pipeline,
+    /// shares: its [`D3d11Gpu::context`] is the device's one immediate
+    /// context behind the one lock every element takes. Reading a texture via
+    /// `CopySubresourceRegion`/`Map` ([`crate::elements::D3d11Download`]) or
+    /// drawing with it (a window renderer) are both context-level operations,
+    /// and only funneling every one of them through one shared, mutex-guarded
+    /// context is what lets this whole stack skip explicit GPU fences once a
+    /// consumer has submitted its read. Output texture reuse is governed
+    /// separately by the output frame's downstream `Arc` lifetime, because a
+    /// frame waiting inside a `Queue` has not submitted that read yet.
     pub fn new(
         name: impl Into<String>,
-        device: &ID3D11Device,
-        context: Arc<Mutex<ID3D11DeviceContext>>,
+        gpu: &D3d11Gpu,
         options: VideoCompositorOptions,
     ) -> std::result::Result<(Self, D3d11VideoCompositorHandle), D3d11VideoCompositorError> {
+        let (device, context) = (gpu.device(), gpu.context());
         validate_output_options(options)?;
         // Every input arrives from another thread, and the compositor draws
         // through the same immediate context those producers write with.

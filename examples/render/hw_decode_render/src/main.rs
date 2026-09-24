@@ -80,9 +80,7 @@ mod windows_example {
         let decoder = VideoDecodeBin::open(
             "decoder",
             video.parameters.clone(),
-            DecodeTarget::D3d12 {
-                device: gpu.device().clone(),
-            },
+            DecodeTarget::D3d12 { gpu: gpu.clone() },
             None,
         )?;
         println!("decoding: {:?}", decoder.path());

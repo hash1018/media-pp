@@ -69,7 +69,11 @@ use crate::{
     element::{Element, ElementType, Source, SourceElement, element_pp_log},
     error::{D3d11FrameWrapError, D3d11SharedDeviceError, Result},
     pad::SrcPad,
-    platform::windows::{d3d11::protect_shared_device, d3d11va::wrap_d3d11_texture},
+    platform::windows::{
+        d3d11::protect_shared_device,
+        d3d11_gpu::{D3d11Gpu, D3d11GpuError},
+        d3d11va::wrap_d3d11_texture,
+    },
     pool::UnboundObjectPool,
     pp_log::{PpLog, pp_error, pp_info, pp_warn},
     schedule::PeriodicSchedule,
@@ -112,6 +116,10 @@ pub enum WgcCaptureSourceError {
     /// The capture device cannot be shared across a pipeline's threads.
     #[error(transparent)]
     SharedDevice(#[from] D3d11SharedDeviceError),
+    /// The device made for the capture could not be set up as the
+    /// [`D3d11Gpu`] [`WgcCaptureSource::open`] returns.
+    #[error(transparent)]
+    Gpu(#[from] D3d11GpuError),
     /// The helper thread that watches the original HWND could not start.
     #[error("cannot start the WGC window lifetime watcher: {0}")]
     WindowWatcherUnavailable(String),
@@ -239,14 +247,14 @@ pub struct WgcCaptureSource {
 
 impl WgcCaptureSource {
     /// Validates `hwnd`, starts its lifetime watcher, creates the capture's D3D11
-    /// device, and returns both the source and a cloned device reference for
-    /// downstream construction. The frame pool and session are activated in
+    /// device, and returns both the source and that device as the [`D3d11Gpu`]
+    /// every other D3D11 element in the pipeline is to share. The frame pool and session are activated in
     /// [`SourceElement::run`] on their owning source thread.
     pub fn open(
         name: impl Into<String>,
         hwnd: HWND,
         options: WgcCaptureOptions,
-    ) -> std::result::Result<(Self, ID3D11Device), WgcCaptureSourceError> {
+    ) -> std::result::Result<(Self, D3d11Gpu), WgcCaptureSourceError> {
         validate_options(&options)?;
         let target = CaptureTarget::open(hwnd)?;
 
@@ -272,28 +280,28 @@ impl WgcCaptureSource {
         let device = device.expect("D3D11CreateDevice succeeded without producing a device");
         drop(context);
         let context = protect_shared_device(&device)?;
-        let returned_device = device.clone();
+        let gpu = D3d11Gpu::from_device(device.clone())?;
         let source = Self::from_device(name, target, options, device, context);
 
-        Ok((source, returned_device))
+        Ok((source, gpu))
     }
 
-    /// Uses a caller-owned D3D11 device for capture, allowing capture,
-    /// filtering, compositing, encoding, and rendering to share one device.
+    /// Captures on the [`D3d11Gpu`] every other D3D11 element in this pipeline
+    /// shares, allowing capture, filtering, compositing, encoding, and
+    /// rendering to share one device.
     ///
-    /// The device must have been created with
-    /// `D3D11_CREATE_DEVICE_BGRA_SUPPORT` and without
-    /// `D3D11_CREATE_DEVICE_SINGLETHREADED`. This method enables its immediate
-    /// context's D3D11 runtime multithread protection. WGC surfaces and emitted
-    /// frames remain GPU-resident on this exact device; each new captured image
-    /// still needs one GPU copy to separate its lifetime from WGC's reusable
-    /// frame pool surface.
+    /// Its device must have been created with
+    /// `D3D11_CREATE_DEVICE_BGRA_SUPPORT`, as [`D3d11Gpu::new`]'s is. WGC
+    /// surfaces and emitted frames remain GPU-resident on this exact device;
+    /// each new captured image still needs one GPU copy to separate its
+    /// lifetime from WGC's reusable frame pool surface.
     pub fn open_with_device(
         name: impl Into<String>,
         hwnd: HWND,
         options: WgcCaptureOptions,
-        device: &ID3D11Device,
+        gpu: &D3d11Gpu,
     ) -> std::result::Result<Self, WgcCaptureSourceError> {
+        let device = gpu.device();
         validate_options(&options)?;
         let target = CaptureTarget::open(hwnd)?;
         // SAFETY: this reads immutable creation metadata from a live device.
@@ -1273,7 +1281,7 @@ impl Drop for WgcRuntime {
 #[cfg(test)]
 mod tests {
     use std::{
-        sync::{Arc, Mutex, mpsc},
+        sync::{Arc, mpsc},
         thread,
         time::Duration,
     };
@@ -1481,30 +1489,6 @@ mod tests {
         probe_in_a_fresh_apartment();
     }
 
-    /// Capture runs on the source thread while everything past the first
-    /// `Queue` runs on another, so a device that promised single-threaded use
-    /// has to be refused at `open_with_device` — before a window is watched or
-    /// a WGC object exists.
-    #[test]
-    fn rejects_a_single_threaded_device() {
-        let Some(device) = crate::test_support::try_single_threaded_d3d11_device() else {
-            return;
-        };
-        let window = TestWindow::create().expect("create capture target window");
-        let result = WgcCaptureSource::open_with_device(
-            "capture",
-            window.0,
-            WgcCaptureOptions::default(),
-            &device,
-        );
-        assert!(matches!(
-            result,
-            Err(WgcCaptureSourceError::SharedDevice(
-                D3d11SharedDeviceError::SingleThreaded
-            ))
-        ));
-    }
-
     /// The destroy hook is asynchronous and can be missed, so the identity
     /// read is what has to keep answering for a window that went away while
     /// its owner kept running — otherwise the source loop parks forever on
@@ -1562,7 +1546,7 @@ mod tests {
     #[ignore = "requires an interactive Windows Graphics Capture session"]
     fn queue_and_d3d11_scaler_share_the_capture_context_safely() {
         let window = TestWindow::create().expect("create capture target window");
-        let (source, device) = match WgcCaptureSource::open(
+        let (source, gpu) = match WgcCaptureSource::open(
             "capture",
             window.0,
             WgcCaptureOptions {
@@ -1576,20 +1560,13 @@ mod tests {
                 return;
             }
         };
-        // SAFETY: returns the one live immediate context owned by `device`.
-        let context = unsafe { device.GetImmediateContext() }.expect("immediate context");
+        // SAFETY: returns the one live immediate context owned by the device.
+        let context = unsafe { gpu.device().GetImmediateContext() }.expect("immediate context");
         let multithread: ID3D11Multithread = context.cast().expect("multithread interface");
         // SAFETY: reads one boolean property from the live context interface.
         assert!(unsafe { multithread.GetMultithreadProtected() }.as_bool());
-        let scaler = D3d11Scaler::new(
-            "scale",
-            &device,
-            Arc::new(Mutex::new(context)),
-            D3d11ScalerFormat::Preserve,
-            160,
-            120,
-        )
-        .expect("create scaler");
+        let scaler = D3d11Scaler::new("scale", &gpu, D3d11ScalerFormat::Preserve, 160, 120)
+            .expect("create scaler");
         let (counter, frames) = FrameCounter::new("frames");
         let (pipeline, ()) = Pipeline::new("wgc-d3d11-queue", source, |source, ctx| {
             let branch = ctx.branch().queue("captured", 4).pipe(scaler).to(counter)?;
@@ -1614,7 +1591,7 @@ mod tests {
     #[ignore = "requires an interactive Windows Graphics Capture session"]
     fn captures_after_one_downstream_frame_failure() {
         let window = TestWindow::create().expect("create capture target window");
-        let (created, device) = match WgcCaptureSource::open(
+        let (created, gpu) = match WgcCaptureSource::open(
             "capture",
             window.0,
             WgcCaptureOptions {
@@ -1636,7 +1613,7 @@ mod tests {
                 frame_rate: ffmpeg::Rational::new(30, 1),
                 include_cursor: false,
             },
-            &device,
+            &gpu,
         )
         .expect("the device created by WGC open must be reusable");
 
@@ -1779,7 +1756,7 @@ mod tests {
             return;
         };
 
-        let (source, _device) = match WgcCaptureSource::open(
+        let (source, _gpu) = match WgcCaptureSource::open(
             "capture",
             hwnd,
             WgcCaptureOptions {
@@ -1838,7 +1815,7 @@ mod tests {
     #[ignore = "requires an interactive Windows Graphics Capture session"]
     fn destroying_the_target_window_ends_the_source() {
         let window = TestWindow::create().expect("create capture target window");
-        let (source, _device) = match WgcCaptureSource::open(
+        let (source, _gpu) = match WgcCaptureSource::open(
             "capture",
             window.0,
             WgcCaptureOptions {

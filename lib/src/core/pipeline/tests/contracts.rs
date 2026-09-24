@@ -249,7 +249,7 @@ fn a_demuxer_declares_packets_on_every_stream_pad() {
 fn a_system_memory_frame_cannot_feed_a_d3d11_filter() {
     use crate::elements::{D3d11ScalerFormat, D3d11Upload};
 
-    let Some((device, d3d_context)) = crate::test_support::try_d3d11_device() else {
+    let Some(gpu) = crate::test_support::try_d3d11_gpu() else {
         eprintln!("skipped: no D3D11 hardware device available");
         return;
     };
@@ -262,14 +262,7 @@ fn a_system_memory_frame_cannot_feed_a_d3d11_filter() {
     // the other, and that is a missing capability to skip on, not a
     // failure of what this test is checking.
     let scaler = |name: &str| {
-        crate::elements::D3d11Scaler::new(
-            name,
-            &device,
-            d3d_context.clone(),
-            D3d11ScalerFormat::Preserve,
-            64,
-            64,
-        )
+        crate::elements::D3d11Scaler::new(name, &gpu, D3d11ScalerFormat::Preserve, 64, 64)
     };
     if let Err(error) = scaler("probe") {
         eprintln!("skipped: this D3D11 device has no usable video processor ({error})");
@@ -299,7 +292,7 @@ fn a_system_memory_frame_cannot_feed_a_d3d11_filter() {
     contract_context()
         .branch()
         .pipe(video_decoder("decoder"))
-        .pipe(D3d11Upload::new("upload", &device))
+        .pipe(D3d11Upload::new("upload", &gpu))
         .pipe(scaler("scaler"))
         .to(DeclaringSink::boxed("renderer", gpu_frames))
         .expect("a D3d11Upload is exactly what makes this chain valid");
@@ -312,7 +305,7 @@ fn a_system_memory_frame_cannot_feed_a_d3d11_filter() {
 fn a_d3d11_frame_cannot_feed_a_cpu_filter() {
     use crate::elements::{D3d11Upload, SwScaler};
 
-    let Some((device, _d3d_context)) = crate::test_support::try_d3d11_device() else {
+    let Some(gpu) = crate::test_support::try_d3d11_gpu() else {
         eprintln!("skipped: no D3D11 hardware device available");
         return;
     };
@@ -320,7 +313,7 @@ fn a_d3d11_frame_cannot_feed_a_cpu_filter() {
     let Err(error) = contract_context()
         .branch()
         .pipe(video_decoder("decoder"))
-        .pipe(D3d11Upload::new("upload", &device))
+        .pipe(D3d11Upload::new("upload", &gpu))
         .pipe(SwScaler::new(
             "scaler",
             ffmpeg::format::Pixel::YUV420P,
@@ -526,7 +519,7 @@ fn a_video_effect_takes_video_frames_and_refuses_audio() {
 fn a_d3d11_texture_cannot_feed_a_cuda_filter() {
     use crate::elements::{CudaScaler, CudaScalerInterp, D3d11Upload};
 
-    let Some((device, _d3d_context)) = crate::test_support::try_d3d11_device() else {
+    let Some(gpu) = crate::test_support::try_d3d11_gpu() else {
         eprintln!("skipped: no D3D11 hardware device available");
         return;
     };
@@ -537,7 +530,7 @@ fn a_d3d11_texture_cannot_feed_a_cuda_filter() {
     let Err(error) = contract_context()
         .branch()
         .pipe(video_decoder("decoder"))
-        .pipe(D3d11Upload::new("upload", &device))
+        .pipe(D3d11Upload::new("upload", &gpu))
         .pipe(CudaScaler::new(
             "scaler",
             &cuda,
@@ -605,14 +598,14 @@ fn a_d3d12_renderer_takes_device_resources_only() {
         }
     }
 
-    let Some(device) = crate::test_support::try_d3d12_device() else {
+    let Some(gpu) = crate::test_support::try_d3d12_gpu() else {
         eprintln!("skipped: no D3D12 hardware device available");
         return;
     };
     // The second half of this test needs a working D3D12VA hw frames
     // context, which a device alone does not guarantee. Probe for it up
     // front so a machine without one skips rather than failing halfway.
-    let upload = match D3d12Upload::new("upload", &device) {
+    let upload = match D3d12Upload::new("upload", &gpu) {
         Ok(upload) => upload,
         Err(error) => {
             eprintln!("skipped: this D3D12 device cannot open a frames context ({error})");
@@ -625,7 +618,7 @@ fn a_d3d12_renderer_takes_device_resources_only() {
         .pipe(video_decoder("decoder"))
         .to(D3d12Renderer::new(
             "renderer",
-            Box::new(StubRenderer(device.clone())),
+            Box::new(StubRenderer(gpu.device().clone())),
         ))
     else {
         panic!("a software decoder's frames have no path to the swap chain");
@@ -647,7 +640,7 @@ fn a_d3d12_renderer_takes_device_resources_only() {
         .pipe(upload)
         .to(D3d12Renderer::new(
             "renderer",
-            Box::new(StubRenderer(device)),
+            Box::new(StubRenderer(gpu.device().clone())),
         ))
         .expect("a D3D12 resource is exactly what this renderer accepts");
 }
@@ -858,16 +851,15 @@ impl crate::elements::D3d11FrameRenderer for StubD3d11Renderer {
 fn a_passthrough_at_the_head_of_a_branch_still_carries_the_downstream_requirement() {
     use crate::elements::{TestVideoOptions, TestVideoSource, VideoSynchronizer};
 
-    let Some((device, d3d_context)) = crate::test_support::try_d3d11_device() else {
+    let Some(gpu) = crate::test_support::try_d3d11_gpu() else {
         eprintln!("skipped: no D3D11 hardware device available");
         return;
     };
     let context = contract_context();
     let renderer = crate::elements::D3d11Renderer::new(
         "renderer",
-        Box::new(StubD3d11Renderer(device.clone())),
+        Box::new(StubD3d11Renderer(gpu.device().clone())),
     );
-    let _ = &d3d_context;
 
     let branch = context
         .branch()
@@ -914,14 +906,14 @@ fn a_passthrough_at_the_head_of_a_branch_accepts_a_matching_source() {
         D3d11Upload, SwScaler, TestVideoOptions, TestVideoSource, VideoSynchronizer,
     };
 
-    let Some((device, _d3d_context)) = crate::test_support::try_d3d11_device() else {
+    let Some(gpu) = crate::test_support::try_d3d11_gpu() else {
         eprintln!("skipped: no D3D11 hardware device available");
         return;
     };
     let context = contract_context();
     let renderer = crate::elements::D3d11Renderer::new(
         "renderer",
-        Box::new(StubD3d11Renderer(device.clone())),
+        Box::new(StubD3d11Renderer(gpu.device().clone())),
     );
 
     let branch = context
@@ -934,7 +926,7 @@ fn a_passthrough_at_the_head_of_a_branch_accepts_a_matching_source() {
             64,
             ffmpeg::software::scaling::Flags::BILINEAR,
         ))
-        .pipe(D3d11Upload::new("upload", &device))
+        .pipe(D3d11Upload::new("upload", &gpu))
         .to(renderer)
         .expect("the branch itself is consistent");
 

@@ -61,7 +61,7 @@ mod windows_example {
             },
             ..DxgiCaptureOptions::default()
         };
-        let (source, _format, _device) = DxgiCaptureSource::open("screen", capture_options)?;
+        let (source, _format, _gpu) = DxgiCaptureSource::open("screen", capture_options)?;
 
         // The capture's BGRA in system memory, drawn as it comes: the renderer
         // uploads it itself and scales it to the window as it draws.

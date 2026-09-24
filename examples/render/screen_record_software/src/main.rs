@@ -77,7 +77,7 @@ mod windows_example {
             },
             ..DxgiCaptureOptions::default()
         };
-        let (source, format, _device) = DxgiCaptureSource::open("screen", capture_options)?;
+        let (source, format, _gpu) = DxgiCaptureSource::open("screen", capture_options)?;
 
         let encoder = SwEncoder::new(
             "encoder",

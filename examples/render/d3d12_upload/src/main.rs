@@ -72,7 +72,7 @@ mod windows_example {
             );
             // Same device the renderer draws with — required for the
             // zero-copy path to be valid at all (see D3d12Upload::new).
-            let upload = D3d12Upload::new("upload", gpu.device())?;
+            let upload = D3d12Upload::new("upload", &gpu)?;
 
             let branch = ctx
                 .branch()

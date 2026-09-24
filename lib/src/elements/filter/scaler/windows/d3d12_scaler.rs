@@ -24,6 +24,7 @@ use crate::{
     pad::SrcPad,
     platform::{
         ffmpeg::AvBufferRef,
+        windows::d3d12_gpu::D3d12Gpu,
         windows::d3d12va::{create_hw_device_ctx, create_hw_frames_ctx, d3d12va_texture},
     },
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
@@ -184,13 +185,15 @@ pub struct D3d12Scaler {
 unsafe impl Send for D3d12Scaler {}
 
 impl D3d12Scaler {
-    /// Creates a fixed-size NV12 scaler on `device`.
+    /// Creates a fixed-size NV12 scaler on `gpu`, which must be the
+    /// [`D3d12Gpu`] every other D3D12 element in this pipeline shares.
     pub fn new(
         name: impl Into<String>,
-        device: &ID3D12Device,
+        gpu: &D3d12Gpu,
         width: u32,
         height: u32,
     ) -> std::result::Result<Self, D3d12ScalerError> {
+        let device = gpu.device();
         validate_dimensions(width, height)?;
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::D3d12Scaler, &name, None);
@@ -511,9 +514,9 @@ mod tests {
 
     use super::*;
     use crate::elements::{D3d12Download, D3d12Upload};
-    use crate::test_support::try_d3d12_device as try_device;
+    use crate::test_support::try_d3d12_gpu as try_device;
 
-    fn try_distinct_device(first: &ID3D12Device) -> Option<ID3D12Device> {
+    fn try_distinct_device(first: &D3d12Gpu) -> Option<D3d12Gpu> {
         // SAFETY: creates the documented DXGI factory interface with no raw
         // caller-owned storage.
         let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }.ok()?;
@@ -526,9 +529,9 @@ mod tests {
             // out-parameter for the requested minimum feature level.
             if unsafe { D3D12CreateDevice(&adapter, D3D_FEATURE_LEVEL_11_0, &mut device) }.is_ok()
                 && let Some(device) = device
-                && device.as_raw() != first.as_raw()
+                && device.as_raw() != first.device().as_raw()
             {
-                return Some(device);
+                return D3d12Gpu::from_device(device).ok();
             }
             index += 1;
         }
@@ -542,17 +545,16 @@ mod tests {
     /// picture at the end would be a different one.
     #[test]
     fn a_repeated_input_travels_the_chain_without_redoing_it() {
-        let Some(device) = try_device() else {
+        let Some(gpu) = try_device() else {
             return;
         };
         let (input_width, input_height) = (128, 128);
         let (output_width, output_height) = (64, 64);
-        let Ok(mut upload) = D3d12Upload::new("upload", &device) else {
+        let Ok(mut upload) = D3d12Upload::new("upload", &gpu) else {
             eprintln!("skipping: FFmpeg could not create D3D12VA frames");
             return;
         };
-        let Ok(mut scaler) = D3d12Scaler::new("scaler", &device, output_width, output_height)
-        else {
+        let Ok(mut scaler) = D3d12Scaler::new("scaler", &gpu, output_width, output_height) else {
             eprintln!("skipping: D3D12 video processing is unavailable");
             return;
         };
@@ -618,17 +620,16 @@ mod tests {
 
     #[test]
     fn scales_nv12_on_gpu_and_preserves_metadata() {
-        let Some(device) = try_device() else {
+        let Some(gpu) = try_device() else {
             return;
         };
         let (input_width, input_height) = (128, 128);
         let (output_width, output_height) = (64, 64);
-        let Ok(mut upload) = D3d12Upload::new("upload", &device) else {
+        let Ok(mut upload) = D3d12Upload::new("upload", &gpu) else {
             eprintln!("skipping: FFmpeg could not create D3D12VA frames");
             return;
         };
-        let Ok(mut scaler) = D3d12Scaler::new("scaler", &device, output_width, output_height)
-        else {
+        let Ok(mut scaler) = D3d12Scaler::new("scaler", &gpu, output_width, output_height) else {
             eprintln!("skipping: D3D12 video processing is unavailable");
             return;
         };
@@ -719,10 +720,10 @@ mod tests {
 
     #[test]
     fn rejects_cpu_and_packet_buffers_and_forwards_eos() {
-        let Some(device) = try_device() else {
+        let Some(gpu) = try_device() else {
             return;
         };
-        let Ok(mut scaler) = D3d12Scaler::new("scaler", &device, 64, 64) else {
+        let Ok(mut scaler) = D3d12Scaler::new("scaler", &gpu, 64, 64) else {
             eprintln!("skipping: D3D12 video processing is unavailable");
             return;
         };
@@ -764,7 +765,7 @@ mod tests {
             eprintln!("skipping: no second D3D12 adapter is available");
             return;
         };
-        if first.as_raw() == second.as_raw() {
+        if first.device().as_raw() == second.device().as_raw() {
             eprintln!("skipping: D3D12CreateDevice returned the same device object twice");
             return;
         }

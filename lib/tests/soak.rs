@@ -655,7 +655,7 @@ fn segment_rotation_does_not_grow_process_memory_or_hold_files() {
 #[cfg(all(windows, feature = "d3d11"))]
 mod d3d11 {
     use std::{
-        sync::{Arc, Mutex},
+        sync::Arc,
         thread,
         time::{Duration, Instant},
     };
@@ -664,18 +664,18 @@ mod d3d11 {
     use media_pp::{
         color::Color,
         elements::{
-            ChromaKeyMethod, ChromaKeyOptions, D3d11ChromaKey, D3d11Decoder, D3d11Scaler,
+            ChromaKeyMethod, ChromaKeyOptions, D3d11ChromaKey, D3d11Decoder, D3d11Gpu, D3d11Scaler,
             D3d11ScalerFormat, D3d11Upload, D3d11VideoCodec, D3d11VideoCompositor,
             D3d11VideoEncoder, D3d11VideoEncoderOptions, D3d11VideoInputFormat, FrameCounter,
             PacketCounter, SwScaler, VideoCompositorOptions, VideoLayer, VideoRect,
         },
         pipeline::Pipeline,
     };
-    use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11DeviceContext};
+    use windows::Win32::Graphics::Direct3D11::ID3D11Device;
 
     use crate::common::{
         MIB, Trend, Unit, exclusive,
-        gpu::{D3d11LiveObjects, try_d3d11_device, vram_bytes},
+        gpu::{D3d11LiveObjects, try_d3d11_gpu, vram_bytes},
         iterations, settle, soak_duration, try_test_video,
     };
     use crate::{HEIGHT, Teardown, WARMUP, WIDTH, frame_rate, test_source};
@@ -693,14 +693,9 @@ mod d3d11 {
     /// Upload every frame to a texture, scale it on the video processor,
     /// and hold the results in a queue — the shape of a real GPU pipeline,
     /// minus the renderer a headless test cannot present to.
-    fn cycle(
-        device: &ID3D11Device,
-        context: &Arc<Mutex<ID3D11DeviceContext>>,
-        teardown: Teardown,
-    ) -> usize {
+    fn cycle(gpu: &D3d11Gpu, teardown: Teardown) -> usize {
         let (counter, frames) = FrameCounter::new("counter");
-        let device = device.clone();
-        let context = context.clone();
+        let gpu = gpu.clone();
         let (pipeline, ()) =
             Pipeline::new("soak-d3d11", test_source("video"), move |source, ctx| {
                 let to_nv12 = SwScaler::new(
@@ -710,11 +705,10 @@ mod d3d11 {
                     HEIGHT,
                     ffmpeg::software::scaling::Flags::BILINEAR,
                 );
-                let upload = D3d11Upload::new("upload", &device);
+                let upload = D3d11Upload::new("upload", &gpu);
                 let scaler = D3d11Scaler::new(
                     "scaler",
-                    &device,
-                    context.clone(),
+                    &gpu,
                     D3d11ScalerFormat::Preserve,
                     SCALED_WIDTH,
                     SCALED_HEIGHT,
@@ -749,15 +743,10 @@ mod d3d11 {
     /// GPU-resident BGRA in this crate — `D3d11Upload` is NV12-only, and
     /// desktop capture needs a desktop. It is also the real topology: this
     /// element exists to key a layer without leaving video memory.
-    fn chroma_key_cycle(
-        device: &ID3D11Device,
-        context: &Arc<Mutex<ID3D11DeviceContext>>,
-        teardown: Teardown,
-    ) -> usize {
+    fn chroma_key_cycle(gpu: &D3d11Gpu, teardown: Teardown) -> usize {
         let (compositor, compositor_handle) = D3d11VideoCompositor::new(
             "compositor",
-            device,
-            context.clone(),
+            gpu,
             VideoCompositorOptions {
                 width: WIDTH,
                 height: HEIGHT,
@@ -775,7 +764,7 @@ mod d3d11 {
             .expect("register the compositor input")
             .sink;
 
-        let input_device = device.clone();
+        let input_gpu = gpu.clone();
         let (input_pipeline, ()) = Pipeline::new("soak-d3d11-key-input", test_source("video"), {
             move |source, ctx| {
                 let to_nv12 = SwScaler::new(
@@ -785,7 +774,7 @@ mod d3d11 {
                     HEIGHT,
                     ffmpeg::software::scaling::Flags::BILINEAR,
                 );
-                let upload = D3d11Upload::new("upload", &input_device);
+                let upload = D3d11Upload::new("upload", &input_gpu);
                 let branch = ctx.branch().pipe(to_nv12).pipe(upload).to(layer_sink)?;
                 ctx.attach(source, 0, branch)?;
                 Ok(())
@@ -794,14 +783,12 @@ mod d3d11 {
         .expect("wire the compositor input pipeline");
 
         let (counter, frames) = FrameCounter::new("counter");
-        let key_device = device.clone();
-        let key_context = context.clone();
+        let key_gpu = gpu.clone();
         let (output_pipeline, ()) =
             Pipeline::new("soak-d3d11-key", compositor, move |source, ctx| {
                 let (key, _key_handle) = D3d11ChromaKey::new(
                     "key",
-                    &key_device,
-                    key_context,
+                    &key_gpu,
                     ChromaKeyOptions {
                         method: ChromaKeyMethod::Green,
                         threshold: 0.15,
@@ -839,13 +826,13 @@ mod d3d11 {
     /// upload scenario is the decoder's own fixed-size surface pool: a
     /// decoder that outlived its cycle would keep that whole texture array
     /// while the next cycle allocates another one.
-    fn decode_cycle(device: &ID3D11Device, path: &str, teardown: Teardown) -> usize {
+    fn decode_cycle(gpu: &D3d11Gpu, path: &str, teardown: Teardown) -> usize {
         let (source, index, parameters) = crate::open_fixture(path);
         let (counter, frames) = FrameCounter::new("counter");
-        let device = device.clone();
+        let gpu = gpu.clone();
         let (pipeline, ()) = Pipeline::new("soak-d3d11-decode", source, move |source, ctx| {
             let decoder =
-                D3d11Decoder::new("decoder", parameters, &device, DECODE_QUEUE_DEPTH as i32)?;
+                D3d11Decoder::new("decoder", parameters, &gpu, DECODE_QUEUE_DEPTH as i32)?;
             let branch = ctx
                 .branch()
                 .pipe(decoder)
@@ -886,15 +873,10 @@ mod d3d11 {
     /// hardware encoding session, and consumer drivers cap how many can be
     /// open at once — so a session that outlived its cycle stops a later
     /// cycle from opening at all, rather than merely costing memory.
-    fn encode_cycle(
-        device: &ID3D11Device,
-        context: &Arc<Mutex<ID3D11DeviceContext>>,
-        teardown: Teardown,
-    ) -> usize {
+    fn encode_cycle(gpu: &D3d11Gpu, teardown: Teardown) -> usize {
         let (counter, packets) = PacketCounter::new("counter");
         let source = test_source("video");
-        let device = device.clone();
-        let context = context.clone();
+        let gpu = gpu.clone();
         let (pipeline, ()) = Pipeline::new("soak-d3d11-nvenc", source, move |source, ctx| {
             let to_nv12 = SwScaler::new(
                 "to-nv12",
@@ -903,9 +885,8 @@ mod d3d11 {
                 HEIGHT,
                 ffmpeg::software::scaling::Flags::BILINEAR,
             );
-            let upload = D3d11Upload::new("upload", &device);
-            let encoder =
-                D3d11VideoEncoder::new("encoder", &device, context.clone(), nvenc_options())?;
+            let upload = D3d11Upload::new("upload", &gpu);
+            let encoder = D3d11VideoEncoder::new("encoder", &gpu, nvenc_options())?;
             let branch = ctx
                 .branch()
                 .pipe(to_nv12)
@@ -928,8 +909,8 @@ mod d3d11 {
     }
 
     /// Whether this GPU and FFmpeg build have NVENC at all.
-    fn nvenc_supported(device: &ID3D11Device, context: &Arc<Mutex<ID3D11DeviceContext>>) -> bool {
-        match D3d11VideoEncoder::new("probe", device, context.clone(), nvenc_options()) {
+    fn nvenc_supported(gpu: &D3d11Gpu) -> bool {
+        match D3d11VideoEncoder::new("probe", gpu, nvenc_options()) {
             Ok(_) => true,
             Err(error) => {
                 eprintln!("skipping: no D3D11 NVENC encoder on this machine ({error})");
@@ -942,9 +923,9 @@ mod d3d11 {
     /// One that does not is not a failure of anything this scenario
     /// measures, so it skips with a reason the same way a missing device
     /// does.
-    fn decode_supported(device: &ID3D11Device, path: &str) -> bool {
+    fn decode_supported(gpu: &D3d11Gpu, path: &str) -> bool {
         let (_source, _index, parameters) = crate::open_fixture(path);
-        match D3d11Decoder::new("probe", parameters, device, 0) {
+        match D3d11Decoder::new("probe", parameters, gpu, 0) {
             Ok(_) => true,
             Err(error) => {
                 eprintln!("skipping: no D3D11VA decoder for this fixture ({error})");
@@ -1058,7 +1039,7 @@ mod d3d11 {
     fn upload_and_scale_cycles_do_not_grow_gpu_memory() {
         isolate!();
         let _exclusive = exclusive();
-        let Some((device, context, live)) = try_d3d11_device() else {
+        let Some((gpu, live)) = try_d3d11_gpu() else {
             return;
         };
         // Every cycle allocates its own upload and scaler textures and
@@ -1066,7 +1047,7 @@ mod d3d11 {
         // cycle's worth of jitter, but not for a cycle's worth of growth.
         measure_cycles(
             "d3d11 cycle",
-            &device,
+            gpu.device(),
             live.map(Arc::new),
             Budget {
                 warmup: WARMUP,
@@ -1074,7 +1055,7 @@ mod d3d11 {
                 memory: Some(0.5 * MIB),
                 vram: 1.0 * MIB,
             },
-            |teardown| cycle(&device, &context, teardown),
+            |teardown| cycle(&gpu, teardown),
         );
     }
 
@@ -1083,7 +1064,7 @@ mod d3d11 {
     fn chroma_key_cycles_do_not_grow_gpu_memory() {
         isolate!();
         let _exclusive = exclusive();
-        let Some((device, context, live)) = try_d3d11_device() else {
+        let Some((gpu, live)) = try_d3d11_gpu() else {
             return;
         };
         // The live-object count is the gauge that matters here, and the
@@ -1098,7 +1079,7 @@ mod d3d11 {
         // place, which is where these thresholds come from.
         measure_cycles(
             "d3d11 chroma key cycle",
-            &device,
+            gpu.device(),
             live.map(Arc::new),
             Budget {
                 warmup: WARMUP,
@@ -1106,7 +1087,7 @@ mod d3d11 {
                 memory: Some(0.5 * MIB),
                 vram: 1.0 * MIB,
             },
-            |teardown| chroma_key_cycle(&device, &context, teardown),
+            |teardown| chroma_key_cycle(&gpu, teardown),
         );
     }
 
@@ -1128,14 +1109,13 @@ mod d3d11 {
     fn a_running_d3d11_compositor_does_not_grow_gpu_memory() {
         isolate!();
         let _exclusive = exclusive();
-        let Some((device, context, live)) = try_d3d11_device() else {
+        let Some((gpu, live)) = try_d3d11_gpu() else {
             return;
         };
 
         let (compositor, handle) = D3d11VideoCompositor::new(
             "compositor",
-            &device,
-            context.clone(),
+            &gpu,
             VideoCompositorOptions {
                 width: WIDTH,
                 height: HEIGHT,
@@ -1153,7 +1133,7 @@ mod d3d11 {
             .expect("register the compositor input")
             .sink;
 
-        let input_device = device.clone();
+        let input_gpu = gpu.clone();
         let (feeder, ()) = Pipeline::new("soak-running-d3d11-input", test_source("video"), {
             move |source, ctx| {
                 let to_nv12 = SwScaler::new(
@@ -1163,7 +1143,7 @@ mod d3d11 {
                     HEIGHT,
                     ffmpeg::software::scaling::Flags::BILINEAR,
                 );
-                let upload = D3d11Upload::new("upload", &input_device);
+                let upload = D3d11Upload::new("upload", &input_gpu);
                 let branch = ctx.branch().pipe(to_nv12).pipe(upload).to(layer_sink)?;
                 ctx.attach(source, 0, branch)?;
                 Ok(())
@@ -1187,7 +1167,7 @@ mod d3d11 {
         let sample_interval = Duration::from_secs(1);
         let mut memory = Trend::private_bytes("running d3d11 compositor private bytes");
         let mut vram = Trend::new("running d3d11 compositor adapter memory", Unit::Bytes, {
-            let device = device.clone();
+            let device = gpu.device().clone();
             move || vram_bytes(&device)
         });
         let mut objects = live.map(Arc::new).map(|live| {
@@ -1250,10 +1230,10 @@ mod d3d11 {
         isolate!();
         let _exclusive = exclusive();
         let Some(path) = try_test_video() else { return };
-        let Some((device, _context, live)) = try_d3d11_device() else {
+        let Some((gpu, live)) = try_d3d11_gpu() else {
             return;
         };
-        if !decode_supported(&device, &path) {
+        if !decode_supported(&gpu, &path) {
             return;
         }
         // A decode surface pool is much larger than the upload scenario's
@@ -1261,7 +1241,7 @@ mod d3d11 {
         // still far below a single missed release.
         measure_cycles(
             "d3d11 decode cycle",
-            &device,
+            gpu.device(),
             live.map(Arc::new),
             Budget {
                 warmup: WARMUP,
@@ -1269,7 +1249,7 @@ mod d3d11 {
                 memory: Some(0.5 * MIB),
                 vram: 2.0 * MIB,
             },
-            |teardown| decode_cycle(&device, &path, teardown),
+            |teardown| decode_cycle(&gpu, &path, teardown),
         );
     }
 
@@ -1278,17 +1258,17 @@ mod d3d11 {
     fn nvenc_encode_cycles_do_not_grow_gpu_memory() {
         isolate!();
         let _exclusive = exclusive();
-        let Some((device, context, live)) = try_d3d11_device() else {
+        let Some((gpu, live)) = try_d3d11_gpu() else {
             return;
         };
-        if !nvenc_supported(&device, &context) {
+        if !nvenc_supported(&gpu) {
             return;
         }
         // NVENC keeps its own reference-frame surfaces per session, so a
         // leaked session costs more than the upload scenario's textures.
         measure_cycles(
             "d3d11 nvenc cycle",
-            &device,
+            gpu.device(),
             live.map(Arc::new),
             Budget {
                 warmup: WARMUP,
@@ -1296,7 +1276,7 @@ mod d3d11 {
                 memory: Some(0.5 * MIB),
                 vram: 2.0 * MIB,
             },
-            |teardown| encode_cycle(&device, &context, teardown),
+            |teardown| encode_cycle(&gpu, teardown),
         );
     }
 
@@ -1324,7 +1304,7 @@ mod d3d11 {
 
     /// One capture session: open it, let it emit for a while, tear it all
     /// down. Unlike every other scenario here the source brings its own
-    /// `ID3D11Device` (see `DxgiCaptureSource::open`, which returns one), so
+    /// device (see `DxgiCaptureSource::open`, which returns one), so
     /// each cycle creates and destroys a whole device, duplication, and
     /// texture set.
     #[cfg(feature = "dxgi-capture")]
@@ -1332,7 +1312,7 @@ mod d3d11 {
         use media_pp::elements::{CaptureArea, DxgiCaptureOptions, DxgiCaptureSource};
 
         let (counter, frames) = FrameCounter::new("counter");
-        let (source, _format, _device) = DxgiCaptureSource::open(
+        let (source, _format, _gpu) = DxgiCaptureSource::open(
             "capture",
             DxgiCaptureOptions {
                 area: CaptureArea::Output { output_index: 0 },
@@ -1410,12 +1390,12 @@ mod d3d11 {
         if !capture_supported(cpu_mode()) {
             return;
         }
-        let Some((device, _context, _live)) = try_d3d11_device() else {
+        let Some((gpu, _live)) = try_d3d11_gpu() else {
             return;
         };
         measure_cycles(
             "cpu capture cycle",
-            &device,
+            gpu.device(),
             None,
             Budget {
                 warmup: WARMUP,
@@ -1443,7 +1423,7 @@ mod d3d11 {
         if !capture_supported(CaptureMode::Gpu) {
             return;
         }
-        let Some((device, _context, _live)) = try_d3d11_device() else {
+        let Some((gpu, _live)) = try_d3d11_gpu() else {
             return;
         };
         // No live-object trend: this scenario's D3D11 objects belong to the
@@ -1451,7 +1431,7 @@ mod d3d11 {
         // Adapter memory is per process, so it still covers them.
         measure_cycles(
             "gpu capture cycle",
-            &device,
+            gpu.device(),
             None,
             Budget {
                 warmup: CAPTURE_WARMUP,
@@ -1598,7 +1578,7 @@ mod d3d11 {
         static CYCLE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
         let (counter, frames) = FrameCounter::new("counter");
-        let (source, _device) = WgcCaptureSource::open(
+        let (source, _gpu) = WgcCaptureSource::open(
             "window-capture",
             hwnd,
             WgcCaptureOptions {
@@ -1654,17 +1634,17 @@ mod d3d11 {
                 return;
             }
         };
-        let Some((gauge_device, _context, _live)) = try_d3d11_device() else {
+        let Some((gpu, _live)) = try_d3d11_gpu() else {
             return;
         };
 
         // WGC and the user-mode driver retain bounded initialization caches,
         // so discard the same longer warm-up used for GPU DXGI sessions. The
         // source devices differ per cycle; adapter memory is process-wide,
-        // while a live-object gauge on `gauge_device` could not see them.
+        // while a live-object gauge on the gauge device could not see them.
         measure_cycles(
             "WGC window capture cycle",
-            &gauge_device,
+            gpu.device(),
             None,
             Budget {
                 warmup: CAPTURE_WARMUP,
@@ -1688,12 +1668,8 @@ mod d3d12 {
 
     use ffmpeg_next as ffmpeg;
     use media_pp::{
-        elements::{D3d12Download, D3d12Scaler, D3d12Upload, FrameCounter, SwScaler},
+        elements::{D3d12Download, D3d12Gpu, D3d12Scaler, D3d12Upload, FrameCounter, SwScaler},
         pipeline::Pipeline,
-    };
-    use windows::Win32::Graphics::{
-        Direct3D::D3D_FEATURE_LEVEL_11_0,
-        Direct3D12::{D3D12CreateDevice, ID3D12Device},
     };
 
     use crate::common::{Trend, Unit, exclusive, gpu::d3d12_vram_bytes, iterations, settle};
@@ -1702,22 +1678,17 @@ mod d3d12 {
     const SCALED_WIDTH: u32 = 176;
     const SCALED_HEIGHT: u32 = 144;
 
-    fn try_device() -> Option<ID3D12Device> {
-        let mut device = None;
-        // SAFETY: null adapter requests the default hardware adapter and
-        // `device` is the correctly typed live out-parameter for this feature
-        // level.
-        let result = unsafe { D3D12CreateDevice(None, D3D_FEATURE_LEVEL_11_0, &mut device) };
-        if let Err(error) = result {
-            eprintln!("skipping: D3D12CreateDevice failed on this machine: {error}");
-            return None;
-        }
-        device
+    fn try_device() -> Option<D3d12Gpu> {
+        D3d12Gpu::new()
+            .inspect_err(|error| {
+                eprintln!("skipping: no Direct3D 12 device on this machine: {error}")
+            })
+            .ok()
     }
 
-    fn cycle(device: &ID3D12Device, teardown: Teardown) -> usize {
+    fn cycle(gpu: &D3d12Gpu, teardown: Teardown) -> usize {
         let (counter, frames) = FrameCounter::new("counter");
-        let device = device.clone();
+        let gpu = gpu.clone();
         let (pipeline, ()) = Pipeline::new("soak-d3d12", test_source("video"), move |source, ctx| {
             let to_nv12 = SwScaler::new(
                 "to-nv12",
@@ -1726,8 +1697,8 @@ mod d3d12 {
                 HEIGHT,
                 ffmpeg::software::scaling::Flags::BILINEAR,
             );
-            let upload = D3d12Upload::new("upload", &device)?;
-            let scaler = D3d12Scaler::new("scaler", &device, SCALED_WIDTH, SCALED_HEIGHT)?;
+            let upload = D3d12Upload::new("upload", &gpu)?;
+            let scaler = D3d12Scaler::new("scaler", &gpu, SCALED_WIDTH, SCALED_HEIGHT)?;
             let download = D3d12Download::new("download");
             let branch = ctx
                 .branch()
@@ -1756,16 +1727,16 @@ mod d3d12 {
     fn upload_scale_and_download_cycles_do_not_grow_gpu_memory() {
         isolate!();
         let _exclusive = exclusive();
-        let Some(device) = try_device() else { return };
+        let Some(gpu) = try_device() else { return };
 
         let mut memory = Trend::private_bytes("d3d12 scale cycle private bytes");
         let mut vram = Trend::new("d3d12 scale cycle adapter memory", Unit::Bytes, {
-            let device = device.clone();
+            let device = gpu.device().clone();
             move || d3d12_vram_bytes(&device)
         });
         for index in 0..(WARMUP + iterations(15)) {
             let teardown = Teardown::for_cycle(index);
-            let frames = cycle(&device, teardown);
+            let frames = cycle(&gpu, teardown);
             if teardown == Teardown::Finish {
                 assert!(frames > 0, "D3D12 finish cycle {index} produced no frames");
             }

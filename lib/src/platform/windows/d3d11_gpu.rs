@@ -28,8 +28,8 @@ pub enum D3d11GpuError {
 }
 
 /// The D3D11 device every D3D11 element of a pipeline shares, and its one
-/// immediate context behind the lock they all take — the `device` and
-/// `context` their constructors ask for, made once, correctly.
+/// immediate context behind the lock they all take — what every D3D11
+/// element's constructor takes, made once, correctly.
 ///
 /// Every D3D11 element here has to be on the same device, and every one that
 /// draws or copies has to go through the same `Arc<Mutex<_>>` around that
@@ -93,9 +93,12 @@ impl D3d11Gpu {
     }
 
     /// Shares a device made elsewhere — one pinned to a particular adapter,
-    /// such as the one `DxgiCaptureSource::open` returns for the monitor it
-    /// captures. Fails for a device created single-threaded, which cannot be
-    /// shared across a pipeline's threads.
+    /// or one another library made. Fails for a device created
+    /// single-threaded, which cannot be shared across a pipeline's threads.
+    ///
+    /// Each call makes a new lock around the device's one immediate context,
+    /// so a device is shared by cloning the one `D3d11Gpu` made for it, not by
+    /// calling this again for each element.
     pub fn from_device(device: ID3D11Device) -> Result<Self, D3d11GpuError> {
         let context = protect_shared_device(&device)?;
         Ok(Self {
@@ -104,14 +107,15 @@ impl D3d11Gpu {
         })
     }
 
-    /// The device — for every D3D11 element's `device` parameter.
+    /// The device, for what this crate does not wrap — a texture of the
+    /// caller's own to push, or a check of its adapter.
     pub fn device(&self) -> &ID3D11Device {
         &self.device
     }
 
-    /// The immediate context behind the one lock every D3D11 element shares
-    /// — for every D3D11 element's `context` parameter. Clones of this are the
-    /// same lock.
+    /// The immediate context behind the one lock every D3D11 element shares.
+    /// Clones of this are the same lock; a caller drawing or copying on the
+    /// device itself takes it for the whole sequence, as the elements do.
     pub fn context(&self) -> Arc<Mutex<ID3D11DeviceContext>> {
         Arc::clone(&self.context)
     }
@@ -143,5 +147,21 @@ mod tests {
 
         let shared = D3d11Gpu::from_device(gpu.device().clone()).expect("share it again");
         assert_eq!(shared.device(), gpu.device());
+    }
+
+    /// Every D3D11 element takes its device through a `D3d11Gpu`, so this is
+    /// the one place a device that promised single-threaded use can be
+    /// refused — before any element, and any thread past a `Queue`, has it.
+    #[test]
+    fn a_single_threaded_device_is_refused() {
+        let Some(device) = crate::test_support::try_single_threaded_d3d11_device() else {
+            return;
+        };
+        assert!(matches!(
+            D3d11Gpu::from_device(device),
+            Err(D3d11GpuError::SharedDevice(
+                D3d11SharedDeviceError::SingleThreaded
+            ))
+        ));
     }
 }

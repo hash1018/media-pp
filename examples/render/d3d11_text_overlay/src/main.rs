@@ -86,8 +86,7 @@ mod windows_example {
         let frame_rate = ffmpeg::Rational::new(30, 1);
         let (compositor, compositor_handle) = D3d11VideoCompositor::new(
             "compositor",
-            gpu.device(),
-            gpu.context(),
+            &gpu,
             VideoCompositorOptions {
                 width: output_width,
                 height: output_height,
@@ -134,7 +133,7 @@ mod windows_example {
                     output_height,
                     ffmpeg::software::scaling::Flags::BILINEAR,
                 );
-                let upload = D3d11Upload::new("upload", gpu.device());
+                let upload = D3d11Upload::new("upload", &gpu);
                 let branch = ctx.branch().pipe(scaler).pipe(upload).to(background_sink)?;
                 ctx.attach(source, 0, branch)?;
                 Ok(())
@@ -159,7 +158,7 @@ mod windows_example {
 
         let (output_pipeline, ()) =
             Pipeline::new("composited-output", compositor, |source, ctx| {
-                let download = D3d11Download::new("download", gpu.device(), gpu.context())?;
+                let download = D3d11Download::new("download", &gpu)?;
                 let to_yuv = SwScaler::new(
                     "to-yuv",
                     ffmpeg::format::Pixel::YUV420P,

@@ -3,7 +3,6 @@ use std::sync::Arc;
 use crate::pp_log::{PpLog, pp_error, pp_info};
 use ffmpeg_next::{self as ffmpeg, ffi};
 use thiserror::Error as ThisError;
-use windows::Win32::Graphics::Direct3D12::ID3D12Device;
 
 use crate::{
     buffer::MediaBuffer,
@@ -11,7 +10,10 @@ use crate::{
     control::ControlMsg,
     element::{Element, ElementType, Sink, Source, element_pp_log},
     pad::SrcPad,
-    platform::{ffmpeg::AvBufferRef, windows::d3d12va::create_hw_device_ctx},
+    platform::{
+        ffmpeg::AvBufferRef,
+        windows::{d3d12_gpu::D3d12Gpu, d3d12va::create_hw_device_ctx},
+    },
     pool::UnboundObjectPool,
 };
 
@@ -92,14 +94,13 @@ pub struct D3d12Decoder {
 unsafe impl Send for D3d12Decoder {}
 
 impl D3d12Decoder {
-    /// The D3D12VA hardware context owns an independent COM reference to
-    /// `device`, so the caller does not need to keep its handle alive. Pass
-    /// the same underlying `ID3D12Device` your
-    /// [`crate::elements::D3d12Renderer`]'s own
-    /// [`crate::elements::D3d12FrameRenderer`] impl renders with (see
-    /// that trait's own `device()`) so decoded frames land on the same
-    /// device the renderer reads from — required for the zero-copy path
-    /// to be valid at all; checked at render time, not just documented,
+    /// `gpu` must be the [`D3d12Gpu`] every other D3D12 element in this
+    /// pipeline shares; the D3D12VA hardware context owns an independent COM
+    /// reference to its device, so the caller does not need to keep `gpu`
+    /// alive. A renderer has to render with the same device (see
+    /// [`crate::elements::D3d12FrameRenderer`]'s own `device()`) so decoded
+    /// frames land on the device it reads from — required for the zero-copy
+    /// path to be valid at all; checked at render time, not just documented,
     /// via `D3d12Renderer`'s own device-mismatch guard.
     ///
     /// The decoder opened is the first one FFmpeg has for the codec that can
@@ -109,8 +110,9 @@ impl D3d12Decoder {
     pub fn new(
         name: impl Into<String>,
         params: ffmpeg::codec::Parameters,
-        device: &ID3D12Device,
+        gpu: &D3d12Gpu,
     ) -> Result<Self, D3d12DecoderError> {
+        let device = gpu.device();
         crate::ensure_ffmpeg();
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::D3d12Decoder, &name, None);
@@ -333,7 +335,7 @@ unsafe extern "C" fn get_format(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::try_d3d12_device;
+    use crate::test_support::try_d3d12_gpu;
 
     /// Video parameters for `codec` carrying nothing but its size, which is
     /// all choosing a decoder asks of them.
@@ -362,11 +364,11 @@ mod tests {
     /// opening as software and failing at the first frame.
     #[test]
     fn a_codec_with_no_d3d12va_decoder_is_refused_when_built() {
-        let Some(device) = try_d3d12_device() else {
+        let Some(gpu) = try_d3d12_gpu() else {
             return;
         };
         let codec = ffmpeg::codec::Id::PRORES;
-        let error = D3d12Decoder::new("test-decoder", video_parameters(codec), &device)
+        let error = D3d12Decoder::new("test-decoder", video_parameters(codec), &gpu)
             .err()
             .expect("a codec with no D3D12VA decoder must not open");
         assert!(
@@ -384,13 +386,13 @@ mod tests {
     fn av1_opens_a_d3d12va_decoder_and_decodes_on_the_gpu() {
         use crate::elements::AppSink;
 
-        let Some(device) = try_d3d12_device() else {
+        let Some(gpu) = try_d3d12_gpu() else {
             return;
         };
         let Some((params, packets)) = crate::test_support::try_av1_packets() else {
             return;
         };
-        let mut decoder = match D3d12Decoder::new("test-av1", params, &device) {
+        let mut decoder = match D3d12Decoder::new("test-av1", params, &gpu) {
             Ok(decoder) => decoder,
             Err(D3d12DecoderError::HwDeviceInit(code)) => {
                 eprintln!("skipping: this device does not do video decoding (code {code})");
@@ -453,7 +455,7 @@ mod tests {
     /// 4:4:4, is one no hardware decoder here has.
     #[test]
     fn a_profile_the_gpu_lacks_is_reported_as_refused() {
-        let Some(device) = try_d3d12_device() else {
+        let Some(gpu) = try_d3d12_gpu() else {
             return;
         };
         let Some((params, packets)) = crate::test_support::try_encoded_packets(
@@ -464,7 +466,7 @@ mod tests {
         ) else {
             return;
         };
-        let mut decoder = D3d12Decoder::new("refused", params, &device).unwrap();
+        let mut decoder = D3d12Decoder::new("refused", params, &gpu).unwrap();
         decoder.src_pads()[0].link(Box::new(crate::elements::AppSink::new(
             "refused-frames",
             |_| Ok(()),

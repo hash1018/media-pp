@@ -22,8 +22,8 @@ pub enum D3d12GpuError {
     Queue(windows::core::Error),
 }
 
-/// The D3D12 device every D3D12 element of a pipeline shares — the `device`
-/// their constructors ask for — and the one direct command queue a
+/// The D3D12 device every D3D12 element of a pipeline shares — what every
+/// D3D12 element's constructor takes — and the one direct command queue a
 /// [`D3d12WindowRenderer`](crate::elements::D3d12WindowRenderer) presents
 /// through.
 ///
@@ -82,7 +82,7 @@ impl D3d12Gpu {
         Ok(Self { device, queue })
     }
 
-    /// The device — for every D3D12 element's `device` parameter.
+    /// The device, for what this crate does not wrap.
     pub fn device(&self) -> &ID3D12Device {
         &self.device
     }
