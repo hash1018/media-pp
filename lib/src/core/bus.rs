@@ -257,7 +257,12 @@ impl Bus {
 
 impl BusReceiver {
     /// The channel itself, for a caller inside this crate that waits on it
-    /// beside another.
+    /// beside another — `Player`, on its window's events and its bus at once.
+    ///
+    /// Crate-private because it is crossbeam's type: public, the channel
+    /// crate would become part of this one's API. A public form would be a
+    /// wait on the bus and something else together, which nothing outside
+    /// has asked for.
     #[cfg(any(
         all(
             target_os = "windows",

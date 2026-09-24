@@ -92,6 +92,11 @@ impl VideoWindow {
     /// its surface budget. That is D3D11 on Windows (D3D12 in a build with
     /// only `d3d12`), and CUDA on Linux where the build has `cuda` and the
     /// machine an NVIDIA GPU; on Linux otherwise, system memory.
+    ///
+    /// Crate-private, and `Player`'s: a public form would be a choice of GPU
+    /// handed back beside the window, which a program wiring its own
+    /// decoder makes better by opening the platform renderer on the GPU it
+    /// chose — as this type's own docs say to.
     #[cfg(any(
         all(target_os = "windows", feature = "wasapi-renderer"),
         all(target_os = "linux", feature = "pipewire-audio-renderer")

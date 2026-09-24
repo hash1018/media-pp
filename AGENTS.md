@@ -167,6 +167,14 @@ final source of truth when documentation and implementation differ.
 
 ## API and module organization
 
+- Three layers, each built only on the ones below it: `core/` is the pipeline
+  framework, `elements/` the parts that go into a pipeline (a bin such as
+  `VideoDecodeBin` is one of them), and `app/` whole pipelines behind one type
+  for a common job — `Player`. An `app/` type is built on the public elements
+  and pipeline API; where it needs a crate-private item, that item documents
+  why, so the layer could become a crate of its own without redesign. `core/`
+  code never reaches up into `elements/` or `app/`; its docs and tests may
+  name them.
 - Put genuinely shared, backend-independent value types and math in a shared
   module; keep backend implementation and dependencies in the backend module.
   A type used by only one backend does not need to be made shared speculatively.

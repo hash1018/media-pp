@@ -241,6 +241,7 @@
 // builds never see the `feature` attribute.
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
+mod app;
 mod core;
 pub mod elements;
 pub mod error;
@@ -248,10 +249,9 @@ mod platform;
 #[cfg(test)]
 mod test_support;
 
-// Flat re-export: `core/` only exists to group these files on disk (see
-// its module doc) — every external and internal caller keeps using
+// Flat re-export: `core/` and `app/` only exist to group these files on disk
+// (see their module docs) — every external and internal caller keeps using
 // `crate::pipeline`/`media_pp::pipeline` etc., never `crate::core::...`.
-pub use core::diagnostics::{log, pp_log, stats};
 #[cfg(any(
     all(
         target_os = "windows",
@@ -264,7 +264,8 @@ pub use core::diagnostics::{log, pp_log, stats};
         feature = "pipewire-audio-renderer"
     )
 ))]
-pub use core::player;
+pub use app::player;
+pub use core::diagnostics::{log, pp_log, stats};
 pub use core::timing::{clock, playback_clock, rate};
 pub use core::{
     buffer, bus, color, contract, control, driver, element, graph, pad, pipeline, pool, queue,
