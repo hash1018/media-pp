@@ -6,8 +6,9 @@
 //!
 //! The window is the renderer's own: `VulkanWindowRenderer::open` opens it
 //! on a thread of its own, the way a GStreamer video sink does, and reports
-//! what happens to it — Space pauses and resumes, Escape or closing the
-//! window stops. It is an X11 window, so on a Wayland desktop it is an
+//! what happens to it — Space pauses and resumes, F or a double click fills
+//! the screen and puts it back, Escape or closing the window stops — and its
+//! `WindowControl` changes it: the title shows where playback is. It is an X11 window, so on a Wayland desktop it is an
 //! XWayland one, and this program needs no `winit` or event loop of its own.
 //!
 //!     cargo run -p cuda_decode_render -- path/to/video.mp4
@@ -30,11 +31,13 @@ mod linux_example {
     use media_pp::{
         bus::BusEvent,
         elements::{
-            CudaDecoder, CudaDevice, FileDemuxer, Key, Pacer, VulkanGpu, VulkanWindowRenderer,
-            WindowEvent, WindowOptions,
+            CudaDecoder, CudaDevice, FileDemuxer, Key, MouseButton, Pacer, VulkanGpu,
+            VulkanWindowRenderer, WindowEvent, WindowOptions,
         },
         pipeline::Pipeline,
     };
+
+    const TITLE: &str = "media-pp cuda_decode_render";
 
     /// Decoded frames queued ahead of the pacer.
     const FRAMES: usize = 12;
@@ -64,10 +67,14 @@ mod linux_example {
             "screen",
             &gpu,
             WindowOptions {
-                title: "media-pp cuda_decode_render".into(),
+                title: TITLE.into(),
                 ..WindowOptions::default()
             },
         )?;
+        // Taken before the renderer goes into the pipeline.
+        let control = screen
+            .window_control()
+            .expect("a window the renderer opened is its own to change");
 
         let (pipeline, ()) = Pipeline::new("cuda-decode-render", source, |source, ctx| {
             // The decoder's surface pool does not grow, so its budget covers
@@ -90,7 +97,20 @@ mod linux_example {
         // `Finished`, and an error does not end a pipeline on its own — and
         // the window, whose keys and closing are this program's to act on.
         let mut paused = false;
+        let mut shown = None;
         loop {
+            // The title follows playback, once a second is enough to see.
+            let seconds = pipeline.position().map(|position| position.as_secs());
+            if seconds != shown {
+                shown = seconds;
+                if let Some(seconds) = seconds {
+                    let _ = control.set_title(&format!(
+                        "{TITLE} — {}:{:02}",
+                        seconds / 60,
+                        seconds % 60
+                    ));
+                }
+            }
             match pipeline.bus().recv_timeout(Duration::from_millis(20)) {
                 Ok(event) => {
                     println!("{event}");
@@ -110,6 +130,15 @@ mod linux_example {
                     } else {
                         pipeline.resume();
                     }
+                }
+                Some(
+                    WindowEvent::Key(Key::Char('f'))
+                    | WindowEvent::DoubleClick {
+                        button: MouseButton::Left,
+                        ..
+                    },
+                ) => {
+                    let _ = control.set_fullscreen(!control.is_fullscreen());
                 }
                 Some(event) => println!("{event:?}"),
                 None => {}

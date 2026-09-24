@@ -32,12 +32,12 @@ restore token can be passed as the last argument on later runs.
 | [`av_playback`](av_playback/) | Play synchronized audio/video | Windows / Linux | Software audio + platform GPU video | EOS, Escape or close window | `<video>` |
 | [`hw_decode_render`](hw_decode_render/) | Decode on the GPU where it can, in software where not, and render | Windows / Linux | `VideoDecodeBin` onto D3D12 / CUDA | EOS, Escape or close window | `<video>` |
 | [`seek_render`](seek_render/) | Interactive seek/pause/resume | Windows / Linux | CPU decode -> platform GPU upload | `q`, EOS, Escape or close window | `<video>` |
-| [`player`](player/) | Play a file with its sound through `Player` | Windows / Linux | `Player`: software decode -> `VideoWindow` + audio output | EOS, Escape or close window; Space pauses, arrows seek, F or a double click fills the screen | `<video>` |
+| [`player`](player/) | Play a file with its sound through `Player` | Windows / Linux | `Player`: GPU decode where it can (D3D11VA / NVDEC), software where not -> `VideoWindow` + audio output | EOS, Escape or close window; Space pauses, arrows seek, F or a double click fills the screen | `<video>` |
 | [`sw_decode_render`](sw_decode_render/) | Software-decode and render | Windows / Linux | CPU decode -> `VideoWindow`, one program for both | EOS, Escape or close window | `<video>` |
 | [`test_video`](test_video/) | Render a synthetic source | Windows / Linux | CPU frame -> platform GPU upload | Escape or close window | None |
 | [`transcode_render`](transcode_render/) | Encode/decode round trip | Windows / Linux | OpenH264 round trip -> platform GPU | Escape or close window | None |
 | [`gpu_video_compositor`](gpu_video_compositor/) | Composite GPU frames | Windows / Linux | D3D11 / CUDA compositor | Escape or close window | None |
-| [`cuda_decode_render`](cuda_decode_render/) | NVDEC decode/render in the renderer's own window | Linux | CUDA, `VulkanWindowRenderer::open` | EOS, Escape or close window; Space pauses | `<video>` |
+| [`cuda_decode_render`](cuda_decode_render/) | NVDEC decode/render in the renderer's own window | Linux | CUDA, `VulkanWindowRenderer::open` | EOS, Escape or close window; Space pauses, F or a double click fills the screen | `<video>` |
 | [`vulkan_window_render`](vulkan_window_render/) | Render into a `winit` window with the library's Vulkan renderer | Linux | CPU NV12, YUV420P or BGRA (`--format`), or CUDA with `--cuda`, `VulkanWindowRenderer` | Close window, or after `--seconds N` | None; `--file <video>` plays a file |
 | [`d3d11_decode_render`](d3d11_decode_render/) | D3D11VA decode/render in the renderer's own window | Windows | D3D11 zero-copy, `D3d11WindowRenderer` | EOS, Escape or close window; Space pauses, F or a double click fills the screen | `<video>` |
 | [`d3d11_scale_render`](d3d11_scale_render/) | D3D11 scale/render | Windows | D3D11 GPU path | EOS, Escape or close window | `<video>` |
