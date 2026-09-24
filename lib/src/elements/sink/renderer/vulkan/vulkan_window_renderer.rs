@@ -1153,9 +1153,11 @@ impl Presenter {
         &mut self,
         extent: vk::Extent2D,
     ) -> std::result::Result<(), VulkanWindowRendererError> {
-        // SAFETY: waits for everything submitted, so nothing still uses the
-        // swapchain being replaced.
-        unsafe { self.gpu.device.device_wait_idle() }.map_err(call("vkDeviceWaitIdle"))?;
+        // Held until the old swapchain is gone and the new one made: nothing
+        // else on this GPU submits or presents in between.
+        let gpu = Arc::clone(&self.gpu);
+        let queue = gpu.queue();
+        wait_idle(&gpu, *queue)?;
         self.submitted = false;
         let old = self.swapchain.take();
         let made = create_swapchain(
@@ -1167,14 +1169,15 @@ impl Presenter {
         if let Some(old) = old {
             self.destroy_swapchain(old);
         }
+        drop(queue);
         self.swapchain = Some(made?);
         Ok(())
     }
 
     fn destroy_swapchain(&self, swapchain: Swapchain) {
         let device = &self.gpu.device;
-        // SAFETY: the device is idle — every caller waited first — so nothing
-        // uses these any more, and each is destroyed once.
+        // SAFETY: the queue is idle — every caller waited, holding its lock —
+        // so nothing uses these any more, and each is destroyed once.
         unsafe {
             for framebuffer in swapchain.framebuffers {
                 device.destroy_framebuffer(framebuffer, None);
@@ -1206,12 +1209,17 @@ impl Presenter {
         }) {
             return Ok(());
         }
-        // SAFETY: waits for everything submitted, so the resources being
-        // replaced are no longer read.
-        unsafe { self.gpu.device.device_wait_idle() }.map_err(call("vkDeviceWaitIdle"))?;
-        self.submitted = false;
-        if let Some(video) = self.video.take() {
-            self.destroy_video(video);
+        // The resources being replaced are no longer read once the queue is
+        // idle; the lock is let go as soon as they are gone, since what is
+        // made next touches no queue.
+        {
+            let gpu = Arc::clone(&self.gpu);
+            let queue = gpu.queue();
+            wait_idle(&gpu, *queue)?;
+            self.submitted = false;
+            if let Some(video) = self.video.take() {
+                self.destroy_video(video);
+            }
         }
 
         let shapes = layout.planes(width, height);
@@ -1711,12 +1719,16 @@ impl Presenter {
 
 impl Drop for Presenter {
     fn drop(&mut self) {
-        // SAFETY: waits for everything this presenter submitted, so nothing it
-        // destroys below is still in use. Each handle is destroyed once; the
-        // ones never made are null, which every destroy call ignores.
-        unsafe {
-            let _ = self.gpu.device.device_wait_idle();
-        }
+        // Held for the whole teardown: waiting on the queue needs its lock
+        // (see `wait_idle`), and another renderer on this GPU submitting or
+        // presenting while this one's swapchain and surface go is nothing a
+        // driver has to cope with.
+        let gpu = Arc::clone(&self.gpu);
+        let queue = gpu.queue();
+        // Nothing it destroys below is still in use once the queue is idle.
+        // Each handle is destroyed once; the ones never made are null, which
+        // every destroy call ignores.
+        let _ = wait_idle(&gpu, *queue);
         if let Some(video) = self.video.take() {
             self.destroy_video(video);
         }
@@ -1739,7 +1751,25 @@ impl Drop for Presenter {
             device.destroy_render_pass(self.render_pass, None);
             self.surface_fn.destroy_surface(self.surface, None);
         }
+        drop(queue);
     }
+}
+
+/// Waits for everything submitted on the GPU's one queue — this renderer's
+/// and any other's on the same [`VulkanGpu`] — with `queue` the one its lock
+/// was taken for.
+///
+/// Not `vkDeviceWaitIdle`, though the device has only this queue: that call
+/// needs every queue of the device to itself, and without the lock another
+/// renderer on this GPU may be submitting or presenting on it. With the lock
+/// held, waiting on the queue is the same wait, and a legal one.
+fn wait_idle(
+    gpu: &VulkanShared,
+    queue: vk::Queue,
+) -> std::result::Result<(), VulkanWindowRendererError> {
+    // SAFETY: the caller holds the queue's lock, which is what
+    // `vkQueueWaitIdle` needs.
+    unsafe { gpu.device.queue_wait_idle(queue) }.map_err(call("vkQueueWaitIdle"))
 }
 
 /// The largest rectangle of the frame's aspect ratio that fits the window,
@@ -2359,6 +2389,68 @@ mod tests {
 
         drop(renderer);
         assert_eq!(events.recv(), None, "the window's events end with it");
+    }
+
+    /// Two renderers on one GPU, each drawing from a thread of its own and
+    /// dropped at the same moment — what stopping a pipeline with two
+    /// windows does, each waiting on the one queue they share as it goes.
+    #[test]
+    fn two_renderers_on_one_gpu_draw_and_go_at_once() {
+        use std::sync::Barrier;
+
+        let gpu = match VulkanGpu::new() {
+            Ok(gpu) => gpu,
+            Err(error) => {
+                eprintln!("skipping: no Vulkan device ({error})");
+                return;
+            }
+        };
+        for round in 0..5 {
+            let mut renderers = Vec::new();
+            for side in ["a", "b"] {
+                let options = WindowOptions {
+                    title: format!("media-pp renderer test {side}"),
+                    width: 320,
+                    height: 180,
+                };
+                match VulkanWindowRenderer::open(side, &gpu, options) {
+                    Ok((renderer, _events)) => renderers.push(renderer),
+                    Err(error) => {
+                        eprintln!("skipping: no window can be opened here ({error})");
+                        return;
+                    }
+                }
+            }
+            let both = Arc::new(Barrier::new(2));
+            let threads: Vec<_> = renderers
+                .into_iter()
+                .map(|mut renderer| {
+                    let both = Arc::clone(&both);
+                    std::thread::spawn(move || {
+                        let pool = crate::pool::UnboundObjectPool::new(
+                            0,
+                            || ffmpeg::frame::Video::new(Pixel::NV12, 320, 180),
+                            |_| {},
+                        );
+                        for luma in 0..20u8 {
+                            let mut frame = pool.get();
+                            frame.data_mut(0).fill(luma * 10);
+                            frame.data_mut(1).fill(128);
+                            renderer
+                                .consume(MediaBuffer::Video(Arc::new(frame)))
+                                .expect("the frame draws");
+                        }
+                        both.wait();
+                        drop(renderer);
+                    })
+                })
+                .collect();
+            for thread in threads {
+                thread
+                    .join()
+                    .unwrap_or_else(|_| panic!("round {round} failed"));
+            }
+        }
     }
 
     #[test]
