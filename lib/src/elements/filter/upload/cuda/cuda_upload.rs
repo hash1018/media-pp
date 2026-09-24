@@ -10,6 +10,7 @@ use crate::{
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
     control::ControlMsg,
     element::{Element, ElementType, Sink, Source, element_pp_log},
+    elements::filter::upload::nv12,
     error::Result,
     frame_size::ForSize,
     pad::SrcPad,
@@ -59,6 +60,20 @@ pub enum CudaUploadError {
 
     #[error("CPU to CUDA transfer failed (code {0})")]
     Transfer(i32),
+
+    /// A CPU frame plane is shorter than its stride and height require.
+    #[error(
+        "frame's plane holds {actual} bytes, too few for {height} rows of \
+         stride {stride}; uploading it would read past the end of the buffer"
+    )]
+    PlaneTooSmall {
+        /// Bytes actually available in the plane.
+        actual: usize,
+        /// Declared row stride in bytes.
+        stride: usize,
+        /// Number of rows that must be uploaded.
+        height: u32,
+    },
 }
 
 impl From<CudaFramesContextError> for CudaUploadError {
@@ -87,13 +102,16 @@ impl From<CudaFramesContextError> for CudaUploadError {
 /// # One format, chosen up front
 ///
 /// `format` fixes what every surface this allocates holds, and every frame
-/// `consume` receives must already be in the matching CPU layout — nothing
-/// here converts. `Bgra` is the format a screen capture already produces and
+/// `consume` receives must already be in the matching CPU layout — with one
+/// exception, which is not a conversion: built for `Nv12`, this also takes
+/// YUV420P (and YUVJ420P, tagged full range), the same samples with Cb and
+/// Cr in planes of their own, interleaved into NV12 on the CPU on the way
+/// up. So a software decode needs no scaler in front. `Bgra` is the format a screen capture already produces and
 /// NVENC ingests directly; `Nv12` is what a decoder produces and
 /// [`crate::elements::CudaRenderer`] presents. See [`CudaFrameFormat`] on
 /// why the choice has to be made here rather than converted later: no
 /// element on the CUDA path can turn one into the other. Put a
-/// [`crate::elements::SwScaler`] in front if the source produces neither.
+/// [`crate::elements::SwScaler`] in front if the source produces none of these.
 ///
 /// # Why the frames context is built by hand here
 ///
@@ -119,6 +137,9 @@ pub struct CudaUpload {
     /// itself comes from `hw_frames_ctx`'s own pool. Same split as
     /// `D3d11Upload`.
     pool: UnboundObjectPool<ffmpeg::frame::Video>,
+    /// Where a YUV420P frame is made NV12 before it goes up, kept for the
+    /// next one of the same size.
+    staging: Option<ffmpeg::frame::Video>,
     /// The last upload and the CPU picture it came from, so a producer that
     /// re-emits an unchanged picture is answered with the surface already on
     /// the GPU instead of another transfer across PCIe — see
@@ -158,6 +179,7 @@ impl CudaUpload {
             format,
             pad,
             pool,
+            staging: None,
             repeated: RepeatedOutput::new(),
         }
     }
@@ -166,7 +188,8 @@ impl CudaUpload {
         &mut self,
         source: &ffmpeg::frame::Video,
     ) -> Result<UnboundObjectPoolRef<ffmpeg::frame::Video>> {
-        if source.format() != self.format.pixel() {
+        let planar = self.format == CudaFrameFormat::Nv12 && nv12::is_planar_420(source.format());
+        if source.format() != self.format.pixel() && !planar {
             pp_error!(self, "unsupported pixel format: {:?}", source.format());
             return Err(CudaUploadError::UnsupportedFormat {
                 expected: self.format.pixel(),
@@ -174,6 +197,15 @@ impl CudaUpload {
             }
             .into());
         }
+        let staged = if planar {
+            Some(
+                self.stage(source)
+                    .inspect_err(|error| pp_error!(self, "{error}"))?,
+            )
+        } else {
+            None
+        };
+        let pixels = staged.as_ref().unwrap_or(source);
         let (device, format, pp_log) = (&self.hw_device_ctx, self.format, &self.pp_log);
         let frames_ctx = self
             .hw_frames_ctx
@@ -203,7 +235,7 @@ impl CudaUpload {
                 pp_error!(self, "av_hwframe_get_buffer failed: {code}");
                 return Err(CudaUploadError::HwFrameGet(code).into());
             }
-            let code = ffi::av_hwframe_transfer_data(dst, source.as_ptr(), 0);
+            let code = ffi::av_hwframe_transfer_data(dst, pixels.as_ptr(), 0);
             if code < 0 {
                 pp_error!(self, "av_hwframe_transfer_data failed: {code}");
                 return Err(CudaUploadError::Transfer(code).into());
@@ -213,7 +245,52 @@ impl CudaUpload {
             // otherwise be dropped here.
             ffi::av_frame_copy_props(dst, source.as_ptr());
         }
+        // The J of YUVJ420P is its range, which not every producer also says
+        // in the range field; on NV12 only the field can say it.
+        if source.format() == ffmpeg::format::Pixel::YUVJ420P {
+            destination.set_color_range(ffmpeg::color::Range::JPEG);
+        }
+        self.staging = staged;
         Ok(destination)
+    }
+
+    /// `source`, a YUV420P frame, as NV12 — in the staging frame kept from
+    /// the last one where it is the same size, which `upload` puts back.
+    fn stage(
+        &mut self,
+        source: &ffmpeg::frame::Video,
+    ) -> std::result::Result<ffmpeg::frame::Video, CudaUploadError> {
+        nv12::check_planes(source).map_err(
+            |nv12::PlaneTooSmall {
+                 actual,
+                 stride,
+                 height,
+             }| CudaUploadError::PlaneTooSmall {
+                actual,
+                stride,
+                height,
+            },
+        )?;
+        let (width, height) = (source.width(), source.height());
+        let mut staging = match self.staging.take() {
+            Some(staging) if staging.width() == width && staging.height() == height => staging,
+            _ => ffmpeg::frame::Video::new(ffmpeg::format::Pixel::NV12, width, height),
+        };
+        let row_bytes = width as usize;
+        let (luma_stride, source_stride) = (staging.stride(0), source.stride(0));
+        for row in 0..height as usize {
+            staging.data_mut(0)[row * luma_stride..][..row_bytes]
+                .copy_from_slice(&source.data(0)[row * source_stride..][..row_bytes]);
+        }
+        // An odd width has one more chroma sample than luma column, and
+        // NV12's chroma rows room for both of its halves.
+        let chroma_bytes = 2 * width.div_ceil(2) as usize;
+        let chroma_stride = staging.stride(1);
+        for row in 0..height.div_ceil(2) as usize {
+            let destination = &mut staging.data_mut(1)[row * chroma_stride..][..chroma_bytes];
+            nv12::interleave_chroma_row(source, row, destination);
+        }
+        Ok(staging)
     }
 }
 
@@ -262,9 +339,15 @@ impl Source for CudaUpload {
 impl Sink for CudaUpload {
     /// CPU-readable planes: uploading is what this does, so a frame already in device memory has no work here.
     fn input_contract(&self) -> InputContract {
+        let layouts = match self.format {
+            CudaFrameFormat::Nv12 => crate::contract::PixelLayoutSet::from_slice(&[
+                crate::contract::PixelLayout::Nv12,
+                crate::contract::PixelLayout::Yuv420p,
+            ]),
+            format => format.layouts(),
+        };
         InputContract::Fixed(
-            PortContract::frame(MediaKind::VideoFrame, MemoryDomain::System)
-                .with_layouts(self.format.layouts()),
+            PortContract::frame(MediaKind::VideoFrame, MemoryDomain::System).with_layouts(layouts),
         )
     }
 
@@ -493,5 +576,63 @@ mod tests {
             error.to_string().contains("uploads NV12 frames, got RGB24"),
             "expected UnsupportedFormat, got {error}"
         );
+    }
+
+    /// A software decode's YUV420P goes up to an NV12 uploader as it is,
+    /// its Cb and Cr interleaved into NV12's chroma rows — read back, each
+    /// sample is where NV12 has it — and YUVJ420P comes out tagged full
+    /// range.
+    #[test]
+    fn yuv420p_goes_up_as_nv12() {
+        let Some((mut upload, received, _cuda_lock)) = new_upload() else {
+            return;
+        };
+        let (width, height) = (64u32, 32u32);
+        let mut planar = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::YUVJ420P, width, height);
+        for (plane, value) in [(0, 50u8), (1, 100), (2, 200)] {
+            planar.data_mut(plane).fill(value);
+        }
+        planar.set_pts(Some(9));
+        upload
+            .consume(MediaBuffer::video(planar))
+            .expect("a YUV420P frame goes up");
+
+        let received = received.lock().unwrap();
+        let MediaBuffer::Video(frame) = &received[0] else {
+            panic!("expected a Video buffer, got {}", received[0].kind());
+        };
+        assert_eq!(frame.pts(), Some(9));
+        assert_eq!(frame.color_range(), ffmpeg::color::Range::JPEG);
+        let mut back = ffmpeg::frame::Video::empty();
+        // SAFETY: `frame` is a live CUDA frame and `back` an empty one for
+        // FFmpeg to allocate in the surface's own layout.
+        let code = unsafe { ffi::av_hwframe_transfer_data(back.as_mut_ptr(), frame.as_ptr(), 0) };
+        assert!(code >= 0, "read back failed: {code}");
+        assert_eq!(back.format(), ffmpeg::format::Pixel::NV12);
+        assert_eq!(back.data(0)[0], 50, "luma");
+        let chroma = &back.data(1)[..4];
+        assert_eq!(chroma, [100, 200, 100, 200], "Cb then Cr");
+    }
+
+    /// The link check lets a software decode's YUV420P into an NV12 uploader,
+    /// and not into a BGRA one.
+    #[test]
+    fn an_nv12_uploader_takes_yuv420p_and_a_bgra_one_does_not() {
+        let Some((device, _cuda_lock)) = try_cuda_device() else {
+            return;
+        };
+        let decoded = OutputContract::Fixed(
+            PortContract::frame(MediaKind::VideoFrame, MemoryDomain::System)
+                .with_layouts(crate::contract::PixelLayoutSet::YUV420P),
+        );
+        let fits = |format| {
+            !crate::contract::check_link(
+                &decoded,
+                &CudaUpload::new("upload", &device, format).input_contract(),
+            )
+            .is_refused()
+        };
+        assert!(fits(CudaFrameFormat::Nv12));
+        assert!(!fits(CudaFrameFormat::Bgra));
     }
 }

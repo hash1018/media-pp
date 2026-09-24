@@ -16,6 +16,7 @@ use crate::{
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
     control::ControlMsg,
     element::{Element, ElementType, Sink, Source, element_pp_log},
+    elements::filter::upload::nv12,
     error::Result,
     pad::SrcPad,
     platform::windows::{d3d11_gpu::D3d11Gpu, d3d11va::wrap_d3d11_texture},
@@ -38,8 +39,8 @@ pub enum D3d11UploadError {
     /// The CPU pixel format cannot be represented by this uploader.
 
     #[error(
-        "D3d11Upload only accepts Pixel::NV12 and Pixel::BGRA frames (chain a \
-         SwScaler in front of it), got {0:?}"
+        "D3d11Upload only accepts Pixel::NV12, Pixel::YUV420P and Pixel::BGRA \
+         frames (chain a SwScaler in front of it), got {0:?}"
     )]
     UnsupportedFormat(ffmpeg::format::Pixel),
     /// A CPU frame plane is shorter than its stride and height require.
@@ -174,31 +175,21 @@ impl D3d11Upload {
         let row_bytes = frame.width() as usize;
         let luma_rows = frame.height() as usize;
         let chroma_rows = frame.height().div_ceil(2) as usize;
-        let chroma_width = frame.width().div_ceil(2) as usize;
-        let planar = frame.format() != ffmpeg::format::Pixel::NV12;
+        let planar = nv12::is_planar_420(frame.format());
         // Each plane's rows are read at its stride, so every plane is checked
         // to hold them first: a short plane would be a panic here, not an
         // error returned to the caller.
-        let planes: &[(usize, usize, usize)] = if planar {
-            &[
-                (0, luma_rows, row_bytes),
-                (1, chroma_rows, chroma_width),
-                (2, chroma_rows, chroma_width),
-            ]
-        } else {
-            &[(0, luma_rows, row_bytes), (1, chroma_rows, row_bytes)]
-        };
-        for &(plane, rows, bytes) in planes {
-            let stride = frame.stride(plane);
-            let needed = stride * rows.saturating_sub(1) + bytes;
-            if stride < bytes || frame.data(plane).len() < needed {
-                return Err(D3d11UploadError::PlaneTooSmall {
-                    actual: frame.data(plane).len(),
-                    stride,
-                    height: rows as u32,
-                });
-            }
-        }
+        nv12::check_planes(frame).map_err(
+            |nv12::PlaneTooSmall {
+                 actual,
+                 stride,
+                 height,
+             }| D3d11UploadError::PlaneTooSmall {
+                actual,
+                stride,
+                height,
+            },
+        )?;
         let mut packed = vec![0u8; row_bytes * (luma_rows + chroma_rows)];
         let (luma_stride, luma_src) = (frame.stride(0), frame.data(0));
         for row in 0..luma_rows {
@@ -207,16 +198,9 @@ impl D3d11Upload {
         }
         let chroma_offset = row_bytes * luma_rows;
         if planar {
-            let (cb_stride, cb) = (frame.stride(1), frame.data(1));
-            let (cr_stride, cr) = (frame.stride(2), frame.data(2));
             for row in 0..chroma_rows {
                 let destination = &mut packed[chroma_offset + row * row_bytes..][..row_bytes];
-                for (column, pair) in destination.chunks_mut(2).enumerate() {
-                    pair[0] = cb[row * cb_stride + column];
-                    if let Some(second) = pair.get_mut(1) {
-                        *second = cr[row * cr_stride + column];
-                    }
-                }
+                nv12::interleave_chroma_row(frame, row, destination);
             }
         } else {
             let (chroma_stride, chroma_src) = (frame.stride(1), frame.data(1));

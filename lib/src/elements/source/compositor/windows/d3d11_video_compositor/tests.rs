@@ -1142,11 +1142,12 @@ fn a_transparent_background_leaves_alpha_where_nothing_drew() {
     );
 }
 
-/// A frame in system memory goes into an input as it is — BGRA, and a
-/// YUV420P one converted with its own colour description — uploaded by the
-/// input itself, with no `D3d11Upload` in front.
+/// An input takes textures only: a frame in system memory is refused when
+/// the pipeline is linked, with `D3d11Upload` named as what goes in front —
+/// and through one, BGRA and a YUV420P frame with its own colour
+/// description are drawn as they are.
 #[test]
-fn a_system_memory_frame_goes_straight_into_an_input() {
+fn a_system_memory_frame_goes_in_through_an_upload() {
     let Some(gpu) = try_device() else {
         return;
     };
@@ -1180,20 +1181,31 @@ fn a_system_memory_frame_goes_straight_into_an_input() {
     }
     yuv.set_color_space(ffmpeg::color::Space::BT709);
     yuv.set_color_range(ffmpeg::color::Range::MPEG);
-    assert!(
-        !crate::contract::check_link(
-            &OutputContract::Fixed(
-                PortContract::frame(MediaKind::VideoFrame, MemoryDomain::System).with_layouts(
-                    crate::contract::PixelLayoutSet::of(crate::contract::PixelLayout::Yuv420p)
-                ),
+    let link = crate::contract::check_link(
+        &OutputContract::Fixed(
+            PortContract::frame(MediaKind::VideoFrame, MemoryDomain::System).with_layouts(
+                crate::contract::PixelLayoutSet::of(crate::contract::PixelLayout::Yuv420p),
             ),
-            &overlay.input_contract(),
-        )
-        .is_refused(),
-        "a software decode links straight to an input"
+        ),
+        &overlay.input_contract(),
     );
-    background.consume(MediaBuffer::video(bgra)).unwrap();
-    overlay.consume(MediaBuffer::video(yuv)).unwrap();
+    assert!(link.is_refused(), "a software decode needs an upload first");
+    assert!(
+        link.remedy()
+            .is_some_and(|remedy| remedy.contains("D3d11Upload")),
+        "{:?}",
+        link.remedy()
+    );
+    let mut upload = crate::elements::D3d11Upload::new("upload", &gpu);
+    let mut uploaded = |frame| {
+        use crate::repeat::PerFrameTransform;
+        let MediaBuffer::Video(frame) = MediaBuffer::video(frame) else {
+            unreachable!()
+        };
+        MediaBuffer::Video(upload.transform(&frame).unwrap())
+    };
+    background.consume(uploaded(bgra)).unwrap();
+    overlay.consume(uploaded(yuv)).unwrap();
 
     let composed = compositor
         .compose_frame(&test_bus())

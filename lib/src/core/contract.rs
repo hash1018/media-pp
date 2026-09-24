@@ -486,6 +486,24 @@ impl PixelLayoutSet {
     pub const fn is_subset_of(self, other: Self) -> bool {
         self.0 & !other.0 == 0
     }
+
+    /// What leaves an [`OutputContract::SameLayout`] port whose own layouts
+    /// are `self`, given frames in `arrived`: each as it came, but YUV420P
+    /// as NV12 where the port lists NV12 and not YUV420P — an upload that
+    /// interleaves YUV420P's chroma planes on the way up puts out NV12's
+    /// samples. A producer that stated nothing still has stated nothing.
+    pub(crate) fn passed_on(self, arrived: Self) -> Self {
+        let (planar, nv12) = (PixelLayout::Yuv420p, PixelLayout::Nv12);
+        if arrived != Self::ALL
+            && arrived.contains(planar)
+            && !self.contains(planar)
+            && self.contains(nv12)
+        {
+            Self(arrived.0 & !planar.bit() | nv12.bit())
+        } else {
+            arrived
+        }
+    }
 }
 
 impl fmt::Display for PixelLayoutSet {
@@ -670,7 +688,9 @@ pub enum OutputContract {
     /// This, in the layout that arrived — for an element that changes what a
     /// frame is or where it lives but not how its pixels are laid out: a
     /// resize-only scaler. The contract's own layouts are every one it can
-    /// be given. Where nothing upstream says what it will be given, nothing
+    /// be given, but for YUV420P: a port listing NV12 and not YUV420P passes
+    /// YUV420P on as NV12, the same samples with the chroma interleaved, as
+    /// an upload of a software decode does. Where nothing upstream says what it will be given, nothing
     /// downstream is checked against it — assuming every layout would refuse
     /// a consumer that takes only the one it will turn out to pass on.
     SameLayout(PortContract),
@@ -755,13 +775,13 @@ pub fn remedy(produced: &PortContract, accepted: &PortContract) -> Option<&'stat
         let to = accepted_memory.only()?;
         return match (from, to) {
             (System, D3d11) => Some(
-                "upload it: a D3d11Upload, which takes NV12 or BGRA — a SwScaler::to_format to one of those first where the frames are in another layout",
+                "upload it: a D3d11Upload, which takes NV12, YUV420P or BGRA — a SwScaler::to_format to one of those first where the frames are in another layout",
             ),
             (System, D3d12) => Some(
                 "upload it: a D3d12Upload, which takes NV12 — a SwScaler::to_format to NV12 first where the frames are in another layout",
             ),
             (System, Cuda) => Some(
-                "upload it: a CudaUpload built for NV12 or BGRA — a SwScaler::to_format to that layout first where the frames are in another",
+                "upload it: a CudaUpload built for NV12, which takes YUV420P too, or for BGRA — a SwScaler::to_format to one of those first where the frames are in another layout",
             ),
             (D3d11, System) => Some(
                 "download it: a D3d11Download, which reads BGRA — a D3d11Scaler::to_format with D3d11ScalerFormat::Bgra first where the frames are in another layout",
@@ -924,6 +944,32 @@ pub fn check_link(produced: &OutputContract, accepted: &InputContract) -> LinkCh
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An upload lists what it puts out; YUV420P given to one listing NV12
+    /// leaves as NV12, and everything else as it came.
+    #[test]
+    fn yuv420p_is_passed_on_as_nv12_where_only_nv12_is_listed() {
+        let upload = PixelLayoutSet::NV12_OR_BGRA;
+        assert_eq!(
+            upload.passed_on(PixelLayoutSet::YUV420P),
+            PixelLayoutSet::NV12
+        );
+        assert_eq!(
+            upload.passed_on(PixelLayoutSet::from_slice(&[
+                PixelLayout::Yuv420p,
+                PixelLayout::Bgra
+            ])),
+            PixelLayoutSet::NV12_OR_BGRA
+        );
+        assert_eq!(upload.passed_on(PixelLayoutSet::BGRA), PixelLayoutSet::BGRA);
+        assert_eq!(upload.passed_on(PixelLayoutSet::ALL), PixelLayoutSet::ALL);
+        // A port that lists YUV420P itself passes it on as YUV420P.
+        let planar = PixelLayoutSet::from_slice(&[PixelLayout::Nv12, PixelLayout::Yuv420p]);
+        assert_eq!(
+            planar.passed_on(PixelLayoutSet::YUV420P),
+            PixelLayoutSet::YUV420P
+        );
+    }
 
     #[test]
     fn a_producers_kinds_must_all_be_accepted() {

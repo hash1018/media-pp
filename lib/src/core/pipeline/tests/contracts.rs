@@ -1332,3 +1332,48 @@ fn check_elements_answers_before_linking_as_building_would() {
     let refused = check_elements(&mut software, &counter);
     assert!(refused.to_string().contains("encode it first"), "{refused}");
 }
+
+/// A software decode's YUV420P goes up through a `D3d11Upload` as NV12,
+/// so what takes only NV12 on the GPU links after it — the upload's output
+/// follows its input's layout, and YUV420P is NV12's samples once up.
+#[cfg(all(target_os = "windows", feature = "d3d11"))]
+#[test]
+fn yuv420p_uploaded_to_d3d11_links_to_what_takes_nv12() {
+    let Some(gpu) = crate::test_support::try_d3d11_gpu() else {
+        return;
+    };
+    let d3d11 = |layout| {
+        PortContract::frame(MediaKind::VideoFrame, MemoryDomain::D3d11)
+            .with_layouts(PixelLayoutSet::of(layout))
+    };
+    let decoder = || {
+        DeclaringFilter::new(
+            "decoder",
+            OutputContract::Fixed(
+                PortContract::frame(MediaKind::VideoFrame, MemoryDomain::System)
+                    .with_layouts(PixelLayoutSet::YUV420P),
+            ),
+        )
+    };
+    contract_context()
+        .branch()
+        .pipe(decoder())
+        .pipe(crate::elements::D3d11Upload::new("upload", &gpu))
+        .to(DeclaringSink::boxed(
+            "scaler",
+            InputContract::Fixed(d3d11(PixelLayout::Nv12)),
+        ))
+        .expect("YUV420P is uploaded as NV12");
+    assert!(
+        contract_context()
+            .branch()
+            .pipe(decoder())
+            .pipe(crate::elements::D3d11Upload::new("upload", &gpu))
+            .to(DeclaringSink::boxed(
+                "keyer",
+                InputContract::Fixed(d3d11(PixelLayout::Bgra)),
+            ))
+            .is_err(),
+        "and NV12 is not BGRA"
+    );
+}

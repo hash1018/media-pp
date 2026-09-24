@@ -503,7 +503,8 @@ impl BranchPlan {
                 // again with what upstream does send.
                 OutputContract::SameLayout(contract) => flow.as_ref().map(|flow| ResolvedFlow {
                     producer: name_of(id),
-                    contract: contract.with_layouts(flow.contract.layouts()),
+                    contract: contract
+                        .with_layouts(contract.layouts().passed_on(flow.contract.layouts())),
                 }),
                 OutputContract::Passthrough => flow,
                 OutputContract::Unknown => None,

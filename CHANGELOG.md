@@ -620,16 +620,17 @@ compile error with no explanation.
   `ab_glyph`, which rasterizes, is now always a dependency rather than one
   the `cuda` and `d3d11` features bring.
 
-- **A D3D11 compositor input takes frames in system memory, and
-  `D3d11Upload` takes YUV420P.** An input of `D3d11VideoCompositor` took
-  only a texture on its device, so a software decode or a synthetic source
-  needed a `SwScaler` to NV12 and a `D3d11Upload` in front of each input —
-  where the window renderers had just stopped needing them. Each input now
-  takes system-memory NV12, YUV420P and BGRA as well, uploading it itself,
-  and answers a repeated picture with the texture already uploaded.
-  `D3d11Upload` takes YUV420P (and YUVJ420P, as full range) by
-  interleaving its chroma planes into NV12 on the way up — the same samples,
-  so no scaler is needed for a software decode.
+- **`D3d11Upload` and `CudaUpload` take YUV420P.** A software decode
+  needed a `SwScaler` to NV12 in front of either. Both now take YUV420P (and
+  YUVJ420P, tagged full range) and put it up as NV12, interleaving its
+  chroma planes on the way — the same samples, so no scaler is needed.
+  `CudaUpload` does this when built for `CudaFrameFormat::Nv12`, and adds
+  `CudaUploadError::PlaneTooSmall` for a plane too short for its rows. The
+  link check follows: what takes NV12 on the GPU links after an upload of
+  YUV420P, and the suggestion it makes for a missing upload says so. A
+  compositor input still takes frames on the compositor's device only —
+  the upload in front is where the copy shows, in the topology and in the
+  stats.
 
 - **`VulkanGpu` and `VulkanWindowRenderer`: video in a window on Linux,
   from system memory or CUDA.** A new `vulkan` feature, and the Linux

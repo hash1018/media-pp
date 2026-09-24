@@ -4,6 +4,8 @@
 
 #[cfg(feature = "cuda")]
 pub(crate) mod cuda;
+#[cfg(any(feature = "cuda", all(target_os = "windows", feature = "d3d11")))]
+mod nv12;
 #[cfg(all(target_os = "windows", any(feature = "d3d11", feature = "d3d12")))]
 mod windows;
 

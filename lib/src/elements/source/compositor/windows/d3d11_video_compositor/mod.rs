@@ -53,7 +53,7 @@ use crate::{
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
     control::{ControlMsg, ControlReceiver, drain_control},
     element::{Context, Element, ElementType, Sink, Source, SourceElement, element_pp_log},
-    elements::{D3d11Upload, VideoCompositorOptions},
+    elements::VideoCompositorOptions,
     error::{D3d11FrameWrapError, D3d11SharedDeviceError, Result},
     pad::SrcPad,
     platform::windows::{
@@ -62,7 +62,6 @@ use crate::{
         d3d11va::{d3d11va_texture, wrap_d3d11_texture},
     },
     pool::{UnboundObjectPool, UnboundObjectPoolRef},
-    repeat::PerFrameTransform,
     schedule::PeriodicSchedule,
     stats::TickCounters,
 };
@@ -268,11 +267,10 @@ struct D3d11CompositorShared {
     /// [`D3d11VideoCompositorHandle::set_frame_rate`] writes.
     frame_rate: Arc<FrameRate>,
     /// Lets [`D3d11VideoCompositorHandle::add_text_layer`] build GPU
-    /// resources guaranteed to match this compositor's own device, and each
-    /// input upload a system-memory frame to it, without a
-    /// separately-threaded-through device parameter that could drift from
-    /// the real one.
-    gpu: D3d11Gpu,
+    /// resources guaranteed to match this compositor's own device, without
+    /// requiring a separately-threaded-through device parameter that could
+    /// drift from the real one.
+    device: ID3D11Device,
 }
 
 /// A cheaply cloneable handle for adding and removing
@@ -343,11 +341,6 @@ impl D3d11VideoCompositorHandle {
         name: impl Into<String>,
         layer: VideoLayer,
     ) -> std::result::Result<D3d11VideoCompositorInput, D3d11VideoCompositorError> {
-        let gpu = self
-            .shared
-            .upgrade()
-            .map(|shared| shared.gpu.clone())
-            .ok_or(D3d11VideoCompositorError::Stopped)?;
         let layer_handle = self.register_input(name, layer)?;
         Ok(D3d11VideoCompositorInput {
             sink: Box::new(D3d11VideoCompositorInputSink {
@@ -355,7 +348,6 @@ impl D3d11VideoCompositorHandle {
                 pp_log: element_pp_log(ElementType::D3d11VideoCompositor, &layer_handle.name, None),
                 shared: self.shared.clone(),
                 input: layer_handle.input.clone(),
-                upload: D3d11Upload::new(format!("{}-upload", layer_handle.name), &gpu),
             }),
             layer: layer_handle,
         })
@@ -454,11 +446,7 @@ impl D3d11VideoCompositorHandle {
         name: impl Into<String>,
         text_layer: TextLayer,
     ) -> std::result::Result<D3d11TextLayerHandle, D3d11TextLayerError> {
-        let Some(device) = self
-            .shared
-            .upgrade()
-            .map(|shared| shared.gpu.device().clone())
-        else {
+        let Some(device) = self.shared.upgrade().map(|shared| shared.device.clone()) else {
             return Err(D3d11VideoCompositorError::Stopped.into());
         };
         // Validate everything that can fail before replacing an existing
@@ -494,9 +482,6 @@ pub struct D3d11VideoCompositorInputSink {
     name: Arc<str>,
     shared: Weak<D3d11CompositorShared>,
     input: Weak<GpuVideoInput>,
-    /// Puts a system-memory frame on the compositor's device, so a software
-    /// decode or a synthetic source feeds this input with nothing in front.
-    upload: D3d11Upload,
 }
 
 impl D3d11VideoCompositorInputSink {
@@ -533,22 +518,13 @@ impl Element for D3d11VideoCompositorInputSink {
 }
 
 impl Sink for D3d11VideoCompositorInputSink {
-    /// A D3D11 texture on the compositor's device, NV12 or BGRA — drawn as
-    /// it is — or a frame in system memory, NV12, YUV420P or BGRA, uploaded
-    /// here first as [`D3d11Upload`] would.
+    /// Every layer is composited on the GPU, so each input takes a
+    /// device texture just as the composed output produces one.
     fn input_contract(&self) -> InputContract {
-        InputContract::Fixed(PortContract::Frames(
-            crate::contract::MediaKindSet::of(MediaKind::VideoFrame),
-            crate::contract::MemoryDomainSet::from_slice(&[
-                MemoryDomain::D3d11,
-                MemoryDomain::System,
-            ]),
-            crate::contract::PixelLayoutSet::from_slice(&[
-                crate::contract::PixelLayout::Nv12,
-                crate::contract::PixelLayout::Yuv420p,
-                crate::contract::PixelLayout::Bgra,
-            ]),
-        ))
+        InputContract::Fixed(
+            PortContract::frame(MediaKind::VideoFrame, MemoryDomain::D3d11)
+                .with_layouts(crate::contract::PixelLayoutSet::NV12_OR_BGRA),
+        )
     }
 
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
@@ -557,13 +533,9 @@ impl Sink for D3d11VideoCompositorInputSink {
         };
         match buf {
             MediaBuffer::Video(frame) => {
-                // A repeat of the last system-memory picture is answered with
-                // the texture already uploaded — see `PerFrameTransform`.
-                let frame = if frame.format() == ffmpeg::format::Pixel::D3D11 {
-                    frame
-                } else {
-                    self.upload.transform(&frame)?
-                };
+                if frame.format() != ffmpeg::format::Pixel::D3D11 {
+                    return Err(D3d11VideoCompositorError::UnsupportedFormat(frame.format()).into());
+                }
                 input.latest_frame.store(Some(frame));
                 Ok(())
             }
@@ -582,12 +554,8 @@ impl Sink for D3d11VideoCompositorInputSink {
 
     fn control(&mut self, msg: ControlMsg) -> Result<()> {
         match msg {
-            ControlMsg::Stop => {
-                self.upload.repeated().clear();
-                self.detach();
-            }
+            ControlMsg::Stop => self.detach(),
             ControlMsg::Flush => {
-                self.upload.repeated().clear();
                 if let Some(input) = self.input.upgrade() {
                     input.latest_frame.store(None);
                 }
@@ -891,7 +859,7 @@ impl D3d11VideoCompositor {
             inputs: Mutex::new(HashMap::new()),
             next_input_id: AtomicU64::new(1),
             frame_rate: FrameRate::new(options.frame_rate),
-            gpu: gpu.clone(),
+            device: device.clone(),
         });
 
         // SAFETY: `device` is live; the helper reads only static shader bytes
