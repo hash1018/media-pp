@@ -8,8 +8,8 @@
 // in as push constants — WGSL's `immediate` address space — worked out from
 // the frame's own colour description, so a BT.709 frame and a BT.601 one are
 // each drawn with their own coefficients rather than one of them with the
-// other's. See `Colour` in `vulkan_window_renderer.rs` for how the eight
-// values are derived.
+// other's. They are three affine rows from `color::yuv_to_rgb_rows`, the
+// same the D3D renderers use; see `Colour` in `vulkan_window_renderer.rs`.
 
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
@@ -31,20 +31,12 @@ fn vs_main(@builtin(vertex_index) index: u32) -> VsOut {
     return out;
 }
 
+// Each row turns (Y, Cb, Cr, 1), every sample normalized to 0..1, into one
+// of R, G and B: range and matrix both, offsets in the fourth column.
 struct Colour {
-    // Y' = (Y - y_offset) * y_scale
-    y_offset: f32,
-    y_scale: f32,
-    // C = (C - c_offset) * c_scale, for both Cb and Cr
-    c_offset: f32,
-    c_scale: f32,
-    // R = Y' + cr_to_r Cr
-    // G = Y' - cb_to_g Cb - cr_to_g Cr
-    // B = Y' + cb_to_b Cb
-    cr_to_r: f32,
-    cb_to_g: f32,
-    cr_to_g: f32,
-    cb_to_b: f32,
+    r: vec4<f32>,
+    g: vec4<f32>,
+    b: vec4<f32>,
 };
 
 var<immediate> colour: Colour;
@@ -55,13 +47,8 @@ var<immediate> colour: Colour;
 @group(0) @binding(3) var plane2: texture_2d<f32>;
 
 fn to_rgb(luma: f32, cb: f32, cr: f32) -> vec4<f32> {
-    let y = (luma - colour.y_offset) * colour.y_scale;
-    let c = (vec2<f32>(cb, cr) - vec2<f32>(colour.c_offset)) * colour.c_scale;
-    let rgb = vec3<f32>(
-        y + colour.cr_to_r * c.y,
-        y - colour.cb_to_g * c.x - colour.cr_to_g * c.y,
-        y + colour.cb_to_b * c.x,
-    );
+    let yuv = vec4<f32>(luma, cb, cr, 1.0);
+    let rgb = vec3<f32>(dot(colour.r, yuv), dot(colour.g, yuv), dot(colour.b, yuv));
     return vec4<f32>(clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
 }
 

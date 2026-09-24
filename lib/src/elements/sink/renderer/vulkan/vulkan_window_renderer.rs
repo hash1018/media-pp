@@ -166,10 +166,12 @@ impl WindowSize {
 ///
 /// # What it draws
 ///
-/// Each YUV frame is drawn by its own colour description: BT.709, BT.601 or
-/// BT.2020 coefficients as the frame says, limited or full range as it says,
-/// and where it says nothing, BT.709 for a picture 720 rows high or more and
-/// BT.601 below that; a YUVJ420P frame is full range whatever it says. A
+/// Each YUV frame is drawn by its own colour description, read as every
+/// other converter in this crate reads it: BT.709, BT.601 or BT.2020
+/// coefficients as the frame says, limited or full range as it says, and
+/// where it says nothing, BT.709 for a picture over 576 rows and BT.601
+/// otherwise — as the D3D window renderers draw it; a YUVJ420P frame is full
+/// range whatever it says. A
 /// BGRA frame is drawn as it is, and its alpha ignored. The picture keeps
 /// its aspect ratio inside the window,
 /// with black bars as needed, and each frame is presented synchronized to
@@ -464,70 +466,30 @@ impl Sink for VulkanWindowRenderer {
     }
 }
 
-/// The colour conversion one frame is drawn with: the eight push constants
-/// `present.wgsl`'s YUV shaders read.
+/// The colour conversion one frame is drawn with: the three affine rows
+/// `present.wgsl`'s YUV shaders take as push constants, each turning
+/// normalized `(Y, Cb, Cr, 1)` into one of R, G and B.
 ///
-/// Derived from the matrix's two luma weights, `kr` and `kb`, rather than
-/// written out per standard, so there is one formula to trust. Limited range
-/// scales luma by 255/219 and chroma by 255/224 after taking their offsets
-/// away, which reproduces the familiar constants exactly: BT.709 red from Cr
-/// is 1.5748 x 255/224 = 1.793, and BT.601's is 1.402 x 255/224 = 1.596.
+/// The rows are `color::yuv_to_rgb_rows`'s, which the D3D renderers and
+/// compositors and the CUDA converter read a frame's colour description
+/// through as well, so one picture is drawn in the same colours whichever of
+/// them draws it — down to which matrix a frame that says nothing gets.
 #[derive(Debug, Clone, Copy, PartialEq)]
-#[repr(C)]
-struct Colour {
-    y_offset: f32,
-    y_scale: f32,
-    c_offset: f32,
-    c_scale: f32,
-    cr_to_r: f32,
-    cb_to_g: f32,
-    cr_to_g: f32,
-    cb_to_b: f32,
-}
+struct Colour([[f32; 4]; 3]);
 
 impl Colour {
     fn of(space: ffmpeg::color::Space, range: ffmpeg::color::Range, height: u32) -> Self {
-        use ffmpeg::color::{Range, Space};
-
-        let (kr, kb) = match space {
-            Space::BT709 => (0.2126, 0.0722),
-            Space::BT470BG | Space::SMPTE170M | Space::SMPTE240M | Space::FCC => (0.299, 0.114),
-            Space::BT2020NCL | Space::BT2020CL => (0.2627, 0.0593),
-            // Nothing said: what a player assumes, by the picture's height.
-            _ if height >= 720 => (0.2126, 0.0722),
-            _ => (0.299, 0.114),
-        };
-        let kg = 1.0 - kr - kb;
-        let (y_offset, y_scale, c_scale) = match range {
-            Range::JPEG => (0.0, 1.0, 1.0),
-            // MPEG, or unspecified: limited is what video almost always is.
-            _ => (16.0 / 255.0, 255.0 / 219.0, 255.0 / 224.0),
-        };
-        Self {
-            y_offset,
-            y_scale,
-            c_offset: 128.0 / 255.0,
-            c_scale,
-            cr_to_r: 2.0 * (1.0 - kr),
-            cb_to_g: 2.0 * kb * (1.0 - kb) / kg,
-            cr_to_g: 2.0 * kr * (1.0 - kr) / kg,
-            cb_to_b: 2.0 * (1.0 - kb),
-        }
+        Self(crate::color::yuv_to_rgb_rows(space, range, height))
     }
 
-    fn bytes(&self) -> [u8; 32] {
-        let values = [
-            self.y_offset,
-            self.y_scale,
-            self.c_offset,
-            self.c_scale,
-            self.cr_to_r,
-            self.cb_to_g,
-            self.cr_to_g,
-            self.cb_to_b,
-        ];
-        let mut bytes = [0u8; 32];
-        for (chunk, value) in bytes.as_chunks_mut::<4>().0.iter_mut().zip(values) {
+    fn bytes(&self) -> [u8; 48] {
+        let mut bytes = [0u8; 48];
+        for (chunk, value) in bytes
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
+            .zip(self.0.as_flattened())
+        {
             *chunk = value.to_ne_bytes();
         }
         bytes
@@ -2225,18 +2187,12 @@ mod tests {
         near(view([1920, 1080], 1280, 720), [0.0, 0.0, 1280.0, 720.0]);
     }
 
-    /// The derived constants are the familiar ones, applied to limited-range
+    /// The rows are the familiar constants, applied to limited-range
     /// chroma: BT.709 and BT.601 as the rest of the world writes them out.
     #[test]
     fn a_frame_is_converted_by_its_own_matrix() {
-        let effective = |colour: Colour| {
-            [
-                colour.cr_to_r * colour.c_scale,
-                colour.cb_to_g * colour.c_scale,
-                colour.cr_to_g * colour.c_scale,
-                colour.cb_to_b * colour.c_scale,
-            ]
-        };
+        // Red from Cr, green from Cb and from Cr, blue from Cb.
+        let effective = |Colour(rows): Colour| [rows[0][2], -rows[1][1], -rows[1][2], rows[2][1]];
         let near = |got: [f32; 4], expected: [f32; 4]| {
             assert!(
                 got.iter()
@@ -2253,18 +2209,21 @@ mod tests {
             effective(Colour::of(Space::BT470BG, Range::MPEG, 1080)),
             [1.596, 0.392, 0.813, 2.017],
         );
-        // Nothing said: 709 for HD, 601 below it.
+        // Nothing said: 709 over 576 rows, 601 through them — the line the
+        // D3D renderers draw at, not a 720 of this renderer's own.
         assert_eq!(
-            Colour::of(Space::Unspecified, Range::MPEG, 1080),
-            Colour::of(Space::BT709, Range::MPEG, 1080)
+            Colour::of(Space::Unspecified, Range::MPEG, 640),
+            Colour::of(Space::BT709, Range::MPEG, 640)
         );
         assert_eq!(
-            Colour::of(Space::Unspecified, Range::MPEG, 480),
-            Colour::of(Space::SMPTE170M, Range::MPEG, 480)
+            Colour::of(Space::Unspecified, Range::MPEG, 576),
+            Colour::of(Space::SMPTE170M, Range::MPEG, 576)
         );
-        // Full range: nothing taken off luma, nothing scaled.
-        let full = Colour::of(Space::BT709, Range::JPEG, 1080);
-        assert_eq!((full.y_offset, full.y_scale, full.c_scale), (0.0, 1.0, 1.0));
+        // Full range: luma taken as it is; limited: stretched from 16..235.
+        let Colour(full) = Colour::of(Space::BT709, Range::JPEG, 1080);
+        let Colour(limited) = Colour::of(Space::BT709, Range::MPEG, 1080);
+        assert_eq!(full[0][0], 1.0);
+        assert!((limited[0][0] - 255.0 / 219.0).abs() < 1e-6);
     }
 
     #[test]

@@ -96,7 +96,8 @@ impl ColorDescription {
 /// treated as MPEG/limited, matching ordinary decoded NV12 video.
 #[cfg(any(
     feature = "cuda",
-    all(target_os = "windows", any(feature = "d3d11", feature = "d3d12"))
+    all(target_os = "windows", any(feature = "d3d11", feature = "d3d12")),
+    all(target_os = "linux", feature = "vulkan")
 ))]
 pub(crate) fn yuv_to_rgb_rows(
     space: ffmpeg_next::color::Space,
