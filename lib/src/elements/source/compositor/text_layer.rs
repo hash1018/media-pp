@@ -4,9 +4,10 @@
 //!
 //! Rasterizing is backend-agnostic by nature: `ab_glyph` turns a font and a
 //! string into per-pixel coverage, and what differs is only what each
-//! backend does with that coverage. D3D11 expands it into a straight-alpha
-//! BGRA texture for its blend state; CUDA hands it to a blend kernel as a
-//! mask with the color as a scalar.
+//! backend does with that coverage. D3D11 and the software compositor
+//! expand it into straight-alpha BGRA — [`rasterize_bgra`] — for their
+//! blending; CUDA hands it to a blend kernel as a mask with the color as a
+//! scalar.
 
 use crate::color::Color;
 
@@ -15,7 +16,6 @@ use crate::color::Color;
 /// Coverage, not color: `TextLayer::color` is uniform over the whole layer,
 /// so carrying it per pixel would be three redundant bytes each. Each
 /// backend combines the two in whatever form it draws with.
-#[cfg(any(feature = "cuda", all(target_os = "windows", feature = "d3d11")))]
 pub(crate) struct TextMask {
     pub(crate) width: u32,
     pub(crate) height: u32,
@@ -26,7 +26,6 @@ pub(crate) struct TextMask {
 /// Errors from rasterizing, which each backend maps into its own text-layer
 /// error type so a caller matching on one sees only that backend's enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg(any(feature = "cuda", all(target_os = "windows", feature = "d3d11")))]
 pub(crate) enum TextRasterError {
     TooLarge { width: u64, height: u64 },
     AllocationFailed { bytes: usize },
@@ -34,13 +33,11 @@ pub(crate) enum TextRasterError {
 
 /// A rasterized string this crate refuses to allocate for — a guard against
 /// a pathological font size turning one `set_text` into gigabytes.
-#[cfg(any(feature = "cuda", all(target_os = "windows", feature = "d3d11")))]
 pub(crate) const MAX_TEXT_PIXELS: usize = 16 * 1024 * 1024;
 
 /// Rasterizes `text` at `size_px` (pixel height) into tightly-bounding
 /// coverage. `None` for text with no drawable glyphs (empty, all-whitespace,
 /// or all-control).
-#[cfg(any(feature = "cuda", all(target_os = "windows", feature = "d3d11")))]
 pub(crate) fn rasterize_coverage(
     font: &ab_glyph::FontArc,
     size_px: f32,
@@ -127,8 +124,39 @@ pub(crate) fn rasterize_coverage(
     }))
 }
 
-/// Construction-time settings for one text layer, passed to
-/// `D3d11VideoCompositorHandle::add_text_layer` — the
+/// [`rasterize_coverage`], expanded into the straight-alpha BGRA the D3D11
+/// and software compositors blend: RGB is `color` uniformly, alpha is glyph
+/// coverage — tightly packed, `width * height * 4` bytes. `None` for text
+/// with no drawable glyphs.
+pub(crate) fn rasterize_bgra(
+    font: &ab_glyph::FontArc,
+    size_px: f32,
+    text: &str,
+    color: Color,
+) -> Result<Option<(u32, u32, Vec<u8>)>, TextRasterError> {
+    let Some(mask) = rasterize_coverage(font, size_px, text)? else {
+        return Ok(None);
+    };
+    let byte_count = mask
+        .coverage
+        .len()
+        .checked_mul(4)
+        .ok_or(TextRasterError::TooLarge {
+            width: mask.width.into(),
+            height: mask.height.into(),
+        })?;
+    let mut pixels = Vec::new();
+    pixels
+        .try_reserve_exact(byte_count)
+        .map_err(|_| TextRasterError::AllocationFailed { bytes: byte_count })?;
+    for alpha in mask.coverage {
+        pixels.extend_from_slice(&[color.blue, color.green, color.red, alpha]);
+    }
+    Ok(Some((mask.width, mask.height, pixels)))
+}
+
+/// Construction-time settings for one text layer, passed to a compositor
+/// handle's `add_text_layer` — the software, D3D11 or CUDA one — the
 /// text sibling of [`super::video_layer::VideoLayer`], which `add_source`
 /// takes the same way. `font_data` (raw TTF/OTF bytes; this crate bundles
 /// no font of its own) has no sane default, so — mirroring

@@ -511,6 +511,12 @@ mod tests {
             match player.next_event_timeout(Duration::from_secs(10)) {
                 Some(PlayerEvent::Ended) => break,
                 Some(PlayerEvent::Error { name, error }) => panic!("{name}: {error}"),
+                Some(PlayerEvent::Stopped) => {
+                    panic!(
+                        "playback stopped without ending, at {:?}",
+                        player.position()
+                    )
+                }
                 Some(_) => {}
                 None => panic!("the file never ended"),
             }

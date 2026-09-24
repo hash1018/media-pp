@@ -217,6 +217,26 @@ impl SwVideoCompositorHandle {
         name: impl Into<String>,
         layer: VideoLayer,
     ) -> std::result::Result<SwVideoCompositorInput, SwVideoCompositorError> {
+        let layer = self.register_input(name, layer)?;
+        Ok(SwVideoCompositorInput {
+            sink: Box::new(SwVideoCompositorInputSink {
+                name: layer.name.clone(),
+                pp_log: element_pp_log(ElementType::SwVideoCompositor, &layer.name, None),
+                shared: self.shared.clone(),
+                input: layer.input.clone(),
+            }),
+            layer,
+        })
+    }
+
+    /// Registers an input with no sink — one whose frames are set through
+    /// its layer handle, as a text layer's are — replacing any of the same
+    /// name, as [`Self::add_source`] does.
+    pub(crate) fn register_input(
+        &self,
+        name: impl Into<String>,
+        layer: VideoLayer,
+    ) -> std::result::Result<SwVideoLayerHandle, SwVideoCompositorError> {
         validate_layer(layer)?;
         let Some(shared) = self.shared.upgrade() else {
             return Err(SwVideoCompositorError::Stopped);
@@ -233,19 +253,10 @@ impl SwVideoCompositorHandle {
             .lock()
             .unwrap()
             .insert(name.clone(), input.clone());
-
-        Ok(SwVideoCompositorInput {
-            sink: Box::new(SwVideoCompositorInputSink {
-                name: name.clone(),
-                pp_log: element_pp_log(ElementType::SwVideoCompositor, &name, None),
-                shared: self.shared.clone(),
-                input: Arc::downgrade(&input),
-            }),
-            layer: SwVideoLayerHandle {
-                id,
-                name,
-                input: Arc::downgrade(&input),
-            },
+        Ok(SwVideoLayerHandle {
+            id,
+            name,
+            input: Arc::downgrade(&input),
         })
     }
 
@@ -388,6 +399,20 @@ impl SwVideoLayerHandle {
     ) -> std::result::Result<(), SwVideoCompositorError> {
         video_layer::validate_source(source).map_err(map_layer_error)?;
         self.update(|layer| layer.source = source)
+    }
+
+    /// Makes `frame` what this input is drawn from next — for an input with
+    /// no sink, whose frames come from its owner rather than a branch.
+    pub(crate) fn set_frame(
+        &self,
+        frame: Arc<UnboundObjectPoolRef<ffmpeg::frame::Video>>,
+    ) -> std::result::Result<(), SwVideoCompositorError> {
+        let input = self
+            .input
+            .upgrade()
+            .ok_or(SwVideoCompositorError::SourceRemoved)?;
+        input.latest_frame.store(Some(frame));
+        Ok(())
     }
 
     fn update(
@@ -1166,6 +1191,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::elements::{SwTextLayerError, TextLayer};
 
     fn options(width: u32, height: u32) -> VideoCompositorOptions {
         VideoCompositorOptions {
@@ -1859,5 +1885,90 @@ mod tests {
             &[255, 255, 255, 255],
             "and opaque when it is asked for"
         );
+    }
+
+    fn system_font() -> Option<Vec<u8>> {
+        [
+            "C:/Windows/Fonts/arial.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+        ]
+        .iter()
+        .find_map(|path| std::fs::read(path).ok())
+    }
+
+    /// Where a picture is bright: the text's pixels on a black scene.
+    fn bright(frame: &ffmpeg::frame::Video) -> Vec<(usize, usize)> {
+        let mut found = Vec::new();
+        for y in 0..frame.height() as usize {
+            for x in 0..frame.width() as usize {
+                if pixel(frame, x, y)[..3].iter().all(|&channel| channel > 128) {
+                    found.push((x, y));
+                }
+            }
+        }
+        found
+    }
+
+    /// A text layer shows nothing until it has text, draws it where it was
+    /// put, hides for empty text, follows a move, and a bad font leaves the
+    /// layer that was there as it was.
+    #[test]
+    fn a_text_layer_draws_its_text_where_it_is_put() {
+        let Some(font) = system_font() else {
+            eprintln!("skipping: no system font to draw with here");
+            return;
+        };
+        let (mut compositor, handle) =
+            SwVideoCompositor::new("compositor", options(200, 80)).expect("the compositor opens");
+        let mut label = TextLayer::new(font);
+        label.font_size = 48.0;
+        label.color = Color::WHITE;
+        label.x = 10;
+        label.y = 10;
+        let text = handle.add_text_layer("label", label).unwrap();
+        assert!(
+            bright(&compositor.compose_frame().unwrap()).is_empty(),
+            "nothing before the first text"
+        );
+
+        text.set_text("LIVE").unwrap();
+        let drawn = bright(&compositor.compose_frame().unwrap());
+        assert!(drawn.len() > 50, "only {} pixels of text", drawn.len());
+        assert!(
+            drawn.iter().all(|&(x, y)| x >= 10 && y >= 10),
+            "where it was put"
+        );
+
+        text.set_text("  ").unwrap();
+        assert!(
+            bright(&compositor.compose_frame().unwrap()).is_empty(),
+            "empty text hides it"
+        );
+
+        text.set_text("A").unwrap();
+        text.set_position(120, 10).unwrap();
+        let moved = bright(&compositor.compose_frame().unwrap());
+        assert!(
+            !moved.is_empty() && moved.iter().all(|&(x, _)| x >= 120),
+            "it moved"
+        );
+
+        assert!(matches!(
+            handle.add_text_layer("label", TextLayer::new(vec![1, 2, 3])),
+            Err(SwTextLayerError::InvalidFont(_))
+        ));
+        assert_eq!(handle.source_count(), 1);
+        assert!(
+            !bright(&compositor.compose_frame().unwrap()).is_empty(),
+            "a refused font replaces nothing"
+        );
+        drop(compositor);
+        assert!(matches!(
+            text.set_text("gone"),
+            Err(SwTextLayerError::Compositor(
+                SwVideoCompositorError::SourceRemoved
+            ))
+        ));
     }
 }

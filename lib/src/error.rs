@@ -89,8 +89,9 @@ use crate::{
         AudioResamplerError, AudioVolumeError, FileDemuxerError, FileMuxerError,
         FrameRateLimiterError, HlsMuxerError, MuxerTrackError, PacerError, RackError,
         ReplayBufferError, RtmpMuxerError, RtspSourceError, SubmitError, SwAudioEncoderError,
-        SwChromaKeyError, SwDecoderError, SwEncoderError, SwScalerError, SwVideoCompositorError,
-        SwVideoEffectError, TestAudioSourceError, TestVideoSourceError, VideoSynchronizerError,
+        SwChromaKeyError, SwDecoderError, SwEncoderError, SwScalerError, SwTextLayerError,
+        SwVideoCompositorError, SwVideoEffectError, TestAudioSourceError, TestVideoSourceError,
+        VideoSynchronizerError,
     },
     graph::GraphError,
     log::LogInitError,
@@ -463,6 +464,10 @@ pub enum Error {
     /// A software video compositor operation failed.
     #[error(transparent)]
     SwVideoCompositorError(#[from] SwVideoCompositorError),
+
+    /// A software compositor text layer could not be made or could not draw.
+    #[error(transparent)]
+    SwTextLayerError(#[from] SwTextLayerError),
 
     /// Writing a container file failed.
     #[error(transparent)]

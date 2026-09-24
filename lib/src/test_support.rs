@@ -478,7 +478,12 @@ fn build_fixture(
     let directory = std::env::temp_dir().join("media-pp-fixtures");
     std::fs::create_dir_all(&directory)?;
     let path = directory.join(format!("{name}.mp4"));
-    let _ = std::fs::remove_file(&path);
+    // Written under a name of this process's own and only then moved into
+    // place: two test runs at once — two feature sets, say — each write the
+    // fixture, and one truncating the file while the other's player is
+    // halfway through it made that one's playback stop without ending.
+    let partial = directory.join(format!("{name}.{}.mp4", std::process::id()));
+    let _ = std::fs::remove_file(&partial);
 
     let channels = 2;
     let video = TestVideoSource::new(
@@ -528,7 +533,7 @@ fn build_fixture(
         },
     )?;
 
-    let mut muxer = FileMuxer::create(&path)?;
+    let mut muxer = FileMuxer::create(&partial)?;
     let video_track = muxer.add_stream("video", &video_encoder)?;
     let audio_track = muxer.add_stream("audio", &audio_encoder)?;
     let mut sinks = muxer.open()?;
@@ -565,7 +570,15 @@ fn build_fixture(
     pipeline.run()?;
     std::thread::sleep(std::time::Duration::from_secs_f64(seconds));
     pipeline.stop();
+    drop(pipeline);
 
+    // Where another run still has the old file open, Windows will not
+    // replace it; this run then reads its own copy, left behind like the
+    // other.
+    let path = match std::fs::rename(&partial, &path) {
+        Ok(()) => path,
+        Err(_) => partial,
+    };
     Ok(Fixture {
         path,
         audio_rate,

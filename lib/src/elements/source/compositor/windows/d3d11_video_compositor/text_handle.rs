@@ -22,7 +22,7 @@ use crate::{
     pool::UnboundObjectPool,
 };
 
-use super::super::super::text_layer::{TextRasterError, rasterize_coverage};
+use super::super::super::text_layer::{TextRasterError, rasterize_bgra};
 #[cfg(test)]
 use super::super::super::video_layer::MAX_DIMENSION;
 use super::super::super::video_layer::VideoRect;
@@ -206,40 +206,17 @@ impl D3d11TextLayerHandle {
     }
 }
 
-/// Expands the shared rasterizer's coverage into the straight-alpha BGRA
-/// buffer this backend's blend state expects: RGB is `color` uniformly,
-/// alpha is glyph coverage. Returns `None` for text with no drawable glyphs
-/// (empty, all-whitespace, or all-control).
-///
-/// The glyph work itself is in
-/// [`crate::elements::source::compositor::text_layer::rasterize_coverage`],
-/// shared with the CUDA compositor — only this expansion is D3D11-shaped
-/// (`SrcBlend = SRC_ALPHA`, `DestBlend = INV_SRC_ALPHA`).
+/// The shared rasterizer's straight-alpha BGRA — what this backend's blend
+/// state expects (`SrcBlend = SRC_ALPHA`, `DestBlend = INV_SRC_ALPHA`) —
+/// with its errors as this backend's. `None` for text with no drawable
+/// glyphs (empty, all-whitespace, or all-control).
 fn rasterize(
     font: &FontArc,
     size_px: f32,
     text: &str,
     color: Color,
 ) -> std::result::Result<Option<(u32, u32, Vec<u8>)>, D3d11TextLayerError> {
-    let Some(mask) = rasterize_coverage(font, size_px, text).map_err(text_raster_error)? else {
-        return Ok(None);
-    };
-    let byte_count =
-        mask.coverage
-            .len()
-            .checked_mul(4)
-            .ok_or(D3d11TextLayerError::TextTooLarge {
-                width: mask.width.into(),
-                height: mask.height.into(),
-            })?;
-    let mut pixels = Vec::new();
-    pixels
-        .try_reserve_exact(byte_count)
-        .map_err(|_| D3d11TextLayerError::AllocationFailed { bytes: byte_count })?;
-    for alpha in mask.coverage {
-        pixels.extend_from_slice(&[color.blue, color.green, color.red, alpha]);
-    }
-    Ok(Some((mask.width, mask.height, pixels)))
+    rasterize_bgra(font, size_px, text, color).map_err(text_raster_error)
 }
 
 fn text_raster_error(error: TextRasterError) -> D3d11TextLayerError {

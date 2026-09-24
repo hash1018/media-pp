@@ -603,6 +603,16 @@ compile error with no explanation.
 
 ### Added
 
+- **The software compositor draws text.** A text overlay was on the D3D11
+  and CUDA compositors only, so a program that followed the README to
+  `VideoWindow` and the software path had none. `SwVideoCompositorHandle`
+  has `add_text_layer`, taking the same `TextLayer`, and its
+  `SwTextLayerHandle` sets, moves, fades, restacks and hides the text as
+  the others' do; the text is rasterized on the calling thread into a
+  straight-alpha BGRA picture the compositor blends like any layer.
+  `ab_glyph`, which rasterizes, is now always a dependency rather than one
+  the `cuda` and `d3d11` features bring.
+
 - **A D3D11 compositor input takes frames in system memory, and
   `D3d11Upload` takes YUV420P.** An input of `D3d11VideoCompositor` took
   only a texture on its device, so a software decode or a synthetic source

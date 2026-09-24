@@ -160,11 +160,11 @@ pub use source::{
     AppSource, AppSourceError, AppSourceHandle, AudioMixer, AudioMixerError, AudioMixerOptions,
     FileDemuxer, FileDemuxerError, FileDemuxerHandle, MixFormat, MixerHandle, MixerInputSink,
     PipelineBridge, PipelineBridgeError, PipelineBridgeHandle, PipelineBridgeOptions, RtspOptions,
-    RtspSource, RtspSourceError, StreamInfo, SwVideoCompositor, SwVideoCompositorError,
-    SwVideoCompositorHandle, SwVideoCompositorInput, SwVideoCompositorInputSink,
-    SwVideoLayerHandle, TestAudioOptions, TestAudioSource, TestAudioSourceError, TestVideoOptions,
-    TestVideoSource, TestVideoSourceError, TextLayer, VideoCompositorOptions, VideoFit,
-    VideoInputId, VideoLayer, VideoRect, VideoSourceRect,
+    RtspSource, RtspSourceError, StreamInfo, SwTextLayerError, SwTextLayerHandle,
+    SwVideoCompositor, SwVideoCompositorError, SwVideoCompositorHandle, SwVideoCompositorInput,
+    SwVideoCompositorInputSink, SwVideoLayerHandle, TestAudioOptions, TestAudioSource,
+    TestAudioSourceError, TestVideoOptions, TestVideoSource, TestVideoSourceError, TextLayer,
+    VideoCompositorOptions, VideoFit, VideoInputId, VideoLayer, VideoRect, VideoSourceRect,
 };
 #[cfg(all(target_os = "windows", feature = "dxgi-capture"))]
 pub use source::{

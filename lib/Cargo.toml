@@ -53,7 +53,8 @@ str0m = { version = "0.21", optional = true, default-features = false, features 
 ] }
 # Glyph rasterization for compositor text layers — needed by every backend
 # that draws one, so not Windows-only.
-ab_glyph = { version = "0.2", optional = true }
+# Text layers on every compositor, the software one included.
+ab_glyph = "0.2"
 # RNNoise, as pure Rust with its weights compiled in — see `NoiseSuppressor`.
 # Without its default features, which are the command-line tool's.
 nnnoiseless = { version = "0.5", optional = true, default-features = false }
@@ -134,7 +135,7 @@ undocumented_unsafe_blocks = "deny"
 # caller's own `CudaFrameRenderer`, or `vulkan` below, which is where `ash`
 # is pulled in — not here, so encoding and compositing do not pay for it.
 # Not platform-gated: CUDA is available on Linux and Windows alike.
-cuda = ["dep:ab_glyph"]
+cuda = []
 # `VulkanGpu` and `VulkanWindowRenderer`, which shows video in a window —
 # frames in system memory on any GPU, and CUDA frames too when `cuda` is also
 # on. Named for what draws rather than for what it takes, as a GStreamer sink
@@ -163,7 +164,6 @@ d3d12 = [
 ]
 d3d11 = [
     "dep:windows",
-    "dep:ab_glyph",
     # `D3d11WindowRenderer`'s own window, drawn into through a swap chain, or
     # an application's window given as a `raw-window-handle`.
     "dep:raw-window-handle",

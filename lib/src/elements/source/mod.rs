@@ -77,9 +77,10 @@ pub use compositor::{
     D3d11VideoLayerHandle,
 };
 pub use compositor::{
-    SwVideoCompositor, SwVideoCompositorError, SwVideoCompositorHandle, SwVideoCompositorInput,
-    SwVideoCompositorInputSink, SwVideoLayerHandle, TextLayer, VideoCompositorOptions, VideoFit,
-    VideoInputId, VideoLayer, VideoRect, VideoSourceRect,
+    SwTextLayerError, SwTextLayerHandle, SwVideoCompositor, SwVideoCompositorError,
+    SwVideoCompositorHandle, SwVideoCompositorInput, SwVideoCompositorInputSink,
+    SwVideoLayerHandle, TextLayer, VideoCompositorOptions, VideoFit, VideoInputId, VideoLayer,
+    VideoRect, VideoSourceRect,
 };
 pub use file_demuxer::{FileDemuxer, FileDemuxerError, FileDemuxerHandle, StreamInfo};
 pub use pipeline_bridge::{
