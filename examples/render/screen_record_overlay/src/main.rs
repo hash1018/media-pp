@@ -130,7 +130,6 @@ mod linux_example {
                 background_alpha: 255,
             },
         )?;
-        let time_base = compositor.time_base();
 
         let capture_input = handle.add_source(
             "desktop",
@@ -184,7 +183,6 @@ mod linux_example {
                 input_format: CudaFrameFormat::Nv12,
                 width,
                 height,
-                time_base,
                 frame_rate,
                 bit_rate: 8_000_000,
                 gop_size: 60, // ~2s @ 30fps

@@ -180,7 +180,6 @@ mod linux_example {
             ..TestVideoOptions::default()
         };
         let source = TestVideoSource::new("test-video", options);
-        let time_base = source.time_base();
         let cuda = CudaDevice::new()?;
         let gpu = VulkanGpuContext::new(target.display)?;
 
@@ -192,7 +191,6 @@ mod linux_example {
                     width: target.width,
                     height: target.height,
                     pixel_format: ffmpeg::format::Pixel::YUV420P,
-                    time_base,
                     frame_rate: options.frame_rate,
                     bit_rate: 2_000_000,
                     gop_size: 60,

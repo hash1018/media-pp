@@ -355,7 +355,6 @@ mod linux_example {
                 background_alpha: 255,
             },
         )?;
-        let time_base = compositor.time_base();
 
         let mut background_layer =
             VideoLayer::new(VideoRect::new(0, 0, output_width, output_height));
@@ -438,7 +437,6 @@ mod linux_example {
                 width: output_width,
                 height: output_height,
                 pixel_format: ffmpeg::format::Pixel::YUV420P,
-                time_base,
                 frame_rate,
                 bit_rate: 2_000_000,
                 gop_size: 60,
