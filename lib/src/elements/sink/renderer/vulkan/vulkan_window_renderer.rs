@@ -527,8 +527,8 @@ impl Colour {
             self.cb_to_b,
         ];
         let mut bytes = [0u8; 32];
-        for (chunk, value) in bytes.chunks_exact_mut(4).zip(values) {
-            chunk.copy_from_slice(&value.to_ne_bytes());
+        for (chunk, value) in bytes.as_chunks_mut::<4>().0.iter_mut().zip(values) {
+            *chunk = value.to_ne_bytes();
         }
         bytes
     }
