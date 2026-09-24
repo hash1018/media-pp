@@ -849,7 +849,9 @@ mod tests {
 
     use crate::{
         bus::BusEvent,
-        elements::{D3d12Upload, SwScaler, TestVideoOptions, TestVideoSource, WindowEvent},
+        elements::{
+            D3d12Upload, D3d12UploadError, SwScaler, TestVideoOptions, TestVideoSource, WindowEvent,
+        },
         pipeline::Pipeline,
     };
 
@@ -862,9 +864,23 @@ mod tests {
             .ok()
     }
 
+    /// What puts a test picture on the GPU — which only a device that does
+    /// video has: FFmpeg's D3D12 device context wants one, and a software
+    /// adapter such as WARP, all a CI runner has, is not.
+    fn upload(gpu: &D3d12Gpu) -> Option<D3d12Upload> {
+        match D3d12Upload::new("upload", gpu.device()) {
+            Ok(upload) => Some(upload),
+            Err(D3d12UploadError::HwDeviceInit(code)) => {
+                eprintln!("skipping: this device does not do video (code {code})");
+                None
+            }
+            Err(error) => panic!("the upload did not open: {error}"),
+        }
+    }
+
     /// Plays a test picture into `renderer` for half a second, and returns
     /// how many frames it took and every error the bus carried.
-    fn show(gpu: &D3d12Gpu, renderer: D3d12WindowRenderer) -> (u64, Vec<BusEvent>) {
+    fn show(upload: D3d12Upload, renderer: D3d12WindowRenderer) -> (u64, Vec<BusEvent>) {
         let source = TestVideoSource::new(
             "test-video",
             TestVideoOptions {
@@ -873,7 +889,6 @@ mod tests {
                 frame_rate: ffmpeg_next::Rational::new(30, 1),
             },
         );
-        let device = gpu.device().clone();
         let (pipeline, ()) = Pipeline::new("window-renderer", source, |source, ctx| {
             let branch = ctx
                 .branch()
@@ -882,7 +897,7 @@ mod tests {
                     ffmpeg_next::format::Pixel::NV12,
                     ffmpeg_next::software::scaling::Flags::BILINEAR,
                 ))
-                .pipe(D3d12Upload::new("upload", &device)?)
+                .pipe(upload)
                 .queue("to-screen", 4)
                 .to(renderer)?;
             ctx.attach(source, 0, branch)?;
@@ -912,6 +927,7 @@ mod tests {
     #[test]
     fn a_window_of_its_own_shows_the_frames() {
         let Some(gpu) = gpu() else { return };
+        let Some(upload) = upload(&gpu) else { return };
         let (renderer, events) = match D3d12WindowRenderer::open(
             "screen",
             &gpu,
@@ -927,7 +943,7 @@ mod tests {
                 return;
             }
         };
-        let (shown, errors) = show(&gpu, renderer);
+        let (shown, errors) = show(upload, renderer);
         assert!(errors.is_empty(), "{errors:?}");
         assert!(shown >= 5, "only {shown} frames reached the window");
         assert!(
@@ -957,6 +973,7 @@ mod tests {
     #[test]
     fn a_window_it_is_given_shows_the_frames() {
         let Some(gpu) = gpu() else { return };
+        let Some(upload) = upload(&gpu) else { return };
         let (events_tx, _events) = crossbeam_channel::unbounded();
         let options = WindowOptions {
             title: "media-pp given window test".into(),
@@ -977,7 +994,7 @@ mod tests {
             2,
             "the renderer holds the window"
         );
-        let (shown, errors) = show(&gpu, renderer);
+        let (shown, errors) = show(upload, renderer);
         assert!(errors.is_empty(), "{errors:?}");
         assert!(shown >= 5, "only {shown} frames reached the window");
     }
