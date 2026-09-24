@@ -533,6 +533,22 @@ compile error with no explanation.
 
 ### Added
 
+- **`D3d11Gpu` and `D3d11WindowRenderer`: D3D11 with a window of its own.**
+  `D3d11Gpu::new()` makes the one device a pipeline's D3D11 elements share,
+  with the flags they need, protected for use across threads, and its
+  immediate context behind the one `Arc<Mutex<_>>` they all lock — what a
+  program had to write for itself with the `windows` crate; `from_device`
+  shares a device made elsewhere. `D3d11WindowRenderer` is a renderer that
+  brings its window: `open` opens one on a thread of its own, the way a
+  GStreamer video sink does, and returns `WindowEvents` — keys, resizing,
+  closing — for the application to act on; `for_window` draws into a window
+  the application owns, anything with a `raw-window-handle`, such as a
+  `winit` window, kept alive by the renderer. Either way it follows the
+  window's size on its own and keeps the picture's aspect ratio. It is a
+  plain Win32 window, not a `winit` one, so it does not collide with an
+  application's event loop. `d3d11_decode_render` uses both and no longer
+  needs `render_common` or `winit`.
+
 - **`Pipeline::position`.** Where playback is — the media time the
   playback master has reached, from the audio renderer's played samples or
   the wall clock a `Pacer` or `VideoSynchronizer` keeps — for a progress

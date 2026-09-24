@@ -9,6 +9,8 @@ pub(crate) mod d3d11;
 #[cfg(feature = "d3d11")]
 pub(crate) mod d3d11_full_frame;
 #[cfg(feature = "d3d11")]
+pub(crate) mod d3d11_gpu;
+#[cfg(feature = "d3d11")]
 pub(crate) mod d3d11va;
 #[cfg(feature = "d3d12")]
 pub(crate) mod d3d12va;
@@ -16,3 +18,5 @@ pub(crate) mod d3d12va;
 pub(crate) mod mf;
 #[cfg(any(feature = "wasapi-capture", feature = "wasapi-renderer"))]
 pub(crate) mod wasapi;
+#[cfg(feature = "d3d11")]
+pub(crate) mod window;

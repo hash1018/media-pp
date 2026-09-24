@@ -82,17 +82,18 @@ Video, by backend:
 | Composite | `SwVideoCompositor` | `D3d11VideoCompositor` | | `CudaVideoCompositor` |
 | Key, colour | `SwChromaKey`, `SwVideoEffect` | `D3d11ChromaKey`, `D3d11VideoEffect` | | `CudaChromaKey`, `CudaVideoEffect` |
 | Upload, download | | `D3d11Upload`, `D3d11Download` | `D3d12Upload`, `D3d12Download` | `CudaUpload`, `CudaDownload` |
-| Render | | `D3d11Renderer` | `D3d12Renderer` | `CudaRenderer` |
+| Render | | `D3d11WindowRenderer`, `D3d11Renderer` | `D3d12Renderer` | `CudaRenderer` |
 
 `VideoDecodeBin` chooses among the decode row and the uploads for a stream.
 
-The renderers hand each frame to a presenter the program supplies — an
-implementation of `D3d11FrameRenderer`, `D3d12FrameRenderer` or
-`CudaFrameRenderer` for its own window or UI. The examples' unpublished
-`render_common` crate implements them for a winit window, and is there to
-copy. The GPU elements of one backend share one device the program creates —
-for D3D11, one `ID3D11Device` and its immediate context wrapped once in an
-`Arc<Mutex<_>>` — which `render_common` shows how to build too.
+`D3d11WindowRenderer` shows frames in a window: one it opens for itself, as a
+GStreamer video sink does, reporting keys and closing as `WindowEvents`, or
+one the application gives it. The other renderers hand each frame to a
+presenter the program supplies — an implementation of `D3d11FrameRenderer`,
+`D3d12FrameRenderer` or `CudaFrameRenderer` for its own window or UI; the
+examples' unpublished `render_common` crate implements them for a winit
+window, and is there to copy. The D3D11 elements of a pipeline share one
+`D3d11Gpu`: one device and its immediate context behind one lock.
 
 Everything else:
 

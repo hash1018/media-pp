@@ -992,8 +992,6 @@ name = "d3d11_decode_render"
 version = "0.1.0"
 dependencies = [
  "media-pp",
- "render_common",
- "winit",
 ]
 
 [[package]]
@@ -2026,6 +2024,7 @@ dependencies = [
  "ort",
  "pipewire",
  "pollster",
+ "raw-window-handle",
  "str0m",
  "thiserror 2.0.19",
  "time",

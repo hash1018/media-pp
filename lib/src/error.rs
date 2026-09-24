@@ -65,9 +65,10 @@ use crate::elements::{
 };
 #[cfg(all(target_os = "windows", feature = "d3d11"))]
 use crate::elements::{
-    D3d11ChromaKeyError, D3d11DecoderError, D3d11DownloadError, D3d11RendererError,
+    D3d11ChromaKeyError, D3d11DecoderError, D3d11DownloadError, D3d11GpuError, D3d11RendererError,
     D3d11ScalerError, D3d11SharedTextureSourceError, D3d11TextLayerError, D3d11ToneMapError,
     D3d11UploadError, D3d11VideoCompositorError, D3d11VideoEffectError, D3d11VideoEncoderError,
+    D3d11WindowRendererError,
 };
 #[cfg(all(target_os = "windows", feature = "d3d12"))]
 use crate::elements::{
@@ -200,6 +201,16 @@ pub enum Error {
     #[cfg(all(target_os = "windows", feature = "d3d11"))]
     #[error(transparent)]
     D3d11SharedDeviceError(#[from] D3d11SharedDeviceError),
+
+    /// A shared D3D11 device could not be set up.
+    #[cfg(all(target_os = "windows", feature = "d3d11"))]
+    #[error(transparent)]
+    D3d11GpuError(#[from] D3d11GpuError),
+
+    /// A D3D11 window renderer could not open or present into its window.
+    #[cfg(all(target_os = "windows", feature = "d3d11"))]
+    #[error(transparent)]
+    D3d11WindowRendererError(#[from] D3d11WindowRendererError),
 
     /// A file demuxer operation failed.
     #[error(transparent)]

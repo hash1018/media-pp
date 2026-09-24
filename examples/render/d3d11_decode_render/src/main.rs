@@ -1,9 +1,14 @@
-//! Demux -> D3d11Decoder -> Queue -> Pacer -> Renderer: decodes on the GPU
-//! via D3D11VA hardware acceleration and presents the frames in a native
-//! window at real playback speed, without ever copying the decoded pixels
-//! back to system memory — `D3d11Renderer` draws straight from the
+//! FileDemuxer -> D3d11Decoder -> Queue -> Pacer -> D3d11WindowRenderer:
+//! decodes on the GPU via D3D11VA hardware acceleration and shows the frames
+//! in a window at real playback speed, without ever copying the decoded
+//! pixels back to system memory — the renderer draws straight from the
 //! decoder's own D3D11 texture. The D3D11 sibling of `hw_decode_render`
 //! (which does the same thing via D3D12VA instead).
+//!
+//! The window is the renderer's own: `D3d11WindowRenderer::open` opens it on
+//! a thread of its own, the way a GStreamer video sink does, and reports what
+//! happens to it — Space pauses and resumes, Escape or closing the window
+//! stops. The one device every element shares is a `D3d11Gpu`.
 //!
 //! `D3d11Decoder` never touches FFmpeg's `hw_frames_ctx`/
 //! `AVD3D11VAFramesContext` itself — only `hw_device_ctx` and `get_format`
@@ -28,47 +33,22 @@ fn main() -> impl std::process::Termination {
 
 #[cfg(target_os = "windows")]
 mod windows_example {
+    use std::{sync::mpsc::RecvTimeoutError, time::Duration};
+
     use media_pp::ffmpeg::media;
     use media_pp::{
         bus::BusEvent,
-        elements::{D3d11Decoder, FileDemuxer, Pacer},
+        elements::{
+            D3d11Decoder, D3d11Gpu, D3d11WindowRenderer, FileDemuxer, Key, Pacer, WindowEvent,
+            WindowOptions,
+        },
         pipeline::Pipeline,
     };
-    use render_common::{D3d11GpuContext, Shutdown};
-    use winit::raw_window_handle::RawWindowHandle;
 
-    pub(super) fn run() {
-        let Some(path) = std::env::args().nth(1) else {
-            eprintln!("usage: d3d11_decode_render <video.mp4>");
-            std::process::exit(1);
-        };
+    /// Decoded frames queued ahead of the pacer.
+    const FRAMES: usize = 12;
 
-        render_common::run_window(
-            "media-pp d3d11_decode_render",
-            1280,
-            720,
-            move |target, shutdown| {
-                let RawWindowHandle::Win32(handle) = target.window else {
-                    panic!("d3d11_decode_render example only supports Windows");
-                };
-                play(
-                    &path,
-                    handle.hwnd.get(),
-                    target.width,
-                    target.height,
-                    &shutdown,
-                )
-            },
-        );
-    }
-
-    fn play(
-        path: &str,
-        hwnd: isize,
-        width: u32,
-        height: u32,
-        shutdown: &Shutdown,
-    ) -> media_pp::Result<()> {
+    pub(super) fn run() -> media_pp::Result<()> {
         let _log_guard = media_pp::log::init(
             env!("CARGO_PKG_NAME"),
             "logs",
@@ -76,53 +56,76 @@ mod windows_example {
             7,
         )?;
 
-        let (source, _) = FileDemuxer::open("demux", path)?;
+        let Some(path) = std::env::args().nth(1) else {
+            eprintln!("usage: d3d11_decode_render <video.mp4>");
+            std::process::exit(1);
+        };
+
+        let (source, _) = FileDemuxer::open("demux", &path)?;
         let video = source.best(media::Type::Video)?;
         let params = video.parameters.clone();
 
-        let gpu = D3d11GpuContext::new(None)?;
+        let gpu = D3d11Gpu::new()?;
+        let (screen, window) = D3d11WindowRenderer::open(
+            "screen",
+            &gpu,
+            WindowOptions {
+                title: "media-pp d3d11_decode_render".into(),
+                ..WindowOptions::default()
+            },
+        )?;
 
         let (pipeline, ()) = Pipeline::new("d3d11-decode-render", source, |source, ctx| {
-            // Same device the renderer draws with — required for the
-            // zero-copy path to be valid at all (see D3d11Decoder::new).
-            // The decoder's downstream-frame budget must cover the `"frames"`
-            // queue depth below (see D3d11Decoder::new's docs). Its accurate-
-            // seek candidate surface is reserved internally, so it is not
-            // included in this value.
-            let decoder = D3d11Decoder::new("decoder", params, gpu.device(), 32)?;
-            let pacer = Pacer::new("pacer");
-            let renderer =
-                render_common::d3d11_window_renderer("renderer", &gpu, hwnd, width, height)?;
+            // On the renderer's device — required for the zero-copy path to
+            // be valid at all (see D3d11Decoder::new). The decoder's
+            // downstream-frame budget covers the `"frames"` queue twice over:
+            // a pause can leave the pacer holding what the queue held while
+            // the queue fills again behind it, and the D3D11VA pool does not
+            // grow. Its accurate-seek candidate surface is reserved
+            // internally, so it is not included in this value.
+            let decoder =
+                D3d11Decoder::new("decoder", params, gpu.device(), (2 * FRAMES + 8) as i32)?;
             let branch = ctx
                 .branch()
                 .pipe(decoder) // same thread as the demux — cheap enough not to need a queue
-                .queue("frames", 32) // pacer sleeps on its own thread; let decode run ahead into this
-                .pipe(pacer)
-                .to(renderer)?;
+                .queue("frames", FRAMES) // the pacer sleeps on its own thread; let decode run ahead into this
+                .pipe(Pacer::new("pacer"))
+                .to(screen)?;
             ctx.attach(source, video.index, branch)?;
             Ok(())
         })?;
 
-        // `run()` starts playback on a background thread and returns right
-        // away — any failure (including the source's own) shows up as a
-        // `BusEvent::Error` here instead of through a returned `Result`.
-        if shutdown.publish(std::slice::from_ref(&pipeline)) {
-            return Ok(());
-        }
-
         pipeline.run()?;
 
-        // Errors no longer end the pipeline on their own (see `BusEvent`'s
-        // docs) — watch for one here and `stop()`, or this window would just
-        // sit open (showing a frozen last frame) instead of closing after a
-        // renderer failure. The end of the stream is `Finished`, which the
-        // pipeline posts once every terminal has ended.
-        for event in pipeline.bus().iter() {
-            println!("{event}");
-            if matches!(event, BusEvent::Finished | BusEvent::Error { .. }) {
-                pipeline.stop();
+        // Two things to watch: the pipeline's bus — the end of the stream is
+        // `Finished`, and an error does not end a pipeline on its own — and
+        // the window, whose keys and closing are this program's to act on.
+        let mut paused = false;
+        loop {
+            match pipeline.bus().recv_timeout(Duration::from_millis(20)) {
+                Ok(event) => {
+                    println!("{event}");
+                    if matches!(event, BusEvent::Finished | BusEvent::Error { .. }) {
+                        break;
+                    }
+                }
+                Err(RecvTimeoutError::Disconnected) => break,
+                Err(RecvTimeoutError::Timeout) => {}
+            }
+            match window.try_recv() {
+                Some(WindowEvent::Closed | WindowEvent::Key(Key::Escape)) => break,
+                Some(WindowEvent::Key(Key::Space)) => {
+                    paused = !paused;
+                    if paused {
+                        pipeline.pause();
+                    } else {
+                        pipeline.resume();
+                    }
+                }
+                _ => {}
             }
         }
+        pipeline.stop();
         Ok(())
     }
 }

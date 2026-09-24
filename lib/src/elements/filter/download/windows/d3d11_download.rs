@@ -111,10 +111,9 @@ pub enum D3d11DownloadError {
 /// `ID3D11DeviceContext::CopySubresourceRegion`/`Map`/`Unmap` — context-level calls,
 /// not device-level ones. `context` must be the exact same
 /// `Arc<Mutex<ID3D11DeviceContext>>` every other context-touching D3D11
-/// consumer in this pipeline shares — the pipeline device's one immediate context, wrapped once in an
-/// `Arc<Mutex<_>>` and cloned to every element; the examples'
-/// `render_common::D3d11GpuContext` builds the device and that wrapper, and
-/// is there to copy, not to depend on. See the examples' own docs
+/// consumer in this pipeline shares — [`D3d11Gpu::context`](crate::elements::D3d11Gpu::context),
+/// which is the pipeline device's one immediate context behind the one
+/// lock every element shares. See [`D3d11Gpu`](crate::elements::D3d11Gpu)
 /// on why a lone per-element context handle isn't enough to prevent two
 /// unrelated bind/draw/copy sequences from interleaving on the one
 /// underlying immediate context.

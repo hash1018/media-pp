@@ -206,6 +206,9 @@ pub struct D3d11Renderer {
     /// so the answer is kept and returned by the first `consume`, before a
     /// single frame has been submitted.
     shared_device_error: Option<D3d11SharedDeviceError>,
+    /// What this renderer is in the graph and its log — a `D3d11Renderer`,
+    /// or the `D3d11WindowRenderer` built around one.
+    element_type: ElementType,
 }
 
 impl D3d11Renderer {
@@ -218,8 +221,18 @@ impl D3d11Renderer {
     /// applies to the device it is handed. A device that refuses it fails the
     /// first `consume` rather than this call.
     pub fn new(name: impl Into<String>, renderer: Box<dyn D3d11FrameRenderer>) -> Self {
+        Self::labelled(name, renderer, ElementType::D3d11Renderer)
+    }
+
+    /// [`Self::new`], appearing in the graph and the log as `element_type` —
+    /// for an element built around this one.
+    pub(crate) fn labelled(
+        name: impl Into<String>,
+        renderer: Box<dyn D3d11FrameRenderer>,
+        element_type: ElementType,
+    ) -> Self {
         let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::D3d11Renderer, &name, None);
+        let pp_log = element_pp_log(element_type, &name, None);
         let device = renderer.device();
         let shared_device_error = match protect_shared_device(&device) {
             Ok(_) => None,
@@ -235,6 +248,7 @@ impl D3d11Renderer {
             inner: renderer,
             device,
             shared_device_error,
+            element_type,
         }
     }
 
@@ -323,7 +337,7 @@ impl Element for D3d11Renderer {
     }
 
     fn element_type(&self) -> ElementType {
-        ElementType::D3d11Renderer
+        self.element_type
     }
 
     fn pp_log(&self) -> &PpLog {

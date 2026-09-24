@@ -1,11 +1,16 @@
 # d3d11_decode_render
 
-`Demux -> D3d11Decoder -> Queue -> Pacer -> Renderer`: decodes on the GPU via
-D3D11VA hardware acceleration and presents the frames in a native window at
-real playback speed, without ever copying the decoded pixels back to system
-memory — `D3d11Renderer` draws straight from the decoder's own D3D11 texture.
-The D3D11 sibling of `hw_decode_render` (which does the same thing via
-D3D12VA instead).
+`FileDemuxer -> D3d11Decoder -> Queue -> Pacer -> D3d11WindowRenderer`:
+decodes on the GPU via D3D11VA hardware acceleration and shows the frames in
+a window at real playback speed, without ever copying the decoded pixels back
+to system memory — the renderer draws straight from the decoder's own D3D11
+texture. The D3D11 sibling of `hw_decode_render` (which does the same thing
+via D3D12VA instead).
+
+The window is the renderer's own: `D3d11WindowRenderer::open` opens it on a
+thread of its own, the way a GStreamer video sink does, and reports what
+happens to it. Space pauses and resumes; Escape or closing the window stops.
+The one device every element shares is a `D3d11Gpu`.
 
 `D3d11Decoder` never touches FFmpeg's `hw_frames_ctx`/`AVD3D11VAFramesContext`
 itself — only `hw_device_ctx` and `get_format` — so libavcodec's own internal

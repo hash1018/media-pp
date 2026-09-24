@@ -35,7 +35,7 @@ restore token can be passed as the last argument on later runs.
 | [`test_video`](test_video/) | Render a synthetic source | Windows / Linux | CPU frame -> platform GPU upload | Close window | None |
 | [`transcode_render`](transcode_render/) | Encode/decode round trip | Windows / Linux | OpenH264 round trip -> platform GPU | Close window | None |
 | [`gpu_video_compositor`](gpu_video_compositor/) | Composite GPU frames | Windows / Linux | D3D11 / CUDA compositor | Close window | None |
-| [`d3d11_decode_render`](d3d11_decode_render/) | D3D11VA decode/render | Windows | D3D11 zero-copy | EOS / close window | `<video>` |
+| [`d3d11_decode_render`](d3d11_decode_render/) | D3D11VA decode/render in the renderer's own window | Windows | D3D11 zero-copy, `D3d11WindowRenderer` | EOS, Escape or close window; Space pauses | `<video>` |
 | [`d3d11_scale_render`](d3d11_scale_render/) | D3D11 scale/render | Windows | D3D11 GPU path | EOS / close window | `<video>` |
 | [`d3d11_upload`](d3d11_upload/) | Demonstrate D3D11 upload | Windows | CPU -> D3D11 | Close window | None |
 | [`d3d12_upload`](d3d12_upload/) | Demonstrate D3D12 upload | Windows | CPU -> D3D12 | Close window | None |

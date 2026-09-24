@@ -60,6 +60,9 @@ nnnoiseless = { version = "0.5", optional = true, default-features = false }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", optional = true }
+# The one type a window renderer takes an application's window by — what
+# `winit` windows, and most others, implement.
+raw-window-handle = { version = "0.6", optional = true }
 # The same crate `windows` re-exports as `windows::core`, named directly
 # because `windows::core::implement` expands to absolute `::windows_core`
 # paths — see `platform::windows::wasapi::process`, the one place this crate
@@ -122,11 +125,18 @@ d3d12 = [
 d3d11 = [
     "dep:windows",
     "dep:ab_glyph",
+    # `D3d11WindowRenderer`'s own window, drawn into through a swap chain, or
+    # an application's window given as a `raw-window-handle`.
+    "dep:raw-window-handle",
     "windows/Win32_Foundation",
     "windows/Win32_Graphics_Direct3D",
     "windows/Win32_Graphics_Direct3D_Fxc",
     "windows/Win32_Graphics_Direct3D11",
+    "windows/Win32_Graphics_Dxgi",
     "windows/Win32_Graphics_Dxgi_Common",
+    "windows/Win32_Graphics_Gdi",
+    "windows/Win32_System_LibraryLoader",
+    "windows/Win32_UI_WindowsAndMessaging",
 ]
 dxgi-capture = [
     "d3d11",
