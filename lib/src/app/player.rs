@@ -206,6 +206,9 @@ pub struct Player {
     /// clock has a sample of the new position to read, which a seek while
     /// paused does not give it until playing resumes.
     sought: Mutex<Option<Duration>>,
+    /// Whether [`PlayerEvent::Ended`] was reported and nothing has moved
+    /// playback since — so [`Self::play`] starts the file again.
+    ended: AtomicBool,
 }
 
 impl Player {
@@ -284,6 +287,7 @@ impl Player {
                 paused: AtomicBool::new(false),
                 stopped: AtomicBool::new(false),
                 sought: Mutex::new(None),
+                ended: AtomicBool::new(false),
             });
         };
         let (screen, events, target) =
@@ -353,11 +357,18 @@ impl Player {
             paused: AtomicBool::new(false),
             stopped: AtomicBool::new(false),
             sought: Mutex::new(None),
+            ended: AtomicBool::new(false),
         })
     }
 
     /// Starts playback, or resumes it after [`Self::pause`].
+    ///
+    /// Once [`PlayerEvent::Ended`] has been reported, it starts the file
+    /// again from the start, as a player's play button does at the end.
     pub fn play(&self) -> Result<(), PlayerError> {
+        if self.ended.load(Ordering::Acquire) {
+            self.seek(Duration::ZERO)?;
+        }
         if self.paused.swap(false, Ordering::AcqRel) {
             self.pipeline.resume();
         }
@@ -387,6 +398,7 @@ impl Player {
     pub fn seek(&self, position: Duration) -> Result<(), PlayerError> {
         let position = self.duration.map_or(position, |end| position.min(end));
         self.pipeline.seek(position, SeekMode::Accurate)?;
+        self.ended.store(false, Ordering::Release);
         *self
             .sought
             .lock()
@@ -396,7 +408,8 @@ impl Player {
 
     /// Where playback is in the file — `None` before the first picture is
     /// due. After a seek, where it went, until playback has moved on from
-    /// there. While looping, where it is in the lap it is on.
+    /// there. While looping, where it is in the lap it is on. At the end,
+    /// the file's length, however long it stays there.
     pub fn position(&self) -> Option<Duration> {
         let mut sought = self
             .sought
@@ -405,7 +418,10 @@ impl Player {
         match self.pipeline.position() {
             Some(position) => {
                 *sought = None;
-                Some(self.in_lap(position))
+                // The clock runs on past the last sample once everything has
+                // played; playback itself is at the end.
+                let position = self.in_lap(position);
+                Some(self.duration.map_or(position, |end| position.min(end)))
             }
             None => *sought,
         }
@@ -555,7 +571,10 @@ impl Player {
                 (None, Some(Err(_))) | (None, None) => return Wait::Gone,
             };
             match message.event {
-                BusEvent::Finished => return Wait::Event(PlayerEvent::Ended),
+                BusEvent::Finished => {
+                    self.ended.store(true, Ordering::Release);
+                    return Wait::Event(PlayerEvent::Ended);
+                }
                 BusEvent::Error { name, error, .. } => {
                     return Wait::Event(PlayerEvent::Error { name, error });
                 }
@@ -747,11 +766,27 @@ mod tests {
             }
         };
         played_to_the_end();
+        // At the end it stays at the end, however long it is left there.
+        std::thread::sleep(Duration::from_millis(600));
+        assert!(
+            player.position().is_some_and(|at| at <= length),
+            "at {:?}, past the end of {length:?}",
+            player.position()
+        );
         // And from the end, back into the file: it plays on and ends again.
         player
             .seek(length.saturating_sub(Duration::from_millis(500)))
             .expect("a player that has ended can still be sought");
         played_to_the_end();
+        // Play at the end starts the file again, from the start.
+        player.play().unwrap();
+        assert!(
+            wait_until(|| player
+                .position()
+                .is_some_and(|at| at > Duration::from_millis(300) && at < Duration::from_secs(3))),
+            "played again from the start, at {:?}",
+            player.position()
+        );
         player.stop();
         assert!(player.next_event().is_none(), "nothing after stopping");
         assert!(
