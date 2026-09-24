@@ -24,14 +24,12 @@ call has a generated stream going one way and a real file the other:
   fixed 640x480 both renderers are wired up at, and `Pacer` holds it to
   playback speed — without it the whole file would be encoded and sent in
   seconds rather than played as a call.
-- Windows receives `WebRtcTrackSource -> Queue -> SwDecoder -> SwScaler(NV12)
-  -> D3d12Upload -> D3d12WindowRenderer`; that renderer draws from a device
-  resource only, so the decoded system-memory frame needs that conversion and
-  upload first. Linux receives
-  `WebRtcTrackSource -> Queue -> SwDecoder -> VulkanWindowRenderer`, which
-  uploads the decoded frame itself. Neither receive path needs a `Pacer`: these packets arrive at the
-  rate the other side encoded them, so the timeline is already real. The send
-  pipelines start first, then each
+- Each side receives `WebRtcTrackSource -> Queue -> SwDecoder -> renderer`
+  (`D3d12WindowRenderer` on Windows, `VulkanWindowRenderer` on Linux), which
+  draws the decoded YUV420P as it comes and uploads it itself. Neither receive
+  path needs a `Pacer`: these packets arrive at the rate the other side
+  encoded them, so the timeline is already real. The send pipelines start
+  first, then each
   receiver calls `WebRtcTrackSource::wait_stream_info` with a two-second
   timeout. That reports the codec from the first actual RTP payload, not from
   the other peer's encoder object or merely from the SDP capability list. The

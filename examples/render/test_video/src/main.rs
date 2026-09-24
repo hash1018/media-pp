@@ -1,15 +1,13 @@
-//! TestVideoSource -> Queue -> SwScaler -> GPU upload -> Renderer: a synthetic
-//! moving-gradient stream, no file/camera/decoder involved at all, presented in
-//! a native window via the platform GPU renderer — on Windows, uploaded to
-//! D3D12 and drawn into `D3d12WindowRenderer`'s own window. On Linux
-//! it is TestVideoSource -> Queue -> VulkanWindowRenderer: the renderer draws
-//! the source's YUV420P as it comes and uploads it itself, in a window of its
-//! own. This proves the source, conversion, upload, and presentation path
+//! TestVideoSource -> Queue -> Renderer: a synthetic moving-gradient stream,
+//! no file/camera/decoder involved at all, presented in a native window. The
+//! renderer — `D3d12WindowRenderer` on Windows, `VulkanWindowRenderer` on
+//! Linux — draws the source's YUV420P as it comes and uploads it itself, in a
+//! window of its own. This proves the source, upload, and presentation path
 //! works end to end without needing a real video source.
 //!
 //! No `Pacer` here, deliberately, as an experiment: `TestVideoSource`
 //! self-paces with a drift-free absolute schedule (see its own docs) and
-//! only format conversion/upload sits between it and the renderer. Testing
+//! only a queue sits between it and the renderer. Testing
 //! confirmed that schedule is enough on its own
 //! for a vsync-locked renderer to stay smooth without a separate pacing
 //! stage; `screen_preview_cpu` reached the same result after its source moved
@@ -37,10 +35,8 @@ mod windows_example {
     use media_pp::{
         bus::BusEvent,
         elements::{
-            D3d12Gpu, D3d12Upload, D3d12WindowRenderer, SwScaler, TestVideoOptions,
-            TestVideoSource, WindowOptions,
+            D3d12Gpu, D3d12WindowRenderer, TestVideoOptions, TestVideoSource, WindowOptions,
         },
-        ffmpeg,
         pipeline::Pipeline,
     };
 
@@ -52,6 +48,8 @@ mod windows_example {
             7,
         )?;
 
+        // Frames in system memory, which the renderer uploads itself: YUV420P
+        // as the source makes it, with nothing in between.
         let gpu = D3d12Gpu::new()?;
         let window_options = WindowOptions {
             title: "media-pp test_video".into(),
@@ -72,17 +70,6 @@ mod windows_example {
             let branch = ctx
                 .branch()
                 .queue("frames", 8) // thread boundary so rendering doesn't block generation
-                // `D3d12WindowRenderer` draws from a device resource only, so the
-                // generated system-memory frames are converted to the NV12
-                // layout `D3d12Upload` writes and uploaded here.
-                .pipe(SwScaler::new(
-                    "to-nv12",
-                    ffmpeg::format::Pixel::NV12,
-                    width,
-                    height,
-                    ffmpeg::software::scaling::Flags::BILINEAR,
-                ))
-                .pipe(D3d12Upload::new("upload", gpu.device())?)
                 .to(renderer)?;
             ctx.attach(source, 0, branch)?;
             Ok(())

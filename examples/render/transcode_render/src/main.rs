@@ -1,8 +1,7 @@
-//! TestVideoSource -> SwEncoder -> SwDecoder -> Pacer -> SwScaler -> GPU upload
-//! -> Renderer (on Linux, `VulkanWindowRenderer` straight after the `Pacer`,
-//! drawing the decoded YUV420P as it comes): encodes a synthetic moving-gradient stream (via `libopenh264`)
-//! and decodes it straight back — no file, camera, or container/mux involved at
-//! all — presented in a native window at real playback speed. Proves
+//! TestVideoSource -> SwEncoder -> SwDecoder -> Pacer -> Renderer: encodes a
+//! synthetic moving-gradient stream (via `libopenh264`) and decodes it
+//! straight back — no file, camera, or container/mux involved at all —
+//! presented in a native window at real playback speed. Proves
 //! `SwEncoder`'s `Packet`s are actually valid, decodable H.264 (not just
 //! "avcodec_open2 succeeded"): if the round trip corrupted anything, the
 //! gradient would visibly glitch or freeze instead of scrolling smoothly.
@@ -10,8 +9,9 @@
 //! source itself is already paced accurately enough for direct rendering,
 //! but the encoder and decoder add their own buffering and per-frame
 //! variance; this particular chain has not been validated without the
-//! final clock-anchored pacing stage. On Windows the frames are uploaded to
-//! D3D12 and drawn into `D3d12WindowRenderer`'s own window.
+//! final clock-anchored pacing stage. The renderer — `D3d12WindowRenderer` on
+//! Windows, `VulkanWindowRenderer` on Linux — comes straight after the
+//! `Pacer`, drawing the decoded YUV420P as it comes and uploading it itself.
 //!
 //!     cargo run -p transcode_render
 
@@ -38,9 +38,8 @@ mod windows_example {
     use media_pp::{
         bus::BusEvent,
         elements::{
-            D3d12Gpu, D3d12Upload, D3d12WindowRenderer, Pacer, SwDecoder, SwEncoder,
-            SwEncoderOptions, SwScaler, TestVideoOptions, TestVideoSource, VideoCodec,
-            WindowOptions,
+            D3d12Gpu, D3d12WindowRenderer, Pacer, SwDecoder, SwEncoder, SwEncoderOptions,
+            TestVideoOptions, TestVideoSource, VideoCodec, WindowOptions,
         },
         ffmpeg,
         pipeline::Pipeline,
@@ -54,6 +53,8 @@ mod windows_example {
             7,
         )?;
 
+        // OpenH264 decodes to YUV420P, which the renderer draws as it comes
+        // and uploads itself.
         let gpu = D3d12Gpu::new()?;
         let window_options = WindowOptions {
             title: "media-pp transcode_render".into(),
@@ -98,17 +99,6 @@ mod windows_example {
                 .pipe(decoder)
                 .queue("frames", 8) // pacer sleeps on its own thread; let decode run ahead into this
                 .pipe(pacer)
-                // `D3d12WindowRenderer` draws from a device resource only, so the
-                // system-memory frames are converted to the NV12 layout
-                // `D3d12Upload` writes and uploaded here.
-                .pipe(SwScaler::new(
-                    "to-nv12",
-                    ffmpeg::format::Pixel::NV12,
-                    width,
-                    height,
-                    ffmpeg::software::scaling::Flags::BILINEAR,
-                ))
-                .pipe(D3d12Upload::new("upload", gpu.device())?)
                 .to(renderer)?;
             ctx.attach(source, 0, branch)?;
             Ok(())

@@ -1,12 +1,10 @@
-//! Demux -> SwDecoder -> Queue -> Pacer -> SwScaler -> GPU upload -> Renderer,
-//! the same chain as `sw_decode_render`, plus a terminal prompt that reads
-//! timestamps and calls `Pipeline::seek` with them while the window is open —
-//! proves
-//! `seek` actually changes what's on screen, not just that it compiles.
-//! Windows uploads to D3D12 and draws into `D3d12WindowRenderer`'s own
-//! window. Linux draws the decoded frames with `VulkanWindowRenderer`, which
-//! uploads them itself — through a `SwScaler` only for a stream it cannot
-//! draw as it comes.
+//! Demux -> SwDecoder -> Queue -> Pacer -> Renderer, the same chain as
+//! `sw_decode_render`, plus a terminal prompt that reads timestamps and calls
+//! `Pipeline::seek` with them while the window is open — proves `seek`
+//! actually changes what's on screen, not just that it compiles. The renderer
+//! — `D3d12WindowRenderer` on Windows, `VulkanWindowRenderer` on Linux —
+//! uploads the decoded frames itself, through a `SwScaler` only for a stream
+//! it cannot draw as it comes.
 //!
 //!     cargo run -p seek_render -- path/to/video.mp4
 //!     (then use `pause`, `resume`, `seek 30`, `seek 1:15`, or `q`)
@@ -40,11 +38,7 @@ mod windows_example {
     use media_pp::ffmpeg::media;
     use media_pp::{
         bus::BusEvent,
-        elements::{
-            D3d12Gpu, D3d12Upload, D3d12WindowRenderer, FileDemuxer, Pacer, SwDecoder, SwScaler,
-            WindowOptions,
-        },
-        ffmpeg,
+        elements::{D3d12Gpu, D3d12WindowRenderer, FileDemuxer, Pacer, SwDecoder, WindowOptions},
         pipeline::{Pipeline, SeekMode},
     };
 
@@ -64,36 +58,29 @@ mod windows_example {
         let video = source.best(media::Type::Video)?;
         let params = video.parameters.clone();
 
+        // Decoded frames stay in system memory; the renderer uploads them.
         let gpu = D3d12Gpu::new()?;
-        let window_options = WindowOptions {
-            title: "media-pp seek_render".into(),
-            ..WindowOptions::default()
-        };
-        let (width, height) = (window_options.width, window_options.height);
-        let (renderer, window) = D3d12WindowRenderer::open("renderer", &gpu, window_options)?;
+        let (renderer, window) = D3d12WindowRenderer::open(
+            "renderer",
+            &gpu,
+            WindowOptions {
+                title: "media-pp seek_render".into(),
+                ..WindowOptions::default()
+            },
+        )?;
         let shutdown = render_common::stop_on_close([window]);
+        let to_drawable = render_common::to_drawable(&params, &renderer)?;
 
         let (pipeline, ()) = Pipeline::new("seek-render", source, |source, ctx| {
-            let decoder = SwDecoder::new("decoder", params)?;
-            let pacer = Pacer::new("pacer");
-            let branch = ctx
+            let mut branch = ctx
                 .branch()
-                .pipe(decoder) // same thread as the demux — cheap enough not to need a queue
+                .pipe(SwDecoder::new("decoder", params)?) // same thread as the demux — cheap enough not to need a queue
                 .queue("frames", 32) // pacer sleeps on its own thread; let decode run ahead into this
-                .pipe(pacer)
-                // `D3d12WindowRenderer` draws from a device resource only, so the
-                // decoder's system-memory frames are converted to the NV12
-                // layout `D3d12Upload` writes and uploaded here.
-                .pipe(SwScaler::new(
-                    "to-nv12",
-                    ffmpeg::format::Pixel::NV12,
-                    width,
-                    height,
-                    ffmpeg::software::scaling::Flags::BILINEAR,
-                ))
-                .pipe(D3d12Upload::new("upload", gpu.device())?)
-                .to(renderer)?;
-            ctx.attach(source, video.index, branch)?;
+                .pipe(Pacer::new("pacer"));
+            if let Some(to_drawable) = to_drawable {
+                branch = branch.pipe(to_drawable);
+            }
+            ctx.attach(source, video.index, branch.to(renderer)?)?;
             Ok(())
         })?;
 

@@ -13,15 +13,16 @@ the GPU:
 
 ```text
 Windows: FileDemuxer -> SwDecoder -> Queue -> VideoSynchronizer
-         -> SwScaler(NV12) -> D3d12Upload -> D3d12WindowRenderer
+         -> D3d12WindowRenderer
 Linux:   FileDemuxer -> CudaDecoder -> Queue -> VideoSynchronizer
          -> VulkanWindowRenderer
 ```
 
 The Linux branch is the one that never brings decoded pixels to the CPU: NVDEC
 keeps every frame in CUDA memory and the renderer copies it straight into
-Vulkan-owned memory. Windows decodes in system memory, so it has to convert and
-upload before the renderer can take it.
+Vulkan-owned memory. Windows decodes in system memory and the renderer uploads
+each frame itself — through a `SwScaler` after the synchronizer only for a
+stream it cannot draw as it comes.
 
 ```sh
 cargo run -p av_playback -- path/to/video-with-audio.mp4

@@ -20,14 +20,15 @@
 //! on the GPU:
 //!
 //!     Windows: FileDemuxer -> SwDecoder -> Queue -> VideoSynchronizer
-//!              -> SwScaler(NV12) -> D3d12Upload -> D3d12WindowRenderer
+//!              -> D3d12WindowRenderer
 //!     Linux:   FileDemuxer -> CudaDecoder -> Queue -> VideoSynchronizer
 //!              -> VulkanWindowRenderer
 //!
 //! The Linux branch is the one that never brings decoded pixels to the CPU:
 //! NVDEC keeps every frame in CUDA memory and the renderer copies it straight
-//! into Vulkan-owned memory. Windows decodes in system memory, so it has to
-//! convert and upload before the renderer can take it.
+//! into Vulkan-owned memory. Windows decodes in system memory and the renderer
+//! uploads each frame itself — through a `SwScaler` after the synchronizer
+//! only for a stream it cannot draw as it comes.
 
 #[cfg(not(any(target_os = "windows", target_os = "linux")))]
 fn main() {
@@ -88,10 +89,9 @@ mod windows_example {
         Error,
         bus::BusEvent,
         elements::{
-            AudioResampler, D3d12Gpu, D3d12Upload, D3d12WindowRenderer, SwDecoder, SwScaler,
-            VideoSynchronizer, WasapiRenderer, WasapiRendererOptions, WindowOptions,
+            AudioResampler, D3d12Gpu, D3d12WindowRenderer, SwDecoder, VideoSynchronizer,
+            WasapiRenderer, WasapiRendererOptions, WindowOptions,
         },
-        ffmpeg,
         pipeline::Pipeline,
     };
 
@@ -106,39 +106,35 @@ mod windows_example {
         )?;
         let (source, streams) = common::open(&path)?;
 
+        // Decoded frames stay in system memory; the renderer uploads them.
         let gpu = D3d12Gpu::new()?;
-        let window_options = WindowOptions {
-            title: "media-pp A/V playback".into(),
-            ..WindowOptions::default()
-        };
-        let (width, height) = (window_options.width, window_options.height);
-        let (renderer, window) = D3d12WindowRenderer::open("video-renderer", &gpu, window_options)?;
+        let (renderer, window) = D3d12WindowRenderer::open(
+            "video-renderer",
+            &gpu,
+            WindowOptions {
+                title: "media-pp A/V playback".into(),
+                ..WindowOptions::default()
+            },
+        )?;
         let shutdown = render_common::stop_on_close([window]);
+        let to_drawable = render_common::to_drawable(&streams.video_params, &renderer)?;
 
         let (pipeline, audio_tee_handle) =
             Pipeline::new("av-playback", source, |source, context| {
-                let video_branch = context
+                let mut video_branch = context
                     .branch()
                     .pipe(SwDecoder::new(
                         "video-decoder",
                         streams.video_params.clone(),
                     )?)
                     .queue("video-frames", 32)
-                    .pipe(VideoSynchronizer::new("video-sync"))
-                    // After the synchronizer, not before: a frame it drops for
-                    // being late never pays for the conversion or the upload.
-                    // `D3d12WindowRenderer` draws from a device resource only, so
-                    // this pair is what carries CPU-decoded frames to the GPU.
-                    .pipe(SwScaler::new(
-                        "to-nv12",
-                        ffmpeg::format::Pixel::NV12,
-                        width,
-                        height,
-                        ffmpeg::software::scaling::Flags::BILINEAR,
-                    ))
-                    .pipe(D3d12Upload::new("video-upload", gpu.device())?)
-                    .to(renderer)?;
-                context.attach(source, streams.video_index, video_branch)?;
+                    .pipe(VideoSynchronizer::new("video-sync"));
+                // After the synchronizer, not before: a frame it drops for
+                // being late never pays for the conversion.
+                if let Some(to_drawable) = to_drawable {
+                    video_branch = video_branch.pipe(to_drawable);
+                }
+                context.attach(source, streams.video_index, video_branch.to(renderer)?)?;
 
                 // Keep a stable insertion point on the demuxer's audio pad. With
                 // no branches attached the Tee cheaply drops packets, so playback

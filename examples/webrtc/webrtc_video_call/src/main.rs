@@ -35,10 +35,9 @@ mod windows_example {
 
     use media_pp::{
         elements::{
-            D3d12Gpu, D3d12Upload, D3d12WindowRenderer, SwDecoder, SwScaler, WebRtcStreamInfo,
-            WebRtcTrackSource, WindowOptions,
+            D3d12Gpu, D3d12WindowRenderer, SwDecoder, WebRtcStreamInfo, WebRtcTrackSource,
+            WindowOptions,
         },
-        ffmpeg,
         pipeline::Pipeline,
     };
     use render_common::Shutdown;
@@ -47,24 +46,24 @@ mod windows_example {
     use super::common::{HEIGHT, WIDTH};
 
     /// Where one side of the call is shown: the renderer that opened the
-    /// window, and the device its frames have to be uploaded to.
-    pub(super) struct Target {
-        renderer: D3d12WindowRenderer,
-        gpu: D3d12Gpu,
-    }
+    /// window, already drawing into it.
+    pub(super) type Target = D3d12WindowRenderer;
 
     pub(super) fn run() {
         super::common::run();
     }
 
-    /// Opens both windows on one D3D12 device, and the `Shutdown` that
-    /// closing either sets off.
+    /// Opens both windows, and the `Shutdown` that closing either sets off.
+    ///
+    /// On one D3D12 device: what arrives is H.264 decoded to YUV420P in
+    /// system memory, which the renderer draws as it comes and uploads
+    /// itself.
     pub(super) fn open_windows(
         titles: [&str; 2],
     ) -> media_pp::Result<(Target, Target, Arc<Shutdown>)> {
         let gpu = D3d12Gpu::new()?;
-        let open = |name: &str, title: &str| -> media_pp::Result<_> {
-            let (renderer, window) = D3d12WindowRenderer::open(
+        let open = |name: &str, title: &str| {
+            D3d12WindowRenderer::open(
                 name,
                 &gpu,
                 WindowOptions {
@@ -72,12 +71,7 @@ mod windows_example {
                     width: WIDTH,
                     height: HEIGHT,
                 },
-            )?;
-            let target = Target {
-                renderer,
-                gpu: gpu.clone(),
-            };
-            Ok((target, window))
+            )
         };
         let (screen_a, window_a) = open("peer-a-render", titles[0])?;
         let (screen_b, window_b) = open("peer-b-render", titles[1])?;
@@ -85,52 +79,29 @@ mod windows_example {
         Ok((screen_a, screen_b, shutdown))
     }
 
-    /// The device both windows draw from, which each side's decoded frames
-    /// are uploaded to.
-    pub(super) struct RenderContext {
-        gpu: D3d12Gpu,
-    }
+    /// Nothing to share between the two sides: the renderers already have
+    /// their device.
+    pub(super) struct RenderContext;
 
     impl RenderContext {
-        pub(super) fn new(target: &Target) -> media_pp::Result<Self> {
-            Ok(Self {
-                gpu: target.gpu.clone(),
-            })
+        pub(super) fn new(_target: &Target) -> media_pp::Result<Self> {
+            Ok(Self)
         }
     }
 
-    /// `WebRtcTrackSource -> Queue -> SwDecoder -> SwScaler(NV12) ->
-    /// D3d12Upload -> D3d12WindowRenderer`.
+    /// `WebRtcTrackSource -> Queue -> SwDecoder -> D3d12WindowRenderer`.
     pub(super) fn receive_pipeline(
         name: &str,
         source: WebRtcTrackSource,
         stream_info: WebRtcStreamInfo,
-        render: &RenderContext,
-        target: Target,
+        _render: &RenderContext,
+        screen: Target,
     ) -> media_pp::Result<Arc<Pipeline>> {
         validate_h264(name, &stream_info)?;
         let decoder = SwDecoder::new(format!("{name}-decode"), stream_info.codec_parameters()?)?;
-        // `D3d12WindowRenderer` draws from a device resource only, so decoded
-        // frames have to be converted to the layout it samples and uploaded
-        // first.
-        let scaler = SwScaler::new(
-            format!("{name}-nv12"),
-            ffmpeg::format::Pixel::NV12,
-            WIDTH,
-            HEIGHT,
-            ffmpeg::software::scaling::Flags::BILINEAR,
-        );
-        let upload = D3d12Upload::new(format!("{name}-upload"), render.gpu.device())?;
-        let renderer = target.renderer;
 
         let (pipeline, ()) = Pipeline::new(name, source, move |source, ctx| {
-            let branch = ctx
-                .branch()
-                .queue("packets", 16)
-                .pipe(decoder)
-                .pipe(scaler)
-                .pipe(upload)
-                .to(renderer)?;
+            let branch = ctx.branch().queue("packets", 16).pipe(decoder).to(screen)?;
             ctx.attach(source, 0, branch)?;
             Ok(())
         })?;
@@ -342,8 +313,8 @@ mod common {
         thread::sleep(Duration::from_millis(100)); // let the answer apply
         println!("call established — one SendRecv track carrying both directions");
 
-        // What the two receive pipelines share: on Windows the D3D12 device
-        // both windows draw from, which decoded frames are uploaded to.
+        // What the two receive pipelines share: nothing on either platform,
+        // since each renderer already has its device.
         let render = platform::RenderContext::new(&target_a)?;
 
         let send_a = generated_send_pipeline(sink_a)?;

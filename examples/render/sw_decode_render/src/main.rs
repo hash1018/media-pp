@@ -1,9 +1,8 @@
-//! Demux -> SwDecoder -> Queue -> Pacer -> SwScaler -> GPU upload -> Renderer:
-//! decodes a video file in system memory and presents it in a native window at
-//! real playback speed. Windows uploads to D3D12 and draws into
-//! `D3d12WindowRenderer`'s own window. Linux draws the decoded frames
-//! with `VulkanWindowRenderer`, which uploads them itself, in a window of its
-//! own — through a `SwScaler` only for a stream it cannot draw as it comes.
+//! Demux -> SwDecoder -> Queue -> Pacer -> Renderer: decodes a video file in
+//! system memory and presents it in a native window at real playback speed.
+//! The renderer — `D3d12WindowRenderer` on Windows, `VulkanWindowRenderer` on
+//! Linux — uploads the decoded frames itself, in a window of its own, through
+//! a `SwScaler` only for a stream it cannot draw as it comes.
 //!
 //!     cargo run -p sw_decode_render -- path/to/video.mp4
 
@@ -27,11 +26,7 @@ mod windows_example {
     use media_pp::ffmpeg::media;
     use media_pp::{
         bus::BusEvent,
-        elements::{
-            D3d12Gpu, D3d12Upload, D3d12WindowRenderer, FileDemuxer, Pacer, SwDecoder, SwScaler,
-            WindowOptions,
-        },
-        ffmpeg,
+        elements::{D3d12Gpu, D3d12WindowRenderer, FileDemuxer, Pacer, SwDecoder, WindowOptions},
         pipeline::Pipeline,
     };
 
@@ -51,40 +46,29 @@ mod windows_example {
         let video = source.best(media::Type::Video)?;
         let params = video.parameters.clone();
 
+        // Decoded frames stay in system memory; the renderer uploads them.
         let gpu = D3d12Gpu::new()?;
-        let window_options = WindowOptions {
-            title: "media-pp sw_decode_render".into(),
-            ..WindowOptions::default()
-        };
-        let (width, height) = (window_options.width, window_options.height);
-        let (renderer, window) = D3d12WindowRenderer::open("renderer", &gpu, window_options)?;
+        let (renderer, window) = D3d12WindowRenderer::open(
+            "renderer",
+            &gpu,
+            WindowOptions {
+                title: "media-pp sw_decode_render".into(),
+                ..WindowOptions::default()
+            },
+        )?;
         let shutdown = render_common::stop_on_close([window]);
+        let to_drawable = render_common::to_drawable(&params, &renderer)?;
 
         let (pipeline, ()) = Pipeline::new("sw-decode-render", source, |source, ctx| {
-            let decoder = SwDecoder::new("decoder", params)?;
-            let pacer = Pacer::new("pacer");
-            // `D3d12WindowRenderer` draws from a device resource only, so the
-            // decoder's system-memory frames are converted to the NV12
-            // layout `D3d12Upload` writes and uploaded here. Without this
-            // pair the branch is refused as it is built, naming the
-            // decoder — see `media_pp::contract`.
-            let scaler = SwScaler::new(
-                "to-nv12",
-                ffmpeg::format::Pixel::NV12,
-                width,
-                height,
-                ffmpeg::software::scaling::Flags::BILINEAR,
-            );
-            let upload = D3d12Upload::new("upload", gpu.device())?;
-            let branch = ctx
+            let mut branch = ctx
                 .branch()
-                .pipe(decoder)
+                .pipe(SwDecoder::new("decoder", params)?)
                 .queue("frames", 32)
-                .pipe(pacer)
-                .pipe(scaler)
-                .pipe(upload)
-                .to(renderer)?;
-            ctx.attach(source, video.index, branch)?;
+                .pipe(Pacer::new("pacer"));
+            if let Some(to_drawable) = to_drawable {
+                branch = branch.pipe(to_drawable);
+            }
+            ctx.attach(source, video.index, branch.to(renderer)?)?;
             Ok(())
         })?;
 
