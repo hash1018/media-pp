@@ -132,8 +132,11 @@ pub struct Bus {
 
 /// The receiving half of a [`Bus`], held by whoever owns the pipeline.
 ///
-/// Draining it blocks until every `Bus` sender has been dropped, which is how
-/// a caller waits for a pipeline to actually finish rather than polling for it.
+/// Draining it blocks until every `Bus` sender has been dropped — once the
+/// pipeline has stopped, or once every source has ended of itself. A source
+/// that can be sought back does not end at the end of its media: a
+/// `FileDemuxer` stays there until stopped. What says a pipeline has played
+/// everything is [`BusEvent::Finished`], and the usual loop stops it there.
 pub struct BusReceiver {
     rx: Receiver<BusMessage>,
 }

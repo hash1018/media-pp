@@ -12,6 +12,21 @@ compile error with no explanation.
 
 ### Breaking
 
+- **A file's source waits at its end instead of ending.** `FileDemuxer`
+  sent `Eos` at the end of the file and ended its thread, and with it the
+  queues it owns, a second or more of the file still in them. A `Pause` from
+  then on reached nothing, so the last second played on through one; a
+  paused seek near the end lost its picture and its `Eos` and never
+  finished; and a file could not be sought back once it had ended —
+  `PipelineError::NotRunning`. It now stays at the end, passing control on,
+  until the pipeline is stopped, and a seek from there plays on. So a
+  pipeline reading a file no longer ends by itself: `Pipeline::is_running`
+  stays `true` and `BusReceiver::iter` does not end until it is stopped.
+  Stop it on `BusEvent::Finished`, which says everything read has reached
+  its terminals — what the examples and `Player` already did. A
+  `FileDemuxer` driven by hand returns from `run` at the end once its
+  control sender is gone.
+
 - **D3D elements take their `D3d11Gpu` or `D3d12Gpu`.** Every D3D11
   element took an `&ID3D11Device` and, where it draws or copies, a separate
   `Arc<Mutex<ID3D11DeviceContext>>` — two values that had to belong to the

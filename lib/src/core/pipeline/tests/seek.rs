@@ -1384,3 +1384,119 @@ fn a_paused_seek_that_runs_into_the_end_still_finishes_once_resumed() {
     pipeline.stop();
     assert!(finished, "the file never finished after resuming");
 }
+
+/// Reads the bus until `Finished`, or gives up at `timeout`.
+fn wait_for_finished(pipeline: &Pipeline, timeout: Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() < deadline {
+        match pipeline.bus().recv_timeout(Duration::from_millis(50)) {
+            Ok(BusEvent::Finished) => return true,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return false,
+            _ => {}
+        }
+    }
+    false
+}
+
+/// A file decoded into a queue and paced out of it, counting what reaches
+/// the end — the shape of any player.
+fn paced_file(name: &str) -> Option<(Arc<Pipeline>, Duration, Arc<AtomicUsize>)> {
+    let path = try_test_video()?;
+    let (source, streams) = FileDemuxer::open("demux", &path).expect("open test video");
+    let duration = source.duration().expect("the fixture says how long it is");
+    let video = streams
+        .iter()
+        .find(|stream| stream.kind == ffmpeg::media::Type::Video)
+        .expect("test video has a video stream");
+    let params = video.parameters.clone();
+    let index = video.index;
+    let shown = Arc::new(AtomicUsize::new(0));
+    let count = Arc::clone(&shown);
+    let (pipeline, ()) = Pipeline::new(name, source, |source, ctx| {
+        let branch = ctx
+            .branch()
+            .pipe(SwDecoder::new("video-decoder", params)?)
+            .queue("video-frames", 32)
+            .pipe(Pacer::new("video-pacer"))
+            .to(CountingSink {
+                pp_log: element_pp_log(ElementType::Other, "screen", None),
+                name: "screen".into(),
+                count,
+            })?;
+        ctx.attach(source, index, branch)?;
+        Ok(())
+    })
+    .expect("test pipeline wiring must succeed");
+    Some((pipeline, duration, shown))
+}
+
+/// The demuxer reaches the end of the file a queue's depth before the
+/// picture does. It used to end its thread there, taking the queue with it,
+/// so a pause in that last second reached nothing and the picture played on
+/// to the end.
+#[test]
+fn a_pause_in_the_last_second_still_holds_the_picture() {
+    let Some((pipeline, duration, shown)) = paced_file("pause-at-the-end") else {
+        return;
+    };
+    pipeline.run().unwrap();
+    // Far enough from the end that the queue fills before the file runs
+    // out, near enough that it runs out while the queue still plays.
+    pipeline
+        .seek(
+            duration.saturating_sub(Duration::from_millis(1_500)),
+            SeekMode::Accurate,
+        )
+        .expect("a file accepts a seek");
+    thread::sleep(Duration::from_millis(700));
+
+    pipeline.pause();
+    let held = shown.load(Ordering::SeqCst);
+    thread::sleep(Duration::from_millis(400));
+    let after = shown.load(Ordering::SeqCst);
+    pipeline.resume();
+    let finished = wait_for_finished(&pipeline, Duration::from_secs(5));
+    pipeline.stop();
+
+    assert!(
+        after <= held + 1,
+        "{} pictures went by while paused",
+        after - held
+    );
+    assert!(finished, "the file finished once resumed");
+}
+
+/// Once a file has played to its end, a seek plays it again from where it
+/// lands, and the pipeline finishes a second time.
+#[test]
+fn a_file_can_be_sought_back_after_it_finished() {
+    let Some((pipeline, duration, shown)) = paced_file("seek-after-the-end") else {
+        return;
+    };
+    pipeline.run().unwrap();
+    pipeline
+        .seek(
+            duration.saturating_sub(Duration::from_millis(300)),
+            SeekMode::Accurate,
+        )
+        .expect("a file accepts a seek");
+    assert!(
+        wait_for_finished(&pipeline, Duration::from_secs(5)),
+        "the file finished"
+    );
+
+    let before = shown.load(Ordering::SeqCst);
+    pipeline
+        .seek(
+            duration.saturating_sub(Duration::from_millis(600)),
+            SeekMode::Accurate,
+        )
+        .expect("a file that has finished can still be sought");
+    let finished_again = wait_for_finished(&pipeline, Duration::from_secs(5));
+    pipeline.stop();
+    assert!(finished_again, "and finished again");
+    assert!(
+        shown.load(Ordering::SeqCst) > before,
+        "pictures were shown from where it landed"
+    );
+}

@@ -312,6 +312,13 @@ fn drain_bus(pipeline: &media_pp::pipeline::Pipeline) {
     use media_pp::bus::BusEvent;
 
     for event in pipeline.bus().iter() {
+        // The file's source stays at its end, where a seek could still take
+        // it back; the pipeline says when everything it read has played.
+        if matches!(event, BusEvent::Finished) {
+            println!("finished");
+            pipeline.stop();
+            continue;
+        }
         match event {
             BusEvent::Eos { name, .. } => println!("[{name}] eos"),
             BusEvent::Error { name, error, .. } => eprintln!("[{name}] error: {error}"),

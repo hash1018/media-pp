@@ -107,7 +107,8 @@ pub enum PlayerEvent {
     /// what a player usually does about it.
     Window(WindowEvent),
     /// The file has played to its end: every stream has. The last picture
-    /// stays in the window until the player is stopped or dropped.
+    /// stays in the window until the player is stopped or dropped, and a
+    /// [`Player::seek`] from there plays on from where it lands.
     Ended,
     /// Playback is over for good: [`Player::stop`] was called, or the window
     /// and the playback are gone. Only [`Player::next_event_timeout`]
@@ -564,7 +565,7 @@ mod tests {
             "sought to {near_end:?}, at {landed:?}"
         );
         player.play().unwrap();
-        loop {
+        let played_to_the_end = || loop {
             match player.next_event_timeout(Duration::from_secs(10)) {
                 Some(PlayerEvent::Ended) => break,
                 Some(PlayerEvent::Error { name, error }) => panic!("{name}: {error}"),
@@ -577,7 +578,13 @@ mod tests {
                 Some(_) => {}
                 None => panic!("the file never ended"),
             }
-        }
+        };
+        played_to_the_end();
+        // And from the end, back into the file: it plays on and ends again.
+        player
+            .seek(length.saturating_sub(Duration::from_millis(500)))
+            .expect("a player that has ended can still be sought");
+        played_to_the_end();
         player.stop();
         assert!(player.next_event().is_none(), "nothing after stopping");
         assert!(

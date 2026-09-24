@@ -78,9 +78,12 @@ pub enum SeekMode {
 /// [`BusReceiver::log_events`] block until every [`Bus`] sender has been
 /// dropped. Under the normal ownership path that happens once every
 /// source's background thread (and everything reachable from it) has
-/// fully finished, so draining the bus doubles as "wait for completion" —
-/// with more than one source, that means waiting for *all* of them, not
-/// just the first to reach `Eos`. A caller that clones the [`Context`]
+/// fully finished — with more than one source, *all* of them, not just the
+/// first to reach `Eos`. A source that can be sought back, `FileDemuxer`
+/// among them, does not finish at the end of its media but stays there
+/// until stopped; [`BusEvent::Finished`](crate::bus::BusEvent::Finished) is
+/// what says the pipeline has played everything, and where a caller stops
+/// it. A caller that clones the [`Context`]
 /// supplied to a source's own `wire` closure also retains its `Bus`
 /// sender; in that case bus draining intentionally remains blocked until
 /// that extra context is dropped. A source-level failure (returned from
@@ -219,7 +222,9 @@ impl Pipeline {
     ///
     /// Calling [`BusReceiver::iter`](crate::bus::BusReceiver::iter) blocks
     /// until every sender has dropped, which normally coincides with all source
-    /// and queue workers finishing. A custom element that retains a cloned
+    /// and queue workers finishing — for a seekable source such as a file,
+    /// once the pipeline is stopped; see
+    /// [`BusEvent::Finished`](crate::bus::BusEvent::Finished). A custom element that retains a cloned
     /// [`Context`] can intentionally keep the receiver connected longer.
     pub fn bus(&self) -> &BusReceiver {
         &self.bus_rx
@@ -315,6 +320,12 @@ impl Pipeline {
     /// asking: a live capture whose target went away has to be noticed by
     /// whoever might reopen it, and that caller has no reason to care which
     /// way it ended.
+    ///
+    /// A source that can be sought back does not finish by its own `Eos`: a
+    /// `FileDemuxer` stays at the end of its file, and this stays `true`,
+    /// until the pipeline is stopped. For one of those,
+    /// [`BusEvent::Finished`](crate::bus::BusEvent::Finished) is what says it
+    /// has played everything.
     ///
     /// Draining the bus stays the way to learn *why* — see this type's own
     /// docs — and remains the only way to wait for the end rather than poll

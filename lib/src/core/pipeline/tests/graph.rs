@@ -628,7 +628,14 @@ fn bus_messages_carry_the_posting_elements_stable_graph_id() {
         .id;
 
     pipeline.run().unwrap();
-    let messages: Vec<_> = pipeline.bus().iter_with_ids().collect();
+    // Up to `Finished`: a file's source stays at its end until stopped, so
+    // the bus does not close of itself.
+    let messages: Vec<_> = pipeline
+        .bus()
+        .iter_with_ids()
+        .take_while(|message| !matches!(message.event, BusEvent::Finished))
+        .collect();
+    pipeline.stop();
     assert!(messages.iter().any(|message| {
         message.element_id == Some(sink_id)
             && matches!(

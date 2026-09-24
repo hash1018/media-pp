@@ -16,7 +16,7 @@ use crate::{
     buffer::MediaBuffer,
     bus::{Bus, BusEvent},
     contract::{MediaKind, OutputContract, PortContract},
-    control::{ControlMsg, ControlReceiver, RequestKind, apply_one, drain_control},
+    control::{ControlReceiver, RequestKind, apply_one, drain_control},
     element::{Element, ElementType, Source, SourceElement, element_pp_log},
     pad::SrcPad,
 };
@@ -150,6 +150,16 @@ impl FileDemuxerHandle {
 /// no longer positions *in the file* — one second into the third lap is at
 /// twice the file's length plus a second — and [`FileDemuxer::seek`] stays
 /// the way to speak in the file's own timeline.
+///
+/// At the end of the file it sends `Eos` down every pad and stays, passing
+/// `Pause`, `Resume` and the rest on to its branches — whose queues still
+/// hold what was read, a second or more of it — until it is stopped or
+/// finished; a seek from there reads on from where it lands. So a pipeline
+/// reading a file does not end when the file does: it posts
+/// [`BusEvent::Finished`](crate::bus::BusEvent::Finished) once everything
+/// read has reached its terminals, and it is the caller's to stop it then.
+/// Run by hand, [`run`](crate::element::SourceElement::run) returns at that
+/// point only once its control sender is gone.
 ///
 /// [`FileDemuxer::seek`]: crate::element::SourceElement::seek
 pub struct FileDemuxer {
@@ -575,9 +585,9 @@ impl FileDemuxer {
     }
 
     /// Waits at the end of the file, passing every control request on to
-    /// the branches, until playback resumes — `Ok(false)`, the stream over —
-    /// or it is stopped or finished, also `Ok(false)`; or until a seek
-    /// moves it back into the file, `Ok(true)`, to read on from there.
+    /// the branches — pausing and resuming them as the pipeline does — until
+    /// it is stopped or finished, `Ok(false)`, or a seek moves it back into
+    /// the file, `Ok(true)`, to read on from there.
     fn linger(&mut self, control: &ControlReceiver, bus: &Bus) -> crate::error::Result<bool> {
         self.sought = false;
         loop {
@@ -594,9 +604,6 @@ impl FileDemuxer {
             }
             if self.sought {
                 return Ok(true);
-            }
-            if msg == ControlMsg::Resume {
-                return Ok(false);
             }
         }
     }
@@ -741,13 +748,14 @@ impl SourceElement for FileDemuxer {
                 pad.push_eos(&self.pp_log)?;
             }
             pp_info!(self, "event=eos phase=source_completed outcome=ok");
-            // The end of the file inside a paused seek's preroll: the pipeline
-            // is paused, and what the end of stream drained out of a decoder —
-            // the preroll's picture among it — waits in a paused queue with the
-            // `Eos` behind it. Ending here would drop that queue with all of it
-            // inside, and with this thread gone, the `Resume` that would let it
-            // out would reach nothing. So it stays, passing control on.
-            if !self.prerolling || !self.linger(control, bus)? {
+            // The end of the file is not the end of playback: the queues after
+            // this still hold what was read, a second of it or more, and they
+            // belong to this thread — ending it would drop them with it, and a
+            // `Pause` or `Resume` sent from then on would reach nothing. In a
+            // paused seek's preroll that is the `Eos` itself, held in a paused
+            // queue, and the file would never finish. So it stays, passing
+            // control on, until it is stopped — or sought back into the file.
+            if !self.linger(control, bus)? {
                 return Ok(());
             }
         }
@@ -995,7 +1003,7 @@ mod tests {
             pp_log: element_pp_log(ElementType::Other, "counting-sink", None),
         }));
         let (bus, _bus_rx) = Bus::new();
-        let (_tx, rx) = control::channel();
+        let (_, rx) = control::channel();
         demuxer.run(&rx, &bus).expect("run must reach eos cleanly");
         count.load(Ordering::SeqCst)
     }
@@ -1042,7 +1050,7 @@ mod tests {
         }));
 
         let (bus, bus_rx) = Bus::new();
-        let (_tx, rx) = control::channel();
+        let (_, rx) = control::channel();
         demuxer
             .run(&rx, &bus)
             .expect("run must reach eos cleanly, not error");
@@ -1153,7 +1161,7 @@ mod tests {
         }));
 
         let (bus, bus_rx) = Bus::new();
-        let (_tx, rx) = control::channel();
+        let (_, rx) = control::channel();
         demuxer
             .run(&rx, &bus)
             .expect("run must reach eos cleanly, not error");
@@ -1204,7 +1212,7 @@ mod tests {
         }));
 
         let (bus, _bus_rx) = Bus::new();
-        let (_tx, rx) = control::channel();
+        let (_, rx) = control::channel();
         demuxer
             .run(&rx, &bus)
             .expect("run after seek must reach eos cleanly");
