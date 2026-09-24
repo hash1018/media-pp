@@ -95,8 +95,8 @@ be either — from frames in system memory, and from CUDA frames too on a
 renderers hand each frame to a
 presenter the program supplies — an implementation of `D3d11FrameRenderer`,
 `D3d12FrameRenderer` or `CudaFrameRenderer` for its own window or UI; the
-examples' unpublished `render_common` crate implements them for a winit
-window, and is there to copy. The D3D11 elements of a pipeline share one
+examples' unpublished `render_common` crate implements the two D3D ones for
+a winit window, and is there to copy. The D3D11 elements of a pipeline share one
 `D3d11Gpu`: one device and its immediate context behind one lock; the D3D12
 elements share one `D3d12Gpu`.
 

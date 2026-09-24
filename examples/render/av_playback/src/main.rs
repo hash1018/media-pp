@@ -22,7 +22,7 @@
 //!     Windows: FileDemuxer -> SwDecoder -> Queue -> VideoSynchronizer
 //!              -> SwScaler(NV12) -> D3d12Upload -> D3d12Renderer
 //!     Linux:   FileDemuxer -> CudaDecoder -> Queue -> VideoSynchronizer
-//!              -> CudaRenderer
+//!              -> VulkanWindowRenderer
 //!
 //! The Linux branch is the one that never brings decoded pixels to the CPU:
 //! NVDEC keeps every frame in CUDA memory and the renderer copies it straight
@@ -49,17 +49,12 @@ fn main() {
 }
 
 #[cfg(target_os = "linux")]
-fn main() {
+fn main() -> media_pp::Result<()> {
     let Some(path) = std::env::args().nth(1) else {
         eprintln!("usage: av_playback <video-with-audio.mp4>");
         std::process::exit(2);
     };
-    render_common::run_window(
-        "media-pp A/V playback",
-        1280,
-        720,
-        move |target, shutdown| linux_example::play(path, target, shutdown),
-    );
+    linux_example::play(path)
 }
 
 mod shell;
@@ -220,17 +215,15 @@ mod windows_example {
 
 #[cfg(target_os = "linux")]
 mod linux_example {
-    use std::sync::Arc;
-
     use media_pp::{
         Error,
         elements::{
             AudioResampler, CudaDecoder, CudaDevice, PipeWireAudioRenderer,
-            PipeWireAudioRendererOptions, SwDecoder, TeeHandle, VideoSynchronizer,
+            PipeWireAudioRendererOptions, SwDecoder, TeeHandle, VideoSynchronizer, VulkanGpu,
+            VulkanWindowRenderer, WindowOptions,
         },
         pipeline::Pipeline,
     };
-    use render_common::{Shutdown, VulkanGpuContext, WindowTarget};
 
     use crate::common;
 
@@ -242,11 +235,7 @@ mod linux_example {
     /// `CudaDecoder::new`'s docs. Eight frames are about 266 ms at 30 fps.
     const VIDEO_QUEUE_DEPTH: usize = 8;
 
-    pub fn play(
-        path: String,
-        target: WindowTarget,
-        shutdown: Arc<Shutdown>,
-    ) -> media_pp::Result<()> {
+    pub fn play(path: String) -> media_pp::Result<()> {
         let _log_guard = media_pp::log::init(
             env!("CARGO_PKG_NAME"),
             "logs",
@@ -256,10 +245,20 @@ mod linux_example {
         let (source, streams) = common::open(&path)?;
 
         // One CUDA context for the whole stack: the decoder allocates frames
-        // on it and the renderer imports its Vulkan memory into it. The
-        // renderer element rejects any frame from a different one.
+        // on it and the renderer copies out of it into memory its Vulkan
+        // device allocated — which is why that device is made for this CUDA
+        // one. The renderer rejects any frame from a different one.
         let cuda = CudaDevice::new()?;
-        let gpu = VulkanGpuContext::new(target.display)?;
+        let gpu = VulkanGpu::for_cuda(&cuda)?;
+        let (renderer, window) = VulkanWindowRenderer::open(
+            "video-renderer",
+            &gpu,
+            WindowOptions {
+                title: "media-pp A/V playback".into(),
+                ..WindowOptions::default()
+            },
+        )?;
+        let shutdown = render_common::stop_on_close([window]);
 
         let (pipeline, audio_tee_handle) =
             Pipeline::new("av-playback", source, |source, context| {
@@ -273,15 +272,7 @@ mod linux_example {
                     )?)
                     .queue("video-frames", VIDEO_QUEUE_DEPTH)
                     .pipe(VideoSynchronizer::new("video-sync"))
-                    .to(render_common::cuda_window_renderer(
-                        "video-renderer",
-                        &gpu,
-                        &cuda,
-                        target.display,
-                        target.window,
-                        target.width,
-                        target.height,
-                    )?)?;
+                    .to(renderer)?;
                 context.attach(source, streams.video_index, video_branch)?;
 
                 let (audio_tee, handle) = context.tee("audio-tee").build_dynamic()?;

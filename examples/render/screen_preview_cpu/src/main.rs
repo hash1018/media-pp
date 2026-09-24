@@ -1,9 +1,10 @@
-//! Previews desktop capture through the CPU-frame path —
-//! `CaptureSource -> Queue -> SwScaler(NV12) -> Queue -> GPU upload ->
-//! Renderer`. Windows uses DXGI and D3D12; Linux uses the desktop
-//! portal/PipeWire and CUDA/Vulkan. The capture includes the cursor, converts
-//! directly to window-sized NV12, and needs no encode/decode round trip or
-//! separate `Pacer`.
+//! Previews desktop capture through the CPU-frame path. Windows is
+//! `DxgiCaptureSource -> Queue -> SwScaler(NV12) -> Queue -> D3d12Upload ->
+//! Renderer`, converting directly to window-sized NV12. Linux is
+//! `PipeWireScreenCaptureSource -> Queue -> VulkanWindowRenderer`: the
+//! renderer draws the capture's system-memory BGRA as it comes, uploading
+//! and scaling it itself. The capture includes the cursor, and needs no
+//! encode/decode round trip or separate `Pacer`.
 //!
 //!     cargo run -p screen_preview_cpu
 
@@ -168,24 +169,14 @@ mod linux_example {
         bus::BusEvent,
         element::ElementType,
         elements::{
-            CaptureSourceKind, CudaDevice, CudaFrameFormat, CudaUpload,
-            PipeWireScreenCaptureOptions, PipeWireScreenCaptureSource, SwScaler,
+            CaptureSourceKind, PipeWireScreenCaptureOptions, PipeWireScreenCaptureSource,
+            VulkanGpu, VulkanWindowRenderer, WindowOptions,
         },
         ffmpeg,
         pipeline::Pipeline,
     };
-    use render_common::{Shutdown, VulkanGpuContext, WindowTarget};
 
-    pub(super) fn run() {
-        render_common::run_window(
-            "media-pp screen_preview_cpu",
-            1280,
-            720,
-            |target, shutdown| play(target, &shutdown),
-        );
-    }
-
-    fn play(target: WindowTarget, shutdown: &Shutdown) -> media_pp::Result<()> {
+    pub(super) fn run() -> media_pp::Result<()> {
         let _log_guard = media_pp::log::init(
             env!("CARGO_PKG_NAME"),
             "logs",
@@ -211,35 +202,21 @@ mod linux_example {
             },
         )?;
 
-        let cuda = CudaDevice::new()?;
-        let gpu = VulkanGpuContext::new(target.display)?;
+        // The capture's BGRA in system memory, drawn as it comes: the renderer
+        // uploads it itself and scales it to the window as it draws.
+        let gpu = VulkanGpu::new()?;
+        let (renderer, window) = VulkanWindowRenderer::open(
+            "renderer",
+            &gpu,
+            WindowOptions {
+                title: "media-pp screen_preview_cpu".into(),
+                ..WindowOptions::default()
+            },
+        )?;
+        let shutdown = render_common::stop_on_close([window]);
 
         let (pipeline, ()) = Pipeline::new("screen-preview-cpu", source, |source, ctx| {
-            let scaler = SwScaler::new(
-                "to-nv12",
-                ffmpeg::format::Pixel::NV12,
-                target.width,
-                target.height,
-                ffmpeg::software::scaling::Flags::BILINEAR,
-            );
-            let upload = CudaUpload::new("upload", &cuda, CudaFrameFormat::Nv12);
-            let renderer = render_common::cuda_window_renderer(
-                "renderer",
-                &gpu,
-                &cuda,
-                target.display,
-                target.window,
-                target.width,
-                target.height,
-            )?;
-
-            let branch = ctx
-                .branch()
-                .queue("captured", 4)
-                .pipe(scaler)
-                .queue("frames", 8)
-                .pipe(upload)
-                .to(renderer)?;
+            let branch = ctx.branch().queue("captured", 4).to(renderer)?;
             ctx.attach(source, 0, branch)?;
             Ok(())
         })?;

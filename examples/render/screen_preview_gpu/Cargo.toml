@@ -22,6 +22,6 @@ winit = "0.30"
 media-pp = { path = "../../../lib", features = [
     "pipewire-screen-capture",
     "cuda",
+    "vulkan",
 ] }
 render_common = { path = "../render_common" }
-winit = "0.30"

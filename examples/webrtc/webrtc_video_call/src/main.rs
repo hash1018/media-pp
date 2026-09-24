@@ -44,6 +44,9 @@ mod windows_example {
 
     use super::common::{HEIGHT, WIDTH};
 
+    /// Where one side of the call is shown: a window of the winit shell's.
+    pub(super) type Target = WindowTarget;
+
     pub(super) fn run() {
         super::common::run();
     }
@@ -124,75 +127,73 @@ mod linux_example {
 
     use media_pp::{
         elements::{
-            CudaDevice, CudaFrameFormat, CudaUpload, SwDecoder, SwScaler, WebRtcStreamInfo,
-            WebRtcTrackSource,
+            SwDecoder, VulkanGpu, VulkanWindowRenderer, WebRtcStreamInfo, WebRtcTrackSource,
+            WindowOptions,
         },
-        ffmpeg,
         pipeline::Pipeline,
     };
-    use render_common::{VulkanGpuContext, WindowTarget};
+    use render_common::Shutdown;
     use str0m::format::Codec;
 
     use super::common::{HEIGHT, WIDTH};
+
+    /// Where one side of the call is shown: the renderer that opened the
+    /// window, already drawing into it.
+    pub(super) type Target = VulkanWindowRenderer;
 
     pub(super) fn run() {
         super::common::run();
     }
 
-    pub(super) struct RenderContext {
-        cuda: CudaDevice,
-        gpu: VulkanGpuContext,
+    /// Opens both windows, and the `Shutdown` that closing either sets off.
+    ///
+    /// On one Vulkan device and no CUDA at all: what arrives is H.264
+    /// decoded to YUV420P in system memory, which the renderer draws as it
+    /// comes and uploads itself.
+    pub(super) fn open_windows(
+        titles: [&str; 2],
+    ) -> media_pp::Result<(Target, Target, Arc<Shutdown>)> {
+        let gpu = VulkanGpu::new()?;
+        let open = |name: &str, title: &str| {
+            VulkanWindowRenderer::open(
+                name,
+                &gpu,
+                WindowOptions {
+                    title: title.into(),
+                    width: WIDTH,
+                    height: HEIGHT,
+                },
+            )
+        };
+        let (screen_a, window_a) = open("peer-a-render", titles[0])?;
+        let (screen_b, window_b) = open("peer-b-render", titles[1])?;
+        let shutdown = render_common::stop_on_close([window_a, window_b]);
+        Ok((screen_a, screen_b, shutdown))
     }
 
+    /// Nothing to share between the two sides: the renderers already have
+    /// their device.
+    pub(super) struct RenderContext;
+
     impl RenderContext {
-        pub(super) fn new(target: &WindowTarget) -> media_pp::Result<Self> {
-            let cuda = CudaDevice::new()?;
-            let gpu = VulkanGpuContext::new(target.display)?;
-            Ok(Self { cuda, gpu })
+        pub(super) fn new(_target: &Target) -> media_pp::Result<Self> {
+            Ok(Self)
         }
     }
 
-    /// `WebRtcTrackSource -> Queue -> SwDecoder -> SwScaler(NV12) ->
-    /// CudaUpload -> CudaRenderer(Vulkan)`.
+    /// `WebRtcTrackSource -> Queue -> SwDecoder -> VulkanWindowRenderer`.
     pub(super) fn receive_pipeline(
         name: &str,
         source: WebRtcTrackSource,
         stream_info: WebRtcStreamInfo,
-        render: &RenderContext,
-        target: WindowTarget,
+        _render: &RenderContext,
+        screen: Target,
     ) -> media_pp::Result<Arc<Pipeline>> {
         validate_h264(name, &stream_info)?;
         let decoder = SwDecoder::new(format!("{name}-decode"), stream_info.codec_parameters()?)?;
-        let scaler = SwScaler::new(
-            format!("{name}-nv12"),
-            ffmpeg::format::Pixel::NV12,
-            WIDTH,
-            HEIGHT,
-            ffmpeg::software::scaling::Flags::BILINEAR,
-        );
-        let upload = CudaUpload::new(
-            format!("{name}-upload"),
-            &render.cuda,
-            CudaFrameFormat::Nv12,
-        );
-        let renderer = render_common::cuda_window_renderer(
-            format!("{name}-render"),
-            &render.gpu,
-            &render.cuda,
-            target.display,
-            target.window,
-            target.width,
-            target.height,
-        )?;
 
         let (pipeline, ()) = Pipeline::new(name, source, move |source, ctx| {
-            let branch = ctx
-                .branch()
-                .queue("packets", 16)
-                .pipe(decoder)
-                .pipe(scaler)
-                .pipe(upload)
-                .to(renderer)?;
+            let branch = ctx.branch().queue("packets", 16).pipe(decoder).to(screen)?;
             ctx.attach(source, 0, branch)?;
             Ok(())
         })?;
@@ -234,7 +235,9 @@ mod common {
         ffmpeg,
         pipeline::Pipeline,
     };
-    use render_common::{Shutdown, WindowTarget};
+    use render_common::Shutdown;
+    #[cfg(target_os = "windows")]
+    use render_common::WindowTarget;
     use str0m::{
         Candidate, Rtc,
         change::SdpOffer,
@@ -250,31 +253,38 @@ mod common {
     const FPS: i32 = 30;
     const STREAM_INFO_TIMEOUT: Duration = Duration::from_secs(2);
 
+    const TITLES: [&str; 2] = [
+        "media-pp webrtc_video_call — peer-a (showing peer-b's file)",
+        "media-pp webrtc_video_call — peer-b (showing peer-a's test pattern)",
+    ];
+
     pub(super) fn run() {
         let Some(path) = std::env::args().nth(1) else {
             eprintln!("usage: webrtc_video_call <video.mp4>");
             std::process::exit(1);
         };
 
-        render_common::run_windows(
-            &[
-                "media-pp webrtc_video_call — peer-a (showing peer-b's file)",
-                "media-pp webrtc_video_call — peer-b (showing peer-a's test pattern)",
-            ],
-            WIDTH,
-            HEIGHT,
-            move |targets, shutdown| {
-                let [target_a, target_b] = <[WindowTarget; 2]>::try_from(targets)
-                    .unwrap_or_else(|_| panic!("run_windows opened the two windows asked for"));
-                play(&path, target_a, target_b, shutdown)
-            },
-        );
+        #[cfg(target_os = "windows")]
+        render_common::run_windows(&TITLES, WIDTH, HEIGHT, move |targets, shutdown| {
+            let [target_a, target_b] = <[WindowTarget; 2]>::try_from(targets)
+                .unwrap_or_else(|_| panic!("run_windows opened the two windows asked for"));
+            play(&path, target_a, target_b, shutdown)
+        });
+
+        // The renderers open their own windows here, and `play` runs on this
+        // thread: there is no event loop of this program's to keep turning.
+        #[cfg(target_os = "linux")]
+        if let Err(error) = platform::open_windows(TITLES)
+            .and_then(|(screen_a, screen_b, shutdown)| play(&path, screen_a, screen_b, shutdown))
+        {
+            eprintln!("the call failed: {error}");
+        }
     }
 
     fn play(
         path: &str,
-        target_a: WindowTarget,
-        target_b: WindowTarget,
+        target_a: platform::Target,
+        target_b: platform::Target,
         shutdown: Arc<Shutdown>,
     ) -> media_pp::Result<()> {
         let _log_guard = media_pp::log::init(

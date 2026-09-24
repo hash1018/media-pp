@@ -1,5 +1,11 @@
-//! The window every GPU render example presents into, and the shutdown
+//! The window every Windows render example presents into, and the shutdown
 //! ordering that presenting from another thread requires.
+//!
+//! Windows only now. The Linux examples used it too, and the Wayland case
+//! below is where the first ordering was learned; they draw through
+//! `VulkanWindowRenderer::open` instead, whose window lives on a thread of
+//! its own that only the renderer ends, so neither ordering can go wrong
+//! there.
 //!
 //! # Why this is shared rather than copied per example
 //!
@@ -20,8 +26,8 @@
 //!   the window.
 //!
 //! * **Stopping from the event loop thread deadlocks.**
-//!   [`Pipeline::stop`] returns only once every element's control cascade has
-//!   acknowledged, and a renderer can only acknowledge once the compositor
+//!   [`Pipeline::stop`] returns only once every element's control cascade
+//!   has acknowledged, and a renderer can only acknowledge once the compositor
 //!   releases a swapchain image — which needs this event loop to keep
 //!   dispatching. So `CloseRequested` hands the stop to its own thread and
 //!   keeps pumping; the window stays mapped, and `PlaybackDone` is what
@@ -30,13 +36,12 @@
 //! [`Shutdown`] carries the third case: a close that arrives before the
 //! worker has any pipeline to stop, which is ordinary rather than rare when
 //! opening the source blocks on a portal dialog.
+//!
+//! [`Pipeline::stop`]: media_pp::pipeline::Pipeline::stop
 
-use std::{
-    sync::{Arc, Mutex},
-    thread,
-};
+use crate::Shutdown;
+use std::{sync::Arc, thread};
 
-use media_pp::pipeline::Pipeline;
 use winit::{
     application::ApplicationHandler,
     dpi::LogicalSize,
@@ -68,53 +73,6 @@ pub struct WindowTarget {
 
 // SAFETY: see the type's own docs — the window outlives the worker thread.
 unsafe impl Send for WindowTarget {}
-
-/// The handshake between the window and the worker that owns the pipelines.
-///
-/// The worker [`publish`](Self::publish)es what it built; the window records
-/// a close and stops whatever has been published by then. Both go through one
-/// lock, so the two orders are equivalent: a close that beats `publish` is
-/// reported back by `publish` itself.
-#[derive(Default)]
-pub struct Shutdown {
-    state: Mutex<ShutdownState>,
-}
-
-#[derive(Default)]
-struct ShutdownState {
-    requested: bool,
-    pipelines: Vec<Arc<Pipeline>>,
-}
-
-impl Shutdown {
-    /// Worker: publishes the pipelines a close should stop, and reports
-    /// whether one already arrived — in which case the worker should return
-    /// instead of running anything.
-    ///
-    /// Call this after building and before [`Pipeline::run`], so no window
-    /// event can find a running pipeline it cannot reach.
-    pub fn publish(&self, pipelines: &[Arc<Pipeline>]) -> bool {
-        let mut state = self.state.lock().expect("shutdown state poisoned");
-        state.pipelines = pipelines.to_vec();
-        state.requested
-    }
-
-    /// Whether the window has been closed, for a worker whose own loop would
-    /// otherwise run to a fixed length with nothing left to present to.
-    pub fn requested(&self) -> bool {
-        self.state
-            .lock()
-            .expect("shutdown state poisoned")
-            .requested
-    }
-
-    /// Window: records the close and hands back what to stop.
-    fn request(&self) -> Vec<Arc<Pipeline>> {
-        let mut state = self.state.lock().expect("shutdown state poisoned");
-        state.requested = true;
-        state.pipelines.clone()
-    }
-}
 
 /// Opens a `width` x `height` window titled `title`, runs `play` on its own
 /// thread with a target to present into, and returns once `play` has finished
@@ -206,7 +164,8 @@ struct App<F> {
     /// One per entry in `titles`, in that order — empty until `resumed`.
     windows: Vec<Window>,
     shutdown: Arc<Shutdown>,
-    /// Runs [`Pipeline::stop`] off the event loop thread; see the module docs.
+    /// Runs [`Pipeline::stop`](media_pp::pipeline::Pipeline::stop) off the
+    /// event loop thread; see the module docs.
     stopper: Option<thread::JoinHandle<()>>,
     /// Joined — not merely held — in [`App::drop`].
     playback: Option<thread::JoinHandle<()>>,

@@ -2,12 +2,13 @@
 //! where it can, and in software onto the same device where it cannot, and
 //! presents the frames at real playback speed. Windows decodes onto D3D12
 //! (D3D12VA, or `SwDecoder` and an upload); Linux onto CUDA (NVDEC, or
-//! `SwDecoder` and an upload) with Vulkan presentation, and puts a
-//! `CudaConverter` before the renderer where `contract::check_elements`
-//! says the bin's output does not fit the renderer's input — the bin hands
-//! on BGRA for a stream with alpha, an odd side, BT.2020 or HDR colour, and
-//! that renderer presents NV12. The check is asked of the two before they
-//! are linked, rather than the example knowing what each one takes.
+//! `SwDecoder` and an upload) into `VulkanWindowRenderer`'s own window, and
+//! puts a `CudaConverter` before the renderer where
+//! `contract::check_elements` says the bin's output does not fit the
+//! renderer's input — the renderer draws NV12 and BGRA, and the bin may hand
+//! on P010, or a layout it cannot name where the stream does not say. The
+//! check is asked of the two before they are linked, rather than the example
+//! knowing what each one takes.
 //! Compare against `sw_decode_render`, which always decodes on the CPU.
 //!
 //! Which way the bin decodes, and why where it is software, is printed when
@@ -138,29 +139,18 @@ mod linux_example {
         contract::check_elements,
         elements::{
             CudaConverter, CudaDevice, CudaFrameFormat, DecodeTarget, FileDemuxer, Pacer,
-            VideoDecodeBin,
+            VideoDecodeBin, VulkanGpu, VulkanWindowRenderer, WindowOptions,
         },
         pipeline::Pipeline,
     };
-    use render_common::{Shutdown, VulkanGpuContext, WindowTarget};
 
     const VIDEO_QUEUE_DEPTH: usize = 8;
 
-    pub(super) fn run() {
+    pub(super) fn run() -> media_pp::Result<()> {
         let Some(path) = std::env::args().nth(1) else {
             eprintln!("usage: hw_decode_render <video.mp4>");
             std::process::exit(1);
         };
-
-        render_common::run_window(
-            "media-pp hw_decode_render",
-            1280,
-            720,
-            move |target, shutdown| play(&path, target, &shutdown),
-        );
-    }
-
-    fn play(path: &str, target: WindowTarget, shutdown: &Shutdown) -> media_pp::Result<()> {
         let _log_guard = media_pp::log::init(
             env!("CARGO_PKG_NAME"),
             "logs",
@@ -168,11 +158,22 @@ mod linux_example {
             7,
         )?;
 
-        let (source, _) = FileDemuxer::open("demux", path)?;
+        let (source, _) = FileDemuxer::open("demux", &path)?;
         let video = source.best(media::Type::Video)?;
 
+        // The CUDA device first, and the Vulkan device on the same GPU, which
+        // is the one a CUDA frame can be copied to.
         let cuda = CudaDevice::new()?;
-        let gpu = VulkanGpuContext::new(target.display)?;
+        let gpu = VulkanGpu::for_cuda(&cuda)?;
+        let (renderer, window) = VulkanWindowRenderer::open(
+            "renderer",
+            &gpu,
+            WindowOptions {
+                title: "media-pp hw_decode_render".into(),
+                ..WindowOptions::default()
+            },
+        )?;
+        let shutdown = render_common::stop_on_close([window]);
 
         let mut decoder = VideoDecodeBin::open(
             "decoder",
@@ -185,19 +186,11 @@ mod linux_example {
         )?;
         println!("decoding: {:?}", decoder.path());
         let decoding = decoder.handle();
-        let renderer = render_common::cuda_window_renderer(
-            "renderer",
-            &gpu,
-            &cuda,
-            target.display,
-            target.window,
-            target.width,
-            target.height,
-        )?;
-        // Asked before linking rather than known: the renderer presents
-        // NV12, and the bin hands on BGRA for alpha, an odd side or BT.2020
-        // or HDR colour. Where the two do not fit, this crate's own kernel
-        // brings BGRA back to NV12 — which needs even sides, as NV12 does.
+        // Asked before linking rather than known: the renderer draws NV12
+        // and BGRA, and the bin may hand on what it does not — P010, or a
+        // surface in another layout, where the stream does not say what it
+        // decodes to. Where the two do not fit, this crate's own kernel
+        // brings it to NV12.
         let fits = check_elements(&mut decoder, &renderer);
         let to_nv12 = if fits.is_refused() {
             println!("decoder and renderer: {fits}; converting to NV12");

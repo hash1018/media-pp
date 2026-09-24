@@ -1,8 +1,10 @@
 //! TestVideoSource -> Queue -> SwScaler -> GPU upload -> Renderer: a synthetic
 //! moving-gradient stream, no file/camera/decoder involved at all, presented in
-//! a native window via the platform GPU renderer — D3D12 on Windows and
-//! CUDA/Vulkan on Linux. This proves the source, conversion, upload, and
-//! presentation path works end to end without needing a real video source.
+//! a native window via the platform GPU renderer — D3D12 on Windows. On Linux
+//! it is TestVideoSource -> Queue -> VulkanWindowRenderer: the renderer draws
+//! the source's YUV420P as it comes and uploads it itself, in a window of its
+//! own. This proves the source, conversion, upload, and presentation path
+//! works end to end without needing a real video source.
 //!
 //! No `Pacer` here, deliberately, as an experiment: `TestVideoSource`
 //! self-paces with a drift-free absolute schedule (see its own docs) and
@@ -116,20 +118,12 @@ mod linux_example {
     use media_pp::{
         bus::BusEvent,
         elements::{
-            CudaDevice, CudaFrameFormat, CudaUpload, SwScaler, TestVideoOptions, TestVideoSource,
+            TestVideoOptions, TestVideoSource, VulkanGpu, VulkanWindowRenderer, WindowOptions,
         },
-        ffmpeg,
         pipeline::Pipeline,
     };
-    use render_common::{Shutdown, VulkanGpuContext, WindowTarget};
 
-    pub(super) fn run() {
-        render_common::run_window("media-pp test_video", 1280, 720, |target, shutdown| {
-            play(target, &shutdown)
-        });
-    }
-
-    fn play(target: WindowTarget, shutdown: &Shutdown) -> media_pp::Result<()> {
+    pub(super) fn run() -> media_pp::Result<()> {
         let _log_guard = media_pp::log::init(
             env!("CARGO_PKG_NAME"),
             "logs",
@@ -137,39 +131,27 @@ mod linux_example {
             7,
         )?;
 
-        let options = TestVideoOptions {
-            width: target.width,
-            height: target.height,
-            ..TestVideoOptions::default()
+        // Frames in system memory, which the renderer uploads itself: YUV420P
+        // as the source makes it, with nothing in between.
+        let gpu = VulkanGpu::new()?;
+        let options = WindowOptions {
+            title: "media-pp test_video".into(),
+            ..WindowOptions::default()
         };
-        let source = TestVideoSource::new("test-video", options);
-        let cuda = CudaDevice::new()?;
-        let gpu = VulkanGpuContext::new(target.display)?;
+        let (width, height) = (options.width, options.height);
+        let (renderer, window) = VulkanWindowRenderer::open("renderer", &gpu, options)?;
+        let shutdown = render_common::stop_on_close([window]);
 
+        let source = TestVideoSource::new(
+            "test-video",
+            TestVideoOptions {
+                width,
+                height,
+                ..TestVideoOptions::default()
+            },
+        );
         let (pipeline, ()) = Pipeline::new("test-video", source, |source, ctx| {
-            let scaler = SwScaler::new(
-                "to-nv12",
-                ffmpeg::format::Pixel::NV12,
-                target.width,
-                target.height,
-                ffmpeg::software::scaling::Flags::BILINEAR,
-            );
-            let upload = CudaUpload::new("upload", &cuda, CudaFrameFormat::Nv12);
-            let renderer = render_common::cuda_window_renderer(
-                "renderer",
-                &gpu,
-                &cuda,
-                target.display,
-                target.window,
-                target.width,
-                target.height,
-            )?;
-            let branch = ctx
-                .branch()
-                .queue("frames", 8)
-                .pipe(scaler)
-                .pipe(upload)
-                .to(renderer)?;
+            let branch = ctx.branch().queue("frames", 8).to(renderer)?;
             ctx.attach(source, 0, branch)?;
             Ok(())
         })?;

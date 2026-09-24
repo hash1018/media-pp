@@ -15,5 +15,5 @@ render_common = { path = "../../render/render_common" }
 winit = "0.30"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-media-pp = { path = "../../../lib", features = ["webrtc", "cuda"] }
+media-pp = { path = "../../../lib", features = ["webrtc", "vulkan"] }
 render_common = { path = "../../render/render_common" }

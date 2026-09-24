@@ -3,8 +3,8 @@
 //!
 //! - Windows desktop: `DxgiCaptureSource(GPU) -> Queue -> D3d11Renderer`
 //! - Windows window: `WgcCaptureSource -> Queue -> D3d11Renderer`
-//! - Linux: `PipeWireScreenCaptureSource(GPU) -> Queue -> CudaConverter ->
-//!   CudaRenderer(Vulkan)`
+//! - Linux: `PipeWireScreenCaptureSource(GPU) -> Queue ->
+//!   VulkanWindowRenderer`, drawing the capture's CUDA BGRA as it comes
 //!
 //! `WgcCaptureSource` deliberately takes only an `HWND` and shows no picker
 //! of its own (see its docs); on Windows, `wgc` with no `HWND` argument lists
@@ -383,24 +383,14 @@ mod linux_example {
         bus::BusEvent,
         element::ElementType,
         elements::{
-            CaptureSourceKind, CudaConverter, CudaDevice, PipeWireScreenCaptureOptions,
-            PipeWireScreenCaptureSource,
+            CaptureSourceKind, CudaDevice, PipeWireScreenCaptureOptions,
+            PipeWireScreenCaptureSource, VulkanGpu, VulkanWindowRenderer, WindowOptions,
         },
         ffmpeg,
         pipeline::Pipeline,
     };
-    use render_common::{Shutdown, VulkanGpuContext, WindowTarget};
 
-    pub(super) fn run() {
-        render_common::run_window(
-            "media-pp screen_preview_gpu",
-            1280,
-            720,
-            |target, shutdown| play(target, &shutdown),
-        );
-    }
-
-    fn play(target: WindowTarget, shutdown: &Shutdown) -> media_pp::Result<()> {
+    pub(super) fn run() -> media_pp::Result<()> {
         let _log_guard = media_pp::log::init(
             env!("CARGO_PKG_NAME"),
             "logs",
@@ -420,9 +410,9 @@ mod linux_example {
         }
 
         // One CUDA context for the whole stack: the capture allocates its
-        // surfaces on it, the converter allocates from it, and the renderer
-        // imports its Vulkan memory into it. Each element rejects a frame
-        // from a different one.
+        // surfaces on it, and the renderer copies out of it into memory its
+        // Vulkan device allocated — which is why that device is made for
+        // this CUDA one. Each element rejects a frame from a different one.
         let cuda = CudaDevice::new()?;
         let (source, format, restore_token) = PipeWireScreenCaptureSource::open_gpu(
             "screen",
@@ -434,32 +424,26 @@ mod linux_example {
             },
             &cuda,
         )?;
-        let gpu = VulkanGpuContext::new(target.display)?;
+        let gpu = VulkanGpu::for_cuda(&cuda)?;
+        let (renderer, window) = VulkanWindowRenderer::open(
+            "renderer",
+            &gpu,
+            WindowOptions {
+                title: "media-pp screen_preview_gpu".into(),
+                ..WindowOptions::default()
+            },
+        )?;
+        let shutdown = render_common::stop_on_close([window]);
 
         let (width, height) = (format.width, format.height);
         let (pipeline, ()) = Pipeline::new("screen-preview-gpu", source, |source, ctx| {
-            // The capture's own size, not a rounded one: the converter is
-            // fixed-size, so anything else would reject every frame. An odd
-            // capture is refused here rather than at the first frame — see
-            // `CudaConverter`, whose chroma has no half sample to write.
-            let converter =
-                CudaConverter::new("convert", &cuda, media_pp::elements::CudaFrameFormat::Nv12)?;
-            let renderer = render_common::cuda_window_renderer(
-                "renderer",
-                &gpu,
-                &cuda,
-                target.display,
-                target.window,
-                target.width,
-                target.height,
-            )?;
-
+            // The capture's CUDA BGRA, drawn as it comes — no conversion, and
+            // the renderer scales it to the window as it draws.
             let branch = ctx
                 .branch()
-                // Thread boundary so conversion and presentation cannot stall
-                // capture; the compositor keeps producing at its own rate.
+                // Thread boundary so presentation cannot stall capture; the
+                // compositor keeps producing at its own rate.
                 .queue("captured", 4)
-                .pipe(converter)
                 .to(renderer)?;
             ctx.attach(source, 0, branch)?;
             Ok(())

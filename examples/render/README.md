@@ -8,8 +8,8 @@ the same across platforms.
 
 | Example | Purpose | Platform | Capture and memory path | Output | Ends by | Arguments |
 |---|---|---|---|---|---|---|
-| [`screen_preview_cpu`](screen_preview_cpu/) | Preview a CPU-captured desktop | Windows / Linux | DXGI / PipeWire system memory -> D3D12 / CUDA upload | Window | Close window | Linux: `[monitor\|window] [restore-token]` |
-| [`screen_preview_gpu`](screen_preview_gpu/) | Preview without a system-memory pixel copy | Windows / Linux | DXGI/WGC D3D11 / PipeWire DMA-BUF -> CUDA | D3D11 / CUDA renderer | Close window | Windows: `[dxgi\|wgc [<HWND>]]` (`wgc` with no `HWND` prompts); Linux: `[monitor\|window] [restore-token]` |
+| [`screen_preview_cpu`](screen_preview_cpu/) | Preview a CPU-captured desktop | Windows / Linux | DXGI / PipeWire system memory -> D3D12 upload / `VulkanWindowRenderer` | Window | Close window | Linux: `[monitor\|window] [restore-token]` |
+| [`screen_preview_gpu`](screen_preview_gpu/) | Preview without a system-memory pixel copy | Windows / Linux | DXGI/WGC D3D11 / PipeWire DMA-BUF -> CUDA | D3D11 renderer / `VulkanWindowRenderer` | Close window | Windows: `[dxgi\|wgc [<HWND>]]` (`wgc` with no `HWND` prompts); Linux: `[monitor\|window] [restore-token]` |
 | [`screen_record_software`](screen_record_software/) | Record with software conversion and encoding | Windows / Linux | DXGI / PipeWire -> system-memory BGRA | OpenH264 MP4 | Fixed duration (`Stop`) | `[output.mp4] [seconds]` plus Linux source/token |
 | [`screen_record_nvenc`](screen_record_nvenc/) | Record GPU-resident frames with NVENC | Windows / Linux | DXGI D3D11 / PipeWire DMA-BUF -> CUDA | NVENC MP4 | Fixed duration (`Finish`) | `<output.mp4> [seconds]` plus Linux source/token |
 | [`screen_record_overlay`](screen_record_overlay/) | Draw a live CUDA overlay and record it | Linux | PipeWire DMA-BUF -> CUDA compositor | NVENC MP4 | Fixed duration | `<output.mp4> [seconds] [monitor\|window] [restore-token]` |
@@ -17,7 +17,8 @@ the same across platforms.
 
 Use `screen_preview_gpu` for the general live-preview path. The
 `screen_preview_cpu` example specifically demonstrates system-memory capture,
-software conversion, and a platform GPU upload. Use `screen_record_software` for the
+software conversion, and a platform GPU upload — on Linux, the renderer
+drawing the capture's BGRA as it comes and uploading it itself. Use `screen_record_software` for the
 portable CPU encode path and `screen_record_nvenc` when the captured frame must
 stay GPU-resident through encoding.
 
@@ -46,4 +47,7 @@ restore token can be passed as the last argument on later runs.
 | [`d3d11_text_overlay`](d3d11_text_overlay/) | Demonstrate D3D11 text overlay | Windows | D3D11 compositor | Fixed duration / `q` | `[output.mp4] [seconds]` |
 
 `render_common` is a support crate shared by windowed examples, not an
-executable example.
+executable example. On Windows it is the winit window and the D3D12/D3D11
+presenters most of them draw through; on Linux every example draws through
+the library's `VulkanWindowRenderer` in a window of its own, and all that is
+left in it is turning a close of that window into a stop.

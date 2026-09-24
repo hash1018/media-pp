@@ -1,6 +1,8 @@
 //! Demux -> SwDecoder -> Queue -> Pacer -> SwScaler -> GPU upload -> Renderer:
 //! decodes a video file in system memory and presents it in a native window at
-//! real playback speed. Windows uses D3D12; Linux uses CUDA/Vulkan.
+//! real playback speed. Windows uses D3D12. Linux draws the decoded frames
+//! with `VulkanWindowRenderer`, which uploads them itself, in a window of its
+//! own — through a `SwScaler` only for a stream it cannot draw as it comes.
 //!
 //!     cargo run -p sw_decode_render -- path/to/video.mp4
 
@@ -127,69 +129,48 @@ mod linux_example {
     use media_pp::ffmpeg::media;
     use media_pp::{
         bus::BusEvent,
-        elements::{
-            CudaDevice, CudaFrameFormat, CudaUpload, FileDemuxer, Pacer, SwDecoder, SwScaler,
-        },
-        ffmpeg,
+        elements::{FileDemuxer, Pacer, SwDecoder, VulkanGpu, VulkanWindowRenderer, WindowOptions},
         pipeline::Pipeline,
     };
-    use render_common::{Shutdown, VulkanGpuContext, WindowTarget};
 
-    pub(super) fn run() {
+    pub(super) fn run() -> media_pp::Result<()> {
         let Some(path) = std::env::args().nth(1) else {
             eprintln!("usage: sw_decode_render <video.mp4>");
             std::process::exit(1);
         };
-        render_common::run_window(
-            "media-pp sw_decode_render",
-            1280,
-            720,
-            move |target, shutdown| play(&path, target, &shutdown),
-        );
-    }
-
-    fn play(path: &str, target: WindowTarget, shutdown: &Shutdown) -> media_pp::Result<()> {
         let _log_guard = media_pp::log::init(
             env!("CARGO_PKG_NAME"),
             "logs",
             media_pp::log::Level::Trace,
             7,
         )?;
-        let (source, _) = FileDemuxer::open("demux", path)?;
+        let (source, _) = FileDemuxer::open("demux", &path)?;
         let video = source.best(media::Type::Video)?;
         let params = video.parameters.clone();
-        let cuda = CudaDevice::new()?;
-        let gpu = VulkanGpuContext::new(target.display)?;
+
+        // Decoded frames stay in system memory; the renderer uploads them.
+        let gpu = VulkanGpu::new()?;
+        let (renderer, window) = VulkanWindowRenderer::open(
+            "renderer",
+            &gpu,
+            WindowOptions {
+                title: "media-pp sw_decode_render".into(),
+                ..WindowOptions::default()
+            },
+        )?;
+        let shutdown = render_common::stop_on_close([window]);
+        let to_drawable = render_common::to_drawable(&params, &renderer)?;
 
         let (pipeline, ()) = Pipeline::new("sw-decode-render", source, |source, ctx| {
-            let decoder = SwDecoder::new("decoder", params)?;
-            let pacer = Pacer::new("pacer");
-            let scaler = SwScaler::new(
-                "to-nv12",
-                ffmpeg::format::Pixel::NV12,
-                target.width,
-                target.height,
-                ffmpeg::software::scaling::Flags::BILINEAR,
-            );
-            let upload = CudaUpload::new("upload", &cuda, CudaFrameFormat::Nv12);
-            let renderer = render_common::cuda_window_renderer(
-                "renderer",
-                &gpu,
-                &cuda,
-                target.display,
-                target.window,
-                target.width,
-                target.height,
-            )?;
-            let branch = ctx
+            let mut branch = ctx
                 .branch()
-                .pipe(decoder)
+                .pipe(SwDecoder::new("decoder", params)?)
                 .queue("frames", 32)
-                .pipe(pacer)
-                .pipe(scaler)
-                .pipe(upload)
-                .to(renderer)?;
-            ctx.attach(source, video.index, branch)?;
+                .pipe(Pacer::new("pacer"));
+            if let Some(to_drawable) = to_drawable {
+                branch = branch.pipe(to_drawable);
+            }
+            ctx.attach(source, video.index, branch.to(renderer)?)?;
             Ok(())
         })?;
 

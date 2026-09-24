@@ -1,5 +1,6 @@
 //! TestVideoSource -> SwEncoder -> SwDecoder -> Pacer -> SwScaler -> GPU upload
-//! -> Renderer: encodes a synthetic moving-gradient stream (via `libopenh264`)
+//! -> Renderer (on Linux, `VulkanWindowRenderer` straight after the `Pacer`,
+//! drawing the decoded YUV420P as it comes): encodes a synthetic moving-gradient stream (via `libopenh264`)
 //! and decodes it straight back — no file, camera, or container/mux involved at
 //! all — presented in a native window at real playback speed. Proves
 //! `SwEncoder`'s `Packet`s are actually valid, decodable H.264 (not just
@@ -149,24 +150,14 @@ mod linux_example {
     use media_pp::{
         bus::BusEvent,
         elements::{
-            CudaDevice, CudaFrameFormat, CudaUpload, Pacer, SwDecoder, SwEncoder, SwEncoderOptions,
-            SwScaler, TestVideoOptions, TestVideoSource, VideoCodec,
+            Pacer, SwDecoder, SwEncoder, SwEncoderOptions, TestVideoOptions, TestVideoSource,
+            VideoCodec, VulkanGpu, VulkanWindowRenderer, WindowOptions,
         },
         ffmpeg,
         pipeline::Pipeline,
     };
-    use render_common::{Shutdown, VulkanGpuContext, WindowTarget};
 
-    pub(super) fn run() {
-        render_common::run_window(
-            "media-pp transcode_render",
-            1280,
-            720,
-            |target, shutdown| play(target, &shutdown),
-        );
-    }
-
-    fn play(target: WindowTarget, shutdown: &Shutdown) -> media_pp::Result<()> {
+    pub(super) fn run() -> media_pp::Result<()> {
         let _log_guard = media_pp::log::init(
             env!("CARGO_PKG_NAME"),
             "logs",
@@ -174,22 +165,31 @@ mod linux_example {
             7,
         )?;
 
+        // OpenH264 decodes to YUV420P, which the renderer draws as it comes
+        // and uploads itself.
+        let gpu = VulkanGpu::new()?;
+        let window_options = WindowOptions {
+            title: "media-pp transcode_render".into(),
+            ..WindowOptions::default()
+        };
+        let (width, height) = (window_options.width, window_options.height);
+        let (renderer, window) = VulkanWindowRenderer::open("renderer", &gpu, window_options)?;
+        let shutdown = render_common::stop_on_close([window]);
+
         let options = TestVideoOptions {
-            width: target.width,
-            height: target.height,
+            width,
+            height,
             ..TestVideoOptions::default()
         };
         let source = TestVideoSource::new("test-video", options);
-        let cuda = CudaDevice::new()?;
-        let gpu = VulkanGpuContext::new(target.display)?;
 
         let (pipeline, ()) = Pipeline::new("transcode-render", source, |source, ctx| {
             let encoder = SwEncoder::new(
                 "encoder",
                 SwEncoderOptions {
                     codec: VideoCodec::OpenH264,
-                    width: target.width,
-                    height: target.height,
+                    width,
+                    height,
                     pixel_format: ffmpeg::format::Pixel::YUV420P,
                     frame_rate: options.frame_rate,
                     bit_rate: 2_000_000,
@@ -198,25 +198,6 @@ mod linux_example {
                 },
             )?;
             let decoder = SwDecoder::new("decoder", encoder.parameters())?;
-            let pacer = Pacer::new("pacer");
-            let scaler = SwScaler::new(
-                "to-nv12",
-                ffmpeg::format::Pixel::NV12,
-                target.width,
-                target.height,
-                ffmpeg::software::scaling::Flags::BILINEAR,
-            );
-            let upload = CudaUpload::new("upload", &cuda, CudaFrameFormat::Nv12);
-            let renderer = render_common::cuda_window_renderer(
-                "renderer",
-                &gpu,
-                &cuda,
-                target.display,
-                target.window,
-                target.width,
-                target.height,
-            )?;
-
             let branch = ctx
                 .branch()
                 .queue("to-encode", 8)
@@ -224,9 +205,7 @@ mod linux_example {
                 .queue("to-decode", 8)
                 .pipe(decoder)
                 .queue("frames", 8)
-                .pipe(pacer)
-                .pipe(scaler)
-                .pipe(upload)
+                .pipe(Pacer::new("pacer"))
                 .to(renderer)?;
             ctx.attach(source, 0, branch)?;
             Ok(())

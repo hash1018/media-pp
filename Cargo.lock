@@ -3167,11 +3167,7 @@ dependencies = [
 name = "render_common"
 version = "0.1.0"
 dependencies = [
- "ash",
- "ash-window",
  "media-pp",
- "naga",
- "raw-window-handle",
  "windows",
  "winit",
 ]

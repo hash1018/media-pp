@@ -299,13 +299,13 @@ mod linux_example {
         elements::{
             CudaDevice, CudaDownload, CudaFrameFormat, CudaUpload, CudaVideoCompositor, FileMuxer,
             SwEncoder, SwEncoderOptions, SwScaler, TestVideoOptions, TestVideoSource, VideoCodec,
-            VideoCompositorOptions, VideoFit, VideoLayer, VideoRect,
+            VideoCompositorOptions, VideoFit, VideoLayer, VideoRect, VulkanGpu,
+            VulkanWindowRenderer, WindowOptions,
         },
         pipeline::Pipeline,
     };
-    use render_common::{Shutdown, VulkanGpuContext, WindowTarget};
 
-    pub(super) fn run() {
+    pub(super) fn run() -> media_pp::Result<()> {
         let path = std::env::args()
             .nth(1)
             .unwrap_or_else(|| "gpu_video_compositor.mp4".into());
@@ -314,20 +314,10 @@ mod linux_example {
             .and_then(|value| value.parse().ok())
             .unwrap_or(5);
 
-        render_common::run_window(
-            "media-pp gpu_video_compositor",
-            640,
-            360,
-            move |target, shutdown| play(target, &path, seconds, &shutdown),
-        );
+        play(&path, seconds)
     }
 
-    fn play(
-        target: WindowTarget,
-        path: &str,
-        seconds: u64,
-        shutdown: &Shutdown,
-    ) -> media_pp::Result<()> {
+    fn play(path: &str, seconds: u64) -> media_pp::Result<()> {
         let _log_guard = media_pp::log::init(
             env!("CARGO_PKG_NAME"),
             "logs",
@@ -335,14 +325,26 @@ mod linux_example {
             7,
         )?;
 
-        // One CUDA context for the whole stack: every input uploads onto it,
-        // the compositor draws on it, and the renderer imports its Vulkan
-        // memory into it. Each element rejects a frame from a different one.
-        let cuda = CudaDevice::new()?;
-        let gpu = VulkanGpuContext::new(target.display)?;
-
         let output_width = 640;
         let output_height = 360;
+
+        // One CUDA context for the whole stack: every input uploads onto it,
+        // the compositor draws on it, and the renderer copies out of it into
+        // memory its Vulkan device allocated — which is why that device is
+        // made for this CUDA one. Each element rejects a frame from a
+        // different one.
+        let cuda = CudaDevice::new()?;
+        let gpu = VulkanGpu::for_cuda(&cuda)?;
+        let (renderer, window) = VulkanWindowRenderer::open(
+            "renderer",
+            &gpu,
+            WindowOptions {
+                title: "media-pp gpu_video_compositor".into(),
+                width: output_width,
+                height: output_height,
+            },
+        )?;
+        let shutdown = render_common::stop_on_close([window]);
         let frame_rate = ffmpeg::Rational::new(30, 1);
         let (compositor, compositor_handle) = CudaVideoCompositor::new(
             "compositor",
@@ -449,15 +451,6 @@ mod linux_example {
 
         let (output_pipeline, ()) =
             Pipeline::new("composited-output", compositor, |source, ctx| {
-                let renderer = render_common::cuda_window_renderer(
-                    "renderer",
-                    &gpu,
-                    &cuda,
-                    target.display,
-                    target.window,
-                    output_width,
-                    output_height,
-                )?;
                 let render_branch = ctx.branch().queue("render", 4).to(renderer)?;
 
                 let download = CudaDownload::new("download", &cuda, CudaFrameFormat::Nv12);
