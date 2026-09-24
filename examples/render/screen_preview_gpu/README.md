@@ -3,10 +3,11 @@
 Captures a desktop or application window straight into GPU memory and presents
 it, with no pixel ever passing through system memory.
 
-- Windows desktop: `DxgiCaptureSource` (GPU mode) `-> Queue -> D3d11Renderer`
-- Windows window: `WgcCaptureSource -> Queue -> D3d11Renderer`
-- Linux: `PipeWireScreenCaptureSource` (GPU mode) `-> Queue -> CudaConverter
-  -> CudaRenderer`
+- Windows desktop: `DxgiCaptureSource` (GPU mode) `-> Queue ->
+  D3d11WindowRenderer`
+- Windows window: `WgcCaptureSource -> Queue -> D3d11WindowRenderer`
+- Linux: `PipeWireScreenCaptureSource` (GPU mode) `-> Queue ->
+  VulkanWindowRenderer`
 
 On Windows one BGRA-capable `D3d11Gpu` device is created, opens
 `D3d11WindowRenderer` and its window, and is then passed into
@@ -20,15 +21,14 @@ new PTS.
 
 No `SwScaler`: captured content is already BGRA/RGB, and the renderer
 letterboxes any capture size into the preview window. Compare against
-`screen_preview_cpu`, which captures to a plain CPU `Pixel::BGRA` frame and
-converts it to NV12 before the platform GPU upload.
+`screen_preview_cpu`, which captures to a plain CPU `Pixel::BGRA` frame — and
+on Windows converts it to NV12 before the GPU upload.
 
-The Linux graph is one element longer, and the platform forces exactly that
-one. PipeWire hands over a DMA-BUF that `open_gpu` imports as a BGRA CUDA
-surface, and `CudaRenderer` presents NV12, so `CudaConverter` sits between
-them. That element exists for this shape: without it a GPU capture can only be
-encoded — NVENC ingests BGRA directly, which is what `screen_record_nvenc`
-does — never shown or composited.
+The Linux graph has the same shape. One CUDA context serves the whole stack:
+PipeWire hands over a DMA-BUF that `open_gpu` imports as a BGRA CUDA surface
+on it, and `VulkanWindowRenderer`, on a `VulkanGpu` made for that CUDA
+device, copies the BGRA into Vulkan memory and draws it as it comes — no
+conversion in between.
 
 The Windows DXGI GPU path has no cursor because `CaptureMode::Gpu` doesn't
 support cursor compositing yet; the WGC window path requests WGC's cursor

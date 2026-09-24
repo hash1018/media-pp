@@ -15,7 +15,7 @@ the GPU:
 Windows: FileDemuxer -> SwDecoder -> Queue -> VideoSynchronizer
          -> SwScaler(NV12) -> D3d12Upload -> D3d12WindowRenderer
 Linux:   FileDemuxer -> CudaDecoder -> Queue -> VideoSynchronizer
-         -> CudaRenderer
+         -> VulkanWindowRenderer
 ```
 
 The Linux branch is the one that never brings decoded pixels to the CPU: NVDEC

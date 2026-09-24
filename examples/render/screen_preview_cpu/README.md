@@ -1,11 +1,15 @@
 # screen_preview_cpu
 
-`CaptureSource -> Queue -> SwScaler(NV12) -> Queue -> GPU upload -> Renderer`:
-captures the desktop into system memory, converts/resizes it to window-sized
-NV12, uploads it to the GPU, and presents it without an encode/decode round
-trip. Windows uses DXGI capture, D3D12 upload, and `D3d12WindowRenderer`'s own
-window. Linux uses the xdg-desktop-portal PipeWire CPU path, CUDA upload, and
-Vulkan presentation.
+Previews desktop capture through the CPU-frame path, without an
+encode/decode round trip:
+
+- Windows: `DxgiCaptureSource -> Queue -> SwScaler(NV12) -> Queue ->
+  D3d12Upload -> D3d12WindowRenderer`, converting directly to window-sized
+  NV12 and drawing it in the renderer's own window.
+- Linux: `PipeWireScreenCaptureSource -> Queue -> VulkanWindowRenderer`, the
+  xdg-desktop-portal PipeWire CPU path: the renderer draws the capture's
+  system-memory BGRA as it comes, uploading and scaling it itself. The
+  capture includes the cursor.
 
 No `Pacer` here, confirmed unneeded: `DxgiCaptureSource` previously emitted
 variable-rate (real wall-clock pts, push-on-change), and removing `Pacer`

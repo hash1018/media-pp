@@ -6,7 +6,9 @@ reads timestamps and calls
 `Pipeline::seek` with them while the window is open — proves `seek` actually
 changes what's on screen, not just that it compiles. The same prompt also
 exposes `pause`/`resume`. Windows uploads to D3D12 and draws into
-`D3d12WindowRenderer`'s own window; Linux uses CUDA/Vulkan.
+`D3d12WindowRenderer`'s own window. Linux draws the decoded frames with
+`VulkanWindowRenderer`, which uploads them itself — through a `SwScaler` only
+for a stream it cannot draw as it comes.
 
 ```sh
 cargo run -p seek_render -- path/to/video.mp4

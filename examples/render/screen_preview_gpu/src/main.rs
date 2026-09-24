@@ -323,13 +323,11 @@ mod windows_example {
 /// The Linux half of the same example: capture straight into GPU memory and
 /// present it, with no pixel ever passing through system memory.
 ///
-/// The graph is one element longer than the Windows branch, and the platform
-/// forces exactly that one. DXGI hands over a BGRA texture that
-/// `D3d11Renderer` presents as-is; PipeWire hands over a DMA-BUF that
-/// `open_gpu` imports as a BGRA CUDA surface, and `CudaRenderer` presents
-/// NV12 — so `CudaConverter` sits between them. That element exists for this
-/// shape: without it a GPU capture can only be encoded (NVENC ingests BGRA
-/// directly), never shown or composited.
+/// The graph has the Windows branch's shape. DXGI hands over a BGRA texture
+/// that `D3d11WindowRenderer` draws as it is; PipeWire hands over a DMA-BUF
+/// that `open_gpu` imports as a BGRA CUDA surface, and `VulkanWindowRenderer`
+/// draws that as it is too, on a `VulkanGpu` made for the capture's CUDA
+/// device.
 ///
 /// The CLI differences are the ones `screen_record_software` documents: Wayland has no
 /// way to name a monitor, so the compositor prompts on the first run and

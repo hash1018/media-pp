@@ -10,8 +10,9 @@ download.
 
 - Windows: `D3d11Upload` -> `D3d11VideoCompositor` -> `D3d11WindowRenderer` /
   `D3d11Download`
-- Linux: `CudaUpload` -> `CudaVideoCompositor` -> `CudaRenderer` (Vulkan
-  swapchain) / `CudaDownload`
+- Linux: `CudaUpload` -> `CudaVideoCompositor` -> `VulkanWindowRenderer`,
+  drawing the CUDA frames on a `VulkanGpu` made for that CUDA device /
+  `CudaDownload`
 
 Both branches run the identical graph, terminal sinks, layer settings, and
 CLI — the foreground is drawn at 0.85 opacity with `VideoFit::Cover` on

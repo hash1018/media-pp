@@ -4,7 +4,9 @@
 //! proves
 //! `seek` actually changes what's on screen, not just that it compiles.
 //! Windows uploads to D3D12 and draws into `D3d12WindowRenderer`'s own
-//! window.
+//! window. Linux draws the decoded frames with `VulkanWindowRenderer`, which
+//! uploads them itself — through a `SwScaler` only for a stream it cannot
+//! draw as it comes.
 //!
 //!     cargo run -p seek_render -- path/to/video.mp4
 //!     (then use `pause`, `resume`, `seek 30`, `seek 1:15`, or `q`)

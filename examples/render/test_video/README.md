@@ -1,12 +1,13 @@
 # test_video
 
 `TestVideoSource -> Queue -> SwScaler -> GPU upload -> Renderer`: a synthetic
-moving-gradient stream, no
-file/camera/decoder involved at all, presented in a native window via
-the platform renderer. Windows converts to NV12, uploads to D3D12, and draws
-into `D3d12WindowRenderer`'s own window; Linux
-converts to NV12, uploads to CUDA, and presents through Vulkan. This proves the
-synthetic source and complete presentation path work without a real video.
+moving-gradient stream, no file/camera/decoder involved at all, presented in
+a native window via the platform renderer. Windows converts to NV12, uploads
+to D3D12, and draws into `D3d12WindowRenderer`'s own window. On Linux it is
+`TestVideoSource -> Queue -> VulkanWindowRenderer`: the renderer draws the
+source's YUV420P as it comes and uploads it itself, in a window of its own.
+This proves the synthetic source and complete presentation path work without
+a real video.
 
 No `Pacer` here, deliberately, as an experiment: `TestVideoSource` self-paces
 with a drift-free absolute schedule and nothing sits between it and the

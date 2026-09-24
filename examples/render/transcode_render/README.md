@@ -13,8 +13,8 @@ itself is already paced accurately enough for direct rendering, but the
 encoder and decoder add their own buffering and per-frame variance; this
 particular chain has not been validated without the final clock-anchored
 pacing stage. Windows uploads to D3D12 and draws into `D3d12WindowRenderer`'s
-own window; Linux uploads the decoded frames
-to CUDA and presents through Vulkan.
+own window. On Linux `VulkanWindowRenderer` comes straight after the `Pacer`,
+drawing the decoded YUV420P as it comes and uploading it itself.
 
 ```sh
 cargo run -p transcode_render
