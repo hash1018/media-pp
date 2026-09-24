@@ -148,7 +148,8 @@ Everything else:
   device's textures). Linux — `PipeWireScreenCaptureSource`,
   `PipeWireAudioCaptureSource`, `V4l2CaptureSource`.
 - **Audio**: `AudioMixer`, `AudioResampler`, `AudioVolume`, `AudioGate`,
-  `AudioCompressor`, `AudioLimiter`, `NoiseSuppressor`, `SwAudioEncoder`;
+  `AudioCompressor`, `AudioLimiter`, `NoiseSuppressor`, `SwAudioEncoder`,
+  and `AudioWaveform`, which draws sound as pictures;
   playback through `WasapiRenderer` and `PipeWireAudioRenderer`.
 - **Outputs**: `FileMuxer`, `SegmentedFileMuxer`, `ReplayBuffer`, `HlsMuxer`,
   `RtmpMuxer`, `RtspMuxer`, `WebRtcTrackSink`, `AppSink`.

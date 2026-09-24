@@ -34,11 +34,12 @@ use crate::{
     },
     element::Sink,
     elements::{
-        AudioFormat, AudioResampler, AudioVolume, AudioVolumeError, AudioVolumeHandle, DecodePath,
-        DecodeTarget, DecodeThreadKind, DecodeThreading, FileDemuxer, FileDemuxerError,
-        FileDemuxerHandle, Key, MouseButton, SoftwareReason, StreamInfo, SwDecoder, SwScaler,
-        VideoDecodeBin, VideoDecodeBinHandle, VideoSynchronizer, VideoWindow, VideoWindowError,
-        WindowControl, WindowEvent, WindowEvents, WindowOptions,
+        AudioFormat, AudioResampler, AudioVolume, AudioVolumeError, AudioVolumeHandle,
+        AudioWaveform, AudioWaveformOptions, DecodePath, DecodeTarget, DecodeThreadKind,
+        DecodeThreading, FileDemuxer, FileDemuxerError, FileDemuxerHandle, Key, MouseButton,
+        SoftwareReason, StreamInfo, SwDecoder, SwScaler, VideoDecodeBin, VideoDecodeBinHandle,
+        VideoSynchronizer, VideoWindow, VideoWindowError, WindowControl, WindowEvent, WindowEvents,
+        WindowOptions,
     },
     ffmpeg,
     pipeline::{Pipeline, SeekMode},
@@ -170,6 +171,9 @@ enum Wait {
 /// # }
 /// ```
 ///
+/// A file with sound and no picture shows its sound's waveform instead —
+/// see [`AudioWaveform`](crate::elements::AudioWaveform).
+///
 /// The picture is decoded on the GPU the [`VideoWindow`] draws with, and
 /// stays there: D3D11VA on Windows (D3D12 in a build with only `d3d12`),
 /// NVDEC on Linux where the build has `cuda` and the machine an NVIDIA GPU —
@@ -192,9 +196,6 @@ pub struct Player {
     /// Where the file's timeline has been carried to by looping, which
     /// [`Self::position`] takes back off.
     laps: FileDemuxerHandle,
-    /// The window of a file with no picture, which no pipeline holds —
-    /// kept here so it stays open as long as the player.
-    _idle: Option<VideoWindow>,
     window: WindowControl,
     events: WindowEvents,
     duration: Option<Duration>,
@@ -242,17 +243,32 @@ impl Player {
         let budget = GPU_FRAMES_QUEUED as i32 + 3;
         let Some(video) = video else {
             // Sound alone: still a window, since it is where the keys arrive
-            // and what closing means stop. It shows black.
-            let (mut screen, events) = VideoWindow::open("screen", options.window)?;
-            screen.consume(black())?;
+            // and what closing means stop, and in it the sound's waveform,
+            // drawn from the same decoded sound and shown as it is heard.
+            let (screen, events) = VideoWindow::open("screen", options.window)?;
             let window = screen.window_control();
+            let waveform = AudioWaveform::new("waveform", AudioWaveformOptions::default())
+                .map_err(crate::Error::from)?;
             let (pipeline, ()) = Pipeline::new("player", source, |source, ctx| {
                 if let (Some(audio), Some((speakers, format))) = (audio, output) {
-                    ctx.attach(
-                        source,
-                        audio.index,
-                        sound(ctx, &audio, format, volume, speakers)?,
-                    )?;
+                    let heard = ctx
+                        .branch()
+                        .pipe(volume)
+                        .queue("audio-output", 8)
+                        .to(speakers)?;
+                    let seen = ctx
+                        .branch()
+                        .pipe(waveform)
+                        .queue("waveform-frames", SYSTEM_FRAMES_QUEUED)
+                        .pipe(VideoSynchronizer::new("video-sync"))
+                        .to(screen)?;
+                    let sound = ctx.tee("sound").branch(heard).branch(seen).build()?;
+                    let decoded = ctx
+                        .branch()
+                        .pipe(SwDecoder::new("audio-decoder", audio.parameters.clone())?)
+                        .pipe(AudioResampler::new("audio-resampler", format))
+                        .to_branch(sound)?;
+                    ctx.attach(source, audio.index, decoded)?;
                 }
                 Ok(())
             })?;
@@ -261,7 +277,6 @@ impl Player {
                 decoder: None,
                 volume: volume_handle,
                 laps,
-                _idle: Some(screen),
                 window,
                 events,
                 duration,
@@ -331,7 +346,6 @@ impl Player {
             decoder: Some(handle),
             volume: volume_handle,
             laps,
-            _idle: None,
             window,
             events,
             duration,
@@ -614,15 +628,6 @@ fn sound(
         .to(speakers)
 }
 
-/// One black picture, for a window with nothing else to show.
-fn black() -> crate::buffer::MediaBuffer {
-    let mut frame = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::BGRA, 2, 2);
-    for pixel in frame.data_mut(0).as_chunks_mut::<4>().0 {
-        *pixel = [0, 0, 0, 255];
-    }
-    crate::buffer::MediaBuffer::video(frame)
-}
-
 /// The default output device, opened, with the format it plays.
 fn open_output() -> Result<(AudioOut, AudioFormat), PlayerError> {
     let audio = |error| PlayerError::Audio(Box::new(error));
@@ -830,8 +835,9 @@ mod tests {
         assert_eq!(player.volume(), 0.25);
     }
 
-    /// A file with sound and no picture plays, in a window that shows
-    /// black, to its end.
+    /// A file with sound and no picture plays, its waveform in the window,
+    /// to its end — which it reaches only once the pictures of it have
+    /// ended too.
     #[test]
     fn a_file_with_only_sound_plays_to_its_end() {
         let Some(path) = crate::test_support::try_test_sound() else {

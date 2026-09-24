@@ -5,7 +5,7 @@
 //! audio output, built by `Player::open`. Where the picture is decoded is
 //! printed when it starts.
 //!
-//! A file with only sound plays too, in a window that shows black.
+//! A file with only sound plays too, its waveform in the window.
 //!
 //! Space pauses and plays, the left and right arrows move five seconds, the
 //! up and down arrows turn the volume, M mutes, F or a double click fills

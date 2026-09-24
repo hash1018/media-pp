@@ -14,6 +14,7 @@ mod audio_gate;
 mod audio_limiter;
 pub(crate) mod audio_resampler;
 mod audio_volume;
+mod audio_waveform;
 #[cfg(feature = "rnnoise")]
 mod noise_suppressor;
 mod tuning;
@@ -25,5 +26,6 @@ pub use audio_gate::{AudioGate, AudioGateError, AudioGateHandle, AudioGateOption
 pub use audio_limiter::{AudioLimiter, AudioLimiterError, AudioLimiterHandle, AudioLimiterOptions};
 pub use audio_resampler::{AudioResampler, AudioResamplerError};
 pub use audio_volume::{AudioVolume, AudioVolumeError, AudioVolumeHandle, AudioVolumeOptions};
+pub use audio_waveform::{AudioWaveform, AudioWaveformError, AudioWaveformOptions};
 #[cfg(feature = "rnnoise")]
 pub use noise_suppressor::{NOISE_SUPPRESSOR_SAMPLE_RATE, NoiseSuppressor, NoiseSuppressorError};

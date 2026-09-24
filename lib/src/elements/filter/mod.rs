@@ -43,7 +43,8 @@ pub use audio::{
     AudioCompressor, AudioCompressorError, AudioCompressorHandle, AudioCompressorOptions,
     AudioGate, AudioGateError, AudioGateHandle, AudioGateOptions, AudioLimiter, AudioLimiterError,
     AudioLimiterHandle, AudioLimiterOptions, AudioResampler, AudioResamplerError, AudioVolume,
-    AudioVolumeError, AudioVolumeHandle, AudioVolumeOptions,
+    AudioVolumeError, AudioVolumeHandle, AudioVolumeOptions, AudioWaveform, AudioWaveformError,
+    AudioWaveformOptions,
 };
 #[cfg(feature = "rnnoise")]
 pub use audio::{NOISE_SUPPRESSOR_SAMPLE_RATE, NoiseSuppressor, NoiseSuppressorError};

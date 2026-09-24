@@ -17,7 +17,8 @@ uploaded where the GPU does not take the stream. Where there is no such GPU —
 Linux without `cuda` or NVIDIA — it is a software decode straight into the
 window. What it chose is printed when playback starts, as `decoding:
 Hardware` or `decoding: Software(...)` with the reason — or `sound only` for a
-file with no picture, which plays in a window that shows black.
+file with no picture, which plays with its waveform in the window
+(`AudioWaveform`, shown in time with the sound).
 
 The audio renderer is `WasapiRenderer` on Windows and `PipeWireAudioRenderer`
 on Linux, on the default output device. Space pauses and plays, the left and

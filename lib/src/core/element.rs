@@ -163,6 +163,8 @@ pub enum ElementType {
     VideoDecodeBin,
     /// One video stream encoded into H.264, by whichever encoder takes it.
     VideoEncodeBin,
+    /// Sound drawn as its waveform.
+    AudioWaveform,
     /// Bounded asynchronous queue filter.
     Queue,
     /// Diagnostic decoded-frame counter sink.

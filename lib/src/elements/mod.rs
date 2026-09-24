@@ -79,12 +79,12 @@ pub use filter::{
     AudioCompressorOptions, AudioGate, AudioGateError, AudioGateHandle, AudioGateOptions,
     AudioLimiter, AudioLimiterError, AudioLimiterHandle, AudioLimiterOptions, AudioResampler,
     AudioResamplerError, AudioVolume, AudioVolumeError, AudioVolumeHandle, AudioVolumeOptions,
-    ChangeGate, ChromaKeyHandle, ChromaKeyMethod, ChromaKeyOptions, FrameRateLimiter,
-    FrameRateLimiterError, Pacer, PacerError, PauseGate, PauseGateHandle, Rack, RackError,
-    RackHandle, SwAudioEncoder, SwAudioEncoderError, SwAudioEncoderOptions, SwChromaKey,
-    SwChromaKeyError, SwDecoder, SwDecoderError, SwEncoder, SwEncoderError, SwEncoderOptions,
-    SwScaler, SwScalerError, Tee, TeeBuilder, TeeHandle, TimestampOrigin, VideoCodec,
-    VideoSynchronizer, VideoSynchronizerError,
+    AudioWaveform, AudioWaveformError, AudioWaveformOptions, ChangeGate, ChromaKeyHandle,
+    ChromaKeyMethod, ChromaKeyOptions, FrameRateLimiter, FrameRateLimiterError, Pacer, PacerError,
+    PauseGate, PauseGateHandle, Rack, RackError, RackHandle, SwAudioEncoder, SwAudioEncoderError,
+    SwAudioEncoderOptions, SwChromaKey, SwChromaKeyError, SwDecoder, SwDecoderError, SwEncoder,
+    SwEncoderError, SwEncoderOptions, SwScaler, SwScalerError, Tee, TeeBuilder, TeeHandle,
+    TimestampOrigin, VideoCodec, VideoSynchronizer, VideoSynchronizerError,
 };
 pub use filter::{
     ColorCorrection, LumaKey, SwVideoEffect, SwVideoEffectError, VideoEffect, VideoEffectHandle,

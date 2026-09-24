@@ -86,12 +86,12 @@ use crate::{
     control::{PrerollError, SeekError},
     elements::{
         AppSourceError, AudioCompressorError, AudioGateError, AudioLimiterError, AudioMixerError,
-        AudioResamplerError, AudioVolumeError, FileDemuxerError, FileMuxerError,
-        FrameRateLimiterError, HlsMuxerError, MuxerTrackError, PacerError, RackError,
-        ReplayBufferError, RtmpMuxerError, RtspSourceError, SubmitError, SwAudioEncoderError,
-        SwChromaKeyError, SwDecoderError, SwEncoderError, SwScalerError, SwTextLayerError,
-        SwVideoCompositorError, SwVideoEffectError, TestAudioSourceError, TestVideoSourceError,
-        VideoSynchronizerError,
+        AudioResamplerError, AudioVolumeError, AudioWaveformError, FileDemuxerError,
+        FileMuxerError, FrameRateLimiterError, HlsMuxerError, MuxerTrackError, PacerError,
+        RackError, ReplayBufferError, RtmpMuxerError, RtspSourceError, SubmitError,
+        SwAudioEncoderError, SwChromaKeyError, SwDecoderError, SwEncoderError, SwScalerError,
+        SwTextLayerError, SwVideoCompositorError, SwVideoEffectError, TestAudioSourceError,
+        TestVideoSourceError, VideoSynchronizerError,
     },
     graph::GraphError,
     log::LogInitError,
@@ -407,6 +407,10 @@ pub enum Error {
     /// An audio gain operation failed.
     #[error(transparent)]
     AudioVolumeError(#[from] AudioVolumeError),
+
+    /// A waveform could not be drawn from what it was given.
+    #[error(transparent)]
+    AudioWaveformError(#[from] AudioWaveformError),
 
     /// A noise gate was misconfigured or handed audio it cannot gate.
     #[error(transparent)]

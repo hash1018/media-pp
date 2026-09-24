@@ -620,8 +620,12 @@ compile error with no explanation.
 
 - **`Player` plays sound on its own, and has a volume, a loop and a choice
   of track.** A file with no picture was refused as one with nothing to
-  play; it now plays, in a window that shows black, where the keys still
-  arrive. `set_volume`, `set_muted` and the up and down arrows and M in
+  play; it now plays, with its waveform in the window — drawn by the new
+  `AudioWaveform` from the same decoded sound and shown by a
+  `VideoSynchronizer` as it is heard — and the keys arrive there as ever.
+  `AudioWaveform` is an element of its own: `f32` sound in, a BGRA
+  oscilloscope trace out at a steady rate, each picture stamped with the
+  moment of the sound it ends at. `set_volume`, `set_muted` and the up and down arrows and M in
   `respond_to` turn the sound, through an `AudioVolume` in its branch;
   `set_looping` plays the file again from the start instead of ending, with
   `position` read within the lap; and `PlayerOptions::audio_stream` picks
