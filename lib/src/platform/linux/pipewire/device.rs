@@ -117,6 +117,10 @@ pub struct PipeWireAudioApplication {
 /// What one registry round trip found.
 struct Published {
     devices: Vec<PipeWireAudioDevice>,
+    /// Found on the same walk whatever the features; only a capture of one
+    /// application's sound reads it, so a build without that feature — the
+    /// audio renderer alone — does not.
+    #[cfg_attr(not(feature = "pipewire-audio-capture"), allow(dead_code))]
     applications: Vec<PipeWireAudioApplication>,
 }
 
@@ -142,6 +146,7 @@ pub(crate) fn list_devices() -> std::result::Result<Vec<PipeWireAudioDevice>, Pi
 /// The same round trip [`list_devices`] makes, reading the other half of what
 /// it already walks past: a program's playback is a node like any other, and
 /// the registry hands both over together.
+#[cfg(feature = "pipewire-audio-capture")]
 pub(crate) fn list_applications()
 -> std::result::Result<Vec<PipeWireAudioApplication>, PipeWireDeviceError> {
     Ok(enumerate()?.applications)

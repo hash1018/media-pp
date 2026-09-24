@@ -6,4 +6,6 @@ pub use device::{
     PipeWireAudioApplication, PipeWireAudioDevice, PipeWireAudioDeviceKind, PipeWireDeviceError,
 };
 
-pub(crate) use device::{list_applications, list_devices};
+#[cfg(feature = "pipewire-audio-capture")]
+pub(crate) use device::list_applications;
+pub(crate) use device::list_devices;

@@ -202,8 +202,12 @@ jobs:
       - name: Lint (no features)
         run: cargo clippy -p media-pp --all-targets -- -D warnings
 
+      # Together, and the audio renderer alone as well: a player takes it
+      # without the capture, and code the two share is only used by one.
       - name: Lint (Linux backends)
-        run: cargo clippy -p media-pp --all-targets --features pipewire-audio-capture,pipewire-audio-renderer,pipewire-screen-capture,v4l2-capture -- -D warnings
+        run: |
+          cargo clippy -p media-pp --all-targets --features pipewire-audio-capture,pipewire-audio-renderer,pipewire-screen-capture,v4l2-capture -- -D warnings
+          cargo clippy -p media-pp --all-targets --features pipewire-audio-renderer -- -D warnings
 
       # Linted but not run: hosted runners have no NVIDIA driver, so a test
       # binary built with this feature will not start. See the same job on
