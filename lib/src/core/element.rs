@@ -161,6 +161,8 @@ pub enum ElementType {
     Rack,
     /// One video stream decoded onto a device, by whichever path takes it.
     VideoDecodeBin,
+    /// One video stream encoded into H.264, by whichever encoder takes it.
+    VideoEncodeBin,
     /// Bounded asynchronous queue filter.
     Queue,
     /// Diagnostic decoded-frame counter sink.

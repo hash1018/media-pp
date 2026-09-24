@@ -618,6 +618,21 @@ compile error with no explanation.
 
 ### Added
 
+- **`VideoEncodeBin`: H.264 by whichever encoder opens.** Encoding took
+  choosing between `SwEncoder`, `D3d11VideoEncoder` and `CudaEncoder` by
+  hand, with the download, conversion and colour description each one
+  needs in front — obs-rs had grown its own probe for it. The bin takes
+  frames from system memory, D3D11 or CUDA (`EncodeInput`) and opens
+  `h264_nvenc`, then `h264_mf` for D3D11, then software (`libx264`, or
+  `libopenh264`), keeping the first that opens; `path` says which, and a
+  muxer's `add_stream` takes the bin itself. Every path says in the stream
+  what its YUV is — from RGB, what it converted with; from YUV,
+  `VideoEncodeOptions::color`. Chosen once, when it opens: a muxer writes
+  its headers from that encoder. `D3d11Download` reads NV12 textures as
+  well as BGRA, into NV12 frames with their colour description, so the
+  software path from a decoder's or an upload's textures needs no video
+  processor — which a device with none, such as a CI runner's, lacks.
+
 - **A picture is shown when its sound is heard, not a screen's delay
   later.** `VideoSynchronizer` handed each picture over when the audio
   position reached it, and the audio position is what the listener hears,

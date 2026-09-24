@@ -3,6 +3,7 @@ use ffmpeg_next::{self as ffmpeg, Rescale};
 #[cfg(feature = "cuda")]
 mod cuda;
 mod sw_encoder;
+mod video_encode_bin;
 
 #[cfg(feature = "cuda")]
 pub use cuda::{CudaCodec, CudaEncoder, CudaEncoderError, CudaEncoderOptions};
@@ -10,6 +11,7 @@ pub use cuda::{CudaCodec, CudaEncoder, CudaEncoderError, CudaEncoderOptions};
 mod windows;
 
 pub use sw_encoder::{SwEncoder, SwEncoderError, SwEncoderOptions, VideoCodec};
+pub use video_encode_bin::{EncodeInput, EncodePath, VideoEncodeBin, VideoEncodeOptions};
 #[cfg(all(target_os = "windows", feature = "d3d11"))]
 pub use windows::*;
 

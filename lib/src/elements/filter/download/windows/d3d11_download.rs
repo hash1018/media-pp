@@ -10,7 +10,9 @@ use windows::{
             D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING, ID3D11Device, ID3D11DeviceContext,
             ID3D11Texture2D,
         },
-        Dxgi::Common::{DXGI_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC},
+        Dxgi::Common::{
+            DXGI_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_NV12, DXGI_SAMPLE_DESC,
+        },
     },
     core::Interface,
 };
@@ -60,7 +62,7 @@ pub enum D3d11DownloadError {
     InvalidD3d11Frame,
     /// The input texture uses a DXGI format this downloader cannot copy.
 
-    #[error("D3d11Download only reads DXGI_FORMAT_B8G8R8A8_UNORM textures, got {0:?}")]
+    #[error("D3d11Download only reads BGRA and NV12 textures, got {0:?}")]
     UnsupportedTextureFormat(DXGI_FORMAT),
     /// The input texture belongs to another D3D11 device.
 
@@ -100,9 +102,11 @@ pub enum D3d11DownloadError {
     UnsupportedBuffer(&'static str),
 }
 
-/// Downloads GPU-resident `Pixel::D3D11` BGRA video frames (e.g. from
-/// [`crate::elements::D3d11VideoCompositor`]) to CPU-resident `Pixel::BGRA`
-/// frames — the mirror of [`crate::elements::D3d11Upload`]. Needed because
+/// Downloads GPU-resident `Pixel::D3D11` video frames to CPU-resident ones in
+/// the same layout — BGRA (a [`crate::elements::D3d11VideoCompositor`]'s, a
+/// capture's) as `Pixel::BGRA`, NV12 (a decoder's, an upload's) as
+/// `Pixel::NV12` with the frame's colour description — the mirror of
+/// [`crate::elements::D3d11Upload`]. Needed because
 /// this crate's video encoder ([`crate::elements::SwEncoder`]) is
 /// software-only and has no zero-copy GPU input path; chain a
 /// [`crate::elements::SwScaler`] after this to convert to whatever pixel
@@ -125,8 +129,9 @@ pub struct D3d11Download {
     /// The staging texture and the CPU frames read out of it, made for the
     /// size of the frames actually arriving rather than recreated per frame
     /// — and made again if a source changes resolution mid-stream, see
-    /// `ForSize`.
-    readback: ForSize<Readback>,
+    /// `ForSize`. One for each layout, as a staging texture has one format.
+    bgra: ForSize<Readback>,
+    nv12: ForSize<Readback>,
     pad: SrcPad,
     /// The last download and the texture it came from, so a producer that
     /// re-emits an unchanged picture is answered with the bytes already in
@@ -161,9 +166,9 @@ impl D3d11Download {
         protect_shared_device(device)?;
         let pad = SrcPad::with_contract(
             format!("{name}_src"),
-            OutputContract::Fixed(
+            OutputContract::SameLayout(
                 PortContract::frame(MediaKind::VideoFrame, MemoryDomain::System)
-                    .with_layouts(crate::contract::PixelLayoutSet::BGRA),
+                    .with_layouts(crate::contract::PixelLayoutSet::NV12_OR_BGRA),
             ),
         );
         pp_info!(pp_log: &pp_log, "opened");
@@ -172,7 +177,8 @@ impl D3d11Download {
             pp_log,
             device: device.clone(),
             context,
-            readback: ForSize::new(),
+            bgra: ForSize::new(),
+            nv12: ForSize::new(),
             pad,
             repeated: RepeatedOutput::new(),
         })
@@ -184,6 +190,9 @@ impl D3d11Download {
 struct Readback {
     width: u32,
     height: u32,
+    /// Whether the texture is NV12 — two planes, the chroma rows after the
+    /// luma ones — rather than BGRA.
+    nv12: bool,
     staging: ID3D11Texture2D,
     pool: UnboundObjectPool<ffmpeg::frame::Video>,
 }
@@ -193,14 +202,21 @@ impl Readback {
         device: &ID3D11Device,
         width: u32,
         height: u32,
+        nv12: bool,
     ) -> std::result::Result<Self, D3d11DownloadError> {
+        let (format, pixel) = if nv12 {
+            (DXGI_FORMAT_NV12, ffmpeg::format::Pixel::NV12)
+        } else {
+            (DXGI_FORMAT_B8G8R8A8_UNORM, ffmpeg::format::Pixel::BGRA)
+        };
         Ok(Self {
             width,
             height,
-            staging: create_staging_texture(device, width, height)?,
+            nv12,
+            staging: create_staging_texture(device, width, height, format)?,
             pool: UnboundObjectPool::new(
                 0,
-                move || ffmpeg::frame::Video::new(ffmpeg::format::Pixel::BGRA, width, height),
+                move || ffmpeg::frame::Video::new(pixel, width, height),
                 |_| {},
             ),
         })
@@ -249,16 +265,29 @@ impl Readback {
             let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
             context.Map(&self.staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))?;
 
-            let row_bytes = (self.width as usize) * 4;
             let src_stride = mapped.RowPitch as usize;
+            let src = mapped.pData as *const u8;
             // Overwrites the pooled slot's previous pixel contents in
             // place — same reasoning as `D3d11Upload`'s own pooled frame.
-            let dst_stride = output.stride(0);
-            let src = mapped.pData as *const u8;
-            let dst = output.data_mut(0);
-            for row in 0..self.height as usize {
-                let src_row = std::slice::from_raw_parts(src.add(row * src_stride), row_bytes);
-                dst[row * dst_stride..row * dst_stride + row_bytes].copy_from_slice(src_row);
+            // NV12 maps as its luma rows and then, one texture height on, its
+            // interleaved chroma rows, each as wide in bytes as the picture.
+            let planes: &[(usize, usize, usize)] = if self.nv12 {
+                let luma = self.height as usize;
+                &[
+                    (0, self.width as usize, luma),
+                    (src_stride * luma, self.width as usize, luma.div_ceil(2)),
+                ]
+            } else {
+                &[(0, self.width as usize * 4, self.height as usize)]
+            };
+            for (plane, &(offset, row_bytes, rows)) in planes.iter().enumerate() {
+                let dst_stride = output.stride(plane);
+                let dst = output.data_mut(plane);
+                for row in 0..rows {
+                    let src_row =
+                        std::slice::from_raw_parts(src.add(offset + row * src_stride), row_bytes);
+                    dst[row * dst_stride..row * dst_stride + row_bytes].copy_from_slice(src_row);
+                }
             }
 
             context.Unmap(&self.staging, 0);
@@ -296,7 +325,7 @@ impl Sink for D3d11Download {
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(
             PortContract::frame(MediaKind::VideoFrame, MemoryDomain::D3d11)
-                .with_layouts(crate::contract::PixelLayoutSet::BGRA),
+                .with_layouts(crate::contract::PixelLayoutSet::NV12_OR_BGRA),
         )
     }
 
@@ -374,7 +403,8 @@ impl PerFrameTransform for D3d11Download {
         let mut desc = D3D11_TEXTURE2D_DESC::default();
         // SAFETY: `desc` is a live out-parameter for the live texture.
         unsafe { texture.GetDesc(&mut desc) };
-        if desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM {
+        let nv12 = desc.Format == DXGI_FORMAT_NV12;
+        if !nv12 && desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM {
             pp_error!(self, "unsupported texture format: {:?}", desc.Format);
             return Err(D3d11DownloadError::UnsupportedTextureFormat(desc.Format).into());
         }
@@ -399,11 +429,12 @@ impl PerFrameTransform for D3d11Download {
         let source_subresource = (index as u32) * desc.MipLevels;
 
         let (device, context, pp_log) = (&self.device, &self.context, &self.pp_log);
-        let readback = self
-            .readback
+        let readbacks = if nv12 { &mut self.nv12 } else { &mut self.bgra };
+        let readback = readbacks
             .try_get(frame.width(), frame.height(), |width, height| {
-                pp_info!(pp_log: pp_log, "reading back {width}x{height}");
-                Readback::new(device, width, height)
+                let layout = if nv12 { "NV12" } else { "BGRA" };
+                pp_info!(pp_log: pp_log, "reading back {width}x{height} {layout}");
+                Readback::new(device, width, height, nv12)
             })
             .inspect_err(|error| pp_error!(self, "{error}"))?;
         let mut cpu_frame = readback
@@ -413,6 +444,8 @@ impl PerFrameTransform for D3d11Download {
         crate::buffer::carry_timing(&mut cpu_frame, frame);
         cpu_frame.set_color_space(frame.color_space());
         cpu_frame.set_color_range(frame.color_range());
+        cpu_frame.set_color_primaries(frame.color_primaries());
+        cpu_frame.set_color_transfer_characteristic(frame.color_transfer_characteristic());
 
         Ok(cpu_frame)
     }
@@ -422,13 +455,14 @@ fn create_staging_texture(
     device: &ID3D11Device,
     width: u32,
     height: u32,
+    format: DXGI_FORMAT,
 ) -> std::result::Result<ID3D11Texture2D, D3d11DownloadError> {
     let desc = D3D11_TEXTURE2D_DESC {
         Width: width,
         Height: height,
         MipLevels: 1,
         ArraySize: 1,
-        Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+        Format: format,
         SampleDesc: DXGI_SAMPLE_DESC {
             Count: 1,
             Quality: 0,
@@ -548,6 +582,46 @@ mod tests {
             Some(200),
             "a repeat carries this frame's timestamp, not the one it points at"
         );
+    }
+
+    /// An NV12 texture — an upload's or a decoder's — comes back as NV12
+    /// with the same samples, its colour description with it: what a
+    /// software encoder behind it needs, with nothing on the GPU asked of a
+    /// device that may have no video processor.
+    #[test]
+    fn an_nv12_texture_comes_back_as_nv12() {
+        use crate::{elements::D3d11Upload, repeat::PerFrameTransform};
+
+        let Some(gpu) = try_d3d11_gpu() else {
+            return;
+        };
+        let (width, height) = (64, 48);
+        let mut yuv = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::YUV420P, width, height);
+        for (plane, value) in [(0, 72u8), (1, 107), (2, 220)] {
+            yuv.data_mut(plane).fill(value);
+        }
+        yuv.set_color_space(ffmpeg::color::Space::BT709);
+        yuv.set_color_range(ffmpeg::color::Range::MPEG);
+        let MediaBuffer::Video(yuv) = MediaBuffer::video(yuv) else {
+            unreachable!()
+        };
+        let texture = D3d11Upload::new("upload", &gpu)
+            .transform(&yuv)
+            .expect("the frame uploads");
+
+        let mut download = D3d11Download::new("download", &gpu).unwrap();
+        let back = download.transform(&texture).expect("the texture downloads");
+        assert_eq!(back.format(), ffmpeg::format::Pixel::NV12);
+        assert_eq!((back.width(), back.height()), (width, height));
+        assert!(back.data(0)[..width as usize].iter().all(|&y| y == 72));
+        let last_chroma_row = (height as usize / 2 - 1) * back.stride(1);
+        assert_eq!(
+            &back.data(1)[last_chroma_row..last_chroma_row + 4],
+            &[107, 220, 107, 220],
+            "Cb then Cr, to the last chroma row"
+        );
+        assert_eq!(back.color_space(), ffmpeg::color::Space::BT709);
+        assert_eq!(back.color_range(), ffmpeg::color::Range::MPEG);
     }
 
     /// Real hardware round trip: build a small BGRA texture directly (the

@@ -95,6 +95,7 @@ impl ColorDescription {
 /// BT.601 through 576 lines and BT.709 above it; unspecified range is
 /// treated as MPEG/limited, matching ordinary decoded NV12 video.
 #[cfg(any(
+    test,
     feature = "cuda",
     all(target_os = "windows", any(feature = "d3d11", feature = "d3d12")),
     all(target_os = "linux", feature = "vulkan")

@@ -611,10 +611,9 @@ pub(crate) fn bt2020_as_bt709(y: f32, cb: f32, cr: f32) -> [u8; 3] {
 }
 
 /// Asserts each of `got`'s channels is within `within` of `want`'s, naming
-/// `what` and both colours when one is not — for a colour a GPU path is to
-/// produce, which rounding, or a transfer function's approximate powers,
-/// may leave a level or two off an exact reference.
-#[cfg(any(feature = "cuda", all(target_os = "windows", feature = "d3d11")))]
+/// `what` and both colours when one is not — for a colour a GPU path or an
+/// encoder is to produce, which rounding, a transfer function's approximate
+/// powers, or a lossy codec may leave a level or two off an exact reference.
 pub(crate) fn assert_rgb_near(got: [u8; 3], want: [u8; 3], within: u8, what: &str) {
     assert!(
         got.iter()

@@ -14,7 +14,9 @@ boundaries are explicit bounded queues.
 - **Streams the GPU does not take still reach it.** `VideoDecodeBin` decodes
   on the hardware where it can, and in software onto the same device where it
   cannot — alpha, 4:4:4, codecs without a hardware decoder — switching over
-  by itself if the GPU refuses a stream at a frame.
+  by itself if the GPU refuses a stream at a frame. `VideoEncodeBin` does the
+  same for H.264 the other way: NVENC or Media Foundation where one opens,
+  software otherwise, with each path saying in the stream what its colour is.
 - **Capture** of screens, windows, cameras and system or per-application audio
   on Windows and Linux; **output** to files, HLS, RTMP, RTSP and WebRTC.
 - **Observable**: per-element statistics while it runs, and a private
@@ -111,7 +113,9 @@ Video, by backend:
 | Upload, download | | `D3d11Upload`, `D3d11Download` | `D3d12Upload`, `D3d12Download` | `CudaUpload`, `CudaDownload` |
 | Render | `VideoWindow`; every window renderer | `D3d11WindowRenderer`, `D3d11Renderer` | `D3d12WindowRenderer`, `D3d12Renderer` | `VulkanWindowRenderer`, `CudaRenderer` |
 
-`VideoDecodeBin` chooses among the decode row and the uploads for a stream.
+`VideoDecodeBin` chooses among the decode row and the uploads for a stream,
+and `VideoEncodeBin` among the encode row and the downloads, for H.264 from
+system memory, D3D11 or CUDA.
 
 `VideoWindow` is the one to reach for first: a window of its own on whichever
 renderer the platform has, on a GPU of its own, taking frames in system

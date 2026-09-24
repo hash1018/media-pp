@@ -75,8 +75,9 @@ pub use download::{D3d11Download, D3d11DownloadError};
 #[cfg(all(target_os = "windows", feature = "d3d12"))]
 pub use download::{D3d12Download, D3d12DownloadError};
 pub use encoder::{
-    AudioCodec, SwAudioEncoder, SwAudioEncoderError, SwAudioEncoderOptions, SwEncoder,
-    SwEncoderError, SwEncoderOptions, VideoCodec,
+    AudioCodec, EncodeInput, EncodePath, SwAudioEncoder, SwAudioEncoderError,
+    SwAudioEncoderOptions, SwEncoder, SwEncoderError, SwEncoderOptions, VideoCodec, VideoEncodeBin,
+    VideoEncodeOptions,
 };
 #[cfg(feature = "cuda")]
 pub use encoder::{CudaCodec, CudaEncoder, CudaEncoderError, CudaEncoderOptions};

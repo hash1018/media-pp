@@ -784,7 +784,7 @@ pub fn remedy(produced: &PortContract, accepted: &PortContract) -> Option<&'stat
                 "upload it: a CudaUpload built for NV12, which takes YUV420P too, or for BGRA — a SwScaler::to_format to one of those first where the frames are in another layout",
             ),
             (D3d11, System) => Some(
-                "download it: a D3d11Download, which reads BGRA — a D3d11Scaler::to_format with D3d11ScalerFormat::Bgra first where the frames are in another layout",
+                "download it: a D3d11Download, which reads BGRA and NV12 — a D3d11Scaler::to_format to one of those first where the frames are in another layout",
             ),
             (D3d12, System) => Some("download it: a D3d12Download, which reads NV12"),
             (Cuda, System) => Some("download it: a CudaDownload built for NV12 or BGRA"),

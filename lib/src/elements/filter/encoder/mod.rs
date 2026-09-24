@@ -20,4 +20,7 @@ pub use video::{
     D3d11VideoCodec, D3d11VideoEncoder, D3d11VideoEncoderError, D3d11VideoEncoderOptions,
     D3d11VideoInputFormat,
 };
-pub use video::{SwEncoder, SwEncoderError, SwEncoderOptions, VideoCodec};
+pub use video::{
+    EncodeInput, EncodePath, SwEncoder, SwEncoderError, SwEncoderOptions, VideoCodec,
+    VideoEncodeBin, VideoEncodeOptions,
+};
