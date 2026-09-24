@@ -549,6 +549,15 @@ compile error with no explanation.
   application's event loop. `d3d11_decode_render` uses both and no longer
   needs `render_common` or `winit`.
 
+- **`D3d12Gpu` and `D3d12WindowRenderer`: the same for D3D12.** `D3d12Gpu`
+  makes the one device a pipeline's D3D12 elements share, and the one queue
+  its windows present through; `from_device` shares a device made
+  elsewhere. `D3d12WindowRenderer` has `open` and `for_window` as the D3D11
+  one does, with the same `WindowOptions` and `WindowEvents`, and draws the
+  NV12 frames `D3d12Decoder` and `D3d12Upload` make zero-copy, waiting on
+  the GPU for each frame's own fence. `d3d12_upload` uses both and no
+  longer needs `render_common` or `winit`.
+
 - **`Pipeline::position`.** Where playback is — the media time the
   playback master has reached, from the audio renderer's played samples or
   the wall clock a `Pacer` or `VideoSynchronizer` keeps — for a progress

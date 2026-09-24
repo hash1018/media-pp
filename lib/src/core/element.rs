@@ -171,6 +171,9 @@ pub enum ElementType {
     CudaRenderer,
     /// D3D12 video renderer sink.
     D3d12Renderer,
+    /// D3D12 video renderer sink with its own window, or drawing into one
+    /// it was given.
+    D3d12WindowRenderer,
     /// D3D11 video renderer sink.
     D3d11Renderer,
     /// D3D11 video renderer sink with its own window, or drawing into one

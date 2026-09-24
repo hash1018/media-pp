@@ -1026,8 +1026,6 @@ name = "d3d12_upload"
 version = "0.1.0"
 dependencies = [
  "media-pp",
- "render_common",
- "winit",
 ]
 
 [[package]]

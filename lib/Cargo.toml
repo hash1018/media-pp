@@ -114,9 +114,18 @@ undocumented_unsafe_blocks = "deny"
 cuda = ["dep:ab_glyph"]
 d3d12 = [
     "dep:windows",
+    # `D3d12WindowRenderer`'s own window, drawn into through a swap chain, or
+    # an application's window given as a `raw-window-handle`.
+    "dep:raw-window-handle",
     "windows/Win32_Foundation",
+    "windows/Win32_Graphics_Direct3D",
+    "windows/Win32_Graphics_Direct3D_Fxc",
     "windows/Win32_Graphics_Direct3D12",
+    "windows/Win32_Graphics_Dxgi",
     "windows/Win32_Graphics_Dxgi_Common",
+    "windows/Win32_Graphics_Gdi",
+    "windows/Win32_System_LibraryLoader",
+    "windows/Win32_UI_WindowsAndMessaging",
     "windows/Win32_Media_MediaFoundation",
     # `CreateEventW` is hidden by windows-rs without its SECURITY_ATTRIBUTES type.
     "windows/Win32_Security",

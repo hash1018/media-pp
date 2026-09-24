@@ -35,6 +35,8 @@ pub use crate::platform::cuda::{
 pub use crate::platform::linux::v4l2::{V4l2CaptureFormat, V4l2Device};
 #[cfg(all(target_os = "windows", feature = "d3d11"))]
 pub use crate::platform::windows::d3d11_gpu::{D3d11Gpu, D3d11GpuError};
+#[cfg(all(target_os = "windows", feature = "d3d12"))]
+pub use crate::platform::windows::d3d12_gpu::{D3d12Gpu, D3d12GpuError};
 #[cfg(all(target_os = "windows", feature = "mf-capture"))]
 pub use crate::platform::windows::mf::{MfCaptureFormat, MfDevice};
 #[cfg(all(target_os = "windows", feature = "wasapi-capture"))]
@@ -129,11 +131,13 @@ pub use sink::{CudaFrameRenderer, CudaRenderer, CudaRendererError};
 #[cfg(all(target_os = "windows", feature = "d3d11"))]
 pub use sink::{D3d11FrameRenderer, D3d11Renderer, D3d11RendererError};
 #[cfg(all(target_os = "windows", feature = "d3d11"))]
-pub use sink::{
-    D3d11WindowRenderer, D3d11WindowRendererError, Key, WindowEvent, WindowEvents, WindowOptions,
-};
+pub use sink::{D3d11WindowRenderer, D3d11WindowRendererError};
 #[cfg(all(target_os = "windows", feature = "d3d12"))]
 pub use sink::{D3d12FrameRenderer, D3d12Renderer, D3d12RendererError};
+#[cfg(all(target_os = "windows", feature = "d3d12"))]
+pub use sink::{D3d12WindowRenderer, D3d12WindowRendererError};
+#[cfg(all(target_os = "windows", any(feature = "d3d11", feature = "d3d12")))]
+pub use sink::{Key, WindowEvent, WindowEvents, WindowOptions};
 #[cfg(all(target_os = "linux", feature = "pipewire-audio-renderer"))]
 pub use sink::{PipeWireAudioRenderer, PipeWireAudioRendererError, PipeWireAudioRendererOptions};
 #[cfg(all(target_os = "windows", feature = "wasapi-renderer"))]

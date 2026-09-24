@@ -72,7 +72,8 @@ use crate::elements::{
 };
 #[cfg(all(target_os = "windows", feature = "d3d12"))]
 use crate::elements::{
-    D3d12DecoderError, D3d12DownloadError, D3d12RendererError, D3d12ScalerError, D3d12UploadError,
+    D3d12DecoderError, D3d12DownloadError, D3d12GpuError, D3d12RendererError, D3d12ScalerError,
+    D3d12UploadError, D3d12WindowRendererError,
 };
 use crate::{
     control::{PrerollError, SeekError},
@@ -470,6 +471,16 @@ pub enum Error {
     #[cfg(all(target_os = "windows", feature = "d3d12"))]
     #[error(transparent)]
     D3d12ScalerError(#[from] D3d12ScalerError),
+
+    /// A shared D3D12 device could not be set up.
+    #[cfg(all(target_os = "windows", feature = "d3d12"))]
+    #[error(transparent)]
+    D3d12GpuError(#[from] D3d12GpuError),
+
+    /// A D3D12 window renderer could not open or present into its window.
+    #[cfg(all(target_os = "windows", feature = "d3d12"))]
+    #[error(transparent)]
+    D3d12WindowRendererError(#[from] D3d12WindowRendererError),
 
     /// A D3D11 decoder operation failed.
     #[cfg(all(target_os = "windows", feature = "d3d11"))]

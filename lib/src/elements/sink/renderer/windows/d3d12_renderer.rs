@@ -128,6 +128,9 @@ pub struct D3d12Renderer {
     /// caller could get wrong, proving nothing about what `inner` really
     /// renders with.
     device: ID3D12Device,
+    /// What this renderer is in the graph and its log — a `D3d12Renderer`,
+    /// or the `D3d12WindowRenderer` built around one.
+    element_type: ElementType,
 }
 
 impl D3d12Renderer {
@@ -136,8 +139,18 @@ impl D3d12Renderer {
     /// window/device by the time it gets here. This element doesn't
     /// create or own a window itself.
     pub fn new(name: impl Into<String>, renderer: Box<dyn D3d12FrameRenderer>) -> Self {
+        Self::labelled(name, renderer, ElementType::D3d12Renderer)
+    }
+
+    /// [`Self::new`], appearing in the graph and the log as `element_type` —
+    /// for an element built around this one.
+    pub(crate) fn labelled(
+        name: impl Into<String>,
+        renderer: Box<dyn D3d12FrameRenderer>,
+        element_type: ElementType,
+    ) -> Self {
         let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::D3d12Renderer, &name, None);
+        let pp_log = element_pp_log(element_type, &name, None);
         pp_info!(pp_log: &pp_log, "created");
         let device = renderer.device();
         Self {
@@ -145,6 +158,7 @@ impl D3d12Renderer {
             pp_log,
             inner: renderer,
             device,
+            element_type,
         }
     }
 
@@ -218,7 +232,7 @@ impl Element for D3d12Renderer {
     }
 
     fn element_type(&self) -> ElementType {
-        ElementType::D3d12Renderer
+        self.element_type
     }
 
     fn pp_log(&self) -> &PpLog {

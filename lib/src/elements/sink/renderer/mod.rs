@@ -10,7 +10,7 @@ mod cuda;
 #[cfg(all(target_os = "linux", feature = "pipewire-audio-renderer"))]
 mod linux;
 mod submit_error;
-#[cfg(all(target_os = "windows", feature = "d3d11"))]
+#[cfg(all(target_os = "windows", any(feature = "d3d11", feature = "d3d12")))]
 mod window;
 #[cfg(all(
     target_os = "windows",
@@ -23,7 +23,7 @@ pub use cuda::*;
 #[cfg(all(target_os = "linux", feature = "pipewire-audio-renderer"))]
 pub use linux::*;
 pub use submit_error::SubmitError;
-#[cfg(all(target_os = "windows", feature = "d3d11"))]
+#[cfg(all(target_os = "windows", any(feature = "d3d11", feature = "d3d12")))]
 pub use window::{Key, WindowEvent, WindowEvents, WindowOptions};
 #[cfg(all(
     target_os = "windows",
