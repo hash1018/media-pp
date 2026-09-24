@@ -1314,3 +1314,73 @@ fn position_follows_playback_through_pause_and_seek() {
     );
     pipeline.stop();
 }
+
+/// A paused seek close enough to the end that the file runs out before the
+/// preroll has its picture — a decoder holding several pictures in flight
+/// needs packets past the target to hand the target on, and past the end
+/// there are none, so only the end of stream drains it. The source reaches
+/// its end while the pipeline is paused, with the queue downstream holding
+/// the pictures and the `Eos` behind them until it is resumed.
+///
+/// The demuxer used to end its thread there, dropping the queue with them in
+/// it, so the resume never reached them and the file never finished.
+#[test]
+fn a_paused_seek_that_runs_into_the_end_still_finishes_once_resumed() {
+    let Some(path) = try_test_video() else { return };
+    let (source, streams) = FileDemuxer::open("demux", &path).expect("open test video");
+    let duration = source.duration().expect("the fixture says how long it is");
+    let video = streams
+        .iter()
+        .find(|stream| stream.kind == ffmpeg::media::Type::Video)
+        .expect("test video has a video stream");
+    let params = video.parameters.clone();
+    let index = video.index;
+    let decoder = crate::elements::SwDecoder::with_threading(
+        "video-decoder",
+        params,
+        crate::elements::DecodeThreading {
+            threads: None,
+            kind: crate::elements::DecodeThreadKind::Frame,
+        },
+    )
+    .expect("the fixture's decoder opens");
+
+    let (pipeline, ()) = Pipeline::new("paused-seek-to-end", source, |source, ctx| {
+        let branch = ctx
+            .branch()
+            .pipe(decoder)
+            .queue("video-frames", 32)
+            .pipe(Pacer::new("video-pacer"))
+            .to(NoOpSink {
+                name: "screen".into(),
+                pp_log: element_pp_log(ElementType::Other, "screen", None),
+            })?;
+        ctx.attach(source, index, branch)?;
+        Ok(())
+    })
+    .expect("test pipeline wiring must succeed");
+
+    pipeline.run().unwrap();
+    thread::sleep(Duration::from_millis(100));
+    pipeline.pause();
+    pipeline
+        .seek(
+            duration.saturating_sub(Duration::from_millis(50)),
+            SeekMode::Accurate,
+        )
+        .expect("a file accepts a seek");
+    pipeline.resume();
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let finished = loop {
+        match pipeline.bus().recv_timeout(Duration::from_millis(100)) {
+            Ok(BusEvent::Finished) => break true,
+            Ok(_) => {}
+            Err(_) if std::time::Instant::now() > deadline => break false,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break false,
+            Err(_) => {}
+        }
+    };
+    pipeline.stop();
+    assert!(finished, "the file never finished after resuming");
+}

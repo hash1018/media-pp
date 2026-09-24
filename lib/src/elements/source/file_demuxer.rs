@@ -16,7 +16,7 @@ use crate::{
     buffer::MediaBuffer,
     bus::{Bus, BusEvent},
     contract::{MediaKind, OutputContract, PortContract},
-    control::{ControlReceiver, drain_control},
+    control::{ControlMsg, ControlReceiver, RequestKind, apply_one, drain_control},
     element::{Element, ElementType, Source, SourceElement, element_pp_log},
     pad::SrcPad,
 };
@@ -186,6 +186,9 @@ pub struct FileDemuxer {
     /// outside one, only while another branch is waiting on the read cursor
     /// — see [`FileDemuxer::may_park`].
     prerolling: bool,
+    /// Whether a `Seek` has repositioned it since [`Self::linger`] began
+    /// waiting at the end of the file.
+    sought: bool,
     /// Set through [`FileDemuxerHandle::set_looping`], read only where the
     /// container runs out.
     looping: Arc<AtomicBool>,
@@ -285,6 +288,7 @@ impl FileDemuxer {
                 parked_since_ns: vec![None; pads.len()],
                 read_ns: None,
                 prerolling: false,
+                sought: false,
                 pads,
                 pending: VecDeque::new(),
                 pending_bytes: 0,
@@ -570,6 +574,33 @@ impl FileDemuxer {
         Ok(())
     }
 
+    /// Waits at the end of the file, passing every control request on to
+    /// the branches, until playback resumes — `Ok(false)`, the stream over —
+    /// or it is stopped or finished, also `Ok(false)`; or until a seek
+    /// moves it back into the file, `Ok(true)`, to read on from there.
+    fn linger(&mut self, control: &ControlReceiver, bus: &Bus) -> crate::error::Result<bool> {
+        self.sought = false;
+        loop {
+            let Some((request, ack)) = control.recv() else {
+                return Ok(false);
+            };
+            let RequestKind::Control(msg) = request else {
+                // A graceful finish: the `Eos` it would push is already out.
+                let _ = ack.send(());
+                return Ok(false);
+            };
+            if apply_one(self, bus, &msg, &ack)? {
+                return Ok(false);
+            }
+            if self.sought {
+                return Ok(true);
+            }
+            if msg == ControlMsg::Resume {
+                return Ok(false);
+            }
+        }
+    }
+
     /// Whether reading another packet would only deepen the parked backlog.
     ///
     /// Not a tuning knob: a branch that is briefly behind parks a handful of
@@ -643,73 +674,83 @@ impl SourceElement for FileDemuxer {
         // *second* mutable borrow of `input` — in between reads, which a
         // single loop-spanning iterator would rule out.
         loop {
-            if drain_control(control, self, bus)?.stopped {
-                // Stop: abandon in place, no final Eos.
-                pp_info!(self, "stopped");
-                return Ok(());
-            }
-            // Deliver whatever is parked and now accepted, oldest first.
-            // Skipping a still-blocked pad's entry to reach a later one is
-            // safe: only each pad's own order has to hold, and this preserves
-            // it because entries for one pad are never reordered against each
-            // other.
-            self.drain_pending(bus)?;
-            // Read on unless everything is blocked, or the parked backlog has
-            // grown past what one branch briefly falling behind can explain.
-            // Sleeping is the only option then: the container cannot hand out
-            // a different stream's packet without reading this one.
-            if self.pending_blocked() {
-                std::thread::sleep(Duration::from_millis(1));
-                continue;
-            }
-            let next = self
-                .input
-                .packets()
-                .next()
-                .map(|(s, p)| (s.index(), s.time_base(), p));
-            let Some((index, time_base, mut packet)) = next else {
-                if !self.pending.is_empty() {
-                    // Nothing left to read, but a blocked pad still owes
-                    // delivery.
+            loop {
+                if drain_control(control, self, bus)?.stopped {
+                    // Stop: abandon in place, no final Eos.
+                    pp_info!(self, "stopped");
+                    return Ok(());
+                }
+                // Deliver whatever is parked and now accepted, oldest first.
+                // Skipping a still-blocked pad's entry to reach a later one is
+                // safe: only each pad's own order has to hold, and this preserves
+                // it because entries for one pad are never reordered against each
+                // other.
+                self.drain_pending(bus)?;
+                // Read on unless everything is blocked, or the parked backlog has
+                // grown past what one branch briefly falling behind can explain.
+                // Sleeping is the only option then: the container cannot hand out
+                // a different stream's packet without reading this one.
+                if self.pending_blocked() {
                     std::thread::sleep(Duration::from_millis(1));
                     continue;
                 }
-                // The end of the file, and the one place the loop flag is
-                // read: a change made mid-file lands here, at the end the
-                // source was already heading for.
-                if self.looping.load(Ordering::Relaxed) {
-                    match self.wrap() {
-                        Ok(()) => continue,
-                        // A file that cannot be rewound cannot be looped,
-                        // but it has been fully read — so report why the
-                        // loop stopped and end the stream properly, rather
-                        // than failing a source that delivered everything
-                        // it was asked for.
-                        Err(error) => bus.post(
-                            &self.pp_log,
-                            BusEvent::Error {
-                                element_type: ElementType::FileDemuxer,
-                                name: self.name.clone(),
-                                error,
-                            },
-                        ),
+                let next = self
+                    .input
+                    .packets()
+                    .next()
+                    .map(|(s, p)| (s.index(), s.time_base(), p));
+                let Some((index, time_base, mut packet)) = next else {
+                    if !self.pending.is_empty() {
+                        // Nothing left to read, but a blocked pad still owes
+                        // delivery.
+                        std::thread::sleep(Duration::from_millis(1));
+                        continue;
                     }
+                    // The end of the file, and the one place the loop flag is
+                    // read: a change made mid-file lands here, at the end the
+                    // source was already heading for.
+                    if self.looping.load(Ordering::Relaxed) {
+                        match self.wrap() {
+                            Ok(()) => continue,
+                            // A file that cannot be rewound cannot be looped,
+                            // but it has been fully read — so report why the
+                            // loop stopped and end the stream properly, rather
+                            // than failing a source that delivered everything
+                            // it was asked for.
+                            Err(error) => bus.post(
+                                &self.pp_log,
+                                BusEvent::Error {
+                                    element_type: ElementType::FileDemuxer,
+                                    name: self.name.clone(),
+                                    error,
+                                },
+                            ),
+                        }
+                    }
+                    break;
+                };
+                self.stamp_lap(index, time_base, &mut packet);
+                if let Some(ns) = packet_ns(&packet, time_base) {
+                    self.read_ns = Some(ns);
                 }
-                break;
-            };
-            self.stamp_lap(index, time_base, &mut packet);
-            if let Some(ns) = packet_ns(&packet, time_base) {
-                self.read_ns = Some(ns);
+                // `deliver_or_park` stamps the stream time base; every packet
+                // leaves this source through it, parked or not.
+                self.deliver_or_park((index, time_base, packet), bus)?;
             }
-            // `deliver_or_park` stamps the stream time base; every packet
-            // leaves this source through it, parked or not.
-            self.deliver_or_park((index, time_base, packet), bus)?;
+            for pad in self.pads.iter_mut() {
+                pad.push_eos(&self.pp_log)?;
+            }
+            pp_info!(self, "event=eos phase=source_completed outcome=ok");
+            // The end of the file inside a paused seek's preroll: the pipeline
+            // is paused, and what the end of stream drained out of a decoder —
+            // the preroll's picture among it — waits in a paused queue with the
+            // `Eos` behind it. Ending here would drop that queue with all of it
+            // inside, and with this thread gone, the `Resume` that would let it
+            // out would reach nothing. So it stays, passing control on.
+            if !self.prerolling || !self.linger(control, bus)? {
+                return Ok(());
+            }
         }
-        for pad in self.pads.iter_mut() {
-            pad.push_eos(&self.pp_log)?;
-        }
-        pp_info!(self, "event=eos phase=source_completed outcome=ok");
-        Ok(())
     }
 
     fn on_control(&mut self, msg: &crate::control::ControlMsg) {
@@ -731,7 +772,8 @@ impl SourceElement for FileDemuxer {
             // is running; see `deliver_or_park`.
             ControlMsg::Preroll(_) => self.prerolling = true,
             ControlMsg::Pause | ControlMsg::Resume | ControlMsg::Stop => self.prerolling = false,
-            ControlMsg::CheckSeek(_) | ControlMsg::Seek(_) => {}
+            ControlMsg::Seek(_) => self.sought = true,
+            ControlMsg::CheckSeek(_) => {}
         }
     }
 
