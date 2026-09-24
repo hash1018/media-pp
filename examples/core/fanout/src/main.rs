@@ -13,6 +13,7 @@ mod example {
 
     use media_pp::ffmpeg::media;
     use media_pp::{
+        bus::BusEvent,
         elements::{FileDemuxer, PacketCounter},
         pipeline::Pipeline,
     };
@@ -60,9 +61,16 @@ mod example {
         })?;
 
         pipeline.run()?; // starts the source on a background thread, returns right away
-        // Blocks until the demuxer hits EOS and both branch queues have
-        // drained and joined (i.e. every `Bus` handle in the pipeline dropped).
-        pipeline.bus().log_events();
+        // Printed as `log_events()` would print it, stopping on `Finished` —
+        // everything read has reached both counters — or on an error. A file's
+        // source waits at its end until stopped, so the bus does not close by
+        // itself.
+        for event in pipeline.bus().iter() {
+            println!("{event}");
+            if matches!(event, BusEvent::Finished | BusEvent::Error { .. }) {
+                pipeline.stop();
+            }
+        }
 
         println!("video packets: {}", video_count.get());
         println!("audio packets: {}", audio_count.get());
