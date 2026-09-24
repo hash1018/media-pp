@@ -165,11 +165,12 @@ a software decode goes straight into one; each converts a frame with its own
 colour description. The other renderers hand each frame to a presenter the
 program supplies — an implementation of `D3d11FrameRenderer`,
 `D3d12FrameRenderer` or `CudaFrameRenderer` for its own window or UI — with
-no colour description; they are for drawing into something other than a
-window of the renderer's own. The D3D11 elements of a pipeline share one
-`D3d11Gpu` — one device and its immediate context behind one lock — and each
-is constructed from it, `D3d11Upload::new("upload", &gpu)`; the D3D12 elements
-share one `D3d12Gpu` the same way.
+the colour description an NV12 frame came with, for it to convert by; they
+are for drawing into something other than a window of the renderer's own.
+The D3D11 elements of a pipeline share one `D3d11Gpu` — one device and its
+immediate context behind one lock — and each is constructed from it,
+`D3d11Upload::new("upload", &gpu)`; the D3D12 elements share one `D3d12Gpu`
+the same way.
 
 Everything else:
 

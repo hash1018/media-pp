@@ -589,6 +589,7 @@ fn a_d3d12_renderer_takes_device_resources_only() {
             _width: u32,
             _height: u32,
             _keep_alive: Box<dyn Any + Send>,
+            _color: crate::color::ColorDescription,
         ) -> std::result::Result<(), SubmitError> {
             unreachable!("the link check never pushes a buffer")
         }
@@ -827,6 +828,7 @@ impl crate::elements::D3d11FrameRenderer for StubD3d11Renderer {
         _array_index: u32,
         _width: u32,
         _height: u32,
+        _color: crate::color::ColorDescription,
     ) -> std::result::Result<(), crate::elements::SubmitError> {
         unreachable!("the link check never pushes a buffer")
     }

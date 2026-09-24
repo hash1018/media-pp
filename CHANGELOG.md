@@ -12,6 +12,19 @@ compile error with no explanation.
 
 ### Breaking
 
+- **A presenter of your own is told what colour an NV12 frame is.**
+  `D3d11FrameRenderer::submit_nv12_texture`,
+  `D3d12FrameRenderer::submit_nv12_texture` and
+  `CudaFrameRenderer::submit_nv12` take a last `color: ColorDescription`
+  parameter: what the frame says of its matrix, range, primaries and
+  transfer. Without it a presenter could only guess, and the usual guess —
+  one fixed BT.601 matrix — draws a decoded HD stream, which is BT.709,
+  with visibly wrong colours. Add the parameter to an implementation;
+  `color.yuv_to_rgb_rows(height)`, also new, gives the three rows a shader
+  converts with, filling in what the frame leaves unsaid the way this
+  crate's own renderers do. `ColorDescription::of(frame)` reads the same
+  description from any frame.
+
 - **`FileDemuxer::open` names the file it could not open, and refuses one
   with nothing in it.** A missing or unreadable file was
   `FileDemuxerError::Ffmpeg("No such file or directory")`, with no word of
@@ -1493,6 +1506,11 @@ compile error with no explanation.
   decoder in this crate — keys exactly as before, byte for byte.
 
 ### Fixed
+
+- **`D3d11Upload` keeps a frame's primaries and transfer.** It passed on
+  the matrix and range and dropped the other two, so an uploaded BT.2020
+  PQ or HLG picture reached anything reading them after it looking like
+  SDR. The other uploads already copied all four.
 
 - **`Player` stays at the end once it gets there.** Its `position` went on
   counting past the file's length after `Ended`, a second a second; it now

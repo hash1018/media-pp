@@ -402,6 +402,8 @@ impl PerFrameTransform for D3d11Upload {
             ffmpeg::format::Pixel::YUVJ420P => ffmpeg::color::Range::JPEG,
             _ => frame.color_range(),
         });
+        gpu_frame.set_color_primaries(frame.color_primaries());
+        gpu_frame.set_color_transfer_characteristic(frame.color_transfer_characteristic());
         Ok(gpu_frame)
     }
 }
@@ -490,6 +492,33 @@ mod tests {
             Some(200),
             "a repeat carries this frame's timestamp, not the one it points at"
         );
+    }
+
+    /// Every part of what a frame says of its colour survives the upload:
+    /// primaries and transfer are what tell a BT.2020 HDR picture from an
+    /// SDR one downstream, and a presenter is handed all four.
+    #[test]
+    fn an_uploaded_frame_keeps_its_whole_colour_description() {
+        use crate::{color::ColorDescription, repeat::PerFrameTransform};
+
+        let Some(gpu) = try_d3d11_gpu() else {
+            return;
+        };
+        let mut picture = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::NV12, 16, 16);
+        let hdr = ColorDescription {
+            space: ffmpeg::color::Space::BT2020NCL,
+            range: ffmpeg::color::Range::MPEG,
+            primaries: ffmpeg::color::Primaries::BT2020,
+            transfer: ffmpeg::color::TransferCharacteristic::SMPTE2084,
+        };
+        hdr.describe(&mut picture);
+        let MediaBuffer::Video(picture) = MediaBuffer::video(picture) else {
+            unreachable!()
+        };
+        let uploaded = D3d11Upload::new("upload", &gpu)
+            .transform(&picture)
+            .expect("the frame uploads");
+        assert_eq!(ColorDescription::of(&uploaded), hdr);
     }
 
     /// Reads a BGRA texture back through a staging copy, tightly packed —

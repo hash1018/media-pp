@@ -46,7 +46,12 @@ use crate::{
 /// treats that return as the terminal's presentation commitment; it does not
 /// require the implementation to wait for physical scanout.
 pub trait CudaFrameRenderer: Send {
-    /// Presents one NV12 frame.
+    /// Presents one NV12 frame. `color` is what it says of its Y'CbCr, each
+    /// part `Unspecified` where it says nothing; its
+    /// [`yuv_to_rgb_rows`](crate::color::ColorDescription::yuv_to_rgb_rows)
+    /// are the rows to convert it with, filling in what it leaves unsaid as
+    /// this crate's own renderers do. A decoded HD stream is BT.709, and
+    /// drawn with a fixed BT.601 matrix it comes out visibly wrong.
     ///
     /// # Safety
     /// `y` and `uv` must be valid CUDA device pointers into an NV12 surface
@@ -55,6 +60,7 @@ pub trait CudaFrameRenderer: Send {
     /// `height / 2` rows of `uv_pitch` bytes respectively. They are only
     /// valid for the duration of the call — the frame they belong to may
     /// return to the decoder's pool as soon as it returns.
+    #[allow(clippy::too_many_arguments)]
     unsafe fn submit_nv12(
         &self,
         y: *const u8,
@@ -63,6 +69,7 @@ pub trait CudaFrameRenderer: Send {
         uv_pitch: usize,
         width: u32,
         height: u32,
+        color: crate::color::ColorDescription,
     ) -> std::result::Result<(), SubmitError>;
 
     /// Call when the target window resizes.
@@ -200,8 +207,15 @@ impl CudaRenderer {
         // SAFETY: validated just above — CUDA frame, this renderer's own
         // context, NV12 layout, both planes present.
         unsafe {
-            self.inner
-                .submit_nv12(y, y_pitch, uv, uv_pitch, width, height)
+            self.inner.submit_nv12(
+                y,
+                y_pitch,
+                uv,
+                uv_pitch,
+                width,
+                height,
+                crate::color::ColorDescription::of(frame),
+            )
         }
         .map_err(CudaRendererError::Submit)
     }
@@ -277,6 +291,7 @@ mod tests {
     struct RecordingRenderer {
         submits: AtomicUsize,
         last: Mutex<Option<(usize, usize, u32, u32)>>,
+        color: Mutex<Option<crate::color::ColorDescription>>,
     }
 
     impl CudaFrameRenderer for RecordingRenderer {
@@ -288,10 +303,12 @@ mod tests {
             uv_pitch: usize,
             width: u32,
             height: u32,
+            color: crate::color::ColorDescription,
         ) -> std::result::Result<(), SubmitError> {
             assert!(!y.is_null() && !uv.is_null());
             self.submits.fetch_add(1, Ordering::Relaxed);
             *self.last.lock().unwrap() = Some((y_pitch, uv_pitch, width, height));
+            *self.color.lock().unwrap() = Some(color);
             Ok(())
         }
 
@@ -359,6 +376,35 @@ mod tests {
         );
     }
 
+    /// What a frame says of its colour reaches the presenter with it, for it
+    /// to draw the frame in its own colours rather than a fixed matrix's.
+    #[test]
+    fn a_frames_colour_reaches_the_presenter() {
+        use crate::{color::ColorDescription, elements::CudaUpload, repeat::PerFrameTransform};
+
+        let Some((device, _cuda_lock)) = try_cuda_device() else {
+            return;
+        };
+        let mut picture = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::NV12, 64, 64);
+        ColorDescription::BT709_LIMITED.describe(&mut picture);
+        let MediaBuffer::Video(picture) = MediaBuffer::video(picture) else {
+            unreachable!()
+        };
+        let uploaded = CudaUpload::new("upload", &device, crate::elements::CudaFrameFormat::Nv12)
+            .transform(&picture)
+            .expect("the frame uploads");
+
+        let inner = Arc::new(RecordingRenderer::default());
+        let mut renderer = CudaRenderer::new("cuda-renderer", &device, Box::new(inner.clone()));
+        renderer
+            .consume(MediaBuffer::Video(uploaded))
+            .expect("the frame is presented");
+        assert_eq!(
+            *inner.color.lock().unwrap(),
+            Some(ColorDescription::BT709_LIMITED)
+        );
+    }
+
     /// The happy path: a real NVDEC frame reaches the graphics side with the
     /// dimensions and pitches it actually has.
     #[test]
@@ -406,11 +452,14 @@ mod tests {
             uv_pitch: usize,
             width: u32,
             height: u32,
+            color: crate::color::ColorDescription,
         ) -> std::result::Result<(), SubmitError> {
             // SAFETY: forwarding the caller's own obligation unchanged — this trait
             // method is `unsafe` for exactly the pointer validity that
             // `RecordingRenderer::submit_nv12` requires.
-            unsafe { RecordingRenderer::submit_nv12(self, y, y_pitch, uv, uv_pitch, width, height) }
+            unsafe {
+                RecordingRenderer::submit_nv12(self, y, y_pitch, uv, uv_pitch, width, height, color)
+            }
         }
 
         fn resize(&self, width: u32, height: u32) -> std::result::Result<(), SubmitError> {

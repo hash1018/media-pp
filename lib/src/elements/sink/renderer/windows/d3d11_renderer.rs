@@ -92,6 +92,13 @@ pub trait D3d11FrameRenderer: Send {
     /// non-array, single-slice texture per frame — `array_index` is always
     /// `0` there) — see `d3d11va_texture`'s own docs.
     ///
+    /// `color` is what the frame says of its Y'CbCr, each part
+    /// `Unspecified` where it says nothing; its
+    /// [`yuv_to_rgb_rows`](crate::color::ColorDescription::yuv_to_rgb_rows)
+    /// are the rows to convert it with, filling in what it leaves unsaid as
+    /// this crate's own renderers do. A decoded HD stream is BT.709, and
+    /// drawn with a fixed BT.601 matrix it comes out visibly wrong.
+    ///
     /// # Safety
     /// `texture` must be a valid `ID3D11Texture2D` on the same
     /// `ID3D11Device` this renderer was created with, `DXGI_FORMAT_NV12`,
@@ -102,6 +109,7 @@ pub trait D3d11FrameRenderer: Send {
         array_index: u32,
         width: u32,
         height: u32,
+        color: crate::color::ColorDescription,
     ) -> std::result::Result<(), SubmitError>;
 
     /// Updates the presentation target dimensions.
@@ -272,7 +280,13 @@ impl D3d11Renderer {
             // contract selected by this format arm.
             _ => unsafe {
                 self.inner
-                    .submit_nv12_texture(picture.texture, picture.array_index, width, height)
+                    .submit_nv12_texture(
+                        picture.texture,
+                        picture.array_index,
+                        width,
+                        height,
+                        crate::color::ColorDescription::of(frame),
+                    )
                     .map_err(D3d11RendererError::Submit)?;
             },
         }
@@ -381,5 +395,85 @@ impl Sink for D3d11Renderer {
         // Terminal, nothing to flush or forward — same reasoning as
         // `D3d12Renderer::control`.
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use super::*;
+    use crate::{color::ColorDescription, elements::D3d11Upload, repeat::PerFrameTransform};
+
+    /// Takes what it is handed and keeps the colour an NV12 frame came with.
+    struct Recording {
+        device: ID3D11Device,
+        color: Arc<Mutex<Option<ColorDescription>>>,
+    }
+
+    impl D3d11FrameRenderer for Recording {
+        fn device(&self) -> ID3D11Device {
+            self.device.clone()
+        }
+
+        unsafe fn submit_bgra_texture(
+            &self,
+            _texture: ID3D11Texture2D,
+            _array_index: u32,
+            _width: u32,
+            _height: u32,
+        ) -> std::result::Result<(), SubmitError> {
+            Ok(())
+        }
+
+        unsafe fn submit_nv12_texture(
+            &self,
+            _texture: ID3D11Texture2D,
+            _array_index: u32,
+            _width: u32,
+            _height: u32,
+            color: ColorDescription,
+        ) -> std::result::Result<(), SubmitError> {
+            *self.color.lock().unwrap() = Some(color);
+            Ok(())
+        }
+
+        fn resize(&self, _width: u32, _height: u32) -> std::result::Result<(), SubmitError> {
+            Ok(())
+        }
+    }
+
+    /// What an NV12 frame says of its colour reaches the presenter with it,
+    /// for it to draw the frame in its own colours rather than a fixed
+    /// matrix's.
+    #[test]
+    fn a_frames_colour_reaches_the_presenter() {
+        let Some(gpu) = crate::test_support::try_d3d11_gpu() else {
+            return;
+        };
+        let mut picture = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::NV12, 64, 64);
+        ColorDescription::BT709_LIMITED.describe(&mut picture);
+        let MediaBuffer::Video(picture) = MediaBuffer::video(picture) else {
+            unreachable!()
+        };
+        let texture = D3d11Upload::new("upload", &gpu)
+            .transform(&picture)
+            .expect("the frame uploads");
+
+        let color = Arc::new(Mutex::new(None));
+        let mut renderer = D3d11Renderer::new(
+            "renderer",
+            Box::new(Recording {
+                device: gpu.device().clone(),
+                color: color.clone(),
+            }),
+        );
+        renderer
+            .consume(MediaBuffer::Video(texture))
+            .expect("the frame is presented");
+        assert_eq!(
+            *color.lock().unwrap(),
+            Some(ColorDescription::BT709_LIMITED)
+        );
     }
 }

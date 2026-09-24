@@ -49,11 +49,17 @@ pub trait D3d12FrameRenderer: Send {
     /// trusted.
     fn device(&self) -> ID3D12Device;
 
+    /// `color` is what the frame says of its Y'CbCr — see
+    /// `D3d11FrameRenderer::submit_nv12_texture` in a build with `d3d11`,
+    /// and [`ColorDescription::yuv_to_rgb_rows`](crate::color::ColorDescription::yuv_to_rgb_rows)
+    /// for the rows to convert it with.
+    ///
     /// # Safety
     /// `texture` must be a valid `ID3D12Resource` on the same
     /// `ID3D12Device` this renderer was created with, laid out as NV12.
     /// `fence` must only reach `fence_value` once the GPU work that
     /// produced `texture`'s contents has completed.
+    #[allow(clippy::too_many_arguments)]
     unsafe fn submit_nv12_texture(
         &self,
         texture: ID3D12Resource,
@@ -62,6 +68,7 @@ pub trait D3d12FrameRenderer: Send {
         width: u32,
         height: u32,
         keep_alive: Box<dyn Any + Send>,
+        color: crate::color::ColorDescription,
     ) -> std::result::Result<(), SubmitError>;
 
     /// Updates the presentation target dimensions.
@@ -181,7 +188,8 @@ impl D3d12Renderer {
                     picture.fence_value,
                     width,
                     height,
-                    Box::new(frame),
+                    Box::new(frame.clone()),
+                    crate::color::ColorDescription::of(&frame),
                 )
                 .map_err(D3d12RendererError::Submit)?;
         }
