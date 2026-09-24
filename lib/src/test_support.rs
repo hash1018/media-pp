@@ -263,6 +263,29 @@ pub(crate) fn try_single_threaded_d3d11_device()
     device
 }
 
+/// Held by every test that opens a hardware encoder — NVENC through D3D11 or
+/// CUDA, Media Foundation — for the whole of the test.
+///
+/// A GPU allows a limited number of concurrent encode sessions, NVENC's
+/// shared between D3D11 and CUDA, and `cargo test` runs tests on threads of
+/// their own. Each test closes its encoders as it goes, but tests opening
+/// them overlap enough to exhaust the sessions — which surfaces as whichever
+/// test is unlucky failing, a different one each run: to open with
+/// `Invalid argument`, or to encode with `Generic error in an external
+/// library`, seen once the encode bin's tests joined the encoders' own.
+///
+/// Held for the whole test rather than per open, so the count is bounded by
+/// one test's own sequence. A CUDA test takes it after
+/// [`try_cuda_device`]'s lock, never before, so the two cannot deadlock.
+/// Poison is stepped over: a test that panicked while holding this must not
+/// turn every later encoder test into a poison error instead of its own
+/// real result.
+#[cfg(any(feature = "cuda", all(target_os = "windows", feature = "d3d11")))]
+pub(crate) fn encoder_session() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// A CUDA device for a hardware test, together with the lock that keeps
 /// CUDA tests from overlapping. `None` — after printing why — on a machine
 /// without a usable device, the same way [`try_test_video`] skips without a

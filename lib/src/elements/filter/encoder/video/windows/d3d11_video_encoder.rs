@@ -970,26 +970,6 @@ mod tests {
         gpu_frame_with_backing_size(device, format, width, height, width, height)
     }
 
-    /// Serialises every test here that opens a hardware encoder.
-    ///
-    /// A GPU allows a limited number of concurrent encode sessions, and
-    /// `cargo test` runs these on threads of its own. Each test closes its
-    /// encoders as it goes, but two matrix tests walking eight combinations
-    /// apiece overlap enough to exhaust them — which surfaces as whichever
-    /// test happened to be unlucky failing to open with `Invalid argument`,
-    /// a different one each run.
-    ///
-    /// Held for the whole test rather than per open, so the count is bounded
-    /// by one test's own sequence. Poison is stepped over: a test that
-    /// panicked while holding this must not turn every later encoder test
-    /// into a poison error instead of its own real result — the same
-    /// reasoning as `test_support::try_cuda_device`, which serialises the
-    /// CUDA device for the same kind of reason.
-    fn encoder_session() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-
     /// Every codec this element offers, against both input formats. Whichever
     /// of them this machine cannot open is skipped with a reason rather than
     /// failed: the NVENC pair needs an NVIDIA GPU, and the Media Foundation
@@ -1025,7 +1005,7 @@ mod tests {
     /// silently-empty encoder would pass the latter.
     #[test]
     fn encodes_gpu_textures_into_packets() {
-        let _session = encoder_session();
+        let _session = crate::test_support::encoder_session();
         let Some(gpu) = try_device() else {
             return;
         };
@@ -1150,7 +1130,7 @@ mod tests {
     /// for its NVENC API version, and a frames context this GPU accepts.
     #[test]
     fn opens_for_every_codec_and_input_format_on_real_hardware() {
-        let _session = encoder_session();
+        let _session = crate::test_support::encoder_session();
         let Some(gpu) = try_device() else {
             return;
         };
@@ -1232,7 +1212,7 @@ mod tests {
     fn a_media_foundation_stream_told_bt709_says_it_and_holds_it() {
         use crate::elements::{D3d11Scaler, D3d11ScalerFormat, FileMuxer};
 
-        let _session = encoder_session();
+        let _session = crate::test_support::encoder_session();
         let Some(gpu) = try_device() else {
             return;
         };
@@ -1349,7 +1329,7 @@ mod tests {
     /// it would be a guess, and is refused before anything is opened.
     #[test]
     fn a_colour_for_bgra_input_is_refused() {
-        let _session = encoder_session();
+        let _session = crate::test_support::encoder_session();
         let Some(gpu) = try_device() else {
             return;
         };
@@ -1375,7 +1355,7 @@ mod tests {
     /// bad frame does not poison the encoder's subsequent state.
     #[test]
     fn rejects_invalid_textures_then_continues_encoding() {
-        let _session = encoder_session();
+        let _session = crate::test_support::encoder_session();
         let Some(gpu) = try_device() else {
             return;
         };
@@ -1507,7 +1487,7 @@ mod tests {
     /// producing garbage or tripping a Windows API failure later.
     #[test]
     fn rejects_a_non_d3d11_frame() {
-        let _session = encoder_session();
+        let _session = crate::test_support::encoder_session();
         let Some(gpu) = try_device() else {
             return;
         };
@@ -1553,7 +1533,7 @@ mod tests {
     /// carrying a frame displayed later has to be decoded first.
     #[test]
     fn the_b_frame_count_is_honoured_in_both_directions() {
-        let _session = encoder_session();
+        let _session = crate::test_support::encoder_session();
         let Some(gpu) = try_device() else {
             return;
         };

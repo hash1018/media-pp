@@ -531,6 +531,7 @@ mod tests {
         let Some((device, _cuda_lock)) = try_cuda_device() else {
             return;
         };
+        let _session = crate::test_support::encoder_session();
         let (width, height) = (320u32, 240u32);
         let mut upload = CudaUpload::new("upload", &device, CudaFrameFormat::Nv12);
         let mut encoder = match CudaEncoder::new("encoder", &device, options(width, height)) {
@@ -602,6 +603,7 @@ mod tests {
         let Some((device, _cuda_lock)) = try_cuda_device() else {
             return;
         };
+        let _session = crate::test_support::encoder_session();
         let (width, height) = (320u32, 240u32);
         let mut upload = CudaUpload::new("upload", &device, CudaFrameFormat::Nv12);
         let Ok(mut encoder) = CudaEncoder::new("encoder", &device, options(width, height)) else {
@@ -652,6 +654,7 @@ mod tests {
         let Some((device, _cuda_lock)) = try_cuda_device() else {
             return;
         };
+        let _session = crate::test_support::encoder_session();
         let (width, height) = (320u32, 240u32);
         let mut upload = CudaUpload::new("upload", &device, CudaFrameFormat::Bgra);
         let mut encoder = match CudaEncoder::new(
@@ -729,6 +732,7 @@ mod tests {
         let Some((device, _cuda_lock)) = try_cuda_device() else {
             return;
         };
+        let _session = crate::test_support::encoder_session();
         let mut upload = CudaUpload::new("upload", &device, CudaFrameFormat::Bgra);
         let mut encoder = match CudaEncoder::new("encoder", &device, options(320, 240)) {
             Ok(encoder) => encoder,
@@ -774,6 +778,7 @@ mod tests {
         let Some((device, _cuda_lock)) = try_cuda_device() else {
             return;
         };
+        let _session = crate::test_support::encoder_session();
         let Some(path) = try_test_video() else {
             return;
         };
@@ -856,6 +861,7 @@ mod tests {
         let Some((device, _cuda_lock)) = try_cuda_device() else {
             return;
         };
+        let _session = crate::test_support::encoder_session();
         let mut encoder = match CudaEncoder::new("encoder", &device, options(320, 240)) {
             Ok(encoder) => encoder,
             Err(error) => {
@@ -890,6 +896,7 @@ mod tests {
         let Some((device, _cuda_lock)) = try_cuda_device() else {
             return;
         };
+        let _session = crate::test_support::encoder_session();
         let (width, height) = (320u32, 240u32);
         let Some(none) = encoded_timestamps(&device, width, height, Some(0)) else {
             return;
@@ -982,6 +989,7 @@ mod tests {
         let Some((device, _cuda_lock)) = crate::test_support::try_cuda_device() else {
             return;
         };
+        let _session = crate::test_support::encoder_session();
         let options = CudaEncoderOptions {
             codec: CudaCodec::H264,
             input_format: CudaFrameFormat::Nv12,

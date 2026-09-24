@@ -1053,6 +1053,7 @@ mod tests {
             let Some(gpu) = crate::test_support::try_d3d11_gpu() else {
                 return;
             };
+            let _session = crate::test_support::encoder_session();
             let mut taken = Vec::new();
             for skip in IN_TURN {
                 let input = EncodeInput::D3d11 {
@@ -1073,6 +1074,7 @@ mod tests {
             let Some(gpu) = crate::test_support::try_d3d11_gpu() else {
                 return;
             };
+            let _session = crate::test_support::encoder_session();
             for skip in &IN_TURN[..2] {
                 let input = EncodeInput::D3d11 {
                     gpu: gpu.clone(),
@@ -1091,6 +1093,7 @@ mod tests {
             let Some(gpu) = crate::test_support::try_d3d11_gpu() else {
                 return;
             };
+            let _session = crate::test_support::encoder_session();
             let mut taken = Vec::new();
             for skip in IN_TURN {
                 let input = EncodeInput::D3d11 {
@@ -1128,6 +1131,7 @@ mod tests {
             let Some((device, _cuda_lock)) = crate::test_support::try_cuda_device() else {
                 return;
             };
+            let _session = crate::test_support::encoder_session();
             let cases: [Case; 2] = [
                 (CudaFrameFormat::Bgra, None, bgra),
                 (
