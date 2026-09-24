@@ -1141,3 +1141,73 @@ fn a_transparent_background_leaves_alpha_where_nothing_drew() {
         "what a layer drew is still opaque"
     );
 }
+
+/// A frame in system memory goes into an input as it is — BGRA, and a
+/// YUV420P one converted with its own colour description — uploaded by the
+/// input itself, with no `D3d11Upload` in front.
+#[test]
+fn a_system_memory_frame_goes_straight_into_an_input() {
+    let Some(gpu) = try_device() else {
+        return;
+    };
+    let options = VideoCompositorOptions {
+        width: 4,
+        height: 4,
+        frame_rate: ffmpeg::Rational::new(30, 1),
+        background: Color::BLACK,
+        background_alpha: 255,
+    };
+    let (mut compositor, handle) = D3d11VideoCompositor::new("compositor", &gpu, options)
+        .expect("D3d11VideoCompositor::new should succeed");
+    let mut background_layer = VideoLayer::new(VideoRect::new(0, 0, 4, 4));
+    background_layer.fit = video_layer::VideoFit::Stretch;
+    let mut background = handle
+        .add_source("background", background_layer)
+        .unwrap()
+        .sink;
+    let mut overlay_layer = VideoLayer::new(VideoRect::new(2, 2, 2, 2));
+    overlay_layer.fit = video_layer::VideoFit::Stretch;
+    let mut overlay = handle.add_source("overlay", overlay_layer).unwrap().sink;
+
+    let mut bgra = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::BGRA, 4, 4);
+    for pixel in bgra.data_mut(0).as_chunks_mut::<4>().0 {
+        *pixel = [0, 0, 255, 255];
+    }
+    // R'G'B' (230, 20, 20) in BT.709, limited range.
+    let mut yuv = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::YUV420P, 2, 2);
+    for (plane, value) in [72u8, 107, 220].into_iter().enumerate() {
+        yuv.data_mut(plane).fill(value);
+    }
+    yuv.set_color_space(ffmpeg::color::Space::BT709);
+    yuv.set_color_range(ffmpeg::color::Range::MPEG);
+    assert!(
+        !crate::contract::check_link(
+            &OutputContract::Fixed(
+                PortContract::frame(MediaKind::VideoFrame, MemoryDomain::System).with_layouts(
+                    crate::contract::PixelLayoutSet::of(crate::contract::PixelLayout::Yuv420p)
+                ),
+            ),
+            &overlay.input_contract(),
+        )
+        .is_refused(),
+        "a software decode links straight to an input"
+    );
+    background.consume(MediaBuffer::video(bgra)).unwrap();
+    overlay.consume(MediaBuffer::video(yuv)).unwrap();
+
+    let composed = compositor
+        .compose_frame(&test_bus())
+        .expect("compose_frame failed");
+    let downloaded = download_frame(&gpu, composed);
+    assert_eq!(
+        pixel(&downloaded, 0, 0),
+        [0, 0, 255, 255],
+        "the BGRA background"
+    );
+    let [blue, green, red, _] = pixel(&downloaded, 3, 3);
+    assert!(
+        red.abs_diff(230) <= 3 && green.abs_diff(20) <= 3 && blue.abs_diff(20) <= 3,
+        "the YUV420P overlay drawn as {:?}",
+        [red, green, blue]
+    );
+}

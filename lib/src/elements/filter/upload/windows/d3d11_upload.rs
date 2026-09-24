@@ -62,12 +62,16 @@ pub enum D3d11UploadError {
     UnsupportedBuffer(&'static str),
 }
 
-/// Uploads CPU-resident `Pixel::NV12` and `Pixel::BGRA` video frames to
-/// GPU-resident `Video` frames tagged `Pixel::D3D11` — the D3D11 sibling of
+/// Uploads CPU-resident `Pixel::NV12`, `Pixel::YUV420P` (and `YUVJ420P`) and
+/// `Pixel::BGRA` video frames to GPU-resident `Video` frames tagged
+/// `Pixel::D3D11` — the D3D11 sibling of
 /// `D3d12Upload`, for a pipeline built entirely on one
 /// shared `ID3D11Device` (see [`crate::elements::D3d11Renderer`]'s own
-/// docs on why). Chain a [`crate::elements::SwScaler`] in front of this if
-/// the source produces anything else.
+/// docs on why). A YUV420P frame — what a software decode usually gives —
+/// goes up as NV12, its two chroma planes interleaved on the way: the same
+/// samples, so no scaler is needed for it. Chain a
+/// [`crate::elements::SwScaler`] in front of this if the source produces
+/// anything else.
 ///
 /// # Which of the two to feed it
 ///
@@ -163,24 +167,67 @@ impl D3d11Upload {
     /// half-height interleaved-chroma rows, all sharing one row pitch —
     /// whereas `frame`'s two planes are separately allocated and
     /// independently strided.
-    fn pack_nv12(frame: &ffmpeg::frame::Video) -> Vec<u8> {
+    ///
+    /// A YUV420P frame is packed the same way, its separate Cb and Cr planes
+    /// interleaved into the chroma rows NV12 has.
+    fn pack_nv12(frame: &ffmpeg::frame::Video) -> std::result::Result<Vec<u8>, D3d11UploadError> {
         let row_bytes = frame.width() as usize;
         let luma_rows = frame.height() as usize;
         let chroma_rows = frame.height().div_ceil(2) as usize;
+        let chroma_width = frame.width().div_ceil(2) as usize;
+        let planar = frame.format() != ffmpeg::format::Pixel::NV12;
+        // Each plane's rows are read at its stride, so every plane is checked
+        // to hold them first: a short plane would be a panic here, not an
+        // error returned to the caller.
+        let planes: &[(usize, usize, usize)] = if planar {
+            &[
+                (0, luma_rows, row_bytes),
+                (1, chroma_rows, chroma_width),
+                (2, chroma_rows, chroma_width),
+            ]
+        } else {
+            &[(0, luma_rows, row_bytes), (1, chroma_rows, row_bytes)]
+        };
+        for &(plane, rows, bytes) in planes {
+            let stride = frame.stride(plane);
+            let needed = stride * rows.saturating_sub(1) + bytes;
+            if stride < bytes || frame.data(plane).len() < needed {
+                return Err(D3d11UploadError::PlaneTooSmall {
+                    actual: frame.data(plane).len(),
+                    stride,
+                    height: rows as u32,
+                });
+            }
+        }
         let mut packed = vec![0u8; row_bytes * (luma_rows + chroma_rows)];
-        let (luma_stride, chroma_stride) = (frame.stride(0), frame.stride(1));
-        let (luma_src, chroma_src) = (frame.data(0), frame.data(1));
+        let (luma_stride, luma_src) = (frame.stride(0), frame.data(0));
         for row in 0..luma_rows {
             packed[row * row_bytes..row * row_bytes + row_bytes]
                 .copy_from_slice(&luma_src[row * luma_stride..row * luma_stride + row_bytes]);
         }
         let chroma_offset = row_bytes * luma_rows;
-        for row in 0..chroma_rows {
-            let dst = chroma_offset + row * row_bytes;
-            packed[dst..dst + row_bytes]
-                .copy_from_slice(&chroma_src[row * chroma_stride..row * chroma_stride + row_bytes]);
+        if planar {
+            let (cb_stride, cb) = (frame.stride(1), frame.data(1));
+            let (cr_stride, cr) = (frame.stride(2), frame.data(2));
+            for row in 0..chroma_rows {
+                let destination = &mut packed[chroma_offset + row * row_bytes..][..row_bytes];
+                for (column, pair) in destination.chunks_mut(2).enumerate() {
+                    pair[0] = cb[row * cb_stride + column];
+                    if let Some(second) = pair.get_mut(1) {
+                        *second = cr[row * cr_stride + column];
+                    }
+                }
+            }
+        } else {
+            let (chroma_stride, chroma_src) = (frame.stride(1), frame.data(1));
+            for row in 0..chroma_rows {
+                let dst = chroma_offset + row * row_bytes;
+                packed[dst..dst + row_bytes].copy_from_slice(
+                    &chroma_src[row * chroma_stride..row * chroma_stride + row_bytes],
+                );
+            }
         }
-        packed
+        Ok(packed)
     }
 
     /// Builds one GPU `ID3D11Texture2D` (`D3D11_USAGE_DEFAULT`,
@@ -197,7 +244,9 @@ impl D3d11Upload {
         format: DXGI_FORMAT,
     ) -> std::result::Result<ID3D11Texture2D, D3d11UploadError> {
         let (width, height) = (frame.width(), frame.height());
-        let packed = (format == DXGI_FORMAT_NV12).then(|| Self::pack_nv12(frame));
+        let packed = (format == DXGI_FORMAT_NV12)
+            .then(|| Self::pack_nv12(frame))
+            .transpose()?;
         let (pixels, pitch) = match &packed {
             Some(packed) => (packed.as_slice(), width as usize),
             None => (frame.data(0), frame.stride(0)),
@@ -255,7 +304,9 @@ impl D3d11Upload {
 /// element cannot upload at all.
 fn texture_format(format: ffmpeg::format::Pixel) -> Option<DXGI_FORMAT> {
     match format {
-        ffmpeg::format::Pixel::NV12 => Some(DXGI_FORMAT_NV12),
+        ffmpeg::format::Pixel::NV12
+        | ffmpeg::format::Pixel::YUV420P
+        | ffmpeg::format::Pixel::YUVJ420P => Some(DXGI_FORMAT_NV12),
         ffmpeg::format::Pixel::BGRA => Some(DXGI_FORMAT_B8G8R8A8_UNORM),
         _ => None,
     }
@@ -289,8 +340,13 @@ impl Sink for D3d11Upload {
     /// CPU-readable planes specifically: uploading is what this element does, so a frame already on the device has no work here.
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(
-            PortContract::frame(MediaKind::VideoFrame, MemoryDomain::System)
-                .with_layouts(crate::contract::PixelLayoutSet::NV12_OR_BGRA),
+            PortContract::frame(MediaKind::VideoFrame, MemoryDomain::System).with_layouts(
+                crate::contract::PixelLayoutSet::from_slice(&[
+                    crate::contract::PixelLayout::Nv12,
+                    crate::contract::PixelLayout::Yuv420p,
+                    crate::contract::PixelLayout::Bgra,
+                ]),
+            ),
         )
     }
 
@@ -356,7 +412,12 @@ impl PerFrameTransform for D3d11Upload {
         *gpu_frame = wrap_d3d11_texture(texture, frame.width(), frame.height())?;
         crate::buffer::carry_timing(&mut gpu_frame, frame);
         gpu_frame.set_color_space(frame.color_space());
-        gpu_frame.set_color_range(frame.color_range());
+        // The J of YUVJ420P is its range, which not every producer also says
+        // in the range field; on NV12 only the field can say it.
+        gpu_frame.set_color_range(match frame.format() {
+            ffmpeg::format::Pixel::YUVJ420P => ffmpeg::color::Range::JPEG,
+            _ => frame.color_range(),
+        });
         Ok(gpu_frame)
     }
 }
@@ -679,17 +740,17 @@ mod tests {
 
         let pool = UnboundObjectPool::new(
             0,
-            move || ffmpeg::frame::Video::new(ffmpeg::format::Pixel::YUV420P, width, height),
+            move || ffmpeg::frame::Video::new(ffmpeg::format::Pixel::RGB24, width, height),
             |_| {},
         );
         let error = upload
             .consume(MediaBuffer::Video(Arc::new(pool.get())))
-            .expect_err("YUV420P must be rejected");
+            .expect_err("RGB24 must be rejected");
         assert!(
             matches!(
                 error,
                 crate::error::Error::D3d11UploadError(D3d11UploadError::UnsupportedFormat(
-                    ffmpeg::format::Pixel::YUV420P
+                    ffmpeg::format::Pixel::RGB24
                 ))
             ),
             "unexpected error: {error}"
