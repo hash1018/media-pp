@@ -618,6 +618,16 @@ compile error with no explanation.
 
 ### Added
 
+- **`Player` plays sound on its own, and has a volume, a loop and a choice
+  of track.** A file with no picture was refused as one with nothing to
+  play; it now plays, in a window that shows black, where the keys still
+  arrive. `set_volume`, `set_muted` and the up and down arrows and M in
+  `respond_to` turn the sound, through an `AudioVolume` in its branch;
+  `set_looping` plays the file again from the start instead of ending, with
+  `position` read within the lap; and `PlayerOptions::audio_stream` picks
+  one of several sound tracks by its stream index. `decoding` is `None` for
+  a file with no picture.
+
 - **`VideoEncodeBin`: H.264 by whichever encoder opens.** Encoding took
   choosing between `SwEncoder`, `D3d11VideoEncoder` and `CudaEncoder` by
   hand, with the download, conversion and colour description each one

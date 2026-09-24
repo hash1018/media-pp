@@ -16,12 +16,14 @@ Linux in a build with `cuda` on a machine with an NVIDIA GPU, in software and
 uploaded where the GPU does not take the stream. Where there is no such GPU —
 Linux without `cuda` or NVIDIA — it is a software decode straight into the
 window. What it chose is printed when playback starts, as `decoding:
-Hardware` or `decoding: Software(...)` with the reason.
+Hardware` or `decoding: Software(...)` with the reason — or `sound only` for a
+file with no picture, which plays in a window that shows black.
 
 The audio renderer is `WasapiRenderer` on Windows and `PipeWireAudioRenderer`
-on Linux, on the default output device. Space pauses and plays, the arrows
-move five seconds, F or a double click fills the screen, Escape or closing
-the window stops; the title shows where playback is. One program for Windows
+on Linux, on the default output device. Space pauses and plays, the left and
+right arrows move five seconds, the up and down arrows turn the volume, M
+mutes, F or a double click fills the screen, Escape or closing the window
+stops; the title shows where playback is. One program for Windows
 and Linux, with no `#[cfg]` but the one choosing its `main`.
 
 ```sh

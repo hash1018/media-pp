@@ -61,6 +61,101 @@ pub(crate) fn try_test_video() -> Option<String> {
         .clone()
 }
 
+/// Path to a file with sound and no picture — an `.m4a` of a tone, a few
+/// seconds long — synthesized the way [`try_test_video`] is, once per run.
+/// `None`, after saying why, where it cannot be built.
+#[cfg(any(
+    all(
+        target_os = "windows",
+        any(feature = "d3d11", feature = "d3d12"),
+        feature = "wasapi-renderer"
+    ),
+    all(
+        target_os = "linux",
+        feature = "vulkan",
+        feature = "pipewire-audio-renderer"
+    )
+))]
+pub(crate) fn try_test_sound() -> Option<String> {
+    static SYNTHESIZED: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    SYNTHESIZED
+        .get_or_init(|| match build_sound("test-sound", 3.0) {
+            Ok(path) => Some(path.to_string_lossy().into_owned()),
+            Err(error) => {
+                eprintln!("skipping: could not synthesize a test sound: {error}");
+                None
+            }
+        })
+        .clone()
+}
+
+/// A tone, `seconds` of it, in an `.m4a` — written and moved into place as
+/// [`build_fixture`] does.
+#[cfg(any(
+    all(
+        target_os = "windows",
+        any(feature = "d3d11", feature = "d3d12"),
+        feature = "wasapi-renderer"
+    ),
+    all(
+        target_os = "linux",
+        feature = "vulkan",
+        feature = "pipewire-audio-renderer"
+    )
+))]
+fn build_sound(
+    name: &str,
+    seconds: f64,
+) -> std::result::Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+    use crate::elements::{
+        AudioCodec, FileMuxer, SwAudioEncoder, SwAudioEncoderOptions, TestAudioOptions,
+        TestAudioSource,
+    };
+    use crate::pipeline::Pipeline;
+
+    let directory = std::env::temp_dir().join("media-pp-fixtures");
+    std::fs::create_dir_all(&directory)?;
+    let path = directory.join(format!("{name}.m4a"));
+    let partial = directory.join(format!("{name}.{}.m4a", std::process::id()));
+    let _ = std::fs::remove_file(&partial);
+
+    let (sample_rate, channels) = (48_000, 2);
+    let tone = TestAudioSource::new(
+        format!("{name}-tone"),
+        TestAudioOptions {
+            sample_rate,
+            channels,
+            frequency: 440.0,
+        },
+    );
+    let encoder = SwAudioEncoder::new(
+        format!("{name}-encoder"),
+        SwAudioEncoderOptions {
+            codec: AudioCodec::Aac,
+            sample_rate,
+            channels,
+            bit_rate: 128_000,
+        },
+    )?;
+    let mut muxer = FileMuxer::create(&partial)?;
+    let track = muxer.add_stream("audio", &encoder)?;
+    let mut sinks = muxer.open()?;
+    let sink = sinks.take(track)?;
+    let (pipeline, ()) = Pipeline::new(format!("{name}-fixture"), tone, move |source, ctx| {
+        let branch = ctx.branch().pipe(encoder).to(sink)?;
+        ctx.attach(source, 0, branch)?;
+        Ok(())
+    })?;
+    pipeline.run()?;
+    std::thread::sleep(std::time::Duration::from_secs_f64(seconds));
+    pipeline.stop();
+    drop(pipeline);
+    Ok(match std::fs::rename(&partial, &path) {
+        Ok(()) => path,
+        Err(_) => partial,
+    })
+}
+
 /// The [`D3d11Gpu`](crate::elements::D3d11Gpu) a D3D11 element's unit test
 /// builds on. Prints the platform error and returns `None` when the machine
 /// cannot create one, so callers can use the repository's normal

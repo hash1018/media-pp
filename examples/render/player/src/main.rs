@@ -5,9 +5,12 @@
 //! audio output, built by `Player::open`. Where the picture is decoded is
 //! printed when it starts.
 //!
-//! Space pauses and plays, the arrows move five seconds, F or a double click
-//! fills the screen, Escape or closing the window stops; the title shows
-//! where playback is. One program for Windows and Linux.
+//! A file with only sound plays too, in a window that shows black.
+//!
+//! Space pauses and plays, the left and right arrows move five seconds, the
+//! up and down arrows turn the volume, M mutes, F or a double click fills
+//! the screen, Escape or closing the window stops; the title shows where
+//! playback is. One program for Windows and Linux.
 //!
 //!     cargo run -p player -- path/to/video.mp4
 
@@ -55,7 +58,10 @@ mod example {
             },
         )?;
         let window = player.window_control();
-        println!("decoding: {:?}", player.decoding());
+        match player.decoding() {
+            Some(path) => println!("decoding: {path:?}"),
+            None => println!("sound only"),
+        }
         player.play()?;
 
         let mut shown = None;
