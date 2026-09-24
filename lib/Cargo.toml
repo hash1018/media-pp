@@ -164,6 +164,11 @@ d3d12 = [
     # `CreateEventW` is hidden by windows-rs without its SECURITY_ATTRIBUTES type.
     "windows/Win32_Security",
     "windows/Win32_System_Threading",
+    # What a window renderer's picture takes to reach the screen: DXGI's
+    # frame statistics are in performance-counter ticks, and the desktop's
+    # refresh is what is estimated from where they say nothing.
+    "windows/Win32_System_Performance",
+    "windows/Win32_Graphics_Dwm",
 ]
 d3d11 = [
     "dep:windows",
@@ -179,6 +184,9 @@ d3d11 = [
     "windows/Win32_Graphics_Gdi",
     "windows/Win32_System_LibraryLoader",
     "windows/Win32_UI_WindowsAndMessaging",
+    # As for `d3d12`.
+    "windows/Win32_System_Performance",
+    "windows/Win32_Graphics_Dwm",
 ]
 dxgi-capture = [
     "d3d11",

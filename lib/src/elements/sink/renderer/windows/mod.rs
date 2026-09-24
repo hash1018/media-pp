@@ -7,6 +7,8 @@ mod d3d12_renderer;
 #[cfg(feature = "d3d12")]
 mod d3d12_window_renderer;
 #[cfg(any(feature = "d3d11", feature = "d3d12"))]
+mod present_timing;
+#[cfg(any(feature = "d3d11", feature = "d3d12"))]
 mod system_frame;
 #[cfg(feature = "wasapi-renderer")]
 mod wasapi_renderer;

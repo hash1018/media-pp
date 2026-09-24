@@ -38,6 +38,7 @@ use windows::{
 
 use super::{
     d3d11_renderer::{D3d11Picture, check_d3d11_frame},
+    present_timing::PresentTiming,
     system_frame::{SystemLayout, colour_rows, planes_of},
 };
 use crate::{
@@ -113,6 +114,12 @@ pub enum D3d11WindowRendererError {
 /// or [`crate::elements::Pacer`] in front for a picture shown at its own
 /// time rather than as fast as it is decoded. Each frame is presented
 /// synchronized to the display's refresh.
+///
+/// Handed a picture, it tells the pipeline's playback clock what putting it
+/// on the screen takes — measured from the swap chain's frame statistics,
+/// or two refreshes of the desktop's compositor until they say — so a
+/// `VideoSynchronizer` in front hands each picture over that much early and
+/// it is shown when its sound is heard.
 ///
 /// Its GPU is the [`D3d11Gpu`] every other D3D11 element in the pipeline
 /// shares — the frames it shows must come from that device.
@@ -241,6 +248,14 @@ impl Element for D3d11WindowRenderer {
     fn pp_log_mut(&mut self) -> &mut PpLog {
         &mut self.pp_log
     }
+
+    /// Takes a place in the pipeline's presentation delay, which a
+    /// `VideoSynchronizer` in front hands pictures over early by.
+    fn attach_context(&mut self, context: &Arc<crate::element::Context>) {
+        if let Ok(mut state) = self.presenter.state.lock() {
+            state.timing.delay.registration = Some(context.playback_clock.register_presenter());
+        }
+    }
 }
 
 impl Sink for D3d11WindowRenderer {
@@ -265,6 +280,16 @@ impl Sink for D3d11WindowRenderer {
         };
         self.draw(&frame)
             .inspect_err(|error| pp_error!(self, "draw failed: {error}"))?;
+        let change = self.presenter.state.lock().ok().and_then(|mut state| {
+            let (delay, source) = state.timing.delay.take_change()?;
+            Some((delay, source.to_owned()))
+        });
+        if let Some((delay, source)) = change {
+            pp_info!(
+                self,
+                "a picture takes {delay:.1?} to reach the screen, {source}"
+            );
+        }
         Ok(())
     }
 
@@ -292,6 +317,9 @@ struct PresentState {
     /// The textures system-memory frames are uploaded into, made for the
     /// layout and size of the last one and remade when either changes.
     system: Option<SystemPlanes>,
+    /// What a picture takes to reach the screen, from the swap chain's frame
+    /// statistics.
+    timing: PresentTiming,
 }
 
 /// Textures a system-memory frame's planes are uploaded into, one per plane,
@@ -495,6 +523,7 @@ impl WindowPresenter {
                     width: width.max(1),
                     height: height.max(1),
                     system: None,
+                    timing: PresentTiming::new(),
                 }),
                 #[cfg(test)]
                 probe: Arc::default(),
@@ -539,6 +568,7 @@ impl WindowPresenter {
         }
         state.width = width;
         state.height = height;
+        state.timing.restart();
         Ok(())
     }
 
@@ -552,6 +582,9 @@ impl WindowPresenter {
         frame_width: u32,
         frame_height: u32,
     ) -> std::result::Result<(), SubmitError> {
+        // What a measured presentation delay counts from: the moment the frame
+        // is handed over, which is what a synchronizer schedules.
+        let handed = PresentTiming::now();
         let mut state = self
             .state
             .lock()
@@ -630,6 +663,8 @@ impl WindowPresenter {
         // SAFETY: the swap chain is only touched under `state`'s lock, held here.
         self.checked(unsafe { state.swap_chain.Present(1, DXGI_PRESENT(0)) }.ok())?;
         drop(context);
+        let state = &mut *state;
+        state.timing.presented(&state.swap_chain, handed);
         Ok(())
     }
 
@@ -972,8 +1007,9 @@ mod tests {
     }
 
     /// Plays a test picture into `renderer` for half a second, and returns
-    /// how many frames it took and every error the bus carried.
-    fn show(gpu: &D3d11Gpu, renderer: D3d11WindowRenderer) -> (u64, Vec<BusEvent>) {
+    /// how many frames it took, every error the bus carried, and the
+    /// presentation delay the renderer gave the pipeline's playback clock.
+    fn show(gpu: &D3d11Gpu, renderer: D3d11WindowRenderer) -> (u64, Vec<BusEvent>, Duration) {
         let source = TestVideoSource::new(
             "test-video",
             TestVideoOptions {
@@ -1005,13 +1041,14 @@ mod tests {
             .iter()
             .find(|element| element.element_type == ElementType::D3d11WindowRenderer)
             .map_or(0, |element| element.buffers_in);
+        let delay = pipeline.playback_clock().presentation_delay();
         pipeline.stop();
         let errors = pipeline
             .bus()
             .iter()
             .filter(|event| matches!(event, BusEvent::Error { .. }))
             .collect();
-        (shown, errors)
+        (shown, errors, delay)
     }
 
     /// Opened on its own window, it shows what it is given, with nothing on
@@ -1041,9 +1078,17 @@ mod tests {
         control
             .set_title("media-pp window renderer test, renamed")
             .expect("the window is there");
-        let (shown, errors) = show(&gpu, renderer);
+        let (shown, errors, delay) = show(&gpu, renderer);
         assert!(errors.is_empty(), "{errors:?}");
         assert!(shown >= 5, "only {shown} frames reached the window");
+        // Measured from the swap chain's frame statistics, or estimated from
+        // the desktop's refresh — where there is a desktop to say it.
+        if super::super::present_timing::desktop_refresh().is_some() {
+            assert!(
+                delay > Duration::ZERO && delay < Duration::from_millis(200),
+                "the renderer says a picture takes {delay:?} to reach the screen"
+            );
+        }
         assert!(
             std::iter::from_fn(|| events.try_recv())
                 .any(|event| matches!(event, WindowEvent::Resized { .. })),
@@ -1095,7 +1140,7 @@ mod tests {
             renderer.window_control().is_none(),
             "a window it was given is the application's"
         );
-        let (shown, errors) = show(&gpu, renderer);
+        let (shown, errors, _) = show(&gpu, renderer);
         assert!(errors.is_empty(), "{errors:?}");
         assert!(shown >= 5, "only {shown} frames reached the window");
     }

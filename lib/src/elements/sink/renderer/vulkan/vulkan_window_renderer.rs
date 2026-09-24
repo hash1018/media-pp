@@ -5,13 +5,12 @@
 use std::os::fd::{FromRawFd, OwnedFd};
 use std::{
     any::Any,
-    collections::VecDeque,
     ffi::CStr,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
-    time::{Duration, Instant},
+    time::Instant,
 };
 
 use ash::vk;
@@ -29,6 +28,7 @@ use crate::{
     },
     control::ControlMsg,
     element::{Element, ElementType, Sink, element_pp_log},
+    elements::sink::renderer::presentation_delay::PresentationDelay,
     elements::{VulkanGpu, WindowControl, WindowEvents, WindowOptions},
     error::Result,
     platform::linux::{
@@ -521,99 +521,6 @@ impl Colour {
 /// far past any refresh, short of a hang being noticed.
 const PRESENT_WAIT_TIMEOUT_NS: u64 = 100_000_000;
 
-/// What presenting takes, measured now and then and published to the
-/// pipeline's playback clock — see `PlaybackClock::presentation_delay`.
-///
-/// Each measurement holds the renderer until its picture is on the screen, so
-/// it is taken often only while little is known, and rarely after: the first
-/// frame after a swapchain is made, every tenth until there are five, and
-/// every hundred and twentieth after that — a couple of seconds, to follow a
-/// display that changes under it. What is published is the median of the
-/// last few, so one slow present does not move it.
-#[derive(Default)]
-struct PresentationDelay {
-    samples: VecDeque<Duration>,
-    /// Frames presented since the last measurement was due.
-    since: u32,
-    /// The id last given to a present; they must rise on a swapchain, and
-    /// rising across swapchains does no harm.
-    last_id: u64,
-    /// The playback clock's place for it, where there is a pipeline.
-    registration: Option<crate::playback_clock::PresenterRegistration>,
-    /// What was last published, where it came from, and whether that is
-    /// news for the log.
-    published: Option<Duration>,
-    source: String,
-    changed: bool,
-}
-
-impl PresentationDelay {
-    const KEPT: usize = 9;
-
-    fn due(&mut self) -> bool {
-        self.since = self.since.saturating_add(1);
-        let every = if self.samples.len() < 5 { 10 } else { 120 };
-        if self.samples.is_empty() || self.since >= every {
-            self.since = 0;
-            true
-        } else {
-            false
-        }
-    }
-
-    fn next_id(&mut self) -> u64 {
-        self.last_id += 1;
-        self.last_id
-    }
-
-    fn record(&mut self, delay: Duration) {
-        if self.samples.len() == Self::KEPT {
-            self.samples.pop_front();
-        }
-        self.samples.push_back(delay);
-        let mut sorted: Vec<Duration> = self.samples.iter().copied().collect();
-        sorted.sort();
-        self.publish(sorted[sorted.len() / 2], "measured".into());
-    }
-
-    /// Publishes an estimate where nothing can be measured: `delay`, for a
-    /// display refreshing every `interval`.
-    fn estimate(&mut self, delay: Duration, interval: Duration) {
-        let hertz = 1.0 / interval.as_secs_f64();
-        self.publish(
-            delay,
-            format!("estimated as two refreshes of a {hertz:.0} Hz display"),
-        );
-    }
-
-    fn publish(&mut self, delay: Duration, source: String) {
-        if let Some(registration) = &self.registration {
-            registration.publish(delay);
-        }
-        // Told once it moves by a millisecond, not on every sample.
-        if self
-            .published
-            .is_none_or(|last| last.abs_diff(delay) >= Duration::from_millis(1))
-        {
-            self.published = Some(delay);
-            self.source = source;
-            self.changed = true;
-        }
-    }
-
-    fn restart(&mut self) {
-        self.samples.clear();
-        self.since = 0;
-    }
-
-    fn take_change(&mut self) -> Option<(Duration, &str)> {
-        let delay = self
-            .published
-            .filter(|_| std::mem::take(&mut self.changed))?;
-        Some((delay, &self.source))
-    }
-}
-
 /// A frame layout this renderer draws, each with a fragment shader of its
 /// own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -797,6 +704,9 @@ struct Presenter {
     x11_window: Option<u32>,
     /// What presenting takes, as measured with `present_wait_fn`.
     delay: PresentationDelay,
+    /// The id last given to a present; they must rise on a swapchain, and
+    /// rising across swapchains does no harm.
+    present_id: u64,
     /// Keeps the window alive until the surface on it is destroyed, which is
     /// why it is the last field: fields drop after `Drop::drop` has run.
     _window: Arc<dyn Any + Send + Sync>,
@@ -960,6 +870,7 @@ impl Presenter {
                 _ => None,
             },
             delay: PresentationDelay::default(),
+            present_id: 0,
             _window: window,
         };
         presenter.finish()?;
@@ -1181,7 +1092,10 @@ impl Presenter {
         // learn when a picture reached the screen.
         let measuring =
             self.present_wait_fn.is_some() && self.x11_window.is_none() && self.delay.due();
-        let ids = [if measuring { self.delay.next_id() } else { 0 }];
+        if measuring {
+            self.present_id += 1;
+        }
+        let ids = [if measuring { self.present_id } else { 0 }];
         let mut present_id = vk::PresentIdKHR::default().present_ids(&ids);
         if measuring {
             present_info = present_info.push_next(&mut present_id);
@@ -1228,7 +1142,7 @@ impl Presenter {
     ///
     /// It holds this thread until then — some twenty milliseconds on a
     /// composited desktop — which is why it is done only now and then; see
-    /// [`PresentationDelay::due`].
+    /// `PresentationDelay::due`.
     fn measure(&mut self, swapchain: vk::SwapchainKHR, id: u64, handed: Instant) {
         let Some(wait) = &self.present_wait_fn else {
             return;

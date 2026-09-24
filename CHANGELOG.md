@@ -617,8 +617,11 @@ compile error with no explanation.
   present to be shown (`VK_KHR_present_wait`, turned on by `VulkanGpu`
   where the device has it), and on X11, where that wait returns once
   XWayland has the picture, estimates two refreshes of the monitor the
-  window is on, read from RandR. It logs what it found. The D3D renderers
-  do not tell the clock yet, and draw as before.
+  window is on, read from RandR. `D3d11WindowRenderer` and
+  `D3d12WindowRenderer` measure it from the swap chain's frame statistics,
+  which say when each present was shown without waiting for it — 27 ms on
+  a 60 Hz desktop here — and until they have, estimate two refreshes of the
+  desktop's compositor. Each logs what it found.
 
 - **`Player` decodes on the GPU.** It decoded every file in software, which
   is what a 4K file cannot afford. Its picture now goes through a

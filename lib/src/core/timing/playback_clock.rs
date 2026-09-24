@@ -66,9 +66,10 @@ pub struct PlaybackClock {
     state: Mutex<State>,
     /// How long each video renderer takes to put a picture on the screen
     /// once it has it, by registration — see [`Self::presentation_delay`].
-    /// Only a renderer that can measure it registers, the one today being
-    /// behind `vulkan`; as with the audio master, the clock does not take on
-    /// a backend's feature for that, hence the `allow`.
+    /// Only a window renderer registers — Vulkan's, and the D3D11 and D3D12
+    /// ones — each behind its own feature; as with the audio master, the
+    /// clock does not take on a backend's feature for that, hence the
+    /// `allow`.
     #[allow(dead_code)]
     presenters: Mutex<Presenters>,
     /// The largest of them in nanoseconds, kept beside the list so video

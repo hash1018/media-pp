@@ -9,6 +9,11 @@
 mod cuda;
 #[cfg(all(target_os = "linux", feature = "pipewire-audio-renderer"))]
 mod linux;
+#[cfg(any(
+    all(target_os = "windows", any(feature = "d3d11", feature = "d3d12")),
+    all(target_os = "linux", feature = "vulkan")
+))]
+mod presentation_delay;
 mod submit_error;
 #[cfg(any(
     all(target_os = "windows", any(feature = "d3d11", feature = "d3d12")),

@@ -45,6 +45,7 @@ use windows::{
 
 use super::{
     d3d12_renderer::{D3d12Picture, check_d3d12_frame},
+    present_timing::PresentTiming,
     system_frame::{PlaneShape, SystemLayout, colour_rows, planes_of},
 };
 use crate::{
@@ -126,6 +127,12 @@ pub enum D3d12WindowRendererError {
 /// time. Each frame is presented synchronized to the display's refresh, and
 /// one frame is in flight at a time: each waits for the one before it to
 /// finish on the GPU.
+///
+/// Handed a picture, it tells the pipeline's playback clock what putting it
+/// on the screen takes — measured from the swap chain's frame statistics,
+/// or two refreshes of the desktop's compositor until they say — so a
+/// `VideoSynchronizer` in front hands each picture over that much early and
+/// it is shown when its sound is heard.
 ///
 /// Its GPU is the [`D3d12Gpu`] every other D3D12 element in the pipeline
 /// shares — the frames it shows must come from that device.
@@ -264,6 +271,14 @@ impl Element for D3d12WindowRenderer {
     fn pp_log_mut(&mut self) -> &mut PpLog {
         &mut self.pp_log
     }
+
+    /// Takes a place in the pipeline's presentation delay, which a
+    /// `VideoSynchronizer` in front hands pictures over early by.
+    fn attach_context(&mut self, context: &Arc<crate::element::Context>) {
+        if let Ok(mut state) = self.presenter.state.lock() {
+            state.timing.delay.registration = Some(context.playback_clock.register_presenter());
+        }
+    }
 }
 
 impl Sink for D3d12WindowRenderer {
@@ -288,6 +303,16 @@ impl Sink for D3d12WindowRenderer {
         };
         self.draw(frame)
             .inspect_err(|error| pp_error!(self, "draw failed: {error}"))?;
+        let change = self.presenter.state.lock().ok().and_then(|mut state| {
+            let (delay, source) = state.timing.delay.take_change()?;
+            Some((delay, source.to_owned()))
+        });
+        if let Some((delay, source)) = change {
+            pp_info!(
+                self,
+                "a picture takes {delay:.1?} to reach the screen, {source}"
+            );
+        }
         Ok(())
     }
 
@@ -326,6 +351,12 @@ struct PresentState {
     /// through, made for the layout and size of the last one and remade when
     /// either changes.
     system: Option<SystemPlanes>,
+    /// When the frame being drawn was handed over, in performance-counter
+    /// ticks — what a measured presentation delay counts from.
+    handed: i64,
+    /// What a picture takes to reach the screen, from the swap chain's frame
+    /// statistics.
+    timing: PresentTiming,
 }
 
 /// What system-memory frames of one layout and size are drawn through.
@@ -549,6 +580,8 @@ impl WindowPresenter {
                     width,
                     height,
                     system: None,
+                    handed: 0,
+                    timing: PresentTiming::new(),
                 }),
                 #[cfg(test)]
                 probe: Arc::default(),
@@ -702,6 +735,7 @@ impl WindowPresenter {
         }
         state.width = width;
         state.height = height;
+        state.timing.restart();
         Ok(())
     }
 
@@ -876,6 +910,7 @@ impl WindowPresenter {
             self.queue.Signal(&self.fence, value)?;
             state.last_submitted = value;
         }
+        state.timing.presented(&state.swap_chain, state.handed);
         Ok(())
     }
 
@@ -895,10 +930,14 @@ impl WindowPresenter {
         if width == 0 || height == 0 {
             return Err(SubmitError::InvalidFrame);
         }
+        // What a measured presentation delay counts from: the moment the frame
+        // is handed over, which is what a synchronizer schedules.
+        let handed = PresentTiming::now();
         let mut state = self
             .state
             .lock()
             .map_err(|_| SubmitError::RendererStopped)?;
+        state.handed = handed;
         self.checked(self.wait_for(state.last_submitted))?;
         state.pending_keep_alive = None;
         match client_size(HWND(self.hwnd as *mut c_void)) {
@@ -1423,8 +1462,9 @@ mod tests {
     }
 
     /// Plays a test picture into `renderer` for half a second, and returns
-    /// how many frames it took and every error the bus carried.
-    fn show(upload: D3d12Upload, renderer: D3d12WindowRenderer) -> (u64, Vec<BusEvent>) {
+    /// how many frames it took, every error the bus carried, and the
+    /// presentation delay the renderer gave the pipeline's playback clock.
+    fn show(upload: D3d12Upload, renderer: D3d12WindowRenderer) -> (u64, Vec<BusEvent>, Duration) {
         let source = TestVideoSource::new(
             "test-video",
             TestVideoOptions {
@@ -1456,13 +1496,14 @@ mod tests {
             .iter()
             .find(|element| element.element_type == ElementType::D3d12WindowRenderer)
             .map_or(0, |element| element.buffers_in);
+        let delay = pipeline.playback_clock().presentation_delay();
         pipeline.stop();
         let errors = pipeline
             .bus()
             .iter()
             .filter(|event| matches!(event, BusEvent::Error { .. }))
             .collect();
-        (shown, errors)
+        (shown, errors, delay)
     }
 
     /// Opened on its own window, it shows what it is given, with nothing on
@@ -1493,9 +1534,17 @@ mod tests {
         control
             .set_title("media-pp window renderer test, renamed")
             .expect("the window is there");
-        let (shown, errors) = show(upload, renderer);
+        let (shown, errors, delay) = show(upload, renderer);
         assert!(errors.is_empty(), "{errors:?}");
         assert!(shown >= 5, "only {shown} frames reached the window");
+        // Measured from the swap chain's frame statistics, or estimated from
+        // the desktop's refresh — where there is a desktop to say it.
+        if super::super::present_timing::desktop_refresh().is_some() {
+            assert!(
+                delay > Duration::ZERO && delay < Duration::from_millis(200),
+                "the renderer says a picture takes {delay:?} to reach the screen"
+            );
+        }
         assert!(
             std::iter::from_fn(|| events.try_recv())
                 .any(|event| matches!(event, WindowEvent::Resized { .. })),
@@ -1548,7 +1597,7 @@ mod tests {
             renderer.window_control().is_none(),
             "a window it was given is the application's"
         );
-        let (shown, errors) = show(upload, renderer);
+        let (shown, errors, _) = show(upload, renderer);
         assert!(errors.is_empty(), "{errors:?}");
         assert!(shown >= 5, "only {shown} frames reached the window");
     }
