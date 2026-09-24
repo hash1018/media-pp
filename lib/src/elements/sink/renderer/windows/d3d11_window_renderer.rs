@@ -1,6 +1,6 @@
 //! A D3D11 renderer that brings its own window, or draws into one it is
 //! given — the part a program otherwise writes for itself behind
-//! [`D3d11FrameRenderer`].
+//! [`D3d11FrameRenderer`](crate::elements::D3d11FrameRenderer).
 
 use std::{
     any::Any,
@@ -11,6 +11,7 @@ use std::{
     },
 };
 
+use ffmpeg_next as ffmpeg;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use thiserror::Error as ThisError;
 use windows::{
@@ -35,17 +36,17 @@ use windows::{
     core::{Interface, s},
 };
 
+use super::d3d11_renderer::{D3d11Picture, check_d3d11_frame};
 use crate::{
     buffer::MediaBuffer,
-    contract::InputContract,
+    color::yuv_to_rgb_rows,
+    contract::{InputContract, MediaKind, MemoryDomain, PixelLayoutSet, PortContract},
     control::ControlMsg,
-    element::{Element, ElementType, Sink},
-    elements::{
-        D3d11FrameRenderer, D3d11Gpu, D3d11Renderer, SubmitError, WindowEvents, WindowOptions,
-    },
+    element::{Element, ElementType, Sink, element_pp_log},
+    elements::{D3d11Gpu, D3d11RendererError, SubmitError, WindowEvents, WindowOptions},
     error::Result,
     platform::windows::{d3d11::compile_shader, window::OwnedWindow},
-    pp_log::PpLog,
+    pp_log::{PpLog, pp_error, pp_info},
 };
 
 const BGRA_SHADER: &[u8] = include_bytes!("../../../../shaders/d3d11/present_bgra.hlsl");
@@ -80,12 +81,16 @@ pub enum D3d11WindowRendererError {
 /// for itself, the way a GStreamer video sink does when nobody hands it one,
 /// or one the application gives it.
 ///
-/// It is a [`D3d11Renderer`] with the window, swap chain and shaders built
-/// in: frames go through the same checks and dispatch (a texture from the
-/// wrong device is refused, NV12 and BGRA each drawn their own way), and
-/// the picture keeps its aspect ratio inside the window, with black bars as
-/// needed. It follows the window's size on its own, reading it before every
-/// frame, so nothing has to tell it about a resize.
+/// It takes what a [`D3d11Renderer`](crate::elements::D3d11Renderer) takes,
+/// checked the same way — a texture from another device is refused, and a
+/// frame's error is a [`D3d11RendererError`] — but draws it itself rather
+/// than through a presenter, and so knows the frame it draws: an NV12 frame
+/// is converted with its own colour description, BT.709, BT.601 or BT.2020
+/// and limited or full range as it says, and where it says nothing, BT.709
+/// for a picture over 576 rows and BT.601 otherwise. A BGRA frame is drawn
+/// as it is. The picture keeps its aspect ratio inside the window, with
+/// black bars as needed. It follows the window's size on its own, reading
+/// it before every frame, so nothing has to tell it about a resize.
 ///
 /// It draws; it does not pace. Put a [`crate::elements::VideoSynchronizer`]
 /// or [`crate::elements::Pacer`] in front for a picture shown at its own
@@ -95,7 +100,9 @@ pub enum D3d11WindowRendererError {
 /// Its GPU is the [`D3d11Gpu`] every other D3D11 element in the pipeline
 /// shares — the frames it shows must come from that device.
 pub struct D3d11WindowRenderer {
-    inner: D3d11Renderer,
+    name: Arc<str>,
+    pp_log: PpLog,
+    presenter: WindowPresenter,
 }
 
 impl D3d11WindowRenderer {
@@ -148,49 +155,70 @@ impl D3d11WindowRenderer {
     }
 
     fn around(name: impl Into<String>, presenter: WindowPresenter) -> Self {
+        let name: Arc<str> = name.into().into();
+        let pp_log = element_pp_log(ElementType::D3d11WindowRenderer, &name, None);
+        pp_info!(pp_log: &pp_log, "created");
         Self {
-            inner: D3d11Renderer::labelled(
-                name,
-                Box::new(presenter),
-                ElementType::D3d11WindowRenderer,
-            ),
+            name,
+            pp_log,
+            presenter,
         }
+    }
+
+    /// Where the centre pixel of each frame drawn is read back to.
+    #[cfg(test)]
+    fn probe(&self) -> Arc<Mutex<Option<[u8; 4]>>> {
+        Arc::clone(&self.presenter.probe)
+    }
+
+    fn draw(&self, frame: &ffmpeg::frame::Video) -> std::result::Result<(), D3d11RendererError> {
+        let picture = check_d3d11_frame(frame, &self.presenter.device)?;
+        self.presenter
+            .show(&picture, frame)
+            .map_err(D3d11RendererError::Submit)
     }
 }
 
 impl Element for D3d11WindowRenderer {
     fn name(&self) -> Arc<str> {
-        self.inner.name()
+        self.name.clone()
     }
 
     fn element_type(&self) -> ElementType {
-        self.inner.element_type()
+        ElementType::D3d11WindowRenderer
     }
 
     fn pp_log(&self) -> &PpLog {
-        self.inner.pp_log()
+        &self.pp_log
     }
 
     fn pp_log_mut(&mut self) -> &mut PpLog {
-        self.inner.pp_log_mut()
+        &mut self.pp_log
     }
 }
 
 impl Sink for D3d11WindowRenderer {
+    /// What a [`D3d11Renderer`](crate::elements::D3d11Renderer) takes: a
+    /// D3D11 texture, NV12 or BGRA.
     fn input_contract(&self) -> InputContract {
-        self.inner.input_contract()
-    }
-
-    fn ready_consume(&mut self) -> bool {
-        self.inner.ready_consume()
+        InputContract::Fixed(
+            PortContract::frame(MediaKind::VideoFrame, MemoryDomain::D3d11)
+                .with_layouts(PixelLayoutSet::NV12_OR_BGRA),
+        )
     }
 
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
-        self.inner.consume(buf)
+        let MediaBuffer::Video(frame) = buf else {
+            return Ok(());
+        };
+        self.draw(&frame)
+            .inspect_err(|error| pp_error!(self, "draw failed: {error}"))?;
+        Ok(())
     }
 
-    fn control(&mut self, msg: ControlMsg) -> Result<()> {
-        self.inner.control(msg)
+    fn control(&mut self, _msg: ControlMsg) -> Result<()> {
+        // Terminal, with nothing to flush or forward.
+        Ok(())
     }
 }
 
@@ -211,8 +239,8 @@ struct PresentState {
     height: u32,
 }
 
-/// The swap chain and shaders a window is drawn with — the
-/// [`D3d11FrameRenderer`] a [`D3d11WindowRenderer`] is built around.
+/// The swap chain and shaders a [`D3d11WindowRenderer`] draws its window
+/// with.
 ///
 /// Every draw holds the shared context's lock for its whole
 /// bind-draw-present sequence (see [`D3d11Gpu`]), so it cannot interleave
@@ -224,11 +252,18 @@ struct WindowPresenter {
     bgra_pixel_shader: ID3D11PixelShader,
     nv12_pixel_shader: ID3D11PixelShader,
     sampler: ID3D11SamplerState,
+    /// The three rows `present_nv12.hlsl` turns Y'CbCr into R'G'B' with,
+    /// written from each NV12 frame's own colour description.
+    colour: ID3D11Buffer,
     hwnd: isize,
     /// Set once a call reports the device removed, after which every draw
     /// fails fast rather than touching the GPU again.
     device_lost: AtomicBool,
     state: Mutex<PresentState>,
+    /// The centre pixel of the last frame drawn, R, G, B, A — read back
+    /// before it is presented, for a test to check the colour it came out.
+    #[cfg(test)]
+    probe: Arc<Mutex<Option<[u8; 4]>>>,
     /// Last, so the swap chain above is released before the window goes.
     _keep: Keep,
 }
@@ -342,6 +377,19 @@ impl WindowPresenter {
                     Some(&mut sampler),
                 )
                 .map_err(present)?;
+            let mut colour = None;
+            device
+                .CreateBuffer(
+                    &D3D11_BUFFER_DESC {
+                        ByteWidth: size_of::<[[f32; 4]; 3]>() as u32,
+                        Usage: D3D11_USAGE_DEFAULT,
+                        BindFlags: D3D11_BIND_CONSTANT_BUFFER.0 as u32,
+                        ..Default::default()
+                    },
+                    None,
+                    Some(&mut colour),
+                )
+                .map_err(present)?;
             let missing = || {
                 present(windows::core::Error::from(
                     windows::Win32::Foundation::E_POINTER,
@@ -354,6 +402,7 @@ impl WindowPresenter {
                 bgra_pixel_shader: bgra_pixel_shader.ok_or_else(missing)?,
                 nv12_pixel_shader: nv12_pixel_shader.ok_or_else(missing)?,
                 sampler: sampler.ok_or_else(missing)?,
+                colour: colour.ok_or_else(missing)?,
                 hwnd: hwnd.0 as isize,
                 device_lost: AtomicBool::new(false),
                 state: Mutex::new(PresentState {
@@ -362,6 +411,8 @@ impl WindowPresenter {
                     width: width.max(1),
                     height: height.max(1),
                 }),
+                #[cfg(test)]
+                probe: Arc::default(),
                 _keep: keep,
             })
         }
@@ -412,6 +463,7 @@ impl WindowPresenter {
         &self,
         pixel_shader: &ID3D11PixelShader,
         planes: &[Option<ID3D11ShaderResourceView>],
+        colour: Option<[[f32; 4]; 3]>,
         frame_width: u32,
         frame_height: u32,
     ) -> std::result::Result<(), SubmitError> {
@@ -465,18 +517,94 @@ impl WindowPresenter {
             context.PSSetShader(pixel_shader, None);
             context.PSSetShaderResources(0, Some(planes));
             context.PSSetSamplers(0, Some(&[Some(self.sampler.clone())]));
+            if let Some(rows) = colour {
+                context.UpdateSubresource(&self.colour, 0, None, rows.as_ptr().cast(), 0, 0);
+                context.PSSetConstantBuffers(0, Some(&[Some(self.colour.clone())]));
+            }
             context.Draw(3, 0);
             // Unbound before anything else draws through this context, so the
             // frame's texture is not held by leftover state.
             context.PSSetShaderResources(0, Some(&vec![None; planes.len()]));
+            context.PSSetConstantBuffers(0, Some(&[None]));
             context.OMSetRenderTargets(None, None);
         }
+        #[cfg(test)]
+        // SAFETY: the shared context is held, and the swap chain under
+        // `state`'s lock.
+        unsafe {
+            self.probe_centre(&context, &state)
+        };
         // Presented before returning: a preroll counts this return as the
         // frame being on its way to the screen.
         // SAFETY: the swap chain is only touched under `state`'s lock, held here.
         self.checked(unsafe { state.swap_chain.Present(1, DXGI_PRESENT(0)) }.ok())?;
         drop(context);
         Ok(())
+    }
+
+    /// Reads the centre pixel of the back buffer just drawn into
+    /// [`Self::probe`] — what the window shows there once it is presented.
+    ///
+    /// # Safety
+    ///
+    /// `context` is the shared context, held, and `state` is under its lock.
+    #[cfg(test)]
+    unsafe fn probe_centre(&self, context: &ID3D11DeviceContext, state: &PresentState) {
+        // SAFETY: the caller's promise; everything made here is a local.
+        unsafe {
+            let Ok(back) = state.swap_chain.GetBuffer::<ID3D11Texture2D>(0) else {
+                return;
+            };
+            let mut staging = None;
+            let made = self.device.CreateTexture2D(
+                &D3D11_TEXTURE2D_DESC {
+                    Width: 1,
+                    Height: 1,
+                    MipLevels: 1,
+                    ArraySize: 1,
+                    Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                    SampleDesc: DXGI_SAMPLE_DESC {
+                        Count: 1,
+                        Quality: 0,
+                    },
+                    Usage: D3D11_USAGE_STAGING,
+                    CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
+                    ..Default::default()
+                },
+                None,
+                Some(&mut staging),
+            );
+            let (Ok(()), Some(staging)) = (made, staging) else {
+                return;
+            };
+            let (x, y) = (state.width / 2, state.height / 2);
+            context.CopySubresourceRegion(
+                &staging,
+                0,
+                0,
+                0,
+                0,
+                &back,
+                0,
+                Some(&D3D11_BOX {
+                    left: x,
+                    top: y,
+                    front: 0,
+                    right: x + 1,
+                    bottom: y + 1,
+                    back: 1,
+                }),
+            );
+            let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+            if context
+                .Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
+                .is_ok()
+            {
+                let bgra = std::slice::from_raw_parts(mapped.pData.cast::<u8>(), 4);
+                *self.probe.lock().unwrap() = Some([bgra[2], bgra[1], bgra[0], bgra[3]]);
+                context.Unmap(&staging, 0);
+            }
+        }
     }
 
     fn plane(
@@ -516,50 +644,32 @@ impl WindowPresenter {
         }
         Ok(())
     }
-}
 
-impl D3d11FrameRenderer for WindowPresenter {
-    fn device(&self) -> ID3D11Device {
-        self.device.clone()
-    }
-
-    unsafe fn submit_bgra_texture(
+    /// Draws one checked frame: BGRA as it is, NV12 through the matrix its
+    /// own colour description gives.
+    fn show(
         &self,
-        texture: ID3D11Texture2D,
-        array_index: u32,
-        width: u32,
-        height: u32,
+        picture: &D3d11Picture,
+        frame: &ffmpeg::frame::Video,
     ) -> std::result::Result<(), SubmitError> {
+        let (width, height) = (frame.width(), frame.height());
         self.usable(width, height)?;
-        let bgra = self.plane(&texture, DXGI_FORMAT_B8G8R8A8_UNORM, array_index)?;
-        self.draw(&self.bgra_pixel_shader, &[bgra], width, height)
-    }
-
-    unsafe fn submit_nv12_texture(
-        &self,
-        texture: ID3D11Texture2D,
-        array_index: u32,
-        width: u32,
-        height: u32,
-    ) -> std::result::Result<(), SubmitError> {
-        self.usable(width, height)?;
+        let texture = &picture.texture;
+        if picture.format == DXGI_FORMAT_B8G8R8A8_UNORM {
+            let bgra = self.plane(texture, DXGI_FORMAT_B8G8R8A8_UNORM, picture.array_index)?;
+            return self.draw(&self.bgra_pixel_shader, &[bgra], None, width, height);
+        }
         // One NV12 texture read as two planes: the view's format picks which.
-        let luma = self.plane(&texture, DXGI_FORMAT_R8_UNORM, array_index)?;
-        let chroma = self.plane(&texture, DXGI_FORMAT_R8G8_UNORM, array_index)?;
-        self.draw(&self.nv12_pixel_shader, &[luma, chroma], width, height)
-    }
-
-    fn resize(&self, width: u32, height: u32) -> std::result::Result<(), SubmitError> {
-        self.usable(width, height)?;
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| SubmitError::RendererStopped)?;
-        let _context = self
-            .context
-            .lock()
-            .map_err(|_| SubmitError::RendererStopped)?;
-        self.resize_to(&mut state, width, height)
+        let luma = self.plane(texture, DXGI_FORMAT_R8_UNORM, picture.array_index)?;
+        let chroma = self.plane(texture, DXGI_FORMAT_R8G8_UNORM, picture.array_index)?;
+        let rows = yuv_to_rgb_rows(frame.color_space(), frame.color_range(), height);
+        self.draw(
+            &self.nv12_pixel_shader,
+            &[luma, chroma],
+            Some(rows),
+            width,
+            height,
+        )
     }
 }
 
@@ -650,7 +760,9 @@ mod tests {
 
     use crate::{
         bus::BusEvent,
-        elements::{D3d11Upload, SwScaler, TestVideoOptions, TestVideoSource, WindowEvent},
+        elements::{
+            AppSource, D3d11Upload, SwScaler, TestVideoOptions, TestVideoSource, WindowEvent,
+        },
         pipeline::Pipeline,
     };
 
@@ -809,5 +921,92 @@ mod tests {
             D3d11WindowRenderer::for_window("screen", &gpu, Arc::new(Headless)),
             Err(D3d11WindowRendererError::NotAWin32Window)
         ));
+    }
+
+    /// A solid NV12 picture of one Y'CbCr value, tagged with `space`, limited
+    /// range.
+    fn solid_nv12(ycbcr: [u8; 3], space: ffmpeg_next::color::Space) -> MediaBuffer {
+        let mut frame = ffmpeg_next::frame::Video::new(ffmpeg_next::format::Pixel::NV12, 64, 64);
+        frame.data_mut(0).fill(ycbcr[0]);
+        for pair in frame.data_mut(1).as_chunks_mut::<2>().0 {
+            pair.copy_from_slice(&ycbcr[1..]);
+        }
+        frame.set_color_space(space);
+        frame.set_color_range(ffmpeg_next::color::Range::MPEG);
+        frame.set_pts(Some(0));
+        MediaBuffer::video(frame)
+    }
+
+    /// Draws `frame` and reads back the centre of the window.
+    fn drawn(gpu: &D3d11Gpu, frame: MediaBuffer) -> Option<[u8; 3]> {
+        let (renderer, _events) = match D3d11WindowRenderer::open(
+            "screen",
+            gpu,
+            WindowOptions {
+                title: "media-pp window colour test".into(),
+                width: WIDTH,
+                height: HEIGHT,
+            },
+        ) {
+            Ok(opened) => opened,
+            Err(error) => {
+                eprintln!("skipping: no window can be opened here ({error})");
+                return None;
+            }
+        };
+        let probe = renderer.probe();
+        let (source, handle) = AppSource::new("frames", 4);
+        let device = gpu.device().clone();
+        let (pipeline, ()) = Pipeline::new("window-colour", source, |source, ctx| {
+            let branch = ctx
+                .branch()
+                .pipe(D3d11Upload::new("upload", &device))
+                .to(renderer)?;
+            ctx.attach(source, 0, branch)?;
+            Ok(())
+        })
+        .expect("wiring");
+        pipeline.run().expect("run");
+        handle.push(frame).expect("push");
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while probe.lock().unwrap().is_none() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        pipeline.stop();
+        let errors: Vec<_> = pipeline
+            .bus()
+            .iter()
+            .filter(|event| matches!(event, BusEvent::Error { .. }))
+            .collect();
+        assert!(errors.is_empty(), "{errors:?}");
+        let [r, g, b, _] = probe.lock().unwrap().expect("the frame was drawn");
+        Some([r, g, b])
+    }
+
+    fn near(got: [u8; 3], expected: [u8; 3]) -> bool {
+        got.iter()
+            .zip(expected)
+            .all(|(&got, expected)| got.abs_diff(expected) <= 3)
+    }
+
+    /// Each NV12 frame is converted with its own matrix. (72, 107, 220) is
+    /// R'G'B' (230, 20, 20) in BT.709; tagged BT.709 it comes out as that.
+    /// Read with BT.601 — what this renderer used to do with every frame —
+    /// the same numbers are (211, 0, 22), and a BT.601 frame of them is
+    /// drawn as that.
+    #[test]
+    fn an_nv12_frame_is_drawn_with_its_own_colour_description() {
+        use ffmpeg_next::color::Space;
+
+        let Some(gpu) = gpu() else { return };
+        let ycbcr = [72, 107, 220];
+        let Some(bt709) = drawn(&gpu, solid_nv12(ycbcr, Space::BT709)) else {
+            return;
+        };
+        assert!(near(bt709, [230, 20, 20]), "BT.709 drawn as {bt709:?}");
+        let Some(bt601) = drawn(&gpu, solid_nv12(ycbcr, Space::BT470BG)) else {
+            return;
+        };
+        assert!(near(bt601, [211, 0, 22]), "BT.601 drawn as {bt601:?}");
     }
 }

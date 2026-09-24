@@ -128,9 +128,6 @@ pub struct D3d12Renderer {
     /// caller could get wrong, proving nothing about what `inner` really
     /// renders with.
     device: ID3D12Device,
-    /// What this renderer is in the graph and its log — a `D3d12Renderer`,
-    /// or the `D3d12WindowRenderer` built around one.
-    element_type: ElementType,
 }
 
 impl D3d12Renderer {
@@ -139,18 +136,8 @@ impl D3d12Renderer {
     /// window/device by the time it gets here. This element doesn't
     /// create or own a window itself.
     pub fn new(name: impl Into<String>, renderer: Box<dyn D3d12FrameRenderer>) -> Self {
-        Self::labelled(name, renderer, ElementType::D3d12Renderer)
-    }
-
-    /// [`Self::new`], appearing in the graph and the log as `element_type` —
-    /// for an element built around this one.
-    pub(crate) fn labelled(
-        name: impl Into<String>,
-        renderer: Box<dyn D3d12FrameRenderer>,
-        element_type: ElementType,
-    ) -> Self {
         let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(element_type, &name, None);
+        let pp_log = element_pp_log(ElementType::D3d12Renderer, &name, None);
         pp_info!(pp_log: &pp_log, "created");
         let device = renderer.device();
         Self {
@@ -158,7 +145,6 @@ impl D3d12Renderer {
             pp_log,
             inner: renderer,
             device,
-            element_type,
         }
     }
 
@@ -176,54 +162,81 @@ impl D3d12Renderer {
         &self,
         frame: Arc<UnboundObjectPoolRef<ffmpeg::frame::Video>>,
     ) -> Result<()> {
-        let (texture_raw, fence_raw, fence_value) =
-            d3d12va_texture(&frame).ok_or(D3d12RendererError::InvalidD3d12Frame)?;
-        let width = frame.width();
-        let height = frame.height();
-
-        // SAFETY: `texture_raw`/`fence_raw` are borrowed raw COM pointers
-        // — still owned by `frame`'s own hw frame pool reference, not by
-        // us. `.clone()` (`AddRef`) gives us our own independently
-        // ref-counted handle, valid for as long as *we* hold it,
-        // regardless of what `frame`/ffmpeg later does with its copy.
-        let (texture, fence) = unsafe {
-            let texture = ID3D12Resource::from_raw_borrowed(&texture_raw)
-                .expect("AVD3D12VAFrame.texture must not be null")
-                .clone();
-            let fence = ID3D12Fence::from_raw_borrowed(&fence_raw)
-                .expect("AVD3D12VAFrame.sync_ctx.fence must not be null")
-                .clone();
-            (texture, fence)
-        };
-
-        // The producer (`D3d12Decoder`/`D3d12Upload`) and `self.inner`
-        // are independent constructions that only *should* share a
-        // device by convention — verify it, since drawing a different
-        // device's texture is invalid, not just wrong output.
-        let mut texture_device: Option<ID3D12Device> = None;
-        // SAFETY: `texture` is live and `texture_device` is a correctly typed
-        // out-parameter for the resource's creating device.
-        unsafe { texture.GetDevice(&mut texture_device) }
-            .map_err(|_| D3d12RendererError::DeviceMismatch)?;
-        let texture_device = texture_device.ok_or(D3d12RendererError::DeviceMismatch)?;
-        if texture_device.as_raw() != self.device.as_raw() {
-            return Err(D3d12RendererError::DeviceMismatch.into());
-        }
-
+        let picture = check_d3d12_frame(&frame, &self.device)?;
+        let (width, height) = (frame.width(), frame.height());
         // `frame` (an `Arc`) is what keeps the underlying D3D12 texture
         // memory from being recycled by the decoder's frame pool while
         // the renderer still has it queued to draw — independent of, and
-        // in addition to, the `texture`/`fence` COM references above.
-        // SAFETY: validation established the resource device, NV12 layout,
-        // visible dimensions, and matching producer fence. The boxed frame
-        // keeps the pooled allocation alive until the renderer releases it.
+        // in addition to, the `texture`/`fence` COM references.
+        // SAFETY: `check_d3d12_frame` established the resource device, and
+        // the fence is the producer's own. The boxed frame keeps the pooled
+        // allocation alive until the renderer releases it.
         unsafe {
             self.inner
-                .submit_nv12_texture(texture, fence, fence_value, width, height, Box::new(frame))
+                .submit_nv12_texture(
+                    picture.texture,
+                    picture.fence,
+                    picture.fence_value,
+                    width,
+                    height,
+                    Box::new(frame),
+                )
                 .map_err(D3d12RendererError::Submit)?;
         }
         Ok(())
     }
+}
+
+/// A D3D12 frame found fit to draw on a device: its texture, and the fence
+/// value its producer signals once the texture is written.
+pub(crate) struct D3d12Picture {
+    pub(crate) texture: ID3D12Resource,
+    pub(crate) fence: ID3D12Fence,
+    pub(crate) fence_value: u64,
+}
+
+/// Everything a D3D12 renderer checks of a frame before drawing it: that it
+/// is a D3D12 frame at all, and that its texture was made on `device` —
+/// the producer and the renderer are separate constructions that only
+/// *should* share one, and drawing another device's texture is invalid, not
+/// just wrong-looking. Shared by [`D3d12Renderer`] and `D3d12WindowRenderer`.
+pub(crate) fn check_d3d12_frame(
+    frame: &ffmpeg::frame::Video,
+    device: &ID3D12Device,
+) -> std::result::Result<D3d12Picture, D3d12RendererError> {
+    if frame.format() != ffmpeg::format::Pixel::D3D12 {
+        return Err(D3d12RendererError::UnsupportedFormat(frame.format()));
+    }
+    let (texture_raw, fence_raw, fence_value) =
+        d3d12va_texture(frame).ok_or(D3d12RendererError::InvalidD3d12Frame)?;
+    // SAFETY: `texture_raw`/`fence_raw` are borrowed raw COM pointers —
+    // still owned by `frame`'s own hw frame pool reference, not by us.
+    // `.clone()` (`AddRef`) gives our own independently ref-counted handles,
+    // valid for as long as they are held.
+    let (texture, fence) = unsafe {
+        (
+            ID3D12Resource::from_raw_borrowed(&texture_raw)
+                .ok_or(D3d12RendererError::InvalidD3d12Frame)?
+                .clone(),
+            ID3D12Fence::from_raw_borrowed(&fence_raw)
+                .ok_or(D3d12RendererError::InvalidD3d12Frame)?
+                .clone(),
+        )
+    };
+    let mut texture_device: Option<ID3D12Device> = None;
+    // SAFETY: `texture` is live and `texture_device` is a correctly typed
+    // out-parameter for the resource's creating device.
+    unsafe { texture.GetDevice(&mut texture_device) }
+        .map_err(|_| D3d12RendererError::DeviceMismatch)?;
+    let texture_device = texture_device.ok_or(D3d12RendererError::DeviceMismatch)?;
+    if texture_device.as_raw() != device.as_raw() {
+        return Err(D3d12RendererError::DeviceMismatch);
+    }
+    Ok(D3d12Picture {
+        texture,
+        fence,
+        fence_value,
+    })
 }
 
 impl Element for D3d12Renderer {
@@ -232,7 +245,7 @@ impl Element for D3d12Renderer {
     }
 
     fn element_type(&self) -> ElementType {
-        self.element_type
+        ElementType::D3d12Renderer
     }
 
     fn pp_log(&self) -> &PpLog {
@@ -260,15 +273,8 @@ impl Sink for D3d12Renderer {
             return Ok(());
         };
 
-        match frame.format() {
-            ffmpeg::format::Pixel::D3D12 => self
-                .submit_d3d12_frame(frame)
-                .inspect_err(|error| pp_error!(self, "submit_d3d12_frame failed: {error}")),
-            other => {
-                pp_error!(self, "unsupported pixel format: {other:?}");
-                Err(D3d12RendererError::UnsupportedFormat(other).into())
-            }
-        }
+        self.submit_d3d12_frame(frame)
+            .inspect_err(|error| pp_error!(self, "submit_d3d12_frame failed: {error}"))
     }
 
     fn control(&mut self, _msg: ControlMsg) -> Result<()> {

@@ -1268,6 +1268,21 @@ compile error with no explanation.
 
 ### Fixed
 
+- **The D3D11 and D3D12 window renderers draw a frame in its own colours.**
+  Their NV12 shaders had BT.601 limited range written into them, carried
+  over from the examples' presenters, so every HD picture — BT.709, what
+  nearly every decoded stream is — was converted with the wrong matrix:
+  the R'G'B' (230, 20, 20) a BT.709 frame holds came out as (212, 0, 23).
+  `D3d11WindowRenderer` and `D3d12WindowRenderer` now draw their frames
+  themselves rather than through a presenter, so they read each frame's
+  colour description and convert with its own matrix and range — BT.709,
+  BT.601 or BT.2020, limited or full, and for an untagged frame BT.709 over
+  576 rows and BT.601 otherwise — as `D3d11VideoCompositor` already did.
+  They check frames exactly as `D3d11Renderer` and `D3d12Renderer` do, and
+  report the same errors. Those two, and their presenter traits, are
+  unchanged: a presenter of one's own is still handed no colour
+  description.
+
 - **Pausing leaves a queue's backlog in the queue.** `Pipeline::pause`
   interrupts every paced wait before its request has reached the queues,
   and an interrupted `Pacer` or `VideoSynchronizer` takes whatever it is

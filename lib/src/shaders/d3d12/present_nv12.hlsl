@@ -4,12 +4,12 @@
 // with a full-resolution luma plane and a half-resolution
 // interleaved-chroma plane.
 //
-// Compiled as its own translation unit (own `D3DCompile` call, see
-// `d3d12_gpu_context.rs`) so its texture registers are declared exactly
-// once. The root signature is the one extracted from frame.hlsl's
-// `vs_main` (`FRAME_ROOT_SIGNATURE`: the luma/chroma SRV pair at t0, plus
-// a static sampler at s0), which this shader fits inside without needing
-// its own copy of that attribute.
+// Compiled as its own translation unit (own `D3DCompile` call) so its
+// texture registers are declared exactly once. The root signature is the
+// one extracted from present_frame.hlsl's `vs_main` (`FRAME_ROOT_SIGNATURE`:
+// the luma/chroma SRV pair at t0, the colour rows at b0, and a static
+// sampler at s0), which this shader fits inside without needing its own copy
+// of that attribute.
 
 struct VertexOutput
 {
@@ -21,19 +21,24 @@ Texture2D<float> luma : register(t0);
 Texture2D<float2> chroma : register(t1);
 SamplerState frame_sampler : register(s0);
 
-// Converts an NV12 texture pair directly to RGB on the GPU. Same BT.601
-// limited-range assumption the rest of this renderer uses.
+// Three affine rows from the frame's own colour description — its matrix
+// and range — set per frame by the renderer (`color::yuv_to_rgb_rows`).
+// Each takes the samples as they are, (Y, Cb, Cr, 1) in 0..1, offsets
+// included, so a BT.709 frame and a BT.601 one are each converted with
+// their own coefficients rather than one of them with the other's.
+cbuffer Colour : register(b0)
+{
+    float4 to_red;
+    float4 to_green;
+    float4 to_blue;
+};
+
 float4 ps_nv12(VertexOutput input) : SV_Target
 {
-    float y = luma.Sample(frame_sampler, input.uv).r;
-    float2 uv = chroma.Sample(frame_sampler, input.uv).rg - 0.5;
-
-    y = 1.16438356 * (y - 16.0 / 255.0);
-
-    float3 rgb;
-    rgb.r = y + 1.59602678 * uv.y;
-    rgb.g = y - 0.39176229 * uv.x - 0.81296764 * uv.y;
-    rgb.b = y + 2.01723214 * uv.x;
-
+    float4 ycbcr = float4(
+        luma.Sample(frame_sampler, input.uv).r,
+        chroma.Sample(frame_sampler, input.uv).rg,
+        1.0);
+    float3 rgb = float3(dot(to_red, ycbcr), dot(to_green, ycbcr), dot(to_blue, ycbcr));
     return float4(saturate(rgb), 1.0);
 }

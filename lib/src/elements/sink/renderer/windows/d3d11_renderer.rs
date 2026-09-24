@@ -19,7 +19,6 @@ use crate::{
     elements::SubmitError,
     error::{D3d11SharedDeviceError, Result},
     platform::windows::{d3d11::protect_shared_device, d3d11va::d3d11va_texture},
-    pool::UnboundObjectPoolRef,
 };
 
 /// What [`D3d11Renderer`] needs from an actual DX11 window/rendering
@@ -206,9 +205,6 @@ pub struct D3d11Renderer {
     /// so the answer is kept and returned by the first `consume`, before a
     /// single frame has been submitted.
     shared_device_error: Option<D3d11SharedDeviceError>,
-    /// What this renderer is in the graph and its log — a `D3d11Renderer`,
-    /// or the `D3d11WindowRenderer` built around one.
-    element_type: ElementType,
 }
 
 impl D3d11Renderer {
@@ -221,18 +217,8 @@ impl D3d11Renderer {
     /// applies to the device it is handed. A device that refuses it fails the
     /// first `consume` rather than this call.
     pub fn new(name: impl Into<String>, renderer: Box<dyn D3d11FrameRenderer>) -> Self {
-        Self::labelled(name, renderer, ElementType::D3d11Renderer)
-    }
-
-    /// [`Self::new`], appearing in the graph and the log as `element_type` —
-    /// for an element built around this one.
-    pub(crate) fn labelled(
-        name: impl Into<String>,
-        renderer: Box<dyn D3d11FrameRenderer>,
-        element_type: ElementType,
-    ) -> Self {
         let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(element_type, &name, None);
+        let pp_log = element_pp_log(ElementType::D3d11Renderer, &name, None);
         let device = renderer.device();
         let shared_device_error = match protect_shared_device(&device) {
             Ok(_) => None,
@@ -248,7 +234,6 @@ impl D3d11Renderer {
             inner: renderer,
             device,
             shared_device_error,
-            element_type,
         }
     }
 
@@ -262,72 +247,88 @@ impl D3d11Renderer {
         Ok(())
     }
 
-    fn submit_d3d11_frame(
-        &self,
-        frame: Arc<UnboundObjectPoolRef<ffmpeg::frame::Video>>,
-    ) -> Result<()> {
-        let (texture_raw, index) =
-            d3d11va_texture(&frame).ok_or(D3d11RendererError::InvalidD3d11Frame)?;
-        let width = frame.width();
-        let height = frame.height();
-
-        // SAFETY: `texture_raw` is a borrowed raw `ID3D11Texture2D*` —
-        // still owned by `frame`'s own buffer reference, not by us.
-        // `.clone()` (`AddRef`) gives us an independently ref-counted
-        // handle, valid for as long as we hold it.
-        let texture = unsafe {
-            ID3D11Texture2D::from_raw_borrowed(&texture_raw)
-                .expect("D3d11 frame's texture pointer must not be null")
-                .clone()
-        };
-
-        // Same reasoning as `D3d12Renderer::submit_d3d12_frame`'s own
-        // device check: the producer and `self.inner` are independent
-        // constructions that only *should* share a device by convention —
-        // verify it.
-        // SAFETY: `texture` is a live cloned COM interface; `GetDevice`
-        // returns an owned reference to the device that created it.
-        let texture_device = unsafe { texture.GetDevice() }.map_err(D3d11RendererError::from)?;
-        if texture_device.as_raw() != self.device.as_raw() {
-            return Err(D3d11RendererError::DeviceMismatch.into());
-        }
-
-        let mut desc = Default::default();
-        // SAFETY: `desc` is a live, correctly typed out-parameter for the
-        // live texture.
-        unsafe { texture.GetDesc(&mut desc) };
-        if index < 0 || index as u64 >= u64::from(desc.ArraySize) {
-            let error = D3d11RendererError::InvalidArrayIndex {
-                index,
-                array_size: desc.ArraySize,
-            };
-            pp_error!(self, "{error}");
-            return Err(error.into());
-        }
-        let array_index = index as u32;
-
+    fn submit_d3d11_frame(&self, frame: &ffmpeg::frame::Video) -> Result<()> {
+        let picture = check_d3d11_frame(frame, &self.device)?;
+        let (width, height) = (frame.width(), frame.height());
         // No `keep_alive` to pass through here — see `D3d11FrameRenderer`'s
         // own docs on why D3D11's driver-deferred resource destruction
         // makes that unnecessary, unlike `D3d12Renderer`. `frame` itself
-        // just drops normally at the end of this function.
-        match desc.Format {
-            // SAFETY: device, format, dimensions, and array index were all
-            // validated above; the cloned texture remains live for the call.
+        // just drops normally once `consume` returns.
+        match picture.format {
+            // SAFETY: `check_d3d11_frame` validated the device, format and
+            // array index; the cloned texture remains live for the call.
             DXGI_FORMAT_B8G8R8A8_UNORM => unsafe {
                 self.inner
-                    .submit_bgra_texture(texture, array_index, width, height)
+                    .submit_bgra_texture(picture.texture, picture.array_index, width, height)
                     .map_err(D3d11RendererError::Submit)?;
             },
             // SAFETY: the same validation applies to the NV12-specific submit
             // contract selected by this format arm.
-            DXGI_FORMAT_NV12 => unsafe {
+            _ => unsafe {
                 self.inner
-                    .submit_nv12_texture(texture, array_index, width, height)
+                    .submit_nv12_texture(picture.texture, picture.array_index, width, height)
                     .map_err(D3d11RendererError::Submit)?;
             },
-            other => return Err(D3d11RendererError::UnsupportedTextureFormat(other).into()),
         }
         Ok(())
+    }
+}
+
+/// A D3D11 frame found fit to draw on a device: its texture, the slice of
+/// the texture array it is, and the texture's format — NV12 or BGRA, the two
+/// a renderer here draws.
+pub(crate) struct D3d11Picture {
+    pub(crate) texture: ID3D11Texture2D,
+    pub(crate) array_index: u32,
+    pub(crate) format: DXGI_FORMAT,
+}
+
+/// Everything a D3D11 renderer checks of a frame before drawing it: that it
+/// is a D3D11 frame at all, that its texture was made on `device` — drawing
+/// another device's texture is invalid, not just wrong-looking — that its
+/// slice is inside the texture array, and that its format is one a renderer
+/// draws. Shared by [`D3d11Renderer`] and `D3d11WindowRenderer`.
+pub(crate) fn check_d3d11_frame(
+    frame: &ffmpeg::frame::Video,
+    device: &ID3D11Device,
+) -> std::result::Result<D3d11Picture, D3d11RendererError> {
+    if frame.format() != ffmpeg::format::Pixel::D3D11 {
+        return Err(D3d11RendererError::UnsupportedFormat(frame.format()));
+    }
+    let (texture_raw, index) =
+        d3d11va_texture(frame).ok_or(D3d11RendererError::InvalidD3d11Frame)?;
+    // SAFETY: `texture_raw` is a borrowed raw `ID3D11Texture2D*` — still
+    // owned by `frame`'s own buffer reference, not by us. `.clone()`
+    // (`AddRef`) gives an independently ref-counted handle, valid for as
+    // long as it is held.
+    let texture = unsafe { ID3D11Texture2D::from_raw_borrowed(&texture_raw) }
+        .ok_or(D3d11RendererError::InvalidD3d11Frame)?
+        .clone();
+
+    // SAFETY: `texture` is a live cloned COM interface; `GetDevice` returns
+    // an owned reference to the device that created it.
+    let texture_device = unsafe { texture.GetDevice() }?;
+    if texture_device.as_raw() != device.as_raw() {
+        return Err(D3d11RendererError::DeviceMismatch);
+    }
+
+    let mut desc = Default::default();
+    // SAFETY: `desc` is a live, correctly typed out-parameter for the live
+    // texture.
+    unsafe { texture.GetDesc(&mut desc) };
+    if index < 0 || index as u64 >= u64::from(desc.ArraySize) {
+        return Err(D3d11RendererError::InvalidArrayIndex {
+            index,
+            array_size: desc.ArraySize,
+        });
+    }
+    match desc.Format {
+        DXGI_FORMAT_B8G8R8A8_UNORM | DXGI_FORMAT_NV12 => Ok(D3d11Picture {
+            texture,
+            array_index: index as u32,
+            format: desc.Format,
+        }),
+        other => Err(D3d11RendererError::UnsupportedTextureFormat(other)),
     }
 }
 
@@ -337,7 +338,7 @@ impl Element for D3d11Renderer {
     }
 
     fn element_type(&self) -> ElementType {
-        self.element_type
+        ElementType::D3d11Renderer
     }
 
     fn pp_log(&self) -> &PpLog {
@@ -366,12 +367,7 @@ impl Sink for D3d11Renderer {
             return Ok(());
         };
 
-        if frame.format() != ffmpeg::format::Pixel::D3D11 {
-            let format = frame.format();
-            pp_error!(self, "unsupported pixel format: {format:?}");
-            return Err(D3d11RendererError::UnsupportedFormat(format).into());
-        }
-        self.submit_d3d11_frame(frame)
+        self.submit_d3d11_frame(&frame)
             .inspect_err(|error| pp_error!(self, "submit_d3d11_frame failed: {error}"))
     }
 

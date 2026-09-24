@@ -94,7 +94,10 @@ impl ColorDescription {
 /// into RGB. Unspecified color metadata follows the common SD/HD fallback:
 /// BT.601 through 576 lines and BT.709 above it; unspecified range is
 /// treated as MPEG/limited, matching ordinary decoded NV12 video.
-#[cfg(any(feature = "cuda", all(target_os = "windows", feature = "d3d11")))]
+#[cfg(any(
+    feature = "cuda",
+    all(target_os = "windows", any(feature = "d3d11", feature = "d3d12"))
+))]
 pub(crate) fn yuv_to_rgb_rows(
     space: ffmpeg_next::color::Space,
     range: ffmpeg_next::color::Range,

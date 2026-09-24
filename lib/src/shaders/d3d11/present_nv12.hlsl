@@ -20,19 +20,24 @@ Texture2D<float> luma : register(t0);
 Texture2D<float2> chroma : register(t1);
 SamplerState frame_sampler : register(s0);
 
-// Converts an NV12 texture pair directly to RGB on the GPU. BT.601
-// limited-range assumption, same as the D3D12 side's ps_nv12/ps_yuv420p.
+// Three affine rows from the frame's own colour description — its matrix
+// and range — written per frame by the renderer (`color::yuv_to_rgb_rows`).
+// Each takes the samples as they are, (Y, Cb, Cr, 1) in 0..1, offsets
+// included, so a BT.709 frame and a BT.601 one are each converted with
+// their own coefficients rather than one of them with the other's.
+cbuffer Colour : register(b0)
+{
+    float4 to_red;
+    float4 to_green;
+    float4 to_blue;
+};
+
 float4 ps_nv12(VertexOutput input) : SV_Target
 {
-    float y = luma.Sample(frame_sampler, input.uv).r;
-    float2 uv = chroma.Sample(frame_sampler, input.uv).rg - 0.5;
-
-    y = 1.16438356 * (y - 16.0 / 255.0);
-
-    float3 rgb;
-    rgb.r = y + 1.59602678 * uv.y;
-    rgb.g = y - 0.39176229 * uv.x - 0.81296764 * uv.y;
-    rgb.b = y + 2.01723214 * uv.x;
-
+    float4 ycbcr = float4(
+        luma.Sample(frame_sampler, input.uv).r,
+        chroma.Sample(frame_sampler, input.uv).rg,
+        1.0);
+    float3 rgb = float3(dot(to_red, ycbcr), dot(to_green, ycbcr), dot(to_blue, ycbcr));
     return float4(saturate(rgb), 1.0);
 }

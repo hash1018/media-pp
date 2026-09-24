@@ -1,6 +1,6 @@
 //! A D3D12 renderer that brings its own window, or draws into one it is
 //! given — the part a program otherwise writes for itself behind
-//! [`D3d12FrameRenderer`].
+//! [`D3d12FrameRenderer`](crate::elements::D3d12FrameRenderer).
 
 use std::{
     any::Any,
@@ -12,6 +12,7 @@ use std::{
     },
 };
 
+use ffmpeg_next as ffmpeg;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use thiserror::Error as ThisError;
 use windows::{
@@ -42,17 +43,18 @@ use windows::{
     core::{Interface, s},
 };
 
+use super::d3d12_renderer::{D3d12Picture, check_d3d12_frame};
 use crate::{
     buffer::MediaBuffer,
-    contract::InputContract,
+    color::yuv_to_rgb_rows,
+    contract::{InputContract, MediaKind, MemoryDomain, PixelLayoutSet, PortContract},
     control::ControlMsg,
-    element::{Element, ElementType, Sink},
-    elements::{
-        D3d12FrameRenderer, D3d12Gpu, D3d12Renderer, SubmitError, WindowEvents, WindowOptions,
-    },
+    element::{Element, ElementType, Sink, element_pp_log},
+    elements::{D3d12Gpu, D3d12RendererError, SubmitError, WindowEvents, WindowOptions},
     error::Result,
     platform::windows::{hlsl::compile_shader, window::OwnedWindow},
-    pp_log::PpLog,
+    pool::UnboundObjectPoolRef,
+    pp_log::{PpLog, pp_error, pp_info},
 };
 
 const FRAME_SHADER: &[u8] = include_bytes!("../../../../shaders/d3d12/present_frame.hlsl");
@@ -88,13 +90,18 @@ pub enum D3d12WindowRendererError {
 /// or one the application gives it. The D3D12 sibling of
 /// `D3d11WindowRenderer`, with the same [`WindowOptions`] and [`WindowEvents`].
 ///
-/// It is a [`D3d12Renderer`] with the window, swap chain and shaders built
-/// in: frames go through the same checks — a texture from another device is
-/// refused — and are drawn zero-copy from the NV12 textures `D3d12Decoder`
-/// and `D3d12Upload` make, waiting on the GPU for each frame's own fence
-/// before reading it. The picture keeps its aspect ratio inside the window,
-/// with black bars as needed, and the renderer follows the window's size on
-/// its own, reading it before every frame.
+/// It takes what a [`D3d12Renderer`](crate::elements::D3d12Renderer) takes,
+/// checked the same way — a texture from another device is refused, and a
+/// frame's error is a [`D3d12RendererError`] — and draws it zero-copy from
+/// the NV12 textures `D3d12Decoder` and `D3d12Upload` make, waiting on the
+/// GPU for each frame's own fence before reading it. It draws the frame
+/// itself rather than through a presenter, and so knows it: each is
+/// converted with its own colour description, BT.709, BT.601 or BT.2020 and
+/// limited or full range as it says, and where it says nothing, BT.709 for
+/// a picture over 576 rows and BT.601 otherwise. The picture keeps its
+/// aspect ratio inside the window, with black bars as needed, and the
+/// renderer follows the window's size on its own, reading it before every
+/// frame.
 ///
 /// It draws; it does not pace. Put a [`crate::elements::VideoSynchronizer`]
 /// or [`crate::elements::Pacer`] in front for a picture shown at its own
@@ -105,7 +112,9 @@ pub enum D3d12WindowRendererError {
 /// Its GPU is the [`D3d12Gpu`] every other D3D12 element in the pipeline
 /// shares — the frames it shows must come from that device.
 pub struct D3d12WindowRenderer {
-    inner: D3d12Renderer,
+    name: Arc<str>,
+    pp_log: PpLog,
+    presenter: WindowPresenter,
 }
 
 impl D3d12WindowRenderer {
@@ -158,49 +167,80 @@ impl D3d12WindowRenderer {
     }
 
     fn around(name: impl Into<String>, presenter: WindowPresenter) -> Self {
+        let name: Arc<str> = name.into().into();
+        let pp_log = element_pp_log(ElementType::D3d12WindowRenderer, &name, None);
+        pp_info!(pp_log: &pp_log, "created");
         Self {
-            inner: D3d12Renderer::labelled(
-                name,
-                Box::new(presenter),
-                ElementType::D3d12WindowRenderer,
-            ),
+            name,
+            pp_log,
+            presenter,
+        }
+    }
+
+    /// Where the centre pixel of each frame drawn is read back to.
+    #[cfg(test)]
+    fn probe(&self) -> Arc<Mutex<Option<[u8; 4]>>> {
+        Arc::clone(&self.presenter.probe)
+    }
+
+    fn draw(
+        &self,
+        frame: Arc<UnboundObjectPoolRef<ffmpeg::frame::Video>>,
+    ) -> std::result::Result<(), D3d12RendererError> {
+        let picture = check_d3d12_frame(&frame, &self.presenter.device)?;
+        let (width, height) = (frame.width(), frame.height());
+        let rows = yuv_to_rgb_rows(frame.color_space(), frame.color_range(), height);
+        // SAFETY: `check_d3d12_frame` established the texture's device, and
+        // the fence is its producer's own. `frame` keeps the pooled texture
+        // alive until the GPU is done with it.
+        unsafe {
+            self.presenter
+                .show(picture, (width, height), rows, Box::new(frame))
+                .map_err(D3d12RendererError::Submit)
         }
     }
 }
 
 impl Element for D3d12WindowRenderer {
     fn name(&self) -> Arc<str> {
-        self.inner.name()
+        self.name.clone()
     }
 
     fn element_type(&self) -> ElementType {
-        self.inner.element_type()
+        ElementType::D3d12WindowRenderer
     }
 
     fn pp_log(&self) -> &PpLog {
-        self.inner.pp_log()
+        &self.pp_log
     }
 
     fn pp_log_mut(&mut self) -> &mut PpLog {
-        self.inner.pp_log_mut()
+        &mut self.pp_log
     }
 }
 
 impl Sink for D3d12WindowRenderer {
+    /// What a [`D3d12Renderer`](crate::elements::D3d12Renderer) takes: an
+    /// NV12 D3D12 texture.
     fn input_contract(&self) -> InputContract {
-        self.inner.input_contract()
-    }
-
-    fn ready_consume(&mut self) -> bool {
-        self.inner.ready_consume()
+        InputContract::Fixed(
+            PortContract::frame(MediaKind::VideoFrame, MemoryDomain::D3d12)
+                .with_layouts(PixelLayoutSet::NV12),
+        )
     }
 
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
-        self.inner.consume(buf)
+        let MediaBuffer::Video(frame) = buf else {
+            return Ok(());
+        };
+        self.draw(frame)
+            .inspect_err(|error| pp_error!(self, "draw failed: {error}"))?;
+        Ok(())
     }
 
-    fn control(&mut self, msg: ControlMsg) -> Result<()> {
-        self.inner.control(msg)
+    fn control(&mut self, _msg: ControlMsg) -> Result<()> {
+        // Terminal, with nothing to flush or forward.
+        Ok(())
     }
 }
 
@@ -245,6 +285,14 @@ struct WindowPresenter {
     /// fails fast rather than touching the GPU again.
     device_lost: AtomicBool,
     state: Mutex<PresentState>,
+    /// The centre pixel of the last frame drawn, R, G, B, A — copied out of
+    /// the back buffer before it is presented, for a test to check the
+    /// colour it came out.
+    #[cfg(test)]
+    probe: Arc<Mutex<Option<[u8; 4]>>>,
+    /// Where that pixel is copied to: one row of a readback buffer.
+    #[cfg(test)]
+    readback: ID3D12Resource,
     /// Last, so the swap chain above is released before the window goes.
     _keep: Keep,
 }
@@ -363,6 +411,40 @@ impl WindowPresenter {
                 .CreateFence(0, D3D12_FENCE_FLAG_NONE)
                 .map_err(present)?;
             let fence_event = CreateEventW(None, false, false, None).map_err(present)?;
+            #[cfg(test)]
+            let readback = {
+                let mut readback: Option<ID3D12Resource> = None;
+                device
+                    .CreateCommittedResource(
+                        &D3D12_HEAP_PROPERTIES {
+                            Type: D3D12_HEAP_TYPE_READBACK,
+                            ..Default::default()
+                        },
+                        D3D12_HEAP_FLAG_NONE,
+                        &D3D12_RESOURCE_DESC {
+                            Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
+                            Width: u64::from(D3D12_TEXTURE_DATA_PITCH_ALIGNMENT),
+                            Height: 1,
+                            DepthOrArraySize: 1,
+                            MipLevels: 1,
+                            SampleDesc: DXGI_SAMPLE_DESC {
+                                Count: 1,
+                                Quality: 0,
+                            },
+                            Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+                            ..Default::default()
+                        },
+                        D3D12_RESOURCE_STATE_COPY_DEST,
+                        None,
+                        &mut readback,
+                    )
+                    .map_err(present)?;
+                readback.ok_or_else(|| {
+                    present(windows::core::Error::from(
+                        windows::Win32::Foundation::E_POINTER,
+                    ))
+                })?
+            };
 
             Ok(Self {
                 device,
@@ -387,8 +469,98 @@ impl WindowPresenter {
                     width,
                     height,
                 }),
+                #[cfg(test)]
+                probe: Arc::default(),
+                #[cfg(test)]
+                readback,
                 _keep: keep,
             })
+        }
+    }
+
+    /// Records a copy of the back buffer's centre pixel into
+    /// [`Self::readback`], leaving `target` in the state it returns.
+    ///
+    /// # Safety
+    ///
+    /// `list` is open, and `target` is the back buffer it has just drawn
+    /// into, in `RENDER_TARGET`.
+    #[cfg(test)]
+    unsafe fn copy_probe(
+        &self,
+        list: &ID3D12GraphicsCommandList,
+        target: &ID3D12Resource,
+        state: &PresentState,
+    ) -> D3D12_RESOURCE_STATES {
+        let (x, y) = (state.width / 2, state.height / 2);
+        // SAFETY: the caller's promise; the descriptions are locals, and the
+        // references they take are released right after the call.
+        unsafe {
+            transition(
+                list,
+                target,
+                D3D12_RESOURCE_STATE_RENDER_TARGET,
+                D3D12_RESOURCE_STATE_COPY_SOURCE,
+            );
+            let mut destination = D3D12_TEXTURE_COPY_LOCATION {
+                pResource: ManuallyDrop::new(Some(self.readback.clone())),
+                Type: D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
+                Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
+                    PlacedFootprint: D3D12_PLACED_SUBRESOURCE_FOOTPRINT {
+                        Offset: 0,
+                        Footprint: D3D12_SUBRESOURCE_FOOTPRINT {
+                            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                            Width: 1,
+                            Height: 1,
+                            Depth: 1,
+                            RowPitch: D3D12_TEXTURE_DATA_PITCH_ALIGNMENT,
+                        },
+                    },
+                },
+            };
+            let mut source = D3D12_TEXTURE_COPY_LOCATION {
+                pResource: ManuallyDrop::new(Some(target.clone())),
+                Type: D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
+                Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
+                    SubresourceIndex: 0,
+                },
+            };
+            list.CopyTextureRegion(
+                &destination,
+                0,
+                0,
+                0,
+                &source,
+                Some(&D3D12_BOX {
+                    left: x,
+                    top: y,
+                    front: 0,
+                    right: x + 1,
+                    bottom: y + 1,
+                    back: 1,
+                }),
+            );
+            ManuallyDrop::drop(&mut destination.pResource);
+            ManuallyDrop::drop(&mut source.pResource);
+        }
+        D3D12_RESOURCE_STATE_COPY_SOURCE
+    }
+
+    /// Reads what [`Self::copy_probe`] copied, once the frame is done.
+    #[cfg(test)]
+    fn read_probe(&self, state: &PresentState) {
+        if self.wait_for(state.last_submitted).is_err() {
+            return;
+        }
+        let mut data = std::ptr::null_mut();
+        // SAFETY: the readback buffer is this presenter's own, and the GPU's
+        // write into it has finished; the four bytes read are inside it.
+        unsafe {
+            if self.readback.Map(0, None, Some(&mut data)).is_ok() {
+                let bgra = std::slice::from_raw_parts(data.cast::<u8>(), 4);
+                *self.probe.lock().unwrap() = Some([bgra[2], bgra[1], bgra[0], bgra[3]]);
+                self.readback.Unmap(0, None);
+            }
         }
     }
 
@@ -465,6 +637,7 @@ impl WindowPresenter {
         texture: &ID3D12Resource,
         (fence, fence_value): (&ID3D12Fence, u64),
         (frame_width, frame_height): (u32, u32),
+        rows: &[[f32; 4]; 3],
     ) -> windows::core::Result<()> {
         // SAFETY: as the caller promises for `texture`; everything else is
         // this presenter's own, under `state`'s lock.
@@ -512,6 +685,8 @@ impl WindowPresenter {
                 0,
                 state.srv_heap.GetGPUDescriptorHandleForHeapStart(),
             );
+            // The three colour rows, as the root signature's twelve constants.
+            list.SetGraphicsRoot32BitConstants(1, 12, rows.as_ptr().cast(), 0);
             list.RSSetViewports(&[letterbox(
                 frame_width,
                 frame_height,
@@ -534,12 +709,11 @@ impl WindowPresenter {
                 D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
                 D3D12_RESOURCE_STATE_COMMON,
             );
-            transition(
-                list,
-                &target,
-                D3D12_RESOURCE_STATE_RENDER_TARGET,
-                D3D12_RESOURCE_STATE_PRESENT,
-            );
+            #[cfg(test)]
+            let target_state = self.copy_probe(list, &target, state);
+            #[cfg(not(test))]
+            let target_state = D3D12_RESOURCE_STATE_RENDER_TARGET;
+            transition(list, &target, target_state, D3D12_RESOURCE_STATE_PRESENT);
             list.Close()?;
 
             // A GPU-side wait for whatever wrote the texture: sharing a device
@@ -558,18 +732,19 @@ impl WindowPresenter {
     }
 }
 
-impl D3d12FrameRenderer for WindowPresenter {
-    fn device(&self) -> ID3D12Device {
-        self.device.clone()
-    }
-
-    unsafe fn submit_nv12_texture(
+impl WindowPresenter {
+    /// Draws one checked frame, converted with `rows`, and holds
+    /// `keep_alive` until the GPU is done reading its texture.
+    ///
+    /// # Safety
+    ///
+    /// `picture` is an NV12 texture on this presenter's device, in `COMMON`,
+    /// with the fence its producer signals once it is written.
+    unsafe fn show(
         &self,
-        texture: ID3D12Resource,
-        fence: ID3D12Fence,
-        fence_value: u64,
-        width: u32,
-        height: u32,
+        picture: D3d12Picture,
+        (width, height): (u32, u32),
+        rows: [[f32; 4]; 3],
         keep_alive: Box<dyn Any + Send>,
     ) -> std::result::Result<(), SubmitError> {
         if self.device_lost.load(Ordering::Relaxed) {
@@ -596,29 +771,20 @@ impl D3d12FrameRenderer for WindowPresenter {
             }
             _ => {}
         }
-        // SAFETY: `D3d12Renderer` hands on an NV12 texture on this device, in
-        // `COMMON`, with the fence its producer signals when it is written.
+        // SAFETY: the caller's promise for the texture and its fence.
         self.checked(unsafe {
-            self.draw(&mut state, &texture, (&fence, fence_value), (width, height))
+            self.draw(
+                &mut state,
+                &picture.texture,
+                (&picture.fence, picture.fence_value),
+                (width, height),
+                &rows,
+            )
         })?;
         state.pending_keep_alive = Some(keep_alive);
+        #[cfg(test)]
+        self.read_probe(&state);
         Ok(())
-    }
-
-    fn resize(&self, width: u32, height: u32) -> std::result::Result<(), SubmitError> {
-        if self.device_lost.load(Ordering::Relaxed) {
-            return Err(SubmitError::DeviceRemoved);
-        }
-        if width == 0 || height == 0 {
-            return Err(SubmitError::InvalidFrame);
-        }
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| SubmitError::RendererStopped)?;
-        self.checked(self.wait_for(state.last_submitted))?;
-        state.pending_keep_alive = None;
-        self.resize_to(&mut state, width, height)
     }
 }
 
@@ -850,7 +1016,8 @@ mod tests {
     use crate::{
         bus::BusEvent,
         elements::{
-            D3d12Upload, D3d12UploadError, SwScaler, TestVideoOptions, TestVideoSource, WindowEvent,
+            AppSource, D3d12Upload, D3d12UploadError, SwScaler, TestVideoOptions, TestVideoSource,
+            WindowEvent,
         },
         pipeline::Pipeline,
     };
@@ -1025,5 +1192,90 @@ mod tests {
             D3d12WindowRenderer::for_window("screen", &gpu, Arc::new(Headless)),
             Err(D3d12WindowRendererError::NotAWin32Window)
         ));
+    }
+
+    /// A solid NV12 picture of one Y'CbCr value, tagged with `space`, limited
+    /// range.
+    fn solid_nv12(ycbcr: [u8; 3], space: ffmpeg_next::color::Space) -> MediaBuffer {
+        let mut frame = ffmpeg_next::frame::Video::new(ffmpeg_next::format::Pixel::NV12, 64, 64);
+        frame.data_mut(0).fill(ycbcr[0]);
+        for pair in frame.data_mut(1).as_chunks_mut::<2>().0 {
+            pair.copy_from_slice(&ycbcr[1..]);
+        }
+        frame.set_color_space(space);
+        frame.set_color_range(ffmpeg_next::color::Range::MPEG);
+        frame.set_pts(Some(0));
+        MediaBuffer::video(frame)
+    }
+
+    /// Draws `frame` and reads back the centre of the window.
+    fn drawn(gpu: &D3d12Gpu, upload: D3d12Upload, frame: MediaBuffer) -> Option<[u8; 3]> {
+        let (renderer, _events) = match D3d12WindowRenderer::open(
+            "screen",
+            gpu,
+            WindowOptions {
+                title: "media-pp window colour test".into(),
+                width: WIDTH,
+                height: HEIGHT,
+            },
+        ) {
+            Ok(opened) => opened,
+            Err(error) => {
+                eprintln!("skipping: no window can be opened here ({error})");
+                return None;
+            }
+        };
+        let probe = renderer.probe();
+        let (source, handle) = AppSource::new("frames", 4);
+        let (pipeline, ()) = Pipeline::new("window-colour", source, |source, ctx| {
+            let branch = ctx.branch().pipe(upload).to(renderer)?;
+            ctx.attach(source, 0, branch)?;
+            Ok(())
+        })
+        .expect("wiring");
+        pipeline.run().expect("run");
+        handle.push(frame).expect("push");
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while probe.lock().unwrap().is_none() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        pipeline.stop();
+        let errors: Vec<_> = pipeline
+            .bus()
+            .iter()
+            .filter(|event| matches!(event, BusEvent::Error { .. }))
+            .collect();
+        assert!(errors.is_empty(), "{errors:?}");
+        let [r, g, b, _] = probe.lock().unwrap().expect("the frame was drawn");
+        Some([r, g, b])
+    }
+
+    fn near(got: [u8; 3], expected: [u8; 3]) -> bool {
+        got.iter()
+            .zip(expected)
+            .all(|(&got, expected)| got.abs_diff(expected) <= 3)
+    }
+
+    /// Each frame is converted with its own matrix. (72, 107, 220) is R'G'B'
+    /// (230, 20, 20) in BT.709; tagged BT.709 it comes out as that. Read
+    /// with BT.601 — what this renderer used to do with every frame — the
+    /// same numbers are (211, 0, 22), and a BT.601 frame of them is drawn as
+    /// that.
+    #[test]
+    fn a_frame_is_drawn_with_its_own_colour_description() {
+        use ffmpeg_next::color::Space;
+
+        let Some(gpu) = gpu() else { return };
+        let ycbcr = [72, 107, 220];
+        let Some(first) = upload(&gpu) else { return };
+        let Some(bt709) = drawn(&gpu, first, solid_nv12(ycbcr, Space::BT709)) else {
+            return;
+        };
+        assert!(near(bt709, [230, 20, 20]), "BT.709 drawn as {bt709:?}");
+        let Some(second) = upload(&gpu) else { return };
+        let Some(bt601) = drawn(&gpu, second, solid_nv12(ycbcr, Space::BT470BG)) else {
+            return;
+        };
+        assert!(near(bt601, [211, 0, 22]), "BT.601 drawn as {bt601:?}");
     }
 }
