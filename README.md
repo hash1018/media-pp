@@ -88,9 +88,10 @@ Video, by backend:
 
 `D3d11WindowRenderer` and `D3d12WindowRenderer` show frames in a window: one it opens for itself, as a
 GStreamer video sink does, reporting keys and closing as `WindowEvents`, or
-one the application gives it. On Linux, `VulkanWindowRenderer` draws into a
-window the application gives it, X11 or Wayland, from frames in system
-memory, and from CUDA frames too on a `VulkanGpu` made for CUDA. The other
+one the application gives it. `VulkanWindowRenderer` does the same on Linux
+— its own window is X11, XWayland on a Wayland desktop; one it is given may
+be either — from frames in system memory, and from CUDA frames too on a
+`VulkanGpu` made for CUDA. The other
 renderers hand each frame to a
 presenter the program supplies — an implementation of `D3d11FrameRenderer`,
 `D3d12FrameRenderer` or `CudaFrameRenderer` for its own window or UI; the

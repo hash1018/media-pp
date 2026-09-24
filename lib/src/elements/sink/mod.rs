@@ -49,7 +49,10 @@ pub use renderer::{D3d11WindowRenderer, D3d11WindowRendererError};
 pub use renderer::{D3d12FrameRenderer, D3d12Renderer, D3d12RendererError};
 #[cfg(all(target_os = "windows", feature = "d3d12"))]
 pub use renderer::{D3d12WindowRenderer, D3d12WindowRendererError};
-#[cfg(all(target_os = "windows", any(feature = "d3d11", feature = "d3d12")))]
+#[cfg(any(
+    all(target_os = "windows", any(feature = "d3d11", feature = "d3d12")),
+    all(target_os = "linux", feature = "vulkan")
+))]
 pub use renderer::{Key, WindowEvent, WindowEvents, WindowOptions};
 #[cfg(all(target_os = "linux", feature = "pipewire-audio-renderer"))]
 pub use renderer::{

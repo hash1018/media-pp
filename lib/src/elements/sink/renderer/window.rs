@@ -1,5 +1,6 @@
 //! What a window renderer's own window says, and how it is opened —
-//! backend-independent, so the D3D11 and D3D12 window renderers share it.
+//! backend-independent, so the D3D11, D3D12 and Vulkan window renderers
+//! share it.
 
 use std::time::Duration;
 
@@ -72,7 +73,7 @@ pub enum Key {
     /// A letter (lowercase) or a digit.
     Char(char),
     /// Any other key, by the platform's own code for it — on Windows, the
-    /// virtual-key code.
+    /// virtual-key code; on Linux, the X11 keysym.
     Other(u32),
 }
 
@@ -90,6 +91,23 @@ impl Key {
             0x28 => Self::Down,
             0x30..=0x39 => Self::Char(char::from(code as u8)),
             0x41..=0x5A => Self::Char(char::from(code as u8).to_ascii_lowercase()),
+            other => Self::Other(other),
+        }
+    }
+
+    /// Reads an X11 keysym — the unshifted one, so a letter is lowercase.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn from_keysym(keysym: u32) -> Self {
+        match keysym {
+            0x0020 => Self::Space,
+            0xFF0D | 0xFF8D => Self::Enter,
+            0xFF1B => Self::Escape,
+            0xFF51 => Self::Left,
+            0xFF52 => Self::Up,
+            0xFF53 => Self::Right,
+            0xFF54 => Self::Down,
+            0x0030..=0x0039 | 0x0061..=0x007A => Self::Char(char::from(keysym as u8)),
+            0x0041..=0x005A => Self::Char(char::from(keysym as u8).to_ascii_lowercase()),
             other => Self::Other(other),
         }
     }
@@ -124,10 +142,26 @@ impl WindowEvents {
     }
 }
 
-#[cfg(all(test, target_os = "windows"))]
+#[cfg(test)]
 mod tests {
+    #[allow(unused_imports)]
     use super::*;
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn keysyms_read_as_the_keys_a_player_uses() {
+        assert_eq!(Key::from_keysym(0x20), Key::Space);
+        assert_eq!(Key::from_keysym(0xFF51), Key::Left);
+        assert_eq!(Key::from_keysym(0xFF53), Key::Right);
+        assert_eq!(Key::from_keysym(0xFF1B), Key::Escape);
+        assert_eq!(Key::from_keysym(0xFF0D), Key::Enter);
+        assert_eq!(Key::from_keysym(0x66), Key::Char('f'));
+        assert_eq!(Key::from_keysym(0x46), Key::Char('f'));
+        assert_eq!(Key::from_keysym(0x31), Key::Char('1'));
+        assert_eq!(Key::from_keysym(0xFFBE), Key::Other(0xFFBE));
+    }
+
+    #[cfg(target_os = "windows")]
     #[test]
     fn virtual_keys_read_as_the_keys_a_player_uses() {
         assert_eq!(Key::from_virtual_key(0x20), Key::Space);

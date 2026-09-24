@@ -1,0 +1,8 @@
+[package]
+name = "cuda_decode_render"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[target.'cfg(target_os = "linux")'.dependencies]
+media-pp = { path = "../../../lib", features = ["cuda", "vulkan"] }

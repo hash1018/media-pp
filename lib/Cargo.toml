@@ -112,6 +112,13 @@ naga = { version = "30", optional = true, default-features = false, features = [
 # The window a `VulkanWindowRenderer` is given, as on Windows. `std` for
 # its `HandleError` to be an `Error`.
 raw-window-handle = { version = "0.6", optional = true, features = ["std"] }
+# The window `VulkanWindowRenderer::open` makes for itself: plain X11 through
+# libxcb, which Vulkan's XCB surface needs the connection of. `dl-libxcb`
+# opens libxcb at run time, so building needs no X11 development package.
+x11rb = { version = "0.13", optional = true, default-features = false, features = [
+    "allow-unsafe-code",
+    "dl-libxcb",
+] }
 
 # Every `unsafe` block in this crate states why it is sound. The rule is
 # worth enforcing rather than remembering: writing these honestly is what
@@ -132,8 +139,9 @@ cuda = ["dep:ab_glyph"]
 # frames in system memory on any GPU, and CUDA frames too when `cuda` is also
 # on. Named for what draws rather than for what it takes, as a GStreamer sink
 # is, because it takes more than one memory domain. Linux only: its CUDA
-# path shares memory through a POSIX file descriptor.
-vulkan = ["dep:ash", "dep:ash-window", "dep:naga", "dep:raw-window-handle"]
+# path shares memory through a POSIX file descriptor, and the window it
+# opens for itself is X11.
+vulkan = ["dep:ash", "dep:ash-window", "dep:naga", "dep:raw-window-handle", "dep:x11rb"]
 d3d12 = [
     "dep:windows",
     # `D3d12WindowRenderer`'s own window, drawn into through a swap chain, or

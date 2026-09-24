@@ -932,6 +932,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "cuda_decode_render"
+version = "0.1.0"
+dependencies = [
+ "media-pp",
+]
+
+[[package]]
 name = "cuda_record"
 version = "0.1.0"
 dependencies = [
@@ -2033,6 +2040,7 @@ dependencies = [
  "whisper-rs",
  "windows",
  "windows-core",
+ "x11rb",
 ]
 
 [[package]]

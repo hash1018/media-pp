@@ -12,7 +12,10 @@ mod linux;
 mod submit_error;
 #[cfg(all(target_os = "linux", feature = "vulkan"))]
 mod vulkan;
-#[cfg(all(target_os = "windows", any(feature = "d3d11", feature = "d3d12")))]
+#[cfg(any(
+    all(target_os = "windows", any(feature = "d3d11", feature = "d3d12")),
+    all(target_os = "linux", feature = "vulkan")
+))]
 mod window;
 #[cfg(all(
     target_os = "windows",
@@ -27,7 +30,10 @@ pub use linux::*;
 pub use submit_error::SubmitError;
 #[cfg(all(target_os = "linux", feature = "vulkan"))]
 pub use vulkan::*;
-#[cfg(all(target_os = "windows", any(feature = "d3d11", feature = "d3d12")))]
+#[cfg(any(
+    all(target_os = "windows", any(feature = "d3d11", feature = "d3d12")),
+    all(target_os = "linux", feature = "vulkan")
+))]
 pub use window::{Key, WindowEvent, WindowEvents, WindowOptions};
 #[cfg(all(
     target_os = "windows",

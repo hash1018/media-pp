@@ -17,3 +17,5 @@ pub(crate) mod v4l2;
 /// The Vulkan device `VulkanWindowRenderer` draws with — see `VulkanGpu`.
 #[cfg(feature = "vulkan")]
 pub(crate) mod vulkan;
+#[cfg(feature = "vulkan")]
+pub(crate) mod x11_window;

@@ -27,9 +27,9 @@ use crate::{
     },
     control::ControlMsg,
     element::{Element, ElementType, Sink, element_pp_log},
-    elements::VulkanGpu,
+    elements::{VulkanGpu, WindowEvents, WindowOptions},
     error::Result,
-    platform::linux::vulkan::VulkanShared,
+    platform::linux::{vulkan::VulkanShared, x11_window::OwnedWindow},
     pp_log::{PpLog, pp_error, pp_info},
 };
 
@@ -45,6 +45,20 @@ pub enum VulkanWindowRendererError {
     /// The window has no handle to give, or no display to find it on.
     #[error("the window given has no handle to draw into: {0}")]
     NoHandle(#[from] HandleError),
+
+    /// [`VulkanWindowRenderer::open`] was asked for a window with no area.
+    #[error("a window of {width}x{height} has nothing to draw into")]
+    EmptyWindow {
+        /// Width asked for.
+        width: u32,
+        /// Height asked for.
+        height: u32,
+    },
+
+    /// [`VulkanWindowRenderer::open`] could not open its window — no X
+    /// display to open it on, most likely.
+    #[error("could not open a window: {0}")]
+    Window(String),
 
     /// Vulkan would not make a surface for the window — one that is neither
     /// X11 nor Wayland, most likely.
@@ -130,8 +144,9 @@ impl WindowSize {
     }
 }
 
-/// A terminal sink that shows video frames in a window the application
-/// gives it — an X11 window or a Wayland one, such as a `winit` window.
+/// A terminal sink that shows video frames in a window — one it opens for
+/// itself, the way a GStreamer video sink does when nobody hands it one, or
+/// one the application gives it, X11 or Wayland, such as a `winit` window.
 ///
 /// # What it takes
 ///
@@ -167,9 +182,10 @@ impl WindowSize {
 ///
 /// # Following the window's size
 ///
-/// On X11 it reads the window's size before every frame, so nothing has to
-/// tell it about a resize. On Wayland nothing can be read — see
-/// [`WindowSize`], which the application sets from its own resize events.
+/// On X11 — its own window always is — it reads the window's size before
+/// every frame, so nothing has to tell it about a resize. On a Wayland
+/// window it was given nothing can be read — see [`WindowSize`], which the
+/// application sets from its own resize events.
 pub struct VulkanWindowRenderer {
     name: Arc<str>,
     pp_log: PpLog,
@@ -190,9 +206,43 @@ struct Drawing {
 }
 
 impl VulkanWindowRenderer {
+    /// Opens a window of its own on a thread of its own and draws into it.
+    ///
+    /// What the window reports — keys, resizing, the user closing it —
+    /// comes out of the [`WindowEvents`] returned beside it; the renderer
+    /// acts on none of it but resizing. Closing only hides the window, and
+    /// the window is destroyed when the renderer is dropped.
+    ///
+    /// It is an X11 window, opened through libxcb rather than `winit`, so it
+    /// does not collide with an application's own event loop, and several
+    /// can be open at once. On a Wayland desktop it is an XWayland window,
+    /// with the title bar and borders every other X11 window there has;
+    /// where there is no X display at all this fails with
+    /// [`VulkanWindowRendererError::Window`], and [`Self::for_window`] with
+    /// a Wayland window of the application's own is the way to draw.
+    pub fn open(
+        name: impl Into<String>,
+        gpu: &VulkanGpu,
+        options: WindowOptions,
+    ) -> std::result::Result<(Self, WindowEvents), VulkanWindowRendererError> {
+        if options.width == 0 || options.height == 0 {
+            return Err(VulkanWindowRendererError::EmptyWindow {
+                width: options.width,
+                height: options.height,
+            });
+        }
+        let (events_tx, events) = crossbeam_channel::unbounded();
+        let window =
+            OwnedWindow::open(&options, events_tx).map_err(VulkanWindowRendererError::Window)?;
+        let (display, handle) = window.handles();
+        let renderer = Self::around(name, gpu, display, handle, Arc::new(window))?;
+        Ok((renderer, WindowEvents { events }))
+    }
+
     /// Draws into `window`, which the application owns and runs the event
     /// loop of. The renderer keeps its `Arc`, so the window cannot be dropped
-    /// while it is being drawn into.
+    /// while it is being drawn into. Keys and closing are the application's
+    /// own events here; there is nothing for the renderer to report.
     ///
     /// Frames it draws must come from `gpu`'s own CUDA device where they are
     /// CUDA frames; frames in system memory can come from anywhere.
@@ -204,12 +254,24 @@ impl VulkanWindowRenderer {
     where
         W: HasWindowHandle + HasDisplayHandle + Send + Sync + 'static,
     {
-        let name: Arc<str> = name.into().into();
-        let pp_log = element_pp_log(ElementType::VulkanWindowRenderer, &name, None);
         let display = window.display_handle()?.as_raw();
         let handle = window.window_handle()?.as_raw();
+        Self::around(name, gpu, display, handle, window)
+    }
+
+    /// Either way in: a presenter for the window the handles name, which
+    /// `keep` keeps alive until after its surface is gone.
+    fn around(
+        name: impl Into<String>,
+        gpu: &VulkanGpu,
+        display: RawDisplayHandle,
+        handle: RawWindowHandle,
+        keep: Arc<dyn Any + Send + Sync>,
+    ) -> std::result::Result<Self, VulkanWindowRendererError> {
+        let name: Arc<str> = name.into().into();
+        let pp_log = element_pp_log(ElementType::VulkanWindowRenderer, &name, None);
         let size = WindowSize::default();
-        let presenter = Presenter::new(gpu.shared(), display, handle, window, size.clone())?;
+        let presenter = Presenter::new(gpu.shared(), display, handle, keep, size.clone())?;
         #[cfg(feature = "cuda")]
         let domains = if gpu.shared().cuda.is_some() {
             MemoryDomainSet::from_slice(&[MemoryDomain::System, MemoryDomain::Cuda])
@@ -702,16 +764,13 @@ impl Staging {
 }
 
 impl Presenter {
-    fn new<W>(
+    fn new(
         gpu: &Arc<VulkanShared>,
         display: RawDisplayHandle,
         handle: RawWindowHandle,
-        window: Arc<W>,
+        window: Arc<dyn Any + Send + Sync>,
         size: WindowSize,
-    ) -> std::result::Result<Self, VulkanWindowRendererError>
-    where
-        W: Send + Sync + 'static,
-    {
+    ) -> std::result::Result<Self, VulkanWindowRendererError> {
         let gpu = Arc::clone(gpu);
         // SAFETY: `display` and `handle` come from a window the caller passed
         // in, whose `Arc` is kept in the returned presenter until after the
@@ -2211,6 +2270,95 @@ mod tests {
             assert_eq!(layout.planes(8, 8).len(), layout.plane_count());
             assert_eq!(Layout::ALL[layout.index()], layout);
         }
+    }
+
+    /// Its own window, end to end: frames draw into it; a close button
+    /// hides it and says so, and drawing goes on into the hidden window
+    /// without blocking — a stop has to be able to get through — and
+    /// dropping the renderer takes the window and its events with it.
+    #[test]
+    fn its_own_window_draws_hides_when_closed_and_goes_when_dropped() {
+        use std::time::{Duration, Instant};
+
+        use x11rb::{
+            connection::Connection,
+            protocol::xproto::{ClientMessageEvent, ConnectionExt as _, EventMask},
+            xcb_ffi::XCBConnection,
+        };
+
+        use crate::elements::WindowEvent;
+
+        let gpu = match VulkanGpu::new() {
+            Ok(gpu) => gpu,
+            Err(error) => {
+                eprintln!("skipping: no Vulkan device ({error})");
+                return;
+            }
+        };
+        let options = WindowOptions {
+            title: "media-pp renderer test".into(),
+            width: 320,
+            height: 180,
+        };
+        let (mut renderer, events) = match VulkanWindowRenderer::open("screen", &gpu, options) {
+            Ok(opened) => opened,
+            Err(error) => {
+                eprintln!("skipping: no window can be opened here ({error})");
+                return;
+            }
+        };
+        let window = renderer
+            .presenter
+            ._window
+            .downcast_ref::<OwnedWindow>()
+            .expect("its own window")
+            .id();
+        let pool = crate::pool::UnboundObjectPool::new(
+            0,
+            || ffmpeg::frame::Video::new(Pixel::NV12, 320, 180),
+            |_| {},
+        );
+        let mut draw = |luma: u8| {
+            let mut frame = pool.get();
+            frame.data_mut(0).fill(luma);
+            frame.data_mut(1).fill(128);
+            let started = Instant::now();
+            renderer
+                .consume(MediaBuffer::Video(Arc::new(frame)))
+                .expect("the frame draws");
+            started.elapsed()
+        };
+        for luma in 0..10 {
+            draw(luma * 20);
+        }
+
+        // What a window manager sends when the close button is pressed.
+        let (wm, _) = XCBConnection::connect(None).expect("the display the window is on");
+        let atom = |name: &[u8]| wm.intern_atom(false, name).unwrap().reply().unwrap().atom;
+        let request = ClientMessageEvent::new(
+            32,
+            window,
+            atom(b"WM_PROTOCOLS"),
+            [atom(b"WM_DELETE_WINDOW"), 0, 0, 0, 0],
+        );
+        wm.send_event(false, window, EventMask::NO_EVENT, request)
+            .unwrap();
+        wm.flush().unwrap();
+        let closed = std::iter::from_fn(|| events.recv_timeout(Duration::from_secs(5)))
+            .find(|event| *event == WindowEvent::Closed);
+        assert_eq!(closed, Some(WindowEvent::Closed));
+
+        // Hidden, and still drawn into, a frame at a time.
+        for luma in 0..10 {
+            let took = draw(luma * 20);
+            assert!(
+                took < Duration::from_secs(2),
+                "a hidden window took {took:?}"
+            );
+        }
+
+        drop(renderer);
+        assert_eq!(events.recv(), None, "the window's events end with it");
     }
 
     #[test]

@@ -549,24 +549,29 @@ compile error with no explanation.
 ### Added
 
 - **`VulkanGpu` and `VulkanWindowRenderer`: video in a window on Linux,
-  from system memory or CUDA.** A new `vulkan` feature. `VulkanWindowRenderer`
-  draws into a window the application gives it with `for_window` — X11 or
-  Wayland, anything with a `raw-window-handle`, such as a `winit` window,
-  kept alive by the renderer — and takes NV12, YUV420P and BGRA frames in
+  from system memory or CUDA.** A new `vulkan` feature, and the Linux
+  counterpart of `D3d11WindowRenderer`. `open` opens a window of its own on
+  a thread of its own and returns the same `WindowOptions` and
+  `WindowEvents` as on Windows — keys, resizing, closing, which hides the
+  window — as a plain X11 window through libxcb, not `winit`, so it does
+  not collide with an application's event loop; on a Wayland desktop it is
+  an XWayland window. `for_window` draws into a window the application
+  gives it instead, X11 or Wayland, anything with a `raw-window-handle`,
+  kept alive by the renderer. It takes NV12, YUV420P and BGRA frames in
   system memory, each drawn by a shader of its own with no conversion in
   front, and NV12 and BGRA CUDA frames too where its `VulkanGpu` was made
-  with `for_cuda`, which pairs it with the GPU CUDA decodes on by UUID. A CUDA frame is copied
-  device to device into memory the renderer's device allocated and CUDA
-  imported; what `render_common`'s `CudaWindowRenderer` did for the
-  examples, in the library. Each YUV frame is drawn by its own colour
-  description — BT.709, BT.601 or BT.2020, limited or full range, and by
-  height where it says nothing — and every frame letterboxed, and presented
-  in step with the display. On X11 it follows the window's size by itself; on Wayland,
-  where a client sets its own size, the application passes it on through
-  `WindowSize`. Named for what draws rather than for the frames it takes,
-  like a GStreamer sink, because it takes more than one memory domain. The
-  new `vulkan_window_render` example shows it. `open`, a window of its
-  own with `WindowEvents` as on Windows, is still to come.
+  with `for_cuda`, which pairs it with the GPU CUDA decodes on by UUID. A
+  CUDA frame is copied device to device into memory the renderer's device
+  allocated and CUDA imported — what `render_common`'s `CudaWindowRenderer`
+  did for the examples, in the library. Each YUV frame is drawn by its own
+  colour description — BT.709, BT.601 or BT.2020, limited or full range,
+  and by height where it says nothing — and every frame letterboxed, and
+  presented in step with the display. On X11 it follows the window's size
+  by itself; on a Wayland window, where a client sets its own size, the
+  application passes it on through `WindowSize`. Named for what draws
+  rather than for the frames it takes, like a GStreamer sink, because it
+  takes more than one memory domain. `cuda_decode_render` shows `open`,
+  with NVDEC and no `winit`; `vulkan_window_render` shows `for_window`.
 
 - **`D3d11Gpu` and `D3d11WindowRenderer`: D3D11 with a window of its own.**
   `D3d11Gpu::new()` makes the one device a pipeline's D3D11 elements share,
