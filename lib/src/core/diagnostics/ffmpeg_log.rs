@@ -25,6 +25,20 @@ use ffmpeg_next::ffi;
 use super::log::{Level, emit, enabled, is_active};
 use crate::pp_log::PpLog;
 
+/// The `va_list` FFmpeg's log callback and its formatting functions take, as
+/// the bindings spell it on this target.
+///
+/// Not `ffi::va_list` everywhere. On x86-64 outside Windows the C type is a
+/// one-element array, `__va_list_tag[1]`, and an array parameter decays to a
+/// pointer: `ffi::va_list` names the array, while `av_log_set_callback`,
+/// `av_log_default_callback` and `av_log_format_line2` are all bound taking
+/// `*mut __va_list_tag`. Windows' `va_list` is a pointer already, and
+/// AArch64's a struct passed by value, and each matches its own alias.
+#[cfg(all(target_arch = "x86_64", not(target_os = "windows")))]
+type VaList = *mut ffi::__va_list_tag;
+#[cfg(not(all(target_arch = "x86_64", not(target_os = "windows"))))]
+type VaList = ffi::va_list;
+
 /// The longest message kept whole. FFmpeg's own default callback uses the
 /// same bound; anything longer is cut, not dropped.
 const LINE_BYTES: usize = 1024;
@@ -66,12 +80,7 @@ fn level_of(av_level: c_int) -> Option<Level> {
 /// A level the logger does not keep is dropped before anything is
 /// formatted. Once the logger has stopped — a message racing the guard's
 /// drop — it goes where FFmpeg would have sent it.
-unsafe extern "C" fn route(
-    avcl: *mut c_void,
-    av_level: c_int,
-    fmt: *const c_char,
-    vl: ffi::va_list,
-) {
+unsafe extern "C" fn route(avcl: *mut c_void, av_level: c_int, fmt: *const c_char, vl: VaList) {
     // A panic must not unwind into C; a message lost to one is only a
     // message lost.
     let _ = catch_unwind(AssertUnwindSafe(|| {
