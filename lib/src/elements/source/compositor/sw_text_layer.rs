@@ -10,7 +10,7 @@ use thiserror::Error as ThisError;
 
 use super::{
     sw_video_compositor::{SwVideoCompositorError, SwVideoCompositorHandle, SwVideoLayerHandle},
-    text_layer::{TextLayer, TextRasterError, rasterize_bgra},
+    text_layer::{TextFontError, TextLayer, TextRasterError, load_font, rasterize_bgra},
     video_layer::{VideoLayer, VideoRect},
 };
 use crate::{color::Color, pool::UnboundObjectPool};
@@ -45,6 +45,15 @@ pub enum SwTextLayerError {
     /// The compositor, or this layer's registration in it, is gone.
     #[error(transparent)]
     Compositor(#[from] SwVideoCompositorError),
+}
+
+impl From<TextFontError> for SwTextLayerError {
+    fn from(error: TextFontError) -> Self {
+        match error {
+            TextFontError::Size(size) => Self::InvalidFontSize(size),
+            TextFontError::Font(error) => Self::InvalidFont(error),
+        }
+    }
 }
 
 impl From<TextRasterError> for SwTextLayerError {
@@ -161,10 +170,7 @@ impl SwVideoCompositorHandle {
         name: impl Into<String>,
         text_layer: TextLayer,
     ) -> Result<SwTextLayerHandle, SwTextLayerError> {
-        if !text_layer.font_size.is_finite() || text_layer.font_size <= 0.0 {
-            return Err(SwTextLayerError::InvalidFontSize(text_layer.font_size));
-        }
-        let font = FontArc::try_from_vec(text_layer.font_data)?;
+        let font = load_font(text_layer.font_data, text_layer.font_size)?;
         // No text yet, so no size: a hidden placeholder until the first
         // `set_text` gives it one.
         let mut placeholder = VideoLayer::new(VideoRect::new(text_layer.x, text_layer.y, 1, 1));

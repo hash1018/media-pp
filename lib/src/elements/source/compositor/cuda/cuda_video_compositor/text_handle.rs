@@ -9,7 +9,9 @@ use std::sync::{
 
 use arc_swap::ArcSwapOption;
 
-use super::super::super::text_layer::{TextLayer, TextRasterError, rasterize_coverage};
+use super::super::super::text_layer::{
+    TextFontError, TextLayer, TextRasterError, load_font, rasterize_coverage,
+};
 use super::{CudaVideoCompositorError, CudaVideoCompositorHandle, validate_opacity};
 use crate::{
     color::Color,
@@ -106,16 +108,16 @@ impl CudaVideoCompositorHandle {
         name: impl Into<String>,
         text_layer: TextLayer,
     ) -> std::result::Result<CudaTextLayerHandle, CudaVideoCompositorError> {
-        if !text_layer.font_size.is_finite() || text_layer.font_size <= 0.0 {
-            return Err(CudaVideoCompositorError::InvalidFontSize(
-                text_layer.font_size,
-            ));
-        }
+        let font =
+            load_font(text_layer.font_data, text_layer.font_size).map_err(|error| match error {
+                TextFontError::Size(size) => CudaVideoCompositorError::InvalidFontSize(size),
+                TextFontError::Font(error) => {
+                    CudaVideoCompositorError::InvalidFont(error.to_string())
+                }
+            })?;
         let Some(shared) = self.shared.upgrade() else {
             return Err(CudaVideoCompositorError::Stopped);
         };
-        let font = ab_glyph::FontArc::try_from_vec(text_layer.font_data)
-            .map_err(|error| CudaVideoCompositorError::InvalidFont(error.to_string()))?;
         let state = Arc::new(TextLayerState {
             font,
             font_size: text_layer.font_size,

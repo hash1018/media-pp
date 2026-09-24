@@ -22,7 +22,7 @@ use crate::{
     pool::UnboundObjectPool,
 };
 
-use super::super::super::text_layer::{TextRasterError, rasterize_bgra};
+use super::super::super::text_layer::{TextFontError, TextRasterError, rasterize_bgra};
 #[cfg(test)]
 use super::super::super::video_layer::MAX_DIMENSION;
 use super::super::super::video_layer::VideoRect;
@@ -100,26 +100,11 @@ pub struct D3d11TextLayerHandle {
 }
 
 impl D3d11TextLayerHandle {
-    /// Validates `font_size` and parses `font_data`, so
-    /// [`super::D3d11VideoCompositorHandle::add_text_layer`] can fail
-    /// *before* registering anything — everything that can fail happens
-    /// here, ahead of the `add_layer` call, so a rejected font never
-    /// leaves a dangling placeholder registration behind.
-    pub(crate) fn parse_font(
-        font_data: Vec<u8>,
-        font_size: f32,
-    ) -> std::result::Result<FontArc, D3d11TextLayerError> {
-        if !font_size.is_finite() || font_size <= 0.0 {
-            return Err(D3d11TextLayerError::InvalidFontSize(font_size));
-        }
-        Ok(FontArc::try_from_vec(font_data)?)
-    }
-
     /// `pub(crate)`, not `pub`, and infallible: by the time this is called
     /// (from [`super::D3d11VideoCompositorHandle::add_text_layer`], the
     /// only place outside this crate that can ever produce a
     /// `D3d11TextLayerHandle`), `font` has already been validated via
-    /// [`Self::parse_font`] and `device` is guaranteed to match `layer`'s
+    /// `load_font` and `device` is guaranteed to match `layer`'s
     /// own compositor — a public constructor here would let a caller
     /// reintroduce that mismatch.
     pub(crate) fn new(
@@ -219,6 +204,15 @@ fn rasterize(
     rasterize_bgra(font, size_px, text, color).map_err(text_raster_error)
 }
 
+impl From<TextFontError> for D3d11TextLayerError {
+    fn from(error: TextFontError) -> Self {
+        match error {
+            TextFontError::Size(size) => Self::InvalidFontSize(size),
+            TextFontError::Font(error) => Self::InvalidFont(error),
+        }
+    }
+}
+
 fn text_raster_error(error: TextRasterError) -> D3d11TextLayerError {
     match error {
         TextRasterError::TooLarge { width, height } => {
@@ -279,16 +273,6 @@ mod tests {
     fn system_font() -> Option<FontArc> {
         let data = std::fs::read(r"C:\Windows\Fonts\arial.ttf").ok()?;
         FontArc::try_from_vec(data).ok()
-    }
-
-    #[test]
-    fn rejects_invalid_font_sizes_before_parsing_font_data() {
-        for size in [0.0, -1.0, f32::NAN, f32::INFINITY] {
-            assert!(matches!(
-                D3d11TextLayerHandle::parse_font(Vec::new(), size),
-                Err(D3d11TextLayerError::InvalidFontSize(value)) if value.to_bits() == size.to_bits()
-            ));
-        }
     }
 
     #[test]

@@ -1,6 +1,7 @@
 //! [`TextLayer`] — backend-agnostic construction-time settings for a
 //! dynamic text layer, the text sibling of [`super::video_layer::VideoLayer`]
-//! — plus the glyph rasterization both backends that draw one share.
+//! — plus what every compositor that draws one shares: loading its font
+//! and rasterizing glyphs.
 //!
 //! Rasterizing is backend-agnostic by nature: `ab_glyph` turns a font and a
 //! string into per-pixel coverage, and what differs is only what each
@@ -29,6 +30,30 @@ pub(crate) struct TextMask {
 pub(crate) enum TextRasterError {
     TooLarge { width: u64, height: u64 },
     AllocationFailed { bytes: usize },
+}
+
+/// Why a [`TextLayer`]'s font cannot be drawn with, which each backend maps
+/// into its own text-layer error type, as it does [`TextRasterError`].
+#[derive(Debug)]
+pub(crate) enum TextFontError {
+    /// The glyph pixel height is non-positive or non-finite.
+    Size(f32),
+    /// The bytes are not a supported TrueType or OpenType font.
+    Font(ab_glyph::InvalidFont),
+}
+
+/// Checks `font_size` and parses `font_data` — everything an
+/// `add_text_layer` can fail on, so each can do it before registering
+/// anything and a rejected font never leaves a placeholder behind. The size
+/// is checked first, so a bad size is reported as such whatever the bytes.
+pub(crate) fn load_font(
+    font_data: Vec<u8>,
+    font_size: f32,
+) -> Result<ab_glyph::FontArc, TextFontError> {
+    if !font_size.is_finite() || font_size <= 0.0 {
+        return Err(TextFontError::Size(font_size));
+    }
+    ab_glyph::FontArc::try_from_vec(font_data).map_err(TextFontError::Font)
 }
 
 /// A rasterized string this crate refuses to allocate for — a guard against
@@ -196,5 +221,28 @@ impl TextLayer {
             x: 0,
             y: 0,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_bad_size_is_refused_before_the_font_is_read() {
+        for size in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+            assert!(matches!(
+                load_font(Vec::new(), size),
+                Err(TextFontError::Size(value)) if value.to_bits() == size.to_bits()
+            ));
+        }
+    }
+
+    #[test]
+    fn bytes_that_are_no_font_are_refused() {
+        assert!(matches!(
+            load_font(b"not a font".to_vec(), 24.0),
+            Err(TextFontError::Font(_))
+        ));
     }
 }

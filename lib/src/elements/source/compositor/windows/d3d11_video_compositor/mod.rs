@@ -42,7 +42,7 @@ pub use text_handle::{D3d11TextLayerError, D3d11TextLayerHandle};
 pub use video_handle::D3d11VideoLayerHandle;
 
 use super::super::{
-    text_layer::TextLayer,
+    text_layer::{TextLayer, load_font},
     video_layer::{
         self, LayerGeometry, MAX_DIMENSION, VideoLayer, VideoLayerError, VideoSourceRect,
     },
@@ -463,7 +463,7 @@ impl D3d11VideoCompositorHandle {
         };
         // Validate everything that can fail before replacing an existing
         // registration with the same name.
-        let font = D3d11TextLayerHandle::parse_font(text_layer.font_data, text_layer.font_size)?;
+        let font = load_font(text_layer.font_data, text_layer.font_size)?;
         // Placeholder rect: no text has been rasterized yet, so its exact
         // size is unknown. `D3d11TextLayerHandle::set_text` immediately overwrites
         // this with the real bitmap size the first time it's called.
