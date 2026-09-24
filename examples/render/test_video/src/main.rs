@@ -1,6 +1,7 @@
 //! TestVideoSource -> Queue -> SwScaler -> GPU upload -> Renderer: a synthetic
 //! moving-gradient stream, no file/camera/decoder involved at all, presented in
-//! a native window via the platform GPU renderer — D3D12 on Windows. On Linux
+//! a native window via the platform GPU renderer — on Windows, uploaded to
+//! D3D12 and drawn into `D3d12WindowRenderer`'s own window. On Linux
 //! it is TestVideoSource -> Queue -> VulkanWindowRenderer: the renderer draws
 //! the source's YUV420P as it comes and uploads it itself, in a window of its
 //! own. This proves the source, conversion, upload, and presentation path
@@ -35,29 +36,30 @@ fn main() -> impl std::process::Termination {
 mod windows_example {
     use media_pp::{
         bus::BusEvent,
-        elements::{D3d12Upload, SwScaler, TestVideoOptions, TestVideoSource},
+        elements::{
+            D3d12Gpu, D3d12Upload, D3d12WindowRenderer, SwScaler, TestVideoOptions,
+            TestVideoSource, WindowOptions,
+        },
         ffmpeg,
         pipeline::Pipeline,
     };
-    use render_common::{D3d12GpuContext, Shutdown};
-    use winit::raw_window_handle::RawWindowHandle;
 
-    pub(super) fn run() {
-        render_common::run_window("media-pp test_video", 1280, 720, |target, shutdown| {
-            let RawWindowHandle::Win32(handle) = target.window else {
-                panic!("test_video example only supports Windows");
-            };
-            play(handle.hwnd.get(), target.width, target.height, &shutdown)
-        });
-    }
-
-    fn play(hwnd: isize, width: u32, height: u32, shutdown: &Shutdown) -> media_pp::Result<()> {
+    pub(super) fn run() -> media_pp::Result<()> {
         let _log_guard = media_pp::log::init(
             env!("CARGO_PKG_NAME"),
             "logs",
             media_pp::log::Level::Trace,
             7,
         )?;
+
+        let gpu = D3d12Gpu::new()?;
+        let window_options = WindowOptions {
+            title: "media-pp test_video".into(),
+            ..WindowOptions::default()
+        };
+        let (width, height) = (window_options.width, window_options.height);
+        let (renderer, window) = D3d12WindowRenderer::open("renderer", &gpu, window_options)?;
+        let shutdown = render_common::stop_on_close([window]);
 
         let options = TestVideoOptions {
             width,
@@ -66,15 +68,11 @@ mod windows_example {
         };
         let source = TestVideoSource::new("test-video", options);
 
-        let gpu = D3d12GpuContext::new()?;
-
         let (pipeline, ()) = Pipeline::new("test-video", source, |source, ctx| {
-            let renderer =
-                render_common::d3d12_window_renderer("renderer", &gpu, hwnd, width, height)?;
             let branch = ctx
                 .branch()
                 .queue("frames", 8) // thread boundary so rendering doesn't block generation
-                // `D3d12Renderer` draws from a device resource only, so the
+                // `D3d12WindowRenderer` draws from a device resource only, so the
                 // generated system-memory frames are converted to the NV12
                 // layout `D3d12Upload` writes and uploaded here.
                 .pipe(SwScaler::new(
@@ -95,7 +93,7 @@ mod windows_example {
         // `Renderer`) shows up as a `BusEvent::Error` here instead of through
         // a returned `Result`. `TestVideoSource` never reaches `Eos` on its
         // own — closing the window is what ends this (see `Ok(())` below,
-        // reached when the shared shell stops this published pipeline, or
+        // reached when closing the window stops this published pipeline, or
         // when an error ends it below).
         if shutdown.publish(std::slice::from_ref(&pipeline)) {
             return Ok(());

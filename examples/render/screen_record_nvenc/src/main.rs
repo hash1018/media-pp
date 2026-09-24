@@ -45,12 +45,11 @@ mod windows_example {
     use media_pp::ffmpeg;
     use media_pp::{
         elements::{
-            CaptureMode, D3d11VideoCodec, D3d11VideoEncoder, D3d11VideoEncoderOptions,
+            CaptureMode, D3d11Gpu, D3d11VideoCodec, D3d11VideoEncoder, D3d11VideoEncoderOptions,
             D3d11VideoInputFormat, DxgiCaptureOptions, DxgiCaptureSource, FileMuxer,
         },
         pipeline::Pipeline,
     };
-    use render_common::D3d11GpuContext;
 
     use crate::common;
 
@@ -75,7 +74,7 @@ mod windows_example {
         };
         let (source, format, device) = DxgiCaptureSource::open("screen", capture_options)?;
         let device = device.expect("CaptureMode::Gpu always returns a device");
-        let gpu = D3d11GpuContext::new(Some(device))?;
+        let gpu = D3d11Gpu::from_device(device)?;
 
         let encoder = D3d11VideoEncoder::new(
             "encoder",

@@ -16,7 +16,6 @@ windows = { version = "0.62", features = [
     "Win32_Graphics_Dwm",
     "Win32_UI_WindowsAndMessaging",
 ] }
-winit = "0.30"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 media-pp = { path = "../../../lib", features = [

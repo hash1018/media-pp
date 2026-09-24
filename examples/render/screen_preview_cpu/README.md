@@ -3,8 +3,9 @@
 `CaptureSource -> Queue -> SwScaler(NV12) -> Queue -> GPU upload -> Renderer`:
 captures the desktop into system memory, converts/resizes it to window-sized
 NV12, uploads it to the GPU, and presents it without an encode/decode round
-trip. Windows uses DXGI capture and D3D12 upload/rendering. Linux uses the
-xdg-desktop-portal PipeWire CPU path, CUDA upload, and Vulkan presentation.
+trip. Windows uses DXGI capture, D3D12 upload, and `D3d12WindowRenderer`'s own
+window. Linux uses the xdg-desktop-portal PipeWire CPU path, CUDA upload, and
+Vulkan presentation.
 
 No `Pacer` here, confirmed unneeded: `DxgiCaptureSource` previously emitted
 variable-rate (real wall-clock pts, push-on-change), and removing `Pacer`

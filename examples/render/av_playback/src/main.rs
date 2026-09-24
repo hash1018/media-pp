@@ -20,7 +20,7 @@
 //! on the GPU:
 //!
 //!     Windows: FileDemuxer -> SwDecoder -> Queue -> VideoSynchronizer
-//!              -> SwScaler(NV12) -> D3d12Upload -> D3d12Renderer
+//!              -> SwScaler(NV12) -> D3d12Upload -> D3d12WindowRenderer
 //!     Linux:   FileDemuxer -> CudaDecoder -> Queue -> VideoSynchronizer
 //!              -> VulkanWindowRenderer
 //!
@@ -35,17 +35,12 @@ fn main() {
 }
 
 #[cfg(target_os = "windows")]
-fn main() {
+fn main() -> media_pp::Result<()> {
     let Some(path) = std::env::args().nth(1) else {
         eprintln!("usage: av_playback <video-with-audio.mp4>");
         std::process::exit(2);
     };
-    render_common::run_window(
-        "media-pp A/V playback",
-        1280,
-        720,
-        move |target, shutdown| windows_example::play(path, target, shutdown),
-    );
+    windows_example::play(path)
 }
 
 #[cfg(target_os = "linux")]
@@ -89,28 +84,20 @@ mod common {
 
 #[cfg(target_os = "windows")]
 mod windows_example {
-    use std::sync::Arc;
-
     use media_pp::{
         Error,
         bus::BusEvent,
         elements::{
-            AudioResampler, D3d12Upload, SwDecoder, SwScaler, VideoSynchronizer, WasapiRenderer,
-            WasapiRendererOptions,
+            AudioResampler, D3d12Gpu, D3d12Upload, D3d12WindowRenderer, SwDecoder, SwScaler,
+            VideoSynchronizer, WasapiRenderer, WasapiRendererOptions, WindowOptions,
         },
         ffmpeg,
         pipeline::Pipeline,
     };
-    use render_common::{D3d12GpuContext, Shutdown, WindowTarget};
-    use winit::raw_window_handle::RawWindowHandle;
 
     use crate::common;
 
-    pub fn play(
-        path: String,
-        target: WindowTarget,
-        shutdown: Arc<Shutdown>,
-    ) -> media_pp::Result<()> {
+    pub fn play(path: String) -> media_pp::Result<()> {
         let _log_guard = media_pp::log::init(
             env!("CARGO_PKG_NAME"),
             "logs",
@@ -119,11 +106,14 @@ mod windows_example {
         )?;
         let (source, streams) = common::open(&path)?;
 
-        let RawWindowHandle::Win32(handle) = target.window else {
-            return Err(Error::Other("not a Win32 window".into()));
+        let gpu = D3d12Gpu::new()?;
+        let window_options = WindowOptions {
+            title: "media-pp A/V playback".into(),
+            ..WindowOptions::default()
         };
-        let hwnd = handle.hwnd.get();
-        let gpu = D3d12GpuContext::new()?;
+        let (width, height) = (window_options.width, window_options.height);
+        let (renderer, window) = D3d12WindowRenderer::open("video-renderer", &gpu, window_options)?;
+        let shutdown = render_common::stop_on_close([window]);
 
         let (pipeline, audio_tee_handle) =
             Pipeline::new("av-playback", source, |source, context| {
@@ -137,23 +127,17 @@ mod windows_example {
                     .pipe(VideoSynchronizer::new("video-sync"))
                     // After the synchronizer, not before: a frame it drops for
                     // being late never pays for the conversion or the upload.
-                    // `D3d12Renderer` draws from a device resource only, so this
-                    // pair is what carries CPU-decoded frames to the GPU.
+                    // `D3d12WindowRenderer` draws from a device resource only, so
+                    // this pair is what carries CPU-decoded frames to the GPU.
                     .pipe(SwScaler::new(
                         "to-nv12",
                         ffmpeg::format::Pixel::NV12,
-                        target.width,
-                        target.height,
+                        width,
+                        height,
                         ffmpeg::software::scaling::Flags::BILINEAR,
                     ))
                     .pipe(D3d12Upload::new("video-upload", gpu.device())?)
-                    .to(render_common::d3d12_window_renderer(
-                        "video-renderer",
-                        &gpu,
-                        hwnd,
-                        target.width,
-                        target.height,
-                    )?)?;
+                    .to(renderer)?;
                 context.attach(source, streams.video_index, video_branch)?;
 
                 // Keep a stable insertion point on the demuxer's audio pad. With

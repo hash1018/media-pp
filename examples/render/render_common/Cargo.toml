@@ -4,23 +4,11 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
+# The windows and the renderers are the library's own; this crate only turns
+# closing one into a stop — and on Linux fits a software decode to
+# `VulkanWindowRenderer`.
 [target.'cfg(target_os = "linux")'.dependencies]
-# The window and the renderer are the library's own `VulkanWindowRenderer`;
-# this crate only turns closing it into a stop.
 media-pp = { path = "../../../lib", features = ["vulkan"] }
 
-# The winit shell every Windows example presents into.
 [target.'cfg(windows)'.dependencies]
-media-pp = { path = "../../../lib", features = ["d3d12", "d3d11"] }
-winit = "0.30"
-windows = { version = "0.62", features = [
-    "Win32_Foundation",
-    "Win32_Graphics_Direct3D",
-    "Win32_Graphics_Direct3D_Fxc",
-    "Win32_Graphics_Direct3D11",
-    "Win32_Graphics_Direct3D12",
-    "Win32_Graphics_Dxgi",
-    "Win32_Graphics_Dxgi_Common",
-    "Win32_Security",
-    "Win32_System_Threading",
-] }
+media-pp = { path = "../../../lib", features = ["d3d11"] }

@@ -1458,10 +1458,8 @@ fn clipped_viewport(
     Some((viewport, scissor))
 }
 
-/// Builds a single-slice `Texture2DArray` SRV description — see
-/// `render_common::d3d11_window_renderer`'s own `plane_srv_desc` (same
-/// shape, duplicated here since that one is private to an example crate,
-/// not something `lib` can depend on).
+/// Builds a single-slice `Texture2DArray` SRV description — the same shape
+/// `D3d11WindowRenderer` views a frame's planes with.
 fn plane_srv_desc(format: DXGI_FORMAT, array_index: u32) -> D3D11_SHADER_RESOURCE_VIEW_DESC {
     D3D11_SHADER_RESOURCE_VIEW_DESC {
         Format: format,

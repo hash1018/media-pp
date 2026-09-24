@@ -8,14 +8,15 @@ it, with no pixel ever passing through system memory.
 - Linux: `PipeWireScreenCaptureSource` (GPU mode) `-> Queue -> CudaConverter
   -> CudaRenderer`
 
-On Windows the renderer creates one BGRA-capable `ID3D11Device`, then passes
-that exact device into `DxgiCaptureSource::open_with_device` or
-`WgcCaptureSource::open_with_device`. Captured `Pixel::D3D11` BGRA textures
-therefore reach `D3d11Renderer` without `Map`, a CPU pixel copy, or a device
-transfer. DXGI retains its internal latest-image and independent per-emission
-GPU copies. WGC copies each new image once to detach it from the reusable WGC
-surface; cadence repeats share that immutable texture and allocate only a new
-metadata wrapper with a new PTS.
+On Windows one BGRA-capable `D3d11Gpu` device is created, opens
+`D3d11WindowRenderer` and its window, and is then passed into
+`DxgiCaptureSource::open_with_device` or `WgcCaptureSource::open_with_device`.
+Captured `Pixel::D3D11` BGRA textures therefore reach `D3d11WindowRenderer`
+without `Map`, a CPU pixel copy, or a device transfer. DXGI retains its
+internal latest-image and independent per-emission GPU copies. WGC copies each
+new image once to detach it from the reusable WGC surface; cadence repeats
+share that immutable texture and allocate only a new metadata wrapper with a
+new PTS.
 
 No `SwScaler`: captured content is already BGRA/RGB, and the renderer
 letterboxes any capture size into the preview window. Compare against

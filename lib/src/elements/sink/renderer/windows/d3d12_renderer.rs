@@ -28,11 +28,13 @@ use crate::{
 /// itself only depends on this trait (plus the `windows` COM types the
 /// zero-copy path needs to pass through) — not on `renderer_engine` or
 /// any other concrete rendering crate. A caller wanting to actually
-/// render implements this for its own window/rendering stack; this
-/// repository's examples use `examples/render/render_common` for that
-/// implementation, outside the `media-pp` crate itself — unpublished, so
-/// a program of its own copies what it needs from there rather than
-/// depending on it.
+/// render implements this for its own window/rendering stack.
+///
+/// It is handed a texture and nothing about its colour: an NV12 frame's
+/// matrix and range stay with the frame. A window of the renderer's own,
+/// where each frame is converted with its own, is what `D3d12WindowRenderer` is
+/// for; this trait is for drawing into something else — a UI's own swap
+/// chain, an offscreen target.
 ///
 /// A successful submit must install the frame as the current presentation
 /// content or enqueue its swap-chain presentation before returning. Pipeline

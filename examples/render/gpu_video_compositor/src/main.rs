@@ -35,18 +35,16 @@ mod windows_example {
         bus::BusEvent,
         color::Color,
         elements::{
-            D3d11Download, D3d11Upload, D3d11VideoCompositor, FileMuxer, SwEncoder,
-            SwEncoderOptions, SwScaler, TestVideoOptions, TestVideoSource, VideoCodec,
-            VideoCompositorOptions, VideoFit, VideoLayer, VideoRect,
+            D3d11Download, D3d11Gpu, D3d11Upload, D3d11VideoCompositor, D3d11WindowRenderer,
+            FileMuxer, SwEncoder, SwEncoderOptions, SwScaler, TestVideoOptions, TestVideoSource,
+            VideoCodec, VideoCompositorOptions, VideoFit, VideoLayer, VideoRect, WindowOptions,
         },
         pipeline::Pipeline,
     };
-    use render_common::{D3d11GpuContext, Shutdown};
-    use winit::raw_window_handle::RawWindowHandle;
 
     /// Two TestVideoSource pipelines -> D3d11Upload -> D3d11VideoCompositor
     /// (GPU shader compositing, no CPU round trip for the inputs or the
-    /// composited output) -> Tee -> {D3d11Renderer for live display,
+    /// composited output) -> Tee -> {D3d11WindowRenderer for live display,
     /// D3d11Download -> SwScaler -> SwEncoder -> FileMuxer for simultaneous
     /// recording}. The foreground layer moves at runtime through its
     /// D3d11VideoLayerHandle, same as the CPU `video_compositor` example, but
@@ -54,7 +52,7 @@ mod windows_example {
     /// branch's own D3d11Download.
     ///
     ///     cargo run -p gpu_video_compositor -- [output.mp4] [seconds]
-    pub(super) fn run() {
+    pub(super) fn run() -> media_pp::Result<()> {
         let path = std::env::args()
             .nth(1)
             .unwrap_or_else(|| "gpu_video_compositor.mp4".into());
@@ -63,20 +61,10 @@ mod windows_example {
             .and_then(|value| value.parse().ok())
             .unwrap_or(5);
 
-        render_common::run_window(
-            "media-pp gpu_video_compositor",
-            640,
-            360,
-            move |target, shutdown| {
-                let RawWindowHandle::Win32(handle) = target.window else {
-                    panic!("gpu_video_compositor example only supports Windows");
-                };
-                play(handle.hwnd.get(), &path, seconds, &shutdown)
-            },
-        );
+        play(&path, seconds)
     }
 
-    fn play(hwnd: isize, path: &str, seconds: u64, shutdown: &Shutdown) -> media_pp::Result<()> {
+    fn play(path: &str, seconds: u64) -> media_pp::Result<()> {
         let _log_guard = media_pp::log::init(
             env!("CARGO_PKG_NAME"),
             "logs",
@@ -84,10 +72,20 @@ mod windows_example {
             7,
         )?;
 
-        let gpu = D3d11GpuContext::new(None)?;
-
         let output_width = 640;
         let output_height = 360;
+
+        let gpu = D3d11Gpu::new()?;
+        let (renderer, window) = D3d11WindowRenderer::open(
+            "renderer",
+            &gpu,
+            WindowOptions {
+                title: "media-pp gpu_video_compositor".into(),
+                width: output_width,
+                height: output_height,
+            },
+        )?;
+        let shutdown = render_common::stop_on_close([window]);
         let frame_rate = ffmpeg::Rational::new(30, 1);
         let (compositor, compositor_handle) = D3d11VideoCompositor::new(
             "compositor",
@@ -195,13 +193,6 @@ mod windows_example {
 
         let (output_pipeline, ()) =
             Pipeline::new("composited-output", compositor, |source, ctx| {
-                let renderer = render_common::d3d11_window_renderer(
-                    "renderer",
-                    &gpu,
-                    hwnd,
-                    output_width,
-                    output_height,
-                )?;
                 let render_branch = ctx.branch().queue("render", 4).to(renderer)?;
 
                 let download = D3d11Download::new("download", gpu.device(), gpu.context())?;

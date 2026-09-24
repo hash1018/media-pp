@@ -1,8 +1,8 @@
 //! Captures a desktop or application window straight into GPU memory and
 //! presents it without a system-memory pixel round trip.
 //!
-//! - Windows desktop: `DxgiCaptureSource(GPU) -> Queue -> D3d11Renderer`
-//! - Windows window: `WgcCaptureSource -> Queue -> D3d11Renderer`
+//! - Windows desktop: `DxgiCaptureSource(GPU) -> Queue -> D3d11WindowRenderer`
+//! - Windows window: `WgcCaptureSource -> Queue -> D3d11WindowRenderer`
 //! - Linux: `PipeWireScreenCaptureSource(GPU) -> Queue ->
 //!   VulkanWindowRenderer`, drawing the capture's CUDA BGRA as it comes
 //!
@@ -39,19 +39,19 @@ mod windows_example {
     use std::{
         ffi::c_void,
         io::{self, Write},
-        process::ExitCode,
     };
 
     use media_pp::{
         bus::BusEvent,
         element::{ElementType, SourceElement},
         elements::{
-            CaptureMode, DxgiCaptureOptions, DxgiCaptureSource, WgcCaptureOptions, WgcCaptureSource,
+            CaptureMode, D3d11Gpu, D3d11WindowRenderer, DxgiCaptureOptions, DxgiCaptureSource,
+            WgcCaptureOptions, WgcCaptureSource, WindowOptions,
         },
         ffmpeg,
         pipeline::Pipeline,
     };
-    use render_common::{D3d11GpuContext, Shutdown};
+    use render_common::Shutdown;
     use windows::{
         Win32::{
             Foundation::{HWND, LPARAM, TRUE},
@@ -63,7 +63,6 @@ mod windows_example {
         },
         core::BOOL,
     };
-    use winit::raw_window_handle::RawWindowHandle;
 
     #[derive(Clone, Copy)]
     enum CaptureSelection {
@@ -71,15 +70,16 @@ mod windows_example {
         Wgc(isize),
     }
 
-    /// DxgiCaptureSource (GPU mode) -> Renderer: captures the desktop straight
-    /// to a GPU-resident `Pixel::D3D11` BGRA texture on the *renderer's own*
-    /// `ID3D11Device` (no `Map`, no CPU pixel copy at all — see
-    /// `CaptureMode::Gpu`'s own docs) and presents it directly, no `SwScaler`
-    /// (desktop content is already BGRA/RGB, no YUV conversion needed, and
-    /// `D3d11Renderer` letterboxes any capture size into the window on its
-    /// own). Compare against the Windows-only `screen_preview_cpu`, which captures
-    /// to a plain CPU `Pixel::BGRA` frame instead and converts it to YUV420P
-    /// for the D3D12 CPU-upload path.
+    /// DxgiCaptureSource (GPU mode) -> D3d11WindowRenderer: captures the
+    /// desktop straight to a GPU-resident `Pixel::D3D11` BGRA texture on the
+    /// *renderer's own* `ID3D11Device` (no `Map`, no CPU pixel copy at all —
+    /// see `CaptureMode::Gpu`'s own docs) and presents it directly in the
+    /// renderer's own window, no `SwScaler` (desktop content is already
+    /// BGRA/RGB, no YUV conversion needed, and `D3d11WindowRenderer`
+    /// letterboxes any capture size into the window on its own). Compare
+    /// against the Windows-only `screen_preview_cpu`, which captures to a
+    /// plain CPU `Pixel::BGRA` frame instead and converts it to YUV420P for
+    /// the D3D12 CPU-upload path.
     ///
     /// The DXGI GPU path has no cursor because `CaptureMode::Gpu` doesn't
     /// support cursor compositing yet; the WGC path requests cursor capture.
@@ -87,32 +87,15 @@ mod windows_example {
     ///     cargo run -p screen_preview_gpu -- dxgi
     ///     cargo run -p screen_preview_gpu -- wgc 0x0000000000123456
     ///     cargo run -p screen_preview_gpu -- wgc # prompts for a window
-    pub(super) fn run() -> ExitCode {
+    pub(super) fn run() -> media_pp::Result<()> {
         let selection = match parse_selection() {
             Ok(selection) => selection,
             Err(()) => {
                 eprintln!("usage: {} [dxgi | wgc [<HWND>]]", env!("CARGO_PKG_NAME"));
-                return ExitCode::FAILURE;
+                std::process::exit(1);
             }
         };
-        render_common::run_window(
-            "media-pp screen_preview_gpu",
-            1280,
-            720,
-            move |target, shutdown| {
-                let RawWindowHandle::Win32(handle) = target.window else {
-                    panic!("screen_preview_gpu example only supports Windows");
-                };
-                play(
-                    selection,
-                    handle.hwnd.get(),
-                    target.width,
-                    target.height,
-                    &shutdown,
-                )
-            },
-        );
-        ExitCode::SUCCESS
+        play(selection)
     }
 
     fn parse_selection() -> Result<CaptureSelection, ()> {
@@ -242,13 +225,7 @@ mod windows_example {
         cloak_query.is_err() || cloaked == 0
     }
 
-    fn play(
-        selection: CaptureSelection,
-        hwnd: isize,
-        window_width: u32,
-        window_height: u32,
-        shutdown: &Shutdown,
-    ) -> media_pp::Result<()> {
+    fn play(selection: CaptureSelection) -> media_pp::Result<()> {
         let _log_guard = media_pp::log::init(
             env!("CARGO_PKG_NAME"),
             "logs",
@@ -259,7 +236,16 @@ mod windows_example {
         // Renderer first, then capture: both `open_with_device` paths use
         // this exact device. WGC requires its BGRA creation flag; DXGI proves
         // the selected output belongs to the same adapter.
-        let gpu = D3d11GpuContext::new(None)?;
+        let gpu = D3d11Gpu::new()?;
+        let (renderer, window) = D3d11WindowRenderer::open(
+            "renderer",
+            &gpu,
+            WindowOptions {
+                title: "media-pp screen_preview_gpu".into(),
+                ..WindowOptions::default()
+            },
+        )?;
+        let shutdown = render_common::stop_on_close([window]);
 
         match selection {
             CaptureSelection::Dxgi => {
@@ -272,15 +258,7 @@ mod windows_example {
                     },
                     gpu.device(),
                 )?;
-                present(
-                    source,
-                    ElementType::DxgiCaptureSource,
-                    &gpu,
-                    hwnd,
-                    window_width,
-                    window_height,
-                    shutdown,
-                )
+                present(source, ElementType::DxgiCaptureSource, renderer, &shutdown)
             }
             CaptureSelection::Wgc(target) => {
                 let source = WgcCaptureSource::open_with_device(
@@ -292,15 +270,7 @@ mod windows_example {
                     },
                     gpu.device(),
                 )?;
-                present(
-                    source,
-                    ElementType::WgcCaptureSource,
-                    &gpu,
-                    hwnd,
-                    window_width,
-                    window_height,
-                    shutdown,
-                )
+                present(source, ElementType::WgcCaptureSource, renderer, &shutdown)
             }
         }
     }
@@ -308,21 +278,10 @@ mod windows_example {
     fn present<S: SourceElement + 'static>(
         source: S,
         source_type: ElementType,
-        gpu: &D3d11GpuContext,
-        hwnd: isize,
-        window_width: u32,
-        window_height: u32,
+        renderer: D3d11WindowRenderer,
         shutdown: &Shutdown,
     ) -> media_pp::Result<()> {
         let (pipeline, ()) = Pipeline::new("screen-preview-gpu", source, |source, ctx| {
-            let renderer = render_common::d3d11_window_renderer(
-                "renderer",
-                gpu,
-                hwnd,
-                window_width,
-                window_height,
-            )?;
-
             let branch = ctx
                 .branch()
                 .queue("captured", 4) // thread boundary so rendering doesn't block capture

@@ -3,6 +3,8 @@
 //! timestamps and calls `Pipeline::seek` with them while the window is open —
 //! proves
 //! `seek` actually changes what's on screen, not just that it compiles.
+//! Windows uploads to D3D12 and draws into `D3d12WindowRenderer`'s own
+//! window.
 //!
 //!     cargo run -p seek_render -- path/to/video.mp4
 //!     (then use `pause`, `resume`, `seek 30`, `seek 1:15`, or `q`)
@@ -36,45 +38,19 @@ mod windows_example {
     use media_pp::ffmpeg::media;
     use media_pp::{
         bus::BusEvent,
-        elements::{D3d12Upload, FileDemuxer, Pacer, SwDecoder, SwScaler},
+        elements::{
+            D3d12Gpu, D3d12Upload, D3d12WindowRenderer, FileDemuxer, Pacer, SwDecoder, SwScaler,
+            WindowOptions,
+        },
         ffmpeg,
         pipeline::{Pipeline, SeekMode},
     };
-    use render_common::{D3d12GpuContext, Shutdown};
-    use winit::raw_window_handle::RawWindowHandle;
 
-    pub(super) fn run() {
+    pub(super) fn run() -> media_pp::Result<()> {
         let Some(path) = std::env::args().nth(1) else {
             eprintln!("usage: seek_render <video.mp4>");
             std::process::exit(1);
         };
-
-        render_common::run_window(
-            "media-pp seek_render",
-            1280,
-            720,
-            move |target, shutdown| {
-                let RawWindowHandle::Win32(handle) = target.window else {
-                    panic!("seek_render example only supports Windows");
-                };
-                play(
-                    &path,
-                    handle.hwnd.get(),
-                    target.width,
-                    target.height,
-                    &shutdown,
-                )
-            },
-        );
-    }
-
-    fn play(
-        path: &str,
-        hwnd: isize,
-        width: u32,
-        height: u32,
-        shutdown: &Shutdown,
-    ) -> media_pp::Result<()> {
         let _log_guard = media_pp::log::init(
             env!("CARGO_PKG_NAME"),
             "logs",
@@ -82,23 +58,28 @@ mod windows_example {
             7,
         )?;
 
-        let (source, _) = FileDemuxer::open("demux", path)?;
+        let (source, _) = FileDemuxer::open("demux", &path)?;
         let video = source.best(media::Type::Video)?;
         let params = video.parameters.clone();
 
-        let gpu = D3d12GpuContext::new()?;
+        let gpu = D3d12Gpu::new()?;
+        let window_options = WindowOptions {
+            title: "media-pp seek_render".into(),
+            ..WindowOptions::default()
+        };
+        let (width, height) = (window_options.width, window_options.height);
+        let (renderer, window) = D3d12WindowRenderer::open("renderer", &gpu, window_options)?;
+        let shutdown = render_common::stop_on_close([window]);
 
         let (pipeline, ()) = Pipeline::new("seek-render", source, |source, ctx| {
             let decoder = SwDecoder::new("decoder", params)?;
             let pacer = Pacer::new("pacer");
-            let renderer =
-                render_common::d3d12_window_renderer("renderer", &gpu, hwnd, width, height)?;
             let branch = ctx
                 .branch()
                 .pipe(decoder) // same thread as the demux — cheap enough not to need a queue
                 .queue("frames", 32) // pacer sleeps on its own thread; let decode run ahead into this
                 .pipe(pacer)
-                // `D3d12Renderer` draws from a device resource only, so the
+                // `D3d12WindowRenderer` draws from a device resource only, so the
                 // decoder's system-memory frames are converted to the NV12
                 // layout `D3d12Upload` writes and uploaded here.
                 .pipe(SwScaler::new(
@@ -125,8 +106,8 @@ mod windows_example {
 
         // Reads seek requests for as long as the process lives, on its own
         // thread — a blocked stdin read can't also notice natural playback
-        // completion, so it doesn't try to; the shared shell stops the
-        // pipeline and exits once the playback worker has returned.
+        // completion, so it doesn't try to; the bus loop below ends when the
+        // pipeline stops, and the process exits with it.
         {
             let pipeline = pipeline.clone();
             thread::spawn(move || read_seek_commands(&pipeline));

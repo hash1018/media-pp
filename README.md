@@ -86,19 +86,19 @@ Video, by backend:
 
 `VideoDecodeBin` chooses among the decode row and the uploads for a stream.
 
-`D3d11WindowRenderer` and `D3d12WindowRenderer` show frames in a window: one it opens for itself, as a
-GStreamer video sink does, reporting keys and closing as `WindowEvents`, or
-one the application gives it. `VulkanWindowRenderer` does the same on Linux
-— its own window is X11, XWayland on a Wayland desktop; one it is given may
-be either — from frames in system memory, and from CUDA frames too on a
-`VulkanGpu` made for CUDA. The other
-renderers hand each frame to a
-presenter the program supplies — an implementation of `D3d11FrameRenderer`,
-`D3d12FrameRenderer` or `CudaFrameRenderer` for its own window or UI; the
-examples' unpublished `render_common` crate implements the two D3D ones for
-a winit window, and is there to copy. The D3D11 elements of a pipeline share one
-`D3d11Gpu`: one device and its immediate context behind one lock; the D3D12
-elements share one `D3d12Gpu`.
+`D3d11WindowRenderer` and `D3d12WindowRenderer` show frames in a window: one
+they open for themselves, as a GStreamer video sink does, reporting keys and
+closing as `WindowEvents`, or one the application gives them.
+`VulkanWindowRenderer` does the same on Linux — its own window is X11,
+XWayland on a Wayland desktop; one it is given may be either — from frames in
+system memory, and from CUDA frames too on a `VulkanGpu` made for CUDA. Each
+converts a frame with its own colour description. The other renderers hand
+each frame to a presenter the program supplies — an implementation of
+`D3d11FrameRenderer`, `D3d12FrameRenderer` or `CudaFrameRenderer` for its own
+window or UI — with no colour description; they are for drawing into
+something other than a window of the renderer's own. The D3D11 elements of a
+pipeline share one `D3d11Gpu`: one device and its immediate context behind
+one lock; the D3D12 elements share one `D3d12Gpu`.
 
 Everything else:
 

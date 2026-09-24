@@ -1,11 +1,11 @@
-//! TestVideoSource -> SwScaler -> D3d11Upload -> Renderer: a synthetic
-//! `Pixel::YUV420P` stream converted to `Pixel::NV12` on the CPU, then
-//! uploaded to a GPU `Pixel::D3D11` texture on the *renderer's own*
-//! `ID3D11Device` before being presented — proves `D3d11Upload`'s frames
-//! (built via plain `windows-rs` calls + `av_buffer_create`, not FFmpeg's
-//! own hwframe pool — see `D3d11Upload`'s own docs) are readable by
-//! `D3d11Renderer`'s zero-copy path. Compare against `d3d12_upload`, the
-//! D3D12 sibling of this same smoke test.
+//! TestVideoSource -> SwScaler -> D3d11Upload -> D3d11WindowRenderer: a
+//! synthetic `Pixel::YUV420P` stream converted to `Pixel::NV12` on the CPU,
+//! then uploaded to a GPU `Pixel::D3D11` texture on the *renderer's own*
+//! `ID3D11Device` before being presented in the renderer's own window —
+//! proves `D3d11Upload`'s frames (built via plain `windows-rs` calls +
+//! `av_buffer_create`, not FFmpeg's own hwframe pool — see `D3d11Upload`'s
+//! own docs) are readable by `D3d11WindowRenderer`'s zero-copy path. Compare
+//! against `d3d12_upload`, the D3D12 sibling of this same smoke test.
 //!
 //!     cargo run -p d3d11_upload
 
@@ -24,22 +24,14 @@ mod windows_example {
     use media_pp::ffmpeg;
     use media_pp::{
         bus::BusEvent,
-        elements::{D3d11Upload, SwScaler, TestVideoOptions, TestVideoSource},
+        elements::{
+            D3d11Gpu, D3d11Upload, D3d11WindowRenderer, SwScaler, TestVideoOptions,
+            TestVideoSource, WindowOptions,
+        },
         pipeline::Pipeline,
     };
-    use render_common::{D3d11GpuContext, Shutdown};
-    use winit::raw_window_handle::RawWindowHandle;
 
-    pub(super) fn run() {
-        render_common::run_window("media-pp d3d11_upload", 1280, 720, |target, shutdown| {
-            let RawWindowHandle::Win32(handle) = target.window else {
-                panic!("d3d11_upload example only supports Windows");
-            };
-            play(handle.hwnd.get(), target.width, target.height, &shutdown)
-        });
-    }
-
-    fn play(hwnd: isize, width: u32, height: u32, shutdown: &Shutdown) -> media_pp::Result<()> {
+    pub(super) fn run() -> media_pp::Result<()> {
         let _log_guard = media_pp::log::init(
             env!("CARGO_PKG_NAME"),
             "logs",
@@ -47,14 +39,20 @@ mod windows_example {
             7,
         )?;
 
+        let window_options = WindowOptions {
+            title: "media-pp d3d11_upload".into(),
+            ..WindowOptions::default()
+        };
         let options = TestVideoOptions {
-            width,
-            height,
+            width: window_options.width,
+            height: window_options.height,
             ..TestVideoOptions::default()
         };
         let source = TestVideoSource::new("test-video", options);
 
-        let gpu = D3d11GpuContext::new(None)?;
+        let gpu = D3d11Gpu::new()?;
+        let (renderer, window) = D3d11WindowRenderer::open("renderer", &gpu, window_options)?;
+        let shutdown = render_common::stop_on_close([window]);
 
         let (pipeline, ()) = Pipeline::new("d3d11-upload", source, |source, ctx| {
             // `Pixel::NV12` — the only layout `D3d11Upload` accepts.
@@ -66,8 +64,6 @@ mod windows_example {
             // Same device the renderer draws with — required for the
             // zero-copy path to be valid at all (see D3d11Upload::new).
             let upload = D3d11Upload::new("upload", gpu.device());
-            let renderer =
-                render_common::d3d11_window_renderer("renderer", &gpu, hwnd, width, height)?;
 
             let branch = ctx
                 .branch()

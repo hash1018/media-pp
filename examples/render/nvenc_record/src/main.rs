@@ -37,12 +37,11 @@ mod windows_example {
     use media_pp::ffmpeg;
     use media_pp::{
         elements::{
-            AppSource, D3d11Upload, D3d11VideoCodec, D3d11VideoEncoder, D3d11VideoEncoderOptions,
-            D3d11VideoInputFormat, FileMuxer, SwScaler,
+            AppSource, D3d11Gpu, D3d11Upload, D3d11VideoCodec, D3d11VideoEncoder,
+            D3d11VideoEncoderOptions, D3d11VideoInputFormat, FileMuxer, SwScaler,
         },
         pipeline::Pipeline,
     };
-    use render_common::D3d11GpuContext;
 
     use crate::common;
 
@@ -58,7 +57,7 @@ mod windows_example {
 
         // One device and one shared immediate context for both D3D11 stages —
         // the invariant every D3D11 element in this crate is built around.
-        let gpu = D3d11GpuContext::new(None)?;
+        let gpu = D3d11Gpu::new()?;
         let (source, source_handle) = AppSource::new("source", 8);
 
         let encoder = D3d11VideoEncoder::new(

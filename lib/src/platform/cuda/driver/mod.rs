@@ -2,8 +2,7 @@
 //! declared here rather than pulled in through a CUDA binding crate.
 //!
 //! Everything here is the *driver* API (`cu*`), which the NVIDIA driver
-//! itself ships — no CUDA toolkit is needed to build or run, the same
-//! property `render_common`'s own `cuda_ffi` relies on. The signatures come
+//! itself ships — no CUDA toolkit is needed to build or run. The signatures come
 //! from `cuda.h`; they are plain C functions with scalar/pointer arguments
 //! rather than structs whose layout has to be mirrored, except
 //! `CUDA_MEMCPY2D`, which is versioned by name (`cuMemcpy2D_v2`) and has been
@@ -218,8 +217,7 @@ fn check(call: &'static str, result: CUresult) -> Result<(), CudaDriverError> {
 /// memory operations this crate issues against it.
 ///
 /// A CUDA context is per-thread state, so every operation here pushes and
-/// pops it rather than assuming it is current — the same reason
-/// `render_common`'s `with_context` exists. Owning this keeps the primary
+/// pops it rather than assuming it is current. Owning this keeps the primary
 /// context alive for as long as the element that holds it, which is what
 /// makes the pointers inside a frame it composites remain valid.
 pub(crate) struct CudaDriver {

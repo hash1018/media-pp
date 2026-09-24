@@ -8,7 +8,7 @@ its layer handle, same as the CPU `video_compositor` example, but every frame
 this composites never touches the CPU until the recording branch's own
 download.
 
-- Windows: `D3d11Upload` -> `D3d11VideoCompositor` -> `D3d11Renderer` /
+- Windows: `D3d11Upload` -> `D3d11VideoCompositor` -> `D3d11WindowRenderer` /
   `D3d11Download`
 - Linux: `CudaUpload` -> `CudaVideoCompositor` -> `CudaRenderer` (Vulkan
   swapchain) / `CudaDownload`

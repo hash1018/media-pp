@@ -1,7 +1,6 @@
 //! The handshake between whatever closes a window and the worker that owns
-//! the pipelines presenting into it — the same on both platforms, whether the
-//! window is a `winit` one ([`crate::run_window`], on Windows) or a
-//! renderer's own ([`crate::stop_on_close`], on Linux).
+//! the pipelines presenting into it — a renderer's own window, watched by
+//! [`crate::stop_on_close`].
 
 use std::sync::{Arc, Mutex, Weak};
 
@@ -17,7 +16,7 @@ use media_pp::pipeline::Pipeline;
 /// It holds the pipelines weakly. What owns a pipeline is the worker that
 /// built it, and dropping it there is what joins its threads — the ones that
 /// drop its elements, a renderer among them. A strong hold here outlived
-/// the worker whenever this outlived it, as it does on Linux, where the
+/// the worker whenever this outlived it, as it does wherever the
 /// thread watching a window keeps it until the window is gone: nothing then
 /// joined those threads, and the process could exit in the middle of a
 /// renderer tearing itself down.

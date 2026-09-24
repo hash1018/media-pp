@@ -1,7 +1,8 @@
 //! Demux -> VideoDecodeBin -> Queue -> Pacer -> Renderer: decodes on the GPU
 //! where it can, and in software onto the same device where it cannot, and
 //! presents the frames at real playback speed. Windows decodes onto D3D12
-//! (D3D12VA, or `SwDecoder` and an upload); Linux onto CUDA (NVDEC, or
+//! (D3D12VA, or `SwDecoder` and an upload) into `D3d12WindowRenderer`'s own
+//! window; Linux onto CUDA (NVDEC, or
 //! `SwDecoder` and an upload) into `VulkanWindowRenderer`'s own window, and
 //! puts a `CudaConverter` before the renderer where
 //! `contract::check_elements` says the bin's output does not fit the
@@ -39,44 +40,18 @@ fn main() -> impl std::process::Termination {
 mod windows_example {
     use media_pp::ffmpeg::media;
     use media_pp::{
-        elements::{DecodeTarget, FileDemuxer, Pacer, VideoDecodeBin},
+        elements::{
+            D3d12Gpu, D3d12WindowRenderer, DecodeTarget, FileDemuxer, Pacer, VideoDecodeBin,
+            WindowOptions,
+        },
         pipeline::Pipeline,
     };
-    use render_common::{D3d12GpuContext, Shutdown};
-    use winit::raw_window_handle::RawWindowHandle;
 
-    pub(super) fn run() {
+    pub(super) fn run() -> media_pp::Result<()> {
         let Some(path) = std::env::args().nth(1) else {
             eprintln!("usage: hw_decode_render <video.mp4>");
             std::process::exit(1);
         };
-
-        render_common::run_window(
-            "media-pp hw_decode_render",
-            1280,
-            720,
-            move |target, shutdown| {
-                let RawWindowHandle::Win32(handle) = target.window else {
-                    panic!("hw_decode_render example only supports Windows");
-                };
-                play(
-                    &path,
-                    handle.hwnd.get(),
-                    target.width,
-                    target.height,
-                    &shutdown,
-                )
-            },
-        );
-    }
-
-    fn play(
-        path: &str,
-        hwnd: isize,
-        width: u32,
-        height: u32,
-        shutdown: &Shutdown,
-    ) -> media_pp::Result<()> {
         let _log_guard = media_pp::log::init(
             env!("CARGO_PKG_NAME"),
             "logs",
@@ -84,10 +59,19 @@ mod windows_example {
             7,
         )?;
 
-        let (source, _) = FileDemuxer::open("demux", path)?;
+        let (source, _) = FileDemuxer::open("demux", &path)?;
         let video = source.best(media::Type::Video)?;
 
-        let gpu = D3d12GpuContext::new()?;
+        let gpu = D3d12Gpu::new()?;
+        let (renderer, window) = D3d12WindowRenderer::open(
+            "renderer",
+            &gpu,
+            WindowOptions {
+                title: "media-pp hw_decode_render".into(),
+                ..WindowOptions::default()
+            },
+        )?;
+        let shutdown = render_common::stop_on_close([window]);
 
         // Opened out here rather than in the builder: a stream this build
         // cannot decode at all is an error to report, and which way it
@@ -106,8 +90,6 @@ mod windows_example {
 
         let (pipeline, ()) = Pipeline::new("hw-decode-render", source, |source, ctx| {
             let pacer = Pacer::new("pacer");
-            let renderer =
-                render_common::d3d12_window_renderer("renderer", &gpu, hwnd, width, height)?;
             let branch = ctx
                 .branch()
                 .pipe(decoder) // same thread as the demux — cheap enough not to need a queue
@@ -124,7 +106,6 @@ mod windows_example {
         if shutdown.publish(std::slice::from_ref(&pipeline)) {
             return Ok(());
         }
-
         pipeline.run()?;
         super::drain_bus(&pipeline);
         println!("decoded: {:?}", decoding.path());

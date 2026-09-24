@@ -13,7 +13,7 @@ the GPU:
 
 ```text
 Windows: FileDemuxer -> SwDecoder -> Queue -> VideoSynchronizer
-         -> SwScaler(NV12) -> D3d12Upload -> D3d12Renderer
+         -> SwScaler(NV12) -> D3d12Upload -> D3d12WindowRenderer
 Linux:   FileDemuxer -> CudaDecoder -> Queue -> VideoSynchronizer
          -> CudaRenderer
 ```

@@ -48,6 +48,12 @@ use crate::{
 /// runtime — not this crate — is what keeps the actual texture memory
 /// valid for as long as the GPU still needs it.
 ///
+/// It is handed a texture and nothing about its colour: an NV12 frame's
+/// matrix and range stay with the frame. A window of the renderer's own,
+/// where each frame is converted with its own, is what `D3d11WindowRenderer` is
+/// for; this trait is for drawing into something else — a UI's own swap
+/// chain, an offscreen target.
+///
 /// A successful submit must install the frame as the current presentation
 /// content or enqueue its swap-chain presentation before returning. Pipeline
 /// preroll treats that return as the terminal's presentation commitment; it

@@ -10,7 +10,8 @@
 //! source itself is already paced accurately enough for direct rendering,
 //! but the encoder and decoder add their own buffering and per-frame
 //! variance; this particular chain has not been validated without the
-//! final clock-anchored pacing stage.
+//! final clock-anchored pacing stage. On Windows the frames are uploaded to
+//! D3D12 and drawn into `D3d12WindowRenderer`'s own window.
 //!
 //!     cargo run -p transcode_render
 
@@ -37,30 +38,15 @@ mod windows_example {
     use media_pp::{
         bus::BusEvent,
         elements::{
-            D3d12Upload, Pacer, SwDecoder, SwEncoder, SwEncoderOptions, SwScaler, TestVideoOptions,
-            TestVideoSource, VideoCodec,
+            D3d12Gpu, D3d12Upload, D3d12WindowRenderer, Pacer, SwDecoder, SwEncoder,
+            SwEncoderOptions, SwScaler, TestVideoOptions, TestVideoSource, VideoCodec,
+            WindowOptions,
         },
         ffmpeg,
         pipeline::Pipeline,
     };
-    use render_common::{D3d12GpuContext, Shutdown};
-    use winit::raw_window_handle::RawWindowHandle;
 
-    pub(super) fn run() {
-        render_common::run_window(
-            "media-pp transcode_render",
-            1280,
-            720,
-            |target, shutdown| {
-                let RawWindowHandle::Win32(handle) = target.window else {
-                    panic!("transcode_render example only supports Windows");
-                };
-                play(handle.hwnd.get(), target.width, target.height, &shutdown)
-            },
-        );
-    }
-
-    fn play(hwnd: isize, width: u32, height: u32, shutdown: &Shutdown) -> media_pp::Result<()> {
+    pub(super) fn run() -> media_pp::Result<()> {
         let _log_guard = media_pp::log::init(
             env!("CARGO_PKG_NAME"),
             "logs",
@@ -68,14 +54,21 @@ mod windows_example {
             7,
         )?;
 
+        let gpu = D3d12Gpu::new()?;
+        let window_options = WindowOptions {
+            title: "media-pp transcode_render".into(),
+            ..WindowOptions::default()
+        };
+        let (width, height) = (window_options.width, window_options.height);
+        let (renderer, window) = D3d12WindowRenderer::open("renderer", &gpu, window_options)?;
+        let shutdown = render_common::stop_on_close([window]);
+
         let options = TestVideoOptions {
             width,
             height,
             ..TestVideoOptions::default()
         };
         let source = TestVideoSource::new("test-video", options);
-
-        let gpu = D3d12GpuContext::new()?;
 
         let (pipeline, ()) = Pipeline::new("transcode-render", source, |source, ctx| {
             let encoder = SwEncoder::new(
@@ -96,8 +89,6 @@ mod windows_example {
             let params = encoder.parameters();
             let decoder = SwDecoder::new("decoder", params)?;
             let pacer = Pacer::new("pacer");
-            let renderer =
-                render_common::d3d12_window_renderer("renderer", &gpu, hwnd, width, height)?;
 
             let branch = ctx
                 .branch()
@@ -107,7 +98,7 @@ mod windows_example {
                 .pipe(decoder)
                 .queue("frames", 8) // pacer sleeps on its own thread; let decode run ahead into this
                 .pipe(pacer)
-                // `D3d12Renderer` draws from a device resource only, so the
+                // `D3d12WindowRenderer` draws from a device resource only, so the
                 // system-memory frames are converted to the NV12 layout
                 // `D3d12Upload` writes and uploaded here.
                 .pipe(SwScaler::new(

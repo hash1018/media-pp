@@ -58,14 +58,13 @@ mod windows_example {
         color::Color,
         elements::{
             AppSource, AppSourceHandle, ChromaKeyMethod, ChromaKeyOptions, D3d11ChromaKey,
-            D3d11Download, D3d11Upload, D3d11VideoCompositor, FileMuxer, SwEncoder,
+            D3d11Download, D3d11Gpu, D3d11Upload, D3d11VideoCompositor, FileMuxer, SwEncoder,
             SwEncoderOptions, SwScaler, TestVideoOptions, TestVideoSource, VideoCodec,
             VideoCompositorOptions, VideoFit, VideoLayer, VideoRect,
         },
         pipeline::Pipeline,
         pool::UnboundObjectPool,
     };
-    use render_common::D3d11GpuContext;
 
     const CANVAS_WIDTH: u32 = 640;
     const CANVAS_HEIGHT: u32 = 360;
@@ -93,7 +92,7 @@ mod windows_example {
         // One device and one shared immediate context for every D3D11 stage —
         // both uploads, the key, the compositor, and the download. Each of
         // them rejects a texture that came from a different device.
-        let gpu = D3d11GpuContext::new(None)?;
+        let gpu = D3d11Gpu::new()?;
         let frame_rate = ffmpeg::Rational::new(30, 1);
 
         let (compositor, compositor_handle) = D3d11VideoCompositor::new(

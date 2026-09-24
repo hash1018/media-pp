@@ -4,7 +4,8 @@
 where it can, and in software onto the same device where it cannot, and
 presents the frames in a native window at real playback speed.
 
-- Windows decodes onto D3D12: D3D12VA, or `SwDecoder` and an upload.
+- Windows decodes onto D3D12 — D3D12VA, or `SwDecoder` and an upload — and
+  draws into `D3d12WindowRenderer`'s own window.
 - Linux decodes onto CUDA — NVDEC, or `SwDecoder` and an upload — with
   Vulkan presentation. Before linking, `contract::check_elements` asks
   whether the bin's output fits the renderer's input; where it does not —

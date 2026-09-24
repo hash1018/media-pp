@@ -25,11 +25,11 @@ call has a generated stream going one way and a real file the other:
   playback speed — without it the whole file would be encoded and sent in
   seconds rather than played as a call.
 - Windows receives `WebRtcTrackSource -> Queue -> SwDecoder -> SwScaler(NV12)
-  -> D3d12Upload -> D3d12Renderer`. Linux receives
-  `WebRtcTrackSource -> Queue -> SwDecoder -> SwScaler(NV12) -> CudaUpload ->
-  CudaRenderer(Vulkan)`. Both renderers draw from a device resource, so the
-  decoded system-memory frame needs that conversion and upload on either
-  backend. Neither receive path needs a `Pacer`: these packets arrive at the
+  -> D3d12Upload -> D3d12WindowRenderer`; that renderer draws from a device
+  resource only, so the decoded system-memory frame needs that conversion and
+  upload first. Linux receives
+  `WebRtcTrackSource -> Queue -> SwDecoder -> VulkanWindowRenderer`, which
+  uploads the decoded frame itself. Neither receive path needs a `Pacer`: these packets arrive at the
   rate the other side encoded them, so the timeline is already real. The send
   pipelines start first, then each
   receiver calls `WebRtcTrackSource::wait_stream_info` with a two-second
@@ -40,10 +40,11 @@ call has a generated stream going one way and a real file the other:
   pipeline is built. No cross-peer encoder-parameter wiring or example-local
   FFmpeg FFI is needed.
 
-Both windows come from one `render_common::run_windows` call and share one
-worker thread. They also share one `D3d12GpuContext` on Windows, or one CUDA
-device and `VulkanGpuContext` on Linux. Closing either window ends the whole
-call; the file side also ends on its own when the file runs out.
+Each window is its renderer's own: two `D3d12WindowRenderer::open` calls on
+one `D3d12Gpu` on Windows, or two `VulkanWindowRenderer::open` calls on one
+`VulkanGpu` on Linux. `render_common::stop_on_close` watches both, so closing
+either window (or pressing Escape in it) ends the whole call; the file side
+also ends on its own when the file runs out.
 
 ```sh
 cargo run -p webrtc_video_call -- path/to/video.mp4

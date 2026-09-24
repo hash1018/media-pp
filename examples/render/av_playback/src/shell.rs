@@ -1,6 +1,5 @@
 //! The terminal command loop and the timestamp parsing this example's shell
-//! adds on top of the window — `render_common::run_window`'s on Windows, the
-//! renderer's own on Linux.
+//! adds on top of the window the video renderer opens for itself.
 
 use std::{
     io::{self, BufRead},

@@ -1,9 +1,9 @@
 //! FileDemuxer -> D3d11Decoder -> D3d11Scaler (960x540) -> Queue ->
-//! Pacer -> D3d11Renderer: decodes and resizes video entirely on one
-//! shared D3D11 device, then presents the fixed-size NV12 output in a
-//! native window at real playback speed. Decoded array-texture slices go
-//! directly through the D3D11 video processor, and neither scaling nor
-//! rendering maps the pixels to system memory.
+//! Pacer -> D3d11WindowRenderer: decodes and resizes video entirely on one
+//! shared D3D11 device, then presents the fixed-size NV12 output in the
+//! renderer's own window at real playback speed. Decoded array-texture
+//! slices go directly through the D3D11 video processor, and neither
+//! scaling nor rendering maps the pixels to system memory.
 //!
 //! The scaler sits before the queue deliberately. Once one synchronous
 //! scale finishes, its decoded input surface can return to FFmpeg's fixed
@@ -27,47 +27,21 @@ mod windows_example {
     use media_pp::ffmpeg::media;
     use media_pp::{
         bus::BusEvent,
-        elements::{D3d11Decoder, D3d11Scaler, D3d11ScalerFormat, FileDemuxer, Pacer},
+        elements::{
+            D3d11Decoder, D3d11Gpu, D3d11Scaler, D3d11ScalerFormat, D3d11WindowRenderer,
+            FileDemuxer, Pacer, WindowOptions,
+        },
         pipeline::Pipeline,
     };
-    use render_common::{D3d11GpuContext, Shutdown};
-    use winit::raw_window_handle::RawWindowHandle;
 
     const OUTPUT_WIDTH: u32 = 960;
     const OUTPUT_HEIGHT: u32 = 540;
 
-    pub(super) fn run() {
+    pub(super) fn run() -> media_pp::Result<()> {
         let Some(path) = std::env::args().nth(1) else {
             eprintln!("usage: d3d11_scale_render <video.mp4>");
             std::process::exit(1);
         };
-
-        render_common::run_window(
-            "media-pp d3d11_scale_render",
-            OUTPUT_WIDTH,
-            OUTPUT_HEIGHT,
-            move |target, shutdown| {
-                let RawWindowHandle::Win32(handle) = target.window else {
-                    panic!("d3d11_scale_render example only supports Windows");
-                };
-                play(
-                    &path,
-                    handle.hwnd.get(),
-                    target.width,
-                    target.height,
-                    &shutdown,
-                )
-            },
-        );
-    }
-
-    fn play(
-        path: &str,
-        hwnd: isize,
-        width: u32,
-        height: u32,
-        shutdown: &Shutdown,
-    ) -> media_pp::Result<()> {
         let _log_guard = media_pp::log::init(
             env!("CARGO_PKG_NAME"),
             "logs",
@@ -75,11 +49,21 @@ mod windows_example {
             7,
         )?;
 
-        let (source, _) = FileDemuxer::open("demux", path)?;
+        let (source, _) = FileDemuxer::open("demux", &path)?;
         let video = source.best(media::Type::Video)?;
         let params = video.parameters.clone();
 
-        let gpu = D3d11GpuContext::new(None)?;
+        let gpu = D3d11Gpu::new()?;
+        let (renderer, window) = D3d11WindowRenderer::open(
+            "renderer",
+            &gpu,
+            WindowOptions {
+                title: "media-pp d3d11_scale_render".into(),
+                width: OUTPUT_WIDTH,
+                height: OUTPUT_HEIGHT,
+            },
+        )?;
+        let shutdown = render_common::stop_on_close([window]);
 
         let (pipeline, ()) = Pipeline::new("d3d11-scale-render", source, |source, ctx| {
             // The scaler consumes each decoder surface synchronously before
@@ -98,8 +82,6 @@ mod windows_example {
                 OUTPUT_HEIGHT,
             )?;
             let pacer = Pacer::new("pacer");
-            let renderer =
-                render_common::d3d11_window_renderer("renderer", &gpu, hwnd, width, height)?;
             let branch = ctx
                 .branch()
                 .pipe(decoder)

@@ -1,6 +1,7 @@
 //! Demux -> SwDecoder -> Queue -> Pacer -> SwScaler -> GPU upload -> Renderer:
 //! decodes a video file in system memory and presents it in a native window at
-//! real playback speed. Windows uses D3D12. Linux draws the decoded frames
+//! real playback speed. Windows uploads to D3D12 and draws into
+//! `D3d12WindowRenderer`'s own window. Linux draws the decoded frames
 //! with `VulkanWindowRenderer`, which uploads them itself, in a window of its
 //! own — through a `SwScaler` only for a stream it cannot draw as it comes.
 //!
@@ -26,45 +27,19 @@ mod windows_example {
     use media_pp::ffmpeg::media;
     use media_pp::{
         bus::BusEvent,
-        elements::{D3d12Upload, FileDemuxer, Pacer, SwDecoder, SwScaler},
+        elements::{
+            D3d12Gpu, D3d12Upload, D3d12WindowRenderer, FileDemuxer, Pacer, SwDecoder, SwScaler,
+            WindowOptions,
+        },
         ffmpeg,
         pipeline::Pipeline,
     };
-    use render_common::{D3d12GpuContext, Shutdown};
-    use winit::raw_window_handle::RawWindowHandle;
 
-    pub(super) fn run() {
+    pub(super) fn run() -> media_pp::Result<()> {
         let Some(path) = std::env::args().nth(1) else {
             eprintln!("usage: sw_decode_render <video.mp4>");
             std::process::exit(1);
         };
-
-        render_common::run_window(
-            "media-pp sw_decode_render",
-            1280,
-            720,
-            move |target, shutdown| {
-                let RawWindowHandle::Win32(handle) = target.window else {
-                    panic!("sw_decode_render example only supports Windows");
-                };
-                play(
-                    &path,
-                    handle.hwnd.get(),
-                    target.width,
-                    target.height,
-                    &shutdown,
-                )
-            },
-        );
-    }
-
-    fn play(
-        path: &str,
-        hwnd: isize,
-        width: u32,
-        height: u32,
-        shutdown: &Shutdown,
-    ) -> media_pp::Result<()> {
         let _log_guard = media_pp::log::init(
             env!("CARGO_PKG_NAME"),
             "logs",
@@ -72,18 +47,23 @@ mod windows_example {
             7,
         )?;
 
-        let (source, _) = FileDemuxer::open("demux", path)?;
+        let (source, _) = FileDemuxer::open("demux", &path)?;
         let video = source.best(media::Type::Video)?;
         let params = video.parameters.clone();
 
-        let gpu = D3d12GpuContext::new()?;
+        let gpu = D3d12Gpu::new()?;
+        let window_options = WindowOptions {
+            title: "media-pp sw_decode_render".into(),
+            ..WindowOptions::default()
+        };
+        let (width, height) = (window_options.width, window_options.height);
+        let (renderer, window) = D3d12WindowRenderer::open("renderer", &gpu, window_options)?;
+        let shutdown = render_common::stop_on_close([window]);
 
         let (pipeline, ()) = Pipeline::new("sw-decode-render", source, |source, ctx| {
             let decoder = SwDecoder::new("decoder", params)?;
             let pacer = Pacer::new("pacer");
-            let renderer =
-                render_common::d3d12_window_renderer("renderer", &gpu, hwnd, width, height)?;
-            // `D3d12Renderer` draws from a device resource only, so the
+            // `D3d12WindowRenderer` draws from a device resource only, so the
             // decoder's system-memory frames are converted to the NV12
             // layout `D3d12Upload` writes and uploaded here. Without this
             // pair the branch is refused as it is built, naming the

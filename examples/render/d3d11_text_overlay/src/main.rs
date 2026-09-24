@@ -37,13 +37,12 @@ mod windows_example {
         bus::BusEvent,
         color::Color,
         elements::{
-            D3d11Download, D3d11Upload, D3d11VideoCompositor, FileMuxer, SwEncoder,
+            D3d11Download, D3d11Gpu, D3d11Upload, D3d11VideoCompositor, FileMuxer, SwEncoder,
             SwEncoderOptions, SwScaler, TestVideoOptions, TestVideoSource, TextLayer, VideoCodec,
             VideoCompositorOptions, VideoFit, VideoLayer, VideoRect,
         },
         pipeline::Pipeline,
     };
-    use render_common::D3d11GpuContext;
     use windows::Win32::System::Console::{
         GetStdHandle, INPUT_RECORD, KEY_EVENT, ReadConsoleInputW, STD_INPUT_HANDLE,
     };
@@ -80,7 +79,7 @@ mod windows_example {
             .and_then(|value| value.parse().ok())
             .unwrap_or(5);
 
-        let gpu = D3d11GpuContext::new(None)?;
+        let gpu = D3d11Gpu::new()?;
 
         let output_width = 640;
         let output_height = 360;

@@ -6,7 +6,6 @@ publish = false
 
 [dependencies]
 render_common = { path = "../render_common" }
-winit = "0.30"
 
 [target.'cfg(windows)'.dependencies]
 media-pp = { path = "../../../lib", features = ["d3d12", "wasapi-renderer"] }

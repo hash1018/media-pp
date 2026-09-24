@@ -1,6 +1,7 @@
 //! Previews desktop capture through the CPU-frame path. Windows is
 //! `DxgiCaptureSource -> Queue -> SwScaler(NV12) -> Queue -> D3d12Upload ->
-//! Renderer`, converting directly to window-sized NV12. Linux is
+//! D3d12WindowRenderer`, converting directly to window-sized NV12 and
+//! drawing it in the renderer's own window. Linux is
 //! `PipeWireScreenCaptureSource -> Queue -> VulkanWindowRenderer`: the
 //! renderer draws the capture's system-memory BGRA as it comes, uploading
 //! and scaling it itself. The capture includes the cursor, and needs no
@@ -32,17 +33,19 @@ mod windows_example {
     use media_pp::{
         bus::BusEvent,
         element::ElementType,
-        elements::{CaptureMode, D3d12Upload, DxgiCaptureOptions, DxgiCaptureSource, SwScaler},
+        elements::{
+            CaptureMode, D3d12Gpu, D3d12Upload, D3d12WindowRenderer, DxgiCaptureOptions,
+            DxgiCaptureSource, SwScaler, WindowOptions,
+        },
         pipeline::Pipeline,
     };
-    use render_common::{D3d12GpuContext, Shutdown};
-    use winit::raw_window_handle::RawWindowHandle;
 
-    /// DxgiCaptureSource -> SwScaler -> D3d12Upload -> Renderer: captures the
-    /// desktop live via DXGI Desktop Duplication (cursor included) at a
-    /// constant frame rate (`DxgiCaptureOptions::frame_rate`), converts/resizes it to
-    /// the window's own size as `Pixel::NV12` in one pass, and uploads that to
-    /// the GPU — no `SwEncoder`/`SwDecoder` round trip.
+    /// DxgiCaptureSource -> SwScaler -> D3d12Upload -> D3d12WindowRenderer:
+    /// captures the desktop live via DXGI Desktop Duplication (cursor
+    /// included) at a constant frame rate (`DxgiCaptureOptions::frame_rate`),
+    /// converts/resizes it to the window's own size as `Pixel::NV12` in one
+    /// pass, and uploads that to the GPU — no `SwEncoder`/`SwDecoder` round
+    /// trip.
     ///
     /// No `Pacer` here, confirmed unneeded: `DxgiCaptureSource` previously
     /// emitted variable-rate (real wall-clock pts, push-on-change), and
@@ -55,26 +58,7 @@ mod windows_example {
     /// not the presence of a `Pacer` stage.
     ///
     ///     cargo run -p screen_preview_cpu
-    pub(super) fn run() {
-        render_common::run_window(
-            "media-pp screen_preview_cpu",
-            1280,
-            720,
-            |target, shutdown| {
-                let RawWindowHandle::Win32(handle) = target.window else {
-                    panic!("screen_preview_cpu example only supports Windows");
-                };
-                play(handle.hwnd.get(), target.width, target.height, &shutdown)
-            },
-        );
-    }
-
-    fn play(
-        hwnd: isize,
-        window_width: u32,
-        window_height: u32,
-        shutdown: &Shutdown,
-    ) -> media_pp::Result<()> {
+    pub(super) fn run() -> media_pp::Result<()> {
         let _log_guard = media_pp::log::init(
             env!("CARGO_PKG_NAME"),
             "logs",
@@ -91,7 +75,14 @@ mod windows_example {
         };
         let (source, _format, _device) = DxgiCaptureSource::open("screen", capture_options)?;
 
-        let gpu = D3d12GpuContext::new()?;
+        let gpu = D3d12Gpu::new()?;
+        let window_options = WindowOptions {
+            title: "media-pp screen_preview_cpu".into(),
+            ..WindowOptions::default()
+        };
+        let (window_width, window_height) = (window_options.width, window_options.height);
+        let (renderer, window) = D3d12WindowRenderer::open("renderer", &gpu, window_options)?;
+        let shutdown = render_common::stop_on_close([window]);
 
         let (pipeline, ()) = Pipeline::new("screen-preview-cpu", source, |source, ctx| {
             // Converts the captured `Pixel::BGRA` desktop frames down to the
@@ -104,16 +95,9 @@ mod windows_example {
                 window_height,
                 ffmpeg::software::scaling::Flags::BILINEAR,
             );
-            // `D3d12Renderer` draws from a device resource only, so this is
-            // where the captured pixels cross to the GPU.
+            // `D3d12WindowRenderer` draws from a device resource only, so this
+            // is where the captured pixels cross to the GPU.
             let upload = D3d12Upload::new("upload", gpu.device())?;
-            let renderer = render_common::d3d12_window_renderer(
-                "renderer",
-                &gpu,
-                hwnd,
-                window_width,
-                window_height,
-            )?;
 
             let branch = ctx
                 .branch()
@@ -138,19 +122,13 @@ mod windows_example {
 
         for event in pipeline.bus().iter() {
             println!("{event}");
-            // Unlike the other render examples (a steady, self-paced
-            // synthetic/file source that essentially never overruns the
-            // renderer's 2-slot upload ring), live desktop capture can
-            // legitimately burst faster than that ring drains — e.g. right at
-            // startup, before the render thread has processed even its first
-            // frame. `D3d12RendererError::Submit(NoFreeSlot)` on an occasional
-            // frame is expected backpressure, not a reason to end the whole
-            // demo — the `Queue` in front of the renderer already drops just
-            // that one buffer and keeps going (see `Queue`'s own "report,
-            // don't die" contract). Only stop for `Finished`, or an `Error` from
-            // `DxgiCaptureSource` itself (its `run()` thread actually ended —
-            // e.g. `DXGI_ERROR_ACCESS_LOST` from a lock screen — so nothing
-            // more will ever arrive).
+            // An error on an occasional frame downstream is not a reason to
+            // end the whole demo — the `Queue` in front of the failing stage
+            // already drops just that one buffer and keeps going (see
+            // `Queue`'s own "report, don't die" contract). Only stop for
+            // `Finished`, or an `Error` from `DxgiCaptureSource` itself (its
+            // `run()` thread actually ended — e.g. `DXGI_ERROR_ACCESS_LOST`
+            // from a lock screen — so nothing more will ever arrive).
             let source_died = matches!(
                 &event,
                 BusEvent::Error { element_type, .. } if *element_type == ElementType::DxgiCaptureSource
