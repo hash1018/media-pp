@@ -82,13 +82,16 @@ Video, by backend:
 | Composite | `SwVideoCompositor` | `D3d11VideoCompositor` | | `CudaVideoCompositor` |
 | Key, colour | `SwChromaKey`, `SwVideoEffect` | `D3d11ChromaKey`, `D3d11VideoEffect` | | `CudaChromaKey`, `CudaVideoEffect` |
 | Upload, download | | `D3d11Upload`, `D3d11Download` | `D3d12Upload`, `D3d12Download` | `CudaUpload`, `CudaDownload` |
-| Render | | `D3d11WindowRenderer`, `D3d11Renderer` | `D3d12WindowRenderer`, `D3d12Renderer` | `CudaRenderer` |
+| Render | `VulkanWindowRenderer` | `D3d11WindowRenderer`, `D3d11Renderer` | `D3d12WindowRenderer`, `D3d12Renderer` | `VulkanWindowRenderer`, `CudaRenderer` |
 
 `VideoDecodeBin` chooses among the decode row and the uploads for a stream.
 
 `D3d11WindowRenderer` and `D3d12WindowRenderer` show frames in a window: one it opens for itself, as a
 GStreamer video sink does, reporting keys and closing as `WindowEvents`, or
-one the application gives it. The other renderers hand each frame to a
+one the application gives it. On Linux, `VulkanWindowRenderer` draws into a
+window the application gives it, X11 or Wayland, from frames in system
+memory, and from CUDA frames too on a `VulkanGpu` made for CUDA. The other
+renderers hand each frame to a
 presenter the program supplies — an implementation of `D3d11FrameRenderer`,
 `D3d12FrameRenderer` or `CudaFrameRenderer` for its own window or UI; the
 examples' unpublished `render_common` crate implements them for a winit
@@ -126,6 +129,7 @@ backend's prefix and exist only where their feature is enabled.
 | `cuda` | NVDEC decode, NVENC encode, scaling, compositing, upload/download, and rendering, all on CUDA-resident frames | Linux, Windows |
 | `d3d11` | D3D11 decode, scaling, upload/download, rendering, GPU compositing, and hardware encoding | Windows |
 | `d3d12` | D3D12VA decode, scaling, upload/download, and rendering | Windows |
+| `vulkan` | `VulkanWindowRenderer`: video in an X11 or Wayland window, from system memory, or from CUDA with `cuda` too | Linux |
 | `dxgi-capture` | Desktop capture; also enables `d3d11` | Windows |
 | `wgc-capture` | Individual-window capture through Windows Graphics Capture; also enables `d3d11` | Windows |
 | `mf-capture` | Camera capture through Media Foundation | Windows |

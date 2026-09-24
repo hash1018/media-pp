@@ -2007,6 +2007,8 @@ version = "0.2.0"
 dependencies = [
  "ab_glyph",
  "arc-swap",
+ "ash",
+ "ash-window",
  "ashpd",
  "async-io",
  "crossbeam-channel",
@@ -2017,6 +2019,7 @@ dependencies = [
  "futures-util",
  "libc",
  "log",
+ "naga",
  "ndarray",
  "nnnoiseless",
  "ort",
@@ -4235,6 +4238,14 @@ name = "video_compositor"
 version = "0.1.0"
 dependencies = [
  "media-pp",
+]
+
+[[package]]
+name = "vulkan_window_render"
+version = "0.1.0"
+dependencies = [
+ "media-pp",
+ "winit",
 ]
 
 [[package]]

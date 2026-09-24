@@ -179,6 +179,8 @@ pub enum ElementType {
     /// D3D11 video renderer sink with its own window, or drawing into one
     /// it was given.
     D3d11WindowRenderer,
+    /// Vulkan video renderer sink, drawing into a window it was given.
+    VulkanWindowRenderer,
     /// PipeWire audio renderer sink.
     PipeWireAudioRenderer,
     /// Windows WASAPI audio renderer sink.

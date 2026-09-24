@@ -1,0 +1,9 @@
+[package]
+name = "vulkan_window_render"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[target.'cfg(target_os = "linux")'.dependencies]
+media-pp = { path = "../../../lib", features = ["vulkan", "cuda"] }
+winit = "0.30"

@@ -33,6 +33,8 @@ pub use crate::platform::cuda::{
 };
 #[cfg(all(target_os = "linux", feature = "v4l2-capture"))]
 pub use crate::platform::linux::v4l2::{V4l2CaptureFormat, V4l2Device};
+#[cfg(all(target_os = "linux", feature = "vulkan"))]
+pub use crate::platform::linux::vulkan::{VulkanGpu, VulkanGpuError};
 #[cfg(all(target_os = "windows", feature = "d3d11"))]
 pub use crate::platform::windows::d3d11_gpu::{D3d11Gpu, D3d11GpuError};
 #[cfg(all(target_os = "windows", feature = "d3d12"))]
@@ -140,6 +142,8 @@ pub use sink::{D3d12WindowRenderer, D3d12WindowRendererError};
 pub use sink::{Key, WindowEvent, WindowEvents, WindowOptions};
 #[cfg(all(target_os = "linux", feature = "pipewire-audio-renderer"))]
 pub use sink::{PipeWireAudioRenderer, PipeWireAudioRendererError, PipeWireAudioRendererOptions};
+#[cfg(all(target_os = "linux", feature = "vulkan"))]
+pub use sink::{VulkanWindowRenderer, VulkanWindowRendererError, WindowSize};
 #[cfg(all(target_os = "windows", feature = "wasapi-renderer"))]
 pub use sink::{WasapiRenderer, WasapiRendererError, WasapiRendererOptions};
 pub use source::{

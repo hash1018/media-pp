@@ -13,3 +13,7 @@ pub(crate) mod dmabuf_cuda;
 /// Camera enumeration, for `V4l2CaptureSource`'s own picker.
 #[cfg(feature = "v4l2-capture")]
 pub(crate) mod v4l2;
+
+/// The Vulkan device `VulkanWindowRenderer` draws with — see `VulkanGpu`.
+#[cfg(feature = "vulkan")]
+pub(crate) mod vulkan;

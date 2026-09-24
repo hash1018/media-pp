@@ -96,6 +96,22 @@ futures-util = { version = "0.3", optional = true }
 libc = { version = "0.2", optional = true }
 pipewire = { version = "0.10.1", optional = true, features = ["v0_3_50"] }
 pollster = { version = "1", optional = true }
+# `VulkanWindowRenderer`: `ash` with its default `loaded` feature, so the
+# Vulkan loader is opened at run time and building this needs no Vulkan SDK
+# — the same stance as the EGL and CUDA libraries this crate `dlopen`s.
+# `ash-window` makes a surface from whichever window handle is given, X11 or
+# Wayland; `naga` compiles the WGSL presenting shaders at construction, the
+# way the D3D11 renderer compiles its HLSL, so there is no shader toolchain
+# to install either.
+ash = { version = "0.38", optional = true }
+ash-window = { version = "0.13", optional = true }
+naga = { version = "30", optional = true, default-features = false, features = [
+    "wgsl-in",
+    "spv-out",
+] }
+# The window a `VulkanWindowRenderer` is given, as on Windows. `std` for
+# its `HandleError` to be an `Error`.
+raw-window-handle = { version = "0.6", optional = true, features = ["std"] }
 
 # Every `unsafe` block in this crate states why it is sound. The rule is
 # worth enforcing rather than remembering: writing these honestly is what
@@ -107,11 +123,17 @@ undocumented_unsafe_blocks = "deny"
 [features]
 # CUDA-resident decode and rendering. Needs no extra Rust dependency: FFmpeg
 # owns the CUDA context and the frame pool, and this crate's CUDA elements
-# only ever move `AVFrame`s around. The graphics-API interop that actually
-# displays a CUDA frame lives in the caller's own `CudaFrameRenderer`
-# implementation, which is where `ash`/`windows-rs` would be pulled in.
+# only ever move `AVFrame`s around. Showing a CUDA frame is either the
+# caller's own `CudaFrameRenderer`, or `vulkan` below, which is where `ash`
+# is pulled in — not here, so encoding and compositing do not pay for it.
 # Not platform-gated: CUDA is available on Linux and Windows alike.
 cuda = ["dep:ab_glyph"]
+# `VulkanGpu` and `VulkanWindowRenderer`, which shows video in a window —
+# frames in system memory on any GPU, and CUDA frames too when `cuda` is also
+# on. Named for what draws rather than for what it takes, as a GStreamer sink
+# is, because it takes more than one memory domain. Linux only: its CUDA
+# path shares memory through a POSIX file descriptor.
+vulkan = ["dep:ash", "dep:ash-window", "dep:naga", "dep:raw-window-handle"]
 d3d12 = [
     "dep:windows",
     # `D3d12WindowRenderer`'s own window, drawn into through a swap chain, or

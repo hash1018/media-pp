@@ -55,6 +55,8 @@ pub use renderer::{Key, WindowEvent, WindowEvents, WindowOptions};
 pub use renderer::{
     PipeWireAudioRenderer, PipeWireAudioRendererError, PipeWireAudioRendererOptions,
 };
+#[cfg(all(target_os = "linux", feature = "vulkan"))]
+pub use renderer::{VulkanWindowRenderer, VulkanWindowRendererError, WindowSize};
 #[cfg(all(target_os = "windows", feature = "wasapi-renderer"))]
 pub use renderer::{WasapiRenderer, WasapiRendererError, WasapiRendererOptions};
 #[cfg(feature = "whisper")]

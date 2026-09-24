@@ -211,6 +211,13 @@ jobs:
       - name: Lint (CUDA)
         run: cargo clippy -p media-pp --all-targets --features cuda -- -D warnings
 
+      # Both halves of the renderer: system memory alone, and with the CUDA
+      # path that only exists when `cuda` is on too.
+      - name: Lint (Vulkan)
+        run: |
+          cargo clippy -p media-pp --all-targets --features vulkan -- -D warnings
+          cargo clippy -p media-pp --all-targets --features vulkan,cuda -- -D warnings
+
       # See the same job on Windows: this one also proves the runner can
       # build whisper.cpp, which is C++ and needs cmake.
       - name: Lint (Whisper)
@@ -233,11 +240,20 @@ jobs:
           cargo doc -p media-pp --no-deps
           cargo doc -p media-pp --no-deps --features pipewire-audio-capture,pipewire-audio-renderer,pipewire-screen-capture,v4l2-capture
           cargo doc -p media-pp --no-deps --features cuda
+          cargo doc -p media-pp --no-deps --features vulkan
+          cargo doc -p media-pp --no-deps --features vulkan,cuda
           cargo doc -p media-pp --no-deps --features whisper
           cargo doc -p media-pp --no-deps --features rnnoise
 
       - name: Test (no features)
         run: cargo test -p media-pp
+
+      # Runs without a GPU: the Vulkan loader is opened at run time, the
+      # tests that need a device skip where there is none, and what is left —
+      # the presenting shader compiling, the colour matrices, the letterbox —
+      # is exactly what a runner can check.
+      - name: Test (Vulkan)
+        run: cargo test -p media-pp --features vulkan
 
       # The chunking these cover needs no model file, which is why they can
       # run here at all — a model is gigabytes and belongs to whoever runs

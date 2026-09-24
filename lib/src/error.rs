@@ -75,6 +75,8 @@ use crate::elements::{
     D3d12DecoderError, D3d12DownloadError, D3d12GpuError, D3d12RendererError, D3d12ScalerError,
     D3d12UploadError, D3d12WindowRendererError,
 };
+#[cfg(all(target_os = "linux", feature = "vulkan"))]
+use crate::elements::{VulkanGpuError, VulkanWindowRendererError};
 use crate::{
     control::{PrerollError, SeekError},
     elements::{
@@ -212,6 +214,16 @@ pub enum Error {
     #[cfg(all(target_os = "windows", feature = "d3d11"))]
     #[error(transparent)]
     D3d11WindowRendererError(#[from] D3d11WindowRendererError),
+
+    /// A Vulkan device could not be set up.
+    #[cfg(all(target_os = "linux", feature = "vulkan"))]
+    #[error(transparent)]
+    VulkanGpuError(#[from] VulkanGpuError),
+
+    /// A Vulkan window renderer could not set up or present into its window.
+    #[cfg(all(target_os = "linux", feature = "vulkan"))]
+    #[error(transparent)]
+    VulkanWindowRendererError(#[from] VulkanWindowRendererError),
 
     /// A file demuxer operation failed.
     #[error(transparent)]

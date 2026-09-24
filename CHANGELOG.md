@@ -533,6 +533,25 @@ compile error with no explanation.
 
 ### Added
 
+- **`VulkanGpu` and `VulkanWindowRenderer`: video in a window on Linux,
+  from system memory or CUDA.** A new `vulkan` feature. `VulkanWindowRenderer`
+  draws into a window the application gives it with `for_window` — X11 or
+  Wayland, anything with a `raw-window-handle`, such as a `winit` window,
+  kept alive by the renderer — and takes NV12 frames in system memory, and
+  CUDA frames too where its `VulkanGpu` was made with `for_cuda`, which
+  pairs it with the GPU CUDA decodes on by UUID. A CUDA frame is copied
+  device to device into memory the renderer's device allocated and CUDA
+  imported; what `render_common`'s `CudaWindowRenderer` did for the
+  examples, in the library. Each frame is drawn by its own colour
+  description — BT.709, BT.601 or BT.2020, limited or full range, and by
+  height where it says nothing — letterboxed, and presented in step with
+  the display. On X11 it follows the window's size by itself; on Wayland,
+  where a client sets its own size, the application passes it on through
+  `WindowSize`. Named for what draws rather than for the frames it takes,
+  like a GStreamer sink, because it takes more than one memory domain. The
+  new `vulkan_window_render` example shows it. `open`, a window of its
+  own with `WindowEvents` as on Windows, is still to come.
+
 - **`D3d11Gpu` and `D3d11WindowRenderer`: D3D11 with a window of its own.**
   `D3d11Gpu::new()` makes the one device a pipeline's D3D11 elements share,
   with the flags they need, protected for use across threads, and its

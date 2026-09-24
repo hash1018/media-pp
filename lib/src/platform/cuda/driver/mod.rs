@@ -23,6 +23,10 @@ use thiserror::Error as ThisError;
 
 use crate::color::Color;
 
+/// What a graphics API needs from CUDA to show a CUDA frame — see
+/// `crate::elements::VulkanWindowRenderer`.
+#[cfg(all(target_os = "linux", feature = "vulkan"))]
+pub(crate) mod interop;
 mod ptx;
 
 use ptx::{BLEND_PTX, CONVERT_PTX};
