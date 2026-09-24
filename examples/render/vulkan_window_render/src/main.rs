@@ -1,8 +1,10 @@
-//! TestVideoSource -> SwScaler (NV12) -> [CudaUpload] -> VulkanWindowRenderer:
-//! a moving test pattern drawn into a `winit` window by the library's own
+//! TestVideoSource -> SwScaler -> [CudaUpload] -> VulkanWindowRenderer: a
+//! moving test pattern drawn into a `winit` window by the library's own
 //! Vulkan renderer, from system memory or — with `--cuda` — from CUDA.
 //! `--file PATH` plays a file instead, decoded on the CPU and paced, which is
-//! how to see colour: the test pattern is grey.
+//! how to see colour: the test pattern is grey. `--format` picks the layout
+//! the frames reach the renderer in: `nv12` (the default), `yuv420p` or
+//! `bgra`; CUDA frames are NV12 or BGRA only.
 //!
 //! The window is this program's: it runs the event loop and hands the
 //! renderer an `Arc` of the window. Resizing it is followed — on X11 by the
@@ -10,7 +12,7 @@
 //! from its own `Resized` events. `--seconds N` closes it after N seconds,
 //! resizing it once halfway through, for a run nobody watches.
 //!
-//!     cargo run -p vulkan_window_render -- [--cuda] [--seconds N] [--file PATH]
+//!     cargo run -p vulkan_window_render -- [--cuda] [--format F] [--seconds N] [--file PATH]
 
 #[cfg(not(target_os = "linux"))]
 fn main() {
@@ -59,9 +61,12 @@ mod linux_example {
 
     struct Options {
         cuda: bool,
+        format: ffmpeg::format::Pixel,
         seconds: Option<u64>,
         file: Option<String>,
     }
+
+    const USAGE: &str = "usage: vulkan_window_render [--cuda] [--format nv12|yuv420p|bgra] [--seconds N] [--file PATH]";
 
     pub(super) fn run() -> media_pp::Result<()> {
         let _log_guard = media_pp::log::init(
@@ -72,6 +77,7 @@ mod linux_example {
         )?;
         let mut options = Options {
             cuda: false,
+            format: ffmpeg::format::Pixel::NV12,
             seconds: None,
             file: None,
         };
@@ -81,11 +87,32 @@ mod linux_example {
                 "--cuda" => options.cuda = true,
                 "--seconds" => options.seconds = args.next().and_then(|s| s.parse().ok()),
                 "--file" => options.file = args.next(),
+                "--format" => {
+                    options.format = match args.next().as_deref() {
+                        Some("nv12") => ffmpeg::format::Pixel::NV12,
+                        Some("yuv420p") => ffmpeg::format::Pixel::YUV420P,
+                        Some("bgra") => ffmpeg::format::Pixel::BGRA,
+                        _ => {
+                            eprintln!("{USAGE}");
+                            std::process::exit(1);
+                        }
+                    }
+                }
                 _ => {
-                    eprintln!("usage: vulkan_window_render [--cuda] [--seconds N] [--file PATH]");
+                    eprintln!("{USAGE}");
                     std::process::exit(1);
                 }
             }
+        }
+        // What `CudaUpload` makes of the frames, where they go to CUDA.
+        let upload = match options.format {
+            ffmpeg::format::Pixel::NV12 => Some(CudaFrameFormat::Nv12),
+            ffmpeg::format::Pixel::BGRA => Some(CudaFrameFormat::Bgra),
+            _ => None,
+        };
+        if options.cuda && upload.is_none() {
+            eprintln!("CUDA frames are NV12 or BGRA; {USAGE}");
+            std::process::exit(1);
         }
 
         // The CUDA side first, and the Vulkan device paired with it: made
@@ -139,13 +166,24 @@ mod linux_example {
         fn start(&mut self, window: &Arc<Window>) -> media_pp::Result<()> {
             let renderer = VulkanWindowRenderer::for_window("screen", &self.gpu, window.clone())?;
             self.size = Some(renderer.window_size());
-            let cuda = self.cuda.clone();
-            // NV12 at the source's own size: the renderer scales, and the
+            let format = self.options.format;
+            let upload = match &self.cuda {
+                Some(cuda) => {
+                    let into = if format == ffmpeg::format::Pixel::BGRA {
+                        CudaFrameFormat::Bgra
+                    } else {
+                        CudaFrameFormat::Nv12
+                    };
+                    Some(CudaUpload::new("upload", cuda, into))
+                }
+                None => None,
+            };
+            // At the source's own size: the renderer scales, and the
             // letterboxing is part of what this shows.
-            let to_nv12 = |width, height| {
+            let convert = |width, height| {
                 SwScaler::new(
-                    "to-nv12",
-                    ffmpeg::format::Pixel::NV12,
+                    "convert",
+                    format,
                     width,
                     height,
                     ffmpeg::software::scaling::Flags::BILINEAR,
@@ -162,11 +200,9 @@ mod linux_example {
                         },
                     );
                     Pipeline::new("vulkan-window-render", source, |source, ctx| {
-                        let branch = ctx.branch().queue("frames", 4).pipe(to_nv12(WIDTH, HEIGHT));
-                        let branch = match &cuda {
-                            Some(cuda) => {
-                                branch.pipe(CudaUpload::new("upload", cuda, CudaFrameFormat::Nv12))
-                            }
+                        let branch = ctx.branch().queue("frames", 4).pipe(convert(WIDTH, HEIGHT));
+                        let branch = match upload {
+                            Some(upload) => branch.pipe(upload),
                             None => branch,
                         };
                         ctx.attach(source, 0, branch.to(renderer)?)?;
@@ -190,11 +226,9 @@ mod linux_example {
                             .pipe(SwDecoder::new("decoder", params)?)
                             .queue("frames", 16)
                             .pipe(Pacer::new("pacer"))
-                            .pipe(to_nv12(width, height));
-                        let branch = match &cuda {
-                            Some(cuda) => {
-                                branch.pipe(CudaUpload::new("upload", cuda, CudaFrameFormat::Nv12))
-                            }
+                            .pipe(convert(width, height));
+                        let branch = match upload {
+                            Some(upload) => branch.pipe(upload),
                             None => branch,
                         };
                         ctx.attach(source, video.index, branch.to(renderer)?)?;

@@ -129,7 +129,7 @@ backend's prefix and exist only where their feature is enabled.
 | `cuda` | NVDEC decode, NVENC encode, scaling, compositing, upload/download, and rendering, all on CUDA-resident frames | Linux, Windows |
 | `d3d11` | D3D11 decode, scaling, upload/download, rendering, GPU compositing, and hardware encoding | Windows |
 | `d3d12` | D3D12VA decode, scaling, upload/download, and rendering | Windows |
-| `vulkan` | `VulkanWindowRenderer`: video in an X11 or Wayland window, from system memory, or from CUDA with `cuda` too | Linux |
+| `vulkan` | `VulkanWindowRenderer`: video in an X11 or Wayland window — NV12, YUV420P or BGRA from system memory, or NV12 or BGRA from CUDA with `cuda` too | Linux |
 | `dxgi-capture` | Desktop capture; also enables `d3d11` | Windows |
 | `wgc-capture` | Individual-window capture through Windows Graphics Capture; also enables `d3d11` | Windows |
 | `mf-capture` | Camera capture through Media Foundation | Windows |

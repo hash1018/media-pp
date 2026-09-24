@@ -5,6 +5,7 @@
 use std::os::fd::{FromRawFd, OwnedFd};
 use std::{
     any::Any,
+    ffi::CStr,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -21,8 +22,8 @@ use thiserror::Error as ThisError;
 use crate::{
     buffer::MediaBuffer,
     contract::{
-        InputContract, MediaKind, MediaKindSet, MemoryDomain, MemoryDomainSet, PixelLayoutSet,
-        PortContract,
+        InputContract, MediaKind, MediaKindSet, MemoryDomain, MemoryDomainSet, PixelLayout,
+        PixelLayoutSet, PortContract,
     },
     control::ControlMsg,
     element::{Element, ElementType, Sink, element_pp_log},
@@ -35,7 +36,7 @@ use crate::{
 #[cfg(feature = "cuda")]
 use crate::platform::cuda::driver::interop::{CudaInterop, DeviceRows, ImportedMemory};
 
-const NV12_SHADER: &str = include_str!("../../../../shaders/vulkan/present_nv12.wgsl");
+const SHADER: &str = include_str!("../../../../shaders/vulkan/present.wgsl");
 
 /// Why a [`VulkanWindowRenderer`] could not be set up, or could not draw a
 /// frame.
@@ -72,19 +73,10 @@ pub enum VulkanWindowRendererError {
     #[error("the presenting shader did not build: {0}")]
     Shader(String),
 
-    /// A frame in a layout this renderer does not draw.
+    /// A frame in a layout this renderer does not draw: not NV12, YUV420P
+    /// or BGRA in system memory, or not NV12 or BGRA in CUDA memory.
     #[error("a {0:?} frame is not one this renderer draws")]
     UnsupportedFrame(Pixel),
-
-    /// An NV12 frame whose sides are not both even, which has no whole
-    /// chroma sample for its last row or column.
-    #[error("an NV12 frame of {width}x{height} is not one this renderer draws")]
-    OddFrame {
-        /// Width of the frame.
-        width: u32,
-        /// Height of the frame.
-        height: u32,
-    },
 
     /// A CUDA frame reached a renderer whose [`VulkanGpu`] was not made for
     /// CUDA, so there is no GPU memory to copy it into.
@@ -143,11 +135,19 @@ impl WindowSize {
 ///
 /// # What it takes
 ///
-/// Frames in system memory, on any GPU a [`VulkanGpu`] can open. And CUDA
-/// frames as well when that [`VulkanGpu`] was made with
-/// `VulkanGpu::for_cuda` (with the `cuda` feature): a CUDA frame is copied, device to device, into
-/// memory this renderer's device allocated and CUDA imported, which only
-/// works within one GPU. NV12 either way.
+/// Frames in system memory, on any GPU a [`VulkanGpu`] can open: NV12,
+/// YUV420P (and YUVJ420P) or BGRA — what a hardware decode downloaded, a
+/// software decode, and a screen capture give, each drawn as it comes with
+/// no conversion in front. And CUDA frames as well, NV12 or BGRA, when that
+/// [`VulkanGpu`] was made with `VulkanGpu::for_cuda` (with the `cuda`
+/// feature): a CUDA frame is copied, device to device, into memory this
+/// renderer's device allocated and CUDA imported, which only works within
+/// one GPU.
+///
+/// Its input contract admits system-memory frames of any layout other than
+/// NV12 and BGRA, because that is the one name the contract has for
+/// YUV420P; a frame in another of them — RGB24, YUV444P — is refused when
+/// it arrives, with [`VulkanWindowRendererError::UnsupportedFrame`].
 ///
 /// That is also why it is named for what draws rather than for what it
 /// takes, unlike `CudaRenderer`: a renderer of one memory
@@ -156,10 +156,12 @@ impl WindowSize {
 ///
 /// # What it draws
 ///
-/// Each frame is drawn by its own colour description: BT.709, BT.601 or
+/// Each YUV frame is drawn by its own colour description: BT.709, BT.601 or
 /// BT.2020 coefficients as the frame says, limited or full range as it says,
 /// and where it says nothing, BT.709 for a picture 720 rows high or more and
-/// BT.601 below that. The picture keeps its aspect ratio inside the window,
+/// BT.601 below that; a YUVJ420P frame is full range whatever it says. A
+/// BGRA frame is drawn as it is, and its alpha ignored. The picture keeps
+/// its aspect ratio inside the window,
 /// with black bars as needed, and each frame is presented synchronized to
 /// the display's refresh.
 ///
@@ -187,6 +189,7 @@ pub struct VulkanWindowRenderer {
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Drawing {
     frame: [u32; 2],
+    layout: Layout,
     domain: MemoryDomain,
     window: vk::Extent2D,
 }
@@ -242,25 +245,20 @@ impl VulkanWindowRenderer {
         self.size.clone()
     }
 
+    /// Draws one frame, and says what it was.
     fn draw(
         &mut self,
         frame: &ffmpeg::frame::Video,
-    ) -> std::result::Result<(), VulkanWindowRendererError> {
+    ) -> std::result::Result<(Layout, MemoryDomain), VulkanWindowRendererError> {
         let (width, height) = (frame.width(), frame.height());
-        let colour = Colour::of(frame.color_space(), frame.color_range(), height);
+        let range = match frame.format() {
+            // The J is the range: FFmpeg's name for full-range 4:2:0, which
+            // not every producer also says in the range field.
+            Pixel::YUVJ420P => ffmpeg::color::Range::JPEG,
+            _ => frame.color_range(),
+        };
+        let colour = Colour::of(frame.color_space(), range, height);
         match frame.format() {
-            Pixel::NV12 => {
-                if width % 2 != 0 || height % 2 != 0 {
-                    return Err(VulkanWindowRendererError::OddFrame { width, height });
-                }
-                let rows = Rows::System {
-                    y: frame.data(0),
-                    y_pitch: frame.stride(0),
-                    uv: frame.data(1),
-                    uv_pitch: frame.stride(1),
-                };
-                self.presenter.present(width, height, colour, rows)
-            }
             #[cfg(feature = "cuda")]
             Pixel::CUDA => {
                 use crate::platform::cuda::{CudaSurfaces, frame::validate};
@@ -271,41 +269,47 @@ impl VulkanWindowRenderer {
                     .cuda
                     .as_ref()
                     .ok_or(VulkanWindowRendererError::NotForCuda)?;
-                validate(
+                let surface = validate(
                     frame,
                     ElementType::VulkanWindowRenderer,
                     pairing.device_ctx,
-                    CudaSurfaces::NV12,
+                    CudaSurfaces::NV12_OR_BGRA,
                 )?;
+                let layout = Layout::of(surface.layout)
+                    .ok_or(VulkanWindowRendererError::UnsupportedFrame(surface.layout))?;
                 let interop = Arc::clone(&pairing.interop);
-                // SAFETY: `validate` has established a live CUDA frame from the
-                // device this renderer's GPU was paired with, in NV12, so its
-                // first two planes are device pointers in that context.
-                let (y, y_pitch, uv, uv_pitch) = unsafe {
-                    let ptr = frame.as_ptr();
-                    (
-                        (*ptr).data[0] as u64,
-                        (*ptr).linesize[0] as usize,
-                        (*ptr).data[1] as u64,
-                        (*ptr).linesize[1] as usize,
-                    )
-                };
-                if y == 0 || uv == 0 {
-                    return Err(VulkanWindowRendererError::UnsupportedFrame(Pixel::CUDA));
+                let mut planes = [(0u64, 0usize); 3];
+                for (index, plane) in planes.iter_mut().enumerate().take(layout.plane_count()) {
+                    // SAFETY: `validate` has established a live CUDA frame from
+                    // the device this renderer's GPU was paired with, in a
+                    // layout of `plane_count` planes, whose pointers are
+                    // device pointers in that context.
+                    *plane = unsafe {
+                        let ptr = frame.as_ptr();
+                        ((*ptr).data[index] as u64, (*ptr).linesize[index] as usize)
+                    };
+                    if plane.0 == 0 {
+                        return Err(VulkanWindowRendererError::UnsupportedFrame(surface.layout));
+                    }
                 }
-                if width % 2 != 0 || height % 2 != 0 {
-                    return Err(VulkanWindowRendererError::OddFrame { width, height });
-                }
-                let rows = Rows::Cuda {
-                    y,
-                    y_pitch,
-                    uv,
-                    uv_pitch,
+                let source = Source::Cuda {
+                    planes,
                     interop: &interop,
                 };
-                self.presenter.present(width, height, colour, rows)
+                self.presenter
+                    .present(width, height, layout, colour, source)?;
+                Ok((layout, MemoryDomain::Cuda))
             }
-            other => Err(VulkanWindowRendererError::UnsupportedFrame(other)),
+            format => {
+                let layout = Layout::of(format)
+                    .ok_or(VulkanWindowRendererError::UnsupportedFrame(format))?;
+                if frame.planes() < layout.plane_count() {
+                    return Err(VulkanWindowRendererError::UnsupportedFrame(format));
+                }
+                self.presenter
+                    .present(width, height, layout, colour, Source::System(frame))?;
+                Ok((layout, MemoryDomain::System))
+            }
         }
     }
 }
@@ -337,13 +341,13 @@ impl Element for VulkanWindowRenderer {
 }
 
 impl Sink for VulkanWindowRenderer {
-    /// NV12 video, in system memory — and in CUDA memory too where the GPU
-    /// was made for it.
+    /// NV12, BGRA, and — as the contract names YUV420P — any other layout,
+    /// in system memory; in CUDA memory too where the GPU was made for it.
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(PortContract::Frames(
             MediaKindSet::of(MediaKind::VideoFrame),
             self.domains,
-            PixelLayoutSet::NV12,
+            PixelLayoutSet::from_slice(&[PixelLayout::Nv12, PixelLayout::Bgra, PixelLayout::Other]),
         ))
     }
 
@@ -351,15 +355,13 @@ impl Sink for VulkanWindowRenderer {
         let MediaBuffer::Video(frame) = buf else {
             return Ok(());
         };
-        self.draw(&frame)
+        let (layout, domain) = self
+            .draw(&frame)
             .inspect_err(|error| pp_error!(self, "draw failed: {error}"))?;
         let drawing = self.presenter.extent().map(|window| Drawing {
             frame: [frame.width(), frame.height()],
-            domain: if frame.format() == Pixel::CUDA {
-                MemoryDomain::Cuda
-            } else {
-                MemoryDomain::System
-            },
+            layout,
+            domain,
             window,
         });
         if let Some(now) = drawing
@@ -367,9 +369,10 @@ impl Sink for VulkanWindowRenderer {
         {
             pp_info!(
                 self,
-                "drawing {}x{} {:?} frames into {}x{}",
+                "drawing {}x{} {:?} {:?} frames into {}x{}",
                 now.frame[0],
                 now.frame[1],
+                now.layout,
                 now.domain,
                 now.window.width,
                 now.window.height
@@ -386,7 +389,7 @@ impl Sink for VulkanWindowRenderer {
 }
 
 /// The colour conversion one frame is drawn with: the eight push constants
-/// `present_nv12.wgsl` reads.
+/// `present.wgsl`'s YUV shaders read.
 ///
 /// Derived from the matrix's two luma weights, `kr` and `kb`, rather than
 /// written out per standard, so there is one formula to trust. Limited range
@@ -455,30 +458,134 @@ impl Colour {
     }
 }
 
-/// An NV12 frame's two planes, wherever they are.
-enum Rows<'a> {
+/// A frame layout this renderer draws, each with a fragment shader of its
+/// own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Layout {
+    /// A luma plane and an interleaved chroma plane at half size.
+    Nv12,
+    /// Luma, Cb and Cr planes, the chroma ones at half size.
+    Yuv420p,
+    /// One plane of packed B, G, R and A bytes.
+    Bgra,
+}
+
+impl Layout {
+    const ALL: [Self; 3] = [Self::Nv12, Self::Yuv420p, Self::Bgra];
+
+    fn of(format: Pixel) -> Option<Self> {
+        match format {
+            Pixel::NV12 => Some(Self::Nv12),
+            Pixel::YUV420P | Pixel::YUVJ420P => Some(Self::Yuv420p),
+            Pixel::BGRA => Some(Self::Bgra),
+            _ => None,
+        }
+    }
+
+    /// Which of the pipelines made from [`Self::ALL`] draws it.
+    fn index(self) -> usize {
+        match self {
+            Self::Nv12 => 0,
+            Self::Yuv420p => 1,
+            Self::Bgra => 2,
+        }
+    }
+
+    fn fragment_shader(self) -> &'static CStr {
+        match self {
+            Self::Nv12 => c"fs_nv12",
+            Self::Yuv420p => c"fs_yuv420p",
+            Self::Bgra => c"fs_bgra",
+        }
+    }
+
+    fn plane_count(self) -> usize {
+        match self {
+            Self::Nv12 => 2,
+            Self::Yuv420p => 3,
+            Self::Bgra => 1,
+        }
+    }
+
+    /// The planes of a `width` x `height` frame, as they are packed one
+    /// after another in the staging buffer.
+    ///
+    /// Chroma is rounded up, as FFmpeg rounds it: an odd-sized frame's last
+    /// column and row have a chroma sample of their own. Each plane starts
+    /// on a 16-byte boundary, which is more than a buffer-to-image copy
+    /// asks of any of these formats.
+    fn planes(self, width: u32, height: u32) -> Vec<PlaneShape> {
+        let (half_width, half_height) = (width.div_ceil(2), height.div_ceil(2));
+        let shapes: &[(vk::Format, u32, u32, u32)] = match self {
+            Self::Nv12 => &[
+                (vk::Format::R8_UNORM, width, height, 1),
+                (vk::Format::R8G8_UNORM, half_width, half_height, 2),
+            ],
+            Self::Yuv420p => &[
+                (vk::Format::R8_UNORM, width, height, 1),
+                (vk::Format::R8_UNORM, half_width, half_height, 1),
+                (vk::Format::R8_UNORM, half_width, half_height, 1),
+            ],
+            Self::Bgra => &[(vk::Format::B8G8R8A8_UNORM, width, height, 4)],
+        };
+        let mut offset = 0u64;
+        shapes
+            .iter()
+            .map(|&(format, width, height, bytes_per_pixel)| {
+                let shape = PlaneShape {
+                    format,
+                    width,
+                    height,
+                    bytes_per_pixel,
+                    offset,
+                };
+                offset = (offset + shape.bytes()).next_multiple_of(16);
+                shape
+            })
+            .collect()
+    }
+}
+
+/// One plane of a frame: the image it is sampled from, and where its rows
+/// sit in the staging buffer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PlaneShape {
+    format: vk::Format,
+    width: u32,
+    height: u32,
+    bytes_per_pixel: u32,
+    offset: u64,
+}
+
+impl PlaneShape {
+    /// One row's bytes, packed: the staging buffer has no padding between
+    /// rows.
+    fn row_bytes(&self) -> usize {
+        (self.width * self.bytes_per_pixel) as usize
+    }
+
+    fn bytes(&self) -> u64 {
+        self.row_bytes() as u64 * u64::from(self.height)
+    }
+}
+
+/// Where a frame's planes are.
+enum Source<'a> {
     /// In system memory: copied into mapped memory on the CPU.
-    System {
-        y: &'a [u8],
-        y_pitch: usize,
-        uv: &'a [u8],
-        uv_pitch: usize,
-    },
+    System(&'a ffmpeg::frame::Video),
     /// In CUDA memory: copied device to device into memory CUDA imported.
+    /// Each plane's device pointer and pitch, as many as the layout has.
     #[cfg(feature = "cuda")]
     Cuda {
-        y: u64,
-        y_pitch: usize,
-        uv: u64,
-        uv_pitch: usize,
+        planes: [(u64, usize); 3],
         interop: &'a Arc<CudaInterop>,
     },
 }
 
-impl Rows<'_> {
+impl Source<'_> {
     fn domain(&self) -> MemoryDomain {
         match self {
-            Self::System { .. } => MemoryDomain::System,
+            Self::System(_) => MemoryDomain::System,
             #[cfg(feature = "cuda")]
             Self::Cuda { .. } => MemoryDomain::Cuda,
         }
@@ -489,9 +596,10 @@ impl Rows<'_> {
 /// with.
 ///
 /// Everything a frame's memory domain decides happens before the staging
-/// buffer: how its bytes get there. From the buffer on — the copy into two
+/// buffer: how its bytes get there. From the buffer on — the copy into the
 /// sampled images, the draw, the present — nothing here knows or cares where
-/// a frame came from.
+/// a frame came from; what the layout decides is how many images there are
+/// and which shader samples them.
 struct Presenter {
     gpu: Arc<VulkanShared>,
     surface_fn: ash::khr::surface::Instance,
@@ -504,7 +612,8 @@ struct Presenter {
     render_pass: vk::RenderPass,
     descriptor_layout: vk::DescriptorSetLayout,
     pipeline_layout: vk::PipelineLayout,
-    pipeline: vk::Pipeline,
+    /// One per [`Layout`], in [`Layout::ALL`]'s order.
+    pipelines: [vk::Pipeline; 3],
     descriptor_pool: vk::DescriptorPool,
     descriptor_set: vk::DescriptorSet,
     sampler: vk::Sampler,
@@ -540,13 +649,14 @@ struct Swapchain {
     render_finished: Vec<vk::Semaphore>,
 }
 
-/// The frame-sized resources: the two images the shader samples, and the
-/// buffer a frame's bytes are put in on their way there.
+/// The frame-sized resources: the images the shader samples, one per plane,
+/// and the buffer a frame's bytes are put in on their way there.
 struct VideoResources {
     width: u32,
     height: u32,
-    luma: Plane,
-    chroma: Plane,
+    layout: Layout,
+    shapes: Vec<PlaneShape>,
+    planes: Vec<Plane>,
     staging: Staging,
 }
 
@@ -556,8 +666,7 @@ struct Plane {
     view: vk::ImageView,
 }
 
-/// One tightly packed NV12 frame: `width x height` luma bytes followed by
-/// `width x height / 2` interleaved chroma bytes.
+/// One frame, its planes packed as [`Layout::planes`] lays them out.
 enum Staging {
     /// Mapped for the CPU, and left mapped.
     System {
@@ -642,7 +751,7 @@ impl Presenter {
         let device = &gpu.device;
         let render_pass = create_render_pass(device, format).map_err(destroy_surface)?;
         let pipeline = create_pipeline(device, render_pass);
-        let (descriptor_layout, pipeline_layout, pipeline) = match pipeline {
+        let (descriptor_layout, pipeline_layout, pipelines) = match pipeline {
             Ok(made) => made,
             Err(error) => {
                 // SAFETY: made just above and used by nothing yet.
@@ -664,7 +773,7 @@ impl Presenter {
             render_pass,
             descriptor_layout,
             pipeline_layout,
-            pipeline,
+            pipelines,
             descriptor_pool: vk::DescriptorPool::null(),
             descriptor_set: vk::DescriptorSet::null(),
             sampler: vk::Sampler::null(),
@@ -691,7 +800,7 @@ impl Presenter {
                 .descriptor_count(1),
             vk::DescriptorPoolSize::default()
                 .ty(vk::DescriptorType::SAMPLED_IMAGE)
-                .descriptor_count(2),
+                .descriptor_count(3),
         ];
         // SAFETY: `sizes` outlives the call.
         self.descriptor_pool = unsafe {
@@ -760,8 +869,9 @@ impl Presenter {
         &mut self,
         width: u32,
         height: u32,
+        layout: Layout,
         colour: Colour,
-        rows: Rows<'_>,
+        source: Source<'_>,
     ) -> std::result::Result<(), VulkanWindowRendererError> {
         // The last frame's commands read the staging buffer this one is about
         // to overwrite.
@@ -775,81 +885,56 @@ impl Presenter {
             .map_err(call("vkWaitForFences"))?;
             self.submitted = false;
         }
-        self.ensure_video(width, height, rows.domain())?;
-        self.stage(width, height, rows)?;
+        self.ensure_video(width, height, layout, source.domain())?;
+        self.stage(source)?;
         self.draw(width, height, colour)
     }
 
-    /// Puts one frame's bytes into the staging buffer, packed.
-    fn stage(
-        &mut self,
-        width: u32,
-        height: u32,
-        rows: Rows<'_>,
-    ) -> std::result::Result<(), VulkanWindowRendererError> {
+    /// Puts one frame's planes into the staging buffer, packed.
+    fn stage(&mut self, source: Source<'_>) -> std::result::Result<(), VulkanWindowRendererError> {
         let video = self.video.as_ref().expect("ensured before staging");
-        let (width, height) = (width as usize, height as usize);
-        match (rows, &video.staging) {
-            (
-                Rows::System {
-                    y,
-                    y_pitch,
-                    uv,
-                    uv_pitch,
-                },
-                Staging::System { mapped, .. },
-            ) => {
-                let luma_bytes = width * height;
-                // SAFETY: the mapping is `width * height * 3 / 2` bytes, made for
-                // exactly this size by `ensure_video`, and nothing else writes it
-                // while `&mut self` is held — the GPU's last read of it was waited
-                // for in `present`.
-                let packed =
-                    unsafe { std::slice::from_raw_parts_mut(*mapped, luma_bytes + luma_bytes / 2) };
-                let (luma, chroma) = packed.split_at_mut(luma_bytes);
-                for (row, out) in luma.chunks_exact_mut(width).enumerate() {
-                    out.copy_from_slice(&y[row * y_pitch..row * y_pitch + width]);
-                }
-                for (row, out) in chroma.chunks_exact_mut(width).enumerate() {
-                    out.copy_from_slice(&uv[row * uv_pitch..row * uv_pitch + width]);
+        match (source, &video.staging) {
+            (Source::System(frame), Staging::System { mapped, .. }) => {
+                for (index, shape) in video.shapes.iter().enumerate() {
+                    let (data, pitch) = (frame.data(index), frame.stride(index));
+                    let row_bytes = shape.row_bytes();
+                    // SAFETY: the mapping holds every plane `ensure_video` made it
+                    // for, this one at `offset` for `bytes`, and nothing else
+                    // writes it while `&mut self` is held — the GPU's last read of
+                    // it was waited for in `present`.
+                    let packed = unsafe {
+                        std::slice::from_raw_parts_mut(
+                            mapped.add(shape.offset as usize),
+                            shape.bytes() as usize,
+                        )
+                    };
+                    for (row, out) in packed.chunks_exact_mut(row_bytes).enumerate() {
+                        out.copy_from_slice(&data[row * pitch..row * pitch + row_bytes]);
+                    }
                 }
                 Ok(())
             }
             #[cfg(feature = "cuda")]
-            (
-                Rows::Cuda {
-                    y,
-                    y_pitch,
-                    uv,
-                    uv_pitch,
-                    interop,
-                },
-                Staging::Cuda { imported, .. },
-            ) => {
+            (Source::Cuda { planes, interop }, Staging::Cuda { imported, .. }) => {
                 let dst = imported.as_ref().expect("imported with the buffer").ptr();
-                let planes = [
-                    DeviceRows {
-                        src: y,
-                        src_pitch: y_pitch,
-                        width_bytes: width,
-                        rows: height,
-                        dst_offset: 0,
-                        dst_pitch: width,
-                    },
-                    DeviceRows {
-                        src: uv,
-                        src_pitch: uv_pitch,
-                        width_bytes: width,
-                        rows: height / 2,
-                        dst_offset: (width * height) as u64,
-                        dst_pitch: width,
-                    },
-                ];
-                // SAFETY: both sources are planes of a frame `draw` validated as
-                // NV12 on this GPU's CUDA device, `height` and `height / 2` rows
-                // of their own pitches; the destination is the mapping of a
-                // buffer sized for exactly this frame.
-                unsafe { interop.copy_rows(dst, &planes)? };
+                let copies: Vec<DeviceRows> = video
+                    .shapes
+                    .iter()
+                    .zip(planes)
+                    .map(|(shape, (src, src_pitch))| DeviceRows {
+                        src,
+                        src_pitch,
+                        width_bytes: shape.row_bytes(),
+                        rows: shape.height as usize,
+                        dst_offset: shape.offset,
+                        dst_pitch: shape.row_bytes(),
+                    })
+                    .collect();
+                // SAFETY: every source is a plane of a frame `draw` validated as
+                // this layout on this GPU's CUDA device, as many rows of its own
+                // pitch as the shape says; the destination is the mapping of a
+                // buffer made to hold exactly these planes.
+                unsafe { interop.copy_rows(dst, &copies)? };
                 Ok(())
             }
             #[cfg(feature = "cuda")]
@@ -1046,16 +1131,20 @@ impl Presenter {
         }
     }
 
-    /// (Re)makes the frame-sized resources when the frame's size, or the
-    /// domain it arrives in, is not what they were made for.
+    /// (Re)makes the frame-sized resources when the frame's size, layout, or
+    /// the domain it arrives in, is not what they were made for.
     fn ensure_video(
         &mut self,
         width: u32,
         height: u32,
+        layout: Layout,
         domain: MemoryDomain,
     ) -> std::result::Result<(), VulkanWindowRendererError> {
         if self.video.as_ref().is_some_and(|video| {
-            video.width == width && video.height == height && video.staging.domain() == domain
+            video.width == width
+                && video.height == height
+                && video.layout == layout
+                && video.staging.domain() == domain
         }) {
             return Ok(());
         }
@@ -1067,15 +1156,21 @@ impl Presenter {
             self.destroy_video(video);
         }
 
-        let luma = self.create_plane(width, height, vk::Format::R8_UNORM)?;
-        let chroma = match self.create_plane(width / 2, height / 2, vk::Format::R8G8_UNORM) {
-            Ok(chroma) => chroma,
-            Err(error) => {
-                self.destroy_plane(luma);
-                return Err(error);
+        let shapes = layout.planes(width, height);
+        let mut planes = Vec::with_capacity(shapes.len());
+        for shape in &shapes {
+            match self.create_plane(shape.width, shape.height, shape.format) {
+                Ok(plane) => planes.push(plane),
+                Err(error) => {
+                    planes
+                        .into_iter()
+                        .for_each(|plane| self.destroy_plane(plane));
+                    return Err(error);
+                }
             }
-        };
-        let bytes = u64::from(width) * u64::from(height) * 3 / 2;
+        }
+        let last = shapes.last().expect("every layout has a plane");
+        let bytes = last.offset + last.bytes();
         let staging = match domain {
             #[cfg(feature = "cuda")]
             MemoryDomain::Cuda => self.create_cuda_staging(bytes),
@@ -1084,38 +1179,40 @@ impl Presenter {
         let staging = match staging {
             Ok(staging) => staging,
             Err(error) => {
-                self.destroy_plane(luma);
-                self.destroy_plane(chroma);
+                planes
+                    .into_iter()
+                    .for_each(|plane| self.destroy_plane(plane));
                 return Err(error);
             }
         };
 
-        let images = [
-            vk::DescriptorImageInfo::default()
-                .image_view(luma.view)
-                .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL),
-            vk::DescriptorImageInfo::default()
-                .image_view(chroma.view)
-                .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL),
-        ];
+        // Bindings 1 to 3, one per plane; a layout with fewer points the rest
+        // at its first, which its shader never samples but which keeps every
+        // binding valid.
+        let images: Vec<vk::DescriptorImageInfo> = (0..3)
+            .map(|index| {
+                vk::DescriptorImageInfo::default()
+                    .image_view(planes.get(index).unwrap_or(&planes[0]).view)
+                    .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+            })
+            .collect();
         let sampler = [vk::DescriptorImageInfo::default().sampler(self.sampler)];
-        let writes = [
+        let mut writes = vec![
             vk::WriteDescriptorSet::default()
                 .dst_set(self.descriptor_set)
                 .dst_binding(0)
                 .descriptor_type(vk::DescriptorType::SAMPLER)
                 .image_info(&sampler),
-            vk::WriteDescriptorSet::default()
-                .dst_set(self.descriptor_set)
-                .dst_binding(1)
-                .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
-                .image_info(&images[0..1]),
-            vk::WriteDescriptorSet::default()
-                .dst_set(self.descriptor_set)
-                .dst_binding(2)
-                .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
-                .image_info(&images[1..2]),
         ];
+        for (index, image) in images.iter().enumerate() {
+            writes.push(
+                vk::WriteDescriptorSet::default()
+                    .dst_set(self.descriptor_set)
+                    .dst_binding(index as u32 + 1)
+                    .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                    .image_info(std::slice::from_ref(image)),
+            );
+        }
         // SAFETY: the set is not in use — the device is idle — and every view
         // and the sampler it is pointed at are live.
         unsafe { self.gpu.device.update_descriptor_sets(&writes, &[]) };
@@ -1123,8 +1220,9 @@ impl Presenter {
         self.video = Some(VideoResources {
             width,
             height,
-            luma,
-            chroma,
+            layout,
+            shapes,
+            planes,
             staging,
         });
         Ok(())
@@ -1393,13 +1491,11 @@ impl Presenter {
 
     fn destroy_video(&self, video: VideoResources) {
         let VideoResources {
-            luma,
-            chroma,
-            staging,
-            ..
+            planes, staging, ..
         } = video;
-        self.destroy_plane(luma);
-        self.destroy_plane(chroma);
+        planes
+            .into_iter()
+            .for_each(|plane| self.destroy_plane(plane));
         let device = &self.gpu.device;
         match staging {
             Staging::System { buffer, memory, .. } => {
@@ -1440,7 +1536,7 @@ impl Presenter {
         })
     }
 
-    /// Records one frame: the staging buffer into the two images, then the
+    /// Records one frame: the staging buffer into the plane images, then the
     /// draw.
     fn record(
         &self,
@@ -1468,15 +1564,7 @@ impl Presenter {
                 )
                 .map_err(call("vkBeginCommandBuffer"))?;
 
-            for (plane, width, height, offset) in [
-                (&video.luma, video.width, video.height, 0u64),
-                (
-                    &video.chroma,
-                    video.width / 2,
-                    video.height / 2,
-                    u64::from(video.width) * u64::from(video.height),
-                ),
-            ] {
+            for (plane, shape) in video.planes.iter().zip(&video.shapes) {
                 transition(
                     device,
                     cmd,
@@ -1485,15 +1573,15 @@ impl Presenter {
                     vk::ImageLayout::TRANSFER_DST_OPTIMAL,
                 );
                 let region = vk::BufferImageCopy::default()
-                    .buffer_offset(offset)
+                    .buffer_offset(shape.offset)
                     .image_subresource(
                         vk::ImageSubresourceLayers::default()
                             .aspect_mask(vk::ImageAspectFlags::COLOR)
                             .layer_count(1),
                     )
                     .image_extent(vk::Extent3D {
-                        width,
-                        height,
+                        width: shape.width,
+                        height: shape.height,
                         depth: 1,
                     });
                 device.cmd_copy_buffer_to_image(
@@ -1531,7 +1619,11 @@ impl Presenter {
                     .clear_values(&clear),
                 vk::SubpassContents::INLINE,
             );
-            device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline);
+            device.cmd_bind_pipeline(
+                cmd,
+                vk::PipelineBindPoint::GRAPHICS,
+                self.pipelines[video.layout.index()],
+            );
             device.cmd_set_viewport(cmd, 0, &[letterbox(frame, swapchain.extent)]);
             device.cmd_set_scissor(cmd, 0, &[whole]);
             device.cmd_push_constants(
@@ -1581,7 +1673,9 @@ impl Drop for Presenter {
             device.destroy_command_pool(self.command_pool, None);
             device.destroy_sampler(self.sampler, None);
             device.destroy_descriptor_pool(self.descriptor_pool, None);
-            device.destroy_pipeline(self.pipeline, None);
+            for pipeline in self.pipelines {
+                device.destroy_pipeline(pipeline, None);
+            }
             device.destroy_pipeline_layout(self.pipeline_layout, None);
             device.destroy_descriptor_set_layout(self.descriptor_layout, None);
             device.destroy_render_pass(self.render_pass, None);
@@ -1836,14 +1930,21 @@ fn create_swapchain(
     Ok(swapchain)
 }
 
+/// The pipelines, one per [`Layout`] in [`Layout::ALL`]'s order: made up
+/// front rather than at the first frame of each, since there are three and
+/// they differ only in their fragment shader.
 fn create_pipeline(
     device: &ash::Device,
     render_pass: vk::RenderPass,
 ) -> std::result::Result<
-    (vk::DescriptorSetLayout, vk::PipelineLayout, vk::Pipeline),
+    (
+        vk::DescriptorSetLayout,
+        vk::PipelineLayout,
+        [vk::Pipeline; 3],
+    ),
     VulkanWindowRendererError,
 > {
-    let spirv = compile_shader(NV12_SHADER)?;
+    let spirv = compile_shader(SHADER)?;
     // SAFETY: `spirv` is a validated module naga wrote, and outlives the call.
     let module = unsafe {
         device.create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&spirv), None)
@@ -1863,6 +1964,11 @@ fn create_pipeline(
             .stage_flags(vk::ShaderStageFlags::FRAGMENT),
         vk::DescriptorSetLayoutBinding::default()
             .binding(2)
+            .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+        vk::DescriptorSetLayoutBinding::default()
+            .binding(3)
             .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
             .descriptor_count(1)
             .stage_flags(vk::ShaderStageFlags::FRAGMENT),
@@ -1901,16 +2007,18 @@ fn create_pipeline(
             }
         };
 
-        let stages = [
-            vk::PipelineShaderStageCreateInfo::default()
-                .stage(vk::ShaderStageFlags::VERTEX)
-                .module(module)
-                .name(c"vs_main"),
-            vk::PipelineShaderStageCreateInfo::default()
-                .stage(vk::ShaderStageFlags::FRAGMENT)
-                .module(module)
-                .name(c"fs_nv12"),
-        ];
+        let stages = Layout::ALL.map(|layout| {
+            [
+                vk::PipelineShaderStageCreateInfo::default()
+                    .stage(vk::ShaderStageFlags::VERTEX)
+                    .module(module)
+                    .name(c"vs_main"),
+                vk::PipelineShaderStageCreateInfo::default()
+                    .stage(vk::ShaderStageFlags::FRAGMENT)
+                    .module(module)
+                    .name(layout.fragment_shader()),
+            ]
+        });
         let vertex_input = vk::PipelineVertexInputStateCreateInfo::default();
         let assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
             .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
@@ -1929,25 +2037,35 @@ fn create_pipeline(
         let blend = vk::PipelineColorBlendStateCreateInfo::default().attachments(&blend_attachment);
         let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
         let dynamic = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
-        let info = [vk::GraphicsPipelineCreateInfo::default()
-            .stages(&stages)
-            .vertex_input_state(&vertex_input)
-            .input_assembly_state(&assembly)
-            .viewport_state(&viewport)
-            .rasterization_state(&raster)
-            .multisample_state(&multisample)
-            .color_blend_state(&blend)
-            .dynamic_state(&dynamic)
-            .layout(pipeline_layout)
-            .render_pass(render_pass)
-            .subpass(0)];
-        // SAFETY: every struct the info points at outlives the call, and the
+        let info = stages.each_ref().map(|stages| {
+            vk::GraphicsPipelineCreateInfo::default()
+                .stages(stages)
+                .vertex_input_state(&vertex_input)
+                .input_assembly_state(&assembly)
+                .viewport_state(&viewport)
+                .rasterization_state(&raster)
+                .multisample_state(&multisample)
+                .color_blend_state(&blend)
+                .dynamic_state(&dynamic)
+                .layout(pipeline_layout)
+                .render_pass(render_pass)
+                .subpass(0)
+        });
+        // SAFETY: every struct the infos point at outlives the call, and the
         // module, layout and render pass are live.
         match unsafe { device.create_graphics_pipelines(vk::PipelineCache::null(), &info, None) } {
-            Ok(pipelines) => Ok((descriptor_layout, pipeline_layout, pipelines[0])),
-            Err((_, result)) => {
-                // SAFETY: made above and used by nothing.
+            Ok(pipelines) => Ok((
+                descriptor_layout,
+                pipeline_layout,
+                [pipelines[0], pipelines[1], pipelines[2]],
+            )),
+            Err((made, result)) => {
+                // SAFETY: made above and used by nothing; a pipeline that failed
+                // is null, which destroying ignores.
                 unsafe {
+                    for pipeline in made {
+                        device.destroy_pipeline(pipeline, None);
+                    }
                     device.destroy_pipeline_layout(pipeline_layout, None);
                     device.destroy_descriptor_set_layout(descriptor_layout, None);
                 }
@@ -2048,8 +2166,52 @@ mod tests {
 
     #[test]
     fn the_presenting_shader_builds() {
-        let spirv = compile_shader(NV12_SHADER).expect("the shader compiles");
+        let spirv = compile_shader(SHADER).expect("the shader compiles");
         assert_eq!(spirv.first(), Some(&0x0723_0203), "SPIR-V's magic number");
+        let module = naga::front::wgsl::parse_str(SHADER).expect("it parses");
+        for layout in Layout::ALL {
+            let name = layout.fragment_shader().to_str().expect("ASCII");
+            assert!(
+                module.entry_points.iter().any(|entry| entry.name == name),
+                "no {name} in the shader"
+            );
+        }
+    }
+
+    /// The planes are where the copies look for them: each after the last,
+    /// on a 16-byte boundary, chroma rounded up for an odd size.
+    #[test]
+    fn a_layout_packs_its_planes_one_after_another() {
+        let extents = |layout: Layout, width, height| {
+            layout
+                .planes(width, height)
+                .iter()
+                .map(|plane| (plane.width, plane.height, plane.row_bytes(), plane.offset))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            extents(Layout::Nv12, 1280, 720),
+            [(1280, 720, 1280, 0), (640, 360, 1280, 921_600)]
+        );
+        assert_eq!(
+            extents(Layout::Yuv420p, 1280, 720),
+            [
+                (1280, 720, 1280, 0),
+                (640, 360, 640, 921_600),
+                (640, 360, 640, 1_152_000)
+            ]
+        );
+        assert_eq!(extents(Layout::Bgra, 1280, 720), [(1280, 720, 5120, 0)]);
+        // 7x5: a 35-byte luma plane, the next one aligned past it, and 4x3
+        // chroma.
+        assert_eq!(
+            extents(Layout::Yuv420p, 7, 5),
+            [(7, 5, 7, 0), (4, 3, 4, 48), (4, 3, 4, 64)]
+        );
+        for layout in Layout::ALL {
+            assert_eq!(layout.planes(8, 8).len(), layout.plane_count());
+            assert_eq!(Layout::ALL[layout.index()], layout);
+        }
     }
 
     #[test]
