@@ -589,6 +589,17 @@ compile error with no explanation.
   application's event loop. `d3d11_decode_render` uses both and no longer
   needs `render_common` or `winit`.
 
+- **`VideoWindow`: a video window on either platform, no `#[cfg]`.** The
+  `autovideosink` of this crate: `VideoWindow::open(name, options)` opens
+  whichever window renderer the platform has — `D3d11WindowRenderer` on
+  Windows (`D3d12WindowRenderer` with only `d3d12`), `VulkanWindowRenderer`
+  on Linux — on a GPU of its own, and returns it with its `WindowEvents`;
+  `window_control()` changes the window. It takes what they all take,
+  system-memory NV12, YUV420P and BGRA, so a software decode goes straight
+  in. GPU frames stay with the platform renderers, whose GPU the rest of a
+  pipeline can share. `sw_decode_render` is one program for both platforms
+  through it.
+
 - **A window renderer's own window can be changed, and reports clicks.**
   `D3d11WindowRenderer`, `D3d12WindowRenderer` and `VulkanWindowRenderer`
   have `window_control()`, taken before the renderer goes into a pipeline:

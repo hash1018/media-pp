@@ -47,6 +47,11 @@ use crate::elements::RtspMuxerError;
 #[cfg(all(target_os = "linux", feature = "v4l2-capture"))]
 use crate::elements::V4l2CaptureSourceError;
 use crate::elements::VideoDecodeBinError;
+#[cfg(any(
+    all(target_os = "windows", any(feature = "d3d11", feature = "d3d12")),
+    all(target_os = "linux", feature = "vulkan")
+))]
+use crate::elements::VideoWindowError;
 #[cfg(all(target_os = "windows", feature = "wasapi-capture"))]
 use crate::elements::WasapiCaptureSourceError;
 #[cfg(all(target_os = "windows", feature = "wasapi-renderer"))]
@@ -209,6 +214,14 @@ pub enum Error {
     #[cfg(all(target_os = "windows", feature = "d3d11"))]
     #[error(transparent)]
     D3d11GpuError(#[from] D3d11GpuError),
+
+    /// A video window could not be opened.
+    #[cfg(any(
+        all(target_os = "windows", any(feature = "d3d11", feature = "d3d12")),
+        all(target_os = "linux", feature = "vulkan")
+    ))]
+    #[error(transparent)]
+    VideoWindowError(#[from] VideoWindowError),
 
     /// A D3D11 window renderer could not open or present into its window.
     #[cfg(all(target_os = "windows", feature = "d3d11"))]

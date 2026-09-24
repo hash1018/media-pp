@@ -147,6 +147,11 @@ pub use sink::{
 };
 #[cfg(all(target_os = "linux", feature = "pipewire-audio-renderer"))]
 pub use sink::{PipeWireAudioRenderer, PipeWireAudioRendererError, PipeWireAudioRendererOptions};
+#[cfg(any(
+    all(target_os = "windows", any(feature = "d3d11", feature = "d3d12")),
+    all(target_os = "linux", feature = "vulkan")
+))]
+pub use sink::{VideoWindow, VideoWindowError};
 #[cfg(all(target_os = "linux", feature = "vulkan"))]
 pub use sink::{VulkanWindowRenderer, VulkanWindowRendererError, WindowSize};
 #[cfg(all(target_os = "windows", feature = "wasapi-renderer"))]

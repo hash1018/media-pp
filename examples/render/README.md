@@ -32,7 +32,7 @@ restore token can be passed as the last argument on later runs.
 | [`av_playback`](av_playback/) | Play synchronized audio/video | Windows / Linux | Software audio + platform GPU video | EOS, Escape or close window | `<video>` |
 | [`hw_decode_render`](hw_decode_render/) | Decode on the GPU where it can, in software where not, and render | Windows / Linux | `VideoDecodeBin` onto D3D12 / CUDA | EOS, Escape or close window | `<video>` |
 | [`seek_render`](seek_render/) | Interactive seek/pause/resume | Windows / Linux | CPU decode -> platform GPU upload | `q`, EOS, Escape or close window | `<video>` |
-| [`sw_decode_render`](sw_decode_render/) | Software-decode and render | Windows / Linux | CPU decode -> platform GPU upload | EOS, Escape or close window | `<video>` |
+| [`sw_decode_render`](sw_decode_render/) | Software-decode and render | Windows / Linux | CPU decode -> `VideoWindow`, one program for both | EOS, Escape or close window | `<video>` |
 | [`test_video`](test_video/) | Render a synthetic source | Windows / Linux | CPU frame -> platform GPU upload | Escape or close window | None |
 | [`transcode_render`](transcode_render/) | Encode/decode round trip | Windows / Linux | OpenH264 round trip -> platform GPU | Escape or close window | None |
 | [`gpu_video_compositor`](gpu_video_compositor/) | Composite GPU frames | Windows / Linux | D3D11 / CUDA compositor | Escape or close window | None |

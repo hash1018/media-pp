@@ -82,13 +82,17 @@ Video, by backend:
 | Composite | `SwVideoCompositor` | `D3d11VideoCompositor` | | `CudaVideoCompositor` |
 | Key, colour | `SwChromaKey`, `SwVideoEffect` | `D3d11ChromaKey`, `D3d11VideoEffect` | | `CudaChromaKey`, `CudaVideoEffect` |
 | Upload, download | | `D3d11Upload`, `D3d11Download` | `D3d12Upload`, `D3d12Download` | `CudaUpload`, `CudaDownload` |
-| Render | `VulkanWindowRenderer` | `D3d11WindowRenderer`, `D3d11Renderer` | `D3d12WindowRenderer`, `D3d12Renderer` | `VulkanWindowRenderer`, `CudaRenderer` |
+| Render | `VideoWindow`; every window renderer | `D3d11WindowRenderer`, `D3d11Renderer` | `D3d12WindowRenderer`, `D3d12Renderer` | `VulkanWindowRenderer`, `CudaRenderer` |
 
 `VideoDecodeBin` chooses among the decode row and the uploads for a stream.
 
-`D3d11WindowRenderer` and `D3d12WindowRenderer` show frames in a window: one
-they open for themselves, as a GStreamer video sink does, reporting keys and
-closing as `WindowEvents`, or one the application gives them.
+`VideoWindow` is the one to reach for first: a window of its own on whichever
+renderer the platform has, on a GPU of its own, taking frames in system
+memory — a software decode goes straight in, with no `#[cfg]` in the program.
+Behind it, `D3d11WindowRenderer` and `D3d12WindowRenderer` show frames in a
+window: one they open for themselves, as a GStreamer video sink does,
+reporting keys, clicks and closing as `WindowEvents` and changed through a
+`WindowControl`, or one the application gives them.
 `VulkanWindowRenderer` does the same on Linux — its own window is X11,
 XWayland on a Wayland desktop; one it is given may be either — from frames in
 system memory, and from CUDA frames too on a `VulkanGpu` made for CUDA. All
