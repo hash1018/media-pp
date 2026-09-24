@@ -62,7 +62,9 @@ enum Decision {
 /// video PTS establishes the media origin and early frames wait. Once an
 /// audio renderer registers and starts, the same instance automatically
 /// compares video PTS with the played-audio position, waiting for early
-/// frames and dropping frames more than one frame-duration late. During
+/// frames and dropping frames more than one frame-duration late — each frame
+/// due as much before its time as the renderer after it says it takes to put
+/// a picture on the screen, so the two reach the viewer together. During
 /// audio priming it holds the in-flight frame so the wall-to-audio handoff
 /// cannot make the picture run ahead.
 ///
@@ -178,6 +180,11 @@ impl VideoSynchronizer {
                 let Some(position_ns) = position else {
                     return Decision::Hold;
                 };
+                // Handed over early by what the renderer takes to show it, so
+                // it is on the screen when its sound is heard — the audio
+                // position is already what the listener hears, device and all.
+                let frame_ns =
+                    frame_ns.saturating_sub(duration_ns(playback_clock.presentation_delay()));
                 if frame_ns > position_ns {
                     Decision::Wait(ns_duration(frame_ns.saturating_sub(position_ns)))
                 } else if position_ns.saturating_sub(frame_ns) > duration_ns(self.frame_duration) {
@@ -336,6 +343,27 @@ mod tests {
         audio.publish(2_000_000_000, 3_000_000_000, false).unwrap();
         assert!(matches!(sync.decision(ms(1_000)), Decision::Drop));
         assert!(matches!(sync.decision(ms(2_010)), Decision::Wait(_)));
+    }
+
+    /// With a renderer that takes 20 ms to show a picture, a frame due 15 ms
+    /// from now is handed over at once and one due 30 ms from now waits about
+    /// 10: each is on the screen when its sound is heard.
+    #[test]
+    fn frames_are_handed_over_early_by_the_presentation_delay() {
+        let (mut sync, playback) = synchronizer();
+        let audio = playback.register_audio_master().unwrap();
+        audio.publish(2_000_000_000, 3_000_000_000, false).unwrap();
+        assert!(matches!(sync.decision(ms(2_015)), Decision::Wait(_)));
+
+        let screen = playback.register_presenter();
+        screen.publish(Duration::from_millis(20));
+        assert!(matches!(sync.decision(ms(2_015)), Decision::Render));
+        let Decision::Wait(wait) = sync.decision(ms(2_030)) else {
+            panic!("a frame due after the delay still waits");
+        };
+        assert!(wait <= Duration::from_millis(10), "{wait:?}");
+        drop(screen);
+        assert!(matches!(sync.decision(ms(2_015)), Decision::Wait(_)));
     }
 
     /// `ms` milliseconds of media time, as the decisions below take it.

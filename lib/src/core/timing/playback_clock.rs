@@ -13,7 +13,10 @@
 //! registration, and video scheduling only ever reads the result.
 
 use std::{
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Duration,
 };
 
@@ -61,6 +64,23 @@ pub enum PlaybackClockError {
 pub struct PlaybackClock {
     wall_clock: Arc<Clock>,
     state: Mutex<State>,
+    /// How long each video renderer takes to put a picture on the screen
+    /// once it has it, by registration — see [`Self::presentation_delay`].
+    /// Only a renderer that can measure it registers, the one today being
+    /// behind `vulkan`; as with the audio master, the clock does not take on
+    /// a backend's feature for that, hence the `allow`.
+    #[allow(dead_code)]
+    presenters: Mutex<Presenters>,
+    /// The largest of them in nanoseconds, kept beside the list so video
+    /// scheduling reads it without the lock.
+    presentation_delay_ns: AtomicU64,
+}
+
+#[derive(Default)]
+#[allow(dead_code)]
+struct Presenters {
+    next: u64,
+    delays: Vec<(u64, Duration)>,
 }
 
 #[derive(Clone, Copy)]
@@ -108,7 +128,50 @@ impl PlaybackClock {
             state: Mutex::new(State::Unavailable {
                 next_registration: 1,
             }),
+            presenters: Mutex::default(),
+            presentation_delay_ns: AtomicU64::new(0),
         }
+    }
+
+    /// How long after a video renderer is handed a picture it reaches the
+    /// screen — the largest any renderer on this pipeline has said.
+    ///
+    /// A synchronizer that hands each picture over when the sound reaches
+    /// it shows it this much later than the sound is heard: the renderer's
+    /// draw, its wait for the display's next refresh, and a compositor's own
+    /// frame. Handing it over this much earlier puts the two back together.
+    /// Zero until a renderer has measured it.
+    pub(crate) fn presentation_delay(&self) -> Duration {
+        Duration::from_nanos(self.presentation_delay_ns.load(Ordering::Relaxed))
+    }
+
+    /// Takes a place for one video renderer's presentation delay, given up
+    /// when the registration drops.
+    #[allow(dead_code)]
+    pub(crate) fn register_presenter(self: &Arc<Self>) -> PresenterRegistration {
+        let mut presenters = self.presenters.lock().unwrap();
+        let id = presenters.next;
+        presenters.next = presenters.next.wrapping_add(1);
+        PresenterRegistration {
+            clock: Arc::clone(self),
+            id,
+        }
+    }
+
+    #[allow(dead_code)]
+    fn set_presentation_delay(&self, id: u64, delay: Option<Duration>) {
+        let mut presenters = self.presenters.lock().unwrap();
+        presenters.delays.retain(|(held, _)| *held != id);
+        if let Some(delay) = delay {
+            presenters.delays.push((id, delay));
+        }
+        let largest = presenters
+            .delays
+            .iter()
+            .map(|(_, delay)| delay.as_nanos().min(u128::from(u64::MAX)) as u64)
+            .max()
+            .unwrap_or(0);
+        self.presentation_delay_ns.store(largest, Ordering::Relaxed);
     }
 
     /// Reports which timing source currently defines media position.
@@ -348,6 +411,29 @@ impl PlaybackClock {
             },
             None => State::Unavailable { next_registration },
         };
+    }
+}
+
+/// One video renderer's place in [`PlaybackClock::presentation_delay`]:
+/// what it says it takes to put a picture on the screen, until it drops.
+#[allow(dead_code)]
+pub(crate) struct PresenterRegistration {
+    clock: Arc<PlaybackClock>,
+    id: u64,
+}
+
+#[allow(dead_code)]
+impl PresenterRegistration {
+    /// This renderer now takes `delay` from being handed a picture to
+    /// showing it.
+    pub(crate) fn publish(&self, delay: Duration) {
+        self.clock.set_presentation_delay(self.id, Some(delay));
+    }
+}
+
+impl Drop for PresenterRegistration {
+    fn drop(&mut self) {
+        self.clock.set_presentation_delay(self.id, None);
     }
 }
 
@@ -610,5 +696,25 @@ mod tests {
         audio.reset_for_seek().unwrap();
         assert_eq!(playback.master(), PlaybackMaster::AudioPriming);
         assert_eq!(playback.position_ns(), None);
+    }
+
+    /// The delay a synchronizer schedules by is the largest any renderer
+    /// has published, and a renderer that goes takes its own with it.
+    #[test]
+    fn the_presentation_delay_is_the_slowest_renderers() {
+        let clock = Arc::new(PlaybackClock::new(Arc::new(Clock::new())));
+        assert_eq!(clock.presentation_delay(), Duration::ZERO);
+        let fast = clock.register_presenter();
+        let slow = clock.register_presenter();
+        fast.publish(Duration::from_millis(8));
+        assert_eq!(clock.presentation_delay(), Duration::from_millis(8));
+        slow.publish(Duration::from_millis(21));
+        assert_eq!(clock.presentation_delay(), Duration::from_millis(21));
+        slow.publish(Duration::from_millis(5));
+        assert_eq!(clock.presentation_delay(), Duration::from_millis(8));
+        drop(fast);
+        assert_eq!(clock.presentation_delay(), Duration::from_millis(5));
+        drop(slow);
+        assert_eq!(clock.presentation_delay(), Duration::ZERO);
     }
 }

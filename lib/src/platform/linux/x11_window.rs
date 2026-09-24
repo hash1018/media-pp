@@ -243,6 +243,62 @@ fn set_title(
     connection.flush()
 }
 
+/// How often the monitor showing `window` refreshes: the mode of the RandR
+/// CRTC its centre is on, read on a connection of this call's own — so any
+/// X11 window, the renderer's or one it was given. `None` where the server
+/// has no RandR or the window is on no monitor.
+pub(crate) fn refresh_interval(window: u32) -> Option<std::time::Duration> {
+    use x11rb::protocol::randr::{ConnectionExt as _, ModeFlag};
+
+    let (connection, screen) = XCBConnection::connect(None).ok()?;
+    let root = connection.setup().roots.get(screen)?.root;
+    let geometry = connection.get_geometry(window).ok()?.reply().ok()?;
+    let centre = connection
+        .translate_coordinates(
+            window,
+            root,
+            (geometry.width / 2) as i16,
+            (geometry.height / 2) as i16,
+        )
+        .ok()?
+        .reply()
+        .ok()?;
+    let (x, y) = (i32::from(centre.dst_x), i32::from(centre.dst_y));
+    let resources = connection
+        .randr_get_screen_resources_current(root)
+        .ok()?
+        .reply()
+        .ok()?;
+    for &crtc in &resources.crtcs {
+        let Some(info) = connection
+            .randr_get_crtc_info(crtc, resources.config_timestamp)
+            .ok()
+            .and_then(|cookie| cookie.reply().ok())
+        else {
+            continue;
+        };
+        let (left, top) = (i32::from(info.x), i32::from(info.y));
+        let on = info.mode != 0
+            && (left..left + i32::from(info.width)).contains(&x)
+            && (top..top + i32::from(info.height)).contains(&y);
+        if !on {
+            continue;
+        }
+        let mode = resources.modes.iter().find(|mode| mode.id == info.mode)?;
+        let mut lines = f64::from(mode.vtotal);
+        if mode.mode_flags.contains(ModeFlag::DOUBLE_SCAN) {
+            lines *= 2.0;
+        }
+        if mode.mode_flags.contains(ModeFlag::INTERLACE) {
+            lines /= 2.0;
+        }
+        let hertz = f64::from(mode.dot_clock) / (f64::from(mode.htotal) * lines);
+        return (hertz.is_finite() && hertz >= 1.0)
+            .then(|| std::time::Duration::from_secs_f64(1.0 / hertz));
+    }
+    None
+}
+
 /// What the window thread watches for.
 struct Watched {
     window: u32,

@@ -119,6 +119,9 @@ raw-window-handle = { version = "0.6", optional = true, features = ["std"] }
 x11rb = { version = "0.13", optional = true, default-features = false, features = [
     "allow-unsafe-code",
     "dl-libxcb",
+    # The refresh rate of the monitor an X11 window is on, which is what a
+    # picture's way to the screen there is estimated from.
+    "randr",
 ] }
 
 # Every `unsafe` block in this crate states why it is sound. The rule is

@@ -603,6 +603,23 @@ compile error with no explanation.
 
 ### Added
 
+- **A picture is shown when its sound is heard, not a screen's delay
+  later.** `VideoSynchronizer` handed each picture over when the audio
+  position reached it, and the audio position is what the listener hears,
+  device latency and all; the renderer then took its draw, the wait for the
+  display's next refresh and a compositor's repaint to show it — 22 to 38 ms
+  behind the sound, measured with a flash and a beep. A video renderer now
+  tells the pipeline's playback clock what showing a picture takes, and the
+  synchronizer hands each over that much early; the flash now reaches
+  XWayland 10 ms before the beep is heard, the compositor's repaint landing
+  it within a few milliseconds of it, with no picture dropped for it.
+  `VulkanWindowRenderer` measures it on Wayland, waiting now and then for a
+  present to be shown (`VK_KHR_present_wait`, turned on by `VulkanGpu`
+  where the device has it), and on X11, where that wait returns once
+  XWayland has the picture, estimates two refreshes of the monitor the
+  window is on, read from RandR. It logs what it found. The D3D renderers
+  do not tell the clock yet, and draw as before.
+
 - **`Player` decodes on the GPU.** It decoded every file in software, which
   is what a 4K file cannot afford. Its picture now goes through a
   `VideoDecodeBin` onto the window's own GPU — D3D11VA on Windows, NVDEC on

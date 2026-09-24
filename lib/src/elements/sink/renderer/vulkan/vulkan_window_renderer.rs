@@ -5,11 +5,13 @@
 use std::os::fd::{FromRawFd, OwnedFd};
 use std::{
     any::Any,
+    collections::VecDeque,
     ffi::CStr,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
+    time::{Duration, Instant},
 };
 
 use ash::vk;
@@ -29,7 +31,10 @@ use crate::{
     element::{Element, ElementType, Sink, element_pp_log},
     elements::{VulkanGpu, WindowControl, WindowEvents, WindowOptions},
     error::Result,
-    platform::linux::{vulkan::VulkanShared, x11_window::OwnedWindow},
+    platform::linux::{
+        vulkan::VulkanShared,
+        x11_window::{OwnedWindow, refresh_interval},
+    },
     pp_log::{PpLog, pp_error, pp_info},
 };
 
@@ -412,6 +417,15 @@ impl Element for VulkanWindowRenderer {
     fn pp_log_mut(&mut self) -> &mut PpLog {
         &mut self.pp_log
     }
+
+    /// Takes a place in the pipeline's presentation delay, which a
+    /// `VideoSynchronizer` in front hands pictures over early by — where the
+    /// device can measure it.
+    fn attach_context(&mut self, context: &Arc<crate::element::Context>) {
+        if self.presenter.present_wait_fn.is_some() {
+            self.presenter.delay.registration = Some(context.playback_clock.register_presenter());
+        }
+    }
 }
 
 impl Sink for VulkanWindowRenderer {
@@ -436,6 +450,13 @@ impl Sink for VulkanWindowRenderer {
         let (layout, domain) = self
             .draw(&frame)
             .inspect_err(|error| pp_error!(self, "draw failed: {error}"))?;
+        if let Some((delay, source)) = self.presenter.delay.take_change() {
+            let source = source.to_owned();
+            pp_info!(
+                self,
+                "a picture takes {delay:.1?} to reach the screen, {source}"
+            );
+        }
         let drawing = self.presenter.extent().map(|window| Drawing {
             frame: [frame.width(), frame.height()],
             layout,
@@ -493,6 +514,103 @@ impl Colour {
             *chunk = value.to_ne_bytes();
         }
         bytes
+    }
+}
+
+/// How long a measured present may take before the measurement is given up:
+/// far past any refresh, short of a hang being noticed.
+const PRESENT_WAIT_TIMEOUT_NS: u64 = 100_000_000;
+
+/// What presenting takes, measured now and then and published to the
+/// pipeline's playback clock — see `PlaybackClock::presentation_delay`.
+///
+/// Each measurement holds the renderer until its picture is on the screen, so
+/// it is taken often only while little is known, and rarely after: the first
+/// frame after a swapchain is made, every tenth until there are five, and
+/// every hundred and twentieth after that — a couple of seconds, to follow a
+/// display that changes under it. What is published is the median of the
+/// last few, so one slow present does not move it.
+#[derive(Default)]
+struct PresentationDelay {
+    samples: VecDeque<Duration>,
+    /// Frames presented since the last measurement was due.
+    since: u32,
+    /// The id last given to a present; they must rise on a swapchain, and
+    /// rising across swapchains does no harm.
+    last_id: u64,
+    /// The playback clock's place for it, where there is a pipeline.
+    registration: Option<crate::playback_clock::PresenterRegistration>,
+    /// What was last published, where it came from, and whether that is
+    /// news for the log.
+    published: Option<Duration>,
+    source: String,
+    changed: bool,
+}
+
+impl PresentationDelay {
+    const KEPT: usize = 9;
+
+    fn due(&mut self) -> bool {
+        self.since = self.since.saturating_add(1);
+        let every = if self.samples.len() < 5 { 10 } else { 120 };
+        if self.samples.is_empty() || self.since >= every {
+            self.since = 0;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn next_id(&mut self) -> u64 {
+        self.last_id += 1;
+        self.last_id
+    }
+
+    fn record(&mut self, delay: Duration) {
+        if self.samples.len() == Self::KEPT {
+            self.samples.pop_front();
+        }
+        self.samples.push_back(delay);
+        let mut sorted: Vec<Duration> = self.samples.iter().copied().collect();
+        sorted.sort();
+        self.publish(sorted[sorted.len() / 2], "measured".into());
+    }
+
+    /// Publishes an estimate where nothing can be measured: `delay`, for a
+    /// display refreshing every `interval`.
+    fn estimate(&mut self, delay: Duration, interval: Duration) {
+        let hertz = 1.0 / interval.as_secs_f64();
+        self.publish(
+            delay,
+            format!("estimated as two refreshes of a {hertz:.0} Hz display"),
+        );
+    }
+
+    fn publish(&mut self, delay: Duration, source: String) {
+        if let Some(registration) = &self.registration {
+            registration.publish(delay);
+        }
+        // Told once it moves by a millisecond, not on every sample.
+        if self
+            .published
+            .is_none_or(|last| last.abs_diff(delay) >= Duration::from_millis(1))
+        {
+            self.published = Some(delay);
+            self.source = source;
+            self.changed = true;
+        }
+    }
+
+    fn restart(&mut self) {
+        self.samples.clear();
+        self.since = 0;
+    }
+
+    fn take_change(&mut self) -> Option<(Duration, &str)> {
+        let delay = self
+            .published
+            .filter(|_| std::mem::take(&mut self.changed))?;
+        Some((delay, &self.source))
     }
 }
 
@@ -665,6 +783,20 @@ struct Presenter {
     submitted: bool,
     video: Option<VideoResources>,
     size: WindowSize,
+    /// Waits for a present to reach the screen, where the device can — used
+    /// on Wayland only; see `delay`.
+    present_wait_fn: Option<ash::khr::present_wait::Device>,
+    /// The window's X11 id, where it is an X11 window.
+    ///
+    /// There the presentation delay is estimated rather than measured: a
+    /// present waited for on an XWayland window returns once XWayland has
+    /// the picture — about a millisecond, measured — not once it is shown.
+    /// On Wayland the same wait returns when the compositor says the picture
+    /// was presented, eighteen to twenty-three milliseconds on the same
+    /// desktop.
+    x11_window: Option<u32>,
+    /// What presenting takes, as measured with `present_wait_fn`.
+    delay: PresentationDelay,
     /// Keeps the window alive until the surface on it is destroyed, which is
     /// why it is the last field: fields drop after `Drop::drop` has run.
     _window: Arc<dyn Any + Send + Sync>,
@@ -819,6 +951,15 @@ impl Presenter {
             submitted: false,
             video: None,
             size,
+            present_wait_fn: gpu
+                .present_wait
+                .then(|| ash::khr::present_wait::Device::new(&gpu.instance, &gpu.device)),
+            x11_window: match handle {
+                RawWindowHandle::Xlib(window) => u32::try_from(window.window).ok(),
+                RawWindowHandle::Xcb(window) => Some(window.window.get()),
+                _ => None,
+            },
+            delay: PresentationDelay::default(),
             _window: window,
         };
         presenter.finish()?;
@@ -908,6 +1049,9 @@ impl Presenter {
         colour: Colour,
         source: Source<'_>,
     ) -> std::result::Result<(), VulkanWindowRendererError> {
+        // What a measured presentation delay counts from: the moment the frame
+        // is handed over, which is what a synchronizer schedules.
+        let handed = Instant::now();
         // The last frame's commands read the staging buffer this one is about
         // to overwrite.
         if self.submitted {
@@ -922,7 +1066,7 @@ impl Presenter {
         }
         self.ensure_video(width, height, layout, source.domain())?;
         self.stage(source)?;
-        self.draw(width, height, colour)
+        self.draw(width, height, colour, handed)
     }
 
     /// Puts one frame's planes into the staging buffer, packed.
@@ -984,6 +1128,7 @@ impl Presenter {
         width: u32,
         height: u32,
         colour: Colour,
+        handed: Instant,
     ) -> std::result::Result<(), VulkanWindowRendererError> {
         let target = self.target_extent(width, height)?;
         // Minimized: nothing to draw into, and a swapchain cannot be
@@ -1028,10 +1173,19 @@ impl Presenter {
             .signal_semaphores(&signal);
         let handles = [swapchain.handle];
         let indices = [image];
-        let present_info = vk::PresentInfoKHR::default()
+        let mut present_info = vk::PresentInfoKHR::default()
             .wait_semaphores(&signal)
             .swapchains(&handles)
             .image_indices(&indices);
+        // An id only on a present that will be waited for: the one way to
+        // learn when a picture reached the screen.
+        let measuring =
+            self.present_wait_fn.is_some() && self.x11_window.is_none() && self.delay.due();
+        let ids = [if measuring { self.delay.next_id() } else { 0 }];
+        let mut present_id = vk::PresentIdKHR::default().present_ids(&ids);
+        if measuring {
+            present_info = present_info.push_next(&mut present_id);
+        }
         let presented = {
             // One lock for the submit and the present: both use the queue, and
             // another renderer on this GPU must not come between them.
@@ -1049,7 +1203,12 @@ impl Presenter {
             unsafe { self.swapchain_fn.queue_present(*queue, &present_info) }
         };
         match presented {
-            Ok(false) => Ok(()),
+            Ok(false) => {
+                if measuring {
+                    self.measure(handles[0], ids[0], handed);
+                }
+                Ok(())
+            }
             // Suboptimal or out of date: the next frame remakes it, at whatever
             // size the window is by then.
             Ok(true) | Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
@@ -1060,6 +1219,26 @@ impl Presenter {
                 call: "vkQueuePresentKHR",
                 result,
             }),
+        }
+    }
+
+    /// Waits for the present given `id` to reach the screen, and counts the
+    /// time since the frame was handed over as one measurement of the
+    /// presentation delay.
+    ///
+    /// It holds this thread until then — some twenty milliseconds on a
+    /// composited desktop — which is why it is done only now and then; see
+    /// [`PresentationDelay::due`].
+    fn measure(&mut self, swapchain: vk::SwapchainKHR, id: u64, handed: Instant) {
+        let Some(wait) = &self.present_wait_fn else {
+            return;
+        };
+        // SAFETY: the swapchain is this presenter's own and only this thread
+        // uses it, which is the external synchronization the call asks for;
+        // `id` was given to a present on it just now.
+        let waited = unsafe { wait.wait_for_present(swapchain, id, PRESENT_WAIT_TIMEOUT_NS) };
+        if waited.is_ok() {
+            self.delay.record(handed.elapsed());
         }
     }
 
@@ -1148,6 +1327,16 @@ impl Presenter {
         }
         drop(queue);
         self.swapchain = Some(made?);
+        // A new swapchain can present differently — full screen may skip the
+        // compositor — so what the old one took says nothing about it.
+        self.delay.restart();
+        // On X11, two refreshes of the monitor the window is now on: the
+        // wait for the next one after the present, and the compositor's
+        // repaint after XWayland has the picture — measured as 21 to 27 ms to
+        // reach XWayland at 60 Hz, before that repaint.
+        if let Some(interval) = self.x11_window.and_then(refresh_interval) {
+            self.delay.estimate(interval * 2, interval);
+        }
         Ok(())
     }
 

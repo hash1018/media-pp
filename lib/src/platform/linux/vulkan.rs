@@ -100,6 +100,11 @@ pub(crate) struct VulkanShared {
     pub(crate) memory_properties: vk::PhysicalDeviceMemoryProperties,
     /// The device's own name, for a log line.
     pub(crate) name: String,
+    /// Whether `VK_KHR_present_id` and `VK_KHR_present_wait` are on, so a
+    /// renderer can wait for a present to reach the screen and learn how
+    /// long presenting takes — see `VulkanWindowRenderer`'s presentation
+    /// delay. Off where the device has neither, and nothing depends on it.
+    pub(crate) present_wait: bool,
     /// The CUDA context frames are copied out of — set by
     /// [`VulkanGpu::for_cuda`] only.
     #[cfg(feature = "cuda")]
@@ -268,7 +273,7 @@ fn create(purpose: Purpose) -> Result<VulkanShared, VulkanGpuError> {
         unsafe { entry.create_instance(&info, None) }.map_err(call("vkCreateInstance"))?;
 
     match open_device(&instance, &purpose) {
-        Ok((physical_device, device, queue_family, name)) => {
+        Ok((physical_device, device, queue_family, name, present_wait)) => {
             // SAFETY: the queue family was chosen from this device's own list
             // and one queue was asked of it.
             let queue = unsafe { device.get_device_queue(queue_family, 0) };
@@ -284,6 +289,7 @@ fn create(purpose: Purpose) -> Result<VulkanShared, VulkanGpuError> {
                 queue_family,
                 memory_properties,
                 name,
+                present_wait,
                 #[cfg(feature = "cuda")]
                 cuda: None,
             })
@@ -299,7 +305,7 @@ fn create(purpose: Purpose) -> Result<VulkanShared, VulkanGpuError> {
 fn open_device(
     instance: &ash::Instance,
     purpose: &Purpose,
-) -> Result<(vk::PhysicalDevice, ash::Device, u32, String), VulkanGpuError> {
+) -> Result<(vk::PhysicalDevice, ash::Device, u32, String, bool), VulkanGpuError> {
     // SAFETY: a plain query of this instance.
     let devices = unsafe { instance.enumerate_physical_devices() }
         .map_err(call("vkEnumeratePhysicalDevices"))?;
@@ -336,7 +342,6 @@ fn open_device(
     };
     let name = device_name(instance, physical_device);
 
-    #[cfg_attr(not(feature = "cuda"), allow(unused_mut))]
     let mut needed: Vec<&'static CStr> = vec![ash::khr::swapchain::NAME];
     #[cfg(feature = "cuda")]
     if matches!(purpose, Purpose::Cuda(_)) {
@@ -356,19 +361,49 @@ fn open_device(
             });
         }
     }
+
+    // Waiting for a present, where the device can: wanted, not needed.
+    let offered = |extension: &CStr| {
+        available
+            .iter()
+            .any(|have| have.extension_name_as_c_str() == Ok(extension))
+    };
+    let present_wait =
+        offered(ash::khr::present_id::NAME) && offered(ash::khr::present_wait::NAME) && {
+            let mut id = vk::PhysicalDevicePresentIdFeaturesKHR::default();
+            let mut wait = vk::PhysicalDevicePresentWaitFeaturesKHR::default();
+            let mut features = vk::PhysicalDeviceFeatures2::default()
+                .push_next(&mut id)
+                .push_next(&mut wait);
+            // SAFETY: `features` chains two live structs, which the call fills;
+            // `vkGetPhysicalDeviceFeatures2` is core in the 1.1 asked for.
+            unsafe { instance.get_physical_device_features2(physical_device, &mut features) };
+            id.present_id == vk::TRUE && wait.present_wait == vk::TRUE
+        };
+    if present_wait {
+        needed.push(ash::khr::present_id::NAME);
+        needed.push(ash::khr::present_wait::NAME);
+    }
+
     let extensions: Vec<*const c_char> = needed.iter().map(|name| name.as_ptr()).collect();
     let priorities = [1.0f32];
     let queues = [vk::DeviceQueueCreateInfo::default()
         .queue_family_index(queue_family)
         .queue_priorities(&priorities)];
-    let info = vk::DeviceCreateInfo::default()
+    let mut id = vk::PhysicalDevicePresentIdFeaturesKHR::default().present_id(true);
+    let mut wait = vk::PhysicalDevicePresentWaitFeaturesKHR::default().present_wait(true);
+    let mut info = vk::DeviceCreateInfo::default()
         .queue_create_infos(&queues)
         .enabled_extension_names(&extensions);
+    if present_wait {
+        info = info.push_next(&mut id).push_next(&mut wait);
+    }
     // SAFETY: `info` and everything it points at outlive the call, and the
-    // queue family and extensions were taken from this device's own lists.
+    // queue family, extensions and features were taken from this device's own
+    // lists.
     let device = unsafe { instance.create_device(physical_device, &info, None) }
         .map_err(call("vkCreateDevice"))?;
-    Ok((physical_device, device, queue_family, name))
+    Ok((physical_device, device, queue_family, name, present_wait))
 }
 
 /// The first queue family on `device` that draws.
