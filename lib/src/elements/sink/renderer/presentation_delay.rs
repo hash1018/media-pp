@@ -56,11 +56,6 @@ impl PresentationDelay {
         self.publish(sorted[sorted.len() / 2], "measured".into());
     }
 
-    /// Whether anything has been measured since the swap chain was made.
-    pub(crate) fn measured(&self) -> bool {
-        !self.samples.is_empty()
-    }
-
     /// Publishes an estimate where nothing can be measured: `delay`, for a
     /// display refreshing every `interval`.
     pub(crate) fn estimate(&mut self, delay: Duration, interval: Duration) {

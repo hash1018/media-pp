@@ -38,7 +38,10 @@ pub(super) struct PresentTiming {
     frequency: i64,
     /// Measured presents not yet seen on the screen: count, handed over at.
     pending: VecDeque<(u32, i64)>,
+    /// Whether this swap chain has been estimated for, or measured, since
+    /// it was made: an estimate is for the time before a measurement.
     estimated: bool,
+    measured: bool,
 }
 
 impl PresentTiming {
@@ -51,6 +54,7 @@ impl PresentTiming {
             frequency,
             pending: VecDeque::new(),
             estimated: false,
+            measured: false,
         }
     }
 
@@ -85,9 +89,10 @@ impl PresentTiming {
                     let ticks = (statistics.SyncQPCTime - at) as f64;
                     self.delay
                         .record(Duration::from_secs_f64(ticks / self.frequency as f64));
+                    self.measured = true;
                 }
             }
-        } else if !self.estimated && !self.delay.measured() {
+        } else if !self.estimated && !self.measured {
             self.estimate();
         }
         if self.delay.due() {
@@ -107,6 +112,7 @@ impl PresentTiming {
         self.delay.restart();
         self.pending.clear();
         self.estimated = false;
+        self.measured = false;
     }
 
     fn estimate(&mut self) {
