@@ -412,14 +412,14 @@ impl StageBuilder for QueueStage {
         // No `attach_context`: a `Queue` is built here rather than handed in,
         // so there is no chance of it having been given another pipeline's
         // anything.
-        Ok(Box::new(Queue::spawn_counted(
+        Ok(Box::new(Queue::spawn_in_pipeline(
             self.name,
             self.capacity,
             downstream,
             context.bus.for_element(self.id),
             self.policy,
-            Some(&context.pipeline_id),
             self.counters,
+            context,
         )?))
     }
 }

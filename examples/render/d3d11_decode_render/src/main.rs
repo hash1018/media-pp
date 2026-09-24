@@ -78,13 +78,12 @@ mod windows_example {
         let (pipeline, ()) = Pipeline::new("d3d11-decode-render", source, |source, ctx| {
             // On the renderer's device — required for the zero-copy path to
             // be valid at all (see D3d11Decoder::new). The decoder's
-            // downstream-frame budget covers the `"frames"` queue twice over:
-            // a pause can leave the pacer holding what the queue held while
-            // the queue fills again behind it, and the D3D11VA pool does not
-            // grow. Its accurate-seek candidate surface is reserved
-            // internally, so it is not included in this value.
-            let decoder =
-                D3d11Decoder::new("decoder", params, gpu.device(), (2 * FRAMES + 8) as i32)?;
+            // downstream-frame budget covers the `"frames"` queue and a few
+            // more — the frame the pacer is waiting on, the one on screen —
+            // since the D3D11VA pool does not grow. Its accurate-seek
+            // candidate surface is reserved internally, so it is not
+            // included in this value.
+            let decoder = D3d11Decoder::new("decoder", params, gpu.device(), (FRAMES + 8) as i32)?;
             let branch = ctx
                 .branch()
                 .pipe(decoder) // same thread as the demux — cheap enough not to need a queue

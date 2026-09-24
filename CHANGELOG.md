@@ -1228,6 +1228,22 @@ compile error with no explanation.
 
 ### Fixed
 
+- **Pausing leaves a queue's backlog in the queue.** `Pipeline::pause`
+  interrupts every paced wait before its request has reached the queues,
+  and an interrupted `Pacer` or `VideoSynchronizer` takes whatever it is
+  handed without waiting. A queue's worker went on handing it buffers in
+  that time, and a source blocked on the full queue could only pass the
+  pause on once the worker had made room — so the whole backlog moved
+  into the pacer: a 12-frame queue lost 14 frames to it on nine pauses in
+  ten. Held there until resume, they were out of their pool while the
+  queue filled again, which a fixed D3D11VA or NVDEC pool had to be sized
+  twice over for. A queue built by a pipeline now takes nothing but
+  control from the interrupt until every source has acknowledged the
+  request, and a buffer that finds its channel full meanwhile is held
+  over rather than blocking the thread with the request to pass on; the
+  pacer holds the one frame it was waiting on. `d3d11_decode_render`'s
+  decoder budget is back to its queue and a few more.
+
 - **A file whose picture is muxed ahead of its sound plays with any video
   queue.** `FileDemuxer` waited on a pad whose branch was full, which
   stopped its one read cursor. When the full branch was the picture —

@@ -13,12 +13,13 @@
 //! the default and when it is the wrong one.
 
 use std::{
+    collections::VecDeque,
     sync::{
-        Arc,
+        Arc, Mutex, MutexGuard,
         atomic::{AtomicBool, Ordering},
     },
     thread::{self, JoinHandle},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use crate::pp_log::{PpLog, pp_info, pp_trace};
@@ -30,9 +31,10 @@ use thiserror::Error as ThisError;
 use crate::{
     buffer::MediaBuffer,
     bus::{Bus, BusEvent},
+    clock::Clock,
     contract::InputContract,
     control::{self, ControlMsg, ControlReceiver, ControlSender, RequestKind},
-    element::{Element, ElementType, Sink, element_pp_log},
+    element::{Context, Element, ElementType, Sink, element_pp_log},
     error::{Result, ThreadSpawnError},
     stats::ElementCounters,
 };
@@ -76,6 +78,13 @@ pub enum QueueError {
 /// picked up immediately; this pause is only ever *waited out*, not
 /// polled on a timer.
 const STOP_POLL_INTERVAL: Duration = Duration::from_millis(20);
+
+/// How often a wait that an interrupt may cut short looks again: the upstream
+/// side blocked on a full channel, and the worker holding back while an
+/// interrupt is out — see [`Queue`]'s docs on pausing. Short, because
+/// a pause waits on it; not zero, because the upstream side spends it
+/// blocked in ordinary backpressure too.
+const INTERRUPT_POLL_INTERVAL: Duration = Duration::from_millis(5);
 
 /// What a `Queue` does when its channel is full.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -146,6 +155,17 @@ impl Default for OverflowPolicy {
 /// worker immediately, it's never stuck behind the pause itself. See the
 /// worker loop below.
 ///
+/// A queue built by a pipeline also holds back for the pipeline's clock
+/// interrupts. `Pipeline::pause`, `stop`, `finish` and a seek interrupt a
+/// paced wait before their request has reached every queue, and an
+/// interrupted `Pacer` takes what it is handed without waiting; a worker
+/// that went on feeding it in that time moved its whole backlog into the
+/// pacer. So from the interrupt until the pipeline has every source's
+/// acknowledgement the worker takes nothing but control, and the thread
+/// handing buffers over is not left blocked on a channel that will not
+/// drain: a buffer that finds it full is held over and taken after the
+/// channel's own, in order.
+///
 /// Cheap elements (e.g. a muxer sitting right after an encoder) should
 /// simply *not* have a `Queue` between them and their upstream — they run
 /// as a direct call on the upstream element's thread instead of paying for
@@ -186,6 +206,12 @@ pub struct Queue {
     /// Where this queue is counted, when a pipeline built it — see
     /// [`crate::stats`]. `None` for one spawned by hand.
     counters: Option<Arc<ElementCounters>>,
+    /// The pipeline's clock, whose interrupts this queue holds back for;
+    /// `None` for one spawned by hand, which never does.
+    clock: Option<Arc<Clock>>,
+    /// Buffers handed over while the channel was full and an interrupt
+    /// was out — see [`Overflow`].
+    overflow: Overflow,
 }
 
 impl Queue {
@@ -239,20 +265,22 @@ impl Queue {
             policy,
             pipeline_id,
             None,
+            None,
             |thread_name, task| thread::Builder::new().name(thread_name).spawn(task),
         )
     }
 
-    /// [`Self::spawn_with_policy`], counted — what a pipeline's chain
-    /// builds, so the queue is reported with the rest of the graph.
-    pub(crate) fn spawn_counted(
+    /// [`Self::spawn_with_policy`] as a pipeline's chain builds it: counted,
+    /// so the queue is reported with the rest of the graph, and on the
+    /// pipeline's clock, so it holds back for its interrupts.
+    pub(crate) fn spawn_in_pipeline(
         name: impl Into<String>,
         capacity: usize,
         downstream: Box<dyn Sink>,
         bus: Bus,
         policy: OverflowPolicy,
-        pipeline_id: Option<&str>,
         counters: Arc<ElementCounters>,
+        context: &Context,
     ) -> Result<Queue> {
         Self::spawn_with_policy_using(
             name,
@@ -260,8 +288,9 @@ impl Queue {
             downstream,
             bus,
             policy,
-            pipeline_id,
+            Some(&context.pipeline_id),
             Some(counters),
+            Some(Arc::clone(&context.clock)),
             |thread_name, task| thread::Builder::new().name(thread_name).spawn(task),
         )
     }
@@ -277,6 +306,7 @@ impl Queue {
         policy: OverflowPolicy,
         pipeline_id: Option<&str>,
         counters: Option<Arc<ElementCounters>>,
+        clock: Option<Arc<Clock>>,
         spawn: impl FnOnce(
             String,
             Box<dyn FnOnce() + Send + 'static>,
@@ -299,6 +329,12 @@ impl Queue {
             queue.watch(tx.clone());
         }
         let worker_counters = counters.clone();
+        let overflow = Overflow::default();
+        let worker_inbox = Inbox {
+            data: rx,
+            overflow: overflow.clone(),
+            clock: clock.clone(),
+        };
 
         // `Builder::name` panics on interior NULs. Queue names are caller
         // input and remain unchanged for element/log identity; only the OS
@@ -308,7 +344,7 @@ impl Queue {
             thread_name.clone(),
             Box::new(move || {
                 worker_loop(
-                    rx,
+                    worker_inbox,
                     control_rx,
                     downstream,
                     worker_bus,
@@ -332,6 +368,8 @@ impl Queue {
             control: control_tx,
             stop,
             counters,
+            clock,
+            overflow,
         })
     }
 }
@@ -362,7 +400,7 @@ impl Sink for Queue {
             // upstream Queue stop before `consume` can perform that drop,
             // silently turning DropNewest into blocking backpressure.
             OverflowPolicy::DropNewest => true,
-            OverflowPolicy::Block(_) => !self.tx.is_full(),
+            OverflowPolicy::Block(_) => !self.tx.is_full() && self.overflow.lock().is_empty(),
         }
     }
 
@@ -384,8 +422,7 @@ impl Sink for Queue {
         if buf.is_eos() {
             pp_trace!(pp_log: &self.pp_log, "event=eos phase=received");
             let result = self
-                .tx
-                .send(buf)
+                .hand_over(buf, Duration::MAX)
                 .map_err(|_| QueueError::ChannelClosed.into());
             match &result {
                 Ok(()) => pp_trace!(
@@ -409,8 +446,8 @@ impl Sink for Queue {
                 // Timed only when it had to wait: a send into room is not
                 // backpressure, and timing every one would cost a clock
                 // reading for nothing.
-                let waited = self.tx.is_full().then(std::time::Instant::now);
-                let sent = self.tx.send_timeout(buf, timeout);
+                let waited = self.tx.is_full().then(Instant::now);
+                let sent = self.hand_over(buf, timeout);
                 if let (Some(started), Some(queue)) =
                     (waited, counters.and_then(ElementCounters::queue))
                 {
@@ -418,29 +455,38 @@ impl Sink for Queue {
                 }
                 match sent {
                     Ok(()) => Ok(()),
-                    Err(SendTimeoutError::Timeout(_)) => {
+                    Err(HandOverError::TimedOut) => {
                         Err(QueueError::SendTimedOut { after: timeout }.into())
                     }
-                    Err(SendTimeoutError::Disconnected(_)) => Err(QueueError::ChannelClosed.into()),
+                    Err(HandOverError::Closed) => Err(QueueError::ChannelClosed.into()),
                 }
             }
-            OverflowPolicy::DropNewest => match self.tx.try_send(buf) {
-                Ok(()) => Ok(()),
-                Err(TrySendError::Full(_)) => {
-                    if let Some(queue) = counters.and_then(ElementCounters::queue) {
-                        queue.dropped();
+            // Anything held over counts as a full channel: sent past it, this
+            // buffer would overtake it.
+            OverflowPolicy::DropNewest => {
+                let sent = if self.overflow.lock().is_empty() {
+                    self.tx.try_send(buf)
+                } else {
+                    Err(TrySendError::Full(buf))
+                };
+                match sent {
+                    Ok(()) => Ok(()),
+                    Err(TrySendError::Full(_)) => {
+                        if let Some(queue) = counters.and_then(ElementCounters::queue) {
+                            queue.dropped();
+                        }
+                        self.bus.post(
+                            &self.pp_log,
+                            BusEvent::Dropped {
+                                element_type: ElementType::Queue,
+                                name: self.name.clone(),
+                            },
+                        );
+                        Ok(())
                     }
-                    self.bus.post(
-                        &self.pp_log,
-                        BusEvent::Dropped {
-                            element_type: ElementType::Queue,
-                            name: self.name.clone(),
-                        },
-                    );
-                    Ok(())
+                    Err(TrySendError::Disconnected(_)) => Err(QueueError::ChannelClosed.into()),
                 }
-                Err(TrySendError::Disconnected(_)) => Err(QueueError::ChannelClosed.into()),
-            },
+            }
         };
         if result.is_err()
             && let Some(counters) = counters
@@ -464,6 +510,11 @@ impl Sink for Queue {
             pp_log: &self.pp_log,
             "event=control control={msg:?} phase=received"
         );
+        // What was held over is part of the backlog these discard, and this
+        // thread is the only one that adds to it.
+        if matches!(msg, ControlMsg::Flush | ControlMsg::Stop) {
+            self.overflow.lock().clear();
+        }
         self.control.send(msg.clone());
         pp_trace!(
             pp_log: &self.pp_log,
@@ -497,6 +548,129 @@ impl Drop for Queue {
     }
 }
 
+/// What the upstream side could not put in the channel because it was full
+/// when an interrupt came — handed over all the same, so that thread can
+/// get back to the request behind the interrupt, and taken by the worker
+/// once the channel has emptied, after everything sent before it.
+///
+/// Only the upstream side adds to it, and only while it is empty sends to the
+/// channel instead; the worker takes from it only once the channel is empty.
+/// Together that keeps every buffer in the order it was handed over. It
+/// holds what one source makes between two looks at its control — a buffer
+/// or two — and is emptied by `Flush` and `Stop` like the channel.
+#[derive(Clone, Default)]
+struct Overflow(Arc<Mutex<VecDeque<MediaBuffer>>>);
+
+impl Overflow {
+    fn lock(&self) -> MutexGuard<'_, VecDeque<MediaBuffer>> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+/// Why [`Queue::hand_over`] could not hand a buffer over.
+enum HandOverError {
+    TimedOut,
+    Closed,
+}
+
+impl Queue {
+    /// Puts `buf` in the channel, waiting up to `timeout` for room — unless
+    /// an interrupt comes while it waits, when `buf` goes to the
+    /// [`Overflow`] instead and this returns at once.
+    ///
+    /// Why it may not simply wait: while an interrupt is out the worker takes
+    /// nothing (see `worker_loop`), and what ends the interrupt is the request
+    /// behind it, which the thread calling this is the one to pass on. Before
+    /// the worker held back, it did make room here — by feeding every
+    /// buffer in the channel to an interrupted `Pacer`, which took each
+    /// without waiting and held them all, so a pause left a whole queue's worth
+    /// of frames out of their pool.
+    fn hand_over(
+        &self,
+        mut buf: MediaBuffer,
+        timeout: Duration,
+    ) -> std::result::Result<(), HandOverError> {
+        let Some(clock) = self.clock.clone() else {
+            return self
+                .tx
+                .send_timeout(buf, timeout)
+                .map_err(|error| match error {
+                    SendTimeoutError::Timeout(_) => HandOverError::TimedOut,
+                    SendTimeoutError::Disconnected(_) => HandOverError::Closed,
+                });
+        };
+        let deadline = Instant::now().checked_add(timeout);
+        loop {
+            let mut overflow = self.overflow.lock();
+            if overflow.is_empty() {
+                match self.tx.try_send(buf) {
+                    Ok(()) => return Ok(()),
+                    Err(TrySendError::Disconnected(_)) => return Err(HandOverError::Closed),
+                    Err(TrySendError::Full(back)) => buf = back,
+                }
+            }
+            if clock.interrupt_pending() {
+                overflow.push_back(buf);
+                return Ok(());
+            }
+            let slice = match deadline {
+                Some(deadline) => deadline.saturating_duration_since(Instant::now()),
+                None => INTERRUPT_POLL_INTERVAL,
+            }
+            .min(INTERRUPT_POLL_INTERVAL);
+            if slice.is_zero() {
+                return Err(HandOverError::TimedOut);
+            }
+            if overflow.is_empty() {
+                drop(overflow);
+                match self.tx.send_timeout(buf, slice) {
+                    Ok(()) => return Ok(()),
+                    Err(SendTimeoutError::Timeout(back)) => buf = back,
+                    Err(SendTimeoutError::Disconnected(_)) => return Err(HandOverError::Closed),
+                }
+            } else {
+                // What was held over goes first; the worker is taking it.
+                drop(overflow);
+                if self.handle.as_ref().is_none_or(JoinHandle::is_finished) {
+                    return Err(HandOverError::Closed);
+                }
+                thread::sleep(slice);
+            }
+        }
+    }
+}
+
+/// Where a worker takes its buffers from: the channel, then what was held
+/// over — see [`Overflow`] — and neither while an interrupt is out.
+struct Inbox {
+    data: Receiver<MediaBuffer>,
+    overflow: Overflow,
+    clock: Option<Arc<Clock>>,
+}
+
+impl Inbox {
+    /// Whether the worker should take nothing for now: an interrupt is out,
+    /// so whatever it fed downstream would only be held by an interrupted
+    /// `Pacer` rather than played. Not once `stop` is set — the queue has
+    /// been dropped, nothing will answer the interrupt here, and the worker
+    /// drains what it holds as it always has.
+    fn held_back(&self, stop: &AtomicBool) -> bool {
+        self.clock.as_deref().is_some_and(Clock::interrupt_pending) && !stop.load(Ordering::Relaxed)
+    }
+
+    /// The next buffer held over, once the channel has nothing older.
+    fn take_held_over(&self) -> Option<MediaBuffer> {
+        let mut overflow = self.overflow.lock();
+        if self.data.is_empty() {
+            overflow.pop_front()
+        } else {
+            None
+        }
+    }
+}
+
 /// Owns `downstream` on its own thread: pulls from `data_rx` and calls
 /// `downstream.consume()`, same as before. Every iteration first checks
 /// `control_rx` non-blockingly, so a control request already pending there
@@ -510,7 +684,7 @@ impl Drop for Queue {
 // `spawn_with_policy_using` carries the same list for the same reason.
 #[allow(clippy::too_many_arguments)]
 fn worker_loop(
-    data_rx: Receiver<MediaBuffer>,
+    inbox: Inbox,
     control_rx: ControlReceiver,
     mut downstream: Box<dyn Sink>,
     bus: Bus,
@@ -529,6 +703,13 @@ fn worker_loop(
         downstream: (downstream.element_type(), downstream.name()),
         pp_log: &pp_log,
     };
+    let worker = Worker {
+        bus: &bus,
+        name: &name,
+        pp_log: &pp_log,
+        counters: counters.as_deref(),
+        errors: &error_reporter,
+    };
     loop {
         if let Some((request, ack)) = control_rx.try_recv() {
             let RequestKind::Control(msg) = request else {
@@ -536,7 +717,7 @@ fn worker_loop(
                 continue;
             };
             if apply_control(
-                &data_rx,
+                &inbox.data,
                 &mut downstream,
                 msg,
                 &ack,
@@ -550,15 +731,24 @@ fn worker_loop(
             continue;
         }
 
-        if !downstream.ready_consume() {
-            match control_rx.rx.recv_timeout(STOP_POLL_INTERVAL) {
+        // Neither while an interrupt is out — see `Inbox::held_back` — nor
+        // while downstream is not ready does this take a buffer; it waits on
+        // control alone, which is what will change either.
+        let held_back = inbox.held_back(&stop);
+        if held_back || !downstream.ready_consume() {
+            let wait = if held_back {
+                INTERRUPT_POLL_INTERVAL
+            } else {
+                STOP_POLL_INTERVAL
+            };
+            match control_rx.rx.recv_timeout(wait) {
                 Ok(request) => {
                     let RequestKind::Control(msg) = request.kind else {
                         let _ = request.ack.send(());
                         continue;
                     };
                     if apply_control(
-                        &data_rx,
+                        &inbox.data,
                         &mut downstream,
                         msg,
                         &request.ack,
@@ -570,14 +760,21 @@ fn worker_loop(
                         return;
                     }
                 }
+                // Held back, it looks again rather than ending: `stop` set
+                // since then means draining what is here, as ever.
                 Err(RecvTimeoutError::Timeout) => {
-                    if stop.load(Ordering::Relaxed) {
+                    if !held_back && stop.load(Ordering::Relaxed) {
                         pp_info!(pp_log: &pp_log, "worker: stop flag set, ending");
                         return;
                     }
                 }
                 Err(RecvTimeoutError::Disconnected) => return,
             }
+            continue;
+        }
+
+        if let Some(buf) = inbox.take_held_over() {
+            forward(&mut downstream, buf, &worker);
             continue;
         }
 
@@ -590,7 +787,7 @@ fn worker_loop(
                             continue;
                         };
                         if apply_control(
-                            &data_rx,
+                            &inbox.data,
                             &mut downstream,
                             msg,
                             &req.ack,
@@ -608,54 +805,10 @@ fn worker_loop(
                     }
                 }
             }
-            recv(data_rx) -> buf => {
+            recv(inbox.data) -> buf => {
                 match buf {
                     Ok(buf) => {
-                        let is_eos = buf.is_eos();
-                        let call = counters
-                            .as_deref()
-                            .map(|counters| counters.begin_forwarding(is_eos));
-                        let result = downstream.consume(buf);
-                        if let Some(call) = call {
-                            call.end(result.is_ok());
-                        }
-                        match result {
-                            Ok(()) => {
-                                if is_eos {
-                                    pp_trace!(
-                                        pp_log: &pp_log,
-                                        "event=eos phase=completed outcome=ok"
-                                    );
-                                    bus.post(
-                                        &pp_log,
-                                        BusEvent::Eos {
-                                            element_type: ElementType::Queue,
-                                            name: name.clone(),
-                                        },
-                                    );
-                                    // Not a return: `Eos` ends a stream, not
-                                    // this queue. A source that parks at its
-                                    // end can still be sought, and the
-                                    // `Flush`/`Seek`/`Preroll` that follow
-                                    // need a worker here to carry them and
-                                    // the new stream — see the type docs.
-                                }
-                            }
-                            Err(error) => {
-                                if is_eos {
-                                    pp_trace!(
-                                        pp_log: &pp_log,
-                                        "event=eos phase=completed outcome=error error={error}"
-                                    );
-                                }
-                                // Report and move on to the next buffer —
-                                // this one's dropped, but nothing else
-                                // dies over it. Whoever's watching the bus
-                                // decides whether the error is fatal
-                                // enough to call `Pipeline::stop`.
-                                error_reporter.post(error);
-                            }
-                        }
+                        forward(&mut downstream, buf, &worker);
                     }
                     Err(_) => {
                         pp_info!(pp_log: &pp_log, "worker: producer (this Queue) gone, ending");
@@ -672,6 +825,63 @@ fn worker_loop(
                     return;
                 }
             }
+        }
+    }
+}
+
+/// What handing a buffer on needs from its worker, besides the element it
+/// goes to.
+struct Worker<'a> {
+    bus: &'a Bus,
+    name: &'a Arc<str>,
+    pp_log: &'a PpLog,
+    counters: Option<&'a ElementCounters>,
+    errors: &'a QueueErrorReporter<'a>,
+}
+
+/// Hands one buffer to `downstream`, counting it and reporting a failure on
+/// the bus — a failure drops that buffer and nothing else.
+fn forward(downstream: &mut Box<dyn Sink>, buf: MediaBuffer, worker: &Worker<'_>) {
+    let is_eos = buf.is_eos();
+    let call = worker
+        .counters
+        .map(|counters| counters.begin_forwarding(is_eos));
+    let result = downstream.consume(buf);
+    if let Some(call) = call {
+        call.end(result.is_ok());
+    }
+    match result {
+        Ok(()) => {
+            if is_eos {
+                pp_trace!(
+                    pp_log: worker.pp_log,
+                    "event=eos phase=completed outcome=ok"
+                );
+                worker.bus.post(
+                    worker.pp_log,
+                    BusEvent::Eos {
+                        element_type: ElementType::Queue,
+                        name: worker.name.clone(),
+                    },
+                );
+                // Not a return: `Eos` ends a stream, not this queue. A
+                // source that parks at its end can still be sought, and the
+                // `Flush`/`Seek`/`Preroll` that follow need a worker here to
+                // carry them and the new stream — see the type docs.
+            }
+        }
+        Err(error) => {
+            if is_eos {
+                pp_trace!(
+                    pp_log: worker.pp_log,
+                    "event=eos phase=completed outcome=error error={error}"
+                );
+            }
+            // Report and move on to the next buffer — this one's dropped,
+            // but nothing else dies over it. Whoever's watching the bus
+            // decides whether the error is fatal enough to call
+            // `Pipeline::stop`.
+            worker.errors.post(error);
         }
     }
 }
@@ -950,6 +1160,7 @@ mod tests {
             }),
             bus,
             OverflowPolicy::default(),
+            None,
             None,
             None,
             |_thread_name, _task| Err(std::io::Error::other("injected spawn failure")),
@@ -1677,5 +1888,132 @@ mod tests {
             dropped.load(Ordering::SeqCst),
             "the join released everything downstream"
         );
+    }
+
+    /// Records the pts of every packet it is handed.
+    struct PtsRecorder {
+        pp_log: PpLog,
+        seen: Arc<Mutex<Vec<i64>>>,
+    }
+
+    impl Element for PtsRecorder {
+        fn name(&self) -> Arc<str> {
+            "pts-recorder".into()
+        }
+
+        fn element_type(&self) -> ElementType {
+            ElementType::Other
+        }
+
+        fn pp_log(&self) -> &PpLog {
+            &self.pp_log
+        }
+
+        fn pp_log_mut(&mut self) -> &mut PpLog {
+            &mut self.pp_log
+        }
+    }
+
+    impl Sink for PtsRecorder {
+        fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+            if let MediaBuffer::Packet(packet) = buf {
+                self.seen.lock().unwrap().push(packet.pts().unwrap_or(-1));
+            }
+            Ok(())
+        }
+
+        fn control(&mut self, _msg: ControlMsg) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    fn packet_at(pts: i64) -> MediaBuffer {
+        let mut packet = ffmpeg_next::Packet::empty();
+        packet.set_pts(Some(pts));
+        MediaBuffer::Packet(Arc::new(packet))
+    }
+
+    fn recording_queue(capacity: usize, clock: &Arc<Clock>) -> (Queue, Arc<Mutex<Vec<i64>>>) {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let (bus, _bus_rx) = Bus::new();
+        let queue = Queue::spawn_with_policy_using(
+            "queue",
+            capacity,
+            Box::new(PtsRecorder {
+                pp_log: element_pp_log(ElementType::Other, "pts-recorder", None),
+                seen: Arc::clone(&seen),
+            }),
+            bus,
+            OverflowPolicy::default(),
+            None,
+            None,
+            Some(Arc::clone(clock)),
+            |thread_name, task| thread::Builder::new().name(thread_name).spawn(task),
+        )
+        .expect("spawn");
+        (queue, seen)
+    }
+
+    /// While an interrupt is out the worker takes nothing, and a full
+    /// channel does not block the thread handing buffers over — they are
+    /// held over instead, so that thread can go and take the request behind
+    /// the interrupt. Once it is settled, everything arrives in the order it
+    /// was handed over, what was held over after what was in the channel.
+    #[test]
+    fn an_interrupt_holds_the_worker_back_and_lets_the_producer_go() {
+        let clock = Arc::new(Clock::new());
+        let (mut queue, seen) = recording_queue(1, &clock);
+        clock.interrupt();
+
+        let started = std::time::Instant::now();
+        for pts in 0..4 {
+            queue.consume(packet_at(pts)).expect("handed over");
+        }
+        queue
+            .consume(MediaBuffer::Eos)
+            .expect("even Eos is held over");
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "a full channel must not block while an interrupt is out"
+        );
+        assert!(!queue.ready_consume(), "held-over buffers make it full");
+        thread::sleep(Duration::from_millis(50));
+        assert!(seen.lock().unwrap().is_empty(), "the worker held back");
+
+        clock.settle();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while seen.lock().unwrap().len() < 4 && std::time::Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(*seen.lock().unwrap(), [0, 1, 2, 3]);
+
+        // Sent after the held-over ones have gone: nothing overtakes them.
+        queue.consume(packet_at(4)).expect("send");
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while seen.lock().unwrap().len() < 5 && std::time::Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(*seen.lock().unwrap(), [0, 1, 2, 3, 4]);
+    }
+
+    /// What was held over belongs to the old timeline as much as the
+    /// channel's backlog does: a `Flush` drops both.
+    #[test]
+    fn flush_discards_what_was_held_over() {
+        let clock = Arc::new(Clock::new());
+        let (mut queue, seen) = recording_queue(1, &clock);
+        clock.interrupt();
+        for pts in 0..3 {
+            queue.consume(packet_at(pts)).expect("handed over");
+        }
+        queue.control(ControlMsg::Flush).expect("flush");
+        clock.settle();
+        queue.consume(packet_at(10)).expect("send");
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while seen.lock().unwrap().is_empty() && std::time::Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        thread::sleep(Duration::from_millis(50));
+        assert_eq!(*seen.lock().unwrap(), [10]);
     }
 }

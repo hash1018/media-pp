@@ -31,6 +31,9 @@ pub struct Clock {
     /// acknowledged in `control()` so a long presentation-time wait can
     /// return promptly and let the owning worker process that request.
     interrupt_epoch: AtomicU64,
+    /// The `interrupt_epoch` every request sent so far has been handled up
+    /// to — see [`Self::interrupt_pending`].
+    settled_epoch: AtomicU64,
 }
 
 #[derive(Clone, Copy)]
@@ -59,6 +62,7 @@ impl Clock {
         Self {
             state: Mutex::new(State::Unset),
             interrupt_epoch: AtomicU64::new(0),
+            settled_epoch: AtomicU64::new(0),
         }
     }
 
@@ -71,6 +75,27 @@ impl Clock {
 
     pub(crate) fn interrupt_epoch(&self) -> u64 {
         self.interrupt_epoch.load(Ordering::Acquire)
+    }
+
+    /// Marks every interrupt so far as answered: the requests that followed
+    /// it have been handled all the way through the graph. Called by the
+    /// pipeline once every source has acknowledged them.
+    pub(crate) fn settle(&self) {
+        self.settled_epoch
+            .store(self.interrupt_epoch(), Ordering::Release);
+    }
+
+    /// Whether an interrupt is out and the requests behind it are still on
+    /// their way. A `Queue` takes nothing from its channel meanwhile: what
+    /// it fed an interrupted `Pacer` would only pile up there, not play —
+    /// see `Queue`.
+    ///
+    /// Settled by the pipeline, not by each element's own control: a
+    /// request can reach an element before the interrupt that goes with it
+    /// is raised, and an element that took its own control as the answer
+    /// would then wait on an interrupt nothing is coming to answer.
+    pub(crate) fn interrupt_pending(&self) -> bool {
+        self.interrupt_epoch() != self.settled_epoch.load(Ordering::Acquire)
     }
 
     /// The instant playback started, set on first call — shifted forward

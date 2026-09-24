@@ -544,6 +544,10 @@ impl Pipeline {
         for ack in acks {
             let _ = ack.recv();
         }
+        // Every source has taken the request and cascaded it, so whatever an
+        // interrupt — this one or one raised just before — was holding back
+        // can go on.
+        self.clock.settle();
     }
 
     fn pause_runtime(&self) {

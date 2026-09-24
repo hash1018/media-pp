@@ -604,3 +604,83 @@ fn seeking_a_pipeline_that_is_not_running_is_refused() {
         pipeline.seek(Duration::ZERO, SeekMode::Keyframe)
     ));
 }
+
+/// Pausing leaves a queue's backlog in the queue. The pacer behind it is
+/// interrupted the moment `pause` is called, and takes whatever it is handed
+/// from then on without waiting; before the queue held back for the
+/// interrupt, its worker handed it the whole backlog — twelve frames here —
+/// in the time it took the pause to reach the queue, all of them held out
+/// of their pool until resume. What the pacer holds now is the frame it was
+/// waiting on, and at most one more that met the interrupt on the way.
+#[test]
+fn pausing_leaves_a_queue_backlog_in_the_queue() {
+    const FRAMES: usize = 12;
+    let Some(path) = try_test_video() else { return };
+    let (source, streams) = FileDemuxer::open("demux", &path).expect("the fixture must open");
+    let video = streams
+        .iter()
+        .find(|stream| stream.kind == ffmpeg::media::Type::Video)
+        .expect("the fixture must have a video stream")
+        .clone();
+    let shown = Arc::new(AtomicUsize::new(0));
+    let sink = CountingSink {
+        pp_log: element_pp_log(ElementType::Other, "screen", None),
+        name: "screen".into(),
+        count: Arc::clone(&shown),
+    };
+    let (pipeline, ()) = Pipeline::new("pause-backlog", source, |source, ctx| {
+        let branch = ctx
+            .branch()
+            .pipe(SwDecoder::new("decoder", video.parameters.clone())?)
+            .queue("frames", FRAMES)
+            .pipe(Pacer::new("pacer"))
+            .to(sink)?;
+        ctx.attach(source, video.index, branch)?;
+        Ok(())
+    })
+    .expect("wiring");
+    let taken_by_pacer = |pipeline: &Pipeline| {
+        pipeline
+            .stats()
+            .elements
+            .iter()
+            .find(|element| &*element.name == "pacer")
+            .map_or(0, |element| element.buffers_in)
+    };
+    let queued = |pipeline: &Pipeline| {
+        pipeline
+            .stats()
+            .elements
+            .iter()
+            .find_map(|element| element.queue.as_ref().map(|queue| queue.len))
+            .unwrap_or(0)
+    };
+    pipeline.run().expect("run");
+    // Decoding runs far ahead of a paced picture, so the queue fills.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while queued(&pipeline) < FRAMES && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(queued(&pipeline), FRAMES, "the queue never filled");
+
+    pipeline.pause();
+    thread::sleep(Duration::from_millis(200));
+    let held = taken_by_pacer(&pipeline) as usize - shown.load(Ordering::SeqCst);
+    assert!(
+        held <= 2,
+        "the pacer took {held} frames while pausing; the queue should have kept them"
+    );
+    assert!(
+        queued(&pipeline) >= FRAMES - 2,
+        "and the queue still holds them"
+    );
+
+    let before = shown.load(Ordering::SeqCst);
+    pipeline.resume();
+    thread::sleep(Duration::from_millis(300));
+    assert!(
+        shown.load(Ordering::SeqCst) > before,
+        "playback goes on after resume"
+    );
+    pipeline.stop();
+}
