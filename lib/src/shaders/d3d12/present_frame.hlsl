@@ -1,14 +1,15 @@
 // The shared vertex stage and root signature every frame shader in this
-// renderer draws with. The pixel stage lives in its own translation unit
-// (present_nv12.hlsl) so its texture registers are declared exactly once.
+// renderer draws with. Each pixel stage lives in its own translation unit
+// (present_nv12.hlsl, present_yuv420p.hlsl, present_bgra.hlsl) so its
+// texture registers are declared exactly once.
 //
-// The table is exactly NV12's luma/chroma pair, matching the two-entry
-// SRV heap the renderer allocates. The twelve root constants at b0 are the
-// three rows present_nv12.hlsl converts Y'CbCr with, set per frame from the
-// frame's own colour description.
+// The table holds a frame's planes — up to three, YUV420P's, matching the
+// three-entry SRV heap the renderer allocates; NV12 uses two, BGRA one. The
+// twelve root constants at b0 are the three rows the YUV shaders convert
+// Y'CbCr with, set per frame from the frame's own colour description.
 #define FRAME_ROOT_SIGNATURE \
     "RootFlags(ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT)," \
-    "DescriptorTable(SRV(t0, numDescriptors=2))," \
+    "DescriptorTable(SRV(t0, numDescriptors=3))," \
     "RootConstants(num32BitConstants=12, b0)," \
     "StaticSampler(s0," \
         "filter=FILTER_MIN_MAG_LINEAR_MIP_POINT," \

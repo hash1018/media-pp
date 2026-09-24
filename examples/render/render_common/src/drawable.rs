@@ -1,5 +1,4 @@
-//! What only Linux needs besides: fitting a software decode to
-//! `VulkanWindowRenderer`'s input.
+//! Fitting a software decode to a window renderer's input.
 
 /// What a software decode of `params` needs in front of `renderer`: nothing
 /// where it decodes to a layout the renderer draws — YUV420P, as most
@@ -10,14 +9,13 @@
 /// here, so what it draws is said in one place: the library.
 pub fn to_drawable(
     params: &media_pp::ffmpeg::codec::Parameters,
-    renderer: &media_pp::elements::VulkanWindowRenderer,
+    renderer: &impl media_pp::element::Sink,
 ) -> media_pp::Result<Option<media_pp::elements::SwScaler>> {
     use media_pp::{
         contract::{
             MediaKind, MemoryDomain, OutputContract, PixelLayout, PixelLayoutSet, PortContract,
             check_link,
         },
-        element::Sink,
         elements::SwScaler,
         ffmpeg,
     };

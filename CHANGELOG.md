@@ -589,6 +589,17 @@ compile error with no explanation.
   application's event loop. `d3d11_decode_render` uses both and no longer
   needs `render_common` or `winit`.
 
+- **The D3D window renderers take frames in system memory.**
+  `D3d11WindowRenderer` and `D3d12WindowRenderer` draw NV12, YUV420P (and
+  YUVJ420P) and BGRA from system memory as well as their backend's own
+  textures, uploading each frame themselves into textures made for its
+  layout and size — as `VulkanWindowRenderer` already did on Linux. A
+  software decode, a CPU capture or an application's own frames go straight
+  into one; on Windows they needed a `SwScaler` to NV12 and a
+  `D3d11Upload`/`D3d12Upload` in front, which was also where the two
+  platforms' graphs parted. The system-memory path needs no video support
+  of the device, so a software adapter draws it too.
+
 - **`D3d12Gpu` and `D3d12WindowRenderer`: the same for D3D12.** `D3d12Gpu`
   makes the one device a pipeline's D3D12 elements share, and the one queue
   its windows present through; `from_device` shares a device made

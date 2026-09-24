@@ -11,7 +11,7 @@ use std::{
     },
 };
 
-use ffmpeg_next as ffmpeg;
+use ffmpeg_next::{self as ffmpeg, format::Pixel};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use thiserror::Error as ThisError;
 use windows::{
@@ -36,11 +36,16 @@ use windows::{
     core::{Interface, s},
 };
 
-use super::d3d11_renderer::{D3d11Picture, check_d3d11_frame};
+use super::{
+    d3d11_renderer::{D3d11Picture, check_d3d11_frame},
+    system_frame::{SystemLayout, colour_rows, planes_of},
+};
 use crate::{
     buffer::MediaBuffer,
-    color::yuv_to_rgb_rows,
-    contract::{InputContract, MediaKind, MemoryDomain, PixelLayoutSet, PortContract},
+    contract::{
+        InputContract, MediaKind, MediaKindSet, MemoryDomain, MemoryDomainSet, PixelLayout,
+        PixelLayoutSet, PortContract,
+    },
     control::ControlMsg,
     element::{Element, ElementType, Sink, element_pp_log},
     elements::{D3d11Gpu, D3d11RendererError, SubmitError, WindowEvents, WindowOptions},
@@ -51,6 +56,7 @@ use crate::{
 
 const BGRA_SHADER: &[u8] = include_bytes!("../../../../shaders/d3d11/present_bgra.hlsl");
 const NV12_SHADER: &[u8] = include_bytes!("../../../../shaders/d3d11/present_nv12.hlsl");
+const YUV420P_SHADER: &[u8] = include_bytes!("../../../../shaders/d3d11/present_yuv420p.hlsl");
 
 /// Double-buffered flip-model swap chain.
 const FRAME_COUNT: u32 = 2;
@@ -81,16 +87,25 @@ pub enum D3d11WindowRendererError {
 /// for itself, the way a GStreamer video sink does when nobody hands it one,
 /// or one the application gives it.
 ///
-/// It takes what a [`D3d11Renderer`](crate::elements::D3d11Renderer) takes,
-/// checked the same way — a texture from another device is refused, and a
-/// frame's error is a [`D3d11RendererError`] — but draws it itself rather
-/// than through a presenter, and so knows the frame it draws: an NV12 frame
-/// is converted with its own colour description, BT.709, BT.601 or BT.2020
-/// and limited or full range as it says, and where it says nothing, BT.709
-/// for a picture over 576 rows and BT.601 otherwise. A BGRA frame is drawn
-/// as it is. The picture keeps its aspect ratio inside the window, with
-/// black bars as needed. It follows the window's size on its own, reading
-/// it before every frame, so nothing has to tell it about a resize.
+/// It takes two kinds of frame:
+///
+/// - What a [`D3d11Renderer`](crate::elements::D3d11Renderer) takes — a
+///   D3D11 texture, NV12 or BGRA, drawn zero-copy — checked the same way: a
+///   texture from another device is refused.
+/// - A frame in system memory, NV12, YUV420P (or YUVJ420P) or BGRA — what a
+///   software decode, a CPU capture or an application's own frames give —
+///   uploaded here into textures made for its layout and size, and remade
+///   only when either changes. A software decode needs no scaler or upload
+///   in front, as on Linux with `VulkanWindowRenderer`.
+///
+/// A frame's error is a [`D3d11RendererError`]. It draws each frame itself
+/// rather than through a presenter, and so knows it: a YUV frame is
+/// converted with its own colour description, BT.709, BT.601 or BT.2020 and
+/// limited or full range as it says, and where it says nothing, BT.709 for a
+/// picture over 576 rows and BT.601 otherwise. A BGRA frame is drawn as it
+/// is. The picture keeps its aspect ratio inside the window, with black bars
+/// as needed. It follows the window's size on its own, reading it before
+/// every frame, so nothing has to tell it about a resize.
 ///
 /// It draws; it does not pace. Put a [`crate::elements::VideoSynchronizer`]
 /// or [`crate::elements::Pacer`] in front for a picture shown at its own
@@ -172,6 +187,14 @@ impl D3d11WindowRenderer {
     }
 
     fn draw(&self, frame: &ffmpeg::frame::Video) -> std::result::Result<(), D3d11RendererError> {
+        if frame.format() != Pixel::D3D11 {
+            let layout = SystemLayout::of(frame.format())
+                .ok_or(D3d11RendererError::UnsupportedFormat(frame.format()))?;
+            return self
+                .presenter
+                .show_system(frame, layout)
+                .map_err(D3d11RendererError::Submit);
+        }
         let picture = check_d3d11_frame(frame, &self.presenter.device)?;
         self.presenter
             .show(&picture, frame)
@@ -198,13 +221,19 @@ impl Element for D3d11WindowRenderer {
 }
 
 impl Sink for D3d11WindowRenderer {
-    /// What a [`D3d11Renderer`](crate::elements::D3d11Renderer) takes: a
-    /// D3D11 texture, NV12 or BGRA.
+    /// A D3D11 texture, NV12 or BGRA, as a
+    /// [`D3d11Renderer`](crate::elements::D3d11Renderer) takes; or a frame in
+    /// system memory, NV12, YUV420P or BGRA.
     fn input_contract(&self) -> InputContract {
-        InputContract::Fixed(
-            PortContract::frame(MediaKind::VideoFrame, MemoryDomain::D3d11)
-                .with_layouts(PixelLayoutSet::NV12_OR_BGRA),
-        )
+        InputContract::Fixed(PortContract::Frames(
+            MediaKindSet::of(MediaKind::VideoFrame),
+            MemoryDomainSet::from_slice(&[MemoryDomain::D3d11, MemoryDomain::System]),
+            PixelLayoutSet::from_slice(&[
+                PixelLayout::Nv12,
+                PixelLayout::Yuv420p,
+                PixelLayout::Bgra,
+            ]),
+        ))
     }
 
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
@@ -237,6 +266,25 @@ struct PresentState {
     render_target_view: Option<ID3D11RenderTargetView>,
     width: u32,
     height: u32,
+    /// The textures system-memory frames are uploaded into, made for the
+    /// layout and size of the last one and remade when either changes.
+    system: Option<SystemPlanes>,
+}
+
+/// Textures a system-memory frame's planes are uploaded into, one per plane,
+/// and the views the pixel shader samples them through.
+struct SystemPlanes {
+    layout: SystemLayout,
+    size: (u32, u32),
+    textures: Vec<ID3D11Texture2D>,
+    views: Vec<Option<ID3D11ShaderResourceView>>,
+}
+
+/// What a draw samples: views of a D3D11 frame's own texture, or a
+/// system-memory frame to upload first.
+enum Planes<'a> {
+    Views(Vec<Option<ID3D11ShaderResourceView>>),
+    System(&'a ffmpeg::frame::Video, SystemLayout),
 }
 
 /// The swap chain and shaders a [`D3d11WindowRenderer`] draws its window
@@ -251,9 +299,10 @@ struct WindowPresenter {
     vertex_shader: ID3D11VertexShader,
     bgra_pixel_shader: ID3D11PixelShader,
     nv12_pixel_shader: ID3D11PixelShader,
+    yuv420p_pixel_shader: ID3D11PixelShader,
     sampler: ID3D11SamplerState,
-    /// The three rows `present_nv12.hlsl` turns Y'CbCr into R'G'B' with,
-    /// written from each NV12 frame's own colour description.
+    /// The three rows the YUV shaders turn Y'CbCr into R'G'B' with,
+    /// written from each frame's own colour description.
     colour: ID3D11Buffer,
     hwnd: isize,
     /// Set once a call reports the device removed, after which every draw
@@ -344,6 +393,13 @@ impl WindowPresenter {
                 s!("ps_5_0"),
             )
             .map_err(present)?;
+            let yuv420p = compile_shader(
+                YUV420P_SHADER,
+                s!("present_yuv420p.hlsl"),
+                s!("ps_yuv420p"),
+                s!("ps_5_0"),
+            )
+            .map_err(present)?;
             let bytes = |blob: &windows::Win32::Graphics::Direct3D::ID3DBlob| {
                 std::slice::from_raw_parts(
                     blob.GetBufferPointer().cast::<u8>(),
@@ -361,6 +417,10 @@ impl WindowPresenter {
             let mut nv12_pixel_shader = None;
             device
                 .CreatePixelShader(bytes(&nv12), None, Some(&mut nv12_pixel_shader))
+                .map_err(present)?;
+            let mut yuv420p_pixel_shader = None;
+            device
+                .CreatePixelShader(bytes(&yuv420p), None, Some(&mut yuv420p_pixel_shader))
                 .map_err(present)?;
             let mut sampler = None;
             device
@@ -401,6 +461,7 @@ impl WindowPresenter {
                 vertex_shader: vertex_shader.ok_or_else(missing)?,
                 bgra_pixel_shader: bgra_pixel_shader.ok_or_else(missing)?,
                 nv12_pixel_shader: nv12_pixel_shader.ok_or_else(missing)?,
+                yuv420p_pixel_shader: yuv420p_pixel_shader.ok_or_else(missing)?,
                 sampler: sampler.ok_or_else(missing)?,
                 colour: colour.ok_or_else(missing)?,
                 hwnd: hwnd.0 as isize,
@@ -410,6 +471,7 @@ impl WindowPresenter {
                     render_target_view: Some(render_target_view),
                     width: width.max(1),
                     height: height.max(1),
+                    system: None,
                 }),
                 #[cfg(test)]
                 probe: Arc::default(),
@@ -462,7 +524,7 @@ impl WindowPresenter {
     fn draw(
         &self,
         pixel_shader: &ID3D11PixelShader,
-        planes: &[Option<ID3D11ShaderResourceView>],
+        planes: Planes<'_>,
         colour: Option<[[f32; 4]; 3]>,
         frame_width: u32,
         frame_height: u32,
@@ -489,6 +551,12 @@ impl WindowPresenter {
             .context
             .lock()
             .map_err(|_| SubmitError::RendererStopped)?;
+        let planes = match planes {
+            Planes::Views(views) => views,
+            // Uploaded under the context's lock, like every other call on it.
+            Planes::System(frame, layout) => self.upload(&mut state, &context, frame, layout)?,
+        };
+        let planes = planes.as_slice();
         let viewport = letterbox(frame_width, frame_height, state.width, state.height);
         let scissor = RECT {
             left: 0,
@@ -645,8 +713,8 @@ impl WindowPresenter {
         Ok(())
     }
 
-    /// Draws one checked frame: BGRA as it is, NV12 through the matrix its
-    /// own colour description gives.
+    /// Draws one checked D3D11 frame: BGRA as it is, NV12 through the matrix
+    /// its own colour description gives.
     fn show(
         &self,
         picture: &D3d11Picture,
@@ -657,19 +725,124 @@ impl WindowPresenter {
         let texture = &picture.texture;
         if picture.format == DXGI_FORMAT_B8G8R8A8_UNORM {
             let bgra = self.plane(texture, DXGI_FORMAT_B8G8R8A8_UNORM, picture.array_index)?;
-            return self.draw(&self.bgra_pixel_shader, &[bgra], None, width, height);
+            return self.draw(
+                &self.bgra_pixel_shader,
+                Planes::Views(vec![bgra]),
+                None,
+                width,
+                height,
+            );
         }
         // One NV12 texture read as two planes: the view's format picks which.
         let luma = self.plane(texture, DXGI_FORMAT_R8_UNORM, picture.array_index)?;
         let chroma = self.plane(texture, DXGI_FORMAT_R8G8_UNORM, picture.array_index)?;
-        let rows = yuv_to_rgb_rows(frame.color_space(), frame.color_range(), height);
         self.draw(
             &self.nv12_pixel_shader,
-            &[luma, chroma],
-            Some(rows),
+            Planes::Views(vec![luma, chroma]),
+            Some(colour_rows(frame)),
             width,
             height,
         )
+    }
+
+    /// Draws a system-memory frame, uploading its planes first. The planes
+    /// are checked here, so a frame short of what its layout needs is
+    /// refused rather than read past its end.
+    fn show_system(
+        &self,
+        frame: &ffmpeg::frame::Video,
+        layout: SystemLayout,
+    ) -> std::result::Result<(), SubmitError> {
+        let (width, height) = (frame.width(), frame.height());
+        self.usable(width, height)?;
+        planes_of(frame, layout).ok_or(SubmitError::InvalidFrame)?;
+        let (shader, colour) = match layout {
+            SystemLayout::Nv12 => (&self.nv12_pixel_shader, Some(colour_rows(frame))),
+            SystemLayout::Yuv420p => (&self.yuv420p_pixel_shader, Some(colour_rows(frame))),
+            SystemLayout::Bgra => (&self.bgra_pixel_shader, None),
+        };
+        self.draw(shader, Planes::System(frame, layout), colour, width, height)
+    }
+
+    /// Uploads `frame`'s planes into textures made for its layout and size
+    /// — the last frame's, unless either changed — and hands back their
+    /// views.
+    fn upload(
+        &self,
+        state: &mut PresentState,
+        context: &ID3D11DeviceContext,
+        frame: &ffmpeg::frame::Video,
+        layout: SystemLayout,
+    ) -> std::result::Result<Vec<Option<ID3D11ShaderResourceView>>, SubmitError> {
+        let size = (frame.width(), frame.height());
+        let planes = planes_of(frame, layout).ok_or(SubmitError::InvalidFrame)?;
+        let current = state
+            .system
+            .as_ref()
+            .is_some_and(|system| system.layout == layout && system.size == size);
+        if !current {
+            state.system = None;
+            state.system = Some(self.system_planes(layout, size)?);
+        }
+        let system = state.system.as_ref().ok_or(SubmitError::RenderFailed)?;
+        for (texture, (data, stride)) in system.textures.iter().zip(planes) {
+            // SAFETY: `planes_of` checked `data` holds every row of this
+            // plane at `stride`, and the texture was made at the plane's size
+            // on this device; the shared context is held by the caller.
+            unsafe {
+                context.UpdateSubresource(texture, 0, None, data.as_ptr().cast(), stride as u32, 0);
+            }
+        }
+        Ok(system.views.clone())
+    }
+
+    fn system_planes(
+        &self,
+        layout: SystemLayout,
+        (width, height): (u32, u32),
+    ) -> std::result::Result<SystemPlanes, SubmitError> {
+        let mut textures = Vec::new();
+        let mut views = Vec::new();
+        for shape in layout.planes(width, height) {
+            let mut texture = None;
+            // SAFETY: a texture and a view of it on this presenter's device,
+            // from local descriptions.
+            unsafe {
+                self.checked(self.device.CreateTexture2D(
+                    &D3D11_TEXTURE2D_DESC {
+                        Width: shape.width,
+                        Height: shape.height,
+                        MipLevels: 1,
+                        ArraySize: 1,
+                        Format: shape.format,
+                        SampleDesc: DXGI_SAMPLE_DESC {
+                            Count: 1,
+                            Quality: 0,
+                        },
+                        Usage: D3D11_USAGE_DEFAULT,
+                        BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
+                        ..Default::default()
+                    },
+                    None,
+                    Some(&mut texture),
+                ))?;
+                let texture = texture.ok_or(SubmitError::RenderFailed)?;
+                let mut view = None;
+                self.checked(self.device.CreateShaderResourceView(
+                    &texture,
+                    None,
+                    Some(&mut view),
+                ))?;
+                textures.push(texture);
+                views.push(view);
+            }
+        }
+        Ok(SystemPlanes {
+            layout,
+            size: (width, height),
+            textures,
+            views,
+        })
     }
 }
 
@@ -937,8 +1110,33 @@ mod tests {
         MediaBuffer::video(frame)
     }
 
-    /// Draws `frame` and reads back the centre of the window.
-    fn drawn(gpu: &D3d11Gpu, frame: MediaBuffer) -> Option<[u8; 3]> {
+    /// A solid YUV420P picture of one Y'CbCr value at an odd size, tagged
+    /// with `space` — so its chroma planes round up, and FFmpeg pads its
+    /// rows past the picture's width.
+    fn solid_yuv420p(ycbcr: [u8; 3], space: ffmpeg_next::color::Space) -> MediaBuffer {
+        let mut frame = ffmpeg_next::frame::Video::new(ffmpeg_next::format::Pixel::YUV420P, 63, 35);
+        for (plane, value) in ycbcr.into_iter().enumerate() {
+            frame.data_mut(plane).fill(value);
+        }
+        frame.set_color_space(space);
+        frame.set_color_range(ffmpeg_next::color::Range::MPEG);
+        frame.set_pts(Some(0));
+        MediaBuffer::video(frame)
+    }
+
+    /// A solid BGRA picture of one R'G'B' value.
+    fn solid_bgra([r, g, b]: [u8; 3]) -> MediaBuffer {
+        let mut frame = ffmpeg_next::frame::Video::new(ffmpeg_next::format::Pixel::BGRA, 64, 64);
+        for pixel in frame.data_mut(0).as_chunks_mut::<4>().0 {
+            *pixel = [b, g, r, 255];
+        }
+        frame.set_pts(Some(0));
+        MediaBuffer::video(frame)
+    }
+
+    /// Draws `frame` — through a `D3d11Upload` first, or as it is — and
+    /// reads back the centre of the window.
+    fn drawn(gpu: &D3d11Gpu, frame: MediaBuffer, upload: bool) -> Option<[u8; 3]> {
         let (renderer, _events) = match D3d11WindowRenderer::open(
             "screen",
             gpu,
@@ -958,10 +1156,13 @@ mod tests {
         let (source, handle) = AppSource::new("frames", 4);
         let device = gpu.device().clone();
         let (pipeline, ()) = Pipeline::new("window-colour", source, |source, ctx| {
-            let branch = ctx
-                .branch()
-                .pipe(D3d11Upload::new("upload", &device))
-                .to(renderer)?;
+            let branch = if upload {
+                ctx.branch()
+                    .pipe(D3d11Upload::new("upload", &device))
+                    .to(renderer)?
+            } else {
+                ctx.branch().to(renderer)?
+            };
             ctx.attach(source, 0, branch)?;
             Ok(())
         })
@@ -1000,13 +1201,78 @@ mod tests {
 
         let Some(gpu) = gpu() else { return };
         let ycbcr = [72, 107, 220];
-        let Some(bt709) = drawn(&gpu, solid_nv12(ycbcr, Space::BT709)) else {
+        let Some(bt709) = drawn(&gpu, solid_nv12(ycbcr, Space::BT709), true) else {
             return;
         };
         assert!(near(bt709, [230, 20, 20]), "BT.709 drawn as {bt709:?}");
-        let Some(bt601) = drawn(&gpu, solid_nv12(ycbcr, Space::BT470BG)) else {
+        let Some(bt601) = drawn(&gpu, solid_nv12(ycbcr, Space::BT470BG), true) else {
             return;
         };
         assert!(near(bt601, [211, 0, 22]), "BT.601 drawn as {bt601:?}");
+    }
+
+    /// A frame in system memory is drawn as it comes — NV12, YUV420P, BGRA,
+    /// no upload in front — each YUV one with its own colour description,
+    /// and a YUV420P one at an odd size with its padded rows read by their
+    /// stride.
+    #[test]
+    fn a_system_memory_frame_is_drawn_as_it_comes() {
+        use ffmpeg_next::color::Space;
+
+        let Some(gpu) = gpu() else { return };
+        let ycbcr = [72, 107, 220];
+        let Some(nv12) = drawn(&gpu, solid_nv12(ycbcr, Space::BT709), false) else {
+            return;
+        };
+        assert!(near(nv12, [230, 20, 20]), "NV12 drawn as {nv12:?}");
+        let Some(yuv420p) = drawn(&gpu, solid_yuv420p(ycbcr, Space::BT709), false) else {
+            return;
+        };
+        assert!(near(yuv420p, [230, 20, 20]), "YUV420P drawn as {yuv420p:?}");
+        let Some(bt601) = drawn(&gpu, solid_yuv420p(ycbcr, Space::BT470BG), false) else {
+            return;
+        };
+        assert!(
+            near(bt601, [211, 0, 22]),
+            "BT.601 YUV420P drawn as {bt601:?}"
+        );
+        let Some(bgra) = drawn(&gpu, solid_bgra([30, 140, 200]), false) else {
+            return;
+        };
+        assert!(near(bgra, [30, 140, 200]), "BGRA drawn as {bgra:?}");
+    }
+
+    /// The contract says what the runtime takes: a software decode links
+    /// straight to it, where before it needed a scaler and an upload.
+    #[test]
+    fn a_system_memory_frame_links_straight_to_it() {
+        use crate::contract::{OutputContract, check_link};
+
+        let Some(gpu) = gpu() else { return };
+        let Ok((renderer, _events)) = D3d11WindowRenderer::open(
+            "screen",
+            &gpu,
+            WindowOptions {
+                width: WIDTH,
+                height: HEIGHT,
+                ..WindowOptions::default()
+            },
+        ) else {
+            return;
+        };
+        let decoded = |layout| {
+            OutputContract::Fixed(
+                PortContract::frame(MediaKind::VideoFrame, MemoryDomain::System)
+                    .with_layouts(PixelLayoutSet::of(layout)),
+            )
+        };
+        let accepted = renderer.input_contract();
+        for layout in [PixelLayout::Yuv420p, PixelLayout::Nv12, PixelLayout::Bgra] {
+            assert!(
+                !check_link(&decoded(layout), &accepted).is_refused(),
+                "{layout}"
+            );
+        }
+        assert!(check_link(&decoded(PixelLayout::P010), &accepted).is_refused());
     }
 }

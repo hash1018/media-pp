@@ -7,12 +7,12 @@ use std::{
     ffi::c_void,
     mem::ManuallyDrop,
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, MutexGuard,
         atomic::{AtomicBool, Ordering},
     },
 };
 
-use ffmpeg_next as ffmpeg;
+use ffmpeg_next::{self as ffmpeg, format::Pixel};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use thiserror::Error as ThisError;
 use windows::{
@@ -43,11 +43,16 @@ use windows::{
     core::{Interface, s},
 };
 
-use super::d3d12_renderer::{D3d12Picture, check_d3d12_frame};
+use super::{
+    d3d12_renderer::{D3d12Picture, check_d3d12_frame},
+    system_frame::{PlaneShape, SystemLayout, colour_rows, planes_of},
+};
 use crate::{
     buffer::MediaBuffer,
-    color::yuv_to_rgb_rows,
-    contract::{InputContract, MediaKind, MemoryDomain, PixelLayoutSet, PortContract},
+    contract::{
+        InputContract, MediaKind, MediaKindSet, MemoryDomain, MemoryDomainSet, PixelLayout,
+        PixelLayoutSet, PortContract,
+    },
     control::ControlMsg,
     element::{Element, ElementType, Sink, element_pp_log},
     elements::{D3d12Gpu, D3d12RendererError, SubmitError, WindowEvents, WindowOptions},
@@ -59,6 +64,8 @@ use crate::{
 
 const FRAME_SHADER: &[u8] = include_bytes!("../../../../shaders/d3d12/present_frame.hlsl");
 const NV12_SHADER: &[u8] = include_bytes!("../../../../shaders/d3d12/present_nv12.hlsl");
+const YUV420P_SHADER: &[u8] = include_bytes!("../../../../shaders/d3d12/present_yuv420p.hlsl");
+const BGRA_SHADER: &[u8] = include_bytes!("../../../../shaders/d3d12/present_bgra.hlsl");
 
 /// Double-buffered flip-model swap chain.
 const FRAME_COUNT: usize = 2;
@@ -90,18 +97,27 @@ pub enum D3d12WindowRendererError {
 /// or one the application gives it. The D3D12 sibling of
 /// `D3d11WindowRenderer`, with the same [`WindowOptions`] and [`WindowEvents`].
 ///
-/// It takes what a [`D3d12Renderer`](crate::elements::D3d12Renderer) takes,
-/// checked the same way — a texture from another device is refused, and a
-/// frame's error is a [`D3d12RendererError`] — and draws it zero-copy from
-/// the NV12 textures `D3d12Decoder` and `D3d12Upload` make, waiting on the
-/// GPU for each frame's own fence before reading it. It draws the frame
-/// itself rather than through a presenter, and so knows it: each is
+/// It takes two kinds of frame:
+///
+/// - What a [`D3d12Renderer`](crate::elements::D3d12Renderer) takes — the
+///   NV12 textures `D3d12Decoder` and `D3d12Upload` make, drawn zero-copy
+///   after a GPU wait on each frame's own fence — checked the same way: a
+///   texture from another device is refused.
+/// - A frame in system memory, NV12, YUV420P (or YUVJ420P) or BGRA — what a
+///   software decode, a CPU capture or an application's own frames give —
+///   copied into an upload buffer here and from there into textures made for
+///   its layout and size, as part of the same draw. A software decode needs
+///   no scaler or upload in front, as on Linux with `VulkanWindowRenderer`,
+///   and needs no video support of the device.
+///
+/// A frame's error is a [`D3d12RendererError`]. It draws each frame itself
+/// rather than through a presenter, and so knows it: a YUV frame is
 /// converted with its own colour description, BT.709, BT.601 or BT.2020 and
-/// limited or full range as it says, and where it says nothing, BT.709 for
-/// a picture over 576 rows and BT.601 otherwise. The picture keeps its
-/// aspect ratio inside the window, with black bars as needed, and the
-/// renderer follows the window's size on its own, reading it before every
-/// frame.
+/// limited or full range as it says, and where it says nothing, BT.709 for a
+/// picture over 576 rows and BT.601 otherwise. A BGRA frame is drawn as it
+/// is. The picture keeps its aspect ratio inside the window, with black bars
+/// as needed, and the renderer follows the window's size on its own, reading
+/// it before every frame.
 ///
 /// It draws; it does not pace. Put a [`crate::elements::VideoSynchronizer`]
 /// or [`crate::elements::Pacer`] in front for a picture shown at its own
@@ -187,9 +203,17 @@ impl D3d12WindowRenderer {
         &self,
         frame: Arc<UnboundObjectPoolRef<ffmpeg::frame::Video>>,
     ) -> std::result::Result<(), D3d12RendererError> {
+        if frame.format() != Pixel::D3D12 {
+            let layout = SystemLayout::of(frame.format())
+                .ok_or(D3d12RendererError::UnsupportedFormat(frame.format()))?;
+            return self
+                .presenter
+                .show_system(&frame, layout)
+                .map_err(D3d12RendererError::Submit);
+        }
         let picture = check_d3d12_frame(&frame, &self.presenter.device)?;
         let (width, height) = (frame.width(), frame.height());
-        let rows = yuv_to_rgb_rows(frame.color_space(), frame.color_range(), height);
+        let rows = colour_rows(&frame);
         // SAFETY: `check_d3d12_frame` established the texture's device, and
         // the fence is its producer's own. `frame` keeps the pooled texture
         // alive until the GPU is done with it.
@@ -220,13 +244,19 @@ impl Element for D3d12WindowRenderer {
 }
 
 impl Sink for D3d12WindowRenderer {
-    /// What a [`D3d12Renderer`](crate::elements::D3d12Renderer) takes: an
-    /// NV12 D3D12 texture.
+    /// An NV12 D3D12 texture, as a
+    /// [`D3d12Renderer`](crate::elements::D3d12Renderer) takes; or a frame in
+    /// system memory, NV12, YUV420P or BGRA.
     fn input_contract(&self) -> InputContract {
-        InputContract::Fixed(
-            PortContract::frame(MediaKind::VideoFrame, MemoryDomain::D3d12)
-                .with_layouts(PixelLayoutSet::NV12),
-        )
+        InputContract::Fixed(PortContract::Frames(
+            MediaKindSet::of(MediaKind::VideoFrame),
+            MemoryDomainSet::from_slice(&[MemoryDomain::D3d12, MemoryDomain::System]),
+            PixelLayoutSet::from_slice(&[
+                PixelLayout::Nv12,
+                PixelLayout::Yuv420p,
+                PixelLayout::Bgra,
+            ]),
+        ))
     }
 
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
@@ -269,6 +299,36 @@ struct PresentState {
     pending_keep_alive: Option<Box<dyn Any + Send>>,
     width: u32,
     height: u32,
+    /// The textures and upload buffer system-memory frames are drawn
+    /// through, made for the layout and size of the last one and remade when
+    /// either changes.
+    system: Option<SystemPlanes>,
+}
+
+/// What system-memory frames of one layout and size are drawn through.
+struct SystemPlanes {
+    layout: SystemLayout,
+    size: (u32, u32),
+    planes: Vec<SystemPlane>,
+    /// Every plane's rows, each at its placed footprint, copied into its
+    /// texture as part of the draw.
+    upload: ID3D12Resource,
+}
+
+/// One plane: its texture, between frames in `COPY_DEST`, and where its rows
+/// sit in the upload buffer.
+struct SystemPlane {
+    shape: PlaneShape,
+    texture: ID3D12Resource,
+    footprint: D3D12_PLACED_SUBRESOURCE_FOOTPRINT,
+}
+
+/// What a draw reads from.
+enum DrawSource<'a> {
+    /// A D3D12 frame's own NV12 texture.
+    Texture(&'a D3d12Picture),
+    /// A system-memory frame, its planes staged into `PresentState::system`.
+    System(SystemLayout),
 }
 
 /// The swap chain, pipeline state and fence a window is drawn with — the
@@ -278,6 +338,8 @@ struct WindowPresenter {
     queue: ID3D12CommandQueue,
     root_signature: ID3D12RootSignature,
     nv12_pipeline: ID3D12PipelineState,
+    yuv420p_pipeline: ID3D12PipelineState,
+    bgra_pipeline: ID3D12PipelineState,
     fence: ID3D12Fence,
     fence_event: HANDLE,
     hwnd: isize,
@@ -361,7 +423,8 @@ impl WindowPresenter {
             let srv_heap: ID3D12DescriptorHeap = device
                 .CreateDescriptorHeap(&D3D12_DESCRIPTOR_HEAP_DESC {
                     Type: D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
-                    NumDescriptors: 2,
+                    // A frame's planes: three at most, YUV420P's.
+                    NumDescriptors: 3,
                     Flags: D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE,
                     ..Default::default()
                 })
@@ -406,51 +469,45 @@ impl WindowPresenter {
                 .map_err(present)?;
             let nv12_pipeline =
                 create_pipeline(&device, &root_signature, &vertex, &nv12).map_err(present)?;
+            let yuv420p = compile_shader(
+                YUV420P_SHADER,
+                s!("present_yuv420p.hlsl"),
+                s!("ps_yuv420p"),
+                s!("ps_5_1"),
+            )
+            .map_err(present)?;
+            let yuv420p_pipeline =
+                create_pipeline(&device, &root_signature, &vertex, &yuv420p).map_err(present)?;
+            let bgra = compile_shader(
+                BGRA_SHADER,
+                s!("present_bgra.hlsl"),
+                s!("ps_bgra"),
+                s!("ps_5_1"),
+            )
+            .map_err(present)?;
+            let bgra_pipeline =
+                create_pipeline(&device, &root_signature, &vertex, &bgra).map_err(present)?;
 
             let fence: ID3D12Fence = device
                 .CreateFence(0, D3D12_FENCE_FLAG_NONE)
                 .map_err(present)?;
             let fence_event = CreateEventW(None, false, false, None).map_err(present)?;
             #[cfg(test)]
-            let readback = {
-                let mut readback: Option<ID3D12Resource> = None;
-                device
-                    .CreateCommittedResource(
-                        &D3D12_HEAP_PROPERTIES {
-                            Type: D3D12_HEAP_TYPE_READBACK,
-                            ..Default::default()
-                        },
-                        D3D12_HEAP_FLAG_NONE,
-                        &D3D12_RESOURCE_DESC {
-                            Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
-                            Width: u64::from(D3D12_TEXTURE_DATA_PITCH_ALIGNMENT),
-                            Height: 1,
-                            DepthOrArraySize: 1,
-                            MipLevels: 1,
-                            SampleDesc: DXGI_SAMPLE_DESC {
-                                Count: 1,
-                                Quality: 0,
-                            },
-                            Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
-                            ..Default::default()
-                        },
-                        D3D12_RESOURCE_STATE_COPY_DEST,
-                        None,
-                        &mut readback,
-                    )
-                    .map_err(present)?;
-                readback.ok_or_else(|| {
-                    present(windows::core::Error::from(
-                        windows::Win32::Foundation::E_POINTER,
-                    ))
-                })?
-            };
+            let readback = create_buffer(
+                &device,
+                D3D12_HEAP_TYPE_READBACK,
+                u64::from(D3D12_TEXTURE_DATA_PITCH_ALIGNMENT),
+                D3D12_RESOURCE_STATE_COPY_DEST,
+            )
+            .map_err(present)?;
 
             Ok(Self {
                 device,
                 queue,
                 root_signature,
                 nv12_pipeline,
+                yuv420p_pipeline,
+                bgra_pipeline,
                 fence,
                 fence_event,
                 hwnd: hwnd.0 as isize,
@@ -468,6 +525,7 @@ impl WindowPresenter {
                     pending_keep_alive: None,
                     width,
                     height,
+                    system: None,
                 }),
                 #[cfg(test)]
                 probe: Arc::default(),
@@ -624,45 +682,94 @@ impl WindowPresenter {
         Ok(())
     }
 
-    /// Records the frame's draw — letterboxed, after a GPU wait on its own
-    /// fence — executes it, presents, and signals this presenter's fence.
+    /// Records the frame's draw — letterboxed, after a GPU wait on a D3D12
+    /// frame's own fence, or after copying a system-memory frame's staged
+    /// planes into their textures — executes it, presents, and signals this
+    /// presenter's fence.
     ///
     /// # Safety
     ///
-    /// `texture` is an NV12 resource on this presenter's device, in the
-    /// `COMMON` state, fully written once `fence` reaches `fence_value`.
+    /// A [`DrawSource::Texture`]'s texture is an NV12 resource on this
+    /// presenter's device, in the `COMMON` state, fully written once its
+    /// fence reaches its value. A [`DrawSource::System`] has had its planes
+    /// staged into `state.system` by [`Self::stage`].
     unsafe fn draw(
         &self,
         state: &mut PresentState,
-        texture: &ID3D12Resource,
-        (fence, fence_value): (&ID3D12Fence, u64),
+        source: DrawSource<'_>,
         (frame_width, frame_height): (u32, u32),
-        rows: &[[f32; 4]; 3],
+        rows: Option<&[[f32; 4]; 3]>,
     ) -> windows::core::Result<()> {
-        // SAFETY: as the caller promises for `texture`; everything else is
+        let unexpected = || windows::core::Error::from(windows::Win32::Foundation::E_UNEXPECTED);
+        // SAFETY: as the caller promises for the source; everything else is
         // this presenter's own, under `state`'s lock.
         unsafe {
-            let luma = srv_handle(&state.srv_heap, state.srv_size, 0);
-            let chroma = srv_handle(&state.srv_heap, state.srv_size, 1);
-            self.device.CreateShaderResourceView(
-                texture,
-                Some(&plane_srv_desc(DXGI_FORMAT_R8_UNORM, 0)),
-                luma,
-            );
-            self.device.CreateShaderResourceView(
-                texture,
-                Some(&plane_srv_desc(DXGI_FORMAT_R8G8_UNORM, 1)),
-                chroma,
-            );
+            // The table's three slots: the frame's planes, and a null view
+            // wherever its layout has none — so every slot is initialized.
+            let mut views: [Option<(ID3D12Resource, D3D12_SHADER_RESOURCE_VIEW_DESC)>; 3] =
+                Default::default();
+            let pipeline = match &source {
+                DrawSource::Texture(picture) => {
+                    views[0] = Some((
+                        picture.texture.clone(),
+                        plane_srv_desc(DXGI_FORMAT_R8_UNORM, 0),
+                    ));
+                    views[1] = Some((
+                        picture.texture.clone(),
+                        plane_srv_desc(DXGI_FORMAT_R8G8_UNORM, 1),
+                    ));
+                    &self.nv12_pipeline
+                }
+                DrawSource::System(layout) => {
+                    let system = state.system.as_ref().ok_or_else(unexpected)?;
+                    for (slot, plane) in views.iter_mut().zip(&system.planes) {
+                        *slot =
+                            Some((plane.texture.clone(), plane_srv_desc(plane.shape.format, 0)));
+                    }
+                    match layout {
+                        SystemLayout::Nv12 => &self.nv12_pipeline,
+                        SystemLayout::Yuv420p => &self.yuv420p_pipeline,
+                        SystemLayout::Bgra => &self.bgra_pipeline,
+                    }
+                }
+            };
+            for (index, view) in views.iter().enumerate() {
+                let handle = srv_handle(&state.srv_heap, state.srv_size, index);
+                match view {
+                    Some((resource, desc)) => {
+                        self.device
+                            .CreateShaderResourceView(resource, Some(desc), handle)
+                    }
+                    None => self.device.CreateShaderResourceView(
+                        None::<&ID3D12Resource>,
+                        Some(&plane_srv_desc(DXGI_FORMAT_R8_UNORM, 0)),
+                        handle,
+                    ),
+                }
+            }
             state.command_allocator.Reset()?;
             state.command_list.Reset(&state.command_allocator, None)?;
             let list = &state.command_list;
-            transition(
-                list,
-                texture,
-                D3D12_RESOURCE_STATE_COMMON,
-                D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
-            );
+            match &source {
+                DrawSource::Texture(picture) => transition(
+                    list,
+                    &picture.texture,
+                    D3D12_RESOURCE_STATE_COMMON,
+                    D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                ),
+                DrawSource::System(_) => {
+                    let system = state.system.as_ref().ok_or_else(unexpected)?;
+                    for plane in &system.planes {
+                        copy_plane(list, &system.upload, &plane.footprint, &plane.texture);
+                        transition(
+                            list,
+                            &plane.texture,
+                            D3D12_RESOURCE_STATE_COPY_DEST,
+                            D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                        );
+                    }
+                }
+            }
 
             let index = state.swap_chain.GetCurrentBackBufferIndex() as usize;
             let target = state.render_targets[index].clone();
@@ -678,7 +785,7 @@ impl WindowPresenter {
             );
             list.OMSetRenderTargets(1, Some(&rtv), false, None);
             list.ClearRenderTargetView(rtv, &[0.0, 0.0, 0.0, 1.0], None);
-            list.SetPipelineState(&self.nv12_pipeline);
+            list.SetPipelineState(pipeline);
             list.SetGraphicsRootSignature(&self.root_signature);
             list.SetDescriptorHeaps(&[Some(state.srv_heap.clone())]);
             list.SetGraphicsRootDescriptorTable(
@@ -686,7 +793,9 @@ impl WindowPresenter {
                 state.srv_heap.GetGPUDescriptorHandleForHeapStart(),
             );
             // The three colour rows, as the root signature's twelve constants.
-            list.SetGraphicsRoot32BitConstants(1, 12, rows.as_ptr().cast(), 0);
+            if let Some(rows) = rows {
+                list.SetGraphicsRoot32BitConstants(1, 12, rows.as_ptr().cast(), 0);
+            }
             list.RSSetViewports(&[letterbox(
                 frame_width,
                 frame_height,
@@ -701,14 +810,28 @@ impl WindowPresenter {
             }]);
             list.IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
             list.DrawInstanced(3, 1, 0, 0);
-            // Back to `COMMON` before closing: the texture is its producer's
-            // again once this list has run.
-            transition(
-                list,
-                texture,
-                D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
-                D3D12_RESOURCE_STATE_COMMON,
-            );
+            match &source {
+                // Back to `COMMON` before closing: the texture is its
+                // producer's again once this list has run.
+                DrawSource::Texture(picture) => transition(
+                    list,
+                    &picture.texture,
+                    D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                    D3D12_RESOURCE_STATE_COMMON,
+                ),
+                // Back to `COPY_DEST`, where the next frame's copy expects them.
+                DrawSource::System(_) => {
+                    let system = state.system.as_ref().ok_or_else(unexpected)?;
+                    for plane in &system.planes {
+                        transition(
+                            list,
+                            &plane.texture,
+                            D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                            D3D12_RESOURCE_STATE_COPY_DEST,
+                        );
+                    }
+                }
+            }
             #[cfg(test)]
             let target_state = self.copy_probe(list, &target, state);
             #[cfg(not(test))]
@@ -718,7 +841,9 @@ impl WindowPresenter {
 
             // A GPU-side wait for whatever wrote the texture: sharing a device
             // does not order this queue after the decoder's or uploader's.
-            self.queue.Wait(fence, fence_value)?;
+            if let DrawSource::Texture(picture) = &source {
+                self.queue.Wait(&picture.fence, picture.fence_value)?;
+            }
             self.queue
                 .ExecuteCommandLists(&[Some(state.command_list.cast()?)]);
             // Presented before returning: a preroll counts this return as the
@@ -730,10 +855,40 @@ impl WindowPresenter {
         }
         Ok(())
     }
-}
 
-impl WindowPresenter {
-    /// Draws one checked frame, converted with `rows`, and holds
+    /// What every frame waits for before it is drawn: the device still
+    /// there, the last frame done on the GPU — so its heaps, list, back
+    /// buffer and staging are free again, and its texture can be let go —
+    /// and the swap chain at the window's size. `None` for a minimised
+    /// window, which has nothing to draw into until it comes back.
+    fn begin(
+        &self,
+        width: u32,
+        height: u32,
+    ) -> std::result::Result<Option<MutexGuard<'_, PresentState>>, SubmitError> {
+        if self.device_lost.load(Ordering::Relaxed) {
+            return Err(SubmitError::DeviceRemoved);
+        }
+        if width == 0 || height == 0 {
+            return Err(SubmitError::InvalidFrame);
+        }
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| SubmitError::RendererStopped)?;
+        self.checked(self.wait_for(state.last_submitted))?;
+        state.pending_keep_alive = None;
+        match client_size(HWND(self.hwnd as *mut c_void)) {
+            Some((0, _)) | Some((_, 0)) => return Ok(None),
+            Some((width, height)) if (width, height) != (state.width, state.height) => {
+                self.resize_to(&mut state, width, height)?;
+            }
+            _ => {}
+        }
+        Ok(Some(state))
+    }
+
+    /// Draws one checked D3D12 frame, converted with `rows`, and holds
     /// `keep_alive` until the GPU is done reading its texture.
     ///
     /// # Safety
@@ -747,44 +902,170 @@ impl WindowPresenter {
         rows: [[f32; 4]; 3],
         keep_alive: Box<dyn Any + Send>,
     ) -> std::result::Result<(), SubmitError> {
-        if self.device_lost.load(Ordering::Relaxed) {
-            return Err(SubmitError::DeviceRemoved);
-        }
-        if width == 0 || height == 0 {
-            return Err(SubmitError::InvalidFrame);
-        }
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| SubmitError::RendererStopped)?;
-        // One frame in flight: the last one is done before its heaps, list
-        // and back buffer are reused — and before its texture is let go.
-        self.checked(self.wait_for(state.last_submitted))?;
-        state.pending_keep_alive = None;
-        // Follow the window: read its size before every frame. A minimised
-        // window has no area, and there is nothing to draw into until it
-        // comes back.
-        match client_size(HWND(self.hwnd as *mut c_void)) {
-            Some((0, _)) | Some((_, 0)) => return Ok(()),
-            Some((width, height)) if (width, height) != (state.width, state.height) => {
-                self.resize_to(&mut state, width, height)?;
-            }
-            _ => {}
-        }
+        let Some(mut state) = self.begin(width, height)? else {
+            return Ok(());
+        };
         // SAFETY: the caller's promise for the texture and its fence.
         self.checked(unsafe {
             self.draw(
                 &mut state,
-                &picture.texture,
-                (&picture.fence, picture.fence_value),
+                DrawSource::Texture(&picture),
                 (width, height),
-                &rows,
+                Some(&rows),
             )
         })?;
         state.pending_keep_alive = Some(keep_alive);
         #[cfg(test)]
         self.read_probe(&state);
         Ok(())
+    }
+
+    /// Draws a system-memory frame: its planes copied into an upload buffer
+    /// here, and from there into textures on the GPU as part of the draw.
+    /// Nothing of the frame is kept once this returns.
+    fn show_system(
+        &self,
+        frame: &ffmpeg::frame::Video,
+        layout: SystemLayout,
+    ) -> std::result::Result<(), SubmitError> {
+        let (width, height) = (frame.width(), frame.height());
+        let planes = planes_of(frame, layout).ok_or(SubmitError::InvalidFrame)?;
+        let Some(mut state) = self.begin(width, height)? else {
+            return Ok(());
+        };
+        self.stage(&mut state, layout, (width, height), &planes)?;
+        let rows = (layout != SystemLayout::Bgra).then(|| colour_rows(frame));
+        // SAFETY: the planes were staged just above, into `state.system`.
+        self.checked(unsafe {
+            self.draw(
+                &mut state,
+                DrawSource::System(layout),
+                (width, height),
+                rows.as_ref(),
+            )
+        })?;
+        #[cfg(test)]
+        self.read_probe(&state);
+        Ok(())
+    }
+
+    /// Copies `planes` into the upload buffer, at the placed footprints the
+    /// copy into each plane's texture reads — making the buffer and the
+    /// textures first when the layout or size is new. The last frame is done
+    /// on the GPU (see [`Self::begin`]), so none of it is in use.
+    fn stage(
+        &self,
+        state: &mut PresentState,
+        layout: SystemLayout,
+        size: (u32, u32),
+        planes: &[(&[u8], usize)],
+    ) -> std::result::Result<(), SubmitError> {
+        let current = state
+            .system
+            .as_ref()
+            .is_some_and(|system| system.layout == layout && system.size == size);
+        if !current {
+            state.system = None;
+            state.system = Some(self.checked(self.system_planes(layout, size))?);
+        }
+        let system = state.system.as_ref().ok_or(SubmitError::RenderFailed)?;
+        let mut mapped = std::ptr::null_mut();
+        // SAFETY: the upload buffer is this presenter's own and not in use;
+        // every write lands inside the footprint its plane was given, which
+        // `GetCopyableFootprints` sized for exactly these rows.
+        unsafe {
+            self.checked(system.upload.Map(0, None, Some(&mut mapped)))?;
+            let base = mapped.cast::<u8>();
+            for (plane, (data, stride)) in system.planes.iter().zip(planes) {
+                let footprint = &plane.footprint;
+                let pitch = footprint.Footprint.RowPitch as usize;
+                let row_bytes = plane.shape.row_bytes();
+                for row in 0..plane.shape.height as usize {
+                    std::ptr::copy_nonoverlapping(
+                        data.as_ptr().add(row * stride),
+                        base.add(footprint.Offset as usize + row * pitch),
+                        row_bytes,
+                    );
+                }
+            }
+            system.upload.Unmap(0, None);
+        }
+        Ok(())
+    }
+
+    /// Textures for each plane of a `layout` frame of `size`, left in
+    /// `COPY_DEST`, and one upload buffer holding them all.
+    fn system_planes(
+        &self,
+        layout: SystemLayout,
+        (width, height): (u32, u32),
+    ) -> windows::core::Result<SystemPlanes> {
+        let mut planes = Vec::new();
+        let mut offset = 0u64;
+        for shape in layout.planes(width, height) {
+            let desc = D3D12_RESOURCE_DESC {
+                Dimension: D3D12_RESOURCE_DIMENSION_TEXTURE2D,
+                Width: u64::from(shape.width),
+                Height: shape.height,
+                DepthOrArraySize: 1,
+                MipLevels: 1,
+                Format: shape.format,
+                SampleDesc: DXGI_SAMPLE_DESC {
+                    Count: 1,
+                    Quality: 0,
+                },
+                ..Default::default()
+            };
+            let mut texture: Option<ID3D12Resource> = None;
+            let mut footprint = D3D12_PLACED_SUBRESOURCE_FOOTPRINT::default();
+            let mut total = 0u64;
+            // SAFETY: a texture on this presenter's device and a query of the
+            // footprint its one subresource needs, into locals.
+            unsafe {
+                self.device.CreateCommittedResource(
+                    &D3D12_HEAP_PROPERTIES {
+                        Type: D3D12_HEAP_TYPE_DEFAULT,
+                        ..Default::default()
+                    },
+                    D3D12_HEAP_FLAG_NONE,
+                    &desc,
+                    D3D12_RESOURCE_STATE_COPY_DEST,
+                    None,
+                    &mut texture,
+                )?;
+                self.device.GetCopyableFootprints(
+                    &desc,
+                    0,
+                    1,
+                    offset,
+                    Some(&mut footprint),
+                    None,
+                    None,
+                    Some(&mut total),
+                );
+            }
+            let texture = texture
+                .ok_or_else(|| windows::core::Error::from(windows::Win32::Foundation::E_POINTER))?;
+            offset = (footprint.Offset + total)
+                .next_multiple_of(u64::from(D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT));
+            planes.push(SystemPlane {
+                shape,
+                texture,
+                footprint,
+            });
+        }
+        let upload = create_buffer(
+            &self.device,
+            D3D12_HEAP_TYPE_UPLOAD,
+            offset,
+            D3D12_RESOURCE_STATE_GENERIC_READ,
+        )?;
+        Ok(SystemPlanes {
+            layout,
+            size: (width, height),
+            planes,
+            upload,
+        })
     }
 }
 
@@ -899,6 +1180,79 @@ unsafe fn create_pipeline(
         let pipeline = device.CreateGraphicsPipelineState(&desc);
         ManuallyDrop::drop(&mut desc.pRootSignature);
         pipeline
+    }
+}
+
+/// A buffer of `size` bytes in a heap of `heap_type`, starting in `state`.
+fn create_buffer(
+    device: &ID3D12Device,
+    heap_type: D3D12_HEAP_TYPE,
+    size: u64,
+    state: D3D12_RESOURCE_STATES,
+) -> windows::core::Result<ID3D12Resource> {
+    let mut buffer: Option<ID3D12Resource> = None;
+    // SAFETY: a committed resource on a live device, from local descriptions.
+    unsafe {
+        device.CreateCommittedResource(
+            &D3D12_HEAP_PROPERTIES {
+                Type: heap_type,
+                ..Default::default()
+            },
+            D3D12_HEAP_FLAG_NONE,
+            &D3D12_RESOURCE_DESC {
+                Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
+                Width: size,
+                Height: 1,
+                DepthOrArraySize: 1,
+                MipLevels: 1,
+                SampleDesc: DXGI_SAMPLE_DESC {
+                    Count: 1,
+                    Quality: 0,
+                },
+                Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+                ..Default::default()
+            },
+            state,
+            None,
+            &mut buffer,
+        )?;
+    }
+    buffer.ok_or_else(|| windows::core::Error::from(windows::Win32::Foundation::E_POINTER))
+}
+
+/// Records a copy of one plane's rows, at `footprint` in `upload`, into
+/// `texture`.
+///
+/// # Safety
+///
+/// `list` is open, `texture` is in `COPY_DEST`, and `footprint` is the one
+/// `GetCopyableFootprints` gave for it inside `upload`.
+unsafe fn copy_plane(
+    list: &ID3D12GraphicsCommandList,
+    upload: &ID3D12Resource,
+    footprint: &D3D12_PLACED_SUBRESOURCE_FOOTPRINT,
+    texture: &ID3D12Resource,
+) {
+    let mut destination = D3D12_TEXTURE_COPY_LOCATION {
+        pResource: ManuallyDrop::new(Some(texture.clone())),
+        Type: D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
+        Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
+            SubresourceIndex: 0,
+        },
+    };
+    let mut source = D3D12_TEXTURE_COPY_LOCATION {
+        pResource: ManuallyDrop::new(Some(upload.clone())),
+        Type: D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
+        Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
+            PlacedFootprint: *footprint,
+        },
+    };
+    // SAFETY: the caller's promise; the references the descriptions took are
+    // released right after the call.
+    unsafe {
+        list.CopyTextureRegion(&destination, 0, 0, 0, &source, None);
+        ManuallyDrop::drop(&mut destination.pResource);
+        ManuallyDrop::drop(&mut source.pResource);
     }
 }
 
@@ -1208,8 +1562,33 @@ mod tests {
         MediaBuffer::video(frame)
     }
 
-    /// Draws `frame` and reads back the centre of the window.
-    fn drawn(gpu: &D3d12Gpu, upload: D3d12Upload, frame: MediaBuffer) -> Option<[u8; 3]> {
+    /// A solid YUV420P picture of one Y'CbCr value at an odd size, tagged
+    /// with `space` — so its chroma planes round up, and FFmpeg pads its
+    /// rows past the picture's width.
+    fn solid_yuv420p(ycbcr: [u8; 3], space: ffmpeg_next::color::Space) -> MediaBuffer {
+        let mut frame = ffmpeg_next::frame::Video::new(ffmpeg_next::format::Pixel::YUV420P, 63, 35);
+        for (plane, value) in ycbcr.into_iter().enumerate() {
+            frame.data_mut(plane).fill(value);
+        }
+        frame.set_color_space(space);
+        frame.set_color_range(ffmpeg_next::color::Range::MPEG);
+        frame.set_pts(Some(0));
+        MediaBuffer::video(frame)
+    }
+
+    /// A solid BGRA picture of one R'G'B' value.
+    fn solid_bgra([r, g, b]: [u8; 3]) -> MediaBuffer {
+        let mut frame = ffmpeg_next::frame::Video::new(ffmpeg_next::format::Pixel::BGRA, 64, 64);
+        for pixel in frame.data_mut(0).as_chunks_mut::<4>().0 {
+            *pixel = [b, g, r, 255];
+        }
+        frame.set_pts(Some(0));
+        MediaBuffer::video(frame)
+    }
+
+    /// Draws `frame` — through `upload` first, where there is one — and
+    /// reads back the centre of the window.
+    fn drawn(gpu: &D3d12Gpu, upload: Option<D3d12Upload>, frame: MediaBuffer) -> Option<[u8; 3]> {
         let (renderer, _events) = match D3d12WindowRenderer::open(
             "screen",
             gpu,
@@ -1228,7 +1607,10 @@ mod tests {
         let probe = renderer.probe();
         let (source, handle) = AppSource::new("frames", 4);
         let (pipeline, ()) = Pipeline::new("window-colour", source, |source, ctx| {
-            let branch = ctx.branch().pipe(upload).to(renderer)?;
+            let branch = match upload {
+                Some(upload) => ctx.branch().pipe(upload).to(renderer)?,
+                None => ctx.branch().to(renderer)?,
+            };
             ctx.attach(source, 0, branch)?;
             Ok(())
         })
@@ -1268,14 +1650,103 @@ mod tests {
         let Some(gpu) = gpu() else { return };
         let ycbcr = [72, 107, 220];
         let Some(first) = upload(&gpu) else { return };
-        let Some(bt709) = drawn(&gpu, first, solid_nv12(ycbcr, Space::BT709)) else {
+        let Some(bt709) = drawn(&gpu, Some(first), solid_nv12(ycbcr, Space::BT709)) else {
             return;
         };
         assert!(near(bt709, [230, 20, 20]), "BT.709 drawn as {bt709:?}");
         let Some(second) = upload(&gpu) else { return };
-        let Some(bt601) = drawn(&gpu, second, solid_nv12(ycbcr, Space::BT470BG)) else {
+        let Some(bt601) = drawn(&gpu, Some(second), solid_nv12(ycbcr, Space::BT470BG)) else {
             return;
         };
         assert!(near(bt601, [211, 0, 22]), "BT.601 drawn as {bt601:?}");
+    }
+
+    /// A frame in system memory is drawn as it comes — NV12, YUV420P, BGRA,
+    /// no upload in front — each YUV one with its own colour description,
+    /// and a YUV420P one at an odd size with its padded rows read by their
+    /// stride. Needs no video support of the device, so it draws even on a
+    /// software adapter.
+    #[test]
+    fn a_system_memory_frame_is_drawn_as_it_comes() {
+        use ffmpeg_next::color::Space;
+
+        let Some(gpu) = gpu() else { return };
+        let ycbcr = [72, 107, 220];
+        let Some(nv12) = drawn(&gpu, None, solid_nv12(ycbcr, Space::BT709)) else {
+            return;
+        };
+        assert!(near(nv12, [230, 20, 20]), "NV12 drawn as {nv12:?}");
+        let Some(yuv420p) = drawn(&gpu, None, solid_yuv420p(ycbcr, Space::BT709)) else {
+            return;
+        };
+        assert!(near(yuv420p, [230, 20, 20]), "YUV420P drawn as {yuv420p:?}");
+        let Some(bt601) = drawn(&gpu, None, solid_yuv420p(ycbcr, Space::BT470BG)) else {
+            return;
+        };
+        assert!(
+            near(bt601, [211, 0, 22]),
+            "BT.601 YUV420P drawn as {bt601:?}"
+        );
+        let Some(bgra) = drawn(&gpu, None, solid_bgra([30, 140, 200])) else {
+            return;
+        };
+        assert!(near(bgra, [30, 140, 200]), "BGRA drawn as {bgra:?}");
+    }
+
+    /// Frames of one layout and size after another reuse what the first was
+    /// drawn through, and a new size is drawn through new textures — each
+    /// still coming out as it should.
+    #[test]
+    fn frames_that_change_size_are_each_drawn() {
+        use ffmpeg_next::color::Space;
+
+        let Some(gpu) = gpu() else { return };
+        let Ok((renderer, _events)) = D3d12WindowRenderer::open(
+            "screen",
+            &gpu,
+            WindowOptions {
+                width: WIDTH,
+                height: HEIGHT,
+                ..WindowOptions::default()
+            },
+        ) else {
+            return;
+        };
+        let probe = renderer.probe();
+        let (source, handle) = AppSource::new("frames", 8);
+        let (pipeline, ()) = Pipeline::new("window-sizes", source, |source, ctx| {
+            let branch = ctx.branch().to(renderer)?;
+            ctx.attach(source, 0, branch)?;
+            Ok(())
+        })
+        .expect("wiring");
+        pipeline.run().expect("run");
+        for frame in [
+            solid_nv12([72, 107, 220], Space::BT709),
+            solid_nv12([72, 107, 220], Space::BT709),
+            solid_yuv420p([72, 107, 220], Space::BT709),
+            solid_bgra([30, 140, 200]),
+        ] {
+            *probe.lock().unwrap() = None;
+            handle.push(frame).expect("push");
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while probe.lock().unwrap().is_none() && std::time::Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(probe.lock().unwrap().is_some(), "every frame is drawn");
+        }
+        let [r, g, b, _] = probe.lock().unwrap().expect("drawn");
+        assert!(
+            near([r, g, b], [30, 140, 200]),
+            "the last drawn as {:?}",
+            [r, g, b]
+        );
+        pipeline.stop();
+        let errors: Vec<_> = pipeline
+            .bus()
+            .iter()
+            .filter(|event| matches!(event, BusEvent::Error { .. }))
+            .collect();
+        assert!(errors.is_empty(), "{errors:?}");
     }
 }

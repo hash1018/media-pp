@@ -5,18 +5,14 @@
 //! window the renderer opens itself — `D3d11WindowRenderer` or
 //! `D3d12WindowRenderer` on Windows, `VulkanWindowRenderer` on Linux — and all
 //! of them report that window through the library's one `WindowEvents`, so
-//! [`stop_on_close`] and [`Shutdown`] are the same on both platforms. On Linux
-//! there is one thing more, `to_drawable`, which fits a software decode to
-//! `VulkanWindowRenderer`'s input; it is named rather than linked, since on
-//! any other host the link would be a broken one.
+//! [`stop_on_close`] and [`Shutdown`] are the same on both platforms, and so
+//! is [`to_drawable`], which fits a software decode to whichever renderer's
+//! input: all three take system-memory YUV420P, NV12 and BGRA.
 
+mod drawable;
 mod shutdown;
 mod window;
 
+pub use drawable::to_drawable;
 pub use shutdown::Shutdown;
 pub use window::stop_on_close;
-
-#[cfg(target_os = "linux")]
-mod linux;
-#[cfg(target_os = "linux")]
-pub use linux::to_drawable;
