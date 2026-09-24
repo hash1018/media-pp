@@ -200,7 +200,14 @@ mod linux_example {
                         },
                     );
                     Pipeline::new("vulkan-window-render", source, |source, ctx| {
-                        let branch = ctx.branch().queue("frames", 4).pipe(convert(WIDTH, HEIGHT));
+                        // The pattern is YUV420P already, which the renderer
+                        // draws as it comes: no conversion in between.
+                        let branch = ctx.branch().queue("frames", 4);
+                        let branch = if format == ffmpeg::format::Pixel::YUV420P {
+                            branch
+                        } else {
+                            branch.pipe(convert(WIDTH, HEIGHT))
+                        };
                         let branch = match upload {
                             Some(upload) => branch.pipe(upload),
                             None => branch,

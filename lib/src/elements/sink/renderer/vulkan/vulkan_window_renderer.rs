@@ -144,11 +144,6 @@ impl WindowSize {
 /// renderer's device allocated and CUDA imported, which only works within
 /// one GPU.
 ///
-/// Its input contract admits system-memory frames of any layout other than
-/// NV12 and BGRA, because that is the one name the contract has for
-/// YUV420P; a frame in another of them — RGB24, YUV444P — is refused when
-/// it arrives, with [`VulkanWindowRendererError::UnsupportedFrame`].
-///
 /// That is also why it is named for what draws rather than for what it
 /// takes, unlike `CudaRenderer`: a renderer of one memory
 /// domain is best found by the frames it takes, and this one takes more than
@@ -341,13 +336,17 @@ impl Element for VulkanWindowRenderer {
 }
 
 impl Sink for VulkanWindowRenderer {
-    /// NV12, BGRA, and — as the contract names YUV420P — any other layout,
-    /// in system memory; in CUDA memory too where the GPU was made for it.
+    /// NV12, YUV420P and BGRA, in system memory; in CUDA memory too where
+    /// the GPU was made for it, where the frames are NV12 or BGRA.
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(PortContract::Frames(
             MediaKindSet::of(MediaKind::VideoFrame),
             self.domains,
-            PixelLayoutSet::from_slice(&[PixelLayout::Nv12, PixelLayout::Bgra, PixelLayout::Other]),
+            PixelLayoutSet::from_slice(&[
+                PixelLayout::Nv12,
+                PixelLayout::Yuv420p,
+                PixelLayout::Bgra,
+            ]),
         ))
     }
 

@@ -268,7 +268,7 @@ where
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(
             PortContract::frame(MediaKind::VideoFrame, MemoryDomain::System)
-                .with_layouts(crate::contract::PixelLayoutSet::OTHER),
+                .with_layouts(crate::contract::PixelLayoutSet::RGB24),
         )
     }
 

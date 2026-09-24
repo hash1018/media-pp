@@ -12,6 +12,21 @@ compile error with no explanation.
 
 ### Breaking
 
+- **`PixelLayout::Yuv420p` and `Rgb24`: a link check tells them from other
+  layouts.** YUV420P was `PixelLayout::Other`, so a consumer that draws it
+  had to accept every other layout too, and a pipeline feeding it RGB24 or
+  4:4:4 linked and failed on its first frame. `PixelLayout::of` maps
+  `YUV420P` and `YUVJ420P` to the new `Yuv420p`, which `SwScaler` and
+  `SwEncoder` state through it with no change of their own, and
+  `TestVideoSource` states it too; `PixelLayoutSet::YUV420P` is the set of
+  it alone. `PixelLayout::Rgb24` is added beside it for the same reason:
+  `OrtDetector` takes RGB24 alone and said `Other`, which linked a YUV420P
+  source to it; it says `Rgb24` now. `Other` is left for producers — a
+  format with no layout of its own, which a consumer naming its layouts
+  refuses — and no consumer here states it. A `match` on `PixelLayout`
+  needs arms for both, and a contract written with `Other` to take YUV420P
+  or RGB24 needs the new layout instead.
+
 - **A preroll timeout names what it waited on.** `PrerollError::TimedOut`
   carried `pending: Vec<ElementId>`, so a failed seek said
   `pending terminals [ElementId(8)]` and left the caller to work out which

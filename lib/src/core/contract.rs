@@ -320,12 +320,21 @@ impl fmt::Display for MemoryDomainSet {
 /// How a decoded video frame's pixels are laid out — the part of its format
 /// an element that reads them is built for.
 ///
-/// Only the layouts this crate's GPU paths deal in are told apart: NV12,
-/// what hardware decoders and encoders trade in; P010, the same at 10 bits;
-/// and BGRA, what captures produce and shaders write. Every other format —
-/// planar YUV from a software decoder, a camera's YUY2, audio — is
-/// [`Self::Other`], which is as much as a link check needs to know about it:
-/// that it is none of these.
+/// Only the layouts elements here are built for are told apart: NV12, what
+/// hardware decoders and encoders trade in; P010, the same at 10 bits; BGRA,
+/// what captures produce and shaders write; YUV420P, what a software decoder
+/// and encoder trade in and a renderer can draw as it comes; and RGB24, what
+/// a vision model reads. A layout is added here when an element is built for
+/// one — every other format, a camera's YUY2 or a 4:4:4 decode, is
+/// [`Self::Other`].
+///
+/// `Other` is for producers only. A producer that states it says its frames
+/// are in none of the named layouts, which every consumer that names the
+/// ones it takes then refuses at link time — the point of it. A consumer
+/// that stated it would take every unnamed format at once, whatever it is
+/// actually built for, and would be refused nothing; an element built for a
+/// format with no layout here gets one added instead, as `Rgb24` was for
+/// `OrtDetector`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PixelLayout {
     /// 8-bit 4:2:0, a luma plane and an interleaved chroma plane.
@@ -334,7 +343,13 @@ pub enum PixelLayout {
     P010,
     /// 8-bit packed BGRA.
     Bgra,
-    /// Any other format.
+    /// 8-bit 4:2:0 in three planes, luma, Cb and Cr — `YUV420P`, and the
+    /// `YUVJ420P` that is the same planes at full range.
+    Yuv420p,
+    /// 8-bit packed RGB, three bytes a pixel.
+    Rgb24,
+    /// Any format with no layout of its own above — stated by a producer,
+    /// never accepted by a consumer; see the type's own docs.
     Other,
 }
 
@@ -345,13 +360,17 @@ impl PixelLayout {
             PixelLayout::P010 => 1 << 1,
             PixelLayout::Bgra => 1 << 2,
             PixelLayout::Other => 1 << 3,
+            PixelLayout::Yuv420p => 1 << 4,
+            PixelLayout::Rgb24 => 1 << 5,
         }
     }
 
-    const ALL: [PixelLayout; 4] = [
+    const ALL: [PixelLayout; 6] = [
         PixelLayout::Nv12,
         PixelLayout::P010,
         PixelLayout::Bgra,
+        PixelLayout::Yuv420p,
+        PixelLayout::Rgb24,
         PixelLayout::Other,
     ];
 
@@ -362,6 +381,10 @@ impl PixelLayout {
             ffmpeg::format::Pixel::NV12 => PixelLayout::Nv12,
             ffmpeg::format::Pixel::P010LE => PixelLayout::P010,
             ffmpeg::format::Pixel::BGRA => PixelLayout::Bgra,
+            ffmpeg::format::Pixel::YUV420P | ffmpeg::format::Pixel::YUVJ420P => {
+                PixelLayout::Yuv420p
+            }
+            ffmpeg::format::Pixel::RGB24 => PixelLayout::Rgb24,
             _ => PixelLayout::Other,
         }
     }
@@ -373,6 +396,8 @@ impl fmt::Display for PixelLayout {
             PixelLayout::Nv12 => "NV12",
             PixelLayout::P010 => "P010",
             PixelLayout::Bgra => "BGRA",
+            PixelLayout::Yuv420p => "YUV420P",
+            PixelLayout::Rgb24 => "RGB24",
             PixelLayout::Other => "other layouts",
         };
         f.write_str(name)
@@ -403,7 +428,12 @@ impl PixelLayoutSet {
     pub const NV12: Self = Self::of(PixelLayout::Nv12);
     /// BGRA alone.
     pub const BGRA: Self = Self::of(PixelLayout::Bgra);
-    /// Any other format alone.
+    /// YUV420P alone.
+    pub const YUV420P: Self = Self::of(PixelLayout::Yuv420p);
+    /// RGB24 alone.
+    pub const RGB24: Self = Self::of(PixelLayout::Rgb24);
+    /// A format with no layout of its own, alone — a producer's to state,
+    /// not a consumer's; see [`PixelLayout`].
     pub const OTHER: Self = Self::of(PixelLayout::Other);
     /// 4:2:0 at 8 or 10 bits — what a hardware video processor or scaler
     /// reads as Y'CbCr.
@@ -1044,7 +1074,55 @@ mod tests {
         assert_eq!(PixelLayout::of(Pixel::NV12), PixelLayout::Nv12);
         assert_eq!(PixelLayout::of(Pixel::P010LE), PixelLayout::P010);
         assert_eq!(PixelLayout::of(Pixel::BGRA), PixelLayout::Bgra);
-        assert_eq!(PixelLayout::of(Pixel::YUV420P), PixelLayout::Other);
+        assert_eq!(PixelLayout::of(Pixel::YUV420P), PixelLayout::Yuv420p);
+        assert_eq!(PixelLayout::of(Pixel::YUVJ420P), PixelLayout::Yuv420p);
+        assert_eq!(PixelLayout::of(Pixel::RGB24), PixelLayout::Rgb24);
+        assert_eq!(PixelLayout::of(Pixel::YUV444P), PixelLayout::Other);
+        assert_eq!(PixelLayout::of(Pixel::YUYV422), PixelLayout::Other);
+    }
+
+    /// A consumer that draws YUV420P but not every other layout can say so:
+    /// a software decode links to it, and RGB24 or 4:4:4 does not.
+    #[test]
+    fn yuv420p_is_told_apart_from_other_layouts() {
+        use ffmpeg::format::Pixel;
+        let system = PortContract::frame(MediaKind::VideoFrame, MemoryDomain::System);
+        let drawn = InputContract::Fixed(system.with_layouts(PixelLayoutSet::from_slice(&[
+            PixelLayout::Nv12,
+            PixelLayout::Yuv420p,
+            PixelLayout::Bgra,
+        ])));
+        let producing = |format| {
+            OutputContract::Fixed(system.with_layouts(PixelLayoutSet::of(PixelLayout::of(format))))
+        };
+        for format in [Pixel::YUV420P, Pixel::YUVJ420P, Pixel::NV12, Pixel::BGRA] {
+            assert_eq!(
+                check_link(&producing(format), &drawn),
+                LinkCheck::Fits,
+                "{format:?}"
+            );
+        }
+        for format in [Pixel::RGB24, Pixel::YUV444P] {
+            assert!(
+                check_link(&producing(format), &drawn).is_refused(),
+                "{format:?}"
+            );
+        }
+        assert_eq!(PixelLayoutSet::YUV420P.to_string(), "YUV420P");
+
+        // A consumer of RGB24 alone refuses the rest, a producer of an
+        // unnamed format among them: what `Other` is for.
+        let rgb24 = InputContract::Fixed(system.with_layouts(PixelLayoutSet::RGB24));
+        assert_eq!(
+            check_link(&producing(Pixel::RGB24), &rgb24),
+            LinkCheck::Fits
+        );
+        for format in [Pixel::YUV420P, Pixel::YUV444P, Pixel::BGR24] {
+            assert!(
+                check_link(&producing(format), &rgb24).is_refused(),
+                "{format:?}"
+            );
+        }
     }
 
     /// The answer a caller gets before linking is the one the pipeline would

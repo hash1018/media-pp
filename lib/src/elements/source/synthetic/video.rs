@@ -123,7 +123,7 @@ impl TestVideoSource {
             format!("{name}_src"),
             OutputContract::Fixed(
                 PortContract::frame(MediaKind::VideoFrame, MemoryDomain::System)
-                    .with_layouts(crate::contract::PixelLayoutSet::OTHER),
+                    .with_layouts(crate::contract::PixelLayoutSet::YUV420P),
             ),
         );
         pp_info!(
