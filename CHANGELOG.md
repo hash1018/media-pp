@@ -1592,6 +1592,13 @@ compile error with no explanation.
 
 ### Changed
 
+- **`Player` decodes each stream on a thread of its own.** A queue of 64
+  packets now sits between the demuxer and each decoder, so a slow picture
+  decode no longer holds up the sound, and a file muxed with one stream a
+  second or so ahead of the other waits in those queues rather than in the
+  demuxer. A program building the same graph itself does the same with a
+  `queue` in front of each decoder.
+
 - **A seek made while playing pauses before it plays on.** Its preroll now
   ends in a `Pause`, and the `Resume` follows it, where it used to play on
   with the `Resume` alone. An element counting control messages sees one

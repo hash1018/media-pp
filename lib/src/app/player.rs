@@ -59,6 +59,15 @@ const RATE_STEP: f64 = 0.25;
 const GPU_FRAMES_QUEUED: usize = 8;
 /// The same, for pictures in system memory, whose pool grows.
 const SYSTEM_FRAMES_QUEUED: usize = 32;
+/// How many packets wait in front of each decoder, straight after the
+/// demuxer: two seconds of a 30 fps picture, one and a half of AAC sound.
+///
+/// Each stream is decoded on a thread of its own behind these, not on the
+/// demuxer's, so a slow picture decode does not hold up the sound. And a
+/// file is muxed with one stream ahead of the other — a second, commonly
+/// — which is how far the demuxer has to read one to reach the other: the
+/// packets it passes wait here rather than in the demuxer.
+const PACKETS_QUEUED: usize = 64;
 
 /// How a [`Player`] opens its window and its sound.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -270,6 +279,7 @@ impl Player {
                     let sound = ctx.tee("sound").branch(heard).branch(seen).build()?;
                     let decoded = ctx
                         .branch()
+                        .queue("audio-packets", PACKETS_QUEUED)
                         .pipe(SwDecoder::new("audio-decoder", audio.parameters.clone())?)
                         .pipe(AudioResampler::new("audio-resampler", format))
                         .to_branch(sound)?;
@@ -329,6 +339,7 @@ impl Player {
         let (pipeline, ()) = Pipeline::new("player", source, |source, ctx| {
             let mut picture = ctx
                 .branch()
+                .queue("video-packets", PACKETS_QUEUED)
                 .pipe(decoder)
                 .queue("video-frames", queued)
                 .pipe(VideoSynchronizer::new("video-sync"));
@@ -696,6 +707,7 @@ fn sound(
     speakers: AudioOut,
 ) -> crate::Result<crate::pipeline::DetachedBranch> {
     ctx.branch()
+        .queue("audio-packets", PACKETS_QUEUED)
         .pipe(SwDecoder::new("audio-decoder", audio.parameters.clone())?)
         .pipe(AudioResampler::new("audio-resampler", format))
         .pipe(volume)
