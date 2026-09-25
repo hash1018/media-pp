@@ -134,6 +134,9 @@ pub struct Pipeline {
     pub(super) control_rxs: Mutex<Option<Vec<ControlReceiver>>>,
     pub(super) clock: Arc<Clock>,
     pub(super) playback_clock: Arc<PlaybackClock>,
+    /// Which timeline this pipeline is on; a seek starts the next — see
+    /// [`crate::timeline`].
+    pub(super) timeline: Arc<crate::timeline::Timeline>,
     pub(super) bus_rx: BusReceiver,
     /// How many source threads are still running — `0` before `run()` and
     /// again once every source's thread has finished. `AtomicUsize` rather
@@ -409,6 +412,7 @@ impl Pipeline {
         {
             let bus = bus.for_element(source_id);
             let running = Arc::clone(&self.running);
+            let timeline = Arc::clone(&self.timeline);
             let thread_name = "pipeline:source".to_owned();
             let spawn_result = spawn(
                 thread_name.clone(),
@@ -420,6 +424,9 @@ impl Pipeline {
                     let mut source = source;
                     let control_rx = control_rx;
                     let _running = RunningSourceGuard::new(running);
+                    // What this source makes is on the pipeline's timeline,
+                    // and moves to each new one as it applies the `Seek`.
+                    crate::timeline::enter(&timeline);
 
                     let source_name = source.name();
                     let source_type = source.element_type();
@@ -864,6 +871,10 @@ impl Pipeline {
         );
         self.clock.interrupt();
         self.playback_clock.reset_for_seek();
+        // Everything read from here on belongs to the new position, and a
+        // queue drops whatever reaches it from the old one — what the
+        // `Flush` below discards, and what it misses.
+        self.timeline.begin();
         self.broadcast(|control_tx| control_tx.enqueue(ControlMsg::Flush));
         self.broadcast(|control_tx| control_tx.enqueue(msg.clone()));
         let graph = self.graph();

@@ -657,7 +657,15 @@ pub(crate) fn apply_one_unacked<S: SourceElement>(
     let result: Result<bool> = (|| {
         apply_seek_check(source, msg);
         source.on_control(msg);
-        apply_seek(source, bus, msg)?;
+        let sought = apply_seek(source, bus, msg);
+        if matches!(msg, ControlMsg::Seek(_)) {
+            // What this thread reads from now on is the new position's — see
+            // `crate::timeline`. Even where the seek failed: the pipeline has
+            // left the old timeline all the same, and whatever this source
+            // goes on to read is all it will get.
+            crate::timeline::follow();
+        }
+        sought?;
         for pad in source.src_pads() {
             pad.control(msg.clone())?;
         }

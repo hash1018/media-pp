@@ -1541,6 +1541,19 @@ compile error with no explanation.
 
 ### Fixed
 
+- **A queue drops what a seek has left behind, however late it gets
+  there.** A seek empties every queue with a `Flush` and then repositions
+  the sources, and that relied on every source being paused and every
+  thread's timing going its way. A source of your own that read on while
+  paused — handed the `Flush` and the `Seek` as two requests, and pushing
+  between them — put media from the old position into a queue the flush
+  had just emptied, and it was delivered ahead of the new position's.
+  Every buffer now carries the timeline it was read on, from the thread
+  that read it across each `Queue`, and a queue drops what is from one a
+  seek has left. Nothing in the public API changes, and a buffer made on
+  a thread no pipeline numbered — an element's own worker, a caller
+  driving elements by hand — is never dropped for it.
+
 - **A seek no longer loses the stream that prerolls first.** After handing
   its branch the seek's one sample, a decoder suppressed what it decoded
   until the preroll ended — and went on taking packets meanwhile, since

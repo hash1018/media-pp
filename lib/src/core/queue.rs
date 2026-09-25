@@ -13,6 +13,7 @@
 //! the default and when it is the wrong one.
 
 use std::{
+    cell::Cell,
     collections::VecDeque,
     sync::{
         Arc, Mutex, MutexGuard,
@@ -22,7 +23,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::pp_log::{PpLog, pp_info, pp_trace};
+use crate::pp_log::{PpLog, pp_debug, pp_info, pp_trace};
 use crossbeam_channel::{
     Receiver, RecvTimeoutError, SendTimeoutError, Sender, TrySendError, bounded, select,
 };
@@ -37,6 +38,7 @@ use crate::{
     element::{Context, Element, ElementType, Sink, element_pp_log},
     error::{Result, ThreadSpawnError},
     stats::ElementCounters,
+    timeline::{Numbered, Timeline, UNNUMBERED},
 };
 
 /// Errors specific to `Queue`. Converts into the crate-wide `Error` via
@@ -190,7 +192,7 @@ impl Default for OverflowPolicy {
 pub struct Queue {
     pp_log: PpLog,
     name: Arc<str>,
-    tx: Sender<MediaBuffer>,
+    tx: Sender<Numbered>,
     policy: OverflowPolicy,
     bus: Bus,
     handle: Option<JoinHandle<()>>,
@@ -215,6 +217,9 @@ pub struct Queue {
     /// How many `Eos` this queue has taken and not yet handed on or
     /// discarded — see [`Inbox::owes_an_end`].
     ends_owed: Arc<AtomicUsize>,
+    /// The pipeline's timeline, whose number a buffer is handed over with —
+    /// see [`crate::timeline`]. `None` for one spawned by hand.
+    timeline: Option<Arc<Timeline>>,
 }
 
 impl Queue {
@@ -269,6 +274,7 @@ impl Queue {
             pipeline_id,
             None,
             None,
+            None,
             |thread_name, task| thread::Builder::new().name(thread_name).spawn(task),
         )
     }
@@ -294,6 +300,7 @@ impl Queue {
             Some(&context.pipeline_id),
             Some(counters),
             Some(Arc::clone(&context.clock)),
+            Some(Arc::clone(&context.timeline)),
             |thread_name, task| thread::Builder::new().name(thread_name).spawn(task),
         )
     }
@@ -310,6 +317,7 @@ impl Queue {
         pipeline_id: Option<&str>,
         counters: Option<Arc<ElementCounters>>,
         clock: Option<Arc<Clock>>,
+        timeline: Option<Arc<Timeline>>,
         spawn: impl FnOnce(
             String,
             Box<dyn FnOnce() + Send + 'static>,
@@ -321,7 +329,7 @@ impl Queue {
         // particular can fire once per buffer under sustained overflow.
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::Queue, &name, pipeline_id);
-        let (tx, rx) = bounded::<MediaBuffer>(capacity);
+        let (tx, rx) = bounded::<Numbered>(capacity);
         let (control_tx, control_rx) = control::channel();
         let worker_name = name.clone();
         let worker_bus = bus.clone();
@@ -338,6 +346,7 @@ impl Queue {
             data: rx,
             overflow: overflow.clone(),
             clock: clock.clone(),
+            timeline: timeline.clone(),
             ends_owed: ends_owed.clone(),
         };
 
@@ -348,6 +357,11 @@ impl Queue {
         let handle = spawn(
             thread_name.clone(),
             Box::new(move || {
+                // What this worker hands on is on the timeline of what it
+                // carries — see `crate::timeline::carry_on`.
+                if let Some(timeline) = &worker_inbox.timeline {
+                    crate::timeline::enter(timeline);
+                }
                 worker_loop(
                     worker_inbox,
                     control_rx,
@@ -376,6 +390,7 @@ impl Queue {
             clock,
             overflow,
             ends_owed,
+            timeline,
         })
     }
 }
@@ -431,7 +446,7 @@ impl Sink for Queue {
             // one that was not yet counted in.
             self.ends_owed.fetch_add(1, Ordering::AcqRel);
             let result = self
-                .hand_over(buf, Duration::MAX)
+                .hand_over(Numbered::on(self.timeline.as_ref(), buf), Duration::MAX)
                 .map_err(|_| QueueError::ChannelClosed.into());
             if result.is_err() {
                 self.ends_owed.fetch_sub(1, Ordering::AcqRel);
@@ -453,6 +468,9 @@ impl Sink for Queue {
         if let Some(counters) = counters {
             counters.arrived();
         }
+        // Numbered as the thread handing it over is, and carried so: see
+        // `crate::timeline`.
+        let buf = Numbered::on(self.timeline.as_ref(), buf);
         let result = match self.policy {
             OverflowPolicy::Block(timeout) => {
                 // Timed only when it had to wait: a send into room is not
@@ -526,7 +544,7 @@ impl Sink for Queue {
         // thread is the only one that adds to it.
         if matches!(msg, ControlMsg::Flush | ControlMsg::Stop) {
             let mut overflow = self.overflow.lock();
-            let ends = overflow.iter().filter(|buf| buf.is_eos()).count();
+            let ends = overflow.iter().filter(|held| held.buf.is_eos()).count();
             overflow.clear();
             self.ends_owed.fetch_sub(ends, Ordering::AcqRel);
         }
@@ -574,10 +592,10 @@ impl Drop for Queue {
 /// holds what one source makes between two looks at its control — a buffer
 /// or two — and is emptied by `Flush` and `Stop` like the channel.
 #[derive(Clone, Default)]
-struct Overflow(Arc<Mutex<VecDeque<MediaBuffer>>>);
+struct Overflow(Arc<Mutex<VecDeque<Numbered>>>);
 
 impl Overflow {
-    fn lock(&self) -> MutexGuard<'_, VecDeque<MediaBuffer>> {
+    fn lock(&self) -> MutexGuard<'_, VecDeque<Numbered>> {
         self.0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -604,7 +622,7 @@ impl Queue {
     /// of frames out of their pool.
     fn hand_over(
         &self,
-        mut buf: MediaBuffer,
+        mut buf: Numbered,
         timeout: Duration,
     ) -> std::result::Result<(), HandOverError> {
         let Some(clock) = self.clock.clone() else {
@@ -660,9 +678,13 @@ impl Queue {
 /// Where a worker takes its buffers from: the channel, then what was held
 /// over — see [`Overflow`] — and neither while an interrupt is out.
 struct Inbox {
-    data: Receiver<MediaBuffer>,
+    data: Receiver<Numbered>,
     overflow: Overflow,
     clock: Option<Arc<Clock>>,
+    /// The pipeline's timeline, against which what is carried is judged
+    /// before it goes on — `None` for a queue spawned by hand, which
+    /// drops nothing for being old.
+    timeline: Option<Arc<Timeline>>,
     /// Shared with the [`Queue`], which counts an `Eos` in as it takes one;
     /// the worker counts it out as it hands it on or a `Flush` discards it.
     ends_owed: Arc<AtomicUsize>,
@@ -698,7 +720,7 @@ impl Inbox {
     }
 
     /// The next buffer held over, once the channel has nothing older.
-    fn take_held_over(&self) -> Option<MediaBuffer> {
+    fn take_held_over(&self) -> Option<Numbered> {
         let mut overflow = self.overflow.lock();
         if self.data.is_empty() {
             overflow.pop_front()
@@ -747,6 +769,7 @@ fn worker_loop(
         pp_log: &pp_log,
         counters: counters.as_deref(),
         errors: &error_reporter,
+        dropped_from: Cell::new(UNNUMBERED),
     };
     loop {
         if let Some((request, ack)) = control_rx.try_recv() {
@@ -882,11 +905,36 @@ struct Worker<'a> {
     pp_log: &'a PpLog,
     counters: Option<&'a ElementCounters>,
     errors: &'a QueueErrorReporter<'a>,
+    /// The timeline this worker last dropped a buffer from, so a seek's
+    /// leftovers are logged once rather than once a buffer.
+    dropped_from: Cell<u64>,
 }
 
 /// Hands one buffer to `downstream`, counting it and reporting a failure on
 /// the bus — a failure drops that buffer and nothing else.
-fn forward(downstream: &mut Box<dyn Sink>, buf: MediaBuffer, worker: &Worker<'_>) {
+fn forward(downstream: &mut Box<dyn Sink>, carried: Numbered, worker: &Worker<'_>) {
+    let Numbered { number, buf } = carried;
+    if worker
+        .inbox
+        .timeline
+        .as_deref()
+        .is_some_and(|timeline| timeline.is_behind(number))
+    {
+        // From a position the pipeline has since left — what a `Flush`
+        // should have discarded and a thread's timing let past it.
+        if worker.dropped_from.replace(number) != number {
+            pp_debug!(
+                pp_log: worker.pp_log,
+                "dropping what arrives from timeline {number}, which a seek has left"
+            );
+        }
+        if buf.is_eos() {
+            worker.inbox.discarded(1);
+        }
+        return;
+    }
+    // What the elements after this make of it is on the same timeline.
+    crate::timeline::carry_on(number);
     let is_eos = buf.is_eos();
     let call = worker
         .counters
@@ -1081,11 +1129,11 @@ fn forward_control(
 /// docs on why that's safe (nothing feeds a paused/stopped queue in the
 /// first place).
 /// Empties the channel on `Flush`, and says how many `Eos` went with it.
-fn discard_stale_data(data_rx: &Receiver<MediaBuffer>, msg: &ControlMsg) -> usize {
+fn discard_stale_data(data_rx: &Receiver<Numbered>, msg: &ControlMsg) -> usize {
     let mut ends = 0;
     if *msg == ControlMsg::Flush {
-        while let Ok(buf) = data_rx.try_recv() {
-            ends += usize::from(buf.is_eos());
+        while let Ok(held) = data_rx.try_recv() {
+            ends += usize::from(held.buf.is_eos());
         }
     }
     ends
@@ -1108,12 +1156,12 @@ mod tests {
     #[test]
     fn flush_discards_backlog_but_seek_does_not() {
         let (tx, rx) = crossbeam_channel::bounded(2);
-        tx.send(packet()).unwrap();
+        tx.send(Numbered::on(None, packet())).unwrap();
 
         discard_stale_data(&rx, &ControlMsg::Seek(Duration::from_secs(1)));
         assert!(rx.try_recv().is_ok(), "Seek must not own Queue flushing");
 
-        tx.send(packet()).unwrap();
+        tx.send(Numbered::on(None, packet())).unwrap();
         discard_stale_data(&rx, &ControlMsg::Flush);
         assert!(rx.try_recv().is_err(), "Flush must discard queued data");
     }
@@ -1214,6 +1262,7 @@ mod tests {
             }),
             bus,
             OverflowPolicy::default(),
+            None,
             None,
             None,
             None,
@@ -2139,6 +2188,7 @@ mod tests {
             None,
             None,
             Some(Arc::clone(clock)),
+            None,
             |thread_name, task| thread::Builder::new().name(thread_name).spawn(task),
         )
         .expect("spawn");

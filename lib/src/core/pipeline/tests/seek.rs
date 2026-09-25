@@ -1847,3 +1847,146 @@ fn a_tee_of_packets_whose_branch_prerolls_first_misses_nothing() {
         "pictures went missing after the seek: {after:?}"
     );
 }
+
+/// Reads on regardless, like `UnpausingSource`, and stamps what it reads
+/// with where it is: a millisecond a packet, from wherever the last seek put
+/// it.
+struct ReadingOnSource {
+    pp_log: PpLog,
+    pad: SrcPad,
+    at_ms: i64,
+}
+
+impl Element for ReadingOnSource {
+    fn name(&self) -> Arc<str> {
+        "reading-on".into()
+    }
+
+    fn element_type(&self) -> ElementType {
+        ElementType::Other
+    }
+
+    fn pp_log(&self) -> &PpLog {
+        &self.pp_log
+    }
+
+    fn pp_log_mut(&mut self) -> &mut PpLog {
+        &mut self.pp_log
+    }
+}
+
+impl Source for ReadingOnSource {
+    fn src_pads(&mut self) -> &mut [SrcPad] {
+        std::slice::from_mut(&mut self.pad)
+    }
+}
+
+impl SourceElement for ReadingOnSource {
+    fn is_live(&self) -> bool {
+        false
+    }
+
+    fn is_seekable(&self) -> bool {
+        true
+    }
+
+    fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
+        loop {
+            while let Some((request, ack)) = control.try_recv() {
+                let crate::control::RequestKind::Control(msg) = request else {
+                    let _ = ack.send(());
+                    return Ok(());
+                };
+                if crate::control::apply_one(self, bus, &msg, &ack)? {
+                    return Ok(());
+                }
+            }
+            let mut packet = ffmpeg_next::Packet::empty();
+            packet.set_pts(Some(self.at_ms));
+            packet.set_time_base(ffmpeg_next::Rational::new(1, 1000));
+            self.at_ms += 1;
+            self.pad.push(MediaBuffer::Packet(Arc::new(packet)))?;
+        }
+    }
+
+    fn seek(&mut self, target: Duration) -> Result<Duration> {
+        self.at_ms = target.as_millis() as i64;
+        Ok(target)
+    }
+}
+
+/// What a source read before it applied a seek does not reach the
+/// terminal after it, even where it slipped past the seek's `Flush`.
+///
+/// A source that reads on while the seek is cascading puts old packets into
+/// the queue behind it after the `Flush` has emptied that queue and before
+/// the source has repositioned. Nothing in the cascade can tell them from
+/// the new position's; the queue delivered them first, and the seek's own
+/// preview was a picture from before it. Each packet now carries the number
+/// of the timeline it was read on, and the queue drops what is behind.
+#[test]
+fn what_was_read_before_a_seek_does_not_arrive_after_it() {
+    let source = ReadingOnSource {
+        pp_log: element_pp_log(ElementType::Other, "reading-on", None),
+        pad: SrcPad::new("src"),
+        at_ms: 0,
+    };
+    let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = crate::elements::AppSink::with_control(
+        "recorder",
+        {
+            let seen = Arc::clone(&seen);
+            move |buffer| {
+                if let MediaBuffer::Packet(packet) = buffer {
+                    seen.lock()
+                        .unwrap()
+                        .push(format!("{}", packet.pts().unwrap_or(-1)));
+                }
+                Ok(())
+            }
+        },
+        {
+            let seen = Arc::clone(&seen);
+            move |msg| {
+                if matches!(msg, ControlMsg::Seek(_)) {
+                    seen.lock().unwrap().push("seek".into());
+                }
+                Ok(())
+            }
+        },
+    );
+    let (pipeline, ()) = Pipeline::new("reading-on", source, |source, ctx| {
+        let branch = ctx.branch().queue("q", 64).to(sink)?;
+        ctx.attach(source, 0, branch)?;
+        Ok(())
+    })
+    .expect("pipeline wiring");
+    pipeline.run().expect("run");
+    thread::sleep(Duration::from_millis(20));
+    let target = Duration::from_secs(1_000);
+    pipeline
+        .seek(target, SeekMode::Keyframe)
+        .expect("the seek completes");
+    thread::sleep(Duration::from_millis(20));
+    pipeline.stop();
+
+    let seen = seen.lock().unwrap();
+    let after: Vec<i64> = seen
+        .iter()
+        .skip_while(|entry| entry.as_str() != "seek")
+        .skip(1)
+        .map(|entry| entry.parse().expect("a packet's pts"))
+        .collect();
+    assert!(!after.is_empty(), "nothing arrived after the seek");
+    let stale: Vec<i64> = after
+        .iter()
+        .copied()
+        .filter(|&pts| pts < target.as_millis() as i64)
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "{} packet(s) from before the seek arrived after it, the first {:?}",
+        stale.len(),
+        stale.first()
+    );
+}

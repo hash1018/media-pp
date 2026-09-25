@@ -58,7 +58,6 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::Sender;
 
 use crate::{
-    buffer::MediaBuffer,
     element::ElementType,
     graph::{BranchId, ElementId},
 };
@@ -328,13 +327,13 @@ pub(crate) struct QueueCounters {
     /// sees the sending side close while it runs. It never relied on that:
     /// the queue's own sender lives exactly as long as the `Queue`, whose
     /// drop stops the worker by its flag and joins it first.
-    channel: OnceLock<Sender<MediaBuffer>>,
+    channel: OnceLock<Sender<crate::timeline::Numbered>>,
     dropped: AtomicU64,
     blocked_ns: AtomicU64,
 }
 
 impl QueueCounters {
-    pub(crate) fn watch(&self, channel: Sender<MediaBuffer>) {
+    pub(crate) fn watch(&self, channel: Sender<crate::timeline::Numbered>) {
         let _ = self.channel.set(channel);
     }
 
@@ -539,6 +538,7 @@ pub struct TickStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::buffer::MediaBuffer;
     use crate::pad::SrcPad;
 
     /// A pad counts the bytes of the packets through it — what makes an

@@ -350,6 +350,9 @@ pub struct Context {
     /// Shared media-position clock used to hand video scheduling from the
     /// wall clock to an audio output master without changing pipelines.
     pub playback_clock: Arc<PlaybackClock>,
+    /// Which timeline the pipeline is on, for a queue to drop what is from
+    /// one it has left — see [`crate::timeline`].
+    pub(crate) timeline: Arc<crate::timeline::Timeline>,
     /// Serializes topology attachment with pipeline timeline operations.
     ///
     /// A branch may be detached while preroll is waiting (the waiter removes
@@ -415,6 +418,7 @@ impl Context {
             graph,
             playback_clock: Arc::new(PlaybackClock::new(clock.clone())),
             clock,
+            timeline: crate::timeline::Timeline::new(),
             operation: Arc::new(Mutex::new(())),
             source_id,
             source_counters: ElementCounters::new(),
