@@ -689,6 +689,22 @@ compile error with no explanation.
 
 ### Added
 
+- **`Pipeline::set_rate` plays faster or slower, the sound at its own
+  pitch.** From a quarter of the speed to four times it
+  (`Pipeline::MIN_RATE`..=`MAX_RATE`), taken from where playback is with
+  nothing sought or flushed: the playback clock covers that much more or
+  less media each second, so a `Pacer` or `VideoSynchronizer` paces the
+  picture to it unchanged. `WasapiRenderer` and `PipeWireAudioRenderer`
+  stretch their sound to the rate with FFmpeg's `atempo` and say where
+  playback is from what the device has played, each sample standing for
+  `rate` samples of the media, so the picture stays with the sound. A seek,
+  a step and a pause keep the rate; it is refused where a seek is, and
+  outside the range with `PipelineError::UnsupportedRate`. `Player` has
+  `set_rate` and `rate`, and in `respond_to` the minus and plus keys play a
+  quarter slower and faster and Backspace at the file's own speed. `Key`
+  gains `Backspace`, and `Char('+')` for the plus key (`=` unshifted on a
+  US keyboard).
+
 - **`Pipeline::step` moves the picture by frames, forward and back.**
   `step(n)` pauses and shows the picture `n` on, or `-n` back, and answers
   where it now is. Forward asks each terminal showing pictures for `n`

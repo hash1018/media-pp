@@ -32,6 +32,7 @@ mod conformance;
 mod contracts;
 mod graph;
 mod lifecycle;
+mod rate;
 mod seek;
 mod stats;
 mod step;

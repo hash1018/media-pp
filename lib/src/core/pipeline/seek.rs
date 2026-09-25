@@ -318,6 +318,54 @@ impl Pipeline {
         (every, pictures)
     }
 
+    /// The slowest rate [`Self::set_rate`] takes.
+    pub const MIN_RATE: f64 = 0.25;
+    /// The fastest rate [`Self::set_rate`] takes.
+    pub const MAX_RATE: f64 = 4.0;
+
+    /// Plays on at `rate` times its own speed, from where playback is: 2.0
+    /// covers two seconds of media in each second, 0.5 half of one.
+    ///
+    /// Nothing is sought and nothing flushed. The playback clock takes the
+    /// new rate from the position it has reached, so what paces the picture
+    /// — a [`crate::elements::Pacer`], a
+    /// [`crate::elements::VideoSynchronizer`] — shows it that much faster or
+    /// slower from the next picture on. An audio renderer of this crate
+    /// stretches its sound to the rate without changing its pitch, and says
+    /// where playback is from what it has played, so the picture stays with
+    /// the sound; a moment of sound already in the device plays out at the
+    /// rate it was stretched to. Paused, it takes effect as playback goes on.
+    /// A seek, a step and a pause leave it as it is.
+    ///
+    /// Refused where a seek is, before anything changes — a live source
+    /// plays at the rate it arrives, and a recording has to be of the stream
+    /// as it ran; see [`Self::check_seek`] — and with
+    /// [`PipelineError::UnsupportedRate`] outside
+    /// [`Self::MIN_RATE`]..=[`Self::MAX_RATE`]. Taken before [`Self::run`]
+    /// as well, for playback to start at it.
+    pub fn set_rate(&self, rate: f64) -> Result<()> {
+        if !(Self::MIN_RATE..=Self::MAX_RATE).contains(&rate) {
+            return Err(PipelineError::UnsupportedRate.into());
+        }
+        let _operation = self
+            .operation
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.check_seek()?;
+        pp_trace!(
+            pp_log: &self.pp_log,
+            "event=rate rate={rate} phase=completed outcome=ok"
+        );
+        self.playback_clock.set_rate(rate);
+        Ok(())
+    }
+
+    /// The rate playback goes at — 1.0 until [`Self::set_rate`] says
+    /// otherwise.
+    pub fn rate(&self) -> f64 {
+        self.playback_clock.rate()
+    }
+
     /// Moves the picture by `frames` and holds it there: forward by that many
     /// pictures, or back, and paused either way. Answers where the picture
     /// is now, in its media.

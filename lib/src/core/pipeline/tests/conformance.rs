@@ -1,5 +1,5 @@
-//! Control conformance: random sequences of pause, resume, seek, frame step
-//! and stop,
+//! Control conformance: random sequences of pause, resume, seek, frame step,
+//! rate and stop,
 //! run against the shapes of pipeline this crate is used in, and judged
 //! against what every terminal was handed.
 //!
@@ -380,6 +380,8 @@ enum Op {
     PlayToEnd,
     /// The picture this many pictures on, or back.
     Step(i64),
+    /// Playing on at this rate.
+    Rate(f64),
 }
 
 /// A small, seedable generator — enough to spread sequences over the
@@ -402,11 +404,12 @@ impl Rng {
 
 fn op(rng: &mut Rng, duration: Option<Duration>) -> Op {
     let Some(duration) = duration else {
-        return match rng.below(5) {
+        return match rng.below(6) {
             0 => Op::Pause,
             1 => Op::Resume,
             2 => Op::Seek(Duration::from_secs(1), SeekMode::Accurate),
             3 => Op::Step(1),
+            4 => Op::Rate(2.0),
             _ => Op::Wait(Duration::from_millis(rng.below(300))),
         };
     };
@@ -415,7 +418,7 @@ fn op(rng: &mut Rng, duration: Option<Duration>) -> Op {
     } else {
         SeekMode::Accurate
     };
-    match rng.below(12) {
+    match rng.below(13) {
         0 | 1 => Op::Pause,
         2 | 3 => Op::Resume,
         4 => {
@@ -444,6 +447,9 @@ fn op(rng: &mut Rng, duration: Option<Duration>) -> Op {
             2 => -1,
             _ => -3,
         }),
+        // Not four times: the model counts only the waits as playing, and
+        // what the other calls take is played too, four times as far.
+        12 => Op::Rate([0.5, 1.0, 2.0][rng.below(3) as usize]),
         _ => Op::Wait(Duration::from_millis(rng.below(400))),
     }
 }
@@ -554,6 +560,8 @@ struct Model {
     stepped: bool,
     /// Where the last step left the picture.
     picture: Option<Duration>,
+    /// The rate it plays at.
+    rate: f64,
 }
 
 impl Model {
@@ -565,7 +573,7 @@ impl Model {
 
     fn waited(&mut self, wait: Duration) {
         if !self.paused {
-            self.played += wait;
+            self.played += wait.mul_f64(self.rate);
             if self.played > Duration::from_millis(1_500) {
                 self.far_from_end = false;
             }
@@ -592,6 +600,7 @@ fn run_sequence(shape: Shape, seed: u64, steps: usize) -> std::result::Result<()
     let bus = BusLog::start(&rig.pipeline);
     let mut model = Model {
         far_from_end: rig.duration.is_some(),
+        rate: 1.0,
         ..Model::default()
     };
     model.sought(Duration::ZERO, rig.duration);
@@ -631,6 +640,15 @@ fn run_sequence(shape: Shape, seed: u64, steps: usize) -> std::result::Result<()
                     // Lined up to the picture before playing on.
                     model.seeks.push((None, SeekMode::Accurate));
                     model.sought(picture, rig.duration);
+                }
+            }
+            Op::Rate(rate) => {
+                let pipeline = Arc::clone(&rig.pipeline);
+                match within(move || pipeline.set_rate(rate)) {
+                    None => return fail(&history, "set_rate did not return".into()),
+                    Some(Ok(())) => model.rate = rate,
+                    Some(Err(crate::Error::SeekError(_))) if rig.duration.is_none() => {}
+                    Some(Err(error)) => return fail(&history, format!("set_rate failed: {error}")),
                 }
             }
             Op::Step(frames) => {

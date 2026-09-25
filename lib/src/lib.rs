@@ -116,7 +116,9 @@
 //! decodes forward to the exact target, and
 //! [`SeekMode::Keyframe`](pipeline::SeekMode::Keyframe) shows the keyframe the
 //! demuxer landed on. [`Pipeline::step`](pipeline::Pipeline::step) moves the
-//! picture by frames, forward or back, and holds it there, paused.
+//! picture by frames, forward or back, and holds it there, paused, and
+//! [`Pipeline::set_rate`](pipeline::Pipeline::set_rate) plays on faster or
+//! slower from where playback is, the sound stretched to it at its own pitch.
 //!
 //! # Connecting elements
 //!

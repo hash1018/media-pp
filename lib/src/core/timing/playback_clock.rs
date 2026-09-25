@@ -75,6 +75,11 @@ pub struct PlaybackClock {
     /// The largest of them in nanoseconds, kept beside the list so video
     /// scheduling reads it without the lock.
     presentation_delay_ns: AtomicU64,
+    /// How many seconds of media one second of playback covers, as `f64`
+    /// bits — see [`Self::set_rate`]. Written only under `state`'s lock,
+    /// together with the anchor it re-bases, so a reader holding the lock
+    /// sees the two agree.
+    rate_bits: AtomicU64,
 }
 
 #[derive(Default)]
@@ -131,7 +136,73 @@ impl PlaybackClock {
             }),
             presenters: Mutex::default(),
             presentation_delay_ns: AtomicU64::new(0),
+            rate_bits: AtomicU64::new(1.0f64.to_bits()),
         }
+    }
+
+    /// How many seconds of media one second of playback covers — 1.0 unless
+    /// [`Self::set_rate`] said otherwise.
+    pub(crate) fn rate(&self) -> f64 {
+        f64::from_bits(self.rate_bits.load(Ordering::Acquire))
+    }
+
+    /// Plays on at `rate` from where the position is now.
+    ///
+    /// The position is re-based on the moment of the change, so it neither
+    /// jumps nor is re-read against the time since the last anchor at the
+    /// new rate: what played before the change played at the old one. An
+    /// audio master's last sample is projected to now and re-sampled here
+    /// for the same reason; what it publishes next is its own, and already
+    /// counts the rate its sound was stretched at. `rate` is the caller's to
+    /// have checked — finite and positive.
+    pub(crate) fn set_rate(&self, rate: f64) {
+        let mut state = self.state.lock().unwrap();
+        let elapsed = self.wall_clock.elapsed();
+        let position = position_at(*state, elapsed, self.rate());
+        *state = match (*state, position) {
+            (
+                State::Wall {
+                    next_registration, ..
+                },
+                Some(anchor_ns),
+            ) => State::Wall {
+                anchor_ns,
+                anchor_elapsed: elapsed,
+                next_registration,
+            },
+            (
+                State::AudioFallback {
+                    registration,
+                    next_registration,
+                    ..
+                },
+                Some(anchor_ns),
+            ) => State::AudioFallback {
+                registration,
+                anchor_ns,
+                anchor_elapsed: elapsed,
+                next_registration,
+            },
+            (
+                State::Audio {
+                    registration,
+                    submitted_until_ns,
+                    running,
+                    next_registration,
+                    ..
+                },
+                Some(position_ns),
+            ) => State::Audio {
+                registration,
+                position_ns,
+                sampled_elapsed: elapsed,
+                submitted_until_ns,
+                running,
+                next_registration,
+            },
+            (other, _) => other,
+        };
+        self.rate_bits.store(rate.to_bits(), Ordering::Release);
     }
 
     /// How long after a video renderer is handed a picture it reaches the
@@ -192,7 +263,7 @@ impl PlaybackClock {
     /// [`crate::pipeline::Pipeline::position`].
     pub(crate) fn position_ns(&self) -> Option<i64> {
         let state = self.state.lock().unwrap();
-        position_at(*state, self.wall_clock.elapsed())
+        position_at(*state, self.wall_clock.elapsed(), self.rate())
     }
 
     /// Establishes a wall-clock media origin if no stream owns one yet.
@@ -209,7 +280,7 @@ impl PlaybackClock {
                 next_registration,
             };
         }
-        position_at(*state, self.wall_clock.elapsed())
+        position_at(*state, self.wall_clock.elapsed(), self.rate())
     }
 
     /// How long from now until `media_ns` is its turn.
@@ -247,14 +318,15 @@ impl PlaybackClock {
                 next_registration,
             };
         }
-        let Some(position) = position_at(*state, self.wall_clock.elapsed()) else {
+        let Some(position) = position_at(*state, self.wall_clock.elapsed(), self.rate()) else {
             return Duration::ZERO;
         };
         let ahead = media_ns.saturating_sub(position);
         if ahead <= 0 {
             return Duration::ZERO;
         }
-        Duration::from_nanos(ahead as u64)
+        // Media ahead, as the time it takes to play it at this rate.
+        Duration::from_nanos((ahead as f64 / self.rate()) as u64)
     }
 
     /// Moves the origin so that `media_ns` is due now.
@@ -306,7 +378,7 @@ impl PlaybackClock {
             State::AudioPriming { .. } => PlaybackMaster::AudioPriming,
             State::Audio { .. } => PlaybackMaster::Audio,
         };
-        (master, position_at(*state, elapsed))
+        (master, position_at(*state, elapsed, self.rate()))
     }
 
     /// Claims the timeline for one audio renderer. Unused in a build without
@@ -324,7 +396,7 @@ impl PlaybackClock {
             State::Wall {
                 next_registration, ..
             } => (
-                position_at(*state, elapsed),
+                position_at(*state, elapsed, self.rate()),
                 next_registration,
                 next_registration.wrapping_add(1),
             ),
@@ -400,7 +472,7 @@ impl PlaybackClock {
         if !matches {
             return;
         }
-        *state = match position_at(*state, elapsed) {
+        *state = match position_at(*state, elapsed, self.rate()) {
             Some(anchor_ns) => State::Wall {
                 anchor_ns,
                 anchor_elapsed: elapsed,
@@ -453,6 +525,11 @@ pub(crate) struct AudioMasterRegistration {
 
 #[allow(dead_code)]
 impl AudioMasterRegistration {
+    /// The rate playback goes at — what the renderer stretches its sound to.
+    pub(crate) fn rate(&self) -> f64 {
+        self.clock.rate()
+    }
+
     pub(crate) fn priming_target_ns(&self) -> Result<Option<i64>, PlaybackClockError> {
         match *self.clock.state.lock().unwrap() {
             State::AudioPriming {
@@ -573,7 +650,10 @@ impl Drop for AudioMasterRegistration {
     }
 }
 
-fn position_at(state: State, elapsed: Duration) -> Option<i64> {
+/// The position `state` puts at `elapsed`, media advancing `rate` times as
+/// fast as the pipeline's clock.
+fn position_at(state: State, elapsed: Duration, rate: f64) -> Option<i64> {
+    let add_duration = |value_ns: i64, duration: Duration| add_scaled(value_ns, duration, rate);
     match state {
         State::Unavailable { .. } => None,
         State::Wall {
@@ -610,8 +690,13 @@ fn position_at(state: State, elapsed: Duration) -> Option<i64> {
     }
 }
 
-fn add_duration(value_ns: i64, duration: Duration) -> i64 {
+fn add_scaled(value_ns: i64, duration: Duration, rate: f64) -> i64 {
     let delta = duration.as_nanos().min(i64::MAX as u128) as i64;
+    let delta = if rate == 1.0 {
+        delta
+    } else {
+        (delta as f64 * rate) as i64
+    };
     value_ns.saturating_add(delta)
 }
 
@@ -693,6 +778,58 @@ mod tests {
         audio.reset_for_seek().unwrap();
         assert_eq!(playback.master(), PlaybackMaster::AudioPriming);
         assert_eq!(playback.position_ns(), None);
+    }
+
+    /// At a rate, the position covers that much media for each second of
+    /// playback, from where it was when the rate changed: nothing played
+    /// before the change is counted again at the new rate.
+    #[test]
+    fn a_rate_moves_the_position_that_much_faster_from_where_it_was() {
+        let wall = Arc::new(Clock::new());
+        let playback = PlaybackClock::new(wall.clone());
+        playback.ensure_wall_origin(0);
+        thread::sleep(Duration::from_millis(100));
+        let before = playback.position_ns().unwrap();
+        playback.set_rate(2.0);
+        assert!(
+            playback.position_ns().unwrap() - before < 20_000_000,
+            "no jump at the change"
+        );
+        thread::sleep(Duration::from_millis(200));
+        let moved = playback.position_ns().unwrap() - before;
+        assert!(
+            (380_000_000..600_000_000).contains(&moved),
+            "200 ms at twice the rate is 400 ms of media, moved {moved}"
+        );
+        // And how long until a later moment: half the media ahead.
+        let at = playback.position_ns().unwrap();
+        let left = playback.remaining(at + 1_000_000_000);
+        assert!(
+            (Duration::from_millis(450)..=Duration::from_millis(500)).contains(&left),
+            "a second of media ahead at twice the rate: {left:?}"
+        );
+
+        wall.pause();
+        let paused = playback.position_ns().unwrap();
+        thread::sleep(Duration::from_millis(20));
+        assert_eq!(playback.position_ns(), Some(paused), "paused still holds");
+    }
+
+    /// An audio master's last sample is projected at the rate, and a change
+    /// re-bases it rather than re-reading the time since it was taken.
+    #[test]
+    fn an_audio_position_is_projected_at_the_rate() {
+        let wall = Arc::new(Clock::new());
+        let playback = Arc::new(PlaybackClock::new(wall));
+        let audio = playback.register_audio_master().unwrap();
+        audio.publish(1_000_000_000, 10_000_000_000, true).unwrap();
+        playback.set_rate(0.5);
+        thread::sleep(Duration::from_millis(200));
+        let moved = playback.position_ns().unwrap() - 1_000_000_000;
+        assert!(
+            (90_000_000..150_000_000).contains(&moved),
+            "200 ms at half the rate is 100 ms of media, moved {moved}"
+        );
     }
 
     /// The delay a synchronizer schedules by is the largest any renderer

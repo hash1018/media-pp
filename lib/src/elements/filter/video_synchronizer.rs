@@ -181,12 +181,16 @@ impl VideoSynchronizer {
             return Decision::Render;
         };
         let (master, position) = playback_clock.video_snapshot(frame_ns);
+        // Media ahead is waited out as the time it takes to play it: at twice
+        // the rate, half as long.
+        let rate = playback_clock.rate();
+        let wait = |ahead_ns: i64| Decision::Wait(ns_duration((ahead_ns as f64 / rate) as i64));
         match master {
             PlaybackMaster::Unavailable => Decision::Render,
             PlaybackMaster::AudioPriming => Decision::Hold,
             PlaybackMaster::Wall => match position {
                 Some(position_ns) if frame_ns > position_ns => {
-                    Decision::Wait(ns_duration(frame_ns.saturating_sub(position_ns)))
+                    wait(frame_ns.saturating_sub(position_ns))
                 }
                 _ => Decision::Render,
             },
@@ -197,10 +201,13 @@ impl VideoSynchronizer {
                 // Handed over early by what the renderer takes to show it, so
                 // it is on the screen when its sound is heard — the audio
                 // position is already what the listener hears, device and all.
-                let frame_ns =
-                    frame_ns.saturating_sub(duration_ns(playback_clock.presentation_delay()));
+                // That delay is the screen's, in playback time: at a rate it
+                // covers that much more media.
+                let delay_ns =
+                    (duration_ns(playback_clock.presentation_delay()) as f64 * rate) as i64;
+                let frame_ns = frame_ns.saturating_sub(delay_ns);
                 if frame_ns > position_ns {
-                    Decision::Wait(ns_duration(frame_ns.saturating_sub(position_ns)))
+                    wait(frame_ns.saturating_sub(position_ns))
                 } else if position_ns.saturating_sub(frame_ns) > duration_ns(self.frame_duration) {
                     Decision::Drop
                 } else {
@@ -367,6 +374,34 @@ mod tests {
         audio.publish(2_000_000_000, 3_000_000_000, false).unwrap();
         assert!(matches!(sync.decision(ms(1_000)), Decision::Drop));
         assert!(matches!(sync.decision(ms(2_010)), Decision::Wait(_)));
+    }
+
+    /// At twice the rate a frame 100 ms of media ahead is 50 ms away, and the
+    /// renderer's delay is twice as much media: at that rate, 20 ms of it
+    /// covers 40.
+    #[test]
+    fn a_rate_waits_out_media_in_the_time_it_takes_to_play() {
+        let (mut sync, playback) = synchronizer();
+        assert!(matches!(sync.decision(ms(0)), Decision::Render));
+        playback.set_rate(2.0);
+        let Decision::Wait(wait) = sync.decision(ms(100)) else {
+            panic!("a frame ahead waits");
+        };
+        assert!(
+            (Duration::from_millis(40)..=Duration::from_millis(52)).contains(&wait),
+            "{wait:?}"
+        );
+
+        let (mut sync, playback) = synchronizer();
+        let audio = playback.register_audio_master().unwrap();
+        audio.publish(2_000_000_000, 3_000_000_000, false).unwrap();
+        let screen = playback.register_presenter();
+        screen.publish(Duration::from_millis(20));
+        playback.set_rate(2.0);
+        assert!(
+            matches!(sync.decision(ms(2_035)), Decision::Render),
+            "35 ms ahead, inside the 40 the delay covers at twice the rate"
+        );
     }
 
     /// With a renderer that takes 20 ms to show a picture, a frame due 15 ms

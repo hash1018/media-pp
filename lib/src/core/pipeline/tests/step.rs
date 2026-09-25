@@ -13,14 +13,14 @@ fn picture(at: Duration) -> u64 {
 
 /// Notes where in its media every frame it takes is, pictures and sound
 /// alike.
-struct Taker {
+pub(super) struct Taker {
     name: Arc<str>,
     pp_log: PpLog,
     taken: Arc<Mutex<Vec<Duration>>>,
 }
 
 impl Taker {
-    fn new(name: &str) -> (Self, Arc<Mutex<Vec<Duration>>>) {
+    pub(super) fn new(name: &str) -> (Self, Arc<Mutex<Vec<Duration>>>) {
         let taken = Arc::new(Mutex::new(Vec::new()));
         let taker = Self {
             name: name.into(),

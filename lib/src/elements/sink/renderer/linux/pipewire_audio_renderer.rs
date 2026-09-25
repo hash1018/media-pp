@@ -25,6 +25,7 @@ use crate::{
     control::ControlMsg,
     element::{Element, ElementType, Sink, element_pp_log},
     elements::AudioFormat,
+    elements::sink::renderer::audio_rate::{Piece, PlayedMedia, Stretcher},
     error::Result,
     platform::linux::pipewire::{
         PipeWireAudioDevice, PipeWireAudioDeviceKind, PipeWireDeviceError,
@@ -126,6 +127,10 @@ pub enum PipeWireAudioRendererError {
     #[error("audio frame data is too short: need {expected} byte(s), got {actual}")]
     FrameDataTooShort { expected: usize, actual: usize },
 
+    /// Stretching the sound to the playback rate failed in FFmpeg.
+    #[error("stretching the sound to the playback rate failed: {0}")]
+    Stretch(ffmpeg::Error),
+
     #[error(transparent)]
     PlaybackClock(#[from] PlaybackClockError),
 
@@ -162,6 +167,15 @@ impl PlaybackClockBinding {
         match self {
             Self::Registered(master) => Some(master),
             Self::Unbound | Self::Deferred(_) => None,
+        }
+    }
+
+    /// The rate playback goes at, 1.0 for a renderer no pipeline wired.
+    fn rate(&self) -> f64 {
+        match self {
+            Self::Unbound => 1.0,
+            Self::Deferred(clock) => clock.rate(),
+            Self::Registered(master) => master.rate(),
         }
     }
 
@@ -383,6 +397,8 @@ pub struct PipeWireAudioRenderer {
     /// Media timestamp the first submitted frame carried, and how far the
     /// submitted range now extends. `None` until the first frame with a `pts`.
     timeline: Option<Timeline>,
+    /// The sound at the playback rate — see [`Pipeline::set_rate`](crate::pipeline::Pipeline::set_rate).
+    stretcher: Stretcher,
     /// Ends the PipeWire thread's main loop. `Option` only so `Drop` can take
     /// it; always `Some` while this element is alive.
     commands: Option<pw::channel::Sender<Command>>,
@@ -391,10 +407,10 @@ pub struct PipeWireAudioRenderer {
 }
 
 struct Timeline {
-    /// `pts` of the first frame, in nanoseconds.
-    media_origin_ns: i64,
-    /// How far the *submitted* media extends, whether or not it has played.
-    submitted_until_ns: i64,
+    /// Which media the frames submitted since `played_origin` stand for, from
+    /// the first frame's `pts` on, and how far it extends whether or not it
+    /// has played.
+    media: PlayedMedia,
     /// `played_frames` when this timeline began, so a rebase after an underrun
     /// does not count the intervening silence as media time.
     played_origin: u64,
@@ -519,6 +535,7 @@ impl PipeWireAudioRenderer {
                 clock_binding: PlaybackClockBinding::Unbound,
                 primed: false,
                 timeline: None,
+                stretcher: Stretcher::new(format),
                 commands: Some(command_tx),
                 worker: Some(worker),
             },
@@ -561,11 +578,9 @@ impl PipeWireAudioRenderer {
             .saturating_sub(timeline.played_origin);
         let latency = self.playback.latency_frames.load(Ordering::Acquire);
         let audible = played.saturating_sub(latency);
-        let position_ns = timeline
-            .media_origin_ns
-            .saturating_add(self.frames_ns(audible));
+        let position_ns = timeline.media.media_at(audible);
         master
-            .publish(position_ns, timeline.submitted_until_ns, running)
+            .publish(position_ns, timeline.media.handed_until(), running)
             .map_err(PipeWireAudioRendererError::from)?;
         Ok(())
     }
@@ -604,6 +619,59 @@ impl PipeWireAudioRenderer {
             .ensure_registered()
             .map_err(PipeWireAudioRendererError::from)?;
 
+        let pts_ns = if self.clock_binding.registration().is_some() {
+            Some(self.audio_pts_ns(frame)?)
+        } else {
+            frame.pts().map(|pts| self.frames_ns(pts.max(0) as u64))
+        };
+        // At the file's own speed the frame goes as it came; at a rate, it is
+        // stretched to it first.
+        let rate = self.clock_binding.rate();
+        if self.stretcher.passes(rate) {
+            return self.queue(frame, pts_ns, 1.0);
+        }
+        let pieces = self
+            .stretcher
+            .stretch(frame, pts_ns.unwrap_or(0), rate)
+            .map_err(PipeWireAudioRendererError::Stretch)?;
+        self.queue_pieces(pieces, Some(frame), pts_ns)
+    }
+
+    /// Queues what the stretcher answered, in order: `input` for
+    /// [`Piece::AsIs`], at `pts_ns`.
+    fn queue_pieces(
+        &mut self,
+        pieces: Vec<Piece>,
+        input: Option<&ffmpeg::frame::Audio>,
+        pts_ns: Option<i64>,
+    ) -> Result<()> {
+        let timed = self.clock_binding.registration().is_some();
+        for piece in pieces {
+            match piece {
+                Piece::AsIs => {
+                    if let Some(input) = input {
+                        self.queue(input, pts_ns, 1.0)?;
+                    }
+                }
+                Piece::Stretched {
+                    frame,
+                    media_ns,
+                    rate,
+                } => self.queue(&frame, timed.then_some(media_ns), rate)?,
+            }
+        }
+        Ok(())
+    }
+
+    /// Hands `frame` to the PipeWire thread, waiting while its queue is full.
+    /// Its first sample is at `pts_ns` in the media, and each sample of it
+    /// stands for `rate` samples' worth.
+    fn queue(
+        &mut self,
+        frame: &ffmpeg::frame::Audio,
+        pts_ns: Option<i64>,
+        rate: f64,
+    ) -> Result<()> {
         let bytes_per_frame = self.format.channels as usize * self.format.sample_format.bytes();
         let tight = frame.samples() * bytes_per_frame;
         let plane = frame.data(0);
@@ -616,11 +684,6 @@ impl PipeWireAudioRenderer {
         }
         let payload = plane[..tight].to_vec();
 
-        let pts_ns = if self.clock_binding.registration().is_some() {
-            Some(self.audio_pts_ns(frame)?)
-        } else {
-            frame.pts().map(|pts| self.frames_ns(pts.max(0) as u64))
-        };
         let played_origin = self.playback.played_frames.load(Ordering::Acquire);
 
         // Counted before the send, not after: the callback may consume this
@@ -665,17 +728,14 @@ impl PipeWireAudioRenderer {
         // origin was sampled before sending so a very fast callback cannot
         // make the first frame appear to start after itself.
         if let Some(pts_ns) = pts_ns {
-            let end_ns = pts_ns.saturating_add(self.frames_ns(frame.samples() as u64));
-            match &mut self.timeline {
-                Some(timeline) => timeline.submitted_until_ns = end_ns,
-                None => {
-                    self.timeline = Some(Timeline {
-                        media_origin_ns: pts_ns,
-                        submitted_until_ns: end_ns,
-                        played_origin,
-                    })
-                }
-            }
+            let sample_rate = self.format.sample_rate;
+            self.timeline
+                .get_or_insert_with(|| Timeline {
+                    media: PlayedMedia::new(sample_rate, pts_ns),
+                    played_origin,
+                })
+                .media
+                .push(frame.samples() as u64, rate);
         }
         self.start_once_primed()?;
         self.publish_position(true)?;
@@ -703,6 +763,12 @@ impl PipeWireAudioRenderer {
     /// Waits for everything already queued to reach the device, then reports
     /// the final position to the playback clock.
     fn drain(&mut self) -> Result<()> {
+        // What the stretcher still holds is the end of the sound too.
+        let pieces = self
+            .stretcher
+            .finish()
+            .map_err(PipeWireAudioRendererError::Stretch)?;
+        self.queue_pieces(pieces, None, None)?;
         // A stream shorter than `PRIME_FRAMES` never reached the threshold;
         // start it now or its audio would never play at all.
         if !self.primed {
@@ -741,7 +807,7 @@ impl PipeWireAudioRenderer {
         let final_position = self
             .timeline
             .as_ref()
-            .map(|timeline| timeline.submitted_until_ns);
+            .map(|timeline| timeline.media.handed_until());
         if let (Some(master), Some(final_position)) =
             (self.clock_binding.registration(), final_position)
         {
@@ -909,6 +975,7 @@ impl Sink for PipeWireAudioRenderer {
                 }
                 let position_result = self.publish_position(false);
                 self.timeline = None;
+                self.stretcher.reset();
                 self.primed = false;
                 position_result?;
             }
@@ -916,6 +983,7 @@ impl Sink for PipeWireAudioRenderer {
                 // Discard everything queued from the old timeline.
                 self.flush()?;
                 self.timeline = None;
+                self.stretcher.reset();
             }
             ControlMsg::Seek(_) | ControlMsg::Preroll(_) => {}
         }

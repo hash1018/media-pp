@@ -5,6 +5,12 @@
 //! `media-pp`'s own type — always available regardless of which, if
 //! either, renderer feature is on).
 
+#[cfg(any(
+    test,
+    all(target_os = "windows", feature = "wasapi-renderer"),
+    all(target_os = "linux", feature = "pipewire-audio-renderer")
+))]
+mod audio_rate;
 #[cfg(feature = "cuda")]
 mod cuda;
 #[cfg(all(target_os = "linux", feature = "pipewire-audio-renderer"))]

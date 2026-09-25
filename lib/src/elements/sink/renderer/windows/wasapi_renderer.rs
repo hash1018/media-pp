@@ -16,6 +16,7 @@ use crate::{
     contract::{InputContract, MediaKind, MemoryDomain, PortContract},
     control::ControlMsg,
     element::{Element, ElementType, Sink, element_pp_log},
+    elements::sink::renderer::audio_rate::{Piece, PlayedMedia, Stretcher},
     elements::{AudioFormat, WasapiDevice, WasapiDeviceKind},
     error::Result,
     platform::windows::wasapi::{
@@ -108,6 +109,10 @@ pub enum WasapiRendererError {
 
     #[error("WASAPI reported an invalid audio-clock frequency of {0}")]
     InvalidClockFrequency(u64),
+    /// Stretching the sound to the playback rate failed in FFmpeg.
+
+    #[error("stretching the sound to the playback rate failed: {0}")]
+    Stretch(ffmpeg::Error),
 }
 
 /// Terminal audio sink backed by a WASAPI shared-mode render endpoint.
@@ -143,6 +148,8 @@ pub struct WasapiRenderer {
     paused: bool,
     clock_binding: PlaybackClockBinding,
     timeline: Option<DeviceTimeline>,
+    /// The sound at the playback rate — see [`Pipeline::set_rate`](crate::pipeline::Pipeline::set_rate).
+    stretcher: Stretcher,
 }
 
 enum PlaybackClockBinding {
@@ -163,6 +170,15 @@ impl PlaybackClockBinding {
         }
     }
 
+    /// The rate playback goes at, 1.0 for a renderer no pipeline wired.
+    fn rate(&self) -> f64 {
+        match self {
+            Self::Unbound => 1.0,
+            Self::Deferred(clock) => clock.rate(),
+            Self::Registered(master) => master.rate(),
+        }
+    }
+
     fn ensure_registered(&mut self) -> std::result::Result<(), PlaybackClockError> {
         let registration = match self {
             Self::Deferred(playback_clock) => Some(playback_clock.register_audio_master()?),
@@ -177,8 +193,8 @@ impl PlaybackClockBinding {
 
 struct DeviceTimeline {
     device_origin: u64,
-    media_origin_ns: i64,
-    submitted_until_ns: i64,
+    /// Which media the samples handed over since `device_origin` stand for.
+    media: PlayedMedia,
 }
 
 // SAFETY: WASAPI client interfaces are free-threaded. Every method that
@@ -272,6 +288,7 @@ impl WasapiRenderer {
                 paused: false,
                 clock_binding: PlaybackClockBinding::Unbound,
                 timeline: None,
+                stretcher: Stretcher::new(format),
             },
             format,
         ))
@@ -319,6 +336,7 @@ impl WasapiRenderer {
         // resetting its queued audio.
         unsafe { self.audio_client.Reset() }.map_err(|error| self.classify_error(error))?;
         self.timeline = None;
+        self.stretcher.reset();
         Ok(())
     }
 
@@ -331,22 +349,24 @@ impl WasapiRenderer {
         Ok(position)
     }
 
-    fn publish_device_position(&self, running: bool) -> Result<()> {
-        let (Some(master), Some(timeline)) = (self.clock_binding.registration(), &self.timeline)
+    fn publish_device_position(&mut self, running: bool) -> Result<()> {
+        if self.clock_binding.registration().is_none() || self.timeline.is_none() {
+            return Ok(());
+        }
+        let position = self.device_position()?;
+        let (Some(master), Some(timeline)) =
+            (self.clock_binding.registration(), &mut self.timeline)
         else {
             return Ok(());
         };
-        let position = self.device_position()?;
         let device_delta = position.saturating_sub(timeline.device_origin);
-        let elapsed_ns = ((u128::from(device_delta) * 1_000_000_000u128)
+        // The device's clock, as the samples it has played.
+        let played = ((u128::from(device_delta) * u128::from(self.format.sample_rate))
             / u128::from(self.audio_clock_frequency))
-        .min(i64::MAX as u128) as i64;
+        .min(u128::from(u64::MAX)) as u64;
+        let position_ns = timeline.media.played(played);
         master
-            .publish(
-                timeline.media_origin_ns.saturating_add(elapsed_ns),
-                timeline.submitted_until_ns,
-                running,
-            )
+            .publish(position_ns, timeline.media.handed_until(), running)
             .map_err(WasapiRendererError::from)?;
         Ok(())
     }
@@ -367,13 +387,12 @@ impl WasapiRenderer {
     }
 
     fn render(&mut self, frame: &ffmpeg::frame::Audio) -> Result<()> {
-        let bytes = validate_frame(self.format, frame)?;
+        validate_frame(self.format, frame)?;
         if frame.samples() == 0 || self.paused {
             return Ok(());
         }
         self.ensure_playback_master()?;
 
-        let bytes_per_frame = self.format.sample_format.bytes() * self.format.channels as usize;
         let frame_pts_ns = if self.clock_binding.registration().is_some() {
             Some(self.audio_pts_ns(frame)?)
         } else {
@@ -396,6 +415,66 @@ impl WasapiRenderer {
             }
         }
 
+        // At the file's own speed the frame goes as it came. At a rate, what
+        // is left of it after the trim is stretched to it first.
+        let rate = self.clock_binding.rate();
+        if self.stretcher.passes(rate) {
+            return self.submit(frame, frame_offset, frame_pts_ns, 1.0);
+        }
+        let trimmed;
+        let input = if frame_offset > 0 {
+            trimmed = trim(self.format, frame, frame_offset);
+            &trimmed
+        } else {
+            frame
+        };
+        let media_ns =
+            frame_pts_ns.map(|pts| pts.saturating_add(self.sample_offset_ns(frame_offset)));
+        let pieces = self
+            .stretcher
+            .stretch(input, media_ns.unwrap_or(0), rate)
+            .map_err(WasapiRendererError::Stretch)?;
+        self.submit_pieces(pieces, Some(input), media_ns)
+    }
+
+    /// Hands the device what the stretcher answered, in order: `input` for
+    /// [`Piece::AsIs`], at `media_ns`.
+    fn submit_pieces(
+        &mut self,
+        pieces: Vec<Piece>,
+        input: Option<&ffmpeg::frame::Audio>,
+        media_ns: Option<i64>,
+    ) -> Result<()> {
+        let timed = self.clock_binding.registration().is_some();
+        for piece in pieces {
+            match piece {
+                Piece::AsIs => {
+                    if let Some(input) = input {
+                        self.submit(input, 0, media_ns, 1.0)?;
+                    }
+                }
+                Piece::Stretched {
+                    frame,
+                    media_ns: stretched_ns,
+                    rate,
+                } => self.submit(&frame, 0, timed.then_some(stretched_ns), rate)?,
+            }
+        }
+        Ok(())
+    }
+
+    /// Writes `frame` from `frame_offset` on to the device, waiting for room
+    /// as it goes. Its first sample is at `frame_pts_ns` in the media, and
+    /// each sample of it stands for `rate` samples' worth.
+    fn submit(
+        &mut self,
+        frame: &ffmpeg::frame::Audio,
+        mut frame_offset: usize,
+        frame_pts_ns: Option<i64>,
+        rate: f64,
+    ) -> Result<()> {
+        let bytes = validate_frame(self.format, frame)?;
+        let bytes_per_frame = self.format.sample_format.bytes() * self.format.channels as usize;
         while frame_offset < frame.samples() {
             // SAFETY: the initialized live client returns padding by value;
             // this renderer serializes access to it.
@@ -437,17 +516,18 @@ impl WasapiRenderer {
             unsafe { self.render_client.ReleaseBuffer(take as u32, 0) }
                 .map_err(|error| self.classify_error(error))?;
             if let Some(frame_pts_ns) = frame_pts_ns {
-                let submitted_until_ns = frame_pts_ns
-                    .saturating_add(self.sample_offset_ns(frame_offset.saturating_add(take)));
-                if !rebase_timeline && let Some(timeline) = &mut self.timeline {
-                    timeline.submitted_until_ns = submitted_until_ns;
-                } else {
+                if rebase_timeline || self.timeline.is_none() {
+                    let offset_ns = (self.sample_offset_ns(frame_offset) as f64 * rate) as i64;
                     self.timeline = Some(DeviceTimeline {
                         device_origin: self.device_position()?,
-                        media_origin_ns: frame_pts_ns
-                            .saturating_add(self.sample_offset_ns(frame_offset)),
-                        submitted_until_ns,
+                        media: PlayedMedia::new(
+                            self.format.sample_rate,
+                            frame_pts_ns.saturating_add(offset_ns),
+                        ),
                     });
+                }
+                if let Some(timeline) = &mut self.timeline {
+                    timeline.media.push(take as u64, rate);
                 }
             }
             frame_offset += take;
@@ -458,6 +538,14 @@ impl WasapiRenderer {
     }
 
     fn drain(&mut self) -> Result<()> {
+        // What the stretcher still holds is the end of the sound too.
+        let pieces = self
+            .stretcher
+            .finish()
+            .map_err(WasapiRendererError::Stretch)?;
+        if !self.paused {
+            self.submit_pieces(pieces, None, None)?;
+        }
         // SAFETY: the initialized live client returns its current padding by
         // value and this renderer serializes calls.
         let padding = unsafe { self.audio_client.GetCurrentPadding() }
@@ -480,7 +568,7 @@ impl WasapiRenderer {
         let final_position = self
             .timeline
             .as_ref()
-            .map(|timeline| timeline.submitted_until_ns);
+            .map(|timeline| timeline.media.handed_until());
         self.stop_and_reset()?;
         if let (Some(master), Some(final_position)) =
             (self.clock_binding.registration(), final_position)
@@ -509,6 +597,19 @@ fn validate_frame(
         .data(0)
         .get(..tight_bytes)
         .ok_or(WasapiRendererError::TruncatedFrame)
+}
+
+/// `frame` from its `offset`th sample on, as a frame of its own.
+fn trim(format: AudioFormat, frame: &ffmpeg::frame::Audio, offset: usize) -> ffmpeg::frame::Audio {
+    let samples = frame.samples() - offset;
+    let mut trimmed =
+        ffmpeg::frame::Audio::new(format.sample_format, samples, frame.channel_layout());
+    trimmed.set_rate(format.sample_rate);
+    let bytes_per_frame = format.sample_format.bytes() * format.channels as usize;
+    let from = offset * bytes_per_frame;
+    let len = samples * bytes_per_frame;
+    trimmed.data_mut(0)[..len].copy_from_slice(&frame.data(0)[from..from + len]);
+    trimmed
 }
 
 fn priming_trim_samples(frame_pts_ns: i64, target_ns: i64, sample_rate: u32) -> usize {
@@ -629,6 +730,7 @@ impl Sink for WasapiRenderer {
                 // required state for `Reset`.
                 unsafe { self.audio_client.Reset() }.map_err(|error| self.classify_error(error))?;
                 self.timeline = None;
+                self.stretcher.reset();
                 if let Some(master) = self.clock_binding.registration() {
                     master.reset_for_seek().map_err(WasapiRendererError::from)?;
                 }

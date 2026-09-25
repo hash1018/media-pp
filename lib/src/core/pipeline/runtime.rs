@@ -48,6 +48,12 @@ pub enum PipelineError {
     /// there is neither a picture to step nor a place to step it from.
     #[error("nothing in this pipeline has shown a picture yet, so there is none to step")]
     NoPicture,
+
+    /// [`Pipeline::set_rate`] was asked for a rate outside
+    /// [`Pipeline::MIN_RATE`]..=[`Pipeline::MAX_RATE`], or one that is not a
+    /// number. Playing backwards is not yet something a pipeline does.
+    #[error("a playback rate has to be between 0.25 and 4")]
+    UnsupportedRate,
 }
 
 /// Top-level pipeline: one or more sources (see [`PipelineBuilder`], with

@@ -110,9 +110,13 @@ pub enum Key {
     Up,
     /// Down arrow.
     Down,
-    /// A letter (lowercase), a digit, or the full stop, comma or minus — the
-    /// three punctuation keys every keyboard layout has a key of its own
-    /// for, and what a player steps and zooms with.
+    /// Backspace.
+    Backspace,
+    /// A letter (lowercase), a digit, or the full stop, comma, minus or plus
+    /// — the four punctuation keys every keyboard layout has a key of its
+    /// own for, and what a player steps and changes its speed with. The plus
+    /// is the key Windows calls that on every layout, which on a US keyboard
+    /// says `=` unshifted.
     Char(char),
     /// Any other key, by the platform's own code for it — on Windows, the
     /// virtual-key code; on Linux, the X11 keysym.
@@ -131,10 +135,12 @@ impl Key {
             0x26 => Self::Up,
             0x27 => Self::Right,
             0x28 => Self::Down,
+            0x08 => Self::Backspace,
             0x30..=0x39 => Self::Char(char::from(code as u8)),
             0x41..=0x5A => Self::Char(char::from(code as u8).to_ascii_lowercase()),
-            // VK_OEM_COMMA, VK_OEM_MINUS, VK_OEM_PERIOD: the one virtual-key
-            // codes Windows defines as the same key on every layout.
+            // VK_OEM_PLUS, VK_OEM_COMMA, VK_OEM_MINUS, VK_OEM_PERIOD: the one
+            // virtual-key codes Windows defines as the same key on every layout.
+            0xBB => Self::Char('+'),
             0xBC => Self::Char(','),
             0xBD => Self::Char('-'),
             0xBE => Self::Char('.'),
@@ -153,11 +159,14 @@ impl Key {
             0xFF52 => Self::Up,
             0xFF53 => Self::Right,
             0xFF54 => Self::Down,
+            0xFF08 => Self::Backspace,
             0x0030..=0x0039 | 0x0061..=0x007A => Self::Char(char::from(keysym as u8)),
             0x0041..=0x005A => Self::Char(char::from(keysym as u8).to_ascii_lowercase()),
-            // The same three punctuation keys as on Windows, and no more, so a
-            // program reads the same keys on both.
+            // The same four punctuation keys as on Windows, and no more, so a
+            // program reads the same keys on both. The plus key says `=`
+            // unshifted on a US layout and `+` on most others.
             0x002C..=0x002E => Self::Char(char::from(keysym as u8)),
+            0x002B | 0x003D => Self::Char('+'),
             other => Self::Other(other),
         }
     }
@@ -255,6 +264,10 @@ mod tests {
         assert_eq!(Key::from_keysym(0x2E), Key::Char('.'));
         assert_eq!(Key::from_keysym(0x2C), Key::Char(','));
         assert_eq!(Key::from_keysym(0x2D), Key::Char('-'));
+        // And its speed keys.
+        assert_eq!(Key::from_keysym(0x3D), Key::Char('+'));
+        assert_eq!(Key::from_keysym(0x2B), Key::Char('+'));
+        assert_eq!(Key::from_keysym(0xFF08), Key::Backspace);
         assert_eq!(Key::from_keysym(0x2F), Key::Other(0x2F));
         assert_eq!(Key::from_keysym(0xFFBE), Key::Other(0xFFBE));
     }
@@ -272,7 +285,9 @@ mod tests {
         assert_eq!(Key::from_virtual_key(0xBE), Key::Char('.'));
         assert_eq!(Key::from_virtual_key(0xBC), Key::Char(','));
         assert_eq!(Key::from_virtual_key(0xBD), Key::Char('-'));
-        assert_eq!(Key::from_virtual_key(0xBB), Key::Other(0xBB));
+        // And its speed keys.
+        assert_eq!(Key::from_virtual_key(0xBB), Key::Char('+'));
+        assert_eq!(Key::from_virtual_key(0x08), Key::Backspace);
         assert_eq!(Key::from_virtual_key(0x70), Key::Other(0x70));
     }
 }

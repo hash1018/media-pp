@@ -110,7 +110,7 @@ fn main() -> media_pp::Result<()> {
     player.play()?;
     while let Some(event) = player.next_event() {
         match event {
-            // Space, arrows, `.` and `,`, F, a double click; `false` for
+            // Space, arrows, `.` `,` `-` `+`, F, a double click; `false` for
             // Escape or a close.
             PlayerEvent::Window(event) if !player.respond_to(&event) => break,
             PlayerEvent::Ended => break,

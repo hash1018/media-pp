@@ -56,6 +56,12 @@ pub(super) struct PrerollGate {
     active: bool,
     /// Exact target for accurate seek. `None` also covers keyframe preroll;
     /// `active` distinguishes that from ordinary playback.
+    ///
+    /// Kept past the end of a preroll this decoder never reached it in — a
+    /// step back's, which waits on the pictures and not on the sound — and
+    /// what precedes it is dropped until a sample reaches it, as it would
+    /// have been during the preroll. Let go at the end of the preroll, the
+    /// sound from before the target played on once playback went on.
     target_ns: Option<i64>,
     /// Whether this decoder already forwarded its one sample for the active
     /// preroll. A decoder may return several frames from one `receive_frame`
@@ -116,7 +122,11 @@ impl PrerollGate {
             }
             None => {
                 if self.armed.take().is_some() {
+                    // Still owed where the preroll ended before this decoder
+                    // reached its target — see `target_ns`.
+                    let owed = self.target_ns.filter(|_| !self.delivered);
                     self.clear();
+                    self.target_ns = owed;
                 }
             }
         }
@@ -197,10 +207,10 @@ impl PrerollGate {
 
     /// Admits one decoded sample, retaining at most one pre-target candidate.
     fn admit(&mut self, buffer: MediaBuffer) -> Option<MediaBuffer> {
-        if !self.active {
+        if !self.active && self.target_ns.is_none() {
             return Some(buffer);
         }
-        if self.delivered {
+        if self.active && self.delivered {
             // Kept rather than dropped — see `after`.
             self.after.push_back(buffer);
             return None;
@@ -238,12 +248,23 @@ impl PrerollGate {
         // requested instant; do not discard the whole frame just because its
         // first sample precedes the target.
         if audio_end_ns.is_some_and(|end| start_ns <= target_ns && end > target_ns) {
+            if !self.active {
+                self.target_ns = None;
+            }
             return Some(buffer);
         }
 
         if start_ns < target_ns {
-            self.candidate = Some(buffer);
+            // Outside a preroll there is nothing to select, only what is from
+            // before the target to drop.
+            if self.active {
+                self.candidate = Some(buffer);
+            }
             return None;
+        }
+        if !self.active {
+            self.target_ns = None;
+            return Some(buffer);
         }
 
         if start_ns > target_ns
@@ -355,6 +376,8 @@ impl PrerollGate {
 mod tests {
     use std::time::Duration;
 
+    use crate::control::ControlMsg;
+
     use super::*;
     use crate::pool::UnboundObjectPool;
 
@@ -450,6 +473,48 @@ mod tests {
             panic!("selected a non-video buffer");
         };
         assert_eq!(selected.pts(), Some(1_967));
+    }
+
+    /// A preroll that ends before this decoder reached its target — a step
+    /// back's, which waits on the pictures and not on the sound — leaves it
+    /// dropping what precedes the target until something reaches it; then it
+    /// passes everything again. A preroll it did reach its target in leaves
+    /// nothing owed.
+    #[test]
+    fn a_target_not_reached_in_the_preroll_is_still_owed_after_it() {
+        let state = PlaybackState::new();
+        let mut gate = PrerollGate::default();
+        gate.attach(&state);
+        gate.observe_packet(&millis(ffmpeg::Rational(1, 1_000)));
+        let preroll = ControlMsg::Preroll(Arc::new(PrerollContext::for_seek(
+            [],
+            Duration::from_secs(2),
+        )));
+        state.observe(&preroll);
+        let mut pushed = Vec::new();
+        let mut push = |pts: i64, gate: &mut PrerollGate| {
+            gate.push_admitted(video(pts), |buffer| {
+                if let MediaBuffer::Video(frame) = &buffer {
+                    pushed.push(frame.pts().unwrap_or(-1));
+                }
+                Ok::<(), ()>(())
+            })
+            .unwrap();
+        };
+        push(1_000, &mut gate);
+        // The preroll ends, and playback goes on, before this reached 2 s.
+        state.observe(&ControlMsg::Pause);
+        state.observe(&ControlMsg::Resume);
+        push(1_500, &mut gate);
+        push(2_000, &mut gate);
+        push(2_033, &mut gate);
+        assert_eq!(pushed, [2_000, 2_033], "nothing from before the target");
+
+        // Reached within the preroll: nothing owed once it is over.
+        state.observe(&preroll);
+        state.observe(&ControlMsg::Pause);
+        state.observe(&ControlMsg::Resume);
+        assert!(gate.target_ns.is_none());
     }
 
     /// What is decoded after the preroll's sample is not dropped: it follows

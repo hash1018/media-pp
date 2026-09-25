@@ -8,8 +8,9 @@
 //! A file with only sound plays too, its waveform in the window.
 //!
 //! Space pauses and plays, the left and right arrows move five seconds, the
-//! full stop and the comma step a picture on and back, the up and down
-//! arrows turn the volume, M mutes, F or a double click fills the screen,
+//! full stop and the comma step a picture on and back, the minus and plus
+//! play slower and faster and Backspace at the file's own speed, the up and
+//! down arrows turn the volume, M mutes, F or a double click fills the screen,
 //! Escape or closing the window stops; the title shows where
 //! playback is. One program for Windows and Linux.
 //!

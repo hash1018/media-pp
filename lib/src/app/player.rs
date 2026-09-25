@@ -49,6 +49,8 @@ use crate::{
 const ARROW_STEP: Duration = Duration::from_secs(5);
 /// How far [`Player::respond_to`] turns the volume on an arrow key.
 const VOLUME_STEP: f32 = 0.1;
+/// How far [`Player::respond_to`] changes the speed on the minus and plus.
+const RATE_STEP: f64 = 0.25;
 
 /// How many decoded pictures wait between the decoder and the synchronizer
 /// when they are on the GPU: enough to ride out a slow packet, few enough
@@ -428,6 +430,20 @@ impl Player {
         Ok(at)
     }
 
+    /// Plays at `rate` times the file's own speed, from where playback is,
+    /// the sound at its own pitch — see [`Pipeline::set_rate`]. Between
+    /// [`Pipeline::MIN_RATE`] and [`Pipeline::MAX_RATE`]; a seek, a step and
+    /// a pause keep it.
+    pub fn set_rate(&self, rate: f64) -> Result<(), PlayerError> {
+        self.pipeline.set_rate(rate)?;
+        Ok(())
+    }
+
+    /// How fast it plays, as [`Self::set_rate`] set it — 1.0 to begin with.
+    pub fn rate(&self) -> f64 {
+        self.pipeline.rate()
+    }
+
     /// Where playback is in the file — `None` before the first picture is
     /// due. After a seek, where it went, until playback has moved on from
     /// there. While looping, where it is in the lap it is on. At the end,
@@ -609,9 +625,11 @@ impl Player {
     /// Does what a player usually does with a window event, and says whether
     /// to go on: Space pauses and plays, F or a double click fills the screen
     /// and puts it back, the left and right arrows move five seconds, the
-    /// full stop and the comma step a picture on and back, the up and down
-    /// arrows turn the volume up and down a tenth, M mutes and unmutes, and
-    /// Escape or closing the window answer `false` — the
+    /// full stop and the comma step a picture on and back, the minus and
+    /// plus play a quarter slower and faster and Backspace at the file's own
+    /// speed again, the up and down arrows turn the volume up and down a
+    /// tenth, M mutes and unmutes, and Escape or closing the window answer
+    /// `false` — the
     /// caller's to act on, by stopping or dropping the player. Anything else
     /// is left alone.
     pub fn respond_to(&self, event: &WindowEvent) -> bool {
@@ -644,6 +662,15 @@ impl Player {
             }
             WindowEvent::Key(Key::Char(',')) => {
                 let _ = self.step(-1);
+            }
+            WindowEvent::Key(Key::Char('-')) => {
+                let _ = self.set_rate((self.rate() - RATE_STEP).max(Pipeline::MIN_RATE));
+            }
+            WindowEvent::Key(Key::Char('+')) => {
+                let _ = self.set_rate((self.rate() + RATE_STEP).min(Pipeline::MAX_RATE));
+            }
+            WindowEvent::Key(Key::Backspace) => {
+                let _ = self.set_rate(1.0);
             }
             WindowEvent::Key(Key::Up) => {
                 let _ = self.set_volume((self.volume() + VOLUME_STEP).min(1.0));
@@ -948,6 +975,42 @@ mod tests {
             "played on from the picture, at {:?}",
             player.position()
         );
+    }
+
+    /// At twice the speed, the position covers two seconds of the file in
+    /// each second, with the sound; the keys change it a quarter at a time,
+    /// and Backspace puts it back.
+    #[test]
+    fn a_rate_plays_the_file_that_much_faster() {
+        let Some(player) = open(true) else { return };
+        player.play().unwrap();
+        assert!(
+            wait_until(|| player.position() > Some(Duration::from_millis(500))),
+            "playback moves"
+        );
+        player.set_rate(2.0).expect("twice the speed");
+        assert_eq!(player.rate(), 2.0);
+        let (from, started) = (player.position().unwrap(), std::time::Instant::now());
+        std::thread::sleep(Duration::from_millis(1_500));
+        let (to, took) = (player.position().unwrap(), started.elapsed());
+        let speed = (to - from).as_secs_f64() / took.as_secs_f64();
+        assert!(
+            (1.7..2.3).contains(&speed),
+            "{:?} of the file in {took:?}: {speed}x",
+            to - from
+        );
+
+        assert!(player.respond_to(&WindowEvent::Key(Key::Char('-'))));
+        assert_eq!(player.rate(), 1.75);
+        assert!(player.respond_to(&WindowEvent::Key(Key::Char('+'))));
+        assert_eq!(player.rate(), 2.0);
+        assert!(player.respond_to(&WindowEvent::Key(Key::Backspace)));
+        assert_eq!(player.rate(), 1.0);
+        assert!(matches!(
+            player.set_rate(8.0),
+            Err(PlayerError::Pipeline(_))
+        ));
+        assert_eq!(player.rate(), 1.0, "a rate refused changes nothing");
     }
 
     /// A volume that is no gain is refused, and leaves the one set before.
