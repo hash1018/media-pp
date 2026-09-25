@@ -52,6 +52,14 @@ const VOLUME_STEP: f32 = 0.1;
 /// How far [`Player::respond_to`] changes the speed on the minus and plus.
 const RATE_STEP: f64 = 0.25;
 
+/// `rate` made `by` faster, the same way round, within what a pipeline
+/// plays at.
+fn faster(rate: f64, by: f64) -> f64 {
+    (rate.abs() + by)
+        .clamp(Pipeline::MIN_RATE, Pipeline::MAX_RATE)
+        .copysign(rate)
+}
+
 /// How many decoded pictures wait between the decoder and the synchronizer
 /// when they are on the GPU: enough to ride out a slow packet, few enough
 /// that a hardware decoder's fixed surface pool — NVDEC's is capped at 32 —
@@ -443,9 +451,9 @@ impl Player {
 
     /// Plays at `rate` times the file's own speed, from where playback is,
     /// the sound at its own pitch — see [`Pipeline::set_rate`]. Between
-    /// [`Pipeline::MIN_RATE`] and [`Pipeline::MAX_RATE`], or
-    /// [`Pipeline::REVERSE_RATE`] to play the picture backwards from the one
-    /// shown, without sound; a seek, a step and a pause keep it.
+    /// [`Pipeline::MIN_RATE`] and [`Pipeline::MAX_RATE`], or as far below
+    /// zero to play the picture backwards from the one shown, without
+    /// sound; a seek, a step and a pause keep it.
     pub fn set_rate(&self, rate: f64) -> Result<(), PlayerError> {
         self.pipeline.set_rate(rate)?;
         Ok(())
@@ -638,10 +646,10 @@ impl Player {
     /// to go on: Space pauses and plays, F or a double click fills the screen
     /// and puts it back, the left and right arrows move five seconds, the
     /// full stop and the comma step a picture on and back, the minus and
-    /// plus play a quarter slower and faster and Backspace at the file's own
-    /// speed again, R plays backwards and forwards again, the up and down arrows turn the volume up and down a
-    /// tenth, M mutes and unmutes, and Escape or closing the window answer
-    /// `false` — the
+    /// plus play a quarter slower and faster, either way round, Backspace at
+    /// the file's own speed again and R turns round at the same speed, the
+    /// up and down arrows turn the volume up and down a tenth, M mutes and
+    /// unmutes, and Escape or closing the window answer `false` — the
     /// caller's to act on, by stopping or dropping the player. Anything else
     /// is left alone.
     pub fn respond_to(&self, event: &WindowEvent) -> bool {
@@ -675,22 +683,19 @@ impl Player {
             WindowEvent::Key(Key::Char(',')) => {
                 let _ = self.step(-1);
             }
-            // Speed, forwards; backwards has the one.
-            WindowEvent::Key(Key::Char('-')) if self.rate() > 0.0 => {
-                let _ = self.set_rate((self.rate() - RATE_STEP).max(Pipeline::MIN_RATE));
+            // Speed, whichever way it plays.
+            WindowEvent::Key(Key::Char('-')) => {
+                let _ = self.set_rate(faster(self.rate(), -RATE_STEP));
             }
-            WindowEvent::Key(Key::Char('+')) if self.rate() > 0.0 => {
-                let _ = self.set_rate((self.rate() + RATE_STEP).min(Pipeline::MAX_RATE));
+            WindowEvent::Key(Key::Char('+')) => {
+                let _ = self.set_rate(faster(self.rate(), RATE_STEP));
             }
             WindowEvent::Key(Key::Backspace) => {
                 let _ = self.set_rate(1.0);
             }
+            // The other way round, at the same speed.
             WindowEvent::Key(Key::Char('r')) => {
-                let _ = self.set_rate(if self.rate() < 0.0 {
-                    1.0
-                } else {
-                    Pipeline::REVERSE_RATE
-                });
+                let _ = self.set_rate(-self.rate());
             }
             WindowEvent::Key(Key::Up) => {
                 let _ = self.set_volume((self.volume() + VOLUME_STEP).min(1.0));
@@ -1055,6 +1060,12 @@ mod tests {
             (0.7..1.3).contains(&back),
             "backwards {from:?} to {to:?} in {took:?}"
         );
+
+        // Faster backwards is the plus key, as forwards.
+        assert!(player.respond_to(&WindowEvent::Key(Key::Char('+'))));
+        assert_eq!(player.rate(), -1.25);
+        assert!(player.respond_to(&WindowEvent::Key(Key::Char('-'))));
+        assert_eq!(player.rate(), -1.0);
 
         assert!(player.respond_to(&WindowEvent::Key(Key::Char('r'))));
         assert_eq!(player.rate(), 1.0);

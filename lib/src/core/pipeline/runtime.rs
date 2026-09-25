@@ -49,10 +49,10 @@ pub enum PipelineError {
     #[error("nothing in this pipeline has shown a picture yet, so there is none to step")]
     NoPicture,
 
-    /// [`Pipeline::set_rate`] was asked for a rate outside
-    /// [`Pipeline::MIN_RATE`]..=[`Pipeline::MAX_RATE`] that is not
-    /// [`Pipeline::REVERSE_RATE`], or one that is not a number.
-    #[error("a playback rate has to be between 0.25 and 4, or -1 to play backwards")]
+    /// [`Pipeline::set_rate`] was asked for a speed outside
+    /// [`Pipeline::MIN_RATE`]..=[`Pipeline::MAX_RATE`], either way, or a
+    /// rate that is not a number.
+    #[error("a playback rate has to be between 0.25 and 4, or -4 and -0.25 to play backwards")]
     UnsupportedRate,
 }
 

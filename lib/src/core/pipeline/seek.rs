@@ -343,12 +343,11 @@ impl Pipeline {
         (every, pictures)
     }
 
-    /// The slowest rate [`Self::set_rate`] takes.
+    /// The slowest speed [`Self::set_rate`] takes, either way.
     pub const MIN_RATE: f64 = 0.25;
-    /// The fastest rate [`Self::set_rate`] takes.
+    /// The fastest speed [`Self::set_rate`] takes, either way.
     pub const MAX_RATE: f64 = 4.0;
-    /// The one backward rate [`Self::set_rate`] takes: the media's own speed,
-    /// backwards.
+    /// The media's own speed, backwards.
     pub const REVERSE_RATE: f64 = -1.0;
 
     /// Plays on at `rate` times its own speed, from where playback is: 2.0
@@ -365,27 +364,31 @@ impl Pipeline {
     /// rate it was stretched to. Paused, it takes effect as playback goes on.
     /// A seek, a step and a pause leave it as it is.
     ///
-    /// [`Self::REVERSE_RATE`] plays backwards from the picture shown. That
-    /// is a turn, not a change of speed: the source goes back over its media
-    /// a stretch at a time and the picture's decoder hands each stretch on
-    /// last picture first, so everything is sought to the picture shown and
-    /// prerolled there, as a seek is — paused or playing, as it was — and
-    /// the same happens turning forwards again. The sound is not played
-    /// backwards: nothing reaches it, and the clock goes on the wall.
+    /// A negative rate plays backwards from the picture shown —
+    /// [`Self::REVERSE_RATE`] at the media's own speed. Turning round is not
+    /// a change of speed: the source goes back over its media a stretch at a
+    /// time and the picture's decoder hands each stretch on last picture
+    /// first, so everything is sought to the picture shown and prerolled
+    /// there, as a seek is — paused or playing, as it was — and the same
+    /// happens turning forwards again. Faster or slower the same way round
+    /// is only a change of speed, as it is forwards. The sound is not
+    /// played backwards: nothing reaches it, and the clock goes on the wall.
+    /// Backwards the picture's decoder decodes each stretch from the
+    /// keyframe before it, so a fast rate asks more of it than playing that
+    /// fast forwards; what it cannot decode in time a pacer shows late.
     ///
     /// Refused where a seek is, before anything changes — a live source
     /// plays at the rate it arrives, and a recording has to be of the stream
     /// as it ran; see [`Self::check_seek`] — backwards also where
     /// [`Self::check_reverse`] says, and before [`Self::run`]; and with
-    /// [`PipelineError::UnsupportedRate`] for a rate that is neither
-    /// [`Self::MIN_RATE`]..=[`Self::MAX_RATE`] nor
-    /// [`Self::REVERSE_RATE`]. A forward rate is taken before
-    /// [`Self::run`] as well, for playback to start at it.
+    /// [`PipelineError::UnsupportedRate`] for a speed outside
+    /// [`Self::MIN_RATE`]..=[`Self::MAX_RATE`], either way. A forward rate
+    /// is taken before [`Self::run`] as well, for playback to start at it.
     pub fn set_rate(&self, rate: f64) -> Result<()> {
-        let reverse = rate == Self::REVERSE_RATE;
-        if !reverse && !(Self::MIN_RATE..=Self::MAX_RATE).contains(&rate) {
+        if !(Self::MIN_RATE..=Self::MAX_RATE).contains(&rate.abs()) {
             return Err(PipelineError::UnsupportedRate.into());
         }
+        let reverse = rate < 0.0;
         let _operation = self
             .operation
             .lock()

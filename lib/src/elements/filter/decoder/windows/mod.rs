@@ -1,6 +1,8 @@
 #[cfg(feature = "d3d11")]
 mod d3d11va_decoder;
 #[cfg(feature = "d3d12")]
+mod d3d12_copier;
+#[cfg(feature = "d3d12")]
 mod d3d12va_decoder;
 
 #[cfg(feature = "d3d11")]

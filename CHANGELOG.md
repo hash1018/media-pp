@@ -34,6 +34,11 @@ compile error with no explanation.
   such a source as before, from `Pipeline::check_seek`; one driven by hand
   and sent a `Seek` answers a `SeekError` naming `SourceNotSeekable`.
 
+- **`D3d11DecoderError` and `D3d12DecoderError` have a `Copy` variant.**
+  It is a copy of a decoded picture failing on the device, which playing
+  backwards makes — see `Pipeline::set_rate` under Added. A `match` on
+  either needs the arm.
+
 - **`SeekRejectReason` has two more variants: `SourceNotReversible` and
   `DecoderNotReversible`.** They are why `Pipeline::check_reverse` refuses
   to play backwards — see `Pipeline::set_rate` under Added. A `match` on
@@ -717,10 +722,14 @@ compile error with no explanation.
 
 ### Added
 
-- **`Pipeline::set_rate(Pipeline::REVERSE_RATE)` plays backwards.** At the
-  media's own speed, from the picture shown: everything is sought there and
-  prerolled, as a seek is, and the same turning forwards again with any
-  forward rate. The sound is not played — nothing reaches it, and the
+- **A negative `Pipeline::set_rate` plays backwards.** From the picture
+  shown, from a quarter of the speed to four times it
+  (`Pipeline::REVERSE_RATE` is the media's own): turning round, everything
+  is sought there and prerolled, as a seek is, and the same turning
+  forwards again; faster or slower the same way round is only a change of
+  speed. Backwards each stretch is decoded from the keyframe before it, so
+  a fast rate asks more of the decoder than playing as fast forwards; what
+  it cannot decode in time a pacer shows late. The sound is not played — nothing reaches it, and the
   playback clock goes on the wall, so a `Pacer` or `VideoSynchronizer` paces
   the picture as it does forwards. At the start of the file the stream ends
   and the pipeline says `Finished`. A seek or a step while backwards stays
@@ -742,11 +751,13 @@ compile error with no explanation.
   default: a source that is not refuses to play backwards, and so does an
   element whose contracts take a picture's packets and hand on pictures.
   `FileDemuxer` is a `ReversibleSource` for a file with a picture, reading a
-  second at a time, and `SwDecoder` and `D3d11Decoder` are
-  `ReversibleDecoder`s — and `VideoDecodeBin` on the software and D3D11 paths,
-  not yet on D3D12 or CUDA. What a decoder holds is a second of pictures,
-  D3D11's as copies of its fixed surfaces. `Player`'s `respond_to` plays
-  backwards and forwards again on R.
+  second at a time, and `SwDecoder`, `D3d11Decoder`, `D3d12Decoder` and
+  `CudaDecoder` are `ReversibleDecoder`s, and so `VideoDecodeBin` on every
+  path. What a decoder holds is a second of pictures; a hardware one holds
+  copies, since its surfaces are a pool the rest of the stretch is decoded
+  into, made on the device from a frames context of its own. In
+  `Player`'s `respond_to` R turns round at the same speed, and the minus
+  and plus keys change the speed either way round.
 
 - **`Pipeline::set_rate` plays faster or slower, the sound at its own
   pitch.** From a quarter of the speed to four times it
@@ -1687,6 +1698,15 @@ compile error with no explanation.
   decoder in this crate — keys exactly as before, byte for byte.
 
 ### Fixed
+
+- **`VideoDecodeBin` on a device that decodes no video decodes in
+  software.** A software adapter — what a machine or a virtual machine
+  without a GPU has — cannot make a D3D11VA or D3D12VA decoder, and the bin
+  failed to open with the decoder's `HwDeviceInit`, where a stream the
+  hardware refuses at its first picture was already gone on with in
+  software. It now does the same from the start: the stream is decoded in
+  software and put on the device, and `VideoDecodeBinHandle::path` reads
+  `SoftwareReason::HardwareRefused`.
 
 - **A file whose picture is muxed ahead of its sound no longer freezes when
   both branches are full at once.** `FileDemuxer` held a full picture

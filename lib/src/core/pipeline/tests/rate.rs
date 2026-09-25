@@ -115,7 +115,7 @@ fn a_rate_is_refused_where_it_cannot_be_played() {
     let Some((pipeline, _, _)) = paced_player() else {
         return;
     };
-    for rate in [0.1, 8.0, 0.0, -0.5, f64::NAN, f64::INFINITY] {
+    for rate in [0.1, 8.0, 0.0, -0.0, -0.1, -8.0, f64::NAN, f64::INFINITY] {
         assert!(
             matches!(
                 pipeline.set_rate(rate),

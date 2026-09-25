@@ -173,9 +173,11 @@ pub enum SoftwareReason {
     /// A hardware decoder that takes them at all hands on a surface (Y210,
     /// P010, ...) that nothing reading decoded surfaces here takes.
     PixelFormat(ffmpeg::format::Pixel),
-    /// The hardware was chosen, and refused the stream once asked to decode
-    /// it — a profile or a size the GPU does not have, which a stream's
-    /// parameters do not say. The bin went on in software from there.
+    /// The hardware was chosen, and refused: the device cannot decode video
+    /// at all — a software adapter, a virtual machine's — or it refused the
+    /// stream once asked to decode it, a profile or a size the GPU does not
+    /// have, which a stream's parameters do not say. The bin went on in
+    /// software from there.
     HardwareRefused,
 }
 
@@ -286,9 +288,6 @@ pub struct VideoDecodeBin {
     /// decoder brings down: the hardware line, on a target that can, built
     /// for a stream that did not say it was 10-bit.
     watch_for_p010: bool,
-    /// Whether the hardware line hands a stretch on backwards — see
-    /// [`ReversibleDecoder`]. The software line always does.
-    hardware_reverses: bool,
 }
 
 // SAFETY: what is not `Send` by its own type is the device a target holds —
@@ -357,12 +356,31 @@ impl VideoDecodeBin {
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::VideoDecodeBin, &name, None);
         let stream = Stream::of(&params)?;
-        let path = choose(&stream, &target);
-
-        let (elements, output_format, fallback) = match path {
+        let mut path = choose(&stream, &target);
+        // A device that cannot decode video at all says so as its decoder is
+        // made, and is gone on from in software as one that refuses the
+        // stream is later.
+        let hardware = match path {
             DecodePath::Hardware => {
-                let mut elements =
-                    vec![target.hardware_decoder(format!("{name}-decoder"), params.clone())?];
+                match target.hardware_decoder(format!("{name}-decoder"), params.clone()) {
+                    Ok(decoder) => Some(decoder),
+                    Err(error) if no_video_device(&error) => {
+                        pp_warn!(
+                            pp_log: &pp_log,
+                            "the device decodes no video ({error}); decoding in software"
+                        );
+                        path = DecodePath::Software(SoftwareReason::HardwareRefused);
+                        None
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            DecodePath::Software(_) => None,
+        };
+
+        let (elements, output_format, fallback) = match (path, hardware) {
+            (DecodePath::Hardware, Some(decoder)) => {
+                let mut elements = vec![decoder];
                 let output = target.hardware_format(&stream);
                 if output != ffmpeg::format::Pixel::NV12 || stream.format.is_some_and(is_10bit_420)
                 {
@@ -378,7 +396,10 @@ impl VideoDecodeBin {
                 };
                 (elements, Some(output), Some(fallback))
             }
-            DecodePath::Software(reason) => {
+            (DecodePath::Hardware, None) => {
+                unreachable!("a hardware path without its decoder is made a software one")
+            }
+            (DecodePath::Software(reason), _) => {
                 let format = target.software_format(reason, &stream)?;
                 let elements = software(&name, params, stream.size, format, &target, threading)?;
                 // Where there is no upload, what comes out is what the
@@ -410,7 +431,6 @@ impl VideoDecodeBin {
             pad,
             output_format,
             path: Arc::new(Mutex::new(path)),
-            hardware_reverses: target.reverses(),
             fallback,
         })
     }
@@ -602,14 +622,10 @@ impl Sink for VideoDecodeBin {
         InputContract::Fixed(PortContract::packet(MediaKind::VideoPacket))
     }
 
-    /// Where its decoder hands a stretch on backwards: the software line,
-    /// and D3D11's hardware one.
+    /// Every decoder it may hold hands a stretch on backwards, and the
+    /// one at the head of its line is told where each begins and ends.
     fn as_reversible(&mut self) -> Option<&mut dyn ReversibleDecoder> {
-        let reverses = match self.path() {
-            DecodePath::Software(_) => true,
-            DecodePath::Hardware => self.hardware_reverses,
-        };
-        if reverses { Some(self) } else { None }
+        Some(self)
     }
 
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
@@ -679,6 +695,19 @@ impl ReversibleDecoder for VideoDecodeBin {
 impl Drop for VideoDecodeBin {
     fn drop(&mut self) {
         pp_info!(self, "dropped: releasing what it held");
+    }
+}
+
+/// Whether `error` is a hardware decoder finding its device decodes no video
+/// at all, as it is made.
+fn no_video_device(error: &Error) -> bool {
+    match error {
+        Error::Traced(traced) => no_video_device(&traced.source),
+        #[cfg(all(target_os = "windows", feature = "d3d11"))]
+        Error::D3d11DecoderError(crate::elements::D3d11DecoderError::HwDeviceInit(_)) => true,
+        #[cfg(all(target_os = "windows", feature = "d3d12"))]
+        Error::D3d12DecoderError(crate::elements::D3d12DecoderError::HwDeviceInit(_)) => true,
+        _ => false,
     }
 }
 
@@ -757,21 +786,6 @@ impl DecodeTarget {
             Self::D3d12 { .. } => Some(crate::elements::D3d12Decoder::supports(codec)),
             #[cfg(feature = "cuda")]
             Self::Cuda { .. } => Some(crate::elements::CudaDecoder::supports(codec)),
-        }
-    }
-
-    /// Whether its hardware decoder hands a stretch read backwards on last
-    /// picture first — see [`ReversibleDecoder`]. D3D11's does; the others do
-    /// not yet.
-    fn reverses(&self) -> bool {
-        match self {
-            Self::System => true,
-            #[cfg(all(target_os = "windows", feature = "d3d11"))]
-            Self::D3d11 { .. } => true,
-            #[cfg(all(target_os = "windows", feature = "d3d12"))]
-            Self::D3d12 { .. } => false,
-            #[cfg(feature = "cuda")]
-            Self::Cuda { .. } => false,
         }
     }
 
@@ -1419,20 +1433,18 @@ mod tests {
         fn no_video_device(error: &Error) -> bool {
             match error {
                 Error::Traced(traced) => no_video_device(&traced.source),
-                #[cfg(all(target_os = "windows", feature = "d3d11"))]
-                Error::D3d11DecoderError(crate::elements::D3d11DecoderError::HwDeviceInit(_)) => {
-                    true
-                }
-                #[cfg(all(target_os = "windows", feature = "d3d12"))]
-                Error::D3d12DecoderError(crate::elements::D3d12DecoderError::HwDeviceInit(_)) => {
-                    true
-                }
                 #[cfg(all(target_os = "windows", feature = "d3d12"))]
                 Error::D3d12UploadError(crate::elements::D3d12UploadError::HwDeviceInit(_)) => true,
                 _ => false,
             }
         }
         match VideoDecodeBin::open(name, params, target, None) {
+            // Gone to software at once: what these tests ask of the
+            // hardware, this device cannot show.
+            Ok(bin) if bin.path() == DecodePath::Software(SoftwareReason::HardwareRefused) => {
+                eprintln!("skipping: this device does not do video decoding");
+                None
+            }
             Ok(bin) => Some(bin),
             Err(error) if no_video_device(&error) => {
                 eprintln!("skipping: this device does not do video decoding ({error})");
@@ -1568,6 +1580,60 @@ mod tests {
                     .all(|frame| frame.format() == ffmpeg::format::Pixel::D3D11)
             );
             assert_eq!(handle.path(), DecodePath::Hardware, "and it stayed there");
+        }
+
+        /// A device that decodes no video — a software adapter, what a
+        /// machine without a GPU has — gets the stream decoded in software
+        /// and put on it, as a stream the hardware refuses does, rather than
+        /// a bin that will not open.
+        #[test]
+        fn a_device_that_decodes_no_video_gets_the_stream_decoded_in_software() {
+            use windows::Win32::Graphics::{
+                Direct3D::D3D_DRIVER_TYPE_WARP,
+                Direct3D11::{
+                    D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION, D3D11CreateDevice,
+                },
+            };
+            let mut device = None;
+            // SAFETY: out-pointers to locals; no caller-owned storage is kept.
+            let created = unsafe {
+                D3D11CreateDevice(
+                    None,
+                    D3D_DRIVER_TYPE_WARP,
+                    Default::default(),
+                    D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                    None,
+                    D3D11_SDK_VERSION,
+                    Some(&mut device),
+                    None,
+                    None,
+                )
+            };
+            let (Ok(()), Some(device)) = (created, device) else {
+                eprintln!("skipping: no WARP device here");
+                return;
+            };
+            let gpu = D3d11Gpu::from_device(device).expect("share the WARP device");
+            let (params, packets) = h264();
+            let sent = packets.len();
+            let bin = VideoDecodeBin::open("h264", params, target(&gpu), None)
+                .expect("it opens all the same");
+            if bin.path() == DecodePath::Hardware {
+                eprintln!("skipping: WARP decodes video on this machine");
+                return;
+            }
+            assert_eq!(
+                bin.path(),
+                DecodePath::Software(SoftwareReason::HardwareRefused)
+            );
+            let frames = run(bin, None, packets).expect("an H.264 stream decodes");
+            assert_eq!(frames.len(), sent, "every picture comes out");
+            assert!(
+                frames
+                    .iter()
+                    .all(|frame| frame.format() == ffmpeg::format::Pixel::D3D11),
+                "on the device"
+            );
         }
 
         /// Motion JPEG has no D3D11VA decoder, so it is decoded in software

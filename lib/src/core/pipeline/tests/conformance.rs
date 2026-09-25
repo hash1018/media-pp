@@ -451,7 +451,7 @@ fn op(rng: &mut Rng, duration: Option<Duration>) -> Op {
         }),
         // Not four times: the model counts only the waits as playing, and
         // what the other calls take is played too, four times as far.
-        12 => Op::Rate([0.5, 1.0, 2.0, Pipeline::REVERSE_RATE][rng.below(4) as usize]),
+        12 => Op::Rate([0.5, 1.0, 2.0, -0.5, -1.0, -2.0][rng.below(6) as usize]),
         _ => Op::Wait(Duration::from_millis(rng.below(400))),
     }
 }

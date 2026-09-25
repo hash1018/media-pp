@@ -119,3 +119,78 @@ impl NegotiationRefusal {
         self.0.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
+
+/// Where a hardware decoder copies the pictures it holds while playing
+/// backwards — see [`crate::element::ReversibleDecoder`]: a frames context
+/// on the decoder's own device, shaped like the one it decodes into but its
+/// own. A stretch is more pictures than a decoder's pool has surfaces, and
+/// what is held must not keep them from the rest of the stretch.
+///
+/// Built on the first copy, and again when the stream's shape changes. The
+/// copies come from FFmpeg's own pool, so what they are handed to takes
+/// them as it takes the decoder's frames: same device, same kind of frame.
+#[cfg(any(feature = "cuda", all(target_os = "windows", feature = "d3d12")))]
+#[derive(Default)]
+pub(super) struct CopyFrames {
+    frames: Option<(crate::platform::ffmpeg::AvBufferRef, CopyShape)>,
+}
+
+/// A frames context's hardware format, software format and size.
+#[cfg(any(feature = "cuda", all(target_os = "windows", feature = "d3d12")))]
+type CopyShape = (ffi::AVPixelFormat, ffi::AVPixelFormat, i32, i32);
+
+#[cfg(any(feature = "cuda", all(target_os = "windows", feature = "d3d12")))]
+impl CopyFrames {
+    /// A frame of this pool shaped like `frame`, a decoded hardware frame,
+    /// at its visible size, its pixels not yet written. `initial` surfaces
+    /// are made up front: none where the device's pool grows as asked.
+    pub(super) fn frame_like(
+        &mut self,
+        frame: &ffmpeg::frame::Video,
+        initial: i32,
+    ) -> Result<ffmpeg::frame::Video, ffmpeg::Error> {
+        // SAFETY: a decoded hardware frame's `hw_frames_ctx` is a live
+        // `AVHWFramesContext`, and its `device_ref` is live as long as it
+        // is; the context allocated here is wrapped before anything can
+        // fail, and its fields are the ones `av_hwframe_ctx_init` reads.
+        unsafe {
+            let source = (*frame.as_ptr()).hw_frames_ctx;
+            if source.is_null() {
+                return Err(ffmpeg::Error::InvalidData);
+            }
+            let source = &*((*source).data as *const ffi::AVHWFramesContext);
+            let shape = (source.format, source.sw_format, source.width, source.height);
+            let frames = match self.frames.take() {
+                Some((frames, built)) if built == shape => frames,
+                _ => {
+                    let frames = crate::platform::ffmpeg::AvBufferRef::from_raw(
+                        ffi::av_hwframe_ctx_alloc(source.device_ref),
+                    )
+                    .ok_or(ffmpeg::Error::Other {
+                        errno: ffmpeg::error::ENOMEM,
+                    })?;
+                    let context = (*frames.as_ptr()).data as *mut ffi::AVHWFramesContext;
+                    (*context).format = shape.0;
+                    (*context).sw_format = shape.1;
+                    (*context).width = shape.2;
+                    (*context).height = shape.3;
+                    (*context).initial_pool_size = initial;
+                    let code = ffi::av_hwframe_ctx_init(frames.as_ptr());
+                    if code < 0 {
+                        return Err(ffmpeg::Error::from(code));
+                    }
+                    frames
+                }
+            };
+            let mut copy = ffmpeg::frame::Video::empty();
+            let code = ffi::av_hwframe_get_buffer(frames.as_ptr(), copy.as_mut_ptr(), 0);
+            self.frames = Some((frames, shape));
+            if code < 0 {
+                return Err(ffmpeg::Error::from(code));
+            }
+            (*copy.as_mut_ptr()).width = (*frame.as_ptr()).width;
+            (*copy.as_mut_ptr()).height = (*frame.as_ptr()).height;
+            Ok(copy)
+        }
+    }
+}

@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
-use super::super::hw_decoder::{NegotiationRefusal, capable_decoder};
+use super::super::backwards::Stretch;
+use super::super::hw_decoder::{CopyFrames, NegotiationRefusal, capable_decoder};
 use super::super::preroll_gate::{PrerollGate, hw_surface_budget};
 use ffmpeg_next::{self as ffmpeg, ffi};
 use thiserror::Error as ThisError;
@@ -11,7 +12,7 @@ use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
     control::ControlMsg,
-    element::{Element, ElementType, Sink, Source, element_pp_log},
+    element::{Element, ElementType, ReversibleDecoder, Sink, Source, element_pp_log},
     elements::filter::is_codec_drain_boundary,
     pad::SrcPad,
     platform::{cuda::CudaDevice, ffmpeg::AvBufferRef},
@@ -83,6 +84,14 @@ pub struct CudaDecoder {
     /// [`NegotiationRefusal`]. After `decoder`, so it outlives the codec
     /// context that points at it.
     refused: NegotiationRefusal,
+    /// Holds a stretch's pictures to hand on last first, playing backwards
+    /// — copies of them, since NVDEC's surfaces are a fixed pool the rest
+    /// of the stretch is decoded into.
+    stretch: Stretch,
+    /// Where those copies come from, on this decoder's device.
+    copies: CopyFrames,
+    /// What the copies travel in.
+    copy_wrappers: UnboundObjectPool<ffmpeg::frame::Video>,
 }
 
 // SAFETY: `hw_device_ctx` is a heap-allocated FFmpeg buffer with no thread
@@ -185,6 +194,9 @@ impl CudaDecoder {
             pool,
             preroll_gate: PrerollGate::default(),
             refused,
+            stretch: Stretch::default(),
+            copies: CopyFrames::default(),
+            copy_wrappers: UnboundObjectPool::new(0, ffmpeg::frame::Video::empty, |_| {}),
         })
     }
 
@@ -217,6 +229,41 @@ impl CudaDecoder {
         }
     }
 
+    /// `frame`'s picture in a surface of the copies' own, with its timing
+    /// and colour. Copied on FFmpeg's own stream, as NVDEC's output was
+    /// written, so nothing reads it before it is there.
+    fn copied(
+        &mut self,
+        frame: &ffmpeg::frame::Video,
+    ) -> crate::error::Result<crate::pool::UnboundObjectPoolRef<ffmpeg::frame::Video>> {
+        let mut copy = self
+            .copies
+            .frame_like(frame, 0)
+            .map_err(CudaDecoderError::Ffmpeg)?;
+        // SAFETY: both frames are live CUDA frames on this decoder's
+        // device; `copy` is as large as the frame's own pool, and props
+        // copies timing, colour and side data, not buffers.
+        unsafe {
+            let code = ffi::av_hwframe_transfer_data(copy.as_mut_ptr(), frame.as_ptr(), 0);
+            if code < 0 {
+                return Err(CudaDecoderError::Ffmpeg(ffmpeg::Error::from(code)).into());
+            }
+            ffi::av_frame_copy_props(copy.as_mut_ptr(), frame.as_ptr());
+        }
+        let mut wrapped = self.copy_wrappers.get();
+        *wrapped = copy;
+        Ok(wrapped)
+    }
+
+    /// Hands on what was held of the stretch just over, last first.
+    fn release(&mut self) -> crate::error::Result<()> {
+        for buffer in self.stretch.end() {
+            self.preroll_gate
+                .push_admitted(buffer, |frame| self.pad.push(frame))?;
+        }
+        Ok(())
+    }
+
     fn drain(&mut self) -> crate::error::Result<()> {
         let mut frame = self.pool.get();
         loop {
@@ -225,6 +272,14 @@ impl CudaDecoder {
                     if frame.format() != ffmpeg::format::Pixel::CUDA {
                         pp_error!(self, "decoder did not select the CUDA pixel format");
                         return Err(CudaDecoderError::HwAccelUnavailable.into());
+                    }
+                    if self.stretch.holding() {
+                        // Held as a copy; the surface goes back to the pool
+                        // as `frame` is reused below.
+                        let copy = self.copied(&frame)?;
+                        self.stretch.hold(MediaBuffer::Video(Arc::new(copy)));
+                        frame = self.pool.get();
+                        continue;
                     }
                     // Reassigning `frame` releases a suppressed one right here,
                     // returning its fixed-pool surface a whole branch earlier
@@ -323,8 +378,33 @@ impl Sink for CudaDecoder {
         if *msg == ControlMsg::Flush {
             self.decoder.flush();
             self.preroll_gate.reset();
+            self.stretch.reset();
         }
         Ok(())
+    }
+
+    fn as_reversible(&mut self) -> Option<&mut dyn ReversibleDecoder> {
+        Some(self)
+    }
+}
+
+impl ReversibleDecoder for CudaDecoder {
+    fn begin_stretch(&mut self) -> crate::error::Result<()> {
+        self.stretch.begin();
+        Ok(())
+    }
+
+    /// Drains the decoder of the stretch and leaves it fresh for the next
+    /// one's keyframe, then hands the stretch on: copies of its pictures,
+    /// since NVDEC's surfaces are a fixed pool.
+    fn end_stretch(&mut self) -> crate::error::Result<()> {
+        self.decoder
+            .send_eof()
+            .inspect_err(|error| pp_error!(self, "send_eof failed: {error}"))
+            .map_err(|error| self.decode_error(error))?;
+        self.drain()?;
+        self.decoder.flush();
+        self.release()
     }
 }
 

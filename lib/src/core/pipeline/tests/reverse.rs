@@ -233,6 +233,62 @@ fn forwards_again_goes_on_from_the_picture_shown() {
     pipeline.stop();
 }
 
+/// Faster and slower backwards is only a change of speed, as it is
+/// forwards: nothing is sought, the pictures go on down one by one, and
+/// the position goes down that much faster.
+#[test]
+fn backwards_faster_and_slower_is_only_a_change_of_speed() {
+    let Some(path) = try_test_video() else {
+        return;
+    };
+    let path = std::path::PathBuf::from(path);
+    let every = pictures_of(&path);
+    let from = every[every.len() * 4 / 5];
+    let (pipeline, pictures, _) = player(&path);
+    pipeline.pause();
+    pipeline.run().expect("run");
+    pipeline
+        .seek(from, SeekMode::Accurate)
+        .expect("into the file");
+    let before = pictures.lock().unwrap().len();
+    pipeline.set_rate(-1.0).expect("backwards");
+    pipeline.resume();
+    thread::sleep(Duration::from_millis(500));
+    let seeks_before = std::iter::from_fn(|| pipeline.bus().try_recv())
+        .filter(|event| matches!(event, crate::bus::BusEvent::Seeked { .. }))
+        .count();
+    assert!(seeks_before > 0, "the turn was a seek");
+
+    pipeline.set_rate(-2.0).expect("faster backwards");
+    thread::sleep(Duration::from_millis(300));
+    let (high, started) = (pipeline.position().expect("a position"), Instant::now());
+    thread::sleep(Duration::from_millis(1_000));
+    let (low, took) = (pipeline.position().expect("a position"), started.elapsed());
+    let speed = high.saturating_sub(low).as_secs_f64() / took.as_secs_f64();
+    assert!(
+        (1.6..2.4).contains(&speed),
+        "{speed}x from {high:?} to {low:?}"
+    );
+
+    pipeline.set_rate(-0.5).expect("slower backwards");
+    thread::sleep(Duration::from_millis(300));
+    pipeline.pause();
+    let sought = std::iter::from_fn(|| pipeline.bus().try_recv())
+        .filter(|event| matches!(event, crate::bus::BusEvent::Seeked { .. }))
+        .count();
+    assert_eq!(sought, 0, "no seek for a change of speed");
+    let shown = pictures.lock().unwrap()[before..].to_vec();
+    let expected: Vec<_> = every
+        .iter()
+        .copied()
+        .filter(|&at| at <= from)
+        .rev()
+        .take(shown.len())
+        .collect();
+    assert_eq!(shown, expected, "one by one down from {from:?}");
+    pipeline.stop();
+}
+
 /// Refused where it cannot be played: before running, and on a live
 /// source.
 #[test]
@@ -246,7 +302,7 @@ fn backwards_is_refused_where_it_cannot_be_played() {
         pipeline.set_rate(-1.0),
         Err(crate::Error::PipelineError(PipelineError::NotRunning))
     ));
-    for rate in [-0.5, -2.0] {
+    for rate in [-0.1, -8.0] {
         assert!(matches!(
             pipeline.set_rate(rate),
             Err(crate::Error::PipelineError(PipelineError::UnsupportedRate))
@@ -277,64 +333,79 @@ fn backwards_is_refused_where_it_cannot_be_played() {
     pipeline.stop();
 }
 
+/// Each picture's place and what its luma adds up to.
+#[cfg(any(
+    feature = "cuda",
+    all(target_os = "windows", any(feature = "d3d11", feature = "d3d12"))
+))]
+struct Sums {
+    pp_log: PpLog,
+    seen: Arc<Mutex<Vec<(i64, u64)>>>,
+}
+#[cfg(any(
+    feature = "cuda",
+    all(target_os = "windows", any(feature = "d3d11", feature = "d3d12"))
+))]
+impl Element for Sums {
+    fn name(&self) -> Arc<str> {
+        "sums".into()
+    }
+    fn element_type(&self) -> ElementType {
+        ElementType::Other
+    }
+    fn pp_log(&self) -> &PpLog {
+        &self.pp_log
+    }
+    fn pp_log_mut(&mut self) -> &mut PpLog {
+        &mut self.pp_log
+    }
+}
+#[cfg(any(
+    feature = "cuda",
+    all(target_os = "windows", any(feature = "d3d11", feature = "d3d12"))
+))]
+impl Sink for Sums {
+    fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
+        if let MediaBuffer::Video(frame) = &buf {
+            let (width, height, stride) = (
+                frame.width() as usize,
+                frame.height() as usize,
+                frame.stride(0),
+            );
+            let luma = frame.data(0);
+            let sum = (0..height)
+                .map(|row| {
+                    luma[row * stride..row * stride + width]
+                        .iter()
+                        .map(|&value| u64::from(value))
+                        .sum::<u64>()
+                })
+                .sum();
+            self.seen
+                .lock()
+                .unwrap()
+                .push((frame.pts().unwrap_or(-1), sum));
+        }
+        Ok(())
+    }
+}
+
 /// On the GPU the decoder's surfaces are a fixed pool, fewer than a stretch
 /// has pictures, so what it holds to play a stretch backwards are copies.
-/// Each is the picture it copies: read back, a picture played backwards is
-/// the same as that picture played forwards.
-#[cfg(all(target_os = "windows", feature = "d3d11"))]
-#[test]
-fn backwards_on_a_d3d11_decoder_shows_the_same_pictures_as_forwards() {
-    use crate::elements::{D3d11Download, DecodePath, DecodeTarget, VideoDecodeBin};
+/// Each is the picture it copies: read back through `download`, a picture
+/// played backwards is the same as that picture played forwards.
+#[cfg(any(
+    feature = "cuda",
+    all(target_os = "windows", any(feature = "d3d11", feature = "d3d12"))
+))]
+fn backwards_on_hardware_shows_the_same_pictures_as_forwards(
+    label: &str,
+    target: crate::elements::DecodeTarget,
+    download: Box<dyn crate::element::Filter>,
+) {
+    use crate::elements::{DecodePath, VideoDecodeBin};
     use std::collections::HashMap;
 
-    /// Each picture's place and what its luma adds up to.
-    struct Sums {
-        pp_log: PpLog,
-        seen: Arc<Mutex<Vec<(i64, u64)>>>,
-    }
-    impl Element for Sums {
-        fn name(&self) -> Arc<str> {
-            "sums".into()
-        }
-        fn element_type(&self) -> ElementType {
-            ElementType::Other
-        }
-        fn pp_log(&self) -> &PpLog {
-            &self.pp_log
-        }
-        fn pp_log_mut(&mut self) -> &mut PpLog {
-            &mut self.pp_log
-        }
-    }
-    impl Sink for Sums {
-        fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
-            if let MediaBuffer::Video(frame) = &buf {
-                let (width, height, stride) = (
-                    frame.width() as usize,
-                    frame.height() as usize,
-                    frame.stride(0),
-                );
-                let luma = frame.data(0);
-                let sum = (0..height)
-                    .map(|row| {
-                        luma[row * stride..row * stride + width]
-                            .iter()
-                            .map(|&value| u64::from(value))
-                            .sum::<u64>()
-                    })
-                    .sum();
-                self.seen
-                    .lock()
-                    .unwrap()
-                    .push((frame.pts().unwrap_or(-1), sum));
-            }
-            Ok(())
-        }
-    }
-
-    let Some(gpu) = crate::test_support::try_d3d11_gpu() else {
-        return;
-    };
     let Some(path) = try_test_video() else {
         return;
     };
@@ -345,19 +416,16 @@ fn backwards_on_a_d3d11_decoder_shows_the_same_pictures_as_forwards() {
         .find(|stream| stream.kind == ffmpeg::media::Type::Video)
         .expect("a picture")
         .clone();
-    let bin = VideoDecodeBin::open(
-        "video",
-        video.parameters.clone(),
-        DecodeTarget::D3d11 {
-            gpu: gpu.clone(),
-            downstream_hw_frames: 8 + 3,
-        },
-        None,
-    )
-    .expect("open the decode bin");
+    let bin = match VideoDecodeBin::open("video", video.parameters.clone(), target, None) {
+        Ok(bin) => bin,
+        Err(error) => {
+            eprintln!("skipping: no {label} decoder on this machine ({error})");
+            return;
+        }
+    };
     if bin.path() != DecodePath::Hardware {
         eprintln!(
-            "skipping: this GPU does not decode the fixture ({:?})",
+            "skipping: {label} does not decode the fixture ({:?})",
             bin.path()
         );
         return;
@@ -367,8 +435,7 @@ fn backwards_on_a_d3d11_decoder_shows_the_same_pictures_as_forwards() {
         pp_log: element_pp_log(ElementType::Other, "sums", None),
         seen: Arc::clone(&seen),
     };
-    let download = D3d11Download::new("download", &gpu).expect("a download");
-    let (pipeline, ()) = Pipeline::new("reverse-d3d11", source, |source, ctx| {
+    let (pipeline, ()) = Pipeline::new(format!("reverse-{label}"), source, |source, ctx| {
         let branch = ctx
             .branch()
             .queue("video-packets", 64)
@@ -380,7 +447,7 @@ fn backwards_on_a_d3d11_decoder_shows_the_same_pictures_as_forwards() {
         Ok(())
     })
     .expect("wire");
-    assert!(pipeline.check_reverse().is_ok(), "D3D11 decoding can");
+    assert!(pipeline.check_reverse().is_ok(), "{label} decoding can");
     // Forwards, unpaced, to the end: every picture's sum.
     pipeline.run().expect("run");
     assert!(wait_until(|| std::iter::from_fn(|| pipeline
@@ -424,6 +491,57 @@ fn backwards_on_a_d3d11_decoder_shows_the_same_pictures_as_forwards() {
         );
     }
     pipeline.stop();
+}
+
+#[cfg(all(target_os = "windows", feature = "d3d11"))]
+#[test]
+fn backwards_on_a_d3d11_decoder_shows_the_same_pictures_as_forwards() {
+    let Some(gpu) = crate::test_support::try_d3d11_gpu() else {
+        return;
+    };
+    let download = crate::elements::D3d11Download::new("download", &gpu).expect("a download");
+    backwards_on_hardware_shows_the_same_pictures_as_forwards(
+        "D3D11",
+        crate::elements::DecodeTarget::D3d11 {
+            gpu,
+            downstream_hw_frames: 8 + 3,
+        },
+        Box::new(download),
+    );
+}
+
+#[cfg(all(target_os = "windows", feature = "d3d12"))]
+#[test]
+fn backwards_on_a_d3d12_decoder_shows_the_same_pictures_as_forwards() {
+    let Some(gpu) = crate::test_support::try_d3d12_gpu() else {
+        return;
+    };
+    backwards_on_hardware_shows_the_same_pictures_as_forwards(
+        "D3D12",
+        crate::elements::DecodeTarget::D3d12 { gpu },
+        Box::new(crate::elements::D3d12Download::new("download")),
+    );
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn backwards_on_a_cuda_decoder_shows_the_same_pictures_as_forwards() {
+    let Some((device, _guard)) = crate::test_support::try_cuda_device() else {
+        return;
+    };
+    let download = crate::elements::CudaDownload::new(
+        "download",
+        &device,
+        crate::platform::cuda::CudaFrameFormat::Nv12,
+    );
+    backwards_on_hardware_shows_the_same_pictures_as_forwards(
+        "CUDA",
+        crate::elements::DecodeTarget::Cuda {
+            device,
+            downstream_hw_frames: 8 + 3,
+        },
+        Box::new(download),
+    );
 }
 
 /// What [`Watched`] was told and handed, in order.

@@ -9,10 +9,11 @@
 //!
 //! Space pauses and plays, the left and right arrows move five seconds, the
 //! full stop and the comma step a picture on and back, the minus and plus
-//! play slower and faster and Backspace at the file's own speed, R plays
-//! backwards and forwards again, the up and down arrows turn the volume, M mutes, F or a double click fills the screen,
-//! Escape or closing the window stops; the title shows where
-//! playback is. One program for Windows and Linux.
+//! play slower and faster, either way round, Backspace at the file's own
+//! speed and R turns round at the same speed, the up and down arrows turn
+//! the volume, M mutes, F or a double click fills the screen, Escape or
+//! closing the window stops; the title shows where playback is. One program
+//! for Windows and Linux.
 //!
 //!     cargo run -p player -- path/to/video.mp4
 
