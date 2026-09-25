@@ -55,6 +55,12 @@ impl Completion {
         self.check(bus);
     }
 
+    /// Whether `terminal` has taken the end of its stream and not been
+    /// flushed since — a step has no more pictures to ask it for.
+    pub(crate) fn has_ended(&self, terminal: ElementId) -> bool {
+        self.lock().ended.contains(&terminal)
+    }
+
     /// `terminal` was flushed by a seek: what it ended is gone, and it has a
     /// new stream to end before the pipeline is finished again.
     pub(crate) fn terminal_flushed(&self, terminal: ElementId) {

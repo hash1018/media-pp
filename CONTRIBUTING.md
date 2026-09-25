@@ -17,7 +17,7 @@ skip, saying why, on a machine without the hardware.
 ## Control sequences
 
 `core::pipeline::tests::conformance` runs random orders of pause, resume,
-seek, finish and stop against the shapes of pipeline this crate is used in,
+seek, frame step, finish and stop against the shapes of pipeline this crate is used in,
 and checks what every terminal was handed: nothing new while paused, nothing
 from before a seek after it, an `Eos` after a finish, and no call that fails
 to return. An ordinary test run plays a few fixed sequences. The races these

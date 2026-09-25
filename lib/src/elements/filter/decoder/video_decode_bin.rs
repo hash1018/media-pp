@@ -1836,8 +1836,9 @@ mod tests {
         }
 
         /// A seek's preroll that was under way when the hardware refused is
-        /// given to the software line too: only the picture the seek asked
-        /// for comes out, rather than every one decoded to reach it.
+        /// given to the software line too: none of the pictures decoded to
+        /// reach the one the seek asked for comes out. What followed that
+        /// one does, the stream having ended — see the preroll gate.
         #[test]
         fn a_replacement_keeps_the_preroll_it_replaced() {
             let Some(gpu) = crate::test_support::try_d3d11_gpu() else {
@@ -1882,7 +1883,11 @@ mod tests {
                 .iter()
                 .map(|frame| frame.pts())
                 .collect();
-            assert_eq!(pts, vec![Some(3)], "only the picture the seek asked for");
+            assert_eq!(
+                pts,
+                vec![Some(3), Some(4)],
+                "the picture the seek asked for, then the rest of the stream"
+            );
         }
     }
 

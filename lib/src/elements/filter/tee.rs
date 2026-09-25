@@ -576,8 +576,6 @@ impl Element for Tee {
 }
 
 impl Tee {
-    /// Pushes the `Eos` a preroll kept for each branch still attached,
-    /// isolating a failure to its own branch as `consume` does.
     /// Keeps `buf` for the branch rooted at `root`, which a preroll holds.
     fn owe(&mut self, root: ElementId, buf: &MediaBuffer) {
         let index = match self.owed.iter().position(|(owed, _)| *owed == root) {
@@ -750,13 +748,16 @@ impl Sink for Tee {
             }
         }
         match msg {
-            // Playing again: every branch downstream has just been resumed,
-            // so the `Eos` a preroll kept goes on behind it.
-            ControlMsg::Resume => self.hand_on_owed(),
+            // Playing again, or a frame step asking for more: every branch
+            // downstream has just been told, so what a preroll kept — the
+            // `Eos` with it — goes on behind it. Kept until the next buffer
+            // came through instead, a step at the end of a file waited for
+            // an `Eos` held here with nothing left to come.
+            ControlMsg::Resume | ControlMsg::Preroll(_) => self.hand_on_owed(),
             // A new timeline, or none at all: the end of the old one is not
             // owed to anybody now.
             ControlMsg::Flush | ControlMsg::Stop => self.owed.clear(),
-            ControlMsg::Pause | ControlMsg::Preroll(_) | ControlMsg::Seek(_) => {}
+            ControlMsg::Pause | ControlMsg::Seek(_) => {}
         }
         Ok(())
     }
@@ -1783,5 +1784,80 @@ mod tests {
             "what was kept, then what followed"
         );
         assert_eq!(*late.lock().unwrap(), [1, 2, 3]);
+    }
+
+    /// What a preroll kept for a branch — the end of the stream with it —
+    /// goes on when the next preroll asks that branch for more, as a frame
+    /// step does, not only when playback goes on. At the end of a file
+    /// nothing else is coming through to carry it, and a step there waited
+    /// on an `Eos` held here.
+    #[test]
+    fn a_step_takes_what_the_last_preroll_kept() {
+        let (bus, _bus_rx) = Bus::new();
+        let graph = PipelineGraph::new();
+        let source_id = graph.add_source(ElementType::Other, "source".into());
+        let context = Arc::new(Context::for_test(bus, "test", graph, source_id));
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let ended = Arc::new(Mutex::new(Vec::new()));
+        let tee_branch = context
+            .tee("tee")
+            .branch(
+                context
+                    .branch()
+                    .to(PtsSink {
+                        pp_log: element_pp_log(ElementType::Other, "screen", None),
+                        name: "screen",
+                        seen: Arc::clone(&seen),
+                    })
+                    .unwrap(),
+            )
+            .branch(
+                context
+                    .branch()
+                    .to(RecordingSink {
+                        pp_log: element_pp_log(ElementType::Other, "ends", None),
+                        name: "ends",
+                        seen: Arc::clone(&ended),
+                    })
+                    .unwrap(),
+            )
+            .build()
+            .unwrap();
+        let mut upstream = SrcPad::new("source_src");
+        context.attach_pad(&mut upstream, tee_branch).unwrap();
+        let mut packet = ffmpeg_next::Packet::empty();
+        packet.set_pts(Some(1));
+
+        // A preroll every branch has its sample for, and the rest of the
+        // file behind it: held.
+        let terminals = context.graph.snapshot().terminal_ids();
+        let preroll = Arc::new(crate::control::PrerollContext::new(terminals.clone()));
+        for &terminal in &terminals {
+            preroll.mark_ready(terminal);
+        }
+        context
+            .state
+            .enter(crate::playback_state::Phase::Prerolling(preroll));
+        upstream
+            .push(MediaBuffer::Packet(Arc::new(packet)))
+            .unwrap();
+        upstream.push(MediaBuffer::Eos).unwrap();
+        assert!(seen.lock().unwrap().is_empty(), "held by the preroll");
+
+        // Paused, then a step's preroll asks for more.
+        context
+            .state
+            .enter(crate::playback_state::Phase::Paused { kept: None });
+        let step = ControlMsg::Preroll(Arc::new(crate::control::PrerollContext::for_step(
+            terminals, 1,
+        )));
+        context.state.observe(&step);
+        upstream.control(&step).unwrap();
+        assert_eq!(*seen.lock().unwrap(), [1], "what was kept");
+        assert_eq!(
+            *ended.lock().unwrap(),
+            ["data", "eos"],
+            "the end of the stream with it"
+        );
     }
 }

@@ -34,6 +34,7 @@ mod graph;
 mod lifecycle;
 mod seek;
 mod stats;
+mod step;
 
 struct BurstSource {
     pp_log: PpLog,

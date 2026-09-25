@@ -176,6 +176,8 @@ impl PipelineBuilder {
             bus_rx: self.bus_rx,
             running: Arc::new(AtomicUsize::new(0)),
             paused: AtomicBool::new(false),
+            stepped: AtomicBool::new(false),
+            completion: Arc::clone(&self.completion),
             operation: self.operation,
             preroll_slot: PrerollSlot::default().into(),
             workers: Mutex::new(Vec::new()),

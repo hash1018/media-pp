@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use crate::pp_log::{PpLog, pp_trace};
 
@@ -323,10 +323,28 @@ impl Sink for TerminalTracer {
         let is_eos = buf.is_eos();
         if is_eos {
             pp_trace!(pp_log: self.inner.pp_log(), "event=eos phase=received");
+        } else if self
+            .state
+            .preroll()
+            .is_some_and(|context| context.drops_for(self.id))
+        {
+            // A step moves the picture; what reaches this terminal meanwhile
+            // — the sound — is not played, and playing on puts it back in
+            // line. See `Pipeline::step`.
+            return Ok(());
         }
+        let picture = match &buf {
+            MediaBuffer::Video(frame) => picture_position(frame),
+            _ => None,
+        };
         let call = self.counters.begin(is_eos);
         let result = self.inner.consume(buf);
         call.end(result.is_ok());
+        if result.is_ok()
+            && let Some((at, lasts)) = picture
+        {
+            self.state.picture_taken(self.id, at, lasts);
+        }
         // `Sink::consume` defines successful terminal return as acceptance
         // into that sink's output path. This is the preroll completion point;
         // deliberately do not claim physical presentation has completed.
@@ -383,6 +401,7 @@ impl Sink for TerminalTracer {
         // before it.
         if matches!(msg, ControlMsg::Flush) {
             self.completion.terminal_flushed(self.id);
+            self.state.picture_flushed(self.id);
         }
         match &result {
             Ok(()) => pp_trace!(
@@ -396,6 +415,27 @@ impl Sink for TerminalTracer {
         }
         result
     }
+}
+
+/// Where a picture is in its media, read as the decoders read a seek's
+/// target so a step back can ask for the instant just before it, and how
+/// long it lasts where it says.
+fn picture_position(frame: &ffmpeg_next::frame::Video) -> Option<(Duration, Option<Duration>)> {
+    use ffmpeg_next::Rescale;
+    let nanos = ffmpeg_next::Rational::new(1, 1_000_000_000);
+    let pts = frame.pts()?;
+    let time_base = crate::buffer::time_base(frame)?;
+    let at = u64::try_from(pts.rescale(time_base, nanos))
+        .ok()
+        .map(Duration::from_nanos)?;
+    // SAFETY: `frame` is a live `AVFrame`; `duration` is a plain field, in
+    // the same unit as `pts`, and zero where nothing set it.
+    let duration = unsafe { (*frame.as_ptr()).duration };
+    let lasts = (duration > 0)
+        .then(|| u64::try_from(duration.rescale(time_base, nanos)).ok())
+        .flatten()
+        .map(Duration::from_nanos);
+    Some((at, lasts))
 }
 
 impl StageBuilder for QueueStage {

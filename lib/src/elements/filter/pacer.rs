@@ -330,7 +330,20 @@ impl Sink for Pacer {
 
     fn consume(&mut self, buf: MediaBuffer) -> crate::error::Result<()> {
         self.pending.push_back(buf);
+        let mut handed_on = false;
         while let Some(buf) = self.pending.pop_front() {
+            let ends = buf.is_eos() || self.pending.iter().any(MediaBuffer::is_eos);
+            // What was kept goes first, and what came with it waits while
+            // the terminal has stopped taking — as one does when it has the
+            // samples a preroll asked of it. Handed on regardless, a picture
+            // kept by a pause went on together with the next into a step
+            // that asked for one. The caller asked before this call, so only
+            // a later buffer need ask again; and with the end of the stream
+            // in, nothing is kept — see below.
+            if handed_on && !ends && !self.pad.ready_consume() {
+                self.pending.push_front(buf);
+                return Ok(());
+            }
             let ready = match Timing::of(&buf) {
                 Some(timing) => self.wait_for(timing)?,
                 None => true,
@@ -340,11 +353,12 @@ impl Sink for Pacer {
             // has nothing left to hand it, and what was kept was dropped with
             // the pacer — the `Eos` with it, so the stream never ended. Late
             // pictures at the end are the smaller loss.
-            if !ready && !self.pending.iter().any(MediaBuffer::is_eos) {
+            if !ready && !ends {
                 self.pending.push_front(buf);
                 return Ok(());
             }
             self.pad.push(buf)?;
+            handed_on = true;
         }
         Ok(())
     }
@@ -488,6 +502,42 @@ mod tests {
         );
     }
 
+    /// What a pause kept goes on first when a preroll asks for a sample,
+    /// and what came in behind it waits while the terminal has what it asked
+    /// for. Handed on together, a picture kept by a pause and the next went
+    /// into a frame step that asked for one.
+    #[test]
+    fn a_kept_buffer_goes_first_and_the_next_waits_for_room() {
+        let clock = Arc::new(Clock::new());
+        let context = context(&clock);
+        let mut pacer = paced("pacer", &context);
+        let (room, taken) = crate::test_support::Room::new(2);
+        pacer.pad.link(Box::new(room));
+        pacer.consume(packet(0)).expect("anchors the clock");
+
+        context.state.interrupt();
+        pacer.consume(packet(60)).expect("interrupted");
+        assert_eq!(pacer.pending.len(), 1, "kept by the pause");
+
+        let preroll = ControlMsg::Preroll(Arc::new(PrerollContext::new([])));
+        context.state.observe(&preroll);
+        pacer.control(&preroll).expect("preroll");
+        pacer.consume(packet(61)).expect("the next");
+        assert_eq!(
+            *taken.lock().unwrap(),
+            [Some(0), Some(60)],
+            "the kept one, and no more than there was room for"
+        );
+        assert_eq!(pacer.pending.len(), 1, "the next waits its turn");
+
+        pacer.consume(MediaBuffer::Eos).expect("the end");
+        assert_eq!(
+            *taken.lock().unwrap(),
+            [Some(0), Some(60), Some(61), None],
+            "with the end in, all of it"
+        );
+    }
+
     /// A packet `pts` seconds in, saying so, as every packet here does.
     fn packet(pts: i64) -> MediaBuffer {
         let mut packet = ffmpeg::Packet::empty();
@@ -496,10 +546,6 @@ mod tests {
         MediaBuffer::Packet(Arc::new(packet))
     }
 
-    /// A preroll's buffers go straight on even while an interrupt is out —
-    /// one raised after this pacer took the request it goes with, as the
-    /// pipeline raises it. Kept instead, each was handed on together with
-    /// the next once the interrupt settled.
     /// What an interrupted wait kept goes on at once when the end of the
     /// stream comes in behind it: nothing will call again to hand it on,
     /// and kept, it was dropped with the pacer — the `Eos` along with it.
@@ -518,6 +564,10 @@ mod tests {
         assert!(pacer.pending.is_empty(), "all handed on, the end with it");
     }
 
+    /// A preroll's buffers go straight on even while an interrupt is out —
+    /// one raised after this pacer took the request it goes with, as the
+    /// pipeline raises it. Kept instead, each was handed on together with
+    /// the next once the interrupt settled.
     #[test]
     fn a_preroll_is_not_held_back_by_an_interrupt() {
         let clock = Arc::new(Clock::new());

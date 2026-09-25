@@ -22,8 +22,9 @@ file with no picture, which plays with its waveform in the window
 
 The audio renderer is `WasapiRenderer` on Windows and `PipeWireAudioRenderer`
 on Linux, on the default output device. Space pauses and plays, the left and
-right arrows move five seconds, the up and down arrows turn the volume, M
-mutes, F or a double click fills the screen, Escape or closing the window
+right arrows move five seconds, the full stop and the comma step a picture
+on and back, the up and down arrows turn the volume, M mutes, F or a double
+click fills the screen, Escape or closing the window
 stops; the title shows where playback is. One program for Windows
 and Linux, with no `#[cfg]` but the one choosing its `main`.
 

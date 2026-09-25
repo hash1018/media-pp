@@ -263,7 +263,15 @@ impl Sink for VideoSynchronizer {
         }
 
         self.pending.push_back(buf);
+        let mut handed_on = false;
         while let Some(buf) = self.pending.pop_front() {
+            // What was kept goes first, and what came with it waits while
+            // the terminal has stopped taking — see `Pacer::consume`.
+            let ends = buf.is_eos() || self.pending.iter().any(MediaBuffer::is_eos);
+            if handed_on && !ends && !self.pad.ready_consume() {
+                self.pending.push_front(buf);
+                return Ok(());
+            }
             let outcome = match &buf {
                 MediaBuffer::Video(frame) => {
                     let frame_ns = Self::frame_ns(frame)?;
@@ -273,13 +281,17 @@ impl Sink for VideoSynchronizer {
                 _ => unreachable!("buffer kind validated before queueing"),
             };
             match outcome {
-                WaitOutcome::Render => self.pad.push(buf)?,
+                WaitOutcome::Render => {
+                    self.pad.push(buf)?;
+                    handed_on = true;
+                }
                 WaitOutcome::Drop => pp_debug!(self, "dropping late video frame"),
                 // Kept only while there will be a next call — see
                 // `Pacer::consume`: with the end of the stream behind it,
                 // nothing will make one.
-                WaitOutcome::Interrupted if self.pending.iter().any(MediaBuffer::is_eos) => {
+                WaitOutcome::Interrupted if ends => {
                     self.pad.push(buf)?;
+                    handed_on = true;
                 }
                 WaitOutcome::Interrupted => {
                     self.pending.push_front(buf);
@@ -434,6 +446,41 @@ mod tests {
         ));
         assert!(sync.last_ns.is_none());
         assert!(sync.pending.is_empty());
+    }
+
+    /// What a pause kept goes on first when a preroll asks for a picture,
+    /// and what came in behind it waits while the terminal has what it
+    /// asked for — as in `Pacer`, where a frame step was handed two.
+    #[test]
+    fn a_kept_frame_goes_first_and_the_next_waits_for_room() {
+        let (mut sync, _playback) = synchronizer();
+        let (room, taken) = crate::test_support::Room::new(2);
+        sync.pad.link(Box::new(room));
+        let unit = ffmpeg::Rational::new(1, 1_000);
+        sync.consume(frame(0, unit)).expect("anchors the clock");
+
+        let state = Arc::clone(sync.state.as_ref().expect("wired"));
+        state.interrupt();
+        sync.consume(frame(60_000, unit)).expect("interrupted");
+        assert_eq!(sync.pending.len(), 1, "kept by the pause");
+
+        let preroll = ControlMsg::Preroll(Arc::new(PrerollContext::new([])));
+        state.observe(&preroll);
+        sync.control(&preroll).expect("preroll");
+        sync.consume(frame(60_033, unit)).expect("the next");
+        assert_eq!(
+            *taken.lock().unwrap(),
+            [Some(0), Some(60_000)],
+            "the kept one, and no more than there was room for"
+        );
+        assert_eq!(sync.pending.len(), 1, "the next waits its turn");
+
+        sync.consume(MediaBuffer::Eos).expect("the end");
+        assert_eq!(
+            *taken.lock().unwrap(),
+            [Some(0), Some(60_000), Some(60_033), None],
+            "with the end in, all of it"
+        );
     }
 
     /// Preroll has to outrun the clock this element schedules against —

@@ -115,7 +115,8 @@
 //! state the caller had. [`SeekMode::Accurate`](pipeline::SeekMode::Accurate)
 //! decodes forward to the exact target, and
 //! [`SeekMode::Keyframe`](pipeline::SeekMode::Keyframe) shows the keyframe the
-//! demuxer landed on.
+//! demuxer landed on. [`Pipeline::step`](pipeline::Pipeline::step) moves the
+//! picture by frames, forward or back, and holds it there, paused.
 //!
 //! # Connecting elements
 //!

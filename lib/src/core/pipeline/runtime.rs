@@ -42,7 +42,16 @@ pub enum PipelineError {
     /// stream is still running, and can be sought back into.
     #[error("this pipeline is not running, so there is nothing to seek")]
     NotRunning,
+
+    /// [`Pipeline::step`] was asked to move the picture of a pipeline that
+    /// has not shown one: no terminal of it has taken a video frame yet, so
+    /// there is neither a picture to step nor a place to step it from.
+    #[error("nothing in this pipeline has shown a picture yet, so there is none to step")]
+    NoPicture,
 }
+
+/// The longest a seek or a step waits for its preroll.
+const PREROLL_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// How [`Pipeline::seek`] chooses the sample shown at the requested position.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -150,6 +159,13 @@ pub struct Pipeline {
     /// media timestamp leaves an unset clock unchanged while downstream
     /// queues are nevertheless paused.
     pub(super) paused: AtomicBool,
+    /// Whether the picture has been stepped since playback last lined
+    /// everything up to it — see [`Pipeline::step`]. The next resume seeks to
+    /// the picture first.
+    pub(super) stepped: AtomicBool,
+    /// Which terminals have taken the end of their stream — what a step has
+    /// no more pictures to ask for.
+    pub(super) completion: Arc<super::completion::Completion>,
     /// Serializes public lifecycle/timeline operations. `paused` remains the
     /// caller-requested state while seek temporarily pauses the runtime.
     pub(super) operation: Arc<Mutex<()>>,
@@ -611,7 +627,32 @@ impl Pipeline {
             return;
         }
         self.paused.store(false, Ordering::Release);
+        if self.stepped.swap(false, Ordering::AcqRel) && self.play_on_from_the_picture() {
+            return;
+        }
         self.resume_runtime();
+    }
+
+    /// After a step: plays on from the picture shown, with everything else
+    /// lined up to it first — an accurate seek to it, ended by playing on. A
+    /// step drops the sound and leaves the clock where it was; see
+    /// [`Self::step`]. `false`, having done nothing, where there is no
+    /// picture to line up to.
+    fn play_on_from_the_picture(&self) -> bool {
+        let (_, terminals) = self.picture_terminals();
+        let Some((at, _)) = self.state.picture_at(&terminals) else {
+            return false;
+        };
+        self.reposition(at);
+        let preroll = self.preroll_for(|terminals| PrerollContext::for_seek(terminals, at));
+        if let Err(error) = self.preroll(&preroll, PREROLL_TIMEOUT) {
+            pp_warn!(
+                pp_log: &self.pp_log,
+                "playing on after a step, not everything lined up to the picture: {error}"
+            );
+        }
+        self.end_preroll(true);
+        true
     }
 
     fn resume_runtime(&self) {
@@ -863,8 +904,6 @@ impl Pipeline {
     }
 
     pub fn seek(&self, target: Duration, mode: SeekMode) -> Result<()> {
-        const PREROLL_TIMEOUT: Duration = Duration::from_secs(5);
-
         let _operation = self
             .operation
             .lock()
@@ -873,6 +912,9 @@ impl Pipeline {
             return Err(PipelineError::NotRunning.into());
         }
         self.check_seek()?;
+        // A seek lines everything up itself; nothing a step left out of line
+        // is left for a resume to see to.
+        self.stepped.store(false, Ordering::Release);
         let playing = !self.paused.load(Ordering::Acquire);
 
         // A seek is these four stages, each leaving the graph in a state
@@ -927,8 +969,17 @@ impl Pipeline {
         &self,
         make: impl FnOnce(Vec<crate::graph::ElementId>) -> PrerollContext,
     ) -> Arc<PrerollContext> {
+        self.preroll_expecting(self.graph().terminal_ids(), make)
+    }
+
+    /// A preroll expecting `terminals`, as `make` sets it up, and naming them
+    /// for a timeout to say which it waited on.
+    fn preroll_expecting(
+        &self,
+        terminals: Vec<crate::graph::ElementId>,
+        make: impl FnOnce(Vec<crate::graph::ElementId>) -> PrerollContext,
+    ) -> Arc<PrerollContext> {
         let graph = self.graph();
-        let terminals = graph.terminal_ids();
         let labels: Vec<_> = terminals
             .iter()
             .filter_map(|&id| graph.node(id).cloned())
@@ -958,6 +1009,125 @@ impl Pipeline {
         let prerolled = self.await_preroll(preroll, timeout);
         self.retire_preroll();
         prerolled
+    }
+
+    /// Every terminal, and those of them that show pictures: that decoded
+    /// video is wired to reach, or — where the wiring does not say — that
+    /// have taken some. The wiring first: a screen slower than its sibling
+    /// may not have taken its first picture yet, and read as one that shows
+    /// none, a step dropped its pictures as it drops the sound.
+    fn picture_terminals(&self) -> (Vec<crate::graph::ElementId>, Vec<crate::graph::ElementId>) {
+        let every = self.graph().terminal_ids();
+        let shown = self.state.picture_terminals(&every);
+        let pictures = every
+            .iter()
+            .copied()
+            .filter(|&terminal| {
+                self.graph.takes_pictures(terminal) == Some(true) || shown.contains(&terminal)
+            })
+            .collect();
+        (every, pictures)
+    }
+
+    /// Moves the picture by `frames` and holds it there: forward by that many
+    /// pictures, or back, and paused either way. Answers where the picture
+    /// is now, in its media.
+    ///
+    /// Forward is a preroll that asks each terminal showing pictures for
+    /// `frames` more, taken from wherever its decoder is: no seek, nothing
+    /// decoded twice, and a picture decoded past the last one asked for waits
+    /// to be the next step's first. Past the end there is nothing more to
+    /// take, and the picture stays at the last. Back is an accurate seek to
+    /// the instant just before the picture shown, which lands on the one
+    /// before it however unevenly the pictures are spaced; each picture
+    /// further back is counted in the spacing of the pictures shown, which
+    /// is exact for a stream at a constant rate. A step back decodes again
+    /// from the keyframe before, each time.
+    ///
+    /// Nothing but the picture moves. What reaches a terminal that does not
+    /// show pictures — the sound — is dropped meanwhile, and the clock is
+    /// let go of as a seek lets go of it: [`Self::position`] is `None` until
+    /// playback moves on, and this answer is where the picture is.
+    /// [`Self::resume`] after a step first seeks to the picture shown, which
+    /// puts the sound and the clock back in line with it, and plays on from
+    /// there.
+    ///
+    /// Refused where a seek is, before anything moves — a live source, a
+    /// recording; see [`Self::check_seek`] — and with
+    /// [`PipelineError::NoPicture`] where no terminal has taken a picture
+    /// yet, and [`PipelineError::NotRunning`] as a seek is. A `frames` of zero
+    /// pauses and answers where the picture is.
+    pub fn step(&self, frames: i64) -> Result<Duration> {
+        let _operation = self
+            .operation
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if self.running.load(Ordering::Acquire) == 0 {
+            return Err(PipelineError::NotRunning.into());
+        }
+        self.check_seek()?;
+        let (every, terminals) = self.picture_terminals();
+        let Some((at, spacing)) = self.state.picture_at(&terminals) else {
+            return Err(PipelineError::NoPicture.into());
+        };
+        // What shows no pictures — the sound — is not played meanwhile.
+        let quiet: Vec<_> = every
+            .into_iter()
+            .filter(|terminal| !terminals.contains(terminal))
+            .collect();
+        // Stepping is something done paused, and it leaves the pipeline so.
+        if !self.paused.swap(true, Ordering::AcqRel) {
+            self.pause_runtime();
+        }
+        if frames == 0 {
+            return Ok(at);
+        }
+        self.stepped.store(true, Ordering::Release);
+        // Where the clock stood is not where the picture is going.
+        self.playback_clock.reset_for_seek();
+        let stepped = if frames > 0 {
+            // Only what has pictures left to take: one that has taken the
+            // end of its stream never will, and waiting on it would be
+            // waiting out the timeout.
+            let taking: Vec<_> = terminals
+                .iter()
+                .copied()
+                .filter(|&terminal| !self.completion.has_ended(terminal))
+                .collect();
+            if taking.is_empty() {
+                return Ok(at);
+            }
+            let count = usize::try_from(frames).unwrap_or(usize::MAX);
+            let preroll = self.preroll_expecting(taking, |terminals| {
+                PrerollContext::for_step(terminals, count).silencing(quiet)
+            });
+            let stepped = self.preroll(&preroll, PREROLL_TIMEOUT);
+            self.end_preroll(false);
+            stepped
+        } else {
+            // One back is the instant just before the picture shown, which
+            // lands on the one before it however unevenly they are spaced.
+            // Further back is counted in spacings, and aimed at the middle of
+            // the picture wanted: positions are whole nanoseconds, and a count
+            // of rounded spacings lands on a picture's very start as often as
+            // not — which is the picture after.
+            let back = u32::try_from(frames.unsigned_abs()).unwrap_or(u32::MAX);
+            let target = match spacing {
+                Some(spacing) if back > 1 => at
+                    .saturating_sub(spacing.saturating_mul(back))
+                    .saturating_add(spacing / 2),
+                _ => at.saturating_sub(Duration::from_nanos(1)),
+            };
+            self.reposition(target);
+            let preroll = self.preroll_expecting(terminals.clone(), |terminals| {
+                PrerollContext::for_seek(terminals, target).silencing(quiet)
+            });
+            let stepped = self.preroll(&preroll, PREROLL_TIMEOUT);
+            self.end_preroll(false);
+            stepped
+        };
+        stepped?;
+        Ok(self.state.picture_at(&terminals).map_or(at, |(at, _)| at))
     }
 
     /// A seek's last stage: out of the preroll by way of a pause, then on

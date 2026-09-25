@@ -698,6 +698,106 @@ impl FileDemuxer {
         }
     }
 
+    /// The stream FFmpeg seeks the file by — its default one, the picture
+    /// where there is one — and that stream's time base. `None` where it
+    /// has none with a time base to read.
+    fn seek_stream(&self) -> Option<(usize, ffmpeg::Rational)> {
+        // SAFETY: `input` is an open format context for as long as `self`
+        // is, and this only reads its stream list.
+        let index =
+            unsafe { ffmpeg::ffi::av_find_default_stream_index(self.input.as_ptr().cast_mut()) };
+        let index = usize::try_from(index).ok()?;
+        let time_base = self.input.stream(index)?.time_base();
+        (time_base.numerator() > 0 && time_base.denominator() > 0).then_some((index, time_base))
+    }
+
+    /// Reads on from where a seek left the file up to the first packet of
+    /// the stream it seeks by, parking all of it for `run`, and answers
+    /// where the first packet of all starts and when that stream's first
+    /// starts and is decoded — `None` for either past the end.
+    ///
+    /// Where a seek landed is only known by reading: `avformat_seek_file`
+    /// says nothing but whether it failed. What is read is real data, not a
+    /// probe to throw away, which is why it is parked rather than dropped.
+    fn read_to_landing(
+        &mut self,
+        by: Option<(usize, ffmpeg::Rational)>,
+    ) -> (Option<Duration>, Option<(Duration, Duration)>) {
+        // Enough for any interleave; a stream this does not reach within it
+        // is one to stop looking for.
+        const READ_LIMIT: usize = 1_024;
+        let nanos = ffmpeg::Rational::new(1, 1_000_000_000);
+        let mut first = None;
+        for _ in 0..READ_LIMIT {
+            let Some((index, time_base, mut packet)) = self
+                .input
+                .packets()
+                .next()
+                .map(|(stream, packet)| (stream.index(), stream.time_base(), packet))
+            else {
+                break;
+            };
+            // Read before `stamp_lap` moves it: where a seek landed is a
+            // position in the *file*, which a loop's accumulated offset must
+            // not be added to.
+            first.get_or_insert_with(|| {
+                packet
+                    .pts()
+                    .or_else(|| packet.dts())
+                    .map(|ts| ts_to_duration(ts, time_base))
+                    .unwrap_or(Duration::ZERO)
+            });
+            let at = |ts: Option<i64>| {
+                ts.and_then(|ts| u64::try_from(ts.rescale(time_base, nanos)).ok())
+                    .map(Duration::from_nanos)
+            };
+            let seeking_by = by.is_none_or(|(by, _)| by == index);
+            let landing = at(packet.pts().or_else(|| packet.dts()))
+                .zip(at(packet.dts().or_else(|| packet.pts())));
+            self.stamp_lap(index, time_base, &mut packet);
+            self.park((index, time_base, packet));
+            if seeking_by {
+                return (first, landing);
+            }
+        }
+        (first, None)
+    }
+
+    /// Forgets every packet read and parked, for a new position to be read
+    /// from — a `Flush`'s, or a seek's that landed too late.
+    fn forget_parked(&mut self) {
+        self.pending.clear();
+        self.pending_bytes = 0;
+        self.parked_per_pad.fill(0);
+        self.parked_since_ns.fill(None);
+        self.read_ns = None;
+    }
+
+    /// `target` as the microseconds to hand `Input::seek`, such that the seek
+    /// never lands on a keyframe after it.
+    ///
+    /// FFmpeg reads those microseconds in the time base of the stream it
+    /// seeks by — the one `av_find_default_stream_index` picks — rounding
+    /// to the nearest tick. Rounded up, a target just before a keyframe was
+    /// that keyframe, and the seek landed on it: an accurate seek to the
+    /// instant before a keyframe showed the keyframe, and a frame step back
+    /// from one stayed where it was. Here the target is floored to that
+    /// stream's tick and then to a microsecond whose nearest tick is that
+    /// one, or a later microsecond's is not reached.
+    fn seek_micros(target: Duration, by: Option<(usize, ffmpeg::Rational)>) -> i64 {
+        let whole = target.as_micros().min(i64::MAX as u128) as i64;
+        let Some((_, time_base)) = by else {
+            return whole;
+        };
+        let (num, den) = (
+            i128::from(time_base.numerator()),
+            i128::from(time_base.denominator()),
+        );
+        let ticks = target.as_nanos() as i128 * den / (1_000_000_000 * num);
+        let micros = ticks * 1_000_000 * num / den;
+        i64::try_from(micros).unwrap_or(whole).min(whole)
+    }
+
     /// Whether reading another packet would only deepen the parked backlog.
     ///
     /// Not a tuning knob: a branch that is briefly behind parks a handful of
@@ -863,13 +963,7 @@ impl SourceElement for FileDemuxer {
             // stage discards its own on the same `Flush`, so releasing these
             // afterwards would be the one way old media could reach a decoder
             // that had already reset for the new position.
-            ControlMsg::Flush => {
-                self.pending.clear();
-                self.pending_bytes = 0;
-                self.parked_per_pad.fill(0);
-                self.parked_since_ns.fill(None);
-                self.read_ns = None;
-            }
+            ControlMsg::Flush => self.forget_parked(),
             ControlMsg::Seek(_) => self.sought = true,
             ControlMsg::Pause | ControlMsg::Resume | ControlMsg::Preroll(_) | ControlMsg::Stop => {}
         }
@@ -887,40 +981,56 @@ impl SourceElement for FileDemuxer {
         // make that keyframe well before `target` — e.g. a single
         // 10-second file with keyframes only at 0s and 8.3s means every
         // `target` under 8.3s lands back at 0s.
-        let ts = target.as_micros().min(i64::MAX as u128) as i64;
-        self.input.seek(ts, ..).inspect_err(|error| {
-            pp_error!(self, "seek to {target:?} failed: {error}");
-        })?;
-
-        // `avformat_seek_file` only reports success/failure, not where it
-        // landed — the one way to find out is to read the next packet and
-        // look at its own timestamp. That packet is real data (not a
-        // probe to throw away), so it's stashed in `pending` for `run`'s
-        // next iteration instead of being dropped here.
-        let landed_packet = self
-            .input
-            .packets()
-            .next()
-            .map(|(stream, packet)| (stream.index(), stream.time_base(), packet));
-        match landed_packet {
-            Some((index, time_base, mut packet)) => {
-                // Read before `stamp_lap` moves it: where a seek landed is a
-                // position in the *file*, which a loop's accumulated offset
-                // must not be added to.
-                let landed = packet
-                    .pts()
-                    .or_else(|| packet.dts())
-                    .map(|ts| ts_to_duration(ts, time_base))
-                    .unwrap_or(Duration::ZERO);
-                self.stamp_lap(index, time_base, &mut packet);
-                self.park((index, time_base, packet));
-                Ok(landed)
+        //
+        // Where it lands is by when a keyframe is *decoded*, which with
+        // B-frames is before it is shown: the pictures shown just before a
+        // keyframe belong to the group before it, and a target among them
+        // landed on the keyframe, whose pictures all come after the target.
+        // Nothing then covered it — an accurate seek there showed the
+        // keyframe, a frame step back from it stayed on it. So a landing
+        // whose first picture starts after the target is sought again from
+        // before that picture is decoded, which is the group before.
+        const ATTEMPTS: usize = 4;
+        let by = self.seek_stream();
+        let mut aim = target;
+        let mut landed = None;
+        let mut last_picture = None;
+        for _ in 0..ATTEMPTS {
+            let ts = Self::seek_micros(aim, by);
+            self.input.seek(ts, ..).inspect_err(|error| {
+                pp_error!(self, "seek to {target:?} failed: {error}");
+            })?;
+            let (first, picture) = self.read_to_landing(by);
+            landed = first;
+            // Landed where it did last time too: the stream's pictures start
+            // after the target, and there is nothing earlier to land on.
+            if std::mem::replace(&mut last_picture, picture) == picture {
+                break;
             }
-            // Nothing left to read right after seeking (`target` at/past
-            // EOF) — there's no packet to learn a real position from, so
-            // just report the request back as-is.
-            None => Ok(target),
+            let Some((starts, decoded)) = picture.filter(|(starts, _)| *starts > target) else {
+                break;
+            };
+            let tick = by.map_or(Duration::from_micros(1), |(_, base)| {
+                Duration::from_nanos(
+                    (1_000_000_000 * u64::try_from(base.numerator()).unwrap_or(1))
+                        .div_ceil(u64::try_from(base.denominator()).unwrap_or(1)),
+                )
+            });
+            let earlier = decoded.min(aim).saturating_sub(tick);
+            if earlier >= aim {
+                // The start of the file: nothing before it to land on.
+                break;
+            }
+            pp_debug!(
+                self,
+                "seek to {target:?} landed on a picture at {starts:?}; seeking again from {earlier:?}"
+            );
+            aim = earlier;
+            self.forget_parked();
         }
+        // Nothing left to read (`target` at/past EOF): no packet to learn a
+        // real position from, so the request is reported back as it is.
+        Ok(landed.unwrap_or(target))
     }
 }
 
@@ -1505,19 +1615,27 @@ mod tests {
         assert_eq!(parked, 4, "the fixture must have packets to park");
 
         // The order a pipeline uses: Flush marks the timeline boundary, Seek
-        // then moves the cursor and reads one packet ahead to learn where it
-        // landed. Counting rather than comparing timestamps, because a seek
-        // that lands back at the start legitimately re-reads a packet with
-        // the same pts as one of the discarded ones.
+        // then moves the cursor and reads ahead, up to its first picture, to
+        // learn where it landed. Three seconds in lands well past the four
+        // parked, which are the file's first.
         demuxer.on_control(&crate::control::ControlMsg::Flush);
-        demuxer
+        let landed = demuxer
             .seek(Duration::from_secs(3))
             .expect("seek within the test video");
+        assert!(landed > Duration::from_secs(1), "landed at {landed:?}");
 
+        assert!(!demuxer.pending.is_empty(), "the seek's own read-ahead");
+        for (_, time_base, packet) in &demuxer.pending {
+            let at = ts_to_duration(packet.pts().or(packet.dts()).unwrap_or(0), *time_base);
+            assert!(
+                at > Duration::from_secs(1),
+                "a packet from before the seek survived the flush: {at:?}"
+            );
+        }
         assert_eq!(
-            demuxer.pending.len(),
-            1,
-            "only the seek's own read-ahead packet may survive the flush"
+            demuxer.pending.back().map(|(index, _, _)| *index),
+            Some(video.index),
+            "read ahead as far as the first picture, and no further"
         );
         let counted: usize = demuxer
             .pending

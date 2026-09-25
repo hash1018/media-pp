@@ -1,4 +1,5 @@
-//! Control conformance: random sequences of pause, resume, seek and stop,
+//! Control conformance: random sequences of pause, resume, seek, frame step
+//! and stop,
 //! run against the shapes of pipeline this crate is used in, and judged
 //! against what every terminal was handed.
 //!
@@ -14,7 +15,7 @@
 //! - every call returns — a control call that does not, within
 //!   [`OP_TIMEOUT`], fails the sequence with its history;
 //! - paused means nothing new reaches a terminal, except the one picture a
-//!   seek's preroll asks for;
+//!   seek's preroll asks for and the pictures a step does;
 //! - after a seek, what a terminal is handed is from the new position on,
 //!   and goes forward — nothing from before the seek arrives after it —
 //!   with nothing missing in between: no step between two samples much
@@ -377,6 +378,8 @@ enum Op {
     Wait(Duration),
     /// To just short of the end, playing, and on until it finishes.
     PlayToEnd,
+    /// The picture this many pictures on, or back.
+    Step(i64),
 }
 
 /// A small, seedable generator — enough to spread sequences over the
@@ -399,10 +402,11 @@ impl Rng {
 
 fn op(rng: &mut Rng, duration: Option<Duration>) -> Op {
     let Some(duration) = duration else {
-        return match rng.below(4) {
+        return match rng.below(5) {
             0 => Op::Pause,
             1 => Op::Resume,
             2 => Op::Seek(Duration::from_secs(1), SeekMode::Accurate),
+            3 => Op::Step(1),
             _ => Op::Wait(Duration::from_millis(rng.below(300))),
         };
     };
@@ -411,7 +415,7 @@ fn op(rng: &mut Rng, duration: Option<Duration>) -> Op {
     } else {
         SeekMode::Accurate
     };
-    match rng.below(10) {
+    match rng.below(12) {
         0 | 1 => Op::Pause,
         2 | 3 => Op::Resume,
         4 => {
@@ -434,6 +438,12 @@ fn op(rng: &mut Rng, duration: Option<Duration>) -> Op {
             }
         }
         7 => Op::PlayToEnd,
+        10 | 11 => Op::Step(match rng.below(4) {
+            0 => 1,
+            1 => 4,
+            2 => -1,
+            _ => -3,
+        }),
         _ => Op::Wait(Duration::from_millis(rng.below(400))),
     }
 }
@@ -535,8 +545,15 @@ struct Model {
     /// How long it has played since the last seek.
     played: Duration,
     /// The seeks that succeeded, in order: what each terminal's `Seek`
-    /// controls are matched against.
-    seeks: Vec<(Duration, SeekMode)>,
+    /// controls are matched against. `None` for one whose target the
+    /// pipeline works out — a step back's, and the one a resume after a step
+    /// makes to line everything up to the picture.
+    seeks: Vec<(Option<Duration>, SeekMode)>,
+    /// Whether the picture has been stepped since the last seek, so the next
+    /// resume seeks to it first.
+    stepped: bool,
+    /// Where the last step left the picture.
+    picture: Option<Duration>,
 }
 
 impl Model {
@@ -608,13 +625,44 @@ fn run_sequence(shape: Shape, seed: u64, steps: usize) -> std::result::Result<()
                     return fail(&history, "resume did not return".into());
                 }
                 model.paused = false;
+                if std::mem::take(&mut model.stepped)
+                    && let Some(picture) = model.picture
+                {
+                    // Lined up to the picture before playing on.
+                    model.seeks.push((None, SeekMode::Accurate));
+                    model.sought(picture, rig.duration);
+                }
+            }
+            Op::Step(frames) => {
+                let pipeline = Arc::clone(&rig.pipeline);
+                match within(move || pipeline.step(frames)) {
+                    None => return fail(&history, "step did not return".into()),
+                    Some(Ok(at)) => {
+                        model.paused = true;
+                        model.stepped = true;
+                        model.picture = Some(at);
+                        if frames < 0 {
+                            model.seeks.push((None, SeekMode::Accurate));
+                            model.sought(at, rig.duration);
+                        }
+                    }
+                    // Nothing shown yet to step from, and nothing changed.
+                    Some(Err(crate::Error::PipelineError(PipelineError::NoPicture))) => {}
+                    Some(Err(error)) if rig.duration.is_none() => {
+                        if !matches!(error, crate::Error::SeekError(_)) {
+                            return fail(&history, format!("live step refused oddly: {error}"));
+                        }
+                    }
+                    Some(Err(error)) => return fail(&history, format!("step failed: {error}")),
+                }
             }
             Op::Seek(target, mode) => {
                 let pipeline = Arc::clone(&rig.pipeline);
                 match within(move || pipeline.seek(target, mode)) {
                     None => return fail(&history, "seek did not return".into()),
                     Some(Ok(())) => {
-                        model.seeks.push((target, mode));
+                        model.seeks.push((Some(target), mode));
+                        model.stepped = false;
                         model.sought(target, rig.duration);
                     }
                     Some(Err(error)) if rig.duration.is_none() => {
@@ -642,7 +690,10 @@ fn run_sequence(shape: Shape, seed: u64, steps: usize) -> std::result::Result<()
                     Some(Err(error)) => {
                         return fail(&history, format!("seek to the end failed: {error}"));
                     }
-                    Some(Ok(())) => model.seeks.push((target, SeekMode::Accurate)),
+                    Some(Ok(())) => {
+                        model.seeks.push((Some(target), SeekMode::Accurate));
+                        model.stepped = false;
+                    }
                 }
                 let pipeline = Arc::clone(&rig.pipeline);
                 if within(move || pipeline.resume()).is_none() {
@@ -723,17 +774,43 @@ fn run_sequence(shape: Shape, seed: u64, steps: usize) -> std::result::Result<()
     }
     let landings = bus.landings();
     for (name, log) in &rig.terminals {
+        let log = log.lock().unwrap();
         if let Err(why) = judge(
-            &log.lock().unwrap(),
+            &log,
             &model.seeks,
             &landings,
             rig.duration,
             shape.lossless(),
+            *name != "speakers",
         ) {
-            return fail(&history, format!("{name}: {why}"));
+            let handed = sketch(&log);
+            return fail(
+                &history,
+                format!("{name}: {why}\n  it was handed: {handed}"),
+            );
         }
     }
     Ok(())
+}
+
+/// Everything a terminal was handed, one short word each, for a failure
+/// the data promises found to show: a sample as the millisecond it starts
+/// at, a control message by its name.
+fn sketch(log: &[Entry]) -> String {
+    let words: Vec<String> = log
+        .iter()
+        .map(|entry| match entry {
+            Entry::Data { pts: Some(pts) } => pts.as_millis().to_string(),
+            Entry::Data { pts: None } => "?".into(),
+            Entry::Eos => "Eos".into(),
+            Entry::Control(ControlMsg::Seek(target)) => format!("Seek({})", target.as_millis()),
+            Entry::Control(ControlMsg::Preroll(context)) => {
+                format!("Preroll({})", context.samples())
+            }
+            Entry::Control(message) => format!("{message:?}"),
+        })
+        .collect();
+    words.join(" ")
 }
 
 /// The last few things a terminal was handed, for a failure to show.
@@ -744,10 +821,11 @@ fn tail(log: &[Entry]) -> &[Entry] {
 /// Checks one terminal's record against the promises about data.
 fn judge(
     log: &[Entry],
-    seeks: &[(Duration, SeekMode)],
+    seeks: &[(Option<Duration>, SeekMode)],
     landings: &[Duration],
     duration: Option<Duration>,
     lossless: bool,
+    shows_pictures: bool,
 ) -> std::result::Result<(), String> {
     // The widest step allowed between two samples in a row: a few of the
     // stream's own, so a picture or a packet of sound gone missing shows,
@@ -756,13 +834,17 @@ fn judge(
         .map(|spacing| (spacing * 5 / 2).max(spacing + Duration::from_millis(20)));
     let mut paused = false;
     // How many samples a preroll has let through while paused, not yet
-    // taken: one per `Preroll`, which is what a preroll asks each terminal
-    // for.
+    // taken: what each `Preroll` asks each terminal for — one for a seek's,
+    // the pictures asked for in a step's.
     let mut prerolls = 0usize;
     let mut flushed = false;
     let mut seek = 0usize;
     let mut floor: Option<Duration> = None;
     let mut last: Option<Duration> = None;
+    // Whether what comes next may start further on than the stream's own
+    // spacing allows: a step drops the sound, and unless a seek lines it
+    // up again — a `finish` does not — it goes on from further on.
+    let mut skipped = false;
     for (at, entry) in log.iter().enumerate() {
         match entry {
             Entry::Control(ControlMsg::Pause) => {
@@ -770,7 +852,10 @@ fn judge(
                 prerolls = 0;
             }
             Entry::Control(ControlMsg::Resume) => paused = false,
-            Entry::Control(ControlMsg::Preroll(_)) if paused => prerolls += 1,
+            Entry::Control(ControlMsg::Preroll(context)) if paused => {
+                prerolls += context.samples();
+                skipped |= context.is_step() && !shows_pictures;
+            }
             Entry::Control(ControlMsg::Flush) => flushed = true,
             Entry::Control(ControlMsg::Seek(target)) => {
                 flushed = false;
@@ -778,7 +863,8 @@ fn judge(
                 let (asked, mode) = seeks
                     .get(seek)
                     .copied()
-                    .unwrap_or((*target, SeekMode::Accurate));
+                    .unwrap_or((Some(*target), SeekMode::Accurate));
+                let asked = asked.unwrap_or(*target);
                 if asked != *target {
                     return Err(format!(
                         "entry {at}: seek {seek} was for {asked:?}, this terminal was told {target:?}"
@@ -796,10 +882,10 @@ fn judge(
             Entry::Control(_) | Entry::Eos => {}
             Entry::Data { pts } => {
                 if paused {
-                    if prerolls == 0 {
+                    if prerolls == 0 && !ends_the_stream(&log[at..]) {
                         return Err(format!("entry {at}: data while paused, {pts:?}"));
                     }
-                    prerolls -= 1;
+                    prerolls = prerolls.saturating_sub(1);
                 }
                 if flushed {
                     return Err(format!(
@@ -821,7 +907,8 @@ fn judge(
                         "entry {at}: {pts:?} after {last:?} — going backwards"
                     ));
                 }
-                if let (true, Some(last), Some(widest)) = (lossless, last, widest)
+                if let (true, false, Some(last), Some(widest)) =
+                    (lossless, std::mem::take(&mut skipped), last, widest)
                     && pts - last > widest
                 {
                     return Err(format!(
@@ -834,6 +921,17 @@ fn judge(
         }
     }
     Ok(())
+}
+
+/// Whether `rest` is samples and then the end of the stream, nothing
+/// between them: what a `Pacer` kept goes on with the `Eos` behind it,
+/// preroll or not, since nothing would come to hand it on after — see
+/// `Pacer::consume`. A step it had kept a picture for then shows the last
+/// of the file rather than the one picture it asked for.
+fn ends_the_stream(rest: &[Entry]) -> bool {
+    rest.iter()
+        .find(|entry| !matches!(entry, Entry::Data { .. }))
+        .is_some_and(|entry| matches!(entry, Entry::Eos))
 }
 
 /// How far apart a terminal's samples usually are: the median step

@@ -132,6 +132,9 @@ impl SeekError {
 #[derive(Debug, Default)]
 struct PrerollState {
     ready: HashSet<ElementId>,
+    /// Samples each expected terminal has taken so far, where a preroll
+    /// asks more than one of each — see [`PrerollContext::samples`].
+    taken: HashMap<ElementId, usize>,
     cancelled: bool,
 }
 
@@ -143,6 +146,14 @@ pub struct PrerollContext {
     /// by [`crate::pipeline::Pipeline::seek`] from its graph.
     labels: HashMap<ElementId, NodeInfo>,
     target: Option<Duration>,
+    /// How many samples each expected terminal takes before it is ready.
+    samples: usize,
+    /// A frame step's, which lets the decoders decode on as they were
+    /// rather than select a sample — see [`Self::for_step`].
+    step: bool,
+    /// The terminals that drop what reaches them until the preroll ends —
+    /// see [`Self::silencing`].
+    silenced: HashSet<ElementId>,
     state: Mutex<PrerollState>,
     changed: Condvar,
 }
@@ -155,6 +166,9 @@ impl PrerollContext {
             expected: terminals.into_iter().collect(),
             labels: HashMap::new(),
             target: None,
+            samples: 1,
+            step: false,
+            silenced: HashSet::new(),
             state: Mutex::new(PrerollState::default()),
             changed: Condvar::new(),
         }
@@ -168,9 +182,57 @@ impl PrerollContext {
             expected: terminals.into_iter().collect(),
             labels: HashMap::new(),
             target: Some(target),
+            samples: 1,
+            step: false,
+            silenced: HashSet::new(),
             state: Mutex::new(PrerollState::default()),
             changed: Condvar::new(),
         }
+    }
+
+    /// A frame step's preroll: each of `terminals` takes `frames` more
+    /// pictures, from wherever its decoder is, and holds.
+    ///
+    /// The decoders are left to decode on as they were: no sample is being
+    /// selected, and a picture decoded past the last one asked for waits in
+    /// its queue to be the next step's first rather than being dropped.
+    pub(crate) fn for_step(terminals: impl IntoIterator<Item = ElementId>, frames: usize) -> Self {
+        Self {
+            samples: frames.max(1),
+            step: true,
+            ..Self::new(terminals)
+        }
+    }
+
+    /// This preroll, with `terminals` dropping what reaches them until it is
+    /// over. A step moves the picture, and what comes meanwhile for the
+    /// terminals that show none — the sound — is not played; playing on
+    /// after a step puts it back in line.
+    ///
+    /// Named rather than read as every terminal not expected: a `Tee` is
+    /// traced as the terminal of the chain in front of it, and is none of
+    /// the graph's, so it is never expected — and dropping at it silenced
+    /// the pictures behind it too.
+    pub(crate) fn silencing(mut self, terminals: impl IntoIterator<Item = ElementId>) -> Self {
+        self.silenced = terminals.into_iter().collect();
+        self
+    }
+
+    /// How many samples each expected terminal takes before it is ready:
+    /// one for a seek's preroll, the frames asked for in a step's.
+    pub fn samples(&self) -> usize {
+        self.samples
+    }
+
+    /// Whether this is a frame step's preroll — see [`Self::for_step`].
+    pub(crate) fn is_step(&self) -> bool {
+        self.step
+    }
+
+    /// Whether `terminal` drops what reaches it while this preroll lasts
+    /// — see [`Self::silencing`].
+    pub(crate) fn drops_for(&self, terminal: ElementId) -> bool {
+        self.silenced.contains(&terminal)
     }
 
     /// Names the expected terminals, so a timeout says which ones it waited
@@ -186,8 +248,29 @@ impl PrerollContext {
         self.target
     }
 
-    /// Marks one expected terminal's first valid sample as ready.
+    /// Counts one valid sample an expected terminal has taken; it is ready
+    /// once it has taken all [`Self::samples`] asks of it.
     pub fn mark_ready(&self, terminal: ElementId) {
+        if !self.expected.contains(&terminal) {
+            return;
+        }
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.ready.contains(&terminal) {
+            return;
+        }
+        let taken = state.taken.entry(terminal).or_insert(0);
+        *taken += 1;
+        if *taken >= self.samples {
+            state.ready.insert(terminal);
+            self.changed.notify_all();
+        }
+    }
+
+    /// Takes `terminal` as done however many samples it has taken.
+    fn mark_done(&self, terminal: ElementId) {
         if !self.expected.contains(&terminal) {
             return;
         }
@@ -201,9 +284,10 @@ impl PrerollContext {
     }
 
     /// EOS means this terminal cannot produce a sample and therefore must not
-    /// leave the whole preroll waiting forever.
+    /// leave the whole preroll waiting forever — nor a step asking for
+    /// more pictures than are left.
     pub fn mark_eos(&self, terminal: ElementId) {
-        self.mark_ready(terminal);
+        self.mark_done(terminal);
     }
 
     /// Stops expecting a terminal that has left the graph.
@@ -214,7 +298,7 @@ impl PrerollContext {
     /// timeout for a sample nobody is left to produce. Like EOS, this is
     /// "cannot produce one", not "produced one".
     pub fn mark_departed(&self, terminal: ElementId) {
-        self.mark_ready(terminal);
+        self.mark_done(terminal);
     }
 
     /// Whether this one terminal has already taken its preroll sample.

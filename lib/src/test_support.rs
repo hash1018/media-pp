@@ -1,6 +1,11 @@
 //! Shared fixtures for this crate's own tests.
 
+use std::sync::{Arc, Mutex};
+
+use crate::buffer::MediaBuffer;
+use crate::element::{Element, ElementType, Sink};
 use crate::elements::VideoCodec;
+use crate::pp_log::PpLog;
 
 /// Says where this crate's test binary crashed, when it crashes on Windows.
 ///
@@ -78,6 +83,63 @@ exception {:#010x} at {:?} on thread {:?} (information {:x?})
     #[used]
     #[unsafe(link_section = ".CRT$XCU")]
     static INSTALL: extern "C" fn() = install;
+}
+
+/// A terminal with room for so many buffers and not ready after, which
+/// writes down the `pts` of each it takes — `None` for the end of the
+/// stream. What an element that keeps buffers is tried against: a terminal
+/// that has taken the samples a preroll asked of it takes no more.
+pub(crate) struct Room {
+    pp_log: PpLog,
+    taken: Arc<Mutex<Vec<Option<i64>>>>,
+    room: usize,
+}
+
+impl Room {
+    pub(crate) fn new(room: usize) -> (Self, Arc<Mutex<Vec<Option<i64>>>>) {
+        let taken = Arc::new(Mutex::new(Vec::new()));
+        let sink = Self {
+            pp_log: crate::element::element_pp_log(ElementType::Other, "room", None),
+            taken: Arc::clone(&taken),
+            room,
+        };
+        (sink, taken)
+    }
+}
+
+impl Element for Room {
+    fn name(&self) -> Arc<str> {
+        "room".into()
+    }
+
+    fn element_type(&self) -> ElementType {
+        ElementType::Other
+    }
+
+    fn pp_log(&self) -> &PpLog {
+        &self.pp_log
+    }
+
+    fn pp_log_mut(&mut self) -> &mut PpLog {
+        &mut self.pp_log
+    }
+}
+
+impl Sink for Room {
+    fn ready_consume(&mut self) -> bool {
+        self.taken.lock().unwrap().len() < self.room
+    }
+
+    fn consume(&mut self, buf: MediaBuffer) -> crate::error::Result<()> {
+        let pts = match &buf {
+            MediaBuffer::Packet(packet) => packet.pts(),
+            MediaBuffer::Video(frame) => frame.pts(),
+            MediaBuffer::Audio(frame) => frame.pts(),
+            MediaBuffer::Eos => None,
+        };
+        self.taken.lock().unwrap().push(pts);
+        Ok(())
+    }
 }
 
 /// Path to a video file for tests that need one — synthesized here, every

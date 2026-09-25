@@ -1,5 +1,6 @@
 use ffmpeg_next::{self as ffmpeg, Rescale};
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use crate::buffer::MediaBuffer;
@@ -70,6 +71,12 @@ pub(super) struct PrerollGate {
     /// instant, and EOF uses the same candidate as its last-presentable
     /// fallback.
     candidate: Option<MediaBuffer>,
+    /// What was decoded after the preroll's sample — the one that proved
+    /// which sample covered the target, and the rest of a decoder's burst —
+    /// kept, in order, to follow the sample once the preroll is over. It is
+    /// what comes next: dropped, as it was, a step forward after a seek
+    /// skipped it, and so did playing on.
+    after: VecDeque<MediaBuffer>,
     /// The pipeline's playback state, which says when a preroll starts and
     /// ends — `None` for a decoder wired into no pipeline, which never
     /// gates.
@@ -89,7 +96,13 @@ impl PrerollGate {
     /// since this last looked, open again once none is running — whatever
     /// ended it. Called wherever the gate is about to decide.
     fn follow_state(&mut self) {
-        let running = self.state.as_ref().and_then(|state| state.preroll());
+        // Not a step's: a step selects no sample, and a picture decoded past
+        // the last one asked for is the next step's first, not one to drop.
+        let running = self
+            .state
+            .as_ref()
+            .and_then(|state| state.preroll())
+            .filter(|context| !context.is_step());
         match running {
             Some(context) => {
                 if !self
@@ -138,6 +151,7 @@ impl PrerollGate {
         self.delivered = false;
         self.time_base = None;
         self.candidate = None;
+        self.after.clear();
     }
 
     /// Whether the decoder must not be fed for now: this preroll has its
@@ -187,6 +201,8 @@ impl PrerollGate {
             return Some(buffer);
         }
         if self.delivered {
+            // Kept rather than dropped — see `after`.
+            self.after.push_back(buffer);
             return None;
         }
         let Some(target_ns) = self.target_ns else {
@@ -230,12 +246,14 @@ impl PrerollGate {
             return None;
         }
 
-        let selected = if start_ns > target_ns && matches!(&buffer, MediaBuffer::Video(_)) {
-            self.candidate.take().unwrap_or(buffer)
-        } else {
-            buffer
-        };
-        Some(selected)
+        if start_ns > target_ns
+            && matches!(&buffer, MediaBuffer::Video(_))
+            && let Some(covering) = self.candidate.take()
+        {
+            self.after.push_back(buffer);
+            return Some(covering);
+        }
+        Some(buffer)
     }
 
     /// Pushes one admitted sample and closes the active preroll only after the
@@ -244,9 +262,17 @@ impl PrerollGate {
     pub(super) fn push_admitted<E>(
         &mut self,
         mut buffer: MediaBuffer,
-        push: impl FnOnce(MediaBuffer) -> Result<(), E>,
+        push: impl FnMut(MediaBuffer) -> Result<(), E>,
     ) -> Result<(), E> {
+        let mut push = push;
         self.follow_state();
+        // What followed the last preroll's sample goes first, now that the
+        // preroll is over — see `after`.
+        if !self.active {
+            while let Some(after) = self.after.pop_front() {
+                push(after)?;
+            }
+        }
         self.describe(&mut buffer);
         if let Some(buffer) = self.admit(buffer) {
             push(buffer)?;
@@ -308,12 +334,18 @@ impl PrerollGate {
     /// rule as [`Self::push_admitted`].
     pub(super) fn push_eos_candidate<E>(
         &mut self,
-        push: impl FnOnce(MediaBuffer) -> Result<(), E>,
+        push: impl FnMut(MediaBuffer) -> Result<(), E>,
     ) -> Result<(), E> {
+        let mut push = push;
         self.follow_state();
         if let Some(candidate) = self.finish_on_eos() {
             push(candidate)?;
             self.commit_delivery();
+        }
+        // Ahead of the end of the stream, whatever the preroll: after the end
+        // nothing would ever take it.
+        while let Some(after) = self.after.pop_front() {
+            push(after)?;
         }
         Ok(())
     }
@@ -418,6 +450,40 @@ mod tests {
             panic!("selected a non-video buffer");
         };
         assert_eq!(selected.pts(), Some(1_967));
+    }
+
+    /// What is decoded after the preroll's sample is not dropped: it follows
+    /// the sample, in order, once the preroll is over — the picture that
+    /// proved which one covered the target, and the rest of the burst. It is
+    /// what a step forward after a seek shows, and where playing on starts.
+    #[test]
+    fn what_follows_the_preroll_sample_is_kept_for_after_it() {
+        let mut gate = PrerollGate::default();
+        gate.observe_packet(&millis(ffmpeg::Rational(1, 1_000)));
+        gate.begin(&PrerollContext::for_seek([], Duration::from_secs(2)));
+        let mut pushed = Vec::new();
+        let push = |pts: i64, gate: &mut PrerollGate, pushed: &mut Vec<i64>| {
+            gate.push_admitted(video(pts), |buffer| {
+                if let MediaBuffer::Video(frame) = &buffer {
+                    pushed.push(frame.pts().unwrap_or(-1));
+                }
+                Ok::<(), ()>(())
+            })
+            .unwrap();
+        };
+
+        for pts in [1_967, 2_033, 2_067] {
+            push(pts, &mut gate, &mut pushed);
+        }
+        assert_eq!(pushed, [1_967], "one sample while the preroll lasts");
+
+        gate.clear();
+        push(2_100, &mut gate, &mut pushed);
+        assert_eq!(
+            pushed,
+            [1_967, 2_033, 2_067, 2_100],
+            "nothing lost, nothing out of order"
+        );
     }
 
     /// `ready_consume` is observed between upstream buffers, not between all

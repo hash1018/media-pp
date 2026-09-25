@@ -19,7 +19,7 @@ use std::{
 use thiserror::Error as ThisError;
 
 use crate::{
-    contract::{InputContract, LinkCheck, OutputContract, PortContract, check_link},
+    contract::{InputContract, LinkCheck, MediaKind, OutputContract, PortContract, check_link},
     control::{SeekRejectReason, SeekRejection},
     element::ElementType,
     log::{Level, enabled},
@@ -642,6 +642,24 @@ impl PipelineGraph {
         let mut state = self.0.lock().unwrap();
         state.next_element_id += 1;
         ElementId(state.next_element_id)
+    }
+
+    /// Whether decoded video is what reaches `terminal`, as the attach that
+    /// wired it worked out from the contracts along the way — `None` where
+    /// nothing upstream says what it puts out.
+    pub(crate) fn takes_pictures(&self, terminal: ElementId) -> Option<bool> {
+        let state = self.0.lock().unwrap();
+        let feeding = state
+            .edges
+            .iter()
+            .find(|edge| edge.to.element == terminal)?
+            .from
+            .element;
+        let flow = state.outgoing.get(&feeding)?.as_ref()?;
+        Some(match flow.contract {
+            PortContract::Frames(kinds, ..) => kinds.contains(MediaKind::VideoFrame),
+            PortContract::Packets(_) => false,
+        })
     }
 
     /// Records that the source `id` cannot be sought, and why — what its

@@ -62,6 +62,7 @@
 //! preroll.
 
 use std::{
+    collections::HashMap,
     sync::{
         Arc, Condvar, Mutex, MutexGuard,
         atomic::{AtomicU64, Ordering},
@@ -72,6 +73,7 @@ use std::{
 use crossbeam_channel::{Receiver, Sender, TrySendError, bounded};
 
 use crate::control::{ControlMsg, PrerollContext};
+use crate::graph::ElementId;
 use crate::timeline::UNNUMBERED;
 
 /// Where playback stands: whether data flows, and why.
@@ -176,6 +178,21 @@ pub(crate) struct PlaybackState {
     /// no longer heard by, because whatever held it has gone, is dropped at
     /// the next ring.
     listeners: Mutex<Vec<Sender<()>>>,
+    /// The picture each terminal that shows pictures last took — what a
+    /// frame step moves from; see [`Self::picture_taken`].
+    pictures: Mutex<HashMap<ElementId, Picture>>,
+}
+
+/// The picture one terminal last took.
+#[derive(Debug, Clone, Copy, Default)]
+struct Picture {
+    /// Its position in its media, or `None` once a flush has left the
+    /// terminal without one.
+    at: Option<Duration>,
+    /// How far apart its pictures come — what a step back by more than one
+    /// picture measures with. The stream's rather than the position's, so
+    /// kept across a flush.
+    spacing: Option<Duration>,
 }
 
 impl PlaybackState {
@@ -189,6 +206,7 @@ impl PlaybackState {
             raised: Mutex::new(()),
             raised_changed: Condvar::new(),
             listeners: Mutex::new(Vec::new()),
+            pictures: Mutex::new(HashMap::new()),
         })
     }
 
@@ -266,6 +284,66 @@ impl PlaybackState {
     /// unpaced — for what asks once a buffer.
     pub(crate) fn is_prerolling(&self) -> bool {
         matches!(&*self.lock(), Phase::Prerolling(_))
+    }
+
+    fn pictures(&self) -> MutexGuard<'_, HashMap<ElementId, Picture>> {
+        self.pictures
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Records that `terminal` has taken a picture at `at` in its media,
+    /// lasting `lasts` where the picture says — kept by the terminal tracer
+    /// for every terminal that is handed pictures, and read by a frame step:
+    /// which terminals it steps, from where, and by how much.
+    ///
+    /// The spacing is measured between pictures taken one after the other,
+    /// and taken from the picture's own duration until two have been.
+    pub(crate) fn picture_taken(&self, terminal: ElementId, at: Duration, lasts: Option<Duration>) {
+        let mut pictures = self.pictures();
+        let picture = pictures.entry(terminal).or_default();
+        let measured = picture
+            .at
+            .and_then(|before| at.checked_sub(before))
+            .filter(|spacing| !spacing.is_zero());
+        picture.spacing = measured
+            .or(picture.spacing)
+            .or(lasts.filter(|lasts| !lasts.is_zero()));
+        picture.at = Some(at);
+    }
+
+    /// `terminal` has been flushed: where its picture is is not known again
+    /// until it takes the next. Still a terminal that shows pictures, and
+    /// its pictures still as far apart.
+    pub(crate) fn picture_flushed(&self, terminal: ElementId) {
+        if let Some(picture) = self.pictures().get_mut(&terminal) {
+            picture.at = None;
+        }
+    }
+
+    /// Which of `terminals` show pictures.
+    pub(crate) fn picture_terminals(&self, terminals: &[ElementId]) -> Vec<ElementId> {
+        let pictures = self.pictures();
+        terminals
+            .iter()
+            .copied()
+            .filter(|terminal| pictures.contains_key(terminal))
+            .collect()
+    }
+
+    /// Where the picture is among `terminals` — the furthest any of them has
+    /// taken, since fanned out they show the same one — and how far it came
+    /// after the one before.
+    pub(crate) fn picture_at(
+        &self,
+        terminals: &[ElementId],
+    ) -> Option<(Duration, Option<Duration>)> {
+        let pictures = self.pictures();
+        terminals
+            .iter()
+            .filter_map(|terminal| pictures.get(terminal))
+            .filter_map(|picture| picture.at.map(|at| (at, picture.spacing)))
+            .max_by_key(|(at, _)| *at)
     }
 
     /// The number of the timeline media is being read on.

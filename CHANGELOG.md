@@ -689,6 +689,21 @@ compile error with no explanation.
 
 ### Added
 
+- **`Pipeline::step` moves the picture by frames, forward and back.**
+  `step(n)` pauses and shows the picture `n` on, or `-n` back, and answers
+  where it now is. Forward asks each terminal showing pictures for `n`
+  more from wherever its decoder is — nothing sought, nothing decoded
+  twice; back is an accurate seek to just before the picture shown,
+  counted in the spacing of the pictures, so it lands on the one before
+  however they are spaced. The sound is not played while stepping, and
+  `resume` after a step first seeks to the picture shown, so the sound
+  goes on in line with it. Refused where a seek is, and with
+  `PipelineError::NoPicture` before anything has shown a picture. A
+  `PrerollContext` now says how many samples it asks each terminal for,
+  `samples`: one for a seek's, the frames asked for in a step's.
+  `Player::step` does the same for a player, and the full stop and the
+  comma step a picture on and back in `respond_to`.
+
 - **`Pipeline::check_seek` says whether a seek would be refused, and by
   what, without seeking.** Answered from the graph as it stands, not by
   asking anything running: it works before `run` and after the sources
@@ -1590,6 +1605,24 @@ compile error with no explanation.
   decoder in this crate — keys exactly as before, byte for byte.
 
 ### Fixed
+
+- **An accurate seek to just before a keyframe shows the picture there, not
+  the keyframe.** A file is sought by when its keyframes are decoded, and
+  with B-frames that is before they are shown: the pictures shown just
+  before a keyframe belong to the group before it, and a target among them
+  landed on the keyframe, where nothing covered it — the keyframe was shown,
+  or with open groups a picture after it. `FileDemuxer` now reads where a
+  seek landed and, where the first picture starts after the target, seeks
+  again from before it is decoded. The target is also no longer rounded up
+  to the stream's next tick on its way to FFmpeg, which landed an instant
+  before a keyframe on the keyframe in files without B-frames too.
+
+- **An accurate seek no longer drops the pictures after the one it shows.**
+  To pick the picture covering the target, a decoder has to decode the one
+  after it, and it dropped that one — with whatever else the same packet
+  decoded — once the seek had its picture. Playing on after an accurate
+  seek skipped a picture or more straight after the one it had shown. What
+  follows the seek's picture is now kept and handed on after it.
 
 - **The end of a stream is not lost when a file is paused, sought or
   finished at its last picture.** A `Pacer` or `VideoSynchronizer` waiting

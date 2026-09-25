@@ -406,6 +406,28 @@ impl Player {
         Ok(())
     }
 
+    /// Shows the picture `frames` on, or back, and holds it there, paused,
+    /// as a player's frame step does — see [`Pipeline::step`]. Answers where
+    /// that picture is in the file, which is also what [`Self::position`]
+    /// says until playback moves on. Playing on from there puts the sound
+    /// back in line with the picture. Only once playing has started, as
+    /// [`Self::seek`].
+    pub fn step(&self, frames: i64) -> Result<Duration, PlayerError> {
+        let at = self.in_lap(self.pipeline.step(frames)?);
+        let at = self.duration.map_or(at, |end| at.min(end));
+        self.paused.store(true, Ordering::Release);
+        if frames < 0 {
+            // Back from the end is back in the file: playing on goes on from
+            // there rather than starting it again.
+            self.ended.store(false, Ordering::Release);
+        }
+        *self
+            .sought
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = Some(at);
+        Ok(at)
+    }
+
     /// Where playback is in the file — `None` before the first picture is
     /// due. After a seek, where it went, until playback has moved on from
     /// there. While looping, where it is in the lap it is on. At the end,
@@ -586,9 +608,10 @@ impl Player {
 
     /// Does what a player usually does with a window event, and says whether
     /// to go on: Space pauses and plays, F or a double click fills the screen
-    /// and puts it back, the left and right arrows move five seconds, the up
-    /// and down arrows turn the volume up and down a tenth, M mutes and
-    /// unmutes, and Escape or closing the window answer `false` — the
+    /// and puts it back, the left and right arrows move five seconds, the
+    /// full stop and the comma step a picture on and back, the up and down
+    /// arrows turn the volume up and down a tenth, M mutes and unmutes, and
+    /// Escape or closing the window answer `false` — the
     /// caller's to act on, by stopping or dropping the player. Anything else
     /// is left alone.
     pub fn respond_to(&self, event: &WindowEvent) -> bool {
@@ -615,6 +638,12 @@ impl Player {
             WindowEvent::Key(Key::Left) => {
                 let at = self.position().unwrap_or_default();
                 let _ = self.seek(at.saturating_sub(ARROW_STEP));
+            }
+            WindowEvent::Key(Key::Char('.')) => {
+                let _ = self.step(1);
+            }
+            WindowEvent::Key(Key::Char(',')) => {
+                let _ = self.step(-1);
             }
             WindowEvent::Key(Key::Up) => {
                 let _ = self.set_volume((self.volume() + VOLUME_STEP).min(1.0));
@@ -854,6 +883,38 @@ mod tests {
         assert!(!player.is_muted());
         assert!(!player.respond_to(&WindowEvent::Key(Key::Escape)));
         assert!(!player.respond_to(&WindowEvent::Closed));
+    }
+
+    /// A step pauses on the picture after or before the one shown, and the
+    /// position says where that is; playing on moves from there.
+    #[test]
+    fn a_step_holds_the_next_picture_and_says_where_it_is() {
+        let Some(player) = open(false) else { return };
+        player.play().unwrap();
+        assert!(
+            wait_until(|| player.position() > Some(Duration::from_millis(500))),
+            "playback moves"
+        );
+        let at = player.step(1).expect("a step");
+        assert!(player.is_paused(), "a step pauses");
+        assert_eq!(player.position(), Some(at), "where the picture is");
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(player.position(), Some(at), "and it stays there");
+
+        let back = player.step(-1).expect("a step back");
+        assert!(back < at, "{back:?} is before {at:?}");
+        assert_eq!(player.position(), Some(back));
+        assert!(player.respond_to(&WindowEvent::Key(Key::Char('.'))));
+        assert_eq!(player.position().map(|now| now > back), Some(true));
+
+        player.play().unwrap();
+        assert!(
+            wait_until(|| player
+                .position()
+                .is_some_and(|now| now > at + Duration::from_millis(300))),
+            "played on from the picture, at {:?}",
+            player.position()
+        );
     }
 
     /// A volume that is no gain is refused, and leaves the one set before.
