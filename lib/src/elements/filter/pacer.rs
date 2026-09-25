@@ -335,7 +335,12 @@ impl Sink for Pacer {
                 Some(timing) => self.wait_for(timing)?,
                 None => true,
             };
-            if !ready {
+            // Kept for the next call only while there will be one. With the
+            // end of the stream in, there will not: the thread feeding this
+            // has nothing left to hand it, and what was kept was dropped with
+            // the pacer — the `Eos` with it, so the stream never ended. Late
+            // pictures at the end are the smaller loss.
+            if !ready && !self.pending.iter().any(MediaBuffer::is_eos) {
                 self.pending.push_front(buf);
                 return Ok(());
             }
@@ -498,6 +503,24 @@ mod tests {
     /// one raised after this pacer took the request it goes with, as the
     /// pipeline raises it. Kept instead, each was handed on together with
     /// the next once the interrupt settled.
+    /// What an interrupted wait kept goes on at once when the end of the
+    /// stream comes in behind it: nothing will call again to hand it on,
+    /// and kept, it was dropped with the pacer — the `Eos` along with it.
+    #[test]
+    fn the_end_of_the_stream_is_not_kept_behind_an_interrupted_wait() {
+        let clock = Arc::new(Clock::new());
+        let context = context(&clock);
+        let mut pacer = paced("pacer", &context);
+        pacer.consume(packet(0)).expect("anchors the clock");
+
+        context.state.interrupt();
+        pacer.consume(packet(60)).expect("interrupted");
+        assert_eq!(pacer.pending.len(), 1, "kept for the next call");
+
+        pacer.consume(MediaBuffer::Eos).expect("the end");
+        assert!(pacer.pending.is_empty(), "all handed on, the end with it");
+    }
+
     #[test]
     fn a_preroll_is_not_held_back_by_an_interrupt() {
         let clock = Arc::new(Clock::new());

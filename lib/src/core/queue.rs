@@ -78,6 +78,12 @@ pub enum QueueError {
 /// a queue waits on a timer.
 const READINESS_POLL_INTERVAL: Duration = Duration::from_millis(20);
 
+/// The longest a dropped queue's worker holds back for an interrupt before
+/// it drains all the same — for a pipeline that is not going to settle it.
+/// One that is settles it a moment after the request that ended its source,
+/// and rings the worker as it does; see [`Inbox::held_back`].
+const SETTLE_WAIT_LIMIT: Duration = Duration::from_secs(1);
+
 /// What a `Queue` does when its channel is full.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OverflowPolicy {
@@ -351,6 +357,7 @@ impl Queue {
             ends_owed: ends_owed.clone(),
             bell: worker_bell.clone(),
             room: room.clone(),
+            stopped_during_interrupt: Cell::new(None),
         };
 
         // `Builder::name` panics on interior NULs. Queue names are caller
@@ -655,19 +662,42 @@ struct Inbox {
     bell: Bell,
     /// Rung as the worker makes room — see [`Queue::room`].
     room: Bell,
+    /// When the worker first found its queue dropped while an interrupt was
+    /// out — see [`Self::held_back`].
+    stopped_during_interrupt: Cell<Option<Instant>>,
 }
 
 impl Inbox {
     /// Whether the worker should take nothing for now: an interrupt is out,
     /// so whatever it fed downstream would only be held by an interrupted
-    /// `Pacer` rather than played. Not once `stop` is set — the queue has
-    /// been dropped, nothing will answer the interrupt here, and the worker
-    /// drains what it holds as it always has.
+    /// `Pacer` rather than played.
+    ///
+    /// Dropped as well, all the same. A source that `finish` has ended
+    /// drops its queue right after it answers the request, a moment before
+    /// the pipeline settles the interrupt that went with it; a worker that
+    /// drained in that moment fed an interrupted `Pacer`, which kept what it
+    /// was handed — the end of the stream with it — and was dropped with it
+    /// before anything asked again. The settle rings the worker, so this
+    /// costs no more than that moment. Not for longer than
+    /// [`SETTLE_WAIT_LIMIT`]: past it, nothing is coming to settle the
+    /// interrupt, and the worker drains what it holds as it always has.
     fn held_back(&self, stop: &AtomicBool) -> bool {
-        self.state
+        if !self
+            .state
             .as_deref()
             .is_some_and(PlaybackState::interrupt_pending)
-            && !stop.load(Ordering::Relaxed)
+        {
+            return false;
+        }
+        if !stop.load(Ordering::Relaxed) {
+            return true;
+        }
+        let since = self.stopped_during_interrupt.get().unwrap_or_else(|| {
+            let now = Instant::now();
+            self.stopped_during_interrupt.set(Some(now));
+            now
+        });
+        since.elapsed() < SETTLE_WAIT_LIMIT
     }
 
     /// Whether an `Eos` handed over is still here, on its way.
@@ -782,7 +812,9 @@ fn worker_loop(
         // again on a timer; see `READINESS_POLL_INTERVAL`.
         let held_back = inbox.held_back(&stop);
         if held_back || !downstream.ready_consume() {
-            let poll = if held_back {
+            // Held back, the settle rings it — unless the queue has been
+            // dropped, when it also has to notice nothing is coming to.
+            let poll = if held_back && !stop.load(Ordering::Relaxed) {
                 Duration::MAX
             } else {
                 READINESS_POLL_INTERVAL

@@ -275,6 +275,12 @@ impl Sink for VideoSynchronizer {
             match outcome {
                 WaitOutcome::Render => self.pad.push(buf)?,
                 WaitOutcome::Drop => pp_debug!(self, "dropping late video frame"),
+                // Kept only while there will be a next call — see
+                // `Pacer::consume`: with the end of the stream behind it,
+                // nothing will make one.
+                WaitOutcome::Interrupted if self.pending.iter().any(MediaBuffer::is_eos) => {
+                    self.pad.push(buf)?;
+                }
                 WaitOutcome::Interrupted => {
                     self.pending.push_front(buf);
                     return Ok(());

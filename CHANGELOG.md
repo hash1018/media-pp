@@ -1573,6 +1573,17 @@ compile error with no explanation.
 
 ### Fixed
 
+- **The end of a stream is not lost when a file is paused, sought or
+  finished at its last picture.** A `Pacer` or `VideoSynchronizer` waiting
+  on that picture's time lets go of it when a request comes and keeps it,
+  with whatever follows, for its next call — and with the `Eos` already
+  behind it there is none: the thread feeding it has nothing left to hand
+  over. What it kept was dropped with it, so the stream never ended and no
+  `Finished` came. Once the end of the stream is in, they now hand
+  everything on at once. And a queue being dropped waits for the
+  pipeline to settle an interrupt before it drains, as it does while
+  running, so it does not feed a pacer that is letting go.
+
 - **A `Pacer` puts one sample through a seek, not two.** A seek's request
   can reach a `Pacer` before the interrupt the pipeline raises for it, and
   for that moment the pacer took itself for interrupted: it kept the
