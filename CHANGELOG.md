@@ -1543,6 +1543,22 @@ compile error with no explanation.
 
 ### Changed
 
+- **A seek made while playing pauses before it plays on.** Its preroll now
+  ends in a `Pause`, and the `Resume` follows it, where it used to play on
+  with the `Resume` alone. An element counting control messages sees one
+  more `Pause` per seek. It is what makes sure no element is handed data
+  before the `Resume` that lets it take any has reached it.
+
+- **An idle or paused `Queue` sleeps until something happens.** Its worker
+  woke every 20 ms to see whether it had been dropped, idle or paused
+  alike, and a thread waiting to hand it a buffer looked every 5 ms for a
+  request on its way — a graph with many queues, paused, kept every one of
+  them waking fifty times a second. They are woken now by what they wait
+  for: a request, the pipeline's state moving on, the queue being dropped,
+  room being made. Only a worker whose downstream is not ready still looks
+  again on a timer, for the downstream that becomes ready without saying so
+  — a device playing out what it holds.
+
 - **`ChainBuilder::to` takes any sink, boxed or not.** `.to(counter)` rather
   than `.to(Box::new(counter))`, and the same for `build`. A boxed element is
   now the element it holds — `Box<T>` is an `Element`, `Sink` and `Source`
@@ -1556,6 +1572,14 @@ compile error with no explanation.
   decoder in this crate — keys exactly as before, byte for byte.
 
 ### Fixed
+
+- **A `Pacer` puts one sample through a seek, not two.** A seek's request
+  can reach a `Pacer` before the interrupt the pipeline raises for it, and
+  for that moment the pacer took itself for interrupted: it kept the
+  preroll's buffer and handed it on together with the next, two samples
+  into a terminal that takes one. A seek made while paused could then show
+  a picture past the one it landed on. A preroll waits for nothing, so the
+  pacer now lets its buffers straight through whatever the interrupt says.
 
 - **A source tells every one of its pads, whatever one of them answers.**
   A control message went to a source's pads in turn and stopped at the

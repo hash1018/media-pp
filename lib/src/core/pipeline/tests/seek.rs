@@ -244,9 +244,20 @@ fn playing_seek_uses_an_internal_pause_then_resumes() {
         thread::yield_now();
     }
     assert_eq!(seeks.load(Ordering::SeqCst), 1);
+    // The preroll ends in a pause even here, and playback resumes from it:
+    // nothing is let go before its `Resume` reaches it — see
+    // `crate::playback_state`.
     assert_eq!(
-        controls.lock().unwrap()[..6],
-        ["check-seek", "pause", "flush", "seek", "preroll", "resume"]
+        controls.lock().unwrap()[..7],
+        [
+            "check-seek",
+            "pause",
+            "flush",
+            "seek",
+            "preroll",
+            "pause",
+            "resume"
+        ]
     );
     pipeline.stop();
 }
@@ -1560,7 +1571,7 @@ impl SourceElement for UnpausingSource {
 ///
 /// A source that fails to pause fills the paused queue behind it and blocks
 /// handing it the next packet. Only some requests used to raise the
-/// interrupt that makes a queue take such a packet as held over; the seek's
+/// interrupt that makes a queue take such a packet past its capacity; the seek's
 /// `Seek` and `Preroll` did not, since the graph is paused when they are
 /// sent — so the seek waited for good on a source that could not read them.
 #[test]

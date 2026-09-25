@@ -329,6 +329,9 @@ impl Sink for TerminalTracer {
             } else {
                 context.mark_ready(self.id);
             }
+            // A `Tee` holding a sibling branch back for this one looks
+            // again now, rather than when it next happens to.
+            self.state.sample_taken();
         }
         if is_eos {
             match &result {

@@ -14,9 +14,8 @@
 
 use std::{
     cell::Cell,
-    collections::VecDeque,
     sync::{
-        Arc, Mutex, MutexGuard,
+        Arc,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     thread::{self, JoinHandle},
@@ -24,9 +23,7 @@ use std::{
 };
 
 use crate::pp_log::{PpLog, pp_debug, pp_info, pp_trace};
-use crossbeam_channel::{
-    Receiver, RecvTimeoutError, SendTimeoutError, Sender, TrySendError, bounded, select,
-};
+use crossbeam_channel::{Receiver, Sender, select, unbounded};
 use thiserror::Error as ThisError;
 
 use crate::{
@@ -36,7 +33,7 @@ use crate::{
     control::{self, ControlMsg, ControlReceiver, ControlSender, RequestKind},
     element::{Context, Element, ElementType, Sink, element_pp_log},
     error::{Result, ThreadSpawnError},
-    playback_state::PlaybackState,
+    playback_state::{Bell, PlaybackState},
     stats::ElementCounters,
     timeline::{Numbered, UNNUMBERED},
 };
@@ -72,21 +69,14 @@ pub enum QueueError {
     },
 }
 
-/// How often the worker's blocking wait wakes up on its own (nothing
-/// ready on either channel) to check [`Queue`]'s `stop` flag — see
-/// [`worker_loop`] and [`apply_control`]'s pause loop. Only ever adds
-/// latency to the already-abnormal "torn down without ever being told to
-/// stop" path (see [`Queue::drop`]); real data/control traffic is always
-/// picked up immediately; this pause is only ever *waited out*, not
-/// polled on a timer.
-const STOP_POLL_INTERVAL: Duration = Duration::from_millis(20);
-
-/// How often a wait that an interrupt may cut short looks again: the upstream
-/// side blocked on a full channel, and the worker holding back while an
-/// interrupt is out — see [`Queue`]'s docs on pausing. Short, because
-/// a pause waits on it; not zero, because the upstream side spends it
-/// blocked in ordinary backpressure too.
-const INTERRUPT_POLL_INTERVAL: Duration = Duration::from_millis(5);
+/// How often a worker whose downstream is not ready looks again — for a
+/// downstream that becomes ready without saying so: a renderer whose device
+/// has played some of what it holds, another queue whose worker has taken
+/// a buffer. What does say so — the pipeline's state moving on, a terminal
+/// taking its preroll sample, a request, the queue being dropped — rings
+/// the worker at once; see [`crate::playback_state::Bell`]. Nothing else in
+/// a queue waits on a timer.
+const READINESS_POLL_INTERVAL: Duration = Duration::from_millis(20);
 
 /// What a `Queue` does when its channel is full.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -157,7 +147,7 @@ impl Default for OverflowPolicy {
 /// worker immediately, it's never stuck behind the pause itself. See the
 /// worker loop below.
 ///
-/// A queue built by a pipeline also holds back for the pipeline's clock
+/// A queue built by a pipeline also holds back for the pipeline's
 /// interrupts. `Pipeline::pause`, `stop`, `finish` and a seek interrupt a
 /// paced wait before their request has reached every queue, and an
 /// interrupted `Pacer` takes what it is handed without waiting; a worker
@@ -165,8 +155,9 @@ impl Default for OverflowPolicy {
 /// pacer. So from the interrupt until the pipeline has every source's
 /// acknowledgement the worker takes nothing but control, and the thread
 /// handing buffers over is not left blocked on a channel that will not
-/// drain: a buffer that finds it full is held over and taken after the
-/// channel's own, in order.
+/// drain: a buffer that finds it full goes in past its capacity, behind
+/// everything already there. The channel itself has no bound for that
+/// reason; the queue keeps to `capacity` otherwise.
 ///
 /// Cheap elements (e.g. a muxer sitting right after an encoder) should
 /// simply *not* have a `Queue` between them and their upstream — they run
@@ -188,7 +179,7 @@ impl Default for OverflowPolicy {
 /// `Flush`, `Seek`, and `Preroll`, and then the new stream, reach
 /// downstream through this same worker. Only `ControlMsg::Stop` or dropping
 /// the `Queue` ends it, and both still join it: dropping one idle after
-/// `Eos` returns within one short internal poll interval.
+/// `Eos` returns as soon as its worker has woken.
 pub struct Queue {
     pp_log: PpLog,
     name: Arc<str>,
@@ -208,9 +199,16 @@ pub struct Queue {
     /// Where this queue is counted, when a pipeline built it — see
     /// [`crate::stats`]. `None` for one spawned by hand.
     counters: Option<Arc<ElementCounters>>,
-    /// Buffers handed over while the channel was full and an interrupt
-    /// was out — see [`Overflow`].
-    overflow: Overflow,
+    /// How many buffers may wait ahead of the worker — the channel's own
+    /// bound is none; see the type docs. Zero hands each over as the worker
+    /// takes it.
+    capacity: usize,
+    /// Rings the worker — for the pipeline's state moving on, and for this
+    /// queue being dropped.
+    worker_bell: Bell,
+    /// Rings the thread handing buffers over — for room made, an interrupt,
+    /// and the worker ending.
+    room: Bell,
     /// How many `Eos` this queue has taken and not yet handed on or
     /// discarded — see [`Inbox::owes_an_end`].
     ends_owed: Arc<AtomicUsize>,
@@ -277,7 +275,7 @@ impl Queue {
 
     /// [`Self::spawn_with_policy`] as a pipeline's chain builds it: counted,
     /// so the queue is reported with the rest of the graph, and on the
-    /// pipeline's clock, so it holds back for its interrupts.
+    /// pipeline's playback state, so it holds back for its interrupts.
     pub(crate) fn spawn_in_pipeline(
         name: impl Into<String>,
         capacity: usize,
@@ -323,7 +321,7 @@ impl Queue {
         // particular can fire once per buffer under sustained overflow.
         let name: Arc<str> = name.into().into();
         let pp_log = element_pp_log(ElementType::Queue, &name, pipeline_id);
-        let (tx, rx) = bounded::<Numbered>(capacity);
+        let (tx, rx) = unbounded::<Numbered>();
         // The pipeline's state where there is a pipeline: it says when a
         // paused worker may go on. One spawned by hand keeps its own, moved
         // on by what `control` sends it.
@@ -340,13 +338,19 @@ impl Queue {
             queue.watch(tx.clone());
         }
         let worker_counters = counters.clone();
-        let overflow = Overflow::default();
         let ends_owed = Arc::new(AtomicUsize::new(0));
+        // Both rung by every move of the state this queue's control channel
+        // reads — the pipeline's, or its own.
+        let worker_bell = Bell::new();
+        let room = Bell::new();
+        control_rx.state().listen(&worker_bell);
+        control_rx.state().listen(&room);
         let worker_inbox = Inbox {
             data: rx,
-            overflow: overflow.clone(),
             state: state.clone(),
             ends_owed: ends_owed.clone(),
+            bell: worker_bell.clone(),
+            room: room.clone(),
         };
 
         // `Builder::name` panics on interior NULs. Queue names are caller
@@ -386,7 +390,9 @@ impl Queue {
             control: control_tx,
             stop,
             counters,
-            overflow,
+            capacity,
+            worker_bell,
+            room,
             ends_owed,
             state,
         })
@@ -419,7 +425,7 @@ impl Sink for Queue {
             // upstream Queue stop before `consume` can perform that drop,
             // silently turning DropNewest into blocking backpressure.
             OverflowPolicy::DropNewest => true,
-            OverflowPolicy::Block(_) => !self.tx.is_full() && self.overflow.lock().is_empty(),
+            OverflowPolicy::Block(_) => self.has_room(),
         }
     }
 
@@ -489,30 +495,23 @@ impl Sink for Queue {
                     Err(HandOverError::Closed) => Err(QueueError::ChannelClosed.into()),
                 }
             }
-            // Anything held over counts as a full channel: sent past it, this
-            // buffer would overtake it.
             OverflowPolicy::DropNewest => {
-                let sent = if self.overflow.lock().is_empty() {
-                    self.tx.try_send(buf)
+                if self.has_room() {
+                    self.tx
+                        .send(buf)
+                        .map_err(|_| QueueError::ChannelClosed.into())
                 } else {
-                    Err(TrySendError::Full(buf))
-                };
-                match sent {
-                    Ok(()) => Ok(()),
-                    Err(TrySendError::Full(_)) => {
-                        if let Some(queue) = counters.and_then(ElementCounters::queue) {
-                            queue.dropped();
-                        }
-                        self.bus.post(
-                            &self.pp_log,
-                            BusEvent::Dropped {
-                                element_type: ElementType::Queue,
-                                name: self.name.clone(),
-                            },
-                        );
-                        Ok(())
+                    if let Some(queue) = counters.and_then(ElementCounters::queue) {
+                        queue.dropped();
                     }
-                    Err(TrySendError::Disconnected(_)) => Err(QueueError::ChannelClosed.into()),
+                    self.bus.post(
+                        &self.pp_log,
+                        BusEvent::Dropped {
+                            element_type: ElementType::Queue,
+                            name: self.name.clone(),
+                        },
+                    );
+                    Ok(())
                 }
             }
         };
@@ -538,14 +537,6 @@ impl Sink for Queue {
             pp_log: &self.pp_log,
             "event=control control={msg:?} phase=received"
         );
-        // What was held over is part of the backlog these discard, and this
-        // thread is the only one that adds to it.
-        if matches!(msg, ControlMsg::Flush | ControlMsg::Stop) {
-            let mut overflow = self.overflow.lock();
-            let ends = overflow.iter().filter(|held| held.buf.is_eos()).count();
-            overflow.clear();
-            self.ends_owed.fetch_sub(ends, Ordering::AcqRel);
-        }
         self.control.send(msg.clone());
         pp_trace!(
             pp_log: &self.pp_log,
@@ -558,45 +549,19 @@ impl Sink for Queue {
 impl Drop for Queue {
     fn drop(&mut self) {
         if let Some(handle) = self.handle.take() {
-            // Wakes the worker if nothing else already would — it checks
-            // this on every idle wait-timeout, in both `worker_loop` and
-            // `apply_control`'s pause loop, so it's the one signal that
-            // reaches a genuinely-idle worker no matter which of those two
-            // places it's currently blocked in (e.g. a `.queue()`-having
-            // `Pipeline` dropped without ever being `run()`, or a bare
-            // `Queue` paused and then dropped without `Resume`/`Stop` —
-            // `handle.join()` below would otherwise hang on either).
-            // Doesn't race real pending data/control the way closing a
-            // channel to force this would: it's only ever consulted once
-            // `select!`/`recv_timeout` has already waited out a full
-            // `STOP_POLL_INTERVAL` with *nothing* ready on either channel,
-            // so any already-queued `Stop`/`Eos`/data is always drained
-            // first, same as `block_never_drops` and friends rely on.
+            // Wakes the worker wherever it waits — idle, paused, or on a
+            // downstream that is not ready — which is what ends one nothing
+            // else would: a `.queue()`-having `Pipeline` dropped without
+            // ever being `run()`, or a bare `Queue` paused and then dropped
+            // without `Resume`/`Stop`. Not by closing a channel, which
+            // would race whatever real data and control are still queued:
+            // a woken worker drains what is waiting before it ends, as
+            // `block_never_drops` and friends rely on.
             self.stop.store(true, Ordering::Relaxed);
+            self.worker_bell.ring();
             pp_info!(pp_log: &self.pp_log, "dropped: joining worker");
             let _ = handle.join();
         }
-    }
-}
-
-/// What the upstream side could not put in the channel because it was full
-/// when an interrupt came — handed over all the same, so that thread can
-/// get back to the request behind the interrupt, and taken by the worker
-/// once the channel has emptied, after everything sent before it.
-///
-/// Only the upstream side adds to it, and only while it is empty sends to the
-/// channel instead; the worker takes from it only once the channel is empty.
-/// Together that keeps every buffer in the order it was handed over. It
-/// holds what one source makes between two looks at its control — a buffer
-/// or two — and is emptied by `Flush` and `Stop` like the channel.
-#[derive(Clone, Default)]
-struct Overflow(Arc<Mutex<VecDeque<Numbered>>>);
-
-impl Overflow {
-    fn lock(&self) -> MutexGuard<'_, VecDeque<Numbered>> {
-        self.0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
@@ -607,9 +572,20 @@ enum HandOverError {
 }
 
 impl Queue {
-    /// Puts `buf` in the channel, waiting up to `timeout` for room — unless
-    /// an interrupt comes while it waits, when `buf` goes to the
-    /// [`Overflow`] instead and this returns at once.
+    /// Whether a buffer handed over now would wait within `capacity`.
+    fn has_room(&self) -> bool {
+        self.tx.len() < self.capacity.max(1)
+    }
+
+    /// Whether the worker has ended, so nothing will take what is handed
+    /// over.
+    fn worker_gone(&self) -> bool {
+        self.handle.as_ref().is_none_or(JoinHandle::is_finished)
+    }
+
+    /// Puts `buf` in the channel once there is room, waiting up to `timeout`
+    /// for some — unless an interrupt comes while it waits, when `buf` goes
+    /// in past the queue's capacity and this returns at once.
     ///
     /// Why it may not simply wait: while an interrupt is out the worker takes
     /// nothing (see `worker_loop`), and what ends the interrupt is the request
@@ -618,66 +594,55 @@ impl Queue {
     /// buffer in the channel to an interrupted `Pacer`, which took each
     /// without waiting and held them all, so a pause left a whole queue's worth
     /// of frames out of their pool.
+    ///
+    /// Waits on [`Self::room`], which the worker rings as it takes a buffer
+    /// and the pipeline's state rings as an interrupt is raised.
     fn hand_over(
         &self,
-        mut buf: Numbered,
+        buf: Numbered,
         timeout: Duration,
     ) -> std::result::Result<(), HandOverError> {
-        let Some(state) = self.state.clone() else {
-            return self
-                .tx
-                .send_timeout(buf, timeout)
-                .map_err(|error| match error {
-                    SendTimeoutError::Timeout(_) => HandOverError::TimedOut,
-                    SendTimeoutError::Disconnected(_) => HandOverError::Closed,
-                });
-        };
         let deadline = Instant::now().checked_add(timeout);
+        let interrupted = || {
+            self.state
+                .as_deref()
+                .is_some_and(PlaybackState::interrupt_pending)
+        };
+        let wait_for_room = |until: Option<Instant>| -> bool {
+            let wait = until.map_or(Duration::MAX, |until| {
+                until.saturating_duration_since(Instant::now())
+            });
+            !wait.is_zero() && {
+                let _ = self.room.rings().recv_timeout(wait);
+                true
+            }
+        };
         loop {
-            let mut overflow = self.overflow.lock();
-            if overflow.is_empty() {
-                match self.tx.try_send(buf) {
-                    Ok(()) => return Ok(()),
-                    Err(TrySendError::Disconnected(_)) => return Err(HandOverError::Closed),
-                    Err(TrySendError::Full(back)) => buf = back,
-                }
+            if self.worker_gone() {
+                return Err(HandOverError::Closed);
             }
-            if state.interrupt_pending() {
-                overflow.push_back(buf);
-                return Ok(());
+            if self.has_room() || interrupted() {
+                break;
             }
-            let slice = match deadline {
-                Some(deadline) => deadline.saturating_duration_since(Instant::now()),
-                None => INTERRUPT_POLL_INTERVAL,
-            }
-            .min(INTERRUPT_POLL_INTERVAL);
-            if slice.is_zero() {
+            if !wait_for_room(deadline) {
                 return Err(HandOverError::TimedOut);
             }
-            if overflow.is_empty() {
-                drop(overflow);
-                match self.tx.send_timeout(buf, slice) {
-                    Ok(()) => return Ok(()),
-                    Err(SendTimeoutError::Timeout(back)) => buf = back,
-                    Err(SendTimeoutError::Disconnected(_)) => return Err(HandOverError::Closed),
-                }
-            } else {
-                // What was held over goes first; the worker is taking it.
-                drop(overflow);
-                if self.handle.as_ref().is_none_or(JoinHandle::is_finished) {
-                    return Err(HandOverError::Closed);
-                }
-                thread::sleep(slice);
+        }
+        self.tx.send(buf).map_err(|_| HandOverError::Closed)?;
+        // No backlog at all: handed over is taken, or it would not be.
+        if self.capacity == 0 {
+            while !self.tx.is_empty() && !interrupted() && !self.worker_gone() {
+                wait_for_room(None);
             }
         }
+        Ok(())
     }
 }
 
-/// Where a worker takes its buffers from: the channel, then what was held
-/// over — see [`Overflow`] — and neither while an interrupt is out.
+/// Where a worker takes its buffers from — and not while an interrupt is
+/// out — and the bells it waits on and rings.
 struct Inbox {
     data: Receiver<Numbered>,
-    overflow: Overflow,
     /// The pipeline's playback state, against whose timeline what is
     /// carried is judged before it goes on and whose interrupts the worker
     /// holds back for — `None` for a queue spawned by hand, which does
@@ -686,6 +651,10 @@ struct Inbox {
     /// Shared with the [`Queue`], which counts an `Eos` in as it takes one;
     /// the worker counts it out as it hands it on or a `Flush` discards it.
     ends_owed: Arc<AtomicUsize>,
+    /// What wakes the worker — see [`Queue::worker_bell`].
+    bell: Bell,
+    /// Rung as the worker makes room — see [`Queue::room`].
+    room: Bell,
 }
 
 impl Inbox {
@@ -719,15 +688,15 @@ impl Inbox {
     fn discarded(&self, ends: usize) {
         self.ends_owed.fetch_sub(ends, Ordering::AcqRel);
     }
+}
 
-    /// The next buffer held over, once the channel has nothing older.
-    fn take_held_over(&self) -> Option<Numbered> {
-        let mut overflow = self.overflow.lock();
-        if self.data.is_empty() {
-            overflow.pop_front()
-        } else {
-            None
-        }
+/// Rings the thread handing buffers over as the worker ends, so one waiting
+/// for room finds there will never be any.
+struct RingOnEnd(Bell);
+
+impl Drop for RingOnEnd {
+    fn drop(&mut self) {
+        self.0.ring();
     }
 }
 
@@ -772,127 +741,114 @@ fn worker_loop(
         errors: &error_reporter,
         dropped_from: Cell::new(UNNUMBERED),
     };
+    // However this ends, a thread waiting to hand a buffer over hears of it.
+    let _ends = RingOnEnd(inbox.room.clone());
+    let apply = |msg, ack: &Sender<()>, downstream: &mut Box<dyn Sink>| {
+        apply_control(
+            &inbox,
+            downstream,
+            msg,
+            ack,
+            &control_rx,
+            &error_reporter,
+            &stop,
+        )
+    };
     loop {
         if let Some((request, ack)) = control_rx.try_recv() {
             let RequestKind::Control(msg) = request else {
                 let _ = ack.send(());
                 continue;
             };
-            if apply_control(
-                &inbox,
-                &mut downstream,
-                msg,
-                &ack,
-                &control_rx,
-                &error_reporter,
-                &stop,
-            ) {
+            if apply(msg, &ack, &mut downstream) {
                 pp_info!(pp_log: &pp_log, "worker: stopped");
                 return;
             }
             continue;
         }
 
+        // Dropped: what is waiting still goes, and once nothing is, this ends.
+        let stopping = stop.load(Ordering::Relaxed);
+        if stopping && inbox.data.is_empty() {
+            pp_info!(pp_log: &pp_log, "worker: stop flag set, ending");
+            return;
+        }
+
         // Neither while an interrupt is out — see `Inbox::held_back` — nor
-        // while downstream is not ready does this take a buffer; it waits on
-        // control alone, which is what will change either.
+        // while downstream is not ready does this take a buffer. It waits
+        // for what will change either: a request, or its bell — rung as
+        // the pipeline's state moves on, and as the queue is dropped. Only
+        // a downstream that becomes ready without saying so is looked at
+        // again on a timer; see `READINESS_POLL_INTERVAL`.
         let held_back = inbox.held_back(&stop);
         if held_back || !downstream.ready_consume() {
-            let wait = if held_back {
-                INTERRUPT_POLL_INTERVAL
+            let poll = if held_back {
+                Duration::MAX
             } else {
-                STOP_POLL_INTERVAL
+                READINESS_POLL_INTERVAL
             };
-            match control_rx.rx.recv_timeout(wait) {
+            select! {
+                recv(control_rx.rx) -> request => match request {
+                    Ok(request) => {
+                        let RequestKind::Control(msg) = request.kind else {
+                            let _ = request.ack.send(());
+                            continue;
+                        };
+                        if apply(msg, &request.ack, &mut downstream) {
+                            pp_info!(pp_log: &pp_log, "worker: stopped");
+                            return;
+                        }
+                    }
+                    Err(_) => return,
+                },
+                recv(inbox.bell.rings()) -> _ => {}
+                default(poll) => {}
+            }
+            // Dropped with downstream not taking anything: what is queued
+            // is abandoned — unless it holds an `Eos`, which is owed
+            // downstream however long it takes: see `Inbox::owes_an_end`.
+            // Ending here regardless dropped the end of the stream, which
+            // is what a `finish` of a playing file lost: the source ends,
+            // its queue is dropped, and the worker found its downstream
+            // busy.
+            if !held_back && stop.load(Ordering::Relaxed) && !inbox.owes_an_end() {
+                pp_info!(pp_log: &pp_log, "worker: stop flag set, ending");
+                return;
+            }
+            continue;
+        }
+
+        select! {
+            recv(control_rx.rx) -> request => match request {
                 Ok(request) => {
                     let RequestKind::Control(msg) = request.kind else {
                         let _ = request.ack.send(());
                         continue;
                     };
-                    if apply_control(
-                        &inbox,
-                        &mut downstream,
-                        msg,
-                        &request.ack,
-                        &control_rx,
-                        &error_reporter,
-                        &stop,
-                    ) {
+                    if apply(msg, &request.ack, &mut downstream) {
                         pp_info!(pp_log: &pp_log, "worker: stopped");
                         return;
                     }
                 }
-                // Held back, it looks again rather than ending: `stop` set
-                // since then means draining what is here, as ever. So does
-                // a downstream that is only full for now — a `Pacer` behind
-                // it letting pictures go at their time — while an `Eos` is
-                // still queued: see `Inbox::owes_an_end`. Ending here
-                // regardless dropped the end of the stream, which is what a
-                // `finish` of a playing file lost: the source ends, its
-                // queue is dropped, and the worker found its downstream busy.
-                Err(RecvTimeoutError::Timeout) => {
-                    if !held_back && stop.load(Ordering::Relaxed) && !inbox.owes_an_end() {
-                        pp_info!(pp_log: &pp_log, "worker: stop flag set, ending");
-                        return;
-                    }
+                Err(_) => {
+                    pp_info!(pp_log: &pp_log, "worker: control channel gone, ending");
+                    return; // sender (this Queue) dropped
                 }
-                Err(RecvTimeoutError::Disconnected) => return,
-            }
-            continue;
-        }
-
-        if let Some(buf) = inbox.take_held_over() {
-            forward(&mut downstream, buf, &worker);
-            continue;
-        }
-
-        select! {
-            recv(control_rx.rx) -> req => {
-                match req {
-                    Ok(req) => {
-                        let RequestKind::Control(msg) = req.kind else {
-                            let _ = req.ack.send(());
-                            continue;
-                        };
-                        if apply_control(
-                            &inbox,
-                            &mut downstream,
-                            msg,
-                            &req.ack,
-                            &control_rx,
-                            &error_reporter,
-                            &stop,
-                        ) {
-                            pp_info!(pp_log: &pp_log, "worker: stopped");
-                            return;
-                        }
-                    }
-                    Err(_) => {
-                        pp_info!(pp_log: &pp_log, "worker: control channel gone, ending");
-                        return; // sender (this Queue) dropped
-                    }
+            },
+            recv(inbox.data) -> buf => match buf {
+                Ok(buf) => {
+                    // Room for the thread handing buffers over, before this
+                    // one goes on, which may take a while.
+                    inbox.room.ring();
+                    forward(&mut downstream, buf, &worker);
                 }
-            }
-            recv(inbox.data) -> buf => {
-                match buf {
-                    Ok(buf) => {
-                        forward(&mut downstream, buf, &worker);
-                    }
-                    Err(_) => {
-                        pp_info!(pp_log: &pp_log, "worker: producer (this Queue) gone, ending");
-                        return;
-                    }
-                }
-            }
-            // Only reached once neither branch above had anything ready
-            // for a whole `STOP_POLL_INTERVAL` — real traffic on either
-            // channel always wins first. See `Queue::drop`.
-            default(STOP_POLL_INTERVAL) => {
-                if stop.load(Ordering::Relaxed) {
-                    pp_info!(pp_log: &pp_log, "worker: stop flag set, ending");
+                Err(_) => {
+                    pp_info!(pp_log: &pp_log, "worker: producer (this Queue) gone, ending");
                     return;
                 }
-            }
+            },
+            // The state moved on, or the queue was dropped: look again.
+            recv(inbox.bell.rings()) -> _ => {}
         }
     }
 }
@@ -1002,6 +958,7 @@ fn apply_control(
         "event=control control={msg:?} phase=forwarding"
     );
     inbox.discarded(discard_stale_data(&inbox.data, &msg));
+    inbox.room.ring();
     forward_control(downstream, msg.clone(), error_reporter);
     let is_stop = msg == ControlMsg::Stop;
     let _ = ack.send(());
@@ -1012,14 +969,23 @@ fn apply_control(
         return false;
     }
     loop {
-        // `recv_timeout` (not `recv`) so `Queue::drop` setting `stop` can
-        // still wake a worker that's paused forever with no `Resume`/
-        // `Stop` ever coming (e.g. a bare `Queue`, not reached through a
-        // `Pipeline` — see `Queue::drop`'s docs on why this state is
-        // otherwise unreachable there). Nothing else feeds this queue
-        // while paused (see the type-level docs), so there's no
-        // legitimate traffic this could ever cut off.
-        let (msg, ack) = match control_rx.rx.recv_timeout(STOP_POLL_INTERVAL) {
+        // On control, and on the bell as well: `Queue::drop` rings it, and a
+        // worker paused for good — a bare `Queue`, not reached through a
+        // `Pipeline`, paused and dropped with no `Resume` or `Stop` ever
+        // coming — has nothing else to wake it. Nothing feeds this queue
+        // while paused (see the type-level docs), so there is no traffic
+        // this could cut off.
+        let request = select! {
+            recv(control_rx.rx) -> request => request,
+            recv(inbox.bell.rings()) -> _ => {
+                if stop.load(Ordering::Relaxed) {
+                    pp_info!(pp_log: error_reporter.pp_log, "worker: stop flag set while paused, ending");
+                    return true;
+                }
+                continue;
+            }
+        };
+        let (msg, ack) = match request {
             Ok(req) => {
                 let RequestKind::Control(msg) = req.kind else {
                     let _ = req.ack.send(());
@@ -1027,14 +993,7 @@ fn apply_control(
                 };
                 (msg, req.ack)
             }
-            Err(RecvTimeoutError::Timeout) => {
-                if stop.load(Ordering::Relaxed) {
-                    pp_info!(pp_log: error_reporter.pp_log, "worker: stop flag set while paused, ending");
-                    return true;
-                }
-                continue;
-            }
-            Err(RecvTimeoutError::Disconnected) => {
+            Err(_) => {
                 pp_info!(pp_log: error_reporter.pp_log, "worker: control channel gone while paused, ending");
                 return true; // sender gone — treat like Stop
             }
@@ -1044,6 +1003,7 @@ fn apply_control(
             "event=control control={msg:?} phase=forwarding"
         );
         inbox.discarded(discard_stale_data(&inbox.data, &msg));
+        inbox.room.ring();
         forward_control(downstream, msg.clone(), error_reporter);
         let is_stop = msg == ControlMsg::Stop;
         let _ = ack.send(());
@@ -1146,7 +1106,7 @@ fn discard_stale_data(data_rx: &Receiver<Numbered>, msg: &ControlMsg) -> usize {
 mod tests {
     use std::{
         sync::{
-            Arc,
+            Arc, Mutex,
             atomic::{AtomicUsize, Ordering},
         },
         thread,
@@ -1403,7 +1363,7 @@ mod tests {
         let opener = {
             let open = open.clone();
             thread::spawn(move || {
-                thread::sleep(STOP_POLL_INTERVAL * 4);
+                thread::sleep(READINESS_POLL_INTERVAL * 4);
                 open.store(true, Ordering::SeqCst);
             })
         };
@@ -2175,11 +2135,11 @@ mod tests {
         (queue, seen)
     }
 
-    /// While an interrupt is out the worker takes nothing, and a full
-    /// channel does not block the thread handing buffers over — they are
-    /// held over instead, so that thread can go and take the request behind
+    /// While an interrupt is out the worker takes nothing, and a full queue
+    /// does not block the thread handing buffers over — they go in past its
+    /// capacity instead, so that thread can go and take the request behind
     /// the interrupt. Once it is settled, everything arrives in the order it
-    /// was handed over, what was held over after what was in the channel.
+    /// was handed over.
     #[test]
     fn an_interrupt_holds_the_worker_back_and_lets_the_producer_go() {
         let state = PlaybackState::new();
@@ -2192,12 +2152,15 @@ mod tests {
         }
         queue
             .consume(MediaBuffer::Eos)
-            .expect("even Eos is held over");
+            .expect("even Eos goes in past capacity");
         assert!(
             started.elapsed() < Duration::from_secs(1),
             "a full channel must not block while an interrupt is out"
         );
-        assert!(!queue.ready_consume(), "held-over buffers make it full");
+        assert!(
+            !queue.ready_consume(),
+            "what went in past capacity makes it full"
+        );
         thread::sleep(Duration::from_millis(50));
         assert!(seen.lock().unwrap().is_empty(), "the worker held back");
 
@@ -2208,7 +2171,7 @@ mod tests {
         }
         assert_eq!(*seen.lock().unwrap(), [0, 1, 2, 3]);
 
-        // Sent after the held-over ones have gone: nothing overtakes them.
+        // Sent after the ones past capacity have gone: nothing overtakes them.
         queue.consume(packet_at(4)).expect("send");
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while seen.lock().unwrap().len() < 5 && std::time::Instant::now() < deadline {
@@ -2217,10 +2180,10 @@ mod tests {
         assert_eq!(*seen.lock().unwrap(), [0, 1, 2, 3, 4]);
     }
 
-    /// What was held over belongs to the old timeline as much as the
-    /// channel's backlog does: a `Flush` drops both.
+    /// What went in past capacity belongs to the old timeline as much as the
+    /// rest of the backlog: a `Flush` drops it all.
     #[test]
-    fn flush_discards_what_was_held_over() {
+    fn flush_discards_what_went_in_past_capacity() {
         let state = PlaybackState::new();
         let (mut queue, seen) = recording_queue(1, &state);
         state.interrupt();
@@ -2236,5 +2199,87 @@ mod tests {
         }
         thread::sleep(Duration::from_millis(50));
         assert_eq!(*seen.lock().unwrap(), [10]);
+    }
+    fn gated(open: &Arc<AtomicBool>, count: &Arc<AtomicUsize>) -> Box<dyn Sink> {
+        Box::new(Gated {
+            pp_log: element_pp_log(ElementType::Other, "gated", None),
+            open: Arc::clone(open),
+            count: Arc::clone(count),
+            ended: Arc::new(AtomicBool::new(false)),
+        })
+    }
+
+    /// A thread already waiting for room lets go the moment an interrupt is
+    /// raised: the state rings it, rather than it noticing on its next look
+    /// round. Nothing else ever wakes it here — downstream takes nothing —
+    /// so without the ring this waits for good.
+    #[test]
+    fn an_interrupt_lets_go_of_a_thread_already_waiting_for_room() {
+        let state = PlaybackState::new();
+        let (bus, _bus_rx) = Bus::new();
+        let open = Arc::new(AtomicBool::new(false));
+        let count = Arc::new(AtomicUsize::new(0));
+        let mut queue = Queue::spawn_with_policy_using(
+            "queue",
+            1,
+            gated(&open, &count),
+            bus,
+            OverflowPolicy::default(),
+            None,
+            None,
+            Some(Arc::clone(&state)),
+            |thread_name, task| thread::Builder::new().name(thread_name).spawn(task),
+        )
+        .expect("spawn");
+        queue.consume(packet()).expect("room for one");
+
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let producer = thread::spawn(move || {
+            let handed_over = queue.consume(packet()).is_ok();
+            done_tx.send(handed_over).unwrap();
+            queue
+        });
+        assert!(
+            done_rx.recv_timeout(Duration::from_millis(100)).is_err(),
+            "full, so it waits"
+        );
+        state.interrupt();
+        assert_eq!(
+            done_rx.recv_timeout(Duration::from_secs(5)),
+            Ok(true),
+            "the interrupt lets it go, the buffer handed over past capacity"
+        );
+        let queue = producer.join().unwrap();
+        state.settle();
+        drop(queue);
+    }
+
+    /// With no capacity at all, handing a buffer over waits until the worker
+    /// has taken it: nothing is left waiting ahead of the worker.
+    #[test]
+    fn a_queue_without_capacity_hands_over_only_what_is_taken() {
+        let (bus, _bus_rx) = Bus::new();
+        let open = Arc::new(AtomicBool::new(false));
+        let count = Arc::new(AtomicUsize::new(0));
+        let queue = Queue::spawn("queue", 0, gated(&open, &count), bus, None).expect("spawn");
+
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let producer = thread::spawn(move || {
+            let mut queue = queue;
+            queue.consume(packet()).expect("handed over");
+            done_tx.send(()).unwrap();
+            queue
+        });
+        assert!(
+            done_rx.recv_timeout(Duration::from_millis(100)).is_err(),
+            "not taken yet, so not handed over"
+        );
+        open.store(true, Ordering::SeqCst);
+        done_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("taken, and so handed over");
+        let queue = producer.join().unwrap();
+        drop(queue);
+        assert_eq!(count.load(Ordering::SeqCst), 1);
     }
 }

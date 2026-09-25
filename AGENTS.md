@@ -176,7 +176,10 @@ final source of truth when documentation and implementation differ.
   remain for what an element does about a change — stopping a device,
   dropping a timeline's leftovers. Whatever an element holds back during a
   phase it hands on, in order, as soon as it sees the phase is over: from
-  the next buffer as much as from the message behind it.
+  the next buffer as much as from the message behind it. The pipeline
+  writes what restricts flow before its message; what lets flow go travels
+  only as a message, which a paused source or queue waits for and passes
+  on before any data — so a preroll always ends in a pause, even to play on.
 - Dropping a running `Pipeline`, driver, Queue, or owned helper process must stop
   and join/collect the worker it owns. Retained handles must not accidentally
   keep an unrelated pipeline bus, graph, sink, or worker alive.

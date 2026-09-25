@@ -204,11 +204,17 @@ impl Pacer {
     fn wait_for(&mut self, timing: Timing) -> Result<bool, PacerError> {
         let playback = self.playback_clock.clone().ok_or(PacerError::NotAttached)?;
         let state = self.state.clone().ok_or(PacerError::NotAttached)?;
-        if state.interrupted_since(self.interrupt_epoch) {
-            return Ok(false);
-        }
+        // Before the interrupt, not after it: a preroll waits for nothing,
+        // so there is no wait for an interrupt to cut short. Asked the other
+        // way round, a buffer arriving while an interrupt was out — which
+        // it can be during a preroll, since a request reaches this before
+        // the interrupt raised for it — was kept, and handed on together
+        // with the next: two samples into a terminal that takes one.
         if state.is_prerolling() {
             return Ok(true);
+        }
+        if state.interrupted_since(self.interrupt_epoch) {
+            return Ok(false);
         }
         let (pts, time_base) = match timing {
             Timing::Untimed => return Ok(true),
@@ -486,6 +492,24 @@ mod tests {
         packet.set_pts(Some(pts));
         packet.set_time_base(ffmpeg::Rational::new(1, 1));
         MediaBuffer::Packet(Arc::new(packet))
+    }
+
+    /// A preroll's buffers go straight on even while an interrupt is out —
+    /// one raised after this pacer took the request it goes with, as the
+    /// pipeline raises it. Kept instead, each was handed on together with
+    /// the next once the interrupt settled.
+    #[test]
+    fn a_preroll_is_not_held_back_by_an_interrupt() {
+        let clock = Arc::new(Clock::new());
+        let context = context(&clock);
+        let mut pacer = paced("pacer", &context);
+        let preroll = ControlMsg::Preroll(Arc::new(PrerollContext::new([])));
+        context.state.observe(&preroll);
+        pacer.control(&preroll).expect("preroll");
+        context.state.interrupt();
+
+        pacer.consume(packet(60)).expect("preroll packet");
+        assert!(pacer.pending.is_empty(), "handed on, not kept");
     }
 
     #[test]

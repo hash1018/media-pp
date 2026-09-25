@@ -156,6 +156,12 @@ impl VideoSynchronizer {
             return WaitOutcome::Render;
         };
         loop {
+            // Before the interrupt, for the reason `Pacer::wait_for` gives: a
+            // preroll waits for nothing, and a frame kept for an interrupt
+            // during one went on together with the next.
+            if state.is_prerolling() {
+                return WaitOutcome::Render;
+            }
             if state.interrupted_since(self.interrupt_epoch) {
                 return WaitOutcome::Interrupted;
             }

@@ -563,7 +563,7 @@ impl Pipeline {
     /// then a `Preroll` found it blocked handing a full, paused queue a
     /// packet, nothing let it go, and the seek waited on it for good. An
     /// interrupt is what lets such a thread go — a `Queue` takes the packet
-    /// as held over, a `Pacer` lets go of its wait — so every request raises
+    /// past its capacity, a `Pacer` lets go of its wait — so every request raises
     /// one, and none depends on the graph already being in the state the
     /// request assumes. It costs a request sent while all is paused nothing:
     /// there is nothing waiting for it to wake.
@@ -829,8 +829,8 @@ impl Pipeline {
     /// before [`Pipeline::run`] or once every source has stopped; a source
     /// parked at the end of its stream still counts as running.
     ///
-    /// Signals the clock's interrupt epoch before starting the synchronous
-    /// cascade so a `Pacer` in a long wait can return its worker promptly.
+    /// Raises an interrupt before starting the synchronous cascade so a
+    /// `Pacer` in a long wait can return its worker promptly.
     /// The clock's playback anchor is still reset later, inside
     /// [`Sink::control`](crate::element::Sink::control) on `Pacer`, after
     /// that in-flight frame is
@@ -905,9 +905,14 @@ impl Pipeline {
         self.broadcast(|control_tx| control_tx.enqueue(ControlMsg::Preroll(Arc::clone(&preroll))));
         let preroll_result = self.await_preroll(&preroll, PREROLL_TIMEOUT);
         self.retire_preroll();
-        if restore_paused {
-            self.pause_runtime();
-        } else {
+        // Out of a preroll by way of a pause, even to play on: a preroll
+        // lets data through, and playing read off the state before its
+        // `Resume` arrived let a queue hand a terminal data it had not been
+        // told to take. Paused, every thread waits for the `Resume` itself
+        // and passes it on before anything else — see
+        // `crate::playback_state`.
+        self.pause_runtime();
+        if !restore_paused {
             self.resume_runtime();
         }
         preroll_result?;

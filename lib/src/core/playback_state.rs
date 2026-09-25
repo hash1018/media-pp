@@ -28,6 +28,13 @@
 //! So a pause that follows a preroll keeps it ([`Phase::Paused`]), and what
 //! it held stays held for as long as the pause lasts.
 //!
+//! What lets data go, on the other hand, is never read here first. A paused
+//! source or queue goes on only when the `Resume` or `Preroll` itself
+//! reaches it, and passes it on downstream before anything else, so no
+//! element is handed data it has not yet been told to take. A preroll lets
+//! data flow without being paused, so the pipeline never ends one by
+//! playing on directly: it pauses first, then resumes.
+//!
 //! # Interrupts
 //!
 //! A request the pipeline sends reaches an element only when the thread
@@ -36,6 +43,14 @@
 //! buffer. So before each request the pipeline raises an interrupt here,
 //! which every such wait answers by letting go, and settles it once every
 //! source has handled the request — see [`PlaybackState::interrupt`].
+//!
+//! # Waking what waits on it
+//!
+//! A thread waiting in a [`Queue`](crate::queue::Queue) — for room, for the
+//! interrupt to settle, for its downstream to be ready — is waiting for
+//! something here to change, and each change rings it: a [`Bell`] the queue
+//! lends this state when it is made. Nothing that waits on the state looks
+//! again on a timer.
 //!
 //! # Outside a pipeline
 //!
@@ -53,6 +68,8 @@ use std::{
     },
     time::Duration,
 };
+
+use crossbeam_channel::{Receiver, Sender, TrySendError, bounded};
 
 use crate::control::{ControlMsg, PrerollContext};
 use crate::timeline::UNNUMBERED;
@@ -105,6 +122,36 @@ impl Phase {
     }
 }
 
+/// What wakes a thread waiting in a `select!` on a change it cannot see
+/// coming — see the module docs.
+///
+/// A channel of one: ringing never blocks, and a ring nobody has answered
+/// yet is not lost, since the waiter finds it the next time it waits and
+/// looks again. A ring that has already been answered costs one look that
+/// finds nothing new.
+#[derive(Clone)]
+pub(crate) struct Bell {
+    ringer: Sender<()>,
+    rings: Receiver<()>,
+}
+
+impl Bell {
+    pub(crate) fn new() -> Self {
+        let (ringer, rings) = bounded(1);
+        Self { ringer, rings }
+    }
+
+    /// Wakes whatever is waiting on this, or the next thing to.
+    pub(crate) fn ring(&self) {
+        let _ = self.ringer.try_send(());
+    }
+
+    /// What a waiter selects on.
+    pub(crate) fn rings(&self) -> &Receiver<()> {
+        &self.rings
+    }
+}
+
 /// A pipeline's playback state, shared by everything in it — see the module
 /// docs.
 #[derive(Debug)]
@@ -125,6 +172,10 @@ pub(crate) struct PlaybackState {
     /// read the count cannot miss the raise that changes it.
     raised: Mutex<()>,
     raised_changed: Condvar,
+    /// Rung whenever any of the above moves — see [`Bell`]. What a bell is
+    /// no longer heard by, because whatever held it has gone, is dropped at
+    /// the next ring.
+    listeners: Mutex<Vec<Sender<()>>>,
 }
 
 impl PlaybackState {
@@ -137,6 +188,7 @@ impl PlaybackState {
             settled: AtomicU64::new(0),
             raised: Mutex::new(()),
             raised_changed: Condvar::new(),
+            listeners: Mutex::new(Vec::new()),
         })
     }
 
@@ -146,23 +198,51 @@ impl PlaybackState {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    /// Rings `bell` whenever this state moves, from now on.
+    pub(crate) fn listen(&self, bell: &Bell) {
+        self.listeners
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(bell.ringer.clone());
+    }
+
+    /// Rings every bell still heard — see [`Bell`].
+    fn ring(&self) {
+        self.listeners
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|ringer| !matches!(ringer.try_send(()), Err(TrySendError::Disconnected(_))));
+    }
+
     /// Moves playback to `phase` — the pipeline's to call, before it
     /// announces the change.
     pub(crate) fn enter(&self, phase: Phase) {
         *self.lock() = phase;
+        self.ring();
+    }
+
+    /// Says a terminal has taken its sample for the preroll under way, which
+    /// is what a branch held back for it waits on — see
+    /// [`PrerollContext::mark_ready`].
+    pub(crate) fn sample_taken(&self) {
+        self.ring();
     }
 
     /// Pauses playback, keeping a preroll this ends — see the module docs.
     /// The pipeline's to call, as [`Self::enter`] is.
     pub(crate) fn pause(&self) {
-        let mut phase = self.lock();
-        *phase = Phase::paused_after(&phase);
+        {
+            let mut phase = self.lock();
+            *phase = Phase::paused_after(&phase);
+        }
+        self.ring();
     }
 
     /// Moves playback on as `msg` says — what a control channel with no
     /// pipeline behind it does as it sends one.
     pub(crate) fn observe(&self, msg: &ControlMsg) {
         self.lock().observe(msg);
+        self.ring();
     }
 
     /// Whether nothing is to flow: paused, or stopped.
@@ -217,6 +297,7 @@ impl PlaybackState {
             self.interrupts.fetch_add(1, Ordering::Release);
         }
         self.raised_changed.notify_all();
+        self.ring();
     }
 
     /// Sleeps for `duration`, or until the next [`Self::interrupt`] if that
@@ -245,6 +326,7 @@ impl PlaybackState {
     pub(crate) fn settle(&self) {
         self.settled
             .store(self.interrupt_epoch(), Ordering::Release);
+        self.ring();
     }
 
     /// Whether an interrupt is out and the requests behind it are still on
@@ -327,6 +409,32 @@ mod tests {
         assert!(!state.holds());
         state.observe(&ControlMsg::Stop);
         assert!(state.holds(), "a stop holds for good");
+    }
+
+    /// Every move of the state rings what listens to it, and a bell whose
+    /// holder has gone is let go of rather than rung for good.
+    #[test]
+    fn a_bell_rings_for_every_move_and_is_dropped_with_its_holder() {
+        let state = PlaybackState::new();
+        let bell = Bell::new();
+        state.listen(&bell);
+        let heard = |bell: &Bell| bell.rings().try_recv().is_ok();
+
+        state.interrupt();
+        assert!(heard(&bell), "an interrupt");
+        state.settle();
+        assert!(heard(&bell), "its settling");
+        state.pause();
+        assert!(heard(&bell), "a pause");
+        state.enter(Phase::Playing);
+        assert!(heard(&bell), "a phase");
+        state.sample_taken();
+        assert!(heard(&bell), "a terminal's sample");
+        assert!(!heard(&bell), "one ring apiece");
+
+        drop(bell);
+        state.interrupt();
+        assert!(state.listeners.lock().unwrap().is_empty());
     }
 
     #[test]
