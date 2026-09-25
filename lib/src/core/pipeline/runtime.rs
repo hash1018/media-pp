@@ -37,7 +37,7 @@ pub enum PipelineError {
     AlreadyStarted,
 
     /// [`Pipeline::seek`] was called before [`Pipeline::run`], or after every
-    /// source had stopped — by [`Pipeline::stop`], [`Pipeline::finish`], or
+    /// source had stopped â by [`Pipeline::stop`], [`Pipeline::finish`], or
     /// an error it could not continue past. A source parked at the end of its
     /// stream is still running, and can be sought back into.
     #[error("this pipeline is not running, so there is nothing to seek")]
@@ -66,7 +66,7 @@ pub enum SeekMode {
 /// cannot be created; any workers already created for that call are stopped
 /// and joined before the error is returned. The one-shot pipeline is not
 /// reusable after that failure. Returned as `Arc<Pipeline>` (that's what
-/// [`Pipeline::new`]/[`PipelineBuilder::build`] return) — the background
+/// [`Pipeline::new`]/[`PipelineBuilder::build`] return) â the background
 /// threads deliberately do not retain an owning handle, so dropping the
 /// last external `Arc` can stop them. The `Arc` also lets [`Pipeline::pause`]/
 /// [`Pipeline::resume`]/[`Pipeline::stop`] be called from another thread
@@ -77,7 +77,7 @@ pub enum SeekMode {
 /// [`BusReceiver::log_events`] block until every [`Bus`] sender has been
 /// dropped. Under the normal ownership path that happens once every
 /// source's background thread (and everything reachable from it) has
-/// fully finished — with more than one source, *all* of them, not just the
+/// fully finished â with more than one source, *all* of them, not just the
 /// first to reach `Eos`. A source that can be sought back, `FileDemuxer`
 /// among them, does not finish at the end of its media but stays there
 /// until stopped; [`BusEvent::Finished`](crate::bus::BusEvent::Finished) is
@@ -93,11 +93,11 @@ pub enum SeekMode {
 ///
 /// A `Pipeline` isn't reusable once `run()` has been called (whether it
 /// finished via every source's natural `Eos`, [`Pipeline::finish`], or
-/// [`Pipeline::stop`]) — a
+/// [`Pipeline::stop`]) â a
 /// second `run()` call is a no-op; build a fresh `Pipeline` for another
 /// play-through.
 pub struct Pipeline {
-    /// This pipeline's own id — passed to [`Pipeline::new`]/
+    /// This pipeline's own id â passed to [`Pipeline::new`]/
     /// [`PipelineBuilder::new`], stamped onto every source's own `pp_log`
     /// there and onto every element that passes through a [`super::ChainBuilder`]
     /// built with it (see [`Pipeline::id`]).
@@ -106,7 +106,7 @@ pub struct Pipeline {
     pub(super) pp_log: PpLog,
     pub(super) sources: Mutex<Option<Vec<SourceEntry>>>,
     /// Taken (leaving `None` behind) the moment `run()` starts, and cloned
-    /// once per source into that source's own background thread — so once
+    /// once per source into that source's own background thread â so once
     /// a pipeline is running, `Pipeline` itself no longer holds a `Bus`
     /// sender directly. If it did, [`BusReceiver::iter`] could never
     /// observe every sender dropped (one would always still be sitting
@@ -114,32 +114,32 @@ pub struct Pipeline {
     /// every source actually finishes.
     pub(super) bus: Mutex<Option<Bus>>,
     /// One [`ControlSender`] per source, in the same order
-    /// [`PipelineBuilder::add_source`] was called — [`Pipeline::finish`]/
+    /// [`PipelineBuilder::add_source`] was called â [`Pipeline::finish`]/
     /// `stop`/`pause`/`resume`/`seek` queue a request on every one of these
-    /// before waking anything, and then wait for all of them together — see
+    /// before waking anything, and then wait for all of them together â see
     /// `Pipeline::broadcast` for why both halves of that matter.
     pub(super) control_txs: Vec<ControlSender>,
     /// Taken (leaving `None` behind) the moment `run()` starts, and moved
-    /// one per thread — same reasoning as `bus` above. If `Pipeline` kept
+    /// one per thread â same reasoning as `bus` above. If `Pipeline` kept
     /// its own clone of each alive for its whole lifetime instead, that
     /// control channel's receiver side would never fully disconnect even
     /// after its thread has long since exited, so a
     /// [`Pipeline::stop`]/`pause`/`resume` racing that thread's own
     /// natural end (e.g. called right as it finishes on its own) could
-    /// enqueue a `Request` nobody will ever read *or drop* — leaving
+    /// enqueue a `Request` nobody will ever read *or drop* â leaving
     /// [`crate::control::ControlSender::send`]'s rendezvous ack blocked
     /// forever instead of unblocked by the disconnect, the way it is the
     /// moment the *last* `ControlReceiver` clone actually goes away.
     pub(super) control_rxs: Mutex<Option<Vec<ControlReceiver>>>,
     pub(super) clock: Arc<Clock>,
     pub(super) playback_clock: Arc<PlaybackClock>,
-    /// Where playback stands, for every element to read — see
+    /// Where playback stands, for every element to read â see
     /// [`crate::playback_state`]. This is the only thing that writes it,
     /// and always before it sends the control message that goes with the
     /// change.
     pub(super) state: Arc<PlaybackState>,
     pub(super) bus_rx: BusReceiver,
-    /// How many source threads are still running — `0` before `run()` and
+    /// How many source threads are still running â `0` before `run()` and
     /// again once every source's thread has finished. `AtomicUsize` rather
     /// than a per-source flag: every call site (`pause`/`resume`/`stop`/
     /// `seek`) only ever needs "is anything still running at all", never
@@ -159,7 +159,7 @@ pub struct Pipeline {
     /// Held here rather than only inside `seek` so a caller that wants the
     /// pipeline to end can reach it *without* the operation lock. `Stop` would
     /// otherwise have to queue behind that wait, which is the one thing it
-    /// promises not to do — and the cancellation the terminals already forward
+    /// promises not to do â and the cancellation the terminals already forward
     /// on `Stop` cannot arrive either, because sending it needs the same lock.
     pub(super) preroll_slot: Mutex<PrerollSlot>,
     /// Handles for every source thread started by [`Pipeline::run`]. They
@@ -168,29 +168,29 @@ pub struct Pipeline {
     pub(super) workers: Mutex<Vec<JoinHandle<()>>>,
     /// Live node/edge graph backing snapshots and topology rendering.
     pub(super) graph: PipelineGraph,
-    /// Each source's counters, kept alive here — see
+    /// Each source's counters, kept alive here â see
     /// [`PipelineBuilder`]'s own field.
     pub(super) _source_counters: Vec<Arc<crate::stats::ElementCounters>>,
 }
 
 impl Pipeline {
-    /// `id` names this pipeline — stamped into the source's own `pp_log` as
+    /// `id` names this pipeline â stamped into the source's own `pp_log` as
     /// its `pipeline_id` right away, and folded into the [`Context`] handed
     /// to `wire` (see [`super::ChainBuilder`]'s own docs).
     ///
     /// `wire` is called once with the freshly created source and a
     /// [`Context`] bundling this pipeline's `Bus`, `id`, [`PipelineGraph`]
     /// (already seeded with the source itself), and `Clock` (share it with
-    /// every [`crate::elements::Pacer`] via `Clock::clone` — one clock per
+    /// every [`crate::elements::Pacer`] via `Clock::clone` â one clock per
     /// pipeline, so every paced branch agrees on the same t=0 and the same
-    /// pause/resume timeline) — everything a [`super::ChainBuilder`]/
+    /// pause/resume timeline) â everything a [`super::ChainBuilder`]/
     /// [`crate::elements::Tee`] needs, in one `Arc` clone instead of four
     /// separate arguments. `wire` creates detached chains and attaches
     /// them through [`Context::attach`]. Pads left unattached drop data.
     ///
     /// Whatever `wire` returns comes back beside the pipeline: something
-    /// only the wiring can make — a [`crate::elements::TeeHandle`] from
-    /// [`crate::elements::TeeBuilder::build_dynamic`], a routing to keep —
+    /// only the wiring can make â a [`crate::elements::TeeHandle`] from
+    /// [`crate::elements::TeeBuilder::build_dynamic`], a routing to keep â
     /// is returned from it, several at once as a tuple, rather than
     /// smuggled out through a variable the closure fills in. `()` where
     /// there is nothing to hand back:
@@ -204,7 +204,7 @@ impl Pipeline {
     /// })?;
     /// ```
     ///
-    /// The single-source special case of [`PipelineBuilder`] — see its own
+    /// The single-source special case of [`PipelineBuilder`] â see its own
     /// docs for combining more than one live source (e.g. a video capture
     /// and an audio capture) into one `Pipeline`.
     pub fn new<S: SourceElement + 'static, T>(
@@ -226,7 +226,7 @@ impl Pipeline {
     ///
     /// Calling [`BusReceiver::iter`](crate::bus::BusReceiver::iter) blocks
     /// until every sender has dropped, which normally coincides with all source
-    /// and queue workers finishing — for a seekable source such as a file,
+    /// and queue workers finishing â for a seekable source such as a file,
     /// once the pipeline is stopped; see
     /// [`BusEvent::Finished`](crate::bus::BusEvent::Finished). A custom element that retains a cloned
     /// [`Context`] can intentionally keep the receiver connected longer.
@@ -252,9 +252,9 @@ impl Pipeline {
     }
 
     /// Human-readable rundown of [`Pipeline::elements`]: one line per
-    /// branch — each element nothing else in the graph feeds into (a
+    /// branch â each element nothing else in the graph feeds into (a
     /// terminal sink, or an empty [`crate::elements::Tee`] with no sinks
-    /// attached yet) — formatted `Type(name) - Type(name) - ...` by
+    /// attached yet) â formatted `Type(name) - Type(name) - ...` by
     /// walking that element's `upstream` chain back to the source.
     /// Multiple branches (fan-out across more than one src pad, or a
     /// `Tee`) are joined by newlines.
@@ -262,12 +262,12 @@ impl Pipeline {
         self.graph().topology()
     }
 
-    /// What every element is doing, read now — see [`crate::stats`].
+    /// What every element is doing, read now â see [`crate::stats`].
     ///
     /// Running totals rather than rates: take two readings and the rate is
     /// their difference over the time between them, matched by
     /// [`ElementStats::id`](crate::stats::ElementStats::id). Cheap enough to
-    /// call a few times a second — the graph's lock is held only to copy
+    /// call a few times a second â the graph's lock is held only to copy
     /// the list of what is registered, and nothing on the path a buffer
     /// travels is locked by it.
     ///
@@ -285,7 +285,7 @@ impl Pipeline {
         }
     }
 
-    /// The clock every `Pacer` in this pipeline paces against — see
+    /// The clock every `Pacer` in this pipeline paces against â see
     /// [`Pipeline::pause`] for why callers don't usually need to touch
     /// this directly.
     pub fn clock(&self) -> &Arc<Clock> {
@@ -298,14 +298,14 @@ impl Pipeline {
     }
 
     /// Where playback is: the media time the pipeline's playback master has
-    /// reached — the audio renderer's played samples when there is one, else
+    /// reached â the audio renderer's played samples when there is one, else
     /// the wall clock a [`crate::elements::Pacer`] or
     /// [`crate::elements::VideoSynchronizer`] keeps. What a progress bar
     /// shows, read from the clock rather than from whichever frame last went
     /// past, so it moves with the sound and holds still while paused.
     ///
-    /// `None` while nothing paces this pipeline — a transcode runs as fast as
-    /// it can and has no "now" — and from a [`Pipeline::seek`] until the
+    /// `None` while nothing paces this pipeline â a transcode runs as fast as
+    /// it can and has no "now" â and from a [`Pipeline::seek`] until the
     /// first sample of the new position anchors the clock again. A position
     /// before the start of the media reads as zero.
     pub fn position(&self) -> Option<Duration> {
@@ -317,7 +317,7 @@ impl Pipeline {
     /// Whether any source of this pipeline is still on a thread of its own.
     ///
     /// `false` before [`Pipeline::run`], and `true` from then until every
-    /// source has finished — by its own `Eos`, by [`Pipeline::stop`] or
+    /// source has finished â by its own `Eos`, by [`Pipeline::stop`] or
     /// [`Pipeline::finish`], or by returning an error it could not continue
     /// past. Those endings look different on the bus and identical here,
     /// which is what a caller wanting only "is this still producing?" is
@@ -331,24 +331,24 @@ impl Pipeline {
     /// [`BusEvent::Finished`](crate::bus::BusEvent::Finished) is what says it
     /// has played everything.
     ///
-    /// Draining the bus stays the way to learn *why* — see this type's own
-    /// docs — and remains the only way to wait for the end rather than poll
+    /// Draining the bus stays the way to learn *why* â see this type's own
+    /// docs â and remains the only way to wait for the end rather than poll
     /// for it.
     pub fn is_running(&self) -> bool {
         self.running.load(Ordering::Acquire) > 0
     }
 
     /// Starts driving the source on a background thread and returns
-    /// immediately — see the type-level docs for how to learn when it's
+    /// immediately â see the type-level docs for how to learn when it's
     /// actually done. A pipeline runs once: calling this again, whether it
     /// is still running or has ended, fails with
-    /// [`PipelineError::AlreadyStarted`] and changes nothing — this type has
+    /// [`PipelineError::AlreadyStarted`] and changes nothing â this type has
     /// no "reset" path; build a fresh `Pipeline` for another play-through.
     ///
     /// A pipeline [`Pipeline::pause`]d before this starts paused: every
     /// source stops before producing anything, and this returns once they
     /// all have. A [`Pipeline::seek`] then puts exactly one sample through
-    /// every terminal — the one at the requested position — and returns
+    /// every terminal â the one at the requested position â and returns
     /// once it has arrived, which is how to take a single frame from part
     /// way into a file without decoding everything before it.
     ///
@@ -369,13 +369,13 @@ impl Pipeline {
         ) -> std::io::Result<JoinHandle<()>>,
     ) -> Result<()> {
         // Held throughout, so a `pause` racing this either lands before the
-        // sources are taken — and this starts paused — or after, as the
+        // sources are taken â and this starts paused â or after, as the
         // ordinary cascade.
         let _operation = lock(&self.operation);
         let Some(sources) = lock(&self.sources).take() else {
             return Err(PipelineError::AlreadyStarted.into());
         };
-        // Always `Some` in lockstep with `sources` above — all three taken
+        // Always `Some` in lockstep with `sources` above â all three taken
         // exactly once, on whichever `run()` call actually wins the
         // `sources` guard.
         let Some(bus) = lock(&self.bus).take() else {
@@ -434,7 +434,7 @@ impl Pipeline {
                     let source_type = source.element_type();
                     // `source.run()` itself already reports non-fatal,
                     // per-buffer failures to `bus` as it goes (see
-                    // `SourceElement::run`'s docs) — a returned `Err` here
+                    // `SourceElement::run`'s docs) â a returned `Err` here
                     // means something genuinely ended this source, e.g.
                     // a `Seek` that failed outright.
                     let outcome = if let Err(error) = source.run(&control_rx, &bus) {
@@ -450,7 +450,7 @@ impl Pipeline {
                         // over: `run` returned instead of being stopped, and
                         // dropping it merely tears the elements down. A muxer
                         // waiting on this track would then never write its
-                        // trailer, leaving an unplayable file — so cascade the
+                        // trailer, leaving an unplayable file â so cascade the
                         // same `Stop` a deliberate shutdown would have sent.
                         // `Stop` rather than `Eos` because the source failed:
                         // there is no complete stream to drain, only state to
@@ -508,7 +508,7 @@ impl Pipeline {
         Ok(())
     }
 
-    /// Blocks until every element downstream of every source has paused —
+    /// Blocks until every element downstream of every source has paused â
     /// see [`crate::control::drain_control`] (source side) and
     /// [`crate::queue::Queue`]'s worker loop (each thread boundary). Also
     /// pauses this pipeline's `Clock` before that synchronous cascade
@@ -516,7 +516,7 @@ impl Pipeline {
     /// acknowledge `Pause` is frozen too and a `Pacer` doesn't see a jump
     /// once resumed.
     ///
-    /// Before [`Pipeline::run`], this makes the run start paused — see its
+    /// Before [`Pipeline::run`], this makes the run start paused â see its
     /// docs. Once every source has stopped, there is nothing to pause and
     /// this does nothing.
     pub fn pause(&self) {
@@ -545,7 +545,7 @@ impl Pipeline {
     ///
     /// In that order, and for every source at once. A `Pacer` or
     /// `VideoSynchronizer` interrupted mid-wait keeps its buffer and returns,
-    /// so its source can take the request that interrupted it — which has to
+    /// so its source can take the request that interrupted it â which has to
     /// be there already. Sent one source at a time, as this used to be, a
     /// source waiting its turn behind another's cascade was interrupted with
     /// nothing to take: it read on, each buffer handed straight back by the
@@ -553,15 +553,15 @@ impl Pipeline {
     /// milliseconds. Waiting for them together also keeps one slow cascade
     /// from holding up the rest.
     ///
-    /// Every request interrupts, whatever it is. Only some used to — pause,
-    /// stop, finish, and the question that opens a seek — on the reasoning
+    /// Every request interrupts, whatever it is. Only some used to â pause,
+    /// stop, finish, and the question that opens a seek â on the reasoning
     /// that the rest are sent while everything is already paused, so nothing
     /// can be waiting on the clock or blocked handing data on. That held
     /// until a source was not paused when it should have been (208af56):
     /// then a `Preroll` found it blocked handing a full, paused queue a
     /// packet, nothing let it go, and the seek waited on it for good. An
-    /// interrupt is what lets such a thread go — a `Queue` takes the packet
-    /// past its capacity, a `Pacer` lets go of its wait — so every request raises
+    /// interrupt is what lets such a thread go â a `Queue` takes the packet
+    /// past its capacity, a `Pacer` lets go of its wait â so every request raises
     /// one, and none depends on the graph already being in the state the
     /// request assumes. It costs a request sent while all is paused nothing:
     /// there is nothing waiting for it to wake.
@@ -575,7 +575,7 @@ impl Pipeline {
             let _ = ack.recv();
         }
         // Every source has taken the request and cascaded it, so whatever an
-        // interrupt — this one or one raised just before — was holding back
+        // interrupt â this one or one raised just before â was holding back
         // can go on.
         self.state.settle();
     }
@@ -629,7 +629,7 @@ impl Pipeline {
         );
     }
 
-    /// Performs an early, full stop — abandons buffered work rather than
+    /// Performs an early, full stop â abandons buffered work rather than
     /// draining to a natural `Eos`. This call is synchronous: it sends
     /// [`ControlMsg::Stop`] to every source at once and waits until each
     /// one's own cascade has finished. It therefore cannot preempt an arbitrary
@@ -637,7 +637,7 @@ impl Pipeline {
     /// external-library code; the call returns only after that work gives
     /// the control cascade a turn. After it returns, watch [`Pipeline::bus`]
     /// for every source's background thread to finish. Not reusable
-    /// afterward — build a new `Pipeline` for the next play-through.
+    /// afterward â build a new `Pipeline` for the next play-through.
     pub fn stop(&self) {
         // Before the operation lock, not after: a seek holds that lock for as
         // long as its preroll wait, and an abandoning caller must not be made
@@ -660,7 +660,7 @@ impl Pipeline {
     ///
     /// That second case is not hypothetical: `stop` runs before the operation
     /// lock, so it can arrive in the window between the seek repositioning its
-    /// sources and reaching this call. One mutex covers both sides — either
+    /// sources and reaching this call. One mutex covers both sides â either
     /// `stop` finds the preroll here, or this finds `stop`'s flag.
     fn publish_preroll(&self, preroll: &Arc<PrerollContext>) {
         let mut slot = self
@@ -688,7 +688,7 @@ impl Pipeline {
     /// not. Detaching a `Tee` branch mid-seek removes its terminal without
     /// removing the obligation to hear from it, and nothing is left to report
     /// a sample for it. Rather than lock topology changes out for the whole
-    /// wait, this simply stops expecting whoever has since left — which also
+    /// wait, this simply stops expecting whoever has since left â which also
     /// covers any other way a terminal can disappear, not just that one.
     ///
     /// The graph snapshot only happens on a poll that found work still
@@ -818,7 +818,8 @@ impl Pipeline {
 
     /// Jumps to an absolute position from the start of the media. The whole
     /// operation is serialized against lifecycle controls and internally runs
-    /// `Pause -> Flush -> Seek -> Preroll`. Every source repositions (see
+    /// `Pause -> Flush -> Seek -> Preroll -> Pause`, and `Resume` after that if it
+    /// was playing — see its four stages below. Every source repositions (see
     /// [`crate::element::SourceElement::seek`]) and every downstream element
     /// reacts before preroll begins. Once every terminal in the starting
     /// topology snapshot has
@@ -846,7 +847,7 @@ impl Pipeline {
     /// according to [`Sink::consume`](crate::element::Sink::consume). For a
     /// video renderer that includes installing or submitting the preview
     /// frame, but not waiting for physical display scanout.
-    /// Whether a [`Self::seek`] would be refused, and by what — without
+    /// Whether a [`Self::seek`] would be refused, and by what â without
     /// seeking, and without asking anything running.
     ///
     /// Answered from the graph as it stands: a source that is live or cannot
@@ -854,7 +855,7 @@ impl Pipeline {
     /// [`Sink::accepts_seek`](crate::element::Sink::accepts_seek)), say so as
     /// they are wired. So this works before [`Self::run`] and after the
     /// sources have stopped, costs a lock rather than a round trip through
-    /// every thread, and changes as branches come and go — a recording
+    /// every thread, and changes as branches come and go â a recording
     /// attached to a `Tee` refuses from the moment it is attached until it is
     /// detached. What a player needs to decide whether to offer a seek bar.
     pub fn check_seek(&self) -> std::result::Result<(), crate::control::SeekError> {
@@ -872,10 +873,39 @@ impl Pipeline {
             return Err(PipelineError::NotRunning.into());
         }
         self.check_seek()?;
-        let restore_paused = self.paused.load(Ordering::Acquire);
-        if !restore_paused {
+        let playing = !self.paused.load(Ordering::Acquire);
+
+        // A seek is these four stages, each leaving the graph in a state
+        // the next relies on â see each for which.
+        if playing {
             self.pause_runtime();
         }
+        self.reposition(target);
+        let preroll = self.preroll_for(|terminals| match mode {
+            SeekMode::Keyframe => PrerollContext::new(terminals),
+            SeekMode::Accurate => PrerollContext::for_seek(terminals, target),
+        });
+        let prerolled = self.preroll(&preroll, PREROLL_TIMEOUT);
+        self.end_preroll(playing);
+        prerolled?;
+        pp_trace!(
+            pp_log: &self.pp_log,
+            "event=control control={:?} phase=completed outcome=ok",
+            ControlMsg::Seek(target)
+        );
+        Ok(())
+    }
+
+    /// A seek's second stage, the graph paused: moves every source to
+    /// `target` on a new timeline.
+    ///
+    /// After it, every source is at `target` or wherever it landed near it
+    /// (see [`crate::bus::BusEvent::Seeked`]), nothing any element held from
+    /// the old position is left â the `Flush` â and whatever of the old
+    /// position reaches a queue later is dropped there, being on a timeline
+    /// that is no longer current â see [`crate::timeline`]. Nothing has
+    /// moved: every source is still paused.
+    fn reposition(&self, target: Duration) {
         let msg = ControlMsg::Seek(target);
         pp_trace!(
             pp_log: &self.pp_log,
@@ -884,48 +914,65 @@ impl Pipeline {
         self.state.interrupt();
         self.playback_clock.reset_for_seek();
         // Everything read from here on belongs to the new position, and a
-        // queue drops whatever reaches it from the old one — what the
+        // queue drops whatever reaches it from the old one â what the
         // `Flush` below discards, and what it misses.
         self.state.begin_timeline();
         self.broadcast(|control_tx| control_tx.enqueue(ControlMsg::Flush));
         self.broadcast(|control_tx| control_tx.enqueue(msg.clone()));
+    }
+
+    /// A preroll expecting every terminal the graph has now, as `make`
+    /// sets it up, and naming them for a timeout to say which it waited on.
+    fn preroll_for(
+        &self,
+        make: impl FnOnce(Vec<crate::graph::ElementId>) -> PrerollContext,
+    ) -> Arc<PrerollContext> {
         let graph = self.graph();
         let terminals = graph.terminal_ids();
         let labels: Vec<_> = terminals
             .iter()
             .filter_map(|&id| graph.node(id).cloned())
             .collect();
-        let preroll = Arc::new(
-            match mode {
-                SeekMode::Keyframe => PrerollContext::new(terminals),
-                SeekMode::Accurate => PrerollContext::for_seek(terminals, target),
-            }
-            .labelled(labels),
-        );
-        // Publish before waiting, so `stop` can end this wait rather than
-        // queue behind it. Cleared on every exit below, including the error
-        // one, so no later `stop` cancels a preroll that already finished.
-        self.publish_preroll(&preroll);
-        self.state.enter(Phase::Prerolling(Arc::clone(&preroll)));
-        self.broadcast(|control_tx| control_tx.enqueue(ControlMsg::Preroll(Arc::clone(&preroll))));
-        let preroll_result = self.await_preroll(&preroll, PREROLL_TIMEOUT);
+        Arc::new(make(terminals).labelled(labels))
+    }
+
+    /// A seek's third stage: lets data through the paused graph until every
+    /// terminal has taken its sample for `preroll` â or `timeout`, or a
+    /// `stop`, ends the wait.
+    ///
+    /// Paused before and, as far as what flows is concerned, after: each
+    /// terminal takes one sample and holds, and a branch with its sample is
+    /// held while its siblings catch up â see `Tee`. What ends the preroll
+    /// is [`Self::end_preroll`], which must follow whatever this answers.
+    fn preroll(
+        &self,
+        preroll: &Arc<PrerollContext>,
+        timeout: Duration,
+    ) -> std::result::Result<(), PrerollError> {
+        // Published before the wait, so `stop` can end it rather than queue
+        // behind it; cleared whatever the wait answers, so no later `stop`
+        // cancels a preroll that has already finished.
+        self.publish_preroll(preroll);
+        self.state.enter(Phase::Prerolling(Arc::clone(preroll)));
+        self.broadcast(|control_tx| control_tx.enqueue(ControlMsg::Preroll(Arc::clone(preroll))));
+        let prerolled = self.await_preroll(preroll, timeout);
         self.retire_preroll();
-        // Out of a preroll by way of a pause, even to play on: a preroll
-        // lets data through, and playing read off the state before its
-        // `Resume` arrived let a queue hand a terminal data it had not been
-        // told to take. Paused, every thread waits for the `Resume` itself
-        // and passes it on before anything else — see
-        // `crate::playback_state`.
+        prerolled
+    }
+
+    /// A seek's last stage: out of the preroll by way of a pause, then on
+    /// playing if `play_on`.
+    ///
+    /// Always the pause, even to play on. A preroll lets data through, and
+    /// playing read off the state before its `Resume` had arrived let a
+    /// queue hand a terminal data it had not yet been told to take. Paused,
+    /// every source and queue waits for the `Resume` itself and passes it on
+    /// before anything else â see `crate::playback_state`.
+    fn end_preroll(&self, play_on: bool) {
         self.pause_runtime();
-        if !restore_paused {
+        if play_on {
             self.resume_runtime();
         }
-        preroll_result?;
-        pp_trace!(
-            pp_log: &self.pp_log,
-            "event=control control={msg:?} phase=completed outcome=ok"
-        );
-        Ok(())
     }
 }
 
@@ -958,7 +1005,7 @@ impl Drop for Pipeline {
 
 /// Seek's preroll wait, reachable without the operation lock.
 ///
-/// `abandoned` is sticky because the calls that set it — `stop` and `finish` —
+/// `abandoned` is sticky because the calls that set it â `stop` and `finish` â
 /// both end the pipeline for good. Once set, a seek that has not yet published
 /// its preroll cancels it on arrival instead of waiting out a timeout nobody
 /// is going to collect.
@@ -968,8 +1015,8 @@ pub(super) struct PrerollSlot {
     abandoned: bool,
 }
 
-/// Locks `mutex`, taking over a poisoned one: what these guard — the run
-/// state taken once, and the list of workers to join — is never left
+/// Locks `mutex`, taking over a poisoned one: what these guard â the run
+/// state taken once, and the list of workers to join â is never left
 /// half-written by a panic elsewhere.
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex
