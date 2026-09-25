@@ -747,3 +747,84 @@ fn a_decoder_that_cannot_hand_a_stretch_on_backwards_refuses() {
     let (pipeline, _) = watched(&path, true);
     assert!(pipeline.check_reverse().is_ok());
 }
+
+/// A group of pictures that fits what a decoder may hold is read as one
+/// stretch, from its keyframe, so backwards each packet reaches the decoder
+/// once, as it does forwards — not once for every stretch in the group.
+#[test]
+fn backwards_hands_the_decoder_each_packet_once() {
+    let Some(path) = try_test_video() else {
+        return;
+    };
+    let path = std::path::PathBuf::from(path);
+    // Every packet of the picture: its decode time, in its own unit and in
+    // nanoseconds, and whether it is a keyframe.
+    let packets: Vec<(i64, Duration, bool)> = {
+        let mut input = ffmpeg::format::input(&path).expect("open");
+        let (index, base) = {
+            let stream = input
+                .streams()
+                .best(ffmpeg::media::Type::Video)
+                .expect("a picture");
+            (stream.index(), stream.time_base())
+        };
+        input
+            .packets()
+            .filter(|(stream, _)| stream.index() == index)
+            .filter_map(|(_, packet)| {
+                let dts = packet.dts()?;
+                let ns = dts.rescale(base, ffmpeg::Rational::new(1, 1_000_000_000));
+                Some((dts, Duration::from_nanos(ns.max(0) as u64), packet.is_key()))
+            })
+            .collect()
+    };
+    let keyframes: Vec<Duration> = packets
+        .iter()
+        .filter(|(_, _, key)| *key)
+        .map(|&(_, at, _)| at)
+        .collect();
+    if keyframes
+        .windows(2)
+        .any(|pair| pair[1] - pair[0] > Duration::from_secs(20))
+    {
+        eprintln!("skipping: the fixture's groups are longer than a stretch may be");
+        return;
+    }
+    let every = pictures_of(&path);
+    let from = every[every.len() / 2];
+    let (pipeline, told) = watched(&path, true);
+    pipeline.pause();
+    pipeline.run().expect("run");
+    pipeline
+        .seek(from, SeekMode::Accurate)
+        .expect("into the file");
+    let before = told.lock().unwrap().len();
+    pipeline.set_rate(-1.0).expect("backwards");
+    pipeline.resume();
+    assert!(wait_until(|| {
+        std::iter::from_fn(|| pipeline.bus().try_recv())
+            .any(|event| matches!(event, crate::bus::BusEvent::Finished))
+    }));
+    pipeline.stop();
+
+    let told = told.lock().unwrap()[before..].to_vec();
+    // From the turn's flush: what came before it was the forwards timeline's.
+    let turned = told
+        .iter()
+        .position(|event| *event == Told::Flush)
+        .expect("the turn flushes");
+    let mut handed: Vec<i64> = told[turned..]
+        .iter()
+        .filter_map(|event| match event {
+            Told::Packet(Some(dts)) => Some(*dts),
+            _ => None,
+        })
+        .collect();
+    handed.sort_unstable();
+    let expected: Vec<i64> = packets
+        .iter()
+        .filter(|&&(_, at, _)| at <= from)
+        .map(|&(dts, _, _)| dts)
+        .collect();
+    assert_eq!(handed, expected, "each packet up to {from:?} once");
+}

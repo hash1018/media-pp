@@ -730,10 +730,11 @@ compile error with no explanation.
   step once they have come on time for a while. What is shown stays at
   the right place in time. A preroll decodes everything, since a seek or
   a step asks for one particular picture. Playing backwards is where it
-  counts: each stretch is decoded from the keyframe before it, so on a
-  recording with a keyframe every five seconds a software decoder that
-  fell to 2.3 times the speed at -4 now holds -4, showing fewer pictures,
-  and it does not touch one that keeps up.
+  counts where a group of pictures is longer than a stretch, since each
+  stretch in it is decoded from the group's start: forced to one-second
+  stretches on a 1080p recording with a keyframe every five seconds, a
+  software decoder fell to 2.3 times the speed at -4, and with this held
+  4, showing fewer pictures. One that keeps up is not touched.
 
 - **A negative `Pipeline::set_rate` plays backwards.** From the picture
   shown, from a quarter of the speed to four times it
@@ -763,11 +764,17 @@ compile error with no explanation.
   from `as_reversible`, on `SourceElement` and on `Sink`, which is `None` by
   default: a source that is not refuses to play backwards, and so does an
   element whose contracts take a picture's packets and hand on pictures.
-  `FileDemuxer` is a `ReversibleSource` for a file with a picture, reading a
-  second at a time, and `SwDecoder`, `D3d11Decoder`, `D3d12Decoder` and
-  `CudaDecoder` are `ReversibleDecoder`s, and so `VideoDecodeBin` on every
-  path. What a decoder holds is a second of pictures; a hardware one holds
-  copies, since its surfaces are a pool the rest of the stretch is decoded
+  `FileDemuxer` is a `ReversibleSource` for a file with a picture, and
+  `SwDecoder`, `D3d11Decoder`, `D3d12Decoder` and `CudaDecoder` are
+  `ReversibleDecoder`s, and so `VideoDecodeBin` on every path.
+  `FileDemuxer` begins a stretch at a keyframe, so that a group of
+  pictures is decoded once, as long as the pictures a decoder holds for
+  it fit in 512 MB — a whole five-second group at 1080p and 30 a second,
+  two thirds of a second at 4K and 60 — and a longer group is read in
+  stretches that long from its end, decoding its start again for each.
+  On a 1080p recording with a keyframe every five seconds every decode
+  path, software included, plays it at -4 without leaving anything out.
+  A hardware decoder holds copies, since its surfaces are a pool the rest of the stretch is decoded
   into, made on the device from a frames context of its own. In
   `Player`'s `respond_to` R turns round at the same speed, and the minus
   and plus keys change the speed either way round.

@@ -313,14 +313,18 @@ pub struct FileDemuxer {
 /// flagged `AV_PKT_FLAG_DISCARD`, which the decoder decodes and does not
 /// hand on. Then the stretch before it, whose `end` is this one's `start`.
 ///
-/// A stretch is [`BACKWARDS_STRETCH`] long, not a whole group of pictures:
-/// the decoder holds a stretch's pictures to hand them on backwards, and a
-/// group can be seconds long. The price is decoding the group's start again
-/// for each stretch in it. Only the picture is read; the sound is not
-/// played backwards, and its packets are passed over.
+/// A stretch begins at a keyframe where it can: the one the last picture
+/// before `end` is decoded from, so what is decoded for it is decoded once.
+/// It is as long as the decoder can hold, though — see [`BACKWARDS_BUDGET`]
+/// — and a group of pictures longer than that is read in stretches of that
+/// length from its end, each decoding the group's start again. Only the
+/// picture is read; the sound is not played backwards, and its packets are
+/// passed over.
 struct Backwards {
     /// The picture's stream.
     stream: usize,
+    /// The longest a stretch may be, in nanoseconds — see [`BACKWARDS_BUDGET`].
+    longest: i64,
     /// This stretch, in nanoseconds of the file.
     start: i64,
     end: i64,
@@ -328,11 +332,24 @@ struct Backwards {
     unread: bool,
 }
 
-/// How much of the picture one stretch read backwards covers — see
-/// [`Backwards`]. What the decoder holds at once, and how often a group of
-/// pictures is decoded from its start again: a second of 1080p is about
-/// 90 MB, and a five-second group is decoded three times over.
-const BACKWARDS_STRETCH: Duration = Duration::from_secs(1);
+/// How much a decoder may hold of a stretch read backwards — see
+/// [`Backwards`] — in bytes of decoded pictures. What sets how long a
+/// stretch may be: at 1080p and 30 pictures a second about five seconds,
+/// the whole of a group of pictures of the length recordings commonly have,
+/// which is then decoded once; at 4K and 60 a second two thirds of one, and
+/// a group of pictures longer than a stretch is decoded from its start
+/// again for each. A hardware decoder holds copies on the device, so this
+/// is memory there.
+const BACKWARDS_BUDGET: u64 = 512 * 1024 * 1024;
+
+/// The shortest and longest a stretch is, whatever the budget says: a
+/// picture too large for it still has to be played, and one small enough
+/// for minutes of it gains nothing past a group's length.
+const BACKWARDS_STRETCH_LIMITS: (Duration, Duration) =
+    (Duration::from_millis(250), Duration::from_secs(20));
+
+/// A stretch's length where the stream does not say its size or rate.
+const BACKWARDS_STRETCH_UNKNOWN: Duration = Duration::from_secs(1);
 
 /// How far the read cursor may run ahead of what a blocked pad still owes,
 /// in file time, to keep another branch fed — see
@@ -1039,8 +1056,10 @@ impl ReversibleSource for FileDemuxer {
             .ok_or(FileDemuxerError::NoStream(ffmpeg::media::Type::Video))?;
         // The picture at `target` is the last of the first stretch.
         let end = duration_ns(target).saturating_add(1);
+        let longest = duration_ns(self.stretch_limit(stream));
         self.backwards = Some(Backwards {
             stream,
+            longest,
             start: end,
             end,
             unread: true,
@@ -1078,15 +1097,63 @@ impl FileDemuxer {
         let Some(backwards) = self.backwards.as_mut() else {
             return Ok(());
         };
-        backwards.start = backwards
-            .end
-            .saturating_sub(duration_ns(BACKWARDS_STRETCH))
-            .max(0);
         backwards.unread = false;
-        let start = Duration::from_nanos(backwards.start.max(0) as u64);
+        let (end, longest) = (backwards.end, backwards.longest);
         self.forget_parked();
-        self.reposition(start)?;
+        // The keyframe the last picture before `end` is decoded from: a
+        // seek to just before `end` lands on it, and it is where this
+        // stretch is read from whatever its length.
+        let before_end = Duration::from_nanos(end.saturating_sub(1).max(0) as u64);
+        let (_, keyframe) = self.reposition_landing(before_end)?;
+        let shortest_start = end.saturating_sub(longest).max(0);
+        let start = keyframe
+            .map(duration_ns)
+            .filter(|&keyframe| keyframe < end)
+            .map_or(shortest_start, |keyframe| keyframe.max(shortest_start));
+        if let Some(backwards) = self.backwards.as_mut() {
+            backwards.start = start;
+        }
         Ok(())
+    }
+
+    /// How long a stretch of `stream` may be: as many of its pictures as
+    /// [`BACKWARDS_BUDGET`] holds, reckoned from the size, depth and rate
+    /// its parameters say, within [`BACKWARDS_STRETCH_LIMITS`].
+    fn stretch_limit(&self, stream: usize) -> Duration {
+        let Some(stream) = self.input.stream(stream) else {
+            return BACKWARDS_STRETCH_UNKNOWN;
+        };
+        let rate = stream.avg_frame_rate();
+        let rate = if rate.numerator() > 0 && rate.denominator() > 0 {
+            rate
+        } else {
+            stream.rate()
+        };
+        let parameters = stream.parameters();
+        // SAFETY: `parameters` is the stream's live codec parameters, read
+        // for three plain fields.
+        let (width, height, depth) = unsafe {
+            let parameters = parameters.as_ptr();
+            (
+                (*parameters).width,
+                (*parameters).height,
+                (*parameters).bits_per_raw_sample,
+            )
+        };
+        let (Ok(width), Ok(height)) = (u64::try_from(width), u64::try_from(height)) else {
+            return BACKWARDS_STRETCH_UNKNOWN;
+        };
+        if width == 0 || height == 0 || rate.numerator() <= 0 || rate.denominator() <= 0 {
+            return BACKWARDS_STRETCH_UNKNOWN;
+        }
+        // Chroma at a quarter the resolution of luma, as decoders hand
+        // most pictures on, and two bytes a sample past eight bits.
+        let sample_bytes = if depth > 8 { 2 } else { 1 };
+        let picture_bytes = (width * height * 3 / 2 * sample_bytes).max(1);
+        let pictures = (BACKWARDS_BUDGET / picture_bytes) as f64;
+        let seconds = pictures * f64::from(rate.denominator()) / f64::from(rate.numerator());
+        let (shortest, longest) = BACKWARDS_STRETCH_LIMITS;
+        Duration::from_secs_f64(seconds).clamp(shortest, longest)
     }
 
     /// Reads one packet backwards — see [`Backwards`] — and answers
@@ -1169,6 +1236,16 @@ impl FileDemuxer {
     /// Moves the read cursor to `target`, forwards — see
     /// [`SourceElement::seek`].
     fn reposition(&mut self, target: Duration) -> crate::error::Result<Duration> {
+        self.reposition_landing(target).map(|(landed, _)| landed)
+    }
+
+    /// As [`Self::reposition`], answering besides where the first picture
+    /// of the stream it seeks by starts, where the file has one after it —
+    /// the keyframe it landed on.
+    fn reposition_landing(
+        &mut self,
+        target: Duration,
+    ) -> crate::error::Result<(Duration, Option<Duration>)> {
         // `Input::seek` takes microseconds (`AV_TIME_BASE` units) when
         // seeking the whole container (stream index -1, which is what it
         // uses internally) rather than one specific stream — an unbounded
@@ -1229,7 +1306,10 @@ impl FileDemuxer {
         }
         // Nothing left to read (`target` at/past EOF): no packet to learn a
         // real position from, so the request is reported back as it is.
-        Ok(landed.unwrap_or(target))
+        Ok((
+            landed.unwrap_or(target),
+            last_picture.map(|(starts, _)| starts),
+        ))
     }
 }
 
