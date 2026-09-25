@@ -38,7 +38,7 @@ use crate::{
 };
 
 #[cfg(feature = "cuda")]
-use crate::platform::cuda::driver::interop::{CudaInterop, DeviceRows, ImportedMemory};
+use crate::platform::cuda::driver::interop::{ArrayRows, CudaInterop, ImportedArray};
 
 const SHADER: &str = include_str!("../../../../shaders/vulkan/present.wgsl");
 
@@ -630,8 +630,9 @@ impl PlaneShape {
 enum Source<'a> {
     /// In system memory: copied into mapped memory on the CPU.
     System(&'a ffmpeg::frame::Video),
-    /// In CUDA memory: copied device to device into memory CUDA imported.
-    /// Each plane's device pointer and pitch, as many as the layout has.
+    /// In CUDA memory: copied device to device into the plane images, which
+    /// CUDA imported. Each plane's device pointer and pitch, as many as the
+    /// layout has.
     #[cfg(feature = "cuda")]
     Cuda {
         planes: [(u64, usize); 3],
@@ -652,11 +653,12 @@ impl Source<'_> {
 /// The swapchain, the pipeline and the per-frame resources a window is drawn
 /// with.
 ///
-/// Everything a frame's memory domain decides happens before the staging
-/// buffer: how its bytes get there. From the buffer on — the copy into the
-/// sampled images, the draw, the present — nothing here knows or cares where
-/// a frame came from; what the layout decides is how many images there are
-/// and which shader samples them.
+/// A frame's memory domain decides how its bytes reach the sampled images:
+/// a system frame through a staging buffer the GPU copies out of, a CUDA
+/// frame written into the images by CUDA itself. From the images on — the
+/// draw, the present — nothing here knows or cares where a frame came from;
+/// what the layout decides is how many images there are and which shader
+/// samples them.
 struct Presenter {
     gpu: Arc<VulkanShared>,
     surface_fn: ash::khr::surface::Instance,
@@ -724,54 +726,54 @@ struct Swapchain {
 }
 
 /// The frame-sized resources: the images the shader samples, one per plane,
-/// and the buffer a frame's bytes are put in on their way there.
+/// and how a frame's bytes get there.
 struct VideoResources {
     width: u32,
     height: u32,
     layout: Layout,
     shapes: Vec<PlaneShape>,
     planes: Vec<Plane>,
-    staging: Staging,
+    upload: Upload,
 }
 
 struct Plane {
     image: vk::Image,
     memory: vk::DeviceMemory,
     view: vk::ImageView,
+    /// The image as CUDA sees it, where CUDA writes it: made exportable and
+    /// imported once. Dropped before `memory` is freed: the mapping refers
+    /// to it.
+    #[cfg(feature = "cuda")]
+    array: Option<ImportedArray>,
 }
 
-/// One frame, its planes packed as [`Layout::planes`] lays them out.
-enum Staging {
-    /// Mapped for the CPU, and left mapped.
+/// How a frame's bytes reach the plane images.
+enum Upload {
+    /// Through a buffer mapped for the CPU, and left mapped: a frame's
+    /// planes are packed into it as [`Layout::planes`] lays them out, and
+    /// copied from it into the images on the GPU.
     System {
         buffer: vk::Buffer,
         memory: vk::DeviceMemory,
         mapped: *mut u8,
     },
-    /// Allocated exportable and imported into CUDA once.
+    /// Straight into the images, which CUDA writes as the arrays it imported
+    /// them as — see [`Plane::array`]. The images stay in `GENERAL` layout
+    /// throughout, and change hands with CUDA in each frame's commands.
+    ///
+    /// One copy where a staging buffer would take two: NVDEC's surfaces
+    /// cannot be exported, so the frame is copied once either way, but not
+    /// then copied again on the Vulkan side.
     #[cfg(feature = "cuda")]
-    Cuda {
-        buffer: vk::Buffer,
-        memory: vk::DeviceMemory,
-        /// Dropped before `memory` is freed: the mapping refers to it.
-        imported: Option<ImportedMemory>,
-    },
+    Cuda,
 }
 
-impl Staging {
+impl Upload {
     fn domain(&self) -> MemoryDomain {
         match self {
             Self::System { .. } => MemoryDomain::System,
             #[cfg(feature = "cuda")]
-            Self::Cuda { .. } => MemoryDomain::Cuda,
-        }
-    }
-
-    fn buffer(&self) -> vk::Buffer {
-        match self {
-            Self::System { buffer, .. } => *buffer,
-            #[cfg(feature = "cuda")]
-            Self::Cuda { buffer, .. } => *buffer,
+            Self::Cuda => MemoryDomain::Cuda,
         }
     }
 }
@@ -957,8 +959,8 @@ impl Presenter {
         // What a measured presentation delay counts from: the moment the frame
         // is handed over, which is what a synchronizer schedules.
         let handed = Instant::now();
-        // The last frame's commands read the staging buffer this one is about
-        // to overwrite.
+        // The last frame's commands read what this one is about to overwrite:
+        // the staging buffer, or the images CUDA writes.
         if self.submitted {
             // SAFETY: the fence is this presenter's own and was submitted.
             unsafe {
@@ -974,11 +976,12 @@ impl Presenter {
         self.draw(width, height, colour, handed)
     }
 
-    /// Puts one frame's planes into the staging buffer, packed.
+    /// Puts one frame's planes where [`Self::record`] finds them: packed into
+    /// the staging buffer, or written into the images.
     fn stage(&mut self, source: Source<'_>) -> std::result::Result<(), VulkanWindowRendererError> {
         let video = self.video.as_ref().expect("ensured before staging");
-        match (source, &video.staging) {
-            (Source::System(frame), Staging::System { mapped, .. }) => {
+        match (source, &video.upload) {
+            (Source::System(frame), Upload::System { mapped, .. }) => {
                 for (index, shape) in video.shapes.iter().enumerate() {
                     let (data, pitch) = (frame.data(index), frame.stride(index));
                     let row_bytes = shape.row_bytes();
@@ -999,35 +1002,39 @@ impl Presenter {
                 Ok(())
             }
             #[cfg(feature = "cuda")]
-            (Source::Cuda { planes, interop }, Staging::Cuda { imported, .. }) => {
-                let dst = imported.as_ref().expect("imported with the buffer").ptr();
-                let copies: Vec<DeviceRows> = video
+            (Source::Cuda { planes, interop }, Upload::Cuda) => {
+                let copies: Vec<ArrayRows> = video
                     .shapes
                     .iter()
+                    .zip(&video.planes)
                     .zip(planes)
-                    .map(|(shape, (src, src_pitch))| DeviceRows {
+                    .map(|((shape, plane), (src, src_pitch))| ArrayRows {
                         src,
                         src_pitch,
                         width_bytes: shape.row_bytes(),
                         rows: shape.height as usize,
-                        dst_offset: shape.offset,
-                        dst_pitch: shape.row_bytes(),
+                        dst: plane
+                            .array
+                            .as_ref()
+                            .expect("imported with the image")
+                            .array(),
                     })
                     .collect();
                 // SAFETY: every source is a plane of a frame `draw` validated as
                 // this layout on this GPU's CUDA device, as many rows of its own
-                // pitch as the shape says; the destination is the mapping of a
-                // buffer made to hold exactly these planes.
-                unsafe { interop.copy_rows(dst, &copies)? };
+                // pitch as the shape says; each destination is the image made
+                // for that plane, the shape's size, and no longer read — the
+                // last frame's commands were waited for in `present`.
+                unsafe { interop.copy_into(&copies)? };
                 Ok(())
             }
             #[cfg(feature = "cuda")]
-            _ => unreachable!("the staging buffer is made for the domain of the frame"),
+            _ => unreachable!("the upload is made for the domain of the frame"),
         }
     }
 
-    /// Draws what is in the staging buffer into the window, letterboxed, and
-    /// presents it.
+    /// Draws the frame [`Self::stage`] put in place into the window,
+    /// letterboxed, and presents it.
     fn draw(
         &mut self,
         width: u32,
@@ -1279,7 +1286,7 @@ impl Presenter {
             video.width == width
                 && video.height == height
                 && video.layout == layout
-                && video.staging.domain() == domain
+                && video.upload.domain() == domain
         }) {
             return Ok(());
         }
@@ -1299,7 +1306,7 @@ impl Presenter {
         let shapes = layout.planes(width, height);
         let mut planes = Vec::with_capacity(shapes.len());
         for shape in &shapes {
-            match self.create_plane(shape.width, shape.height, shape.format) {
+            match self.create_plane(shape, domain) {
                 Ok(plane) => planes.push(plane),
                 Err(error) => {
                     planes
@@ -1309,15 +1316,16 @@ impl Presenter {
                 }
             }
         }
-        let last = shapes.last().expect("every layout has a plane");
-        let bytes = last.offset + last.bytes();
-        let staging = match domain {
+        let upload = match domain {
             #[cfg(feature = "cuda")]
-            MemoryDomain::Cuda => self.create_cuda_staging(bytes),
-            _ => self.create_system_staging(bytes),
+            MemoryDomain::Cuda => self.hand_to_cuda(&planes).map(|()| Upload::Cuda),
+            _ => {
+                let last = shapes.last().expect("every layout has a plane");
+                self.create_system_staging(last.offset + last.bytes())
+            }
         };
-        let staging = match staging {
-            Ok(staging) => staging,
+        let upload = match upload {
+            Ok(upload) => upload,
             Err(error) => {
                 planes
                     .into_iter()
@@ -1329,11 +1337,12 @@ impl Presenter {
         // Bindings 1 to 3, one per plane; a layout with fewer points the rest
         // at its first, which its shader never samples but which keeps every
         // binding valid.
+        let sampled = sampled_layout(&upload);
         let images: Vec<vk::DescriptorImageInfo> = (0..3)
             .map(|index| {
                 vk::DescriptorImageInfo::default()
                     .image_view(planes.get(index).unwrap_or(&planes[0]).view)
-                    .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                    .image_layout(sampled)
             })
             .collect();
         let sampler = [vk::DescriptorImageInfo::default().sampler(self.sampler)];
@@ -1363,39 +1372,66 @@ impl Presenter {
             layout,
             shapes,
             planes,
-            staging,
+            upload,
         });
         Ok(())
     }
 
+    /// Makes the image a plane is sampled from — for a CUDA frame, made
+    /// exportable and imported into CUDA, which writes it.
     fn create_plane(
         &self,
-        width: u32,
-        height: u32,
-        format: vk::Format,
+        shape: &PlaneShape,
+        domain: MemoryDomain,
     ) -> std::result::Result<Plane, VulkanWindowRendererError> {
-        let device = &self.gpu.device;
-        // SAFETY: a plain image with no references.
-        let image = unsafe {
-            device.create_image(
-                &vk::ImageCreateInfo::default()
-                    .image_type(vk::ImageType::TYPE_2D)
-                    .format(format)
-                    .extent(vk::Extent3D {
-                        width,
-                        height,
-                        depth: 1,
-                    })
-                    .mip_levels(1)
-                    .array_layers(1)
-                    .samples(vk::SampleCountFlags::TYPE_1)
-                    .tiling(vk::ImageTiling::OPTIMAL)
-                    .usage(vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED)
-                    .initial_layout(vk::ImageLayout::UNDEFINED),
-                None,
-            )
+        let (width, height, format) = (shape.width, shape.height, shape.format);
+        #[cfg(feature = "cuda")]
+        let interop = match domain {
+            MemoryDomain::Cuda => Some(
+                &self
+                    .gpu
+                    .cuda
+                    .as_ref()
+                    .ok_or(VulkanWindowRendererError::NotForCuda)?
+                    .interop,
+            ),
+            _ => None,
+        };
+        #[cfg(not(feature = "cuda"))]
+        let interop: Option<()> = {
+            let _ = domain;
+            None
+        };
+        let exported = interop.is_some();
+        // Written by CUDA, never by a Vulkan copy.
+        let usage = if exported {
+            vk::ImageUsageFlags::SAMPLED
+        } else {
+            vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED
+        };
+        let mut external = vk::ExternalMemoryImageCreateInfo::default()
+            .handle_types(vk::ExternalMemoryHandleTypeFlags::OPAQUE_FD);
+        let mut info = vk::ImageCreateInfo::default()
+            .image_type(vk::ImageType::TYPE_2D)
+            .format(format)
+            .extent(vk::Extent3D {
+                width,
+                height,
+                depth: 1,
+            })
+            .mip_levels(1)
+            .array_layers(1)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .tiling(vk::ImageTiling::OPTIMAL)
+            .usage(usage)
+            .initial_layout(vk::ImageLayout::UNDEFINED);
+        if exported {
+            info = info.push_next(&mut external);
         }
-        .map_err(call("vkCreateImage"))?;
+        let device = &self.gpu.device;
+        // SAFETY: an image with no references; `external`, where it is
+        // chained, outlives the call.
+        let image = unsafe { device.create_image(&info, None) }.map_err(call("vkCreateImage"))?;
         let destroy_image = |error| {
             // SAFETY: made just above, bound to nothing that outlives it.
             unsafe { device.destroy_image(image, None) };
@@ -1407,17 +1443,22 @@ impl Presenter {
             .memory_type(requirements, vk::MemoryPropertyFlags::DEVICE_LOCAL)
             .ok_or(VulkanWindowRendererError::NoMemoryType("device-local"))
             .map_err(destroy_image)?;
-        // SAFETY: the size and type come from the image's own requirements.
-        let memory = unsafe {
-            device.allocate_memory(
-                &vk::MemoryAllocateInfo::default()
-                    .allocation_size(requirements.size)
-                    .memory_type_index(index),
-                None,
-            )
+        let mut export = vk::ExportMemoryAllocateInfo::default()
+            .handle_types(vk::ExternalMemoryHandleTypeFlags::OPAQUE_FD);
+        // Dedicated: CUDA imports the whole allocation, so it backs this
+        // image and nothing else.
+        let mut dedicated = vk::MemoryDedicatedAllocateInfo::default().image(image);
+        let mut allocate = vk::MemoryAllocateInfo::default()
+            .allocation_size(requirements.size)
+            .memory_type_index(index);
+        if exported {
+            allocate = allocate.push_next(&mut export).push_next(&mut dedicated);
         }
-        .map_err(call("vkAllocateMemory"))
-        .map_err(destroy_image)?;
+        // SAFETY: the size and type come from the image's own requirements, and
+        // the chained structs, where they are chained, outlive the call.
+        let memory = unsafe { device.allocate_memory(&allocate, None) }
+            .map_err(call("vkAllocateMemory"))
+            .map_err(destroy_image)?;
         let free = |error| {
             // SAFETY: made just above; nothing uses either yet.
             unsafe {
@@ -1430,6 +1471,37 @@ impl Presenter {
         unsafe { device.bind_image_memory(image, memory, 0) }
             .map_err(call("vkBindImageMemory"))
             .map_err(free)?;
+        #[cfg(feature = "cuda")]
+        let array = match interop {
+            Some(interop) => {
+                let external_fn =
+                    ash::khr::external_memory_fd::Device::new(&self.gpu.instance, &self.gpu.device);
+                // SAFETY: the memory was allocated exportable as an opaque fd,
+                // which the device enabled `VK_KHR_external_memory_fd` for when
+                // it was made for CUDA.
+                let fd = unsafe {
+                    external_fn.get_memory_fd(
+                        &vk::MemoryGetFdInfoKHR::default()
+                            .memory(memory)
+                            .handle_type(vk::ExternalMemoryHandleTypeFlags::OPAQUE_FD),
+                    )
+                }
+                .map_err(call("vkGetMemoryFdKHR"))
+                .map_err(free)?;
+                // SAFETY: `vkGetMemoryFdKHR` hands out a new descriptor the
+                // caller owns.
+                let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+                // The whole allocation, not the image's own size: a dedicated
+                // allocation is imported as what it is. One element per
+                // texel, as many one-byte channels as the texel has bytes.
+                Some(
+                    interop
+                        .import_image(fd, requirements.size, width, height, shape.bytes_per_pixel)
+                        .map_err(|error| free(error.into()))?,
+                )
+            }
+            None => None,
+        };
         // SAFETY: the image is bound and the view describes its one level and
         // layer in its own format.
         let view = unsafe {
@@ -1446,14 +1518,82 @@ impl Presenter {
                     ),
                 None,
             )
-        }
-        .map_err(call("vkCreateImageView"))
-        .map_err(free)?;
+        };
+        let view = match view {
+            Ok(view) => view,
+            Err(error) => {
+                // CUDA's mapping first: it refers to the allocation.
+                #[cfg(feature = "cuda")]
+                drop(array);
+                return Err(free(call("vkCreateImageView")(error)));
+            }
+        };
         Ok(Plane {
             image,
             memory,
             view,
+            #[cfg(feature = "cuda")]
+            array,
         })
+    }
+
+    /// Puts freshly made plane images in the layout CUDA writes them in, and
+    /// hands them to it: after this, each frame's commands take them back to
+    /// sample and give them up again after.
+    ///
+    /// Done once, with a submission of its own, because it cannot wait for
+    /// the first frame: CUDA writes that frame before its commands run, and
+    /// a transition out of `UNDEFINED` then would discard it.
+    #[cfg(feature = "cuda")]
+    fn hand_to_cuda(&self, planes: &[Plane]) -> std::result::Result<(), VulkanWindowRendererError> {
+        let device = &self.gpu.device;
+        let cmd = self.command_buffer;
+        let barriers: Vec<vk::ImageMemoryBarrier> = planes
+            .iter()
+            .map(|plane| {
+                colour_barrier(plane.image)
+                    .old_layout(vk::ImageLayout::UNDEFINED)
+                    .new_layout(vk::ImageLayout::GENERAL)
+                    .src_queue_family_index(self.gpu.queue_family)
+                    .dst_queue_family_index(vk::QUEUE_FAMILY_EXTERNAL)
+            })
+            .collect();
+        let queue = self.gpu.queue();
+        // SAFETY: the command buffer is not in use — the caller waited for the
+        // queue, whose lock is held from here until this submission is done —
+        // and the images are live and read by nothing yet.
+        unsafe {
+            device
+                .reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty())
+                .map_err(call("vkResetCommandBuffer"))?;
+            device
+                .begin_command_buffer(
+                    cmd,
+                    &vk::CommandBufferBeginInfo::default()
+                        .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+                )
+                .map_err(call("vkBeginCommandBuffer"))?;
+            device.cmd_pipeline_barrier(
+                cmd,
+                vk::PipelineStageFlags::TOP_OF_PIPE,
+                vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &barriers,
+            );
+            device
+                .end_command_buffer(cmd)
+                .map_err(call("vkEndCommandBuffer"))?;
+            device
+                .queue_submit(
+                    *queue,
+                    &[vk::SubmitInfo::default().command_buffers(&[cmd])],
+                    vk::Fence::null(),
+                )
+                .map_err(call("vkQueueSubmit"))?;
+        }
+        wait_idle(&self.gpu, *queue)
     }
 
     fn destroy_plane(&self, plane: Plane) {
@@ -1463,14 +1603,18 @@ impl Presenter {
         unsafe {
             device.destroy_image_view(plane.view, None);
             device.destroy_image(plane.image, None);
-            device.free_memory(plane.memory, None);
         }
+        // CUDA's mapping before the memory it refers to.
+        #[cfg(feature = "cuda")]
+        drop(plane.array);
+        // SAFETY: as above; nothing maps the memory any more.
+        unsafe { device.free_memory(plane.memory, None) };
     }
 
     fn create_system_staging(
         &self,
         bytes: u64,
-    ) -> std::result::Result<Staging, VulkanWindowRendererError> {
+    ) -> std::result::Result<Upload, VulkanWindowRendererError> {
         let device = &self.gpu.device;
         // SAFETY: a plain buffer with no references.
         let buffer = unsafe {
@@ -1525,140 +1669,28 @@ impl Presenter {
         let mapped = unsafe { device.map_memory(memory, 0, bytes, vk::MemoryMapFlags::empty()) }
             .map_err(call("vkMapMemory"))
             .map_err(free)?;
-        Ok(Staging::System {
+        Ok(Upload::System {
             buffer,
             memory,
             mapped: mapped.cast(),
         })
     }
 
-    /// Allocates the staging buffer exportable, and imports it into CUDA —
-    /// the one direction the two will share memory in.
-    #[cfg(feature = "cuda")]
-    fn create_cuda_staging(
-        &self,
-        bytes: u64,
-    ) -> std::result::Result<Staging, VulkanWindowRendererError> {
-        let pairing = self
-            .gpu
-            .cuda
-            .as_ref()
-            .ok_or(VulkanWindowRendererError::NotForCuda)?;
-        let device = &self.gpu.device;
-        let mut external = vk::ExternalMemoryBufferCreateInfo::default()
-            .handle_types(vk::ExternalMemoryHandleTypeFlags::OPAQUE_FD);
-        // SAFETY: `external` outlives the call.
-        let buffer = unsafe {
-            device.create_buffer(
-                &vk::BufferCreateInfo::default()
-                    .size(bytes)
-                    .usage(vk::BufferUsageFlags::TRANSFER_SRC)
-                    .sharing_mode(vk::SharingMode::EXCLUSIVE)
-                    .push_next(&mut external),
-                None,
-            )
-        }
-        .map_err(call("vkCreateBuffer"))?;
-        let destroy_buffer = |error| {
-            // SAFETY: made just above, bound to nothing.
-            unsafe { device.destroy_buffer(buffer, None) };
-            error
-        };
-        // SAFETY: a plain query of the buffer just made.
-        let requirements = unsafe { device.get_buffer_memory_requirements(buffer) };
-        let index = self
-            .memory_type(requirements, vk::MemoryPropertyFlags::DEVICE_LOCAL)
-            .ok_or(VulkanWindowRendererError::NoMemoryType("device-local"))
-            .map_err(destroy_buffer)?;
-        let mut export = vk::ExportMemoryAllocateInfo::default()
-            .handle_types(vk::ExternalMemoryHandleTypeFlags::OPAQUE_FD);
-        // Dedicated: CUDA imports the whole allocation, so it backs this
-        // buffer and nothing else.
-        let mut dedicated = vk::MemoryDedicatedAllocateInfo::default().buffer(buffer);
-        // SAFETY: both chained structs outlive the call, and the size and type
-        // come from the buffer's own requirements.
-        let memory = unsafe {
-            device.allocate_memory(
-                &vk::MemoryAllocateInfo::default()
-                    .allocation_size(requirements.size)
-                    .memory_type_index(index)
-                    .push_next(&mut export)
-                    .push_next(&mut dedicated),
-                None,
-            )
-        }
-        .map_err(call("vkAllocateMemory"))
-        .map_err(destroy_buffer)?;
-        let free = |error| {
-            // SAFETY: made just above; nothing uses either yet.
-            unsafe {
-                device.destroy_buffer(buffer, None);
-                device.free_memory(memory, None);
-            }
-            error
-        };
-        // SAFETY: the memory was allocated for this buffer's requirements.
-        unsafe { device.bind_buffer_memory(buffer, memory, 0) }
-            .map_err(call("vkBindBufferMemory"))
-            .map_err(free)?;
-        let external_fn =
-            ash::khr::external_memory_fd::Device::new(&self.gpu.instance, &self.gpu.device);
-        // SAFETY: the memory was allocated exportable as an opaque fd, which the
-        // device enabled `VK_KHR_external_memory_fd` for when it was made for CUDA.
-        let fd = unsafe {
-            external_fn.get_memory_fd(
-                &vk::MemoryGetFdInfoKHR::default()
-                    .memory(memory)
-                    .handle_type(vk::ExternalMemoryHandleTypeFlags::OPAQUE_FD),
-            )
-        }
-        .map_err(call("vkGetMemoryFdKHR"))
-        .map_err(free)?;
-        // SAFETY: `vkGetMemoryFdKHR` hands out a new descriptor the caller owns.
-        let fd = unsafe { OwnedFd::from_raw_fd(fd) };
-        // The whole allocation, not the buffer's own size: a dedicated
-        // allocation is imported as what it is.
-        let imported = pairing
-            .interop
-            .import(fd, requirements.size)
-            .map_err(|error| free(error.into()))?;
-        Ok(Staging::Cuda {
-            buffer,
-            memory,
-            imported: Some(imported),
-        })
-    }
-
     fn destroy_video(&self, video: VideoResources) {
-        let VideoResources {
-            planes, staging, ..
-        } = video;
+        let VideoResources { planes, upload, .. } = video;
         planes
             .into_iter()
             .for_each(|plane| self.destroy_plane(plane));
-        let device = &self.gpu.device;
-        match staging {
-            Staging::System { buffer, memory, .. } => {
+        match upload {
+            Upload::System { buffer, memory, .. } => {
                 // SAFETY: the device is idle, and freeing the memory unmaps it.
                 unsafe {
-                    device.destroy_buffer(buffer, None);
-                    device.free_memory(memory, None);
+                    self.gpu.device.destroy_buffer(buffer, None);
+                    self.gpu.device.free_memory(memory, None);
                 }
             }
             #[cfg(feature = "cuda")]
-            Staging::Cuda {
-                buffer,
-                memory,
-                mut imported,
-            } => {
-                // CUDA's mapping first: it refers to the allocation below.
-                drop(imported.take());
-                // SAFETY: the device is idle and CUDA has let go of the memory.
-                unsafe {
-                    device.destroy_buffer(buffer, None);
-                    device.free_memory(memory, None);
-                }
-            }
+            Upload::Cuda => {}
         }
     }
 
@@ -1676,8 +1708,8 @@ impl Presenter {
         })
     }
 
-    /// Records one frame: the staging buffer into the plane images, then the
-    /// draw.
+    /// Records one frame: the staging buffer into the plane images, or the
+    /// images taken back from CUDA, then the draw.
     fn record(
         &self,
         image: usize,
@@ -1704,40 +1736,56 @@ impl Presenter {
                 )
                 .map_err(call("vkBeginCommandBuffer"))?;
 
-            for (plane, shape) in video.planes.iter().zip(&video.shapes) {
-                transition(
-                    device,
+            match &video.upload {
+                Upload::System { buffer, .. } => {
+                    for (plane, shape) in video.planes.iter().zip(&video.shapes) {
+                        transition(
+                            device,
+                            cmd,
+                            plane.image,
+                            vk::ImageLayout::UNDEFINED,
+                            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                        );
+                        let region = vk::BufferImageCopy::default()
+                            .buffer_offset(shape.offset)
+                            .image_subresource(
+                                vk::ImageSubresourceLayers::default()
+                                    .aspect_mask(vk::ImageAspectFlags::COLOR)
+                                    .layer_count(1),
+                            )
+                            .image_extent(vk::Extent3D {
+                                width: shape.width,
+                                height: shape.height,
+                                depth: 1,
+                            });
+                        device.cmd_copy_buffer_to_image(
+                            cmd,
+                            *buffer,
+                            plane.image,
+                            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                            &[region],
+                        );
+                        transition(
+                            device,
+                            cmd,
+                            plane.image,
+                            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                        );
+                    }
+                }
+                // CUDA wrote them, and finished — `stage` waited — before
+                // this is submitted; what is left is to take them back.
+                #[cfg(feature = "cuda")]
+                Upload::Cuda => device.cmd_pipeline_barrier(
                     cmd,
-                    plane.image,
-                    vk::ImageLayout::UNDEFINED,
-                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                );
-                let region = vk::BufferImageCopy::default()
-                    .buffer_offset(shape.offset)
-                    .image_subresource(
-                        vk::ImageSubresourceLayers::default()
-                            .aspect_mask(vk::ImageAspectFlags::COLOR)
-                            .layer_count(1),
-                    )
-                    .image_extent(vk::Extent3D {
-                        width: shape.width,
-                        height: shape.height,
-                        depth: 1,
-                    });
-                device.cmd_copy_buffer_to_image(
-                    cmd,
-                    video.staging.buffer(),
-                    plane.image,
-                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                    &[region],
-                );
-                transition(
-                    device,
-                    cmd,
-                    plane.image,
-                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                    vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-                );
+                    vk::PipelineStageFlags::TOP_OF_PIPE,
+                    vk::PipelineStageFlags::FRAGMENT_SHADER,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &cuda_handover(video, self.gpu.queue_family, true),
+                ),
             }
 
             // Black everywhere first, which is what the bars are.
@@ -1783,6 +1831,19 @@ impl Presenter {
             );
             device.cmd_draw(cmd, 3, 1, 0, 0);
             device.cmd_end_render_pass(cmd);
+            // And give them back once they have been read, for the next frame.
+            #[cfg(feature = "cuda")]
+            if let Upload::Cuda = video.upload {
+                device.cmd_pipeline_barrier(
+                    cmd,
+                    vk::PipelineStageFlags::FRAGMENT_SHADER,
+                    vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &cuda_handover(video, self.gpu.queue_family, false),
+                );
+            }
             device
                 .end_command_buffer(cmd)
                 .map_err(call("vkEndCommandBuffer"))?;
@@ -1864,6 +1925,64 @@ fn letterbox(frame: [u32; 2], window: vk::Extent2D) -> vk::Viewport {
     }
 }
 
+/// The layout the plane images are sampled in: `GENERAL` where CUDA writes
+/// them, since CUDA knows nothing of layouts and they are never transitioned
+/// again once handed to it.
+fn sampled_layout(upload: &Upload) -> vk::ImageLayout {
+    match upload {
+        Upload::System { .. } => vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+        #[cfg(feature = "cuda")]
+        Upload::Cuda => vk::ImageLayout::GENERAL,
+    }
+}
+
+/// A barrier on the one level and layer of a colour image, with nothing else
+/// set.
+fn colour_barrier(image: vk::Image) -> vk::ImageMemoryBarrier<'static> {
+    vk::ImageMemoryBarrier::default()
+        .image(image)
+        .subresource_range(
+            vk::ImageSubresourceRange::default()
+                .aspect_mask(vk::ImageAspectFlags::COLOR)
+                .level_count(1)
+                .layer_count(1),
+        )
+}
+
+/// Every plane image passing between CUDA and this queue family: taken from
+/// CUDA to be sampled where `acquire`, given back to it after otherwise.
+///
+/// Memory CUDA writes belongs to `VK_QUEUE_FAMILY_EXTERNAL` while it does,
+/// and what it wrote is only defined here once ownership has come back.
+#[cfg(feature = "cuda")]
+fn cuda_handover(
+    video: &VideoResources,
+    family: u32,
+    acquire: bool,
+) -> Vec<vk::ImageMemoryBarrier<'static>> {
+    let (from, to) = if acquire {
+        (vk::QUEUE_FAMILY_EXTERNAL, family)
+    } else {
+        (family, vk::QUEUE_FAMILY_EXTERNAL)
+    };
+    video
+        .planes
+        .iter()
+        .map(|plane| {
+            colour_barrier(plane.image)
+                .old_layout(vk::ImageLayout::GENERAL)
+                .new_layout(vk::ImageLayout::GENERAL)
+                .src_queue_family_index(from)
+                .dst_queue_family_index(to)
+                .dst_access_mask(if acquire {
+                    vk::AccessFlags::SHADER_READ
+                } else {
+                    vk::AccessFlags::empty()
+                })
+        })
+        .collect()
+}
+
 fn transition(
     device: &ash::Device,
     cmd: vk::CommandBuffer,
@@ -1885,20 +2004,13 @@ fn transition(
             vk::PipelineStageFlags::FRAGMENT_SHADER,
         ),
     };
-    let barrier = vk::ImageMemoryBarrier::default()
+    let barrier = colour_barrier(image)
         .old_layout(from)
         .new_layout(to)
         .src_access_mask(src_access)
         .dst_access_mask(dst_access)
         .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-        .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-        .image(image)
-        .subresource_range(
-            vk::ImageSubresourceRange::default()
-                .aspect_mask(vk::ImageAspectFlags::COLOR)
-                .level_count(1)
-                .layer_count(1),
-        );
+        .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED);
     // SAFETY: recorded into a command buffer in the recording state, for an
     // image of this device, as `record`'s own contract says.
     unsafe {

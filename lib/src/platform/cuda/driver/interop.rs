@@ -20,10 +20,19 @@ use std::{
 use super::{
     CU_MEMORYTYPE_DEVICE, CUcontext, CUdevice, CUdeviceptr, CUresult, CudaDriverError,
     CudaMemcpy2D, check, cuCtxPopCurrent_v2, cuCtxPushCurrent_v2, cuCtxSynchronize, cuDeviceGet,
-    cuDevicePrimaryCtxRelease_v2, cuDevicePrimaryCtxRetain, cuInit, cuMemFree_v2, cuMemcpy2D_v2,
+    cuDevicePrimaryCtxRelease_v2, cuDevicePrimaryCtxRetain, cuInit, cuMemcpy2D_v2,
 };
 
 type CUexternalMemory = *mut std::ffi::c_void;
+type CUmipmappedArray = *mut std::ffi::c_void;
+pub(crate) type CUarray = *mut std::ffi::c_void;
+
+/// `CU_MEMORYTYPE_ARRAY` — a copy's end is a CUDA array, laid out however
+/// the driver lays arrays out, rather than pitched rows.
+const CU_MEMORYTYPE_ARRAY: std::ffi::c_uint = 3;
+
+/// `CU_AD_FORMAT_UNSIGNED_INT8`: each channel of an array element one byte.
+const CU_AD_FORMAT_UNSIGNED_INT8: std::ffi::c_uint = 0x01;
 
 /// `CU_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD` — a POSIX file descriptor
 /// another API exported, which is what Vulkan's `VK_KHR_external_memory_fd`
@@ -56,13 +65,26 @@ union ExternalMemoryHandle {
     nv_sci_buf_object: *const std::ffi::c_void,
 }
 
-/// `CUDA_EXTERNAL_MEMORY_BUFFER_DESC`.
+/// `CUDA_ARRAY3D_DESCRIPTOR`, versioned by name (`_v2`) and unchanged since
+/// CUDA 3.2. A depth of zero is a 2D array.
 #[repr(C)]
-#[derive(Clone, Copy, Default)]
-struct ExternalMemoryBufferDesc {
-    offset: u64,
-    size: u64,
+#[derive(Clone, Copy)]
+struct Array3dDescriptor {
+    width: usize,
+    height: usize,
+    depth: usize,
+    format: std::ffi::c_uint,
+    num_channels: std::ffi::c_uint,
     flags: std::ffi::c_uint,
+}
+
+/// `CUDA_EXTERNAL_MEMORY_MIPMAPPED_ARRAY_DESC`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct ExternalMemoryMipmappedArrayDesc {
+    offset: u64,
+    array_desc: Array3dDescriptor,
+    num_levels: std::ffi::c_uint,
     reserved: [std::ffi::c_uint; 16],
 }
 
@@ -76,11 +98,17 @@ unsafe extern "C" {
         memory: *mut CUexternalMemory,
         desc: *const ExternalMemoryHandleDesc,
     ) -> CUresult;
-    fn cuExternalMemoryGetMappedBuffer(
-        pointer: *mut CUdeviceptr,
+    fn cuExternalMemoryGetMappedMipmappedArray(
+        array: *mut CUmipmappedArray,
         memory: CUexternalMemory,
-        desc: *const ExternalMemoryBufferDesc,
+        desc: *const ExternalMemoryMipmappedArrayDesc,
     ) -> CUresult;
+    fn cuMipmappedArrayGetLevel(
+        level_array: *mut CUarray,
+        array: CUmipmappedArray,
+        level: std::ffi::c_uint,
+    ) -> CUresult;
+    fn cuMipmappedArrayDestroy(array: CUmipmappedArray) -> CUresult;
     fn cuDestroyExternalMemory(memory: CUexternalMemory) -> CUresult;
 }
 
@@ -135,16 +163,24 @@ impl CudaInterop {
         Ok(uuid)
     }
 
-    /// Takes `fd` — memory another API allocated and exported, `size` bytes
-    /// of it — and maps it into this context as one buffer.
+    /// Takes `fd` — an image another API allocated and exported, `size`
+    /// bytes of memory dedicated to it — and maps it into this context as a
+    /// 2D array of `width` by `height` elements, each `channels` bytes.
+    ///
+    /// The shape must be the image's own: CUDA takes the layout of the
+    /// memory from it, and an image of another shape or element size is
+    /// read and written as garbage.
     ///
     /// The descriptor is CUDA's once this succeeds, and is closed with the
     /// import; on failure it is closed here.
-    pub(crate) fn import(
+    pub(crate) fn import_image(
         self: &Arc<Self>,
         fd: OwnedFd,
         size: u64,
-    ) -> Result<ImportedMemory, CudaDriverError> {
+        width: u32,
+        height: u32,
+        channels: u32,
+    ) -> Result<ImportedArray, CudaDriverError> {
         let raw = fd.into_raw_fd();
         let desc = ExternalMemoryHandleDesc {
             type_: CU_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD,
@@ -169,18 +205,26 @@ impl CudaInterop {
                 drop(unsafe { <OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(raw) });
                 return Err(error);
             }
-            let buffer = ExternalMemoryBufferDesc {
+            let desc = ExternalMemoryMipmappedArrayDesc {
                 offset: 0,
-                size,
-                ..Default::default()
+                array_desc: Array3dDescriptor {
+                    width: width as usize,
+                    height: height as usize,
+                    depth: 0,
+                    format: CU_AD_FORMAT_UNSIGNED_INT8,
+                    num_channels: channels,
+                    flags: 0,
+                },
+                num_levels: 1,
+                reserved: [0; 16],
             };
-            let mut ptr: CUdeviceptr = 0;
-            // SAFETY: `memory` was just imported and `buffer` asks for all of
-            // it; `ptr` is a live out-param.
+            let mut mipmapped: CUmipmappedArray = std::ptr::null_mut();
+            // SAFETY: `memory` was just imported and `desc` describes one level
+            // at its start; `mipmapped` is a live out-param.
             let mapped = unsafe {
                 check(
-                    "cuExternalMemoryGetMappedBuffer",
-                    cuExternalMemoryGetMappedBuffer(&mut ptr, memory, &buffer),
+                    "cuExternalMemoryGetMappedMipmappedArray",
+                    cuExternalMemoryGetMappedMipmappedArray(&mut mipmapped, memory, &desc),
                 )
             };
             if let Err(error) = mapped {
@@ -188,16 +232,35 @@ impl CudaInterop {
                 unsafe { cuDestroyExternalMemory(memory) };
                 return Err(error);
             }
-            Ok(ImportedMemory {
+            let mut array: CUarray = std::ptr::null_mut();
+            // SAFETY: level 0 of the array just mapped, which has one level;
+            // `array` is a live out-param.
+            let level = unsafe {
+                check(
+                    "cuMipmappedArrayGetLevel",
+                    cuMipmappedArrayGetLevel(&mut array, mipmapped, 0),
+                )
+            };
+            if let Err(error) = level {
+                // SAFETY: both were made above and nothing else refers to them;
+                // the array goes first, as the driver requires.
+                unsafe {
+                    cuMipmappedArrayDestroy(mipmapped);
+                    cuDestroyExternalMemory(memory);
+                }
+                return Err(error);
+            }
+            Ok(ImportedArray {
                 interop: Arc::clone(self),
                 memory,
-                ptr,
+                mipmapped,
+                array,
             })
         })
     }
 
-    /// Copies each of `rows` device to device, then waits for the copies to
-    /// finish.
+    /// Copies each of `planes` from device memory into an array, then waits
+    /// for the copies to finish.
     ///
     /// The wait is what makes the result safe to hand to another API: it
     /// cannot see CUDA's work, so a copy still in flight would be read half
@@ -207,22 +270,18 @@ impl CudaInterop {
     ///
     /// # Safety
     /// Each source must be a device pointer in this context, readable for
-    /// `rows` rows of `src_pitch` bytes, and `dst` must be a mapping from
-    /// [`Self::import`] large enough for every destination written.
-    pub(crate) unsafe fn copy_rows(
-        &self,
-        dst: CUdeviceptr,
-        planes: &[DeviceRows],
-    ) -> Result<(), CudaDriverError> {
+    /// `rows` rows of `src_pitch` bytes, and each destination an array from
+    /// [`Self::import_image`], still imported, at least `width_bytes` by
+    /// `rows`.
+    pub(crate) unsafe fn copy_into(&self, planes: &[ArrayRows]) -> Result<(), CudaDriverError> {
         self.with_context(|| {
             for plane in planes {
                 let copy = CudaMemcpy2D {
                     src_memory_type: CU_MEMORYTYPE_DEVICE,
                     src_device: plane.src,
                     src_pitch: plane.src_pitch,
-                    dst_memory_type: CU_MEMORYTYPE_DEVICE,
-                    dst_device: dst + plane.dst_offset,
-                    dst_pitch: plane.dst_pitch,
+                    dst_memory_type: CU_MEMORYTYPE_ARRAY,
+                    dst_array: plane.dst,
                     width_in_bytes: plane.width_bytes,
                     height: plane.rows,
                     ..Default::default()
@@ -258,8 +317,8 @@ impl Drop for CudaInterop {
     }
 }
 
-/// One plane's rows, as [`CudaInterop::copy_rows`] copies them.
-pub(crate) struct DeviceRows {
+/// One plane's rows, as [`CudaInterop::copy_into`] copies them.
+pub(crate) struct ArrayRows {
     /// Where the rows start, in the frame.
     pub(crate) src: CUdeviceptr,
     /// Bytes from one source row to the next.
@@ -268,42 +327,42 @@ pub(crate) struct DeviceRows {
     pub(crate) width_bytes: usize,
     /// How many rows.
     pub(crate) rows: usize,
-    /// Where they go, from the start of the destination.
-    pub(crate) dst_offset: u64,
-    /// Bytes from one destination row to the next.
-    pub(crate) dst_pitch: usize,
+    /// Where they go: [`ImportedArray::array`].
+    pub(crate) dst: CUarray,
 }
 
-/// Another API's memory, mapped into CUDA — freed from CUDA when dropped.
+/// Another API's image, mapped into CUDA as an array — let go of by CUDA
+/// when dropped.
 ///
 /// Must be dropped before the memory it maps is freed on the other side:
 /// the mapping refers to that allocation.
-pub(crate) struct ImportedMemory {
+pub(crate) struct ImportedArray {
     interop: Arc<CudaInterop>,
     memory: CUexternalMemory,
-    ptr: CUdeviceptr,
+    mipmapped: CUmipmappedArray,
+    array: CUarray,
 }
 
-// SAFETY: the handle and pointer are only used through `interop`, which
-// pushes its context around every call, on whichever thread drops this.
-unsafe impl Send for ImportedMemory {}
+// SAFETY: the handles are only used through `interop`, which pushes its
+// context around every call, on whichever thread drops this.
+unsafe impl Send for ImportedArray {}
 
-impl ImportedMemory {
-    /// The device pointer the whole buffer is mapped at.
-    pub(crate) fn ptr(&self) -> CUdeviceptr {
-        self.ptr
+impl ImportedArray {
+    /// The image's one level, which is what a copy writes.
+    pub(crate) fn array(&self) -> CUarray {
+        self.array
     }
 }
 
-impl Drop for ImportedMemory {
+impl Drop for ImportedArray {
     fn drop(&mut self) {
-        let (ptr, memory) = (self.ptr, self.memory);
+        let (mipmapped, memory) = (self.mipmapped, self.memory);
         let _ = self.interop.with_context(|| {
-            // SAFETY: `ptr` was mapped from `memory` by `import` and is freed
-            // once, before the import it belongs to is destroyed, as the
-            // driver requires.
+            // SAFETY: `mipmapped` was mapped from `memory` by `import_image`
+            // and is destroyed once, before the import it belongs to, as the
+            // driver requires; the level taken from it goes with it.
             unsafe {
-                cuMemFree_v2(ptr);
+                cuMipmappedArrayDestroy(mipmapped);
                 cuDestroyExternalMemory(memory);
             }
             Ok(())

@@ -1726,6 +1726,13 @@ compile error with no explanation.
   everything that one had taken out. An opaque input — every capture and
   decoder in this crate — keys exactly as before, byte for byte.
 
+- **`VulkanWindowRenderer` copies a CUDA frame once, not twice.** CUDA used
+  to copy each frame into a Vulkan buffer, and Vulkan then copied that into
+  the images it samples. The images are now imported into CUDA as arrays and
+  written directly, and the second copy is gone. A 4K60 NVDEC stream
+  measured 8% of an RTX 3050's SMs and memory bandwidth before, and 6%
+  after. What is drawn is the same byte for byte.
+
 ### Fixed
 
 - **`VideoDecodeBin` on a device that decodes no video decodes in
