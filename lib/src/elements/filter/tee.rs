@@ -40,7 +40,8 @@ pub struct Tee {
     id: ElementId,
     name: Arc<str>,
     shared: Arc<TeeShared>,
-    preroll: Option<Arc<crate::control::PrerollContext>>,
+    /// Which preroll, if any, is holding the branches that have their sample.
+    phase: crate::control::Phase,
     /// What arrived for a branch — by its root — while a preroll held it,
     /// in order, owed to it once playback goes on. See [`Tee::consume`].
     owed: Vec<(ElementId, VecDeque<MediaBuffer>)>,
@@ -174,7 +175,7 @@ impl Tee {
                 name: name.clone(),
                 pp_log: pp_log.clone(),
                 shared: shared.clone(),
-                preroll: None,
+                phase: crate::control::Phase::default(),
                 owed: Vec::new(),
             },
             TeeHandle {
@@ -634,14 +635,14 @@ impl Sink for Tee {
     fn ready_consume(&mut self) -> bool {
         let branches = lock_unpoisoned(&self.shared.branches).clone();
         let graph = self
-            .preroll
-            .as_ref()
+            .phase
+            .preroll()
             .map(|_| self.shared.context.graph.snapshot());
         branches.into_iter().all(|branch| {
             if !branch.active.load(Ordering::Acquire) {
                 return true;
             }
-            if let (Some(context), Some(graph)) = (&self.preroll, &graph) {
+            if let (Some(context), Some(graph)) = (self.phase.preroll(), &graph) {
                 let terminals = graph.terminal_ids_from(branch.root_id);
                 if context.are_ready(&terminals) {
                     return true;
@@ -660,8 +661,8 @@ impl Sink for Tee {
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         let branches = lock_unpoisoned(&self.shared.branches).clone();
         let graph = self
-            .preroll
-            .as_ref()
+            .phase
+            .preroll()
             .map(|_| self.shared.context.graph.snapshot());
         // One branch failing must not stop the buffer from reaching its
         // siblings — same "errors never kill anything, just get reported"
@@ -673,7 +674,7 @@ impl Sink for Tee {
             if !branch.active.load(Ordering::Acquire) {
                 continue;
             }
-            if let (Some(context), Some(graph)) = (&self.preroll, &graph) {
+            if let (Some(context), Some(graph)) = (self.phase.preroll(), &graph) {
                 let terminals = graph.terminal_ids_from(branch.root_id);
                 if context.are_ready(&terminals) {
                     // This branch has its sample and its siblings do not yet:
@@ -728,11 +729,7 @@ impl Sink for Tee {
                 self.report_branch_error(branch.root_id, peer, error);
             }
         }
-        match msg {
-            ControlMsg::Preroll(context) => self.preroll = Some(Arc::clone(context)),
-            ControlMsg::Pause | ControlMsg::Resume | ControlMsg::Stop => self.preroll = None,
-            ControlMsg::Flush | ControlMsg::CheckSeek(_) | ControlMsg::Seek(_) => {}
-        }
+        self.phase.observe(msg);
         match msg {
             // Playing again: every branch downstream has just been resumed,
             // so the `Eos` a preroll kept goes on behind it.

@@ -328,18 +328,13 @@ impl Sink for SwDecoder {
         // `Preroll` may carry a seek target, in which case the decoded samples
         // this decoder produces while catching up to it exist only to warm the
         // codec and must not be forwarded.
-        match msg {
-            ControlMsg::Flush => {
-                match &mut self.kind {
-                    Kind::Video(decoder) => decoder.flush(),
-                    Kind::Audio(decoder) => decoder.flush(),
-                }
-                self.preroll_gate.reset();
+        if *msg == ControlMsg::Flush {
+            match &mut self.kind {
+                Kind::Video(decoder) => decoder.flush(),
+                Kind::Audio(decoder) => decoder.flush(),
             }
-            ControlMsg::Preroll(context) => self.preroll_gate.begin(context),
-            ControlMsg::Pause | ControlMsg::Resume | ControlMsg::Stop => self.preroll_gate.clear(),
-            ControlMsg::CheckSeek(_) | ControlMsg::Seek(_) => {}
         }
+        self.preroll_gate.observe(msg);
         Ok(())
     }
 }

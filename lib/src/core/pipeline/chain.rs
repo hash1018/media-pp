@@ -6,7 +6,7 @@ use crate::{
     buffer::MediaBuffer,
     bus::{Bus, BusEvent},
     contract::{InputContract, OutputContract},
-    control::ControlMsg,
+    control::{ControlMsg, Phase},
     element::{Context, Element, ElementType, Filter, Sink, Source, element_pp_log},
     error::Result,
     graph::{
@@ -254,8 +254,9 @@ struct TerminalTracer {
     bus: Bus,
     id: ElementId,
     inner: Box<dyn Sink>,
-    paused: bool,
-    preroll: Option<Arc<crate::control::PrerollContext>>,
+    /// Whether this terminal takes anything, and which preroll it reports
+    /// its sample to.
+    phase: Phase,
     counters: Arc<ElementCounters>,
     /// Told when this terminal ends, and when a seek flushes it, so the
     /// pipeline can say when every terminal has — see
@@ -287,7 +288,7 @@ impl Element for TerminalTracer {
 
 impl Sink for TerminalTracer {
     fn ready_consume(&mut self) -> bool {
-        if self.paused {
+        if self.phase.holds() {
             return false;
         }
         // This terminal's own readiness, not the whole preroll's. Closing only
@@ -295,8 +296,8 @@ impl Sink for TerminalTracer {
         // first keep consuming for as long as the slowest one takes, leaving
         // the streams at different positions when preroll finally completes.
         if self
-            .preroll
-            .as_ref()
+            .phase
+            .preroll()
             .is_some_and(|context| context.is_ready(self.id))
         {
             return false;
@@ -320,7 +321,7 @@ impl Sink for TerminalTracer {
         // into that sink's output path. This is the preroll completion point;
         // deliberately do not claim physical presentation has completed.
         if result.is_ok()
-            && let Some(context) = &self.preroll
+            && let Some(context) = self.phase.preroll()
         {
             if is_eos {
                 context.mark_eos(self.id);
@@ -371,27 +372,13 @@ impl Sink for TerminalTracer {
             self.completion.terminal_flushed(self.id);
         }
         if result.is_ok() {
-            match msg {
-                ControlMsg::Pause => {
-                    self.paused = true;
-                    self.preroll = None;
-                }
-                ControlMsg::Resume => {
-                    self.paused = false;
-                    self.preroll = None;
-                }
-                ControlMsg::Preroll(context) => {
-                    self.paused = false;
-                    self.preroll = Some(Arc::clone(context));
-                }
-                ControlMsg::Stop => {
-                    if let Some(context) = self.preroll.take() {
-                        context.cancel();
-                    }
-                    self.paused = true;
-                }
-                ControlMsg::Flush | ControlMsg::CheckSeek(_) | ControlMsg::Seek(_) => {}
+            // A preroll a stop cuts short has nobody left to wait for.
+            if *msg == ControlMsg::Stop
+                && let Some(context) = self.phase.preroll()
+            {
+                context.cancel();
             }
+            self.phase.observe(msg);
         }
         match &result {
             Ok(()) => pp_trace!(
@@ -596,8 +583,7 @@ impl ChainBuilder {
             bus: self.context.bus.for_element(terminal_id),
             id: terminal_id,
             inner: terminal,
-            paused: false,
-            preroll: None,
+            phase: Phase::default(),
             counters: terminal_counters,
             completion: Arc::clone(&self.context.completion),
         });
@@ -849,8 +835,7 @@ mod tests {
                 count,
                 pp_log: element_pp_log(ElementType::Other, "terminal", None),
             }),
-            paused: false,
-            preroll: None,
+            phase: Phase::default(),
             counters: ElementCounters::new(),
             completion: crate::pipeline::completion::Completion::new(
                 crate::graph::PipelineGraph::new(),

@@ -7,7 +7,7 @@ use thiserror::Error as ThisError;
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, OutputContract, PortContract},
-    control::ControlMsg,
+    control::{ControlMsg, Phase},
     element::{Element, ElementType, Sink, Source, element_pp_log},
     pad::SrcPad,
     playback_clock::{PlaybackClock, PlaybackMaster},
@@ -77,8 +77,9 @@ pub struct VideoSynchronizer {
     /// why this is not something the caller supplies.
     playback_clock: Option<Arc<PlaybackClock>>,
     interrupt_epoch: u64,
-    /// Preroll forwards frames without waiting on the paused playback clock.
-    prerolling: bool,
+    /// A preroll forwards frames without waiting on the paused playback
+    /// clock.
+    phase: Phase,
     /// The last frame's presentation time, in nanoseconds — kept in one
     /// unit rather than the frame's own, so a stream whose unit changes
     /// still measures its frame spacing correctly.
@@ -101,7 +102,7 @@ impl VideoSynchronizer {
             pp_log,
             playback_clock: None,
             interrupt_epoch: 0,
-            prerolling: false,
+            phase: Phase::default(),
             last_ns: None,
             frame_duration: FALLBACK_FRAME_DURATION,
             pending: VecDeque::new(),
@@ -137,7 +138,7 @@ impl VideoSynchronizer {
     }
 
     fn wait_for(&mut self, frame_ns: i64) -> WaitOutcome {
-        if self.prerolling {
+        if self.phase.preroll().is_some() {
             return WaitOutcome::Render;
         }
         self.observe_frame_duration(frame_ns);
@@ -275,19 +276,11 @@ impl Sink for VideoSynchronizer {
         if let Some(playback_clock) = &self.playback_clock {
             self.interrupt_epoch = playback_clock.interrupt_epoch();
         }
-        match msg {
-            ControlMsg::Flush | ControlMsg::Stop => {
-                self.pending.clear();
-                self.last_ns = None;
-                self.frame_duration = FALLBACK_FRAME_DURATION;
-            }
-            ControlMsg::Preroll(_) => {
-                self.prerolling = true;
-            }
-            ControlMsg::Pause | ControlMsg::Resume => {
-                self.prerolling = false;
-            }
-            ControlMsg::Seek(_) | ControlMsg::CheckSeek(_) => {}
+        self.phase.observe(msg);
+        if matches!(msg, ControlMsg::Flush | ControlMsg::Stop) {
+            self.pending.clear();
+            self.last_ns = None;
+            self.frame_duration = FALLBACK_FRAME_DURATION;
         }
         Ok(())
     }

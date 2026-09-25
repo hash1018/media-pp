@@ -34,7 +34,7 @@ use crate::{
     bus::{Bus, BusEvent},
     clock::Clock,
     contract::InputContract,
-    control::{self, ControlMsg, ControlReceiver, ControlSender, RequestKind},
+    control::{self, ControlMsg, ControlReceiver, ControlSender, Phase, RequestKind},
     element::{Context, Element, ElementType, Sink, element_pp_log},
     error::{Result, ThreadSpawnError},
     stats::ElementCounters,
@@ -1049,7 +1049,8 @@ fn apply_control(
         if is_stop {
             return true;
         }
-        if matches!(msg, ControlMsg::Resume | ControlMsg::Preroll(_)) {
+        if !Phase::Paused.after(&msg).holds() {
+            // Data flows again — a `Resume`, a `Preroll`: see `Phase`.
             return false;
         }
         // Another Pause while already paused: already forwarded above, keep waiting.

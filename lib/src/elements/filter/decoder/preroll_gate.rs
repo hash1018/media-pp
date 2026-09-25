@@ -1,7 +1,9 @@
 use ffmpeg_next::{self as ffmpeg, Rescale};
 
+use std::sync::Arc;
+
 use crate::buffer::MediaBuffer;
-use crate::control::PrerollContext;
+use crate::control::{ControlMsg, Phase, PrerollContext};
 
 const NANOS: ffmpeg::Rational = ffmpeg::Rational(1, 1_000_000_000);
 #[cfg(any(test, feature = "cuda", all(target_os = "windows", feature = "d3d11")))]
@@ -67,9 +69,29 @@ pub(super) struct PrerollGate {
     /// instant, and EOF uses the same candidate as its last-presentable
     /// fallback.
     candidate: Option<MediaBuffer>,
+    /// Which preroll, if any, the decoder is in — what arms and opens this.
+    phase: Phase,
 }
 
 impl PrerollGate {
+    /// Follows `msg`: a `Flush` forgets what the stream taught the gate,
+    /// a preroll starting arms it, and a preroll ending — whatever ends
+    /// it — opens it again. What a decoder's `control` hands every message
+    /// to.
+    pub(super) fn observe(&mut self, msg: &ControlMsg) {
+        if *msg == ControlMsg::Flush {
+            self.reset();
+        }
+        let before = self.phase.preroll().map(Arc::as_ptr);
+        self.phase.observe(msg);
+        match self.phase.preroll().cloned() {
+            Some(context) if before != Some(Arc::as_ptr(&context)) => self.begin(&context),
+            Some(_) => {}
+            None if before.is_some() => self.clear(),
+            None => {}
+        }
+    }
+
     /// Arms the gate for `context`. A targetless keyframe preroll forwards its
     /// first sample, while accurate seek first suppresses samples before its
     /// target; both then stay closed until the preroll ends.

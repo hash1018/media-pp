@@ -7,7 +7,7 @@ use thiserror::Error as ThisError;
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, OutputContract},
-    control::ControlMsg,
+    control::{ControlMsg, Phase},
     element::{Element, ElementType, Sink, Source, element_pp_log},
     pad::SrcPad,
     playback_clock::PlaybackClock,
@@ -121,8 +121,9 @@ pub struct Pacer {
     /// timeline that cannot restart — see
     /// [`Pacer::with_discontinuity_limit`].
     discontinuity_limit: Option<Duration>,
-    /// Preroll advances data without consulting the paused pipeline clock.
-    prerolling: bool,
+    /// A preroll advances data without consulting the paused pipeline
+    /// clock.
+    phase: Phase,
     /// Buffers whose paced wait was interrupted before the owning worker
     /// could process pause/seek/stop. Pause retains them for resume; seek
     /// and stop discard them in `control()`.
@@ -151,7 +152,7 @@ impl Pacer {
             playback_clock: None,
             discontinuity_limit: None,
             interrupt_epoch: 0,
-            prerolling: false,
+            phase: Phase::default(),
             pending: VecDeque::new(),
             pad,
         }
@@ -204,7 +205,7 @@ impl Pacer {
         if playback.interrupted_since(self.interrupt_epoch) {
             return Ok(false);
         }
-        if self.prerolling {
+        if self.phase.preroll().is_some() {
             return Ok(true);
         }
         let (pts, time_base) = match timing {
@@ -345,8 +346,9 @@ impl Sink for Pacer {
         if let Some(playback) = &self.playback_clock {
             self.interrupt_epoch = playback.interrupt_epoch();
         }
+        self.phase.observe(msg);
         match msg {
-            ControlMsg::Flush => self.pending.clear(),
+            ControlMsg::Flush | ControlMsg::Stop => self.pending.clear(),
             ControlMsg::Seek(_) => {
                 // The wall clock is left alone, which it could not be while
                 // the origin was paired with `Clock::start()`: post-seek
@@ -360,14 +362,10 @@ impl Sink for Pacer {
                     playback.reset_for_seek();
                 }
             }
-            ControlMsg::Stop => self.pending.clear(),
-            ControlMsg::Preroll(_) => {
-                self.prerolling = true;
-            }
-            ControlMsg::Pause | ControlMsg::Resume => {
-                self.prerolling = false;
-            }
-            ControlMsg::CheckSeek(_) => {}
+            ControlMsg::Pause
+            | ControlMsg::Resume
+            | ControlMsg::Preroll(_)
+            | ControlMsg::CheckSeek(_) => {}
         }
         Ok(())
     }

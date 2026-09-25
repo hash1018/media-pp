@@ -167,6 +167,11 @@ final source of truth when documentation and implementation differ.
   thread, `Tee` to its branches, a bin to the line inside it — sends it on
   from its hook. A Queue control failure is reported without leaving the
   control cascade permanently blocked.
+- An element that behaves differently while paused or while a preroll runs
+  keeps a `control::Phase`, feeds it every message, and reads it; it does
+  not match `Pause`, `Resume`, `Preroll` and `Stop` itself. Messages become
+  a phase in that one place, so a new way of letting data through a paused
+  graph is taught there once.
 - Dropping a running `Pipeline`, driver, Queue, or owned helper process must stop
   and join/collect the worker it owns. Retained handles must not accidentally
   keep an unrelated pipeline bus, graph, sink, or worker alive.

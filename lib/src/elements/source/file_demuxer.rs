@@ -261,7 +261,7 @@ pub struct FileDemuxer {
     /// Whether a preroll is running. Any blocked pad is parked for then;
     /// outside one, only while another branch is waiting on the read cursor
     /// — see [`FileDemuxer::may_park`].
-    prerolling: bool,
+    phase: crate::control::Phase,
     /// Whether a `Seek` has repositioned it since [`Self::linger`] began
     /// waiting at the end of the file.
     sought: bool,
@@ -371,7 +371,7 @@ impl FileDemuxer {
                 parked_per_pad: vec![0; pads.len()],
                 parked_since_ns: vec![None; pads.len()],
                 read_ns: None,
-                prerolling: false,
+                phase: crate::control::Phase::default(),
                 sought: false,
                 pads,
                 pending: VecDeque::new(),
@@ -564,7 +564,7 @@ impl FileDemuxer {
     /// run away from playback and buffer the file here — 67 MB within 1.5 s
     /// of paced playback, when parking was not yet scoped at all.
     fn may_park(&mut self, index: usize) -> bool {
-        if self.prerolling {
+        if self.phase.preroll().is_some() {
             return true;
         }
         let another_waiting = self
@@ -701,7 +701,7 @@ impl FileDemuxer {
         }
         // Outside a preroll, a pad held back past the interleave bound is
         // waited on: reading on would only park more for it.
-        if !self.prerolling && self.interleave_exceeded() {
+        if self.phase.preroll().is_none() && self.interleave_exceeded() {
             return true;
         }
         const MAX_PENDING_PACKETS: usize = 4_096;
@@ -842,6 +842,9 @@ impl SourceElement for FileDemuxer {
 
     fn on_control(&mut self, msg: &crate::control::ControlMsg) {
         use crate::control::ControlMsg;
+        // Holding a blocked pad's packets is only correct while a preroll is
+        // running; see `deliver_or_park`.
+        self.phase.observe(msg);
         match msg {
             // Those packets were read from the timeline being left behind,
             // and this source is the only place they exist — every downstream
@@ -855,12 +858,12 @@ impl SourceElement for FileDemuxer {
                 self.parked_since_ns.fill(None);
                 self.read_ns = None;
             }
-            // Holding a blocked pad's packets is only correct while a preroll
-            // is running; see `deliver_or_park`.
-            ControlMsg::Preroll(_) => self.prerolling = true,
-            ControlMsg::Pause | ControlMsg::Resume | ControlMsg::Stop => self.prerolling = false,
             ControlMsg::Seek(_) => self.sought = true,
-            ControlMsg::CheckSeek(_) => {}
+            ControlMsg::Pause
+            | ControlMsg::Resume
+            | ControlMsg::Preroll(_)
+            | ControlMsg::Stop
+            | ControlMsg::CheckSeek(_) => {}
         }
     }
 

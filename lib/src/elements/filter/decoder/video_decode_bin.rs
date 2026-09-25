@@ -37,7 +37,7 @@ use crate::{
         InputContract, MediaKind, MemoryDomain, OutputContract, PixelLayout, PixelLayoutSet,
         PortContract,
     },
-    control::ControlMsg,
+    control::{ControlMsg, Phase},
     element::{Context, Element, ElementType, Filter, Sink, Source, element_pp_log},
     elements::{DecodeThreading, SwDecoder, filter::line::Line},
     error::{Error, Result},
@@ -301,9 +301,9 @@ struct Fallback {
     size: Option<(u32, u32)>,
     /// Every packet from the last keyframe on, the one that failed included.
     since_keyframe: Vec<MediaBuffer>,
-    /// A preroll the line is in the middle of, which a new line has to be
-    /// armed with before it decodes anything — see `PrerollGate`.
-    preroll: Option<ControlMsg>,
+    /// Whether the line is in the middle of a preroll, which a new line has
+    /// to be armed with before it decodes anything — see `PrerollGate`.
+    phase: Phase,
 }
 
 /// Reads which way a [`VideoDecodeBin`] is decoding, from anywhere.
@@ -373,7 +373,7 @@ impl VideoDecodeBin {
                     params,
                     size: stream.size,
                     since_keyframe: Vec::new(),
-                    preroll: None,
+                    phase: Phase::default(),
                 };
                 (elements, Some(output), Some(fallback))
             }
@@ -543,8 +543,9 @@ impl VideoDecodeBin {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) =
             DecodePath::Software(SoftwareReason::HardwareRefused);
 
-        if let Some(preroll) = fallback.preroll {
-            self.line.control(&preroll)?;
+        if let Some(context) = fallback.phase.preroll() {
+            self.line
+                .control(&ControlMsg::Preroll(Arc::clone(context)))?;
         }
         // One packet that fails does not keep the rest from being decoded,
         // as it would not have in the line being replaced either; the first
@@ -631,18 +632,12 @@ impl Sink for VideoDecodeBin {
     fn control(&mut self, msg: &ControlMsg) -> Result<()> {
         self.install();
         // Mirrors what the decoder inside does with each, so a replacement
-        // can be put in the same state: a preroll is armed until Pause,
-        // Resume or Stop ends it, and a Flush or Stop drops the packets a
-        // decoder has been told to forget.
+        // can be put in the same state: armed for the preroll it is in, and
+        // without the packets a Flush or Stop told the decoder to forget.
         if let Some(fallback) = &mut self.fallback {
-            match msg {
-                ControlMsg::Preroll(_) => fallback.preroll = Some(msg.clone()),
-                ControlMsg::Pause | ControlMsg::Resume => fallback.preroll = None,
-                ControlMsg::Flush | ControlMsg::Stop => {
-                    fallback.since_keyframe.clear();
-                    fallback.preroll = None;
-                }
-                ControlMsg::CheckSeek(_) | ControlMsg::Seek(_) => {}
+            fallback.phase.observe(msg);
+            if matches!(msg, ControlMsg::Flush | ControlMsg::Stop) {
+                fallback.since_keyframe.clear();
             }
         }
         // Both, whatever the first answers — as a filter's pads all get a

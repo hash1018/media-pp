@@ -314,15 +314,10 @@ impl Sink for CudaDecoder {
         //
         // `Preroll` may carry a seek target; the samples decoded while
         // catching up to it exist only to warm the codec.
-        match msg {
-            ControlMsg::Flush => {
-                self.decoder.flush();
-                self.preroll_gate.reset();
-            }
-            ControlMsg::Preroll(context) => self.preroll_gate.begin(context),
-            ControlMsg::Pause | ControlMsg::Resume | ControlMsg::Stop => self.preroll_gate.clear(),
-            ControlMsg::CheckSeek(_) | ControlMsg::Seek(_) => {}
+        if *msg == ControlMsg::Flush {
+            self.decoder.flush();
         }
+        self.preroll_gate.observe(msg);
         Ok(())
     }
 }

@@ -88,6 +88,67 @@ impl PartialEq for ControlMsg {
 
 impl Eq for ControlMsg {}
 
+/// Where playback stands, as the control messages one element has been
+/// handed say — for an element that behaves differently while a preroll
+/// runs, or while paused.
+///
+/// Kept by each such element and fed every message it is handed, rather
+/// than read from the pipeline: a message reaches an element in order with
+/// the data around it, so the phase says what is true of the buffer that
+/// element is holding, where a flag the pipeline shared would already say
+/// what is true of the next seek's. And messages become a phase in this
+/// one place, so a new way of letting data through a paused graph — a
+/// frame step — is taught here once, not to every element that waits,
+/// holds or gates.
+#[derive(Debug, Clone, Default)]
+pub(crate) enum Phase {
+    /// Data flows at the clock's pace. Where a graph starts.
+    #[default]
+    Playing,
+    /// Nothing flows until a `Resume` or a `Preroll`.
+    Paused,
+    /// Paused, but data flows, unpaced, until each terminal has its sample
+    /// — see [`PrerollContext`].
+    Prerolling(Arc<PrerollContext>),
+    /// Abandoned: nothing flows again.
+    Stopped,
+}
+
+impl Phase {
+    /// Moves on as `msg` says. A `Flush`, `CheckSeek` or `Seek` leaves the
+    /// phase as it was: a seek is a pause, a flush, a reposition and a
+    /// preroll, and only the pause and the preroll change what flows.
+    pub(crate) fn observe(&mut self, msg: &ControlMsg) {
+        *self = match msg {
+            ControlMsg::Pause => Self::Paused,
+            ControlMsg::Resume => Self::Playing,
+            ControlMsg::Preroll(context) => Self::Prerolling(Arc::clone(context)),
+            ControlMsg::Stop => Self::Stopped,
+            ControlMsg::Flush | ControlMsg::CheckSeek(_) | ControlMsg::Seek(_) => return,
+        };
+    }
+
+    /// The phase `msg` would move this one to.
+    pub(crate) fn after(&self, msg: &ControlMsg) -> Self {
+        let mut next = self.clone();
+        next.observe(msg);
+        next
+    }
+
+    /// The preroll under way, if one is.
+    pub(crate) fn preroll(&self) -> Option<&Arc<PrerollContext>> {
+        match self {
+            Self::Prerolling(context) => Some(context),
+            Self::Playing | Self::Paused | Self::Stopped => None,
+        }
+    }
+
+    /// Whether nothing is to flow: paused with no preroll, or stopped.
+    pub(crate) fn holds(&self) -> bool {
+        matches!(self, Self::Paused | Self::Stopped)
+    }
+}
+
 /// Why one element refused a pipeline-wide seek check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SeekRejectReason {
@@ -701,7 +762,8 @@ pub(crate) fn wait_out_pause<S: SourceElement>(
             apply_finish(source, bus, &ack);
             return Ok(true);
         };
-        if matches!(msg, ControlMsg::Resume | ControlMsg::Preroll(_)) {
+        if !Phase::Paused.after(&msg).holds() {
+            // Data flows again — a `Resume`, a `Preroll`: see `Phase`.
             // Downstream goes on first, then the source itself, and only
             // then is the request done — see `SourceElement::resuming`.
             apply_one_unacked(source, bus, &msg)?;
@@ -1339,6 +1401,47 @@ mod tests {
     /// An element failing to react to a message does not keep it from the
     /// elements after it: a `Pause` one element refuses still pauses the
     /// rest of the graph, and the caller still hears of the failure.
+    /// A phase moves only on what changes what flows, and a preroll is
+    /// what a pause is released into as much as a resume is.
+    #[test]
+    fn a_phase_follows_what_changes_what_flows() {
+        let context = Arc::new(PrerollContext::new([]));
+        let mut phase = Phase::default();
+        assert!(!phase.holds(), "a graph starts playing");
+
+        phase.observe(&ControlMsg::Pause);
+        assert!(phase.holds());
+        for unmoved in [
+            ControlMsg::Flush,
+            ControlMsg::Seek(Duration::from_secs(1)),
+            ControlMsg::CheckSeek(Arc::new(SeekCheckContext::new())),
+        ] {
+            phase.observe(&unmoved);
+            assert!(phase.holds(), "{unmoved:?} leaves it paused");
+        }
+
+        phase.observe(&ControlMsg::Preroll(Arc::clone(&context)));
+        assert!(!phase.holds(), "a preroll lets data through");
+        assert!(
+            phase
+                .preroll()
+                .is_some_and(|running| Arc::ptr_eq(running, &context))
+        );
+        assert!(
+            Phase::Paused
+                .after(&ControlMsg::Preroll(context))
+                .preroll()
+                .is_some()
+        );
+
+        phase.observe(&ControlMsg::Pause);
+        assert!(phase.preroll().is_none(), "a pause ends the preroll");
+        phase.observe(&ControlMsg::Resume);
+        assert!(!phase.holds());
+        phase.observe(&ControlMsg::Stop);
+        assert!(phase.holds(), "a stop holds for good");
+    }
+
     #[test]
     fn a_filter_that_fails_to_react_still_passes_the_message_on() {
         let mut filter = Refusing {
