@@ -1622,6 +1622,18 @@ compile error with no explanation.
 
 ### Fixed
 
+- **A file whose picture is muxed ahead of its sound no longer freezes when
+  both branches are full at once.** `FileDemuxer` held a full picture
+  branch's packets back only while the sound's branch had room at that
+  moment; a packet read while both were full was pushed into the picture's
+  queue and waited on there. Once the sound drained, the demuxer was still
+  waiting on a picture that waited on sound nobody was reading, and
+  playback stopped for good a few seconds in — found with `Player` on a
+  recording muxed a second ahead, whatever keys were being pressed. A full
+  branch's packets are now held back whenever the read cursor is within
+  `MAX_INTERLEAVE` of what is owed, and reading waits while no branch can
+  take anything, as before.
+
 - **The full stop and the comma step a `Player`'s picture from the
   keyboard.** `respond_to` steps on `Key::Char('.')` and `Key::Char(',')`,
   and no window renderer produced them: Windows' virtual-key codes and X11's
