@@ -144,6 +144,12 @@ impl Line {
         Ok(std::mem::take(&mut *made))
     }
 
+    /// Whether the line's first element can take a buffer now — which, for
+    /// a decoder in it, may be no, and the owner has to say so for it.
+    pub(crate) fn ready_consume(&mut self) -> bool {
+        self.head.as_mut().is_none_or(|head| head.ready_consume())
+    }
+
     /// Sends `msg` down the line, which stops at its end — what is past the
     /// owner is the owner's own pad to tell.
     pub(crate) fn control(&mut self, msg: ControlMsg) -> Result<()> {

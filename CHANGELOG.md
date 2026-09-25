@@ -1533,6 +1533,26 @@ compile error with no explanation.
 
 ### Fixed
 
+- **A seek no longer loses the stream that prerolls first.** After handing
+  its branch the seek's one sample, a decoder suppressed what it decoded
+  until the preroll ended — and went on taking packets meanwhile, since
+  nothing said it was full. With a picture slow to preroll, the sound's
+  decoder was fed the whole rest of the file in that time and threw it
+  away: a player resumed after a seek with no sound at all. A decoder now
+  says it is not ready while its preroll has its sample and runs on, so
+  the queue in front of it holds the packets and the demuxer keeps them.
+  `VideoDecodeBin` passes the answer on from the decoder inside it.
+
+- **Every control request lets go of a thread blocked handing data on.**
+  Only pause, stop, finish and a seek's opening check used to raise the
+  interrupt that makes a `Queue` take such a buffer as held over and a
+  `Pacer` let go of its wait; the rest were sent on the assumption that
+  the graph was already paused and nothing could be blocked. A source that
+  was not — as `FileDemuxer` at the end of its file was until 208af56 —
+  then left a seek waiting on it for good. Every request raises one now,
+  and a paced wait wakes the moment it is raised rather than at the end of
+  a polling slice.
+
 - **A `Tee` no longer drops the end of the stream during a seek.** While a
   seek's preroll runs, a `Tee` stops feeding a branch that has taken its
   picture, and it stopped the `Eos` along with the pictures — dropped, not

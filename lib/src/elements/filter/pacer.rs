@@ -1,4 +1,4 @@
-use std::{collections::VecDeque, sync::Arc, thread, time::Duration};
+use std::{collections::VecDeque, sync::Arc, time::Duration};
 
 use crate::pp_log::{PpLog, pp_info, pp_warn};
 use ffmpeg_next as ffmpeg;
@@ -248,7 +248,7 @@ impl Pacer {
                 playback.re_anchor(pts_ns);
                 return Ok(true);
             }
-            thread::sleep(remaining.min(INTERRUPT_POLL_INTERVAL));
+            playback.sleep_unless_interrupted(remaining.min(INTERRUPT_POLL_INTERVAL));
         }
     }
 }
@@ -378,6 +378,7 @@ mod tests {
     use super::*;
     use crate::clock::Clock;
     use crate::control::PrerollContext;
+    use std::thread;
     use std::{
         sync::mpsc,
         time::{Duration, Instant},

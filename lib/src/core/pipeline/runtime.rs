@@ -543,15 +543,25 @@ impl Pipeline {
     /// still-interrupted pacer, and reached the end of its file in
     /// milliseconds. Waiting for them together also keeps one slow cascade
     /// from holding up the rest.
+    ///
+    /// Every request interrupts, whatever it is. Only some used to — pause,
+    /// stop, finish, and the question that opens a seek — on the reasoning
+    /// that the rest are sent while everything is already paused, so nothing
+    /// can be waiting on the clock or blocked handing data on. That held
+    /// until a source was not paused when it should have been (208af56):
+    /// then a `Preroll` found it blocked handing a full, paused queue a
+    /// packet, nothing let it go, and the seek waited on it for good. An
+    /// interrupt is what lets such a thread go — a `Queue` takes the packet
+    /// as held over, a `Pacer` lets go of its wait — so every request raises
+    /// one, and none depends on the graph already being in the state the
+    /// request assumes. It costs a request sent while all is paused nothing:
+    /// there is nothing waiting for it to wake.
     fn broadcast(
         &self,
-        wake: Wake,
         enqueue: impl Fn(&ControlSender) -> Option<crossbeam_channel::Receiver<()>>,
     ) {
         let acks: Vec<_> = self.control_txs.iter().filter_map(enqueue).collect();
-        if wake == Wake::Interrupt {
-            self.clock.interrupt();
-        }
+        self.clock.interrupt();
         for ack in acks {
             let _ = ack.recv();
         }
@@ -568,9 +578,7 @@ impl Pipeline {
             "event=control control={msg:?} phase=requested"
         );
         self.clock.pause();
-        self.broadcast(Wake::Interrupt, |control_tx| {
-            control_tx.enqueue(msg.clone())
-        });
+        self.broadcast(|control_tx| control_tx.enqueue(msg.clone()));
         pp_trace!(
             pp_log: &self.pp_log,
             "event=control control={msg:?} phase=completed outcome=ok"
@@ -603,7 +611,7 @@ impl Pipeline {
             "event=control control={msg:?} phase=requested"
         );
         self.clock.resume();
-        self.broadcast(Wake::Leave, |control_tx| control_tx.enqueue(msg.clone()));
+        self.broadcast(|control_tx| control_tx.enqueue(msg.clone()));
         pp_trace!(
             pp_log: &self.pp_log,
             "event=control control={msg:?} phase=completed outcome=ok"
@@ -736,9 +744,7 @@ impl Pipeline {
             pp_log: &self.pp_log,
             "event=control control={msg:?} phase=requested"
         );
-        self.broadcast(Wake::Interrupt, |control_tx| {
-            control_tx.enqueue(msg.clone())
-        });
+        self.broadcast(|control_tx| control_tx.enqueue(msg.clone()));
         pp_trace!(
             pp_log: &self.pp_log,
             "event=control control={msg:?} phase=completed outcome=ok"
@@ -777,7 +783,7 @@ impl Pipeline {
             self.paused.store(false, Ordering::Release);
             self.resume_runtime();
         }
-        self.broadcast(Wake::Interrupt, ControlSender::enqueue_finish);
+        self.broadcast(ControlSender::enqueue_finish);
         self.join_workers();
         pp_trace!(
             pp_log: &self.pp_log,
@@ -845,9 +851,7 @@ impl Pipeline {
         // source that is about to stop and wait for this very question to
         // be answered, so without the interrupt neither ever moves.
         let check = Arc::new(SeekCheckContext::new());
-        self.broadcast(Wake::Interrupt, |control_tx| {
-            control_tx.enqueue(ControlMsg::CheckSeek(Arc::clone(&check)))
-        });
+        self.broadcast(|control_tx| control_tx.enqueue(ControlMsg::CheckSeek(Arc::clone(&check))));
         check.result()?;
         let restore_paused = self.paused.load(Ordering::Acquire);
         if !restore_paused {
@@ -860,10 +864,8 @@ impl Pipeline {
         );
         self.clock.interrupt();
         self.playback_clock.reset_for_seek();
-        self.broadcast(Wake::Leave, |control_tx| {
-            control_tx.enqueue(ControlMsg::Flush)
-        });
-        self.broadcast(Wake::Leave, |control_tx| control_tx.enqueue(msg.clone()));
+        self.broadcast(|control_tx| control_tx.enqueue(ControlMsg::Flush));
+        self.broadcast(|control_tx| control_tx.enqueue(msg.clone()));
         let graph = self.graph();
         let terminals = graph.terminal_ids();
         let labels: Vec<_> = terminals
@@ -881,9 +883,7 @@ impl Pipeline {
         // queue behind it. Cleared on every exit below, including the error
         // one, so no later `stop` cancels a preroll that already finished.
         self.publish_preroll(&preroll);
-        self.broadcast(Wake::Leave, |control_tx| {
-            control_tx.enqueue(ControlMsg::Preroll(Arc::clone(&preroll)))
-        });
+        self.broadcast(|control_tx| control_tx.enqueue(ControlMsg::Preroll(Arc::clone(&preroll))));
         let preroll_result = self.await_preroll(&preroll, PREROLL_TIMEOUT);
         self.retire_preroll();
         if restore_paused {
@@ -946,15 +946,4 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
-/// Whether [`Pipeline::broadcast`] interrupts the clock once its requests are
-/// queued.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Wake {
-    /// For a request that has to reach elements waiting on the clock: pause,
-    /// stop, finish, and the question that opens a seek.
-    Interrupt,
-    /// For one sent while everything is already paused, or that resumes it.
-    Leave,
 }

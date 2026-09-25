@@ -1500,3 +1500,195 @@ fn a_file_can_be_sought_back_after_it_finished() {
         "pictures were shown from where it landed"
     );
 }
+
+/// Takes every control request and passes it on, but never waits out a
+/// `Pause`: it goes on reading into a paused queue — the state
+/// `FileDemuxer` was in at the end of its file before 208af56.
+struct UnpausingSource {
+    pp_log: PpLog,
+    pad: SrcPad,
+}
+
+impl Element for UnpausingSource {
+    fn name(&self) -> Arc<str> {
+        "unpausing".into()
+    }
+
+    fn element_type(&self) -> ElementType {
+        ElementType::Other
+    }
+
+    fn pp_log(&self) -> &PpLog {
+        &self.pp_log
+    }
+
+    fn pp_log_mut(&mut self) -> &mut PpLog {
+        &mut self.pp_log
+    }
+}
+
+impl Source for UnpausingSource {
+    fn src_pads(&mut self) -> &mut [SrcPad] {
+        std::slice::from_mut(&mut self.pad)
+    }
+}
+
+impl SourceElement for UnpausingSource {
+    fn is_live(&self) -> bool {
+        false
+    }
+
+    fn is_seekable(&self) -> bool {
+        true
+    }
+
+    fn run(&mut self, control: &ControlReceiver, bus: &Bus) -> Result<()> {
+        loop {
+            while let Some((request, ack)) = control.try_recv() {
+                let crate::control::RequestKind::Control(msg) = request else {
+                    let _ = ack.send(());
+                    return Ok(());
+                };
+                if crate::control::apply_one(self, bus, &msg, &ack)? {
+                    return Ok(());
+                }
+            }
+            self.pad
+                .push(MediaBuffer::Packet(Arc::new(ffmpeg_next::Packet::empty())))?;
+        }
+    }
+
+    fn seek(&mut self, target: Duration) -> Result<Duration> {
+        Ok(target)
+    }
+}
+
+/// Every control request lets go of a thread blocked handing data on, not
+/// only the ones that were expected to meet one.
+///
+/// A source that fails to pause fills the paused queue behind it and blocks
+/// handing it the next packet. Only some requests used to raise the
+/// interrupt that makes a queue take such a packet as held over; the seek's
+/// `Seek` and `Preroll` did not, since the graph is paused when they are
+/// sent — so the seek waited for good on a source that could not read them.
+#[test]
+fn a_seek_reaches_a_source_that_did_not_pause() {
+    let source = UnpausingSource {
+        pp_log: element_pp_log(ElementType::Other, "unpausing", None),
+        pad: SrcPad::new("src"),
+    };
+    let (pipeline, ()) = Pipeline::new("unpausing", source, |source, ctx| {
+        let branch = ctx.branch().queue("q", 1).to(NoOpSink {
+            name: "noop".into(),
+            pp_log: element_pp_log(ElementType::Other, "noop", None),
+        })?;
+        ctx.attach(source, 0, branch)?;
+        Ok(())
+    })
+    .expect("pipeline wiring");
+    pipeline.run().expect("run");
+    pipeline.pause();
+
+    let seeking = Arc::clone(&pipeline);
+    let (done, finished) = mpsc::channel();
+    thread::spawn(move || {
+        let _ = done.send(seeking.seek(Duration::from_secs(1), SeekMode::Keyframe));
+    });
+    let outcome = finished
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the seek never returned");
+    assert!(outcome.is_ok(), "{outcome:?}");
+    pipeline.stop();
+}
+
+/// The branch whose preroll finishes first keeps its stream for when
+/// playback goes on, however long the other branch takes.
+///
+/// A decoder that had handed its branch the preroll's sample threw away
+/// whatever it decoded after, until the preroll ended — and went on taking
+/// packets all the while, since nothing said it was full. With the picture
+/// slow to preroll, the sound's decoder was fed and emptied the whole rest
+/// of the file in that time: a player resumed after a seek with no sound at
+/// all. Found by the conformance sequences on two cores.
+#[test]
+fn a_seek_keeps_the_sound_that_prerolled_before_the_picture() {
+    use crate::elements::AppSink;
+
+    let Some(path) = try_test_video() else { return };
+    let (source, streams) = FileDemuxer::open("demux", &path).expect("open the fixture");
+    let find = |kind| {
+        streams
+            .iter()
+            .find(|stream| stream.kind == kind)
+            .expect("the fixture has picture and sound")
+            .clone()
+    };
+    let (video, audio) = (
+        find(ffmpeg::media::Type::Video),
+        find(ffmpeg::media::Type::Audio),
+    );
+    let heard: Arc<Mutex<Vec<Option<i64>>>> = Arc::new(Mutex::new(Vec::new()));
+    let speakers = {
+        let heard = Arc::clone(&heard);
+        AppSink::new("speakers", move |buffer| {
+            if let MediaBuffer::Audio(frame) = buffer {
+                heard.lock().unwrap().push(frame.pts());
+            }
+            Ok(())
+        })
+    };
+    // Slow to take a picture, so the sound's preroll is long done before the
+    // picture's is.
+    let screen = AppSink::new("screen", |_| {
+        thread::sleep(Duration::from_millis(400));
+        Ok(())
+    });
+    let (pipeline, ()) = Pipeline::new("sound-before-picture", source, |source, ctx| {
+        let picture = ctx
+            .branch()
+            .queue("video-packets", 8)
+            .pipe(SwDecoder::new("video-decoder", video.parameters.clone())?)
+            .queue("video-frames", 2)
+            .to(screen)?;
+        ctx.attach(source, video.index, picture)?;
+        let sound = ctx
+            .branch()
+            .queue("audio-packets", 8)
+            .pipe(SwDecoder::new("audio-decoder", audio.parameters.clone())?)
+            .queue("audio-frames", 4)
+            .to(speakers)?;
+        ctx.attach(source, audio.index, sound)?;
+        Ok(())
+    })
+    .expect("wire the pipeline");
+    pipeline.run().unwrap();
+    pipeline.pause();
+    pipeline
+        .seek(Duration::from_secs(1), SeekMode::Accurate)
+        .expect("a file accepts a seek");
+    let prerolled = heard.lock().unwrap().len();
+    pipeline.resume();
+    let waited = Instant::now();
+    while heard.lock().unwrap().len() < prerolled + 3 {
+        assert!(
+            waited.elapsed() < Duration::from_secs(5),
+            "no sound after the seek's own: {:?}",
+            heard.lock().unwrap()
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    pipeline.stop();
+
+    let heard = heard.lock().unwrap();
+    let base = audio.time_base;
+    let at = |pts: Option<i64>| {
+        pts.map(|pts| pts as f64 * f64::from(base.numerator()) / f64::from(base.denominator()))
+    };
+    let (first, next) = (at(heard[prerolled - 1]), at(heard[prerolled]));
+    // The sound goes on from where the seek left it: one packet later, not
+    // wherever the file had been read to meanwhile.
+    assert!(
+        matches!((first, next), (Some(first), Some(next)) if next - first < 0.1),
+        "the sound jumped from {first:?} to {next:?} across the resume"
+    );
+}

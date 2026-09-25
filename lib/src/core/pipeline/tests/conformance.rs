@@ -278,6 +278,34 @@ impl Rig {
         })
     }
 
+    /// Where everything stands, for a failure to show: each element's
+    /// state, what it has taken, and how full its queue is, then what each
+    /// terminal was last handed. A stall is found from this without a
+    /// trace, which slows a run down enough to hide the race behind it.
+    fn describe(&self) -> String {
+        let stats = self.pipeline.stats();
+        let mut out = format!("  paused: {}\n", stats.paused);
+        for element in &stats.elements {
+            out += &format!(
+                "  {:<22} {:?} in={} eos={} idle={:?}{}\n",
+                element.name,
+                element.state,
+                element.buffers_in,
+                element.eos,
+                element.idle_for,
+                element
+                    .queue
+                    .as_ref()
+                    .map(|queue| format!(" queue={}/{}", queue.len, queue.capacity))
+                    .unwrap_or_default()
+            );
+        }
+        for (name, log) in &self.terminals {
+            out += &format!("  {name} ended {:?}\n", tail(&log.lock().unwrap()));
+        }
+        out
+    }
+
     fn data_counts(&self) -> Vec<usize> {
         self.terminals
             .iter()
@@ -600,7 +628,8 @@ fn run_sequence(shape: Shape, seed: u64, steps: usize) -> std::result::Result<()
                     return fail(
                         &history,
                         format!(
-                            "resumed away from the end, but nothing flowed: {before:?} → {now:?}"
+                            "resumed away from the end, but nothing flowed: {before:?} → {now:?}\n{}",
+                            rig.describe()
                         ),
                     );
                 }

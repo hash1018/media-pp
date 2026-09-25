@@ -355,6 +355,12 @@ impl Source for D3d11Decoder {
 }
 
 impl Sink for D3d11Decoder {
+    /// Not while a preroll this has already given its sample to is still
+    /// running — see `PrerollGate::holding`.
+    fn ready_consume(&mut self) -> bool {
+        !self.preroll_gate.holding()
+    }
+
     /// Decodes into D3D11VA surfaces, so what it accepts is the same encoded data any decoder takes.
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(PortContract::packet(MediaKind::VideoPacket))

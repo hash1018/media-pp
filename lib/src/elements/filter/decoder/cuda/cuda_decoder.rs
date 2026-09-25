@@ -268,6 +268,12 @@ impl Source for CudaDecoder {
 }
 
 impl Sink for CudaDecoder {
+    /// Not while a preroll this has already given its sample to is still
+    /// running — see `PrerollGate::holding`.
+    fn ready_consume(&mut self) -> bool {
+        !self.preroll_gate.holding()
+    }
+
     /// Decodes into NVDEC surfaces, so what it accepts is the same encoded data any decoder takes.
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(PortContract::packet(MediaKind::VideoPacket))

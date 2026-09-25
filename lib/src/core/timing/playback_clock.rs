@@ -213,6 +213,12 @@ impl PlaybackClock {
     /// up, the picture being waited on was kept for good, and the `Eos`
     /// behind it never left. See [`Clock::interrupt_pending`] on why settling
     /// is the pipeline's to say.
+    /// Sleeps `duration`, waking early for an interrupt — see
+    /// [`Clock::sleep_unless_interrupted`].
+    pub(crate) fn sleep_unless_interrupted(&self, duration: Duration) {
+        self.wall_clock.sleep_unless_interrupted(duration);
+    }
+
     pub(crate) fn interrupted_since(&self, answered: u64) -> bool {
         self.wall_clock.interrupt_epoch() != answered && self.wall_clock.interrupt_pending()
     }

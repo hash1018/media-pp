@@ -250,6 +250,12 @@ impl Source for SwDecoder {
 }
 
 impl Sink for SwDecoder {
+    /// Not while a preroll this has already given its sample to is still
+    /// running — see `PrerollGate::holding`.
+    fn ready_consume(&mut self) -> bool {
+        !self.preroll_gate.holding()
+    }
+
     /// The medium, not just "a packet": an audio stream wired into a
     /// decoder opened for video is the mistake this rules out, and both
     /// sides of it are `MediaBuffer::Packet`.

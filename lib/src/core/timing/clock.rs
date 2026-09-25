@@ -8,7 +8,7 @@
 
 use std::{
     sync::{
-        Mutex,
+        Condvar, Mutex,
         atomic::{AtomicU64, Ordering},
     },
     time::{Duration, Instant},
@@ -34,6 +34,11 @@ pub struct Clock {
     /// The `interrupt_epoch` every request sent so far has been handled up
     /// to — see [`Self::interrupt_pending`].
     settled_epoch: AtomicU64,
+    /// What [`Self::sleep_unless_interrupted`] waits on, notified by every
+    /// [`Self::interrupt`]. The lock is taken around the raise so a sleeper
+    /// that has read the epoch cannot miss the raise that changes it.
+    raised: Mutex<()>,
+    raised_changed: Condvar,
 }
 
 #[derive(Clone, Copy)]
@@ -63,6 +68,8 @@ impl Clock {
             state: Mutex::new(State::Unset),
             interrupt_epoch: AtomicU64::new(0),
             settled_epoch: AtomicU64::new(0),
+            raised: Mutex::new(()),
+            raised_changed: Condvar::new(),
         }
     }
 
@@ -70,7 +77,28 @@ impl Clock {
     /// anchor. The actual pause/seek/stop state change still happens through
     /// the ordinary synchronous control cascade.
     pub(crate) fn interrupt(&self) {
-        self.interrupt_epoch.fetch_add(1, Ordering::Release);
+        {
+            let _raising = self
+                .raised
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            self.interrupt_epoch.fetch_add(1, Ordering::Release);
+        }
+        self.raised_changed.notify_all();
+    }
+
+    /// Sleeps for `duration`, or until the next [`Self::interrupt`] if that
+    /// comes first — what a paced wait sleeps in, so a control request
+    /// reaches it at once rather than at the end of a polling slice.
+    pub(crate) fn sleep_unless_interrupted(&self, duration: Duration) {
+        let guard = self
+            .raised
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let epoch = self.interrupt_epoch();
+        let _ = self
+            .raised_changed
+            .wait_timeout_while(guard, duration, |_| self.interrupt_epoch() == epoch);
     }
 
     pub(crate) fn interrupt_epoch(&self) -> u64 {

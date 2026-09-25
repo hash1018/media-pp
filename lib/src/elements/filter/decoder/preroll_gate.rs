@@ -101,6 +101,19 @@ impl PrerollGate {
         self.candidate = None;
     }
 
+    /// Whether the decoder must not be fed for now: this preroll has its
+    /// sample and is still running, and anything decoded before it ends
+    /// would be suppressed — see [`Self::commit_delivery`].
+    ///
+    /// What a decoder answers from `ready_consume`, so the queue in front
+    /// of it holds its packets instead. It went on taking them, and a branch
+    /// whose preroll finished well before its sibling's — the sound, while a
+    /// slow picture caught up — was fed and emptied its whole stream in that
+    /// time: nothing of it was left to play once the seek was done.
+    pub(super) fn holding(&self) -> bool {
+        self.active && self.delivered
+    }
+
     /// Records the unit this decoder's `pts` values will be expressed in.
     /// `FileDemuxer` stamps every packet with its stream's time base, so this
     /// is available before the first frame comes back out.

@@ -592,6 +592,12 @@ impl Source for VideoDecodeBin {
 }
 
 impl Sink for VideoDecodeBin {
+    /// What the decoder inside says — see `PrerollGate::holding` on when it
+    /// is not ready.
+    fn ready_consume(&mut self) -> bool {
+        self.line.ready_consume()
+    }
+
     /// Encoded video, which is what every decoder it may hold takes.
     fn input_contract(&self) -> InputContract {
         InputContract::Fixed(PortContract::packet(MediaKind::VideoPacket))

@@ -1,4 +1,4 @@
-use std::{collections::VecDeque, sync::Arc, thread, time::Duration};
+use std::{collections::VecDeque, sync::Arc, time::Duration};
 
 use crate::pp_log::{PpLog, pp_debug, pp_info};
 use ffmpeg_next as ffmpeg;
@@ -156,8 +156,10 @@ impl VideoSynchronizer {
             match self.decision_without_observing(frame_ns) {
                 Decision::Render => return WaitOutcome::Render,
                 Decision::Drop => return WaitOutcome::Drop,
-                Decision::Wait(wait) => thread::sleep(wait.min(INTERRUPT_POLL_INTERVAL)),
-                Decision::Hold => thread::sleep(INTERRUPT_POLL_INTERVAL),
+                Decision::Wait(wait) => {
+                    playback_clock.sleep_unless_interrupted(wait.min(INTERRUPT_POLL_INTERVAL));
+                }
+                Decision::Hold => playback_clock.sleep_unless_interrupted(INTERRUPT_POLL_INTERVAL),
             }
         }
     }
