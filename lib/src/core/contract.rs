@@ -709,7 +709,7 @@ pub enum OutputContract {
 
 /// Whether an element taking `input` and handing on `output` turns a
 /// picture's packets into pictures — what has to be a
-/// [`crate::element::ReversibleSink`] to play backwards.
+/// [`crate::element::ReversibleDecoder`] to play backwards.
 pub(crate) fn decodes_pictures(input: &InputContract, output: &OutputContract) -> bool {
     let takes_packets = matches!(
         input,

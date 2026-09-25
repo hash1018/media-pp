@@ -8,7 +8,7 @@ use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
     control::ControlMsg,
-    element::{Element, ElementType, ReversibleSink, Sink, Source, element_pp_log},
+    element::{Element, ElementType, ReversibleDecoder, Sink, Source, element_pp_log},
     pad::SrcPad,
     pool::UnboundObjectPool,
 };
@@ -109,7 +109,7 @@ pub struct SwDecoder {
     /// Suppresses decoded samples before a seek target during preroll.
     preroll_gate: PrerollGate,
     /// Holds a stretch's pictures to hand on last first, playing backwards
-    /// — see [`ReversibleSink`].
+    /// — see [`ReversibleDecoder`].
     stretch: Stretch,
 }
 
@@ -279,7 +279,7 @@ impl Sink for SwDecoder {
 
     /// A picture's decoder hands a stretch on backwards; a sound's is never
     /// given one.
-    fn as_reversible(&mut self) -> Option<&mut dyn ReversibleSink> {
+    fn as_reversible(&mut self) -> Option<&mut dyn ReversibleDecoder> {
         if matches!(self.kind, Kind::Video(_)) {
             Some(self)
         } else {
@@ -373,7 +373,7 @@ impl Sink for SwDecoder {
     }
 }
 
-impl ReversibleSink for SwDecoder {
+impl ReversibleDecoder for SwDecoder {
     fn begin_stretch(&mut self) -> crate::error::Result<()> {
         self.stretch.begin();
         Ok(())

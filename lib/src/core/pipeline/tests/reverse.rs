@@ -3,7 +3,7 @@
 
 use super::step::Taker;
 use super::*;
-use crate::element::ReversibleSink;
+use crate::element::ReversibleDecoder;
 
 /// What a terminal took, where in its media each sample was.
 type Taken = Arc<Mutex<Vec<Duration>>>;
@@ -438,7 +438,7 @@ enum Told {
 }
 
 /// A picture's [`SwDecoder`] with what it is told and handed written down
-/// — and, where `reversible` is false, not a [`ReversibleSink`]: an
+/// — and, where `reversible` is false, not a [`ReversibleDecoder`]: an
 /// element a user wrote that decodes pictures and cannot play them
 /// backwards.
 struct Watched {
@@ -478,7 +478,7 @@ impl Sink for Watched {
     fn input_contract(&self) -> InputContract {
         self.inner.input_contract()
     }
-    fn as_reversible(&mut self) -> Option<&mut dyn ReversibleSink> {
+    fn as_reversible(&mut self) -> Option<&mut dyn ReversibleDecoder> {
         if self.reversible { Some(self) } else { None }
     }
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
@@ -498,7 +498,7 @@ impl Sink for Watched {
     }
 }
 
-impl ReversibleSink for Watched {
+impl ReversibleDecoder for Watched {
     fn begin_stretch(&mut self) -> Result<()> {
         self.told.lock().unwrap().push(Told::Begin);
         self.inner.begin_stretch()
@@ -608,7 +608,7 @@ fn a_decoder_is_told_where_each_stretch_begins_and_ends() {
 }
 
 /// An element that turns a picture's packets into pictures and is not a
-/// [`ReversibleSink`] cannot play backwards, and says so as it is wired —
+/// [`ReversibleDecoder`] cannot play backwards, and says so as it is wired —
 /// while the same element that is one can.
 #[test]
 fn a_decoder_that_cannot_hand_a_stretch_on_backwards_refuses() {
@@ -621,7 +621,7 @@ fn a_decoder_that_cannot_hand_a_stretch_on_backwards_refuses() {
     assert_eq!(refused.rejections().len(), 1, "{refused:?}");
     assert_eq!(
         refused.rejections()[0].reason,
-        crate::control::SeekRejectReason::ElementNotReversible
+        crate::control::SeekRejectReason::DecoderNotReversible
     );
     assert_eq!(&*refused.rejections()[0].name, "video-decoder");
     assert!(pipeline.check_seek().is_ok(), "seeking is another matter");

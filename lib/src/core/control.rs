@@ -96,10 +96,10 @@ pub enum SeekRejectReason {
     /// The source cannot read its media backwards — it is not a
     /// [`crate::element::ReversibleSource`].
     SourceNotReversible,
-    /// A downstream element turns a picture's packets into pictures and
-    /// cannot hand them on backwards — it is not a
-    /// [`crate::element::ReversibleSink`].
-    ElementNotReversible,
+    /// A decoder downstream, which turns a picture's packets into
+    /// pictures, cannot hand them on backwards — it is not a
+    /// [`crate::element::ReversibleDecoder`].
+    DecoderNotReversible,
 }
 
 /// One element that prevents a pipeline-wide seek.

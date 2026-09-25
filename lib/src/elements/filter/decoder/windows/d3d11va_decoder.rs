@@ -18,7 +18,7 @@ use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
     control::ControlMsg,
-    element::{Element, ElementType, ReversibleSink, Sink, Source, element_pp_log},
+    element::{Element, ElementType, ReversibleDecoder, Sink, Source, element_pp_log},
     error::D3d11SharedDeviceError,
     pad::SrcPad,
     platform::{
@@ -458,7 +458,7 @@ impl D3d11Decoder {
     }
 }
 
-impl ReversibleSink for D3d11Decoder {
+impl ReversibleDecoder for D3d11Decoder {
     fn begin_stretch(&mut self) -> crate::error::Result<()> {
         self.stretch.begin();
         Ok(())
@@ -520,7 +520,7 @@ impl Sink for D3d11Decoder {
         InputContract::Fixed(PortContract::packet(MediaKind::VideoPacket))
     }
 
-    fn as_reversible(&mut self) -> Option<&mut dyn ReversibleSink> {
+    fn as_reversible(&mut self) -> Option<&mut dyn ReversibleDecoder> {
         Some(self)
     }
 

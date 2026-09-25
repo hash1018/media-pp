@@ -198,7 +198,7 @@ impl Pipeline {
     /// seek, so what refuses one refuses it too; besides, every source has
     /// to be a [`crate::element::ReversibleSource`], and every element that
     /// turns a picture's packets into pictures a
-    /// [`crate::element::ReversibleSink`]. What a player needs to decide
+    /// [`crate::element::ReversibleDecoder`]. What a player needs to decide
     /// whether to offer it.
     pub fn check_reverse(&self) -> std::result::Result<(), crate::control::SeekError> {
         crate::control::SeekError::from_rejections(self.graph.reverse_rejections())

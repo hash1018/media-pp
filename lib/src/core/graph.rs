@@ -428,7 +428,7 @@ pub(crate) struct PortContracts {
     pub accepts_seek: bool,
     /// Whether it can follow its pipeline playing backwards: anything but
     /// what turns a picture's packets into pictures and is not a
-    /// [`crate::element::ReversibleSink`].
+    /// [`crate::element::ReversibleDecoder`].
     pub accepts_reverse: bool,
 }
 
@@ -824,7 +824,7 @@ impl PipelineGraph {
             {
                 state
                     .reverse_refusals
-                    .insert(node.id, SeekRejectReason::ElementNotReversible);
+                    .insert(node.id, SeekRejectReason::DecoderNotReversible);
             }
         }
         state.nodes.extend(plan.nodes);

@@ -8,7 +8,7 @@ use crate::{
     contract::{InputContract, OutputContract},
     control::ControlMsg,
     element::{
-        Context, Element, ElementType, Filter, ReversibleSink, Sink, Source, element_pp_log,
+        Context, Element, ElementType, Filter, ReversibleDecoder, Sink, Source, element_pp_log,
     },
     error::Result,
     graph::{
@@ -104,7 +104,7 @@ pub(crate) struct FlowTracer<T> {
     stretches: Option<Stretches>,
 }
 
-/// Where the stretches a [`ReversibleSink`] is handed while playing
+/// Where the stretches a [`ReversibleDecoder`] is handed while playing
 /// backwards begin and end, for the stage in front of it to tell it — see
 /// [`crate::element::ReversibleSource`]. One place for every decoder, so
 /// none of them works it out from the packets on its own.
@@ -157,7 +157,7 @@ impl<T: Filter> Sink for FlowTracer<T> {
         self.inner.accepts_seek()
     }
 
-    fn as_reversible(&mut self) -> Option<&mut dyn ReversibleSink> {
+    fn as_reversible(&mut self) -> Option<&mut dyn ReversibleDecoder> {
         self.inner.as_reversible()
     }
 
@@ -221,7 +221,7 @@ impl<T: Filter> Sink for FlowTracer<T> {
     }
 }
 
-/// Tells a [`ReversibleSink`] where a stretch played backwards begins
+/// Tells a [`ReversibleDecoder`] where a stretch played backwards begins
 /// and ends, before it is handed `buf`: a stretch ends where a packet's
 /// decode time goes back, the next beginning with that packet, and the
 /// last ends with the end of the stream.

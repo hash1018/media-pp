@@ -14,7 +14,7 @@ use crate::{
     buffer::MediaBuffer,
     control::ControlMsg,
     core::pipeline::chain::FlowTracer,
-    element::{Context, Element, ElementType, Filter, ReversibleSink, Sink, element_pp_log},
+    element::{Context, Element, ElementType, Filter, ReversibleDecoder, Sink, element_pp_log},
     error::Result,
 };
 
@@ -150,8 +150,8 @@ impl Line {
         std::mem::take(&mut *made)
     }
 
-    /// The line's first element as a [`ReversibleSink`], where it is one.
-    pub(crate) fn reversible(&mut self) -> Option<&mut dyn ReversibleSink> {
+    /// The line's first element as a [`ReversibleDecoder`], where it is one.
+    pub(crate) fn reversible(&mut self) -> Option<&mut dyn ReversibleDecoder> {
         self.head.as_mut()?.as_reversible()
     }
 

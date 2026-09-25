@@ -39,7 +39,7 @@ use crate::{
     },
     control::ControlMsg,
     element::{
-        Context, Element, ElementType, Filter, ReversibleSink, Sink, Source, element_pp_log,
+        Context, Element, ElementType, Filter, ReversibleDecoder, Sink, Source, element_pp_log,
     },
     elements::{DecodeThreading, SwDecoder, filter::line::Line},
     error::{Error, Result},
@@ -287,7 +287,7 @@ pub struct VideoDecodeBin {
     /// for a stream that did not say it was 10-bit.
     watch_for_p010: bool,
     /// Whether the hardware line hands a stretch on backwards — see
-    /// [`ReversibleSink`]. The software line always does.
+    /// [`ReversibleDecoder`]. The software line always does.
     hardware_reverses: bool,
 }
 
@@ -604,7 +604,7 @@ impl Sink for VideoDecodeBin {
 
     /// Where its decoder hands a stretch on backwards: the software line,
     /// and D3D11's hardware one.
-    fn as_reversible(&mut self) -> Option<&mut dyn ReversibleSink> {
+    fn as_reversible(&mut self) -> Option<&mut dyn ReversibleDecoder> {
         let reverses = match self.path() {
             DecodePath::Software(_) => true,
             DecodePath::Hardware => self.hardware_reverses,
@@ -657,7 +657,7 @@ impl Sink for VideoDecodeBin {
 
 /// The decoder at the head of its line is told, and what that hands on
 /// goes on as what it hands on from a packet does.
-impl ReversibleSink for VideoDecodeBin {
+impl ReversibleDecoder for VideoDecodeBin {
     fn begin_stretch(&mut self) -> Result<()> {
         self.install();
         match self.line.reversible() {
@@ -761,7 +761,7 @@ impl DecodeTarget {
     }
 
     /// Whether its hardware decoder hands a stretch read backwards on last
-    /// picture first — see [`ReversibleSink`]. D3D11's does; the others do
+    /// picture first — see [`ReversibleDecoder`]. D3D11's does; the others do
     /// not yet.
     fn reverses(&self) -> bool {
         match self {

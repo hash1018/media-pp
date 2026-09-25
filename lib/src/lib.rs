@@ -121,8 +121,9 @@
 //! slower from where playback is, the sound stretched to it at its own pitch
 //! — or backwards, the picture only: a
 //! [`ReversibleSource`](element::ReversibleSource) reads its media back a
-//! stretch at a time, and a [`ReversibleSink`](element::ReversibleSink)
-//! decoder hands each stretch on last first.
+//! stretch at a time, and a
+//! [`ReversibleDecoder`](element::ReversibleDecoder) hands each stretch on
+//! last first.
 //!
 //! # Connecting elements
 //!

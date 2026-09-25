@@ -1,7 +1,7 @@
 //! What a video decoder holds of a stretch played backwards.
 //!
 //! Played backwards, each video decoder here is a
-//! [`ReversibleSink`](crate::element::ReversibleSink): told where each
+//! [`ReversibleDecoder`](crate::element::ReversibleDecoder): told where each
 //! stretch begins and ends, it holds the pictures of one and hands them on
 //! last first. They all hold them in this, so which decoder a pipeline has
 //! does not change what reverse looks like.
