@@ -2,6 +2,84 @@
 
 use crate::elements::VideoCodec;
 
+/// Says where this crate's test binary crashed, when it crashes on Windows.
+///
+/// An access violation ends the process with `0xc0000005` and nothing else:
+/// no test name, since the tests run on threads of their own and libtest
+/// prints a name as a test finishes, and no stack. CI has lost whole runs to
+/// one that no machine here reproduces. An unhandled exception reaches this
+/// filter on the thread it happened on, before the process ends, and the
+/// filter prints that thread's name — the test's, or the element thread's
+/// such as `queue:video-frames` — and its stack, then lets the process end
+/// as it would have.
+///
+/// Only an exception nothing handled comes here, so a driver's own caught
+/// fault prints nothing. Installed before `main` through the C runtime's
+/// initializer table, as a `static` constructor would be.
+#[cfg(windows)]
+mod crash_report {
+    use std::ffi::c_void;
+    use std::io::Write;
+
+    #[repr(C)]
+    struct ExceptionRecord {
+        code: u32,
+        flags: u32,
+        record: *mut ExceptionRecord,
+        address: *mut c_void,
+        parameters: u32,
+        information: [usize; 15],
+    }
+
+    #[repr(C)]
+    struct ExceptionPointers {
+        record: *const ExceptionRecord,
+        context: *mut c_void,
+    }
+
+    type Filter = unsafe extern "system" fn(*const ExceptionPointers) -> i32;
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn SetUnhandledExceptionFilter(filter: Option<Filter>) -> Option<Filter>;
+    }
+
+    /// Carry on to the process's end, as without this filter.
+    const EXCEPTION_CONTINUE_SEARCH: i32 = 0;
+
+    unsafe extern "system" fn report(pointers: *const ExceptionPointers) -> i32 {
+        // SAFETY: the system hands an unhandled exception filter valid
+        // exception pointers for the exception being dispatched.
+        let record = unsafe { &*(*pointers).record };
+        let thread = std::thread::current();
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        // Straight to the process's stderr, which libtest does not capture.
+        let _ = writeln!(
+            std::io::stderr(),
+            "
+exception {:#010x} at {:?} on thread {:?} (information {:x?})
+{backtrace}",
+            record.code,
+            record.address,
+            thread.name().unwrap_or("<unnamed>"),
+            &record.information[..(record.parameters as usize).min(15)],
+        );
+        EXCEPTION_CONTINUE_SEARCH
+    }
+
+    extern "C" fn install() {
+        // SAFETY: `report` has the signature the system calls a filter with,
+        // and lives as long as the process.
+        unsafe {
+            SetUnhandledExceptionFilter(Some(report));
+        }
+    }
+
+    #[used]
+    #[unsafe(link_section = ".CRT$XCU")]
+    static INSTALL: extern "C" fn() = install;
+}
+
 /// Path to a video file for tests that need one — synthesized here, every
 /// time, on every machine.
 ///
