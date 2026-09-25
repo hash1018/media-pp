@@ -82,7 +82,7 @@ impl SrcPad {
     }
 
     /// The linked sink's own identity, without touching the link itself —
-    /// lets a caller that just saw [`SrcPad::push`]/[`SrcPad::control`]
+    /// lets a caller that just saw [`SrcPad::push`] or a control message
     /// fail (e.g. [`crate::elements::Tee`], fanning out to several pads at
     /// once) report *which* downstream element the failure actually came
     /// from, instead of only knowing its own. `None` for an unlinked pad.
@@ -170,7 +170,11 @@ impl SrcPad {
     /// Forwards a [`ControlMsg`] to whatever this pad is linked to —
     /// mirrors [`SrcPad::push`], just for control instead of data.
     /// Pushing into an unlinked pad is a no-op, same as `push`.
-    pub fn control(&mut self, msg: ControlMsg) -> Result<()> {
+    ///
+    /// Not public: an element never passes control on itself — see
+    /// [`crate::element::Sink::control`] — and one that did would hand
+    /// everything after it each message twice.
+    pub(crate) fn control(&mut self, msg: &ControlMsg) -> Result<()> {
         match &mut self.peer {
             Some(sink) => sink.control(msg),
             None => Ok(()),

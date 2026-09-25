@@ -5,7 +5,6 @@ use crate::pp_log::{PpLog, pp_info};
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKindSet, PortContract},
-    control::ControlMsg,
     element::{Element, ElementType, Sink, element_pp_log},
     elements::CounterHandle,
     error::Result,
@@ -67,11 +66,6 @@ impl Sink for PacketCounter {
         if let MediaBuffer::Packet(_) = buf {
             self.count.increment();
         }
-        Ok(())
-    }
-
-    fn control(&mut self, _msg: ControlMsg) -> Result<()> {
-        // Terminal, nothing to flush or forward.
         Ok(())
     }
 }

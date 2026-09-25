@@ -29,7 +29,6 @@ mod example {
     use media_pp::{
         Result,
         buffer::MediaBuffer,
-        control::ControlMsg,
         driver::DriverRunner,
         element::{Element, ElementType, Sink, element_pp_log},
         elements::{AttachedTrack, TrackEndpoints, WebRtcPeer, WebRtcTrackSink, WebRtcTrackSource},
@@ -235,10 +234,6 @@ mod example {
             if matches!(buf, MediaBuffer::Packet(_)) {
                 self.count.fetch_add(1, Ordering::SeqCst);
             }
-            Ok(())
-        }
-
-        fn control(&mut self, _msg: ControlMsg) -> Result<()> {
             Ok(())
         }
     }

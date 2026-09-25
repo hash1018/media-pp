@@ -236,13 +236,13 @@ impl Sink for SwChromaKey {
         }
     }
 
-    fn control(&mut self, msg: ControlMsg) -> Result<()> {
+    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
         // A pure per-pixel transform, same as `SwScaler` — nothing local
         // buffered or ordered to flush beyond the cached keyed frame.
         if matches!(msg, ControlMsg::Flush | ControlMsg::Stop) {
             self.repeated.clear();
         }
-        self.pad.control(msg)
+        Ok(())
     }
 }
 

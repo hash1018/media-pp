@@ -334,7 +334,7 @@ impl Sink for Pacer {
         Ok(())
     }
 
-    fn control(&mut self, msg: ControlMsg) -> crate::error::Result<()> {
+    fn control(&mut self, msg: &ControlMsg) -> crate::error::Result<()> {
         // Acknowledge the interrupt that made any in-flight wait return.
         // Flush discards an interrupted old-timeline buffer; Seek then drops
         // the origin so the new timeline anchors on whichever stream reaches
@@ -369,7 +369,7 @@ impl Sink for Pacer {
             }
             ControlMsg::CheckSeek(_) => {}
         }
-        self.pad.control(msg)
+        Ok(())
     }
 }
 
@@ -527,20 +527,20 @@ mod tests {
         pacer.consume(packet(0)).expect("interrupted consume");
         assert_eq!(pacer.pending.len(), 1);
 
-        pacer.control(ControlMsg::Pause).expect("pause");
+        pacer.control(&ControlMsg::Pause).expect("pause");
         assert_eq!(pacer.pending.len(), 1, "pause must retain the buffer");
 
-        pacer.control(ControlMsg::Flush).expect("flush");
+        pacer.control(&ControlMsg::Flush).expect("flush");
         assert!(pacer.pending.is_empty(), "flush must discard stale data");
 
         pacer
-            .control(ControlMsg::Seek(Duration::ZERO))
+            .control(&ControlMsg::Seek(Duration::ZERO))
             .expect("seek");
 
         clock.interrupt();
         pacer.consume(packet(1)).expect("interrupted consume");
         assert_eq!(pacer.pending.len(), 1);
-        pacer.control(ControlMsg::Stop).expect("stop");
+        pacer.control(&ControlMsg::Stop).expect("stop");
         assert!(pacer.pending.is_empty(), "stop must abandon pending data");
     }
 
@@ -624,7 +624,7 @@ mod tests {
         let mut pacer = paced("pacer", &context);
         let context = Arc::new(PrerollContext::for_seek([], Duration::from_secs(2)));
         pacer
-            .control(ControlMsg::Preroll(context))
+            .control(&ControlMsg::Preroll(context))
             .expect("preroll");
 
         let started = Instant::now();

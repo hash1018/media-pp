@@ -185,7 +185,7 @@ impl Sink for TimestampOrigin {
         self.pad.push(MediaBuffer::Packet(Arc::new(rebased)))
     }
 
-    fn control(&mut self, msg: ControlMsg) -> Result<()> {
+    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
         // `Stop` abandons this run, so a pipeline started again begins a new
         // timeline at zero like the first one did.
         //
@@ -193,10 +193,10 @@ impl Sink for TimestampOrigin {
         // *same* timeline, and forgetting the origin would restart the output
         // at zero mid-stream — timestamps going backwards, which is not
         // something a muxer accepts or a caller asked for.
-        if msg == ControlMsg::Stop {
+        if *msg == ControlMsg::Stop {
             self.origin = None;
         }
-        self.pad.control(msg)
+        Ok(())
     }
 }
 
@@ -352,7 +352,7 @@ mod tests {
         let received = capture(&mut origin);
 
         origin.consume(packet(Some(1_000), Some(1_000))).unwrap();
-        origin.control(ControlMsg::Stop).unwrap();
+        origin.control(&ControlMsg::Stop).unwrap();
         origin.consume(packet(Some(9_000), Some(9_000))).unwrap();
 
         assert_eq!(
@@ -370,7 +370,7 @@ mod tests {
         let received = capture(&mut origin);
 
         origin.consume(packet(Some(1_000), Some(1_000))).unwrap();
-        origin.control(ControlMsg::Flush).unwrap();
+        origin.control(&ControlMsg::Flush).unwrap();
         origin.consume(packet(Some(3_000), Some(3_000))).unwrap();
 
         assert_eq!(

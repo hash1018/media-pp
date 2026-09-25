@@ -220,13 +220,13 @@ impl Sink for D3d12Upload {
         }
     }
 
-    fn control(&mut self, msg: ControlMsg) -> Result<()> {
+    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
         // Nothing local to react to beyond the cached upload — a pure
         // per-frame CPU->GPU transfer.
         if matches!(msg, ControlMsg::Flush | ControlMsg::Stop) {
             self.repeated.clear();
         }
-        self.pad.control(msg)
+        Ok(())
     }
 }
 

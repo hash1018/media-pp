@@ -12,6 +12,22 @@ compile error with no explanation.
 
 ### Breaking
 
+- **`Sink::control` is an element's own reaction; the graph passes the
+  message on.** It took a `ControlMsg`, had no default, and every filter
+  ended it by forwarding to its own pad — so a filter that forgot, or
+  returned early on an error, stopped the message there, and a message
+  added later had to be taught to every element. It now takes
+  `&ControlMsg`, does nothing by default, and does not forward: whatever
+  delivers a message to a filter hands it on through the filter's
+  `src_pads()` afterwards — to every pad even where one fails, and even
+  where the filter's own reaction failed. `SrcPad::control` is no longer
+  public, since a filter still calling it would hand everything after it
+  each message twice. To migrate, take `msg: &ControlMsg`, end with
+  `Ok(())` where you called `self.pad.control(msg)`, and delete a
+  `control` that did nothing else. Code that drives a filter by hand,
+  outside a pipeline, calls `control::deliver(&mut filter, &msg)` for the
+  old forwarding. `AppSink::with_control`'s callback is unchanged.
+
 - **`RtspMuxer::open` gives up on a server that does not answer.** It
   waited without limit: publishing to an address with nothing listening,
   or to a server that took the connection and never replied, never
@@ -1540,6 +1556,12 @@ compile error with no explanation.
   decoder in this crate — keys exactly as before, byte for byte.
 
 ### Fixed
+
+- **A source tells every one of its pads, whatever one of them answers.**
+  A control message went to a source's pads in turn and stopped at the
+  first that failed: a file's picture branch refusing a `Pause` left the
+  sound branch beside it playing. Every pad is told now, and the first
+  failure is still what comes back.
 
 - **A queue drops what a seek has left behind, however late it gets
   there.** A seek empties every queue with a `Flush` and then repositions

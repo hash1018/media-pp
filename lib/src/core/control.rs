@@ -25,9 +25,10 @@ use crossbeam_channel::{Receiver, Sender, unbounded};
 
 use crate::{
     bus::{Bus, BusEvent},
-    element::{ElementType, SourceElement},
+    element::{ElementType, Filter, SourceElement},
     error::Result,
     graph::{ElementId, NodeInfo},
+    pad::SrcPad,
 };
 
 /// A command that can be sent down a running [`crate::pipeline::Pipeline`]
@@ -666,9 +667,7 @@ pub(crate) fn apply_one_unacked<S: SourceElement>(
             crate::timeline::follow();
         }
         sought?;
-        for pad in source.src_pads() {
-            pad.control(msg.clone())?;
-        }
+        forward(source.src_pads(), msg)?;
         Ok(*msg == ControlMsg::Stop)
     })();
     match &result {
@@ -736,6 +735,35 @@ fn apply_seek_check<S: SourceElement>(source: &S, msg: &ControlMsg) {
     if let Some(reason) = reason {
         context.reject(source.element_type(), source.name(), reason);
     }
+}
+
+/// Hands `msg` to `filter` and then on through each of its pads — what a
+/// graph does for every filter in it, for code that drives one by hand: a
+/// bin of your own passing control to the elements it holds, a test.
+///
+/// The filter reacts first ([`Sink::control`](crate::element::Sink::control)), so whatever it holds
+/// already reflects the message by the time the elements after it see it.
+/// The message goes on even where that reaction failed, and through every
+/// pad even where one of them failed: a `Pause` or `Stop` stopped at the
+/// first failure would leave the rest of the graph running. What comes back
+/// is the first failure.
+pub fn deliver<F: Filter + ?Sized>(filter: &mut F, msg: &ControlMsg) -> Result<()> {
+    let reacted = filter.control(msg);
+    let forwarded = forward(filter.src_pads(), msg);
+    reacted.and(forwarded)
+}
+
+/// Passes `msg` through every one of `pads`, a failure on one keeping it
+/// from none of the others, and answers the first failure.
+pub(crate) fn forward(pads: &mut [SrcPad], msg: &ControlMsg) -> Result<()> {
+    let mut first = Ok(());
+    for pad in pads {
+        let outcome = pad.control(msg);
+        if first.is_ok() {
+            first = outcome;
+        }
+    }
+    first
 }
 
 fn apply_seek<S: SourceElement>(source: &mut S, bus: &Bus, msg: &ControlMsg) -> Result<()> {
@@ -948,7 +976,7 @@ mod tests {
             Ok(())
         }
 
-        fn control(&mut self, msg: ControlMsg) -> Result<()> {
+        fn control(&mut self, msg: &ControlMsg) -> Result<()> {
             self.order
                 .lock()
                 .unwrap()
@@ -1034,8 +1062,8 @@ mod tests {
             Ok(())
         }
 
-        fn control(&mut self, msg: ControlMsg) -> Result<()> {
-            if msg == ControlMsg::Pause {
+        fn control(&mut self, msg: &ControlMsg) -> Result<()> {
+            if *msg == ControlMsg::Pause {
                 thread::sleep(self.pause_delay);
             }
             Ok(())
@@ -1216,6 +1244,191 @@ mod tests {
             "the {:?} Pause cascade was omitted from paused_for: {:?}",
             pause_delay,
             outcome.paused_for
+        );
+    }
+    /// Notes each control message it is handed, and refuses every one where
+    /// told to.
+    struct Noting {
+        pp_log: PpLog,
+        noted: Arc<std::sync::Mutex<Vec<ControlMsg>>>,
+        refuses: bool,
+    }
+
+    fn noting(refuses: bool) -> (Noting, Arc<std::sync::Mutex<Vec<ControlMsg>>>) {
+        let noted = Arc::default();
+        let sink = Noting {
+            pp_log: element_pp_log(ElementType::Other, "noting", None),
+            noted: Arc::clone(&noted),
+            refuses,
+        };
+        (sink, noted)
+    }
+
+    impl Element for Noting {
+        fn name(&self) -> Arc<str> {
+            "noting".into()
+        }
+
+        fn element_type(&self) -> ElementType {
+            ElementType::Other
+        }
+
+        fn pp_log(&self) -> &PpLog {
+            &self.pp_log
+        }
+
+        fn pp_log_mut(&mut self) -> &mut PpLog {
+            &mut self.pp_log
+        }
+    }
+
+    impl Sink for Noting {
+        fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
+            Ok(())
+        }
+
+        fn control(&mut self, msg: &ControlMsg) -> Result<()> {
+            self.noted.lock().unwrap().push(msg.clone());
+            if self.refuses {
+                return Err(crate::error::Error::Other("refused".into()));
+            }
+            Ok(())
+        }
+    }
+
+    /// A filter whose own reaction to every message fails.
+    struct Refusing {
+        pp_log: PpLog,
+        pad: SrcPad,
+    }
+
+    impl Element for Refusing {
+        fn name(&self) -> Arc<str> {
+            "refusing".into()
+        }
+
+        fn element_type(&self) -> ElementType {
+            ElementType::Other
+        }
+
+        fn pp_log(&self) -> &PpLog {
+            &self.pp_log
+        }
+
+        fn pp_log_mut(&mut self) -> &mut PpLog {
+            &mut self.pp_log
+        }
+    }
+
+    impl Source for Refusing {
+        fn src_pads(&mut self) -> &mut [SrcPad] {
+            std::slice::from_mut(&mut self.pad)
+        }
+    }
+
+    impl Sink for Refusing {
+        fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
+            Ok(())
+        }
+
+        fn control(&mut self, _msg: &ControlMsg) -> Result<()> {
+            Err(crate::error::Error::Other("cannot pause".into()))
+        }
+    }
+
+    /// An element failing to react to a message does not keep it from the
+    /// elements after it: a `Pause` one element refuses still pauses the
+    /// rest of the graph, and the caller still hears of the failure.
+    #[test]
+    fn a_filter_that_fails_to_react_still_passes_the_message_on() {
+        let mut filter = Refusing {
+            pp_log: element_pp_log(ElementType::Other, "refusing", None),
+            pad: SrcPad::new("src"),
+        };
+        let (after, noted) = noting(false);
+        filter.pad.link(Box::new(after));
+
+        let delivered = deliver(&mut filter, &ControlMsg::Pause);
+
+        assert!(delivered.is_err(), "the refusal is the answer");
+        assert_eq!(
+            *noted.lock().unwrap(),
+            [ControlMsg::Pause],
+            "and the element after it paused all the same"
+        );
+    }
+
+    /// Two pads, as a file's demuxer has one for the picture and one for
+    /// the sound.
+    struct TwoPads {
+        pp_log: PpLog,
+        pads: [SrcPad; 2],
+    }
+
+    impl Element for TwoPads {
+        fn name(&self) -> Arc<str> {
+            "two-pads".into()
+        }
+
+        fn element_type(&self) -> ElementType {
+            ElementType::Other
+        }
+
+        fn pp_log(&self) -> &PpLog {
+            &self.pp_log
+        }
+
+        fn pp_log_mut(&mut self) -> &mut PpLog {
+            &mut self.pp_log
+        }
+    }
+
+    impl Source for TwoPads {
+        fn src_pads(&mut self) -> &mut [SrcPad] {
+            &mut self.pads
+        }
+    }
+
+    impl SourceElement for TwoPads {
+        fn is_live(&self) -> bool {
+            false
+        }
+
+        fn is_seekable(&self) -> bool {
+            false
+        }
+
+        fn run(&mut self, _control: &ControlReceiver, _bus: &Bus) -> Result<()> {
+            unreachable!("not exercised by these tests")
+        }
+
+        fn seek(&mut self, target: Duration) -> Result<Duration> {
+            Ok(target)
+        }
+    }
+
+    /// A source tells every one of its pads, whatever the first answers. It
+    /// told them in turn and stopped at the first failure, so a picture
+    /// branch refusing a `Pause` left the sound branch beside it playing.
+    #[test]
+    fn a_source_tells_every_pad_even_where_one_fails() {
+        let mut source = TwoPads {
+            pp_log: element_pp_log(ElementType::Other, "two-pads", None),
+            pads: [SrcPad::new("video"), SrcPad::new("audio")],
+        };
+        let (picture, _) = noting(true);
+        let (sound, sound_noted) = noting(false);
+        source.pads[0].link(Box::new(picture));
+        source.pads[1].link(Box::new(sound));
+        let (bus, _bus_rx) = Bus::new();
+
+        let applied = apply_one_unacked(&mut source, &bus, &ControlMsg::Pause);
+
+        assert!(applied.is_err(), "the picture's refusal is the answer");
+        assert_eq!(
+            *sound_noted.lock().unwrap(),
+            [ControlMsg::Pause],
+            "and the sound paused all the same"
         );
     }
 }

@@ -476,15 +476,27 @@ pub trait Sink: Element {
         InputContract::Unknown
     }
 
-    /// Reacts to a [`ControlMsg`] (pause/resume/stop) and, for anything
-    /// with a downstream of its own, forwards it on — same shape as
-    /// `consume`, just a separate channel from `MediaBuffer` so it can
-    /// reach every element (not just ones that already know how to
-    /// interpret a data buffer) and, at a [`crate::queue::Queue`], jump
-    /// ahead of whatever data is backed up instead of waiting behind it.
-    /// No default: every `Sink` has to consciously decide what this means
-    /// for it, rather than silently dropping it.
-    fn control(&mut self, msg: ControlMsg) -> Result<()>;
+    /// Reacts to a [`ControlMsg`] — drops what belongs to the timeline a
+    /// `Flush` ends, arms for a `Preroll`, lets go of a device on `Stop` —
+    /// on the thread delivering it, in order with the data around it.
+    ///
+    /// Only the reaction. Passing the message on is not this element's to
+    /// do: a filter in a graph is behind a wrapper that hands it on through
+    /// the filter's [`Source::src_pads`] once this returns, whatever it
+    /// returns ([`crate::control::deliver`] does the same for a filter
+    /// driven by hand); a terminal has nothing after it; and an element that
+    /// routes control its own way — a [`crate::queue::Queue`], across a
+    /// thread, a [`crate::elements::Tee`], to branches that come and go —
+    /// does that from here. So an element with nothing of its own to reset
+    /// leaves this alone, and a message added later reaches every element
+    /// whether or not that element knows of it.
+    ///
+    /// An error goes back to whoever sent the message. The message has
+    /// still gone on downstream: one element failing to pause must not
+    /// leave the rest of the graph running.
+    fn control(&mut self, _msg: &ControlMsg) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// An element with one or more output ports. It sends data downstream by
@@ -676,7 +688,7 @@ impl<S: Sink + ?Sized> Sink for Box<S> {
         (**self).input_contract()
     }
 
-    fn control(&mut self, msg: ControlMsg) -> Result<()> {
+    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
         (**self).control(msg)
     }
 }
@@ -725,8 +737,8 @@ mod tests {
             InputContract::Fixed(PortContract::packet(MediaKind::AudioPacket))
         }
 
-        fn control(&mut self, _msg: ControlMsg) -> Result<()> {
-            Ok(())
+        fn control(&mut self, _msg: &ControlMsg) -> Result<()> {
+            Err(crate::error::Error::Other("opinionated".into()))
         }
     }
 
@@ -752,6 +764,10 @@ mod tests {
                 "not the default of Unknown"
             );
             sink.consume(MediaBuffer::Eos).unwrap();
+            assert!(
+                sink.control(&ControlMsg::Pause).is_err(),
+                "not the default of doing nothing"
+            );
         }
         check(Box::new(opinionated()));
         check(Box::new(opinionated()) as Box<dyn Sink>);

@@ -28,7 +28,6 @@ use super::{
 use crate::{
     buffer::MediaBuffer,
     bus::BusEvent,
-    control::ControlMsg,
     driver::DriverRunner,
     element::{Element, ElementType, Sink, element_pp_log},
     elements::{
@@ -944,10 +943,6 @@ impl Sink for CountingSink {
         if matches!(buf, MediaBuffer::Packet(_)) {
             self.count.fetch_add(1, Ordering::SeqCst);
         }
-        Ok(())
-    }
-
-    fn control(&mut self, _msg: ControlMsg) -> Result<()> {
         Ok(())
     }
 }

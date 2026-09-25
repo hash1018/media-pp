@@ -871,7 +871,7 @@ where
         }
     }
 
-    fn control(&mut self, msg: ControlMsg) -> Result<()> {
+    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
         pp_trace!(self, "event=control control={msg:?} phase=received");
         match msg {
             // All three abandon the audio being held: a flush because what

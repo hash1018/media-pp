@@ -8,7 +8,6 @@ use crate::pp_log::{PpLog, pp_error, pp_info};
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, PortContract},
-    control::ControlMsg,
     element::{Element, ElementType, Sink, element_pp_log},
     elements::sink::renderer::SubmitError,
     platform::{
@@ -255,12 +254,6 @@ impl Sink for CudaRenderer {
 
         self.submit(&frame)
             .inspect_err(|error| pp_error!(self, "submit failed: {error}"))?;
-        Ok(())
-    }
-
-    fn control(&mut self, _msg: ControlMsg) -> crate::error::Result<()> {
-        // Terminal, nothing to flush or forward — same reasoning as
-        // `D3d11Renderer::control`.
         Ok(())
     }
 }
@@ -525,9 +518,6 @@ mod tests {
             if matches!(buf, MediaBuffer::Video(_)) {
                 self.received.lock().unwrap().push(buf);
             }
-            Ok(())
-        }
-        fn control(&mut self, _msg: ControlMsg) -> crate::error::Result<()> {
             Ok(())
         }
     }

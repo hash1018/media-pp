@@ -680,10 +680,6 @@ impl Sink for Passthrough {
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         self.pad.push(buf)
     }
-
-    fn control(&mut self, msg: ControlMsg) -> Result<()> {
-        self.pad.control(msg)
-    }
 }
 
 /// Refuses every buffer, the way a muxer whose connection has gone does.
@@ -715,10 +711,6 @@ impl Sink for AlwaysFailingSink {
             return Ok(());
         }
         Err(crate::Error::Other("the connection went away".into()))
-    }
-
-    fn control(&mut self, _msg: ControlMsg) -> Result<()> {
-        Ok(())
     }
 }
 

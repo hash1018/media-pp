@@ -350,14 +350,14 @@ impl Sink for D3d11Download {
         }
     }
 
-    fn control(&mut self, msg: ControlMsg) -> Result<()> {
+    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
         // Nothing local to react to beyond the cached download — a pure
         // per-frame GPU->CPU transfer, same reasoning as
         // `D3d11Upload::control`.
         if matches!(msg, ControlMsg::Flush | ControlMsg::Stop) {
             self.repeated.clear();
         }
-        self.pad.control(msg)
+        Ok(())
     }
 }
 
@@ -883,10 +883,6 @@ mod tests {
     impl Sink for CapturingSink {
         fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
             self.received.lock().unwrap().push(buf);
-            Ok(())
-        }
-
-        fn control(&mut self, _msg: ControlMsg) -> Result<()> {
             Ok(())
         }
     }

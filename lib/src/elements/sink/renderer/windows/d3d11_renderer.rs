@@ -14,7 +14,6 @@ use windows::{
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, PortContract},
-    control::ControlMsg,
     element::{Element, ElementType, Sink, element_pp_log},
     elements::SubmitError,
     error::{D3d11SharedDeviceError, Result},
@@ -389,12 +388,6 @@ impl Sink for D3d11Renderer {
 
         self.submit_d3d11_frame(&frame)
             .inspect_err(|error| pp_error!(self, "submit_d3d11_frame failed: {error}"))
-    }
-
-    fn control(&mut self, _msg: ControlMsg) -> Result<()> {
-        // Terminal, nothing to flush or forward — same reasoning as
-        // `D3d12Renderer::control`.
-        Ok(())
     }
 }
 

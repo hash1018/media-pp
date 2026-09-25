@@ -307,12 +307,12 @@ impl Sink for NoiseSuppressor {
         }
     }
 
-    fn control(&mut self, msg: ControlMsg) -> Result<()> {
+    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
         if matches!(msg, ControlMsg::Flush | ControlMsg::Stop) {
             let channels = self.channels.len();
             self.restart(channels);
         }
-        self.pad.control(msg)
+        Ok(())
     }
 }
 
@@ -517,7 +517,7 @@ mod tests {
                 Type::Packed,
             )))
             .unwrap();
-        suppressor.control(ControlMsg::Flush).unwrap();
+        suppressor.control(&ControlMsg::Flush).unwrap();
         suppressor.consume(MediaBuffer::Eos).unwrap();
         assert!(matches!(
             received.lock().unwrap().as_slice(),

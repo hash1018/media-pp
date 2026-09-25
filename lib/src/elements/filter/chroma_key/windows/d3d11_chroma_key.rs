@@ -590,13 +590,13 @@ impl Sink for D3d11ChromaKey {
         }
     }
 
-    fn control(&mut self, msg: ControlMsg) -> Result<()> {
+    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
         // A pure per-pixel transform, same as `D3d11Scaler` — nothing local
         // buffered or ordered to flush beyond the cached keyed frame.
         if matches!(msg, ControlMsg::Flush | ControlMsg::Stop) {
             self.repeated.clear();
         }
-        self.pad.control(msg)
+        Ok(())
     }
 }
 

@@ -158,9 +158,15 @@ final source of truth when documentation and implementation differ.
   `SourceElement::pausing` and `resuming`, not in a pause loop of its own.
   Wall-clock-driven sources must add `ControlOutcome::paused_for` back into their
   scheduling state so Resume does not emit a catch-up burst.
-- `Sink::control` must consciously handle and, when it has downstream stages,
-  propagate every control message. A Queue control failure is reported without
-  leaving the control cascade permanently blocked.
+- `Sink::control` is an element's own reaction and nothing more. The graph
+  passes each message on through a filter's `src_pads()` after it
+  (`control::deliver` for a filter driven by hand), to every pad even where
+  one fails; an element never forwards control itself, and `SrcPad::control`
+  is crate-private so that it cannot hand everything after it a message
+  twice. Only an element that routes control its own way — `Queue` across a
+  thread, `Tee` to its branches, a bin to the line inside it — sends it on
+  from its hook. A Queue control failure is reported without leaving the
+  control cascade permanently blocked.
 - Dropping a running `Pipeline`, driver, Queue, or owned helper process must stop
   and join/collect the worker it owns. Retained handles must not accidentally
   keep an unrelated pipeline bus, graph, sink, or worker alive.

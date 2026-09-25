@@ -544,7 +544,7 @@ impl VideoDecodeBin {
             DecodePath::Software(SoftwareReason::HardwareRefused);
 
         if let Some(preroll) = fallback.preroll {
-            self.line.control(preroll)?;
+            self.line.control(&preroll)?;
         }
         // One packet that fails does not keep the rest from being decoded,
         // as it would not have in the line being replaced either; the first
@@ -628,14 +628,14 @@ impl Sink for VideoDecodeBin {
         }
     }
 
-    fn control(&mut self, msg: ControlMsg) -> Result<()> {
+    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
         self.install();
         // Mirrors what the decoder inside does with each, so a replacement
         // can be put in the same state: a preroll is armed until Pause,
         // Resume or Stop ends it, and a Flush or Stop drops the packets a
         // decoder has been told to forget.
         if let Some(fallback) = &mut self.fallback {
-            match &msg {
+            match msg {
                 ControlMsg::Preroll(_) => fallback.preroll = Some(msg.clone()),
                 ControlMsg::Pause | ControlMsg::Resume => fallback.preroll = None,
                 ControlMsg::Flush | ControlMsg::Stop => {
@@ -645,9 +645,11 @@ impl Sink for VideoDecodeBin {
                 ControlMsg::CheckSeek(_) | ControlMsg::Seek(_) => {}
             }
         }
-        self.line.control(msg.clone())?;
-        self.tail.control(msg.clone())?;
-        self.pad.control(msg)
+        // Both, whatever the first answers — as a filter's pads all get a
+        // message; the first failure is the answer.
+        let line = self.line.control(msg);
+        let tail = self.tail.control(msg);
+        line.and(tail)
     }
 }
 
@@ -1865,7 +1867,8 @@ mod tests {
 
             // Frame 3 of five at 30 a second.
             let preroll = PrerollContext::for_seek([], Duration::from_millis(100));
-            bin.control(ControlMsg::Preroll(Arc::new(preroll))).unwrap();
+            bin.control(&ControlMsg::Preroll(Arc::new(preroll)))
+                .unwrap();
             for packet in packets {
                 bin.consume(MediaBuffer::Packet(Arc::new(packet))).unwrap();
             }

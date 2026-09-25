@@ -187,13 +187,13 @@ impl Sink for ChangeGate {
         self.pad.push(buf)
     }
 
-    fn control(&mut self, msg: ControlMsg) -> Result<()> {
+    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
         if matches!(msg, ControlMsg::Flush | ControlMsg::Stop) {
             // Whatever comes next is new by definition: downstream has been
             // reset, or is about to stop.
             self.forwarded = None;
         }
-        self.pad.control(msg)
+        Ok(())
     }
 }
 
@@ -400,7 +400,7 @@ mod tests {
         let first = picture(1);
 
         gate.consume(repeat_of(&first, 1)).expect("first");
-        gate.control(ControlMsg::Flush).expect("flush");
+        gate.control(&ControlMsg::Flush).expect("flush");
         gate.consume(repeat_of(&first, 2)).expect("after flush");
 
         assert_eq!(

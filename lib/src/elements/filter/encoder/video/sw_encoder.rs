@@ -534,15 +534,15 @@ impl Sink for SwEncoder {
         }
     }
 
-    fn control(&mut self, msg: ControlMsg) -> Result<()> {
-        // Current behavior deliberately forwards Seek without flushing
-        // the encoder. Encoders may retain delayed/reordered frames (see
+    fn control(&mut self, _msg: &ControlMsg) -> Result<()> {
+        // Nothing to reset, deliberately: a `Flush` or `Seek` leaves the
+        // encoder as it is. Encoders may retain delayed/reordered frames (see
         // the type docs), so packets originating before the seek can still
         // be emitted by later `send_frame` calls. Callers that require a
         // hard encoded-stream discontinuity must rebuild the encoder; this
         // implementation does not promise that boundary. `Stop` abandons
         // the codec context without flushing it.
-        self.pad.control(msg)
+        Ok(())
     }
 }
 
@@ -646,10 +646,6 @@ mod tests {
             if let MediaBuffer::Packet(packet) = buf {
                 self.packets.lock().unwrap().push(packet);
             }
-            Ok(())
-        }
-
-        fn control(&mut self, _msg: ControlMsg) -> Result<()> {
             Ok(())
         }
     }

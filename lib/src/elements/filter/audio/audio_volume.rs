@@ -368,11 +368,11 @@ impl Sink for AudioVolume {
         }
     }
 
-    fn control(&mut self, msg: ControlMsg) -> Result<()> {
+    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
         if matches!(msg, ControlMsg::Flush | ControlMsg::Stop) {
             self.snap_to_target();
         }
-        self.pad.control(msg)
+        Ok(())
     }
 }
 

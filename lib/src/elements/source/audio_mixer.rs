@@ -482,8 +482,8 @@ impl Sink for MixerInputSink {
     /// freeze/resume, and a live capture source doesn't seek. Removal is
     /// conditional on the registration ID: a late `Stop` from a replaced
     /// sink must not remove the newer input using the same name.
-    fn control(&mut self, msg: ControlMsg) -> Result<()> {
-        if msg == ControlMsg::Stop
+    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
+        if *msg == ControlMsg::Stop
             && let Some(shared) = self.shared.upgrade()
         {
             let mut inputs = shared.inputs.lock().unwrap();
@@ -848,9 +848,6 @@ mod tests {
             }
             Ok(())
         }
-        fn control(&mut self, _msg: ControlMsg) -> Result<()> {
-            Ok(())
-        }
     }
 
     /// Records the *shape* of every frame rather than a sample of it — what
@@ -885,9 +882,6 @@ mod tests {
                     .unwrap()
                     .push((frame.rate(), frame.channel_layout().channels() as u16));
             }
-            Ok(())
-        }
-        fn control(&mut self, _msg: ControlMsg) -> Result<()> {
             Ok(())
         }
     }
@@ -957,9 +951,6 @@ mod tests {
                 };
                 self.seen.lock().unwrap().push((floats[0], floats[1]));
             }
-            Ok(())
-        }
-        fn control(&mut self, _msg: ControlMsg) -> Result<()> {
             Ok(())
         }
     }
@@ -1239,7 +1230,7 @@ mod tests {
         // What a `Queue`/`Pipeline` actually calls on this input's own
         // `Sink` when its upstream capture pipeline is stopped — never
         // `consume(Eos)`, since `WasapiCaptureSource` doesn't send one.
-        input_a.control(ControlMsg::Stop).unwrap();
+        input_a.control(&ControlMsg::Stop).unwrap();
 
         assert_eq!(
             handle.source_count(),
@@ -1303,7 +1294,7 @@ mod tests {
             ))))
             .unwrap();
         stale.consume(MediaBuffer::Eos).unwrap();
-        stale.control(ControlMsg::Stop).unwrap();
+        stale.control(&ControlMsg::Stop).unwrap();
 
         assert_eq!(
             handle.source_count(),
@@ -1336,7 +1327,7 @@ mod tests {
             assert!(input.eos, "current Eos was not accepted");
         }
 
-        current.control(ControlMsg::Stop).unwrap();
+        current.control(&ControlMsg::Stop).unwrap();
         assert_eq!(handle.source_count(), 0);
     }
 

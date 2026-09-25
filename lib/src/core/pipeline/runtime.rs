@@ -457,7 +457,7 @@ impl Pipeline {
                         // the source mutably for the whole loop.
                         let source_log = source.pp_log().clone();
                         for pad in source.src_pads() {
-                            if let Err(error) = pad.control(ControlMsg::Stop) {
+                            if let Err(error) = pad.control(&ControlMsg::Stop) {
                                 pp_warn!(
                                     pp_log: &source_log,
                                     "failed to stop the branch after a source error: {error}"

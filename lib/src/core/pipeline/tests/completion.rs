@@ -129,10 +129,6 @@ impl Sink for EndingSink {
         }
         Ok(())
     }
-
-    fn control(&mut self, _msg: ControlMsg) -> Result<()> {
-        Ok(())
-    }
 }
 
 /// Reads the bus until `Finished` arrives or `timeout` passes, returning

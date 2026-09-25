@@ -22,7 +22,6 @@ mod example {
         Result,
         buffer::MediaBuffer,
         bus::BusEvent,
-        control::ControlMsg,
         element::{Element, ElementType, Sink, element_pp_log},
         elements::{FileDemuxer, SwDecoder, SwScaler},
         pipeline::Pipeline,
@@ -132,10 +131,6 @@ mod example {
                 assert_eq!(frame.width(), DST_WIDTH, "SwScaler didn't resize width");
                 assert_eq!(frame.height(), DST_HEIGHT, "SwScaler didn't resize height");
             }
-            Ok(())
-        }
-
-        fn control(&mut self, _msg: ControlMsg) -> Result<()> {
             Ok(())
         }
     }

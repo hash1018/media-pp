@@ -270,7 +270,7 @@ impl Sink for SwScaler {
         }
     }
 
-    fn control(&mut self, msg: ControlMsg) -> Result<()> {
+    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
         // Nothing local to react to beyond the cached scale: unlike a
         // decoder, this has no reference-frame/reordering state to flush on
         // `Seek`, and nothing buffered to drop on `Stop` — a pure per-frame
@@ -278,7 +278,7 @@ impl Sink for SwScaler {
         if matches!(msg, ControlMsg::Flush | ControlMsg::Stop) {
             self.repeated.clear();
         }
-        self.pad.control(msg)
+        Ok(())
     }
 }
 

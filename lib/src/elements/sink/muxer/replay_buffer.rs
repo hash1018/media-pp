@@ -617,7 +617,7 @@ impl Sink for ReplayTrackSink {
         }
     }
 
-    fn control(&mut self, msg: ControlMsg) -> Result<()> {
+    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
         // Terminal, so nothing is forwarded.
         match msg {
             // A window measured across a jump in the timeline would hold
@@ -1061,7 +1061,7 @@ mod tests {
             "an ended stream is still held"
         );
 
-        sinks[0].control(ControlMsg::Flush).expect("flush");
+        sinks[0].control(&ControlMsg::Flush).expect("flush");
         assert_eq!(handle.buffered(), Duration::ZERO);
     }
 

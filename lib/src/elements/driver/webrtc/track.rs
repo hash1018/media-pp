@@ -20,7 +20,7 @@ use crate::{
     buffer::MediaBuffer,
     bus::Bus,
     contract::{InputContract, OutputContract, PortContract},
-    control::{ControlMsg, ControlReceiver, RequestKind, drain_control, handle_request},
+    control::{ControlReceiver, RequestKind, drain_control, handle_request},
     element::{Element, ElementType, Sink, Source, SourceElement, element_pp_log},
     error::Result,
     pad::SrcPad,
@@ -645,12 +645,6 @@ impl Sink for WebRtcTrackSink {
                 Err(WebRtcError::Closed.into())
             }
         }
-    }
-
-    fn control(&mut self, _msg: ControlMsg) -> Result<()> {
-        // Terminal, same as AppSink/RtspMuxer: nothing buffered or
-        // downstream to flush/forward for any ControlMsg.
-        Ok(())
     }
 }
 

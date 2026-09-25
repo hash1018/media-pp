@@ -282,7 +282,7 @@ impl Sink for D3d12Decoder {
         }
     }
 
-    fn control(&mut self, msg: ControlMsg) -> crate::error::Result<()> {
+    fn control(&mut self, msg: &ControlMsg) -> crate::error::Result<()> {
         // `Stop`: no local reaction needed — see `SwDecoder::control`;
         // same reasoning applies to the hw device context, freed in
         // `Drop`.
@@ -293,7 +293,7 @@ impl Sink for D3d12Decoder {
         //
         // `Preroll` may carry a seek target; the samples decoded while
         // catching up to it exist only to warm the codec.
-        match &msg {
+        match msg {
             ControlMsg::Flush => {
                 self.decoder.flush();
                 self.preroll_gate.reset();
@@ -302,7 +302,7 @@ impl Sink for D3d12Decoder {
             ControlMsg::Pause | ControlMsg::Resume | ControlMsg::Stop => self.preroll_gate.clear(),
             ControlMsg::CheckSeek(_) | ControlMsg::Seek(_) => {}
         }
-        self.pad.control(msg)
+        Ok(())
     }
 }
 

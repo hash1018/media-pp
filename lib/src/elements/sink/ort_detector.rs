@@ -9,7 +9,6 @@ use thiserror::Error as ThisError;
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, PortContract},
-    control::ControlMsg,
     element::{Element, ElementType, Sink, element_pp_log},
     error::Result,
 };
@@ -294,11 +293,5 @@ where
                 Err(OrtDetectorError::UnsupportedBuffer("Audio").into())
             }
         }
-    }
-
-    fn control(&mut self, _msg: ControlMsg) -> Result<()> {
-        // Terminal, same as AppSink/D3d12Renderer: nothing buffered or
-        // downstream to flush/forward for any ControlMsg.
-        Ok(())
     }
 }

@@ -556,12 +556,12 @@ impl Sink for SwAudioEncoder {
         }
     }
 
-    fn control(&mut self, msg: ControlMsg) -> Result<()> {
-        // Same reasoning as `SwEncoder::control`: `Seek` is forwarded
-        // without flushing (delayed/reordered packets from before the
-        // seek can still surface later), `Stop` abandons without
-        // flushing.
-        self.pad.control(msg)
+    fn control(&mut self, _msg: &ControlMsg) -> Result<()> {
+        // Nothing to reset, for the same reason as `SwEncoder::control`: a
+        // `Flush` or `Seek` leaves the encoder as it is (delayed packets from
+        // before the seek can still surface later), and `Stop` abandons it
+        // without flushing.
+        Ok(())
     }
 }
 
@@ -629,9 +629,6 @@ mod tests {
                 }
                 _ => {}
             }
-            Ok(())
-        }
-        fn control(&mut self, _msg: ControlMsg) -> Result<()> {
             Ok(())
         }
     }
@@ -733,9 +730,6 @@ mod tests {
             if let MediaBuffer::Packet(packet) = buf {
                 self.packets.lock().unwrap().push(packet);
             }
-            Ok(())
-        }
-        fn control(&mut self, _msg: ControlMsg) -> Result<()> {
             Ok(())
         }
     }

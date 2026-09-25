@@ -239,7 +239,7 @@ impl Sink for FrameRateLimiter {
         self.pad.push(MediaBuffer::Video(Arc::new(stamped)))
     }
 
-    fn control(&mut self, msg: ControlMsg) -> Result<()> {
+    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
         // `Stop` abandons this run, so a pipeline started again begins a new
         // output timeline at zero like the first one did.
         //
@@ -256,7 +256,7 @@ impl Sink for FrameRateLimiter {
             ControlMsg::Flush => self.next_tick = None,
             _ => {}
         }
-        self.pad.control(msg)
+        Ok(())
     }
 }
 
@@ -480,7 +480,7 @@ mod tests {
 
         limiter.consume(frame(Some(0))).unwrap();
         limiter.consume(frame(Some(2))).unwrap();
-        limiter.control(ControlMsg::Flush).unwrap();
+        limiter.control(&ControlMsg::Flush).unwrap();
         limiter.consume(frame(Some(100))).unwrap();
         assert_eq!(
             stamps(&received),
@@ -488,7 +488,7 @@ mod tests {
             "a flush must not send the output back to zero"
         );
 
-        limiter.control(ControlMsg::Stop).unwrap();
+        limiter.control(&ControlMsg::Stop).unwrap();
         limiter.consume(frame(Some(200))).unwrap();
         assert_eq!(
             stamps(&received).last(),

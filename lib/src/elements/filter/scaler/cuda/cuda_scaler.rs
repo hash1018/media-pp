@@ -10,7 +10,6 @@ use super::scale_graph::CudaScaleGraph;
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, OutputContract, PortContract},
-    control::ControlMsg,
     element::{Element, ElementType, Sink, Source, element_pp_log},
     error::Result,
     frame_size::OutputSize,
@@ -416,12 +415,6 @@ impl Sink for CudaScaler {
             }
             other => Err(CudaScalerError::UnsupportedBuffer(other.kind()).into()),
         }
-    }
-
-    fn control(&mut self, msg: ControlMsg) -> Result<()> {
-        // Nothing local to react to — a pure per-frame spatial transform,
-        // same reasoning as `SwScaler::control`.
-        self.pad.control(msg)
     }
 }
 

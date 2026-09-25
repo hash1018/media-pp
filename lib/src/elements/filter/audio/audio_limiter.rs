@@ -291,11 +291,11 @@ impl Sink for AudioLimiter {
         }
     }
 
-    fn control(&mut self, msg: ControlMsg) -> Result<()> {
+    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
         if matches!(msg, ControlMsg::Flush | ControlMsg::Stop) {
             self.reduction = 0.0;
         }
-        self.pad.control(msg)
+        Ok(())
     }
 }
 

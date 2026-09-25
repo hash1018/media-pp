@@ -400,13 +400,13 @@ impl Sink for CudaChromaKey {
         }
     }
 
-    fn control(&mut self, msg: ControlMsg) -> Result<()> {
+    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
         // Nothing local to react to beyond the cached keyed frame — a pure
         // per-frame transform, same reasoning as `CudaConverter::control`.
         if matches!(msg, ControlMsg::Flush | ControlMsg::Stop) {
             self.repeated.clear();
         }
-        self.pad.control(msg)
+        Ok(())
     }
 }
 

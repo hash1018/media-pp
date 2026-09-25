@@ -471,7 +471,7 @@ impl SegmentGroup {
         packet: &ffmpeg::Packet,
     ) -> Result<u64> {
         for sink in state.current_sinks.iter_mut() {
-            sink.control(ControlMsg::Stop)?;
+            sink.control(&ControlMsg::Stop)?;
         }
         let index = state.segment_index + 1;
         let path = (self.naming.lock().unwrap())(index);
@@ -571,7 +571,7 @@ impl SegmentGroup {
     fn finish_stop(&self, track_index: usize) -> Result<()> {
         let mut state = self.state.lock().unwrap();
         let released = self.release_ending(&mut state, track_index);
-        let stopped = state.current_sinks[track_index].control(ControlMsg::Stop);
+        let stopped = state.current_sinks[track_index].control(&ControlMsg::Stop);
         released.and(stopped)
     }
 }
@@ -631,7 +631,7 @@ impl Sink for SegmentedTrackSink {
         }
     }
 
-    fn control(&mut self, msg: ControlMsg) -> Result<()> {
+    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
         if let ControlMsg::CheckSeek(context) = &msg {
             context.reject(
                 self.element_type(),
@@ -639,7 +639,7 @@ impl Sink for SegmentedTrackSink {
                 SeekRejectReason::ElementNotSeekable,
             );
         }
-        if msg == ControlMsg::Stop {
+        if *msg == ControlMsg::Stop {
             self.group.finish_stop(self.track_index)?;
         }
         Ok(())

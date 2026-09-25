@@ -152,8 +152,8 @@ impl Sink for Recorder {
         Ok(())
     }
 
-    fn control(&mut self, msg: ControlMsg) -> Result<()> {
-        self.log.lock().unwrap().push(Entry::Control(msg));
+    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
+        self.log.lock().unwrap().push(Entry::Control(msg.clone()));
         Ok(())
     }
 }

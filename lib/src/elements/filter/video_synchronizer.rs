@@ -271,7 +271,7 @@ impl Sink for VideoSynchronizer {
         Ok(())
     }
 
-    fn control(&mut self, msg: ControlMsg) -> crate::error::Result<()> {
+    fn control(&mut self, msg: &ControlMsg) -> crate::error::Result<()> {
         if let Some(playback_clock) = &self.playback_clock {
             self.interrupt_epoch = playback_clock.interrupt_epoch();
         }
@@ -289,7 +289,7 @@ impl Sink for VideoSynchronizer {
             }
             ControlMsg::Seek(_) | ControlMsg::CheckSeek(_) => {}
         }
-        self.pad.control(msg)
+        Ok(())
     }
 }
 
@@ -441,10 +441,11 @@ mod tests {
         // Audio has primed nothing, so ordinary scheduling would hold here.
         assert!(matches!(sync.decision(ms(2_000)), Decision::Hold));
 
-        sync.control(ControlMsg::Preroll(context)).expect("preroll");
+        sync.control(&ControlMsg::Preroll(context))
+            .expect("preroll");
         assert!(matches!(sync.wait_for(ms(2_000)), WaitOutcome::Render));
 
-        sync.control(ControlMsg::Resume).expect("resume");
+        sync.control(&ControlMsg::Resume).expect("resume");
         assert!(matches!(sync.decision(ms(2_000)), Decision::Hold));
     }
 }

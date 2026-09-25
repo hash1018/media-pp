@@ -438,13 +438,13 @@ impl Sink for CudaConverter {
         }
     }
 
-    fn control(&mut self, msg: ControlMsg) -> Result<()> {
+    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
         // Nothing local to react to beyond the cached conversion — a pure
         // per-frame conversion, same reasoning as `CudaUpload::control`.
         if matches!(msg, ControlMsg::Flush | ControlMsg::Stop) {
             self.repeated.clear();
         }
-        self.pad.control(msg)
+        Ok(())
     }
 }
 

@@ -698,10 +698,9 @@ impl Sink for VideoEncodeBin {
         Ok(())
     }
 
-    fn control(&mut self, msg: ControlMsg) -> Result<()> {
+    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
         self.install();
-        self.line.control(msg.clone())?;
-        self.pad.control(msg)
+        self.line.control(msg)
     }
 }
 

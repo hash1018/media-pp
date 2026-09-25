@@ -337,12 +337,12 @@ impl Sink for AudioWaveform {
         }
     }
 
-    fn control(&mut self, msg: ControlMsg) -> Result<()> {
+    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
         if matches!(msg, ControlMsg::Flush | ControlMsg::Stop) {
             self.samples.clear();
             self.clock = None;
         }
-        self.pad.control(msg)
+        Ok(())
     }
 }
 
@@ -466,7 +466,7 @@ mod tests {
         for frame in sound(0.2, 440.0, 0.5, 0) {
             waveform.consume(frame).unwrap();
         }
-        waveform.control(ControlMsg::Flush).unwrap();
+        waveform.control(&ControlMsg::Flush).unwrap();
         received.lock().unwrap().clear();
         for frame in sound(0.2, 440.0, 0.5, 96_000) {
             waveform.consume(frame).unwrap();

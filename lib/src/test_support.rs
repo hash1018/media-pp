@@ -850,10 +850,6 @@ impl crate::element::Sink for CapturingSink {
         self.received.lock().unwrap().push(buf);
         Ok(())
     }
-
-    fn control(&mut self, _msg: crate::control::ControlMsg) -> crate::error::Result<()> {
-        Ok(())
-    }
 }
 
 /// Links a [`CapturingSink`] to `element`'s first src pad, and returns

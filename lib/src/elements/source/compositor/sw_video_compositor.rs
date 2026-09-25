@@ -502,7 +502,7 @@ impl Sink for SwVideoCompositorInputSink {
         }
     }
 
-    fn control(&mut self, msg: ControlMsg) -> Result<()> {
+    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
         match msg {
             ControlMsg::Stop => self.detach(),
             ControlMsg::Flush => {
@@ -1579,7 +1579,7 @@ mod tests {
         let layer = VideoLayer::new(VideoRect::new(0, 0, 1, 1));
         let (mut old_sink, _) = input(&handle, "camera", layer);
         let (_new_sink, _) = input(&handle, "camera", layer);
-        old_sink.control(ControlMsg::Stop).unwrap();
+        old_sink.control(&ControlMsg::Stop).unwrap();
         assert_eq!(handle.source_count(), 1);
 
         handle.remove_source("camera");
@@ -1678,9 +1678,6 @@ mod tests {
                 thread::sleep(self.hold);
                 let _ = self.tx.send(Instant::now());
             }
-            Ok(())
-        }
-        fn control(&mut self, _msg: ControlMsg) -> Result<()> {
             Ok(())
         }
     }

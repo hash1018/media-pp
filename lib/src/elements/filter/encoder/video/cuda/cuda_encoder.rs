@@ -468,12 +468,13 @@ impl Sink for CudaEncoder {
         }
     }
 
-    fn control(&mut self, msg: ControlMsg) -> Result<()> {
-        // Same deliberate choice as `SwEncoder`/`D3d11VideoEncoder`: Seek is
-        // forwarded without flushing, since NVENC can still emit packets
-        // originating before the seek from later `send_frame` calls. A caller
-        // needing a hard encoded-stream discontinuity rebuilds the encoder.
-        self.pad.control(msg)
+    fn control(&mut self, _msg: &ControlMsg) -> Result<()> {
+        // Nothing to reset, the same deliberate choice as `SwEncoder` and
+        // `D3d11VideoEncoder`: a `Flush` or `Seek` leaves NVENC as it is, so
+        // packets from before the seek can still come out of later
+        // `send_frame` calls. A caller needing a hard encoded-stream
+        // discontinuity rebuilds the encoder.
+        Ok(())
     }
 }
 

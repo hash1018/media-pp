@@ -887,7 +887,7 @@ impl Sink for PipeWireAudioRenderer {
         }
     }
 
-    fn control(&mut self, msg: ControlMsg) -> Result<()> {
+    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
         match msg {
             ControlMsg::Pause => {
                 self.set_active(false)?;

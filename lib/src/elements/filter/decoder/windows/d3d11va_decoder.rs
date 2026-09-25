@@ -394,14 +394,14 @@ impl Sink for D3d11Decoder {
         }
     }
 
-    fn control(&mut self, msg: ControlMsg) -> crate::error::Result<()> {
+    fn control(&mut self, msg: &ControlMsg) -> crate::error::Result<()> {
         // Same reasoning as `D3d12Decoder::control`: nothing to do on
         // `Stop` (the hw device context is freed in `Drop`), flush
         // reference-frame state on `Flush`.
         //
         // `Preroll` may carry a seek target; the samples decoded while
         // catching up to it exist only to warm the codec.
-        match &msg {
+        match msg {
             ControlMsg::Flush => {
                 self.decoder.flush();
                 self.preroll_gate.reset();
@@ -410,7 +410,7 @@ impl Sink for D3d11Decoder {
             ControlMsg::Pause | ControlMsg::Resume | ControlMsg::Stop => self.preroll_gate.clear(),
             ControlMsg::CheckSeek(_) | ControlMsg::Seek(_) => {}
         }
-        self.pad.control(msg)
+        Ok(())
     }
 }
 
@@ -748,9 +748,6 @@ mod tests {
             self.held.lock().unwrap().push(buf);
             Ok(())
         }
-        fn control(&mut self, _msg: crate::control::ControlMsg) -> crate::error::Result<()> {
-            Ok(())
-        }
     }
 
     /// Frames held downstream past what the fixed surface pool can spare used
@@ -826,7 +823,7 @@ mod tests {
         held.lock().unwrap().clear();
         drop(remaining);
         decoder
-            .control(crate::control::ControlMsg::Flush)
+            .control(&crate::control::ControlMsg::Flush)
             .expect("flush");
         for packet in packets.iter().take(5) {
             decoder

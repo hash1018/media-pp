@@ -152,7 +152,7 @@ impl Line {
 
     /// Sends `msg` down the line, which stops at its end — what is past the
     /// owner is the owner's own pad to tell.
-    pub(crate) fn control(&mut self, msg: ControlMsg) -> Result<()> {
+    pub(crate) fn control(&mut self, msg: &ControlMsg) -> Result<()> {
         match &mut self.head {
             Some(head) => head.control(msg),
             None => Ok(()),
@@ -192,13 +192,6 @@ impl Sink for Collector {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .push(buf);
-        Ok(())
-    }
-
-    /// The end of the line. Control has already reached every element on
-    /// the way here, and what is past the owner is the owner's own pad to
-    /// tell.
-    fn control(&mut self, _msg: ControlMsg) -> Result<()> {
         Ok(())
     }
 }

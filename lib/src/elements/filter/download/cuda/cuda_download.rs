@@ -264,14 +264,14 @@ impl Sink for CudaDownload {
         }
     }
 
-    fn control(&mut self, msg: ControlMsg) -> Result<()> {
+    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
         // Nothing local to react to beyond the cached download — a pure
         // per-frame GPU->CPU transfer, same reasoning as
         // `CudaUpload::control`.
         if matches!(msg, ControlMsg::Flush | ControlMsg::Stop) {
             self.repeated.clear();
         }
-        self.pad.control(msg)
+        Ok(())
     }
 }
 

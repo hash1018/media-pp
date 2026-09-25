@@ -887,12 +887,13 @@ impl Sink for D3d11VideoEncoder {
         }
     }
 
-    fn control(&mut self, msg: ControlMsg) -> Result<()> {
-        // Same deliberate choice as `SwEncoder::control`: Seek is forwarded
-        // without flushing, since the encoder can still emit packets originating
-        // before the seek from later `send_frame` calls. A caller needing a
-        // hard encoded-stream discontinuity rebuilds the encoder.
-        self.pad.control(msg)
+    fn control(&mut self, _msg: &ControlMsg) -> Result<()> {
+        // Nothing to reset, the same deliberate choice as `SwEncoder::control`:
+        // a `Flush` or `Seek` leaves the encoder as it is, so packets from
+        // before the seek can still come out of later `send_frame` calls. A
+        // caller needing a hard encoded-stream discontinuity rebuilds the
+        // encoder.
+        Ok(())
     }
 }
 

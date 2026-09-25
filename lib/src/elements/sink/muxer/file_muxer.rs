@@ -348,7 +348,7 @@ mod tests {
             .expect("the muxer's own track");
         let context = Arc::new(SeekCheckContext::new());
 
-        sink.control(ControlMsg::CheckSeek(Arc::clone(&context)))
+        sink.control(&ControlMsg::CheckSeek(Arc::clone(&context)))
             .expect("check control");
 
         let error = context.result().expect_err("muxer must reject seek");
@@ -357,7 +357,7 @@ mod tests {
             error.rejections()[0].reason,
             SeekRejectReason::ElementNotSeekable
         );
-        sink.control(ControlMsg::Stop).expect("finalize muxer");
+        sink.control(&ControlMsg::Stop).expect("finalize muxer");
         std::fs::remove_file(path).ok();
     }
 

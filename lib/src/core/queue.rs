@@ -526,7 +526,7 @@ impl Sink for Queue {
         result
     }
 
-    fn control(&mut self, msg: ControlMsg) -> Result<()> {
+    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
         // Blocks until the worker — and everything downstream of it — has
         // finished handling this. Never stuck behind a data backlog: the
         // worker checks this channel before every data buffer it pulls
@@ -1116,7 +1116,7 @@ fn forward_control(
     msg: ControlMsg,
     error_reporter: &QueueErrorReporter<'_>,
 ) {
-    if let Err(error) = downstream.control(msg) {
+    if let Err(error) = downstream.control(&msg) {
         error_reporter.post(error);
     }
 }
@@ -1199,10 +1199,6 @@ mod tests {
             }
             Ok(())
         }
-
-        fn control(&mut self, _msg: ControlMsg) -> Result<()> {
-            Ok(())
-        }
     }
 
     fn packet() -> MediaBuffer {
@@ -1240,10 +1236,6 @@ mod tests {
 
     impl Sink for DropAwareSink {
         fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
-            Ok(())
-        }
-
-        fn control(&mut self, _msg: ControlMsg) -> Result<()> {
             Ok(())
         }
     }
@@ -1365,10 +1357,6 @@ mod tests {
                     self.count.fetch_add(1, Ordering::SeqCst);
                 }
             }
-            Ok(())
-        }
-
-        fn control(&mut self, _msg: ControlMsg) -> Result<()> {
             Ok(())
         }
     }
@@ -1563,7 +1551,7 @@ mod tests {
             None,
         )
         .unwrap();
-        queue.control(ControlMsg::Pause).unwrap(); // blocks until the worker is actually paused
+        queue.control(&ControlMsg::Pause).unwrap(); // blocks until the worker is actually paused
 
         for _ in 0..3 {
             queue.consume(packet()).unwrap();
@@ -1573,7 +1561,7 @@ mod tests {
         thread::sleep(Duration::from_millis(100));
         assert_eq!(count.load(Ordering::SeqCst), 0);
 
-        queue.control(ControlMsg::Resume).unwrap();
+        queue.control(&ControlMsg::Resume).unwrap();
         queue.consume(MediaBuffer::Eos).unwrap();
         drop(queue);
 
@@ -1597,11 +1585,11 @@ mod tests {
             None,
         )
         .unwrap();
-        queue.control(ControlMsg::Pause).unwrap();
+        queue.control(&ControlMsg::Pause).unwrap();
         queue.consume(packet()).unwrap();
 
         queue
-            .control(ControlMsg::Preroll(Arc::new(PrerollContext::new([]))))
+            .control(&ControlMsg::Preroll(Arc::new(PrerollContext::new([]))))
             .unwrap();
         for _ in 0..50 {
             if count.load(Ordering::SeqCst) == 1 {
@@ -1610,7 +1598,7 @@ mod tests {
             thread::sleep(Duration::from_millis(2));
         }
         assert_eq!(count.load(Ordering::SeqCst), 1);
-        queue.control(ControlMsg::Stop).unwrap();
+        queue.control(&ControlMsg::Stop).unwrap();
     }
 
     /// Regression test: before `Queue::drop` set its own `stop` flag,
@@ -1666,7 +1654,7 @@ mod tests {
             None,
         )
         .unwrap();
-        queue.control(ControlMsg::Pause).unwrap(); // blocks until the worker is actually paused
+        queue.control(&ControlMsg::Pause).unwrap(); // blocks until the worker is actually paused
         drop(queue);
     }
 
@@ -1689,7 +1677,7 @@ mod tests {
         )
         .unwrap();
         queue.consume(packet()).unwrap();
-        queue.control(ControlMsg::Stop).unwrap(); // blocks until the worker has exited
+        queue.control(&ControlMsg::Stop).unwrap(); // blocks until the worker has exited
         drop(queue); // join should return immediately — the worker already returned
     }
 
@@ -1731,10 +1719,6 @@ mod tests {
             self.count.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
-
-        fn control(&mut self, _msg: ControlMsg) -> Result<()> {
-            Ok(())
-        }
     }
 
     struct FailControl {
@@ -1764,7 +1748,7 @@ mod tests {
             Ok(())
         }
 
-        fn control(&mut self, msg: ControlMsg) -> Result<()> {
+        fn control(&mut self, msg: &ControlMsg) -> Result<()> {
             Err(crate::error::Error::Other(format!(
                 "simulated {msg:?} failure"
             )))
@@ -1885,9 +1869,9 @@ mod tests {
         )
         .unwrap();
 
-        queue.control(ControlMsg::Pause).unwrap();
-        queue.control(ControlMsg::Resume).unwrap();
-        queue.control(ControlMsg::Stop).unwrap();
+        queue.control(&ControlMsg::Pause).unwrap();
+        queue.control(&ControlMsg::Resume).unwrap();
+        queue.control(&ControlMsg::Stop).unwrap();
         drop(queue);
 
         let errors: Vec<_> = bus_rx
@@ -1934,10 +1918,6 @@ mod tests {
                 return Err(crate::error::Error::Other("simulated drain failure".into()));
             }
             self.count.fetch_add(1, Ordering::SeqCst);
-            Ok(())
-        }
-
-        fn control(&mut self, _msg: ControlMsg) -> Result<()> {
             Ok(())
         }
     }
@@ -2037,7 +2017,7 @@ mod tests {
             Ok(())
         }
 
-        fn control(&mut self, msg: ControlMsg) -> Result<()> {
+        fn control(&mut self, msg: &ControlMsg) -> Result<()> {
             let label = match msg {
                 ControlMsg::Flush => "flush",
                 ControlMsg::Seek(_) => "seek",
@@ -2087,13 +2067,13 @@ mod tests {
         queue.consume(MediaBuffer::Eos).unwrap();
         expect_eos(&bus_rx);
 
-        queue.control(ControlMsg::Flush).unwrap();
-        queue.control(ControlMsg::Seek(Duration::ZERO)).unwrap();
+        queue.control(&ControlMsg::Flush).unwrap();
+        queue.control(&ControlMsg::Seek(Duration::ZERO)).unwrap();
         queue.consume(packet()).unwrap();
         queue.consume(MediaBuffer::Eos).unwrap();
         expect_eos(&bus_rx);
 
-        queue.control(ControlMsg::Stop).unwrap();
+        queue.control(&ControlMsg::Stop).unwrap();
         assert_eq!(
             *seen.lock().unwrap(),
             ["packet", "eos", "flush", "seek", "packet", "eos", "stop"]
@@ -2159,10 +2139,6 @@ mod tests {
             if let MediaBuffer::Packet(packet) = buf {
                 self.seen.lock().unwrap().push(packet.pts().unwrap_or(-1));
             }
-            Ok(())
-        }
-
-        fn control(&mut self, _msg: ControlMsg) -> Result<()> {
             Ok(())
         }
     }
@@ -2247,7 +2223,7 @@ mod tests {
         for pts in 0..3 {
             queue.consume(packet_at(pts)).expect("handed over");
         }
-        queue.control(ControlMsg::Flush).expect("flush");
+        queue.control(&ControlMsg::Flush).expect("flush");
         clock.settle();
         queue.consume(packet_at(10)).expect("send");
         let deadline = std::time::Instant::now() + Duration::from_secs(5);

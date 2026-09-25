@@ -326,11 +326,11 @@ impl Sink for AudioCompressor {
         }
     }
 
-    fn control(&mut self, msg: ControlMsg) -> Result<()> {
+    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
         if matches!(msg, ControlMsg::Flush | ControlMsg::Stop) {
             self.level = 0.0;
         }
-        self.pad.control(msg)
+        Ok(())
     }
 }
 

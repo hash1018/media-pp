@@ -581,7 +581,7 @@ impl Sink for WasapiRenderer {
         }
     }
 
-    fn control(&mut self, msg: ControlMsg) -> Result<()> {
+    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
         let _apartment = ComApartment::new().map_err(WasapiRendererError::from)?;
         match msg {
             ControlMsg::Pause => {
@@ -759,15 +759,15 @@ mod tests {
             };
 
         renderer
-            .control(ControlMsg::Pause)
+            .control(&ControlMsg::Pause)
             .expect("pause the renderer");
         renderer
-            .control(ControlMsg::Flush)
+            .control(&ControlMsg::Flush)
             .expect("flush must reset the endpoint");
         assert!(renderer.paused, "a flush must not resume a paused renderer");
 
         renderer
-            .control(ControlMsg::Resume)
+            .control(&ControlMsg::Resume)
             .expect("resume the renderer");
         assert!(!renderer.paused, "only Resume lifts the pause");
     }

@@ -307,14 +307,14 @@ impl Sink for CudaDecoder {
         }
     }
 
-    fn control(&mut self, msg: ControlMsg) -> crate::error::Result<()> {
+    fn control(&mut self, msg: &ControlMsg) -> crate::error::Result<()> {
         // Same reasoning as `D3d11Decoder::control`: nothing to do on `Stop`
         // (the hw device reference is released in `Drop`), flush
         // reference-frame state on `Seek`.
         //
         // `Preroll` may carry a seek target; the samples decoded while
         // catching up to it exist only to warm the codec.
-        match &msg {
+        match msg {
             ControlMsg::Flush => {
                 self.decoder.flush();
                 self.preroll_gate.reset();
@@ -323,7 +323,7 @@ impl Sink for CudaDecoder {
             ControlMsg::Pause | ControlMsg::Resume | ControlMsg::Stop => self.preroll_gate.clear(),
             ControlMsg::CheckSeek(_) | ControlMsg::Seek(_) => {}
         }
-        self.pad.control(msg)
+        Ok(())
     }
 }
 

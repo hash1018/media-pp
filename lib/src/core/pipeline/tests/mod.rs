@@ -128,10 +128,6 @@ impl Sink for SlowEosSink {
         }
         Ok(())
     }
-
-    fn control(&mut self, _msg: ControlMsg) -> Result<()> {
-        Ok(())
-    }
 }
 
 struct NoOpSink {
@@ -157,9 +153,6 @@ impl Element for NoOpSink {
 }
 impl Sink for NoOpSink {
     fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
-        Ok(())
-    }
-    fn control(&mut self, _msg: ControlMsg) -> Result<()> {
         Ok(())
     }
 }
@@ -196,9 +189,6 @@ impl Sink for CountingSink {
         if !buf.is_eos() {
             self.count.fetch_add(1, Ordering::SeqCst);
         }
-        Ok(())
-    }
-    fn control(&mut self, _msg: ControlMsg) -> Result<()> {
         Ok(())
     }
 }

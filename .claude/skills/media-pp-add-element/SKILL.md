@@ -56,9 +56,10 @@ name.
 - A direct `Sink::consume` remains synchronous. Introduce a worker only when the
   contract requires one; `Queue` is the normal explicit downstream thread and
   recovery boundary.
-- Implement every `Sink::control` case consciously and propagate control when
-  the element has downstream pads. Flush delayed state before forwarding EOS;
-  treat `Stop` as abandonment rather than natural EOS.
+- Implement `Sink::control` for what the element itself holds — timeline
+  state a `Flush` ends, a device a `Stop` releases — and nothing else: the
+  graph passes the message on through its pads. Flush delayed state before
+  forwarding EOS; treat `Stop` as abandonment rather than natural EOS.
 - In a `SourceElement` loop, remain responsive through the established control
   helpers. Report a recoverable per-buffer pad-push error to the source bus and
   continue; return `Err` only when the source cannot meaningfully continue.

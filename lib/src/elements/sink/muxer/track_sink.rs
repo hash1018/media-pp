@@ -303,7 +303,7 @@ impl<M: Muxer> Sink for TrackSink<M> {
         }
     }
 
-    fn control(&mut self, msg: ControlMsg) -> Result<()> {
+    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
         // Terminal, so nothing is forwarded.
         match msg {
             ControlMsg::CheckSeek(context) if self.timeline.is_none() => {
@@ -401,7 +401,7 @@ mod tests {
 
     fn seek_refused(sink: &mut Box<dyn Sink>) -> bool {
         let context = Arc::new(SeekCheckContext::new());
-        sink.control(ControlMsg::CheckSeek(Arc::clone(&context)))
+        sink.control(&ControlMsg::CheckSeek(Arc::clone(&context)))
             .expect("a seek check is answered, not failed");
         context.result().is_err()
     }
@@ -425,7 +425,7 @@ mod tests {
             },
         );
         assert!(seek_refused(&mut sink));
-        sink.control(ControlMsg::Stop).expect("stop");
+        sink.control(&ControlMsg::Stop).expect("stop");
         assert!(finalized(&path), "Stop must write the trailer");
         drop(sink);
         std::fs::remove_file(&path).ok();
@@ -525,7 +525,7 @@ mod tests {
             },
         );
         assert!(!seek_refused(&mut sink));
-        sink.control(ControlMsg::Stop).expect("stop");
+        sink.control(&ControlMsg::Stop).expect("stop");
         assert!(!finalized(&path), "Stop must not write the trailer here");
         sink.consume(MediaBuffer::Eos).expect("eos");
         assert!(finalized(&path), "Eos must write the trailer");

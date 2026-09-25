@@ -552,7 +552,7 @@ impl Sink for D3d11VideoCompositorInputSink {
         }
     }
 
-    fn control(&mut self, msg: ControlMsg) -> Result<()> {
+    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
         match msg {
             ControlMsg::Stop => self.detach(),
             ControlMsg::Flush => {

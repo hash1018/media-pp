@@ -281,12 +281,11 @@ impl Sink for Rack {
 
     /// Reaches what is installed, which is not necessarily what has been
     /// handed to the handle — see this type's own docs.
-    fn control(&mut self, msg: ControlMsg) -> Result<()> {
-        // Into the rack first, so an element inside sees a Flush before the
-        // element after the rack does, exactly as it would if the two were
-        // linked directly.
-        self.line.control(msg.clone())?;
-        self.pad.control(msg)
+    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
+        // Into the rack here, and past it once this returns, so an element
+        // inside sees a Flush before the element after the rack does, exactly
+        // as it would if the two were linked directly.
+        self.line.control(msg)
     }
 }
 
@@ -333,8 +332,8 @@ mod tests {
             self.received.lock().unwrap().push(buf);
             Ok(())
         }
-        fn control(&mut self, msg: ControlMsg) -> Result<()> {
-            self.controls.lock().unwrap().push(msg);
+        fn control(&mut self, msg: &ControlMsg) -> Result<()> {
+            self.controls.lock().unwrap().push(msg.clone());
             Ok(())
         }
     }
@@ -399,9 +398,9 @@ mod tests {
             self.pad.push(MediaBuffer::Video(Arc::new(next)))
         }
 
-        fn control(&mut self, msg: ControlMsg) -> Result<()> {
+        fn control(&mut self, msg: &ControlMsg) -> Result<()> {
             self.controls.lock().unwrap().push(msg.clone());
-            self.pad.control(msg)
+            Ok(())
         }
     }
 
@@ -569,7 +568,7 @@ mod tests {
         // asking an unfed rack for a flush asks an empty one.
         rig.rack.consume(frame(0)).expect("install the line");
 
-        rig.rack.control(ControlMsg::Flush).expect("flush");
+        crate::control::deliver(&mut rig.rack, &ControlMsg::Flush).expect("flush");
 
         let controls = rig.controls.lock().unwrap();
         assert_eq!(controls.len(), 2, "the element inside, then the one after");
@@ -580,7 +579,7 @@ mod tests {
     #[test]
     fn control_still_reaches_past_an_empty_rack() {
         let mut rig = rig();
-        rig.rack.control(ControlMsg::Stop).expect("stop");
+        crate::control::deliver(&mut rig.rack, &ControlMsg::Stop).expect("stop");
 
         let controls = rig.controls.lock().unwrap();
         assert_eq!(controls.len(), 1);
@@ -617,9 +616,6 @@ mod tests {
         }
         impl Sink for TwoOut {
             fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
-                Ok(())
-            }
-            fn control(&mut self, _msg: ControlMsg) -> Result<()> {
                 Ok(())
             }
         }
@@ -691,9 +687,6 @@ mod tests {
         fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
             Err(crate::error::Error::Other("this element refuses".into()))
         }
-        fn control(&mut self, msg: ControlMsg) -> Result<()> {
-            self.pad.control(msg)
-        }
     }
 
     /// What a `Queue` reports is the element that failed, and being inside a
@@ -755,7 +748,7 @@ mod tests {
             fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
                 self.pad.push(buf)
             }
-            fn control(&mut self, _msg: ControlMsg) -> Result<()> {
+            fn control(&mut self, _msg: &ControlMsg) -> Result<()> {
                 Err(crate::error::Error::Other("no controls here".into()))
             }
         }
@@ -780,7 +773,7 @@ mod tests {
 
         let error = rig
             .rack
-            .control(ControlMsg::Flush)
+            .control(&ControlMsg::Flush)
             .expect_err("the element refuses controls");
         assert_eq!(
             &*error

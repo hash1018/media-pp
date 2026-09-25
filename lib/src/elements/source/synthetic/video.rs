@@ -281,7 +281,7 @@ mod tests {
     use crate::pp_log::PpLog;
 
     use super::*;
-    use crate::{control::ControlMsg, element::Sink, pipeline::Pipeline};
+    use crate::{element::Sink, pipeline::Pipeline};
 
     type VideoObservation = (ffmpeg::format::Pixel, u32, u32, Option<i64>);
     type RecordedFrames = Arc<Mutex<Vec<VideoObservation>>>;
@@ -319,9 +319,6 @@ mod tests {
                     frame.pts(),
                 ));
             }
-            Ok(())
-        }
-        fn control(&mut self, _msg: ControlMsg) -> crate::error::Result<()> {
             Ok(())
         }
     }
@@ -410,9 +407,6 @@ mod tests {
             if matches!(buf, MediaBuffer::Video(_)) {
                 self.seen.lock().unwrap().push(Instant::now());
             }
-            Ok(())
-        }
-        fn control(&mut self, _msg: ControlMsg) -> crate::error::Result<()> {
             Ok(())
         }
     }
@@ -511,9 +505,6 @@ mod tests {
                 // against.
                 let _ = self.tx.send(Instant::now());
             }
-            Ok(())
-        }
-        fn control(&mut self, _msg: ControlMsg) -> crate::error::Result<()> {
             Ok(())
         }
     }

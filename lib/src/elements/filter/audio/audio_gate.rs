@@ -397,11 +397,11 @@ impl Sink for AudioGate {
         }
     }
 
-    fn control(&mut self, msg: ControlMsg) -> Result<()> {
+    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
         if matches!(msg, ControlMsg::Flush | ControlMsg::Stop) {
             self.close();
         }
-        self.pad.control(msg)
+        Ok(())
     }
 }
 
@@ -633,7 +633,7 @@ mod tests {
             ..no_timing()
         });
         run(&mut gate, &received, &tone(-12.0, 0.1));
-        gate.control(ControlMsg::Flush).unwrap();
+        gate.control(&ControlMsg::Flush).unwrap();
         let after = run(&mut gate, &received, &vec![0.5; 480]);
         assert!(after[0] < 0.01, "fades in again: {}", after[0]);
     }

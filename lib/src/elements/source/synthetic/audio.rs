@@ -254,7 +254,7 @@ mod tests {
     use crate::pp_log::PpLog;
 
     use super::*;
-    use crate::{control::ControlMsg, element::Sink, pipeline::Pipeline};
+    use crate::{element::Sink, pipeline::Pipeline};
 
     /// Captures every frame's `(format, rate, channels, pts, first_sample)`
     /// it sees, in order.
@@ -292,9 +292,6 @@ mod tests {
                     frame.plane::<f32>(0)[0],
                 ));
             }
-            Ok(())
-        }
-        fn control(&mut self, _msg: ControlMsg) -> Result<()> {
             Ok(())
         }
     }

@@ -30,7 +30,6 @@ mod example {
     use media_pp::pp_log::PpLog;
     use media_pp::{
         buffer::MediaBuffer,
-        control::ControlMsg,
         driver::DriverRunner,
         element::{Element, ElementType, Sink, element_pp_log},
         elements::{
@@ -329,9 +328,6 @@ mod example {
             if matches!(buf, MediaBuffer::Packet(_)) {
                 self.count.fetch_add(1, Ordering::SeqCst);
             }
-            Ok(())
-        }
-        fn control(&mut self, _msg: ControlMsg) -> media_pp::Result<()> {
             Ok(())
         }
     }

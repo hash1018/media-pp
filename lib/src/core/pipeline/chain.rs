@@ -161,12 +161,16 @@ impl<T: Filter> Sink for FlowTracer<T> {
         self.trace_origin(result)
     }
 
-    fn control(&mut self, msg: ControlMsg) -> Result<()> {
+    /// The filter's own reaction, and then the message on through its pads
+    /// — the passing on that no filter does itself (see
+    /// [`Sink::control`]). Traced around both, so a log shows everything
+    /// after this element handle the message inside this one's record of it.
+    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
         pp_trace!(
             pp_log: self.inner.pp_log(),
             "event=control control={msg:?} phase=received"
         );
-        let result = self.inner.control(msg.clone());
+        let result = crate::control::deliver(&mut self.inner, msg);
         match &result {
             Ok(()) => pp_trace!(
                 pp_log: self.inner.pp_log(),
@@ -351,14 +355,14 @@ impl Sink for TerminalTracer {
         result.map_err(|error| error.traced_at(self.inner.element_type(), self.inner.name()))
     }
 
-    fn control(&mut self, msg: ControlMsg) -> Result<()> {
+    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
         pp_trace!(
             pp_log: self.inner.pp_log(),
             "event=control control={msg:?} phase=received"
         );
         let result = self
             .inner
-            .control(msg.clone())
+            .control(msg)
             .map_err(|error| error.traced_at(self.inner.element_type(), self.inner.name()));
         // Whether or not the sink managed its own flush: a seek is under way
         // either way, and what this terminal ended belongs to the stream
@@ -367,7 +371,7 @@ impl Sink for TerminalTracer {
             self.completion.terminal_flushed(self.id);
         }
         if result.is_ok() {
-            match &msg {
+            match msg {
                 ControlMsg::Pause => {
                     self.paused = true;
                     self.preroll = None;
@@ -834,10 +838,6 @@ mod tests {
             self.count.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
-
-        fn control(&mut self, _msg: ControlMsg) -> Result<()> {
-            Ok(())
-        }
     }
 
     fn terminal(id: ElementId, count: Arc<AtomicUsize>) -> TerminalTracer {
@@ -872,14 +872,14 @@ mod tests {
         let mut second_terminal = terminal(second, Arc::new(AtomicUsize::new(0)));
 
         first_terminal
-            .control(ControlMsg::Pause)
+            .control(&ControlMsg::Pause)
             .expect("pause first terminal");
         assert!(!first_terminal.ready_consume());
         first_terminal
-            .control(ControlMsg::Preroll(Arc::clone(&context)))
+            .control(&ControlMsg::Preroll(Arc::clone(&context)))
             .expect("preroll first terminal");
         second_terminal
-            .control(ControlMsg::Preroll(Arc::clone(&context)))
+            .control(&ControlMsg::Preroll(Arc::clone(&context)))
             .expect("preroll second terminal");
 
         first_terminal
@@ -903,7 +903,7 @@ mod tests {
         assert!(!second_terminal.ready_consume());
 
         first_terminal
-            .control(ControlMsg::Resume)
+            .control(&ControlMsg::Resume)
             .expect("resume first terminal");
         assert!(first_terminal.ready_consume());
     }

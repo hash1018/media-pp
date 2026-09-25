@@ -448,7 +448,7 @@ impl Sink for CudaVideoCompositorInputSink {
         }
     }
 
-    fn control(&mut self, msg: ControlMsg) -> Result<()> {
+    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
         // Terminal for its own branch: nothing downstream to forward to. A
         // `Stop` means this upstream pipeline is done, so the registration
         // goes with it — same as `SwVideoCompositorInputSink`.

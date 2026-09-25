@@ -26,7 +26,6 @@ use crate::{
         InputContract, MediaKind, MediaKindSet, MemoryDomain, MemoryDomainSet, PixelLayout,
         PixelLayoutSet, PortContract,
     },
-    control::ControlMsg,
     element::{Element, ElementType, Sink, element_pp_log},
     elements::sink::renderer::presentation_delay::PresentationDelay,
     elements::{VulkanGpu, WindowControl, WindowEvents, WindowOptions},
@@ -478,11 +477,6 @@ impl Sink for VulkanWindowRenderer {
             );
             self.drawing = drawing;
         }
-        Ok(())
-    }
-
-    fn control(&mut self, _msg: ControlMsg) -> Result<()> {
-        // Terminal, with nothing to flush or forward — as `CudaRenderer`.
         Ok(())
     }
 }

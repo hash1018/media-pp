@@ -325,7 +325,7 @@ impl Sink for PauseGate {
         self.pad.push(forwarded)
     }
 
-    fn control(&mut self, msg: ControlMsg) -> Result<()> {
+    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
         // `Stop` abandons this run, so a pipeline started again owes nothing
         // to what the last one skipped.
         //
@@ -343,7 +343,7 @@ impl Sink for PauseGate {
             ControlMsg::Flush => self.paused_from = None,
             _ => {}
         }
-        self.pad.control(msg)
+        Ok(())
     }
 }
 
@@ -570,7 +570,7 @@ mod tests {
         gate.consume(frame(Some(11))).unwrap();
         assert_eq!(stamps(&received), vec![0, 1], "ten ticks were paused away");
 
-        gate.control(ControlMsg::Flush).unwrap();
+        gate.control(&ControlMsg::Flush).unwrap();
         gate.consume(frame(Some(21))).unwrap();
         assert_eq!(
             stamps(&received).last(),
@@ -578,7 +578,7 @@ mod tests {
             "a flush must not give back the ten it had skipped"
         );
 
-        gate.control(ControlMsg::Stop).unwrap();
+        gate.control(&ControlMsg::Stop).unwrap();
         gate.consume(frame(Some(31))).unwrap();
         assert_eq!(
             stamps(&received).last(),

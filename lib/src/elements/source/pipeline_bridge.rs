@@ -446,7 +446,7 @@ impl Sink for PipelineBridgeSink {
     /// actually read — keeps running. Two authorities over one timeline is
     /// the defect, not the missing feature; the downstream pipeline has its
     /// own `pause`, `finish` and `stop` for what its owner wants of it.
-    fn control(&mut self, msg: ControlMsg) -> Result<()> {
+    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
         let Some(shared) = self.shared.upgrade() else {
             return Ok(());
         };
@@ -547,7 +547,7 @@ impl SourceElement for PipelineBridge {
             };
             let (taken, flush) = taken;
             if flush {
-                self.pad.control(ControlMsg::Flush)?;
+                self.pad.control(&ControlMsg::Flush)?;
             }
             if let Some(buffer) = taken {
                 self.shared.changed.notify_all();
@@ -632,7 +632,7 @@ mod tests {
             Ok(())
         }
 
-        fn control(&mut self, msg: ControlMsg) -> Result<()> {
+        fn control(&mut self, msg: &ControlMsg) -> Result<()> {
             if matches!(msg, ControlMsg::Flush) {
                 self.flushed.fetch_add(1, Ordering::Relaxed);
             }
@@ -822,7 +822,7 @@ mod tests {
 
         input.consume(packet(1)).expect("queued");
         input
-            .control(ControlMsg::Flush)
+            .control(&ControlMsg::Flush)
             .expect("a flush from the feeding pipeline");
         input.consume(packet(2)).expect("after the flush");
 

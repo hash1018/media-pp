@@ -211,7 +211,7 @@ impl Sink for VideoWindow {
         self.renderer.consume(buf)
     }
 
-    fn control(&mut self, msg: ControlMsg) -> Result<()> {
+    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
         self.renderer.control(msg)
     }
 }

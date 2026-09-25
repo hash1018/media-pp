@@ -317,7 +317,7 @@ impl Sink for SwDecoder {
         }
     }
 
-    fn control(&mut self, msg: ControlMsg) -> crate::error::Result<()> {
+    fn control(&mut self, msg: &ControlMsg) -> crate::error::Result<()> {
         // `Stop`: no local reaction needed — abandon means there's
         // nothing to flush before this decoder's own `Drop` frees the
         // codec context.
@@ -328,7 +328,7 @@ impl Sink for SwDecoder {
         // `Preroll` may carry a seek target, in which case the decoded samples
         // this decoder produces while catching up to it exist only to warm the
         // codec and must not be forwarded.
-        match &msg {
+        match msg {
             ControlMsg::Flush => {
                 match &mut self.kind {
                     Kind::Video(decoder) => decoder.flush(),
@@ -340,7 +340,7 @@ impl Sink for SwDecoder {
             ControlMsg::Pause | ControlMsg::Resume | ControlMsg::Stop => self.preroll_gate.clear(),
             ControlMsg::CheckSeek(_) | ControlMsg::Seek(_) => {}
         }
-        self.pad.control(msg)
+        Ok(())
     }
 }
 
@@ -428,8 +428,8 @@ mod tests {
             Ok(())
         }
 
-        fn control(&mut self, msg: ControlMsg) -> Result<()> {
-            self.received.lock().unwrap().controls.push(msg);
+        fn control(&mut self, msg: &ControlMsg) -> Result<()> {
+            self.received.lock().unwrap().controls.push(msg.clone());
             Ok(())
         }
     }
@@ -487,9 +487,7 @@ mod tests {
         let mut decoder = video_decoder("decoder");
         let received = link_capture(&mut decoder);
 
-        decoder
-            .control(ControlMsg::Flush)
-            .expect("flush must not fail");
+        crate::control::deliver(&mut decoder, &ControlMsg::Flush).expect("flush must not fail");
 
         assert_eq!(received.lock().unwrap().controls, [ControlMsg::Flush]);
     }
@@ -507,7 +505,7 @@ mod tests {
             ControlMsg::Stop,
             ControlMsg::Seek(std::time::Duration::from_secs(3)),
         ] {
-            decoder.control(msg).expect("control must not fail");
+            crate::control::deliver(&mut decoder, &msg).expect("control must not fail");
         }
 
         assert_eq!(

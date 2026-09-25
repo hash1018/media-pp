@@ -48,10 +48,6 @@ impl Sink for PassThrough {
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         self.pad.push(buf)
     }
-
-    fn control(&mut self, msg: ControlMsg) -> Result<()> {
-        self.pad.control(msg)
-    }
 }
 
 /// Waits, boundedly, for `done` — every buffer here moves on threads of
@@ -269,10 +265,6 @@ impl Sink for LingeringEosSink {
         if buf.is_eos() {
             thread::sleep(self.linger);
         }
-        Ok(())
-    }
-
-    fn control(&mut self, _msg: ControlMsg) -> Result<()> {
         Ok(())
     }
 }

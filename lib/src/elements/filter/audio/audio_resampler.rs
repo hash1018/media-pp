@@ -309,11 +309,11 @@ impl Sink for AudioResampler {
         }
     }
 
-    fn control(&mut self, msg: ControlMsg) -> Result<()> {
+    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
         if matches!(msg, ControlMsg::Flush | ControlMsg::Stop) {
             self.reset();
         }
-        self.pad.control(msg)
+        Ok(())
     }
 }
 

@@ -879,9 +879,6 @@ impl Sink for TimestampSink {
         }
         Ok(())
     }
-    fn control(&mut self, _msg: ControlMsg) -> Result<()> {
-        Ok(())
-    }
 }
 
 /// Same regression as `SwVideoCompositor`'s

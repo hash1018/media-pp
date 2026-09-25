@@ -533,9 +533,6 @@ mod tests {
             }
             Ok(())
         }
-        fn control(&mut self, _message: ControlMsg) -> Result<()> {
-            Ok(())
-        }
     }
 
     /// A stream that decodes nothing is handed back rather than left

@@ -47,7 +47,6 @@ use crate::{
         InputContract, MediaKind, MediaKindSet, MemoryDomain, MemoryDomainSet, PixelLayout,
         PixelLayoutSet, PortContract,
     },
-    control::ControlMsg,
     element::{Element, ElementType, Sink, element_pp_log},
     elements::{
         D3d11Gpu, D3d11RendererError, SubmitError, WindowControl, WindowEvents, WindowOptions,
@@ -290,11 +289,6 @@ impl Sink for D3d11WindowRenderer {
                 "a picture takes {delay:.1?} to reach the screen, {source}"
             );
         }
-        Ok(())
-    }
-
-    fn control(&mut self, _msg: ControlMsg) -> Result<()> {
-        // Terminal, with nothing to flush or forward.
         Ok(())
     }
 }

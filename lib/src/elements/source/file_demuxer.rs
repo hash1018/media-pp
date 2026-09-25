@@ -1080,10 +1080,6 @@ mod tests {
             }
             Ok(())
         }
-
-        fn control(&mut self, _msg: crate::control::ControlMsg) -> crate::error::Result<()> {
-            Ok(())
-        }
     }
 
     /// `open` lists every stream, each at its own index — which is also its
@@ -1153,10 +1149,6 @@ mod tests {
                 }
                 _ => {}
             }
-            Ok(())
-        }
-
-        fn control(&mut self, _msg: crate::control::ControlMsg) -> crate::error::Result<()> {
             Ok(())
         }
     }
@@ -1571,10 +1563,6 @@ mod tests {
             }
             Ok(())
         }
-
-        fn control(&mut self, _msg: crate::control::ControlMsg) -> crate::error::Result<()> {
-            Ok(())
-        }
     }
 
     /// A pad that says "full" for the first packet of a drain and "ready" for
@@ -1665,10 +1653,6 @@ mod tests {
                 self.seen.lock().unwrap().push(pts);
             }
             self.remaining.fetch_sub(1, Ordering::SeqCst);
-            Ok(())
-        }
-
-        fn control(&mut self, _msg: crate::control::ControlMsg) -> crate::error::Result<()> {
             Ok(())
         }
     }
@@ -1769,9 +1753,6 @@ mod tests {
         }
         fn consume(&mut self, _buf: MediaBuffer) -> crate::error::Result<()> {
             self.seen.fetch_add(1, Ordering::SeqCst);
-            Ok(())
-        }
-        fn control(&mut self, _msg: crate::control::ControlMsg) -> crate::error::Result<()> {
             Ok(())
         }
     }

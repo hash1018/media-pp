@@ -11,7 +11,6 @@ use windows::{
 use crate::{
     buffer::MediaBuffer,
     contract::{InputContract, MediaKind, MemoryDomain, PortContract},
-    control::ControlMsg,
     element::{Element, ElementType, Sink, element_pp_log},
     elements::SubmitError,
     error::Result,
@@ -285,12 +284,5 @@ impl Sink for D3d12Renderer {
 
         self.submit_d3d12_frame(frame)
             .inspect_err(|error| pp_error!(self, "submit_d3d12_frame failed: {error}"))
-    }
-
-    fn control(&mut self, _msg: ControlMsg) -> Result<()> {
-        // Terminal, nothing to flush or forward — a paused/stopped window
-        // just stops receiving new frames (see `Queue`'s worker loop) and
-        // keeps showing whatever was submitted last.
-        Ok(())
     }
 }

@@ -246,7 +246,6 @@ mod tests {
     };
 
     use super::*;
-    use crate::control::ControlMsg;
     use crate::pipeline::Pipeline;
 
     struct CountingSink {
@@ -277,10 +276,6 @@ mod tests {
             if !buf.is_eos() {
                 self.count.fetch_add(1, Ordering::SeqCst);
             }
-            Ok(())
-        }
-
-        fn control(&mut self, _msg: ControlMsg) -> Result<()> {
             Ok(())
         }
     }

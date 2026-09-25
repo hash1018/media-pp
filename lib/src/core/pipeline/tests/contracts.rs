@@ -55,10 +55,6 @@ impl Sink for DeclaringSink {
     fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
         Ok(())
     }
-
-    fn control(&mut self, _msg: ControlMsg) -> Result<()> {
-        Ok(())
-    }
 }
 
 fn contract_context() -> Arc<Context> {
@@ -1185,10 +1181,6 @@ impl Sink for DeclaringFilter {
 
     fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
         self.pad.push(buf)
-    }
-
-    fn control(&mut self, msg: ControlMsg) -> Result<()> {
-        self.pad.control(msg)
     }
 }
 

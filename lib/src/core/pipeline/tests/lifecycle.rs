@@ -194,8 +194,8 @@ impl Sink for StopRecordingSink {
         Ok(())
     }
 
-    fn control(&mut self, msg: ControlMsg) -> Result<()> {
-        if msg == ControlMsg::Stop {
+    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
+        if *msg == ControlMsg::Stop {
             self.stopped.store(true, Ordering::Release);
         }
         Ok(())
@@ -481,8 +481,8 @@ impl Sink for SlowPauseSink {
         Ok(())
     }
 
-    fn control(&mut self, msg: ControlMsg) -> Result<()> {
-        if msg == ControlMsg::Pause {
+    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
+        if *msg == ControlMsg::Pause {
             thread::sleep(self.pause_delay);
         }
         Ok(())

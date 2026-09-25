@@ -121,7 +121,7 @@ impl Sink for ControlRecordingSink {
         Ok(())
     }
 
-    fn control(&mut self, msg: ControlMsg) -> Result<()> {
+    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
         let label = match msg {
             ControlMsg::Pause => "pause",
             ControlMsg::Resume => "resume",
@@ -412,10 +412,6 @@ impl Sink for PrerollProbe {
             let ns = pts.rescale(self.time_base, ffmpeg::Rational(1, 1_000_000_000));
             self.samples.lock().unwrap().push(ns);
         }
-        Ok(())
-    }
-
-    fn control(&mut self, _msg: ControlMsg) -> Result<()> {
         Ok(())
     }
 }
@@ -780,10 +776,6 @@ impl Sink for NeverReadySink {
     }
 
     fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
-        Ok(())
-    }
-
-    fn control(&mut self, _msg: ControlMsg) -> Result<()> {
         Ok(())
     }
 }

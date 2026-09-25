@@ -129,8 +129,8 @@ where
         (self.consume)(buf)
     }
 
-    fn control(&mut self, msg: ControlMsg) -> Result<()> {
-        (self.control)(msg)
+    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
+        (self.control)(msg.clone())
     }
 }
 
@@ -162,7 +162,7 @@ mod tests {
         let mut sink = AppSink::new("counter", |_buf| Ok(()));
 
         for msg in control_messages() {
-            sink.control(msg).unwrap();
+            sink.control(&msg).unwrap();
         }
     }
 
@@ -182,7 +182,7 @@ mod tests {
         );
 
         for msg in control_messages() {
-            sink.control(msg).unwrap();
+            sink.control(&msg).unwrap();
         }
 
         assert_eq!(&*seen.lock().unwrap(), &control_messages());

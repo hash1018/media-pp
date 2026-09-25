@@ -708,7 +708,7 @@ impl Sink for Tee {
         Ok(())
     }
 
-    fn control(&mut self, msg: ControlMsg) -> Result<()> {
+    fn control(&mut self, msg: &ControlMsg) -> Result<()> {
         // Control failures follow the same isolation rule as data failures:
         // report the failed branch, but still deliver the message to every
         // sibling. This is especially important for Stop and Pause.
@@ -722,18 +722,18 @@ impl Sink for Tee {
                 continue;
             }
             let peer = pad.peer_identity();
-            let outcome = pad.control(msg.clone());
+            let outcome = pad.control(msg);
             drop(pad);
             if let Err(error) = outcome {
                 self.report_branch_error(branch.root_id, peer, error);
             }
         }
-        match &msg {
+        match msg {
             ControlMsg::Preroll(context) => self.preroll = Some(Arc::clone(context)),
             ControlMsg::Pause | ControlMsg::Resume | ControlMsg::Stop => self.preroll = None,
             ControlMsg::Flush | ControlMsg::CheckSeek(_) | ControlMsg::Seek(_) => {}
         }
-        match &msg {
+        match msg {
             // Playing again: every branch downstream has just been resumed,
             // so the `Eos` a preroll kept goes on behind it.
             ControlMsg::Resume => self.hand_on_owed(),
@@ -798,10 +798,6 @@ mod tests {
             self.count.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
-
-        fn control(&mut self, _msg: ControlMsg) -> Result<()> {
-            Ok(())
-        }
     }
 
     struct AlwaysFailSink {
@@ -831,10 +827,6 @@ mod tests {
             Err(crate::error::Error::Other(
                 "simulated branch failure".into(),
             ))
-        }
-
-        fn control(&mut self, _msg: ControlMsg) -> Result<()> {
-            Ok(())
         }
     }
 
@@ -868,7 +860,7 @@ mod tests {
             Ok(())
         }
 
-        fn control(&mut self, _msg: ControlMsg) -> Result<()> {
+        fn control(&mut self, _msg: &ControlMsg) -> Result<()> {
             self.count.fetch_add(1, Ordering::SeqCst);
             if self.fail {
                 Err(crate::error::Error::Other(
@@ -913,10 +905,6 @@ mod tests {
             self.successful.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
-
-        fn control(&mut self, _msg: ControlMsg) -> Result<()> {
-            Ok(())
-        }
     }
 
     struct BlockingSink {
@@ -951,10 +939,6 @@ mod tests {
             let _ = self.release.recv();
             Ok(())
         }
-
-        fn control(&mut self, _msg: ControlMsg) -> Result<()> {
-            Ok(())
-        }
     }
 
     struct GraphInspectingDropSink {
@@ -983,10 +967,6 @@ mod tests {
 
     impl Sink for GraphInspectingDropSink {
         fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
-            Ok(())
-        }
-
-        fn control(&mut self, _msg: ControlMsg) -> Result<()> {
             Ok(())
         }
     }
@@ -1115,7 +1095,7 @@ mod tests {
         context.attach_pad(&mut upstream, tee_branch).unwrap();
 
         upstream
-            .control(ControlMsg::Pause)
+            .control(&ControlMsg::Pause)
             .expect("a branch control failure should be reported, not short-circuit Tee");
 
         assert_eq!(failing_count.load(Ordering::SeqCst), 1);
@@ -1190,10 +1170,6 @@ mod tests {
     impl Sink for RecordingSink {
         fn consume(&mut self, buf: MediaBuffer) -> Result<()> {
             lock_unpoisoned(&self.seen).push(if buf.is_eos() { "eos" } else { "data" });
-            Ok(())
-        }
-
-        fn control(&mut self, _msg: ControlMsg) -> Result<()> {
             Ok(())
         }
     }
@@ -1383,10 +1359,6 @@ mod tests {
         fn consume(&mut self, _buf: MediaBuffer) -> Result<()> {
             Ok(())
         }
-
-        fn control(&mut self, _msg: ControlMsg) -> Result<()> {
-            Ok(())
-        }
     }
 
     impl Drop for PanicOnDropSink {
@@ -1428,10 +1400,6 @@ mod tests {
                 thread::sleep(Duration::from_millis(30));
             }
             lock_unpoisoned(&self.seen).push(if is_eos { "eos" } else { "data" });
-            Ok(())
-        }
-
-        fn control(&mut self, _msg: ControlMsg) -> Result<()> {
             Ok(())
         }
     }
