@@ -152,20 +152,20 @@ impl VideoSynchronizer {
         // Rendering is the only answer that does not stall a branch that
         // was built wrong — and `attach_context` runs before any frame can
         // reach here, so it is unreachable through ordinary wiring.
-        let Some(playback_clock) = self.playback_clock.clone() else {
+        let Some(state) = self.state.clone() else {
             return WaitOutcome::Render;
         };
         loop {
-            if playback_clock.interrupted_since(self.interrupt_epoch) {
+            if state.interrupted_since(self.interrupt_epoch) {
                 return WaitOutcome::Interrupted;
             }
             match self.decision_without_observing(frame_ns) {
                 Decision::Render => return WaitOutcome::Render,
                 Decision::Drop => return WaitOutcome::Drop,
                 Decision::Wait(wait) => {
-                    playback_clock.sleep_unless_interrupted(wait.min(INTERRUPT_POLL_INTERVAL));
+                    state.sleep_unless_interrupted(wait.min(INTERRUPT_POLL_INTERVAL));
                 }
-                Decision::Hold => playback_clock.sleep_unless_interrupted(INTERRUPT_POLL_INTERVAL),
+                Decision::Hold => state.sleep_unless_interrupted(INTERRUPT_POLL_INTERVAL),
             }
         }
     }
@@ -229,7 +229,7 @@ impl Element for VideoSynchronizer {
     }
 
     fn attach_context(&mut self, context: &Arc<crate::element::Context>) {
-        self.interrupt_epoch = context.playback_clock.interrupt_epoch();
+        self.interrupt_epoch = context.state.interrupt_epoch();
         self.playback_clock = Some(Arc::clone(&context.playback_clock));
         self.state = Some(Arc::clone(&context.state));
     }
@@ -279,8 +279,8 @@ impl Sink for VideoSynchronizer {
     }
 
     fn control(&mut self, msg: &ControlMsg) -> crate::error::Result<()> {
-        if let Some(playback_clock) = &self.playback_clock {
-            self.interrupt_epoch = playback_clock.interrupt_epoch();
+        if let Some(state) = &self.state {
+            self.interrupt_epoch = state.interrupt_epoch();
         }
         if matches!(msg, ControlMsg::Flush | ControlMsg::Stop) {
             self.pending.clear();

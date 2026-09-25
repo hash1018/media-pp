@@ -32,7 +32,6 @@ use thiserror::Error as ThisError;
 use crate::{
     buffer::MediaBuffer,
     bus::{Bus, BusEvent},
-    clock::Clock,
     contract::InputContract,
     control::{self, ControlMsg, ControlReceiver, ControlSender, RequestKind},
     element::{Context, Element, ElementType, Sink, element_pp_log},
@@ -209,9 +208,6 @@ pub struct Queue {
     /// Where this queue is counted, when a pipeline built it — see
     /// [`crate::stats`]. `None` for one spawned by hand.
     counters: Option<Arc<ElementCounters>>,
-    /// The pipeline's clock, whose interrupts this queue holds back for;
-    /// `None` for one spawned by hand, which never does.
-    clock: Option<Arc<Clock>>,
     /// Buffers handed over while the channel was full and an interrupt
     /// was out — see [`Overflow`].
     overflow: Overflow,
@@ -275,7 +271,6 @@ impl Queue {
             pipeline_id,
             None,
             None,
-            None,
             |thread_name, task| thread::Builder::new().name(thread_name).spawn(task),
         )
     }
@@ -300,7 +295,6 @@ impl Queue {
             policy,
             Some(&context.pipeline_id),
             Some(counters),
-            Some(Arc::clone(&context.clock)),
             Some(Arc::clone(&context.state)),
             |thread_name, task| thread::Builder::new().name(thread_name).spawn(task),
         )
@@ -317,7 +311,6 @@ impl Queue {
         policy: OverflowPolicy,
         pipeline_id: Option<&str>,
         counters: Option<Arc<ElementCounters>>,
-        clock: Option<Arc<Clock>>,
         state: Option<Arc<PlaybackState>>,
         spawn: impl FnOnce(
             String,
@@ -352,7 +345,6 @@ impl Queue {
         let worker_inbox = Inbox {
             data: rx,
             overflow: overflow.clone(),
-            clock: clock.clone(),
             state: state.clone(),
             ends_owed: ends_owed.clone(),
         };
@@ -394,7 +386,6 @@ impl Queue {
             control: control_tx,
             stop,
             counters,
-            clock,
             overflow,
             ends_owed,
             state,
@@ -632,7 +623,7 @@ impl Queue {
         mut buf: Numbered,
         timeout: Duration,
     ) -> std::result::Result<(), HandOverError> {
-        let Some(clock) = self.clock.clone() else {
+        let Some(state) = self.state.clone() else {
             return self
                 .tx
                 .send_timeout(buf, timeout)
@@ -651,7 +642,7 @@ impl Queue {
                     Err(TrySendError::Full(back)) => buf = back,
                 }
             }
-            if clock.interrupt_pending() {
+            if state.interrupt_pending() {
                 overflow.push_back(buf);
                 return Ok(());
             }
@@ -687,10 +678,10 @@ impl Queue {
 struct Inbox {
     data: Receiver<Numbered>,
     overflow: Overflow,
-    clock: Option<Arc<Clock>>,
     /// The pipeline's playback state, against whose timeline what is
-    /// carried is judged before it goes on — `None` for a queue spawned by
-    /// hand, which drops nothing for being old.
+    /// carried is judged before it goes on and whose interrupts the worker
+    /// holds back for — `None` for a queue spawned by hand, which does
+    /// neither.
     state: Option<Arc<PlaybackState>>,
     /// Shared with the [`Queue`], which counts an `Eos` in as it takes one;
     /// the worker counts it out as it hands it on or a `Flush` discards it.
@@ -704,7 +695,10 @@ impl Inbox {
     /// been dropped, nothing will answer the interrupt here, and the worker
     /// drains what it holds as it always has.
     fn held_back(&self, stop: &AtomicBool) -> bool {
-        self.clock.as_deref().is_some_and(Clock::interrupt_pending) && !stop.load(Ordering::Relaxed)
+        self.state
+            .as_deref()
+            .is_some_and(PlaybackState::interrupt_pending)
+            && !stop.load(Ordering::Relaxed)
     }
 
     /// Whether an `Eos` handed over is still here, on its way.
@@ -1263,7 +1257,6 @@ mod tests {
             }),
             bus,
             OverflowPolicy::default(),
-            None,
             None,
             None,
             None,
@@ -2158,7 +2151,10 @@ mod tests {
         MediaBuffer::Packet(Arc::new(packet))
     }
 
-    fn recording_queue(capacity: usize, clock: &Arc<Clock>) -> (Queue, Arc<Mutex<Vec<i64>>>) {
+    fn recording_queue(
+        capacity: usize,
+        state: &Arc<PlaybackState>,
+    ) -> (Queue, Arc<Mutex<Vec<i64>>>) {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let (bus, _bus_rx) = Bus::new();
         let queue = Queue::spawn_with_policy_using(
@@ -2172,8 +2168,7 @@ mod tests {
             OverflowPolicy::default(),
             None,
             None,
-            Some(Arc::clone(clock)),
-            None,
+            Some(Arc::clone(state)),
             |thread_name, task| thread::Builder::new().name(thread_name).spawn(task),
         )
         .expect("spawn");
@@ -2187,9 +2182,9 @@ mod tests {
     /// was handed over, what was held over after what was in the channel.
     #[test]
     fn an_interrupt_holds_the_worker_back_and_lets_the_producer_go() {
-        let clock = Arc::new(Clock::new());
-        let (mut queue, seen) = recording_queue(1, &clock);
-        clock.interrupt();
+        let state = PlaybackState::new();
+        let (mut queue, seen) = recording_queue(1, &state);
+        state.interrupt();
 
         let started = std::time::Instant::now();
         for pts in 0..4 {
@@ -2206,7 +2201,7 @@ mod tests {
         thread::sleep(Duration::from_millis(50));
         assert!(seen.lock().unwrap().is_empty(), "the worker held back");
 
-        clock.settle();
+        state.settle();
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while seen.lock().unwrap().len() < 4 && std::time::Instant::now() < deadline {
             thread::sleep(Duration::from_millis(5));
@@ -2226,14 +2221,14 @@ mod tests {
     /// channel's backlog does: a `Flush` drops both.
     #[test]
     fn flush_discards_what_was_held_over() {
-        let clock = Arc::new(Clock::new());
-        let (mut queue, seen) = recording_queue(1, &clock);
-        clock.interrupt();
+        let state = PlaybackState::new();
+        let (mut queue, seen) = recording_queue(1, &state);
+        state.interrupt();
         for pts in 0..3 {
             queue.consume(packet_at(pts)).expect("handed over");
         }
         queue.control(&ControlMsg::Flush).expect("flush");
-        clock.settle();
+        state.settle();
         queue.consume(packet_at(10)).expect("send");
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while seen.lock().unwrap().is_empty() && std::time::Instant::now() < deadline {

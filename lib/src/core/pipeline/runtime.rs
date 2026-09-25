@@ -489,7 +489,7 @@ impl Pipeline {
                     // acknowledgement is let go first, so it can take the
                     // `Stop` below.
                     drop(std::mem::take(&mut pause_acks));
-                    self.clock.interrupt();
+                    self.state.interrupt();
                     for control_tx in self.control_txs.iter().take(index) {
                         control_tx.send(ControlMsg::Stop);
                     }
@@ -572,14 +572,14 @@ impl Pipeline {
         enqueue: impl Fn(&ControlSender) -> Option<crossbeam_channel::Receiver<()>>,
     ) {
         let acks: Vec<_> = self.control_txs.iter().filter_map(enqueue).collect();
-        self.clock.interrupt();
+        self.state.interrupt();
         for ack in acks {
             let _ = ack.recv();
         }
         // Every source has taken the request and cascaded it, so whatever an
         // interrupt — this one or one raised just before — was holding back
         // can go on.
-        self.clock.settle();
+        self.state.settle();
     }
 
     fn pause_runtime(&self) {
@@ -876,7 +876,7 @@ impl Pipeline {
             pp_log: &self.pp_log,
             "event=control control={msg:?} phase=requested"
         );
-        self.clock.interrupt();
+        self.state.interrupt();
         self.playback_clock.reset_for_seek();
         // Everything read from here on belongs to the new position, and a
         // queue drops whatever reaches it from the old one — what the

@@ -28,6 +28,15 @@
 //! So a pause that follows a preroll keeps it ([`Phase::Paused`]), and what
 //! it held stays held for as long as the pause lasts.
 //!
+//! # Interrupts
+//!
+//! A request the pipeline sends reaches an element only when the thread
+//! carrying it is between buffers, and a thread may be anywhere else: in a
+//! `Pacer` waiting for a picture's time, blocked handing a full queue a
+//! buffer. So before each request the pipeline raises an interrupt here,
+//! which every such wait answers by letting go, and settles it once every
+//! source has handled the request — see [`PlaybackState::interrupt`].
+//!
 //! # Outside a pipeline
 //!
 //! A [`Queue`](crate::queue::Queue) or a source driven by hand has no
@@ -37,9 +46,12 @@
 //! has no state to read, and behaves as if playing: never held, never in a
 //! preroll.
 
-use std::sync::{
-    Arc, Mutex, MutexGuard,
-    atomic::{AtomicU64, Ordering},
+use std::{
+    sync::{
+        Arc, Condvar, Mutex, MutexGuard,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Duration,
 };
 
 use crate::control::{ControlMsg, PrerollContext};
@@ -102,6 +114,17 @@ pub(crate) struct PlaybackState {
     /// [`crate::timeline`]. Apart from the phase, and atomic, because a
     /// queue reads it for every buffer it hands on.
     timeline: AtomicU64,
+    /// Interrupts raised so far, one before each request the pipeline
+    /// sends — see [`Self::interrupt`].
+    interrupts: AtomicU64,
+    /// The interrupt every request sent so far has been handled up to —
+    /// see [`Self::interrupt_pending`].
+    settled: AtomicU64,
+    /// What [`Self::sleep_unless_interrupted`] waits on, notified by every
+    /// interrupt. Its lock is taken around the raise, so a sleeper that has
+    /// read the count cannot miss the raise that changes it.
+    raised: Mutex<()>,
+    raised_changed: Condvar,
 }
 
 impl PlaybackState {
@@ -110,6 +133,10 @@ impl PlaybackState {
         Arc::new(Self {
             phase: Mutex::new(Phase::Playing),
             timeline: AtomicU64::new(UNNUMBERED + 1),
+            interrupts: AtomicU64::new(0),
+            settled: AtomicU64::new(0),
+            raised: Mutex::new(()),
+            raised_changed: Condvar::new(),
         })
     }
 
@@ -176,6 +203,78 @@ impl PlaybackState {
     /// pipeline has since left.
     pub(crate) fn is_behind(&self, number: u64) -> bool {
         number != UNNUMBERED && number < self.timeline()
+    }
+
+    /// Tells whatever is waiting — a paced wait, a queue — that a request
+    /// is on its way, so it lets go and the thread it holds can take it.
+    /// The pipeline's to call, before each request it sends.
+    pub(crate) fn interrupt(&self) {
+        {
+            let _raising = self
+                .raised
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            self.interrupts.fetch_add(1, Ordering::Release);
+        }
+        self.raised_changed.notify_all();
+    }
+
+    /// Sleeps for `duration`, or until the next [`Self::interrupt`] if that
+    /// comes first — what a paced wait sleeps in, so a request reaches it at
+    /// once rather than at the end of a polling slice.
+    pub(crate) fn sleep_unless_interrupted(&self, duration: Duration) {
+        let guard = self
+            .raised
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let epoch = self.interrupt_epoch();
+        let _ = self
+            .raised_changed
+            .wait_timeout_while(guard, duration, |_| self.interrupt_epoch() == epoch);
+    }
+
+    /// How many interrupts have been raised — what an element records as it
+    /// takes a request, to tell a later one from it.
+    pub(crate) fn interrupt_epoch(&self) -> u64 {
+        self.interrupts.load(Ordering::Acquire)
+    }
+
+    /// Marks every interrupt so far as answered: the requests that followed
+    /// it have been handled all the way through the graph. The pipeline's
+    /// to call, once every source has acknowledged them.
+    pub(crate) fn settle(&self) {
+        self.settled
+            .store(self.interrupt_epoch(), Ordering::Release);
+    }
+
+    /// Whether an interrupt is out and the requests behind it are still on
+    /// their way. A `Queue` takes nothing from its channel meanwhile: what
+    /// it fed an interrupted `Pacer` would only pile up there, not play —
+    /// see `Queue`.
+    ///
+    /// Settled by the pipeline, not by each element's own control: a
+    /// request can reach an element before the interrupt that goes with it
+    /// is raised, and an element that took its own control as the answer
+    /// would then wait on an interrupt nothing is coming to answer.
+    pub(crate) fn interrupt_pending(&self) -> bool {
+        self.interrupt_epoch() != self.settled.load(Ordering::Acquire)
+    }
+
+    /// Whether a wait that last answered the interrupt numbered `answered`
+    /// must let go now: a later interrupt has been raised and the pipeline
+    /// has not yet settled it.
+    ///
+    /// Both halves, because each alone is wrong. Without the first, an
+    /// element that has already taken the control behind an interrupt would
+    /// keep giving up until the rest of the graph caught up. Without the
+    /// second — which is how `Pacer` and `VideoSynchronizer` used to read it
+    /// — only a control message of the element's own could answer an
+    /// interrupt, and `Pipeline::finish` raises one and sends none
+    /// downstream: its `Eos` travels as data. Every wait after it then gave
+    /// up, the picture being waited on was kept for good, and the `Eos`
+    /// behind it never left.
+    pub(crate) fn interrupted_since(&self, answered: u64) -> bool {
+        self.interrupt_epoch() != answered && self.interrupt_pending()
     }
 }
 

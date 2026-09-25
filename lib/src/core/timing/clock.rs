@@ -7,10 +7,7 @@
 //! first frame.
 
 use std::{
-    sync::{
-        Condvar, Mutex,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::Mutex,
     time::{Duration, Instant},
 };
 
@@ -26,19 +23,6 @@ use std::{
 /// pause-aware and not just a fixed anchor.
 pub struct Clock {
     state: Mutex<State>,
-    /// Incremented before a control request starts cascading through the
-    /// pipeline. A `Pacer` compares this with the last generation it
-    /// acknowledged in `control()` so a long presentation-time wait can
-    /// return promptly and let the owning worker process that request.
-    interrupt_epoch: AtomicU64,
-    /// The `interrupt_epoch` every request sent so far has been handled up
-    /// to — see [`Self::interrupt_pending`].
-    settled_epoch: AtomicU64,
-    /// What [`Self::sleep_unless_interrupted`] waits on, notified by every
-    /// [`Self::interrupt`]. The lock is taken around the raise so a sleeper
-    /// that has read the epoch cannot miss the raise that changes it.
-    raised: Mutex<()>,
-    raised_changed: Condvar,
 }
 
 #[derive(Clone, Copy)]
@@ -66,64 +50,7 @@ impl Clock {
     pub fn new() -> Self {
         Self {
             state: Mutex::new(State::Unset),
-            interrupt_epoch: AtomicU64::new(0),
-            settled_epoch: AtomicU64::new(0),
-            raised: Mutex::new(()),
-            raised_changed: Condvar::new(),
         }
-    }
-
-    /// Signals paced waits to return without changing the clock's playback
-    /// anchor. The actual pause/seek/stop state change still happens through
-    /// the ordinary synchronous control cascade.
-    pub(crate) fn interrupt(&self) {
-        {
-            let _raising = self
-                .raised
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            self.interrupt_epoch.fetch_add(1, Ordering::Release);
-        }
-        self.raised_changed.notify_all();
-    }
-
-    /// Sleeps for `duration`, or until the next [`Self::interrupt`] if that
-    /// comes first — what a paced wait sleeps in, so a control request
-    /// reaches it at once rather than at the end of a polling slice.
-    pub(crate) fn sleep_unless_interrupted(&self, duration: Duration) {
-        let guard = self
-            .raised
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let epoch = self.interrupt_epoch();
-        let _ = self
-            .raised_changed
-            .wait_timeout_while(guard, duration, |_| self.interrupt_epoch() == epoch);
-    }
-
-    pub(crate) fn interrupt_epoch(&self) -> u64 {
-        self.interrupt_epoch.load(Ordering::Acquire)
-    }
-
-    /// Marks every interrupt so far as answered: the requests that followed
-    /// it have been handled all the way through the graph. Called by the
-    /// pipeline once every source has acknowledged them.
-    pub(crate) fn settle(&self) {
-        self.settled_epoch
-            .store(self.interrupt_epoch(), Ordering::Release);
-    }
-
-    /// Whether an interrupt is out and the requests behind it are still on
-    /// their way. A `Queue` takes nothing from its channel meanwhile: what
-    /// it fed an interrupted `Pacer` would only pile up there, not play —
-    /// see `Queue`.
-    ///
-    /// Settled by the pipeline, not by each element's own control: a
-    /// request can reach an element before the interrupt that goes with it
-    /// is raised, and an element that took its own control as the answer
-    /// would then wait on an interrupt nothing is coming to answer.
-    pub(crate) fn interrupt_pending(&self) -> bool {
-        self.interrupt_epoch() != self.settled_epoch.load(Ordering::Acquire)
     }
 
     /// The instant playback started, set on first call — shifted forward

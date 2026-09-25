@@ -203,14 +203,11 @@ impl Pacer {
     /// wrong by however far that rate differs.
     fn wait_for(&mut self, timing: Timing) -> Result<bool, PacerError> {
         let playback = self.playback_clock.clone().ok_or(PacerError::NotAttached)?;
-        if playback.interrupted_since(self.interrupt_epoch) {
+        let state = self.state.clone().ok_or(PacerError::NotAttached)?;
+        if state.interrupted_since(self.interrupt_epoch) {
             return Ok(false);
         }
-        if self
-            .state
-            .as_ref()
-            .is_some_and(|state| state.is_prerolling())
-        {
+        if state.is_prerolling() {
             return Ok(true);
         }
         let (pts, time_base) = match timing {
@@ -234,7 +231,7 @@ impl Pacer {
             return Err(PacerError::UnpaceableTimestamp { pts });
         }
         loop {
-            if playback.interrupted_since(self.interrupt_epoch) {
+            if state.interrupted_since(self.interrupt_epoch) {
                 return Ok(false);
             }
             let remaining = playback.remaining(pts_ns);
@@ -254,7 +251,7 @@ impl Pacer {
                 playback.re_anchor(pts_ns);
                 return Ok(true);
             }
-            playback.sleep_unless_interrupted(remaining.min(INTERRUPT_POLL_INTERVAL));
+            state.sleep_unless_interrupted(remaining.min(INTERRUPT_POLL_INTERVAL));
         }
     }
 }
@@ -306,7 +303,7 @@ impl Element for Pacer {
     }
 
     fn attach_context(&mut self, context: &Arc<crate::element::Context>) {
-        self.interrupt_epoch = context.playback_clock.interrupt_epoch();
+        self.interrupt_epoch = context.state.interrupt_epoch();
         self.playback_clock = Some(Arc::clone(&context.playback_clock));
         self.state = Some(Arc::clone(&context.state));
     }
@@ -349,8 +346,8 @@ impl Sink for Pacer {
         // A pacer that was never wired has no clock to acknowledge, and
         // nothing is going to send it control either — see
         // `PacerError::NotAttached`.
-        if let Some(playback) = &self.playback_clock {
-            self.interrupt_epoch = playback.interrupt_epoch();
+        if let Some(state) = &self.state {
+            self.interrupt_epoch = state.interrupt_epoch();
         }
         match msg {
             ControlMsg::Flush | ControlMsg::Stop => self.pending.clear(),
@@ -509,7 +506,7 @@ mod tests {
 
         started_rx.recv().expect("paced wait should start");
         thread::sleep(Duration::from_millis(20));
-        clock.interrupt();
+        context.state.interrupt();
 
         assert!(
             !worker
@@ -526,7 +523,7 @@ mod tests {
         let context = context(&clock);
         let mut pacer = paced("pacer", &context);
 
-        clock.interrupt();
+        context.state.interrupt();
         pacer.consume(packet(0)).expect("interrupted consume");
         assert_eq!(pacer.pending.len(), 1);
 
@@ -540,7 +537,7 @@ mod tests {
             .control(&ControlMsg::Seek(Duration::ZERO))
             .expect("seek");
 
-        clock.interrupt();
+        context.state.interrupt();
         pacer.consume(packet(1)).expect("interrupted consume");
         assert_eq!(pacer.pending.len(), 1);
         pacer.control(&ControlMsg::Stop).expect("stop");
