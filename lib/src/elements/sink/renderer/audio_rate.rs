@@ -20,7 +20,10 @@
     allow(dead_code)
 )]
 
-use std::collections::VecDeque;
+use std::{
+    collections::VecDeque,
+    sync::{Mutex, MutexGuard},
+};
 
 use ffmpeg_next as ffmpeg;
 
@@ -231,8 +234,10 @@ fn bytes_per_frame(format: AudioFormat) -> usize {
 /// position is read past them.
 pub(crate) struct PlayedMedia {
     sample_rate: u32,
-    /// `(first sample, media there, rate)`, oldest first.
-    spans: VecDeque<(u64, i64, f64)>,
+    /// `(first sample, media there, rate)`, oldest first. Behind a lock so
+    /// that reading a position, which a renderer does from `&self`, can
+    /// forget the spans played through.
+    spans: Mutex<VecDeque<(u64, i64, f64)>>,
     /// Samples handed over so far.
     handed: u64,
 }
@@ -242,43 +247,59 @@ impl PlayedMedia {
     pub(crate) fn new(sample_rate: u32, media_ns: i64) -> Self {
         Self {
             sample_rate: sample_rate.max(1),
-            spans: VecDeque::from([(0, media_ns, 1.0)]),
+            spans: Mutex::new(VecDeque::from([(0, media_ns, 1.0)])),
             handed: 0,
         }
     }
 
+    fn spans(&self) -> MutexGuard<'_, VecDeque<(u64, i64, f64)>> {
+        self.spans
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     /// `samples` more handed over, played at `rate`.
     pub(crate) fn push(&mut self, samples: u64, rate: f64) {
-        let (_, _, last_rate) = *self.spans.back().expect("never empty");
-        if last_rate != rate {
-            let media_ns = self.media_at(self.handed);
-            self.spans.push_back((self.handed, media_ns, rate));
+        let media_ns = self.media_at(self.handed);
+        let mut spans = self.spans();
+        if spans
+            .back()
+            .is_none_or(|&(_, _, last_rate)| last_rate != rate)
+        {
+            spans.push_back((self.handed, media_ns, rate));
         }
+        drop(spans);
         self.handed += samples;
     }
 
     /// The media reached once the device has played `played` samples, at
     /// most as far as what it has been handed.
     pub(crate) fn media_at(&self, played: u64) -> i64 {
+        self.at(&self.spans(), played)
+    }
+
+    fn at(&self, spans: &VecDeque<(u64, i64, f64)>, played: u64) -> i64 {
         let played = played.min(self.handed);
-        let (start, media_ns, rate) = self
-            .spans
+        // The first span starts at zero and is never forgotten while it is
+        // the only one, so there is always one to find.
+        let (start, media_ns, rate) = spans
             .iter()
             .rev()
             .find(|(start, _, _)| *start <= played)
             .copied()
-            .expect("the first span starts at zero");
+            .unwrap_or((0, 0, 1.0));
         let ns = (played - start) as f64 * 1e9 / f64::from(self.sample_rate);
         media_ns.saturating_add((ns * rate) as i64)
     }
 
     /// As [`Self::media_at`], forgetting the spans played through: what a
     /// renderer calls as it publishes where playback is.
-    pub(crate) fn played(&mut self, played: u64) -> i64 {
-        while self.spans.len() > 1 && self.spans[1].0 <= played {
-            self.spans.pop_front();
+    pub(crate) fn played(&self, played: u64) -> i64 {
+        let mut spans = self.spans();
+        while spans.len() > 1 && spans[1].0 <= played {
+            spans.pop_front();
         }
-        self.media_at(played)
+        self.at(&spans, played)
     }
 
     /// How far the media handed over reaches.
@@ -402,6 +423,6 @@ mod tests {
             8_250_000_000,
             "no further than what was handed over"
         );
-        assert_eq!(map.spans.len(), 1, "what was played through is forgotten");
+        assert_eq!(map.spans().len(), 1, "what was played through is forgotten");
     }
 }

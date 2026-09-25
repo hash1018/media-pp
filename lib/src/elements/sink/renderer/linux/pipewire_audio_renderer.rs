@@ -578,7 +578,7 @@ impl PipeWireAudioRenderer {
             .saturating_sub(timeline.played_origin);
         let latency = self.playback.latency_frames.load(Ordering::Acquire);
         let audible = played.saturating_sub(latency);
-        let position_ns = timeline.media.media_at(audible);
+        let position_ns = timeline.media.played(audible);
         master
             .publish(position_ns, timeline.media.handed_until(), running)
             .map_err(PipeWireAudioRendererError::from)?;
